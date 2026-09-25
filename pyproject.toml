@@ -1,0 +1,35 @@
+[project]
+name = "data2g"
+version = "0.0.1"
+description = "HF data modem on the SSTVAE OFDM waveform, with ML-optimized submodes"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+train = [
+    "torch>=2.13.0",
+    "matplotlib>=3.7",
+    "onnx>=1.23.0",
+    "onnxruntime>=1.24.3",
+]
+# the decoders run on torch (codes.decode)
+tnc = ["torch>=2.13.0", "pyaudio>=0.2.13"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+data2g-tnc = "data2g.tnc:main"
+data2g-host = "data2g.host:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["data2g*"]
+
+[tool.setuptools.package-data]
+"data2g" = ["codes_data/*", "constellations/*.npy"]
+
+[tool.pytest.ini_options]
+markers = ["slow: long-running Monte Carlo checks"]
+addopts = "-m 'not slow'"

@@ -1,0 +1,27 @@
+{
+ "doppler": {
+  "awgn": 0.0,
+  "mpg": 0.1,
+  "mpp": 1.0,
+  "mpd": 2.0
+ },
+ "offsets": {
+  "w|awgn": 0.027547914627939457,
+  "w|mpg": 0.10979573400691149,
+  "w|mpp": 0.06243750220164655,
+  "w|mpd": 0.09604562139138581,
+  "n4|awgn": -0.03983719116076827,
+  "n4|mpg": 0.2721941725350916,
+  "n4|mpp": 0.054401090461760754,
+  "n4|mpd": 0.04449034994468093,
+  "n10|awgn": 0.004347021225839854,
+  "n10|mpg": 0.09698944436386227,
+  "n10|mpp": 0.10784866204485295,
+  "n10|mpd": 0.09892484033480287,
+  "w48|awgn": 0.00813895957544446,
+  "w48|mpg": 0.051888511609286064,
+  "w48|mpp": 0.04026691289618613,
+  "w48|mpd": 0.06277684802189469
+ },
+ "source": "scripts/linksim.py calibrate: median per (band, preset) of the MI the receiver's estimate loses against the true channel's, from the ladder thresholds"
+}

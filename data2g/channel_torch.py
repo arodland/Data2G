@@ -1,0 +1,214 @@
+"""Differentiable burst channel for training constellations.
+
+TX is `modem.modulate_bits` in torch: the numpy burst (preamble, header,
+pilots) plus the data symbols, then the same clip-and-filter as
+`dsp.tx_condition`, so gradients reach the constellation points through
+the clipper. The channel is waveform-domain (two-path Watterson with
+ITU-R F.1487 Gaussian Doppler, AWGN in the SNR_REF_BW_HZ convention),
+so ISI past the CP and clip-noise leakage are in it too; SSTVAE's
+replica faded per symbol and had neither.
+
+RX assumes acquisition succeeded (no CFO, no clock error), places the
+window as `equalizer.window_shift` would for the known delays, and runs
+the real numpy `equalizer.estimate` on detached pilots. The estimate
+depends on the constellation only through clip distortion on the
+pilots, so it carries no gradient; keeping one estimator means training
+and the modem cannot drift apart.
+
+`tests/test_channel_torch.py` pins the TX against numpy and the whole
+path against `scripts/eq_floor.py`'s measurement.
+"""
+
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+from scipy.signal import firwin
+
+from . import config, equalizer, modem
+from .config import (
+    DATA_SYMS_PER_FRAME,
+    DEMOD_BACKOFF,
+    FCENTER,
+    FS,
+    LEADIN_SAMPLES,
+    LEADOUT_SAMPLES,
+    M,
+    NCP,
+    NSYM,
+    PREAMBLE_CP,
+    SNR_REF_BW_HZ,
+    SYMS_PER_FRAME,
+    SubmodeSpec,
+)
+from .waveform import ofdm
+
+
+@dataclass(frozen=True)
+class Channel:
+    name: str
+    spread_hz: float = 0.0  # 0 = no fading
+    delay_ms: float = 0.0
+
+
+CHANNELS = {
+    "awgn": Channel("awgn"),
+    "mpg": Channel("mpg", 0.1, 0.5),
+    "mpp": Channel("mpp", 1.0, 2.0),
+    "mpd": Channel("mpd", 2.0, 4.0),
+    # SSTVAE's measured path (hfchannel.py there): slow like mpg,
+    # selective like mpp. The hard case for interleaving.
+    "mps": Channel("mps", 0.15, 2.0),
+}
+
+
+def _analytic(x: torch.Tensor) -> torch.Tensor:
+    """scipy.signal.hilbert along the last axis."""
+    n = x.shape[-1]
+    h = torch.zeros(n, device=x.device, dtype=x.dtype)
+    h[0] = 1
+    h[1 : (n + 1) // 2] = 2
+    if n % 2 == 0:
+        h[n // 2] = 1
+    return torch.fft.ifft(torch.fft.fft(x) * h)
+
+
+class BurstChannel:
+    def __init__(self, spec: SubmodeSpec, n_frames: int, device="cpu", dtype=torch.float32,
+                 clip_setting: tuple | None = None, clip_consts: tuple | None = None):
+        """`clip_setting` (headroom dB, overshoot) and `clip_consts` (as a
+        config.CLIP entry) override the band's, for clipper studies."""
+        self.spec, self.n_f, self.device, self.dtype = spec, n_frames, device, dtype
+        cdtype = torch.complex64 if dtype == torch.float32 else torch.complex128
+        self.cdtype = cdtype
+        self.band = b = ofdm.band(spec.band)
+        self.headroom, self.overshoot = clip_setting or (spec.headroom, b.spec.clip_overshoot)
+        self.clip_consts = clip_consts or config.clip_consts(spec.band, spec.headroom)
+        self.nc = b.nc
+        zeros = np.zeros((n_frames, DATA_SYMS_PER_FRAME, b.nc), dtype=np.complex128)
+        self.base = torch.tensor(modem.burst_waveform(zeros, spec), dtype=dtype, device=device)
+        self.mod = torch.tensor(b.mod, dtype=cdtype, device=device)  # (NSYM, nc)
+        sb = config.BANDS[spec.sync_band]  # preamble and header (BandSpec.sync)
+        self.frames0 = LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(spec.sync_band)
+        self.taps = torch.tensor(
+            firwin(201, sb.tx_bandpass, fs=FS, pass_zero=False), dtype=dtype, device=device
+        )
+        n = torch.arange(len(self.base), device=device)
+        self.het = torch.exp(-2j * torch.pi * ((FCENTER * n) % FS).to(dtype) / FS).to(cdtype)
+        self.demod = torch.tensor(b.demod, dtype=cdtype, device=device)  # (nc, M)
+
+    # --- TX -------------------------------------------------------------
+    def transmit(self, data: torch.Tensor) -> torch.Tensor:
+        """(B, n_f, 5, nc) complex data symbols -> (B, n) clipped, unit-RMS."""
+        b = data.shape[0]
+        syms = torch.zeros(b, self.n_f, SYMS_PER_FRAME, self.nc, dtype=self.cdtype, device=self.device)
+        syms[:, :, 1:] = data
+        wav = torch.einsum("bfsc,nc->bfsn", syms, self.mod).real.reshape(b, -1)
+        x = self.base.expand(b, -1).clone()
+        x[:, self.frames0 : self.frames0 + wav.shape[1]] += wav
+        return self.tx_condition(x)
+
+    def tx_condition(self, x: torch.Tensor) -> torch.Tensor:
+        """dsp.tx_condition, batched, power over the non-silent part."""
+        act = slice(LEADIN_SAMPLES, x.shape[1] - LEADOUT_SAMPLES)
+        power = x[:, act].pow(2).mean(dim=1, keepdim=True)
+        thresh = torch.sqrt(2 * power) * 10 ** (self.headroom / 20)
+        for k in self.overshoot:
+            z = _analytic(x)
+            scale = torch.clamp(thresh / z.abs().clamp_min(1e-12), max=1.0)
+            if k != 1.0:
+                scale = scale**k
+            x = (z * scale).real
+            x = torch.nn.functional.conv1d(x[:, None], self.taps.flip(0)[None, None], padding=100)[:, 0]
+        return x / x[:, act].pow(2).mean(dim=1, keepdim=True).sqrt()
+
+    # --- channel --------------------------------------------------------
+    def _taps(self, b: int, n: int, spread: float, g: torch.Generator) -> torch.Tensor:
+        """hfchannel._gaussian_taps, batched: (b, n) unit-power complex."""
+        lowrate = max(64 * spread, 8.0)
+        n_low = int(np.ceil(n * lowrate / FS)) + 2
+        w = torch.randn(b, n_low, generator=g, device=self.device, dtype=self.dtype) + 1j * torch.randn(
+            b, n_low, generator=g, device=self.device, dtype=self.dtype
+        )
+        f = torch.fft.fftfreq(n_low, 1 / lowrate, device=self.device, dtype=self.dtype)
+        shape = torch.exp(-(f**2) / (4 * (spread / 2) ** 2))
+        w = torch.fft.ifft(torch.fft.fft(w) * shape) / torch.sqrt(2 * shape.pow(2).mean())
+        pos = torch.arange(n, device=self.device, dtype=self.dtype) * (lowrate / FS)
+        i0 = pos.floor().long().clamp(max=n_low - 2)
+        a = (pos - i0).to(self.dtype)
+        return w[:, i0] * (1 - a) + w[:, i0 + 1] * a  # unit power in expectation
+
+    def channel(self, x: torch.Tensor, ch: Channel, snr_db: float, g: torch.Generator) -> torch.Tensor:
+        """hfchannel.apply_channel: SNR against the transmitted (= average
+        received) active power, so a burst in a fade is a low-SNR burst."""
+        b, n = x.shape
+        env = _analytic(x).abs()
+        active = env > 0.1 * x.pow(2).mean(dim=1, keepdim=True).sqrt()
+        s_power = (x.pow(2) * active).sum(dim=1, keepdim=True) / active.sum(dim=1, keepdim=True)
+        if ch.spread_hz:
+            z = _analytic(x)
+            d = int(round(ch.delay_ms * 1e-3 * FS))
+            z2 = torch.nn.functional.pad(z, (d, 0))[:, :n]
+            g1, g2 = self._taps(b, n, ch.spread_hz, g), self._taps(b, n, ch.spread_hz, g)
+            x = ((z * g1 + z2 * g2) / np.sqrt(2)).real
+        sigma2 = s_power * (FS / 2) / SNR_REF_BW_HZ / 10 ** (snr_db / 10)
+        return x + torch.randn(x.shape, generator=g, device=self.device, dtype=self.dtype) * sigma2.sqrt()
+
+    # --- RX -------------------------------------------------------------
+    def receive(self, y: torch.Tensor, ch: Channel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """-> raw data symbols (B, n_f, 5, nc), and (no grad) channel
+        estimate and per-cu noise variance of the same shape."""
+        b = y.shape[0]
+        z = y.to(self.cdtype) * self.het
+        d = int(round(ch.delay_ms * 1e-3 * FS))
+        support = (DEMOD_BACKOFF, d + DEMOD_BACKOFF)  # apparent delays before the shift
+        shift = equalizer.window_shift(support)
+        start = self.frames0 + NCP - DEMOD_BACKOFF + shift
+        idx = (
+            start
+            + torch.arange(self.n_f * SYMS_PER_FRAME + 1, device=self.device)[:, None] * NSYM
+            + torch.arange(M, device=self.device)[None, :]
+        )
+        win = z[:, idx]  # (B, S, M)
+        raw = (2.0 / M) * torch.einsum("bsm,cm->bsc", win, self.demod)
+        # preamble repeats, for the noise estimate (equalizer.preamble_noise)
+        pidx = (
+            LEADIN_SAMPLES + PREAMBLE_CP - NCP // 2
+            + torch.arange(config.BANDS[self.spec.sync_band].preamble_repeats, device=self.device)[:, None] * M
+            + torch.arange(M, device=self.device)[None, :]
+        )
+        reps = (2.0 / M) * torch.einsum("bsm,cm->bsc", z[:, pidx], self.demod)
+        reps = (reps / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)).detach().cpu().numpy()
+        pilots = raw[:, ::SYMS_PER_FRAME] / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)
+        data = raw[:, :-1].reshape(b, self.n_f, SYMS_PER_FRAME, self.nc)[:, :, 1:]
+
+        sup = (support[0] - shift, support[1] - shift)
+        hp = pilots.detach().cpu().numpy().astype(np.complex128)
+        hs, vs = [], []
+        for i in range(b):
+            est = modem.data_channel(hp[i], sup, self.spec.band, equalizer.preamble_noise(reps[i]),
+                                     clip=self.clip_consts)
+            hs.append(est["h"])
+            vs.append(modem.noise_var(est["h"], est) + est["mse"])
+        h = torch.tensor(np.stack(hs), dtype=self.cdtype, device=self.device)
+        var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
+        return data, h, var
+
+
+def llr(y: torch.Tensor, h: torch.Tensor, var: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+    """constellation.llr in torch: (..., ) -> (..., m)."""
+    m = int(np.log2(points.shape[0]))
+    d = -(y[..., None] - h[..., None] * points).abs().pow(2) / var[..., None]  # (..., 2^m)
+    lb = torch.tensor(
+        (np.arange(2**m)[None, :] >> np.arange(m - 1, -1, -1)[:, None]) & 1, dtype=torch.bool, device=y.device
+    )  # (m, 2^m)
+    neg = torch.tensor(-torch.inf, device=y.device, dtype=d.dtype)
+    dd = d[..., None, :]
+    l0 = torch.logsumexp(torch.where(~lb, dd, neg), dim=-1)
+    l1 = torch.logsumexp(torch.where(lb, dd, neg), dim=-1)
+    return l0 - l1
+
+
+def bmi(l: torch.Tensor, bits: torch.Tensor) -> torch.Tensor:
+    """Bitwise mutual information, bits per bit: 1 - E log2(1 + e^(-s L))."""
+    return 1.0 - torch.nn.functional.softplus(-(1.0 - 2.0 * bits) * l).mean() / np.log(2)

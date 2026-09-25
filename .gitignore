@@ -1,0 +1,13 @@
+# environment and tool caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# generated study output: logs, CSVs, datasets, plots (scripts/ regenerate them)
+runs/
+
+# live-stack session recordings (data2g-host --record-dir)
+recordings/
