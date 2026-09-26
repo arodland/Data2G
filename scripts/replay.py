@@ -80,8 +80,19 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
             except modem.SyncError:
                 oc = [False] * len(slots)
             data = [o for o, s in zip(oc, slots) if s["mask"][2] < 128 and o is not None]
-            row.update(ctl_ok=all(oc[:n_ctl]), data_first=len(data), data_ok=sum(data),
-                       data_ok_ctl_lost=sum(data) if not all(oc[:n_ctl]) else 0,
+            # control: each codeword alone, or with its RV 1 copy (ARQ_DUP)
+            ctl_ok = all(o for o, s in zip(oc[:n_ctl], slots) if not s["rv"])
+            if not ctl_ok and n_ctl >= 2 and slots[1]["rv"] == 1:
+                try:
+                    soft = PHY.soft_bits(r)
+                    m = PHY.mask_value(tuple(slots[0]["mask"]))
+                    buf = codes.combine(spec, codes.combine(spec, None, soft[0:1], 0), soft[1:2], 1)
+                    p, good = codes.decode_buffer(spec, buf, 1, m, index=0)[0]
+                    ctl_ok = good and p == bytes.fromhex(slots[0]["payload"])
+                except (NameError, modem.SyncError):
+                    pass
+            row.update(ctl_ok=ctl_ok, data_first=len(data), data_ok=sum(data),
+                       data_ok_ctl_lost=sum(data) if not ctl_ok else 0,
                        snr_est=round(rx["meas"]["snr_est"], 1) if rx.get("meas") else "")
         elif receiver["audio"] is not None:
             # where the burst was on the receiver's clock, +-1 s

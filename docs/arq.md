@@ -74,11 +74,28 @@ extensions, so C = 1.
 | 7 | peer cumulative | the next peer seq this station expects; all below received |
 | 1 | reply lost | the peer's last burst repeated one this station already had (§6) |
 | 6 | K | resends in this burst |
-| 6 | recommend | the submode (sync band 2 bits, index 4) the peer should use next |
+| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`) |
 | 2 | size hint | peer burst length: shrink / hold / grow / max |
 
 Where the rest comes from:
 
+- **CPM modes (`data2g.cpm`) carry control in a short codeword:** polar k=176,
+  a 20 B payload, one per burst (twice under `ARQ_DUP`: the CPM header can
+  announce only that). When control doesn't fit 20 B, the sender drops, in
+  order: resends, then the optional extensions (`T_BUFFER`, `T_CHAT`,
+  `T_REPLY`, `T_DUPCTL`; none is state the two ends must agree on), then the
+  bitmap, then new data. A CPM data burst carries at least one data codeword
+  and at most 8.
+
+- **Duplicated control (`ARQ_DUP`, frame type 3):**
+  - Each control codeword goes twice: RV 0, then RV 1 in the next slot.
+    Everything after the doubled control span is mapped as usual.
+  - The burst's receiver asks for it with the empty `T_DUPCTL` = 14 extension,
+    when its outcome model predicts P(burst usable) < 0.9 for the recommended
+    data mode. The sender honours it on data bursts only.
+  - If slot 0 fails alone, the receiver combines slots 0 and 1 and decodes the
+    pair. A pair combined on a burst that wasn't duplicated fails its masked
+    CRC. One whose frame type isn't `ARQ_DUP` is discarded.
 - **Redundancy versions are explicit:** a `rv` extension lists 2 bits per resend, in
   slot order, and is always present when K > 0. (Polar resends are identical and
   Chase-combined; their RV field is 0.)

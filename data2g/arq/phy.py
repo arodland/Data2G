@@ -10,9 +10,10 @@ import zlib
 
 import numpy as np
 
-from .. import codes, modem
+from .. import codes, cpm, modem
 from ..config import BANDS, RS, SNR_REF_BW_HZ, SUBMODES
 from . import predictor as P
+from .modes import MODES, ctl_spec, is_cpm
 
 
 def mask_value(mask_id: tuple) -> int:
@@ -27,12 +28,25 @@ def mask_value(mask_id: tuple) -> int:
 def tx_audio(burst) -> np.ndarray:
     """A link.TxBurst -> unit-RMS audio. Codewords scramble by their mask
     alone (index 0), so a resend in another slot combines."""
-    spec = SUBMODES[burst.submode]
+    spec = MODES[burst.submode]
+    if is_cpm(spec):
+        # control slots (masks >= 128) in the grid's short codeword; two of
+        # them are one codeword at RV 0 and 1 (ARQ_DUP)
+        n_ctl = sum(1 for s in burst.slots if s.mask_id[2] >= 128)
+        coded = [codes.encode(ctl_spec(spec) if i < n_ctl else spec, s.payload, s.rv, mask_value(s.mask_id))
+                 for i, s in enumerate(burst.slots)]
+        return cpm.modulate(spec, coded, dup=n_ctl == 2)
     bits = np.stack([codes.encode(spec, s.payload, s.rv, mask_value(s.mask_id)) for s in burst.slots])
     return modem.modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
 
 
 def measure(r: dict) -> dict:
+    if r.get("family") == "cpm":
+        return cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
+    return _measure_ofdm(r)
+
+
+def _measure_ofdm(r: dict) -> dict:
     """The gear shifter's inputs from modem.receive's result: effective MI
     against thermal noise and estimation error, not the transmitter's clip
     noise (it belongs to the submode sent, not to the channel)."""
@@ -48,7 +62,15 @@ def measure(r: dict) -> dict:
     return out
 
 
-def soft_bits(r: dict) -> np.ndarray:
+def soft_bits(r: dict):
+    """Per slot soft bits in mapping order ((n_cw, coded_bits) for OFDM; a
+    list, control and data lengths differing, for CPM)."""
+    if r.get("family") == "cpm":
+        return r["soft"]
+    return _soft_ofdm(r)
+
+
+def _soft_ofdm(r: dict) -> np.ndarray:
     """(n_cw, coded_bits) soft bits in mapping order from modem.receive's result."""
     spec, est = r["spec"], r["est"]
     var = modem.noise_var(est["h"], est) + est["mse"]
@@ -66,21 +88,30 @@ class ModemRx:
     def __init__(self, r: dict, store: dict):
         self.spec, self.n_cw, self.submode = r["spec"], r["n_cw"], r["spec"].name
         self.soft, self.store = soft_bits(r), store
+        self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
+
+    def _spec(self, slot: int):
+        return ctl_spec(self.spec) if slot < self.n_ctl_slots else self.spec
 
     def decode(self, slot: int, mask_id: tuple, rv: int, key: tuple | None) -> bytes | None:
         if slot >= self.n_cw:
             return None
+        if self.n_ctl_slots and (mask_id[2] >= 128) != (slot < self.n_ctl_slots):
+            # CPM: its header says which slots are control (their own short
+            # codeword); a blind ARQ_DUP pair probe on a data slot is a miss
+            return None
         m = mask_value(mask_id)
         if key is None:
-            payload, ok = codes.decode_many(self.spec, self.soft[slot:slot + 1], m, index=0)[0]
+            payload, ok = codes.decode_many(self._spec(slot), np.asarray(self.soft[slot])[None], m, index=0)[0]
             return payload if ok else None
         buf, top, name, where = self.store.get(key, (None, 0, self.submode, None))
         if name != self.submode:
             raise AssertionError(f"soft bits of {key} stored in {name} ({where}), resent in {self.submode} "
                                  f"slot {slot} rv {rv}")
-        buf = codes.combine(self.spec, None if buf is None else buf.copy(), self.soft[slot:slot + 1], rv)
+        spec = self._spec(slot)
+        buf = codes.combine(spec, None if buf is None else buf.copy(), np.asarray(self.soft[slot])[None], rv)
         top = max(top, rv)
-        payload, ok = codes.decode_buffer(self.spec, buf, top, m, index=0)[0]
+        payload, ok = codes.decode_buffer(spec, buf, top, m, index=0)[0]
         if ok:
             return payload
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))

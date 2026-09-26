@@ -8,7 +8,7 @@ dsp.to_baseband, where carrier k sits at bin (k - 11) * RS Hz.
 import numpy as np
 
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cached_property, lru_cache
 
 from ..config import (
     BANDS, FS, M, NCP, NSYM, FCENTER, PILOT_PHASE_DEN, PREAMBLE_CP,
@@ -74,9 +74,17 @@ class Band:
         return np.real(_phasor(np.outer(n, self.freqs)) @ self.pilot)
 
     def preamble_template(self) -> np.ndarray:
-        """Complex baseband replica of the preamble (timing correlation)."""
+        """Complex baseband replica of the preamble (timing correlation).
+        Read-only, built once: every search and refine asked for it (7% of
+        a ladder trial's CPU)."""
+        return self._preamble_template
+
+    @cached_property
+    def _preamble_template(self) -> np.ndarray:
         n = np.arange(self.spec.preamble_samples) - PREAMBLE_CP
-        return 0.5 * (_phasor(np.outer(n, self.bb)) @ self.pilot)
+        t = 0.5 * (_phasor(np.outer(n, self.bb)) @ self.pilot)
+        t.flags.writeable = False
+        return t
 
 
 @lru_cache(maxsize=None)

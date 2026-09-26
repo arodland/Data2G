@@ -42,3 +42,23 @@ def test_failed_slot_combines_with_its_resend():
     again = PHY.ModemRx(hear(burst(pl, rv=1), snr=0.5, seed=4), store)
     assert [again.decode(i, (7, 0, i), 1, ("p", i)) for i in range(4) if got[i] is None] == [
         p for p, g in zip(pl, got) if g is None]
+
+
+def test_duplicated_control_pair_combines():
+    """ARQ_DUP: control codeword 0 at RV 0 in slot 0 and RV 1 in slot 1. At
+    an SNR where slot 0 alone mostly fails, the receiver's pair decode
+    (link.Station._ctl_pair) mostly succeeds."""
+    from data2g.arq import link as L
+    from data2g.arq.policy import GearShifter
+
+    rng = np.random.default_rng(5)
+    alone = paired = 0
+    st = L.Station(1, GearShifter(), key=7)
+    for seed in range(8):
+        pl = [bytes(rng.integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8)) for _ in range(3)]
+        b = TxBurst(SPEC.name, [Slot(L.ctl_mask(0, 0, 7), 0, pl[0]), Slot(L.ctl_mask(0, 0, 7), 1, pl[0]),
+                                Slot(L.data_mask(0, 0, 7), 0, pl[1])], 0)
+        rx = PHY.ModemRx(hear(b, snr=-1.5, seed=seed), {})
+        alone += rx.decode(0, L.ctl_mask(0, 0, 7), 0, None) == pl[0]
+        paired += st._ctl_pair(rx, 0, 0) == pl[0]
+    assert alone <= 3 and paired >= 6, (alone, paired)

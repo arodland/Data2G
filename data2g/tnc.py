@@ -123,6 +123,39 @@ def unpack(payloads: list[bytes], ok: list[bool]) -> tuple[list[bytes], int]:
 SILENCE_RMS = 1e-4  # below this (-80 dBFS) the receiver's input is taken as silence: no search
 
 
+def search_span(bands, cpm_grids=()) -> int:
+    """Samples holding a whole preamble and header (every copy) of any of these."""
+    from . import cpm
+
+    n = max((modem.head_samples(b) for b in bands), default=0)
+    for g in cpm_grids:
+        lay = cpm.layout(g, cpm.stream_symbols(g, 0, False))
+        n = max(n, (lay.hdr_rows[0][-1] + 2) * cpm.GRIDS[g].T)
+    return n
+
+
+def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
+    """One burst starting within `lead` samples of y's start, whichever
+    family (OFDM first, as Receiver tries them) -> modem.receive's or
+    cpm.receive's dict, or None. Offline use (sessions through the real
+    modem); searches only the head, as the streaming receiver does."""
+    from . import cpm
+
+    grids = tuple(cpm.GRIDS) if cpm_grids is None else tuple(cpm_grids)
+    head = lead + search_span(tuple(BANDS), grids)
+    try:
+        r = modem.receive(y, head=min(head, len(y)))
+        if r["score"] >= Receiver.SUSPECT_SCORE:
+            return r
+    except modem.SyncError:
+        r = None
+    for g in grids:
+        lock = cpm.find(cpm.GRIDS[g], y[:head])
+        if lock is not None:
+            return cpm.receive(y, lock)  # a CPM lock beats a suspect OFDM header
+    return r
+
+
 class Receiver:
     """Streaming receiver at FS: feed() audio as it arrives, get events
     back. Looks for a preamble and header in a short rolling buffer
@@ -131,11 +164,16 @@ class Receiver:
     the preamble it already found (modem.receive's `head`), so little work
     is left when the burst ends."""
 
-    def __init__(self, accept: modem.Accept):
+    def __init__(self, accept: modem.Accept, cpm_grids=()):
+        """`cpm_grids`: data2g.cpm grids to listen for too (early lock:
+        front sync block and first header copy)."""
+        from . import cpm
+
         self.accept, self.bands = accept, accept.bands
+        self.grids = [cpm.GRIDS[g] for g in cpm_grids]
         # the least audio worth searching (a whole preamble and header), and
         # what a trim keeps (so one still arriving survives it)
-        self.min_search = max(BANDS[b].preamble_samples + modem.header_samples(b) for b in self.bands) + NSYM
+        self.min_search = search_span(self.bands, cpm_grids)
         self.keep = self.min_search + FS
         self.reset()
 
@@ -174,6 +212,8 @@ class Receiver:
         completes), not just the newest audio."""
         self.fresh = 0
         p = self.pending
+        if p.get("family") == "cpm":
+            return False  # scores aren't comparable across families; CPM bursts are long and certain
         hdr_end = p["start"] + BANDS[p["band"]].preamble_samples + modem.header_samples(p["band"]) - self.off
         w0 = hdr_end if whole else max(hdr_end, len(self.buf) - self.keep)
         if len(self.buf) - w0 < self.keep // 2:
@@ -193,6 +233,16 @@ class Receiver:
         self.pending = q
         out.append(("header", q))
         return True
+
+    def _find_cpm(self) -> dict | None:
+        """An early lock on any listened-for CPM grid, as find_burst's dict."""
+        from . import cpm
+
+        for g in self.grids:
+            lock = cpm.find(g, self.buf)
+            if lock is not None:
+                return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
+        return None
 
     def feed(self, x: np.ndarray) -> list[tuple[str, dict]]:
         """-> events in order: ("header", find_burst's dict) as a burst
@@ -218,24 +268,38 @@ class Receiver:
                     break
                 try:
                     p = modem.find_burst(self.buf, self.bands, self.accept)
+                    if p["score"] < self.SUSPECT_SCORE:
+                        p = self._find_cpm() or p  # a strong CPM burst read as a weak OFDM header
                 except modem.SyncError:
-                    self._trim(self.keep)
-                    break
+                    p = self._find_cpm()
+                    if p is None:
+                        self._trim(self.keep)
+                        break
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window
                 self.pending = dict(p, start=p["start"] + self.off, end=p["end"] + self.off)
-                log.info("receiving %s burst: %d codeword(s), %.1f s, header score %.2f", p["spec"].name,
-                         p["n_cw"], (p["end"] - p["start"]) / FS, p["score"])
+                log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
+                         p["n_cw"], (p["end"] - p["start"]) / FS, "sync" if p.get("family") == "cpm" else "header",
+                         p["score"])
                 out.append(("header", self.pending))
             p = self.pending
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
                 if self.fresh >= self.HOP and self._supersede(out):
                     continue
                 break
+            if p.get("family") == "cpm":
+                from . import cpm
+
+                r = cpm.receive(self.buf, dict(p, start=p["start"] - self.off))
+                out.append(("burst", {"header": p, "rx": r, "audio": self.buf[max(0, p["start"] - self.off):
+                                                                               p["end"] - self.off]}))
+                self.last_start = p["start"]
+                self._trim(len(self.buf) - (p["end"] - self.off))
+                self.pending = None
+                continue
             s0 = max(0, p["start"] - LEADIN_SAMPLES - self.off)
             seg = self.buf[s0 : p["end"] + LEADIN_SAMPLES - self.off]
-            head = p["start"] - self.off - s0 + BANDS[p["band"]].preamble_samples + modem.header_samples(p["band"]) \
-                + 2 * NSYM + 3 * modem.M
+            head = p["start"] - self.off - s0 + modem.head_samples(p["band"]) + NSYM + 3 * modem.M
             try:
                 r = modem.receive(seg, [p["band"]], self.accept, head=min(head, len(seg)))
             except modem.SyncError as e:

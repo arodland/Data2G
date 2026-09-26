@@ -15,26 +15,39 @@ from collections import defaultdict
 import numpy as np
 import torch
 
+from data2g import cpm
+from data2g.config import SUBMODES
 from data2g.arq import predictor as P
 
 HIDDEN = 64
+MODES = P.OUTCOME_MODES + tuple(cpm.SPECS)
+SUBMODES_BAND = {m: s.sync_band for m, s in SUBMODES.items()}  # the model's outputs, saved with it
+BANDS = P.BANDS + tuple(cpm.GRIDS)
 MEAS = ("snr_est", "spread_est", "delay_est_ms", "headroom", "frames") + tuple(f"mi_{c}" for c in P.CONSTS)
 
 
-def load(path):
-    rows = [r for r in csv.DictReader(open(path)) if r["cand"] in P.OUTCOME_MODES]
-    x, mode, bok, dsent, dok = [], [], [], [], []
+def load(path, stale_header=()):
+    """`stale_header`: data from before the header copy (PROTOCOL_VERSION
+    11): its w/w48 candidates' burst labels are not today's (their codeword
+    labels, given a usable burst, still are)."""
+    rows = []
+    for pth in path.split(","):
+        stale = pth in stale_header
+        rows += [dict(r, _bmask=0.0 if stale and SUBMODES_BAND.get(r["cand"]) in ("w", "w48") else 1.0)
+                 for r in csv.DictReader(open(pth)) if r["cand"] in MODES]
+    x, mode, bok, dsent, dok, bmask = [], [], [], [], [], []
     for r in rows:
         m = {k: float(r[k]) for k in MEAS}
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev))
-        mode.append(P.OUTCOME_MODES.index(r["cand"]))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS))
+        mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
         dok.append(float(r["data_ok"]))
-    return (np.array(x), np.array(mode), np.array(bok), np.array(dsent), np.array(dok), rows)
+        bmask.append(r["_bmask"])
+    return (np.array(x), np.array(mode), np.array(bok), np.array(dsent), np.array(dok), rows, np.array(bmask))
 
 
 class Net(torch.nn.Module):
@@ -51,25 +64,42 @@ class Net(torch.nn.Module):
         return self.l3(torch.tanh(self.l2(h)))
 
 
-def loss_fn(z, mode, bok, dsent, dok, n):
+def loss_fn(z, mode, bok, dsent, dok, bmask, n):
     zb = z.gather(1, mode[:, None])[:, 0]
     zc = z.gather(1, (mode + n)[:, None])[:, 0]
-    lb = torch.nn.functional.binary_cross_entropy_with_logits(zb, bok, reduction="sum")
+    lb = (bmask * torch.nn.functional.binary_cross_entropy_with_logits(zb, bok, reduction="none")).sum()
     # codewords given a usable burst: binomial log-likelihood, dok of dsent
     w = bok * (dsent > 0)
     lc = -(w * (dok * torch.nn.functional.logsigmoid(zc) + (dsent - dok) * torch.nn.functional.logsigmoid(-zc))).sum()
     return (lb + lc) / len(mode)
 
 
+def combine(paths, out):
+    """Members' npz files -> one file (keys m<i>_<key>), which
+    predictor.outcome_model loads as an ensemble."""
+    arrays = {}
+    for i, pth in enumerate(paths):
+        d = np.load(pth)
+        arrays.update({f"m{i}_{k}": d[k] for k in d.files})
+    np.savez(out, **arrays)
+    P.outcome_model.cache_clear()
+    print(f"{out}: {len(paths)} members")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("data")
+    ap.add_argument("data", help="csv, or several comma-separated")
+    ap.add_argument("--stale-header", default="", help="comma-separated csvs from before the header copy")
+    ap.add_argument("--seed", type=int, default=0, help="nonzero: an ensemble member (seeded, bootstrapped)")
+    ap.add_argument("--ensemble", default="", help="comma-separated member npz files: combine them into --out")
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     a = ap.parse_args()
-    torch.manual_seed(0)
-    x, mode, bok, dsent, dok, rows = load(a.data)
-    n = len(P.OUTCOME_MODES)
+    if a.ensemble:
+        return combine(a.ensemble.split(","), a.out)
+    torch.manual_seed(a.seed)
+    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))))
+    n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
     us = np.unique(seeds)
@@ -81,14 +111,21 @@ def main():
     val_seeds = set(np.random.default_rng(1).choice(rest, len(rest) // 8, replace=False))
     va = np.array([s in val_seeds for s in seeds])
     trn = ~te & ~va
+    if a.seed:
+        # an ensemble member: a bootstrap of the training samples (a sample's
+        # candidates, or a session's bursts, stay together)
+        tr_seeds = np.unique(seeds[trn])
+        draw = np.random.default_rng(a.seed).choice(tr_seeds, len(tr_seeds))
+        count = dict(zip(*np.unique(draw, return_counts=True)))
+        trn = np.repeat(np.flatnonzero(trn), [count.get(s, 0) for s in seeds[trn]])
     mean, std = x[trn].mean(0), x[trn].std(0) + 1e-6
     net = Net(x.shape[1], n, mean, std)
     opt = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
     T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt)  # noqa: E731
-    tr_t = [T(x[trn]), T(mode[trn], torch.long), T(bok[trn]), T(dsent[trn]), T(dok[trn])]
-    va_t = [T(x[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va])]
+    tr_t = [T(x[trn]), T(mode[trn], torch.long), T(bok[trn]), T(dsent[trn]), T(dok[trn]), T(bmask[trn])]
+    va_t = [T(x[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va]), T(bmask[va])]
     best_val, best_state = float("inf"), None
-    te_t = [T(x[te]), T(mode[te], torch.long), T(bok[te]), T(dsent[te]), T(dok[te])]
+    te_t = [T(x[te]), T(mode[te], torch.long), T(bok[te]), T(dsent[te]), T(dok[te]), T(bmask[te])]
     for ep in range(a.epochs):
         perm = torch.randperm(len(tr_t[0]))
         for i in range(0, len(perm), 512):
@@ -132,7 +169,7 @@ def main():
         print(f"  {k[0]:6s} {k[1]:5s} n {len(ii):5d}: {pj[ii].mean():.3f} vs {frac[ii].mean():.3f}   "
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
     layers = [net.l1, net.l2, net.l3]
-    np.savez(a.out, mean=mean, std=std, **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
+    np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
     P.outcome_model.cache_clear()
     zn = P.outcome_model(a.out)(x[te])

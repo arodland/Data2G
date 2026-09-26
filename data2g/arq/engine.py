@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import modem
+from .. import cpm, modem
 from ..config import FS
 from . import frames as F
 from . import link as L
@@ -78,7 +78,7 @@ class Engine:
         self.policy_factory = policy or GearShifter
         self.rng = random.Random(seed)
         self.accept = modem.Accept.of(None, MAX_BURST_S, min_header_score)
-        self.receiver = Receiver(self.accept)
+        self.receiver = Receiver(self.accept, cpm_grids=tuple(cpm.GRIDS))
         self.ptt_delay = int(ptt_delay_s * FS)
         self.rec = Recorder(record_dir, self.call) if record_dir else None
         self.n = 0  # samples processed

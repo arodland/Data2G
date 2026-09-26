@@ -13,12 +13,16 @@ WINDOW = SEQ_MOD // 2 - 1
 BURST_MOD = 8
 
 # frame types (core word)
-ARQ, SESSION, PROBE = 0, 1, 2
+# ARQ_DUP: an ARQ burst whose control codewords each go twice, RV 0 then
+# RV 1 (the receiver combines the pair if the first fails); the peer asks
+# for it with T_DUPCTL when it predicts this burst's control is at risk
+ARQ, SESSION, PROBE, ARQ_DUP = 0, 1, 2, 3
 # extension types
 T_PAD, T_NEW, T_ABANDON, T_RV, T_BITMAP, T_RESYNC, T_REPORT, T_SURVEY, T_SOUND, T_BUFFER = range(10)
 T_REPLY = 11  # recommended submode for the peer's control-only bursts (10 is session.T_SESS)
 T_CHAT = 12  # empty: the sender's host has CHAT ON (latency over throughput, docs/arq.md §9)
 CHAT_LINE_BYTES = 200  # CHAT ON plans for at least a chat line; T_BUFFER is sent only above it
+T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the burst's receiver
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)

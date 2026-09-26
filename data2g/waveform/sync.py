@@ -87,6 +87,29 @@ def _repeat_corr(z: np.ndarray, t: np.ndarray, f: float) -> np.ndarray:
     return signal.fftconvolve(z, np.conj(tf[::-1]), mode="valid")
 
 
+def _repeat_corrs(z: np.ndarray, t: np.ndarray, freqs) -> np.ndarray:
+    """_repeat_corr for every f in `freqs` (multiples of STEP_HZ): one
+    forward FFT of z and of the template, then per f one inverse FFT of
+    their product with the template's spectrum rolled by f. With the FFT
+    length a multiple of FS / STEP_HZ every f is a whole number of bins,
+    and a frequency-shifted template's spectrum is the unshifted one's,
+    rolled, times a constant phase (3x fewer transforms than a
+    fftconvolve per f: the receiver's search was ~40% of a burst's CPU)."""
+    from scipy import fft
+
+    per = round(FS / STEP_HZ)
+    n = len(z) + M - 1
+    L = per * fft.next_fast_len(-(-n // per))
+    Z = fft.fft(z, L)
+    G0 = fft.fft(np.conj(t[::-1]), L)
+    out = np.empty((len(freqs), len(z) - M + 1), dtype=np.complex128)
+    for i, f in enumerate(freqs):
+        shift = round(f / STEP_HZ) * (L // per)
+        c = fft.ifft(Z * np.roll(G0, shift), L)[M - 1 : n - M + 1]
+        out[i] = c * np.exp(-2j * np.pi * f * (M - 1) / FS)
+    return out
+
+
 def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
                    repeats: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """-> S (n_freqs, n_starts): the noise-normalized differential
@@ -100,14 +123,14 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
     n_out = len(z) - PREAMBLE_CP - repeats * M + 1
     S = np.empty((len(freqs), n_out))
     q = np.empty(len(freqs) + len(NOISE_REF_HZ))
-    for i, f in enumerate(list(freqs) + list(NOISE_REF_HZ)):
-        c = _repeat_corr(z, t, f)
+    for i, c in enumerate(_repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
         p = np.abs(c) ** 2
         q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
         q[i] = max(q[i], 1e-12 * np.mean(p) + 1e-300)  # silence-only buffers (tests)
         if i < len(freqs):
-            w = [c[PREAMBLE_CP + r * M : PREAMBLE_CP + r * M + n_out] for r in range(repeats)]
-            S[i] = np.abs(sum(w[r] * np.conj(w[r - 1]) for r in range(1, repeats)))
+            d = c[M:] * np.conj(c[:-M])  # each window against the one before it
+            S[i] = np.abs(sum(d[PREAMBLE_CP + (r - 1) * M : PREAMBLE_CP + (r - 1) * M + n_out]
+                              for r in range(1, repeats)))
     # White noise is the same in every bin, so one level for all: the
     # lowest bin's, from bins the buffer's signal does not reach. Per-bin
     # levels failed when one burst filled most of the buffer: an n4 burst

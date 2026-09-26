@@ -32,11 +32,13 @@ from pathlib import Path
 
 import numpy as np
 
-from data2g import codes, modem
+from data2g import codes, cpm, modem
 from data2g.arq import phy as PHY
 from data2g.arq import policy as G
-from data2g.arq.link import Slot, TxBurst
-from data2g.config import SUBMODES
+from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
+from data2g.arq.modes import MODES, burst_seconds, ctl_spec, is_cpm
+from data2g.config import FS
+from data2g.tnc import search_span
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ir_study as I  # noqa: E402
@@ -46,11 +48,18 @@ CANDIDATES = 4
 REPLY_MODES = {"ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f", "qpsk-r1/5", "n10-qpsk-r1/3"}
 KINDS = (("awgn", 0.15), ("mpg", 0.2), ("mpp", 0.2), ("mpd", 0.15), ("random", 0.3))
 THRESHOLDS = I.thresholds()
+# CPM modes' 1% end-to-end points (the CPM prototype's study, 1% v2), for
+# choosing modes near their working range only
+CPM_THRESHOLDS = {"fsk16r25-r1/3": (-13.4, -5.0, -10.2, -10.8), "fsk16r25-r1/2": (-12.3, -2.8, -8.0, -8.2),
+                  "fsk8r50-r1/3": (-11.2, -0.7, -6.9, -7.2), "fsk8r50-r1/2": (-9.7, 1.9, -5.4, -5.2),
+                  "fsk32r62-r1/3": (-8.8, 1.8, -4.8, -5.2), "fsk32r62-r1/2": (-7.6, 2.9, -1.6, -2.2)}
 
 
 def threshold(name: str, kind: str) -> float:
     """The mode's ladder threshold (1% codeword failures) on this channel family."""
-    t = THRESHOLDS.get((I.ladder_name(SUBMODES[name]), kind))
+    if name in CPM_THRESHOLDS:
+        return CPM_THRESHOLDS[name][("awgn", "mpg", "mpp", "mpd").index(kind)]
+    t = THRESHOLDS.get((I.ladder_name(MODES[name]), kind))
     return t if t is not None else 99.0
 
 
@@ -59,14 +68,31 @@ def family(doppler: float) -> str:
 
 
 def burst(name: str, n: int, rng) -> TxBurst:
-    s = SUBMODES[name]
-    return TxBurst(name, [Slot((5, 0, i), 0, bytes(rng.integers(0, 256, codes.payload_bytes(s), dtype=np.uint8)))
-                          for i in range(n)], 0)
+    """A control codeword, then n - 1 data codewords (random payloads)."""
+    s = MODES[name]
+    rand = lambda spec: bytes(rng.integers(0, 256, codes.payload_bytes(spec), dtype=np.uint8))  # noqa: E731
+    return TxBurst(name, [Slot(ctl_mask(0, 0, 5), 0, rand(ctl_spec(s)))]
+                   + [Slot(data_mask(0, i, 5), 0, rand(s)) for i in range(1, n)], 0)
 
 
 def n_for(name: str, seconds: float) -> int:
-    s = SUBMODES[name]
-    return max(1, sum(1 for k in range(1, 65) if modem.burst_seconds(s, k) <= seconds))
+    return G.slots_for(MODES[name], seconds)
+
+
+def receive(y: np.ndarray, name: str) -> dict | None:
+    """The receiver's result for a burst of `name` in y, or None (no sync).
+    ponytail: listens for the sent family only (OFDM, or CPM on the sent
+    grid); cross-family false locks are not in the data."""
+    s = MODES[name]
+    if not is_cpm(s):
+        try:
+            return modem.receive(y)
+        except modem.SyncError:
+            return None
+    # the head only, as the streaming receiver searches (a whole-burst search
+    # can lock on a later sync block)
+    lock = cpm.find(cpm.GRIDS[s.grid], y[:int(PS.PAD_S * FS) + FS // 2 + search_span((), (s.grid,))])
+    return cpm.receive(y, lock) if lock is not None else None
 
 
 def sample(seed):
@@ -89,8 +115,8 @@ def sample(seed):
     def hear(b: TxBurst, t0: float):
         ch.snr_db = snr0 + drift * t0 / 30
         try:
-            return modem.receive(ch.apply(PHY.tx_audio(b), t0))
-        except modem.SyncError:
+            return receive(ch.apply(PHY.tx_audio(b), t0), b.submode)
+        except modem.SyncError:  # ponytail: an OFDM header read past the audio
             return None
 
     def measured_burst(t0):
@@ -110,7 +136,7 @@ def sample(seed):
         b = burst(name, n, rng)
         r = hear(b, t0)
         ok = r is not None and r["spec"].name == name and r["n_cw"] == n
-        return (PHY.measure(r) if ok else None), name, t0 + modem.burst_seconds(SUBMODES[name], n)
+        return (PHY.measure(r) if ok else None), name, t0 + burst_seconds(MODES[name], n)
 
     t = 1.0
     prev, prev_name, t = measured_burst(t) if rng.random() < 0.85 else (None, None, t)
@@ -121,20 +147,27 @@ def sample(seed):
         return []
     gap = float(rng.uniform(1.5, 4.0))
     t_next = t_cur_end + gap
+    # one reply mode (sent as replies are, 1-2 codewords: without these the
+    # model barely knew the ACK modes' sync, and the shifter replied in
+    # ack-4f at MPP -4 dB, 79% usable, over n10-ack-4f, 95%), two near their
+    # decision boundary, one at random
     near = [m for m in allowed if abs(threshold(m, fam) - snr0) <= 5]
-    cands = list(rng.choice(near, size=min(len(near), CANDIDATES - 1), replace=False)) if near else []
+    cands = [str(rng.choice([m for m in allowed if m in REPLY_MODES]))]
+    cands += list(rng.choice(near, size=min(len(near), CANDIDATES - 2), replace=False)) if near else []
+    cpm_ok = [m for m in allowed if m in cpm.SPECS]
+    if cpm_ok and rng.random() < 0.3:  # CPM candidates oversampled (a new family: few rows otherwise)
+        cands.append(str(rng.choice(cpm_ok)))
     while len(cands) < CANDIDATES:
         cands.append(str(rng.choice(allowed)))
     base = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2),
-                snr_next=round(snr0 + drift * t_next / 30, 2), cap=cap, band=SUBMODES[cur_name].band, gap=round(gap, 2),
+                snr_next=round(snr0 + drift * t_next / 30, 2), cap=cap, band=MODES[cur_name].band, gap=round(gap, 2),
                 **{k: v for k, v in cur.items()})
     if prev is not None:
-        base.update(prev_band=SUBMODES[prev_name].band, prev_age=round(t_cur_end - t_prev_end, 2),
+        base.update(prev_band=MODES[prev_name].band, prev_age=round(t_cur_end - t_prev_end, 2),
                     **{f"prev_{k}": v for k, v in prev.items()})
     rows = []
-    for name in cands:
-        secs = float(rng.choice(G.SIZE_S))
-        n = max(2, n_for(name, secs))
+    for j, name in enumerate(cands):
+        n = int(rng.integers(1, 3)) if j == 0 else max(2, n_for(name, float(rng.choice(G.SIZE_S))))
         b = burst(name, n, rng)
         r = hear(b, t_next)
         right = r is not None and r["spec"].name == name and r["n_cw"] == n
@@ -142,7 +175,7 @@ def sample(seed):
         if right:
             rx = PHY.ModemRx(r, {})
             ok = [rx.decode(i, s.mask_id, 0, None) == s.payload for i, s in enumerate(b.slots)]
-        rows.append(dict(base, cand=name, cand_n=n, cand_seconds=round(modem.burst_seconds(SUBMODES[name], n), 2),
+        rows.append(dict(base, cand=name, cand_n=n, cand_seconds=round(burst_seconds(MODES[name], n), 2),
                          burst_ok=int(bool(ok) and ok[0]), data_sent=n - 1, data_ok=int(sum(ok[1:])) if ok else 0))
     return rows
 
@@ -152,6 +185,7 @@ def main():
     ap.add_argument("--samples", type=int, default=20000)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--first", type=int, default=0, help="first sample number (another dataset's seeds: past its end)")
     a = ap.parse_args()
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
@@ -164,7 +198,7 @@ def main():
         w = csv.DictWriter(f, fields)
         if new:
             w.writeheader()
-        for rows in pool.imap_unordered(sample, range(start * 11 + 1, (start + a.samples) * 11 + 1, 11), chunksize=2):
+        for rows in pool.imap_unordered(sample, range((a.first + start) * 11 + 1, (a.first + start + a.samples) * 11 + 1, 11), chunksize=2):
             for r in rows:
                 w.writerow({k: r.get(k, "") for k in fields})
             done += 1

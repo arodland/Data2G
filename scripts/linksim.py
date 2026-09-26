@@ -15,7 +15,8 @@ real mode ladder, with the modem replaced by a link-abstraction model:
   fresh parity, Chase on repeats; fitted to the real PHY).
 - Measurements handed to the receiving policy: what the real receiver
   would report (predictor inputs): the truth plus a real receiver's error
-  on a similar burst (runs/predictor_data_v5.csv).
+  on a similar burst (scripts/data/measurement_errors.npz, exported from
+  runs/predictor_data_v5.csv by `linksim.py export-errors`).
 
     uv run python scripts/linksim.py validate              # abstraction PHY vs the ladder thresholds
     uv run python scripts/linksim.py run --policy fixed:qpsk-r1/2:8 --chan mpd --snr 5
@@ -172,7 +173,8 @@ class SimRx:
     def decode(self, i, mask_id, rv, key):
         s = self.burst.slots[i]
         if mask_id != s.mask_id or (key is not None and rv != s.rv):
-            if key is not None and mask_id[0] == s.mask_id[0]:
+            # (control pairs are probed blindly: link._ctl_pair)
+            if key is not None and mask_id[0] == s.mask_id[0] and mask_id[2] < F.SEQ_MOD:
                 self.stats["mismatch"] += 1
             return None
         mi = self.mi
@@ -245,23 +247,34 @@ class SimPhy:
         return out
 
 
-RESIDUALS = ROOT / "runs/predictor_data_v5.csv"  # scripts/predictor_data.py (truth1_* columns)
+ERRORS = ROOT / "scripts/data/measurement_errors.npz"  # linksim.py export-errors (committed)
+
+
+def export_errors(src: str, out: str = str(ERRORS)):
+    """The real receiver's measurement errors, per band, from a
+    scripts/predictor_data.py dataset (its truth1_* columns): the compact,
+    committed table residuals() reads."""
+    rows = list(csv.DictReader(open(src)))
+    arrays = {}
+    for b in BANDS:
+        rs = [r for r in rows if r["band1"] == b]
+        arrays[f"{b}_doppler"] = np.array([float(r["doppler"]) for r in rs], np.float32)
+        arrays[f"{b}_truth"] = np.array([float(r["truth1_gray-qam4"]) for r in rs], np.float32)
+        arrays[f"{b}_errors"] = np.array([[float(r[f"mi_{c}"]) - float(r[f"truth1_{c}"]) for c in P.CONSTS]
+                                          + [float(r["snr_est"]) - float(r["snr"]),
+                                             float(r["spread_est"]) - float(r["doppler"])] for r in rs], np.float32)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out, source=src, **arrays)
+    print(f"{out}: {sum(len(arrays[f'{b}_truth']) for b in BANDS)} measurements from {src}")
 
 
 @lru_cache(maxsize=None)
 def residuals() -> dict:
     """Per band: (doppler, true QPSK MI, [MI errors per constellation, SNR
     error dB, spread error Hz]) of the real receiver's measurements."""
-    out = {}
-    rows = list(csv.DictReader(open(RESIDUALS)))
-    for b in BANDS:
-        rs = [r for r in rows if r["band1"] == b]
-        out[b] = (np.array([float(r["doppler"]) for r in rs]),
-                  np.array([float(r["truth1_gray-qam4"]) for r in rs]),
-                  np.array([[float(r[f"mi_{c}"]) - float(r[f"truth1_{c}"]) for c in P.CONSTS]
-                            + [float(r["snr_est"]) - float(r["snr"]), float(r["spread_est"]) - float(r["doppler"])]
-                            for r in rs]))
-    return out
+    d = np.load(ERRORS)
+    return {b: (d[f"{b}_doppler"].astype(float), d[f"{b}_truth"].astype(float), d[f"{b}_errors"].astype(float))
+            for b in BANDS}
 
 
 # --- policies -----------------------------------------------------------------------
@@ -285,7 +298,7 @@ class FixedPolicy:
     def rv_cycle(self, m):
         return rv_cycle(m)
 
-    def connect_mode(self, cap):
+    def connect_mode(self, cap, tries=0):
         return self.connect
 
     def airtime(self, m, n_cw):
@@ -296,13 +309,13 @@ class FixedPolicy:
 
 
 def _ladder(cap=2):
-    """Allowed submodes, slowest to fastest (payload bits per second of a 6 s burst)."""
+    """Allowed OFDM submodes (the baselines), slowest to fastest (payload bits per second of a 6 s burst)."""
     from data2g.arq import policy as G
 
     def rate(s):
         n = max(1, sum(1 for k in range(1, 65) if modem.burst_seconds(s, k) <= 6.0))
         return (n - 1) * codes.payload_bytes(s) / modem.burst_seconds(s, n)
-    return sorted((s.name for s in G.allowed(cap)), key=lambda m: rate(SUBMODES[m]))
+    return sorted((s.name for s in G.allowed(cap) if s.name in SUBMODES), key=lambda m: rate(SUBMODES[m]))
 
 
 class ArdopPolicy(FixedPolicy):
@@ -373,10 +386,11 @@ def make_policy(spec: str):
         return ArdopPolicy(size_s=float(args[0]) if args else 6.0)
     if kind == "snr":
         return SnrPolicy(float(args[0]) if args else 3.0, int(args[1]) if len(args) > 1 else 2)
-    if kind in ("shift", "chat"):
+    if kind.split("+")[0] in ("shift", "chat"):
         from data2g.arq.policy import GearShifter
-        g = GearShifter()
-        g.chat_on = kind == "chat"  # the harness sets CHAT ON on the sessions
+        # "+cpm": CPM modes too (real-modem sessions only: the link abstraction models OFDM)
+        g = GearShifter(use_cpm="+cpm" in kind)
+        g.chat_on = kind.startswith("chat")  # the harness sets CHAT ON on the sessions
         return g
     raise ValueError(spec)
 
@@ -455,7 +469,7 @@ def chat(rng, n=10):
 WORKLOADS = {"bulk": bulk, "winlink": winlink, "chat": chat}
 
 
-def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None):
+def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=2):
     """-> dict: per-step write and delivery times, delivered bytes, stats.
     `phy`: what carries bursts (default SimPhy on `ch`; scripts/phy_session.py
     has the real modem)."""
@@ -468,7 +482,7 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None):
     a.set_chat(getattr(pol_a, "chat_on", False))
     b.set_chat(getattr(pol_b, "chat_on", False))
     b.listen()
-    a.connect("K2XYZ", 2, 0.0)
+    a.connect("K2XYZ", cap, 0.0)
     stores = {id(a): {}, id(b): {}}
     stats = {"mismatch": 0, "bursts": 0, "modes": {}, "airtime": 0.0, "time": {}, "lost_sync": 0, "timeouts": 0}
     last_sent = {}
@@ -591,6 +605,8 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate")
+    ex = sub.add_parser("export-errors")
+    ex.add_argument("--csv", default="runs/predictor_data_v5.csv")
     s2 = sub.add_parser("sweep2")
     s2.add_argument("--out", default="runs/linksim_sweep2.csv")
     s2.add_argument("--workloads", nargs="+", default=["bulk", "winlink", "chat"])
@@ -607,6 +623,8 @@ def main():
     r.add_argument("--bytes", type=int, default=20000)
     r.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
+    if a.cmd == "export-errors":
+        return export_errors(a.csv)
     if a.cmd == "validate":
         validate()
         return

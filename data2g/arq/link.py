@@ -29,6 +29,9 @@ from .frames import SEQ_MOD, WINDOW
 NO_PROGRESS_TURNS = 8
 RESYNCS_BEFORE_FAIL = 3
 REPEATS_BEFORE_SHRINK = 1
+# extensions a short control codeword (CPM) sheds first when it can't hold
+# everything, least useful first; none of them is state the peer must agree on
+OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
 LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s bound
 
 ACTIVE, FAILED = "active", "failed"
@@ -213,6 +216,7 @@ class Station:
     chat: bool = False  # my host's CHAT ON
     peer_chat: bool = False  # the peer's, from its last burst
     peer_queued: int = 0  # bytes the peer had queued at its last burst (T_BUFFER, chat only)
+    peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
     rx: RxSide = field(default_factory=RxSide)
@@ -277,6 +281,9 @@ class Station:
         # replies are lost (it repeats or polls: §6)
         submode, max_cw = self.policy.choose(self, min(max(self.misses, self.reply_escalation), 3))
         pb = self.policy.payload_bytes(submode)
+        # control codewords: CPM carries control in a short codeword, one per burst
+        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(submode)
+        max_ctl = getattr(self.policy, "max_ctl", lambda m: 4)(submode)
         ext = {}
         reset = None
         if not fresh:
@@ -303,6 +310,8 @@ class Station:
             ext[F.T_REPLY] = bytes([reply])
         if self.chat:
             ext[F.T_CHAT] = b""
+        if getattr(self.policy, "want_dup", False):
+            ext[F.T_DUPCTL] = b""  # the peer's next data burst: duplicate its control (ARQ_DUP)
         if self.chat or self.peer_chat:
             # what I have queued, so the peer's CHAT objective plans for a file
             # rather than a chat line when there is one (informational only)
@@ -322,11 +331,15 @@ class Station:
             e = dict(ext)
             if bitmap:
                 e[F.T_BITMAP] = bitmap
-            n_ctl = self._ctl_size(e, pb, k, has_new)
-            if n_ctl <= 4 and n_ctl + k <= max(max_cw, n_ctl) and (fresh or not has_new):
+            n_ctl = self._ctl_size(e, cpb, k, has_new)
+            # the peer asked for duplicated control: data bursts only
+            dup = 2 if (fresh and self.peer_wants_dup and (k or has_new)) else 1
+            if n_ctl <= max_ctl and dup * n_ctl + k <= max(max_cw, dup * n_ctl) and (fresh or not has_new):
                 break
             if k:
                 k -= 1
+            elif optional := [t for t in OPTIONAL_TLVS if t in ext]:
+                del ext[optional[0]]  # hints and requests: a later burst carries them
             elif bitmap:
                 bitmap = b""  # costs extra resends, never wrong ones
             elif has_new:
@@ -342,7 +355,7 @@ class Station:
         cycle = self.policy.rv_cycle(submode)
         rvs = [self.tx.cws[x].heard % cycle for x in resend]
         new = []
-        room = max(0, max_cw - n_ctl - len(resend))
+        room = max(0, max_cw - dup * n_ctl - len(resend))
         while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
             avail = self._new_available()
             if avail <= 0:
@@ -360,8 +373,12 @@ class Station:
             ext[F.T_RV] = F.pack_rv(rvs)
         if new:
             ext[F.T_NEW] = bytes([new[0].seq % SEQ_MOD])
-        ctl = F.Control(core, ext).pack(pb)
-        slots = [Slot(ctl_mask(self.direction, i, self.key), 0, p) for i, p in enumerate(ctl)]
+        if dup == 2 and not (resend or new):
+            dup = 1  # nothing but control after all
+        if dup == 2:
+            core.ftype = F.ARQ_DUP
+        ctl = F.Control(core, ext).pack(cpb)
+        slots = [Slot(ctl_mask(self.direction, i, self.key), rv, p) for i, p in enumerate(ctl) for rv in range(dup)]
         slots += [Slot(data_mask(self.direction, x, self.key), rv, self.tx.cws[x].payload) for x, rv in zip(resend, rvs)]
         slots += [Slot(data_mask(self.direction, c.seq, self.key), 0, c.payload) for c in new]
         self._snapshots[bn] = (self.rx.cum, conveyed)
@@ -408,6 +425,12 @@ class Station:
         """Process a received burst. -> whether its control decoded (then
         this station must answer). Discards the burst otherwise."""
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
+        paired = False
+        if first is None and rx.n_cw >= 2:
+            # an ARQ_DUP burst's control pair, combined (a wrong guess just
+            # fails the masked CRC)
+            first = self._ctl_pair(rx, 0, 0)
+            paired = first is not None
         outcome = getattr(self.policy, "outcome", None)  # first transmissions only (resends gain from IR)
         if first is None:
             if outcome:
@@ -415,9 +438,14 @@ class Station:
             return False
         try:
             core = F.Core.unpack(first)
+            dup = 2 if core.ftype == F.ARQ_DUP else 1
+            if paired and dup == 1:
+                return False  # combined as a pair, but not sent as one
             payloads = [first]
             for i in range(1, core.n_ctl):
-                p = rx.decode(i, ctl_mask(self.peer, i, self.key), 0, None)
+                p = rx.decode(dup * i, ctl_mask(self.peer, i, self.key), 0, None)
+                if p is None and dup == 2:
+                    p = self._ctl_pair(rx, 2 * i, i)
                 if p is None:
                     return False
                 payloads.append(p)
@@ -429,6 +457,7 @@ class Station:
         self.peer_recommend, self.peer_size_hint = core.recommend, core.size_hint
         self.peer_reply_recommend = ext[F.T_REPLY][0] if F.T_REPLY in ext and ext[F.T_REPLY] else None
         self.peer_chat = F.T_CHAT in ext
+        self.peer_wants_dup = F.T_DUPCTL in ext
         self.peer_queued = int.from_bytes(ext[F.T_BUFFER], "big") if len(ext.get(F.T_BUFFER, b"")) == 2 else 0
         seen = self.peer_burst is not None and core.burst_seq == self.peer_burst
         repeat = seen and self._answered
@@ -472,15 +501,16 @@ class Station:
             # them (the failed ones, not only the decoded ones) belong to
             # the old codewords (phase G found them combined into new ones)
             self._forget_all(rx)
-        slots = self._map(core, ext, rx.n_cw, acted)
+        n_ctl_slots = dup * core.n_ctl
+        slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
         self.last_rx_data = bool(slots)
         n_ok = n_new = 0
-        for i, (seq, rv) in enumerate(slots, start=core.n_ctl):
+        for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
             if seq is None or seq < self.rx.cum:
                 continue
             key = (self.peer, seq)
             p = rx.decode(i, data_mask(self.peer, seq, self.key), rv, key)
-            if i >= core.n_ctl + core.k:
+            if i >= n_ctl_slots + core.k:
                 n_new += 1
                 n_ok += p is not None
             if p is not None:
@@ -496,6 +526,16 @@ class Station:
         return True
 
     _answered: bool = False
+
+    def _ctl_pair(self, rx: RxBurst, slot: int, i: int) -> bytes | None:
+        """Control codeword i from slots `slot` (RV 0) and `slot + 1` (RV 1),
+        combined under a key used for nothing else and dropped after."""
+        key = ("ctl", id(rx), i)
+        mask = ctl_mask(self.peer, i, self.key)
+        rx.decode(slot, mask, 0, key)
+        p = rx.decode(slot + 1, mask, 1, key)
+        rx.forget(key)
+        return p
 
     def answered(self):
         """Call after sending the reply to the burst just handled."""

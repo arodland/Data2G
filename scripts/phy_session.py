@@ -30,11 +30,20 @@ import numpy as np
 from data2g import hfchannel, modem
 from data2g.arq import phy as PHY
 from data2g.config import BANDS, FS, LEADIN_SAMPLES, SUBMODES
+from data2g.tnc import receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import linksim as L  # noqa: E402
 
 PAD_S = 0.3  # noise the receiver sees around a burst
+
+
+def header_time(r: dict, t0: float) -> float:
+    """When the receiver knew a burst's mode and length (its header read)."""
+    if r.get("family") == "cpm":
+        return t0 + (r["header_end"] - int(PAD_S * FS)) / FS
+    sb = BANDS[r["spec"].sync_band]
+    return t0 + (LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(r["spec"].sync_band)) / FS
 CFO_HZ = 4.5  # the two rigs' frequency offset, both directions
 
 
@@ -75,18 +84,23 @@ class RealPhy:
     def __init__(self, ch: ContinuousChannel):
         self.ch, self.decode_s = ch, []
 
+    def hear(self, x, t0):
+        """The receiver's result for audio x sent at t0 (either family), or None."""
+        try:
+            return receive_any(self.ch.apply(x, t0), lead=int(PAD_S * FS) + FS // 2)
+        except modem.SyncError:  # ponytail: an OFDM header read past the audio
+            return None
+
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
         x = PHY.tx_audio(burst)
         end = t0 + len(x) / FS
         t = time.perf_counter()
-        try:
-            r = modem.receive(self.ch.apply(x, t0))
-        except modem.SyncError:
+        r = self.hear(x, t0)
+        if r is None:
             return end, None, None, None
         spec = r["spec"]
-        sb = BANDS[spec.sync_band]
-        t_hdr = t0 + (LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(spec.sync_band)) / FS
+        t_hdr = header_time(r, t0)
         soft_r = r
 
         def make_rx(store, stats, rng):
