@@ -1424,8 +1424,17 @@ noise at MPP 0 dB. Installed: `outcome_predictor.npz` = v5e.
 
 ## KISS TNC with mode shifting (2026-09-26)
 
-`data2g-tnc --bw 2400|500` (2400 by default) replaces the single-mode KISS
-TNC (`--mode` is gone). Link layer: `data2g/kisslink.py`.
+KISS is a personality of `data2g-host`, next to VARA; the single-mode
+`data2g-tnc` is gone. Both personalities share one engine, receiver and
+PTT:
+- **Switches:** `--vara/--no-vara`, `--kiss/--no-kiss`, both on by default.
+- **KISS options:** `--kiss-port` (8100, as VARA HF), `--kiss-bw 2400|500`,
+  `--broadcast-mode`, `--list-modes`.
+- **Receiving:** each burst heard goes to the KISS link first, and it takes
+  only bursts with its own CRC masks. The rest go to the ARQ session.
+- **Sending:** KISS sends only between ARQ sessions, and while the channel
+  is free.
+- Link layer: `data2g/kisslink.py`.
 
 - **Feedback without a session.** Each burst carries reports: for every
   station heard in the last 10 min, the mode and size it should use to

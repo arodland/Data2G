@@ -205,9 +205,11 @@ class KissLink:
 
     # -- receiving -----------------------------------------------------------
 
-    def on_burst(self, r: dict) -> list[bytes]:
+    def on_burst(self, r: dict) -> list[bytes] | None:
         """A received burst (modem.receive's or cpm.receive's dict) -> the
-        frames in it. Updates what we know of its sender."""
+        frames in it, or None if it isn't a KISS burst (no codeword decodes
+        with KISS_KEY's masks: an ARQ burst, or one lost whole). Updates what
+        we know of its sender."""
         rx = PHY.ModemRx(r, {})
         mode, n = r["spec"].name, r["n_cw"]
         now = self.clock()
@@ -233,6 +235,8 @@ class KissLink:
             ok.append(p is not None)
         from .tnc import unpack
 
+        if c0 is None and not any(ok):
+            return None
         frames, _ = unpack(payloads, ok) if payloads else ([], 0)
         if not sender and frames:
             ax = parse_ax25(frames[0])

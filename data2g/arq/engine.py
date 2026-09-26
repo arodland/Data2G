@@ -72,7 +72,10 @@ def _jsonable(v):
 
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
-                 min_header_score: float = 0.0):
+                 min_header_score: float = 0.0, kiss=None):
+        """`kiss`: a data2g.kisslink.KissLink to serve too (the KISS
+        personality): its bursts are peeled off what's heard, and it sends
+        when no ARQ session is under way and the channel is free."""
         self.call = call.upper()
         self.aliases = ()
         self.policy_factory = policy or GearShifter
@@ -88,6 +91,8 @@ class Engine:
         self.chat = False
         self._extra: list = []  # bursts outside any session (CQ frames), sent when the channel is free
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
+        self.kiss = kiss
+        self.kiss_rx: list[bytes] = []  # frames heard for KISS clients
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -167,6 +172,9 @@ class Engine:
                 burst = self.session.poll(t)
                 if burst is None and self._extra:
                     burst = self._extra.pop(0)
+                if (burst is None and self.kiss is not None and not self.receiver.channel_busy
+                        and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)):
+                    burst = self.kiss.next_burst()  # KISS only between ARQ sessions
                 if burst is not None:
                     self._start_tx(burst, t)
         if self.tx is not None:
@@ -195,6 +203,11 @@ class Engine:
                 self.rec.rx(t, ev["audio"], h, r, meas)
             if r is None:
                 continue
+            if self.kiss is not None:
+                frames = self.kiss.on_burst(r)
+                if frames is not None:  # a KISS burst: not the session's
+                    self.kiss_rx += frames
+                    continue
             rx = PHY.ModemRx(r, self.store)
             if self._cq(rx):
                 continue

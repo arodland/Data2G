@@ -1,7 +1,13 @@
-"""VARA-style TNC host for Data2G ARQ sessions (gear-shifter phase H).
+"""The Data2G server: one radio, two personalities, each on or off.
 
-Two TCP ports, as VARA: commands (8300, CR-terminated lines) and data
-(8301, the session's byte stream). The station itself is an
+VARA (--vara, default on): ARQ sessions (gear-shifter phase H) on two TCP
+ports, as VARA: commands (8300, CR-terminated lines) and data (8301, the
+session's byte stream).
+
+KISS (--kiss, default on): frames on port 8100 (VARA HF's KISS port),
+their modes shifted per station from reports in the bursts
+(data2g.kisslink). KISS bursts go out only between ARQ sessions and while
+the channel is free; each burst heard goes to whichever it belongs to. The station itself is an
 arq.engine.Engine clocked by the sound card; PTT through rigctld; every
 burst heard and sent recorded for offline replay (scripts/replay.py).
 
@@ -264,13 +270,22 @@ class _Port:
 
 def serve(a, pa, stop: threading.Event | None = None):
     """Run until SIGINT/SIGTERM (or `stop` is set)."""
+    from .kisslink import KissLink
+    from .tnc import KissServer
+
+    link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode) if a.kiss else None
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
-                    min_header_score=a.min_header_score)
+                    min_header_score=a.min_header_score, kiss=link)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
-    cmd = _Port((a.host, a.command_port), lambda line: inbox.put(("cmd", line)), lines=True,
-                on_close=lambda: inbox.put(("gone", None)))
-    data = _Port((a.host, a.command_port + 1), lambda d: inbox.put(("data", d)), lines=False)
+    cmd = data = kiss = None
+    if a.vara:
+        cmd = _Port((a.host, a.command_port), lambda line: inbox.put(("cmd", line)), lines=True,
+                    on_close=lambda: inbox.put(("gone", None)))
+        data = _Port((a.host, a.command_port + 1), lambda d: inbox.put(("data", d)), lines=False)
+    if a.kiss:
+        kiss = KissServer((a.kiss_address, a.kiss_port), lambda f: inbox.put(("kiss", f)))
+        threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
     dec, interp = Decimator(a.sample_rate), Interpolator(a.sample_rate)
     per = BLOCK * (a.sample_rate // FS)
@@ -283,8 +298,12 @@ def serve(a, pa, stop: threading.Event | None = None):
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, lambda *_: stop.set())
-    log.info("commands on %s:%d, data on %d; recording to %s", a.host, a.command_port, a.command_port + 1,
-             a.record_dir or "(off)")
+    if a.vara:
+        log.info("VARA: commands on %s:%d, data on %d", a.host, a.command_port, a.command_port + 1)
+    if a.kiss:
+        log.info("KISS on %s:%d: %d Hz cap, broadcasts in %s", a.kiss_address, a.kiss_port, a.kiss_bw,
+                 link.broadcast)
+    log.info("recording to %s", a.record_dir or "(off)")
     keyed, slow = False, 0
     try:
         while not stop.is_set():
@@ -295,10 +314,13 @@ def serve(a, pa, stop: threading.Event | None = None):
                     host.command(v)
                 elif kind == "gone":
                     host.client_gone()
+                elif kind == "kiss":
+                    link.enqueue(v)
                 else:
                     host.data_in(v)
             for line in host.out_cmd:  # replies at once, not after the audio step (clients time out at ~2 s)
-                cmd.send(line.encode() + b"\r")
+                if cmd:
+                    cmd.send(line.encode() + b"\r")
             host.out_cmd.clear()
             x = np.frombuffer(inp.read(per, exception_on_overflow=False), dtype=np.float32).astype(np.float64)
             t0 = time.perf_counter()
@@ -317,22 +339,43 @@ def serve(a, pa, stop: threading.Event | None = None):
                 keyed = False
             host.after_step(ptt)
             for line in host.out_cmd:
-                cmd.send(line.encode() + b"\r")
+                if cmd:
+                    cmd.send(line.encode() + b"\r")
             host.out_cmd.clear()
-            data.send(bytes(host.out_data))
+            if data:
+                data.send(bytes(host.out_data))
             host.out_data.clear()
+            for f in engine.kiss_rx:
+                kiss.broadcast(f)
+            engine.kiss_rx.clear()
     finally:
         log.info("shutting down")
         rig.ptt(False)
         rig.close()
-        cmd.close()
+        if cmd:
+            cmd.close()
+            data.close()
+        if kiss:
+            kiss.shutdown()
+            kiss.close_clients()
+            kiss.server_close()
         data.close()
         inp.close()
         out.close()
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Data2G ARQ host, VARA-style TCP")
+    ap = argparse.ArgumentParser(description="Data2G server: a VARA-style TNC and a KISS TNC on one radio")
+    ap.add_argument("--vara", action=argparse.BooleanOptionalAction, default=True,
+                    help="the VARA personality: ARQ sessions on --command-port and the next")
+    ap.add_argument("--kiss", action=argparse.BooleanOptionalAction, default=True,
+                    help="the KISS personality: frames on --kiss-port, modes shifted per station")
+    ap.add_argument("--kiss-port", type=int, default=8100, help="as VARA HF's")
+    ap.add_argument("--kiss-address", default="127.0.0.1")
+    ap.add_argument("--kiss-bw", type=int, choices=(2400, 500), default=2400, help="KISS bandwidth cap, Hz")
+    ap.add_argument("--broadcast-mode", metavar="MODE",
+                    help="KISS mode for UI frames, non-AX.25 and unreported stations "
+                         "(default: qpsk-r1/5, n10-qpsk-r1/5 with --kiss-bw 500)")
     ap.add_argument("--mycall")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--command-port", type=int, default=8300, help="data is on the next port")
@@ -353,7 +396,23 @@ def main():
     ap.add_argument("--record-dir", default=f"recordings/{time.strftime('%Y%m%d-%H%M%S')}",
                     help="where every burst heard and sent is logged ('' turns it off)")
     ap.add_argument("--log-level", default="INFO")
+    ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
+    if a.list_modes:
+        from . import codes
+        from .arq import policy as G
+
+        for s in sorted(G.allowed({2400: 2, 500: 0}[a.kiss_bw]), key=lambda s: (G.width_hz(s), s.name)):
+            print(f"{s.name:18s} {G.width_hz(s):5.0f} Hz  {codes.payload_bytes(s):4d} bytes/codeword")
+        return
+    if not (a.vara or a.kiss):
+        ap.error("nothing to serve: --no-vara and --no-kiss")
+    if a.kiss and a.broadcast_mode is not None:
+        from .arq import policy as G
+        from .arq.modes import MODES
+
+        if a.broadcast_mode not in MODES or MODES[a.broadcast_mode] not in G.allowed({2400: 2, 500: 0}[a.kiss_bw]):
+            ap.error(f"--broadcast-mode {a.broadcast_mode}: not a mode within {a.kiss_bw} Hz")
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(message)s")
     a.record_dir = Path(a.record_dir) if a.record_dir else None
 
