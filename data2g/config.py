@@ -71,7 +71,16 @@ FIRST_PATH_FRAC = 0.5
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
 HEADER_SAMPLES = HEADER_SYMS * NSYM
-PROTOCOL_VERSION = 10  # 10: first frozen submode table; n4 on n10 sync (2026-09-23)
+PROTOCOL_VERSION = 11  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy
+# A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
+# frame of its own (pilot, the 4 header symbols, the first again) after
+# data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
+# receiver combines the copies' LLRs. scripts/header_diversity.py (2000
+# bursts a cell): w48 MPP -1 dB header loss 8.5% -> 2.4%, MPD -1 14.5% ->
+# 3.8%; w wrong headers accepted at MPD -3 dB 10.2% -> 4.0%. Spaced beat
+# contiguous (an 8-symbol header: w48 MPP -1 4.8%); 1-4 frames later alike.
+HEADER_COPY_BANDS = ("w", "w48")
+HEADER_COPY_AFTER = 2
 MAX_CODEWORDS = 64  # the header carries n_cw - 1 in 6 bits
 
 LEADIN_SAMPLES = 800  # 100 ms of silence before the preamble
@@ -242,7 +251,7 @@ def _load_clip_table():
     import json
     from pathlib import Path
 
-    d = json.load(open(Path(__file__).parent / "codes_data" / "clip_constants.json"))
+    d = json.loads((Path(__file__).parent / "codes_data" / "clip_constants.json").read_text())
     return tuple(d["overshoot"]), d["entries"]
 
 

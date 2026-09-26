@@ -85,6 +85,8 @@ class BurstChannel:
         self.headroom, self.overshoot = clip_setting or (spec.headroom, b.spec.clip_overshoot)
         self.clip_consts = clip_consts or config.clip_consts(spec.band, spec.headroom)
         self.nc = b.nc
+        self.kc = modem.copy_frame(spec.sync_band, n_frames)  # the header copy's frame (in self.base)
+        self.n_air = n_frames + (self.kc is not None)
         zeros = np.zeros((n_frames, DATA_SYMS_PER_FRAME, b.nc), dtype=np.complex128)
         self.base = torch.tensor(modem.burst_waveform(zeros, spec), dtype=dtype, device=device)
         self.mod = torch.tensor(b.mod, dtype=cdtype, device=device)  # (NSYM, nc)
@@ -101,8 +103,9 @@ class BurstChannel:
     def transmit(self, data: torch.Tensor) -> torch.Tensor:
         """(B, n_f, 5, nc) complex data symbols -> (B, n) clipped, unit-RMS."""
         b = data.shape[0]
-        syms = torch.zeros(b, self.n_f, SYMS_PER_FRAME, self.nc, dtype=self.cdtype, device=self.device)
-        syms[:, :, 1:] = data
+        syms = torch.zeros(b, self.n_air, SYMS_PER_FRAME, self.nc, dtype=self.cdtype, device=self.device)
+        frames = [f for f in range(self.n_air) if f != self.kc]
+        syms[:, frames, 1:] = data
         wav = torch.einsum("bfsc,nc->bfsn", syms, self.mod).real.reshape(b, -1)
         x = self.base.expand(b, -1).clone()
         x[:, self.frames0 : self.frames0 + wav.shape[1]] += wav
@@ -166,7 +169,7 @@ class BurstChannel:
         start = self.frames0 + NCP - DEMOD_BACKOFF + shift
         idx = (
             start
-            + torch.arange(self.n_f * SYMS_PER_FRAME + 1, device=self.device)[:, None] * NSYM
+            + torch.arange(self.n_air * SYMS_PER_FRAME + 1, device=self.device)[:, None] * NSYM
             + torch.arange(M, device=self.device)[None, :]
         )
         win = z[:, idx]  # (B, S, M)
@@ -180,16 +183,17 @@ class BurstChannel:
         reps = (2.0 / M) * torch.einsum("bsm,cm->bsc", z[:, pidx], self.demod)
         reps = (reps / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)).detach().cpu().numpy()
         pilots = raw[:, ::SYMS_PER_FRAME] / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)
-        data = raw[:, :-1].reshape(b, self.n_f, SYMS_PER_FRAME, self.nc)[:, :, 1:]
+        frames = [f for f in range(self.n_air) if f != self.kc]
+        data = raw[:, :-1].reshape(b, self.n_air, SYMS_PER_FRAME, self.nc)[:, frames, 1:]
 
         sup = (support[0] - shift, support[1] - shift)
         hp = pilots.detach().cpu().numpy().astype(np.complex128)
         hs, vs = [], []
         for i in range(b):
             est = modem.data_channel(hp[i], sup, self.spec.band, equalizer.preamble_noise(reps[i]),
-                                     clip=self.clip_consts)
-            hs.append(est["h"])
-            vs.append(modem.noise_var(est["h"], est) + est["mse"])
+                                     clip=self.clip_consts, n_frames=self.n_f)
+            hs.append(est["h"][frames])
+            vs.append((modem.noise_var(est["h"], est) + est["mse"])[frames])
         h = torch.tensor(np.stack(hs), dtype=self.cdtype, device=self.device)
         var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
         return data, h, var

@@ -186,18 +186,19 @@ def predict(measured: dict, band: str, gap: float, submodes=None, window: float 
 # the receiver's last two measurements. No link abstraction, clip-noise or
 # estimation-loss model in the loop: the real receiver made the labels.
 
-OUTCOME_MODES = tuple(SUBMODES)
+OUTCOME_MODES = tuple(SUBMODES)  # a model file without its own list (the OFDM-only v2)
 OUTCOME_INPUTS = ("snr_est", "log_spread", "delay_est_ms", *(f"mi_{c}" for c in CONSTS), "headroom", "log_frames",
                   *(f"band_{b}" for b in BANDS), "has_prev", *(f"prev_mi_{c}" for c in CONSTS), "prev_snr_est",
                   "prev_log_spread", "prev_log_age", "prev_same_band", "prev_log_frames", "gap", "log_seconds")
 
 
-def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None) -> np.ndarray:
-    """measured, prev: as inputs(); `seconds`: the next burst's length on air."""
+def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS) -> np.ndarray:
+    """measured, prev: as inputs(); `seconds`: the next burst's length on air;
+    `bands`: the model's band one-hot (OFDM bands, then CPM grids)."""
     x = [measured["snr_est"], np.log(0.05 + measured["spread_est"]), measured["delay_est_ms"]]
     x += [measured[f"mi_{c}"] for c in CONSTS]
     x += [measured.get("headroom", 0.0), np.log2(measured.get("frames", 16))]
-    x += [float(band == b) for b in BANDS]
+    x += [float(band == b) for b in bands]
     pm, pb, age = prev if prev is not None else (measured, band, 0.0)
     x += [float(prev is not None), *(pm[f"mi_{c}"] for c in CONSTS), pm["snr_est"], np.log(0.05 + pm["spread_est"]),
           np.log2(1 + age), float(pb == band), np.log2(pm.get("frames", 16))]
@@ -210,6 +211,8 @@ class OutcomeMlp:
     mean: np.ndarray
     std: np.ndarray
     layers: list
+    modes: tuple = OUTCOME_MODES  # its outputs' order
+    bands: tuple = tuple(BANDS)  # its band one-hot
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """-> (..., 2 * len(OUTCOME_MODES)) logits: burst ok, then codeword ok."""
@@ -227,16 +230,51 @@ def outcome_model(path: str = str(DATA / "outcome_predictor.npz")) -> OutcomeMlp
     if not p.exists():
         return None
     d = np.load(p)
-    n = sum(1 for k in d.files if k.startswith("W"))
-    return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)])
+    if "m0_mean" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
+        members = sorted({k.split("_", 1)[0] for k in d.files})
+        return OutcomeEnsemble([_mlp({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
+                                for m in members])
+    return _mlp({k: d[k] for k in d.files})
+
+
+def _mlp(d: dict) -> OutcomeMlp:
+    n = sum(1 for k in d if k.startswith("W"))
+    extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
+    return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)], **extra)
+
+
+@dataclass
+class OutcomeEnsemble:
+    """Bootstrap members; their probabilities averaged (returned as logits).
+    Where the data are thin the members disagree, and the average stays
+    away from 0 and 1 (single models put 0.9+ on contradictory inputs)."""
+    members: list
+
+    @property
+    def modes(self):
+        return self.members[0].modes
+
+    @property
+    def bands(self):
+        return self.members[0].bands
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        p = np.mean([1 / (1 + np.exp(-np.clip(m(x), -40, 40))) for m in self.members], axis=0)
+        p = np.clip(p, 1e-9, 1 - 1e-9)
+        return np.log(p / (1 - p))
+
+
+def outcome_knows(submode: str) -> bool:
+    m = outcome_model()
+    return m is not None and submode in m.modes
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
                     prev=None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
     next burst `seconds` long."""
-    z = outcome_model()(outcome_inputs(measured, band, gap, seconds, prev))
-    n = len(OUTCOME_MODES)
+    model = outcome_model()
+    z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands))
+    n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))
-    return {s.name: (float(p[OUTCOME_MODES.index(s.name)]), float(p[n + OUTCOME_MODES.index(s.name)]))
-            for s in (submodes or SUBMODES.values())}
+    return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]])) for s in (submodes or SUBMODES.values())}

@@ -136,3 +136,21 @@ def test_no_burst_from_a_tone():
             y = hfchannel.awgn(np.concatenate([np.zeros(4000), x, np.zeros(4000)]), 15, seed=seed, s_power=0.5)
             with pytest.raises(modem.SyncError):
                 modem.demodulate(y)
+
+
+@pytest.mark.parametrize("sub,n_cw", [("ack-1f", 1), ("qpsk-r1/5", 1), ("w48-qpsk-r1/5", 2)])
+def test_header_copy_rescues_a_lost_first_copy(sub, n_cw):
+    """The 4-symbol headers (w, w48) carry a second copy in a frame of its
+    own (after data frame 2, or the last on a shorter burst: ack-1f's 1
+    frame). With the first copy wiped, the burst still decodes; the copy's
+    frame is not data."""
+    spec = SUBMODES[sub]
+    rng = np.random.default_rng(7)
+    payloads = [bytes(rng.integers(0, 256, codes.payload_bytes(spec), dtype=np.uint8)) for _ in range(n_cw)]
+    x = modem.modulate(payloads, spec)
+    assert modem.frames_on_air(spec, n_cw) == n_cw * spec.frames_per_cw + 1
+    h0 = modem.LEADIN_SAMPLES + BANDS[spec.sync_band].preamble_samples
+    x[h0:h0 + modem.header_samples(spec.sync_band)] = rng.normal(0, 1, modem.header_samples(spec.sync_band))
+    y = hfchannel.apply_channel(np.concatenate([x, np.zeros(4000)]), snr_db=15, seed=3)
+    b = modem.demodulate(y)
+    assert b.submode.name == sub and b.payloads == payloads

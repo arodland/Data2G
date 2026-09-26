@@ -64,6 +64,7 @@ class Session:
     _out: L.TxBurst | None = None
     _due: float | None = None  # when _out may go
     _deadline: float | None = None  # master: reply must be heard by then
+    _answer_mode: str | None = None  # callee: the mode the CONNECT came in (its ACK goes in it)
     _tries: int = 0
     _last_heard: float = 0.0
     _last_data: float = 0.0
@@ -239,8 +240,11 @@ class Session:
     # session frames: control-only bursts with a T_SESS extension. Connect
     # frames use key 0 (no session yet); DISC / DISC_ACK the session key.
 
-    def _session_burst(self, direction: int, key: int, body: bytes) -> L.TxBurst:
-        mode = self.policy.connect_mode(self.cap)
+    def _session_burst(self, direction: int, key: int, body: bytes, mode: str | None = None) -> L.TxBurst:
+        """`mode`: an answer goes in the mode its frame came in (a caller that
+        needed the robust connect mode hears its answer in it); otherwise
+        the policy's, more robust on retries."""
+        mode = mode or self.policy.connect_mode(self.cap, self._tries)
         ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(self.policy.payload_bytes(mode))
         slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         return L.TxBurst(mode, slots, 0)
@@ -287,7 +291,7 @@ class Session:
                 body = F.Control.unpack(payloads).ext.get(T_SESS, b"")
             except ValueError:
                 return None
-            return {"key": key, "body": body} if body else None
+            return {"key": key, "body": body, "mode": rx.submode} if body else None
         return None
 
     def _on_session_frame(self, f: dict, now: float):
@@ -299,12 +303,13 @@ class Session:
             if callee != self.call.upper() and callee not in self.aliases:
                 return
             if self.station is not None and nonce == self._nonce:
+                self._answer_mode = f["mode"]
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
             if self.state != LISTEN:
                 return
             if body[1] != VERSION:
-                self._queue(self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + b"\x01"), now)
+                self._queue(self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + b"\x01", f["mode"]), now)
                 return
             self.call = callee  # the call it dialed (the session key derives from it)
             self.peer, self._nonce, self.cap = caller, nonce, min(body[20], self.cap)
@@ -315,6 +320,7 @@ class Session:
             self._heard(now)
             self._last_data = now
             self.events.append(f"CONNECTED {caller}")
+            self._answer_mode = f["mode"]
             self._queue(self._accept_burst(), now)
         elif sub == F.CONNECT_ACK and self.state == CONNECTING and key == 0:
             if int.from_bytes(body[1:3], "big") != self._nonce:
@@ -335,13 +341,13 @@ class Session:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
             self._close("disconnected by peer",
-                        final=self._session_burst(self.station.direction, key, bytes([F.DISC_ACK])), now=now)
+                        final=self._session_burst(self.station.direction, key, bytes([F.DISC_ACK]), f["mode"]), now=now)
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
             self._close("disconnected")
 
     def _accept_burst(self) -> L.TxBurst:
         body = bytes([F.CONNECT_ACK]) + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)])
-        return self._session_burst(1, 0, body)
+        return self._session_burst(1, 0, body, self._answer_mode)
 
     def _flush_writes(self):
         if self._pending_write:

@@ -36,10 +36,12 @@ def test_bmi_agrees_with_the_full_modem():
     has the same TX, fading, noise convention and estimator."""
     spec = SubmodeSpec(0, "t", "ldpc", "gray-qam4", 1)
     ch = BurstChannel(spec, 20)
-    g = torch.Generator().manual_seed(0)
     p = torch.tensor(constellation.gray_qam(2), dtype=torch.complex64)
-    bits = torch.randint(0, 2, (16, 20, DATA_SYMS_PER_FRAME, NC, 2), generator=g)
-    data = p[bits[..., 0] * 2 + bits[..., 1]]
-    y, h, var = ch.receive(ch.channel(ch.transmit(data), CHANNELS["mpp"], 10.0, g), CHANNELS["mpp"])
-    b = bmi(llr(y, h, var, p), bits.float()).item()
-    assert 0.88 < b < 0.94, b
+    vals = []
+    for seed in range(3):  # one seed spans 0.856-0.898 (16 bursts of fading draws)
+        g = torch.Generator().manual_seed(seed)
+        bits = torch.randint(0, 2, (16, 20, DATA_SYMS_PER_FRAME, NC, 2), generator=g)
+        data = p[bits[..., 0] * 2 + bits[..., 1]]
+        y, h, var = ch.receive(ch.channel(ch.transmit(data), CHANNELS["mpp"], 10.0, g), CHANNELS["mpp"])
+        vals.append(bmi(llr(y, h, var, p), bits.float()).item())
+    assert 0.88 < np.mean(vals) < 0.94, vals

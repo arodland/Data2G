@@ -6,8 +6,15 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# generated study output: logs, CSVs, datasets, plots (scripts/ regenerate them)
-runs/
+# generated study output: logs, CSVs, datasets, plots (scripts/ regenerate them),
+# except the small measured inputs the simulator and dataset generators read
+runs/*
+!runs/ladder_final.csv
+!runs/sync_floor.csv
+!runs/ladder_10pct.csv
 
 # live-stack session recordings (data2g-host --record-dir)
 recordings/
+
+# Claude Code worktrees (forked sessions)
+.claude/worktrees/

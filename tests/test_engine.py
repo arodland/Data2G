@@ -95,7 +95,7 @@ def test_vara_commands_drive_a_session(tmp_path):
 def test_a_mode_the_link_mangles_does_not_stall_the_session(monkeypatch):
     """The audio loopback's livelock: 64/256-QAM bursts clipped to death on
     the way out (their headers still heard), everything else fine, a clean
-    30 dB link the shifter would put 64-QAM on. Strikes must route around
+    30 dB link the shifter would put 64-QAM on. The online bias must route around
     it and the data must still arrive."""
     from data2g.arq import phy as PHY
     from data2g.config import SUBMODES
@@ -250,3 +250,37 @@ def test_losing_the_command_client_ends_its_session():
     assert link(a.engine, b.engine, 20, 60, pump(lambda: "DISCONNECTED" in a.out_cmd
                                                  and b.engine.session.state in (S.IDLE, S.CLOSED)), seed=53)
     assert not b.listening and b.engine.session.state != S.LISTEN
+
+
+def test_a_session_in_cpm_modes():
+    """Both directions forced onto a CPM mode (control in its short
+    codeword, data up to 8 codewords, duplicated control when asked): the
+    Receiver's Costas path, tx/rx dispatch and the link's one-control-
+    codeword fit, end to end on audio."""
+    from data2g.arq import policy as G
+
+    class CpmOnly(G.GearShifter):
+        def choose(self, station, escalation):
+            if escalation:
+                return super().choose(station, escalation)
+            m = "fsk32r62-r1/2"
+            return m, G.slots_for(G.MODES[m], 12.0, station.tx.pending(), station.peer_wants_dup)
+
+    a, b = Engine("W1AW", policy=CpmOnly, seed=11), Engine("K2XYZ", policy=CpmOnly, seed=12)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    up = np.random.default_rng(13).bytes(500)
+    a.session.write(up)
+    got = bytearray()
+    sent = []
+    tx = a.session.station.build
+
+    def build(*args, **kw):
+        burst = tx(*args, **kw)
+        sent.append(burst.submode)
+        return burst
+    a.session.station.build = build
+    assert link(a, b, 10, 240, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=14)
+    assert bytes(got) == up
+    assert sent.count("fsk32r62-r1/2") >= 2, sent

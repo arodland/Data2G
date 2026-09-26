@@ -120,8 +120,8 @@ def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
     0.088; the reverse assignment fails outright. Others: random."""
     rng = np.random.default_rng(INTERLEAVER_SEED + spec.index)
     n = spec.coded_bits
-    if spec.code != "ldpc":
-        return rng.permutation(n)
+    if spec.code != "ldpc" or spec.constellation.startswith("fsk"):
+        return rng.permutation(n)  # (M-FSK: no labels to rank, data2g.cpm)
     code = ldpc_code(spec)
     deg = np.bincount(code.edges[1], minlength=code.n_cols)[code.sent]
     order = np.lexsort((rng.random(n), -deg))  # highest degree first

@@ -1067,6 +1067,334 @@ burst classified at its receiver):
     here, unlike on MPG.
   - Missed preambles (8-14%) remain.
 
+## Duplicated control codeword (2026-09-25)
+
+- **What it is:** an `ARQ_DUP` burst sends each control codeword twice (RV 0,
+  then RV 1). The receiver combines the pair if the first copy fails.
+- **When:** the receiver asks for it (`T_DUPCTL`) when its outcome model gives
+  P(burst usable) < 0.9. It costs one codeword per data burst, and only then.
+- **Why:** at MPP -4 dB, codewords in a burst fail about independently, so a
+  single control codeword failed in 73% of data bursts while their data decoded.
+- **Real-modem loss study** (`runs/loss_study.log`):
+
+  | Cell | Before | After |
+  |---|---|---|
+  | MPG -4 dB | 49 bps, control lost 39% | 73 bps, 17% |
+  | MPP -4 dB | 5 bps, 70% | 14 bps, 33% |
+  | MPG 0 dB | 224 bps, 24% | 230 bps, 9% |
+  | MPP 0 dB | 162 bps, 23% | 209 bps, 4% |
+  | AWGN -4 dB | 196 bps | 180 bps (-8%) |
+
+  On AWGN at -4 dB the model's under-confidence turned it on for 45% of data
+  bursts that didn't need it.
+- **Phase G:** the high end is unchanged (AWGN 12 dB 411 vs 415 B/s, MPP 8 dB
+  the same). Fading improved: MPG 4 dB +20%, MPD 4 dB +11%, MPD 16 dB +5%,
+  winlink MPP 12 dB 120 -> 114 s.
+- **Accounting:**
+  - The fuzz policy asks for it at random. Stress: 3200 + 1600 runs, 0 bugs.
+  - The fuzz test's heaviest loss cell now allows a bounded "link lost". About
+    20% of its runs lose the link with or without duplication (300 seeds: 59
+    vs 48).
+- **Tests:** tests/test_arq_phy.py `test_duplicated_control_pair_combines`.
+
+## Reply modes and outcome data v2 (2026-09-25)
+
+- **Reply modes at -4 dB on the real modem**, fraction usable (150 bursts
+  each):
+
+  | Reply mode | MPP | MPG |
+  |---|---|---|
+  | ack-4f | 79% | 82% |
+  | n10-ack-4f | 95% | 86% |
+  | n4-ack-8f | 96% | 89% |
+  | ack-1f | 39% | 46% |
+
+  The shifter mostly replied in ack-4f.
+- **Outcome data v2:** 15k more samples, each with one reply mode among its
+  candidates, 34.6k samples in all.
+  - The model still ranks n10-ack-4f only a hair above ack-4f (0.87 vs 0.84; the
+    real rates are 0.95 vs 0.79), so the choice barely moved.
+  - Held-out calibration is within ~0.05 per bin, slightly under-confident in
+    mid-range.
+- **Fallback n10-ack-4f** (polls and escalated replies): tried and reverted.
+  Every loss-study cell went down. A likely cause is that the receiver
+  recommends wide modes from measurements of 500 Hz polls. That's unproven: see
+  the noise below.
+- **Loss-study noise:** 4 seeds x 300 s gives a standard error of the cell mean
+  of 8% (AWGN -4 dB), 10-26% (fading at 0 and -4 dB), and 67% (MPP -4 dB, two of
+  four seeds delivered nothing). Throughput differences under ~20-30% between
+  runs are not evidence. The per-burst rates, over hundreds of bursts, are much
+  firmer. Deciding between close variants needs more seeds and longer sessions.
+
+## Constant-envelope (CPM) modes in the ARQ (2026-09-25)
+
+TLDR: CPM modes are in the modem, the link and the shifter. At MPP -4 dB
+they lift a session from 29 to 46 bps, and cost nothing elsewhere. A connect
+fix found on the way took that cell from 8 to 29 bps first.
+
+- **The family:** noncoherent M-FSK (`data2g/cpm.py`), three grids, each with
+  r1/3 and r1/2 LDPC data codewords (k 320/480, n 960):
+
+  | Mode | Width | bps | 10% point, avg power: awgn / mpg / mpp / mpd | 1% point |
+  |---|---|---|---|---|
+  | fsk16r25-r1/3 | 460 Hz | 32 | -13.8 / -8.0 / -11.6 / -11.6 | -13.4 / -5.0 / -10.2 / -10.8 |
+  | fsk16r25-r1/2 | 460 Hz | 48 | -12.5 / -6.3 / -9.3 / -9.3 | -12.3 / -2.8 / -8.0 / -8.2 |
+  | fsk8r50-r1/3 | 460 Hz | 48 | -11.6 / -5.6 / -8.9 / -8.9 | -11.2 / -0.7 / -6.9 / -7.2 |
+  | fsk8r50-r1/2 | 460 Hz | 72 | -10.1 / -2.6 / -6.1 / -6.3 | -9.7 / 1.9 / -5.4 / -5.2 |
+  | fsk32r62-r1/3 | 2060 Hz | 99 | -9.1 / -3.9 / -5.9 / -5.9 | -8.8 / 1.8 / -4.8 / -5.2 |
+  | fsk32r62-r1/2 | 2060 Hz | 151 | -8.0 / -1.6 / -3.7 / -3.3 | -7.6 / 2.9 / -1.6 / -2.2 |
+
+  From the CPM prototype's study. Codeword thresholds, end to end with
+  spread sync. The c8r50 mid-block change below postdates it; the front
+  pattern and thresholds are unchanged.
+- **Wire format:**
+  - Control rides a short polar codeword: 20 B, one per burst (twice
+    duplicated).
+  - When control doesn't fit, the sender sheds resends, then the optional
+    extensions, then the bitmap, then new data (docs/arq.md §3).
+  - A recommendation's band code 3 means CPM.
+  - CPM size classes are 4x the OFDM ones (4-48 s). A CPM data codeword
+    takes 3-10 s.
+- **Receiver:**
+  - The streaming receiver also listens on the three CPM grids. At idle that
+    costs 8.7% of a core more (20.5% total, after skipping the fine search
+    below threshold).
+  - `tnc.receive_any` is the offline equivalent for the real-modem session
+    scripts (`--policy shift+cpm`).
+- **Sync fixes found by the outcome data:**
+  - c8r50's mid-burst sync blocks repeated its front Costas array. A mid
+    block scored 0.50 on the front detector (0.10-0.12 on the other grids).
+    It is now time-reversed (0.17).
+  - On a clean signal, a burst's own data met the front pattern by chance.
+    With the front cut off, 16-23 of 40 bursts per grid locked, all with
+    wrong headers. A lock now needs pattern share over peak share >= 0.7:
+    fronts measure 0.82+ from -10 to 25 dB, false locks 0.59 at most. Noise
+    alone gave 0 locks in 398 windows.
+  - A blind duplicated-control probe on a CPM data slot crashed a session
+    (a 960-bit codeword combined into a 360-bit buffer). `ModemRx` now
+    refuses control decodes outside the header's control slots.
+- **Outcome model v3:**
+  - 20k more samples, with CPM as measured bursts and candidates (oversampled
+    30%). The model stores its mode and band lists.
+  - CPM held-out calibration is within ~0.1 in most cells. It is optimistic
+    for fsk8r50 on MPG below -5 dB: 0.73 predicted, 0.57 real.
+- **Connect escalation:**
+  - At MPP -4 dB, 9 of 12 sessions never connected: every try went in
+    qpsk-r1/5, 38% usable there.
+  - Retries now go in n4-qpsk-r1/3 (91% usable), and the callee answers in
+    the mode it heard. DISC retries escalate too.
+  - The "two of four seeds delivered nothing" in the v2 loss study was this.
+- **Loss study,** 12 seeds x 600 s, bps (mean ± s.e.):
+
+  | Cell | OFDM only | + CPM |
+  |---|---|---|
+  | MPG -4 dB | 57 ± 7 | 52 ± 4 |
+  | MPG 0 dB | 200 ± 8 | 203 ± 8 |
+  | MPG +8 dB | 894 ± 27 | 894 ± 27 |
+  | MPP -4 dB | 29 ± 4 | 46 ± 4 |
+  | MPP 0 dB | 186 ± 8 | 186 ± 8 |
+
+- **Tried and dropped:**
+  - A P(usable) >= 0.3 floor on data candidates: within noise everywhere.
+    It was meant to stop the argmax picking overestimated long shots (64l
+    at 5-18% usable), but the online bias already limits those to a few
+    bursts.
+  - Not recommending 14 near-clone modes (an envelope analysis said they
+    cost <= 0.2% anywhere): within noise too. That analysis also proposed
+    dropping n4-qpsk-r1/3, which is now what makes connects work.
+- **Open:**
+  - MPP -4 dB is still ~46 bps against VARA's reported ~100.
+  - Most time there goes to control and reply bursts (ack-4f 24% missed).
+    CPM isn't used for replies: a control-only CPM burst is 2.4-5 s.
+
+## Strikes removed, control-slot accounting, search CPU (2026-09-25)
+
+TLDR: removing strikes gained 12-48% at -4 to 0 dB fading. The live
+receiver's idle CPU is down from 20.5% to 11.1% of a core.
+
+- **Strikes removed.** A mode that went unanswered, or a family whose
+  control failed, was held out of use for a while.
+  - The only evidence for them was the audio loopback's clipped 64-QAM.
+    That test passes without them: the online bias routes around it.
+  - At -4 to 0 dB fading they held working modes, and the fallback carried
+    no data. One MPP -4 dB session sent 32 consecutive control-only turns.
+  - Loss study, shift+cpm, 12 seeds x 600 s, bps:
+
+    | Cell | Strikes on | Strikes off |
+    |---|---|---|
+    | MPG -4 dB | 48 ± 4 | 67 ± 4 |
+    | MPG 0 dB | 195 ± 9 | 219 ± 8 |
+    | MPG +8 dB | 894 ± 27 | 865 ± 34 |
+    | MPP -4 dB | 45 ± 4 | 56 ± 3 |
+    | MPP 0 dB | 178 ± 9 | 226 ± 6 |
+
+- **Control slots per mode.**
+  - The shifter's objective assumed one control codeword per burst.
+  - In a 4-byte reply mode, control takes 3 codewords. So ack-4f was
+    recommended for data with no room for any.
+  - `policy.ctl_slots` now counts them (control estimated at 12 B).
+- **CPM burst on a weak OFDM header.** OFDM's search runs first, and read
+  strong CPM audio as a header (0.25-0.29) in 5 of 40 bursts at MPG +10 dB.
+  Below the suspect score (0.36), a CPM lock now wins.
+- **Search CPU, same results to 1e-14:**
+  - `sync.detection_stat`: one FFT of the buffer, then one inverse FFT per
+    CFO bin. With the FFT length a multiple of 640, each bin is a whole-bin
+    roll of the template's spectrum.
+  - The repeat products are one lagged product, and the preamble template
+    is cached per band.
+  - `cpm.detect` mixes once per CFO fraction, not once per fraction and
+    timing phase.
+  - Receiver idle: OFDM 11.8% -> 6.2% of a core, with CPM 20.5% -> 11.1%.
+    The test suite runs in 47 s, down from 62.
+  - Tried and dropped: a strided noise quantile. It moved the noise level
+    by +-4%, and the minimum over bins then biases toward false alarms.
+- **CPM late detection: no headroom.** Spread sync over the whole burst
+  locked no more bursts than the early lock on MPG and MPP (fsk8r50,
+  fsk16r25, fsk32r62; -4 to +2 dB). MPG's 0.1 Hz fades outlast a burst:
+  what the early lock misses, the rest of the burst misses too.
+
+- **c8r50 locked a period late.** Its front is a 6-symbol Costas array
+  tiled 4x, so a lock one tile late still matched. It happened in 3-8% of
+  fsk8r50-r1/3 bursts at MPP -3 dB, where the header's first symbols stood
+  in for the last tile. `cpm.find` now reads the header at each whole-period
+  alignment and keeps the best. fsk8r50-r1/3's MPP 10% point went from -1.3
+  to -4.9 dB.
+- **Ladder study** (`scripts/ladder_study.py`, page `scripts/ladder_page.py`):
+  - All 48 modes' 10% points, measured on the smallest ARQ data burst
+    (control plus one data codeword) through the ARQ's receiver. Results in
+    `runs/ladder_10pct.csv`.
+  - On MPP, the 1200 Hz modes are ~4 dB behind 500 Hz ones with the same
+    codes: ack-4f +1.4 vs n10-ack-4f -2.2 dB. Their 96 ms header against
+    n10's 240 ms.
+  - On each CPM grid, r1/3 and r1/2 reach about the same point (fsk32r62
+    AWGN -7.9 vs -7.8 dB). The 20 B control codeword (polar, rate ~1/2)
+    limits CPM bursts, not the data code.
+
+## Second header copy on the 1200 and 2400 Hz bands (2026-09-25)
+
+TLDR: +16-18% on MPP, no measurable cost at the top. Protocol version 11.
+
+- **Why:** on MPP, nearly all missed bursts decoded the preamble fine and
+  failed at the 4-symbol (96 ms) header. Replies failed the same way (8 of
+  9 ack-4f failures). The 500 Hz header is 10 symbols and was fine.
+- **Study** (`scripts/header_diversity.py`, 2000 bursts a cell): a second
+  copy spaced 1-4 frames later cut 2400 Hz header losses 3-4x on MPP and
+  MPD, and wrong headers accepted on 1200 Hz 2-4x. An 8-symbol contiguous
+  header did clearly worse; MPG barely changed (slow fades).
+- **Design:**
+  - The copy is a frame of its own: pilot, the 4 header symbols, the first
+    again. It sits after data frame 2, or after the last on a shorter burst.
+    The pilot grid stays regular for the equalizer.
+  - The receiver adds the copy's LLRs to the first copy's. It keeps a
+    decode only if the burst it describes carries the copy where it was
+    read.
+  - A streaming receiver commits on the first copy at a score of 0.45 or
+    more, and otherwise waits for the second.
+  - The coarse CFO estimate uses the copy's known symbols too. Without
+    that, a burst whose first copy was lost read its header but lost its
+    data.
+  - Costs 144 ms per burst.
+- **10% points** (`runs/ladder_10pct.csv`; before in
+  `runs/ladder_10pct_before_hdrcopy.csv`). MPP and MPD improved 2.5-5 dB for
+  the robust modes, e.g. ack-4f MPP +1.4 -> -2.8 and MPD +2.7 -> -1.5;
+  qpsk-r1/5 MPD +5.1 -> +0.4. High-rate modes moved within +-0.5 dB.
+- **Loss study,** shift+cpm, 12 seeds x 600 s, bps:
+
+  | Cell | Before | With copy |
+  |---|---|---|
+  | MPG -4 dB | 67 ± 4 | 77 ± 5 |
+  | MPG 0 dB | 219 ± 8 | 227 ± 10 |
+  | MPG +8 dB | 865 ± 34 | 919 ± 42 |
+  | MPP -4 dB | 56 ± 3 | 65 ± 3 |
+  | MPP 0 dB | 226 ± 6 | 266 ± 8 |
+
+  Missed data bursts on MPP: 16.3% -> 7.6% (0 dB), 19.1% -> 11.5% (-4 dB).
+- **Pending:** outcome model v3 predates the copy, so its P(usable) for
+  robust w/w48 modes is now pessimistic. Refresh the outcome data and
+  retrain.
+
+## Outcome model v4: better calibrated offline, worse in sessions (2026-09-25)
+
+TLDR: retraining on post-header-copy data lowered session throughput by up
+to 57%. v3 stays installed.
+
+- **Result:** loss study, shift+cpm, 12 seeds x 600 s, bps:
+
+  | Cell | v3 (installed) | v4 (30k new) | v4b (84k, stale labels masked) | v4b + evidence-weighted bias |
+  |---|---|---|---|---|
+  | MPG -4 dB | 77 ± 5 | 67 ± 4 | 65 ± 5 | 53 ± 4 |
+  | MPG 0 dB | 227 ± 10 | 207 ± 7 | 203 ± 13 | 168 ± 10 |
+  | MPG +8 dB | 919 ± 42 | 870 ± 27 | 864 ± 37 | 924 ± 29 |
+  | MPP -4 dB | 65 ± 3 | 60 ± 4 | 28 ± 3 | 29 ± 4 |
+  | MPP 0 dB | 266 ± 8 | 212 ± 8 | 191 ± 9 | 176 ± 11 |
+
+- **What goes wrong:** v4 moves the data mode up.
+  - At MPP 0 dB it sends w48-qpsk-r1/3, where 3-5% of first-transmission
+    codewords decode, and w48-64l-r7/12. v3 sent w48-qpsk-r1/5 (76%).
+  - A session trace: nearly every measurement is of the peer's short
+    replies, reading -3.3 to +4.4 dB at a true 0 dB. At +2 to +4 dB, v4b
+    predicted P(codeword | usable) ~0.99 for w48-qpsk-r1/3; its bursts then
+    decoded 1 of 18.
+- **Why the offline data doesn't show it:** the same conditioning offline
+  (w48-qpsk-r1/3, MPP, measured +1..+4 dB on a 1200 Hz reply) decoded 90%
+  of codewords in usable bursts, at a median true SNR of 1.4 dB.
+  - The model is right about the average burst behind such a reading under
+    the training prior: SNR uniform -8..22 dB.
+  - A session held at 0 dB is that prior's pessimistic tail, and this mode
+    is on its steep slope there: 5-14% at 0 dB against ~30% at 1.4 dB.
+  - v3 did better because its pre-copy data made w48 look risky. It was
+    right for the wrong reason.
+- **The online bias didn't fix it.** Updating the codeword bias per
+  codeword (the binomial gradient, rate 0.25, clamp 8) instead of per burst
+  (step 1, clamp 3) made the low cells worse.
+- **Files:** `runs/outcome_data_v4.csv`, `runs/outcome_predictor_v4*.npz`,
+  `runs/cpm_eval_shift_v4*.csv`. `scripts/train_outcome.py` now takes
+  several CSVs and `--stale-header` (masks pre-copy w/w48 burst labels).
+
+## Outcome model v5: trained on what sessions see, as an ensemble (2026-09-25)
+
+TLDR: +24-27% on MPG at 0 and +8 dB, +9% at -4 dB (MPG and MPP), within
+noise at MPP 0 dB. Installed: `outcome_predictor.npz` = v5e.
+
+- **Session data** (`scripts/session_data.py`): 2903 real-modem ARQ
+  sessions of 300 s, 134,803 rows (`runs/session_data.csv`).
+  - Each session draws a channel kind (random Doppler/delay included), SNR
+    uniform -8..22 dB drifting slowly (~1% far outside), and a 500 Hz cap a
+    quarter of the time.
+  - A row is a burst that followed a measurement: the receiver's inputs at
+    its last recommendation, and what the burst did. These are the
+    conditions the shifter really sees: mostly short replies, a SNR that
+    holds still, true gaps.
+  - 20% of data and reply recommendations are a random allowed mode and
+    size, so it isn't only the shifter's own picks. Control is never
+    duplicated, so burst labels mean what the model predicts.
+- **Training mix:** sessions plus every offline set (v2, v3 with their
+  pre-copy w/w48 burst labels masked, v4). The offline sets' random
+  candidates and far-SNR cases keep coverage wide.
+- **Ensemble:** 5 members, each on a bootstrap of the training samples,
+  probabilities averaged (`train_outcome.py --seed`, `--ensemble`;
+  `predictor.OutcomeEnsemble`). 37 us per prediction against 4 us for one.
+- **Out-of-range probes** (`scripts/ood_probe.py`): given contradictory
+  measurements (20 dB SNR, MI as at -5 dB), the top-order w48 modes get
+  0.36 (v3: 0.88). A 1-frame measurement at 30 dB still gets 0.97-0.99 for
+  them.
+- **Loss study,** shift+cpm, 12 seeds x 600 s, bps:
+
+  | Cell | v3 | v5a (sessions + v4) | v5b (sessions + all) | v5e (v5b x 5, installed) |
+  |---|---|---|---|---|
+  | MPG -4 dB | 77 ± 5 | 77 ± 5 | 70 ± 4 | 84 ± 6 |
+  | MPG 0 dB | 227 ± 10 | 278 ± 15 | 286 ± 12 | 282 ± 14 |
+  | MPG +8 dB | 919 ± 42 | 1102 ± 32 | 1137 ± 21 | 1164 ± 28 |
+  | MPP -4 dB | 65 ± 3 | 70 ± 3 | 69 ± 3 | 71 ± 2 |
+  | MPP 0 dB | 266 ± 8 | 227 ± 9 | 249 ± 10 | 252 ± 7 |
+
+- **Left:** at MPP 0 dB v5b still sent w48-qpsk-r1/3 40 times at 2% of
+  codewords decoded.
+- **Also:** the shifter predicts every candidate with `gap_s` = 2.5 s. A
+  reply follows the recommender's own data burst, so its true gap is that
+  burst's length plus turnarounds (the session data holds true gaps). A
+  small mismatch for reply modes.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX

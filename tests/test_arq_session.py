@@ -31,7 +31,7 @@ class Policy:
     def rv_cycle(self, m):
         return MODES[m][1]
 
-    def connect_mode(self, cap):
+    def connect_mode(self, cap, tries=0):
         return "m46"  # a connect frame (28 B) in one control codeword
 
     def airtime(self, m, n_cw):
@@ -125,3 +125,27 @@ def test_dead_link_closes_both_within_bound(seed):
     assert "link" in r["a"].close_reason and "link" in r["b"].close_reason
     assert r["t"] <= 20.0 + S.LINK_LOST_S + 5
     assert r["collisions"] == 0
+
+
+def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
+    """A lost CONNECT is retried in ROBUST_CONNECT; the callee answers in
+    the mode the CONNECT came in (MPP -4 dB: 9 of 12 loss-study sessions
+    never connected when every try went in qpsk-r1/5)."""
+    from data2g.arq import policy as G
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    assert first.submode == G.CONNECT[2]
+    a.on_tx_end(first, 2.0)  # lost: nobody hears it
+    t, retry = 2.0, None
+    while retry is None and t < 60:
+        t = max(t + 0.1, a.next_event() or t)
+        retry = a.poll(t)
+    assert retry is not None and retry.submode == G.ROBUST_CONNECT
+    a.on_tx_end(retry, t + 4.2)
+    b.on_rx(FakeRx(retry, random.Random(3), 0.0, {}, {"mismatch": 0}), t + 4.5)
+    ack = b.poll(t + 4.5)
+    assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT

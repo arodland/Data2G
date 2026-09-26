@@ -1,0 +1,17 @@
+band,channel,sync_threshold_db
+w,awgn,-7.0
+w,mpg,1.75
+w,mpp,3.5
+w,mpd,5.25
+n10,awgn,-9.5
+n10,mpg,4.25
+n10,mpp,0.0
+n10,mpd,2.25
+n4,awgn,-9.75
+n4,mpg,3.25
+n4,mpp,0.0
+n4,mpd,1.75
+w48,awgn,-3.75
+w48,mpg,5.25
+w48,mpp,5.5
+w48,mpd,7.75

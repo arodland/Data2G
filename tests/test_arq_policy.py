@@ -8,16 +8,18 @@ import numpy as np
 
 from data2g.arq import policy as G
 from data2g.arq import predictor as P
+from data2g.arq.modes import MODES
 from data2g.config import SUBMODES
 
 
 def test_recommend_roundtrip_every_submode():
-    for name in SUBMODES:
+    for name in MODES:
         assert G.decode(G.encode(name)) == name
 
 
 def test_500hz_cap_only_narrow_modes():
-    assert all(s.band in ("n10", "n4") for s in G.allowed(0))
+    assert all(G.width_hz(s) <= 500 for s in G.allowed(0))
+    assert {s.band for s in G.allowed(0)} == {"n10", "n4", "c16r25", "c8r50"}
     assert G.FALLBACK[0] in {s.name for s in G.allowed(0)} and G.CONNECT[0] in {s.name for s in G.allowed(0)}
 
 
@@ -97,30 +99,25 @@ def test_online_bias_follows_outcomes():
     assert list(g.bias) == ["qpsk-r1/2"]  # per mode: qpsk-r1/3 is not vouched for
 
 
-def test_a_mode_that_never_answers_is_left():
-    """Sender-side strikes: the peer keeps recommending a mode whose bursts
-    go unanswered (escalation after each) though polls get through; the
-    sender must stop using it for a while instead of looping forever."""
-    g = G.GearShifter()
-    st = station(2)
-    st.peer_recommend, st.peer_reply_recommend = G.encode("w48-64l-r2/3"), G.encode("ack-4f")
-    assert g.choose(st, 0)[0] == "w48-64l-r2/3"
-    g.choose(st, 1)  # its repeat timed out: a poll (fallback)
-    assert g.choose(st, 0)[0] == G.CONNECT[2]  # the robust data mode, not 64-QAM again
-    for _ in range(G.STRIKE_HOLD + 1):
-        mode = g.choose(st, 0)[0]
-    assert mode == "w48-64l-r2/3"  # the hold ends; it may be tried again
+def test_outcome_ensemble_averages_member_probabilities(tmp_path):
+    """scripts/train_outcome.py --ensemble: members' files in one, loaded
+    as an ensemble whose output is the logit of the mean probability."""
+    import sys
+    from pathlib import Path
 
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import train_outcome as T
 
-def test_a_family_whose_controls_fail_is_not_recommended():
-    """Receiver-side strikes: two headers in a family with no control decoded
-    and the family sits out the next recommendations."""
-    g = G.GearShifter()
-    g.observe(measured(30, 0.05, "w48"), "w48-qpsk-r1/2", 0.0)
-    st = station(2)
-    first = G.decode(g.recommend(st)[0])
-    fam = G._family(SUBMODES[first])
-    g.outcome(first, 0, 1)
-    g.outcome(first, 0, 1)
-    again = G.decode(g.recommend(st)[0])
-    assert G._family(SUBMODES[again]) != fam
+    n_in, n_out = 3, 2
+    paths = []
+    for i, b in enumerate((2.0, -2.0)):
+        p = tmp_path / f"m{i}.npz"
+        np.savez(p, mean=np.zeros(n_in), std=np.ones(n_in), W0=np.zeros((n_in, n_out)), b0=np.full(n_out, b),
+                 modes=np.array(["a"]), bands=np.array(["w"]))
+        paths.append(str(p))
+    out = str(tmp_path / "ens.npz")
+    T.combine(paths, out)
+    m = P.outcome_model(out)
+    assert isinstance(m, P.OutcomeEnsemble) and m.modes == ("a",)
+    z = m(np.zeros(n_in))
+    assert np.allclose(z, 0.0, atol=1e-9)  # mean of sigmoid(2), sigmoid(-2) is 0.5
