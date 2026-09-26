@@ -536,10 +536,42 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None) -> dict:
     alone, so a streaming receiver knows how much audio to wait for:
     {spec, n_cw, start (first preamble sample), end (one past the closing
     pilot)}. The burst may run past the end of `x`. Raises SyncError."""
-    hd, _, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept)
+    hd, acq, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept)
     spec, n_cw = hd["hdr"]
     return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
-                end=burst_end(hd["p0"], spec, n_cw))
+                end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)
+
+
+# a burst's frame pilots, n_pairs consecutive pairs: pilot_coherence's mean
+# over them at or under this is noise (each band's 99th percentile on noise:
+# 1/sqrt(carriers) scaled). Real bursts: 0-2% under it at 0 dB, 10-16% at
+# -4 dB; locks on noise: 99% under within 4 pairs (0.6 s).
+PILOT_PAIRS = 4
+PILOT_NOISE = {"w": 0.30, "n10": 0.44, "n4": 0.68, "w48": 0.20}
+
+
+def pilot_coherence(x: np.ndarray, lock: dict, n_max: int = 8, latest: bool = False) -> list[float]:
+    """For a streaming lock (find_burst's dict, same sample origin as x):
+    per consecutive pair of the frame pilots already in x (the first n_max
+    pairs, or with `latest` the newest), |sum over carriers of y_f
+    conj(y_f-1)| / sqrt(energies). A real burst's pilots repeat through a
+    slowly varying channel; a false lock's 'pilots' are noise or someone
+    else's data, near 1/sqrt(carriers)."""
+    spec = lock["spec"]
+    b = ofdm.band(spec.band)
+    total = frames_on_air(spec, lock["n_cw"]) + 1  # frame pilots and the closing one
+    avail = sum(lock["p0"] + f * FRAME_SAMPLES + NCP + M <= len(x) for f in range(total))
+    f1 = avail if latest else min(avail, n_max + 1)
+    f0 = max(0, f1 - n_max - 1)
+    if f1 - f0 < 2:
+        return []
+    lo = max(0, lock["p0"] + f0 * FRAME_SAMPLES - 2 * NSYM)
+    hi = lock["p0"] + (f1 - 1) * FRAME_SAMPLES + 3 * NSYM
+    z = freq_correct(to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
+    y = [b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + NCP, DEMOD_BACKOFF) for f in range(f0, f1)]
+    return [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
+                  / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
+            for f in range(1, len(y))]
 
 
 def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None) -> dict:

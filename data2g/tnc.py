@@ -186,13 +186,52 @@ class Receiver:
         self.buf = np.zeros(0)
         self.off = 0  # stream sample index of buf[0]
         self.pending = None
+        self.pilots_ok = False
+        self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
+        self._ps, self._pn = 0.0, 0  # the block being summed
         self.fresh = self.HOP  # samples fed since the last preamble search (search at once)
         self.last_start = -1  # stream start of the last burst handled (not to be found again)
 
     @property
     def busy(self) -> bool:
-        """A burst is being received (channel busy)."""
+        """A burst is being received (our own replies wait for it)."""
         return self.pending is not None
+
+    @property
+    def channel_busy(self) -> bool:
+        """What the host reports as BUSY: a burst is being received and its
+        frame pilots say it is really there. A false lock (a weak header off
+        noise or a missed burst's data) held BUSY for the whole length it
+        claimed, up to 12 s, and a VARA client doesn't transmit under BUSY."""
+        return self.pending is not None and (self.pilots_ok or self.on_air)
+
+    # BUSY by energy too: in-band power over the recent noise floor (the 5th
+    # percentile of 0.1 s block powers over two minutes, so a long burst does
+    # not lift it). A false lock whose pilots are absent keeps BUSY only while
+    # something is on air: a real burst whose preamble was missed (its frame
+    # grid is not the false lock's), or another station.
+    ON_AIR_DB = 3.0
+    FLOOR_BLOCKS = 1200  # 0.1 s blocks: two minutes
+
+    @property
+    def on_air(self) -> bool:
+        if len(self.powers) < 50:
+            return False
+        floor = np.percentile(self.powers, 5)
+        return float(np.mean(list(self.powers)[-3:])) > floor * 10 ** (self.ON_AIR_DB / 10)
+
+    def _check_pilots(self):
+        """pilots_ok from the newest PILOT_PAIRS frame pilot pairs: under the
+        band's noise level, nothing is there (any more)."""
+        p = self.pending
+        if p.get("family") == "cpm" or "p0" not in p:
+            return
+        c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
+        if len(c) >= modem.PILOT_PAIRS:
+            ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
+            if ok != self.pilots_ok:
+                log.info("%s burst: pilots %s (coherence %.2f)", p["spec"].name, "back" if ok else "gone", np.mean(c))
+            self.pilots_ok = ok
 
     def _trim(self, n: int):
         self.off += len(self.buf) - n if n < len(self.buf) else 0
@@ -224,13 +263,14 @@ class Receiver:
             return False
         if q["score"] < p["score"] + self.SUPERSEDE_MARGIN:
             return False
-        q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off)
+        q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
         log.info("%s header (score %.2f) superseded by %s (score %.2f)", p["spec"].name, p["score"],
                  q["spec"].name, q["score"])
         if not whole:  # completing: the caller has already handled p
             out.append(("burst", {"header": p, "rx": None,
                                   "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
         self.pending = q
+        self.pilots_ok = q["score"] >= self.SUSPECT_SCORE
         out.append(("header", q))
         return True
 
@@ -249,6 +289,14 @@ class Receiver:
         starts, then ("burst", {"header": that dict, "rx": modem.receive's
         dict or None if it was lost, "audio": the segment received}). The dicts' start/end are stream
         sample indices (samples fed since reset)."""
+        # 0.1 s block powers for the noise floor (feeds may be any size)
+        sq = np.asarray(x, dtype=np.float64) ** 2
+        while len(sq):
+            take = min(len(sq), FS // 10 - self._pn)
+            self._ps, self._pn, sq = self._ps + float(np.sum(sq[:take])), self._pn + take, sq[take:]
+            if self._pn == FS // 10:
+                self.powers.append(self._ps / self._pn)
+                self._ps = self._pn = 0
         self.buf = np.concatenate([self.buf, x])
         self.fresh += len(x)
         out = []
@@ -278,14 +326,20 @@ class Receiver:
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window
                 self.pending = dict(p, start=p["start"] + self.off, end=p["end"] + self.off)
+                if "p0" in p:
+                    self.pending["p0"] = p["p0"] + self.off
+                # BUSY at once on a clear header; a suspect one waits for its pilots
+                self.pilots_ok = p.get("family") == "cpm" or p["score"] >= self.SUSPECT_SCORE
                 log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS, "sync" if p.get("family") == "cpm" else "header",
                          p["score"])
                 out.append(("header", self.pending))
             p = self.pending
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
-                if self.fresh >= self.HOP and self._supersede(out):
-                    continue
+                if self.fresh >= self.HOP:
+                    self._check_pilots()
+                    if self._supersede(out):
+                        continue
                 break
             if p.get("family") == "cpm":
                 from . import cpm

@@ -129,3 +129,38 @@ def test_a_half_arrived_header_is_waited_for_not_misread():
         heads = [ev for k, ev in events if k == "header"]
         assert heads and all(h["spec"].name == spec.name and h["score"] > 0.9 for h in heads), (
             seed, [(h["spec"].name, round(h["score"], 2)) for h in heads])
+
+
+def test_busy_ends_with_the_signal_not_a_false_headers_claim():
+    """A burst whose preamble was missed reads as false headers claiming up
+    to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
+    host reports) follows the pilots and the in-band energy, so it ends with
+    the signal; the internal hold (Receiver.busy) may run on."""
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+
+    from data2g import hfchannel, modem
+    from data2g.arq import phy as PHY
+    from data2g.arq.engine import Engine
+    from data2g.config import BANDS, FS
+    from data2g.tnc import Receiver
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import outcome_data as O
+
+    rng = np.random.default_rng(1)
+    x = PHY.tx_audio(O.burst("qpsk-r1/2", 20, rng))
+    cut = x[BANDS["w"].preamble_samples + modem.header_samples("w") + 800 + int(rng.integers(0, 3000)):]
+    y = np.concatenate([np.zeros(FS * 20), cut, np.zeros(FS * 12)])
+    y = hfchannel.awgn(y, 20.0, seed=1, s_power=hfchannel.active_power(x))
+    r = Receiver(Engine("W1AW", seed=1).accept)
+    end = FS * 20 + len(cut)
+    busy_after = held_after = 0.0
+    for i in range(0, len(y), FS // 50):
+        r.feed(y[i:i + FS // 50])
+        if i >= end:
+            busy_after += r.channel_busy / 50
+            held_after += r.busy / 50
+    assert busy_after <= 1.0 < held_after, (busy_after, held_after)

@@ -1395,6 +1395,33 @@ noise at MPP 0 dB. Installed: `outcome_predictor.npz` = v5e.
   burst's length plus turnarounds (the session data holds true gaps). A
   small mismatch for reply modes.
 
+## BUSY follows the signal, not a false header's claim (2026-09-25)
+
+- **Problem (on air):** a false OFDM lock (a weak header read off noise, QRM
+  or a burst whose preamble was missed) reported BUSY for the whole length
+  it claimed, up to 12 s. A VARA client doesn't transmit under BUSY.
+- **Now:** the host reports `Receiver.channel_busy`: a burst is pending and
+  either its frame pilots say it is there, or the channel is on air.
+  - **Pilots:** `modem.pilot_coherence`, over the newest 4 pairs of
+    consecutive frame pilots (~0.6 s), against each band's noise level
+    (`PILOT_NOISE`: 99th percentile on noise, scaled by 1/sqrt(carriers)).
+    Real bursts stay over it: 0-2% dip under at 0 dB, 10-16% at -4 dB.
+  - **On air:** in-band power over the noise floor by 3 dB. The floor is the
+    5th percentile of 0.1 s block powers over two minutes. This keeps BUSY
+    through a real burst whose preamble was missed: its frame grid isn't the
+    false lock's, so its pilots don't show.
+  - A suspect header (score < 0.36) raises BUSY only once its pilots confirm
+    it. A clear one raises it at once, as before.
+- **Measured** (20 ms feeds, like an audio callback):
+  - After a missed-preamble burst ends, BUSY drops within 0.0-0.7 s. The
+    internal hold ran up to 5 s past the audio, on false claims.
+  - 6 min of noise: no false lock, no BUSY.
+  - Real bursts at 0 and +10 dB: BUSY held throughout.
+- **Unchanged:** the engine's own hold (`Receiver.busy`, a reply waits for
+  a pending burst) still trusts the claim, so its own replies don't key over
+  a weak real burst. BUSY is still reported only while a Data2G lock is
+  pending; it is not a general carrier detect.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX

@@ -162,8 +162,8 @@ class Host:
             if ptt and e.tx and e.tx[0].submode != self._mode:
                 self._mode = e.tx[0].submode
                 self.out_cmd.append(f"MODE {self._mode}")
-        if e.receiver.busy != self._busy:
-            self._busy = e.receiver.busy
+        if e.receiver.channel_busy != self._busy:
+            self._busy = e.receiver.channel_busy
             self.out_cmd.append("BUSY ON" if self._busy else "BUSY OFF")
         # BUFFER: bytes still waiting after the next burst goes. VARA
         # clients throttle on it: Pat blocks writes while BUFFER >= 7x its
