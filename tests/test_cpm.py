@@ -71,3 +71,13 @@ def test_a_strong_cpm_burst_is_not_lost_to_a_weak_ofdm_header():
                                     fading_preset="mpg", seed=seed)
         r = receive_any(y, lead=FS)
         assert r is not None and r["spec"].name == "fsk8r50-r1/2", (seed, r and r["spec"].name)
+
+
+def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
+    """detect's fine timing (+-T/8) can move a coarse lock at sample 0 to a
+    negative start. No tile alignment is then left to read, and find's max()
+    over none crashed the host on air."""
+    g = cpm.GRIDS["c8r50"]
+    monkeypatch.setattr(cpm, "detect", lambda *a, **k: (1.0, -g.T // 8, 0.0))
+    x = np.random.default_rng(0).normal(0, 0.05, 40 * g.T)
+    assert cpm.find(g, x) is None

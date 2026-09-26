@@ -486,8 +486,11 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
     # MPP -3 dB. The alignment whose header reads best is the burst's.
     period = len(costas(g.m)) * g.T
     tiles = len(preamble_pattern(g)) * g.T // period
-    s0, (spec, n, d, hs, h2) = max(((s, read_header(g, x, s, cfo, copies=1)) for s in
-                                    (s0 - k * period for k in range(tiles)) if s >= 0), key=lambda c: c[1][3])
+    starts = [s for s in (s0 - k * period for k in range(tiles)) if s >= 0]
+    if not starts:
+        return None  # fine timing moved a lock at x's first sample before it: its front is cut off
+    s0, (spec, n, d, hs, h2) = max(((s, read_header(g, x, s, cfo, copies=1)) for s in starts),
+                                   key=lambda c: c[1][3])
     if _peak_ratio(g, x, s0, cfo) < PEAK_RATIO:
         return None  # a burst's data or a later sync block, its front missed
     if threshold is None and hs < HEADER_THRESHOLD[g.name]:
