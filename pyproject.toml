@@ -17,7 +17,6 @@ tnc = ["torch>=2.13.0", "pyaudio>=0.2.13"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
-data2g-tnc = "data2g.tnc:main"
 data2g-host = "data2g.host:main"
 
 [build-system]

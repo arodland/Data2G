@@ -284,3 +284,35 @@ def test_a_session_in_cpm_modes():
     assert link(a, b, 10, 240, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=14)
     assert bytes(got) == up
     assert sent.count("fsk32r62-r1/2") >= 2, sent
+
+
+def test_kiss_and_vara_personalities_share_one_engine():
+    """One engine serves both: a KISS frame crosses; an ARQ session still
+    connects and delivers; a KISS frame queued during it waits for the
+    session to end (ARQ first; KISS only between sessions)."""
+    import sys
+    from pathlib import Path
+
+    from data2g.kisslink import KissLink
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_kiss import frame
+
+    a = Engine("W1AW", seed=21, kiss=KissLink())
+    b = Engine("K2XYZ", seed=22, kiss=KissLink())
+    ui = frame("APRS", "W1AW", 0x03, b"!beacon")
+    a.kiss.enqueue(ui)
+    assert link(a, b, 12, 30, lambda: ui in b.kiss_rx)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    late = frame("K2XYZ", "W1AW", 0x03, b"queued during the session")
+    a.kiss.enqueue(late)
+    up = np.random.default_rng(23).bytes(300)
+    a.session.write(up)
+    got = bytearray()
+    assert link(a, b, 12, 120, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=1)
+    assert bytes(got) == up and late not in b.kiss_rx  # held while the session runs
+    a.session.disconnect()
+    assert link(a, b, 12, 90, lambda: late in b.kiss_rx, seed=2)
+    assert a.session.state == S.CLOSED

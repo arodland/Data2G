@@ -34,7 +34,8 @@ def test_commands_over_tcp(tmp_path):
     a = SimpleNamespace(mycall="W1AW", host="127.0.0.1", command_port=18310, sample_rate=48000, output_volume=0.0,
                         rigctld_host="localhost", rigctld_port=0, ptt_on_delay_ms=100, ptt_off_delay_ms=0,
                         min_header_score=0.0, record_dir=tmp_path, input_device=None, output_device=None,
-                        buffer_credit=-1)
+                        buffer_credit=-1, vara=True, kiss=True, kiss_port=18320, kiss_address="127.0.0.1",
+                        kiss_bw=2400, broadcast_mode=None)
     stop = threading.Event()
     th = threading.Thread(target=host.serve, args=(a, FakePA(), stop), daemon=True)
     th.start()
