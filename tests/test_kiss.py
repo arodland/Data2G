@@ -106,3 +106,17 @@ def test_first_transmission_success_is_the_target():
         over_air(b, a, 0.0, seed=20 + k)
         t[0] += 3
     assert got_n == 4
+
+
+def test_broadcast_mode_option():
+    import pytest
+
+    a, b = KissLink(broadcast="n4-qpsk-r1/3"), KissLink()
+    f = frame("APRS", "W1AW", 0x03, b"!beacon")
+    a.enqueue(f)
+    burst, got = over_air(a, b, seed=8)
+    assert burst.submode == "n4-qpsk-r1/3" and got == [f]
+    with pytest.raises(ValueError):
+        KissLink(cap=0, broadcast="w48-qpsk-r1/5")  # 2400 Hz under a 500 Hz cap
+    with pytest.raises(ValueError):
+        KissLink(broadcast="no-such-mode")

@@ -118,8 +118,13 @@ class KissLink:
     me: set = field(default_factory=set)  # hashes this TNC has sent as
     clock: callable = time.monotonic
     n_sent: int = 0
+    broadcast: str | None = None  # the robust broadcast mode (None: BROADCAST[cap])
 
     def __post_init__(self):
+        self.broadcast = self.broadcast or BROADCAST[self.cap]
+        s = MODES.get(self.broadcast)
+        if s is None or s not in G.allowed(self.cap):
+            raise ValueError(f"broadcast mode {self.broadcast!r}: not a mode within the bandwidth cap")
         self._stub = SimpleNamespace(cap=self.cap, rx=SimpleNamespace(buf={}), chat=False, peer_chat=False,
                                      peer_queued=0)
 
@@ -137,7 +142,7 @@ class KissLink:
                 mode = G.decode(p.report[0] >> 2)
                 if mode is not None and MODES[mode] in G.allowed(self.cap):
                     return mode, p.report[0] & 3
-        return BROADCAST[self.cap], len(G.SIZE_S) - 1
+        return self.broadcast, len(G.SIZE_S) - 1
 
     def _control(self, spec, sender: int) -> list[bytes]:
         """Control codeword payloads: header and as many fresh reports as fit."""
@@ -169,7 +174,7 @@ class KissLink:
         if sender:
             self.me.add(sender)
         ctl = self._control(spec, sender)
-        seconds = G.SIZE_S[hint] if mode != BROADCAST[self.cap] else BROADCAST_S
+        seconds = G.SIZE_S[hint] if mode != self.broadcast else BROADCAST_S
         pb = codes.payload_bytes(spec)
         # the size class is a preference: a burst grows to carry its first frame
         # (a 256-byte PACLEN I frame outgrew a 12 s qpsk-r1/5 burst), up to what

@@ -488,7 +488,7 @@ class TNC:
         from .kisslink import KissLink
 
         self.rate, self.a, self.pa = a.sample_rate, a, pa
-        self.link, self.lock = KissLink(cap=a.cap), threading.Lock()
+        self.link, self.lock = KissLink(cap=a.cap, broadcast=a.broadcast_mode), threading.Lock()
         self.stop = threading.Event()
         self.transmitting = threading.Event()
         self.rx_reset = threading.Event()  # set by TX, acted on by the RX thread
@@ -584,8 +584,8 @@ class TNC:
         for t in threads:
             t.start()
         self.inp.start_stream()
-        log.info("KISS on %s:%d; bandwidth cap %d Hz", self.a.kiss_tcp_address, self.a.kiss_tcp_port,
-                 {0: 500, 2: 2400}[self.a.cap])
+        log.info("KISS on %s:%d; bandwidth cap %d Hz; broadcasts in %s", self.a.kiss_tcp_address,
+                 self.a.kiss_tcp_port, {0: 500, 2: 2400}[self.a.cap], self.link.broadcast)
         while not self.stop.wait(0.5):
             pass
         log.info("shutting down")
@@ -627,6 +627,10 @@ def main():
     ap.add_argument("--log-level", default="INFO",
                     choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"])
     ap.add_argument("--bw", type=int, choices=(2400, 500), default=2400, help="bandwidth cap, Hz")
+    ap.add_argument("--broadcast-mode", metavar="MODE",
+                    help="mode for UI frames, non-AX.25 and unreported stations (default: qpsk-r1/5, "
+                         "n10-qpsk-r1/5 with --bw 500; --list-modes)")
+    ap.add_argument("--list-modes", action="store_true", help="modes within --bw, narrowest first")
     ap.add_argument("--min-header-score", type=float, default=0.0,
                     help="header match floor over the modem's own, 0..1")
     ap.add_argument("--input-device", help="index or name substring (default: system default)")
@@ -642,6 +646,18 @@ def main():
     ap.add_argument("--ptt-off-delay-ms", type=int, default=0, help="after audio, before unkeying")
     a = ap.parse_args()
     a.cap = {2400: 2, 500: 0}[a.bw]
+    if a.list_modes:
+        from .arq import policy as G
+
+        for s in sorted(G.allowed(a.cap), key=lambda s: (G.width_hz(s), s.name)):
+            print(f"{s.name:18s} {G.width_hz(s):5.0f} Hz  {codes.payload_bytes(s):4d} bytes/codeword")
+        return
+    if a.broadcast_mode is not None:
+        from .arq import policy as G
+        from .arq.modes import MODES
+
+        if a.broadcast_mode not in MODES or MODES[a.broadcast_mode] not in G.allowed(a.cap):
+            ap.error(f"--broadcast-mode {a.broadcast_mode}: not a mode within {a.bw} Hz (--list-modes)")
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(message)s")
 
     import pyaudio

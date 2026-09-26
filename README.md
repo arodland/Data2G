@@ -1437,7 +1437,8 @@ TNC (`--mode` is gone). Link layer: `data2g/kisslink.py`.
     that has repeated it, else the source.
   - A frame goes to its RF next hop: the first digipeater that hasn't
     repeated it, else the destination.
-- **Robust broadcast** (qpsk-r1/5; n10-qpsk-r1/5 under a 500 Hz cap) for UI
+- **Robust broadcast** (`--broadcast-mode`, any mode within the cap; by
+  default qpsk-r1/5, n10-qpsk-r1/5 under a 500 Hz cap; `--list-modes`) for UI
   frames whatever their destination, for non-AX.25, and for stations
   without a fresh report. Connected-mode frames (I, S, U other than UI) to
   a station with a report use the reported mode.
