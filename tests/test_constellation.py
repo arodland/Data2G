@@ -48,3 +48,16 @@ def test_qpsk_fast_llr_is_the_exact_llr(monkeypatch):
     fast = C.llr(y, h, v, C.gray_qam(2))
     monkeypatch.setattr(C, "_QPSK", np.zeros(4))  # the general path
     np.testing.assert_allclose(fast, C.llr(y, h, v, C.gray_qam(2)), atol=1e-9)
+
+
+@pytest.mark.parametrize("m", [4, 6])
+def test_square_qam_axis_llr_is_the_exact_llr(m, monkeypatch):
+    from data2g import constellation as C
+
+    rng = np.random.default_rng(m)
+    y, h = (rng.normal(size=(2, 500)) + 1j * rng.normal(size=(2, 500)))
+    h[:3] = 0  # a dead carrier: every LLR 0 either way
+    v = rng.uniform(0.05, 2, 500)
+    fast = C.llr(y, h, v, C.gray_qam(m))
+    monkeypatch.setattr(C, "_square", lambda m: np.zeros(1))  # the general path
+    np.testing.assert_allclose(fast, C.llr(y, h, v, C.gray_qam(m)), atol=1e-9)

@@ -126,9 +126,11 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
     return S / q.min(), freqs
 
 
-def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None):
+def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: int | None = None):
     """-> (S before noise normalization, each bin's noise level (the
-    NOISE_REF_HZ bins last), the searched hypotheses)."""
+    NOISE_REF_HZ bins last), the searched hypotheses). `levels_from`: the
+    levels from correlation outputs from there on only, by one partition
+    (StreamDetector: a chunk's new outputs, not its overlap with the last)."""
     band = band or ofdm.band("w")
     repeats = repeats or band.spec.preamble_repeats
     t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
@@ -139,7 +141,12 @@ def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None):
     q = np.empty(len(freqs) + len(NOISE_REF_HZ))
     for i, c in enumerate(_repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
         p = np.abs(c) ** 2
-        q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
+        if levels_from is None:
+            q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
+        else:
+            pn = p[levels_from:]
+            k = int(NOISE_QUANTILE * (len(pn) - 1))
+            q[i] = np.partition(pn, k)[k] / -np.log(1 - NOISE_QUANTILE)
         q[i] = max(q[i], 1e-12 * np.mean(p) + 1e-300)  # silence-only buffers (tests)
         if i < len(freqs):
             d = c[M:] * np.conj(c[:-M])  # each window against the one before it
@@ -180,11 +187,13 @@ class StreamDetector:
         if not len(self.S[0]) and not len(self.tail):
             self.s0 = self.fed
         self.fed += len(z)
+        new = len(z)
         z = np.concatenate([self.tail, z])
         if len(z) < self.span + M:
             self.tail = z
             return
-        S, q, _ = _raw_stat(z, self.band, self.reach)
+        # the level from the new outputs, at least 2000 (0.25 s) of the latest
+        S, q, _ = _raw_stat(z, self.band, self.reach, levels_from=max(0, len(z) - M + 1 - max(new, 2000)))
         self.S = np.concatenate([self.S, S], axis=1)
         self.levels = (self.levels + [q])[-self.CHUNKS:]
         self.tail = z[len(S[0]):]

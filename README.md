@@ -1476,8 +1476,8 @@ PTT:
 
 ## Receiver CPU: incremental search, QPSK LLRs, burst routing (2026-09-26)
 
-TLDR: listening dropped from 14% to 5.4% of a core per host; a Pat exchange's
-busier host from 12.7% to 6.4%. Measured with two hosts under py-spy on a
+TLDR: listening dropped from 14% to 4.3% of a core per host; a Pat exchange's
+busier host from 12.7% to 3.3%. Measured with two hosts under py-spy on a
 PipeWire loopback, an outside process injecting noise (SNR sweeping 25 to
 2 dB), Pat P2P (text, 8 kB and 4 kB attachments; 220-231 s, no bursts lost).
 
@@ -1508,8 +1508,26 @@ PipeWire loopback, an outside process injecting noise (SNR sweeping 25 to
   key claims a burst before KISS tries its keys; KISS gives up after slot 0
   and 1 fail instead of decoding every slot. Soft bits are computed once per
   burst and shared, and one-off decodes are remembered (`ModemRx`).
-- **What's left** (exchange): search while receiving 30% (header reads 12%,
-  the detector feed 10%), idle search 21%, ARQ decodes 14%.
+- **Second round** (listening 5.4% -> 4.3%; the exchange's hosts 4.2/6.4%
+  -> 3.3/2.7%):
+  - A confirmed burst (header >= 0.36 and its frame pilots there, ~0.6 s in)
+    skips the later-header search, which exists for false locks: it was 30%
+    of the exchange. Back-to-back bursts 0.2-0.6 s apart, both received: 478
+    of 480 with and without the skip (`scripts/cpu_profile/search_ab.py`).
+  - The detector keeps only the statistic a search can use (it grew with a
+    long burst in the buffer and was copied every hop: 23% of the exchange).
+  - The delay-support basis of the header's channel smoothing is cached per
+    band and support (its SVD was 7%, once per header read).
+  - Square Gray QAM (16-QAM) LLRs exactly, one axis at a time: the likelihood
+    splits into I and Q, so 4 levels per axis instead of 16 points (2x).
+  - A chunk's noise level from its new correlation outputs (at least 0.25 s),
+    by one partition.
+- **Measuring:** `scripts/cpu_profile/run.sh idle|pat <s> <out>` (two hosts
+  under py-spy on a noisy PipeWire loopback), `analyze.py` on the profiles,
+  `search_ab.py` for detection before/after a receiver change.
+- **What's left** (exchange): OFDM search 25%, polar decodes 11% (a list
+  decoder recursing in torch: exact speedups need care), LDPC 10%, soft bits
+  under KISS 9% (computed once, shared), audio I/O 8%.
 
 ## TODO
 

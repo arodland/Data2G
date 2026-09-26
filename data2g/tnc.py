@@ -183,6 +183,7 @@ class Receiver:
         self.off = 0  # stream sample index of buf[0]
         self.pending = None
         self.pilots_ok = False
+        self.confirmed = False  # the pending burst's header is clear and its pilots are there
         self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
         self._ps, self._pn = 0.0, 0  # the block being summed
         self.fresh = self.HOP  # samples fed since the last preamble search (search at once)
@@ -230,6 +231,7 @@ class Receiver:
         c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
         if len(c) >= modem.PILOT_PAIRS:
             ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
+            self.confirmed = ok and p["score"] >= self.SUSPECT_SCORE
             if ok != self.pilots_ok:
                 log.info("%s burst: pilots %s (coherence %.2f)", p["spec"].name, "back" if ok else "gone", np.mean(c))
             self.pilots_ok = ok
@@ -249,6 +251,9 @@ class Receiver:
                 d.reset()
                 d.fed = self.off
             d.feed(modem.to_baseband(self.buf[d.fed - self.off:]))
+            # no search looks further back than `keep` (the statistic grew
+            # with a long burst in the buffer, and was copied every hop)
+            d.trim(self.off + len(self.buf) - self.keep - d.span)
             n = len(self.buf) - w0 - d.span + 1
             if n <= 0:
                 continue
@@ -311,6 +316,7 @@ class Receiver:
                                   "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
         self.pending = q
         self.pilots_ok = q["score"] >= self.SUSPECT_SCORE
+        self.confirmed = False
         out.append(("header", q))
         return True
 
@@ -377,6 +383,7 @@ class Receiver:
                     self.pending["p0"] = p["p0"] + self.off
                 # BUSY at once on a clear header; a suspect one waits for its pilots
                 self.pilots_ok = p.get("family") == "cpm" or p["score"] >= self.SUSPECT_SCORE
+                self.confirmed = False
                 log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS, "sync" if p.get("family") == "cpm" else "header",
                          p["score"])
@@ -385,7 +392,11 @@ class Receiver:
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
                 if self.fresh >= self.HOP:
                     self._check_pilots()
-                    if self._supersede(out):
+                    # the later-header search is for false locks: a confirmed
+                    # burst skips it (it was 30% of a Pat exchange's CPU)
+                    if self.confirmed:
+                        self.fresh = 0
+                    elif self._supersede(out):
                         continue
                 break
             if p.get("family") == "cpm":
@@ -410,7 +421,7 @@ class Receiver:
             self.last_start = p["start"]
             # a better header inside this burst's span (it was a false lock,
             # and the real one began before it ended) is next, not trimmed away
-            if self._supersede(out, whole=True):
+            if not self.confirmed and self._supersede(out, whole=True):
                 self._trim(len(self.buf) - max(0, self.pending["start"] - LEADIN_SAMPLES - self.off))
                 continue
             # a suspect (possibly false) burst may have claimed an end past a
