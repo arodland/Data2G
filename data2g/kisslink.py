@@ -224,19 +224,20 @@ class KissLink:
                 stream = b"".join(ctl)[4:]
                 reports = [struct.unpack(">HB", stream[3 * j:3 * j + 3]) for j in range(min(k, len(stream) // 3))]
         payloads, ok = [], []
-        first = start if start is not None else 1
-        for i in range(first, n):
+        if start is None:
+            # control lost (or not KISS): slot 1 decoding as KISS data says it's
+            # a KISS burst with a one-codeword control. Otherwise it isn't ours:
+            # scanning every slot here decoded each ARQ burst a second time, with
+            # masks that can't match (13% of a Pat exchange's CPU)
+            if n < 2 or rx.decode(1, data_mask(0, 1, KISS_KEY), 0, None) is None:
+                return None
+            start = 1
+        for i in range(start, n):
             p = rx.decode(i, data_mask(0, i, KISS_KEY), 0, None)
-            if start is None:
-                if p is None:
-                    continue  # still control, or lost: the stream starts at the first data slot decoded
-                start = i
             payloads.append(p or bytes(codes.payload_bytes(r["spec"])))
             ok.append(p is not None)
         from .tnc import unpack
 
-        if c0 is None and not any(ok):
-            return None
         frames, _ = unpack(payloads, ok) if payloads else ([], 0)
         if not sender and frames:
             ax = parse_ax25(frames[0])

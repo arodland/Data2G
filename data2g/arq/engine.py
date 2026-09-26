@@ -203,12 +203,19 @@ class Engine:
                 self.rec.rx(t, ev["audio"], h, r, meas)
             if r is None:
                 continue
-            if self.kiss is not None:
+            rx = PHY.ModemRx(r, self.store)
+            # in a session, its peer's bursts are the likely ones: a control
+            # codeword under the session's key (the station's first decode,
+            # remembered) claims the burst before KISS tries its keys on it
+            # (two failed decodes per ARQ burst: ~10% of a Pat exchange's CPU)
+            st = self.session.station
+            ours = (st is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING)
+                    and rx.decode(0, L.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
+            if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r)
                 if frames is not None:  # a KISS burst: not the session's
                     self.kiss_rx += frames
                     continue
-            rx = PHY.ModemRx(r, self.store)
             if self._cq(rx):
                 continue
             self.session.policy.observe(meas, r["spec"].name, t)

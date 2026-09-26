@@ -115,6 +115,20 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
     """-> S (n_freqs, n_starts): the noise-normalized differential
     statistic per CFO hypothesis and candidate preamble start, and the
     hypotheses (Hz). `repeats`: the band's unless given."""
+    S, q, freqs = _raw_stat(z, band, reach, repeats)
+    # White noise is the same in every bin, so one level for all: the
+    # lowest bin's, from bins the buffer's signal does not reach. Per-bin
+    # levels failed when one burst filled most of the buffer: an n4 burst
+    # (89% of a test buffer) raised every bin overlapping its 4 carriers,
+    # the true CFO's among them, and n10 locked 400 Hz off at 30 dB.
+    # NOISE_REF_HZ bins are for this level only: at +-150 Hz every searched
+    # bin overlaps a narrow burst, noise read high, and n10 mpd lost ~0.4%.
+    return S / q.min(), freqs
+
+
+def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None):
+    """-> (S before noise normalization, each bin's noise level (the
+    NOISE_REF_HZ bins last), the searched hypotheses)."""
     band = band or ofdm.band("w")
     repeats = repeats or band.spec.preamble_repeats
     t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
@@ -131,14 +145,63 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
             d = c[M:] * np.conj(c[:-M])  # each window against the one before it
             S[i] = np.abs(sum(d[PREAMBLE_CP + (r - 1) * M : PREAMBLE_CP + (r - 1) * M + n_out]
                               for r in range(1, repeats)))
-    # White noise is the same in every bin, so one level for all: the
-    # lowest bin's, from bins the buffer's signal does not reach. Per-bin
-    # levels failed when one burst filled most of the buffer: an n4 burst
-    # (89% of a test buffer) raised every bin overlapping its 4 carriers,
-    # the true CFO's among them, and n10 locked 400 Hz off at 30 dB.
-    # NOISE_REF_HZ bins are for this level only: at +-150 Hz every searched
-    # bin overlaps a narrow burst, noise read high, and n10 mpd lost ~0.4%.
-    return S / q.min(), freqs
+    return S, q, freqs
+
+
+class StreamDetector:
+    """detection_stat for a stream, each sample's statistic computed once.
+
+    A streaming receiver searched its whole buffer (1.9 s) every 0.25 s,
+    on three bands: each start's statistic was recomputed ~8 times, and the
+    search was 70-90% of a listening host's CPU. S at a start depends only
+    on the preamble's span of audio after it, and on no carrier phase (the
+    phase cancels in the products), so feeding new baseband audio computes
+    S for the new starts alone. The noise level can't be the whole buffer's
+    quantile any more: each fed chunk's per-bin level is kept, and a bin's
+    level is the median of the last CHUNKS chunks (about the buffer's span),
+    then the lowest bin's as before (detection_stat)."""
+
+    CHUNKS = 8
+
+    def __init__(self, band, reach: float = ACQUIRE_REACH_HZ):
+        self.band, self.reach = band, reach
+        self.span = PREAMBLE_CP + band.spec.preamble_repeats * M
+        self.reset()
+
+    def reset(self):
+        self.tail = np.zeros(0, dtype=np.complex128)  # the last span - 1 samples fed
+        self.S = np.zeros((len(_cfo_grid(self.reach)), 0))
+        self.s0 = 0  # stream index of the start S[:, 0] is for
+        self.fed = 0  # stream index one past the last sample fed
+        self.levels: list = []  # per chunk, each bin's noise level
+
+    def feed(self, z: np.ndarray):
+        """The next baseband samples of the stream (contiguous)."""
+        if not len(self.S[0]) and not len(self.tail):
+            self.s0 = self.fed
+        self.fed += len(z)
+        z = np.concatenate([self.tail, z])
+        if len(z) < self.span + M:
+            self.tail = z
+            return
+        S, q, _ = _raw_stat(z, self.band, self.reach)
+        self.S = np.concatenate([self.S, S], axis=1)
+        self.levels = (self.levels + [q])[-self.CHUNKS:]
+        self.tail = z[len(S[0]):]
+
+    def trim(self, start: int):
+        """Drop the statistic of starts before stream index `start`."""
+        k = min(max(0, start - self.s0), len(self.S[0]))
+        self.S, self.s0 = self.S[:, k:], self.s0 + k
+
+    def stat(self, lo: int, hi: int) -> np.ndarray:
+        """Normalized S for stream starts [lo, hi) (-1 where not computed)."""
+        out = np.full((len(self.S), max(0, hi - lo)), -1.0)
+        a, b = max(lo, self.s0), min(hi, self.s0 + len(self.S[0]))
+        if b > a and self.levels:
+            q = np.median(np.array(self.levels), axis=0).min()
+            out[:, a - lo:b - lo] = self.S[:, a - self.s0:b - self.s0] / q
+        return out
 
 
 def first_path(
@@ -260,19 +323,25 @@ def acquire(
     reach: float = ACQUIRE_REACH_HZ,
     search: tuple[int, int] | None = None,
     band=None,
+    S: np.ndarray | None = None,
 ) -> Acquisition:
     """Find the preamble in baseband signal z (modem.to_baseband output,
     unfiltered: the matched filter is the band filter).
 
     `search` optionally restricts the preamble hunt to a [start, end)
-    sample range (the rest of the signal is still used for frames)."""
+    sample range (the rest of the signal is still used for frames).
+    `S`: detection_stat's statistic for z's starts, precomputed
+    (StreamDetector; -1 marks starts not to search)."""
     band = band or ofdm.band("w")
     if threshold is None:
         threshold = band.spec.preamble_threshold
     n_pre = band.spec.preamble_samples
     if len(z) < n_pre + 2 * M:
         raise SyncError("signal too short")
-    S, freqs = detection_stat(z, band, reach)
+    if S is None:
+        S, freqs = detection_stat(z, band, reach)
+    else:
+        S, freqs = S.copy(), _cfo_grid(reach)
     if search is not None:
         s0, s1 = max(0, int(search[0])), min(S.shape[1], int(search[1]))
         if s1 - s0 < 1:

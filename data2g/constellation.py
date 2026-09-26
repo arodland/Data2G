@@ -37,6 +37,9 @@ def gray_qam(m: int) -> np.ndarray:
     return pts / np.sqrt(np.mean(np.abs(pts) ** 2))
 
 
+_QPSK = gray_qam(2)
+
+
 @lru_cache(maxsize=None)
 def load(name: str) -> np.ndarray:
     if name.startswith("gray-qam"):
@@ -61,6 +64,12 @@ def llr(y: np.ndarray, h: np.ndarray, var: np.ndarray, points: np.ndarray) -> np
     point equally likely. y, h, var share a shape; returns shape + (m,)
     flattened to (..., m) then to one row of bits in symbol order."""
     m = bits_per_symbol(points)
+    if m == 2 and np.allclose(points, _QPSK):
+        # Gray QPSK: each bit rides one axis and the other axis's terms cancel,
+        # so the exact LLR is linear: -4a Re|Im(y conj h) / var (a = 1/sqrt 2).
+        # The general path below took 13% of a Pat exchange's CPU.
+        u = y * np.conj(h) * (-2 * np.sqrt(2) / var)
+        return np.stack([u.real, u.imag], axis=-1).reshape(-1)
     d = -np.abs(y[..., None] - h[..., None] * points) ** 2 / var[..., None]  # (..., 2^m)
     lb = label_bits(m).astype(bool)  # (2^m, m)
     l0 = _lse(np.where(~lb.T, d[..., None, :], -np.inf))

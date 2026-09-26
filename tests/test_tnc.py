@@ -82,13 +82,24 @@ def test_rx_rejects_headers_outside_accept():
             pass
 
 
-def test_a_false_lock_on_data_does_not_cost_the_next_burst():
+def _whole_buffer_search(monkeypatch):
+    """The receiver's old search (every start of the buffer, the buffer's
+    own noise level). The incremental search takes its noise level from the
+    recent audio, so data whose preamble was lost no longer false-locks;
+    these tests need a false lock to test what follows one."""
+    monkeypatch.setattr(tnc.Receiver, "_stats", lambda self, w0=0: None)
+    monkeypatch.setattr(tnc.Receiver, "_searched", lambda self: None)
+
+
+def test_a_false_lock_on_data_does_not_cost_the_next_burst(monkeypatch):
     """Data whose preamble was lost can read as a burst with a random header
     (w floor 0.25: about half the time), claiming up to a long burst's
     length. A real burst arriving meanwhile must still be received: the
     receiver keeps searching and a better header supersedes."""
     from data2g.config import BANDS, LEADIN_SAMPLES
 
+    monkeypatch.setitem(modem.HEADER_MIN_SCORE, "w", 0.25)  # 0.33 now rejects the false locks this needs
+    _whole_buffer_search(monkeypatch)
     spec = SUBMODES["qpsk-r1/2"]
     cut = LEADIN_SAMPLES + BANDS[spec.sync_band].preamble_samples + modem.header_samples(spec.sync_band)
     got_any = 0
@@ -153,6 +164,7 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     import outcome_data as O
 
     monkeypatch.setitem(modem.HEADER_MIN_SCORE, "w", 0.25)
+    _whole_buffer_search(monkeypatch)
     rng = np.random.default_rng(1)
     x = PHY.tx_audio(O.burst("qpsk-r1/2", 20, rng))
     cut = x[BANDS["w"].preamble_samples + modem.header_samples("w") + 800 + int(rng.integers(0, 3000)):]

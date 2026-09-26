@@ -1474,6 +1474,43 @@ PTT:
 - **Not done:** reports only travel inside bursts that carry frames. A
   station that only listens never reports, so traffic to it stays robust.
 
+## Receiver CPU: incremental search, QPSK LLRs, burst routing (2026-09-26)
+
+TLDR: listening dropped from 14% to 5.4% of a core per host; a Pat exchange's
+busier host from 12.7% to 6.4%. Measured with two hosts under py-spy on a
+PipeWire loopback, an outside process injecting noise (SNR sweeping 25 to
+2 dB), Pat P2P (text, 8 kB and 4 kB attachments; 220-231 s, no bursts lost).
+
+- **Profile before:** preamble search was 95% of listening CPU (OFDM 73%,
+  CPM 22%); in the exchange, search while a burst arrived 36%, idle search
+  26%, KISS trying ARQ bursts with its own keys 13%, the exact LLR 13%.
+- **Incremental OFDM search** (`sync.StreamDetector`): the receiver searched
+  its 1.9 s buffer every 0.25 s on three bands, each start's statistic
+  recomputed ~8 times. The statistic at a start depends only on the audio
+  after it (no carrier phase), so each band's detector now computes it once
+  as audio arrives. The noise level is each bin's median over the last 8
+  chunks (then the lowest bin's, as before), not the buffer's quantile.
+  Starts whose whole head has been searched are not searched again, after
+  one more hop (`Receiver.REVISIT`: the old repeated searches rescued a weak
+  preamble now and then).
+  - Detection, same seeds, old vs new: 506 vs 504 of 560 bursts across 7
+    weak cells (ack-4f AWGN -8, MPP -3; qpsk-r1/5 MPG -2; n10-ack-4f AWGN -9,
+    MPP -3; w48-qpsk-r1/5 MPP 2; fsk16r25-r1/2 AWGN -11). 16 min of noise:
+    no header lock either way.
+  - Data whose preamble was lost no longer false-locks: its own audio sets
+    the noise level. Two tests that need such a false lock force the old
+    search (`tests/test_tnc.py`).
+- **CPM search:** only starts not yet searched (`cpm.find(lo, hi)`), and the
+  shift/row loop vectorized: 3.4 -> 1.0 ms per grid per search.
+- **Gray QPSK LLRs in closed form** (`constellation.llr`): the exact LLR is
+  linear for Gray QPSK; same values to 1e-13, ~160x faster.
+- **Burst routing:** in a session, a control codeword under the session's
+  key claims a burst before KISS tries its keys; KISS gives up after slot 0
+  and 1 fail instead of decoding every slot. Soft bits are computed once per
+  burst and shared, and one-off decodes are remembered (`ModemRx`).
+- **What's left** (exchange): search while receiving 30% (header reads 12%,
+  the detector feed 10%), idle search 21%, ARQ decodes 14%.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
