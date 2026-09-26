@@ -1,18 +1,18 @@
-"""KISS TNC for one Data2G submode, after xssfox/freedvtnc2.
+"""KISS TNC for Data2G, after xssfox/freedvtnc2, with mode shifting.
 
-Packets from KISS clients (TCP) go out as Data2G bursts in the submode
-given on the command line; bursts heard in that submode's sync band
-(its preamble and header; any submode sharing them decodes) come back to
-every client as KISS frames. PTT through rigctld ("T 1" / "T 0").
+Frames from KISS clients (TCP) go out as Data2G bursts; every burst heard
+comes back to every client as KISS frames. The mode is chosen per frame
+(data2g.kisslink): connected-mode AX.25 to a station that has reported on
+us goes in the mode it asked for; UI frames, non-AX.25 and unreported
+stations go in the cap's robust broadcast mode. PTT through rigctld
+("T 1" / "T 0"). Also here: the streaming Receiver the ARQ host uses.
 
     data2g-tnc --list-audio-devices
-    data2g-tnc --mode qpsk-r1/2 --input-device USB --output-device USB \\
+    data2g-tnc --bw 2400 --input-device USB --output-device USB \\
         --rigctld-port 4532 --ptt-on-delay-ms 100
 
-Framing: a burst carries whole packets as [length, 2 bytes big-endian]
-[packet] back to back across its codewords' payloads, zero-padded (a
-zero length ends the burst). A codeword that fails its CRC loses the
-packets it touches, and everything after it if it held a length.
+Framing of the frames: [length, 2 bytes big-endian][frame] back to back
+across a burst's data codewords, zero-padded (a zero length ends it).
 """
 
 import os
@@ -41,7 +41,7 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 from . import codes, modem  # noqa: E402
-from .config import BANDS, FS, LEADIN_SAMPLES, MAX_CODEWORDS, NSYM, SUBMODES  # noqa: E402
+from .config import BANDS, FS, LEADIN_SAMPLES, MAX_CODEWORDS, NSYM  # noqa: E402
 
 log = logging.getLogger("data2g.tnc")
 
@@ -479,20 +479,23 @@ class _KissHandler(socketserver.BaseRequestHandler):
 # --- the TNC ----------------------------------------------------------------
 
 class TNC:
+    """KISS TNC with mode shifting (data2g.kisslink): frames from KISS
+    clients go out in the mode each next hop reported for us, or the cap's
+    robust broadcast mode; every burst heard comes back as KISS frames."""
+
     def __init__(self, a, pa):
-        self.spec = SUBMODES[a.mode]
+        from . import cpm
+        from .kisslink import KissLink
+
         self.rate, self.a, self.pa = a.sample_rate, a, pa
+        self.link, self.lock = KissLink(cap=a.cap), threading.Lock()
         self.stop = threading.Event()
         self.transmitting = threading.Event()
         self.rx_reset = threading.Event()  # set by TX, acted on by the RX thread
-        self.txq, self.txcv = deque(), threading.Condition()
+        self.txcv = threading.Condition()
         self.rxq = queue.Queue()
-        rx = a.rx_modes or [n for n, s in SUBMODES.items() if s.sync_band == self.spec.sync_band]
-        self.accept = modem.Accept.of(rx, a.max_burst_secs, a.min_header_score)
-        self.receiver = Receiver(self.accept)
-        self.cap = capacity(self.spec, dict(modem.Accept.of([a.mode], a.max_burst_secs).max_cw).get(a.mode, 0))
-        if self.cap < 3:
-            raise SystemExit(f"{a.mode}: no burst fits in {a.max_burst_secs} s")
+        self.accept = modem.Accept.of(None, None, a.min_header_score)
+        self.receiver = Receiver(self.accept, cpm_grids=tuple(cpm.GRIDS))
         self.rig = Rigctld(a.rigctld_host, a.rigctld_port)
         self.kiss = KissServer((a.kiss_tcp_address, a.kiss_tcp_port), self.queue_packet)
         self.gain = 10 ** (a.output_volume / 20)
@@ -510,14 +513,11 @@ class TNC:
         return None, pyaudio.paContinue
 
     def queue_packet(self, data: bytes):
-        if 2 + len(data) > self.cap:
-            log.error("packet of %d bytes dropped: %s carries at most %d per burst",
-                      len(data), self.spec.name, self.cap - 2)
-            return
+        with self.lock:
+            self.link.enqueue(data)
         with self.txcv:
-            self.txq.append(data)
             self.txcv.notify()
-        log.debug("queued %d-byte packet", len(data))
+        log.debug("queued %d-byte frame", len(data))
 
     def rx_loop(self):
         dec, acc, n = Decimator(self.rate), [], 0
@@ -539,37 +539,34 @@ class TNC:
             for kind, ev in self.receiver.feed(x):
                 if kind != "burst" or ev["rx"] is None:
                     continue
-                b = modem.decode_received(ev["rx"])
-                packets, lost = unpack(b.payloads, b.crc_ok)
-                log.info("RX %s: %d/%d codewords, %d packet(s) (%d lost), SNR %.1f dB, offset %+.1f Hz",
-                         b.submode.name, sum(b.crc_ok), len(b.crc_ok), len(packets), lost, b.snr_db, b.freq_offset)
-                for p in packets:
-                    self.kiss.broadcast(p)
+                r = ev["rx"]
+                with self.lock:
+                    frames = self.link.on_burst(r)
+                log.info("RX %s: %d codeword(s), %d frame(s)", r["spec"].name, r["n_cw"], len(frames))
+                for f in frames:
+                    self.kiss.broadcast(f)
 
     def tx_loop(self):
-        cap, limit = self.cap, self.a.max_packets_combined or 10**9
         while not self.stop.is_set():
-            with self.txcv:
-                if not self.txq:
+            with self.lock:
+                burst = self.link.next_burst()
+            if burst is None:
+                with self.txcv:
                     self.txcv.wait(0.2)
-                    continue
-                packets, size = [], 0
-                while self.txq and len(packets) < limit and size + 2 + len(self.txq[0]) <= cap:
-                    packets.append(self.txq.popleft())
-                    size += 2 + len(packets[-1])
-            if self.receiver.busy:
-                log.info("channel busy, holding %d packet(s)", len(packets))
-                while self.receiver.busy and not self.stop.is_set():
+                continue
+            if self.receiver.channel_busy:
+                log.info("channel busy, holding a %s burst", burst.submode)
+                while self.receiver.channel_busy and not self.stop.is_set():
                     time.sleep(0.1)
-            self.transmit(packets)
+            self.transmit(burst)
 
-    def transmit(self, packets: list[bytes]):
-        payloads = pack(packets, self.spec)
-        x = modem.modulate(payloads, self.spec)
+    def transmit(self, burst):
+        from .arq import phy as PHY
+
+        x = PHY.tx_audio(burst)
         x = sps.resample_poly(x, self.rate // FS, 1) if self.rate != FS else x
         x = np.clip(x / np.max(np.abs(x)) * self.gain, -1, 1).astype(np.float32)
-        log.info("TX %s: %d packet(s), %d bytes, %d codeword(s), %.1f s", self.spec.name, len(packets),
-                 sum(map(len, packets)), len(payloads), len(x) / self.rate)
+        log.info("TX %s: %d codeword(s), %.1f s", burst.submode, len(burst.slots), len(x) / self.rate)
         self.transmitting.set()
         try:
             self.rig.ptt(True)
@@ -587,10 +584,8 @@ class TNC:
         for t in threads:
             t.start()
         self.inp.start_stream()
-        log.info("KISS on %s:%d; TX %s (%d Hz), up to %d bytes per burst", self.a.kiss_tcp_address,
-                 self.a.kiss_tcp_port, self.spec.name, BANDS[self.spec.band].nc * 50, self.cap - 2)
-        log.info("RX %s; header score >= %g", ", ".join(f"{n} (<= {cw} cw)" for n, cw in self.accept.max_cw),
-                 self.accept.min_score)
+        log.info("KISS on %s:%d; bandwidth cap %d Hz", self.a.kiss_tcp_address, self.a.kiss_tcp_port,
+                 {0: 500, 2: 2400}[self.a.cap])
         while not self.stop.wait(0.5):
             pass
         log.info("shutting down")
@@ -627,26 +622,18 @@ def _device(pa, want: str | None, kind: str) -> int | None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="KISS TNC for one Data2G submode")
+    ap = argparse.ArgumentParser(description="KISS TNC for Data2G, shifting modes per station")
     ap.add_argument("--list-audio-devices", action="store_true")
     ap.add_argument("--log-level", default="INFO",
                     choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"])
-    ap.add_argument("--list-modes", action="store_true")
-    ap.add_argument("--mode", choices=list(SUBMODES), metavar="MODE", help="the submode to transmit (--list-modes)")
-    ap.add_argument("--rx-modes", nargs="+", choices=list(SUBMODES), metavar="MODE",
-                    help="submodes to receive (default: every one sharing --mode's preamble and header)")
-    ap.add_argument("--max-burst-secs", type=float,
-                    help="longest burst on air: caps what TX combines and what RX accepts from a header")
-    ap.add_argument("--min-header-score", type=float, default=0.35,
-                    help="header match floor, 0..1; lower hears weaker bursts and more noise "
-                         "(0.35: ~1 dB off the 1200 Hz sync floor)")
+    ap.add_argument("--bw", type=int, choices=(2400, 500), default=2400, help="bandwidth cap, Hz")
+    ap.add_argument("--min-header-score", type=float, default=0.0,
+                    help="header match floor over the modem's own, 0..1")
     ap.add_argument("--input-device", help="index or name substring (default: system default)")
     ap.add_argument("--output-device", help="index or name substring (default: system default)")
     ap.add_argument("--sample-rate", type=int, default=48000, help="audio device rate, a multiple of 8000")
     ap.add_argument("--output-volume", type=float, default=0.0,
                     help="dB; 0 puts a burst's peak at digital full scale, negative is quieter")
-    ap.add_argument("--max-packets-combined", type=int, default=0,
-                    help="packets per burst at most (0: as many as fit)")
     ap.add_argument("--kiss-tcp-port", type=int, default=8001)
     ap.add_argument("--kiss-tcp-address", default="0.0.0.0")
     ap.add_argument("--rigctld-host", default="localhost")
@@ -654,12 +641,7 @@ def main():
     ap.add_argument("--ptt-on-delay-ms", type=int, default=0, help="after keying, before audio")
     ap.add_argument("--ptt-off-delay-ms", type=int, default=0, help="after audio, before unkeying")
     a = ap.parse_args()
-    if a.list_modes:
-        for s in SUBMODES.values():
-            k, crc = s.k, 32 if s.code == "ldpc" and s.k >= 512 else 16
-            print(f"{s.name:18s} {BANDS[s.band].nc * 50:5d} Hz  {(k - crc) / (s.frames_per_cw * 0.144):6.0f} bps  "
-                  f"{capacity(s) - 2:6d} bytes/burst")
-        return
+    a.cap = {2400: 2, 500: 0}[a.bw]
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(message)s")
 
     import pyaudio
@@ -672,8 +654,6 @@ def main():
                 print(f"{i:3d}  in {d['maxInputChannels']:2d}  out {d['maxOutputChannels']:2d}  "
                       f"{int(d['defaultSampleRate']):6d} Hz  {d['name']}")
             return
-        if a.mode is None:
-            ap.error("--mode is required")
         if a.sample_rate % FS:
             ap.error(f"--sample-rate must be a multiple of {FS}")
         if a.output_volume > 0:

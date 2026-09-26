@@ -121,7 +121,11 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
 @dataclass
 class GearShifter:
     gap_s: float = 2.5
-    use_cpm: bool = True  # recommend CPM modes (only once the outcome model has learned them)  # expected time from the end of the peer's burst to its next
+    use_cpm: bool = True  # recommend CPM modes (only once the outcome model has learned them)
+    # data modes need P(usable) x P(codeword) at least this: the KISS TNC
+    # sets it (no resends there; a lost codeword is a lost AX.25 frame and a
+    # retry), the ARQ doesn't (IR resends recover codewords)
+    min_success: float = 0.0  # expected time from the end of the peer's burst to its next
     measured: dict | None = None  # the peer's last burst, as measured
     measured_band: str = "w"
     measured_at: float = 0.0
@@ -301,6 +305,8 @@ class GearShifter:
                     n = min(n, k + c)
                 pn = q_cw(s, n)
                 ok_ctl = q_burst(s, n)  # the burst survives sync and its control codeword
+                if ok_ctl * pn < self.min_success:
+                    continue
                 tb = burst_seconds(s, n)
                 t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S
                 if chat:

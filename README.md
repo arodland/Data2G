@@ -1422,6 +1422,48 @@ noise at MPP 0 dB. Installed: `outcome_predictor.npz` = v5e.
   a weak real burst. BUSY is still reported only while a Data2G lock is
   pending; it is not a general carrier detect.
 
+## KISS TNC with mode shifting (2026-09-26)
+
+`data2g-tnc --bw 2400|500` (2400 by default) replaces the single-mode KISS
+TNC (`--mode` is gone). Link layer: `data2g/kisslink.py`.
+
+- **Feedback without a session.** Each burst carries reports: for every
+  station heard in the last 10 min, the mode and size it should use to
+  reach us. That's the ARQ shifter's recommendation, from a per-station
+  `GearShifter` fed by what we measured of its bursts. A TNC follows the
+  report its next hop sent about it (up to 180 s old).
+- **Stations are AX.25 callsigns,** read from the frames:
+  - A burst's sender is its first frame's RF sender: the last digipeater
+    that has repeated it, else the source.
+  - A frame goes to its RF next hop: the first digipeater that hasn't
+    repeated it, else the destination.
+- **Robust broadcast** (qpsk-r1/5; n10-qpsk-r1/5 under a 500 Hz cap) for UI
+  frames whatever their destination, for non-AX.25, and for stations
+  without a fresh report. Connected-mode frames (I, S, U other than UI) to
+  a station with a report use the reported mode.
+- **First-transmission success.** There are no resends at this layer (AX.25
+  retries), so the KISS shifters only recommend modes with predicted
+  P(usable) x P(codeword) >= 0.9 (`GearShifter.min_success`; the ARQ keeps 0).
+  - Plain goodput shifting picked w48-qpsk-r1/3 at 0 dB AWGN and lost half
+    the frames.
+  - With the floor, 256-byte I frames, 6 per SNR, all delivered:
+    - +20 dB: w48-256l-r5/8
+    - +8 dB: w48-16qam-r1/3
+    - 0 dB: w48-qpsk-r1/5
+    - -4 dB: robust modes, CPM included
+- **Burst format:** control codeword(s) (the ARQ's control masks, key
+  0x4B53) holding [version, n_ctl][sender hash][n][hash, mode|size] x n.
+  Then data codewords with the old length-prefixed framing. A burst grows
+  past its size class to carry its first frame: 256-byte-PACLEN I frames
+  outgrew a 12 s broadcast burst.
+- **Listen before talk:** the TNC holds while `Receiver.channel_busy`.
+  It hears every OFDM band and the CPM grids.
+- **Tests:** `tests/test_kiss.py` (AX.25 parsing; two links over the real
+  modem shifting from reports; UI and non-AX.25 staying robust; stale
+  reports; the 500 Hz cap; 0 dB delivery).
+- **Not done:** reports only travel inside bursts that carry frames. A
+  station that only listens never reports, so traffic to it stays robust.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
