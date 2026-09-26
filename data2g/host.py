@@ -297,6 +297,9 @@ def serve(a, pa, stop: threading.Event | None = None):
                     host.client_gone()
                 else:
                     host.data_in(v)
+            for line in host.out_cmd:  # replies at once, not after the audio step (clients time out at ~2 s)
+                cmd.send(line.encode() + b"\r")
+            host.out_cmd.clear()
             x = np.frombuffer(inp.read(per, exception_on_overflow=False), dtype=np.float32).astype(np.float64)
             t0 = time.perf_counter()
             y, ptt = engine.step(dec(x) if not keyed else np.zeros(BLOCK))

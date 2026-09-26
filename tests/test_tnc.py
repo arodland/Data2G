@@ -131,11 +131,13 @@ def test_a_half_arrived_header_is_waited_for_not_misread():
             seed, [(h["spec"].name, round(h["score"], 2)) for h in heads])
 
 
-def test_busy_ends_with_the_signal_not_a_false_headers_claim():
+def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     """A burst whose preamble was missed reads as false headers claiming up
     to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
     host reports) follows the pilots and the in-band energy, so it ends with
-    the signal; the internal hold (Receiver.busy) may run on."""
+    the signal; the internal hold (Receiver.busy) may run on. (The w header
+    floor, 0.33, now rejects these false headers; at 0.25 they got through,
+    which this reproduces to test BUSY on its own.)"""
     import sys
     from pathlib import Path
 
@@ -150,6 +152,7 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim():
     sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
     import outcome_data as O
 
+    monkeypatch.setitem(modem.HEADER_MIN_SCORE, "w", 0.25)
     rng = np.random.default_rng(1)
     x = PHY.tx_audio(O.burst("qpsk-r1/2", 20, rng))
     cut = x[BANDS["w"].preamble_samples + modem.header_samples("w") + 800 + int(rng.integers(0, 3000)):]

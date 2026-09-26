@@ -73,9 +73,14 @@ HEADER_BACKOFF = NCP // 2
 #   0.28         11%                0%                 1.3%
 #   0.33          0.7%              0%                 5.1%
 # 0.33 cost the w band 1.75 dB of AWGN sync floor and up to 3 dB on fading
-# (w carries the robust ACKs); 0.25 costs nothing measurable. The data
-# false locks it lets through are made cheap by tnc.Receiver's supersede
-# search (a better header later replaces a pending one), not by the floor.
+# (w carries the robust ACKs); 0.25 cost nothing measurable, the supersede
+# search to make its false locks cheap. On air it wasn't: behind a 500 Hz
+# receive filter the w detector fired on every window and 0.25-0.32 false
+# headers held BUSY. With the header copy (two copies combined), 0.33:
+#   false locks  500 Hz capture 225 -> 5 of 360 windows; data without its
+#                preamble 476 -> 13 of 900
+#   true lost    ack-4f AWGN -8 +0.7 points, MPP -4 +1.8, MPD -3 +1.5,
+#                MPG -3 +3.3; qpsk-r1/5 MPP -2 +0.3 (and most wrong headers go)
 STREAM_COMMIT_SCORE = 0.5  # a header this good commits even while another band's is still arriving
 # a streaming receiver commits on the first header copy alone at this
 # score; under it, it waits for the second copy (wrong words read 0.25-0.35)
@@ -83,7 +88,7 @@ COPY_COMMIT_SCORE = 0.45
 # w48: 0.26 since its header went to 4 symbols (384 bits): its noise reads
 # top out at 0.248 (3000 measured), its reads off w bursts at 0.243 (-8..+30
 # dB); true w48 headers score 0.35 median at -6 dB (0.30 had cut ~20% there).
-HEADER_MIN_SCORE = {"w": 0.25, "n10": 0.30, "w48": 0.26}
+HEADER_MIN_SCORE = {"w": 0.33, "n10": 0.30, "w48": 0.26}
 # Handicap on the header score of every hypothesis but acquisition's own
 # (its runner-ups, and the +-1, +-2 repeat alignments): near -8 dB wide a
 # true header scores ~0.26 and noise read at some other hypothesis beat
