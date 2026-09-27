@@ -4,6 +4,13 @@ one data codeword) fails FAIL of the time, end to end through the receiver
 the ARQ uses (head-only search, as the streaming receiver; the burst's
 header right; both codewords decoded). CFO +-50 Hz, 10 ppm, random lead.
 
+Trials use common random numbers: trial k has the same seed (payload,
+lead, CFO, fading, noise shape) at every SNR, only the noise scaled, so
+pass/fail is near monotone in SNR, and two receivers searched from the same
+--seed are paired. With a fresh seed per SNR point, a search from another
+start took another path through the noise: the same receiver re-measured
+-1.6 to +1.2 dB apart on robust rungs (README, header copy section).
+
     uv run python scripts/ladder_study.py --fail 0.1 --out runs/ladder_10pct.csv
     uv run python scripts/ladder_study.py --fail 0.01 --out runs/ladder_1pct.csv
 """
@@ -52,11 +59,11 @@ def trial(args):
     return all(rx.decode(i, s.mask_id, 0, None) == s.payload for i, s in enumerate(b.slots))
 
 
-def passes(pool, name, chan, snr, fail):
+def passes(pool, name, chan, snr, fail, seed0=0):
     n_max = TRIALS[fail]
     fails = n = 0
     while n < n_max:
-        r = pool.map(trial, [(name, chan, snr, 7919 * n + j + int((snr + 100) * 1000)) for j in range(100)])
+        r = pool.map(trial, [(name, chan, snr, seed0 + n + j) for j in range(100)])
         n += 100
         fails += r.count(False)
         if fails > fail * n_max:
@@ -64,21 +71,22 @@ def passes(pool, name, chan, snr, fail):
     return True
 
 
-def threshold(pool, name, chan, fail, start):
+def threshold(pool, name, chan, fail, start, seed0=0):
     """Lowest passing SNR to 0.25 dB, searched from `start` in 3 dB steps."""
+    ok = lambda snr: passes(pool, name, chan, snr, fail, seed0)  # noqa: E731
     hi = start
-    while not passes(pool, name, chan, hi, fail):
+    while not ok(hi):
         hi += 3
         if hi > 40:
             return float("nan")
     lo = hi - 3
-    while passes(pool, name, chan, lo, fail):
+    while ok(lo):
         hi, lo = lo, lo - 3
         if lo < -30:
             return hi
     while hi - lo > 0.25:
         mid = (hi + lo) / 2
-        hi, lo = (mid, lo) if passes(pool, name, chan, mid, fail) else (hi, mid)
+        hi, lo = (mid, lo) if ok(mid) else (hi, mid)
     return hi
 
 
@@ -90,6 +98,7 @@ def main():
     ap.add_argument("--modes", nargs="+", default=list(MODES))
     ap.add_argument("--channels", nargs="+", default=list(CHANNELS))
     ap.add_argument("--start", type=str, default=None, help="a previous run's csv: search from its thresholds")
+    ap.add_argument("--seed", type=int, default=0, help="trial k's seed is seed + k at every SNR (paired runs share it)")
     a = ap.parse_args()
     prev = {(r["name"], c): float(r[c]) for r in csv.DictReader(open(a.start)) for c in CHANNELS
             if r.get(c) not in (None, "", "nan")} if a.start else {}
@@ -101,7 +110,7 @@ def main():
             row = dict(name=name)
             for c in a.channels:
                 start = prev.get((name, c), O.threshold(name, c) if O.threshold(name, c) < 90 else 0.0) - 2
-                row[c] = threshold(pool, name, c, a.fail, round(start * 4) / 4)
+                row[c] = threshold(pool, name, c, a.fail, round(start * 4) / 4, a.seed)
                 print(name, c, row[c], flush=True)
             done[name] = row
             with open(a.out, "w", newline="") as f:
