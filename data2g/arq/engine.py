@@ -15,6 +15,7 @@ what was on air (scripts/replay.py).
 """
 
 import json
+import logging
 import random
 import time
 from pathlib import Path
@@ -29,6 +30,8 @@ from ..tnc import Receiver
 from . import phy as PHY
 from . import session as S
 from .policy import GearShifter
+
+log = logging.getLogger("data2g.engine")
 
 MAX_BURST_S = 16.0  # longest burst accepted from a header (the shifter's largest is 12 s)
 
@@ -93,6 +96,9 @@ class Engine:
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
         self.kiss_rx: list[bytes] = []  # frames heard for KISS clients
+        self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
+        self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
+        self._kiss_slot = 0  # next p-persistence slot, samples
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -168,15 +174,17 @@ class Engine:
             self.rec.audio(x if self.tx is None else np.zeros(k))
         if self.tx is None:
             self._hear(x, t)
+            burst = None
             if not self.receiver.busy:  # a burst still arriving holds any reply (half duplex)
                 burst = self.session.poll(t)
                 if burst is None and self._extra:
                     burst = self._extra.pop(0)
-                if (burst is None and self.kiss is not None and not self.receiver.channel_busy
-                        and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)):
-                    burst = self.kiss.next_burst()  # KISS only between ARQ sessions
-                if burst is not None:
-                    self._start_tx(burst, t)
+            if burst is None and self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
+                burst = self._kiss_burst(k)  # KISS only between ARQ sessions
+            else:
+                self._kiss_busy = 0
+            if burst is not None:
+                self._start_tx(burst, t)
         if self.tx is not None:
             burst, audio, pos = self.tx
             n = min(k, len(audio) - pos)
@@ -220,6 +228,34 @@ class Engine:
                 continue
             self.session.policy.observe(meas, r["spec"].name, t)
             self.session.on_rx(rx, t)
+
+    def _kiss_burst(self, k: int):
+        """The next KISS burst if it may go now. A burst that waited on BUSY
+        is p-persistent after it: each slot (SLOTTIME) is taken with
+        probability (P + 1) / 256, so stations that queued under the same
+        burst don't all key up as it ends. One queued on a free channel (a
+        reply) goes at once. BUSY holds a burst, but not past busy_limit_s
+        of it unbroken (a stuck BUSY). `k`: this block's samples."""
+        link = self.kiss
+        if not link.queue:
+            self._kiss_busy, self._kiss_deferred = 0, False
+            return None
+        if self.receiver.busy:
+            self._kiss_busy += k
+            self._kiss_deferred = True
+            if self._kiss_busy < link.busy_limit_s * FS:
+                return None
+            log.warning("KISS: BUSY for %.0f s, sending anyway", self._kiss_busy / FS)
+        else:
+            self._kiss_busy = 0
+            if self._kiss_deferred:
+                if self.n < self._kiss_slot:
+                    return None
+                if self.rng.random() >= (link.persist + 1) / 256:
+                    self._kiss_slot = self.n + int(link.slot_s * FS)
+                    return None
+        self._kiss_busy, self._kiss_deferred = 0, False
+        return link.next_burst()
 
     def _cq(self, rx) -> bool:
         """A CQ frame? -> notified (CQFRAME call cap), and nothing else to do."""

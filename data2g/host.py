@@ -273,7 +273,8 @@ def serve(a, pa, stop: threading.Event | None = None):
     from .kisslink import KissLink
     from .tnc import KissServer
 
-    link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode) if a.kiss else None
+    link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode,
+                    busy_limit_s=a.kiss_busy_limit) if a.kiss else None
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
@@ -284,7 +285,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                     on_close=lambda: inbox.put(("gone", None)))
         data = _Port((a.host, a.command_port + 1), lambda d: inbox.put(("data", d)), lines=False)
     if a.kiss:
-        kiss = KissServer((a.kiss_address, a.kiss_port), lambda f: inbox.put(("kiss", f)))
+        kiss = KissServer((a.kiss_address, a.kiss_port), lambda f: inbox.put(("kiss", f)), link.command)
         threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
     dec, interp = Decimator(a.sample_rate), Interpolator(a.sample_rate)
@@ -372,6 +373,8 @@ def main():
                     help="the KISS personality: frames on --kiss-port, modes shifted per station")
     ap.add_argument("--kiss-port", type=int, default=8100, help="as VARA HF's")
     ap.add_argument("--kiss-address", default="127.0.0.1")
+    ap.add_argument("--kiss-busy-limit", type=float, default=60.0, metavar="S",
+                    help="a KISS burst held this long by BUSY is sent anyway")
     ap.add_argument("--kiss-bw", type=int, choices=(2400, 500), default=2400, help="KISS bandwidth cap, Hz")
     ap.add_argument("--broadcast-mode", metavar="MODE",
                     help="KISS mode for UI frames, non-AX.25 and unreported stations "

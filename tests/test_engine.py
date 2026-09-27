@@ -316,3 +316,63 @@ def test_kiss_and_vara_personalities_share_one_engine():
     a.session.disconnect()
     assert link(a, b, 12, 90, lambda: late in b.kiss_rx, seed=2)
     assert a.session.state == S.CLOSED
+
+
+class _Busy:
+    """A receiver whose BUSY is set by hand."""
+
+    def __init__(self, until: float):
+        self.until, self.t = until, 0.0
+
+    @property
+    def busy(self):
+        return self.t < self.until
+
+    channel_busy = busy
+
+    def feed(self, x):
+        self.t += len(x) / FS
+        return []
+
+    def reset(self):
+        pass
+
+
+def _first_tx(e: Engine, seconds: float) -> float | None:
+    for i in range(int(seconds * FS / BLOCK)):
+        if e.step(np.zeros(BLOCK))[1]:
+            return (i + 1) * BLOCK / FS
+    return None
+
+
+def test_kiss_waits_out_busy_but_not_a_stuck_one():
+    from data2g.kisslink import KissLink
+
+    e = Engine("W1AW", seed=1, kiss=KissLink(busy_limit_s=5.0))
+    e.receiver = _Busy(until=1e9)
+    e.kiss.enqueue(b"frame")
+    assert 5.0 <= _first_tx(e, 8) <= 5.2
+
+
+def test_kiss_stations_queued_under_one_burst_do_not_all_collide():
+    """Both queue under the same burst: p-persistence spreads them over
+    1 s slots (longer than our 0.44-0.79 s to sense a burst). A reply on a
+    free channel goes at once."""
+    from data2g.kisslink import KissLink
+
+    def starts(seed, persist):
+        out = []
+        for s in (seed, seed + 1000):
+            e = Engine("W1AW", seed=s, kiss=KissLink(persist=persist))
+            e.receiver = _Busy(until=2.0)
+            e.kiss.enqueue(b"frame")
+            out.append(_first_tx(e, 60))
+        return out
+
+    hit = [abs(a - b) < 0.8 for a, b in (starts(k, 63) for k in range(40))]
+    assert sum(hit) < 0.3 * len(hit)  # (P + 1) / 256 = 1/4: 1/7 expected
+    assert all(abs(a - b) < 0.8 for a, b in (starts(k, 255) for k in range(5)))
+    e = Engine("W1AW", seed=1, kiss=KissLink())
+    e.receiver = _Busy(until=0.0)
+    e.kiss.enqueue(b"reply")
+    assert _first_tx(e, 1) == BLOCK / FS

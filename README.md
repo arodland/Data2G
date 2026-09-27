@@ -1529,6 +1529,57 @@ PipeWire loopback, an outside process injecting noise (SNR sweeping 25 to
   decoder recursing in torch: exact speedups need care), LDPC 10%, soft bits
   under KISS 9% (computed once, shared), audio I/O 8%.
 
+## Impulse blanker and KISS channel access, after modem73 (2026-09-27)
+
+Ideas from RFnexus/modem73 (public domain); plan in
+`docs/modem73-ideas-plan.md`.
+
+- **Impulse blanker** (`tnc.Blanker`, on by default in `tnc.Receiver`):
+  - modem73's rule: against a slow envelope of |x| (85 ms, fed
+    min(|x|, 3 env)), zero samples over 8 env and limit those over 6 env.
+  - Ours runs in 10 ms blocks. A block whose median |x| is over 2 env is a
+    level step (a station keying up) and resets the envelope first.
+  - It zeroes 1 ms each side of a zeroed sample. Guard 8 samples beat
+    0 and 16.
+- **Clicks model:** `hfchannel.clicks`: Poisson-timed white bursts,
+  0.1-2 ms, 20 dB over the signal.
+- **Measured** (`scripts/blanker_study.py`): the smallest ARQ burst at
+  each mode's 10% point, decoded of 200 without / with the blanker (same
+  audio):
+
+  | mode, channel | 0 clicks/s | 1/s | 5/s | 20/s |
+  |---|---|---|---|---|
+  | qpsk-r1/5 AWGN | 179 / 179 | 166 / 176 | 122 / 164 | 3 / 113 |
+  | qpsk-r1/5 MPG | 174 / 174 | 172 / 174 | 155 / 174 | 113 / 171 |
+  | n10-qpsk-r1/5 AWGN | 182 / 182 | 184 / 185 | 171 / 176 | 116 / 143 |
+  | n10-qpsk-r1/5 MPG | 183 / 183 | 180 / 182 | 174 / 182 | 139 / 182 |
+  | fsk16r25-r1/3 AWGN | 184 / 184 | 184 / 184 | 179 / 179 | 157 / 160 |
+  | fsk16r25-r1/3 MPG | 179 / 179 | 177 / 180 | 174 / 180 | 165 / 176 |
+
+  - Without clicks it changes no trial.
+  - CPM gains least.
+  - Clean 30 dB bursts: 0.015-0.06% of samples blanked, all at the onset.
+    A step inside a block zeroes the burst's first 1-3 ms, which falls in
+    the preamble's cyclic prefix. CPM: none.
+- **False locks** (streaming receiver, 80 min of noise a row): with
+  5 clicks/s, 18 headers an hour without, 0 with. With 20 clicks/s,
+  5.2 and 0. None either way on plain noise. Receiver CPU 3.3-3.4 s per
+  audio minute with it, against 3.4-5.8 without (clicks cost searches).
+- **KISS p-persistence** (`Engine._kiss_burst`): a KISS burst that waited
+  on BUSY takes each following slot with probability (P + 1) / 256
+  (P = 63), so stations that queued under one burst don't all key up as
+  it ends. A burst queued on a free channel (a reply) goes at once.
+  - SLOTTIME is 1 s, not KISS's usual 100 ms. A burst reads as BUSY
+    0.44-0.79 s after it starts (10 dB), and a slot must outlast that.
+  - The client's KISS P is kept. SLOTTIME can lengthen the slot, not
+    shorten it. TXDELAY is ignored (`--ptt-on-delay-ms` is ours), as are
+    TXTAIL and the rest. modem73 ignores all four.
+  - Two stations queued under one burst: 1 collision in 7 expected
+    (tests/test_engine.py), against every time with P = 255.
+- **BUSY cap:** 60 s of unbroken BUSY (`--kiss-busy-limit`) and a queued
+  KISS burst goes anyway, logged. It counts only BUSY time, not time
+  spent in an ARQ session. ARQ timing is unchanged.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
