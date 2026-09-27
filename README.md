@@ -1734,6 +1734,18 @@ CPU +28%.
 
   - ack-4f and polar-k96-f8 fail less 1 dB under their old 10% points on
     MPP/MPD than they did at them: their 10% points move 1 dB or more.
+  - Seeded 10% points (ladder_study `--seed 0`, the same trials for both),
+    before -> after, dB; every other cell of these 7 rungs is unchanged:
+
+    | Rung | MPP | MPD |
+    |---|---|---|
+    | ack-4f | -2.69 -> -3.25 | -2.19 -> -3.12 |
+    | polar-k96-f8 | -2.62 -> -3.19 | -0.56 -> -2.44 |
+    | qpsk-r1/5 | -0.62 | 0.94 -> 0.56 |
+    | qpsk-r1/3 | 2.06 | 3.44 -> 3.25 |
+    | w48-qpsk-r1/5 | 2.94 -> 2.75 | 3.81 |
+
+    ack-1f, w48-qpsk-r1/3, and every AWGN and MPG cell: no change.
   - The data rungs gain 1-3 points of failure rate; MPG nothing (7 rungs).
   - Re-running ladder_study's threshold search instead gave -1.6 to +1.2 dB
     on the same rungs: its SNR points use different trial seeds, and a
