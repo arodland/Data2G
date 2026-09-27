@@ -1720,6 +1720,38 @@ CPU +28%.
     2.1%, MPP 0 dB 5.2% -> 1.5%. At MPP -4 dB the bursts won back are mostly
     replies, and throughput doesn't move.
   - MPG: slow fades take the copy too.
+- **Ladder** (paired: each trial of ladder_study's smallest burst received
+  with and without the copy lock, 400 per point). Failures, before -> after:
+
+  | Rung, channel | old 10% point | 1 dB under |
+  |---|---|---|
+  | ack-4f MPP | 45 -> 35 | 56 -> 44 |
+  | ack-4f MPD | 43 -> 20 | 67 -> 29 |
+  | polar-k96-f8 MPP | 26 -> 13 | 33 -> 19 |
+  | polar-k96-f8 MPD | 37 -> 15 | 47 -> 24 |
+  | qpsk-r1/5 MPD | 34 -> 27 | 98 -> 85 |
+  | w48-qpsk-r1/5 MPD | 46 -> 38 | 99 -> 85 |
+
+  - ack-4f and polar-k96-f8 fail less 1 dB under their old 10% points on
+    MPP/MPD than they did at them: their 10% points move 1 dB or more.
+  - The data rungs gain 1-3 points of failure rate; MPG nothing (7 rungs).
+  - Re-running ladder_study's threshold search instead gave -1.6 to +1.2 dB
+    on the same rungs: its SNR points use different trial seeds, and a
+    different starting point takes a different path through that noise (the
+    lock can't fail a trial that passed without it).
+- **Streaming: a copy lock can be superseded.** A copy read off the wrong
+  frame, taken before the burst's own copy arrived, can clear the header
+  floor (0.26-0.33). Nothing replaced it: the supersede search looked for
+  preambles only. Now a pending copy lock also re-runs the copy search, and a
+  better, different lock (the preamble path's 0.05 margin) replaces it; a
+  copy lock counts as confirmed (no further search) at the single-copy
+  commit score, 0.45. Head-zeroed bursts through the streaming receiver, 3
+  modes x 2 SNRs x 20 seeds: 117 -> 120 decoded with the CFO below.
+- **CFO:** a frame-pair product carries the whole CFO modulo 6.94 Hz, not
+  its offset from the bin; read as the offset, copy reads ran up to 3.5 Hz
+  off (receive() then fixed it from the copy). Correct, the paired ladder
+  points above fail 45 fewer times in 42 (one point 2 worse); sessions
+  unchanged.
 - **CPU** (`scripts/copy_cpu.py`, streaming receiver, s per audio minute):
   noise 4.40 -> 5.62 (the fold, each hop; header reads almost never run);
   MPP -4 dB traffic 2.93 -> 4.20; MPP 0 dB 2.12 -> 2.37.

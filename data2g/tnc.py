@@ -242,7 +242,9 @@ class Receiver:
         c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
         if len(c) >= modem.PILOT_PAIRS:
             ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
-            self.confirmed = ok and p["score"] >= self.SUSPECT_SCORE
+            # a copy lock is one header copy: confirmed (no further search) at
+            # the single-copy commit score
+            self.confirmed = ok and p["score"] >= (modem.COPY_COMMIT_SCORE if "copy" in p else self.SUSPECT_SCORE)
             if ok != self.pilots_ok:
                 log.info("%s burst: pilots %s (coherence %.2f)", p["spec"].name, "back" if ok else "gone", np.mean(c))
             self.pilots_ok = ok
@@ -311,22 +313,31 @@ class Receiver:
         w0 = hdr_end if whole else max(hdr_end, len(self.buf) - self.keep)
         if len(self.buf) - w0 < self.keep // 2:
             return False
+        q = None
         try:
             q = modem.find_burst(self.buf[w0:], self.bands, self.accept, stats=self._stats(w0))
+            q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
         except modem.SyncError:
-            return False
+            pass
         finally:
             self._searched()
-        if q["score"] < p["score"] + self.SUPERSEDE_MARGIN:
+        if "copy" in p and (q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN):
+            # a copy lock can be a copy read off the wrong frame, taken before
+            # the burst's own copy arrived (at the header floor, 0.26-0.33):
+            # the true one, later, replaces it
+            c = self._find_copy()
+            if c is not None:
+                q = dict(c, start=c["start"] + self.off, end=c["end"] + self.off, p0=c["p0"] + self.off,
+                         copy=dict(c["copy"], pc=c["copy"]["pc"] + self.off))
+        if q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN or q["start"] == p["start"]:
             return False
-        q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
         log.info("%s header (score %.2f) superseded by %s (score %.2f)", p["spec"].name, p["score"],
                  q["spec"].name, q["score"])
         if not whole:  # completing: the caller has already handled p
             out.append(("burst", {"header": p, "rx": None,
                                   "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
         self.pending = q
-        self.pilots_ok = q["score"] >= self.SUSPECT_SCORE
+        self.pilots_ok = "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
         out.append(("header", q))
         return True

@@ -613,9 +613,10 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
        repeat symbol), over COPY_PAIRS pairs, then folded over every frame
        per grid phase: a burst's pilots add coherently (each pair turns by
        the same CFO), its data symbols (M-periodic too) at random.
-    2. Per grid (the COPY_GRIDS best phases), the CFO: the bin, refined by
-       the fold's phase (modulo 1 / FRAME_S; the copy read interpolates its
-       channel over a frame, and a half-bin error turns it 0.9 cycles).
+    2. Per grid (the COPY_GRIDS best phases), the CFO: the fold's phase (the
+       CFO modulo 1 / FRAME_S), every alias within the bin (the copy read
+       interpolates its channel over a frame, and a half-bin error turns it
+       0.9 cycles).
     3. The copy read at every frame of the grid; a word counts if its own
        length puts its copy frame there and it clears the header floor.
     4. The best-scoring word whose burst's frame pilots are coherent
@@ -648,15 +649,12 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
             grids.append(int(ph))
             if len(grids) == COPY_GRIDS:
                 break
-    alias = FS / FRAME_SAMPLES
     sb = BANDS[band]
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
     found = []
     for ph in grids:
         i = int(np.argmax(np.abs(fold[:, ph])))
-        frac = float(np.angle(fold[i, ph])) / (2 * np.pi) * alias
-        for f in [float(freqs[i]) + frac + k * alias for k in (-1, 0, 1)
-                  if abs(frac + k * alias) <= _sync.STEP_HZ / 2 + 0.5]:
+        for f in _cfo_aliases(fold[i, ph], float(freqs[i])):
             z = freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
@@ -676,6 +674,17 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE:
             return lock
     return None
+
+
+def _cfo_aliases(d: complex, centre: float) -> list[float]:
+    """CFOs whose turn over one frame is d's phase, within the bin at
+    `centre`. A frame-pair product carries the whole CFO modulo 1 / FRAME_S
+    (6.94 Hz), not its offset from the bin: read as the offset, the copy
+    reads ran up to 3.5 Hz off (receive() then fixed it from the copy)."""
+    alias = FS / FRAME_SAMPLES
+    frac = float(np.angle(d)) / (2 * np.pi) * alias
+    k0 = round((centre - frac) / alias)
+    return [frac + k * alias for k in (k0 - 1, k0, k0 + 1) if abs(frac + k * alias - centre) <= _sync.STEP_HZ / 2 + 0.5]
 
 
 def _copy_header(z: np.ndarray, lock: dict) -> dict:
