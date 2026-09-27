@@ -49,6 +49,7 @@ HEARD_MAX_S = 600.0  # stations reported on: heard this recently
 # robust broadcast mode per cap (data2g.arq.policy.CAP_HZ): what everyone hears
 BROADCAST = {0: "n10-qpsk-r1/5", 2: "qpsk-r1/5"}
 BROADCAST_S = G.SIZE_S[-1]
+SLOT_S = 1.0  # the shortest p-persistence slot (KissLink.slot_s)
 MIN_SUCCESS = 0.9  # recommended modes: predicted first-transmission codeword success at least this  # broadcast bursts: at most the longest size class
 
 
@@ -119,6 +120,11 @@ class KissLink:
     clock: callable = time.monotonic
     n_sent: int = 0
     broadcast: str | None = None  # the robust broadcast mode (None: BROADCAST[cap])
+    # channel access (the engine applies them). A slot must outlast our
+    # carrier sense: a burst reads as BUSY 0.44-0.79 s after it starts (10 dB)
+    persist: int = 63  # KISS P: after BUSY, a slot is taken with probability (P + 1) / 256
+    slot_s: float = SLOT_S  # KISS SLOTTIME
+    busy_limit_s: float = 60.0  # BUSY held a burst this long: send anyway (modem73's csma)
 
     def __post_init__(self):
         self.broadcast = self.broadcast or BROADCAST[self.cap]
@@ -127,6 +133,20 @@ class KissLink:
             raise ValueError(f"broadcast mode {self.broadcast!r}: not a mode within the bandwidth cap")
         self._stub = SimpleNamespace(cap=self.cap, rx=SimpleNamespace(buf={}), chat=False, peer_chat=False,
                                      peer_queued=0)
+
+    def command(self, cmd: int, payload: bytes):
+        """A KISS command from a client. P is kept. SLOTTIME (10 ms units)
+        can lengthen the slot, not shorten it: clients' defaults (100 ms)
+        suit VHF carrier detect, not ours. TXDELAY (--ptt-on-delay-ms is
+        ours), TXTAIL and the rest are ignored."""
+        if not payload or cmd not in (2, 3):
+            log.debug("KISS command %d ignored", cmd)
+            return
+        if cmd == 2:
+            self.persist = payload[0]
+        else:
+            self.slot_s = max(SLOT_S, payload[0] / 100)
+        log.info("KISS %s = %d", "P" if cmd == 2 else "SLOTTIME", payload[0])
 
     # -- sending -------------------------------------------------------------
 

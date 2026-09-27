@@ -156,9 +156,10 @@ class Receiver:
     the preamble it already found (modem.receive's `head`), so little work
     is left when the burst ends."""
 
-    def __init__(self, accept: modem.Accept, cpm_grids=()):
+    def __init__(self, accept: modem.Accept, cpm_grids=(), blank: bool = True):
         """`cpm_grids`: data2g.cpm grids to listen for too (early lock:
-        front sync block and first header copy)."""
+        front sync block and first header copy). `blank`: impulse-blank
+        the input (Blanker)."""
         from . import cpm
 
         self.accept, self.bands = accept, accept.bands
@@ -171,6 +172,7 @@ class Receiver:
 
         # each band's detection statistic, computed once per sample (not per search)
         self.detectors = {b: sync.StreamDetector(ofdm.band(b)) for b in self.bands}
+        self.blanker = Blanker() if blank else None
         self.reset()
 
     # new audio between preamble searches (one is ~40 ms of CPU at +-150 Hz):
@@ -336,6 +338,8 @@ class Receiver:
         starts, then ("burst", {"header": that dict, "rx": modem.receive's
         dict or None if it was lost, "audio": the segment received}). The dicts' start/end are stream
         sample indices (samples fed since reset)."""
+        if self.blanker is not None:
+            x = self.blanker(x)
         # 0.1 s block powers for the noise floor (feeds may be any size)
         sq = np.asarray(x, dtype=np.float64) ** 2
         while len(sq):
@@ -453,6 +457,47 @@ class Decimator:
         return out
 
 
+class Blanker:
+    """Impulse blanker, after modem73's (RFnexus/modem73, public domain):
+    against a slow envelope of |x|, zero samples above ZERO x it and limit
+    those above LIMIT x it to that. The envelope follows min(|x|, 3 x env)
+    with an 85 ms time constant, so clicks barely lift it. In 10 ms blocks,
+    not per sample: a block whose median |x| is over RESYNC x the envelope
+    is a level step (a strong station keying up), not a click (those are
+    under half a block), and the envelope jumps to it before the block is
+    blanked, so a burst's first samples are kept."""
+
+    BLOCK = FS // 100
+    ZERO, LIMIT, RESYNC = 8.0, 6.0, 2.0
+    TAU = 683  # samples (modem73: 4096 at 48 kHz)
+    GUARD = 8  # samples zeroed each side of a zeroed one (1 ms: beat 0 and 16, scripts/blanker_study.py)
+
+    def __init__(self):
+        self.env = 0.0
+        self.n_blanked = 0  # samples zeroed or limited
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        y = np.array(x, dtype=np.float64)
+        for i in range(0, len(y), self.BLOCK):
+            b = y[i:i + self.BLOCK]  # a view: blanked in place
+            m = np.abs(b)
+            med = float(np.median(m))
+            if med > self.RESYNC * self.env:
+                self.env = float(np.mean(np.minimum(m, 3 * med)))
+            if self.env <= 0:  # digital silence
+                continue
+            hit = m > self.LIMIT * self.env
+            if hit.any():
+                zero = m > self.ZERO * self.env
+                if self.GUARD and zero.any():
+                    zero = np.convolve(zero, np.ones(2 * self.GUARD + 1))[self.GUARD:self.GUARD + len(b)] > 0
+                    hit |= zero
+                b[hit] *= np.where(zero[hit], 0.0, self.LIMIT * self.env / np.maximum(m[hit], 1e-30))
+                self.n_blanked += int(hit.sum())
+            self.env += (float(np.mean(np.minimum(m, 3 * self.env))) - self.env) * min(1.0, len(b) / self.TAU)
+        return y
+
+
 # --- PTT --------------------------------------------------------------------
 
 class Rigctld:
@@ -490,8 +535,9 @@ class KissServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, on_packet):
-        self.clients, self.lock, self.on_packet = set(), threading.Lock(), on_packet
+    def __init__(self, addr, on_packet, on_command=None):
+        """`on_command(cmd, payload)`: KISS commands other than data."""
+        self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
         super().__init__(addr, _KissHandler)
 
     def broadcast(self, data: bytes):
@@ -524,8 +570,8 @@ class _KissHandler(socketserver.BaseRequestHandler):
                 for cmd, payload in dec.feed(data):
                     if cmd & 0x0F == 0:
                         srv.on_packet(payload)
-                    else:
-                        log.debug("KISS command 0x%02x ignored", cmd)
+                    elif srv.on_command is not None:
+                        srv.on_command(cmd & 0x0F, payload)
         except OSError:
             pass
         finally:

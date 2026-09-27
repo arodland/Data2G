@@ -145,6 +145,24 @@ def awgn(x: np.ndarray, snr_db: float, seed: int = 0, s_power: float | None = No
     return x + rng.normal(scale=np.sqrt(sigma2), size=len(x))
 
 
+def clicks(x: np.ndarray, rate_hz: float, amp_db: float, seed: int = 0, s_power: float | None = None) -> np.ndarray:
+    """Add impulsive noise: Poisson-timed clicks at `rate_hz`, each a white
+    noise burst 0.1-2 ms long, `amp_db` over `s_power` (default: `x`'s
+    active power)."""
+    rng = np.random.default_rng(seed)
+    if s_power is None:
+        s_power = active_power(x)
+    y = np.array(x, dtype=np.float64)
+    a = np.sqrt(s_power * 10 ** (amp_db / 10))
+    for t in np.cumsum(rng.exponential(FS / rate_hz, size=int(3 * rate_hz * len(x) / FS) + 8)):
+        if t >= len(y):
+            break
+        n = int(rng.uniform(0.1e-3, 2e-3) * FS) + 1
+        seg = y[int(t):int(t) + n]
+        seg += rng.normal(scale=a, size=len(seg))
+    return y
+
+
 def zero_spans(x: np.ndarray, spans_s: list[tuple[float, float]]) -> np.ndarray:
     """Blank out time spans (seconds) — simulates lost/blocked frames."""
     y = x.copy()

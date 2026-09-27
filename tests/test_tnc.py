@@ -59,6 +59,21 @@ def test_digital_silence_is_not_searched():
     assert rx.feed(np.zeros(5 * FS)) == [] and not rx.busy
 
 
+def test_blanker_removes_clicks_and_leaves_noise_and_level_steps():
+    rng = np.random.default_rng(0)
+    noise = rng.normal(size=20 * FS)
+    b = tnc.Blanker()
+    assert np.array_equal(b(noise), noise) and b.n_blanked == 0
+    y = hfchannel.clicks(noise, 10, 20, seed=1, s_power=1.0)
+    z = tnc.Blanker()(y)
+    assert np.mean(z**2) < 1.1 < np.mean(y**2) / 1.5
+    # a strong station keying up (+30 dB) is a level step, not a click
+    step = np.concatenate([noise[:FS], 30 * noise[FS:2 * FS]])
+    b = tnc.Blanker()
+    assert np.array_equal(b(step), step)
+    assert np.array_equal(tnc.Blanker()(np.zeros(FS)), np.zeros(FS))
+
+
 def test_accept_caps_codewords_by_burst_length():
     a = modem.Accept.of(["qpsk-r1/5", "w48-qpsk-r1/2"], max_secs=10)
     lim = dict(a.max_cw)

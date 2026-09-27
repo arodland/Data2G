@@ -120,3 +120,13 @@ def test_broadcast_mode_option():
         KissLink(cap=0, broadcast="w48-qpsk-r1/5")  # 2400 Hz under a 500 Hz cap
     with pytest.raises(ValueError):
         KissLink(broadcast="no-such-mode")
+
+
+def test_kiss_commands_set_channel_access():
+    k = KissLink()
+    k.command(2, bytes([127]))
+    k.command(3, bytes([10]))  # a client's 100 ms: shorter than our carrier sense
+    k.command(1, bytes([50]))  # TXDELAY: ours is --ptt-on-delay-ms
+    assert (k.persist, k.slot_s) == (127, 1.0)
+    k.command(3, bytes([200]))
+    assert k.slot_s == 2.0
