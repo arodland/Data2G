@@ -1474,6 +1474,61 @@ PTT:
 - **Not done:** reports only travel inside bursts that carry frames. A
   station that only listens never reports, so traffic to it stays robust.
 
+## Receiver CPU: incremental search, QPSK LLRs, burst routing (2026-09-26)
+
+TLDR: listening dropped from 14% to 4.3% of a core per host; a Pat exchange's
+busier host from 12.7% to 3.3%. Measured with two hosts under py-spy on a
+PipeWire loopback, an outside process injecting noise (SNR sweeping 25 to
+2 dB), Pat P2P (text, 8 kB and 4 kB attachments; 220-231 s, no bursts lost).
+
+- **Profile before:** preamble search was 95% of listening CPU (OFDM 73%,
+  CPM 22%); in the exchange, search while a burst arrived 36%, idle search
+  26%, KISS trying ARQ bursts with its own keys 13%, the exact LLR 13%.
+- **Incremental OFDM search** (`sync.StreamDetector`): the receiver searched
+  its 1.9 s buffer every 0.25 s on three bands, each start's statistic
+  recomputed ~8 times. The statistic at a start depends only on the audio
+  after it (no carrier phase), so each band's detector now computes it once
+  as audio arrives. The noise level is each bin's median over the last 8
+  chunks (then the lowest bin's, as before), not the buffer's quantile.
+  Starts whose whole head has been searched are not searched again, after
+  one more hop (`Receiver.REVISIT`: the old repeated searches rescued a weak
+  preamble now and then).
+  - Detection, same seeds, old vs new: 506 vs 504 of 560 bursts across 7
+    weak cells (ack-4f AWGN -8, MPP -3; qpsk-r1/5 MPG -2; n10-ack-4f AWGN -9,
+    MPP -3; w48-qpsk-r1/5 MPP 2; fsk16r25-r1/2 AWGN -11). 16 min of noise:
+    no header lock either way.
+  - Data whose preamble was lost no longer false-locks: its own audio sets
+    the noise level. Two tests that need such a false lock force the old
+    search (`tests/test_tnc.py`).
+- **CPM search:** only starts not yet searched (`cpm.find(lo, hi)`), and the
+  shift/row loop vectorized: 3.4 -> 1.0 ms per grid per search.
+- **Gray QPSK LLRs in closed form** (`constellation.llr`): the exact LLR is
+  linear for Gray QPSK; same values to 1e-13, ~160x faster.
+- **Burst routing:** in a session, a control codeword under the session's
+  key claims a burst before KISS tries its keys; KISS gives up after slot 0
+  and 1 fail instead of decoding every slot. Soft bits are computed once per
+  burst and shared, and one-off decodes are remembered (`ModemRx`).
+- **Second round** (listening 5.4% -> 4.3%; the exchange's hosts 4.2/6.4%
+  -> 3.3/2.7%):
+  - A confirmed burst (header >= 0.36 and its frame pilots there, ~0.6 s in)
+    skips the later-header search, which exists for false locks: it was 30%
+    of the exchange. Back-to-back bursts 0.2-0.6 s apart, both received: 478
+    of 480 with and without the skip (`scripts/cpu_profile/search_ab.py`).
+  - The detector keeps only the statistic a search can use (it grew with a
+    long burst in the buffer and was copied every hop: 23% of the exchange).
+  - The delay-support basis of the header's channel smoothing is cached per
+    band and support (its SVD was 7%, once per header read).
+  - Square Gray QAM (16-QAM) LLRs exactly, one axis at a time: the likelihood
+    splits into I and Q, so 4 levels per axis instead of 16 points (2x).
+  - A chunk's noise level from its new correlation outputs (at least 0.25 s),
+    by one partition.
+- **Measuring:** `scripts/cpu_profile/run.sh idle|pat <s> <out>` (two hosts
+  under py-spy on a noisy PipeWire loopback), `analyze.py` on the profiles,
+  `search_ab.py` for detection before/after a receiver change.
+- **What's left** (exchange): OFDM search 25%, polar decodes 11% (a list
+  decoder recursing in torch: exact speedups need care), LDPC 10%, soft bits
+  under KISS 9% (computed once, shared), audio I/O 8%.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX

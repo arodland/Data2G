@@ -477,7 +477,8 @@ def _copy_llr(z: np.ndarray, p: int, band: str, n_hdr: int) -> np.ndarray | None
     return out.reshape(-1)
 
 
-def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Accept | None = None) -> tuple:
+def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Accept | None = None,
+                 stats: dict | None = None) -> tuple:
     """-> (header read, acquisition, frequency-corrected z) of the best
     CRC-valid header in baseband `z0`, over `bands` (default: every sync
     band). `complete`: the burst the header claims must fit in `z0`;
@@ -496,7 +497,7 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
     good, detected, waiting = [], 0, False
     for name in bands or (accept.bands if accept else SYNC_BANDS):
         try:
-            acq_b = acquire(z0, band=ofdm.band(name))
+            acq_b = acquire(z0, band=ofdm.band(name), S=stats.get(name) if stats else None)
         except SyncError:
             continue
         detected += 1
@@ -536,12 +537,14 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
     return hd, acq, z
 
 
-def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None) -> dict:
+def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: dict | None = None) -> dict:
     """Where the first burst in `x` is, from its preamble and header
-    alone, so a streaming receiver knows how much audio to wait for:
+    alone, so a streaming receiver knows how much audio to wait for
+    (`stats`: per band, sync.StreamDetector's statistic for x's starts):
     {spec, n_cw, start (first preamble sample), end (one past the closing
     pilot)}. The burst may run past the end of `x`. Raises SyncError."""
-    hd, acq, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept)
+    hd, acq, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
+                              stats=stats)
     spec, n_cw = hd["hdr"]
     return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
                 end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)

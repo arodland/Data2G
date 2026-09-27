@@ -37,6 +37,9 @@ def gray_qam(m: int) -> np.ndarray:
     return pts / np.sqrt(np.mean(np.abs(pts) ** 2))
 
 
+_QPSK = gray_qam(2)
+
+
 @lru_cache(maxsize=None)
 def load(name: str) -> np.ndarray:
     if name.startswith("gray-qam"):
@@ -61,11 +64,45 @@ def llr(y: np.ndarray, h: np.ndarray, var: np.ndarray, points: np.ndarray) -> np
     point equally likely. y, h, var share a shape; returns shape + (m,)
     flattened to (..., m) then to one row of bits in symbol order."""
     m = bits_per_symbol(points)
+    if m == 2 and np.allclose(points, _QPSK):
+        # Gray QPSK: each bit rides one axis and the other axis's terms cancel,
+        # so the exact LLR is linear: -4a Re|Im(y conj h) / var (a = 1/sqrt 2).
+        # The general path below took 13% of a Pat exchange's CPU.
+        u = y * np.conj(h) * (-2 * np.sqrt(2) / var)
+        return np.stack([u.real, u.imag], axis=-1).reshape(-1)
+    if m % 2 == 0 and m <= 8 and np.allclose(points, _square(m)):
+        return _llr_square(y, h, var, m)
     d = -np.abs(y[..., None] - h[..., None] * points) ** 2 / var[..., None]  # (..., 2^m)
     lb = label_bits(m).astype(bool)  # (2^m, m)
     l0 = _lse(np.where(~lb.T, d[..., None, :], -np.inf))
     l1 = _lse(np.where(lb.T, d[..., None, :], -np.inf))
     return (l0 - l1).reshape(-1)
+
+
+@lru_cache(maxsize=None)
+def _square(m: int) -> np.ndarray:
+    return gray_qam(m)
+
+
+def _llr_square(y, h, var, m):
+    """Exact LLRs for Gray square QAM, one axis at a time: -|y - h x|^2 / var
+    = -(|h|^2 / var) |y / h - x|^2, which splits into I and Q terms, and the
+    first m/2 bits ride I, the rest Q, so each bit's LLR needs its own axis's
+    2^(m/2) levels (16-QAM: 4 levels, not 16 points)."""
+    k = m // 2
+    pts = _square(m)
+    amp = pts[:: 2**k].real  # I level of each I label (index = I label << k)
+    g2 = np.abs(h) ** 2
+    w = g2 / var
+    z = np.where(g2 > 0, y * np.conj(h) / np.where(g2 > 0, g2, 1), 0)
+    lb = label_bits(k).astype(bool)  # (levels, k)
+    out = []
+    for t in (z.real, z.imag):
+        d = -w[..., None] * (t[..., None] - amp) ** 2  # (..., levels)
+        l0 = _lse(np.where(~lb.T, d[..., None, :], -np.inf))
+        l1 = _lse(np.where(lb.T, d[..., None, :], -np.inf))
+        out.append(l0 - l1)  # (..., k)
+    return np.concatenate(out, axis=-1).reshape(-1)
 
 
 def _lse(a: np.ndarray) -> np.ndarray:

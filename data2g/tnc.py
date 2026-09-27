@@ -167,6 +167,10 @@ class Receiver:
         # what a trim keeps (so one still arriving survives it)
         self.min_search = search_span(self.bands, cpm_grids)
         self.keep = self.min_search + FS
+        from .waveform import ofdm, sync
+
+        # each band's detection statistic, computed once per sample (not per search)
+        self.detectors = {b: sync.StreamDetector(ofdm.band(b)) for b in self.bands}
         self.reset()
 
     # new audio between preamble searches (one is ~40 ms of CPU at +-150 Hz):
@@ -179,10 +183,16 @@ class Receiver:
         self.off = 0  # stream sample index of buf[0]
         self.pending = None
         self.pilots_ok = False
+        self.confirmed = False  # the pending burst's header is clear and its pilots are there
         self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
         self._ps, self._pn = 0.0, 0  # the block being summed
         self.fresh = self.HOP  # samples fed since the last preamble search (search at once)
         self.last_start = -1  # stream start of the last burst handled (not to be found again)
+        # per band / CPM grid: starts before this stream index have been
+        # searched with all the audio their header needs (not searched again)
+        self.decided: dict = {}
+        for d in getattr(self, "detectors", {}).values():
+            d.reset()
 
     @property
     def busy(self) -> bool:
@@ -221,6 +231,7 @@ class Receiver:
         c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
         if len(c) >= modem.PILOT_PAIRS:
             ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
+            self.confirmed = ok and p["score"] >= self.SUSPECT_SCORE
             if ok != self.pilots_ok:
                 log.info("%s burst: pilots %s (coherence %.2f)", p["spec"].name, "back" if ok else "gone", np.mean(c))
             self.pilots_ok = ok
@@ -228,6 +239,46 @@ class Receiver:
     def _trim(self, n: int):
         self.off += len(self.buf) - n if n < len(self.buf) else 0
         self.buf = self.buf[-n:] if n < len(self.buf) else self.buf
+        for d in self.detectors.values():
+            d.trim(self.off)
+
+    def _stats(self, w0: int = 0) -> dict:
+        """Per band, the detection statistic for buf[w0:]'s starts (new audio
+        fed first), starts already decided masked out (-1)."""
+        out = {}
+        for b, d in self.detectors.items():
+            if d.fed < self.off:  # its audio was trimmed away: start over
+                d.reset()
+                d.fed = self.off
+            d.feed(modem.to_baseband(self.buf[d.fed - self.off:]))
+            # no search looks further back than `keep` (the statistic grew
+            # with a long burst in the buffer, and was copied every hop)
+            d.trim(self.off + len(self.buf) - self.keep - d.span)
+            n = len(self.buf) - w0 - d.span + 1
+            if n <= 0:
+                continue
+            lo = self.off + w0
+            S = d.stat(lo, lo + n)
+            S[:, :max(0, self.decided.get(b, 0) - lo)] = -1.0
+            out[b] = S
+        return out
+
+    # a decided start stays searchable this much longer: the old whole-buffer
+    # search met each start ~4 times, which rescued weak preambles now and
+    # then (n10-ack-4f AWGN -9 dB: 64/80 found, 60-62 once each)
+    REVISIT = 2 * HOP
+
+    def _searched(self):
+        """Every start whose whole head (both header copies) is in the buffer
+        is decided: a later search of it would read the same."""
+        from . import cpm
+
+        end = self.off + len(self.buf)
+        for b in self.detectors:
+            self.decided[b] = max(self.decided.get(b, 0),
+                                  end - modem.head_samples(b) - BANDS[b].preamble_samples - self.REVISIT)
+        for g in self.grids:
+            self.decided[g.name] = max(self.decided.get(g.name, 0), end - search_span((), (g.name,)) - g.T)
 
     SUPERSEDE_MARGIN = 0.05  # header score a later header needs over the pending one
     SUSPECT_SCORE = 0.36  # below it a header may be a false lock (false ones score 0.19-0.34)
@@ -250,9 +301,11 @@ class Receiver:
         if len(self.buf) - w0 < self.keep // 2:
             return False
         try:
-            q = modem.find_burst(self.buf[w0:], self.bands, self.accept)
+            q = modem.find_burst(self.buf[w0:], self.bands, self.accept, stats=self._stats(w0))
         except modem.SyncError:
             return False
+        finally:
+            self._searched()
         if q["score"] < p["score"] + self.SUPERSEDE_MARGIN:
             return False
         q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
@@ -263,6 +316,7 @@ class Receiver:
                                   "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
         self.pending = q
         self.pilots_ok = q["score"] >= self.SUSPECT_SCORE
+        self.confirmed = False
         out.append(("header", q))
         return True
 
@@ -271,7 +325,8 @@ class Receiver:
         from . import cpm
 
         for g in self.grids:
-            lock = cpm.find(g, self.buf)
+            lock = cpm.find(g, self.buf, lo=max(0, self.decided.get(g.name, 0) - self.off),
+                            hi=len(self.buf) - search_span((), (g.name,)) + 2 * g.T)
             if lock is not None:
                 return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
         return None
@@ -305,16 +360,22 @@ class Receiver:
                 # radio's noise at the sound card is far above -80 dBFS.
                 if np.sqrt(np.mean(self.buf[-self.min_search :] ** 2)) < SILENCE_RMS:
                     self._trim(self.keep)
+                    for d in self.detectors.values():  # no noise level in silence: skip it
+                        d.reset()
+                        d.fed = self.off + len(self.buf)
                     break
                 try:
-                    p = modem.find_burst(self.buf, self.bands, self.accept)
-                    if p["score"] < self.SUSPECT_SCORE:
-                        p = self._find_cpm() or p  # a strong CPM burst read as a weak OFDM header
-                except modem.SyncError:
-                    p = self._find_cpm()
-                    if p is None:
-                        self._trim(self.keep)
-                        break
+                    try:
+                        p = modem.find_burst(self.buf, self.bands, self.accept, stats=self._stats())
+                        if p["score"] < self.SUSPECT_SCORE:
+                            p = self._find_cpm() or p  # a strong CPM burst read as a weak OFDM header
+                    except modem.SyncError:
+                        p = self._find_cpm()
+                finally:
+                    self._searched()
+                if p is None:
+                    self._trim(self.keep)
+                    break
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window
                 self.pending = dict(p, start=p["start"] + self.off, end=p["end"] + self.off)
@@ -322,6 +383,7 @@ class Receiver:
                     self.pending["p0"] = p["p0"] + self.off
                 # BUSY at once on a clear header; a suspect one waits for its pilots
                 self.pilots_ok = p.get("family") == "cpm" or p["score"] >= self.SUSPECT_SCORE
+                self.confirmed = False
                 log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS, "sync" if p.get("family") == "cpm" else "header",
                          p["score"])
@@ -330,7 +392,11 @@ class Receiver:
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
                 if self.fresh >= self.HOP:
                     self._check_pilots()
-                    if self._supersede(out):
+                    # the later-header search is for false locks: a confirmed
+                    # burst skips it (it was 30% of a Pat exchange's CPU)
+                    if self.confirmed:
+                        self.fresh = 0
+                    elif self._supersede(out):
                         continue
                 break
             if p.get("family") == "cpm":
@@ -355,7 +421,7 @@ class Receiver:
             self.last_start = p["start"]
             # a better header inside this burst's span (it was a false lock,
             # and the real one began before it ended) is next, not trimmed away
-            if self._supersede(out, whole=True):
+            if not self.confirmed and self._supersede(out, whole=True):
                 self._trim(len(self.buf) - max(0, self.pending["start"] - LEADIN_SAMPLES - self.off))
                 continue
             # a suspect (possibly false) burst may have claimed an end past a

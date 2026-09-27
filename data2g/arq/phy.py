@@ -87,7 +87,11 @@ class ModemRx:
 
     def __init__(self, r: dict, store: dict):
         self.spec, self.n_cw, self.submode = r["spec"], r["n_cw"], r["spec"].name
-        self.soft, self.store = soft_bits(r), store
+        # computed once per burst, shared by whoever decodes it (KISS, then ARQ)
+        if "_soft" not in r:
+            r["_soft"] = soft_bits(r)
+        self.soft, self.store = r["_soft"], store
+        self._memo = {}  # (slot, mask) -> a one-off decode's result: asked again, free
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
 
     def _spec(self, slot: int):
@@ -102,8 +106,10 @@ class ModemRx:
             return None
         m = mask_value(mask_id)
         if key is None:
-            payload, ok = codes.decode_many(self._spec(slot), np.asarray(self.soft[slot])[None], m, index=0)[0]
-            return payload if ok else None
+            if (slot, m) not in self._memo:
+                payload, ok = codes.decode_many(self._spec(slot), np.asarray(self.soft[slot])[None], m, index=0)[0]
+                self._memo[(slot, m)] = payload if ok else None
+            return self._memo[(slot, m)]
         buf, top, name, where = self.store.get(key, (None, 0, self.submode, None))
         if name != self.submode:
             raise AssertionError(f"soft bits of {key} stored in {name} ({where}), resent in {self.submode} "

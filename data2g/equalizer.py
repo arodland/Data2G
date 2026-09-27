@@ -17,6 +17,8 @@ is buffered before decoding, so every estimate can use every pilot:
   the per-cu estimate MSE so the demapper can discount it.
 """
 
+from functools import lru_cache
+
 import numpy as np
 
 from .config import FRAME_SAMPLES, FS, NC, NCP, RS, SYMS_PER_FRAME
@@ -86,6 +88,24 @@ def window_shift(support: tuple[int, int]) -> int:
     return int(round((support[0] + support[1] - NCP) / 2))
 
 
+@lru_cache(maxsize=1024)
+def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
+    """(orthonormal basis of the support's delays across the carriers, its
+    rank, the uncapped rank): geometry only, so computed once per band and
+    support (the SVD was 7% of a Pat exchange's CPU, once per header read)."""
+    bb = np.frombuffer(bb_bytes)
+    nc = len(bb)
+    slack = 4  # see _freq_smooth
+    d = np.arange(d0 - slack, d1 + slack + 1)
+    B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
+    U, s, _ = np.linalg.svd(B, full_matrices=False)
+    r_full = int(np.sum(s > s[0] * 1e-2))
+    r = min(r_full, nc - 2)
+    U = np.ascontiguousarray(U[:, :r])
+    U.setflags(write=False)
+    return U, r, r_full
+
+
 def _freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
     """Project each pilot vector onto the delay support. Returns the
     smoothed pilots, the per-carrier noise variance from the residual
@@ -114,13 +134,7 @@ def _freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray =
     # k1280 AWGN +2.5): the tight projection's noise averaging is worth
     # more than its bias at the SNRs these modes run at. Per-burst model
     # order selection could have both; untried.
-    slack = 4
-    d = np.arange(d0 - slack, d1 + slack + 1)
-    B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
-    U, s, _ = np.linalg.svd(B, full_matrices=False)
-    r_full = int(np.sum(s > s[0] * 1e-2))
-    r = min(r_full, nc - 2)
-    U = U[:, :r]
+    U, r, r_full = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(d0), int(d1))
     hs = (h_pilot @ np.conj(U)) @ U.T
     n0 = float(np.mean(np.abs(h_pilot - hs) ** 2) * nc / (nc - r)) if nc - r_full >= 2 else np.inf
     return hs, n0, r, 1 - np.sum(np.abs(U) ** 2, axis=1)

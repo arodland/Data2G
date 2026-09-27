@@ -69,3 +69,17 @@ def test_search_reaches_150_hz_and_no_further():
 
     g = sync._cfo_grid()
     assert ACQUIRE_REACH_HZ == 150 and g.min() == -150 and g.max() == 150
+
+
+def test_stream_detector_matches_the_whole_signal():
+    """Fed in chunks, StreamDetector's statistic (before the noise level)
+    is detection_stat's on the whole signal, start for start."""
+    rng = np.random.default_rng(3)
+    z = rng.normal(size=12000) + 1j * rng.normal(size=12000)
+    band = ofdm.band("n10")
+    S_all, _, _ = sync._raw_stat(z, band)
+    d = sync.StreamDetector(band)
+    for a in range(0, len(z), 1777):
+        d.feed(z[a:a + 1777])
+    assert d.s0 == 0 and d.S.shape == S_all.shape
+    np.testing.assert_allclose(d.S, S_all, rtol=1e-9, atol=1e-9 * S_all.max())

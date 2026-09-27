@@ -372,12 +372,17 @@ def detect(g: Grid, x: np.ndarray, reach_hz: float = 150.0, fine=True, front_onl
                 continue
             Z = np.fft.fft(zf[off:off + n * T].reshape(n, T), axis=1)
             E = _shares(np.abs(Z[:, :g.m + 2 * extra]) ** 2)
-            for dk in range(-extra, extra + 1):
-                cols = tones_ + extra + dk
-                S = sum(E[r:n - span + 1 + r, c] for r, c in zip(rows, cols))
-                j = int(np.argmax(S))
-                if S[j] / len(rows) > best[0]:
-                    best = (float(S[j]) / len(rows), off + j * T, dk * g.rate + frac * g.rate)
+            # every start and whole-bin shift at once: S[dk, j] = sum over the
+            # pattern's rows r of E[r + j, tone_r + extra + dk] (a loop over
+            # dk and r took ~1/3 of a listening host's CPU on its tiny arrays)
+            J = n - span + 1
+            Er = E[np.asarray(rows)[:, None] + np.arange(J)]  # (rows, J, bins)
+            cols = np.asarray(tones_)[:, None] + extra + np.arange(-extra, extra + 1)  # (rows, dk)
+            S = Er[np.arange(len(rows))[:, None], :, cols].sum(axis=0)  # (dk, J)
+            k = int(np.argmax(S))
+            if S.flat[k] / len(rows) > best[0]:
+                dk, j = divmod(k, J)
+                best = (float(S.flat[k]) / len(rows), off + j * T, (dk - extra) * g.rate + frac * g.rate)
     score, s0, cfo = best
     if fine and score >= floor:  # timing to T/32, CFO to R/16
         cand = []
@@ -468,14 +473,27 @@ def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float) -> float:
     return float(E[np.arange(len(f)), f].mean() / E.max(axis=1).mean())
 
 
-def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float = 150.0, front_only: bool = True):
+def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float = 150.0, front_only: bool = True,
+         lo: int = 0, hi: int | None = None):
     """-> early lock {spec, n_data, dup, start, end, score, header score} of
     a burst of grid g in x, or None: the sync pattern (front block alone by
     default) scoring over `threshold` (default SYNC_THRESHOLD; given: no
     header floor either), then its first header copy (HEADER_THRESHOLD).
-    `end`: one past its last sample, in x's samples (it may run past x)."""
+    `end`: one past its last sample, in x's samples (it may run past x).
+    `lo`, `hi`: only starts in [lo, hi) are searched (a streaming receiver
+    searches each start once: detect's cost is the audio it is given)."""
     floor = SYNC_THRESHOLD[g.name] if threshold is None else threshold
-    score, s0, cfo = detect(g, x, reach_hz=reach_hz, front_only=front_only, floor=floor)
+    if lo or hi is not None:
+        lay0 = layout(g.name, stream_symbols(g.name, 0, False))
+        span = ((lay0.sync_rows[lay0.front - 1] if front_only else lay0.sync_rows[-1]) + 2) * g.T
+        a = max(0, lo - g.T)
+        b = len(x) if hi is None else min(len(x), hi + span + g.T)
+        score, s0, cfo = detect(g, x[a:b], reach_hz=reach_hz, front_only=front_only, floor=floor)
+        s0 += a
+        if not lo <= s0 < (len(x) if hi is None else hi):
+            return None
+    else:
+        score, s0, cfo = detect(g, x, reach_hz=reach_hz, front_only=front_only, floor=floor)
     if score < (SYNC_THRESHOLD[g.name] if threshold is None else threshold):
         return None
     if s0 + (layout(g.name, stream_symbols(g.name, 0, False)).hdr_rows[0][-1] + 1) * g.T > len(x):
