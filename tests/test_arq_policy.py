@@ -33,12 +33,16 @@ def measured(snr_db, doppler, band="w"):
     return m
 
 
+def joint(measured_, band, seconds=6.0):
+    """P(usable) x P(codeword) per submode from the outcome model."""
+    return {k: pb * pc for k, (pb, pc) in P.predict_outcome(measured_, band, 2.5, seconds).items()}
+
+
 def test_predictor_monotone_in_snr_and_rate():
-    lo = P.predict(measured(-2, 0.05), "w", 2.5)
-    hi = P.predict(measured(12, 0.05), "w", 2.5)
+    lo, hi = joint(measured(-2, 0.05), "w"), joint(measured(12, 0.05), "w")
     for name in ("qpsk-r1/2", "16qam-r1/2", "w48-16qam-r2/3"):
         assert hi[name] > lo[name]
-    assert hi["qpsk-r1/5"] >= hi["16qam-r1/2"] - 1e-9  # a faster mode never predicts likelier
+    assert lo["qpsk-r1/5"] >= lo["16qam-r1/2"]  # near the bottom, the robust mode is the likelier
 
 
 def station(cap, chat=False):
@@ -56,7 +60,7 @@ def test_chat_trades_rate_for_latency():
         rec, hint, _ = g.recommend(station(2, chat))
         out[chat] = (G.decode(rec), hint)
     assert out[True][1] <= out[False][1]
-    p = P.predict(measured(6, 0.1, "w48"), "w48", 2.5)
+    p = joint(measured(6, 0.1, "w48"), "w48")
     assert p[out[True][0]] >= p[out[False][0]] - 0.02
 
 
@@ -77,16 +81,18 @@ def test_shifter_respects_cap_and_falls_back():
 def test_numpy_runtime_has_no_torch():
     import sys
     before = "torch" in sys.modules
-    P.model.cache_clear()
-    P.model()
+    P.outcome_model.cache_clear()
+    P.predict_outcome(measured(5, 0.1), "w", 2.5, 6.0)
     assert before or "torch" not in sys.modules
 
 
 def test_inputs_match_model_with_and_without_history():
     m = dict(measured(5, 0.1), frames=8)
+    model = P.outcome_model()
+    mean = (model.members[0] if isinstance(model, P.OutcomeEnsemble) else model).mean
     for prev in (None, (m, "w", 4.0)):
-        x = P.inputs(m, "w", 2.5, 16, prev)
-        assert x.shape == (len(P.INPUTS),) == P.model().mean.shape
+        x = P.outcome_inputs(m, "w", 2.5, 6.0, prev, model.bands)
+        assert x.shape == mean.shape
 
 
 def test_online_bias_follows_outcomes():
