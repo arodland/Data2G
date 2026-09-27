@@ -44,6 +44,7 @@ from .config import (
     SubmodeSpec,
 )
 from .waveform import ofdm
+from .waveform import sync as _sync
 from .waveform.dsp import freq_correct, to_baseband, tx_condition
 from .waveform.sync import SyncError, acquire
 
@@ -582,16 +583,131 @@ def pilot_coherence(x: np.ndarray, lock: dict, n_max: int = 8, latest: bool = Fa
             for f in range(1, len(y))]
 
 
-def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None) -> dict:
+# Mid-burst acquisition from the header copy (w, w48; scripts/copy_acq_study.py),
+# for a burst whose preamble was lost in a fade: the frame pilots after it
+# give the frame grid, the copy gives the header.
+COPY_PAIRS = 3  # frame-pilot pairs per product window
+COPY_GRIDS = 4  # frame grids (phases) tried per search
+COPY_EARLIER = (0, NCP // 2, NCP)  # read the copy this much before a peak (its strongest path may be late)
+# mean frame-pilot coherence a copy lock needs over its burst: on noise
+# locks read 0.11-0.23 (47 in 2 h), true locks that decoded 0.41-0.73 (58)
+COPY_COHERENCE = 0.35
+# find_copy's normalized pilot peak worth reading headers at: noise-only
+# 1.9 s buffers (the stream's) reach 11.9 (2400 of them, w and w48); bursts
+# the copy lock went on to decode, 16.6-91 (16, MPP/MPD low end). Without it
+# the search tripled a listening receiver's CPU (4.4 -> 13.7 s per minute).
+COPY_DETECT = 14.0
+
+
+def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndarray | None = None,
+              level: float | None = None) -> dict | None:
+    """A burst in real audio `x` found from its frame pilots and header copy
+    alone (the preamble and first header lost): find_burst's dict plus
+    "copy" (what receive() needs to rebuild the header), or None. The burst
+    may run past the end of x. `C`, `level`: the preamble matched filter's
+    outputs for x's starts (sync.StreamDetector.C) and noise level, if a
+    stream has them; computed here otherwise.
+
+    1. The matched filter's outputs one frame apart, correlated as the
+       preamble's are one repeat apart (the frame pilot is the preamble's
+       repeat symbol), over COPY_PAIRS pairs, then folded over every frame
+       per grid phase: a burst's pilots add coherently (each pair turns by
+       the same CFO), its data symbols (M-periodic too) at random.
+    2. Per grid (the COPY_GRIDS best phases), the CFO: the bin, refined by
+       the fold's phase (modulo 1 / FRAME_S; the copy read interpolates its
+       channel over a frame, and a half-bin error turns it 0.9 cycles).
+    3. The copy read at every frame of the grid; a word counts if its own
+       length puts its copy frame there and it clears the header floor.
+    4. The best-scoring word whose burst's frame pilots are coherent
+       (COPY_COHERENCE; the live BUSY floors pass noise)."""
+    b = ofdm.band(band)
+    z0 = to_baseband(np.asarray(x, dtype=np.float64))
+    freqs = _sync._cfo_grid()
+    if C is None:
+        t = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
+        C = _sync._repeat_corrs(z0, t / np.linalg.norm(t), list(freqs))
+        level = float((np.quantile(np.abs(C) ** 2, _sync.NOISE_QUANTILE, axis=1)
+                       / -np.log(1 - _sync.NOISE_QUANTILE)).min())
+    n = C.shape[1] - COPY_PAIRS * FRAME_SAMPLES
+    m = n // FRAME_SAMPLES
+    if m < 1:
+        return None
+    d = C[:, FRAME_SAMPLES:] * np.conj(C[:, :-FRAME_SAMPLES])
+    D = sum(d[:, j * FRAME_SAMPLES:j * FRAME_SAMPLES + m * FRAME_SAMPLES] for j in range(COPY_PAIRS))
+    fold = D.reshape(len(freqs), m, FRAME_SAMPLES).sum(axis=1)
+    mag = np.abs(fold).max(axis=0)
+    # on noise each product's magnitude is about the level, and the m x
+    # COPY_PAIRS of them add at random: the header reads (nearly all of the
+    # search's CPU) only past COPY_DETECT
+    find_copy.peak = float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
+    if find_copy.peak < COPY_DETECT:
+        return None
+    grids = []
+    for ph in np.argsort(-mag):
+        if all(min(abs(int(ph) - g), FRAME_SAMPLES - abs(int(ph) - g)) >= NCP for g in grids):
+            grids.append(int(ph))
+            if len(grids) == COPY_GRIDS:
+                break
+    alias = FS / FRAME_SAMPLES
+    sb = BANDS[band]
+    floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
+    found = []
+    for ph in grids:
+        i = int(np.argmax(np.abs(fold[:, ph])))
+        frac = float(np.angle(fold[i, ph])) / (2 * np.pi) * alias
+        for f in [float(freqs[i]) + frac + k * alias for k in (-1, 0, 1)
+                  if abs(frac + k * alias) <= _sync.STEP_HZ / 2 + 0.5]:
+            z = freq_correct(z0, f)
+            for early in COPY_EARLIER:
+                for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
+                    llr = _copy_llr(z, pc, band, sb.header_syms)
+                    if llr is None:
+                        continue
+                    word, (spec, n_cw), score = decode_header(llr, band, accept)
+                    kc = copy_frame(band, n_cw * spec.frames_per_cw)
+                    p0 = pc - (kc or 0) * FRAME_SAMPLES
+                    start = p0 - header_samples(band) - sb.preamble_samples
+                    if kc is not None and score >= floor and start >= 0:
+                        found.append(dict(spec=spec, n_cw=n_cw, start=start, score=score, band=band,
+                                          end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
+                                          copy=dict(word=word, pc=pc)))
+    for lock in sorted(found, key=lambda k: -k["score"]):
+        c = pilot_coherence(x, lock, n_max=10**4)
+        if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE:
+            return lock
+    return None
+
+
+def _copy_header(z: np.ndarray, lock: dict) -> dict:
+    """_read_header's dict for a copy lock (z frequency-corrected): the header
+    it read, its phase reference from the copy frame's pilot (the preamble
+    faded)."""
+    band = lock["band"]
+    b = ofdm.band(band)
+    hd = _read_header(z, lock["start"], band)
+    hd.update(hdr=(lock["spec"], lock["n_cw"]), word=lock["copy"]["word"], score=lock["score"],
+              h_pre=b.demod_window(z, lock["copy"]["pc"] + NCP, HEADER_BACKOFF) / b.pilot)
+    return hd
+
+
+def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None,
+            copy: dict | None = None) -> dict:
     """Everything up to soft bits for the first burst in `x`: the
     synchronisation state (so an analysis script can replay it on
     another signal) and the equalizer output. `bands`: the sync bands to
     look for (default: all). `head`: the preamble and header lie in the
     first `head` samples (a streaming receiver found them there): search
     only those. Acquisition over a whole 11 s burst took 1-4 s of CPU,
-    nearly all of receive's time."""
+    nearly all of receive's time. `copy`: find_copy's lock (same sample
+    origin as x): no preamble search, the header its copy read."""
     z0 = to_baseband(np.asarray(x, dtype=np.float64))
-    if head is None:
+    if copy is not None:
+        z = freq_correct(z0, copy["cfo"])
+        hd = _copy_header(z, copy)
+        acq = _sync.Acquisition(copy["start"], copy["cfo"], 0.0)
+        if copy["end"] > len(z0):
+            raise SyncError("burst runs past the buffer")
+    elif head is None:
         hd, acq, z = _best_header(z0, bands, accept=accept)
     else:
         hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept)

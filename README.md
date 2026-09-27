@@ -1670,6 +1670,69 @@ waveform change yet.
   the index's cost and reliability. A 16-QAM w48 symbol is 192 coded
   bits, and 5 bits of index per symbol is 2.6%.
 
+## Mid-burst acquisition from the header copy (2026-09-27)
+
+TLDR: when a fade takes a w/w48 burst's preamble, the receiver now finds
+the burst from its frame pilots and reads the header from its mid-burst
+copy. Throughput +10% on MPP and MPD at 0 dB, nothing lost elsewhere, idle
+CPU +28%.
+
+- **Where sync costs** (`scripts/sync_loss_study.py`: the loss study's
+  sessions, every OFDM burst also received by a genie with the true start,
+  CFO and header, on the same audio). Bursts lost at sync that the genie
+  decodes: MPP -4 dB 11.7%, MPD 0 dB 4.6%, MPP 0 dB 4.5%, MPG -4 dB 3.7%,
+  MPG 0 dB 2.1%, AWGN -4 dB none. 80% of them on w/w48, all missed
+  preambles (not misread headers), none shorter than 5 frames.
+- **How** (`modem.find_copy`; prototype and diagnosis in
+  `scripts/copy_acq_study.py`):
+  - The preamble's matched filter (the frame pilot is its repeat symbol)
+    one frame apart, over 3 pilot pairs, folded over every frame of the
+    buffer per grid phase: pilots add coherently, data symbols don't.
+    Ranking 3-pair windows instead, data slots outranked the pilots.
+  - CFO: the bin, refined by the fold's phase. At the 12.5 Hz grid alone
+    the copy read (channel interpolated over 144 ms) failed.
+  - The copy read at every frame of the 4 best grids, at the peak and 16
+    and 32 samples earlier (the peak sat on MPP's and MPD's second path).
+    A word counts only if its own length puts its copy frame there.
+  - Gates: the normalized pilot peak must reach 14 before any header read
+    (noise buffers reach 11.9, decoded copy locks 16.6-91), and the claimed
+    burst's frame pilots must be coherent, 0.35 (noise locks 0.11-0.23,
+    decoded 0.41-0.73; the BUSY floors would pass noise).
+  - `tnc.Receiver` tries it when the preamble and CPM searches find nothing,
+    from the stream detector's kept matched filter outputs (no extra
+    filtering). A copy lock is pending as any other; `receive(copy=...)`
+    rebuilds the header from it. `receive_any` falls back to it too, so the
+    offline studies include it.
+  - `to_baseband` takes a stream offset: the receiver's fed chunks now share
+    one heterodyne phase (products a frame apart span chunks).
+- **Loss study,** shift+cpm, 12 seeds x 600 s, bps, paired by seed:
+
+  | Cell | Before | After | Paired |
+  |---|---|---|---|
+  | MPD 0 dB | 140 ± 7 | 155 ± 6 | +14 ± 5 (+10%) |
+  | MPP 0 dB | 252 ± 7 | 278 ± 7 | +26 ± 7 (+10%) |
+  | MPP -4 dB | 72 ± 2 | 72 ± 2 | 0 ± 2 |
+  | MPG -4 dB | 79 ± 6 | 82 ± 5 | +3 ± 3 |
+  | MPG 0 dB | 296 ± 14 | 295 ± 14 | -1 ± 1 |
+  | AWGN -4 dB | 202 ± 3 | 202 ± 3 | 0 |
+
+  - Missed preambles: MPP -4 dB 13.5% -> 6.5% of bursts, MPD 0 dB 5.3% ->
+    2.1%, MPP 0 dB 5.2% -> 1.5%. At MPP -4 dB the bursts won back are mostly
+    replies, and throughput doesn't move.
+  - MPG: slow fades take the copy too.
+- **CPU** (`scripts/copy_cpu.py`, streaming receiver, s per audio minute):
+  noise 4.40 -> 5.62 (the fold, each hop; header reads almost never run);
+  MPP -4 dB traffic 2.93 -> 4.20; MPP 0 dB 2.12 -> 2.37.
+- **Also tried** (`scripts/rx_ab_study.py`, 8-codeword bursts near the 10%
+  points, same audio): modem73's local LLR gate, +20% codeword failures
+  (+16% on MPD, its target); aicodix's median (Theil-Sen) phase fits, +1%.
+  Our power-weighted phasor estimators already discount faded pilots.
+- **Not reached:** n4/n10 (no header copy), MPG, and bursts whose copy
+  faded too. Per-frame pilots (a format change) would reach them: distinct
+  low-PAPR pilots exist on 10+ carriers (64 at 0.9-1.1 dB on 24/48, 16 at
+  1.25-1.6 dB on 10), identified by their pattern over frames; n4 has 2 and
+  would rotate one pilot per frame instead.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
