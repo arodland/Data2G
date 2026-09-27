@@ -1580,6 +1580,96 @@ Ideas from RFnexus/modem73 (public domain); plan in
   KISS burst goes anyway, logged. It counts only BUSY time, not time
   spent in an ARQ session. ARQ timing is unchanged.
 
+## Studies: polar list size, erasure retry (2026-09-27)
+
+From the same plan; no code change made from either yet.
+
+- **Polar SCL list 8 -> 16 -> 32** (`scripts/polar_list_study.py`,
+  `runs/polar_list.csv`): the smallest ARQ burst around each polar mode's
+  10% point, 300 trials a point, every list size decoding the same audio.
+  10% burst-failure point, gain of L = 32 over L = 8 (dB):
+
+  | mode | AWGN | MPG | MPP | MPD |
+  |---|---|---|---|---|
+  | ack-1f | 0.47 | 0.96 | 0.73 | 0.66 |
+  | ack-4f | 0.17 | 0.10 | 0.88 | 0.00 |
+  | n4-ack-2f | 0.03 | 0.17 | 0.22 | floor |
+  | n4-ack-8f | 0.10 | 0.02 | 0.00 | floor |
+  | n10-ack-4f | 0.22 | 0.09 | 0.08 | floor |
+  | polar-k96-f4 | 0.22 | 0.12 | 0.11 | 0.10 |
+  | polar-k96-f8 | 0.38 | 0.04 | 0.05 | 0.08 |
+  | polar-k192-f8 | 0.26 | 0.11 | 0.09 | 0.25 |
+  | fsk16r25-r1/3 (control, k176/n360) | 0.12 | 0.08 | 0.22 | 0.14 |
+  | fsk32r62-r1/2 (control) | 0.04 | 0.37 | 0.07 | 0.03 |
+
+  - Fading cells are noisy at 300 trials (curves not monotone); "floor":
+    the n4/n10 replies never reach 10% on MPD in the grid.
+  - ack-1f (48 bits over 240) gains most.
+  - CPU per codeword alone (as ModemRx decodes): L = 32 costs 2-5% more
+    (3.7 vs 3.5 ms at n80, 54 vs 52 ms at n1920). Batched, 1.6-2.4x.
+  - Cost: CRC16 false accepts on noise per decode, per 1e4: L = 8
+    0.8-1.7, L = 16 1.6-3.9, L = 32 4.1-5.6 (about L / 65536).
+    Every decode with a mask that isn't the sender's (KISS keys on ARQ
+    bursts, CQ probes) runs that risk.
+- **Erasure retry** (`scripts/erasure_retry_study.py`,
+  `runs/erasure_retry.csv`): after a failed decode, erase the worst 1/8,
+  then 1/4, of OFDM symbols by decision residual, then those over
+  3.3 x the median, and decode again (modem73's ladder).
+  - 8-codeword bursts of qpsk-r1/2, 16qam-r1/2, n10-qpsk-r1/2 and
+    w48-16qam-r1/2, on MPG/MPP/MPD and AWGN with 5 clicks/s (blanked),
+    0-2 dB under the 10% points.
+  - 40 of 18997 failed codewords recovered (0.2%; 30 of them n10 on MPD),
+    no false accepts. Our LLRs already weigh each cell by its channel and
+    noise estimate. Not adopted.
+
+## Study: SLM and ACE peak reduction (2026-09-27)
+
+`scripts/slm_study.py` (log in `runs/slm_ace.txt`, untracked); no
+waveform change yet.
+- **SLM** (aicodix/modem): each OFDM data symbol, or each frame, is sent
+  under the lowest-peak of C carrier sign patterns. The index is taken as
+  free here; carrying it is the open design question.
+- **ACE** (the TODO below): the data cells are projected into their
+  allowed regions after each clip-and-filter pass. TX only.
+- **Method:** 16-QAM through channel_torch's clipper and clean receiver
+  (as clip_constants.py).
+  - Scored by effective SDR: data error after the fitted gain, less the
+    outward error on outer levels, which is harmless and which ACE adds
+    on purpose.
+  - For each headroom a mode uses today: the headroom each method needs
+    for the same effective SDR, and the drop in mean burst peak there (the
+    PEP gain, dB).
+
+| band, today's headroom | SLM 32 | SLM 128 | SLM 32 per frame | ACE 3 passes | SLM 32 + ACE |
+|---|---|---|---|---|---|
+| w48, 3 dB | 0.76 | 1.06 | 0.33 | 0.45 (0.60 closing at k=1) | 1.36 |
+| w48, 4 dB | 0.87 | 1.18 | 0.38 | 0.01 (0.82) | 1.55 (1.73) |
+| w48, 5 dB | 1.33 | 1.43 | 0.43 | 0.07 (0.30) | 1.31 (1.83) |
+| w48, 6 dB | 1.21 | 1.68 | 0.58 | none (0.03) | 1.28 (1.58) |
+| n10, 2 dB | 1.12 | 1.20 | 0.66 | 0.42 | 0.90 |
+| n10, 3 dB | 1.65 | 1.82 | 0.78 | 0.44 | 1.52 |
+| any band, 0 dB | 0.14-0.43 | 0.15-0.43 | 0.03-0.15 | -0.27 to +0.04 | -0.15 to +0.34 |
+
+- Brackets: ACE whose closing clip has overshoot 1.0 rather than 2.0
+  (better SDR, higher peak).
+- Where it would count:
+  - w48-16qam-r2/3 and the learned 64/256 modes (3-6 dB of headroom).
+  - n10-16qam-r2/3 and r3/4 (2-3 dB).
+  - w48-16qam-r1/3 and r1/2 (1 dB): SLM 32 gains 0.45 there.
+  - Every other mode clips at 0 dB, where the grid can't go lower, and
+    those modes are noise-limited anyway.
+- Per-frame selection (one index per frame, cheap to carry) keeps about
+  a third of the per-symbol gain.
+- **ACE alone** is worth 0.4-0.8 dB at 2-4 dB headroom and nothing above,
+  with no format change. It is built for square QAM only: the learned
+  64/256 sets need their cells.
+  - With nothing clipped, it costs SDR 37 -> 30 dB: the 201-tap TX
+    bandpass smears symbols past the cyclic prefix, and the projection
+    chases that too.
+- **Not yet measured:** decode thresholds (these are SDR equivalences), or
+  the index's cost and reliability. A 16-QAM w48 symbol is 192 coded
+  bits, and 5 bits of index per symbol is 2.6%.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
