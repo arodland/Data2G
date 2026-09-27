@@ -47,7 +47,7 @@ VERSION = 1
 REPORT_MAX_S = 180.0  # a report older than this is not followed
 HEARD_MAX_S = 600.0  # stations reported on: heard this recently
 # robust broadcast mode per cap (data2g.arq.policy.CAP_HZ): what everyone hears
-BROADCAST = {0: "n10-qpsk-r1/5", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}
+BROADCAST = {0: "n10-qpsk-r1/5", 2: "qpsk-r1/5"}
 BROADCAST_S = G.SIZE_S[-1]
 MIN_SUCCESS = 0.9  # recommended modes: predicted first-transmission codeword success at least this  # broadcast bursts: at most the longest size class
 

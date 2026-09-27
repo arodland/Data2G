@@ -37,7 +37,6 @@ REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this sh
 
 IDLE, LISTEN, CONNECTING, CONNECTED, DISCONNECTING, CLOSED = (
     "idle", "listen", "connecting", "connected", "disconnecting", "closed")
-CAPS = {0: 500, 1: 1200, 2: 2400}
 
 
 def session_key(caller: str, callee: str, nonce: int) -> int:

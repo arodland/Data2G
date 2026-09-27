@@ -12,9 +12,7 @@ The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
 """
 
-import json
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 import numpy as np
 
@@ -63,25 +61,6 @@ def decode(rec: int) -> str | None:
     band = BY_CODE.get(rec >> 4)
     s = BY_INDEX.get((band, rec & 15)) if band else None
     return s.name if s else None
-
-
-@lru_cache(maxsize=None)
-def _sync():
-    return json.load(open(P.DATA / "sync_floors.json"))
-
-
-def p_sync(band: str, snr_db: float, doppler: float) -> float:
-    """P(a burst's preamble and header get through) in its sync band, from
-    the measured 1% floors (codes_data/sync_floors.json) interpolated in
-    Doppler, as a logistic in SNR: steep on AWGN (0.6 dB), shallow on
-    fading (3 dB, outage-like), where it is 1% at the floor."""
-    d = _sync()
-    names = ["awgn", "mpg", "mpp", "mpd"]
-    xs = [d["doppler"][c] for c in names]
-    floor = float(np.interp(doppler, xs, [d["floors_db"][band][c] for c in names]))
-    scale = 0.6 if doppler < 0.05 else 3.0
-    z = (snr_db - floor) / scale + 4.6  # logit(0.99) at the floor
-    return float(1 / (1 + np.exp(-np.clip(z, -40, 40))))
 
 
 def allowed(cap: int) -> list:
@@ -219,26 +198,16 @@ class GearShifter:
             return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
         cands = [s for s in allowed(station.cap) if (not is_cpm(s) or (self.use_cpm and P.outcome_knows(s.name)))]
         m = self.measured
-        memo = {}
         prev = None
         if self.prev is not None and self.measured_at - self.prev[2] <= PREV_MAX_S:
             prev = (self.prev[0], self.prev[1], self.measured_at - self.prev[2])
 
-        def p(s, n_cw):
-            """P(codeword decodes) over an n_cw burst of s from the MI
-            predictor (the fallback without the outcome model): the window
-            snapped to a power of two (one forward pass each)."""
-            w = 2 ** int(np.clip(np.round(np.log2(n_cw * s.frames_per_cw)), 1, 6))
-            if w not in memo:
-                memo[w] = P.predict(m, self.measured_band, self.gap_s, cands, window=w, prev=prev)
-            q = float(np.clip(memo[w][s.name], 1e-6, 1 - 1e-6))
-            return float(1 / (1 + np.exp(-(np.log(q / (1 - q)) + self.bias.get(s.name, 0.0)))))
-
         # the outcome model (P from real decodes, scripts/train_outcome.py)
         # replaced the MI predictor's output corrections: at -4 dB AWGN on
         # the real modem, control losses 24% -> 3% of data bursts and 141 ->
-        # 196 bps (scripts/loss_study.py); the MI predictor stays as fallback
-        outcome = P.outcome_model() is not None
+        # 196 bps (scripts/loss_study.py). It ships with the package.
+        if P.outcome_model() is None:
+            raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
 
         def logit_shift(q, b):
@@ -247,8 +216,6 @@ class GearShifter:
 
         def q_burst(s, n_cw):
             """P(a burst of s, n_cw long, is usable: synced, header, control)."""
-            if not outcome:
-                return ps[s.name] * p(s, n_cw)
             sec = round(burst_seconds(s, n_cw), 2)
             if sec not in omemo:
                 omemo[sec] = P.predict_outcome(m, self.measured_band, self.gap_s, sec, cands, prev)
@@ -256,14 +223,9 @@ class GearShifter:
 
         def q_cw(s, n_cw):
             """P(one of its data codewords decodes | the burst is usable)."""
-            if not outcome:
-                return p(s, n_cw)
             q_burst(s, n_cw)
             return logit_shift(omemo[round(burst_seconds(s, n_cw), 2)][s.name][1], self.bias.get(s.name, 0.0))
 
-        # the band's SNR from the measured one: same power over another width
-        # is the same SNR (2500 Hz reference); the outcome model has sync inside
-        ps = {} if outcome else {s.name: p_sync(s.sync_band, m["snr_est"], m["spread_est"]) for s in cands}
         best, best_v = None, -1.0
         # my reply to the peer: the cheapest in expectation. A lost reply costs
         # a timeout and a poll round trip on top of itself (linksim: fragile
@@ -330,7 +292,7 @@ class GearShifter:
             # its control at risk: ask for it twice (one codeword of the burst;
             # at MPP -4 dB 73% of data bursts lost their control while 172 of
             # their data codewords decoded, scripts/loss_study.py)
-            self.want_dup = outcome and self.predicted[s.name][0] < DUP_BELOW
+            self.want_dup = self.predicted[s.name][0] < DUP_BELOW
             if reply:
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
         reply = reply or FALLBACK[station.cap]

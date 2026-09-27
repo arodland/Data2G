@@ -24,7 +24,6 @@ FCENTER = 1500  # Hz; baseband conversion frequency
 SYMS_PER_FRAME = 6  # 1 pilot + 5 data
 DATA_SYMS_PER_FRAME = SYMS_PER_FRAME - 1
 FRAME_SAMPLES = SYMS_PER_FRAME * NSYM  # 1152 = 144 ms
-CU_PER_FRAME = NC * DATA_SYMS_PER_FRAME  # 120 complex channel uses
 
 # --- preamble / acquisition (SSTVAE values; see its config.py) --------------
 # DATA2G_* overrides exist for studies only; the on-air value is the
@@ -70,7 +69,6 @@ FIRST_PATH_FRAC = 0.5
 # The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
-HEADER_SAMPLES = HEADER_SYMS * NSYM
 PROTOCOL_VERSION = 11  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
