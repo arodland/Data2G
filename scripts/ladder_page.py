@@ -93,7 +93,6 @@ def page(p10: dict, p1: dict) -> str:
         s = MODES[m]
         w = width(s)
         chip = "bw200" if w <= 200 else "bw500" if w <= 500 else "bw1200" if w <= 1200 else "bw2400"
-        fam = "CPM" if is_cpm(s) else ""
         code = ("Polar" if s.code == "polar" else "LDPC")
         rtxt, _ = rate(s)
         tags = "".join(f'<span class="tag">{html.escape(t)}</span>' for t in ROLES.get(m, []))
@@ -101,7 +100,7 @@ def page(p10: dict, p1: dict) -> str:
         cells10 = "".join(f"<td>{fmt(p10.get((m, c)))}</td>" for c in CH)
         cells1 = "".join(f'<td class="p1">{fmt(p1.get((m, c)))}{"†" if is_cpm(s) else ""}</td>' for c in CH)
         body.append(f'<tr{cls}><td class="name">{html.escape(m)}{tags}</td><td>{bps(s):.0f}</td>'
-                    f'<td><span class="bw {chip}">{w}</span></td><td>{code}{" · " + fam if fam else ""}</td>'
+                    f'<td><span class="bw {chip}">{w}</span></td><td>{code}</td>'
                     f"<td>{rtxt}</td><td>{const_name(s)}</td>{cells10}{cells1}</tr>")
     n10 = sum(1 for m in MODES for c in CH if (m, c) in p10)
     return TEMPLATE.replace("{ROWS}", "\n".join(body)).replace("{N}", str(len(MODES))).replace(
