@@ -334,6 +334,31 @@ def test_compression_fits_more_per_codeword():
     assert stats["cw_new"] < raw / 1.5, (stats["cw_new"], raw)
 
 
+def test_compression_off_sends_raw_and_still_receives(monkeypatch):
+    """DATA2G_COMPRESS=0 (link.COMPRESS): a sender sends raw; its peer still
+    compresses, and each side takes what the other sends."""
+    rng = random.Random(3)
+    a = L.Station(0, RandomPolicy(random.Random(1), 0.0, ("m46",), 20), master=True)
+    b = L.Station(1, RandomPolicy(random.Random(2), 0.0, ("m46",), 20))
+    up, down = text(rng, 3000), text(rng, 3000)
+    a.write(up)
+    b.write(down)
+    got_a, got_b, burst, sender = bytearray(), bytearray(), None, b
+    for _ in range(200):
+        receiver = b if sender is a else a
+        monkeypatch.setattr(L, "COMPRESS", receiver is b)  # a never compresses
+        burst = receiver.build()
+        receiver.answered()
+        (a if receiver is b else b).handle(FakeRx(burst, rng, 0.0, {}, Counter()))
+        sender = receiver
+        got_a += a.read()
+        got_b += b.read()
+        if got_b == up and got_a == down:
+            break
+    assert bytes(got_b) == up and bytes(got_a) == down
+    assert a.stats["cw_comp"] == 0 and b.stats["cw_comp"] > 0
+
+
 def test_incompressible_goes_raw():
     result, stats = run(2, 0.0, 0.0, 3000, 3000, modes=("m46",))
     assert result == "done" and stats["cw_new"] > 0 and stats["cw_comp"] == 0

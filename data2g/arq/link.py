@@ -21,6 +21,7 @@ because they disagree about state):
 """
 
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -35,6 +36,8 @@ REPEATS_BEFORE_SHRINK = 1
 # everything, least useful first; none of them is state the peer must agree on
 OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
 LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s bound
+# DATA2G_COMPRESS=0: send every codeword raw (for testing); compressed ones are still received
+COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 
 ACTIVE, FAILED = "active", "failed"
 
@@ -421,7 +424,7 @@ class Station:
         while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
             if self._new_available() <= 0:
                 break
-            fits = 2 + -(-(k + len(new) + 1) // 8) <= spare
+            fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
             new.append(self.tx.new_codeword(submode, pb, fits, bn))
         core.k = len(resend)
         if resend:

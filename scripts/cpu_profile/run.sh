@@ -14,7 +14,8 @@
 # Needs pactl, pacat, pat (pat phases), uvx (py-spy). PY: the python with Data2G's
 # dependencies (default: the repo's .venv). Uses ports 8300/8400 (+1, +20)
 # and Pat HTTP 5061/5062. HOST_ARGS: extra data2g.host flags for both hosts;
-# A_BYTES: W1AW's attachment size (default 8000).
+# A_BYTES: W1AW's attachment size (default 8000). DATA2G_COMPRESS=0: both
+# hosts send raw (no T_COMP), the baseline for the raw-text/raw-mixed phases.
 set -u
 PHASE=$1; T=$2; OUT=$(realpath -m "$3")
 case $PHASE in idle|pat|pat-text|pat-mixed|raw|raw-text|raw-mixed) ;; *) echo "unknown phase $PHASE" >&2; exit 2;; esac
