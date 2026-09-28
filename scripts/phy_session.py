@@ -36,6 +36,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 import linksim as L  # noqa: E402
 
 PAD_S = 0.3  # noise the receiver sees around a burst
+# DATA2G_PEP_REF_DB (studies): SNR against each burst's envelope peak, as the
+# average-power SNR of a burst whose peak-to-average is this many dB (PEP-fair
+# between modes of different clip headroom); unset: against its own average
+PEP_REF_DB = float(os.environ["DATA2G_PEP_REF_DB"]) if os.environ.get("DATA2G_PEP_REF_DB") else None
 
 
 def header_time(r: dict, t0: float) -> float:
@@ -68,6 +72,11 @@ class ContinuousChannel:
         """Audio sent at t0 -> what the receiver hears, PAD_S of noise either side."""
         s_power = hfchannel.active_power(x)
         z = hfchannel._analytic(x)
+        if PEP_REF_DB is not None:
+            # a peak-limited transmitter (data2g-host sends every burst at a
+            # full-scale peak): noise against the peak, so a burst whose
+            # peak-to-average is REF has the cell's SNR, a lower one more
+            s_power = np.max(np.abs(z) ** 2) / 2 / 10 ** (PEP_REF_DB / 10)
         if self.doppler:
             tl = (t0 + np.arange(len(x)) / FS) * self.rate
             g1, g2 = (np.interp(tl, np.arange(len(g)), g.real) + 1j * np.interp(tl, np.arange(len(g)), g.imag)
