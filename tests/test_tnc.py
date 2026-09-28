@@ -194,3 +194,37 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
             busy_after += r.channel_busy / 50
             held_after += r.busy / 50
     assert busy_after <= 1.0 < held_after, (busy_after, held_after)
+
+
+def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
+    """Preamble and header lost (a fade): the streaming receiver finds the
+    burst from its frame pilots and mid-burst header copy (modem.find_copy)
+    and decodes it; noise alone finds nothing."""
+    import sys
+    from pathlib import Path
+
+    from data2g import cpm
+    from data2g.arq import phy as PHY
+    from data2g.arq.modes import MODES
+    from data2g.config import BANDS, LEADIN_SAMPLES
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import outcome_data as O
+
+    acc = modem.Accept.of(None, 16.0)
+    for name, n in (("qpsk-r1/5", 2), ("ack-4f", 1), ("w48-qpsk-r1/2", 3)):
+        b = O.burst(name, n, np.random.default_rng(3))
+        x = PHY.tx_audio(b)
+        sb = MODES[name].sync_band
+        head = LEADIN_SAMPLES + BANDS[sb].preamble_samples + modem.header_samples(sb)
+        x = np.concatenate([np.zeros(2 * FS), np.zeros(head), x[head:], np.zeros(2 * FS)])
+        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        rx = tnc.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
+        got = [ev for i in range(0, len(y), FS // 10) for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
+        ok = [ev for ev in got if ev["rx"] is not None and ev["rx"]["spec"].name == name
+              and all(PHY.ModemRx(ev["rx"], {}).decode(i, s.mask_id, 0, None) == s.payload
+                      for i, s in enumerate(b.slots))]
+        assert ok and "copy" in ok[0]["header"], (name, [(ev["header"]["spec"].name, "copy" in ev["header"]) for ev in got])
+    y = np.random.default_rng(4).normal(size=60 * FS)
+    rx = tnc.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
+    assert not [k for i in range(0, len(y), FS // 10) for k, _ in rx.feed(y[i:i + FS // 10])]
