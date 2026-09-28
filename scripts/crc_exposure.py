@@ -12,8 +12,9 @@ Per hour of session, PEP-referenced (DATA2G_PEP_REF_DB, default 5 here).
 
 import os
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 os.environ.setdefault("DATA2G_PEP_REF_DB", "5")
 
 import argparse

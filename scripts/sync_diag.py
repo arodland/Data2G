@@ -12,10 +12,9 @@ detector and a genie header read (true start and CFO) did:
     uv run python scripts/sync_diag.py --at w:awgn:-6.75 n4:mpd:3 --trials 800
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 from collections import Counter
