@@ -28,7 +28,7 @@ from itertools import permutations
 
 import numpy as np
 
-from .config import FS, crc32_k
+from .config import FS
 
 PREAMBLE_S = 0.45  # the front sync block
 BLOCK_S = 0.25  # the later sync blocks, about
@@ -39,7 +39,7 @@ MAX_DATA = 8  # data codewords per burst
 PEAK_RATIO = 0.7  # a lock's floor on _peak_ratio: fronts 0.82+, locks inside a burst 0.59 at most
 RAMP_S = 0.01  # amplitude ramp at a burst's ends (key clicks)
 DATA_N = 960
-CTL_K, CTL_N = 176, 360  # 20 bytes of control; 360 bits fill whole symbols at 3, 4 and 5 bits per tone
+CTL_K, CTL_N = 184, 360  # 20 bytes of control (CRC-24); 360 bits fill whole symbols at 3, 4 and 5 bits per tone
 
 
 @dataclass(frozen=True)
@@ -122,10 +122,10 @@ def _grid_name(g: Grid) -> str:
 
 
 SPECS = {s.name: s for g in GRIDS.values() for s in (
-    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", crc32_k("ldpc", 320), DATA_N),
-    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", crc32_k("ldpc", 480), DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", 320, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", 480, DATA_N),
 )}
-CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", crc32_k("polar", CTL_K), CTL_N) for g in GRIDS}
+CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", CTL_K, CTL_N) for g in GRIDS}
 
 
 # Early lock (find): the front block's score, then its header copy's.

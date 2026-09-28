@@ -69,7 +69,8 @@ FIRST_PATH_FRAC = 0.5
 # The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
-PROTOCOL_VERSION = 11  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy
+PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
+# 12: polar codewords carry CRC-24 (k + 8, payloads kept)
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
@@ -302,11 +303,11 @@ def _m(i, name, code, const, frames, k, band="w", headroom=None, ace=()):
 # be trimmed once there is on-air experience.
 SUBMODES = dict([
     # 1200 Hz. ack-1f is kept for latency (432 ms), not by domination.
-    _m(0, "ack-4f", "polar", "gray-qam4", 4, 48, headroom=0),  # 56 bps
-    _m(1, "polar-k96-f8", "polar", "gray-qam4", 8, 96, headroom=0),  # 69 bps
-    _m(2, "polar-k96-f4", "polar", "gray-qam4", 4, 96, headroom=0),  # 139 bps
-    _m(3, "polar-k192-f8", "polar", "gray-qam4", 8, 192, headroom=0),  # 153 bps
-    _m(4, "ack-1f", "polar", "gray-qam4", 1, 48, headroom=0),  # 222 bps
+    _m(0, "ack-4f", "polar", "gray-qam4", 4, 56, headroom=0),  # 56 bps
+    _m(1, "polar-k96-f8", "polar", "gray-qam4", 8, 104, headroom=0),  # 69 bps
+    _m(2, "polar-k96-f4", "polar", "gray-qam4", 4, 104, headroom=0),  # 139 bps
+    _m(3, "polar-k192-f8", "polar", "gray-qam4", 8, 200, headroom=0),  # 153 bps
+    _m(4, "ack-1f", "polar", "gray-qam4", 1, 56, headroom=0),  # 222 bps
     _m(5, "qpsk-r1/5", "ldpc", "gray-qam4", 8, 384, headroom=0),  # 319 bps
     _m(6, "qpsk-r1/3", "ldpc", "gray-qam4", 8, 640, headroom=0),  # 528 bps
     _m(7, "qpsk-r1/2", "ldpc", "gray-qam4", 8, 960, headroom=0),  # 806 bps
@@ -315,11 +316,11 @@ SUBMODES = dict([
     _m(10, "16qam-r1/2", "ldpc", "gray-qam16", 8, 1920, headroom=0),  # 1639 bps
     # <=500 Hz: n10 and n4 (n4 on n10's preamble and header)
     # n4-ack-2f is kept for latency (768 ms; the n4 LDPC modes are 3.9 s)
-    _m(0, "n4-ack-8f", "polar", "gray-qam4", 8, 48, band="n4", headroom=0),  # 28 bps
+    _m(0, "n4-ack-8f", "polar", "gray-qam4", 8, 56, band="n4", headroom=0),  # 28 bps
     _m(1, "n4-qpsk-r1/5", "ldpc", "gray-qam4", 24, 192, band="n4", headroom=0),  # 51 bps
-    _m(2, "n10-ack-4f", "polar", "gray-qam4", 4, 48, band="n10", headroom=0),  # 56 bps
+    _m(2, "n10-ack-4f", "polar", "gray-qam4", 4, 56, band="n10", headroom=0),  # 56 bps
     _m(3, "n4-qpsk-r1/3", "ldpc", "gray-qam4", 24, 320, band="n4", headroom=0),  # 88 bps
-    _m(4, "n4-ack-2f", "polar", "gray-qam4", 2, 48, band="n4", headroom=0),  # 111 bps
+    _m(4, "n4-ack-2f", "polar", "gray-qam4", 2, 56, band="n4", headroom=0),  # 111 bps
     _m(5, "n10-qpsk-r1/5", "ldpc", "gray-qam4", 10, 200, band="n10", headroom=0),  # 128 bps
     _m(6, "n4-qpsk-r1/2", "ldpc", "gray-qam4", 24, 480, band="n4", headroom=0),  # 134 bps
     _m(7, "n4-qpsk-r2/3", "ldpc", "gray-qam4", 24, 640, band="n4", headroom=0),  # 176 bps
@@ -348,22 +349,3 @@ SUBMODES = dict([
     _m(13, "w48-64l-r3/4", "ldpc", "c64-w48-r34", 2, 2160, band="w48", headroom=5),  # 7389 bps
     _m(14, "w48-256l-r5/8", "ldpc", "c256-w48-r58", 2, 2400, band="w48", headroom=6),  # 8222 bps
 ])
-
-# DATA2G_CRC32 (studies only, scripts/crc_study.py): every codeword's CRC 32
-# bits (codes.crc_bits). "samek": LDPC keeps k (2 payload bytes fewer);
-# "k16": k + 16 on every CRC16 code (payload kept). Polar gets k + 16 either
-# way: a 48-bit reply codeword left 2 bytes can't hold control.
-CRC32_STUDY = os.environ.get("DATA2G_CRC32", "")
-
-
-def crc32_k(code: str, k: int) -> int:
-    """A codeword's k under DATA2G_CRC32."""
-    if CRC32_STUDY and (code == "polar" or (CRC32_STUDY == "k16" and k < 512)):
-        return k + 16
-    return k
-
-
-if CRC32_STUDY:
-    from dataclasses import replace
-
-    SUBMODES = {n: replace(s, k=crc32_k(s.code, s.k)) for n, s in SUBMODES.items()}

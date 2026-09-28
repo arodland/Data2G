@@ -17,13 +17,40 @@ from functools import lru_cache
 import numpy as np
 
 from . import constellation, ldpc, polar
-from .config import CRC32_STUDY, SubmodeSpec
+from .config import SubmodeSpec
 
 INTERLEAVER_SEED = 2026
 
 
 def crc_bits(spec: SubmodeSpec) -> int:
-    return 32 if CRC32_STUDY or (spec.code == "ldpc" and spec.k >= 512) else 16
+    """CRC-24 on polar codewords: CRC-aided list decoding takes the first of
+    its 8 paths whose CRC checks, so a failed decode passed CRC-16 8 in 65536
+    times, and a random control word fails the session (scripts/crc_study.py;
+    k + 8 kept the payloads). LDPC: CRC-32 from k 512, else CRC-16 (a decode
+    must also converge: _payloads)."""
+    if spec.code == "polar":
+        return 24
+    return 32 if spec.k >= 512 else 16
+
+
+def _crc24_table() -> list[int]:
+    out = []
+    for i in range(256):
+        c = i << 16
+        for _ in range(8):
+            c = ((c << 1) ^ CRC24_POLY) & 0xFFFFFF if c & 0x800000 else (c << 1) & 0xFFFFFF
+        out.append(c)
+    return out
+
+
+CRC24_POLY = 0xB2B117  # CRC24C, 5G NR's for polar-coded control (TS 38.212 5.1)
+_CRC24 = _crc24_table()
+
+
+def crc24(data: bytes, crc: int = 0xFFFFFF) -> int:
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFF) ^ _CRC24[(crc >> 16) ^ b]
+    return crc
 
 
 def payload_bytes(spec: SubmodeSpec) -> int:
@@ -35,8 +62,8 @@ def _with_crc(payload: bytes, n_crc: int, mask: int = 0) -> bytes:
     per-codeword identity; 0 outside sessions, the frozen format)."""
     if n_crc == 16:
         return payload + (binascii.crc_hqx(payload, 0xFFFF) ^ mask & 0xFFFF).to_bytes(2, "big")
-    if n_crc == 24:  # studies (scripts/crc_cost.py): CRC-32's low 24 bits
-        return payload + ((binascii.crc32(payload) ^ mask) & 0xFFFFFF).to_bytes(3, "big")
+    if n_crc == 24:
+        return payload + (crc24(payload) ^ mask & 0xFFFFFF).to_bytes(3, "big")
     return payload + (binascii.crc32(payload) ^ mask & 0xFFFFFFFF).to_bytes(4, "big")
 
 
