@@ -1670,6 +1670,50 @@ waveform change yet.
   the index's cost and reliability. A 16-QAM w48 symbol is 192 coded
   bits, and 5 bits of index per symbol is 2.6%.
 
+## Sender-side hedges after a miss: measured, dropped (2026-09-27)
+
+TLDR: after a burst of mine goes unanswered, duplicating the next data
+burst's control changes nothing, and capping its size costs 18-33% at
+-4 and 0 dB fading. The receiver's shifter already covers it; the code
+is gone, the tight-burst fuzz test stays.
+
+- **The idea (outer-loop link adaptation, sender side):** the receiver's
+  online bias (`GearShifter.outcome`) learns only from bursts it heard.
+  A burst lost before its header reaches only the sender, as a timeout.
+  So the first data burst after a miss would hedge:
+  - `hdup`: duplicate its control (ARQ_DUP, as the receiver can ask for);
+  - `hsize1`: cap its size class at 3 s (a fade takes a long burst whole).
+- **Guard (kept in the design, not needed in the end):** a hedge must
+  never cost the data. A duplicate that crowded the data out of a small
+  burst left it control-only, and the next burst hedged alike: no data
+  ever. The duplicate had to give way to the data, and a hedge to cover
+  one burst at most. `tests/test_arq.py`'s 1-3 slot fuzz covers that path.
+- **Measured** (`scripts/loss_study.py`, shift+cpm, 12 seeds x 600 s,
+  delivered bps; differences paired on the same seeds):
+
+  | cell | baseline | hdup | hsize1 | both |
+  |---|---|---|---|---|
+  | AWGN -4 | 202 ± 3 | +0 ± 0 | -1 ± 1 | -1 ± 1 |
+  | MPG -4 | 79 ± 6 | +4 ± 3 | -21 ± 6 | -19 ± 7 |
+  | MPG 0 | 296 ± 14 | -1 ± 4 | -54 ± 19 | -43 ± 18 |
+  | MPG +8 | 1164 ± 28 | -25 ± 17 | -29 ± 27 | -3 ± 29 |
+  | MPP -4 | 72 ± 2 | -4 ± 3 | -24 ± 3 | -21 ± 4 |
+  | MPP 0 | 252 ± 7 | +1 ± 2 | -16 ± 11 | -14 ± 10 |
+
+- **Why:**
+  - Duplication is mostly on already: the receiver asks for it under
+    P(usable) 0.9 (MPP 0 dB: 278 of 418 heard data bursts), and where it
+    applies, control is lost 1% against 24%.
+  - The cap: at these SNRs the modes are slow, so 3 s halves a turn's
+    payload while its turnarounds stay.
+  - Misses were 0-9% of data bursts, most losses being control the
+    receiver hears (and learns from). After a lost data burst, the next
+    was almost never in the same mode: the recovery poll's measurement
+    moves the recommendation.
+- **Not tried:** the same hedge driven by AX.25 retransmissions in the KISS
+  link (no ACK there at all), and telling the receiver which mode went
+  unanswered (a protocol change, for the rare miss).
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX
