@@ -116,6 +116,8 @@ class Codeword:
     heard: int = 0  # sends in bursts the peer is known to have decoded (sets the RV)
     comp: bool = False  # payload is deflate of the stream bytes (T_COMP)
     cstart: int = 0  # offset in the delivered stream (hist) where its bytes begin
+    first_bn: int = -1  # my burst number that sent it new
+    comp_known: bool = False  # the peer acted on first_bn: it holds the flag, resends omit it
 
 
 class TxSide:
@@ -159,7 +161,7 @@ class TxSide:
             self.hist_off = keep
         return advanced
 
-    def new_codeword(self, submode: str, pb: int, compress: bool) -> Codeword:
+    def new_codeword(self, submode: str, pb: int, compress: bool, bn: int) -> Codeword:
         """The next `pb` bytes of stream as seq `next`, or (`compress`)
         more of it deflated into `pb` bytes when that carries more."""
         i = self.stream_end - self.buf_off
@@ -169,7 +171,7 @@ class TxSide:
             n, z = fit
             payload, comp = z + bytes(pb - len(z)), True
         c = Codeword(self.next, self.stream_end, n, submode, payload, comp=comp,
-                     cstart=self.hist_off + len(self.hist))
+                     cstart=self.hist_off + len(self.hist), first_bn=bn)
         self.hist += self.buf[i:i + n] if comp else payload
         self.cws[c.seq] = c
         self.next += 1
@@ -211,6 +213,9 @@ class RxSide:
         self.reader = F.RecordReader()
         self.out = bytearray()
         self.hist = b""  # the last HIST stream bytes delivered (compression's history)
+        # seqs flagged compressed by a control decoded here (its data slot may
+        # have failed): a resend after the sender knows that omits the bit
+        self.comp_seqs: set[int] = set()
 
     def accept(self, seq: int, payload: bytes, comp: bool = False) -> bool:
         """-> whether new bytes were delivered. `comp`: deflated (T_COMP),
@@ -221,6 +226,7 @@ class RxSide:
         delivered = False
         while self.cum in self.buf:
             p, z = self.buf.pop(self.cum)
+            self.comp_seqs.discard(self.cum)
             if z:
                 try:
                     p = F.inflate(self.hist, p)
@@ -238,6 +244,7 @@ class RxSide:
         gone = [s for s in self.buf if s >= lo]
         for s in gone:
             del self.buf[s]
+        self.comp_seqs = {s for s in self.comp_seqs if s < lo}
         return gone
 
 
@@ -380,8 +387,9 @@ class Station:
             e = dict(ext)
             if bitmap:
                 e[F.T_BITMAP] = bitmap
-            # a compressed resend's T_COMP bit is mandatory: reserved like T_RV
-            zk = max((j + 1 for j, x in enumerate(missing[:k]) if self.tx.cws[x].comp), default=0)
+            # a compressed resend's T_COMP bit, if the peer may lack it, is
+            # mandatory: reserved like T_RV
+            zk = max((j + 1 for j, x in enumerate(missing[:k]) if self._comp_bit(x)), default=0)
             n_ctl = self._ctl_size(e, cpb, k, has_new, zk)
             # the peer asked for duplicated control: data bursts only
             dup = 2 if (fresh and self.peer_wants_dup and (k or has_new)) else 1
@@ -414,13 +422,13 @@ class Station:
             if self._new_available() <= 0:
                 break
             fits = 2 + -(-(k + len(new) + 1) // 8) <= spare
-            new.append(self.tx.new_codeword(submode, pb, fits))
+            new.append(self.tx.new_codeword(submode, pb, fits, bn))
         core.k = len(resend)
         if resend:
             ext[F.T_RV] = F.pack_rv(rvs)
         if new:
             ext[F.T_NEW] = bytes([new[0].seq % SEQ_MOD])
-        if comp := F.pack_flags([self.tx.cws[x].comp for x in resend] + [c.comp for c in new]):
+        if comp := F.pack_flags([self._comp_bit(x) for x in resend] + [c.comp for c in new]):
             ext[F.T_COMP] = comp
         if dup == 2 and not (resend or new):
             dup = 1  # nothing but control after all
@@ -473,6 +481,10 @@ class Station:
     def _snr(self) -> str:
         m = getattr(self.policy, "measured", None)
         return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
+
+    def _comp_bit(self, seq: int) -> bool:
+        c = self.tx.cws[seq]
+        return c.comp and not c.comp_known
 
     def _new_available(self) -> int:
         return self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
@@ -577,8 +589,10 @@ class Station:
         if self._abandon is not None and acted in self._abandon_bursts:
             self._abandon = None  # the peer has applied it
         for x in self._sent_seqs.pop(acted, []):
-            if x in self.tx.cws:
-                self.tx.cws[x].heard += 1  # the peer decoded that burst: it holds soft bits
+            if c := self.tx.cws.get(x):
+                c.heard += 1  # the peer decoded that burst: it holds soft bits
+                # and mapped its new slots by T_NEW: it holds their T_COMP bits
+                c.comp_known |= c.first_bn == acted
         try:
             cum = unwrap(core.cum, self.tx.base)
             received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
@@ -604,7 +618,12 @@ class Station:
             self._forget_all(rx)
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
-        comp = F.unpack_flags(ext.get(F.T_COMP, b""), len(slots))
+        bits = F.unpack_flags(ext.get(F.T_COMP, b""), len(slots))
+        # new slots' bits are kept (the sender omits them from resends once I
+        # act on this burst); a resend's bit is sent whenever it is needed
+        self.rx.comp_seqs |= {seq for (seq, _), z in zip(slots[core.k:], bits[core.k:])
+                              if z and seq is not None and seq >= self.rx.cum}
+        comp = [z or seq in self.rx.comp_seqs for (seq, _), z in zip(slots, bits)]
         self.last_rx_data = bool(slots)
         n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):

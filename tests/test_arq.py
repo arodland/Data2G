@@ -157,12 +157,16 @@ def payload(rng, n, kind):
     return bytes(out[:n])
 
 
-def count_resends(burst, stats):
-    """Resends in `burst` by T_COMP bit: compressed or raw."""
-    c = F.Control.unpack([s.payload for s in burst.slots if s.mask_id[2] >= F.SEQ_MOD and s.rv == 0])
-    comp = sum(F.unpack_flags(c.ext.get(F.T_COMP, b""), c.core.k))
-    stats["resend_comp"] += comp
-    stats["resend_raw"] += c.core.k - comp
+def count_resends(burst, sender, stats):
+    """Resends in `burst`: raw, or compressed with the T_COMP bit sent, or
+    omitted (the peer holds it from the burst that sent the codeword new)."""
+    n_ctl = sum(s.mask_id[2] >= F.SEQ_MOD for s in burst.slots)
+    c = F.Control.unpack([s.payload for s in burst.slots[:n_ctl] if s.rv == 0])
+    bits = F.unpack_flags(c.ext.get(F.T_COMP, b""), c.core.k)
+    for s, bit in zip(burst.slots[n_ctl:n_ctl + c.core.k], bits):
+        cw = next((x for x in sender.tx.cws.values() if x.seq % F.SEQ_MOD == s.mask_id[2]), None)
+        if cw is not None:
+            stats["resend_raw" if not cw.comp else "resend_comp_bit" if bit else "resend_comp_implicit"] += 1
 
 
 def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, max_cw=20,
@@ -181,7 +185,7 @@ def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, 
     burst, sender = a.build(), a
     for turn in range(max_turns):
         stats["turns"] = turn
-        count_resends(burst, stats)
+        count_resends(burst, sender, stats)
         receiver = b if sender is a else a
         dead = die_at is not None and turn >= die_at
         ok = False
@@ -305,7 +309,20 @@ def test_mixed_compressed_and_raw_through_retransmits(seed):
     assert result == "done", (result, stats, LAST_REASON[0])
     assert stats["mismatch"] == 0
     assert 0 < stats["cw_comp"] < stats["cw_new"]
-    assert stats["resend_comp"] > 0 and stats["resend_raw"] > 0, stats
+    assert stats["resend_comp_implicit"] > 0 and stats["resend_raw"] > 0, stats
+
+
+def test_compressed_resend_after_lost_control_carries_its_bit():
+    """A compressed codeword whose first burst the peer never decoded goes
+    again with its T_COMP bit sent: the peer can't know it. Whole bursts
+    lost, so that path runs; bursts deliver exactly or the link is lost."""
+    total = Counter()
+    for seed in range(10):
+        result, stats = run(800 + seed, 0.2, 0.2, 6000, 2000, modes=("m22", "m46"), kind="mixed")
+        assert result == "done" or LAST_REASON[0] == "link lost", (result, LAST_REASON[0])
+        assert stats["mismatch"] == 0
+        total += stats
+    assert total["resend_comp_bit"] > 0 and total["resend_comp_implicit"] > 0, total
 
 
 def test_compression_fits_more_per_codeword():

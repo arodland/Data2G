@@ -25,7 +25,9 @@ T_CHAT = 12  # empty: the sender's host has CHAT ON (latency over throughput, do
 CHAT_LINE_BYTES = 200  # CHAT ON plans for at least a chat line; T_BUFFER is sent only above it
 T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the burst's receiver
 # bit per data slot (resends, then new), MSB first, cut after the last set
-# byte, sent when any is set: that codeword is raw deflate (docs/arq.md §9a)
+# byte, sent when any is set: that codeword is raw deflate. A resend's bit
+# is left 0 once the peer has its flag from the codeword's first burst
+# (docs/arq.md §9a)
 T_COMP = 15
 HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed with
 MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
