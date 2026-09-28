@@ -251,6 +251,15 @@ class QCLDPC:
         return np.all(syn % 2 == 0, axis=1)
 
 
+# Channel LLR magnitude cap at the decoder input: below the largest message
+# a check can send (~16.8, _phi's floor in float32), so no channel value
+# outvotes every check. At 50, combined IR buffers whose info bits were
+# already right never satisfied H: 256-QAM r5/8 at 28 dB AWGN fell from 0.99
+# decoded to 0.70 over five transmissions, 1.00 throughout at 16; unchanged at
+# threshold (scripts/llr_clamp_study.py, runs/llr_clamp_study.csv).
+CH_CLAMP = 16.0
+
+
 def _phi(x):
     import torch
 
@@ -301,7 +310,7 @@ class MinSumDecoder:
     def decode(self, llr_sent, iters: int = 30, alpha=None):
         """-> (info bit decisions (B, k) uint8, converged (B,) bool)."""
         t = self.torch
-        ch = self.channel_llrs(llr_sent.clamp(-50, 50))
+        ch = self.channel_llrs(llr_sent.clamp(-CH_CLAMP, CH_CLAMP))
         b = ch.shape[0]
         c2v = t.zeros(b, self.n_edges, device=self.device, dtype=ch.dtype)
         for it in range(iters):
