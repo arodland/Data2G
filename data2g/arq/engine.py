@@ -75,7 +75,7 @@ def _jsonable(v):
 
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
-                 min_header_score: float = 0.0, kiss=None):
+                 min_header_score: float = 0.0, kiss=None, stats_interval_s: float = 60.0):
         """`kiss`: a data2g.kisslink.KissLink to serve too (the KISS
         personality): its bursts are peeled off what's heard, and it sends
         when no ARQ session is under way and the channel is free."""
@@ -95,6 +95,7 @@ class Engine:
         self._extra: list = []  # bursts outside any session (CQ frames), sent when the channel is free
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
+        self.stats_interval_s = stats_interval_s
         self.kiss_rx: list[bytes] = []  # frames heard for KISS clients
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
         self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
@@ -109,7 +110,7 @@ class Engine:
 
     def _new_session(self):
         self.session = S.Session(self.call, self.policy_factory(), rng=random.Random(self.rng.random()),
-                                 aliases=self.aliases)
+                                 aliases=self.aliases, stats_interval_s=self.stats_interval_s)
         self.session.set_chat(self.chat)
         self.store = {}
 
@@ -210,6 +211,7 @@ class Engine:
             if self.rec:
                 self.rec.rx(t, ev["audio"], h, r, meas)
             if r is None:
+                log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
                 continue
             rx = PHY.ModemRx(r, self.store)
             # in a session, its peer's bursts are the likely ones: a control

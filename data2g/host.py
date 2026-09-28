@@ -52,6 +52,7 @@ BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = {0: "500", 1: "1200", 2: "2300"}
 BLOCK = FS // 10  # audio block: 0.1 s
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
+BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 # ponytail: from memory of VARA clients, not a checked list; check the log on first contact with Pat
 IGNORED = {"COMPRESSION", "PUBLIC", "CWID", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"}
@@ -71,6 +72,7 @@ class Host:
         self.out_data = bytearray()
         self._ptt = self._busy = False
         self._buffer = 0
+        self._buffer_t = 0.0  # engine time of the last BUFFER line
         self._mode = None
         self._alive = 0.0  # engine time of the last IAMALIVE
 
@@ -171,25 +173,31 @@ class Host:
         if e.receiver.channel_busy != self._busy:
             self._busy = e.receiver.channel_busy
             self.out_cmd.append("BUSY ON" if self._busy else "BUSY OFF")
-        # BUFFER: bytes still waiting after the next burst goes. VARA
-        # clients throttle on it: Pat blocks writes while BUFFER >= 7x its
-        # write (<= 250 B B2F blocks), tuned to VARA's short frames. Counting
-        # everything queued kept ~1-2 KB here, and every Data2G burst (up to
-        # ~12 KB) went out short: a 20 KB Pat transfer took 5x as long as the
-        # same bytes written at once. A DISCONNECT still sends and gets
-        # acknowledged all of it before the session closes.
+        # BUFFER, as VARA defines it: bytes the peer hasn't acknowledged yet,
+        # sent or not. Pat blocks writes while BUFFER >= 7x its write (<= 250
+        # B B2F blocks), tuned to VARA's short frames, and its Flush (after
+        # every message) waits for BUFFER 0. Counting everything kept Data2G
+        # bursts (up to ~12 KB) short: a 20 KB Pat transfer took 5x as long
+        # as the same bytes written at once. So while more than the next
+        # burst waits, BUFFER is the unsent bytes past it (the credit); once
+        # it has all gone, 1 until the peer acks it all, so Flush still waits
+        # for delivery but writes never block. --buffer-credit 0 reports the
+        # plain VARA figure.
         st = e.session.station
-        unsent = len(e.session._pending_write)
+        unsent = unacked = len(e.session._pending_write)
         if st:
             unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
-            if hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
-                credit = e.session.policy.next_capacity(st)
-                if self.buffer_credit is not None:
-                    credit = min(credit, self.buffer_credit)
-                unsent = max(0, unsent - credit)
-        buffered = unsent
-        if buffered != self._buffer:
+            unacked += len(st.tx.buf)  # from the first unacked codeword on
+        buffered = unacked
+        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
+            credit = e.session.policy.next_capacity(st)
+            if self.buffer_credit is not None:
+                credit = min(credit, self.buffer_credit)
+            buffered = unsent - credit if unsent > credit else min(unacked, 1)
+        # Pat's write and Flush give up after a minute without a BUFFER line
+        if buffered != self._buffer or (buffered and e.now - self._buffer_t >= BUFFER_REPEAT_S):
             self._buffer = buffered
+            self._buffer_t = e.now
             self.out_cmd.append(f"BUFFER {buffered}")
 
 
@@ -207,6 +215,53 @@ class Interpolator:
         up[:: self.u] = x
         y, self.zi = sps.lfilter(self.taps, 1.0, up, zi=self.zi)
         return y
+
+
+class Player:
+    """Output from our own FIFO through a PortAudio callback. The loop runs on the input clock and hands
+    over 0.1 s at a time, which a blocking write can't bridge: with 4800-frame buffers PipeWire padded
+    64 zeros after every block (a 1.3 ms hole each 0.1 s, on air too), and with its default buffers
+    (~11 ms) any late step underruns. Callback periods are a multiple of 256 frames (2048 at 48 kHz: a
+    main thread holding the GIL made 1024 late), and the FIFO starts `lead` ahead of the card."""
+
+    def __init__(self, pa, nout: int, rate: int, device: int | None, lead_s: float):
+        self.nout, self.rate, self.lead = nout, rate, int(lead_s * rate)
+        self.fifo, self.lock, self.active, self.underruns = bytearray(), threading.Lock(), False, 0
+        self.s = pa.open(format=_pa_float(), channels=nout, rate=rate, output=True, output_device_index=device,
+                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._fill)
+
+    def _fill(self, _in, n, _t, _status):
+        need = n * self.nout * 4
+        with self.lock:
+            b = bytes(self.fifo[:need])
+            del self.fifo[:need]
+        if len(b) < need and self.active:
+            self.underruns += 1
+            log.warning("TX audio underrun (%d)", self.underruns)
+        return b + bytes(need - len(b)), 0  # 0: paContinue
+
+    def start(self):
+        """Key-up: queue the lead, so a late step doesn't leave the device empty."""
+        self.write(np.zeros(self.lead))
+        self.active = True
+
+    def write(self, y: np.ndarray):
+        with self.lock:
+            self.fifo += np.repeat(y.astype(np.float32), self.nout).tobytes()
+
+    def drain(self):
+        """Wait until everything queued has left the sound card (then PTT can drop without clipping)."""
+        self.active = False  # the last callback coming up short is the end, not an underrun
+        while True:
+            with self.lock:
+                left = len(self.fifo)
+            if not left:
+                break
+            time.sleep(left / (self.nout * 4 * self.rate) + 0.002)
+        time.sleep(self.s.get_output_latency())
+
+    def close(self):
+        self.s.close()
 
 
 # --- sockets and audio ---------------------------------------------------------------
@@ -283,7 +338,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode,
                     busy_limit_s=a.kiss_busy_limit) if a.kiss else None
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
-                    min_header_score=a.min_header_score, kiss=link)
+                    min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = data = kiss = None
@@ -303,8 +358,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
     inp = pa.open(format=_pa_float(), channels=nin, rate=a.sample_rate, input=True, input_device_index=a.input_device,
                   frames_per_buffer=per)
-    out = pa.open(format=_pa_float(), channels=nout, rate=a.sample_rate, output=True, output_device_index=a.output_device,
-                  frames_per_buffer=per)
+    out = Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
@@ -342,10 +396,12 @@ def serve(a, pa, stop: threading.Event | None = None):
                 log.debug("step took %.2f s (%d slow)", time.perf_counter() - t0, slow)
             if ptt and not keyed:
                 rig.ptt(True)
+                out.start()
                 keyed = True
             if keyed:
-                out.write(np.repeat(np.clip(interp(y) * gain, -1, 1).astype(np.float32), nout).tobytes())
+                out.write(np.clip(interp(y) * gain, -1, 1))
             if keyed and not ptt:
+                out.drain()
                 time.sleep(a.ptt_off_delay_ms / 1000)
                 rig.ptt(False)
                 keyed = False
@@ -402,14 +458,18 @@ def main():
     ap.add_argument("--rigctld-port", type=int, default=4532, help="0: no PTT")
     ap.add_argument("--ptt-on-delay-ms", type=int, default=100)
     ap.add_argument("--ptt-off-delay-ms", type=int, default=50)
+    ap.add_argument("--tx-lead-ms", type=int, default=100,
+                    help="TX audio queued ahead of the sound card: slack for a late audio step")
     ap.add_argument("--min-header-score", type=float, default=0.0)
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
                          "that throttle on it (Pat) keep a whole burst queued; -1: the next burst's full "
-                         "capacity, 0: report everything queued (plain VARA)")
+                         "capacity, 0: report every unacked byte (plain VARA)")
     ap.add_argument("--record-dir", default=f"recordings/{time.strftime('%Y%m%d-%H%M%S')}",
                     help="where every burst heard and sent is logged ('' turns it off)")
     ap.add_argument("--log-level", default="INFO")
+    ap.add_argument("--stats-interval", type=float, default=60.0, metavar="S",
+                    help="log a connection's throughput this often (0: only at disconnect)")
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
     if a.list_modes:

@@ -21,6 +21,9 @@ class FakeStream:
     def write(self, data):
         assert len(data) % (4 * self.channels) == 0
 
+    def get_output_latency(self):
+        return 0.0
+
     def close(self):
         pass
 
@@ -34,16 +37,22 @@ class FakePA:
     def get_default_output_device_info(self):
         return {"maxInputChannels": 0, "maxOutputChannels": 2}
 
-    def open(self, rate, channels, **kw):
+    def open(self, rate, channels, stream_callback=None, **kw):
+        if stream_callback:  # play what the host queues, in real time
+            def card():
+                while True:
+                    stream_callback(None, 1024, None, 0)
+                    time.sleep(1024 / rate)
+            threading.Thread(target=card, daemon=True).start()
         return FakeStream(rate, channels)
 
 
 def test_commands_over_tcp(tmp_path):
     a = SimpleNamespace(mycall="W1AW", host="127.0.0.1", command_port=18310, sample_rate=48000, output_volume=0.0,
-                        rigctld_host="localhost", rigctld_port=0, ptt_on_delay_ms=100, ptt_off_delay_ms=0,
+                        rigctld_host="localhost", rigctld_port=0, ptt_on_delay_ms=100, ptt_off_delay_ms=0, tx_lead_ms=100,
                         min_header_score=0.0, record_dir=tmp_path, input_device=None, output_device=None,
                         buffer_credit=-1, vara=True, kiss=True, kiss_port=18320, kiss_address="127.0.0.1",
-                        kiss_bw=2400, broadcast_mode=None, kiss_busy_limit=60.0)
+                        kiss_bw=2400, broadcast_mode=None, kiss_busy_limit=60.0, stats_interval=60.0)
     stop = threading.Event()
     th = threading.Thread(target=host.serve, args=(a, FakePA(), stop), daemon=True)
     th.start()

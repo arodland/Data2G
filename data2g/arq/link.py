@@ -20,6 +20,8 @@ because they disagree about state):
   base, drop soft bits); resyncs without progress to FAILED.
 """
 
+import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -35,6 +37,8 @@ OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
 LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s bound
 
 ACTIVE, FAILED = "active", "failed"
+
+log = logging.getLogger("data2g.link")
 
 
 def unwrap(s7: int, anchor: int) -> int:
@@ -96,6 +100,9 @@ class Policy(Protocol):
     def rv_cycle(self, submode: str) -> int:
         """Distinct RVs the submode's code has (4 LDPC, 1 polar)."""
 
+    # optional, for the log: mode_name(recommendation code) -> str,
+    # airtime(submode, n_cw) -> s, measured (the last burst's measurements)
+
 
 # --- the two directions -----------------------------------------------------------
 
@@ -120,6 +127,7 @@ class TxSide:
         self.base = 0  # first unacked seq
         self.next = 0  # next new seq
         self.ack: tuple[int, frozenset] | None = None  # (cum, received) acted on
+        self.acked = 0  # stream bytes acked (host bytes and their record length bytes)
 
     def write(self, data: bytes):
         self.buf += F.to_records(data)
@@ -133,7 +141,7 @@ class TxSide:
             raise ProtocolError(f"peer cumulative {cum} outside [{self.base}, {self.next}]")
         advanced = cum > self.base
         for s in range(self.base, cum):
-            self.cws.pop(s, None)
+            self.acked += c.length if (c := self.cws.pop(s, None)) else 0
         self.base = cum
         self.ack = (cum, frozenset(s for s in received if cum < s < self.next))
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
@@ -219,6 +227,7 @@ class Station:
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
+    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_resend, rx_ok, rx_lost, timeouts
     rx: RxSide = field(default_factory=RxSide)
     state: str = ACTIVE
     fail_reason: str = ""
@@ -275,11 +284,14 @@ class Station:
         if self._latest - self._confirmed >= F.BURST_MOD - 1 and self.last_sent is not None:
             # 7 of my bursts unconfirmed: one more new seq could alias an old
             # one in the peer's 3-bit acted-on. Repeat the latest instead.
+            log.info("TX b%d repeat: 7 bursts unconfirmed", self._latest % F.BURST_MOD)
+            self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
         # escalation: my own timeouts (master), or the peer telling me my
         # replies are lost (it repeats or polls: §6)
-        submode, max_cw = self.policy.choose(self, min(max(self.misses, self.reply_escalation), 3))
+        escalation = min(max(self.misses, self.reply_escalation), 3)
+        submode, max_cw = self.policy.choose(self, escalation)
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
         cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(submode)
@@ -390,7 +402,37 @@ class Station:
         burst = TxBurst(submode, slots, self.bursts_sent)
         self.bursts_sent += 1
         self.last_sent = burst
+        self.stats["cw_new"] += len(new)
+        self.stats["cw_resend"] += len(resend)
+        if log.isEnabledFor(logging.INFO):
+            kind = "data" if resend or new else ("ack" if fresh else "poll")
+            parts = [f"{kind} {self._burst_desc(submode, len(slots))}"]
+            if resend:
+                parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
+            if new:
+                parts.append(f"new {new[0].seq}" + (f"-{new[-1].seq}" if len(new) > 1 else "")
+                             + f" {sum(c.length for c in new)} B")
+            if self.tx.pending():
+                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self._new_available()} B")
+            parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
+            parts.append(f"ask data {self._mode(rec)} size {hint}, reply {self._mode(reply)}")
+            flags = [f"escalated {escalation}"] * bool(escalation) + [f"timeout {self.misses}"] * bool(self.misses)
+            if F.T_ABANDON in ext:
+                flags.append(("resync" if F.T_RESYNC in ext else "abandon") + f" at {self.tx.base}")
+            flags += ["dup ctl"] * (dup == 2) + ["reply lost"] * core.reply_lost
+            log.info("TX b%d %s", bn % F.BURST_MOD, " | ".join(parts + flags))
         return burst
+
+    def _mode(self, rec: int | None) -> str:
+        return "-" if rec is None else getattr(self.policy, "mode_name", str)(rec)
+
+    def _burst_desc(self, submode: str, n_cw: int) -> str:
+        airtime = getattr(self.policy, "airtime", None)
+        return f"{submode} x{n_cw}" + (f" {airtime(submode, n_cw):.1f}s" if airtime else "")
+
+    def _snr(self) -> str:
+        m = getattr(self.policy, "measured", None)
+        return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
 
     def _new_available(self) -> int:
         return self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
@@ -412,10 +454,13 @@ class Station:
         by asking (the session decides, it knows airtimes)."""
         assert self.master
         self.misses += 1
+        self.stats["timeouts"] += 1
         if self.max_misses is not None and self.misses > self.max_misses:
             self._fail("link lost")
             return None
         if allow_repeat and self.misses <= REPEATS_BEFORE_SHRINK and self.last_sent is not None:
+            log.info("TX b%d repeat: timeout %d", self._latest % F.BURST_MOD, self.misses)
+            self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent  # identical, same burst seq (§6 step 1)
         return self.build(fresh=False)
 
@@ -424,6 +469,12 @@ class Station:
     def handle(self, rx: RxBurst) -> bool:
         """Process a received burst. -> whether its control decoded (then
         this station must answer). Discards the burst otherwise."""
+        self.stats["rx_ok" if (ok := self._handle(rx)) else "rx_lost"] += 1
+        if not ok:
+            log.info("RX %s%s | control lost, discarded", self._burst_desc(rx.submode, rx.n_cw), self._snr())
+        return ok
+
+    def _handle(self, rx: RxBurst) -> bool:
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
         paired = False
         if first is None and rx.n_cw >= 2:
@@ -454,6 +505,7 @@ class Station:
             return False
         core, ext = ctl.core, ctl.ext
         self.misses = 0
+        was = (self.peer_recommend, self.peer_size_hint)
         self.peer_recommend, self.peer_size_hint = core.recommend, core.size_hint
         self.peer_reply_recommend = ext[F.T_REPLY][0] if F.T_REPLY in ext and ext[F.T_REPLY] else None
         self.peer_chat = F.T_CHAT in ext
@@ -464,6 +516,7 @@ class Station:
         # a repeat or a poll means my last reply did not get through
         self.reply_escalation = self.reply_escalation + 1 if (repeat or core.ftype == F.PROBE) else 0
         progress = False
+        base0, next0, cum0 = self.tx.base, self.tx.next, self.rx.cum
 
         # their ACK of my data (their cum / bitmap), acted on in my next burst
         # which of my bursts the peer acted on: its 3-bit seq, resolved in
@@ -490,7 +543,8 @@ class Station:
             return True
 
         # their data
-        if F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch:
+        abandoned = F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch
+        if abandoned:
             a = unwrap(ext[F.T_ABANDON][0], self.rx.cum)
             if a != self.rx.cum:
                 self._fail(f"protocol: abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
@@ -504,9 +558,10 @@ class Station:
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
         self.last_rx_data = bool(slots)
-        n_ok = n_new = 0
+        n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
             if seq is None or seq < self.rx.cum:
+                n_old += 1
                 continue
             key = (self.peer, seq)
             p = rx.decode(i, data_mask(self.peer, seq, self.key), rv, key)
@@ -514,11 +569,31 @@ class Station:
                 n_new += 1
                 n_ok += p is not None
             if p is not None:
+                n_dec += 1
                 rx.forget(key)
                 progress |= self.rx.accept(seq, p)
         if outcome:
             outcome(rx.submode, n_ok + core.n_ctl, n_new + core.n_ctl)
 
+        if log.isEnabledFor(logging.INFO):
+            kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
+            parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw)}" + self._snr()]
+            if slots:
+                parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
+                             + (f", {n_old} already had" if n_old else "")
+                             + f", cum {cum0}->{self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
+            if self.tx.base != base0:
+                parts.append(f"acked {base0}->{self.tx.base}")
+            elif next0 > base0:
+                parts.append(f"acked none of {base0}-{next0 - 1}")
+            now = (self.peer_recommend, self.peer_size_hint)
+            ask = f"wants data {self._mode(now[0])} size {now[1]}"
+            if was[0] is not None and was != now:
+                ask += f" (was {self._mode(was[0])} size {was[1]})"
+            parts.append(ask + f", reply {self._mode(self.peer_reply_recommend)}")
+            flags = (["repeat (my reply lost)"] * repeat + ["abandon"] * abandoned + ["dup ctl"] * (dup == 2)
+                     + ["wants dup ctl"] * self.peer_wants_dup)
+            log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
         self.reply_lost = repeat
         self.peer_burst = core.burst_seq
         self._answered = False
@@ -572,6 +647,7 @@ class Station:
             rx.forget((self.peer, s))
 
     def _fail(self, why: str):
+        log.warning("link failed: %s", why)
         self.state = FAILED
         self.fail_reason = why
 
@@ -590,3 +666,5 @@ class Station:
                 self._fail("no progress")
             else:
                 self.resync_due = True
+                log.info("watchdog: %d turns without progress, resync %d of %d",
+                         NO_PROGRESS_TURNS, self.resyncs, RESYNCS_BEFORE_FAIL)
