@@ -160,6 +160,7 @@ Where the rest comes from:
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
 | buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
+| comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
 
 ## 6. Turn rules and timers
 
@@ -298,6 +299,31 @@ As built (data2g/arq/policy.py):
 - **Boundaries:** padding only ever falls between records. That keeps re-slicing after
   an abandon exact: the receiver's stream is the concatenation of delivered codewords
   in seq order.
+- **Compression (`T_COMP`, session version 2):**
+  - A compressed codeword is raw deflate (no header) of the stream bytes it carries,
+    zero padded. Deflate is primed with the last 4 KB (`frames.HIST`) of the stream
+    as delivered before it: raw codewords with their padding, compressed ones inflated.
+  - The receiver delivers in seq order, so it always holds that history. It inflates at
+    delivery; a codeword that won't inflate fails the link (protocol error).
+  - The flag is fixed at creation, so a resend carries the same bit. After an abandon
+    both ends' history is the stream before A, and re-sliced codewords are
+    compressed afresh.
+  - The sender compresses only when that carries more than a raw codeword: the longest
+    prefix that deflates into the payload, found by binary search. Incompressible data
+    costs one trial per codeword.
+  - A new codeword is compressed only if its bit fits in the control's spare bytes.
+  - A resend's bit is sent only while the peer may lack it: until the peer acts on
+    the burst that sent the codeword new (its new slots are mapped by `new`, so the
+    peer took their bits from it, whether or not the data decoded). The receiver
+    keeps flagged seqs until delivery or abandon, and ORs them with the bits. A
+    bit still owed is reserved like `rv`, and can cost control space.
+  - Measured (tests/test_arq.py harness, 22 B and CPM 20 B control, loaded like
+    the gear shifter's): sending the bit on every compressed resend changed the
+    control's fit in 3-13% of bursts. Omitting known bits cut that by 67-89%.
+  - Measured on text (scripts/compress_study.py): about 1.75x fewer codewords
+    at 38-176 B payloads, 2x at 396 B. Codewords compressed on their own gained
+    1.0-1.1x on narrow modes. zstd lost to deflate at every size (its frame header),
+    and brotli's binding can't take a dictionary.
 
 ## 10. State agreement (no jabbering)
 

@@ -1,6 +1,7 @@
 """ARQ frame codecs (docs/arq.md §4, §5, §7, §9a): the 32-bit core
 control word, extension TLVs, callsign packing and stream records."""
 
+import zlib
 from dataclasses import dataclass, field
 
 SEQ_BITS = 7
@@ -23,6 +24,13 @@ T_REPLY = 11  # recommended submode for the peer's control-only bursts (10 is se
 T_CHAT = 12  # empty: the sender's host has CHAT ON (latency over throughput, docs/arq.md §9)
 CHAT_LINE_BYTES = 200  # CHAT ON plans for at least a chat line; T_BUFFER is sent only above it
 T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the burst's receiver
+# bit per data slot (resends, then new), MSB first, cut after the last set
+# byte, sent when any is set: that codeword is raw deflate. A resend's bit
+# is left 0 once the peer has its flag from the codeword's first burst
+# (docs/arq.md §9a)
+T_COMP = 15
+HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed with
+MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
@@ -126,6 +134,55 @@ def unpack_rv(b: bytes, k: int) -> list[int]:
     v = int.from_bytes(b, "big")
     total = 8 * len(b)
     return [(v >> (total - 2 * (i + 1))) & 3 for i in range(k)]
+
+
+def pack_flags(flags: list[bool]) -> bytes:
+    out = bytearray(-(-len(flags) // 8))
+    for i, f in enumerate(flags):
+        if f:
+            out[i // 8] |= 0x80 >> i % 8
+    return bytes(out).rstrip(b"\0")
+
+
+def unpack_flags(b: bytes, n: int) -> list[bool]:
+    return [i < 8 * len(b) and bool(b[i // 8] >> (7 - i % 8) & 1) for i in range(n)]
+
+
+# --- compression (docs/arq.md §9a) ------------------------------------------------
+
+def deflate(hist: bytes, data: bytes) -> bytes:
+    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9, **({"zdict": hist} if hist else {}))
+    return c.compress(data) + c.flush()
+
+
+def deflate_fit(hist: bytes, data: bytes, pb: int) -> tuple[int, bytes] | None:
+    """The longest prefix of `data` past `pb` bytes whose deflate (primed
+    with `hist`) fits `pb` bytes -> (its length, deflated), or None: a
+    raw codeword carries as much. Binary search: deflated length is
+    near enough monotone in the input's."""
+    lo, hi = pb + 1, min(len(data), 16 * pb)
+    if lo > hi or len(z := deflate(hist, data[:lo])) > pb:
+        return None  # incompressible: one trial
+    best, lo = (lo, z), lo + 1
+    while lo <= hi:
+        m = (lo + hi) // 2
+        if len(z := deflate(hist, data[:m])) <= pb:
+            best, lo = (m, z), m + 1
+        else:
+            hi = m - 1
+    return best
+
+
+def inflate(hist: bytes, payload: bytes) -> bytes:
+    """A compressed codeword (zero padded) -> its stream bytes."""
+    d = zlib.decompressobj(-15, **({"zdict": hist} if hist else {}))
+    try:
+        out = d.decompress(payload, MAX_INFLATE)
+    except zlib.error as e:
+        raise ValueError(f"inflate: {e}") from None
+    if not d.eof:
+        raise ValueError("inflate: truncated or over MAX_INFLATE")
+    return out
 
 
 # --- callsigns ----------------------------------------------------------------

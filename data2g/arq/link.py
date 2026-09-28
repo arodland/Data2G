@@ -21,6 +21,7 @@ because they disagree about state):
 """
 
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -35,6 +36,8 @@ REPEATS_BEFORE_SHRINK = 1
 # everything, least useful first; none of them is state the peer must agree on
 OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
 LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s bound
+# DATA2G_COMPRESS=0: send every codeword raw (for testing); compressed ones are still received
+COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 
 ACTIVE, FAILED = "active", "failed"
 
@@ -114,6 +117,10 @@ class Codeword:
     submode: str
     payload: bytes
     heard: int = 0  # sends in bursts the peer is known to have decoded (sets the RV)
+    comp: bool = False  # payload is deflate of the stream bytes (T_COMP)
+    cstart: int = 0  # offset in the delivered stream (hist) where its bytes begin
+    first_bn: int = -1  # my burst number that sent it new
+    comp_known: bool = False  # the peer acted on first_bn: it holds the flag, resends omit it
 
 
 class TxSide:
@@ -128,6 +135,10 @@ class TxSide:
         self.next = 0  # next new seq
         self.ack: tuple[int, frozenset] | None = None  # (cum, received) acted on
         self.acked = 0  # stream bytes acked (host bytes and their record length bytes)
+        # the stream as the peer will deliver it (raw codewords with their
+        # padding): compression's history, from offset hist_off on
+        self.hist = bytearray()
+        self.hist_off = 0
 
     def write(self, data: bytes):
         self.buf += F.to_records(data)
@@ -147,7 +158,28 @@ class TxSide:
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
         del self.buf[: keep - self.buf_off]
         self.buf_off = keep
+        keep = min((c.cstart for c in self.cws.values()), default=self.hist_off + len(self.hist)) - F.HIST
+        if keep > self.hist_off:
+            del self.hist[: keep - self.hist_off]
+            self.hist_off = keep
         return advanced
+
+    def new_codeword(self, submode: str, pb: int, compress: bool, bn: int) -> Codeword:
+        """The next `pb` bytes of stream as seq `next`, or (`compress`)
+        more of it deflated into `pb` bytes when that carries more."""
+        i = self.stream_end - self.buf_off
+        n = min(pb, len(self.buf) - i)
+        payload, comp = bytes(self.buf[i:i + n]) + bytes(pb - n), False
+        if compress and (fit := F.deflate_fit(bytes(self.hist[-F.HIST:]), bytes(self.buf[i:i + 16 * pb]), pb)):
+            n, z = fit
+            payload, comp = z + bytes(pb - len(z)), True
+        c = Codeword(self.next, self.stream_end, n, submode, payload, comp=comp,
+                     cstart=self.hist_off + len(self.hist), first_bn=bn)
+        self.hist += self.buf[i:i + n] if comp else payload
+        self.cws[c.seq] = c
+        self.next += 1
+        self.stream_end += n
+        return c
 
     def missing(self) -> list[int]:
         """Unacked seqs per the acted-on reply only, ascending (§4).
@@ -168,6 +200,7 @@ class TxSide:
         a = self.base
         if a in self.cws:
             self.stream_end = self.cws[a].start
+            del self.hist[self.cws[a].cstart - self.hist_off:]
         self.cws.clear()
         self.next = a
         self.ack = None
@@ -179,18 +212,31 @@ class RxSide:
 
     def __init__(self):
         self.cum = 0
-        self.buf: dict[int, bytes] = {}
+        self.buf: dict[int, tuple[bytes, bool]] = {}  # held above cum: (payload, compressed)
         self.reader = F.RecordReader()
         self.out = bytearray()
+        self.hist = b""  # the last HIST stream bytes delivered (compression's history)
+        # seqs flagged compressed by a control decoded here (its data slot may
+        # have failed): a resend after the sender knows that omits the bit
+        self.comp_seqs: set[int] = set()
 
-    def accept(self, seq: int, payload: bytes) -> bool:
-        """-> whether new bytes were delivered."""
+    def accept(self, seq: int, payload: bytes, comp: bool = False) -> bool:
+        """-> whether new bytes were delivered. `comp`: deflated (T_COMP),
+        inflated in seq order, primed with the stream delivered before it."""
         if seq < self.cum or seq in self.buf or seq >= self.cum + WINDOW:
             return False
-        self.buf[seq] = payload
+        self.buf[seq] = (payload, comp)
         delivered = False
         while self.cum in self.buf:
-            self.out += self.reader.feed(self.buf.pop(self.cum))
+            p, z = self.buf.pop(self.cum)
+            self.comp_seqs.discard(self.cum)
+            if z:
+                try:
+                    p = F.inflate(self.hist, p)
+                except ValueError as e:
+                    raise ProtocolError(f"seq {self.cum}: {e}") from None
+            self.hist = (self.hist + p)[-F.HIST:]
+            self.out += self.reader.feed(p)
             self.cum += 1
             delivered = True
         return delivered
@@ -201,6 +247,7 @@ class RxSide:
         gone = [s for s in self.buf if s >= lo]
         for s in gone:
             del self.buf[s]
+        self.comp_seqs = {s for s in self.comp_seqs if s < lo}
         return gone
 
 
@@ -343,7 +390,10 @@ class Station:
             e = dict(ext)
             if bitmap:
                 e[F.T_BITMAP] = bitmap
-            n_ctl = self._ctl_size(e, cpb, k, has_new)
+            # a compressed resend's T_COMP bit, if the peer may lack it, is
+            # mandatory: reserved like T_RV
+            zk = max((j + 1 for j, x in enumerate(missing[:k]) if self._comp_bit(x)), default=0)
+            n_ctl = self._ctl_size(e, cpb, k, has_new, zk)
             # the peer asked for duplicated control: data bursts only
             dup = 2 if (fresh and self.peer_wants_dup and (k or has_new)) else 1
             if n_ctl <= max_ctl and dup * n_ctl + k <= max(max_cw, dup * n_ctl) and (fresh or not has_new):
@@ -368,28 +418,27 @@ class Station:
         rvs = [self.tx.cws[x].heard % cycle for x in resend]
         new = []
         room = max(0, max_cw - dup * n_ctl - len(resend))
+        # a new codeword is compressed only when its T_COMP bit fits the
+        # control's padding: compression never costs a control codeword
+        spare = n_ctl * cpb - self._ctl_bytes(ext, k, has_new, 0)
         while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
-            avail = self._new_available()
-            if avail <= 0:
+            if self._new_available() <= 0:
                 break
-            n = min(pb, avail)
-            i = self.tx.stream_end - self.tx.buf_off
-            c = Codeword(self.tx.next, self.tx.stream_end, n, submode,
-                         bytes(self.tx.buf[i:i + n]) + bytes(pb - n))
-            self.tx.cws[c.seq] = c
-            self.tx.next += 1
-            self.tx.stream_end += n
-            new.append(c)
+            fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
+            new.append(self.tx.new_codeword(submode, pb, fits, bn))
         core.k = len(resend)
         if resend:
             ext[F.T_RV] = F.pack_rv(rvs)
         if new:
             ext[F.T_NEW] = bytes([new[0].seq % SEQ_MOD])
+        if comp := F.pack_flags([self._comp_bit(x) for x in resend] + [c.comp for c in new]):
+            ext[F.T_COMP] = comp
         if dup == 2 and not (resend or new):
             dup = 1  # nothing but control after all
         if dup == 2:
             core.ftype = F.ARQ_DUP
         ctl = F.Control(core, ext).pack(cpb)
+        assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
         slots = [Slot(ctl_mask(self.direction, i, self.key), rv, p) for i, p in enumerate(ctl) for rv in range(dup)]
         slots += [Slot(data_mask(self.direction, x, self.key), rv, self.tx.cws[x].payload) for x, rv in zip(resend, rvs)]
         slots += [Slot(data_mask(self.direction, c.seq, self.key), 0, c.payload) for c in new]
@@ -403,6 +452,7 @@ class Station:
         self.bursts_sent += 1
         self.last_sent = burst
         self.stats["cw_new"] += len(new)
+        self.stats["cw_comp"] += sum(c.comp for c in new)
         self.stats["cw_resend"] += len(resend)
         if log.isEnabledFor(logging.INFO):
             kind = "data" if resend or new else ("ack" if fresh else "poll")
@@ -411,7 +461,8 @@ class Station:
                 parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
             if new:
                 parts.append(f"new {new[0].seq}" + (f"-{new[-1].seq}" if len(new) > 1 else "")
-                             + f" {sum(c.length for c in new)} B")
+                             + f" {sum(c.length for c in new)} B"
+                             + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
             if self.tx.pending():
                 parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self._new_available()} B")
             parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
@@ -434,18 +485,29 @@ class Station:
         m = getattr(self.policy, "measured", None)
         return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
 
+    def _comp_bit(self, seq: int) -> bool:
+        c = self.tx.cws[seq]
+        return c.comp and not c.comp_known
+
     def _new_available(self) -> int:
         return self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
 
     @staticmethod
-    def _ctl_size(ext, pb, k, has_new) -> int:
+    def _ctl_bytes(ext, k, has_new, zk) -> int:
+        """Control bytes with T_RV, T_NEW and a T_COMP covering the first
+        `zk` data slots, as they will be packed."""
         e = dict(ext)
         if k:
             e[F.T_RV] = bytes(-(-2 * k // 8))
         if has_new:
             e[F.T_NEW] = b"\0"
-        total = 4 + sum(2 + len(v) for v in e.values())
-        return max(1, -(-total // pb))
+        if zk:
+            e[F.T_COMP] = bytes(-(-zk // 8))
+        return 4 + sum(2 + len(v) for v in e.values())
+
+    @classmethod
+    def _ctl_size(cls, ext, pb, k, has_new, zk=0) -> int:
+        return max(1, -(-cls._ctl_bytes(ext, k, has_new, zk) // pb))
 
     def on_timeout(self, allow_repeat: bool = True) -> TxBurst | None:
         """Master only: no decodable reply in time. -> what to send.
@@ -530,8 +592,10 @@ class Station:
         if self._abandon is not None and acted in self._abandon_bursts:
             self._abandon = None  # the peer has applied it
         for x in self._sent_seqs.pop(acted, []):
-            if x in self.tx.cws:
-                self.tx.cws[x].heard += 1  # the peer decoded that burst: it holds soft bits
+            if c := self.tx.cws.get(x):
+                c.heard += 1  # the peer decoded that burst: it holds soft bits
+                # and mapped its new slots by T_NEW: it holds their T_COMP bits
+                c.comp_known |= c.first_bn == acted
         try:
             cum = unwrap(core.cum, self.tx.base)
             received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
@@ -557,6 +621,12 @@ class Station:
             self._forget_all(rx)
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
+        bits = F.unpack_flags(ext.get(F.T_COMP, b""), len(slots))
+        # new slots' bits are kept (the sender omits them from resends once I
+        # act on this burst); a resend's bit is sent whenever it is needed
+        self.rx.comp_seqs |= {seq for (seq, _), z in zip(slots[core.k:], bits[core.k:])
+                              if z and seq is not None and seq >= self.rx.cum}
+        comp = [z or seq in self.rx.comp_seqs for (seq, _), z in zip(slots, bits)]
         self.last_rx_data = bool(slots)
         n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
@@ -571,7 +641,11 @@ class Station:
             if p is not None:
                 n_dec += 1
                 rx.forget(key)
-                progress |= self.rx.accept(seq, p)
+                try:
+                    progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
+                except ProtocolError as e:
+                    self._fail(f"protocol: {e}")
+                    return True
         if outcome:
             outcome(rx.submode, n_ok + core.n_ctl, n_new + core.n_ctl)
 
