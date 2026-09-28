@@ -166,6 +166,7 @@ class RecordReader:
 
     def __init__(self):
         self.buf = bytearray()
+        self.delivered = 0  # host bytes out, for the log's throughput
 
     def feed(self, b: bytes) -> bytes:
         self.buf += b
@@ -178,6 +179,7 @@ class RecordReader:
                 continue
             if i + 1 + n > len(self.buf):
                 break
+            self.delivered += n
             out += self.buf[i + 1:i + 1 + n]
             i += 1 + n
         del self.buf[:i]
