@@ -22,7 +22,7 @@ from . import frames as F
 from . import link as L
 
 T_SESS = 10  # extension type carrying a session frame
-VERSION = 1
+VERSION = 2  # 2: T_COMP (a v1 peer would deliver compressed codewords raw)
 CONNECT_TRIES = 5
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
@@ -239,9 +239,10 @@ class Session:
         d = {k: v - prev.get(k, 0) for k, v in self._stats().items()}
         dt = max(now - since, 1e-9)
         cw = d.get("cw_new", 0) + d.get("cw_resend", 0)
-        log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends"
-                 " | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"], 8 * d["tx_bytes"] / dt,
-                 d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw, 100 * d.get("cw_resend", 0) / max(cw, 1),
+        log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends,"
+                 " %d new compressed | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"],
+                 8 * d["tx_bytes"] / dt, d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw,
+                 100 * d.get("cw_resend", 0) / max(cw, 1), d.get("cw_comp", 0),
                  d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):

@@ -2,6 +2,7 @@
 PHY with loss, asserting the accounting (docs/arq.md §10)."""
 
 import random
+from collections import Counter
 
 import pytest
 
@@ -131,24 +132,56 @@ class FakeRx:
 
 
 LAST_REASON = [""]
+WORDS = (b"the of and to in is that for with as burst codeword ACK resend CQ de QTH RST 599 73 "
+         b"frequency antenna propagation Winlink message\r\n").split(b" ")
+
+
+def text(rng, n):
+    """Compressible bytes, not a pattern deflate learns in one codeword."""
+    out = bytearray()
+    while len(out) < n:
+        out += rng.choice(WORDS) + b" " + (str(rng.randrange(1000)).encode() if rng.random() < 0.1 else b"")
+    return bytes(out[:n])
+
+
+def payload(rng, n, kind):
+    """kind "random", "text", or "mixed": text and random runs of 50-600 B
+    alternating, so compressed and raw codewords interleave."""
+    noise = lambda k: bytes(rng.randrange(256) for _ in range(k))
+    if kind != "mixed":
+        return text(rng, n) if kind == "text" else noise(n)
+    out = bytearray()
+    while len(out) < n:
+        k = rng.randrange(50, 600)
+        out += text(rng, k) if rng.random() < 0.5 else noise(k)
+    return bytes(out[:n])
+
+
+def count_resends(burst, stats):
+    """Resends in `burst` by T_COMP bit: compressed or raw."""
+    c = F.Control.unpack([s.payload for s in burst.slots if s.mask_id[2] >= F.SEQ_MOD and s.rv == 0])
+    comp = sum(F.unpack_flags(c.ext.get(F.T_COMP, b""), c.core.k))
+    stats["resend_comp"] += comp
+    stats["resend_raw"] += c.core.k - comp
 
 
 def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, max_cw=20,
-        modes=("m4", "m22", "m46")):
+        modes=("m4", "m22", "m46"), kind="random"):
     rng = random.Random(seed)
-    data_a = bytes(rng.randrange(256) for _ in range(n_a))
-    data_b = bytes(rng.randrange(256) for _ in range(n_b))
+    data_a = payload(rng, n_a, kind)
+    data_b = payload(rng, n_b, kind)
     a = L.Station(0, RandomPolicy(random.Random(seed + 1), change, modes, max_cw), master=True)
     b = L.Station(1, RandomPolicy(random.Random(seed + 2), change, modes, max_cw))
     a.write(data_a)
     b.write(data_b)
     stores = {0: {}, 1: {}}
-    stats = {"mismatch": 0, "turns": 0}
+    stats = Counter(mismatch=0, turns=0)
     got_a, got_b = bytearray(), bytearray()
     LAST_REASON[0] = ""
     burst, sender = a.build(), a
     for turn in range(max_turns):
         stats["turns"] = turn
+        count_resends(burst, stats)
         receiver = b if sender is a else a
         dead = die_at is not None and turn >= die_at
         ok = False
@@ -166,6 +199,8 @@ def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, 
             # the log's throughput counters: exact, abandons and resends included
             assert (a.tx.acked, b.rx.reader.delivered) == (len(F.to_records(data_a)), n_a)
             assert (b.tx.acked, a.rx.reader.delivered) == (len(F.to_records(data_b)), n_b)
+            for k in ("cw_new", "cw_comp"):
+                stats[k] = a.stats[k] + b.stats[k]
             return "done", stats
         if ok:
             burst, sender = receiver.build(), receiver
@@ -243,3 +278,45 @@ def test_tiny_bursts_with_losses_still_deliver(seed, max_cw):
     result, stats = run(300 + seed, 0.2, 0.05, 1500, 1500, max_cw=max_cw, modes=("m22",))
     assert result == "done", (result, LAST_REASON[0])
     assert stats["mismatch"] == 0
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_compressed_codewords_deliver_exactly(seed):
+    """Text goes as deflate primed with the delivered stream (T_COMP):
+    through losses, abandons, re-slicing, CPM's 20 B control and tiny
+    bursts, every byte arrives exact and compression is used."""
+    modes = [("m22", "m46"), ("m4", "m46", "c60", "c40"), ("m22",)][seed % 3]
+    p_burst, p_cw = [(0.0, 0.0), (0.1, 0.1), (0.2, 0.05)][seed // 3 % 3]
+    result, stats = run(500 + seed, p_burst, p_cw, 6000, 2000, modes=modes, max_cw=[20, 10, 3][seed % 3],
+                        kind="text")
+    assert result == "done", (result, stats, LAST_REASON[0])
+    assert stats["mismatch"] == 0
+    assert stats["cw_comp"] > 0
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_mixed_compressed_and_raw_through_retransmits(seed):
+    """Text and random runs interleaved: compressed and raw codewords in
+    the same bursts, both resent (with RVs, after abandons) and both
+    delivered exact. A raw resend must keep its T_COMP bit clear and a
+    compressed one set, or the stream corrupts."""
+    modes = [("m22", "m46"), ("m4", "m46", "c60", "c40")][seed % 2]
+    result, stats = run(700 + seed, 0.0, 0.2, 8000, 3000, modes=modes, max_cw=[20, 10][seed % 2], kind="mixed")
+    assert result == "done", (result, stats, LAST_REASON[0])
+    assert stats["mismatch"] == 0
+    assert 0 < stats["cw_comp"] < stats["cw_new"]
+    assert stats["resend_comp"] > 0 and stats["resend_raw"] > 0, stats
+
+
+def test_compression_fits_more_per_codeword():
+    """Clean link, one 46 B mode: text takes well under the raw codeword count."""
+    n = 20000
+    result, stats = run(1, 0.0, 0.0, n, 0, change=0.0, modes=("m46",), kind="text")
+    assert result == "done"
+    raw = -(-len(F.to_records(text(random.Random(1), n))) // 46)
+    assert stats["cw_new"] < raw / 1.5, (stats["cw_new"], raw)
+
+
+def test_incompressible_goes_raw():
+    result, stats = run(2, 0.0, 0.0, 3000, 3000, modes=("m46",))
+    assert result == "done" and stats["cw_new"] > 0 and stats["cw_comp"] == 0

@@ -31,7 +31,9 @@ def test_connect_exchange_disconnect(tmp_path):
     a.connect("K2XYZ", 2)
     assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
     rng = np.random.default_rng(3)
-    up, down = rng.bytes(3000), rng.bytes(400)
+    # raw and deflated (T_COMP) codewords both, over the real PHY
+    up = rng.bytes(1500) + (b"CQ CQ de W1AW QTH FN31 RST 599 GM OM 73 " * 60)[:2000]
+    down = rng.bytes(400)
     a.session.write(up)
     b.session.write(down)
     got_a, got_b = bytearray(), bytearray()
@@ -42,6 +44,7 @@ def test_connect_exchange_disconnect(tmp_path):
         return len(got_b) >= len(up) and len(got_a) >= len(down)
     assert link(a, b, 12, 240, done, seed=1)
     assert bytes(got_b) == up and bytes(got_a) == down
+    assert 0 < a.session.station.stats["cw_comp"] < a.session.station.stats["cw_new"]
     a.session.disconnect()
     assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=2)
     ev_a, ev_b = a.events(), b.events()
