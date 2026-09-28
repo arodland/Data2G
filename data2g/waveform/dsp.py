@@ -32,7 +32,7 @@ _HET_STEP = FCENTER // _HET_G  # 3
 _HET_TABLE = np.exp(-2j * np.pi * np.arange(_HET_PERIOD) / _HET_PERIOD)
 
 
-def to_baseband(x: np.ndarray) -> np.ndarray:
+def to_baseband(x: np.ndarray, n0: int = 0) -> np.ndarray:
     """Real passband -> complex baseband (pure heterodyne by FCENTER).
 
     Deliberately unfiltered: any FIR long enough to be selective smears
@@ -41,7 +41,7 @@ def to_baseband(x: np.ndarray) -> np.ndarray:
     image exactly (all image spacings are carrier-spacing multiples) and
     provides per-carrier noise selectivity. Sync filters its own copy.
     """
-    n = np.arange(len(x))
+    n = np.arange(n0, n0 + len(x))  # `n0`: x's first sample's index in a stream, so chunks share one phase
     return x.astype(np.float64) * _HET_TABLE[(_HET_STEP * n) % _HET_PERIOD]
 
 

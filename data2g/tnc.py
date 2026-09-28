@@ -145,6 +145,15 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
         lock = cpm.find(cpm.GRIDS[g], y[:head])
         if lock is not None:
             return cpm.receive(y, lock)  # a CPM lock beats a suspect OFDM header
+    if r is None:
+        # no preamble: the header copy of a burst whose head faded (as Receiver._find_copy)
+        locks = [c for c in (modem.find_copy(y, b) for b in modem.HEADER_COPY_BANDS) if c is not None]
+        locks = [c for c in locks if c["start"] <= lead and c["end"] <= len(y)]
+        if locks:
+            try:
+                return modem.receive(y, copy=max(locks, key=lambda c: c["score"]))
+            except modem.SyncError:
+                pass
     return r
 
 
@@ -233,7 +242,9 @@ class Receiver:
         c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
         if len(c) >= modem.PILOT_PAIRS:
             ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
-            self.confirmed = ok and p["score"] >= self.SUSPECT_SCORE
+            # a copy lock is one header copy: confirmed (no further search) at
+            # the single-copy commit score
+            self.confirmed = ok and p["score"] >= (modem.COPY_COMMIT_SCORE if "copy" in p else self.SUSPECT_SCORE)
             if ok != self.pilots_ok:
                 log.info("%s burst: pilots %s (coherence %.2f)", p["spec"].name, "back" if ok else "gone", np.mean(c))
             self.pilots_ok = ok
@@ -252,7 +263,7 @@ class Receiver:
             if d.fed < self.off:  # its audio was trimmed away: start over
                 d.reset()
                 d.fed = self.off
-            d.feed(modem.to_baseband(self.buf[d.fed - self.off:]))
+            d.feed(modem.to_baseband(self.buf[d.fed - self.off:], d.fed))
             # no search looks further back than `keep` (the statistic grew
             # with a long burst in the buffer, and was copied every hop)
             d.trim(self.off + len(self.buf) - self.keep - d.span)
@@ -302,25 +313,58 @@ class Receiver:
         w0 = hdr_end if whole else max(hdr_end, len(self.buf) - self.keep)
         if len(self.buf) - w0 < self.keep // 2:
             return False
+        q = None
         try:
             q = modem.find_burst(self.buf[w0:], self.bands, self.accept, stats=self._stats(w0))
+            q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
         except modem.SyncError:
-            return False
+            pass
         finally:
             self._searched()
-        if q["score"] < p["score"] + self.SUPERSEDE_MARGIN:
+        if "copy" in p and (q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN):
+            # a copy lock can be a copy read off the wrong frame, taken before
+            # the burst's own copy arrived (at the header floor, 0.26-0.33):
+            # the true one, later, replaces it
+            c = self._find_copy()
+            if c is not None:
+                q = dict(c, start=c["start"] + self.off, end=c["end"] + self.off, p0=c["p0"] + self.off,
+                         copy=dict(c["copy"], pc=c["copy"]["pc"] + self.off))
+        if q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN or q["start"] == p["start"]:
             return False
-        q = dict(q, start=q["start"] + w0 + self.off, end=q["end"] + w0 + self.off, p0=q["p0"] + w0 + self.off)
         log.info("%s header (score %.2f) superseded by %s (score %.2f)", p["spec"].name, p["score"],
                  q["spec"].name, q["score"])
         if not whole:  # completing: the caller has already handled p
             out.append(("burst", {"header": p, "rx": None,
                                   "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
         self.pending = q
-        self.pilots_ok = q["score"] >= self.SUSPECT_SCORE
+        self.pilots_ok = "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
         out.append(("header", q))
         return True
+
+    def _find_copy(self) -> dict | None:
+        """A burst whose preamble and header faded, found from its frame
+        pilots and header copy (modem.find_copy) on the bands that carry a
+        copy, from the detectors' kept matched filter outputs: the best
+        lock, as find_burst's dict (buffer indices), or None."""
+        best = None
+        for band in modem.HEADER_COPY_BANDS:
+            d = self.detectors.get(band)
+            level = d.level() if d is not None else None
+            if level is None:
+                continue
+            a = max(d.c0, self.off)  # the stream index both the buffer and C cover from
+            C = d.C[:, a - d.c0:]
+            x = self.buf[a - self.off:]
+            C = C[:, :max(0, len(x) - modem.M + 1)]
+            lock = modem.find_copy(x, band, self.accept, C, level)
+            if lock is not None and (best is None or lock["score"] > best[0]["score"]):
+                best = (lock, a - self.off)
+        if best is None:
+            return None
+        lock, k = best
+        return dict(lock, start=lock["start"] + k, end=lock["end"] + k, p0=lock["p0"] + k,
+                    copy=dict(lock["copy"], pc=lock["copy"]["pc"] + k))
 
     def _find_cpm(self) -> dict | None:
         """An early lock on any listened-for CPM grid, as find_burst's dict."""
@@ -378,6 +422,8 @@ class Receiver:
                 finally:
                     self._searched()
                 if p is None:
+                    p = self._find_copy()  # the preamble faded: the frame pilots and header copy
+                if p is None:
                     self._trim(self.keep)
                     break
                 if p["start"] + self.off <= self.last_start:
@@ -385,12 +431,15 @@ class Receiver:
                 self.pending = dict(p, start=p["start"] + self.off, end=p["end"] + self.off)
                 if "p0" in p:
                     self.pending["p0"] = p["p0"] + self.off
-                # BUSY at once on a clear header; a suspect one waits for its pilots
-                self.pilots_ok = p.get("family") == "cpm" or p["score"] >= self.SUSPECT_SCORE
+                if "copy" in p:
+                    self.pending["copy"] = dict(p["copy"], pc=p["copy"]["pc"] + self.off)
+                # BUSY at once on a clear header (or a copy lock: its pilots
+                # passed already); a suspect one waits for its pilots
+                self.pilots_ok = p.get("family") == "cpm" or "copy" in p or p["score"] >= self.SUSPECT_SCORE
                 self.confirmed = False
                 log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
-                         p["n_cw"], (p["end"] - p["start"]) / FS, "sync" if p.get("family") == "cpm" else "header",
-                         p["score"])
+                         p["n_cw"], (p["end"] - p["start"]) / FS,
+                         "sync" if p.get("family") == "cpm" else "header copy" if "copy" in p else "header", p["score"])
                 out.append(("header", self.pending))
             p = self.pending
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
@@ -417,7 +466,13 @@ class Receiver:
             seg = self.buf[s0 : p["end"] + LEADIN_SAMPLES - self.off]
             head = p["start"] - self.off - s0 + modem.head_samples(p["band"]) + NSYM + 3 * modem.M
             try:
-                r = modem.receive(seg, [p["band"]], self.accept, head=min(head, len(seg)))
+                if "copy" in p:
+                    at = self.off + s0  # seg's stream index
+                    lock = dict(p, start=p["start"] - at, end=p["end"] - at, p0=p["p0"] - at,
+                                copy=dict(p["copy"], pc=p["copy"]["pc"] - at))
+                    r = modem.receive(seg, accept=self.accept, copy=lock)
+                else:
+                    r = modem.receive(seg, [p["band"]], self.accept, head=min(head, len(seg)))
             except modem.SyncError as e:
                 log.warning("burst lost: %s", e)
                 r = None

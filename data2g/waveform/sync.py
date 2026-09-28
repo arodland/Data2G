@@ -126,11 +126,12 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
     return S / q.min(), freqs
 
 
-def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: int | None = None):
+def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: int | None = None, outs: list | None = None):
     """-> (S before noise normalization, each bin's noise level (the
     NOISE_REF_HZ bins last), the searched hypotheses). `levels_from`: the
     levels from correlation outputs from there on only, by one partition
-    (StreamDetector: a chunk's new outputs, not its overlap with the last)."""
+    (StreamDetector: a chunk's new outputs, not its overlap with the last).
+    `outs`: gets each searched bin's matched filter outputs, c_f."""
     band = band or ofdm.band("w")
     repeats = repeats or band.spec.preamble_repeats
     t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
@@ -149,6 +150,8 @@ def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: i
             q[i] = np.partition(pn, k)[k] / -np.log(1 - NOISE_QUANTILE)
         q[i] = max(q[i], 1e-12 * np.mean(p) + 1e-300)  # silence-only buffers (tests)
         if i < len(freqs):
+            if outs is not None:
+                outs.append(c)
             d = c[M:] * np.conj(c[:-M])  # each window against the one before it
             S[i] = np.abs(sum(d[PREAMBLE_CP + (r - 1) * M : PREAMBLE_CP + (r - 1) * M + n_out]
                               for r in range(1, repeats)))
@@ -166,7 +169,11 @@ class StreamDetector:
     S for the new starts alone. The noise level can't be the whole buffer's
     quantile any more: each fed chunk's per-bin level is kept, and a bin's
     level is the median of the last CHUNKS chunks (about the buffer's span),
-    then the lowest bin's as before (detection_stat)."""
+    then the lowest bin's as before (detection_stat).
+
+    Its matched filter outputs are kept too (C, from stream index c0): the
+    frame pilot is the preamble's repeat symbol, so modem.find_copy's
+    mid-burst search reuses them rather than filtering again."""
 
     CHUNKS = 8
 
@@ -181,6 +188,8 @@ class StreamDetector:
         self.s0 = 0  # stream index of the start S[:, 0] is for
         self.fed = 0  # stream index one past the last sample fed
         self.levels: list = []  # per chunk, each bin's noise level
+        self.C = np.zeros((len(_cfo_grid(self.reach)), 0), dtype=np.complex128)  # c_f per stream start
+        self.c0 = 0  # stream index of C[:, 0]
 
     def feed(self, z: np.ndarray):
         """The next baseband samples of the stream (contiguous)."""
@@ -193,7 +202,13 @@ class StreamDetector:
             self.tail = z
             return
         # the level from the new outputs, at least 2000 (0.25 s) of the latest
-        S, q, _ = _raw_stat(z, self.band, self.reach, levels_from=max(0, len(z) - M + 1 - max(new, 2000)))
+        outs: list = []
+        S, q, _ = _raw_stat(z, self.band, self.reach, levels_from=max(0, len(z) - M + 1 - max(new, 2000)), outs=outs)
+        zs = self.fed - len(z)  # stream index of z[0], so of c[0]
+        if not len(self.C[0]):
+            self.c0 = zs
+        have = self.c0 + len(self.C[0])  # outputs overlap the last chunk's: append the new ones
+        self.C = np.concatenate([self.C, np.array(outs)[:, max(0, have - zs):]], axis=1)
         self.S = np.concatenate([self.S, S], axis=1)
         self.levels = (self.levels + [q])[-self.CHUNKS:]
         self.tail = z[len(S[0]):]
@@ -202,6 +217,12 @@ class StreamDetector:
         """Drop the statistic of starts before stream index `start`."""
         k = min(max(0, start - self.s0), len(self.S[0]))
         self.S, self.s0 = self.S[:, k:], self.s0 + k
+        k = min(max(0, start - self.c0), len(self.C[0]))
+        self.C, self.c0 = self.C[:, k:], self.c0 + k
+
+    def level(self) -> float | None:
+        """The noise level stat() normalizes by (None before any)."""
+        return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
 
     def stat(self, lo: int, hi: int) -> np.ndarray:
         """Normalized S for stream starts [lo, hi) (-1 where not computed)."""

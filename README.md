@@ -1714,6 +1714,133 @@ is gone, the tight-burst fuzz test stays.
   link (no ACK there at all), and telling the receiver which mode went
   unanswered (a protocol change, for the rare miss).
 
+## Mid-burst acquisition from the header copy (2026-09-27)
+
+TLDR: when a fade takes a w/w48 burst's preamble, the receiver now finds
+the burst from its frame pilots and reads the header from its mid-burst
+copy. Throughput +10% on MPP and MPD at 0 dB, nothing lost elsewhere, idle
+CPU +28%.
+
+- **Where sync costs** (`scripts/sync_loss_study.py`: the loss study's
+  sessions, every OFDM burst also received by a genie with the true start,
+  CFO and header, on the same audio). Bursts lost at sync that the genie
+  decodes: MPP -4 dB 11.7%, MPD 0 dB 4.6%, MPP 0 dB 4.5%, MPG -4 dB 3.7%,
+  MPG 0 dB 2.1%, AWGN -4 dB none. 80% of them on w/w48, all missed
+  preambles (not misread headers), none shorter than 5 frames.
+- **How** (`modem.find_copy`; prototype and diagnosis in
+  `scripts/copy_acq_study.py`):
+  - The preamble's matched filter (the frame pilot is its repeat symbol)
+    one frame apart, over 3 pilot pairs, folded over every frame of the
+    buffer per grid phase: pilots add coherently, data symbols don't.
+    Ranking 3-pair windows instead, data slots outranked the pilots.
+  - CFO: the bin, refined by the fold's phase. At the 12.5 Hz grid alone
+    the copy read (channel interpolated over 144 ms) failed.
+  - The copy read at every frame of the 4 best grids, at the peak and 16
+    and 32 samples earlier (the peak sat on MPP's and MPD's second path).
+    A word counts only if its own length puts its copy frame there.
+  - Gates: the normalized pilot peak must reach 14 before any header read
+    (noise buffers reach 11.9, decoded copy locks 16.6-91), and the claimed
+    burst's frame pilots must be coherent, 0.35 (noise locks 0.11-0.23,
+    decoded 0.41-0.73; the BUSY floors would pass noise).
+  - `tnc.Receiver` tries it when the preamble and CPM searches find nothing,
+    from the stream detector's kept matched filter outputs (no extra
+    filtering). A copy lock is pending as any other; `receive(copy=...)`
+    rebuilds the header from it. `receive_any` falls back to it too, so the
+    offline studies include it.
+  - `to_baseband` takes a stream offset: the receiver's fed chunks now share
+    one heterodyne phase (products a frame apart span chunks).
+- **Loss study,** shift+cpm, 12 seeds x 600 s, bps, paired by seed:
+
+  | Cell | Before | After | Paired |
+  |---|---|---|---|
+  | MPD 0 dB | 140 ± 7 | 155 ± 6 | +14 ± 5 (+10%) |
+  | MPP 0 dB | 252 ± 7 | 278 ± 7 | +26 ± 7 (+10%) |
+  | MPP -4 dB | 72 ± 2 | 72 ± 2 | 0 ± 2 |
+  | MPG -4 dB | 79 ± 6 | 82 ± 5 | +3 ± 3 |
+  | MPG 0 dB | 296 ± 14 | 295 ± 14 | -1 ± 1 |
+  | AWGN -4 dB | 202 ± 3 | 202 ± 3 | 0 |
+
+  - Missed preambles: MPP -4 dB 13.5% -> 6.5% of bursts, MPD 0 dB 5.3% ->
+    2.1%, MPP 0 dB 5.2% -> 1.5%. At MPP -4 dB the bursts won back are mostly
+    replies, and throughput doesn't move.
+  - MPG: slow fades take the copy too.
+- **Ladder** (paired: each trial of ladder_study's smallest burst received
+  with and without the copy lock, 400 per point). Failures, before -> after:
+
+  | Rung, channel | old 10% point | 1 dB under |
+  |---|---|---|
+  | ack-4f MPP | 45 -> 35 | 56 -> 44 |
+  | ack-4f MPD | 43 -> 20 | 67 -> 29 |
+  | polar-k96-f8 MPP | 26 -> 13 | 33 -> 19 |
+  | polar-k96-f8 MPD | 37 -> 15 | 47 -> 24 |
+  | qpsk-r1/5 MPD | 34 -> 27 | 98 -> 85 |
+  | w48-qpsk-r1/5 MPD | 46 -> 38 | 99 -> 85 |
+
+  - ack-4f and polar-k96-f8 fail less 1 dB under their old 10% points on
+    MPP/MPD than they did at them: their 10% points move 1 dB or more.
+  - Seeded 10% points (ladder_study `--seed 0`, the same trials for both),
+    before -> after, dB; every other cell of these 7 rungs is unchanged:
+
+    | Rung | MPP | MPD |
+    |---|---|---|
+    | ack-4f | -2.69 -> -3.25 | -2.19 -> -3.12 |
+    | polar-k96-f8 | -2.62 -> -3.19 | -0.56 -> -2.44 |
+    | qpsk-r1/5 | -0.62 | 0.94 -> 0.56 |
+    | qpsk-r1/3 | 2.06 | 3.44 -> 3.25 |
+    | w48-qpsk-r1/5 | 2.94 -> 2.75 | 3.81 |
+
+    ack-1f, w48-qpsk-r1/3, and every AWGN and MPG cell: no change.
+  - The whole ladder, seeded (`--seed 0`, 48 modes, same trials both ways;
+    `runs/ladder_seeded_{master,pr6}_{10,1}pct.csv`): nothing worse. 10%:
+    175 cells identical, 11 better (the 7 rungs above, and polar-k96-f4
+    MPP/MPD -0.38/-0.56, polar-k192-f8 MPP/MPD -0.38/-0.94). 1%, where
+    fades that take the preamble set the point, 146 identical, 17 better:
+
+    | Rung | MPP | MPD |
+    |---|---|---|
+    | ack-4f | 2.56 -> -0.44 | 1.94 -> 0.25 |
+    | polar-k96-f8 | 1.12 -> -1.50 | 3.75 -> 0.56 |
+    | polar-k96-f4 | 1.19 -> 0.06 | 3.75 -> 1.88 |
+    | polar-k192-f8 | 0.75 -> 0.19 | 3.00 -> -0.38 |
+    | qpsk-r1/5 | 2.19 -> 1.44 | 3.75 -> 2.62 |
+    | qpsk-r1/3 | | 5.31 -> 4.75 |
+    | qpsk-r1/2 | | 6.56 -> 6.38 |
+    | 16qam-r1/3 | | 10.88 -> 10.31 |
+    | w48-qpsk-r1/5 | 5.19 -> 5.00 | 5.88 -> 5.31 |
+    | w48-qpsk-r1/3 | | 7.62 -> 7.25 |
+
+    and polar-k96-f8 MPG 4.31 -> 4.12.
+  - The data rungs gain 1-3 points of failure rate; MPG nothing (7 rungs).
+  - Re-running ladder_study's threshold search instead gave -1.6 to +1.2 dB
+    on the same rungs: its SNR points use different trial seeds, and a
+    different starting point takes a different path through that noise (the
+    lock can't fail a trial that passed without it).
+- **Streaming: a copy lock can be superseded.** A copy read off the wrong
+  frame, taken before the burst's own copy arrived, can clear the header
+  floor (0.26-0.33). Nothing replaced it: the supersede search looked for
+  preambles only. Now a pending copy lock also re-runs the copy search, and a
+  better, different lock (the preamble path's 0.05 margin) replaces it; a
+  copy lock counts as confirmed (no further search) at the single-copy
+  commit score, 0.45. Head-zeroed bursts through the streaming receiver, 3
+  modes x 2 SNRs x 20 seeds: 117 -> 120 decoded with the CFO below.
+- **CFO:** a frame-pair product carries the whole CFO modulo 6.94 Hz, not
+  its offset from the bin; read as the offset, copy reads ran up to 3.5 Hz
+  off (receive() then fixed it from the copy). Correct, the paired ladder
+  points above fail 45 fewer times in 42 (one point 2 worse); sessions
+  unchanged.
+- **CPU** (`scripts/copy_cpu.py`, streaming receiver, s per audio minute):
+  noise 4.40 -> 5.62 (the fold, each hop; header reads almost never run);
+  MPP -4 dB traffic 2.93 -> 4.20; MPP 0 dB 2.12 -> 2.37.
+- **Also tried** (`scripts/rx_ab_study.py`, 8-codeword bursts near the 10%
+  points, same audio): modem73's local LLR gate, +20% codeword failures
+  (+16% on MPD, its target); aicodix's median (Theil-Sen) phase fits, +1%.
+  Our power-weighted phasor estimators already discount faded pilots.
+- **Not reached:** n4/n10 (no header copy), MPG, and bursts whose copy
+  faded too. Per-frame pilots (a format change) would reach them: distinct
+  low-PAPR pilots exist on 10+ carriers (64 at 0.9-1.1 dB on 24/48, 16 at
+  1.25-1.6 dB on 10), identified by their pattern over frames; n4 has 2 and
+  would rotate one pilot per frame instead.
+
 ## TODO
 
 - Active constellation extension (Krongold & Jones 2003) in the TX

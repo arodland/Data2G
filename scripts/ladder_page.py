@@ -1,11 +1,12 @@
 """The ladder artifact (HTML) from the ladder study's CSVs.
 
-    uv run python scripts/ladder_page.py runs/ladder_10pct.csv --out <page.html>
+    uv run python scripts/ladder_page.py runs/ladder_10pct.csv --p1 runs/ladder_1pct.csv --out <page.html>
 
-10% column: scripts/ladder_study.py (the smallest ARQ data burst through
-the ARQ's receiver). 1% column: the freeze (runs/ladder_final.csv and
-runs/sync_floor.csv: the larger of the code's and the band's sync point);
-CPM's from the prototype study, before the c8r50 sync change.
+Both columns: scripts/ladder_study.py (the smallest ARQ data burst through
+the ARQ's receiver, seeded: the same trials at every SNR). Without --p1,
+the 1% column is the freeze (runs/ladder_final.csv and runs/sync_floor.csv:
+the larger of the code's and the band's sync point; CPM's from the
+prototype study).
 """
 
 import argparse
@@ -86,7 +87,7 @@ def fmt(v) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".").replace("-", "−")
 
 
-def page(p10: dict, p1: dict) -> str:
+def page(p10: dict, p1: dict, p1_measured: bool = False) -> str:
     rows = sorted(MODES, key=lambda m: (bps(MODES[m]), width(MODES[m])))
     body = []
     for m in rows:
@@ -98,12 +99,16 @@ def page(p10: dict, p1: dict) -> str:
         tags = "".join(f'<span class="tag">{html.escape(t)}</span>' for t in ROLES.get(m, []))
         cls = ' class="covered"' if m in COVERED and m not in ROLES else ""
         cells10 = "".join(f"<td>{fmt(p10.get((m, c)))}</td>" for c in CH)
-        cells1 = "".join(f'<td class="p1">{fmt(p1.get((m, c)))}{"†" if is_cpm(s) else ""}</td>' for c in CH)
+        cells1 = "".join(f'<td class="p1">{fmt(p1.get((m, c)))}{"" if p1_measured or not is_cpm(s) else "†"}</td>'
+                         for c in CH)
         body.append(f'<tr{cls}><td class="name">{html.escape(m)}{tags}</td><td>{bps(s):.0f}</td>'
                     f'<td><span class="bw {chip}">{w}</span></td><td>{code}</td>'
                     f"<td>{rtxt}</td><td>{const_name(s)}</td>{cells10}{cells1}</tr>")
     n10 = sum(1 for m in MODES for c in CH if (m, c) in p10)
-    return TEMPLATE.replace("{ROWS}", "\n".join(body)).replace("{N}", str(len(MODES))).replace(
+    notes = NOTES_MEASURED if p1_measured else NOTES_FREEZE
+    head1 = "1% failure, dB" if p1_measured else "1% failure, dB (freeze)"
+    return TEMPLATE.replace("{NOTES}", notes).replace("{P1HEAD}", head1).replace(
+        "{ROWS}", "\n".join(body)).replace("{N}", str(len(MODES))).replace(
         "{DONE}", "" if n10 == 4 * len(MODES) else f'<p class="pending">10% points measured so far: {n10} of {4 * len(MODES)} cells; the rest show “—”.</p>')
 
 
@@ -153,32 +158,47 @@ tr.covered .bw{opacity:.55}
 <div class="key"><span><span class="sw"></span>Greyed: another mode no wider does as well everywhere, so the shifter rarely picks it</span><span><span class="tag" style="margin:0 6px 0 0">reply</span>role besides data</span></div>
 {DONE}
 <div class="wrap"><table>
-<thead><tr><th rowspan="2" class="name">Mode</th><th rowspan="2">bps</th><th rowspan="2">Hz</th><th rowspan="2">Code</th><th rowspan="2">FEC rate</th><th rowspan="2">Const.</th><th class="grp c10" colspan="4">10% failure, dB</th><th class="grp c1" colspan="4">1% failure, dB (freeze)</th></tr>
+<thead><tr><th rowspan="2" class="name">Mode</th><th rowspan="2">bps</th><th rowspan="2">Hz</th><th rowspan="2">Code</th><th rowspan="2">FEC rate</th><th rowspan="2">Const.</th><th class="grp c10" colspan="4">10% failure, dB</th><th class="grp c1" colspan="4">{P1HEAD}</th></tr>
 <tr><th class="c10">AWGN</th><th>MPG</th><th>MPP</th><th>MPD</th><th class="c1">AWGN</th><th>MPG</th><th>MPP</th><th>MPD</th></tr></thead>
 <tbody>
 {ROWS}
 </tbody></table></div>
 <div class="notes">
 <p>SNR is average transmitted power over noise in 2500 Hz. MPG, MPP and MPD are ITU-R F.1487 channels: 0.1/0.5, 1/2 and 2/4 Hz Doppler / ms delay.</p>
-<p><b>10%:</b> the smallest ARQ data burst (a control codeword plus one data codeword) through the receiver the ARQ uses: header right and both codewords decoded, 200 trials a point, 0.25 dB steps, ±50 Hz and 10 ppm offsets.</p>
-<p><b>1% (freeze):</b> 16-frame bursts; the larger of the code’s 1% packet-error point and the band’s 1% sync point. † CPM: the prototype study’s one-codeword bursts, measured before the c8r50 sync fix.</p>
+{NOTES}
 <p>Payload rate excludes CRC and burst overhead. QAM64 and QAM256 are learned (non-square) constellations. “—”: not measured, or never reaches the point on that channel.</p>
 </div>
 </main>
 """
 
 
+NOTES_10 = ("<p><b>10% and 1%:</b> the smallest ARQ data burst (a control codeword plus one data codeword) "
+            "through the receiver the ARQ uses: header right and both codewords decoded, 200 (10%) or 400 (1%) "
+            "trials a point, the same trials at every SNR, 0.25 dB steps, ±50 Hz and 10 ppm offsets.</p>")
+NOTES_MEASURED = NOTES_10
+NOTES_FREEZE = (NOTES_10.replace("10% and 1%:", "10%:").replace(" 200 (10%) or 400 (1%) trials", " 200 trials")
+                + "\n<p><b>1% (freeze):</b> 16-frame bursts; the larger of the code’s 1% packet-error point and "
+                  "the band’s 1% sync point. † CPM: the prototype study’s one-codeword bursts, measured before the "
+                  "c8r50 sync fix.</p>")
+
+
+def load_col(path) -> dict:
+    out = {}
+    for r in csv.DictReader(open(path)):
+        for c in CH:
+            if r.get(c) not in (None, ""):
+                out[(r["name"], c)] = float(r[c])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("p10")
+    ap.add_argument("--p1", help="ladder_study's 1%% csv (default: the freeze)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    p10 = {}
-    for r in csv.DictReader(open(a.p10)):
-        for c in CH:
-            if r.get(c) not in (None, ""):
-                p10[(r["name"], c)] = float(r[c])
-    Path(a.out).write_text(page(p10, freeze_1pct()))
+    p1 = load_col(a.p1) if a.p1 else freeze_1pct()
+    Path(a.out).write_text(page(load_col(a.p10), p1, p1_measured=bool(a.p1)))
 
 
 if __name__ == "__main__":
