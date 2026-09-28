@@ -268,6 +268,13 @@ class _Port:
             self.client.close()
 
 
+def _channels(pa, index: int | None, kind: str) -> int:
+    """2 if the device (None: the default) has two or more channels of this kind, else 1."""
+    d = pa.get_device_info_by_index(index) if index is not None else (
+        pa.get_default_input_device_info() if kind == "input" else pa.get_default_output_device_info())
+    return 2 if d["maxInputChannels" if kind == "input" else "maxOutputChannels"] >= 2 else 1
+
+
 def serve(a, pa, stop: threading.Event | None = None):
     """Run until SIGINT/SIGTERM (or `stop` is set)."""
     from .kisslink import KissLink
@@ -290,9 +297,13 @@ def serve(a, pa, stop: threading.Event | None = None):
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
     dec, interp = Decimator(a.sample_rate), Interpolator(a.sample_rate)
     per = BLOCK * (a.sample_rate // FS)
-    inp = pa.open(format=_pa_float(), channels=1, rate=a.sample_rate, input=True, input_device_index=a.input_device,
+    # Stereo where the device has it (left channel in, the same signal on both out): PortAudio's ALSA
+    # host API corrupts the heap reading or writing a mono stream on a PipeWire device that has more
+    # channels (glibc aborts in the first read, e.g. "malloc(): invalid size (unsorted)").
+    nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
+    inp = pa.open(format=_pa_float(), channels=nin, rate=a.sample_rate, input=True, input_device_index=a.input_device,
                   frames_per_buffer=per)
-    out = pa.open(format=_pa_float(), channels=1, rate=a.sample_rate, output=True, output_device_index=a.output_device,
+    out = pa.open(format=_pa_float(), channels=nout, rate=a.sample_rate, output=True, output_device_index=a.output_device,
                   frames_per_buffer=per)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
@@ -323,7 +334,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                 if cmd:
                     cmd.send(line.encode() + b"\r")
             host.out_cmd.clear()
-            x = np.frombuffer(inp.read(per, exception_on_overflow=False), dtype=np.float32).astype(np.float64)
+            x = np.frombuffer(inp.read(per, exception_on_overflow=False), dtype=np.float32)[::nin].astype(np.float64)
             t0 = time.perf_counter()
             y, ptt = engine.step(dec(x) if not keyed else np.zeros(BLOCK))
             if time.perf_counter() - t0 > BLOCK / FS:
@@ -333,7 +344,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                 rig.ptt(True)
                 keyed = True
             if keyed:
-                out.write(np.clip(interp(y) * gain, -1, 1).astype(np.float32).tobytes())
+                out.write(np.repeat(np.clip(interp(y) * gain, -1, 1).astype(np.float32), nout).tobytes())
             if keyed and not ptt:
                 time.sleep(a.ptt_off_delay_ms / 1000)
                 rig.ptt(False)
