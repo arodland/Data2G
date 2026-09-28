@@ -28,6 +28,7 @@ threads.limit(1)
 import argparse
 import csv
 import sys
+from types import SimpleNamespace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -102,6 +103,16 @@ def receive(y: np.ndarray, name: str) -> dict | None:
     return cpm.receive(y, lock) if lock is not None else None
 
 
+def model_pick(cap, prev, prev_name, t_prev, cur, cur_name, t_cur) -> str:
+    """The data mode the installed shifter recommends from these measurements."""
+    sh = G.GearShifter()
+    if prev is not None:
+        sh.observe(prev, prev_name, t_prev)
+    sh.observe(cur, cur_name, t_cur)
+    station = SimpleNamespace(cap=cap, rx=SimpleNamespace(buf=[]), chat=False, peer_chat=False, peer_queued=0)
+    return G.decode(sh.recommend(station)[0])
+
+
 def sample(seed):
     rng = np.random.default_rng(seed)
     kind = str(rng.choice([k for k, _ in KINDS], p=[w for _, w in KINDS]))
@@ -166,6 +177,10 @@ def sample(seed):
     cpm_ok = [m for m in allowed if m in cpm.SPECS]
     if cpm_ok and rng.random() < 0.3:  # CPM candidates oversampled (a new family: few rows otherwise)
         cands.append(str(rng.choice(cpm_ok)))
+    if SUSTAINED:  # the installed model's own pick, so its mistakes are in the data
+        pick = model_pick(cap, prev, prev_name, t_prev_end, cur, cur_name, t_cur_end)
+        if pick not in cands:
+            cands.insert(1, pick)
     while len(cands) < CANDIDATES:
         cands.append(str(rng.choice(allowed)))
     base = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2),
@@ -197,7 +212,12 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--first", type=int, default=0, help="first sample number (another dataset's seeds: past its end)")
     ap.add_argument("--sustained", action="store_true", help="the sustained-low-SNR supplement (see SUSTAINED)")
+    ap.add_argument("--average-snr", action="store_true",
+                    help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
+    if PS.PEP_REF_DB is None and not a.average_snr:
+        ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
+                 "transmits) or pass --average-snr")
     global SUSTAINED
     SUSTAINED = a.sustained
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]

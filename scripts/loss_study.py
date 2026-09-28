@@ -143,7 +143,12 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--policy", default="shift", help='linksim.make_policy spec ("shift+cpm": CPM modes too)')
     ap.add_argument("--cells", default=None, help="channel:snr,... (default CELLS)")
+    ap.add_argument("--average-snr", action="store_true",
+                    help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
+    if G.PEP_REF_DB is None and not a.average_snr:
+        ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
+                 "transmits) or pass --average-snr")
     cells = [(c, float(s)) for c, s in (x.split(":") for x in a.cells.split(","))] if a.cells else CELLS
     jobs = [(c, s, seed, a.horizon, a.policy) for c, s in cells for seed in range(a.seeds)]
     with Pool(a.jobs) as pool, open(a.out, "w", newline="") as f:
