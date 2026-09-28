@@ -437,7 +437,7 @@ class Receiver:
                 # passed already); a suspect one waits for its pilots
                 self.pilots_ok = p.get("family") == "cpm" or "copy" in p or p["score"] >= self.SUSPECT_SCORE
                 self.confirmed = False
-                log.info("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
+                log.debug("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS,
                          "sync" if p.get("family") == "cpm" else "header copy" if "copy" in p else "header", p["score"])
                 out.append(("header", self.pending))

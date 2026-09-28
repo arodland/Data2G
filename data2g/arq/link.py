@@ -21,6 +21,7 @@ because they disagree about state):
 """
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -126,6 +127,7 @@ class TxSide:
         self.base = 0  # first unacked seq
         self.next = 0  # next new seq
         self.ack: tuple[int, frozenset] | None = None  # (cum, received) acted on
+        self.acked = 0  # stream bytes acked (host bytes and their record length bytes)
 
     def write(self, data: bytes):
         self.buf += F.to_records(data)
@@ -139,7 +141,7 @@ class TxSide:
             raise ProtocolError(f"peer cumulative {cum} outside [{self.base}, {self.next}]")
         advanced = cum > self.base
         for s in range(self.base, cum):
-            self.cws.pop(s, None)
+            self.acked += c.length if (c := self.cws.pop(s, None)) else 0
         self.base = cum
         self.ack = (cum, frozenset(s for s in received if cum < s < self.next))
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
@@ -225,6 +227,7 @@ class Station:
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
+    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_resend, rx_ok, rx_lost, timeouts
     rx: RxSide = field(default_factory=RxSide)
     state: str = ACTIVE
     fail_reason: str = ""
@@ -282,6 +285,7 @@ class Station:
             # 7 of my bursts unconfirmed: one more new seq could alias an old
             # one in the peer's 3-bit acted-on. Repeat the latest instead.
             log.info("TX b%d repeat: 7 bursts unconfirmed", self._latest % F.BURST_MOD)
+            self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
         # escalation: my own timeouts (master), or the peer telling me my
@@ -398,6 +402,8 @@ class Station:
         burst = TxBurst(submode, slots, self.bursts_sent)
         self.bursts_sent += 1
         self.last_sent = burst
+        self.stats["cw_new"] += len(new)
+        self.stats["cw_resend"] += len(resend)
         if log.isEnabledFor(logging.INFO):
             kind = "data" if resend or new else ("ack" if fresh else "poll")
             parts = [f"{kind} {self._burst_desc(submode, len(slots))}"]
@@ -448,11 +454,13 @@ class Station:
         by asking (the session decides, it knows airtimes)."""
         assert self.master
         self.misses += 1
+        self.stats["timeouts"] += 1
         if self.max_misses is not None and self.misses > self.max_misses:
             self._fail("link lost")
             return None
         if allow_repeat and self.misses <= REPEATS_BEFORE_SHRINK and self.last_sent is not None:
             log.info("TX b%d repeat: timeout %d", self._latest % F.BURST_MOD, self.misses)
+            self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent  # identical, same burst seq (§6 step 1)
         return self.build(fresh=False)
 
@@ -461,7 +469,8 @@ class Station:
     def handle(self, rx: RxBurst) -> bool:
         """Process a received burst. -> whether its control decoded (then
         this station must answer). Discards the burst otherwise."""
-        if not (ok := self._handle(rx)):
+        self.stats["rx_ok" if (ok := self._handle(rx)) else "rx_lost"] += 1
+        if not ok:
             log.info("RX %s%s | control lost, discarded", self._burst_desc(rx.submode, rx.n_cw), self._snr())
         return ok
 

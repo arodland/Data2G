@@ -77,6 +77,11 @@ class Session:
     _pending_write: bytearray = field(default_factory=bytearray)
     chat: bool = False  # CHAT ON: set with set_chat()
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
+    stats_interval_s: float = 60.0  # throughput line in the log this often while connected (0: off)
+    _now: float = 0.0  # the latest time the caller gave
+    _stats_since: float = 0.0
+    _stats_prev: dict = field(default_factory=dict)
+    _connected_at: float = 0.0
 
     # -- host side -------------------------------------------------------------------
 
@@ -113,6 +118,11 @@ class Session:
     # -- clock side ------------------------------------------------------------------
 
     def poll(self, now: float) -> L.TxBurst | None:
+        self._now = now
+        if (self.stats_interval_s and self.state in (CONNECTED, DISCONNECTING)
+                and now >= self._stats_since + self.stats_interval_s):
+            self._log_stats("stats", now, self._stats_since, self._stats_prev)
+            self._stats_since, self._stats_prev = now, self._stats()
         if self.state == CLOSED and self._out is None:
             return None
         if self.state in (CONNECTED, DISCONNECTING):
@@ -208,10 +218,31 @@ class Session:
         self._build_at = None
         if self.state != CLOSED:
             self.events.append(f"DISCONNECTED {why}")
+            if self.station is not None:
+                self._log_stats("session", max(now, self._now), self._connected_at, {})
         self.state, self.close_reason = CLOSED, why
         self._out, self._due = (final, now) if final is not None else (None, None)
         self._deadline = None
         return None
+
+    def _connected(self, now: float):
+        self.state = CONNECTED
+        self._heard(now)
+        self._last_data = self._connected_at = self._stats_since = now
+        self._stats_prev = {}
+
+    def _stats(self) -> dict:
+        st = self.station
+        return dict(st.stats, tx_bytes=st.tx.acked, rx_bytes=st.rx.reader.delivered)
+
+    def _log_stats(self, label: str, now: float, since: float, prev: dict):
+        d = {k: v - prev.get(k, 0) for k, v in self._stats().items()}
+        dt = max(now - since, 1e-9)
+        cw = d.get("cw_new", 0) + d.get("cw_resend", 0)
+        log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends"
+                 " | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"], 8 * d["tx_bytes"] / dt,
+                 d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw, 100 * d.get("cw_resend", 0) / max(cw, 1),
+                 d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):
         if self.state == CONNECTING:
@@ -251,6 +282,8 @@ class Session:
         mode = mode or self.policy.connect_mode(self.cap, self._tries)
         ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(self.policy.payload_bytes(mode))
         slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
+        retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
+        log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
         return L.TxBurst(mode, slots, 0)
 
     def _connect_burst(self) -> L.TxBurst:
@@ -301,6 +334,7 @@ class Session:
     def _on_session_frame(self, f: dict, now: float):
         body, key = f["body"], f["key"]
         sub = body[0]
+        log.info("RX %s %s", _frame_desc(body), f["mode"])
         if sub == F.CONNECT and len(body) >= 22 and key == 0:
             caller, callee = F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
             nonce = int.from_bytes(body[18:20], "big")
@@ -320,9 +354,7 @@ class Session:
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
-            self.state = CONNECTED
-            self._heard(now)
-            self._last_data = now
+            self._connected(now)
             self.events.append(f"CONNECTED {caller}")
             self._answer_mode = f["mode"]
             self._queue(self._accept_burst(), now)
@@ -333,9 +365,7 @@ class Session:
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
-            self.state = CONNECTED
-            self._heard(now)
-            self._last_data = now
+            self._connected(now)
             self.events.append(f"CONNECTED {self.peer}")
             self._queue(self.station.build(), now)
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
@@ -357,3 +387,14 @@ class Session:
         if self._pending_write:
             self.station.write(bytes(self._pending_write))
             self._pending_write.clear()
+
+
+FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
+               F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
+
+
+def _frame_desc(body: bytes) -> str:
+    out = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
+    if body[0] == F.CONNECT and len(body) >= 18:
+        out += f" {F.unpack_call(body[2:10])}>{F.unpack_call(body[10:18])}"
+    return out
