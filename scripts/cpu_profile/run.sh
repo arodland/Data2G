@@ -2,8 +2,10 @@
 # Profile both data2g-host processes (py-spy, sampling) over a noisy PipeWire
 # loopback: two null sinks cross-connect the hosts, noise.py (not profiled)
 # adds noise to both paths. Phase "idle": listening only. Phase "pat": a Pat
-# P2P exchange (W1AW -> K2XYZ: text and an 8 kB attachment; 4 kB back).
-#   scripts/cpu_profile/run.sh <idle|pat> <seconds | timeout> <out dir>
+# P2P exchange (W1AW -> K2XYZ: text and an 8 kB attachment; 4 kB back), the
+# attachments random bytes. "pat-text": the same with text attachments (the
+# repo's docs); "pat-mixed": each attachment half text, then half random.
+#   scripts/cpu_profile/run.sh <idle|pat|pat-text|pat-mixed> <seconds | timeout> <out dir>
 # then: python scripts/cpu_profile/analyze.py <out>/prof_a.txt <out>/prof_b.txt
 # Needs pactl, pacat, pat, uvx (py-spy). PY: the python with Data2G's
 # dependencies (default: the repo's .venv). Uses ports 8300/8400 (+1, +20)
@@ -11,6 +13,7 @@
 # A_BYTES: W1AW's attachment size (default 8000).
 set -u
 PHASE=$1; T=$2; OUT=$(realpath -m "$3")
+case $PHASE in idle|pat|pat-text|pat-mixed) ;; *) echo "unknown phase $PHASE" >&2; exit 2;; esac
 W=$(cd "$(dirname "$0")" && pwd)
 WT=$(cd "$W/../.." && pwd)
 PY=${PY:-$WT/.venv/bin/python}
@@ -46,7 +49,15 @@ else
     printf '{"mycall": "%s", "locator": "FN31pr", "http_addr": "127.0.0.1:%s", "listen": [], "version_reporting_disabled": true,\n "varahf": {"addr": "localhost:%s", "bandwidth": 2300, "rig": "", "ptt_ctrl": false}}\n' $call $http $port > $P/$k/config.json
   done
   pa() { k=$1; shift; pat --config $P/$k/config.json --mbox $P/$k/mbox --event-log $P/$k/events.json --log $P/$k/pat.log --forms $P/forms --prehooks $P/prehooks "$@"; }
-  head -c ${A_BYTES:-8000} /dev/urandom > $P/a8k.bin; head -c 4000 /dev/urandom > $P/b4k.bin
+  text() { while cat $WT/docs/*.md $WT/README.md; do :; done 2>/dev/null | head -c $1; }  # ends on SIGPIPE
+  attachment() {  # bytes, per phase
+    case $PHASE in
+      pat) head -c $1 /dev/urandom;;
+      pat-text) text $1;;
+      pat-mixed) text $(( $1 / 2 )); head -c $(( $1 - $1 / 2 )) /dev/urandom;;
+    esac
+  }
+  attachment ${A_BYTES:-8000} > $P/a8k.bin; attachment 4000 > $P/b4k.bin
   printf 'Status report from W1AW.\nAll well here; band noisy.\n%.0s' {1..20} | pa a compose --p2p-only -s "Status" K2XYZ
   echo "Photo attached." | pa a compose --p2p-only -s "Photo" -a $P/a8k.bin K2XYZ
   echo "Log attached." | pa b compose --p2p-only -s "Log" -a $P/b4k.bin W1AW
