@@ -39,7 +39,7 @@ MAX_DATA = 8  # data codewords per burst
 PEAK_RATIO = 0.7  # a lock's floor on _peak_ratio: fronts 0.82+, locks inside a burst 0.59 at most
 RAMP_S = 0.01  # amplitude ramp at a burst's ends (key clicks)
 DATA_N = 960
-CTL_K, CTL_N = 176, 360  # 20 bytes of control; 360 bits fill whole symbols at 3, 4 and 5 bits per tone
+CTL_K, CTL_N = 184, 360  # 20 bytes of control (CRC-24); 360 bits fill whole symbols at 3, 4 and 5 bits per tone
 
 
 @dataclass(frozen=True)

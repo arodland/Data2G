@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from scipy.signal import firwin
 
-from . import config, equalizer, modem
+from . import config, constellation, equalizer, modem
 from .config import (
     DATA_SYMS_PER_FRAME,
     DEMOD_BACKOFF,
@@ -76,14 +76,22 @@ def _analytic(x: torch.Tensor) -> torch.Tensor:
 class BurstChannel:
     def __init__(self, spec: SubmodeSpec, n_frames: int, device="cpu", dtype=torch.float32,
                  clip_setting: tuple | None = None, clip_consts: tuple | None = None):
-        """`clip_setting` (headroom dB, overshoot) and `clip_consts` (as a
-        config.CLIP entry) override the band's, for clipper studies."""
+        """`clip_setting` (headroom dB, overshoot[, ACE closing passes]) and
+        `clip_consts` (as a config.CLIP entry) override the submode's, for
+        clipper studies."""
         self.spec, self.n_f, self.device, self.dtype = spec, n_frames, device, dtype
         cdtype = torch.complex64 if dtype == torch.float32 else torch.complex128
         self.cdtype = cdtype
         self.band = b = ofdm.band(spec.band)
-        self.headroom, self.overshoot = clip_setting or (spec.headroom, b.spec.clip_overshoot)
-        self.clip_consts = clip_consts or config.clip_consts(spec.band, spec.headroom)
+        cs = clip_setting or (spec.headroom, b.spec.clip_overshoot, spec.ace)
+        self.headroom, self.overshoot, self.ace = cs[0], cs[1], tuple(cs[2]) if len(cs) > 2 else ()
+        self.clip_consts = clip_consts or config.clip_consts(spec.band, spec.headroom, spec.ace, spec.constellation)
+        if self.ace:
+            win, full = modem.ace_cells(spec, n_frames)
+            self.ace_win, self.ace_full = torch.tensor(win, device=device), torch.tensor(full, device=device)
+            pts = constellation.load(spec.constellation)
+            self.points = torch.tensor(pts, dtype=cdtype, device=device)
+            self.dirs = torch.tensor(constellation.ace_dirs(spec.constellation), dtype=cdtype, device=device)
         self.nc = b.nc
         self.kc = modem.copy_frame(spec.sync_band, n_frames)  # the header copy's frame (in self.base)
         self.n_air = n_frames + (self.kc is not None)
@@ -109,20 +117,46 @@ class BurstChannel:
         wav = torch.einsum("bfsc,nc->bfsn", syms, self.mod).real.reshape(b, -1)
         x = self.base.expand(b, -1).clone()
         x[:, self.frames0 : self.frames0 + wav.shape[1]] += wav
+        self.sent = data.reshape(b, -1, self.nc) if self.ace else None
+        if self.ace:
+            # the point each cell was sent as, a few bursts at a time: the
+            # (cells x points) table was 2 GB for 2000 one-frame 256-point bursts
+            self.sent_dirs = torch.cat([self.dirs[(s[..., None] - self.points).abs().argmin(dim=-1)]
+                                        for s in self.sent.split(32)])
         return self.tx_condition(x)
+
+    def _ace(self, x: torch.Tensor) -> torch.Tensor:
+        """modem.ace_projector, batched."""
+        X = self.sent
+        got = (2.0 / M) * torch.einsum("bjm,mc->bjc", x[:, self.ace_win].to(self.cdtype), self.mod[NCP:].conj())
+        g = (torch.sum(X.conj() * got, dim=1).real / torch.sum(X.abs() ** 2, dim=1))[:, None, :]
+        new = constellation.ace_project(got, g * X, self.sent_dirs)
+        x = x.clone()
+        x[:, self.ace_full] += torch.einsum("bjc,nc->bjn", new - got, self.mod).real
+        return x
+
+    def _filter(self, x: torch.Tensor) -> torch.Tensor:
+        """np.convolve(x, taps, "same") per row, by FFT. conv1d built a
+        (bursts, taps, samples) buffer: 2.6 GB for 250 one-frame bursts, and
+        clip_constants' 2000 at once took ~20 GB a process."""
+        n, k = x.shape[-1], len(self.taps)
+        y = torch.fft.irfft(torch.fft.rfft(x, n + k - 1) * torch.fft.rfft(self.taps, n + k - 1), n + k - 1)
+        return y[..., (k - 1) // 2:(k - 1) // 2 + n]
 
     def tx_condition(self, x: torch.Tensor) -> torch.Tensor:
         """dsp.tx_condition, batched, power over the non-silent part."""
         act = slice(LEADIN_SAMPLES, x.shape[1] - LEADOUT_SAMPLES)
         power = x[:, act].pow(2).mean(dim=1, keepdim=True)
         thresh = torch.sqrt(2 * power) * 10 ** (self.headroom / 20)
-        for k in self.overshoot:
+        for i, k in enumerate(list(self.overshoot) + list(self.ace)):
             z = _analytic(x)
             scale = torch.clamp(thresh / z.abs().clamp_min(1e-12), max=1.0)
             if k != 1.0:
                 scale = scale**k
             x = (z * scale).real
-            x = torch.nn.functional.conv1d(x[:, None], self.taps.flip(0)[None, None], padding=100)[:, 0]
+            x = self._filter(x)
+            if self.ace and i < len(self.overshoot):
+                x = self._ace(x)
         return x / x[:, act].pow(2).mean(dim=1, keepdim=True).sqrt()
 
     # --- channel --------------------------------------------------------

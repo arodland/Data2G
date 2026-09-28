@@ -23,7 +23,34 @@ INTERLEAVER_SEED = 2026
 
 
 def crc_bits(spec: SubmodeSpec) -> int:
-    return 32 if spec.code == "ldpc" and spec.k >= 512 else 16
+    """CRC-24 on polar codewords: CRC-aided list decoding takes the first of
+    its 8 paths whose CRC checks, so a failed decode passed CRC-16 8 in 65536
+    times, and a random control word fails the session (scripts/crc_study.py;
+    k + 8 kept the payloads). LDPC: CRC-32 from k 512, else CRC-16 (a decode
+    must also converge: _payloads)."""
+    if spec.code == "polar":
+        return 24
+    return 32 if spec.k >= 512 else 16
+
+
+def _crc24_table() -> list[int]:
+    out = []
+    for i in range(256):
+        c = i << 16
+        for _ in range(8):
+            c = ((c << 1) ^ CRC24_POLY) & 0xFFFFFF if c & 0x800000 else (c << 1) & 0xFFFFFF
+        out.append(c)
+    return out
+
+
+CRC24_POLY = 0xB2B117  # CRC24C, 5G NR's for polar-coded control (TS 38.212 5.1)
+_CRC24 = _crc24_table()
+
+
+def crc24(data: bytes, crc: int = 0xFFFFFF) -> int:
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFF) ^ _CRC24[(crc >> 16) ^ b]
+    return crc
 
 
 def payload_bytes(spec: SubmodeSpec) -> int:
@@ -35,6 +62,8 @@ def _with_crc(payload: bytes, n_crc: int, mask: int = 0) -> bytes:
     per-codeword identity; 0 outside sessions, the frozen format)."""
     if n_crc == 16:
         return payload + (binascii.crc_hqx(payload, 0xFFFF) ^ mask & 0xFFFF).to_bytes(2, "big")
+    if n_crc == 24:
+        return payload + (crc24(payload) ^ mask & 0xFFFFFF).to_bytes(3, "big")
     return payload + (binascii.crc32(payload) ^ mask & 0xFFFFFFFF).to_bytes(4, "big")
 
 
@@ -249,10 +278,10 @@ def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=
     masks = np.broadcast_to(crc_mask, len(buf))
     idx = np.arange(len(buf)) if index is None else np.broadcast_to(index, len(buf))
     if spec.code != "ldpc":
-        return _payloads(spec, _decode_code_order(spec, _decoder(spec, "cpu"), buf, crc_mask=masks, index=idx)[0],
+        return _payloads(spec, *_decode_code_order(spec, _decoder(spec, "cpu"), buf, crc_mask=masks, index=idx),
                          masks, idx)
     extent = min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
-    return _payloads(spec, _decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent])[0], masks, idx)
+    return _payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
 
 
 @lru_cache(maxsize=None)
@@ -260,18 +289,23 @@ def _ext_decoder(spec: SubmodeSpec, extent: int):
     return ldpc.MinSumDecoder(ldpc_code(spec).mother(extent))
 
 
-def _payloads(spec: SubmodeSpec, bits: np.ndarray, masks=None, index=None) -> list[tuple[bytes, bool]]:
-    """Decoded (scrambled) info bits -> [(payload, crc_ok)]; row i was sent
-    with CRC mask masks[i] at burst position index[i] (default: i)."""
+def _payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
+    """Decoded (scrambled) info bits -> [(payload, ok)]; row i was sent
+    with CRC mask masks[i] at burst position index[i] (default: i). ok:
+    the CRC checks and the decoder converged (LDPC: every parity check
+    satisfied). The CRC alone let a failed LDPC decode's guess through 1 in
+    65536 (CRC16): the v6 session data delivered one corrupt codeword that
+    way; requiring convergence rejected 41 of 46579 correct decodes
+    (scripts/crc_study.py)."""
     n_crc = crc_bits(spec)
     out = []
     masks = np.zeros(len(bits), int) if masks is None else masks
     index = np.arange(len(bits)) if index is None else index
-    for b, m, i in zip(bits, masks, index):
+    for b, m, i, c in zip(bits, masks, index, converged):
         b = b.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(m), int(i)))[: len(b)]
         data = np.packbits(b[: 8 * (payload_bytes(spec) + n_crc // 8)]).tobytes()
         payload = data[: -n_crc // 8]
-        out.append((payload, _with_crc(payload, n_crc, int(m)) == data))
+        out.append((payload, bool(c) and _with_crc(payload, n_crc, int(m)) == data))
     return out
 
 
@@ -287,7 +321,7 @@ def decode_many(spec: SubmodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> 
     and burst position it was sent with (default 0 and the row number)."""
     masks = np.broadcast_to(crc_mask, len(soft))
     idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
-    return _payloads(spec, decode_llrs(spec, soft, crc_mask=masks, index=idx)[0], masks, idx)
+    return _payloads(spec, *decode_llrs(spec, soft, crc_mask=masks, index=idx), masks, idx)
 
 
 def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device="cpu", crc_mask=0, index=0):

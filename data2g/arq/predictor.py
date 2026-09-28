@@ -150,6 +150,15 @@ def outcome_knows(submode: str) -> bool:
     return m is not None and submode in m.modes
 
 
+# Logit offsets on P(burst usable), per submode: where the installed model
+# is overconfident the same way across SNRs (scripts/calibration.py on
+# on-policy session rows, 2026-09-28). Its error concentrates on slow fading
+# (MPG ~0 dB: 16qam-r1/3 predicted 0.71, 0.46 actual; ~+8 dB: w48-16qam-r1/2
+# 0.80 vs 0.36); the offsets are at most 1 logit, since they apply everywhere.
+LOGIT_OFFSETS = {"16qam-r1/3": -1.0, "w48-16qam-r1/2": -1.0, "n10-16qam-r3/4": -1.0, "n10-qpsk-r3/4": -1.0,
+                 "w48-qpsk-r1/3": -0.7, "w48-qpsk-r2/3": -0.7}
+
+
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
                     prev=None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
@@ -157,5 +166,10 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     model = outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
+    if LOGIT_OFFSETS:
+        z = z.copy()
+        for m, off in LOGIT_OFFSETS.items():
+            if m in idx:
+                z[idx[m]] += off
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))
     return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]])) for s in (submodes or SUBMODES.values())}

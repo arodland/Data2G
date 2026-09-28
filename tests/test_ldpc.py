@@ -63,3 +63,19 @@ def test_incremental_redundancy_decodes_what_one_rv_cannot():
     assert sum(ok for _, ok in alone) <= 1
     both = codes.decode_buffer(s, codes.combine(s, codes.combine(s, None, s0, 0), soft(1), 1), max_rv=1)
     assert all(ok and p == q for (p, ok), q in zip(both, payloads))
+
+
+def test_a_crc_match_needs_a_converged_decode():
+    """A failed LDPC decode's guess can carry a matching CRC16 (1 in 65536):
+    it is still a failure."""
+    import numpy as np
+
+    from data2g import codes
+    from data2g.config import SUBMODES
+
+    spec = SUBMODES["qpsk-r1/5"]
+    bits = codes.info_bits(spec, bytes(range(codes.payload_bytes(spec))))[None]
+    assert codes._payloads(spec, bits, [True], index=[0])[0][1]
+    assert not codes._payloads(spec, bits, [False], index=[0])[0][1]
+    soft = (1 - 2 * codes.encode_info(spec, bits).astype(int)) * 4.0
+    assert codes.decode_many(spec, soft)[0] == (bytes(range(codes.payload_bytes(spec))), True)

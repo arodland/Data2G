@@ -30,7 +30,7 @@ from data2g.channel_torch import CHANNELS, BurstChannel, _analytic  # noqa: E402
 from data2g.config import LEADIN_SAMPLES, LEADOUT_SAMPLES, SubmodeSpec  # noqa: E402
 
 
-def measure(band, headroom, overshoot, device, const="gray-qam16"):
+def measure(band, headroom, overshoot, device, const="gray-qam16", ace=()):
     spec = SubmodeSpec(0, "clip", "ldpc", const, 1, band=band)
     pts = constellation.load(const)
     m = constellation.bits_per_symbol(pts)
@@ -38,18 +38,21 @@ def measure(band, headroom, overshoot, device, const="gray-qam16"):
     for n_f in (1, 8):
         # Unit gain in the RX model: what comes back is the raw ratio.
         ch = BurstChannel(spec, n_f, device=device, dtype=torch.float64,
-                          clip_setting=(headroom, tuple(overshoot)), clip_consts=({}, 1.0, 0.0))
+                          clip_setting=(headroom, tuple(overshoot), tuple(ace)), clip_consts=({}, 1.0, 0.0))
         b = max(16, 2000 // n_f)
         rng = np.random.default_rng(n_f)
         x = constellation.modulate(rng.integers(0, 2, b * n_f * 5 * ch.nc * m), pts).reshape(b, n_f, 5, ch.nc)
-        tx = ch.transmit(torch.tensor(x, device=device))
-        raw, h, _ = ch.receive(tx, CHANNELS["awgn"])
-        raw, h = raw.cpu().numpy(), h.cpu().numpy()
+        raws, hs, envs = [], [], []
+        for i in range(0, b, 250):  # 250 bursts at a time: 2000 at once peaked near 12 GB
+            tx = ch.transmit(torch.tensor(x[i:i + 250], device=device))
+            r, hh, _ = ch.receive(tx, CHANNELS["awgn"])
+            raws.append(r.cpu().numpy())
+            hs.append(hh.cpu().numpy())
+            envs.append(_analytic(tx[:, LEADIN_SAMPLES : tx.shape[1] - LEADOUT_SAMPLES]).abs().pow(2).cpu().numpy())
+        raw, h, env2 = np.concatenate(raws), np.concatenate(hs), np.concatenate(envs)
         g = np.vdot(h * x, raw) / np.vdot(h * x, h * x)
         e = raw - g * h * x
         sdr = 10 * np.log10(np.mean(np.abs(g * h * x) ** 2) / np.mean(np.abs(e) ** 2))
-        act = tx[:, LEADIN_SAMPLES : tx.shape[1] - LEADOUT_SAMPLES]
-        env2 = _analytic(act).abs().pow(2).cpu().numpy()
         papr = 10 * np.log10(np.quantile(env2, 0.9999) / env2.mean())
         peak = 10 * np.log10(env2.max(axis=1).mean() / env2.mean())
         out[n_f] = (abs(g), sdr, papr, peak)

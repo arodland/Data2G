@@ -69,7 +69,8 @@ FIRST_PATH_FRAC = 0.5
 # The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
-PROTOCOL_VERSION = 11  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy
+PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
+# 12: polar codewords carry CRC-24 (k + 8, payloads kept)
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
@@ -187,6 +188,9 @@ class SubmodeSpec:
     protograph: str = ""  # LDPC only: "bg<1|2>:<path to mask .npy>", else NR's own graph
     band: str = "w"  # key into BANDS
     clip_headroom_db: float | None = None  # None: the band's
+    # active constellation extension in the TX clipper: the overshoot of
+    # its closing passes; () none (scripts/pick_headroom.py)
+    ace: tuple = ()
 
     @property
     def bits_per_cu(self) -> int:
@@ -256,16 +260,23 @@ def _load_clip_table():
 CLIP_OVERSHOOT_TABLE, _CLIP_ENTRIES = _load_clip_table()
 
 
-def clip_consts(band: str, headroom: float) -> tuple:
+def clip_key(band: str, headroom: float, ace: tuple = (), const: str = "") -> str:
+    """codes_data/clip_constants.json's key. Plain clipping looks the same to
+    every constellation; ACE depends on the constellation's regions."""
+    k = f"{band}@{headroom:g}"
+    return k + f"+ace{'-'.join(f'{v:g}' for v in ace)}:{const}" if ace else k
+
+
+def clip_consts(band: str, headroom: float, ace: tuple = (), const: str = "") -> tuple:
     """(gain by frame count, default gain, clip-noise ratio) for a band at a
     headroom, from codes_data/clip_constants.json (stock overshoot)."""
-    e = _CLIP_ENTRIES[f"{band}@{headroom:g}"]
+    e = _CLIP_ENTRIES[clip_key(band, headroom, ace, const)]
     return {1: e["gain_1f"]}, e["gain"], 10 ** (-e["sdr_db"] / 10)
 
 
-def clip_peak_db(band: str, headroom: float) -> float:
+def clip_peak_db(band: str, headroom: float, ace: tuple = (), const: str = "") -> float:
     """Post-clip envelope peak-to-average of a burst, for PEP-fair scores."""
-    return _CLIP_ENTRIES[f"{band}@{headroom:g}"]["peak_db"]
+    return _CLIP_ENTRIES[clip_key(band, headroom, ace, const)]["peak_db"]
 
 
 # Per band at its default headroom (what a submode without its own gets).
@@ -279,8 +290,8 @@ assert CLIP_OVERSHOOT_TABLE == CLIP_OVERSHOOT, "clip table measured with another
 # worse on AWGN than learned-64 at the same rate). Indices are not frozen;
 # plan step 9 freezes them with their constellations and interleavers.
 # Payload bits/cu (CRC excluded) in the comments.
-def _m(i, name, code, const, frames, k, band="w", headroom=None):
-    return name, SubmodeSpec(i, name, code, const, frames, k=k, band=band, clip_headroom_db=headroom)
+def _m(i, name, code, const, frames, k, band="w", headroom=None, ace=()):
+    return name, SubmodeSpec(i, name, code, const, frames, k=k, band=band, clip_headroom_db=headroom, ace=ace)
 
 
 # The pruned ladder (2026-09-23): scripts/prune.py runs/ladder_final.csv
@@ -292,11 +303,11 @@ def _m(i, name, code, const, frames, k, band="w", headroom=None):
 # be trimmed once there is on-air experience.
 SUBMODES = dict([
     # 1200 Hz. ack-1f is kept for latency (432 ms), not by domination.
-    _m(0, "ack-4f", "polar", "gray-qam4", 4, 48, headroom=0),  # 56 bps
-    _m(1, "polar-k96-f8", "polar", "gray-qam4", 8, 96, headroom=0),  # 69 bps
-    _m(2, "polar-k96-f4", "polar", "gray-qam4", 4, 96, headroom=0),  # 139 bps
-    _m(3, "polar-k192-f8", "polar", "gray-qam4", 8, 192, headroom=0),  # 153 bps
-    _m(4, "ack-1f", "polar", "gray-qam4", 1, 48, headroom=0),  # 222 bps
+    _m(0, "ack-4f", "polar", "gray-qam4", 4, 56, headroom=0),  # 56 bps
+    _m(1, "polar-k96-f8", "polar", "gray-qam4", 8, 104, headroom=0),  # 69 bps
+    _m(2, "polar-k96-f4", "polar", "gray-qam4", 4, 104, headroom=0),  # 139 bps
+    _m(3, "polar-k192-f8", "polar", "gray-qam4", 8, 200, headroom=0),  # 153 bps
+    _m(4, "ack-1f", "polar", "gray-qam4", 1, 56, headroom=0),  # 222 bps
     _m(5, "qpsk-r1/5", "ldpc", "gray-qam4", 8, 384, headroom=0),  # 319 bps
     _m(6, "qpsk-r1/3", "ldpc", "gray-qam4", 8, 640, headroom=0),  # 528 bps
     _m(7, "qpsk-r1/2", "ldpc", "gray-qam4", 8, 960, headroom=0),  # 806 bps
@@ -305,11 +316,11 @@ SUBMODES = dict([
     _m(10, "16qam-r1/2", "ldpc", "gray-qam16", 8, 1920, headroom=0),  # 1639 bps
     # <=500 Hz: n10 and n4 (n4 on n10's preamble and header)
     # n4-ack-2f is kept for latency (768 ms; the n4 LDPC modes are 3.9 s)
-    _m(0, "n4-ack-8f", "polar", "gray-qam4", 8, 48, band="n4", headroom=0),  # 28 bps
+    _m(0, "n4-ack-8f", "polar", "gray-qam4", 8, 56, band="n4", headroom=0),  # 28 bps
     _m(1, "n4-qpsk-r1/5", "ldpc", "gray-qam4", 24, 192, band="n4", headroom=0),  # 51 bps
-    _m(2, "n10-ack-4f", "polar", "gray-qam4", 4, 48, band="n10", headroom=0),  # 56 bps
+    _m(2, "n10-ack-4f", "polar", "gray-qam4", 4, 56, band="n10", headroom=0),  # 56 bps
     _m(3, "n4-qpsk-r1/3", "ldpc", "gray-qam4", 24, 320, band="n4", headroom=0),  # 88 bps
-    _m(4, "n4-ack-2f", "polar", "gray-qam4", 2, 48, band="n4", headroom=0),  # 111 bps
+    _m(4, "n4-ack-2f", "polar", "gray-qam4", 2, 56, band="n4", headroom=0),  # 111 bps
     _m(5, "n10-qpsk-r1/5", "ldpc", "gray-qam4", 10, 200, band="n10", headroom=0),  # 128 bps
     _m(6, "n4-qpsk-r1/2", "ldpc", "gray-qam4", 24, 480, band="n4", headroom=0),  # 134 bps
     _m(7, "n4-qpsk-r2/3", "ldpc", "gray-qam4", 24, 640, band="n4", headroom=0),  # 176 bps
@@ -328,10 +339,10 @@ SUBMODES = dict([
     _m(3, "w48-qpsk-r2/3", "ldpc", "gray-qam4", 4, 1280, band="w48", headroom=0),  # 2167 bps
     _m(4, "w48-16qam-r1/3", "ldpc", "gray-qam16", 4, 1280, band="w48", headroom=1),  # 2167 bps
     _m(5, "w48-qpsk-r3/4", "ldpc", "gray-qam4", 4, 1440, band="w48", headroom=0),  # 2444 bps
-    _m(6, "w48-16qam-r1/2", "ldpc", "gray-qam16", 4, 1920, band="w48", headroom=1),  # 3278 bps
-    _m(7, "w48-16qam-r2/3", "ldpc", "gray-qam16", 4, 2560, band="w48", headroom=3),  # 4389 bps
+    _m(6, "w48-16qam-r1/2", "ldpc", "gray-qam16", 4, 1920, band="w48", headroom=1, ace=(1.0,)),  # 3278 bps
+    _m(7, "w48-16qam-r2/3", "ldpc", "gray-qam16", 4, 2560, band="w48", headroom=1, ace=(1.0,)),  # 4389 bps
     _m(8, "w48-64l-r1/2", "ldpc", "c64-w48-r12", 2, 1440, band="w48", headroom=4),  # 4889 bps
-    _m(9, "w48-16qam-r3/4", "ldpc", "gray-qam16", 4, 2880, band="w48", headroom=4),  # 4944 bps
+    _m(9, "w48-16qam-r3/4", "ldpc", "gray-qam16", 4, 2880, band="w48", headroom=3, ace=(1.0,)),  # 4944 bps
     _m(10, "w48-16qam-r5/6", "ldpc", "gray-qam16", 4, 3200, band="w48", headroom=5),  # 5500 bps
     _m(11, "w48-64l-r7/12", "ldpc", "c64-w48-r712", 2, 1680, band="w48", headroom=5),  # 5722 bps
     _m(12, "w48-64l-r2/3", "ldpc", "c64-w48-r23", 2, 1920, band="w48", headroom=6),  # 6556 bps
