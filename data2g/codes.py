@@ -35,6 +35,8 @@ def _with_crc(payload: bytes, n_crc: int, mask: int = 0) -> bytes:
     per-codeword identity; 0 outside sessions, the frozen format)."""
     if n_crc == 16:
         return payload + (binascii.crc_hqx(payload, 0xFFFF) ^ mask & 0xFFFF).to_bytes(2, "big")
+    if n_crc == 24:  # studies (scripts/crc_cost.py): CRC-32's low 24 bits
+        return payload + ((binascii.crc32(payload) ^ mask) & 0xFFFFFF).to_bytes(3, "big")
     return payload + (binascii.crc32(payload) ^ mask & 0xFFFFFFFF).to_bytes(4, "big")
 
 

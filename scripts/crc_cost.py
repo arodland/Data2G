@@ -30,10 +30,10 @@ from thresholds import Sim  # noqa: E402
 from data2g import codes  # noqa: E402
 from data2g.arq.modes import MODES  # noqa: E402
 
-NAMES = ("qpsk-r1/5", "w48-qpsk-r1/5", "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n4-qpsk-r1/5",
+NAMES = tuple(os.environ["CRC_COST_NAMES"].split(",")) if os.environ.get("CRC_COST_NAMES") else ("qpsk-r1/5", "w48-qpsk-r1/5", "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n4-qpsk-r1/5",
          "n4-qpsk-r1/3", "n4-qpsk-r1/2", "ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-8f", "n4-ack-2f",
          "polar-k96-f4", "polar-k96-f8", "polar-k192-f8")
-VARIANTS = ("base", "same-k", "k+16")
+VARIANTS = tuple(os.environ.get("CRC_COST_VARIANTS", "base,same-k,k+16").split(","))
 CHANNELS = ("awgn", "mpd")
 BURSTS = 512
 _crc_bits = codes.crc_bits
@@ -43,9 +43,9 @@ def job(args):
     name, var, chan, snrs = args
     torch.set_num_threads(1)
     spec = MODES[name]
-    if var == "k+16":
-        spec = dataclasses.replace(spec, k=spec.k + 16)
-    codes.crc_bits = _crc_bits if var == "base" else (lambda s: 32)
+    if var in ("k+16", "crc24"):
+        spec = dataclasses.replace(spec, k=spec.k + (16 if var == "k+16" else 8))
+    codes.crc_bits = {"base": _crc_bits, "crc24": lambda s: 24}.get(var, lambda s: 32)
     n_cw = max(1, 16 // spec.frames_per_cw)
     sim = Sim(spec, "cpu", n_cw, batch=max(8, 256 // n_cw))
     rng, g = np.random.default_rng(1), torch.Generator().manual_seed(1)
@@ -84,12 +84,12 @@ def main():
     with Pool(8) as pool:
         for name, var, chan, curve in pool.imap_unordered(job, jobs):
             res[(name, var, chan)] = curve
-    with open("runs/crc_cost.csv", "w", newline="") as f:
+    with open(os.environ.get("CRC_COST_OUT", "runs/crc_cost.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["name", "variant", "channel", "snr", "cw_fail"])
         for (name, var, chan), curve in sorted(res.items()):
             w.writerows([name, var, chan, s, e] for s, e in curve)
-    print("mode channel | 10% point base, same-k, k+16 | 1% point base, same-k, k+16 | payload B base -> same-k")
+    print(f"mode channel | 10% point {VARIANTS} | 1% point {VARIANTS} | payload B base -> same-k")
     for name in NAMES:
         s = MODES[name]
         for chan in CHANNELS:
