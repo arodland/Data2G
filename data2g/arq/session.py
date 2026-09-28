@@ -14,6 +14,7 @@ caller starts turns. While idle it polls with a backoff (KEEPALIVE_S),
 and the callee's new data rides its reply to the next poll.
 """
 
+import logging
 import random
 from dataclasses import dataclass, field
 
@@ -34,6 +35,8 @@ IDLE_CLOSE_S = 300.0
 KEEPALIVE_S = (2.0, 16.0)  # first and largest idle poll interval
 CHAT_KEEPALIVE_S = (2.0, 4.0)  # the same while either side has CHAT ON: the callee's message waits for a poll
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
+
+log = logging.getLogger("data2g.session")
 
 IDLE, LISTEN, CONNECTING, CONNECTED, DISCONNECTING, CLOSED = (
     "idle", "listen", "connecting", "connected", "disconnecting", "closed")
@@ -213,12 +216,14 @@ class Session:
     def _on_timeout(self, now: float):
         if self.state == CONNECTING:
             self._tries += 1
+            log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, CONNECT_TRIES)
             if self._tries >= CONNECT_TRIES:
                 self._close("no answer")
             else:
                 self._queue(self._connect_burst(), now + self.rng.uniform(3.0, 5.0))
         elif self.state == DISCONNECTING:
             self._tries += 1
+            log.info("no answer to DISC, try %d of %d", self._tries, DISC_TRIES)
             if self._tries >= DISC_TRIES:
                 self._close("disconnected (unconfirmed)")
             else:
