@@ -1746,6 +1746,26 @@ CPU +28%.
     | w48-qpsk-r1/5 | 2.94 -> 2.75 | 3.81 |
 
     ack-1f, w48-qpsk-r1/3, and every AWGN and MPG cell: no change.
+  - The whole ladder, seeded (`--seed 0`, 48 modes, same trials both ways;
+    `runs/ladder_seeded_{master,pr6}_{10,1}pct.csv`): nothing worse. 10%:
+    175 cells identical, 11 better (the 7 rungs above, and polar-k96-f4
+    MPP/MPD -0.38/-0.56, polar-k192-f8 MPP/MPD -0.38/-0.94). 1%, where
+    fades that take the preamble set the point, 146 identical, 17 better:
+
+    | Rung | MPP | MPD |
+    |---|---|---|
+    | ack-4f | 2.56 -> -0.44 | 1.94 -> 0.25 |
+    | polar-k96-f8 | 1.12 -> -1.50 | 3.75 -> 0.56 |
+    | polar-k96-f4 | 1.19 -> 0.06 | 3.75 -> 1.88 |
+    | polar-k192-f8 | 0.75 -> 0.19 | 3.00 -> -0.38 |
+    | qpsk-r1/5 | 2.19 -> 1.44 | 3.75 -> 2.62 |
+    | qpsk-r1/3 | | 5.31 -> 4.75 |
+    | qpsk-r1/2 | | 6.56 -> 6.38 |
+    | 16qam-r1/3 | | 10.88 -> 10.31 |
+    | w48-qpsk-r1/5 | 5.19 -> 5.00 | 5.88 -> 5.31 |
+    | w48-qpsk-r1/3 | | 7.62 -> 7.25 |
+
+    and polar-k96-f8 MPG 4.31 -> 4.12.
   - The data rungs gain 1-3 points of failure rate; MPG nothing (7 rungs).
   - Re-running ladder_study's threshold search instead gave -1.6 to +1.2 dB
     on the same rungs: its SNR points use different trial seeds, and a
