@@ -348,3 +348,22 @@ SUBMODES = dict([
     _m(13, "w48-64l-r3/4", "ldpc", "c64-w48-r34", 2, 2160, band="w48", headroom=5),  # 7389 bps
     _m(14, "w48-256l-r5/8", "ldpc", "c256-w48-r58", 2, 2400, band="w48", headroom=6),  # 8222 bps
 ])
+
+# DATA2G_CRC32 (studies only, scripts/crc_study.py): every codeword's CRC 32
+# bits (codes.crc_bits). "samek": LDPC keeps k (2 payload bytes fewer);
+# "k16": k + 16 on every CRC16 code (payload kept). Polar gets k + 16 either
+# way: a 48-bit reply codeword left 2 bytes can't hold control.
+CRC32_STUDY = os.environ.get("DATA2G_CRC32", "")
+
+
+def crc32_k(code: str, k: int) -> int:
+    """A codeword's k under DATA2G_CRC32."""
+    if CRC32_STUDY and (code == "polar" or (CRC32_STUDY == "k16" and k < 512)):
+        return k + 16
+    return k
+
+
+if CRC32_STUDY:
+    from dataclasses import replace
+
+    SUBMODES = {n: replace(s, k=crc32_k(s.code, s.k)) for n, s in SUBMODES.items()}

@@ -17,13 +17,13 @@ from functools import lru_cache
 import numpy as np
 
 from . import constellation, ldpc, polar
-from .config import SubmodeSpec
+from .config import CRC32_STUDY, SubmodeSpec
 
 INTERLEAVER_SEED = 2026
 
 
 def crc_bits(spec: SubmodeSpec) -> int:
-    return 32 if spec.code == "ldpc" and spec.k >= 512 else 16
+    return 32 if CRC32_STUDY or (spec.code == "ldpc" and spec.k >= 512) else 16
 
 
 def payload_bytes(spec: SubmodeSpec) -> int:

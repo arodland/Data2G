@@ -28,7 +28,7 @@ from itertools import permutations
 
 import numpy as np
 
-from .config import FS
+from .config import FS, crc32_k
 
 PREAMBLE_S = 0.45  # the front sync block
 BLOCK_S = 0.25  # the later sync blocks, about
@@ -122,10 +122,10 @@ def _grid_name(g: Grid) -> str:
 
 
 SPECS = {s.name: s for g in GRIDS.values() for s in (
-    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", 320, DATA_N),
-    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", 480, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", crc32_k("ldpc", 320), DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", crc32_k("ldpc", 480), DATA_N),
 )}
-CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", CTL_K, CTL_N) for g in GRIDS}
+CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", crc32_k("polar", CTL_K), CTL_N) for g in GRIDS}
 
 
 # Early lock (find): the front block's score, then its header copy's.
