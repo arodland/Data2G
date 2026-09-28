@@ -209,6 +209,53 @@ class Interpolator:
         return y
 
 
+class Player:
+    """Output from our own FIFO through a PortAudio callback. The loop runs on the input clock and hands
+    over 0.1 s at a time, which a blocking write can't bridge: with 4800-frame buffers PipeWire padded
+    64 zeros after every block (a 1.3 ms hole each 0.1 s, on air too), and with its default buffers
+    (~11 ms) any late step underruns. Callback periods are a multiple of 256 frames (2048 at 48 kHz: a
+    main thread holding the GIL made 1024 late), and the FIFO starts `lead` ahead of the card."""
+
+    def __init__(self, pa, nout: int, rate: int, device: int | None, lead_s: float):
+        self.nout, self.rate, self.lead = nout, rate, int(lead_s * rate)
+        self.fifo, self.lock, self.active, self.underruns = bytearray(), threading.Lock(), False, 0
+        self.s = pa.open(format=_pa_float(), channels=nout, rate=rate, output=True, output_device_index=device,
+                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._fill)
+
+    def _fill(self, _in, n, _t, _status):
+        need = n * self.nout * 4
+        with self.lock:
+            b = bytes(self.fifo[:need])
+            del self.fifo[:need]
+        if len(b) < need and self.active:
+            self.underruns += 1
+            log.warning("TX audio underrun (%d)", self.underruns)
+        return b + bytes(need - len(b)), 0  # 0: paContinue
+
+    def start(self):
+        """Key-up: queue the lead, so a late step doesn't leave the device empty."""
+        self.write(np.zeros(self.lead))
+        self.active = True
+
+    def write(self, y: np.ndarray):
+        with self.lock:
+            self.fifo += np.repeat(y.astype(np.float32), self.nout).tobytes()
+
+    def drain(self):
+        """Wait until everything queued has left the sound card (then PTT can drop without clipping)."""
+        self.active = False  # the last callback coming up short is the end, not an underrun
+        while True:
+            with self.lock:
+                left = len(self.fifo)
+            if not left:
+                break
+            time.sleep(left / (self.nout * 4 * self.rate) + 0.002)
+        time.sleep(self.s.get_output_latency())
+
+    def close(self):
+        self.s.close()
+
+
 # --- sockets and audio ---------------------------------------------------------------
 
 class _Port:
@@ -303,8 +350,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
     inp = pa.open(format=_pa_float(), channels=nin, rate=a.sample_rate, input=True, input_device_index=a.input_device,
                   frames_per_buffer=per)
-    out = pa.open(format=_pa_float(), channels=nout, rate=a.sample_rate, output=True, output_device_index=a.output_device,
-                  frames_per_buffer=per)
+    out = Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
@@ -342,10 +388,12 @@ def serve(a, pa, stop: threading.Event | None = None):
                 log.debug("step took %.2f s (%d slow)", time.perf_counter() - t0, slow)
             if ptt and not keyed:
                 rig.ptt(True)
+                out.start()
                 keyed = True
             if keyed:
-                out.write(np.repeat(np.clip(interp(y) * gain, -1, 1).astype(np.float32), nout).tobytes())
+                out.write(np.clip(interp(y) * gain, -1, 1))
             if keyed and not ptt:
+                out.drain()
                 time.sleep(a.ptt_off_delay_ms / 1000)
                 rig.ptt(False)
                 keyed = False
@@ -402,6 +450,8 @@ def main():
     ap.add_argument("--rigctld-port", type=int, default=4532, help="0: no PTT")
     ap.add_argument("--ptt-on-delay-ms", type=int, default=100)
     ap.add_argument("--ptt-off-delay-ms", type=int, default=50)
+    ap.add_argument("--tx-lead-ms", type=int, default=100,
+                    help="TX audio queued ahead of the sound card: slack for a late audio step")
     ap.add_argument("--min-header-score", type=float, default=0.0)
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
