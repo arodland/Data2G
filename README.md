@@ -1861,7 +1861,89 @@ per 12 s burst.
 - **Not done:** the outcome model is not retrained. `headroom` is one of
   its inputs, and r2/3's moved 3 -> 1.
 
+## False accepts: LDPC success check, CRC-24 on polar codes (2026-09-28, protocol 12)
+
+TLDR: a v6 session delivered corrupt bytes: a w48-qpsk-r1/5 codeword passed
+its CRC-16 with the wrong payload. Two fixes cut the session-level
+false-accept rate from ~1e-2 to ~1e-5 per busy hour at the low end.
+
+- **LDPC success check** (`codes._payloads`): a decode counts only if the
+  decoder converged (every parity check satisfied), not on its CRC alone.
+  - Unconverged guesses were the whole mechanism: of 12,117 wrong LDPC
+    decodes, 2 had converged to another codeword.
+  - A CRC-16 passes a guess 1 time in 65,536.
+  - It rejects 0.09% of correct decodes near threshold. Receiver only.
+- **CRC-24 on every polar codeword** (CRC24C, 0xB2B117, as 5G NR pairs with
+  polar): k + 8, so payloads keep their size.
+  - The list decoder takes the first of 8 paths whose CRC checks, so a
+    failed decode passed a CRC-16 8 / 65,536 of the time.
+  - At the low end that was ~4e-3 session failures per hour (a random
+    control word always parses, then fails the link's range checks).
+    With CRC-24: ~1.6e-5.
+  - 10% points (AWGN / MPG / MPP / MPD, dB worse):
+    - ack-1f +0.6 / +0.9 / +0.8 / +1.2.
+    - n10-ack-4f +0.4 / +0.9 / +0.4 / +1.0.
+    - n4-ack-2f +1.0 / +1.6 / +2.0 / +4.4. It has 80 coded bits: rate 0.6 -> 0.7. It stays greyed out and the shifter doesn't pick it.
+    - Others within re-measurement spread.
+  - Loss study at the low cells (PEP-referenced): within ~1 SE except
+    MPP -4 (-6.7 +- 3.3%), whose extra losses were on qpsk-r1/5, an LDPC
+    mode CRC-24 doesn't touch.
+- **Not done:** CRC-32 on the LDPC CRC-16 modes: 3-9% of their payload,
+  for a risk the success check already removed (the remainder is
+  wrong-mask probes, which CQ/KISS parsing checks further).
+- `PROTOCOL_VERSION` 12: stations of 11 and 12 reject each other's headers.
+  Polar info sets re-frozen; `runs/ladder_10pct.csv` and `ladder_1pct.csv`
+  rows re-measured.
+- Studies: `scripts/crc_study.py`, `crc_exposure*.py`, `crc_cost.py`,
+  `polar_gate_study.py`.
+
+## Outcome model v7, with logit offsets (2026-09-28)
+
+TLDR: retrained on protocol-12 data, PEP-referenced throughout. Against v5e,
+sessions deliver +7..+21% on eight of nine cells. The exception is MPG 0 dB,
+at -5%.
+
+- **Data:**
+  - 2900 real-modem sessions (`runs/session_data_v7.csv`) and a fresh
+    83,000-sample offline set (`runs/outcome_data_v7.csv`).
+  - Both have `DATA2G_PEP_REF_DB=5`: noise against each burst's peak, as
+    data2g-host transmits. The old offline sets were average-power: mixing
+    them with PEP sessions (v6) cost AWGN +15 9.5%.
+- **Training:** as v5e (5 bootstrap members, averaged).
+  - An on-policy round (v8: sessions steered by v7) came out level with
+    v7 in every cell.
+- **Logit offsets** (`predictor.LOGIT_OFFSETS`, on P(burst usable)):
+  - v7 was overconfident on slow fading for a few modes, found by
+    `scripts/calibration.py` on the on-policy rows. For example 16qam-r1/3 at
+    MPG ~0 dB predicted 0.71 against 0.46 actual, and w48-16qam-r1/2 at
+    ~+8 dB 0.80 against 0.36.
+  - The offsets: -1.0 on 16qam-r1/3, w48-16qam-r1/2, n10-16qam-r3/4 and
+    n10-qpsk-r3/4; -0.7 on w48-qpsk-r1/3 and w48-qpsk-r2/3.
+  - Modes whose error flips sign with SNR (w48-qpsk-r1/2) are left alone.
+  - The ensemble's members agree on these errors (spread 0.03-0.07 against
+    errors of 0.2-0.5): it is a bias in the data, not noise.
+- **Loss study** (12 seeds x 600 s, shift+cpm, PEP-referenced, protocol-12
+  code, paired by seed; bps):
+
+  | cell | v5e | v7 | v7 + offsets | vs v5e |
+  |---|---|---|---|---|
+  | MPG -4 | 121 | 141 | 145 | +20% |
+  | MPP -4 | 142 | 173 | 169 | +19% |
+  | MPG 0 | 331 | 307 | 314 | -5.4 +- 3% |
+  | MPP 0 | 341 | 335 | 345 | +1% |
+  | MPG +8 | 1233 | 1179 | 1238 | 0% |
+  | MPG +15 | 2032 | 2346 | 2311 | +14% |
+  | MPP +15 | 2577 | 2774 | 2764 | +7% |
+  | MPD +20 | 1910 | 2250 | 2304 | +21% |
+  | AWGN +15 | 3885 | 3815 | 3815 | -2% (noise) |
+
+- No corrupt deliveries in the 5800 v7/v8 sessions: with the success check,
+  v6's session 302160 has no successor.
+
 ## TODO
+
+- MPG 0 dB: a fading-dependent offset (or reweighted training, see below)
+  for the modes whose error flips sign with SNR.
 
 - ACE for the learned 64/256 constellations: their Voronoi regions (the
   outer part of each hull point's cell) in place of the radial-only rule,
