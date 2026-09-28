@@ -11,23 +11,31 @@ from data2g import host
 
 
 class FakeStream:
-    def __init__(self, rate):
-        self.rate, self.rng = rate, np.random.default_rng(0)
+    def __init__(self, rate, channels):
+        self.rate, self.channels, self.rng = rate, channels, np.random.default_rng(0)
 
     def read(self, n, exception_on_overflow=True):
         time.sleep(0.002)
-        return (self.rng.normal(0, 0.01, n)).astype(np.float32).tobytes()
+        return (self.rng.normal(0, 0.01, n * self.channels)).astype(np.float32).tobytes()
 
     def write(self, data):
-        pass
+        assert len(data) % (4 * self.channels) == 0
 
     def close(self):
         pass
 
 
 class FakePA:
-    def open(self, rate, **kw):
-        return FakeStream(rate)
+    """A stereo sound card (the host opens stereo where it can)."""
+
+    def get_default_input_device_info(self):
+        return {"maxInputChannels": 2, "maxOutputChannels": 0}
+
+    def get_default_output_device_info(self):
+        return {"maxInputChannels": 0, "maxOutputChannels": 2}
+
+    def open(self, rate, channels, **kw):
+        return FakeStream(rate, channels)
 
 
 def test_commands_over_tcp(tmp_path):
