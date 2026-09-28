@@ -58,7 +58,7 @@ attachment() {  # bytes, per phase
 if [ "$PHASE" = idle ]; then
   sleep $T
 elif [[ $PHASE == raw* ]]; then
-  attachment ${A_BYTES:-8000} > $OUT/a8k.bin; attachment 4000 > $OUT/b4k.bin
+  attachment ${A_BYTES:-8000} > $OUT/a8k.bin; attachment ${B_BYTES:-4000} > $OUT/b4k.bin
   $PY $W/raw.py 8300 8400 $OUT/a8k.bin $OUT/b4k.bin $T > $OUT/raw_result.txt 2>&1
   echo "exit $?" >> $OUT/raw_result.txt
   sleep 10
@@ -68,7 +68,7 @@ else
     printf '{"mycall": "%s", "locator": "FN31pr", "http_addr": "127.0.0.1:%s", "listen": [], "version_reporting_disabled": true,\n "varahf": {"addr": "localhost:%s", "bandwidth": 2300, "rig": "", "ptt_ctrl": false}}\n' $call $http $port > $P/$k/config.json
   done
   pa() { k=$1; shift; pat --config $P/$k/config.json --mbox $P/$k/mbox --event-log $P/$k/events.json --log $P/$k/pat.log --forms $P/forms --prehooks $P/prehooks "$@"; }
-  attachment ${A_BYTES:-8000} > $P/a8k.bin; attachment 4000 > $P/b4k.bin
+  attachment ${A_BYTES:-8000} > $P/a8k.bin; attachment ${B_BYTES:-4000} > $P/b4k.bin
   printf 'Status report from W1AW.\nAll well here; band noisy.\n%.0s' {1..20} | pa a compose --p2p-only -s "Status" K2XYZ
   echo "Photo attached." | pa a compose --p2p-only -s "Photo" -a $P/a8k.bin K2XYZ
   echo "Log attached." | pa b compose --p2p-only -s "Log" -a $P/b4k.bin W1AW
