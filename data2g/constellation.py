@@ -49,6 +49,46 @@ def load(name: str) -> np.ndarray:
     return pts
 
 
+@lru_cache(maxsize=None)
+def ace_dirs(name: str) -> np.ndarray:
+    """(2^m, 2) complex unit directions each point may move along, outward
+    only (active constellation extension; zero: none). Moving along them
+    only takes a point further from its decision boundaries.
+    - Square QAM (gray-qam*): an outer level may move out along its axis; a
+      corner along both.
+    - Learned sets: a point on the convex hull may move radially out, the
+      rest not. Conservative: its true region (the outer part of its
+      Voronoi cell) is wider."""
+    pts = load(name)
+    d = np.zeros((len(pts), 2), dtype=complex)
+    if name.startswith("gray-qam"):
+        top = np.max(np.abs(pts.real))
+        re, im = np.isclose(np.abs(pts.real), top), np.isclose(np.abs(pts.imag), top)
+        d[re, 0] = np.sign(pts.real[re])
+        d[im, 1] = 1j * np.sign(pts.imag[im])
+    else:
+        from scipy.spatial import ConvexHull
+
+        hull = ConvexHull(np.c_[pts.real, pts.imag]).vertices
+        d[hull, 0] = pts[hull] / np.abs(pts[hull])
+    d.setflags(write=False)
+    return d
+
+
+def ace_project(got: np.ndarray, want: np.ndarray, dirs: np.ndarray) -> np.ndarray:
+    """ACE's projection: `got` (received cells) onto the region around
+    `want` (the sent points, scaled) that `dirs` (per cell, (..., 2)) allow:
+    want plus the outward part of the error along each direction. Works
+    for numpy and torch alike."""
+    e = got - want
+    out = want
+    for i in range(2):
+        di = dirs[..., i]
+        a = (e * di.conj()).real  # component along di (unit or zero)
+        out = out + di * (a * (a > 0))
+    return out
+
+
 def bits_per_symbol(points: np.ndarray) -> int:
     return int(np.log2(len(points)))
 

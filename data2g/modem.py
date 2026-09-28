@@ -305,13 +305,52 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     -> unit-RMS audio. The codec-free half of `modulate`, for
     measurements that send raw bits."""
     b = ofdm.band(spec.band)
-    data = constellation.modulate(bits, constellation.load(spec.constellation))
-    x = burst_waveform(data.reshape(-1, DATA_SYMS_PER_FRAME, b.nc), spec)
+    pts = constellation.load(spec.constellation)
+    data = constellation.modulate(bits, pts).reshape(-1, DATA_SYMS_PER_FRAME, b.nc)
+    x = burst_waveform(data, spec)
+    project = None
+    if spec.ace:
+        m = constellation.bits_per_symbol(pts)
+        idx = (bits.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))).reshape(data.shape)
+        project = ace_projector(spec, data, constellation.ace_dirs(spec.constellation)[idx])
     # the sync band's filter: it contains the data band (BandSpec.sync)
     return tx_condition(
         x, spec.headroom, b.spec.clip_overshoot,
         active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES), bandpass=BANDS[spec.sync_band].tx_bandpass,
+        project=project, closing=spec.ace,
     )
+
+
+def ace_cells(spec: SubmodeSpec, n_f: int) -> tuple[np.ndarray, np.ndarray]:
+    """Sample indices of a burst's data symbols (n_f data frames): (their
+    useful windows (n_f * 5, M), the whole symbols (n_f * 5, NSYM))."""
+    kc = copy_frame(spec.sync_band, n_f)
+    frames = [f for f in range(n_f + (kc is not None)) if f != kc]
+    j = np.array([f * SYMS_PER_FRAME + s for f in frames for s in range(1, SYMS_PER_FRAME)])
+    f0 = LEADIN_SAMPLES + BANDS[spec.sync_band].preamble_samples + header_samples(spec.sync_band)
+    full = f0 + j[:, None] * NSYM + np.arange(NSYM)
+    return full[:, NCP:], full
+
+
+def ace_projector(spec: SubmodeSpec, data: np.ndarray, dirs: np.ndarray):
+    """Active constellation extension (constellation.ace_dirs), for
+    tx_condition: demodulate each data cell of the clipped burst, move it
+    into its point's allowed region (the point scaled by the carrier's
+    clip gain), and add the difference back as those carriers."""
+    b = ofdm.band(spec.band)
+    win, full = ace_cells(spec, len(data))
+    X, D = data.reshape(-1, b.nc), dirs.reshape(-1, b.nc, 2)
+    dem = b.mod[NCP:].conj()
+
+    def project(x):
+        got = (2.0 / M) * (x[win] @ dem)
+        # per carrier: the TX bandpass shapes the band edges, pilots included
+        g = np.sum(X.conj() * got, axis=0).real / np.sum(np.abs(X) ** 2, axis=0)
+        x = x.copy()
+        x[full] += np.real((constellation.ace_project(got, g * X, D) - got) @ b.mod.T)
+        return x
+
+    return project
 
 
 def burst_waveform(data: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
@@ -646,7 +685,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     support = (support[0] - shift, support[1] - shift)
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
-    est = data_channel(hp, support, db, hd["n0_pre"], clip_consts(db, spec.headroom),
+    est = data_channel(hp, support, db, hd["n0_pre"], clip_consts(db, spec.headroom, spec.ace, spec.constellation),
                        n0_pre_k=hd["n0_pre_k"] if db == band else None, n_frames=n_f)
     if kc is not None:
         raw = np.delete(raw, kc, axis=0)

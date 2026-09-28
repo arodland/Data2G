@@ -67,6 +67,8 @@ def tx_condition(
     overshoot: Sequence[float] = CLIP_OVERSHOOT,
     active: slice = slice(None),
     bandpass: tuple[float, float] = TX_BANDPASS,
+    project=None,
+    closing: Sequence[float] = (),
 ) -> np.ndarray:
     """Envelope clip-and-filter for PAPR (PEP) control.
 
@@ -82,6 +84,11 @@ def tx_condition(
     inverts the envelope where this clipper bites hardest. See
     `config.CLIP_OVERSHOOT` for the measurements and for why the pass
     count, not the overshoot, is most of the gain.
+
+    `project`: active constellation extension (modem.ace_projector): after
+    each pass, the data cells go back into their allowed regions; then the
+    `closing` passes (overshoot per pass) clip and filter again, so the
+    peak holds.
     """
     # Data2G: power (and the final level) over `active` only, so the
     # lead-in/out silence does not pull the threshold down. SSTVAE uses
@@ -93,7 +100,7 @@ def tx_condition(
     # mean envelope power is 2x mean real power
     thresh = np.sqrt(2 * power) * 10 ** (clip_headroom_db / 20)
     taps = signal.firwin(201, bandpass, fs=FS, pass_zero=False)
-    for k in overshoot:
+    for i, k in enumerate(list(overshoot) + list(closing) if project else overshoot):
         z = signal.hilbert(x)
         mag = np.abs(z)
         scale = np.minimum(1.0, thresh / np.maximum(mag, 1e-12))
@@ -101,6 +108,8 @@ def tx_condition(
             scale = scale**k
         x = np.real(z * scale)
         x = np.convolve(x, taps, mode="same")
+        if project and i < len(overshoot):
+            x = project(x)
     return x / np.sqrt(np.mean(x[active] ** 2))
 
 
