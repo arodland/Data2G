@@ -52,6 +52,7 @@ BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = {0: "500", 1: "1200", 2: "2300"}
 BLOCK = FS // 10  # audio block: 0.1 s
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
+BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 # ponytail: from memory of VARA clients, not a checked list; check the log on first contact with Pat
 IGNORED = {"COMPRESSION", "PUBLIC", "CWID", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"}
@@ -71,6 +72,7 @@ class Host:
         self.out_data = bytearray()
         self._ptt = self._busy = False
         self._buffer = 0
+        self._buffer_t = 0.0  # engine time of the last BUFFER line
         self._mode = None
         self._alive = 0.0  # engine time of the last IAMALIVE
 
@@ -171,25 +173,31 @@ class Host:
         if e.receiver.channel_busy != self._busy:
             self._busy = e.receiver.channel_busy
             self.out_cmd.append("BUSY ON" if self._busy else "BUSY OFF")
-        # BUFFER: bytes still waiting after the next burst goes. VARA
-        # clients throttle on it: Pat blocks writes while BUFFER >= 7x its
-        # write (<= 250 B B2F blocks), tuned to VARA's short frames. Counting
-        # everything queued kept ~1-2 KB here, and every Data2G burst (up to
-        # ~12 KB) went out short: a 20 KB Pat transfer took 5x as long as the
-        # same bytes written at once. A DISCONNECT still sends and gets
-        # acknowledged all of it before the session closes.
+        # BUFFER, as VARA defines it: bytes the peer hasn't acknowledged yet,
+        # sent or not. Pat blocks writes while BUFFER >= 7x its write (<= 250
+        # B B2F blocks), tuned to VARA's short frames, and its Flush (after
+        # every message) waits for BUFFER 0. Counting everything kept Data2G
+        # bursts (up to ~12 KB) short: a 20 KB Pat transfer took 5x as long
+        # as the same bytes written at once. So while more than the next
+        # burst waits, BUFFER is the unsent bytes past it (the credit); once
+        # it has all gone, 1 until the peer acks it all, so Flush still waits
+        # for delivery but writes never block. --buffer-credit 0 reports the
+        # plain VARA figure.
         st = e.session.station
-        unsent = len(e.session._pending_write)
+        unsent = unacked = len(e.session._pending_write)
         if st:
             unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
-            if hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
-                credit = e.session.policy.next_capacity(st)
-                if self.buffer_credit is not None:
-                    credit = min(credit, self.buffer_credit)
-                unsent = max(0, unsent - credit)
-        buffered = unsent
-        if buffered != self._buffer:
+            unacked += len(st.tx.buf)  # from the first unacked codeword on
+        buffered = unacked
+        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
+            credit = e.session.policy.next_capacity(st)
+            if self.buffer_credit is not None:
+                credit = min(credit, self.buffer_credit)
+            buffered = unsent - credit if unsent > credit else min(unacked, 1)
+        # Pat's write and Flush give up after a minute without a BUFFER line
+        if buffered != self._buffer or (buffered and e.now - self._buffer_t >= BUFFER_REPEAT_S):
             self._buffer = buffered
+            self._buffer_t = e.now
             self.out_cmd.append(f"BUFFER {buffered}")
 
 
@@ -456,7 +464,7 @@ def main():
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
                          "that throttle on it (Pat) keep a whole burst queued; -1: the next burst's full "
-                         "capacity, 0: report everything queued (plain VARA)")
+                         "capacity, 0: report every unacked byte (plain VARA)")
     ap.add_argument("--record-dir", default=f"recordings/{time.strftime('%Y%m%d-%H%M%S')}",
                     help="where every burst heard and sent is logged ('' turns it off)")
     ap.add_argument("--log-level", default="INFO")
