@@ -283,7 +283,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode,
                     busy_limit_s=a.kiss_busy_limit) if a.kiss else None
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
-                    min_header_score=a.min_header_score, kiss=link)
+                    min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = data = kiss = None
@@ -410,6 +410,8 @@ def main():
     ap.add_argument("--record-dir", default=f"recordings/{time.strftime('%Y%m%d-%H%M%S')}",
                     help="where every burst heard and sent is logged ('' turns it off)")
     ap.add_argument("--log-level", default="INFO")
+    ap.add_argument("--stats-interval", type=float, default=60.0, metavar="S",
+                    help="log a connection's throughput this often (0: only at disconnect)")
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
     if a.list_modes:

@@ -164,6 +164,9 @@ class GearShifter:
     def airtime(self, m, n_cw):
         return burst_seconds(MODES[m], n_cw)
 
+    def mode_name(self, rec: int) -> str:
+        return decode(rec) or f"?{rec}"
+
     # -- receiver side ------------------------------------------------------------------
 
     def observe(self, measured: dict, submode: str, now: float):

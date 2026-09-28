@@ -163,6 +163,9 @@ def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, 
             LAST_REASON[0] = a.fail_reason or b.fail_reason
             return "failed", stats
         if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+            # the log's throughput counters: exact, abandons and resends included
+            assert (a.tx.acked, b.rx.reader.delivered) == (len(F.to_records(data_a)), n_a)
+            assert (b.tx.acked, a.rx.reader.delivered) == (len(F.to_records(data_b)), n_b)
             return "done", stats
         if ok:
             burst, sender = receiver.build(), receiver
