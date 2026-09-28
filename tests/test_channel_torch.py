@@ -21,6 +21,37 @@ def test_transmit_matches_numpy_modulator():
     np.testing.assert_allclose(got, ref, atol=1e-9)
 
 
+def test_ace_transmit_matches_numpy_and_keeps_points_in_their_regions():
+    """ACE in both clippers alike; after it, each 16-QAM cell's error has
+    no inward part left along its outer axes, and less clip error overall."""
+    import dataclasses
+
+    rng = np.random.default_rng(2)
+    n_f = 4
+    spec = dataclasses.replace(SubmodeSpec(0, "t", "ldpc", "gray-qam16", 1), clip_headroom_db=1.0,
+                               ace=(1.0, 1.5, 2.0))
+    bits = rng.integers(0, 2, n_f * DATA_SYMS_PER_FRAME * NC * 4)
+    ref = modem.modulate_bits(bits, spec)
+    data = constellation.modulate(bits, constellation.load(spec.constellation))
+    ch = BurstChannel(spec, n_f, dtype=torch.float64, clip_consts=({}, 1.0, 0.0))
+    got = ch.transmit(torch.tensor(data.reshape(1, n_f, DATA_SYMS_PER_FRAME, NC)))[0].numpy()
+    np.testing.assert_allclose(got, ref, atol=1e-9)
+    plain = modem.modulate_bits(bits, dataclasses.replace(spec, ace=()))
+    win, _ = modem.ace_cells(spec, n_f)
+    dem = modem.ofdm.band("w").mod[modem.NCP:].conj()
+
+    dirs = constellation.ace_dirs(spec.constellation)[
+        bits.reshape(-1, 4) @ np.array([8, 4, 2, 1])]
+
+    def harm(x):
+        """Mean square of the error that isn't outward along a point's axes."""
+        cells = ((2.0 / modem.M) * (x[win] @ dem)).reshape(-1)
+        cells = cells * np.vdot(cells, data) / np.vdot(cells, cells)  # the clip's gain out
+        return np.mean(np.abs(cells - constellation.ace_project(cells, data, dirs)) ** 2)
+
+    assert harm(ref) < 0.5 * harm(plain)
+
+
 def test_llr_matches_numpy():
     rng = np.random.default_rng(1)
     p = constellation.gray_qam(4)

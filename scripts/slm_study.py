@@ -96,7 +96,7 @@ class AceChannel(BurstChannel):
         z = _analytic(x)
         scale = torch.clamp(thresh / z.abs().clamp_min(1e-12), max=1.0)
         x = (z * (scale**k if k != 1.0 else scale)).real
-        return torch.nn.functional.conv1d(x[:, None], self.taps.flip(0)[None, None], padding=100)[:, 0]
+        return self._filter(x)
 
     def _project(self, x):
         X = self.sent
@@ -122,7 +122,8 @@ class AceChannel(BurstChannel):
         ks = list(self.overshoot) + [self.overshoot[-1]] * max(0, self.passes - len(self.overshoot))
         for k in ks[:self.passes]:
             x = self._project(self._pass(x, thresh, k))
-        x = self._pass(x, thresh, self.final)
+        for k in (self.final if isinstance(self.final, tuple) else (self.final,)):
+            x = self._pass(x, thresh, k)
         return x / x[:, act].pow(2).mean(dim=1, keepdim=True).sqrt()
 
 
