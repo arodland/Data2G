@@ -329,8 +329,8 @@ SUBMODES = dict([
     _m(11, "n10-16qam-r1/3", "ldpc", "gray-qam16", 10, 664, band="n10", headroom=0),  # 439 bps
     _m(12, "n10-qpsk-r3/4", "ldpc", "gray-qam4", 10, 752, band="n10", headroom=0),  # 500 bps
     _m(13, "n10-16qam-r1/2", "ldpc", "gray-qam16", 10, 1000, band="n10", headroom=0),  # 672 bps
-    _m(14, "n10-16qam-r2/3", "ldpc", "gray-qam16", 10, 1336, band="n10", headroom=2, ace=(1.0, 1.5, 2.0)),  # 906 bps
-    _m(15, "n10-16qam-r3/4", "ldpc", "gray-qam16", 10, 1504, band="n10", headroom=2, ace=(1.0,)),  # 1022 bps
+    _m(14, "n10-16qam-r2/3", "ldpc", "gray-qam16", 10, 1336, band="n10", headroom=2),  # 906 bps
+    _m(15, "n10-16qam-r3/4", "ldpc", "gray-qam16", 10, 1504, band="n10", headroom=3),  # 1022 bps
     # 2400 Hz, data only
     _m(0, "w48-qpsk-r1/5", "ldpc", "gray-qam4", 4, 384, band="w48", headroom=0),  # 639 bps
     _m(1, "w48-qpsk-r1/3", "ldpc", "gray-qam4", 4, 640, band="w48", headroom=0),  # 1056 bps

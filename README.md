@@ -1797,22 +1797,75 @@ CPU +28%.
   1.25-1.6 dB on 10), identified by their pattern over frames; n4 has 2 and
   would rotate one pilot per frame instead.
 
+## ACE in the TX clipper (2026-09-28)
+
+TLDR: on three w48 16-QAM modes, sessions deliver 6-9% more on fading at
++15..+20 dB, PEP-fair. No receiver or format change. TX costs 12-32 ms
+per 12 s burst.
+
+- **What** (`SubmodeSpec.ace`, `modem.ace_projector`, `dsp.tx_condition`):
+  - After each clip-and-filter pass, each data cell is demodulated and
+    moved into its point's allowed region: the point scaled by the
+    carrier's clip gain, plus any outward error along its outer axes
+    (`constellation.ace_dirs`, `ace_project`).
+  - Then closing passes (`ace`: their overshoot) clip and filter again.
+  - The same is in channel_torch, pinned to numpy by a test.
+- **Picks** (`scripts/ace_study.py`, `scripts/pick_ace.py`): 1% thresholds
+  on AWGN and MPD against today's plain clipping, PEP-fair (threshold +
+  mean burst peak). Adopted where no channel is worse and the mean gain
+  is at least 0.2 dB:
+
+  | mode | headroom | ACE closing | AWGN | MPD |
+  |---|---|---|---|---|
+  | w48-16qam-r1/2 | 1 -> 1 | (1.0,) | +0.27 | +0.77 |
+  | w48-16qam-r2/3 | 3 -> 1 | (1.0,) | +0.40 | +0.65 |
+  | w48-16qam-r3/4 | 4 -> 3 | (1.0,) | +0.36 | +0.36 |
+
+  - Not adopted: w48-16qam-r1/3 and r5/6 (under 0.2 dB); the learned
+    64/256 sets (no setting no worse everywhere).
+    - Their rule is conservative: a hull point may only move radially
+      out. Their true regions would need Voronoi cells.
+  - n10-16qam-r2/3 and r3/4 passed on the torch channel (+0.60, +0.23)
+    but not through the real modem.
+    - Paired by seed, their failures at equal average SNR were the same
+      with and without ACE (59 vs 60 of 400 at MPD 20 dB), and ACE raised
+      their peak by 0.15-0.38 dB. Reverted.
+    - Their 10% points on fading sit on a ~14% failure floor, so they
+      jump by several dB between runs.
+- **10% points** (real modem, `runs/ladder_10pct_ace.csv`), PEP-fair gain:
+  - w48-16qam-r1/2: 0.00 / +0.38 / +1.19 / +1.06 (AWGN / MPG / MPP / MPD).
+  - r2/3: +0.09 / +0.34 / +0.40 / +0.28.
+  - r3/4: +0.15 / +0.15 / +0.09 / +1.21.
+- **Loss study, PEP-referenced** (12 seeds x 600 s, shift+cpm, bps, paired
+  by seed):
+  - Noise here is set against each burst's peak (`DATA2G_PEP_REF_DB=5` in
+    `scripts/phy_session.py`): a burst whose peak-to-average is 5 dB gets
+    the cell's SNR, and a lower one gets more.
+  - On air, data2g-host sends every burst at a full-scale peak. The
+    average-power convention can't show a peak gain: there ACE was
+    -1.5..+4.3%.
+
+  | cell | before | ACE | change |
+  |---|---|---|---|
+  | MPD +20 dB | 1926 ± 68 | 2089 ± 41 | +164 ± 55 (+8.5%) |
+  | MPP +15 dB | 2357 ± 67 | 2526 ± 65 | +170 ± 67 (+7.2%) |
+  | MPG +15 dB | 1966 ± 59 | 2078 ± 56 | +112 ± 63 (+5.7%) |
+  | MPG +8 dB | 1236 ± 40 | 1247 ± 32 | +11 ± 22 |
+  | AWGN +15 dB | 3892 | 3893 | 0 (64-point modes only) |
+
+- **CPU:** TX 25 -> 37 ms per 12 s w48 burst (57 with the stock three
+  closing passes). RX unchanged.
+- **Also:** channel_torch's bandpass is now an FFT convolution. conv1d's
+  im2col buffer took ~20 GB a process in clip_constants (2000 bursts at
+  once), which crashed an 8-worker study.
+- **Not done:** the outcome model is not retrained. `headroom` is one of
+  its inputs, and r2/3's moved 3 -> 1.
+
 ## TODO
 
-- Active constellation extension (Krongold & Jones 2003) in the TX
-  clipper: after each clip, project every data symbol back into its
-  allowed region, where inner points snap back and outer points may
-  move only outward (the outward part of the Voronoi cell; for learned
-  constellations, a one-time precompute per set). Peaks come down
-  without moving any point toward a decision boundary, so it needs no RX
-  or format change. Aimed at the top w48 modes, which clip at 4-6 dB of
-  headroom; a guessed 1-2 dB PEP-fair gain, to be measured with
-  scripts/clip_study.py. Plain projection (POCS) converges slower than
-  today's 3-pass clip-and-filter (CLIP_OVERSHOOT) and typically wants
-  ~4-10 passes. The smart-gradient variant (Krongold & Jones) gets most
-  of the way in 1-2, so compare PAPR against pass count. The projection
-  is differentiable, so it could also go into channel_torch's TX for
-  constellation training.
+- ACE for the learned 64/256 constellations: their Voronoi regions (the
+  outer part of each hull point's cell) in place of the radial-only rule,
+  then scripts/ace_study.py on them. The top w48 modes clip at 4-6 dB.
 
 - Trailer acquisition, as in FreeDV's data modes: a second sync
   sequence (preamble copy, or header repeat) at the burst's end, so the
