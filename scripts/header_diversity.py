@@ -16,10 +16,9 @@ ok, wrong (another valid word accepted) or fail (none).
     uv run python scripts/header_diversity.py --out runs/header_diversity.csv
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 import csv

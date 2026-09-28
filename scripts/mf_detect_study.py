@@ -6,10 +6,9 @@ statistic at the true start on signals (misses at a threshold).
     uv run python scripts/mf_detect_study.py signal --band n4 --chan awgn --snr -8 -6 --thr 40
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 from multiprocessing import Pool

@@ -6,10 +6,9 @@ per audio minute, and the copy search's own share.
     uv run --no-sync python scripts/copy_cpu.py
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import logging
 import sys

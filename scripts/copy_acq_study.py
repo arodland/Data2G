@@ -22,10 +22,9 @@ decodes (and wrong headers it takes). Then false locks on noise.
     uv run --no-sync python scripts/copy_acq_study.py --out runs/copy_acq.csv
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 import csv

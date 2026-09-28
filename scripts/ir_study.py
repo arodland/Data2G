@@ -10,10 +10,9 @@ Reported beside the simulator's model of the same thing
     uv run python scripts/ir_study.py --out runs/ir_study.csv
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 import csv

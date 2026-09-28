@@ -9,10 +9,9 @@ get no genie.
     uv run --no-sync python scripts/sync_loss_study.py --out runs/sync_loss.csv
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 import csv
