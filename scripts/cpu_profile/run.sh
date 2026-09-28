@@ -18,9 +18,12 @@
 # A_BYTES, B_BYTES: W1AW's and K2XYZ's attachment sizes (default 8000, 4000;
 # B_BYTES=0: K2XYZ sends nothing). DATA2G_COMPRESS=0: both
 # hosts send raw (no T_COMP), the baseline for the raw-text/raw-mixed phases.
-# CHANNEL=<mpg|mpp|mpd|mps | doppler_hz:delay_ms>: Watterson fading on both
-# paths (channel.py, not profiled): each host plays into its own TX sink and
-# channel.py carries it to the other's RX sink. Unset: AWGN only.
+# Channel and noise as ARSFI's HFSimulator makes them. CHANNEL=<awgn|mpg|mpp|
+# mpd|mps | doppler_hz:delay_ms>: Watterson fading on both paths (channel.py,
+# not profiled): each host plays into its own TX sink and channel.py carries
+# it to the other's RX sink. Unset or awgn: noise only (its WGN mode). SNR
+# (noise.py): the input's PEP over the noise in 3000 Hz; NOISE_SNR=<dB> holds
+# it constant, else it wanders (snr.log).
 set -u
 PHASE=$1; T=$2; OUT=$(realpath -m "$3")
 case $PHASE in idle|pat|pat-text|pat-mixed|raw|raw-text|raw-mixed) ;; *) echo "unknown phase $PHASE" >&2; exit 2;; esac
@@ -35,7 +38,7 @@ for s in d2g_ab d2g_ba; do
   mods+=($(pactl load-module module-null-sink sink_name=$s sink_properties=device.description=$s rate=48000 channels=1 format=float32le))
 done
 TX_A=d2g_ab TX_B=d2g_ba
-if [ -n "${CHANNEL:-}" ]; then
+if [ "${CHANNEL:-awgn}" != awgn ]; then
   TX_A=d2g_a_tx TX_B=d2g_b_tx
   for s in $TX_A $TX_B; do
     mods+=($(pactl load-module module-null-sink sink_name=$s sink_properties=device.description=$s rate=48000 channels=1 format=float32le))
