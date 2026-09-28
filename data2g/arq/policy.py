@@ -42,6 +42,13 @@ CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payloa
 ROBUST_CONNECT = "n4-qpsk-r1/3"  # session-frame retries: 38 B, 200 Hz, within every cap
 
 
+# LDPC codes of one family (band, constellation, coded length): the
+# lower-rate ones of each, whose P(codeword) caps it
+LOWER_RATE = {s.name: tuple(r.name for r in MODES.values() if r.code == "ldpc" and s.code == "ldpc"
+                            and (r.band, r.constellation, r.coded_bits) == (s.band, s.constellation, s.coded_bits)
+                            and r.k < s.k) for s in MODES.values()}
+
+
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
 
 
@@ -175,23 +182,28 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
 
-    def outcome(self, submode: str, decoded: int, sent: int):
+    def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
         mode: one burst tells little (a fade takes a whole burst), so the
         bias moves a step per burst. It learns what one burst's features
         cannot tell (held-out: slow fading over-predicted by 0.1-0.2, a
-        steady channel under-predicted as much). Kept per submode."""
+        steady channel under-predicted as much). Kept per submode.
+        `usable`: its control decoded, with decoded/sent its data codewords
+        alone (counted with them, the control made a 0/7 burst score 1/8);
+        None (KISS: no control): any codeword decoded."""
         p = self.predicted.get(submode)
-        if p is None or sent == 0:
+        if p is None or (sent == 0 and usable is None):
             return
+        if usable is None:
+            usable = decoded > 0
         pb, p = p
-        # the burst usable (its control decoded) or not; then its codewords
-        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * ((decoded > 0) - pb),
+        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * (usable - pb),
                                                  -BIAS_MAX, BIAS_MAX))
-        if decoded == 0:
+        if not usable or sent == 0:
             return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
-        # qpsk-r1/3 over the eligibility floor, where it decoded 6%
+        # qpsk-r1/3 over the eligibility floor, where it decoded 6% (the
+        # family cap in recommend() passes only the other direction on)
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
 
     def recommend(self, station) -> tuple[int, int, int]:
@@ -225,9 +237,14 @@ class GearShifter:
             return logit_shift(omemo[sec][s.name][0], self.bias_burst.get(s.name, 0.0))
 
         def q_cw(s, n_cw):
-            """P(one of its data codewords decodes | the burst is usable)."""
+            """P(one of its data codewords decodes | the burst is usable): no
+            more than a lower-rate code of its family at the same length
+            (bias included), so qpsk-r1/5 failing holds qpsk-r1/3 down at
+            once (an HFSimulator MPP trial, 2026-09-28: qpsk-r1/3 picked
+            fresh after qpsk-r1/5 reached -3, then 0/7 on every burst)."""
             q_burst(s, n_cw)
-            return logit_shift(omemo[round(burst_seconds(s, n_cw), 2)][s.name][1], self.bias.get(s.name, 0.0))
+            pred = omemo[round(burst_seconds(s, n_cw), 2)]
+            return min(logit_shift(pred[m][1], self.bias.get(m, 0.0)) for m in (s.name, *LOWER_RATE[s.name]) if m in pred)
 
         best, best_v = None, -1.0
         # my reply to the peer: the cheapest in expectation. A lost reply costs
