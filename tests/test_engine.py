@@ -141,14 +141,20 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
 
     from data2g.host import Host
 
-    # 400 of the 1000 bytes sent and not yet acked: VARA counts them too
-    for credit, expect in ((None, 0), (100, 900), (0, 1000)):
+    # 400 of the 1000 bytes sent and not yet acked: VARA counts them. With a
+    # credit, only unsent bytes past it count, and 1 stands for the rest
+    # until they're acked (Pat's Flush waits for 0; its writes never block)
+    for credit, expect in ((None, 1), (100, 500), (0, 1000)):
         h = Host(Engine("W1AW", seed=1), credit)
         st = SimpleNamespace(tx=SimpleNamespace(buf_off=0, buf=bytearray(1000), stream_end=400), read=lambda: b"")
         h.engine.session.station = st
         h.engine.session.policy.next_capacity = lambda station: 5000
         h.after_step(False)
-        assert f"BUFFER {expect}" in h.out_cmd or (expect == 0 and not any(x.startswith("BUFFER") for x in h.out_cmd))
+        assert f"BUFFER {expect}" in h.out_cmd
+        h.out_cmd.clear()
+        h.engine.n += int(31 * FS)  # unchanged, but repeated: Pat times out after a minute without one
+        h.after_step(False)
+        assert f"BUFFER {expect}" in h.out_cmd
 
 
 def test_cqframe_is_heard_without_a_session():
