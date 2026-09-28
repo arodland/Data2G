@@ -51,17 +51,18 @@ def load(path, stale_header=()):
 
 
 class Net(torch.nn.Module):
-    def __init__(self, n_in, n_modes, mean, std):
+    def __init__(self, n_in, n_modes, mean, std, hidden=HIDDEN, depth=2):
         super().__init__()
         self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
         self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
-        self.l1 = torch.nn.Linear(n_in, HIDDEN)
-        self.l2 = torch.nn.Linear(HIDDEN, HIDDEN)
-        self.l3 = torch.nn.Linear(HIDDEN, 2 * n_modes)
+        sizes = [n_in] + [hidden] * depth + [2 * n_modes]
+        self.layers = torch.nn.ModuleList(torch.nn.Linear(a, b) for a, b in zip(sizes, sizes[1:]))
 
     def forward(self, x):
-        h = torch.tanh(self.l1((x - self.mean) / self.std))
-        return self.l3(torch.tanh(self.l2(h)))
+        h = (x - self.mean) / self.std
+        for layer in self.layers[:-1]:
+            h = torch.tanh(layer(h))
+        return self.layers[-1](h)
 
 
 def loss_fn(z, mode, bok, dsent, dok, bmask, n):
@@ -93,6 +94,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0, help="nonzero: an ensemble member (seeded, bootstrapped)")
     ap.add_argument("--ensemble", default="", help="comma-separated member npz files: combine them into --out")
     ap.add_argument("--epochs", type=int, default=150)
+    ap.add_argument("--hidden", type=int, default=HIDDEN, help="hidden layer width")
+    ap.add_argument("--depth", type=int, default=2, help="hidden layers")
+    ap.add_argument("--input-noise", type=float, default=0.0,
+                    help="augmentation: Gaussian noise on the continuous inputs, in standard deviations, per batch")
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     a = ap.parse_args()
     if a.ensemble:
@@ -119,7 +124,10 @@ def main():
         count = dict(zip(*np.unique(draw, return_counts=True)))
         trn = np.repeat(np.flatnonzero(trn), [count.get(s, 0) for s in seeds[trn]])
     mean, std = x[trn].mean(0), x[trn].std(0) + 1e-6
-    net = Net(x.shape[1], n, mean, std)
+    # the noise leaves one-hots and flags (columns of only 0 and 1) alone
+    cont = ~np.all(np.isin(x[trn], (0.0, 1.0)), axis=0)
+    noise_scale = torch.tensor(a.input_noise * std * cont, dtype=torch.float32)
+    net = Net(x.shape[1], n, mean, std, a.hidden, a.depth)
     opt = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
     T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt)  # noqa: E731
     tr_t = [T(x[trn]), T(mode[trn], torch.long), T(bok[trn]), T(dsent[trn]), T(dok[trn]), T(bmask[trn])]
@@ -130,7 +138,10 @@ def main():
         perm = torch.randperm(len(tr_t[0]))
         for i in range(0, len(perm), 512):
             b = perm[i:i + 512]
-            loss = loss_fn(net(tr_t[0][b]), *(t[b] for t in tr_t[1:]), n)
+            xb = tr_t[0][b]
+            if a.input_noise:
+                xb = xb + torch.randn_like(xb) * noise_scale
+            loss = loss_fn(net(xb), *(t[b] for t in tr_t[1:]), n)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -168,7 +179,7 @@ def main():
         ii = np.array(g[k])
         print(f"  {k[0]:6s} {k[1]:5s} n {len(ii):5d}: {pj[ii].mean():.3f} vs {frac[ii].mean():.3f}   "
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
-    layers = [net.l1, net.l2, net.l3]
+    layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
     P.outcome_model.cache_clear()

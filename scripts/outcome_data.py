@@ -21,8 +21,9 @@ P(codeword ok | burst ok) per submode from these.
 
 import os
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 
 import argparse
 import csv
@@ -46,6 +47,12 @@ import phy_session as PS  # noqa: E402
 
 CANDIDATES = 4
 REPLY_MODES = {"ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f", "qpsk-r1/5", "n10-qpsk-r1/3"}
+# --sustained: a supplement for sustained low SNR (a trial at MPP -6 dB PEP5
+# found the model flat there: qpsk-r1/5 x9 predicted 0.71 per codeword sent,
+# 0.26 actual). No drift, the measured burst often a reply (fragile: synced
+# only in an up-fade, as a receiver in such a session measures), candidates
+# at the long size classes the shifter sends at low SNR.
+SUSTAINED = False
 KINDS = (("awgn", 0.15), ("mpg", 0.2), ("mpp", 0.2), ("mpd", 0.15), ("random", 0.3))
 THRESHOLDS = I.thresholds()
 # CPM modes' 1% end-to-end points (the CPM prototype's study, 1% v2), for
@@ -108,6 +115,8 @@ def sample(seed):
     u = rng.random()
     snr0 = float(rng.uniform(-14, -8) if u < 0.005 else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
     drift = float(rng.normal(0, 1.5))  # dB per 30 s
+    if SUSTAINED:
+        snr0, drift = float(rng.uniform(-10, 4)), 0.0
     cap = 0 if rng.random() < 0.25 else 2
     allowed = [s.name for s in G.allowed(cap)]
     ch = PS.ContinuousChannel(fam, snr0, seed, 120.0, doppler=doppler, delay_ms=delay)
@@ -125,7 +134,7 @@ def sample(seed):
         if rng.random() < 0.01:  # any mode at all, rarely (as above)
             name = str(rng.choice(allowed))
             n = n_for(name, float(rng.choice(G.SIZE_S)))
-        elif rng.random() < 0.35:
+        elif rng.random() < (0.6 if SUSTAINED else 0.35):
             name = str(rng.choice([m for m in allowed if m in REPLY_MODES]))
             n = int(rng.integers(1, 3))
         else:
@@ -167,7 +176,8 @@ def sample(seed):
                     **{f"prev_{k}": v for k, v in prev.items()})
     rows = []
     for j, name in enumerate(cands):
-        n = int(rng.integers(1, 3)) if j == 0 else max(2, n_for(name, float(rng.choice(G.SIZE_S))))
+        sizes = G.SIZE_S[2:] if SUSTAINED else G.SIZE_S
+        n = int(rng.integers(1, 3)) if j == 0 else max(2, n_for(name, float(rng.choice(sizes))))
         b = burst(name, n, rng)
         r = hear(b, t_next)
         right = r is not None and r["spec"].name == name and r["n_cw"] == n
@@ -186,7 +196,10 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", required=True)
     ap.add_argument("--first", type=int, default=0, help="first sample number (another dataset's seeds: past its end)")
+    ap.add_argument("--sustained", action="store_true", help="the sustained-low-SNR supplement (see SUSTAINED)")
     a = ap.parse_args()
+    global SUSTAINED
+    SUSTAINED = a.sustained
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
               + ["prev_band", "prev_age"] + [f"prev_{k}" for k in meas]
