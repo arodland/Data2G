@@ -51,29 +51,37 @@ _TONES, _BANDPASS = cpm.tones, cpm.bandpass
 
 
 def apply(variant: str):
-    """Patch the CPM transmitter for `variant` (per worker process)."""
+    """Patch the CPM transmitter for `variant` (per worker process); parts
+    joined by "+" combine (bp150+glide0.3)."""
     cpm.tones, cpm.bandpass = _TONES, _BANDPASS
-    if variant.startswith("clip") or variant.startswith("bp"):
-        field, v = ("clip_db", float(variant[4:])) if variant.startswith("clip") else ("bp", float(variant[2:]))
-        cpm.bandpass = lambda g, x: _BANDPASS(replace(g, **{field: v}), x)
-    elif variant.startswith("glide"):
-        beta = float(variant[5:])
+    fields = {}
+    for part in variant.split("+"):
+        if part.startswith("clip"):
+            fields["clip_db"] = float(part[4:])
+        elif part.startswith("bp"):
+            fields["bp"] = float(part[2:])
+        elif part.startswith("glide"):
+            cpm.tones = glide_tones(float(part[5:]))
+    if fields:
+        cpm.bandpass = lambda g, x: _BANDPASS(replace(g, **fields), x)
 
-        def tones(g, sym):
-            T = g.T
-            a = np.repeat(sym.astype(float), T)
-            n = max(1, int(beta * T))
-            if n > 1:
-                w = np.hanning(n + 2)[1:-1]
-                a = np.convolve(np.pad(a, n, mode="edge"), w / w.sum(), mode="same")[n:-n]
-            x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
-            nr = int(cpm.RAMP_S * FS)
-            ramp = (1 - np.cos(np.pi * (np.arange(nr) + 0.5) / nr)) / 2
-            x[:nr] *= ramp
-            x[-nr:] *= ramp[::-1]
-            return x
 
-        cpm.tones = tones
+def glide_tones(beta: float):
+    def tones(g, sym):
+        T = g.T
+        a = np.repeat(sym.astype(float), T)
+        n = max(1, int(beta * T))
+        if n > 1:
+            w = np.hanning(n + 2)[1:-1]
+            a = np.convolve(np.pad(a, n, mode="edge"), w / w.sum(), mode="same")[n:-n]
+        x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
+        nr = int(cpm.RAMP_S * FS)
+        ramp = (1 - np.cos(np.pi * (np.arange(nr) + 0.5) / nr)) / 2
+        x[:nr] *= ramp
+        x[-nr:] *= ramp[::-1]
+        return x
+
+    return tones
 
 
 def shape(variant, n=40):
@@ -118,15 +126,21 @@ def point(snrs, fail, target=0.1):
 
 
 def main():
+    global MODE
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="runs/cpm_papr.csv")
     ap.add_argument("--trials", type=int, default=120)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--variants", default=",".join(VARIANTS))
+    ap.add_argument("--mode", default=MODE)
+    ap.add_argument("--shift", type=float, default=0.0, help="dB added to the SNR grids (a lower mode: negative)")
     a = ap.parse_args()
     if PS.PEP_REF_DB is None:
         ap.error("DATA2G_PEP_REF_DB must be set (PEP-fair thresholds)")
     variants = a.variants.split(",")
+    MODE = a.mode
+    for c in SNRS:
+        SNRS[c] = SNRS[c] + a.shift
     jobs = [(v, c, float(s), 90000 + i) for v in variants for c in SNRS for s in SNRS[c] for i in range(a.trials)]
     with Pool(a.jobs) as pool:
         shapes = dict(zip(variants, pool.map(shape, variants)))
