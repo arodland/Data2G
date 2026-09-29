@@ -345,7 +345,7 @@ class Station:
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
         # escalation: my own timeouts (master), or the peer telling me my
         # replies are lost (it repeats or polls: §6)
-        escalation = min(max(self.misses, self.reply_escalation), 3)
+        escalation = min(max(self.misses, self.reply_escalation), 4)
         submode, max_cw = self.policy.choose(self, escalation)
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
