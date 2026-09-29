@@ -1,5 +1,5 @@
-"""Equalizer quality of the stub submode (uncoded Gray QPSK) through the
-full burst modem, per channel.
+"""Equalizer quality of a submode's uncoded soft bits (default
+qpsk-r1/2) through the full burst modem, per channel.
 
 Reports BMI, the bitwise mutual information of the soft outputs with the
 best single scale per burst: what a decoder can actually extract, in
@@ -10,6 +10,7 @@ overweights carriers sitting in deep notches, which no equalizer can
 make reliable and a code only needs flagged as unreliable.
 
     uv run python scripts/eq_floor.py [--snr 60] [--bursts 10] [--taps gaussian|butter]
+        [--submode w48-16qam-r3/4] [--channels mpp mpd]
 """
 
 import argparse
@@ -18,7 +19,7 @@ import numpy as np
 
 from data2g import codes, hfchannel, modem
 from data2g.config import (
-    CLIP, HEADER_SYMS, LEADIN_SAMPLES, LEADOUT_SAMPLES, SUBMODES, SYMS_PER_FRAME,
+    LEADIN_SAMPLES, LEADOUT_SAMPLES, NSYM, SUBMODES, SYMS_PER_FRAME, clip_consts,
 )
 from data2g.waveform import ofdm
 from data2g.waveform.dsp import freq_correct, to_baseband
@@ -45,23 +46,26 @@ def bmi(soft: np.ndarray, bits: np.ndarray) -> float:
     )
 
 
-def _pilot_only_twin(x_len: int, n_f: int) -> np.ndarray:
-    """Same burst layout with every frame symbol a pilot, unclipped. The
-    channel is linear, so pushing this through the same seeded channel
-    without noise reads the true channel off every data position."""
-    syms = np.tile(modem.PILOT, (n_f * SYMS_PER_FRAME + 1, 1))
-    hdr = np.tile(modem.PILOT, (HEADER_SYMS, 1))
+def _pilot_only_twin(x_len: int, n_air: int, spec) -> np.ndarray:
+    """Same burst layout (n_air on-air frames, header copy included) with
+    every symbol a pilot, unclipped. The channel is linear, so pushing
+    this through the same seeded channel without noise reads the true
+    channel off every data position."""
+    b, sb = ofdm.band(spec.band), ofdm.band(spec.sync_band)
+    syms = np.tile(b.pilot, (n_air * SYMS_PER_FRAME + 1, 1))
+    hdr = np.tile(sb.pilot, (modem.header_samples(spec.sync_band) // NSYM, 1))
     body = np.concatenate([
-        np.zeros(LEADIN_SAMPLES), ofdm.preamble_waveform(),
-        ofdm.modulate_symbols(hdr), ofdm.modulate_symbols(syms), np.zeros(LEADOUT_SAMPLES),
+        np.zeros(LEADIN_SAMPLES), sb.preamble_waveform(),
+        sb.modulate_symbols(hdr), b.modulate_symbols(syms), np.zeros(LEADOUT_SAMPLES),
     ])
     return np.concatenate([np.zeros(3000), body, np.zeros(x_len - 3000 - len(body))])
 
 
-def measure(preset, snr, bursts, taps, frames=20):
+def measure(preset, snr, bursts, taps, submode="qpsk-r1/2", frames=20):
     """(BMI, genie BMI, raw BER, sync failures). Genie = same bursts, same
     fades, same timing and CFO, true channel instead of the estimate."""
-    spec = SUBMODES["qpsk-r1/2"]  # any QPSK submode measures the same soft bits
+    spec = SUBMODES[submode]
+    pilot = ofdm.band(spec.band).pilot
     errs = n = sync_fail = 0
     bmis, genie = [], []
     for seed in range(bursts):
@@ -82,15 +86,20 @@ def measure(preset, snr, bursts, taps, frames=20):
         n += len(bits)
         bmis.append(bmi(soft, bits))
 
-        twin = hfchannel.apply_channel(_pilot_only_twin(len(x), len(raw)), **kw)
+        n_f = len(raw)
+        n_air = modem.frames_on_air(spec, len(sent))
+        twin = hfchannel.apply_channel(_pilot_only_twin(len(x), n_air, spec), **kw)
         zt = freq_correct(to_baseband(twin), r["cfo"])
-        rt, _, _ = modem._demod_frames(zt, r["p0"], len(raw), r["shift"], r["phi_ref"], r["steps"])
-        h_true = rt / modem.PILOT
+        rt, _, _ = modem._demod_frames(zt, r["p0"], n_air, r["shift"], r["phi_ref"], r["steps"], band=spec.band)
+        if n_air > n_f:  # receive() drops the header copy's frame; so must the genie
+            rt = np.delete(rt, modem.copy_frame(spec.sync_band, n_f), axis=0)
+        h_true = rt / pilot
         # The twin skips the clipper and the TX bandpass, so it differs by
         # a static per-carrier gain: fit it on the pilots both share.
-        hp_a, hp_t = raw[:, 0] / modem.PILOT, h_true[:, 0]
+        hp_a, hp_t = raw[:, 0] / pilot, h_true[:, 0]
         gain = np.sum(hp_a * np.conj(hp_t), axis=0) / np.sum(np.abs(hp_t) ** 2, axis=0)
-        h_true = h_true[:, 1:] * gain * CLIP[spec.band][0].get(len(raw), CLIP[spec.band][1])
+        gains, default, _ = clip_consts(spec.band, spec.headroom, spec.ace, spec.constellation)
+        h_true = h_true[:, 1:] * gain * gains.get(n_f, default)
         var_t = modem.noise_var(h_true, est)
         genie.append(bmi(modem.soft_bits(raw, h_true, var_t, spec), bits))
     m = lambda v: float(np.mean(v)) if v else 0.0  # noqa: E731
@@ -102,12 +111,15 @@ def main():
     ap.add_argument("--snr", type=float, nargs="+", default=[10.0, 20.0, 60.0])
     ap.add_argument("--bursts", type=int, default=10)
     ap.add_argument("--taps", default="gaussian")
+    ap.add_argument("--submode", default="qpsk-r1/2")
+    ap.add_argument("--channels", nargs="+", default=list(CHANNELS))
     a = ap.parse_args()
     print(f"{'':10s} " + "  ".join(f"{s:>9.0f} dB: BMI genie  BER  " for s in a.snr) + "  hdr fail")
-    for name, p in CHANNELS.items():
+    for name in a.channels:
+        p = CHANNELS[name]
         cells, fails = [], 0
         for snr in a.snr:
-            b, g, ber, sf = measure(p, snr, a.bursts, a.taps)
+            b, g, ber, sf = measure(p, snr, a.bursts, a.taps, a.submode)
             cells.append(f"{b:13.4f} {g:.4f} {ber:.4f}")
             fails += sf
         print(f"{name:10s} " + "  ".join(cells) + f"  {fails}", flush=True)

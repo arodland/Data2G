@@ -816,7 +816,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         raw = np.delete(raw, kc, axis=0)
         est["h"], est["mse"] = np.delete(est["h"], kc, axis=0), np.delete(est["mse"], kc, axis=0)
     return dict(
-        spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db,
+        spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc,
         cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, phi_ref=phi_ref, support=support,
         preamble_start=hd["start"], score=hd["score"],
     )
@@ -838,6 +838,7 @@ def data_channel(h_pilot: np.ndarray, support: tuple[int, int], band: str = "w",
     g = gains.get(len(h_pilot) - 1 if n_frames is None else n_frames, default)
     est["h"] = est["h"] * g
     est["mse"] = est["mse"] * g**2
+    est["gain"] = g
     est["band"] = band
     return est
 

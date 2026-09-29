@@ -88,7 +88,10 @@ def fmt(v) -> str:
 
 
 def page(p10: dict, p1: dict, p1_measured: bool = False) -> str:
+    import prune
+
     rows = sorted(MODES, key=lambda m: (bps(MODES[m]), width(MODES[m])))
+    papr = {m: prune.peak_db(m) for m in rows}
     body = []
     for m in rows:
         s = MODES[m]
@@ -103,7 +106,7 @@ def page(p10: dict, p1: dict, p1_measured: bool = False) -> str:
                          for c in CH)
         body.append(f'<tr{cls}><td class="name">{html.escape(m)}{tags}</td><td>{bps(s):.0f}</td>'
                     f'<td><span class="bw {chip}">{w}</span></td><td>{code}</td>'
-                    f"<td>{rtxt}</td><td>{const_name(s)}</td>{cells10}{cells1}</tr>")
+                    f"<td>{rtxt}</td><td>{const_name(s)}</td><td>{fmt(papr[m])}</td>{cells10}{cells1}</tr>")
     n10 = sum(1 for m in MODES for c in CH if (m, c) in p10)
     notes = NOTES_MEASURED if p1_measured else NOTES_FREEZE
     head1 = "1% failure, dB" if p1_measured else "1% failure, dB (freeze)"
@@ -137,7 +140,7 @@ td.name,th.name{text-align:left}
 td.name{font-size:12.5px}
 td:nth-child(4),td:nth-child(6){text-align:left;font-family:var(--sans);font-size:13.5px}
 th:nth-child(4),th:nth-child(6){text-align:left}
-td:nth-child(7),td:nth-child(11),th.c10,th.c1{border-left:1px solid var(--rule)}
+td:nth-child(8),td:nth-child(12),th.c10,th.c1{border-left:1px solid var(--rule)}
 td.p1{color:var(--muted)}
 tr:last-child td{border-bottom:0}
 tr.covered td{color:var(--faint)}
@@ -158,12 +161,13 @@ tr.covered .bw{opacity:.55}
 <div class="key"><span><span class="sw"></span>Greyed: another mode no wider does as well everywhere, so the shifter rarely picks it</span><span><span class="tag" style="margin:0 6px 0 0">reply</span>role besides data</span></div>
 {DONE}
 <div class="wrap"><table>
-<thead><tr><th rowspan="2" class="name">Mode</th><th rowspan="2">bps</th><th rowspan="2">Hz</th><th rowspan="2">Code</th><th rowspan="2">FEC rate</th><th rowspan="2">Const.</th><th class="grp c10" colspan="4">10% failure, dB</th><th class="grp c1" colspan="4">{P1HEAD}</th></tr>
+<thead><tr><th rowspan="2" class="name">Mode</th><th rowspan="2">bps</th><th rowspan="2">Hz</th><th rowspan="2">Code</th><th rowspan="2">FEC rate</th><th rowspan="2">Const.</th><th rowspan="2">PAPR, dB</th><th class="grp c10" colspan="4">10% failure, dB</th><th class="grp c1" colspan="4">{P1HEAD}</th></tr>
 <tr><th class="c10">AWGN</th><th>MPG</th><th>MPP</th><th>MPD</th><th class="c1">AWGN</th><th>MPG</th><th>MPP</th><th>MPD</th></tr></thead>
 <tbody>
 {ROWS}
 </tbody></table></div>
 <div class="notes">
+<p>PAPR: envelope peak over average power of the measured burst (control and one data codeword, after the TX clipper and filter), median of 5; a peak-limited transmitter sends a mode this much below its PEP, so add it to a threshold to compare modes PEP-fair.</p>
 <p>SNR is average transmitted power over noise in 2500 Hz. MPG, MPP and MPD are ITU-R F.1487 channels: 0.1/0.5, 1/2 and 2/4 Hz Doppler / ms delay.</p>
 {NOTES}
 <p>Payload rate excludes CRC and burst overhead. QAM64 and QAM256 are learned (non-square) constellations. “—”: not measured, or never reaches the point on that channel.</p>
