@@ -32,6 +32,8 @@ from .frames import SEQ_MOD, WINDOW
 NO_PROGRESS_TURNS = 8
 RESYNCS_BEFORE_FAIL = 3
 REPEATS_BEFORE_SHRINK = 1
+MAX_ESCALATION = 4
+FLOOR_DECAY_TURNS = 4  # clean turns (no escalation) that lower the escalation floor by one
 # extensions a short control codeword (CPM) sheds first when it can't hold
 # everything, least useful first; none of them is state the peer must agree on
 OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
@@ -292,6 +294,12 @@ class Station:
     reply_lost: bool = False
     misses: int = 0  # consecutive timeouts
     reply_escalation: int = 0  # consecutive peer repeats/polls: my replies are lost
+    # the escalation the last recovery took: the next drop starts there
+    # instead of climbing the whole ladder again (at MPP -8 each drop took
+    # 4 polls until the session's clock ran out)
+    esc_floor: int = 0
+    _clean: int = 0  # clean turns since the floor last moved
+    _sent_esc: int = 0  # the escalation my last built burst went at
     no_progress: int = 0
     resyncs: int = 0
     resync_due: bool = False
@@ -345,7 +353,9 @@ class Station:
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
         # escalation: my own timeouts (master), or the peer telling me my
         # replies are lost (it repeats or polls: §6)
-        escalation = min(max(self.misses, self.reply_escalation), 4)
+        raw = max(self.misses, self.reply_escalation)
+        escalation = min(max(raw, self.esc_floor + raw - 1), MAX_ESCALATION) if raw else 0
+        self._sent_esc = escalation
         submode, max_cw = self.policy.choose(self, escalation)
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
@@ -528,7 +538,7 @@ class Station:
         if self.max_misses is not None and self.misses > self.max_misses:
             self._fail("link lost")
             return None
-        if allow_repeat and self.misses <= REPEATS_BEFORE_SHRINK and self.last_sent is not None:
+        if allow_repeat and not self.esc_floor and self.misses <= REPEATS_BEFORE_SHRINK and self.last_sent is not None:
             log.info("TX b%d repeat: timeout %d", self._latest % F.BURST_MOD, self.misses)
             self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent  # identical, same burst seq (§6 step 1)
@@ -574,6 +584,7 @@ class Station:
         except ValueError:
             return False
         core, ext = ctl.core, ctl.ext
+        escalated = bool(self.misses or self.reply_escalation)
         self.misses = 0
         was = (self.peer_recommend, self.peer_size_hint)
         self.peer_recommend, self.peer_size_hint = core.recommend, core.size_hint
@@ -585,6 +596,14 @@ class Station:
         repeat = seen and self._answered
         # a repeat or a poll means my last reply did not get through
         self.reply_escalation = self.reply_escalation + 1 if (repeat or core.ftype == F.PROBE) else 0
+        if not self.reply_escalation:
+            if escalated:
+                # recovered: my last burst got through at this escalation
+                self.esc_floor, self._clean = self._sent_esc, 0
+            elif self.esc_floor:
+                self._clean += 1
+                if self._clean >= FLOOR_DECAY_TURNS:
+                    self.esc_floor, self._clean = self.esc_floor - 1, 0
         progress = False
         base0, next0, cum0 = self.tx.base, self.tx.next, self.rx.cum
 
