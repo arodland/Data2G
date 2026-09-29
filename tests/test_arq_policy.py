@@ -156,3 +156,17 @@ def test_control_is_not_a_decoded_data_codeword():
     assert g.bias_burst["qpsk-r1/3"] > 0 and g.bias["qpsk-r1/3"] < -0.8
     g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only
     assert g.bias_burst["qpsk-r1/3"] < 0.5 and g.bias["qpsk-r1/3"] < -0.8
+
+
+def test_cpm_cap_reply_hold_and_link_lost_price():
+    from data2g.arq.modes import burst_seconds
+
+    for m in ("fsk32r62-r1/2", "fsk8r50-r1/2"):
+        s = G.MODES[m]
+        assert burst_seconds(s, G.slots_for(s, G.SIZE_S[-1])) <= G.CPM_MAX_S
+    g = G.GearShifter()
+    g.log = [("w48-qpsk-r1/2", 2, "ack-1f")]
+    quiet = g.reply_hold(SimpleNamespace(cap=2, misses=0, esc_floor=0), SimpleNamespace(submode="w48-qpsk-r1/2"))
+    assert quiet < 2.0  # a short reply asked for: about the old 1.5 s
+    robust = g.reply_hold(SimpleNamespace(cap=2, misses=1, esc_floor=4), SimpleNamespace(submode=G.ROBUST_CONNECT))
+    assert robust >= burst_seconds(G.MODES[G.ROBUST_CONNECT], 1)  # its 5 s answer is not polled over

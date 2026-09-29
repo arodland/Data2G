@@ -34,6 +34,17 @@ BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surp
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
+# ... but at most this long: a missed header loses the whole burst and no soft
+# bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
+# helped run out the 90 s link-lost clock)
+CPM_MAX_S = 24.0
+# a lost data burst spends the session's link-lost clock (session.LINK_LOST_S);
+# recovering takes polls of about T_RECOVER_S each, and a session that runs
+# out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
+LINK_LOST_S = 90.0
+T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
+LOST_LINK_COST_S = 300.0
+REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
 WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
 BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
@@ -95,7 +106,7 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     its header can announce. CPM size classes are CPM_SIZE_SCALE times
     longer (a CPM data codeword is 3-10 s)."""
     if is_cpm(spec):
-        seconds *= CPM_SIZE_SCALE
+        seconds = min(seconds * CPM_SIZE_SCALE, CPM_MAX_S)
     n = 1
     while n < 64 and burst_seconds(spec, n + 1) <= seconds:
         n += 1
@@ -179,6 +190,20 @@ class GearShifter:
         (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
         loss-study sessions there never connected in qpsk-r1/5)."""
         return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
+
+    def reply_hold(self, station, burst) -> float:
+        """Seconds past t_turn to wait for a reply to `burst` before timing
+        out: the longest control-only reply the peer may send (the reply
+        mode I asked for; its ladder's if `burst` was a poll; the robust
+        mode if `burst` was in it or my floor is there). At MPP -8 the
+        master missed reply headers and polled into the replies 2 s in
+        (8 times in 717 s). A data reply (up to CPM_MAX_S) is not covered."""
+        modes = [self.log[-1][2] if self.log else FALLBACK[station.cap]]
+        if station.misses:
+            modes += [FALLBACK[station.cap], ALT_POLL]
+        if burst.submode == ROBUST_CONNECT or getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION:
+            modes.append(ROBUST_CONNECT)
+        return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
 
     def airtime(self, m, n_cw, dup=False):
         """`dup`: a CPM burst's control twice (the second copy is a short
@@ -303,6 +328,10 @@ class GearShifter:
                 dup = is_cpm(s) and ok_ctl < DUP_BELOW
                 tb = burst_seconds(s, n + dup, dup)
                 t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S
+                # lost, the burst leaves (LINK_LOST_S - tb) to recover in:
+                # each try a poll and its reply, both at about my reply's P
+                tries = max(0, int((LINK_LOST_S - tb - TIMEOUT_S) // T_RECOVER_S))
+                t += (1 - ok_ctl) * (1 - reply_p ** 2) ** tries * LOST_LINK_COST_S
                 if chat:
                     # every burst the message takes, each retried until it all arrives
                     ok_all = max(ok_ctl * pn ** (n - c), 1e-3)

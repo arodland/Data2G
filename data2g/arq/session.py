@@ -156,7 +156,12 @@ class Session:
     def on_tx_end(self, burst: L.TxBurst, now: float):
         """Arm the reply timer (only the caller retries, §6)."""
         if self._master and self.state in (CONNECTING, CONNECTED, DISCONNECTING):
-            self._deadline = now + self.t_turn + REPLY_START_S
+            wait = REPLY_START_S
+            hold = getattr(self.policy, "reply_hold", None)
+            if hold and self.state == CONNECTED and self.station is not None:
+                # a reply whose header I miss is still on air: don't poll over it
+                wait = max(wait, hold(self.station, burst))
+            self._deadline = now + self.t_turn + wait
 
     def on_header(self, submode: str, n_cw: int, now: float):
         """A burst started arriving: wait for its end instead of timing out."""
