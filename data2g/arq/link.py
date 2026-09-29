@@ -552,7 +552,7 @@ class Station:
         outcome = getattr(self.policy, "outcome", None)  # first transmissions only (resends gain from IR)
         if first is None:
             if outcome:
-                outcome(rx.submode, 0, 1)
+                outcome(rx.submode, 0, 0, usable=False)
             return False
         try:
             core = F.Core.unpack(first)
@@ -652,7 +652,7 @@ class Station:
                     self._fail(f"protocol: {e}")
                     return True
         if outcome:
-            outcome(rx.submode, n_ok + core.n_ctl, n_new + core.n_ctl, core.n_ctl)
+            outcome(rx.submode, n_ok, n_new, usable=True)
 
         if log.isEnabledFor(logging.INFO):
             kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")

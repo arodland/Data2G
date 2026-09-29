@@ -307,8 +307,9 @@ class MinSumDecoder:
         full[:, self.filler] = self.BIG
         return full
 
-    def decode(self, llr_sent, iters: int = 30, alpha=None):
-        """-> (info bit decisions (B, k) uint8, converged (B,) bool)."""
+    def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False):
+        """-> (info bit decisions (B, k) uint8, converged (B,) bool), and
+        with `posterior` the a-posteriori LLRs of the sent bits (B, n)."""
         t = self.torch
         ch = self.channel_llrs(llr_sent.clamp(-CH_CLAMP, CH_CLAMP))
         b = ch.shape[0]
@@ -336,10 +337,13 @@ class MinSumDecoder:
             c2v = t.zeros(b, self.n_edges + 1, device=self.device, dtype=ch.dtype)
             c2v.scatter_(1, self.chk.reshape(1, -1).expand(b, -1), out.reshape(b, -1))
             c2v = c2v[:, :-1]
-            hard = (ch.index_add(1, self.var, c2v) < 0).to(t.uint8)
+            tot = ch.index_add(1, self.var, c2v)
+            hard = (tot < 0).to(t.uint8)
             ok = self.syndrome(hard)
             if bool(ok.all()):
                 break
+        if posterior:
+            return hard[:, : self.code.k], ok, tot[:, self.sent]
         return hard[:, : self.code.k], ok
 
     def syndrome(self, hard):

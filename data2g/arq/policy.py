@@ -28,12 +28,11 @@ TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
-# The codeword correction from data codewords only (control, counted in by
-# the link, reads as a decoded codeword) and bounded at 6: without
-# LOGIT_OFFSETS v10 sent w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13%
-# of its codewords decoding, for a whole session; at a predicted 0.99 a -3
-# bound still leaves 0.83. On since v12; DATA2G_BIAS_FIX=0 (studies) is the
-# old correction.
+# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
+# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
+# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
+# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
+# On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
 if BIAS_FIX:
     BIAS_MAX = 6.0
@@ -194,25 +193,25 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
 
-    def outcome(self, submode: str, decoded: int, sent: int, ctl: int = 0):
+    def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
         mode: one burst tells little (a fade takes a whole burst), so the
         bias moves a step per burst. It learns what one burst's features
         cannot tell (held-out: slow fading over-predicted by 0.1-0.2, a
-        steady channel under-predicted as much). Kept per submode."""
+        steady channel under-predicted as much). Kept per submode.
+        `usable`: its control decoded, with decoded/sent its data codewords
+        alone (counted with them, the control made a 0/7 burst score 1/8);
+        None (KISS: no control): any codeword decoded."""
         p = self.predicted.get(submode)
-        if p is None or sent == 0:
+        if p is None or (sent == 0 and usable is None):
             return
+        if usable is None:
+            usable = decoded > 0
         pb, p = p
-        # the burst usable (its control decoded) or not; then its codewords
-        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * ((decoded > 0) - pb),
+        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * (usable - pb),
                                                  -BIAS_MAX, BIAS_MAX))
-        if decoded == 0:
+        if not usable or sent == 0:
             return
-        if BIAS_FIX and ctl:
-            decoded, sent = decoded - ctl, sent - ctl  # `ctl` control codewords counted in both, all decoded
-            if sent <= 0:
-                return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))

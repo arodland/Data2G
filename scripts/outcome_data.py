@@ -28,6 +28,7 @@ threads.limit(1)
 import argparse
 import csv
 import sys
+from types import SimpleNamespace
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -47,6 +48,12 @@ import phy_session as PS  # noqa: E402
 
 CANDIDATES = 4
 REPLY_MODES = {"ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f", "qpsk-r1/5", "n10-qpsk-r1/3"}
+# --sustained: a supplement for sustained low SNR (a trial at MPP -6 dB PEP5
+# found the model flat there: qpsk-r1/5 x9 predicted 0.71 per codeword sent,
+# 0.26 actual). No drift, the measured burst often a reply (fragile: synced
+# only in an up-fade, as a receiver in such a session measures), candidates
+# at the long size classes the shifter sends at low SNR.
+SUSTAINED = False
 KINDS = (("awgn", 0.15), ("mpg", 0.2), ("mpp", 0.2), ("mpd", 0.15), ("random", 0.3))
 THRESHOLDS = I.thresholds()
 # CPM modes' 1% end-to-end points (the CPM prototype's study, 1% v2), for
@@ -96,6 +103,16 @@ def receive(y: np.ndarray, name: str) -> dict | None:
     return cpm.receive(y, lock) if lock is not None else None
 
 
+def model_pick(cap, prev, prev_name, t_prev, cur, cur_name, t_cur) -> str:
+    """The data mode the installed shifter recommends from these measurements."""
+    sh = G.GearShifter()
+    if prev is not None:
+        sh.observe(prev, prev_name, t_prev)
+    sh.observe(cur, cur_name, t_cur)
+    station = SimpleNamespace(cap=cap, rx=SimpleNamespace(buf=[]), chat=False, peer_chat=False, peer_queued=0)
+    return G.decode(sh.recommend(station)[0])
+
+
 def sample(seed):
     rng = np.random.default_rng(seed)
     kind = str(rng.choice([k for k, _ in KINDS], p=[w for _, w in KINDS]))
@@ -109,6 +126,8 @@ def sample(seed):
     u = rng.random()
     snr0 = float(rng.uniform(-14, -8) if u < 0.005 else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
     drift = float(rng.normal(0, 1.5))  # dB per 30 s
+    if SUSTAINED:
+        snr0, drift = float(rng.uniform(-10, 4)), 0.0
     cap = 0 if rng.random() < 0.25 else 2
     allowed = [s.name for s in G.allowed(cap)]
     ch = PS.ContinuousChannel(fam, snr0, seed, 120.0, doppler=doppler, delay_ms=delay)
@@ -126,7 +145,7 @@ def sample(seed):
         if rng.random() < 0.01:  # any mode at all, rarely (as above)
             name = str(rng.choice(allowed))
             n = n_for(name, float(rng.choice(G.SIZE_S)))
-        elif rng.random() < 0.35:
+        elif rng.random() < (0.6 if SUSTAINED else 0.35):
             name = str(rng.choice([m for m in allowed if m in REPLY_MODES]))
             n = int(rng.integers(1, 3))
         else:
@@ -158,6 +177,10 @@ def sample(seed):
     cpm_ok = [m for m in allowed if m in cpm.SPECS]
     if cpm_ok and rng.random() < 0.3:  # CPM candidates oversampled (a new family: few rows otherwise)
         cands.append(str(rng.choice(cpm_ok)))
+    if SUSTAINED:  # the installed model's own pick, so its mistakes are in the data
+        pick = model_pick(cap, prev, prev_name, t_prev_end, cur, cur_name, t_cur_end)
+        if pick not in cands:
+            cands.insert(1, pick)
     while len(cands) < CANDIDATES:
         cands.append(str(rng.choice(allowed)))
     base = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2),
@@ -168,7 +191,8 @@ def sample(seed):
                     **{f"prev_{k}": v for k, v in prev.items()})
     rows = []
     for j, name in enumerate(cands):
-        n = int(rng.integers(1, 3)) if j == 0 else max(2, n_for(name, float(rng.choice(G.SIZE_S))))
+        sizes = G.SIZE_S[2:] if SUSTAINED else G.SIZE_S
+        n = int(rng.integers(1, 3)) if j == 0 else max(2, n_for(name, float(rng.choice(sizes))))
         b = burst(name, n, rng)
         r = hear(b, t_next)
         right = r is not None and r["spec"].name == name and r["n_cw"] == n
@@ -187,12 +211,15 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", required=True)
     ap.add_argument("--first", type=int, default=0, help="first sample number (another dataset's seeds: past its end)")
+    ap.add_argument("--sustained", action="store_true", help="the sustained-low-SNR supplement (see SUSTAINED)")
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
+    global SUSTAINED
+    SUSTAINED = a.sustained
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
               + ["prev_band", "prev_age"] + [f"prev_{k}" for k in meas]
