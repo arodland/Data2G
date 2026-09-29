@@ -177,20 +177,24 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
 
-    def outcome(self, submode: str, decoded: int, sent: int):
+    def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
         mode: one burst tells little (a fade takes a whole burst), so the
         bias moves a step per burst. It learns what one burst's features
         cannot tell (held-out: slow fading over-predicted by 0.1-0.2, a
-        steady channel under-predicted as much). Kept per submode."""
+        steady channel under-predicted as much). Kept per submode.
+        `usable`: its control decoded, with decoded/sent its data codewords
+        alone (counted with them, the control made a 0/7 burst score 1/8);
+        None (KISS: no control): any codeword decoded."""
         p = self.predicted.get(submode)
-        if p is None or sent == 0:
+        if p is None or (sent == 0 and usable is None):
             return
+        if usable is None:
+            usable = decoded > 0
         pb, p = p
-        # the burst usable (its control decoded) or not; then its codewords
-        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * ((decoded > 0) - pb),
+        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * (usable - pb),
                                                  -BIAS_MAX, BIAS_MAX))
-        if decoded == 0:
+        if not usable or sent == 0:
             return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%

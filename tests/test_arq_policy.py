@@ -139,3 +139,14 @@ def test_cpm_airtime_counts_a_duplicated_control_as_control():
     ctl, data = [Slot(ctl_mask(0, 0), 0, b"")], [Slot(data_mask(0, i), 0, b"") for i in range(8)]
     assert dup_ctl(TxBurst("fsk32r62-r1/2", ctl + [Slot(ctl_mask(0, 0), 1, b"")] + data, 0))
     assert not dup_ctl(TxBurst("fsk32r62-r1/2", ctl + data, 0))
+
+
+def test_control_is_not_a_decoded_data_codeword():
+    """A usable burst whose 7 data codewords all failed: burst bias up,
+    codeword bias down (counting the control, it scored 1/8)."""
+    g = G.GearShifter()
+    g.predicted = {"qpsk-r1/3": (0.5, 0.9)}
+    g.outcome("qpsk-r1/3", 0, 7, usable=True)
+    assert g.bias_burst["qpsk-r1/3"] > 0 and g.bias["qpsk-r1/3"] < -0.8
+    g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only
+    assert g.bias_burst["qpsk-r1/3"] < 0.5 and g.bias["qpsk-r1/3"] < -0.8
