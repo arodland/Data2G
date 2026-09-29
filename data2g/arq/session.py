@@ -188,7 +188,12 @@ class Session:
         """Arm the reply timer (only the caller retries, §6, and a callee's
         DISC), or the callee's wake."""
         if (self._master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
-            self._deadline = now + self.t_turn + REPLY_START_S
+            wait = REPLY_START_S
+            hold = getattr(self.policy, "reply_hold", None)
+            if hold and self.state == CONNECTED and self.station is not None:
+                # a reply whose header I miss is still on air: don't poll over it
+                wait = max(wait, hold(self.station, burst))
+            self._deadline = now + self.t_turn + wait
         elif not self._master:
             self._quiet_from = now
             self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
