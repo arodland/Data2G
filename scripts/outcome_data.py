@@ -21,8 +21,9 @@ P(codeword ok | burst ok) per submode from these.
 
 import os
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 
 import argparse
 import csv
@@ -186,7 +187,12 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", required=True)
     ap.add_argument("--first", type=int, default=0, help="first sample number (another dataset's seeds: past its end)")
+    ap.add_argument("--average-snr", action="store_true",
+                    help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
+    if PS.PEP_REF_DB is None and not a.average_snr:
+        ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
+                 "transmits) or pass --average-snr")
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
               + ["prev_band", "prev_age"] + [f"prev_{k}" for k in meas]
