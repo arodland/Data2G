@@ -14,6 +14,7 @@ without the outcome model; it is gone, as the outcome model always ships.)
 """
 
 import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -106,7 +107,10 @@ class OutcomeMlp:
 
 
 @lru_cache(maxsize=None)
-def outcome_model(path: str = str(DATA / "outcome_predictor.npz")) -> OutcomeMlp | None:
+def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA / "outcome_predictor.npz")
+                  ) -> OutcomeMlp | None:
+    """The installed model, or DATA2G_OUTCOME_MODEL's file (studies: two
+    models side by side, paired, without swapping the installed one)."""
     p = Path(path)
     if not p.exists():
         return None
@@ -166,7 +170,7 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     model = outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
-    if LOGIT_OFFSETS:
+    if LOGIT_OFFSETS and not os.environ.get("DATA2G_OUTCOME_MODEL"):  # the installed model's, not another's
         z = z.copy()
         for m, off in LOGIT_OFFSETS.items():
             if m in idx:
