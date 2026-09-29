@@ -139,3 +139,30 @@ def test_cpm_airtime_counts_a_duplicated_control_as_control():
     ctl, data = [Slot(ctl_mask(0, 0), 0, b"")], [Slot(data_mask(0, i), 0, b"") for i in range(8)]
     assert dup_ctl(TxBurst("fsk32r62-r1/2", ctl + [Slot(ctl_mask(0, 0), 1, b"")] + data, 0))
     assert not dup_ctl(TxBurst("fsk32r62-r1/2", ctl + data, 0))
+
+
+def test_control_is_not_a_decoded_data_codeword():
+    """A usable burst whose 7 data codewords all failed: burst bias up,
+    codeword bias down (counting the control, it scored 1/8)."""
+    g = G.GearShifter()
+    g.predicted = {"qpsk-r1/3": (0.5, 0.9)}
+    g.outcome("qpsk-r1/3", 0, 7, usable=True)
+    assert g.bias_burst["qpsk-r1/3"] > 0 and g.bias["qpsk-r1/3"] < -0.8
+    g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only
+    assert g.bias_burst["qpsk-r1/3"] < 0.5 and g.bias["qpsk-r1/3"] < -0.8
+
+
+def test_family_cap_holds_higher_rates_down():
+    """qpsk-r1/5 failing (bias at the bound) keeps the rest of its family
+    from being recommended in its place (an HFSimulator MPP trial picked a
+    fresh qpsk-r1/3 there, which then decoded 0/7 every burst). At that
+    trial's measured SNR only: higher up, a capped qpsk-r1/3 can still win
+    on rate, as it should."""
+    assert G.LOWER_RATE["qpsk-r1/3"] == ("qpsk-r1/5",) and G.LOWER_RATE["qpsk-r1/5"] == ()
+    assert G.LOWER_RATE["fsk32r62-r1/2"] == ("fsk32r62-r1/3",)
+    family = {"qpsk-r1/3", "qpsk-r1/2", "qpsk-r3/4"}
+    for snr in (-3.0, -2.0, -1.0, 0.0):
+        g = G.GearShifter()
+        g.observe(measured(snr, 1.0), "ack-4f", 0.0)
+        g.bias["qpsk-r1/5"] = -G.BIAS_MAX
+        assert G.decode(g.recommend(station(2))[0]) not in family, snr
