@@ -170,3 +170,16 @@ def test_cpm_cap_reply_hold_and_link_lost_price():
     assert quiet < 2.0  # a short reply asked for: about the old 1.5 s
     robust = g.reply_hold(SimpleNamespace(cap=2, misses=1, esc_floor=4), SimpleNamespace(submode=G.ROBUST_CONNECT))
     assert robust >= burst_seconds(G.MODES[G.ROBUST_CONNECT], 1)  # its 5 s answer is not polled over
+
+
+def test_robust_floor_sends_control_only_bursts_robust():
+    g = G.GearShifter()
+    st = station(2)
+    st.peer_reply_recommend = G.encode("n4-ack-8f")
+    st.tx = SimpleNamespace(pending=lambda: False, base=0)
+    assert g.choose(st, 0)[0] == "n4-ack-8f"
+    st.esc_floor = G.ROBUST_ESCALATION
+    assert g.choose(st, 0) == (G.ROBUST_CONNECT, 1)
+    st.tx = SimpleNamespace(pending=lambda: True, base=0)
+    st.peer_recommend = G.encode("fsk32r62-r1/2")
+    assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation

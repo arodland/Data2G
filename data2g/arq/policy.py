@@ -148,7 +148,11 @@ class GearShifter:
         # escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, or
         # answering the peer's robust poll: control only in the connect
         # retry's mode (ack-4f polls went unanswered until the link was lost)
-        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT):
+        # the floor there too (the last drop took it): my control-only bursts
+        # as well, not only polls (MPP -8: the peer heard 4 of my 11
+        # n4-ack-8f acks and 13 of 17 robust polls; its data waited on them)
+        robust_floor = getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION and not station.tx.pending()
+        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT) or robust_floor:
             return ROBUST_CONNECT, 1
         if escalation == 2:
             return ALT_POLL, 2
