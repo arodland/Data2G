@@ -75,9 +75,10 @@ def test_shifter_respects_cap_and_falls_back():
     st.peer_recommend, st.peer_size_hint = rec, hint
     mode, n = g.choose(st, 0)
     assert mode == name and n >= 1
-    assert g.choose(st, 1)[0] == G.FALLBACK[0]  # escalation: robust
-    assert g.choose(st, 2)[0] == G.FALLBACK[0]  # the first poll
-    assert g.choose(st, 3) == (G.ROBUST_CONNECT, 1)  # a poll unanswered: control only in the robust mode
+    assert g.choose(st, 1)[0] == G.FALLBACK[0]  # escalation, no reply mode heard: the fallback
+    st.peer_reply_recommend = G.encode("n10-qpsk-r1/3")
+    assert [g.choose(st, e)[0] for e in (1, 2, 3)] == ["n10-qpsk-r1/3", G.ALT_POLL, "n10-qpsk-r1/3"]
+    assert g.choose(st, 4) == (G.ROBUST_CONNECT, 1)  # control only in the robust mode
     g.observe(measured(-5, 0.1, "n10"), G.ROBUST_CONNECT, 1.0)
     assert g.choose(st, 1) == (G.ROBUST_CONNECT, 1)  # a robust poll is answered in its mode
     assert g.choose(st, 0)[0] == name  # not escalated: the recommendation
