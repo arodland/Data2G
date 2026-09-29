@@ -244,3 +244,52 @@ def test_malformed_session_frame_is_dropped(bad):
         body = bytes([F.CONNECT_ACK]) + nonce + (b"" if bad == "short ack" else b"\x07\x0a")
         a.on_rx(_frame(body, 1), 1.0)
         assert a.state == S.CONNECTING and a.station is None
+
+
+def test_compact_connect_over_the_cpm_modem():
+    """ROBUST_CONNECT is CPM: its one 20 B control codeword can't hold a
+    CONNECT's Control (28 B), so the retry goes compact under its own mask,
+    and the callee, hearing it through the real modem, connects and answers
+    in it."""
+    import numpy as np
+
+    from data2g import cpm
+    from data2g.arq import frames as F
+    from data2g.arq import phy as PHY
+    from data2g.arq import link as L
+    from data2g.arq import policy as G
+    from data2g.arq.modes import MODES as REAL
+
+    a = S.Session("VE3/W1AW-1", G.GearShifter(), rng=random.Random(1), t_turn=2.5)
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 0, 0.0)
+    a.on_tx_end(a.poll(0.0), 2.0)  # lost
+    t, retry = 2.0, None
+    while retry is None and t < 60:
+        t = max(t + 0.1, a.next_event() or t)
+        retry = a.poll(t)
+    assert retry.submode == G.ROBUST_CONNECT and [s.mask_id for s in retry.slots] == [L.COMPACT_CONNECT]
+    body = F.unpack_connect(retry.slots[0].payload)
+    assert F.unpack_call(body[2:10]) == "VE3/W1AW-1" and body[20:] == bytes([0, 25])
+
+    spec = REAL[retry.submode]
+    y = np.concatenate([np.zeros(2000), PHY.tx_audio(retry), np.zeros(2000)])
+    y += np.random.default_rng(1).normal(0, 0.05, len(y))
+    rx = PHY.ModemRx(cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y)), {})
+    assert rx.decode(0, L.ctl_mask(0, 0), 0, None) is None  # the plain connect mask misses it
+    b.on_rx(rx, t + 6.0)
+    ack = b.poll(t + 6.0)
+    assert b.state == S.CONNECTED and b.peer == "VE3/W1AW-1" and b.cap == 0
+    assert ack.submode == G.ROBUST_CONNECT and len(ack.slots) == 1
+
+
+def test_compact_connect_round_trip():
+    from data2g.arq import frames as F
+
+    body = (bytes([F.CONNECT, S.VERSION]) + F.pack_call("W1AW") + F.pack_call("K2XYZ/P")
+            + (0xBEEF).to_bytes(2, "big") + bytes([2, 63]))
+    p = F.pack_connect(body)
+    assert len(p) == F.COMPACT_BYTES and F.unpack_connect(p) == body
+    with pytest.raises(ValueError):
+        F.pack_connect(body[:-1] + bytes([64]))  # t_turn over 6.3 s

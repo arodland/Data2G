@@ -26,6 +26,7 @@ from . import link as L
 T_SESS = 10  # extension type carrying a session frame
 VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
 CONNECT_TRIES = 5
+CONNECT_CTL_BYTES = 28  # a CONNECT's Control: core 4, T_SESS header 2, body 22
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
@@ -356,11 +357,22 @@ class Session:
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
         mode = mode or self.policy.connect_mode(self.cap, self._tries)
-        ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(self.policy.payload_bytes(mode))
-        slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
+        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
+        if body[0] == F.CONNECT and self._compact(mode):
+            slots = [L.Slot(L.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
+        else:
+            ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(cpb)
+            slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
         return L.TxBurst(mode, slots, 0)
+
+    def _compact(self, mode: str) -> bool:
+        """A CONNECT in `mode` goes compact (frames.pack_connect): in its
+        Control envelope it needs more codewords than the mode's control
+        may have (CPM: one of 20 B)."""
+        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
+        return -(-CONNECT_CTL_BYTES // cpb) > getattr(self.policy, "max_ctl", lambda m: 4)(mode)
 
     def _connect_burst(self) -> L.TxBurst:
         body = (bytes([F.CONNECT, VERSION]) + F.pack_call(self.call) + F.pack_call(self.peer)
@@ -387,6 +399,10 @@ class Session:
             tries.append((0, 0))
         elif self.state == CONNECTING:
             tries.append((1, 0))
+        if (0, 0) in tries and self._compact(rx.submode):
+            p = rx.decode(0, L.COMPACT_CONNECT, 0, None)
+            if p is not None:
+                return {"key": 0, "body": F.unpack_connect(p[:F.COMPACT_BYTES]), "mode": rx.submode}
         for direction, key in tries:
             first = rx.decode(0, L.ctl_mask(direction, 0, key), 0, None)
             if first is None:

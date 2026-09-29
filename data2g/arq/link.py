@@ -61,6 +61,9 @@ def ctl_mask(direction: int, i: int, key: int = 0) -> tuple:
     return (key, direction, SEQ_MOD + i)
 
 
+COMPACT_CONNECT = ctl_mask(0, 4)  # a compact CONNECT's mask (frames.pack_connect); ctl_mask's i is 0-3
+
+
 def dup_ctl(burst) -> bool:
     """Its control sent twice (ARQ_DUP): a control slot at RV 1."""
     return any(s.rv for s in burst.slots if s.mask_id[2] >= SEQ_MOD)

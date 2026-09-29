@@ -48,7 +48,7 @@ BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
 # poll says little about the wide modes it recommends (2026-09-25)
 FALLBACK = {0: "n10-ack-4f", 1: "ack-4f", 2: "ack-4f"}
 CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payload, one control codeword
-ROBUST_CONNECT = "n4-qpsk-r1/3"  # session-frame retries: 38 B, 200 Hz, within every cap
+ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 
 
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
