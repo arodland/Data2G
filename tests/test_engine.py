@@ -107,7 +107,7 @@ def test_a_mode_the_link_mangles_does_not_stall_the_session(monkeypatch):
 
     def mangled(burst):
         x = tx(burst)
-        if SUBMODES[burst.submode].constellation[:3] in ("c64", "c25"):
+        if burst.submode in SUBMODES and SUBMODES[burst.submode].constellation[:3] in ("c64", "c25"):
             x = np.clip(x, -0.3, 0.3) / 0.3
         return x
     monkeypatch.setattr(PHY, "tx_audio", mangled)
