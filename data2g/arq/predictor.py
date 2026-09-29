@@ -173,6 +173,12 @@ def outcome_knows(submode: str) -> bool:
 # 0.80 vs 0.36); the offsets are at most 1 logit, since they apply everywhere.
 LOGIT_OFFSETS = {"16qam-r1/3": -1.0, "w48-16qam-r1/2": -1.0, "n10-16qam-r3/4": -1.0, "n10-qpsk-r3/4": -1.0,
                  "w48-qpsk-r1/3": -0.7, "w48-qpsk-r2/3": -0.7}
+# DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
+# whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
+# installed model only.
+_ENV_OFFSETS = os.environ.get("DATA2G_LOGIT_OFFSETS")
+if _ENV_OFFSETS is not None:
+    LOGIT_OFFSETS = {m: float(v) for m, v in (e.rsplit(":", 1) for e in _ENV_OFFSETS.split(",") if e)}
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
@@ -182,7 +188,7 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     model = outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
-    if LOGIT_OFFSETS and not os.environ.get("DATA2G_OUTCOME_MODEL"):  # the installed model's, not another's
+    if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()
         for m, off in LOGIT_OFFSETS.items():
             if m in idx:
