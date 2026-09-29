@@ -166,13 +166,13 @@ def outcome_knows(submode: str) -> bool:
     return m is not None and submode in m.modes
 
 
-# Logit offsets on P(burst usable), per submode: where the installed model
-# is overconfident the same way across SNRs (scripts/calibration.py on
-# on-policy session rows, 2026-09-28). Its error concentrates on slow fading
-# (MPG ~0 dB: 16qam-r1/3 predicted 0.71, 0.46 actual; ~+8 dB: w48-16qam-r1/2
-# 0.80 vs 0.36); the offsets are at most 1 logit, since they apply everywhere.
-LOGIT_OFFSETS = {"16qam-r1/3": -1.0, "w48-16qam-r1/2": -1.0, "n10-16qam-r3/4": -1.0, "n10-qpsk-r3/4": -1.0,
-                 "w48-qpsk-r1/3": -0.7, "w48-qpsk-r2/3": -0.7}
+# Logit offsets on P(burst usable), per submode, for the installed model.
+# v7 needed six (2026-09-28), but they were a patch for a coverage loop:
+# they kept modes out of the sessions later models trained on, so those
+# never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
+# picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
+# nothing elsewhere (README, outcome model v12).
+LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0}
 # DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
 # whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
 # installed model only.

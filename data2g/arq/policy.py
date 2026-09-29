@@ -28,12 +28,13 @@ TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
-# DATA2G_BIAS_FIX=1 (studies): the codeword correction from data codewords
-# only (control, counted in by the link, reads as a decoded codeword) and
-# bounded at 6: without LOGIT_OFFSETS v10 sent w48-qpsk-r1/3 in 78% of MPP
-# 0 dB data bursts, 13% of its codewords decoding, for a whole session; at
-# a predicted 0.99 a -3 bound still leaves 0.83
-BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX") == "1"
+# The codeword correction from data codewords only (control, counted in by
+# the link, reads as a decoded codeword) and bounded at 6: without
+# LOGIT_OFFSETS v10 sent w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13%
+# of its codewords decoding, for a whole session; at a predicted 0.99 a -3
+# bound still leaves 0.83. On since v12; DATA2G_BIAS_FIX=0 (studies) is the
+# old correction.
+BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
 if BIAS_FIX:
     BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
