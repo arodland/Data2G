@@ -14,10 +14,9 @@ could cost first-transmission decodes.
     python scripts/llr_clamp_study.py --jobs 4 --out runs/llr_clamp_study.csv
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse  # noqa: E402
 import csv  # noqa: E402

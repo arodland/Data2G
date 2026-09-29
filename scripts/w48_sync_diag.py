@@ -5,10 +5,9 @@ scripts/sync_floor.py measures with.
     uv run python scripts/w48_sync_diag.py --snr -6 -5 -4
 """
 
-import os
+from data2g import threads  # noqa: E402
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.limit(1)
 
 import argparse
 import sys

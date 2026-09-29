@@ -16,8 +16,9 @@ candidate submode's clip noise and the receiver's estimation loss).
 
 import os
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 
 import argparse
 import csv

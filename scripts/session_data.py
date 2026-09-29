@@ -18,8 +18,9 @@ never duplicated (the model's P(usable) is without it).
 
 import os
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 
 import argparse
 import csv
@@ -131,7 +132,12 @@ def main():
     ap.add_argument("--first", type=int, default=300000)
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--average-snr", action="store_true",
+                    help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
+    if PS.PEP_REF_DB is None and not a.average_snr:
+        ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
+                 "transmits) or pass --average-snr")
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]

@@ -10,13 +10,12 @@ uniform +-50 Hz, 10 ppm clock error. Preamble threshold is the value
 config.PREAMBLE_THRESHOLDS' calibrated value for the repeat count.
 """
 
-import os
-
 # One BLAS/OpenMP thread per process, set before numpy loads so forked
 # workers inherit it: with a worker per core, numpy's default of a thread
 # per core each put the load average past 300 on 24 cores (2026-09-23).
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+from data2g import threads  # noqa: E402
+
+threads.limit(1)
 
 import argparse
 from collections import Counter

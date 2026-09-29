@@ -14,12 +14,11 @@ and prints both on the same held-out seeds at the end. Points are
 renormalized to unit power each step (the modem's contract).
 """
 
-import os
-
 # Two BLAS/OpenMP threads, torch capped at 4, so a long GPU run leaves the CPU
 # to the machine's owner (numpy and torch default to a thread per core).
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "2")
+from data2g import threads  # noqa: E402
+
+threads.limit(2)
 
 import argparse
 import time
