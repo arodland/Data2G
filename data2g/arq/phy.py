@@ -15,6 +15,7 @@ from .. import codes, constellation, cpm, equalizer, modem
 from ..config import BANDS, NSYM, RS, SNR_REF_BW_HZ, SUBMODES, SYMS_PER_FRAME
 from ..waveform import ofdm
 from . import predictor as P
+from .frames import SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
 
 # DATA2G_DD (default 1; 0 turns it off): decision-directed re-estimation. When a slot
@@ -27,10 +28,11 @@ DD_ITERS = 2
 
 def mask_value(mask_id: tuple) -> int:
     """A slot's CRC mask from (session key, direction, seq or 128 + control
-    index). Key 0 (connect frames, before a session) is mask 0."""
+    index). Key 0 (connect frames, before a session) is mask 0, except a
+    compact CONNECT's (link.COMPACT_CONNECT)."""
     key, direction, s = mask_id
     if key == 0:
-        return 0
+        return 0xC0C0C0 if s == SEQ_MOD + 4 else 0
     return zlib.crc32(bytes([key >> 8, key & 255, direction, s])) or 1
 
 
