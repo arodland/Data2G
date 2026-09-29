@@ -652,7 +652,7 @@ class Station:
                     self._fail(f"protocol: {e}")
                     return True
         if outcome:
-            outcome(rx.submode, n_ok + core.n_ctl, n_new + core.n_ctl)
+            outcome(rx.submode, n_ok + core.n_ctl, n_new + core.n_ctl, core.n_ctl)
 
         if log.isEnabledFor(logging.INFO):
             kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")

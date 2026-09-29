@@ -128,6 +128,15 @@ def _mlp(d: dict) -> OutcomeMlp:
     return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)], **extra)
 
 
+# DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its
+# members' standard deviation, a lower confidence bound. The shifter picks
+# the best of many noisy predictions, so its pick is the one most likely
+# over-predicted (on explored rows v10 is near calibrated; on its own picks
+# it is not); this discounts where the members disagree, in any channel,
+# instead of per-mode constants (LOGIT_OFFSETS).
+LCB = float(os.environ.get("DATA2G_OUTCOME_LCB") or 0)
+
+
 @dataclass
 class OutcomeEnsemble:
     """Bootstrap members; their probabilities averaged (returned as logits).
@@ -144,9 +153,12 @@ class OutcomeEnsemble:
         return self.members[0].bands
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
-        p = np.mean([1 / (1 + np.exp(-np.clip(m(x), -40, 40))) for m in self.members], axis=0)
-        p = np.clip(p, 1e-9, 1 - 1e-9)
-        return np.log(p / (1 - p))
+        z = np.array([np.clip(m(x), -40, 40) for m in self.members])
+        p = np.clip(np.mean(1 / (1 + np.exp(-z)), axis=0), 1e-9, 1 - 1e-9)
+        out = np.log(p / (1 - p))
+        if LCB:
+            out = out - LCB * np.std(z, axis=0)
+        return out
 
 
 def outcome_knows(submode: str) -> bool:

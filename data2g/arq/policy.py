@@ -28,6 +28,14 @@ TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
+# DATA2G_BIAS_FIX=1 (studies): the codeword correction from data codewords
+# only (control, counted in by the link, reads as a decoded codeword) and
+# bounded at 6: without LOGIT_OFFSETS v10 sent w48-qpsk-r1/3 in 78% of MPP
+# 0 dB data bursts, 13% of its codewords decoding, for a whole session; at
+# a predicted 0.99 a -3 bound still leaves 0.83
+BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX") == "1"
+if BIAS_FIX:
+    BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
@@ -185,7 +193,7 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
 
-    def outcome(self, submode: str, decoded: int, sent: int):
+    def outcome(self, submode: str, decoded: int, sent: int, ctl: int = 0):
         """Codeword outcomes of a peer burst against what I predicted for its
         mode: one burst tells little (a fade takes a whole burst), so the
         bias moves a step per burst. It learns what one burst's features
@@ -200,6 +208,10 @@ class GearShifter:
                                                  -BIAS_MAX, BIAS_MAX))
         if decoded == 0:
             return
+        if BIAS_FIX and ctl:
+            decoded, sent = decoded - ctl, sent - ctl  # `ctl` control codewords counted in both, all decoded
+            if sent <= 0:
+                return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
