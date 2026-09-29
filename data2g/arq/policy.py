@@ -48,6 +48,7 @@ BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
 # poll says little about the wide modes it recommends (2026-09-25)
 FALLBACK = {0: "n10-ack-4f", 1: "ack-4f", 2: "ack-4f"}
 CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payload, one control codeword
+ROBUST_ESCALATION = 3  # polls from this escalation on go in ROBUST_CONNECT (link: 1 is the repeat, 2 the first poll)
 ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 
 
@@ -124,6 +125,7 @@ class GearShifter:
     measured: dict | None = None  # the peer's last burst, as measured
     measured_band: str = "w"
     measured_at: float = 0.0
+    heard: str | None = None  # the submode of the peer's last burst
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
@@ -141,6 +143,11 @@ class GearShifter:
         # and at -4 to 0 dB fading they held working modes: 12 seeds x 600 s,
         # 12-48% lower throughput with them)
         rec = station.peer_recommend if station.tx.pending() else station.peer_reply_recommend
+        # a poll already unanswered (escalation 3), or answering the peer's
+        # robust poll: control only in the connect retry's mode (ack-4f
+        # polls went unanswered until the link was lost, below its floor)
+        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT):
+            return ROBUST_CONNECT, 1
         if escalation or rec is None:
             return FALLBACK[cap], 2
         mode = decode(rec)
@@ -192,6 +199,7 @@ class GearShifter:
         if self.measured is not None:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
+        self.heard = submode
 
     def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
