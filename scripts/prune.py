@@ -25,6 +25,18 @@ A candidate needs a finite threshold on at least one judged channel (it
 is then optimized for that one); infinite thresholds compare as worst.
 
     uv run python scripts/prune.py runs/ladder.csv
+
+It also reads scripts/ladder_study.py's per-mode CSV (name, awgn, mpg,
+mpp, mpd: the frozen ARQ modes, CPM included), recognised by its header.
+Then rate and width come from the modes themselves, the "codeword
+length" of the near-tie rule is a codeword's airtime (bits do not
+compare across bands and CPM), a mode's PEP offset is its measured
+envelope peak over average power (the ladder's own burst, median of 5;
+CPM is constant envelope but its TX filter rings), the <=500 Hz ladder is
+every mode no wider than 500 Hz, and modes with a role besides data
+(ladder_page.ROLES: replies, connect) are kept whatever dominates them.
+
+    uv run python scripts/prune.py runs/ladder_10pct.csv
 """
 
 import argparse
@@ -69,6 +81,54 @@ def load(path, rows_out=None, sync=None):
     return {n: (*meta[n], t) for n, t in thr.items() if all(c in t for c in JUDGED)}
 
 
+def peak_db(name: str, bursts: int = 5) -> float:
+    """Envelope peak over average power, dB, of the ladder's burst (a
+    control and a data codeword), as phy_session.ContinuousChannel's PEP
+    reference reads it; median over `bursts`."""
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+
+    from data2g import hfchannel
+    from data2g.arq import phy as PHY
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import outcome_data as O
+
+    out = []
+    for seed in range(bursts):
+        x = PHY.tx_audio(O.burst(name, 2, np.random.default_rng(seed)))
+        z = hfchannel._analytic(x)
+        out.append(10 * np.log10(np.max(np.abs(z) ** 2) / 2 / hfchannel.active_power(x)))
+    return float(np.median(out))
+
+
+def load_modes(path) -> tuple[dict, dict, set]:
+    """ladder_study's CSV -> (candidates as `load` returns them, PEP-
+    referenced, airtime per codeword in ms as the length; {name: (width
+    Hz, peak dB)}; the role modes)."""
+    import sys
+    from pathlib import Path
+
+    from data2g import codes
+    from data2g.arq.modes import MODES
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ladder_page as LP
+
+    c, info = {}, {}
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            s = MODES[r["name"]]
+            pk = peak_db(r["name"])
+            t = {ch: (INF if r.get(ch) in (None, "", "nan") else float(r[ch]) + pk) for ch in (*JUDGED, "mpp")}
+            rate = LP.bps(s)
+            c[r["name"]] = (rate, round(1000 * codes.payload_bytes(s) * 8 / rate), t)
+            info[r["name"]] = (LP.width(s), pk)
+    return c, info, set(LP.ROLES)
+
+
 def near_tie(a, b):
     (ra, _, ta), (rb, _, tb) = a, b
     lo, hi = sorted((ra, rb))
@@ -89,11 +149,13 @@ def band_of(name: str) -> str:
     return b if b in ("n10", "n4", "w48") else "w"
 
 
-def prune(c: dict, keep=()) -> tuple[list, dict]:
+def prune(c: dict, keep=(), narrow=None) -> tuple[list, dict]:
     """-> (kept names by rate, {dropped name: reason}): the overall
-    ladder plus the <=500 Hz ladder plus `keep`."""
+    ladder plus the <=500 Hz ladder (`narrow`: its names; default by
+    band name) plus `keep`."""
     kept, why = prune_one(c)
-    nk, nwhy = prune_one({n: v for n, v in c.items() if band_of(n) in NARROW})
+    narrow = {n for n in c if band_of(n) in NARROW} if narrow is None else set(narrow)
+    nk, nwhy = prune_one({n: v for n, v in c.items() if n in narrow})
     for n in nk:
         if n in why:
             why.pop(n)
@@ -219,6 +281,22 @@ def main():
     ap.add_argument("--sync", help="sync thresholds CSV (scripts/sync_floor.py): end-to-end thresholds")
     ap.add_argument("--keep", nargs="+", action="extend", default=[], help="candidates kept whatever dominates them (latency exceptions)")
     a = ap.parse_args()
+    with open(a.csv) as f:
+        modes = "threshold_db" not in f.readline()
+    if modes:
+        c, info, roles = load_modes(a.csv)
+        kept, why = prune(c, [*a.keep, *roles], narrow=[n for n, (w, _) in info.items() if w <= 500])
+        print(f"KEPT\n{'mode':18s} {'bps':>6s} {'Hz':>5s} {'cw ms':>6s} {'peak':>5s} "
+              + " ".join(f"{ch:>6s}" for ch in (*JUDGED, "mpp")) + "   (PEP-referenced dB)")
+        for n in kept:
+            r, ms, t = c[n]
+            print(f"{n:18s} {r:6.0f} {info[n][0]:5d} {ms:6d} {info[n][1]:5.2f} "
+                  + " ".join(f"{t.get(ch, INF):6.2f}" for ch in (*JUDGED, "mpp"))
+                  + ("   (role)" if n in roles else ""))
+        print("\nDROPPED")
+        for n in sorted(why, key=lambda n: c[n][0]):
+            print(f"  {n:18s} {c[n][0]:6.0f} bps: {why[n]}")
+        return
     rows = {}
     c = load(a.csv, rows, load_sync(a.sync) if a.sync else None)
     kept, why = prune(c, a.keep)
