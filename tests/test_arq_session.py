@@ -34,7 +34,7 @@ class Policy:
     def connect_mode(self, cap, tries=0):
         return "m46"  # a connect frame (28 B) in one control codeword
 
-    def airtime(self, m, n_cw):
+    def airtime(self, m, n_cw, dup=False):
         return 0.4 + 0.12 * n_cw
 
 

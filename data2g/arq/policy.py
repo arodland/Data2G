@@ -168,8 +168,10 @@ class GearShifter:
         loss-study sessions there never connected in qpsk-r1/5)."""
         return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
 
-    def airtime(self, m, n_cw):
-        return burst_seconds(MODES[m], n_cw)
+    def airtime(self, m, n_cw, dup=False):
+        """`dup`: a CPM burst's control twice (the second copy is a short
+        control codeword, not a data one: an x10 burst is 30.4 s, not 32.6)."""
+        return burst_seconds(MODES[m], n_cw, dup)
 
     def mode_name(self, rec: int) -> str:
         return decode(rec) or f"?{rec}"
@@ -289,7 +291,10 @@ class GearShifter:
                 ok_ctl = q_burst(s, n)  # the burst survives sync and its control codeword
                 if ok_ctl * pn < self.min_success:
                     continue
-                tb = burst_seconds(s, n)
+                # a CPM burst whose control is at risk goes with it twice (one
+                # more slot, its short control codeword: choose(), slots_for)
+                dup = is_cpm(s) and ok_ctl < DUP_BELOW
+                tb = burst_seconds(s, n + dup, dup)
                 t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S
                 if chat:
                     # every burst the message takes, each retried until it all arrives

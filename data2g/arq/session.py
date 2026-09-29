@@ -266,7 +266,7 @@ class Session:
             # instead of the whole burst again (linksim: repeats of 12 s
             # bursts took 30% of the time on mpg)
             last = self.station.last_sent
-            short = last is None or self.policy.airtime(last.submode, len(last.slots)) <= REPEAT_MAX_S
+            short = last is None or self.policy.airtime(last.submode, len(last.slots), L.dup_ctl(last)) <= REPEAT_MAX_S
             b = self.station.on_timeout(allow_repeat=short)
             if b is None:
                 self._close(f"link failed: {self.station.fail_reason}")
