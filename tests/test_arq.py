@@ -543,3 +543,49 @@ def test_late_burst_from_before_an_abandon():
 
 def test_late_burst_with_a_stale_ack():
     late_burst_with_a_stale_ack(L.Station)
+
+
+def test_escalation_floor_is_sticky_and_decays():
+    """A drop that took escalation 4 to recover makes the next drop start
+    at 4 (no identical repeat, no climb); clean turns lower it again."""
+    class Rec(RandomPolicy):
+        def choose(self, station, escalation):
+            station.seen = getattr(station, "seen", []) + [escalation]
+            return super().choose(station, escalation)
+
+    rng = random.Random(5)
+    a = L.Station(0, Rec(random.Random(1), 0.0, ("m46",), 4), master=True)
+    b = L.Station(1, Rec(random.Random(2), 0.0, ("m46",), 4))
+    a.write(text(rng, 4000))
+
+    def hear(dst, burst):
+        assert dst.handle(FakeRx(burst, rng, 0.0, {}, Counter()))
+
+    def turn():
+        hear(b, a.build())
+        hear(a, b.build())
+
+    turn()
+    hear(b, a.build())
+    b.build()  # its reply is lost
+    assert a.on_timeout() is a.last_sent  # the identical repeat, lost
+    a.seen = []
+    for _ in range(3):  # polls at 2, 3, 4: the last one heard and answered
+        p = a.on_timeout()
+    assert a.seen == [2, 3, 4]
+    hear(b, p)
+    hear(a, b.build())
+    assert a.esc_floor == 4
+    turn()
+    assert b.esc_floor >= 1
+
+    hear(b, a.build())
+    b.build()  # lost again
+    a.seen = []
+    p = a.on_timeout()
+    assert a.seen == [4]  # built, not the identical repeat: straight to 4
+    hear(b, p)
+    hear(a, b.build())
+    for _ in range(L.FLOOR_DECAY_TURNS):
+        turn()
+    assert a.esc_floor == 3
