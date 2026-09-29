@@ -17,11 +17,11 @@ from ..waveform import ofdm
 from . import predictor as P
 from .modes import MODES, ctl_spec, is_cpm
 
-# DATA2G_DD=1 (study toggle): decision-directed re-estimation. When a slot
+# DATA2G_DD (default 1; 0 turns it off): decision-directed re-estimation. When a slot
 # fails, its decoder's a-posteriori LLRs and every decoded codeword of the
 # burst become soft pilots (equalizer.refine), and it is decoded again, up
 # to DD_ITERS times.
-DD = os.environ.get("DATA2G_DD") == "1"
+DD = os.environ.get("DATA2G_DD", "1") == "1"
 DD_ITERS = 2
 
 
@@ -106,7 +106,7 @@ def _dd_estimate(r: dict, post: dict) -> dict:
     w = np.where(k, g**2 * np.abs(x) ** 2 / (est.get("n0_k", est["n0"]) + est["clip_ratio"] * g**2 * p + g**2 * p * v), 0)
     kc = r["kc"]
     air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
-    t_rows = ((air[:, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)) * NSYM / modem.FS).ravel()
+    t_rows = (air[:, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)) * NSYM / modem.FS
     t_pilot = np.arange(len(r["hp"])) * SYMS_PER_FRAME * NSYM / modem.FS
     h, mse = equalizer.refine(r["hp"], t_pilot, z.reshape(-1, nc), w.reshape(-1, nc), t_rows, r["support"], est,
                               ofdm.band(spec.band).bb)
@@ -123,25 +123,27 @@ def _soft_ofdm(r: dict, est: dict | None = None) -> np.ndarray:
     return np.asarray(codes.despread(modem.soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
 
 
-def _posterior(spec, buf, top: int, rv: int, soft) -> np.ndarray:
-    """A-posteriori LLRs of one slot's coded bits (mapping order) after an
-    LDPC decode of its soft bits alone (buf None) or of the combined
-    buffer `buf`, as codes.decode_many / decode_buffer decode them."""
+def _decode_post(spec, buf, top: int, rv: int, soft, m: int) -> tuple:
+    """One LDPC decode as codes.decode_many (buf None: the slot's soft bits
+    alone) or codes.decode_buffer (the combined buffer `buf`, RVs up to
+    `top`, this slot sent at `rv`) would, with mask `m` at index 0 ->
+    (payload, ok, a-posteriori LLRs of the slot's coded bits in mapping
+    order): DD needs the posterior of every failed decode, so it comes
+    from the same pass."""
     import torch
 
     perm = codes.interleaver(spec)
     if buf is None:
         d = np.empty(spec.coded_bits)
         d[perm] = soft
-        _, _, post = codes._decoder(spec, "cpu").decode(torch.as_tensor(d[None], dtype=torch.float32), iters=40,
-                                                        posterior=True)
-        code = post[0].numpy()
+        dec, llr = codes._decoder(spec, "cpu"), d[None]
     else:
         extent = min(codes.buffer_len(spec), (min(top, codes.rv_cycle(spec) - 1) + 1) * spec.coded_bits)
-        _, _, post = codes._ext_decoder(spec, extent).decode(
-            torch.as_tensor(buf[:, :extent], dtype=torch.float32), iters=40, posterior=True)
-        code = post[0].numpy()[codes.rv_positions(spec, rv)]
-    return code[perm]
+        dec, llr = codes._ext_decoder(spec, extent), buf[:, :extent]
+    out, ok, post = dec.decode(torch.as_tensor(llr, dtype=torch.float32), iters=40, posterior=True)
+    payload, good = codes._payloads(spec, out.cpu().numpy(), ok.cpu().numpy(), np.array([m]), np.array([0]))[0]
+    code = post[0].numpy()
+    return payload, good, (code if buf is None else code[codes.rv_positions(spec, rv)])[perm]
 
 
 class ModemRx:
@@ -177,12 +179,19 @@ class ModemRx:
         spec = self._spec(slot)
         if key is None:
             if (slot, m) not in self._memo:
+                soft0 = self.soft
                 for it in range(DD_ITERS + 1):
-                    payload, ok = codes.decode_many(spec, np.asarray(self.soft[slot])[None], m, index=0)[0]
-                    if ok or it == DD_ITERS or not self._refine(slot, spec, None, 0, 0):
+                    if not self._dd(spec):
+                        payload, ok = codes.decode_many(spec, np.asarray(self.soft[slot])[None], m, index=0)[0]
                         break
+                    payload, ok, post = _decode_post(spec, None, 0, 0, self.soft[slot], m)
+                    if ok or it == DD_ITERS:
+                        break
+                    self._refine(slot, spec, post)
                 if ok:
                     self._learn(slot, spec, payload, 0, m)
+                else:
+                    self._undo(slot, soft0)
                 self._memo[(slot, m)] = payload if ok else None
             return self._memo[(slot, m)]
         buf0, top, name, where = self.store.get(key, (None, 0, self.submode, None))
@@ -190,14 +199,24 @@ class ModemRx:
             raise AssertionError(f"soft bits of {key} stored in {name} ({where}), resent in {self.submode} "
                                  f"slot {slot} rv {rv}")
         top = max(top, rv)
+        soft0 = self.soft
         for it in range(DD_ITERS + 1):
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), np.asarray(self.soft[slot])[None], rv)
-            payload, ok = codes.decode_buffer(spec, buf, top, m, index=0)[0]
+            if not self._dd(spec):
+                payload, ok = codes.decode_buffer(spec, buf, top, m, index=0)[0]
+                if ok:
+                    return payload
+                break
+            payload, ok, post = _decode_post(spec, buf, top, rv, None, m)
             if ok:
                 self._learn(slot, spec, payload, rv, m)
                 return payload
-            if it == DD_ITERS or not self._refine(slot, spec, buf, top, rv):
+            if it == DD_ITERS:
                 break
+            self._refine(slot, spec, post)
+        if self.soft is not soft0:
+            self._undo(slot, soft0)
+            buf = codes.combine(spec, None if buf0 is None else buf0.copy(), np.asarray(self.soft[slot])[None], rv)
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))
         return None
 
@@ -208,14 +227,11 @@ class ModemRx:
         if self._dd(spec):
             self._post[slot] = 30.0 * (1 - 2.0 * codes.encode(spec, payload, rv, m, index=0))
 
-    def _refine(self, slot: int, spec, buf, top: int, rv: int) -> bool:
+    def _refine(self, slot: int, spec, post: np.ndarray) -> None:
         """DD after a failed decode of `slot`: its decoder's a-posteriori
-        LLRs (from `buf` at RVs up to `top` when combined, sent at `rv`)
-        join the other slots' as soft pilots, the channel is re-estimated
-        and the soft bits remade. -> whether they were."""
-        if not self._dd(spec):
-            return False
-        self._post[slot] = _posterior(spec, buf, top, rv, self.soft[slot])
+        LLRs `post` join the other slots' as soft pilots, the channel is
+        re-estimated and the soft bits remade."""
+        self._post[slot] = post
         if not self._blind:
             # RV 0 slots the link has not asked about yet: parity checks
             # alone say they decoded (a resend at another RV simply fails)
@@ -227,7 +243,15 @@ class ModemRx:
                     if o:
                         self._post[s] = 30.0 * (1 - 2.0 * codes.encode_info(spec, i[None], 0)[0])
         self.soft = _soft_ofdm(self.r, _dd_estimate(self.r, self._post))
-        return True
+
+    def _undo(self, slot: int, soft0) -> None:
+        """DD did not rescue `slot`: a failed decode's posterior can be
+        confidently wrong (AWGN -1.5 dB: 20% sign errors, the channel's
+        own rate, and it moved the estimate by 53%), so neither it nor the
+        estimate made from it outlives the attempt; later slots and the
+        soft bits stored for combining see the burst as before."""
+        self._post.pop(slot, None)
+        self.soft = soft0
 
     def forget(self, key: tuple) -> None:
         self.store.pop(key, None)
