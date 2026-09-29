@@ -48,6 +48,11 @@ EXPLORE = 0.2
 # had decoded 0.99 of codewords in session data (2026-09-29). MPG 70% of
 # sessions, else Doppler 0.05-0.3 Hz and 0-2 ms; SNR fixed, -8..0 dB; 600 s.
 SLOW = False
+# --sustained: the same (fixed SNR -8..0 dB, 600 s) over every channel kind
+# in the regular mix: v12, trained with --slow alone, learned "low spread,
+# low SNR: fast modes fail" and took it to flat channels too (AWGN 0 dB
+# qpsk-r1/2 on every burst; w48-qpsk-r1/3 had decoded 1.00 there).
+SUSTAINED = False
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
@@ -123,8 +128,10 @@ def session(seed):
         u = rng.random()
         snr0 = float(rng.uniform(-14, -8) if u < 0.005 else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
+        if SUSTAINED:
+            snr0, drift = float(rng.uniform(-8, 0)), 0.0
     cap = 0 if rng.random() < 0.25 else 2
-    horizon = 600.0 if SLOW else 300.0
+    horizon = 600.0 if SLOW or SUSTAINED else 300.0
     ch = PS.ContinuousChannel(O.family(doppler), snr0, seed, horizon + 60, doppler=doppler, delay_ms=delay)
     pols = [Explorer(random.Random(seed * 2 + i)) for i in range(2)]
     out = []
@@ -144,6 +151,7 @@ def main():
     ap.add_argument("--first", type=int, default=300000)
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
+    ap.add_argument("--sustained", action="store_true", help="sustained low SNR, every channel kind (SUSTAINED)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
@@ -151,8 +159,8 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW
-    SLOW = a.slow  # set before the pool forks: the workers inherit it
+    global SLOW, SUSTAINED
+    SLOW, SUSTAINED = a.slow, a.sustained  # set before the pool forks: the workers inherit them
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]
