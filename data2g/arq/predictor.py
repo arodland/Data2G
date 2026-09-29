@@ -150,13 +150,12 @@ def outcome_knows(submode: str) -> bool:
     return m is not None and submode in m.modes
 
 
-# Logit offsets on P(burst usable), per submode: where the installed model
-# is overconfident the same way across SNRs (scripts/calibration.py on
-# on-policy session rows, 2026-09-28). Its error concentrates on slow fading
-# (MPG ~0 dB: 16qam-r1/3 predicted 0.71, 0.46 actual; ~+8 dB: w48-16qam-r1/2
-# 0.80 vs 0.36); the offsets are at most 1 logit, since they apply everywhere.
-LOGIT_OFFSETS = {"16qam-r1/3": -1.0, "w48-16qam-r1/2": -1.0, "n10-16qam-r3/4": -1.0, "n10-qpsk-r3/4": -1.0,
-                 "w48-qpsk-r1/3": -0.7, "w48-qpsk-r2/3": -0.7}
+# Logit offsets on P(burst usable), per submode, fit to the installed model
+# (v10) by scripts/fit_offsets.py on 800 sessions it steered: only modes
+# whose error has one sign in every channel x SNR cell with 40+ bursts, the
+# weighted mean gap, at most 1 logit (they apply everywhere). v10 is
+# under-confident on these w48 modes; no codeword-head offset qualified.
+LOGIT_OFFSETS = {"w48-qpsk-r1/3": 0.52, "w48-16qam-r2/3": 1.0, "w48-64l-r2/3": 1.0, "w48-256l-r5/8": 1.0}
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
