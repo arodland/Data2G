@@ -12,6 +12,7 @@ The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
 """
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -63,8 +64,15 @@ def decode(rec: int) -> str | None:
     return s.name if s else None
 
 
+# DATA2G_DROP_MODES (studies): comma-separated modes nobody picks (a pruned
+# ladder): not a candidate, not taken from a peer, not trained on
+# (scripts/train_outcome.py). They still decode when received.
+DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")))
+assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
+
+
 def allowed(cap: int) -> list:
-    return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap]]
+    return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
 
 
 def width_hz(s) -> float:
