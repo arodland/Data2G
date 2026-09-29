@@ -57,6 +57,11 @@ def ctl_mask(direction: int, i: int, key: int = 0) -> tuple:
     return (key, direction, SEQ_MOD + i)
 
 
+def dup_ctl(burst) -> bool:
+    """Its control sent twice (ARQ_DUP): a control slot at RV 1."""
+    return any(s.rv for s in burst.slots if s.mask_id[2] >= SEQ_MOD)
+
+
 def data_mask(direction: int, seq: int, key: int = 0) -> tuple:
     return (key, direction, seq % SEQ_MOD)
 
@@ -456,7 +461,7 @@ class Station:
         self.stats["cw_resend"] += len(resend)
         if log.isEnabledFor(logging.INFO):
             kind = "data" if resend or new else ("ack" if fresh else "poll")
-            parts = [f"{kind} {self._burst_desc(submode, len(slots))}"]
+            parts = [f"{kind} {self._burst_desc(submode, len(slots), dup == 2)}"]
             if resend:
                 parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
             if new:
@@ -477,9 +482,9 @@ class Station:
     def _mode(self, rec: int | None) -> str:
         return "-" if rec is None else getattr(self.policy, "mode_name", str)(rec)
 
-    def _burst_desc(self, submode: str, n_cw: int) -> str:
+    def _burst_desc(self, submode: str, n_cw: int, dup: bool = False) -> str:
         airtime = getattr(self.policy, "airtime", None)
-        return f"{submode} x{n_cw}" + (f" {airtime(submode, n_cw):.1f}s" if airtime else "")
+        return f"{submode} x{n_cw}" + (f" {airtime(submode, n_cw, dup):.1f}s" if airtime else "")
 
     def _snr(self) -> str:
         m = getattr(self.policy, "measured", None)
@@ -651,7 +656,7 @@ class Station:
 
         if log.isEnabledFor(logging.INFO):
             kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
-            parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw)}" + self._snr()]
+            parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw, dup == 2)}" + self._snr()]
             if slots:
                 parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
                              + (f", {n_old} already had" if n_old else "")

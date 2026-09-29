@@ -301,8 +301,8 @@ class FixedPolicy:
     def connect_mode(self, cap, tries=0):
         return self.connect
 
-    def airtime(self, m, n_cw):
-        return modem.burst_seconds(SUBMODES[m], n_cw)
+    def airtime(self, m, n_cw, dup=False):
+        return modem.burst_seconds(SUBMODES[m], n_cw)  # OFDM: dup changes nothing
 
     def observe(self, measured, submode, now):
         pass
