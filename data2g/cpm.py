@@ -4,9 +4,10 @@ Prototyped in the cpm-modes fork (scripts/cpm_study.py, cpm_spectrum.py):
 4-7 dB better than OFDM of similar rate on fading, PEP-fair, 10% points.
 
 Signal: M tones spaced by the symbol rate R (h = 1), continuous phase, the
-OFDM bands' TX bandpass over the tones +- 30 Hz with one clip-and-filter
-pass (everything beyond a 500 Hz segment's edge ~59 dB down, ~1.6 dB of
-envelope peak). A grid (tones, spacing) is what OFDM calls a sync band.
+OFDM bands' TX bandpass over the tones +- Grid.bp with clip-and-filter at
+no headroom (envelope peak 0.9-1.1 dB over average; beyond the segment or
+band edge under -37 dB: GRIDS). A grid (tones, spacing) is what OFDM calls
+a sync band.
 
 Codewords go through data2g.codes like OFDM's (CRC masks, scrambler, RVs,
 soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
@@ -50,8 +51,8 @@ class Grid:
     m: int  # tones
     rate: float  # symbols/s = tone spacing (Hz)
     center: float = 1500.0
-    bp: float = 30.0  # TX bandpass margin beyond the outer tones, Hz
-    clip_db: float = 0.5  # clip-and-filter headroom (scripts/cpm_spectrum.py)
+    bp: float = 50.0  # TX bandpass margin beyond the outer tones, Hz
+    clip_db: float = 0.0  # clip-and-filter headroom
 
     @property
     def T(self) -> int:  # samples per symbol
@@ -70,10 +71,16 @@ class Grid:
         return self.m * self.rate + 2 * self.bp
 
 
+# TX filter (scripts/cpm_papr_study.py, 2026-09-28): SSB PEP is the
+# envelope, and the old 30 Hz margin rang at every tone jump (fsk32r62's
+# envelope 2.8 dB over its average). Wider margins and no clip headroom:
+# PEP-fair 10% points 0.5-1.9 dB lower (c32r62 -1.9 AWGN / -1.8 MPP; c8r50
+# -0.8 / -0.9; c16r25 -0.5 / -1.0). Out of band still under -37 dB at the
+# segment or band edge (OFDM: -3 to -5). Receivers are unchanged.
 GRIDS = {g.name: g for g in [
     Grid("c16r25", 16, 25.0),  # 400 Hz of tones: a 500 Hz segment
     Grid("c8r50", 8, 50.0),  # the same
-    Grid("c32r62", 32, 62.5),  # 2000 Hz
+    Grid("c32r62", 32, 62.5, bp=150.0),  # 2000 Hz of tones, 2300 Hz wide (the 2400 Hz cap)
 ]}
 
 
