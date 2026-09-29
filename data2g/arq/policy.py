@@ -26,7 +26,11 @@ from . import predictor as P
 SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
-PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
+# the predictor's training range for the previous burst's age (scripts/predictor_data.py).
+# Older history is used as this old, not dropped: with no history the model
+# gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
+# and escalation's long gaps sent 12 s 64-ary bursts that all failed
+PREV_MAX_S = 30.0
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
 # The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
 # w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
@@ -240,8 +244,8 @@ class GearShifter:
         cands = [s for s in allowed(station.cap) if (not is_cpm(s) or (self.use_cpm and P.outcome_knows(s.name)))]
         m = self.measured
         prev = None
-        if self.prev is not None and self.measured_at - self.prev[2] <= PREV_MAX_S:
-            prev = (self.prev[0], self.prev[1], self.measured_at - self.prev[2])
+        if self.prev is not None:
+            prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))
 
         # the outcome model (P from real decodes, scripts/train_outcome.py)
         # replaced the MI predictor's output corrections: at -4 dB AWGN on
