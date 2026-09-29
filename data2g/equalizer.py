@@ -256,3 +256,48 @@ def time_shift_phase(shift: np.ndarray, bb: np.ndarray = BB_FREQS) -> np.ndarray
     samples (array, per frame): a window moved later by s multiplies
     carrier k by exp(+2j*pi*f_k*s/FS)."""
     return np.exp(-2j * np.pi * np.outer(shift, bb) / FS)
+
+
+
+def refine(h_pilot: np.ndarray, t_pilot: np.ndarray, z: np.ndarray, w: np.ndarray, t_rows: np.ndarray,
+           support: tuple[int, int], est: dict, bb: np.ndarray = BB_FREQS) -> tuple[np.ndarray, np.ndarray]:
+    """Decision-directed re-estimate: the pilots plus data cells whose
+    symbols are (softly) known, as extra pilots.
+
+    h_pilot (P, NC): LS at the pilots, at times t_pilot. z (R, NC): LS at
+    every data symbol row (times t_rows), in the pilots' units; w (R, NC)
+    its inverse noise variance, 0 where nothing is known. Pilot rows are
+    smoothed as in `estimate`; data rows by LMMSE across carriers with
+    the delay support as prior (a row may know only a comb of carriers:
+    one codeword's), keeping each carrier's posterior variance. Then per
+    carrier, every data row is Wiener-interpolated in time over the
+    nearby pilot and data rows, each with its own noise. `est`:
+    estimate()'s result for p_sig, spread and n0. Returns h and mse
+    (R, NC), in the pilots' units."""
+    nc = len(bb)
+    U, r, _ = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]))
+    p_sig, spread = est["p_sig"], est["spread_hz"]
+    hs_p = (h_pilot @ np.conj(U)) @ U.T
+    d = np.arange(support[0] - 4, support[1] + 5)  # _support_basis's slack
+    B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
+    Rf = p_sig / len(d) * (B @ B.conj().T)
+    vals, var, times = [*hs_p], [np.full(nc, est["n0"] * r / nc)] * len(hs_p), [*t_pilot]
+    for i in np.flatnonzero(np.any(w > 0, axis=1)):
+        k = w[i] > 0
+        S = Rf[np.ix_(k, k)] + np.diag(1 / w[i, k])
+        G = np.linalg.solve(S, Rf[k]).conj().T  # (NC, K): Rf[:, k] S^-1
+        vals.append(G @ z[i, k])
+        var.append(np.maximum(p_sig - np.real(np.sum(G * Rf[:, k].conj(), axis=1)), 1e-9 * p_sig))
+        times.append(t_rows[i])
+    vals, var, times = np.array(vals), np.array(var), np.array(times)
+    h = np.zeros((len(t_rows), nc), dtype=np.complex128)
+    mse = np.zeros((len(t_rows), nc))
+    for i, t in enumerate(t_rows):
+        j = np.flatnonzero(np.abs(times - t) <= TIME_TAPS * FRAME_S)
+        Rt = p_sig * _doppler_corr(times[j, None] - times[None, j], spread)
+        Rpp = Rt[None] + var[j].T[:, :, None] * np.eye(len(j))  # (NC, J, J)
+        Rdp = p_sig * _doppler_corr(t - times[j], spread)
+        W = np.linalg.solve(Rpp, np.broadcast_to(Rdp, (nc, len(j)))[..., None])[..., 0]  # (NC, J)
+        h[i] = np.sum(W * vals[j].T, axis=1)
+        mse[i] = np.maximum(p_sig - W @ Rdp, 0.0)
+    return h, mse
