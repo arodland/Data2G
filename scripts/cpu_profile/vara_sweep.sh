@@ -2,20 +2,27 @@
 # varatrials.py at every point of the IONOS SIM paper's VARA tables
 # (sim-mar-2021.xlsx: "VARA 4.0 2300Hz" on HF Wide, "VARA 500" on HF 500),
 # SNR 40 .. -5 on WGN, MPG 2 and MPP 2 (awgn, mpg, mpp here), each with the
-# paper's message size. One point at a time (vara_ref.sh's sinks and ports
-# are fixed); ~113 h of real time at the paper's rates, failures extra.
+# paper's message size. ~113 h of real time at the paper's rates, failures
+# extra, run one point at a time: locally vara_ref.sh's sinks and ports are
+# fixed. In containers (vara-container/), JOBS points run at once.
 #   scripts/cpu_profile/vara_sweep.sh [regex on the line "bw channel snr bytes rate"] [out dir]
 # e.g. vara_sweep.sh '^2300 awgn ' or '^500 mpg (40|-5) '. Each point's report:
 # <out>/<bw>_<channel>_<snr>dB.txt;
 # a point with one is skipped, so a stopped sweep resumes. A transfer taking
-# over 3x the paper's time (at least 15 min) fails. Stops if varatrials
-# stops (the harness failed, not VARA).
+# over 3x the paper's time (at least 15 min) fails. Stops launching points
+# if varatrials stops (the harness failed, not VARA).
+# VARATRIALS: the command that runs varatrials.py (default: this checkout's,
+# with $PY); it runs in <out> with --out ., e.g. for the container:
+#   VARATRIALS="podman run --rm --network none --userns keep-id -v $PWD/runs/varatrials:/out d2g-vara" JOBS=4 vara_sweep.sh
+# (with build.sh's vfs store, add its --root/--runroot/--storage-driver flags).
 set -u
 FILTER=${1:-.}
 OUT=${2:-runs/varatrials}
 W=$(cd "$(dirname "$0")" && pwd)
 PY=${PY:-$(cd "$W/../.." && pwd)/.venv/bin/python}
+export VARATRIALS=${VARATRIALS:-$PY $W/varatrials.py} JOBS=${JOBS:-1}
 mkdir -p "$OUT"
+cd "$OUT"
 # bw channel snr bytes paper_B/min (the paper's)
 POINTS="
 2300 awgn 40 205451 46227
@@ -79,15 +86,19 @@ POINTS="
 500 mpg -5 8640 84
 500 mpp -5 8640 104
 "
-echo "$POINTS" | grep -E "$FILTER" | while read -r bw chan snr bytes rate; do
-  [ -z "$bw" ] && continue
-  report="$OUT/${bw}_${chan}_${snr}dB.txt"
-  grep -q succeeded "$report" 2>/dev/null && continue
-  limit=$(( bytes * 60 * 3 / rate )); [ $limit -lt 900 ] && limit=900
+point() {  # bw chan snr bytes rate
+  local bw=$1 chan=$2 snr=$3 bytes=$4 rate=$5
+  local report="${bw}_${chan}_${snr}dB.txt"
+  grep -q succeeded "$report" 2>/dev/null && return 0
+  local limit=$(( bytes * 60 * 3 / rate )); [ $limit -lt 900 ] && limit=900
   echo "== VARA $bw $chan $snr dB, $bytes B (paper $rate B/min), limit ${limit} s: $(date '+%F %T')"
-  $PY "$W/varatrials.py" "$chan" "$snr" --bytes "$bytes" --bw "$bw" --timeout "$limit" --out "$OUT" < /dev/null \
-    | tee "$report.partial"
-  status=${PIPESTATUS[0]}
+  $VARATRIALS "$chan" "$snr" --bytes "$bytes" --bw "$bw" --timeout "$limit" --out . < /dev/null > "$report.partial" 2>&1
+  local status=$?
   mv "$report.partial" "$report"
-  [ "$status" = 2 ] && { echo "varatrials stopped: the harness failed; fix it and rerun to resume"; exit 2; }
-done
+  echo "== VARA $bw $chan $snr dB done: $(tail -1 "$report")"
+  # 255 stops xargs launching more: the harness failed, not VARA
+  [ "$status" = 2 ] && { echo "varatrials stopped: the harness failed; fix it and rerun to resume"; return 255; }
+  return 0
+}
+export -f point
+echo "$POINTS" | grep -E "$FILTER" | xargs -P "$JOBS" -L 1 bash -c 'point "$@"' _
