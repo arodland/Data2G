@@ -17,6 +17,7 @@
 # own TX sink, channel.py fades it into the other's). REC=1: record both RX sinks.
 # HEADLESS=0: VARA on the real display instead of Xvfb.
 # WINEDEBUG: -all unless set (VARA floods Wine's debug log: disk, and slow).
+# SEED: the noise's seed, and the fading's (2 SEED + 11, + 12); unset: 7, 11, 12.
 # Ports 8510/8610 (+1).
 set -u
 BW=$1; BYTES=$2; T=$3; OUT=$(realpath -m "$4")
@@ -47,10 +48,10 @@ TX_A=var_ab TX_B=var_ba
 if [ "${CHANNEL:-awgn}" != awgn ]; then
   TX_A=var_a_tx TX_B=var_b_tx
   sink $TX_A; sink $TX_B
-  PYTHONPATH=$WT $PY $W/channel.py $CHANNEL 11 $TX_A var_ab > $OUT/channel_a.log 2>&1 & pids+=($!)
-  PYTHONPATH=$WT $PY $W/channel.py $CHANNEL 12 $TX_B var_ba > $OUT/channel_b.log 2>&1 & pids+=($!)
+  PYTHONPATH=$WT $PY $W/channel.py $CHANNEL $(( ${SEED:-0} * 2 + 11 )) $TX_A var_ab > $OUT/channel_a.log 2>&1 & pids+=($!)
+  PYTHONPATH=$WT $PY $W/channel.py $CHANNEL $(( ${SEED:-0} * 2 + 12 )) $TX_B var_ba > $OUT/channel_b.log 2>&1 & pids+=($!)
 fi
-NOISE_SINKS=var_ab,var_ba $PY $W/noise.py 7 $OUT/snr.log & pids+=($!)
+NOISE_SINKS=var_ab,var_ba $PY $W/noise.py ${SEED:-7} $OUT/snr.log & pids+=($!)
 if [ "${REC:-0}" = 1 ]; then
   for s in var_ab var_ba; do
     pacat --record --device=$s.monitor --format=float32le --rate=48000 --channels=1 > $OUT/$s.f32 & pids+=($!)

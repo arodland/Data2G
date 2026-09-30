@@ -5,13 +5,10 @@ middle three with 5 successes (high and low dropped), else of all of them.
     python scripts/cpu_profile/speedtrials.py <channel> <snr_db> [--bytes 20000] [--bw 2300] [--seed 0]
 """
 import argparse
-import sys
 
 import speedtest as T  # first: it sets the thread caps before numpy loads
 
-import numpy as np  # noqa: E402
-
-WINS, LOSSES = 5, 10
+import trials  # noqa: E402
 
 
 def main():
@@ -25,29 +22,16 @@ def main():
     T.log_arg(ap)
     a = ap.parse_args()
     T.log_setup(a)
-    ok, failed = [], {}
-    seed = a.seed
-    while len(ok) < WINS and sum(failed.values()) < LOSSES:
-        r = T.run(a.channel, a.snr, a.bytes, seed, cap=T.BW["BW" + a.bw], latency=a.latency)
-        if r["phase"] == "done":
-            ok.append(r)
-            print(f"seed {seed}: {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min; {T.top2(r['airtime'])}", flush=True)
-        else:
-            failed[r["phase"]] = failed.get(r["phase"], 0) + 1
-            print(f"seed {seed}: FAILED during {r['phase']} at {r['t']:.1f} s", flush=True)
-        seed += 1
-    n = len(ok) + sum(failed.values())
-    why = ", ".join(f"{v} {k}" for k, v in failed.items())
-    print(f"{a.channel} {a.snr:g} dB, {a.bytes} B, BW{a.bw}: {len(ok)}/{n} succeeded"
-          + (f", failed: {why}" if failed else ""))
-    if not ok:
-        sys.exit(1)
-    ok.sort(key=lambda r: r["bps"])
-    used = ok[1:-1] if len(ok) == WINS else ok
-    what = "middle 3 of 5" if len(ok) == WINS else f"all {len(ok)}"
-    print(f"mean of {what}: {np.mean([r['seconds'] for r in used]):.1f} s = "
-          f"{np.mean([r['bps'] for r in used]):.0f} bit/s = {np.mean([r['bpm'] for r in used]):.0f} B/min; "
-          f"{T.top2({k: sum(r['airtime'].get(k, 0.0) for r in used) for q in used for k in q['airtime']})}")
+
+    def airtime(results):  # the sender's top two submodes, pooled over the results
+        pooled = {}
+        for r in results:
+            for k, v in r["airtime"].items():
+                pooled[k] = pooled.get(k, 0.0) + v
+        return "; " + T.top2(pooled)
+
+    trials.run(lambda seed: T.run(a.channel, a.snr, a.bytes, seed, cap=T.BW["BW" + a.bw], latency=a.latency),
+               a.seed, f"{a.channel} {a.snr:g} dB, {a.bytes} B, BW{a.bw}", airtime)
 
 
 if __name__ == "__main__":
