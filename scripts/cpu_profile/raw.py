@@ -2,7 +2,9 @@
 sees the bytes as written (Pat's B2F LZHUF-compresses every message first,
 leaving nothing for T_COMP). W1AW connects K2XYZ, both send a file at once
 as Pat's P2P exchange does, then W1AW disconnects. Also vara_ref.sh's
-transfer, straight into VARA (Pat feeds VARA 889 bytes per BUFFER 0).
+transfer, straight into VARA (Pat writes at most 7 x 127 bytes between
+BUFFER reports, and VARA reports BUFFER only after each burst, so a Pat
+session gets 889 bytes an over).
 
     python raw.py <a command port> <b command port> <a->b file> <b->a file> <timeout s>
 
