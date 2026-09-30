@@ -2057,6 +2057,50 @@ at the lowest fading SNRs and +16% at AWGN +15. No cell is worse by more than
   - A lower confidence bound on the members' spread: v10's error on its own
     picks does not grow with it.
 
+## Two 500 Hz modes above n10-16qam-r3/4 (2026-09-29)
+
+TLDR: at BW500, AWGN 25 dB, a 20 kB one-way transfer goes from 4932 to 9685
+B/min (VARA HF 500: ~10,000). The ladder is unchanged; n10's header has room.
+
+| mode | bps | headroom | AWGN 1% PEP-fair | constellation |
+|---|---:|---:|---:|---|
+| n10-16qam-r3/4 (was the top) | 1022 | 3 dB | 9.7 dB | gray-qam16 |
+| n10-64l-r3/4 | 1544 | 6 dB | 15.8 dB | c64-w48-r34 |
+| n10-256l-r3/4 | 2067 | 8 dB | 21.9 dB | c256-w48-r58 |
+
+- **Header (protocol 13):** n10's 10-bit word splits 5 | 5 (config.CW_BITS),
+  so 32 indices, at most 32 codewords a burst; its 16 were full. The
+  recommendation carries indices 16-23 in the CPM band code's unused 8-15.
+- **Headroom:** pick_headroom over 2-10 dB (clip_study panels n10-top,
+  n10-256). The 256-point mode saturates at 8 dB (clip SDR ~32 dB).
+- **Constellations:** the w48 learned sets beat the design ones on n10 too
+  (AWGN -0.25 / -1.5 dB). Sets retrained for n10 gained 0.01-0.03 bits/cu
+  held out: not kept.
+- **Outcome model:** v12 plus output units for the two modes, trained on 8000
+  offline samples of them (`outcome_data.py --cands`, `train_outcome.py
+  --extend`); every other weight frozen, so v12's modes predict as before.
+  v10's data, which v12 was trained on, is gone. Offset -0.5 on
+  n10-256l-r3/4 (below).
+- **speedtrials, BW500, B/min** (20 kB, middle 3 of 5 seeds):
+
+  | cell | v12 | new | top mode |
+  |---|---:|---:|---|
+  | AWGN 15 | 4932 | 7040 | 64l |
+  | AWGN 20 | 4932 | 6243 | 64l 68%, 256l 32% |
+  | AWGN 22 | | 8740 | 256l 87% |
+  | AWGN 25 | 4932 | 9685 | 256l |
+  | MPG 25 | 4932 | 5690* | 256l 67%, 64l 30% |
+  | MPP 25 | 3289 | 3381* | 16qam-r2/3 |
+
+  \* without the offset.
+- **The offset:** at AWGN 20 the shifter tries 256l from a 64l burst's
+  measurement, and loses bursts (256l sends 1.6 dB less average power at the
+  same peak). No offset / -0.5 / -1: AWGN 20 6105 / 6243 / 7353, AWGN 25
+  10169 / 9685 / 9397. -0.5 for now.
+- **Wide sessions unchanged:** loss study, v12 against the extension, 6 cells
+  x 12 seeds, PEP5 (`runs/n10_loss.sh`): identical in every seed; the modes
+  are never picked at the 2400 Hz cap.
+
 ## TODO
 
 - MPG 0 dB: a fading-dependent offset (or reweighted training, see below)

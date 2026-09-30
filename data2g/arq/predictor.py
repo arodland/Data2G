@@ -172,7 +172,10 @@ def outcome_knows(submode: str) -> bool:
 # never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
 # picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
 # nothing elsewhere (README, outcome model v12).
-LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0}
+# n10-256l-r3/4 (v12 + n10 extension): tried below its threshold at AWGN 20
+# dB, BW500 (speedtrials, B/min, no offset / -0.5 / -1): 20 dB 6105 / 6243 /
+# 7353, 25 dB 10169 / 9685 / 9397. -0.5 for now (the user's call).
+LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0, "n10-256l-r3/4": -0.5}
 # DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
 # whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
 # installed model only.
