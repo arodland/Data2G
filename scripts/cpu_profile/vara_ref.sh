@@ -16,13 +16,14 @@
 # NOISE_SNR, NOISE_PEAK, CHANNEL as run.sh. REC=1: record both RX sinks
 # (VARA then loses its sound devices: another capture on a sink monitor).
 # HEADLESS=0: VARA on the real display instead of Xvfb.
+# WINEDEBUG: -all unless set (VARA floods Wine's debug log: disk, and slow).
 # Ports 8510/8610 (+1).
 set -u
 BW=$1; BYTES=$2; T=$3; OUT=$(realpath -m "$4")
 W=$(cd "$(dirname "$0")" && pwd)
 WT=$(cd "$W/../.." && pwd)
 PY=${PY:-$WT/.venv/bin/python}
-export WINEPREFIX=${WINEPREFIX:-$HOME/.wine-vara} WINEDEBUG=-all
+export WINEPREFIX=${WINEPREFIX:-$HOME/.wine-vara} WINEDEBUG=${WINEDEBUG:--all}
 rm -rf $OUT; mkdir -p $OUT
 cd $WT
 
