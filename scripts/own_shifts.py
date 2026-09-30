@@ -210,11 +210,27 @@ def rank_key(r):
     return (sum(r[f"c4_mb{m}"] for m in mbs),) + tuple(r[f"c6_mb{m}"] for m in mbs)
 
 
+# The GPU is shared with the desktop: the decoder's (batch, checks, dmax)
+# intermediates are sized to this, and the process is capped (gpu_cap).
+VRAM_BUDGET = 1.0e9
+VRAM_CAP = 0.12  # of the device; an overshoot is our OOM, not another app's
+
+
+def gpu_cap(device):
+    import torch
+
+    if str(device).startswith("cuda"):
+        torch.cuda.set_per_process_memory_fraction(VRAM_CAP)
+
+
 def bler_curve(code, ebn0s, blocks, device, iters=40, seed=1, batch=2000):
     import torch
 
     dec = ldpc.MinSumDecoder(code, device=device)
     k, n = code.k, code.n
+    # ~10 live float32 tensors of (batch, checks, dmax) at the peak
+    batch = max(100, min(batch, int(VRAM_BUDGET / (40 * dec.chk.numel()))))
+    blocks = -(-blocks // batch) * batch
     out = []
     for ebn0 in ebn0s:
         rng = np.random.default_rng([seed, int(round(ebn0 * 100)) + 10000])
@@ -228,6 +244,9 @@ def bler_curve(code, ebn0s, blocks, device, iters=40, seed=1, batch=2000):
             fe += int((est.cpu().numpy() != bits).any(1).sum())
             done += batch
         out.append(fe / done)
+    del dec
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()  # code sizes vary; don't hold the high-water mark
     return np.array(out)
 
 
@@ -245,6 +264,7 @@ def cmd_sim(a):
     import torch
 
     torch.set_num_threads(2)
+    gpu_cap(a.device)
     with open(OUT / "cycles.csv") as f:
         cyc_rows = [{k: (v if k == "cand" else int(v)) for k, v in r.items() if v != ""} for r in csv.DictReader(f)]
     out_path = OUT / f"sim_{a.tag}.csv"
@@ -305,6 +325,7 @@ def cmd_deep(a):
     import torch
 
     torch.set_num_threads(2)
+    gpu_cap(a.device)
     path = OUT / f"deep_{a.tag}.csv"
     done = set()
     if path.exists():  # resume: a code's rows are written together, at its end
