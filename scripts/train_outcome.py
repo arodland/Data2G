@@ -17,10 +17,11 @@ import torch
 
 from data2g import cpm
 from data2g.config import SUBMODES
+from data2g.arq import policy as G
 from data2g.arq import predictor as P
 
 HIDDEN = 64
-MODES = P.OUTCOME_MODES + tuple(cpm.SPECS)
+MODES = tuple(m for m in P.OUTCOME_MODES + tuple(cpm.SPECS) if m not in G.DROP)  # DATA2G_DROP_MODES: a pruned set
 SUBMODES_BAND = {m: s.sync_band for m, s in SUBMODES.items()}  # the model's outputs, saved with it
 BANDS = P.BANDS + tuple(cpm.GRIDS)
 MEAS = ("snr_est", "spread_est", "delay_est_ms", "headroom", "frames") + tuple(f"mi_{c}" for c in P.CONSTS)

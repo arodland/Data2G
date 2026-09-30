@@ -12,6 +12,7 @@ The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
 """
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -27,6 +28,14 @@ TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
+# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
+# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
+# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
+# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
+# On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
+BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+if BIAS_FIX:
+    BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
@@ -63,8 +72,15 @@ def decode(rec: int) -> str | None:
     return s.name if s else None
 
 
+# DATA2G_DROP_MODES (studies): comma-separated modes nobody picks (a pruned
+# ladder): not a candidate, not taken from a peer, not trained on
+# (scripts/train_outcome.py). They still decode when received.
+DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")))
+assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
+
+
 def allowed(cap: int) -> list:
-    return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap]]
+    return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
 
 
 def width_hz(s) -> float:

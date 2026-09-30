@@ -34,6 +34,8 @@ import numpy as np
 
 from data2g import codes, modem
 from data2g.arq import frames as F
+from data2g.arq.modes import MODES, ctl_payload_bytes, max_ctl
+from data2g.arq.modes import burst_seconds as mode_seconds
 from data2g.arq import predictor as P
 from data2g.arq import session as S
 from data2g.config import BANDS, FRAME_SAMPLES, FS, LEADIN_SAMPLES, SUBMODES, clip_consts
@@ -284,7 +286,9 @@ def rv_cycle(submode):
 
 
 class FixedPolicy:
-    """One data mode, fixed burst size (the baseline and the validation)."""
+    """One data mode, fixed burst size (the baseline and the validation).
+    Any ARQ mode, CPM included (real-modem sessions only for CPM: the link
+    abstraction models OFDM)."""
 
     def __init__(self, mode, n_cw, connect="qpsk-r1/5"):
         self.mode, self.n_cw, self.connect = mode, n_cw, connect
@@ -293,16 +297,22 @@ class FixedPolicy:
         return self.mode, self.n_cw
 
     def payload_bytes(self, m):
-        return codes.payload_bytes(SUBMODES[m])
+        return codes.payload_bytes(MODES[m])
+
+    def ctl_payload_bytes(self, m):  # CPM: control rides the grid's short codeword
+        return ctl_payload_bytes(MODES[m])
+
+    def max_ctl(self, m):
+        return max_ctl(MODES[m])
 
     def rv_cycle(self, m):
-        return rv_cycle(m)
+        return codes.rv_cycle(MODES[m])
 
     def connect_mode(self, cap, tries=0):
         return self.connect
 
     def airtime(self, m, n_cw, dup=False):
-        return modem.burst_seconds(SUBMODES[m], n_cw)  # OFDM: dup changes nothing
+        return mode_seconds(MODES[m], n_cw, dup)  # OFDM: dup changes nothing
 
     def observe(self, measured, submode, now):
         pass

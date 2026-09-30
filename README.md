@@ -1984,6 +1984,79 @@ at -5%.
 - No corrupt deliveries in the 5800 v7/v8 sessions: with the success check,
   v6's session 302160 has no successor.
 
+## Outcome model v12, one logit offset, a deeper online correction (2026-09-29)
+
+TLDR: against v7, both on master with DD and #19, sessions deliver +17..+36%
+at the lowest fading SNRs and +16% at AWGN +15. No cell is worse by more than
+1.2 SE (MPD 0 -3.8%, MPP 0 -3.5%, MPP -4 -3.0%).
+
+- **Why v7's offsets went:** they were a patch for a coverage loop.
+  - They kept modes out of the sessions later models were trained on
+    (v10: w48-qpsk-r1/3 appeared only in up-fades, decoding 0.96). So the
+    models never saw those modes fail.
+  - Without offsets, v10 sent w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts,
+    13% of its codewords decoding, for whole sessions.
+  - With them, AWGN 0 dB lost 32%: 16qam-r1/3 was never picked, though it
+    decodes 98% there.
+  - On randomly chosen (explored) rows v10 is near calibrated, so no per-mode
+    constant is right everywhere.
+- **Online correction:**
+  - It learns from data codewords only (#19's `usable`, found independently
+    here).
+  - `policy.BIAS_FIX`, on (`DATA2G_BIAS_FIX=0`: 3): it is bounded at 6
+    logits, not 3.
+  - The two together, alone (v10 + v7's offsets), change nothing; without
+    offsets they halve the MPP 0 loss.
+- **Data:**
+  - v10's 2900 sessions and its 83,000-sample offline set.
+  - 2900 sessions steered by v10 with no offsets and the new correction
+    (`session_data.py --first 700000`): these took w48-qpsk-r1/3 at MPP 0
+    from 78% of bursts to 13%.
+  - 800 sessions of sustained low SNR on slow fading (`session_data.py
+    --slow`: MPG 70%, else 0.05-0.3 Hz; SNR fixed per session at -8..0 dB;
+    600 s), steered by that round's model. They took MPG -4 from -13% to
+    -5% against v7.
+- **Training:** as v7 (5 bootstrap members, seeds 1-5, averaged).
+- **Offsets:** one, -1.0 on w48-16qam-r1/2: MPG +8 +6.7% (10/2 seeds), no
+  change elsewhere.
+- **Loss study** against v7 as master ships it (v7's offsets, bound 3), both
+  on master with DD and #19 (12 seeds x 600 s, shift+cpm, PEP5, paired by
+  seed; bps; `runs/pr22_recheck.sh`). Before DD and #19 the same comparison
+  gave MPD -6 +52%, MPG -4 -5.3%, MPP 0 -6.8%: both lifted v7 at the lowest
+  SNRs.
+
+  | cell | v7 | v12 | change |
+  |---|---|---|---|
+  | MPP -8 | 47 | 64 | +35.7 +- 8.2% |
+  | MPD -6 | 80 | 97 | +21.0 +- 3.8% |
+  | MPP -6 | 82 | 96 | +16.8 +- 4.8% |
+  | AWGN +15 | 3815 | 4441 | +16.4 +- 0.8% |
+  | MPP +15 | 2867 | 2955 | +3.1 +- 1.3% |
+  | MPG +8 | 1254 | 1272 | +1.4 +- 0.8% |
+  | AWGN 0 | 558 | 564 | +1.0 +- 0.1% |
+  | MPP +8 | 1606 | 1615 | +0.6 +- 0.5% |
+  | MPG +15 | 2361 | 2362 | +0.0 +- 1.5% |
+  | MPG -4 | 143 | 142 | -0.4 +- 5.0% |
+  | MPD +20 | 2404 | 2373 | -1.3 +- 1.4% |
+  | MPG 0 | 327 | 323 | -1.4 +- 2.7% |
+  | MPD +8 | 1355 | 1335 | -1.4 +- 2.5% |
+  | MPD -4 | 128 | 126 | -1.5 +- 4.4% |
+  | MPP -4 | 181 | 175 | -3.0 +- 2.6% |
+  | MPP 0 | 370 | 357 | -3.5 +- 3.4% |
+  | MPD 0 | 266 | 256 | -3.8 +- 4.1% |
+
+- **Not kept:** the model before the slow-fading sessions reached AWGN 0 dB
+  +40% against v7, but MPG -4 -13%.
+  - The supplement has no flat counterpart at sustained low SNR, so v12
+    avoids w48 and 16qam-r1/3 there on flat channels too.
+  - Next: the same supplement across channel kinds.
+- **Tried and dropped:**
+  - Training on the 1% prune (41 modes): within noise of 48 in every cell.
+  - Favouring CPM at MPG -4: fsk32r62-r1/2 alone delivers at most 95 bps
+    there, against 137.
+  - A lower confidence bound on the members' spread: v10's error on its own
+    picks does not grow with it.
+
 ## TODO
 
 - MPG 0 dB: a fading-dependent offset (or reweighted training, see below)
