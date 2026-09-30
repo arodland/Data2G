@@ -293,4 +293,5 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
             if m in idx:
                 z[idx[m]] += off
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))
-    return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]])) for s in (submodes or SUBMODES.values())}
+    return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]]))
+            for s in (submodes or SUBMODES.values()) if s.name in idx}  # a model knows the modes it was trained on

@@ -93,12 +93,19 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 
 
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
+# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
+# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
+N10_HIGH = 8
+assert len(cpm.SPECS) <= N10_HIGH
 
 
 def encode(submode: str) -> int:
     s = MODES[submode]
     if is_cpm(s):
         return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
+    if s.sync_band == "n10" and s.index >= 16:
+        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
+        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
     return F.BANDS_CODE[s.sync_band] << 4 | s.index
 
 
@@ -106,8 +113,11 @@ def decode(rec: int) -> str | None:
     from ..modem import BY_INDEX
 
     if rec >> 4 == CPM_CODE:
-        names = list(cpm.SPECS)
-        return names[rec & 15] if (rec & 15) < len(names) else None
+        i, names = rec & 15, list(cpm.SPECS)
+        if i >= N10_HIGH:
+            s = BY_INDEX.get(("n10", 16 + i - N10_HIGH))
+            return s.name if s else None
+        return names[i] if i < len(names) else None
     band = BY_CODE.get(rec >> 4)
     s = BY_INDEX.get((band, rec & 15)) if band else None
     return s.name if s else None
