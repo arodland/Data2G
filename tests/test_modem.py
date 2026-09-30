@@ -40,9 +40,12 @@ def test_header_roundtrip_every_field(band):
     for (b, sub), spec in modem.BY_INDEX.items():
         if b != band:
             continue
-        for n in (1, 2, 63, 64):
+        top = modem.max_codewords(band)
+        for n in (1, 2, top - 1, top):
             _, got, score = modem.decode_header(1.0 - 2.0 * modem.header_bits(sub, n, band), band)
             assert got == (spec, n) and score > 0.999
+        with pytest.raises(ValueError):
+            modem.header_bits(sub, top + 1, band)
 
 
 def test_header_of_another_version_is_rejected(monkeypatch):
