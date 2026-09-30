@@ -34,6 +34,8 @@ rm -rf $OUT; mkdir -p $OUT
 cd $WT
 
 mods=()
+# on any exit, a killed run too: leaked sinks pile up and break other apps (Wine lists them all)
+trap 'for m in $(pactl list short modules | grep -E "sink_name=d2g_" | cut -f1); do pactl unload-module $m; done' EXIT
 for s in d2g_ab d2g_ba; do
   mods+=($(pactl load-module module-null-sink sink_name=$s sink_properties=device.description=$s rate=48000 channels=1 format=float32le))
 done
@@ -102,5 +104,4 @@ fi
 kill $MON
 pkill -INT -f "^$PY -m data2g.host" ; sleep 8   # py-spy writes its profile when the child exits
 kill $NOISE ${CHA:-} ${CHB:-}; pkill -f "[p]acat --(playback|record) --device=d2g_" ; sleep 1
-for m in "${mods[@]}"; do pactl unload-module $m; done
 echo done
