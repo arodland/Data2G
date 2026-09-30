@@ -20,6 +20,12 @@ import trials
 W = Path(__file__).resolve().parent
 
 
+def stop(why):
+    """The harness failed, not VARA: exit 2 (trials.run exits 1 when nothing completed)."""
+    print(why, file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("channel", help="awgn | mpg | mpp | mpd | mps | doppler_hz:delay_ms")
@@ -40,17 +46,17 @@ def main():
                            env=env, capture_output=True, text=True, timeout=a.timeout + 300)
         out = p.stdout + p.stderr
         if "opened no audio" in out:
-            sys.exit(f"seed {seed}: {out.strip().splitlines()[-1]} (the harness, not VARA: stopping)")
+            stop(f"seed {seed}: {out.strip().splitlines()[-1]} (the harness, not VARA: stopping)")
         if m := re.search(r"done after ([\d.]+) s: a->b (\d+)/(\d+) B .* exact (\w+)", out):
             if m[4] != "True":
-                sys.exit(f"seed {seed}: data corrupted: {m[0]}")
+                stop(f"seed {seed}: data corrupted: {m[0]}")
             s, n = float(m[1]), int(m[3])
             return dict(phase="done", seconds=s, bps=8 * n / s, bpm=60 * n / s)
         if m := re.search(r"timeout after ([\d.]+) s", out):
             return dict(phase="bulk", t=float(m[1]))
         if "no connect" in out:
             return dict(phase="connect")
-        sys.exit(f"seed {seed}: unexpected output:\n{out}")
+        stop(f"seed {seed}: unexpected output:\n{out}")
 
     trials.run(trial, a.seed, f"VARA {a.channel} {a.snr:g} dB, {a.bytes} B, BW{a.bw}")
 
