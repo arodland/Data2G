@@ -5,7 +5,8 @@
 # and, with CHANNEL, channel.py's fading. raw.py connects KC2G -> KC2G-2
 # (VARA registration goes by call) and writes <bytes> of random data at once:
 # the payload rate, as the IONOS SIM paper's and our speed test's. (Not Pat:
-# it feeds VARA 889 bytes per BUFFER 0, a fraction of an over's capacity.)
+# Pat writes 7 x 127 bytes per BUFFER report, and VARA reports after each
+# burst: 889 bytes an over.)
 #   scripts/cpu_profile/vara_ref.sh <500|2300> <bytes> <timeout s> <out dir>
 # Needs a registered VARA HF in WINEPREFIX (default ~/.wine-vara) copied to
 # C:\d2g_vara\a and \b, their VARA.ini set to TCP Command Port 8510 and 8610,
@@ -34,6 +35,7 @@ cleanup() {
   kill "${pids[@]}" $(marked) 2>/dev/null
   sleep 3
   kill -9 $(marked) 2>/dev/null  # winedevice.exe outlives SIGTERM, holding the audio driver
+  timeout 30 wineserver -w  # a next run joining this dying server gets no audio
   sleep 1
   # by name, not the IDs load-module printed: PipeWire reuses them
   for m in $(pactl list short modules | grep -E "sink_name=var_" | cut -f1); do pactl unload-module $m; done
