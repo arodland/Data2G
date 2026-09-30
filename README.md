@@ -1986,8 +1986,9 @@ at -5%.
 
 ## Outcome model v12, one logit offset, a deeper online correction (2026-09-29)
 
-TLDR: against v7, sessions deliver +13..+52% at the lowest fading SNRs and
-+16% at AWGN +15. MPP 0 is -6.8% and MPG -4 -5.3%, both about 2 SE.
+TLDR: against v7, both on master with DD and #19, sessions deliver +17..+36%
+at the lowest fading SNRs and +16% at AWGN +15. No cell is worse by more than
+1.2 SE (MPD 0 -3.8%, MPP 0 -3.5%, MPP -4 -3.0%).
 
 - **Why v7's offsets went:** they were a patch for a coverage loop.
   - They kept modes out of the sessions later models were trained on
@@ -1999,13 +2000,13 @@ TLDR: against v7, sessions deliver +13..+52% at the lowest fading SNRs and
     decodes 98% there.
   - On randomly chosen (explored) rows v10 is near calibrated, so no per-mode
     constant is right everywhere.
-- **Online correction** (`policy.BIAS_FIX`, on; `DATA2G_BIAS_FIX=0` is the
-  old one):
-  - It learns from data codewords only. The link counts control in, and a
-    burst whose control decodes and whose data all fail read as 1 of 9.
-  - It is bounded at 6 logits, not 3.
-  - Alone (v10 + v7's offsets) it changes nothing; without offsets it halves
-    the MPP 0 loss.
+- **Online correction:**
+  - It learns from data codewords only (#19's `usable`, found independently
+    here).
+  - `policy.BIAS_FIX`, on (`DATA2G_BIAS_FIX=0`: 3): it is bounded at 6
+    logits, not 3.
+  - The two together, alone (v10 + v7's offsets), change nothing; without
+    offsets they halve the MPP 0 loss.
 - **Data:**
   - v10's 2900 sessions and its 83,000-sample offline set.
   - 2900 sessions steered by v10 with no offsets and the new correction
@@ -2018,28 +2019,31 @@ TLDR: against v7, sessions deliver +13..+52% at the lowest fading SNRs and
 - **Training:** as v7 (5 bootstrap members, seeds 1-5, averaged).
 - **Offsets:** one, -1.0 on w48-16qam-r1/2: MPG +8 +6.7% (10/2 seeds), no
   change elsewhere.
-- **Loss study** against v7 with its offsets (12 seeds x 600 s, shift+cpm,
-  PEP5, paired by seed; bps):
+- **Loss study** against v7 as master ships it (v7's offsets, bound 3), both
+  on master with DD and #19 (12 seeds x 600 s, shift+cpm, PEP5, paired by
+  seed; bps; `runs/pr22_recheck.sh`). Before DD and #19 the same comparison
+  gave MPD -6 +52%, MPG -4 -5.3%, MPP 0 -6.8%: both lifted v7 at the lowest
+  SNRs.
 
   | cell | v7 | v12 | change |
   |---|---|---|---|
-  | MPD -6 | 64 | 97 | +51.9 +- 7.1% |
-  | MPP -8 | 50 | 69 | +37.0 +- 9.4% |
-  | AWGN +15 | 3815 | 4433 | +16.2 +- 0.7% |
-  | MPP -6 | 75 | 84 | +13.0 +- 4.3% |
-  | MPD +8 | 1216 | 1252 | +2.9 +- 2.4% |
-  | MPG +8 | 1238 | 1272 | +2.8 +- 1.1% |
-  | MPG +15 | 2296 | 2331 | +1.5 +- 2.1% |
+  | MPP -8 | 47 | 64 | +35.7 +- 8.2% |
+  | MPD -6 | 80 | 97 | +21.0 +- 3.8% |
+  | MPP -6 | 82 | 96 | +16.8 +- 4.8% |
+  | AWGN +15 | 3815 | 4441 | +16.4 +- 0.8% |
+  | MPP +15 | 2867 | 2955 | +3.1 +- 1.3% |
+  | MPG +8 | 1254 | 1272 | +1.4 +- 0.8% |
   | AWGN 0 | 558 | 564 | +1.0 +- 0.1% |
-  | MPG 0 | 314 | 316 | +0.6 +- 3.7% |
-  | MPP +8 | 1595 | 1604 | +0.5 +- 0.8% |
-  | MPD +20 | 2345 | 2318 | -1.2 +- 1.4% |
-  | MPP +15 | 2764 | 2725 | -1.4 +- 1.7% |
-  | MPD 0 | 234 | 229 | -2.2 +- 3.5% |
-  | MPD -4 | 105 | 102 | -3.2 +- 3.2% |
-  | MPP -4 | 169 | 162 | -4.1 +- 3.3% |
-  | MPG -4 | 145 | 137 | -5.3 +- 3.1% |
-  | MPP 0 | 354 | 330 | -6.8 +- 3.4% |
+  | MPP +8 | 1606 | 1615 | +0.6 +- 0.5% |
+  | MPG +15 | 2361 | 2362 | +0.0 +- 1.5% |
+  | MPG -4 | 143 | 142 | -0.4 +- 5.0% |
+  | MPD +20 | 2404 | 2373 | -1.3 +- 1.4% |
+  | MPG 0 | 327 | 323 | -1.4 +- 2.7% |
+  | MPD +8 | 1355 | 1335 | -1.4 +- 2.5% |
+  | MPD -4 | 128 | 126 | -1.5 +- 4.4% |
+  | MPP -4 | 181 | 175 | -3.0 +- 2.6% |
+  | MPP 0 | 370 | 357 | -3.5 +- 3.4% |
+  | MPD 0 | 266 | 256 | -3.8 +- 4.1% |
 
 - **Not kept:** the model before the slow-fading sessions reached AWGN 0 dB
   +40% against v7, but MPG -4 -13%.
