@@ -74,13 +74,25 @@ vara() {  # k tx_sink rx_sink
 until [ "$(pactl list short sources | grep -cE "($TX_A|$TX_B|var_ab|var_ba)\.monitor")" -ge $( [ $TX_A = var_ab ] && echo 2 || echo 4) ]; do sleep 0.2; done
 sleep 1
 wine_streams() { { pactl list sink-inputs; pactl list source-outputs; } 2>/dev/null | grep -c 'binary = "wine-preloader"'; }
-# one at a time: started together, one VARA may get no audio device
-base=$(wine_streams)
-for k in a b; do
-  [ $k = a ] && vara a $TX_A var_ba || vara b $TX_B var_ab
-  base=$(( base + 2 ))  # its playback and capture
-  for i in $(seq 300); do [ "$(wine_streams)" -ge $base ] && break; sleep 0.2; done
-  [ "$(wine_streams)" -ge $base ] || { echo "VARA $k opened no audio in 60 s" | tee $OUT/result.txt; exit 1; }
+wait_audio() {  # $1 streams open and staying open for 1 s (VARA may open and close them starting up), 60 s at most
+  local ok=0 i
+  for i in $(seq 300); do
+    if [ "$(wine_streams)" -ge "$1" ]; then ok=$(( ok + 1 )); [ $ok -ge 5 ] && return 0; else ok=0; fi
+    sleep 0.2
+  done
+  return 1
+}
+start_varas() {  # one at a time: started together, one VARA may get no audio device
+  local base
+  base=$(wine_streams)
+  vara a $TX_A var_ba && wait_audio $(( base + 2 )) || return 1  # its playback and capture
+  vara b $TX_B var_ab && wait_audio $(( base + 4 ))
+}
+for try in 1 2 3; do  # a slow start (a loaded machine) is retried, not the end of a sweep
+  start_varas && break
+  { pactl list sink-inputs; pactl list source-outputs; } > $OUT/streams_fail$try.txt 2>&1
+  kill -9 $(marked) 2>/dev/null; timeout 30 wineserver -w
+  [ $try = 3 ] && { echo "VARA opened no audio in 60 s, 3 tries" | tee $OUT/result.txt; exit 1; }
 done
 sleep 3
 
