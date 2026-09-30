@@ -17,6 +17,7 @@ acked (B's copy checked). As run.sh with A_BYTES=n, B_BYTES=0, without Pat.
     python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0]
 """
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -41,6 +42,16 @@ from noise import BLK, Noise  # noqa: E402
 from noise import FS as FS_DEV  # noqa: E402
 
 BLOCK = FS // 10
+
+
+def log_arg(ap):
+    """--log-level: data2g's log (data2g-host's), to stderr. Unconfigured,
+    Python prints its warnings bare (receiver "burst lost" lines)."""
+    ap.add_argument("--log-level", default="ERROR", help="data2g's log on stderr (the host's is INFO)")
+
+
+def log_setup(a):
+    logging.basicConfig(level=a.log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
 # one way, audio out -> audio in. Measured on run.sh loopback recordings (8
 # runs, 2026-09-29, under py-spy): each burst's end at the sender to the
 # receiver's rx event, summed over both directions, averaged 1.06-1.31 s
@@ -148,7 +159,9 @@ def main():
     ap.add_argument("--latency", type=float, default=LATENCY_S, help="one-way audio latency, s")
     ap.add_argument("--record", metavar="DIR", help="record both stations (DIR/rec_a, rec_b), as data2g-host does")
     ap.add_argument("--limit", type=float, default=3600.0, help="give up after this much simulated time, s")
+    log_arg(ap)
     a = ap.parse_args()
+    log_setup(a)
     r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record)
     head = f"{a.channel} {a.snr:g} dB seed {a.seed}:"
     if r["phase"] == "done":

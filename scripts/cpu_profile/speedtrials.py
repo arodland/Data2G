@@ -22,7 +22,9 @@ def main():
     ap.add_argument("--bw", choices=["500", "1200", "2300", "2750"], default="2300")
     ap.add_argument("--seed", type=int, default=0, help="first seed")
     ap.add_argument("--latency", type=float, default=T.LATENCY_S)
+    T.log_arg(ap)
     a = ap.parse_args()
+    T.log_setup(a)
     ok, failed = [], {}
     seed = a.seed
     while len(ok) < WINS and sum(failed.values()) < LOSSES:
