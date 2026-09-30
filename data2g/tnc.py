@@ -33,7 +33,7 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 from . import codes, modem  # noqa: E402
-from .config import BANDS, FS, LEADIN_SAMPLES, MAX_CODEWORDS, NSYM  # noqa: E402
+from .config import BANDS, FS, LEADIN_SAMPLES, NSYM, max_codewords  # noqa: E402
 
 log = logging.getLogger("data2g.tnc")
 
@@ -75,9 +75,10 @@ class KissDecoder:
 
 # --- framing ----------------------------------------------------------------
 
-def capacity(spec, max_cw: int = MAX_CODEWORDS) -> int:
-    """Bytes a burst of at most `max_cw` codewords carries, length fields included."""
-    return max_cw * codes.payload_bytes(spec)
+def capacity(spec, max_cw: int | None = None) -> int:
+    """Bytes a burst of at most `max_cw` codewords (default: what its header
+    can announce) carries, length fields included."""
+    return (max_cw or max_codewords(spec.sync_band)) * codes.payload_bytes(spec)
 
 
 def pack(packets: list[bytes], spec) -> list[bytes]:

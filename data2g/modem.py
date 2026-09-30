@@ -31,8 +31,9 @@ from .config import (
     HEADER_COPY_BANDS,
     LEADIN_SAMPLES,
     LEADOUT_SAMPLES,
+    CW_BITS,
     M,
-    MAX_CODEWORDS,
+    max_codewords,
     NCP,
     NSYM,
     PREAMBLE_CP,
@@ -201,15 +202,24 @@ def _word_bits(word: int) -> np.ndarray:
     return (word >> np.arange(15, -1, -1)) & 1
 
 
+def _split(v: int, band: str) -> tuple[int, int]:
+    """A header's 10-bit value -> (submode index, n_cw) on this sync band."""
+    b = CW_BITS.get(band, 6)
+    return v >> b, (v & ((1 << b) - 1)) + 1
+
+
 def header_bits(submode: int, n_cw: int, band: str = "w") -> np.ndarray:
     """-> coded header bits for the band. Word: submode (4) | n_cw - 1 (6)
-    | CRC-6. Was 8 + CRC-4 until measured: tried at 5 alignments and on
-    every band whose detector fires, a 4-bit check let wrong headers
-    through after the true one failed (11 of 200 wide ACKs at -6 dB on
-    mpd read as a burst of hundreds of codewords)."""
-    if not 1 <= n_cw <= MAX_CODEWORDS:
-        raise ValueError(f"1..{MAX_CODEWORDS} codewords per burst")
-    v = (submode << 6) | (n_cw - 1)
+    | CRC-6, 5 | 5 on n10 (config.CW_BITS). Was 8 + CRC-4 until measured:
+    tried at 5 alignments and on every band whose detector fires, a 4-bit
+    check let wrong headers through after the true one failed (11 of 200
+    wide ACKs at -6 dB on mpd read as a burst of hundreds of codewords)."""
+    b = CW_BITS.get(band, 6)
+    if not 1 <= n_cw <= 1 << b:
+        raise ValueError(f"1..{1 << b} codewords per burst on {band}")
+    if not 0 <= submode < 1 << (10 - b):
+        raise ValueError(f"submode index {submode} does not fit {band}'s header")
+    v = (submode << b) | (n_cw - 1)
     return (_word_bits((v << 6) | _crc6(v)) @ header_code(band)) % 2
 
 
@@ -245,7 +255,7 @@ class Accept:
         out = []
         for n in names or SUBMODES:
             s = SUBMODES[n]
-            cw = MAX_CODEWORDS
+            cw = max_codewords(s.sync_band)
             if max_secs is not None:
                 fixed = BANDS[s.sync_band].preamble_samples + header_samples(s.sync_band) + NSYM
                 fixed += FRAME_SAMPLES * (s.sync_band in HEADER_COPY_BANDS)
@@ -265,10 +275,10 @@ def _valid_words(band: str, accept: Accept | None = None) -> np.ndarray:
     taken by `accept`)."""
     v = np.arange(2**10)
     if accept is None:
-        v = v[np.isin(v >> 6, [i for b, i in BY_INDEX if b == band])]
+        v = v[[_split(int(x), band)[0] in {i for b, i in BY_INDEX if b == band} for x in v]]
     else:
         lim = {SUBMODES[n].index: cw for n, cw in accept.max_cw if SUBMODES[n].sync_band == band}
-        v = v[[(x >> 6) in lim and (x & 0x3F) < lim[x >> 6] for x in v]]
+        v = v[[(i := _split(int(x), band))[0] in lim and i[1] <= lim[i[0]] for x in v]]
     return (v << 6) | np.array([_crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
 
 
@@ -291,8 +301,8 @@ def decode_header(soft: np.ndarray, band: str = "w",
     i = int(np.argmax(corr))
     word = int(words[i])
     score = float(corr[i] / (np.sqrt(np.sum(soft**2) * len(soft)) + 1e-12))
-    v = word >> 6
-    return word, (BY_INDEX[(band, v >> 6)], (v & 0x3F) + 1), score
+    sub, n_cw = _split(word >> 6, band)
+    return word, (BY_INDEX[(band, sub)], n_cw), score
 
 
 # --- transmit ---------------------------------------------------------------
@@ -302,8 +312,8 @@ def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None) -> np.
     audio. `rvs`: each codeword's redundancy version (codes.rv_positions),
     all 0 by default."""
     spec = SUBMODES[submode] if isinstance(submode, str) else submode
-    if not 1 <= len(payloads) <= MAX_CODEWORDS:
-        raise ValueError(f"1..{MAX_CODEWORDS} codewords per burst, got {len(payloads)}")
+    if not 1 <= len(payloads) <= max_codewords(spec.sync_band):
+        raise ValueError(f"1..{max_codewords(spec.sync_band)} codewords per burst, got {len(payloads)}")
     bits = np.stack([codes.encode(spec, p, rv, index=i) for i, (p, rv) in enumerate(zip(payloads, rvs or [0] * len(payloads)))])
     return modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
 

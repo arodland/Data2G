@@ -69,11 +69,11 @@ def mode_lines(cap: int) -> list[str]:
     from . import codes, cpm
     from .arq import policy as G
     from .arq.modes import burst_seconds, is_cpm
-    from .config import MAX_CODEWORDS
+    from .config import max_codewords
 
     out = []
     for s in sorted(G.allowed(cap), key=lambda s: (G.width_hz(s), s.name)):
-        n = 1 + cpm.MAX_DATA if is_cpm(s) else MAX_CODEWORDS
+        n = 1 + cpm.MAX_DATA if is_cpm(s) else max_codewords(s.sync_band)
         out.append(f"MODE {s.name} {G.width_hz(s):.0f} {codes.payload_bytes(s)} {n} "
                    f"{burst_seconds(s, 1):.2f} {burst_seconds(s, n):.2f}")
     return out

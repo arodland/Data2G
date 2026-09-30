@@ -70,7 +70,8 @@ FIRST_PATH_FRAC = 0.5
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
 PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
-# 12: polar codewords carry CRC-24 (k + 8, payloads kept)
+# 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
+# in place: development, one operator)
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
@@ -80,7 +81,17 @@ PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09
 # contiguous (an 8-symbol header: w48 MPP -1 4.8%); 1-4 frames later alike.
 HEADER_COPY_BANDS = ("w", "w48")
 HEADER_COPY_AFTER = 2
-MAX_CODEWORDS = 64  # the header carries n_cw - 1 in 6 bits
+MAX_CODEWORDS = 64  # the header carries n_cw - 1 in 6 bits (CW_BITS: fewer on n10)
+# The header word's 10 bits split per sync band: submode | n_cw - 1, 6 bits
+# of count unless listed. n10's 16 indices (n10 and n4) were full; its
+# bursts never need 64 codewords (at 16 s, MAX_BURST_S, the most is 55
+# n4-ack-2f, which the shifter never plans past 12 s), so it takes 5 | 5.
+CW_BITS = {"n10": 5}
+
+
+def max_codewords(sync_band: str) -> int:
+    """Codewords a burst's header can announce on this sync band."""
+    return 1 << CW_BITS.get(sync_band, 6)
 
 LEADIN_SAMPLES = 800  # 100 ms of silence before the preamble
 LEADOUT_SAMPLES = 800
@@ -179,7 +190,7 @@ class BandSpec:
 # --- submodes ---------------------------------------------------------------
 @dataclass(frozen=True)
 class SubmodeSpec:
-    index: int  # 0..15, sent in the header
+    index: int  # sent in the header: 0..15 (0..31 on n10, CW_BITS)
     name: str
     code: str  # "ldpc" | "polar"
     constellation: str  # name for data2g.constellation.load

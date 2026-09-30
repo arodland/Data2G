@@ -20,6 +20,7 @@ import numpy as np
 
 from .. import codes, modem
 from .. import cpm
+from ..config import max_codewords
 from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
 from . import frames as F
 from . import predictor as P
@@ -144,8 +145,8 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     longer (a CPM data codeword is 3-10 s)."""
     if is_cpm(spec):
         seconds = min(seconds * CPM_SIZE_SCALE, CPM_MAX_S)
-    n = 1
-    while n < 64 and burst_seconds(spec, n + 1) <= seconds:
+    n, lim = 1, 64 if is_cpm(spec) else max_codewords(spec.sync_band)
+    while n < lim and burst_seconds(spec, n + 1) <= seconds:
         n += 1
     n = max(n, min_cw(spec, data), ctl_slots(spec) + data)
     if is_cpm(spec):
@@ -308,7 +309,9 @@ class GearShifter:
         the mode it should use if it sends data, and if it sends none."""
         if self.measured is None:
             return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
-        cands = [s for s in allowed(station.cap) if (not is_cpm(s) or (self.use_cpm and P.outcome_knows(s.name)))]
+        # only modes the outcome model has learned (a mode added since is
+        # left out until a model trained with it ships)
+        cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
         m = self.measured
         prev = None
         if self.prev is not None:

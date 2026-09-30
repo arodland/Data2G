@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from . import codes, cpm
-from .config import MAX_CODEWORDS
+from .config import max_codewords
 from .arq import frames as F
 from .arq import phy as PHY
 from .arq import policy as G
@@ -379,7 +379,7 @@ class KissLink:
         # the size class is a preference: a burst grows to carry its first frame
         # (a 256-byte PACLEN I frame outgrew a 12 s qpsk-r1/5 burst), up to what
         # its header can say
-        limit = 1 + 1 + cpm.MAX_DATA if is_cpm(spec) else MAX_CODEWORDS
+        limit = 1 + 1 + cpm.MAX_DATA if is_cpm(spec) else max_codewords(spec.sync_band)
         need = len(ctl) + -(-(2 + len(first)) // pb)
         n_max = min(limit, max(G.slots_for(spec, seconds), need))
         room = (n_max - len(ctl)) * pb
