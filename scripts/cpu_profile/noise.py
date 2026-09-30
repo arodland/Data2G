@@ -10,7 +10,7 @@ give any advantage of High CF signals"), over the noise in 3000 Hz. The noise
 filter is its 3 kHz one. Its firmware 2.03 sets fixed noise and signal gains
 calibrated at a nominal input level; here the input's peak is the host's
 full scale (--output-volume 0 puts each burst's peak there). NOISE_PEAK: a
-different peak (1.0)."""
+different peak (1.0). NOISE_SINKS: the sinks, comma-separated (d2g_ab,d2g_ba)."""
 import os
 import subprocess
 import sys
@@ -46,7 +46,8 @@ class Noise:
 
 if __name__ == "__main__":
     procs = [subprocess.Popen(["pacat", "--playback", f"--device={s}", "--format=float32le", "--rate=48000",
-                               "--channels=1", "--latency-msec=100"], stdin=subprocess.PIPE) for s in ("d2g_ab", "d2g_ba")]
+                               "--channels=1", "--latency-msec=100"], stdin=subprocess.PIPE)
+             for s in os.environ.get("NOISE_SINKS", "d2g_ab,d2g_ba").split(",")]
     noise = Noise(int(sys.argv[1]) if len(sys.argv) > 1 else 0, len(procs), float(os.environ.get("NOISE_PEAK", "1.0")))
     t = 0.0
     fixed = os.environ.get("NOISE_SNR")
