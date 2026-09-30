@@ -8,6 +8,7 @@ session gets 889 bytes an over).
 
     python raw.py <a command port> <b command port> <a->b file> <b->a file> <timeout s>
 
+On a mismatch a->b the bytes received are kept in <a->b file>.got.
 RAW_CALLS: the two calls (default "W1AW K2XYZ"), each sent as MYCALL
 first; RAW_BW: a bandwidth command for both (e.g. BW2300). Prints bytes,
 seconds, rates and whether each direction arrived exact, and the median of
@@ -70,6 +71,15 @@ def main():
     ok = pump(lambda: len(got["b"]) >= len(up) and len(got["a"]) >= len(down))
     dt = time.monotonic() - t0
     exact = bytes(got["b"]) == up and bytes(got["a"]) == down
+    if bytes(got["b"]) != up:  # keep what arrived, and say how it differs
+        open(sys.argv[3] + ".got", "wb").write(got["b"])
+        bad = [i for i, (x, y) in enumerate(zip(got["b"], up)) if x != y]
+        if bad:
+            chunk = bytes(got["b"][bad[0]:bad[0] + 64])
+            elsewhere = up.find(chunk)
+            print(f"mismatch: {len(bad)} bytes differ, offsets {bad[0]}..{bad[-1]}; the first bad 64 bytes "
+                  + (f"are the sent data's at offset {elsewhere} (reordered/duplicated)" if elsewhere >= 0
+                     else "appear nowhere in the sent data (corrupted)"))
     print(f"{'done' if ok else 'timeout'} after {dt:.1f} s: a->b {len(got['b'])}/{len(up)} B "
           f"({60 * len(got['b']) / dt:.0f} B/min), b->a {len(got['a'])}/{len(down)} B, exact {exact}")
     sn = [float(x.split()[1]) for k in "ab" for x in lines[k] if x.startswith("SN ")]

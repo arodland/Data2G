@@ -33,7 +33,10 @@ sink() { mods+=($(pactl load-module module-null-sink sink_name=$1 sink_propertie
 marked() {  # the VARA instances, their Xvfb and the Wine services they started
   for p in /proc/[0-9]*; do grep -qzxF "D2G_VARA_RUN=$OUT" $p/environ 2>/dev/null && echo ${p#/proc/}; done
 }
+VLOG="$WINEPREFIX/drive_c/d2g_vara"  # each instance's VARAHF.log: this run's lines kept in $OUT
+declare -A vlines=([a]=$(cat "$VLOG/a/VARAHF.log" 2>/dev/null | wc -l) [b]=$(cat "$VLOG/b/VARAHF.log" 2>/dev/null | wc -l))
 cleanup() {
+  for k in a b; do tail -n +$(( vlines[$k] + 1 )) "$VLOG/$k/VARAHF.log" > "$OUT/VARAHF_$k.log" 2>/dev/null; done
   kill "${pids[@]}" $(marked) 2>/dev/null
   sleep 3
   kill -9 $(marked) 2>/dev/null  # winedevice.exe outlives SIGTERM, holding the audio driver
