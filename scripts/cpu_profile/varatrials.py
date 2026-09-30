@@ -6,7 +6,9 @@ has it all. Real time: a run lasts as long as VARA takes.
     python scripts/cpu_profile/varatrials.py <channel> <snr_db> [--bytes 20000] [--bw 2300] [--seed 0]
 
 A run where VARA opened no audio is the harness's failure, not VARA's: it
-stops the trials (exit 2). Each run's files: <out>/<channel>_<snr>dB_<bw>_<bytes>B/seed<n>/.
+stops the trials (exit 2). Data delivered wrong counts as a failure
+("corrupt"; the bytes received and both VARA logs are in the seed's files).
+Each run's files: <out>/<channel>_<snr>dB_<bw>_<bytes>B/seed<n>/.
 """
 import argparse
 import os
@@ -48,8 +50,8 @@ def main():
         if "opened no audio" in out:
             stop(f"seed {seed}: {out.strip().splitlines()[-1]} (the harness, not VARA: stopping)")
         if m := re.search(r"done after ([\d.]+) s: a->b (\d+)/(\d+) B .* exact (\w+)", out):
-            if m[4] != "True":
-                stop(f"seed {seed}: data corrupted: {m[0]}")
+            if m[4] != "True":  # VARA's doing, on air: a failure, evidence kept (raw.py)
+                return dict(phase="corrupt", t=float(m[1]))
             s, n = float(m[1]), int(m[3])
             return dict(phase="done", seconds=s, bps=8 * n / s, bpm=60 * n / s)
         if m := re.search(r"timeout after ([\d.]+) s", out):
