@@ -78,7 +78,7 @@ class Cycles:
     """Base-graph 4- and 6-cycles as (edge ids, signs): the lifted cycle
     exists when sum(sign * shift[edge]) = 0 mod z."""
 
-    def __init__(self, mask: np.ndarray):
+    def __init__(self, mask: np.ndarray, eight: bool = False):
         self.mask = mask
         self.eid = np.full(mask.shape, -1, dtype=np.int64)
         self.er, self.ec = np.nonzero(mask)
@@ -98,6 +98,25 @@ class Cycles:
                     for w in C - {x, y}:
                         c6.append((e[a, x], e[b, x], e[b, y], e[c, y], e[c, w], e[a, w]))
         self.c = {4: np.array(c4), 6: np.array(c6)}
+        if eight:  # BG2: 256k base 8-cycles; a = min row, neighbours b < d
+            c8 = []
+            M = mask.shape[0]
+            for a in range(M):
+                for b, d in itertools.combinations(range(a + 1, M), 2):
+                    X, V = nb[a] & nb[b], nb[d] & nb[a]
+                    if not (X and V):
+                        continue
+                    for c in range(a + 1, M):
+                        if c in (b, d):
+                            continue
+                        Y, W = nb[b] & nb[c], nb[c] & nb[d]
+                        for x in X:
+                            for y in Y - {x}:
+                                for w in W - {x, y}:
+                                    for v in V - {x, y, w}:
+                                        c8.append((e[a, x], e[b, x], e[b, y], e[c, y],
+                                                   e[c, w], e[d, w], e[d, v], e[a, v]))
+            self.c[8] = np.array(c8)
         # a cycle's max row: it is in a truncated graph iff that row is kept
         self.top = {L: self.er[cy].max(1) for L, cy in self.c.items()}
 
@@ -108,9 +127,12 @@ class Cycles:
         """(cycles,) bool: lifts to Z cycles of length L."""
         return (s[self.c[L]] * self.sign(L)).sum(1) % z == 0
 
-    def counts(self, s: np.ndarray, z: int, mb: int) -> tuple[int, int]:
-        """Balanced base 4- and 6-cycles among rows < mb."""
-        return tuple(int((self.balanced(s, z, L) & (self.top[L] < mb)).sum()) for L in (4, 6))
+    def counts(self, s: np.ndarray, z: int, mb: int) -> tuple[int, ...]:
+        """Balanced base 4-, 6- (and 8-) cycles among rows < mb."""
+        return tuple(int((self.balanced(s, z, L) & (self.top[L] < mb)).sum()) for L in sorted(self.c))
+
+
+G8_W6 = 4.0  # g8: one 6-cycle counts as this many 8-cycles
 
 
 def lift(cyc: Cycles, bg: int, z: int, mode: str, seed: int) -> np.ndarray:
@@ -138,7 +160,9 @@ def lift(cyc: Cycles, bg: int, z: int, mode: str, seed: int) -> np.ndarray:
         closing = {k: np.array(v) for k, v in closing.items()}
         for e in order:
             score = rng.random(z) * 0.5
-            for L, w in ((4, 1e6), (6, 1.0 if mode == "g6" else 0.0)):
+            weights = {"g6": ((4, 1e6), (6, 1.0)), "g4": ((4, 1e6),),
+                       "g8": ((4, 1e6), (6, G8_W6), (8, 1.0))}[mode]
+            for L, w in weights:
                 idx = closing.get((L, e))
                 if idx is None or w == 0:
                     continue
@@ -169,8 +193,10 @@ def code_with(table: np.ndarray, bg: int, k: int, n: int) -> ldpc.QCLDPC:
 def cmd_gen(a):
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
-    for bg in (1, 2):
-        cyc = Cycles(mask_of(bg))
+    eight = "g8" in a.modes
+    for bg in a.bg:
+        cyc = Cycles(mask_of(bg), eight=eight)
+        Ls = sorted(cyc.c)
         for (g, z), subs in shipped().items():
             if g != bg:
                 continue
@@ -186,18 +212,18 @@ def cmd_gen(a):
                     code_with(t, bg, *subs[0][1:])._core_inv
                 r = {"bg": bg, "z": z, "cand": name}
                 for mb in mbs:
-                    c4, c6 = cyc.counts(s, z, mb)
-                    r[f"c4_mb{mb}"], r[f"c6_mb{mb}"] = c4, c6
+                    for L, c in zip(Ls, cyc.counts(s, z, mb)):
+                        r[f"c{L}_mb{mb}"] = c
                 rows.append(r)
-            np.savez_compressed(OUT / f"cands_bg{bg}_z{z}.npz", **tables)
+            np.savez_compressed(OUT / f"cands_bg{bg}_z{z}{a.tag}.npz", **tables)
             best = sorted((x for x in rows if x["bg"] == bg and x["z"] == z and x["cand"] != "nr"),
                           key=lambda x: rank_key(x))[:3]
             nr = next(x for x in rows if x["bg"] == bg and x["z"] == z and x["cand"] == "nr")
-            fmt = lambda x: " ".join(f"{x[f'c4_mb{m}']}/{x[f'c6_mb{m}']}" for m in mbs)
-            print(f"bg{bg} z={z:3d} mb {mbs}  4/6-cycles  nr {fmt(nr)}  |  "
+            fmt = lambda x: " ".join("/".join(str(x[f"c{L}_mb{m}"]) for L in Ls) for m in mbs)
+            print(f"bg{bg} z={z:3d} mb {mbs}  {'/'.join(map(str, Ls))}-cycles  nr {fmt(nr)}  |  "
                   + "  ".join(f"{x['cand']} {fmt(x)}" for x in best), flush=True)
     keys = list(dict.fromkeys(k for r in rows for k in r))
-    with open(OUT / "cycles.csv", "w", newline="") as f:
+    with open(OUT / f"cycles{a.tag}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, keys)
         w.writeheader()
         w.writerows(rows)
@@ -207,7 +233,10 @@ def rank_key(r):
     """Fewest 4-cycles anywhere, then 6-cycles in the shipped graphs
     (the smallest truncation first: it is in every code of this z)."""
     mbs = sorted(int(k[5:]) for k in r if k.startswith("c4_mb"))
-    return (sum(r[f"c4_mb{m}"] for m in mbs),) + tuple(r[f"c6_mb{m}"] for m in mbs)
+    c4 = sum(r[f"c4_mb{m}"] for m in mbs)
+    if f"c8_mb{mbs[0]}" in r:  # with 8-cycles: g8's own weighting, summed
+        return (c4, sum(G8_W6 * r[f"c6_mb{m}"] + r[f"c8_mb{m}"] for m in mbs))
+    return (c4,) + tuple(r[f"c6_mb{m}"] for m in mbs)
 
 
 # The GPU is shared with the desktop: the decoder's (batch, checks, dmax)
@@ -328,48 +357,59 @@ def cmd_deep(a):
     gpu_cap(a.device)
     path = OUT / f"deep_{a.tag}.csv"
     done = set()
-    if path.exists():  # resume: a code's rows are written together, at its end
+    if path.exists():  # resume: a (code, cand)'s rows are written together, at its end
         with open(path) as f:
-            done = {r["submode"] for r in csv.DictReader(f)}
+            done = {(r["submode"], r["cand"]) for r in csv.DictReader(f)}
     fh = open(path, "a", newline="")
     w = csv.writer(fh)
     if not done:
         w.writerow(["bg", "z", "submode", "k", "n", "cand", "test", "ebn0", "bler_nr", "bler_cand"])
     with open(OUT / "sim_stage1.csv") as f:
         e1 = {(int(r["k"]), int(r["n"])): float(r["ebn0_1"]) for r in csv.DictReader(f) if r["cand"] == "nr"}
-    for (bg, z), cand in picks(OUT / "sim_stage1.csv").items():
-        tables = np.load(OUT / f"cands_bg{bg}_z{z}.npz")
+    if a.cands_tag:  # the top of a gen ranking, untested by sim
+        with open(OUT / f"cycles{a.cands_tag}.csv") as f:
+            cyc_rows = [{k: (v if k == "cand" else int(v)) for k, v in r.items() if v != ""}
+                        for r in csv.DictReader(f)]
+        todo = {}
+        for r in sorted((r for r in cyc_rows if r["cand"] != "nr"), key=rank_key):
+            todo.setdefault((r["bg"], r["z"]), []).append(r["cand"])
+        todo = {g: c[: a.top] for g, c in todo.items()}
+    else:
+        todo = {g: [c] for g, c in picks(OUT / "sim_stage1.csv").items()}
+    for (bg, z), cands in todo.items():
+        if a.only and f"bg{bg}z{z}" not in a.only:
+            continue
+        tables = np.load(OUT / f"cands_bg{bg}_z{z}{a.cands_tag}.npz")
         for name, k, n in shipped()[(bg, z)]:
-            if name in done:
+            left = [c for c in cands if (name, c) not in done]
+            if not left:
                 continue
-            rows = []
             grid = np.round(e1[(k, n)] + np.array([0.25, 0.5, 0.75]), 2)
             bn = bler_curve(code_with(tables["nr"], bg, k, n), grid, a.blocks, a.device, seed=7)
-            bc = bler_curve(code_with(tables[cand], bg, k, n), grid, a.blocks, a.device, seed=7)
-            for e, x, y in zip(grid, bn, bc):
-                rows.append([bg, z, name, k, n, cand, "floor", e, f"{x:.2e}", f"{y:.2e}"])
-            print(f"bg{bg} z={z:3d} {name:16s} {cand:8s} floor " + "  ".join(
-                f"{e:.2f}: {x:.1e}/{y:.1e}" for e, x, y in zip(grid, bn, bc)), flush=True)
-            mother = code_with(tables["nr"], bg, k, n).mother()
-            n2 = min(2 * n, mother.n)
-            if n2 <= n:
+            n2 = min(2 * n, code_with(tables["nr"], bg, k, n).mother().n)
+            if n2 > n:
+                nr2 = code_with(tables["nr"], bg, k, n2)
+                lo = np.arange(-4.0, 6.01, 0.5)
+                b0 = bler_curve(nr2, lo, 2000, a.device)
+                e_hi = lo[np.argmax(b0 < 3e-3)] if (b0 < 3e-3).any() else lo[-1]
+                g2 = np.round(np.arange(e_hi - 1.5, e_hi + 0.51, 0.25), 2)
+                bn2 = bler_curve(nr2, g2, a.blocks // 10, a.device)
+            for cand in left:
+                rows = []
+                bc = bler_curve(code_with(tables[cand], bg, k, n), grid, a.blocks, a.device, seed=7)
+                for e, x, y in zip(grid, bn, bc):
+                    rows.append([bg, z, name, k, n, cand, "floor", e, f"{x:.2e}", f"{y:.2e}"])
+                print(f"bg{bg} z={z:3d} {name:16s} {cand:8s} floor " + "  ".join(
+                    f"{e:.2f}: {x:.1e}/{y:.1e}" for e, x, y in zip(grid, bn, bc)), flush=True)
+                if n2 > n:
+                    bc = bler_curve(code_with(tables[cand], bg, k, n2), g2, a.blocks // 10, a.device)
+                    d = [crossing(g2, bc, t) - crossing(g2, bn2, t) for t in (0.1, 0.01)]
+                    for e, x, y in zip(g2, bn2, bc):
+                        rows.append([bg, z, name, k, n2, cand, "ir", e, f"{x:.2e}", f"{y:.2e}"])
+                    print(f"bg{bg} z={z:3d} {name:16s} {cand:8s} IR n={n2}  d10 {d[0]:+.2f}  d1 {d[1]:+.2f}"
+                          f"  top {g2[-1]:.2f}: {bn2[-1]:.1e}/{bc[-1]:.1e}", flush=True)
                 w.writerows(rows)
                 fh.flush()
-                continue
-            nr2 = code_with(tables["nr"], bg, k, n2)
-            lo = np.arange(-4.0, 6.01, 0.5)
-            b0 = bler_curve(nr2, lo, 2000, a.device)
-            e_hi = lo[np.argmax(b0 < 3e-3)] if (b0 < 3e-3).any() else lo[-1]
-            g2 = np.round(np.arange(e_hi - 1.5, e_hi + 0.51, 0.25), 2)
-            bn = bler_curve(nr2, g2, a.blocks // 10, a.device)
-            bc = bler_curve(code_with(tables[cand], bg, k, n2), g2, a.blocks // 10, a.device)
-            d = [crossing(g2, bc, t) - crossing(g2, bn, t) for t in (0.1, 0.01)]
-            for e, x, y in zip(g2, bn, bc):
-                rows.append([bg, z, name, k, n2, cand, "ir", e, f"{x:.2e}", f"{y:.2e}"])
-            print(f"bg{bg} z={z:3d} {name:16s} {cand:8s} IR n={n2}  d10 {d[0]:+.2f}  d1 {d[1]:+.2f}"
-                  f"  top {g2[-1]:.2f}: {bn[-1]:.1e}/{bc[-1]:.1e}", flush=True)
-            w.writerows(rows)
-            fh.flush()
 
 
 def main():
@@ -378,6 +418,8 @@ def main():
     g = sub.add_parser("gen")
     g.add_argument("--seeds", type=int, default=32)
     g.add_argument("--modes", nargs="+", default=["g6", "g4", "rand"])
+    g.add_argument("--bg", type=int, nargs="+", default=[1, 2])
+    g.add_argument("--tag", default="", help="output suffix: cands_bg2_z96<tag>.npz, cycles<tag>.csv")
     s = sub.add_parser("sim")
     s.add_argument("--top", type=int, default=3)
     s.add_argument("--extra", nargs="*", default=[], help="candidates to add, e.g. rand-0")
@@ -388,6 +430,9 @@ def main():
     d = sub.add_parser("deep")
     d.add_argument("--blocks", type=int, default=100000)
     d.add_argument("--tag", default="stage2")
+    d.add_argument("--cands-tag", default="", help="test the top of cycles<tag>.csv, not stage-1 picks")
+    d.add_argument("--top", type=int, default=2)
+    d.add_argument("--only", nargs="*", default=[], help="bg2z192 ...")
     d.add_argument("--device", default="cuda")
     a = ap.parse_args()
     {"gen": cmd_gen, "sim": cmd_sim, "deep": cmd_deep}[a.cmd](a)
