@@ -13,8 +13,8 @@
 # KISS off (their sound devices are set here, per run). Only processes
 # started here are stopped (marked by D2G_VARA_RUN in their environment);
 # other Wine programs are left alone.
-# NOISE_SNR, NOISE_PEAK, CHANNEL as run.sh. REC=1: record both RX sinks
-# (VARA then loses its sound devices: another capture on a sink monitor).
+# NOISE_SNR, NOISE_PEAK, CHANNEL as run.sh (CHANNEL: each VARA plays into its
+# own TX sink, channel.py fades it into the other's). REC=1: record both RX sinks.
 # HEADLESS=0: VARA on the real display instead of Xvfb.
 # WINEDEBUG: -all unless set (VARA floods Wine's debug log: disk, and slow).
 # Ports 8510/8610 (+1).
@@ -67,7 +67,7 @@ vara() {  # k tx_sink rx_sink
   D2G_VARA_RUN=$OUT "${x[@]}" wine "C:\\d2g_vara\\$1\\VARA.exe" > $OUT/vara_$1.log 2>&1 &
 }
 # Wine lists the devices once, at start: the sinks and monitors must be up
-until [ "$(pactl list short sources | grep -cE "var_(ab|ba)\.monitor")" = 2 ]; do sleep 0.2; done
+until [ "$(pactl list short sources | grep -cE "($TX_A|$TX_B|var_ab|var_ba)\.monitor")" -ge $( [ $TX_A = var_ab ] && echo 2 || echo 4) ]; do sleep 0.2; done
 sleep 1
 wine_streams() { { pactl list sink-inputs; pactl list source-outputs; } 2>/dev/null | grep -c 'binary = "wine-preloader"'; }
 # one at a time: started together, one VARA may get no audio device
