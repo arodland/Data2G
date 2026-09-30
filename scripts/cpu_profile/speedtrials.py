@@ -29,7 +29,7 @@ def main():
         r = T.run(a.channel, a.snr, a.bytes, seed, cap=T.BW["BW" + a.bw], latency=a.latency)
         if r["phase"] == "done":
             ok.append(r)
-            print(f"seed {seed}: {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min", flush=True)
+            print(f"seed {seed}: {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min; {T.top2(r['airtime'])}", flush=True)
         else:
             failed[r["phase"]] = failed.get(r["phase"], 0) + 1
             print(f"seed {seed}: FAILED during {r['phase']} at {r['t']:.1f} s", flush=True)
@@ -44,7 +44,8 @@ def main():
     used = ok[1:-1] if len(ok) == WINS else ok
     what = "middle 3 of 5" if len(ok) == WINS else f"all {len(ok)}"
     print(f"mean of {what}: {np.mean([r['seconds'] for r in used]):.1f} s = "
-          f"{np.mean([r['bps'] for r in used]):.0f} bit/s = {np.mean([r['bpm'] for r in used]):.0f} B/min")
+          f"{np.mean([r['bps'] for r in used]):.0f} bit/s = {np.mean([r['bpm'] for r in used]):.0f} B/min; "
+          f"{T.top2({k: sum(r['airtime'].get(k, 0.0) for r in used) for q in used for k in q['airtime']})}")
 
 
 if __name__ == "__main__":

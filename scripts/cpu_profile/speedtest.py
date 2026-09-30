@@ -58,10 +58,15 @@ class Side:
         self.interp, self.dec = Interpolator(FS_DEV), Decimator(FS_DEV)
         self.fader, self.keyed = fader, False
         self.fifo = np.zeros(delay)
+        self.airtime = {}  # submode -> seconds on air (PTT delay excluded)
 
     def step(self, x):
         """48 kHz heard -> 48 kHz arriving at the other side (host.serve's loop)."""
+        was = self.eng.tx and self.eng.tx[0]
         y, ptt = self.eng.step(self.dec(x) if not self.keyed else np.zeros(BLOCK))
+        if self.eng.tx and self.eng.tx[0] is not was:  # a burst started
+            sub = self.eng.tx[0].submode
+            self.airtime[sub] = self.airtime.get(sub, 0.0) + (len(self.eng.tx[1]) - self.eng.ptt_delay) / FS
         out = np.clip(self.interp(y), -1, 1) if (ptt or self.keyed) else np.zeros(BLK)
         self.keyed = ptt
         if self.fader:
@@ -115,13 +120,21 @@ def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=36
     assert bytes(got_b) == wa and bytes(got_a) == wb, "warm-up data corrupted"
     data = rng.bytes(nbytes)
     got_b.clear()
+    a.airtime.clear()
     t0 = a.eng.now
     a.eng.session.write(data)
     if not until(lambda: a.unacked() == 0 and len(got_b) >= nbytes):
         return dict(res, phase="bulk", t=a.eng.now, delivered=len(got_b))
     assert bytes(got_b) == data, "bulk data corrupted"
     dt = a.eng.now - t0
-    return dict(res, phase="done", t=a.eng.now, seconds=dt, bps=8 * nbytes / dt, bpm=60 * nbytes / dt)
+    return dict(res, phase="done", t=a.eng.now, seconds=dt, bps=8 * nbytes / dt, bpm=60 * nbytes / dt,
+                airtime=a.airtime)
+
+
+def top2(airtime: dict) -> str:
+    """The sender's two most-used submodes, as % of its airtime."""
+    tot = sum(airtime.values()) or 1.0
+    return ", ".join(f"{k} {100 * v / tot:.0f}%" for k, v in sorted(airtime.items(), key=lambda kv: -kv[1])[:2])
 
 
 def main():
@@ -140,7 +153,7 @@ def main():
     head = f"{a.channel} {a.snr:g} dB seed {a.seed}:"
     if r["phase"] == "done":
         print(f"{head} {a.bytes} B in {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min"
-              f" (connected at {r['t_connect']:.1f} s)")
+              f" (connected at {r['t_connect']:.1f} s; {top2(r['airtime'])})")
     else:
         extra = f", {r['delivered']} of {a.bytes} B delivered" if r["phase"] == "bulk" else ""
         print(f"{head} FAILED during {r['phase']} at {r['t']:.1f} s{extra}")
