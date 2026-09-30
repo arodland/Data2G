@@ -57,7 +57,9 @@ def main():
 
     call_a, call_b = os.environ.get("RAW_CALLS", "W1AW K2XYZ").split()
     for k, call in (("a", call_a), ("b", call_b)):
+        cmd[k].sendall(b"COMPRESSION TEXT\r")  # and WINLINK SESSION below: as Pat sends them
         cmd[k].sendall(f"MYCALL {call}\r".encode() + (os.environ["RAW_BW"].encode() + b"\r" if "RAW_BW" in os.environ else b""))
+        cmd[k].sendall(b"WINLINK SESSION\r")
     cmd["b"].sendall(b"LISTEN ON\r")
     cmd["a"].sendall(f"CONNECT {call_a} {call_b}\r".encode())
     if not pump(lambda: heard("a", "CONNECTED")() and heard("b", "CONNECTED")()):
