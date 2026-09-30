@@ -342,6 +342,10 @@ SUBMODES = dict([
     _m(13, "n10-16qam-r1/2", "ldpc", "gray-qam16", 10, 1000, band="n10", headroom=0),  # 672 bps
     _m(14, "n10-16qam-r2/3", "ldpc", "gray-qam16", 10, 1336, band="n10", headroom=2),  # 906 bps
     _m(15, "n10-16qam-r3/4", "ldpc", "gray-qam16", 10, 1504, band="n10", headroom=3),  # 1022 bps
+    # past n10's first 16 indices (CW_BITS), toward VARA 500's ~10 kB/min at
+    # 25 dB: learned sets, headroom by pick_headroom (runs/clip_n10_top.csv)
+    _m(16, "n10-64l-r3/4", "ldpc", "c64-w48-r34", 10, 2256, band="n10", headroom=6),  # 1544 bps
+    _m(17, "n10-256l-r3/4", "ldpc", "c256-w48-r58", 10, 3008, band="n10", headroom=8),  # 2067 bps
     # 2400 Hz, data only
     _m(0, "w48-qpsk-r1/5", "ldpc", "gray-qam4", 4, 384, band="w48", headroom=0),  # 639 bps
     _m(1, "w48-qpsk-r1/3", "ldpc", "gray-qam4", 4, 640, band="w48", headroom=0),  # 1056 bps
