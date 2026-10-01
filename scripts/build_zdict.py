@@ -32,6 +32,7 @@ FREQ: dict[bytes, int] = {}  # pool workers inherit these (fork)
 NXT: dict = {}
 PRV: dict = {}
 VAL: list[bytes] = []
+RANDOM_SIDE = False  # each step picks its end at random, then the best byte there
 
 
 def clean(b: bytes) -> bytes:
@@ -70,10 +71,11 @@ def grow(seed: int) -> tuple[int, bytes]:
     seen, total = set(), 0
     while len(d) < SIZE:
         cands = []
-        for c in NXT.get(bytes(d[-2:])) or ALPHA_B:
+        side = rng.randrange(2) if RANDOM_SIDE else None
+        for c in () if side == 0 else NXT.get(bytes(d[-2:])) or ALPHA_B:
             t = bytes(d[-(L - 1):]) + c
             cands.append((sum(FREQ.get(x, 0) for x in {t[i:] for i in range(len(t) - 2)} if x not in seen), 1, c))
-        for c in PRV.get(bytes(d[:2])) or ALPHA_B:
+        for c in () if side == 1 else PRV.get(bytes(d[:2])) or ALPHA_B:
             t = c + bytes(d[:L - 1])
             cands.append((sum(FREQ.get(x, 0) for x in {t[:j] for j in range(3, len(t) + 1)} if x not in seen), 0, c))
         top = max(g for g, _, _ in cands)
@@ -117,7 +119,7 @@ def score(zdict: bytes, tests: list[bytes]) -> int:
 
 
 def main():
-    global FREQ, NXT, PRV, VAL
+    global FREQ, NXT, PRV, VAL, RANDOM_SIDE
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--train", nargs="+", required=True)
@@ -125,8 +127,10 @@ def main():
     ap.add_argument("--test", nargs="+", required=True, help="reported only")
     ap.add_argument("--per-book", type=int, default=200_000)
     ap.add_argument("--budget", type=float, default=30.0, help="seconds of restarts")
+    ap.add_argument("--random-side", action="store_true", help="commit to an end at random each step")
     ap.add_argument("--baseline", nargs="*", default=[], help="dictionaries to score alongside")
     a = ap.parse_args()
+    RANDOM_SIDE = a.random_side
     books = [clean(Path(f).read_bytes()) for f in a.train]
     corpus = b"\n\n".join(b[len(b) // 2 - a.per_book // 2:][:a.per_book] for b in books)
     VAL = [clean(Path(f).read_bytes()) for f in a.val]
