@@ -183,11 +183,24 @@ def despread(x, n_cw: int, m: int):
     return x.reshape(*lead, n // m, n_cw, m).swapaxes(-3, -2).reshape(*lead, n_cw, n)
 
 
-def scramble_seed(crc_mask: int = 0, index: int = 0) -> int:
-    """A codeword's scrambler seed (1-511): from its CRC mask (ARQ: one per
-    seq, so a resend in any slot scrambles alike and combines) and its
-    position in the burst (mask 0: plain modem use)."""
-    return 1 + (crc_mask ^ (index * 0x9E3779B1)) % 511
+PLAIN = -1  # burst position meaning "not scrambled" (soft bits already flipped: flip())
+
+
+def scramble_seed(index: int = 0) -> int:
+    """A codeword's scrambler seed (1-511, distinct for positions 0-510) from
+    its position in the burst alone: public, so anyone can descramble what
+    is on air without a session key (docs/arq.md §2). PLAIN: 0, all-zero
+    PN9."""
+    return 0 if index == PLAIN else 1 + (index * 0x9E3779B1) % 511
+
+
+@lru_cache(maxsize=None)
+def flip(spec: SubmodeSpec, index: int, rv: int = 0) -> np.ndarray:
+    """(coded_bits,) +-1 in mapping order: soft bits of a codeword sent at
+    burst position `index` and RV `rv`, times this, are those of the same
+    codeword unscrambled (the code is linear: C(u ^ s) = C(u) ^ C(s)).
+    Resends in other slots combine that way, and decode with index PLAIN."""
+    return 1.0 - 2.0 * encode_info(spec, scrambler(spec.k, scramble_seed(index))[None], rv)[0]
 
 
 @lru_cache(maxsize=None)
@@ -213,12 +226,12 @@ def info_bits(spec: SubmodeSpec, payload: bytes, crc_mask: int = 0, index: int =
     if len(payload) != payload_bytes(spec):
         raise ValueError(f"{spec.name} carries {payload_bytes(spec)} bytes, got {len(payload)}")
     bits = np.unpackbits(np.frombuffer(_with_crc(payload, crc_bits(spec), crc_mask), np.uint8))
-    return np.pad(bits, (0, spec.k - len(bits))) ^ scrambler(spec.k, scramble_seed(crc_mask, index))
+    return np.pad(bits, (0, spec.k - len(bits))) ^ scrambler(spec.k, scramble_seed(index))
 
 
 def encode(spec: SubmodeSpec, payload: bytes, rv: int = 0, crc_mask: int = 0, index: int = 0) -> np.ndarray:
     """One codeword's payload -> (coded_bits,) array of 0/1, interleaved.
-    `index`: its position in the burst (the scrambler seed with crc_mask)."""
+    `index`: its position in the burst (the scrambler seed)."""
     return encode_info(spec, info_bits(spec, payload, crc_mask, index)[None], rv)[0]
 
 
@@ -301,7 +314,7 @@ def _payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=
     masks = np.zeros(len(bits), int) if masks is None else masks
     index = np.arange(len(bits)) if index is None else index
     for b, m, i, c in zip(bits, masks, index, converged):
-        b = b.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(m), int(i)))[: len(b)]
+        b = b.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(i)))[: len(b)]
         data = np.packbits(b[: 8 * (payload_bytes(spec) + n_crc // 8)]).tobytes()
         payload = data[: -n_crc // 8]
         out.append((payload, bool(c) and _with_crc(payload, n_crc, int(m)) == data))
@@ -366,7 +379,7 @@ def crc_ok(spec: SubmodeSpec, bits: np.ndarray, crc_mask=0, index=0) -> np.ndarr
     nbytes = payload_bytes(spec) + n_crc // 8
     out = []
     for r, m, i in zip(bits, np.broadcast_to(crc_mask, len(bits)), np.broadcast_to(index, len(bits))):
-        d = np.packbits(r[: 8 * nbytes].astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(m), int(i)))[: 8 * nbytes])
+        d = np.packbits(r[: 8 * nbytes].astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(i)))[: 8 * nbytes])
         out.append(_with_crc(d[: -n_crc // 8].tobytes(), n_crc, int(m)) == d.tobytes())
     return np.array(out)
 

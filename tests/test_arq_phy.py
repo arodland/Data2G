@@ -30,6 +30,37 @@ def test_mask_selects_the_slot_identity():
     assert rx.decode(1, (7, 0, 1), 0, None) == pl[1]
 
 
+def test_session_traffic_reads_without_its_key():
+    """Part 97: what's on air is plain once decoded. The scrambler seed is
+    the burst position alone, so a listener without the session key reads
+    every payload; only the masked CRC needs the key."""
+    rng = np.random.default_rng(2)
+    pl = [bytes(rng.integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8)) for _ in range(3)]
+    soft = PHY.soft_bits(hear(burst(pl, key=0xBEEF)))
+    for i, p in enumerate(pl):
+        payload, ok = codes.decode_many(SPEC, soft[i:i + 1], 0, index=i)[0]
+        assert payload == p and not ok
+
+
+def test_resend_in_another_slot_combines():
+    """A seq first sent in slot 2 and resent at RV 1 in slot 0 (other
+    scrambling: codes.flip aligns them) decodes from the pair."""
+    rng = np.random.default_rng(1)
+    pl = [bytes(rng.integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8)) for _ in range(3)]
+    store = {}
+    first = PHY.ModemRx(hear(burst(pl), snr=0.5, seed=3), store)
+    for seed in range(4, 20):  # a draw where slot 2 fails alone
+        store.clear()
+        if first.decode(2, (7, 0, 2), 0, ("p", 2)) is None:
+            break
+        first = PHY.ModemRx(hear(burst(pl), snr=0.5, seed=seed), store)
+    assert ("p", 2) in store
+    resend = TxBurst(SPEC.name, [Slot((7, 0, 2), 1, pl[2])], 0)
+    r = hear(resend, snr=0.5, seed=21)
+    assert PHY.ModemRx(r, {}).decode(0, (7, 0, 2), 1, ("p", 2)) is None  # the resend alone fails
+    assert PHY.ModemRx(r, store).decode(0, (7, 0, 2), 1, ("p", 2)) == pl[2]
+
+
 def test_failed_slot_combines_with_its_resend():
     """At an SNR where one transmission fails, the stored soft bits plus the
     RV 1 resend decode."""
