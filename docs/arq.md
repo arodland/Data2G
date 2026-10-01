@@ -314,8 +314,8 @@ Station identification, readable by anyone listening (data2g/arq/engine.py).
 - **Frame:** a control-only burst, frame type SESSION, mask 0, in the cap's connect mode, as a
   CQ frame is. It carries a `T_ID` = 16 extension: the packed callsign (8 B), then the
   16-bit session key it identifies for (2 B). One codeword in every connect mode.
-- **Mask 0, not the session key:** the scrambler seed comes from the mask (§2), so a frame
-  under the session key could be read only by a station that heard the CONNECT.
+- **Mask 0, not the session key:** under the session key anyone could still read it
+  (§2), but only a station with the key could check its CRC. At mask 0, anyone can.
 - **Outside the protocol:** no seq, no burst seq, never seen by the session. A receiver
   notifies it as `ID call key`, and logs it.
 - **During a session:** at least every `ID_INTERVAL_S` (600 s, FCC 97.119), the ID goes
