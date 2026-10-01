@@ -384,10 +384,18 @@ def cmd_deep(a):
         todo = {g: c[: a.top] for g, c in todo.items()}
     else:
         todo = {g: [c] for g, c in picks(OUT / "sim_stage1.csv").items()}
+    tags = {}
+    for p in a.pick:  # bg2z44=_g8:g8-21 (tag '' for the g6 set)
+        key, val = p.split("=")
+        bg, z = (int(x) for x in key[2:].split("z"))
+        tags[(bg, z)], c = val.split(":")
+        todo[(bg, z)] = [c]
+    if a.pick:
+        todo = {g: todo[g] for g in tags}
     for (bg, z), cands in todo.items():
         if a.only and f"bg{bg}z{z}" not in a.only:
             continue
-        tables = np.load(OUT / f"cands_bg{bg}_z{z}{a.cands_tag}.npz")
+        tables = np.load(OUT / f"cands_bg{bg}_z{z}{tags.get((bg, z), a.cands_tag)}.npz")
         for name, k, n in shipped()[(bg, z)]:
             left = [c for c in cands if (name, c) not in done]
             if not left:
@@ -490,6 +498,7 @@ def main():
     d.add_argument("--cands-tag", default="", help="test the top of cycles<tag>.csv, not stage-1 picks")
     d.add_argument("--top", type=int, default=2)
     d.add_argument("--only", nargs="*", default=[], help="bg2z192 ...")
+    d.add_argument("--pick", nargs="*", default=[], help="bg2z44=_g8:g8-21 ... (tag '' = the g6 set)")
     d.add_argument("--device", default="cuda")
     c = sub.add_parser("screen")
     c.add_argument("--blocks", type=int, default=100000)
