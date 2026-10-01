@@ -210,14 +210,16 @@ Where the rest comes from:
   - Only from idle: the callee's last burst carried no data, so the caller's receive
     state is exactly what the callee last heard it ACK, and the wake may be a fresh
     build (abandon, re-slice, mode change).
-  - The callee owns no retry timer. An unanswered wake is repeated identically once,
-    6-10 s later (to the caller, a repeat: its reply was lost). After that the
-    caller's keepalive collects the data. Any burst from the caller cancels a wake.
+  - The callee owns no retry timer. An unanswered wake is repeated identically (to
+    the caller, a repeat: its reply was lost) after the same guard plus a random
+    backoff that doubles with each send (0-1, 0-2, 0-4 s, ...: CSMA-like). At most 2
+    sends per idle period, 6 with chat on. After that the caller's keepalive
+    collects the data. Any burst from the caller cancels a wake.
   - The caller answers a burst that arrives while its idle poll waits at once, data
     or not. It stays the only station that retries on a timeout.
-  - Not in chat mode: there the caller's 2-4 s polls carry the callee's lines.
   - v1 (until 2026-10) let only the caller start turns, polling 2 s after the last
-    exchange and doubling to 16 s: up to 16 s of callee latency, and constant keying.
+    exchange and doubling to 16 s (2-4 s with chat on): up to 16 s of callee latency,
+    and constant keying.
 - **Waiting for a reply:** t_turn + 1 s for the reply to start, detected as a decoded
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
@@ -279,9 +281,10 @@ As built (data2g/arq/policy.py):
   throughput. A station with chat on sets a `chat` extension (1 byte) in its bursts.
   The peer's shifter, which recommends this station's modes, then minimizes expected
   delivery time of what's queued (short bursts, higher-P modes) instead of maximizing
-  bytes per second. The caller's idle-poll backoff is shortened while either side has
-  chat on (2-4 s instead of 15-60 s), and the callee's wake bursts are off. Implemented: `T_CHAT` = 12 (empty),
-  `Session.set_chat()`, `GearShifter.recommend`, `session.CHAT_KEEPALIVE_S`.
+  bytes per second. The callee's lines go in its wake bursts (§6a), with more wake
+  retries than with chat off; the caller's keepalive is the usual 15-60 s (v1 polled
+  every 2-4 s instead). Implemented: `T_CHAT` = 12 (empty), `Session.set_chat()`,
+  `GearShifter.recommend`, `session.CHAT_WAKE_TRIES`.
   - The objective is the least expected time to deliver what the peer has queued,
     at least a 200 B chat line.
   - With chat on, a data burst carries `T_BUFFER` (2 bytes): the sender's unsent

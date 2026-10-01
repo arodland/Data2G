@@ -41,13 +41,14 @@ KEEPALIVE_JITTER = 0.3  # each interval stretched by up to this fraction (no loc
 # the callee's wake: after t_turn + REPLY_START_S + WAKE_GUARD_S of silence
 # since its last burst (the caller's answer or timeout retry starts within
 # t_turn + REPLY_START_S of it; the guard covers PTT, audio latency and
-# header detection), plus a random 0-WAKE_JITTER_S. A lost wake is repeated
-# identically after WAKE_RETRY_S, at most WAKE_TRIES sends per idle period.
+# header detection), plus a random backoff, 0-WAKE_JITTER_S doubling with
+# each unanswered send (CSMA-like). A lost wake is repeated identically, at
+# most WAKE_TRIES sends per idle period (CHAT_WAKE_TRIES in chat mode).
 WAKE_GUARD_S = 1.0
 WAKE_JITTER_S = 1.0
-WAKE_RETRY_S = (6.0, 10.0)
 WAKE_TRIES = 2
-CHAT_KEEPALIVE_S = (2.0, 4.0)  # the same while either side has CHAT ON: the callee's message waits for a poll
+CHAT_WAKE_TRIES = 6
+CHAT_KEEPALIVE_S = KEEPALIVE_S  # CHAT ON: the callee's wakes carry its lines (v1 polled every 2-4 s)
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
 
 log = logging.getLogger("data2g.session")
@@ -185,8 +186,8 @@ class Session:
             self._deadline = now + self.t_turn + REPLY_START_S
         elif not self._master:
             self._quiet_from = now
-            self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S + self.rng.uniform(0, WAKE_JITTER_S) if not self._wakes
-                               else self.rng.uniform(*WAKE_RETRY_S))
+            self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
+                               + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
 
     def on_header(self, submode: str, n_cw: int, now: float):
         """A burst started arriving: wait for its end instead of timing out
@@ -256,11 +257,11 @@ class Session:
         """Callee: when to break idle with queued data, if it may. Only from
         idle: its last burst carried no data, so the caller's receive state
         is what this station last heard it ack and a fresh build is exact
-        (link.Station.build). Not while a burst is queued or in chat mode,
-        where the caller's fast polls carry it."""
+        (link.Station.build). Not while a burst is queued."""
         st = self.station
         if (st is None or self._master or self.state != CONNECTED or self._out is not None or self._want_disc
-                or self._wakes >= WAKE_TRIES or st.chat or st.peer_chat or st.last_sent is None):
+                or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
+                or st.last_sent is None):
             return None
         if not self._wakes and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
             return None

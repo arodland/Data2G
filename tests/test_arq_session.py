@@ -39,7 +39,7 @@ class Policy:
 
 
 def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0,
-        b_write_at=None):
+        b_write_at=None, chat=False):
     """`b_write_at`: the callee writes its data then (idle by then) instead
     of up front; `ack_loss_first` then loses its first bursts from then on."""
     rng = random.Random(seed)
@@ -47,6 +47,8 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
     b = S.Session("K2XYZ-7", Policy(random.Random(seed + 3)), rng=random.Random(seed + 4))
     data_a = bytes(rng.randrange(256) for _ in range(n_a))
     data_b = bytes(rng.randrange(256) for _ in range(n_b))
+    a.set_chat(chat)
+    b.set_chat(chat)
     b.listen()
     a.write(data_a)
     if b_write_at is None:
@@ -189,3 +191,13 @@ def test_lost_wake_is_recovered(lost):
     assert r["got_a"] == r["data_b"] and r["got_b"] == r["data_a"]
     assert r["collisions"] == 0
     assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[1] * (1 + S.KEEPALIVE_JITTER) + 10
+
+
+def test_chat_wakes_back_off():
+    """CHAT ON: the callee keeps waking (CSMA-like backoff) through 4 lost
+    wakes, and its line arrives within that retry budget."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0, ack_loss_first=4, chat=True)
+    assert r["got_a"] == r["data_b"] and r["collisions"] == 0
+    guard = 1.0 + S.REPLY_START_S + S.WAKE_GUARD_S
+    budget = sum(guard + S.WAKE_JITTER_S * 2 ** k + 1.0 for k in range(5))  # + airtime
+    assert r["b_done"] - r["b_written"] < budget + 5
