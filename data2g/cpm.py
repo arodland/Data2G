@@ -94,7 +94,6 @@ class CpmSpec:
     code: str  # "ldpc" (data) | "polar" (control)
     k: int  # info bits incl. CRC
     coded_bits: int
-    protograph: str = ""
     frames_per_cw: int = 0
     clip_headroom_db: float | None = None
     family: str = field(default="cpm", compare=False)

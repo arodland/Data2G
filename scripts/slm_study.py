@@ -1,6 +1,6 @@
 """Peak reduction before any waveform change: SLM (selected mapping, as
 aicodix/modem's encoder) and ACE (active constellation extension,
-Krongold & Jones 2003; the README TODO), alone and together.
+Krongold & Jones 2003; the old README TODO), alone and together.
 
 - SLM: each OFDM data symbol (or each frame's five) goes under whichever
   of C carrier sign patterns gives the lowest envelope peak, pattern 0

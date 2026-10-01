@@ -1,7 +1,7 @@
 #!/bin/bash
 # PR #22 after merging master (DD on, #19's usable flag): v7 as master ships
 # it (v7 model, v7's six offsets, bound 3) against v12 as this branch ships
-# it, both on this code, paired, on the 17 cells of the README table.
+# it, both on this code, paired, on the 17 cells of the old README table.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=/home/andrew/code/Data2G/.venv/bin/python

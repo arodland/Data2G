@@ -185,7 +185,6 @@ class SubmodeSpec:
     constellation: str  # name for data2g.constellation.load
     frames_per_cw: int
     k: int = 0  # info bits per codeword incl. CRC
-    protograph: str = ""  # LDPC only: "bg<1|2>:<path to mask .npy>", else NR's own graph
     band: str = "w"  # key into BANDS
     clip_headroom_db: float | None = None  # None: the band's
     # active constellation extension in the TX clipper: the overshoot of

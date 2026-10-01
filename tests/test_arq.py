@@ -277,7 +277,7 @@ def test_tiny_bursts_with_losses_still_deliver(seed, max_cw):
     """Bursts of 1-3 slots, a fifth of them lost, duplicated control asked
     for at random: control can crowd out data in a burst, but never for
     good, and every byte arrives. Written for the sender-side hedges after
-    a miss (README: measured and dropped); it guards the tight-burst path
+    a miss (old README: measured and dropped); it guards the tight-burst path
     whatever claims its slots next."""
     result, stats = run(300 + seed, 0.2, 0.05, 1500, 1500, max_cw=max_cw, modes=("m22",))
     assert result == "done", (result, LAST_REASON[0])

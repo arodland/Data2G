@@ -43,7 +43,7 @@ def _crc24_table() -> list[int]:
     return out
 
 
-CRC24_POLY = 0xB2B117  # CRC24C, 5G NR's for polar-coded control (TS 38.212 5.1)
+CRC24_POLY = 0xB2B117  # CRC-24C, for polar-coded control
 _CRC24 = _crc24_table()
 
 
@@ -69,10 +69,7 @@ def _with_crc(payload: bytes, n_crc: int, mask: int = 0) -> bytes:
 
 @lru_cache(maxsize=None)
 def ldpc_code(spec: SubmodeSpec) -> ldpc.QCLDPC:
-    if spec.protograph:
-        bg, path = spec.protograph.split(":", 1)
-        return ldpc.protograph_code(np.load(path), int(bg[2:]), spec.k, spec.coded_bits)
-    return ldpc.nr_code(spec.k, spec.coded_bits)
+    return ldpc.qc_code(spec.k, spec.coded_bits)
 
 
 # ponytail: GA-DE frozen set at a fixed design point until
@@ -85,9 +82,11 @@ FORMAT_DIR = Path(__file__).parent / "format"
 
 
 def _fingerprint(spec: SubmodeSpec) -> str:
-    """Everything a frozen file depends on; a mismatch means it is stale."""
+    """Everything a frozen file depends on; a mismatch means it is stale.
+    (The empty field was a protograph path, never set; kept so the frozen
+    fingerprints still match.)"""
     return (f"{spec.band}|{spec.index}|{spec.code}|{spec.constellation}|{spec.frames_per_cw}|"
-            f"{spec.k}|{spec.protograph}|{spec.headroom:g}")
+            f"{spec.k}||{spec.headroom:g}")
 
 
 def frozen(spec: SubmodeSpec) -> dict | None:
@@ -144,7 +143,7 @@ def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
     LDPC: degree-aware. Code bits sorted by variable-node degree go, in
     equal groups, to label bits sorted by reliability: the most connected
     bits on the most reliable labels; each group scattered randomly over
-    its label's positions. Measured, learned 64-point, NR r1/2 n=2880:
+    its label's positions. Measured, learned 64-point, LDPC r1/2 n=2880:
     AWGN BER at 12 dB 1.0e-3 (random) -> 4.2e-5, mpd PER at 19 dB 0.16 ->
     0.088; the reverse assignment fails outright. Others: random."""
     rng = np.random.default_rng(INTERLEAVER_SEED + spec.index)

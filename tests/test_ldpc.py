@@ -4,31 +4,39 @@ import pytest
 from data2g import ldpc
 
 
-@pytest.mark.parametrize("k,n", [(48, 240), (120, 480), (500, 1000), (1320, 2880), (4000, 4800), (8000, 24000)])
-def test_nr_codewords_satisfy_h(k, n):
-    code = ldpc.nr_code(k, n, shifts="nr")
-    rng = np.random.default_rng(k)
-    bits = rng.integers(0, 2, (4, k))
-    cw = code.encode(bits)
-    assert cw.shape == (4, n)
-    assert code.syndrome_ok(code.encode_full(bits)).all()
-    # the systematic part that is sent really is the info bits
-    sent_info = code.sent[code.sent < k]
-    assert np.array_equal(cw[:, : len(sent_info)], bits[:, sent_info])
-
-
-def test_own_shifts_cover_every_ldpc_submode():
-    """Every LDPC code on air (OFDM and CPM) has its own table: same blocks
-    as NR's graph, no 4-cycles, and codewords (mother included) satisfy H."""
-    from data2g import codes, cpm
+def _ldpc_specs():
+    from data2g import cpm
     from data2g.config import SUBMODES
 
-    specs = [s for s in SUBMODES.values() if s.code == "ldpc"] + list(cpm.SPECS.values())
-    rng = np.random.default_rng(2)
-    for s in specs:
+    return [s for s in SUBMODES.values() if s.code == "ldpc"] + list(cpm.SPECS.values())
+
+
+def test_codewords_satisfy_h():
+    """Every LDPC code on air (OFDM and CPM): codewords satisfy H, and the
+    systematic part that is sent really is the info bits."""
+    from data2g import codes
+
+    for s in _ldpc_specs():
         code = codes.ldpc_code(s)
-        nr = ldpc.nr_code(s.k, s.coded_bits, shifts="nr")
-        assert np.array_equal(code.full_base >= 0, nr.full_base >= 0), s.name
+        rng = np.random.default_rng(s.k)
+        bits = rng.integers(0, 2, (4, s.k))
+        cw = code.encode(bits)
+        assert cw.shape == (4, s.coded_bits)
+        assert code.syndrome_ok(code.encode_full(bits)).all(), s.name
+        sent_info = code.sent[code.sent < s.k]
+        assert np.array_equal(cw[:, : len(sent_info)], bits[:, sent_info]), s.name
+
+
+def test_shift_tables_cover_every_ldpc_submode():
+    """Every LDPC code on air has a table on its graph's mask, without
+    4-cycles, whose mother code's codewords satisfy H."""
+    from data2g import codes
+
+    rng = np.random.default_rng(2)
+    for s in _ldpc_specs():
+        code = codes.ldpc_code(s)
+        bg = 1 if code.kb == ldpc.KB[1] else 2
+        assert np.array_equal(code.full_base >= 0, ldpc.mask(bg)), s.name
         b, z = code.full_base, code.z
         for r1 in range(b.shape[0]):
             for r2 in range(r1 + 1, b.shape[0]):
@@ -40,9 +48,14 @@ def test_own_shifts_cover_every_ldpc_submode():
         assert m.syndrome_ok(m.encode_full(bits)).all(), s.name
 
 
+def test_a_lifting_size_without_a_table_is_an_error():
+    with pytest.raises(KeyError, match="no shift table"):
+        ldpc.qc_code(8000, 24000)
+
+
 def test_min_sum_decodes_noise_free_and_corrects_errors():
     torch = pytest.importorskip("torch")
-    code = ldpc.nr_code(500, 1000, shifts="nr")
+    code = ldpc.qc_code(500, 1000)
     dec = ldpc.MinSumDecoder(code)
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, (8, 500))
