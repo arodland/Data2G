@@ -177,7 +177,7 @@ Where the rest comes from:
   2. **Shrink:** fewer codewords, one step more robust, and recommend a more robust
      reply mode.
   3. **Robust floor:** the most robust polar mode in the narrowest band both allow.
-  4. **Probe:** after 6 misses, one robust probe every 10 s. Link lost at 90 s:
+  4. **Probe:** after 6 misses, one robust probe every 10 s. Link lost at 135 s:
      disconnect and report to the host.
 - **Who retries:** only the caller (the session's master) retries on timeout. The
   callee only ever answers, carrying its own data in its replies. It starts a turn
@@ -201,15 +201,31 @@ Where the rest comes from:
 
 ## 6a. v1 implementation choices (data2g/arq/session.py)
 
-- **Idle:** only the caller starts turns. While both sides are idle it keeps polling,
-  2 s after the last exchange, doubling to at most 16 s. The callee's new data rides
-  its reply to the next poll, at up to 16 s extra latency. This drops §6's "either may
-  start from idle" rule, and with it the case of both stations keying at once.
+- **Idle:** the caller keeps the link alive with a poll 15 s after the last exchange,
+  doubling to at most 60 s, each interval stretched by a random 0-30%.
+  - The callee breaks idle itself when its host writes: a wake burst, built like any
+    other (data, its ACK), once t_turn + 1.5 s + 1 s plus a random 0-1 s has passed
+    in silence since its last burst. By then the caller's answer or timeout retry
+    would have started. A header heard meanwhile holds the wake past that burst.
+  - Only from idle: the callee's last burst carried no data, so the caller's receive
+    state is exactly what the callee last heard it ACK, and the wake may be a fresh
+    build (abandon, re-slice, mode change).
+  - The callee owns no retry timer. An unanswered wake is repeated identically (to
+    the caller, a repeat: its reply was lost) after the same guard plus a random
+    backoff that doubles with each send (0-1, 0-2, 0-4 s, ...: CSMA-like). At most 2
+    sends per idle period, 6 with chat on. After that the caller's keepalive
+    collects the data. Any burst from the caller cancels a wake.
+  - The caller answers a burst that arrives while its idle poll waits at once, data
+    or not. It stays the only station that retries on a timeout.
+  - v1 (until 2026-10) let only the caller start turns, polling 2 s after the last
+    exchange and doubling to 16 s (2-4 s with chat on): up to 16 s of callee latency,
+    and constant keying.
 - **Waiting for a reply:** t_turn + 1 s for the reply to start, detected as a decoded
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
   before retrying.
-- **Link lost:** 90 s after the last decodable burst from the peer, on either side.
+- **Link lost:** 135 s after the last decodable burst from the peer, on either side
+  (the 60 s keepalive's longest gap plus v1's ~75 s retry budget; v1: 90 s).
   The link core's consecutive-timeout count (12) applies only in the lockstep tests,
   which have no clock. In a session it tripped on links that were slow but alive.
 - **Listen before talk** before any turn that isn't a reply (retries, polls): a
@@ -265,9 +281,10 @@ As built (data2g/arq/policy.py):
   throughput. A station with chat on sets a `chat` extension (1 byte) in its bursts.
   The peer's shifter, which recommends this station's modes, then minimizes expected
   delivery time of what's queued (short bursts, higher-P modes) instead of maximizing
-  bytes per second. The caller's idle-poll backoff is shortened while either side has
-  chat on (2-4 s instead of 2-16 s). Implemented: `T_CHAT` = 12 (empty),
-  `Session.set_chat()`, `GearShifter.recommend`, `session.CHAT_KEEPALIVE_S`.
+  bytes per second. The callee's lines go in its wake bursts (§6a), with more wake
+  retries than with chat off; the caller's keepalive is the usual 15-60 s (v1 polled
+  every 2-4 s instead). Implemented: `T_CHAT` = 12 (empty), `Session.set_chat()`,
+  `GearShifter.recommend`, `session.CHAT_WAKE_TRIES`.
   - The objective is the least expected time to deliver what the peer has queued,
     at least a 200 B chat line.
   - With chat on, a data burst carries `T_BUFFER` (2 bytes): the sender's unsent
@@ -357,7 +374,7 @@ forever without progress, because they disagree about protocol state.
   - An inconsistency the protocol can't explain also disconnects at once, rather than
     resyncing: a peer cumulative outside [base, next], or an abandon at the wrong
     point. A resync from a state the station can't trust could corrupt.
-  - A dead link is bounded too: the 90 s timeout of §6.
+  - A dead link is bounded too: the 135 s timeout of §6.
   - No path through the state machine runs unbounded.
 - **Tests before tuning** (tests/test_arq.py, and scripts/arq_stress.py: 3200 runs
   over a 4x4 loss grid; no corruption, mismatch or fail-safe trip): random loss of

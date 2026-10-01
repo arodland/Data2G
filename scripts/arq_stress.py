@@ -75,7 +75,9 @@ def one_session(args):
     signal.signal(signal.SIGALRM, _alarm)
     signal.alarm(WALL_S)
     try:
-        r = TS.run(seed, pb, pc, n_a=rng.randrange(0, 6000), n_b=rng.randrange(0, 3000), horizon=5000.0)
+        late = rng.uniform(20.0, 400.0) if rng.random() < 0.5 else None  # the callee writes then: its wakes
+        r = TS.run(seed, pb, pc, n_a=rng.randrange(0, 6000), n_b=rng.randrange(0, 3000), horizon=5000.0,
+                   b_write_at=late, chat=rng.random() < 0.3)
     except AssertionError as e:
         return (pb, pc, "CORRUPT", f"seed {seed}: {str(e)[:60]}", 0, 0)
     except Hang:

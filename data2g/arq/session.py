@@ -9,9 +9,11 @@ around link.Station. Driven by its caller's clock:
 Timers are absolute times; nothing here sleeps. The same object runs in
 the simulator (scripts/linksim.py) and on the air.
 
-v1 idle rule (differs from docs/arq.md §6, see §6a there): only the
-caller starts turns. While idle it polls with a backoff (KEEPALIVE_S),
-and the callee's new data rides its reply to the next poll.
+Idle rule (docs/arq.md §6a): the caller keeps the link alive with a
+jittered backoff (KEEPALIVE_S). The callee may break idle with its new
+data (a wake burst, WAKE_*), but owns no retry timer: any burst from the
+caller cancels its wake, and the caller stays the only station that
+retries on a timeout.
 """
 
 import logging
@@ -30,10 +32,23 @@ DISC_TRIES = 3
 # preamble and header (0.4-0.6 s) and the receiver's search step (0.25 s)
 # (the audio loopback timed out on replies already on air at 1.0)
 REPLY_START_S = 1.5
-LINK_LOST_S = 90.0
 IDLE_CLOSE_S = 300.0
-KEEPALIVE_S = (2.0, 16.0)  # first and largest idle poll interval
-CHAT_KEEPALIVE_S = (2.0, 4.0)  # the same while either side has CHAT ON: the callee's message waits for a poll
+KEEPALIVE_S = (15.0, 60.0)  # first and largest idle poll interval
+# after the longest keepalive gap, v1's retry budget (90 s link lost
+# against 16 s polls): a lost keepalive must not close the link
+LINK_LOST_S = KEEPALIVE_S[1] + 75.0
+KEEPALIVE_JITTER = 0.3  # each interval stretched by up to this fraction (no lockstep with the callee's wakes)
+# the callee's wake: after t_turn + REPLY_START_S + WAKE_GUARD_S of silence
+# since its last burst (the caller's answer or timeout retry starts within
+# t_turn + REPLY_START_S of it; the guard covers PTT, audio latency and
+# header detection), plus a random backoff, 0-WAKE_JITTER_S doubling with
+# each unanswered send (CSMA-like). A lost wake is repeated identically, at
+# most WAKE_TRIES sends per idle period (CHAT_WAKE_TRIES in chat mode).
+WAKE_GUARD_S = 1.0
+WAKE_JITTER_S = 1.0
+WAKE_TRIES = 2
+CHAT_WAKE_TRIES = 6
+CHAT_KEEPALIVE_S = KEEPALIVE_S  # CHAT ON: the callee's wakes carry its lines (v1 polled every 2-4 s)
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
 
 log = logging.getLogger("data2g.session")
@@ -72,6 +87,9 @@ class Session:
     _last_data: float = 0.0
     _idle_wait: float = 0.0
     _build_at: float | None = None  # the caller's idle poll: built when it goes
+    _quiet_from: float = 0.0  # callee: the end of its last burst, or the last burst heard since
+    _wake_wait: float = 0.0  # callee: silence after _quiet_from before a wake
+    _wakes: int = 0  # callee: wake bursts sent since the caller was last heard
     _want_disc: bool = False
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
@@ -140,6 +158,16 @@ class Session:
             self._build_at = None
             self._queue(self.station.build(), now)
             self.station.answered()
+        if (w := self._wake_time()) is not None and now >= w:
+            self._wakes += 1
+            self._wake_wait = float("inf")  # until on_tx_end arms the next
+            st = self.station
+            if self._wakes == 1:
+                log.info("wake: breaking idle with %d B queued", st._new_available())
+                self._queue(st.build(), now)
+            else:
+                log.info("wake %d: no answer, repeating", self._wakes)
+                self._queue(st.last_sent, now)
         if self._out is not None and self._due is not None and now >= self._due:
             out, self._out, self._due = self._out, None, None
             return out
@@ -147,20 +175,28 @@ class Session:
 
     def next_event(self) -> float | None:
         """The earliest time poll() may do something (for an event loop)."""
-        ts = [t for t in (self._due, self._deadline, self._build_at) if t is not None]
+        ts = [t for t in (self._due, self._deadline, self._build_at, self._wake_time()) if t is not None]
         if self.state in (CONNECTED, DISCONNECTING):
             ts.append(self._last_heard + LINK_LOST_S)
         return min(ts) if ts else None
 
     def on_tx_end(self, burst: L.TxBurst, now: float):
-        """Arm the reply timer (only the caller retries, §6)."""
+        """Arm the reply timer (only the caller retries, §6), or the callee's wake."""
         if self._master and self.state in (CONNECTING, CONNECTED, DISCONNECTING):
             self._deadline = now + self.t_turn + REPLY_START_S
+        elif not self._master:
+            self._quiet_from = now
+            self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
+                               + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
 
     def on_header(self, submode: str, n_cw: int, now: float):
-        """A burst started arriving: wait for its end instead of timing out."""
+        """A burst started arriving: wait for its end instead of timing out
+        (caller), or hold a wake past it (callee)."""
+        end = now + self.policy.airtime(submode, n_cw)
         if self._deadline is not None:
-            self._deadline = max(self._deadline, now + self.policy.airtime(submode, n_cw) + self.t_turn)
+            self._deadline = max(self._deadline, end + self.t_turn)
+        if not self._master:
+            self._quiet_from = max(self._quiet_from, end)
 
     def on_rx(self, rx: L.RxBurst, now: float):
         ctl = self._session_frame(rx)
@@ -190,7 +226,10 @@ class Session:
         # the caller: go on now, or after an idle backoff when neither side
         # has data. The idle poll is built when it goes, so data the host
         # writes meanwhile rides it (write() also brings it forward).
-        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write)
+        # a burst while the idle poll waits is the callee's wake: answer it
+        # at once even without data in it (its policy may have sent control only)
+        woke, self._build_at = self._build_at is not None, None
+        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke
         if busy:
             self._idle_wait = 0.0
             self._queue(st.build(), now)
@@ -198,7 +237,7 @@ class Session:
         else:
             lo, hi = CHAT_KEEPALIVE_S if st.chat or st.peer_chat else KEEPALIVE_S
             self._idle_wait = lo if not self._idle_wait else min(hi, 2 * self._idle_wait)
-            self._build_at = now + self._idle_wait
+            self._build_at = now + min(hi, self._idle_wait * (1 + self.rng.uniform(0, KEEPALIVE_JITTER)))
 
     # -- internals ---------------------------------------------------------------------
 
@@ -212,6 +251,21 @@ class Session:
     def _heard(self, now: float):
         self._last_heard = now
         self._deadline = None
+        self._quiet_from, self._wakes = now, 0
+
+    def _wake_time(self) -> float | None:
+        """Callee: when to break idle with queued data, if it may. Only from
+        idle: its last burst carried no data, so the caller's receive state
+        is what this station last heard it ack and a fresh build is exact
+        (link.Station.build). Not while a burst is queued."""
+        st = self.station
+        if (st is None or self._master or self.state != CONNECTED or self._out is not None or self._want_disc
+                or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
+                or st.last_sent is None):
+            return None
+        if not self._wakes and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
+            return None
+        return self._quiet_from + self._wake_wait
 
     def _close(self, why: str, final: L.TxBurst | None = None, now: float = 0.0):
         """-> None. `final`: one last burst to send (a DISC_ACK)."""
