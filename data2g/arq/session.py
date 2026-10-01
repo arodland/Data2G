@@ -287,16 +287,20 @@ class Session:
 
     def _stats(self) -> dict:
         st = self.station
-        return dict(st.stats, tx_bytes=st.tx.acked, rx_bytes=st.rx.reader.delivered)
+        return dict(st.stats, tx_bytes=st.tx.acked, rx_bytes=st.rx.reader.delivered,
+                    tx_plain=st.tx.acked_plain, tx_wire=st.tx.acked_wire, rx_plain=st.rx.plain, rx_wire=st.rx.wire)
 
     def _log_stats(self, label: str, now: float, since: float, prev: dict):
         d = {k: v - prev.get(k, 0) for k, v in self._stats().items()}
         dt = max(now - since, 1e-9)
         cw = d.get("cw_new", 0) + d.get("cw_resend", 0)
-        log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends,"
-                 " compression %s | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"],
-                 8 * d["tx_bytes"] / dt, d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw,
-                 100 * d.get("cw_resend", 0) / max(cw, 1), "%.2f" % (d["cw_in"] / d["cw_out"]) if d.get("cw_out") else "-",
+
+        def ratio(k):  # uncompressed / compressed payload bytes
+            return "%.2f" % (d[k + "_plain"] / d[k + "_wire"]) if d[k + "_wire"] else "-"
+        log.info("%s %.0f s: tx %d B acked (%.0f bps, compression %s), rx %d B (%.0f bps, compression %s)"
+                 " | data cw sent %d, %.0f%% resends | bursts heard %d, %d control lost | timeouts %d", label, dt,
+                 d["tx_bytes"], 8 * d["tx_bytes"] / dt, ratio("tx"), d["rx_bytes"], 8 * d["rx_bytes"] / dt,
+                 ratio("rx"), cw, 100 * d.get("cw_resend", 0) / max(cw, 1),
                  d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):
