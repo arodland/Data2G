@@ -140,6 +140,8 @@ class TxSide:
         self.next = 0  # next new seq
         self.ack: tuple[int, frozenset] | None = None  # (cum, received) acted on
         self.acked = 0  # stream bytes acked (host bytes and their record length bytes)
+        # acked payload bytes, as sent and uncompressed (a raw codeword's padding counts in both)
+        self.acked_wire = self.acked_plain = 0
         # the stream as the peer will deliver it (raw codewords with their
         # padding): compression's history, from offset hist_off on
         self.hist = bytearray()
@@ -157,7 +159,10 @@ class TxSide:
             raise ProtocolError(f"peer cumulative {cum} outside [{self.base}, {self.next}]")
         advanced = cum > self.base
         for s in range(self.base, cum):
-            self.acked += c.length if (c := self.cws.pop(s, None)) else 0
+            if c := self.cws.pop(s, None):
+                self.acked += c.length
+                self.acked_wire += len(c.payload)
+                self.acked_plain += c.length if c.comp else len(c.payload)
         self.base = cum
         self.ack = (cum, frozenset(s for s in received if cum < s < self.next))
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
@@ -221,6 +226,7 @@ class RxSide:
         self.reader = F.RecordReader()
         self.out = bytearray()
         self.hist = b""  # the last HIST stream bytes delivered (compression's history)
+        self.wire = self.plain = 0  # delivered payload bytes, as received and inflated
         # seqs flagged compressed by a control decoded here (its data slot may
         # have failed): a resend after the sender knows that omits the bit
         self.comp_seqs: set[int] = set()
@@ -235,11 +241,13 @@ class RxSide:
         while self.cum in self.buf:
             p, z = self.buf.pop(self.cum)
             self.comp_seqs.discard(self.cum)
+            self.wire += len(p)
             if z:
                 try:
                     p = F.inflate(self.hist, p)
                 except ValueError as e:
                     raise ProtocolError(f"seq {self.cum}: {e}") from None
+            self.plain += len(p)
             self.hist = (self.hist + p)[-F.HIST:]
             self.out += self.reader.feed(p)
             self.cum += 1
@@ -279,7 +287,7 @@ class Station:
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
-    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_resend, rx_ok, rx_lost, timeouts
+    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_comp, cw_resend, rx_ok, rx_lost, timeouts
     rx: RxSide = field(default_factory=RxSide)
     state: str = ACTIVE
     fail_reason: str = ""
