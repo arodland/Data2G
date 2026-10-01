@@ -113,12 +113,6 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
-def max_burst_bytes(cap: int) -> int:
-    """Payload of the largest data burst any mode within `cap` sends (the
-    longest size class): the most a burst can take from the queue."""
-    return max((slots_for(s, SIZE_S[-1]) - ctl_slots(s)) * codes.payload_bytes(s) for s in allowed(cap))
-
-
 @dataclass
 class GearShifter:
     gap_s: float = 2.5

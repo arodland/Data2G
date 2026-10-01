@@ -43,7 +43,6 @@ from scipy import signal as sps  # noqa: E402
 
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
-from .arq.policy import CAP_HZ, max_burst_bytes  # noqa: E402
 from .config import FS  # noqa: E402
 from .tnc import Decimator, Rigctld, _device, _pa_float  # noqa: E402
 
@@ -54,7 +53,6 @@ BW_NAME = {0: "500", 1: "1200", 2: "2300"}
 BLOCK = FS // 10  # audio block: 0.1 s
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
-MAX_BURST = {cap: max_burst_bytes(cap) for cap in CAP_HZ}  # bytes queued past which the data port isn't read
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 # ponytail: from memory of VARA clients, not a checked list; check the log on first contact with Pat
 IGNORED = {"COMPRESSION", "PUBLIC", "CWID", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"}
@@ -77,14 +75,6 @@ class Host:
         self._buffer_t = 0.0  # engine time of the last BUFFER line
         self._mode = None
         self._alive = 0.0  # engine time of the last IAMALIVE
-        self.unsent = 0  # bytes written and not yet sent (after_step recounts; data_in adds)
-
-    def queue_full(self, held: int = 0) -> bool:
-        """Enough queued (plus `held`, read but not yet given to data_in) for
-        the largest burst the session's fastest mode sends: serve() stops
-        reading the data port, so clients that ignore BUFFER block in TCP."""
-        st = self.engine.session.station
-        return self.unsent + held >= MAX_BURST[st.cap if st else self.cap]
 
     def command(self, line: str):
         words = line.strip().split()
@@ -149,7 +139,6 @@ class Host:
 
     def data_in(self, data: bytes):
         self.engine.session.write(data)
-        self.unsent += len(data)  # counted at once: the next after_step may be a block away
         # always answer data with a BUFFER line, changed or not: Pat counts
         # what it wrote until one arrives, and blocks once that count passes
         # 7x its next write (it waited forever on a 6-byte B2F line)
@@ -199,7 +188,6 @@ class Host:
         if st:
             unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
             unacked += len(st.tx.buf)  # from the first unacked codeword on
-        self.unsent = unsent
         buffered = unacked
         if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
             credit = e.session.policy.next_capacity(st)
@@ -281,9 +269,8 @@ class Player:
 class _Port:
     """One TCP listener holding at most one client; lines or bytes go to `on_input`."""
 
-    def __init__(self, addr, on_input, lines: bool, on_close=None, paused=None):
-        """`paused()`: true while the client isn't to be read (TCP backpressure)."""
-        self.on_input, self.lines, self.client, self.on_close, self.paused = on_input, lines, None, on_close, paused
+    def __init__(self, addr, on_input, lines: bool, on_close=None):
+        self.on_input, self.lines, self.client, self.on_close = on_input, lines, None, on_close
         self.srv = socket.create_server(addr, reuse_port=False)
         threading.Thread(target=self._accept, daemon=True).start()
 
@@ -302,8 +289,6 @@ class _Port:
     def _read(self, c):
         buf = b""
         while True:
-            while self.paused and self.paused() and self.client is c:
-                time.sleep(0.05)
             try:
                 d = c.recv(4096)
             except OSError:
@@ -357,19 +342,10 @@ def serve(a, pa, stop: threading.Event | None = None):
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = data = kiss = None
-    # data bytes read from the port and given to the host: each written by one thread only
-    data_read = data_taken = 0
-
-    def on_data(d):
-        nonlocal data_read
-        data_read += len(d)
-        inbox.put(("data", d))
-
     if a.vara:
         cmd = _Port((a.host, a.command_port), lambda line: inbox.put(("cmd", line)), lines=True,
                     on_close=lambda: inbox.put(("gone", None)))
-        data = _Port((a.host, a.command_port + 1), on_data, lines=False,
-                     paused=lambda: host.queue_full(data_read - data_taken))
+        data = _Port((a.host, a.command_port + 1), lambda d: inbox.put(("data", d)), lines=False)
     if a.kiss:
         kiss = KissServer((a.kiss_address, a.kiss_port), lambda f: inbox.put(("kiss", f)), link.command)
         threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
@@ -408,7 +384,6 @@ def serve(a, pa, stop: threading.Event | None = None):
                     link.enqueue(v)
                 else:
                     host.data_in(v)
-                    data_taken += len(v)
             for line in host.out_cmd:  # replies at once, not after the audio step (clients time out at ~2 s)
                 if cmd:
                     cmd.send(line.encode() + b"\r")
