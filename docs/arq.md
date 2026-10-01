@@ -316,7 +316,7 @@ As built (data2g/arq/policy.py):
 - **Boundaries:** padding only ever falls between records. That keeps re-slicing after
   an abandon exact: the receiver's stream is the concatenation of delivered codewords
   in seq order.
-- **Compression (`T_COMP`, session version 2; primed dictionary, version 4):**
+- **Compression (`T_COMP`, session version 2; primed dictionary, version 3):**
   - A compressed codeword is raw deflate (no header) of the stream bytes it carries,
     zero padded. Deflate is primed with a fixed 4 KB dictionary
     (`frames.ZDICT`, built from C4 web text by `scripts/build_zdict.py`), then the last 4 KB (`frames.HIST`) of the stream as delivered

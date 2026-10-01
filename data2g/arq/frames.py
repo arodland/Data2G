@@ -33,7 +33,7 @@ T_COMP = 15
 HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed with
 # 4 KB primed ahead of the history so short streams compress too: built from
 # C4 web text by scripts/build_zdict.py to share as many frequent substrings
-# with it as it can (session version 4)
+# with it as it can (session version 3)
 ZDICT = (Path(__file__).parent / "zdict.bin").read_bytes()
 MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
