@@ -23,9 +23,15 @@ Screening, cheapest first:
   deep the stage-1 pick per (bg, Z) against NR: 100k blocks just above
        NR's 1% point (floors), and the code at 2n (IR's extension rows).
 
-First run (runs/own_shifts): uniform random shifts floor (4-cycles);
-greedy g6 and g4 match NR; every g6 pick is within +0.03 dB of NR at
-10% and 1%.
+  screen  one floor point per Z (where a pick floored) with early
+       rejection: bad candidates die in 10-40k blocks.
+
+First run (runs/own_shifts): uniform random shifts floor (4-cycles).
+Greedy picks are within +0.03 dB of NR at 10% and 1%, but four BG2 picks
+floored in stage 2. The floors were small trapping sets plus weight-11
+codewords, and cycle counts did not predict them: g8 has fewer 8-cycles
+than NR and still floored. Seeds of the same family spread 0-14 errors
+per 100k at one point, so the floor screen is the filter. PICKS below.
 
     python -m scripts.own_shifts gen --seeds 32
     python -m scripts.own_shifts sim --top 3 --blocks 10000
@@ -42,6 +48,24 @@ import numpy as np
 from data2g import codes, config, ldpc
 
 OUT = Path("runs/own_shifts")
+
+# The screened table per shipped (bg, Z): lift(mode, seed) regenerates it.
+# BG1 and most of BG2: stage-1 g6 picks, clean in stage 2. BG2 Z=44/60/176/
+# 192/240: the g6 pick floored; these won the single-point floor screen and
+# then passed stage 2. Marginal, under 0.05 dB: Z=26 and 44 run 1.4-2x NR's
+# BLER near 5e-4.
+PICKS = {
+    (1, 36): "g6-27", (1, 72): "g6-29", (1, 104): "g6-23", (1, 144): "g6-22", (1, 160): "g6-7",
+    (2, 26): "g6-17", (2, 32): "g6-26", (2, 40): "g6-8", (2, 44): "g8-21", (2, 48): "g6-11",
+    (2, 60): "g6-21", (2, 64): "g6-15", (2, 72): "g6-5", (2, 96): "g6-30", (2, 104): "g6-15",
+    (2, 128): "g6-2", (2, 144): "g6-0", (2, 176): "g6-4", (2, 192): "g8-30", (2, 240): "g8-9",
+    (2, 256): "g6-0",
+}
+
+
+def pick_table(bg: int, z: int) -> np.ndarray:
+    mode, seed = PICKS[(bg, z)].split("-")
+    return lift(Cycles(mask_of(bg), eight=mode != "g6"), bg, z, mode, int(seed))
 
 
 def shipped() -> dict[tuple[int, int], list[tuple[str, int, int]]]:
