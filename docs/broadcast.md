@@ -29,8 +29,11 @@ Needs a decision:
     Promiscuous listening needs no list of groups.
   - The receiver's cost per burst is what KISS costs today: one control decode.
 - **Data codewords:** `data_mask(0, slot, group key)`.
-  - A data codeword decodes only under its own group's mask. Data from a burst whose
-    control was lost never lands on the wrong port.
+  - Anyone decodes and reads a data codeword (the scrambler is unkeyed, `arq.md` §2);
+    its CRC passes only under its own group's mask. Data from a burst whose control
+    was lost never lands on the wrong port.
+  - A promiscuous listener verifies a burst's data with the key hashed from the group
+    in its control. With the control lost, it can still read the data unverified.
   - Control lost: the receiver tries slot 1 under each open port's key, as KISS tries
     `KISS_KEY` today. That costs up to 16 decodes, only on those bursts.
 - **Collisions:** two group names share a key 1 time in 65536. The name in the control
