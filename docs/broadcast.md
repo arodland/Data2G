@@ -9,7 +9,6 @@ KISS under the group name "VARA KISS", with the same mode shifting.
 
 Needs a decision:
 
-- Should the command port (8300) run without `--vara`, since broadcast commands and statuses need it?
 - The status set in §5.
 - Port 0's wire changes anyway (its key becomes the hash of "VARA KISS"). Should its
   control move to the TLV format too (reports as a TLV), or keep today's layout?
@@ -50,8 +49,8 @@ and reads any codeword. A mask only decides whose CRC check passes.
     decode, then up to 16 CRC checks). A promiscuous listener can still read that
     data, unverified.
 - **Collisions:** two group names share a key 1 time in 65536. The control's name
-  settles it. Only a control-lost burst can be misdelivered, and only between two
-  colliding groups that are both open.
+  settles it. Control-lost data whose key matches two open ports is dropped, and both
+  get a LOST notice (one a false positive): a payload is never misdelivered.
 
 ## 3. Burst format
 
@@ -73,23 +72,27 @@ and reads any codeword. A mask only decides whose CRC check passes.
 
 ## 4. Modes and channel access
 
-- **Groups other than 0:** one mode per port, set by the host. The default is the cap's
-  robust broadcast mode (`kisslink.BROADCAST`). One-to-many traffic can't be shifted
-  from reports.
-- **Port 0:** today's per-station shifting, unchanged.
+- **Groups other than 0:** each port has a transmit mode, set by the host at any time
+  between frames (it applies to frames sent after it). Receiving decodes every mode,
+  whatever a port's transmit mode. The default is the cap's robust broadcast mode
+  (`kisslink.BROADCAST`). One-to-many traffic can't be shifted from reports.
+- **Port 0:** today's per-station shifting by default (`BCAST MODE 0 AUTO`). A fixed
+  mode (`BCAST MODE 0 mode`) turns it off: no reports sent, reports heard ignored, and
+  frames never parsed as AX.25.
 - **One queue for all ports:** the next burst takes the first queued frame's port and
   mode, then every queued frame of that port that fits. KISS p-persistence and
   SLOTTIME apply to all ports. Broadcast still goes only between ARQ sessions.
 
 ## 5. Host interface
 
-Commands on the command port, replies as for VARA's (OK / WRONG):
+One integrated server: the command, data and KISS ports always run (the `--vara` /
+`--kiss` flags go). Commands go on the command port, replies as for VARA's (OK / WRONG):
 
 | command | reply | does |
 |---|---|---|
 | `BCAST OPEN group [FROM call]` | `BCAST PORT n` | opens a port; FROM sends group+from |
 | `BCAST CLOSE n` | OK | |
-| `BCAST MODE n mode` | OK / WRONG | that port's mode, within the KISS cap |
+| `BCAST MODE n mode` | OK / WRONG | that port's transmit mode for later frames, within the KISS cap; any time between frames, never filters decoding. Port 0 also takes `AUTO` (shifting, the default) |
 | `MODES` | one `MODE ...` line per mode, then OK | name, bandwidth Hz, bytes per codeword, max codewords, airtime at 1 and at max codewords |
 
 Statuses, to ports opened on this connection only:
@@ -97,10 +100,13 @@ Statuses, to ports opened on this connection only:
 - `BCAST n HEARD [call]`: a burst's control checked for port n (call from group+from).
   Its frames follow on the KISS port. It's known only at the burst's end: the receiver
   decodes whole bursts.
-- `BCAST n LOST k`: the control decoded, but k frames were lost (header and control,
-  no data).
-- A burst whose header decoded but whose control didn't can't be tied to a port. It's
-  BUSY ON/OFF, as now.
+- `BCAST n LOST k`: the burst is the port's (control checked, or data under its key),
+  but k frames were lost.
+- Control lost: if a data slot passes under an open port's key, the burst is that
+  port's (HEARD / LOST as usual; an ambiguous key as in §2 Collisions). Control and
+  all data lost can't be tied to a port: the frozen 16-bit PHY header has no room for
+  a group. Proposed: a `BCAST * MISSED submode n_cw` hint to every open port; it may
+  be another group's burst.
 
 ## 6. Not done
 
@@ -108,6 +114,9 @@ Statuses, to ports opened on this connection only:
   app needs more.
 - **Setting a port's mode by KISS command:** the command port does it. Add it when a
   KISS-only client needs it.
-- **Incremental redundancy across broadcast bursts:** no resends, so no IR.
+- **Incremental redundancy across broadcast bursts:** later. An app would mark a frame,
+  by a KISS extension, as a resend at a given redundancy version; it runs its own
+  resends outside our ARQ, and we keep its soft bits for a while to combine. The
+  position-only scrambler already lets a resend combine from any slot.
 - **ID:** ID frames (`arq.md` §7a) are the application's call. A port with FROM
   identifies the sender of each burst.
