@@ -94,7 +94,6 @@ class CpmSpec:
     code: str  # "ldpc" (data) | "polar" (control)
     k: int  # info bits incl. CRC
     coded_bits: int
-    protograph: str = ""
     frames_per_cw: int = 0
     clip_headroom_db: float | None = None
     family: str = field(default="cpm", compare=False)
@@ -297,10 +296,10 @@ def tones(g: Grid, sym: np.ndarray) -> np.ndarray:
     T = g.T
     a = np.repeat(sym.astype(float), T)
     x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
-    nr = int(RAMP_S * FS)
-    ramp = (1 - np.cos(np.pi * (np.arange(nr) + 0.5) / nr)) / 2
-    x[:nr] *= ramp
-    x[-nr:] *= ramp[::-1]
+    n_ramp = int(RAMP_S * FS)
+    ramp = (1 - np.cos(np.pi * (np.arange(n_ramp) + 0.5) / n_ramp)) / 2
+    x[:n_ramp] *= ramp
+    x[-n_ramp:] *= ramp[::-1]
     return x
 
 

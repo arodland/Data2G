@@ -1,142 +1,72 @@
-"""Quasi-cyclic LDPC with 5G NR structure, any (K, N).
+"""Quasi-cyclic LDPC on two base graphs, any (K, N).
 
-A base matrix holds, per (row, column), a circulant shift or -1. Rows
-0..3 and parity columns kb..kb+3 form NR's core, which is invertible and
-fixes the first 4Z parities; every later row r adds one parity column
-kb+r with an identity. That structure is what makes systematic encoding
-cheap, and any base matrix that keeps it (NR's own BG1/BG2, or an
-optimized protograph) uses the same encoder and decoder.
+A base matrix holds, per (row, column), a circulant shift or -1. Base
+graph 1 is (46, 68) with 22 info columns, base graph 2 (42, 52) with 10.
+The block masks and one shift table per lifting size Z a submode uses
+are in codes_data/ldpc_shifts.npz (scripts/own_shifts.py generated and
+screened them). Rows 0..3 and parity columns kb..kb+3 form a
+dual-diagonal core (as in 802.11n/802.16e), which is invertible and fixes
+the first 4Z parities; every later row r adds one parity column kb+r
+with an identity. That makes systematic encoding cheap.
 
-Rate matching follows NR: the first two info columns are punctured (never
-sent), K below kb*Z is padded with filler zeros (known to the decoder,
-never sent), and only as many base rows are kept as the N transmitted
-bits reach; H is truncated to them.
+Rate matching: the first two info columns are punctured (never sent), K
+below kb*Z is padded with filler zeros (known to the decoder, never
+sent), and only as many base rows are kept as the N transmitted bits
+reach; H is truncated to them.
 
-Circulant convention (TS 38.212): row i of a block with shift s connects
-to column (i + s) mod Z.
+Circulant convention: row i of a block with shift s connects to column
+(i + s) mod Z.
 
 Encoder: numpy (runtime). Decoder: torch, batched normalized min-sum
 with an optional per-iteration normalization (neural min-sum).
 """
 
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 import numpy as np
 
 DATA = Path(__file__).parent / "codes_data"
+SHIFTS = DATA / "ldpc_shifts.npz"
 CORE = 4
+KB = {1: 22, 2: 10}  # info columns per base graph
 
-# TS 38.212 Table 5.3.2-1: lifting sizes by set index i_ls.
-LIFTING_SETS = [
-    [2, 4, 8, 16, 32, 64, 128, 256],
-    [3, 6, 12, 24, 48, 96, 192, 384],
-    [5, 10, 20, 40, 80, 160, 320],
-    [7, 14, 28, 56, 112, 224],
-    [9, 18, 36, 72, 144, 288],
-    [11, 22, 44, 88, 176, 352],
-    [13, 26, 52, 104, 208],
-    [15, 30, 60, 120, 240],
-]
+# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15}.
+LIFTING_SIZES = sorted({a << j for a in (2, 3, 5, 7, 9, 11, 13, 15) for j in range(8) if a << j <= 384})
 
 
-def nr_base_graph(bg: int, i_ls: int) -> np.ndarray:
-    """(46, 68) for BG1, (42, 52) for BG2; -1 where there is no block."""
-    a = np.genfromtxt(DATA / f"5G_bg{bg}.csv", delimiter=";")[2:]
-    shape = (46, 68) if bg == 1 else (42, 52)
-    base = np.full(shape, -1, dtype=np.int64)
-    r = -1
-    for row in a:
-        if not np.isnan(row[0]):
-            r = int(row[0])
-        base[r, int(row[1])] = int(row[2 + i_ls])
-    return base
+@lru_cache(maxsize=None)
+def tables() -> dict[str, np.ndarray]:
+    """"mask_bg1", "mask_bg2" (bool) and "bg<b>_z<Z>" shift tables."""
+    with np.load(SHIFTS) as d:
+        return {key: d[key].astype(bool if key.startswith("mask") else np.int64) for key in d.files}
 
 
-def nr_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
-    """NR LDPC carrying k bits in n: base graph by TS 38.212 7.2.2 rules
-    (unless given), smallest lifting with kb*Z >= k."""
+def mask(bg: int) -> np.ndarray:
+    return tables()[f"mask_bg{bg}"].copy()
+
+
+def layout(k: int, n: int, bg: int | None = None) -> tuple[int, int]:
+    """(base graph, Z) for k bits in n: graph 2 for short blocks and low
+    rates, and the smallest lifting size whose (graph 2: k-dependent)
+    info columns hold k."""
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
-    if bg == 1:
-        kb_z = 22
-    else:
-        kb_z = 10 if k > 640 else 9 if k > 560 else 8 if k > 192 else 6
-    z, i_ls = min(
-        (s, i) for i, zs in enumerate(LIFTING_SETS) for s in zs if kb_z * s >= k
-    )
-    base = nr_base_graph(bg, i_ls) % z  # shifts are defined mod Z
-    base[nr_base_graph(bg, i_ls) < 0] = -1
-    return QCLDPC(base=base, z=z, kb=22 if bg == 1 else 10, k=k, n=n)
+    kb_z = 22 if bg == 1 else 10 if k > 640 else 9 if k > 560 else 8 if k > 192 else 6
+    return bg, next(z for z in LIFTING_SIZES if kb_z * z >= k)
 
 
-def embed(mask: np.ndarray, bg: int) -> np.ndarray:
-    """A searched (mb, kb+mb) protograph inside NR's full base mask, so
-    NR's extension rows are there when rate matching (filler bits) needs
-    more parity than the design rate had."""
-    full = nr_base_graph(bg, 0) >= 0
-    full[: mask.shape[0], : mask.shape[1]] = mask
-    return full
-
-
-def lift(mask: np.ndarray, kb: int, z: int, bg: int, seed: int = 0) -> np.ndarray:
-    """Circulant shifts for a protograph at lifting size z.
-
-    Every block NR's own graph has keeps NR's shift (for the lifting set
-    containing z): that keeps the core invertible, and NR's shifts beat
-    a pure greedy lift measured (same graph, K=1024 rate 1/2: greedy has
-    no 6-cycles against NR's 84, yet floors at BLER 2.5e-4 at 1.8 dB
-    where NR has none). Blocks the search added are placed greedily, in
-    random order: a shift that closes no 4-cycle with the blocks already
-    placed, and among those the fewest 6-cycles.
-
-    A cycle through blocks (r,c),(r2,c),(r2,c2),(r,c2) exists in the
-    lifted graph when the alternating shift sum is 0 mod z; so each
-    already-placed path back to row r forbids one shift value.
-    """
-    rng = np.random.default_rng(seed)
-    i_ls = next(i for i, zs in enumerate(LIFTING_SETS) if z in zs)
-    nr = nr_base_graph(bg, i_ls)[: mask.shape[0], : mask.shape[1]]
-    base = np.full(mask.shape, -1, dtype=np.int64)
-    fixed = mask & (nr >= 0)
-    base[fixed] = nr[fixed] % z
-    todo = [tuple(e) for e in np.argwhere(mask & ~fixed)]
-    rng.shuffle(todo)
-    for r, c in todo:
-        bad4 = np.zeros(z, int)
-        bad6 = np.zeros(z, int)
-        rows_c = np.flatnonzero(base[:, c] >= 0)
-        cols_r = np.flatnonzero(base[r] >= 0)
-        for r2 in rows_c:
-            for c2 in np.flatnonzero(base[r2] >= 0):
-                if c2 == c:
-                    continue
-                v = base[r2, c] - base[r2, c2]
-                if base[r, c2] >= 0:
-                    bad4[(v + base[r, c2]) % z] += 1
-                for r3 in np.flatnonzero(base[:, c2] >= 0):
-                    if r3 in (r, r2):
-                        continue
-                    for c3 in cols_r:
-                        if c3 in (c, c2) or base[r3, c3] < 0:
-                            continue
-                        bad6[(v + base[r3, c2] - base[r3, c3] + base[r, c3]) % z] += 1
-        score = bad4 * 10**6 + bad6 + rng.random(z) * 0.5
-        base[r, c] = int(np.argmin(score))
-    return base
-
-
-def protograph_code(mask: np.ndarray, bg: int, k: int, n: int) -> "QCLDPC":
-    """A searched protograph (scripts/design_ldpc.py) as a code for
-    (k, n): embedded in NR's full graph, lifted at NR's lifting size for k.
-
-    ponytail: lifted at load time from the mask; the shifts become
-    committed data when the ladder is frozen (plan step 9)."""
-    ref = nr_code(k, n, bg=bg)
-    base = lift(embed(mask, bg), ref.kb, ref.z, bg)
-    return QCLDPC(base=base, z=ref.z, kb=ref.kb, k=k, n=n)
+def qc_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
+    """The code carrying k bits in n, on its shift table."""
+    bg, z = layout(k, n, bg)
+    try:
+        base = tables()[f"bg{bg}_z{z}"].copy()
+    except KeyError:
+        raise KeyError(f"no shift table for base graph {bg}, Z={z} (k={k}): "
+                       "add one with scripts/own_shifts.py (gen, screen, PICKS, export)") from None
+    return QCLDPC(base=base, z=z, kb=KB[bg], k=k, n=n)
 
 
 def _gf2_inv(a: np.ndarray) -> np.ndarray:
@@ -181,7 +111,7 @@ class QCLDPC:
     def mother(self, n: int | None = None) -> "QCLDPC":
         """The same code with more of its base rows: n transmitted bits
         (default all: the whole circular buffer, docs/arq.md §5). Its first
-        self.n sent bits are this code's codeword (NR's extension rows each
+        self.n sent bits are this code's codeword (the extension rows each
         add one parity column and leave earlier columns alone), which is
         what makes incremental redundancy possible without a format change."""
         n_all = (self.full_base.shape[1] - 2) * self.z - (self.kb * self.z - self.k)

@@ -171,7 +171,7 @@ def outcome_knows(submode: str) -> bool:
 # they kept modes out of the sessions later models trained on, so those
 # never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
 # picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
-# nothing elsewhere (README, outcome model v12).
+# nothing elsewhere (old README in git history, outcome model v12).
 LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0}
 # DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
 # whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
