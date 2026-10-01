@@ -2,14 +2,17 @@
 
 TLDR: KISS grows into named broadcast groups. Each group is a KISS port, opened by a
 command on the command port. A group's bursts carry its name in the control codeword,
-and its data codewords use a CRC mask hashed from the name. Port 0 is today's KISS
-under the group name "VARA KISS", with the same mode shifting.
+and every codeword in them, control and data, uses a CRC mask hashed from that name. A
+receiver decodes the control without a mask, reads the name and checks the CRC with
+its key: no fixed broadcast key, and no trying groups one by one. Port 0 is today's
+KISS under the group name "VARA KISS", with the same mode shifting.
 
 Needs a decision:
 
 - Should the command port (8300) run without `--vara`, since broadcast commands and statuses need it?
 - The status set in §5.
-- Should port 0 move to the new control format (its wire changes), or keep today's?
+- Port 0's wire changes anyway (its key becomes the hash of "VARA KISS"). Should its
+  control move to the TLV format too (reports as a TLV), or keep today's layout?
 
 ## 1. Terms
 
@@ -23,20 +26,30 @@ Needs a decision:
 
 ## 2. Masks: who can read what
 
-- **Control codewords:** one fixed mask for every broadcast burst,
-  `ctl_mask(0, i, BCAST_KEY)` (today's `KISS_KEY`).
-  - Any station decodes any broadcast burst's control and reads its group from it.
-    Promiscuous listening needs no list of groups.
-  - The receiver's cost per burst is what KISS costs today: one control decode.
-- **Data codewords:** `data_mask(0, slot, group key)`.
-  - Anyone decodes and reads a data codeword (the scrambler is unkeyed, `arq.md` §2);
-    its CRC passes only under its own group's mask. Data from a burst whose control
-    was lost never lands on the wrong port.
-  - A promiscuous listener verifies a burst's data with the key hashed from the group
-    in its control. With the control lost, it can still read the data unverified.
-  - Control lost: the receiver tries slot 1 under each open port's key, as KISS tries
-    `KISS_KEY` today. That costs up to 16 decodes, only on those bursts.
-- **Collisions:** two group names share a key 1 time in 65536. The name in the control
+Everything on air is plain: the scrambler is unkeyed (`arq.md` §2), so anyone decodes
+and reads any codeword. A mask only decides whose CRC check passes.
+
+- **One key per group, on every codeword:** `ctl_mask(0, i, group key)` for control,
+  `data_mask(0, slot, group key)` for data. Port 0's key is the hash of "VARA KISS".
+- **The control checks itself:**
+  1. Decode slot 0 once, mask left open (`codes.decode_raw`; the engine does this
+     already, for the session's key and mask 0).
+  2. Parse the unverified bytes: the header's version must be 2, then the TLVs. The
+     group comes from group or group+from; absent means "VARA KISS".
+  3. Hash the group to its key and check the CRC (`codes.check`). Polar control
+     (CPM) does this per list candidate, each with the group read from it.
+  - A wrong decode or another burst type gives a garbage name, and the check fails.
+    A false pass is 2^-16 per candidate (CRC-16), as for any mask today.
+- **Cost:** one decode per burst, shared with the ARQ and CQ/ID checks, then CRC
+  checks. Interest in many groups costs nothing extra: the burst names its own.
+- **Filtering:** a receiver checks the control, then keeps the burst only if the
+  group is an open port. Promiscuous listening keeps every group's.
+- **Data:** checked under the group read from the control. Data from a burst whose
+  control was lost never lands on the wrong port.
+  - Control lost: the receiver checks slot 1's CRC under each open port's key (one
+    decode, then up to 16 CRC checks). A promiscuous listener can still read that
+    data, unverified.
+- **Collisions:** two group names share a key 1 time in 65536. The control's name
   settles it. Only a control-lost burst can be misdelivered, and only between two
   colliding groups that are both open.
 
@@ -49,7 +62,7 @@ Needs a decision:
 
   | type | contents | when |
   |---|---|---|
-  | group | packed group, 8 B | every burst except port 0's (absent means "VARA KISS") |
+  | group | packed group, 8 B | every burst except port 0's (absent means "VARA KISS", and its key) |
   | group+from | group and sender, 15 B (120 bits packed together) | in place of group, when the port asks for it |
   | reports | sender hash (2 B), then per station [hash 2 B][mode code << 2 \| size hint] | port 0 only: today's AX.25 mode shifting |
 
@@ -81,7 +94,7 @@ Commands on the command port, replies as for VARA's (OK / WRONG):
 
 Statuses, to ports opened on this connection only:
 
-- `BCAST n HEARD [call]`: a burst's control decoded for port n (call from group+from).
+- `BCAST n HEARD [call]`: a burst's control checked for port n (call from group+from).
   Its frames follow on the KISS port. It's known only at the burst's end: the receiver
   decodes whole bursts.
 - `BCAST n LOST k`: the control decoded, but k frames were lost (header and control,
