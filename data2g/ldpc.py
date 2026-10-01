@@ -23,6 +23,7 @@ Encoder: numpy (runtime). Decoder: torch, batched normalized min-sum
 with an optional per-iteration normalization (neural min-sum).
 """
 
+import os
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -31,6 +32,9 @@ import numpy as np
 
 DATA = Path(__file__).parent / "codes_data"
 OWN_SHIFTS = DATA / "ldpc_shifts.npz"
+# Study toggle: "nr" runs the whole modem on TS 38.212's shifts (paired
+# ladder runs against ours); the runtime default is "own".
+SHIFTS = os.environ.get("DATA2G_LDPC_SHIFTS", "own")
 CORE = 4
 
 # TS 38.212 Table 5.3.2-1: lifting sizes by set index i_ls.
@@ -65,11 +69,12 @@ def own_shifts() -> dict[str, np.ndarray]:
         return {key: d[key].astype(np.int64) for key in d.files}
 
 
-def nr_code(k: int, n: int, bg: int | None = None, shifts: str = "own") -> "QCLDPC":
+def nr_code(k: int, n: int, bg: int | None = None, shifts: str | None = None) -> "QCLDPC":
     """NR-structured LDPC carrying k bits in n: base graph by TS 38.212
     7.2.2 rules (unless given), smallest lifting with kb*Z >= k. Shifts
     "own" (the runtime's; only the lifting sizes a submode uses have a
-    table) or "nr" (TS 38.212's, for studies)."""
+    table) or "nr" (TS 38.212's, for studies); None: SHIFTS."""
+    shifts = shifts or SHIFTS
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
