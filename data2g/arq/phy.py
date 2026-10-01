@@ -130,19 +130,17 @@ def _decode_post(spec, buf, top: int, rv: int, soft, m: int) -> tuple:
     (payload, ok, a-posteriori LLRs of the slot's coded bits in mapping
     order): DD needs the posterior of every failed decode, so it comes
     from the same pass."""
-    import torch
-
     perm = codes.interleaver(spec)
     if buf is None:
         d = np.empty(spec.coded_bits)
         d[perm] = soft
-        dec, llr = codes._decoder(spec, "cpu"), d[None]
+        dec, llr = codes._decoder(spec), d[None]
     else:
         extent = min(codes.buffer_len(spec), (min(top, codes.rv_cycle(spec) - 1) + 1) * spec.coded_bits)
         dec, llr = codes._ext_decoder(spec, extent), buf[:, :extent]
-    out, ok, post = dec.decode(torch.as_tensor(llr, dtype=torch.float32), iters=40, posterior=True)
-    payload, good = codes._payloads(spec, out.cpu().numpy(), ok.cpu().numpy(), np.array([m]), np.array([0]))[0]
-    code = post[0].numpy()
+    out, ok, post = dec.decode(llr, iters=40, posterior=True)
+    payload, good = codes._payloads(spec, out, ok, np.array([m]), np.array([0]))[0]
+    code = post[0]
     return payload, good, (code if buf is None else code[codes.rv_positions(spec, rv)])[perm]
 
 
