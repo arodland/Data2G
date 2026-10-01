@@ -33,7 +33,7 @@ import linksim as L  # noqa: E402
 import phy_session as G  # noqa: E402
 
 VARIANTS = {
-    "v1": dict(KEEPALIVE_S=(2.0, 16.0), KEEPALIVE_JITTER=0.0, WAKE_TRIES=0),
+    "v1": dict(KEEPALIVE_S=(2.0, 16.0), KEEPALIVE_JITTER=0.0, WAKE_TRIES=0, LINK_LOST_S=90.0),
     "wake": {},  # session.py as it stands
 }
 CELLS = [("awgn", 8.0), ("mpp", 8.0), ("mpp", 2.0), ("mpd", 4.0)]

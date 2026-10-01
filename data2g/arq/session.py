@@ -32,9 +32,11 @@ DISC_TRIES = 3
 # preamble and header (0.4-0.6 s) and the receiver's search step (0.25 s)
 # (the audio loopback timed out on replies already on air at 1.0)
 REPLY_START_S = 1.5
-LINK_LOST_S = 90.0
 IDLE_CLOSE_S = 300.0
 KEEPALIVE_S = (15.0, 60.0)  # first and largest idle poll interval
+# after the longest keepalive gap, v1's retry budget (90 s link lost
+# against 16 s polls): a lost keepalive must not close the link
+LINK_LOST_S = KEEPALIVE_S[1] + 75.0
 KEEPALIVE_JITTER = 0.3  # each interval stretched by up to this fraction (no lockstep with the callee's wakes)
 # the callee's wake: after t_turn + REPLY_START_S + WAKE_GUARD_S of silence
 # since its last burst (the caller's answer or timeout retry starts within

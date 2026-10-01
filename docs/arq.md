@@ -177,7 +177,7 @@ Where the rest comes from:
   2. **Shrink:** fewer codewords, one step more robust, and recommend a more robust
      reply mode.
   3. **Robust floor:** the most robust polar mode in the narrowest band both allow.
-  4. **Probe:** after 6 misses, one robust probe every 10 s. Link lost at 90 s:
+  4. **Probe:** after 6 misses, one robust probe every 10 s. Link lost at 135 s:
      disconnect and report to the host.
 - **Who retries:** only the caller (the session's master) retries on timeout. The
   callee only ever answers, carrying its own data in its replies. It starts a turn
@@ -222,7 +222,8 @@ Where the rest comes from:
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
   before retrying.
-- **Link lost:** 90 s after the last decodable burst from the peer, on either side.
+- **Link lost:** 135 s after the last decodable burst from the peer, on either side
+  (the 60 s keepalive's longest gap plus v1's ~75 s retry budget; v1: 90 s).
   The link core's consecutive-timeout count (12) applies only in the lockstep tests,
   which have no clock. In a session it tripped on links that were slow but alive.
 - **Listen before talk** before any turn that isn't a reply (retries, polls): a
@@ -370,7 +371,7 @@ forever without progress, because they disagree about protocol state.
   - An inconsistency the protocol can't explain also disconnects at once, rather than
     resyncing: a peer cumulative outside [base, next], or an abandon at the wrong
     point. A resync from a state the station can't trust could corrupt.
-  - A dead link is bounded too: the 90 s timeout of §6.
+  - A dead link is bounded too: the 135 s timeout of §6.
   - No path through the state machine runs unbounded.
 - **Tests before tuning** (tests/test_arq.py, and scripts/arq_stress.py: 3200 runs
   over a 4x4 loss grid; no corruption, mismatch or fail-safe trip): random loss of
