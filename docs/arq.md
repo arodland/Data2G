@@ -295,7 +295,7 @@ Where the rest comes from:
 
 These are sent in the most robust mode the bandwidth cap allows. The fields span
 several control codewords, and callsigns are packed 6 bits per character, up to 10
-characters plus SSID.
+characters plus SSID, space padded at the end (a space inside a name is kept).
 
 | frame | contents |
 |---|---|
