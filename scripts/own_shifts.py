@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data2g import config, cpm, ldpc
+from data2g import config, cpm, decoders_torch, ldpc
 
 OUT = Path("runs/own_shifts")
 
@@ -263,7 +263,7 @@ def bler_curve(code, ebn0s, blocks, device, iters=40, seed=1, batch=2000):
     noise for any code of this (k, n) and seed (paired)."""
     import torch
 
-    dec = ldpc.MinSumDecoder(code, device=device)
+    dec = decoders_torch.MinSumDecoder(code, device=device)
     k, n = code.k, code.n
     # ~10 live float32 tensors of (batch, checks, dmax) at the peak
     batch = max(100, min(batch, int(VRAM_BUDGET / (40 * dec.chk.numel()))))

@@ -46,9 +46,11 @@ def _decoder(spec, device):
         return _ldpc(spec, device)
     key = (spec, device, _L[0])
     if key not in _decoders:
-        from data2g import polar
+        from data2g import decoders_torch, polar
 
-        _decoders[key] = polar.SCLDecoder(codes.polar_code(spec), _L[0], device=device)
+        code = codes.polar_code(spec)
+        _decoders[key] = (polar.SCLDecoder(code, _L[0]) if device is None
+                          else decoders_torch.SCLDecoder(code, _L[0], device=device))
     return _decoders[key]
 
 

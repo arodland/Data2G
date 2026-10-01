@@ -54,16 +54,15 @@ def test_a_lifting_size_without_a_table_is_an_error():
 
 
 def test_min_sum_decodes_noise_free_and_corrects_errors():
-    torch = pytest.importorskip("torch")
     code = ldpc.qc_code(500, 1000)
     dec = ldpc.MinSumDecoder(code)
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, (8, 500))
     x = 1.0 - 2.0 * code.encode(bits)
     y = x + rng.normal(scale=0.7, size=x.shape)  # BPSK, Es/N0 ~3 dB at rate 1/2
-    out, ok = dec.decode(torch.tensor(2 * y / 0.49, dtype=torch.float32))
+    out, ok = dec.decode(2 * y / 0.49)
     assert ok.all()
-    assert np.array_equal(out.numpy(), bits)
+    assert np.array_equal(out, bits)
 
 
 def test_mother_code_starts_with_the_codeword():

@@ -277,7 +277,7 @@ def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=
     masks = np.broadcast_to(crc_mask, len(buf))
     idx = np.arange(len(buf)) if index is None else np.broadcast_to(index, len(buf))
     if spec.code != "ldpc":
-        return _payloads(spec, *_decode_code_order(spec, _decoder(spec, "cpu"), buf, crc_mask=masks, index=idx),
+        return _payloads(spec, *_decode_code_order(spec, _decoder(spec), buf, crc_mask=masks, index=idx),
                          masks, idx)
     extent = min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
     return _payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
@@ -323,32 +323,36 @@ def decode_many(spec: SubmodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> 
     return _payloads(spec, *decode_llrs(spec, soft, crc_mask=masks, index=idx), masks, idx)
 
 
-def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device="cpu", crc_mask=0, index=0):
-    """Batched decode: (B, coded_bits) LLRs in mapping order (numpy or
-    torch) -> (info bits (B, k) numpy uint8, success (B,) numpy bool).
-    LDPC: success = H satisfied. Polar: the first list path (best metric
-    first) whose CRC checks; success = one did.
+def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device=None, crc_mask=0, index=0):
+    """Batched decode: (B, coded_bits) LLRs in mapping order (numpy, or
+    torch with `device`) -> (info bits (B, k) numpy uint8, success (B,)
+    numpy bool). LDPC: success = H satisfied. Polar: the first list path
+    (best metric first) whose CRC checks; success = one did. `device`
+    (studies only): decode on torch there (decoders_torch)."""
+    if device is not None:
+        import torch
 
-    ponytail: the runtime decoder is torch on CPU; a numpy (and later
-    C++) min-sum is needed before the modem can drop torch."""
-    import torch
-
-    llr = torch.as_tensor(llr, dtype=torch.float32, device=device)
-    deint = torch.empty_like(llr)
-    deint[:, torch.as_tensor(interleaver(spec), device=device)] = llr
+        llr = torch.as_tensor(llr, dtype=torch.float32, device=device)
+        deint = torch.empty_like(llr)
+        deint[:, torch.as_tensor(interleaver(spec), device=device)] = llr
+    else:
+        llr = np.asarray(llr, dtype=np.float32)
+        deint = np.empty_like(llr)
+        deint[:, interleaver(spec)] = llr
     return _decode_code_order(spec, _decoder(spec, device), deint, iters, crc_mask, index)
+
+
+def _numpy(x):
+    return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
 
 def _decode_code_order(spec: SubmodeSpec, dec, deint, iters: int = 40, crc_mask=0, index=0):
     """decode_llrs after deinterleaving: LLRs in the decoder's code order."""
-    import torch
-
-    deint = torch.as_tensor(deint, dtype=torch.float32)
     if spec.code == "ldpc":
         out, ok = dec.decode(deint, iters=iters)
-        return out.cpu().numpy(), ok.cpu().numpy()
+        return _numpy(out), _numpy(ok)
     paths, _ = dec.decode(deint)
-    paths = paths.cpu().numpy()  # (B, L, k), best first
+    paths = _numpy(paths)  # (B, L, k), best first
     rep = lambda v: np.repeat(np.broadcast_to(v, len(paths)), paths.shape[1])  # noqa: E731
     crc = crc_ok(spec, paths.reshape(-1, spec.k), rep(crc_mask), rep(index)).reshape(paths.shape[:2])
     pick = np.where(crc.any(axis=1), crc.argmax(axis=1), 0)
@@ -368,7 +372,14 @@ def crc_ok(spec: SubmodeSpec, bits: np.ndarray, crc_mask=0, index=0) -> np.ndarr
 
 
 @lru_cache(maxsize=None)
-def _decoder(spec: SubmodeSpec, device: str):
+def _decoder(spec: SubmodeSpec, device=None):
+    """The numpy decoder, or with `device` the torch one there (studies)."""
+    if device is not None:
+        from . import decoders_torch
+
+        if spec.code == "ldpc":
+            return decoders_torch.MinSumDecoder(ldpc_code(spec), device=device)
+        return decoders_torch.SCLDecoder(polar_code(spec), POLAR_LIST, device=device)
     if spec.code == "ldpc":
-        return ldpc.MinSumDecoder(ldpc_code(spec), device=device)
-    return polar.SCLDecoder(polar_code(spec), POLAR_LIST, device=device)
+        return ldpc.MinSumDecoder(ldpc_code(spec))
+    return polar.SCLDecoder(polar_code(spec), POLAR_LIST)
