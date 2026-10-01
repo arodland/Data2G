@@ -24,7 +24,7 @@ from . import frames as F
 from . import link as L
 
 T_SESS = 10  # extension type carrying a session frame
-VERSION = 2  # 2: T_COMP (a v1 peer would deliver compressed codewords raw)
+VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.WORDS
 CONNECT_TRIES = 5
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's

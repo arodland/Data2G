@@ -316,10 +316,11 @@ As built (data2g/arq/policy.py):
 - **Boundaries:** padding only ever falls between records. That keeps re-slicing after
   an abandon exact: the receiver's stream is the concatenation of delivered codewords
   in seq order.
-- **Compression (`T_COMP`, session version 2):**
+- **Compression (`T_COMP`, session version 2; word list, version 3):**
   - A compressed codeword is raw deflate (no header) of the stream bytes it carries,
-    zero padded. Deflate is primed with the last 4 KB (`frames.HIST`) of the stream
-    as delivered before it: raw codewords with their padding, compressed ones inflated.
+    zero padded. Deflate is primed with a fixed 4 KB list of common English words
+    (`frames.WORDS`), then the last 4 KB (`frames.HIST`) of the stream as delivered
+    before it: raw codewords with their padding, compressed ones inflated.
   - The receiver delivers in seq order, so it always holds that history. It inflates at
     delivery; a codeword that won't inflate fails the link (protocol error).
   - The flag is fixed at creation, so a resend carries the same bit. After an abandon
