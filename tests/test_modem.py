@@ -154,3 +154,8 @@ def test_header_copy_rescues_a_lost_first_copy(sub, n_cw):
     y = hfchannel.apply_channel(np.concatenate([x, np.zeros(4000)]), snr_db=15, seed=3)
     b = modem.demodulate(y)
     assert b.submode.name == sub and b.payloads == payloads
+
+
+def test_valid_signs_are_the_valid_rows_of_the_full_table():
+    for band in modem.SYNC_BANDS:
+        assert np.array_equal(modem._valid_signs(band), modem._header_signs(band)[modem._valid_words(band)])
