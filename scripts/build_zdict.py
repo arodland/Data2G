@@ -4,10 +4,10 @@ shares as many frequent substrings as possible with a text corpus.
 Iterated epsilon-greedy: grow one string, each step appending a byte at
 the right, prepending one at the left, or appending a frequent word,
 scored by the corpus count of the distinct 3..L-byte substrings it adds
-(per byte added). Several restarts; the one that deflates held-out text
-smallest wins.
+(per byte added). Several restarts; the one that deflates validation text
+smallest wins, then so does the best of its rotations.
 
-    python scripts/build_zdict.py OUT --train BOOK... --test TEXT...
+    python scripts/build_zdict.py OUT --train TEXT... --val TEXT... --test TEXT...
 """
 
 import argparse
@@ -23,12 +23,10 @@ SIZE = 4096
 
 
 def clean(b: bytes) -> bytes:
-    """A Gutenberg text -> its body, LF line ends, wraps joined."""
-    t = b.decode("utf-8", "ignore")
+    """ASCII, LF line ends; a Gutenberg text -> its body, wraps joined."""
+    t = b.decode("utf-8", "ignore").replace("\r\n", "\n")
     if (m := re.search(r"\*\*\* START OF .*?\*\*\*(.*)\*\*\* END OF", t, re.S)):
-        t = m.group(1)
-    t = t.replace("\r\n", "\n")
-    t = re.sub(r"(?<!\n)\n(?!\n)", " ", t)  # hard wraps -> spaces, paragraphs kept
+        t = re.sub(r"(?<!\n)\n(?!\n)", " ", m.group(1))  # hard wraps -> spaces, paragraphs kept
     return t.encode("ascii", "ignore")
 
 
@@ -94,30 +92,38 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--train", nargs="+", required=True)
-    ap.add_argument("--test", nargs="+", required=True)
+    ap.add_argument("--val", nargs="+", required=True, help="picks the restart and the rotation")
+    ap.add_argument("--test", nargs="+", required=True, help="reported only")
     ap.add_argument("--per-book", type=int, default=200_000)
     ap.add_argument("--baseline", nargs="*", default=[], help="dictionaries to score alongside")
     a = ap.parse_args()
     books = [clean(Path(f).read_bytes()) for f in a.train]
     corpus = b"\n\n".join(b[len(b) // 2 - a.per_book // 2:][:a.per_book] for b in books)
+    val = [clean(Path(f).read_bytes()) for f in a.val]
     tests = [clean(Path(f).read_bytes()) for f in a.test]
     print(f"corpus {len(corpus)} B", flush=True)
     freq = counts(corpus)
     wc = Counter(re.findall(rb" [A-Za-z']+", corpus))
     words = [w + b" " for w, _ in sorted(wc.items(), key=lambda x: -x[1] * len(x[0]))]
+    print("deflated bytes, val / test")
     for f in a.baseline:
-        print(f"baseline {f}: {score(Path(f).read_bytes(), tests)}")
-    print(f"no dictionary: {score(b'', tests)}")
+        print(f"baseline {f}: {score(Path(f).read_bytes(), val)} / {score(Path(f).read_bytes(), tests)}")
+    print(f"no dictionary: {score(b'', val)} / {score(b'', tests)}")
     best = None
-    for eps in (0.0, 0.05, 0.1, 0.2):
+    for eps in (0.0, 0.05, 0.1):
         for seed in range(1 if eps == 0 else 2):
             d = grow(freq, words, eps, random.Random(seed))
-            s = score(d, tests)
-            print(f"eps {eps} seed {seed}: {s}", flush=True)
+            print(f"eps {eps} seed {seed}: {(s := score(d, val))} / {score(d, tests)}", flush=True)
             if best is None or s < best[0]:
                 best = (s, d)
-    Path(a.out).write_bytes(best[1])
-    print(f"best {best[0]} -> {a.out}")
+    d = best[1]
+    rot = [score(d[r:] + d[:r], val) for r in range(len(d))]
+    r = min(range(len(d)), key=rot.__getitem__)
+    print(f"rotations: val median {sorted(rot)[len(rot) // 2]}, worst {max(rot)}, unrotated {rot[0]}")
+    d = d[r:] + d[:r]
+    print(f"best rotation {r}: {rot[r]} / {score(d, tests)}")
+    Path(a.out).write_bytes(d)
+    print(f"-> {a.out}")
 
 
 if __name__ == "__main__":
