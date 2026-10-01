@@ -314,7 +314,7 @@ def _payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=
     masks = np.zeros(len(bits), int) if masks is None else masks
     index = np.arange(len(bits)) if index is None else index
     for b, m, i, c in zip(bits, masks, index, converged):
-        b = b.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(i)))[: len(b)]
+        b = descramble(spec, b, i)
         data = np.packbits(b[: 8 * (payload_bytes(spec) + n_crc // 8)]).tobytes()
         payload = data[: -n_crc // 8]
         out.append((payload, bool(c) and _with_crc(payload, n_crc, int(m)) == data))
@@ -353,6 +353,44 @@ def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device=None, crc_mask=0
         deint = np.empty_like(llr)
         deint[:, interleaver(spec)] = llr
     return _decode_code_order(spec, _decoder(spec, device), deint, iters, crc_mask, index)
+
+
+def decode_raw(spec: SubmodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray, np.ndarray]:
+    """(B, coded_bits) soft bits in mapping order -> (candidates (B, L, k)
+    uint8, descrambled; usable (B, L) bool), with the CRC mask left open:
+    decode once, then check() each mask in question. LDPC: one candidate,
+    usable when H is satisfied. Polar: the list, best metric first, all
+    usable (the CRC picks). `index`: per row, the burst position (default
+    the row number)."""
+    soft = np.asarray(soft, dtype=np.float32)
+    deint = np.empty_like(soft)
+    deint[:, interleaver(spec)] = soft
+    if spec.code == "ldpc":
+        out, ok = _decoder(spec).decode(deint, iters=40)
+        cands, usable = _numpy(out)[:, None], _numpy(ok)[:, None]
+    else:
+        cands = _numpy(_decoder(spec).decode(deint)[0])
+        usable = np.ones(cands.shape[:2], bool)
+    idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
+    return np.stack([descramble(spec, c, i) for c, i in zip(cands, idx)]), usable
+
+
+def descramble(spec: SubmodeSpec, bits: np.ndarray, index: int) -> np.ndarray:
+    """(..., k) decoded info bits sent at burst position `index` -> unscrambled."""
+    return bits.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(index)))[: bits.shape[-1]]
+
+
+def check(spec: SubmodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) -> bytes | None:
+    """One row of decode_raw -> the payload of its first usable candidate
+    whose CRC passes under `crc_mask`, or None."""
+    n_crc = crc_bits(spec)
+    nbytes = payload_bytes(spec) + n_crc // 8
+    for b, u in zip(cands, usable):
+        if u:
+            data = np.packbits(b[: 8 * nbytes]).tobytes()
+            if _with_crc(data[: -n_crc // 8], n_crc, crc_mask) == data:
+                return data[: -n_crc // 8]
+    return None
 
 
 def _numpy(x):

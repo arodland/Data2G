@@ -50,6 +50,10 @@ a control word first, then resent codewords, then new ones.
   decodes any codeword, descrambles it by its slot and reads the payload, with no
   trials. That is all a promiscuous receiver needs. Only the CRC check needs the key,
   so filtering stays (§2), but meaning is never obscured (FCC 97.113(a)(4)).
+- **Decode once, check each mask:** a receiver decodes a slot once (`codes.decode_raw`)
+  and tries each mask it cares about as a CRC check (`codes.check`; polar: the first
+  list candidate that passes). The engine asks every burst's slot 0 under the session's
+  key, KISS's and mask 0: three decodes became one (polar `ack-4f`: 56 to 19 ms).
   - Until 2026-10 the seed came from the mask. Reading traffic then needed the key,
     from the CONNECT or by trying all 65536.
 

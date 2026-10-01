@@ -42,6 +42,22 @@ def test_session_traffic_reads_without_its_key():
         assert payload == p and not ok
 
 
+def test_a_slot_decodes_once_for_every_mask(monkeypatch):
+    """The scrambler is unkeyed, so asking a slot under several masks (the
+    engine tries the session's, KISS's and mask 0 on every burst) costs
+    one decode and a CRC check each."""
+    rng = np.random.default_rng(3)
+    pl = [bytes(rng.integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8)) for _ in range(2)]
+    r = hear(burst(pl))
+    calls = []
+    raw = codes.decode_raw
+    monkeypatch.setattr(codes, "decode_raw", lambda *a, **k: calls.append(1) or raw(*a, **k))
+    monkeypatch.setattr(PHY, "DD", False)
+    rx = PHY.ModemRx(r, {})
+    assert [rx.decode(0, m, 0, None) for m in [(8, 0, 0), (0, 0, 0), (7, 1, 0), (7, 0, 0)]] == [None] * 3 + [pl[0]]
+    assert len(calls) == 1
+
+
 def test_resend_in_another_slot_combines():
     """A seq first sent in slot 2 and resent at RV 1 in slot 0 (other
     scrambling: codes.flip aligns them) decodes from the pair."""
