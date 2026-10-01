@@ -54,6 +54,44 @@ def test_connect_exchange_disconnect(tmp_path):
     assert '"kind": "tx"' in log and '"kind": "rx"' in log and list((tmp_path / "a").glob("rx_*.npz"))
 
 
+def test_id_frames_during_and_after_a_session():
+    """ID frames (mask 0): each station's goes ahead of its own turn when due
+    and once more after the session, and the peer hears every one without
+    the session minding (data still flows, nothing times out)."""
+    a, b = Engine("W1AW", seed=21), Engine("K2XYZ", seed=22)
+    a.id_interval_s = b.id_interval_s = 3.0
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    key = a.session.station.key
+    up, down = bytes(range(256)) * 40, bytes(range(255, -1, -1)) * 20
+    a.session.write(up)
+    b.session.write(down)
+    got_a, got_b, ev_a, ev_b = bytearray(), bytearray(), [], []
+
+    def done():
+        got_a.extend(a.session.read())
+        got_b.extend(b.session.read())
+        ev_a.extend(a.events())
+        ev_b.extend(b.events())
+        return len(got_b) >= len(up) and len(got_a) >= len(down)
+    assert link(a, b, 12, 240, done, seed=3)
+    assert bytes(got_b) == up and bytes(got_a) == down
+    assert f"ID W1AW {key}" in ev_b and f"ID K2XYZ {key}" in ev_a
+    assert a.session.station.stats.get("timeouts", 0) == 0
+    a.session.disconnect()
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=4)
+    ev_a.extend(a.events())
+    ev_b.extend(b.events())
+    n_a, n_b = ev_a.count(f"ID K2XYZ {key}"), ev_b.count(f"ID W1AW {key}")
+
+    def last_ids():  # B's after its DISC_ACK, A's ID_GUARD_S after it closed
+        ev_a.extend(a.events())
+        ev_b.extend(b.events())
+        return ev_a.count(f"ID K2XYZ {key}") > n_a and ev_b.count(f"ID W1AW {key}") > n_b
+    assert link(a, b, 12, 30, last_ids, seed=5)
+
+
 def test_vara_commands_drive_a_session(tmp_path):
     import json
 

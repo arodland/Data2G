@@ -215,6 +215,7 @@ Where the rest comes from:
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
 | buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
+| id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
 
 ## 6. Turn rules and timers
@@ -305,6 +306,29 @@ characters plus SSID, space padded at the end (a space inside a name is kept).
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
 CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+
+## 7a. ID frames
+
+Station identification, readable by anyone listening (data2g/arq/engine.py).
+
+- **Frame:** a control-only burst, frame type SESSION, mask 0, in the cap's connect mode, as a
+  CQ frame is. It carries a `T_ID` = 16 extension: the packed callsign (8 B), then the
+  16-bit session key it identifies for (2 B). One codeword in every connect mode.
+- **Mask 0, not the session key:** the scrambler seed comes from the mask (§2), so a frame
+  under the session key could be read only by a station that heard the CONNECT.
+- **Outside the protocol:** no seq, no burst seq, never seen by the session. A receiver
+  notifies it as `ID call key`, and logs it.
+- **During a session:** at least every `ID_INTERVAL_S` (600 s, FCC 97.119), the ID goes
+  back to back ahead of the station's own turn, on the same PTT.
+  - A waiting caller that hears a one-codeword burst in the connect mode allows
+    `REPLY_START_S` more for the reply's header. The reply follows the ID at once, and
+    finding its header takes up to ~0.85 s, close to `T_turn`.
+- **After a session:** one more ID, still with the expired session's key.
+  - The station that closes on a DISC sends it right after its DISC_ACK.
+  - Otherwise it goes `ID_GUARD_S` (1.5 s) after the close.
+  - Nothing new goes out in that guard (KISS, CQ, a new session), so the peer's
+    trailing ID is heard and not keyed over. A KISS frame queued during a session was
+    lost that way.
 
 ## 8. Gear-shift loop (summary; details in the phase E policy doc)
 
