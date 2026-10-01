@@ -10,7 +10,7 @@ from data2g.config import SUBMODES
 from data2g.hfchannel import FadingPreset
 
 
-def test_dd_rescues_a_codeword(monkeypatch):
+def _burst():
     spec = SUBMODES["qpsk-r1/2"]
     rng = np.random.default_rng(4)
     mids = [(7, 1, 0), (7, 1, 1)]
@@ -20,6 +20,11 @@ def test_dd_rescues_a_codeword(monkeypatch):
     # channel seed 13: a draw where codeword 1 fails without DD (which draws
     # do depends on the code's shift tables)
     r = modem.receive(hfchannel.apply_channel(x, snr_db=3.0, fading_preset=FadingPreset("mpd", 2.0, 4.0), seed=13))
+    return r, mids, pays
+
+
+def test_dd_rescues_a_codeword(monkeypatch):
+    r, mids, pays = _burst()
     got = {}
     for dd in (False, True):
         monkeypatch.setattr(phy, "DD", dd)
@@ -27,3 +32,10 @@ def test_dd_rescues_a_codeword(monkeypatch):
         got[dd] = [rx.decode(i, m, 0, None) for i, m in enumerate(mids)]
     assert got[False] == [pays[0], None]
     assert got[True] == pays
+
+
+def test_dd_budget_spent():
+    """A live receiver past its DD budget decodes on the pilot estimate alone."""
+    r, mids, pays = _burst()
+    rx = phy.ModemRx(r, {}, dd_budget=0.0)
+    assert [rx.decode(i, m, 0, None) for i, m in enumerate(mids)] == [pays[0], None]

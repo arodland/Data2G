@@ -213,7 +213,7 @@ class Engine:
             if r is None:
                 log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
                 continue
-            rx = PHY.ModemRx(r, self.store)
+            rx = PHY.ModemRx(r, self.store, PHY.DD_BUDGET_S)
             # in a session, its peer's bursts are the likely ones: a control
             # codeword under the session's key (the station's first decode,
             # remembered) claims the burst before KISS tries its keys on it
