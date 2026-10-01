@@ -13,6 +13,8 @@ backlog (see LATENCY_S).
 A calls B, both send `--warm` bytes, then A writes `--bytes` of random
 data at once; the time runs from that write until A holds every byte
 acked (B's copy checked). As run.sh with A_BYTES=n, B_BYTES=0, without Pat.
+`--callee-sends`: B writes them and A receives (the callee has no turn of
+its own, so its data rides its replies to A's polls; session.KEEPALIVE_S).
 
     python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0]
 """
@@ -91,7 +93,8 @@ class Side:
         return len(s._pending_write) + (len(s.station.tx.buf) if s.station else 0)
 
 
-def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=3600.0, record=None):
+def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=3600.0, record=None,
+        callee_sends=False):
     """-> dict: phase reached ('done' or where it failed), times, rates."""
     fade = None
     if chan != "awgn":
@@ -117,7 +120,7 @@ def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=36
             got_b.extend(b.eng.session.read())
         return True
 
-    res = dict(channel=chan, snr=snr, seed=seed, bytes=nbytes)
+    res = dict(channel=chan, snr=snr, seed=seed, bytes=nbytes, sender="b" if callee_sends else "a")
     b.eng.listen()
     a.eng.connect("K2XYZ", cap)
     if not until(lambda: a.eng.session.state == b.eng.session.state == S.CONNECTED):
@@ -130,16 +133,17 @@ def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=36
         return dict(res, phase="exchange", t=a.eng.now)
     assert bytes(got_b) == wa and bytes(got_a) == wb, "warm-up data corrupted"
     data = rng.bytes(nbytes)
-    got_b.clear()
-    a.airtime.clear()
+    snd, got = (b, got_a) if callee_sends else (a, got_b)
+    got.clear()
+    snd.airtime.clear()
     t0 = a.eng.now
-    a.eng.session.write(data)
-    if not until(lambda: a.unacked() == 0 and len(got_b) >= nbytes):
-        return dict(res, phase="bulk", t=a.eng.now, delivered=len(got_b))
-    assert bytes(got_b) == data, "bulk data corrupted"
+    snd.eng.session.write(data)
+    if not until(lambda: snd.unacked() == 0 and len(got) >= nbytes):
+        return dict(res, phase="bulk", t=a.eng.now, delivered=len(got))
+    assert bytes(got) == data, "bulk data corrupted"
     dt = a.eng.now - t0
     return dict(res, phase="done", t=a.eng.now, seconds=dt, bps=8 * nbytes / dt, bpm=60 * nbytes / dt,
-                airtime=a.airtime)
+                airtime=snd.airtime)
 
 
 def top2(airtime: dict) -> str:
@@ -159,11 +163,12 @@ def main():
     ap.add_argument("--latency", type=float, default=LATENCY_S, help="one-way audio latency, s")
     ap.add_argument("--record", metavar="DIR", help="record both stations (DIR/rec_a, rec_b), as data2g-host does")
     ap.add_argument("--limit", type=float, default=3600.0, help="give up after this much simulated time, s")
+    ap.add_argument("--callee-sends", action="store_true", help="B (the callee) sends the bulk data, A receives")
     log_arg(ap)
     a = ap.parse_args()
     log_setup(a)
-    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record)
-    head = f"{a.channel} {a.snr:g} dB seed {a.seed}:"
+    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record, a.callee_sends)
+    head = f"{a.channel} {a.snr:g} dB seed {a.seed}{', callee sends' * a.callee_sends}:"
     if r["phase"] == "done":
         print(f"{head} {a.bytes} B in {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min"
               f" (connected at {r['t_connect']:.1f} s; {top2(r['airtime'])})")
