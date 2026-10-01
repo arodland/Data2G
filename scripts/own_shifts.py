@@ -119,6 +119,10 @@ class Cycles:
             self.c[8] = np.array(c8)
         # a cycle's max row: it is in a truncated graph iff that row is kept
         self.top = {L: self.er[cy].max(1) for L, cy in self.c.items()}
+        # ACE (Tian et al. 2004): sum of (degree - 2) over a cycle's variable
+        # nodes, mother-graph degrees; each node is on two of its edges
+        deg = mask.sum(0)
+        self.ace = {L: (deg[self.ec[cy]] - 2).sum(1) / 2 for L, cy in self.c.items()}
 
     def sign(self, L):
         return np.tile([1, -1], L // 2)
@@ -133,6 +137,7 @@ class Cycles:
 
 
 G8_W6 = 4.0  # g8: one 6-cycle counts as this many 8-cycles
+GA_ETA = 3.0  # ga: a cycle's weight falls by e per GA_ETA of ACE
 
 
 def lift(cyc: Cycles, bg: int, z: int, mode: str, seed: int) -> np.ndarray:
@@ -161,18 +166,21 @@ def lift(cyc: Cycles, bg: int, z: int, mode: str, seed: int) -> np.ndarray:
         for e in order:
             score = rng.random(z) * 0.5
             weights = {"g6": ((4, 1e6), (6, 1.0)), "g4": ((4, 1e6),),
-                       "g8": ((4, 1e6), (6, G8_W6), (8, 1.0))}[mode]
+                       "g8": ((4, 1e6), (6, G8_W6), (8, 1.0)),
+                       "ga": ((4, 1e6), (6, G8_W6), (8, 1.0))}[mode]
             for L, w in weights:
                 idx = closing.get((L, e))
                 if idx is None or w == 0:
                     continue
+                if mode == "ga" and L > 4:  # low-ACE cycles are the trapping-set ones
+                    w = w * np.exp(-cyc.ace[L][idx] / GA_ETA)
                 cy = cyc.c[L][idx]
                 sg = np.broadcast_to(cyc.sign(L), cy.shape)
                 pos = cy == e
                 rest = np.where(pos, 0, s[cy] * sg).sum(1)
                 se = sg[pos]  # this edge's sign in each cycle
                 bad = (-rest * se) % z  # se * v + rest = 0 mod z
-                score += w * np.bincount(bad, minlength=z)
+                score += np.bincount(bad, weights=np.broadcast_to(w, bad.shape), minlength=z)
             s[e] = int(np.argmin(score))
     out = np.full(cyc.mask.shape, -1, dtype=np.int64)
     out[cyc.er, cyc.ec] = s
@@ -193,7 +201,7 @@ def code_with(table: np.ndarray, bg: int, k: int, n: int) -> ldpc.QCLDPC:
 def cmd_gen(a):
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
-    eight = "g8" in a.modes
+    eight = bool({"g8", "ga"} & set(a.modes))
     for bg in a.bg:
         cyc = Cycles(mask_of(bg), eight=eight)
         Ls = sorted(cyc.c)
@@ -412,6 +420,55 @@ def cmd_deep(a):
                 fh.flush()
 
 
+# The code and Eb/N0 where stage 2 saw each g6 pick floor (NR's errors per
+# 100k there in the comment). One point per Z: a floor screen, not a curve.
+FLOOR_POINTS = {
+    (2, 44): (336, 1000, 1.91),  # NR 4
+    (2, 60): (480, 1920, 1.50),  # IR; NR 0/10k
+    (2, 176): (1680, 2880, 2.03),  # NR 1
+    (2, 192): (1920, 2880, 2.45),  # NR 2
+    (2, 240): (2400, 7680, 1.00),  # IR; NR 0/10k
+    (2, 256): (2560, 3840, 2.37),  # NR 1
+}
+
+
+def cmd_screen(a):
+    """NR at each floor point, then every candidate there with early
+    rejection: stop once its errors pass max(3 x NR's, NR's + 10)."""
+    import torch
+
+    torch.set_num_threads(2)
+    gpu_cap(a.device)
+    fh = open(OUT / f"screen_{a.tag}.csv", "a", newline="")
+    w = csv.writer(fh)
+    for (bg, z), (k, n, ebn0) in FLOOR_POINTS.items():
+        if a.only and f"bg{bg}z{z}" not in a.only:
+            continue
+        nr = code_with(nr_table(bg, z), bg, k, n)
+        e_nr = int(round(bler_curve(nr, [ebn0], a.blocks, a.device, seed=11)[0] * a.blocks))
+        limit = max(3 * e_nr, e_nr + 10)
+        print(f"bg{bg} z={z:3d} k={k} n={n} @{ebn0} dB: NR {e_nr} errors / {a.blocks}, reject above {limit}", flush=True)
+        w.writerow([bg, z, k, n, ebn0, "nr", e_nr, a.blocks])
+        for tag in a.cands_tags:
+            tables = np.load(OUT / f"cands_bg{bg}_z{z}{tag}.npz")
+            names = [c for c in tables.files if c != "nr" and not c.startswith("rand")]
+            with open(OUT / f"cycles{tag}.csv") as f:
+                rk = {r["cand"]: rank_key({q: (v if q == "cand" else int(v)) for q, v in r.items() if v != ""})
+                      for r in csv.DictReader(f) if int(r["bg"]) == bg and int(r["z"]) == z}
+            names.sort(key=lambda c: rk[c])
+            for cand in names[: a.top]:
+                code = code_with(tables[cand], bg, k, n)
+                errs = done = 0
+                step = 10000
+                while done < a.blocks and errs <= limit:
+                    errs += int(round(bler_curve(code, [ebn0], step, a.device, seed=11 + done)[0] * step))
+                    done += step
+                verdict = "REJECT" if errs > limit else ("ok" if errs <= e_nr + 2 * np.sqrt(e_nr + 1) else "worse")
+                print(f"  {tag or 'g6':4s} {cand:6s} {errs:4d} errors / {done:6d}  {verdict}", flush=True)
+                w.writerow([bg, z, k, n, ebn0, f"{tag}:{cand}", errs, done])
+                fh.flush()
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -434,8 +491,15 @@ def main():
     d.add_argument("--top", type=int, default=2)
     d.add_argument("--only", nargs="*", default=[], help="bg2z192 ...")
     d.add_argument("--device", default="cuda")
+    c = sub.add_parser("screen")
+    c.add_argument("--blocks", type=int, default=100000)
+    c.add_argument("--cands-tags", nargs="+", default=["", "_g8", "_ga"], help="'' is the g6/g4 set")
+    c.add_argument("--top", type=int, default=8, help="per tag, best by cycle rank")
+    c.add_argument("--only", nargs="*", default=[])
+    c.add_argument("--tag", default="floor")
+    c.add_argument("--device", default="cuda")
     a = ap.parse_args()
-    {"gen": cmd_gen, "sim": cmd_sim, "deep": cmd_deep}[a.cmd](a)
+    {"gen": cmd_gen, "sim": cmd_sim, "deep": cmd_deep, "screen": cmd_screen}[a.cmd](a)
 
 
 if __name__ == "__main__":
