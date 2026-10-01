@@ -38,7 +38,10 @@ class Policy:
         return 0.4 + 0.12 * n_cw
 
 
-def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0):
+def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0,
+        b_write_at=None):
+    """`b_write_at`: the callee writes its data then (idle by then) instead
+    of up front; `ack_loss_first` then loses its first bursts from then on."""
     rng = random.Random(seed)
     a = S.Session("W1AW", Policy(random.Random(seed + 1)), rng=random.Random(seed + 2))
     b = S.Session("K2XYZ-7", Policy(random.Random(seed + 3)), rng=random.Random(seed + 4))
@@ -46,7 +49,8 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
     data_b = bytes(rng.randrange(256) for _ in range(n_b))
     b.listen()
     a.write(data_a)
-    b.write(data_b)
+    if b_write_at is None:
+        b.write(data_b)
     a.connect("K2XYZ-7", 2, 0.0)
     stores = {id(a): {}, id(b): {}}
     stats = {"mismatch": 0, "collisions": 0, "bursts": 0}
@@ -57,6 +61,9 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
     t = 0.0
     lost_first = ack_loss_first
     while t < horizon:
+        if b_write_at is not None and t >= b_write_at and stats.get("b_written") is None:
+            b.write(data_b)
+            stats["b_written"] = t
         for me, other in ((a, b), (b, a)):
             burst = me.poll(t)
             if burst is None:
@@ -72,13 +79,15 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             stats["bursts"] += 1
             events.append((end, "txend", me, burst))
             lost = (die_at is not None and start >= die_at) or rng.random() < p_burst
-            if me is b and lost_first > 0:
+            if me is b and lost_first > 0 and start >= (b_write_at or 0.0):
                 lost, lost_first = True, lost_first - 1
             if not lost:
                 events.append((start + HEADER_S, "header", other, burst))
                 events.append((end + DECODE_S, "rx", other, burst))
         got_a += a.read()
         got_b += b.read()
+        if got_a == data_b and "b_done" not in stats and stats.get("b_written") is not None:
+            stats["b_done"] = t
         assert bytes(got_b) == data_a[:len(got_b)]
         assert bytes(got_a) == data_b[:len(got_a)]
         if got_a == data_b and got_b == data_a and not disconnect_asked:
@@ -87,6 +96,8 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
         if a.state == S.CLOSED and b.state == S.CLOSED and not events and a._out is None and b._out is None:
             break
         nxt = [e[0] for e in events] + [x for x in (a.next_event(), b.next_event()) if x is not None]
+        if b_write_at is not None and stats.get("b_written") is None:
+            nxt.append(b_write_at)
         if not nxt:
             break
         t = max(t, min(nxt))
@@ -149,3 +160,21 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     b.on_rx(FakeRx(retry, random.Random(3), 0.0, {}, {"mismatch": 0}), t + 4.5)
     ack = b.poll(t + 4.5)
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
+
+
+def test_callee_breaks_idle():
+    """Data the callee writes on an idle link goes in its own wake burst, not
+    at the caller's next keepalive (KEEPALIVE_S[0] or more away)."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0)
+    assert r["got_a"] == r["data_b"] and r["collisions"] == 0
+    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[0] - 5
+
+
+@pytest.mark.parametrize("lost", [1, 2, 3])
+def test_lost_wake_is_recovered(lost):
+    """Lost wakes (the repeat too, with 2 or more): the caller's keepalive
+    still collects the data, and the callee never keys over the caller."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0, ack_loss_first=lost)
+    assert r["got_a"] == r["data_b"] and r["got_b"] == r["data_a"]
+    assert r["collisions"] == 0
+    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[1] * (1 + S.KEEPALIVE_JITTER) + 10

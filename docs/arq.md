@@ -201,10 +201,23 @@ Where the rest comes from:
 
 ## 6a. v1 implementation choices (data2g/arq/session.py)
 
-- **Idle:** only the caller starts turns. While both sides are idle it keeps polling,
-  2 s after the last exchange, doubling to at most 16 s. The callee's new data rides
-  its reply to the next poll, at up to 16 s extra latency. This drops §6's "either may
-  start from idle" rule, and with it the case of both stations keying at once.
+- **Idle:** the caller keeps the link alive with a poll 15 s after the last exchange,
+  doubling to at most 60 s, each interval stretched by a random 0-30%.
+  - The callee breaks idle itself when its host writes: a wake burst, built like any
+    other (data, its ACK), once t_turn + 1.5 s + 1 s plus a random 0-1 s has passed
+    in silence since its last burst. By then the caller's answer or timeout retry
+    would have started. A header heard meanwhile holds the wake past that burst.
+  - Only from idle: the callee's last burst carried no data, so the caller's receive
+    state is exactly what the callee last heard it ACK, and the wake may be a fresh
+    build (abandon, re-slice, mode change).
+  - The callee owns no retry timer. An unanswered wake is repeated identically once,
+    6-10 s later (to the caller, a repeat: its reply was lost). After that the
+    caller's keepalive collects the data. Any burst from the caller cancels a wake.
+  - The caller answers a burst that arrives while its idle poll waits at once, data
+    or not. It stays the only station that retries on a timeout.
+  - Not in chat mode: there the caller's 2-4 s polls carry the callee's lines.
+  - v1 (until 2026-10) let only the caller start turns, polling 2 s after the last
+    exchange and doubling to 16 s: up to 16 s of callee latency, and constant keying.
 - **Waiting for a reply:** t_turn + 1 s for the reply to start, detected as a decoded
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
@@ -266,7 +279,7 @@ As built (data2g/arq/policy.py):
   The peer's shifter, which recommends this station's modes, then minimizes expected
   delivery time of what's queued (short bursts, higher-P modes) instead of maximizing
   bytes per second. The caller's idle-poll backoff is shortened while either side has
-  chat on (2-4 s instead of 2-16 s). Implemented: `T_CHAT` = 12 (empty),
+  chat on (2-4 s instead of 15-60 s), and the callee's wake bursts are off. Implemented: `T_CHAT` = 12 (empty),
   `Session.set_chat()`, `GearShifter.recommend`, `session.CHAT_KEEPALIVE_S`.
   - The objective is the least expected time to deliver what the peer has queued,
     at least a 200 B chat line.
