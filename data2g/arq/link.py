@@ -279,7 +279,7 @@ class Station:
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
-    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_resend, rx_ok, rx_lost, timeouts
+    stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_comp, cw_in, cw_out, cw_resend, rx_ok, rx_lost, timeouts
     rx: RxSide = field(default_factory=RxSide)
     state: str = ACTIVE
     fail_reason: str = ""
@@ -458,6 +458,8 @@ class Station:
         self.last_sent = burst
         self.stats["cw_new"] += len(new)
         self.stats["cw_comp"] += sum(c.comp for c in new)
+        self.stats["cw_in"] += sum(c.length for c in new)  # stream bytes ...
+        self.stats["cw_out"] += sum(len(c.payload) for c in new)  # ... in payload bytes
         self.stats["cw_resend"] += len(resend)
         if log.isEnabledFor(logging.INFO):
             kind = "data" if resend or new else ("ack" if fresh else "poll")

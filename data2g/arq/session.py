@@ -294,9 +294,9 @@ class Session:
         dt = max(now - since, 1e-9)
         cw = d.get("cw_new", 0) + d.get("cw_resend", 0)
         log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends,"
-                 " %d new compressed | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"],
+                 " compression %s | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"],
                  8 * d["tx_bytes"] / dt, d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw,
-                 100 * d.get("cw_resend", 0) / max(cw, 1), d.get("cw_comp", 0),
+                 100 * d.get("cw_resend", 0) / max(cw, 1), "%.2f" % (d["cw_in"] / d["cw_out"]) if d.get("cw_out") else "-",
                  d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):
