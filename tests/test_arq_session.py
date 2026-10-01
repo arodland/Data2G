@@ -190,7 +190,7 @@ def test_lost_wake_is_recovered(lost):
     r = run(3, n_a=200, n_b=40, b_write_at=120.0, ack_loss_first=lost)
     assert r["got_a"] == r["data_b"] and r["got_b"] == r["data_a"]
     assert r["collisions"] == 0
-    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[1] * (1 + S.KEEPALIVE_JITTER) + 10
+    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[1] + 10
 
 
 def test_chat_wakes_back_off():
