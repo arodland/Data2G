@@ -105,8 +105,8 @@ Statuses, to ports opened on this connection only:
 - Control lost: if a data slot passes under an open port's key, the burst is that
   port's (HEARD / LOST as usual; an ambiguous key as in §2 Collisions). Control and
   all data lost can't be tied to a port: the frozen 16-bit PHY header has no room for
-  a group. Proposed: a `BCAST * MISSED submode n_cw` hint to every open port; it may
-  be another group's burst.
+  a group. Every open port gets a `BCAST * MISSED submode n_cw` hint; it may be
+  another group's burst.
 
 ## 6. Not done
 
