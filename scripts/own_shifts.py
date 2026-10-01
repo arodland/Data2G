@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data2g import codes, config, ldpc
+from data2g import config, ldpc
 
 OUT = Path("runs/own_shifts")
 
@@ -75,7 +75,7 @@ def shipped() -> dict[tuple[int, int], list[tuple[str, int, int]]]:
     for s in config.SUBMODES.values():
         if s.code != "ldpc":
             continue
-        q = codes.ldpc_code(s)
+        q = ldpc.nr_code(s.k, s.coded_bits, shifts="nr")  # (bg, z) only; no table needed
         out.setdefault((1 if q.kb == 22 else 2, q.z), {}).setdefault((s.k, s.coded_bits), []).append(s.name)
     return {g: [("+".join(v), k, n) for (k, n), v in d.items()] for g, d in sorted(out.items())}
 
@@ -218,7 +218,7 @@ def nr_table(bg: int, z: int) -> np.ndarray:
 
 
 def code_with(table: np.ndarray, bg: int, k: int, n: int) -> ldpc.QCLDPC:
-    ref = ldpc.nr_code(k, n, bg=bg)
+    ref = ldpc.nr_code(k, n, bg=bg, shifts="nr")
     return ldpc.QCLDPC(base=table.copy(), z=ref.z, kb=ref.kb, k=k, n=n)
 
 
@@ -501,9 +501,20 @@ def cmd_screen(a):
                 fh.flush()
 
 
+def cmd_export(a):
+    """PICKS -> the runtime's table file (data2g/codes_data/ldpc_shifts.npz)."""
+    tables = {f"bg{bg}_z{z}": pick_table(bg, z).astype(np.int16) for bg, z in PICKS}
+    missing = set(shipped()) - set(PICKS)
+    if missing:
+        raise SystemExit(f"shipped (bg, z) without a pick: {sorted(missing)}")
+    np.savez_compressed(ldpc.OWN_SHIFTS, **tables)
+    print(f"{len(tables)} tables -> {ldpc.OWN_SHIFTS}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("export")
     g = sub.add_parser("gen")
     g.add_argument("--seeds", type=int, default=32)
     g.add_argument("--modes", nargs="+", default=["g6", "g4", "rand"])
@@ -532,7 +543,7 @@ def main():
     c.add_argument("--tag", default="floor")
     c.add_argument("--device", default="cuda")
     a = ap.parse_args()
-    {"gen": cmd_gen, "sim": cmd_sim, "deep": cmd_deep, "screen": cmd_screen}[a.cmd](a)
+    {"gen": cmd_gen, "sim": cmd_sim, "deep": cmd_deep, "screen": cmd_screen, "export": cmd_export}[a.cmd](a)
 
 
 if __name__ == "__main__":

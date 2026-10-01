@@ -1,6 +1,10 @@
 """Quasi-cyclic LDPC with 5G NR structure, any (K, N).
 
-A base matrix holds, per (row, column), a circulant shift or -1. Rows
+A base matrix holds, per (row, column), a circulant shift or -1. The
+blocks are NR's base graphs; the shifts are this project's own
+(scripts/own_shifts.py, one table per lifting size a submode uses, in
+codes_data/ldpc_shifts.npz), not TS 38.212's. NR's tables stay for
+studies (shifts="nr"). Rows
 0..3 and parity columns kb..kb+3 form NR's core, which is invertible and
 fixes the first 4Z parities; every later row r adds one parity column
 kb+r with an identity. That structure is what makes systematic encoding
@@ -20,12 +24,13 @@ with an optional per-iteration normalization (neural min-sum).
 """
 
 from dataclasses import dataclass, field
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 
 import numpy as np
 
 DATA = Path(__file__).parent / "codes_data"
+OWN_SHIFTS = DATA / "ldpc_shifts.npz"
 CORE = 4
 
 # TS 38.212 Table 5.3.2-1: lifting sizes by set index i_ls.
@@ -54,9 +59,17 @@ def nr_base_graph(bg: int, i_ls: int) -> np.ndarray:
     return base
 
 
-def nr_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
-    """NR LDPC carrying k bits in n: base graph by TS 38.212 7.2.2 rules
-    (unless given), smallest lifting with kb*Z >= k."""
+@lru_cache(maxsize=None)
+def own_shifts() -> dict[str, np.ndarray]:
+    with np.load(OWN_SHIFTS) as d:
+        return {key: d[key].astype(np.int64) for key in d.files}
+
+
+def nr_code(k: int, n: int, bg: int | None = None, shifts: str = "own") -> "QCLDPC":
+    """NR-structured LDPC carrying k bits in n: base graph by TS 38.212
+    7.2.2 rules (unless given), smallest lifting with kb*Z >= k. Shifts
+    "own" (the runtime's; only the lifting sizes a submode uses have a
+    table) or "nr" (TS 38.212's, for studies)."""
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
@@ -67,8 +80,15 @@ def nr_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
     z, i_ls = min(
         (s, i) for i, zs in enumerate(LIFTING_SETS) for s in zs if kb_z * s >= k
     )
-    base = nr_base_graph(bg, i_ls) % z  # shifts are defined mod Z
-    base[nr_base_graph(bg, i_ls) < 0] = -1
+    if shifts == "nr":
+        base = nr_base_graph(bg, i_ls) % z  # shifts are defined mod Z
+        base[nr_base_graph(bg, i_ls) < 0] = -1
+    else:
+        try:
+            base = own_shifts()[f"bg{bg}_z{z}"].copy()
+        except KeyError:
+            raise KeyError(f"no shift table for BG{bg} Z={z} (k={k}): add it with scripts/own_shifts.py "
+                           "(gen, screen, PICKS, export), or shifts='nr' in a study") from None
     return QCLDPC(base=base, z=z, kb=22 if bg == 1 else 10, k=k, n=n)
 
 
@@ -134,7 +154,7 @@ def protograph_code(mask: np.ndarray, bg: int, k: int, n: int) -> "QCLDPC":
 
     ponytail: lifted at load time from the mask; the shifts become
     committed data when the ladder is frozen (plan step 9)."""
-    ref = nr_code(k, n, bg=bg)
+    ref = nr_code(k, n, bg=bg, shifts="nr")  # for z and kb only
     base = lift(embed(mask, bg), ref.kb, ref.z, bg)
     return QCLDPC(base=base, z=ref.z, kb=ref.kb, k=k, n=n)
 

@@ -2,3 +2,8 @@
 polar_5G.csv (polar reliability sequence, TS 38.212 Table 5.3.1.2-1) are
 3GPP tables as distributed in Sionna 2.1.0 (sionna/phy/fec/*/codes/),
 Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES, Apache-2.0.
+
+ldpc_shifts.npz (the circulant shifts the runtime uses, one table per
+lifting size a submode needs) is this project's own, generated and
+screened by scripts/own_shifts.py; only the block mask is NR's. The
+TS 38.212 shift values above are kept for studies (ldpc.nr_code shifts="nr").

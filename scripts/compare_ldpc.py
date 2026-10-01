@@ -46,7 +46,7 @@ def main():
     bg, path = a.proto.split(":", 1)
     bg = int(bg[2:])
     codes = {
-        "NR": ldpc.nr_code(a.k, a.n, bg=bg),
+        "NR": ldpc.nr_code(a.k, a.n, bg=bg, shifts="nr"),
         "searched": ldpc.protograph_code(np.load(path), bg, a.k, a.n),
     }
     print(f"k={a.k} n={a.n} z={codes['NR'].z}; BLER / BER at Eb/N0 {a.ebn0}")

@@ -6,7 +6,7 @@ from data2g import ldpc
 
 @pytest.mark.parametrize("k,n", [(48, 240), (120, 480), (500, 1000), (1320, 2880), (4000, 4800), (8000, 24000)])
 def test_nr_codewords_satisfy_h(k, n):
-    code = ldpc.nr_code(k, n)
+    code = ldpc.nr_code(k, n, shifts="nr")
     rng = np.random.default_rng(k)
     bits = rng.integers(0, 2, (4, k))
     cw = code.encode(bits)
@@ -17,9 +17,32 @@ def test_nr_codewords_satisfy_h(k, n):
     assert np.array_equal(cw[:, : len(sent_info)], bits[:, sent_info])
 
 
+def test_own_shifts_cover_every_ldpc_submode():
+    """Every LDPC code on air (OFDM and CPM) has its own table: same blocks
+    as NR's graph, no 4-cycles, and codewords (mother included) satisfy H."""
+    from data2g import codes, cpm
+    from data2g.config import SUBMODES
+
+    specs = [s for s in SUBMODES.values() if s.code == "ldpc"] + list(cpm.SPECS.values())
+    rng = np.random.default_rng(2)
+    for s in specs:
+        code = codes.ldpc_code(s)
+        nr = ldpc.nr_code(s.k, s.coded_bits, shifts="nr")
+        assert np.array_equal(code.full_base >= 0, nr.full_base >= 0), s.name
+        b, z = code.full_base, code.z
+        for r1 in range(b.shape[0]):
+            for r2 in range(r1 + 1, b.shape[0]):
+                cols = np.flatnonzero((b[r1] >= 0) & (b[r2] >= 0))
+                d = (b[r1, cols] - b[r2, cols]) % z
+                assert len(set(d)) == len(d), f"{s.name}: 4-cycle in rows {r1},{r2}"
+        m = code.mother()
+        bits = rng.integers(0, 2, (2, s.k))
+        assert m.syndrome_ok(m.encode_full(bits)).all(), s.name
+
+
 def test_min_sum_decodes_noise_free_and_corrects_errors():
     torch = pytest.importorskip("torch")
-    code = ldpc.nr_code(500, 1000)
+    code = ldpc.nr_code(500, 1000, shifts="nr")
     dec = ldpc.MinSumDecoder(code)
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, (8, 500))
