@@ -139,6 +139,21 @@ def test_data_from_the_client_is_always_answered_with_buffer():
         h.out_cmd.clear()
 
 
+def test_data_port_pauses_once_the_largest_burst_is_queued():
+    """Clients that ignore BUFFER are held off in TCP: the data port isn't
+    read while what's queued would fill the cap's largest burst."""
+    from data2g.host import MAX_BURST, Host
+
+    h = Host(Engine("W1AW", seed=1))
+    assert MAX_BURST[0] < MAX_BURST[2]
+    h.data_in(bytes(MAX_BURST[2] - 100))
+    assert not h.queue_full() and h.queue_full(held=100)
+    h.after_step(False)  # no session: all of it still waits
+    assert h.unsent == MAX_BURST[2] - 100 and not h.queue_full()
+    h.command("BW500")
+    assert h.queue_full()
+
+
 def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
     from types import SimpleNamespace
 
