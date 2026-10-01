@@ -1,11 +1,12 @@
 """Build deflate's priming dictionary (frames.ZDICT): a 4 KB string that
 shares as many frequent substrings as possible with a text corpus.
 
-Iterated epsilon-greedy: grow one string, each step appending a byte at
-the right, prepending one at the left, or appending a frequent word,
-scored by the corpus count of the distinct 3..L-byte substrings it adds
-(per byte added). Several restarts; the one that deflates validation text
-smallest wins, then so does the best of its rotations.
+Greedy from a random byte: grow one string, each step appending a byte at
+the right or prepending one at the left, whichever adds distinct 3..L-byte
+substrings of the largest total corpus count (ties at random). Restarts for
+--budget seconds across a pool; the KEEP that cover most are kept, every
+rotation of each is scored on validation text, and the one that deflates
+it smallest wins.
 
     python scripts/build_zdict.py OUT --train TEXT... --val TEXT... --test TEXT...
 """
@@ -13,13 +14,24 @@ smallest wins, then so does the best of its rotations.
 import argparse
 import random
 import re
+import resource
+import time
 import zlib
+import multiprocessing
 from collections import Counter
 from pathlib import Path
 
 L = 12  # longest substring counted
 MINC = 4  # corpus count below which a substring is ignored
 SIZE = 4096
+KEEP = 10  # restarts kept for the rotation search
+WORKERS = 8
+ALPHA = bytes(range(32, 127)) + b"\n"
+ALPHA_B = [bytes([c]) for c in ALPHA]
+FREQ: dict[bytes, int] = {}  # pool workers inherit these (fork)
+NXT: dict = {}
+PRV: dict = {}
+VAL: list[bytes] = []
 
 
 def clean(b: bytes) -> bytes:
@@ -39,42 +51,58 @@ def counts(corpus: bytes) -> dict[bytes, int]:
     return freq
 
 
-def grow(freq, words, eps, rng) -> bytes:
+def tables(freq):
+    """3-gram continuations: 2-byte context -> bytes that may follow / precede."""
     nxt, prv = {}, {}
     for s in freq:
         if len(s) == 3:
             nxt.setdefault(s[:2], []).append(s[2:])
             prv.setdefault(s[1:], []).append(s[:1])
-    d = bytearray(words[0])
-    seen = {bytes(d[i:j]) for i in range(len(d)) for j in range(i + 3, min(len(d), i + L) + 1)}
+    return nxt, prv
 
-    def gain(new):
-        return sum(freq.get(s, 0) for s in new if s not in seen)
 
+def grow(seed: int) -> tuple[int, bytes]:
+    """Greedy from a random byte, ties broken at random: each step adds the
+    byte, at either end, whose new distinct substrings have the largest
+    total corpus count. -> (total count covered, dictionary)."""
+    rng = random.Random(seed)
+    d = bytearray([rng.choice(ALPHA)])
+    seen, total = set(), 0
     while len(d) < SIZE:
         cands = []
-        for c in nxt.get(bytes(d[-2:]), ()):
+        for c in NXT.get(bytes(d[-2:])) or ALPHA_B:
             t = bytes(d[-(L - 1):]) + c
-            cands.append((gain({t[i:] for i in range(len(t) - 2)}), "R", c))
-        for c in prv.get(bytes(d[:2]), ()):
+            cands.append((sum(FREQ.get(x, 0) for x in {t[i:] for i in range(len(t) - 2)} if x not in seen), 1, c))
+        for c in PRV.get(bytes(d[:2])) or ALPHA_B:
             t = c + bytes(d[:L - 1])
-            cands.append((gain({t[:j] for j in range(3, len(t) + 1)}), "L", c))
-        for w in words[:100]:
-            t = bytes(d[-(L - 1):]) + w
-            k = len(t) - len(w)  # new substrings end past k
-            new = {t[i:j] for i in range(len(t)) for j in range(max(i + 3, k + 1), min(len(t), i + L) + 1)}
-            cands.append((gain(new) / len(w), "R", w))
-        cands.sort(key=lambda x: -x[0])
-        g, side, s = rng.choice(cands[:5]) if rng.random() < eps else cands[0]
-        if side == "R":
-            d += s
-            t = bytes(d[-(L + len(s) - 1):])
-            seen |= {t[i:j] for i in range(len(t)) for j in range(i + 3, min(len(t), i + L) + 1)}
+            cands.append((sum(FREQ.get(x, 0) for x in {t[:j] for j in range(3, len(t) + 1)} if x not in seen), 0, c))
+        top = max(g for g, _, _ in cands)
+        g, right, c = rng.choice([x for x in cands if x[0] == top])
+        total += g
+        if right:
+            d += c
+            t = bytes(d[-L:])
+            seen |= {t[i:] for i in range(len(t) - 2)}
         else:
-            d[:0] = s
+            d[:0] = c
             t = bytes(d[:L])
             seen |= {t[:j] for j in range(3, len(t) + 1)}
-    return bytes(d[-SIZE:])
+    return total, bytes(d)
+
+
+def restarts(args) -> tuple[int, list[tuple[int, bytes]]]:
+    """Seeds seed0, seed0 + step, ... until the deadline -> (runs, the KEEP best)."""
+    seed, step, deadline = args
+    out = []
+    while time.time() < deadline:
+        out.append(grow(seed))
+        seed += step
+    return len(out), sorted(out, reverse=True)[:KEEP]
+
+
+def rot_scores(args) -> list[int]:
+    d, rs = args
+    return [score(d[r:] + d[:r], VAL) for r in rs]
 
 
 def score(zdict: bytes, tests: list[bytes]) -> int:
@@ -89,41 +117,46 @@ def score(zdict: bytes, tests: list[bytes]) -> int:
 
 
 def main():
+    global FREQ, NXT, PRV, VAL
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--train", nargs="+", required=True)
     ap.add_argument("--val", nargs="+", required=True, help="picks the restart and the rotation")
     ap.add_argument("--test", nargs="+", required=True, help="reported only")
     ap.add_argument("--per-book", type=int, default=200_000)
+    ap.add_argument("--budget", type=float, default=30.0, help="seconds of restarts")
     ap.add_argument("--baseline", nargs="*", default=[], help="dictionaries to score alongside")
     a = ap.parse_args()
     books = [clean(Path(f).read_bytes()) for f in a.train]
     corpus = b"\n\n".join(b[len(b) // 2 - a.per_book // 2:][:a.per_book] for b in books)
-    val = [clean(Path(f).read_bytes()) for f in a.val]
+    VAL = [clean(Path(f).read_bytes()) for f in a.val]
     tests = [clean(Path(f).read_bytes()) for f in a.test]
     print(f"corpus {len(corpus)} B", flush=True)
-    freq = counts(corpus)
-    wc = Counter(re.findall(rb" [A-Za-z']+", corpus))
-    words = [w + b" " for w, _ in sorted(wc.items(), key=lambda x: -x[1] * len(x[0]))]
+    FREQ = counts(corpus)
+    NXT, PRV = tables(FREQ)
+    print(f"peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6:.1f} GB", flush=True)
     print("deflated bytes, val / test")
     for f in a.baseline:
-        print(f"baseline {f}: {score(Path(f).read_bytes(), val)} / {score(Path(f).read_bytes(), tests)}")
-    print(f"no dictionary: {score(b'', val)} / {score(b'', tests)}")
-    best = None
-    for eps in (0.0, 0.05, 0.1):
-        for seed in range(1 if eps == 0 else 2):
-            d = grow(freq, words, eps, random.Random(seed))
-            print(f"eps {eps} seed {seed}: {(s := score(d, val))} / {score(d, tests)}", flush=True)
-            if best is None or s < best[0]:
-                best = (s, d)
-    d = best[1]
-    rot = [score(d[r:] + d[:r], val) for r in range(len(d))]
-    r = min(range(len(d)), key=rot.__getitem__)
-    print(f"rotations: val median {sorted(rot)[len(rot) // 2]}, worst {max(rot)}, unrotated {rot[0]}")
-    d = d[r:] + d[:r]
-    print(f"best rotation {r}: {rot[r]} / {score(d, tests)}")
-    Path(a.out).write_bytes(d)
-    print(f"-> {a.out}")
+        print(f"baseline {f}: {score(Path(f).read_bytes(), VAL)} / {score(Path(f).read_bytes(), tests)}")
+    print(f"no dictionary: {score(b'', VAL)} / {score(b'', tests)}", flush=True)
+    with multiprocessing.get_context("fork").Pool(WORKERS) as pool:  # workers inherit the globals
+        deadline = time.time() + a.budget
+        res = pool.map(restarts, [(i, WORKERS, deadline) for i in range(WORKERS)])
+        top = sorted((r for _, rs in res for r in rs), reverse=True)[:KEEP]
+        print(f"{sum(n for n, _ in res)} restarts in {time.time() - deadline + a.budget:.0f} s; coverage"
+              f" kept {top[-1][0]}..{top[0][0]}", flush=True)
+        chunks = [range(i, min(i + 256, SIZE)) for i in range(0, SIZE, 256)]
+        best = None
+        for k, (cov, d) in enumerate(top):
+            rot = [x for xs in pool.map(rot_scores, [(d, c) for c in chunks]) for x in xs]
+            r = min(range(len(d)), key=rot.__getitem__)
+            dr = d[r:] + d[:r]
+            print(f"#{k} coverage {cov}: val unrotated {rot[0]}, median {sorted(rot)[len(rot) // 2]},"
+                  f" best rotation {r} {rot[r]} | test {score(dr, tests)}", flush=True)
+            if best is None or rot[r] < best[0]:
+                best = (rot[r], dr)
+    Path(a.out).write_bytes(best[1])
+    print(f"best val {best[0]} -> {a.out}")
 
 
 if __name__ == "__main__":
