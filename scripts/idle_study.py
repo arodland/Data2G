@@ -38,7 +38,7 @@ VARIANTS = {
     "wake": {},  # session.py as it stands
 }
 CELLS = [("awgn", 8.0), ("mpp", 8.0), ("mpp", 2.0), ("mpd", 4.0)]
-WORKLOADS = ("chat", "winlink")
+WORKLOADS = (("chat", "shift+cpm"), ("chat", "chat+cpm"), ("winlink", "shift+cpm"))  # (workload, policy): chat+cpm is CHAT ON
 HORIZON = 1800.0
 
 
@@ -50,7 +50,7 @@ def one(args):
     steps = L.WORKLOADS[workload](random.Random(seed + 7))
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, steps, seed=seed, horizon=HORIZON,
                 phy=G.RealPhy(ch), cs_s=L.CS_S)
-    row = dict(variant=variant, workload=workload, channel=chan, snr=snr, seed=seed, complete=int(res["complete"]),
+    row = dict(variant=variant, workload=workload, policy=policy, channel=chan, snr=snr, seed=seed, complete=int(res["complete"]),
                t=round(res["t"], 1), collisions=res["collisions"], timeouts=res["timeouts"],
                reason="|".join(res["reason"])[:120])
     for w in "ab":
@@ -64,12 +64,14 @@ def one(args):
 def summarize(path):
     g = defaultdict(dict)
     for r in csv.DictReader(open(path)):
-        g[(r["workload"], r["channel"], float(r["snr"]))].setdefault(r["variant"], {})[int(r["seed"])] = r
+        g[(r["workload"], r["policy"], r["channel"], float(r["snr"]))].setdefault(r["variant"], {})[int(r["seed"])] = r
     for k in sorted(g):
         v = g[k]
         seeds = sorted(set.intersection(*(set(x) for x in v.values())))
         done = ", ".join(f"{n} {sum(int(v[n][s]['complete']) for s in seeds)}" for n in v)
-        print(f"\n== {k[0]} {k[1]} {k[2]:+.0f} dB, {len(seeds)} paired seeds (complete: {done})")
+        print(f"\n== {k[0]} ({k[1]}) {k[2]} {k[3]:+.0f} dB, {len(seeds)} paired seeds (complete: {done})")
+        fails = ", ".join(f"{n} {sum('link' in v[n][s]['reason'] for s in seeds)}" for n in v)
+        print(f"  link lost/failed: {fails}")
         for c in ("lat_a", "lat_b", "t", "air_a", "air_b", "collisions"):
             cells = []
             for n in VARIANTS:
@@ -83,12 +85,10 @@ def main():
     ap.add_argument("--out", default="runs/idle_study.csv")
     ap.add_argument("--seeds", type=int, default=12)
     ap.add_argument("--jobs", type=int, default=8)
-    ap.add_argument("--policy", default="shift+cpm")
     a = ap.parse_args()
     if G.PEP_REF_DB is None:
         ap.error("DATA2G_PEP_REF_DB is unset (5: noise against each burst's peak, as data2g-host transmits)")
-    jobs = [(v, w, c, s, seed, a.policy) for w in WORKLOADS for c, s in CELLS for seed in range(a.seeds)
-            for v in VARIANTS]
+    jobs = [(v, w, c, s, seed, p) for w, p in WORKLOADS for c, s in CELLS for seed in range(a.seeds) for v in VARIANTS]
     # one task per worker: a variant patches session's constants for the process
     with Pool(a.jobs, maxtasksperchild=1) as pool, open(a.out, "w", newline="") as f:
         w = None
