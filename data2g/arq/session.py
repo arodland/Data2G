@@ -10,7 +10,7 @@ Timers are absolute times; nothing here sleeps. The same object runs in
 the simulator (scripts/linksim.py) and on the air.
 
 Idle rule (docs/arq.md §6a): the caller keeps the link alive with a
-jittered backoff (KEEPALIVE_S). The callee may break idle with its new
+poll after a random 15-30 s (KEEPALIVE_S). The callee may break idle with its new
 data (a wake burst, WAKE_*), but owns no retry timer: any burst from the
 caller cancels its wake, and the caller stays the only station that
 retries on a timeout.
@@ -33,11 +33,9 @@ DISC_TRIES = 3
 # (the audio loopback timed out on replies already on air at 1.0)
 REPLY_START_S = 1.5
 IDLE_CLOSE_S = 300.0
-KEEPALIVE_S = (15.0, 60.0)  # first and largest idle poll interval
-# after the longest keepalive gap, v1's retry budget (90 s link lost
-# against 16 s polls): a lost keepalive must not close the link
-LINK_LOST_S = KEEPALIVE_S[1] + 75.0
-KEEPALIVE_JITTER = 0.3  # each interval stretched by up to this fraction (no lockstep with the callee's wakes)
+KEEPALIVE_S = (15.0, 30.0)  # idle poll: a random wait in this range after each exchange
+KEEPALIVE_DOUBLING = False  # v1 (scripts/idle_study.py): the low end, doubling to the high end
+LINK_LOST_S = 90.0  # 60 s of retries past the longest keepalive gap
 # the callee's wake: after t_turn + REPLY_START_S + WAKE_GUARD_S of silence
 # since its last burst (the caller's answer or timeout retry starts within
 # t_turn + REPLY_START_S of it; the guard covers PTT, audio latency and
@@ -236,8 +234,11 @@ class Session:
             st.answered()
         else:
             lo, hi = CHAT_KEEPALIVE_S if st.chat or st.peer_chat else KEEPALIVE_S
-            self._idle_wait = lo if not self._idle_wait else min(hi, 2 * self._idle_wait)
-            self._build_at = now + min(hi, self._idle_wait * (1 + self.rng.uniform(0, KEEPALIVE_JITTER)))
+            if KEEPALIVE_DOUBLING:
+                self._idle_wait = lo if not self._idle_wait else min(hi, 2 * self._idle_wait)
+            else:
+                self._idle_wait = self.rng.uniform(lo, hi)
+            self._build_at = now + self._idle_wait
 
     # -- internals ---------------------------------------------------------------------
 
