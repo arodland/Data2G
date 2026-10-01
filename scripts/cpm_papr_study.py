@@ -79,10 +79,10 @@ def glide_tones(beta: float):
             w = np.hanning(n + 2)[1:-1]
             a = np.convolve(np.pad(a, n, mode="edge"), w / w.sum(), mode="same")[n:-n]
         x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
-        nr = int(cpm.RAMP_S * FS)
-        ramp = (1 - np.cos(np.pi * (np.arange(nr) + 0.5) / nr)) / 2
-        x[:nr] *= ramp
-        x[-nr:] *= ramp[::-1]
+        n_ramp = int(cpm.RAMP_S * FS)
+        ramp = (1 - np.cos(np.pi * (np.arange(n_ramp) + 0.5) / n_ramp)) / 2
+        x[:n_ramp] *= ramp
+        x[-n_ramp:] *= ramp[::-1]
         return x
 
     return tones
