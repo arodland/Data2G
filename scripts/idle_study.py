@@ -50,7 +50,8 @@ def one(args):
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, steps, seed=seed, horizon=HORIZON,
                 phy=G.RealPhy(ch), cs_s=L.CS_S)
     row = dict(variant=variant, workload=workload, channel=chan, snr=snr, seed=seed, complete=int(res["complete"]),
-               t=round(res["t"], 1), collisions=res["collisions"], timeouts=res["timeouts"])
+               t=round(res["t"], 1), collisions=res["collisions"], timeouts=res["timeouts"],
+               reason="|".join(res["reason"])[:120])
     for w in "ab":
         lat = [(d if d is not None else HORIZON) - tw for (who, *_), tw, d in zip(steps, res["t_write"], res["t_done"])
                if who == w and tw is not None]

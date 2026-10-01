@@ -487,10 +487,14 @@ CS_S = 0.6
 def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=2, cs_s=None):
     """-> dict: per-step write and delivery times, delivered bytes, stats.
     `phy`: what carries bursts (default SimPhy on `ch`; scripts/phy_session.py
-    has the real modem). `cs_s`: None defers every burst past the other
-    station's (perfect carrier sense); a number defers only past one whose
-    header it found and that started at least cs_s earlier (CS_S), and
-    loses both bursts of an overlap at their receivers (half duplex)."""
+    has the real modem). As data2g.arq.engine, a station is not polled
+    (nothing is built) while a burst it hears is pending: built earlier and
+    sent after it, a burst can act on a stale ACK, which the callee's wakes
+    turned into protocol fail-safes. `cs_s`: None holds it from when the
+    other's burst is sent until it is handled or ends (perfect carrier
+    sense); a number only for a burst whose header it found, from cs_s into
+    it (CS_S), and an overlap loses both bursts at their receivers (half
+    duplex)."""
     rng = random.Random(seed)
     nprng = np.random.default_rng(seed)
     phy = phy or SimPhy(ch, nprng)
@@ -519,6 +523,7 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
     t_write = [None] * len(steps)
     t_done = [None] * len(steps)
     events, air = [], []
+    hold = {id(a): {}, id(b): {}}  # receiver -> {id(burst): hold from}: its polls wait for that burst
     t = 0.0
     while t < horizon:
         # the application: write every step whose prerequisite is delivered
@@ -540,21 +545,23 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
         if all(x is not None for x in t_done):
             break
         for me, other in ((a, b), (b, a)):
+            if any(f <= t for f in hold[id(me)].values()):
+                continue
             burst = me.poll(t)
             if burst is None:
                 continue
             start = t + PTT_S
-            busy = max([e for s_, e, w_, *h in air[-4:] if w_ is other and e > start
-                        and (cs_s is None or (h[0] and s_ + cs_s <= start))], default=None)
-            if busy is not None:
-                start = busy + 0.05
             end, hdr, make_rx, meas = phy.send(burst, start)
             hit = [x for x in air[-4:] if x[2] is other and x[0] < end and start < x[1]] if cs_s is not None else []
             if hit:  # half duplex: neither hears the other's burst
                 stats["collisions"] += 1
                 gone = {id(burst)} | {id(x[4]) for x in hit}
                 events = [e for e in events if not (e[1] in ("header", "rx") and id(e[3]) in gone)]
+                for x in hit:
+                    hold[id(me)].pop(id(x[4]), None)
                 hdr = None
+            if cs_s is None or hdr is not None:
+                hold[id(other)][id(burst)] = float("-inf") if cs_s is None else start + cs_s
             air.append((start, end, me, hdr is not None, burst))
             stats["bursts"] += 1
             core = F.Core.unpack(burst.slots[0].payload)
@@ -578,7 +585,9 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
             delivered[w] = len(got[w])
         if a.state == S.CLOSED and b.state == S.CLOSED:
             break
-        nxt = [e[0] for e in events] + [x for x in (a.next_event(), b.next_event()) if x is not None]
+        # a held station's timers wait for the burst event that releases it
+        nxt = [e[0] for e in events] + [x for x in (s_.next_event() for s_ in (a, b)
+                                                    if not any(f <= t for f in hold[id(s_)].values())) if x is not None]
         pend = [t_done[after] + think for (_, _, after, think), tw in zip(steps, t_write)
                 if tw is None and after is not None and t_done[after] is not None]
         nxt += [p for p in pend if p > t] + ([t + 0.05] if any(p <= t for p in pend) else [])
@@ -590,12 +599,16 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
         for when, kind, whom, burst, extra in due:
             if kind == "txend":
                 whom.on_tx_end(burst, when)
+                if not any(e[1] == "rx" and e[3] is burst for e in events):
+                    for h in hold.values():
+                        h.pop(id(burst), None)  # not heard: nothing to wait for
             elif kind == "header":
                 whom.on_header(extra[1], extra[2], when)
             else:
                 make_rx, meas, submode = extra
                 whom.policy.observe(meas, submode, when)
                 whom.on_rx(make_rx(stores[id(whom)], stats, rng), when)
+                hold[id(whom)].pop(id(burst), None)
     lat = [d - w for w, d in zip(t_write, t_done) if w is not None and d is not None]
     return dict(t=t, complete=all(x is not None for x in t_done), latency=lat, t_write=t_write, t_done=t_done,
                 delivered=delivered["a"] + delivered["b"], a_state=a.state, b_state=b.state,

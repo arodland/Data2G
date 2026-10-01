@@ -56,6 +56,10 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
     stats = {"mismatch": 0, "collisions": 0, "bursts": 0}
     air = []  # (start, end, sender) of every transmission
     events = []  # (time, kind, target, payload)
+    # as data2g.arq.engine: no poll (nothing built) while the other's burst is
+    # on air or pending decode; a burst built earlier and deferred past it
+    # could act on a stale ACK
+    held = {id(a): set(), id(b): set()}
     got_a, got_b = bytearray(), bytearray()
     disconnect_asked = False
     t = 0.0
@@ -65,6 +69,8 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             b.write(data_b)
             stats["b_written"] = t
         for me, other in ((a, b), (b, a)):
+            if held[id(me)]:
+                continue
             burst = me.poll(t)
             if burst is None:
                 continue
@@ -76,6 +82,7 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             if any(s < end and start < e for s, e, _ in air[-4:]):
                 stats["collisions"] += 1
             air.append((start, end, me))
+            held[id(other)].add(id(burst))
             stats["bursts"] += 1
             events.append((end, "txend", me, burst))
             lost = (die_at is not None and start >= die_at) or rng.random() < p_burst
@@ -95,7 +102,7 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             disconnect_asked = True
         if a.state == S.CLOSED and b.state == S.CLOSED and not events and a._out is None and b._out is None:
             break
-        nxt = [e[0] for e in events] + [x for x in (a.next_event(), b.next_event()) if x is not None]
+        nxt = [e[0] for e in events] + [x for x in (s.next_event() for s in (a, b) if not held[id(s)]) if x is not None]
         if b_write_at is not None and stats.get("b_written") is None:
             nxt.append(b_write_at)
         if not nxt:
@@ -106,10 +113,14 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
         for when, kind, who, burst in due:
             if kind == "txend":
                 who.on_tx_end(burst, when)
+                if not any(e[1] == "rx" and e[3] is burst for e in events):
+                    held[id(a)].discard(id(burst))  # lost: nothing to wait for
+                    held[id(b)].discard(id(burst))
             elif kind == "header":
                 who.on_header(burst.submode, len(burst.slots), when)
             else:
                 who.on_rx(FakeRx(burst, rng, p_cw, stores[id(who)], stats), when)
+                held[id(who)].discard(id(burst))
     return dict(a=a, b=b, got_a=bytes(got_a), got_b=bytes(got_b), data_a=data_a, data_b=data_b, t=t, **stats)
 
 
