@@ -31,9 +31,10 @@ T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the b
 # (docs/arq.md §9a)
 T_COMP = 15
 HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed with
-# ~4 KB of common English words, commonest last (nearest), primed ahead of the
-# history so short streams compress too (wordfreq top list, session version 3)
-WORDS = (Path(__file__).parent / "words.txt").read_bytes()
+# 4 KB primed ahead of the history so short streams compress too: built from
+# C4 web text by scripts/build_zdict.py to share as many frequent substrings
+# with it as it can (session version 3)
+ZDICT = (Path(__file__).parent / "zdict.bin").read_bytes()
 MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
 # session control subtypes (in a SESSION frame's first extension byte)
@@ -155,7 +156,7 @@ def unpack_flags(b: bytes, n: int) -> list[bool]:
 # --- compression (docs/arq.md §9a) ------------------------------------------------
 
 def deflate(hist: bytes, data: bytes) -> bytes:
-    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9, zdict=WORDS + hist)
+    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9, zdict=ZDICT + hist)
     return c.compress(data) + c.flush()
 
 
@@ -179,7 +180,7 @@ def deflate_fit(hist: bytes, data: bytes, pb: int) -> tuple[int, bytes] | None:
 
 def inflate(hist: bytes, payload: bytes) -> bytes:
     """A compressed codeword (zero padded) -> its stream bytes."""
-    d = zlib.decompressobj(-15, zdict=WORDS + hist)
+    d = zlib.decompressobj(-15, zdict=ZDICT + hist)
     try:
         out = d.decompress(payload, MAX_INFLATE)
     except zlib.error as e:

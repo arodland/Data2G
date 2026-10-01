@@ -1,4 +1,4 @@
-"""Build deflate's priming dictionary (frames.ZDICT): a 4 KB string that
+"""Build deflate's priming dictionary (frames.ZDICT, data2g/arq/zdict.bin): a 4 KB string that
 shares as many frequent substrings as possible with a text corpus.
 
 Greedy from a random byte: grow one string, each step appending a byte at
