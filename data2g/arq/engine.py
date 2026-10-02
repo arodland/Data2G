@@ -221,13 +221,13 @@ class Engine:
         if self.tx is None:
             self._hear(x, t)
             self._id_check(t)
-            bursts = None
+            bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
             if not self.receiver.busy and not held:  # a burst still arriving holds any reply (half duplex)
                 burst = self.session.poll(t)
                 self._id_check(t)
                 if burst is not None:
-                    bursts = self._with_id(burst, t)
+                    bursts, main = self._with_id(burst, t), burst
                 elif self._id_pending is not None and t >= self._id_pending[1]:
                     bursts, self._id_pending = [self._id_frame(self._id_pending[0])], None
                 elif self._extra and t >= self._hold:
@@ -239,7 +239,7 @@ class Engine:
             else:
                 self._kiss_busy = 0
             if bursts is not None:
-                self._start_tx(bursts, t)
+                self._start_tx(bursts, t, main or bursts[0])
         if self.tx is not None:
             burst, audio, pos = self.tx  # burst: the session's, when an ID rides with it
             n = min(k, len(audio) - pos)
@@ -347,18 +347,21 @@ class Engine:
             log.warning("RX malformed CQ/ID frame (%s): dropped", e)
             return False
 
-    def _start_tx(self, bursts: list, t: float):
-        """Bursts back to back on one PTT (an ID frame with a session's burst)."""
+    def _start_tx(self, bursts: list, t: float, main: L.TxBurst):
+        """Bursts back to back on one PTT (an ID frame with a session's
+        burst). `main`: the one the session is told has gone, when all have."""
         xs = [PHY.tx_audio(b) for b in bursts]
         # peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a
         # sound card clips at 1 (the audio loopback found 64-QAM bursts wrecked)
         audio = np.concatenate([np.zeros(self.ptt_delay)] + [x / np.max(np.abs(x)) for x in xs])
-        # the session's burst is told when they all end (an ID frame is never the session's)
-        main = next((b for b in bursts if b.slots[0].mask_id[0]), bursts[0])
         self.tx = [main, audio, 0]
         if self.rec:
-            for b, x in zip(bursts, xs):
+            # one event per burst, at its own start: the first's seconds include
+            # the PTT delay, as a lone burst's always did (scripts/replay.py)
+            for i, (b, x) in enumerate(zip(bursts, xs)):
+                seconds = (len(x) + (self.ptt_delay if i == 0 else 0)) / FS
                 self.rec.event("tx", t=t, submode=b.submode, burst_seq=b.burst_seq,
                                slots=[dict(mask=list(s.mask_id), rv=s.rv, payload=s.payload) for s in b.slots],
-                               seconds=len(x) / FS)
+                               seconds=seconds)
+                t += seconds
 
