@@ -1,0 +1,8 @@
+# On-air data read byte for byte at run time. zdict.bin is mostly text (the
+# deflate dictionary), so Git for Windows rewrote its line endings on
+# checkout: Python's dictionary then differed from every other station's,
+# and inflate produced garbage.
+*.bin binary
+*.npy binary
+*.npz binary
+*.json -text
