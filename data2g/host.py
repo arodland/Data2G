@@ -459,8 +459,7 @@ def serve(a, pa, stop: threading.Event | None = None):
             engine.kiss_rx.clear()
     finally:
         log.info("shutting down")
-        rig.ptt(False)
-        rig.close()
+        rig.release()
         if cmd:
             cmd.close()
             data.close()

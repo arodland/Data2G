@@ -228,3 +228,57 @@ def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
     y = np.random.default_rng(4).normal(size=60 * FS)
     rx = tnc.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
     assert not [k for i in range(0, len(y), FS // 10) for k, _ in rx.feed(y[i:i + FS // 10])]
+
+
+def _fake_rigctld():
+    """A rigctld stand-in on a free port: answers RPRT 0, records commands."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    got = []
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            with c:
+                while data := c.recv(64):
+                    got.append(data)
+                    c.sendall(b"RPRT 0\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, got
+
+
+def test_exit_unkeys_only_a_radio_we_keyed(caplog):
+    import socket
+    import time
+
+    # never connected: no attempt, no wait, no warning
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    rig, t = tnc.Rigctld("127.0.0.1", closed), time.monotonic()
+    rig.release()
+    assert time.monotonic() - t < 0.5 and not caplog.records
+
+    # connected, never keyed: no PTT off
+    srv, got = _fake_rigctld()
+    rig = tnc.Rigctld("127.0.0.1", srv.getsockname()[1])
+    rig.ptt(False)  # an unkey while running (connects, never keys)
+    got.clear()
+    rig.release()
+    assert got == [] and not rig.keyed
+
+    # keyed once: PTT off at exit
+    rig = tnc.Rigctld("127.0.0.1", srv.getsockname()[1])
+    rig.ptt(True)
+    rig.release()
+    time.sleep(0.2)
+    assert got[-1] == b"T 0\n"
+    srv.close()
