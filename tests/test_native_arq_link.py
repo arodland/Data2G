@@ -300,3 +300,22 @@ def test_session_policy_is_the_python_object(native):
     s.on_tx_end(b, 1.0)
     assert s.next_event() == 1.0 + s.t_turn + S.REPLY_START_S
     assert MODES["m46"][0] == len(b.slots[0].payload)
+
+
+def test_session_on_timeout_override_and_tuning(native, monkeypatch):
+    """scripts/linksim.py wraps a session's _on_timeout to count timeouts and
+    scripts/idle_study.py patches session.py's constants: both reach the C++
+    session, as they do the Python one."""
+    monkeypatch.setattr(S, "REPLY_START_S", 4.0)
+    monkeypatch.setattr(S, "CONNECT_TRIES", 2)
+    for cls in (conftest._originals.get((S, "Session"), S.Session), native.arq.Session):
+        s = cls("W1AW", SessionPolicy(random.Random(1)), rng=random.Random(2))
+        seen, ot = [], s._on_timeout
+        s._on_timeout = lambda now, ot=ot: (seen.append(now), ot(now))
+        s.connect("K2XYZ", 2, 0.0)
+        s.on_tx_end(s.poll(0.0), 1.0)
+        assert s.next_event() == 1.0 + s.t_turn + 4.0
+        s.poll(6.0)
+        s.on_tx_end(s.poll(s.next_event()), 10.0)
+        s.poll(s.next_event())
+        assert seen == [6.0, 10.0 + s.t_turn + 4.0] and s.state == S.CLOSED and s.close_reason == "no answer"

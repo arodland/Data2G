@@ -62,6 +62,20 @@ const char* state_name(SessionState s);  // as session.py's strings
 int session_key(const std::string& caller, const std::string& callee, std::int64_t nonce);
 std::string frame_desc(ByteView body);
 
+// session.py's module constants that a study patches (scripts/idle_study.py's
+// variants). Defaults are the constants; a binding copies Python's values in
+// when it makes a Session (session.py reads them at each use).
+struct SessionTuning {
+    int connect_tries = CONNECT_TRIES, disc_tries = DISC_TRIES;
+    double reply_start_s = REPLY_START_S, idle_close_s = IDLE_CLOSE_S;
+    double keepalive_lo_s = KEEPALIVE_LO_S, keepalive_hi_s = KEEPALIVE_HI_S;
+    double chat_keepalive_lo_s = CHAT_KEEPALIVE_LO_S, chat_keepalive_hi_s = CHAT_KEEPALIVE_HI_S;
+    bool keepalive_doubling = KEEPALIVE_DOUBLING;
+    double link_lost_s = LINK_LOST_S, wake_guard_s = WAKE_GUARD_S, wake_jitter_s = WAKE_JITTER_S;
+    int wake_tries = WAKE_TRIES, chat_wake_tries = CHAT_WAKE_TRIES;
+    double repeat_max_s = REPEAT_MAX_S;
+};
+
 class Session {
 public:
     Session(std::string call, std::shared_ptr<Policy> policy, double t_turn = 1.0, std::shared_ptr<Rng> rng = nullptr,
@@ -81,6 +95,7 @@ public:
     bool chat = false;
     std::vector<std::string> aliases;
     double stats_interval_s;
+    SessionTuning tune;
 
     std::int64_t nonce = 0;
     TxBurstPtr out;
@@ -113,6 +128,9 @@ public:
     bool master() const;
     std::optional<double> wake_time();
     std::map<std::string, std::int64_t> stats();
+    // session.py's _on_timeout; virtual so a binding can honour an instance
+    // override (scripts/linksim.py counts timeouts by wrapping it)
+    virtual void on_timeout(double now);
 
 protected:
     // A binding makes its own Station subclass here.
@@ -129,7 +147,6 @@ private:
     void close(const std::string& why, TxBurstPtr final_burst = nullptr, double now = 0.0);
     void connected(double now);
     void log_stats(const char* label, double now, double since, const std::map<std::string, std::int64_t>& prev);
-    void on_timeout(double now);
     TxBurstPtr session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode = std::nullopt);
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();

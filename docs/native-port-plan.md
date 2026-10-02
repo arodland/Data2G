@@ -51,6 +51,29 @@ Stays Python only: channel_torch, decoders_torch, hfchannel, scripts/,
 tools/freeze_format.py, training. Studies can import the native module for
 speed later. That is a bonus, not a goal.
 
+Goal for studies: every study script runs unchanged on the C++ through
+`tools/with_native.py` (no `--skip`), so a result (speed test, loss study)
+can be re-run on the port and shown to hold. Status 2026-10-02: gap closed
+for every script that drives sessions or the engine. The wrappers now
+honour what scripts reach into: an instance override of
+`Session._on_timeout` (linksim counts timeouts), session.py's patched
+constants (idle_study's variants, read when a Session is made), a repeated
+burst returned as the same object (linksim keys on identity), and
+`phy.ModemRx` is a class whose methods a study can wrap (crc_exposure).
+Checked 2026-10-02, Python vs C++, same seeds, DD budget inf: identical
+rows for loss_study, phy_session, session_data, outcome_data,
+crc_exposure, sync_loss_study; idle_study 23 of 24 rows (one session
+diverges at a single borderline codeword decode, slot 13 of a 19-cw
+w48-16qam-r1/2 burst, C++ fails where Python decodes, DD on or off).
+What remains:
+- `crc_exposure_engine.py` fails on Python too (its ModemRx.__init__ patch
+  predates the dd_budget argument). The C++ Engine also has no
+  `_start_tx` and never calls Python's ModemRx, so its counts need engine
+  hooks once the script is fixed.
+- `linksim.py run` fails on Python too (stale `run()` call). Its sweeps
+  hard-code 8 workers. Its session loop is covered through phy_session's
+  `sim_score`.
+
 Python remains the definition of the on-air format. When the two disagree,
 Python is right until shown otherwise. New DSP lands in both.
 
@@ -213,6 +236,9 @@ Status 2026-10-02: met.
   DD budget infinite on both sides (`tools/with_native.py --dd-budget inf
   --skip arq`; the study reaches into Session internals). All 5643 burst
   rows identical; wall time 199 s Python, 78 s C++ (6 workers).
+  Re-run without `--skip` (C++ sessions too), default cells, `shift`,
+  4 seeds x 300 s: all 967 burst rows identical; 37 s Python, 14 s C++
+  (6 workers, peak RSS 263 MB per process Python, 163 MB C++).
 
 ### Phase 2: ARQ and engine
 
@@ -247,7 +273,7 @@ Engine and recorder landed (`core/arq/engine.*`).
   pairing sends Py-Py's bursts; no stall past the watchdog; streams exact
   except the reference behaviours under Findings. Default 386 runs x 4
   pairings in ~18 s; `-m slow` about 3800 more.
-- Not done yet: the loss study.
+- Loss study: paired without `--skip`, rows identical (Phase 1, "Paired check").
 
 ### Phase 3: headless host
 
