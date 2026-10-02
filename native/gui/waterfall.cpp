@@ -21,18 +21,20 @@ constexpr int BINS = NFFT / 2;  // 0 .. FS/2
 constexpr double DISPLAY_HZ = config::FS / 2.0;
 constexpr std::size_t METER_SAMPLES = config::FS / 10;  // one engine block
 constexpr double DB_FLOOR = -95.0, DB_CEIL = -20.0;
+// TX audio is full scale (a burst's peak at 1.0): its own range, so it neither
+// saturates nor reads as quieter than the band.
+constexpr double TX_DB_FLOOR = -80.0, TX_DB_CEIL = -15.0;
 
 using Rgb = std::array<std::uint8_t, 3>;
 
-// 256-entry black -> blue -> green -> yellow -> white ramp.
-const std::array<Rgb, 256>& colormap() {
-    static const std::array<Rgb, 256> lut = [] {
-        struct Stop {
-            double at;
-            Rgb color;
-        };
-        constexpr std::array<Stop, 5> stops{
-            {{0.00, {0, 0, 0}}, {0.25, {0, 0, 140}}, {0.50, {0, 170, 90}}, {0.75, {245, 235, 40}}, {1.00, {255, 255, 255}}}};
+struct Stop {
+    double at;
+    Rgb color;
+};
+using Ramp = std::array<Stop, 5>;
+
+// 256-entry colour ramp through the stops.
+std::array<Rgb, 256> ramp(const Ramp& stops) {
         std::array<Rgb, 256> out{};
         for (int i = 0; i < 256; ++i) {
             const double x = i / 255.0;
@@ -45,7 +47,19 @@ const std::array<Rgb, 256>& colormap() {
                 out[i][ch] = static_cast<std::uint8_t>(lo.color[ch] + t * (hi.color[ch] - lo.color[ch]));
         }
         return out;
-    }();
+}
+
+// RX: black -> blue -> green -> yellow -> white.
+const std::array<Rgb, 256>& colormap() {
+    static const auto lut =
+        ramp({{{0.00, {0, 0, 0}}, {0.25, {0, 0, 140}}, {0.50, {0, 170, 90}}, {0.75, {245, 235, 40}}, {1.00, {255, 255, 255}}}});
+    return lut;
+}
+
+// TX: black -> purple -> magenta -> pink -> white, apart from every RX hue.
+const std::array<Rgb, 256>& tx_colormap() {
+    static const auto lut =
+        ramp({{{0.00, {0, 0, 0}}, {0.25, {70, 0, 90}}, {0.50, {200, 30, 140}}, {0.75, {255, 140, 200}}, {1.00, {255, 255, 255}}}});
     return lut;
 }
 
@@ -122,14 +136,17 @@ void Waterfall::ensure_image() {
 void Waterfall::tick() {
     if (!source_) return;
     std::uint64_t total = 0;
-    const std::vector<double> block = source_(NFFT, &total);
+    bool tx = false;
+    const std::vector<double> block = source_(NFFT, &total, &tx);
     if (total == seen_ || block.size() < static_cast<std::size_t>(NFFT)) return;
     seen_ = total;
 
-    peak_ = 0.0;
-    for (auto it = block.end() - METER_SAMPLES; it != block.end(); ++it) peak_ = std::max(peak_, std::abs(*it));
-    clipping_ = peak_ >= 0.99;
-    if (clipping_) clip_latched_ = true;
+    if (!tx) {  // the meter is the input's: TX audio would read as clipping
+        peak_ = 0.0;
+        for (auto it = block.end() - METER_SAMPLES; it != block.end(); ++it) peak_ = std::max(peak_, std::abs(*it));
+        clipping_ = peak_ >= 0.99;
+        if (clipping_) clip_latched_ = true;
+    }
 
     ensure_image();
     const std::vector<double> row = reduce_to_width(spectrum_db(block), image_.width());
@@ -137,10 +154,11 @@ void Waterfall::tick() {
     // one row = one pixel: scroll down by one, bottom-up in place
     const auto stride = static_cast<std::size_t>(image_.bytesPerLine());
     for (int y = image_.height() - 1; y > 0; --y) std::copy_n(image_.constScanLine(y - 1), stride, image_.scanLine(y));
-    const auto& lut = colormap();
+    const auto& lut = tx ? tx_colormap() : colormap();
+    const double floor = tx ? TX_DB_FLOOR : DB_FLOOR, ceil = tx ? TX_DB_CEIL : DB_CEIL;
     uchar* top = image_.scanLine(0);
     for (int x = 0; x < image_.width(); ++x) {
-        const double norm = std::clamp((row[x] - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0);
+        const double norm = std::clamp((row[x] - floor) / (ceil - floor), 0.0, 1.0);
         std::copy_n(lut[static_cast<std::size_t>(norm * 255.0)].data(), 3, top + x * 3);
     }
     update();

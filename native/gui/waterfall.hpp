@@ -1,4 +1,5 @@
-// Scrolling spectrum of the 8 kHz RX input, with the input level meter down
+// Scrolling spectrum of the 8 kHz RX input (and our TX audio while we transmit,
+// in its own colours), with the input level meter down
 // its right edge. Lifted from SSTVAE's gui/waterfall.{hpp,cpp}: the backing
 // image is kept exactly the widget's size in device pixels so the painter
 // never rescales it (rows would shimmer), spectra are reduced to the width
@@ -23,8 +24,9 @@ class Waterfall : public QWidget {
     Q_OBJECT
 
 public:
-    // The newest n input samples, and how many have been read in all.
-    using Source = std::function<std::vector<double>(std::size_t n, std::uint64_t* total)>;
+    // The newest n samples, how many have been read in all, and whether the
+    // newest block is our own TX audio (drawn in TX colours, kept off the meter).
+    using Source = std::function<std::vector<double>(std::size_t n, std::uint64_t* total, bool* tx)>;
 
     explicit Waterfall(QWidget* parent = nullptr, int fps = 10);
 
