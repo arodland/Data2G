@@ -341,7 +341,7 @@ std::optional<cpm::Lock> Receiver::find_cpm() const {
     return std::nullopt;
 }
 
-bool Receiver::supersede(std::vector<Event>& out, bool whole) {
+bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     fresh_ = 0;
     const Pending p = *pending_;
     if (p.is_cpm()) return false;  // scores aren't comparable across families
@@ -381,7 +381,17 @@ bool Receiver::supersede(std::vector<Event>& out, bool whole) {
     return true;
 }
 
-std::vector<Event> Receiver::feed(std::span<const double> x_in) {
+std::vector<Event> Receiver::feed(std::span<const double> x) {
+    std::vector<Event> out;
+    for (auto& it : feed_deferred(x)) {
+        if (auto* r = std::get_if<DecodeRequest>(&it)) out.emplace_back(decode(std::move(*r), accept_));
+        else if (auto* h = std::get_if<HeaderEvent>(&it)) out.emplace_back(std::move(*h));
+        else out.emplace_back(std::move(std::get<BurstEvent>(it)));
+    }
+    return out;
+}
+
+std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in) {
     std::vector<double> blanked;
     std::span<const double> x = x_in;
     if (blanker_) {
@@ -408,7 +418,7 @@ std::vector<Event> Receiver::feed(std::span<const double> x_in) {
     }
     buf_.insert(buf_.end(), x.begin(), x.end());
     fresh_ += static_cast<int64_t>(x.size());
-    std::vector<Event> out;
+    std::vector<Item> out;
     while (true) {
         if (!pending_) {
             // a burst's end is checked on every call; new preambles only every HOP samples
@@ -471,7 +481,7 @@ std::vector<Event> Receiver::feed(std::span<const double> x_in) {
             req.at = off_;
             req.audio_lo = std::max<int64_t>(0, p.start() - off_);
             req.audio_hi = std::max(req.audio_lo, std::min(p.end() - off_, len()));
-            out.push_back(decode(std::move(req), accept_));
+            out.push_back(std::move(req));
             last_start_ = p.start();
             trim(len() - (p.end() - off_));
             pending_.reset();
@@ -483,7 +493,7 @@ std::vector<Event> Receiver::feed(std::span<const double> x_in) {
         req.at = off_ + s0;
         req.head = p.start() - off_ - s0 + modem::head_samples(p.ofdm().band) + config::NSYM + 3 * config::M;
         req.audio_hi = s1 - s0;
-        out.push_back(decode(std::move(req), accept_));
+        out.push_back(std::move(req));
         last_start_ = p.start();
         // a better header inside this burst's span (it was a false lock, and
         // the real one began before it ended) is next, not trimmed away

@@ -215,7 +215,20 @@ modes, engine, recorder.
 Status 2026-10-02: frames, link, session, phy, policy, predictor, modes,
 kisslink and the tnc Receiver are ported and substituted. Python and C++
 stations exchange identical bursts in both mixed pairings, with loss and
-duplication. The engine port is in progress.
+duplication.
+Engine and recorder landed (`core/arq/engine.*`).
+- `--native` substitutes the C++ Engine (sync mode) for engine.Engine;
+  `test_native_engine.py` runs a C++ engine against a Python one both
+  ways (VARA session, KISS) and reads both recordings alike.
+- Decode worker (`EngineConfig::worker`): the receiver stage (search,
+  BUSY) stays in step(); burst receive, DD and the session run on one
+  worker, blocks in order, so session times equal sync mode's and only
+  the output's lag behind input varies (as Python's backlog does). Not
+  deterministic, so sync stays the default and the parity mode. With a
+  1 s decode in flight, the next header's BUSY was 0.23 s late in sync
+  mode and 0.02 s with the worker (`test_engine`, real time).
+- Not done yet: the loss study and the state-agreement fuzz on the mixed
+  pair.
 
 ### Phase 3: headless host
 

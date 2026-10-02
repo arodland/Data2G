@@ -60,6 +60,9 @@ public:
         return (dup ? obj.attr("airtime")(m, n_cw, true) : obj.attr("airtime")(m, n_cw)).cast<double>();
     }
     std::string connect_mode(int cap, int tries) override { return obj.attr("connect_mode")(cap, tries).cast<std::string>(); }
+    void observe(const Measured& m, const std::string& submode, double now) override {
+        obj.attr("observe")(to_dict(m), submode, now);
+    }
 };
 
 std::shared_ptr<Policy> policy_of(py::object o) { return std::make_shared<PyPolicy>(std::move(o)); }
@@ -151,11 +154,21 @@ py::object counter(const std::map<std::string, std::int64_t>& m) {
 
 }  // namespace
 
+std::shared_ptr<Policy> py_policy(py::object o) { return policy_of(std::move(o)); }
+std::shared_ptr<Rng> py_rng(py::object o) { return std::make_shared<PyRng>(std::move(o)); }
+std::shared_ptr<Session> py_session(const std::string& call, std::shared_ptr<Policy> policy, std::shared_ptr<Rng> rng,
+                                    const std::vector<std::string>& aliases, double stats_interval_s) {
+    return std::make_shared<PySession>(call, std::move(policy), 1.0, std::move(rng), aliases, stats_interval_s);
+}
+
 void bind_arq_link(py::module_& m) {
+    // the GIL taken: an engine's worker logs too
     set_log_sink({[](const char* name, int level) {
+                      py::gil_scoped_acquire gil;
                       return py::module_::import("logging").attr("getLogger")(name).attr("isEnabledFor")(level).cast<bool>();
                   },
                   [](const char* name, int level, const std::string& msg) {
+                      py::gil_scoped_acquire gil;
                       py::module_::import("logging").attr("getLogger")(name).attr("log")(level, "%s", msg);
                   }});
 
@@ -385,7 +398,7 @@ void bind_arq_link(py::module_& m) {
         d["_station_obj"] = o;
         return o;
     };
-    py::class_<Session>(a, "Session", py::dynamic_attr())
+    py::class_<Session, std::shared_ptr<Session>>(a, "Session", py::dynamic_attr())
         .def(py::init([](std::string call, py::object policy, double t_turn, py::object rng, std::vector<std::string> aliases,
                          double stats_interval_s) {
                  std::shared_ptr<Rng> r;

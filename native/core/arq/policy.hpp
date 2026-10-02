@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "arq/link.hpp"
 #include "arq/modes.hpp"
 #include "arq/predictor.hpp"
 
@@ -90,6 +91,34 @@ public:
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
+};
+
+StationView view(const Station& st);
+
+// The engine's default policy: a GearShifter as link.Policy, the methods
+// policy.py's GearShifter has for the link and the session.
+class GearPolicy : public Policy {
+public:
+    GearShifter shifter;
+
+    std::pair<std::string, int> choose(Station& st, int escalation) override;
+    int payload_bytes(const std::string& submode) override;
+    int ctl_payload_bytes(const std::string& submode) override;
+    int max_ctl(const std::string& submode) override;
+    std::optional<Recommendation> recommend(Station& st) override;
+    bool want_dup() override { return shifter.want_dup; }
+    int rv_cycle(const std::string& submode) override;
+    bool has_outcome() override { return true; }
+    void outcome(const std::string& submode, int decoded, int sent, bool usable) override {
+        shifter.outcome(submode, decoded, sent, usable);
+    }
+    std::string mode_name(int rec) override;
+    bool has_airtime() override { return true; }
+    std::optional<double> snr_est() override;
+    double airtime(const std::string& submode, int n_cw, bool dup) override;
+    std::string connect_mode(int cap, int tries) override;
+    void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
+    int next_capacity(const Station& st) const { return shifter.next_capacity(view(st)); }  // the host's BUFFER
 };
 
 }  // namespace data2g::arq

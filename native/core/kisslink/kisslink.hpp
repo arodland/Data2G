@@ -39,9 +39,6 @@ struct Ax25 {
 std::optional<Ax25> parse_ax25(ByteView frame);  // nullopt: not AX.25
 int station_hash(std::string_view call);         // nonzero 16-bit FNV-1a
 
-// tnc.unpack: codeword payloads and their CRC results -> (whole packets, packets lost).
-std::pair<std::vector<Bytes>, int> unpack(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
-
 struct Peer {
     arq::GearShifter shifter;
     double heard = 0.0;                             // when we last heard it

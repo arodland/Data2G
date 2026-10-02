@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "codes/codes.hpp"
+#include "tnc/tnc.hpp"
 
 namespace data2g::kisslink {
 
@@ -74,37 +75,6 @@ int station_hash(std::string_view call) {
     for (char c : call) h = (h ^ static_cast<std::uint8_t>(std::toupper(static_cast<unsigned char>(c)))) * 0x01000193u;
     const int v = static_cast<int>(h & 0xFFFF);
     return v ? v : 1;
-}
-
-std::pair<std::vector<Bytes>, int> unpack(const std::vector<Bytes>& payloads, const std::vector<bool>& ok) {
-    Bytes stream;
-    std::vector<bool> good;
-    for (std::size_t i = 0; i < payloads.size(); ++i) {
-        stream.insert(stream.end(), payloads[i].begin(), payloads[i].end());
-        good.insert(good.end(), payloads[i].size(), ok[i]);
-    }
-    auto all_good = [&](std::size_t a, std::size_t b) {
-        return std::all_of(good.begin() + static_cast<std::ptrdiff_t>(a), good.begin() + static_cast<std::ptrdiff_t>(b),
-                           [](bool g) { return g; });
-    };
-    std::vector<Bytes> out;
-    int lost = 0;
-    std::size_t pos = 0;
-    while (pos + 2 <= stream.size()) {
-        if (!all_good(pos, pos + 2)) {
-            ++lost;  // at least this one; the rest can not be found
-            break;
-        }
-        const std::size_t n = static_cast<std::size_t>(be16(&stream[pos]));
-        if (n == 0 || pos + 2 + n > stream.size()) break;
-        if (all_good(pos + 2, pos + 2 + n))
-            out.emplace_back(stream.begin() + static_cast<std::ptrdiff_t>(pos + 2),
-                             stream.begin() + static_cast<std::ptrdiff_t>(pos + 2 + n));
-        else
-            ++lost;
-        pos += 2 + n;
-    }
-    return {out, lost};
 }
 
 KissLink::KissLink(int cap_, std::string broadcast_, arq::Clock clock_)
@@ -269,7 +239,7 @@ std::optional<std::vector<Bytes>> KissLink::on_burst(const arq::Heard& r, std::s
         ok.push_back(p.has_value());
         payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
     }
-    auto frames = payloads.empty() ? std::vector<Bytes>{} : unpack(payloads, ok).first;
+    auto frames = payloads.empty() ? std::vector<Bytes>{} : tnc::unpack(payloads, ok).first;
     if (!sender && !frames.empty()) {
         const auto ax = parse_ax25(frames[0]);
         sender = ax ? station_hash(ax->sender) : 0;
