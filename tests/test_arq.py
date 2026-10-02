@@ -362,3 +362,184 @@ def test_compression_off_sends_raw_and_still_receives(monkeypatch):
 def test_incompressible_goes_raw():
     result, stats = run(2, 0.0, 0.0, 3000, 3000, modes=("m46",))
     assert result == "done" and stats["cw_new"] > 0 and stats["cw_comp"] == 0
+
+
+# --- CRC-valid but wrong control (a false CRC accept, 2^-16 on noise) ------------------
+
+def _clean(burst, stats=None):
+    return FakeRx(burst, random.Random(0), 0.0, {}, Counter() if stats is None else stats)
+
+
+@pytest.mark.parametrize("ext, k, n_data, n_ctl", [
+    ({F.T_RV: b"\0"}, 5, 5, None),  # T_RV shorter than K resends
+    ({}, 1, 1, None),  # K resends, no T_RV
+    ({F.T_NEW: b""}, 0, 2, None),
+    ({F.T_ABANDON: b"\x01"}, 0, 0, None),
+    ({F.T_RV: b"\0\0"}, 5, 2, None),  # K past the burst's end
+    ({}, 0, 0, 3),  # 3 control codewords in a burst of 1
+])
+def test_malformed_control_is_dropped(ext, k, n_data, n_ctl):
+    """Dropped like a failed control codeword (not answered, no state
+    touched), never raised; repeats and the watchdog recover (§10)."""
+    b = L.Station(1, RandomPolicy(random.Random(1), 0.0, ("m22",), 5))
+    if n_ctl:
+        ctl = [F.Core(n_ctl=n_ctl, acted_on=7).pack() + bytes(18)]
+    else:
+        ctl = F.Control(F.Core(k=k, acted_on=7), ext).pack(22)
+    slots = [L.Slot(L.ctl_mask(0, i), 0, p) for i, p in enumerate(ctl)]
+    slots += [L.Slot(L.data_mask(0, i), 0, bytes(22)) for i in range(n_data)]
+    assert not b.handle(_clean(L.TxBurst("m22", slots, 0)))
+    assert b.state == L.ACTIVE and b.stats["rx_lost"] == 1 and b.peer_burst is None
+
+
+def test_flipped_comp_bit_fails_the_crc():
+    """A control arriving CRC-valid with a compressed codeword's T_COMP bit
+    cleared: the codeword's CRC identity includes its compression (§2), so
+    decoded as raw it fails and is never delivered as raw bytes. The
+    watchdog's resync re-slices it and the stream arrives exact."""
+    class Fixed(RandomPolicy):
+        want_dup = False
+
+        def choose(self, station, escalation):
+            return "m46", self.max_cw
+
+    a = L.Station(0, Fixed(random.Random(1), 0.0, ("m46",), 2), master=True)
+    b = L.Station(1, Fixed(random.Random(2), 0.0, ("m46",), 1))
+    data = b"CQ CQ de W1AW QTH FN31 RST 599 " * 20 + bytes(range(256))
+    a.write(data)
+    burst = a.build()
+    a.answered()
+    ctl = F.Control.unpack([burst.slots[0].payload])
+    assert ctl.ext[F.T_COMP] == b"\x80"  # its one data codeword is deflated
+    ctl.ext[F.T_COMP] = b"\x00"
+    burst.slots[0] = L.Slot(burst.slots[0].mask_id, 0, F.Control(ctl.core, ctl.ext).pack(46)[0])
+    got, stats = bytearray(), Counter()
+    for _ in range(100):
+        assert b.handle(_clean(burst, stats))
+        got += b.read()
+        assert bytes(got) == data[:len(got)]
+        r = b.build()
+        b.answered()
+        assert a.handle(_clean(r))
+        if not a.tx.pending():
+            break
+        burst = a.build()
+        a.answered()
+    assert bytes(got) == data and stats["mismatch"] > 0
+
+
+# --- late bursts (true reordering): minimized reproducers -------------------------------
+# A burst heard after a later one from the same sender. The half-duplex
+# engine decodes in order, so not expected on air; tests/test_native_fuzz.py
+# found both of these corrupting the stream before the abandon epoch went
+# into the data CRC identity and the two ACK rules of docs/arq.md §4.
+# Taking the Station class lets the native tests run them on C++ too.
+
+class Script:
+    """A policy that plays a list of (submode, max codewords), then repeats the last."""
+
+    def __init__(self, plan):
+        self.plan = list(plan)
+
+    def choose(self, station, escalation):
+        return self.plan.pop(0) if len(self.plan) > 1 else self.plan[0]
+
+    def payload_bytes(self, m):
+        return MODES[m][0]
+
+    def rv_cycle(self, m):
+        return MODES[m][1]
+
+
+def clean(burst, lost=()):
+    rx = FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
+    for i in lost:
+        rx.good[i] = False
+    return rx
+
+
+def finish(a, b, burst, turns=20):
+    """Lossless lockstep from a's `burst` on. -> what b delivered."""
+    got = bytearray()
+    for _ in range(turns):
+        b.handle(clean(burst))
+        got += b.read()
+        if L.FAILED in (a.state, b.state):
+            break
+        r = b.build()
+        b.answered()
+        a.handle(clean(r))
+        if a.state == L.FAILED or not a.tx.pending():
+            break
+        burst = a.build()
+        a.answered()
+    return bytes(got)
+
+
+def _late_stations(cls, plan_a):
+    rng = random.Random(1)
+    data = bytes(rng.randrange(256) for _ in range(400))
+    a = cls(0, Script(plan_a), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    a.write(data)
+    return a, b, data
+
+
+def late_burst_from_before_an_abandon(cls):
+    """a sends P (m22, seqs 0-3); b loses seq 1 (cum 1) and answers. a
+    switches to m46: Q abandons at 1 and re-slices; Q is lost. A late copy
+    of P arrives: b, which never saw the abandon, delivers P's old 1-3 (cum
+    4). Its answer acts on P, from before a's pending abandon, with a
+    cumulative past the abandon point: a can't map that onto its new
+    slicing and fails the link rather than guess (it used to take it as an
+    ACK of the re-sliced 1-3 and corrupt the stream)."""
+    a, b, data = _late_stations(cls, [("m22", 5), ("m46", 5), ("m22", 5)])
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
+    assert a.handle(clean(b.build()))
+    b.answered()
+    a.build()  # Q, lost
+    a.answered()
+    assert b.handle(clean(p)) and b.rx.cum == 4  # P again, late
+    assert a.handle(clean(b.build()))
+    assert a.state == L.FAILED and "pre-abandon" in a.fail_reason
+    got = b.read()
+    assert got == data[:len(got)]
+
+
+def late_burst_with_a_stale_ack(cls):
+    """b's reply R0 (cum 2) is heard again late, after b moved on to cum 4
+    (its reply R1 lost). Answering a repeat, a may not abandon, so its
+    mode switch waits: a control-only burst (lost). R1 then arrives late
+    too and a's next burst abandons at 4 against an exact ACK. The stream
+    arrives whole (it used to abandon at 2 from R0's stale ACK, and a
+    later abandon at 4 joined two slicings)."""
+    a, b, data = _late_stations(cls, [("m22", 3), ("m22", 3), ("m46", 5), ("m22", 5)])
+    assert b.handle(clean(a.build())) and b.rx.cum == 2
+    a.answered()
+    r0 = b.build()
+    b.answered()
+    assert a.handle(clean(r0))
+    p1 = a.build()
+    a.answered()
+    assert b.handle(clean(p1)) and b.rx.cum == 4
+    got = b.read()
+    r1 = b.build()  # lost
+    b.answered()
+    assert a.handle(clean(r0))  # R0 again, late
+    assert not a.build().slots[1:]  # no abandon from a stale ACK: control only, lost
+    a.answered()
+    assert a.handle(clean(r1)) and a.tx.base == 4  # R1, late
+    n = a.build()
+    a.answered()
+    got += finish(a, b, n)
+    assert got == data and a.state == b.state == L.ACTIVE
+
+
+def test_late_burst_from_before_an_abandon():
+    late_burst_from_before_an_abandon(L.Station)
+
+
+def test_late_burst_with_a_stale_ack():
+    late_burst_with_a_stale_ack(L.Station)

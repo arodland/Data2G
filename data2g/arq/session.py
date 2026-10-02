@@ -378,6 +378,10 @@ class Session:
             core = F.Core.unpack(first)
             if core.ftype != F.SESSION:
                 return None
+            if core.n_ctl > rx.n_cw:
+                log.warning("RX malformed session frame (%d control codewords in a burst of %d): dropped",
+                            core.n_ctl, rx.n_cw)
+                return None
             payloads = [first]
             for i in range(1, core.n_ctl):
                 p = rx.decode(i, L.ctl_mask(direction, i, key), 0, None)
@@ -386,7 +390,11 @@ class Session:
                 payloads.append(p)
             try:
                 body = F.Control.unpack(payloads).ext.get(T_SESS, b"")
-            except ValueError:
+            except ValueError as e:
+                log.warning("RX malformed session frame (%s): dropped", e)
+                return None
+            if body and (why := _check_frame(body)):
+                log.warning("RX malformed %s: dropped", why)
                 return None
             return {"key": key, "body": body, "mode": rx.submode} if body else None
         return None
@@ -451,6 +459,24 @@ class Session:
 
 FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
                F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
+# body length as sent: subtype, version, 2 callsigns, nonce, cap, t_turn / subtype, nonce, cap, t_turn / subtype, nonce, reason
+FRAME_BYTES = {F.CONNECT: 22, F.CONNECT_ACK: 5, F.CONNECT_NAK: 4}
+
+
+def _check_frame(body: bytes) -> str | None:
+    """What is wrong with a CRC-valid session frame body, or None. A bad
+    one is dropped as if it had not decoded (the peer retries)."""
+    name = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
+    if len(body) < FRAME_BYTES.get(body[0], 1):
+        return f"{name} of {len(body)} B"
+    if body[0] == F.CONNECT:
+        try:
+            F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
+        except ValueError as e:
+            return f"{name}: {e}"
+    if body[0] == F.CONNECT_ACK and body[3] > 2:
+        return f"{name}: cap code {body[3]}"
+    return None
 
 
 def _frame_desc(body: bytes) -> str:

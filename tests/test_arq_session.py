@@ -7,6 +7,8 @@ import random
 
 import pytest
 
+from data2g.arq import frames as F
+from data2g.arq import link as L
 from data2g.arq import session as S
 
 from test_arq import MODES, FakeRx
@@ -201,3 +203,29 @@ def test_chat_wakes_back_off():
     guard = 1.0 + S.REPLY_START_S + S.WAKE_GUARD_S
     budget = sum(guard + S.WAKE_JITTER_S * 2 ** k + 1.0 for k in range(5))  # + airtime
     assert r["b_done"] - r["b_written"] < budget + 5
+
+
+def _frame(body, direction):
+    """A CRC-valid session frame (key 0) carrying `body`."""
+    ctl = F.Control(F.Core(ftype=F.SESSION), {S.T_SESS: body}).pack(46)
+    burst = L.TxBurst("m46", [L.Slot(L.ctl_mask(direction, i, 0), 0, p) for i, p in enumerate(ctl)], 0)
+    return FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
+
+
+@pytest.mark.parametrize("bad", ["short ack", "ack cap", "callsign"])
+def test_malformed_session_frame_is_dropped(bad):
+    """A CRC-valid but malformed session frame is dropped as if it had not
+    decoded (the peer retries), never raised."""
+    a = S.Session("W1AW", Policy(random.Random(1)), rng=random.Random(2))
+    b = S.Session("K2XYZ", Policy(random.Random(3)), rng=random.Random(4))
+    a.connect("K2XYZ", 2, 0.0)
+    b.listen()
+    nonce = a._nonce.to_bytes(2, "big")
+    if bad == "callsign":
+        body = bytes([F.CONNECT, S.VERSION]) + b"\xff" * 8 + F.pack_call("K2XYZ") + nonce + b"\x02\x0a"
+        b.on_rx(_frame(body, 0), 1.0)
+        assert b.state == S.LISTEN and b.poll(1.0) is None
+    else:
+        body = bytes([F.CONNECT_ACK]) + nonce + (b"" if bad == "short ack" else b"\x07\x0a")
+        a.on_rx(_frame(body, 1), 1.0)
+        assert a.state == S.CONNECTING and a.station is None
