@@ -481,6 +481,8 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         meas = measure(*r);
     }
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas);
+    if (on_burst_)
+        on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt});
     if (!r) {
         if (log_enabled(LOG, INFO))
             log_write(LOG, INFO, format("RX %s x%d: header heard (score %.2f), burst lost", spec_name(ev.header).c_str(),
