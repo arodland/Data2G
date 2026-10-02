@@ -459,3 +459,43 @@ def test_kiss_stations_queued_under_one_burst_do_not_all_collide():
     e.receiver = _Busy(until=0.0)
     e.kiss.enqueue(b"reply")
     assert _first_tx(e, 1) == BLOCK / FS
+
+
+def test_bcast_commands_and_statuses():
+    """BCAST OPEN / MODE / CLOSE and MODES on the command port; broadcast
+    statuses only once the client has used BCAST (VARA clients never see
+    them); a client gone takes its ports with it."""
+    from data2g.host import Host
+    from data2g.kisslink import BROADCAST, KissLink
+
+    h = Host(Engine("W1AW", seed=41, kiss=KissLink()))
+    link = h.engine.kiss
+    link.missed("qpsk-r1/5", 3)
+    h.after_step(False)
+    assert not any(c.startswith("BCAST") for c in h.out_cmd)  # not asked for: not sent
+    h.out_cmd.clear()
+    for line, want in (("BCAST OPEN APRS", "BCAST PORT 1"), ("BCAST OPEN my chat FROM w1aw", "BCAST PORT 2"),
+                       ("BCAST MODE 1 n4-qpsk-r1/3", "OK"), ("BCAST MODE 2 AUTO qpsk-r1/5", "OK"),
+                       ("BCAST MODE 1 no-such-mode", "WRONG"), ("BCAST MODE 9 qpsk-r1/5", "WRONG"),
+                       ("BCAST MODE 1 FAST qpsk-r1/5", "WRONG"), ("BCAST CLOSE 0", "WRONG"),
+                       ("BCAST OPEN bad_name", "WRONG"), ("BCAST", "WRONG")):
+        h.command(line)
+        assert h.out_cmd.pop() == want, line
+    assert (link.ports[1].group, link.ports[1].mode, link.ports[1].auto) == ("APRS", "n4-qpsk-r1/3", False)
+    assert (link.ports[2].group, link.ports[2].from_call, link.ports[2].auto) == ("MY CHAT", "W1AW", True)
+    link.enqueue(b"queued", 1)
+    h.command("BCAST CLOSE 1")
+    link.missed("qpsk-r1/5", 3)
+    h.after_step(False)
+    assert "OK" in h.out_cmd and "BCAST 1 DROPPED 1" in h.out_cmd and "BCAST * MISSED qpsk-r1/5 3" in h.out_cmd
+    h.out_cmd.clear()
+    h.command("MODES")
+    assert h.out_cmd[-1] == "OK" and len(h.out_cmd) > 10
+    name, hz, nb, n_cw, t1, tmax = h.out_cmd[0].split()[1:]
+    assert float(t1) < float(tmax) and int(n_cw) >= 1
+    h.client_gone()
+    assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto) == (BROADCAST[2], False)
+    link.missed("qpsk-r1/5", 3)
+    h.out_cmd.clear()
+    h.after_step(False)
+    assert not any(c.startswith("BCAST") for c in h.out_cmd)

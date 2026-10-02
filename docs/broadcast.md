@@ -1,4 +1,6 @@
-# Data2G broadcast (draft for review)
+# Data2G broadcast
+
+Status: accepted 2026-10-02; implemented in `data2g/kisslink.py` (link) and `data2g/host.py` (commands).
 
 TLDR: KISS grows into named broadcast groups. Each group is a KISS port, opened by a
 command on the command port. A group's bursts carry its name in the control codeword,
@@ -55,14 +57,22 @@ and reads any codeword. A mask only decides whose CRC check passes.
 
   | type | contents | when |
   |---|---|---|
-  | group | packed group, 8 B | every burst except port 0's (absent means "KISS 0", and its key) |
-  | group+from | group and sender, 15 B (120 bits packed together) | in place of group, when the port asks for it |
-  | reports | sender hash (2 B), then per station [hash 2 B][mode code << 2 \| size hint] | a port with rate shifting on (§4) |
+  | group (1) | packed group, 8 B | every burst except port 0's (absent means "KISS 0", and its key) |
+  | group+from (2) | group and sender, 15 B (120 bits packed together) | in place of group, when the port asks for it |
+  | reports (3) | sender hash (2 B), then per station [hash 2 B][mode code << 2 \| size hint] | a port with rate shifting on (§4) |
 
   - group+from on CPM: 1 + 2 + 15 = 18 B, which fits 20 B. Separate group and from TLVs
     would be 1 + 10 + 10 = 21 B, which doesn't fit.
 - **Data:** `[length, 2][frame]` back to back, zero length ends it, as today. One burst
   carries one group's frames.
+- **What fits:** `BCAST MODE` refuses a mode whose control codewords (at most 4) can't
+  hold the port's control: the header, its group TLV, and on a shifting port a
+  reports TLV with at least its sender.
+  - group+from on a shifting port (1 + 17 + 4 = 22 B) doesn't fit CPM's 20 B.
+  - group+from (18 B) doesn't fit the 4 B codewords of the ACK modes, even 4 of them.
+  - A plain group fits every mode, shifting or not.
+- **Control lost** (§2): the receiver looks for data from slot 1, so it finds a burst
+  whose control was one codeword.
 
 ## 4. Modes and channel access
 
@@ -95,7 +105,12 @@ One integrated server: the command, data and KISS ports always run (the `--vara`
 | `BCAST MODE n AUTO mode` | OK / WRONG | rate shifting on for that port, `mode` the fallback (§4) |
 | `MODES` | one `MODE ...` line per mode, then OK | name, bandwidth Hz, bytes per codeword, max codewords, airtime at 1 and at max codewords |
 
-Statuses, to ports opened on this connection only:
+Statuses go to the command client once it has sent a BCAST command, port 0's and
+MISSED included, so a VARA client that never does (Pat) never sees one. When the
+client goes, its ports close and port 0 is back to its defaults (fixed mode, the
+cap's robust broadcast mode). A group may be several words in `BCAST OPEN`; opened
+twice, both ports get its frames. `MODE` lines read `MODE name bandwidth-Hz
+bytes-per-codeword max-codewords seconds-at-1 seconds-at-max`.
 
 - `BCAST n HEARD [call]`: a burst's control checked for port n (call from group+from).
   Its frames follow on the KISS port. It's known only at the burst's end: the receiver
@@ -106,7 +121,8 @@ Statuses, to ports opened on this connection only:
   port's (HEARD / LOST as usual; an ambiguous key as in §2 Collisions). Control and
   all data lost can't be tied to a port: the frozen 16-bit PHY header has no room for
   a group. Every open port gets a `BCAST * MISSED submode n_cw` hint; it may be
-  another group's burst.
+  another group's burst. Only outside an ARQ session: during one, a lost burst is
+  most likely the peer's.
 
 Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
 and QtSoundModem):
@@ -114,8 +130,8 @@ and QtSoundModem):
 - **Ask per frame:** the app sends `0x0C` (with the port in the high nibble), a 2-byte
   tag of its choosing, then the frame. Plain data frames (`0x00`) get no ack, so apps
   that don't ask see no change. Works on every port, port 0 included.
-- **The ack:** `0x0C`, the same port, and just the tag, sent on the KISS port when the
-  burst carrying that frame finishes transmitting. Frames sharing a burst are acked
+- **The ack:** `0x0C`, the same port, and just the tag, sent on the KISS port to the
+  client that sent the frame, when the burst carrying that frame finishes transmitting. Frames sharing a burst are acked
   together, in queue order.
 - **Sent, not heard:** an ack means the frame was on the air. One-to-many traffic has
   no receipt; a reply is the app's business.

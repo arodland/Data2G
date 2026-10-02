@@ -40,11 +40,12 @@ log = logging.getLogger("data2g.tnc")
 # --- KISS -------------------------------------------------------------------
 
 FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
+DATA, ACKMODE = 0x00, 0x0C  # KISS commands (low nibble; the port is the high one)
 
 
-def kiss_encode(data: bytes, port: int = 0) -> bytes:
-    """A KISS data frame (command 0) for `data`."""
-    body = bytes([port << 4]) + data
+def kiss_encode(data: bytes, port: int = 0, cmd: int = DATA) -> bytes:
+    """A KISS frame: a data frame (command 0) for `data` on `port` by default."""
+    body = bytes([port << 4 | cmd]) + data
     body = body.replace(bytes([FESC]), bytes([FESC, TFESC])).replace(bytes([FEND]), bytes([FESC, TFEND]))
     return bytes([FEND]) + body + bytes([FEND])
 
@@ -600,18 +601,31 @@ class KissServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, addr, on_packet, on_command=None):
-        """`on_command(cmd, payload)`: KISS commands other than data."""
+        """`on_packet(port, frame, ack)`: a data frame, or an ACKMODE one
+        (`ack` (client, tag) for send_ack, else None). `on_command(cmd,
+        payload)`: KISS commands other than those."""
         self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
         super().__init__(addr, _KissHandler)
 
-    def broadcast(self, data: bytes):
-        frame = kiss_encode(data)
+    def broadcast(self, data: bytes, port: int = 0):
+        """A frame heard on `port`, to every client."""
+        frame = kiss_encode(data, port)
         with self.lock:
             for c in list(self.clients):
                 try:
                     c.sendall(frame)
                 except OSError:
                     self.clients.discard(c)
+
+    def send_ack(self, ack, port: int):
+        """An ACKMODE frame went out: its tag back to the client that sent it."""
+        client, tag = ack
+        with self.lock:
+            if client in self.clients:
+                try:
+                    client.sendall(kiss_encode(tag, port, ACKMODE))
+                except OSError:
+                    self.clients.discard(client)
 
     def close_clients(self):
         with self.lock:
@@ -632,8 +646,10 @@ class _KissHandler(socketserver.BaseRequestHandler):
         try:
             while data := self.request.recv(4096):
                 for cmd, payload in dec.feed(data):
-                    if cmd & 0x0F == 0:
-                        srv.on_packet(payload)
+                    if cmd & 0x0F == DATA:
+                        srv.on_packet(cmd >> 4, payload, None)
+                    elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
+                        srv.on_packet(cmd >> 4, payload[2:], (self.request, payload[:2]))
                     elif srv.on_command is not None:
                         srv.on_command(cmd & 0x0F, payload)
         except OSError:
