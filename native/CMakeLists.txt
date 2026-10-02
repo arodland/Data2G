@@ -1,4 +1,4 @@
-# Native Data2G: C++20 core, Qt front end to follow.
+# Native Data2G: C++20 core, a headless host and a Qt Widgets GUI.
 #
 # See docs/native-port-plan.md. The Python package stays the normative
 # definition of the on-air format; everything here is checked against it.
@@ -12,6 +12,8 @@
 #                          data2g-audio-check
 #   DATA2G_BUILD_HOST      AUTO/ON/OFF: data2g-host (Qt Core + Network; sound
 #                          cards when Qt Multimedia is there, PTT with RIG)
+#   DATA2G_BUILD_GUI       AUTO/ON/OFF: data2g-gui (Qt Widgets, Network,
+#                          Multimedia); ON fails naming what is missing
 #   DATA2G_BUILD_RIG       data2g_rig (libhamlib, pinned: cmake/hamlib.cmake;
 #                          DATA2G_HAMLIB_SYSTEM=ON takes pkg-config's). OFF
 #                          still builds the rig controller and PTT keyer.
@@ -35,6 +37,8 @@ set_property(CACHE DATA2G_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 option(DATA2G_BUILD_RIG "Build libhamlib rig control" ON)
 set(DATA2G_BUILD_HOST "AUTO" CACHE STRING "Build the data2g-host app (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_HOST PROPERTY STRINGS ON OFF AUTO)
+set(DATA2G_BUILD_GUI "AUTO" CACHE STRING "Build the data2g-gui app (ON/OFF/AUTO)")
+set_property(CACHE DATA2G_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 
 # Parity is checked to tight tolerances; fast-math would let the optimizer
 # reassociate exactly the sums being compared.
@@ -89,27 +93,73 @@ if(DATA2G_BUILD_RIG)
 endif()
 
 # --- apps ----------------------------------------------------------------------
-if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
+# data2g_station: the runtime both apps share (app/station.*: options,
+# servers, engine thread, audio, PTT). Qt Core + Network, never Widgets.
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_executable(data2g-host apps/data2g_host.cpp)
-    target_link_libraries(data2g-host PRIVATE data2g_core Qt6::Core Qt6::Network)
-    target_compile_definitions(data2g-host PRIVATE QT_NO_KEYWORDS)  # the core has members named slots
+    add_library(data2g_station STATIC app/station.cpp)
+    target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(data2g_station PUBLIC data2g_core Qt6::Core Qt6::Network)
+    target_compile_definitions(data2g_station PUBLIC QT_NO_KEYWORDS)  # the core has members named slots
     if(TARGET data2g_audio_qt)
-      target_link_libraries(data2g-host PRIVATE data2g_audio_qt)
-      target_compile_definitions(data2g-host PRIVATE DATA2G_HAVE_QTAUDIO)
+      target_link_libraries(data2g_station PUBLIC data2g_audio_qt)
+      target_compile_definitions(data2g_station PUBLIC DATA2G_HAVE_QTAUDIO)
     endif()
     if(TARGET data2g_rig)
-      target_link_libraries(data2g-host PRIVATE data2g_rig)
-      target_compile_definitions(data2g-host PRIVATE DATA2G_HAVE_RIG)
-      if(DATA2G_HAMLIB_RUNTIME_DIR)
-        set_property(TARGET data2g-host APPEND PROPERTY BUILD_RPATH "${DATA2G_HAMLIB_RUNTIME_DIR}")
-      endif()
+      target_link_libraries(data2g_station PUBLIC data2g_rig)
+      target_compile_definitions(data2g_station PUBLIC DATA2G_HAVE_RIG)
     endif()
+  endif()
+endif()
+
+function(data2g_rig_rpath target)
+  if(TARGET data2g_rig AND DATA2G_HAMLIB_RUNTIME_DIR)
+    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH "${DATA2G_HAMLIB_RUNTIME_DIR}")
+  endif()
+endfunction()
+
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
+  if(TARGET data2g_station)
+    add_executable(data2g-host apps/data2g_host.cpp)
+    target_link_libraries(data2g-host PRIVATE data2g_station)
+    data2g_rig_rpath(data2g-host)
   elseif(DATA2G_BUILD_HOST STREQUAL "ON")
     message(FATAL_ERROR "DATA2G_BUILD_HOST=ON but Qt6 Network was not found")
   else()
     message(STATUS "Qt6 Network not found; building without data2g-host")
+  endif()
+endif()
+
+# data2g-gui: a status window and a settings dialog over the same station.
+# Qt Widgets only here (tools/check_layering.py); sound cards required.
+if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
+  set(_gui_missing "")
+  find_package(Qt6 6.2 COMPONENTS Gui Widgets QUIET)
+  if(NOT Qt6Widgets_FOUND)
+    list(APPEND _gui_missing "Qt6 Widgets")
+  endif()
+  if(NOT TARGET data2g_station)
+    list(APPEND _gui_missing "Qt6 Network")
+  endif()
+  if(NOT TARGET data2g_audio_qt)
+    list(APPEND _gui_missing "Qt6 Multimedia (DATA2G_BUILD_QTAUDIO)")
+  endif()
+  string(REPLACE ";" ", " _gui_missing_text "${_gui_missing}")
+  if(NOT _gui_missing)
+    add_library(data2g_gui STATIC gui/main_window.cpp gui/settings_dialog.cpp gui/waterfall.cpp)
+    set_target_properties(data2g_gui PROPERTIES AUTOMOC ON)
+    target_include_directories(data2g_gui PUBLIC gui)
+    target_link_libraries(data2g_gui PUBLIC data2g_station Qt6::Gui Qt6::Widgets)
+    add_executable(data2g-gui gui/main.cpp)
+    target_link_libraries(data2g-gui PRIVATE data2g_gui)
+    data2g_rig_rpath(data2g-gui)
+    message(STATUS "data2g-gui: Qt ${Qt6_VERSION}")
+  elseif(DATA2G_BUILD_GUI STREQUAL "ON")
+    message(FATAL_ERROR "DATA2G_BUILD_GUI=ON but data2g-gui needs: ${_gui_missing_text}. "
+                        "Install what is missing, or pass -DDATA2G_BUILD_GUI=OFF.")
+  else()
+    message(STATUS "Not building data2g-gui; missing: ${_gui_missing_text}")
   endif()
 endif()
 

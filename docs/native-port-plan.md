@@ -277,6 +277,29 @@ Status 2026-10-02: headless host landed (`data2g-host`, not yet on air).
 Status window and settings dialog over the same core. Exit: you use it for a
 session.
 
+Status 2026-10-02: `data2g-gui` landed (not yet used for a session).
+- `app/station.*` (`data2g_station`, Qt Core + Network): the options, the
+  servers, the engine thread, audio and PTT, moved out of
+  `apps/data2g_host.cpp`. Both apps run it; data2g-host's CLI and output
+  are unchanged. It also keeps what a front end polls: link snapshot
+  (after every block), burst log (`Engine::set_on_burst`), PTT, BUSY,
+  audio counters, a 4096-sample tap of the 8 kHz input.
+- Found on the way: a `Port`/`KissServer` destroyed with a client still
+  connected ran its disconnect handler on destroyed members (heap
+  corruption on a GUI restart; at exit in data2g-host). Fixed.
+- `gui/` (`DATA2G_BUILD_GUI` AUTO/ON/OFF; needs Widgets, Network,
+  Multimedia): waterfall and level meter lifted from SSTVAE (0-4 kHz,
+  a row per new engine block), link state, mode and width, BUSY/PTT,
+  throughput over `--stats-interval`, burst log, audio counters. The
+  settings dialog persists to QSettings; data2g-host's flags override
+  it per run; OK with changes restarts the station (each run records to
+  its own directory).
+- `test_gui` (ctest, offscreen, pipe audio): a CQ burst from a second
+  Engine lands in the burst log, mode and BUSY follow, LISTEN ON shows
+  listening, a restart re-listens; settings round-trip through QSettings
+  and the dialog. Writes `native/build/data2g_gui_shot.png`.
+- `check_layering.py`: Qt Widgets only under `gui/`.
+
 ### Phase 5: packaging and CI
 
 Lift SSTVAE's ci.yml / native-build.yml matrix (Linux x86_64 and aarch64,

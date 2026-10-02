@@ -98,6 +98,15 @@ struct EngineHooks {
         session;
 };
 
+// A burst heard (Engine::set_on_burst): what a front end's burst log shows.
+struct BurstHeard {
+    double t = 0.0;  // engine time, s
+    std::string submode;
+    int n_cw = 0;
+    bool lost = false;  // header heard, burst not (the recorder's "lost")
+    std::optional<double> snr_db;  // phy.measure's snr_est; nullopt when lost
+};
+
 class Engine {
 public:
     struct Out {
@@ -128,6 +137,8 @@ public:
     // through post() / after_block only
     void post(std::function<void()> f);  // runs before the next block's session stage
     void set_after_block(std::function<void(bool ptt)> f) { after_block_ = std::move(f); }
+    // Every burst heard, on the session stage. Set it before the first step().
+    void set_on_burst(std::function<void(const BurstHeard&)> f) { on_burst_ = std::move(f); }
 
     const std::string& call() const { return call_; }
     const std::vector<std::string>& aliases() const { return aliases_; }
@@ -209,6 +220,7 @@ private:
     bool kiss_deferred_ = false;  // ... and it has waited on BUSY
     std::int64_t kiss_slot_ = 0;  // next p-persistence slot, samples
     std::function<void(bool)> after_block_;
+    std::function<void(const BurstHeard&)> on_burst_;
 
     // between the stages
     std::atomic<bool> transmitting_{false}, busy_now_{false}, channel_busy_now_{false};
