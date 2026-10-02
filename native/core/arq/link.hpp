@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "arq/frames.hpp"
+#include "arq/predictor.hpp"
 
 namespace data2g::arq {
 
@@ -120,6 +121,8 @@ public:
     // session
     virtual double airtime(const std::string&, int /*n_cw*/, bool /*dup*/) { return 0.0; }
     virtual std::string connect_mode(int /*cap*/, int /*tries*/) { return {}; }
+    // engine: the receiver's measurements of a peer burst
+    virtual void observe(const Measured&, const std::string& /*submode*/, double /*now*/) {}
 };
 
 struct Codeword {

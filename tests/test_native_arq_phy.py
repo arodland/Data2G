@@ -192,9 +192,6 @@ def test_ax25(native, pure):
         assert (None if t is None else KL.Ax25(*t)) == want
         if want is not None:
             assert native.kisslink.station_hash(want.sender) == KL.station_hash(want.sender)
-    ok = [True, False, True]
-    pl = [b"\x00\x03abc\x00", b"\x02xy\x00\x01", b"z\x00\x00"]
-    assert native.kisslink.unpack(pl, ok) == tuple(__import__("data2g.tnc", fromlist=["unpack"]).unpack(pl, ok))
 
 
 def test_kiss_links_match(native, pure):

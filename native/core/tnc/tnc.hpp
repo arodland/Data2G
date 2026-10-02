@@ -93,10 +93,11 @@ struct BurstEvent {
 using Event = std::variant<HeaderEvent, BurstEvent>;
 
 // A complete burst's audio and how to receive it: what the receiver hands
-// to a decode step (today called in line; a worker thread later). Nothing
-// the receiver does after a burst reads its rx (supersede and trim read
-// only the audio), so decode() can run elsewhere and its BurstEvent be
-// posted later, ordered by header.start().
+// to a decode step (in line from feed(); feed_deferred() hands it back for
+// arq::Engine to decode on its worker). Nothing the receiver does after a
+// burst reads its rx (supersede and trim read only the audio), so decode()
+// can run elsewhere and its BurstEvent be posted later, ordered by
+// header.start().
 struct DecodeRequest {
     Pending header;              // stream indices
     std::vector<double> seg;     // the audio
@@ -119,6 +120,9 @@ public:
     explicit Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids = {}, bool blank = true);
 
     std::vector<Event> feed(std::span<const double> x);
+    // feed() with each burst to decode left as its DecodeRequest, in order.
+    using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest>;
+    std::vector<Item> feed_deferred(std::span<const double> x);
     void reset();
 
     bool busy() const { return pending_.has_value(); }
@@ -142,7 +146,7 @@ private:
     void trim(std::int64_t n);
     Stats stats(std::int64_t w0 = 0);
     void searched();
-    bool supersede(std::vector<Event>& out, bool whole = false);
+    bool supersede(std::vector<Item>& out, bool whole = false);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm() const;
     std::int64_t decided(std::string_view key) const;

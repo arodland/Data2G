@@ -192,6 +192,20 @@ modes, engine, recorder.
   duplication) runs on the mixed pair.
 - Needs you for: nothing.
 
+Status 2026-10-02: engine and recorder landed (`core/arq/engine.*`).
+- `--native` substitutes the C++ Engine (sync mode) for engine.Engine;
+  `test_native_engine.py` runs a C++ engine against a Python one both
+  ways (VARA session, KISS) and reads both recordings alike.
+- Decode worker (`EngineConfig::worker`): the receiver stage (search,
+  BUSY) stays in step(); burst receive, DD and the session run on one
+  worker, blocks in order, so session times equal sync mode's and only
+  the output's lag behind input varies (as Python's backlog does). Not
+  deterministic, so sync stays the default and the parity mode. With a
+  1 s decode in flight, the next header's BUSY was 0.23 s late in sync
+  mode and 0.02 s with the worker (`test_engine`, real time).
+- Not done yet: the loss study and the state-agreement fuzz on the mixed
+  pair.
+
 ### Phase 3: headless host
 
 Audio, VARA command and data ports, KISS server and kisslink, PTT,

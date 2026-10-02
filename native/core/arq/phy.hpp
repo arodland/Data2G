@@ -23,6 +23,7 @@
 #include "arq/modes.hpp"
 #include "arq/predictor.hpp"
 #include "codes/codes.hpp"
+#include "cpm/cpm.hpp"
 #include "modem/modem.hpp"
 
 namespace data2g::arq {
@@ -42,18 +43,10 @@ std::uint32_t mask_value(const MaskId& m);
 // A TxBurst -> unit-RMS audio. Throws std::out_of_range for an unknown mode.
 std::vector<double> tx_audio(const TxBurst& burst);
 
-// cpm.receive's result (the parts phy reads).
-struct CpmReceived {
-    const tables::CpmSpec* spec = nullptr;  // the data mode
-    bool dup = false;                       // control twice: slots 0 and 1
-    std::vector<std::vector<double>> soft;  // per slot, mapping order
-    Mat<double> E;                          // the stream's tone energies
-};
-
 // A received burst: modem::receive's (OFDM) or cpm.receive's.
 struct Heard {
     std::shared_ptr<const modem::Received> ofdm;
-    std::shared_ptr<const CpmReceived> cpm;
+    std::shared_ptr<const cpm::Received> cpm;  // reads spec, dup, soft, E
     const Mode& mode() const;
     int n_cw() const;
 };

@@ -39,7 +39,7 @@ double get(const GearShifter::Map& m, std::string_view k) {
     return it == m.end() ? 0.0 : it->second;
 }
 
-int ceil_div(long a, long b) { return static_cast<int>((a + b - 1) / b); }  // a >= 0, b > 0
+int cdiv(long a, long b) { return static_cast<int>((a + b - 1) / b); }  // a >= 0, b > 0
 
 }  // namespace
 
@@ -103,7 +103,7 @@ const Mode* decode(int rec) {
     return nullptr;
 }
 
-int ctl_slots(const Mode& m) { return std::min(max_ctl(m), ceil_div(CTL_BYTES, ctl_payload_bytes(m))); }
+int ctl_slots(const Mode& m) { return std::min(max_ctl(m), cdiv(CTL_BYTES, ctl_payload_bytes(m))); }
 
 int slots_for(const Mode& m, double seconds, bool data, bool dup) {
     if (m.is_cpm()) seconds *= CPM_SIZE_SCALE;
@@ -196,7 +196,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             int n = slots_for(*s, SIZE_S[hint]);
             int k = 0;
             if (chat) {
-                k = ceil_div(queued, pb);
+                k = cdiv(queued, pb);
                 if (n < k + c && hint < static_cast<int>(SIZE_S.size()) - 1) continue;
                 n = std::min(n, k + c);
             }
@@ -209,7 +209,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             double v;
             if (chat) {
                 const double ok_all = std::max(ok_ctl * std::pow(pn, static_cast<double>(n - c)), 1e-3);
-                v = -t * ceil_div(k, std::max(n - c, 1)) / ok_all + 1e-6 * (n - c) * pb;
+                v = -t * cdiv(k, std::max(n - c, 1)) / ok_all + 1e-6 * (n - c) * pb;
             } else {
                 v = (ok_ctl * pn * (n - c) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
@@ -231,5 +231,41 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     log.push_back({std::string(best_name), best_hint, std::string(reply_name)});
     return {encode(best_name), best_hint, encode(reply_name)};
 }
+
+StationView view(const Station& st) {
+    StationView v;
+    v.cap = st.cap;
+    v.pending = st.tx.pending();
+    v.peer_recommend = st.peer_recommend;
+    v.peer_reply_recommend = st.peer_reply_recommend;
+    v.peer_size_hint = st.peer_size_hint;
+    v.peer_wants_dup = st.peer_wants_dup;
+    v.chat = st.chat || st.peer_chat;
+    v.peer_queued = st.peer_queued;
+    v.held = static_cast<long>(st.rx.buf.size());
+    return v;
+}
+
+std::pair<std::string, int> GearPolicy::choose(Station& st, int escalation) {
+    const auto [m, n] = shifter.choose(view(st), escalation);
+    return {std::string(m), n};
+}
+int GearPolicy::payload_bytes(const std::string& m) { return arq::payload_bytes(mode_at(m)); }
+int GearPolicy::ctl_payload_bytes(const std::string& m) { return arq::ctl_payload_bytes(mode_at(m)); }
+int GearPolicy::max_ctl(const std::string& m) { return arq::max_ctl(mode_at(m)); }
+int GearPolicy::rv_cycle(const std::string& m) { return arq::rv_cycle(mode_at(m)); }
+std::optional<Recommendation> GearPolicy::recommend(Station& st) {
+    const auto r = shifter.recommend(view(st));
+    return Recommendation{r.data, r.hint, r.reply};
+}
+std::string GearPolicy::mode_name(int rec) {
+    const Mode* m = decode(rec);
+    return m ? std::string(m->name) : "?" + std::to_string(rec);
+}
+std::optional<double> GearPolicy::snr_est() {
+    return shifter.measured ? std::optional(shifter.measured->snr_est) : std::nullopt;
+}
+double GearPolicy::airtime(const std::string& m, int n_cw, bool dup) { return burst_seconds(mode_at(m), n_cw, dup); }
+std::string GearPolicy::connect_mode(int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); }
 
 }  // namespace data2g::arq

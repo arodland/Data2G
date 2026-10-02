@@ -216,7 +216,8 @@ float numpy_sum(const float* a, int d, int n, bool pairwise) {
 // phi_all is most of a decode: on x86-64 Linux also build it for AVX2 (4
 // doubles a vector, not SSE2's 2), picked at load time. "avx2" leaves FMA
 // off, so both clones round identically.
-#if defined(__x86_64__) && defined(__linux__) && defined(__GNUC__)
+// Not under TSan: the ifunc resolver runs before its runtime is up (a crash at load).
+#if defined(__x86_64__) && defined(__linux__) && defined(__GNUC__) && !defined(__SANITIZE_THREAD__)
 #define DATA2G_AVX2_CLONE __attribute__((target_clones("avx2", "default")))
 #else
 #define DATA2G_AVX2_CLONE

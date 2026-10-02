@@ -33,7 +33,7 @@ bool is_cpm(const py::dict& r) { return r.contains("family") && r["family"].cast
 Heard heard_of(const py::dict& r) {
     Heard h;
     if (is_cpm(r)) {
-        auto c = std::make_shared<CpmReceived>();
+        auto c = std::make_shared<cpm::Received>();
         const auto& m = mode_at(name_of(r["spec"]));
         if (!m.is_cpm()) throw py::value_error("not a CPM mode");
         c->spec = m.cpm;
@@ -202,14 +202,6 @@ void bind_arq_phy(py::module_& m) {
         return py::make_tuple(a->dst, a->src, a->next_hop, a->sender, a->connected);
     });
     k.def("station_hash", [](const std::string& c) { return kisslink::station_hash(c); });
-    k.def("unpack", [](const std::vector<py::bytes>& payloads, const std::vector<bool>& ok) {
-        std::vector<Bytes> pl;
-        for (const auto& b : payloads) pl.push_back(bytes_of(b));
-        auto [frames, lost] = kisslink::unpack(pl, ok);
-        py::list out;
-        for (const auto& f : frames) out.append(pyb(f));
-        return py::make_tuple(out, lost);
-    });
     py::class_<KissLink>(k, "KissLink")
         .def(py::init([](int cap, const py::object& clock, int n_sent, const py::object& broadcast, int persist,
                          double slot_s, double busy_limit_s) {
