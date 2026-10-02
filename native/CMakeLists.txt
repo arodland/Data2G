@@ -10,6 +10,8 @@
 #   DATA2G_SANITIZE        ASan + UBSan
 #   DATA2G_BUILD_QTAUDIO   AUTO/ON/OFF: data2g_audio_qt (Qt Multimedia) and
 #                          data2g-audio-check
+#   DATA2G_BUILD_HOST      AUTO/ON/OFF: data2g-host (Qt Core + Network; sound
+#                          cards when Qt Multimedia is there, PTT with RIG)
 #   DATA2G_BUILD_RIG       data2g_rig (libhamlib, pinned: cmake/hamlib.cmake;
 #                          DATA2G_HAMLIB_SYSTEM=ON takes pkg-config's). OFF
 #                          still builds the rig controller and PTT keyer.
@@ -31,6 +33,8 @@ option(DATA2G_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 set(DATA2G_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 option(DATA2G_BUILD_RIG "Build libhamlib rig control" ON)
+set(DATA2G_BUILD_HOST "AUTO" CACHE STRING "Build the data2g-host app (ON/OFF/AUTO)")
+set_property(CACHE DATA2G_BUILD_HOST PROPERTY STRINGS ON OFF AUTO)
 
 # Parity is checked to tight tolerances; fast-math would let the optimizer
 # reassociate exactly the sums being compared.
@@ -82,6 +86,31 @@ if(DATA2G_BUILD_RIG)
   add_library(data2g_rig STATIC core/rig/hamlib/hamlib.cpp)
   set_target_properties(data2g_rig PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_link_libraries(data2g_rig PUBLIC data2g_core PRIVATE data2g::hamlib)
+endif()
+
+# --- apps ----------------------------------------------------------------------
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
+  find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
+  if(Qt6Network_FOUND)
+    add_executable(data2g-host apps/data2g_host.cpp)
+    target_link_libraries(data2g-host PRIVATE data2g_core Qt6::Core Qt6::Network)
+    target_compile_definitions(data2g-host PRIVATE QT_NO_KEYWORDS)  # the core has members named slots
+    if(TARGET data2g_audio_qt)
+      target_link_libraries(data2g-host PRIVATE data2g_audio_qt)
+      target_compile_definitions(data2g-host PRIVATE DATA2G_HAVE_QTAUDIO)
+    endif()
+    if(TARGET data2g_rig)
+      target_link_libraries(data2g-host PRIVATE data2g_rig)
+      target_compile_definitions(data2g-host PRIVATE DATA2G_HAVE_RIG)
+      if(DATA2G_HAMLIB_RUNTIME_DIR)
+        set_property(TARGET data2g-host APPEND PROPERTY BUILD_RPATH "${DATA2G_HAMLIB_RUNTIME_DIR}")
+      endif()
+    endif()
+  elseif(DATA2G_BUILD_HOST STREQUAL "ON")
+    message(FATAL_ERROR "DATA2G_BUILD_HOST=ON but Qt6 Network was not found")
+  else()
+    message(STATUS "Qt6 Network not found; building without data2g-host")
+  endif()
 endif()
 
 enable_testing()

@@ -256,6 +256,22 @@ Status 2026-10-02: device layer landed (no host yet).
   `cmake/hamlib.cmake`); `test_rig_hamlib` keys a spawned `rigctld -m 1`
   through model 2.
 
+Status 2026-10-02: headless host landed (`data2g-host`, not yet on air).
+- `core/host/`: host.py's Host (commands, notifications, BUFFER credit).
+  `test_native_host.py` runs a scripted pair with the Python and the C++
+  Host over the same engines: every line and byte identical. `--native`
+  substitutes it (test_host, test_engine).
+- `apps/data2g_host.cpp`: host.py main's flags, plus `--decode-worker`
+  (default on) and `--audio-io pipe:IN,OUT`. Threads: main (Qt loop, TCP
+  ports), engine (capture -> step -> Keyer), decode worker (session stage
+  and the Host, reached by `post()`), audio, rig.
+- `core/audio/pipe.*`: raw float32 8 kHz files or named pipes at real
+  time. `test_native_host_e2e.py`: two hosts over two mkfifo pipes, VARA
+  session (2 kB each way) and KISS both ways, worker on and off, no
+  overflow/underrun/backlog lines.
+- No `--threads`: the engine has no pool yet.
+- Not yet checked: sound cards through the host, Hamlib PTT, Pat.
+
 ### Phase 4: GUI
 
 Status window and settings dialog over the same core. Exit: you use it for a

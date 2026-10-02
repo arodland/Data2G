@@ -3,10 +3,13 @@
 // tests/test_native_audio.py; this checks behaviour (host.py's Capture and
 // Player semantics) and thread safety (run it under TSan).
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <numbers>
 #include <random>
 #include <stdexcept>
@@ -16,6 +19,7 @@
 
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
+#include "audio/pipe.hpp"
 #include "audio/filters.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
@@ -323,6 +327,56 @@ void test_keyer() {
 
 }  // namespace
 
+void test_pipe_io() {
+    check::current_step = "pipe io";
+    // Regular files: the input read at real time into the capture FIFO, the
+    // output written at real time, silence around what was played.
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("data2g_test_pipe_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    const auto in = (dir / "in.f32").string(), out = (dir / "out.f32").string();
+    const auto x = noise(4000, 7);
+    {
+        std::ofstream f(in, std::ios::binary);
+        for (double v : x) {
+            const float s = static_cast<float>(v);
+            f.write(reinterpret_cast<const char*>(&s), sizeof s);
+        }
+    }
+    audio::CaptureFifo cap(config::FS);
+    audio::PlaybackFifo play(config::FS, 0.1);
+    std::vector<double> ramp(800);
+    for (std::size_t i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<float>((i + 1) / 1000.0);
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<double> got;
+    {
+        audio::PipeIo io(in, out, cap, play);
+        play.start();
+        play.write(ramp);
+        const auto first = cap.read(4000);
+        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        check::is_true(took > 0.4, "input paced at real time (" + std::to_string(took) + " s for 0.5 s)");
+        if (first) got = *first;
+        play.drain();
+        const auto silence = cap.read(800);  // after the file: silence at real time
+        check::is_true(silence && std::all_of(silence->begin(), silence->end(), [](double v) { return v == 0.0; }),
+                       "silence after the end");
+    }
+    std::vector<double> want(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) want[i] = static_cast<float>(x[i]);
+    check::close(got, want, 0, "input: every sample");
+    std::ifstream f(out, std::ios::binary);
+    std::vector<float> o;
+    for (float s; f.read(reinterpret_cast<char*>(&s), sizeof s);) o.push_back(s);
+    check::equal(o.size() % audio::PipeIo::PERIOD, std::size_t{0}, "output: whole periods");
+    const auto start = std::find_if(o.begin(), o.end(), [](float v) { return v != 0.0f; });
+    check::is_true(start - o.begin() >= 800, "the lead's silence first");
+    check::is_true(o.end() - start >= 800 && std::equal(ramp.begin(), ramp.end(), start, [](double a, float b) { return float(a) == b; }),
+                   "output: the samples played, whole");
+    check::is_true(std::all_of(start + 800, o.end(), [](float v) { return v == 0.0f; }), "then silence");
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog watchdog(100, "test_audio");
@@ -333,5 +387,6 @@ int main() {
     test_close_unblocks_a_reader();
     test_playback();
     test_keyer();
+    test_pipe_io();
     return check::report("audio");
 }

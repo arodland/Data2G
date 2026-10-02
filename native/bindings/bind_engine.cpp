@@ -64,6 +64,8 @@ auto unlocked(PyEngine& e, F f) {
 
 }  // namespace
 
+arq::Engine& engine_of(const py::handle& h) { return h.cast<PyEngine&>(); }
+
 void bind_engine(py::module_& m) {
     auto e = m.def_submodule("engine", "data2g.arq.engine");
     e.attr("MAX_BURST_S") = MAX_BURST_S;

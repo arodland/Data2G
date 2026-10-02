@@ -2,6 +2,7 @@
 // ids, link.TxBurst, predictor measurement dicts.
 #pragma once
 
+#include "arq/engine.hpp"
 #include "arq/link.hpp"
 #include "arq/predictor.hpp"
 #include "arq/session.hpp"
@@ -12,6 +13,8 @@ namespace data2g::bind {
 // bind_arq_link's adapters: a Python policy object, a random.Random, and a
 // Session whose stations see a test's build override.
 std::shared_ptr<arq::Policy> py_policy(py::object o);
+// bind_engine's Engine object as the C++ engine (bind_host).
+arq::Engine& engine_of(const py::handle& h);
 std::shared_ptr<arq::Rng> py_rng(py::object o);
 std::shared_ptr<arq::Session> py_session(const std::string& call, std::shared_ptr<arq::Policy> policy,
                                          std::shared_ptr<arq::Rng> rng, const std::vector<std::string>& aliases,
