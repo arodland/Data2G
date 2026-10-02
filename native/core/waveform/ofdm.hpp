@@ -31,6 +31,7 @@ struct Band {
     std::vector<std::int64_t> bb;     // the same at baseband
     Mat<cdouble> mod;                 // (NSYM, nc), phase reference at n = NCP
     Mat<cdouble> demod;               // (nc, M), one useful window
+    Mat<double> demod_re, demod_im;   // demod transposed, (M, nc), split (demod_window's layout)
     std::vector<cdouble> pilot;       // (nc,), unit magnitude
     std::vector<cdouble> preamble_template;  // complex baseband preamble replica
 
