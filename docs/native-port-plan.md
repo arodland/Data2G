@@ -355,12 +355,12 @@ Reference behaviour, unchanged in Python, ported as is:
 - Fixed 2026-10: a flipped T_COMP bit in a CRC-valid control delivered a
   deflated codeword raw (4% of corrupted-control link runs with text). The
   compression flag is now in the data codeword's CRC identity (§2).
-- A reordered burst (heard after a later one from the same sender) can
-  corrupt the stream: the abandon epoch and slicing aren't in the CRC
-  mask, and a fresh build answering a stale burst takes its stale ACK as
-  current. In order delivery (the engine) never shows it; docs/arq.md §10
-  says reordering is tested, but nothing reordered before the fuzz.
-  Reproducers: `test_late_burst_*` (xfail).
+- Fixed 2026-10: a reordered burst (heard after a later one from the same
+  sender) could corrupt the stream: the abandon epoch wasn't in the CRC
+  mask, and a fresh build answering a stale burst took its stale ACK as
+  current. Now the epoch is in the data CRC identity, an answer to a
+  repeat may not abandon, and a pre-abandon ACK past the abandon point
+  fails the link (docs/arq.md §2, §4). Reproducers: `test_late_burst_*`.
 - `kisslink.on_burst` builds `ModemRx(r, {})` with no DD budget: a failed
   KISS burst runs DD unbounded.
 - `modem.modulate` drops codewords silently when `rvs` is shorter than

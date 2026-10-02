@@ -275,8 +275,9 @@ void bind_arq_link(py::module_& m) {
     a.def("unwrap", &unwrap);
     a.def("ctl_mask", [](int d, int i, int key) { return mask_tuple(ctl_mask(d, i, key)); }, py::arg("direction"), py::arg("i"),
           py::arg("key") = 0);
-    a.def("data_mask", [](int d, std::int64_t seq, int key, bool comp) { return mask_tuple(data_mask(d, seq, key, comp)); },
-          py::arg("direction"), py::arg("seq"), py::arg("key") = 0, py::arg("comp") = false);
+    a.def("data_mask",
+          [](int d, std::int64_t seq, int key, bool comp, int epoch) { return mask_tuple(data_mask(d, seq, key, comp, epoch)); },
+          py::arg("direction"), py::arg("seq"), py::arg("key") = 0, py::arg("comp") = false, py::arg("epoch") = 0);
 
     py::class_<Codeword>(a, "Codeword")
         .def_readonly("seq", &Codeword::seq)

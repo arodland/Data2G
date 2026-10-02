@@ -46,10 +46,13 @@ struct MaskId {
 };
 
 inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
-// comp: deflated (T_COMP), folded into the direction byte so a codeword
-// decoded under the wrong compression assumption fails its CRC
-inline MaskId data_mask(int direction, std::int64_t seq, int key = 0, bool comp = false) {
-    return {key, direction | (comp ? 2 : 0), static_cast<int>(pmod(seq, SEQ_MOD))};
+inline constexpr int EPOCH_MOD = 64;  // abandon epochs in a data codeword's identity
+// comp: deflated (T_COMP); epoch: the sender's abandon epoch (its slicing).
+// Both folded into the direction byte, so a codeword decoded under the
+// wrong compression or slicing assumption fails its CRC.
+inline MaskId data_mask(int direction, std::int64_t seq, int key = 0, bool comp = false, int epoch = 0) {
+    return {key, direction | (comp ? 2 : 0) | static_cast<int>(pmod(epoch, EPOCH_MOD)) << 2,
+            static_cast<int>(pmod(seq, SEQ_MOD))};
 }
 // The absolute seq = s7 (mod SEQ_MOD) nearest anchor.
 inline std::int64_t unwrap(std::int64_t s7, std::int64_t anchor) {
@@ -222,6 +225,7 @@ public:
     std::set<std::int64_t> abandon_bursts;
     int abandon_epoch = 0, peer_epoch = 0;
     bool answered_ = false;
+    bool stale_ = false;  // the last burst handled repeated one already answered: its ACK may be stale
 
     int peer() const { return 1 - direction; }
     void write(ByteView data) { tx.write(data); }

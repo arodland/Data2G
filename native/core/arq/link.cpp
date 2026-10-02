@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 namespace data2g::arq {
 
@@ -265,12 +266,19 @@ TxBurstPtr Station::build(bool fresh) {
     const int max_ctl = policy->max_ctl(submode);
     Ext ext;
     std::optional<int> reset;
+    const bool stale = std::exchange(stale_, false);
+    const bool other_mode =
+        std::any_of(tx.cws.begin(), tx.cws.end(), [&](const auto& kv) { return kv.second.submode != submode; });
     if (!fresh) {
         max_cw = 0;  // control only
+    } else if (stale && (resync_due || other_mode)) {
+        // answering a repeat of the peer burst I last answered: its ACK may
+        // predate my last burst, so it may not abandon (§4)
+        max_cw = 0;
     } else if (resync_due) {
         reset = 1;
         resync_due = false;
-    } else if (std::any_of(tx.cws.begin(), tx.cws.end(), [&](const auto& kv) { return kv.second.submode != submode; })) {
+    } else if (other_mode) {
         reset = 0;  // a resend must keep its submode (§4)
     }
     if (reset) {
@@ -375,8 +383,10 @@ TxBurstPtr Station::build(bool fresh) {
         for (int rv = 0; rv < dup; ++rv) burst->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), rv, ctl[i]});
     for (std::size_t j = 0; j < resend.size(); ++j)
         burst->slots.push_back(
-            {data_mask(direction, resend[j], key, tx.cws.at(resend[j]).comp), rvs[j], tx.cws.at(resend[j]).payload});
-    for (auto* c : fresh_cws) burst->slots.push_back({data_mask(direction, c->seq, key, c->comp), 0, c->payload});
+            {data_mask(direction, resend[j], key, tx.cws.at(resend[j]).comp, abandon_epoch), rvs[j],
+             tx.cws.at(resend[j]).payload});
+    for (auto* c : fresh_cws)
+        burst->slots.push_back({data_mask(direction, c->seq, key, c->comp, abandon_epoch), 0, c->payload});
     snapshots[bn] = {rx.cum, conveyed};
     auto& sent = sent_seqs[bn] = resend;
     for (auto* c : fresh_cws) sent.push_back(c->seq);
@@ -520,6 +530,13 @@ bool Station::handle_inner(RxBurst& rxb) {
         }
         sent_seqs.erase(it);
     }
+    if (abandon_tlv && !abandon_bursts.empty() && acted < *abandon_bursts.begin() && unwrap(core.cum, tx.base) > tx.base) {
+        // an ACK of a burst from before my pending abandon describes the old
+        // slicing: past the abandon point it can't be mapped (§4)
+        fail(format("protocol: ACK of pre-abandon burst %d past the abandon at %lld", static_cast<int>(pmod(acted, BURST_MOD)),
+                    static_cast<long long>(tx.base)));
+        return true;
+    }
     try {
         const std::int64_t cum = unwrap(core.cum, tx.base);
         std::set<std::int64_t> received;
@@ -563,7 +580,7 @@ bool Station::handle_inner(RxBurst& rxb) {
             continue;
         }
         const SoftKey skey{false, peer(), *seq, 0};
-        auto p = rxb.decode(i, data_mask(peer(), *seq, key, comp[j]), rv, &skey);
+        auto p = rxb.decode(i, data_mask(peer(), *seq, key, comp[j], peer_epoch), rv, &skey);
         if (i >= n_ctl_slots + core.k) {
             n_new += 1;
             n_ok += p.has_value();
@@ -604,6 +621,7 @@ bool Station::handle_inner(RxBurst& rxb) {
         log_write(LOG, INFO, format("RX b%d %s", core.burst_seq, join(parts, " | ").c_str()));
     }
     reply_lost = repeat;
+    stale_ = repeat;
     peer_burst = core.burst_seq;
     answered_ = false;
     watchdog(progress);

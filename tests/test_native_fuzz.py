@@ -14,12 +14,11 @@ long fades, a peer that restarts mid-session (session: a fresh Session;
 engine: abort), and CRC-valid but corrupted control codewords (link and
 session, own tests).
 
-A reference behaviour found here, the same in every pairing, is kept as
-strict xfails rather than fixed (docs/native-port-plan.md, Findings):
-reordered bursts corrupting the stream (a run that corrupts after a late
-copy ends with outcome LATE; anything else that corrupts fails). Two more
-found here are fixed (2026-10): malformed control raising, now dropped,
-and a flipped T_COMP bit delivering deflate raw, now a CRC failure.
+Three reference behaviours found here, the same in every pairing, are
+fixed (2026-10; docs/native-port-plan.md, Findings): malformed control
+raising, now dropped; a flipped T_COMP bit delivering deflate raw, and
+reordered bursts corrupting the stream, now CRC failures or a bounded
+disconnect.
 
 Every run asserts:
 (a) it ends in delivery or a bounded disconnect. A station's handled
@@ -49,7 +48,8 @@ from data2g.arq import link as L
 from data2g.arq import session as S
 from data2g.config import SNR_REF_BW_HZ
 
-from test_arq import MODES, FakeRx, RandomPolicy, payload
+from test_arq import (FakeRx, RandomPolicy, Script, clean, finish, late_burst_from_before_an_abandon,
+                      late_burst_with_a_stale_ack, payload)
 from test_arq_session import DECODE_S, HEADER_S, PTT_S
 from test_arq_session import Policy as SessionPolicy
 from test_engine import BLOCK
@@ -168,9 +168,7 @@ def lockstep(sc, cls_a, cls_b, max_turns=30000):
         assert turn - last_progress <= TURN_BOUND, ("turns without progress", turn, last_progress)
         got_a += a.read()
         got_b += b.read()
-        if bytes(got_b) != data_a[:len(got_b)] or bytes(got_a) != data_b[:len(got_a)]:
-            assert stats.get("late"), "stream corrupted"
-            return trace, ("corrupted after a late burst",), stats  # test_late_burst_*
+        assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)], "stream corrupted"
         if a.state == L.FAILED or b.state == L.FAILED:
             return trace, ("failed", a.fail_reason or b.fail_reason), stats
         if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
@@ -271,9 +269,8 @@ def sessions(sc, cls_a, cls_b, horizon=8000.0):
                 stats["late"] = stats.get("late", 0) + 1
         for tag in "ab":
             got[tag] += orig[tag].read()
-        if bytes(got["b"]) != data_a[:len(got["b"])] or bytes(got["a"]) != data_b[:len(got["a"])]:
-            assert stats.get("late_heard"), "stream corrupted"
-            return trace, ("corrupted after a late burst",), dict(stats, corrupted=True)  # test_late_burst_*
+        assert bytes(got["b"]) == data_a[:len(got["b"])] and bytes(got["a"]) == data_b[:len(got["a"])], \
+            "stream corrupted"
         if restarted:
             assert not who[sc["restart"][0]].read() or who[sc["restart"][0]] is orig[sc["restart"][0]]
         done = bytes(got["a"]) == data_b and bytes(got["b"]) == data_a and (b_written or sc["b_write_at"] is None)
@@ -348,12 +345,9 @@ def run_pairs(fn, sc, native):
     return ref
 
 
-LATE = ("corrupted after a late burst",)
-
-
 def check_link(sc, native):
     trace, outcome, stats = run_pairs(lockstep, sc, native)
-    assert outcome[0] in ("done", "failed") or outcome == LATE, (outcome, stats)
+    assert outcome[0] in ("done", "failed"), (outcome, stats)
     if not (sc["p_late"] or sc["p_corrupt"]):
         # only the clock or the watchdog ends a link, and nothing is ever mapped wrong
         assert outcome[0] == "done" or outcome[1] in ("link lost", "no progress"), outcome
@@ -363,8 +357,6 @@ def check_link(sc, native):
 
 def check_session(sc, native):
     trace, outcome, stats = run_pairs(sessions, sc, native)
-    if outcome == LATE:
-        return outcome, stats
     assert not stats["horizon"], ("still running at the horizon", outcome[3:7])
     if not sc["p_late"]:  # a late copy is answered like any burst, whoever is on air
         assert outcome[8] == 0, "collisions"
@@ -451,118 +443,19 @@ def test_malformed_control_dropped(native, pure, which):
 
 # --- late bursts: minimized reproducers -------------------------------------------------------
 # A burst heard after a later one from the same sender (true reordering;
-# the half-duplex engine decodes in order, so not expected on air) can
-# corrupt the delivered stream, in both implementations: neither the
-# abandon epoch nor the slicing is in the CRC mask, and a fresh build that
-# answers a stale burst takes its stale ACK as current. docs/arq.md §10
-# says reordered bursts are tested; nothing in the suite reordered before.
+# the half-duplex engine decodes in order, so not expected on air). Found
+# here corrupting the stream in both implementations; fixed 2026-10 by the
+# abandon epoch in the data CRC identity and the ACK rules of docs/arq.md
+# §4. The scenarios live in test_arq (pure Python); here on both classes.
 
-LATE_REASON = ("reference behaviour: a reordered burst can corrupt the delivered stream, though docs/arq.md §10 "
-               "says reordering is covered; found by this fuzz, not fixed here")
-
-
-class Script:
-    """A policy that plays a list of (submode, max codewords), then repeats the last."""
-
-    def __init__(self, plan):
-        self.plan = list(plan)
-
-    def choose(self, station, escalation):
-        return self.plan.pop(0) if len(self.plan) > 1 else self.plan[0]
-
-    def payload_bytes(self, m):
-        return MODES[m][0]
-
-    def rv_cycle(self, m):
-        return MODES[m][1]
-
-
-def clean(burst, lost=()):
-    rx = FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
-    for i in lost:
-        rx.good[i] = False
-    return rx
-
-
-def finish(a, b, burst, data, turns=20):
-    """Lossless lockstep from a's `burst` on. -> what b delivered."""
-    got = bytearray()
-    for _ in range(turns):
-        b.handle(clean(burst))
-        got += b.read()
-        if L.FAILED in (a.state, b.state):
-            break
-        r = b.build()
-        b.answered()
-        a.handle(clean(r))
-        if a.state == L.FAILED or not a.tx.pending():
-            break
-        burst = a.build()
-        a.answered()
-    return bytes(got)
-
-
-def _stations(cls, plan_a):
-    rng = random.Random(1)
-    data = bytes(rng.randrange(256) for _ in range(400))
-    a = cls(0, Script(plan_a), master=True)
-    b = cls(1, Script([("m22", 1)]))
-    a.write(data)
-    return a, b, data
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_REASON)
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_late_burst_from_before_an_abandon(native, pure, which):
-    """a sends P (m22, seqs 0-3); b loses seq 1 (cum 1) and answers. a
-    switches to m46: Q abandons at 1 and re-slices; Q is lost. A late copy
-    of P arrives: b delivers P's old 1-3 (cum 4), and its answer acks Q's
-    re-sliced 1-3 to a. a switches back to m22: a new abandon at 4, equal
-    to b's cumulative, so b takes it and joins two slicings."""
-    a, b, data = _stations(impl(native, which)[0], [("m22", 5), ("m46", 5), ("m22", 5)])
-    p = a.build()
-    a.answered()
-    assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
-    assert a.handle(clean(b.build()))
-    b.answered()
-    a.build()  # Q, lost
-    a.answered()
-    assert b.handle(clean(p)) and b.rx.cum == 4  # P again, late
-    assert a.handle(clean(b.build())) and a.tx.base == 4
-    b.answered()
-    n = a.build()
-    a.answered()
-    got = finish(a, b, n, data)
-    assert got == data[:len(got)] or L.FAILED in (a.state, b.state)
+    late_burst_from_before_an_abandon(impl(native, which)[0])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=LATE_REASON)
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_late_burst_with_a_stale_ack(native, pure, which):
-    """b's reply R0 (cum 2) is heard again late, after b moved on to cum 4
-    (its reply R1 lost). a answers R0 with a fresh build that switches
-    mode: abandon at 2 (data b already delivered), lost. R1 then arrives
-    late too: a's base goes to 4 under the new slicing, and its next switch
-    abandons at 4, which b takes: b holds old 2-3, then new 4 on."""
-    a, b, data = _stations(impl(native, which)[0], [("m22", 3), ("m22", 3), ("m46", 5), ("m22", 5)])
-    assert b.handle(clean(a.build())) and b.rx.cum == 2
-    a.answered()
-    r0 = b.build()
-    b.answered()
-    assert a.handle(clean(r0))
-    p1 = a.build()
-    a.answered()
-    assert b.handle(clean(p1)) and b.rx.cum == 4
-    r1 = b.build()  # lost
-    b.answered()
-    assert a.handle(clean(r0))  # R0 again, late
-    a.build()  # abandon at 2, lost
-    a.answered()
-    assert a.handle(clean(r1)) and a.tx.base == 4  # R1, late
-    n = a.build()
-    a.answered()
-    got = finish(a, b, n, data)
-    assert got == data[:len(got)] or L.FAILED in (a.state, b.state)
+    late_burst_with_a_stale_ack(impl(native, which)[0])
 
 
 @pytest.mark.parametrize("which", ["py", "cpp"])
@@ -582,7 +475,7 @@ def test_flipped_comp_bit(native, pure, which):
     assert ctl.ext[F.T_COMP] == b"\x80"  # its one data codeword is deflated
     ctl.ext[F.T_COMP] = b"\x00"
     burst.slots[0] = L.Slot(burst.slots[0].mask_id, 0, F.Control(ctl.core, ctl.ext).pack(46)[0])
-    got = finish(a, b, burst, data)  # the rest of the stream, lossless
+    got = finish(a, b, burst)  # the rest of the stream, lossless
     assert got == data
 
 
