@@ -233,3 +233,37 @@ def test_cli_has_every_host_py_flag(request):
     ref = subprocess.run([sys.executable, "-m", "data2g.host", "--list-modes", "--kiss-bw", "500"], capture_output=True,
                          text=True, check=True).stdout
     assert out == ref
+
+
+def test_cli_rig_flags(request):
+    """The Hamlib flags: --list-rigs, and conflicting combinations as usage errors
+    (exit 2 before anything opens; values are tested in native/tests/test_args.cpp)."""
+    if not BINARY.exists():
+        if request.config.getoption("--native"):
+            pytest.fail(f"--native: {BINARY} not built (tools/build_native.sh)")
+        pytest.skip(f"{BINARY} not built")
+
+    def run(*args):
+        return subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=60)
+
+    rigs = run("--list-rigs")
+    if rigs.returncode == 1 and "without Hamlib" in rigs.stderr:
+        pytest.skip("built without Hamlib")
+    assert rigs.returncode == 0
+    rows = {int(line.split()[0]): line for line in rigs.stdout.splitlines()}
+    assert "NET rigctl" in rows[2] and "Dummy" in rows[1] and "IC-7300" in rows[3073]
+    helptext = run("--help").stdout
+    for flag in ("--rig-model", "--rig-device", "--rig-baud", "--rig-parity", "--rig-handshake", "--rig-dtr", "--ptt-method",
+                 "--ptt-device", "--ptt-audio", "--rig-mode", "--rig-timeout-ms", "--rig-retries", "--rig-poll-interval",
+                 "--rig-debug", "--list-rigs", "--no-rig"):
+        assert flag in helptext, flag
+    for args, says in [
+        (("--rigctld-port", "4533", "--rig-model", "3073"), "mean --rig-model 2"),
+        (("--rigctld-host", "radio", "--rig-device", "/dev/ttyUSB0"), "use one"),
+        (("--no-rig", "--rig-model", "1"), "--no-rig with a rig"),
+        (("--ptt-device", "/dev/ttyUSB1"), "--ptt-method dtr or rts"),
+        (("--rig-model", "999999"), "not a model this Hamlib knows"),
+        (("--rig-parity", "mark"), "invalid choice"),
+    ]:
+        r = run(*args)
+        assert r.returncode == 2 and says in r.stderr, (args, r.returncode, r.stderr[-300:])

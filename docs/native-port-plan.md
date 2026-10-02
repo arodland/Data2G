@@ -341,6 +341,31 @@ Status 2026-10-02: headless host landed (`data2g-host`, not yet on air).
 - `--threads N`: the shared pool's size (see "Threads").
 - Not yet checked: sound cards through the host, Hamlib PTT, Pat.
 
+Status 2026-10-02: SSTVAE's full Hamlib settings, not only model 2.
+- `core/rig/hamlib/`: SSTVAE's HamlibConfig (serial speed, data/stop
+  bits, parity, handshake, DTR/RTS held, PTT CAT/DTR/RTS/VOX and its port,
+  mic/data keying, mode on connect, timeout, retries), `list_models()` /
+  `model_info()` (with the port type) and the trace sink. Not lifted:
+  `serial_defaults()` (only SSTVAE's Android bridge uses it).
+- data2g-host: `--rig-model`, `--rig-device`, `--rig-baud`,
+  `--rig-{data-bits,stop-bits,parity,handshake,dtr,rts}`, `--ptt-method`,
+  `--ptt-device`, `--ptt-audio`, `--rig-mode`, `--rig-timeout-ms`,
+  `--rig-retries`, `--rig-poll-interval` (default 0: key only),
+  `--rig-debug` (Hamlib's trace as `hamlib:` log lines), `--rig/--no-rig`,
+  `--list-rigs`. `--rigctld-host/--rigctld-port` still mean model 2 at that
+  address (port 0: no rig); with `--rig-model N` (N != 2) or `--rig-device`
+  they are a usage error, as is `--ptt-device` without DTR/RTS keying.
+- Exit no longer sends PTT off to a rig that never opened or was never
+  keyed (`RigController::keyed_since_open`, Keyer's `must_release`): no
+  call, no 10 s operation timeout, no warning. unkey() after a burst is
+  unchanged. The Python host still sends `T 0` on every exit
+  (`host.py` finally: `rig.ptt(False)`, reconnecting if need be).
+- Tests: `test_rig` (exit rule against the fake rig), `test_rig_hamlib`
+  (model list and port types, every setting on the dummy, a serial model
+  with no device, the trace sink, model 2 to a closed port and to a
+  spawned `rigctld -m 1`), `test_args` (flags, model-2 mapping,
+  HamlibConfig), `test_cli_rig_flags` (usage errors on the binary).
+
 ### Phase 4: GUI
 
 Status window and settings dialog over the same core. Exit: you use it for a
@@ -368,6 +393,14 @@ Status 2026-10-02: `data2g-gui` landed (not yet used for a session).
   listening, a restart re-listens; settings round-trip through QSettings
   and the dialog. Writes `native/build/data2g_gui_shot.png`.
 - `check_layering.py`: Qt Widgets only under `gui/`.
+- Settings dialog: Station and Rig tabs. The Rig tab is SSTVAE's: model
+  picker with search (`list_models`), device and serial fields shown only
+  for the model's port type (serial, network, none), PTT method and port,
+  mic/data keying (enabled only for MICDATA rigs), mode, delays, Hamlib
+  timeout and retries, frequency poll, trace, and Test CAT / Test PTT on
+  a worker thread. All persisted in QSettings; older settings (rigctld
+  host and port only) load as model 2 there. The main window shows the dial
+  frequency only when the poll is on.
 
 ### Phase 5: packaging and CI
 

@@ -7,7 +7,7 @@ endfunction()
 
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
-list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_rig_hamlib\\.cpp$")
+list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args)\\.cpp$")
 foreach(src ${DATA2G_TESTS})
   get_filename_component(stem ${src} NAME_WE)
   string(REGEX REPLACE "^test_" "" name ${stem})
@@ -28,6 +28,13 @@ if(TARGET data2g_rig AND NOT WIN32)
     set_property(TARGET test_rig_hamlib APPEND PROPERTY BUILD_RPATH "${DATA2G_HAMLIB_RUNTIME_DIR}")
   endif()
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
+endif()
+
+# data2g-host's rig options (app/station.*).
+if(TARGET data2g_station)
+  data2g_test(args)
+  target_link_libraries(test_args PRIVATE data2g_station)
+  data2g_rig_rpath(test_args)
 endif()
 
 # data2g-gui's window, offscreen, over pipe audio (no device, no display).

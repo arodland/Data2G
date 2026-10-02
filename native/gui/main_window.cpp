@@ -73,6 +73,8 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     tx_ = value("throughput_tx", 1, 2, tr("Sent:"));
     counters_ = value("audio_counters", 2, 0, tr("Audio:"));
     grid->addWidget(counters_, 2, 1, 1, 3);
+    dial_ = value("dial", 3, 0, tr("Dial:"));
+    dial_label_ = qobject_cast<QLabel*>(grid->itemAtPosition(3, 0)->widget());
     const auto lamp = [&](const char* name, const QString& text) {
         auto* l = new QLabel(text);
         l->setObjectName(QLatin1String(name));
@@ -174,6 +176,13 @@ void MainWindow::poll() {
         mode_->setText(tr("%1, %2 Hz").arg(qs(l.mode)).arg(arq::width_hz(*m), 0, 'f', 0));
     } else {
         mode_->setText(qs(l.mode));
+    }
+    const bool polled = s.running() && a.rig_poll_interval > 0;
+    dial_label_->setVisible(polled);
+    dial_->setVisible(polled);
+    if (polled) {
+        const auto hz = s.rig_frequency();
+        dial_->setText(hz ? tr("%1 MHz").arg(*hz / 1e6, 0, 'f', 4) : QStringLiteral("-"));
     }
     set_lamp(busy_, s.busy(), "#e6a01e");
     set_lamp(ptt_, s.ptt(), "#f03c3c");

@@ -79,6 +79,23 @@ app::Args persisted() {
     a.rigctld_port = 4533;
     a.ptt_on_delay_ms = 150;
     a.ptt_off_delay_ms = 70;
+    a.rig_model = 3073;  // IC-7300: serial, so the serial fields show
+    a.rig_device = "/dev/ttyUSB1";
+    a.rig_baud = 19200;
+    a.rig_data_bits = "8";
+    a.rig_stop_bits = "2";
+    a.rig_parity = "even";
+    a.rig_handshake = "hardware";
+    a.rig_dtr = "high";
+    a.rig_rts = "low";
+    a.ptt_method = "rts";
+    a.ptt_device = "/dev/ttyUSB2";
+    a.ptt_audio = "data";
+    a.rig_mode = "pkt_usb";
+    a.rig_timeout_ms = 750;
+    a.rig_retries = 3;
+    a.rig_poll_interval = 2.5;
+    a.rig_debug = true;
     a.vara = false;
     a.host = "0.0.0.0";
     a.command_port = 8400;
@@ -114,6 +131,27 @@ void test_settings(const QTemporaryDir& dir) {
     e.record_dir = a.record_dir;
     d.apply_to(e);
     check::is_true(e == a, "settings round trip through the dialog");
+
+    // model 2 at rigctld's address stays that (no device), and a saved
+    // 'no rig' stays off; neither opens anything
+    app::Args r;
+    r.record_dir = a.record_dir;
+    r.rigctld_host = "radio.lan";
+    r.rigctld_port = 4533;
+    for (bool on : {true, false}) {
+        r.rig = on;
+        gui::SettingsDialog rd(r, {}, {});
+        app::Args f;
+        f.record_dir = a.record_dir;
+        rd.apply_to(f);
+        check::is_true(f == r, on ? "rigctld settings round trip through the dialog" : "rig off round trips");
+    }
+    // legacy settings (no rig keys): rigctld at their host and port
+    QSettings legacy(dir.filePath(QStringLiteral("legacy.ini")), QSettings::IniFormat);
+    legacy.setValue("rigctld_host", QStringLiteral("old.lan"));
+    legacy.setValue("rigctld_port", 4534);
+    const app::Args l = gui::load_settings(legacy);
+    check::is_true(app::rig_enabled(l) && app::rig_device(l) == "old.lan:4534", "legacy rigctld settings: model 2 there");
 }
 
 void test_window(const QTemporaryDir& dir) {
@@ -146,6 +184,8 @@ void test_window(const QTemporaryDir& dir) {
     if (!(link && mode && busy && log)) return;
     w.poll();
     check::equal(link->text().toStdString(), std::string("idle"), "link idle at start");
+    auto* dial = w.findChild<QLabel*>(QStringLiteral("dial"));
+    check::is_true(dial && dial->isHidden(), "no dial frequency unless the rig is polled");
 
     check::current_step = "window: VARA client";
     QTcpSocket client;

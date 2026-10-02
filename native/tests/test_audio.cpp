@@ -308,7 +308,9 @@ void test_keyer() {
         k.unkey();
         check::is_true(!k.keyed() && calls.back() == "off", "unkey: PTT off after drain");
     }
-    check::equal(calls.size(), std::size_t{3}, "destructor: PTT off again, always");
+    check::equal(calls.size(), std::size_t{3}, "destructor: PTT off again, once keyed");
+    { rig::Keyer idle([&](bool on) { calls.push_back(on ? "on" : "off"); }, fifo, 0.0); }
+    check::equal(calls.size(), std::size_t{3}, "destructor: never keyed, no PTT off");
 
     std::string reported;
     rig::Keyer failing([](bool) { throw std::runtime_error("rigctld gone"); }, fifo, 0.0,

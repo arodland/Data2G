@@ -13,6 +13,8 @@
 #include <ctime>
 #include <functional>
 #include <map>
+#include <set>
+#include <tuple>
 #include <cstdlib>
 
 #include "arq/engine.hpp"
@@ -33,9 +35,9 @@
 #ifdef DATA2G_HAVE_QTAUDIO
 #include "audio/qt/qtaudio.hpp"
 #endif
-#ifdef DATA2G_HAVE_RIG
+// Always: its types and constants need no libhamlib (only its functions,
+// called under DATA2G_HAVE_RIG, do).
 #include "rig/hamlib/hamlib.hpp"
-#endif
 
 namespace data2g::app {
 
@@ -127,7 +129,14 @@ const char* USAGE =
     "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
     "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
     "                   [--record-dir RECORD_DIR] [--log-level LOG_LEVEL] [--stats-interval S] [--list-modes]\n"
-    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n";
+    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
+    "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
+    "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
+    "                   [--rig-parity {default,none,odd,even}] [--rig-handshake {default,none,xonxoff,hardware}]\n"
+    "                   [--rig-dtr {default,high,low}] [--rig-rts {default,high,low}]\n"
+    "                   [--ptt-method {cat,dtr,rts,vox}] [--ptt-device DEVICE] [--ptt-audio {mic,data}]\n"
+    "                   [--rig-mode {none,usb,pkt_usb}] [--rig-timeout-ms MS] [--rig-retries N]\n"
+    "                   [--rig-poll-interval S] [--rig-debug | --no-rig-debug]\n";
 
 const char* HELP =
     "\nData2G server: a VARA-style TNC and a KISS TNC on one radio\n\n"
@@ -174,7 +183,31 @@ const char* HELP =
     "  --audio-io pipe:IN,OUT  no sound card: raw float32 8 kHz mono read from IN and written to OUT (files\n"
     "                        or named pipes), both at real time, silence while not keyed. Two hosts cross-\n"
     "                        connect through two mkfifo pipes. --sample-rate and the devices are then unused.\n"
-    "  --threads N           threads for decode and sync, the calling one included (default: min(4, cores / 2))\n";
+    "  --threads N           threads for decode and sync, the calling one included (default: min(4, cores / 2))\n"
+    "\nrig control (Hamlib, linked in; SSTVAE's settings):\n"
+    "  --rig, --no-rig       rig control at all; --no-rig: no PTT (default: on)\n"
+    "  --list-rigs           Hamlib's rig models: number, manufacturer, model, status\n"
+    "  --rig-model N         Hamlib model (see --list-rigs); 2 is NET rigctl, a rigctld client (default 2)\n"
+    "  --rig-device DEVICE   serial device (/dev/ttyUSB0, COM5) or host:port; for model 2, default\n"
+    "                        RIGCTLD_HOST:RIGCTLD_PORT. --rigctld-host/--rigctld-port mean --rig-model 2 at\n"
+    "                        that address (port 0: no rig), so neither goes with --rig-model or --rig-device\n"
+    "  --rig-baud BAUD       serial speed; 0: the model's (default 0)\n"
+    "  --rig-data-bits, --rig-stop-bits, --rig-parity, --rig-handshake\n"
+    "                        serial line settings; default: the model's\n"
+    "  --rig-dtr, --rig-rts {default,high,low}\n"
+    "                        hold a control line for the session (an interface powered from it)\n"
+    "  --ptt-method {cat,dtr,rts,vox}\n"
+    "                        cat: a CAT command; dtr/rts: a serial control line; vox: never key (the rig\n"
+    "                        keys on the audio) (default cat)\n"
+    "  --ptt-device DEVICE   the port whose DTR/RTS keys, if not --rig-device's\n"
+    "  --ptt-audio {mic,data}  the input CAT keying selects, on rigs with two (TS-480 and the like)\n"
+    "                        (default mic)\n"
+    "  --rig-mode {none,usb,pkt_usb}  set once the rig opens; none leaves it (default none)\n"
+    "  --rig-timeout-ms MS   Hamlib's timeout per command (default 1000)\n"
+    "  --rig-retries N       Hamlib's retries per command (default 1)\n"
+    "  --rig-poll-interval S read the dial frequency this often; 0: key only (default 0)\n"
+    "  --rig-debug, --no-rig-debug\n"
+    "                        Hamlib's trace in the log, as 'hamlib:' lines (default: off)\n";
 
 template <typename T>
 T number(const std::string& opt, const std::string& v, const char* prog) {
@@ -206,11 +239,13 @@ std::string default_record_dir() {
 
 Args parse(int argc, char** argv, Args a, const char* prog) {
     std::map<std::string, bool*> flags = {
-        {"--list-audio-devices", &a.list_audio_devices}, {"--list-modes", &a.list_modes}};
+        {"--list-audio-devices", &a.list_audio_devices}, {"--list-modes", &a.list_modes}, {"--list-rigs", &a.list_rigs}};
     std::map<std::string, std::pair<bool*, bool>> switches = {
         {"--vara", {&a.vara, true}},   {"--no-vara", {&a.vara, false}},
         {"--kiss", {&a.kiss, true}},   {"--no-kiss", {&a.kiss, false}},
-        {"--decode-worker", {&a.decode_worker, true}}, {"--no-decode-worker", {&a.decode_worker, false}}};
+        {"--decode-worker", {&a.decode_worker, true}}, {"--no-decode-worker", {&a.decode_worker, false}},
+        {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
+        {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
     const auto i_ = [prog](auto& o, auto& v) { return number<int>(o, v, prog); };
     const auto d_ = [prog](auto& o, auto& v) { return number<double>(o, v, prog); };
     std::map<std::string, std::function<void(const std::string&, const std::string&)>> valued = {
@@ -242,7 +277,27 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--stats-interval", [&](auto& o, auto& v) { a.stats_interval = d_(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
         {"--threads", [&](auto& o, auto& v) { pool::set_threads(i_(o, v)); }},
+        {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
+        {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
+        {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
+        {"--rig-data-bits", [&](auto&, auto& v) { a.rig_data_bits = v; }},
+        {"--rig-stop-bits", [&](auto&, auto& v) { a.rig_stop_bits = v; }},
+        {"--rig-parity", [&](auto&, auto& v) { a.rig_parity = v; }},
+        {"--rig-handshake", [&](auto&, auto& v) { a.rig_handshake = v; }},
+        {"--rig-dtr", [&](auto&, auto& v) { a.rig_dtr = v; }},
+        {"--rig-rts", [&](auto&, auto& v) { a.rig_rts = v; }},
+        {"--ptt-method", [&](auto&, auto& v) { a.ptt_method = v; }},
+        {"--ptt-device", [&](auto&, auto& v) { a.ptt_device = v; }},
+        {"--ptt-audio", [&](auto&, auto& v) { a.ptt_audio = v; }},
+        {"--rig-mode", [&](auto&, auto& v) { a.rig_mode = v; }},
+        {"--rig-timeout-ms", [&](auto& o, auto& v) { a.rig_timeout_ms = i_(o, v); }},
+        {"--rig-retries", [&](auto& o, auto& v) { a.rig_retries = i_(o, v); }},
+        {"--rig-poll-interval", [&](auto& o, auto& v) { a.rig_poll_interval = d_(o, v); }},
     };
+    // The rig flags on this command line (value: the last one given).
+    std::map<std::string, std::string> given;
+    static const std::set<std::string> rig_flags = {"--rigctld-host", "--rigctld-port", "--rig-model", "--rig-device",
+                                                    "--no-rig", "--ptt-device"};
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -260,18 +315,129 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
             *s->second.first = s->second.second;
         } else if (auto v = valued.find(arg); v != valued.end()) {
             if (!inline_value && i + 1 >= argc) usage_error("argument " + arg + ": expected one argument", prog);
-            v->second(arg, inline_value ? *inline_value : std::string(argv[++i]));
+            const std::string value = inline_value ? *inline_value : std::string(argv[++i]);
+            v->second(arg, value);
+            if (rig_flags.count(arg)) given[arg] = value;
+            continue;
         } else {
             usage_error("unrecognized arguments: " + std::string(argv[i]), prog);
         }
+        if (rig_flags.count(arg)) given[arg] = "";
+        if (arg == "--rig") given.erase("--no-rig");
     }
+    // The rig flags given here override saved settings as a whole: rigctld
+    // means model 2 at that address, and a model or device turns the rig on.
+    const bool rigctld = given.count("--rigctld-host") || given.count("--rigctld-port");
+    if (rigctld && given.count("--rig-model") && a.rig_model != rig::MODEL_NET_RIGCTL)
+        usage_error("--rigctld-host/--rigctld-port mean --rig-model 2 (NET rigctl), not --rig-model " + given["--rig-model"] +
+                        " (give that model's address as --rig-device)",
+                    prog);
+    if (rigctld && given.count("--rig-device"))
+        usage_error("--rigctld-host/--rigctld-port and --rig-device both give the rig's address: use one", prog);
+    if (given.count("--no-rig") && (given.count("--rig-model") || given.count("--rig-device") || (rigctld && a.rigctld_port != 0)))
+        usage_error("--no-rig with a rig to use (--rig-model, --rig-device or --rigctld-*)", prog);
+    if (rigctld) {
+        a.rig_model = rig::MODEL_NET_RIGCTL;
+        a.rig_device.clear();
+        a.rig = a.rigctld_port != 0;
+    } else if (given.count("--rig-model") || given.count("--rig-device")) {
+        a.rig = true;
+    }
+    if (given.count("--ptt-device") && a.ptt_method != "dtr" && a.ptt_method != "rts")
+        usage_error("--ptt-device is the port whose DTR or RTS keys: it needs --ptt-method dtr or rts, not " + a.ptt_method, prog);
     return a;
 }
 
 int kiss_cap(int hz) { return hz == 500 ? 0 : 2; }
 
+// In the order of the matching enums in rig/hamlib/hamlib.hpp: hamlib_config()
+// maps a value by its index.
+const std::vector<std::string>& rig_choices(std::string_view field) {
+    static const std::map<std::string, std::vector<std::string>, std::less<>> choices = {
+        {"rig_data_bits", {"default", "7", "8"}},
+        {"rig_stop_bits", {"default", "1", "2"}},
+        {"rig_parity", {"default", "none", "odd", "even"}},
+        {"rig_handshake", {"default", "none", "xonxoff", "hardware"}},
+        {"rig_dtr", {"default", "high", "low"}},
+        {"rig_rts", {"default", "high", "low"}},
+        {"ptt_method", {"vox", "cat", "dtr", "rts"}},
+        {"ptt_audio", {"mic", "data"}},
+        {"rig_mode", {"none", "usb", "pkt_usb"}},
+    };
+    return choices.find(field)->second;
+}
+
+bool rig_enabled(const Args& a) {
+    return a.rig && !(a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty() && a.rigctld_port == 0);
+}
+
+std::string rig_device(const Args& a) {
+    if (a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty()) return a.rigctld_host + ":" + std::to_string(a.rigctld_port);
+    return a.rig_device;
+}
+
+namespace {
+
+int choice_index(const std::string& field, const std::string& value) {
+    const auto& c = rig_choices(field);
+    return static_cast<int>(std::find(c.begin(), c.end(), value) - c.begin());
+}
+
+}  // namespace
+
+rig::HamlibConfig hamlib_config(const Args& a) {
+    rig::HamlibConfig h;
+    h.model = a.rig_model;
+    h.device = rig_device(a);
+    h.baud = a.rig_baud;
+    h.data_bits = static_cast<rig::DataBits>(choice_index("rig_data_bits", a.rig_data_bits));
+    h.stop_bits = static_cast<rig::StopBits>(choice_index("rig_stop_bits", a.rig_stop_bits));
+    h.parity = static_cast<rig::Parity>(choice_index("rig_parity", a.rig_parity));
+    h.handshake = static_cast<rig::Handshake>(choice_index("rig_handshake", a.rig_handshake));
+    h.dtr = static_cast<rig::LineState>(choice_index("rig_dtr", a.rig_dtr));
+    h.rts = static_cast<rig::LineState>(choice_index("rig_rts", a.rig_rts));
+    h.ptt_method = static_cast<rig::PttMethod>(choice_index("ptt_method", a.ptt_method));
+    h.ptt_device = a.ptt_device;
+    h.ptt_audio = static_cast<rig::PttAudio>(choice_index("ptt_audio", a.ptt_audio));
+    h.mode = static_cast<rig::RigMode>(choice_index("rig_mode", a.rig_mode));
+    h.timeout_ms = a.rig_timeout_ms;
+    h.retries = a.rig_retries;
+    return h;
+}
+
+bool list_rigs() {
+#ifdef DATA2G_HAVE_RIG
+    for (const auto& m : rig::list_models())
+        std::printf("%6d  %-22s %-28s %s\n", m.model, m.manufacturer.c_str(), m.name.c_str(), m.status.c_str());
+    return true;
+#else
+    return false;
+#endif
+}
+
 std::optional<std::string> check(const Args& a) {
     if (!a.vara && !a.kiss) return "nothing to serve: --no-vara and --no-kiss";
+    // Saved settings come through here too, so every value is checked, not only flags.
+    for (const auto& [flag, field, value] :
+         {std::tuple{"--rig-data-bits", "rig_data_bits", &a.rig_data_bits}, {"--rig-stop-bits", "rig_stop_bits", &a.rig_stop_bits},
+          {"--rig-parity", "rig_parity", &a.rig_parity}, {"--rig-handshake", "rig_handshake", &a.rig_handshake},
+          {"--rig-dtr", "rig_dtr", &a.rig_dtr}, {"--rig-rts", "rig_rts", &a.rig_rts}, {"--ptt-method", "ptt_method", &a.ptt_method},
+          {"--ptt-audio", "ptt_audio", &a.ptt_audio}, {"--rig-mode", "rig_mode", &a.rig_mode}}) {
+        const auto& c = rig_choices(field);
+        if (std::find(c.begin(), c.end(), *value) == c.end()) {
+            std::string all;
+            for (const auto& x : c) all += (all.empty() ? "" : ", ") + x;
+            return std::string(flag) + ": invalid choice: '" + *value + "' (choose from " + all + ")";
+        }
+    }
+    if (a.rig_baud < 0) return "--rig-baud: must be 0 (the model's) or more";
+    if (a.rig_timeout_ms <= 0) return "--rig-timeout-ms: must be positive";
+    if (a.rig_retries < 0) return "--rig-retries: must be 0 or more";
+    if (a.rig_poll_interval < 0) return "--rig-poll-interval: must be 0 (key only) or more";
+#ifdef DATA2G_HAVE_RIG
+    if (rig_enabled(a) && !rig::model_info(a.rig_model))
+        return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";
+#endif
     if (a.kiss && a.broadcast_mode) {
         const auto ok = arq::allowed(kiss_cap(a.kiss_bw));
         const auto* m = arq::mode(*a.broadcast_mode);
@@ -577,6 +743,8 @@ void Station::engine_loop() {
     }
 }
 
+std::optional<double> Station::rig_frequency() const { return rig_ ? rig_->frequency_hz() : std::nullopt; }
+
 void Station::start() {
     if (running_) return;
     try {
@@ -638,20 +806,40 @@ void Station::start() {
 
         // PTT
         rig::Keyer::Ptt ptt;
-        if (a_.rigctld_port) {
+        rig::Keyer::MustRelease must_release;
+        if (rig_enabled(a_)) {
 #ifdef DATA2G_HAVE_RIG
-            rig_ = std::make_unique<rig::RigController>(nullptr, [](const std::string& text, bool error) {
-                log_line(error ? ERROR : INFO, "rig: " + text);
+            if (a_.rig_debug) rig::set_debug_sink([](const std::string& line) { log_line(INFO, "hamlib: " + line); });
+            const bool polling = a_.rig_poll_interval > 0;
+            rig_ = std::make_unique<rig::RigController>(nullptr, [polling](const std::string& text, bool error) {
+                // a healthy poll's readout ("Rig: 14.1000 MHz") is shown, not logged
+                if (error || !polling || text.find(" MHz") == std::string::npos) log_line(error ? ERROR : INFO, "rig: " + text);
             });
-            rig::HamlibConfig hc;
-            hc.model = rig::MODEL_NET_RIGCTL;
-            hc.device = a_.rigctld_host + ":" + std::to_string(a_.rigctld_port);
+            const rig::HamlibConfig hc = hamlib_config(a_);
             rig::RigConfig rc;
-            rc.poll_interval_s = 0;  // key only, as tnc.Rigctld
+            rc.poll_interval_s = a_.rig_poll_interval;  // 0: key only, as tnc.Rigctld
             rig_->start(rig::make_hamlib_backend(hc), rc);
-            ptt = rig_->ptt_function();
+            rig::RigController* r = rig_.get();
+            if (hc.ptt_method != rig::PttMethod::Vox) {
+                // no polls while keyed; resumed after the off, so none delays it
+                ptt = [r](bool on) {
+                    if (on) {
+                        r->pause_polling();
+                        r->set_ptt(true);
+                        return;
+                    }
+                    try {
+                        r->set_ptt(false);
+                    } catch (...) {
+                        r->resume_polling();
+                        throw;
+                    }
+                    r->resume_polling();
+                };
+                must_release = [r] { return r->keyed_since_open(); };
+            }
 #else
-            log_line(WARNING, "built without Hamlib: no PTT (--rigctld-port ignored)");
+            log_line(WARNING, "built without Hamlib: no PTT (rig settings ignored)");
 #endif
         }
 
@@ -684,7 +872,7 @@ void Station::start() {
 #endif
         }
         keyer_ = std::make_unique<rig::Keyer>(ptt, *play_, a_.ptt_off_delay_ms / 1000.0,
-                                              [](const std::string& s) { log_line(ERROR, s); });
+                                              [](const std::string& s) { log_line(ERROR, s); }, must_release);
 
         if (a_.vara) logf(INFO, "VARA: commands on %s:%d, data on %d", a_.host.c_str(), a_.command_port, a_.command_port + 1);
         if (a_.kiss)
@@ -709,11 +897,14 @@ void Station::stop() {
     if (cap_) cap_->close();
     if (engine_thread_.joinable()) engine_thread_.join();
     if (engine_) engine_->stop();
-    keyer_.reset();  // PTT off
+    keyer_.reset();  // PTT off, if the rig was ever keyed
     ptt_ = false;
     if (rig_) {
         rig_->stop();
         rig_->wait_for_shutdown(2.0);
+#ifdef DATA2G_HAVE_RIG
+        if (a_.rig_debug) rig::set_debug_sink({});
+#endif
     }
     if (kiss_) kiss_->close_clients();
     if (pipe_) pipe_->stop();

@@ -4,7 +4,8 @@
 // here waits on the engine.
 //
 // Shown: the RX waterfall and input level, link state, mode and bandwidth,
-// BUSY and PTT, throughput, the received-burst log, and the audio counters.
+// BUSY and PTT, throughput, the received-burst log, the audio counters, and
+// the dial frequency when the rig is polled.
 // Settings... opens the dialog; OK saves to QSettings and, when anything
 // changed, restarts the station.
 #pragma once
@@ -52,6 +53,7 @@ private:
     std::string record_base_;
     Waterfall* waterfall_;
     QLabel *link_, *mode_, *busy_, *ptt_, *rx_, *tx_, *counters_, *status_;
+    QLabel *dial_label_, *dial_;  // shown only with --rig-poll-interval
     QTableWidget* log_;
     struct Sample {
         std::chrono::steady_clock::time_point t;

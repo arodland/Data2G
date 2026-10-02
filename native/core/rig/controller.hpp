@@ -148,6 +148,12 @@ public:
     // transmission that cannot key the radio.
     std::function<void(bool)> ptt_function();
 
+    // Whether this session's rig opened and a PTT on was then sent to it
+    // (attempted, so a failed or timed-out one counts). The exit path keys
+    // off only then: a rig we never reached, or never keyed, is not ours to
+    // unkey (and waiting on one that never opened costs the full timeout).
+    bool keyed_since_open() const;
+
     // Transmit interlock. Polling stops while keyed: the answer is not
     // interesting mid-over, and some rigs dislike CAT traffic while
     // transmitting.

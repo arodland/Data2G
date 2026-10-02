@@ -30,8 +30,10 @@
 #include <utility>
 #include <vector>
 
+#include "audio/fifo.hpp"
 #include "check.hpp"
 #include "rig/controller.hpp"
+#include "rig/ptt.hpp"
 
 using namespace data2g;
 
@@ -508,6 +510,83 @@ void test_poll_interval_zero_only_keys() {
                    "rig/nopoll: open, key, unkey, nothing else");
 }
 
+// On exit the Keyer sends PTT off only to a rig that opened and was keyed:
+// one we never reached, or never keyed, is left alone (no call, no wait for
+// the operation timeout, no warning).
+void test_exit_releases_ptt_only_if_the_rig_was_keyed() {
+    audio::PlaybackFifo fifo(8000, 0.0);
+    const auto keyer = [&](rig::RigController& c, std::vector<std::string>& reports) {
+        return std::make_unique<rig::Keyer>(c.ptt_function(), fifo, 0.0,
+                                            [&reports](const std::string& s) { reports.push_back(s); },
+                                            [&c] { return c.keyed_since_open(); });
+    };
+    const auto offs = [](const std::vector<std::string>& calls) { return std::count(calls.begin(), calls.end(), "ptt-off"); };
+
+    // (a) the rig never opens: a TX's key-on fails while running (reported, as
+    // before), but exit sends nothing and says nothing more
+    {
+        auto probe = std::make_shared<Probe>();
+        probe->open_gate();
+        probe->fail_open = true;
+        Published pub;
+        rig::RigController c({}, pub.status_fn());
+        rig::RigConfig rc;
+        rc.poll_interval_s = 0;
+        rc.operation_timeout_s = 0.2;
+        c.start(make(probe), rc);
+        check::is_true(pub.wait_for_status_containing("/dev/nope"), "exit/unopened: open failed");
+        std::vector<std::string> reports;
+        auto k = keyer(c, reports);
+        k.reset();
+        check::is_true(reports.empty(), "exit/unopened: never keyed, no warning");
+        k = keyer(c, reports);
+        k->key();
+        check::equal(reports.size(), std::size_t{1}, "exit/unopened: a key-on while running still reports");
+        k.reset();
+        check::equal(reports.size(), std::size_t{1}, "exit/unopened: keyed, but exit adds no PTT off warning");
+        check::is_true(!c.keyed_since_open(), "exit/unopened: not keyed since open");
+        check::is_true(offs(probe->call_log()) == 0, "exit/unopened: no PTT off sent");
+        c.stop();
+    }
+    // (b) opens, never keyed: no PTT off
+    {
+        auto probe = std::make_shared<Probe>();
+        probe->open_gate();
+        Published pub;
+        rig::RigController c({}, pub.status_fn());
+        rig::RigConfig rc;
+        rc.poll_interval_s = 0;
+        c.start(make(probe), rc);
+        check::is_true(pub.wait_for_status_containing("Fake Rig"), "exit/idle: opened");
+        std::vector<std::string> reports;
+        keyer(c, reports).reset();
+        check::is_true(reports.empty() && probe->call_log() == std::vector<std::string>{"open"},
+                       "exit/idle: opened, never keyed: no PTT off");
+        c.stop();
+    }
+    // (c) keyed at least once: PTT off on exit, mid-over or after it
+    {
+        auto probe = std::make_shared<Probe>();
+        probe->open_gate();
+        Published pub;
+        rig::RigController c({}, pub.status_fn());
+        rig::RigConfig rc;
+        rc.poll_interval_s = 0;
+        c.start(make(probe), rc);
+        check::is_true(pub.wait_for_status_containing("Fake Rig"), "exit/keyed: opened");
+        std::vector<std::string> reports;
+        auto k = keyer(c, reports);
+        k->key();
+        k.reset();  // exit mid-over
+        check::is_true(offs(probe->call_log()) == 1, "exit/keyed: PTT off on exit mid-over");
+        k = keyer(c, reports);
+        k.reset();  // a later Keyer on the same session: the rig was keyed
+        check::is_true(offs(probe->call_log()) == 2, "exit/keyed: and after the over");
+        check::is_true(reports.empty(), "exit/keyed: no warnings");
+        c.stop();
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -523,6 +602,7 @@ int main() {
         test_polling_pauses_while_transmitting();
         test_destruction_stops_a_running_controller();
         test_poll_interval_zero_only_keys();
+        test_exit_releases_ptt_only_if_the_rig_was_keyed();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

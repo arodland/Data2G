@@ -37,6 +37,11 @@ int main(int argc, char** argv) {
         list_modes(a.kiss_bw);
         return 0;
     }
+    if (a.list_rigs) {
+        if (list_rigs()) return 0;
+        std::fprintf(stderr, "data2g-host: built without Hamlib: no rig models\n");
+        return 1;
+    }
     if (const auto bad = check(a)) usage_error(*bad);
     const auto level = parse_level(a.log_level);
     if (!level) {

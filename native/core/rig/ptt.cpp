@@ -7,10 +7,13 @@
 
 namespace data2g::rig {
 
-Keyer::Keyer(Ptt ptt, audio::PlaybackFifo& out, double off_delay_s, Report on_error)
-    : ptt_(std::move(ptt)), out_(out), off_delay_s_(off_delay_s), report_(std::move(on_error)) {}
+Keyer::Keyer(Ptt ptt, audio::PlaybackFifo& out, double off_delay_s, Report on_error, MustRelease must_release)
+    : ptt_(std::move(ptt)), out_(out), off_delay_s_(off_delay_s), report_(std::move(on_error)),
+      must_release_(std::move(must_release)) {}
 
-Keyer::~Keyer() { ptt(false); }
+Keyer::~Keyer() {
+    if (must_release_ ? must_release_() : sent_on_) ptt(false);
+}
 
 void Keyer::key() {
     if (keyed_) return;
@@ -29,6 +32,7 @@ void Keyer::unkey() {
 
 void Keyer::ptt(bool on) {
     if (!ptt_) return;
+    if (on) sent_on_ = true;
     try {
         ptt_(on);
     } catch (const std::exception& e) {

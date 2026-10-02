@@ -17,9 +17,15 @@ public:
     using Ptt = std::function<void(bool)>;
     using Report = std::function<void(const std::string&)>;
 
+    // Whether the exit path must send PTT off: RigController::keyed_since_open.
+    using MustRelease = std::function<bool()>;
+
     // `off_delay_s`: --ptt-off-delay-ms, between the audio draining and PTT off.
-    Keyer(Ptt ptt, audio::PlaybackFifo& out, double off_delay_s, Report on_error = {});
-    ~Keyer();  // PTT always comes back down
+    // `must_release` empty: whether this Keyer ever sent PTT on.
+    Keyer(Ptt ptt, audio::PlaybackFifo& out, double off_delay_s, Report on_error = {}, MustRelease must_release = {});
+    // PTT off if `must_release` says the rig was keyed; otherwise nothing
+    // (no call, no wait, no warning). unkey() always sends it.
+    ~Keyer();
 
     Keyer(const Keyer&) = delete;
     Keyer& operator=(const Keyer&) = delete;
@@ -37,7 +43,8 @@ private:
     audio::PlaybackFifo& out_;
     double off_delay_s_;
     Report report_;
-    bool keyed_ = false;
+    MustRelease must_release_;
+    bool keyed_ = false, sent_on_ = false;
     std::uint64_t failures_ = 0;
 };
 

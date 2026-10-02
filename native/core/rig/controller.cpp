@@ -53,6 +53,10 @@ struct RigSession {
     std::condition_variable cv;
     bool stopping = false;
     bool paused = false;
+    // For the exit path (keyed_since_open): open() succeeded, and a PTT on
+    // was attempted on the open rig since.
+    bool opened = false;
+    bool keyed = false;
 
     // A keying request waiting to be run, and its result. Only ever one:
     // the rig is either keyed or not, so a second request supersedes the
@@ -113,6 +117,10 @@ namespace {
 void run(std::shared_ptr<RigSession> s) {
     try {
         s->backend->open();
+        {
+            std::lock_guard<std::mutex> lock(s->m);
+            s->opened = true;
+        }
         s->publish_status("Rig: " + s->backend->description(), false);
     } catch (const std::exception& e) {
         s->publish_status(first_line(e.what()), true);
@@ -156,6 +164,10 @@ void run(std::shared_ptr<RigSession> s) {
         if (job) {
             // Priority work. Any poll that was due is simply skipped --
             // it would have been stale by the time it ran.
+            if (job->on) {
+                std::lock_guard<std::mutex> lock(s->m);
+                s->keyed = true;  // attempted: a failed or timed-out on may still have keyed it
+            }
             try {
                 s->backend->set_ptt(job->on);
             } catch (const std::exception& e) {
@@ -321,6 +333,17 @@ void RigController::set_ptt(bool on) {
                        std::to_string(s->config.operation_timeout_s) + " s");
     }
     if (job->failed) throw RigError(job->error);
+}
+
+bool RigController::keyed_since_open() const {
+    std::shared_ptr<RigSession> s;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        s = session_;
+    }
+    if (!s) return false;
+    std::lock_guard<std::mutex> lock(s->m);
+    return s->opened && s->keyed;
 }
 
 std::function<void(bool)> RigController::ptt_function() {

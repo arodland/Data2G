@@ -2,15 +2,25 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTabWidget>
+#include <QThread>
 #include <QVBoxLayout>
+
+#include <cstddef>
+#include <initializer_list>
+#include <memory>
+#include <utility>
 
 namespace data2g::gui {
 
@@ -44,6 +54,43 @@ QSpinBox* spin(int lo, int hi, int v, const QString& suffix = {}) {
     return s;
 }
 
+// One of app::rig_choices(field), shown as `labels` (same order; a value
+// without one shows as itself). A saved value that isn't a choice is kept,
+// so check() reports it rather than the dialog quietly changing it.
+QComboBox* choice(const char* field, const std::string& current, const QStringList& labels) {
+    auto* c = new QComboBox;
+    const auto& values = app::rig_choices(field);
+    for (std::size_t i = 0; i < values.size(); ++i) c->addItem(labels.value(static_cast<int>(i), qs(values[i])), qs(values[i]));
+    if (c->findData(qs(current)) < 0) c->addItem(qs(current), qs(current));
+    c->setCurrentIndex(c->findData(qs(current)));
+    return c;
+}
+std::string chosen(const QComboBox* c) { return c->currentData().toString().toStdString(); }
+
+QWidget* row(std::initializer_list<QWidget*> ws) {
+    auto* w = new QWidget;
+    auto* l = new QHBoxLayout(w);
+    l->setContentsMargins(0, 0, 0, 0);
+    for (auto* x : ws) l->addWidget(x);
+    l->addStretch();
+    return w;
+}
+
+void set_row_visible(QFormLayout* form, QWidget* field, bool visible) {
+    field->setVisible(visible);
+    if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
+}
+
+// The string-valued rig options; the QSettings key is the Args field's name.
+const std::pair<const char*, std::string app::Args::*> RIG_STRINGS[] = {
+    {"rig_device", &app::Args::rig_device},       {"rig_data_bits", &app::Args::rig_data_bits},
+    {"rig_stop_bits", &app::Args::rig_stop_bits}, {"rig_parity", &app::Args::rig_parity},
+    {"rig_handshake", &app::Args::rig_handshake}, {"rig_dtr", &app::Args::rig_dtr},
+    {"rig_rts", &app::Args::rig_rts},             {"ptt_method", &app::Args::ptt_method},
+    {"ptt_device", &app::Args::ptt_device},       {"ptt_audio", &app::Args::ptt_audio},
+    {"rig_mode", &app::Args::rig_mode},
+};
+
 }  // namespace
 
 app::Args load_settings(QSettings& s, app::Args a) {
@@ -57,6 +104,14 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.rigctld_port = s.value("rigctld_port", a.rigctld_port).toInt();
     a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
     a.ptt_off_delay_ms = s.value("ptt_off_delay_ms", a.ptt_off_delay_ms).toInt();
+    a.rig = s.value("rig", a.rig).toBool();
+    a.rig_model = s.value("rig_model", a.rig_model).toInt();
+    a.rig_baud = s.value("rig_baud", a.rig_baud).toInt();
+    for (const auto& [key, field] : RIG_STRINGS) a.*field = str(key, a.*field);
+    a.rig_timeout_ms = s.value("rig_timeout_ms", a.rig_timeout_ms).toInt();
+    a.rig_retries = s.value("rig_retries", a.rig_retries).toInt();
+    a.rig_poll_interval = s.value("rig_poll_interval", a.rig_poll_interval).toDouble();
+    a.rig_debug = s.value("rig_debug", a.rig_debug).toBool();
     a.vara = s.value("vara", a.vara).toBool();
     a.host = str("host", a.host);
     a.command_port = s.value("command_port", a.command_port).toInt();
@@ -77,6 +132,14 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("rigctld_port", a.rigctld_port);
     s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);
     s.setValue("ptt_off_delay_ms", a.ptt_off_delay_ms);
+    s.setValue("rig", a.rig);
+    s.setValue("rig_model", a.rig_model);
+    s.setValue("rig_baud", a.rig_baud);
+    for (const auto& [key, field] : RIG_STRINGS) s.setValue(key, qs(a.*field));
+    s.setValue("rig_timeout_ms", a.rig_timeout_ms);
+    s.setValue("rig_retries", a.rig_retries);
+    s.setValue("rig_poll_interval", a.rig_poll_interval);
+    s.setValue("rig_debug", a.rig_debug);
     s.setValue("vara", a.vara);
     s.setValue("host", qs(a.host));
     s.setValue("command_port", a.command_port);
@@ -87,9 +150,15 @@ void save_settings(QSettings& s, const app::Args& a) {
 }
 
 SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent)
-    : QDialog(parent) {
+    : QDialog(parent), base_(a) {
     setWindowTitle(tr("Data2G settings"));
-    auto* top = new QVBoxLayout(this);
+    auto* outer = new QVBoxLayout(this);
+    auto* tabs = new QTabWidget;
+    outer->addWidget(tabs);
+    auto* general = new QWidget;
+    auto* top = new QVBoxLayout(general);
+    tabs->addTab(general, tr("Station"));
+    tabs->addTab(rig_tab(a), tr("Rig"));
     const auto group = [&](const QString& title) {
         auto* g = new QGroupBox(title);
         auto* f = new QFormLayout(g);
@@ -128,17 +197,6 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     if (!a.audio_io.empty())
         audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
 
-    auto* ptt = group(tr("PTT (rigctld, Hamlib model 2)"));
-    rig_host_ = new QLineEdit(qs(a.rigctld_host));
-    ptt->addRow(tr("rigctld host"), rig_host_);
-    rig_port_ = spin(0, 65535, a.rigctld_port);
-    rig_port_->setSpecialValueText(tr("0 (no PTT)"));
-    ptt->addRow(tr("rigctld port"), rig_port_);
-    ptt_on_ = spin(0, 2000, a.ptt_on_delay_ms, tr(" ms"));
-    ptt->addRow(tr("PTT on delay"), ptt_on_);
-    ptt_off_ = spin(0, 2000, a.ptt_off_delay_ms, tr(" ms"));
-    ptt->addRow(tr("PTT off delay"), ptt_off_);
-
     auto* vara = group(tr("VARA ports"));
     vara_ = new QCheckBox(tr("Serve VARA clients"));
     vara_->setChecked(a.vara);
@@ -150,10 +208,10 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     const auto show_data = [data_port](int p) { data_port->setText(tr("data on %1").arg(p + 1)); };
     show_data(a.command_port);
     connect(cmd_port_, &QSpinBox::valueChanged, data_port, show_data);
-    auto* row = new QHBoxLayout;
-    row->addWidget(cmd_port_);
-    row->addWidget(data_port);
-    vara->addRow(tr("Command port"), row);
+    auto* port_row = new QHBoxLayout;
+    port_row->addWidget(cmd_port_);
+    port_row->addWidget(data_port);
+    vara->addRow(tr("Command port"), port_row);
 
     auto* kiss = group(tr("KISS"));
     kiss_ = new QCheckBox(tr("Serve KISS clients"));
@@ -163,11 +221,197 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     kiss->addRow(tr("Address"), kiss_address_);
     kiss_port_ = spin(1, 65535, a.kiss_port);
     kiss->addRow(tr("Port"), kiss_port_);
+    top->addStretch();
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    top->addWidget(buttons);
+    outer->addWidget(buttons);
+}
+
+// SSTVAE's Rig tab (gui/settings_dialog.cpp rig_tab), in a plain form.
+QWidget* SettingsDialog::rig_tab(const app::Args& a) {
+    auto* page = new QWidget;
+    auto* form = rig_form_ = new QFormLayout(page);
+
+    rig_on_ = new QCheckBox(tr("Use rig control (PTT through Hamlib)"));
+    rig_on_->setChecked(app::rig_enabled(a));
+    form->addRow(rig_on_);
+
+    // Editable: the list may be missing (no Hamlib) or lack a saved model,
+    // and the number must still be typeable and survive a round trip.
+    rig_model_ = new QComboBox;
+    rig_model_->setEditable(true);
+    rig_model_->setInsertPolicy(QComboBox::NoInsert);
+#ifdef DATA2G_HAVE_RIG
+    for (const rig::RigModel& m : rig::list_models())
+        rig_model_->addItem(tr("%1 (%2)").arg(qs(m.label())).arg(m.model), m.model);
+#endif
+    // 300-odd "<mfg> <model>" entries: match what is typed anywhere ("7300").
+    rig_model_->completer()->setCaseSensitivity(Qt::CaseInsensitive);
+    rig_model_->completer()->setFilterMode(Qt::MatchContains);
+    if (const int i = rig_model_->findData(a.rig_model); i >= 0) rig_model_->setCurrentIndex(i);
+    else rig_model_->setEditText(QString::number(a.rig_model));
+    form->addRow(tr("Rig"), rig_model_);
+
+    // Model 2 with no device is rigctld at --rigctld-host:--rigctld-port: shown as such.
+    rig_device_ = new QLineEdit(a.rig_device.empty() && a.rig_model == rig::MODEL_NET_RIGCTL ? rigctld_text() : qs(a.rig_device));
+    form->addRow(tr("Device"), rig_device_);
+
+    baud_ = new QComboBox;
+    baud_->addItem(tr("Default"), 0);
+    for (int b : {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}) baud_->addItem(QString::number(b), b);
+    if (baud_->findData(a.rig_baud) < 0) baud_->addItem(QString::number(a.rig_baud), a.rig_baud);
+    baud_->setCurrentIndex(baud_->findData(a.rig_baud));
+    data_bits_ = choice("rig_data_bits", a.rig_data_bits, {tr("Default")});
+    stop_bits_ = choice("rig_stop_bits", a.rig_stop_bits, {tr("Default")});
+    parity_ = choice("rig_parity", a.rig_parity, {tr("Default"), tr("None"), tr("Odd"), tr("Even")});
+    handshake_ = choice("rig_handshake", a.rig_handshake, {tr("Default"), tr("None"), tr("XON/XOFF"), tr("Hardware")});
+    const QStringList levels = {tr("Default"), tr("High"), tr("Low")};
+    dtr_ = choice("rig_dtr", a.rig_dtr, levels);
+    rts_ = choice("rig_rts", a.rig_rts, levels);
+    serial_row_ = row({new QLabel(tr("Baud")), baud_, new QLabel(tr("Data")), data_bits_, new QLabel(tr("Stop")), stop_bits_});
+    form->addRow(tr("Serial"), serial_row_);
+    serial_row2_ = row({new QLabel(tr("Parity")), parity_, new QLabel(tr("Handshake")), handshake_});
+    form->addRow(QString(), serial_row2_);
+    lines_row_ = row({new QLabel(tr("DTR")), dtr_, new QLabel(tr("RTS")), rts_});
+    lines_row_->setToolTip(tr("Held for the whole session: how an interface powered from the control lines stays fed"));
+    form->addRow(tr("Control lines"), lines_row_);
+
+    ptt_method_ = choice("ptt_method", a.ptt_method, {tr("VOX"), tr("CAT"), tr("DTR"), tr("RTS")});
+    ptt_device_ = new QLineEdit(qs(a.ptt_device));
+    ptt_device_->setPlaceholderText(tr("(the device above)"));
+    form->addRow(tr("PTT"), row({ptt_method_, new QLabel(tr("Port")), ptt_device_}));
+    ptt_audio_ = choice("ptt_audio", a.ptt_audio, {tr("Mic / front"), tr("Data / rear")});
+    form->addRow(tr("Transmit audio"), ptt_audio_);
+    auto* note = new QLabel(tr("VOX: never key (the rig keys on the audio). DTR and RTS may use another port. "
+                               "Transmit audio: the input CAT keying selects, on rigs with two."));
+    note->setWordWrap(true);
+    form->addRow(note);
+    rig_mode_ = choice("rig_mode", a.rig_mode, {tr("None"), tr("USB"), tr("Data/Pkt")});
+    form->addRow(tr("Mode on connect"), rig_mode_);
+
+    ptt_on_ = spin(0, 2000, a.ptt_on_delay_ms, tr(" ms"));
+    ptt_off_ = spin(0, 2000, a.ptt_off_delay_ms, tr(" ms"));
+    form->addRow(tr("PTT delays"), row({new QLabel(tr("On")), ptt_on_, new QLabel(tr("Off")), ptt_off_}));
+    timeout_ = spin(1, 60000, a.rig_timeout_ms, tr(" ms"));
+    retries_ = spin(0, 10, a.rig_retries);
+    form->addRow(tr("Hamlib"), row({new QLabel(tr("Timeout")), timeout_, new QLabel(tr("Retries")), retries_}));
+    poll_ = new QDoubleSpinBox;
+    poll_->setRange(0.0, 3600.0);
+    poll_->setDecimals(1);
+    poll_->setSuffix(tr(" s"));
+    poll_->setSpecialValueText(tr("off (key only)"));
+    poll_->setValue(a.rig_poll_interval);
+    poll_->setToolTip(tr("Read the dial frequency this often, for the main window"));
+    form->addRow(tr("Frequency poll"), poll_);
+    rig_debug_ = new QCheckBox(tr("Hamlib's trace in the log"));
+    rig_debug_->setChecked(a.rig_debug);
+    form->addRow(rig_debug_);
+
+#ifdef DATA2G_HAVE_RIG
+    // They act at once, on a radio that may be on an antenna. The running
+    // station holds the rig, so a serial one may report busy here.
+    test_cat_ = new QPushButton(tr("Test CAT"));
+    test_ptt_ = new QPushButton(tr("Test PTT (0.5 s)"));
+    connect(test_cat_, &QPushButton::clicked, this, [this] { test_rig(false); });
+    connect(test_ptt_, &QPushButton::clicked, this, [this] { test_rig(true); });
+    auto* tests = new QHBoxLayout;
+    tests->addStretch();
+    tests->addWidget(test_cat_);
+    tests->addWidget(test_ptt_);
+    tests->addStretch();
+    form->addRow(tests);
+#endif
+
+    connect(rig_model_, &QComboBox::currentTextChanged, this, [this] { sync_rig(); });
+    connect(ptt_method_, &QComboBox::currentIndexChanged, this, [this] { sync_rig(); });
+    sync_rig();
+    return page;
+}
+
+QString SettingsDialog::rigctld_text() const {
+    return tr("%1:%2").arg(qs(base_.rigctld_host)).arg(base_.rigctld_port ? base_.rigctld_port : 4532);
+}
+
+int SettingsDialog::rig_model() const {
+    // An item carries its number; typed text is a label, a bare number, or a
+    // label ending "(N)".
+    const QString text = rig_model_->currentText().trimmed();
+    if (const int i = rig_model_->findText(text); i >= 0) return rig_model_->itemData(i).toInt();
+    bool ok = false;
+    if (const int n = text.toInt(&ok); ok) return n;
+    const int open = text.lastIndexOf(QLatin1Char('(')), close = text.lastIndexOf(QLatin1Char(')'));
+    if (open >= 0 && close > open)
+        if (const int n = text.mid(open + 1, close - open - 1).toInt(&ok); ok) return n;
+    return base_.rig_model;
+}
+
+void SettingsDialog::sync_rig() {
+    const int model = rig_model();
+    // Without Hamlib to ask: model 2 is a network client, anything else may be serial.
+    rig::PortType port = model == rig::MODEL_NET_RIGCTL ? rig::PortType::Network : rig::PortType::Serial;
+    bool micdata = false;
+#ifdef DATA2G_HAVE_RIG
+    if (const auto info = rig::model_info(model)) port = info->port;
+    micdata = rig::supports_ptt_audio_source(model);
+#endif
+    const bool serial = port == rig::PortType::Serial;
+    set_row_visible(rig_form_, rig_device_, port != rig::PortType::None);
+    rig_device_->setPlaceholderText(serial                               ? tr("/dev/ttyUSB0 or COM5")
+                                    : port == rig::PortType::Network ? tr("host:port")
+                                                                     : tr("(Hamlib's default)"));
+    for (QWidget* w : {serial_row_, serial_row2_, lines_row_}) set_row_visible(rig_form_, w, serial);
+    const std::string method = chosen(ptt_method_);
+    ptt_device_->setEnabled(method == "dtr" || method == "rts");
+    ptt_audio_->setEnabled(method == "cat" && micdata);
+}
+
+void SettingsDialog::test_rig(bool key_ptt) {
+#ifdef DATA2G_HAVE_RIG
+    app::Args a = base_;
+    apply_to(a);
+    a.rig = true;
+    if (const auto bad = app::check(a)) {
+        QMessageBox::warning(this, tr("Rig control"), qs(*bad));
+        return;
+    }
+    const rig::HamlibConfig config = app::hamlib_config(a);
+    test_cat_->setEnabled(false);
+    test_ptt_->setEnabled(false);
+    // A worker thread: a rig that is off costs the timeout, and the GUI never
+    // waits on one. The answer reaches the dialog only if it still exists.
+    auto result = std::make_shared<std::pair<bool, QString>>();
+    QThread* t = QThread::create([config, key_ptt, result] {
+        try {
+            auto backend = rig::make_hamlib_backend(config);
+            backend->open();
+            if (key_ptt) {
+                backend->set_ptt(true);
+                QThread::msleep(500);
+                backend->set_ptt(false);
+                *result = {true, tr("PTT keyed and released.")};
+            } else {
+                *result = {true, tr("Connected to %1.\nDial frequency: %2 MHz")
+                                     .arg(qs(backend->description()))
+                                     .arg(backend->frequency_hz() / 1e6, 0, 'f', 4)};
+            }
+            backend->close();
+        } catch (const std::exception& e) {
+            *result = {false, QString::fromUtf8(e.what())};
+        }
+    });
+    connect(t, &QThread::finished, this, [this, result] {
+        test_cat_->setEnabled(true);
+        test_ptt_->setEnabled(true);
+        if (result->first) QMessageBox::information(this, tr("Rig control"), result->second);
+        else QMessageBox::warning(this, tr("Rig control"), result->second);
+    });
+    connect(t, &QThread::finished, t, &QObject::deleteLater);
+    t->start();
+#else
+    (void)key_ptt;
+#endif
 }
 
 void SettingsDialog::apply_to(app::Args& a) const {
@@ -176,8 +420,31 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.output_device = opt(output_->currentData().toString());
     a.sample_rate = rate_->currentData().toInt();
     a.output_volume = volume_->value();
-    a.rigctld_host = rig_host_->text().trimmed().toStdString();
-    a.rigctld_port = rig_port_->value();
+    a.rig = rig_on_->isChecked();
+    a.rig_model = rig_model();
+    a.rigctld_host = base_.rigctld_host;
+    a.rigctld_port = base_.rigctld_port;
+    a.rig_device = rig_device_->text().trimmed().toStdString();
+    // Model 2 still at rigctld's address: kept as --rigctld-host/--rigctld-port.
+    if (a.rig_model == rig::MODEL_NET_RIGCTL && QString::fromStdString(a.rig_device) == rigctld_text()) {
+        a.rig_device.clear();
+        if (a.rig && !a.rigctld_port) a.rigctld_port = 4532;  // turned on after --rigctld-port 0
+    }
+    a.rig_baud = baud_->currentData().toInt();
+    a.rig_data_bits = chosen(data_bits_);
+    a.rig_stop_bits = chosen(stop_bits_);
+    a.rig_parity = chosen(parity_);
+    a.rig_handshake = chosen(handshake_);
+    a.rig_dtr = chosen(dtr_);
+    a.rig_rts = chosen(rts_);
+    a.ptt_method = chosen(ptt_method_);
+    a.ptt_device = ptt_device_->text().trimmed().toStdString();
+    a.ptt_audio = chosen(ptt_audio_);
+    a.rig_mode = chosen(rig_mode_);
+    a.rig_timeout_ms = timeout_->value();
+    a.rig_retries = retries_->value();
+    a.rig_poll_interval = poll_->value();
+    a.rig_debug = rig_debug_->isChecked();
     a.ptt_on_delay_ms = ptt_on_->value();
     a.ptt_off_delay_ms = ptt_off_->value();
     a.vara = vara_->isChecked();
