@@ -192,7 +192,10 @@ class Session:
         (caller), or hold a wake past it (callee)."""
         end = now + self.policy.airtime(submode, n_cw)
         if self._deadline is not None:
-            self._deadline = max(self._deadline, end + self.t_turn)
+            # a peer's ID burst (one codeword in the connect mode) runs straight
+            # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
+            is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
+            self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
         if not self._master:
             self._quiet_from = max(self._quiet_from, end)
 

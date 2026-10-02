@@ -164,7 +164,8 @@ Where the rest comes from:
   any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,
   `T_ABANDON` under 2 bytes, K or C past the burst's codeword count, a truncated TLV.
   Session frames likewise: shorter than their subtype's length, callsign codes past
-  the alphabet, a CONNECT_ACK cap code above 2. No new recovery: repeats, the
+  the alphabet, a CONNECT_ACK cap code above 2. CQ and ID frames (§7a) too: a `T_CQ`
+  under 9 B, a `T_ID` under 10 B, callsign codes past the alphabet. No new recovery: repeats, the
   watchdog and bounded failure (§10) handle it. Before 2026-10 these raised out of
   the receiver (16% of fuzzed link runs with corrupted control).
 - **Repeats:** a timed-out sender's first retry is the identical burst, with the same
@@ -215,6 +216,7 @@ Where the rest comes from:
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
 | buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
+| id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
 
 ## 6. Turn rules and timers
@@ -295,7 +297,7 @@ Where the rest comes from:
 
 These are sent in the most robust mode the bandwidth cap allows. The fields span
 several control codewords, and callsigns are packed 6 bits per character, up to 10
-characters plus SSID.
+characters plus SSID, space padded at the end (a space inside a name is kept).
 
 | frame | contents |
 |---|---|
@@ -305,6 +307,29 @@ characters plus SSID.
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
 CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+
+## 7a. ID frames
+
+Station identification, readable by anyone listening (data2g/arq/engine.py).
+
+- **Frame:** a control-only burst, frame type SESSION, mask 0, in the cap's connect mode, as a
+  CQ frame is. It carries a `T_ID` = 16 extension: the packed callsign (8 B), then the
+  16-bit session key it identifies for (2 B). One codeword in every connect mode.
+- **Mask 0, not the session key:** under the session key anyone could still read it
+  (§2), but only a station with the key could check its CRC. At mask 0, anyone can.
+- **Outside the protocol:** no seq, no burst seq, never seen by the session. A receiver
+  notifies it as `ID call key`, and logs it.
+- **During a session:** at least every `ID_INTERVAL_S` (600 s, FCC 97.119), the ID goes
+  back to back ahead of the station's own turn, on the same PTT.
+  - A waiting caller that hears a one-codeword burst in the connect mode allows
+    `REPLY_START_S` more for the reply's header. The reply follows the ID at once, and
+    finding its header takes up to ~0.85 s, close to `T_turn`.
+- **After a session:** one more ID, still with the expired session's key.
+  - The station that closes on a DISC sends it right after its DISC_ACK.
+  - Otherwise it goes `ID_GUARD_S` (1.5 s) after the close.
+  - Nothing new goes out in that guard (KISS, CQ, a new session), so the peer's
+    trailing ID is heard and not keyed over. A KISS frame queued during a session was
+    lost that way.
 
 ## 8. Gear-shift loop (summary; details in the phase E policy doc)
 

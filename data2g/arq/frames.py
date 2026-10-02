@@ -37,6 +37,8 @@ HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed 
 ZDICT = (Path(__file__).parent / "zdict.bin").read_bytes()
 MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
+# packed callsign + the session key it identifies for: an ID frame (docs/arq.md §7a), mask 0
+T_ID = 16
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
 
@@ -192,14 +194,16 @@ def inflate(hist: bytes, payload: bytes) -> bytes:
 
 # --- callsigns ----------------------------------------------------------------
 
-CALL_ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"  # 6 bits, space = end
+# 6 bits; space pads at the end, so a name may hold spaces ("VARA KISS") but
+# trailing ones don't survive the round trip
+CALL_ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"
 CALL_CHARS = 10
 
 
 def pack_call(call: str) -> bytes:
     call = call.upper()
-    if len(call) > CALL_CHARS or any(c not in CALL_ALPHABET[1:] for c in call):
-        raise ValueError(f"callsign {call!r}: up to {CALL_CHARS} of A-Z 0-9 / -")
+    if len(call) > CALL_CHARS or any(c not in CALL_ALPHABET for c in call):
+        raise ValueError(f"callsign {call!r}: up to {CALL_CHARS} of A-Z 0-9 / - space")
     v = 0
     for c in call.ljust(CALL_CHARS):
         v = (v << 6) | CALL_ALPHABET.index(c)

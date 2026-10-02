@@ -319,15 +319,55 @@ std::vector<std::string> Engine::events() {
 
 void Engine::send_cq(const std::string& call, int cap) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
-    const std::string mode = session_->policy->connect_mode(cap, 0);
     Bytes body = pack_call(call);
     body.push_back(static_cast<std::uint8_t>(cap));
-    Control ctl{Core{.ftype = SESSION}, {{T_CQ, body}}};
+    extra_.push_back(open_frame(cap, T_CQ, body));
+}
+
+TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
+    const std::string mode = session_->policy->connect_mode(cap, 0);
+    Control ctl{Core{.ftype = SESSION}, {{ext, body}}};
     const auto payloads = ctl.pack(session_->policy->payload_bytes(mode));
     auto b = std::make_shared<TxBurst>();
     b->submode = mode;
     for (std::size_t i = 0; i < payloads.size(); ++i) b->slots.push_back({ctl_mask(0, static_cast<int>(i), 0), 0, payloads[i]});
-    extra_.push_back(std::move(b));
+    return b;
+}
+
+TxBurstPtr Engine::id_frame(const Session& s) const {
+    log_write(LOG, INFO, format("TX ID %s", s.call.c_str()));
+    Bytes body = pack_call(s.call);
+    body.push_back(static_cast<std::uint8_t>(s.station->key >> 8));
+    body.push_back(static_cast<std::uint8_t>(s.station->key & 255));
+    return open_frame(s.cap, T_ID, body);
+}
+
+// Track the session ID frames are owed for; once it closes, its last ID is pending.
+void Engine::id_check(double t) {
+    if (!session_->station) return;
+    if (session_ != id_for_) {
+        id_for_ = session_;
+        id_due_ = t + id_interval_s;
+    }
+    if (session_->state == SessionState::CLOSED && id_due_) {
+        id_due_.reset();
+        id_pending_ = session_;
+        id_pending_t_ = hold_ = t + ID_GUARD_S;
+    }
+}
+
+// A session's burst -> the bursts to send back to back: an ID first when one
+// is due, or the pending last ID after a closed session's final burst (its DISC_ACK).
+std::vector<TxBurstPtr> Engine::with_id(const TxBurstPtr& burst, double t) {
+    if (session_->state == SessionState::CLOSED && id_pending_) {
+        id_pending_.reset();
+        return {burst, id_frame(*session_)};
+    }
+    if (session_ == id_for_ && id_due_ && t >= *id_due_) {
+        id_due_ = t + id_interval_s;
+        return {id_frame(*session_), burst};
+    }
+    return {burst};
 }
 
 void Engine::post(std::function<void()> f) {
@@ -460,18 +500,29 @@ Engine::Done Engine::process(Block& b) {
     if (!tx_) {
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         if (fresh) hear(b.items, t);
+        id_check(t);
         const bool busy = fresh && b.busy;
-        TxBurstPtr burst;
-        if (!busy) {  // a burst still arriving holds any reply (half duplex)
-            burst = session_->poll(t);
-            if (!burst && !extra_.empty()) {
-                burst = extra_.front();
+        std::vector<TxBurstPtr> bursts;
+        TxBurstPtr main;
+        const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
+        if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
+            auto burst = session_->poll(t);
+            id_check(t);
+            if (burst) {
+                bursts = with_id(burst, t);
+                main = burst;
+            } else if (id_pending_ && t >= id_pending_t_) {
+                bursts = {id_frame(*id_pending_)};
+                id_pending_.reset();
+            } else if (!extra_.empty() && t >= hold_) {
+                bursts = {extra_.front()};
                 extra_.pop_front();
             }
         }
-        if (!burst && cfg_.kiss && idle()) burst = kiss_burst(k, busy);  // KISS only between ARQ sessions
-        else kiss_busy_ = 0;
-        if (burst) start_tx(burst, t);
+        if (bursts.empty() && cfg_.kiss && t >= hold_ && idle()) {  // KISS only between ARQ sessions
+            if (auto kb = kiss_burst(k, busy)) bursts = {kb};
+        } else kiss_busy_ = 0;
+        if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
     }
     if (tx_) {
         const auto n = std::min<std::size_t>(static_cast<std::size_t>(k), tx_->audio.size() - tx_->pos);
@@ -568,52 +619,77 @@ TxBurstPtr Engine::kiss_burst(std::int64_t k, bool busy) {
     return link.next_burst();
 }
 
+// A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)? Then
+// nothing else to do. A malformed one (docs/arq.md §4) is dropped as if it
+// had not decoded.
 bool Engine::cq(ModemRx& rx) {
     const auto first = rx.decode(0, ctl_mask(0, 0, 0), 0, nullptr);
     if (!first) return false;
     const Core core = Core::unpack(*first);
-    if (core.ftype != SESSION) return false;
+    if (core.ftype != SESSION || core.n_ctl > rx.n_cw()) return false;
     std::vector<Bytes> payloads = {*first};
     for (int i = 1; i < core.n_ctl; ++i) {
         auto p = rx.decode(i, ctl_mask(0, i, 0), 0, nullptr);
         if (!p) return false;
         payloads.push_back(std::move(*p));
     }
-    Bytes body;
     try {
         const auto ext = Control::unpack(payloads).ext;
+        if (const auto it = ext.find(T_ID); it != ext.end()) {
+            const Bytes& body = it->second;
+            if (body.size() < 10) throw std::invalid_argument("ID of " + std::to_string(body.size()) + " B");
+            const std::string call = unpack_call(ByteView(body).first(8));
+            const int key = body[8] << 8 | body[9];
+            if (log_enabled(LOG, INFO)) log_write(LOG, INFO, format("RX ID %s (session %04x)", call.c_str(), key));
+            events_.push_back("ID " + call + " " + std::to_string(key));
+            return true;
+        }
         const auto it = ext.find(T_CQ);
-        if (it != ext.end()) body = it->second;
-    } catch (const std::invalid_argument&) {
+        if (it == ext.end()) return false;
+        const Bytes& body = it->second;
+        if (body.size() < 9) throw std::invalid_argument("CQ of " + std::to_string(body.size()) + " B");
+        events_.push_back("CQFRAME " + unpack_call(ByteView(body).first(8)) + " " + std::to_string(body[8]));
+        return true;
+    } catch (const std::invalid_argument& e) {
+        log_write(LOG, WARNING, format("RX malformed CQ/ID frame (%s): dropped", e.what()));
         return false;
     }
-    if (body.size() < 9) return false;
-    events_.push_back("CQFRAME " + unpack_call(ByteView(body).first(8)) + " " + std::to_string(body[8]));
-    return true;
 }
 
-void Engine::start_tx(const TxBurstPtr& burst, double t) {
-    const auto x = tx_audio(*burst);
-    // peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound card clips at 1
-    double peak = 0.0;
-    for (double v : x) peak = std::max(peak, std::fabs(v));
-    Tx tx{burst, std::vector<double>(static_cast<std::size_t>(ptt_delay_), 0.0), 0};
-    for (double v : x) tx.audio.push_back(v / peak);
+void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxBurstPtr& main) {
+    Tx tx{main, std::vector<double>(static_cast<std::size_t>(ptt_delay_), 0.0), 0};
+    std::vector<std::size_t> lens;
+    for (const auto& b : bursts) {
+        const auto x = tx_audio(*b);
+        // peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound card clips at 1
+        double peak = 0.0;
+        for (double v : x) peak = std::max(peak, std::fabs(v));
+        for (double v : x) tx.audio.push_back(v / peak);
+        lens.push_back(x.size());
+    }
     if (rec_) {
-        std::string slots = "[";
-        for (std::size_t i = 0; i < burst->slots.size(); ++i) {
-            const auto& s = burst->slots[i];
-            if (i) slots += ", ";
-            slots += json_obj({{"mask", "[" + std::to_string(s.mask_id.key) + ", " + std::to_string(s.mask_id.direction) + ", " +
-                                            std::to_string(s.mask_id.seq) + "]"},
-                               {"rv", std::to_string(s.rv)},
-                               {"payload", json_str(hex(s.payload))}});
+        // one event per burst, at its own start: the first's seconds include
+        // the PTT delay, as a lone burst's always did (scripts/replay.py)
+        for (std::size_t j = 0; j < bursts.size(); ++j) {
+            const auto& burst = bursts[j];
+            std::string slots = "[";
+            for (std::size_t i = 0; i < burst->slots.size(); ++i) {
+                const auto& s = burst->slots[i];
+                if (i) slots += ", ";
+                slots += json_obj({{"mask", "[" + std::to_string(s.mask_id.key) + ", " + std::to_string(s.mask_id.direction) +
+                                                ", " + std::to_string(s.mask_id.seq) + "]"},
+                                   {"rv", std::to_string(s.rv)},
+                                   {"payload", json_str(hex(s.payload))}});
+            }
+            const double seconds =
+                static_cast<double>(lens[j] + (j == 0 ? static_cast<std::size_t>(ptt_delay_) : 0)) / config::FS;
+            rec_->event("tx", {{"t", json_num(t)},
+                               {"submode", json_str(burst->submode)},
+                               {"burst_seq", std::to_string(burst->burst_seq)},
+                               {"slots", slots + "]"},
+                               {"seconds", json_num(seconds)}});
+            t += seconds;
         }
-        rec_->event("tx", {{"t", json_num(t)},
-                           {"submode", json_str(burst->submode)},
-                           {"burst_seq", std::to_string(burst->burst_seq)},
-                           {"slots", slots + "]"},
-                           {"seconds", json_num(static_cast<double>(tx.audio.size()) / config::FS)}});
     }
     tx_ = std::move(tx);
 }

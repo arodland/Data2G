@@ -43,7 +43,7 @@ def test_bitmap_rv_callsign_records():
     assert F.pack_bitmap(set(), 7) == b""
     rvs = [0, 1, 2, 3, 3, 2, 1]
     assert F.unpack_rv(F.pack_rv(rvs), len(rvs)) == rvs
-    for call in ("W1AW", "VK2ABC-15", "G4ABC/P", "KD9XYZ-1"):
+    for call in ("W1AW", "VK2ABC-15", "G4ABC/P", "KD9XYZ-1", "VARA KISS"):
         assert F.unpack_call(F.pack_call(call)) == call
     r = F.RecordReader()
     data = bytes(range(256)) * 3

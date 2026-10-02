@@ -1115,6 +1115,7 @@ def _engine_substitutions(native):
             return self._n.step(np.asarray(x, dtype=np.float64))
 
         n = property(lambda s: s._n.n, lambda s, v: setattr(s._n, "n", v))
+        id_interval_s = property(lambda s: s._n.id_interval_s, lambda s, v: setattr(s._n, "id_interval_s", v))
 
         @property
         def kiss_rx(self):

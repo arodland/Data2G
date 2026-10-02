@@ -182,7 +182,12 @@ void Session::on_tx_end(double now) {
 
 void Session::on_header(const std::string& submode, int n_cw, double now) {
     const double end = now + policy->airtime(submode, n_cw, false);
-    if (deadline) deadline = std::max(*deadline, end + t_turn);
+    if (deadline) {
+        // a peer's ID burst (one codeword in the connect mode) runs straight
+        // into its reply, whose header must still be found (engine ID_INTERVAL_S)
+        const bool is_id = n_cw == 1 && submode == policy->connect_mode(cap, 0);
+        deadline = std::max(*deadline, end + t_turn + (is_id ? tune.reply_start_s : 0.0));
+    }
     if (!master()) quiet_from = std::max(quiet_from, end);
 }
 

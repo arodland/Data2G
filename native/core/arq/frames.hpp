@@ -32,7 +32,8 @@ inline constexpr int ARQ = 0, SESSION = 1, PROBE = 2, ARQ_DUP = 3;
 // extension types
 inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4, T_RESYNC = 5, T_REPORT = 6,
                      T_SURVEY = 7, T_SOUND = 8, T_BUFFER = 9, T_REPLY = 11, T_CHAT = 12, T_CQ = 13, T_DUPCTL = 14,
-                     T_COMP = 15;
+                     T_COMP = 15,
+                     T_ID = 16;  // packed callsign + session key: an ID frame (docs/arq.md §7a), mask 0
 inline constexpr int CHAT_LINE_BYTES = 200;
 inline constexpr int HIST = 4096;
 inline constexpr int MAX_INFLATE = 1 << 16;
