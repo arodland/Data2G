@@ -34,6 +34,7 @@
 #include <thread>
 #include <vector>
 #include <cstddef>
+#include <span>
 
 #include "rig/hamlib/hamlib.hpp"  // types only: no libhamlib needed
 
@@ -195,7 +196,8 @@ public:
     AudioCounters counters() const;
     // The newest `n` samples (FS) the engine read, and how many it has read
     // in all (unchanged: nothing new).
-    std::vector<double> input_tail(std::size_t n, std::uint64_t* total = nullptr) const;
+    // `tx`: the newest block is our own TX audio (8 kHz, peak 1.0), not input.
+    std::vector<double> input_tail(std::size_t n, std::uint64_t* total = nullptr, bool* tx = nullptr) const;
     // The dial frequency the rig last reported (--rig-poll-interval > 0), or nothing.
     std::optional<double> rig_frequency() const;
 
@@ -212,7 +214,7 @@ private:
     // engine thread
     void engine_loop();
     void watch_counters();
-    void tap(const std::vector<double>& x);
+    void tap(std::span<const double> x, bool tx);
 
     Args a_;
     QObject ctx_;  // queued calls from other threads land here, on the owner's thread
@@ -240,6 +242,7 @@ private:
     mutable std::mutex tap_mu_;
     std::vector<double> tap_;  // ring of the newest input
     std::uint64_t tapped_ = 0;
+    bool tap_tx_ = false;  // the newest tapped block was TX audio
 };
 
 }  // namespace data2g::app

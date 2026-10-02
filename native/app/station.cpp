@@ -674,17 +674,19 @@ void Station::watch_counters() {
     }
 }
 
-void Station::tap(const std::vector<double>& x) {
+void Station::tap(std::span<const double> x, bool tx) {
     std::lock_guard lock(tap_mu_);
     for (double v : x) tap_[tapped_++ % tap_.size()] = v;
+    tap_tx_ = tx;
 }
 
-std::vector<double> Station::input_tail(std::size_t n, std::uint64_t* total) const {
+std::vector<double> Station::input_tail(std::size_t n, std::uint64_t* total, bool* tx) const {
     std::lock_guard lock(tap_mu_);
     n = std::min({n, tap_.size(), static_cast<std::size_t>(tapped_)});
     std::vector<double> out(n);
     for (std::size_t i = 0; i < n; ++i) out[i] = tap_[(tapped_ - n + i) % tap_.size()];
     if (total) *total = tapped_;
+    if (tx) *tx = tap_tx_;
     return out;
 }
 
@@ -717,10 +719,14 @@ void Station::engine_loop() {
         while (!stop_) {
             auto x = cap_->read(block);
             if (!x) break;
-            tap(*x);
+            const std::vector<double> heard = *x;
             if (keyer_->keyed()) std::fill(x->begin(), x->end(), 0.0);
             const auto t0 = std::chrono::steady_clock::now();
             auto out = engine_->step(*x);
+            // the waterfall shows what we send while we send it (the radio's
+            // RX audio is muted then), what we hear otherwise
+            if (out.ptt && out.audio.size() == heard.size()) tap(out.audio, true);
+            else tap(heard, false);
             const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             if (took > static_cast<double>(block) / config::FS) {
                 ++slow;

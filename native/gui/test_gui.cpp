@@ -16,11 +16,13 @@
 
 #include <fstream>
 #include <functional>
+#include <random>
 
 #include "arq/engine.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
 #include "main_window.hpp"
+#include "waterfall.hpp"
 #include "settings_dialog.hpp"
 
 using namespace data2g;
@@ -219,6 +221,25 @@ void test_window(const QTemporaryDir& dir) {
     const app::AudioCounters c = w.station().counters();
     check::is_true(c.overflows == 0 && c.dropped == 0 && c.underruns == 0 && c.decode_dropped == 0, "no audio faults");
 
+    // our own CQ: its audio goes on the waterfall (TX colours) while PTT is up
+    check::current_step = "window: transmit";
+    auto* ptt = w.findChild<QLabel*>(QStringLiteral("ptt"));
+    client.write("CQFRAME N0GUI 500\r");
+    bool keyed = false, tapped_tx = false;
+    const bool sent = wait_for(
+        [&] {
+            if (ptt && ptt->property("lit").toBool()) {
+                keyed = true;
+                bool tx = false;
+                w.station().input_tail(1, nullptr, &tx);
+                tapped_tx |= tx;
+            }
+            return keyed && ptt && !ptt->property("lit").toBool();
+        },
+        30000);
+    check::is_true(sent, "PTT up for our CQ, then down");
+    check::is_true(tapped_tx, "the waterfall was fed our TX audio while keyed");
+
     check::current_step = "window: screenshot";
     check::is_true(w.grab().save(QStringLiteral(DATA2G_GUI_SHOT)), "screenshot saved");
 
@@ -233,6 +254,39 @@ void test_window(const QTemporaryDir& dir) {
     check::current_step = "window: close";
 }
 
+// TX audio goes on the waterfall in its own colours and stays off the meter:
+// full-scale noise as TX, then as RX.
+void test_waterfall_tx() {
+    check::current_step = "waterfall TX";
+    gui::Waterfall wf(nullptr, 1);
+    wf.resize(200, 100);
+    std::uint64_t total = 0;
+    bool as_tx = true;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    wf.set_source([&](std::size_t n, std::uint64_t* t, bool* tx) {
+        std::vector<double> x(n);
+        for (auto& v : x) v = u(rng);
+        total += config::FS / 10;
+        *t = total;
+        *tx = as_tx;
+        return x;
+    });
+    const auto top_pixel = [&] { return wf.grab().toImage().pixelColor(50, 0); };
+
+    wf.tick();
+    const QColor tx = top_pixel();
+    check::is_true(tx.red() > tx.green() + 50 && tx.blue() > tx.green(), "TX row in TX colours (magenta, not RX's ramp)");
+    check::equal(wf.peak(), 0.0, "TX audio stays off the input meter");
+    check::is_true(!wf.clip_latched(), "full-scale TX audio doesn't latch CLIP");
+
+    as_tx = false;
+    wf.tick();
+    const QColor rx = top_pixel();
+    check::is_true(rx.green() > rx.blue() + 100, "RX row back on the RX ramp");
+    check::is_true(wf.peak() > 0.9 && wf.clip_latched(), "full-scale input does latch CLIP");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -244,6 +298,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QTemporaryDir dir;
     test_settings(dir);
+    test_waterfall_tx();
     test_window(dir);
     return check::report("gui");
 }

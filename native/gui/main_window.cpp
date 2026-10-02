@@ -53,8 +53,8 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     auto* top = new QVBoxLayout(central);
 
     waterfall_ = new Waterfall;
-    waterfall_->set_source([this](std::size_t n, std::uint64_t* total) {
-        return station_ ? station_->input_tail(n, total) : std::vector<double>{};
+    waterfall_->set_source([this](std::size_t n, std::uint64_t* total, bool* tx) {
+        return station_ ? station_->input_tail(n, total, tx) : std::vector<double>{};
     });
     top->addWidget(waterfall_, 2);
 
