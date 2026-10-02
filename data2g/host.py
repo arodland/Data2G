@@ -264,6 +264,46 @@ class Player:
         self.s.close()
 
 
+class Capture:
+    """Input through a PortAudio callback into our own FIFO, read a block at a time. A blocking read
+    dropped whatever the card's small buffer couldn't hold while the loop was busy (a slow step, the
+    drain after TX): ~50 s of a 14 min session, holes of 60-290 ms inside bursts, each one fatal."""
+
+    def __init__(self, pa, nin: int, rate: int, device: int | None):
+        self.nin, self.rate = nin, rate
+        self.fifo, self.cond, self.overflows, self._late = bytearray(), threading.Condition(), 0, False
+        self.s = pa.open(format=_pa_float(), channels=nin, rate=rate, input=True, input_device_index=device,
+                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._take)
+
+    def _take(self, data, _n, _t, status):
+        if status & 2:  # paInputOverflow: the callback itself was late (GIL), samples are gone
+            self.overflows += 1
+            log.warning("RX audio overflow (%d)", self.overflows)
+        with self.cond:
+            self.fifo += data
+            self.cond.notify()
+        return None, 0  # 0: paContinue
+
+    def read(self, frames: int, stop: threading.Event) -> np.ndarray | None:
+        """The next `frames` frames, left channel (None once `stop` is set)."""
+        need = frames * self.nin * 4
+        with self.cond:
+            while len(self.fifo) < need:
+                if stop.is_set():
+                    return None
+                self.cond.wait(0.5)
+            b = bytes(self.fifo[:need])
+            del self.fifo[:need]
+            behind = len(self.fifo) / (self.nin * 4 * self.rate)
+        if behind > 1.0 and not self._late:
+            log.warning("RX audio %.1f s behind the card", behind)
+        self._late = behind > 1.0
+        return np.frombuffer(b, dtype=np.float32)[::self.nin].astype(np.float64)
+
+    def close(self):
+        self.s.close()
+
+
 # --- sockets and audio ---------------------------------------------------------------
 
 class _Port:
@@ -356,8 +396,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     # host API corrupts the heap reading or writing a mono stream on a PipeWire device that has more
     # channels (glibc aborts in the first read, e.g. "malloc(): invalid size (unsorted)").
     nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
-    inp = pa.open(format=_pa_float(), channels=nin, rate=a.sample_rate, input=True, input_device_index=a.input_device,
-                  frames_per_buffer=per)
+    inp = Capture(pa, nin, a.sample_rate, a.input_device)
     out = Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
@@ -388,7 +427,9 @@ def serve(a, pa, stop: threading.Event | None = None):
                 if cmd:
                     cmd.send(line.encode() + b"\r")
             host.out_cmd.clear()
-            x = np.frombuffer(inp.read(per, exception_on_overflow=False), dtype=np.float32)[::nin].astype(np.float64)
+            x = inp.read(per, stop)
+            if x is None:
+                break
             t0 = time.perf_counter()
             y, ptt = engine.step(dec(x) if not keyed else np.zeros(BLOCK))
             if time.perf_counter() - t0 > BLOCK / FS:
