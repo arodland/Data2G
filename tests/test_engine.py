@@ -3,6 +3,8 @@ on the sample clock: connect, data both ways, disconnect."""
 
 import numpy as np
 
+from data2g.arq import frames as F
+from data2g.arq import phy as PHY
 from data2g.arq import session as S
 from data2g.arq.engine import Engine
 from data2g.config import FS, SNR_REF_BW_HZ
@@ -90,6 +92,27 @@ def test_id_frames_during_and_after_a_session():
         ev_b.extend(b.events())
         return ev_a.count(f"ID K2XYZ {key}") > n_a and ev_b.count(f"ID W1AW {key}") > n_b
     assert link(a, b, 12, 30, last_ids, seed=5)
+
+
+def test_malformed_cq_and_id_frames_are_dropped():
+    """A CRC-valid CQ or ID frame that can't be read (callsign codes past the
+    alphabet, a short body) is dropped, not raised out of the receiver."""
+    e = Engine("W1AW", seed=31)
+    bad_call = b"\xff" * 8  # code 63 everywhere: past the 39-character alphabet
+    for ext, body in ((F.T_ID, bad_call + b"\x00\x01"), (F.T_ID, b"\x01"), (F.T_CQ, bad_call + b"\x02"),
+                      (F.T_CQ, b"\x01")):
+        burst = e._open_frame(2, ext, body)
+        rx = PHY.ModemRx(PHY_rx(burst), {})
+        assert e._cq(rx) is False and e.events() == []
+    good = e._open_frame(2, F.T_ID, F.pack_call("VARA KISS") + b"\x12\x34")
+    assert e._cq(PHY.ModemRx(PHY_rx(good), {})) and e.events() == ["ID VARA KISS 4660"]
+
+
+def PHY_rx(burst):
+    """A burst as heard on a clean channel."""
+    from data2g import modem
+
+    return modem.receive(np.concatenate([np.zeros(2400), PHY.tx_audio(burst), np.zeros(2400)]))
 
 
 def test_vara_commands_drive_a_session(tmp_path):

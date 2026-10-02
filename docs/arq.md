@@ -164,7 +164,8 @@ Where the rest comes from:
   any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,
   `T_ABANDON` under 2 bytes, K or C past the burst's codeword count, a truncated TLV.
   Session frames likewise: shorter than their subtype's length, callsign codes past
-  the alphabet, a CONNECT_ACK cap code above 2. No new recovery: repeats, the
+  the alphabet, a CONNECT_ACK cap code above 2. CQ and ID frames (§7a) too: a `T_CQ`
+  under 9 B, a `T_ID` under 10 B, callsign codes past the alphabet. No new recovery: repeats, the
   watchdog and bounded failure (§10) handle it. Before 2026-10 these raised out of
   the receiver (16% of fuzzed link runs with corrupted control).
 - **Repeats:** a timed-out sender's first retry is the identical burst, with the same

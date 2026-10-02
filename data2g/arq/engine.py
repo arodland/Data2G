@@ -320,24 +320,32 @@ class Engine:
         if first is None:
             return False
         core = F.Core.unpack(first)
-        if core.ftype != F.SESSION:
+        if core.ftype != F.SESSION or core.n_ctl > rx.n_cw:
             return False
         payloads = [first] + [rx.decode(i, L.ctl_mask(0, i, 0), 0, None) for i in range(1, core.n_ctl)]
         if None in payloads:
             return False
+        # a malformed one (docs/arq.md §4) is dropped as if it had not decoded
         try:
             ext = F.Control.unpack(payloads).ext
-        except ValueError:
-            return False
-        if len(body := ext.get(F.T_ID, b"")) >= 10:
-            call, key = F.unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
-            log.info("RX ID %s (session %04x)", call, key)
-            self._events.append(f"ID {call} {key}")
+            if F.T_ID in ext:
+                body = ext[F.T_ID]
+                if len(body) < 10:
+                    raise ValueError(f"ID of {len(body)} B")
+                call, key = F.unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
+                log.info("RX ID %s (session %04x)", call, key)
+                self._events.append(f"ID {call} {key}")
+                return True
+            if F.T_CQ not in ext:
+                return False
+            body = ext[F.T_CQ]
+            if len(body) < 9:
+                raise ValueError(f"CQ of {len(body)} B")
+            self._events.append(f"CQFRAME {F.unpack_call(body[:8])} {body[8]}")
             return True
-        if len(body := ext.get(F.T_CQ, b"")) < 9:
+        except ValueError as e:
+            log.warning("RX malformed CQ/ID frame (%s): dropped", e)
             return False
-        self._events.append(f"CQFRAME {F.unpack_call(body[:8])} {body[8]}")
-        return True
 
     def _start_tx(self, bursts: list, t: float):
         """Bursts back to back on one PTT (an ID frame with a session's burst)."""
