@@ -1,0 +1,101 @@
+# Build, sign and publish a release. Lifted from SSTVAE, triggered by a tag.
+#
+#   1. Bump the version in native/CMakeLists.txt and pyproject.toml, commit.
+#   2. Tag it vX.Y.Z and push the tag (or run this by hand with the tag).
+#   3. This checks the tag against both declared versions, creates a draft
+#      release, builds and signs all five platforms with the same workflow
+#      CI runs, attaches the downloads, and publishes.
+#
+# A release requires signing (native-build.yml sets DATA2G_REQUIRE_SIGNING
+# when release-tag is set), so it fails until the signing secrets exist.
+
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+  # A re-run for an existing tag: rebuilds, replaces the assets, publishes.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.1.0"
+        required: true
+        type: string
+
+# Never two runs against one tag, and never cancel one: by the time a
+# second starts the first may be most of the way through signed builds.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve and check the version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Inputs arrive as environment variables, with no ${{ }} inside the
+      # script, so the script also runs outside Actions.
+      - name: Parse the tag and check it against the source
+        id: v
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*) VERSION="${TAG#v}" ;;
+            *) echo "::error::'$TAG' is not a version tag (expected v1.2.3)"; exit 1 ;;
+          esac
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+            || { echo "::error::'$VERSION' is not X.Y.Z"; exit 1; }
+          SHA="$(git rev-parse --verify -q "refs/tags/$TAG^{commit}")" \
+            || { echo "::error::tag $TAG does not exist"; exit 1; }
+          git checkout -q "$SHA"
+
+          # Checked against the source, never written into it: a mismatch
+          # would ship a download named one version reporting another.
+          CMAKE_V="$(sed -n 's/^project(data2g_native VERSION \([0-9.]*\).*/\1/p' native/CMakeLists.txt | head -1)"
+          PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          echo "tag=$VERSION native/CMakeLists.txt=$CMAKE_V pyproject.toml=$PY_V"
+          fail=0
+          [ "$CMAKE_V" = "$VERSION" ] || { echo "::error::native/CMakeLists.txt says $CMAKE_V"; fail=1; }
+          [ "$PY_V" = "$VERSION" ]    || { echo "::error::pyproject.toml says $PY_V"; fail=1; }
+          [ "$fail" -eq 0 ] || exit 1
+
+          # A draft to attach to; kept if it exists (a re-run keeps notes).
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes
+          { echo "tag=$TAG"; echo "version=$VERSION"; echo "sha=$SHA"; } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: resolve
+    uses: ./.github/workflows/native-build.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      release-tag: ${{ needs.resolve.outputs.tag }}
+      ref: ${{ needs.resolve.outputs.sha }}
+      sign: true
+    secrets: inherit
+
+  publish:
+    name: Publish
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Drop the draft flag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

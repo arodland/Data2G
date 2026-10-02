@@ -1,0 +1,329 @@
+# The native apps: build, test, package, sign. Lifted from SSTVAE.
+#
+# A reusable workflow so the release runs the same job CI does, not a copy
+# of it (a release-only build path would be first exercised by a release,
+# and it is the path holding the signing credentials). Called by ci.yml (no
+# inputs) and release.yml (all of them).
+
+name: Native build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version for package filenames, no leading "v". Empty for CI builds.
+        type: string
+        default: ""
+      release-tag:
+        description: Release tag to attach the installer and portable archive to. Empty attaches nothing.
+        type: string
+        default: ""
+      ref:
+        description: Commit to build. Empty means whatever triggered the workflow.
+        type: string
+        default: ""
+      sign:
+        description: >-
+          Run the signing steps. Off by default: signing unasked costs quota,
+          while not signing a release is caught by the guard step below.
+        type: boolean
+        default: false
+
+jobs:
+  native:
+    name: Native (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # From SSTVAE:
+      # - ubuntu-24.04, not -latest: the build machine's glibc is the floor
+      #   for every machine the package runs on. 22.04 cannot build with
+      #   the Qt we ship.
+      # - ubuntu-24.04-arm: a Raspberry Pi at the radio is a normal station.
+      # - macos-15, not -latest: macOS 26's SDK dropped AGL, which Qt's link
+      #   interface still names (QTBUG-137687).
+      # - No Intel macOS runner any more (macos-13 queues forever rather
+      #   than failing): the x86_64 slice is cross-built and tested under
+      #   Rosetta. `label` names the target; uname would say arm64.
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64 }
+          - { os: macos-15,         label: macos-arm64 }
+          - { os: macos-15,         label: macos-x86_64, osx_arch: x86_64 }
+          - { os: windows-latest,   label: windows-x64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      # First, and free: a release built with signing off would publish
+      # downloads indistinguishable from signed ones until Gatekeeper or
+      # SmartScreen objects.
+      - name: A release build must be signed
+        if: inputs.release-tag != '' && !inputs.sign
+        shell: bash
+        run: |
+          echo "::error::release ${{ inputs.release-tag }} was built with signing off"
+          exit 1
+      # tests/test_sstvae_golden.py compares the waveform with SSTVAE's
+      # Python and skips without a checkout; a skip is not a pass.
+      - uses: actions/checkout@v7
+        with:
+          repository: arodland/SSTVAE
+          ref: cc06e8775615ad3afe93e1c1eb9e55aaeab0ed94
+          path: .sstvae-ref
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.3.2
+      # The `tnc` extra (pyaudio) builds from source except on Windows, so
+      # it needs PortAudio's headers first.
+      - name: PortAudio headers for pyaudio (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+      - name: PortAudio headers for pyaudio (macOS)
+        if: runner.os == 'macOS'
+        run: brew install portaudio
+      # The locked versions (uv.lock), installed with pip into this job's
+      # Python. Installed, not just present: the `pytest` console script
+      # does not put the working directory on sys.path (SSTVAE: `python -m
+      # pytest` locally hid that). pybind11 for the module. The `tnc` extra
+      # because tests/test_host.py drives host.py's pyaudio path. CPU torch
+      # at ci.yml's pinned version: tests/test_arq_policy.py imports
+      # scripts/train_outcome.py, and the --native suite should run what the
+      # Python job runs, not a subset.
+      - name: Python packages
+        shell: bash
+        run: |
+          # Homebrew's prefix is not on the compiler's default search path
+          # on Apple Silicon. Exported here only, not via GITHUB_ENV, so the
+          # CMake build never sees Homebrew's headers or libraries.
+          if [ "$RUNNER_OS" = macOS ]; then
+            export CFLAGS="-I$(brew --prefix)/include" LDFLAGS="-L$(brew --prefix)/lib"
+          fi
+          uv export --frozen --no-emit-project --extra dev --extra tnc --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/requirements.txt" -e . pybind11
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+      # Install Qt below runs its own setup-python and rewrites PATH, so a
+      # later bare `python` is a different interpreter with none of the
+      # above (SSTVAE). Pin this one now and use it explicitly.
+      - name: Pin this job's python
+        shell: bash
+        run: |
+          echo "DATA2G_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "SSTVAE_PATH=$GITHUB_WORKSPACE/.sstvae-ref" >> "$GITHUB_ENV"
+      # Exact tag: this action has no moving major alias.
+      - uses: lukka/get-cmake@v4.4.0
+      # One Qt on every platform, pinned like Hamlib and zlib. 6.11.1 is
+      # SSTVAE's (6.8 LTS drew its waterfall wrong; the GUI here is the same
+      # stack). qtmultimedia is the only extra module.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.11.1"
+          modules: qtmultimedia
+          cache: true
+          # The action fills `arch` for Windows and Android only; ARM Linux
+          # must name Qt's arm64 desktop package itself.
+          arch: ${{ (runner.os == 'Linux' && runner.arch == 'ARM64') && 'linux_gcc_arm64' || '' }}
+          # aqtinstall from git: the released one cannot find Qt 6.11 on
+          # Windows (repository layout change; aqtinstall PR #1000). Used on
+          # every platform so "which Qt" is not per-platform. Drop once a
+          # release has the fix.
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      # aqt's Qt brings no system libraries; these are what its plugins
+      # dlopen. desktop-file-utils and appstream let make_installer.sh
+      # validate the AppImage metadata instead of skipping it.
+      - name: Qt runtime dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libpulse0 desktop-file-utils appstream
+      # The whole FetchContent tree, never part of it: SSTVAE cached only
+      # *-subbuild once, restored "already extracted" stamps beside an empty
+      # source dir, and failed on every platform in 40 ms. Holds the built
+      # Hamlib (compiled from source on Linux/macOS), zlib on Windows, and
+      # the pinned packaging tools.
+      - name: Cache native dependencies
+        uses: actions/cache@v6
+        with:
+          path: native/.deps
+          key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/*.cmake', 'tools/make_installer.sh', 'tools/sign.sh') }}
+      # MSVC on PATH before CMake looks for a compiler. Otherwise Ninja finds
+      # the runner's MinGW and builds a .pyd CPython cannot load ("DLL load
+      # failed", nothing else).
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Install Rosetta
+        if: matrix.osx_arch == 'x86_64'
+        run: softwareupdate --install-rosetta --agree-to-license
+      # Every optional part ON, not AUTO: AUTO is what let SSTVAE's GUI go
+      # uncompiled on two platforms with every job green.
+      # DATA2G_BUILD_GUI is a no-op until the GUI's option exists.
+      # The module is off for the cross build: it would be built for x86_64
+      # while the runner's Python is arm64.
+      - name: Configure
+        shell: bash
+        env:
+          OSX_ARCH: ${{ matrix.osx_arch }}
+        run: |
+          cmake -S native -B native/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            ${OSX_ARCH:+-DCMAKE_OSX_ARCHITECTURES=$OSX_ARCH} \
+            ${OSX_ARCH:+-DDATA2G_BUILD_PYMODULE=OFF} \
+            -DDATA2G_BUILD_HOST=ON -DDATA2G_BUILD_QTAUDIO=ON -DDATA2G_BUILD_RIG=ON \
+            -DDATA2G_BUILD_GUI=ON \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
+            -DPython3_EXECUTABLE="$DATA2G_PYTHON" \
+            -Dpybind11_DIR="$("$DATA2G_PYTHON" -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+      - name: Build
+        run: cmake --build native/build --parallel
+      # Windows: a bad import library or a missing DLL links cleanly and the
+      # exe dies in the loader (STATUS_DLL_NOT_FOUND) with no output at all,
+      # which ctest reports as a hang (SSTVAE lost several rounds to it).
+      # So run the host directly first and say which DLLs it imports.
+      - name: The host starts outside ctest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "native/build/data2g-host.exe"
+          Write-Host "== beside the executable =="
+          Get-ChildItem (Split-Path $exe) -Filter *.dll | Format-Table Name, Length
+          Write-Host "== imports =="
+          dumpbin /dependents $exe
+          $p = Start-Process -FilePath $exe -ArgumentList "--help" -PassThru -NoNewWindow `
+                 -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          $exited = $p.WaitForExit(60000)
+          if (-not $exited) { $p.Kill() }
+          Get-Content out.txt, err.txt -ErrorAction SilentlyContinue
+          if (-not $exited) { throw "data2g-host --help did not finish in 60 s" }
+          if ($p.ExitCode -ne 0) {
+            throw ("data2g-host exited {0} (0x{0:X8}); 0xC0000135 is STATUS_DLL_NOT_FOUND" -f $p.ExitCode)
+          }
+      - name: C++ tests
+        run: ctest --test-dir native/build --output-on-failure --timeout 600
+      # The Python suite with the C++ functions substituted in: the port's
+      # acceptance test. --native fails, not skips, on a missing module.
+      - name: Python suite against the C++ core
+        if: matrix.osx_arch == ''
+        run: pytest tests -q --native -rs
+      # --- packaging -------------------------------------------------------
+      - name: Stage a runnable app
+        shell: bash
+        run: tools/package_app.sh native/build dist
+      # Before the run check: the hardened runtime that signing turns on can
+      # stop an app that ran unsigned, so check what operators get.
+      - name: Sign the app
+        if: inputs.sign
+        shell: bash
+        run: tools/sign.sh app dist
+        env: &signing_env
+          # Windows: Azure Trusted Signing (DefaultAzureCredential reads the
+          # tenant/client/secret trio from the environment).
+          AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+          AZURE_CODE_SIGNING_NAME: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          AZURE_CERT_PROFILE_NAME: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          # macOS: Developer ID certificate and notary app-specific password.
+          # The team ID is read from the certificate.
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # Without secrets sign.sh is a loud no-op. Set the repository
+          # variable DATA2G_REQUIRE_SIGNING=1 once the secrets exist, so a
+          # missing one fails instead; a release always requires them.
+          DATA2G_REQUIRE_SIGNING: ${{ (inputs.release-tag != '' || (vars.DATA2G_REQUIRE_SIGNING == '1' && github.event.pull_request.head.repo.fork != true)) && '1' || '' }}
+      # The staged tree, not the build tree: only it has to carry Qt itself.
+      - name: The packaged app runs
+        shell: bash
+        run: |
+          case "$(uname -s)" in
+            Darwin) dir=dist/Data2G.app/Contents/MacOS; host="$dir/data2g-host"; gui="$dir/data2g-gui" ;;
+            MINGW*|MSYS*) dir=dist/data2g; host="$dir/data2g-host.exe"; gui="$dir/data2g-gui.exe" ;;
+            *) dir=dist/data2g; host="$dir/data2g host"; gui="$dir/data2g" ;;
+          esac
+          $host --help > /dev/null
+          echo "data2g-host starts"
+          if [ -e "$dir/data2g-gui" ] || [ -e "$dir/data2g-gui.exe" ] || [ -e "$dir/bin/data2g-gui" ]; then
+            # No `timeout` on macOS: run it, and require it to still be up.
+            QT_QPA_PLATFORM=offscreen $gui & pid=$!
+            sleep 8
+            if kill -0 "$pid" 2>/dev/null; then kill "$pid" || true; echo "data2g-gui started and stayed up"
+            else wait "$pid"; echo "the packaged GUI exited on its own" >&2; exit 1; fi
+          fi
+      # Named after what they run on, not the runner image; versioned only
+      # for a release (a CI run is identified by its run).
+      - name: Name the package
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: echo "pkg=data2g${VERSION:+-$VERSION}-${{ matrix.label }}" >> "$GITHUB_ENV"
+      # tar on Unix: an artifact zip drops the executable bit.
+      - name: Archive (Unix)
+        if: runner.os != 'Windows'
+        run: tar czf "${{ env.pkg }}.tar.gz" -C dist .
+      - uses: actions/upload-artifact@v7
+        if: runner.os != 'Windows'
+        with:
+          path: ${{ env.pkg }}.tar.gz
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ env.pkg }}-portable
+          path: dist
+          if-no-files-found: error
+      # PDBs separately: a Windows crash report is a module and an offset,
+      # unresolvable once the runner's build tree is gone.
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ env.pkg }}-symbols
+          path: |
+            native/build/*.pdb
+            native/build/*.exe
+          if-no-files-found: error
+      # Every run, not only releases: an installer first built at a release
+      # has three platform tools in it and no history of working.
+      - name: Build the installer
+        shell: bash
+        run: tools/make_installer.sh dist "${{ env.pkg }}"
+      # After the container exists: notarization assesses the .dmg and
+      # staples into it; on Windows this signs the setup wrapper.
+      - name: Sign the installer
+        if: inputs.sign
+        shell: bash
+        run: tools/sign.sh installer "${{ env.installer }}"
+        env: *signing_env
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.installer }}
+          archive: false
+          if-no-files-found: error
+      # --- release assets ----------------------------------------------------
+      - name: Attach to the release
+        if: inputs.release-tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            portable="${{ env.pkg }}-portable.zip"
+            powershell -NoProfile -NonInteractive -Command \
+              "Compress-Archive -Path dist/* -DestinationPath '$portable' -Force"
+          else
+            portable="${{ env.pkg }}.tar.gz"
+          fi
+          gh release upload "$TAG" "${{ env.installer }}" "$portable" --clobber --repo "$GITHUB_REPOSITORY"

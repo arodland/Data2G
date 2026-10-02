@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  What the hardened runtime (required for notarization) is asked to give
+  back. One entry, the one whose absence is invisible: without
+  audio-input the capture stream opens and every sample is zero (SSTVAE).
+  Both this and NSMicrophoneUsageDescription in Info.plist are required.
+
+  Deliberately absent: disable-library-validation (tools/sign.sh signs
+  every dylib, so validation passes), allow-jit, and sandbox entitlements.
+  XML comments may not contain two consecutive hyphens.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

@@ -1,7 +1,18 @@
+# Generated, compared byte for byte by tools/gen_native_tables.py --check:
+# no CRLF conversion on Windows checkouts.
+native/core/generated/** -text
+
+# Run by Git Bash on Windows CI: a CRLF checkout breaks bash on '\r'.
+*.sh text eol=lf
+# Never let git guess at these.
+*.png binary
+*.ico binary
+*.icns binary
+
 # On-air data read byte for byte at run time. zdict.bin is mostly text (the
 # deflate dictionary), so Git for Windows rewrote its line endings on
-# checkout: Python's dictionary then differed from every other station's,
-# and inflate produced garbage.
+# checkout: Python's dictionary then differed from every other station's
+# (and the compiled-in C++ copy), and inflate produced garbage.
 *.bin binary
 *.npy binary
 *.npz binary

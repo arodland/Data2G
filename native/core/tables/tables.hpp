@@ -1,0 +1,109 @@
+// Frozen on-air data, compiled in. Definitions are generated
+// (core/generated/*.cpp, tools/gen_native_tables.py).
+#pragma once
+
+#include <array>
+#include <complex>
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+#include "generated/config.hpp"
+
+namespace data2g::tables {
+
+// A submode's interleaver (perm[i] = code bit at mapping position i) and,
+// on polar submodes, its info set. Empty info_pos: LDPC.
+struct Format {
+    std::string_view submode;
+    std::span<const std::uint16_t> perm, info_pos;
+};
+
+// Row i belongs to config::SUBMODES[i].
+extern const std::array<Format, config::SUBMODES.size()> FORMATS;
+
+// A constellation (data2g/constellation.py): 2^m points, point i carrying
+// i's bits MSB first, and its ACE directions, row-major (2^m, 2): unit
+// outward directions point i may move along (zero: none). Frozen because
+// learned sets get theirs from scipy's ConvexHull.
+struct Constellation {
+    std::string_view name;
+    int m;
+    std::span<const std::complex<double>> points, ace;
+};
+
+// gray-qam4..256, then every data2g/constellations/*.npy by name.
+extern const std::span<const Constellation> CONSTELLATIONS;
+// data2g/cpm.py. Grid row i owns CPM_CTL[i]. header_tones: 1024 rows of
+// hdr_len, row v = (mode index + 2 x dup) << 6 | n_data (the header word
+// before its CRC-6), as numpy's PCG64 drew them.
+struct CpmGrid {
+    std::string_view name;
+    int m;
+    double rate, center, bp, clip_db;
+    int T, bits;
+    double f0, sync_threshold, header_threshold;
+    int hdr_len, costas_len;
+    std::span<const std::uint8_t> preamble, mid_block, header_tones;
+};
+
+struct CpmSpec {
+    std::string_view name, grid, code;
+    int index, k, coded_bits, n_sym;
+    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver)
+};
+
+struct CpmParams {
+    double preamble_s, block_s, spacing_s, hdr_s;
+    int hdr_copies, max_data;
+    double peak_ratio, ramp_s;
+    int data_n, ctl_k, ctl_n;
+};
+
+extern const std::span<const CpmGrid> CPM_GRIDS;
+extern const std::span<const CpmSpec> CPM_SPECS, CPM_CTL;
+extern const CpmParams CPM;
+// Polar info sets Python designs at run time (codes.polar_code with no
+// frozen file: the CPM control codewords), frozen here by (k, e).
+struct PolarDesign {
+    int k, e;
+    std::span<const std::uint16_t> info_pos;
+};
+extern const std::span<const PolarDesign> POLAR_GA;
+// scipy.stats.gamma.ppf(0.99, n) / n at index n - 1 (equalizer.per_carrier_noise).
+inline constexpr int GAMMA_Q99_MAX = 2048;
+extern const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99;
+// A QC-LDPC base matrix for base graph bg lifted by z: rows x cols
+// circulant shifts, row-major, -1 = zero block (data2g/ldpc.py).
+struct ShiftTable {
+    int bg, z, rows, cols;
+    std::span<const std::int16_t> shift;
+};
+
+extern const std::span<const ShiftTable> LDPC_SHIFTS;
+// Deflate's priming dictionary (data2g/arq/frames.py ZDICT, zdict.bin).
+extern const std::span<const std::uint8_t> ZDICT;
+
+// The gear shifter's outcome model (data2g/arq/predictor.py): bootstrap
+// members, each an MLP (x - mean) / std -> tanh layers -> logits, W row-major
+// (in, out). Outputs: P(burst usable) per OUTCOME_MODES, then P(codeword).
+struct MlpLayer {
+    int in, out;
+    std::span<const double> W, b;
+};
+struct OutcomeMember {
+    std::span<const double> mean, std;
+    std::span<const MlpLayer> layers;
+};
+extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
+extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;
+// AWGN BICM capacity (bits per coded bit) over CAPACITY_GRID (dB), per
+// constellation family (predictor.CONSTS order).
+struct CapacityTable {
+    std::string_view name;
+    std::span<const double> mi;
+};
+extern const std::span<const double> CAPACITY_GRID;
+extern const std::span<const CapacityTable> CAPACITY;
+
+}  // namespace data2g::tables

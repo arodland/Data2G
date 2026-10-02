@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata. The id must match the .desktop file's basename.
+     No project_license yet: the repository has no LICENSE file. -->
+<component type="desktop-application">
+  <id>org.cleverdomain.data2g</id>
+  <metadata_license>CC0-1.0</metadata_license>
+
+  <name>Data2G</name>
+  <summary>Data modem for HF radio</summary>
+
+  <description>
+    <p>
+      Data2G is an HF data modem: OFDM bursts with LDPC and polar codes,
+      adaptive submodes and a selective-repeat ARQ. It offers VARA-compatible
+      command and data ports, so Winlink clients such as Pat can use it, and
+      a KISS port.
+    </p>
+    <p>
+      It runs through a soundcard and keys the radio through Hamlib. An
+      amateur radio licence is required to transmit.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.cleverdomain.data2g.desktop</launchable>
+
+  <categories>
+    <category>Network</category>
+    <category>HamRadio</category>
+  </categories>
+
+  <developer id="org.cleverdomain">
+    <name>Andrew Rodland</name>
+  </developer>
+
+  <url type="homepage">https://github.com/arodland/Data2G</url>
+  <url type="bugtracker">https://github.com/arodland/Data2G/issues</url>
+
+  <provides>
+    <binary>data2g</binary>
+  </provides>
+
+  <releases>
+    <release version="0.0.1" type="development" date="2026-10-02">
+      <description>
+        <p>First packaged build of the native application.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>
