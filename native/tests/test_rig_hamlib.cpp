@@ -86,6 +86,9 @@ void test_net_rigctl() {
 
     rig::HamlibConfig cfg;  // the defaults are the host's: model 2
     cfg.device = "127.0.0.1:" + port;
+    // The open's dump_state round trip missed the 1 s default about 1 run in
+    // 3 on a loaded machine (rigctld just spawned); the default stays for live use.
+    cfg.timeout_ms = 5000;
     std::string status;
     std::mutex m;
     rig::RigController controller({}, [&](const std::string& s, bool) {
