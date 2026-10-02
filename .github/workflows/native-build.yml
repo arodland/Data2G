@@ -76,17 +76,36 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v8.3.2
+      # The `tnc` extra (pyaudio) builds from source except on Windows, so
+      # it needs PortAudio's headers first.
+      - name: PortAudio headers for pyaudio (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+      - name: PortAudio headers for pyaudio (macOS)
+        if: runner.os == 'macOS'
+        run: brew install portaudio
       # The locked versions (uv.lock), installed with pip into this job's
       # Python. Installed, not just present: the `pytest` console script
       # does not put the working directory on sys.path (SSTVAE: `python -m
-      # pytest` locally hid that). pybind11 for the module; no torch here,
-      # the C++ port has no torch counterpart (tests/test_*_torch.py run in
-      # ci.yml's python job).
+      # pytest` locally hid that). pybind11 for the module. The `tnc` extra
+      # because tests/test_host.py drives host.py's pyaudio path. CPU torch
+      # at ci.yml's pinned version: tests/test_arq_policy.py imports
+      # scripts/train_outcome.py, and the --native suite should run what the
+      # Python job runs, not a subset.
       - name: Python packages
         shell: bash
         run: |
-          uv export --frozen --no-emit-project --extra dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          # Homebrew's prefix is not on the compiler's default search path
+          # on Apple Silicon. Exported here only, not via GITHUB_ENV, so the
+          # CMake build never sees Homebrew's headers or libraries.
+          if [ "$RUNNER_OS" = macOS ]; then
+            export CFLAGS="-I$(brew --prefix)/include" LDFLAGS="-L$(brew --prefix)/lib"
+          fi
+          uv export --frozen --no-emit-project --extra dev --extra tnc --no-hashes -o "$RUNNER_TEMP/requirements.txt"
           python -m pip install -r "$RUNNER_TEMP/requirements.txt" -e . pybind11
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
       # Install Qt below runs its own setup-python and rewrites PATH, so a
       # later bare `python` is a different interpreter with none of the
       # above (SSTVAE). Pin this one now and use it explicitly.

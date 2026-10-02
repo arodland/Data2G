@@ -82,9 +82,17 @@ jobs:
       # use it (importorskip), as the reference for the numpy decoders and
       # channel. CPU wheel at the locked version, not the `train` extra
       # (that would pull CUDA torch, matplotlib and onnx for two files).
+      #
+      # The `tnc` extra too: host.py and tnc.py open audio through pyaudio,
+      # and tests/test_host.py drives them. pyaudio has no Linux wheel, so
+      # it builds against PortAudio's headers.
+      - name: PortAudio headers for pyaudio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
       - name: Python packages
         run: |
-          uv export --frozen --no-emit-project --extra dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          uv export --frozen --no-emit-project --extra dev --extra tnc --no-hashes -o "$RUNNER_TEMP/requirements.txt"
           python -m pip install -r "$RUNNER_TEMP/requirements.txt" -e .
           python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
       # importorskip only skips on ImportError, so with this passing the

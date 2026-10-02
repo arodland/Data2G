@@ -459,6 +459,17 @@ Portability notes:
 - `util/simd.hpp`: `target_clones("avx512f", "avx2", "default")` on hot
   loops, x86-64 Linux with GCC or Clang only (ifunc). Elsewhere the plain
   build runs, same bits, slower.
+  Clang with `-stdlib=libc++` on x86-64 Linux does not link with them
+  (undefined hidden `vector<double>::~vector[abi:...]` from `sync.cpp`);
+  not a shipped configuration, so not handled.
+- C++ tests that draw noise must not depend on the standard library or
+  the compiler: `std::normal_distribution`'s algorithm differs between
+  libstdc++ and libc++, and `f(g(rng), g(rng))` evaluates its arguments
+  in an unspecified order (GCC: right to left on x86-64, left to right on
+  aarch64). First CI run: `test_pool`'s "mixed" burst decoded every slot
+  on macOS and `test_equalizer`'s static-channel spread came out 0.12 Hz
+  on aarch64. Braced lists are ordered; `test_pool` builds its channel
+  noise from `mt19937_64` bits.
 
 ## Performance follow-ups
 

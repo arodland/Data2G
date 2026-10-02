@@ -4,7 +4,9 @@
 // 2, 4 and 8. Also the pool itself: every index once, exceptions, nesting,
 // two callers at once. Run under TSan too (docs/native-port-plan.md).
 
+#include <cmath>
 #include <cstring>
+#include <numbers>
 #include <random>
 #include <thread>
 #include <algorithm>
@@ -111,9 +113,17 @@ std::vector<double> on_air(const std::vector<double>& x, double sigma, unsigned 
     std::vector<double> y(2400, 0.0);
     y.insert(y.end(), x.begin(), x.end());
     y.insert(y.end(), 2400, 0.0);
-    std::mt19937 rng(seed);
-    std::normal_distribution<double> n(0.0, sigma);
-    for (double& v : y) v += n(rng);
+    // Not std::normal_distribution: its algorithm is implementation-defined,
+    // and libc++'s draws from the same engine gave macOS a channel where
+    // every slot decoded, so the DD path went untested. mt19937_64 is fully
+    // specified; Box-Muller on top is the same noise everywhere, up to
+    // libm's last ulp in log/cos.
+    std::mt19937_64 rng(seed);
+    const auto u = [&] { return (static_cast<double>(rng() >> 11) + 0.5) * 0x1p-53; };  // (0, 1)
+    for (double& v : y) {
+        const double r = std::sqrt(-2.0 * std::log(u()));
+        v += sigma * r * std::cos(2.0 * std::numbers::pi * u());
+    }
     return y;
 }
 
@@ -163,7 +173,7 @@ int main() {
         burst.slots.push_back({{7, 0, i}, 0, p});
     }
     const auto x = arq::tx_audio(burst);
-    const auto y_fail = on_air(x, 1.6, 11), y_mixed = on_air(x, 0.97, 12);
+    const auto y_fail = on_air(x, 1.6, 11), y_mixed = on_air(x, 1.05, 12);
     pool::set_threads(1);
     const auto want = run(y_fail, y_mixed);
     for (int n : {2, 4, 8}) {
