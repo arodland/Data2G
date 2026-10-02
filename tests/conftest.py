@@ -34,7 +34,7 @@ def import_native():
 def _substitutions(native):
     """(module, attribute) -> the native replacement. Specs are passed to C++
     by name, so a spec that isn't exactly the frozen one stays in Python."""
-    from data2g import codes, config
+    from data2g import codes, config, ldpc
 
     py_frozen = codes.frozen
 
@@ -52,6 +52,10 @@ def _substitutions(native):
         (codes, "scramble_seed"): native.codes.scramble_seed,
         (codes, "scrambler"): native.codes.scrambler,
         (codes, "frozen"): frozen,
+        # every LDPC code (codes.ldpc_code, mother(), IR extents) and decoder
+        # (codes._decoder, _ext_decoder, arq.phy's posteriors) is then C++
+        (ldpc, "qc_code"): native.ldpc.qc_code,
+        (ldpc, "MinSumDecoder"): native.ldpc.MinSumDecoder,
     }
 
 

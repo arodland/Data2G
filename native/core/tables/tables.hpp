@@ -21,4 +21,13 @@ struct Format {
 // Row i belongs to config::SUBMODES[i].
 extern const std::array<Format, config::SUBMODES.size()> FORMATS;
 
+// A QC-LDPC base matrix for base graph bg lifted by z: rows x cols
+// circulant shifts, row-major, -1 = zero block (data2g/ldpc.py).
+struct ShiftTable {
+    int bg, z, rows, cols;
+    std::span<const std::int16_t> shift;
+};
+
+extern const std::span<const ShiftTable> LDPC_SHIFTS;
+
 }  // namespace data2g::tables
