@@ -38,11 +38,15 @@ if(DATA2G_SANITIZE)
 endif()
 
 # --- core: no Qt, no files to find at run time (tools/check_layering.py) ----
-add_library(data2g_core STATIC
-  core/codes/codes.cpp
-  core/generated/format.cpp
-)
+# Globbed so modules ported in parallel don't collide here. Device backends
+# (core/*/qt/, core/*/android/) are separate libraries and excluded.
+file(GLOB_RECURSE DATA2G_CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
+list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android)/")
+add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
 target_include_directories(data2g_core PUBLIC core)
+target_include_directories(data2g_core SYSTEM PUBLIC third_party/pocketfft)
+find_package(Threads REQUIRED)
+target_link_libraries(data2g_core PUBLIC Threads::Threads)
 set_target_properties(data2g_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 enable_testing()

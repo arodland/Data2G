@@ -42,7 +42,7 @@ done
 "$py" "$root/tools/gen_native_tables.py" --check
 "$py" "$root/tools/check_layering.py"
 cmake "${cmake_args[@]}"
-cmake --build "$build"
+cmake --build "$build" --parallel "${JOBS:-8}"  # shared machine: cap it
 
 if (( run_tests )); then
     ctest --test-dir "$build" --output-on-failure
