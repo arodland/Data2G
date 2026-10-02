@@ -69,5 +69,8 @@ struct PolarDesign {
     std::span<const std::uint16_t> info_pos;
 };
 extern const std::span<const PolarDesign> POLAR_GA;
+// scipy.stats.gamma.ppf(0.99, n) / n at index n - 1 (equalizer.per_carrier_noise).
+inline constexpr int GAMMA_Q99_MAX = 2048;
+extern const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99;
 
 }  // namespace data2g::tables

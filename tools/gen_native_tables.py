@@ -221,6 +221,26 @@ def polar_ga_cpp() -> str:
 
 
 FILES["polar_ga.cpp"] = polar_ga_cpp
+# equalizer.per_carrier_noise's `samples`: a burst's pilot count (at most
+# MAX_CODEWORDS * the longest codeword + a header-copy frame + the closing
+# pilot) or 7 (preamble repeats). Tabulated past that; C++ throws outside.
+GAMMA_Q99_MAX = 2048
+
+
+def gamma_q99_cpp() -> str:
+    """gamma.ppf(0.99, n) / n for n = 1..GAMMA_Q99_MAX (equalizer.py:176)."""
+    from scipy.stats import gamma
+
+    need = config.MAX_CODEWORDS * max(s.frames_per_cw for s in config.SUBMODES.values()) + 2
+    assert need <= GAMMA_Q99_MAX, f"raise GAMMA_Q99_MAX to at least {need}"
+    n = np.arange(1, GAMMA_Q99_MAX + 1)
+    q = gamma.ppf(0.99, n) / n
+    rows = ",\n".join(", ".join(repr(float(v)) for v in q[i:i + 4]) for i in range(0, len(q), 4))
+    return (HEADER.format(src="scipy.stats.gamma") + '#include "tables/tables.hpp"\n\nnamespace data2g::tables {\n\n'
+            f"const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99 = {{{{\n{rows}}}}};\n\n}}  // namespace data2g::tables\n")
+
+
+FILES["gamma_q99.cpp"] = gamma_q99_cpp
 
 
 def main():
