@@ -6,6 +6,7 @@
 
 namespace data2g::bind {
 void bind_codes(py::module_&);
+void bind_equalizer(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
@@ -13,4 +14,5 @@ PYBIND11_MODULE(data2g_native, m) {
     // refuses a stale build instead of failing confusingly.
     m.attr("__abi__") = 1;
     data2g::bind::bind_codes(m);
+    data2g::bind::bind_equalizer(m);
 }

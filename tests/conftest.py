@@ -31,10 +31,17 @@ def import_native():
     return data2g_native
 
 
+# Every data2g.equalizer function but _support_basis (its cache is internal
+# to the C++ one).
+EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "_freq_smooth",
+                    "preamble_noise", "preamble_noise_k", "per_carrier_noise", "_doppler_corr", "measure_spread",
+                    "estimate", "time_shift_phase", "refine")
+
+
 def _substitutions(native):
     """(module, attribute) -> the native replacement. Specs are passed to C++
     by name, so a spec that isn't exactly the frozen one stays in Python."""
-    from data2g import codes, config
+    from data2g import codes, config, equalizer
 
     py_frozen = codes.frozen
 
@@ -52,6 +59,7 @@ def _substitutions(native):
         (codes, "scramble_seed"): native.codes.scramble_seed,
         (codes, "scrambler"): native.codes.scrambler,
         (codes, "frozen"): frozen,
+        **{(equalizer, name): getattr(native.equalizer, name) for name in EQUALIZER_NATIVE},
     }
 
 
