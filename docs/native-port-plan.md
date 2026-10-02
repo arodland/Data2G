@@ -227,8 +227,14 @@ Engine and recorder landed (`core/arq/engine.*`).
   deterministic, so sync stays the default and the parity mode. With a
   1 s decode in flight, the next header's BUSY was 0.23 s late in sync
   mode and 0.02 s with the worker (`test_engine`, real time).
-- Not done yet: the loss study and the state-agreement fuzz on the mixed
-  pair.
+- State-agreement fuzz (`tests/test_native_fuzz.py`): seeded runs in all
+  four pairings at link, session and engine level, with asymmetric loss,
+  duplication, late (reordered) bursts, delayed decode, long fades, a
+  restarting peer, and CRC-valid corrupted control. Every link and session
+  pairing sends Py-Py's bursts; no stall past the watchdog; streams exact
+  except the reference behaviours under Findings. Default 386 runs x 4
+  pairings in ~18 s; `-m slow` about 3800 more.
+- Not done yet: the loss study.
 
 ### Phase 3: headless host
 
@@ -274,7 +280,18 @@ Reference behaviour, unchanged in Python, ported as is:
 - A CRC-valid but malformed control frame raises out of `Station.handle` /
   `Session.on_rx` (short T_RV, T_ABANDON, empty T_NEW, 3-byte CONNECT_ACK,
   callsign codes >= 39). A false CRC accept on noise could do this; it
-  breaks the bounded-failure rule. Needs a decision on handling.
+  breaks the bounded-failure rule. Needs a decision on handling. In the
+  fuzz, 16% of link runs and 9% of session runs with corrupted control
+  hit one.
+- A CRC-valid corrupted control word can also corrupt the delivered
+  stream: T_COMP bits ride only in the control, so a flipped bit delivers a
+  deflated codeword raw (4% of corrupted-control link runs with text).
+- A reordered burst (heard after a later one from the same sender) can
+  corrupt the stream: the abandon epoch and slicing aren't in the CRC
+  mask, and a fresh build answering a stale burst takes its stale ACK as
+  current. In order delivery (the engine) never shows it; docs/arq.md §10
+  says reordering is tested, but nothing reordered before the fuzz.
+  Reproducers: `test_late_burst_*` (xfail).
 - `kisslink.on_burst` builds `ModemRx(r, {})` with no DD budget: a failed
   KISS burst runs DD unbounded.
 - `modem.modulate` drops codewords silently when `rvs` is shorter than
