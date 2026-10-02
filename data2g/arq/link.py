@@ -7,10 +7,11 @@ because they disagree about state):
 
 - Seqs are unbounded ints here; 7 bits on the wire, unwrapped against a
   known anchor (the receiver's cumulative, the sender's base).
-- Every data codeword's CRC mask includes its direction, seq and
-  compression (Phy.decode's mask_id), so a slot mapped to the wrong seq
-  or taken under the wrong T_COMP flag fails its CRC: accounting errors
-  can cost progress, never correctness.
+- Every data codeword's CRC mask includes its direction, seq,
+  compression and abandon epoch (Phy.decode's mask_id), so a slot mapped
+  to the wrong seq, taken under the wrong T_COMP flag or from an older
+  slicing fails its CRC: accounting errors can cost progress, never
+  correctness.
 - A control that passes its CRC but is malformed is dropped like one
   that failed (Station._check), before any state changes.
 - The resend list is a pure function of one snapshot, the reply the
@@ -65,11 +66,15 @@ def dup_ctl(burst) -> bool:
     return any(s.rv for s in burst.slots if s.mask_id[2] >= SEQ_MOD)
 
 
-def data_mask(direction: int, seq: int, key: int = 0, comp: bool = False) -> tuple:
-    """A data codeword's identity. `comp`: deflated (T_COMP), folded into
-    the direction byte, so a codeword decoded under the wrong compression
-    assumption fails its CRC (docs/arq.md §2, §9a)."""
-    return (key, direction | 2 * comp, seq % SEQ_MOD)
+EPOCH_MOD = 64  # abandon epochs in a data codeword's identity: the direction byte's 6 spare bits
+
+
+def data_mask(direction: int, seq: int, key: int = 0, comp: bool = False, epoch: int = 0) -> tuple:
+    """A data codeword's identity. `comp`: deflated (T_COMP); `epoch`: the
+    sender's abandon epoch (its slicing). Both are folded into the
+    direction byte, so a codeword decoded under the wrong compression or
+    slicing assumption fails its CRC (docs/arq.md §2, §9a)."""
+    return (key, direction | 2 * comp | 4 * (epoch % EPOCH_MOD), seq % SEQ_MOD)
 
 
 # --- PHY abstraction -----------------------------------------------------------
@@ -319,6 +324,7 @@ class Station:
     _abandon_bursts: set = field(default_factory=set)  # my burst seqs that carried it
     _abandon_epoch: int = 0
     _peer_epoch: int = 0  # the last peer abandon epoch applied
+    _stale: bool = False  # the last burst handled repeated one already answered: its ACK may be stale
 
     @property
     def peer(self) -> int:
@@ -364,8 +370,14 @@ class Station:
         max_ctl = getattr(self.policy, "max_ctl", lambda m: 4)(submode)
         ext = {}
         reset = None
+        stale, self._stale = self._stale, False
         if not fresh:
             max_cw = 0  # control only
+        elif stale and (self.resync_due or any(c.submode != submode for c in self.tx.cws.values())):
+            # answering a repeat of the peer burst I last answered: its ACK
+            # may predate my last burst, so it may not abandon (§4). Control
+            # only until a reply to this one; the resync waits for it too.
+            max_cw = 0
         elif self.resync_due:
             reset, self.resync_due = 1, False
         elif any(c.submode != submode for c in self.tx.cws.values()):
@@ -459,9 +471,11 @@ class Station:
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
         slots = [Slot(ctl_mask(self.direction, i, self.key), rv, p) for i, p in enumerate(ctl) for rv in range(dup)]
-        slots += [Slot(data_mask(self.direction, x, self.key, self.tx.cws[x].comp), rv, self.tx.cws[x].payload)
+        # every outstanding codeword was sliced in the current epoch (abandon clears them)
+        ep = self._abandon_epoch
+        slots += [Slot(data_mask(self.direction, x, self.key, self.tx.cws[x].comp, ep), rv, self.tx.cws[x].payload)
                   for x, rv in zip(resend, rvs)]
-        slots += [Slot(data_mask(self.direction, c.seq, self.key, c.comp), 0, c.payload) for c in new]
+        slots += [Slot(data_mask(self.direction, c.seq, self.key, c.comp, ep), 0, c.payload) for c in new]
         self._snapshots[bn] = (self.rx.cum, conveyed)
         self._sent_seqs[bn] = resend + [c.seq for c in new]
         self._latest = bn
@@ -620,6 +634,13 @@ class Station:
                 c.heard += 1  # the peer decoded that burst: it holds soft bits
                 # and mapped its new slots by T_NEW: it holds their T_COMP bits
                 c.comp_known |= c.first_bn == acted
+        if (self._abandon is not None and acted < min(self._abandon_bursts)
+                and unwrap(core.cum, self.tx.base) > self.tx.base):
+            # an ACK of a burst from before my pending abandon describes the
+            # old slicing: past the abandon point it can't be mapped (a late
+            # burst delivered old codewords there). Never guess (§4).
+            self._fail(f"protocol: ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
+            return True
         try:
             cum = unwrap(core.cum, self.tx.base)
             received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
@@ -658,7 +679,7 @@ class Station:
                 n_old += 1
                 continue
             key = (self.peer, seq)
-            p = rx.decode(i, data_mask(self.peer, seq, self.key, comp[i - n_ctl_slots]), rv, key)
+            p = rx.decode(i, data_mask(self.peer, seq, self.key, comp[i - n_ctl_slots], self._peer_epoch), rv, key)
             if i >= n_ctl_slots + core.k:
                 n_new += 1
                 n_ok += p is not None
@@ -693,6 +714,7 @@ class Station:
                      + ["wants dup ctl"] * self.peer_wants_dup)
             log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
         self.reply_lost = repeat
+        self._stale = repeat
         self.peer_burst = core.burst_seq
         self._answered = False
         self._watchdog(progress)
