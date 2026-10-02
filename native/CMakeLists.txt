@@ -108,6 +108,14 @@ if(DATA2G_BUILD_RIG)
   add_library(data2g_rig STATIC core/rig/hamlib/hamlib.cpp)
   set_target_properties(data2g_rig PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_link_libraries(data2g_rig PUBLIC data2g_core PRIVATE data2g::hamlib)
+  if(MSVC)
+    # hamlib/rig.h includes <pthread.h> unconditionally and MSVC has none
+    # (from SSTVAE). See the header for why a shim is safe here and what
+    # keeps it so. SYSTEM, so it never shadows a real pthread.h elsewhere
+    # and produces no warnings of its own.
+    target_include_directories(data2g_rig SYSTEM PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/msvc-pthread)
+  endif()
 endif()
 
 # --- apps ----------------------------------------------------------------------

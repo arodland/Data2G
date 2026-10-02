@@ -47,6 +47,17 @@ namespace {
 
 std::mutex g_log_mu;
 
+// localtime_r is POSIX; MSVC has localtime_s with the arguments swapped.
+std::tm local_tm(std::time_t t) {
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    return tm;
+}
+
 const char* level_name(int level) {
     switch (level) {
         case DEBUG: return "DEBUG";
@@ -65,8 +76,7 @@ void log_line(int level, const std::string& msg) {
     const auto now = std::chrono::system_clock::now();
     const std::time_t t = std::chrono::system_clock::to_time_t(now);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
-    std::tm tm{};
-    localtime_r(&t, &tm);
+    const std::tm tm = local_tm(t);
     char stamp[32];
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
     std::lock_guard lock(g_log_mu);
@@ -188,8 +198,7 @@ void usage_error(const std::string& msg, const char* prog) {
 
 std::string default_record_dir() {
     const std::time_t t = std::time(nullptr);
-    std::tm tm{};
-    localtime_r(&t, &tm);
+    const std::tm tm = local_tm(t);
     char buf[32];
     std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &tm);
     return std::string("recordings/") + buf;
