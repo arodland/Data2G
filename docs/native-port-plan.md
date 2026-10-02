@@ -433,6 +433,8 @@ Reference behaviour, unchanged in Python, ported as is:
   accept (judge such rows statistically), or make Python's `_phi`
   correctly rounded (float64 tanh/log rounded to float32), which would make
   Python CPU-independent and studies bitwise; a Python-side change.
+  Decision (2026-10-02): accept. Paired studies are judged row for row,
+  with marginal-decode flips like this one judged statistically.
 
 SSTVAE (not changed from here):
 - TSan found a race in `RigController::wait_for_shutdown` (polls
