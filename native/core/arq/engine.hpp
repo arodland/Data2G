@@ -48,6 +48,12 @@
 namespace data2g::arq {
 
 inline constexpr double MAX_BURST_S = 16.0;  // longest burst accepted from a header
+// ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
+// turn at least this often (FCC 97.119: every 10 minutes), and one more once
+// the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
+// after it closed, when the peer's own ID (after its DISC_ACK) has been heard
+inline constexpr double ID_INTERVAL_S = 600.0;
+inline constexpr double ID_GUARD_S = REPLY_START_S;
 
 // engine.Recorder (--record-dir), in the same formats: events.jsonl (one
 // JSON object per line, as json.dumps writes it), rx_NNNNN.npz per burst
@@ -158,8 +164,11 @@ public:
     void abort();
     void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
     void set_chat(bool on);
-    std::vector<std::string> events();  // CONNECTED ..., DISCONNECTED ..., CQFRAME call cap
+    std::vector<std::string> events();  // CONNECTED ..., DISCONNECTED ..., CQFRAME call cap, ID call key
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
+    // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
+    TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
+    double id_interval_s = ID_INTERVAL_S;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
@@ -200,7 +209,11 @@ private:
     void hear(std::vector<tnc::Receiver::Item>& items, double t);
     TxBurstPtr kiss_burst(std::int64_t k, bool busy);
     bool cq(ModemRx& rx);
-    void start_tx(const TxBurstPtr& burst, double t);
+    TxBurstPtr id_frame(const Session& s) const;
+    void id_check(double t);
+    std::vector<TxBurstPtr> with_id(const TxBurstPtr& burst, double t);
+    // Bursts back to back on one PTT; `main` is the one the session is told has gone.
+    void start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxBurstPtr& main);
     void request_reset();
     void apply_reset();
     void run_posted();
@@ -227,6 +240,11 @@ private:
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited
     bool kiss_deferred_ = false;  // ... and it has waited on BUSY
     std::int64_t kiss_slot_ = 0;  // next p-persistence slot, samples
+    std::shared_ptr<Session> id_for_;      // the session ID frames are being sent for
+    std::optional<double> id_due_;         // its next ID (nullopt: closed, its last ID pending or sent)
+    std::shared_ptr<Session> id_pending_;  // its last ID, after it closed, from id_pending_t_
+    double id_pending_t_ = 0.0;
+    double hold_ = 0.0;  // nothing new goes before this (the peer's last ID may follow its DISC_ACK)
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
 

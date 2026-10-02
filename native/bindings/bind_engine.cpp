@@ -121,6 +121,7 @@ void bind_engine(py::module_& m) {
         .def("send_cq", &PyEngine::send_cq)
         .def_property_readonly("now", &PyEngine::now)
         .def_property("n", &PyEngine::n, &PyEngine::set_n)
+        .def_readwrite("id_interval_s", &PyEngine::id_interval_s)
         .def_property_readonly("call", &PyEngine::call)
         .def_property_readonly("aliases", [](const PyEngine& s) { return py::tuple(py::cast(s.aliases())); })
         .def_property_readonly("session", [](PyEngine& self) {

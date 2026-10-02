@@ -66,6 +66,37 @@ def _same_records(d):
     assert keys["cpp"] == keys["py"]
 
 
+@pytest.mark.parametrize("cpp_calls", [True, False], ids=["cpp-calls-python", "python-calls-cpp"])
+def test_id_frames_between_cpp_and_python_engines(native, reference, cpp_calls, tmp_path):
+    """ID frames (docs/arq.md §7a) each way: ahead of a turn when due, and
+    once more after the session, heard by the other implementation."""
+    a, b = _pair(native, reference, cpp_calls, tmp_path)
+    a.id_interval_s = b.id_interval_s = 3.0
+    b.listen()
+    a.connect(b.call, 2)
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    key = a.session.station.key
+    up, down = bytes(range(256)) * 40, bytes(range(255, -1, -1)) * 20
+    a.session.write(up)
+    b.session.write(down)
+    got_a, got_b, ev_a, ev_b = bytearray(), bytearray(), [], []
+
+    def poll():
+        got_a.extend(a.session.read())
+        got_b.extend(b.session.read())
+        ev_a.extend(a.events())
+        ev_b.extend(b.events())
+    assert link(a, b, 12, 240, lambda: poll() or (len(got_b) >= len(up) and len(got_a) >= len(down)), seed=3)
+    assert bytes(got_b) == up and bytes(got_a) == down
+    assert f"ID {a.call} {key}" in ev_b and f"ID {b.call} {key}" in ev_a
+    a.session.disconnect()
+    assert link(a, b, 12, 60, lambda: poll() or (a.session.state == S.CLOSED and b.session.state == S.CLOSED), seed=4)
+    n_a, n_b = ev_a.count(f"ID {b.call} {key}"), ev_b.count(f"ID {a.call} {key}")
+    assert link(a, b, 12, 30, lambda: poll() or (ev_a.count(f"ID {b.call} {key}") > n_a
+                                                 and ev_b.count(f"ID {a.call} {key}") > n_b), seed=5)
+    _same_records(tmp_path)
+
+
 def test_kiss_between_cpp_and_python_engines(native, reference):
     cpp = native.engine.Engine("W1AW", seed=3, kiss=native.kisslink.KissLink())
     py = reference(E, "Engine")("K2XYZ", seed=4, kiss=kisslink.KissLink())

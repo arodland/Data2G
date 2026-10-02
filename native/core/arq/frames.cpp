@@ -240,8 +240,9 @@ Bytes pack_call(const std::string& call_in) {
     for (auto& c : call)
         if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
     bool ok = call.size() <= CALL_CHARS;
-    for (char c : call) ok = ok && c != ' ' && CALL_ALPHABET.find(c) != std::string_view::npos;
-    if (!ok) throw std::invalid_argument("callsign '" + call + "': up to 10 of A-Z 0-9 / -");
+    // space pads at the end, so a name may hold one ("VARA KISS"); trailing ones don't survive the round trip
+    for (char c : call) ok = ok && CALL_ALPHABET.find(c) != std::string_view::npos;
+    if (!ok) throw std::invalid_argument("callsign '" + call + "': up to 10 of A-Z 0-9 / - space");
     std::uint64_t v = 0;
     for (int i = 0; i < CALL_CHARS; ++i)
         v = v << 6 | (static_cast<std::size_t>(i) < call.size() ? CALL_ALPHABET.find(call[i]) : 0);
