@@ -46,6 +46,15 @@ class FakePA:
         return FakeStream(rate, channels)
 
 
+def _connect(port, tries=50):
+    for _ in range(tries):
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=5)
+        except OSError:
+            time.sleep(0.1)
+    return socket.create_connection(("127.0.0.1", port), timeout=5)
+
+
 def test_commands_over_tcp(tmp_path):
     a = SimpleNamespace(mycall="W1AW", host="127.0.0.1", command_port=18310, sample_rate=48000, output_volume=0.0,
                         rigctld_host="localhost", rigctld_port=0, ptt_on_delay_ms=100, ptt_off_delay_ms=0, tx_lead_ms=100,
@@ -55,13 +64,7 @@ def test_commands_over_tcp(tmp_path):
     stop = threading.Event()
     th = threading.Thread(target=host.serve, args=(a, FakePA(), stop), daemon=True)
     th.start()
-    for _ in range(50):
-        try:
-            c = socket.create_connection(("127.0.0.1", 18310), timeout=5)
-            break
-        except OSError:
-            time.sleep(0.1)
-    d = socket.create_connection(("127.0.0.1", 18311), timeout=5)
+    c, d = _connect(18310), _connect(18311)  # the data port binds after the command port
     c.sendall(b"VERSION\rMYCALL K2XYZ\rLISTEN ON\rBW500\rFOO\r")
     got = b""
     deadline = time.time() + 20
