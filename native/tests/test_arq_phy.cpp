@@ -3,6 +3,7 @@
 // links shifting modes from each other's reports. Parity with
 // data2g/arq/phy.py and data2g/kisslink.py is tests/test_native_arq_phy.py's.
 
+#include <algorithm>
 #include <random>
 
 #include "arq/phy.hpp"

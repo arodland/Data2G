@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Data2G
+GenericName=HF Data Modem
+Comment=Data modem for HF radio (VARA-compatible host ports, KISS)
+# The staged launcher: runs data2g-gui, or data2g-host in a build without
+# the GUI. Bare name: valid both inside the AppImage and from a prefix.
+Exec=data2g
+Icon=org.cleverdomain.data2g
+Terminal=false
+# HamRadio is an additional category and needs exactly one main one.
+Categories=Network;HamRadio;
+Keywords=modem;ham;amateur;radio;HF;VARA;KISS;Winlink;
+StartupWMClass=data2g-gui
+StartupNotify=true

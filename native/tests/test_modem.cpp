@@ -3,6 +3,7 @@
 // modulate -> find_burst / receive / demodulate, the header copy included.
 // Parity: tests/test_native_modem.py.
 
+#include <algorithm>
 #include <random>
 #include <string>
 

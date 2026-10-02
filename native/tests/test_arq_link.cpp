@@ -2,6 +2,7 @@
 // through a lossy fake channel. Parity with data2g/arq is
 // tests/test_native_arq.py's job.
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <random>

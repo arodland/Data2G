@@ -1,0 +1,166 @@
+# CI for the Python reference and the native (C++) port. Lifted from SSTVAE.
+#
+# Triggers: pull requests, pushes to master, and by hand. Pushing a feature
+# branch starts nothing.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    # `labeled` as well as the defaults, so adding the `sign` label to an
+    # open pull request produces a signed build without an empty push.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  # A label-triggered run is its own group: sharing one with
+  # cancel-in-progress would cancel the pull request's running CI.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  # The generated tables are committed; regenerating and diffing is what
+  # keeps them honest. If they are stale every other job tests the wrong
+  # thing.
+  generated:
+    name: Generated files and source checks
+    # Only the `sign` label means anything to CI; any other label would
+    # otherwise rebuild five platforms. One condition for every job, so a
+    # commit's results never mix two runs.
+    if: &label_is_relevant >-
+      github.event.action != 'labeled' || github.event.label.name == 'sign'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.3.2
+      # The locked numpy/scipy: some tables come out of numpy routines.
+      - name: Python packages
+        run: |
+          uv export --frozen --no-emit-project --extra dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/requirements.txt" -e .
+      - name: native/core/generated matches data2g/
+        run: python tools/gen_native_tables.py --check
+      - name: Layering rules
+        run: python tools/check_layering.py
+      # A std:: name used without its header compiles on libstdc++ and
+      # libc++ and fails only on MSVC; this finds it on Linux in a second.
+      - name: Standard-library includes
+        run: python tools/check_includes.py
+      - name: Show the diff if anything is stale
+        if: failure()
+        run: |
+          python tools/gen_native_tables.py || true
+          git diff --stat
+          git diff -- native/core/generated | head -200
+
+  python:
+    name: Python reference
+    if: *label_is_relevant
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # tests/test_sstvae_golden.py needs SSTVAE's Python; without it the
+      # module skips, and a skip is not a pass.
+      - uses: actions/checkout@v7
+        with:
+          repository: arodland/SSTVAE
+          ref: cc06e8775615ad3afe93e1c1eb9e55aaeab0ed94
+          path: .sstvae-ref
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v8.3.2
+      # Locked versions from uv.lock. Installed (-e), because the `pytest`
+      # console script does not put the checkout on sys.path.
+      #
+      # torch: only tests/test_channel_torch.py and test_decoders_torch.py
+      # use it (importorskip), as the reference for the numpy decoders and
+      # channel. CPU wheel at the locked version, not the `train` extra
+      # (that would pull CUDA torch, matplotlib and onnx for two files).
+      - name: Python packages
+        run: |
+          uv export --frozen --no-emit-project --extra dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/requirements.txt" -e .
+          python -m pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cpu
+      # importorskip only skips on ImportError, so with this passing the
+      # torch tests run rather than quietly skip.
+      - name: torch is importable, so its tests run
+        run: python -c "import torch; print(torch.__version__)"
+      # -rs lists every skip with its reason. The slow marker (Monte Carlo
+      # and the ~3800-run fuzz) stays local.
+      - name: Fast suite
+        env:
+          SSTVAE_PATH: ${{ github.workspace }}/.sstvae-ref
+          OMP_NUM_THREADS: "1"
+        run: pytest tests -q -rs
+
+  # Build, test, package, sign: its own file so release.yml runs this same
+  # job. `secrets: inherit` because signing needs them and a reusable
+  # workflow gets none by default.
+  #
+  # Signing on a pull request is opt-in with the `sign` label (quota and a
+  # notarization round trip per build); pushes to master and manual runs
+  # sign. Without secrets sign.sh is a loud no-op.
+  native:
+    if: *label_is_relevant
+    uses: ./.github/workflows/native-build.yml
+    with:
+      sign: ${{ github.event_name != 'pull_request'
+                || contains(github.event.pull_request.labels.*.name, 'sign') }}
+    secrets: inherit
+
+  sanitizers:
+    name: ASan + UBSan
+    if: *label_is_relevant
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: lukka/get-cmake@v4.4.0
+      # C++ only: no module (ASan inside CPython reports CPython), no
+      # Hamlib (prebuilt, uninstrumented), no Qt (not installed here, so
+      # the host and Qt audio are skipped by AUTO; their logic lives in the
+      # core and is tested there). RelWithDebInfo, not Debug: -O0 is what
+      # makes an instrumented build slow (SSTVAE: 670 s vs 136 s, same
+      # findings).
+      - name: Configure with sanitizers
+        run: |
+          cmake -S native -B native/build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDATA2G_SANITIZE=ON \
+            -DDATA2G_BUILD_PYMODULE=OFF -DDATA2G_BUILD_RIG=OFF \
+            -DDATA2G_BUILD_HOST=OFF -DDATA2G_BUILD_QTAUDIO=OFF
+      - run: cmake --build native/build-asan --parallel
+      - run: ctest --test-dir native/build-asan --output-on-failure --timeout 900
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  tsan:
+    name: ThreadSanitizer
+    if: *label_is_relevant
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: lukka/get-cmake@v4.4.0
+      # The runner kernel's 32-bit mmap randomization puts mappings where
+      # TSan's shadow memory must go ("unexpected memory mapping").
+      - name: Make room for TSan's shadow memory
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      # Separate from ASan (they cannot be combined). Only the threaded
+      # parts: the engine and its decode worker, the audio FIFOs and
+      # pipeline (SPSC rings), the rig controller and keyer, the host.
+      - name: Configure with ThreadSanitizer
+        run: |
+          cmake -S native -B native/build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            -DDATA2G_BUILD_PYMODULE=OFF -DDATA2G_BUILD_RIG=OFF \
+            -DDATA2G_BUILD_HOST=OFF -DDATA2G_BUILD_QTAUDIO=OFF
+      - run: cmake --build native/build-tsan --parallel --target test_engine test_audio test_rig test_host
+      - run: ctest --test-dir native/build-tsan --output-on-failure --timeout 900 -R '^(engine|audio|rig|host)$'
+        env:
+          TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1

@@ -30,6 +30,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>

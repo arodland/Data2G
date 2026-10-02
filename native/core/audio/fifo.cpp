@@ -1,6 +1,7 @@
 #include "audio/fifo.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <thread>
 
 namespace data2g::audio {

@@ -4,6 +4,7 @@
 // time. Parity with data2g/arq/engine.py is tests/test_native_engine.py's
 // (a C++ engine against a Python one) and the --native substitution's.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
