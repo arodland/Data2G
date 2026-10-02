@@ -49,7 +49,7 @@ def slot_outcomes(spec, r, slots) -> list:
             out.append(None)
             continue
         mask = PHY.mask_value(tuple(s["mask"]))
-        payload, ok = codes.decode_many(spec, soft[i:i + 1], mask, index=0)[0]
+        payload, ok = codes.decode_many(spec, soft[i:i + 1], mask, index=i)[0]
         out.append(bool(ok and payload == bytes.fromhex(s["payload"])))
     return out
 
@@ -86,8 +86,9 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
                 try:
                     soft = PHY.soft_bits(r)
                     m = PHY.mask_value(tuple(slots[0]["mask"]))
-                    buf = codes.combine(spec, codes.combine(spec, None, soft[0:1], 0), soft[1:2], 1)
-                    p, good = codes.decode_buffer(spec, buf, 1, m, index=0)[0]
+                    buf = codes.combine(spec, None, codes.flip(spec, 0, 0) * soft[0:1], 0)
+                    buf = codes.combine(spec, buf, codes.flip(spec, 1, 1) * soft[1:2], 1)
+                    p, good = codes.decode_buffer(spec, buf, 1, m, index=codes.PLAIN)[0]
                     ctl_ok = good and p == bytes.fromhex(slots[0]["payload"])
                 except (NameError, modem.SyncError):
                     pass

@@ -38,10 +38,24 @@ a control word first, then resent codewords, then new ones.
   with probability 2^-16 (CRC-16), or 2^-32 on LDPC codewords of k >= 512.
 - `codes.encode` / `decode_many` / `decode_buffer` take `crc_mask`, from
   `arq.phy.mask_value(mask_id)`.
-- **Scrambler:** info bits are XORed with PN9 before encoding (`codes.scrambler`). The
-  seed comes from the CRC mask, so a codeword scrambles the same in any slot and its
-  resends combine. With mask 0 it comes from the burst position instead. Without
-  scrambling, zero-padded codewords were wrecked by the clipper (phase G).
+- **Scrambler:** info bits are XORed with PN9 before encoding (`codes.scrambler`).
+  Without it, zero-padded codewords were wrecked by the clipper (phase G).
+  - The seed is the codeword's burst position alone (`codes.scramble_seed`), never the
+    key, so seeds differ within a burst.
+  - A resend in another slot is scrambled differently. It still combines, because the
+    code is linear: C(u ^ s) = C(u) ^ C(s). The receiver flips each slot's soft bits by
+    its own C(s) (`codes.flip`) before adding them to the buffer, and decodes the
+    buffer unscrambled (`codes.PLAIN`).
+- **Plain on air (Part 97):** the mask touches only the CRC. A station without the key
+  decodes any codeword, descrambles it by its slot and reads the payload, with no
+  trials. That is all a promiscuous receiver needs. Only the CRC check needs the key,
+  so filtering stays (§2), but meaning is never obscured (FCC 97.113(a)(4)).
+- **Decode once, check each mask:** a receiver decodes a slot once (`codes.decode_raw`)
+  and tries each mask it cares about as a CRC check (`codes.check`; polar: the first
+  list candidate that passes). The engine asks every burst's slot 0 under the session's
+  key, KISS's and mask 0: three decodes became one (polar `ack-4f`: 56 to 19 ms).
+  - Until 2026-10 the seed came from the mask. Reading traffic then needed the key,
+    from the CONNECT or by trying all 65536.
 
 ## 3. Burst layout (both directions)
 
