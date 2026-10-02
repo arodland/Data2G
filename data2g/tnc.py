@@ -560,6 +560,7 @@ class Rigctld:
 
     def __init__(self, host: str, port: int):
         self.addr, self.sock = (host, port), None
+        self.keyed = False  # a PTT on reached a connected rigctld
 
     def ptt(self, on: bool):
         if not self.addr[1]:
@@ -569,6 +570,7 @@ class Rigctld:
                 if self.sock is None:
                     self.sock = socket.create_connection(self.addr, timeout=2)
                 self.sock.sendall(b"T 1\n" if on else b"T 0\n")
+                self.keyed |= on
                 reply = self.sock.recv(64)
                 if not reply.startswith(b"RPRT 0"):
                     log.warning("rigctld answered %r to PTT %s", reply, "on" if on else "off")
@@ -577,6 +579,13 @@ class Rigctld:
                 log.warning("rigctld %s:%d: %s", *self.addr, e)
                 self.close()
         log.error("PTT %s failed", "on" if on else "off")
+
+    def release(self):
+        """At exit: PTT off only if we keyed the radio. Never connected, or
+        never keyed: not ours to touch, so no attempt, no wait, no warning."""
+        if self.keyed:
+            self.ptt(False)
+        self.close()
 
     def close(self):
         if self.sock is not None:
