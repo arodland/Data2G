@@ -219,9 +219,9 @@ class Host:
             e.listen()
         self.out_data += e.session.read()
         if e.kiss is not None:
+            events = e.kiss.take_events()
             if self._bcast:
-                self.out_cmd += e.kiss.events
-            e.kiss.events.clear()
+                self.out_cmd += events
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")
@@ -506,9 +506,8 @@ def serve(a, pa, stop: threading.Event | None = None):
             for port, f in engine.kiss_rx:
                 kiss.broadcast(f, port)
             engine.kiss_rx.clear()
-            for port, ack in link.acks:
+            for port, ack in link.take_acks():
                 kiss.send_ack(ack, port)
-            link.acks.clear()
     finally:
         log.info("shutting down")
         rig.release()

@@ -249,6 +249,21 @@ std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
     return memo_[{slot, m}] = codes::check(s, d.cands, d.usable, m);
 }
 
+std::vector<Bytes> ModemRx::raw(int slot) {
+    if (slot >= n_cw_) return {};
+    const auto& s = spec(slot);
+    const Raw& d = decoded(slot, s);
+    const std::size_t k = static_cast<std::size_t>(s.k), nb = static_cast<std::size_t>(s.payload_bytes);
+    std::vector<Bytes> out;
+    for (std::size_t l = 0; l < d.usable.size(); ++l) {
+        if (!d.usable[l]) continue;
+        Bytes p(nb, 0);
+        for (std::size_t i = 0; i < 8 * nb; ++i) p[i / 8] |= static_cast<std::uint8_t>((d.cands[l * k + i] & 1) << (7 - i % 8));
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
 // The slot decoded alone, mask left open, with DD while it fails to
 // converge. A converged codeword is what was on air, whoever it was for: DD
 // learns from it.

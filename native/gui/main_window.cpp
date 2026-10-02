@@ -161,8 +161,8 @@ void MainWindow::poll() {
         status_->setText(tr("%1: stopped: %2").arg(call, error_));
     } else {
         QStringList on;
-        if (a.vara) on << tr("VARA %1:%2").arg(qs(a.host)).arg(a.command_port);
-        if (a.kiss) on << tr("KISS %1:%2").arg(qs(a.kiss_address)).arg(a.kiss_port);
+        on << tr("VARA %1:%2").arg(qs(a.host)).arg(a.command_port);
+        on << tr("KISS %1:%2").arg(qs(a.kiss_address)).arg(a.kiss_port);
         on << (a.audio_io.empty() ? tr("audio %1 / %2").arg(qs(a.input_device.value_or("default")), qs(a.output_device.value_or("default")))
                                   : tr("audio %1").arg(qs(a.audio_io)));
         status_->setText(tr("%1 on %2").arg(call, on.join(QStringLiteral(", "))));

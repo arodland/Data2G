@@ -60,7 +60,15 @@ int main() {
 
     check::current_step = "known answers";
     check::equal(mask_value({7, 0, 2}), 3389368501u, "mask_value(7, 0, 2)");
-    check::equal(mask_value(ctl_mask(0, 0, kisslink::KISS_KEY)), 3994227689u, "mask_value(KISS control 0)");
+    check::equal(kisslink::group_key("KISS 0"), 28698, "group_key(KISS 0)");
+    check::equal(kisslink::group_key("aprs"), 46564, "group_key(APRS)");
+    check::equal(mask_value(ctl_mask(0, 0, kisslink::group_key("KISS 0"))), 3060980230u, "mask_value(KISS 0 control 0)");
+    {
+        const Bytes pair = kisslink::pack_pair("CHAT", "W1AW");
+        const Bytes want = {0x0c, 0x80, 0x54, 0x00, 0x00, 0x00, 0x00, 0x05, 0xdc, 0x05, 0x70, 0x00, 0x00, 0x00, 0x00};
+        check::is_true(pair == want, "pack_pair(CHAT, W1AW)");
+        check::is_true(kisslink::unpack_pair(pair) == std::pair<std::string, std::string>{"CHAT", "W1AW"}, "unpack_pair");
+    }
     check::equal(mask_value({0, 1, 9}), 0u, "key 0: mask 0");
     check::equal(kisslink::station_hash("W1AW"), 8033, "station_hash(W1AW)");
     check::equal(kisslink::station_hash("kc2g-7"), 26660, "station_hash(kc2g-7)");
@@ -137,16 +145,19 @@ int main() {
         double t = 0.0;
         auto clock = [&] { return t; };
         kisslink::KissLink a(2, "", clock), b(2, "", clock);
+        a.set_mode(0, "qpsk-r1/5", true);  // rate shifting on (BCAST MODE 0 AUTO)
+        b.set_mode(0, "qpsk-r1/5", true);
+        using Got = std::vector<std::pair<int, Bytes>>;
         auto over_air = [&](kisslink::KissLink& tx, kisslink::KissLink& rx, unsigned seed) {
             const auto bu = tx.next_burst();
             auto frames = rx.on_burst(hear(on_air(tx_audio(*bu), 0.02, seed)));
             t += 3;
-            return std::make_pair(bu, frames ? *frames : std::vector<Bytes>{});
+            return std::make_pair(bu, frames ? *frames : Got{});
         };
         const auto i1 = frame("KC2G", "W1AW", 0x00, "connected hello");
         a.enqueue(i1);
         auto [b1, f1] = over_air(a, b, 1);
-        check::is_true(b1->submode == "qpsk-r1/5" && f1 == std::vector<Bytes>{i1}, "no report yet: broadcast");
+        check::is_true(b1->submode == "qpsk-r1/5" && f1 == Got{{0, i1}}, "no report yet: broadcast");
         b.enqueue(frame("W1AW", "KC2G", 0x21, ""));
         auto [b2, f2] = over_air(b, a, 2);
         check::equal(static_cast<int>(f2.size()), 1, "the RR crosses with its report");

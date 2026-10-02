@@ -130,7 +130,7 @@ void sync_kiss() {
     const Bytes ui = ui_frame("!beacon");
     ka.enqueue(ui);
     check::is_true(link(a, b, 12, 30, [&] {
-        return std::find(b.kiss_rx().begin(), b.kiss_rx().end(), ui) != b.kiss_rx().end();
+        return std::find(b.kiss_rx().begin(), b.kiss_rx().end(), std::pair<int, Bytes>{0, ui}) != b.kiss_rx().end();
     }, 5), "a UI frame crosses");
 }
 

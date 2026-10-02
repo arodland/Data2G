@@ -77,7 +77,6 @@ void install_arq_log();
 std::string default_record_dir();  // recordings/YYYYmmdd-HHMMSS
 
 struct Args {
-    bool vara = true, kiss = true;
     int kiss_port = 8100;
     std::string kiss_address = "127.0.0.1";
     double kiss_busy_limit = 60.0;

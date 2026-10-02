@@ -98,10 +98,8 @@ app::Args persisted() {
     a.rig_retries = 3;
     a.rig_poll_interval = 2.5;
     a.rig_debug = true;
-    a.vara = false;
     a.host = "0.0.0.0";
     a.command_port = 8400;
-    a.kiss = false;
     a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
     a.decode_worker = false;
@@ -171,8 +169,8 @@ void test_window(const QTemporaryDir& dir) {
     a.audio_io = "pipe:" + in + "," + out;
     a.rigctld_port = 0;  // no rig
     a.record_dir = "";
-    a.kiss = false;
     a.command_port = free_port_pair();
+    a.kiss_port = free_port_pair();  // KISS always runs: a port of its own
     QSettings store(dir.filePath(QStringLiteral("window.ini")), QSettings::IniFormat);
     check::current_step = "window: start the station";
     gui::MainWindow w(a, store);

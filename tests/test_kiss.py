@@ -184,11 +184,10 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     assert got == [(nb, b"x" * 40)] and b.events == [f"BCAST {nb} HEARD"]
     assert group_key("G102291") == group_key("APRS")  # another group, the same key: open it too
     nc = b.open("G102291")
-    b.events.clear()
+    b.take_events()
     a.enqueue(b"y" * 40, na)
     _, got = heard(control_lost(a.next_burst()), b, seed=35)
-    assert got == [] and sorted(b.events) == sorted([f"BCAST {nb} LOST 1", f"BCAST {nc} LOST 1"])
-    b.events.clear()
+    assert got == [] and sorted(b.take_events()) == sorted([f"BCAST {nb} LOST 1", f"BCAST {nc} LOST 1"])
     a.enqueue(b"z", na)  # with its control, the name settles it
     _, got = over_air(a, b, seed=36)
     assert got == [(nb, b"z")] and b.events == [f"BCAST {nb} HEARD"]

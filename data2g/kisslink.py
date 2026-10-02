@@ -300,9 +300,19 @@ class KissLink:
             return
         self.queue.append((port, frame, ack))
 
+    def take_events(self) -> list[str]:
+        """The statuses since the last call, oldest first."""
+        out, self.events = self.events, []
+        return out
+
+    def take_acks(self) -> list:
+        """(port, ack) of frames gone out since the last call."""
+        out, self.acks = self.acks, []
+        return out
+
     def on_sent(self, burst: TxBurst):
         """A burst finished transmitting: its frames' acks are due."""
-        if self._inflight is not None and burst is self._inflight[0]:
+        if self._inflight is not None and burst == self._inflight[0]:
             self.acks += self._inflight[1]
             self._inflight = None
 

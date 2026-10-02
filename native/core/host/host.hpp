@@ -7,8 +7,11 @@
 //
 // Commands: MYCALL call..., LISTEN ON|OFF|CQ, CONNECT from to, DISCONNECT,
 // ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
-// and IGNORED's settings. Replies OK / WRONG. Notifications: CONNECTED src
-// dst bw, DISCONNECTED, PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE, MODE.
+// and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
+// [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
+// WRONG. Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
+// ON|OFF, BUFFER n, IAMALIVE, MODE; broadcast statuses (BCAST ...) once the
+// client has sent a BCAST command.
 #pragma once
 
 #include <cstdint>
@@ -29,6 +32,10 @@ inline constexpr double BUFFER_REPEAT_S = 30.0;  // a nonzero BUFFER is repeated
 bool ignored(std::string_view cmd);
 // BW500 -> 0, BW1200 -> 1, BW2300/BW2750 -> 2; nullopt: not a BW command.
 std::optional<int> bw_cap(std::string_view cmd);
+// MODES (and --list-modes): one line per mode within the cap, narrowest
+// first: MODE name bandwidth-Hz bytes-per-codeword max-codewords
+// seconds-at-1 seconds-at-max.
+std::vector<std::string> mode_lines(int cap);
 
 class Host {
 public:
@@ -62,6 +69,10 @@ protected:
     virtual std::optional<std::int64_t> next_capacity();
 
 private:
+    // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the reply, nullopt for WRONG.
+    std::optional<std::string> bcast_command(const std::vector<std::string>& args);
+
+    bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
     bool ptt_ = false, busy_ = false;
     std::optional<std::int64_t> buffer_ = 0;  // nullopt: answer the next step whatever it is
     double buffer_t_ = 0.0;                   // engine time of the last BUFFER line

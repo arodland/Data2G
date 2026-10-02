@@ -3,7 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <stdexcept>
+
+#include "arq/modes.hpp"
+#include "tables/tables.hpp"
 
 namespace data2g::host {
 
@@ -58,7 +62,63 @@ std::optional<int> bw_cap(std::string_view cmd) {
     return std::nullopt;
 }
 
+std::vector<std::string> mode_lines(int cap) {
+    auto ms = arq::allowed(cap);
+    std::sort(ms.begin(), ms.end(), [](const arq::Mode* x, const arq::Mode* y) {
+        const double wx = arq::width_hz(*x), wy = arq::width_hz(*y);
+        return wx != wy ? wx < wy : x->name < y->name;
+    });
+    std::vector<std::string> out;
+    for (const auto* m : ms) {
+        const int n = m->is_cpm() ? 1 + tables::CPM.max_data : config::MAX_CODEWORDS;
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "MODE %s %.0f %d %d %.2f %.2f", std::string(m->name).c_str(), arq::width_hz(*m),
+                      arq::payload_bytes(*m), n, arq::burst_seconds(*m, 1, false), arq::burst_seconds(*m, n, false));
+        out.emplace_back(buf);
+    }
+    return out;
+}
+
 Host::Host(arq::Engine& e, std::optional<int> credit) : engine(e), buffer_credit(credit) {}
+
+std::optional<std::string> Host::bcast_command(const std::vector<std::string>& args) {
+    auto* link = engine.kiss();
+    if (args.empty()) return std::nullopt;
+    std::vector<std::string> kw;
+    for (const auto& w : args) kw.push_back(upper(w));
+    auto port = [](const std::string& s) {  // int(): an optional sign, digits, nothing else
+        std::size_t used = 0;
+        const int n = std::stoi(s, &used);
+        if (used != s.size()) throw std::invalid_argument("not a number: " + s);
+        return n;
+    };
+    try {
+        if (kw[0] == "OPEN" && args.size() >= 2) {
+            std::vector<std::string> words(args.begin() + 1, args.end());
+            std::optional<std::string> call;
+            if (words.size() >= 3 && kw[kw.size() - 2] == "FROM") {
+                call = words.back();
+                words.resize(words.size() - 2);
+            }
+            std::string group;
+            for (const auto& w : words) group += (group.empty() ? "" : " ") + w;
+            return "BCAST PORT " + std::to_string(link->open(group, call));
+        }
+        if (kw[0] == "CLOSE" && args.size() == 2) {
+            link->close(port(args[1]));
+            return "OK";
+        }
+        if (kw[0] == "MODE" && (args.size() == 3 || (args.size() == 4 && kw[2] == "AUTO"))) {
+            std::string mode = args.back();
+            for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            link->set_mode(port(args[1]), mode, args.size() == 4);
+            return "OK";
+        }
+    } catch (const std::invalid_argument&) {
+    } catch (const std::out_of_range&) {
+    }
+    return std::nullopt;
+}
 
 void Host::command(std::string_view line) {
     const auto words = split(line);
@@ -101,6 +161,12 @@ void Host::command(std::string_view line) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
         e.set_chat(a0 == "ON");
+    } else if (cmd == "BCAST" && e.kiss()) {
+        bcast_ = true;
+        out_cmd.push_back(bcast_command(args).value_or("WRONG"));
+        return;
+    } else if (cmd == "MODES" && e.kiss()) {
+        for (auto& l : mode_lines(e.kiss()->cap)) out_cmd.push_back(std::move(l));
     } else if (ignored(cmd)) {
         arq::log_write(LOG, INFO, "accepted, not implemented: " + std::string(strip(line)));
     } else if (cmd == "VERSION") {
@@ -121,6 +187,14 @@ void Host::client_gone() {
     listening = false;
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
+    if (auto* link = e.kiss()) {  // its ports go, and port 0 back to its defaults
+        std::vector<int> open;
+        for (const auto& [n, p] : link->ports)
+            if (n) open.push_back(n);
+        for (int n : open) link->close(n);
+        link->set_mode(0, link->broadcast);
+        bcast_ = false;
+    }
 }
 
 void Host::data_in(arq::ByteView data) {
@@ -173,6 +247,10 @@ void Host::after_step(bool ptt) {
     if (e.session().state == SessionState::CLOSED && listening) e.listen();
     const auto got = e.session().read();
     out_data.insert(out_data.end(), got.begin(), got.end());
+    if (auto* link = e.kiss()) {
+        if (bcast_) out_cmd.insert(out_cmd.end(), link->events.begin(), link->events.end());
+        link->events.clear();
+    }
     if (ptt != ptt_) {
         ptt_ = ptt;
         out_cmd.emplace_back(ptt ? "PTT ON" : "PTT OFF");
