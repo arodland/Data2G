@@ -197,6 +197,32 @@ def cpm_cpp() -> str:
 FILES["cpm.cpp"] = cpm_cpp
 
 
+def polar_ga_cpp() -> str:
+    """Polar info sets the live path designs at run time (GA density
+    evolution at codes.POLAR_DESIGN_SNR_DB) because no frozen file holds
+    one: the CPM control codewords. Keyed by (k, e)."""
+    from data2g import cpm
+
+    out = [HEADER.format(src="data2g/polar.py (codes.polar_code of cpm.CTL)"), '#include "tables/tables.hpp"\n\n',
+           f"// Design SNR {cxx(float(codes.POLAR_DESIGN_SNR_DB))} dB.\n",
+           "namespace data2g::tables {\nnamespace {\n\n"]
+    rows, seen = [], set()
+    for s in cpm.CTL.values():
+        if s.code != "polar" or (s.k, s.coded_bits) in seen:
+            continue
+        code = codes.polar_code(s)
+        assert code.frozen_override is None, f"{s.name} has a frozen info set; it doesn't belong here"
+        seen.add((s.k, s.coded_bits))
+        out.append(f"constexpr std::uint16_t ga_{len(rows)}[] = {{{ints(code.info_pos)}}};\n")
+        rows.append(f"    {{{s.k}, {s.coded_bits}, ga_{len(rows)}}},\n")
+    out.append(f"\nconstexpr PolarDesign designs[] = {{\n{''.join(rows)}}};\n\n}}  // namespace\n\n"
+               "const std::span<const PolarDesign> POLAR_GA = designs;\n\n}  // namespace data2g::tables\n")
+    return "".join(out)
+
+
+FILES["polar_ga.cpp"] = polar_ga_cpp
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="compare, write nothing")

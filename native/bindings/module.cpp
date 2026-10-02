@@ -8,6 +8,7 @@ namespace data2g::bind {
 void bind_codes(py::module_&);
 void bind_constellation(py::module_&);
 void bind_cpm(py::module_&);
+void bind_polar(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
@@ -17,4 +18,5 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_codes(m);
     data2g::bind::bind_constellation(m);
     data2g::bind::bind_cpm(m);
+    data2g::bind::bind_polar(m);
 }

@@ -5,6 +5,7 @@ tools/build_native.sh. A skip is not a pass: with --native, a missing or
 stale module is an error.
 """
 
+import functools
 import sys
 from pathlib import Path
 
@@ -85,7 +86,30 @@ def _substitutions(native):
             d["info_pos"] = native.codes.info_pos(spec.name)
         return d
 
+    py_polar_code, py_decoder = codes.polar_code, codes._decoder
+
+    @functools.lru_cache(maxsize=None)
+    def polar_code(spec):
+        if config.SUBMODES.get(spec.name) == spec:
+            return native.polar.polar_code(spec.name)
+        py = py_polar_code(spec)  # e.g. the CPM control codeword: GA-designed
+        if py.frozen_override is None and py.design_snr_db == codes.POLAR_DESIGN_SNR_DB:
+            try:
+                return native.polar.PolarCode(spec.k, spec.coded_bits)
+            except IndexError:  # no frozen GA design for this (k, e)
+                pass
+        return py
+
+    @functools.lru_cache(maxsize=None)
+    def decoder(spec, device=None):
+        code = codes.polar_code(spec) if spec.code == "polar" and device is None else None
+        if isinstance(code, native.polar.PolarCode):
+            return native.polar.SCLDecoder(code, codes.POLAR_LIST)
+        return py_decoder(spec, device)
+
     return {
+        (codes, "polar_code"): polar_code,
+        (codes, "_decoder"): decoder,
         (codes, "crc24"): native.codes.crc24,
         (codes, "_with_crc"): native.codes.with_crc,
         (codes, "scramble_seed"): native.codes.scramble_seed,
