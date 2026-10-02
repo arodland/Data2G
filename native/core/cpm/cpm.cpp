@@ -465,4 +465,11 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
     return out;
 }
 
+Received receive(std::span<const double> x, const Lock& lock) {
+    Soft s = soft(grid_of(*lock.spec), x, lock.start, lock.cfo, lock.n_data, lock.dup);
+    const int n = static_cast<int>(s.slots.size());
+    return {lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
+            lock.header_end};
+}
+
 }  // namespace data2g::cpm

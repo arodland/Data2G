@@ -754,11 +754,22 @@ std::vector<double> cfo_aliases(cd d, double centre) {
 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               const Mat<cd>* C_in, std::optional<double> level, double* peak) {
+    if (!C_in && level) throw std::invalid_argument("find_copy: level without C");
+    std::vector<const cd*> rows;
+    if (C_in)
+        for (size_t i = 0; i < C_in->rows; ++i) rows.push_back((*C_in)[i]);
+    return find_copy(x, band, accept, rows, C_in ? C_in->cols : 0, level, peak);
+}
+
+std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
+                              std::span<const cd* const> C_rows, size_t cols, std::optional<double> level,
+                              double* peak) {
     const auto& b = ob(band);
     const auto z0 = waveform::to_baseband(x);
     const auto freqs = waveform::cfo_grid();
     Mat<cd> C_own;
-    if (!C_in) {
+    std::vector<const cd*> own_rows;
+    if (C_rows.empty()) {
         if (level) throw std::invalid_argument("find_copy: level without C");
         C_own = waveform::repeat_corrs(z0, waveform::unit_template(b), freqs);
         double lv = equalizer::INF;
@@ -769,13 +780,14 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
             lv = std::min(lv, dsp::quantile(std::move(p), waveform::NOISE_QUANTILE) / -std::log(1 - waveform::NOISE_QUANTILE));
         }
         level = lv;
-        C_in = &C_own;
+        for (size_t i = 0; i < C_own.rows; ++i) own_rows.push_back(C_own[i]);
+        C_rows = own_rows;
+        cols = C_own.cols;
     } else if (!level) {
         throw std::invalid_argument("find_copy: C without level");
     }
-    const Mat<cd>& C = *C_in;
-    const size_t F = C.rows;
-    const int64_t n = static_cast<int64_t>(C.cols) - static_cast<int64_t>(COPY_PAIRS) * FRAME_SAMPLES;
+    const size_t F = C_rows.size();
+    const int64_t n = static_cast<int64_t>(cols) - static_cast<int64_t>(COPY_PAIRS) * FRAME_SAMPLES;
     const int64_t m = n >= 0 ? n / FRAME_SAMPLES : -((-n + FRAME_SAMPLES - 1) / FRAME_SAMPLES);
     if (m < 1) return std::nullopt;
     const size_t FR = FRAME_SAMPLES, mm = static_cast<size_t>(m);
@@ -784,7 +796,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     Mat<cd> fold(F, FR);
     std::vector<cd> drow(mm * FR);
     for (size_t f = 0; f < F; ++f) {
-        const cd* c = C[f];
+        const cd* c = C_rows[f];
         for (size_t t = 0; t < mm * FR; ++t) {
             cd s = 0.0;
             for (size_t j = 0; j < static_cast<size_t>(COPY_PAIRS); ++j) {

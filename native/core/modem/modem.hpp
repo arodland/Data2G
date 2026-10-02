@@ -143,6 +143,11 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
 // neither. peak: the normalized pilot peak, if one was computed (find_copy.peak).
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept = nullptr,
                               const Mat<cd>* C = nullptr, std::optional<double> level = {}, double* peak = nullptr);
+// The same with C as row pointers (C_rows empty: compute C, as C == nullptr),
+// each row `cols` long: StreamDetector.C rows, used in place.
+std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
+                              std::span<const cd* const> C_rows, std::size_t cols, std::optional<double> level,
+                              double* peak = nullptr);
 std::vector<double> cfo_aliases(cd d, double centre);
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock);
 

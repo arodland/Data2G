@@ -223,6 +223,11 @@ using OptStats = std::optional<std::map<std::string, std::optional<In<double>>>>
 
 }  // namespace
 
+// Shared with bind_tnc.cpp (modem_dicts.hpp).
+py::dict modem_lock_dict(const modem::Lock& l) { return lock_dict(l); }
+py::dict modem_received_dict(const modem::Received& r) { return received_dict(r); }
+std::optional<modem::Accept> modem_accept_of(const py::object& a) { return accept_of(a); }
+
 void bind_modem(py::module_& m) {
     namespace mo = modem;
     auto d = m.def_submodule("modem", "data2g.modem");
