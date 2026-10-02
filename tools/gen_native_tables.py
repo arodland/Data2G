@@ -121,7 +121,44 @@ def format_cpp() -> str:
     return "".join(out)
 
 
-FILES = {"config.hpp": config_hpp, "format.cpp": format_cpp}
+def cpm_cpp() -> str:
+    """CPM grids, specs, and every on-air tone pattern: the sync blocks
+    (Costas / Welch arrays) and the header tones, which data2g.cpm draws
+    from numpy's PCG64 (frozen per grid for all 1024 header values, so no
+    RNG is ported)."""
+    from data2g import cpm, modem
+
+    out = [HEADER.format(src="data2g/cpm.py"), '#include "tables/tables.hpp"\n\n',
+           "namespace data2g::tables {\nnamespace {\n\n"]
+    rows = []
+    for i, g in enumerate(cpm.GRIDS.values()):
+        assert g.m <= 256
+        tones = [cpm.header_symbols(g.name, (v << 6) | modem._crc6(v)) for v in range(1024)]
+        out.append(f"constexpr std::uint8_t pre_{i}[] = {{{ints(cpm.preamble_pattern(g))}}};\n")
+        out.append(f"constexpr std::uint8_t mid_{i}[] = {{{ints(cpm.mid_block(g))}}};\n")
+        out.append(f"constexpr std::uint8_t hdr_{i}[] = {{{ints(np.concatenate(tones))}}};\n")
+        rows.append(f'    {{"{g.name}", {g.m}, {cxx(float(g.rate))}, {cxx(float(g.center))}, {cxx(float(g.bp))}, '
+                    f"{cxx(float(g.clip_db))}, {g.T}, {g.bits}, {cxx(float(g.f0))}, "
+                    f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.HEADER_THRESHOLD[g.name]))}, "
+                    f"{cpm.hdr_len(g)}, {len(cpm.costas(g.m))}, pre_{i}, mid_{i}, hdr_{i}}},\n")
+
+    def spec(s):
+        return f'    {{"{s.name}", "{s.grid}", "{s.code}", {s.index}, {s.k}, {s.coded_bits}, {s.n_sym}}},\n'
+
+    out.append(f"\nconstexpr CpmGrid grids[] = {{\n{''.join(rows)}}};\n")
+    out.append(f"constexpr CpmSpec specs[] = {{\n{''.join(spec(s) for s in cpm.SPECS.values())}}};\n")
+    out.append(f"constexpr CpmSpec ctl[] = {{\n{''.join(spec(cpm.CTL[g]) for g in cpm.GRIDS)}}};\n")
+    out.append("\n}  // namespace\n\n")
+    out.append("const std::span<const CpmGrid> CPM_GRIDS = grids;\nconst std::span<const CpmSpec> CPM_SPECS = specs;\n"
+               "const std::span<const CpmSpec> CPM_CTL = ctl;\n")
+    c = cpm
+    out.append(f"const CpmParams CPM = {{{c.PREAMBLE_S!r}, {c.BLOCK_S!r}, {c.SPACING_S!r}, {c.HDR_S!r}, {c.HDR_COPIES}, "
+               f"{c.MAX_DATA}, {c.PEAK_RATIO!r}, {c.RAMP_S!r}, {c.DATA_N}, {c.CTL_K}, {c.CTL_N}}};\n\n")
+    out.append("}  // namespace data2g::tables\n")
+    return "".join(out)
+
+
+FILES = {"config.hpp": config_hpp, "format.cpp": format_cpp, "cpm.cpp": cpm_cpp}
 
 
 def main():
