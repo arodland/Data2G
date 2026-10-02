@@ -104,6 +104,19 @@ latency before it is kept:
 One shared pool, sized min(4, cores/2) and settable, because the machine is
 shared and a modem must not saturate a laptop either.
 
+Status 2026-10-02: the pool landed (`core/util/pool`). Fixed threads, one
+job at a time (a second caller, or a nested call, runs inline),
+`parallel_for` over indices whose arithmetic never depends on the thread.
+Size: `pool::set_threads`, `data2g-host --threads N`, `DATA2G_THREADS`
+(`tools/with_native.py` sets 1, so forked study workers don't
+oversubscribe), `data2g_native.set_threads`. Used by LDPC (codewords within
+each iteration; the batch still stops together), polar (rows),
+`equalizer::refine` (data rows, then frames) and the sync CFO grid (only
+from 6000 samples: a StreamDetector hop went 1.2 -> 0.55 ms at +15% CPU,
+every 250 ms per band, so hops stay serial). `test_pool` checks every
+part bit for bit at sizes 1, 2, 4 and 8 (LDPC posteriors, a whole receive
+and DD decodes included), clean under TSan (`-DDATA2G_TSAN=ON`).
+
 ## What must be frozen, not ported
 
 SSTVAE's rule: generate format constants, don't port the algorithms that make
@@ -275,7 +288,7 @@ Status 2026-10-02: headless host landed (`data2g-host`, not yet on air).
   time. `test_native_host_e2e.py`: two hosts over two mkfifo pipes, VARA
   session (2 kB each way) and KISS both ways, worker on and off, no
   overflow/underrun/backlog lines.
-- No `--threads`: the engine has no pool yet.
+- `--threads N`: the shared pool's size (see "Threads").
 - Not yet checked: sound cards through the host, Hamlib PTT, Pat.
 
 ### Phase 4: GUI
@@ -352,19 +365,71 @@ SSTVAE (not changed from here):
 Portability notes:
 - Bitwise parity with numpy relies on glibc libm and on mirroring numpy's
   AVX-512 FMA complex multiply (`std::fma`). On other libms/CPUs expect
-  ulp-level differences, inside the stated tolerances. `std::fma` may be
-  slow without hardware FMA.
-- `polar.cpp` uses `#pragma GCC optimize("O3")`; move to a per-target flag.
+  ulp-level differences, inside the stated tolerances.
+- `std::fma` without `-mfma` (the default x86-64 build) is a call into
+  libm. glibc 2.44 dispatches it to the FMA instruction where the CPU has
+  one: numpy's complex multiply then costs 2.0 ns against 0.66 ns plain
+  (0.69 ns inline with `-mfma`), and 7.7 ns on glibc's software path (no
+  FMA hardware, `GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-FMA4,-AVX2`). Its
+  only caller is `constellation`'s LLRs, 0.05% of a live receive, so
+  neither matters; `-mfma` would also drop pre-Haswell CPUs. MSVC (from
+  its documentation, not measured): `std::fma` is the UCRT's `fma`, which
+  picks the FMA3 instruction at run time where present and a software
+  routine otherwise; `/arch:AVX2` lets the compiler inline it. Either way
+  correctly rounded, so the same bits, only slower without hardware.
+- No FP contraction anywhere (`-ffp-contract=off`; Clang contracts by
+  default, GCC in GNU mode): `a * b + c` rounds twice as numpy's does,
+  which is also what lets the SIMD clones below match bit for bit.
+- `polar.cpp`'s `#pragma GCC optimize("O3")` is now a per-file `-O3` for
+  GCC in CMake (`set_source_files_properties`); Clang and MSVC vectorize
+  those loops at their defaults.
+- `util/simd.hpp`: `target_clones("avx512f", "avx2", "default")` on hot
+  loops, x86-64 Linux with GCC or Clang only (ifunc). Elsewhere the plain
+  build runs, same bits, slower.
 
 ## Performance follow-ups
 
-- LDPC sum-product: `phi` is ~80% of decode; AVX2 `target_clones` on
-  Linux only. Candidates: table/approximate phi where parity allows,
-  codeword-parallel decode (approved threading).
-- `waveform::acquire` / StreamDetector hop: 27 inverse FFTs of 3840 per
-  hop; CFO-grid points are independent (thread candidate).
-- `equalizer::refine`: `lu_solve` is 35% of a DD pass; a low-rank form
-  over the support's delays would give ~3x.
+Status 2026-10-02 (performance pass). `tools/bench_native.py` (run under
+`tools/with_native.py`), best of 5, Ryzen 9 9900X, shared machine; before
+= the port as it was (no pool), so its 4-thread column equals 1-thread.
+Every change bit-identical to before (LDPC posteriors, receives, DD
+results and stored soft bits hashed; `phi` over every float32).
+
+| Case | before 1t | after 1t | after 4t (CPU) |
+|---|---|---|---|
+| decode_many, 64 cw w48-16qam-r1/2, converging | 125 ms | 56 | 15 (57) |
+| the same, all failing (40 iterations) | 385 ms | 168 | 43 (170) |
+| failed DD pass, w48-qpsk-r1/2 16 cw (64 frames) | 63 ms | 38 | 15 (40) |
+| live receive, w48 16 cw, head-limited | 12.5 ms | 8.8 | 6.9 (9.3) |
+| receive, same burst, whole buffer | 143 ms | 129 | 62 (138) |
+| StreamDetector hop, per band | 1.2-1.3 ms | 1.05-1.15 | same (serial) |
+| tnc Receiver, 60 s mixed audio, CPU per s | 13.5 ms | 12.3 | 12.3 |
+
+Kept:
+- LDPC: AVX-512 clone of `phi_all` (1.5x on a decode); the posterior's
+  sign applied by a bit flip (the `?:` was a branch mispredicted on half
+  the edges: 1.5x); the variable-to-check gather in its own cloned loop
+  (1.15x). Then codeword-parallel per iteration (3.9x at 4 threads).
+- `demod_window`'s carrier sums and the sync repeat statistic in cloned
+  loops: live receive 1.4x, a hop 10%.
+- Pool in refine and on the CFO grid above 6000 samples (see "Threads").
+
+Measured and dropped:
+- CFO-grid parallel StreamDetector hops: half the latency, +15% CPU, no
+  reply-latency value (hops are 250 ms apart).
+- `lu_solve` for doubles with back substitution across the right-hand
+  sides, fixed at 5, cloned: no measurable change. `-O3` on ldpc.cpp: none.
+
+Not done:
+- `equalizer::refine`'s low-rank form: `lu_solve` is now ~24% of a
+  single-thread DD pass (~9 ms), parallel at 4 threads; a low-rank
+  solve changes bits, for ~6 ms single-thread at most.
+- Python-side changes that would go further (proposals, parity first):
+  a per-codeword stop (each converged codeword frozen, so batch-mates
+  stop costing iterations; needs a batch-independent check sum, now
+  pairwise only at B = 1); a cheaper `phi` (table or offset min-sum,
+  as in most LDPC decoders) since `phi` is still ~40% of a decode;
+  layered scheduling (about half the iterations to converge).
 
 ## Android stays possible
 

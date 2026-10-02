@@ -41,16 +41,25 @@ set(DATA2G_BUILD_GUI "AUTO" CACHE STRING "Build the data2g-gui app (ON/OFF/AUTO)
 set_property(CACHE DATA2G_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 
 # Parity is checked to tight tolerances; fast-math would let the optimizer
-# reassociate exactly the sums being compared.
+# reassociate exactly the sums being compared. No contraction either: a * b + c
+# must round twice, as numpy does, even where FMA exists (Clang contracts by
+# default; GCC does in GNU mode; MSVC 2022 only with /fp:contract).
 if(MSVC)
   add_compile_options(/fp:precise /W4)
 else()
-  add_compile_options(-fno-fast-math -Wall -Wextra)
+  add_compile_options(-fno-fast-math -ffp-contract=off -Wall -Wextra)
 endif()
 
 if(DATA2G_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
   add_link_options(-fsanitize=address,undefined)
+endif()
+# ThreadSanitizer, for the ctests that run threads (pool, audio, engine):
+#   cmake -S native -B native/build-tsan -G Ninja -DDATA2G_TSAN=ON -DDATA2G_BUILD_PYMODULE=OFF
+option(DATA2G_TSAN "Build with ThreadSanitizer" OFF)
+if(DATA2G_TSAN)
+  add_compile_options(-fsanitize=thread -g)
+  add_link_options(-fsanitize=thread)
 endif()
 
 # --- core: no Qt, no files to find at run time (tools/check_layering.py) ----
@@ -66,6 +75,11 @@ find_package(Threads REQUIRED)
 find_package(ZLIB REQUIRED)
 target_link_libraries(data2g_core PUBLIC Threads::Threads ZLIB::ZLIB)
 set_target_properties(data2g_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# GCC's -O2 cost model leaves polar's f/g loops scalar (1.7x on a decode);
+# Clang and MSVC vectorize them at -O2. Optimization never reassociates
+# without fast-math, so the results are the same bits.
+set_source_files_properties(core/polar/polar.cpp PROPERTIES
+  COMPILE_OPTIONS "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<NOT:$<CONFIG:Debug>>>:-O3>")
 
 # --- device backends -----------------------------------------------------------
 if(NOT DATA2G_BUILD_QTAUDIO STREQUAL "OFF")

@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <numbers>
 #include <string>
 #include <tuple>
 
 #include "dsp/dsp.hpp"
 #include "dsp/fft.hpp"
+#include "util/pool.hpp"
+#include "util/simd.hpp"
 
 namespace data2g::waveform {
 namespace {
@@ -22,6 +25,39 @@ constexpr double TWO_PI = 2.0 * std::numbers::pi;
 // whose length is a multiple of this.
 constexpr std::int64_t PER = 640;
 static_assert(PER * STEP_HZ == FS);
+
+// fn(bin) for each CFO grid point, on the pool for signals of at least
+// PARALLEL_MIN samples. Below it the wakeups cost more CPU than they save
+// time: a StreamDetector hop (3343 samples, every 250 ms per band) went 1.2
+// -> 0.55 ms at +15% CPU. Head-limited receives (6.5-8.4k) gain 2 ms of
+// burst-end latency, whole-buffer acquires 2x.
+constexpr std::size_t PARALLEL_MIN = 6000;
+
+// S[k] = |sum_{r>=1} c[k + CP + rM] conj(c[k + CP + (r-1)M])| for k < n:
+// summed over repeats in Python's order, repeat-major so the loop over
+// starts vectorizes; the products spelled out (no std::complex NaN
+// fallback). Most of a StreamDetector hop after its FFTs: SIMD clones.
+DATA2G_SIMD_CLONES void repeat_stat(const cdouble* __restrict c, int repeats, std::size_t n, double* __restrict S) {
+    std::vector<double> re(n), im(n);
+    double* __restrict pr = re.data();
+    double* __restrict pi = im.data();
+    for (int rr = 1; rr < repeats; ++rr) {
+        const cdouble* x = c + PREAMBLE_CP + static_cast<std::size_t>(rr) * M;
+        const cdouble* y = x - M;
+        for (std::size_t k = 0; k < n; ++k) {
+            pr[k] += x[k].real() * y[k].real() + x[k].imag() * y[k].imag();
+            pi[k] += x[k].imag() * y[k].real() - x[k].real() * y[k].imag();
+        }
+    }
+    for (std::size_t k = 0; k < n; ++k) S[k] = std::sqrt(pr[k] * pr[k] + pi[k] * pi[k]);
+}
+void per_bin(std::size_t samples, std::size_t bins, const std::function<void(std::size_t)>& fn) {
+    if (samples >= PARALLEL_MIN) {
+        pool::parallel_for(bins, fn);
+    } else {
+        for (std::size_t i = 0; i < bins; ++i) fn(i);
+    }
+}
 
 std::size_t argmax(const double* v, std::size_t n) {
     std::size_t best = 0;
@@ -102,8 +138,8 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
     for (std::size_t k = 0; k < m; ++k) gp[k] = std::conj(t[m - 1 - k]);
     const std::vector<cdouble> Z = dsp::fft(zp, true), G0 = dsp::fft(gp, true);
     Mat<cdouble> out(freqs.size(), n_out);
-    // independent per frequency: the parallel unit, if one is wanted
-    for (std::size_t i = 0; i < freqs.size(); ++i) {
+    // independent per frequency: one pool task each
+    per_bin(z.size(), freqs.size(), [&](std::size_t i) {
         const auto k = static_cast<std::int64_t>(std::llround(freqs[i] / STEP_HZ));
         const auto shift = static_cast<std::size_t>(((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L)
                                                      + static_cast<std::int64_t>(L)) % static_cast<std::int64_t>(L));
@@ -116,7 +152,7 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
         if (q < 0) q += PER;
         const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
         for (std::size_t j = 0; j < n_out; ++j) out[i][j] = c[m - 1 + j] * ph;
-    }
+    });
     return out;
 }
 
@@ -137,7 +173,7 @@ RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int
     if (keep_outs) r.outs = Mat<cdouble>(r.freqs.size(), cs.cols);
     const double expo_mean = -std::log(1 - NOISE_QUANTILE);  // quantile -> mean of an exponential
     // independent per bin, like repeat_corrs
-    for (std::size_t i = 0; i < all.size(); ++i) {
+    per_bin(z.size(), all.size(), [&](std::size_t i) {
         const cdouble* c = cs[i];
         std::vector<double> p(cs.cols);
         for (std::size_t j = 0; j < p.size(); ++j) p[j] = power(c[j]);
@@ -151,24 +187,14 @@ RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int
             q = pn[k] / expo_mean;
         }
         r.q[i] = std::max(q, 1e-12 * (dsp::pairwise_sum(p) / static_cast<double>(p.size())) + 1e-300);  // silence (tests)
-        if (i >= r.freqs.size()) continue;
+        if (i >= r.freqs.size()) return;
         if (keep_outs) std::copy(c, c + cs.cols, r.outs[i]);
         // each window against the one before it, summed over repeats in
         // Python's order; repeat-major so the loop over starts vectorizes.
         // c[a + M] * conj(c[a]) spelled out: the same products without
         // std::complex's NaN fallback
-        std::vector<double> re(n_out), im(n_out);
-        for (int rr = 1; rr < repeats; ++rr) {
-            const cdouble* x = c + PREAMBLE_CP + static_cast<std::size_t>(rr) * M;
-            const cdouble* y = x - M;
-            for (std::size_t k = 0; k < n_out; ++k) {
-                re[k] += x[k].real() * y[k].real() + x[k].imag() * y[k].imag();
-                im[k] += x[k].imag() * y[k].real() - x[k].real() * y[k].imag();
-            }
-        }
-        double* S = r.S[i];
-        for (std::size_t k = 0; k < n_out; ++k) S[k] = std::sqrt(re[k] * re[k] + im[k] * im[k]);
-    }
+        repeat_stat(c, repeats, n_out, r.S[i]);
+    });
     return r;
 }
 

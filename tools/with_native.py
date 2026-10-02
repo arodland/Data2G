@@ -6,7 +6,8 @@
 take the same path). --dd-budget overrides arq.phy.DD_BUDGET_S on both
 sides: the budget is wall-clock, so a faster decoder finishes more DD
 passes; `inf` makes paired runs comparable. Pool workers inherit the
-substitutions through fork.
+substitutions through fork. --threads N also sizes the C++ pool (DATA2G_THREADS,
+default 1 here, so forked workers do not oversubscribe).
 """
 
 import argparse
@@ -23,7 +24,7 @@ if "--threads" in sys.argv:
     sys.argv.pop(i)
 else:
     _n = "1"
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "DATA2G_THREADS"):
     os.environ.setdefault(_v, _n)
 
 ROOT = Path(__file__).resolve().parent.parent

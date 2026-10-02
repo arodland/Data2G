@@ -8,13 +8,11 @@
 
 #include "codes/codes.hpp"
 #include "tables/tables.hpp"
+#include "util/pool.hpp"
 
-// GCC leaves the f and g loops scalar at -O2 (its very-cheap vectorizer
-// cost model); -O3 vectorizes them, 1.7x on the whole decode. Clang and
-// MSVC vectorize at -O2 already.
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC optimize("O3")
-#endif
+// Built with -O3 under GCC (native/CMakeLists.txt): at -O2 its very-cheap
+// vectorizer cost model leaves the f and g loops scalar; -O3 vectorizes
+// them, 1.7x on the whole decode. Clang and MSVC vectorize at -O2 already.
 
 namespace data2g::polar {
 
@@ -206,10 +204,11 @@ SclResult SCLDecoder::decode(const Mat<float>& llr) const {
     const std::size_t B = llr.rows;
     const int L = L_, n = c.n, k = c.k;
     SclResult res{Mat<std::uint8_t>(B, static_cast<std::size_t>(L) * k), Mat<float>(B, L)};
-    Work w(n, L, c.frozen.data());
-    std::vector<std::uint8_t> x(static_cast<std::size_t>(L) * n), u(n);
-    std::vector<int> perm(L), order(L);
-    for (std::size_t b = 0; b < B; ++b) {
+    // rows are independent: one pool task each, with its own workspace
+    pool::parallel_for(B, [&](std::size_t b) {
+        Work w(n, L, c.frozen.data());
+        std::vector<std::uint8_t> x(static_cast<std::size_t>(L) * n), u(n);
+        std::vector<int> perm(L), order(L);
         float* a0 = w.alpha[0].data();
         std::fill(a0, a0 + n, 0.0f);
         for (int j = 0; j < c.e; ++j) a0[c.sent[j]] = llr[b][j];
@@ -226,7 +225,7 @@ SclResult SCLDecoder::decode(const Mat<float>& llr) const {
             for (int j = 0; j < k; ++j) dst[j] = u[c.info_pos[j]];
             res.metric[b][l] = w.pm[order[l]];
         }
-    }
+    });
     return res;
 }
 

@@ -3,6 +3,7 @@
 // One bind_<module>.cpp per core module; register it here.
 
 #include "convert.hpp"
+#include "util/pool.hpp"
 
 namespace data2g::bind {
 void bind_codes(py::module_&);
@@ -43,4 +44,6 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_arq_phy(m);
     data2g::bind::bind_engine(m);
     data2g::bind::bind_host(m);
+    m.def("set_threads", &data2g::pool::set_threads, pybind11::arg("n"), "Shared pool size, caller included; < 1: default.");
+    m.def("threads", &data2g::pool::threads);
 }

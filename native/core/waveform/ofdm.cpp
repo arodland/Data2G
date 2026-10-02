@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "util/simd.hpp"
+
 namespace data2g::waveform {
 namespace {
 
@@ -18,6 +20,22 @@ using config::NSYM;
 using config::PREAMBLE_CP;
 
 constexpr double TWO_PI = 2.0 * std::numbers::pi;
+
+// re/im[k] += sum over n of demod[k][n] * win[n], n ascending, every
+// carrier at once. A third of a live receive: SIMD clones.
+DATA2G_SIMD_CLONES void demod_sums(const cdouble* __restrict win, const double* __restrict dre,
+                                   const double* __restrict dim, std::size_t nc, double* __restrict re,
+                                   double* __restrict im) {
+    for (std::size_t n = 0; n < static_cast<std::size_t>(M); ++n) {
+        const double br = win[n].real(), bi = win[n].imag();
+        const double* ar = dre + n * nc;
+        const double* ai = dim + n * nc;
+        for (std::size_t k = 0; k < nc; ++k) {
+            re[k] += ar[k] * br - ai[k] * bi;
+            im[k] += ar[k] * bi + ai[k] * br;
+        }
+    }
+}
 
 // Python's slice bounds for z[a:b] on a sequence of length n.
 std::int64_t slice_bound(std::int64_t i, std::int64_t n) {
@@ -105,15 +123,7 @@ std::vector<cdouble> Band::demod_window(std::span<const cdouble> z, std::int64_t
     // check intervenes (modem's receive spent a third of its time here).
     const std::size_t nc = static_cast<std::size_t>(spec->nc);
     std::vector<double> re(nc, 0.0), im(nc, 0.0);
-    for (std::size_t n = 0; n < static_cast<std::size_t>(M); ++n) {
-        const double br = win[n].real(), bi = win[n].imag();
-        const double* ar = demod_re[n];
-        const double* ai = demod_im[n];
-        for (std::size_t k = 0; k < nc; ++k) {
-            re[k] += ar[k] * br - ai[k] * bi;
-            im[k] += ar[k] * bi + ai[k] * br;
-        }
-    }
+    demod_sums(win.data(), demod_re.data.data(), demod_im.data.data(), nc, re.data(), im.data());
     std::vector<cdouble> out(nc);
     for (std::size_t k = 0; k < nc; ++k) out[k] = (2.0 / M) * cdouble(re[k], im[k]);
     return out;
