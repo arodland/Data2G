@@ -432,9 +432,11 @@ def serve(a, pa, stop: threading.Event | None = None):
                 break
             t0 = time.perf_counter()
             y, ptt = engine.step(dec(x) if not keyed else np.zeros(BLOCK))
-            if time.perf_counter() - t0 > BLOCK / FS:
+            took = time.perf_counter() - t0
+            if took > BLOCK / FS:
                 slow += 1
-                log.debug("step took %.2f s (%d slow)", time.perf_counter() - t0, slow)
+                log.log(logging.WARNING if took > 1.0 else logging.DEBUG, "step took %.2f s at t=%.1f (%d slow)",
+                        took, engine.now, slow)
             if ptt and not keyed:
                 rig.ptt(True)
                 out.start()
