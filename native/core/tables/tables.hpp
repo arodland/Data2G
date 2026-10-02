@@ -82,4 +82,26 @@ struct ShiftTable {
 
 extern const std::span<const ShiftTable> LDPC_SHIFTS;
 
+// The gear shifter's outcome model (data2g/arq/predictor.py): bootstrap
+// members, each an MLP (x - mean) / std -> tanh layers -> logits, W row-major
+// (in, out). Outputs: P(burst usable) per OUTCOME_MODES, then P(codeword).
+struct MlpLayer {
+    int in, out;
+    std::span<const double> W, b;
+};
+struct OutcomeMember {
+    std::span<const double> mean, std;
+    std::span<const MlpLayer> layers;
+};
+extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
+extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;
+// AWGN BICM capacity (bits per coded bit) over CAPACITY_GRID (dB), per
+// constellation family (predictor.CONSTS order).
+struct CapacityTable {
+    std::string_view name;
+    std::span<const double> mi;
+};
+extern const std::span<const double> CAPACITY_GRID;
+extern const std::span<const CapacityTable> CAPACITY;
+
 }  // namespace data2g::tables

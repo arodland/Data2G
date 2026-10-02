@@ -27,6 +27,18 @@ std::vector<std::uint8_t> with_crc(std::span<const std::uint8_t> payload, int n_
 int scramble_seed(int index);
 std::vector<std::uint8_t> scrambler(int k, int seed = 0x1FF);  // PN9, k bits
 
+// Any spec with .code and .k (config::Submode, tables::CpmSpec).
+template <typename Spec>
+int crc_bits(const Spec& spec) {
+    if (spec.code == "polar") return 24;
+    return spec.k >= 512 ? 32 : 16;
+}
+
+template <typename Spec>
+int payload_bytes(const Spec& spec) {
+    return (spec.k - crc_bits(spec)) / 8;
+}
+
 // nullptr if there is no such submode.
 const config::Submode* submode(std::string_view name);
 // spec must be an element of config::SUBMODES.
