@@ -133,12 +133,14 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
     t = time.monotonic()
     subprocess.run([str(BINARY), "--help"], capture_output=True, timeout=120)
     t_help = time.monotonic() - t
-    ports = {}
+    # Both hosts' ports in one pick: picking B's after spawning A, before A
+    # bound, gave B A's data port on macOS (consecutive ephemeral ports).
+    first = free_ports(6)
+    ports = {"A": first, "B": first + 3}
     procs, logs = {}, {}
     env = dict(os.environ, OMP_NUM_THREADS="1")
     for name, inp, out in (("A", b2a, a2b), ("B", a2b, b2a)):
-        base = free_ports(3)
-        ports[name] = base
+        base = ports[name]
         logs[name] = tmp_path / f"{name}.log"
         procs[name] = subprocess.Popen(
             [str(BINARY), "--mycall", name, "--command-port", str(base), "--kiss-port", str(base + 2),
