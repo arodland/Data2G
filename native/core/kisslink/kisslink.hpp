@@ -70,7 +70,9 @@ public:
     arq::TxBurstPtr next_burst();
     // A received burst -> its frames, nullopt if it isn't a KISS burst.
     // Updates what we know of its sender. soft: arq::soft_bits(r), if made.
-    std::optional<std::vector<Bytes>> on_burst(const arq::Heard& r, std::shared_ptr<const arq::SlotSoft> soft = nullptr);
+    // dd_budget: as the engine's (never DD unbounded; nullopt only for tests).
+    std::optional<std::vector<Bytes>> on_burst(const arq::Heard& r, std::shared_ptr<const arq::SlotSoft> soft = nullptr,
+                                               std::optional<double> dd_budget = arq::DD_BUDGET_S);
 
 private:
     std::pair<std::string, int> route(ByteView frame) const;

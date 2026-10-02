@@ -4,6 +4,7 @@
 // one burst share them. ModemRx's store stays the caller's Python dict,
 // {key: (buffer (1, L), highest RV, submode, (slot, rv, mask_id))}.
 #include <pybind11/functional.h>
+#include <cmath>
 
 #include "arq_convert.hpp"
 #include "kisslink/kisslink.hpp"
@@ -239,10 +240,12 @@ void bind_arq_phy(py::module_& m) {
         .def("on_burst", [](KissLink& l, py::dict r) -> py::object {
             auto h = heard_of(r);
             auto soft = cached_soft(r, h);
+            // Python's PHY.DD_BUDGET_S as it stands, so a test patching it applies here too
+            const auto budget = py::module_::import("data2g.arq.phy").attr("DD_BUDGET_S").cast<double>();
             std::optional<std::vector<Bytes>> frames;
             {
                 py::gil_scoped_release nogil;  // the clock takes the GIL back if it is Python's
-                frames = l.on_burst(h, std::move(soft));
+                frames = l.on_burst(h, std::move(soft), std::isfinite(budget) ? std::optional(budget) : std::nullopt);
             }
             if (!frames) return py::none();
             py::list out;

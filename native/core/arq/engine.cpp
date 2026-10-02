@@ -499,7 +499,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     const bool ours = st && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING) &&
                       rx.decode(0, ctl_mask(st->peer(), 0, st->key), 0, nullptr).has_value();
     if (cfg_.kiss && !ours) {
-        if (auto frames = cfg_.kiss->on_burst(*r, soft)) {  // a KISS burst: not the session's
+        if (auto frames = cfg_.kiss->on_burst(*r, soft, cfg_.dd_budget_s)) {  // a KISS burst: not the session's
             kiss_rx_.insert(kiss_rx_.end(), std::make_move_iterator(frames->begin()), std::make_move_iterator(frames->end()));
             return;
         }

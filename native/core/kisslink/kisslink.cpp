@@ -200,9 +200,9 @@ arq::TxBurstPtr KissLink::next_burst() {
     return nullptr;
 }
 
-std::optional<std::vector<Bytes>> KissLink::on_burst(const arq::Heard& r, std::shared_ptr<const arq::SlotSoft> soft) {
-    // no DD budget, as Python's ModemRx(r, {})
-    arq::ModemRx rx(r, nullptr, std::nullopt, std::move(soft));
+std::optional<std::vector<Bytes>> KissLink::on_burst(const arq::Heard& r, std::shared_ptr<const arq::SlotSoft> soft,
+                                                     std::optional<double> dd_budget) {
+    arq::ModemRx rx(r, nullptr, dd_budget, std::move(soft));
     const std::string mode = rx.submode();
     const int n = rx.n_cw();
     const double now = clock();
