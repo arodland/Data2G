@@ -326,6 +326,24 @@ macOS, Windows MSVC), package_app.sh, make_installer.sh, signing. ASan/UBSan
 and TSan jobs over the engine, ring buffer and queues.
 - Needs you for: signing keys, a Windows or macOS on-air check.
 
+Status 2026-10-02: written, not yet run on GitHub (CI minutes not approved).
+- `.github/workflows/`: `ci.yml` (pull_request, push to master,
+  workflow_dispatch only) runs generated/layering/includes checks, the
+  Python suite with CPU torch, `native-build.yml` on five targets (build,
+  ctest, `pytest --native`, stage, installer, sign), ASan/UBSan and TSan
+  (engine, audio, rig, host). `release.yml` on `v*` tags and by hand.
+- `tools/check_includes.py` (SSTVAE's; fixed the 27 includes it found),
+  `tools/package_app.sh`, `make_installer.sh` (AppImage, .dmg, NSIS),
+  `sign.sh` (inert without secrets), `gen_icons.py` and a placeholder icon.
+- zlib: FetchContent fallback (1.3.2, sha256) when there is no system
+  zlib (`native/cmake/zlib.cmake`).
+- Signing: add the SSTVAE-named secrets (AZURE_*, BUILD_CERTIFICATE_BASE64,
+  P12_PASSWORD, KEYCHAIN_PASSWORD, APPLE_ID, APPLE_PASSWORD), then set the
+  repository variable `DATA2G_REQUIRE_SIGNING=1`. A release requires them.
+- Publisher strings in `data2g.rc.in` / `installer.nsi` are placeholders
+  until the certificate subject is known; no LICENSE file yet, so packages
+  ship none and the metainfo names no project_license.
+
 ## Findings during the port (for review)
 
 Reference behaviour, unchanged in Python, ported as is:
@@ -361,6 +379,12 @@ SSTVAE (not changed from here):
   `weak_ptr::expired()`, a relaxed load); fixed in the Data2G copy with a
   release/acquire flag.
 - Its C++ firwin uses Hamming 0.46 where scipy uses `1 - 0.54` (1 ulp).
+
+Hamlib 4.7.2 rigctld: a client that connects microseconds after another
+disconnects can fail `rig_open` (short read in `dump_state`). Seen as the
+`rig_hamlib` test flake (its readiness probe), fixed there with a 300 ms
+settle. The host connects once at startup, so live use should not hit it;
+a reconnect loop would need the same pause.
 
 Portability notes:
 - Bitwise parity with numpy relies on glibc libm and on mirroring numpy's

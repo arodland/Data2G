@@ -18,7 +18,7 @@ import pytest
 
 from data2g import tnc
 
-BINARY = Path(__file__).resolve().parent.parent / "native" / "build" / "data2g-host"
+BINARY = Path(__file__).resolve().parent.parent / "native" / "build" / ("data2g-host.exe" if os.name == "nt" else "data2g-host")
 BAD = re.compile(r"overflow|underrun|behind the card|dropped|CRITICAL|Traceback")
 
 
@@ -109,6 +109,7 @@ def ui_frame(dst, src, info):
     return addr(dst, False) + addr(src, True) + b"\x03\xf0" + info
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes (POSIX mkfifo)")
 @pytest.mark.parametrize("worker", ["--decode-worker", "--no-decode-worker"])
 def test_two_hosts_over_named_pipes(tmp_path, request, worker):
     if not BINARY.exists():

@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstddef>
 
 namespace data2g {
 namespace arq {

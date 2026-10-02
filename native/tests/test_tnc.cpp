@@ -2,6 +2,7 @@
 // streaming Receiver hearing a burst in noise (in two chunkings) and
 // nothing in silence. Parity: tests/test_native_tnc.py.
 
+#include <algorithm>
 #include <random>
 #include <string>
 

@@ -6,6 +6,7 @@
 // std::invalid_argument here, an IndexError std::out_of_range.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>

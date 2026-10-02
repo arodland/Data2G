@@ -1,8 +1,10 @@
 // Known answers and self-consistency that need no Python. Parity with
 // data2g/constellation.py is tests/test_native_constellation.py's job.
 
+#include <algorithm>
 #include <cmath>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 

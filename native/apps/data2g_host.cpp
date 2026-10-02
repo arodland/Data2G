@@ -12,6 +12,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstdio>
+#include <utility>
 
 #include "app/station.hpp"
 #include "generated/config.hpp"

@@ -13,6 +13,7 @@
 #include <ctime>
 #include <functional>
 #include <map>
+#include <cstdlib>
 
 #include "arq/engine.hpp"
 #include "arq/modes.hpp"

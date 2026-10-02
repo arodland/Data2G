@@ -72,7 +72,11 @@ add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
 target_include_directories(data2g_core PUBLIC core)
 target_include_directories(data2g_core SYSTEM PUBLIC third_party/pocketfft)
 find_package(Threads REQUIRED)
-find_package(ZLIB REQUIRED)
+find_package(ZLIB)
+if(NOT ZLIB_FOUND)  # Windows, Android: no system zlib
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+  include(zlib)
+endif()
 target_link_libraries(data2g_core PUBLIC Threads::Threads ZLIB::ZLIB)
 set_target_properties(data2g_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # GCC's -O2 cost model leaves polar's f/g loops scalar (1.7x on a decode);
@@ -182,4 +186,34 @@ add_subdirectory(tests)
 
 if(DATA2G_BUILD_PYMODULE)
   add_subdirectory(bindings)
+endif()
+
+# --- packaging: icon, version block, bundle (tools/package_app.sh) -------------
+# Last, so it sees the apps however they were added. The GUI target is
+# expected to be called data2g-gui.
+set(DATA2G_PACKAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging")
+foreach(app data2g-host data2g-gui)
+  if(NOT TARGET ${app})
+    continue()
+  endif()
+  if(WIN32)
+    set(DATA2G_RC_NAME ${app})
+    configure_file(packaging/data2g.rc.in ${CMAKE_BINARY_DIR}/${app}.rc @ONLY)
+    target_sources(${app} PRIVATE ${CMAKE_BINARY_DIR}/${app}.rc)
+    if(COMMAND data2g_hamlib_copy_runtime AND TARGET data2g_rig)
+      data2g_hamlib_copy_runtime(${app})
+    endif()
+  endif()
+endforeach()
+if(TARGET data2g-gui AND APPLE)
+  target_sources(data2g-gui PRIVATE ${DATA2G_PACKAGING_DIR}/data2g.icns)
+  set_source_files_properties(${DATA2G_PACKAGING_DIR}/data2g.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  set_target_properties(data2g-gui PROPERTIES
+    MACOSX_BUNDLE ON
+    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in
+    MACOSX_BUNDLE_GUI_IDENTIFIER org.cleverdomain.data2g
+    MACOSX_BUNDLE_BUNDLE_NAME Data2G
+    MACOSX_BUNDLE_ICON_FILE data2g.icns
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION})
 endif()

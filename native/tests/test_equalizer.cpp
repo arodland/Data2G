@@ -1,6 +1,7 @@
 // Python-free checks of the equalizer port. Parity with data2g/equalizer.py
 // is tests/test_native_equalizer.py's job.
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <numbers>

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <thread>
 
@@ -83,6 +84,10 @@ void test_net_rigctl() {
         return;
     }
     for (int i = 0; i < 250 && !listening(std::stoi(port)); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Let rigctld finish with the probe's connection: a client connecting
+    // microseconds after the probe closed failed rig_open 5 runs in 6 (short
+    // read in dump_state); never when slowed down (strace, or rigctl's startup).
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     rig::HamlibConfig cfg;  // the defaults are the host's: model 2
     cfg.device = "127.0.0.1:" + port;

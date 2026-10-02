@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <functional>
 #include <vector>
+#include <cstddef>
+#include <utility>
 
 namespace data2g::gui {
 

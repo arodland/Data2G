@@ -1,5 +1,6 @@
 #include "arq/frames.hpp"
 
+#include <cstddef>
 #include <zlib.h>
 
 #include <algorithm>

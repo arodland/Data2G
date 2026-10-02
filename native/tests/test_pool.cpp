@@ -7,6 +7,7 @@
 #include <cstring>
 #include <random>
 #include <thread>
+#include <algorithm>
 
 #include "arq/phy.hpp"
 #include "check.hpp"

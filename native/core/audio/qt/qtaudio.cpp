@@ -15,6 +15,7 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace data2g::audio::qt {
 
