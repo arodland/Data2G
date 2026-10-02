@@ -117,6 +117,30 @@ every 250 ms per band, so hops stay serial). `test_pool` checks every
 part bit for bit at sizes 1, 2, 4 and 8 (LDPC posteriors, a whole receive
 and DD decodes included), clean under TSan (`-DDATA2G_TSAN=ON`).
 
+Falling behind: drop and log at some point, rather than use unlimited
+memory. Status 2026-10-02, every queue on the live path:
+- Capture FIFO: 60 s; past it new samples are dropped, counted, logged.
+- Playback FIFO: 30 s; the engine waits for room (TX audio is not dropped).
+- Decode worker's block queue (`Engine::in_`): `EngineConfig::max_backlog_s`,
+  60 s. Past it the receiver stage drops whole blocks unfed, resets the
+  receiver at the first drop (nothing stitched across the hole), counts
+  the samples (`Engine::decode_dropped`, the GUI's "decode dropped") and
+  logs one WARNING per episode when the queue takes blocks again ("decode
+  worker fell 60 s behind: N s of audio dropped, receiver reset"). The
+  hole's time still passes on the session stage, recorded as silence in
+  `audio_in.f16`. `test_engine` stalls a decode past a 2 s bound.
+- `Engine::out_`: bounded by `in_` (a step queues at most one block and
+  takes one out).
+- `posted_`: drained before every block; it only grows while the worker
+  is stuck, and then by what the clients send. VARA data from Pat is
+  bounded: Pat counts what it wrote until a BUFFER line answers (the
+  worker sends it, in `Host::data_in`) and blocks past 7x its next write,
+  so a stuck worker stops Pat. Another client is trusted to do the same.
+- Not bounded (reported, not changed): KissLink's `queue` (KISS has no
+  flow control, so a client can queue frames without limit, as in
+  kisslink.py) and a command port line with no CR/LF (`Port::buf_`). Both need
+  a misbehaving local client.
+
 ## What must be frozen, not ported
 
 SSTVAE's rule: generate format constants, don't port the algorithms that make

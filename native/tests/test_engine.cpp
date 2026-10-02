@@ -1,7 +1,8 @@
 // arq::Engine with no Python: two engines through a noisy channel in sync
 // mode (a session, KISS, the recorder's files), the worker's header
-// latency with a 1 s decode in flight, and two worker-mode engines in real
-// time. Parity with data2g/arq/engine.py is tests/test_native_engine.py's
+// latency with a 1 s decode in flight, the worker's bounded queue (a stalled
+// decode: blocks dropped, logged, the engine recovers), and two worker-mode
+// engines in real time. Parity with data2g/arq/engine.py is tests/test_native_engine.py's
 // (a C++ engine against a Python one) and the --native substitution's.
 
 #include <algorithm>
@@ -220,6 +221,92 @@ void worker_latency() {
     }
 }
 
+// A burst decode that hangs until released (a stalled worker).
+class StallEngine : public Engine {
+public:
+    using Engine::Engine;
+    ~StallEngine() override {
+        open = true;
+        stop();
+    }
+    std::atomic<bool> open{false};
+
+protected:
+    void hear_burst(tnc::BurstEvent& ev, double t) override {
+        while (!open) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        Engine::hear_burst(ev, t);
+    }
+};
+
+void worker_backlog() {
+    check::current_step = "worker: bounded queue";
+    std::mutex log_mu;
+    std::vector<std::string> warnings;
+    set_log_sink({[](const char*, int level) { return level >= 30; },
+                  [&](const char* name, int, const std::string& msg) {
+                      std::lock_guard lock(log_mu);
+                      if (std::string(name) == "data2g.engine") warnings.push_back(msg);
+                  }});
+    auto burst = std::make_shared<TxBurst>();
+    burst->submode = "qpsk-r1/5";
+    const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(burst->submode)));
+    for (int i = 0; i < 2; ++i) burst->slots.push_back({ctl_mask(0, i, 0), 0, bytes(pb, 7 + i)});
+    const auto x = tx_audio(*burst);
+    // burst, 6 s with the decode stalled, release, 1 s, burst, 3 s
+    std::vector<double> y(2 * config::FS, 0.0);
+    y.insert(y.end(), x.begin(), x.end());
+    y.insert(y.end(), 6 * config::FS, 0.0);
+    const std::size_t release = y.size() / BLOCK;
+    y.insert(y.end(), config::FS, 0.0);
+    y.insert(y.end(), x.begin(), x.end());
+    y.insert(y.end(), 3 * config::FS, 0.0);
+    y.resize(y.size() / BLOCK * BLOCK);
+    std::mt19937 rng(10);
+    std::normal_distribution<double> noise(0.0, 0.05);
+    for (double& v : y) v += noise(rng);
+
+    EngineConfig c;
+    c.worker = true;
+    c.max_backlog_s = 2.0;
+    StallEngine e("W1AW", c);
+    std::atomic<int> processed{0}, heard{0}, decoded{0};
+    std::atomic<std::int64_t> n_seen{0};
+    e.set_after_block([&](bool) {
+        n_seen = e.n();
+        ++processed;
+    });
+    e.set_on_burst([&](const BurstHeard& b) {
+        ++heard;
+        decoded += !b.lost;
+    });
+    const std::size_t steps = y.size() / BLOCK;
+    for (std::size_t i = 0; i < steps; ++i) {
+        if (i == release) {
+            check::is_true(e.decode_dropped() > 0, "stalled: blocks dropped");
+            e.open = true;
+            // let the worker drain what it holds before more audio comes
+            const auto t0 = clk::now();
+            while (processed < static_cast<int>(i - e.decode_dropped() / BLOCK) && clk::now() - t0 < std::chrono::seconds(60))
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        e.step(std::span<const double>(y).subspan(i * BLOCK, BLOCK));
+    }
+    const double dropped_s = static_cast<double>(e.decode_dropped()) / config::FS;
+    std::printf("stalled decode, 2 s bound: %.1f s dropped\n", dropped_s);
+    check::equal(e.decode_dropped() % BLOCK, std::uint64_t{0}, "whole blocks dropped");
+    check::is_true(dropped_s > 2.0 && dropped_s < 6.0, "dropped what was past the bound");
+    {
+        std::lock_guard lock(log_mu);
+        check::equal(warnings.size(), std::size_t{1}, "one warning per episode");
+        const std::string want = format("%.1f s of audio dropped", dropped_s);
+        check::is_true(!warnings.empty() && warnings[0].find(want) != std::string::npos, "the warning says how much: " + want);
+    }
+    check::equal(heard.load(), 2, "both bursts heard");
+    check::equal(decoded.load(), 2, "the burst after the hole decoded");
+    check::equal(n_seen.load(), static_cast<std::int64_t>(y.size()), "dropped time still passed on the session stage");
+    set_log_sink({});
+}
+
 void worker_session() {
     check::current_step = "worker: real-time session";
     EngineConfig ca, cb;
@@ -262,6 +349,7 @@ int main() {
     sync_session(dir);
     sync_kiss();
     worker_latency();
+    worker_backlog();
     worker_session();
     std::filesystem::remove_all(dir);
     return check::report("test_engine");

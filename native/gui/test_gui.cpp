@@ -174,7 +174,7 @@ void test_window(const QTemporaryDir& dir) {
                    }, 5000),
                    "the client heard CQFRAME");
     const app::AudioCounters c = w.station().counters();
-    check::is_true(c.overflows == 0 && c.dropped == 0 && c.underruns == 0, "no audio faults");
+    check::is_true(c.overflows == 0 && c.dropped == 0 && c.underruns == 0 && c.decode_dropped == 0, "no audio faults");
 
     check::is_true(w.grab().save(QStringLiteral(DATA2G_GUI_SHOT)), "screenshot saved");
 

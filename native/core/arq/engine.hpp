@@ -86,6 +86,10 @@ struct EngineConfig {
     bool dd = dd_default();
     std::optional<double> dd_budget_s = DD_BUDGET_S;  // nullopt: no limit
     bool worker = false;  // the session stage on a worker thread (see the top)
+    // Worker: audio queued for the session stage, at most. Past it blocks
+    // are dropped (counted, logged once per episode) and the receiver
+    // reset; their time still passes on the session stage, as silence.
+    double max_backlog_s = 60.0;
 };
 
 // How a binding swaps in its own objects; every one optional.
@@ -132,6 +136,8 @@ public:
     Out step(std::span<const double> x);
     bool busy() const { return busy_now_; }  // a burst arriving (the receiver stage's, latest)
     bool channel_busy() const { return channel_busy_now_; }  // the host's BUSY ON/OFF
+    // Samples dropped because the worker fell max_backlog_s behind (any thread).
+    std::uint64_t decode_dropped() const { return dropped_.load(std::memory_order_relaxed); }
 
     // -- the session stage: the engine thread in sync mode; in worker mode
     // through post() / after_block only
@@ -181,6 +187,7 @@ private:
         std::vector<tnc::Receiver::Item> items;
         bool busy = false;
         std::uint64_t gen = 0, seq = 0;
+        std::int64_t gap = 0;  // samples dropped just before this block
     };
     struct Done {
         Out out;
@@ -198,6 +205,7 @@ private:
     void apply_reset();
     void run_posted();
     void work();
+    Out next_out(std::size_t k);  // under mu_
 
     std::string call_;
     std::vector<std::string> aliases_;
@@ -226,6 +234,9 @@ private:
     std::atomic<bool> transmitting_{false}, busy_now_{false}, channel_busy_now_{false};
     std::atomic<std::uint64_t> want_gen_{0};  // the session stage asks for a receiver reset
     std::uint64_t gen_ = 0, seq_ = 0;          // the receiver stage's
+    std::int64_t gap_ = 0;                     // the receiver stage's: samples dropped since the last block queued
+    std::atomic<std::size_t> queued_{0};       // samples in in_
+    std::atomic<std::uint64_t> dropped_{0};
     std::mutex mu_;
     std::condition_variable wake_, done_cv_;
     std::deque<Block> in_;

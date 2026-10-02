@@ -190,13 +190,16 @@ void MainWindow::poll() {
     tx_->setText(tr("%1, %2 bps").arg(bytes_text(l.tx_bytes)).arg(bps(l.tx_bytes - samples_.front().tx), 0, 'f', 0));
 
     const app::AudioCounters c = s.counters();
-    counters_->setText(tr("overflows %1, dropped %2, backlog %3 s (late %4), underruns %5")
+    counters_->setText(tr("overflows %1, dropped %2, backlog %3 s (late %4), underruns %5, decode dropped %6")
                            .arg(c.overflows)
                            .arg(c.dropped)
                            .arg(c.backlog_s, 0, 'f', 1)
                            .arg(c.late)
-                           .arg(c.underruns));
-    counters_->setStyleSheet(c.overflows || c.dropped || c.late || c.underruns ? QStringLiteral("color: #d03030") : QString());
+                           .arg(c.underruns)
+                           .arg(c.decode_dropped));
+    counters_->setStyleSheet(c.overflows || c.dropped || c.late || c.underruns || c.decode_dropped
+                                 ? QStringLiteral("color: #d03030")
+                                 : QString());
 
     for (const auto& b : s.take_bursts()) {
         log_->insertRow(0);  // newest first

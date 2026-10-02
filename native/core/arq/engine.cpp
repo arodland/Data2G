@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
+#include <utility>
 
 #include "codes/codes.hpp"
 
@@ -361,8 +362,21 @@ void Engine::request_reset() {
 }
 
 Engine::Out Engine::step(std::span<const double> x) {
+    if (cfg_.worker && static_cast<double>(queued_.load()) >= cfg_.max_backlog_s * config::FS) {
+        // the worker fell behind: drop rather than queue without limit
+        if (!gap_) apply_reset();  // nothing is fed across the hole: the receiver resyncs after it
+        gap_ += static_cast<std::int64_t>(x.size());
+        dropped_ += x.size();
+        std::lock_guard lock(mu_);
+        return next_out(x.size());
+    }
     if (gen_ != want_gen_) apply_reset();
     Block b;
+    if (gap_) {
+        log_write(LOG, WARNING, format("decode worker fell %.0f s behind: %.1f s of audio dropped, receiver reset",
+                                       cfg_.max_backlog_s, static_cast<double>(gap_) / config::FS));
+        b.gap = std::exchange(gap_, 0);
+    }
     b.x.assign(x.begin(), x.end());
     b.gen = gen_;
     b.seq = seq_++;
@@ -382,12 +396,20 @@ Engine::Out Engine::step(std::span<const double> x) {
     std::unique_lock lock(mu_);
     const bool lagging = slow_ > 0;  // a burst ahead is being received: don't wait for it
     if (slow) ++slow_;
+    queued_ += b.x.size();
     in_.push_back(std::move(b));
     wake_.notify_one();
     if (!lagging && !slow) done_cv_.wait(lock, [&] { return n_done_ > seq || stop_; });
+    return next_out(x.size());
+}
+
+// out_ needs no bound of its own: a step queues at most one block and takes
+// one out when there is one, so out_ only grows as in_ drains, and the two
+// together hold in_'s bound plus a block or two.
+Engine::Out Engine::next_out(std::size_t k) {
     // catching up: silence the session stage made while it lagged is dropped
     while (out_.size() > 1 && !out_.front().sound) out_.pop_front();
-    if (out_.empty()) return {std::vector<double>(x.size(), 0.0), false};
+    if (out_.empty()) return {std::vector<double>(k, 0.0), false};
     Out o = std::move(out_.front().out);
     out_.pop_front();
     return o;
@@ -406,6 +428,7 @@ void Engine::work() {
         }
         Block b = std::move(in_.front());
         in_.pop_front();
+        queued_ -= b.x.size();
         const bool slow = std::any_of(b.items.begin(), b.items.end(),
                                       [](const auto& it) { return !std::holds_alternative<tnc::HeaderEvent>(it); });
         lock.unlock();
@@ -423,6 +446,12 @@ void Engine::work() {
 // --- the session stage -----------------------------------------------------------------
 
 Engine::Done Engine::process(Block& b) {
+    if (b.gap) {  // dropped blocks before this one: their time passes, recorded as silence
+        if (rec_)
+            for (std::int64_t left = b.gap; left > 0; left -= config::FS)
+                rec_->audio(std::vector<double>(static_cast<std::size_t>(std::min<std::int64_t>(left, config::FS)), 0.0));
+        n_ += b.gap;
+    }
     const auto k = static_cast<std::int64_t>(b.x.size());
     const double t = now() + static_cast<double>(k) / config::FS;  // the block's end: when anything in it is known
     Done d;

@@ -529,7 +529,8 @@ bool Station::busy() const { return engine_ && engine_->channel_busy(); }
 
 AudioCounters Station::counters() const {
     if (!cap_ || !play_) return {};
-    return {cap_->overflows(), play_->underruns(), cap_->late_events(), cap_->dropped(), cap_->backlog_s()};
+    return {cap_->overflows(), play_->underruns(), cap_->late_events(), cap_->dropped(), cap_->backlog_s(),
+            engine_ ? engine_->decode_dropped() : 0};
 }
 
 void Station::engine_loop() {

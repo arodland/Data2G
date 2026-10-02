@@ -135,6 +135,7 @@ struct BurstLogEntry {
 struct AudioCounters {
     std::uint64_t overflows = 0, underruns = 0, late = 0, dropped = 0;
     double backlog_s = 0.0;
+    std::uint64_t decode_dropped = 0;  // samples the decode worker's queue dropped (Engine::decode_dropped)
 };
 
 class Station {
