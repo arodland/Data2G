@@ -347,15 +347,14 @@ Status 2026-10-02: written, not yet run on GitHub (CI minutes not approved).
 ## Findings during the port (for review)
 
 Reference behaviour, unchanged in Python, ported as is:
-- A CRC-valid but malformed control frame raises out of `Station.handle` /
-  `Session.on_rx` (short T_RV, T_ABANDON, empty T_NEW, 3-byte CONNECT_ACK,
-  callsign codes >= 39). A false CRC accept on noise could do this; it
-  breaks the bounded-failure rule. Needs a decision on handling. In the
-  fuzz, 16% of link runs and 9% of session runs with corrupted control
-  hit one.
-- A CRC-valid corrupted control word can also corrupt the delivered
-  stream: T_COMP bits ride only in the control, so a flipped bit delivers a
-  deflated codeword raw (4% of corrupted-control link runs with text).
+- Fixed 2026-10 (both implementations): a CRC-valid but malformed control
+  frame raised out of `Station.handle` / `Session.on_rx` (short T_RV,
+  T_ABANDON, empty T_NEW, 3-byte CONNECT_ACK, callsign codes >= 39; 16% of
+  fuzzed link runs and 9% of session runs with corrupted control). Now
+  dropped as a failed control, with a warning (docs/arq.md §4).
+- Fixed 2026-10: a flipped T_COMP bit in a CRC-valid control delivered a
+  deflated codeword raw (4% of corrupted-control link runs with text). The
+  compression flag is now in the data codeword's CRC identity (§2).
 - A reordered burst (heard after a later one from the same sender) can
   corrupt the stream: the abandon epoch and slicing aren't in the CRC
   mask, and a fresh build answering a stale burst takes its stale ACK as

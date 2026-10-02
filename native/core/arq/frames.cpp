@@ -254,11 +254,13 @@ std::string unpack_call(ByteView b) {
     std::uint64_t v = 0;  // the low 64 bits: all the characters use
     for (auto x : b) v = v << 8 | x;
     std::string out;
+    std::uint64_t worst = 0;
     for (int i = 0; i < CALL_CHARS; ++i) {
         const auto c = (v >> (6 * (CALL_CHARS - 1 - i))) & 63;
-        if (c >= CALL_ALPHABET.size()) throw std::out_of_range("string index out of range");
-        out += CALL_ALPHABET[c];
+        worst = std::max(worst, c);
+        if (c < CALL_ALPHABET.size()) out += CALL_ALPHABET[c];
     }
+    if (worst >= CALL_ALPHABET.size()) throw std::invalid_argument("callsign code " + std::to_string(worst));
     while (!out.empty() && out.back() == ' ') out.pop_back();
     return out;
 }

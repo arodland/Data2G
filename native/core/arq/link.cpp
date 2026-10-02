@@ -374,8 +374,9 @@ TxBurstPtr Station::build(bool fresh) {
     for (std::size_t i = 0; i < ctl.size(); ++i)
         for (int rv = 0; rv < dup; ++rv) burst->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), rv, ctl[i]});
     for (std::size_t j = 0; j < resend.size(); ++j)
-        burst->slots.push_back({data_mask(direction, resend[j], key), rvs[j], tx.cws.at(resend[j]).payload});
-    for (auto* c : fresh_cws) burst->slots.push_back({data_mask(direction, c->seq, key), 0, c->payload});
+        burst->slots.push_back(
+            {data_mask(direction, resend[j], key, tx.cws.at(resend[j]).comp), rvs[j], tx.cws.at(resend[j]).payload});
+    for (auto* c : fresh_cws) burst->slots.push_back({data_mask(direction, c->seq, key, c->comp), 0, c->payload});
     snapshots[bn] = {rx.cum, conveyed};
     auto& sent = sent_seqs[bn] = resend;
     for (auto* c : fresh_cws) sent.push_back(c->seq);
@@ -464,6 +465,8 @@ bool Station::handle_inner(RxBurst& rxb) {
     Core core0 = Core::unpack(*first);
     const int dup = core0.ftype == ARQ_DUP ? 2 : 1;
     if (paired && dup == 1) return false;  // combined as a pair, but not sent as one
+    if (dup * core0.n_ctl > rxb.n_cw())
+        return malformed(format("%d control codewords x%d in a burst of %d", core0.n_ctl, dup, rxb.n_cw()));
     std::vector<Bytes> payloads{*first};
     for (int i = 1; i < core0.n_ctl; ++i) {
         auto p = rxb.decode(dup * i, ctl_mask(peer(), i, key), 0, nullptr);
@@ -474,11 +477,12 @@ bool Station::handle_inner(RxBurst& rxb) {
     Control ctl;
     try {
         ctl = Control::unpack(payloads);
-    } catch (const std::invalid_argument&) {
-        return false;
+    } catch (const std::invalid_argument& e) {
+        return malformed(e.what());
     }
     const Core& core = ctl.core;
     const Ext& ext = ctl.ext;
+    if (auto why = check(core, ext, rxb.n_cw() - dup * core.n_ctl)) return malformed(*why);
     misses = 0;
     const auto was = std::make_pair(peer_recommend, peer_size_hint);
     peer_recommend = core.recommend;
@@ -559,7 +563,7 @@ bool Station::handle_inner(RxBurst& rxb) {
             continue;
         }
         const SoftKey skey{false, peer(), *seq, 0};
-        auto p = rxb.decode(i, data_mask(peer(), *seq, key), rv, &skey);
+        auto p = rxb.decode(i, data_mask(peer(), *seq, key, comp[j]), rv, &skey);
         if (i >= n_ctl_slots + core.k) {
             n_new += 1;
             n_ok += p.has_value();
@@ -604,6 +608,23 @@ bool Station::handle_inner(RxBurst& rxb) {
     answered_ = false;
     watchdog(progress);
     return true;
+}
+
+std::optional<std::string> Station::check(const Core& core, const Ext& ext, int n_data) {
+    if (core.k > n_data) return format("K %d in %d data slots", core.k, n_data);
+    auto e_rv = ext.find(T_RV);
+    const std::size_t rv_bytes = e_rv == ext.end() ? 0 : e_rv->second.size();
+    if (static_cast<std::int64_t>(rv_bytes) < ceil_div(2 * core.k, 8))
+        return format("T_RV of %d B for K %d", static_cast<int>(rv_bytes), core.k);
+    if (auto e = ext.find(T_NEW); e != ext.end() && e->second.empty()) return std::string("empty T_NEW");
+    if (auto e = ext.find(T_ABANDON); e != ext.end() && e->second.size() < 2)
+        return format("T_ABANDON of %d B", static_cast<int>(e->second.size()));
+    return std::nullopt;
+}
+
+bool Station::malformed(const std::string& why) {
+    log_write(LOG, WARNING, "RX malformed control (" + why + "): dropped");
+    return false;
 }
 
 std::optional<Bytes> Station::ctl_pair(RxBurst& rxb, int slot, int i) {

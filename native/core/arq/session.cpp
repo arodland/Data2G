@@ -8,7 +8,7 @@ namespace data2g::arq {
 
 namespace {
 constexpr const char* LOG = "data2g.session";
-constexpr int INFO = 20;
+constexpr int INFO = 20, WARNING = 30;
 constexpr double INF = std::numeric_limits<double>::infinity();
 
 bool live(SessionState s) { return s == SessionState::CONNECTED || s == SessionState::DISCONNECTING; }
@@ -34,6 +34,20 @@ std::uint8_t byte(std::int64_t v) {
 }
 
 std::uint8_t tenths(double t_turn) { return byte(static_cast<std::int64_t>(std::nearbyint(t_turn * 10))); }  // round(): half to even
+// What is wrong with a CRC-valid session frame body, or nullopt. A bad one
+// is dropped as if it had not decoded (the peer retries).
+std::optional<std::string> check_frame(ByteView body) {
+    const int sub = body[0];
+    const std::size_t need = sub == CONNECT ? 22 : sub == CONNECT_ACK ? 5 : sub == CONNECT_NAK ? 4 : 1;
+    if (body.size() < need) return frame_desc(body.first(1)) + " of " + std::to_string(body.size()) + " B";
+    try {
+        if (sub == CONNECT) unpack_call(body.subspan(2, 8)), unpack_call(body.subspan(10, 8));
+    } catch (const std::invalid_argument& e) {
+        return frame_desc(body.first(1)) + ": " + e.what();
+    }
+    if (sub == CONNECT_ACK && body[3] > 2) return "CONNECT_ACK: cap code " + std::to_string(body[3]);
+    return std::nullopt;
+}
 }  // namespace
 
 const char* state_name(SessionState s) {
@@ -380,6 +394,11 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
         if (!first) continue;
         const Core core = Core::unpack(*first);
         if (core.ftype != SESSION) return std::nullopt;
+        if (core.n_ctl > rx.n_cw()) {
+            log_write(LOG, WARNING, format("RX malformed session frame (%d control codewords in a burst of %d): dropped",
+                                           core.n_ctl, rx.n_cw()));
+            return std::nullopt;
+        }
         std::vector<Bytes> payloads{*first};
         for (int i = 1; i < core.n_ctl; ++i) {
             auto p = rx.decode(i, ctl_mask(direction, i, key), 0, nullptr);
@@ -390,10 +409,15 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
         try {
             const auto c = Control::unpack(payloads);
             if (auto it = c.ext.find(T_SESS); it != c.ext.end()) body = it->second;
-        } catch (const std::invalid_argument&) {
+        } catch (const std::invalid_argument& e) {
+            log_write(LOG, WARNING, std::string("RX malformed session frame (") + e.what() + "): dropped");
             return std::nullopt;
         }
         if (body.empty()) return std::nullopt;
+        if (auto why = check_frame(body)) {
+            log_write(LOG, WARNING, "RX malformed " + *why + ": dropped");
+            return std::nullopt;
+        }
         return Frame{key, std::move(body), rx.submode()};
     }
     return std::nullopt;

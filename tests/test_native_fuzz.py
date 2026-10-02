@@ -14,11 +14,12 @@ long fades, a peer that restarts mid-session (session: a fresh Session;
 engine: abort), and CRC-valid but corrupted control codewords (link and
 session, own tests).
 
-Reference behaviours found here, the same in every pairing, are kept as
+A reference behaviour found here, the same in every pairing, is kept as
 strict xfails rather than fixed (docs/native-port-plan.md, Findings):
-malformed control raising, a flipped T_COMP bit, and reordered bursts
-corrupting the stream (a run that corrupts after a late copy ends with
-outcome LATE; anything else that corrupts fails).
+reordered bursts corrupting the stream (a run that corrupts after a late
+copy ends with outcome LATE; anything else that corrupts fails). Two more
+found here are fixed (2026-10): malformed control raising, now dropped,
+and a flipped T_COMP bit delivering deflate raw, now a CRC failure.
 
 Every run asserts:
 (a) it ends in delivery or a bounded disconnect. A station's handled
@@ -58,8 +59,6 @@ WATCHDOG = L.NO_PROGRESS_TURNS * (L.RESYNCS_BEFORE_FAIL + 1)  # handled bursts w
 # turns between progress: each counted handle can be separated by at most
 # LINK_LOST_MISSES + 1 timeouts, and one more burst from the peer
 TURN_BOUND = (WATCHDOG + 1) * (L.LINK_LOST_MISSES + 2)
-KNOWN_RAISE = ("a CRC-valid malformed control frame raises out of Station.handle / Session.on_rx in both "
-               "implementations (docs/native-port-plan.md, Findings): kept as reference behaviour pending a decision")
 
 
 def impl(native, which):
@@ -340,24 +339,9 @@ def sessions(sc, cls_a, cls_b, horizon=8000.0):
 
 def run_pairs(fn, sc, native):
     """fn in all four pairings: every one sends Py-Py's bursts and ends the
-    same way. A raise (corrupted control only) must happen in every
-    pairing after the same bursts; the Python one is re-raised."""
-    out = {}
-    for pair in PAIRS:
-        classes = [impl(native, w)[fn is sessions] for w in pair]
-        try:
-            out[pair] = fn(sc, *classes)
-        except AssertionError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            if not sc["p_corrupt"]:
-                raise
-            out[pair] = e
+    same way."""
+    out = {pair: fn(sc, *[impl(native, w)[fn is sessions] for w in pair]) for pair in PAIRS}
     ref = out[("py", "py")]
-    raised = {pair for pair, got in out.items() if isinstance(got, Exception)}
-    assert not raised or len(raised) == 4, ("raised in some pairings only", raised)
-    if raised:
-        raise ref
     for pair, got in out.items():
         assert got[1] == ref[1], (pair, got[1], ref[1])
         assert got[0] == ref[0], (pair, "bursts differ")
@@ -421,74 +405,48 @@ def test_session_fuzz_sweep(native, pure, seed):
 
 # --- CRC-valid corrupted control codewords --------------------------------------------------
 # A false CRC accept (2^-16 per control codeword on noise) hands the
-# station a control word that is wrong but well framed. Most are discarded
-# (unparseable) or end the link on a protocol check. Two reference
-# behaviours, the same in every pairing, are listed by seed so they stay
-# visible: a raise (KNOWN_RAISE), and a flipped T_COMP bit, which no data
-# CRC covers, delivering a deflated codeword raw (COMP_REASON). Regenerate
-# the lists with `python tests/test_native_fuzz.py` after changing the
-# scenarios or the channel.
+# station a control word that is wrong but well framed. It is dropped as
+# malformed, ends the link on a protocol check, or costs progress until the
+# watchdog resyncs; it never raises or corrupts. Before 2026-10, 91 of the
+# 560 link runs and 32 of the 340 session runs raised, and 23 link runs
+# delivered a deflated codeword raw (its T_COMP bit flipped).
 
-COMP_REASON = ("reference behaviour: T_COMP flags ride in the control word only, so a CRC-valid corrupted "
-               "control can deliver a deflated codeword as raw bytes (or the reverse): stream corrupted")
 CORRUPT_LINK, SLOW_CORRUPT_LINK = range(2000, 2060), range(2060, 2560)
 CORRUPT_SESSION, SLOW_CORRUPT_SESSION = range(3000, 3040), range(3040, 3340)
-# 560 runs: 91 raise, 23 comp
-KNOWN_LINK = {**dict.fromkeys([2001, 2003, 2005, 2008, 2010, 2017, 2043, 2044, 2049, 2051, 2052, 2056, 2058, 2067,
-    2072, 2078, 2079, 2082, 2090, 2094, 2098, 2101, 2102, 2116, 2117, 2122, 2125, 2135, 2139, 2148, 2149, 2153,
-    2154, 2156, 2181, 2189, 2196, 2200, 2208, 2209, 2212, 2218, 2227, 2233, 2238, 2243, 2245, 2248, 2258, 2259,
-    2262, 2271, 2278, 2279, 2280, 2283, 2293, 2300, 2305, 2312, 2317, 2332, 2358, 2360, 2361, 2367, 2369, 2370,
-    2378, 2385, 2404, 2408, 2418, 2423, 2426, 2433, 2438, 2447, 2448, 2466, 2482, 2484, 2487, 2498, 2502, 2504,
-    2508, 2511, 2517, 2520, 2552], 'raise'), **dict.fromkeys([2047, 2048, 2075, 2121, 2129, 2174, 2178, 2179, 2183,
-    2219, 2236, 2241, 2260, 2286, 2355, 2356, 2421, 2431, 2434, 2452, 2480, 2483, 2486], 'comp')}
-# 340 runs: 32 raise, 0 comp
-KNOWN_SESSION = {**dict.fromkeys([3003, 3015, 3040, 3057, 3059, 3065, 3066, 3071, 3085, 3103, 3104, 3113, 3116,
-    3125, 3131, 3183, 3185, 3199, 3211, 3215, 3221, 3240, 3260, 3269, 3273, 3279, 3286, 3292, 3305, 3311, 3330,
-    3336], 'raise'), **dict.fromkeys([], 'comp')}
 
 
-RAISES = (ValueError, IndexError, KeyError)
-
-
-def _marked(seeds, known):
-    mark = {"raise": pytest.mark.xfail(strict=True, raises=RAISES, reason=KNOWN_RAISE),
-            "comp": pytest.mark.xfail(strict=True, raises=AssertionError, reason=COMP_REASON)}
-    return [pytest.param(s, marks=mark[known[s]]) if s in known else s for s in seeds]
-
-
-@pytest.mark.parametrize("seed", _marked(CORRUPT_LINK, KNOWN_LINK))
+@pytest.mark.parametrize("seed", CORRUPT_LINK)
 def test_link_corrupt_control(native, pure, seed):
     check_link(link_scenario(seed, corrupt=True), native)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("seed", _marked(SLOW_CORRUPT_LINK, KNOWN_LINK))
+@pytest.mark.parametrize("seed", SLOW_CORRUPT_LINK)
 def test_link_corrupt_control_sweep(native, pure, seed):
     check_link(link_scenario(seed, corrupt=True), native)
 
 
-@pytest.mark.parametrize("seed", _marked(CORRUPT_SESSION, KNOWN_SESSION))
+@pytest.mark.parametrize("seed", CORRUPT_SESSION)
 def test_session_corrupt_control(native, pure, seed):
     check_session(session_scenario(seed, corrupt=True), native)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("seed", _marked(SLOW_CORRUPT_SESSION, KNOWN_SESSION))
+@pytest.mark.parametrize("seed", SLOW_CORRUPT_SESSION)
 def test_session_corrupt_control_sweep(native, pure, seed):
     check_session(session_scenario(seed, corrupt=True), native)
 
 
-@pytest.mark.xfail(strict=True, raises=RAISES, reason=KNOWN_RAISE)
 @pytest.mark.parametrize("which", ["py", "cpp"])
-def test_malformed_control_raises(native, pure, which):
-    """The smallest known raise: a CRC-valid control word whose T_RV is
-    shorter than its K resends."""
+def test_malformed_control_dropped(native, pure, which):
+    """The smallest case that used to raise: a CRC-valid control word whose
+    T_RV is shorter than its K resends. Dropped, as a failed control."""
     cls = impl(native, which)[0]
     b = cls(1, Script([("m22", 1)]))
     ctl = F.Control(F.Core(k=5, acted_on=7), {F.T_RV: b"\x00"}).pack(22)
     slots = [L.Slot(L.ctl_mask(0, 0), 0, ctl[0])] + [L.Slot(L.data_mask(0, i), 0, bytes(22)) for i in range(5)]
-    b.handle(clean(L.TxBurst("m22", slots, 0)))
-    assert b.state in (L.ACTIVE, L.FAILED)
+    assert not b.handle(clean(L.TxBurst("m22", slots, 0)))
+    assert b.state == L.ACTIVE and b.stats["rx_lost"] == 1
 
 
 # --- late bursts: minimized reproducers -------------------------------------------------------
@@ -607,11 +565,12 @@ def test_late_burst_with_a_stale_ack(native, pure, which):
     assert got == data[:len(got)] or L.FAILED in (a.state, b.state)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=COMP_REASON)
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_flipped_comp_bit(native, pure, which):
     """The smallest T_COMP case: a's first burst carries one deflated
-    codeword; its control arrives CRC-valid with the T_COMP bit cleared."""
+    codeword; its control arrives CRC-valid with the T_COMP bit cleared.
+    The codeword's CRC identity includes its compression, so it fails as
+    raw, and the watchdog's resync re-slices it."""
     cls = impl(native, which)[0]
     a = cls(0, Script([("m46", 2)]), master=True)
     b = cls(1, Script([("m46", 1)]))
@@ -624,7 +583,7 @@ def test_flipped_comp_bit(native, pure, which):
     ctl.ext[F.T_COMP] = b"\x00"
     burst.slots[0] = L.Slot(burst.slots[0].mask_id, 0, F.Control(ctl.core, ctl.ext).pack(46)[0])
     got = finish(a, b, burst, data)  # the rest of the stream, lossless
-    assert got == data[:len(got)] or L.FAILED in (a.state, b.state)
+    assert got == data
 
 
 # --- engines through the simulated audio channel ----------------------------------------------
@@ -729,35 +688,3 @@ def test_engine_fuzz(native, pure, reference, seed):
 @pytest.mark.parametrize("seed", [s for s in range(30) if s not in DEFAULT_ENGINE])
 def test_engine_fuzz_sweep(native, pure, reference, seed):
     check_engines(engine_scenario(seed), native, reference)
-
-
-def _scan(fn, seeds):
-    """{seed: "raise" | "comp"} for the Py-Py runs that end either way."""
-    out = {}
-    for seed in seeds:
-        try:
-            fn(seed)
-        except AssertionError as e:
-            if "stream corrupted" not in str(e):
-                raise
-            out[seed] = "comp"
-        except Exception:  # noqa: BLE001
-            out[seed] = "raise"
-    return out
-
-
-if __name__ == "__main__":
-    import logging
-    import textwrap
-
-    logging.disable(logging.WARNING)
-    for name, fn, seeds in (
-            ("KNOWN_LINK", lambda s: lockstep(link_scenario(s, True), L.Station, L.Station),
-             [*CORRUPT_LINK, *SLOW_CORRUPT_LINK]),
-            ("KNOWN_SESSION", lambda s: sessions(session_scenario(s, True), S.Session, S.Session),
-             [*CORRUPT_SESSION, *SLOW_CORRUPT_SESSION])):
-        known = _scan(fn, seeds)
-        by = {k: [s for s, v in known.items() if v == k] for k in ("raise", "comp")}
-        print(f"# {len(seeds)} runs: {len(by['raise'])} raise, {len(by['comp'])} comp")
-        print(textwrap.fill(f"{name} = {{**dict.fromkeys({by['raise']}, 'raise'), "
-                            f"**dict.fromkeys({by['comp']}, 'comp')}}", 116, subsequent_indent="    "))

@@ -46,8 +46,10 @@ struct MaskId {
 };
 
 inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
-inline MaskId data_mask(int direction, std::int64_t seq, int key = 0) {
-    return {key, direction, static_cast<int>(pmod(seq, SEQ_MOD))};
+// comp: deflated (T_COMP), folded into the direction byte so a codeword
+// decoded under the wrong compression assumption fails its CRC
+inline MaskId data_mask(int direction, std::int64_t seq, int key = 0, bool comp = false) {
+    return {key, direction | (comp ? 2 : 0), static_cast<int>(pmod(seq, SEQ_MOD))};
 }
 // The absolute seq = s7 (mod SEQ_MOD) nearest anchor.
 inline std::int64_t unwrap(std::int64_t s7, std::int64_t anchor) {
@@ -234,6 +236,9 @@ public:
 
 private:
     bool handle_inner(RxBurst& rx);
+    // What is wrong with a CRC-valid control, checked before any state changes.
+    static std::optional<std::string> check(const Core& core, const Ext& ext, int n_data);
+    bool malformed(const std::string& why);  // log, -> false: dropped like a failed control
     bool comp_bit(std::int64_t seq) const;
     std::vector<std::pair<std::optional<std::int64_t>, int>> map_slots(const Core& core, const Ext& ext, int n_cw,
                                                                       std::int64_t acted);
