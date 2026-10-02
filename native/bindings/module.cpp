@@ -10,6 +10,7 @@ void bind_constellation(py::module_&);
 void bind_cpm(py::module_&);
 void bind_polar(py::module_&);
 void bind_equalizer(py::module_&);
+void bind_waveform(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
@@ -21,4 +22,5 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_cpm(m);
     data2g::bind::bind_polar(m);
     data2g::bind::bind_equalizer(m);
+    data2g::bind::bind_waveform(m);
 }
