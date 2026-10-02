@@ -82,7 +82,13 @@ void set_row_visible(QFormLayout* form, QWidget* field, bool visible) {
 }
 
 // The string-valued rig options; the QSettings key is the Args field's name.
-const std::pair<const char*, std::string app::Args::*> RIG_STRINGS[] = {
+// (A named member-pointer type: MSVC can't parse one spelled inside pair<>.)
+using StringField = std::string app::Args::*;
+struct RigString {
+    const char* key;
+    StringField field;
+};
+const RigString RIG_STRINGS[] = {
     {"rig_device", &app::Args::rig_device},       {"rig_data_bits", &app::Args::rig_data_bits},
     {"rig_stop_bits", &app::Args::rig_stop_bits}, {"rig_parity", &app::Args::rig_parity},
     {"rig_handshake", &app::Args::rig_handshake}, {"rig_dtr", &app::Args::rig_dtr},
