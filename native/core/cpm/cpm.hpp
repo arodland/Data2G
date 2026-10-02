@@ -50,12 +50,12 @@ std::vector<double> tones(const Grid& g, std::span<const int> sym);
 std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup);
 
 // (n_sym, m + 2 extra) tone energies from `start`, CFO removed; shares per row.
-Mat<double> energies(const Grid& g, std::span<const double> x, long start, int n_sym, double cfo, int extra = 0);
+Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra = 0);
 Mat<double> shares(const Mat<double>& E);
 
 struct Detection {
     double score;
-    long start;
+    std::int64_t start;
     double cfo;
 };
 Detection detect(const Grid& g, std::span<const double> x, double reach_hz = 150.0, bool fine = true,
@@ -70,28 +70,28 @@ struct Header {
     bool dup;
     double score, runner_up;
 };
-Header read_header(const Grid& g, std::span<const double> x, long s0, double cfo, int copies = 2);
+Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 
 struct Soft {
     std::vector<std::vector<double>> slots;  // per slot, mapping order
     Mat<double> E;                           // the stream's tone energies
 };
-Soft soft(const Grid& g, std::span<const double> x, long s0, double cfo, int n_data, bool dup);
+Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int n_data, bool dup);
 
-double peak_ratio(const Grid& g, std::span<const double> x, long s0, double cfo);
+double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo);
 
 struct Lock {
     const Spec* spec;
     int n_data;
     bool dup;
-    long start;
+    std::int64_t start;
     double cfo, score, header_score, header_margin;
-    long end, header_end;
+    std::int64_t end, header_end;
 };
 // threshold: nullopt = SYNC_THRESHOLD plus the header floor. hi: nullopt = len(x).
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold = std::nullopt,
-                         double reach_hz = 150.0, bool front_only = true, long lo = 0,
-                         std::optional<long> hi = std::nullopt);
+                         double reach_hz = 150.0, bool front_only = true, std::int64_t lo = 0,
+                         std::optional<std::int64_t> hi = std::nullopt);
 
 // cpm.measure without the effective-MI features (arq/predictor's, Phase 2):
 // those are computed from `snr`, per symbol.
@@ -110,7 +110,7 @@ struct Received {
     std::vector<std::vector<double>> soft;
     Mat<double> E;
     double cfo;
-    long preamble_start, header_end;
+    std::int64_t preamble_start, header_end;
 };
 Received receive(std::span<const double> x, const Lock& lock);
 

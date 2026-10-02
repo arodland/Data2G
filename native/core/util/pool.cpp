@@ -20,11 +20,11 @@ namespace {
 
 thread_local bool in_task = false;
 
-long process_id() {
+std::int64_t process_id() {
 #ifdef _WIN32
     return 0;
 #else
-    return static_cast<long>(getpid());
+    return static_cast<std::int64_t>(getpid());
 #endif
 }
 
@@ -134,7 +134,7 @@ private:
 
     std::mutex job_;  // held by the thread running a job, and while resizing
     int size_ = 0;    // 0: not started
-    long owner_ = process_id();
+    std::int64_t owner_ = process_id();
     std::vector<std::thread> threads_;
 
     std::mutex m_;  // guards the job below and the wakeups

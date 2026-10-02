@@ -50,8 +50,8 @@ struct StationView {
     int peer_size_hint = 1;
     bool peer_wants_dup = false;
     bool chat = false;     // station.chat or station.peer_chat
-    long peer_queued = 0;
-    long held = 0;         // codewords held beyond the cumulative ACK: len(rx.buf)
+    std::int64_t peer_queued = 0;
+    std::int64_t held = 0;         // codewords held beyond the cumulative ACK: len(rx.buf)
 };
 
 struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)

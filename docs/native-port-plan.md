@@ -423,6 +423,17 @@ Reference behaviour, unchanged in Python, ported as is:
   Nothing reads them in streaming use.
 - `sync._repeat_corr(s)` don't reduce phase before exp (up to 78 rad).
 
+- Studies under `tools/with_native.py` match Python row for row except
+  where a marginal LDPC decode flips: `idle_study` 23/24 rows. Root cause
+  `phi` alone: C++'s is correctly rounded, numpy's SIMD float32 tanh/log are
+  not (an ulp on half the entries); numpy's decoder with C++'s `phi` swapped
+  in reproduces C++ bit for bit at every iteration. The codeword converged
+  at Python's 40-iteration cap (C++: 43). numpy picks its SIMD kernel per
+  CPU, so Python itself isn't reproducible across machines here. Options:
+  accept (judge such rows statistically), or make Python's `_phi`
+  correctly rounded (float64 tanh/log rounded to float32), which would make
+  Python CPU-independent and studies bitwise; a Python-side change.
+
 SSTVAE (not changed from here):
 - TSan found a race in `RigController::wait_for_shutdown` (polls
   `weak_ptr::expired()`, a relaxed load); fixed in the Data2G copy with a

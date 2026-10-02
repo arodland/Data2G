@@ -39,7 +39,7 @@ double get(const GearShifter::Map& m, std::string_view k) {
     return it == m.end() ? 0.0 : it->second;
 }
 
-int cdiv(long a, long b) { return static_cast<int>((a + b - 1) / b); }  // a >= 0, b > 0
+int cdiv(std::int64_t a, std::int64_t b) { return static_cast<int>((a + b - 1) / b); }  // a >= 0, b > 0
 
 }  // namespace
 
@@ -184,9 +184,9 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     }
 
     const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
-    const long held = cur ? st.held * payload_bytes(*cur) : 0;
+    const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
     const bool chat = st.chat;
-    const long queued = std::max<long>(CHAT_BYTES, st.peer_queued);
+    const std::int64_t queued = std::max<std::int64_t>(CHAT_BYTES, st.peer_queued);
     const Mode* best = nullptr;
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
@@ -242,7 +242,7 @@ StationView view(const Station& st) {
     v.peer_wants_dup = st.peer_wants_dup;
     v.chat = st.chat || st.peer_chat;
     v.peer_queued = st.peer_queued;
-    v.held = static_cast<long>(st.rx.buf.size());
+    v.held = static_cast<std::int64_t>(st.rx.buf.size());
     return v;
 }
 

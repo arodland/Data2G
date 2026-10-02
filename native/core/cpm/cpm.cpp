@@ -75,7 +75,7 @@ Mat<double> power(const std::vector<cdouble>& Z, std::size_t rows, std::size_t T
 // Python's round() for the half-way cases (banker's), as the layout uses it.
 int py_round(double v) { return static_cast<int>(std::nearbyint(v)); }
 
-long floor_div(long a, long b) { return a / b - ((a % b != 0) && ((a < 0) != (b < 0))); }
+std::int64_t floor_div(std::int64_t a, std::int64_t b) { return a / b - ((a % b != 0) && ((a < 0) != (b < 0))); }
 
 std::vector<int> gray(int m) {
     std::vector<int> g(m);
@@ -230,13 +230,13 @@ std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::u
     return tones(g, sym);
 }
 
-Mat<double> energies(const Grid& g, std::span<const double> x, long start, int n_sym, double cfo, int extra) {
+Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra) {
     const std::size_t T = g.T, N = static_cast<std::size_t>(n_sym) * T;
     const double w = (-2 * PI) * (g.f0 - extra * g.rate + cfo);
     std::vector<cdouble> z(N);
-    const long len = static_cast<long>(x.size());
+    const std::int64_t len = static_cast<std::int64_t>(x.size());
     for (std::size_t i = 0; i < N; ++i) {
-        const long s = start + static_cast<long>(i);
+        const std::int64_t s = start + static_cast<std::int64_t>(i);
         if (s < 0 || s >= len) continue;
         const double arg = w * (static_cast<double>(s) / FS);
         z[i] = {x[s] * std::cos(arg), x[s] * std::sin(arg)};
@@ -262,51 +262,51 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         tones_ = tones_.first(L.front);
     }
     const std::size_t R = rows.size();
-    const long span = rows.back() + 1, T = g.T;
+    const std::int64_t span = rows.back() + 1, T = g.T;
     const int extra = static_cast<int>(std::ceil(reach_hz / g.rate));
     const std::size_t nb = g.m + 2 * extra, ndk = 2 * extra + 1;
     Detection best{-1.0, 0, 0.0};
-    const long len = static_cast<long>(x.size());
+    const std::int64_t len = static_cast<std::int64_t>(x.size());
     std::vector<cdouble> zf(x.size());
     for (double frac : {0.0, 0.25, 0.5, 0.75}) {
         // mixed once per CFO fraction as numpy does: (w * n) / FS, the
         // division a complex one (times 1 / FS)
         const double w = (-2 * PI) * (g.f0 - extra * g.rate + frac * g.rate), inv = 1.0 / FS;
-        for (long i = 0; i < len; ++i) {
+        for (std::int64_t i = 0; i < len; ++i) {
             const double arg = (w * static_cast<double>(i)) * inv;
             zf[i] = {x[i] * std::cos(arg), x[i] * std::sin(arg)};
         }
         for (int ph = 0; ph < 4; ++ph) {
-            const long off = ph * T / 4, n = (len - off) / T;
+            const std::int64_t off = ph * T / 4, n = (len - off) / T;
             if (n < span) continue;
             std::vector<cdouble> seg(zf.begin() + off, zf.begin() + off + n * T);
             const Mat<double> E = shares(power(fft_rows(seg, n, T), n, T, nb));
-            const long J = n - span + 1;
+            const std::int64_t J = n - span + 1;
             std::vector<double> S(ndk * J, 0.0);  // S[dk, j] = sum over r of E[rows_r + j, tone_r + dk]
             for (std::size_t dk = 0; dk < ndk; ++dk)
-                for (long j = 0; j < J; ++j) {
+                for (std::int64_t j = 0; j < J; ++j) {
                     double acc = 0.0;
                     for (std::size_t r = 0; r < R; ++r) acc += E[rows[r] + j][tones_[r] + dk];
                     S[dk * J + j] = acc;
                 }
             const std::size_t k = std::max_element(S.begin(), S.end()) - S.begin();
             if (S[k] / R > best.score) {
-                const long dk = static_cast<long>(k) / J, j = static_cast<long>(k) % J;
+                const std::int64_t dk = static_cast<std::int64_t>(k) / J, j = static_cast<std::int64_t>(k) % J;
                 best = {S[k] / R, off + j * T, (dk - extra) * g.rate + frac * g.rate};
             }
         }
     }
     if (fine && best.score >= floor) {  // timing to T/32, CFO to R/16
         double top = 0;
-        long s_best = 0;
+        std::int64_t s_best = 0;
         double c_best = 0;
         bool first = true;
         std::vector<double> on(R), all(R * g.m);
-        const long step = std::max(1L, T / 32), lo = floor_div(-T, 8), hi = T / 8;
-        for (long dt = lo; dt < hi + 1; dt += step)
+        const std::int64_t step = std::max(1L, T / 32), lo = floor_div(-T, 8), hi = T / 8;
+        for (std::int64_t dt = lo; dt < hi + 1; dt += step)
             for (int q = -2; q <= 2; ++q) {
                 const double df = (0.0625 * q) * g.rate;
-                const long s = best.start + dt;
+                const std::int64_t s = best.start + dt;
                 const double c = best.cfo + df;
                 const Mat<double> E = energies(g, x, s, static_cast<int>(span), c);
                 for (std::size_t r = 0; r < R; ++r) {
@@ -351,7 +351,7 @@ std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
     return out;
 }
 
-Header read_header(const Grid& g, std::span<const double> x, long s0, double cfo, int copies) {
+Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies) {
     const Layout L = layout(g, stream_symbols(g, 0, false));
     std::vector<int> rows;
     for (int c = 0; c < copies; ++c) rows.insert(rows.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
@@ -377,7 +377,7 @@ Header read_header(const Grid& g, std::span<const double> x, long s0, double cfo
     return best;
 }
 
-Soft soft(const Grid& g, std::span<const double> x, long s0, double cfo, int n_data, bool dup) {
+Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int n_data, bool dup) {
     const Layout L = layout(g, stream_symbols(g, n_data, dup));
     Soft out;
     out.E = take_rows(energies(g, x, s0, L.n, cfo), L.data_rows);
@@ -392,7 +392,7 @@ Soft soft(const Grid& g, std::span<const double> x, long s0, double cfo, int n_d
     return out;
 }
 
-double peak_ratio(const Grid& g, std::span<const double> x, long s0, double cfo) {
+double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo) {
     const auto f = g.preamble;
     const Mat<double> E = shares(energies(g, x, s0, static_cast<int>(f.size()), cfo));
     std::vector<double> on(f.size());
@@ -401,14 +401,14 @@ double peak_ratio(const Grid& g, std::span<const double> x, long s0, double cfo)
 }
 
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold, double reach_hz,
-                         bool front_only, long lo, std::optional<long> hi) {
+                         bool front_only, std::int64_t lo, std::optional<std::int64_t> hi) {
     const double floor = threshold.value_or(g.sync_threshold);
-    const long len = static_cast<long>(x.size()), T = g.T;
+    const std::int64_t len = static_cast<std::int64_t>(x.size()), T = g.T;
     const Layout L0 = layout(g, stream_symbols(g, 0, false));
     Detection d;
     if (lo || hi) {
-        const long span = ((front_only ? L0.sync_rows[L0.front - 1] : L0.sync_rows.back()) + 2) * T;
-        const long a = std::min(len, std::max(0L, lo - T)), b = hi ? std::min(len, *hi + span + T) : len;
+        const std::int64_t span = ((front_only ? L0.sync_rows[L0.front - 1] : L0.sync_rows.back()) + 2) * T;
+        const std::int64_t a = std::min(len, std::max(0L, lo - T)), b = hi ? std::min(len, *hi + span + T) : len;
         d = detect(g, x.subspan(a, std::max(0L, b - a)), reach_hz, true, front_only, 0, floor);
         d.start += a;
         if (!(lo <= d.start && d.start < hi.value_or(len))) return std::nullopt;
@@ -416,13 +416,13 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
         d = detect(g, x, reach_hz, true, front_only, 0, floor);
     }
     if (d.score < floor) return std::nullopt;
-    const long hdr_end = (L0.hdr_rows[0].back() + 1) * T;
+    const std::int64_t hdr_end = (L0.hdr_rows[0].back() + 1) * T;
     if (d.start + hdr_end > len) return std::nullopt;  // its header copy is still arriving
     // a tiled front also matches whole periods late: the alignment whose header reads best
-    const long period = g.costas_len * T, tiles = static_cast<long>(g.preamble.size()) * T / period;
-    std::optional<std::pair<long, Header>> best;
-    for (long k = 0; k < tiles; ++k) {
-        const long s = d.start - k * period;
+    const std::int64_t period = g.costas_len * T, tiles = static_cast<std::int64_t>(g.preamble.size()) * T / period;
+    std::optional<std::pair<std::int64_t, Header>> best;
+    for (std::int64_t k = 0; k < tiles; ++k) {
+        const std::int64_t s = d.start - k * period;
         if (s < 0) continue;
         const Header h = read_header(g, x, s, d.cfo, 1);
         if (!best || h.score > best->second.score) best.emplace(s, h);

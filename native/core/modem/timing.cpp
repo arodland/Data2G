@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 
 namespace data2g::modem {
 
@@ -46,8 +47,8 @@ int frames_on_air(const Submode& spec, int n_cw) {
     return n_f + copy_frame(spec.sync_band, n_f).has_value();
 }
 
-long burst_end(long p0, const Submode& spec, int n_cw) {
-    return p0 + static_cast<long>(frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM;
+std::int64_t burst_end(std::int64_t p0, const Submode& spec, int n_cw) {
+    return p0 + static_cast<std::int64_t>(frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM;
 }
 
 int head_samples(std::string_view name) {
@@ -56,8 +57,8 @@ int head_samples(std::string_view name) {
 }
 
 double burst_seconds(const Submode& spec, int n_cw) {
-    const long n = LEADIN_SAMPLES + preamble_samples(band(spec.sync_band)) + header_samples(spec.sync_band) +
-                   static_cast<long>(frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM + LEADOUT_SAMPLES;
+    const std::int64_t n = LEADIN_SAMPLES + preamble_samples(band(spec.sync_band)) + header_samples(spec.sync_band) +
+                   static_cast<std::int64_t>(frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM + LEADOUT_SAMPLES;
     return static_cast<double>(n) / FS;
 }
 

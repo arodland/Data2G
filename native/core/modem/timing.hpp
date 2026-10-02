@@ -5,6 +5,7 @@
 #include <optional>
 #include <string_view>
 #include <vector>
+#include <cstdint>
 
 #include "generated/config.hpp"
 
@@ -19,7 +20,7 @@ std::vector<bool> header_layout(std::string_view band);     // per header symbol
 int header_samples(std::string_view band);
 std::optional<int> copy_frame(std::string_view band, int n_f);  // nullopt: no header copy
 int frames_on_air(const config::Submode& spec, int n_cw);
-long burst_end(long p0, const config::Submode& spec, int n_cw);
+std::int64_t burst_end(std::int64_t p0, const config::Submode& spec, int n_cw);
 int head_samples(std::string_view band);
 double burst_seconds(const config::Submode& spec, int n_cw);
 
