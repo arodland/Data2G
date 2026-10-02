@@ -122,11 +122,11 @@ TxBurstPtr Session::poll(double now) {
     }
     if (state == SessionState::CLOSED && !out) return nullptr;
     if (live(state)) {
-        if (now >= last_heard + LINK_LOST_S) {
+        if (now >= last_heard + tune.link_lost_s) {
             close(state == SessionState::CONNECTED ? "link lost" : "disconnected (unconfirmed)");
             return nullptr;
         }
-        if (state == SessionState::CONNECTED && now >= last_data + IDLE_CLOSE_S) want_disc = true;
+        if (state == SessionState::CONNECTED && now >= last_data + tune.idle_close_s) want_disc = true;
     }
     if (deadline && now >= *deadline) {
         deadline.reset();
@@ -166,17 +166,17 @@ std::optional<double> Session::next_event() {
     take(deadline);
     take(build_at);
     take(wake_time());
-    if (live(state)) take(last_heard + LINK_LOST_S);
+    if (live(state)) take(last_heard + tune.link_lost_s);
     return best;
 }
 
 void Session::on_tx_end(double now) {
     const bool m = master();
     if (m && (state == SessionState::CONNECTING || live(state))) {
-        deadline = now + t_turn + REPLY_START_S;
+        deadline = now + t_turn + tune.reply_start_s;
     } else if (!m) {
         quiet_from = now;
-        wake_wait = t_turn + REPLY_START_S + WAKE_GUARD_S + rng->uniform(0, WAKE_JITTER_S * std::pow(2.0, wakes));
+        wake_wait = t_turn + tune.reply_start_s + tune.wake_guard_s + rng->uniform(0, tune.wake_jitter_s * std::pow(2.0, wakes));
     }
 }
 
@@ -221,8 +221,8 @@ void Session::on_rx(RxBurst& rx, double now) {
         st->answered();
     } else {
         const bool c = st->chat || st->peer_chat;
-        const double lo = c ? CHAT_KEEPALIVE_LO_S : KEEPALIVE_LO_S, hi = c ? CHAT_KEEPALIVE_HI_S : KEEPALIVE_HI_S;
-        if (KEEPALIVE_DOUBLING)
+        const double lo = c ? tune.chat_keepalive_lo_s : tune.keepalive_lo_s, hi = c ? tune.chat_keepalive_hi_s : tune.keepalive_hi_s;
+        if (tune.keepalive_doubling)
             idle_wait = idle_wait == 0.0 ? lo : std::min(hi, 2 * idle_wait);
         else
             idle_wait = rng->uniform(lo, hi);
@@ -249,7 +249,7 @@ void Session::heard(double now) {
 std::optional<double> Session::wake_time() {
     Station* st = station.get();
     if (!st || master() || state != SessionState::CONNECTED || out || want_disc ||
-        wakes >= ((st->chat || st->peer_chat) ? CHAT_WAKE_TRIES : WAKE_TRIES) || !st->last_sent)
+        wakes >= ((st->chat || st->peer_chat) ? tune.chat_wake_tries : tune.wake_tries) || !st->last_sent)
         return std::nullopt;
     if (!wakes) {
         auto it = st->sent_seqs.find(st->latest);
@@ -321,8 +321,8 @@ void Session::log_stats(const char* label, double now, double since, const std::
 void Session::on_timeout(double now) {
     if (state == SessionState::CONNECTING) {
         tries += 1;
-        log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, CONNECT_TRIES));
-        if (tries >= CONNECT_TRIES) {
+        log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, tune.connect_tries));
+        if (tries >= tune.connect_tries) {
             close("no answer");
         } else {
             auto b = connect_burst();
@@ -330,15 +330,15 @@ void Session::on_timeout(double now) {
         }
     } else if (state == SessionState::DISCONNECTING) {
         tries += 1;
-        log_write(LOG, INFO, format("no answer to DISC, try %d of %d", tries, DISC_TRIES));
-        if (tries >= DISC_TRIES)
+        log_write(LOG, INFO, format("no answer to DISC, try %d of %d", tries, tune.disc_tries));
+        if (tries >= tune.disc_tries)
             close("disconnected (unconfirmed)");
         else
             queue(disc_burst(), now);
     } else if (state == SessionState::CONNECTED) {
         // an identical repeat only after a short burst
         const auto& last = station->last_sent;
-        const bool short_ = !last || policy->airtime(last->submode, static_cast<int>(last->slots.size()), dup_ctl(*last)) <= REPEAT_MAX_S;
+        const bool short_ = !last || policy->airtime(last->submode, static_cast<int>(last->slots.size()), dup_ctl(*last)) <= tune.repeat_max_s;
         auto b = station->on_timeout(short_);
         if (!b)
             close("link failed: " + station->fail_reason);

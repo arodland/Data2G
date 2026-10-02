@@ -1011,10 +1011,29 @@ def _phy_substitutions(native):
     def substituted(f):  # the codes provider's, not a test's patch
         return getattr(f, "__module__", None) == __name__
 
-    def ModemRx(r, store, dd_budget=None):
-        if not own(r["spec"]) or not all(substituted(getattr(codes, f)) for f in watched):
-            return py_rx(r, store, dd_budget)
-        return P.ModemRx(r, store, dd_budget, bool(PHY.DD))
+    class ModemRx:
+        """A class, as phy.ModemRx is, so a study can wrap its methods
+        (scripts/crc_exposure.py patches __init__ and decode); the decoding
+        is the C++ object's."""
+        __doc__ = py_rx.__doc__
+
+        def __new__(cls, r, store, dd_budget=None):
+            if not own(r["spec"]) or not all(substituted(getattr(codes, f)) for f in watched):
+                return py_rx(r, store, dd_budget)
+            return super().__new__(cls)
+
+        def __init__(self, r, store, dd_budget=None):
+            self._n = P.ModemRx(r, store, dd_budget, bool(PHY.DD))
+            self.spec, self.n_cw, self.submode = r["spec"], r["n_cw"], r["spec"].name
+            self.n_ctl_slots, self.store, self.r = r.get("n_ctl_slots", 0), store, r
+
+        _spec = py_rx._spec
+
+        def decode(self, slot, mask_id, rv, key):
+            return self._n.decode(slot, mask_id, rv, key)
+
+        def forget(self, key):
+            return self._n.forget(key)
 
     def tx_audio(burst):
         return P.tx_audio(burst) if burst.submode in modes.MODES else py_tx(burst)

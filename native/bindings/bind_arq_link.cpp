@@ -123,9 +123,68 @@ public:
     }
 };
 
+// session.py's tunables as Python has them now (a study patches the module).
+SessionTuning py_tuning() {
+    auto S = py::module_::import("data2g.arq.session");
+    auto d = [&](const char* n) { return S.attr(n).cast<double>(); };
+    auto i = [&](const char* n) { return S.attr(n).cast<int>(); };
+    auto pair = [&](const char* n) { return S.attr(n).cast<std::pair<double, double>>(); };
+    SessionTuning t;
+    t.connect_tries = i("CONNECT_TRIES");
+    t.disc_tries = i("DISC_TRIES");
+    t.reply_start_s = d("REPLY_START_S");
+    t.idle_close_s = d("IDLE_CLOSE_S");
+    std::tie(t.keepalive_lo_s, t.keepalive_hi_s) = pair("KEEPALIVE_S");
+    std::tie(t.chat_keepalive_lo_s, t.chat_keepalive_hi_s) = pair("CHAT_KEEPALIVE_S");
+    t.keepalive_doubling = py::bool_(S.attr("KEEPALIVE_DOUBLING"));
+    t.link_lost_s = d("LINK_LOST_S");
+    t.wake_guard_s = d("WAKE_GUARD_S");
+    t.wake_jitter_s = d("WAKE_JITTER_S");
+    t.wake_tries = i("WAKE_TRIES");
+    t.chat_wake_tries = i("CHAT_WAKE_TRIES");
+    t.repeat_max_s = d("REPEAT_MAX_S");
+    return t;
+}
+
+// A Session that takes session.py's tunables when made, and whose timeouts
+// go through an instance override of _on_timeout, as Python's self._on_timeout
+// would (scripts/linksim.py wraps it to count timeouts).
 class PySession : public Session {
 public:
-    using Session::Session;
+    template <typename... A>
+    explicit PySession(A&&... a) : Session(std::forward<A>(a)...) {
+        tune = py_tuning();
+    }
+
+    void on_timeout(double now) override {
+        {
+            py::gil_scoped_acquire gil;
+            py::handle self = py::detail::get_object_handle(static_cast<Session*>(this), py::detail::get_type_info(typeid(Session)));
+            if (self) {
+                py::dict d = py::getattr(self, "__dict__");
+                if (d.contains("_on_timeout")) {
+                    d["_on_timeout"](now);
+                    return;
+                }
+            }
+        }
+        Session::on_timeout(now);
+    }
+
+    // One Python object per C++ burst, so a repeat (station.last_sent sent
+    // again) is the same object, as in Python: scripts/linksim.py and
+    // test_arq_session's channel key on burst identity. Holding the pointer
+    // keeps its address from being reused while cached.
+    py::object burst_obj(const TxBurstPtr& b) {
+        if (!b) return py::none();
+        for (const auto& [p, o] : bursts)
+            if (p == b) return o;
+        py::object o = burst_py(b);
+        bursts.emplace_back(b, o);
+        if (bursts.size() > 8) bursts.erase(bursts.begin());  // repeats are of the latest few
+        return o;
+    }
+    std::vector<std::pair<TxBurstPtr, py::object>> bursts;
 
 protected:
     std::shared_ptr<Station> make_station(int direction, bool master_, int key) override {
@@ -445,13 +504,17 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("_nonce", &Session::nonce)
         .def_readonly("_tries", &Session::tries)
         .def_readonly("_wakes", &Session::wakes)
+        .def("_on_timeout", [](Session& s, double now) { s.Session::on_timeout(now); })
         .def("set_chat", &Session::set_chat)
         .def("listen", &Session::listen)
         .def("connect", &Session::connect)
         .def("disconnect", &Session::disconnect)
         .def("write", [](Session& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Session& s) { return pyb(s.read()); })
-        .def("poll", [](Session& s, double now) { return burst_py(s.poll(now)); })
+        .def("poll", [](Session& s, double now) {
+            auto* p = dynamic_cast<PySession*>(&s);
+            return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));
+        })
         .def("next_event", &Session::next_event)
         .def("on_tx_end", [](Session& s, const py::object&, double now) { s.on_tx_end(now); })
         .def("on_header", &Session::on_header)
