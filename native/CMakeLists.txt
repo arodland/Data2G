@@ -139,9 +139,15 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   endif()
 endif()
 
+# Every executable linking libhamlib: findable at run time. Windows has no
+# rpath, so the DLLs are copied beside it (test_gui in tests/ too: without
+# them it died in the loader, which ctest showed as a silent 120 s hang).
 function(data2g_rig_rpath target)
   if(TARGET data2g_rig AND DATA2G_HAMLIB_RUNTIME_DIR)
     set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH "${DATA2G_HAMLIB_RUNTIME_DIR}")
+    if(COMMAND data2g_hamlib_copy_runtime)  # not defined for a system Hamlib
+      data2g_hamlib_copy_runtime(${target})
+    endif()
   endif()
 endfunction()
 
@@ -208,9 +214,6 @@ foreach(app data2g-host data2g-gui)
     set(DATA2G_RC_NAME ${app})
     configure_file(packaging/data2g.rc.in ${CMAKE_BINARY_DIR}/${app}.rc @ONLY)
     target_sources(${app} PRIVATE ${CMAKE_BINARY_DIR}/${app}.rc)
-    if(COMMAND data2g_hamlib_copy_runtime AND TARGET data2g_rig)
-      data2g_hamlib_copy_runtime(${app})
-    endif()
   endif()
 endforeach()
 if(TARGET data2g-gui AND APPLE)

@@ -48,14 +48,23 @@ def free_ports(n):
 class Client:
     """A VARA client: the command port's lines and the data port's bytes."""
 
-    def __init__(self, port):
-        for _ in range(100):
+    def __init__(self, port, proc, seconds=60):
+        # 60 s: a first launch on macOS waits for the binary and Qt's
+        # frameworks to be assessed before main runs.
+        deadline = time.monotonic() + seconds
+        while True:
             try:
-                self.cmd = socket.create_connection(("127.0.0.1", port), timeout=0.05)
+                self.cmd = socket.create_connection(("127.0.0.1", port), timeout=1)
                 break
-            except OSError:
+            except OSError as e:
+                if proc.poll() is not None:
+                    raise AssertionError(f"host on port {port} exited {proc.returncode} before listening") from e
+                if time.monotonic() > deadline:
+                    raise AssertionError(f"host on port {port} not listening after {seconds} s") from e
                 time.sleep(0.1)
-        self.data = socket.create_connection(("127.0.0.1", port + 1), timeout=0.05)
+        self.data = socket.create_connection(("127.0.0.1", port + 1), timeout=1)
+        self.cmd.settimeout(0.05)
+        self.data.settimeout(0.05)
         self.lines, self.got, self._buf = [], bytearray(), b""
 
     def send(self, line):
@@ -119,6 +128,11 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
     a2b, b2a = tmp_path / "a2b", tmp_path / "b2a"
     os.mkfifo(a2b)
     os.mkfifo(b2a)
+    # Diagnostic: how long a bare start takes here (a first launch on macOS
+    # can take seconds), printed if the test fails.
+    t = time.monotonic()
+    subprocess.run([str(BINARY), "--help"], capture_output=True, timeout=120)
+    t_help = time.monotonic() - t
     ports = {}
     procs, logs = {}, {}
     env = dict(os.environ, OMP_NUM_THREADS="1")
@@ -133,12 +147,14 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
             stdout=subprocess.DEVNULL, stderr=open(logs[name], "w"), env=env)
     clients = {}
     try:
-        a, b = clients["A"], clients["B"] = Client(ports["A"]), Client(ports["B"])
+        a = clients["A"] = Client(ports["A"], procs["A"])
+        b = clients["B"] = Client(ports["B"], procs["B"])
         b.send("MYCALL B")
         b.send("LISTEN ON")
         a.send("MYCALL A")
         a.send("VERSION")
-        wait([a, b], lambda: len(b.lines) >= 2 and "VERSION Data2G 0.1" in a.lines, 10, "replies")
+        # a reply needs audio flowing both ways: the engine steps on capture
+        wait([a, b], lambda: len(b.lines) >= 2 and "VERSION Data2G 0.1" in a.lines, 30, "replies")
         assert b.lines[:2] == ["OK", "OK"]
         t0 = time.monotonic()
         a.send("CONNECT A B")
@@ -174,7 +190,17 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
             c.close()
         for p in procs.values():
             p.send_signal(signal.SIGTERM)
-        codes = {n: p.wait(timeout=20) for n, p in procs.items()}
+        codes = {}
+        for n, p in procs.items():
+            try:
+                codes[n] = p.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                codes[n] = f"killed after SIGTERM was ignored for 20 s ({p.wait()})"
+        # shown by pytest only on failure
+        print(f"\n{worker}: data2g-host --help took {t_help:.1f} s; exit codes {codes}")
+        for n in logs:
+            print(f"--- host {n} stderr ---\n{logs[n].read_text()[-4000:]}")
     text = {n: logs[n].read_text() for n in logs}
     print(f"\n{worker}: connect {t_conn:.1f} s; 2 kB each way {t_data:.1f} s "
           f"({8 * 2 * 2048 / t_data:.0f} bit/s both ways); KISS both ways {t_kiss:.1f} s")

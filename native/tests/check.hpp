@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -123,6 +124,21 @@ inline std::atomic<const char*> current_step{"(not started)"};
 // wrong place. Route the diagnostics to stderr and let the process die.
 // No-op everywhere else, because no other platform does this.
 inline void report_crashes_instead_of_prompting() {
+    // An uncaught exception names itself. MSVC's std::terminate says
+    // nothing (and the abort message is off below), so a test that threw
+    // left an empty log: test_audio's remove_all on an open file did.
+    std::set_terminate([] {
+        try {
+            if (const auto e = std::current_exception()) std::rethrow_exception(e);
+            std::fprintf(stderr, "\nterminate called, no exception, in %s\n", current_step.load());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "\nuncaught exception in %s: %s\n", current_step.load(), e.what());
+        } catch (...) {
+            std::fprintf(stderr, "\nuncaught non-std exception in %s\n", current_step.load());
+        }
+        std::fflush(stderr);
+        std::abort();
+    });
 #ifdef _WIN32
     // Spelled out rather than named, for the same reason the function
     // above is declared here: the SEM_ names are <windows.h> macros, and
@@ -193,6 +209,7 @@ private:
 inline int report(const char* suite) {
     if (failures == 0) {
         std::printf("ok: %s (%d checks)\n", suite, checks);
+        std::fflush(stdout);  // seen even if exit then hangs (static destructors) and ctest kills it
         return 0;
     }
     std::fprintf(stderr, "%d of %d checks FAILED in %s\n", failures, checks, suite);

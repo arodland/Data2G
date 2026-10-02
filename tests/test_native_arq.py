@@ -2,14 +2,18 @@
 Python reference. Skips if the module isn't built; `pytest --native` errors
 instead (conftest.py).
 
-Tolerances. Integers, burst lengths and np.interp are exact. The MI
+Tolerances. Integers and burst lengths are exact. np.interp (capacity) is
+exact on linux x86-64 and 1e-15 relative elsewhere: macOS arm64's numpy
+was 1 ulp off at 3 of 2261 points (plan, Findings: portability). The MI
 features go through log10 and numpy's pairwise mean: 1e-14. The outcome
 model's logits go through BLAS dot products, tanh and exp: 1e-12 relative
 (atol 1e-12 near zero). Every shifter decision (modes, size hints, slots,
 want_dup) must match exactly.
 """
 
+import platform
 import random
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -23,6 +27,8 @@ from data2g.arq import predictor as P
 
 LOGIT_TOL = 1e-12
 MI_TOL = 1e-14
+# The bitwise reference platform (plan, Findings: portability).
+CAP_RTOL = 0.0 if (sys.platform == "linux" and platform.machine() == "x86_64") else 1e-15
 
 
 @pytest.fixture
@@ -70,7 +76,7 @@ def test_capacity_and_effective_mi(A, pure):
     snr = np.concatenate([rng.uniform(-30, 60, 2000), np.load(P.DATA / "capacity_tables.npz")["grid"]])
     for c in P.CONSTS + ("c64-w48-r12", "c256-w48-r58"):
         assert A.const_family(c) == P.const_family(c)
-        np.testing.assert_array_equal(A.capacity(snr, c), P.capacity(snr, c))
+        np.testing.assert_allclose(A.capacity(snr, c), P.capacity(snr, c), rtol=CAP_RTOL, atol=0)
         for shape in ((7,), (5, 24), (3, 48)):
             h = (rng.normal(size=shape) + 1j * rng.normal(size=shape)) * 10 ** rng.uniform(-2, 1)
             var = rng.uniform(0.01, 1, shape)

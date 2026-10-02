@@ -452,6 +452,16 @@ Portability notes:
 - Bitwise parity with numpy relies on glibc libm and on mirroring numpy's
   AVX-512 FMA complex multiply (`std::fma`). On other libms/CPUs expect
   ulp-level differences, inside the stated tolerances.
+  Seen: macOS arm64's `np.interp` (`predictor.capacity`) 1 ulp off C++ at
+  3 of 2261 points; `test_capacity_and_effective_mi` is exact on linux
+  x86-64 and 1e-15 relative elsewhere.
+- Windows: a test executable linking libhamlib needs its DLLs beside it
+  (`data2g_rig_rpath` copies them). Missing, the loader fails before
+  main and ctest shows a silent timeout (`test_gui`, CI round 3). Windows
+  also refuses to delete an open file (`test_audio`'s `remove_all`).
+- `test_native_host_e2e.py` (named pipes) runs on macOS arm64 and Linux
+  only: the macOS x86_64 job is a Rosetta cross build without pytest, and
+  Windows has no mkfifo.
 - `std::fma` without `-mfma` (the default x86-64 build) is a call into
   libm. glibc 2.44 dispatches it to the FMA instruction where the CPU has
   one: numpy's complex multiply then costs 2.0 ns against 0.66 ns plain

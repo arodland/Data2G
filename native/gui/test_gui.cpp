@@ -117,7 +117,7 @@ void test_settings(const QTemporaryDir& dir) {
 }
 
 void test_window(const QTemporaryDir& dir) {
-    check::current_step = "window";
+    check::current_step = "window: synthesize a CQ";
     std::string cq_mode;
     const auto burst = cq_burst(&cq_mode);
     check::is_true(!cq_mode.empty() && burst.size() > 2u * config::FS, "a CQ burst synthesized");
@@ -134,6 +134,7 @@ void test_window(const QTemporaryDir& dir) {
     a.kiss = false;
     a.command_port = free_port_pair();
     QSettings store(dir.filePath(QStringLiteral("window.ini")), QSettings::IniFormat);
+    check::current_step = "window: start the station";
     gui::MainWindow w(a, store);
     w.show();
     check::is_true(w.station().running(), "station running");
@@ -146,12 +147,14 @@ void test_window(const QTemporaryDir& dir) {
     w.poll();
     check::equal(link->text().toStdString(), std::string("idle"), "link idle at start");
 
+    check::current_step = "window: VARA client";
     QTcpSocket client;
     client.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(a.command_port));
     check::is_true(client.waitForConnected(5000), "VARA client connected");
     client.write("LISTEN ON\r");
     check::is_true(wait_for([&] { return link->text() == QStringLiteral("listening"); }, 5000), "link listening");
 
+    check::current_step = "window: hear the CQ";
     bool busy_seen = false;
     const bool heard = wait_for(
         [&] {
@@ -176,22 +179,28 @@ void test_window(const QTemporaryDir& dir) {
     const app::AudioCounters c = w.station().counters();
     check::is_true(c.overflows == 0 && c.dropped == 0 && c.underruns == 0 && c.decode_dropped == 0, "no audio faults");
 
+    check::current_step = "window: screenshot";
     check::is_true(w.grab().save(QStringLiteral(DATA2G_GUI_SHOT)), "screenshot saved");
 
     // a restart on new settings listens again on the same ports
+    check::current_step = "window: restart";
     a.mycall = "N1GUI";
     w.restart(a);
     check::is_true(w.station().running(), "station restarted");
     QTcpSocket again;
     again.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(a.command_port));
     check::is_true(again.waitForConnected(5000), "command port open after the restart");
+    check::current_step = "window: close";
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");  // never on the user's display
-    check::Watchdog dog(120, "gui");
+    qputenv("QT_FORCE_STDERR_LOGGING", "1");   // Windows: a qFatal to stderr, not OutputDebugString
+    check::report_crashes_instead_of_prompting();
+    check::Watchdog dog(100, "gui");  // under ctest's TIMEOUT 120, so it names the step
+    check::current_step = "QApplication";
     QApplication app(argc, argv);
     QTemporaryDir dir;
     test_settings(dir);

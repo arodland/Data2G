@@ -14,6 +14,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -366,16 +367,19 @@ void test_pipe_io() {
     std::vector<double> want(x.size());
     for (std::size_t i = 0; i < x.size(); ++i) want[i] = static_cast<float>(x[i]);
     check::close(got, want, 0, "input: every sample");
-    std::ifstream f(out, std::ios::binary);
     std::vector<float> o;
-    for (float s; f.read(reinterpret_cast<char*>(&s), sizeof s);) o.push_back(s);
+    {
+        std::ifstream f(out, std::ios::binary);  // closed before remove_all: Windows won't delete an open file
+        for (float s; f.read(reinterpret_cast<char*>(&s), sizeof s);) o.push_back(s);
+    }
     check::equal(o.size() % audio::PipeIo::PERIOD, std::size_t{0}, "output: whole periods");
     const auto start = std::find_if(o.begin(), o.end(), [](float v) { return v != 0.0f; });
     check::is_true(start - o.begin() >= 800, "the lead's silence first");
     check::is_true(o.end() - start >= 800 && std::equal(ramp.begin(), ramp.end(), start, [](double a, float b) { return float(a) == b; }),
                    "output: the samples played, whole");
     check::is_true(std::all_of(start + 800, o.end(), [](float v) { return v == 0.0f; }), "then silence");
-    std::filesystem::remove_all(dir);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);  // a leftover temp dir is not a failure
 }
 
 int main() {
