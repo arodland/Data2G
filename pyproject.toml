@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 include = ["data2g*"]
 
 [tool.setuptools.package-data]
-"data2g" = ["codes_data/*", "constellations/*.npy", "arq/zdict.bin"]
+"data2g" = ["codes_data/*", "constellations/*.npy", "format/*.npz", "arq/zdict.bin"]
 
 [tool.pytest.ini_options]
 markers = ["slow: long-running Monte Carlo checks"]

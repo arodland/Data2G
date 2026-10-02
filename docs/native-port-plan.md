@@ -149,6 +149,27 @@ Sized like SSTVAE: volume, what verifies it, what needs you.
 - Verified by: `pytest --native` green with those substituted.
 - Needs you for: decisions 1-4.
 
+Status 2026-10-02: met on Linux.
+- `native/`: `data2g_core` (codes: CRC-16/24/32, `with_crc`, PN9
+  scrambler, scramble seeds, frozen interleavers and polar info sets),
+  `test_codes` (known answers, no Python), the `data2g_native` module.
+- `tools/gen_native_tables.py` writes `native/core/generated/config.hpp`
+  (constants, 4 bands, 42 submodes with derived sizes) and `format.cpp`
+  (interleavers, info sets); `--check` runs in `build_native.sh` and in
+  `test_native_parity.py`.
+- `pytest --native`: 5 substitutions in `data2g.codes`; 438 fast tests pass,
+  as without it. `test_native_parity.py`: 47 direct comparisons.
+- ASan/UBSan build clean. `check_layering.py` in place.
+- Package-data fix landed.
+
+Moved out of Phase 0, each to the phase that first consumes it:
+- Golden-vector corpus: Phase 1, with the first ctest that needs bulk
+  reference data (a modem round trip). Phase 0's ctest uses known answers.
+- CPM tones, ACE directions, `gamma.ppf` and filter-tap tables: Phase 1,
+  generated alongside the modules that read them.
+- pocketfft: Phase 1, with ofdm and sync.
+- CI workflows: Phase 5 as planned; until then `tools/build_native.sh --test`.
+
 ### Phase 1: modem core
 
 ofdm, sync (StreamDetector), dsp, constellation, ldpc, polar, equalizer, cpm,

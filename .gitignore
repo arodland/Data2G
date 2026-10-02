@@ -18,3 +18,7 @@ recordings/
 
 # Claude Code worktrees (forked sessions)
 .claude/worktrees/
+
+# native/ build products
+native/build/
+native/build-*/
