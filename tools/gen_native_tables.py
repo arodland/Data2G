@@ -178,8 +178,16 @@ def cpm_cpp() -> str:
                     f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.HEADER_THRESHOLD[g.name]))}, "
                     f"{cpm.hdr_len(g)}, {len(cpm.costas(g.m))}, pre_{i}, mid_{i}, hdr_{i}}},\n")
 
+    # interleavers: codes.compute_interleaver's PCG64 permutations (no format file)
+    all_specs = [*cpm.SPECS.values(), *cpm.CTL.values()]
+    for j, s in enumerate(all_specs):
+        perm = codes.interleaver(s)
+        assert sorted(perm) == list(range(s.coded_bits))
+        out.append(f"constexpr std::uint16_t perm_{j}[] = {{{ints(perm)}}};\n")
+
     def spec(s):
-        return f'    {{"{s.name}", "{s.grid}", "{s.code}", {s.index}, {s.k}, {s.coded_bits}, {s.n_sym}}},\n'
+        return (f'    {{"{s.name}", "{s.grid}", "{s.code}", {s.index}, {s.k}, {s.coded_bits}, {s.n_sym}, '
+                f"perm_{all_specs.index(s)}}},\n")
 
     out.append(f"\nconstexpr CpmGrid grids[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr CpmSpec specs[] = {{\n{''.join(spec(s) for s in cpm.SPECS.values())}}};\n")

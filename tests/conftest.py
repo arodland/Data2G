@@ -367,6 +367,110 @@ def _cpm_substitutions(native):
     }
 
 
+@provider
+def _codes_substitutions(native):
+    """data2g.codes' codec (encode, combine, decode) in C++. Specs go by
+    name: a frozen submode, a CPM mode or a CPM control codeword; any other
+    spec, torch (decode_llrs' device) and dtypes the binding lacks stay in
+    Python. codes.decode routes through decode_many; _decode_code_order
+    takes a decoder object and is C++-internal."""
+    import functools
+
+    import numpy as np
+
+    from data2g import codes, config, cpm
+
+    n = native.codes
+    py = {k: getattr(codes, k) for k in (
+        "crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
+        "flip", "spread", "despread", "combine", "decode_buffer", "_payloads", "decode_many", "decode_llrs",
+        "decode_raw", "descramble", "check", "crc_ok", "interleaver")}
+
+    @functools.lru_cache(maxsize=None)
+    def own(spec):
+        return (config.SUBMODES.get(spec.name) == spec or cpm.SPECS.get(spec.name) == spec
+                or cpm.CTL.get(getattr(spec, "grid", None)) == spec)
+
+    def by_name(attr):
+        f, p = getattr(n, attr), py[attr]
+        return lambda spec, *a, **k: f(spec.name, *a, **k) if own(spec) else p(spec, *a, **k)
+
+    @functools.lru_cache(maxsize=None)
+    def flip(spec, index, rv=0):
+        out = n.flip(spec.name, index, rv) if own(spec) else py["flip"](spec, index, rv)
+        out.setflags(write=False)
+        return out
+
+    @functools.lru_cache(maxsize=None)
+    def interleaver(spec):
+        if not own(spec):
+            return py["interleaver"](spec)
+        out = n.interleaver(spec.name)
+        out.setflags(write=False)
+        return out
+
+    def native_array(x, ndim):
+        return isinstance(x, np.ndarray) and x.ndim >= ndim and x.dtype in (np.uint8, np.float64)
+
+    def spread(coded, m):
+        if not native_array(coded, 2):
+            return py["spread"](coded, m)
+        *lead, n_cw, N = coded.shape
+        return n.spread(coded.reshape(-1, n_cw * N), n_cw, m).reshape(*lead, n_cw * N)
+
+    def despread(x, n_cw, m):
+        if not native_array(x, 1):
+            return py["despread"](x, n_cw, m)
+        *lead, total = x.shape
+        return n.despread(x.reshape(-1, total), n_cw, m).reshape(*lead, n_cw, total // n_cw)
+
+    def info_bits(spec, payload, crc_mask=0, index=0):
+        if not own(spec):
+            return py["info_bits"](spec, payload, crc_mask, index)
+        return n.info_bits(spec.name, bytes(payload), crc_mask, index)
+
+    def encode(spec, payload, rv=0, crc_mask=0, index=0):
+        if not own(spec):
+            return py["encode"](spec, payload, rv, crc_mask, index)
+        return n.encode(spec.name, bytes(payload), rv, crc_mask, index)
+
+    def combine(spec, buf, soft, rvs):
+        if not own(spec):
+            return py["combine"](spec, buf, soft, rvs)
+        return n.combine(spec.name, buf, np.atleast_2d(soft), rvs)
+
+    def _payloads(spec, bits, converged, masks=None, index=None):
+        if not own(spec):
+            return py["_payloads"](spec, bits, converged, masks, index)
+        return n.payloads(spec.name, np.asarray(bits), np.asarray(converged, np.uint8), masks, index)
+
+    def decode_llrs(spec, llr, iters=40, device=None, crc_mask=0, index=0):
+        if device is not None or not own(spec):
+            return py["decode_llrs"](spec, llr, iters, device, crc_mask, index)
+        return n.decode_llrs(spec.name, llr, iters, crc_mask, index)
+
+    def descramble(spec, bits, index):
+        if not own(spec):
+            return py["descramble"](spec, bits, index)
+        return n.descramble(spec.name, np.asarray(bits), int(index))
+
+    return {
+        **{(codes, a): by_name(a) for a in ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions",
+                                             "encode_info", "decode_buffer", "decode_many", "decode_raw", "check",
+                                             "crc_ok")},
+        (codes, "flip"): flip,
+        (codes, "interleaver"): interleaver,
+        (codes, "spread"): spread,
+        (codes, "despread"): despread,
+        (codes, "info_bits"): info_bits,
+        (codes, "encode"): encode,
+        (codes, "combine"): combine,
+        (codes, "_payloads"): _payloads,
+        (codes, "decode_llrs"): decode_llrs,
+        (codes, "descramble"): descramble,
+    }
+
+
 def pytest_addoption(parser):
     parser.addoption("--native", action="store_true", default=False,
                      help="run the suite against the C++ core (tools/build_native.sh builds it)")

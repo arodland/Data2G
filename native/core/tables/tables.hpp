@@ -50,6 +50,7 @@ struct CpmGrid {
 struct CpmSpec {
     std::string_view name, grid, code;
     int index, k, coded_bits, n_sym;
+    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver)
 };
 
 struct CpmParams {
