@@ -230,7 +230,7 @@ class KissLink:
         frames in it, or None if it isn't a KISS burst (no codeword decodes
         with KISS_KEY's masks: an ARQ burst, or one lost whole). Updates what
         we know of its sender."""
-        rx = PHY.ModemRx(r, {})
+        rx = PHY.ModemRx(r, {}, PHY.DD_BUDGET_S)  # never DD unbounded
         mode, n = r["spec"].name, r["n_cw"]
         now = self.clock()
         c0 = rx.decode(0, ctl_mask(0, 0, KISS_KEY), 0, None)
