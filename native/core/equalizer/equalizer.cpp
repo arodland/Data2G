@@ -12,6 +12,7 @@
 
 #include "tables/tables.hpp"
 #include "util/linalg.hpp"
+#include "util/pool.hpp"
 
 namespace data2g::equalizer {
 
@@ -358,13 +359,18 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
     Mat<cd> vals(P, nc);
     Mat<double> var(P, nc, n0 * basis->r / static_cast<double>(nc));
     vals.data = hs_p.data;
-    std::vector<size_t> known;
-    std::vector<cd> a, x;
-    for (size_t i = 0; i < F * S; ++i) {
-        known.clear();
+    // Rows are independent: one pool task each, gathered in row order after.
+    struct RowObs {
+        std::vector<cd> v;  // empty: nothing known in the row
+        std::vector<double> var;
+    };
+    std::vector<RowObs> row_obs(F * S);
+    pool::parallel_for(F * S, [&](size_t i) {
+        std::vector<size_t> known;
+        std::vector<cd> a, x;
         for (size_t c = 0; c < nc; ++c)
             if (w[i][c] > 0) known.push_back(c);
-        if (known.empty()) continue;
+        if (known.empty()) return;
         const size_t K = known.size(), nx = nc + 1;
         // S = Rf[k, k] + diag(1 / w), x = [Rf[k, :] | z[k]]
         a.assign(K * K, cd(0.0));
@@ -375,7 +381,6 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
             for (size_t c = 0; c < nc; ++c) x[u * nx + c] = Rf(known[u], c);
             x[u * nx + nc] = z[i][known[u]];
         }
-        times.push_back(t_rows.data[i]);
         std::vector<cd> vrow(nc);
         std::vector<double> varrow(nc);
         // Python's G = solve(S, Rf[k]).conj().T. S is Hermitian positive
@@ -411,23 +416,29 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
                 varrow[c] = std::max(p_sig - m.real(), 1e-9 * p_sig);
             }
         }
-        vals.data.insert(vals.data.end(), vrow.begin(), vrow.end());
-        var.data.insert(var.data.end(), varrow.begin(), varrow.end());
+        row_obs[i] = {std::move(vrow), std::move(varrow)};
+    });
+    for (size_t i = 0; i < F * S; ++i) {
+        if (row_obs[i].v.empty()) continue;
+        times.push_back(t_rows.data[i]);
+        vals.data.insert(vals.data.end(), row_obs[i].v.begin(), row_obs[i].v.end());
+        var.data.insert(var.data.end(), row_obs[i].var.begin(), row_obs[i].var.end());
     }
+    vals.rows = var.rows = times.size();
     const size_t O = times.size();
 
     // Time: per frame, every observation within DD_TAPS frames of its middle.
+    // Frames are independent: one pool task each.
     Mat<cd> h(F * S, nc);
     Mat<double> mse(F * S, nc);
-    std::vector<size_t> obs;
-    std::vector<double> rt, rdp, ar, xr;
-    for (size_t f = 0; f < F; ++f) {
+    pool::parallel_for(F, [&](size_t f) {
+        std::vector<size_t> obs;
+        std::vector<double> rt, rdp, ar, xr;
         // t_rows.mean(axis=1) bit for bit (a sequential sum: measured), since
         // an observation exactly DD_TAPS frames away sits on the boundary
         double mid = 0.0;
         for (size_t s = 0; s < S; ++s) mid += t_rows[f][s];
         mid /= static_cast<double>(S);
-        obs.clear();
         for (size_t o = 0; o < O; ++o)
             if (std::abs(times[o] - mid) <= DD_TAPS * FRAME_S) obs.push_back(o);
         const size_t J = obs.size();
@@ -455,7 +466,7 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
                 mse[f * S + s][c] = std::max(p_sig - m, 0.0);
             }
         }
-    }
+    });
     return {std::move(h), std::move(mse)};
 }
 

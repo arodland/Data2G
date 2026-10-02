@@ -9,6 +9,9 @@
 #include <string>
 #include <type_traits>
 
+#include "util/pool.hpp"
+#include "util/simd.hpp"
+
 #ifdef __clang__
 // Clang contracts a*b+c into FMA by default where the target has it
 // (aarch64); the float32 sums below must round exactly as numpy's.
@@ -213,16 +216,6 @@ float numpy_sum(const float* a, int d, int n, bool pairwise) {
     return 0.0f + res;
 }
 
-// phi_all is most of a decode: on x86-64 Linux also build it for AVX2 (4
-// doubles a vector, not SSE2's 2), picked at load time. "avx2" leaves FMA
-// off, so both clones round identically.
-// Not under TSan: the ifunc resolver runs before its runtime is up (a crash at load).
-#if defined(__x86_64__) && defined(__linux__) && defined(__GNUC__) && !defined(__SANITIZE_THREAD__)
-#define DATA2G_AVX2_CLONE __attribute__((target_clones("avx2", "default")))
-#else
-#define DATA2G_AVX2_CLONE
-#endif
-
 constexpr double LN2 = 0x1.62e42fefa39efp-1;
 constexpr double LN2_HI = 0x1.62e42fee00000p-1, LN2_LO = 0x1.a39ef35793c76p-33;
 constexpr double SHIFTER = 0x1.8p52;  // adding it rounds to an integer, held in the low bits
@@ -233,7 +226,9 @@ constexpr double SHIFTER = 0x1.8p52;  // adding it rounds to an integer, held in
 // correctly rounded (test_ldpc checks how often); numpy's own SIMD float32
 // tanh and log are not (about 1 result in 5 differs by an ULP). In place over
 // v[0..n), branch-free and written into the loop so it vectorizes at -O2.
-DATA2G_AVX2_CLONE void phi_all(float* __restrict v, std::size_t n) {
+// Most of a decode: the AVX-512 clone is 1.5x the AVX2 one on the whole
+// decode, bit for bit (checked over every float32).
+DATA2G_SIMD_CLONES void phi_all(float* __restrict v, std::size_t n) {
     for (std::size_t i = 0; i < n; ++i) {
         // np.clip(x, 1e-7, 30), NaN passing through. Selects are bitwise
         // throughout: GCC turns ?: into branches here and stops vectorizing.
@@ -269,6 +264,16 @@ DATA2G_AVX2_CLONE void phi_all(float* __restrict v, std::size_t n) {
         const double s = (mant - 1.0) / (mant + 1.0), s2 = s * s;
         const double q = 1 + s2 * (1. / 3 + s2 * (1. / 5 + s2 * (1. / 7 + s2 * (1. / 9 + s2 * (1. / 11 + s2 * (1. / 13))))));
         v[i] = static_cast<float>(-(k * LN2 + 2.0 * s * q));
+    }
+}
+
+// Variable-to-check messages: m = tot[var[e]] - c2v[e], as sign and size.
+DATA2G_SIMD_CLONES void v2c(const float* __restrict t, const float* __restrict c, const int* __restrict var,
+                           std::size_t n, std::uint8_t* __restrict neg, float* __restrict mag) {
+    for (std::size_t e = 0; e < n; ++e) {
+        const float m = t[var[e]] - c[e];
+        neg[e] = m < 0;
+        mag[e] = std::fabs(m);
     }
 }
 
@@ -318,20 +323,29 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
     };
     for (std::size_t b = 0; b < B; ++b) total(b);
 
-    std::vector<float> mag(E), ph(E);
-    std::vector<std::uint8_t> neg(E), ok(B, 0), hard(n_cols_);
+    // Codewords are independent within an iteration: one pool task each.
+    // Only the stop (every codeword at once) couples them, as in Python.
+    struct Scratch {
+        std::vector<float> mag, ph;
+        std::vector<std::uint8_t> neg, hard;
+    };
+    std::vector<std::uint8_t> ok(B, 0);
     for (int it = 0; it < iters; ++it) {
         const bool bp = alpha.empty();
         const float a = bp ? 0.0f : alpha.size() == 1 ? alpha[0] : alpha[static_cast<std::size_t>(it)];
-        bool all_ok = true;
-        for (std::size_t b = 0; b < B; ++b) {
+        pool::parallel_for(B, [&](std::size_t b) {
+            thread_local Scratch w;
+            w.mag.resize(E);
+            w.ph.resize(E);
+            w.neg.resize(E);
+            w.hard.resize(n_cols_);
+            auto& mag = w.mag;
+            auto& ph = w.ph;
+            auto& neg = w.neg;
+            auto& hard = w.hard;
             float* c = c2v[b];
             const float* t = tot[b];
-            for (std::size_t e = 0; e < E; ++e) {
-                const float m = t[var_[e]] - c[e];
-                neg[e] = m < 0;
-                mag[e] = std::fabs(m);
-            }
+            v2c(t, c, var_.data(), E, neg.data(), mag.data());
             if (bp) {
                 std::copy(mag.begin(), mag.end(), ph.begin());
                 phi_all(ph.data(), E);
@@ -346,7 +360,11 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
                     }
                 }
                 phi_all(mag.data(), E);
-                for (std::size_t e = 0; e < E; ++e) c[e] = neg[e] ? -mag[e] : mag[e];
+                // -x is x with the sign bit flipped: spelled so, since the
+                // ?: became a branch mispredicted on half the edges (55% of
+                // a failing decode)
+                for (std::size_t e = 0; e < E; ++e)
+                    c[e] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(mag[e]) ^ (std::uint32_t{neg[e]} << 31));
             } else {
                 // Normalized min-sum over the check's dmax slots, padding
                 // reading BIG; ties go to the first slot (argmin).
@@ -381,9 +399,8 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
                 good = par == 0;
             }
             ok[b] = good;
-            all_ok = all_ok && good;
-        }
-        if (all_ok) break;
+        });
+        if (std::all_of(ok.begin(), ok.end(), [](std::uint8_t v) { return v != 0; })) break;
     }
 
     Decoded out{Mat<std::uint8_t>(B, k_), std::move(ok), {}};

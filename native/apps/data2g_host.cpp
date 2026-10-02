@@ -56,6 +56,7 @@
 #include "rig/controller.hpp"
 #include "rig/ptt.hpp"
 #include "tnc/tnc.hpp"
+#include "util/pool.hpp"
 
 #ifdef DATA2G_HAVE_QTAUDIO
 #include "audio/qt/qtaudio.hpp"
@@ -145,7 +146,7 @@ const char* USAGE =
     "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
     "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
     "                   [--record-dir RECORD_DIR] [--log-level LOG_LEVEL] [--stats-interval S] [--list-modes]\n"
-    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT]\n";
+    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n";
 
 const char* HELP =
     "\nData2G server: a VARA-style TNC and a KISS TNC on one radio\n\n"
@@ -191,7 +192,8 @@ const char* HELP =
     "                        (default: on)\n"
     "  --audio-io pipe:IN,OUT  no sound card: raw float32 8 kHz mono read from IN and written to OUT (files\n"
     "                        or named pipes), both at real time, silence while not keyed. Two hosts cross-\n"
-    "                        connect through two mkfifo pipes. --sample-rate and the devices are then unused.\n";
+    "                        connect through two mkfifo pipes. --sample-rate and the devices are then unused.\n"
+    "  --threads N           threads for decode and sync, the calling one included (default: min(4, cores / 2))\n";
 
 [[noreturn]] void usage_error(const std::string& msg) {
     std::fprintf(stderr, "%sdata2g-host: error: %s\n", USAGE, msg.c_str());
@@ -257,6 +259,7 @@ Args parse(int argc, char** argv) {
         {"--log-level", [&](auto&, auto& v) { a.log_level = v; }},
         {"--stats-interval", [&](auto& o, auto& v) { a.stats_interval = number<double>(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
+        {"--threads", [&](auto& o, auto& v) { data2g::pool::set_threads(number<int>(o, v)); }},
     };
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
