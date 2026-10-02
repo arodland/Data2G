@@ -367,6 +367,23 @@ def _cpm_substitutions(native):
     }
 
 
+
+@provider
+def _arq_substitutions(native):
+    """data2g.arq frames, link and session. Station and Session are the C++
+    classes behind Python-compatible wrappers (native/bindings/bind_arq.cpp):
+    the policy, the received burst and the session's random.Random stay the
+    Python objects, called in the same order as the Python does."""
+    from data2g.arq import frames, link, session
+
+    a = native.arq
+    out = {(frames, f): getattr(a, f) for f in ("Core", "Control", "pack_bitmap", "unpack_bitmap", "pack_rv", "unpack_rv",
+                                                 "pack_flags", "unpack_flags", "deflate", "deflate_fit", "inflate",
+                                                 "pack_call", "unpack_call", "to_records", "RecordReader")}
+    out.update({(link, f): getattr(a, f) for f in ("unwrap", "ctl_mask", "data_mask", "Station")})
+    out.update({(session, f): getattr(a, f) for f in ("session_key", "Session", "_frame_desc")})
+    return out
+
 def pytest_addoption(parser):
     parser.addoption("--native", action="store_true", default=False,
                      help="run the suite against the C++ core (tools/build_native.sh builds it)")

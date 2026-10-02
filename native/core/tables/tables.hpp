@@ -80,5 +80,7 @@ struct ShiftTable {
 };
 
 extern const std::span<const ShiftTable> LDPC_SHIFTS;
+// Deflate's priming dictionary (data2g/arq/frames.py ZDICT, zdict.bin).
+extern const std::span<const std::uint8_t> ZDICT;
 
 }  // namespace data2g::tables
