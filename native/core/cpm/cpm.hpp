@@ -101,4 +101,17 @@ struct Measure {
 };
 Measure measure(const Grid& g, const Mat<double>& E, int n_sym);
 
+// cpm.receive: an early lock's burst, whole in x (same sample origin) ->
+// the per-slot soft bits and tone energies data2g.arq.phy reads.
+struct Received {
+    const Spec* spec;
+    int n_cw, n_ctl_slots;  // slots, control included; control slots
+    bool dup;
+    std::vector<std::vector<double>> soft;
+    Mat<double> E;
+    double cfo;
+    long preamble_start, header_end;
+};
+Received receive(std::span<const double> x, const Lock& lock);
+
 }  // namespace data2g::cpm
