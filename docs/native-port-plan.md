@@ -181,7 +181,7 @@ modem (burst modulate/receive, header ML, find_burst/find_copy).
   receiver, decode rates within noise at the 1% and 10% points.
 - Needs you for: nothing.
 
-Status 2026-10-02: met, except the paired ladder (pending, below).
+Status 2026-10-02: met.
 - Ported: constellation, ldpc, polar, cpm, waveform (ofdm, dsp, sync),
   equalizer, codes, modem. 1145 fast tests pass under `--native` with
   every module substituted, as without.
@@ -194,8 +194,12 @@ Status 2026-10-02: met, except the paired ladder (pending, below).
 - Speed, single thread, vs numpy: polar 7-9x, equalizer.estimate 6x,
   live receive 1.6x, DD pass 2.2x, LDPC 1.2-1.3x, sync and CPM about
   equal (FFT- and libm-bound). See "Performance follow-ups".
-- Paired ladder (same seeds, Python vs C++ receiver): not run yet. The
-  parity tests make it a formality, but it is the stated exit check.
+- Paired check: `scripts/loss_study.py` (real-modem sessions) instead of
+  the ladder, whose simulator decodes with torch, not the live receiver.
+  Default 5 cells, 12 seeds x 600 s, `shift+cpm`, `DATA2G_PEP_REF_DB=5`,
+  DD budget infinite on both sides (`tools/with_native.py --dd-budget inf
+  --skip arq`; the study reaches into Session internals). All 5643 burst
+  rows identical; wall time 199 s Python, 78 s C++ (6 workers).
 
 ### Phase 2: ARQ and engine
 
