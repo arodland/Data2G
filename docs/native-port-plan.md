@@ -181,6 +181,22 @@ modem (burst modulate/receive, header ML, find_burst/find_copy).
   receiver, decode rates within noise at the 1% and 10% points.
 - Needs you for: nothing.
 
+Status 2026-10-02: met, except the paired ladder (pending, below).
+- Ported: constellation, ldpc, polar, cpm, waveform (ofdm, dsp, sync),
+  equalizer, codes, modem. 1145 fast tests pass under `--native` with
+  every module substituted, as without.
+- Decisions match Python exactly on every parity vector; floats to
+  1e-9..1e-13 of scale (each module's test states its tolerance and why).
+- Frozen as generated tables: constellations and ACE directions, LDPC
+  shifts, polar GA design for the CPM control code (the one live non-frozen
+  polar code), CPM header tones and interleavers (numpy PCG64 on air),
+  `gamma.ppf`, header codes, modem constants, clip constants.
+- Speed, single thread, vs numpy: polar 7-9x, equalizer.estimate 6x,
+  live receive 1.6x, DD pass 2.2x, LDPC 1.2-1.3x, sync and CPM about
+  equal (FFT- and libm-bound). See "Performance follow-ups".
+- Paired ladder (same seeds, Python vs C++ receiver): not run yet. The
+  parity tests make it a formality, but it is the stated exit check.
+
 ### Phase 2: ARQ and engine
 
 frames (zlib + zdict + history), session, link, phy, policy, predictor,
@@ -191,6 +207,11 @@ modes, engine, recorder.
   with `DATA2G_PEP_REF_DB` set. The ARQ state-agreement fuzz (loss plus
   duplication) runs on the mixed pair.
 - Needs you for: nothing.
+
+Status 2026-10-02: frames, link, session, phy, policy, predictor, modes,
+kisslink and the tnc Receiver are ported and substituted. Python and C++
+stations exchange identical bursts in both mixed pairings, with loss and
+duplication. The engine port is in progress.
 
 ### Phase 3: headless host
 
@@ -229,6 +250,48 @@ Lift SSTVAE's ci.yml / native-build.yml matrix (Linux x86_64 and aarch64,
 macOS, Windows MSVC), package_app.sh, make_installer.sh, signing. ASan/UBSan
 and TSan jobs over the engine, ring buffer and queues.
 - Needs you for: signing keys, a Windows or macOS on-air check.
+
+## Findings during the port (for review)
+
+Reference behaviour, unchanged in Python, ported as is:
+- A CRC-valid but malformed control frame raises out of `Station.handle` /
+  `Session.on_rx` (short T_RV, T_ABANDON, empty T_NEW, 3-byte CONNECT_ACK,
+  callsign codes >= 39). A false CRC accept on noise could do this; it
+  breaks the bounded-failure rule. Needs a decision on handling.
+- `kisslink.on_burst` builds `ModemRx(r, {})` with no DD budget: a failed
+  KISS burst runs DD unbounded.
+- `modem.modulate` drops codewords silently when `rvs` is shorter than
+  `payloads` (zip). C++ raises.
+- numpy sums the header score in float32 through OpenBLAS, whose kernel
+  varies by CPU, so Python near-ties can break differently per machine.
+  C++ sums in double.
+- CPM pending locks' `header_end` stays a buffer index (chunking-dependent);
+  CPM rx positions count from the receiver buffer, OFDM from the segment.
+  Nothing reads them in streaming use.
+- `sync._repeat_corr(s)` don't reduce phase before exp (up to 78 rad).
+
+SSTVAE (not changed from here):
+- TSan found a race in `RigController::wait_for_shutdown` (polls
+  `weak_ptr::expired()`, a relaxed load); fixed in the Data2G copy with a
+  release/acquire flag.
+- Its C++ firwin uses Hamming 0.46 where scipy uses `1 - 0.54` (1 ulp).
+
+Portability notes:
+- Bitwise parity with numpy relies on glibc libm and on mirroring numpy's
+  AVX-512 FMA complex multiply (`std::fma`). On other libms/CPUs expect
+  ulp-level differences, inside the stated tolerances. `std::fma` may be
+  slow without hardware FMA.
+- `polar.cpp` uses `#pragma GCC optimize("O3")`; move to a per-target flag.
+
+## Performance follow-ups
+
+- LDPC sum-product: `phi` is ~80% of decode; AVX2 `target_clones` on
+  Linux only. Candidates: table/approximate phi where parity allows,
+  codeword-parallel decode (approved threading).
+- `waveform::acquire` / StreamDetector hop: 27 inverse FFTs of 3840 per
+  hop; CFO-grid points are independent (thread candidate).
+- `equalizer::refine`: `lu_solve` is 35% of a DD pass; a low-rank form
+  over the support's delays would give ~3x.
 
 ## Android stays possible
 
