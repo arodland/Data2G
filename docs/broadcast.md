@@ -7,12 +7,6 @@ receiver decodes the control without a mask, reads the name and checks the CRC w
 its key: no fixed broadcast key, and no trying groups one by one. Port 0 is today's
 KISS under the group name "VARA KISS", with the same mode shifting.
 
-Needs a decision:
-
-- The status set in §5.
-- Port 0's wire changes anyway (its key becomes the hash of "VARA KISS"). Should its
-  control move to the TLV format too (reports as a TLV), or keep today's layout?
-
 ## 1. Terms
 
 - **Group:** up to 10 characters in the packed callsign alphabet (A-Z 0-9 / - and
@@ -54,8 +48,8 @@ and reads any codeword. A mask only decides whose CRC check passes.
 
 ## 3. Burst format
 
-- **Control:** a 1-byte header `[version 4 bits | reserved 2 | n_ctl - 1 (2)]` (version
-  2), then TLVs, as `frames.Control` without the 32-bit core. The ARQ core's fields mean
+- **Control:** every burst's control, port 0's included, is a 1-byte header
+  `[version 4 bits | reserved 2 | n_ctl - 1 (2)]` (version 2), then TLVs, as `frames.Control` without the 32-bit core. The ARQ core's fields mean
   nothing to a broadcast burst, and CPM gives control exactly one 20 B codeword.
 - **TLVs:**
 
@@ -107,6 +101,21 @@ Statuses, to ports opened on this connection only:
   all data lost can't be tied to a port: the frozen 16-bit PHY header has no room for
   a group. Every open port gets a `BCAST * MISSED submode n_cw` hint; it may be
   another group's burst.
+
+Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
+and QtSoundModem):
+
+- **Ask per frame:** the app sends `0x0C` (with the port in the high nibble), a 2-byte
+  tag of its choosing, then the frame. Plain data frames (`0x00`) get no ack, so apps
+  that don't ask see no change. Works on every port, port 0 included.
+- **The ack:** `0x0C`, the same port, and just the tag, sent on the KISS port when the
+  burst carrying that frame finishes transmitting. Frames sharing a burst are acked
+  together, in queue order.
+- **Sent, not heard:** an ack means the frame was on the air. One-to-many traffic has
+  no receipt; a reply is the app's business.
+- **Never sent:** a frame dropped from the queue (its port closed, or too big for the
+  port's mode) gets no ack. The opener gets `BCAST n DROPPED k` on the command port,
+  so an app waiting on tags knows to stop.
 
 ## 6. Not done
 
