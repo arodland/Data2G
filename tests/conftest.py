@@ -15,6 +15,14 @@ NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" 
 NATIVE_ABI = 1
 _import_error = None
 _originals = {}  # (module, attribute) -> the Python function --native replaced
+_PROVIDERS = []  # more substitutions: functions native -> {(module, attr): replacement}
+
+
+def provider(fn):
+    """Register a module's substitutions. One decorated function per ported
+    module, appended at the end of this file, so ports merge cleanly."""
+    _PROVIDERS.append(fn)
+    return fn
 
 
 def import_native():
@@ -132,11 +140,10 @@ def _substitutions(native):
         # (codes._decoder, _ext_decoder, arq.phy's posteriors) is then C++
         (ldpc, "qc_code"): native.ldpc.qc_code,
         (ldpc, "MinSumDecoder"): native.ldpc.MinSumDecoder,
-        **_waveform_substitutions(native),
-        **_cpm_substitutions(native.cpm),
     }
 
 
+@provider
 def _waveform_substitutions(native):
     """data2g.waveform. Bands cross by name; a band whose spec isn't the
     configured one stays in Python. Modules that from-imported a name hold
@@ -263,10 +270,12 @@ def _waveform_substitutions(native):
     }
 
 
-def _cpm_substitutions(n):
+@provider
+def _cpm_substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
     stays in Python. The TX bandpass (dsp) and the MI features (predictor)
     are still Python's, applied to the native results."""
+    n = native.cpm
     import functools
 
     import numpy as np
@@ -370,6 +379,8 @@ def pytest_configure(config):
     if native is None:
         raise pytest.UsageError(f"--native: cannot import data2g_native: {_import_error}")
     subs = _substitutions(native)
+    for p in _PROVIDERS:
+        subs.update(p(native))
     for (module, attr), fn in subs.items():
         _originals[module, attr] = getattr(module, attr)
         setattr(module, attr, fn)

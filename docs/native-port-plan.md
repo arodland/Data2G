@@ -249,3 +249,24 @@ Not planned, low priority, but no choice may rule it out. In practice:
 - Porting numpy PCG64. Tables instead.
 - An Android build. SSTVAE shows it is a fourth build of the same core.
 - Deleting the Python host. It goes only after Phase 3 passes on air.
+
+## Working conventions (for each module port)
+
+- Files: `native/core/<module>/<module>.{hpp,cpp}`, namespace `data2g::<module>`.
+  CMake globs `core/*.cpp`, `bindings/*.cpp` and `tests/test_*.cpp`.
+- Frozen data: a generator function in `tools/gen_native_tables.py`
+  registered with `FILES["<name>.cpp"] = fn` under its definition;
+  declarations in `native/core/tables/tables.hpp`. Nothing is loaded from
+  files at run time.
+- Precision follows the Python: float64 -> double, float32 -> float. No
+  fast-math. Integers and decisions exact; floats to a stated tolerance.
+- Const tables only; any cache thread-safe. Hot functions reentrant.
+- Bindings: `native/bindings/bind_<module>.cpp` defining
+  `void bind_<module>(py::module_&)`, registered in `module.cpp`; helpers in
+  `bindings/convert.hpp`. Submodes, bands, grids cross by name.
+- Tests: a Python-free `native/tests/test_<module>.cpp` (check.hpp); direct
+  comparisons in `tests/test_native_<module>.py` (fixtures `native`,
+  `reference`); `--native` substitutions as one `@provider` function per
+  module, appended at the end of `tests/conftest.py`.
+- Python in `data2g/` is not changed by a port. Reference bugs are reported.
+- Build and test: `JOBS=4 tools/build_native.sh --test`.
