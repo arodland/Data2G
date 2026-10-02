@@ -331,6 +331,62 @@ def zdict_cpp() -> str:
 
 FILES["zdict.cpp"] = zdict_cpp
 
+def modem_hpp() -> str:
+    """data2g/modem.py's constants, header codes and the clip constants its
+    receiver reads (config.clip_consts, from clip_constants.json). A header
+    code (16, N) is emitted as N 16-bit column masks: coded bit j of word w
+    is the parity of w & col[j] (bit 15 = the code's row 0)."""
+    from data2g import modem
+
+    out = [HEADER.format(src="data2g/modem.py, data2g/codes_data/{header_code*.npy,clip_constants.json}"),
+           "#pragma once\n\n#include <array>\n#include <cstdint>\n#include <span>\n#include <string_view>\n"
+           "#include <utility>\n\nnamespace data2g::modem {\n\n"]
+    for name in ("REF_REPEATS", "HEADER_BACKOFF", "STREAM_COMMIT_SCORE", "COPY_COMMIT_SCORE", "ALT_PENALTY",
+                 "PILOT_PAIRS", "COPY_PAIRS", "COPY_GRIDS", "COPY_COHERENCE", "COPY_DETECT"):
+        v = getattr(modem, name)
+        out.append(f"inline constexpr {'double' if isinstance(v, float) else 'int'} {name} = {cxx(v)};\n")
+    out.append(array("COPY_EARLIER", modem.COPY_EARLIER, "int"))
+    out.append(array("SYNC_BANDS", modem.SYNC_BANDS, "std::string_view"))
+
+    def per_band(name, d):
+        rows = ", ".join(f'{{"{b}", {cxx(float(v))}}}' for b, v in d.items())
+        return (f"inline constexpr std::array<std::pair<std::string_view, double>, {len(d)}> {name} = "
+                f"{{{{{rows}}}}};\n")
+
+    out.append(per_band("HEADER_MIN_SCORE", modem.HEADER_MIN_SCORE))
+    out.append(per_band("PILOT_NOISE", modem.PILOT_NOISE))
+
+    out.append("\n// Header codes per sync band, as column masks.\n")
+    rows = []
+    for b in modem.SYNC_BANDS:
+        g = modem.header_code(b)
+        cols = [sum(int(g[r, j]) << (15 - r) for r in range(16)) for j in range(g.shape[1])]
+        out.append(array(f"HEADER_COLS_{b}", cols, "std::uint16_t"))
+        rows.append(f'{{"{b}", HEADER_COLS_{b}}}')
+    out.append(f"inline constexpr std::array<std::pair<std::string_view, std::span<const std::uint16_t>>, "
+               f"{len(rows)}> HEADER_CODES = {{{{{', '.join(rows)}}}}};\n")
+
+    out.append("\n// config.clip_consts: (gain of a 1-frame burst, any other burst's, clip-noise ratio).\n"
+               "struct Clip {\n    double gain_1f, gain, ratio;\n};\n")
+
+    def clip(c):
+        gains, default, ratio = c
+        assert list(gains) == [1]
+        return f"{{{cxx(float(gains[1]))}, {cxx(float(default))}, {cxx(float(ratio))}}}"
+
+    subs = [clip(config.clip_consts(s.band, s.headroom, s.ace, s.constellation)) for s in config.SUBMODES.values()]
+    out.append(f"// receive()'s, per config::SUBMODES row\ninline constexpr std::array<Clip, {len(subs)}> CLIP_SUBMODE = "
+               f"{{{{\n    {', '.join(subs)}}}}};\n")
+    bands = [clip(config.CLIP[b]) for b in config.BANDS]
+    out.append(f"// config.CLIP, per config::BANDS row\ninline constexpr std::array<Clip, {len(bands)}> CLIP_BAND = "
+               f"{{{{{', '.join(bands)}}}}};\n")
+    out.append("\n}  // namespace data2g::modem\n")
+    return "".join(out)
+
+
+FILES["modem.hpp"] = modem_hpp
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="compare, write nothing")

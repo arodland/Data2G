@@ -39,6 +39,12 @@ Band make_band(const config::Band& s) {
     b.demod = Mat<cdouble>(nc, M);
     for (std::size_t k = 0; k < nc; ++k)
         for (int n = 0; n < M; ++n) b.demod[k][static_cast<std::size_t>(n)] = phasor(n * b.bb[k], -1);
+    b.demod_re = b.demod_im = Mat<double>(M, nc);
+    for (std::size_t k = 0; k < nc; ++k)
+        for (std::size_t n = 0; n < static_cast<std::size_t>(M); ++n) {
+            b.demod_re[n][k] = b.demod[k][n].real();
+            b.demod_im[n][k] = b.demod[k][n].imag();
+        }
     // the pilot as an exact rational turn, as ofdm.band builds it
     for (int num : s.pilot_num) {
         const int q = ((num % config::PILOT_PHASE_DEN) + config::PILOT_PHASE_DEN) % config::PILOT_PHASE_DEN;
@@ -93,12 +99,23 @@ std::vector<cdouble> Band::demod_window(std::span<const cdouble> z, std::int64_t
     const std::int64_t s = start - backoff, a = slice_bound(s, len), e = slice_bound(s + M, len);
     std::array<cdouble, M> win{};
     for (std::int64_t i = a; i < e; ++i) win[static_cast<std::size_t>(i - a)] = z[static_cast<std::size_t>(i)];
-    std::vector<cdouble> out(static_cast<std::size_t>(spec->nc));
-    for (std::size_t k = 0; k < out.size(); ++k) {
-        cdouble acc{};
-        for (std::size_t n = 0; n < static_cast<std::size_t>(M); ++n) acc += demod[k][n] * win[n];
-        out[k] = (2.0 / M) * acc;
+    // Each carrier's sum in order, as the complex loop `acc += demod[k][n] *
+    // win[n]` would (the same doubles: no FMA in an ISO build), but over all
+    // carriers at once in real arithmetic, so it vectorizes and no NaN
+    // check intervenes (modem's receive spent a third of its time here).
+    const std::size_t nc = static_cast<std::size_t>(spec->nc);
+    std::vector<double> re(nc, 0.0), im(nc, 0.0);
+    for (std::size_t n = 0; n < static_cast<std::size_t>(M); ++n) {
+        const double br = win[n].real(), bi = win[n].imag();
+        const double* ar = demod_re[n];
+        const double* ai = demod_im[n];
+        for (std::size_t k = 0; k < nc; ++k) {
+            re[k] += ar[k] * br - ai[k] * bi;
+            im[k] += ar[k] * bi + ai[k] * br;
+        }
     }
+    std::vector<cdouble> out(nc);
+    for (std::size_t k = 0; k < nc; ++k) out[k] = (2.0 / M) * cdouble(re[k], im[k]);
     return out;
 }
 

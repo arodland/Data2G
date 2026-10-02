@@ -168,7 +168,11 @@ def _capture(monkeypatch, name):
 @pytest.mark.parametrize("submode,n_cw,snr", [("qpsk-r1/2", 3, 6.0), ("w48-qpsk-r1/2", 16, 10.0),
                                              ("n10-qpsk-r1/2", 2, 8.0), ("n4-qpsk-r1/2", 1, 10.0),
                                              ("w48-16qam-r1/2", 5, 30.0)])
-def test_live_estimate_and_refine(native, py, monkeypatch, submode, n_cw, snr):
+def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n_cw, snr):
+    # Python's receive, so its equalizer calls can be captured (--native
+    # substitutes the whole of modem.receive)
+    for name in ("receive", "data_channel"):
+        monkeypatch.setattr(modem, name, reference(modem, name))
     est_calls, ref_calls = _capture(monkeypatch, "estimate"), _capture(monkeypatch, "refine")
     r, post = _received(submode, n_cw, snr, seed=n_cw)
     assert r is not None and est_calls
