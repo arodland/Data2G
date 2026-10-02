@@ -362,3 +362,67 @@ def test_compression_off_sends_raw_and_still_receives(monkeypatch):
 def test_incompressible_goes_raw():
     result, stats = run(2, 0.0, 0.0, 3000, 3000, modes=("m46",))
     assert result == "done" and stats["cw_new"] > 0 and stats["cw_comp"] == 0
+
+
+# --- CRC-valid but wrong control (a false CRC accept, 2^-16 on noise) ------------------
+
+def _clean(burst, stats=None):
+    return FakeRx(burst, random.Random(0), 0.0, {}, Counter() if stats is None else stats)
+
+
+@pytest.mark.parametrize("ext, k, n_data, n_ctl", [
+    ({F.T_RV: b"\0"}, 5, 5, None),  # T_RV shorter than K resends
+    ({}, 1, 1, None),  # K resends, no T_RV
+    ({F.T_NEW: b""}, 0, 2, None),
+    ({F.T_ABANDON: b"\x01"}, 0, 0, None),
+    ({F.T_RV: b"\0\0"}, 5, 2, None),  # K past the burst's end
+    ({}, 0, 0, 3),  # 3 control codewords in a burst of 1
+])
+def test_malformed_control_is_dropped(ext, k, n_data, n_ctl):
+    """Dropped like a failed control codeword (not answered, no state
+    touched), never raised; repeats and the watchdog recover (§10)."""
+    b = L.Station(1, RandomPolicy(random.Random(1), 0.0, ("m22",), 5))
+    if n_ctl:
+        ctl = [F.Core(n_ctl=n_ctl, acted_on=7).pack() + bytes(18)]
+    else:
+        ctl = F.Control(F.Core(k=k, acted_on=7), ext).pack(22)
+    slots = [L.Slot(L.ctl_mask(0, i), 0, p) for i, p in enumerate(ctl)]
+    slots += [L.Slot(L.data_mask(0, i), 0, bytes(22)) for i in range(n_data)]
+    assert not b.handle(_clean(L.TxBurst("m22", slots, 0)))
+    assert b.state == L.ACTIVE and b.stats["rx_lost"] == 1 and b.peer_burst is None
+
+
+def test_flipped_comp_bit_fails_the_crc():
+    """A control arriving CRC-valid with a compressed codeword's T_COMP bit
+    cleared: the codeword's CRC identity includes its compression (§2), so
+    decoded as raw it fails and is never delivered as raw bytes. The
+    watchdog's resync re-slices it and the stream arrives exact."""
+    class Fixed(RandomPolicy):
+        want_dup = False
+
+        def choose(self, station, escalation):
+            return "m46", self.max_cw
+
+    a = L.Station(0, Fixed(random.Random(1), 0.0, ("m46",), 2), master=True)
+    b = L.Station(1, Fixed(random.Random(2), 0.0, ("m46",), 1))
+    data = b"CQ CQ de W1AW QTH FN31 RST 599 " * 20 + bytes(range(256))
+    a.write(data)
+    burst = a.build()
+    a.answered()
+    ctl = F.Control.unpack([burst.slots[0].payload])
+    assert ctl.ext[F.T_COMP] == b"\x80"  # its one data codeword is deflated
+    ctl.ext[F.T_COMP] = b"\x00"
+    burst.slots[0] = L.Slot(burst.slots[0].mask_id, 0, F.Control(ctl.core, ctl.ext).pack(46)[0])
+    got, stats = bytearray(), Counter()
+    for _ in range(100):
+        assert b.handle(_clean(burst, stats))
+        got += b.read()
+        assert bytes(got) == data[:len(got)]
+        r = b.build()
+        b.answered()
+        assert a.handle(_clean(r))
+        if not a.tx.pending():
+            break
+        burst = a.build()
+        a.answered()
+    assert bytes(got) == data and stats["mismatch"] > 0

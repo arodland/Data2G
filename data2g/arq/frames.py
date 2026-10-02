@@ -208,8 +208,10 @@ def pack_call(call: str) -> bytes:
 
 def unpack_call(b: bytes) -> str:
     v = int.from_bytes(b, "big")
-    chars = [CALL_ALPHABET[(v >> (6 * (CALL_CHARS - 1 - i))) & 63] for i in range(CALL_CHARS)]
-    return "".join(chars).rstrip()
+    codes = [(v >> (6 * (CALL_CHARS - 1 - i))) & 63 for i in range(CALL_CHARS)]
+    if max(codes) >= len(CALL_ALPHABET):
+        raise ValueError(f"callsign code {max(codes)}")
+    return "".join(CALL_ALPHABET[c] for c in codes).rstrip()
 
 
 # --- stream records -------------------------------------------------------------
