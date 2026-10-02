@@ -5,7 +5,7 @@ command on the command port. A group's bursts carry its name in the control code
 and every codeword in them, control and data, uses a CRC mask hashed from that name. A
 receiver decodes the control without a mask, reads the name and checks the CRC with
 its key: no fixed broadcast key, and no trying groups one by one. Port 0 is today's
-KISS under the group name "VARA KISS", with the same mode shifting.
+KISS under the group name "KISS 0", with rate shifting off by default.
 
 ## 1. Terms
 
@@ -15,7 +15,7 @@ KISS under the group name "VARA KISS", with the same mode shifting.
 - **Group key:** a nonzero 16-bit hash of the packed group (FNV-1a, as
   `session.session_key`).
 - **Port:** a KISS port number (1-15) a host has opened for one group. Port 0 is
-  always open, on "VARA KISS".
+  always open, on "KISS 0".
 
 ## 2. Masks: who can read what
 
@@ -23,12 +23,12 @@ Everything on air is plain: the scrambler is unkeyed (`arq.md` §2), so anyone d
 and reads any codeword. A mask only decides whose CRC check passes.
 
 - **One key per group, on every codeword:** `ctl_mask(0, i, group key)` for control,
-  `data_mask(0, slot, group key)` for data. Port 0's key is the hash of "VARA KISS".
+  `data_mask(0, slot, group key)` for data. Port 0's key is the hash of "KISS 0".
 - **The control checks itself:**
   1. Decode slot 0 once, mask left open (`codes.decode_raw`; the engine does this
      already, for the session's key and mask 0).
   2. Parse the unverified bytes: the header's version must be 2, then the TLVs. The
-     group comes from group or group+from; absent means "VARA KISS".
+     group comes from group or group+from; absent means "KISS 0".
   3. Hash the group to its key and check the CRC (`codes.check`). Polar control
      (CPM) does this per list candidate, each with the group read from it.
   - A wrong decode or another burst type gives a garbage name, and the check fails.
@@ -55,9 +55,9 @@ and reads any codeword. A mask only decides whose CRC check passes.
 
   | type | contents | when |
   |---|---|---|
-  | group | packed group, 8 B | every burst except port 0's (absent means "VARA KISS", and its key) |
+  | group | packed group, 8 B | every burst except port 0's (absent means "KISS 0", and its key) |
   | group+from | group and sender, 15 B (120 bits packed together) | in place of group, when the port asks for it |
-  | reports | sender hash (2 B), then per station [hash 2 B][mode code << 2 \| size hint] | port 0 only: today's AX.25 mode shifting |
+  | reports | sender hash (2 B), then per station [hash 2 B][mode code << 2 \| size hint] | a port with rate shifting on (§4) |
 
   - group+from on CPM: 1 + 2 + 15 = 18 B, which fits 20 B. Separate group and from TLVs
     would be 1 + 10 + 10 = 21 B, which doesn't fit.
@@ -66,13 +66,18 @@ and reads any codeword. A mask only decides whose CRC check passes.
 
 ## 4. Modes and channel access
 
-- **Groups other than 0:** each port has a transmit mode, set by the host at any time
+- **Transmit mode:** every port, port 0 included, has one, set by the host at any time
   between frames (it applies to frames sent after it). Receiving decodes every mode,
   whatever a port's transmit mode. The default is the cap's robust broadcast mode
-  (`kisslink.BROADCAST`). One-to-many traffic can't be shifted from reports.
-- **Port 0:** today's per-station shifting by default (`BCAST MODE 0 AUTO`). A fixed
-  mode (`BCAST MODE 0 mode`) turns it off: no reports sent, reports heard ignored, and
-  frames never parsed as AX.25.
+  (`kisslink.BROADCAST`).
+- **Rate shifting, off by default:** `BCAST MODE n AUTO mode` turns it on for port n,
+  any port, with `mode` as the fallback.
+  - A connected-mode AX.25 frame goes in the mode its next hop has reported for us
+    lately. Anything else goes in the fallback: UI frames, non-AX.25, a station
+    without a fresh report. One-to-many traffic can't be shifted from reports.
+  - The port's bursts carry the reports TLV.
+  - `BCAST MODE n mode` turns it off again: no reports sent, reports heard ignored,
+    and frames never parsed as AX.25.
 - **One queue for all ports:** the next burst takes the first queued frame's port and
   mode, then every queued frame of that port that fits. KISS p-persistence and
   SLOTTIME apply to all ports. Broadcast still goes only between ARQ sessions.
@@ -86,7 +91,8 @@ One integrated server: the command, data and KISS ports always run (the `--vara`
 |---|---|---|
 | `BCAST OPEN group [FROM call]` | `BCAST PORT n` | opens a port; FROM sends group+from |
 | `BCAST CLOSE n` | OK | |
-| `BCAST MODE n mode` | OK / WRONG | that port's transmit mode for later frames, within the KISS cap; any time between frames, never filters decoding. Port 0 also takes `AUTO` (shifting, the default) |
+| `BCAST MODE n mode` | OK / WRONG | that port's transmit mode for later frames, within the KISS cap; any time between frames, never filters decoding. Rate shifting off (the default) |
+| `BCAST MODE n AUTO mode` | OK / WRONG | rate shifting on for that port, `mode` the fallback (§4) |
 | `MODES` | one `MODE ...` line per mode, then OK | name, bandwidth Hz, bytes per codeword, max codewords, airtime at 1 and at max codewords |
 
 Statuses, to ports opened on this connection only:
