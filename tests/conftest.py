@@ -897,3 +897,63 @@ def _modem_substitutions(native):
             "noise_var": noise_var, "soft_bits": soft_bits, "decode_received": decode_received,
             "demodulate": demodulate}.items()},
     }
+
+
+@provider
+def _phy_substitutions(native):
+    """data2g.arq.phy (TX audio, ModemRx with DD, measure) and
+    data2g.kisslink (KissLink, AX.25 parsing) in C++. ModemRx stays Python
+    for a mode that isn't the configured one, or while a test patches a
+    codec function it calls (C++ never calls back into them); it reads
+    phy.DD when made, and its store stays the caller's dict."""
+    import time
+
+    from data2g import codes, kisslink
+    from data2g.arq import modes
+    from data2g.arq import phy as PHY
+
+    P, K = native.phy, native.kisslink
+    py_rx, py_tx, py_soft, py_measure = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure
+    watched = ("decode_raw", "decode_buffer", "decode_llrs", "_payloads", "check", "combine", "flip", "encode",
+               "encode_info", "descramble")
+
+    def own(spec):
+        return modes.MODES.get(spec.name) == spec
+
+    def substituted(f):  # the codes provider's, not a test's patch
+        return getattr(f, "__module__", None) == __name__
+
+    def ModemRx(r, store, dd_budget=None):
+        if not own(r["spec"]) or not all(substituted(getattr(codes, f)) for f in watched):
+            return py_rx(r, store, dd_budget)
+        return P.ModemRx(r, store, dd_budget, bool(PHY.DD))
+
+    def tx_audio(burst):
+        return P.tx_audio(burst) if burst.submode in modes.MODES else py_tx(burst)
+
+    def soft_bits(r):
+        return P.soft_bits(r) if own(r["spec"]) else py_soft(r)
+
+    def measure(r):
+        return P.measure(r) if own(r["spec"]) else py_measure(r)
+
+    def parse_ax25(frame):
+        t = K.parse_ax25(bytes(frame))
+        return None if t is None else kisslink.Ax25(*t)
+
+    def KissLink(cap=2, queue=None, peers=None, me=None, clock=time.monotonic, n_sent=0, broadcast=None, **kw):
+        if queue or peers or me:
+            raise NotImplementedError("--native: a KissLink starts with no queue, peers or me")
+        return K.KissLink(cap, clock=None if clock is time.monotonic else clock, n_sent=n_sent, broadcast=broadcast,
+                          **kw)
+
+    return {
+        (PHY, "mask_value"): P.mask_value,
+        (PHY, "tx_audio"): tx_audio,
+        (PHY, "soft_bits"): soft_bits,
+        (PHY, "measure"): measure,
+        (PHY, "ModemRx"): ModemRx,
+        (kisslink, "parse_ax25"): parse_ax25,
+        (kisslink, "station_hash"): K.station_hash,
+        (kisslink, "KissLink"): KissLink,
+    }

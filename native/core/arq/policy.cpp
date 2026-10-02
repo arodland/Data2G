@@ -149,7 +149,7 @@ void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::
     bias[key] = std::clamp(get(bias, key) + BIAS_STEP * (static_cast<double>(decoded) / sent - p), -BIAS_MAX, BIAS_MAX);
 }
 
-Recommendation GearShifter::recommend(const StationView& st) {
+GearRecommendation GearShifter::recommend(const StationView& st) {
     if (!measured) {
         const int fb = encode(fallback(st.cap));
         return {fb, 1, fb};
