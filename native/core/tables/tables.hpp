@@ -81,6 +81,8 @@ struct ShiftTable {
 };
 
 extern const std::span<const ShiftTable> LDPC_SHIFTS;
+// Deflate's priming dictionary (data2g/arq/frames.py ZDICT, zdict.bin).
+extern const std::span<const std::uint8_t> ZDICT;
 
 // The gear shifter's outcome model (data2g/arq/predictor.py): bootstrap
 // members, each an MLP (x - mean) / std -> tanh layers -> logits, W row-major

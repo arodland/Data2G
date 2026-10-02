@@ -318,6 +318,18 @@ def predictor_cpp() -> str:
 
 FILES["predictor.cpp"] = predictor_cpp
 
+def zdict_cpp() -> str:
+    """Deflate's priming dictionary (frames.ZDICT)."""
+    from data2g.arq import frames
+
+    z = frames.ZDICT
+    rows = ",\n".join(", ".join(str(b) for b in z[i:i + 24]) for i in range(0, len(z), 24))
+    return (HEADER.format(src="data2g/arq/zdict.bin") + '#include "tables/tables.hpp"\n\nnamespace data2g::tables {\n\n'
+            f"namespace {{\nconstexpr std::uint8_t zdict[{len(z)}] = {{\n{rows}}};\n}}  // namespace\n\n"
+            "const std::span<const std::uint8_t> ZDICT = zdict;\n\n}  // namespace data2g::tables\n")
+
+
+FILES["zdict.cpp"] = zdict_cpp
 
 def main():
     ap = argparse.ArgumentParser()
