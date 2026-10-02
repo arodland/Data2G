@@ -241,6 +241,26 @@ def gamma_q99_cpp() -> str:
 
 
 FILES["gamma_q99.cpp"] = gamma_q99_cpp
+def ldpc_cpp() -> str:
+    """Every QC-LDPC shift table (data2g/codes_data/ldpc_shifts.npz)."""
+    from data2g import ldpc
+
+    out = [HEADER.format(src="data2g/codes_data/ldpc_shifts.npz"), '#include "tables/tables.hpp"\n\n',
+           "namespace data2g::tables {\nnamespace {\n\n"]
+    rows = []
+    for key, base in ldpc.tables().items():
+        if key.startswith("mask"):
+            continue  # the mask is base >= 0
+        bg, z = (int(v.lstrip("bgz")) for v in key.split("_"))
+        assert base.min() >= -1 and base.max() < z
+        out.append(f"constexpr std::int16_t {key}[] = {{{ints(base.reshape(-1))}}};\n")
+        rows.append(f"    {{{bg}, {z}, {base.shape[0]}, {base.shape[1]}, {key}}},\n")
+    out.append(f"\nconstexpr ShiftTable shifts[] = {{\n{''.join(rows)}}};\n\n}}  // namespace\n\n")
+    out.append("const std::span<const ShiftTable> LDPC_SHIFTS = shifts;\n\n}  // namespace data2g::tables\n")
+    return "".join(out)
+
+
+FILES["ldpc.cpp"] = ldpc_cpp
 
 
 def main():

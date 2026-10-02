@@ -72,5 +72,13 @@ extern const std::span<const PolarDesign> POLAR_GA;
 // scipy.stats.gamma.ppf(0.99, n) / n at index n - 1 (equalizer.per_carrier_noise).
 inline constexpr int GAMMA_Q99_MAX = 2048;
 extern const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99;
+// A QC-LDPC base matrix for base graph bg lifted by z: rows x cols
+// circulant shifts, row-major, -1 = zero block (data2g/ldpc.py).
+struct ShiftTable {
+    int bg, z, rows, cols;
+    std::span<const std::int16_t> shift;
+};
+
+extern const std::span<const ShiftTable> LDPC_SHIFTS;
 
 }  // namespace data2g::tables

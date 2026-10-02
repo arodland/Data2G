@@ -46,7 +46,7 @@ def _substitutions(native):
 
     import numpy as np
 
-    from data2g import codes, config, constellation, equalizer
+    from data2g import codes, config, constellation, equalizer, ldpc
 
     py_frozen = codes.frozen
     nc = native.constellation
@@ -128,6 +128,10 @@ def _substitutions(native):
         (constellation, "llr"): llr,
         (constellation, "ace_project"): ace_project,
         **{(equalizer, name): getattr(native.equalizer, name) for name in EQUALIZER_NATIVE},
+        # every LDPC code (codes.ldpc_code, mother(), IR extents) and decoder
+        # (codes._decoder, _ext_decoder, arq.phy's posteriors) is then C++
+        (ldpc, "qc_code"): native.ldpc.qc_code,
+        (ldpc, "MinSumDecoder"): native.ldpc.MinSumDecoder,
         **_waveform_substitutions(native),
         **_cpm_substitutions(native.cpm),
     }
