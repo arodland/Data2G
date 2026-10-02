@@ -1,6 +1,8 @@
 # Plan: native C++ / Qt 6 port
 
-Draft 2026-10-02, not yet approved. Based on master 157ca38.
+Approved 2026-10-02 with all four recommendations, plus two tweaks (more
+threads where they cut latency; Android kept possible). Based on master
+157ca38.
 
 TLDR: port the live path (`data2g/` minus the torch and channel modules,
 about 7.9k lines) to C++20 / Qt 6 under `native/`, using SSTVAE's stack and
@@ -9,14 +11,14 @@ reference and the home of every study. Parity is checked the SSTVAE way:
 golden vectors plus `pytest --native`, which runs the existing suite with C++
 functions substituted in.
 
-Decisions needed before Phase 0 (recommendations first):
-1. Same repo, `native/` beside `data2g/`. Yes.
-2. Lift SSTVAE `native/` code by copying, not a shared library. Yes.
+Decisions (approved 2026-10-02):
+1. Same repo, `native/` beside `data2g/`.
+2. Lift SSTVAE `native/` code by copying, not a shared library.
 3. Rig control: bundled Hamlib as in SSTVAE (model 2 still reaches an
-   external rigctld). Or keep the 30-line rigctld TCP client. Recommend
-   Hamlib, but not before Phase 3.
+   external rigctld), from Phase 3. Until then, the rigctld TCP client.
 4. GUI scope for Phase 4: a status window (waterfall, link state, mode,
-   throughput, settings dialog). No Android.
+   throughput, settings dialog). Android is not planned, but nothing may
+   foreclose it (see "Android stays possible").
 
 ## Why
 
@@ -67,7 +69,7 @@ Same as SSTVAE unless noted.
 | Deflate with dictionary | zlib, vendored | new. Qt's qCompress can't do raw deflate with a preset dictionary; miniz can't either |
 | TCP (VARA 8300/8301, KISS 8100) | QtNetwork on the main event loop | new |
 | JSON (clip_constants, settings) | QJsonDocument | |
-| .npy / .npz data | lift `core/testing/npy.hpp`, add an npz (stored zip) reader, or convert to .npy at build | |
+| Data files | generated C++ tables compiled into `core/` (see "Android stays possible"); `npy.hpp` only in tests | `tools/gen_data_tables.py` |
 | Tests | hand-rolled `check.hpp` + ctest | lift |
 | Parity | pybind11 module | lift the pattern from `bindings/module/` |
 | GUI | Qt Widgets, optional (`DATA2G_BUILD_GUI=AUTO`) | pattern from `gui/` |
@@ -89,9 +91,18 @@ core.
 - Main thread: Qt event loop, TCP sockets, rig. Talks to the engine through
   two queues (commands in, events out).
 
-Open question for Phase 2: whether decode should move off the engine thread
-so preamble search never waits behind a 1 s DD pass. Measure first. C++ may
-make it moot.
+More threads are welcome where they cut latency (approved 2026-10-02), as
+long as the count stays moderate. Candidates, each measured against reply
+latency before it is kept:
+- Decode worker: burst decode (equalize, LDPC/polar, DD) off the engine
+  thread, so preamble search and BUSY keep running during a 1 s DD pass. The
+  engine stays sample-clocked; a decode result arrives as an event stamped
+  with the sample position it belongs to.
+- Codeword-parallel LDPC/polar decode within a burst.
+- CFO-grid parallel sync correlation.
+
+One shared pool, sized min(4, cores/2) and settable, because the machine is
+shared and a modem must not saturate a laptop either.
 
 ## What must be frozen, not ported
 
@@ -184,6 +195,21 @@ macOS, Windows MSVC), package_app.sh, make_installer.sh, signing. ASan/UBSan
 and TSan jobs over the engine, ring buffer and queues.
 - Needs you for: signing keys, a Windows or macOS on-air check.
 
+## Android stays possible
+
+Not planned, low priority, but no choice may rule it out. In practice:
+- `core/` has no Qt Widgets, no desktop-only APIs and no filesystem paths
+  for data. Everything Data2G loads (ldpc_shifts, header codes, format
+  perms, constellations, predictor, capacity tables, clip constants, zdict)
+  is compiled into the binary as generated tables, so there is nothing to
+  locate at runtime.
+- Audio and rig are split at the device boundary as in SSTVAE, so an
+  Android backend (JNI AudioRecord, as SSTVAE did) is a new leaf, not a
+  refactor.
+- The host CLI and TCP servers sit outside `core/`, so a mobile front end
+  can drive the engine directly.
+- `check_layering.py` enforces the first two.
+
 ## Lessons carried from SSTVAE
 
 - Substituting into the real suite finds bugs that purpose-written parity
@@ -200,5 +226,5 @@ and TSan jobs over the engine, ring buffer and queues.
 
 - Porting studies, channel simulators or training.
 - Porting numpy PCG64. Tables instead.
-- Android. SSTVAE shows it is a fourth build of the same core; revisit later.
+- An Android build. SSTVAE shows it is a fourth build of the same core.
 - Deleting the Python host. It goes only after Phase 3 passes on air.
