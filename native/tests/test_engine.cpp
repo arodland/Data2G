@@ -21,8 +21,8 @@ using clk = std::chrono::steady_clock;
 namespace {
 
 constexpr int BLOCK = config::FS / 10;
-
-#if defined(__SANITIZE_THREAD__)
+// Sanitizers slow everything several-fold: wall-clock latency bounds are off.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
 constexpr bool TSAN = true;
 #else
 constexpr bool TSAN = false;
