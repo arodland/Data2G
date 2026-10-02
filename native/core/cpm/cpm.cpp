@@ -302,7 +302,7 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         double c_best = 0;
         bool first = true;
         std::vector<double> on(R), all(R * g.m);
-        const std::int64_t step = std::max(1L, T / 32), lo = floor_div(-T, 8), hi = T / 8;
+        const std::int64_t step = std::max<std::int64_t>(1, T / 32), lo = floor_div(-T, 8), hi = T / 8;
         for (std::int64_t dt = lo; dt < hi + 1; dt += step)
             for (int q = -2; q <= 2; ++q) {
                 const double df = (0.0625 * q) * g.rate;
@@ -408,8 +408,8 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     Detection d;
     if (lo || hi) {
         const std::int64_t span = ((front_only ? L0.sync_rows[L0.front - 1] : L0.sync_rows.back()) + 2) * T;
-        const std::int64_t a = std::min(len, std::max(0L, lo - T)), b = hi ? std::min(len, *hi + span + T) : len;
-        d = detect(g, x.subspan(a, std::max(0L, b - a)), reach_hz, true, front_only, 0, floor);
+        const std::int64_t a = std::min(len, std::max<std::int64_t>(0, lo - T)), b = hi ? std::min(len, *hi + span + T) : len;
+        d = detect(g, x.subspan(a, std::max<std::int64_t>(0, b - a)), reach_hz, true, front_only, 0, floor);
         d.start += a;
         if (!(lo <= d.start && d.start < hi.value_or(len))) return std::nullopt;
     } else {

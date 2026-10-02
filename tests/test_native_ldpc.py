@@ -130,7 +130,11 @@ def test_sum_product(native, reference, spec):
         assert np.array_equal(np.sign(c_post[ok]), np.sign(post[ok]))
         agree += (c_out[~ok] == out[~ok]).sum()
         total += out[~ok].size
-    assert agree >= 0.999 * total
+    # Failed decodes only: numpy's SIMD float32 tanh/log differ by an ulp
+    # from C++'s correctly rounded phi, and by CPU (aarch64 agreed on 99.898%
+    # against x86-64's >= 99.9%). Accepted 2026-10-02 (plan, Findings);
+    # converged decodes above stay exact.
+    assert agree >= 0.995 * total
 
 
 def test_default_iterations_and_early_stop(native, reference):

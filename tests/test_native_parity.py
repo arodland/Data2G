@@ -56,10 +56,16 @@ def test_submode_table(native):
 
 
 def test_generated_tables_current():
+    import platform
     import subprocess
     import sys
     from pathlib import Path
 
+    # The committed tables are generated on linux x86-64, and CI's "Generated
+    # files" job gates them there. Elsewhere scipy can differ by an ulp
+    # (gamma.ppf on aarch64), which regenerates different bytes, not a stale table.
+    if not (sys.platform == "linux" and platform.machine() == "x86_64"):
+        pytest.skip("tables are generated and checked on linux x86-64")
     tool = Path(__file__).resolve().parent.parent / "tools" / "gen_native_tables.py"
     r = subprocess.run([sys.executable, str(tool), "--check"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
