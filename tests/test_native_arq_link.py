@@ -88,9 +88,10 @@ def test_extension_payloads_callsigns_records(native, pure):
         F.unpack_rv(b"\x00", 5)
     with pytest.raises(ValueError):
         a.unpack_rv(b"\x00", 5)
-    for call in ("W1AW", "vk2abc-15", "G4ABC/P", "K", "AB12345678"):
+    # a space pads at the end, and inside a name is kept ("VARA KISS")
+    for call in ("W1AW", "vk2abc-15", "G4ABC/P", "K", "AB12345678", "W1 AW", "VARA KISS"):
         assert a.pack_call(call) == F.pack_call(call) and a.unpack_call(F.pack_call(call)) == call.upper()
-    for bad in ("TOOLONGCALL1", "W1 AW", "W1_AW"):
+    for bad in ("TOOLONGCALL1", "W1_AW"):
         for codec in (F, a):
             with pytest.raises(ValueError):
                 codec.pack_call(bad)
