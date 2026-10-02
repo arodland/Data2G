@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 OUT = ROOT / "native" / "core" / "generated"
 
-for var in ("DATA2G_PREAMBLE_REPEATS",):
+for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL"):
     if var in os.environ:
         sys.exit(f"{var} is set: the generated tables must hold the on-air defaults")
 
@@ -261,6 +261,54 @@ def ldpc_cpp() -> str:
 
 
 FILES["ldpc.cpp"] = ldpc_cpp
+
+
+def doubles(values) -> str:
+    return ",\n".join(", ".join(repr(float(v)) for v in values[i:i + 6]) for i in range(0, len(values), 6))
+
+
+def predictor_cpp() -> str:
+    """The gear shifter's outcome model (codes_data/outcome_predictor.npz,
+    the installed ensemble; DATA2G_OUTCOME_MODEL is study-only) and the AWGN
+    BICM capacity tables its MI features interpolate (capacity_tables.npz)."""
+    from data2g.arq import predictor as P
+
+    model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
+    members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
+    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,capacity_tables}.npz"),
+           '#include "tables/tables.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
+    rows = []
+    for i, m in enumerate(members):
+        assert m.modes == model.modes and m.bands == model.bands
+        out.append(f"constexpr double mean_{i}[] = {{\n{doubles(m.mean)}}};\n")
+        out.append(f"constexpr double std_{i}[] = {{\n{doubles(m.std)}}};\n")
+        layers = []
+        for j, (w, b) in enumerate(m.layers):
+            assert w.dtype == b.dtype == np.float64 and w.shape[1] == b.shape[0]
+            out.append(f"constexpr double w_{i}_{j}[] = {{\n{doubles(w.reshape(-1))}}};\n")
+            out.append(f"constexpr double b_{i}_{j}[] = {{\n{doubles(b)}}};\n")
+            layers.append(f"{{{w.shape[0]}, {w.shape[1]}, w_{i}_{j}, b_{i}_{j}}}")
+        out.append(f"constexpr MlpLayer layers_{i}[] = {{{', '.join(layers)}}};\n\n")
+        rows.append(f"    {{mean_{i}, std_{i}, layers_{i}}},\n")
+    out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
+    out.append(f"constexpr std::string_view modes[] = {{{', '.join(cxx(m) for m in model.modes)}}};\n")
+    out.append(f"constexpr std::string_view bands[] = {{{', '.join(cxx(b) for b in model.bands)}}};\n\n")
+    grid, tables = P._capacity()
+    out.append(f"constexpr double grid[] = {{\n{doubles(grid)}}};\n")
+    for i, c in enumerate(P.CONSTS):
+        assert len(tables[c]) == len(grid)
+        out.append(f"constexpr double cap_{i}[] = {{\n{doubles(tables[c])}}};\n")
+    caps = ", ".join(f"{{{cxx(c)}, cap_{i}}}" for i, c in enumerate(P.CONSTS))
+    out.append(f"constexpr CapacityTable caps[] = {{{caps}}};\n\n}}  // namespace\n\n")
+    out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
+               "const std::span<const std::string_view> OUTCOME_MODES = modes;\n"
+               "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
+               "const std::span<const double> CAPACITY_GRID = grid;\n"
+               "const std::span<const CapacityTable> CAPACITY = caps;\n\n}  // namespace data2g::tables\n")
+    return "".join(out)
+
+
+FILES["predictor.cpp"] = predictor_cpp
 
 
 def main():
