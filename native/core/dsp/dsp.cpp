@@ -80,8 +80,11 @@ double quantile(std::vector<double> v, double q) {
     return gamma >= 0.5 ? b - diff * (1 - gamma) : a + diff * gamma;
 }
 
-std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz, double fs) {
-    const double nyq = 0.5 * fs, left = lo_hz / nyq, right = hi_hz / nyq;
+namespace {
+
+// scipy.signal.firwin for one band [left, right] (fractions of Nyquist),
+// Hamming window, scale=True at `scale_at` (0: DC, else the band centre).
+std::vector<double> firwin_band(int numtaps, double left, double right, double scale_at) {
     const double alpha = 0.5 * (numtaps - 1);
     // Hamming, sym=True: 0.54 + (1 - 0.54) cos(linspace(-pi, pi, numtaps))
     const double step = (PI - -PI) / static_cast<double>(numtaps - 1);
@@ -93,13 +96,22 @@ std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz, dou
         const double win = 0.54 + (1.0 - 0.54) * std::cos(fac);  // general_hamming: 1 - alpha, not 0.46
         h[u] = (right * sinc(right * m[u]) - left * sinc(left * m[u])) * win;
     }
-    // scale=True: unit gain at the passband centre
-    const double sf = 0.5 * (left + right);
     std::vector<double> resp(h.size());
-    for (std::size_t i = 0; i < h.size(); ++i) resp[i] = h[i] * std::cos(PI * m[i] * sf);
+    for (std::size_t i = 0; i < h.size(); ++i) resp[i] = h[i] * std::cos(PI * m[i] * scale_at);
     const double s = pairwise_sum(resp);
     for (double& v : h) v /= s;
     return h;
+}
+
+}  // namespace
+
+std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz, double fs) {
+    const double nyq = 0.5 * fs, left = lo_hz / nyq, right = hi_hz / nyq;
+    return firwin_band(numtaps, left, right, 0.5 * (left + right));  // unit gain at the passband centre
+}
+
+std::vector<double> firwin_lowpass(int numtaps, double cutoff_hz, double fs) {
+    return firwin_band(numtaps, 0.0, cutoff_hz / (0.5 * fs), 0.0);  // unit gain at DC
 }
 
 std::vector<cdouble> hilbert(std::span<const double> x) {
