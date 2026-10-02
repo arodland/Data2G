@@ -18,6 +18,7 @@ void bind_arq_link(py::module_&);
 void bind_audio(py::module_&);
 void bind_modem(py::module_&);
 void bind_tnc(py::module_&);
+void bind_arq_phy(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
@@ -37,4 +38,5 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_audio(m);
     data2g::bind::bind_modem(m);
     data2g::bind::bind_tnc(m);
+    data2g::bind::bind_arq_phy(m);
 }

@@ -6,6 +6,7 @@
 // (int64) here, 7 bits on the wire.
 #pragma once
 
+#include <compare>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -77,6 +78,7 @@ struct SoftKey {
     int peer = 0;
     std::int64_t seq = 0;
     int index = 0;
+    auto operator<=>(const SoftKey&) const = default;
 };
 
 class RxBurst {

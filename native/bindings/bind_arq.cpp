@@ -4,7 +4,7 @@
 #include "arq/modes.hpp"
 #include "arq/policy.hpp"
 #include "arq/predictor.hpp"
-#include "convert.hpp"
+#include "arq_convert.hpp"
 
 namespace data2g::bind {
 
@@ -14,29 +14,6 @@ const arq::Mode& amode(const std::string& name) {
     const auto* m = arq::mode(name);
     if (!m) throw py::key_error("no mode " + name);
     return *m;
-}
-
-arq::Measured measured(const py::dict& d) {
-    arq::Measured m;
-    m.snr_est = d["snr_est"].cast<double>();
-    m.spread_est = d["spread_est"].cast<double>();
-    m.delay_est_ms = d["delay_est_ms"].cast<double>();
-    for (std::size_t i = 0; i < arq::CONSTS.size(); ++i)
-        m.mi[i] = d[py::str("mi_" + std::string(arq::CONSTS[i]))].cast<double>();
-    if (d.contains("headroom")) m.headroom = d["headroom"].cast<double>();
-    if (d.contains("frames")) m.frames = d["frames"].cast<double>();
-    return m;
-}
-
-py::dict to_dict(const arq::Measured& m) {
-    py::dict d;
-    d["snr_est"] = m.snr_est;
-    d["spread_est"] = m.spread_est;
-    d["delay_est_ms"] = m.delay_est_ms;
-    for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) d[py::str("mi_" + std::string(arq::CONSTS[i]))] = m.mi[i];
-    d["headroom"] = m.headroom;
-    d["frames"] = m.frames;
-    return d;
 }
 
 // predictor's prev: (measured, band, age) or None.

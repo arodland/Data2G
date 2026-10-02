@@ -11,47 +11,13 @@
 #include <pybind11/stl.h>
 
 #include "arq/session.hpp"
-#include "convert.hpp"
+#include "arq_convert.hpp"
 
 namespace data2g::bind {
 
 using namespace data2g::arq;
 
 namespace {
-
-Bytes bytes_of(const py::handle& h) {
-    const std::string_view s = py::isinstance<py::bytes>(h) ? std::string_view(h.cast<py::bytes>())
-                                                            : std::string_view(py::bytes(py::reinterpret_borrow<py::object>(h)));
-    return {s.begin(), s.end()};
-}
-
-py::bytes pyb(const Bytes& b) { return py::bytes(reinterpret_cast<const char*>(b.data()), b.size()); }
-
-py::tuple mask_tuple(const MaskId& m) { return py::make_tuple(m.key, m.direction, m.seq); }
-
-MaskId mask_of(const py::handle& t) {
-    auto s = t.cast<py::sequence>();
-    return {s[0].cast<int>(), s[1].cast<int>(), s[2].cast<int>()};
-}
-
-py::object link_attr(const char* name) { return py::module_::import("data2g.arq.link").attr(name); }
-
-py::object burst_py(const TxBurstPtr& b) {
-    if (!b) return py::none();
-    auto Slot = link_attr("Slot");
-    py::list slots;
-    for (const auto& s : b->slots) slots.append(Slot(mask_tuple(s.mask_id), s.rv, pyb(s.payload)));
-    return link_attr("TxBurst")(b->submode, slots, b->burst_seq);
-}
-
-TxBurstPtr burst_cpp(const py::handle& o) {
-    if (o.is_none()) return nullptr;
-    auto b = std::make_shared<TxBurst>();
-    b->submode = o.attr("submode").cast<std::string>();
-    for (auto s : o.attr("slots")) b->slots.push_back({mask_of(s.attr("mask_id")), s.attr("rv").cast<int>(), bytes_of(s.attr("payload"))});
-    b->burst_seq = o.attr("burst_seq").cast<std::int64_t>();
-    return b;
-}
 
 // --- adapters to the Python objects ---------------------------------------------------
 

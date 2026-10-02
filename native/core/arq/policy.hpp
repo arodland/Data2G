@@ -53,7 +53,7 @@ struct StationView {
     long held = 0;         // codewords held beyond the cumulative ACK: len(rx.buf)
 };
 
-struct Recommendation {
+struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)
     int data, hint, reply;
 };
 
@@ -89,7 +89,7 @@ public:
     void observe(const Measured& m, std::string_view submode, double now);
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
-    Recommendation recommend(const StationView& st);
+    GearRecommendation recommend(const StationView& st);
 };
 
 }  // namespace data2g::arq
