@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <cstdlib>
 
 #include "arq/engine.hpp"
 #include "check.hpp"
@@ -215,7 +216,9 @@ void worker_latency() {
     check::equal(js, j, "sync: same block");
     check::equal(jw, j, "worker: same block");
     check::is_true(late_worker < late_sync, "the worker hears it sooner");
-    if (!TSAN) {
+    // Absolute wall-clock bounds: not on shared CI runners (macOS under
+    // Rosetta missed 0.15 s); the relative check above runs everywhere.
+    if (!TSAN && !std::getenv("CI")) {
         check::is_true(late_worker < 0.15, "worker: on time");
         check::is_true(late_sync > 0.15, "sync: held by the decode");
     }
