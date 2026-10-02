@@ -14,6 +14,7 @@ void bind_waveform(py::module_&);
 void bind_ldpc(py::module_&);
 void bind_timing(py::module_&);
 void bind_arq(py::module_&);
+void bind_audio(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
@@ -29,4 +30,5 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_ldpc(m);
     data2g::bind::bind_timing(m);
     data2g::bind::bind_arq(m);
+    data2g::bind::bind_audio(m);
 }

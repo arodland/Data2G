@@ -660,3 +660,19 @@ def native():
 def reference():
     """reference(module, "name"): the Python function, substituted or not."""
     return lambda module, attr: _originals.get((module, attr), getattr(module, attr))
+
+
+@provider
+def _audio_substitutions(native):
+    """The host's rate conversion and input conditioning. host.py
+    from-imports Decimator, so it is listed there too; tnc.Receiver looks
+    Blanker up at construction, so it gets the native one."""
+    from data2g import host, tnc
+
+    A = native.audio
+    return {
+        (tnc, "Decimator"): A.Decimator,
+        (host, "Decimator"): A.Decimator,
+        (host, "Interpolator"): A.Interpolator,
+        (tnc, "Blanker"): A.Blanker,
+    }

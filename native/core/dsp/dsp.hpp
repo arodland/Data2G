@@ -28,6 +28,9 @@ double quantile(std::vector<double> v, double q);
 // window, scale=True. Frequencies in Hz.
 std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz, double fs);
 
+// scipy.signal.firwin(numtaps, cutoff, fs=fs): lowpass, Hamming, scale=True.
+std::vector<double> firwin_lowpass(int numtaps, double cutoff_hz, double fs);
+
 // scipy.signal.hilbert: the analytic signal, via FFT.
 std::vector<cdouble> hilbert(std::span<const double> x);
 

@@ -204,6 +204,20 @@ flags.
   full session.
 - Needs you for: the loopback session check and the first on-air contact.
 
+Status 2026-10-02: device layer landed (no host yet).
+- `core/audio/`: CaptureFifo / PlaybackFifo (host.py Capture / Player
+  semantics, SPSC rings, no lock across a copy), CapturePipeline (channel
+  0, Decimator on the capture thread), device selection, Decimator /
+  Interpolator / Blanker. Tested against a fake card (`test_audio`), clean
+  under TSan; parity in `test_native_audio.py` and `--native` substitutions.
+- `core/audio/qt/` -> `data2g_audio_qt` (`DATA2G_BUILD_QTAUDIO`), and
+  `data2g-audio-check` (list devices, tone loop; not in CI).
+- `core/rig/`: SSTVAE's RigController (plus poll interval 0 = key only) and
+  a Keyer (key, lead, drain, off delay, unkey). `core/rig/hamlib/` ->
+  `data2g_rig` (`DATA2G_BUILD_RIG`, Hamlib 4.7.2 pinned via
+  `cmake/hamlib.cmake`); `test_rig_hamlib` keys a spawned `rigctld -m 1`
+  through model 2.
+
 ### Phase 4: GUI
 
 Status window and settings dialog over the same core. Exit: you use it for a
