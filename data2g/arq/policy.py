@@ -54,6 +54,15 @@ LINK_LOST_S = 90.0
 T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
 LOST_LINK_COST_S = 300.0
 REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
+# after this many bursts in a row lost in the data mode I recommended, data
+# goes only in the mode of the peer's last burst that decoded, until a data
+# burst gets through. On air (recordings/20261002-232711) every fsk16r25
+# poll decoded and 0 of 12 data bursts did, predicted 0.74-0.93: the model had
+# never seen CPM polls measured on a bad channel, and the per-mode bias hopped
+# to unpenalised neighbours.
+# ponytail: a hard floor, not a learned one; the v13 retrain on this branch's
+# sessions should make it rare
+PROVEN_AFTER = 2
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
 WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
 BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
@@ -144,6 +153,8 @@ class GearShifter:
     measured_band: str = "w"
     measured_at: float = 0.0
     heard: str | None = None  # the submode of the peer's last burst
+    proven: str | None = None  # the submode of the peer's last burst whose control decoded
+    data_lost: int = 0  # bursts lost in a row in the data mode I recommended (PROVEN_AFTER)
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
@@ -251,6 +262,12 @@ class GearShifter:
         `usable`: its control decoded, with decoded/sent its data codewords
         alone (counted with them, the control made a 0/7 burst score 1/8);
         None (KISS: no control): any codeword decoded."""
+        if usable:
+            self.proven = submode
+            if sent:
+                self.data_lost = 0
+        elif usable is False and self.log and submode == self.log[-1][0]:
+            self.data_lost += 1
         p = self.predicted.get(submode)
         if p is None or (sent == 0 and usable is None):
             return
@@ -328,7 +345,10 @@ class GearShifter:
         queued = max(CHAT_BYTES, getattr(station, "peer_queued", 0))
         if chat:
             best_v = -float("inf")
-        for s in cands:
+        data_cands = cands
+        if self.data_lost >= PROVEN_AFTER and self.proven is not None and MODES[self.proven] in cands:
+            data_cands = [MODES[self.proven]]
+        for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
                 n = slots_for(s, target)

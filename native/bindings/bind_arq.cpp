@@ -155,6 +155,8 @@ void bind_arq(py::module_& m) {
         .def_readwrite("want_dup", &Shifter::want_dup)
         .def_readwrite("peer_had_data", &Shifter::peer_had_data)
         .def_readwrite("heard", &Shifter::heard)
+        .def_readwrite("proven", &Shifter::proven)
+        .def_readwrite("data_lost", &Shifter::data_lost)
         .def_property("measured",
             [](const Shifter& s) -> py::object { return s.measured ? py::object(to_dict(*s.measured)) : py::none(); },
             [](Shifter& s, const py::object& d) {
