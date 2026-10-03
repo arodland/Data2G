@@ -183,3 +183,21 @@ def test_robust_floor_sends_control_only_bursts_robust():
     st.tx = SimpleNamespace(pending=lambda: True, base=0)
     st.peer_recommend = G.encode("fsk32r62-r1/2")
     assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation
+
+
+def test_lost_data_falls_back_to_the_proven_mode():
+    """Data bursts lost in a row in the mode I recommended (PROVEN_AFTER):
+    data goes in the mode of the peer's last decoded burst until a data
+    burst gets through (on air: fsk16r25 polls all decoded, 0 of 12 data
+    bursts in the model's picks)."""
+    g = G.GearShifter()
+    g.observe(measured(10, 0.1), "qpsk-r1/5", 0.0)
+    g.outcome(G.ROBUST_CONNECT, 0, 0, usable=True)  # its poll decoded
+    st = station(2)
+    for _ in range(G.PROVEN_AFTER):
+        data = G.decode(g.recommend(st)[0])
+        assert data != G.ROBUST_CONNECT
+        g.outcome(data, 0, 0, usable=False)  # the peer's data burst in it: lost
+    assert G.decode(g.recommend(st)[0]) == G.ROBUST_CONNECT
+    g.outcome(G.ROBUST_CONNECT, 3, 3, usable=True)  # data got through: the model picks again
+    assert G.decode(g.recommend(st)[0]) != G.ROBUST_CONNECT

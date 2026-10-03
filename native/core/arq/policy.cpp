@@ -163,6 +163,12 @@ double GearShifter::reply_hold(const StationView& st, std::string_view submode) 
 }
 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
+    if (usable && *usable) {
+        proven = std::string(submode);
+        if (sent) data_lost = 0;
+    } else if (usable && !log.empty() && submode == log.back().data) {
+        ++data_lost;
+    }
     const auto it = predicted.find(submode);
     if (it == predicted.end() || (sent == 0 && !usable)) return;
     const bool ok = usable ? *usable : decoded > 0;
@@ -215,7 +221,12 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     const Mode* best = nullptr;
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
-    for (const Mode* s : cands) {
+    std::vector<const Mode*> data_cands = cands;
+    if (data_lost >= PROVEN_AFTER && proven) {
+        const Mode* pm = &mode_at(*proven);
+        if (std::find(cands.begin(), cands.end(), pm) != cands.end()) data_cands = {pm};
+    }
+    for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);
         for (int hint = 0; hint < static_cast<int>(SIZE_S.size()); ++hint) {
             int n = slots_for(*s, SIZE_S[hint]);
