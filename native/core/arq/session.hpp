@@ -115,7 +115,7 @@ public:
     void set_chat(bool on);
     void listen() { state = SessionState::LISTEN; }
     void connect(const std::string& peer, int cap, double now);
-    void disconnect() { want_disc = true; }
+    void disconnect();
     void write(ByteView data);
     Bytes read();
 
@@ -128,6 +128,7 @@ public:
 
     bool master() const;
     std::optional<double> wake_time();
+    bool disc(double now);  // queue a DISC if asked for and all our data is acked
     std::map<std::string, std::int64_t> stats();
     // session.py's _on_timeout; virtual so a binding can honour an instance
     // override (scripts/linksim.py counts timeouts by wrapping it)

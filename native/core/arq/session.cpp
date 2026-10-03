@@ -134,13 +134,17 @@ TxBurstPtr Session::poll(double now) {
     }
     if (build_at && now >= *build_at && state == SessionState::CONNECTED) {
         build_at.reset();
-        queue(station->build(), now);
-        station->answered();
+        if (!disc(now)) {
+            queue(station->build(), now);
+            station->answered();
+        }
     }
     if (auto w = wake_time(); w && now >= *w) {
         wakes += 1;
         wake_wait = INF;  // until on_tx_end arms the next
-        if (wakes == 1) {
+        if (disc(now)) {
+            log_write(LOG, INFO, "wake: breaking idle with DISC");
+        } else if (wakes == 1) {
             log_write(LOG, INFO, format("wake: breaking idle with %lld B queued", static_cast<long long>(station->new_available())));
             queue(station->build(), now);
         } else {
@@ -172,7 +176,8 @@ std::optional<double> Session::next_event() {
 
 void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     const bool m = master();
-    if (m && (state == SessionState::CONNECTING || live(state))) {
+    // only the caller retries (§6), and a callee's DISC
+    if ((m && (state == SessionState::CONNECTING || state == SessionState::CONNECTED)) || state == SessionState::DISCONNECTING) {
         double wait = tune.reply_start_s;
         // a reply whose header I miss is still on air: don't poll over it
         if (state == SessionState::CONNECTED && station && burst)
@@ -209,12 +214,7 @@ void Session::on_rx(RxBurst& rx, double now) {
         return;
     }
     if (!st->rx.out.empty() || st->last_rx_data || st->tx.pending()) last_data = now;
-    if (want_disc && !st->tx.pending()) {
-        tries = 0;
-        queue(disc_burst(), now);
-        state = SessionState::DISCONNECTING;
-        return;
-    }
+    if (disc(now)) return;
     if (!master()) {
         queue(st->build(), now);
         st->answered();
@@ -255,12 +255,25 @@ void Session::heard(double now) {
     wakes = 0;
 }
 
+void Session::disconnect() {
+    want_disc = true;
+    if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
+}
+
+bool Session::disc(double now) {
+    if (!want_disc || station->tx.pending()) return false;
+    tries = 0;
+    queue(disc_burst(), now);
+    state = SessionState::DISCONNECTING;
+    return true;
+}
+
 std::optional<double> Session::wake_time() {
     Station* st = station.get();
-    if (!st || master() || state != SessionState::CONNECTED || out || want_disc ||
+    if (!st || master() || state != SessionState::CONNECTED || out ||
         wakes >= ((st->chat || st->peer_chat) ? tune.chat_wake_tries : tune.wake_tries) || !st->last_sent)
         return std::nullopt;
-    if (!wakes) {
+    if (!wakes && !(want_disc && !st->tx.pending())) {
         auto it = st->sent_seqs.find(st->latest);
         if ((it != st->sent_seqs.end() && !it->second.empty()) || !st->tx.pending()) return std::nullopt;
     }

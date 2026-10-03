@@ -273,7 +273,10 @@ Where the rest comes from:
     sends per idle period, 6 with chat on. After that the caller's keepalive
     collects the data. Any burst from the caller cancels a wake.
   - The caller answers a burst that arrives while its idle poll waits at once, data
-    or not. It stays the only station that retries on a timeout.
+    or not. It stays the only station that retries on a timeout, except for DISC.
+  - DISCONNECT breaks idle the same way: the caller sends DISC in place of its
+    waiting poll, the callee as a wake. A station with unacked data sends it first.
+    Either side retries its DISC on a timeout (DISC_TRIES).
   - v1 (until 2026-10) let only the caller start turns, polling 2 s after the last
     exchange and doubling to 16 s (2-4 s with chat on): up to 16 s of callee latency,
     and constant keying.

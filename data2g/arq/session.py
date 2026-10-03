@@ -121,6 +121,8 @@ class Session:
 
     def disconnect(self):
         self._want_disc = True
+        if self._build_at is not None:
+            self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
     def write(self, data: bytes):
         if self.station is not None:
@@ -157,13 +159,16 @@ class Session:
             self._on_timeout(now)
         if self._build_at is not None and now >= self._build_at and self.state == CONNECTED:
             self._build_at = None
-            self._queue(self.station.build(), now)
-            self.station.answered()
+            if not self._disc(now):
+                self._queue(self.station.build(), now)
+                self.station.answered()
         if (w := self._wake_time()) is not None and now >= w:
             self._wakes += 1
             self._wake_wait = float("inf")  # until on_tx_end arms the next
             st = self.station
-            if self._wakes == 1:
+            if self._disc(now):
+                log.info("wake: breaking idle with DISC")
+            elif self._wakes == 1:
                 log.info("wake: breaking idle with %d B queued", st._new_available())
                 self._queue(st.build(), now)
             else:
@@ -182,8 +187,9 @@ class Session:
         return min(ts) if ts else None
 
     def on_tx_end(self, burst: L.TxBurst, now: float):
-        """Arm the reply timer (only the caller retries, §6), or the callee's wake."""
-        if self._master and self.state in (CONNECTING, CONNECTED, DISCONNECTING):
+        """Arm the reply timer (only the caller retries, §6, and a callee's
+        DISC), or the callee's wake."""
+        if (self._master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
             hold = getattr(self.policy, "reply_hold", None)
             if hold and self.state == CONNECTED and self.station is not None:
@@ -223,10 +229,7 @@ class Session:
             return
         if st.rx.out or st.last_rx_data or st.tx.pending():
             self._last_data = now  # data moving either way; a sender that hears no data is not idle
-        if self._want_disc and not st.tx.pending():
-            self._tries = 0
-            self._queue(self._disc_burst(), now)
-            self.state = DISCONNECTING
+        if self._disc(now):
             return
         if not self._master:
             self._queue(st.build(), now)
@@ -265,17 +268,27 @@ class Session:
         self._deadline = None
         self._quiet_from, self._wakes = now, 0
 
+    def _disc(self, now: float) -> bool:
+        """Queue a DISC if the host asked for one and all our data is acked."""
+        if not self._want_disc or self.station.tx.pending():
+            return False
+        self._tries = 0
+        self._queue(self._disc_burst(), now)
+        self.state = DISCONNECTING
+        return True
+
     def _wake_time(self) -> float | None:
-        """Callee: when to break idle with queued data, if it may. Only from
-        idle: its last burst carried no data, so the caller's receive state
-        is what this station last heard it ack and a fresh build is exact
-        (link.Station.build). Not while a burst is queued."""
+        """Callee: when to break idle with queued data or a DISC, if it may.
+        Only from idle: its last burst carried no data, so the caller's
+        receive state is what this station last heard it ack and a fresh
+        build is exact (link.Station.build). Not while a burst is queued."""
         st = self.station
-        if (st is None or self._master or self.state != CONNECTED or self._out is not None or self._want_disc
+        if (st is None or self._master or self.state != CONNECTED or self._out is not None
                 or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
                 or st.last_sent is None):
             return None
-        if not self._wakes and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
+        disc = self._want_disc and not st.tx.pending()
+        if not self._wakes and not disc and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
             return None
         return self._quiet_from + self._wake_wait
 

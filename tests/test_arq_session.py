@@ -41,9 +41,10 @@ class Policy:
 
 
 def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0,
-        b_write_at=None, chat=False):
+        b_write_at=None, chat=False, disc_at=None, disc_by="a"):
     """`b_write_at`: the callee writes its data then (idle by then) instead
-    of up front; `ack_loss_first` then loses its first bursts from then on."""
+    of up front; `ack_loss_first` then loses its first bursts from then on.
+    `disc_by` ("a" or "b") disconnects once all data is in, not before `disc_at`."""
     rng = random.Random(seed)
     a = S.Session("W1AW", Policy(random.Random(seed + 1)), rng=random.Random(seed + 2))
     b = S.Session("K2XYZ-7", Policy(random.Random(seed + 3)), rng=random.Random(seed + 4))
@@ -101,14 +102,16 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             stats["b_done"] = t
         assert bytes(got_b) == data_a[:len(got_b)]
         assert bytes(got_a) == data_b[:len(got_a)]
-        if got_a == data_b and got_b == data_a and not disconnect_asked:
-            a.disconnect()
+        if got_a == data_b and got_b == data_a and not disconnect_asked and t >= (disc_at or 0.0):
+            (a if disc_by == "a" else b).disconnect()
             disconnect_asked = True
         if a.state == S.CLOSED and b.state == S.CLOSED and not events and a._out is None and b._out is None:
             break
         nxt = [e[0] for e in events] + [x for x in (s.next_event() for s in (a, b) if not held[id(s)]) if x is not None]
         if b_write_at is not None and stats.get("b_written") is None:
             nxt.append(b_write_at)
+        if disc_at is not None and not disconnect_asked:
+            nxt.append(disc_at)
         if not nxt:
             break
         t = max(t, min(nxt))
@@ -255,6 +258,18 @@ def test_callee_breaks_idle():
     r = run(3, n_a=200, n_b=40, b_write_at=120.0)
     assert r["got_a"] == r["data_b"] and r["collisions"] == 0
     assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[0] - 5
+
+
+@pytest.mark.parametrize("by", ["a", "b"])
+def test_disconnect_breaks_idle(by):
+    """Either side's DISCONNECT on an idle link goes out at once (the
+    callee's as a wake), not at the caller's next keepalive (up to ~32 s
+    late at these times before)."""
+    for at in range(100, 160, 4):
+        r = run(3, n_a=200, n_b=40, disc_at=at, disc_by=by)
+        assert r["a"].state == S.CLOSED and r["b"].state == S.CLOSED and r["collisions"] == 0
+        assert r["a"].close_reason.startswith("disconnected") and r["b"].close_reason.startswith("disconnected")
+        assert r["t"] - at < 8, at
 
 
 @pytest.mark.parametrize("lost", [1, 2, 3])
