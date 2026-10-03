@@ -2,16 +2,20 @@
 stream takes at each payload size, and CPU per codeword including the
 binary search for the prefix that fits.
 
-    python scripts/compress_study.py            # deflate, zstd (stdlib, 3.14)
+    python scripts/compress_study.py [FILE...]  # deflate, zstd (stdlib, 3.14); FILEs: more texts
     uv run --no-project --python 3.14 --with brotli python scripts/compress_study.py
 """
 
 import gzip
+import sys
 import time
 import zlib
 from pathlib import Path
 
 from compression import zstd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data2g.arq.frames import ZDICT  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 P = zstd.CompressionParameter
@@ -51,7 +55,10 @@ def main():
     srcs = {"text docs/arq.md": (ROOT / "docs/arq.md").read_bytes(),
             "code link.py": (ROOT / "data2g/arq/link.py").read_bytes()}
     srcs["gzipped text"] = gzip.compress(srcs["text docs/arq.md"])
+    for f in sys.argv[1:]:  # past a Gutenberg header
+        srcs[Path(f).name] = Path(f).read_bytes()[50000:]
     algs = [("deflate", deflate, 0), ("deflate+4K", deflate, 4096), ("deflate+32K", deflate, 32768),
+            ("zdict+4K", lambda h, x: deflate(ZDICT + h, x), 4096),
             ("zstd3", zs(3), 0), ("zstd19", zs(19), 0), ("zstd3+4K", zs(3), 4096), ("zstd19+4K", zs(19), 4096)]
     try:
         import brotli  # no dictionary in the binding: no history
@@ -59,8 +66,8 @@ def main():
     except ImportError:
         pass
     sizes = (38, 76, 176, 396)
-    for name, d in srcs.items():
-        d = d[:20000]
+    for (name, d), n in ((s, n) for s in srcs.items() for n in (1000, 20000)):
+        d = d[:n]
         print(f"\n{name} ({len(d)} B): fewer codewords x, ms per codeword")
         print(f"{'':12s}" + "".join(f"{pb:>16d}" for pb in sizes))
         for an, f, h in algs:

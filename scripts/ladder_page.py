@@ -27,7 +27,7 @@ import outcome_data as O  # noqa: E402
 
 CH = ("awgn", "mpg", "mpp", "mpd")
 # another mode of no greater width does as well at every channel x 2 dB cell
-# of the outcome data (greedy envelope, <= 0.2% loss; README, CPM section)
+# of the outcome data (greedy envelope, <= 0.2% loss; old README, CPM section)
 COVERED = {"polar-k96-f8", "polar-k192-f8", "n4-16qam-r1/3", "n4-qpsk-r1/2", "n4-qpsk-r2/3", "n4-qpsk-r1/5",
            "n4-ack-8f", "n4-ack-2f", "fsk16r25-r1/3", "fsk8r50-r1/3", "fsk8r50-r1/2", "w48-qpsk-r2/3",
            "w48-16qam-r3/4"}

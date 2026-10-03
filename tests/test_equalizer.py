@@ -1,5 +1,5 @@
 """Pins for the receiver faults found while replacing SSTVAE's EQ.
-Each case failed on the old receiver; see README "Equalizer"."""
+Each case failed on the old receiver; see the old README, "Equalizer"."""
 
 import numpy as np
 from scipy import signal

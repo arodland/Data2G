@@ -34,6 +34,8 @@ import numpy as np
 
 from data2g import codes, modem
 from data2g.arq import frames as F
+from data2g.arq.modes import MODES, ctl_payload_bytes, max_ctl
+from data2g.arq.modes import burst_seconds as mode_seconds
 from data2g.arq import predictor as P
 from data2g.arq import session as S
 from data2g.config import BANDS, FRAME_SAMPLES, FS, LEADIN_SAMPLES, SUBMODES, clip_consts
@@ -284,7 +286,9 @@ def rv_cycle(submode):
 
 
 class FixedPolicy:
-    """One data mode, fixed burst size (the baseline and the validation)."""
+    """One data mode, fixed burst size (the baseline and the validation).
+    Any ARQ mode, CPM included (real-modem sessions only for CPM: the link
+    abstraction models OFDM)."""
 
     def __init__(self, mode, n_cw, connect="qpsk-r1/5"):
         self.mode, self.n_cw, self.connect = mode, n_cw, connect
@@ -293,16 +297,22 @@ class FixedPolicy:
         return self.mode, self.n_cw
 
     def payload_bytes(self, m):
-        return codes.payload_bytes(SUBMODES[m])
+        return codes.payload_bytes(MODES[m])
+
+    def ctl_payload_bytes(self, m):  # CPM: control rides the grid's short codeword
+        return ctl_payload_bytes(MODES[m])
+
+    def max_ctl(self, m):
+        return max_ctl(MODES[m])
 
     def rv_cycle(self, m):
-        return rv_cycle(m)
+        return codes.rv_cycle(MODES[m])
 
     def connect_mode(self, cap, tries=0):
         return self.connect
 
     def airtime(self, m, n_cw, dup=False):
-        return modem.burst_seconds(SUBMODES[m], n_cw)  # OFDM: dup changes nothing
+        return mode_seconds(MODES[m], n_cw, dup)  # OFDM: dup changes nothing
 
     def observe(self, measured, submode, now):
         pass
@@ -469,10 +479,22 @@ def chat(rng, n=10):
 WORKLOADS = {"bulk": bulk, "winlink": winlink, "chat": chat}
 
 
-def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=2):
+# carrier sense on air: data2g.arq.engine holds a burst only while a header
+# is pending, and BUSY shows 0.44-0.79 s into a burst (kisslink)
+CS_S = 0.6
+
+
+def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=2, cs_s=None):
     """-> dict: per-step write and delivery times, delivered bytes, stats.
     `phy`: what carries bursts (default SimPhy on `ch`; scripts/phy_session.py
-    has the real modem)."""
+    has the real modem). As data2g.arq.engine, a station is not polled
+    (nothing is built) while a burst it hears is pending: built earlier and
+    sent after it, a burst can act on a stale ACK, which the callee's wakes
+    turned into protocol fail-safes. `cs_s`: None holds it from when the
+    other's burst is sent until it is handled or ends (perfect carrier
+    sense); a number only for a burst whose header it found, from cs_s into
+    it (CS_S), and an overlap loses both bursts at their receivers (half
+    duplex)."""
     rng = random.Random(seed)
     nprng = np.random.default_rng(seed)
     phy = phy or SimPhy(ch, nprng)
@@ -484,7 +506,8 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
     b.listen()
     a.connect("K2XYZ", cap, 0.0)
     stores = {id(a): {}, id(b): {}}
-    stats = {"mismatch": 0, "bursts": 0, "modes": {}, "airtime": 0.0, "time": {}, "lost_sync": 0, "timeouts": 0}
+    stats = {"mismatch": 0, "bursts": 0, "modes": {}, "airtime": 0.0, "time": {}, "lost_sync": 0, "timeouts": 0,
+             "collisions": 0}
     last_sent = {}
     ot = a._on_timeout
 
@@ -500,6 +523,7 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
     t_write = [None] * len(steps)
     t_done = [None] * len(steps)
     events, air = [], []
+    hold = {id(a): {}, id(b): {}}  # receiver -> {id(burst): hold from}: its polls wait for that burst
     t = 0.0
     while t < horizon:
         # the application: write every step whose prerequisite is delivered
@@ -521,15 +545,24 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
         if all(x is not None for x in t_done):
             break
         for me, other in ((a, b), (b, a)):
+            if any(f <= t for f in hold[id(me)].values()):
+                continue
             burst = me.poll(t)
             if burst is None:
                 continue
             start = t + PTT_S
-            busy = max([e for s_, e, w_ in air[-4:] if w_ is other and e > start], default=None)
-            if busy is not None:
-                start = busy + 0.05
             end, hdr, make_rx, meas = phy.send(burst, start)
-            air.append((start, end, me))
+            hit = [x for x in air[-4:] if x[2] is other and x[0] < end and start < x[1]] if cs_s is not None else []
+            if hit:  # half duplex: neither hears the other's burst
+                stats["collisions"] += 1
+                gone = {id(burst)} | {id(x[4]) for x in hit}
+                events = [e for e in events if not (e[1] in ("header", "rx") and id(e[3]) in gone)]
+                for x in hit:
+                    hold[id(me)].pop(id(x[4]), None)
+                hdr = None
+            if cs_s is None or hdr is not None:
+                hold[id(other)][id(burst)] = float("-inf") if cs_s is None else start + cs_s
+            air.append((start, end, me, hdr is not None, burst))
             stats["bursts"] += 1
             core = F.Core.unpack(burst.slots[0].payload)
             kind = ("repeat" if last_sent.get(id(me)) is burst else "poll" if core.ftype == F.PROBE
@@ -552,7 +585,9 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
             delivered[w] = len(got[w])
         if a.state == S.CLOSED and b.state == S.CLOSED:
             break
-        nxt = [e[0] for e in events] + [x for x in (a.next_event(), b.next_event()) if x is not None]
+        # a held station's timers wait for the burst event that releases it
+        nxt = [e[0] for e in events] + [x for x in (s_.next_event() for s_ in (a, b)
+                                                    if not any(f <= t for f in hold[id(s_)].values())) if x is not None]
         pend = [t_done[after] + think for (_, _, after, think), tw in zip(steps, t_write)
                 if tw is None and after is not None and t_done[after] is not None]
         nxt += [p for p in pend if p > t] + ([t + 0.05] if any(p <= t for p in pend) else [])
@@ -564,14 +599,18 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
         for when, kind, whom, burst, extra in due:
             if kind == "txend":
                 whom.on_tx_end(burst, when)
+                if not any(e[1] == "rx" and e[3] is burst for e in events):
+                    for h in hold.values():
+                        h.pop(id(burst), None)  # not heard: nothing to wait for
             elif kind == "header":
                 whom.on_header(extra[1], extra[2], when)
             else:
                 make_rx, meas, submode = extra
                 whom.policy.observe(meas, submode, when)
                 whom.on_rx(make_rx(stores[id(whom)], stats, rng), when)
+                hold[id(whom)].pop(id(burst), None)
     lat = [d - w for w, d in zip(t_write, t_done) if w is not None and d is not None]
-    return dict(t=t, complete=all(x is not None for x in t_done), latency=lat,
+    return dict(t=t, complete=all(x is not None for x in t_done), latency=lat, t_write=t_write, t_done=t_done,
                 delivered=delivered["a"] + delivered["b"], a_state=a.state, b_state=b.state,
                 reason=(a.close_reason, b.close_reason), **stats)
 

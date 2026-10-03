@@ -39,7 +39,7 @@ before any protocol change is made from it.
   - It must be a no-op on Gaussian noise: the ladder cells at 0 dB and
     -4 dB show no change.
 - **Done when:** a unit test (clicks removed, Gaussian untouched), the
-  numbers above in the README, and the full suite passes.
+  numbers above in the old README, and the full suite passes.
 
 ### 2. KISS channel access (p-persistence)
 

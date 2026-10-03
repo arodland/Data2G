@@ -12,8 +12,7 @@ train = [
     "onnx>=1.23.0",
     "onnxruntime>=1.24.3",
 ]
-# the decoders run on torch (codes.decode)
-tnc = ["torch>=2.13.0", "pyaudio>=0.2.13"]
+tnc = ["pyaudio>=0.2.13"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]
@@ -27,7 +26,7 @@ build-backend = "setuptools.build_meta"
 include = ["data2g*"]
 
 [tool.setuptools.package-data]
-"data2g" = ["codes_data/*", "constellations/*.npy"]
+"data2g" = ["codes_data/*", "constellations/*.npy", "format/*.npz", "arq/zdict.bin"]
 
 [tool.pytest.ini_options]
 markers = ["slow: long-running Monte Carlo checks"]

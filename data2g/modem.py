@@ -213,11 +213,16 @@ def header_bits(submode: int, n_cw: int, band: str = "w") -> np.ndarray:
     return (_word_bits((v << 6) | _crc6(v)) @ header_code(band)) % 2
 
 
+def _signs(words: np.ndarray, band: str) -> np.ndarray:
+    """(W,) 16-bit words -> (W, N) +-1 codewords."""
+    msgs = (words[:, None] >> np.arange(15, -1, -1)) & 1
+    return (1 - 2 * ((msgs @ header_code(band)) % 2)).astype(np.float32)
+
+
 @lru_cache(maxsize=None)
 def _header_signs(band: str) -> np.ndarray:
     """(65536, N) +-1 for every message, message index = the 16-bit word."""
-    msgs = (np.arange(2**16)[:, None] >> np.arange(15, -1, -1)) & 1
-    return (1 - 2 * ((msgs @ header_code(band)) % 2)).astype(np.float32)
+    return _signs(np.arange(2**16), band)
 
 
 @dataclass(frozen=True)
@@ -269,7 +274,9 @@ def _valid_words(band: str, accept: Accept | None = None) -> np.ndarray:
 
 @lru_cache(maxsize=None)
 def _valid_signs(band: str, accept: Accept | None = None) -> np.ndarray:
-    return _header_signs(band)[_valid_words(band, accept)]
+    # the valid words only: ~1/70 of _header_signs' table, built on the
+    # receiver's first header
+    return _signs(_valid_words(band, accept), band)
 
 
 def decode_header(soft: np.ndarray, band: str = "w",

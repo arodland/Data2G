@@ -1,0 +1,583 @@
+"""Phase 2 exit check (docs/native-port-plan.md): the ARQ state-agreement
+fuzz (docs/arq.md §10) on mixed Python / C++ pairs.
+
+Seeded random sessions in all four pairings (Py-Py, Py-C++, C++-Py,
+C++-C++), at three levels:
+- link: two Stations in lockstep through test_arq's fake channel;
+- session: two Sessions on test_arq_session's simulated clock;
+- engine: two Engines through test_engine's simulated audio channel.
+
+Impairments, drawn per seed: asymmetric burst loss, codeword loss with
+soft combining, duplicated receptions, late copies of a sender's earlier
+burst (reordering; the in-order engine never shows it), delayed decode,
+long fades, a peer that restarts mid-session (session: a fresh Session;
+engine: abort), and CRC-valid but corrupted control codewords (link and
+session, own tests).
+
+Three reference behaviours found here, the same in every pairing, are
+fixed (2026-10; docs/native-port-plan.md, Findings): malformed control
+raising, now dropped; a flipped T_COMP bit delivering deflate raw, and
+reordered bursts corrupting the stream, now CRC failures or a bounded
+disconnect.
+
+Every run asserts:
+(a) it ends in delivery or a bounded disconnect. A station's handled
+    bursts without progress while it has data queued never exceed the
+    watchdog's NO_PROGRESS_TURNS x (RESYNCS_BEFORE_FAIL + 1); turns
+    without progress never exceed that times the dead-link bound; a
+    session never stays connected LINK_LOST_S past the last control it
+    decoded.
+(b) each delivered stream is a prefix of what was sent at every point,
+    and all of it at the end of a delivered run.
+(c) link and session: every pairing sends exactly the bursts Py-Py sends
+    (the C++ classes call the same Python policies and random.Random).
+    The engine level runs the pure C++ Engine (its own policy and draws),
+    so there only (a) and (b) apply.
+
+The default run is a sample; `-m slow` runs the long sweep.
+"""
+
+import random
+
+import numpy as np
+import pytest
+
+from data2g.arq import engine as E
+from data2g.arq import frames as F
+from data2g.arq import link as L
+from data2g.arq import session as S
+from data2g.config import SNR_REF_BW_HZ
+
+from test_arq import (FakeRx, RandomPolicy, Script, clean, finish, late_burst_from_before_an_abandon,
+                      late_burst_with_a_stale_ack, payload)
+from test_arq_session import DECODE_S, HEADER_S, PTT_S
+from test_arq_session import Policy as SessionPolicy
+from test_engine import BLOCK
+from test_native_arq_link import _burst, pure  # noqa: F401 (fixture)
+
+WATCHDOG = L.NO_PROGRESS_TURNS * (L.RESYNCS_BEFORE_FAIL + 1)  # handled bursts without progress, then FAILED
+# turns between progress: each counted handle can be separated by at most
+# LINK_LOST_MISSES + 1 timeouts, and one more burst from the peer
+TURN_BOUND = (WATCHDOG + 1) * (L.LINK_LOST_MISSES + 2)
+
+
+def impl(native, which):
+    """(Station, Session) of one implementation. Python's are the
+    originals, whether or not --native substituted them (the `pure`
+    fixture has restored them by the time this runs)."""
+    return (L.Station, S.Session) if which == "py" else (native.arq.Station, native.arq.Session)
+
+
+PAIRS = [("py", "py"), ("py", "cpp"), ("cpp", "py"), ("cpp", "cpp")]
+
+
+class Channel(FakeRx):
+    """FakeRx, plus: one control codeword corrupted (CRC still passing)
+    with probability p_corrupt. The draw is always made, so loss patterns
+    don't depend on it."""
+
+    def __init__(self, burst, rng, p_cw, store, stats, p_corrupt=0.0):
+        super().__init__(burst, rng, p_cw, store, stats)
+        self.bad = None
+        if rng.random() < p_corrupt:
+            n_ctl = sum(s.mask_id[2] >= F.SEQ_MOD for s in burst.slots)
+            i = rng.randrange(n_ctl)
+            n = len(burst.slots[i].payload)
+            # mostly past the 4-byte core: the TLVs are where malformed lives
+            pos = rng.randrange(4, n) if n > 4 and rng.random() < 0.7 else rng.randrange(n)
+            self.bad = (i, pos, rng.randrange(1, 256))
+            stats["corrupted"] = stats.get("corrupted", 0) + 1
+
+    def decode(self, i, mask_id, rv, key):
+        p = super().decode(i, mask_id, rv, key)
+        if p is not None and self.bad and i == self.bad[0] and mask_id[2] >= F.SEQ_MOD:
+            b = bytearray(p)
+            b[self.bad[1]] ^= self.bad[2]
+            p = bytes(b)
+        return p
+
+
+def progress_of(stations):
+    """Rises whenever any stream moves: a delivery, or a base advanced."""
+    return sum(s.rx.cum + s.tx.base for s in stations if s is not None)
+
+
+# --- scenarios ----------------------------------------------------------------------------
+
+def link_scenario(seed, corrupt=False):
+    r = random.Random(seed * 7919 + 17)
+    p_ab = r.choice([0.0, 0.0, 0.05, 0.1, 0.2, 0.3])
+    sc = dict(
+        seed=seed, p=(p_ab, p_ab if r.random() < 0.5 else r.choice([0.0, 0.05, 0.2, 0.4, 0.6])),
+        p_cw=r.choice([0.0, 0.05, 0.1, 0.2, 0.3]), p_dup=r.choice([0.0, 0.05, 0.2]),
+        p_late=r.choice([0.0, 0.0, 0.0, 0.03, 0.1]),
+        fade=(r.randrange(0, 150), r.choice([3, 8, 12, 30])) if r.random() < 0.3 else None,
+        kind=r.choice(["random", "text", "mixed"]),
+        modes=r.choice([("m4", "m22", "m46"), ("m4", "m46", "c60", "c40"), ("m22",), ("m46", "c60")]),
+        max_cw=r.choice([2, 3, 10, 20, 64]), change=r.choice([0.05, 0.2, 0.5]),
+        n=(r.randrange(0, 6000), r.randrange(0, 2500)), p_corrupt=0.0)
+    if corrupt:
+        sc.update(p_corrupt=r.choice([0.02, 0.05, 0.1]), p_late=0.0, fade=None)
+    return sc
+
+
+def lockstep(sc, cls_a, cls_b, max_turns=30000):
+    """Two stations, one burst per turn, the master retrying on timeouts.
+    -> (trace of every burst sent, outcome, stats)."""
+    seed = sc["seed"]
+    rng = random.Random(seed)
+    data_a, data_b = payload(rng, sc["n"][0], sc["kind"]), payload(rng, sc["n"][1], sc["kind"])
+    pol = lambda k: RandomPolicy(random.Random(seed + k), sc["change"], sc["modes"], sc["max_cw"])
+    a, b = cls_a(0, pol(1), master=True), cls_b(1, pol(2))
+    a.write(data_a)
+    b.write(data_b)
+    stores, stats, trace = {0: {}, 1: {}}, {"mismatch": 0}, []
+    got_a, got_b = bytearray(), bytearray()
+    count = {0: 0, 1: 0}  # per station: handled bursts without progress, its data queued
+    last_progress, prog = 0, progress_of((a, b))
+    prev = {0: None, 1: None}  # each sender's previous burst (late copies)
+    burst, sender = a.build(), a
+    stats["max_count"] = stats["max_turns"] = 0
+    for turn in range(max_turns):
+        trace.append((sender.direction, _burst(burst)))
+        receiver = b if sender is a else a
+        fade = sc["fade"] and sc["fade"][0] <= turn < sc["fade"][0] + sc["fade"][1]
+        heard = []
+        if not fade and rng.random() >= sc["p"][sender.direction]:
+            heard.append(burst)
+            if rng.random() < sc["p_dup"]:
+                heard.append(burst)
+        if prev[sender.direction] is not None and rng.random() < sc["p_late"]:
+            heard.append(prev[sender.direction])  # the previous burst, decoded late
+            stats["late"] = stats.get("late", 0) + 1
+        prev[sender.direction] = burst
+        ok = False
+        for x in heard:
+            before = receiver.stats["rx_ok"]
+            ok = receiver.handle(Channel(x, rng, sc["p_cw"], stores[receiver.direction], stats, sc["p_corrupt"])) or ok
+            if receiver.state == L.FAILED:
+                break
+            now = progress_of((a, b))
+            if now != prog:
+                prog, last_progress, count = now, turn, {0: 0, 1: 0}
+            elif receiver.stats["rx_ok"] > before and receiver.tx.pending():
+                count[receiver.direction] += 1
+                stats["max_count"] = max(stats["max_count"], count[receiver.direction])
+                assert count[receiver.direction] <= WATCHDOG, ("no progress past the watchdog", turn, count)
+        stats["max_turns"] = max(stats["max_turns"], turn - last_progress)
+        assert turn - last_progress <= TURN_BOUND, ("turns without progress", turn, last_progress)
+        got_a += a.read()
+        got_b += b.read()
+        assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)], "stream corrupted"
+        if a.state == L.FAILED or b.state == L.FAILED:
+            return trace, ("failed", a.fail_reason or b.fail_reason), stats
+        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+            return trace, ("done", a.tx.acked, b.tx.acked), stats
+        if ok:
+            burst, sender = receiver.build(), receiver
+            receiver.answered()
+        else:
+            burst, sender = a.on_timeout(), a
+            if burst is None:
+                return trace, ("failed", a.fail_reason), stats
+    return trace, ("stuck",), stats
+
+
+def session_scenario(seed, corrupt=False):
+    r = random.Random(seed * 104729 + 3)
+    p_ab = r.choice([0.0, 0.0, 0.05, 0.15, 0.25])
+    sc = dict(
+        seed=seed, p=(p_ab, p_ab if r.random() < 0.5 else r.choice([0.0, 0.1, 0.3, 0.5])),
+        p_cw=r.choice([0.0, 0.1, 0.2]), p_dup=r.choice([0.0, 0.05, 0.2]),
+        p_late=r.choice([0.0, 0.0, 0.0, 0.03, 0.1]), delay=r.choice([0.0, 0.0, 0.5, 1.2]),
+        fades=[(r.uniform(5, 300), r.choice([5.0, 20.0, 60.0, 120.0])) for _ in range(r.choice([0, 0, 1, 2]))],
+        restart=(r.choice("ab"), r.uniform(3, 200)) if r.random() < 0.15 else None,
+        n=(r.randrange(0, 4000), r.randrange(0, 1500)), chat=r.random() < 0.2, p_corrupt=0.0,
+        b_write_at=r.uniform(30, 200) if r.random() < 0.2 else None)
+    if corrupt:
+        sc.update(p_corrupt=r.choice([0.02, 0.05, 0.1]), p_late=0.0, fades=[], restart=None)
+    return sc
+
+
+def sessions(sc, cls_a, cls_b, horizon=8000.0):
+    """test_arq_session.run with the scenario's channel. -> (trace,
+    outcome, stats)."""
+    seed = sc["seed"]
+    rng = random.Random(seed)
+    data_a = bytes(rng.randrange(256) for _ in range(sc["n"][0]))
+    data_b = bytes(rng.randrange(256) for _ in range(sc["n"][1]))
+    a = cls_a("W1AW", SessionPolicy(random.Random(seed + 1)), rng=random.Random(seed + 2))
+    b = cls_b("K2XYZ-7", SessionPolicy(random.Random(seed + 3)), rng=random.Random(seed + 4))
+    for s in (a, b):
+        s.set_chat(sc["chat"])
+    b.listen()
+    a.write(data_a)
+    if sc["b_write_at"] is None:
+        b.write(data_b)
+    a.connect("K2XYZ-7", 2, 0.0)
+    stores = {"a": {}, "b": {}}
+    stats = {"mismatch": 0, "collisions": 0, "max_count": 0, "max_quiet": 0.0}
+    trace, air, events = [], [], []
+    who = {"a": a, "b": b}
+    held = {"a": set(), "b": set()}
+    got = {"a": bytearray(), "b": bytearray()}  # what a / b delivered (from the original instances only)
+    orig = {"a": a, "b": b}
+    count = {"a": 0, "b": 0}
+    last_ok = {"a": 0.0, "b": 0.0}  # last control decoded by each, while connected
+    prog = 0
+    disconnect_asked = b_written = restarted = False
+    t = 0.0
+    while t < horizon:
+        if sc["b_write_at"] is not None and not b_written and t >= sc["b_write_at"]:
+            orig["b"].write(data_b)
+            b_written = True
+        if sc["restart"] and not restarted and t >= sc["restart"][1]:
+            tag = sc["restart"][0]
+            cls = cls_a if tag == "a" else cls_b
+            fresh = cls(who[tag].call, SessionPolicy(random.Random(seed + 5)), rng=random.Random(seed + 6))
+            if tag == "b":
+                fresh.listen()
+            who[tag], held[tag], restarted = fresh, set(), True
+            events = [e for e in events if e[2] != tag]  # its pending receptions die with it
+            stats["restarted"] = t
+        for tag, other in (("a", "b"), ("b", "a")):
+            me = who[tag]
+            if held[tag]:
+                continue
+            burst = me.poll(t)
+            if burst is None:
+                continue
+            trace.append((tag, round(t, 9), _burst(burst)))
+            start = t + PTT_S
+            busy = max([e for s, e, w in air[-4:] if w == other and e > start], default=None)
+            if busy is not None:
+                start = busy + 0.05
+            end = start + me.policy.airtime(burst.submode, len(burst.slots))
+            if any(s < end and start < e for s, e, _ in air[-4:]):
+                stats["collisions"] += 1
+            air.append((start, end, tag))
+            events.append((end, "txend", tag, burst))
+            lost = any(f0 <= start < f0 + fl for f0, fl in sc["fades"]) or rng.random() < sc["p"][tag == "b"]
+            if not lost:
+                held[other].add(id(burst))
+                events.append((start + HEADER_S, "header", other, burst))
+                events.append((end + DECODE_S + sc["delay"], "rx", other, burst))
+                if rng.random() < sc["p_dup"]:
+                    events.append((end + DECODE_S + sc["delay"], "rx", other, burst))
+            if rng.random() < sc["p_late"]:  # a late copy, decoded after whatever comes next
+                events.append((end + DECODE_S + sc["delay"] + rng.uniform(2.0, 6.0), "late", other, burst))
+                stats["late"] = stats.get("late", 0) + 1
+        for tag in "ab":
+            got[tag] += orig[tag].read()
+        assert bytes(got["b"]) == data_a[:len(got["b"])] and bytes(got["a"]) == data_b[:len(got["a"])], \
+            "stream corrupted"
+        if restarted:
+            assert not who[sc["restart"][0]].read() or who[sc["restart"][0]] is orig[sc["restart"][0]]
+        done = bytes(got["a"]) == data_b and bytes(got["b"]) == data_a and (b_written or sc["b_write_at"] is None)
+        if done and not disconnect_asked:
+            who["a"].disconnect()
+            disconnect_asked = True
+        if all(who[x].state in (S.CLOSED, S.IDLE, S.LISTEN) for x in "ab") and not events \
+                and who["a"]._out is None and who["b"]._out is None:
+            break
+        for tag in "ab":
+            if who[tag].state == S.CONNECTED:
+                stats["max_quiet"] = max(stats["max_quiet"], t - last_ok[tag])
+                # closes at LINK_LOST_S; a reply on air then may still land
+                assert t - last_ok[tag] <= S.LINK_LOST_S + 15, ("connected past the dead-link bound", tag, t)
+        nxt = [e[0] for e in events] + [x for x in (who[g].next_event() for g in "ab" if not held[g]) if x is not None]
+        if sc["b_write_at"] is not None and not b_written:
+            nxt.append(sc["b_write_at"])
+        if sc["restart"] and not restarted:
+            nxt.append(sc["restart"][1])
+        if not nxt:
+            break
+        t = max(t, min(nxt))
+        due = sorted([e for e in events if e[0] <= t], key=lambda e: e[0])
+        events = [e for e in events if e[0] > t]
+        for when, kind, tag, burst in due:
+            me = who[tag]
+            if kind == "txend":
+                me.on_tx_end(burst, when)
+                if not any(e[1] == "rx" and e[3] is burst for e in events):
+                    for g in "ab":
+                        held[g].discard(id(burst))
+            elif kind == "header":
+                me.on_header(burst.submode, len(burst.slots), when)
+            else:
+                if kind == "late":
+                    stats["late_heard"] = stats.get("late_heard", 0) + 1
+                st = me.station
+                before = st.stats["rx_ok"] if st is not None else 0
+                was = me.state
+                me.on_rx(Channel(burst, rng, sc["p_cw"], stores[tag], stats, sc["p_corrupt"]), when)
+                if kind == "rx":
+                    held[tag].discard(id(burst))
+                st = me.station
+                if st is None:
+                    continue
+                if me.state == S.CONNECTED and (was != S.CONNECTED or st.stats["rx_ok"] > before):
+                    last_ok[tag] = when
+                now = progress_of([x.station for x in who.values()])
+                if now != prog:
+                    prog, count = now, {"a": 0, "b": 0}
+                elif st.stats["rx_ok"] > before and st.tx.pending():
+                    count[tag] += 1
+                    stats["max_count"] = max(stats["max_count"], count[tag])
+                    assert count[tag] <= WATCHDOG, ("no progress past the watchdog", tag, when)
+    a, b = who["a"], who["b"]
+    outcome = (bytes(got["a"]), bytes(got["b"]), round(t, 9), a.state, b.state, a.close_reason, b.close_reason,
+               stats["mismatch"], stats["collisions"])
+    return trace, outcome, dict(stats, done=bytes(got["a"]) == data_b and bytes(got["b"]) == data_a, t=t,
+                                horizon=t >= horizon, data=(data_a, data_b))
+
+
+# --- running the four pairings --------------------------------------------------------------
+
+def run_pairs(fn, sc, native):
+    """fn in all four pairings: every one sends Py-Py's bursts and ends the
+    same way."""
+    out = {pair: fn(sc, *[impl(native, w)[fn is sessions] for w in pair]) for pair in PAIRS}
+    ref = out[("py", "py")]
+    for pair, got in out.items():
+        assert got[1] == ref[1], (pair, got[1], ref[1])
+        assert got[0] == ref[0], (pair, "bursts differ")
+    return ref
+
+
+def check_link(sc, native):
+    trace, outcome, stats = run_pairs(lockstep, sc, native)
+    assert outcome[0] in ("done", "failed"), (outcome, stats)
+    if not (sc["p_late"] or sc["p_corrupt"]):
+        # only the clock or the watchdog ends a link, and nothing is ever mapped wrong
+        assert outcome[0] == "done" or outcome[1] in ("link lost", "no progress"), outcome
+        assert stats["mismatch"] == 0, stats
+    return outcome, stats
+
+
+def check_session(sc, native):
+    trace, outcome, stats = run_pairs(sessions, sc, native)
+    assert not stats["horizon"], ("still running at the horizon", outcome[3:7])
+    if not sc["p_late"]:  # a late copy is answered like any burst, whoever is on air
+        assert outcome[8] == 0, "collisions"
+    if not (sc["p_late"] or sc["p_corrupt"]):
+        # only clocks and the watchdog close a session; no protocol check ever trips
+        assert "protocol" not in outcome[5] + outcome[6], outcome[5:7]
+    if not stats["done"]:
+        # a disconnect (or a restarted station that never heard of the session)
+        assert outcome[3] in (S.CLOSED, S.IDLE) and outcome[4] in (S.CLOSED, S.LISTEN, S.IDLE), outcome[3:7]
+    return outcome, stats
+
+
+DEFAULT_LINK, SLOW_LINK = range(0, 200), range(200, 2200)
+DEFAULT_SESSION, SLOW_SESSION = range(0, 100), range(100, 1100)
+
+
+@pytest.mark.parametrize("seed", DEFAULT_LINK)
+def test_link_fuzz(native, pure, seed):
+    check_link(link_scenario(seed), native)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", SLOW_LINK)
+def test_link_fuzz_sweep(native, pure, seed):
+    check_link(link_scenario(seed), native)
+
+
+@pytest.mark.parametrize("seed", DEFAULT_SESSION)
+def test_session_fuzz(native, pure, seed):
+    check_session(session_scenario(seed), native)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", SLOW_SESSION)
+def test_session_fuzz_sweep(native, pure, seed):
+    check_session(session_scenario(seed), native)
+
+
+# --- CRC-valid corrupted control codewords --------------------------------------------------
+# A false CRC accept (2^-16 per control codeword on noise) hands the
+# station a control word that is wrong but well framed. It is dropped as
+# malformed, ends the link on a protocol check, or costs progress until the
+# watchdog resyncs; it never raises or corrupts. Before 2026-10, 91 of the
+# 560 link runs and 32 of the 340 session runs raised, and 23 link runs
+# delivered a deflated codeword raw (its T_COMP bit flipped).
+
+CORRUPT_LINK, SLOW_CORRUPT_LINK = range(2000, 2060), range(2060, 2560)
+CORRUPT_SESSION, SLOW_CORRUPT_SESSION = range(3000, 3040), range(3040, 3340)
+
+
+@pytest.mark.parametrize("seed", CORRUPT_LINK)
+def test_link_corrupt_control(native, pure, seed):
+    check_link(link_scenario(seed, corrupt=True), native)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", SLOW_CORRUPT_LINK)
+def test_link_corrupt_control_sweep(native, pure, seed):
+    check_link(link_scenario(seed, corrupt=True), native)
+
+
+@pytest.mark.parametrize("seed", CORRUPT_SESSION)
+def test_session_corrupt_control(native, pure, seed):
+    check_session(session_scenario(seed, corrupt=True), native)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", SLOW_CORRUPT_SESSION)
+def test_session_corrupt_control_sweep(native, pure, seed):
+    check_session(session_scenario(seed, corrupt=True), native)
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_malformed_control_dropped(native, pure, which):
+    """The smallest case that used to raise: a CRC-valid control word whose
+    T_RV is shorter than its K resends. Dropped, as a failed control."""
+    cls = impl(native, which)[0]
+    b = cls(1, Script([("m22", 1)]))
+    ctl = F.Control(F.Core(k=5, acted_on=7), {F.T_RV: b"\x00"}).pack(22)
+    slots = [L.Slot(L.ctl_mask(0, 0), 0, ctl[0])] + [L.Slot(L.data_mask(0, i), 0, bytes(22)) for i in range(5)]
+    assert not b.handle(clean(L.TxBurst("m22", slots, 0)))
+    assert b.state == L.ACTIVE and b.stats["rx_lost"] == 1
+
+
+# --- late bursts: minimized reproducers -------------------------------------------------------
+# A burst heard after a later one from the same sender (true reordering;
+# the half-duplex engine decodes in order, so not expected on air). Found
+# here corrupting the stream in both implementations; fixed 2026-10 by the
+# abandon epoch in the data CRC identity and the ACK rules of docs/arq.md
+# §4. The scenarios live in test_arq (pure Python); here on both classes.
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_late_burst_from_before_an_abandon(native, pure, which):
+    late_burst_from_before_an_abandon(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_late_burst_with_a_stale_ack(native, pure, which):
+    late_burst_with_a_stale_ack(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_flipped_comp_bit(native, pure, which):
+    """The smallest T_COMP case: a's first burst carries one deflated
+    codeword; its control arrives CRC-valid with the T_COMP bit cleared.
+    The codeword's CRC identity includes its compression, so it fails as
+    raw, and the watchdog's resync re-slices it."""
+    cls = impl(native, which)[0]
+    a = cls(0, Script([("m46", 2)]), master=True)
+    b = cls(1, Script([("m46", 1)]))
+    data = b"CQ CQ de W1AW QTH FN31 RST 599 " * 20 + bytes(range(256))
+    a.write(data)
+    burst = a.build()
+    a.answered()
+    ctl = F.Control.unpack([burst.slots[0].payload])
+    assert ctl.ext[F.T_COMP] == b"\x80"  # its one data codeword is deflated
+    ctl.ext[F.T_COMP] = b"\x00"
+    burst.slots[0] = L.Slot(burst.slots[0].mask_id, 0, F.Control(ctl.core, ctl.ext).pack(46)[0])
+    got = finish(a, b, burst)  # the rest of the stream, lossless
+    assert got == data
+
+
+# --- engines through the simulated audio channel ----------------------------------------------
+# test_engine.link with an impairment per direction: SNR, fades (signal
+# gone, noise stays), a delay in blocks, and one side aborting mid-session
+# (Engine.abort: no DISC) then listening again. Python Engine against the
+# pure C++ Engine (GearPolicy and draws of its own), so no burst equality.
+
+def engine_scenario(seed):
+    r = random.Random(seed * 31337 + 5)
+    return dict(seed=seed, snr=(r.choice([9, 12, 20]), r.choice([9, 12, 20])), delay=(r.randrange(3), r.randrange(3)),
+                fades=[(r.uniform(3, 30), r.choice([1.5, 4.0, 10.0, 100.0]), r.randrange(3))
+                       for _ in range(r.choice([0, 1, 2]))],
+                abort=(r.choice("ab"), r.uniform(5, 25)) if r.random() < 0.25 else None,
+                n=(r.randrange(1000, 8000), r.randrange(0, 1500)))
+
+
+def engines(sc, a, b, limit_s=400.0):
+    """-> (outcome, stats). Steps both engines in 0.1 s blocks."""
+    rng = np.random.default_rng(sc["seed"])
+    data = random.Random(sc["seed"])
+    up = bytes(data.randrange(256) for _ in range(sc["n"][0] // 2)) + (b"CQ de W1AW QTH FN31 RST 599 73 " * 99)[
+        :sc["n"][0] - sc["n"][0] // 2]
+    down = bytes(data.randrange(256) for _ in range(sc["n"][1]))
+    sigma = [np.sqrt((E.FS / 2) / SNR_REF_BW_HZ / 10 ** (s / 10)) for s in sc["snr"]]
+    lines = [[np.zeros(BLOCK)] * (d + 1) for d in sc["delay"]]  # a->b, b->a
+    got = {"a": bytearray(), "b": bytearray()}
+    st = {"max_count": 0}
+    count, last_ok, prog = {"a": 0, "b": 0}, {"a": 0.0, "b": 0.0}, 0
+    phase, written, aborted, t = "connect", False, False, 0.0
+    b.listen()
+    a.connect(b.call, 2)
+    eng = {"a": a, "b": b}
+    for k in range(int(limit_s * 10)):
+        t = k / 10
+        gain = [0.0 if any(f0 <= t < f0 + fl and w in (d, 2) for f0, fl, w in sc["fades"]) else 2.2 for d in (0, 1)]
+        oa, _ = a.step(gain[1] * lines[1][0] + rng.normal(0, sigma[1], BLOCK))
+        ob, _ = b.step(gain[0] * lines[0][0] + rng.normal(0, sigma[0], BLOCK))
+        lines = [lines[0][1:] + [oa], lines[1][1:] + [ob]]
+        sa, sb = a.session, b.session
+        if phase == "connect" and sa.state == S.CONNECTED and sb.state == S.CONNECTED:
+            sa.write(up)
+            sb.write(down)
+            phase, written = "data", True
+        if written:
+            got["b"] += sb.read() if sb.station is not None else b""
+            got["a"] += sa.read() if sa.station is not None else b""
+        assert bytes(got["b"]) == up[:len(got["b"])] and bytes(got["a"]) == down[:len(got["a"])], "stream corrupted"
+        if sc["abort"] and not aborted and written and t >= sc["abort"][1]:
+            eng[sc["abort"][0]].abort()
+            if sc["abort"][0] == "b":
+                b.listen()
+            aborted, st["aborted"] = True, t
+        if phase == "data" and bytes(got["b"]) == up and bytes(got["a"]) == down:
+            sa.disconnect()
+            phase, st["delivered"] = "disc", t
+        for tag in "ab":
+            s = eng[tag].session
+            if s.state == S.CONNECTED:
+                ok = s.station.stats["rx_ok"]
+                if ok > last_ok.get(tag + "n", 0):
+                    last_ok[tag], last_ok[tag + "n"] = t, ok
+                    stations = [x.session.station for x in (a, b) if x.session.state == S.CONNECTED]
+                    now = progress_of(stations)
+                    if now != prog:
+                        prog, count = now, {"a": 0, "b": 0}
+                    elif s.station.tx.pending():
+                        count[tag] += 1
+                        st["max_count"] = max(st["max_count"], count[tag])
+                        assert count[tag] <= WATCHDOG, ("no progress past the watchdog", tag, t)
+                assert t - last_ok[tag] <= S.LINK_LOST_S + 15, ("connected past the dead-link bound", tag, t)
+            else:
+                last_ok[tag], last_ok[tag + "n"] = t, 0
+        settled = all(eng[g].session.state in (S.CLOSED, S.LISTEN, S.IDLE) for g in "ab")
+        if settled and (phase != "connect" or t > 60):
+            break
+    return (phase, a.session.state, b.session.state, a.session.close_reason, b.session.close_reason), dict(
+        st, t=t, settled=settled, delivered=bytes(got["b"]) == up and bytes(got["a"]) == down)
+
+
+def check_engines(sc, native, reference):
+    py = lambda call, seed: reference(E, "Engine")(call, seed=seed)
+    cc = lambda call, seed: native.engine.Engine(call, seed=seed)
+    for wa, wb in PAIRS:
+        a = (py if wa == "py" else cc)("W1AW", sc["seed"] * 2 + 1)
+        b = (py if wb == "py" else cc)("K2XYZ", sc["seed"] * 2 + 2)
+        outcome, st = engines(sc, a, b)
+        assert st["settled"], ("still running at the limit", (wa, wb), outcome)
+        if not (sc["abort"] or any(fl > 60 for _, fl, _ in sc["fades"])):
+            assert st["delivered"], ((wa, wb), outcome)
+
+
+DEFAULT_ENGINE = (2, 4, 9)  # delivered through fades; the link-lost ones (~25 s each) are in the sweep
+
+
+@pytest.mark.parametrize("seed", DEFAULT_ENGINE)
+def test_engine_fuzz(native, pure, reference, seed):
+    check_engines(engine_scenario(seed), native, reference)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [s for s in range(30) if s not in DEFAULT_ENGINE])
+def test_engine_fuzz_sweep(native, pure, reference, seed):
+    check_engines(engine_scenario(seed), native, reference)

@@ -3,6 +3,8 @@ on the sample clock: connect, data both ways, disconnect."""
 
 import numpy as np
 
+from data2g.arq import frames as F
+from data2g.arq import phy as PHY
 from data2g.arq import session as S
 from data2g.arq.engine import Engine
 from data2g.config import FS, SNR_REF_BW_HZ
@@ -52,6 +54,77 @@ def test_connect_exchange_disconnect(tmp_path):
     assert ev_a[-1].startswith("DISCONNECTED") and ev_b[-1].startswith("DISCONNECTED")
     log = (tmp_path / "a" / "events.jsonl").read_text()
     assert '"kind": "tx"' in log and '"kind": "rx"' in log and list((tmp_path / "a").glob("rx_*.npz"))
+
+
+def test_id_frames_during_and_after_a_session(tmp_path):
+    """ID frames (mask 0): each station's goes ahead of its own turn when due
+    and once more after the session, and the peer hears every one without
+    the session minding (data still flows, nothing times out)."""
+    a, b = Engine("W1AW", seed=21, record_dir=tmp_path / "a"), Engine("K2XYZ", seed=22)
+    a.id_interval_s = b.id_interval_s = 3.0
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    key = a.session.station.key
+    up, down = bytes(range(256)) * 40, bytes(range(255, -1, -1)) * 20
+    a.session.write(up)
+    b.session.write(down)
+    got_a, got_b, ev_a, ev_b = bytearray(), bytearray(), [], []
+
+    def done():
+        got_a.extend(a.session.read())
+        got_b.extend(b.session.read())
+        ev_a.extend(a.events())
+        ev_b.extend(b.events())
+        return len(got_b) >= len(up) and len(got_a) >= len(down)
+    assert link(a, b, 12, 240, done, seed=3)
+    assert bytes(got_b) == up and bytes(got_a) == down
+    assert f"ID W1AW {key}" in ev_b and f"ID K2XYZ {key}" in ev_a
+    assert a.session.station.stats.get("timeouts", 0) == 0
+    a.session.disconnect()
+    assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=4)
+    ev_a.extend(a.events())
+    ev_b.extend(b.events())
+    n_a, n_b = ev_a.count(f"ID K2XYZ {key}"), ev_b.count(f"ID W1AW {key}")
+
+    def last_ids():  # B's after its DISC_ACK, A's ID_GUARD_S after it closed
+        ev_a.extend(a.events())
+        ev_b.extend(b.events())
+        return ev_a.count(f"ID K2XYZ {key}") > n_a and ev_b.count(f"ID W1AW {key}") > n_b
+    assert link(a, b, 12, 30, last_ids, seed=5)
+    # an ID ahead of a turn is recorded as its own burst, the turn starting where it ends
+    import json
+
+    tx = [e for e in map(json.loads, open(tmp_path / "a" / "events.jsonl")) if e["kind"] == "tx"]
+    is_id = lambda e: bytes.fromhex(e["slots"][0]["payload"])[4:5] == bytes([F.T_ID])  # noqa: E731 (first TLV's type)
+    pairs = [(p, q) for p, q in zip(tx, tx[1:]) if is_id(p) and q["slots"][0]["mask"][0]]
+    assert pairs and all(abs(q["t"] - (p["t"] + p["seconds"])) < 1e-9 for p, q in pairs)
+
+
+def test_malformed_cq_and_id_frames_are_dropped():
+    """A CRC-valid CQ or ID frame that can't be read (callsign codes past the
+    alphabet, a short body) is dropped, not raised out of the receiver; a
+    good ID frame is notified, a name with a space and all."""
+    from data2g.arq import link as L
+    from data2g.arq.policy import GearShifter
+
+    mode = GearShifter().connect_mode(2)
+    pb = GearShifter().payload_bytes(mode)
+
+    def heard(ext, body):
+        e = Engine("W1AW", seed=31)
+        slots = [L.Slot(L.ctl_mask(0, i, 0), 0, p)
+                 for i, p in enumerate(F.Control(F.Core(ftype=F.SESSION), {ext: body}).pack(pb))]
+        x = np.concatenate([np.zeros(FS // 2), PHY.tx_audio(L.TxBurst(mode, slots, 0)), np.zeros(2 * FS)])
+        for i in range(0, len(x) - BLOCK + 1, BLOCK):
+            e.step(x[i:i + BLOCK])
+        return e.events()
+
+    bad_call = b"\xff" * 8  # code 63 everywhere: past the 39-character alphabet
+    for ext, body in ((F.T_ID, bad_call + b"\x00\x01"), (F.T_ID, b"\x01"), (F.T_CQ, bad_call + b"\x02"),
+                      (F.T_CQ, b"\x01")):
+        assert heard(ext, body) == [], (ext, body)
+    assert heard(F.T_ID, F.pack_call("VARA KISS") + b"\x12\x34") == ["ID VARA KISS 4660"]
 
 
 def test_vara_commands_drive_a_session(tmp_path):

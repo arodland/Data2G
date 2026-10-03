@@ -9,9 +9,11 @@ around link.Station. Driven by its caller's clock:
 Timers are absolute times; nothing here sleeps. The same object runs in
 the simulator (scripts/linksim.py) and on the air.
 
-v1 idle rule (differs from docs/arq.md §6, see §6a there): only the
-caller starts turns. While idle it polls with a backoff (KEEPALIVE_S),
-and the callee's new data rides its reply to the next poll.
+Idle rule (docs/arq.md §6a): the caller keeps the link alive with a
+poll after a random 15-30 s (KEEPALIVE_S). The callee may break idle with its new
+data (a wake burst, WAKE_*), but owns no retry timer: any burst from the
+caller cancels its wake, and the caller stays the only station that
+retries on a timeout.
 """
 
 import logging
@@ -22,19 +24,32 @@ from . import frames as F
 from . import link as L
 
 T_SESS = 10  # extension type carrying a session frame
-VERSION = 2  # 2: T_COMP (a v1 peer would deliver compressed codewords raw)
+VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 28  # a CONNECT's Control: core 4, T_SESS header 2, body 22
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
 # preamble and header (0.4-0.6 s) and the receiver's search step (0.25 s)
-# (the audio loopback timed out on replies already on air at 1.0)
-REPLY_START_S = 1.5
-LINK_LOST_S = 90.0
+# (the audio loopback timed out on replies already on air at 1.0). On air
+# (recordings/20261002-224419) a reply's whole head was in at 1.9 s and its
+# header reported at 2.2 s: 1.5 left no margin for a slower peer or radio
+REPLY_START_S = 2.5
 IDLE_CLOSE_S = 300.0
-KEEPALIVE_S = (2.0, 16.0)  # first and largest idle poll interval
-CHAT_KEEPALIVE_S = (2.0, 4.0)  # the same while either side has CHAT ON: the callee's message waits for a poll
+KEEPALIVE_S = (15.0, 30.0)  # idle poll: a random wait in this range after each exchange
+KEEPALIVE_DOUBLING = False  # v1 (scripts/idle_study.py): the low end, doubling to the high end
+LINK_LOST_S = 90.0  # 60 s of retries past the longest keepalive gap
+# the callee's wake: after t_turn + REPLY_START_S + WAKE_GUARD_S of silence
+# since its last burst (the caller's answer or timeout retry starts within
+# t_turn + REPLY_START_S of it; the guard covers PTT, audio latency and
+# header detection), plus a random backoff, 0-WAKE_JITTER_S doubling with
+# each unanswered send (CSMA-like). A lost wake is repeated identically, at
+# most WAKE_TRIES sends per idle period (CHAT_WAKE_TRIES in chat mode).
+WAKE_GUARD_S = 1.0
+WAKE_JITTER_S = 1.0
+WAKE_TRIES = 2
+CHAT_WAKE_TRIES = 6
+CHAT_KEEPALIVE_S = KEEPALIVE_S  # CHAT ON: the callee's wakes carry its lines (v1 polled every 2-4 s)
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
 
 log = logging.getLogger("data2g.session")
@@ -73,6 +88,9 @@ class Session:
     _last_data: float = 0.0
     _idle_wait: float = 0.0
     _build_at: float | None = None  # the caller's idle poll: built when it goes
+    _quiet_from: float = 0.0  # callee: the end of its last burst, or the last burst heard since
+    _wake_wait: float = 0.0  # callee: silence after _quiet_from before a wake
+    _wakes: int = 0  # callee: wake bursts sent since the caller was last heard
     _want_disc: bool = False
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
@@ -141,6 +159,16 @@ class Session:
             self._build_at = None
             self._queue(self.station.build(), now)
             self.station.answered()
+        if (w := self._wake_time()) is not None and now >= w:
+            self._wakes += 1
+            self._wake_wait = float("inf")  # until on_tx_end arms the next
+            st = self.station
+            if self._wakes == 1:
+                log.info("wake: breaking idle with %d B queued", st._new_available())
+                self._queue(st.build(), now)
+            else:
+                log.info("wake %d: no answer, repeating", self._wakes)
+                self._queue(st.last_sent, now)
         if self._out is not None and self._due is not None and now >= self._due:
             out, self._out, self._due = self._out, None, None
             return out
@@ -148,13 +176,13 @@ class Session:
 
     def next_event(self) -> float | None:
         """The earliest time poll() may do something (for an event loop)."""
-        ts = [t for t in (self._due, self._deadline, self._build_at) if t is not None]
+        ts = [t for t in (self._due, self._deadline, self._build_at, self._wake_time()) if t is not None]
         if self.state in (CONNECTED, DISCONNECTING):
             ts.append(self._last_heard + LINK_LOST_S)
         return min(ts) if ts else None
 
     def on_tx_end(self, burst: L.TxBurst, now: float):
-        """Arm the reply timer (only the caller retries, §6)."""
+        """Arm the reply timer (only the caller retries, §6), or the callee's wake."""
         if self._master and self.state in (CONNECTING, CONNECTED, DISCONNECTING):
             wait = REPLY_START_S
             hold = getattr(self.policy, "reply_hold", None)
@@ -162,11 +190,22 @@ class Session:
                 # a reply whose header I miss is still on air: don't poll over it
                 wait = max(wait, hold(self.station, burst))
             self._deadline = now + self.t_turn + wait
+        elif not self._master:
+            self._quiet_from = now
+            self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
+                               + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
 
     def on_header(self, submode: str, n_cw: int, now: float):
-        """A burst started arriving: wait for its end instead of timing out."""
+        """A burst started arriving: wait for its end instead of timing out
+        (caller), or hold a wake past it (callee)."""
+        end = now + self.policy.airtime(submode, n_cw)
         if self._deadline is not None:
-            self._deadline = max(self._deadline, now + self.policy.airtime(submode, n_cw) + self.t_turn)
+            # a peer's ID burst (one codeword in the connect mode) runs straight
+            # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
+            is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
+            self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
+        if not self._master:
+            self._quiet_from = max(self._quiet_from, end)
 
     def on_rx(self, rx: L.RxBurst, now: float):
         ctl = self._session_frame(rx)
@@ -196,14 +235,20 @@ class Session:
         # the caller: go on now, or after an idle backoff when neither side
         # has data. The idle poll is built when it goes, so data the host
         # writes meanwhile rides it (write() also brings it forward).
-        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write)
+        # a burst while the idle poll waits is the callee's wake: answer it
+        # at once even without data in it (its policy may have sent control only)
+        woke, self._build_at = self._build_at is not None, None
+        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke
         if busy:
             self._idle_wait = 0.0
             self._queue(st.build(), now)
             st.answered()
         else:
             lo, hi = CHAT_KEEPALIVE_S if st.chat or st.peer_chat else KEEPALIVE_S
-            self._idle_wait = lo if not self._idle_wait else min(hi, 2 * self._idle_wait)
+            if KEEPALIVE_DOUBLING:
+                self._idle_wait = lo if not self._idle_wait else min(hi, 2 * self._idle_wait)
+            else:
+                self._idle_wait = self.rng.uniform(lo, hi)
             self._build_at = now + self._idle_wait
 
     # -- internals ---------------------------------------------------------------------
@@ -218,6 +263,21 @@ class Session:
     def _heard(self, now: float):
         self._last_heard = now
         self._deadline = None
+        self._quiet_from, self._wakes = now, 0
+
+    def _wake_time(self) -> float | None:
+        """Callee: when to break idle with queued data, if it may. Only from
+        idle: its last burst carried no data, so the caller's receive state
+        is what this station last heard it ack and a fresh build is exact
+        (link.Station.build). Not while a burst is queued."""
+        st = self.station
+        if (st is None or self._master or self.state != CONNECTED or self._out is not None or self._want_disc
+                or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
+                or st.last_sent is None):
+            return None
+        if not self._wakes and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
+            return None
+        return self._quiet_from + self._wake_wait
 
     def _close(self, why: str, final: L.TxBurst | None = None, now: float = 0.0):
         """-> None. `final`: one last burst to send (a DISC_ACK)."""
@@ -239,16 +299,20 @@ class Session:
 
     def _stats(self) -> dict:
         st = self.station
-        return dict(st.stats, tx_bytes=st.tx.acked, rx_bytes=st.rx.reader.delivered)
+        return dict(st.stats, tx_bytes=st.tx.acked, rx_bytes=st.rx.reader.delivered,
+                    tx_plain=st.tx.acked_plain, tx_wire=st.tx.acked_wire, rx_plain=st.rx.plain, rx_wire=st.rx.wire)
 
     def _log_stats(self, label: str, now: float, since: float, prev: dict):
         d = {k: v - prev.get(k, 0) for k, v in self._stats().items()}
         dt = max(now - since, 1e-9)
         cw = d.get("cw_new", 0) + d.get("cw_resend", 0)
-        log.info("%s %.0f s: tx %d B acked (%.0f bps), rx %d B (%.0f bps) | data cw sent %d, %.0f%% resends,"
-                 " %d new compressed | bursts heard %d, %d control lost | timeouts %d", label, dt, d["tx_bytes"],
-                 8 * d["tx_bytes"] / dt, d["rx_bytes"], 8 * d["rx_bytes"] / dt, cw,
-                 100 * d.get("cw_resend", 0) / max(cw, 1), d.get("cw_comp", 0),
+
+        def ratio(k):  # uncompressed / compressed payload bytes
+            return "%.2f" % (d[k + "_plain"] / d[k + "_wire"]) if d[k + "_wire"] else "-"
+        log.info("%s %.0f s: tx %d B acked (%.0f bps, compression %s), rx %d B (%.0f bps, compression %s)"
+                 " | data cw sent %d, %.0f%% resends | bursts heard %d, %d control lost | timeouts %d", label, dt,
+                 d["tx_bytes"], 8 * d["tx_bytes"] / dt, ratio("tx"), d["rx_bytes"], 8 * d["rx_bytes"] / dt,
+                 ratio("rx"), cw, 100 * d.get("cw_resend", 0) / max(cw, 1),
                  d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):
@@ -340,6 +404,10 @@ class Session:
             core = F.Core.unpack(first)
             if core.ftype != F.SESSION:
                 return None
+            if core.n_ctl > rx.n_cw:
+                log.warning("RX malformed session frame (%d control codewords in a burst of %d): dropped",
+                            core.n_ctl, rx.n_cw)
+                return None
             payloads = [first]
             for i in range(1, core.n_ctl):
                 p = rx.decode(i, L.ctl_mask(direction, i, key), 0, None)
@@ -348,7 +416,11 @@ class Session:
                 payloads.append(p)
             try:
                 body = F.Control.unpack(payloads).ext.get(T_SESS, b"")
-            except ValueError:
+            except ValueError as e:
+                log.warning("RX malformed session frame (%s): dropped", e)
+                return None
+            if body and (why := _check_frame(body)):
+                log.warning("RX malformed %s: dropped", why)
                 return None
             return {"key": key, "body": body, "mode": rx.submode} if body else None
         return None
@@ -413,6 +485,24 @@ class Session:
 
 FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
                F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
+# body length as sent: subtype, version, 2 callsigns, nonce, cap, t_turn / subtype, nonce, cap, t_turn / subtype, nonce, reason
+FRAME_BYTES = {F.CONNECT: 22, F.CONNECT_ACK: 5, F.CONNECT_NAK: 4}
+
+
+def _check_frame(body: bytes) -> str | None:
+    """What is wrong with a CRC-valid session frame body, or None. A bad
+    one is dropped as if it had not decoded (the peer retries)."""
+    name = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
+    if len(body) < FRAME_BYTES.get(body[0], 1):
+        return f"{name} of {len(body)} B"
+    if body[0] == F.CONNECT:
+        try:
+            F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
+        except ValueError as e:
+            return f"{name}: {e}"
+    if body[0] == F.CONNECT_ACK and body[3] > 2:
+        return f"{name}: cap code {body[3]}"
+    return None
 
 
 def _frame_desc(body: bytes) -> str:

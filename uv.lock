@@ -365,7 +365,6 @@ dev = [
 ]
 tnc = [
     { name = "pyaudio" },
-    { name = "torch" },
 ]
 train = [
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -385,7 +384,6 @@ requires-dist = [
     { name = "pyaudio", marker = "extra == 'tnc'", specifier = ">=0.2.13" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "torch", marker = "extra == 'tnc'", specifier = ">=2.13.0" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.13.0" },
 ]
 provides-extras = ["train", "tnc", "dev"]

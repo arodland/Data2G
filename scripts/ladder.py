@@ -39,12 +39,12 @@ def candidates() -> list[SubmodeSpec]:
         tag = "" if band == "w" else f"{band}-"
         c.append(SubmodeSpec(15, f"{tag}{code}-{const}-f{frames}-k{k}", code, const, frames, k=k, band=band))
 
-    # robust: CA-polar on QPSK, below NR's 1/5 mother rate
+    # robust: CA-polar on QPSK, below the LDPC's 1/5 mother rate
     add("polar", "gray-qam4", 8, 192)   # 0.20 bits/cu
     add("polar", "gray-qam4", 4, 96)    # 0.20
     add("polar", "gray-qam4", 8, 96)    # 0.10
     add("polar", "gray-qam4", 4, 48)    # 0.10
-    # NR LDPC, QPSK, 1920-bit codewords
+    # LDPC, QPSK, 1920-bit codewords
     for k in (384, 640, 960, 1280, 1440):  # rates 1/5, 1/3, 1/2, 2/3, 3/4
         add("ldpc", "gray-qam4", 8, k)
     # Gray 16-QAM (learned gains nothing at 16 points), 1920 and 3840 bits

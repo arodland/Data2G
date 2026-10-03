@@ -14,6 +14,7 @@ without the outcome model; it is gone, as the outcome model always ships.)
 """
 
 import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -106,7 +107,10 @@ class OutcomeMlp:
 
 
 @lru_cache(maxsize=None)
-def outcome_model(path: str = str(DATA / "outcome_predictor.npz")) -> OutcomeMlp | None:
+def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA / "outcome_predictor.npz")
+                  ) -> OutcomeMlp | None:
+    """The installed model, or DATA2G_OUTCOME_MODEL's file (studies: two
+    models side by side, paired, without swapping the installed one)."""
     p = Path(path)
     if not p.exists():
         return None
@@ -122,6 +126,15 @@ def _mlp(d: dict) -> OutcomeMlp:
     n = sum(1 for k in d if k.startswith("W"))
     extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
     return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)], **extra)
+
+
+# DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its
+# members' standard deviation, a lower confidence bound. The shifter picks
+# the best of many noisy predictions, so its pick is the one most likely
+# over-predicted (on explored rows v10 is near calibrated; on its own picks
+# it is not); this discounts where the members disagree, in any channel,
+# instead of per-mode constants (LOGIT_OFFSETS).
+LCB = float(os.environ.get("DATA2G_OUTCOME_LCB") or 0)
 
 
 @dataclass
@@ -140,9 +153,12 @@ class OutcomeEnsemble:
         return self.members[0].bands
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
-        p = np.mean([1 / (1 + np.exp(-np.clip(m(x), -40, 40))) for m in self.members], axis=0)
-        p = np.clip(p, 1e-9, 1 - 1e-9)
-        return np.log(p / (1 - p))
+        z = np.array([np.clip(m(x), -40, 40) for m in self.members])
+        p = np.clip(np.mean(1 / (1 + np.exp(-z)), axis=0), 1e-9, 1 - 1e-9)
+        out = np.log(p / (1 - p))
+        if LCB:
+            out = out - LCB * np.std(z, axis=0)
+        return out
 
 
 def outcome_knows(submode: str) -> bool:
@@ -150,13 +166,19 @@ def outcome_knows(submode: str) -> bool:
     return m is not None and submode in m.modes
 
 
-# Logit offsets on P(burst usable), per submode: where the installed model
-# is overconfident the same way across SNRs (scripts/calibration.py on
-# on-policy session rows, 2026-09-28). Its error concentrates on slow fading
-# (MPG ~0 dB: 16qam-r1/3 predicted 0.71, 0.46 actual; ~+8 dB: w48-16qam-r1/2
-# 0.80 vs 0.36); the offsets are at most 1 logit, since they apply everywhere.
-LOGIT_OFFSETS = {"16qam-r1/3": -1.0, "w48-16qam-r1/2": -1.0, "n10-16qam-r3/4": -1.0, "n10-qpsk-r3/4": -1.0,
-                 "w48-qpsk-r1/3": -0.7, "w48-qpsk-r2/3": -0.7}
+# Logit offsets on P(burst usable), per submode, for the installed model.
+# v7 needed six (2026-09-28), but they were a patch for a coverage loop:
+# they kept modes out of the sessions later models trained on, so those
+# never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
+# picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
+# nothing elsewhere (old README in git history, outcome model v12).
+LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0}
+# DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
+# whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
+# installed model only.
+_ENV_OFFSETS = os.environ.get("DATA2G_LOGIT_OFFSETS")
+if _ENV_OFFSETS is not None:
+    LOGIT_OFFSETS = {m: float(v) for m, v in (e.rsplit(":", 1) for e in _ENV_OFFSETS.split(",") if e)}
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
@@ -166,7 +188,7 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     model = outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
-    if LOGIT_OFFSETS:
+    if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()
         for m, off in LOGIT_OFFSETS.items():
             if m in idx:

@@ -144,14 +144,13 @@ def main():
     ap.add_argument("--k", type=int, required=True, help="info bits per codeword incl. CRC")
     ap.add_argument("--channels", nargs="+", default=["awgn", "mpg", "mpp", "mpd"])
     ap.add_argument("--band", default="w")
-    ap.add_argument("--protograph", default="", help='LDPC mask, "bg2:runs/proto/bg2_r0.5.npy"')
     ap.add_argument("--start", type=float, default=10.0)
     ap.add_argument("--no-spread", action="store_true", help="codewords in contiguous frames")
     ap.add_argument("--burst-cws", type=int, help="codewords per burst (default: 1 for polar, else fill 8 frames)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
     spec = SubmodeSpec(15, "candidate", a.code, a.constellation, a.frames, k=a.k,
-                       protograph=a.protograph, band=a.band)
+                       band=a.band)
     burst = a.burst_cws or (1 if a.code == "polar" else max(1, 8 // a.frames))
     sim = Sim(spec, a.device, burst, batch=512 if burst * a.frames <= 2 else 64, spread=not a.no_spread)
     rate = a.k / spec.coded_bits

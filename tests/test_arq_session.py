@@ -7,6 +7,8 @@ import random
 
 import pytest
 
+from data2g.arq import frames as F
+from data2g.arq import link as L
 from data2g.arq import session as S
 
 from test_arq import MODES, FakeRx
@@ -38,26 +40,41 @@ class Policy:
         return 0.4 + 0.12 * n_cw
 
 
-def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0):
+def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=3000.0, ack_loss_first=0,
+        b_write_at=None, chat=False):
+    """`b_write_at`: the callee writes its data then (idle by then) instead
+    of up front; `ack_loss_first` then loses its first bursts from then on."""
     rng = random.Random(seed)
     a = S.Session("W1AW", Policy(random.Random(seed + 1)), rng=random.Random(seed + 2))
     b = S.Session("K2XYZ-7", Policy(random.Random(seed + 3)), rng=random.Random(seed + 4))
     data_a = bytes(rng.randrange(256) for _ in range(n_a))
     data_b = bytes(rng.randrange(256) for _ in range(n_b))
+    a.set_chat(chat)
+    b.set_chat(chat)
     b.listen()
     a.write(data_a)
-    b.write(data_b)
+    if b_write_at is None:
+        b.write(data_b)
     a.connect("K2XYZ-7", 2, 0.0)
     stores = {id(a): {}, id(b): {}}
     stats = {"mismatch": 0, "collisions": 0, "bursts": 0}
     air = []  # (start, end, sender) of every transmission
     events = []  # (time, kind, target, payload)
+    # as data2g.arq.engine: no poll (nothing built) while the other's burst is
+    # on air or pending decode; a burst built earlier and deferred past it
+    # could act on a stale ACK
+    held = {id(a): set(), id(b): set()}
     got_a, got_b = bytearray(), bytearray()
     disconnect_asked = False
     t = 0.0
     lost_first = ack_loss_first
     while t < horizon:
+        if b_write_at is not None and t >= b_write_at and stats.get("b_written") is None:
+            b.write(data_b)
+            stats["b_written"] = t
         for me, other in ((a, b), (b, a)):
+            if held[id(me)]:
+                continue
             burst = me.poll(t)
             if burst is None:
                 continue
@@ -69,16 +86,19 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             if any(s < end and start < e for s, e, _ in air[-4:]):
                 stats["collisions"] += 1
             air.append((start, end, me))
+            held[id(other)].add(id(burst))
             stats["bursts"] += 1
             events.append((end, "txend", me, burst))
             lost = (die_at is not None and start >= die_at) or rng.random() < p_burst
-            if me is b and lost_first > 0:
+            if me is b and lost_first > 0 and start >= (b_write_at or 0.0):
                 lost, lost_first = True, lost_first - 1
             if not lost:
                 events.append((start + HEADER_S, "header", other, burst))
                 events.append((end + DECODE_S, "rx", other, burst))
         got_a += a.read()
         got_b += b.read()
+        if got_a == data_b and "b_done" not in stats and stats.get("b_written") is not None:
+            stats["b_done"] = t
         assert bytes(got_b) == data_a[:len(got_b)]
         assert bytes(got_a) == data_b[:len(got_a)]
         if got_a == data_b and got_b == data_a and not disconnect_asked:
@@ -86,7 +106,9 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
             disconnect_asked = True
         if a.state == S.CLOSED and b.state == S.CLOSED and not events and a._out is None and b._out is None:
             break
-        nxt = [e[0] for e in events] + [x for x in (a.next_event(), b.next_event()) if x is not None]
+        nxt = [e[0] for e in events] + [x for x in (s.next_event() for s in (a, b) if not held[id(s)]) if x is not None]
+        if b_write_at is not None and stats.get("b_written") is None:
+            nxt.append(b_write_at)
         if not nxt:
             break
         t = max(t, min(nxt))
@@ -95,10 +117,14 @@ def run(seed, p_burst=0.0, p_cw=0.0, n_a=2000, n_b=800, die_at=None, horizon=300
         for when, kind, who, burst in due:
             if kind == "txend":
                 who.on_tx_end(burst, when)
+                if not any(e[1] == "rx" and e[3] is burst for e in events):
+                    held[id(a)].discard(id(burst))  # lost: nothing to wait for
+                    held[id(b)].discard(id(burst))
             elif kind == "header":
                 who.on_header(burst.submode, len(burst.slots), when)
             else:
                 who.on_rx(FakeRx(burst, rng, p_cw, stores[id(who)], stats), when)
+                held[id(who)].discard(id(burst))
     return dict(a=a, b=b, got_a=bytes(got_a), got_b=bytes(got_b), data_a=data_a, data_b=data_b, t=t, **stats)
 
 
@@ -198,3 +224,57 @@ def test_compact_connect_round_trip():
     assert len(p) == F.COMPACT_BYTES and F.unpack_connect(p) == body
     with pytest.raises(ValueError):
         F.pack_connect(body[:-1] + bytes([64]))  # t_turn over 6.3 s
+
+
+def test_callee_breaks_idle():
+    """Data the callee writes on an idle link goes in its own wake burst, not
+    at the caller's next keepalive (KEEPALIVE_S[0] or more away)."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0)
+    assert r["got_a"] == r["data_b"] and r["collisions"] == 0
+    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[0] - 5
+
+
+@pytest.mark.parametrize("lost", [1, 2, 3])
+def test_lost_wake_is_recovered(lost):
+    """Lost wakes (the repeat too, with 2 or more): the caller's keepalive
+    still collects the data, and the callee never keys over the caller."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0, ack_loss_first=lost)
+    assert r["got_a"] == r["data_b"] and r["got_b"] == r["data_a"]
+    assert r["collisions"] == 0
+    assert r["b_done"] - r["b_written"] < S.KEEPALIVE_S[1] + 10
+
+
+def test_chat_wakes_back_off():
+    """CHAT ON: the callee keeps waking (CSMA-like backoff) through 4 lost
+    wakes, and its line arrives within that retry budget."""
+    r = run(3, n_a=200, n_b=40, b_write_at=120.0, ack_loss_first=4, chat=True)
+    assert r["got_a"] == r["data_b"] and r["collisions"] == 0
+    guard = 1.0 + S.REPLY_START_S + S.WAKE_GUARD_S
+    budget = sum(guard + S.WAKE_JITTER_S * 2 ** k + 1.0 for k in range(5))  # + airtime
+    assert r["b_done"] - r["b_written"] < budget + 5
+
+
+def _frame(body, direction):
+    """A CRC-valid session frame (key 0) carrying `body`."""
+    ctl = F.Control(F.Core(ftype=F.SESSION), {S.T_SESS: body}).pack(46)
+    burst = L.TxBurst("m46", [L.Slot(L.ctl_mask(direction, i, 0), 0, p) for i, p in enumerate(ctl)], 0)
+    return FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
+
+
+@pytest.mark.parametrize("bad", ["short ack", "ack cap", "callsign"])
+def test_malformed_session_frame_is_dropped(bad):
+    """A CRC-valid but malformed session frame is dropped as if it had not
+    decoded (the peer retries), never raised."""
+    a = S.Session("W1AW", Policy(random.Random(1)), rng=random.Random(2))
+    b = S.Session("K2XYZ", Policy(random.Random(3)), rng=random.Random(4))
+    a.connect("K2XYZ", 2, 0.0)
+    b.listen()
+    nonce = a._nonce.to_bytes(2, "big")
+    if bad == "callsign":
+        body = bytes([F.CONNECT, S.VERSION]) + b"\xff" * 8 + F.pack_call("K2XYZ") + nonce + b"\x02\x0a"
+        b.on_rx(_frame(body, 0), 1.0)
+        assert b.state == S.LISTEN and b.poll(1.0) is None
+    else:
+        body = bytes([F.CONNECT_ACK]) + nonce + (b"" if bad == "short ack" else b"\x07\x0a")
+        a.on_rx(_frame(body, 1), 1.0)
+        assert a.state == S.CONNECTING and a.station is None

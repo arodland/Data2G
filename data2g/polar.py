@@ -11,7 +11,7 @@ u (N bits, frozen = 0, info in the rest in increasing index) -> x = u G,
 G = F^(kron n), F = [[1, 0], [1, 1]], natural order. G is its own
 inverse over GF(2), so a decoder's re-encoded x gives u back.
 
-Decoder: successive-cancellation list, batched in torch, with the CRC
+Decoder: successive-cancellation list, batched in numpy, with the CRC
 picking among the survivors (CA-SCL).
 """
 
@@ -110,59 +110,54 @@ class PolarCode:
         return transform(u)[:, self.sent]
 
 
+def _softplus(x):
+    return np.logaddexp(np.float32(0), x)
+
+
 class SCLDecoder:
-    """Batched SCL in torch. decode() returns every list path's info bits
-    and path metrics, best first; the caller's CRC picks."""
+    """Batched SCL in numpy. decode() returns every list path's info bits
+    and path metrics, best first; the caller's CRC picks.
+    decoders_torch.SCLDecoder is the same on torch, for GPU studies."""
 
-    def __init__(self, code: PolarCode, list_size: int = 8, device="cpu"):
-        import torch
+    def __init__(self, code: PolarCode, list_size: int = 8):
+        self.code, self.L = code, list_size
+        self.frozen = np.ones(code.n, bool)
+        self.frozen[code.info_pos] = False
 
-        self.t, self.code, self.L, self.device = torch, code, list_size, device
-        frozen = np.ones(code.n, bool)
-        frozen[code.info_pos] = False
-        self.frozen = frozen
-        self.sent = torch.tensor(code.sent, device=device)
-        self.info = torch.tensor(code.info_pos, device=device)
-
-    def _f(self, a, b):
-        t = self.t
-        return t.sign(a) * t.sign(b) * t.minimum(a.abs(), b.abs())
+    @staticmethod
+    def _f(a, b):
+        return np.sign(a) * np.sign(b) * np.minimum(np.abs(a), np.abs(b))
 
     def _node(self, alpha, lo, pm):
         """alpha (B, L, n) for leaves lo..lo+n. Returns (beta, perm, pm)."""
-        t = self.t
         n = alpha.shape[-1]
         B, L = alpha.shape[:2]
         if n == 1:
             a = alpha[..., 0]
             if self.frozen[lo]:
-                pm = pm + t.nn.functional.softplus(-a)
-                return t.zeros_like(alpha, dtype=t.uint8), t.arange(L, device=self.device).expand(B, L), pm
-            cand = t.cat([pm + t.nn.functional.softplus(-a), pm + t.nn.functional.softplus(a)], dim=1)
-            best = cand.topk(L, dim=1, largest=False)
-            perm = best.indices % L
-            bit = (best.indices // L).to(t.uint8)
-            return bit[..., None], perm, best.values
+                return np.zeros(alpha.shape, np.uint8), np.broadcast_to(np.arange(L), (B, L)), pm + _softplus(-a)
+            cand = np.concatenate([pm + _softplus(-a), pm + _softplus(a)], axis=1)
+            idx = np.argsort(cand, axis=1, kind="stable")[:, :L]
+            return (idx // L).astype(np.uint8)[..., None], idx % L, np.take_along_axis(cand, idx, 1)
         h = n // 2
         a, b = alpha[..., :h], alpha[..., h:]
         bl, p1, pm = self._node(self._f(a, b), lo, pm)
-        a = a.gather(1, p1[..., None].expand(-1, -1, h))
-        b = b.gather(1, p1[..., None].expand(-1, -1, h))
-        br, p2, pm = self._node(b + (1 - 2 * bl.to(a.dtype)) * a, lo + h, pm)
-        bl = bl.gather(1, p2[..., None].expand(-1, -1, h))
-        return t.cat([bl ^ br, br], dim=-1), p1.gather(1, p2), pm
+        a = np.take_along_axis(a, p1[..., None], 1)
+        b = np.take_along_axis(b, p1[..., None], 1)
+        br, p2, pm = self._node(b + (1 - 2 * bl.astype(a.dtype)) * a, lo + h, pm)
+        bl = np.take_along_axis(bl, p2[..., None], 1)
+        return np.concatenate([bl ^ br, br], axis=-1), np.take_along_axis(p1, p2, 1), pm
 
     def decode(self, llr_sent):
         """(B, e) LLRs -> (info bits (B, L, k) uint8, path metric (B, L)), best first."""
-        t = self.t
+        llr_sent = np.asarray(llr_sent, np.float32)
         B = llr_sent.shape[0]
-        alpha = t.zeros(B, self.code.n, device=self.device, dtype=llr_sent.dtype)
-        alpha[:, self.sent] = llr_sent
-        alpha = alpha[:, None, :].expand(B, self.L, -1).contiguous()
-        pm = t.full((B, self.L), float("inf"), device=self.device, dtype=llr_sent.dtype)
+        alpha = np.zeros((B, self.code.n), np.float32)
+        alpha[:, self.code.sent] = llr_sent
+        alpha = np.repeat(alpha[:, None, :], self.L, axis=1)
+        pm = np.full((B, self.L), np.inf, np.float32)
         pm[:, 0] = 0.0
         x, _, pm = self._node(alpha, 0, pm)
-        order = pm.argsort(dim=1)
-        x = x.gather(1, order[..., None].expand(-1, -1, self.code.n))
-        u = t.as_tensor(transform(x.cpu().numpy()), device=self.device)
-        return u[..., self.info], pm.gather(1, order)
+        order = pm.argsort(axis=1, kind="stable")
+        x = np.take_along_axis(x, order[..., None], 1)
+        return transform(x)[..., self.code.info_pos], np.take_along_axis(pm, order, 1)

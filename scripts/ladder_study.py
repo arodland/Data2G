@@ -9,7 +9,7 @@ lead, CFO, fading, noise shape) at every SNR, only the noise scaled, so
 pass/fail is near monotone in SNR, and two receivers searched from the same
 --seed are paired. With a fresh seed per SNR point, a search from another
 start took another path through the noise: the same receiver re-measured
--1.6 to +1.2 dB apart on robust rungs (README, header copy section).
+-1.6 to +1.2 dB apart on robust rungs (old README, header copy section).
 
     uv run python scripts/ladder_study.py --fail 0.1 --out runs/ladder_10pct.csv
     uv run python scripts/ladder_study.py --fail 0.01 --out runs/ladder_1pct.csv

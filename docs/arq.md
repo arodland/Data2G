@@ -30,18 +30,56 @@ a control word first, then resent codewords, then new ones.
 - **Masked CRC:** inside a session, each codeword's payload CRC is XORed with a mask,
   hash(caller, callee, 16-bit nonce, direction, seq). Control codewords use seq = 128 +
   burst seq.
+- **Compression in the identity (2026-10):** a deflated data codeword (`T_COMP`, §9a)
+  hashes direction + 2 in place of its direction (`link.data_mask(..., comp=True)`).
+  The flag rides only in the control word, which no data CRC covers. A control
+  accepted by CRC with a flipped bit (a 2^-16 false accept) used to deliver deflate as
+  raw bytes, or raw as deflate. Now that codeword fails its CRC and is resent. A wrong
+  belief that persists (the receiver keeps flags for resends that omit them) costs
+  progress until the watchdog's resync re-slices (§10).
+  - Chosen over a flag bit inside the payload: zero bytes on air, and the receiver
+    already knows which mask to check from `T_COMP`.
+  - Chosen over checking both masks: that doubles the false-accept rate on every
+    data codeword and needs two CRC checks per slot.
+  - A wire change: compressed codewords from an older build fail the CRC here. The
+    session version was not bumped (development rule); it must be before release.
+- **Slicing in the identity (2026-10):** a data codeword also hashes its sender's
+  abandon epoch (§4) mod 64, in the direction byte's top 6 bits (`epoch=`). The
+  receiver checks under the last epoch it applied. A late codeword from an older
+  slicing (a reordered burst) fails its CRC instead of landing in the new one.
+  - No cost but the format: still one mask checked per slot, so the false-accept
+    rate is unchanged. HARQ combining never spans an abandon anyway (the receiver
+    drops those soft bits when it applies one), so none is lost; for the same
+    reason the soft-bit key needs no epoch. Wrapping needs a burst to arrive 64
+    abandons late, and each abandon takes a burst of its own.
+  - Same wire change, same unbumped version.
 - **Filtering:** a codeword from another session, another station, the other direction,
-  or decoded under a wrong seq assumption fails its CRC. It is ignored like noise.
-  Stream bytes can never land in the wrong place, whatever either side believes.
+  or decoded under a wrong seq, compression or slicing assumption fails its CRC. It is ignored
+  like noise. Stream bytes can never land in the wrong place, whatever either side
+  believes.
 - **Before a session:** connect frames use mask 0.
 - **Undetected-error rate:** a codeword decoded under a wrong assumption passes by chance
   with probability 2^-16 (CRC-16), or 2^-32 on LDPC codewords of k >= 512.
 - `codes.encode` / `decode_many` / `decode_buffer` take `crc_mask`, from
   `arq.phy.mask_value(mask_id)`.
-- **Scrambler:** info bits are XORed with PN9 before encoding (`codes.scrambler`). The
-  seed comes from the CRC mask, so a codeword scrambles the same in any slot and its
-  resends combine. With mask 0 it comes from the burst position instead. Without
-  scrambling, zero-padded codewords were wrecked by the clipper (phase G).
+- **Scrambler:** info bits are XORed with PN9 before encoding (`codes.scrambler`).
+  Without it, zero-padded codewords were wrecked by the clipper (phase G).
+  - The seed is the codeword's burst position alone (`codes.scramble_seed`), never the
+    key, so seeds differ within a burst.
+  - A resend in another slot is scrambled differently. It still combines, because the
+    code is linear: C(u ^ s) = C(u) ^ C(s). The receiver flips each slot's soft bits by
+    its own C(s) (`codes.flip`) before adding them to the buffer, and decodes the
+    buffer unscrambled (`codes.PLAIN`).
+- **Plain on air (Part 97):** the mask touches only the CRC. A station without the key
+  decodes any codeword, descrambles it by its slot and reads the payload, with no
+  trials. That is all a promiscuous receiver needs. Only the CRC check needs the key,
+  so filtering stays (§2), but meaning is never obscured (FCC 97.113(a)(4)).
+- **Decode once, check each mask:** a receiver decodes a slot once (`codes.decode_raw`)
+  and tries each mask it cares about as a CRC check (`codes.check`; polar: the first
+  list candidate that passes). The engine asks every burst's slot 0 under the session's
+  key, KISS's and mask 0: three decodes became one (polar `ack-4f`: 56 to 19 ms).
+  - Until 2026-10 the seed came from the mask. Reading traffic then needed the key,
+    from the CONNECT or by trying all 65536.
 
 ## 3. Burst layout (both directions)
 
@@ -121,6 +159,15 @@ Where the rest comes from:
 - **If any control codeword fails, the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
+- **A malformed control is a failed one.** A control that passes its CRC but can't be
+  read is dropped the same way, with a warning in the log naming the fault, before
+  any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,
+  `T_ABANDON` under 2 bytes, K or C past the burst's codeword count, a truncated TLV.
+  Session frames likewise: shorter than their subtype's length, callsign codes past
+  the alphabet, a CONNECT_ACK cap code above 2. CQ and ID frames (§7a) too: a `T_CQ`
+  under 9 B, a `T_ID` under 10 B, callsign codes past the alphabet. No new recovery: repeats, the
+  watchdog and bounded failure (§10) handle it. Before 2026-10 these raised out of
+  the receiver (16% of fuzzed link runs with corrupted control).
 - **Repeats:** a timed-out sender's first retry is the identical burst, with the same
   burst seq. The receiver recognizes it by that burst seq. Slots below its cumulative
   are ignored as duplicates.
@@ -133,6 +180,15 @@ Where the rest comes from:
     state, since a station's receive state only changes when it handles the other's
     bursts. After a timeout the peer may have delivered past the stale cumulative,
     and re-slicing from it would corrupt the stream.
+  - **Not when answering a repeat.** A burst that repeats the peer burst this
+    station last answered (a late copy, or a crossing timeout repeat) carries an
+    ACK that may predate this station's last burst. Its answer may not abandon:
+    if that would take an abandon (a mode change or a due resync), it is control
+    only, and the abandon waits for the next reply.
+  - **Pre-abandon ACKs stop at A.** While an abandon is pending, a reply acting on
+    a burst from before it describes the old slicing. A cumulative past A means
+    the peer delivered old codewords there (a late burst); the sender can't map
+    them onto the new slicing, so it disconnects (FAILED) and doesn't guess.
   - **Persistent, with an epoch.** Every burst carries the abandon until the peer
     answers one that did, polls and repeats included. The epoch lets the receiver
     apply each abandon exactly once. A receiver that missed a one-off abandon joined
@@ -160,6 +216,7 @@ Where the rest comes from:
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
 | buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
+| id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
 
 ## 6. Turn rules and timers
@@ -201,15 +258,31 @@ Where the rest comes from:
 
 ## 6a. v1 implementation choices (data2g/arq/session.py)
 
-- **Idle:** only the caller starts turns. While both sides are idle it keeps polling,
-  2 s after the last exchange, doubling to at most 16 s. The callee's new data rides
-  its reply to the next poll, at up to 16 s extra latency. This drops §6's "either may
-  start from idle" rule, and with it the case of both stations keying at once.
+- **Idle:** the caller keeps the link alive with a poll a random 15-30 s after the
+  last exchange.
+  - The callee breaks idle itself when its host writes: a wake burst, built like any
+    other (data, its ACK), once t_turn + 2.5 s + 1 s plus a random 0-1 s has passed
+    in silence since its last burst. By then the caller's answer or timeout retry
+    would have started. A header heard meanwhile holds the wake past that burst.
+  - Only from idle: the callee's last burst carried no data, so the caller's receive
+    state is exactly what the callee last heard it ACK, and the wake may be a fresh
+    build (abandon, re-slice, mode change).
+  - The callee owns no retry timer. An unanswered wake is repeated identically (to
+    the caller, a repeat: its reply was lost) after the same guard plus a random
+    backoff that doubles with each send (0-1, 0-2, 0-4 s, ...: CSMA-like). At most 2
+    sends per idle period, 6 with chat on. After that the caller's keepalive
+    collects the data. Any burst from the caller cancels a wake.
+  - The caller answers a burst that arrives while its idle poll waits at once, data
+    or not. It stays the only station that retries on a timeout.
+  - v1 (until 2026-10) let only the caller start turns, polling 2 s after the last
+    exchange and doubling to 16 s (2-4 s with chat on): up to 16 s of callee latency,
+    and constant keying.
 - **Waiting for a reply:** t_turn + 1 s for the reply to start, detected as a decoded
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
   before retrying.
-- **Link lost:** 90 s after the last decodable burst from the peer, on either side.
+- **Link lost:** 90 s after the last decodable burst from the peer, on either side:
+  60 s of retries past the keepalive's longest gap (30 s).
   The link core's consecutive-timeout count (12) applies only in the lockstep tests,
   which have no clock. In a session it tripped on links that were slow but alive.
 - **Listen before talk** before any turn that isn't a reply (retries, polls): a
@@ -224,7 +297,7 @@ Where the rest comes from:
 
 These are sent in the most robust mode the bandwidth cap allows. The fields span
 several control codewords, and callsigns are packed 6 bits per character, up to 10
-characters plus SSID.
+characters plus SSID, space padded at the end (a space inside a name is kept).
 
 | frame | contents |
 |---|---|
@@ -234,6 +307,29 @@ characters plus SSID.
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
 CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+
+## 7a. ID frames
+
+Station identification, readable by anyone listening (data2g/arq/engine.py).
+
+- **Frame:** a control-only burst, frame type SESSION, mask 0, in the cap's connect mode, as a
+  CQ frame is. It carries a `T_ID` = 16 extension: the packed callsign (8 B), then the
+  16-bit session key it identifies for (2 B). One codeword in every connect mode.
+- **Mask 0, not the session key:** under the session key anyone could still read it
+  (§2), but only a station with the key could check its CRC. At mask 0, anyone can.
+- **Outside the protocol:** no seq, no burst seq, never seen by the session. A receiver
+  notifies it as `ID call key`, and logs it.
+- **During a session:** at least every `ID_INTERVAL_S` (600 s, FCC 97.119), the ID goes
+  back to back ahead of the station's own turn, on the same PTT.
+  - A waiting caller that hears a one-codeword burst in the connect mode allows
+    `REPLY_START_S` more for the reply's header. The reply follows the ID at once, and
+    finding its header takes up to ~0.85 s, close to `T_turn`.
+- **After a session:** one more ID, still with the expired session's key.
+  - The station that closes on a DISC sends it right after its DISC_ACK.
+  - Otherwise it goes `ID_GUARD_S` (2.5 s) after the close.
+  - Nothing new goes out in that guard (KISS, CQ, a new session), so the peer's
+    trailing ID is heard and not keyed over. A KISS frame queued during a session was
+    lost that way.
 
 ## 8. Gear-shift loop (summary; details in the phase E policy doc)
 
@@ -265,9 +361,10 @@ As built (data2g/arq/policy.py):
   throughput. A station with chat on sets a `chat` extension (1 byte) in its bursts.
   The peer's shifter, which recommends this station's modes, then minimizes expected
   delivery time of what's queued (short bursts, higher-P modes) instead of maximizing
-  bytes per second. The caller's idle-poll backoff is shortened while either side has
-  chat on (2-4 s instead of 2-16 s). Implemented: `T_CHAT` = 12 (empty),
-  `Session.set_chat()`, `GearShifter.recommend`, `session.CHAT_KEEPALIVE_S`.
+  bytes per second. The callee's lines go in its wake bursts (§6a), with more wake
+  retries than with chat off; the caller's keepalive is the usual 15-30 s (v1 polled
+  every 2-4 s instead). Implemented: `T_CHAT` = 12 (empty), `Session.set_chat()`,
+  `GearShifter.recommend`, `session.CHAT_WAKE_TRIES`.
   - The objective is the least expected time to deliver what the peer has queued,
     at least a 200 B chat line.
   - With chat on, a data burst carries `T_BUFFER` (2 bytes): the sender's unsent
@@ -299,12 +396,15 @@ As built (data2g/arq/policy.py):
 - **Boundaries:** padding only ever falls between records. That keeps re-slicing after
   an abandon exact: the receiver's stream is the concatenation of delivered codewords
   in seq order.
-- **Compression (`T_COMP`, session version 2):**
+- **Compression (`T_COMP`, session version 2; primed dictionary, version 3):**
   - A compressed codeword is raw deflate (no header) of the stream bytes it carries,
-    zero padded. Deflate is primed with the last 4 KB (`frames.HIST`) of the stream
-    as delivered before it: raw codewords with their padding, compressed ones inflated.
+    zero padded. Deflate is primed with a fixed 4 KB dictionary
+    (`frames.ZDICT`, built from C4 web text by `scripts/build_zdict.py`), then the last 4 KB (`frames.HIST`) of the stream as delivered
+    before it: raw codewords with their padding, compressed ones inflated.
   - The receiver delivers in seq order, so it always holds that history. It inflates at
     delivery; a codeword that won't inflate fails the link (protocol error).
+  - The flag is part of the codeword's CRC identity (§2), so a codeword decoded
+    under the wrong flag fails its CRC rather than delivering.
   - The flag is fixed at creation, so a resend carries the same bit. After an abandon
     both ends' history is the stream before A, and re-sliced codewords are
     compressed afresh.
@@ -330,7 +430,8 @@ As built (data2g/arq/policy.py):
 Failure mode to design out: two stations that hear each other fine, exchanging bursts
 forever without progress, because they disagree about protocol state.
 
-- **Nothing implicit can corrupt.** Every slot's seq is checked by its masked CRC (§2).
+- **Nothing implicit can corrupt.** Every slot's seq, and a data slot's compression,
+  is checked by its masked CRC (§2).
   RVs are sent explicitly. Cumulative ACK, burst seq and acted-on are in every control
   word, so each burst restates the sender's view.
 - **Progress watchdog.** Progress means the peer's cumulative ACK advanced, or this
@@ -361,11 +462,17 @@ forever without progress, because they disagree about protocol state.
   - No path through the state machine runs unbounded.
 - **Tests before tuning** (tests/test_arq.py, and scripts/arq_stress.py: 3200 runs
   over a 4x4 loss grid; no corruption, mismatch or fail-safe trip): random loss of
-  bursts, control codewords and single codewords; duplicated and reordered bursts; and a
-  link that dies. Assertions:
+  bursts, control codewords and single codewords; duplicated bursts; and a link that
+  dies. Assertions:
   - The delivered stream is always an exact prefix of what was sent.
   - Progress resumes within a bounded number of turns once losses stop.
   - Every run ends in delivery or a bounded disconnect.
+- **Reordering** was claimed above until 2026-10 but never tested. The native port's
+  fuzz (tests/test_native_fuzz.py: late copies of a sender's previous burst) found
+  two ways a late burst corrupted the stream. The slicing identity (§2) and the two
+  ACK rules of §4 close them; minimized reproducers are in tests/test_arq.py. Late
+  bursts now end in delivery or a bounded disconnect. On air the engine decodes in
+  order, so only a crossing repeat can produce one.
 
 ## Review decisions (2026-09-24)
 

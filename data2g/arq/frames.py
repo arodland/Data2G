@@ -3,6 +3,7 @@ control word, extension TLVs, callsign packing and stream records."""
 
 import zlib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 SEQ_BITS = 7
 SEQ_MOD = 1 << SEQ_BITS
@@ -30,8 +31,14 @@ T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the b
 # (docs/arq.md §9a)
 T_COMP = 15
 HIST = 4096  # delivered stream bytes a compressed codeword's deflate is primed with
+# 4 KB primed ahead of the history so short streams compress too: built from
+# C4 web text by scripts/build_zdict.py to share as many frequent substrings
+# with it as it can (session version 3)
+ZDICT = (Path(__file__).parent / "zdict.bin").read_bytes()
 MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
+# packed callsign + the session key it identifies for: an ID frame (docs/arq.md §7a), mask 0
+T_ID = 16
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
 
@@ -151,7 +158,7 @@ def unpack_flags(b: bytes, n: int) -> list[bool]:
 # --- compression (docs/arq.md §9a) ------------------------------------------------
 
 def deflate(hist: bytes, data: bytes) -> bytes:
-    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9, **({"zdict": hist} if hist else {}))
+    c = zlib.compressobj(9, zlib.DEFLATED, -15, 9, zdict=ZDICT + hist)
     return c.compress(data) + c.flush()
 
 
@@ -175,7 +182,7 @@ def deflate_fit(hist: bytes, data: bytes, pb: int) -> tuple[int, bytes] | None:
 
 def inflate(hist: bytes, payload: bytes) -> bytes:
     """A compressed codeword (zero padded) -> its stream bytes."""
-    d = zlib.decompressobj(-15, **({"zdict": hist} if hist else {}))
+    d = zlib.decompressobj(-15, zdict=ZDICT + hist)
     try:
         out = d.decompress(payload, MAX_INFLATE)
     except zlib.error as e:
@@ -187,14 +194,16 @@ def inflate(hist: bytes, payload: bytes) -> bytes:
 
 # --- callsigns ----------------------------------------------------------------
 
-CALL_ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"  # 6 bits, space = end
+# 6 bits; space pads at the end, so a name may hold spaces ("VARA KISS") but
+# trailing ones don't survive the round trip
+CALL_ALPHABET = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-"
 CALL_CHARS = 10
 
 
 def pack_call(call: str) -> bytes:
     call = call.upper()
-    if len(call) > CALL_CHARS or any(c not in CALL_ALPHABET[1:] for c in call):
-        raise ValueError(f"callsign {call!r}: up to {CALL_CHARS} of A-Z 0-9 / -")
+    if len(call) > CALL_CHARS or any(c not in CALL_ALPHABET for c in call):
+        raise ValueError(f"callsign {call!r}: up to {CALL_CHARS} of A-Z 0-9 / - space")
     v = 0
     for c in call.ljust(CALL_CHARS):
         v = (v << 6) | CALL_ALPHABET.index(c)
@@ -203,8 +212,10 @@ def pack_call(call: str) -> bytes:
 
 def unpack_call(b: bytes) -> str:
     v = int.from_bytes(b, "big")
-    chars = [CALL_ALPHABET[(v >> (6 * (CALL_CHARS - 1 - i))) & 63] for i in range(CALL_CHARS)]
-    return "".join(chars).rstrip()
+    codes = [(v >> (6 * (CALL_CHARS - 1 - i))) & 63 for i in range(CALL_CHARS)]
+    if max(codes) >= len(CALL_ALPHABET):
+        raise ValueError(f"callsign code {max(codes)}")
+    return "".join(CALL_ALPHABET[c] for c in codes).rstrip()
 
 
 # A CONNECT in 20 B, for a CPM control codeword: no Core or TLV (28 B with

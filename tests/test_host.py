@@ -12,11 +12,7 @@ from data2g import host
 
 class FakeStream:
     def __init__(self, rate, channels):
-        self.rate, self.channels, self.rng = rate, channels, np.random.default_rng(0)
-
-    def read(self, n, exception_on_overflow=True):
-        time.sleep(0.002)
-        return (self.rng.normal(0, 0.01, n * self.channels)).astype(np.float32).tobytes()
+        self.rate, self.channels = rate, channels
 
     def write(self, data):
         assert len(data) % (4 * self.channels) == 0
@@ -37,14 +33,26 @@ class FakePA:
     def get_default_output_device_info(self):
         return {"maxInputChannels": 0, "maxOutputChannels": 2}
 
-    def open(self, rate, channels, stream_callback=None, **kw):
-        if stream_callback:  # play what the host queues, in real time
+    def open(self, rate, channels, stream_callback=None, input=False, **kw):
+        if stream_callback:  # record noise / play what the host queues, in real time
+            rng = np.random.default_rng(0)
+
             def card():
                 while True:
-                    stream_callback(None, 1024, None, 0)
+                    x = rng.normal(0, 0.01, 1024 * channels).astype(np.float32).tobytes() if input else None
+                    stream_callback(x, 1024, None, 0)
                     time.sleep(1024 / rate)
             threading.Thread(target=card, daemon=True).start()
         return FakeStream(rate, channels)
+
+
+def _connect(port, tries=50):
+    for _ in range(tries):
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=5)
+        except OSError:
+            time.sleep(0.1)
+    return socket.create_connection(("127.0.0.1", port), timeout=5)
 
 
 def test_commands_over_tcp(tmp_path):
@@ -56,13 +64,7 @@ def test_commands_over_tcp(tmp_path):
     stop = threading.Event()
     th = threading.Thread(target=host.serve, args=(a, FakePA(), stop), daemon=True)
     th.start()
-    for _ in range(50):
-        try:
-            c = socket.create_connection(("127.0.0.1", 18310), timeout=5)
-            break
-        except OSError:
-            time.sleep(0.1)
-    d = socket.create_connection(("127.0.0.1", 18311), timeout=5)
+    c, d = _connect(18310), _connect(18311)  # the data port binds after the command port
     c.sendall(b"VERSION\rMYCALL K2XYZ\rLISTEN ON\rBW500\rFOO\r")
     got = b""
     deadline = time.time() + 20
@@ -74,3 +76,23 @@ def test_commands_over_tcp(tmp_path):
     d.close()
     assert got.split(b"\r")[:5] == [f"VERSION {host.VERSION}".encode(), b"OK", b"OK", b"OK", b"WRONG"]
     assert (tmp_path / "events.jsonl").exists()
+
+
+def test_capture_keeps_every_sample():
+    """Input queued by the callback while the loop is busy comes out whole, in order, left channel."""
+    class PA:
+        def open(self, stream_callback, **kw):
+            self.cb = stream_callback
+            return FakeStream(48000, 2)
+
+    pa = PA()
+    cap = host.Capture(pa, 2, 48000, None)
+    ramp = np.arange(10_000, dtype=np.float32)
+    for i in range(0, len(ramp), 512):  # the loop stalled: 10k frames arrive before any read
+        pa.cb(np.repeat(ramp[i:i + 512], 2).tobytes(), 512, None, 2 if i == 0 else 0)
+    stop = threading.Event()
+    got = np.concatenate([cap.read(4800, stop), cap.read(4800, stop)])
+    assert np.array_equal(got, ramp[:9600])
+    assert cap.overflows == 1
+    stop.set()
+    assert cap.read(4800, stop) is None  # 400 frames left: not a block, and stopping

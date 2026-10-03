@@ -26,9 +26,13 @@ def test_pilot_and_preamble_identical():
     np.testing.assert_allclose(ours[-len(theirs):], theirs, atol=1e-12)
 
 
-def test_symbols_and_clipper_identical():
+def test_symbols_and_clipper_identical(reference):
     rng = np.random.default_rng(0)
     s = rng.normal(size=(12, NC)) + 1j * rng.normal(size=(12, NC))
-    x = ofdm.modulate_symbols(s)
+    x = reference(ofdm, "modulate_symbols")(s)
     assert np.array_equal(x, s_ofdm.modulate_symbols(s))
-    assert np.array_equal(dsp.tx_condition(x, CLIP_HEADROOM_DB), s_dsp.tx_condition(x, CLIP_HEADROOM_DB))
+    want = s_dsp.tx_condition(x, CLIP_HEADROOM_DB)
+    assert np.array_equal(reference(dsp, "tx_condition")(x, CLIP_HEADROOM_DB), want)
+    # what is substituted (C++ under --native) sums in its own order: to rounding
+    np.testing.assert_allclose(ofdm.modulate_symbols(s), x, rtol=0, atol=1e-13)
+    np.testing.assert_allclose(dsp.tx_condition(x, CLIP_HEADROOM_DB), want, rtol=0, atol=1e-12)
