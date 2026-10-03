@@ -259,7 +259,9 @@ TxBurstPtr Station::build(bool fresh) {
         return last_sent;
     }
     const std::int64_t bn = latest + 1;
-    const int escalation = std::min(std::max(misses, reply_escalation), 3);
+    const int raw = std::max(misses, reply_escalation);
+    const int escalation = raw ? std::min(std::max(raw, esc_floor + raw - 1), MAX_ESCALATION) : 0;
+    sent_esc_ = escalation;
     auto [submode, max_cw] = policy->choose(*this, escalation);
     const int pb = policy->payload_bytes(submode);
     const int cpb = policy->ctl_payload_bytes(submode);
@@ -442,7 +444,7 @@ TxBurstPtr Station::on_timeout(bool allow_repeat) {
         fail("link lost");
         return nullptr;
     }
-    if (allow_repeat && misses <= REPEATS_BEFORE_SHRINK && last_sent) {
+    if (allow_repeat && !esc_floor && misses <= REPEATS_BEFORE_SHRINK && last_sent) {
         log_write(LOG, INFO, format("TX b%d repeat: timeout %d", static_cast<int>(pmod(latest, BURST_MOD)), misses));
         auto it = sent_seqs.find(latest);
         stats["cw_resend"] += it == sent_seqs.end() ? 0 : static_cast<std::int64_t>(it->second.size());
@@ -493,6 +495,7 @@ bool Station::handle_inner(RxBurst& rxb) {
     const Core& core = ctl.core;
     const Ext& ext = ctl.ext;
     if (auto why = check(core, ext, rxb.n_cw() - dup * core.n_ctl)) return malformed(*why);
+    const bool escalated = misses || reply_escalation;
     misses = 0;
     const auto was = std::make_pair(peer_recommend, peer_size_hint);
     peer_recommend = core.recommend;
@@ -507,6 +510,13 @@ bool Station::handle_inner(RxBurst& rxb) {
     const bool repeat = seen && answered_;
     // a repeat or a poll means my last reply did not get through
     reply_escalation = (repeat || core.ftype == PROBE) ? reply_escalation + 1 : 0;
+    if (!reply_escalation) {
+        if (escalated) {
+            esc_floor = sent_esc_, clean_ = 0;  // recovered: my last burst got through at this escalation
+        } else if (esc_floor && ++clean_ >= FLOOR_DECAY_TURNS) {
+            --esc_floor, clean_ = 0;
+        }
+    }
     bool progress = false;
     const std::int64_t base0 = tx.base, next0 = tx.next, cum0 = rx.cum;
 

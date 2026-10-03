@@ -530,9 +530,10 @@ Engine::Done Engine::process(Block& b) {
         tx_->pos += n;
         d.sound = true;
         if (tx_->pos >= tx_->audio.size()) {
+            const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             request_reset();  // our own transmission was not heard
-            session_->on_tx_end(now() + static_cast<double>(n) / config::FS);
+            session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);
         }
     }
     n_ += k;

@@ -26,6 +26,8 @@ namespace data2g::arq {
 inline constexpr int NO_PROGRESS_TURNS = 8;
 inline constexpr int RESYNCS_BEFORE_FAIL = 3;
 inline constexpr int REPEATS_BEFORE_SHRINK = 1;
+inline constexpr int MAX_ESCALATION = 4;
+inline constexpr int FLOOR_DECAY_TURNS = 4;  // clean turns (no escalation) that lower the escalation floor by one
 inline constexpr int LINK_LOST_MISSES = 12;
 
 // Python's logging, by logger name ("data2g.link", "data2g.session") and
@@ -46,6 +48,7 @@ struct MaskId {
 };
 
 inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
+inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // a compact CONNECT's mask (frames pack_connect); ctl_mask's i is 0-3
 inline constexpr int EPOCH_MOD = 64;  // abandon epochs in a data codeword's identity
 // comp: deflated (T_COMP); epoch: the sender's abandon epoch (its slicing).
 // Both folded into the direction byte, so a codeword decoded under the
@@ -126,6 +129,8 @@ public:
     // session
     virtual double airtime(const std::string&, int /*n_cw*/, bool /*dup*/) { return 0.0; }
     virtual std::string connect_mode(int /*cap*/, int /*tries*/) { return {}; }
+    // seconds past t_turn to wait for a reply to `burst` (nullopt: none, REPLY_START_S alone)
+    virtual std::optional<double> reply_hold(Station&, const TxBurst&) { return std::nullopt; }
     // engine: the receiver's measurements of a peer burst
     virtual void observe(const Measured&, const std::string& /*submode*/, double /*now*/) {}
 };
@@ -211,6 +216,10 @@ public:
     bool reply_lost = false;
     int misses = 0;
     int reply_escalation = 0;
+    // the escalation the last recovery took: the next drop starts there
+    int esc_floor = 0;
+    int clean_ = 0;     // clean turns since the floor last moved
+    int sent_esc_ = 0;  // the escalation my last built burst went at
     int no_progress = 0;
     int resyncs = 0;
     bool resync_due = false;

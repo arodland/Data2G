@@ -146,7 +146,7 @@ void sessions(unsigned seed, double p_burst) {
             auto burst = me->poll(t);
             if (!burst) continue;
             const double end = t + 0.1 + me->policy->airtime(burst->submode, static_cast<int>(burst->slots.size()), false);
-            me->on_tx_end(end);
+            me->on_tx_end(burst, end);
             if (std::uniform_real_distribution<>(0, 1)(rng) >= p_burst) {
                 other->on_header(burst->submode, static_cast<int>(burst->slots.size()), t + 0.35);
                 FakeRx rx(*burst, rng, 0.05);
