@@ -48,6 +48,10 @@ EXPLORE = 0.2
 # had decoded 0.99 of codewords in session data (2026-09-29). MPG 70% of
 # sessions, else Doppler 0.05-0.3 Hz and 0-2 ms; SNR fixed, -8..0 dB; 600 s.
 SLOW = False
+# --high: high SNR on fading channels (+10..+30 dB, drifting; no AWGN). With
+# v10's sessions gone, a retrain lost 13-22% at MPD +20, MPP +15 and MPG +15
+# against v12 (runs/cpmc_round.sh, 2026-10-03).
+HIGH = False
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
@@ -115,13 +119,16 @@ def session(seed):
                           else (float(np.exp(rng.uniform(np.log(0.05), np.log(0.3)))), float(rng.uniform(0, 2))))
         snr0, drift = float(rng.uniform(-8, 0)), 0.0
     else:
-        kind = str(rng.choice([k for k, _ in O.KINDS], p=[w for _, w in O.KINDS]))
+        kinds = [(k, w) for k, w in O.KINDS if not (HIGH and k == "awgn")]
+        ws = np.array([w for _, w in kinds])
+        kind = str(rng.choice([k for k, _ in kinds], p=ws / ws.sum()))
         if kind == "random":
             doppler, delay = float(np.exp(rng.uniform(np.log(0.05), np.log(3.0)))), float(rng.uniform(0, 5))
         else:
             doppler, delay = PS.L.PRESETS[kind]
         u = rng.random()
-        snr0 = float(rng.uniform(-14, -8) if u < 0.005 else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
+        snr0 = float(rng.uniform(10, 30) if HIGH else rng.uniform(-14, -8) if u < 0.005
+                     else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
     cap = 0 if rng.random() < 0.25 else 2
     horizon = 600.0 if SLOW else 300.0
@@ -144,6 +151,7 @@ def main():
     ap.add_argument("--first", type=int, default=300000)
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
+    ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
@@ -151,8 +159,8 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW
-    SLOW = a.slow  # set before the pool forks: the workers inherit it
+    global SLOW, HIGH
+    SLOW, HIGH = a.slow, a.high  # set before the pool forks: the workers inherit them
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]
