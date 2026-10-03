@@ -78,3 +78,41 @@ def test_draw_is_in_range():
         for q in s.qrm:
             assert I.PASSBAND_HZ[0] <= q.f_hz - q.bw_hz / 2 and q.f_hz + q.bw_hz / 2 <= I.PASSBAND_HZ[1]
             assert I.INR_DB[0] <= q.inr_db <= I.INR_DB[1] and I.DUTY[0] <= q.duty <= I.DUTY[1]
+
+
+def _phy_session():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import phy_session
+
+    return phy_session
+
+
+def test_clean_channel_hears_as_before():
+    """No interference: a burst through the channel is what it was without
+    the receiver argument (the studies' clean cells reproduce)."""
+    PS = _phy_session()
+    x = np.random.default_rng(1).normal(0, 0.1, 4000)
+    a, b = PS.ContinuousChannel("mpg", 3.0, 9, 60), PS.ContinuousChannel("mpg", 3.0, 9, 60)
+    np.testing.assert_array_equal(a.apply(x, 5.0), b.apply(x, 5.0, rx=1))
+
+
+def test_each_station_hears_its_own_interference():
+    """Impulses at station 1 only: its noise profile counts them, station 0's
+    doesn't; a station's own transmission (and the radio's recovery after
+    it) is not noise."""
+    PS = _phy_session()
+    spec = I.Spec(I.Impulses(trains_per_min=20.0, height_db=30.0, height_sd_db=2.0))
+    ch = PS.ContinuousChannel("awgn", 5.0, 3, 120, interference=(I.Spec(), spec))
+    sn = PS.StationNoise(ch)
+    sn.sent(0, 20.0, 30.0)
+    sn.feed(0, 60.0)
+    sn.feed(1, 60.0)
+    s0, s1 = sn.profile[0].snapshot(), sn.profile[1].snapshot()
+    assert s0["impulses_per_min"] < 1 and s1["impulses_per_min"] > 20
+    # PRE_S before the session to 57 s (COMMIT_S); station 0 less its burst (20-30 s) and the recovery after it
+    kept = round((PS.PRE_S + 60 - NoiseProfile.COMMIT_S) * 10)
+    assert s0["noise_blocks"] == min(NoiseProfile.WINDOW, kept - 100 - round(NoiseProfile.RECOVER_S * 10))
+    assert s1["noise_blocks"] == min(NoiseProfile.WINDOW, kept)

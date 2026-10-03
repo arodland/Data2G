@@ -466,7 +466,7 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     pending_ = Pending{*q};
     pilots_ok_ = q->copy.has_value() || q->score >= SUSPECT_SCORE;
     confirmed_ = false;
-    out.push_back(HeaderEvent{*pending_});
+    out.push_back(HeaderEvent{*pending_, off_ + len()});
     return true;
 }
 
@@ -551,7 +551,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             // passed already); a suspect one waits for its pilots
             pilots_ok_ = p->is_cpm() || p->copy() || p->score() >= SUSPECT_SCORE;
             confirmed_ = false;
-            out.push_back(HeaderEvent{*p});
+            out.push_back(HeaderEvent{*p, off_ + len()});
         }
         const Pending p = *pending_;
         if (off_ + len() < p.end() + config::LEADIN_SAMPLES) {

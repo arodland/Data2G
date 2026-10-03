@@ -93,7 +93,9 @@ py::list events(const std::vector<tnc::Event>& evs) {
     py::list out;
     for (const auto& e : evs) {
         if (const auto* h = std::get_if<tnc::HeaderEvent>(&e)) {
-            out.append(py::make_tuple("header", pending_dict(h->header)));
+            py::dict d = pending_dict(h->header);
+            d["stream_end"] = h->stream_end;
+            out.append(py::make_tuple("header", d));
             continue;
         }
         const auto& b = std::get<tnc::BurstEvent>(e);

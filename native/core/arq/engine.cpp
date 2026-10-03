@@ -559,9 +559,12 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
     for (auto& it : items) {
         if (auto* h = std::get_if<tnc::HeaderEvent>(&it)) {
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
-            // from its start (heard within COMMIT_S) to its end
+            // the burst's span: its lead-in (the header's start, stream_end
+            // samples ago being now, t) to its end (engine.py)
             const Mode* m = mode(spec_name(h->header));
-            noise_.mark(t - tnc::NoiseProfile::COMMIT_S, t + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
+            const double start =
+                t - static_cast<double>(h->stream_end - h->header.start() + config::LEADIN_SAMPLES) / config::FS;
+            noise_.mark(start, start + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
             continue;
         }
         tnc::BurstEvent ev = std::holds_alternative<tnc::DecodeRequest>(it)

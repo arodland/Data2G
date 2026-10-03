@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import cpm, modem
-from ..config import FS
+from ..config import FS, LEADIN_SAMPLES
 from . import frames as F
 from . import link as L
 from ..tnc import NoiseProfile, Receiver
@@ -264,9 +264,11 @@ class Engine:
         for kind, ev in self.receiver.feed(x):
             if kind == "header":
                 self.session.on_header(ev["spec"].name, ev["n_cw"], t)
-                # from its start (heard within COMMIT_S) to its end
+                # the burst's span: its lead-in (the header's start, stream_end
+                # samples ago being now, t) to its end
                 spec = MODES.get(ev["spec"].name)
-                self.noise.mark(t - NoiseProfile.COMMIT_S, t + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
+                start = t - (ev["stream_end"] - ev["start"] + LEADIN_SAMPLES) / FS
+                self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 continue
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
