@@ -261,7 +261,7 @@ Where the rest comes from:
 - **Idle:** the caller keeps the link alive with a poll a random 15-30 s after the
   last exchange.
   - The callee breaks idle itself when its host writes: a wake burst, built like any
-    other (data, its ACK), once t_turn + 1.5 s + 1 s plus a random 0-1 s has passed
+    other (data, its ACK), once t_turn + 2.5 s + 1 s plus a random 0-1 s has passed
     in silence since its last burst. By then the caller's answer or timeout retry
     would have started. A header heard meanwhile holds the wake past that burst.
   - Only from idle: the callee's last burst carried no data, so the caller's receive
@@ -326,7 +326,7 @@ Station identification, readable by anyone listening (data2g/arq/engine.py).
     finding its header takes up to ~0.85 s, close to `T_turn`.
 - **After a session:** one more ID, still with the expired session's key.
   - The station that closes on a DISC sends it right after its DISC_ACK.
-  - Otherwise it goes `ID_GUARD_S` (1.5 s) after the close.
+  - Otherwise it goes `ID_GUARD_S` (2.5 s) after the close.
   - Nothing new goes out in that guard (KISS, CQ, a new session), so the peer's
     trailing ID is heard and not keyed over. A KISS frame queued during a session was
     lost that way.
