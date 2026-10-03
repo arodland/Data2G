@@ -61,8 +61,9 @@ FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "ban
 NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in range(1, 6)]
               + ["impulses_per_min"])
 FIELDS = FIELDS + NOISE_COLS + ["intf"]
-# --interference: each station's interference drawn from data2g.interference.draw()
-INTERFERENCE = False
+# --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
+INTERFERENCE = None
+WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
 
 
 class Explorer(G.GearShifter):
@@ -153,9 +154,9 @@ def session(seed):
     intf = None
     if INTERFERENCE:
         irng = np.random.default_rng(np.random.SeedSequence([seed, 5]))
-        intf = (INTF.draw(irng), INTF.draw(irng))
+        intf = (INTF.draw(irng, INTERFERENCE), INTF.draw(irng, INTERFERENCE))
     ch = PS.ContinuousChannel(O.family(doppler), snr0, seed, horizon + 60, doppler=doppler, delay_ms=delay,
-                              interference=intf)
+                              interference=intf, wander_db=WANDER_DB)
     pols = [Explorer(random.Random(seed * 2 + i)) for i in range(2)]
     out = []
     tag = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2), cap=cap)
@@ -175,7 +176,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
-    ap.add_argument("--interference", action="store_true", help="each station's interference drawn (INTERFERENCE)")
+    ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
+                    help="each station's interference drawn from interference.DRAWS[this] (default v1)")
+    ap.add_argument("--wander", type=float, default=0.0, help="each station's floor wanders by this (dB)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
@@ -183,8 +186,9 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE
-    SLOW, HIGH, INTERFERENCE = a.slow, a.high, a.interference  # set before the pool forks: the workers inherit them
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB
+    # set before the pool forks: the workers inherit them
+    SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]

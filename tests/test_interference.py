@@ -70,14 +70,17 @@ def test_impulses_look_like_the_air_to_the_noise_profile():
     assert np.ptp(s["noise_db"]) < 1.0
 
 
-def test_draw_is_in_range():
+@pytest.mark.parametrize("draws", sorted(I.DRAWS))
+def test_draw_is_in_range(draws):
+    r = I.DRAWS[draws]
     rng = np.random.default_rng(8)
-    specs = [I.draw(rng) for _ in range(400)]
-    assert 0.25 < np.mean([s.clean for s in specs]) < 0.45
+    specs = [I.draw(rng, draws) for _ in range(400)]
+    assert abs(np.mean([s.clean for s in specs]) - r.p_clean) < 0.1
     for s in specs:
+        assert len(s.qrm) <= r.qrm_max
         for q in s.qrm:
             assert I.PASSBAND_HZ[0] <= q.f_hz - q.bw_hz / 2 and q.f_hz + q.bw_hz / 2 <= I.PASSBAND_HZ[1]
-            assert I.INR_DB[0] <= q.inr_db <= I.INR_DB[1] and I.DUTY[0] <= q.duty <= I.DUTY[1]
+            assert r.inr_db[0] <= q.inr_db <= r.inr_db[1] and r.duty[0] <= q.duty <= r.duty[1]
 
 
 def _phy_session():
@@ -116,3 +119,20 @@ def test_each_station_hears_its_own_interference():
     kept = round((PS.PRE_S + 60 - NoiseProfile.COMMIT_S) * 10)
     assert s0["noise_blocks"] == min(NoiseProfile.WINDOW, kept - 100 - round(NoiseProfile.RECOVER_S * 10))
     assert s1["noise_blocks"] == min(NoiseProfile.WINDOW, kept)
+
+
+def test_floor_wander_moves_the_tails_not_the_median():
+    """A floor wandering 1 dB (WANDER_TAU_S): the profile's p90/median rises a
+    little in every band, its median and band shape don't move; without
+    wander the floor is untouched."""
+    PS = _phy_session()
+    snaps = []
+    for wander in (0.0, 1.0):
+        ch = PS.ContinuousChannel("awgn", 5.0, 4, 300, wander_db=wander)
+        sn = PS.StationNoise(ch)
+        sn.feed(0, 120.0)
+        snaps.append(sn.profile[0].snapshot())
+    flat, wand = snaps
+    assert all(w > f + 0.2 for f, w in zip(flat["noise_tail_db"], wand["noise_tail_db"]))
+    assert np.ptp(np.array(wand["noise_db"]) - np.array(flat["noise_db"])) < 0.5
+    assert PS.ContinuousChannel("awgn", 5.0, 4, 60).floor_gain(0, 3.0, 10) == 1.0

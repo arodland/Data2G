@@ -201,31 +201,48 @@ def describe(spec: Spec) -> str:
 
 # --- the training distribution ----------------------------------------------------------
 
-# Ranges of what draw() produces; the benchmark's held-out cells go outside them.
-P_CLEAN = 0.35
-TRAINS_PER_MIN = (1.0, 60.0)  # log-uniform
-PER_TRAIN = (1.0, 8.0)
-HEIGHT_DB = (15.0, 30.0)
-QRM_MAX = 3
-INR_DB = (0.0, 30.0)
-ON_S = (0.5, 30.0)  # log-uniform
-DUTY = (0.05, 0.8)
+@dataclass(frozen=True)
+class Ranges:
+    """What draw() produces; the benchmark's held-out cells go outside v1's."""
+
+    p_clean: float = 0.35
+    p_impulses: float = 0.5
+    trains_per_min: tuple = (1.0, 60.0)  # log-uniform
+    per_train: tuple = (1.0, 8.0)
+    height_db: tuple = (15.0, 30.0)
+    qrm_max: int = 3
+    inr_db: tuple = (0.0, 30.0)
+    on_s: tuple = (0.5, 30.0)  # log-uniform
+    duty: tuple = (0.05, 0.8)
+
+
+# v1: interference_round{,2}.sh. mild (round 3): judgement, not fitted to the
+# recordings (too few and unrepresentative): more clean receivers, fewer and
+# weaker QRM sources on less of the time, slightly weaker impulses. With v1's
+# data the model learned caution in clean low-SNR fading (-15..-25%).
+DRAWS = {
+    "v1": Ranges(),
+    "mild": Ranges(p_clean=0.5, p_impulses=0.4, trains_per_min=(1.0, 30.0), per_train=(1.0, 6.0),
+                   height_db=(15.0, 26.0), qrm_max=2, inr_db=(0.0, 20.0), duty=(0.05, 0.5)),
+}
 BW_HZ = {"carrier": (50.0, 50.0), "fsk": (50.0, 500.0), "noise": (200.0, 1000.0)}
 KINDS = ("carrier", "fsk", "noise")
 
 
-def draw(rng: np.random.Generator) -> Spec:
-    """One station's interference for a training session."""
-    if rng.random() < P_CLEAN:
+def draw(rng: np.random.Generator, draws: str = "v1") -> Spec:
+    """One station's interference for a training session, from DRAWS[draws]."""
+    r = DRAWS[draws]
+    if rng.random() < r.p_clean:
         return Spec()
     imp = None
-    if rng.random() < 0.5:
-        imp = Impulses(trains_per_min=float(np.exp(rng.uniform(*np.log(TRAINS_PER_MIN)))),
-                       per_train=float(rng.uniform(*PER_TRAIN)), height_db=float(rng.uniform(*HEIGHT_DB)))
+    if rng.random() < r.p_impulses:
+        imp = Impulses(trains_per_min=float(np.exp(rng.uniform(*np.log(r.trains_per_min)))),
+                       per_train=float(rng.uniform(*r.per_train)), height_db=float(rng.uniform(*r.height_db)))
     qrm = []
-    for _ in range(int(rng.integers(0 if imp else 1, QRM_MAX + 1))):
+    for _ in range(int(rng.integers(0 if imp else 1, r.qrm_max + 1))):
         kind = str(rng.choice(KINDS))
         bw = float(rng.uniform(*BW_HZ[kind]))
         qrm.append(Qrm(kind, float(rng.uniform(PASSBAND_HZ[0] + bw / 2, PASSBAND_HZ[1] - bw / 2)), bw,
-                       float(rng.uniform(*INR_DB)), float(np.exp(rng.uniform(*np.log(ON_S)))), float(rng.uniform(*DUTY))))
+                       float(rng.uniform(*r.inr_db)), float(np.exp(rng.uniform(*np.log(r.on_s)))),
+                       float(rng.uniform(*r.duty))))
     return Spec(imp, tuple(qrm))

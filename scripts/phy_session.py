@@ -52,6 +52,7 @@ def header_time(r: dict, t0: float) -> float:
     return t0 + (LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(r["spec"].sync_band)) / FS
 CFO_HZ = 4.5  # the two rigs' frequency offset, both directions
 PRE_S = 30.0  # each station's receiver listened this long before the session (its noise profile)
+WANDER_TAU_S = 20.0  # the floor's wander: its time constant
 
 
 class ContinuousChannel:
@@ -59,11 +60,26 @@ class ContinuousChannel:
     each receiving station's own interference (data2g.interference)."""
 
     def __init__(self, chan: str, snr_db: float, seed: int, horizon: float, doppler=None, delay_ms=None,
-                 interference=None, recorded=None):
+                 interference=None, recorded=None, wander_db: float = 0.0):
         """`chan`: a preset name, unless `doppler` (Hz) and `delay_ms` are given.
         `interference`: (station 0's, station 1's) interference.Spec; None: clean.
-        `recorded`: a RecordedNoise in place of the Gaussian floor."""
+        `recorded`: a RecordedNoise in place of the Gaussian floor.
+        `wander_db`: each station's floor wanders by this (standard deviation, dB;
+        WANDER_TAU_S) about the cell's level; its interference doesn't."""
         self.recorded = recorded
+        self.wander = None
+        if wander_db:
+            # Ornstein-Uhlenbeck in dB at 1 Hz, from -PRE_S
+            n = int(PRE_S + horizon + 62)
+            a = np.exp(-1.0 / WANDER_TAU_S)
+            self.wander = []
+            for i in range(2):
+                e = np.random.default_rng(np.random.SeedSequence([seed, 11, i])).normal(size=n)
+                w = np.empty(n)
+                w[0] = wander_db * e[0]
+                for k in range(1, n):
+                    w[k] = a * w[k - 1] + np.sqrt(1 - a * a) * wander_db * e[k]
+                self.wander.append(w)
         self.snr_db, self.rng = snr_db, np.random.default_rng(seed)
         self.seed, self.horizon = seed, horizon
         specs = interference or (INTF.Spec(), INTF.Spec())
@@ -79,6 +95,13 @@ class ContinuousChannel:
             norm = np.sqrt(2 * np.mean(shape**2))
             self.g = [np.fft.ifft(np.fft.fft(self.rng.normal(size=n_low) + 1j * self.rng.normal(size=n_low)) * shape) / norm
                       for _ in range(2)]
+
+    def floor_gain(self, station, t0: float, n: int):
+        """The station's floor amplitude over n samples from session time t0 (1 without wander)."""
+        if self.wander is None or station is None:
+            return 1.0
+        t = t0 + PRE_S + np.arange(n) / FS
+        return 10 ** (np.interp(t, np.arange(len(self.wander[station])), self.wander[station]) / 20)
 
     def interference(self, station: int, t0: float, n: int, sigma: float) -> np.ndarray:
         """Station's interference from session time t0 (PRE_S before 0 at the earliest)."""
@@ -117,7 +140,8 @@ class ContinuousChannel:
             self.rng.integers(1 << 31)  # the draw awgn takes: the bursts' fading and timing stay paired
             y = y + self.recorded.render(rx or 0, t0 - PAD_S, len(y), self.sigma(s_power))
         else:
-            y = hfchannel.awgn(y, self.snr_db, seed=int(self.rng.integers(1 << 31)), s_power=s_power)
+            noisy = hfchannel.awgn(y, self.snr_db, seed=int(self.rng.integers(1 << 31)), s_power=s_power)
+            y = noisy if self.wander is None else y + (noisy - y) * self.floor_gain(rx, t0 - PAD_S, len(y))
         if rx is not None and not self.intf[rx].spec.clean:
             y += self.interference(rx, t0 - PAD_S, len(y), self.sigma(s_power))
         return y
@@ -219,7 +243,7 @@ class StationNoise:
                 if n <= 0:
                     break
                 y = (self.ch.recorded.render(station, ts, n, sigma) if self.ch.recorded is not None
-                     else self.rng.normal(0, sigma, n))
+                     else self.rng.normal(0, sigma, n) * self.ch.floor_gain(station, ts, n))
                 if not clean:
                     y += self.ch.interference(station, ts, n, sigma)
                 p.feed(y, ts)

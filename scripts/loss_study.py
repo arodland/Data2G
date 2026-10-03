@@ -92,6 +92,7 @@ def ctl_decoded(r, slots) -> bool:
 
 
 REC_NOISE = None  # recorded noise for 'rec' cells (main loads it before the pool forks)
+WANDER_DB = 1.0  # 'wander' cells: a clean channel whose floor wanders (phy_session.ContinuousChannel)
 
 
 def one(args):
@@ -99,7 +100,8 @@ def one(args):
     rows = []
     spec = INTF.PRESETS.get(intf or "clean", INTF.Spec())
     rec = G.RecordedNoise(REC_NOISE, seed) if intf == "rec" else None
-    ch = G.ContinuousChannel(chan, snr, seed, horizon, interference=(spec, spec), recorded=rec)
+    ch = G.ContinuousChannel(chan, snr, seed, horizon, interference=(spec, spec), recorded=rec,
+                             wander_db=WANDER_DB if intf == "wander" else 0.0)
     # an interfered cell is its own 'channel' (paired_loss groups by channel and SNR)
     tag = dict(channel=chan if intf in (None, "clean") else f"{chan}/{intf}", snr=snr, seed=seed)
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, L.WORKLOADS["bulk"](random.Random(seed + 7)),
@@ -163,9 +165,9 @@ def main():
                  "transmits) or pass --average-snr")
     cells = ([(f[0], float(f[1]), f[2] if len(f) > 2 else None) for f in (x.split(":") for x in a.cells.split(","))]
              if a.cells else [(c, s, None) for c, s in CELLS])
-    unknown = {i for *_, i in cells if i not in (None, "rec") and i not in INTF.PRESETS}
+    unknown = {i for *_, i in cells if i not in (None, "rec", "wander") and i not in INTF.PRESETS}
     if unknown:
-        ap.error(f"unknown interference {sorted(unknown)}: {sorted(INTF.PRESETS)} or rec")
+        ap.error(f"unknown interference {sorted(unknown)}: {sorted(INTF.PRESETS)}, rec or wander")
     if any(i == "rec" for *_, i in cells):
         if not a.recordings:
             ap.error("'rec' cells need --recordings")
