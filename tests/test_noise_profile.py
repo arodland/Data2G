@@ -19,6 +19,7 @@ def test_white_noise_is_flat():
     assert s["noise_blocks"] == 270  # 30 s less COMMIT_S
     assert np.ptp(s["noise_db"]) < 0.5
     assert max(s["noise_tail_db"]) < 2  # a 0.1 s block's own spread: 1.0-1.4 dB
+    assert s["impulses_per_min"] < 1  # Gaussian peaks over 80 samples stay under 5x
 
 
 def test_intermittent_edge_carrier_shows_in_its_band_only():
@@ -36,6 +37,20 @@ def test_intermittent_edge_carrier_shows_in_its_band_only():
     tails = s["noise_tail_db"]
     assert tails[4] > 10 and max(tails[:4]) < 3
     assert np.ptp(s["noise_db"]) < 1.0
+
+
+def test_impulses_are_counted():
+    """Clicks at 2 per second, 25 dB over the noise (on air: ~22 dB, 1-3 ms):
+    about 120 a minute, the bands' medians unmoved."""
+    from data2g import hfchannel
+
+    rng = np.random.default_rng(5)
+    x = rng.normal(0, 0.1, 60 * FS)
+    p = NoiseProfile()
+    feed(p, hfchannel.clicks(x, 2.0, 25.0, seed=6, s_power=0.01))
+    s = p.snapshot()
+    assert 80 < s["impulses_per_min"] < 160
+    assert np.ptp(s["noise_db"]) < 0.5
 
 
 def test_marked_spans_and_gaps_are_not_noise():
@@ -68,6 +83,7 @@ def test_native_matches(native, native_side):
     n = 30 * FS
     t = np.arange(n) / FS
     x = rng.normal(0, 0.1, n) * (1 + 0.5 * (t > 15)) + ((t % 4) < 1) * 0.2 * np.sin(2 * np.pi * 600 * t)
+    x[rng.integers(0, n, 200)] += 3.0  # impulses
     outs = []
     for cls in (NoiseProfile, native.tnc.NoiseProfile):
         p = cls()
@@ -78,6 +94,7 @@ def test_native_matches(native, native_side):
     assert cpp["noise_blocks"] == py["noise_blocks"]
     np.testing.assert_allclose(cpp["noise_db"], py["noise_db"], atol=1e-9)
     np.testing.assert_allclose(cpp["noise_tail_db"], py["noise_tail_db"], atol=1e-9)
+    assert cpp["impulses_per_min"] == pytest.approx(py["impulses_per_min"]) and py["impulses_per_min"] > 0
 
 
 def test_recordings_carry_it(tmp_path):

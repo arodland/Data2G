@@ -155,6 +155,7 @@ void bind_tnc(py::module_& m) {
             py::dict d;
             d["noise_db"] = std::vector<double>(s->db.begin(), s->db.end());
             d["noise_tail_db"] = std::vector<double>(s->tail_db.begin(), s->tail_db.end());
+            d["impulses_per_min"] = s->impulses_per_min;
             d["noise_blocks"] = s->blocks;
             return d;
         });

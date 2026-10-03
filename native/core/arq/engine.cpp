@@ -119,7 +119,8 @@ std::string json_noise(const tnc::NoiseSnapshot& n) {
         for (std::size_t i = 0; i < v.size(); ++i) s += (i ? ", " : "") + json_num(v[i]);
         return s + "]";
     };
-    return json_obj({{"noise_db", list(n.db)}, {"noise_tail_db", list(n.tail_db)}, {"noise_blocks", std::to_string(n.blocks)}});
+    return json_obj({{"noise_db", list(n.db)}, {"noise_tail_db", list(n.tail_db)},
+                     {"impulses_per_min", json_num(n.impulses_per_min)}, {"noise_blocks", std::to_string(n.blocks)}});
 }
 
 std::uint16_t to_half(double x) {

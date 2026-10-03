@@ -114,6 +114,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept);
 // percentile over it). Times are sample indices, round(t * FS).
 struct NoiseSnapshot {
     std::array<double, 5> db{}, tail_db{};
+    double impulses_per_min = 0.0;
     int blocks = 0;
 };
 
@@ -126,6 +127,8 @@ public:
     static constexpr double COMMIT_S = 3.0;
     static constexpr std::size_t MIN_BLOCKS = 20;
     static constexpr double RECOVER_S = 0.6;
+    static constexpr int PIECE = config::FS / 100;  // impulse detection: 10 ms pieces
+    static constexpr double IMPULSE_X = 10.0;       // over the block's median piece RMS
 
     NoiseProfile();
     void feed(std::span<const double> x, double t_start);  // heard from t_start (s); a gap starts a new block
@@ -136,12 +139,14 @@ private:
     struct Block {
         std::int64_t start, end;
         std::array<double, 5> p;
+        int impulses;
     };
     std::vector<double> win_, buf_;
     std::int64_t s0_ = 0;
     std::deque<Block> pending_;
     std::vector<std::pair<std::int64_t, std::int64_t>> busy_;
     std::deque<std::array<double, 5>> kept_;
+    std::deque<int> kept_impulses_;
 };
 
 class Receiver {

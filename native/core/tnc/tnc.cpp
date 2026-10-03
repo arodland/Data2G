@@ -234,7 +234,23 @@ void NoiseProfile::feed(std::span<const double> x, double t_start) {
     while (buf_.size() - off >= static_cast<std::size_t>(BLOCK)) {
         for (int n = 0; n < BLOCK; ++n) z[n] = buf_[off + n] * win_[n];
         const auto spec = dsp::fft(z, true);
-        Block b{s0_, s0_ + BLOCK, {}};
+        Block b{s0_, s0_ + BLOCK, {}, 0};
+        {  // impulses: 10 ms pieces whose peak is over IMPULSE_X x the median piece RMS
+            std::vector<double> rms, peak;
+            for (int q = 0; q < BLOCK; q += PIECE) {
+                double ss = 0.0, pk = 0.0;
+                for (int n = 0; n < PIECE; ++n) {
+                    const double v = buf_[off + q + n];
+                    ss += v * v;
+                    pk = std::max(pk, std::fabs(v));
+                }
+                rms.push_back(std::sqrt(ss / PIECE));
+                peak.push_back(pk);
+            }
+            const double ref = dsp::quantile(rms, 0.5);
+            if (ref > 0)
+                for (const double pk : peak) b.impulses += pk > IMPULSE_X * ref;
+        }
         for (std::size_t i = 0; i < BANDS_HZ.size(); ++i) {
             // rfft bins k (k * FS / BLOCK Hz) with lo <= f < hi
             const int bin_hz = config::FS / BLOCK;
@@ -257,7 +273,8 @@ void NoiseProfile::feed(std::span<const double> x, double t_start) {
                                         [&](const auto& m) { return m.first < b.end && b.start < m.second; });
         if (!marked) {
             kept_.push_back(b.p);
-            if (kept_.size() > WINDOW) kept_.pop_front();
+            kept_impulses_.push_back(b.impulses);
+            if (kept_.size() > WINDOW) kept_.pop_front(), kept_impulses_.pop_front();
         }
     }
     std::erase_if(busy_, [&](const auto& m) { return m.second <= now - 2 * commit; });
@@ -272,6 +289,9 @@ std::optional<NoiseSnapshot> NoiseProfile::snapshot() const {
     if (kept_.size() < MIN_BLOCKS) return std::nullopt;
     NoiseSnapshot out;
     out.blocks = static_cast<int>(kept_.size());
+    double imp = 0.0;
+    for (const int n : kept_impulses_) imp += n;
+    out.impulses_per_min = 60.0 * imp / (static_cast<double>(kept_.size()) * BLOCK / config::FS);
     for (std::size_t i = 0; i < BANDS_HZ.size(); ++i) {
         std::vector<double> v;
         v.reserve(kept_.size());
