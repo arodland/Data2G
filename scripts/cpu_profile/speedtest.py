@@ -73,11 +73,11 @@ class Side:
 
     def step(self, x):
         """48 kHz heard -> 48 kHz arriving at the other side (host.serve's loop)."""
-        was = self.eng.tx and self.eng.tx[0]
+        idle = not self.eng.tx_samples  # a step starts a burst only from idle, and none is under a block
         y, ptt = self.eng.step(self.dec(x) if not self.keyed else np.zeros(BLOCK))
-        if self.eng.tx and self.eng.tx[0] is not was:  # a burst started
+        if idle and self.eng.tx_samples:  # a burst started (tx itself only now: native builds it per access)
             sub = self.eng.tx[0].submode
-            self.airtime[sub] = self.airtime.get(sub, 0.0) + (len(self.eng.tx[1]) - self.eng.ptt_delay) / FS
+            self.airtime[sub] = self.airtime.get(sub, 0.0) + (self.eng.tx_samples - self.eng.ptt_delay) / FS
         out = np.clip(self.interp(y), -1, 1) if (ptt or self.keyed) else np.zeros(BLK)
         self.keyed = ptt
         if self.fader:

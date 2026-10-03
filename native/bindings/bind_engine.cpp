@@ -136,6 +136,13 @@ void bind_engine(py::module_& m) {
             if (!t) return py::none();
             return py::make_tuple(burst_py(t->burst), t->pos);  // engine.py's [burst, audio, position], less the audio
         })
+        // the burst on air's length (its audio's, PTT delay included) and the delay itself, in samples:
+        // what tx's audio would give, without copying it out (speedtest.py's airtime count)
+        .def_property_readonly("tx_samples", [](const PyEngine& self) -> std::size_t {
+            const auto& t = self.tx();
+            return t ? t->audio.size() : 0;
+        })
+        .def_property_readonly("ptt_delay", &PyEngine::ptt_delay)
         .def_property_readonly("_extra", [](const PyEngine& self) {
             py::list out;
             for (const auto& b : self.extra()) out.append(burst_py(b));

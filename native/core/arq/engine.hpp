@@ -171,6 +171,7 @@ public:
     double id_interval_s = ID_INTERVAL_S;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
+    std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
     std::vector<Bytes>& kiss_rx() { return kiss_rx_; }  // frames heard for KISS clients; the host clears it
     kisslink::KissLink* kiss() const { return cfg_.kiss; }

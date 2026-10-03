@@ -119,6 +119,11 @@ class Engine:
     def now(self) -> float:
         return self.n / FS
 
+    @property
+    def tx_samples(self) -> int:
+        """The burst on air's length in samples (its audio, PTT delay included), 0 if none."""
+        return len(self.tx[1]) if self.tx else 0
+
     def _new_session(self):
         self.session = S.Session(self.call, self.policy_factory(), rng=random.Random(self.rng.random()),
                                  aliases=self.aliases, stats_interval_s=self.stats_interval_s)

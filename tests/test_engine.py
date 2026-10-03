@@ -101,6 +101,20 @@ def test_id_frames_during_and_after_a_session(tmp_path):
     assert pairs and all(abs(q["t"] - (p["t"] + p["seconds"])) < 1e-9 for p, q in pairs)
 
 
+def test_tx_samples_is_the_burst_on_air_with_its_ptt_delay():
+    """tx_samples and ptt_delay (speedtest.py's airtime count; the C++ Engine
+    exposes them instead of copying tx's audio out): idle 0; once a burst
+    starts, its modulated audio plus the PTT delay."""
+    a = Engine("W1AW", seed=1)
+    assert a.tx_samples == 0 and a.ptt_delay == int(0.1 * FS)
+    a.connect("K2XYZ", 2)
+    for _ in range(10):
+        a.step(np.zeros(BLOCK))
+        if a.tx_samples:
+            break
+    assert a.tx_samples == a.ptt_delay + len(PHY.tx_audio(a.tx[0]))
+
+
 def test_malformed_cq_and_id_frames_are_dropped():
     """A CRC-valid CQ or ID frame that can't be read (callsign codes past the
     alphabet, a short body) is dropped, not raised out of the receiver; a
