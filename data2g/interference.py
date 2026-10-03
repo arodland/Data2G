@@ -173,6 +173,17 @@ def _noise_chunk(q: Qrm, power: float, key: tuple) -> np.ndarray:
     return x * np.sqrt(power / max(np.mean(x**2), 1e-30))
 
 
+def describe(spec: Spec) -> str:
+    """A short label, for data rows: '' clean, else 'imp<trains/min>x<per train>@<dB>' and
+    '<kind><f>/<bw>+<inr>d<duty>' per QRM source, ';'-separated."""
+    parts = []
+    if spec.impulses is not None:
+        im = spec.impulses
+        parts.append(f"imp{im.trains_per_min:.1f}x{im.per_train:.1f}@{im.height_db:.0f}")
+    parts += [f"{q.kind}{q.f_hz:.0f}/{q.bw_hz:.0f}+{q.inr_db:.0f}d{q.duty:.2f}" for q in spec.qrm]
+    return ";".join(parts)
+
+
 # --- the training distribution ----------------------------------------------------------
 
 # Ranges of what draw() produces; the benchmark's held-out cells go outside them.

@@ -292,7 +292,8 @@ class Engine:
                     continue
             if self._cq(rx):
                 continue
-            self.session.policy.observe(meas, r["spec"].name, t)
+            # the noise profile too (a model with its inputs reads it; recorded apart, with the rx event)
+            self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
             self.session.on_rx(rx, t)
 
     def _kiss_burst(self, k: int):
