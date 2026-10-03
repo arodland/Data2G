@@ -442,6 +442,14 @@ class Session:
                 self._answer_mode = f["mode"]
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
+            if (self.station is not None and not self._master and caller == self.peer
+                    and self.state in (CONNECTED, DISCONNECTING)):
+                # my caller dialed again: it gave up on our session (lost my
+                # CONNECT_ACK and ran out of tries), so take the new one. Held
+                # on air, the old one ignored it until link lost
+                # (recordings/20261002-232711)
+                self._close("peer reconnected", now=now)
+                self.state, self._want_disc, self._sent_disc_ack, self._tries = LISTEN, False, False, 0
             if self.state != LISTEN:
                 return
             if body[1] != VERSION:

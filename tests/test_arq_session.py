@@ -144,6 +144,29 @@ def test_lost_connect_ack_is_repeated():
     assert r["got_b"] == r["data_a"] and r["got_a"] == r["data_b"]
 
 
+def test_redial_replaces_a_dead_callee_session():
+    """The caller lost my CONNECT_ACK, gave up and dialed again (a new
+    nonce): I drop the session it abandoned and answer the new one, instead
+    of ignoring it until link lost (on air, recordings/20261002-232711)."""
+    def heard(burst):
+        return FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
+
+    b = S.Session("K2XYZ", Policy(random.Random(3)), rng=random.Random(4))
+    b.listen()
+    a1 = S.Session("W1AW", Policy(random.Random(1)), rng=random.Random(2))
+    a1.connect("K2XYZ", 2, 0.0)
+    b.on_rx(heard(a1.poll(0.0)), 1.0)
+    assert b.state == S.CONNECTED and b.poll(1.0) is not None  # its CONNECT_ACK, lost
+    a2 = S.Session("W1AW", Policy(random.Random(5)), rng=random.Random(6))
+    a2.connect("K2XYZ", 2, 40.0)
+    assert a2._nonce != a1._nonce
+    b.on_rx(heard(a2.poll(40.0)), 41.0)
+    ack = b.poll(41.0)
+    assert ack is not None and b.events[-2:] == ["DISCONNECTED peer reconnected", "CONNECTED W1AW"]
+    a2.on_rx(heard(ack), 42.0)
+    assert a2.state == S.CONNECTED and a2.station.key == b.station.key
+
+
 @pytest.mark.parametrize("seed", range(5))
 def test_dead_link_closes_both_within_bound(seed):
     r = run(50 + seed, n_a=50000, die_at=20.0)
