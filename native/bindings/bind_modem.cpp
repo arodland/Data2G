@@ -298,18 +298,18 @@ void bind_modem(py::module_& m) {
         return r ? py::object(np(*r)) : py::object(py::none());
     });
     d.def("best_header", [](const In<cd>& z0, const OptBands& bands, bool complete, const py::object& accept,
-                            const OptStats& stats) {
+                            const OptStats& stats, bool final) {
         const auto a = accept_of(accept);
         const auto st = stats_of(stats);
         const auto bs = bands_of(bands);
         mo::BestHeader r;
         {
             py::gil_scoped_release nogil;
-            r = mo::best_header(view(z0), bs, complete, a ? &*a : nullptr, st.v);
+            r = mo::best_header(view(z0), bs, complete, a ? &*a : nullptr, st.v, final);
         }
         return py::make_tuple(header_dict(r.hd), acq_tuple(r.acq), np(r.z));
     }, py::arg("z0"), py::arg("bands") = py::none(), py::arg("complete") = true, py::arg("accept") = py::none(),
-       py::arg("stats") = py::none());
+       py::arg("stats") = py::none(), py::arg("final") = false);
     d.def("find_burst", [](const In<double>& x, const OptBands& bands, const py::object& accept, const OptStats& stats) {
         const auto a = accept_of(accept);
         const auto st = stats_of(stats);

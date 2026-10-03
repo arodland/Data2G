@@ -118,9 +118,11 @@ struct BestHeader {
     waveform::Acquisition acq;
     std::vector<cd> z;  // z0 corrected by acq.freq_offset
 };
-// bands empty: accept's (sorted) or SYNC_BANDS. Throws SyncError.
+// bands empty: accept's (sorted) or SYNC_BANDS. Throws SyncError. final (with
+// complete false): z0 is the head of a burst that has wholly arrived, so
+// nothing waits (modem.py _best_header).
 BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view> bands = {}, bool complete = true,
-                       const Accept* accept = nullptr, std::span<const BandStat> stats = {});
+                       const Accept* accept = nullptr, std::span<const BandStat> stats = {}, bool final = false);
 
 struct CopyRef {
     int word = 0;

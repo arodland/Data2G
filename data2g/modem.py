@@ -525,11 +525,17 @@ def _copy_llr(z: np.ndarray, p: int, band: str, n_hdr: int) -> np.ndarray | None
 
 
 def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Accept | None = None,
-                 stats: dict | None = None) -> tuple:
+                 stats: dict | None = None, final: bool = False) -> tuple:
     """-> (header read, acquisition, frequency-corrected z) of the best
     CRC-valid header in baseband `z0`, over `bands` (default: every sync
     band). `complete`: the burst the header claims must fit in `z0`;
-    False for a streaming receiver, which waits for the rest.
+    False for a streaming receiver, which waits for the rest. `final`
+    (with complete False): z0 is the head of a burst that has wholly
+    arrived (receive's `head`), so nothing waits: a hypothesis past its end
+    is not read and a weak first copy stands. Waiting there refused
+    headers under STREAM_COMMIT_SCORE whenever an acquisition alternative
+    lay near the window's end: 4 of AG7EW's bursts on air, 0.42-0.49,
+    two of them decodable (recordings/20261002-232711).
 
     Every band's detector runs; each detection has its header read, and
     the best CRC-valid header decode decides the band. (A wide preamble
@@ -559,14 +565,14 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
             # read garbage off a real burst's half-arrived header, which
             # passed the w floor and hid the real header (audio loopback).
             if not complete and start + 2 * M > len(z0) - hdr_end:
-                waiting = True
+                waiting |= not final
                 continue
             zb = freq_correct(z0, f)
             for k in (0, -1, 1, -2, 2):
                 if not 0 <= start + k * M <= len(z0) - hdr_end:
                     continue
                 r = _read_header(zb, start + k * M, name, accept)
-                if not complete and r["pending_copy"] and r["score"] < COPY_COMMIT_SCORE:
+                if not complete and not final and r["pending_copy"] and r["score"] < COPY_COMMIT_SCORE:
                     waiting = True  # a weak first copy waits for the second
                     continue
                 # a header claiming more than the buffer holds is not this burst's
@@ -765,7 +771,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     elif head is None:
         hd, acq, z = _best_header(z0, bands, accept=accept)
     else:
-        hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept)
+        hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept, final=True)
         z = freq_correct(z0, acq.freq_offset)
         spec, n_cw = hd["hdr"]
         if burst_end(hd["p0"], spec, n_cw) > len(z0):

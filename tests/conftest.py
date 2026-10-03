@@ -830,8 +830,8 @@ def _modem_substitutions(native):
         return N.copy_llr(z, int(p), band, int(n_hdr))
 
     @guarded("_best_header")
-    def _best_header(z0, bands=None, complete=True, accept=None, stats=None):
-        hd, a, z = N.best_header(z0, bands_arg(bands), complete, accept, stats)
+    def _best_header(z0, bands=None, complete=True, accept=None, stats=None, final=False):
+        hd, a, z = N.best_header(z0, bands_arg(bands), complete, accept, stats, final)
         return hdr_dict(hd), acq(a), z
 
     @guarded("find_burst")
