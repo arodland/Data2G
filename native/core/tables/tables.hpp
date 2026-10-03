@@ -97,6 +97,13 @@ struct OutcomeMember {
 };
 extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
 extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;
+// The data ladder's robustness order (data2g/arq/policy.py MODE_THRESHOLDS):
+// per mode, its 10% codeword failure SNR (dB) on awgn, mpg, mpp, mpd.
+struct ModeThreshold {
+    std::string_view name;
+    std::array<double, 4> db;
+};
+extern const std::span<const ModeThreshold> MODE_THRESHOLDS;
 // AWGN BICM capacity (bits per coded bit) over CAPACITY_GRID (dB), per
 // constellation family (predictor.CONSTS order).
 struct CapacityTable {

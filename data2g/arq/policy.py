@@ -12,6 +12,7 @@ The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -54,15 +55,19 @@ LINK_LOST_S = 90.0
 T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
 LOST_LINK_COST_S = 300.0
 REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
-# after this many bursts in a row lost in the data mode I recommended, data
-# goes only in the mode of the peer's last burst that decoded, until a data
-# burst gets through. On air (recordings/20261002-232711) every fsk16r25
-# poll decoded and 0 of 12 data bursts did, predicted 0.74-0.93: the model had
-# never seen CPM polls measured on a bad channel, and the per-mode bias hopped
-# to unpenalised neighbours.
-# ponytail: a hard floor, not a learned one; the v13 retrain on this branch's
-# sessions should make it rare
-PROVEN_AFTER = 2
+# The data ladder: after LADDER_AFTER bursts in a row lost in the data mode I
+# recommended, data may only go in modes LADDER_STEP_DB more robust than it on
+# every channel (MODE_THRESHOLDS); each further loss steps down from the mode
+# that failed, each usable data burst climbs a step. On air
+# (recordings/20261002-232711) every fsk16r25 poll decoded and 0 of 12 data
+# bursts did, predicted 0.74-0.93: the model had never seen CPM polls measured
+# on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
+# ponytail: thresholds from one ladder study, not learned; the retrain on this
+# branch's sessions should make the ladder rare
+LADDER_AFTER = 2
+LADDER_STEP_DB = 3.0
+# per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
+MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
 WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
 BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
@@ -153,8 +158,9 @@ class GearShifter:
     measured_band: str = "w"
     measured_at: float = 0.0
     heard: str | None = None  # the submode of the peer's last burst
-    proven: str | None = None  # the submode of the peer's last burst whose control decoded
-    data_lost: int = 0  # bursts lost in a row in the data mode I recommended (PROVEN_AFTER)
+    data_lost: int = 0  # bursts lost in a row in the data mode I recommended (LADDER_AFTER)
+    ceiling: tuple | None = None  # the data ladder: per channel, the highest threshold data may have
+    ladder_top: tuple | None = None  # the thresholds of the mode whose losses started it: climbed back there, it's off
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
@@ -262,12 +268,20 @@ class GearShifter:
         `usable`: its control decoded, with decoded/sent its data codewords
         alone (counted with them, the control made a 0/7 burst score 1/8);
         None (KISS: no control): any codeword decoded."""
-        if usable:
-            self.proven = submode
-            if sent:
-                self.data_lost = 0
+        if usable and sent:
+            self.data_lost = 0
+            if self.ceiling is not None:  # climb a step
+                self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
+                if all(map(lambda c, t: c >= t, self.ceiling, self.ladder_top)):
+                    self.ceiling = self.ladder_top = None
         elif usable is False and self.log and submode == self.log[-1][0]:
             self.data_lost += 1
+            if self.data_lost >= LADDER_AFTER:  # step down from the mode that failed
+                down = tuple(t - LADDER_STEP_DB for t in MODE_THRESHOLDS[submode])
+                if self.ceiling is None:
+                    self.ceiling, self.ladder_top = down, MODE_THRESHOLDS[submode]
+                else:
+                    self.ceiling = tuple(map(min, down, self.ceiling))
         p = self.predicted.get(submode)
         if p is None or (sent == 0 and usable is None):
             return
@@ -346,8 +360,10 @@ class GearShifter:
         if chat:
             best_v = -float("inf")
         data_cands = cands
-        if self.data_lost >= PROVEN_AFTER and self.proven is not None and MODES[self.proven] in cands:
-            data_cands = [MODES[self.proven]]
+        if self.ceiling is not None:
+            data_cands = [s for s in cands if all(map(lambda t, c: t <= c, MODE_THRESHOLDS[s.name], self.ceiling))]
+            # none that robust: the most robust there is (the lowest worst-case threshold)
+            data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):

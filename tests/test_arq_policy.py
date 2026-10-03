@@ -185,19 +185,26 @@ def test_robust_floor_sends_control_only_bursts_robust():
     assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation
 
 
-def test_lost_data_falls_back_to_the_proven_mode():
-    """Data bursts lost in a row in the mode I recommended (PROVEN_AFTER):
-    data goes in the mode of the peer's last decoded burst until a data
-    burst gets through (on air: fsk16r25 polls all decoded, 0 of 12 data
-    bursts in the model's picks)."""
+def test_lost_data_steps_down_the_ladder():
+    """LADDER_AFTER data bursts lost in a row in the mode I recommended: data
+    goes only in modes LADDER_STEP_DB more robust on every channel; a further
+    loss steps down from the mode that failed, a usable data burst climbs."""
+    T, step = G.MODE_THRESHOLDS, G.LADDER_STEP_DB
+
+    def below(a, b, by):  # a at least `by` dB more robust than b on every channel
+        return all(x <= y - by for x, y in zip(T[a], T[b]))
+
     g = G.GearShifter()
     g.observe(measured(10, 0.1), "qpsk-r1/5", 0.0)
-    g.outcome(G.ROBUST_CONNECT, 0, 0, usable=True)  # its poll decoded
     st = station(2)
-    for _ in range(G.PROVEN_AFTER):
+    for _ in range(G.LADDER_AFTER):
         data = G.decode(g.recommend(st)[0])
-        assert data != G.ROBUST_CONNECT
         g.outcome(data, 0, 0, usable=False)  # the peer's data burst in it: lost
-    assert G.decode(g.recommend(st)[0]) == G.ROBUST_CONNECT
-    g.outcome(G.ROBUST_CONNECT, 3, 3, usable=True)  # data got through: the model picks again
-    assert G.decode(g.recommend(st)[0]) != G.ROBUST_CONNECT
+    down = G.decode(g.recommend(st)[0])
+    assert below(down, data, step)
+    g.outcome(down, 0, 0, usable=False)
+    lower = G.decode(g.recommend(st)[0])
+    assert lower == down == min(T, key=lambda m: max(T[m])) or below(lower, down, step)
+    for _ in range(20):  # data gets through: it climbs off the ladder
+        g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
+    assert g.ceiling is None

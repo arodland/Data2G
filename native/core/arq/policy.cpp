@@ -43,6 +43,12 @@ int cdiv(std::int64_t a, std::int64_t b) { return static_cast<int>((a + b - 1) /
 
 }  // namespace
 
+const std::array<double, 4>& mode_thresholds(std::string_view submode) {
+    for (const auto& t : tables::MODE_THRESHOLDS)
+        if (t.name == submode) return t.db;
+    throw std::out_of_range("no ladder thresholds for " + std::string(submode));
+}
+
 int cap_hz(int cap) {
     switch (cap) {
         case 0: return 500;
@@ -163,11 +169,26 @@ double GearShifter::reply_hold(const StationView& st, std::string_view submode) 
 }
 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
-    if (usable && *usable) {
-        proven = std::string(submode);
-        if (sent) data_lost = 0;
-    } else if (usable && !log.empty() && submode == log.back().data) {
-        ++data_lost;
+    if (usable && *usable && sent) {
+        data_lost = 0;
+        if (ceiling) {  // climb a step; back at the mode whose losses started it, it's off
+            bool off = true;
+            for (std::size_t i = 0; i < 4; ++i) {
+                (*ceiling)[i] += LADDER_STEP_DB;
+                off = off && (*ceiling)[i] >= (*ladder_top)[i];
+            }
+            if (off) ceiling.reset(), ladder_top.reset();
+        }
+    } else if (usable && !*usable && !log.empty() && submode == log.back().data) {
+        if (++data_lost >= LADDER_AFTER) {  // step down from the mode that failed
+            std::array<double, 4> down = mode_thresholds(submode);
+            for (std::size_t i = 0; i < 4; ++i) {
+                down[i] -= LADDER_STEP_DB;
+                if (ceiling) down[i] = std::min(down[i], (*ceiling)[i]);
+            }
+            if (!ceiling) ladder_top = mode_thresholds(submode);
+            ceiling = down;
+        }
     }
     const auto it = predicted.find(submode);
     if (it == predicted.end() || (sent == 0 && !usable)) return;
@@ -222,9 +243,22 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
     std::vector<const Mode*> data_cands = cands;
-    if (data_lost >= PROVEN_AFTER && proven) {
-        const Mode* pm = &mode_at(*proven);
-        if (std::find(cands.begin(), cands.end(), pm) != cands.end()) data_cands = {pm};
+    if (ceiling && !cands.empty()) {
+        data_cands.clear();
+        for (const Mode* s : cands) {
+            const auto& t = mode_thresholds(s->name);
+            bool ok = true;
+            for (std::size_t i = 0; i < 4; ++i) ok = ok && t[i] <= (*ceiling)[i];
+            if (ok) data_cands.push_back(s);
+        }
+        if (data_cands.empty()) {  // none that robust: the lowest worst-case threshold
+            auto worst = [](const Mode* s) {
+                const auto& t = mode_thresholds(s->name);
+                return *std::max_element(t.begin(), t.end());
+            };
+            data_cands = {*std::min_element(cands.begin(), cands.end(),
+                                            [&](const Mode* a, const Mode* b) { return worst(a) < worst(b); })};
+        }
     }
     for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);

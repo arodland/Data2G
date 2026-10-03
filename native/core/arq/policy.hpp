@@ -31,7 +31,12 @@ inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
 inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply
 inline constexpr double LOST_LINK_COST_S = 300.0;
 inline constexpr double REPLY_HOLD_MARGIN_S = 0.5;
-inline constexpr int PROVEN_AFTER = 2;  // lost data bursts in a row before data goes in the proven mode (policy.py)
+// the data ladder (policy.py): after LADDER_AFTER data bursts lost in a row,
+// data only in modes LADDER_STEP_DB more robust on every channel
+inline constexpr int LADDER_AFTER = 2;
+inline constexpr double LADDER_STEP_DB = 3.0;
+// per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
+const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
 inline constexpr int CPM_CODE = 3;
 inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
@@ -89,8 +94,9 @@ public:
     std::string measured_band = "w";
     double measured_at = 0.0;
     std::optional<std::string> heard;  // the submode of the peer's last burst
-    std::optional<std::string> proven;  // the submode of the peer's last burst whose control decoded
-    int data_lost = 0;  // bursts lost in a row in the data mode I recommended
+    int data_lost = 0;  // bursts lost in a row in the data mode I recommended (LADDER_AFTER)
+    std::optional<std::array<double, 4>> ceiling;  // the data ladder: per channel, the highest threshold data may have
+    std::optional<std::array<double, 4>> ladder_top;  // the thresholds of the mode whose losses started it
     std::optional<Heard> prev;  // the peer burst before the last
     Map bias, bias_burst;
     bool want_dup = false;
