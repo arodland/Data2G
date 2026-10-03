@@ -59,9 +59,11 @@ class ContinuousChannel:
     each receiving station's own interference (data2g.interference)."""
 
     def __init__(self, chan: str, snr_db: float, seed: int, horizon: float, doppler=None, delay_ms=None,
-                 interference=None):
+                 interference=None, recorded=None):
         """`chan`: a preset name, unless `doppler` (Hz) and `delay_ms` are given.
-        `interference`: (station 0's, station 1's) interference.Spec; None: clean."""
+        `interference`: (station 0's, station 1's) interference.Spec; None: clean.
+        `recorded`: a RecordedNoise in place of the Gaussian floor."""
+        self.recorded = recorded
         self.snr_db, self.rng = snr_db, np.random.default_rng(seed)
         self.seed, self.horizon = seed, horizon
         specs = interference or (INTF.Spec(), INTF.Spec())
@@ -111,10 +113,67 @@ class ContinuousChannel:
         z = z * np.exp(2j * np.pi * CFO_HZ * (t0 + np.arange(len(x)) / FS))
         pad = np.zeros(int(PAD_S * FS))
         y = np.concatenate([pad, np.real(z), pad])
-        y = hfchannel.awgn(y, self.snr_db, seed=int(self.rng.integers(1 << 31)), s_power=s_power)
+        if self.recorded is not None:
+            self.rng.integers(1 << 31)  # the draw awgn takes: the bursts' fading and timing stay paired
+            y = y + self.recorded.render(rx or 0, t0 - PAD_S, len(y), self.sigma(s_power))
+        else:
+            y = hfchannel.awgn(y, self.snr_db, seed=int(self.rng.integers(1 << 31)), s_power=s_power)
         if rx is not None and not self.intf[rx].spec.clean:
             y += self.interference(rx, t0 - PAD_S, len(y), self.sigma(s_power))
         return y
+
+
+class RecordedNoise:
+    """Noise recorded on air (noise-only stretches of radio recordings,
+    each scaled to a unit median floor), standing in for the Gaussian floor
+    and any interference: the benchmark's realism test. Station i hears its
+    own stretch of it, from an offset its seed picks."""
+
+    def __init__(self, x: np.ndarray, seed: int):
+        self.x = x
+        r = np.random.default_rng(np.random.SeedSequence([seed, 9]))
+        self.offset = [int(r.integers(len(x))), int(r.integers(len(x)))]
+
+    def render(self, station: int, t0: float, n: int, sigma: float) -> np.ndarray:
+        i = (self.offset[station] + int(round((t0 + PRE_S) * FS)) + np.arange(n)) % len(self.x)
+        return sigma * self.x[i]
+
+
+def load_recorded_noise(dirs, per_recording_s: float = 90.0, seed: int = 0) -> np.ndarray:
+    """Noise-only stretches (no burst heard within 1 s, not our TX nor the
+    second after it, at least 1 s long) of radio recordings (a floor under
+    -20 dBFS; loopbacks sit near -12), up to per_recording_s from each,
+    each stretch scaled to a unit median 10 ms RMS."""
+    import json
+
+    rng = np.random.default_rng(seed)
+    out = []
+    for d in dirs:
+        x = np.fromfile(d / "audio_in.f16", dtype=np.float16).astype(np.float32)
+        busy = np.zeros(len(x), bool)
+        for e in map(json.loads, open(d / "events.jsonl")):
+            if e["kind"] == "rx" and e["submode"] in PHY.MODES:
+                t1 = e["t"]  # its end: 17 s back covers the longest burst (MAX_BURST_S 16)
+                busy[max(0, int((t1 - 17) * FS)):int((t1 + 1) * FS)] = True
+        zero = np.flatnonzero(x == 0)
+        for z0 in zero[::FS // 10]:
+            busy[max(0, z0 - FS // 5):z0 + FS] = True
+        edges = np.flatnonzero(np.diff(np.r_[1, busy.astype(np.int8), 1]))
+        stretches = [(a, b) for a, b in zip(edges[::2], edges[1::2]) if b - a >= FS]
+        rng.shuffle(stretches)
+        got = 0
+        for a, b in stretches:
+            s = x[a:b]
+            blk = s[:len(s) // 80 * 80].reshape(-1, 80)
+            floor = float(np.median(np.sqrt((blk.astype(np.float64) ** 2).mean(axis=1))))
+            if floor <= 0 or 20 * np.log10(floor) > -20:
+                continue
+            take = s[:int(min(len(s), (per_recording_s - got) * FS))]
+            out.append(take / floor)
+            got += len(take) / FS
+            if got >= per_recording_s:
+                break
+    return np.concatenate(out).astype(np.float32) if out else np.zeros(FS, np.float32)
 
 
 class StationNoise:
@@ -159,7 +218,8 @@ class StationNoise:
                 n = int(round(min(self.CHUNK_S, e0 - ts) * FS))
                 if n <= 0:
                     break
-                y = self.rng.normal(0, sigma, n)
+                y = (self.ch.recorded.render(station, ts, n, sigma) if self.ch.recorded is not None
+                     else self.rng.normal(0, sigma, n))
                 if not clean:
                     y += self.ch.interference(station, ts, n, sigma)
                 p.feed(y, ts)

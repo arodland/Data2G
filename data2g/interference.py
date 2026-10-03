@@ -173,6 +173,21 @@ def _noise_chunk(q: Qrm, power: float, key: tuple) -> np.ndarray:
     return x * np.sqrt(power / max(np.mean(x**2), 1e-30))
 
 
+# The benchmark's cells (docs/interference-plan.md). In the training ranges:
+# impulse trains, a noise source at the top edge (hurts the wide modes only),
+# an FSK hopper mid-band (everyone), carriers. Held out (outside draw()'s
+# ranges): longer, denser impulses; a wide, near-continuous noise source.
+PRESETS = {
+    "clean": Spec(),
+    "imp": Spec(Impulses(20.0, per_train=4.0, height_db=22.0)),
+    "edge": Spec(qrm=(Qrm("noise", 2400, 400, 20.0, 5.0, 0.5),)),
+    "mid": Spec(qrm=(Qrm("fsk", 1500, 300, 15.0, 3.0, 0.4),)),
+    "carriers": Spec(qrm=(Qrm("carrier", 800, 50, 25.0, 10.0, 0.7), Qrm("carrier", 2200, 50, 25.0, 10.0, 0.7))),
+    "imp_long": Spec(Impulses(30.0, per_train=12.0, height_db=26.0, length_ms=(3.0, 5.0))),
+    "qrm_wide": Spec(qrm=(Qrm("noise", 1700, 1200, 8.0, 8.0, 0.9),)),
+}
+
+
 def describe(spec: Spec) -> str:
     """A short label, for data rows: '' clean, else 'imp<trains/min>x<per train>@<dB>' and
     '<kind><f>/<bw>+<inr>d<duty>' per QRM source, ';'-separated."""
