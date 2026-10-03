@@ -266,6 +266,42 @@ std::string unpack_call(ByteView b) {
     return out;
 }
 
+namespace {
+struct CompactField { int bits, at, n; };  // bits, body offset, body bytes
+constexpr CompactField COMPACT[] = {{4, 1, 1}, {60, 2, 8}, {60, 10, 8}, {16, 18, 2}, {2, 20, 1}, {6, 21, 1}};
+}  // namespace
+
+Bytes pack_connect(ByteView body) {
+    if (body.size() < 22) throw std::invalid_argument("CONNECT body of " + std::to_string(body.size()) + " B");
+    Bytes out(COMPACT_BYTES, 0);
+    int pos = 0;  // bits written, MSB first
+    for (const auto& f : COMPACT) {
+        std::uint64_t x = 0;
+        for (int i = 0; i < f.n; ++i) x = x << 8 | body[static_cast<std::size_t>(f.at + i)];
+        if (f.bits < 64 && x >> f.bits)
+            throw std::invalid_argument("CONNECT field at " + std::to_string(f.at) + ": " + std::to_string(x) +
+                                        " over " + std::to_string(f.bits) + " bits");
+        for (int b = f.bits - 1; b >= 0; --b, ++pos)
+            if (x >> b & 1) out[static_cast<std::size_t>(pos / 8)] |= static_cast<std::uint8_t>(0x80 >> (pos % 8));
+    }
+    return out;
+}
+
+Bytes unpack_connect(ByteView p) {
+    Bytes out(22, 0);
+    out[0] = CONNECT;
+    int pos = 0;
+    for (const auto& f : COMPACT) {
+        std::uint64_t x = 0;
+        for (int b = 0; b < f.bits; ++b, ++pos) {
+            const auto i = static_cast<std::size_t>(pos / 8);
+            x = x << 1 | (i < p.size() ? (p[i] >> (7 - pos % 8) & 1) : 0);
+        }
+        for (int i = f.n - 1; i >= 0; --i, x >>= 8) out[static_cast<std::size_t>(f.at + i)] = static_cast<std::uint8_t>(x);
+    }
+    return out;
+}
+
 // --- stream records -----------------------------------------------------------------
 
 Bytes to_records(ByteView data) {

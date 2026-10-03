@@ -15,6 +15,7 @@
 #include "arq/link.hpp"
 #include "arq/modes.hpp"
 #include "arq/predictor.hpp"
+#include "arq/session.hpp"  // LINK_LOST_S
 
 namespace data2g::arq {
 
@@ -26,9 +27,15 @@ inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
 inline constexpr double DUP_BELOW = 0.9;
 inline constexpr int CHAT_BYTES = 200;  // frames.CHAT_LINE_BYTES
 inline constexpr double CPM_SIZE_SCALE = 4.0;
+inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
+inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply
+inline constexpr double LOST_LINK_COST_S = 300.0;
+inline constexpr double REPLY_HOLD_MARGIN_S = 0.5;
 inline constexpr int CTL_BYTES = 12;
 inline constexpr int CPM_CODE = 3;
-inline constexpr std::string_view ROBUST_CONNECT = "n4-qpsk-r1/3";
+inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
+inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
+inline constexpr std::string_view ROBUST_CONNECT = "fsk16r25-r1/2";
 
 int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap
 std::string_view fallback(int cap);
@@ -52,6 +59,8 @@ struct StationView {
     bool chat = false;     // station.chat or station.peer_chat
     std::int64_t peer_queued = 0;
     std::int64_t held = 0;         // codewords held beyond the cumulative ACK: len(rx.buf)
+    int misses = 0;
+    int esc_floor = 0;
 };
 
 struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)
@@ -78,6 +87,7 @@ public:
     std::optional<Measured> measured;  // the peer's last burst
     std::string measured_band = "w";
     double measured_at = 0.0;
+    std::optional<std::string> heard;  // the submode of the peer's last burst
     std::optional<Heard> prev;  // the peer burst before the last
     Map bias, bias_burst;
     bool want_dup = false;
@@ -91,6 +101,8 @@ public:
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
+    // seconds past t_turn to wait for a reply to a burst in `submode`
+    double reply_hold(const StationView& st, std::string_view submode) const;
 };
 
 StationView view(const Station& st);
@@ -117,6 +129,9 @@ public:
     std::optional<double> snr_est() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
     std::string connect_mode(int cap, int tries) override;
+    std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
+        return shifter.reply_hold(view(st), burst.submode);
+    }
     void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
     int next_capacity(const Station& st) const { return shifter.next_capacity(view(st)); }  // the host's BUFFER
 };

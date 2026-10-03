@@ -387,7 +387,7 @@ def test_escalation_floor_is_sticky_and_decays():
     turn()
     hear(b, a.build())
     b.build()  # its reply is lost
-    assert a.on_timeout() is a.last_sent  # the identical repeat, lost
+    assert a.on_timeout() == a.last_sent  # the identical repeat, lost
     a.seen = []
     for _ in range(3):  # polls at 2, 3, 4: the last one heard and answered
         p = a.on_timeout()

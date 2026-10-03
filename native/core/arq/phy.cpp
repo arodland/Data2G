@@ -93,7 +93,7 @@ double monotonic() {
 }
 
 std::uint32_t mask_value(const MaskId& m) {
-    if (m.key == 0) return 0;
+    if (m.key == 0) return m.seq == SEQ_MOD + 4 ? 0xC0C0C0u : 0;  // a compact CONNECT's (link COMPACT_CONNECT)
     const std::uint8_t b[4] = {static_cast<std::uint8_t>(m.key >> 8), static_cast<std::uint8_t>(m.key & 255),
                                static_cast<std::uint8_t>(m.direction), static_cast<std::uint8_t>(m.seq)};
     const std::uint32_t v = codes::crc32(b);

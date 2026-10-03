@@ -4,7 +4,7 @@
 //     on_header(submode, n_cw, now)   a burst header was decoded
 //     on_rx(rx, now)                  a whole burst arrived
 //     poll(now) -> TxBurst or null    anything to send now?
-//     on_tx_end(now)                  that burst finished going out
+//     on_tx_end(burst, now)           that burst finished going out
 #pragma once
 
 #include <cstdint>
@@ -23,6 +23,7 @@ namespace data2g::arq {
 inline constexpr int T_SESS = 10;
 inline constexpr int VERSION = 3;
 inline constexpr int CONNECT_TRIES = 5;
+inline constexpr int CONNECT_CTL_BYTES = 28;  // a CONNECT's Control: core 4, T_SESS header 2, body 22
 inline constexpr int DISC_TRIES = 3;
 inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
 inline constexpr double IDLE_CLOSE_S = 300.0;
@@ -121,7 +122,7 @@ public:
     // clock side
     TxBurstPtr poll(double now);
     std::optional<double> next_event();
-    void on_tx_end(double now);
+    void on_tx_end(const TxBurstPtr& burst, double now);
     void on_header(const std::string& submode, int n_cw, double now);
     void on_rx(RxBurst& rx, double now);
 
@@ -151,6 +152,7 @@ private:
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();
     TxBurstPtr accept_burst();
+    bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
     void on_session_frame(const Frame& f, double now);
     void flush_writes();

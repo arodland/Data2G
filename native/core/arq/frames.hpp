@@ -96,6 +96,12 @@ inline constexpr int CALL_CHARS = 10;
 Bytes pack_call(const std::string& call);
 std::string unpack_call(ByteView b);
 
+// A CONNECT in 20 B, for a CPM control codeword: no Core or TLV, bit-packed
+// under its own CRC mask (link COMPACT_CONNECT). data2g/arq/frames.py.
+inline constexpr int COMPACT_BYTES = 20;
+Bytes pack_connect(ByteView body);  // a 22-byte CONNECT session body; throws std::invalid_argument
+Bytes unpack_connect(ByteView p);
+
 Bytes to_records(ByteView data);
 
 class RecordReader {

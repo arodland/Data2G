@@ -60,6 +60,11 @@ public:
         return (dup ? obj.attr("airtime")(m, n_cw, true) : obj.attr("airtime")(m, n_cw)).cast<double>();
     }
     std::string connect_mode(int cap, int tries) override { return obj.attr("connect_mode")(cap, tries).cast<std::string>(); }
+    std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
+        if (!py::hasattr(obj, "reply_hold")) return std::nullopt;
+        return obj.attr("reply_hold")(py::cast(&st, py::return_value_policy::reference),
+                                      burst_py(std::make_shared<TxBurst>(burst))).cast<double>();
+    }
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
@@ -323,6 +328,9 @@ void bind_arq_link(py::module_& m) {
     a.def("inflate", [](const py::bytes& hist, const py::bytes& payload) { return pyb(inflate(bytes_of(hist), bytes_of(payload))); });
     a.def("pack_call", [](const std::string& c) { return pyb(pack_call(c)); });
     a.def("unpack_call", [](const py::bytes& b) { return unpack_call(bytes_of(b)); });
+    a.def("pack_connect", [](const py::bytes& b) { return pyb(pack_connect(bytes_of(b))); });
+    a.def("unpack_connect", [](const py::bytes& b) { return pyb(unpack_connect(bytes_of(b))); });
+    a.attr("COMPACT_BYTES") = COMPACT_BYTES;
     a.def("to_records", [](const py::bytes& b) { return pyb(to_records(bytes_of(b))); });
     py::class_<RecordReader>(a, "RecordReader")
         .def(py::init<>())
@@ -413,6 +421,9 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("reply_lost", &Station::reply_lost)
         .def_readonly("misses", &Station::misses)
         .def_readonly("reply_escalation", &Station::reply_escalation)
+        .def_readonly("esc_floor", &Station::esc_floor)
+        .def_readonly("_clean", &Station::clean_)
+        .def_readonly("_sent_esc", &Station::sent_esc_)
         .def_readonly("no_progress", &Station::no_progress)
         .def_readonly("resyncs", &Station::resyncs)
         .def_readonly("resync_due", &Station::resync_due)
@@ -516,7 +527,7 @@ void bind_arq_link(py::module_& m) {
             return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));
         })
         .def("next_event", &Session::next_event)
-        .def("on_tx_end", [](Session& s, const py::object&, double now) { s.on_tx_end(now); })
+        .def("on_tx_end", [](Session& s, const py::object& burst, double now) { s.on_tx_end(burst_cpp(burst), now); })
         .def("on_header", &Session::on_header)
         .def("on_rx", [](Session& s, py::object rx, double now) {
             PyRx r(std::move(rx));

@@ -170,10 +170,14 @@ std::optional<double> Session::next_event() {
     return best;
 }
 
-void Session::on_tx_end(double now) {
+void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     const bool m = master();
     if (m && (state == SessionState::CONNECTING || live(state))) {
-        deadline = now + t_turn + tune.reply_start_s;
+        double wait = tune.reply_start_s;
+        // a reply whose header I miss is still on air: don't poll over it
+        if (state == SessionState::CONNECTED && station && burst)
+            if (auto hold = policy->reply_hold(*station, *burst)) wait = std::max(wait, *hold);
+        deadline = now + t_turn + wait;
     } else if (!m) {
         quiet_from = now;
         wake_wait = t_turn + tune.reply_start_s + tune.wake_guard_s + rng->uniform(0, tune.wake_jitter_s * std::pow(2.0, wakes));
@@ -357,17 +361,30 @@ void Session::on_timeout(double now) {
 
 TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode) {
     const std::string m = (mode && !mode->empty()) ? *mode : policy->connect_mode(cap, tries);
-    Core core;
-    core.ftype = SESSION;
-    Control control{core, {{T_SESS, body}}};
-    const auto ctl = control.pack(policy->payload_bytes(m));
+    const int cpb = policy->ctl_payload_bytes(m);
     auto b = std::make_shared<TxBurst>();
     b->submode = m;
-    for (std::size_t i = 0; i < ctl.size(); ++i) b->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), 0, ctl[i]});
+    if (body[0] == CONNECT && compact(m)) {
+        Bytes p = pack_connect(body);
+        p.resize(static_cast<std::size_t>(cpb), 0);
+        b->slots.push_back({COMPACT_CONNECT, 0, std::move(p)});
+    } else {
+        Core core;
+        core.ftype = SESSION;
+        Control control{core, {{T_SESS, body}}};
+        const auto ctl = control.pack(cpb);
+        for (std::size_t i = 0; i < ctl.size(); ++i) b->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), 0, ctl[i]});
+    }
     const std::string retry = (body[0] == CONNECT || body[0] == DISC) ? " try " + std::to_string(tries + 1) : "";
     const std::string desc = frame_desc(body);
     log_write(LOG, INFO, format("TX %s %s x%d%s", desc.c_str(), m.c_str(), static_cast<int>(b->slots.size()), retry.c_str()));
     return b;
+}
+
+bool Session::compact(const std::string& mode) {
+    // in its Control envelope it needs more codewords than the mode's control may have (CPM: one of 20 B)
+    const int cpb = policy->ctl_payload_bytes(mode);
+    return (CONNECT_CTL_BYTES + cpb - 1) / cpb > policy->max_ctl(mode);
 }
 
 TxBurstPtr Session::connect_burst() {
@@ -393,6 +410,16 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
         keys.emplace_back(0, 0);
     } else if (state == SessionState::CONNECTING) {
         keys.emplace_back(1, 0);
+    }
+    if (std::find(keys.begin(), keys.end(), std::pair{0, 0}) != keys.end() && compact(rx.submode())) {
+        if (auto p = rx.decode(0, COMPACT_CONNECT, 0, nullptr)) {
+            Bytes body = unpack_connect(*p);
+            if (auto why = check_frame(body)) {
+                log_write(LOG, WARNING, "RX malformed " + *why + ": dropped");
+                return std::nullopt;
+            }
+            return Frame{0, std::move(body), rx.submode()};
+        }
     }
     for (auto [direction, key] : keys) {
         auto first = rx.decode(0, ctl_mask(direction, 0, key), 0, nullptr);

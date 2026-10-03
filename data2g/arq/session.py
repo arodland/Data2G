@@ -396,7 +396,11 @@ class Session:
         if (0, 0) in tries and self._compact(rx.submode):
             p = rx.decode(0, L.COMPACT_CONNECT, 0, None)
             if p is not None:
-                return {"key": 0, "body": F.unpack_connect(p[:F.COMPACT_BYTES]), "mode": rx.submode}
+                body = F.unpack_connect(p[:F.COMPACT_BYTES])
+                if why := _check_frame(body):
+                    log.warning("RX malformed %s: dropped", why)
+                    return None
+                return {"key": 0, "body": body, "mode": rx.submode}
         for direction, key in tries:
             first = rx.decode(0, L.ctl_mask(direction, 0, key), 0, None)
             if first is None:
