@@ -31,8 +31,10 @@ DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
 # preamble and header (0.4-0.6 s) and the receiver's search step (0.25 s)
-# (the audio loopback timed out on replies already on air at 1.0)
-REPLY_START_S = 1.5
+# (the audio loopback timed out on replies already on air at 1.0). On air
+# (recordings/20261002-224419) a reply's whole head was in at 1.9 s and its
+# header reported at 2.2 s: 1.5 left no margin for a slower peer or radio
+REPLY_START_S = 2.5
 IDLE_CLOSE_S = 300.0
 KEEPALIVE_S = (15.0, 30.0)  # idle poll: a random wait in this range after each exchange
 KEEPALIVE_DOUBLING = False  # v1 (scripts/idle_study.py): the low end, doubling to the high end

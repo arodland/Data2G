@@ -24,7 +24,7 @@ inline constexpr int T_SESS = 10;
 inline constexpr int VERSION = 3;
 inline constexpr int CONNECT_TRIES = 5;
 inline constexpr int DISC_TRIES = 3;
-inline constexpr double REPLY_START_S = 1.5;
+inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
 inline constexpr double IDLE_CLOSE_S = 300.0;
 inline constexpr double KEEPALIVE_LO_S = 15.0, KEEPALIVE_HI_S = 30.0;
 inline constexpr double CHAT_KEEPALIVE_LO_S = KEEPALIVE_LO_S, CHAT_KEEPALIVE_HI_S = KEEPALIVE_HI_S;
