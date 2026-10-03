@@ -68,8 +68,8 @@ class Explorer(G.GearShifter):
         if self.measured is None:
             return rec, hint, reply
         prev = None
-        if self.prev is not None and self.measured_at - self.prev[2] <= G.PREV_MAX_S:
-            prev = (self.prev[0], self.prev[1], self.measured_at - self.prev[2])
+        if self.prev is not None:  # as recommend() reads it: older history at PREV_MAX_S
+            prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], G.PREV_MAX_S))
         ok = [s.name for s in G.allowed(station.cap) if not G.is_cpm(s) or P.outcome_knows(s.name)]
         explored = False
         if self.rng.random() < EXPLORE:
