@@ -6,6 +6,7 @@
 #include <string>
 
 #include "dsp/dsp.hpp"
+#include "dsp/fft.hpp"
 #include "waveform/dsp.hpp"
 
 namespace data2g::tnc {
@@ -212,6 +213,74 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     for (const auto b : bands_) detectors_.push_back({b, waveform::StreamDetector(waveform::band(b))});
     if (blank) blanker_.emplace();
     reset();
+}
+
+// --- NoiseProfile ----------------------------------------------------------------------
+
+NoiseProfile::NoiseProfile() : win_(BLOCK) {
+    for (int n = 0; n < BLOCK; ++n) win_[n] = 0.5 - 0.5 * std::cos(2 * M_PI * n / (BLOCK - 1));  // np.hanning
+}
+
+void NoiseProfile::feed(std::span<const double> x, double t_start) {
+    const auto s = static_cast<std::int64_t>(std::nearbyint(t_start * config::FS));
+    if (!buf_.empty() && s0_ + static_cast<std::int64_t>(buf_.size()) == s) {
+        buf_.insert(buf_.end(), x.begin(), x.end());
+    } else {
+        buf_.assign(x.begin(), x.end());
+        s0_ = s;
+    }
+    std::size_t off = 0;
+    std::vector<dsp::cdouble> z(BLOCK);
+    while (buf_.size() - off >= static_cast<std::size_t>(BLOCK)) {
+        for (int n = 0; n < BLOCK; ++n) z[n] = buf_[off + n] * win_[n];
+        const auto spec = dsp::fft(z, true);
+        Block b{s0_, s0_ + BLOCK, {}};
+        for (std::size_t i = 0; i < BANDS_HZ.size(); ++i) {
+            // rfft bins k (k * FS / BLOCK Hz) with lo <= f < hi
+            const int bin_hz = config::FS / BLOCK;
+            const int k0 = (BANDS_HZ[i].first + bin_hz - 1) / bin_hz, k1 = (BANDS_HZ[i].second + bin_hz - 1) / bin_hz;
+            double sum = 0.0;
+            for (int k = k0; k < k1; ++k) sum += std::norm(spec[static_cast<std::size_t>(k)]);
+            b.p[i] = sum / (k1 - k0);
+        }
+        pending_.push_back(b);
+        off += BLOCK;
+        s0_ += BLOCK;
+    }
+    buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(off));
+    const std::int64_t now = s + static_cast<std::int64_t>(x.size());
+    const auto commit = static_cast<std::int64_t>(std::nearbyint(COMMIT_S * config::FS));
+    while (!pending_.empty() && pending_.front().end <= now - commit) {
+        const Block b = pending_.front();
+        pending_.pop_front();
+        const bool marked = std::any_of(busy_.begin(), busy_.end(),
+                                        [&](const auto& m) { return m.first < b.end && b.start < m.second; });
+        if (!marked) {
+            kept_.push_back(b.p);
+            if (kept_.size() > WINDOW) kept_.pop_front();
+        }
+    }
+    std::erase_if(busy_, [&](const auto& m) { return m.second <= now - 2 * commit; });
+}
+
+void NoiseProfile::mark(double start, double end) {
+    busy_.emplace_back(static_cast<std::int64_t>(std::nearbyint(start * config::FS)),
+                       static_cast<std::int64_t>(std::nearbyint(end * config::FS)));
+}
+
+std::optional<NoiseSnapshot> NoiseProfile::snapshot() const {
+    if (kept_.size() < MIN_BLOCKS) return std::nullopt;
+    NoiseSnapshot out;
+    out.blocks = static_cast<int>(kept_.size());
+    for (std::size_t i = 0; i < BANDS_HZ.size(); ++i) {
+        std::vector<double> v;
+        v.reserve(kept_.size());
+        for (const auto& p : kept_) v.push_back(p[i]);
+        const double med = std::max(dsp::quantile(v, 0.5), 1e-30);  // digital silence
+        out.db[i] = 10 * std::log10(med);
+        out.tail_db[i] = 10 * std::log10(dsp::quantile(v, 0.9) / med);
+    }
+    return out;
 }
 
 void Receiver::reset() {

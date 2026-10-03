@@ -26,9 +26,10 @@ from .. import cpm, modem
 from ..config import FS
 from . import frames as F
 from . import link as L
-from ..tnc import Receiver
+from ..tnc import NoiseProfile, Receiver
 from . import phy as PHY
 from . import session as S
+from .modes import MODES, burst_seconds
 from .policy import GearShifter
 
 log = logging.getLogger("data2g.engine")
@@ -62,12 +63,13 @@ class Recorder:
     def event(self, kind: str, **kw):
         self.log.write(json.dumps(dict(kind=kind, **kw), default=_jsonable) + "\n")
 
-    def rx(self, t: float, audio: np.ndarray, header: dict, r: dict | None, meas: dict | None) -> str:
+    def rx(self, t: float, audio: np.ndarray, header: dict, r: dict | None, meas: dict | None,
+           noise: dict | None = None) -> str:
         name = f"rx_{self.n:05d}.npz"
         self.n += 1
         np.savez_compressed(self.dir / name, audio=audio.astype(np.float32))
         self.event("rx", t=t, file=name, submode=header["spec"].name, n_cw=header["n_cw"],
-                   score=header["score"], lost=r is None, meas=meas)
+                   score=header["score"], lost=r is None, meas=meas, noise=noise)
         return name
 
 
@@ -91,6 +93,7 @@ class Engine:
         self.rng = random.Random(seed)
         self.accept = modem.Accept.of(None, MAX_BURST_S, min_header_score)
         self.receiver = Receiver(self.accept, cpm_grids=tuple(cpm.GRIDS))
+        self.noise = NoiseProfile()  # the passband's noise between bursts (recorded with each burst heard)
         self.ptt_delay = int(ptt_delay_s * FS)
         self.rec = Recorder(record_dir, self.call) if record_dir else None
         self.n = 0  # samples processed
@@ -219,6 +222,7 @@ class Engine:
         if self.rec:
             self.rec.audio(x if self.tx is None else np.zeros(k))
         if self.tx is None:
+            self.noise.feed(x, self.now)
             self._hear(x, t)
             self._id_check(t)
             bursts = main = None
@@ -248,6 +252,7 @@ class Engine:
             if self.tx[2] >= len(audio):
                 self.tx = None
                 self.receiver.reset()  # our own transmission was not heard
+                self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
                 self.session.on_tx_end(burst, self.now + n / FS)
         self.n += k
         return out, self.tx is not None
@@ -259,11 +264,14 @@ class Engine:
         for kind, ev in self.receiver.feed(x):
             if kind == "header":
                 self.session.on_header(ev["spec"].name, ev["n_cw"], t)
+                # from its start (heard within COMMIT_S) to its end
+                spec = MODES.get(ev["spec"].name)
+                self.noise.mark(t - NoiseProfile.COMMIT_S, t + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 continue
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
             if self.rec:
-                self.rec.rx(t, ev["audio"], h, r, meas)
+                self.rec.rx(t, ev["audio"], h, r, meas, self.noise.snapshot())
             if r is None:
                 log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
                 continue

@@ -143,6 +143,22 @@ void bind_tnc(py::module_& m) {
         return r ? py::object(rx_dict(*r)) : py::object(py::none());
     }, py::arg("y"), py::arg("lead") = 0, py::arg("cpm_grids") = py::none());
 
+    py::class_<tnc::NoiseProfile>(t, "NoiseProfile")
+        .def(py::init<>())
+        .def("feed", [](tnc::NoiseProfile& p, const In<double>& x, double t_start) {
+            p.feed({x.data(), static_cast<std::size_t>(x.size())}, t_start);
+        })
+        .def("mark", &tnc::NoiseProfile::mark)
+        .def("snapshot", [](const tnc::NoiseProfile& p) -> py::object {
+            const auto s = p.snapshot();
+            if (!s) return py::none();
+            py::dict d;
+            d["noise_db"] = std::vector<double>(s->db.begin(), s->db.end());
+            d["noise_tail_db"] = std::vector<double>(s->tail_db.begin(), s->tail_db.end());
+            d["noise_blocks"] = s->blocks;
+            return d;
+        });
+
     py::class_<tnc::Receiver>(t, "Receiver")
         .def(py::init([](const py::object& accept, const std::vector<std::string>& grids, bool blank) {
             return tnc::Receiver(accept_or_all(accept), grid_views(grids), blank);

@@ -113,6 +113,15 @@ std::string json_measured(const Measured& m) {
     return json_obj(f);
 }
 
+std::string json_noise(const tnc::NoiseSnapshot& n) {
+    auto list = [](const std::array<double, 5>& v) {
+        std::string s = "[";
+        for (std::size_t i = 0; i < v.size(); ++i) s += (i ? ", " : "") + json_num(v[i]);
+        return s + "]";
+    };
+    return json_obj({{"noise_db", list(n.db)}, {"noise_tail_db", list(n.tail_db)}, {"noise_blocks", std::to_string(n.blocks)}});
+}
+
 std::uint16_t to_half(double x) {
     const std::uint16_t sign = std::signbit(x) ? 0x8000 : 0;
     const double a = std::fabs(x);
@@ -210,7 +219,7 @@ void Recorder::event(std::string_view kind, const std::vector<std::pair<std::str
 }
 
 std::string Recorder::rx(double t, std::span<const double> audio, const tnc::Pending& header, bool lost,
-                         const std::optional<Measured>& meas) {
+                         const std::optional<Measured>& meas, const std::optional<tnc::NoiseSnapshot>& noise) {
     char name[32];
     std::snprintf(name, sizeof name, "rx_%05d.npz", n_++);
     const std::vector<float> a(audio.begin(), audio.end());
@@ -223,7 +232,8 @@ std::string Recorder::rx(double t, std::span<const double> audio, const tnc::Pen
                  {"n_cw", std::to_string(header.n_cw())},
                  {"score", json_num(header.score())},
                  {"lost", lost ? "true" : "false"},
-                 {"meas", meas ? json_measured(*meas) : "null"}});
+                 {"meas", meas ? json_measured(*meas) : "null"},
+                 {"noise", noise ? json_noise(*noise) : "null"}});
     return name;
 }
 
@@ -498,6 +508,7 @@ Engine::Done Engine::process(Block& b) {
     d.out.audio.assign(static_cast<std::size_t>(k), 0.0);
     if (rec_) rec_->audio(tx_ ? d.out.audio : b.x);
     if (!tx_) {
+        noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         if (fresh) hear(b.items, t);
         id_check(t);
@@ -533,6 +544,7 @@ Engine::Done Engine::process(Block& b) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             request_reset();  // our own transmission was not heard
+            noise_.mark(now(), now() + static_cast<double>(n) / config::FS + tnc::NoiseProfile::RECOVER_S);
             session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);
         }
     }
@@ -546,6 +558,9 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
     for (auto& it : items) {
         if (auto* h = std::get_if<tnc::HeaderEvent>(&it)) {
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
+            // from its start (heard within COMMIT_S) to its end
+            const Mode* m = mode(spec_name(h->header));
+            noise_.mark(t - tnc::NoiseProfile::COMMIT_S, t + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
             continue;
         }
         tnc::BurstEvent ev = std::holds_alternative<tnc::DecodeRequest>(it)
@@ -562,7 +577,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         r = heard_of(std::move(*ev.rx));
         meas = measure(*r);
     }
-    if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas);
+    if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
     if (on_burst_)
         on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt});
     if (!r) {
