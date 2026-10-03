@@ -484,6 +484,13 @@ void Session::on_session_frame(const Frame& f, double now) {
             queue(accept_burst(), now);  // our ACK was lost: say it again
             return;
         }
+        if (station && !master() && caller == peer && live(state)) {
+            // my caller dialed again: it gave up on our session, so take the new one (session.py)
+            close("peer reconnected", nullptr, now);
+            state = SessionState::LISTEN;
+            want_disc = sent_disc_ack = false;
+            tries = 0;
+        }
         if (state != SessionState::LISTEN) return;
         if (body[1] != VERSION) {
             const Bytes nak{CONNECT_NAK, body[18], body[19], 1};
