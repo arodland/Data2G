@@ -6,6 +6,7 @@
 
 #include "arq/policy.hpp"
 #include "kisslink/kisslink.hpp"
+#include "tables/tables.hpp"
 
 namespace data2g::monitor {
 
@@ -54,9 +55,14 @@ std::uint16_t be16(ByteView b, std::size_t i) { return static_cast<std::uint16_t
 
 }  // namespace
 
-std::string text_dump(ByteView b) {
+std::string text_dump(ByteView b, const std::vector<bool>& unknown) {
     std::string out;
-    for (const auto c : b) {
+    for (std::size_t i = 0; i < b.size(); ++i) {
+        const auto c = b[i];
+        if (i < unknown.size() && unknown[i]) {
+            out += "<?" "?>";  // split: "??>" is a trigraph
+            continue;
+        }
         if (printable(c)) {
             out += static_cast<char>(c);
             continue;
@@ -69,7 +75,8 @@ std::string text_dump(ByteView b) {
     return out;
 }
 
-std::string hex_dump(ByteView b) {
+std::string hex_dump(ByteView b, const std::vector<bool>& unknown) {
+    auto unk = [&](std::size_t j) { return j < unknown.size() && unknown[j]; };
     std::string out;
     char buf[24];
     for (std::size_t i = 0; i < b.size(); i += 16) {
@@ -77,15 +84,18 @@ std::string hex_dump(ByteView b) {
         out += buf;
         for (std::size_t j = i; j < i + 16; ++j) {
             if ((j - i) % 2 == 0) out += ' ';
-            if (j < b.size()) {
+            if (j >= b.size()) {
+                out += "  ";
+            } else if (unk(j)) {
+                out += "??";
+            } else {
                 std::snprintf(buf, sizeof buf, "%02x", b[j]);
                 out += buf;
-            } else {
-                out += "  ";
             }
         }
         out += "  ";
-        for (std::size_t j = i; j < std::min(i + 16, b.size()); ++j) out += printable(b[j]) ? static_cast<char>(b[j]) : '.';
+        for (std::size_t j = i; j < std::min(i + 16, b.size()); ++j)
+            out += unk(j) ? '?' : printable(b[j]) ? static_cast<char>(b[j]) : '.';
         out += '\n';
     }
     return out;
@@ -93,9 +103,11 @@ std::string hex_dump(ByteView b) {
 
 std::string render(const Dump& d, Format f) {
     std::string out = d.head;
-    for (const auto& [label, bytes] : d.payloads) {
-        out += "  " + label + ", " + std::to_string(bytes.size()) + " B:\n";
-        const std::string body = f == Format::HEX ? hex_dump(bytes) : text_dump(bytes);
+    for (const auto& [label, bytes, unknown] : d.payloads) {
+        const auto n_unk = std::count(unknown.begin(), unknown.end(), true);
+        out += "  " + label + ", " + std::to_string(bytes.size()) + " B" +
+               (n_unk ? " (" + std::to_string(n_unk) + " unknown)" : "") + ":\n";
+        const std::string body = f == Format::HEX ? hex_dump(bytes, unknown) : text_dump(bytes, unknown);
         for (std::size_t i = 0; i < body.size();) {
             const std::size_t nl = std::min(body.find('\n', i), body.size());
             out += "    " + body.substr(i, nl - i) + "\n";
@@ -153,7 +165,7 @@ Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
     for (int i = 0; i < rx.n_cw(); ++i) {
         const auto r = rx.raw(i);
         if (r.empty()) none += " " + std::to_string(i);
-        else d.payloads.emplace_back("slot " + std::to_string(i), r[0]);
+        else d.payloads.push_back({"slot " + std::to_string(i), r[0], {}});
     }
     if (!none.empty()) d.head += "  no decode: slot" + none + "\n";
     return d;
@@ -179,7 +191,7 @@ bool Monitor::broadcast(ModemRx& rx, Dump& d) {
         std::string label = "frame " + std::to_string(i + 1);
         if (const auto ax = kisslink::parse_ax25(frames[i]))
             label += " (AX.25 " + ax->src + ">" + ax->dst + (ax->connected ? ", connected" : ", UI") + ")";
-        d.payloads.emplace_back(label, std::move(frames[i]));
+        d.payloads.push_back({label, std::move(frames[i]), {}});
     }
     return true;
 }
@@ -255,6 +267,8 @@ void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
         connects_[nonce] = {caller, callee};
         if (connects_.size() > MAX_KEYS) connects_.erase(connects_.begin());  // ponytail: by nonce, not age
         learn(k, caller, callee);
+        for (int dir : {0, 1})  // a retry, or a late copy, leaves a stream under way alone
+            if (Side& x = sides_[{k, dir}]; !x.started) x.fresh = true;
         char t[96];
         std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s -> key %04x", at(body, 1), nonce, at(body, 20),
                       at(body, 21) / 10.0, k);
@@ -293,8 +307,7 @@ void Monitor::arq_burst(ModemRx& rx, const Control& ctl, int key, int dir, int d
     if (const auto b = ext.find(T_BITMAP); b != ext.end()) got = unpack_bitmap(b->second, c.cum);
     s.snaps[c.burst_seq] = {c.cum, got};
     if (!o.started) {
-        o.rx.cum = c.cum;
-        o.started = true;
+        start(o, c.cum);
     } else if (const std::int64_t cum = unwrap(c.cum, o.rx.cum); cum > o.rx.cum) {
         skip(o, key, 1 - dir, cum, d);  // its receiver has codewords we never heard
     }
@@ -391,22 +404,92 @@ void Monitor::arq_burst(ModemRx& rx, const Control& ctl, int key, int dir, int d
             continue;
         }
         states += " " + st + (comp ? " ok(z)" : " ok");
-        if (!s.started) {
-            s.rx.cum = seq;
-            s.started = true;
-        }
+        if (!s.started) start(s, seq);
         deliver(s, key, dir, seq, std::move(*p), comp, d);
     }
     if (n_data) d.head += "  data:" + states + "\n";
     flush(s, key, dir, d);
 }
 
+void Monitor::start(Side& s, std::int64_t cum) {
+    s.rx.cum = cum;
+    s.started = true;
+    if (!(s.fresh && cum == 0)) forget(s);  // joined late: what went before is unknown
+}
+
+void Monitor::forget(Side& s) {
+    s.hist.assign(HIST, 0);
+    s.unk.assign(HIST, true);
+    s.zdict_sure = false;
+    s.framed = false;
+    s.left = 0;
+}
+
+void Monitor::take(Side& s, const Bytes& plain, const std::vector<bool>& unknown) {
+    s.rx.plain += static_cast<std::int64_t>(plain.size());
+    s.hist.insert(s.hist.end(), plain.begin(), plain.end());
+    s.unk.insert(s.unk.end(), unknown.begin(), unknown.end());
+    if (s.hist.size() > HIST) {
+        s.hist.erase(s.hist.begin(), s.hist.end() - HIST);
+        s.unk.erase(s.unk.begin(), s.unk.end() - HIST);
+    }
+    // records: [length 1-255][bytes], a zero byte is padding (docs/arq.md §9a)
+    auto show = [&](std::size_t i) {
+        s.out.bytes.push_back(plain[i]);
+        s.out.unknown.push_back(unknown[i]);
+        s.raw |= !s.framed;
+    };
+    for (std::size_t i = 0; i < plain.size(); ++i) {
+        if (!s.framed) {
+            show(i);
+        } else if (s.left) {
+            show(i);
+            --s.left;
+        } else if (unknown[i]) {  // a length never heard: framing lost
+            s.framed = false;
+            show(i);
+        } else {
+            s.left = plain[i];
+        }
+    }
+    // zero padding ends a burst's last codeword, between records: the next starts one
+    // ponytail: binary whose record ends a codeword in a zero byte reframes wrongly, until the next padding
+    if (!s.framed && !plain.empty() && plain.back() == 0 && !unknown.back()) s.framed = true, s.left = 0;
+}
+
 void Monitor::deliver(Side& s, int key, int dir, std::int64_t seq, Bytes p, bool comp, Dump& d) {
-    try {
-        s.rx.accept(seq, std::move(p), comp);
-    } catch (const ProtocolError& e) {  // a codeword at cum that won't inflate: step past it
-        d.head += "  " + who(key, dir) + ": " + e.what() + "\n";
-        skip(s, key, dir, s.rx.cum + 1, d);
+    RxSide& r = s.rx;
+    if (seq < r.cum || r.buf.count(seq) || seq >= r.cum + WINDOW) return;
+    r.buf[seq] = {std::move(p), comp};
+    for (auto it = r.buf.find(r.cum); it != r.buf.end(); it = r.buf.find(r.cum)) {
+        auto [q, z] = std::move(it->second);
+        r.buf.erase(it);
+        r.comp_seqs.erase(r.cum);
+        ++r.cum;
+        if (!z) {
+            take(s, q, std::vector<bool>(q.size(), false));
+            continue;
+        }
+        // Inflated twice, the history's unknown bytes 0x00, then 0xFF: an
+        // output byte copied from one differs, every other is exact. With
+        // the sender's history length unknown (fewer than HIST bytes
+        // delivered in all), ZDICT's place is too: a prefix stands in for it.
+        const bool sure = s.zdict_sure || r.plain >= HIST;
+        auto filled = [&](std::uint8_t f) {
+            Bytes h(sure ? 0 : tables::ZDICT.size(), f);
+            for (std::size_t i = 0; i < s.hist.size(); ++i) h.push_back(s.unk[i] ? f : s.hist[i]);
+            return h;
+        };
+        try {
+            const Bytes a = inflate(filled(0x00), q), b = inflate(filled(0xFF), q);
+            if (a.size() != b.size()) throw std::invalid_argument("inflate: length depends on the history");  // can't: lengths are coded
+            std::vector<bool> unknown(a.size());
+            for (std::size_t i = 0; i < a.size(); ++i) unknown[i] = a[i] != b[i];
+            take(s, a, unknown);
+        } catch (const std::invalid_argument& e) {  // its length unknown: what follows has no history
+            d.head += "  " + who(key, dir) + " stream: seq " + std::to_string((r.cum - 1) % SEQ_MOD) + ": " + e.what() + "\n";
+            forget(s);
+        }
     }
 }
 
@@ -415,11 +498,8 @@ void Monitor::skip(Side& s, int key, int dir, std::int64_t to, Dump& d) {
     d.head += "  " + who(key, dir) + " stream: " +
               (to > r.cum ? "seq " + std::to_string(r.cum % SEQ_MOD) + "-" + std::to_string((to - 1) % SEQ_MOD) + " not all heard"
                           : "re-sliced below what was shown (seq " + std::to_string(to % SEQ_MOD) + ")") +
-              ", text after it may be garbled\n";
-    // the deflate history and record framing are lost with the missing codewords
-    r.hist.clear();
-    r.reader = RecordReader{};
-    s.gap_plain = r.plain;
+              "; bytes copied from it show as <?" "?>\n";
+    forget(s);
     if (to < r.cum) {
         r.cum = to;
         r.buf.clear();
@@ -445,11 +525,11 @@ void Monitor::skip(Side& s, int key, int dir, std::int64_t to, Dump& d) {
 }
 
 void Monitor::flush(Side& s, int key, int dir, Dump& d) {
-    if (s.rx.out.empty()) return;
-    // ponytail: "after a gap" holds for the first HIST plain bytes; misframing can last until padding realigns it
-    const bool suspect = s.gap_plain >= 0 && s.rx.plain - s.gap_plain < HIST;
-    d.payloads.emplace_back(who(key, dir) + (suspect ? " stream, after a gap" : " stream"), std::move(s.rx.out));
-    s.rx.out.clear();
+    if (s.out.bytes.empty()) return;
+    s.out.label = who(key, dir) + " stream" + (s.raw ? ", framing lost (record lengths inline)" : "");
+    d.payloads.push_back(std::move(s.out));
+    s.out = {};
+    s.raw = false;
 }
 
 std::vector<Dump> Monitor::feed(std::span<const double> x, const std::function<std::string(double t)>& when) {

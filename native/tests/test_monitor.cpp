@@ -29,13 +29,19 @@ void units() {
                  std::string("00000000: 4865 6c6c 6f2c 2077 6f72 6c64 0a01 0203  Hello, world....\n"
                              "00000010: 5859                                     XY\n"),
                  "hex_dump");
-    Dump d{"head\n", {{"p", text("a\nb")}}};
+    Dump d{"head\n", {{"p", text("a\nb"), {}}}};
     check::equal(monitor::render(d, monitor::Format::TEXT), std::string("head\n  p, 3 B:\n    a<0A>\n    b\n"), "render");
+    d.payloads[0].unknown = {false, true, false};
+    check::equal(monitor::render(d, monitor::Format::TEXT), std::string("head\n  p, 3 B (1 unknown):\n    a<?" "?>b\n"),
+                 "render: unknown bytes");
+    check::equal(monitor::hex_dump(text("ab"), {true, false}), std::string("00000000: ??62                                     ?b\n"),
+                 "hex_dump: unknown bytes");
 }
 
-// Both engines step, each hearing the other, the monitor hearing both,
-// until until() or `seconds` pass.
+// Both engines step, each hearing the other, the monitor hearing both
+// (noise only while g_deaf), until until() or `seconds` pass.
 double g_snr_db = 12.0;
+bool g_deaf = false;
 
 bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, double seconds,
          const std::function<bool()>& until, unsigned seed) {
@@ -43,7 +49,7 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
     std::normal_distribution<double> noise(0.0, std::sqrt((config::FS / 2.0) / config::SNR_REF_BW_HZ / std::pow(10.0, g_snr_db / 10)));
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK), y(BLOCK);
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-        for (int j = 0; j < BLOCK; ++j) y[j] = 2.2 * (ao[j] + bo[j]) + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : 2.2 * (ao[j] + bo[j])) + noise(rng);
         for (auto& dump : m.feed(y, [](double t) {
                  char s[16];
                  std::snprintf(s, sizeof s, "%.1f", t);
@@ -59,14 +65,18 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
     return false;
 }
 
-// Every payload whose label starts with `label`, concatenated.
-Bytes stream(const std::vector<Dump>& dumps, const std::string& label) {
-    Bytes out;
+// Every payload whose label starts with `label`, concatenated (bytes, unknown).
+std::pair<Bytes, std::vector<bool>> stream_unk(const std::vector<Dump>& dumps, const std::string& label) {
+    std::pair<Bytes, std::vector<bool>> out;
     for (const auto& d : dumps)
-        for (const auto& [l, p] : d.payloads)
-            if (l.rfind(label, 0) == 0) out.insert(out.end(), p.begin(), p.end());
+        for (const auto& p : d.payloads)
+            if (p.label.rfind(label, 0) == 0) {
+                out.first.insert(out.first.end(), p.bytes.begin(), p.bytes.end());
+                for (std::size_t i = 0; i < p.bytes.size(); ++i) out.second.push_back(i < p.unknown.size() && p.unknown[i]);
+            }
     return out;
 }
+Bytes stream(const std::vector<Dump>& dumps, const std::string& label) { return stream_unk(dumps, label).first; }
 
 std::string all(const std::vector<Dump>& dumps) {
     std::string out;
@@ -177,12 +187,74 @@ void lossy(double snr_db, unsigned seed) {
     g_snr_db = 12.0;
 }
 
+// The monitor misses a compressed text the next one copies from: every
+// byte it shows as known is the sender's, the copied ones show as unknown.
+// After the gap it has no framing, so it shows the record stream itself,
+// length bytes included, until padding ends a codeword.
+void compressed_gap() {
+    check::current_step = "compressed gap";
+    EngineConfig ca, cb;
+    ca.seed = 61;
+    cb.seed = 62;
+    Engine a("W1AW", ca), b("K2XYZ", cb);
+    monitor::Monitor m;
+    std::vector<Dump> dumps;
+    b.listen();
+    a.connect("K2XYZ", 2);
+    check::is_true(run(a, b, m, dumps, 60, [&] { return a.session().state == SessionState::CONNECTED; }, 7), "connected");
+    // part 0, heard: past HIST, so the sender's history is known to be full
+    // length, and ZDICT's place in it with it
+    std::string zero, one, two;
+    for (int n = 0; n < 100; ++n) zero += "Opening line: the quick brown fox jumps over the lazy dog.\n";
+    for (int n = 0; n < 60; ++n) {
+        one += "Item: pack my box with five dozen liquor jugs.\n";
+        two += "Re " + std::to_string(n * 7919) + ": pack my box with five dozen liquor jugs.\n";
+    }
+    std::size_t got = 0;
+    a.session().write(text(zero));
+    check::is_true(run(a, b, m, dumps, 120, [&] { return (got += b.session().read().size()) >= zero.size(); }, 12), "part 0 delivered");
+    run(a, b, m, dumps, 5, [] { return false; }, 13);
+    const std::size_t heard = dumps.size();
+    got = 0;
+    g_deaf = true;
+    a.session().write(text(one));
+    check::is_true(run(a, b, m, dumps, 120, [&] { return (got += b.session().read().size()) >= one.size(); }, 8), "part 1 delivered");
+    run(a, b, m, dumps, 5, [] { return false; }, 9);  // its last ACK
+    g_deaf = false;
+    got = 0;
+    a.session().write(text(two));
+    check::is_true(run(a, b, m, dumps, 120, [&] { return (got += b.session().read().size()) >= two.size(); }, 10), "part 2 delivered");
+    run(a, b, m, dumps, 3, [] { return false; }, 11);
+
+    check::is_true(stream({dumps.begin(), dumps.begin() + heard}, "W1AW>K2XYZ stream") == text(zero),
+                   "part 0 as sent");
+    const auto [seen, unk] = stream_unk({dumps.begin() + heard, dumps.end()}, "W1AW>K2XYZ stream");
+    const Bytes want = to_records(text(two));
+    const auto n_unk = std::count(unk.begin(), unk.end(), true);
+    bool agree = seen.size() >= want.size();
+    for (std::size_t i = 0; agree && i < seen.size(); ++i)
+        agree = unk[i] || seen[i] == (i < want.size() ? want[i] : 0);  // past the records: padding
+    std::fprintf(stderr, "compressed gap: %zu B shown, %lld unknown, of %zu B sent\n", seen.size(), static_cast<long long>(n_unk),
+                 want.size());
+    check::is_true(agree, "every known byte is the sender's");
+    check::is_true(n_unk > 0, "bytes copied from the missed text marked unknown");
+    // the phrase copies line 0's, which copied part 1's: unknown in every
+    // line. Each line's new number is literal text, or copies of it: known.
+    std::string known;
+    for (std::size_t i = 0; i < seen.size(); ++i) known += unk[i] ? '\x01' : static_cast<char>(seen[i]);
+    int numbers = 0;
+    for (int n = 0; n < 60; ++n) numbers += known.find(std::to_string(n * 7919)) != std::string::npos;
+    check::is_true(numbers >= 55, "the new text read (" + std::to_string(numbers) + " of 60 lines' numbers)");
+    if (check::failures || std::getenv("SHOW")) std::fputs(all(dumps).c_str(), stderr);
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog dog(900, "test_monitor");
     units();
     session();
     broadcast();
+    compressed_gap();
     for (double snr : {2.0, 0.0, -2.0}) lossy(snr, static_cast<unsigned>(50 + snr));
     return check::report("test_monitor");
 }

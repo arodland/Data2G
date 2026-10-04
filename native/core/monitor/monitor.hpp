@@ -31,16 +31,23 @@ using arq::ByteView;
 
 enum class Format { TEXT, HEX };
 
+struct Payload {
+    std::string label;
+    Bytes bytes;
+    std::vector<bool> unknown;  // per byte: not known (copied from history never heard); empty: all known
+};
+
 // One burst: its description, then its payloads.
 struct Dump {
     std::string head;  // lines, each ending in '\n'
-    std::vector<std::pair<std::string, Bytes>> payloads;  // (label, bytes)
+    std::vector<Payload> payloads;
 };
 
-// Non-printables as <AB>; a line break follows each <0A>.
-std::string text_dump(ByteView b);
-// As xxd: 16 bytes a line, offset, hex in pairs, then the bytes with dots for non-printables.
-std::string hex_dump(ByteView b);
+// Non-printables as <AB>, unknown bytes as <??>; a line break follows each <0A>.
+std::string text_dump(ByteView b, const std::vector<bool>& unknown = {});
+// As xxd: 16 bytes a line, offset, hex in pairs, then the bytes with dots
+// for non-printables. Unknown bytes: ?? and ?.
+std::string hex_dump(ByteView b, const std::vector<bool>& unknown = {});
 // The dump, each payload line indented.
 std::string render(const Dump& d, Format f);
 
@@ -64,12 +71,25 @@ private:
     // the stream it sends, as reassembled here.
     struct Side {
         std::map<int, std::pair<int, std::set<int>>> snaps;  // its burst seq -> (cum, received above it), 7-bit
-        arq::RxSide rx;
+        arq::RxSide rx;  // cum, the codewords held above it, comp_seqs, plain (bytes delivered)
         bool started = false;
+        bool fresh = false;  // its CONNECT was heard: the stream starts empty, history and framing known
         int epoch = 0;
         bool epoch_known = false;
         std::map<std::int64_t, arq::SoftEntry> soft;  // resends' soft bits, combined (IR) until one decodes
-        std::int64_t gap_plain = -1;                  // rx.plain at the last gap (-1: none)
+        // The deflate history as the sender has it (at most HIST), and which
+        // of its bytes were never heard. After a gap it is HIST long, and
+        // zdict_sure says whether the sender's is too (else ZDICT's place in
+        // the window is unknown as well).
+        Bytes hist;
+        std::vector<bool> unk;
+        bool zdict_sure = true;
+        // Record framing: framed, with `left` bytes of the current record to
+        // come; unframed after a gap, until zero padding ends a codeword.
+        bool framed = true;
+        int left = 0;
+        Payload out;  // delivered, not yet in a dump
+        bool raw = false;  // out holds bytes shown unframed
     };
 
     std::string who(int key, int direction) const;
@@ -78,6 +98,9 @@ private:
     bool keyed(arq::ModemRx& rx, Dump& d);
     void session_frame(const Bytes& body, int key, int direction, Dump& d);
     void arq_burst(arq::ModemRx& rx, const arq::Control& ctl, int key, int direction, int dup, Dump& d);
+    void start(Side& s, std::int64_t cum);
+    void forget(Side& s);  // history and framing lost: a gap, or a stream joined late
+    void take(Side& s, const Bytes& plain, const std::vector<bool>& unknown);  // a codeword's stream bytes, in order
     void deliver(Side& s, int key, int direction, std::int64_t seq, Bytes p, bool comp, Dump& d);
     void skip(Side& s, int key, int direction, std::int64_t to, Dump& d);  // jump the stream to `to` over what wasn't heard
     void flush(Side& s, int key, int direction, Dump& d);                  // its delivered bytes -> a payload

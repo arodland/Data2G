@@ -422,8 +422,17 @@ Status 2026-10-04: promiscuous monitor (`core/monitor`).
   - each direction's stream is reassembled and inflated, so the dump
     shows host bytes.
 - A gap (the receiver's ACK passes what the monitor heard) skips ahead
-  and is labelled. After a gap, text can be misframed or misinflated: the
-  deflate history and record framing are gone.
+  and is labelled. A stream joined without its CONNECT starts the same
+  way.
+- After a gap the deflate history is partly unknown. Each compressed
+  codeword is inflated twice, with the unknown bytes as 0x00 and then as
+  0xFF. Output bytes that differ were copied from text never heard and
+  show as `<??>`; the rest are exact.
+  - The sender's history length is unknown until the monitor has
+    delivered 4 KB itself. Until then, matches into ZDICT are unknown
+    too, which hides most English text.
+- Record framing is lost with a gap: the stream is shown raw, length
+  bytes inline, until a codeword ends in zero padding.
 - `Engine` exposes `heard_of`, `spec_name` and `all_grids`.
   `BurstHeard` carries the decoded burst and its soft bits.
   `KissLink::read_burst_control` is public static.
