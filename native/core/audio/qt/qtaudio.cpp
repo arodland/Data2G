@@ -8,8 +8,10 @@
 #include <QMediaDevices>
 #include <QObject>
 #include <QThread>
+#include <QTimer>
 #include <QVersionNumber>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -211,6 +213,8 @@ public:
     FifoDevice(PlaybackFifo& fifo, SampleFormat fmt, int channels) : fifo_(fifo), fmt_(fmt), channels_(channels) {}
     bool isSequential() const override { return true; }
     qint64 bytesAvailable() const override { return std::numeric_limits<int>::max(); }
+    // Bytes handed to the sink since start: what it has, played or not.
+    qint64 pulled() const { return pulled_.load(std::memory_order_relaxed); }
 
 protected:
     qint64 readData(char* data, qint64 maxlen) override {
@@ -220,6 +224,7 @@ protected:
         fifo_.pull(mono_);
         to_device(mono_, fmt_, channels_, bytes_);
         std::memcpy(data, bytes_.data(), bytes_.size());
+        pulled_.fetch_add(static_cast<qint64>(bytes_.size()), std::memory_order_relaxed);
         return static_cast<qint64>(bytes_.size());
     }
     qint64 writeData(const char*, qint64) override { return -1; }
@@ -230,6 +235,7 @@ private:
     int channels_;
     std::vector<float> mono_;
     std::vector<std::byte> bytes_;
+    std::atomic<qint64> pulled_{0};  // the sink may read off its own thread (Qt 6.9+)
 };
 
 class PlaybackWorker final : public Worker {
@@ -238,6 +244,7 @@ public:
         : Worker(std::move(device), rate, std::move(report)), fifo_(fifo) {}
 
     void close() override {
+        if (timer_) timer_->stop();
         if (sink_) sink_->stop();
         sink_.reset();
         if (source_) source_->close();
@@ -256,13 +263,25 @@ protected:
         connect(sink_.get(), &QAudioSink::stateChanged, this, [this] { report("out", sink_->error()); });
         sink_->start(source_.get());
         if (sink_->error() != QAudio::NoError) throw std::runtime_error("could not start playback on \"" + name() + "\"");
-        fifo_.set_output_latency(static_cast<double>(f.qt.durationForBytes(sink_->bufferSize())) / 1e6);
+        // bufferSize() is only the stream's target; the server's own
+        // buffering comes on top (Qt 6.8 on PipeWire: 63 ms reported, 120 ms
+        // measured). What the sink has minus what it has played is the
+        // real latency; where processedUSecs() counts pulls it reads ~0.
+        const double buffered = static_cast<double>(f.qt.durationForBytes(sink_->bufferSize())) / 1e6;
+        fifo_.set_output_latency(buffered);
+        timer_ = new QTimer(this);
+        connect(timer_, &QTimer::timeout, this, [this, f, buffered] {
+            const auto ahead = static_cast<double>(f.qt.durationForBytes(source_->pulled()) - sink_->processedUSecs()) / 1e6;
+            fifo_.set_output_latency(std::clamp(ahead, buffered, 5.0));
+        });
+        timer_->start(100);
     }
 
 private:
     PlaybackFifo& fifo_;
     std::unique_ptr<FifoDevice> source_;
     std::unique_ptr<QAudioSink> sink_;
+    QTimer* timer_ = nullptr;
 };
 
 }  // namespace

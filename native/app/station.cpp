@@ -677,6 +677,10 @@ void Station::watch_counters() {
         underruns_ = n;
         logf(WARNING, "TX audio underrun (%llu)", static_cast<unsigned long long>(n));
     }
+    if (const double l = play_->output_latency(); std::abs(l - latency_) >= 0.05) {
+        latency_ = l;
+        logf(INFO, "TX audio latency %.2f s", l);
+    }
     if (const auto n = cap_->late_events(); n != late_) {
         late_ = n;
         logf(WARNING, "RX audio %.1f s behind the card", cap_->backlog_s());

@@ -233,6 +233,7 @@ private:
     std::atomic<bool> stop_{false}, failed_{false}, ptt_{false};
     bool running_ = false;
     std::uint64_t overflows_ = 0, underruns_ = 0, late_ = 0, dropped_ = 0;  // engine thread
+    double latency_ = 0;  // engine thread: the TX latency last logged
 
     std::string mode_;  // session stage
     mutable std::mutex status_mu_;
