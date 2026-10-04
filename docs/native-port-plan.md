@@ -402,6 +402,35 @@ Status 2026-10-02: `data2g-gui` landed (not yet used for a session).
   host and port only) load as model 2 there. The main window shows the dial
   frequency only when the poll is on.
 
+Status 2026-10-04: promiscuous monitor (`core/monitor`).
+- `data2g-monitor`: receive only (no TX, output device or rig). A sound
+  card, or raw float32 at 8 kHz from a file, pipe or stdin. Every burst
+  heard goes to stdout as a dump: header, then payloads as text (`<AB>`
+  escapes) or `--hex` (xxd-style).
+- GUI: Monitor... opens a terminal-style window with the same dumps,
+  Text / Hex dump switchable (re-renders what is kept). It decodes on its
+  own thread, only while the window is visible.
+- Identification order: a broadcast group's key (the control names it),
+  then mask 0 (CONNECT, CONNECT_ACK/NAK, CQ, ID), then up to 16 session
+  keys learned from CONNECT or ID frames, both directions.
+- A connected-mode burst under a known key is followed as its receiver
+  does:
+  - resends are mapped from the other side's last ACK snapshot;
+  - the abandon epoch comes from `T_ABANDON`, or is searched when the
+    monitor joins mid-session;
+  - resends combine soft bits (IR);
+  - each direction's stream is reassembled and inflated, so the dump
+    shows host bytes.
+- A gap (the receiver's ACK passes what the monitor heard) skips ahead
+  and is labelled. After a gap, text can be misframed or misinflated: the
+  deflate history and record framing are gone.
+- `Engine` exposes `heard_of`, `spec_name` and `all_grids`.
+  `BurstHeard` carries the decoded burst and its soft bits.
+  `KissLink::read_burst_control` is public static.
+- Tests: `test_monitor` (formats; a session with the monitor as a third
+  station, at 12, 2, 0 and -2 dB; a broadcast UI frame) and `test_gui`
+  (the window dumps a CQ and re-renders as hex).
+
 ### Phase 5: packaging and CI
 
 Lift SSTVAE's ci.yml / native-build.yml matrix (Linux x86_64 and aarch64,

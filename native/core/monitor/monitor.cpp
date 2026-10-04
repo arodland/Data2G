@@ -1,0 +1,476 @@
+#include "monitor/monitor.hpp"
+
+#include <algorithm>
+#include <cstdio>
+#include <stdexcept>
+
+#include "arq/policy.hpp"
+#include "kisslink/kisslink.hpp"
+
+namespace data2g::monitor {
+
+namespace {
+
+using namespace arq;
+
+constexpr std::size_t MAX_KEYS = 16;  // sessions followed at once: each is CRC checks on every burst
+
+std::string hex4(int v) {
+    char b[8];
+    std::snprintf(b, sizeof b, "%04x", v & 0xFFFF);
+    return b;
+}
+
+bool printable(std::uint8_t c) { return c >= 0x20 && c < 0x7F; }
+
+std::string ext_desc(const Ext& ext) {
+    static const char* names[] = {"pad",  "new",   "abandon", "rv",    "bitmap", "resync", "report", "survey", "sound",
+                                  "buffer", "sess", "reply",  "chat",  "cq",     "dupctl", "comp",   "id"};
+    std::vector<std::string> out;
+    for (const auto& [t, v] : ext) {
+        std::string s = t < static_cast<int>(std::size(names)) ? names[t] : "ext " + std::to_string(t);
+        if (t == T_NEW && !v.empty()) s += " " + std::to_string(v[0]);
+        if (t == T_ABANDON && v.size() >= 2) s += " " + std::to_string(v[0]) + " epoch " + std::to_string(v[1] >> 1);
+        if (t == T_BUFFER && v.size() == 2) s += " " + std::to_string(v[0] << 8 | v[1]);
+        if (t == T_REPLY && !v.empty()) {
+            const Mode* m = decode(v[0]);
+            s += " " + (m ? std::string(m->name) : "?");
+        }
+        out.push_back(s);
+    }
+    std::string s;
+    for (const auto& x : out) s += (s.empty() ? "" : ", ") + x;
+    return s;
+}
+
+// An ARQ_DUP control pair (RV 0 then RV 1) combined.
+std::optional<Bytes> pair(ModemRx& rx, int slot, const MaskId& mask) {
+    std::optional<SoftEntry> st;
+    rx.decode_stored(slot, mask, 0, st);
+    return rx.decode_stored(slot + 1, mask, 1, st);
+}
+
+std::uint16_t be16(ByteView b, std::size_t i) { return static_cast<std::uint16_t>(at(b, i) << 8 | at(b, i + 1)); }
+
+}  // namespace
+
+std::string text_dump(ByteView b) {
+    std::string out;
+    for (const auto c : b) {
+        if (printable(c)) {
+            out += static_cast<char>(c);
+            continue;
+        }
+        char e[8];
+        std::snprintf(e, sizeof e, "<%02X>", c);
+        out += e;
+        if (c == '\n') out += '\n';
+    }
+    return out;
+}
+
+std::string hex_dump(ByteView b) {
+    std::string out;
+    char buf[24];
+    for (std::size_t i = 0; i < b.size(); i += 16) {
+        std::snprintf(buf, sizeof buf, "%08zx:", i);
+        out += buf;
+        for (std::size_t j = i; j < i + 16; ++j) {
+            if ((j - i) % 2 == 0) out += ' ';
+            if (j < b.size()) {
+                std::snprintf(buf, sizeof buf, "%02x", b[j]);
+                out += buf;
+            } else {
+                out += "  ";
+            }
+        }
+        out += "  ";
+        for (std::size_t j = i; j < std::min(i + 16, b.size()); ++j) out += printable(b[j]) ? static_cast<char>(b[j]) : '.';
+        out += '\n';
+    }
+    return out;
+}
+
+std::string render(const Dump& d, Format f) {
+    std::string out = d.head;
+    for (const auto& [label, bytes] : d.payloads) {
+        out += "  " + label + ", " + std::to_string(bytes.size()) + " B:\n";
+        const std::string body = f == Format::HEX ? hex_dump(bytes) : text_dump(bytes);
+        for (std::size_t i = 0; i < body.size();) {
+            const std::size_t nl = std::min(body.find('\n', i), body.size());
+            out += "    " + body.substr(i, nl - i) + "\n";
+            i = nl + 1;
+        }
+    }
+    return out;
+}
+
+std::string Monitor::who(int key, int direction) const {
+    const auto it = keys_.find(key);
+    const Pair p = it == keys_.end() ? Pair{} : it->second;
+    auto name = [](const std::string& s) { return s.empty() ? std::string("?") : s; };
+    std::string s = direction == 0 ? name(p.caller) + ">" + name(p.callee) : name(p.callee) + ">" + name(p.caller);
+    if (p.caller.empty() && !p.id.empty()) s += " (" + p.id + "'s session)";
+    return s;
+}
+
+void Monitor::learn(int key, const std::string& caller, const std::string& callee, const std::string& id) {
+    Pair& p = keys_[key];
+    if (!caller.empty()) p.caller = caller, p.callee = callee;
+    if (!id.empty()) p.id = id;
+    p.seen = ++seen_;
+    if (keys_.size() <= MAX_KEYS) return;
+    // ponytail: the least recently heard session is forgotten; a ring per band if many run at once
+    const auto old = std::min_element(keys_.begin(), keys_.end(), [](const auto& a, const auto& b) { return a.second.seen < b.second.seen; });
+    sides_.erase({old->first, 0});
+    sides_.erase({old->first, 1});
+    keys_.erase(old);
+}
+
+Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
+    Dump d;
+    char line[200];
+    std::snprintf(line, sizeof line, "%s  %s x%d", when.c_str(), b.submode.c_str(), b.n_cw);
+    d.head = line;
+    if (b.snr_db) {
+        std::snprintf(line, sizeof line, "  SNR %.1f dB", *b.snr_db);
+        d.head += line;
+    }
+    d.head += "\n";
+    if (b.lost) {
+        d.head += "  header only: burst lost\n";
+        return d;
+    }
+    ModemRx rx(b.heard, nullptr, DD_BUDGET_S, b.soft);
+    try {
+        if (broadcast(rx, d) || keyed(rx, d)) return d;
+    } catch (const std::exception& e) {  // passed a CRC but doesn't parse
+        d.head += std::string("  malformed: ") + e.what() + "\n";
+        return d;
+    }
+    d.head += "  unidentified (no CRC passes under a mask known here); raw codewords, unverified\n";
+    std::string none;
+    for (int i = 0; i < rx.n_cw(); ++i) {
+        const auto r = rx.raw(i);
+        if (r.empty()) none += " " + std::to_string(i);
+        else d.payloads.emplace_back("slot " + std::to_string(i), r[0]);
+    }
+    if (!none.empty()) d.head += "  no decode: slot" + none + "\n";
+    return d;
+}
+
+bool Monitor::broadcast(ModemRx& rx, Dump& d) {
+    const auto ctl = kisslink::KissLink::read_burst_control(rx, rx.n_cw());
+    if (!ctl) return false;
+    const auto& [c, n_ctl] = *ctl;
+    const int key = kisslink::group_key(c.group);
+    const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(rx.submode())));
+    std::vector<Bytes> payloads;
+    std::vector<bool> ok;
+    for (int i = n_ctl; i < rx.n_cw(); ++i) {
+        auto p = rx.decode_plain(i, data_mask(0, i, key));
+        ok.push_back(p.has_value());
+        payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
+    }
+    auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : tnc::unpack(payloads, ok);
+    d.head += "  BCAST \"" + c.group + "\"" + (c.call ? " from " + *c.call : "") + ": " + std::to_string(frames.size()) +
+              " frame(s)" + (lost ? ", " + std::to_string(lost) + " lost" : "") + (c.reports ? ", rate reports" : "") + "\n";
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        std::string label = "frame " + std::to_string(i + 1);
+        if (const auto ax = kisslink::parse_ax25(frames[i]))
+            label += " (AX.25 " + ax->src + ">" + ax->dst + (ax->connected ? ", connected" : ", UI") + ")";
+        d.payloads.emplace_back(label, std::move(frames[i]));
+    }
+    return true;
+}
+
+bool Monitor::keyed(ModemRx& rx, Dump& d) {
+    // a compact CONNECT (CPM's one short control codeword): its own mask
+    const Mode& m = mode_at(rx.submode());
+    if (ceil_div(CONNECT_CTL_BYTES, ctl_payload_bytes(m)) > max_ctl(m))
+        if (auto p = rx.decode_plain(0, COMPACT_CONNECT)) {
+            session_frame(unpack_connect(*p), 0, 0, d);
+            return true;
+        }
+    std::vector<std::pair<int, int>> masks{{0, 0}, {1, 0}};  // (key, direction); key 0: CONNECT, CQ, ID
+    for (const auto& [key, p] : keys_)
+        for (int dir : {0, 1}) masks.emplace_back(key, dir);
+    // slot 0 alone under every mask (CRC checks of one decode) before any
+    // ARQ_DUP pair (a decode per mask)
+    for (const bool paired : {false, true}) {
+        if (paired && rx.n_cw() < 2) break;
+        for (const auto& [key, dir] : masks) {
+            const auto first = paired ? pair(rx, 0, ctl_mask(dir, 0, key)) : rx.decode_plain(0, ctl_mask(dir, 0, key));
+            if (!first) continue;
+            const Core c0 = Core::unpack(*first);
+            const int dup = c0.ftype == ARQ_DUP ? 2 : 1;
+            if (paired && dup == 1) continue;  // combined as a pair, but not sent as one
+            if (key) learn(key);
+            const std::string kind = key ? "key " + hex4(key) + " " + who(key, dir) : "mask 0";
+            if (dup * c0.n_ctl > rx.n_cw())
+                throw std::invalid_argument(kind + ": " + std::to_string(c0.n_ctl) + " control codewords x" +
+                                            std::to_string(dup) + " in a burst of " + std::to_string(rx.n_cw()));
+            std::vector<Bytes> payloads{*first};
+            for (int i = 1; i < c0.n_ctl; ++i) {
+                auto p = rx.decode_plain(dup * i, ctl_mask(dir, i, key));
+                if (!p && dup == 2) p = pair(rx, 2 * i, ctl_mask(dir, i, key));
+                if (!p) {
+                    d.head += "  " + kind + ": control codeword " + std::to_string(i + 1) + " of " +
+                              std::to_string(c0.n_ctl) + " lost, burst not read\n";
+                    return true;
+                }
+                payloads.push_back(std::move(*p));
+            }
+            const Control ctl = Control::unpack(payloads);
+            if (c0.ftype == SESSION) {
+                if (const auto it = ctl.ext.find(T_SESS); it != ctl.ext.end()) session_frame(it->second, key, dir, d);
+                else if (const auto id = ctl.ext.find(T_ID); id != ctl.ext.end()) {
+                    const std::string call = unpack_call(ByteView(id->second).first(8));
+                    const int k = be16(id->second, 8);
+                    learn(k, {}, {}, call);
+                    d.head += "  ID " + call + " (session key " + hex4(k) + ")\n";
+                } else if (const auto cq = ctl.ext.find(T_CQ); cq != ctl.ext.end()) {
+                    d.head += "  CQ " + unpack_call(ByteView(cq->second).first(8)) + " bw " + std::to_string(at(cq->second, 8)) + "\n";
+                } else {
+                    d.head += "  session frame (" + kind + "), no body: " + ext_desc(ctl.ext) + "\n";
+                }
+            } else if (key) {
+                arq_burst(rx, ctl, key, dir, dup, d);
+            } else {
+                d.head += "  frame type " + std::to_string(c0.ftype) + " under mask 0: " + ext_desc(ctl.ext) + "\n";
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
+    const int sub = at(body, 0);
+    std::string s;
+    if (sub == CONNECT) {
+        const std::string caller = unpack_call(ByteView(body).subspan(2, 8)), callee = unpack_call(ByteView(body).subspan(10, 8));
+        const int nonce = be16(body, 18);
+        const int k = session_key(caller, callee, nonce);
+        connects_[nonce] = {caller, callee};
+        if (connects_.size() > MAX_KEYS) connects_.erase(connects_.begin());  // ponytail: by nonce, not age
+        learn(k, caller, callee);
+        char t[96];
+        std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s -> key %04x", at(body, 1), nonce, at(body, 20),
+                      at(body, 21) / 10.0, k);
+        s = "CONNECT " + caller + ">" + callee + t;
+    } else if (sub == CONNECT_ACK || sub == CONNECT_NAK) {
+        const int nonce = be16(body, 1);
+        const auto it = connects_.find(nonce);
+        s = std::string(sub == CONNECT_ACK ? "CONNECT_ACK " : "CONNECT_NAK ") +
+            (it == connects_.end() ? "?>?" : it->second.second + ">" + it->second.first) + " nonce " + hex4(nonce) +
+            (sub == CONNECT_ACK ? " cap " : " reason ") + std::to_string(at(body, 3));
+    } else if (sub == DISC || sub == DISC_ACK) {
+        s = std::string(sub == DISC ? "DISC " : "DISC_ACK ") + who(key, dir) + " key " + hex4(key);
+    } else {
+        s = "session frame " + std::to_string(sub);
+    }
+    d.head += "  " + s + "\n";
+}
+
+void Monitor::arq_burst(ModemRx& rx, const Control& ctl, int key, int dir, int dup, Dump& d) {
+    const Core& c = ctl.core;
+    const Ext& ext = ctl.ext;
+    static const char* hints[] = {"shrink", "hold", "grow", "max"};
+    const Mode* rec = decode(c.recommend);
+    char t[200];
+    std::snprintf(t, sizeof t, "  %s %s key %04x  b%d acted %d cum %d K %d rec %s %s%s\n",
+                  c.ftype == PROBE ? "POLL" : c.ftype == ARQ_DUP ? "ARQ (dup ctl)" : "ARQ", who(key, dir).c_str(), key,
+                  c.burst_seq, c.acted_on, c.cum, c.k, rec ? std::string(rec->name).c_str() : "?", hints[c.size_hint],
+                  c.reply_lost ? " reply-lost" : "");
+    d.head += t;
+    if (!ext.empty()) d.head += "  ext: " + ext_desc(ext) + "\n";
+
+    Side& s = sides_[{key, dir}];
+    Side& o = sides_[{key, 1 - dir}];
+    // this station's ACK: what it holds of the other's stream
+    std::set<int> got;
+    if (const auto b = ext.find(T_BITMAP); b != ext.end()) got = unpack_bitmap(b->second, c.cum);
+    s.snaps[c.burst_seq] = {c.cum, got};
+    if (!o.started) {
+        o.rx.cum = c.cum;
+        o.started = true;
+    } else if (const std::int64_t cum = unwrap(c.cum, o.rx.cum); cum > o.rx.cum) {
+        skip(o, key, 1 - dir, cum, d);  // its receiver has codewords we never heard
+    }
+    flush(o, key, 1 - dir, d);
+
+    if (const auto e = ext.find(T_ABANDON); e != ext.end() && e->second.size() >= 2) {
+        const int epoch = e->second[1] >> 1;
+        if (!s.epoch_known || epoch != s.epoch) {
+            s.epoch = epoch;
+            s.epoch_known = true;
+            if (s.started) {
+                const std::int64_t a = unwrap(e->second[0], s.rx.cum);
+                // below cum: we heard codewords its receiver missed, and they come again re-sliced
+                s.rx.abandon(a);
+                s.soft.clear();
+                if (a != s.rx.cum) skip(s, key, dir, a, d);
+            }
+        }
+    }
+
+    // the slots: K resends of what the other's acted-on ACK lacked, then new from T_NEW
+    const int ctl_slots = dup * c.n_ctl;
+    const int n_data = rx.n_cw() - ctl_slots;
+    if (c.k > n_data) throw std::invalid_argument("K " + std::to_string(c.k) + " past the burst");
+    std::vector<std::optional<int>> seqs;
+    if (const auto snap = o.snaps.find(c.acted_on); c.k && snap != o.snaps.end()) {
+        const auto& [cum, held] = snap->second;
+        for (int q = cum; static_cast<int>(seqs.size()) < c.k; ++q)
+            if (!held.count(q % SEQ_MOD)) seqs.push_back(q % SEQ_MOD);
+    } else {
+        seqs.resize(static_cast<std::size_t>(c.k));
+    }
+    const auto e_new = ext.find(T_NEW);
+    for (int j = 0; j < n_data - c.k; ++j)
+        seqs.push_back(e_new != ext.end() && !e_new->second.empty() ? std::optional((e_new->second[0] + j) % SEQ_MOD) : std::nullopt);
+    const auto e_rv = ext.find(T_RV);
+    const auto rvs = unpack_rv(e_rv == ext.end() ? ByteView{} : ByteView(e_rv->second), c.k);
+    const auto e_comp = ext.find(T_COMP);
+    const auto bits = unpack_flags(e_comp == ext.end() ? ByteView{} : ByteView(e_comp->second), n_data);
+
+    std::string states;
+    for (int j = 0; j < n_data; ++j) {
+        const int slot = ctl_slots + j;
+        const int rv = j < c.k ? rvs[static_cast<std::size_t>(j)] : 0;
+        std::string st = j < c.k ? "r" : "";
+        if (!seqs[j]) {
+            states += " ?" + st;
+            continue;
+        }
+        const int s7 = *seqs[j];
+        std::int64_t seq = s.started ? unwrap(s7, s.rx.cum) : s7;
+        if (bits[j] && (!s.started || seq >= s.rx.cum)) s.rx.comp_seqs.insert(seq);
+        const bool hint = bits[j] || s.rx.comp_seqs.count(seq);
+        st = std::to_string(s7) + st;
+        if (s.started && seq < s.rx.cum) {
+            states += " " + st + " had";
+            continue;
+        }
+        std::optional<Bytes> p;
+        bool comp = hint;
+        if (!s.epoch_known && rv == 0) {
+            // joined mid-session: the sender's abandon epoch is in every data CRC
+            for (int e = 0; e < EPOCH_MOD && !p; ++e)
+                for (const bool z : {hint, !hint})
+                    if ((p = rx.decode_plain(slot, data_mask(dir, s7, key, z, e)))) {
+                        s.epoch = e, s.epoch_known = true, comp = z;
+                        break;
+                    }
+        } else if (s.epoch_known) {
+            auto mask = [&](bool z) { return data_mask(dir, s7, key, z, s.epoch); };
+            const auto it = s.soft.find(seq);
+            if (rv == 0 && it == s.soft.end())  // one decode, checked under either compression
+                for (const bool z : {hint, !hint})
+                    if ((p = rx.decode_plain(slot, mask(z)))) {
+                        comp = z;
+                        break;
+                    }
+            if (!p) {
+                // combined with what earlier sends left (IR), and kept for the next resend
+                std::optional<SoftEntry> stored;
+                if (it != s.soft.end()) stored = it->second;
+                try {
+                    p = rx.decode_stored(slot, mask(hint), rv, stored);
+                } catch (const StoreMismatch&) {  // stored under an older mode
+                    stored.reset();
+                    p = rx.decode_stored(slot, mask(hint), rv, stored);
+                }
+                if (!p && stored) s.soft[seq] = std::move(*stored);
+            }
+            if (p) s.soft.erase(seq);
+        }
+        if (!p) {
+            states += " " + st + " lost";
+            continue;
+        }
+        states += " " + st + (comp ? " ok(z)" : " ok");
+        if (!s.started) {
+            s.rx.cum = seq;
+            s.started = true;
+        }
+        deliver(s, key, dir, seq, std::move(*p), comp, d);
+    }
+    if (n_data) d.head += "  data:" + states + "\n";
+    flush(s, key, dir, d);
+}
+
+void Monitor::deliver(Side& s, int key, int dir, std::int64_t seq, Bytes p, bool comp, Dump& d) {
+    try {
+        s.rx.accept(seq, std::move(p), comp);
+    } catch (const ProtocolError& e) {  // a codeword at cum that won't inflate: step past it
+        d.head += "  " + who(key, dir) + ": " + e.what() + "\n";
+        skip(s, key, dir, s.rx.cum + 1, d);
+    }
+}
+
+void Monitor::skip(Side& s, int key, int dir, std::int64_t to, Dump& d) {
+    RxSide& r = s.rx;
+    d.head += "  " + who(key, dir) + " stream: " +
+              (to > r.cum ? "seq " + std::to_string(r.cum % SEQ_MOD) + "-" + std::to_string((to - 1) % SEQ_MOD) + " not all heard"
+                          : "re-sliced below what was shown (seq " + std::to_string(to % SEQ_MOD) + ")") +
+              ", text after it may be garbled\n";
+    // the deflate history and record framing are lost with the missing codewords
+    r.hist.clear();
+    r.reader = RecordReader{};
+    s.gap_plain = r.plain;
+    if (to < r.cum) {
+        r.cum = to;
+        r.buf.clear();
+    }
+    // step over what was never heard, delivering what is held
+    while (r.cum < to) {
+        const auto it = r.buf.lower_bound(r.cum);
+        if (it == r.buf.end() || it->first >= to) {
+            r.cum = to;
+            break;
+        }
+        r.cum = it->first;
+        auto [p, z] = std::move(it->second);
+        r.buf.erase(it);
+        deliver(s, key, dir, r.cum, std::move(p), z, d);
+    }
+    if (const auto it = r.buf.find(r.cum); it != r.buf.end()) {  // held right at the new cum
+        auto [p, z] = std::move(it->second);
+        r.buf.erase(it);
+        deliver(s, key, dir, r.cum, std::move(p), z, d);
+    }
+    for (auto it = s.soft.begin(); it != s.soft.end();) it = it->first < r.cum ? s.soft.erase(it) : std::next(it);
+}
+
+void Monitor::flush(Side& s, int key, int dir, Dump& d) {
+    if (s.rx.out.empty()) return;
+    // ponytail: "after a gap" holds for the first HIST plain bytes; misframing can last until padding realigns it
+    const bool suspect = s.gap_plain >= 0 && s.rx.plain - s.gap_plain < HIST;
+    d.payloads.emplace_back(who(key, dir) + (suspect ? " stream, after a gap" : " stream"), std::move(s.rx.out));
+    s.rx.out.clear();
+}
+
+std::vector<Dump> Monitor::feed(std::span<const double> x, const std::function<std::string(double t)>& when) {
+    if (!receiver_) receiver_ = std::make_unique<tnc::Receiver>(modem::Accept::of({}, MAX_BURST_S), all_grids());
+    std::vector<Dump> out;
+    for (auto& ev : receiver_->feed(x)) {
+        auto* b = std::get_if<tnc::BurstEvent>(&ev);
+        if (!b) continue;
+        BurstHeard h;
+        h.t = static_cast<double>(b->header.start()) / config::FS;
+        h.submode = spec_name(b->header);
+        h.n_cw = b->header.n_cw();
+        h.lost = !b->rx;
+        if (b->rx) {
+            h.heard = heard_of(std::move(*b->rx));
+            h.snr_db = measure(h.heard).snr_est;
+            h.soft = soft_bits(h.heard);
+        }
+        out.push_back(burst(h, when(h.t)));
+    }
+    return out;
+}
+
+}  // namespace data2g::monitor

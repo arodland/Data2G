@@ -102,6 +102,15 @@ if(NOT DATA2G_BUILD_QTAUDIO STREQUAL "OFF")
   endif()
 endif()
 
+# data2g-monitor: receive only, every burst as a packet dump. A sound card
+# with Qt Multimedia; raw float32 input (--input-file) always.
+add_executable(data2g-monitor apps/data2g_monitor.cpp)
+target_link_libraries(data2g-monitor PRIVATE data2g_core)
+if(TARGET data2g_audio_qt)
+  target_link_libraries(data2g-monitor PRIVATE data2g_audio_qt)
+  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_QTAUDIO)
+endif()
+
 if(DATA2G_BUILD_RIG)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(hamlib)
@@ -206,7 +215,7 @@ endif()
 # Last, so it sees the apps however they were added. The GUI target is
 # expected to be called data2g-gui.
 set(DATA2G_PACKAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging")
-foreach(app data2g-host data2g-gui)
+foreach(app data2g-host data2g-gui data2g-monitor)
   if(NOT TARGET ${app})
     continue()
   endif()

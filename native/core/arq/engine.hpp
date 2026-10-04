@@ -116,7 +116,14 @@ struct BurstHeard {
     int n_cw = 0;
     bool lost = false;  // header heard, burst not (the recorder's "lost")
     std::optional<double> snr_db;  // phy.measure's snr_est; nullopt when lost
+    Heard heard;  // the burst itself (empty when lost), for a monitor
+    std::shared_ptr<const SlotSoft> soft;  // soft_bits(heard), shared
 };
+
+// The engine's receive helpers, for a receiver of its own (monitor::Monitor).
+Heard heard_of(tnc::Rx&& rx);
+std::string spec_name(const tnc::Pending& p);
+std::vector<std::string_view> all_grids();  // every CPM grid, as the engine's receiver searches
 
 class Engine {
 public:

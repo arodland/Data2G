@@ -1,9 +1,12 @@
 #include "main_window.hpp"
 
+#include <QComboBox>
 #include <QDateTime>
+#include <QFontDatabase>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QStatusBar>
@@ -14,6 +17,7 @@
 #include "arq/modes.hpp"
 #include "arq/policy.hpp"
 #include "audio/qt/qtaudio.hpp"
+#include "monitor/monitor.hpp"
 #include "settings_dialog.hpp"
 #include "waterfall.hpp"
 
@@ -46,6 +50,64 @@ QStringList names(const std::vector<audio::DeviceInfo>& devs) {
 }
 
 }  // namespace
+
+// Every burst heard, as a packet dump, in a terminal-style scrolling view.
+class MonitorWindow : public QWidget {
+public:
+    static constexpr std::size_t MAX_DUMPS = 1000;  // kept to re-render on a format change
+
+    explicit MonitorWindow(QWidget* parent) : QWidget(parent, Qt::Window) {
+        setWindowTitle(tr("Data2G monitor"));
+        setObjectName(QStringLiteral("monitor"));
+        auto* top = new QVBoxLayout(this);
+        auto* bar = new QHBoxLayout;
+        format_ = new QComboBox;
+        format_->setObjectName(QStringLiteral("monitor_format"));
+        format_->addItems({tr("Text"), tr("Hex dump")});
+        auto* clear = new QPushButton(tr("Clear"));
+        bar->addWidget(new QLabel(tr("Payloads:")));
+        bar->addWidget(format_);
+        bar->addStretch();
+        bar->addWidget(clear);
+        top->addLayout(bar);
+        view_ = new QPlainTextEdit;
+        view_->setObjectName(QStringLiteral("monitor_text"));
+        view_->setReadOnly(true);
+        view_->setLineWrapMode(QPlainTextEdit::NoWrap);
+        view_->setMaximumBlockCount(50000);
+        view_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        view_->setStyleSheet(QStringLiteral("QPlainTextEdit { background: black; color: #d8d8d8; }"));
+        top->addWidget(view_);
+        connect(format_, &QComboBox::currentIndexChanged, this, [this] {
+            QStringList all;
+            for (const auto& d : dumps_) all << text(d);
+            view_->setPlainText(all.join(QLatin1Char('\n')));
+            view_->moveCursor(QTextCursor::End);
+        });
+        connect(clear, &QPushButton::clicked, this, [this] {
+            dumps_.clear();
+            view_->clear();
+        });
+        resize(780, 560);
+    }
+
+    void add(std::vector<monitor::Dump> dumps) {
+        for (auto& d : dumps) {
+            view_->appendPlainText(text(d));  // follows the end while it is scrolled there
+            dumps_.push_back(std::move(d));
+            if (dumps_.size() > MAX_DUMPS) dumps_.pop_front();
+        }
+    }
+
+private:
+    QString text(const monitor::Dump& d) const {
+        return qs(monitor::render(d, format_->currentIndex() == 1 ? monitor::Format::HEX : monitor::Format::TEXT));
+    }
+
+    QComboBox* format_;
+    QPlainTextEdit* view_;
+    std::deque<monitor::Dump> dumps_;
+};
 
 MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMainWindow(parent), store_(store) {
     setWindowTitle(tr("Data2G"));
@@ -89,6 +151,10 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     lamps->addWidget(busy_);
     lamps->addWidget(ptt_);
     lamps->addStretch();
+    auto* monitor = new QPushButton(tr("Monitor..."));
+    monitor->setObjectName(QStringLiteral("open_monitor"));
+    connect(monitor, &QPushButton::clicked, this, &MainWindow::open_monitor);
+    lamps->addWidget(monitor);
     auto* settings = new QPushButton(tr("Settings..."));
     connect(settings, &QPushButton::clicked, this, &MainWindow::open_settings);
     lamps->addWidget(settings);
@@ -220,6 +286,17 @@ void MainWindow::poll() {
         for (int i = 0; i < cells.size(); ++i) log_->setItem(0, i, new QTableWidgetItem(cells[i]));
     }
     while (log_->rowCount() > MAX_LOG_ROWS) log_->removeRow(log_->rowCount() - 1);
+
+    s.set_monitor(monitor_ && monitor_->isVisible());  // decodes only while someone watches
+    if (monitor_) monitor_->add(s.take_dumps());
+}
+
+void MainWindow::open_monitor() {
+    if (!monitor_) monitor_ = new MonitorWindow(this);
+    monitor_->show();
+    monitor_->raise();
+    monitor_->activateWindow();
+    poll();
 }
 
 void MainWindow::open_settings() {

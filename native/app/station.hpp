@@ -53,6 +53,9 @@ class Host;
 namespace kisslink {
 class KissLink;
 }
+namespace monitor {
+struct Dump;
+}
 namespace rig {
 class RigController;
 class Keyer;
@@ -199,12 +202,17 @@ public:
     std::vector<double> input_tail(std::size_t n, std::uint64_t* total = nullptr, bool* tx = nullptr) const;
     // The dial frequency the rig last reported (--rig-poll-interval > 0), or nothing.
     std::optional<double> rig_frequency() const;
+    // The Monitor window: while on, every burst heard is also decoded as a
+    // packet dump (core/monitor), whoever it is for, on a thread of its own.
+    void set_monitor(bool on) { monitor_on_ = on; }
+    std::vector<monitor::Dump> take_dumps();  // since the last call (the newest 256 kept)
 
 private:
     struct Outbox;
     struct Port;
     struct KissServer;
     struct SoundCard;
+    struct MonitorThread;
     // session stage
     void flush();
     void note_link();
@@ -229,6 +237,8 @@ private:
     std::unique_ptr<SoundCard> card_;
     std::unique_ptr<rig::RigController> rig_;
     std::unique_ptr<rig::Keyer> keyer_;
+    std::unique_ptr<MonitorThread> monitor_;  // made in start(), before the engine runs
+    std::atomic<bool> monitor_on_{false};
     std::thread engine_thread_;
     std::atomic<bool> stop_{false}, failed_{false}, ptt_{false};
     bool running_ = false;
