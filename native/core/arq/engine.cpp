@@ -605,7 +605,10 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         }
     }
     if (cq(rx)) return;
-    session_->policy->observe(*meas, rx.submode(), t);
+    // the noise profile too (the gear shifter's noise rule reads it)
+    Measured m = *meas;
+    if (const auto s = noise_.snapshot()) m.noise = NoiseLevels{s->db, s->tail_db, s->impulses_per_min};
+    session_->policy->observe(m, rx.submode(), t);
     session_->on_rx(rx, t);
 }
 

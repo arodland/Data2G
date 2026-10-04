@@ -125,6 +125,15 @@ void bind_arq(py::module_& m) {
     }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none());
 
     // -- policy
+    a.def("band_span_hz", [](const std::string& b) { const auto s = arq::band_span_hz(b); return py::make_tuple(s[0], s[1]); });
+    a.def("noise_shift_db", [](const py::object& noise, const std::string& mb, const std::string& b, double w, double dead) {
+        py::dict d;
+        d["snr_est"] = 0.0, d["spread_est"] = 0.0, d["delay_est_ms"] = 0.0, d["noise"] = noise;
+        for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) d[py::str("mi_" + std::string(arq::CONSTS[i]))] = 0.0;
+        return arq::noise_shift_db(measured(d).noise, mb, b, w, dead);
+    }, py::arg("noise"), py::arg("measured_band"), py::arg("band"), py::arg("tail_weight") = 1.0,
+       py::arg("deadband_db") = 1.0);
+    a.def("shifted", [](const py::dict& m, double shift) { return to_dict(arq::shifted(measured(m), shift)); });
     a.def("cap_hz", &arq::cap_hz);
     a.def("fallback", [](int cap) { return std::string(arq::fallback(cap)); });
     a.def("connect_mode", [](int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); },
@@ -155,6 +164,7 @@ void bind_arq(py::module_& m) {
         .def_readwrite("want_dup", &Shifter::want_dup)
         .def_readwrite("peer_had_data", &Shifter::peer_had_data)
         .def_readwrite("heard", &Shifter::heard)
+        .def_readwrite("noise_rule", &Shifter::noise_rule)
         .def_readwrite("ceiling", &Shifter::ceiling)
         .def_readwrite("ladder_top", &Shifter::ladder_top)
         .def_readwrite("data_lost", &Shifter::data_lost)

@@ -39,7 +39,13 @@ BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surp
 # 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
 # On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
-NOISE_RULE = float(os.environ["DATA2G_NOISE_RULE"]) if os.environ.get("DATA2G_NOISE_RULE") else None
+# The noise rule (recommend(): candidates whose band is noisier in the
+# receiver's profile than the measured one predicted at a lower SNR), its
+# tail weight: on by default (runs/noise_rule_study.sh: carriers +54..+209%,
+# edge +8..+37%, clean and wandering-floor cells unchanged). DATA2G_NOISE_RULE
+# (studies): a weight, or '' / 'off' for none.
+_NR = os.environ.get("DATA2G_NOISE_RULE")
+NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
 if BIAS_FIX:
     BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated

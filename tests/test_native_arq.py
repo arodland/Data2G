@@ -87,7 +87,7 @@ def test_capacity_and_effective_mi(A, pure):
             pytest.approx(P.effective_mi(x, np.ones_like(x), c), rel=MI_TOL, abs=MI_TOL)
 
 
-def random_measured(rng, band="w"):
+def random_measured(rng, band="w", noise=False):
     nc = {"w": 24, "n10": 10, "n4": 4, "w48": 48}.get(band, 10)
     snr = rng.uniform(-8, 25)
     m = dict(snr_est=snr, spread_est=rng.choice([0.0, rng.uniform(0, 3)]), delay_est_ms=rng.uniform(0, 4),
@@ -97,7 +97,20 @@ def random_measured(rng, band="w"):
     if rng.uniform() < 0.3:  # cpm.measure's and older callers' dicts
         del m["headroom"]
         m["frames"] = float(m["frames"])
+    if noise and rng.uniform() < 0.5:  # the receiver's noise profile, often one loud sub-band (the noise rule)
+        m["noise"] = random_noise(rng)
     return m
+
+
+def random_noise(rng):
+    db = rng.normal(0, 0.3, 5)
+    tail = rng.uniform(0.9, 2.0, 5)
+    if rng.uniform() < 0.7:
+        k = rng.integers(5)
+        db[k] += rng.uniform(0, 20)
+        tail[k] += rng.uniform(0, 8)
+    return {"noise_db": [float(v) for v in db], "noise_tail_db": [float(v) for v in tail],
+            "impulses_per_min": float(rng.choice([0.0, 30.0]))}
 
 
 def test_outcome_model(A, pure):
@@ -164,7 +177,7 @@ def test_shifter_decisions_match(A, pure, seed):
         if rng.random() < 0.05:
             cap = rng.choice(list(G.CAP_HZ))
         heard = rng.choice(G.allowed(cap)).name
-        m = random_measured(nrng, modes.MODES[heard].band)
+        m = random_measured(nrng, modes.MODES[heard].band, noise=True)
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
@@ -202,3 +215,24 @@ def test_native_shifter_state_roundtrips(A):
     assert g.predicted == {"ack-4f": (0.25, 0.5)}
     g.log = [("ack-4f", 1, "ack-4f")]
     assert g.log == [("ack-4f", 1, "ack-4f")]
+
+
+def test_noise_rule_helpers_match(A, pure):
+    """predictor.band_span_hz, noise_shift_db and shifted, C++ against Python."""
+    from data2g import cpm
+
+    for b in sorted({s.band for s in modes.MODES.values()} | set(cpm.GRIDS)):
+        assert A.band_span_hz(b) == pytest.approx(P.band_span_hz(b)), b
+    rng = np.random.default_rng(3)
+    bands = sorted({s.band for s in modes.MODES.values()})
+    for _ in range(300):
+        n = random_noise(rng)
+        mb, b = rng.choice(bands), rng.choice(bands)
+        w = float(rng.choice([0.5, 1.0]))
+        assert A.noise_shift_db(n, mb, b, w) == pytest.approx(P.noise_shift_db(n, mb, b, w), abs=1e-9)
+        m = random_measured(rng)
+        shift = float(rng.uniform(0, 12))
+        want, got = P.shifted(m, shift), A.shifted(m, shift)
+        assert got["snr_est"] == pytest.approx(want["snr_est"])
+        assert all(got[f"mi_{c}"] == pytest.approx(want[f"mi_{c}"], abs=1e-12) for c in P.CONSTS)
+    assert A.noise_shift_db(None, "w", "w48") == 0.0
