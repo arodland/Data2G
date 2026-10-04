@@ -66,7 +66,7 @@ public:
     // fields: (key, JSON value) pairs after "kind"
     void event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields);
     std::string rx(double t, std::span<const double> audio, const tnc::Pending& header, bool lost,
-                   const std::optional<Measured>& meas);
+                   const std::optional<Measured>& meas, const std::optional<tnc::NoiseSnapshot>& noise = std::nullopt);
 
 private:
     std::string dir_;
@@ -78,6 +78,7 @@ private:
 std::string json_str(std::string_view s);
 std::string json_num(double v);
 std::string json_measured(const Measured& m);  // phy.measure's dict
+std::string json_noise(const tnc::NoiseSnapshot& n);  // tnc.NoiseProfile.snapshot()'s dict
 // The bytes of a .npz holding one float32 array (np.load reads it).
 std::vector<std::uint8_t> npz_f32(const std::string& name, std::span<const float> a);
 std::uint16_t to_half(double x);  // numpy's float64 -> float16: round to nearest even
@@ -228,6 +229,7 @@ private:
     std::shared_ptr<Rng> rng_;
     modem::Accept accept_;
     tnc::Receiver receiver_;
+    tnc::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
     std::int64_t ptt_delay_;
     std::optional<Recorder> rec_;
     std::int64_t n_ = 0;

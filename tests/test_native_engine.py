@@ -56,6 +56,7 @@ def _same_records(d):
         keys[side] = {e["kind"]: set(e) for e in ev}
         rx = [e for e in ev if e["kind"] == "rx"]
         assert rx and all(e["meas"] is None or set(e["meas"]) >= {"snr_est", "mi_gray-qam4"} for e in rx)
+        assert all(e["noise"] is None or len(e["noise"]["noise_db"]) == 5 for e in rx)
         for e in rx:
             audio = np.load(d / side / e["file"])["audio"]
             assert audio.dtype == np.float32 and audio.ndim == 1 and len(audio)

@@ -7,6 +7,7 @@
 // Positions in events are stream sample indices (samples fed since reset).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -110,6 +111,46 @@ struct DecodeRequest {
 BurstEvent decode(DecodeRequest req, const modem::Accept& accept);
 
 // tnc.Receiver: feed() audio at FS as it arrives, get events back.
+// data2g/tnc.py NoiseProfile: the passband's noise between bursts, per
+// sub-band, from 0.1 s blocks of idle audio (median power, and the 90th
+// percentile over it). Times are sample indices, round(t * FS).
+struct NoiseSnapshot {
+    std::array<double, 5> db{}, tail_db{};
+    double impulses_per_min = 0.0;
+    int blocks = 0;
+};
+
+class NoiseProfile {
+public:
+    static constexpr std::array<std::pair<int, int>, 5> BANDS_HZ = {
+        {{350, 950}, {950, 1300}, {1300, 1750}, {1750, 2100}, {2100, 2700}}};
+    static constexpr int BLOCK = config::FS / 10;
+    static constexpr std::size_t WINDOW = 600;
+    static constexpr double COMMIT_S = 3.0;
+    static constexpr std::size_t MIN_BLOCKS = 20;
+    static constexpr double RECOVER_S = 0.6;
+    static constexpr int PIECE = config::FS / 100;  // impulse detection: 10 ms pieces
+    static constexpr double IMPULSE_X = 10.0;       // over the block's median piece RMS
+
+    NoiseProfile();
+    void feed(std::span<const double> x, double t_start);  // heard from t_start (s); a gap starts a new block
+    void mark(double start, double end);                    // not noise from start to end (s)
+    std::optional<NoiseSnapshot> snapshot() const;
+
+private:
+    struct Block {
+        std::int64_t start, end;
+        std::array<double, 5> p;
+        int impulses;
+    };
+    std::vector<double> win_, buf_;
+    std::int64_t s0_ = 0;
+    std::deque<Block> pending_;
+    std::vector<std::pair<std::int64_t, std::int64_t>> busy_;
+    std::deque<std::array<double, 5>> kept_;
+    std::deque<int> kept_impulses_;
+};
+
 class Receiver {
 public:
     static constexpr int HOP = config::FS / 4;

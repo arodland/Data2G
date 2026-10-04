@@ -588,6 +588,9 @@ def _gear_substitutions(native):
         def connect_mode(self, cap, tries=0):
             return A.connect_mode(cap, tries)
 
+        def reply_hold(self, station, burst):
+            return self._n.reply_hold(station, burst.submode)
+
         def airtime(self, m, n_cw, dup=False):
             return A.burst_seconds(m, int(n_cw), bool(dup))
 
@@ -688,7 +691,8 @@ def _arq_substitutions(native):
     a = native.arq
     out = {(frames, f): getattr(a, f) for f in ("Core", "Control", "pack_bitmap", "unpack_bitmap", "pack_rv", "unpack_rv",
                                                  "pack_flags", "unpack_flags", "deflate", "deflate_fit", "inflate",
-                                                 "pack_call", "unpack_call", "to_records", "RecordReader")}
+                                                 "pack_call", "unpack_call", "pack_connect", "unpack_connect", "to_records",
+                                                 "RecordReader")}
     out.update({(link, f): getattr(a, f) for f in ("unwrap", "ctl_mask", "data_mask", "Station")})
     out.update({(session, f): getattr(a, f) for f in ("session_key", "Session", "_frame_desc")})
     return out
@@ -826,8 +830,8 @@ def _modem_substitutions(native):
         return N.copy_llr(z, int(p), band, int(n_hdr))
 
     @guarded("_best_header")
-    def _best_header(z0, bands=None, complete=True, accept=None, stats=None):
-        hd, a, z = N.best_header(z0, bands_arg(bands), complete, accept, stats)
+    def _best_header(z0, bands=None, complete=True, accept=None, stats=None, final=False):
+        hd, a, z = N.best_header(z0, bands_arg(bands), complete, accept, stats, final)
         return hdr_dict(hd), acq(a), z
 
     @guarded("find_burst")

@@ -43,6 +43,12 @@ int cdiv(std::int64_t a, std::int64_t b) { return static_cast<int>((a + b - 1) /
 
 }  // namespace
 
+const std::array<double, 4>& mode_thresholds(std::string_view submode) {
+    for (const auto& t : tables::MODE_THRESHOLDS)
+        if (t.name == submode) return t.db;
+    throw std::out_of_range("no ladder thresholds for " + std::string(submode));
+}
+
 int cap_hz(int cap) {
     switch (cap) {
         case 0: return 500;
@@ -106,7 +112,7 @@ const Mode* decode(int rec) {
 int ctl_slots(const Mode& m) { return std::min(max_ctl(m), cdiv(CTL_BYTES, ctl_payload_bytes(m))); }
 
 int slots_for(const Mode& m, double seconds, bool data, bool dup) {
-    if (m.is_cpm()) seconds *= CPM_SIZE_SCALE;
+    if (m.is_cpm()) seconds = std::min(seconds * CPM_SIZE_SCALE, CPM_MAX_S);
     int n = 1;
     while (n < 64 && burst_seconds(m, n + 1) <= seconds) ++n;
     n = std::max({n, min_cw(m, data), ctl_slots(m) + data});
@@ -116,9 +122,20 @@ int slots_for(const Mode& m, double seconds, bool data, bool dup) {
 
 std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int escalation) const {
     const auto rec = st.pending ? st.peer_recommend : st.peer_reply_recommend;
-    if (escalation || !rec) return {fallback(st.cap), 2};
-    const Mode* m = decode(*rec);
     const auto ok = allowed(st.cap);
+    // escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, answering
+    // the peer's robust poll, or my floor there with no data: control only in
+    // ROBUST_CONNECT (policy.py)
+    const bool robust_floor = st.esc_floor >= ROBUST_ESCALATION && !st.pending;
+    if (escalation >= ROBUST_ESCALATION || (escalation && heard == ROBUST_CONNECT) || robust_floor)
+        return {ROBUST_CONNECT, 1};
+    if (escalation == 2) return {ALT_POLL, 2};
+    if (escalation) {
+        const Mode* r = st.peer_reply_recommend ? decode(*st.peer_reply_recommend) : nullptr;
+        return {r && std::find(ok.begin(), ok.end(), r) != ok.end() ? r->name : fallback(st.cap), 2};
+    }
+    if (!rec) return {fallback(st.cap), 2};
+    const Mode* m = decode(*rec);
     if (!m || std::find(ok.begin(), ok.end(), m) == ok.end()) return {fallback(st.cap), 2};
     return {m->name, slots_for(*m, SIZE_S.at(st.peer_size_hint), st.pending, st.peer_wants_dup)};
 }
@@ -136,9 +153,43 @@ void GearShifter::observe(const Measured& m, std::string_view submode, double no
     measured = m;
     measured_band = std::string(mode_at(submode).band);
     measured_at = now;
+    heard = std::string(submode);
+}
+
+double GearShifter::reply_hold(const StationView& st, std::string_view submode) const {
+    std::vector<std::string_view> ms = {log.empty() ? fallback(st.cap) : std::string_view(log.back().reply)};
+    if (st.misses) ms.insert(ms.end(), {fallback(st.cap), ALT_POLL});
+    if (submode == ROBUST_CONNECT || st.esc_floor >= ROBUST_ESCALATION) ms.push_back(ROBUST_CONNECT);
+    double t = 0.0;
+    for (auto m : ms) {
+        const Mode& md = mode_at(m);
+        t = std::max(t, burst_seconds(md, ctl_slots(md)));
+    }
+    return t + REPLY_HOLD_MARGIN_S;
 }
 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
+    if (usable && *usable && sent) {
+        data_lost = 0;
+        if (ceiling) {  // climb a step; back at the mode whose losses started it, it's off
+            bool off = true;
+            for (std::size_t i = 0; i < 4; ++i) {
+                (*ceiling)[i] += LADDER_STEP_DB;
+                off = off && (*ceiling)[i] >= (*ladder_top)[i];
+            }
+            if (off) ceiling.reset(), ladder_top.reset();
+        }
+    } else if (usable && !*usable && !log.empty() && submode == log.back().data) {
+        if (++data_lost >= LADDER_AFTER) {  // step down from the mode that failed
+            std::array<double, 4> down = mode_thresholds(submode);
+            for (std::size_t i = 0; i < 4; ++i) {
+                down[i] -= LADDER_STEP_DB;
+                if (ceiling) down[i] = std::min(down[i], (*ceiling)[i]);
+            }
+            if (!ceiling) ladder_top = mode_thresholds(submode);
+            ceiling = down;
+        }
+    }
     const auto it = predicted.find(submode);
     if (it == predicted.end() || (sent == 0 && !usable)) return;
     const bool ok = usable ? *usable : decoded > 0;
@@ -158,7 +209,8 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     for (const Mode* s : allowed(st.cap))
         if (!s->is_cpm() || (use_cpm && outcome_knows(s->name))) cands.push_back(s);
     std::optional<Prev> pv;
-    if (prev && measured_at - prev->at <= PREV_MAX_S) pv = Prev{prev->m, prev->band, measured_at - prev->at};
+    // older history is used as PREV_MAX_S old, not dropped (policy.py)
+    if (prev) pv = Prev{prev->m, prev->band, std::min(measured_at - prev->at, PREV_MAX_S)};
 
     std::map<double, std::vector<Outcome>> memo;  // by the burst's rounded length
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
@@ -175,12 +227,12 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
 
     // my reply: the cheapest in expectation, a lost one costing a timeout
     const Mode* reply = nullptr;
-    double reply_c = std::numeric_limits<double>::infinity();
+    double reply_c = std::numeric_limits<double>::infinity(), reply_p = 0.0;
     for (const Mode* s : cands) {
         const double t = burst_seconds(*s, 1);
         const double ok = q_burst(*s, 1);
         const double c = t + (1 - ok) * (TIMEOUT_S + t) / std::max(ok, 1e-3);
-        if (c < reply_c) reply = s, reply_c = c;
+        if (c < reply_c) reply = s, reply_c = c, reply_p = ok;
     }
 
     const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
@@ -190,7 +242,25 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     const Mode* best = nullptr;
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
-    for (const Mode* s : cands) {
+    std::vector<const Mode*> data_cands = cands;
+    if (ceiling && !cands.empty()) {
+        data_cands.clear();
+        for (const Mode* s : cands) {
+            const auto& t = mode_thresholds(s->name);
+            bool ok = true;
+            for (std::size_t i = 0; i < 4; ++i) ok = ok && t[i] <= (*ceiling)[i];
+            if (ok) data_cands.push_back(s);
+        }
+        if (data_cands.empty()) {  // none that robust: the lowest worst-case threshold
+            auto worst = [](const Mode* s) {
+                const auto& t = mode_thresholds(s->name);
+                return *std::max_element(t.begin(), t.end());
+            };
+            data_cands = {*std::min_element(cands.begin(), cands.end(),
+                                            [&](const Mode* a, const Mode* b) { return worst(a) < worst(b); })};
+        }
+    }
+    for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);
         for (int hint = 0; hint < static_cast<int>(SIZE_S.size()); ++hint) {
             int n = slots_for(*s, SIZE_S[hint]);
@@ -205,7 +275,11 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             if (ok_ctl * pn < min_success) continue;
             const bool dup = s->is_cpm() && ok_ctl < DUP_BELOW;
             const double tb = burst_seconds(*s, n + dup, dup);
-            const double t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S;
+            double t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S;
+            // lost, the burst leaves (LINK_LOST_S - tb) to recover in: each
+            // try a poll and its reply, both at about my reply's P
+            const double tries = std::max(0.0, std::floor((LINK_LOST_S - tb - TIMEOUT_S) / T_RECOVER_S));
+            t += (1 - ok_ctl) * std::pow(1 - reply_p * reply_p, tries) * LOST_LINK_COST_S;
             double v;
             if (chat) {
                 const double ok_all = std::max(ok_ctl * std::pow(pn, static_cast<double>(n - c)), 1e-3);
@@ -243,6 +317,8 @@ StationView view(const Station& st) {
     v.chat = st.chat || st.peer_chat;
     v.peer_queued = st.peer_queued;
     v.held = static_cast<std::int64_t>(st.rx.buf.size());
+    v.misses = st.misses;
+    v.esc_floor = st.esc_floor;
     return v;
 }
 

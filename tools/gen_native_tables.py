@@ -279,6 +279,7 @@ def predictor_cpp() -> str:
     """The gear shifter's outcome model (codes_data/outcome_predictor.npz,
     the installed ensemble; DATA2G_OUTCOME_MODEL is study-only) and the AWGN
     BICM capacity tables its MI features interpolate (capacity_tables.npz)."""
+    from data2g.arq import policy as G
     from data2g.arq import predictor as P
 
     model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
@@ -307,12 +308,15 @@ def predictor_cpp() -> str:
         assert len(tables[c]) == len(grid)
         out.append(f"constexpr double cap_{i}[] = {{\n{doubles(tables[c])}}};\n")
     caps = ", ".join(f"{{{cxx(c)}, cap_{i}}}" for i, c in enumerate(P.CONSTS))
-    out.append(f"constexpr CapacityTable caps[] = {{{caps}}};\n\n}}  // namespace\n\n")
+    out.append(f"constexpr CapacityTable caps[] = {{{caps}}};\n")
+    thr = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(float(v)) for v in t)}}}}}" for m, t in G.MODE_THRESHOLDS.items())
+    out.append(f"constexpr ModeThreshold thresholds[] = {{\n{thr}}};\n\n}}  // namespace\n\n")
     out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
                "const std::span<const std::string_view> OUTCOME_MODES = modes;\n"
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"
-               "const std::span<const CapacityTable> CAPACITY = caps;\n\n}  // namespace data2g::tables\n")
+               "const std::span<const CapacityTable> CAPACITY = caps;\n"
+               "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 
 

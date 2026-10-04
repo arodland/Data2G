@@ -158,6 +158,91 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
     return r
 
 
+class NoiseProfile:
+    """Noise across the passband from the audio heard between bursts: per
+    sub-band (BANDS_HZ, split at the modes' band edges), the median 0.1 s
+    block power over the last WINDOW blocks of idle audio, and its 90th
+    percentile over that median (intermittent interference: a 2.39 kHz
+    signal on air, recordings/20261002-232711, was +11.6 dB there with
+    the rest of the band at +2). A burst's own measurements see only its
+    band; this sees the rest (the outcome model's planned inputs).
+
+    The caller feeds what it hears (not while it transmits) and marks
+    spans that are not noise: bursts heard, the radio's recovery after its
+    own transmission. A block is kept once it is COMMIT_S old (a header is
+    heard within ~2 s of its burst's start) and outside every marked span.
+
+    Impulses too: per block, its 10 ms pieces whose peak is over IMPULSE_X
+    times the block's median 10 ms RMS (on air, recordings 2026-09/10:
+    impulses ~22 dB over the noise, 1-3 ms, clustered; Gaussian peaks over
+    80 samples stay under 5x). Counted on the raw input, before the
+    blanker: what is on air."""
+
+    BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))
+    BLOCK = FS // 10
+    WINDOW = 600  # blocks: 60 s of idle audio
+    COMMIT_S = 3.0
+    MIN_BLOCKS = 20
+    RECOVER_S = 0.6  # after our own transmission (the radio's receiver comes back: -86 dB on air)
+    PIECE = FS // 100  # impulse detection: 10 ms pieces
+    IMPULSE_X = 10.0  # 20 dB
+
+    def __init__(self):
+        f = np.fft.rfftfreq(self.BLOCK, 1 / FS)
+        self._bins = [(f >= lo) & (f < hi) for lo, hi in self.BANDS_HZ]
+        self._win = np.hanning(self.BLOCK)
+        # times as sample indices (round(t * FS)): exact, in Python and C++
+        self._buf, self._s0 = np.zeros(0), 0  # unblocked audio and its first sample's index
+        self._pending = deque()  # (start, end, band powers, impulses) not yet COMMIT_S old
+        self._busy = []  # marked (start, end)
+        self.kept = deque(maxlen=self.WINDOW)  # band powers
+        self.kept_impulses = deque(maxlen=self.WINDOW)  # impulses per kept block
+
+    def feed(self, x: np.ndarray, t_start: float):
+        """Audio heard from t_start (s). A gap since the last feed (we
+        transmitted) starts a new block."""
+        s = round(t_start * FS)
+        if len(self._buf) and self._s0 + len(self._buf) == s:
+            self._buf = np.concatenate([self._buf, x])
+        else:
+            self._buf, self._s0 = np.asarray(x, dtype=np.float64), s
+        while len(self._buf) >= self.BLOCK:
+            blk = self._buf[:self.BLOCK]
+            spec = np.abs(np.fft.rfft(blk * self._win)) ** 2
+            pieces = blk.reshape(-1, self.PIECE)
+            ref = np.median(np.sqrt(np.mean(pieces ** 2, axis=1)))
+            imp = int(np.sum(np.max(np.abs(pieces), axis=1) > self.IMPULSE_X * ref)) if ref > 0 else 0
+            self._pending.append((self._s0, self._s0 + self.BLOCK, [float(spec[b].mean()) for b in self._bins], imp))
+            self._buf, self._s0 = self._buf[self.BLOCK:], self._s0 + self.BLOCK
+        now = s + len(x)
+        commit = round(self.COMMIT_S * FS)
+        while self._pending and self._pending[0][1] <= now - commit:
+            a, b, p, imp = self._pending.popleft()
+            if not any(s0 < b and a < e for s0, e in self._busy):
+                self.kept.append(p)
+                self.kept_impulses.append(imp)
+        self._busy = [(s0, e) for s0, e in self._busy if e > now - 2 * commit]
+
+    def mark(self, start: float, end: float):
+        """Not noise from start to end (s)."""
+        self._busy.append((round(start * FS), round(end * FS)))
+
+    def snapshot(self) -> dict | None:
+        """{"noise_db": per band, 10 log10 of the median block power;
+        "noise_tail_db": per band, the 90th percentile over the median (dB);
+        "impulses_per_min": impulses over IMPULSE_X per minute of it;
+        "noise_blocks": blocks it is over}, or None with under MIN_BLOCKS."""
+        if len(self.kept) < self.MIN_BLOCKS:
+            return None
+        P = np.array(self.kept)
+        med, p90 = np.median(P, axis=0), np.percentile(P, 90, axis=0)
+        med = np.maximum(med, 1e-30)  # digital silence
+        return {"noise_db": [float(10 * np.log10(m)) for m in med],
+                "noise_tail_db": [float(10 * np.log10(q / m)) for q, m in zip(p90, med)],
+                "impulses_per_min": 60.0 * sum(self.kept_impulses) / (len(P) * self.BLOCK / FS),
+                "noise_blocks": len(P)}
+
+
 class Receiver:
     """Streaming receiver at FS: feed() audio as it arrives, get events
     back. Looks for a preamble and header in a short rolling buffer

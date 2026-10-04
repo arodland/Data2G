@@ -47,6 +47,8 @@ arq::StationView station(const py::object& s) {
              py::bool_(attr<py::object>(s, "peer_chat", py::bool_(false)));
     v.peer_queued = attr(s, "peer_queued", 0L);
     if (py::hasattr(s, "rx")) v.held = static_cast<long>(py::len(s.attr("rx").attr("buf")));
+    v.misses = attr(s, "misses", 0);
+    v.esc_floor = attr(s, "esc_floor", 0);
     return v;
 }
 
@@ -152,6 +154,10 @@ void bind_arq(py::module_& m) {
         .def_readwrite("measured_at", &Shifter::measured_at)
         .def_readwrite("want_dup", &Shifter::want_dup)
         .def_readwrite("peer_had_data", &Shifter::peer_had_data)
+        .def_readwrite("heard", &Shifter::heard)
+        .def_readwrite("ceiling", &Shifter::ceiling)
+        .def_readwrite("ladder_top", &Shifter::ladder_top)
+        .def_readwrite("data_lost", &Shifter::data_lost)
         .def_property("measured",
             [](const Shifter& s) -> py::object { return s.measured ? py::object(to_dict(*s.measured)) : py::none(); },
             [](Shifter& s, const py::object& d) {
@@ -208,6 +214,9 @@ void bind_arq(py::module_& m) {
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));
             return py::make_tuple(r.data, r.hint, r.reply);
+        })
+        .def("reply_hold", [](const Shifter& s, const py::object& st, const std::string& submode) {
+            return s.reply_hold(station(st), submode);
         });
 }
 

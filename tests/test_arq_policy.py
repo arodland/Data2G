@@ -75,7 +75,13 @@ def test_shifter_respects_cap_and_falls_back():
     st.peer_recommend, st.peer_size_hint = rec, hint
     mode, n = g.choose(st, 0)
     assert mode == name and n >= 1
-    assert g.choose(st, 1)[0] == G.FALLBACK[0]  # escalation: robust
+    assert g.choose(st, 1)[0] == G.FALLBACK[0]  # escalation, no reply mode heard: the fallback
+    st.peer_reply_recommend = G.encode("n10-qpsk-r1/3")
+    assert [g.choose(st, e)[0] for e in (1, 2, 3)] == ["n10-qpsk-r1/3", G.ALT_POLL, "n10-qpsk-r1/3"]
+    assert g.choose(st, 4) == (G.ROBUST_CONNECT, 1)  # control only in the robust mode
+    g.observe(measured(-5, 0.1, "n10"), G.ROBUST_CONNECT, 1.0)
+    assert g.choose(st, 1) == (G.ROBUST_CONNECT, 1)  # a robust poll is answered in its mode
+    assert g.choose(st, 0)[0] == name  # not escalated: the recommendation
 
 
 def test_numpy_runtime_has_no_torch():
@@ -150,3 +156,55 @@ def test_control_is_not_a_decoded_data_codeword():
     assert g.bias_burst["qpsk-r1/3"] > 0 and g.bias["qpsk-r1/3"] < -0.8
     g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only
     assert g.bias_burst["qpsk-r1/3"] < 0.5 and g.bias["qpsk-r1/3"] < -0.8
+
+
+def test_cpm_cap_reply_hold_and_link_lost_price():
+    from data2g.arq.modes import burst_seconds
+
+    for m in ("fsk32r62-r1/2", "fsk8r50-r1/2"):
+        s = G.MODES[m]
+        assert burst_seconds(s, G.slots_for(s, G.SIZE_S[-1])) <= G.CPM_MAX_S
+    g = G.GearShifter()
+    g.log = [("w48-qpsk-r1/2", 2, "ack-1f")]
+    quiet = g.reply_hold(SimpleNamespace(cap=2, misses=0, esc_floor=0), SimpleNamespace(submode="w48-qpsk-r1/2"))
+    assert quiet < 2.0  # a short reply asked for: about the old 1.5 s
+    robust = g.reply_hold(SimpleNamespace(cap=2, misses=1, esc_floor=4), SimpleNamespace(submode=G.ROBUST_CONNECT))
+    assert robust >= burst_seconds(G.MODES[G.ROBUST_CONNECT], 1)  # its 5 s answer is not polled over
+
+
+def test_robust_floor_sends_control_only_bursts_robust():
+    g = G.GearShifter()
+    st = station(2)
+    st.peer_reply_recommend = G.encode("n4-ack-8f")
+    st.tx = SimpleNamespace(pending=lambda: False, base=0)
+    assert g.choose(st, 0)[0] == "n4-ack-8f"
+    st.esc_floor = G.ROBUST_ESCALATION
+    assert g.choose(st, 0) == (G.ROBUST_CONNECT, 1)
+    st.tx = SimpleNamespace(pending=lambda: True, base=0)
+    st.peer_recommend = G.encode("fsk32r62-r1/2")
+    assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation
+
+
+def test_lost_data_steps_down_the_ladder():
+    """LADDER_AFTER data bursts lost in a row in the mode I recommended: data
+    goes only in modes LADDER_STEP_DB more robust on every channel; a further
+    loss steps down from the mode that failed, a usable data burst climbs."""
+    T, step = G.MODE_THRESHOLDS, G.LADDER_STEP_DB
+
+    def below(a, b, by):  # a at least `by` dB more robust than b on every channel
+        return all(x <= y - by for x, y in zip(T[a], T[b]))
+
+    g = G.GearShifter()
+    g.observe(measured(10, 0.1), "qpsk-r1/5", 0.0)
+    st = station(2)
+    for _ in range(G.LADDER_AFTER):
+        data = G.decode(g.recommend(st)[0])
+        g.outcome(data, 0, 0, usable=False)  # the peer's data burst in it: lost
+    down = G.decode(g.recommend(st)[0])
+    assert below(down, data, step)
+    g.outcome(down, 0, 0, usable=False)
+    lower = G.decode(g.recommend(st)[0])
+    assert lower == down == min(T, key=lambda m: max(T[m])) or below(lower, down, step)
+    for _ in range(20):  # data gets through: it climbs off the ladder
+        g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
+    assert g.ceiling is None

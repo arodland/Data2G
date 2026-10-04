@@ -12,6 +12,7 @@ The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -26,7 +27,11 @@ from . import predictor as P
 SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
-PREV_MAX_S = 30.0  # history older than the predictor's training range is dropped (scripts/predictor_data.py)
+# the predictor's training range for the previous burst's age (scripts/predictor_data.py).
+# Older history is used as this old, not dropped: with no history the model
+# gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
+# and escalation's long gaps sent 12 s 64-ary bursts that all failed
+PREV_MAX_S = 30.0
 BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
 # The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
 # w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
@@ -39,6 +44,30 @@ if BIAS_FIX:
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
+# ... but at most this long: a missed header loses the whole burst and no soft
+# bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
+# helped run out the 90 s link-lost clock)
+CPM_MAX_S = 24.0
+# a lost data burst spends the session's link-lost clock (session.LINK_LOST_S);
+# recovering takes polls of about T_RECOVER_S each, and a session that runs
+# out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
+LINK_LOST_S = 90.0
+T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
+LOST_LINK_COST_S = 300.0
+REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
+# The data ladder: after LADDER_AFTER bursts in a row lost in the data mode I
+# recommended, data may only go in modes LADDER_STEP_DB more robust than it on
+# every channel (MODE_THRESHOLDS); each further loss steps down from the mode
+# that failed, each usable data burst climbs a step. On air
+# (recordings/20261002-232711) every fsk16r25 poll decoded and 0 of 12 data
+# bursts did, predicted 0.74-0.93: the model had never seen CPM polls measured
+# on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
+# ponytail: thresholds from one ladder study, not learned; the retrain on this
+# branch's sessions should make the ladder rare
+LADDER_AFTER = 2
+LADDER_STEP_DB = 3.0
+# per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
+MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
 WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
 BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
@@ -48,7 +77,11 @@ BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
 # poll says little about the wide modes it recommends (2026-09-25)
 FALLBACK = {0: "n10-ack-4f", 1: "ack-4f", 2: "ack-4f"}
 CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payload, one control codeword
-ROBUST_CONNECT = "n4-qpsk-r1/3"  # session-frame retries: 38 B, 200 Hz, within every cap
+# escalation 2's mode: better than ack-4f on awgn and mpg, worse on mpp
+# and mpd, so it alternates with the reply mode (1, 3)
+ALT_POLL = "n4-ack-8f"
+ROBUST_ESCALATION = 4  # from here on ROBUST_CONNECT (link caps escalation at 4)
+ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 
 
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
@@ -103,7 +136,7 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     its header can announce. CPM size classes are CPM_SIZE_SCALE times
     longer (a CPM data codeword is 3-10 s)."""
     if is_cpm(spec):
-        seconds *= CPM_SIZE_SCALE
+        seconds = min(seconds * CPM_SIZE_SCALE, CPM_MAX_S)
     n = 1
     while n < 64 and burst_seconds(spec, n + 1) <= seconds:
         n += 1
@@ -124,6 +157,10 @@ class GearShifter:
     measured: dict | None = None  # the peer's last burst, as measured
     measured_band: str = "w"
     measured_at: float = 0.0
+    heard: str | None = None  # the submode of the peer's last burst
+    data_lost: int = 0  # bursts lost in a row in the data mode I recommended (LADDER_AFTER)
+    ceiling: tuple | None = None  # the data ladder: per channel, the highest threshold data may have
+    ladder_top: tuple | None = None  # the thresholds of the mode whose losses started it: climbed back there, it's off
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
@@ -141,7 +178,21 @@ class GearShifter:
         # and at -4 to 0 dB fading they held working modes: 12 seeds x 600 s,
         # 12-48% lower throughput with them)
         rec = station.peer_recommend if station.tx.pending() else station.peer_reply_recommend
-        if escalation or rec is None:
+        # escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, or
+        # answering the peer's robust poll: control only in the connect
+        # retry's mode (ack-4f polls went unanswered until the link was lost)
+        # the floor there too (the last drop took it): my control-only bursts
+        # as well, not only polls (MPP -8: the peer heard 4 of my 11
+        # n4-ack-8f acks and 13 of 17 robust polls; its data waited on them)
+        robust_floor = getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION and not station.tx.pending()
+        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT) or robust_floor:
+            return ROBUST_CONNECT, 1
+        if escalation == 2:
+            return ALT_POLL, 2
+        if escalation:
+            reply = decode(station.peer_reply_recommend) if station.peer_reply_recommend is not None else None
+            return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
+        if rec is None:
             return FALLBACK[cap], 2
         mode = decode(rec)
         if mode is None or MODES[mode] not in allowed(cap):
@@ -177,6 +228,20 @@ class GearShifter:
         loss-study sessions there never connected in qpsk-r1/5)."""
         return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
 
+    def reply_hold(self, station, burst) -> float:
+        """Seconds past t_turn to wait for a reply to `burst` before timing
+        out: the longest control-only reply the peer may send (the reply
+        mode I asked for; its ladder's if `burst` was a poll; the robust
+        mode if `burst` was in it or my floor is there). At MPP -8 the
+        master missed reply headers and polled into the replies 2 s in
+        (8 times in 717 s). A data reply (up to CPM_MAX_S) is not covered."""
+        modes = [self.log[-1][2] if self.log else FALLBACK[station.cap]]
+        if station.misses:
+            modes += [FALLBACK[station.cap], ALT_POLL]
+        if burst.submode == ROBUST_CONNECT or getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION:
+            modes.append(ROBUST_CONNECT)
+        return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
+
     def airtime(self, m, n_cw, dup=False):
         """`dup`: a CPM burst's control twice (the second copy is a short
         control codeword, not a data one: an x10 burst is 30.4 s, not 32.6)."""
@@ -192,6 +257,7 @@ class GearShifter:
         if self.measured is not None:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
+        self.heard = submode
 
     def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
@@ -202,6 +268,20 @@ class GearShifter:
         `usable`: its control decoded, with decoded/sent its data codewords
         alone (counted with them, the control made a 0/7 burst score 1/8);
         None (KISS: no control): any codeword decoded."""
+        if usable and sent:
+            self.data_lost = 0
+            if self.ceiling is not None:  # climb a step
+                self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
+                if all(map(lambda c, t: c >= t, self.ceiling, self.ladder_top)):
+                    self.ceiling = self.ladder_top = None
+        elif usable is False and self.log and submode == self.log[-1][0]:
+            self.data_lost += 1
+            if self.data_lost >= LADDER_AFTER:  # step down from the mode that failed
+                down = tuple(t - LADDER_STEP_DB for t in MODE_THRESHOLDS[submode])
+                if self.ceiling is None:
+                    self.ceiling, self.ladder_top = down, MODE_THRESHOLDS[submode]
+                else:
+                    self.ceiling = tuple(map(min, down, self.ceiling))
         p = self.predicted.get(submode)
         if p is None or (sent == 0 and usable is None):
             return
@@ -224,8 +304,8 @@ class GearShifter:
         cands = [s for s in allowed(station.cap) if (not is_cpm(s) or (self.use_cpm and P.outcome_knows(s.name)))]
         m = self.measured
         prev = None
-        if self.prev is not None and self.measured_at - self.prev[2] <= PREV_MAX_S:
-            prev = (self.prev[0], self.prev[1], self.measured_at - self.prev[2])
+        if self.prev is not None:
+            prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))
 
         # the outcome model (P from real decodes, scripts/train_outcome.py)
         # replaced the MI predictor's output corrections: at -4 dB AWGN on
@@ -279,7 +359,12 @@ class GearShifter:
         queued = max(CHAT_BYTES, getattr(station, "peer_queued", 0))
         if chat:
             best_v = -float("inf")
-        for s in cands:
+        data_cands = cands
+        if self.ceiling is not None:
+            data_cands = [s for s in cands if all(map(lambda t, c: t <= c, MODE_THRESHOLDS[s.name], self.ceiling))]
+            # none that robust: the most robust there is (the lowest worst-case threshold)
+            data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
+        for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
                 n = slots_for(s, target)
@@ -299,6 +384,10 @@ class GearShifter:
                 dup = is_cpm(s) and ok_ctl < DUP_BELOW
                 tb = burst_seconds(s, n + dup, dup)
                 t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S
+                # lost, the burst leaves (LINK_LOST_S - tb) to recover in:
+                # each try a poll and its reply, both at about my reply's P
+                tries = max(0, int((LINK_LOST_S - tb - TIMEOUT_S) // T_RECOVER_S))
+                t += (1 - ok_ctl) * (1 - reply_p ** 2) ** tries * LOST_LINK_COST_S
                 if chat:
                     # every burst the message takes, each retried until it all arrives
                     ok_all = max(ok_ctl * pn ** (n - c), 1e-3)

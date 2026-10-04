@@ -646,7 +646,7 @@ HeaderRead read_header(std::span<const cd> z, int64_t start, std::string_view ba
 }
 
 BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view> bands, bool complete,
-                       const Accept* accept, std::span<const BandStat> stats) {
+                       const Accept* accept, std::span<const BandStat> stats, bool final) {
     struct Good {
         double rank;
         HeaderRead hd;
@@ -674,7 +674,7 @@ BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view>
         for (size_t h = 0; h < hyps.size(); ++h) {
             const auto [start, f] = hyps[h];
             if (!complete && start + 2 * M > len - hdr_end) {
-                waiting = true;
+                waiting = waiting || !final;
                 continue;
             }
             auto zb = std::make_shared<const std::vector<cd>>(waveform::freq_correct(z0, f));
@@ -682,7 +682,7 @@ BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view>
                 const int64_t s = start + static_cast<int64_t>(k) * M;
                 if (!(0 <= s && s <= len - hdr_end)) continue;
                 auto r = read_header(*zb, s, name, accept);
-                if (!complete && r.pending_copy && r.hdr.score < COPY_COMMIT_SCORE) {
+                if (!complete && !final && r.pending_copy && r.hdr.score < COPY_COMMIT_SCORE) {
                     waiting = true;
                     continue;
                 }
@@ -930,7 +930,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
         acq = std::move(b.acq);
         z = std::move(b.z);
     } else {
-        auto b = best_header(pyslice(std::span<const cd>(z0), 0, *head), bands, false, accept);
+        auto b = best_header(pyslice(std::span<const cd>(z0), 0, *head), bands, false, accept, {}, true);
         hd = std::move(b.hd);
         acq = std::move(b.acq);
         z = waveform::freq_correct(z0, acq.freq_offset);

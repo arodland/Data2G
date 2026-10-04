@@ -218,6 +218,34 @@ def unpack_call(b: bytes) -> str:
     return "".join(CALL_ALPHABET[c] for c in codes).rstrip()
 
 
+# A CONNECT in 20 B, for a CPM control codeword: no Core or TLV (28 B with
+# them), bit-packed. Its own CRC mask (link.COMPACT_CONNECT) says what it is.
+# (bits, body offset) of version, the two calls, nonce, cap, t_turn x10
+_COMPACT = ((4, 1, 1), (60, 2, 8), (60, 10, 8), (16, 18, 2), (2, 20, 1), (6, 21, 1))
+COMPACT_BYTES = 20
+
+
+def pack_connect(body: bytes) -> bytes:
+    """A 22-byte CONNECT session body -> COMPACT_BYTES."""
+    v = 0
+    for bits, at, n in _COMPACT:
+        x = int.from_bytes(body[at:at + n], "big")
+        if x >= 1 << bits:
+            raise ValueError(f"CONNECT field at {at}: {x} over {bits} bits")
+        v = (v << bits) | x
+    return (v << (8 * COMPACT_BYTES - 148)).to_bytes(COMPACT_BYTES, "big")
+
+
+def unpack_connect(p: bytes) -> bytes:
+    v = int.from_bytes(p, "big") >> (8 * COMPACT_BYTES - 148)
+    out = bytearray(22)
+    out[0] = CONNECT
+    for bits, at, n in reversed(_COMPACT):
+        out[at:at + n] = (v & ((1 << bits) - 1)).to_bytes(n, "big")
+        v >>= bits
+    return bytes(out)
+
+
 # --- stream records -------------------------------------------------------------
 
 def to_records(data: bytes) -> bytes:
