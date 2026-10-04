@@ -143,7 +143,7 @@ void bind_engine(py::module_& m) {
         })
         .def("take_kiss_rx", [](PyEngine& self) {
             py::list out;
-            for (const auto& f : self.kiss_rx()) out.append(pyb(f));
+            for (const auto& [port, f] : self.kiss_rx()) out.append(py::make_tuple(port, pyb(f)));
             self.kiss_rx().clear();
             return out;
         })

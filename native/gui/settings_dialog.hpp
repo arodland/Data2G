@@ -61,10 +61,8 @@ private:
     QSpinBox *timeout_, *retries_;
     QDoubleSpinBox* poll_;
     QPushButton *test_cat_ = nullptr, *test_ptt_ = nullptr;
-    QCheckBox* vara_;
     QLineEdit* host_;
     QSpinBox* cmd_port_;
-    QCheckBox* kiss_;
     QLineEdit* kiss_address_;
     QSpinBox* kiss_port_;
     QCheckBox* worker_;

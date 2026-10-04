@@ -14,10 +14,10 @@ using std::int64_t;
 
 // --- KISS -------------------------------------------------------------------
 
-Bytes kiss_encode(std::span<const std::uint8_t> data, int port) {
+Bytes kiss_encode(std::span<const std::uint8_t> data, int port, int cmd) {
     Bytes out{FEND};
     for (int i = -1; i < static_cast<int>(data.size()); ++i) {
-        const std::uint8_t b = i < 0 ? static_cast<std::uint8_t>(port << 4) : data[static_cast<std::size_t>(i)];
+        const std::uint8_t b = i < 0 ? static_cast<std::uint8_t>(port << 4 | cmd) : data[static_cast<std::size_t>(i)];
         if (b == FESC) out.insert(out.end(), {FESC, TFESC});
         else if (b == FEND) out.insert(out.end(), {FESC, TFEND});
         else out.push_back(b);

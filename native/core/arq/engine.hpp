@@ -172,7 +172,8 @@ public:
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
-    std::vector<Bytes>& kiss_rx() { return kiss_rx_; }  // frames heard for KISS clients; the host clears it
+    // (port, frame)s heard for KISS clients; the host clears it
+    std::vector<std::pair<int, Bytes>>& kiss_rx() { return kiss_rx_; }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
     const modem::Accept& accept() const { return accept_; }
     SoftStore& store() { return store_; }
@@ -236,7 +237,7 @@ private:
     bool chat_ = false;
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
     std::vector<std::string> events_;  // host notifications from outside the session
-    std::vector<Bytes> kiss_rx_;
+    std::vector<std::pair<int, Bytes>> kiss_rx_;
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited
     bool kiss_deferred_ = false;  // ... and it has waited on BUSY
     std::int64_t kiss_slot_ = 0;  // next p-persistence slot, samples

@@ -243,6 +243,18 @@ class ModemRx:
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))
         return None
 
+    def raw(self, slot: int) -> list[bytes]:
+        """`slot`'s mask-free decode as payload bytes, CRC unchecked: polar's
+        list best first, LDPC's one candidate if it converged. A broadcast
+        control reads its group from these, then checks the CRC under that
+        group's key (docs/broadcast.md §2)."""
+        if slot >= self.n_cw:
+            return []
+        spec = self._spec(slot)
+        cands, usable = self._decoded(slot, spec)
+        nb = codes.payload_bytes(spec)
+        return [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
+
     def _decoded(self, slot: int, spec) -> tuple:
         """`slot` decoded alone, mask left open (codes.decode_raw's row), with
         DD while it fails to converge. A converged codeword is what was on

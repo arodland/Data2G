@@ -118,10 +118,8 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.rig_retries = s.value("rig_retries", a.rig_retries).toInt();
     a.rig_poll_interval = s.value("rig_poll_interval", a.rig_poll_interval).toDouble();
     a.rig_debug = s.value("rig_debug", a.rig_debug).toBool();
-    a.vara = s.value("vara", a.vara).toBool();
     a.host = str("host", a.host);
     a.command_port = s.value("command_port", a.command_port).toInt();
-    a.kiss = s.value("kiss", a.kiss).toBool();
     a.kiss_address = str("kiss_address", a.kiss_address);
     a.kiss_port = s.value("kiss_port", a.kiss_port).toInt();
     a.decode_worker = s.value("decode_worker", a.decode_worker).toBool();
@@ -146,10 +144,8 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("rig_retries", a.rig_retries);
     s.setValue("rig_poll_interval", a.rig_poll_interval);
     s.setValue("rig_debug", a.rig_debug);
-    s.setValue("vara", a.vara);
     s.setValue("host", qs(a.host));
     s.setValue("command_port", a.command_port);
-    s.setValue("kiss", a.kiss);
     s.setValue("kiss_address", qs(a.kiss_address));
     s.setValue("kiss_port", a.kiss_port);
     s.setValue("decode_worker", a.decode_worker);
@@ -204,9 +200,6 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
         audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
 
     auto* vara = group(tr("VARA ports"));
-    vara_ = new QCheckBox(tr("Serve VARA clients"));
-    vara_->setChecked(a.vara);
-    vara->addRow(vara_);
     host_ = new QLineEdit(qs(a.host));
     vara->addRow(tr("Address"), host_);
     cmd_port_ = spin(1, 65534, a.command_port);
@@ -220,9 +213,6 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     vara->addRow(tr("Command port"), port_row);
 
     auto* kiss = group(tr("KISS"));
-    kiss_ = new QCheckBox(tr("Serve KISS clients"));
-    kiss_->setChecked(a.kiss);
-    kiss->addRow(kiss_);
     kiss_address_ = new QLineEdit(qs(a.kiss_address));
     kiss->addRow(tr("Address"), kiss_address_);
     kiss_port_ = spin(1, 65535, a.kiss_port);
@@ -453,10 +443,8 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.rig_debug = rig_debug_->isChecked();
     a.ptt_on_delay_ms = ptt_on_->value();
     a.ptt_off_delay_ms = ptt_off_->value();
-    a.vara = vara_->isChecked();
     a.host = host_->text().trimmed().toStdString();
     a.command_port = cmd_port_->value();
-    a.kiss = kiss_->isChecked();
     a.kiss_address = kiss_address_->text().trimmed().toStdString();
     a.kiss_port = kiss_port_->value();
     a.decode_worker = worker_->isChecked();

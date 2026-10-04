@@ -41,12 +41,16 @@ bool wait_for(const std::function<bool()>& cond, int ms) {
     return true;
 }
 
-// A port with the next one free too (VARA's command and data ports).
-int free_port_pair() {
+// A port with the next two free too: VARA's command and data ports, and
+// KISS's. Picked at once: macOS and Windows hand out ephemeral ports in
+// sequence, so a second pick after the first was released could be its
+// data port.
+int free_port_triple() {
     for (int i = 0; i < 100; ++i) {
-        QTcpServer a, b;
+        QTcpServer a, b, c;
         if (!a.listen(QHostAddress::LocalHost, 0)) continue;
-        if (a.serverPort() < 65535 && b.listen(QHostAddress::LocalHost, a.serverPort() + 1)) return a.serverPort();
+        const int p = a.serverPort();
+        if (p < 65534 && b.listen(QHostAddress::LocalHost, p + 1) && c.listen(QHostAddress::LocalHost, p + 2)) return p;
     }
     return 0;
 }
@@ -98,10 +102,8 @@ app::Args persisted() {
     a.rig_retries = 3;
     a.rig_poll_interval = 2.5;
     a.rig_debug = true;
-    a.vara = false;
     a.host = "0.0.0.0";
     a.command_port = 8400;
-    a.kiss = false;
     a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
     a.decode_worker = false;
@@ -171,8 +173,8 @@ void test_window(const QTemporaryDir& dir) {
     a.audio_io = "pipe:" + in + "," + out;
     a.rigctld_port = 0;  // no rig
     a.record_dir = "";
-    a.kiss = false;
-    a.command_port = free_port_pair();
+    a.command_port = free_port_triple();
+    a.kiss_port = a.command_port + 2;  // KISS always runs: a port of its own
     QSettings store(dir.filePath(QStringLiteral("window.ini")), QSettings::IniFormat);
     check::current_step = "window: start the station";
     gui::MainWindow w(a, store);

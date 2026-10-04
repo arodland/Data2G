@@ -112,6 +112,19 @@ def kiss_read(sock, dec, seconds):
     return None
 
 
+def kiss_wait(sock, dec, seconds, want):
+    """Whether the KISS frame `want` (command byte, payload) arrives in time."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            d = sock.recv(65536)
+        except socket.timeout:
+            continue
+        if want in dec.feed(d):
+            return True
+    return False
+
+
 def ui_frame(dst, src, info):
     def addr(call, last):
         return bytes(ord(c) << 1 for c in call.ljust(6)) + bytes([0x60 | last])
@@ -187,6 +200,15 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         kb.sendall(tnc.kiss_encode(fb))
         assert kiss_read(ka, tnc.KissDecoder(), 30) == fb
         t_kiss = time.monotonic() - t2
+        # broadcast: a group opened on each, a frame on its port with ACKMODE,
+        # heard on B's port with the sender's call, acked to A once sent
+        a.send("BCAST OPEN CHAT FROM A")
+        b.send("BCAST OPEN CHAT")
+        wait([a, b], lambda: "BCAST PORT 1" in a.lines and "BCAST PORT 1" in b.lines, 30, "BCAST PORT")
+        ka.sendall(tnc.kiss_encode(b"\x00\x07" + b"group hello", 1, tnc.ACKMODE))
+        assert kiss_wait(kb, tnc.KissDecoder(), 30, (1 << 4 | tnc.DATA, b"group hello"))
+        assert kiss_wait(ka, tnc.KissDecoder(), 30, (1 << 4 | tnc.ACKMODE, b"\x00\x07"))
+        wait([a, b], lambda: "BCAST 1 HEARD A" in b.lines, 30, "BCAST 1 HEARD A")
         ka.close()
         kb.close()
     finally:

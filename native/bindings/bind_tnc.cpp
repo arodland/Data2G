@@ -110,8 +110,8 @@ py::list events(const std::vector<tnc::Event>& evs) {
 
 void bind_tnc(py::module_& m) {
     auto t = m.def_submodule("tnc", "data2g.tnc");
-    t.def("kiss_encode", [](const py::bytes& data, int port) { return to_bytes(tnc::kiss_encode(view(data), port)); },
-          py::arg("data"), py::arg("port") = 0);
+    t.def("kiss_encode", [](const py::bytes& data, int port, int cmd) { return to_bytes(tnc::kiss_encode(view(data), port, cmd)); },
+          py::arg("data"), py::arg("port") = 0, py::arg("cmd") = tnc::KISS_DATA);
     py::class_<tnc::KissDecoder>(t, "KissDecoder")
         .def(py::init<>())
         .def("feed", [](tnc::KissDecoder& d, const py::bytes& data) {
