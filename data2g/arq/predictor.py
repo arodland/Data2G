@@ -133,9 +133,13 @@ class OutcomeMlp:
     modes: tuple = OUTCOME_MODES  # its outputs' order
     bands: tuple = tuple(BANDS)  # its band one-hot
     noise: bool = False  # takes the noise profile's inputs (outcome_inputs)
+    noise_lo: np.ndarray | None = None  # its noise inputs clipped to these (clip_noise)
+    noise_hi: np.ndarray | None = None
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         """-> (..., 2 * len(OUTCOME_MODES)) logits: burst ok, then codeword ok."""
+        if self.noise and self.noise_lo is not None:
+            x = clip_noise(x, self.noise_lo, self.noise_hi)
         h = (x - self.mean) / self.std
         for i, (w, b) in enumerate(self.layers):
             h = h @ w + b
@@ -160,11 +164,24 @@ def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA
     return _mlp({k: d[k] for k in d.files})
 
 
+def clip_noise(x: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    """The noise profile's inputs (the last N_NOISE) clipped to [lo, hi], where
+    there is a profile (its flag, the last, 1): a model reads interference
+    stronger than it trained on as its strongest, not as something to
+    extrapolate from (round 3: carriers past the training range took one
+    from 359 to 3 bps). Without a profile the inputs stay 0."""
+    x = np.array(x, dtype=np.float64)
+    has = x[..., -1:] > 0.5
+    x[..., -N_NOISE:] = np.where(has, np.clip(x[..., -N_NOISE:], lo, hi), x[..., -N_NOISE:])
+    return x
+
+
 def _mlp(d: dict) -> OutcomeMlp:
     n = sum(1 for k in d if k.startswith("W"))
     extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
+    clip = {k: d[k] for k in ("noise_lo", "noise_hi") if k in d}
     return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)],
-                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False, **extra)
+                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False, **clip, **extra)
 
 
 # DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its

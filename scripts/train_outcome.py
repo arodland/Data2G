@@ -137,6 +137,16 @@ def main():
         draw = np.random.default_rng(a.seed).choice(tr_seeds, len(tr_seeds))
         count = dict(zip(*np.unique(draw, return_counts=True)))
         trn = np.repeat(np.flatnonzero(trn), [count.get(s, 0) for s in seeds[trn]])
+    clip = {}
+    if a.noise_inputs:
+        # the noise inputs clipped to their training range (rows with a profile,
+        # 0.5-99.5th percentiles), here and when the model runs
+        has = x[:, -1] > 0.5
+        lo, hi = np.percentile(x[has, -P.N_NOISE:], 0.5, axis=0), np.percentile(x[has, -P.N_NOISE:], 99.5, axis=0)
+        lo[-1], hi[-1] = 1.0, 1.0  # the flag
+        x = P.clip_noise(x, lo, hi)
+        clip = dict(noise_lo=lo, noise_hi=hi)
+        print("noise inputs clipped to", np.round(lo, 2), np.round(hi, 2))
     mean, std = x[trn].mean(0), x[trn].std(0) + 1e-6
     # the noise leaves one-hots and flags (columns of only 0 and 1) alone
     cont = ~np.all(np.isin(x[trn], (0.0, 1.0)), axis=0)
@@ -195,6 +205,7 @@ def main():
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
     layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
+             **clip,
              **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
     P.outcome_model.cache_clear()

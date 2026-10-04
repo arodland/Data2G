@@ -75,3 +75,17 @@ def test_training_rows_carry_the_profile():
     row["impulses_per_min"] = "99.0"
     assert T.noise_of(row) == NOISE
     assert T.noise_of({"noise_db1": ""}) is None
+
+
+def test_noise_inputs_clip_to_the_training_range():
+    """Where there is a profile, its inputs are clipped to the model's bounds;
+    without one they stay 0 (the flag stays 0)."""
+    base = len(P.outcome_inputs(measured(), "w", 2.5, 6.0))
+    lo, hi = np.full(P.N_NOISE, -5.0), np.full(P.N_NOISE, 5.0)
+    lo[-1] = hi[-1] = 1.0
+    x = np.stack([P.outcome_inputs(measured(noise=NOISE), "w", 2.5, 6.0, noise=True),
+                  P.outcome_inputs(measured(), "w", 2.5, 6.0, noise=True)])
+    y = P.clip_noise(x, lo, hi)
+    assert np.array_equal(y[:, :base], x[:, :base])
+    assert y[0, -P.N_NOISE:].max() <= 5.0 and y[0, base + 4] == 5.0 and y[0, -1] == 1.0
+    assert not y[1, -P.N_NOISE:].any()
