@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <exception>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -100,9 +101,29 @@ int main(int argc, char** argv) {
             play.write(interp(y));
         }
         play.drain();
-        // The last half, past the loop's latency.
-        const std::vector<double> tail(heard.begin() + static_cast<std::ptrdiff_t>(heard.size() / 2), heard.end());
+        // Where "now" is on the capture timeline when drain() returns (the
+        // host drops PTT here, after its off delay): read so far plus the
+        // backlog. Input latency shifts both this and the tone alike.
+        const std::size_t drained_at = heard.size() + cap.backlog();
+        const std::size_t sent = heard.size();
+        while (heard.size() < drained_at + static_cast<std::size_t>(1.5 * config::FS)) {
+            const auto x = cap.read(block);
+            if (!x) break;
+            heard.insert(heard.end(), x->begin(), x->end());
+        }
+        // The last 20 ms window holding the tone.
+        const std::size_t win = config::FS / 50;
+        std::optional<std::size_t> last;
+        for (std::size_t i = 0; i + win <= heard.size(); i += win)
+            if (tone_snr_db({heard.begin() + static_cast<std::ptrdiff_t>(i), heard.begin() + static_cast<std::ptrdiff_t>(i + win)}, f) > 10)
+                last = i + win;
+        // The last half of what was sent, past the loop's latency.
+        const std::vector<double> tail(heard.begin() + static_cast<std::ptrdiff_t>(sent / 2), heard.begin() + static_cast<std::ptrdiff_t>(sent));
         std::printf("tone %.0f Hz: %.1f dB over the rest\n", f, tone_snr_db(tail, f));
+        if (last)
+            std::printf("tone still playing %.0f ms after drain() returned (PTT must stay up that long)\n",
+                        1000.0 * (static_cast<double>(*last) - static_cast<double>(drained_at)) / config::FS);
+        else std::printf("tone not heard: no drain timing\n");
         std::printf("capture: %llu device frames, overflows %llu, dropped %llu, late %llu, backlog %.2f s\n",
                     static_cast<unsigned long long>(capture.frames_in()),
                     static_cast<unsigned long long>(cap.overflows()), static_cast<unsigned long long>(cap.dropped()),
