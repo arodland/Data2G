@@ -84,6 +84,14 @@ std::string error_text(QAudio::Error e) {
     }
 }
 
+// libpulse (PulseAudio, and PipeWire's pulse layer) reads this when a
+// stream connects and sets both the playback target and the capture
+// fragment from it, whatever Qt asked for. Qt 6.8 measured here: playback
+// 87 -> 76 ms, capture chunks 2.0 -> 0.1 s. A value the user set wins.
+void request_low_latency() {
+    if (!qEnvironmentVariableIsSet("PULSE_LATENCY_MSEC")) qputenv("PULSE_LATENCY_MSEC", "50");
+}
+
 // One stream, opened and closed on its own thread.
 class Worker : public QObject {
 public:
@@ -296,6 +304,7 @@ struct Capture::Impl {
 
 Capture::Capture(std::optional<std::size_t> device, int rate, CaptureFifo& fifo, Report on_error)
     : impl_(std::make_unique<Impl>()) {
+    request_low_latency();
     auto w = std::make_unique<CaptureWorker>(
         pick(QMediaDevices::audioInputs(), device, QMediaDevices::defaultAudioInput()), rate, fifo, std::move(on_error));
     impl_->worker = w.get();
@@ -314,6 +323,7 @@ struct Playback::Impl {
 
 Playback::Playback(std::optional<std::size_t> device, int rate, PlaybackFifo& fifo, Report on_error)
     : impl_(std::make_unique<Impl>()) {
+    request_low_latency();
     impl_->t.run(std::make_unique<PlaybackWorker>(
         pick(QMediaDevices::audioOutputs(), device, QMediaDevices::defaultAudioOutput()), rate, fifo,
         std::move(on_error)));
