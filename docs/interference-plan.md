@@ -84,3 +84,19 @@ be reproduced and predates the receive(head) fix, so it is not an arm):
   sub-band well above the measured one and often loud).
 - The recordings are too few and unrepresentative to fit the sim to; the rec
   cells are weak evidence.
+
+### Option 1: the clean-trained model + an explicit rule (runs/noise_rule_study.sh)
+
+DATA2G_NOISE_RULE=w: each candidate predicted as if its SNR were lower by
+predictor.noise_shift_db (its span's median noise over the measured band's,
+plus w x its often-loud excess; under 1 dB nothing). Against A alone, same
+code, 12 paired seeds:
+
+- clean and wander cells: identical, every seed (the deadband holds);
+- carriers +54..+209% (12/0 seeds in 5 of 6 cells), edge +8..+37%,
+  mpd/qrm_wide +19%; small losses at mpp/edge -4 (-3%, 2/9) and
+  mpp/qrm_wide (-9%, split seeds); impulses untouched (medians don't move);
+  rec within +-2%.
+- w 1.0 a little ahead of 0.5 on edge.
+
+The first approach that gains on interference at no cost on clean channels.
