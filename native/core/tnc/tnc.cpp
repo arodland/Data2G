@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 
@@ -218,7 +219,7 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
 // --- NoiseProfile ----------------------------------------------------------------------
 
 NoiseProfile::NoiseProfile() : win_(BLOCK) {
-    for (int n = 0; n < BLOCK; ++n) win_[n] = 0.5 - 0.5 * std::cos(2 * M_PI * n / (BLOCK - 1));  // np.hanning
+    for (int n = 0; n < BLOCK; ++n) win_[n] = 0.5 - 0.5 * std::cos(2 * std::numbers::pi * n / (BLOCK - 1));  // np.hanning
 }
 
 void NoiseProfile::feed(std::span<const double> x, double t_start) {
