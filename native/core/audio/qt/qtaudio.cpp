@@ -8,6 +8,7 @@
 #include <QMediaDevices>
 #include <QObject>
 #include <QThread>
+#include <QVersionNumber>
 
 #include <atomic>
 #include <chrono>
@@ -25,6 +26,15 @@ using Clock = std::chrono::steady_clock;
 
 // How much the capture device may hold before our thread drains it.
 constexpr double CAPTURE_BUFFER_S = 2.0;
+
+// Qt <= 6.8's PulseAudio source makes the buffer size the fragment size:
+// a 2 s buffer delivered audio in 2 s lumps, and the engine, clocked by
+// capture, then stalled 2 s at a time (TX underruns, late replies). There
+// it gets host.py's PortAudio period instead; 6.9+ treats it as a ring.
+double capture_buffer_s(int rate) {
+    if (QVersionNumber::fromString(QString::fromLatin1(qVersion())) >= QVersionNumber(6, 9)) return CAPTURE_BUFFER_S;
+    return 256.0 * std::max(1, rate / 6000) / rate;
+}
 
 std::vector<DeviceInfo> infos(const QList<QAudioDevice>& devices) {
     std::vector<DeviceInfo> out;
@@ -171,7 +181,7 @@ protected:
         channels_ = f.qt.channelCount();
         pipeline_ = std::make_unique<CapturePipeline>(f.ours, f.qt.channelCount(), rate_, fifo_);
         source_ = std::make_unique<QAudioSource>(device_, f.qt);
-        source_->setBufferSize(f.qt.bytesForDuration(static_cast<qint64>(CAPTURE_BUFFER_S * 1e6)));
+        source_->setBufferSize(f.qt.bytesForDuration(static_cast<qint64>(capture_buffer_s(rate_) * 1e6)));
         connect(source_.get(), &QAudioSource::stateChanged, this, [this] { report("in", source_->error()); });
         io_ = source_->start();
         if (io_ == nullptr) throw std::runtime_error("could not start capture on \"" + name() + "\"");
