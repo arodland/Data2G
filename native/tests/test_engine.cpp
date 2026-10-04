@@ -134,6 +134,20 @@ void sync_kiss() {
     }, 5), "a UI frame crosses");
 }
 
+// EngineConfig::noise_rule reaches each session's gear shifter; 0 turns it off.
+void noise_rule_config() {
+    check::current_step = "noise rule";
+    const auto rule = [](double w) {
+        EngineConfig c;
+        c.noise_rule = w;
+        Engine e("W1AW", c);
+        return dynamic_cast<GearPolicy&>(*e.session().policy).shifter.noise_rule;
+    };
+    check::is_true(EngineConfig{}.noise_rule == NOISE_RULE && rule(NOISE_RULE) == std::optional(NOISE_RULE), "default");
+    check::is_true(rule(0.4) == std::optional(0.4), "a weight");
+    check::is_true(!rule(0.0), "0: off");
+}
+
 void units() {
     check::current_step = "units";
     check::equal(static_cast<int>(to_half(1.0)), 0x3C00, "half 1");
@@ -349,6 +363,7 @@ int main() {
     check::Watchdog dog(TSAN ? 1800 : 600, "test_engine");
     const auto dir = std::filesystem::temp_directory_path() / ("data2g_test_engine_" + std::to_string(clk::now().time_since_epoch().count()));
     units();
+    noise_rule_config();
     sync_session(dir);
     sync_kiss();
     worker_latency();

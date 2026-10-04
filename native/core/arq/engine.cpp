@@ -272,7 +272,14 @@ bool Engine::idle() const {
 }
 
 void Engine::new_session() {
-    auto policy = hooks_.policy ? hooks_.policy() : std::make_shared<GearPolicy>();
+    std::shared_ptr<Policy> policy;
+    if (hooks_.policy) {
+        policy = hooks_.policy();
+    } else {
+        auto gear = std::make_shared<GearPolicy>();
+        gear->shifter.noise_rule = cfg_.noise_rule > 0 ? std::optional(cfg_.noise_rule) : std::nullopt;
+        policy = std::move(gear);
+    }
     const double seed = rng_->uniform(0.0, 1.0);  // random.Random(self.rng.random())
     std::shared_ptr<Rng> rng;
     if (hooks_.session_rng) rng = hooks_.session_rng(seed);

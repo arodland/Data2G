@@ -23,6 +23,7 @@ class QFormLayout;
 class QLineEdit;
 class QPushButton;
 class QSettings;
+class QSlider;
 class QSpinBox;
 
 namespace data2g::gui {
@@ -68,6 +69,7 @@ private:
     QLineEdit* kiss_address_;
     QSpinBox* kiss_port_;
     QCheckBox* worker_;
+    QSlider* noise_rule_;  // the noise rule's weight x 100 (NOISE_RULE_STEPS)
 };
 
 }  // namespace data2g::gui

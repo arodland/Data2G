@@ -12,11 +12,14 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QThread>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
@@ -99,6 +102,9 @@ const RigString RIG_STRINGS[] = {
 
 }  // namespace
 
+// The noise rule's slider, in hundredths.
+constexpr int NOISE_RULE_MAX = 150, NOISE_RULE_DEFAULT = 100, NOISE_RULE_DETENT = 5;
+
 app::Args load_settings(QSettings& s, app::Args a) {
     const auto str = [&](const char* k, const std::string& d) { return s.value(k, qs(d)).toString().toStdString(); };
     if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
@@ -125,6 +131,7 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.kiss_address = str("kiss_address", a.kiss_address);
     a.kiss_port = s.value("kiss_port", a.kiss_port).toInt();
     a.decode_worker = s.value("decode_worker", a.decode_worker).toBool();
+    a.noise_rule = s.value("noise_rule", a.noise_rule).toDouble();
     return a;
 }
 
@@ -153,6 +160,7 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("kiss_address", qs(a.kiss_address));
     s.setValue("kiss_port", a.kiss_port);
     s.setValue("decode_worker", a.decode_worker);
+    s.setValue("noise_rule", a.noise_rule);
 }
 
 SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent)
@@ -180,6 +188,38 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     worker_->setChecked(a.decode_worker);
     worker_->setToolTip(tr("Keeps preamble search and BUSY running during a burst's decode"));
     station->addRow(worker_);
+
+    // The noise rule's weight, 0.00-1.50 in 0.01 steps: a detent at the
+    // default (1.00) while dragging; 0 is off.
+    auto* link = group(tr("Link"));
+    noise_rule_ = new QSlider(Qt::Horizontal);
+    noise_rule_->setObjectName(QStringLiteral("noise_rule"));
+    noise_rule_->setRange(0, NOISE_RULE_MAX);
+    noise_rule_->setSingleStep(1);
+    noise_rule_->setPageStep(10);
+    noise_rule_->setTickPosition(QSlider::TicksBelow);
+    noise_rule_->setTickInterval(50);
+    noise_rule_->setValue(static_cast<int>(std::lround(std::min(a.noise_rule, NOISE_RULE_MAX / 100.0) * 100)));
+    noise_rule_->setToolTip(tr("A mode whose band is noisier in the receiver's noise profile than the band last "
+                               "measured is predicted at a lower SNR. The weight is how much its often-loud "
+                               "moments count. 0: off; 1.00: the default."));
+    auto* noise_label = new QLabel;
+    noise_label->setObjectName(QStringLiteral("noise_rule_value"));
+    noise_label->setMinimumWidth(noise_label->fontMetrics().horizontalAdvance(tr("1.00 (default)")));
+    const auto show_noise = [noise_label](int v) {
+        noise_label->setText(v == 0 ? tr("off") : v == NOISE_RULE_DEFAULT ? tr("1.00 (default)")
+                                                                          : QString::number(v / 100.0, 'f', 2));
+    };
+    show_noise(noise_rule_->value());
+    connect(noise_rule_, &QSlider::valueChanged, noise_label, show_noise);
+    connect(noise_rule_, &QSlider::sliderMoved, noise_rule_, [this](int v) {
+        if (v != NOISE_RULE_DEFAULT && std::abs(v - NOISE_RULE_DEFAULT) <= NOISE_RULE_DETENT)
+            noise_rule_->setValue(NOISE_RULE_DEFAULT);  // the detent: dragging only, so the arrow keys still step through
+    });
+    auto* noise_row = new QHBoxLayout;
+    noise_row->addWidget(noise_rule_, 1);
+    noise_row->addWidget(noise_label);
+    link->addRow(tr("Noise rule"), noise_row);
 
     auto* audio = group(tr("Audio"));
     input_ = new QComboBox;
@@ -460,6 +500,9 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.kiss_address = kiss_address_->text().trimmed().toStdString();
     a.kiss_port = kiss_port_->value();
     a.decode_worker = worker_->isChecked();
+    // left where it opened: the value it came with (a command line may set more than the slider's top)
+    const int shown = static_cast<int>(std::lround(std::min(base_.noise_rule, NOISE_RULE_MAX / 100.0) * 100));
+    a.noise_rule = noise_rule_->value() == shown ? base_.noise_rule : noise_rule_->value() / 100.0;
 }
 
 }  // namespace data2g::gui
