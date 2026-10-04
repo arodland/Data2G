@@ -578,7 +578,10 @@ struct Station::KissServer : QObject {
         acks_.erase(it);
     }
     void close_clients() {
-        for (auto& [c, _] : clients_) c->disconnectFromHost();
+        // disconnectFromHost() can emit disconnected synchronously, which erases from clients_
+        std::vector<QTcpSocket*> cs;
+        for (auto& [c, _] : clients_) cs.push_back(c);
+        for (auto* c : cs) c->disconnectFromHost();
     }
 
 private:
