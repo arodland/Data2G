@@ -39,6 +39,7 @@ BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surp
 # 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
 # On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+NOISE_RULE = float(os.environ["DATA2G_NOISE_RULE"]) if os.environ.get("DATA2G_NOISE_RULE") else None
 if BIAS_FIX:
     BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
@@ -314,6 +315,19 @@ class GearShifter:
         if P.outcome_model() is None:
             raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
+        # DATA2G_NOISE_RULE=w (studies): each candidate predicted as if its SNR
+        # were lower by predictor.noise_shift_db (its band's noise in the
+        # receiver's profile against the measured band's; w: the weight of
+        # its often-loud moments). Unset: off.
+        shift = {}
+        if NOISE_RULE is not None:
+            shift = {s.band: P.noise_shift_db(m.get("noise"), self.measured_band, s.band, NOISE_RULE) for s in cands}
+
+        def predicted(s, n_cw):
+            key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
+            if key not in omemo:
+                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev)
+            return omemo[key][s.name]
 
         def logit_shift(q, b):
             q = float(np.clip(q, 1e-6, 1 - 1e-6))
@@ -321,15 +335,11 @@ class GearShifter:
 
         def q_burst(s, n_cw):
             """P(a burst of s, n_cw long, is usable: synced, header, control)."""
-            sec = round(burst_seconds(s, n_cw), 2)
-            if sec not in omemo:
-                omemo[sec] = P.predict_outcome(m, self.measured_band, self.gap_s, sec, cands, prev)
-            return logit_shift(omemo[sec][s.name][0], self.bias_burst.get(s.name, 0.0))
+            return logit_shift(predicted(s, n_cw)[0], self.bias_burst.get(s.name, 0.0))
 
         def q_cw(s, n_cw):
             """P(one of its data codewords decodes | the burst is usable)."""
-            q_burst(s, n_cw)
-            return logit_shift(omemo[round(burst_seconds(s, n_cw), 2)][s.name][1], self.bias.get(s.name, 0.0))
+            return logit_shift(predicted(s, n_cw)[1], self.bias.get(s.name, 0.0))
 
         best, best_v = None, -1.0
         # my reply to the peer: the cheapest in expectation. A lost reply costs

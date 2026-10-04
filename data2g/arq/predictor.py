@@ -107,6 +107,45 @@ def noise_features(noise: dict | None, band: str) -> list[float]:
     return [*(db - ref), *noise["noise_tail_db"], float(np.log10(1 + noise["impulses_per_min"])), 1.0]
 
 
+def _band_level(db: np.ndarray, band: str) -> float:
+    """Noise power over a band's span, power-weighted over the NOISE_BANDS_HZ it overlaps (dB)."""
+    lo, hi = band_span_hz(band)
+    w = np.array([max(0.0, min(hi, b) - max(lo, a)) for a, b in NOISE_BANDS_HZ])
+    if w.sum() <= 0:
+        return float(np.median(db))
+    return float(10 * np.log10(np.sum(w * 10 ** (db / 10)) / np.sum(w)))
+
+
+def noise_shift_db(noise: dict | None, measured_band: str, band: str, tail_weight: float = 0.5,
+                   deadband_db: float = 1.0) -> float:
+    """How much worse a burst in `band` should fare than the one measured in
+    `measured_band`, from the receiver's noise profile, as an SNR drop (dB,
+    never a gain): the median noise over its span above the measured
+    band's, plus tail_weight of how much louder its often-loud moments (p90)
+    are beyond that. Under deadband_db: 0 (a flat profile changes nothing)."""
+    if not noise:
+        return 0.0
+    db, tail = np.asarray(noise["noise_db"], float), np.asarray(noise["noise_tail_db"], float)
+    med = _band_level(db, band) - _band_level(db, measured_band)
+    loud = _band_level(db + tail, band) - _band_level(db + tail, measured_band)
+    shift = max(0.0, med) + tail_weight * max(0.0, loud - max(0.0, med))
+    return shift if shift >= deadband_db else 0.0
+
+
+def shifted(measured: dict, shift_db: float) -> dict:
+    """The measurements as if the SNR were shift_db lower: snr_est, and each
+    MI feature moved along its capacity curve."""
+    if not shift_db:
+        return measured
+    grid, tables = _capacity()
+    m = dict(measured, snr_est=measured["snr_est"] - shift_db)
+    for c in CONSTS:
+        t = tables[const_family(c)]
+        snr = np.interp(measured[f"mi_{c}"], t, grid)  # the curve is increasing
+        m[f"mi_{c}"] = float(np.interp(snr - shift_db, grid, t))
+    return m
+
+
 def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS,
                    noise: bool = False) -> np.ndarray:
     """measured, prev: as inputs(); `seconds`: the next burst's length on air;

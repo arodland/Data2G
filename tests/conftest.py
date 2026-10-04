@@ -474,7 +474,7 @@ def _codes_substitutions(native):
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
 GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
-                  "DATA2G_BIAS_FIX")
+                  "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
 
 
 @provider

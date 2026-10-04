@@ -89,3 +89,24 @@ def test_noise_inputs_clip_to_the_training_range():
     assert np.array_equal(y[:, :base], x[:, :base])
     assert y[0, -P.N_NOISE:].max() <= 5.0 and y[0, base + 4] == 5.0 and y[0, -1] == 1.0
     assert not y[1, -P.N_NOISE:].any()
+
+
+def test_noise_rule_shifts_only_bands_with_more_noise():
+    """A profile flat but for a loud top band (2100-2700 Hz): a w48 candidate
+    (to 2725 Hz), measured in w, loses SNR; an n4 one (1425-1625) doesn't;
+    a flat profile shifts nothing."""
+    loud = {"noise_db": [0.0, 0.0, 0.0, 0.0, 12.0], "noise_tail_db": [1.5, 1.5, 1.5, 1.5, 6.0], "impulses_per_min": 0}
+    flat = {"noise_db": [0.0, 0.2, -0.1, 0.1, 0.0], "noise_tail_db": [1.4, 1.5, 1.3, 1.6, 1.5], "impulses_per_min": 0}
+    assert P.noise_shift_db(loud, "w", "w48") > 3
+    assert P.noise_shift_db(loud, "w", "n4") == 0.0
+    assert P.noise_shift_db(flat, "w", "w48") == 0.0 and P.noise_shift_db(None, "w", "w48") == 0.0
+
+
+def test_shifted_moves_snr_and_mi_down():
+    m = measured(snr=5.0)
+    m.update({f"mi_{c}": float(P.capacity(8.0, c)) for c in P.CONSTS})
+    s = P.shifted(m, 3.0)
+    assert s["snr_est"] == 2.0
+    for c in P.CONSTS:
+        assert s[f"mi_{c}"] == pytest.approx(float(P.capacity(5.0, c)), abs=1e-3)
+    assert P.shifted(m, 0.0) is m
