@@ -104,9 +104,24 @@ def test_kiss_between_cpp_and_python_engines(native, reference):
     heard = []
     to_py, to_cpp = frame("APRS", "W1AW", 0x03, b"!from C++"), frame("APRS", "K2XYZ", 0x03, b"!from Python")
     cpp.kiss.enqueue(to_py)
-    assert link(cpp, py, 12, 30, lambda: to_py in py.kiss_rx)
+    assert link(cpp, py, 12, 30, lambda: (0, to_py) in py.kiss_rx)
     py.kiss.enqueue(to_cpp)
-    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or to_cpp in heard, seed=1)
+    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (0, to_cpp) in heard, seed=1)
+
+
+def test_broadcast_groups_between_cpp_and_python_engines(native, reference):
+    """A group with FROM each way (the wire format: group+from TLV, group-key
+    masks): frames on the opened port, HEARD with the sender, the ack after."""
+    cpp = native.engine.Engine("W1AW", seed=5, kiss=native.kisslink.KissLink())
+    py = reference(E, "Engine")("K2XYZ", seed=6, kiss=kisslink.KissLink())
+    nc, np_ = cpp.kiss.open("CHAT", "W1AW"), py.kiss.open("chat", "k2xyz")
+    cpp.kiss.enqueue(b"hello from C++", nc, ack="tag-c")
+    assert link(cpp, py, 12, 30, lambda: (np_, b"hello from C++") in py.kiss_rx)
+    assert f"BCAST {np_} HEARD W1AW" in py.kiss.take_events() and cpp.kiss.take_acks() == [(nc, "tag-c")]
+    heard = []
+    py.kiss.enqueue(b"hello from Python", np_, ack="tag-p")
+    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (nc, b"hello from Python") in heard, seed=1)
+    assert f"BCAST {nc} HEARD K2XYZ" in cpp.kiss.take_events() and py.kiss.take_acks() == [(np_, "tag-p")]
 
 
 def test_float16_and_json_numbers_as_numpy_and_json_write_them(native):

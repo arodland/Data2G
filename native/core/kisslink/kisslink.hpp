@@ -1,15 +1,20 @@
-// data2g/kisslink.py: the KISS TNC's link layer, mode shifting without a
-// session. Every burst carries reports (for each station heard lately, the
-// mode it should use to reach us, as the ARQ shifter recommends it); a
-// connected-mode AX.25 frame goes in its next hop's reported mode, anything
-// else in the cap's robust broadcast mode. The burst layout is in the
-// Python module's docstring.
+// data2g/kisslink.py: broadcast over KISS (docs/broadcast.md). Named groups,
+// each a KISS port (port 0 always open, on "KISS 0"); every codeword of a
+// group's bursts is CRC-masked with the group's key, and the control names
+// its group, so a receiver reads the control from the mask-free decode and
+// checks it under that name's key. Rate shifting per port (off by default):
+// a connected-mode AX.25 frame goes in its next hop's reported mode, anything
+// else in the port's mode. The burst layout is in the Python module's
+// docstring.
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -21,8 +26,10 @@ namespace data2g::kisslink {
 using arq::Bytes;
 using arq::ByteView;
 
-inline constexpr int KISS_KEY = 0x4B53;
-inline constexpr int VERSION = 1;
+inline constexpr int VERSION = 2;
+inline constexpr int T_GROUP = 1, T_GROUP_FROM = 2, T_REPORTS = 3;  // control TLVs
+inline constexpr std::string_view PORT0_GROUP = "KISS 0";
+inline constexpr int N_PORTS = 16;  // KISS port numbers 0-15
 inline constexpr double REPORT_MAX_S = 180.0;  // a report older than this is not followed
 inline constexpr double HEARD_MAX_S = 600.0;   // stations reported on: heard this recently
 inline constexpr double SLOT_S = 1.0;          // the shortest p-persistence slot
@@ -39,10 +46,37 @@ struct Ax25 {
 std::optional<Ax25> parse_ax25(ByteView frame);  // nullopt: not AX.25
 int station_hash(std::string_view call);         // nonzero 16-bit FNV-1a
 
+// Groups and control. Each throws std::invalid_argument on what won't pack or parse.
+std::string group_name(const std::string& group);  // as it reads back from the air
+int group_key(const std::string& group);           // nonzero 16-bit FNV-1a of the packed name
+Bytes pack_pair(const std::string& group, const std::string& call);  // T_GROUP_FROM, 15 bytes
+std::pair<std::string, std::string> unpack_pair(ByteView b);
+std::map<int, Bytes> parse_tlvs(ByteView b);  // up to a zero type (padding)
+struct ControlRead {
+    std::string group;
+    std::optional<std::string> call;   // T_GROUP_FROM's sender
+    std::optional<Bytes> reports;      // T_REPORTS
+};
+ControlRead read_control(const std::map<int, Bytes>& tlvs);
+
 struct Peer {
     arq::GearShifter shifter;
     double heard = 0.0;                             // when we last heard it
     std::optional<std::pair<int, double>> report;  // (rec byte, time): how it wants us to send to it
+};
+
+struct Port {
+    std::string group;  // as it reads back (group_name)
+    std::string mode;   // the transmit mode; with shifting on, the fallback
+    bool shift = false;  // rate shifting (BCAST MODE n AUTO mode)
+    std::optional<std::string> from_call;  // sent in T_GROUP_FROM
+    int key() const { return group_key(group); }
+};
+
+struct Queued {
+    int port;
+    Bytes frame;
+    std::optional<std::int64_t> ack;  // opaque to the link: back in `acks` once sent
 };
 
 class KissLink {
@@ -52,32 +86,58 @@ public:
     explicit KissLink(int cap = 2, std::string broadcast = {}, arq::Clock clock = arq::monotonic);
 
     int cap;
-    std::vector<Bytes> queue;                    // frames waiting
-    std::vector<std::pair<int, Peer>> peers;    // station hash -> Peer, first heard first
-    std::set<int> me;                            // hashes this TNC has sent as
+    std::vector<Queued> queue;                    // frames waiting
+    std::vector<std::pair<int, Peer>> peers;     // station hash -> Peer, first heard first
+    std::set<int> me;                             // hashes this TNC has sent as
     arq::Clock clock;
     std::int64_t n_sent = 0;
-    std::string broadcast;
+    std::string broadcast;  // a new port's transmit mode
     // channel access (the engine applies them)
     int persist = 63;  // after BUSY, a slot is taken with probability (P + 1) / 256
     double slot_s = SLOT_S;
     double busy_limit_s = 60.0;  // BUSY held a burst this long: send anyway
+    std::map<int, Port> ports;                       // port number -> Port; 0 always
+    std::vector<std::string> events;                 // statuses for the host, oldest first
+    std::vector<std::pair<int, std::int64_t>> acks;  // (port, ack) of frames that went out
 
     void command(int cmd, ByteView payload);  // KISS P and SLOTTIME; the rest ignored
-    void enqueue(Bytes frame) { queue.push_back(std::move(frame)); }
-    // The first queued frame's mode, with every queued frame that goes in
-    // it, as many as fit. nullptr: nothing queued.
+    // Ports (the host's BCAST commands); each throws std::invalid_argument.
+    int open(const std::string& group, const std::optional<std::string>& from_call = std::nullopt);
+    void close(int n);  // frames queued for it are dropped (DROPPED)
+    void set_mode(int n, const std::string& mode, bool shift = false);
+
+    // A frame for `port`; to a closed port: DROPPED.
+    void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt);
+    std::vector<std::string> take_events();                  // the statuses since the last call
+    std::vector<std::pair<int, std::int64_t>> take_acks();   // (port, ack) gone out since the last call
+    void on_sent(const arq::TxBurstPtr& burst);  // a burst finished transmitting: its acks are due
+    void missed(const std::string& submode, int n_cw);  // BCAST * MISSED
+    // The first queued frame's port and mode, with every queued frame of that
+    // port that goes in it, as many as fit. nullptr: nothing queued.
     arq::TxBurstPtr next_burst();
-    // A received burst -> its frames, nullopt if it isn't a KISS burst.
-    // Updates what we know of its sender. soft: arq::soft_bits(r), if made.
+    // A received burst -> (port, frame)s for the open ports it belongs to
+    // (empty for another group's), nullopt if it isn't a broadcast burst.
+    // rx: the burst's decoder, shared with the engine's other checks.
+    std::optional<std::vector<std::pair<int, Bytes>>> on_burst(const arq::Heard& r, arq::ModemRx& rx);
+    // As above with a decoder of its own. soft: arq::soft_bits(r), if made.
     // dd_budget: as the engine's (never DD unbounded; nullopt only for tests).
-    std::optional<std::vector<Bytes>> on_burst(const arq::Heard& r, std::shared_ptr<const arq::SlotSoft> soft = nullptr,
-                                               std::optional<double> dd_budget = arq::DD_BUDGET_S);
+    std::optional<std::vector<std::pair<int, Bytes>>> on_burst(const arq::Heard& r,
+                                                               std::shared_ptr<const arq::SlotSoft> soft = nullptr,
+                                                               std::optional<double> dd_budget = arq::DD_BUDGET_S);
 
 private:
-    std::pair<std::string, int> route(ByteView frame) const;
-    std::vector<Bytes> control(const arq::Mode& m, int sender);
+    void check_mode(const std::string& mode) const;
+    void check_fits(int n, const Port& p, const std::string& mode, bool shift) const;
+    void drop_where(int port, const std::function<bool(const Queued&)>& which);
+    std::pair<std::string, int> route(const Port& port, ByteView frame) const;
+    std::vector<Bytes> control(const arq::Mode& m, int n, const Port& port, int sender);
+    std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
+    void learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, const std::vector<bool>& ok,
+               double now);
     Peer* peer(int h);
+
+    arq::TxBurstPtr inflight_;  // the last burst handed out
+    std::vector<std::pair<int, std::int64_t>> inflight_acks_;
 };
 
 }  // namespace data2g::kisslink

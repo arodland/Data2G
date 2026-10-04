@@ -547,6 +547,7 @@ Engine::Done Engine::process(Block& b) {
             request_reset();  // our own transmission was not heard
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + tnc::NoiseProfile::RECOVER_S);
             session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);
+            if (cfg_.kiss) cfg_.kiss->on_sent(sent);  // a broadcast burst's frames are acked
         }
     }
     n_ += k;
@@ -585,6 +586,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         if (log_enabled(LOG, INFO))
             log_write(LOG, INFO, format("RX %s x%d: header heard (score %.2f), burst lost", spec_name(ev.header).c_str(),
                                         ev.header.n_cw(), ev.header.score()));
+        if (cfg_.kiss && idle()) cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw());  // maybe an open port's
         return;
     }
     auto soft = soft_bits(*r);
@@ -596,7 +598,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     const bool ours = st && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING) &&
                       rx.decode(0, ctl_mask(st->peer(), 0, st->key), 0, nullptr).has_value();
     if (cfg_.kiss && !ours) {
-        if (auto frames = cfg_.kiss->on_burst(*r, soft, cfg_.dd_budget_s)) {  // a KISS burst: not the session's
+        if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's
             kiss_rx_.insert(kiss_rx_.end(), std::make_move_iterator(frames->begin()), std::make_move_iterator(frames->end()));
             return;
         }

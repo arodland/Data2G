@@ -979,7 +979,7 @@ def _tnc_substitutions(native):
                                 None if cpm_grids is None else list(cpm_grids)))
 
     return {
-        (tnc, "kiss_encode"): lambda data, port=0: T.kiss_encode(bytes(data), int(port)),
+        (tnc, "kiss_encode"): lambda data, port=0, cmd=0: T.kiss_encode(bytes(data), int(port), int(cmd)),
         (tnc, "KissDecoder"): T.KissDecoder,
         (tnc, "capacity"): capacity,
         (tnc, "pack"): pack,
@@ -1035,6 +1035,9 @@ def _phy_substitutions(native):
 
         def decode(self, slot, mask_id, rv, key):
             return self._n.decode(slot, mask_id, rv, key)
+
+        def raw(self, slot):
+            return self._n.raw(slot)
 
         def forget(self, key):
             return self._n.forget(key)

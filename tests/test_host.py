@@ -78,6 +78,43 @@ def test_commands_over_tcp(tmp_path):
     assert (tmp_path / "events.jsonl").exists()
 
 
+def test_broadcast_port_and_ackmode_over_tcp(tmp_path):
+    """A group opened on the command port, a frame sent on its KISS port with
+    ACKMODE: the tag comes back on the KISS port once the burst has gone."""
+    from data2g import tnc
+
+    a = SimpleNamespace(mycall="W1AW", host="127.0.0.1", command_port=18330, sample_rate=48000, output_volume=0.0,
+                        rigctld_host="localhost", rigctld_port=0, ptt_on_delay_ms=100, ptt_off_delay_ms=0, tx_lead_ms=100,
+                        min_header_score=0.0, record_dir=tmp_path, input_device=None, output_device=None,
+                        buffer_credit=-1, kiss_port=18340, kiss_address="127.0.0.1",
+                        kiss_bw=2400, broadcast_mode=None, kiss_busy_limit=60.0, stats_interval=60.0)
+    stop = threading.Event()
+    th = threading.Thread(target=host.serve, args=(a, FakePA(), stop), daemon=True)
+    th.start()
+    c, k = _connect(18330), _connect(18340)
+    try:
+        c.sendall(b"BCAST OPEN APRS\r")
+        got = b""
+        deadline = time.time() + 20
+        while b"\r" not in got and time.time() < deadline:
+            got += c.recv(4096)
+        assert got.split(b"\r")[0] == b"BCAST PORT 1"
+        k.sendall(tnc.kiss_encode(b"\x12\x34" + b"!beacon", 1, tnc.ACKMODE))
+        dec, frames = tnc.KissDecoder(), []
+        k.settimeout(1.0)
+        while not frames and time.time() < deadline + 20:
+            try:
+                frames += dec.feed(k.recv(4096))
+            except socket.timeout:
+                pass
+        assert frames == [(1 << 4 | tnc.ACKMODE, b"\x12\x34")]
+    finally:
+        stop.set()
+        th.join(timeout=20)
+        c.close()
+        k.close()
+
+
 def test_capture_keeps_every_sample():
     """Input queued by the callback while the loop is busy comes out whole, in order, left channel."""
     class PA:

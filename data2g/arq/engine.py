@@ -105,7 +105,7 @@ class Engine:
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
         self.stats_interval_s = stats_interval_s
-        self.kiss_rx: list[bytes] = []  # frames heard for KISS clients
+        self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
         self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
         self._kiss_slot = 0  # next p-persistence slot, samples
@@ -254,6 +254,8 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
                 self.session.on_tx_end(burst, self.now + n / FS)
+                if self.kiss is not None:
+                    self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
         self.n += k
         return out, self.tx is not None
 
@@ -274,6 +276,8 @@ class Engine:
                 self.rec.rx(t, ev["audio"], h, r, meas, self.noise.snapshot())
             if r is None:
                 log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
+                if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
+                    self.kiss.missed(h["spec"].name, h["n_cw"])  # maybe an open port's: BCAST * MISSED
                 continue
             rx = PHY.ModemRx(r, self.store, PHY.DD_BUDGET_S)
             # in a session, its peer's bursts are the likely ones: a control
@@ -284,8 +288,8 @@ class Engine:
             ours = (st is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING)
                     and rx.decode(0, L.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
             if self.kiss is not None and not ours:
-                frames = self.kiss.on_burst(r)
-                if frames is not None:  # a KISS burst: not the session's
+                frames = self.kiss.on_burst(r, rx)
+                if frames is not None:  # a broadcast burst: not the session's
                     self.kiss_rx += frames
                     continue
             if self._cq(rx):

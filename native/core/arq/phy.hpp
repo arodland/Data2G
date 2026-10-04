@@ -96,6 +96,10 @@ public:
     // out of range, CPM control/data mismatch) leaves it. Throws StoreMismatch.
     std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored);
     std::optional<Bytes> decode_plain(int slot, const MaskId& mask);  // no key
+    // The slot's mask-free decode as payload bytes, CRC unchecked: polar's
+    // list best first, LDPC's one candidate if it converged. A broadcast
+    // control reads its group from these (docs/broadcast.md §2).
+    std::vector<Bytes> raw(int slot);
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 

@@ -31,7 +31,9 @@ using Bytes = std::vector<std::uint8_t>;
 
 inline constexpr std::uint8_t FEND = 0xC0, FESC = 0xDB, TFEND = 0xDC, TFESC = 0xDD;
 
-Bytes kiss_encode(std::span<const std::uint8_t> data, int port = 0);  // a data frame (command 0)
+inline constexpr int KISS_DATA = 0x00, KISS_ACKMODE = 0x0C;  // KISS commands (low nibble; the port is the high one)
+// A KISS frame: a data frame (command 0) for `data` on `port` by default.
+Bytes kiss_encode(std::span<const std::uint8_t> data, int port = 0, int cmd = KISS_DATA);
 
 // Bytes in, whole frames (command byte, data) out, across reads.
 class KissDecoder {

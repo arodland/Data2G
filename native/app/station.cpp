@@ -120,7 +120,7 @@ void install_arq_log() {
 namespace {
 
 const char* USAGE =
-    "usage: data2g-host [-h] [--vara | --no-vara] [--kiss | --no-kiss] [--kiss-port KISS_PORT]\n"
+    "usage: data2g-host [-h] [--kiss-port KISS_PORT]\n"
     "                   [--kiss-address KISS_ADDRESS] [--kiss-busy-limit S] [--kiss-bw {2400,500}]\n"
     "                   [--broadcast-mode MODE] [--mycall MYCALL] [--host HOST] [--command-port COMMAND_PORT]\n"
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
@@ -139,16 +139,14 @@ const char* USAGE =
     "                   [--rig-poll-interval S] [--rig-debug | --no-rig-debug]\n";
 
 const char* HELP =
-    "\nData2G server: a VARA-style TNC and a KISS TNC on one radio\n\n"
+    "\nData2G server: VARA-style ARQ sessions and KISS broadcast on one radio\n\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --vara, --no-vara     the VARA personality: ARQ sessions on --command-port and the next (default: on)\n"
-    "  --kiss, --no-kiss     the KISS personality: frames on --kiss-port, modes shifted per station (default: on)\n"
     "  --kiss-port KISS_PORT as VARA HF's (default 8100)\n"
     "  --kiss-address KISS_ADDRESS (default 127.0.0.1)\n"
     "  --kiss-busy-limit S   a KISS burst held this long by BUSY is sent anyway (default 60)\n"
     "  --kiss-bw {2400,500}  KISS bandwidth cap, Hz (default 2400)\n"
-    "  --broadcast-mode MODE KISS mode for UI frames, non-AX.25 and unreported stations\n"
+    "  --broadcast-mode MODE a broadcast port's transmit mode until BCAST MODE sets one\n"
     "                        (default: qpsk-r1/5, n10-qpsk-r1/5 with --kiss-bw 500)\n"
     "  --mycall MYCALL\n"
     "  --host HOST           (default 127.0.0.1)\n"
@@ -241,8 +239,6 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
     std::map<std::string, bool*> flags = {
         {"--list-audio-devices", &a.list_audio_devices}, {"--list-modes", &a.list_modes}, {"--list-rigs", &a.list_rigs}};
     std::map<std::string, std::pair<bool*, bool>> switches = {
-        {"--vara", {&a.vara, true}},   {"--no-vara", {&a.vara, false}},
-        {"--kiss", {&a.kiss, true}},   {"--no-kiss", {&a.kiss, false}},
         {"--decode-worker", {&a.decode_worker, true}}, {"--no-decode-worker", {&a.decode_worker, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
         {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
@@ -416,7 +412,6 @@ bool list_rigs() {
 }
 
 std::optional<std::string> check(const Args& a) {
-    if (!a.vara && !a.kiss) return "nothing to serve: --no-vara and --no-kiss";
     // Saved settings come through here too, so every value is checked, not only flags.
     for (const auto& [flag, field, value] :
          {std::tuple{"--rig-data-bits", "rig_data_bits", &a.rig_data_bits}, {"--rig-stop-bits", "rig_stop_bits", &a.rig_stop_bits},
@@ -438,7 +433,7 @@ std::optional<std::string> check(const Args& a) {
     if (rig_enabled(a) && !rig::model_info(a.rig_model))
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";
 #endif
-    if (a.kiss && a.broadcast_mode) {
+    if (a.broadcast_mode) {
         const auto ok = arq::allowed(kiss_cap(a.kiss_bw));
         const auto* m = arq::mode(*a.broadcast_mode);
         if (!m || std::find(ok.begin(), ok.end(), m) == ok.end())
@@ -448,13 +443,7 @@ std::optional<std::string> check(const Args& a) {
 }
 
 void list_modes(int kiss_bw) {
-    auto ms = arq::allowed(kiss_cap(kiss_bw));
-    std::sort(ms.begin(), ms.end(), [](const arq::Mode* x, const arq::Mode* y) {
-        const double wx = arq::width_hz(*x), wy = arq::width_hz(*y);
-        return wx != wy ? wx < wy : x->name < y->name;
-    });
-    for (const auto* m : ms)
-        std::printf("%-18s %5.0f Hz  %4d bytes/codeword\n", std::string(m->name).c_str(), arq::width_hz(*m), arq::payload_bytes(*m));
+    for (const auto& l : host::mode_lines(kiss_cap(kiss_bw))) std::printf("%s\n", l.c_str());
 }
 
 // --- the servers -------------------------------------------------------------------------
@@ -528,10 +517,11 @@ private:
     std::function<void()> on_close_;
 };
 
-// tnc.py's KissServer: any number of clients; data frames to on_packet,
-// other KISS commands to on_command; frames heard go to every client.
+// tnc.py's KissServer: any number of clients; data and ACKMODE frames to
+// on_packet (port, frame, ack id), other KISS commands to on_command; frames
+// heard go to every client, an ack to the client that asked for it.
 struct Station::KissServer : QObject {
-    KissServer(const QHostAddress& addr, quint16 port, std::function<void(tnc::Bytes)> on_packet,
+    KissServer(const QHostAddress& addr, quint16 port, std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
                std::function<void(int, tnc::Bytes)> on_command)
         : on_packet_(std::move(on_packet)), on_command_(std::move(on_command)) {
         if (!srv_.listen(addr, port))
@@ -548,12 +538,20 @@ struct Station::KissServer : QObject {
                     if (it == clients_.end()) return;
                     const auto* p = reinterpret_cast<const std::uint8_t*>(d.constData());
                     for (auto& [cmd, payload] : it->second.feed({p, static_cast<std::size_t>(d.size())})) {
-                        if ((cmd & 0x0F) == 0) on_packet_(std::move(payload));
-                        else on_command_(cmd & 0x0F, std::move(payload));
+                        if ((cmd & 0x0F) == tnc::KISS_DATA) {
+                            on_packet_(cmd >> 4, std::move(payload), std::nullopt);
+                        } else if ((cmd & 0x0F) == tnc::KISS_ACKMODE && payload.size() >= 2) {  // [tag, 2][frame]
+                            const std::int64_t id = ++n_acks_;
+                            acks_[id] = {c, tnc::Bytes(payload.begin(), payload.begin() + 2)};
+                            on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id);
+                        } else {
+                            on_command_(cmd & 0x0F, std::move(payload));
+                        }
                     }
                 });
                 connect(c, &QTcpSocket::disconnected, this, [this, c, peer] {
                     clients_.erase(c);
+                    std::erase_if(acks_, [c](const auto& kv) { return kv.second.first == c; });
                     c->deleteLater();
                     logf(INFO, "KISS client %s disconnected", peer.c_str());
                 });
@@ -565,10 +563,19 @@ struct Station::KissServer : QObject {
         for (auto* c : srv_.findChildren<QTcpSocket*>()) c->disconnect(this);
     }
 
-    void broadcast(const tnc::Bytes& data) {
-        const auto f = tnc::kiss_encode(data);
+    void broadcast(const tnc::Bytes& data, int port) {
+        const auto f = tnc::kiss_encode(data, port);
         const QByteArray b(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size()));
         for (auto& [c, _] : clients_) c->write(b);
+    }
+    // An ACKMODE frame went out: its tag back to the client that sent it.
+    void send_ack(std::int64_t id, int port) {
+        const auto it = acks_.find(id);
+        if (it == acks_.end()) return;  // its client has gone
+        const auto f = tnc::kiss_encode(it->second.second, port, tnc::KISS_ACKMODE);
+        if (clients_.count(it->second.first))
+            it->second.first->write(QByteArray(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size())));
+        acks_.erase(it);
     }
     void close_clients() {
         for (auto& [c, _] : clients_) c->disconnectFromHost();
@@ -577,7 +584,9 @@ struct Station::KissServer : QObject {
 private:
     QTcpServer srv_;
     std::map<QTcpSocket*, tnc::KissDecoder> clients_;
-    std::function<void(tnc::Bytes)> on_packet_;
+    std::map<std::int64_t, std::pair<QTcpSocket*, tnc::Bytes>> acks_;  // ACKMODE id -> (client, tag)
+    std::int64_t n_acks_ = 0;
+    std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet_;
     std::function<void(int, tnc::Bytes)> on_command_;
 };
 
@@ -611,7 +620,8 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 struct Station::Outbox {
     std::vector<std::string> cmd;
     arq::Bytes data;
-    std::vector<arq::Bytes> kiss;
+    std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
+    std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
 };
 
 // --- the station -------------------------------------------------------------------------
@@ -625,7 +635,8 @@ void Station::flush() {
     o.cmd.swap(host_->out_cmd);
     o.data.swap(host_->out_data);
     o.kiss.swap(engine_->kiss_rx());
-    if (o.cmd.empty() && o.data.empty() && o.kiss.empty()) return;
+    o.acks.swap(link_->acks);
+    if (o.cmd.empty() && o.data.empty() && o.kiss.empty() && o.acks.empty()) return;
     QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
 
@@ -651,8 +662,10 @@ void Station::deliver(const Outbox& o) {
         for (const auto& line : o.cmd) cmd_->send(QByteArray::fromStdString(line + "\r"));
     if (data_ && !o.data.empty())
         data_->send(QByteArray(reinterpret_cast<const char*>(o.data.data()), static_cast<qsizetype>(o.data.size())));
-    if (kiss_)
-        for (const auto& f : o.kiss) kiss_->broadcast(f);
+    if (kiss_) {
+        for (const auto& [port, f] : o.kiss) kiss_->broadcast(f, port);
+        for (const auto& [port, id] : o.acks) kiss_->send_ack(id, port);
+    }
 }
 
 void Station::watch_counters() {
@@ -756,10 +769,8 @@ void Station::start() {
     try {
         stop_ = false;
         failed_ = false;
-        if (a_.kiss) {
-            link_ = std::make_unique<kisslink::KissLink>(kiss_cap(a_.kiss_bw), a_.broadcast_mode.value_or(""));
-            link_->busy_limit_s = a_.kiss_busy_limit;
-        }
+        link_ = std::make_unique<kisslink::KissLink>(kiss_cap(a_.kiss_bw), a_.broadcast_mode.value_or(""));
+        link_->busy_limit_s = a_.kiss_busy_limit;
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = a_.record_dir;
@@ -787,7 +798,7 @@ void Station::start() {
             });
         };
 
-        if (a_.vara) {
+        {
             const QHostAddress addr = resolve(a_.host);
             cmd_ = std::make_unique<Port>(
                 addr, a_.command_port, true,
@@ -803,12 +814,12 @@ void Station::start() {
                 post([this, b = std::move(b)] { host_->data_in(b); });
             });
         }
-        if (a_.kiss) {
-            kiss_ = std::make_unique<KissServer>(
-                resolve(a_.kiss_address), a_.kiss_port,
-                [this, post](tnc::Bytes f) { post([this, f = std::move(f)]() mutable { link_->enqueue(std::move(f)); }); },
-                [this, post](int cmd, tnc::Bytes p) { post([this, cmd, p = std::move(p)] { link_->command(cmd, p); }); });
-        }
+        kiss_ = std::make_unique<KissServer>(
+            resolve(a_.kiss_address), a_.kiss_port,
+            [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack) {
+                post([this, port, ack, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack); });
+            },
+            [this, post](int cmd, tnc::Bytes p) { post([this, cmd, p = std::move(p)] { link_->command(cmd, p); }); });
 
         // PTT
         rig::Keyer::Ptt ptt;
@@ -880,10 +891,9 @@ void Station::start() {
         keyer_ = std::make_unique<rig::Keyer>(ptt, *play_, a_.ptt_off_delay_ms / 1000.0,
                                               [](const std::string& s) { log_line(ERROR, s); }, must_release);
 
-        if (a_.vara) logf(INFO, "VARA: commands on %s:%d, data on %d", a_.host.c_str(), a_.command_port, a_.command_port + 1);
-        if (a_.kiss)
-            logf(INFO, "KISS on %s:%d: %d Hz cap, broadcasts in %s", a_.kiss_address.c_str(), a_.kiss_port, a_.kiss_bw,
-                 link_->broadcast.c_str());
+        logf(INFO, "commands on %s:%d, data on %d", a_.host.c_str(), a_.command_port, a_.command_port + 1);
+        logf(INFO, "KISS on %s:%d: %d Hz cap, broadcasts in %s", a_.kiss_address.c_str(), a_.kiss_port, a_.kiss_bw,
+             link_->broadcast.c_str());
         logf(INFO, "recording to %s", a_.record_dir.empty() ? "(off)" : a_.record_dir.c_str());
         logf(INFO, "decode worker %s", a_.decode_worker ? "on" : "off");
 
