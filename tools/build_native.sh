@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Configure and build native/, including the pybind11 module, for the
-# project's virtualenv.
+# project's virtualenv. Without pybind11 the module is skipped; --test needs it.
 #
 #   tools/build_native.sh              # build
 #   tools/build_native.sh --test       # build, then ctest and pytest --native
@@ -27,7 +27,11 @@ cmake_args=(-S "$root/native" -B "$build" -G Ninja "-DPython3_EXECUTABLE=$py")
 # (never `uv add` it: a sync replaces the venv's ROCm torch).
 if pybind11_dir="$("$py" -c 'import pybind11; print(pybind11.get_cmake_dir())' 2>/dev/null)" ||
    pybind11_dir="$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())' 2>/dev/null)"; then
-    cmake_args+=("-Dpybind11_DIR=$pybind11_dir")
+    cmake_args+=("-Dpybind11_DIR=$pybind11_dir" -DDATA2G_BUILD_PYMODULE=ON)
+else
+    # Without it, skip the module; the core, apps and ctests still build.
+    echo "pybind11 not found: not building the data2g_native module" >&2
+    cmake_args+=(-DDATA2G_BUILD_PYMODULE=OFF)
 fi
 
 run_tests=0
@@ -38,6 +42,11 @@ for arg in "$@"; do
         *)          cmake_args+=("$arg") ;;
     esac
 done
+
+if (( run_tests )) && [[ -z "$pybind11_dir" ]]; then
+    echo "--test runs pytest --native, which needs pybind11" >&2
+    exit 1
+fi
 
 "$py" "$root/tools/gen_native_tables.py" --check
 "$py" "$root/tools/check_layering.py"
