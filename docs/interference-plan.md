@@ -63,3 +63,24 @@ be reproduced and predates the receive(head) fix, so it is not an arm):
   dB shifts of the 10% points and knees per cell, not throughput %.
 - **Sim vs air**: before training, the sim's profile values against those
   recorded on air (each rx event carries one since c4cd0a9).
+
+## Results (2026-10-03, rounds 1-4: runs/interference_round*.sh/.out)
+
+| round | data | arm with the noise profile vs A (clean data) |
+|-------|------|----------------------------------------------|
+| 1 | interfered (v1 draw) only | loses almost everywhere; B (no profile) worse still |
+| 2 | clean + v1 | even at high SNR; -15..-25% clean low-SNR fading; carriers +40..+96%, mid +24..+40% |
+| 3 | clean + mild + 1 dB floor wander | ~= A on clean (except deepest SNR) and wander cells; collapses past its training range (carriers 359 -> 3 bps) |
+| 4 | clean + mild + 1/3 v1, inputs clipped to the training range | no collapse; -7..-13% clean low-SNR fading; mid +47..+78%; carriers/edge mixed (noisy cells) |
+
+- Against its same-data control (no profile) the profile wins large on visible
+  narrowband QRM in every round: a real signal.
+- Any interfered training data cost clean low-SNR fading 7-25% against
+  clean-only training, with or without the profile.
+- Out of its training range the profile extrapolates into ruin; clipping
+  (predictor.clip_noise) bounds that.
+- No learned arm beats A across the board. Next candidate: A's model plus an
+  explicit rule on the profile (penalize candidates whose span covers a
+  sub-band well above the measured one and often loud).
+- The recordings are too few and unrepresentative to fit the sim to; the rec
+  cells are weak evidence.
