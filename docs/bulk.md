@@ -93,8 +93,11 @@ CPM modes:
   one or two. A polar resend is a plain repeat (Chase), so the control is weaker than on
   OFDM. The study (§6) checks whether acquisition fails where blocks would decode.
 - At most 8 data codewords a burst (`cpm.MAX_DATA`, the header's word set), so h is 1-4.
-- Each codeword is contiguous on air (3.1 s in fsk32r62), not spread over the burst: a fade
-  takes whole codewords, and the copy a burst later is the diversity.
+- The data codewords' tones are dealt round-robin over the burst (`bulk.cpm_audio`,
+  `codes.spread` at tone granularity), and un-dealt on receive (`bulk.undeal`). CPM's own
+  burst puts each codeword in a contiguous 3.1 s (fsk32r62), and a slow fade took it whole
+  (§6). The control slots, sync and header are CPM's own, unchanged. This is bulk's format
+  only: data2g-host's CPM bursts are not dealt.
 - An RV 1 copy can't decode alone in fsk32r62-r1/2 (noiseless check), as in OFDM r1/2.
 
 rv1 or a Chase (rv0) copy. Code-level AWGN, 200 codewords a point, the Es/N0 where 90%
@@ -264,33 +267,36 @@ of them control). Speed is 53-55% of h=15's. Last column: the 1% point's shift f
 ### fsk32r62-r1/2 (CPM)
 
 `scripts/bulk_study.py --only-mode --h 4`: as above, receiver listening for fsk32r62 only,
--16..+4 dB in 1 dB steps, 20 trials a cell, mpp, mps and mpg. Output: `runs/cpm_fsk32.csv`.
+-16..+4 dB in 1 dB steps, 20 trials a cell, mpp, mps and mpg, the same seeds in both runs.
+Output: `runs/cpm_fsk32.csv` (codewords contiguous, as CPM's own burst) and
+`runs/cpm_fsk32_il.csv` (data tones dealt over the burst, as shipped).
 
 - Speed at h=4: 30.4 s bursts, 61 bps of payload, about 84 bps of text (1.38x), 126 WPM.
   fldigi's MFSK32 is about 120 WPM.
 
-SNR (dB) where block loss reaches 5% and 1%, and where the last loss goes:
+SNR (dB) where block loss reaches 5% and 1%, and from where nothing was lost, contiguous
+-> dealt:
 
-| chan | 5% copy | 5% first | 1% copy | 1% first | no loss |
-|---|---|---|---|---|---|
-| mpp | -11.3 | -7.2 | -10.3 | -6.1 | -8 |
-| mps | -9.4 | -4.6 | -7.8 | -2.1 | -4 |
-| mpg | -9.2 | -4.5 | -7.4 | -1.5 | -4 |
+| chan | 5% | 1% | 1%, first send only | no loss |
+|---|---|---|---|---|
+| mpp | -11.3 -> -12.0 | -10.3 -> -10.4 | -6.1 -> -7.7 | -8 -> -9 |
+| mps | -9.4 -> -11.3 | -7.8 -> -9.9 | -2.1 -> -6.5 | -4 -> -7 |
+| mpg | -9.2 -> -11.3 | -7.4 -> -10.2 | -1.5 -> -6.2 | -4 -> -7 |
+
+- Contiguous, a slow fade (mps 0.15 Hz, mpg 0.1 Hz) took whole 3.1 s codewords, and the
+  copy 30 s later was the only diversity: a shallow curve, an occasional block down to
+  -16 dB but 1% only at -7.4 to -7.8. Dealt, each codeword spans the burst, and mps and mpg
+  land within 0.5 dB of mpp. mpp's 1 Hz fades already averaged inside 3 s: unchanged.
+- The 2-slot polar control is enough: a transfer heard nothing only at -14 dB and below,
+  where over 80% of blocks are lost anyway.
 
 Against the OFDM modes (h=15, the same study's conventions), 1% points:
 
 | mode | width | payload bps | mpp | mps |
 |---|---|---|---|---|
-| fsk32r62-r1/2 | 2300 Hz | 61 | -10.3 | -7.8 |
+| fsk32r62-r1/2 (dealt) | 2300 Hz | 61 | -10.4 | -9.9 |
 | n10-qpsk-r1/5 | 500 Hz | 56 | -8.4 | -9.2 |
 | qpsk-r1/5 | 1200 Hz | 139 | -6.5 | -7.1 |
 
-- The 2-slot polar control is enough: a transfer heard nothing only at -14 dB and below,
-  where over 80% of blocks are lost anyway.
-- On mpp fsk32 is best by about 2 dB. On slow fading (mps, mpg) its curve is shallow: an
-  occasional block down to -16 dB, but 1% only at -7.5 to -7.8. n10-qpsk-r1/5 is 1.4 dB
-  better on mps at the same speed, in a quarter of the width.
-- Cause: a CPM codeword is a contiguous 3.1 s of tones, so a slow fade takes it whole, and
-  the copy 30 s later is its only diversity. OFDM spreads each codeword over the whole burst.
-  Interleaving the data codewords' tones across the burst (bulk only, control and header
-  untouched) should close most of the gap. Not built yet.
+- fsk32 beats n10-qpsk-r1/5, at the same speed, by 2.0 dB on mpp and 0.7 dB on mps, in
+  4.6 times the width.
