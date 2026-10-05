@@ -109,8 +109,8 @@ def de_reliability(mean_llr: np.ndarray) -> np.ndarray:
     while h >= 1:
         m = m.reshape(-1, 2, h)
         a, b = m[:, 0, :], m[:, 1, :]
-        pa, pb = np.exp(to_log_phi(a)), np.exp(to_log_phi(b))
-        lp = np.log(pa + pb - pa * pb)  # phi of the check node's output
+        la, lb = to_log_phi(a), to_log_phi(b)
+        lp = np.logaddexp(la, lb + np.log1p(-np.exp(la)))  # log(pa + pb - pa pb): the check node's phi
         f = np.exp(np.interp(-lp, -_LOG_PHI, _LOG_M))
         f = np.where((a <= 0) | (b <= 0), 0.0, f)
         m = np.stack([f, a + b], axis=1).reshape(n)
