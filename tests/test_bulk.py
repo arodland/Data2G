@@ -35,3 +35,32 @@ def test_round_trip_with_a_header_lost(lost):
     # the burst's own blocks come from its headerless receive (an r1/2 copy at RV 1 can't decode alone)
     assert bulk.unpack(st.blocks, st.lay.n) == (TEXT, [])
     assert modem.LEADIN_SAMPLES < FS
+
+
+def test_listen_prints_in_order_as_blocks_finalize():
+    """Printer (data2g-bulk listen): text in block order while audio still
+    arrives; a burst lost whole (an r1/2 copy at RV 1 can't decode alone)
+    shows as its blocks' markers. The DD cap reaches every ModemRx."""
+    import io
+
+    from data2g.arq import frames as F
+
+    mode, h = "qpsk-r1/2", 6
+    blocks = bulk.pack(TEXT, codes.payload_bytes(bulk.MODES[mode]))
+    lay = bulk.Layout(bulk.MODES[mode], len(blocks), h)
+    lead = FS // 2
+    y = np.concatenate([np.zeros(lead), bulk.tx_audio(bulk.bursts(TEXT, mode, h, 1)), np.zeros(4 * FS)])
+    y[lead + lay.offset(1):lead + lay.offset(2)] = 0  # burst 1, all of it
+    y = hfchannel.apply_channel(y, snr_db=15, freq_offset_hz=20, ppm=30, seed=1)
+    out, seen = io.BytesIO(), []
+    rx = bulk.Rx(dd_cap=0.25)
+    made = []
+    orig = rx._rx
+    rx._rx = lambda r: made.append(orig(r)) or made[-1]
+    printer = bulk.Printer(out)
+    chunks = [y[i:i + FS] for i in range(0, len(y), FS)]
+    bulk.receive(chunks, rx=rx, on_chunk=lambda r: (printer(r), seen.append(len(out.getvalue()))))
+    want = b"".join(b"[block %d lost]" % k if 6 <= k < 12 else F.inflate(b"", b) for k, b in enumerate(blocks))
+    assert out.getvalue() == want
+    assert 0 < seen[len(chunks) // 2] < len(want)  # printing began mid-transfer
+    assert made and all(m.dd_until is not None for m in made)

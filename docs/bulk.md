@@ -21,8 +21,20 @@ cascades.
 data2g-bulk send notes.txt -o notes.wav [-m qpsk-r1/2] [--blocks-per-burst 15] [--passes 1]
 # play notes.wav into the rig (VOX, or rigctl T 1 / T 0 around aplay)
 data2g-bulk recv rec.wav -o notes.txt
-arecord -r 8000 -c 1 -f FLOAT_LE -t raw | data2g-bulk recv - -o notes.txt   # live
+data2g-bulk listen [--input-device NAME] [-o notes.txt]    # live, text on stdout as it arrives
+data2g-bulk listen --list-audio-devices
 ```
+
+`listen` captures through data2g-host's PortAudio input and decimator (`--sample-rate`, a
+multiple of 8000, default 48000). It prints the current stream's text in block order, each
+block once it is final: decoded, or `[block k lost]` once the burst carrying its copy has
+been handled. Stream starts and ends go to stderr. `-o` keeps the whole text in a file,
+rewritten as blocks arrive, so a later pass can fill a gap the printout already passed.
+
+DD cap (`--dd-cap`, default 0.25): DD starts no refine past that share of a burst's airtime,
+counted from the burst's decode start (`phy.ModemRx`'s budget). A burst then can't take
+longer to decode than about a quarter of its own airtime plus the plain decodes, so the
+receiver keeps up. `recv` takes the same option, no cap by default.
 
 The receiver writes the text with each run of lost blocks marked
 `[... blocks i-j of n lost ...]`, and prints how many blocks needed their copy.
@@ -105,11 +117,10 @@ its start is a fixed offset from burst 0's.
 ## 5. Not done
 
 - **CPM modes:** their control codeword differs. OFDM modes only.
-- **Live audio and PTT:** the tool reads and writes audio files or raw streams. data2g-host
-  has the PortAudio, rigctld and resampling code if a live mode is wanted.
-- **Receive deadline:** decoding runs DD without a time limit (`ModemRx(..., None)`). A live
-  receive at very low SNR may fall behind real time. A per-burst budget equal to the
-  burst's airtime would bound it.
+- **Live transmit and rig control:** not wanted. `send` writes a WAV; play it with any
+  player, keyed by VOX or by hand.
+- **DD cap tuning:** 0.25 of airtime is a guess with headroom, not measured. The studies run
+  uncapped, so their thresholds are the uncapped receiver's.
 - **Header-lost bursts before the first control** are received once a control arrives,
   back to the stream's burst 0, from the last 180 s of audio. Bursts heard before it, control
   lost, are kept (16 at most) and placed then. A joiner mid-transfer starts where its audio does.
