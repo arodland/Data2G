@@ -186,7 +186,7 @@ SNR is in 2500 Hz, against the bursts' peak.
 - 1200 Hz 16qam-r1/3 is dominated: qpsk-r3/4 is 18% faster for 0.2-0.4 dB at 1%.
 - n10-qpsk-r3/4 is dominated on mpp: n10-16qam-r1/2 is 34% faster at the same 1% point.
   On mps the 16qam mode costs 0.9 dB.
-- The copy takes the losses' fading tail away: 5% to 1% is 0.2-1.5 dB in every mode.
+- 5% to 1% is 0.2-1.5 dB in every mode but n10-qpsk-r3/4 on mps (2.5 dB): the copy takes most of the fading tail away.
 - Losses come a burst's worth at a time, so 1% points from 300-700 blocks a cell (the
   16qam modes) carry about 0.5 dB of noise.
 
