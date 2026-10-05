@@ -17,6 +17,7 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 data2g-host = "data2g.host:main"
+data2g-bulk = "data2g.bulk:main"
 
 [build-system]
 requires = ["setuptools>=68"]
