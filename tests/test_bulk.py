@@ -45,7 +45,8 @@ def test_cpm_round_trip_with_a_front_lost():
     text = TEXT[:900]
     bs = bulk.bursts(text, mode, h, 1)
     lay = bulk.Layout(bulk.MODES[mode], len(bulk.pack(text, codes.payload_bytes(bulk.MODES[mode]))), h)
-    assert [len(PHY.tx_audio(b)) for b in bs] == [lay.length(g) for g in range(len(bs))]
+    assert [len(bulk.cpm_audio(b)) for b in bs] == [lay.length(g) for g in range(len(bs))]
+    assert not np.array_equal(bulk.cpm_audio(bs[1]), PHY.tx_audio(bs[1]))  # data tones dealt over the burst
     lead = FS // 2
     y = np.concatenate([np.zeros(lead), bulk.tx_audio(bs), np.zeros(FS)])
     s = lead + lay.offset(1)

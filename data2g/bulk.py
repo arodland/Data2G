@@ -35,7 +35,7 @@ from . import codes, cpm, modem  # noqa: E402
 from .arq import frames as F  # noqa: E402
 from .arq import phy as PHY  # noqa: E402
 from .arq.link import Slot, TxBurst  # noqa: E402
-from .arq.modes import MODES, ctl_payload_bytes, is_cpm  # noqa: E402
+from .arq.modes import MODES, ctl_payload_bytes, ctl_spec, is_cpm  # noqa: E402
 from .config import FS, MAX_CODEWORDS  # noqa: E402
 from .tnc import Receiver  # noqa: E402
 
@@ -183,9 +183,36 @@ def bursts(text: bytes, mode: str, h: int, passes: int) -> list[TxBurst]:
     return out
 
 
+def cpm_audio(b: TxBurst) -> np.ndarray:
+    """A CPM burst as phy.tx_audio makes it, but the data codewords' tones
+    dealt round-robin over the burst's data (codes.spread): a CPM codeword
+    is otherwise a contiguous 3.1 s (fsk32r62), and a slow fade took it
+    whole (fsk32r62-r1/2, 1% points: mpp -10.3 dB, mps -7.8, mpg -7.4).
+    The control slots stay as they are, so sync and header don't change."""
+    spec = MODES[b.submode]
+    k = n_ctl(spec)
+    coded = [codes.encode(ctl_spec(spec) if i < k else spec, s.payload, s.rv, PHY.mask_value(s.mask_id), i)
+             for i, s in enumerate(b.slots)]
+    if len(coded) > k:
+        data = codes.spread(np.stack(coded[k:]), cpm.GRIDS[spec.grid].bits)
+        coded = coded[:k] + list(data.reshape(len(coded) - k, -1))
+    return cpm.modulate(spec, coded, dup=k == 2)
+
+
+def undeal(r: dict) -> dict:
+    """A received CPM burst's data soft bits back in codeword order (cpm_audio's deal undone)."""
+    if r.get("family") == "cpm" and not r.get("_undealt"):
+        k, soft = r["n_ctl_slots"], r["soft"]
+        if len(soft) > k:
+            data = codes.despread(np.concatenate(soft[k:]), len(soft) - k, cpm.GRIDS[r["band"]].bits)
+            r["soft"] = list(soft[:k]) + list(data)
+        r["_undealt"] = True
+    return r
+
+
 def tx_audio(bs: list[TxBurst]) -> np.ndarray:
     """Bursts back to back, each at full-scale peak (as the engine sends them)."""
-    xs = [PHY.tx_audio(b) for b in bs]
+    xs = [cpm_audio(b) if is_cpm(MODES[b.submode]) else PHY.tx_audio(b) for b in bs]
     return np.concatenate([x / np.max(np.abs(x)) for x in xs])
 
 
@@ -245,7 +272,7 @@ class Rx:
 
     def _rx(self, r: dict):
         budget = None if self.dd_cap is None else self.dd_cap * airtime(r["spec"], r["n_cw"]) / FS
-        return PHY.ModemRx(r, self.store, budget)
+        return PHY.ModemRx(undeal(r), self.store, budget)
 
     def control(self, rx, r: dict) -> tuple | None:
         c = rx.decode(0, CTL_MASK, 0, None)
