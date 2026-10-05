@@ -158,3 +158,35 @@ At equal throughput (payload bytes per codeword of airtime, before the ~1.45x de
   transfers, most in qpsk-r1/5 near its knee. Controls lost with the burst placed by
   timing: 4-23.
 - Default mode qpsk-r1/2: 350 bps of payload at h=15 (40 s bursts), about 500 bps of English text.
+
+### Every mode at h=15: 5% and 1% points
+
+`runs/bulk_fine.csv`: 1 dB steps, 20 trials a cell (310-3933 blocks a cell), mpp and mps,
+otherwise as above. Speeds are steady state (one pass, long text). Text bps uses each
+mode's per-block deflate ratio on `docs/*.md` (1.28-1.64x). WPM is 5 characters a word.
+SNR is in 2500 Hz, against the bursts' peak.
+
+| band | mode | burst | payload bps | text bps | WPM | 5% mpp | 5% mps | 1% mpp | 1% mps |
+|---|---|---|---|---|---|---|---|---|---|
+| 1200 | qpsk-r1/5 | 39.8 s | 139 | 189 | 283 | -7.1 | -8.0 | -6.5 | -7.1 |
+| 1200 | qpsk-r1/3 | 39.8 s | 229 | 322 | 483 | -5.2 | -5.6 | -4.9 | -4.6 |
+| 1200 | qpsk-r1/2 | 39.8 s | 350 | 506 | 760 | -3.0 | -3.1 | -2.2 | -2.0 |
+| 1200 | 16qam-r1/3 | 20.2 s | 451 | 634 | 952 | -0.4 | -0.9 | 0.0 | -0.2 |
+| 1200 | qpsk-r3/4 | 39.8 s | 531 | 811 | 1216 | -0.2 | -0.5 | 0.4 | 0.0 |
+| 1200 | 16qam-r1/2 | 39.8 s | 712 | 1165 | 1747 | 0.8 | 0.8 | 1.0 | 1.0 |
+| 500 | n10-qpsk-r1/5 | 49.6 s | 56 | 71 | 106 | -9.7 | -11.0 | -8.4 | -9.2 |
+| 500 | n10-qpsk-r1/3 | 49.6 s | 97 | 130 | 195 | -7.3 | -8.2 | -6.1 | -7.2 |
+| 500 | n10-qpsk-r1/2 | 49.6 s | 145 | 201 | 302 | -5.3 | -6.6 | -4.1 | -5.2 |
+| 500 | n10-16qam-r1/3 | 49.6 s | 191 | 269 | 404 | -2.8 | -3.2 | -2.2 | -2.2 |
+| 500 | n10-qpsk-r3/4 | 49.6 s | 218 | 309 | 463 | -1.8 | -3.5 | -1.0 | -1.0 |
+| 500 | n10-16qam-r1/2 | 49.6 s | 293 | 426 | 639 | -1.4 | -0.7 | -1.0 | -0.1 |
+| 500 | n10-16qam-r2/3 | 49.6 s | 394 | 596 | 893 | 0.0 | 0.8 | 0.8 | 1.7 |
+| 500 | n10-16qam-r3/4 | 49.6 s | 445 | 688 | 1032 | 1.0 | 2.2 | 2.4 | 3.7 |
+
+- 1200 Hz 16qam-r1/3 is dominated: qpsk-r3/4 is 18% faster for 0.2-0.4 dB at 1%.
+- n10-qpsk-r3/4 is dominated on mpp: n10-16qam-r1/2 is 34% faster at the same 1% point.
+  On mps the 16qam mode costs 0.9 dB.
+- The copy takes the losses' fading tail away: 5% to 1% is 0.2-1.5 dB in every mode.
+- Losses come a burst's worth at a time, so 1% points from 300-700 blocks a cell (the
+  16qam modes) carry about 0.5 dB of noise.
+
