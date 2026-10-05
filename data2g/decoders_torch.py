@@ -105,6 +105,8 @@ class SCLDecoder:
 
     def __init__(self, code: PolarCode, list_size: int = 8, device="cpu"):
         self.t, self.code, self.L, self.device = torch, code, list_size, device
+        if len(code.copies):
+            raise NotImplementedError("polar.IRPolarCode's copies: decode it with polar.SCLDecoder")
         frozen = np.ones(code.n, bool)
         frozen[code.info_pos] = False
         self.frozen = frozen

@@ -135,8 +135,7 @@ Where the rest comes from:
     pair. A pair combined on a burst that wasn't duplicated fails its masked
     CRC. One whose frame type isn't `ARQ_DUP` is discarded.
 - **Redundancy versions are explicit:** a `rv` extension lists 2 bits per resend, in
-  slot order, and is always present when K > 0. (Polar resends are identical and
-  Chase-combined; their RV field is 0.)
+  slot order, and is always present when K > 0.
   - **RV r (LDPC)** sends positions [r·n, (r+1)·n) of the mother code's circular
     buffer, wrapping (`codes.rv_positions`).
     - The mother code is the same base graph with all its extension rows
@@ -149,6 +148,24 @@ Where the rest comes from:
     transmissions with IR move the 50% point 2-6 dB below one transmission's,
     more at higher code rates. Chase gets 1-3.5 dB less than IR at rate 1/2 and
     above. At rate 1/5, where RV1 is mostly repeats, they are the same.
+  - **RV r (polar)** sends half r mod 2 of a length-2N polar code
+    (`polar.IRPolarCode`; Ma, Xiong, Wei, Jiang, "An Incremental Redundancy HARQ
+    Scheme for Polar Code", arXiv:1708.09679).
+    - RV0's codeword x = u G_N is the lower half of [v, u] G_2N = [(v ^ u) G_N, x],
+      so RV0 is unchanged on air. RV1 is the upper half, punctured the same way.
+      RV2 repeats RV0 and RV3 repeats RV1 (Chase).
+    - v is frozen except for copies of the info bits that the combined code protects
+      worst. SC decodes v first, so each original is decoded as a frozen bit set to
+      its copy's decision on that list path. The copies come from Gaussian
+      approximation (exact phi) over both halves at `codes.POLAR_IR_DESIGN_SNR_DB`.
+      Native code takes them from `tables::POLAR_IR`.
+    - The receiver decodes the extended code once RV1's half of the buffer holds
+      anything, and RV0's code alone before that.
+    - **Measured** (scripts/polar_ir_study.py, runs/polar_ir_study.csv: BPSK/AWGN,
+      CA-SCL, 10% FER): IR beats Chase by 0.2-0.5 dB on the low-rate ACK and k96/k192
+      codes, and by 0.75-1.0 dB at rate 1/2 and above (CPM control, `n4-ack-2f`).
+      A design point far from where the code operates can lose: CPM control
+      designed at -15 dB lost 5.8 dB.
 - **Slot-to-seq mapping:** it follows from the acted-on ACK's missing list (the K
   resends) and `next_seq` (the new codewords). Every slot is then checked by its
   seq-masked CRC (§2), so a wrong mapping costs a failed decode, never wrong data.

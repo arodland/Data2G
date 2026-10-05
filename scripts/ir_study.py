@@ -8,6 +8,8 @@ Reported beside the simulator's model of the same thing
 (scripts/linksim.py SimRx: P = curve(MI_1 + MI_2), MI from the sim channel).
 
     uv run python scripts/ir_study.py --out runs/ir_study.csv
+    uv run python scripts/ir_study.py --out runs/ir_study_polar.csv \
+        --modes ack-4f,ack-1f,polar-k96-f4,n10-ack-4f,n4-ack-2f
 """
 
 from data2g import threads  # noqa: E402
@@ -43,7 +45,9 @@ def thresholds() -> dict:
 
 
 def ladder_name(s) -> str:
-    return f"{'' if s.band == 'w' else s.band + '-'}{s.code}-{s.constellation}-f{s.frames_per_cw}-k{s.k}@h{s.headroom:g}"
+    # the ladder measured polar modes before CRC-24 (config: k + 8), as k - 8
+    k = s.k - 8 if s.code == "polar" else s.k
+    return f"{'' if s.band == 'w' else s.band + '-'}{s.code}-{s.constellation}-f{s.frames_per_cw}-k{k}@h{s.headroom:g}"
 
 
 def burst_soft(spec, payloads, rvs, chan, snr, seed):
@@ -91,16 +95,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="runs/ir_study.csv")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--modes", default=",".join(MODES))
+    ap.add_argument("--trials", type=int, default=TRIALS)
     a = ap.parse_args()
     thr = thresholds()
     jobs = []
-    for name in MODES:
+    for name in a.modes.split(","):
         for chan in CHANNELS:
             t = thr.get((ladder_name(SUBMODES[name]), chan))
             if t is None:
                 print("no threshold", name, chan)
                 continue
-            jobs += [(name, chan, t + d, 1000 * i + j) for i, d in enumerate(OFFSETS_DB) for j in range(TRIALS)]
+            jobs += [(name, chan, t + d, 1000 * i + j) for i, d in enumerate(OFFSETS_DB) for j in range(a.trials)]
     rows = []
     with Pool(a.jobs) as pool:
         for r in pool.imap_unordered(trial, jobs, chunksize=2):

@@ -59,15 +59,19 @@ inline void argsort(const float* v, int n, int* idx) {
 
 // One codeword's decoder state. Depth d holds nodes of size n >> d.
 struct Work {
-    int L, m;
+    int L, m, nc;
     const std::uint8_t* frozen;
+    const int* slot;                                 // SCLDecoder::slot_
+    std::vector<std::uint8_t> cp, cp2;               // (L, nc): each path's src bits, and scratch
     std::vector<std::vector<float>> alpha;           // [d]: (L, n >> d), node input
     std::vector<std::vector<std::uint8_t>> bl, br;   // [d]: (L, n >> (d + 1)), children's beta
     std::vector<std::vector<int>> p1, p2;            // [d]: (L,), children's path permutations
     std::vector<float> pm, cand;
     std::vector<int> idx;
 
-    Work(int n, int L_, const std::uint8_t* fr) : L(L_), m(std::countr_zero(static_cast<unsigned>(n))), frozen(fr) {
+    Work(int n, int L_, const std::uint8_t* fr, const int* sl, int nc_)
+        : L(L_), m(std::countr_zero(static_cast<unsigned>(n))), nc(nc_), frozen(fr), slot(sl),
+          cp(static_cast<std::size_t>(L_) * nc_), cp2(cp.size()) {
         alpha.resize(m + 1);
         bl.resize(m);
         br.resize(m);
@@ -88,10 +92,12 @@ struct Work {
         if (d == m) {
             const float* a = alpha[d].data();
             if (frozen[lo]) {
+                const int c = slot[lo];  // a copy's dst: the path's src bit, else 0
                 for (int l = 0; l < L; ++l) {
-                    out[l] = 0;
+                    const std::uint8_t u = c < 0 ? 0 : cp[static_cast<std::size_t>(l) * nc + c];
+                    out[l] = u;
                     perm[l] = l;
-                    if (pm[l] != INFINITY || a[l] != a[l]) pm[l] += softplus(-a[l]);  // inf + finite stays inf
+                    if (pm[l] != INFINITY || a[l] != a[l]) pm[l] += softplus(u ? a[l] : -a[l]);  // inf + finite stays inf
                 }
                 return;
             }
@@ -104,6 +110,13 @@ struct Work {
                 out[l] = static_cast<std::uint8_t>(idx[l] / L);
                 perm[l] = idx[l] % L;
                 pm[l] = cand[idx[l]];
+            }
+            if (nc) {  // paths reorder: their src bits go with them
+                for (int l = 0; l < L; ++l)
+                    std::copy_n(cp.data() + static_cast<std::size_t>(perm[l]) * nc, nc, cp2.data() + static_cast<std::size_t>(l) * nc);
+                cp.swap(cp2);
+                if (const int c = slot[lo]; c >= 0)
+                    for (int l = 0; l < L; ++l) cp[static_cast<std::size_t>(l) * nc + c] = out[l];
             }
             return;
         }
@@ -170,6 +183,31 @@ PolarCode::PolarCode(int k_, int e_, std::span<const std::uint16_t> info) : k(k_
     for (auto p : info_pos) frozen[p] = 0;
 }
 
+PolarCode PolarCode::ir(const PolarCode& base, std::span<const std::uint16_t> cp) {
+    PolarCode c;
+    c.k = base.k;
+    c.e = 2 * base.e;
+    c.n = 2 * base.n;
+    const auto N = static_cast<std::uint16_t>(base.n);
+    for (auto p : base.info_pos) c.info_pos.push_back(static_cast<std::uint16_t>(N + p));
+    for (auto p : base.sent) c.sent.push_back(static_cast<std::uint16_t>(N + p));
+    c.sent.insert(c.sent.end(), base.sent.begin(), base.sent.end());
+    c.punctured = base.punctured;
+    for (auto p : base.punctured) c.punctured.push_back(static_cast<std::uint16_t>(N + p));
+    c.frozen.assign(c.n, 1);
+    for (auto p : c.info_pos) c.frozen[p] = 0;
+    if (cp.size() % 2) throw std::invalid_argument("polar ir: copies come in (src, dst) pairs");
+    for (std::size_t i = 0; i < cp.size(); i += 2) {
+        const auto src = cp[i], dst = cp[i + 1];
+        if (src >= N || dst < N || dst >= c.n || c.frozen[dst] || !c.frozen[src])
+            throw std::invalid_argument("polar ir: a copy runs from a frozen upper-half bit to a lower-half info bit");
+        c.copies.push_back({src, dst});
+        c.frozen[src] = 0;
+        c.frozen[dst] = 1;
+    }
+    return c;
+}
+
 Mat<std::uint8_t> PolarCode::encode(const Mat<std::uint8_t>& bits) const {
     if (static_cast<int>(bits.cols) != k) throw std::invalid_argument("polar encode: expected (B, k) bits");
     Mat<std::uint8_t> out(bits.rows, e);
@@ -177,6 +215,7 @@ Mat<std::uint8_t> PolarCode::encode(const Mat<std::uint8_t>& bits) const {
     for (std::size_t b = 0; b < bits.rows; ++b) {
         std::ranges::fill(u, 0);
         for (int j = 0; j < k; ++j) u[info_pos[j]] = bits[b][j];
+        for (const auto& [src, dst] : copies) u[src] = u[dst];
         transform(u);
         for (int j = 0; j < e; ++j) out[b][j] = u[sent[j]];
     }
@@ -194,8 +233,16 @@ std::span<const std::uint16_t> ga_info_pos(int k, int e) {
     throw std::out_of_range("polar: no frozen GA design for k=" + std::to_string(k) + ", e=" + std::to_string(e));
 }
 
-SCLDecoder::SCLDecoder(PolarCode code, int list_size) : code_(std::move(code)), L_(list_size) {
+std::span<const std::uint16_t> ir_copies(int k, int e) {
+    for (const auto& d : tables::POLAR_IR)
+        if (d.k == k && d.e == e) return d.copies;
+    throw std::out_of_range("polar: no IR extension for k=" + std::to_string(k) + ", e=" + std::to_string(e));
+}
+
+SCLDecoder::SCLDecoder(PolarCode code, int list_size) : code_(std::move(code)), L_(list_size), slot_(code_.n, -1) {
     if (L_ < 1) throw std::invalid_argument("polar: list size must be >= 1");
+    for (std::size_t i = 0; i < code_.copies.size(); ++i)
+        for (auto p : code_.copies[i]) slot_[p] = static_cast<int>(i);
 }
 
 SclResult SCLDecoder::decode(const Mat<float>& llr) const {
@@ -206,7 +253,7 @@ SclResult SCLDecoder::decode(const Mat<float>& llr) const {
     SclResult res{Mat<std::uint8_t>(B, static_cast<std::size_t>(L) * k), Mat<float>(B, L)};
     // rows are independent: one pool task each, with its own workspace
     pool::parallel_for(B, [&](std::size_t b) {
-        Work w(n, L, c.frozen.data());
+        Work w(n, L, c.frozen.data(), slot_.data(), static_cast<int>(c.copies.size()));
         std::vector<std::uint8_t> x(static_cast<std::size_t>(L) * n), u(n);
         std::vector<int> perm(L), order(L);
         float* a0 = w.alpha[0].data();

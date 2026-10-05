@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" / "python"
-NATIVE_ABI = 1
+NATIVE_ABI = 2
 _import_error = None
 _originals = {}  # (module, attribute) -> the Python function --native replaced
 _PROVIDERS = []  # more substitutions: functions native -> {(module, attr): replacement}
@@ -122,9 +122,27 @@ def _substitutions(native):
             return native.polar.SCLDecoder(code, codes.POLAR_LIST)
         return py_decoder(spec, device)
 
+    py_polar_ir_code, py_ir_decoder = codes.polar_ir_code, codes._ir_decoder
+
+    @functools.lru_cache(maxsize=None)
+    def polar_ir_code(spec):
+        base = codes.polar_code(spec)
+        if isinstance(base, native.polar.PolarCode):
+            return native.polar.PolarCode.ir(base, native.polar.ir_copies(spec.k, spec.coded_bits))
+        return py_polar_ir_code(spec)
+
+    @functools.lru_cache(maxsize=None)
+    def ir_decoder(spec):
+        code = codes.polar_ir_code(spec)
+        if isinstance(code, native.polar.PolarCode):
+            return native.polar.SCLDecoder(code, codes.POLAR_LIST)
+        return py_ir_decoder(spec)
+
     return {
         (codes, "polar_code"): polar_code,
         (codes, "_decoder"): decoder,
+        (codes, "polar_ir_code"): polar_ir_code,
+        (codes, "_ir_decoder"): ir_decoder,
         (codes, "crc24"): native.codes.crc24,
         (codes, "_with_crc"): native.codes.with_crc,
         (codes, "scramble_seed"): native.codes.scramble_seed,

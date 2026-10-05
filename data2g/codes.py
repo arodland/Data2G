@@ -76,6 +76,9 @@ def ldpc_code(spec: SubmodeSpec) -> ldpc.QCLDPC:
 # scripts/design_polar.py searches one per submode.
 POLAR_DESIGN_SNR_DB = -3.0
 POLAR_LIST = 8
+# The IR extension's copies: GA with both transmissions in, at a point
+# below every polar mode's two-transmission threshold (scripts/polar_ir_study.py).
+POLAR_IR_DESIGN_SNR_DB = -9.0
 
 
 FORMAT_DIR = Path(__file__).parent / "format"
@@ -105,6 +108,12 @@ def polar_code(spec: SubmodeSpec) -> polar.PolarCode:
     f = frozen(spec)
     info = tuple(int(i) for i in f["info_pos"]) if f is not None and "info_pos" in f else None
     return polar.PolarCode(spec.k, spec.coded_bits, design_snr_db=POLAR_DESIGN_SNR_DB, frozen_override=info)
+
+
+@lru_cache(maxsize=None)
+def polar_ir_code(spec: SubmodeSpec) -> polar.IRPolarCode:
+    """RV 0 + RV 1 of the polar code, as one code (polar.IRPolarCode)."""
+    return polar.IRPolarCode(polar_code(spec), POLAR_IR_DESIGN_SNR_DB)
 
 
 def label_reliability(points: np.ndarray, rate: float, n: int = 20000) -> np.ndarray:
@@ -238,8 +247,9 @@ def encode(spec: SubmodeSpec, payload: bytes, rv: int = 0, crc_mask: int = 0, in
 def encode_info(spec: SubmodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
     """(B, k) info bits (CRC included) -> (B, coded_bits), interleaved.
     `rv`: redundancy version (rv_positions); 0 is the first transmission."""
-    if rv and spec.code == "ldpc":
-        coded = ldpc_code(spec).mother().encode(bits)[:, rv_positions(spec, rv)]
+    if rv % rv_cycle(spec):
+        mother = ldpc_code(spec).mother() if spec.code == "ldpc" else polar_ir_code(spec)
+        coded = mother.encode(bits)[:, rv_positions(spec, rv)]
     else:
         code = ldpc_code(spec) if spec.code == "ldpc" else polar_code(spec)
         coded = code.encode(bits)
@@ -247,26 +257,26 @@ def encode_info(spec: SubmodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
 
 
 # --- incremental redundancy (docs/arq.md §5) -----------------------------------------
-# LDPC: RV r sends positions [r n, (r + 1) n) of the mother code's circular
-# buffer (every base row: rate ~1/5), wrapping. RV 0 is the codeword as
-# frozen; RV 1 onwards is fresh parity until the buffer runs out, then
-# repeats (Chase). Polar: every RV is the same codeword (Chase).
+# RV r sends positions [r n, (r + 1) n) of the mother code's circular
+# buffer, wrapping. RV 0 is the codeword as frozen.
+# LDPC: the mother code is every base row (rate ~1/5); RV 1 onwards is
+# fresh parity until the buffer runs out, then repeats (Chase).
+# Polar: the mother code is polar.IRPolarCode, twice the length; RV 1 is
+# its other half, RV 2 repeats RV 0 and RV 3 repeats RV 1.
 # Soft bits accumulate over the buffer in code order ("buffer": (B, L)).
 
 def rv_cycle(spec: SubmodeSpec) -> int:
     """Distinct redundancy versions: resend r uses RV r mod this."""
-    return 4 if spec.code == "ldpc" else 1
+    return 4 if spec.code == "ldpc" else 2
 
 
 def buffer_len(spec: SubmodeSpec) -> int:
-    return ldpc_code(spec).mother().n if spec.code == "ldpc" else spec.coded_bits
+    return ldpc_code(spec).mother().n if spec.code == "ldpc" else 2 * spec.coded_bits
 
 
 def rv_positions(spec: SubmodeSpec, rv: int) -> np.ndarray:
     """Buffer positions RV `rv` carries, in code order."""
     n = spec.coded_bits
-    if spec.code != "ldpc":
-        return np.arange(n)
     return (rv % rv_cycle(spec) * n + np.arange(n)) % buffer_len(spec)
 
 
@@ -286,12 +296,19 @@ def combine(spec: SubmodeSpec, buf: np.ndarray | None, soft: np.ndarray, rvs) ->
 def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
     """(B, L) combined buffers, with RVs up to `max_rv` received -> [(payload,
     crc_ok)]: LDPC decodes the mother code cut to the buffer's received
-    extent (unreceived parity would only slow it)."""
+    extent (unreceived parity would only slow it). Polar decodes the IR
+    code once RV 1's half holds anything, else RV 0's code alone: with
+    nothing on the copies, the IR code's list would spend its paths
+    guessing them."""
     masks = np.broadcast_to(crc_mask, len(buf))
     idx = np.arange(len(buf)) if index is None else np.broadcast_to(index, len(buf))
     if spec.code != "ldpc":
-        return _payloads(spec, *_decode_code_order(spec, _decoder(spec), buf, crc_mask=masks, index=idx),
-                         masks, idx)
+        ir = (buf[:, spec.coded_bits:] != 0).any(axis=1)
+        bits, ok = np.zeros((len(buf), spec.k), np.uint8), np.zeros(len(buf), bool)
+        for rows, dec, llr in ((~ir, _decoder(spec), buf[:, : spec.coded_bits]), (ir, _ir_decoder(spec), buf)):
+            if rows.any():
+                bits[rows], ok[rows] = _decode_code_order(spec, dec, llr[rows], crc_mask=masks[rows], index=idx[rows])
+        return _payloads(spec, bits, ok, masks, idx)
     extent = min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
     return _payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
 
@@ -299,6 +316,11 @@ def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=
 @lru_cache(maxsize=None)
 def _ext_decoder(spec: SubmodeSpec, extent: int):
     return ldpc.MinSumDecoder(ldpc_code(spec).mother(extent))
+
+
+@lru_cache(maxsize=None)
+def _ir_decoder(spec: SubmodeSpec):
+    return polar.SCLDecoder(polar_ir_code(spec), POLAR_LIST)
 
 
 def _payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:

@@ -141,7 +141,7 @@ const std::vector<Spec>& specs() {
 struct Codecs {
     std::optional<ldpc::Code> code, mother;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
-    std::unique_ptr<polar::SCLDecoder> scl;
+    std::unique_ptr<polar::SCLDecoder> scl, scl_ir;
 };
 std::mutex cache_mutex;
 std::map<const Spec*, Codecs> cache;
@@ -204,13 +204,15 @@ Mat<float> deinterleave_llr(const Spec& s, const Mat<float>& llr) {
 }
 
 // codes._decode_code_order: LLRs in the decoder's code order.
+// Polar: `scl`, or by default the code's own decoder.
 Info decode_code_order(const Spec& s, const ldpc::Decoder* dec, const Mat<float>& deint, int iters,
-                       std::span<const std::uint32_t> masks, std::span<const int> index) {
+                       std::span<const std::uint32_t> masks, std::span<const int> index,
+                       const polar::SCLDecoder* scl_ = nullptr) {
     if (dec) {
         auto r = dec->decode(deint, iters);
         return {std::move(r.bits), std::move(r.ok)};
     }
-    const auto& scl = polar_decoder(s);
+    const auto& scl = scl_ ? *scl_ : polar_decoder(s);
     const auto r = scl.decode(deint);
     const std::size_t B = deint.rows, L = static_cast<std::size_t>(scl.list_size()), k = static_cast<std::size_t>(s.k);
     Info out{Mat<std::uint8_t>(B, k), std::vector<std::uint8_t>(B, 0)};
@@ -263,14 +265,22 @@ const polar::SCLDecoder& polar_decoder(const Spec& s) {
     return *d;
 }
 
-int rv_cycle(const Spec& s) { return s.polar ? 1 : 4; }
+const polar::SCLDecoder& polar_ir_decoder(const Spec& s) {
+    const auto& base = polar_decoder(s).code();
+    std::lock_guard lock(cache_mutex);
+    auto& d = cache[&s].scl_ir;
+    if (!d) d = std::make_unique<polar::SCLDecoder>(polar::PolarCode::ir(base, polar::ir_copies(s.k, s.coded_bits)), POLAR_LIST);
+    return *d;
+}
 
-int buffer_len(const Spec& s) { return s.polar ? s.coded_bits : mother_code(s).n; }
+int rv_cycle(const Spec& s) { return s.polar ? 2 : 4; }
+
+int buffer_len(const Spec& s) { return s.polar ? 2 * s.coded_bits : mother_code(s).n; }
 
 std::vector<int> rv_positions(const Spec& s, int rv) {
     const int n = s.coded_bits, c = rv_cycle(s), L = buffer_len(s);
     std::vector<int> out(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) out[i] = s.polar ? i : (((rv % c) + c) % c * n + i) % L;
+    for (int i = 0; i < n; ++i) out[i] = (((rv % c) + c) % c * n + i) % L;
     return out;
 }
 
@@ -287,8 +297,8 @@ std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t>
 
 Mat<std::uint8_t> encode_info(const Spec& s, const Mat<std::uint8_t>& bits, int rv) {
     Mat<std::uint8_t> coded;
-    if (rv && !s.polar) {
-        const auto full = mother_code(s).encode(bits);
+    if (const int c = rv_cycle(s); (rv % c + c) % c) {
+        const auto full = s.polar ? polar_ir_decoder(s).code().encode(bits) : mother_code(s).encode(bits);
         const auto pos = rv_positions(s, rv);
         coded = Mat<std::uint8_t>(bits.rows, pos.size());
         for (std::size_t b = 0; b < bits.rows; ++b)
@@ -359,9 +369,31 @@ std::vector<Payload> decode_many(const Spec& s, const Mat<float>& soft, std::spa
 std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int max_rv, std::span<const std::uint32_t> masks,
                                    std::span<const int> index) {
     if (s.polar) {
-        const auto d = decode_code_order(s, nullptr, cut(s, buf, static_cast<std::size_t>(s.coded_bits)), ITERS,
-                                         masks, index);
-        return payloads(s, d.bits, d.ok, masks, index);
+        // codes.decode_buffer: the IR code where RV 1's half holds anything
+        const std::size_t B = buf.rows, E = static_cast<std::size_t>(s.coded_bits);
+        if (buf.cols < E) throw std::invalid_argument(std::string(s.name) + ": too few soft values per row");
+        Info all{Mat<std::uint8_t>(B, static_cast<std::size_t>(s.k)), std::vector<std::uint8_t>(B, 0)};
+        for (const bool ir : {false, true}) {
+            std::vector<std::size_t> rows;
+            for (std::size_t b = 0; b < B; ++b)
+                if (std::any_of(buf[b] + E, buf[b] + buf.cols, [](double v) { return v != 0.0; }) == ir) rows.push_back(b);
+            if (rows.empty()) continue;
+            const std::size_t w = ir ? buf.cols : E;
+            Mat<float> llr(rows.size(), w);
+            std::vector<std::uint32_t> m(rows.size());
+            std::vector<int> ix(rows.size());
+            for (std::size_t r = 0; r < rows.size(); ++r) {
+                for (std::size_t j = 0; j < w; ++j) llr[r][j] = static_cast<float>(buf[rows[r]][j]);
+                m[r] = mask_at(masks, rows[r], B);
+                ix[r] = index_at(index, rows[r], B);
+            }
+            const auto d = decode_code_order(s, nullptr, llr, ITERS, m, ix, ir ? &polar_ir_decoder(s) : nullptr);
+            for (std::size_t r = 0; r < rows.size(); ++r) {
+                std::copy_n(d.bits[r], s.k, all.bits[rows[r]]);
+                all.ok[rows[r]] = d.ok[r];
+            }
+        }
+        return payloads(s, all.bits, all.ok, masks, index);
     }
     const int extent = std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
     const auto d = decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),

@@ -59,3 +59,36 @@ def test_scl_decode(native, reference, spec):
         assert nu.dtype == np.uint8 and npm.dtype == np.float32, what
         np.testing.assert_array_equal(nu, pu, err_msg=what)
         np.testing.assert_array_equal(npm, ppm, err_msg=what)  # bitwise, inf included
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+def test_ir_code_and_decode(native, reference, spec):
+    """The IR extension (polar.IRPolarCode): the frozen copies are the
+    design's, and the code, encoding and SCL decode (copies frozen to each
+    path's decision) match."""
+    py_base, nat_base = _pair(native, reference, spec)
+    py = polar.IRPolarCode(py_base, codes.POLAR_IR_DESIGN_SNR_DB)
+    np.testing.assert_array_equal(native.polar.ir_copies(spec.k, spec.coded_bits), py.copies.reshape(-1))
+    nat = native.polar.PolarCode.ir(nat_base, py.copies.reshape(-1))
+    assert (nat.k, nat.e, nat.n) == (py.k, py.e, py.n)
+    for attr in ("info_pos", "sent", "copies"):
+        np.testing.assert_array_equal(getattr(nat, attr), getattr(py, attr))
+    rng = np.random.default_rng(spec.coded_bits + 7)
+    bits = rng.integers(0, 2, (20, spec.k))
+    np.testing.assert_array_equal(nat.encode(bits), py.encode(bits))
+    py_dec, nat_dec = polar.SCLDecoder(py, codes.POLAR_LIST), native.polar.SCLDecoder(nat, codes.POLAR_LIST)
+    for what, llr in _llrs(spec, py, rng, 24):
+        if what == "zeros":
+            llr = np.zeros((3, py.e), np.float32)
+        pu, ppm = py_dec.decode(llr)
+        nu, npm = nat_dec.decode(llr)
+        np.testing.assert_array_equal(nu, pu, err_msg=what)
+        np.testing.assert_array_equal(npm, ppm, err_msg=what)
+
+
+def test_ir_rejects_bad_copies(native):
+    base = native.polar.PolarCode(56, 240, polar.PolarCode(56, 240).info_pos.tolist())
+    info = int(base.info_pos[0])
+    for bad in ([1], [256 + info, 256 + info], [3, info], [3, 256 + int(np.setdiff1d(np.arange(256), base.info_pos)[0])]):
+        with pytest.raises(ValueError):
+            native.polar.PolarCode.ir(base, bad)

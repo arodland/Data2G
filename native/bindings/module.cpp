@@ -27,7 +27,7 @@ void bind_host(py::module_&);
 PYBIND11_MODULE(data2g_native, m) {
     // Bumped when the module's Python-facing signatures change, so conftest
     // refuses a stale build instead of failing confusingly.
-    m.attr("__abi__") = 1;
+    m.attr("__abi__") = 2;
     data2g::bind::bind_codes(m);
     data2g::bind::bind_constellation(m);
     data2g::bind::bind_cpm(m);

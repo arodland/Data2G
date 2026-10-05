@@ -68,6 +68,7 @@ const ldpc::Code& ldpc_code(const Spec& s);  // LDPC specs
 // codes._decoder (extent 0) or codes._ext_decoder(spec, extent).
 const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent = 0);
 const polar::SCLDecoder& polar_decoder(const Spec& s);  // polar specs, list POLAR_LIST
+const polar::SCLDecoder& polar_ir_decoder(const Spec& s);  // codes.polar_ir_code's, list POLAR_LIST
 
 inline constexpr int POLAR_LIST = 8;
 inline constexpr int ITERS = 40;  // LDPC decoder iterations

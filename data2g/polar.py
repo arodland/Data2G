@@ -13,6 +13,15 @@ inverse over GF(2), so a decoder's re-encoded x gives u back.
 
 Decoder: successive-cancellation list, batched in numpy, with the CRC
 picking among the survivors (CA-SCL).
+
+Incremental redundancy (IRPolarCode): Ma, Xiong, Wei and Jiang, "An
+Incremental Redundancy HARQ Scheme for Polar Code" (arXiv:1708.09679).
+The codeword x = u G_N is the lower half of a length-2N polar code,
+[v, u] G_2N = [(v ^ u) G_N, x], so the first transmission is unchanged
+and the second sends the upper half (same puncturing). v is frozen but
+for copies of the info bits the combined code protects worst: SC
+decodes v first, and each copy's original becomes a frozen bit whose
+value is the copy's decision on that list path.
 """
 
 from dataclasses import dataclass
@@ -73,6 +82,42 @@ def ga_reliability(mean_llr: np.ndarray) -> np.ndarray:
     return m
 
 
+def _log_phi_table():
+    """log m -> log phi(m), phi(m) = E[1 - tanh(Y / 2)] = E[2 / (1 + e^Y)],
+    Y ~ N(m, 2m): Gauss-Hermite to m = 100, the asymptote above."""
+    m = np.logspace(-6, 5, 6000)
+    y, w = np.polynomial.hermite_e.hermegauss(160)
+    low = m <= 100
+    ml = m[low, None]
+    phi = (w * 2 / (1 + np.exp(ml + np.sqrt(2 * ml) * y))).sum(1) / np.sqrt(2 * np.pi)
+    mh = m[~low]
+    asym = 0.5 * np.log(np.pi / mh) - mh / 4 + np.log1p(-10 / (7 * mh))
+    return np.log(m), np.concatenate([np.log(phi), asym])
+
+
+_LOG_M, _LOG_PHI = _log_phi_table()
+
+
+def de_reliability(mean_llr: np.ndarray) -> np.ndarray:
+    """ga_reliability with phi exact (_log_phi_table) rather than fitted:
+    the fit is off where means are small (phi(0) = e^0.0218 > 1), which
+    the IR design's operating points reach and the RV 0 designs did not."""
+    m = mean_llr.astype(float)
+    n = len(m)
+    to_log_phi = lambda x: np.interp(np.log(np.maximum(x, 1e-6)), _LOG_M, _LOG_PHI)  # noqa: E731
+    h = n // 2
+    while h >= 1:
+        m = m.reshape(-1, 2, h)
+        a, b = m[:, 0, :], m[:, 1, :]
+        pa, pb = np.exp(to_log_phi(a)), np.exp(to_log_phi(b))
+        lp = np.log(pa + pb - pa * pb)  # phi of the check node's output
+        f = np.exp(np.interp(-lp, -_LOG_PHI, _LOG_M))
+        f = np.where((a <= 0) | (b <= 0), 0.0, f)
+        m = np.stack([f, a + b], axis=1).reshape(n)
+        h //= 2
+    return m
+
+
 @dataclass
 class PolarCode:
     k: int  # info bits incl. CRC
@@ -103,11 +148,45 @@ class PolarCode:
         rel = ga_reliability(mean)
         return np.sort(np.argsort(rel)[-self.k :])
 
+    copies = np.zeros((0, 2), np.int64)  # (src, dst): u[src] = u[dst], src decoded first
+
     def encode(self, bits: np.ndarray) -> np.ndarray:
         bits = np.atleast_2d(bits).astype(np.uint8)
         u = np.zeros((bits.shape[0], self.n), dtype=np.uint8)
         u[:, self.info_pos] = bits
+        u[:, self.copies[:, 0]] = u[:, self.copies[:, 1]]
         return transform(u)[:, self.sent]
+
+
+def ir_copies(code: PolarCode, design_snr_db: float) -> np.ndarray:
+    """(c, 2) (src, dst) pairs for IRPolarCode: GA over the length-2N code
+    with both halves received at `design_snr_db`, then the weakest info
+    bit of the lower half (dst) copied to the strongest free position of
+    the upper half (src), next weakest to next strongest, while the copy
+    is the more reliable of the two."""
+    n = code.n
+    mean = np.zeros(2 * n)
+    mean[code.sent] = mean[n + code.sent] = 4 * 10 ** (design_snr_db / 10)
+    rel = de_reliability(mean)
+    weak = n + code.info_pos[np.argsort(rel[n + code.info_pos], kind="stable")]
+    strong = np.argsort(-rel[:n], kind="stable")
+    pairs = [(s, d) for s, d in zip(strong, weak) if rel[s] > rel[d]]
+    return np.array(pairs, np.int64).reshape(-1, 2)
+
+
+class IRPolarCode:
+    """RV 0 and RV 1 of `base` as one length-2N code (module docstring).
+    encode() gives the two transmissions concatenated, RV 0 first: each is
+    `base.sent` of its half, so RV 0 is base.encode() bit for bit. `copies`
+    frozen (from ir_copies), or designed at `design_snr_db`."""
+
+    def __init__(self, base: PolarCode, design_snr_db: float = 0.0, copies=None):
+        self.base, self.k, self.n, self.e = base, base.k, 2 * base.n, 2 * base.e
+        self.sent = np.concatenate([base.n + base.sent, base.sent])
+        self.info_pos = base.n + base.info_pos
+        self.copies = ir_copies(base, design_snr_db) if copies is None else np.asarray(copies, np.int64).reshape(-1, 2)
+
+    encode = PolarCode.encode
 
 
 def _softplus(x):
@@ -123,30 +202,43 @@ class SCLDecoder:
         self.code, self.L = code, list_size
         self.frozen = np.ones(code.n, bool)
         self.frozen[code.info_pos] = False
+        # copies: src decided freely, dst frozen to the path's src bit
+        src, dst = code.copies.T
+        self.frozen[src], self.frozen[dst] = False, True
+        self.slot = {int(p): i for i, p in enumerate(src)} | {int(p): i for i, p in enumerate(dst)}
 
     @staticmethod
     def _f(a, b):
         return np.sign(a) * np.sign(b) * np.minimum(np.abs(a), np.abs(b))
 
-    def _node(self, alpha, lo, pm):
-        """alpha (B, L, n) for leaves lo..lo+n. Returns (beta, perm, pm)."""
+    def _node(self, alpha, lo, pm, cp):
+        """alpha (B, L, n) for leaves lo..lo+n; cp (B, L, copies) each path's
+        copy src bits so far. Returns (beta, perm, pm, cp)."""
         n = alpha.shape[-1]
         B, L = alpha.shape[:2]
         if n == 1:
             a = alpha[..., 0]
+            keep = np.broadcast_to(np.arange(L), (B, L))
+            if self.frozen[lo] and lo in self.slot:  # a copy's dst: the path's src bit
+                u = cp[..., self.slot[lo]]
+                return u[..., None], keep, pm + _softplus(np.where(u == 1, a, -a)), cp
             if self.frozen[lo]:
-                return np.zeros(alpha.shape, np.uint8), np.broadcast_to(np.arange(L), (B, L)), pm + _softplus(-a)
+                return np.zeros(alpha.shape, np.uint8), keep, pm + _softplus(-a), cp
             cand = np.concatenate([pm + _softplus(-a), pm + _softplus(a)], axis=1)
             idx = np.argsort(cand, axis=1, kind="stable")[:, :L]
-            return (idx // L).astype(np.uint8)[..., None], idx % L, np.take_along_axis(cand, idx, 1)
+            u = (idx // L).astype(np.uint8)
+            cp = np.take_along_axis(cp, (idx % L)[..., None], 1)  # paths reorder: their src bits go with them
+            if lo in self.slot:
+                cp[..., self.slot[lo]] = u
+            return u[..., None], idx % L, np.take_along_axis(cand, idx, 1), cp
         h = n // 2
         a, b = alpha[..., :h], alpha[..., h:]
-        bl, p1, pm = self._node(self._f(a, b), lo, pm)
+        bl, p1, pm, cp = self._node(self._f(a, b), lo, pm, cp)
         a = np.take_along_axis(a, p1[..., None], 1)
         b = np.take_along_axis(b, p1[..., None], 1)
-        br, p2, pm = self._node(b + (1 - 2 * bl.astype(a.dtype)) * a, lo + h, pm)
+        br, p2, pm, cp = self._node(b + (1 - 2 * bl.astype(a.dtype)) * a, lo + h, pm, cp)
         bl = np.take_along_axis(bl, p2[..., None], 1)
-        return np.concatenate([bl ^ br, br], axis=-1), np.take_along_axis(p1, p2, 1), pm
+        return np.concatenate([bl ^ br, br], axis=-1), np.take_along_axis(p1, p2, 1), pm, cp
 
     def decode(self, llr_sent):
         """(B, e) LLRs -> (info bits (B, L, k) uint8, path metric (B, L)), best first."""
@@ -157,7 +249,8 @@ class SCLDecoder:
         alpha = np.repeat(alpha[:, None, :], self.L, axis=1)
         pm = np.full((B, self.L), np.inf, np.float32)
         pm[:, 0] = 0.0
-        x, _, pm = self._node(alpha, 0, pm)
+        cp = np.zeros((B, self.L, len(self.code.copies)), np.uint8)
+        x, _, pm, _ = self._node(alpha, 0, pm, cp)
         order = pm.argsort(axis=1, kind="stable")
         x = np.take_along_axis(x, order[..., None], 1)
         return transform(x)[..., self.code.info_pos], np.take_along_axis(pm, order, 1)

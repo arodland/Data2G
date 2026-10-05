@@ -229,6 +229,35 @@ def polar_ga_cpp() -> str:
 
 
 FILES["polar_ga.cpp"] = polar_ga_cpp
+
+
+def polar_ir_cpp() -> str:
+    """Every polar code's IR extension copies (codes.polar_ir_code: GA at
+    codes.POLAR_IR_DESIGN_SNR_DB), by (k, e), the submodes' and CPM control's."""
+    from data2g import cpm
+
+    out = [HEADER.format(src="data2g/polar.py (codes.polar_ir_code)"), '#include "tables/tables.hpp"\n\n',
+           f"// Design SNR {cxx(float(codes.POLAR_IR_DESIGN_SNR_DB))} dB.\n",
+           "namespace data2g::tables {\nnamespace {\n\n"]
+    rows, seen = [], {}
+    for s in [*config.SUBMODES.values(), *cpm.CTL.values()]:
+        if s.code != "polar":
+            continue
+        cp = codes.polar_ir_code(s).copies
+        key = (s.k, s.coded_bits)
+        if key in seen:
+            assert np.array_equal(seen[key], cp), f"{s.name}: two IR extensions for (k, e) = {key}"
+            continue
+        seen[key] = cp
+        if len(cp):  # (C++ has no empty arrays)
+            out.append(f"constexpr std::uint16_t ir_{len(rows)}[] = {{{ints(cp.reshape(-1))}}};\n")
+        rows.append(f"    {{{s.k}, {s.coded_bits}, {f'ir_{len(rows)}' if len(cp) else '{}'}}},\n")
+    out.append(f"\nconstexpr PolarIr designs[] = {{\n{''.join(rows)}}};\n\n}}  // namespace\n\n"
+               "const std::span<const PolarIr> POLAR_IR = designs;\n\n}  // namespace data2g::tables\n")
+    return "".join(out)
+
+
+FILES["polar_ir.cpp"] = polar_ir_cpp
 # equalizer.per_carrier_noise's `samples`: a burst's pilot count (at most
 # MAX_CODEWORDS * the longest codeword + a header-copy frame + the closing
 # pilot) or 7 (preamble repeats). Tabulated past that; C++ throws outside.

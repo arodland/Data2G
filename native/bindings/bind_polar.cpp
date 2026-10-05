@@ -15,6 +15,7 @@ void bind_polar(py::module_& m) {
         return np(x);
     });
     p.def("ga_info_pos", [](int k, int e) { return np<std::int64_t>(polar::ga_info_pos(k, e)); });
+    p.def("ir_copies", [](int k, int e) { return np<std::int64_t>(polar::ir_copies(k, e)); });  // flattened
 
     // Shaped like polar.PolarCode where codes.py and decoders_torch read it.
     // info_pos None: the frozen GA design for (k, e).
@@ -29,6 +30,14 @@ void bind_polar(py::module_& m) {
         .def_property_readonly("info_pos", [](const PolarCode& c) { return np<std::int64_t>(std::span<const std::uint16_t>(c.info_pos)); })
         .def_property_readonly("sent", [](const PolarCode& c) { return np<std::int64_t>(std::span<const std::uint16_t>(c.sent)); })
         .def_property_readonly("punctured", [](const PolarCode& c) { return np<std::int64_t>(std::span<const std::uint16_t>(c.punctured)); })
+        .def_property_readonly("copies", [](const PolarCode& c) {
+            py::array_t<std::int64_t> out({static_cast<py::ssize_t>(c.copies.size()), py::ssize_t{2}});
+            auto* o = out.mutable_data();
+            for (const auto& [src, dst] : c.copies) *o++ = src, *o++ = dst;
+            return out;
+        })
+        // polar.IRPolarCode(base, copies=copies), copies (src, dst) flattened
+        .def_static("ir", [](const PolarCode& base, std::vector<std::uint16_t> copies) { return PolarCode::ir(base, copies); })
         .def("encode", [](const PolarCode& c, const In<std::uint8_t>& bits) { return np(c.encode(mat(bits))); });
     p.def("polar_code", [](const std::string& name) { return polar::polar_code(spec(name)); });
 

@@ -70,6 +70,13 @@ struct PolarDesign {
     std::span<const std::uint16_t> info_pos;
 };
 extern const std::span<const PolarDesign> POLAR_GA;
+// Every polar code's IR extension (codes.polar_ir_code), by (k, e): its
+// copies (src, dst) flattened.
+struct PolarIr {
+    int k, e;
+    std::span<const std::uint16_t> copies;
+};
+extern const std::span<const PolarIr> POLAR_IR;
 // scipy.stats.gamma.ppf(0.99, n) / n at index n - 1 (equalizer.per_carrier_noise).
 inline constexpr int GAMMA_Q99_MAX = 2048;
 extern const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99;
