@@ -416,6 +416,7 @@ class Receiver:
         for g in self.grids:
             self.decided[g.name] = max(self.decided.get(g.name, 0), end - search_span((), (g.name,)) - g.T)
 
+    CPM_TAIL = FS // 20  # kept before a CPM burst's end (Receiver.feed): 440 ppm over a 90 s burst
     SUPERSEDE_MARGIN = 0.05  # header score a later header needs over the pending one
     SUSPECT_SCORE = 0.36  # below it a header may be a false lock (false ones score 0.19-0.34)
 
@@ -583,7 +584,11 @@ class Receiver:
                 out.append(("burst", {"header": p, "rx": r, "audio": self.buf[max(0, p["start"] - self.off):
                                                                                p["end"] - self.off]}))
                 self.last_start = p["start"]
-                self._trim(len(self.buf) - (p["end"] - self.off))
+                # keep a little before its end: a CPM burst has no lead-out silence,
+                # and with the sender's clock fast (30 ppm) the next back-to-back
+                # burst's front began 4 samples before this one's computed end; cut
+                # there, every second burst was missed (data2g-bulk)
+                self._trim(len(self.buf) - (p["end"] - self.CPM_TAIL - self.off))
                 self.pending = None
                 continue
             s0 = max(0, p["start"] - LEADIN_SAMPLES - self.off)

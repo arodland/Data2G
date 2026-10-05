@@ -31,26 +31,30 @@ import numpy as np  # noqa: E402
 from scipy.io import wavfile  # noqa: E402
 from scipy.signal import resample_poly  # noqa: E402
 
-from . import codes, modem  # noqa: E402
+from . import codes, cpm, modem  # noqa: E402
 from .arq import frames as F  # noqa: E402
 from .arq import phy as PHY  # noqa: E402
 from .arq.link import Slot, TxBurst  # noqa: E402
-from .arq.modes import MODES, is_cpm  # noqa: E402
+from .arq.modes import MODES, ctl_payload_bytes, is_cpm  # noqa: E402
 from .config import FS, MAX_CODEWORDS  # noqa: E402
 from .tnc import Receiver  # noqa: E402
 
 log = logging.getLogger("data2g.bulk")
-VERSION = 1
+VERSION = 2
 CTL = struct.Struct(">BHHHBB")  # version, stream, burst in pass, blocks, blocks per burst (h), pass
 CTL_KEY = 0xB17C  # the control's mask key: any receiver reads any stream's control
-CTL_MASK = (CTL_KEY, 0, 0)
-MAX_BLOCKS = 65535
+CTL_MASK = (CTL_KEY, 0, 128)  # last byte >= 128: a control slot's (CPM's receiver checks)
+MAX_BLOCKS = 32767  # data masks keep their last byte under 128
 # the control in this many slots, at RVs 0, 1, ...: it must outlast a block's
 # two sends combined, or the receiver never learns where the copies are (one
 # control slot at the data's rate: qpsk-r1/2 on mpp heard no stream at -2 dB,
 # where copies would have delivered)
 CTL_SLOTS = 4
+# CPM: its header allows one control codeword or two (polar: RV 1 is a plain
+# repeat), and cpm.MAX_DATA data codewords
+CPM_CTL_SLOTS = 2
 MAX_H = (MAX_CODEWORDS - CTL_SLOTS) // 2
+CPM_MAX_H = cpm.MAX_DATA // 2
 TOL = FS // 5  # a heard burst within this of where burst g is due is burst g
 PRE_S = 180
 FLUSH = 6 * FS  # silence fed after the input ends, so the last burst completes
@@ -58,7 +62,24 @@ FLUSH = 6 * FS  # silence fed after the input ends, so the last burst completes
 
 def data_mask(stream: int, i: int) -> tuple:
     """Block i's CRC mask (phy.mask_value's tuple): its identity, no payload bytes spent."""
-    return (stream, i >> 8, i & 255)
+    return (stream, i >> 7, i & 127)
+
+
+def n_ctl(spec) -> int:
+    return CPM_CTL_SLOTS if is_cpm(spec) else CTL_SLOTS
+
+
+def max_h(spec) -> int:
+    return CPM_MAX_H if is_cpm(spec) else MAX_H
+
+
+def airtime(spec, n_cw: int) -> int:
+    """A burst's samples as phy.tx_audio makes them (cpm.burst_seconds adds
+    the ramps on top of the symbols: 160 samples a burst too many)."""
+    if is_cpm(spec):
+        k = n_ctl(spec)
+        return cpm.layout(spec.grid, cpm.stream_symbols(spec.grid, n_cw - k, k == 2)).n * cpm.GRIDS[spec.grid].T
+    return round(modem.burst_seconds(spec, n_cw) * FS)
 
 
 # --- blocks -------------------------------------------------------------------
@@ -129,10 +150,10 @@ class Layout:
         return p, b, new + old
 
     def n_cw(self, g: int) -> int:
-        return CTL_SLOTS + len(self.slots(g)[2])
+        return n_ctl(self.spec) + len(self.slots(g)[2])
 
     def length(self, g: int) -> int:
-        return round(modem.burst_seconds(self.spec, self.n_cw(g)) * FS)
+        return airtime(self.spec, self.n_cw(g))
 
     def offset(self, g: int) -> int:
         """Samples from burst 0's start to burst g's (bursts back to back)."""
@@ -154,8 +175,8 @@ def bursts(text: bytes, mode: str, h: int, passes: int) -> list[TxBurst]:
     out = []
     for g in range(passes * lay.per_pass):
         p, b, slots = lay.slots(g)
-        ctl = CTL.pack(VERSION, stream, b, lay.n, h, p).ljust(pb, b"\0")
-        out.append(TxBurst(mode, [Slot(CTL_MASK, rv, ctl) for rv in range(CTL_SLOTS)] +
+        ctl = CTL.pack(VERSION, stream, b, lay.n, h, p).ljust(ctl_payload_bytes(spec), b"\0")
+        out.append(TxBurst(mode, [Slot(CTL_MASK, rv, ctl) for rv in range(n_ctl(spec))] +
                            [Slot(data_mask(stream, i), rv, blocks[i]) for i, rv in slots], g))
     log.info("%d B of text -> %d blocks of %d B (%.2fx), stream %04x, %d bursts", len(text), lay.n, pb,
              len(text) / (lay.n * pb), stream, len(out))
@@ -170,12 +191,12 @@ def tx_audio(bs: list[TxBurst]) -> np.ndarray:
 
 def check_mode(mode: str, h: int):
     spec = MODES.get(mode)
-    if spec is None or is_cpm(spec):
-        raise SystemExit(f"mode {mode!r}: one of the OFDM modes ({', '.join(sorted(m for m in MODES if not is_cpm(MODES[m])))})")
-    if codes.payload_bytes(spec) < max(CTL.size, 6):
+    if spec is None:
+        raise SystemExit(f"mode {mode!r}: one of {', '.join(sorted(MODES))}")
+    if min(codes.payload_bytes(spec), ctl_payload_bytes(spec)) < max(CTL.size, 6):
         raise SystemExit(f"mode {mode}: {codes.payload_bytes(spec)} B codewords can't hold the control")
-    if not 1 <= h <= MAX_H:
-        raise SystemExit(f"blocks per burst: 1..{MAX_H}")
+    if not 1 <= h <= max_h(spec):
+        raise SystemExit(f"blocks per burst in {mode}: 1..{max_h(spec)}")
 
 
 # --- receive --------------------------------------------------------------------
@@ -223,13 +244,13 @@ class Rx:
         self.waiting = []  # (start, r) heard before any control placed them
 
     def _rx(self, r: dict):
-        budget = None if self.dd_cap is None else self.dd_cap * modem.burst_seconds(r["spec"], r["n_cw"])
+        budget = None if self.dd_cap is None else self.dd_cap * airtime(r["spec"], r["n_cw"]) / FS
         return PHY.ModemRx(r, self.store, budget)
 
-    def control(self, rx, n_cw: int) -> tuple | None:
+    def control(self, rx, r: dict) -> tuple | None:
         c = rx.decode(0, CTL_MASK, 0, None)
         key = ("ctl", id(rx))
-        for i in range(min(CTL_SLOTS, n_cw)):
+        for i in range(min(n_ctl(r["spec"]), r["n_cw"])):
             if c is not None:
                 break
             c = rx.decode(i, CTL_MASK, i, key)  # combined with the slots before
@@ -237,7 +258,7 @@ class Rx:
         if c is None:
             return None
         ver, stream, b, n, h, p = CTL.unpack(c[:CTL.size])
-        if ver != VERSION or not 1 <= h <= MAX_H or not n:
+        if ver != VERSION or not 1 <= h <= max_h(r["spec"]) or not 1 <= n <= MAX_BLOCKS:
             return None
         return stream, b, n, h, p
 
@@ -245,7 +266,7 @@ class Rx:
         """A burst the streaming receiver found, its preamble at `start`
         (r: modem.receive's dict, None if it failed past the header)."""
         rx = None if r is None else self._rx(r)
-        ctl = None if rx is None else self.control(rx, r["n_cw"])
+        ctl = None if rx is None else self.control(rx, r)
         if ctl is not None:
             stream, b, n, h, p = ctl
             spec = r["spec"]
@@ -288,7 +309,7 @@ class Rx:
         if not headerless:
             st.heard.add(g)
         st.stats["headerless" if headerless else "heard"] += 1
-        for slot, (i, rv) in enumerate(st.lay.slots(g)[2], CTL_SLOTS):
+        for slot, (i, rv) in enumerate(st.lay.slots(g)[2], n_ctl(st.lay.spec)):
             key = (st.stream, i)
             if i in st.blocks:
                 continue
@@ -313,16 +334,21 @@ class Rx:
             if g in st.done:
                 continue
             s = round(st.due(g))
-            n_cw = st.lay.n_cw(g)
+            n_cw, spec = st.lay.n_cw(g), st.lay.spec
             lo, hi = s - modem.LEADIN_SAMPLES, s + st.lay.length(g) + FS // 2
             if lo < off:
                 st.done.add(g)  # trimmed away already
                 continue
             if hi > off + len(buf):
                 break
+            seg = buf[lo - off:hi - off]
             try:
-                r = modem.receive(buf[lo - off:hi - off],
-                                  known=dict(start=s - lo, cfo=st.cfo, spec=st.lay.spec, n_cw=n_cw))
+                if is_cpm(spec):  # a lock as cpm.find makes one, from the timing
+                    k = n_ctl(spec)
+                    r = cpm.receive(seg, dict(band=spec.grid, spec=spec, start=s - lo, cfo=st.cfo,
+                                              n_data=n_cw - k, dup=k == 2))
+                else:
+                    r = modem.receive(seg, known=dict(start=s - lo, cfo=st.cfo, spec=spec, n_cw=n_cw))
             except modem.SyncError as e:
                 log.warning("burst %d (header lost) not received: %s", g, e)
                 st.done.add(g)
@@ -331,10 +357,21 @@ class Rx:
             self._burst(st, g, self._rx(r), r, headerless=True)
 
 
-def receive(chunks, accept=None, rx: Rx | None = None, on_chunk=None) -> Rx:
-    """Audio chunks at FS -> the Rx with everything heard (`on_chunk(rx)`
-    after each chunk is handled)."""
-    rx, rcv = rx or Rx(), Receiver(accept or modem.Accept.of(None))
+def listener(mode: str | None = None) -> Receiver:
+    """The streaming receiver for every mode, or for `mode` alone: listening
+    for OFDM too, a fsk32r62 burst read as an n10 header at 10 dB on mpp and
+    the false lock hid the next burst (4 of 7 missed; timing recovered them)."""
+    if mode is None:
+        return Receiver(modem.Accept.of(None), cpm_grids=tuple(cpm.GRIDS))
+    if is_cpm(MODES[mode]):
+        return Receiver(modem.Accept(()), cpm_grids=(MODES[mode].grid,))
+    return Receiver(modem.Accept.of([mode]))
+
+
+def receive(chunks, mode: str | None = None, rx: Rx | None = None, on_chunk=None) -> Rx:
+    """Audio chunks at FS -> the Rx with everything heard (`mode`: listen
+    for that mode only; `on_chunk(rx)` after each chunk is handled)."""
+    rx, rcv = rx or Rx(), listener(mode)
     buf, off = np.zeros(0), 0
     for x in chunks:
         buf = np.concatenate([buf, x])
@@ -463,8 +500,9 @@ def main(argv=None):
     s = sub.add_parser("send", help="text -> WAV")
     s.add_argument("text", help="input text file ('-': stdin)")
     s.add_argument("-o", "--output", required=True, help="WAV file to write (8 kHz, 16 bit)")
-    s.add_argument("-m", "--mode", default="qpsk-r1/2", help="OFDM mode (default %(default)s)")
-    s.add_argument("--blocks-per-burst", type=int, default=15, help="new blocks per burst, 1-30 (default %(default)s)")
+    s.add_argument("-m", "--mode", default="qpsk-r1/2", help="OFDM or CPM mode (default %(default)s)")
+    s.add_argument("--blocks-per-burst", type=int, help=f"new blocks per burst: OFDM 1-{MAX_H} (default 15), "
+                   f"CPM 1-{CPM_MAX_H} (default {CPM_MAX_H})")
     s.add_argument("--passes", type=int, default=1, help="times the whole text is sent, RVs rotating (default 1)")
     s.add_argument("--lead-ms", type=float, default=500, help="silence before the first burst, for PTT/VOX")
     r = sub.add_parser("recv", help="WAV (or raw float32 at 8 kHz on stdin) -> text")
@@ -472,6 +510,7 @@ def main(argv=None):
     r.add_argument("-o", "--output", required=True, help="text file to write (several streams: .<id> appended)")
     r.add_argument("--dd-cap", type=float, help="DD stops starting refines past this share of a burst's airtime "
                    "(default: no cap)")
+    r.add_argument("-m", "--mode", help="listen for this mode only (default: every mode)")
     li = sub.add_parser("listen", help="an audio device -> text on stdout as it arrives")
     li.add_argument("--input-device", help="index or name substring (default: the system's)")
     li.add_argument("--sample-rate", type=int, default=48000, help="a multiple of 8000 (default %(default)s)")
@@ -479,12 +518,16 @@ def main(argv=None):
     li.add_argument("-o", "--output", help="also keep the whole text here, rewritten as blocks arrive")
     li.add_argument("--dd-cap", type=float, default=0.25, help="DD stops starting refines past this share of a "
                     "burst's airtime, so decoding keeps up with the audio (default %(default)s)")
+    li.add_argument("-m", "--mode", help="listen for this mode only (default: every mode)")
     a = ap.parse_args(argv)
+    if a.cmd in ("recv", "listen") and a.mode and a.mode not in MODES:
+        ap.error(f"mode {a.mode!r}: one of {', '.join(sorted(MODES))}")
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(message)s")
     if a.cmd == "send":
-        check_mode(a.mode, a.blocks_per_burst)
+        h = a.blocks_per_burst or (CPM_MAX_H if a.mode in cpm.SPECS else 15)
+        check_mode(a.mode, h)
         text = sys.stdin.buffer.read() if a.text == "-" else open(a.text, "rb").read()
-        bs = bursts(text, a.mode, a.blocks_per_burst, a.passes)
+        bs = bursts(text, a.mode, h, a.passes)
         x = np.concatenate([np.zeros(int(a.lead_ms * FS / 1000)), tx_audio(bs), np.zeros(FS // 2)])
         wavfile.write(a.output, FS, np.round(x * 32000).astype(np.int16))
         print(f"{len(bs)} bursts, {len(x) / FS:.1f} s -> {a.output}", file=sys.stderr)
@@ -497,13 +540,14 @@ def main(argv=None):
         print("listening (Ctrl-C to stop)", file=sys.stderr)
         rx = Rx(a.dd_cap)
         try:
-            receive(read_device(a.input_device, a.sample_rate), rx=rx, on_chunk=Printer(sys.stdout.buffer, a.output))
+            receive(read_device(a.input_device, a.sample_rate), a.mode, rx=rx,
+                    on_chunk=Printer(sys.stdout.buffer, a.output))
         except KeyboardInterrupt:
             pass
         for stream, st in rx.streams.items():
             print(f"\nstream {stream:04x}: {len(st.blocks)}/{st.lay.n} blocks", file=sys.stderr)
         return
-    rx = receive(read_audio(a.audio), rx=Rx(a.dd_cap))
+    rx = receive(read_audio(a.audio), a.mode, rx=Rx(a.dd_cap))
     if not rx.streams:
         raise SystemExit("no stream heard")
     for stream, st in rx.streams.items():

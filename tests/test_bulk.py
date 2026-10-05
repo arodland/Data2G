@@ -37,6 +37,26 @@ def test_round_trip_with_a_header_lost(lost):
     assert modem.LEADIN_SAMPLES < FS
 
 
+def test_cpm_round_trip_with_a_front_lost():
+    """fsk32r62-r1/2: the control in its two polar slots, timing from the CPM
+    layout (not cpm.burst_seconds, which counts the ramps on top), and a
+    burst whose front sync and first header are gone received by its timing."""
+    mode, h = "fsk32r62-r1/2", 2
+    text = TEXT[:900]
+    bs = bulk.bursts(text, mode, h, 1)
+    lay = bulk.Layout(bulk.MODES[mode], len(bulk.pack(text, codes.payload_bytes(bulk.MODES[mode]))), h)
+    assert [len(PHY.tx_audio(b)) for b in bs] == [lay.length(g) for g in range(len(bs))]
+    lead = FS // 2
+    y = np.concatenate([np.zeros(lead), bulk.tx_audio(bs), np.zeros(FS)])
+    s = lead + lay.offset(1)
+    y[s:s + FS] = 0  # burst 1's front sync block, first header copy, part of its control
+    y = hfchannel.apply_channel(y, snr_db=10, freq_offset_hz=20, ppm=30, seed=1)
+    rx = bulk.receive((y[i:i + FS] for i in range(0, len(y), FS)), mode)  # back to back at 30 ppm: tnc.CPM_TAIL
+    (st,) = rx.streams.values()
+    assert st.stats["headerless"] == 1
+    assert bulk.unpack(st.blocks, st.lay.n) == (text, [])
+
+
 def test_listen_prints_in_order_as_blocks_finalize(monkeypatch):
     """Printer (data2g-bulk listen): text in block order while audio still
     arrives; a burst lost whole (an r1/2 copy at RV 1 can't decode alone)

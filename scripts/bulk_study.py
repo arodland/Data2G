@@ -29,7 +29,7 @@ TEXT = open(os.path.join(os.path.dirname(__file__), "..", "docs", "arq.md"), "rb
 
 
 def trial(args):
-    mode, chan, snr, seed, nbytes, h = args
+    mode, chan, snr, seed, nbytes, h, only = args
     rng = np.random.default_rng(seed)
     a = int(rng.integers(0, len(TEXT) - nbytes))
     text = TEXT[a:a + nbytes]
@@ -41,7 +41,7 @@ def trial(args):
     y = hfchannel.freq_shift(y, float(rng.uniform(-50, 50)))
     y = hfchannel.sample_clock_offset(y, 20.0)
     y = hfchannel.awgn(y, snr, seed=seed + 1, s_power=peak)
-    rx = bulk.receive(y[i:i + FS] for i in range(0, len(y), FS))
+    rx = bulk.receive((y[i:i + FS] for i in range(0, len(y), FS)), mode if only else None)
     n = len(bulk.pack(text, codes.payload_bytes(bulk.MODES[mode])))
     st = next(iter(rx.streams.values()), None)
     s = st.stats if st else {}
@@ -59,12 +59,13 @@ def main():
     ap.add_argument("--bytes", type=int, default=6000)
     ap.add_argument("--h", type=int, default=15)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--only-mode", action="store_true", help="the receiver listens for the mode sent only")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     grid = lambda g: np.arange(*(lambda lo, hi, st: (lo, hi + 1e-9, st))(*map(float, g.split(":"))))
     per = dict(x.split("=") for x in a.snrs.split(",")) if "=" in a.snrs else {}
     modes = list(per) if per else a.modes.split(",")
-    jobs = [(m, c, float(s), 1000 + t, a.bytes, a.h)
+    jobs = [(m, c, float(s), 1000 + t, a.bytes, a.h, a.only_mode)
             for m in modes for c, t in itertools.product(a.chans.split(","), range(a.trials))
             for s in grid(per.get(m, a.snrs))]
     logging.basicConfig(level=logging.ERROR)
