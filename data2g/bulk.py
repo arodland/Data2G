@@ -45,7 +45,12 @@ CTL = struct.Struct(">BHHHBB")  # version, stream, burst in pass, blocks, blocks
 CTL_KEY = 0xB17C  # the control's mask key: any receiver reads any stream's control
 CTL_MASK = (CTL_KEY, 0, 0)
 MAX_BLOCKS = 65535
-MAX_H = (MAX_CODEWORDS - 1) // 2
+# the control in this many slots, at RVs 0, 1, ...: it must outlast a block's
+# two sends combined, or the receiver never learns where the copies are (one
+# control slot at the data's rate: qpsk-r1/2 on mpp heard no stream at -2 dB,
+# where copies would have delivered)
+CTL_SLOTS = 4
+MAX_H = (MAX_CODEWORDS - CTL_SLOTS) // 2
 TOL = FS // 5  # a heard burst within this of where burst g is due is burst g
 FLUSH = 6 * FS  # silence fed after the input ends, so the last burst completes
 
@@ -123,7 +128,7 @@ class Layout:
         return p, b, new + old
 
     def n_cw(self, g: int) -> int:
-        return 1 + len(self.slots(g)[2])
+        return CTL_SLOTS + len(self.slots(g)[2])
 
     def length(self, g: int) -> int:
         return round(modem.burst_seconds(self.spec, self.n_cw(g)) * FS)
@@ -149,7 +154,7 @@ def bursts(text: bytes, mode: str, h: int, passes: int) -> list[TxBurst]:
     for g in range(passes * lay.per_pass):
         p, b, slots = lay.slots(g)
         ctl = CTL.pack(VERSION, stream, b, lay.n, h, p).ljust(pb, b"\0")
-        out.append(TxBurst(mode, [Slot(CTL_MASK, 0, ctl)] +
+        out.append(TxBurst(mode, [Slot(CTL_MASK, rv, ctl) for rv in range(CTL_SLOTS)] +
                            [Slot(data_mask(stream, i), rv, blocks[i]) for i, rv in slots], g))
     log.info("%d B of text -> %d blocks of %d B (%.2fx), stream %04x, %d bursts", len(text), lay.n, pb,
              len(text) / (lay.n * pb), stream, len(out))
@@ -214,6 +219,12 @@ class Rx:
 
     def control(self, rx, n_cw: int) -> tuple | None:
         c = rx.decode(0, CTL_MASK, 0, None)
+        key = ("ctl", id(rx))
+        for i in range(min(CTL_SLOTS, n_cw)):
+            if c is not None:
+                break
+            c = rx.decode(i, CTL_MASK, i, key)  # combined with the slots before
+        rx.forget(key)
         if c is None:
             return None
         ver, stream, b, n, h, p = CTL.unpack(c[:CTL.size])
@@ -268,7 +279,7 @@ class Rx:
         if not headerless:
             st.heard.add(g)
         st.stats["headerless" if headerless else "heard"] += 1
-        for slot, (i, rv) in enumerate(st.lay.slots(g)[2], 1):
+        for slot, (i, rv) in enumerate(st.lay.slots(g)[2], CTL_SLOTS):
             key = (st.stream, i)
             if i in st.blocks:
                 continue
@@ -363,7 +374,7 @@ def main(argv=None):
     s.add_argument("text", help="input text file ('-': stdin)")
     s.add_argument("-o", "--output", required=True, help="WAV file to write (8 kHz, 16 bit)")
     s.add_argument("-m", "--mode", default="qpsk-r1/2", help="OFDM mode (default %(default)s)")
-    s.add_argument("--blocks-per-burst", type=int, default=15, help="new blocks per burst, 1-31 (default %(default)s)")
+    s.add_argument("--blocks-per-burst", type=int, default=15, help="new blocks per burst, 1-30 (default %(default)s)")
     s.add_argument("--passes", type=int, default=1, help="times the whole text is sent, RVs rotating (default 1)")
     s.add_argument("--lead-ms", type=float, default=500, help="silence before the first burst, for PTT/VOX")
     r = sub.add_parser("recv", help="WAV (or raw float32 at 8 kHz on stdin) -> text")

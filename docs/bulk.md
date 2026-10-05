@@ -1,6 +1,6 @@
 # data2g-bulk: one-way text transfer
 
-Status: proposed 2026-10-04. Implemented in `data2g/bulk.py` (`data2g-bulk`), outside data2g-host.
+Status: proposed 2026-10-04, measured (§6). Implemented in `data2g/bulk.py` (`data2g-bulk`), outside data2g-host.
 
 TLDR: every block goes twice, a burst apart: once at RV 0 among a burst's new blocks, then
 at RV 1 in the next burst. Bursts go back to back with exact timing. Once the receiver has
@@ -8,7 +8,9 @@ read one control, it knows where every burst starts, so a lost control or even a
 header doesn't lose the burst. Each codeword is its own deflate stream, so a loss never
 cascades.
 
-- Results: §6. The copy moves the 1% block-loss point by NN dB on mpp.
+- Results (§6): the copy moves the 10% block-loss point 2.4 dB (qpsk-r1/5) to 6.5 dB
+  (qpsk-r3/4) on mpp/mps. qpsk-r1/2 with copies (58 B per codeword of airtime) reaches
+  plain qpsk-r1/5's knee (46 B) at 26% more throughput.
 - rv1 copies over Chase copies: +0.3 to +1.9 dB, from code-level AWGN (§3).
 - In modes of rate 1/2 and up, an RV 1 copy can't decode alone. Header-less reception
   (§4) covers a lost header. A burst wiped out whole needs a second pass.
@@ -48,17 +50,22 @@ Pass p, burst b, with h new blocks per burst:
 
 | slot | contents | RV |
 |---|---|---|
-| 0 | control: version, stream, b, blocks, h, p (9 B), mask `(0xB17C, 0, 0)` | 0 |
-| 1 .. | blocks [b h, (b+1) h) | 2p mod 4 |
+| 0-3 | control: version, stream, b, blocks, h, p (9 B), mask `(0xB17C, 0, 0)` | 0, 1, 2, 3 |
+| 4 .. | blocks [b h, (b+1) h) | 2p mod 4 |
 | then | blocks [(b-1) h, b h), burst b-1's again | 2p+1 mod 4 |
 
 - Burst 0 has no copies. The pass ends with one burst of copies only.
 - Further passes rotate RVs (2/3, then 0/1). The receiver's store keeps soft bits across
   passes.
 - `codes.spread` deals each codeword's symbols across the whole burst. The two sends of a
-  block are a burst apart, 36 s at h=15 in the 2400 Hz modes: well past a fade's
+  block are a burst apart, 40 s at h=15 in the 2400 Hz modes: well past a fade's
   correlation time on every CCIR preset.
-- Overhead: one control codeword per 2h+1, 3% at h=15.
+- The control goes in 4 slots at RVs 0-3, combined like any IR resend.
+  - Reason: with one control slot at the data's rate, qpsk-r1/2 on mpp heard no stream at
+    -2 dB (0 of 40 bursts), though the copies would have delivered every block there. The
+    receiver must find a stream before it can combine anything.
+  - Only one control in a transfer has to decode. Timing places every burst after that.
+- Overhead: 4 control codewords per 2h+4, 12% at h=15, 6% at h=30 (the most, 64 codewords).
 
 rv1 or a Chase (rv0) copy. Code-level AWGN, 200 codewords a point, the Es/N0 where 90%
 decode:
@@ -109,4 +116,44 @@ its start is a fixed offset from burst 0's.
 
 ## 6. Results
 
-PLACEHOLDER
+`scripts/bulk_study.py`: 6 kB texts from `docs/arq.md`, h=15, whole transfers through
+continuous fading (so the copy's time diversity is the channel's). Noise is against each
+burst's peak, as `DATA2G_PEP_REF_DB=5`. ±50 Hz CFO, 20 ppm clock. 10 trials a cell, the
+same seeds at every SNR. Output: `runs/bulk_study.csv`.
+
+"First send" counts the blocks decoded from their RV 0 slot alone: what the mode would
+deliver without copies, at twice the throughput (with the 4-slot control and timing still
+in place, so a little optimistic for a plain scheme).
+
+SNR (dB) where block loss reaches 10% and 1%:
+
+| mode | chan | 10% copy | 10% first | gain | 1% copy | 1% first | gain |
+|---|---|---|---|---|---|---|---|
+| qpsk-r1/5 | mpp | -6.4 | -4.0 | 2.4 | -4.5 | -2.1 | 2.4 |
+| qpsk-r1/5 | mps | -6.8 | -4.3 | 2.5 | -4.8 | -2.4 | 2.4 |
+| qpsk-r1/3 | mpp | -5.0 | -1.4 | 3.6 | -2.8 | 1.3 | 4.1 |
+| qpsk-r1/3 | mps | -4.8 | -0.9 | 3.9 | -4.1 | 4.9 | 9.0 |
+| qpsk-r1/2 | mpp | -3.9 | -0.1 | 3.8 | -2.2 | 1.7 | 3.9 |
+| qpsk-r1/2 | mps | -3.3 | 1.3 | 4.6 | -2.1 | 1.9 | 4.0 |
+| qpsk-r3/4 | mpp | -0.4 | 5.7 | 6.1 | 0.0 | 7.3 | 7.3 |
+| qpsk-r3/4 | mps | -0.8 | 5.7 | 6.5 | -0.1 | 7.6 | 7.7 |
+
+At equal throughput (payload bytes per codeword of airtime, before the ~1.45x deflate):
+
+| scheme | B/cw | 10% mpp | 10% mps |
+|---|---|---|---|
+| qpsk-r3/4 + copies | 88 | -0.4 | -0.8 |
+| qpsk-r1/3 plain | 76 | -1.4 | -0.9 |
+| qpsk-r1/2 + copies | 58 | -3.9 | -3.3 |
+| qpsk-r1/5 plain | 46 | -4.0 | -4.3 |
+| qpsk-r1/3 + copies | 38 | -5.0 | -4.8 |
+
+- Copies at a higher rate match or beat the plain lower-rate mode of similar throughput at
+  10%. At 1% they win clearly (qpsk-r3/4 + copies 0.0 dB on mpp, plain r1/3 +1.3; on mps
+  -0.1 against +4.9): the copy's time diversity fills the fading tail.
+- The gain grows with the mode's rate, as the code-level table in §3 predicts: IR adds
+  fresh parity where the mother code has most to give.
+- Headers lost and received at their known position: 0-36 per mode and channel over 120
+  transfers, most in qpsk-r1/5 near its knee. Controls lost with the burst placed by
+  timing: 4-23.
+- Default mode qpsk-r1/2: 350 bps of payload at h=15 (40 s bursts), about 500 bps of English text.
