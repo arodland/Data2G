@@ -190,3 +190,34 @@ SNR is in 2500 Hz, against the bursts' peak.
 - Losses come a burst's worth at a time, so 1% points from 300-700 blocks a cell (the
   16qam modes) carry about 0.5 dB of noise.
 
+
+### Every mode at h=2
+
+`runs/bulk_h2.csv`: as the h=15 table, with 2 new blocks per burst (8-codeword bursts, half
+of them control). Speed is 53-55% of h=15's. Last column: the 1% point's shift from h=15
+(positive: h=2 needs more SNR).
+
+| band | mode | burst | payload bps | text bps | WPM | 5% mpp | 5% mps | 1% mpp | 1% mps | 1% vs h=15 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1200 | qpsk-r1/5 | 9.8 s | 75 | 102 | 153 | -7.1 | -6.5 | -6.2 | -5.4 | +0.3 / +1.7 |
+| 1200 | qpsk-r1/3 | 9.8 s | 123 | 174 | 260 | -5.1 | -4.4 | -4.3 | -3.1 | +0.6 / +1.5 |
+| 1200 | qpsk-r1/2 | 9.8 s | 188 | 273 | 409 | -3.1 | -2.4 | -2.3 | -1.5 | -0.1 / +0.5 |
+| 1200 | 16qam-r1/3 | 5.2 s | 232 | 326 | 489 | -0.6 | 1.0 | 0.1 | 2.7 | +0.1 / +2.9 |
+| 1200 | qpsk-r3/4 | 9.8 s | 286 | 437 | 655 | -0.4 | 0.4 | 0.1 | 1.5 | -0.3 / +1.5 |
+| 1200 | 16qam-r1/2 | 9.8 s | 383 | 628 | 941 | 0.9 | 2.5 | 1.8 | 3.7 | +0.8 / +2.7 |
+| 500 | n10-qpsk-r1/5 | 12.2 s | 30 | 38 | 58 | -10.2 | -10.5 | -9.3 | -9.3 | -0.9 / -0.1 |
+| 500 | n10-qpsk-r1/3 | 12.2 s | 52 | 71 | 106 | -8.2 | -8.3 | -7.1 | -7.2 | -1.0 / 0.0 |
+| 500 | n10-qpsk-r1/2 | 12.2 s | 79 | 109 | 164 | -5.7 | -6.2 | -4.3 | -5.1 | -0.2 / +0.1 |
+| 500 | n10-16qam-r1/3 | 12.2 s | 104 | 146 | 219 | -3.2 | -3.7 | -2.1 | -2.3 | +0.1 / -0.1 |
+| 500 | n10-qpsk-r3/4 | 12.2 s | 118 | 168 | 251 | -2.3 | -3.1 | -1.0 | -1.8 | 0.0 / -0.8 |
+| 500 | n10-16qam-r1/2 | 12.2 s | 159 | 231 | 347 | -1.2 | -0.9 | -0.7 | 0.1 | +0.3 / +0.2 |
+| 500 | n10-16qam-r2/3 | 12.2 s | 214 | 323 | 485 | 0.6 | 1.6 | 1.2 | 3.7 | +0.4 / +2.0 |
+| 500 | n10-16qam-r3/4 | 12.2 s | 241 | 373 | 560 | 1.8 | 3.6 | 2.6 | 5.0 | +0.2 / +1.3 |
+
+- mpp: h=2 costs -1.0 to +0.8 dB at 1%, inside the noise for most modes.
+- mps (slow and selective): the 1200 Hz modes lose 0.5-2.9 dB, most where bursts are
+  shortest (16qam-r1/3, 5.2 s). The copy comes one short burst later and shares more fades.
+- 500 Hz up to n10-16qam-r1/2 loses nothing at h=2, on either channel. n10-16qam-r2/3 and
+  r3/4 lose 1.3-2.0 dB on mps.
+- Header-less receive does far more work at h=2: up to 4338 bursts in a mode (n10-qpsk-r1/5
+  on mpp), against 575 at h=15, as many more headers go out near the knee.
