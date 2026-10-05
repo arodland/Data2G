@@ -54,17 +54,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--modes", default="qpsk-r1/5,qpsk-r1/3,qpsk-r1/2,qpsk-r3/4")
     ap.add_argument("--chans", default="mpp,mps,awgn")
-    ap.add_argument("--snrs", default="-6:10:2")
+    ap.add_argument("--snrs", default="-6:10:2", help="lo:hi:step, or per mode: mode=lo:hi:step,mode=...")
     ap.add_argument("--trials", type=int, default=6)
     ap.add_argument("--bytes", type=int, default=6000)
     ap.add_argument("--h", type=int, default=15)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    lo, hi, step = map(float, a.snrs.split(":"))
-    snrs = np.arange(lo, hi + 1e-9, step)
+    grid = lambda g: np.arange(*(lambda lo, hi, st: (lo, hi + 1e-9, st))(*map(float, g.split(":"))))
+    per = dict(x.split("=") for x in a.snrs.split(",")) if "=" in a.snrs else {}
+    modes = list(per) if per else a.modes.split(",")
     jobs = [(m, c, float(s), 1000 + t, a.bytes, a.h)
-            for m, c, s, t in itertools.product(a.modes.split(","), a.chans.split(","), snrs, range(a.trials))]
+            for m in modes for c, t in itertools.product(a.chans.split(","), range(a.trials))
+            for s in grid(per.get(m, a.snrs))]
     logging.basicConfig(level=logging.ERROR)
     with Pool(a.workers) as p, open(a.out, "w", newline="") as f:
         w = None

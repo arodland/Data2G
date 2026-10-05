@@ -52,6 +52,7 @@ MAX_BLOCKS = 65535
 CTL_SLOTS = 4
 MAX_H = (MAX_CODEWORDS - CTL_SLOTS) // 2
 TOL = FS // 5  # a heard burst within this of where burst g is due is burst g
+PRE_S = 180
 FLUSH = 6 * FS  # silence fed after the input ends, so the last burst completes
 
 
@@ -291,14 +292,16 @@ class Rx:
 
     def missed(self, buf: np.ndarray, off: int):
         """Bursts of the current stream not heard but due inside `buf`
-        (stream index `off`), received at their known position. Only
-        between bursts heard: past a transfer's end the slots are noise,
-        whose soft bits would only dilute the blocks' stored ones."""
+        (stream index `off`), received at their known position: from the
+        stream's first burst (a fade on burst 0's header lost its blocks in
+        modes whose copies can't decode alone) to the last burst heard. Not
+        past that: after a transfer's end the slots are noise, whose soft bits
+        would only dilute the blocks' stored ones."""
         st = self.cur
         if st is None or not st.heard:
             return
         last = max(st.heard)
-        for g in range(min(st.heard), last):
+        for g in range(last):
             if g in st.done:
                 continue
             s = round(st.due(g))
@@ -330,11 +333,11 @@ def receive(chunks, accept=None) -> Rx:
             if kind == "burst":
                 rx.heard(ev["header"]["start"], ev["rx"])
         rx.missed(buf, off)
-        # keep what a burst still due may need (a minute of audio at most before any control)
-        keep = len(buf) - 60 * FS
+        # keep what a burst still due may need (before any control: PRE_S, two of the longest bursts)
+        keep = len(buf) - PRE_S * FS
         if rx.cur is not None and rx.cur.heard:
             st = rx.cur
-            g = min(st.heard)
+            g = 0
             while g in st.done:
                 g += 1
             keep = min(keep, round(st.due(g)) - modem.LEADIN_SAMPLES - off)

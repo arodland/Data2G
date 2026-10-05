@@ -110,8 +110,9 @@ its start is a fixed offset from burst 0's.
 - **Receive deadline:** decoding runs DD without a time limit (`ModemRx(..., None)`). A live
   receive at very low SNR may fall behind real time. A per-burst budget equal to the
   burst's airtime would bound it.
-- **Header-lost bursts before the first control** are not recovered. Bursts heard before
-  it, control lost, are kept (16 at most) and placed once a control arrives.
+- **Header-lost bursts before the first control** are received once a control arrives,
+  back to the stream's burst 0, from the last 180 s of audio. Bursts heard before it, control
+  lost, are kept (16 at most) and placed then. A joiner mid-transfer starts where its audio does.
 - **Native port:** Python only.
 
 ## 6. Results

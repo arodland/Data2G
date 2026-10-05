@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from data2g import bulk, codes, hfchannel, modem
 from data2g.arq import phy as PHY
@@ -17,19 +18,20 @@ def test_blocks_stand_alone():
     assert lost == [(3, 4), (9, 9)] and b"blocks 3-4 of" in text
 
 
-def test_round_trip_with_a_header_lost():
+@pytest.mark.parametrize("lost", [0, 1])  # 0: before any control is heard
+def test_round_trip_with_a_header_lost(lost):
     mode, h = "qpsk-r1/2", 6
     bs = bulk.bursts(TEXT, mode, h, 1)
     lay = bulk.Layout(bulk.MODES[mode], len(bulk.pack(TEXT, codes.payload_bytes(bulk.MODES[mode]))), h)
     assert [len(PHY.tx_audio(b)) for b in bs] == [lay.length(g) for g in range(len(bs))]
     lead = FS // 2
     y = np.concatenate([np.zeros(lead), bulk.tx_audio(bs), np.zeros(FS)])
-    s = lead + lay.offset(1)
-    y[s:s + FS] = 0  # burst 1's preamble, header and header copy
+    s = lead + lay.offset(lost)
+    y[s:s + FS] = 0  # the burst's preamble, header and header copy
     y = hfchannel.apply_channel(y, snr_db=15, freq_offset_hz=20, ppm=30, seed=1)
     rx = bulk.receive(y[i:i + FS] for i in range(0, len(y), FS))
     (st,) = rx.streams.values()
     assert st.stats["headerless"] == 1
-    # burst 1's own blocks come from its headerless receive (an r1/2 copy at RV 1 can't decode alone)
+    # the burst's own blocks come from its headerless receive (an r1/2 copy at RV 1 can't decode alone)
     assert bulk.unpack(st.blocks, st.lay.n) == (TEXT, [])
     assert modem.LEADIN_SAMPLES < FS
