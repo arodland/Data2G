@@ -21,31 +21,48 @@ from multiprocessing import Pool  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from data2g import bulk, codes, hfchannel  # noqa: E402
+from data2g import bulk, codes, hfchannel, modem  # noqa: E402
 from data2g.config import FS  # noqa: E402
 
 PEP_REF_DB = 5.0
+PPM = 20.0  # the sender's sample clock
 TEXT = open(os.path.join(os.path.dirname(__file__), "..", "docs", "arq.md"), "rb").read()
 
 
 def trial(args):
-    mode, chan, snr, seed, nbytes, h, only = args
+    label, chan, snr, seed, nbytes, h, only = args
+    genie = label.endswith("!")  # the receiver is told the stream, its timing and CFO: no acquisition
+    mode, _, passes = label.rstrip("!").partition("*")  # "qpsk-r1/2*6": six passes, combined
+    passes = int(passes or 1)
+    h = min(h, bulk.max_h(bulk.MODES[mode]))  # CPM: 4 at most
     rng = np.random.default_rng(seed)
     a = int(rng.integers(0, len(TEXT) - nbytes))
     text = TEXT[a:a + nbytes]
-    x = bulk.tx_audio(bulk.bursts(text, mode, h, 1))
+    x = bulk.tx_audio(bulk.bursts(text, mode, h, passes))
     y = np.concatenate([np.zeros(FS), x, np.zeros(FS)])
     peak = np.max(np.abs(hfchannel._analytic(y)) ** 2) / 2 / 10 ** (PEP_REF_DB / 10)
     if chan != "awgn":
         y = hfchannel.fading(y, chan, seed=seed)
-    y = hfchannel.freq_shift(y, float(rng.uniform(-50, 50)))
-    y = hfchannel.sample_clock_offset(y, 20.0)
+    cfo = float(rng.uniform(-50, 50))
+    y = hfchannel.freq_shift(y, cfo)
+    y = hfchannel.sample_clock_offset(y, PPM)
     y = hfchannel.awgn(y, snr, seed=seed + 1, s_power=peak)
-    rx = bulk.receive((y[i:i + FS] for i in range(0, len(y), FS)), mode if only else None)
+    rx = bulk.Rx()
+    if genie:
+        spec = bulk.MODES[mode]
+        blocks = bulk.pack(text, codes.payload_bytes(spec))
+        lay = bulk.Layout(spec, len(blocks), h)
+        st = bulk.Stream(lay, bulk.stream_id(blocks), cfo=cfo)
+        last = passes * lay.per_pass
+        lead = FS + (0 if bulk.is_cpm(spec) else modem.LEADIN_SAMPLES)  # where the receiver's start is
+        st.fit = [(lay.offset(g), (lead + lay.offset(g)) / (1 + PPM * 1e-6)) for g in (0, last)]
+        st.heard = {last}  # bulk.Rx.missed receives every burst before it at its known position
+        rx.streams[st.stream], rx.cur = st, st
+    rx = bulk.receive((y[i:i + FS] for i in range(0, len(y), FS)), mode if only else None, rx=rx)
     n = len(bulk.pack(text, codes.payload_bytes(bulk.MODES[mode])))
     st = next(iter(rx.streams.values()), None)
     s = st.stats if st else {}
-    return dict(mode=mode, chan=chan, snr=snr, seed=seed, blocks=n, got=len(st.blocks) if st else 0,
+    return dict(mode=label, chan=chan, snr=snr, seed=seed, blocks=n, got=len(st.blocks) if st else 0,
                 first=s.get("rv0", 0), heard=s.get("heard", 0), headerless=s.get("headerless", 0),
                 control_lost=s.get("control_lost", 0), bursts=n and -(-n // h) + 1)
 

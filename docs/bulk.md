@@ -300,3 +300,25 @@ Against the OFDM modes (h=15, the same study's conventions), 1% points:
 
 - fsk32 beats n10-qpsk-r1/5, at the same speed, by 2.0 dB on mpp and 0.7 dB on mps, in
   4.6 times the width.
+
+### Equal airtime: one fsk32r62-r1/2 pass against OFDM passes combined
+
+`scripts/bulk_study.py --modes 'qpsk-r1/2*6,...'` (`mode*passes`; a trailing `!` gives the
+receiver the stream, its timing and CFO: no acquisition). 6 kB texts, h=15 (fsk32: 4),
+mpp and mps, -14..-2 dB, 10 trials a cell, seeds 1000-1009 throughout. Output:
+`runs/passes.csv`. One fsk32 pass of 6 kB is 568 s. SNR (dB) at 5% / 1% block loss:
+
+| config | airtime vs fsk32 | mpp | mps | mpp, genie | mps, genie |
+|---|---|---|---|---|---|
+| fsk32r62-r1/2 x1 | 1.00 | -12.1 / -11.5 | -11.5 / -10.5 | -12.3 / -12.1 | -12.0 / -11.2 |
+| qpsk-r1/5 x2 | 0.91 | -9.9 / -9.2 | -10.2 / -9.4 | -10.1 / -9.4 | -10.9 / -10.1 |
+| qpsk-r1/5 x3 | 1.36 | -10.5 / -10.1 | -12.0 / -11.3 | -11.2 / -11.0 | -12.2 / -11.8 |
+| qpsk-r1/2 x6 | 1.07 | -8.1 / -8.0 | -9.5 / -9.1 | -10.5 / -10.1 | -11.6 / -11.1 |
+| 16qam-r1/3 x7 | 0.96 | -6.5 / -6.1 | -8.2 / -8.0 | -9.2 / -9.0 | -10.1 / -10.0 |
+
+- One fsk32 pass wins at equal airtime, as built: by about 2 dB on mpp and 0.7 dB on mps at
+  1% against qpsk-r1/5 at its 2.2 passes, by 3.5-5 dB against qpsk-r1/2 x6 and 16qam x7.
+- Many short passes lose 2-3 dB to acquisition (as built against genie): the control
+  combines within a burst, never across passes, so at low SNR no pass is ever found.
+- Given free acquisition, they still don't beat fsk32: qpsk-r1/2 x6 ties it on mps and is
+  2 dB behind on mpp. Each pass's soft bits at -10 to -12 dB are too poor to add up well.
