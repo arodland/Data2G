@@ -68,6 +68,15 @@ inline arq::Measured measured(const py::dict& d) {
         m.mi[i] = d[py::str("mi_" + std::string(arq::CONSTS[i]))].cast<double>();
     if (d.contains("headroom")) m.headroom = d["headroom"].cast<double>();
     if (d.contains("frames")) m.frames = d["frames"].cast<double>();
+    if (d.contains("noise") && !d["noise"].is_none()) {
+        const auto n = d["noise"].cast<py::dict>();
+        arq::NoiseLevels l;
+        const auto db = n["noise_db"].cast<std::vector<double>>(), tail = n["noise_tail_db"].cast<std::vector<double>>();
+        std::copy_n(db.begin(), l.db.size(), l.db.begin());
+        std::copy_n(tail.begin(), l.tail_db.size(), l.tail_db.begin());
+        l.impulses_per_min = n["impulses_per_min"].cast<double>();
+        m.noise = l;
+    }
     return m;
 }
 
@@ -79,6 +88,13 @@ inline py::dict to_dict(const arq::Measured& m) {
     for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) d[py::str("mi_" + std::string(arq::CONSTS[i]))] = m.mi[i];
     d["headroom"] = m.headroom;
     d["frames"] = m.frames;
+    if (m.noise) {
+        py::dict n;
+        n["noise_db"] = std::vector<double>(m.noise->db.begin(), m.noise->db.end());
+        n["noise_tail_db"] = std::vector<double>(m.noise->tail_db.begin(), m.noise->tail_db.end());
+        n["impulses_per_min"] = m.noise->impulses_per_min;
+        d["noise"] = n;
+    }
     return d;
 }
 

@@ -111,6 +111,7 @@ struct Args {
     std::string record_dir = default_record_dir();
     std::string log_level = "INFO";
     double stats_interval = 60.0;
+    double noise_rule = 1.0;  // the gear shifter's noise rule, its tail weight; 0: off
     // additions
     bool decode_worker = true;
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card

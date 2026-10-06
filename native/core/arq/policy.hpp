@@ -31,6 +31,7 @@ inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
 inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply
 inline constexpr double LOST_LINK_COST_S = 300.0;
 inline constexpr double REPLY_HOLD_MARGIN_S = 0.5;
+inline constexpr double NOISE_RULE = 1.0;  // the noise rule's tail weight (policy.py NOISE_RULE)
 // the data ladder (policy.py): after LADDER_AFTER data bursts lost in a row,
 // data only in modes LADDER_STEP_DB more robust on every channel
 inline constexpr int LADDER_AFTER = 2;
@@ -87,6 +88,7 @@ public:
     };
     using Map = std::map<std::string, double, std::less<>>;
 
+    std::optional<double> noise_rule = NOISE_RULE;  // nullopt: off (DATA2G_NOISE_RULE=off)
     double gap_s = 2.5;
     bool use_cpm = true;
     double min_success = 0.0;

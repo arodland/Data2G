@@ -5,6 +5,7 @@
 // Saves a screenshot to DATA2G_GUI_SHOT.
 
 #include <QApplication>
+#include <QSlider>
 #include <QElapsedTimer>
 #include <QLabel>
 #include <QSettings>
@@ -107,7 +108,38 @@ app::Args persisted() {
     a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
     a.decode_worker = false;
+    a.noise_rule = 0.5;
     return a;
+}
+
+// The noise rule's slider: 0.00-1.50, a detent at 1.00 while dragging, 0 off;
+// a weight past its top (a command line's) is kept when it isn't touched.
+void test_noise_rule_slider() {
+    check::current_step = "noise rule slider";
+    app::Args a;
+    gui::SettingsDialog d(a, {}, {});
+    auto* s = d.findChild<QSlider*>(QStringLiteral("noise_rule"));
+    auto* label = d.findChild<QLabel*>(QStringLiteral("noise_rule_value"));
+    check::is_true(s && label, "slider and its value shown");
+    check::is_true(s->minimum() == 0 && s->maximum() == 150 && s->value() == 100, "0-150 hundredths, at the default");
+    check::equal(label->text().toStdString(), std::string("1.00 (default)"), "the default named");
+    Q_EMIT s->sliderMoved(97);
+    check::is_true(s->value() == 100, "dragged near 1.00: the detent holds it");
+    s->setValue(90);
+    Q_EMIT s->sliderMoved(90);
+    check::is_true(s->value() == 90, "past the detent: free");
+    s->setValue(37);
+    app::Args e;
+    d.apply_to(e);
+    check::is_true(e.noise_rule == 0.37, "0.37 applied");
+    s->setValue(0);
+    check::equal(label->text().toStdString(), std::string("off"), "0 is off");
+    d.apply_to(e);
+    check::is_true(e.noise_rule == 0.0, "0 applied");
+    a.noise_rule = 2.0;
+    gui::SettingsDialog high(a, {}, {});
+    high.apply_to(e);
+    check::is_true(e.noise_rule == 2.0, "a weight past the slider's top kept when untouched");
 }
 
 void test_settings(const QTemporaryDir& dir) {
@@ -300,6 +332,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QTemporaryDir dir;
     test_settings(dir);
+    test_noise_rule_slider();
     test_waterfall_tx();
     test_window(dir);
     return check::report("gui");

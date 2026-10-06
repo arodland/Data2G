@@ -474,7 +474,7 @@ def _codes_substitutions(native):
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
 GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
-                  "DATA2G_BIAS_FIX")
+                  "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
 
 
 @provider
@@ -543,7 +543,11 @@ def _gear_substitutions(native):
         out = A.capacity(np.asarray(snr_db, dtype=float).reshape(-1), const).reshape(np.shape(snr_db))
         return out[()] if out.ndim == 0 else out
 
-    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS):
+    py_outcome_inputs = P.outcome_inputs
+
+    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS, noise=False):
+        if noise:  # the noise profile's inputs: Python only, until a model with them ships
+            return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise)
         return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands))
 
     def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None):

@@ -7,6 +7,7 @@
 
 #include <array>
 #include <complex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -28,11 +29,29 @@ double effective_mi(std::span<const std::complex<double>> h, std::span<const dou
 
 // The receiver's measurements of a burst (phy.measure, cpm.measure);
 // mi in CONSTS order. headroom and frames: Python's .get defaults.
+// The receiver's noise profile (tnc::NoiseProfile's snapshot), per NOISE_BANDS_HZ.
+inline constexpr std::array<std::array<double, 2>, 5> NOISE_BANDS_HZ = {
+    {{350, 950}, {950, 1300}, {1300, 1750}, {1750, 2100}, {2100, 2700}}};
+struct NoiseLevels {
+    std::array<double, 5> db{}, tail_db{};
+    double impulses_per_min = 0.0;
+};
+
 struct Measured {
     double snr_est = 0.0, spread_est = 0.0, delay_est_ms = 0.0;
     std::array<double, CONSTS.size()> mi{};
     double headroom = 0.0, frames = 16.0;
+    std::optional<NoiseLevels> noise;  // the receiver's, with it (the gear shifter's noise rule)
 };
+
+// What a sync band (OFDM band or CPM grid) occupies, Hz (predictor.band_span_hz).
+std::array<double, 2> band_span_hz(std::string_view band);
+// How much worse a burst in `band` should fare than the one measured in
+// `measured_band`, from the noise profile, as an SNR drop (predictor.noise_shift_db).
+double noise_shift_db(const std::optional<NoiseLevels>& noise, std::string_view measured_band, std::string_view band,
+                      double tail_weight = 1.0, double deadband_db = 1.0);
+// The measurements as if the SNR were shift_db lower (predictor.shifted).
+Measured shifted(const Measured& m, double shift_db);
 
 // The burst before the last: its measurements, band, and age (s).
 struct Prev {

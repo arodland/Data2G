@@ -85,11 +85,21 @@ void test_check() {
 #endif
 }
 
+void test_noise_rule() {
+    check::current_step = "noise rule";
+    check::is_true(parse({}).noise_rule == 1.0, "default 1");
+    check::is_true(parse({"--noise-rule", "0.4"}).noise_rule == 0.4, "--noise-rule 0.4");
+    check::is_true(parse({"--noise-rule=0"}).noise_rule == 0.0 && !app::check(parse({"--noise-rule=0"})), "0: off, valid");
+    check::equal(app::check(parse({"--noise-rule", "-1"})).value_or(""), std::string("--noise-rule: must be 0 (off) or more"),
+                 "negative refused");
+}
+
 }  // namespace
 
 int main() {
     test_rigctld_is_model_2();
     test_every_flag();
     test_check();
+    test_noise_rule();
     return check::report("args");
 }

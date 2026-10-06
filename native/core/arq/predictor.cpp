@@ -5,7 +5,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cpm/cpm.hpp"
 #include "dsp/dsp.hpp"
+#include "waveform/ofdm.hpp"
 
 namespace data2g::arq {
 
@@ -44,6 +46,51 @@ std::string_view const_family(std::string_view name) {
 
 double capacity(double snr_db, std::string_view constellation) {
     return interp(snr_db, tables::CAPACITY_GRID, table(constellation).mi);
+}
+
+std::array<double, 2> band_span_hz(std::string_view band) {
+    if (const auto* g = cpm::grid(band)) return {g->f0 - g->bp, g->f0 + (g->m - 1) * g->rate + g->bp};
+    auto f = waveform::band(band).freqs;
+    std::sort(f.begin(), f.end());
+    const double half = f.size() > 1 ? (f[1] - f[0]) / 2.0 : 25.0;
+    return {static_cast<double>(f.front()) - half, static_cast<double>(f.back()) + half};
+}
+
+namespace {
+double band_level(const std::array<double, 5>& db, std::string_view band) {
+    const auto [lo, hi] = band_span_hz(band);
+    double num = 0.0, den = 0.0;
+    for (std::size_t i = 0; i < NOISE_BANDS_HZ.size(); ++i) {
+        const double w = std::max(0.0, std::min(hi, NOISE_BANDS_HZ[i][1]) - std::max(lo, NOISE_BANDS_HZ[i][0]));
+        num += w * std::pow(10.0, db[i] / 10);
+        den += w;
+    }
+    if (den <= 0) return dsp::quantile(std::vector<double>(db.begin(), db.end()), 0.5);
+    return 10 * std::log10(num / den);
+}
+}  // namespace
+
+double noise_shift_db(const std::optional<NoiseLevels>& noise, std::string_view measured_band, std::string_view band,
+                      double tail_weight, double deadband_db) {
+    if (!noise) return 0.0;
+    std::array<double, 5> loud{};
+    for (std::size_t i = 0; i < loud.size(); ++i) loud[i] = noise->db[i] + noise->tail_db[i];
+    const double med = band_level(noise->db, band) - band_level(noise->db, measured_band);
+    const double l = band_level(loud, band) - band_level(loud, measured_band);
+    const double shift = std::max(0.0, med) + tail_weight * std::max(0.0, l - std::max(0.0, med));
+    return shift >= deadband_db ? shift : 0.0;
+}
+
+Measured shifted(const Measured& m, double shift_db) {
+    if (shift_db == 0.0) return m;
+    Measured out = m;
+    out.snr_est -= shift_db;
+    for (std::size_t i = 0; i < CONSTS.size(); ++i) {
+        const auto& t = table(CONSTS[i]);
+        const double snr = interp(m.mi[i], t.mi, tables::CAPACITY_GRID);  // the curve is increasing
+        out.mi[i] = interp(snr - shift_db, tables::CAPACITY_GRID, t.mi);
+    }
+    return out;
 }
 
 double effective_mi(std::span<const std::complex<double>> h, std::span<const double> var,

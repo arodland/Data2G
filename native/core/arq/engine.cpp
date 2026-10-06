@@ -272,7 +272,14 @@ bool Engine::idle() const {
 }
 
 void Engine::new_session() {
-    auto policy = hooks_.policy ? hooks_.policy() : std::make_shared<GearPolicy>();
+    std::shared_ptr<Policy> policy;
+    if (hooks_.policy) {
+        policy = hooks_.policy();
+    } else {
+        auto gear = std::make_shared<GearPolicy>();
+        gear->shifter.noise_rule = cfg_.noise_rule > 0 ? std::optional(cfg_.noise_rule) : std::nullopt;
+        policy = std::move(gear);
+    }
     const double seed = rng_->uniform(0.0, 1.0);  // random.Random(self.rng.random())
     std::shared_ptr<Rng> rng;
     if (hooks_.session_rng) rng = hooks_.session_rng(seed);
@@ -560,9 +567,12 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
     for (auto& it : items) {
         if (auto* h = std::get_if<tnc::HeaderEvent>(&it)) {
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
-            // from its start (heard within COMMIT_S) to its end
+            // the burst's span: its lead-in (the header's start, stream_end
+            // samples ago being now, t) to its end (engine.py)
             const Mode* m = mode(spec_name(h->header));
-            noise_.mark(t - tnc::NoiseProfile::COMMIT_S, t + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
+            const double start =
+                t - static_cast<double>(h->stream_end - h->header.start() + config::LEADIN_SAMPLES) / config::FS;
+            noise_.mark(start, start + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
             continue;
         }
         tnc::BurstEvent ev = std::holds_alternative<tnc::DecodeRequest>(it)
@@ -604,7 +614,10 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         }
     }
     if (cq(rx)) return;
-    session_->policy->observe(*meas, rx.submode(), t);
+    // the noise profile too (the gear shifter's noise rule reads it)
+    Measured m = *meas;
+    if (const auto s = noise_.snapshot()) m.noise = NoiseLevels{s->db, s->tail_db, s->impulses_per_min};
+    session_->policy->observe(m, rx.submode(), t);
     session_->on_rx(rx, t);
 }
 

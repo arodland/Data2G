@@ -27,10 +27,20 @@ BANDS = P.BANDS + tuple(cpm.GRIDS)
 MEAS = ("snr_est", "spread_est", "delay_est_ms", "headroom", "frames") + tuple(f"mi_{c}" for c in P.CONSTS)
 
 
-def load(path, stale_header=()):
+def noise_of(r) -> dict | None:
+    """A row's noise profile (session_data's NOISE_COLS), None if it has none."""
+    if not r.get("noise_db1"):
+        return None
+    return {"noise_db": [float(r[f"noise_db{i}"]) for i in range(1, 6)],
+            "noise_tail_db": [float(r[f"noise_tail{i}"]) for i in range(1, 6)],
+            "impulses_per_min": float(r["impulses_per_min"])}
+
+
+def load(path, stale_header=(), noise=False):
     """`stale_header`: data from before the header copy (PROTOCOL_VERSION
     11): its w/w48 candidates' burst labels are not today's (their codeword
-    labels, given a usable burst, still are)."""
+    labels, given a usable burst, still are). `noise`: the noise profile's
+    inputs too (predictor.noise_features; rows without one: 'no profile')."""
     rows = []
     for pth in path.split(","):
         stale = pth in stale_header
@@ -39,10 +49,12 @@ def load(path, stale_header=()):
     x, mode, bok, dsent, dok, bmask = [], [], [], [], [], []
     for r in rows:
         m = {k: float(r[k]) for k in MEAS}
+        if noise:
+            m["noise"] = noise_of(r)
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise))
         mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
@@ -99,12 +111,13 @@ def main():
     ap.add_argument("--depth", type=int, default=2, help="hidden layers")
     ap.add_argument("--input-noise", type=float, default=0.0,
                     help="augmentation: Gaussian noise on the continuous inputs, in standard deviations, per batch")
+    ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     a = ap.parse_args()
     if a.ensemble:
         return combine(a.ensemble.split(","), a.out)
     torch.manual_seed(a.seed)
-    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))))
+    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs)
     n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
@@ -124,6 +137,16 @@ def main():
         draw = np.random.default_rng(a.seed).choice(tr_seeds, len(tr_seeds))
         count = dict(zip(*np.unique(draw, return_counts=True)))
         trn = np.repeat(np.flatnonzero(trn), [count.get(s, 0) for s in seeds[trn]])
+    clip = {}
+    if a.noise_inputs:
+        # the noise inputs clipped to their training range (rows with a profile,
+        # 0.5-99.5th percentiles), here and when the model runs
+        has = x[:, -1] > 0.5
+        lo, hi = np.percentile(x[has, -P.N_NOISE:], 0.5, axis=0), np.percentile(x[has, -P.N_NOISE:], 99.5, axis=0)
+        lo[-1], hi[-1] = 1.0, 1.0  # the flag
+        x = P.clip_noise(x, lo, hi)
+        clip = dict(noise_lo=lo, noise_hi=hi)
+        print("noise inputs clipped to", np.round(lo, 2), np.round(hi, 2))
     mean, std = x[trn].mean(0), x[trn].std(0) + 1e-6
     # the noise leaves one-hots and flags (columns of only 0 and 1) alone
     cont = ~np.all(np.isin(x[trn], (0.0, 1.0)), axis=0)
@@ -181,7 +204,9 @@ def main():
         print(f"  {k[0]:6s} {k[1]:5s} n {len(ii):5d}: {pj[ii].mean():.3f} vs {frac[ii].mean():.3f}   "
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
     layers = list(net.layers)
-    np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
+    np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
+             **clip,
+             **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
     P.outcome_model.cache_clear()
     zn = P.outcome_model(a.out)(x[te])

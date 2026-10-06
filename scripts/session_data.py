@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from data2g import interference as INTF
 from data2g.arq import policy as G
 from data2g.arq import predictor as P
 from data2g.arq.modes import MODES, burst_seconds
@@ -56,6 +57,13 @@ MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
           + ["cand", "cand_n", "cand_seconds", "burst_ok", "data_sent", "data_ok", "explored"])
+# the receiver's noise profile at the recommendation (tnc.NoiseProfile.snapshot()), and its interference
+NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in range(1, 6)]
+              + ["impulses_per_min"])
+FIELDS = FIELDS + NOISE_COLS + ["intf"]
+# --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
+INTERFERENCE = None
+WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
 
 
 class Explorer(G.GearShifter):
@@ -64,7 +72,11 @@ class Explorer(G.GearShifter):
 
     def __init__(self, rng, **kw):
         super().__init__(use_cpm=True, **kw)
-        self.rng, self.snap = rng, None
+        self.rng, self.snap, self.noise = rng, None, None
+
+    def observe(self, measured, submode, now):
+        self.noise = measured.get("noise")  # kept here: a native shifter's measured drops it
+        super().observe(measured, submode, now)
 
     def recommend(self, station):
         rec, hint, reply = super().recommend(station)
@@ -80,7 +92,8 @@ class Explorer(G.GearShifter):
             rec, hint, explored = G.encode(self.rng.choice(ok)), self.rng.randrange(len(G.SIZE_S)), True
         if self.rng.random() < EXPLORE:
             reply = G.encode(self.rng.choice(ok))
-        self.snap = dict(m=self.measured, band=self.measured_band, t=self.measured_at, prev=prev, explored=explored)
+        self.snap = dict(m=dict(self.measured, noise=self.noise), band=self.measured_band, t=self.measured_at,
+                         prev=prev, explored=explored)
         return rec, hint, reply
 
 
@@ -107,6 +120,12 @@ class DataPhy(LS.AuditPhy):
             if snap["prev"] is not None:
                 pm, pb, age = snap["prev"]
                 row.update(prev_band=pb, prev_age=round(age, 2), **{f"prev_{k}": pm.get(k, 0.0) for k in MEAS})
+            noise = snap["m"].get("noise")
+            if noise:
+                row.update({f"noise_db{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_db"])})
+                row.update({f"noise_tail{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_tail_db"])})
+                row["impulses_per_min"] = round(noise["impulses_per_min"], 1)
+            row["intf"] = INTF.describe(self.ch.intf[1 - (burst.slots[0].mask_id[1] & 1)].spec)
             self.out.append(row)
         return res
 
@@ -132,7 +151,12 @@ def session(seed):
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
     cap = 0 if rng.random() < 0.25 else 2
     horizon = 600.0 if SLOW else 300.0
-    ch = PS.ContinuousChannel(O.family(doppler), snr0, seed, horizon + 60, doppler=doppler, delay_ms=delay)
+    intf = None
+    if INTERFERENCE:
+        irng = np.random.default_rng(np.random.SeedSequence([seed, 5]))
+        intf = (INTF.draw(irng, INTERFERENCE), INTF.draw(irng, INTERFERENCE))
+    ch = PS.ContinuousChannel(O.family(doppler), snr0, seed, horizon + 60, doppler=doppler, delay_ms=delay,
+                              interference=intf, wander_db=WANDER_DB)
     pols = [Explorer(random.Random(seed * 2 + i)) for i in range(2)]
     out = []
     tag = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2), cap=cap)
@@ -152,6 +176,9 @@ def main():
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
+    ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
+                    help="each station's interference drawn from interference.DRAWS[this] (default v1)")
+    ap.add_argument("--wander", type=float, default=0.0, help="each station's floor wanders by this (dB)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
@@ -159,8 +186,9 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH
-    SLOW, HIGH = a.slow, a.high  # set before the pool forks: the workers inherit them
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB
+    # set before the pool forks: the workers inherit them
+    SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]

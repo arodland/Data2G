@@ -425,7 +425,7 @@ class Receiver:
         self.pending = q
         self.pilots_ok = "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
-        out.append(("header", q))
+        out.append(("header", dict(q, stream_end=self.off + len(self.buf))))
         return True
 
     def _find_copy(self) -> dict | None:
@@ -526,7 +526,8 @@ class Receiver:
                 log.debug("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS,
                          "sync" if p.get("family") == "cpm" else "header copy" if "copy" in p else "header", p["score"])
-                out.append(("header", self.pending))
+                # stream_end: the stream index of the audio fed so far (the caller's now)
+                out.append(("header", dict(self.pending, stream_end=self.off + len(self.buf))))
             p = self.pending
             if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
                 if self.fresh >= self.HOP:

@@ -97,6 +97,8 @@ struct EngineConfig {
     // are dropped (counted, logged once per episode) and the receiver
     // reset; their time still passes on the session stage, as silence.
     double max_backlog_s = 60.0;
+    // The gear shifter's noise rule, its tail weight (GearShifter::noise_rule); 0: off.
+    double noise_rule = NOISE_RULE;
 };
 
 // How a binding swaps in its own objects; every one optional.

@@ -110,9 +110,11 @@ def test_receiver_chunking_independent(native, reference, mixed):
     def drop(d):
         # CPM positions in buffer indices follow the chunking: a lock's
         # header_end (found at), rx's preamble_start and header_end
-        # (received at; an OFDM rx is in its audio segment's)
+        # (received at; an OFDM rx is in its audio segment's), and a header's
+        # stream_end (how much had been fed when it was found)
         cpm_ = d is not None and d.get("family") == "cpm"
-        return d and {k: v for k, v in d.items() if not (cpm_ and k in ("header_end", "preamble_start"))}
+        return d and {k: v for k, v in d.items()
+                      if k != "stream_end" and not (cpm_ and k in ("header_end", "preamble_start"))}
 
     def run(R, chunk):
         return [(k, drop(ev)) if k == "header" else (k, dict(ev, header=drop(ev["header"]), rx=drop(ev["rx"])))

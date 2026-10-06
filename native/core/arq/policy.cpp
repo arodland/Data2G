@@ -212,12 +212,20 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     // older history is used as PREV_MAX_S old, not dropped (policy.py)
     if (prev) pv = Prev{prev->m, prev->band, std::min(measured_at - prev->at, PREV_MAX_S)};
 
-    std::map<double, std::vector<Outcome>> memo;  // by the burst's rounded length
+    // the noise rule: each candidate predicted as if its SNR were lower by
+    // noise_shift_db (its band's noise in the profile against the measured band's)
+    std::map<std::string, double, std::less<>> shift;
+    if (noise_rule)
+        for (const Mode* s : cands)
+            if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
+    std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
-        const double sec = round2(burst_seconds(s, n_cw));
-        auto it = memo.find(sec);
+        const auto sh = shift.find(s.band);
+        const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
+        auto it = memo.find(key);
         if (it == memo.end())
-            it = memo.emplace(sec, predict_outcome(*measured, measured_band, gap_s, sec, pv ? &*pv : nullptr)).first;
+            it = memo.emplace(key, predict_outcome(shifted(*measured, key.second), measured_band, gap_s, key.first,
+                                                   pv ? &*pv : nullptr)).first;
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
         return it->second[static_cast<std::size_t>(i)];

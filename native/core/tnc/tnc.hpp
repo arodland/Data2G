@@ -87,6 +87,7 @@ struct Pending {
 
 struct HeaderEvent {
     Pending header;
+    std::int64_t stream_end = 0;  // the stream index of the audio fed so far (the caller's now)
 };
 struct BurstEvent {
     Pending header;

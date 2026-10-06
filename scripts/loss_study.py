@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
+from data2g import interference as INTF
 from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES
 
@@ -46,7 +47,9 @@ class AuditPhy(G.RealPhy):
         row = dict(self.tag, submode=spec.name, band=spec.band, n_cw=len(burst.slots),
                    ctl_slots=sum(1 for s in burst.slots if s.mask_id[2] >= 128))
         row["kind"] = "data" if row["n_cw"] > row["ctl_slots"] else "ctl"
-        r = self.hear(x, t0)
+        rx_station = self.listen(burst, t0, end)
+        r = self.hear(x, t0, rx_station)
+        noise = self.heard_noise(rx_station, r, t0, end)
         if r is None:
             row.update(outcome="missed", data_sent=0, data_ok=0)
             self.rows.append(row)
@@ -68,7 +71,7 @@ class AuditPhy(G.RealPhy):
 
         def make_rx(store, stats, rng):
             return PHY.ModemRx(r, store)
-        return end, (t_hdr, r["spec"].name, r["n_cw"]), make_rx, PHY.measure(r)
+        return end, (t_hdr, r["spec"].name, r["n_cw"]), make_rx, dict(PHY.measure(r), noise=noise)
 
 
 def ctl_decoded(r, slots) -> bool:
@@ -88,11 +91,19 @@ def ctl_decoded(r, slots) -> bool:
     return True
 
 
+REC_NOISE = None  # recorded noise for 'rec' cells (main loads it before the pool forks)
+WANDER_DB = 1.0  # 'wander' cells: a clean channel whose floor wanders (phy_session.ContinuousChannel)
+
+
 def one(args):
-    chan, snr, seed, horizon, policy = args
+    chan, snr, seed, horizon, policy, intf = args
     rows = []
-    ch = G.ContinuousChannel(chan, snr, seed, horizon)
-    tag = dict(channel=chan, snr=snr, seed=seed)
+    spec = INTF.PRESETS.get(intf or "clean", INTF.Spec())
+    rec = G.RecordedNoise(REC_NOISE, seed) if intf == "rec" else None
+    ch = G.ContinuousChannel(chan, snr, seed, horizon, interference=(spec, spec), recorded=rec,
+                             wander_db=WANDER_DB if intf == "wander" else 0.0)
+    # an interfered cell is its own 'channel' (paired_loss groups by channel and SNR)
+    tag = dict(channel=chan if intf in (None, "clean") else f"{chan}/{intf}", snr=snr, seed=seed)
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, L.WORKLOADS["bulk"](random.Random(seed + 7)),
                 seed=seed, horizon=horizon, phy=AuditPhy(ch, rows, tag))
     for r in rows:
@@ -142,15 +153,28 @@ def main():
     ap.add_argument("--horizon", type=float, default=300.0)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--policy", default="shift", help='linksim.make_policy spec ("shift+cpm": CPM modes too)')
-    ap.add_argument("--cells", default=None, help="channel:snr,... (default CELLS)")
+    ap.add_argument("--cells", default=None,
+                    help="channel:snr[:interference],... (default CELLS); interference: an interference.PRESETS "
+                         "name, or rec (noise recorded on air: --recordings)")
+    ap.add_argument("--recordings", default=None, help="recordings directory, for 'rec' cells")
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
     a = ap.parse_args()
     if G.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    cells = [(c, float(s)) for c, s in (x.split(":") for x in a.cells.split(","))] if a.cells else CELLS
-    jobs = [(c, s, seed, a.horizon, a.policy) for c, s in cells for seed in range(a.seeds)]
+    cells = ([(f[0], float(f[1]), f[2] if len(f) > 2 else None) for f in (x.split(":") for x in a.cells.split(","))]
+             if a.cells else [(c, s, None) for c, s in CELLS])
+    unknown = {i for *_, i in cells if i not in (None, "rec", "wander") and i not in INTF.PRESETS}
+    if unknown:
+        ap.error(f"unknown interference {sorted(unknown)}: {sorted(INTF.PRESETS)}, rec or wander")
+    if any(i == "rec" for *_, i in cells):
+        if not a.recordings:
+            ap.error("'rec' cells need --recordings")
+        global REC_NOISE
+        REC_NOISE = G.load_recorded_noise(sorted(p.parent for p in Path(a.recordings).glob("*/audio_in.f16")))
+        print(f"recorded noise: {len(REC_NOISE) / G.FS / 60:.1f} min", flush=True)
+    jobs = [(c, s, seed, a.horizon, a.policy, i) for c, s, i in cells for seed in range(a.seeds)]
     with Pool(a.jobs) as pool, open(a.out, "w", newline="") as f:
         w = None
         for rows in pool.imap_unordered(one, jobs):
