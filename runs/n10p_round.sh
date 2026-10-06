@@ -20,7 +20,7 @@ date
 for arm in "" "--slow" "--high"; do
   case $arm in "") n=2900 f=3400000 s="" ;; --slow) n=800 f=3500000 s=_slow ;; --high) n=1200 f=3600000 s=_high ;; esac
   [ -s runs/session_data_n10p$s.csv ] && continue
-  $T1 DATA2G_OUTCOME_MODEL=runs/outcome_n10pxt.npz DATA2G_LOGIT_OFFSETS=$OFFS $PY tools/with_native.py \
+  $T1 DATA2G_OUTCOME_MODEL=runs/outcome_n10ext.npz DATA2G_LOGIT_OFFSETS=$OFFS $PY tools/with_native.py \
     scripts/session_data.py $arm --sessions $n --first $f --jobs 16 --out runs/session_data_n10p$s.csv \
     > runs/session_data_n10p$s.log 2>&1
   date
