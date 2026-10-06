@@ -1,0 +1,12 @@
+# varatrials.py in a box: Wine with the registered VARA HF prefix (VARA.ini
+# baked in: keep the image private), Xvfb, a private PipeWire, and the
+# scripts. Arch, as the machine the harness was built on. Built by build.sh
+# (setup.sh does the work; build.sh runs it directly where podman build
+# can't, the settings below included).
+FROM docker.io/library/archlinux:latest
+ARG UID=1000
+RUN --mount=type=bind,target=/ctx /ctx/setup.sh $UID
+USER vara
+ENV WINEPREFIX=/home/vara/.wine-vara WINEDEBUG=-all
+WORKDIR /out
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,15 +1,24 @@
 """run.sh's raw phases: a Pat-free exchange over the VARA ports, so data2g
 sees the bytes as written (Pat's B2F LZHUF-compresses every message first,
 leaving nothing for T_COMP). W1AW connects K2XYZ, both send a file at once
-as Pat's P2P exchange does, then W1AW disconnects.
+as Pat's P2P exchange does, then W1AW disconnects. Also vara_ref.sh's
+transfer, straight into VARA (Pat writes at most 7 x 127 bytes between
+BUFFER reports, and VARA reports BUFFER only after each burst, so a Pat
+session gets 889 bytes an over).
 
     python raw.py <a command port> <b command port> <a->b file> <b->a file> <timeout s>
 
-Prints bytes, seconds and whether each direction arrived exact; exits 1 if
-not (or on timeout)."""
+On a mismatch a->b the bytes received are kept in <a->b file>.got.
+RAW_CALLS: the two calls (default "W1AW K2XYZ"), each sent as MYCALL
+first; RAW_BW: a bandwidth command for both (e.g. BW2300). Prints bytes,
+seconds, rates and whether each direction arrived exact, and the median of
+any SN reports (VARA's SNR estimate); exits 1 if not exact (or on
+timeout)."""
 
+import os
 import select
 import socket
+import statistics
 import sys
 import time
 
@@ -47,8 +56,13 @@ def main():
     def heard(k, prefix):
         return lambda: any(x.startswith(prefix) for x in lines[k])
 
+    call_a, call_b = os.environ.get("RAW_CALLS", "W1AW K2XYZ").split()
+    for k, call in (("a", call_a), ("b", call_b)):
+        cmd[k].sendall(b"COMPRESSION TEXT\r")  # and WINLINK SESSION below: as Pat sends them
+        cmd[k].sendall(f"MYCALL {call}\r".encode() + (os.environ["RAW_BW"].encode() + b"\r" if "RAW_BW" in os.environ else b""))
+        cmd[k].sendall(b"WINLINK SESSION\r")
     cmd["b"].sendall(b"LISTEN ON\r")
-    cmd["a"].sendall(b"CONNECT W1AW K2XYZ\r")
+    cmd["a"].sendall(f"CONNECT {call_a} {call_b}\r".encode())
     if not pump(lambda: heard("a", "CONNECTED")() and heard("b", "CONNECTED")()):
         raise SystemExit(f"no connect in {timeout:.0f} s: {lines}")
     t0 = time.monotonic()
@@ -57,8 +71,20 @@ def main():
     ok = pump(lambda: len(got["b"]) >= len(up) and len(got["a"]) >= len(down))
     dt = time.monotonic() - t0
     exact = bytes(got["b"]) == up and bytes(got["a"]) == down
-    print(f"{'done' if ok else 'timeout'} after {dt:.0f} s: a->b {len(got['b'])}/{len(up)} B, "
-          f"b->a {len(got['a'])}/{len(down)} B, exact {exact}")
+    if bytes(got["b"]) != up:  # keep what arrived, and say how it differs
+        open(sys.argv[3] + ".got", "wb").write(got["b"])
+        bad = [i for i, (x, y) in enumerate(zip(got["b"], up)) if x != y]
+        if bad:
+            chunk = bytes(got["b"][bad[0]:bad[0] + 64])
+            elsewhere = up.find(chunk)
+            print(f"mismatch: {len(bad)} bytes differ, offsets {bad[0]}..{bad[-1]}; the first bad 64 bytes "
+                  + (f"are the sent data's at offset {elsewhere} (reordered/duplicated)" if elsewhere >= 0
+                     else "appear nowhere in the sent data (corrupted)"))
+    print(f"{'done' if ok else 'timeout'} after {dt:.1f} s: a->b {len(got['b'])}/{len(up)} B "
+          f"({60 * len(got['b']) / dt:.0f} B/min), b->a {len(got['a'])}/{len(down)} B, exact {exact}")
+    sn = [float(x.split()[1]) for k in "ab" for x in lines[k] if x.startswith("SN ")]
+    if sn:
+        print(f"SN reports: {len(sn)}, median {statistics.median(sn):.1f} dB")
     lines["a"].clear()
     cmd["a"].sendall(b"DISCONNECT\r")
     deadline = time.monotonic() + 60
