@@ -277,6 +277,11 @@ void test_playback() {
     const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     check::equal(fifo.queued(), std::size_t{0}, "drain empties the fifo");
     check::is_true(waited >= 0.05, "drain waits out the output latency");
+    const auto& b = fifo.last_burst();
+    check::is_true(std::abs(b.written_s - 0.6) < 1e-9, "burst stats: lead and burst written");
+    // a real-time card takes about what the wall clock says, at least what was written
+    check::is_true(b.pulled_s >= b.written_s && b.pulled_s < b.wall_s + 0.1, "burst stats: card pulled at real time");
+    check::is_true(b.low_s > 0 && b.underruns == 0, "burst stats: never ran dry");
     std::this_thread::sleep_for(50ms);
     card.stop();
     check::equal(fifo.underruns(), std::uint64_t{0}, "lead covers late steps; the end is not an underrun");

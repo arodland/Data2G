@@ -126,7 +126,7 @@ const char* USAGE =
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
     "                   [--sample-rate SAMPLE_RATE] [--output-volume OUTPUT_VOLUME] [--rigctld-host RIGCTLD_HOST]\n"
     "                   [--rigctld-port RIGCTLD_PORT] [--ptt-on-delay-ms PTT_ON_DELAY_MS]\n"
-    "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
+    "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS] [--output-buffer-ms MS]\n"
     "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
     "                   [--record-dir RECORD_DIR] [--log-level LOG_LEVEL] [--stats-interval S] [--list-modes]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
@@ -162,6 +162,8 @@ const char* HELP =
     "  --ptt-off-delay-ms PTT_OFF_DELAY_MS (default 50)\n"
     "  --tx-lead-ms TX_LEAD_MS       TX audio queued ahead of the sound card: slack for a late audio step\n"
     "                                (default 100)\n"
+    "  --output-buffer-ms MS         the sound card stream's buffer, as asked of Qt; 0: two 256-sample\n"
+    "                                periods per 6 kHz, 85 ms at 48 kHz (default 0)\n"
     "  --min-header-score MIN_HEADER_SCORE (default 0.0)\n"
     "  --buffer-credit BUFFER_CREDIT bytes queued for the next burst that BUFFER leaves out, at most, so VARA\n"
     "                                clients that throttle on it (Pat) keep a whole burst queued; -1: the next\n"
@@ -266,6 +268,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--ptt-on-delay-ms", [&](auto& o, auto& v) { a.ptt_on_delay_ms = i_(o, v); }},
         {"--ptt-off-delay-ms", [&](auto& o, auto& v) { a.ptt_off_delay_ms = i_(o, v); }},
         {"--tx-lead-ms", [&](auto& o, auto& v) { a.tx_lead_ms = i_(o, v); }},
+        {"--output-buffer-ms", [&](auto& o, auto& v) { a.output_buffer_ms = i_(o, v); }},
         {"--min-header-score", [&](auto& o, auto& v) { a.min_header_score = d_(o, v); }},
         {"--buffer-credit", [&](auto& o, auto& v) { a.buffer_credit = i_(o, v); }},
         {"--record-dir", [&](auto&, auto& v) { a.record_dir = v; }},
@@ -756,7 +759,15 @@ void Station::engine_loop() {
                 for (auto& v : y) v = std::clamp(v * gain, -1.0, 1.0);
                 play_->write(y);
             }
-            if (keyer_->keyed() && !out.ptt) keyer_->unkey();
+            if (keyer_->keyed() && !out.ptt) {
+                keyer_->unkey();
+                if (card_) {  // a pipe has no device timing to show
+                    const auto& b = play_->last_burst();
+                    logf(INFO, "TX audio: %.2f s written (lead included), the card took %.2f s in %.2f s, "
+                         "FIFO low %.3f s, %llu underruns", b.written_s, b.pulled_s, b.wall_s, b.low_s,
+                         static_cast<unsigned long long>(b.underruns));
+                }
+            }
             ptt_ = keyer_->keyed();
             watch_counters();
         }
@@ -885,7 +896,7 @@ void Station::start() {
             const auto out = audio::select_device(audio::qt::output_devices(), a_.output_device.value_or(""), "output");
             card_ = std::make_unique<SoundCard>();
             card_->cap = std::make_unique<audio::qt::Capture>(in, rate_, *cap_, report);
-            card_->play = std::make_unique<audio::qt::Playback>(out, rate_, *play_, report);
+            card_->play = std::make_unique<audio::qt::Playback>(out, rate_, *play_, report, a_.output_buffer_ms / 1000.0);
             logf(INFO, "audio: in %s (%d ch), out %s (%d ch) at %d Hz", card_->cap->device_name().c_str(), card_->cap->channels(),
                  card_->play->device_name().c_str(), card_->play->channels(), rate_);
 #else

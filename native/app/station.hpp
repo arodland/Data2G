@@ -106,6 +106,7 @@ struct Args {
     bool rig_debug = false;          // Hamlib's trace into the log
     bool list_rigs = false;
     int ptt_on_delay_ms = 100, ptt_off_delay_ms = 50, tx_lead_ms = 100;
+    int output_buffer_ms = 0;  // the Qt sink's buffer; 0: two host.py periods
     double min_header_score = 0.0;
     int buffer_credit = -1;
     std::string record_dir = default_record_dir();

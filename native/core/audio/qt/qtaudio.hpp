@@ -54,10 +54,12 @@ private:
 
 // Opens `device` (an index into output_devices()) at `rate` and plays from
 // `fifo` continuously (silence when it is empty), the same signal on every
-// channel. Sets the FIFO's output latency for drain().
+// channel. Sets the FIFO's output latency for drain(). `buffer_s`: the
+// sink's buffer as asked of Qt; 0: two host.py periods (85 ms at 48 kHz).
 class Playback {
 public:
-    Playback(std::optional<std::size_t> device, int rate, PlaybackFifo& fifo, Report on_error = {});
+    Playback(std::optional<std::size_t> device, int rate, PlaybackFifo& fifo, Report on_error = {},
+             double buffer_s = 0);
     ~Playback();
     Playback(const Playback&) = delete;
     Playback& operator=(const Playback&) = delete;

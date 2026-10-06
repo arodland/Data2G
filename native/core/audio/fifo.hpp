@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -112,6 +113,14 @@ private:
     std::atomic<std::uint64_t> overflows_{0}, dropped_{0}, late_events_{0};
 };
 
+// One key-up to drain(): what was written, what the device pulled over
+// how long (more than the wall time: it ran ahead of real time), how close
+// the FIFO came to empty, and the underruns.
+struct BurstStats {
+    double written_s = 0, pulled_s = 0, wall_s = 0, low_s = 0;
+    std::uint64_t underruns = 0;
+};
+
 // Playback: the engine thread write()s mono samples at the device rate,
 // the device thread pull()s periods.
 class PlaybackFifo {
@@ -136,6 +145,8 @@ public:
     double output_latency() const { return latency_s_.load(std::memory_order_relaxed); }
 
     std::size_t queued() const { return ring_.size(); }
+    // Engine thread, after drain(): the burst it ended.
+    const BurstStats& last_burst() const { return last_; }
     std::uint64_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
     int rate() const { return rate_; }
 
@@ -147,6 +158,13 @@ private:
     std::atomic<double> latency_s_{0.0};
     std::atomic<std::uint64_t> underruns_{0};
     std::vector<float> scratch_;  // engine thread only
+    // device thread writes these two; the engine reads them between start() and drain()
+    std::atomic<std::uint64_t> pulled_{0};
+    std::atomic<std::size_t> low_{0};
+    // engine thread only: the burst under way, then the last one
+    std::chrono::steady_clock::time_point t0_;
+    std::uint64_t written_ = 0, pulled0_ = 0, underruns0_ = 0;
+    BurstStats last_;
 };
 
 }  // namespace data2g::audio

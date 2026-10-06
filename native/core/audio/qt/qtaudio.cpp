@@ -248,8 +248,8 @@ private:
 
 class PlaybackWorker final : public Worker {
 public:
-    PlaybackWorker(QAudioDevice device, int rate, PlaybackFifo& fifo, Report report)
-        : Worker(std::move(device), rate, std::move(report)), fifo_(fifo) {}
+    PlaybackWorker(QAudioDevice device, int rate, PlaybackFifo& fifo, Report report, double buffer_s)
+        : Worker(std::move(device), rate, std::move(report)), fifo_(fifo), buffer_s_(buffer_s) {}
 
     void close() override {
         if (timer_) timer_->stop();
@@ -267,7 +267,8 @@ protected:
         sink_ = std::make_unique<QAudioSink>(device_, f.qt);
         // host.py's period: 256 frames per 6 kHz (2048 at 48 kHz), two of them.
         const int period = 256 * std::max(1, rate_ / 6000);
-        sink_->setBufferSize(f.qt.bytesForFrames(2 * period));
+        sink_->setBufferSize(buffer_s_ > 0 ? f.qt.bytesForDuration(static_cast<qint64>(buffer_s_ * 1e6))
+                                           : f.qt.bytesForFrames(2 * period));
         connect(sink_.get(), &QAudioSink::stateChanged, this, [this] { report("out", sink_->error()); });
         sink_->start(source_.get());
         if (sink_->error() != QAudio::NoError) throw std::runtime_error("could not start playback on \"" + name() + "\"");
@@ -287,6 +288,7 @@ protected:
 
 private:
     PlaybackFifo& fifo_;
+    double buffer_s_;
     std::unique_ptr<FifoDevice> source_;
     std::unique_ptr<QAudioSink> sink_;
     QTimer* timer_ = nullptr;
@@ -320,11 +322,11 @@ struct Playback::Impl {
     Thread t;
 };
 
-Playback::Playback(std::optional<std::size_t> device, int rate, PlaybackFifo& fifo, Report on_error)
+Playback::Playback(std::optional<std::size_t> device, int rate, PlaybackFifo& fifo, Report on_error, double buffer_s)
     : impl_(std::make_unique<Impl>()) {
     impl_->t.run(std::make_unique<PlaybackWorker>(
         pick(QMediaDevices::audioOutputs(), device, QMediaDevices::defaultAudioOutput()), rate, fifo,
-        std::move(on_error)));
+        std::move(on_error), buffer_s));
 }
 
 Playback::~Playback() { stop(); }

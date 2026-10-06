@@ -3,7 +3,7 @@
 // the same FIFOs, Decimator and Interpolator the host uses.
 //
 //   data2g-audio-check                         # list devices
-//   data2g-audio-check --loop --in USB --out USB [--seconds 5] [--rate 48000] [--lead-ms 100]
+//   data2g-audio-check --loop --in USB --out USB [--seconds 5] [--rate 48000] [--lead-ms 100] [--buffer-ms 0]
 //
 // No loopback hardware on Linux: a null sink and a remapped monitor (Qt
 // does not list monitor sources):
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     std::string in, out;
     int rate = 48000;
-    double seconds = 5.0, f = 1000.0, lead_ms = 100;  // lead: the host's --tx-lead-ms
+    double seconds = 5.0, f = 1000.0, lead_ms = 100, buffer_ms = 0;  // the host's --tx-lead-ms, --output-buffer-ms
     bool loop = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -67,8 +67,9 @@ int main(int argc, char** argv) {
         else if (a == "--rate") rate = std::stoi(next());
         else if (a == "--seconds") seconds = std::stod(next());
         else if (a == "--lead-ms") lead_ms = std::stod(next());
+        else if (a == "--buffer-ms") buffer_ms = std::stod(next());
         else {
-            std::fprintf(stderr, "usage: data2g-audio-check [--loop --in DEV --out DEV --rate HZ --seconds S --lead-ms MS]\n");
+            std::fprintf(stderr, "usage: data2g-audio-check [--loop --in DEV --out DEV --rate HZ --seconds S --lead-ms MS --buffer-ms MS]\n");
             return 2;
         }
     }
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
         audio::CaptureFifo cap(config::FS);
         audio::PlaybackFifo play(rate, lead_ms / 1000);
         audio::qt::Capture capture(audio::select_device(ins, in, "input"), rate, cap, report);
-        audio::qt::Playback playback(audio::select_device(outs, out, "output"), rate, play, report);
+        audio::qt::Playback playback(audio::select_device(outs, out, "output"), rate, play, report, buffer_ms / 1000);
         std::printf("in:  %s (%d ch)\nout: %s (%d ch)\n", capture.device_name().c_str(), capture.channels(),
                     playback.device_name().c_str(), playback.channels());
 
@@ -102,6 +103,9 @@ int main(int argc, char** argv) {
             play.write(interp(y));
         }
         play.drain();
+        const auto& b = play.last_burst();
+        std::printf("burst: %.2f s written (lead included), the card took %.2f s in %.2f s, FIFO low %.3f s, %llu underruns\n",
+                    b.written_s, b.pulled_s, b.wall_s, b.low_s, static_cast<unsigned long long>(b.underruns));
         // Where "now" is on the capture timeline when drain() returns (the
         // host drops PTT here, after its off delay): read so far plus the
         // backlog. Input latency shifts both this and the tone alike.

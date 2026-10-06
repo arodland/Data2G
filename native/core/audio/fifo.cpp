@@ -51,11 +51,17 @@ PlaybackFifo::PlaybackFifo(int rate, double lead_s, double capacity_s)
     : rate_(rate), lead_(samples(lead_s, rate)), ring_(samples(capacity_s, rate)) {}
 
 void PlaybackFifo::start() {
+    t0_ = std::chrono::steady_clock::now();
+    pulled0_ = pulled_.load(std::memory_order_relaxed);
+    underruns0_ = underruns_.load(std::memory_order_relaxed);
+    written_ = 0;
     write(std::vector<double>(lead_, 0.0));
+    low_.store(ring_.size(), std::memory_order_relaxed);
     active_.store(true, std::memory_order_release);
 }
 
 void PlaybackFifo::write(std::span<const double> y) {
+    written_ += y.size();
     scratch_.assign(y.begin(), y.end());
     std::span<const float> left(scratch_);
     // ponytail: polls for room; it only waits if the engine runs capacity_s ahead of the card
@@ -68,10 +74,19 @@ void PlaybackFifo::write(std::span<const double> y) {
 void PlaybackFifo::drain() {
     active_.store(false, std::memory_order_release);  // the last pull coming up short is the end, not an underrun
     while (const std::size_t left = ring_.size()) sleep_s(static_cast<double>(left) / rate_ + 0.002);
+    const double r = rate_;
+    last_ = {static_cast<double>(written_) / r,
+             static_cast<double>(pulled_.load(std::memory_order_relaxed) - pulled0_) / r,
+             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count(),
+             static_cast<double>(low_.load(std::memory_order_relaxed)) / r,
+             underruns_.load(std::memory_order_relaxed) - underruns0_};
     sleep_s(output_latency());
 }
 
 std::size_t PlaybackFifo::pull(std::span<float> out) {
+    if (active_.load(std::memory_order_acquire))
+        low_.store(std::min(low_.load(std::memory_order_relaxed), ring_.size()), std::memory_order_relaxed);
+    pulled_.fetch_add(out.size(), std::memory_order_relaxed);
     const std::size_t n = ring_.read(out);
     std::fill(out.begin() + static_cast<std::ptrdiff_t>(n), out.end(), 0.0f);
     if (n < out.size() && active_.load(std::memory_order_acquire)) underruns_.fetch_add(1, std::memory_order_relaxed);
