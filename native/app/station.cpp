@@ -119,8 +119,9 @@ void install_arq_log() {
 
 namespace {
 
+// After "usage: PROG ", PROG padded to data2g-host's width so the columns line up.
 const char* USAGE =
-    "usage: data2g-host [-h] [--kiss-port KISS_PORT]\n"
+    "[-h] [--kiss-port KISS_PORT]\n"
     "                   [--kiss-address KISS_ADDRESS] [--kiss-busy-limit S] [--kiss-bw {2400,500}]\n"
     "                   [--broadcast-mode MODE] [--mycall MYCALL] [--host HOST] [--command-port COMMAND_PORT]\n"
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
@@ -227,7 +228,7 @@ T number(const std::string& opt, const std::string& v, const char* prog) {
 }  // namespace
 
 void usage_error(const std::string& msg, const char* prog) {
-    std::fprintf(stderr, "%s%s: error: %s\n", USAGE, prog, msg.c_str());
+    std::fprintf(stderr, "usage: %-11s %s%s: error: %s\n", prog, USAGE, prog, msg.c_str());
     std::exit(2);
 }
 
@@ -302,7 +303,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
-            std::printf("%s%s", USAGE, HELP);
+            std::printf("usage: %-11s %s%s", prog, USAGE, HELP);
             std::exit(0);
         }
         std::optional<std::string> inline_value;
