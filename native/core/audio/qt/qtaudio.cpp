@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <random>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -222,6 +223,11 @@ protected:
         const auto frames = static_cast<std::size_t>(maxlen / frame);
         mono_.resize(frames);
         fifo_.pull(mono_);
+        // Silence (lead, tail, idle, an underrun's padding) goes out as
+        // -90 dBFS noise, +-1 LSB at 16 bits: nothing downstream sees
+        // digital zero and decides the stream has stopped.
+        for (float& v : mono_)
+            if (v == 0.0f) v = (rng_() & 1) ? FLOOR : -FLOOR;
         to_device(mono_, fmt_, channels_, bytes_);
         std::memcpy(data, bytes_.data(), bytes_.size());
         pulled_.fetch_add(static_cast<qint64>(bytes_.size()), std::memory_order_relaxed);
@@ -235,7 +241,9 @@ private:
     int channels_;
     std::vector<float> mono_;
     std::vector<std::byte> bytes_;
-    std::atomic<qint64> pulled_{0};  // the sink may read off its own thread (Qt 6.9+)
+    std::atomic<qint64> pulled_{0};
+    static constexpr float FLOOR = 3.2e-5f;  // -90 dBFS
+    std::minstd_rand rng_;  // the sink may read off its own thread (Qt 6.9+)
 };
 
 class PlaybackWorker final : public Worker {
