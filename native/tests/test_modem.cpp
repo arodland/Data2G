@@ -50,7 +50,7 @@ int main() {
     for (auto band : modem::SYNC_BANDS) {
         for (const auto& s : config::SUBMODES) {
             if (s.sync_band != band) continue;
-            for (int n : {1, 64}) {
+            for (int n : {1, config::max_codewords(band)}) {
                 std::vector<double> soft;
                 for (auto b : modem::header_bits(s.index, n, band)) soft.push_back(1.0 - 2.0 * b);
                 const auto h = modem::decode_header(soft, band);

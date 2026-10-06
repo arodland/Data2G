@@ -41,6 +41,8 @@ inline constexpr std::array<int, 4> PILOT_N4 = {518, 821, 829, 542};
 inline constexpr std::array<int, 10> PILOT_N10 = {480, 471, 862, 780, 503, 490, 593, 127, 601, 62};
 inline constexpr std::array<int, 48> PILOT_W48 = {1021, 910, 952, 927, 968, 883, 915, 730, 618, 666, 431, 53, 996, 1022, 815, 278, 77, 519, 263, 311, 918, 546, 399, 690, 927, 609, 100, 34, 390, 663, 873, 422, 1004, 904, 229, 366, 529, 880, 1012, 422, 611, 98, 709, 78, 423, 772, 293, 849};
 inline constexpr double PREAMBLE_THRESHOLD = 24.1;
+inline constexpr int cw_bits(std::string_view sync_band) { return sync_band == "n10" ? 5 : 6; }
+inline constexpr int max_codewords(std::string_view sync_band) { return 1 << cw_bits(sync_band); }
 
 struct Band {
     std::string_view name;
@@ -78,11 +80,11 @@ struct Submode {
     std::span<const double> ace;
 };
 
-inline constexpr std::array<double, 1> ACE_33 = {1.0};
-inline constexpr std::array<double, 1> ACE_34 = {1.0};
+inline constexpr std::array<double, 1> ACE_35 = {1.0};
 inline constexpr std::array<double, 1> ACE_36 = {1.0};
+inline constexpr std::array<double, 1> ACE_38 = {1.0};
 
-inline constexpr std::array<Submode, 42> SUBMODES = {{
+inline constexpr std::array<Submode, 44> SUBMODES = {{
     {0, "ack-4f", "polar", "gray-qam4", "w", "w", 4, 56, 2, 960, 24, 4, 0.0, {}},
     {1, "polar-k96-f8", "polar", "gray-qam4", "w", "w", 8, 104, 2, 1920, 24, 10, 0.0, {}},
     {2, "polar-k96-f4", "polar", "gray-qam4", "w", "w", 4, 104, 2, 960, 24, 10, 0.0, {}},
@@ -110,16 +112,18 @@ inline constexpr std::array<Submode, 42> SUBMODES = {{
     {13, "n10-16qam-r1/2", "ldpc", "gray-qam16", "n10", "n10", 10, 1000, 4, 2000, 32, 121, 0.0, {}},
     {14, "n10-16qam-r2/3", "ldpc", "gray-qam16", "n10", "n10", 10, 1336, 4, 2000, 32, 163, 2.0, {}},
     {15, "n10-16qam-r3/4", "ldpc", "gray-qam16", "n10", "n10", 10, 1504, 4, 2000, 32, 184, 3.0, {}},
+    {16, "n10-64l-r3/4", "ldpc", "c64-w48-r34", "n10", "n10", 10, 2256, 6, 3000, 32, 278, 6.0, {}},
+    {17, "n10-256l-r3/4", "ldpc", "c256-w48-r58", "n10", "n10", 10, 3008, 8, 4000, 32, 372, 8.0, {}},
     {0, "w48-qpsk-r1/5", "ldpc", "gray-qam4", "w48", "w48", 4, 384, 2, 1920, 16, 46, 0.0, {}},
     {1, "w48-qpsk-r1/3", "ldpc", "gray-qam4", "w48", "w48", 4, 640, 2, 1920, 32, 76, 0.0, {}},
     {2, "w48-qpsk-r1/2", "ldpc", "gray-qam4", "w48", "w48", 4, 960, 2, 1920, 32, 116, 0.0, {}},
     {3, "w48-qpsk-r2/3", "ldpc", "gray-qam4", "w48", "w48", 4, 1280, 2, 1920, 32, 156, 0.0, {}},
     {4, "w48-16qam-r1/3", "ldpc", "gray-qam16", "w48", "w48", 4, 1280, 4, 3840, 32, 156, 1.0, {}},
     {5, "w48-qpsk-r3/4", "ldpc", "gray-qam4", "w48", "w48", 4, 1440, 2, 1920, 32, 176, 0.0, {}},
-    {6, "w48-16qam-r1/2", "ldpc", "gray-qam16", "w48", "w48", 4, 1920, 4, 3840, 32, 236, 1.0, ACE_33},
-    {7, "w48-16qam-r2/3", "ldpc", "gray-qam16", "w48", "w48", 4, 2560, 4, 3840, 32, 316, 1.0, ACE_34},
+    {6, "w48-16qam-r1/2", "ldpc", "gray-qam16", "w48", "w48", 4, 1920, 4, 3840, 32, 236, 1.0, ACE_35},
+    {7, "w48-16qam-r2/3", "ldpc", "gray-qam16", "w48", "w48", 4, 2560, 4, 3840, 32, 316, 1.0, ACE_36},
     {8, "w48-64l-r1/2", "ldpc", "c64-w48-r12", "w48", "w48", 2, 1440, 6, 2880, 32, 176, 4.0, {}},
-    {9, "w48-16qam-r3/4", "ldpc", "gray-qam16", "w48", "w48", 4, 2880, 4, 3840, 32, 356, 3.0, ACE_36},
+    {9, "w48-16qam-r3/4", "ldpc", "gray-qam16", "w48", "w48", 4, 2880, 4, 3840, 32, 356, 3.0, ACE_38},
     {10, "w48-16qam-r5/6", "ldpc", "gray-qam16", "w48", "w48", 4, 3200, 4, 3840, 32, 396, 5.0, {}},
     {11, "w48-64l-r7/12", "ldpc", "c64-w48-r712", "w48", "w48", 2, 1680, 6, 2880, 32, 206, 5.0, {}},
     {12, "w48-64l-r2/3", "ldpc", "c64-w48-r23", "w48", "w48", 2, 1920, 6, 2880, 32, 236, 6.0, {}},

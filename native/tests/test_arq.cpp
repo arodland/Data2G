@@ -34,7 +34,8 @@ int main() {
     check::equal(modem::header_samples("n10"), 12 * config::NSYM, "n10 header: 10 symbols, a pilot, the closing pilot");
 
     check::current_step = "modes";
-    check::equal(static_cast<int>(arq::modes().size()), 48, "modes");
+    check::equal(static_cast<int>(arq::modes().size()), 50, "modes");
+    check::equal(arq::encode("n10-256l-r3/4"), 3 << 4 | 9, "encode n10-256l-r3/4 (CPM code, past N10_HIGH)");
     check::equal(arq::encode("qpsk-r1/2"), 7, "encode qpsk-r1/2");
     check::equal(arq::encode("fsk8r50-r1/2"), 51, "encode fsk8r50-r1/2");
     for (const auto& m : arq::modes()) check::is_true(arq::decode(arq::encode(m.name)) == &m, std::string(m.name) + " roundtrip");

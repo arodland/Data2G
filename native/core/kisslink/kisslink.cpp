@@ -353,7 +353,7 @@ arq::TxBurstPtr KissLink::next_burst() {
         const std::size_t pb = static_cast<std::size_t>(arq::payload_bytes(m));
         // the size class is a preference: a burst grows to carry its first
         // frame, up to what its header can say
-        const int limit = m.is_cpm() ? 1 + 1 + tables::CPM.max_data : config::MAX_CODEWORDS;
+        const int limit = m.is_cpm() ? 1 + 1 + tables::CPM.max_data : config::max_codewords(m.ofdm->sync_band);
         const int need = static_cast<int>(ctl.size()) + ceil_div(2 + queue[0].frame.size(), pb);
         const int n_max = std::min(limit, std::max(arq::slots_for(m, seconds), need));
         const std::size_t room = static_cast<std::size_t>(n_max - static_cast<int>(ctl.size())) * pb;

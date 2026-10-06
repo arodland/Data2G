@@ -49,7 +49,9 @@ std::vector<std::pair<int, Bytes>> KissDecoder::feed(std::span<const std::uint8_
 
 // --- framing ----------------------------------------------------------------
 
-int capacity(const modem::Spec& spec, int max_cw) { return max_cw * spec.payload_bytes; }
+int capacity(const modem::Spec& spec, int max_cw) {
+    return (max_cw ? max_cw : config::max_codewords(spec.sync_band)) * spec.payload_bytes;
+}
 
 std::vector<Bytes> pack(const std::vector<Bytes>& packets, const modem::Spec& spec) {
     const std::size_t p = static_cast<std::size_t>(spec.payload_bytes);

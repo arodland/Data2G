@@ -47,7 +47,7 @@ private:
 
 // --- framing: [length, 2 bytes big-endian][frame] back to back, zero-padded --
 
-int capacity(const modem::Spec& spec, int max_cw = config::MAX_CODEWORDS);
+int capacity(const modem::Spec& spec, int max_cw = 0);  // 0: what its header can announce
 // Packets -> codeword payloads for one burst. Throws std::invalid_argument past capacity().
 std::vector<Bytes> pack(const std::vector<Bytes>& packets, const modem::Spec& spec);
 // Payloads and their CRC results -> (whole packets, packets lost).

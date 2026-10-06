@@ -552,7 +552,7 @@ def _gear_substitutions(native):
 
     def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None):
         d = A.predict_outcome(measured, band, gap, seconds, prev)
-        return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values())}
+        return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values()) if s.name in d}
 
     class GearShifter(G.GearShifter):
         """State in the C++ object; dict and list fields cross by copy (assign
@@ -804,8 +804,9 @@ def _modem_substitutions(native):
 
     @guarded("modulate", lambda payloads, submode, rvs=None: own(submode))
     def modulate(payloads, submode, rvs=None):
-        if not 1 <= len(payloads) <= config.MAX_CODEWORDS:
-            raise ValueError(f"1..{config.MAX_CODEWORDS} codewords per burst, got {len(payloads)}")
+        top = config.max_codewords((config.SUBMODES[submode] if isinstance(submode, str) else submode).sync_band)
+        if not 1 <= len(payloads) <= top:
+            raise ValueError(f"1..{top} codewords per burst, got {len(payloads)}")
         return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)))
 
     @guarded("modulate_bits", lambda bits, spec: own(spec) and isinstance(bits, np.ndarray))
@@ -970,8 +971,8 @@ def _tnc_substitutions(native):
         channel_busy = property(lambda s: PyReceiver.channel_busy.fget(s) if s._n is None else s._n.channel_busy)
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
-    def capacity(spec, max_cw=config.MAX_CODEWORDS):
-        return T.capacity(spec.name, int(max_cw)) if own(spec) else py["capacity"](spec, max_cw)
+    def capacity(spec, max_cw=None):
+        return T.capacity(spec.name, int(max_cw or 0)) if own(spec) else py["capacity"](spec, max_cw)
 
     def pack(packets, spec):
         return T.pack([bytes(p) for p in packets], spec.name) if own(spec) else py["pack"](packets, spec)

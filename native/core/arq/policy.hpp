@@ -40,6 +40,8 @@ inline constexpr double LADDER_STEP_DB = 3.0;
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
 inline constexpr int CPM_CODE = 3;
+// CPM_CODE's indices from here carry n10's past 15 (16-23; policy.py N10_HIGH)
+inline constexpr int N10_HIGH = 8;
 inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
 inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = "fsk16r25-r1/2";

@@ -89,15 +89,26 @@ std::vector<const Mode*> allowed(int cap) {
     return out;
 }
 
+// CPM_SPECS fits under N10_HIGH: policy.py asserts it, and the tables are generated from it
+
 int encode(std::string_view submode) {
     const Mode& m = mode_at(submode);
     if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
+    if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
+        if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
+        return CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
+    }
     return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
 }
 
 const Mode* decode(int rec) {
     if (rec >> 4 == CPM_CODE) {
         const auto i = static_cast<std::size_t>(rec & 15);
+        if (i >= static_cast<std::size_t>(N10_HIGH)) {
+            for (const auto& s : config::SUBMODES)
+                if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
+            return nullptr;
+        }
         return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
     }
     for (const auto& [band, code] : BANDS_CODE)
@@ -113,8 +124,9 @@ int ctl_slots(const Mode& m) { return std::min(max_ctl(m), cdiv(CTL_BYTES, ctl_p
 
 int slots_for(const Mode& m, double seconds, bool data, bool dup) {
     if (m.is_cpm()) seconds = std::min(seconds * CPM_SIZE_SCALE, CPM_MAX_S);
+    const int lim = m.is_cpm() ? 64 : config::max_codewords(m.ofdm->sync_band);
     int n = 1;
-    while (n < 64 && burst_seconds(m, n + 1) <= seconds) ++n;
+    while (n < lim && burst_seconds(m, n + 1) <= seconds) ++n;
     n = std::max({n, min_cw(m, data), ctl_slots(m) + data});
     if (m.is_cpm()) n = std::min(n + (dup && data), 1 + dup + tables::CPM.max_data);
     return n;
@@ -207,7 +219,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     }
     std::vector<const Mode*> cands;
     for (const Mode* s : allowed(st.cap))
-        if (!s->is_cpm() || (use_cpm && outcome_knows(s->name))) cands.push_back(s);
+        if (outcome_knows(s->name) && (!s->is_cpm() || use_cpm)) cands.push_back(s);  // a mode added since: not until a model knows it
     std::optional<Prev> pv;
     // older history is used as PREV_MAX_S old, not dropped (policy.py)
     if (prev) pv = Prev{prev->m, prev->band, std::min(measured_at - prev->at, PREV_MAX_S)};

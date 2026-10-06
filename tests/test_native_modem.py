@@ -79,9 +79,10 @@ def test_header_tables(native, py):
         np.testing.assert_array_equal(N.signs(py._valid_words(band), band), py._valid_signs(band))
         for (b, sub) in modem.BY_INDEX:
             if b == band:
-                for n in (1, 7, 64):
+                for n in (1, 7, modem.max_codewords(band)):
                     np.testing.assert_array_equal(N.header_bits(sub, n, band), py.header_bits(sub, n, band))
-    acc = modem.Accept.of(["qpsk-r1/2", "ack-1f", "w48-qpsk-r1/2"], max_secs=2.5, min_score=0.2)
+    acc = modem.Accept.of(["qpsk-r1/2", "ack-1f", "w48-qpsk-r1/2", "n10-256l-r3/4", "n4-ack-2f"], max_secs=2.5,
+                          min_score=0.2)
     for band in modem.SYNC_BANDS:
         np.testing.assert_array_equal(N.valid_words(band, acc), py._valid_words(band, acc))
 
