@@ -273,6 +273,10 @@ class RealPhy:
     def hear(self, x, t0, rx=None):
         """The receiver's result for audio x sent at t0 (either family), or None."""
         self.last_y = y = self.ch.apply(x, t0, rx)
+        # its peak-to-average (dB): the energy SNR is reported against the
+        # peer's peak, the same for every mode of a peak-limited transmitter
+        self.last_papr_db = float(10 * np.log10(np.max(np.abs(hfchannel._analytic(x)) ** 2) / 2
+                                                 / hfchannel.active_power(x)))
         try:
             return receive_any(y, lead=int(PAD_S * FS) + FS // 2)
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
@@ -291,8 +295,12 @@ class RealPhy:
         yb = np.fft.irfft(np.fft.rfft(y) * ((f >= lo) & (f <= hi)), len(y))
         pn = np.mean(np.concatenate([yb[:pad], yb[-pad:]]) ** 2)
         ps = np.mean(yb[pad:-pad] ** 2)
-        # in SNR_REF_BW_HZ, as the cell's SNR: every band on one scale
-        return float(10 * np.log10(max(ps / max(pn, 1e-20) - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ))
+        # in SNR_REF_BW_HZ (every band on one scale), against the burst's peak
+        # (every mode on one scale: a 64-ary data burst's average sits ~4 dB
+        # under an ack-1f reply's at the same peak, and the mean of a mix
+        # swung with the mix; an engine would use the mode's constant)
+        snr = max(ps / max(pn, 1e-20) - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ
+        return float(10 * np.log10(snr) + self.last_papr_db)
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
