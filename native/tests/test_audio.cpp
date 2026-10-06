@@ -308,7 +308,9 @@ void test_playback() {
     std::fill(buf.begin(), buf.end(), -1.0f);
     check::equal(some.pull_some(buf), std::size_t{100}, "keyed: only what is queued");
     check::is_true(buf[99] == 0.25f && buf[100] == -1.0f, "keyed: the rest untouched, not zeroed");
-    check::equal(some.underruns(), std::uint64_t{1}, "keyed: the short read counted");
+    check::equal(some.underruns(), std::uint64_t{0}, "keyed: a short read is not an underrun");
+    check::equal(some.pull_some(buf), std::size_t{0}, "keyed and empty: nothing");
+    check::equal(some.underruns(), std::uint64_t{1}, "keyed and empty: an underrun");
     some.drain();
     check::equal(some.pull_some(buf), buf.size(), "idle: a full period");
     check::is_true(buf[0] == 0.0f && buf[255] == 0.0f, "idle: silence");

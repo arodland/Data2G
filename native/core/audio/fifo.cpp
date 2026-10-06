@@ -103,7 +103,7 @@ std::size_t PlaybackFifo::pull_some(std::span<float> out) {
     low_.store(std::min(low_.load(std::memory_order_relaxed), ring_.size()), std::memory_order_relaxed);
     const std::size_t n = ring_.read(out);
     pulled_.fetch_add(n, std::memory_order_relaxed);
-    if (n < out.size()) underruns_.fetch_add(1, std::memory_order_relaxed);
+    if (n == 0 && !out.empty()) underruns_.fetch_add(1, std::memory_order_relaxed);
     return n;
 }
 

@@ -141,9 +141,9 @@ public:
     // the samples that were real audio.
     std::size_t pull(std::span<float> out);
     // Device thread, for a backend that takes short reads: while keyed,
-    // only what is queued (a shortfall is counted, never padded: the
-    // device's own buffer may still cover it); idle, pull()'s full period.
-    // Returns the samples filled.
+    // only what is queued, never padded: the device's own buffer may still
+    // cover a shortfall, so only finding the FIFO empty is an underrun;
+    // idle, pull()'s full period. Returns the samples filled.
     std::size_t pull_some(std::span<float> out);
     bool keyed() const { return active_.load(std::memory_order_acquire); }
     // Called after each write(), on the engine thread: a pull-mode backend
