@@ -272,10 +272,27 @@ class RealPhy:
 
     def hear(self, x, t0, rx=None):
         """The receiver's result for audio x sent at t0 (either family), or None."""
+        self.last_y = y = self.ch.apply(x, t0, rx)
         try:
-            return receive_any(self.ch.apply(x, t0, rx), lead=int(PAD_S * FS) + FS // 2)
+            return receive_any(y, lead=int(PAD_S * FS) + FS // 2)
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
             return None
+
+    def burst_energy_db(self, burst) -> float:
+        """The last burst heard, its in-band SNR (dB) from power alone: over
+        its whole span, faded stretches included, against the noise in the
+        PAD_S either side; no sync needed. ponytail: the station is told when
+        the peer sent (a real engine would need its busy detector for that)."""
+        from data2g.arq import predictor as P
+
+        y, pad = self.last_y, int(PAD_S * FS)
+        lo, hi = P.band_span_hz(PHY.MODES[burst.submode].band)
+        f = np.fft.rfftfreq(len(y), 1 / FS)
+        yb = np.fft.irfft(np.fft.rfft(y) * ((f >= lo) & (f <= hi)), len(y))
+        pn = np.mean(np.concatenate([yb[:pad], yb[-pad:]]) ** 2)
+        ps = np.mean(yb[pad:-pad] ** 2)
+        # in SNR_REF_BW_HZ, as the cell's SNR: every band on one scale
+        return float(10 * np.log10(max(ps / max(pn, 1e-20) - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ))
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""

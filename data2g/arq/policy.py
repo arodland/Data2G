@@ -75,6 +75,7 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
 LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
+ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
@@ -186,6 +187,7 @@ class GearShifter:
     turns: list = field(default_factory=list)  # the last LINK_HIST expected peer bursts: "ok" | "lost" | "miss"
     timeouts_seen: int = 0  # station.stats["timeouts"] already counted as misses
     link_now: list | None = None  # link_features() at the last recommendation
+    energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -320,6 +322,17 @@ class GearShifter:
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
 
+    def observe_energy(self, snr_db: float, now: float):
+        """A peer burst's in-band SNR from its power alone (heard or not)."""
+        self.energies = (self.energies + [snr_db])[-ENERGY_HIST:]
+
+    def energy_features(self) -> list | None:
+        """The energy inputs (predictor.N_ENERGY); None before any."""
+        if not self.energies:
+            return None
+        mean = 10 * np.log10(np.mean(10 ** (np.array(self.energies) / 10)))
+        return [float(mean), len(self.energies) / ENERGY_HIST, 1.0]
+
     def link_features(self, station) -> list | None:
         """The link history as the outcome model reads it (predictor.N_LINK):
         my timeouts since the last call count as missed peer bursts. None
@@ -342,7 +355,7 @@ class GearShifter:
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
         cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
-        m = dict(self.measured, link=self.link_now)
+        m = dict(self.measured, link=self.link_now, energy=self.energy_features())
         prev = None
         if self.prev is not None:
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))
