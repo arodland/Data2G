@@ -1,5 +1,5 @@
 {
- "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study",
+ "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study)",
  "channels": [
   "awgn",
   "mpg",
@@ -294,6 +294,18 @@
    -1.0625,
    -2.3125,
    -2.125
+  ],
+  "n10-64l-r3/4": [
+   8.5625,
+   18.9375,
+   99,
+   99
+  ],
+  "n10-256l-r3/4": [
+   13.4375,
+   25.8125,
+   99,
+   99
   ]
  }
 }
