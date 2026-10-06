@@ -81,6 +81,9 @@ std::string error_text(QAudio::Error e) {
         case QAudio::OpenError: return "could not open the audio device (in use, or gone?)";
         case QAudio::IOError: return "audio device I/O error; the device may have been unplugged";
         case QAudio::FatalError: return "the audio device stopped working";
+#if QT_VERSION < QT_VERSION_CHECK(6, 9, 0)  // later Qt never reports it
+        case QAudio::UnderrunError: return "the sound card ran out of audio (underrun)";
+#endif
         default: return "audio error";
     }
 }
@@ -213,7 +216,11 @@ class FifoDevice final : public QIODevice {
 public:
     FifoDevice(PlaybackFifo& fifo, SampleFormat fmt, int channels) : fifo_(fifo), fmt_(fmt), channels_(channels) {}
     bool isSequential() const override { return true; }
-    qint64 bytesAvailable() const override { return std::numeric_limits<int>::max(); }
+    // Keyed: what is queued (Qt 6.9+ reads no more than this). Idle: endless silence.
+    qint64 bytesAvailable() const override {
+        return fifo_.keyed() ? static_cast<qint64>(fifo_.queued()) * bytes_per_sample(fmt_) * channels_
+                             : std::numeric_limits<int>::max();
+    }
     // Bytes handed to the sink since start: what it has, played or not.
     qint64 pulled() const { return pulled_.load(std::memory_order_relaxed); }
 
@@ -222,7 +229,9 @@ protected:
         const qint64 frame = bytes_per_sample(fmt_) * channels_;
         const auto frames = static_cast<std::size_t>(maxlen / frame);
         mono_.resize(frames);
-        fifo_.pull(mono_);
+        // Keyed, a shortfall is a short read, not zeros in the burst: the
+        // sink asks to top up its buffer, which usually still holds plenty.
+        mono_.resize(fifo_.pull_some(mono_));
         // Silence (lead, tail, idle, an underrun's padding) goes out as
         // -90 dBFS noise, +-1 LSB at 16 bits: nothing downstream sees
         // digital zero and decides the stream has stopped.
@@ -252,6 +261,7 @@ public:
         : Worker(std::move(device), rate, std::move(report)), fifo_(fifo), buffer_s_(buffer_s) {}
 
     void close() override {
+        fifo_.set_on_write({});
         if (timer_) timer_->stop();
         if (sink_) sink_->stop();
         sink_.reset();
@@ -263,7 +273,11 @@ protected:
         const Format f = choose_format(device_, rate_);
         channels_ = f.qt.channelCount();
         source_ = std::make_unique<FifoDevice>(fifo_, f.ours, f.qt.channelCount());
-        source_->open(QIODevice::ReadOnly);
+        source_->open(QIODevice::ReadOnly | QIODevice::Unbuffered);  // no read-ahead hidden in Qt
+        // After a short read Qt 6.8 stops pulling until readyRead; 6.9+ pulls at once on it.
+        fifo_.set_on_write([d = source_.get()] {
+            QMetaObject::invokeMethod(d, [d] { Q_EMIT d->readyRead(); }, Qt::QueuedConnection);
+        });
         sink_ = std::make_unique<QAudioSink>(device_, f.qt);
         // host.py's period: 256 frames per 6 kHz (2048 at 48 kHz), two of them.
         const int period = 256 * std::max(1, rate_ / 6000);

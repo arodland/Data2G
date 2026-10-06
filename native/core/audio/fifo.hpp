@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -139,6 +140,18 @@ public:
     // Device thread: fills `out` (mono), zero-padding a shortfall. Returns
     // the samples that were real audio.
     std::size_t pull(std::span<float> out);
+    // Device thread, for a backend that takes short reads: while keyed,
+    // only what is queued (a shortfall is counted, never padded: the
+    // device's own buffer may still cover it); idle, pull()'s full period.
+    // Returns the samples filled.
+    std::size_t pull_some(std::span<float> out);
+    bool keyed() const { return active_.load(std::memory_order_acquire); }
+    // Called after each write(), on the engine thread: a pull-mode backend
+    // told to come back for more after a short read.
+    void set_on_write(std::function<void()> f) {
+        std::lock_guard lock(hook_mu_);
+        on_write_ = std::move(f);
+    }
 
     // Set by the backend: how long the device holds audio after pull().
     void set_output_latency(double s) { latency_s_.store(s, std::memory_order_relaxed); }
@@ -158,6 +171,8 @@ private:
     std::atomic<double> latency_s_{0.0};
     std::atomic<std::uint64_t> underruns_{0};
     std::vector<float> scratch_;  // engine thread only
+    std::mutex hook_mu_;  // guards on_write_ only, never a copy
+    std::function<void()> on_write_;
     // device thread writes these two; the engine reads them between start() and drain()
     std::atomic<std::uint64_t> pulled_{0};
     std::atomic<std::size_t> low_{0};

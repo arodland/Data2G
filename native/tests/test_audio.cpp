@@ -297,6 +297,21 @@ void test_playback() {
     std::vector<float> buf(256);
     check::equal(starved.pull(buf), std::size_t{0}, "nothing to play");
     check::equal(starved.underruns(), std::uint64_t{1}, "underrun counted while active");
+
+    // pull_some: keyed, a short read and no padding; idle, a full period.
+    audio::PlaybackFifo some(rate, 0.0);
+    int writes = 0;
+    some.set_on_write([&] { ++writes; });
+    some.start();
+    some.write(std::vector<double>(100, 0.25));
+    check::equal(writes, 2, "on_write after the lead and after the write");
+    std::fill(buf.begin(), buf.end(), -1.0f);
+    check::equal(some.pull_some(buf), std::size_t{100}, "keyed: only what is queued");
+    check::is_true(buf[99] == 0.25f && buf[100] == -1.0f, "keyed: the rest untouched, not zeroed");
+    check::equal(some.underruns(), std::uint64_t{1}, "keyed: the short read counted");
+    some.drain();
+    check::equal(some.pull_some(buf), buf.size(), "idle: a full period");
+    check::is_true(buf[0] == 0.0f && buf[255] == 0.0f, "idle: silence");
 }
 
 void test_keyer() {

@@ -69,6 +69,8 @@ void PlaybackFifo::write(std::span<const double> y) {
         left = left.subspan(ring_.write(left));
         if (!left.empty()) sleep_s(0.002);
     }
+    std::lock_guard lock(hook_mu_);
+    if (on_write_) on_write_();
 }
 
 void PlaybackFifo::drain() {
@@ -90,6 +92,18 @@ std::size_t PlaybackFifo::pull(std::span<float> out) {
     const std::size_t n = ring_.read(out);
     std::fill(out.begin() + static_cast<std::ptrdiff_t>(n), out.end(), 0.0f);
     if (n < out.size() && active_.load(std::memory_order_acquire)) underruns_.fetch_add(1, std::memory_order_relaxed);
+    return n;
+}
+
+std::size_t PlaybackFifo::pull_some(std::span<float> out) {
+    if (!active_.load(std::memory_order_acquire)) {
+        pull(out);
+        return out.size();
+    }
+    low_.store(std::min(low_.load(std::memory_order_relaxed), ring_.size()), std::memory_order_relaxed);
+    const std::size_t n = ring_.read(out);
+    pulled_.fetch_add(n, std::memory_order_relaxed);
+    if (n < out.size()) underruns_.fetch_add(1, std::memory_order_relaxed);
     return n;
 }
 
