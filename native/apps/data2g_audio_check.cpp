@@ -3,7 +3,7 @@
 // the same FIFOs, Decimator and Interpolator the host uses.
 //
 //   data2g-audio-check                         # list devices
-//   data2g-audio-check --loop --in USB --out USB [--seconds 5] [--rate 48000]
+//   data2g-audio-check --loop --in USB --out USB [--seconds 5] [--rate 48000] [--lead-ms 100]
 //
 // No loopback hardware on Linux: a null sink and a remapped monitor (Qt
 // does not list monitor sources):
@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     std::string in, out;
     int rate = 48000;
-    double seconds = 5.0, f = 1000.0;
+    double seconds = 5.0, f = 1000.0, lead_ms = 100;  // lead: the host's --tx-lead-ms
     bool loop = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -66,8 +66,9 @@ int main(int argc, char** argv) {
         else if (a == "--out") out = next();
         else if (a == "--rate") rate = std::stoi(next());
         else if (a == "--seconds") seconds = std::stod(next());
+        else if (a == "--lead-ms") lead_ms = std::stod(next());
         else {
-            std::fprintf(stderr, "usage: data2g-audio-check [--loop --in DEV --out DEV --rate HZ --seconds S]\n");
+            std::fprintf(stderr, "usage: data2g-audio-check [--loop --in DEV --out DEV --rate HZ --seconds S --lead-ms MS]\n");
             return 2;
         }
     }
@@ -80,7 +81,7 @@ int main(int argc, char** argv) {
         }
         const auto report = [](const std::string& s) { std::fprintf(stderr, "%s\n", s.c_str()); };
         audio::CaptureFifo cap(config::FS);
-        audio::PlaybackFifo play(rate, 0.1);
+        audio::PlaybackFifo play(rate, lead_ms / 1000);
         audio::qt::Capture capture(audio::select_device(ins, in, "input"), rate, cap, report);
         audio::qt::Playback playback(audio::select_device(outs, out, "output"), rate, play, report);
         std::printf("in:  %s (%d ch)\nout: %s (%d ch)\n", capture.device_name().c_str(), capture.channels(),
