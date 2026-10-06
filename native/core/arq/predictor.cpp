@@ -14,7 +14,7 @@ namespace data2g::arq {
 namespace {
 
 // predictor.LOGIT_OFFSETS for the installed model.
-constexpr std::pair<std::string_view, double> LOGIT_OFFSETS[] = {{"w48-16qam-r1/2", -1.0}};
+constexpr std::pair<std::string_view, double> LOGIT_OFFSETS[] = {{"w48-16qam-r1/2", -1.0}, {"n10-256l-r3/4", -0.5}};
 
 const tables::CapacityTable& table(std::string_view constellation) {
     const auto family = const_family(constellation);
