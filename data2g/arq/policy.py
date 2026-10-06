@@ -74,6 +74,7 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # branch's sessions should make the ladder rare
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
+LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
@@ -182,6 +183,9 @@ class GearShifter:
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
+    turns: list = field(default_factory=list)  # the last LINK_HIST expected peer bursts: "ok" | "lost" | "miss"
+    timeouts_seen: int = 0  # station.stats["timeouts"] already counted as misses
+    link_now: list | None = None  # link_features() at the last recommendation
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -286,6 +290,8 @@ class GearShifter:
         `usable`: its control decoded, with decoded/sent its data codewords
         alone (counted with them, the control made a 0/7 burst score 1/8);
         None (KISS: no control): any codeword decoded."""
+        if usable is not None:
+            self.turns = (self.turns + ["ok" if usable else "lost"])[-LINK_HIST:]
         if usable and sent:
             self.data_lost = 0
             if self.ceiling is not None:  # climb a step
@@ -314,15 +320,29 @@ class GearShifter:
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
 
+    def link_features(self, station) -> list | None:
+        """The link history as the outcome model reads it (predictor.N_LINK):
+        my timeouts since the last call count as missed peer bursts. None
+        before any expected burst."""
+        t = getattr(station, "stats", {}).get("timeouts", 0)
+        if t > self.timeouts_seen:
+            self.turns = (self.turns + ["miss"] * (t - self.timeouts_seen))[-LINK_HIST:]
+        self.timeouts_seen = t
+        if not self.turns:
+            return None
+        n = len(self.turns)
+        return [self.turns.count("lost") / n, self.turns.count("miss") / n, n / LINK_HIST, 1.0]
+
     def recommend(self, station) -> tuple[int, int, int]:
         """-> (data mode, size hint, reply mode) for the peer's next burst:
         the mode it should use if it sends data, and if it sends none."""
+        self.link_now = self.link_features(station)
         if self.measured is None:
             return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
         cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
-        m = self.measured
+        m = dict(self.measured, link=self.link_now)
         prev = None
         if self.prev is not None:
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))

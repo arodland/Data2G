@@ -208,3 +208,19 @@ def test_lost_data_steps_down_the_ladder():
     for _ in range(20):  # data gets through: it climbs off the ladder
         g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
     assert g.ceiling is None
+
+
+def test_link_features_count_lost_and_missed_peer_bursts():
+    """The link history (predictor.N_LINK): heard-but-lost bursts from
+    outcome(), missed ones from my timeouts, over the last LINK_HIST."""
+    sh = G.GearShifter()
+    st = SimpleNamespace(stats={"timeouts": 0})
+    assert sh.link_features(st) is None
+    sh.outcome("qpsk-r1/5", 3, 4, usable=True)
+    sh.outcome("qpsk-r1/5", 0, 0, usable=False)
+    st.stats["timeouts"] = 2
+    assert sh.link_features(st) == [0.25, 0.5, 4 / G.LINK_HIST, 1.0]
+    assert sh.link_features(st) == [0.25, 0.5, 4 / G.LINK_HIST, 1.0]  # timeouts counted once
+    for _ in range(G.LINK_HIST):
+        sh.outcome("qpsk-r1/5", 4, 4, usable=True)
+    assert sh.link_features(st) == [0.0, 0.0, 1.0, 1.0]

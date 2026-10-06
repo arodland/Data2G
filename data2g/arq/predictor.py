@@ -74,6 +74,14 @@ def abstraction(path: str = str(DATA / "link_abstraction.json")) -> dict:
 OUTCOME_MODES = tuple(SUBMODES)  # a model file without its own list (the OFDM-only v2)
 
 
+# The link history's inputs (policy.GearShifter.link_features): of the last
+# LINK_HIST peer bursts I expected, the fraction heard but lost (control
+# failed) and the fraction missed outright (my timeouts), how full that window
+# is, and 1; all 0 without a history (offline rows, older session data). A
+# receiver measures only the bursts that synced: at MPP -8 dB its snr_est read
+# +3.7 dB (median) over the true SNR, so it looked like -4 dB, where QPSK works.
+N_LINK = 4
+
 NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))  # tnc.NoiseProfile.BANDS_HZ
 N_NOISE = 2 * len(NOISE_BANDS_HZ) + 2
 
@@ -147,7 +155,7 @@ def shifted(measured: dict, shift_db: float) -> dict:
 
 
 def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS,
-                   noise: bool = False) -> np.ndarray:
+                   noise: bool = False, link: bool = False) -> np.ndarray:
     """measured, prev: as inputs(); `seconds`: the next burst's length on air;
     `bands`: the model's band one-hot (OFDM bands, then CPM grids); `noise`:
     a model with the noise profile's inputs (measured["noise"], noise_features)."""
@@ -159,6 +167,8 @@ def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=N
     x += [float(prev is not None), *(pm[f"mi_{c}"] for c in CONSTS), pm["snr_est"], np.log(0.05 + pm["spread_est"]),
           np.log2(1 + age), float(pb == band), np.log2(pm.get("frames", 16))]
     x += [gap, np.log2(seconds)]
+    if link:  # before the noise inputs: clip_noise takes the last N_NOISE
+        x += list(measured.get("link") or [0.0] * N_LINK)
     if noise:
         x += noise_features(measured.get("noise"), band)
     return np.array(x, dtype=np.float64)
@@ -172,6 +182,7 @@ class OutcomeMlp:
     modes: tuple = OUTCOME_MODES  # its outputs' order
     bands: tuple = tuple(BANDS)  # its band one-hot
     noise: bool = False  # takes the noise profile's inputs (outcome_inputs)
+    link: bool = False  # takes the link history's inputs (N_LINK)
     noise_lo: np.ndarray | None = None  # its noise inputs clipped to these (clip_noise)
     noise_hi: np.ndarray | None = None
 
@@ -220,7 +231,8 @@ def _mlp(d: dict) -> OutcomeMlp:
     extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
     clip = {k: d[k] for k in ("noise_lo", "noise_hi") if k in d}
     return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)],
-                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False, **clip, **extra)
+                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False,
+                      link=bool(d["link_inputs"]) if "link_inputs" in d else False, **clip, **extra)
 
 
 # DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its
@@ -250,6 +262,10 @@ class OutcomeEnsemble:
     @property
     def noise(self):
         return self.members[0].noise
+
+    @property
+    def link(self):
+        return self.members[0].link
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         z = np.array([np.clip(m(x), -40, 40) for m in self.members])
@@ -287,7 +303,7 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
     next burst `seconds` long."""
     model = outcome_model()
-    z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise))
+    z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
     if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()

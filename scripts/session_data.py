@@ -60,7 +60,9 @@ FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "ban
 # the receiver's noise profile at the recommendation (tnc.NoiseProfile.snapshot()), and its interference
 NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in range(1, 6)]
               + ["impulses_per_min"])
-FIELDS = FIELDS + NOISE_COLS + ["intf"]
+# the link history at the recommendation (GearShifter.link_features; empty before any expected burst)
+LINK_COLS = ["link_lost", "link_miss", "link_n"]
+FIELDS = FIELDS + NOISE_COLS + ["intf"] + LINK_COLS
 # --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
 INTERFERENCE = None
 WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
@@ -93,7 +95,7 @@ class Explorer(G.GearShifter):
         if self.rng.random() < EXPLORE:
             reply = G.encode(self.rng.choice(ok))
         self.snap = dict(m=dict(self.measured, noise=self.noise), band=self.measured_band, t=self.measured_at,
-                         prev=prev, explored=explored)
+                         prev=prev, explored=explored, link=self.link_now)
         return rec, hint, reply
 
 
@@ -125,6 +127,8 @@ class DataPhy(LS.AuditPhy):
                 row.update({f"noise_db{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_db"])})
                 row.update({f"noise_tail{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_tail_db"])})
                 row["impulses_per_min"] = round(noise["impulses_per_min"], 1)
+            if snap["link"]:
+                row.update(zip(LINK_COLS, (round(v, 4) for v in snap["link"][:3])))
             row["intf"] = INTF.describe(self.ch.intf[1 - (burst.slots[0].mask_id[1] & 1)].spec)
             self.out.append(row)
         return res

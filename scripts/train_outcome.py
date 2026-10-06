@@ -36,7 +36,14 @@ def noise_of(r) -> dict | None:
             "impulses_per_min": float(r["impulses_per_min"])}
 
 
-def load(path, stale_header=(), noise=False):
+def link_of(r) -> list | None:
+    """A row's link history (session_data's LINK_COLS), None if it has none."""
+    if not r.get("link_n"):
+        return None
+    return [float(r["link_lost"]), float(r["link_miss"]), float(r["link_n"]), 1.0]
+
+
+def load(path, stale_header=(), noise=False, link=False):
     """`stale_header`: data from before the header copy (PROTOCOL_VERSION
     11): its w/w48 candidates' burst labels are not today's (their codeword
     labels, given a usable burst, still are). `noise`: the noise profile's
@@ -51,10 +58,12 @@ def load(path, stale_header=(), noise=False):
         m = {k: float(r[k]) for k in MEAS}
         if noise:
             m["noise"] = noise_of(r)
+        if link:
+            m["link"] = link_of(r)
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link))
         mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
@@ -109,7 +118,8 @@ def extend(base: str, data: str, new: list, out: str, epochs: int = 300):
     tags = sorted({k.split("_", 1)[0] for k in d.files}) if "m0_mean" in d.files else [""]
     noise = bool(d[f"{tags[0]}_noise_inputs" if tags[0] else "noise_inputs"]) if any(
         k.endswith("noise_inputs") for k in d.files) else False
-    x, mode, bok, dsent, dok, rows, bmask = load(data, noise=noise)
+    link = any(k.endswith("link_inputs") and bool(d[k]) for k in d.files)
+    x, mode, bok, dsent, dok, rows, bmask = load(data, noise=noise, link=link)
     keep = np.isin([MODES[i] for i in mode], new)
     x, bok, dsent, dok, bmask = x[keep], bok[keep], dsent[keep], dok[keep], bmask[keep]
     mode = np.array([new.index(MODES[i]) for i in mode[keep]])
@@ -193,6 +203,7 @@ def main():
     ap.add_argument("--input-noise", type=float, default=0.0,
                     help="augmentation: Gaussian noise on the continuous inputs, in standard deviations, per batch")
     ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
+    ap.add_argument("--link-inputs", action="store_true", help="the link history as inputs too (predictor.N_LINK)")
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--extend", metavar="BASE", help="add --new modes' outputs to this model, all else frozen")
     ap.add_argument("--new", default="", help="comma-separated modes, with --extend")
@@ -202,7 +213,8 @@ def main():
     if a.ensemble:
         return combine(a.ensemble.split(","), a.out)
     torch.manual_seed(a.seed)
-    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs)
+    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs,
+                                                 a.link_inputs)
     n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
@@ -290,6 +302,7 @@ def main():
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
     layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
+             link_inputs=np.array(a.link_inputs),
              **clip,
              **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
