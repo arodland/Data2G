@@ -83,6 +83,7 @@ def test_tx_audio(native, pure):
             slots += [Slot(data_mask(0, i, 3), 0, bytes([i]) * codes.payload_bytes(spec)) for i in range(2)]
             b = TxBurst(spec.name, slots, 0, cap)
             close(native.phy.tx_audio(b), PHY.tx_audio(b))
+    PHY._peak_db.cache_clear()  # tests that patch tx_audio (test_engine) may have filled it
     for name in PHY.MODES:
         for cap in range(3):
             assert native.arq.peak_db(name, cap) == PHY.peak_db(name, cap)
