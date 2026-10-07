@@ -335,6 +335,8 @@ class GearShifter:
 
     def observe_energy(self, snr_db: float, now: float):
         """A peer burst's in-band SNR from its power alone (heard or not)."""
+        if snr_db is None:
+            return
         self.energies = (self.energies + [snr_db])[-ENERGY_HIST:]
 
     def energy_features(self) -> list | None:

@@ -35,6 +35,7 @@ from .policy import GearShifter
 log = logging.getLogger("data2g.engine")
 
 MAX_BURST_S = 16.0  # longest burst accepted from a header (the shifter's largest is 12 s)
+EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_MARGIN_S: 0.4-0.6 s measured)
 # ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 # turn at least this often (FCC 97.119: every 10 minutes), and one more once
 # the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
@@ -114,6 +115,9 @@ class Engine:
         self._id_due: float | None = None  # its next ID (None: closed, its last ID pending or sent)
         self._id_pending: list | None = None  # [session, earliest time]: its last ID, after it closed
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
+        self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
+        self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
+        self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -234,6 +238,7 @@ class Engine:
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
             if not self.receiver.busy and not held:  # a burst still arriving holds any reply (half duplex)
                 burst = self.session.poll(t)
+                self._missed_energy()
                 self._id_check(t)
                 if burst is not None:
                     bursts, main = self._with_id(burst, t), burst
@@ -258,6 +263,7 @@ class Engine:
                 self.tx = None
                 self.receiver.reset()  # our own transmission was not heard
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
+                self._tx_end = self.now + n / FS
                 self.session.on_tx_end(burst, self.now + n / FS)
                 if self.kiss is not None:
                     self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
@@ -276,7 +282,11 @@ class Engine:
                 spec = MODES.get(ev["spec"].name)
                 start = t - (ev["stream_end"] - ev["start"] + LEADIN_SAMPLES) / FS
                 self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
+                self._span = (start, start + burst_seconds(spec, ev["n_cw"]), spec.name) if spec else None
                 continue
+            if self._span is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING):
+                self._energy(*self._span, t)  # heard (decoded or not): the peer's, most likely
+            self._span = None
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
             if self.rec:
@@ -304,6 +314,41 @@ class Engine:
             # the noise profile too (a model with its inputs reads it; recorded apart, with the rx event)
             self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
             self.session.on_rx(rx, t)
+
+    def _energy(self, start: float, end: float, mode: str, t: float):
+        """The energy inputs (predictor.N_ENERGY): a peer burst's in-band SNR
+        over start..end from power alone, against its peak (PHY.peak_db),
+        to the shifter."""
+        observe = getattr(self.session.policy, "observe_energy", None)
+        if observe is None:
+            return
+        from . import predictor as P
+
+        lo, hi = P.band_span_hz(MODES[mode].band)
+        snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
+        if snr is not None:
+            observe(snr + PHY.peak_db(mode), t)
+
+    def _missed_energy(self):
+        """A timeout (no reply heard): the energy where the reply should
+        have been, the mode and size I asked for after my burst ended (the
+        sim reports each sent burst's own span: scripts/phy_session.py)."""
+        st, pol = self.session.station, self.session.policy
+        n = st.stats.get("timeouts", 0) if st is not None else 0
+        if n <= self._timeouts:
+            self._timeouts = n
+            return
+        self._timeouts = n
+        if self._tx_end is None or not getattr(pol, "log", None):
+            return
+        from . import policy as G
+
+        data, hint, reply = pol.log[-1]
+        mode = data if pol.peer_had_data else reply
+        spec = MODES[mode]
+        k = G.slots_for(spec, G.SIZE_S[hint]) if pol.peer_had_data else G.ctl_slots(spec)
+        start = self._tx_end + EXPECT_REPLY_S
+        self._energy(start, start + burst_seconds(spec, k), mode, self.now)
 
     def _kiss_burst(self, k: int):
         """The next KISS burst if it may go now. A burst that waited on BUSY
