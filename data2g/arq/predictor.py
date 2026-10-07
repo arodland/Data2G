@@ -310,11 +310,20 @@ if _ENV_OFFSETS is not None:
     LOGIT_OFFSETS = {m: float(v) for m, v in (e.rsplit(":", 1) for e in _ENV_OFFSETS.split(",") if e)}
 
 
+# DATA2G_OUTCOME_GATE="path:spread:snr" (studies): a second model, used when
+# the median spread_est of the peer's last GATE_HIST bursts is under `spread`
+# Hz and snr_est under `snr` dB (policy.GearShifter.gate); the installed (or
+# DATA2G_OUTCOME_MODEL) model otherwise.
+_GATE = os.environ.get("DATA2G_OUTCOME_GATE")
+GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+GATE_HIST = 5
+
+
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
-                    prev=None) -> dict[str, tuple[float, float]]:
+                    prev=None, model=None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
-    next burst `seconds` long."""
-    model = outcome_model()
+    next burst `seconds` long. `model`: another than the installed one (a gate's)."""
+    model = model or outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,
                              model.energy))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}

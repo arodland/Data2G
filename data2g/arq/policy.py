@@ -188,6 +188,7 @@ class GearShifter:
     timeouts_seen: int = 0  # station.stats["timeouts"] already counted as misses
     link_now: list | None = None  # link_features() at the last recommendation
     energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
+    spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -282,6 +283,16 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
         self.heard = submode
+        self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
+
+    def gate(self):
+        """The gate's model (predictor.GATE) if its conditions hold, else None (the installed one)."""
+        if P.GATE is None or not self.spreads or self.measured is None:
+            return None
+        path, spread, snr = P.GATE
+        if float(np.median(self.spreads)) < spread and self.measured["snr_est"] < snr:
+            return P.outcome_model(path)
+        return None
 
     def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
@@ -364,6 +375,7 @@ class GearShifter:
         # replaced the MI predictor's output corrections: at -4 dB AWGN on
         # the real modem, control losses 24% -> 3% of data bursts and 141 ->
         # 196 bps (scripts/loss_study.py). It ships with the package.
+        gated = self.gate()
         if P.outcome_model() is None:
             raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
@@ -378,7 +390,8 @@ class GearShifter:
         def predicted(s, n_cw):
             key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
             if key not in omemo:
-                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev)
+                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev,
+                                               gated)
             return omemo[key][s.name]
 
         def logit_shift(q, b):
