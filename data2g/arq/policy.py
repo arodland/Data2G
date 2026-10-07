@@ -66,7 +66,9 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # The data ladder: after LADDER_AFTER bursts in a row lost in the data mode I
 # recommended, data may only go in modes LADDER_STEP_DB more robust than it on
 # every channel (MODE_THRESHOLDS); each further loss steps down from the mode
-# that failed, each usable data burst climbs a step. On air
+# that failed, each usable data burst climbs a step. Climbed off it, the next
+# data burst lost re-enters at once (on air, AG7EW 2026-10-06: the climbs out
+# went straight to modes that failed). On air
 # (recordings/20261002-232711) every fsk16r25 poll decoded and 0 of 12 data
 # bursts did, predicted 0.74-0.93: the model had never seen CPM polls measured
 # on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
@@ -198,6 +200,7 @@ class GearShifter:
     data_lost: int = 0  # bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     ceiling: tuple | None = None  # the data ladder: per channel, the highest threshold data may have
     ladder_top: tuple | None = None  # the thresholds of the mode whose losses started it: climbed back there, it's off
+    ladder_left: bool = False  # just climbed off the ladder: one data burst lost puts it back
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
@@ -337,14 +340,16 @@ class GearShifter:
         if usable is not None:
             self.turns = (self.turns + ["ok" if usable else "lost"])[-LINK_HIST:]
         if usable and sent:
-            self.data_lost = 0
+            self.data_lost, self.ladder_left = 0, False
             if self.ceiling is not None:  # climb a step
                 self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
                 if all(map(lambda c, t: c >= t, self.ceiling, self.ladder_top)):
                     self.ceiling = self.ladder_top = None
+                    self.ladder_left = True
         elif usable is False and self.log and submode == self.log[-1][0]:
             self.data_lost += 1
-            if self.data_lost >= LADDER_AFTER:  # step down from the mode that failed
+            if self.data_lost >= LADDER_AFTER or self.ladder_left:  # step down from the mode that failed
+                self.ladder_left = False
                 down = tuple(t - LADDER_STEP_DB for t in MODE_THRESHOLDS[submode])
                 if self.ceiling is None:
                     self.ceiling, self.ladder_top = down, MODE_THRESHOLDS[submode]

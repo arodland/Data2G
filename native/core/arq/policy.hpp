@@ -106,6 +106,7 @@ public:
     int data_lost = 0;  // bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     std::optional<std::array<double, 4>> ceiling;  // the data ladder: per channel, the highest threshold data may have
     std::optional<std::array<double, 4>> ladder_top;  // the thresholds of the mode whose losses started it
+    bool ladder_left = false;  // just climbed off the ladder: one data burst lost puts it back
     std::optional<Heard> prev;  // the peer burst before the last
     Map bias, bias_burst;
     bool want_dup = false;

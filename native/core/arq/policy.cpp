@@ -231,16 +231,18 @@ double GearShifter::reply_hold(const StationView& st, std::string_view submode) 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
     if (usable && *usable && sent) {
         data_lost = 0;
+        ladder_left = false;
         if (ceiling) {  // climb a step; back at the mode whose losses started it, it's off
             bool off = true;
             for (std::size_t i = 0; i < 4; ++i) {
                 (*ceiling)[i] += LADDER_STEP_DB;
                 off = off && (*ceiling)[i] >= (*ladder_top)[i];
             }
-            if (off) ceiling.reset(), ladder_top.reset();
+            if (off) ceiling.reset(), ladder_top.reset(), ladder_left = true;
         }
     } else if (usable && !*usable && !log.empty() && submode == log.back().data) {
-        if (++data_lost >= LADDER_AFTER) {  // step down from the mode that failed
+        if (++data_lost >= LADDER_AFTER || ladder_left) {  // step down from the mode that failed
+            ladder_left = false;
             std::array<double, 4> down = mode_thresholds(submode);
             for (std::size_t i = 0; i < 4; ++i) {
                 down[i] -= LADDER_STEP_DB;

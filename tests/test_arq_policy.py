@@ -188,7 +188,8 @@ def test_robust_floor_sends_control_only_bursts_robust():
 def test_lost_data_steps_down_the_ladder():
     """LADDER_AFTER data bursts lost in a row in the mode I recommended: data
     goes only in modes LADDER_STEP_DB more robust on every channel; a further
-    loss steps down from the mode that failed, a usable data burst climbs."""
+    loss steps down from the mode that failed, a usable data burst climbs;
+    climbed off it, one loss puts it back."""
     T, step = G.MODE_THRESHOLDS, G.LADDER_STEP_DB
 
     def below(a, b, by):  # a at least `by` dB more robust than b on every channel
@@ -205,9 +206,21 @@ def test_lost_data_steps_down_the_ladder():
     g.outcome(down, 0, 0, usable=False)
     lower = G.decode(g.recommend(st)[0])
     assert lower == down == min(T, key=lambda m: max(T[m])) or below(lower, down, step)
-    for _ in range(20):  # data gets through: it climbs off the ladder
-        g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
-    assert g.ceiling is None
+    def climb_off():  # data gets through: it climbs off the ladder
+        for _ in range(20):
+            g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
+            if g.ceiling is None:
+                return
+        raise AssertionError("still on the ladder")
+
+    climb_off()
+    top = G.decode(g.recommend(st)[0])
+    g.outcome(top, 0, 0, usable=False)  # one loss right after the climb out
+    assert g.ceiling is not None and below(G.decode(g.recommend(st)[0]), top, step)
+    climb_off()
+    g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)  # a usable burst after the climb out
+    g.outcome(G.decode(g.recommend(st)[0]), 0, 0, usable=False)
+    assert g.ceiling is None  # one loss later: LADDER_AFTER again
 
 
 def test_link_features_count_lost_and_missed_peer_bursts():
