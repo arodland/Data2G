@@ -23,7 +23,13 @@ data2g-bulk send notes.txt -o notes.wav [-m qpsk-r1/2] [--blocks-per-burst 15] [
 data2g-bulk recv rec.wav -o notes.txt
 data2g-bulk listen [--input-device NAME] [-o notes.txt]    # live, text on stdout as it arrives
 data2g-bulk listen --list-audio-devices
+data2g-bulk send notes.txt -o notes.wav -m fsk32r62-r1/2     # CPM: 4 blocks per burst by default
+data2g-bulk listen -m fsk32r62-r1/2                          # listen for one mode only
 ```
+
+`-m` on `recv` and `listen` listens for that mode alone. Listening for everything, the OFDM
+search read a fsk32r62 burst as an n10 header at 10 dB, and the false lock hid the next
+burst (timing recovered it, but only after the next control).
 
 `listen` captures through data2g-host's PortAudio input and decimator (`--sample-rate`, a
 multiple of 8000, default 48000). It prints the current stream's text in block order, each
@@ -50,11 +56,13 @@ The receiver writes the text with each run of lost blocks marked
     236 B.
   - Why not a comp flag in the mask, as ARQ does: a block whose rv0 failed is combined
     under one mask. Trying a second mask would add the same soft bits twice.
-- Block identity is the CRC mask, `phy.mask_value((stream, i >> 8, i & 255))`. It costs no
-  payload bytes, and a codeword can't be credited to the wrong block or stream.
+- Block identity is the CRC mask, `phy.mask_value((stream, i >> 7, i & 127))`. It costs no
+  payload bytes, and a codeword can't be credited to the wrong block or stream. The last
+  byte stays under 128: CPM's receiver takes 128 and up as a control slot's.
 - Stream id: 16 bits of CRC-32 over the blocks. Sending the same text in the same mode
   again gives the same id, so a second sending combines with the first.
-- At most 65535 blocks: about 4 MB of text at qpsk-r1/5, more in faster modes.
+- At most 32767 blocks: about 2 MB of text at qpsk-r1/5 or fsk32r62-r1/3, more in faster
+  modes.
 
 ## 3. Bursts
 
@@ -62,8 +70,8 @@ Pass p, burst b, with h new blocks per burst:
 
 | slot | contents | RV |
 |---|---|---|
-| 0-3 | control: version, stream, b, blocks, h, p (9 B), mask `(0xB17C, 0, 0)` | 0, 1, 2, 3 |
-| 4 .. | blocks [b h, (b+1) h) | 2p mod 4 |
+| 0-3 (CPM: 0-1) | control: version 2, stream, b, blocks, h, p (9 B), mask `(0xB17C, 0, 128)` | 0, 1, 2, 3 |
+| next | blocks [b h, (b+1) h) | 2p mod 4 |
 | then | blocks [(b-1) h, b h), burst b-1's again | 2p+1 mod 4 |
 
 - Burst 0 has no copies. The pass ends with one burst of copies only.
@@ -78,6 +86,19 @@ Pass p, burst b, with h new blocks per burst:
     receiver must find a stream before it can combine anything.
   - Only one control in a transfer has to decode. Timing places every burst after that.
 - Overhead: 4 control codewords per 2h+4, 12% at h=15, 6% at h=30 (the most, 64 codewords).
+
+CPM modes:
+
+- The control is the grid's own short polar codeword (20 B), twice: the CPM header allows
+  one or two. A polar resend is a plain repeat (Chase), so the control is weaker than on
+  OFDM. The study (§6) checks whether acquisition fails where blocks would decode.
+- At most 8 data codewords a burst (`cpm.MAX_DATA`, the header's word set), so h is 1-4.
+- The data codewords' tones are dealt round-robin over the burst (`bulk.cpm_audio`,
+  `codes.spread` at tone granularity), and un-dealt on receive (`bulk.undeal`). CPM's own
+  burst puts each codeword in a contiguous 3.1 s (fsk32r62), and a slow fade took it whole
+  (§6). The control slots, sync and header are CPM's own, unchanged. This is bulk's format
+  only: data2g-host's CPM bursts are not dealt.
+- An RV 1 copy can't decode alone in fsk32r62-r1/2 (noiseless check), as in OFDM r1/2.
 
 rv1 or a Chase (rv0) copy. Code-level AWGN, 200 codewords a point, the Es/N0 where 90%
 decode:
@@ -113,10 +134,20 @@ its start is a fixed offset from burst 0's.
   picked a wrong alias in the test.
 - Only between bursts heard. Past a transfer's end the slots are noise, and storing their
   soft bits would dilute the blocks still waiting for a combine.
+- CPM: a burst's length is its symbol layout's (`cpm.burst_seconds` counts the 10 ms ramps
+  on top: 160 samples a burst too many). A header-lost CPM burst goes through
+  `cpm.receive` with a lock made from the timing.
+- CPM bursts have no lead-out silence. With the sender's clock 30 ppm fast, the next burst's
+  front began 4 samples before the previous one's computed end, and the streaming
+  receiver, trimming its buffer there, missed every second burst. It now keeps 50 ms
+  (`tnc.Receiver.CPM_TAIL`) before a CPM burst's end. This is in the shared receiver, so
+  data2g-host gets it too.
 
 ## 5. Not done
 
-- **CPM modes:** their control codeword differs. OFDM modes only.
+- **CPM control in data slots** (option b): if the 2-slot polar control limits acquisition,
+  also send it in two LDPC data slots at RV 0/1, at the burst's two ends (h 4 -> 3).
+- **CPM modes other than fsk32r62-r1/2** are supported but not studied.
 - **Live transmit and rig control:** not wanted. `send` writes a WAV; play it with any
   player, keyed by VOX or by hand.
 - **DD cap tuning:** 0.25 of airtime is a guess with headroom, not measured. The studies run
@@ -232,3 +263,62 @@ of them control). Speed is 53-55% of h=15's. Last column: the 1% point's shift f
   r3/4 lose 1.3-2.0 dB on mps.
 - Header-less receive does far more work at h=2: up to 4338 bursts in a mode (n10-qpsk-r1/5
   on mpp), against 575 at h=15, as many more headers go out near the knee.
+
+### fsk32r62-r1/2 (CPM)
+
+`scripts/bulk_study.py --only-mode --h 4`: as above, receiver listening for fsk32r62 only,
+-16..+4 dB in 1 dB steps, 20 trials a cell, mpp, mps and mpg, the same seeds in both runs.
+Output: `runs/cpm_fsk32.csv` (codewords contiguous, as CPM's own burst) and
+`runs/cpm_fsk32_il.csv` (data tones dealt over the burst, as shipped).
+
+- Speed at h=4: 30.4 s bursts, 61 bps of payload, about 84 bps of text (1.38x), 126 WPM.
+  fldigi's MFSK32 is about 120 WPM.
+
+SNR (dB) where block loss reaches 5% and 1%, and from where nothing was lost, contiguous
+-> dealt:
+
+| chan | 5% | 1% | 1%, first send only | no loss |
+|---|---|---|---|---|
+| mpp | -11.3 -> -12.0 | -10.3 -> -10.4 | -6.1 -> -7.7 | -8 -> -9 |
+| mps | -9.4 -> -11.3 | -7.8 -> -9.9 | -2.1 -> -6.5 | -4 -> -7 |
+| mpg | -9.2 -> -11.3 | -7.4 -> -10.2 | -1.5 -> -6.2 | -4 -> -7 |
+
+- Contiguous, a slow fade (mps 0.15 Hz, mpg 0.1 Hz) took whole 3.1 s codewords, and the
+  copy 30 s later was the only diversity: a shallow curve, an occasional block down to
+  -16 dB but 1% only at -7.4 to -7.8. Dealt, each codeword spans the burst, and mps and mpg
+  land within 0.5 dB of mpp. mpp's 1 Hz fades already averaged inside 3 s: unchanged.
+- The 2-slot polar control is enough: a transfer heard nothing only at -14 dB and below,
+  where over 80% of blocks are lost anyway.
+
+Against the OFDM modes (h=15, the same study's conventions), 1% points:
+
+| mode | width | payload bps | mpp | mps |
+|---|---|---|---|---|
+| fsk32r62-r1/2 (dealt) | 2300 Hz | 61 | -10.4 | -9.9 |
+| n10-qpsk-r1/5 | 500 Hz | 56 | -8.4 | -9.2 |
+| qpsk-r1/5 | 1200 Hz | 139 | -6.5 | -7.1 |
+
+- fsk32 beats n10-qpsk-r1/5, at the same speed, by 2.0 dB on mpp and 0.7 dB on mps, in
+  4.6 times the width.
+
+### Equal airtime: one fsk32r62-r1/2 pass against OFDM passes combined
+
+`scripts/bulk_study.py --modes 'qpsk-r1/2*6,...'` (`mode*passes`; a trailing `!` gives the
+receiver the stream, its timing and CFO: no acquisition). 6 kB texts, h=15 (fsk32: 4),
+mpp and mps, -14..-2 dB, 10 trials a cell, seeds 1000-1009 throughout. Output:
+`runs/passes.csv`. One fsk32 pass of 6 kB is 568 s. SNR (dB) at 5% / 1% block loss:
+
+| config | airtime vs fsk32 | mpp | mps | mpp, genie | mps, genie |
+|---|---|---|---|---|---|
+| fsk32r62-r1/2 x1 | 1.00 | -12.1 / -11.5 | -11.5 / -10.5 | -12.3 / -12.1 | -12.0 / -11.2 |
+| qpsk-r1/5 x2 | 0.91 | -9.9 / -9.2 | -10.2 / -9.4 | -10.1 / -9.4 | -10.9 / -10.1 |
+| qpsk-r1/5 x3 | 1.36 | -10.5 / -10.1 | -12.0 / -11.3 | -11.2 / -11.0 | -12.2 / -11.8 |
+| qpsk-r1/2 x6 | 1.07 | -8.1 / -8.0 | -9.5 / -9.1 | -10.5 / -10.1 | -11.6 / -11.1 |
+| 16qam-r1/3 x7 | 0.96 | -6.5 / -6.1 | -8.2 / -8.0 | -9.2 / -9.0 | -10.1 / -10.0 |
+
+- One fsk32 pass wins at equal airtime, as built: by about 2 dB on mpp and 0.7 dB on mps at
+  1% against qpsk-r1/5 at its 2.2 passes, by 3.5-5 dB against qpsk-r1/2 x6 and 16qam x7.
+- Many short passes lose 2-3 dB to acquisition (as built against genie): the control
+  combines within a burst, never across passes, so at low SNR no pass is ever found.
+- Given free acquisition, they still don't beat fsk32: qpsk-r1/2 x6 ties it on mps and is
+  2 dB behind on mpp. Each pass's soft bits at -10 to -12 dB are too poor to add up well.

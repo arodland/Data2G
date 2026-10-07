@@ -627,7 +627,10 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             req.audio_hi = std::max(req.audio_lo, std::min(p.end() - off_, len()));
             out.push_back(std::move(req));
             last_start_ = p.start();
-            trim(len() - (p.end() - off_));
+            // a CPM burst has no lead-out silence: with the sender's clock fast,
+            // the next back-to-back burst's front begins before this one's
+            // computed end (tnc.Receiver.feed)
+            trim(len() - (p.end() - CPM_TAIL - off_));
             pending_.reset();
             continue;
         }
