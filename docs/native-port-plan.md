@@ -402,6 +402,44 @@ Status 2026-10-02: `data2g-gui` landed (not yet used for a session).
   host and port only) load as model 2 there. The main window shows the dial
   frequency only when the poll is on.
 
+Status 2026-10-04: promiscuous monitor (`core/monitor`).
+- `data2g-monitor`: receive only (no TX, output device or rig). A sound
+  card, or raw float32 at 8 kHz from a file, pipe or stdin. Every burst
+  heard goes to stdout as a dump: header, then payloads as text (`<AB>`
+  escapes) or `--hex` (xxd-style).
+- GUI: Monitor... opens a terminal-style window with the same dumps,
+  Text / Hex dump switchable (re-renders what is kept). It decodes on its
+  own thread, only while the window is visible.
+- Identification order: a broadcast group's key (the control names it),
+  then mask 0 (CONNECT, CONNECT_ACK/NAK, CQ, ID), then up to 16 session
+  keys learned from CONNECT or ID frames, both directions.
+- A connected-mode burst under a known key is followed as its receiver
+  does:
+  - resends are mapped from the other side's last ACK snapshot;
+  - the abandon epoch comes from `T_ABANDON`, or is searched when the
+    monitor joins mid-session;
+  - resends combine soft bits (IR);
+  - each direction's stream is reassembled and inflated, so the dump
+    shows host bytes.
+- A gap (the receiver's ACK passes what the monitor heard) skips ahead
+  and is labelled. A stream joined without its CONNECT starts the same
+  way.
+- After a gap the deflate history is partly unknown. Each compressed
+  codeword is inflated twice, with the unknown bytes as 0x00 and then as
+  0xFF. Output bytes that differ were copied from text never heard and
+  show as `<??>`; the rest are exact.
+  - The sender's history length is unknown until the monitor has
+    delivered 4 KB itself. Until then, matches into ZDICT are unknown
+    too, which hides most English text.
+- Record framing is lost with a gap: the stream is shown raw, length
+  bytes inline, until a codeword ends in zero padding.
+- `Engine` exposes `heard_of`, `spec_name` and `all_grids`.
+  `BurstHeard` carries the decoded burst and its soft bits.
+  `KissLink::read_burst_control` is public static.
+- Tests: `test_monitor` (formats; a session with the monitor as a third
+  station, at 12, 2, 0 and -2 dB; a broadcast UI frame) and `test_gui`
+  (the window dumps a CQ and re-renders as hex).
+
 ### Phase 5: packaging and CI
 
 Lift SSTVAE's ci.yml / native-build.yml matrix (Linux x86_64 and aarch64,

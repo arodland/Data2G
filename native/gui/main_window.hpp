@@ -6,6 +6,7 @@
 // Shown: the RX waterfall and input level, link state, mode and bandwidth,
 // BUSY and PTT, throughput, the received-burst log, the audio counters, and
 // the dial frequency when the rig is polled.
+// Monitor... opens a window with every burst heard as a packet dump.
 // Settings... opens the dialog; OK saves to QSettings and, when anything
 // changed, restarts the station.
 #pragma once
@@ -25,6 +26,7 @@ class QTableWidget;
 
 namespace data2g::gui {
 
+class MonitorWindow;
 class Waterfall;
 
 class MainWindow : public QMainWindow {
@@ -42,6 +44,7 @@ public:
 public Q_SLOTS:
     void poll();  // a slot so a test can drive it
     void open_settings();
+    void open_monitor();  // the Monitor window: every burst heard, as a packet dump
 
 private:
     void set_lamp(QLabel* lamp, bool lit, const char* color);
@@ -55,6 +58,7 @@ private:
     QLabel *link_, *mode_, *busy_, *ptt_, *rx_, *tx_, *counters_, *status_;
     QLabel *dial_label_, *dial_;  // shown only with --rig-poll-interval
     QTableWidget* log_;
+    MonitorWindow* monitor_ = nullptr;  // made when first opened
     struct Sample {
         std::chrono::steady_clock::time_point t;
         std::int64_t rx, tx;

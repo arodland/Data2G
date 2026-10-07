@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -28,6 +29,7 @@
 #include "generated/config.hpp"
 #include "host/host.hpp"
 #include "kisslink/kisslink.hpp"
+#include "monitor/monitor.hpp"
 #include "rig/controller.hpp"
 #include "rig/ptt.hpp"
 #include "tnc/tnc.hpp"
@@ -626,6 +628,52 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 
 }  // namespace
 
+// The monitor window's decoder: bursts from the session stage, dumped on a
+// thread of its own so its decodes never delay the session's.
+struct Station::MonitorThread {
+    monitor::Monitor m;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::pair<arq::BurstHeard, std::string>> in;
+    std::deque<monitor::Dump> out;
+    bool stop = false;
+    std::thread thread{[this] { run(); }};  // last: everything above is ready
+
+    ~MonitorThread() {
+        {
+            std::lock_guard lock(mu);
+            stop = true;
+        }
+        cv.notify_one();
+        thread.join();
+    }
+    void push(const arq::BurstHeard& b) {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t t = std::chrono::system_clock::to_time_t(now);
+        const std::tm tm = local_tm(t);
+        char when[16];
+        std::strftime(when, sizeof when, "%H:%M:%S", &tm);
+        std::lock_guard lock(mu);
+        if (in.size() >= MAX_BURSTS) return;  // ponytail: a decoder this far behind loses bursts (shown as gaps)
+        in.emplace_back(b, when);
+        cv.notify_one();
+    }
+    void run() {
+        std::unique_lock lock(mu);
+        while (true) {
+            cv.wait(lock, [this] { return stop || !in.empty(); });
+            if (stop) return;
+            auto [b, when] = std::move(in.front());
+            in.pop_front();
+            lock.unlock();
+            monitor::Dump d = m.burst(b, when);
+            lock.lock();
+            out.push_back(std::move(d));
+            if (out.size() > MAX_BURSTS) out.pop_front();
+        }
+    }
+};
+
 // What the session stage hands the owner after a command or a block.
 struct Station::Outbox {
     std::vector<std::string> cmd;
@@ -718,6 +766,14 @@ LinkStatus Station::link() const {
     return link_status_;
 }
 
+std::vector<monitor::Dump> Station::take_dumps() {
+    if (!monitor_) return {};
+    std::lock_guard lock(monitor_->mu);
+    std::vector<monitor::Dump> out(std::make_move_iterator(monitor_->out.begin()), std::make_move_iterator(monitor_->out.end()));
+    monitor_->out.clear();
+    return out;
+}
+
 std::vector<BurstLogEntry> Station::take_bursts() {
     std::lock_guard lock(status_mu_);
     std::vector<BurstLogEntry> out(std::make_move_iterator(bursts_.begin()), std::make_move_iterator(bursts_.end()));
@@ -781,6 +837,7 @@ void Station::start() {
         failed_ = false;
         link_ = std::make_unique<kisslink::KissLink>(kiss_cap(a_.kiss_bw), a_.broadcast_mode.value_or(""));
         link_->busy_limit_s = a_.kiss_busy_limit;
+        monitor_ = std::make_unique<MonitorThread>();
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = a_.record_dir;
@@ -801,6 +858,7 @@ void Station::start() {
             std::lock_guard lock(status_mu_);
             bursts_.push_back({std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db});
             if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
+            if (monitor_on_) monitor_->push(b);
         });
         auto post = [this](std::function<void()> f) {
             engine_->post([this, f = std::move(f)] {
@@ -924,6 +982,7 @@ void Station::stop() {
     if (cap_) cap_->close();
     if (engine_thread_.joinable()) engine_thread_.join();
     if (engine_) engine_->stop();
+    monitor_.reset();  // after the engine: nothing pushes to it now
     keyer_.reset();  // PTT off, if the rig was ever keyed
     ptt_ = false;
     if (rig_) {

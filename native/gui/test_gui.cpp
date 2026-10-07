@@ -6,8 +6,10 @@
 
 #include <QApplication>
 #include <QSlider>
+#include <QComboBox>
 #include <QElapsedTimer>
 #include <QLabel>
+#include <QPlainTextEdit>
 #include <QSettings>
 #include <QTableWidget>
 #include <QTcpServer>
@@ -222,6 +224,11 @@ void test_window(const QTemporaryDir& dir) {
     check::equal(link->text().toStdString(), std::string("idle"), "link idle at start");
     auto* dial = w.findChild<QLabel*>(QStringLiteral("dial"));
     check::is_true(dial && dial->isHidden(), "no dial frequency unless the rig is polled");
+    w.open_monitor();  // before the CQ arrives (after a second of silence)
+    auto* monitor = w.findChild<QPlainTextEdit*>(QStringLiteral("monitor_text"));
+    auto* monitor_format = w.findChild<QComboBox*>(QStringLiteral("monitor_format"));
+    check::is_true(monitor && monitor_format && monitor->isVisible(), "monitor window open");
+    if (!(monitor && monitor_format)) return;
 
     check::current_step = "window: VARA client";
     QTcpSocket client;
@@ -246,6 +253,10 @@ void test_window(const QTemporaryDir& dir) {
         check::is_true(log->item(0, 2)->text() != QStringLiteral("-"), "an SNR logged");
         check::is_true(mode->text().startsWith(QString::fromStdString(cq_mode)), "mode label shows it");
     }
+    check::is_true(wait_for([&] { return monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")); }, 5000),
+                   "the monitor dumped the CQ");
+    monitor_format->setCurrentIndex(1);
+    check::is_true(monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")), "re-rendered as hex, the CQ kept");
     QByteArray said;
     check::is_true(wait_for([&] {
                        said += client.readAll();
