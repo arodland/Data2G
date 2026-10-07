@@ -473,8 +473,11 @@ def _codes_substitutions(native):
 
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
-GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
+GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
+# GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
+# energy) that models with those inputs read in Python only
+PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "energies"}
 
 
 @provider
@@ -498,6 +501,7 @@ def _gear_substitutions(native):
                                          "burst_end", "head_samples", "burst_seconds")}
     py.update({f"modes.{k}": getattr(modes, k) for k in ("burst_seconds", "ctl_payload_bytes", "max_ctl", "min_cw")})
     py.update({f"G.{k}": getattr(G, k) for k in ("width_hz", "ctl_slots", "slots_for")})
+    py["predict_outcome"] = P.predict_outcome
 
     def own(spec):
         return config.SUBMODES.get(spec.name) == spec
@@ -550,7 +554,9 @@ def _gear_substitutions(native):
             return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise)
         return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands))
 
-    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None):
+    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None, model=None):
+        if model is not None:  # another model than the installed one (a gate's): Python
+            return py["predict_outcome"](measured, band, gap, seconds, submodes, prev, model)
         d = A.predict_outcome(measured, band, gap, seconds, prev)
         return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values()) if s.name in d}
 
@@ -602,6 +608,8 @@ def _gear_substitutions(native):
             return A.decode(int(rec)) or f"?{rec}"
 
     for f in dataclasses.fields(G.GearShifter):
+        if f.name in PY_ONLY_GEAR:  # study state the C++ shifter doesn't keep (link history, energy)
+            continue
         setattr(GearShifter, f.name, property(lambda s, f=f.name: getattr(s._n, f),
                                               lambda s, v, f=f.name: setattr(s._n, f, v)))
 

@@ -288,21 +288,39 @@ def predictor_cpp() -> str:
 
     model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
     members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
-    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,capacity_tables}.npz"),
+    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,capacity_tables}.npz"),
            '#include "tables/tables.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
-    rows = []
-    for i, m in enumerate(members):
-        assert m.modes == model.modes and m.bands == model.bands
-        out.append(f"constexpr double mean_{i}[] = {{\n{doubles(m.mean)}}};\n")
-        out.append(f"constexpr double std_{i}[] = {{\n{doubles(m.std)}}};\n")
-        layers = []
-        for j, (w, b) in enumerate(m.layers):
-            assert w.dtype == b.dtype == np.float64 and w.shape[1] == b.shape[0]
-            out.append(f"constexpr double w_{i}_{j}[] = {{\n{doubles(w.reshape(-1))}}};\n")
-            out.append(f"constexpr double b_{i}_{j}[] = {{\n{doubles(b)}}};\n")
-            layers.append(f"{{{w.shape[0]}, {w.shape[1]}, w_{i}_{j}, b_{i}_{j}}}")
-        out.append(f"constexpr MlpLayer layers_{i}[] = {{{', '.join(layers)}}};\n\n")
-        rows.append(f"    {{mean_{i}, std_{i}, layers_{i}}},\n")
+
+    def emit(tag, ms, order=None):
+        """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
+        rows = []
+        for i, m in enumerate(ms):
+            assert m.bands == model.bands and not (m.noise or m.link or m.energy)
+            out.append(f"constexpr double mean_{tag}{i}[] = {{\n{doubles(m.mean)}}};\n")
+            out.append(f"constexpr double std_{tag}{i}[] = {{\n{doubles(m.std)}}};\n")
+            layers = []
+            for j, (w, b) in enumerate(m.layers):
+                assert w.dtype == b.dtype == np.float64 and w.shape[1] == b.shape[0]
+                if order is not None and j == len(m.layers) - 1:
+                    n = len(m.modes)
+                    cols = [m.modes.index(x) for x in order] + [n + m.modes.index(x) for x in order]
+                    w, b = w[:, cols], b[cols]
+                out.append(f"constexpr double w_{tag}{i}_{j}[] = {{\n{doubles(w.reshape(-1))}}};\n")
+                out.append(f"constexpr double b_{tag}{i}_{j}[] = {{\n{doubles(b)}}};\n")
+                layers.append(f"{{{w.shape[0]}, {w.shape[1]}, w_{tag}{i}_{j}, b_{tag}{i}_{j}}}")
+            out.append(f"constexpr MlpLayer layers_{tag}{i}[] = {{{', '.join(layers)}}};\n\n")
+            rows.append(f"    {{mean_{tag}{i}, std_{tag}{i}, layers_{tag}{i}}},\n")
+        return rows
+
+    for m in members:
+        assert m.modes == model.modes
+    rows = emit("", members)
+    # the gate's model (predictor.GATE_MODEL), its outputs in the installed model's order
+    gate = P.outcome_model(str(P.GATE_MODEL))
+    gmembers = gate.members if isinstance(gate, P.OutcomeEnsemble) else [gate]
+    assert all(set(g.modes) == set(model.modes) for g in gmembers), "the gate's model knows other modes"
+    grows = emit("g", gmembers, model.modes)
+    out.append(f"constexpr OutcomeMember gate_members[] = {{\n{''.join(grows)}}};\n")
     out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr std::string_view modes[] = {{{', '.join(cxx(m) for m in model.modes)}}};\n")
     out.append(f"constexpr std::string_view bands[] = {{{', '.join(cxx(b) for b in model.bands)}}};\n\n")
@@ -316,6 +334,10 @@ def predictor_cpp() -> str:
     thr = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(float(v)) for v in t)}}}}}" for m, t in G.MODE_THRESHOLDS.items())
     out.append(f"constexpr ModeThreshold thresholds[] = {{\n{thr}}};\n\n}}  // namespace\n\n")
     out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
+               "const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = gate_members;\n"
+               f"const double OUTCOME_GATE_SPREAD_HZ = {cxx(P.GATE_SPREAD_HZ)};\n"
+               f"const double OUTCOME_GATE_SNR_DB = {cxx(P.GATE_SNR_DB)};\n"
+               f"const int OUTCOME_GATE_HIST = {P.GATE_HIST};\n"
                "const std::span<const std::string_view> OUTCOME_MODES = modes;\n"
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"

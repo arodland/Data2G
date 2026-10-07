@@ -166,6 +166,18 @@ void GearShifter::observe(const Measured& m, std::string_view submode, double no
     measured_band = std::string(mode_at(submode).band);
     measured_at = now;
     heard = std::string(submode);
+    spreads.push_back(m.spread_est);
+    if (spreads.size() > static_cast<std::size_t>(tables::OUTCOME_GATE_HIST))
+        spreads.erase(spreads.begin(), spreads.end() - tables::OUTCOME_GATE_HIST);
+}
+
+bool GearShifter::gate() const {
+    if (spreads.empty() || !measured) return false;
+    std::vector<double> v = spreads;  // np.median: the middle one, or the mean of the middle two
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    return med < tables::OUTCOME_GATE_SPREAD_HZ && measured->snr_est < tables::OUTCOME_GATE_SNR_DB;
 }
 
 double GearShifter::reply_hold(const StationView& st, std::string_view submode) const {
@@ -231,13 +243,14 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         for (const Mode* s : cands)
             if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
     std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
+    const bool gated = gate();
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
         const auto sh = shift.find(s.band);
         const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
         auto it = memo.find(key);
         if (it == memo.end())
             it = memo.emplace(key, predict_outcome(shifted(*measured, key.second), measured_band, gap_s, key.first,
-                                                   pv ? &*pv : nullptr)).first;
+                                                   pv ? &*pv : nullptr, gated)).first;
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
         return it->second[static_cast<std::size_t>(i)];

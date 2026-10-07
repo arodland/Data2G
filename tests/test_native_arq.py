@@ -162,10 +162,11 @@ def station(rng, cap, rec=None):
                            peer_reply_recommend=rec[2] if rec else None, peer_wants_dup=rng.random() < 0.3)
 
 
-@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("seed", range(9))
 def test_shifter_decisions_match(A, pure, seed):
     """Random sessions: observations, recommendations, outcomes, choices.
-    Every decision identical; probabilities and biases to LOGIT_TOL."""
+    Every decision identical; probabilities and biases to LOGIT_TOL. Seeds 6-8:
+    flat, under 12 dB, so the gate's model (predictor.GATE) decides."""
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
     kw = dict(gap_s=rng.choice([2.5, 1.5, 4.0]), use_cpm=seed % 3 != 2, min_success=rng.choice([0.0, 0.0, 0.5]))
@@ -178,9 +179,12 @@ def test_shifter_decisions_match(A, pure, seed):
             cap = rng.choice(list(G.CAP_HZ))
         heard = rng.choice(G.allowed(cap)).name
         m = random_measured(nrng, modes.MODES[heard].band, noise=True)
+        if seed >= 6:
+            m = dict(m, spread_est=0.05, snr_est=min(m["snr_est"], 10.0))
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
+        assert nat.gate() == (ref.gate() is not None)
         st = station(rng, cap)
         want, got = ref.recommend(st), nat.recommend(st)
         assert got == want, (seed, step, [G.decode(r) for r in (want[0], want[2])], [A.decode(r) for r in (got[0], got[2])])

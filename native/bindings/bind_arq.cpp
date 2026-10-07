@@ -168,6 +168,7 @@ void bind_arq(py::module_& m) {
         .def_readwrite("ceiling", &Shifter::ceiling)
         .def_readwrite("ladder_top", &Shifter::ladder_top)
         .def_readwrite("data_lost", &Shifter::data_lost)
+        .def_readwrite("spreads", &Shifter::spreads)
         .def_property("measured",
             [](const Shifter& s) -> py::object { return s.measured ? py::object(to_dict(*s.measured)) : py::none(); },
             [](Shifter& s, const py::object& d) {
@@ -221,6 +222,7 @@ void bind_arq(py::module_& m) {
         .def("outcome", [](Shifter& s, const std::string& submode, int decoded, int sent, std::optional<bool> usable) {
             s.outcome(submode, decoded, sent, usable);
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())
+        .def("gate", &Shifter::gate)
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));
             return py::make_tuple(r.data, r.hint, r.reply);

@@ -107,6 +107,7 @@ public:
     std::map<std::string, std::pair<double, double>, std::less<>> predicted;
     bool peer_had_data = true;
     std::vector<LogEntry> log;
+    std::vector<double> spreads;  // the peer's last bursts' spread_est (tables::OUTCOME_GATE_HIST)
 
     std::pair<std::string_view, int> choose(const StationView& st, int escalation) const;
     int next_capacity(const StationView& st) const;
@@ -114,6 +115,8 @@ public:
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
+    // the gate's model applies (policy.py GearShifter.gate)
+    bool gate() const;
     // seconds past t_turn to wait for a reply to a burst in `submode`
     double reply_hold(const StationView& st, std::string_view submode) const;
 };

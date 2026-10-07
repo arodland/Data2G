@@ -214,6 +214,10 @@ def test_link_features_count_lost_and_missed_peer_bursts():
     """The link history (predictor.N_LINK): heard-but-lost bursts from
     outcome(), missed ones from my timeouts, over the last LINK_HIST."""
     sh = G.GearShifter()
+    if hasattr(sh, "_n"):
+        import pytest
+
+        pytest.skip("the link history is Python-only (study inputs; the C++ shifter keeps none)")
     st = SimpleNamespace(stats={"timeouts": 0})
     assert sh.link_features(st) is None
     sh.outcome("qpsk-r1/5", 3, 4, usable=True)
@@ -224,3 +228,21 @@ def test_link_features_count_lost_and_missed_peer_bursts():
     for _ in range(G.LINK_HIST):
         sh.outcome("qpsk-r1/5", 4, 4, usable=True)
     assert sh.link_features(st) == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_gate_takes_the_second_model_on_flat_low_snr_channels():
+    """predictor.GATE: the gate's model when the median spread_est of the last
+    GATE_HIST peer bursts is under GATE_SPREAD_HZ and snr_est under GATE_SNR_DB."""
+    if P.GATE is None:
+        import pytest
+
+        pytest.skip("gate off (DATA2G_OUTCOME_GATE / DATA2G_OUTCOME_MODEL)")
+    sh = G.GearShifter()
+    for _ in range(P.GATE_HIST):
+        sh.observe(measured(5.0, 0.05), "qpsk-r1/2", 1.0)
+    assert sh.gate() is not None
+    sh.observe(measured(P.GATE_SNR_DB + 1, 0.05), "qpsk-r1/2", 2.0)
+    assert sh.gate() is None  # SNR over the gate
+    for _ in range(3):
+        sh.observe(measured(5.0, 2.0), "qpsk-r1/2", 3.0)
+    assert sh.gate() is None  # fading: the median spread over the gate

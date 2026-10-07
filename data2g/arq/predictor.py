@@ -310,13 +310,24 @@ if _ENV_OFFSETS is not None:
     LOGIT_OFFSETS = {m: float(v) for m, v in (e.rsplit(":", 1) for e in _ENV_OFFSETS.split(",") if e)}
 
 
-# DATA2G_OUTCOME_GATE="path:spread:snr" (studies): a second model, used when
-# the median spread_est of the peer's last GATE_HIST bursts is under `spread`
-# Hz and snr_est under `snr` dB (policy.GearShifter.gate); the installed (or
-# DATA2G_OUTCOME_MODEL) model otherwise.
-_GATE = os.environ.get("DATA2G_OUTCOME_GATE")
-GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+# The gate: a second model, used when the median spread_est of the peer's last
+# GATE_HIST bursts is under GATE_SPREAD_HZ and snr_est under GATE_SNR_DB
+# (policy.GearShifter.gate); the installed one otherwise. The gate's model
+# (runs/n10f_round.sh's n10qf: AWGN and slow-fading coverage the installed v12
+# lacks) against the installed one alone, 26 cells x 12 seeds
+# (runs/n10g_round.sh): AWGN 0 +35%, AWGN +4/+8 +3.6/+1.8%, MPG -4/+8 +2-3%;
+# no cell worse beyond its SE (worst MPP -8 -3.4 +- 5.1%). A band-aid until one
+# model wins everywhere (docs/outcome-training-data.md).
+# DATA2G_OUTCOME_GATE (studies): "path:spread:snr", or '' for none; unset, the
+# gate applies to the installed model only (not to DATA2G_OUTCOME_MODEL's).
+GATE_MODEL = DATA / "outcome_predictor_gate.npz"
+GATE_SPREAD_HZ, GATE_SNR_DB = 0.5, 12.0
 GATE_HIST = 5
+_GATE = os.environ.get("DATA2G_OUTCOME_GATE")
+if _GATE is not None:
+    GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+else:
+    GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") else (str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,

@@ -64,7 +64,8 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
                                    const Prev* prev = nullptr,
                                    std::span<const std::string_view> bands = tables::OUTCOME_BANDS);
 // The ensemble's logits (mean member probability), LOGIT_OFFSETS not applied.
-std::vector<double> outcome_logits(std::span<const double> x);
+// `gate`: the gate's model (tables::OUTCOME_GATE_MEMBERS) instead of the installed one.
+std::vector<double> outcome_logits(std::span<const double> x, bool gate = false);
 
 int outcome_index(std::string_view submode);  // its row in OUTCOME_MODES, -1: unknown
 bool outcome_knows(std::string_view submode);
@@ -75,6 +76,6 @@ struct Outcome {
 };
 // Indexed by outcome_index, LOGIT_OFFSETS applied.
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev = nullptr);
+                                     const Prev* prev = nullptr, bool gate = false);
 
 }  // namespace data2g::arq
