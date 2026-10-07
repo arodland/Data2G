@@ -36,6 +36,10 @@ log = logging.getLogger("data2g.engine")
 
 MAX_BURST_S = 16.0  # longest burst accepted from a header (the shifter's largest is 12 s)
 EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_MARGIN_S: 0.4-0.6 s measured)
+# A timeout's window reading under this is no reply at all (the peer missed my
+# burst), which the sim never measures: none. Missed replies read -9..-14 dB at
+# MPP -8, empty windows -21..-36 (the clamp); training's lowest is -9.2.
+MISSED_MIN_DB = -18.0
 # ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 # turn at least this often (FCC 97.119: every 10 minutes), and one more once
 # the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
@@ -315,10 +319,10 @@ class Engine:
             self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
             self.session.on_rx(rx, t)
 
-    def _energy(self, start: float, end: float, mode: str, t: float):
+    def _energy(self, start: float, end: float, mode: str, t: float, min_db: float | None = None):
         """The energy inputs (predictor.N_ENERGY): a peer burst's in-band SNR
         over start..end from power alone, against its peak (PHY.peak_db),
-        to the shifter."""
+        to the shifter. None under min_db."""
         observe = getattr(self.session.policy, "observe_energy", None)
         if observe is None:
             return
@@ -326,7 +330,7 @@ class Engine:
 
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
-        if snr is not None:
+        if snr is not None and (min_db is None or snr + PHY.peak_db(mode) >= min_db):
             observe(snr + PHY.peak_db(mode), t)
 
     def _missed_energy(self):
@@ -343,7 +347,7 @@ class Engine:
         if self._tx_end is None or exp is None:
             return
         start = self._tx_end + EXPECT_REPLY_S
-        self._energy(start, start + exp[1], exp[0], self.now)
+        self._energy(start, start + exp[1], exp[0], self.now, MISSED_MIN_DB)
 
     def _kiss_burst(self, k: int):
         """The next KISS burst if it may go now. A burst that waited on BUSY

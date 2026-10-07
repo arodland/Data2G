@@ -49,6 +49,7 @@ namespace data2g::arq {
 
 inline constexpr double MAX_BURST_S = 16.0;  // longest burst accepted from a header
 inline constexpr double EXPECT_REPLY_S = 0.5;  // a reply's start past my burst's end (engine.py)
+inline constexpr double MISSED_MIN_DB = -18.0;  // a timeout's window under this: no reply at all (engine.py)
 // ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 // turn at least this often (FCC 97.119: every 10 minutes), and one more once
 // the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
@@ -260,7 +261,7 @@ private:
     std::optional<Span> span_;  // the burst being heard
     std::optional<double> tx_end_;  // when my last burst ended
     std::int64_t timeouts_ = 0;  // the station's timeouts already reported
-    void energy(double start, double end, const std::string& mode, double t);
+    void energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db = std::nullopt);
     void missed_energy();
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;

@@ -589,10 +589,12 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
     }
 }
 
-void Engine::energy(double start, double end, const std::string& mode, double t) {
+void Engine::energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db) {
     const auto [lo, hi] = band_span_hz(mode_at(mode).band);
-    if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi))
-        session_->policy->observe_energy(*snr + peak_db(mode), t);
+    if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi)) {
+        const double e = *snr + peak_db(mode);
+        if (!min_db || e >= *min_db) session_->policy->observe_energy(e, t);
+    }
 }
 
 void Engine::missed_energy() {
@@ -606,7 +608,7 @@ void Engine::missed_energy() {
     const auto exp = session_->policy->expected_reply();
     if (!tx_end_ || !exp) return;
     const double start = *tx_end_ + EXPECT_REPLY_S;
-    energy(start, start + exp->second, exp->first, now());
+    energy(start, start + exp->second, exp->first, now(), MISSED_MIN_DB);
 }
 
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
