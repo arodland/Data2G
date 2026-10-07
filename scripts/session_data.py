@@ -53,6 +53,7 @@ SLOW = False
 # v10's sessions gone, a retrain lost 13-22% at MPD +20, MPP +15 and MPG +15
 # against v12 (runs/cpmc_round.sh, 2026-10-03).
 HIGH = False
+KINDS_ONLY = ()  # --kinds: only these channel kinds (outcome_data.KINDS names); with --high, AWGN allowed
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
@@ -145,7 +146,7 @@ def session(seed):
                           else (float(np.exp(rng.uniform(np.log(0.05), np.log(0.3)))), float(rng.uniform(0, 2))))
         snr0, drift = float(rng.uniform(-8, 0)), 0.0
     else:
-        kinds = [(k, w) for k, w in O.KINDS if not (HIGH and k == "awgn")]
+        kinds = [(k, w) for k, w in O.KINDS if (k in KINDS_ONLY if KINDS_ONLY else not (HIGH and k == "awgn"))]
         ws = np.array([w for _, w in kinds])
         kind = str(rng.choice([k for k, _ in kinds], p=ws / ws.sum()))
         if kind == "random":
@@ -183,6 +184,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
+    ap.add_argument("--kinds", default="", help="comma-separated channel kinds only (KINDS_ONLY), e.g. awgn")
     ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
                     help="each station's interference drawn from interference.DRAWS[this] (default v1)")
     ap.add_argument("--wander", type=float, default=0.0, help="each station's floor wanders by this (dB)")
@@ -193,9 +195,10 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE, WANDER_DB
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY
     # set before the pool forks: the workers inherit them
     SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
+    KINDS_ONLY = tuple(filter(None, a.kinds.split(",")))
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]
