@@ -36,6 +36,7 @@ inline constexpr double NOISE_RULE = 1.0;  // the noise rule's tail weight (poli
 // data only in modes LADDER_STEP_DB more robust on every channel
 inline constexpr int LADDER_AFTER = 2;
 inline constexpr double LADDER_STEP_DB = 3.0;
+inline constexpr std::size_t ENERGY_HIST = 4;  // the energy inputs' window: the peer's last bursts
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
@@ -108,6 +109,7 @@ public:
     bool peer_had_data = true;
     std::vector<LogEntry> log;
     std::vector<double> spreads;  // the peer's last bursts' spread_est (tables::OUTCOME_GATE_HIST)
+    std::vector<double> energies;  // the peer's last ENERGY_HIST bursts' energy SNR, dB (policy.py)
 
     std::pair<std::string_view, int> choose(const StationView& st, int escalation) const;
     int next_capacity(const StationView& st) const;
@@ -117,6 +119,11 @@ public:
     GearRecommendation recommend(const StationView& st);
     // the gate's model applies (policy.py GearShifter.gate)
     bool gate() const;
+    void observe_energy(double snr_db, double now);
+    // the energy inputs (mean dB in power, fill, 1); nullopt before any
+    std::optional<std::array<double, 3>> energy_features() const;
+    // the burst I asked the peer for last: its mode and seconds on air
+    std::optional<std::pair<std::string, double>> expected_reply() const;
     // seconds past t_turn to wait for a reply to a burst in `submode`
     double reply_hold(const StationView& st, std::string_view submode) const;
 };
@@ -149,6 +156,8 @@ public:
         return shifter.reply_hold(view(st), burst.submode);
     }
     void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
+    void observe_energy(double snr_db, double now) override { shifter.observe_energy(snr_db, now); }
+    std::optional<std::pair<std::string, double>> expected_reply() const override { return shifter.expected_reply(); }
     int next_capacity(const Station& st) const { return shifter.next_capacity(view(st)); }  // the host's BUFFER
 };
 

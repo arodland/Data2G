@@ -102,6 +102,14 @@ extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
 extern const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS;
 extern const double OUTCOME_GATE_SPREAD_HZ, OUTCOME_GATE_SNR_DB;
 extern const int OUTCOME_GATE_HIST;
+// whether each model takes the energy inputs (predictor.N_ENERGY)
+extern const bool OUTCOME_ENERGY, OUTCOME_GATE_ENERGY;
+// each mode's burst peak-to-average (arq/phy.py peak_db): the energy inputs' peak reference
+struct ModePeak {
+    std::string_view mode;
+    double db;
+};
+extern const std::span<const ModePeak> MODE_PEAK_DB;
 extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;
 // The data ladder's robustness order (data2g/arq/policy.py MODE_THRESHOLDS):
 // per mode, its 10% codeword failure SNR (dB) on awgn, mpg, mpp, mpd.

@@ -526,6 +526,7 @@ Engine::Done Engine::process(Block& b) {
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
             auto burst = session_->poll(t);
+            missed_energy();
             id_check(t);
             if (burst) {
                 bursts = with_id(burst, t);
@@ -553,6 +554,7 @@ Engine::Done Engine::process(Block& b) {
             tx_.reset();
             request_reset();  // our own transmission was not heard
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + tnc::NoiseProfile::RECOVER_S);
+            tx_end_ = now() + static_cast<double>(n) / config::FS;
             session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);
             if (cfg_.kiss) cfg_.kiss->on_sent(sent);  // a broadcast burst's frames are acked
         }
@@ -573,13 +575,38 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
             const double start =
                 t - static_cast<double>(h->stream_end - h->header.start() + config::LEADIN_SAMPLES) / config::FS;
             noise_.mark(start, start + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
+            span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
+                      : std::nullopt;
             continue;
         }
+        if (span_ && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
+            energy(span_->start, span_->end, span_->mode, t);  // heard (decoded or not): the peer's, most likely
+        span_.reset();
         tnc::BurstEvent ev = std::holds_alternative<tnc::DecodeRequest>(it)
                                  ? tnc::decode(std::move(std::get<tnc::DecodeRequest>(it)), accept_)
                                  : std::move(std::get<tnc::BurstEvent>(it));
         hear_burst(ev, t);
     }
+}
+
+void Engine::energy(double start, double end, const std::string& mode, double t) {
+    const auto [lo, hi] = band_span_hz(mode_at(mode).band);
+    if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi))
+        session_->policy->observe_energy(*snr + peak_db(mode), t);
+}
+
+void Engine::missed_energy() {
+    const auto& st = session_->station;
+    const std::int64_t n = st ? st->stats["timeouts"] : 0;
+    if (n <= timeouts_) {
+        timeouts_ = n;
+        return;
+    }
+    timeouts_ = n;
+    const auto exp = session_->policy->expected_reply();
+    if (!tx_end_ || !exp) return;
+    const double start = *tx_end_ + EXPECT_REPLY_S;
+    energy(start, start + exp->second, exp->first, now());
 }
 
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {

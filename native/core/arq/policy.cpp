@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "cpm/cpm.hpp"
+#include "dsp/dsp.hpp"
 
 namespace data2g::arq {
 
@@ -171,6 +172,30 @@ void GearShifter::observe(const Measured& m, std::string_view submode, double no
         spreads.erase(spreads.begin(), spreads.end() - tables::OUTCOME_GATE_HIST);
 }
 
+void GearShifter::observe_energy(double snr_db, double) {
+    energies.push_back(snr_db);
+    if (energies.size() > ENERGY_HIST) energies.erase(energies.begin(), energies.end() - ENERGY_HIST);
+}
+
+std::optional<std::array<double, 3>> GearShifter::energy_features() const {
+    if (energies.empty()) return std::nullopt;
+    std::vector<double> lin;
+    for (const double e : energies) lin.push_back(std::pow(10.0, e / 10));
+    const double mean = dsp::pairwise_sum(lin) / static_cast<double>(lin.size());
+    return std::array<double, 3>{10 * std::log10(mean), static_cast<double>(energies.size()) / ENERGY_HIST, 1.0};
+}
+
+std::optional<std::pair<std::string, double>> GearShifter::expected_reply() const {
+    if (log.empty()) return std::nullopt;
+    const auto& e = log.back();
+    if (peer_had_data) {
+        const Mode& m = mode_at(e.data);
+        return std::pair{e.data, burst_seconds(m, slots_for(m, SIZE_S.at(static_cast<std::size_t>(e.hint))))};
+    }
+    const Mode& m = mode_at(e.reply);
+    return std::pair{e.reply, burst_seconds(m, ctl_slots(m))};
+}
+
 bool GearShifter::gate() const {
     if (spreads.empty() || !measured) return false;
     std::vector<double> v = spreads;  // np.median: the middle one, or the mean of the middle two
@@ -244,12 +269,14 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
     std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
     const bool gated = gate();
+    Measured me = *measured;  // with the energy inputs (a model with them reads them)
+    me.energy = energy_features();
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
         const auto sh = shift.find(s.band);
         const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
         auto it = memo.find(key);
         if (it == memo.end())
-            it = memo.emplace(key, predict_outcome(shifted(*measured, key.second), measured_band, gap_s, key.first,
+            it = memo.emplace(key, predict_outcome(shifted(me, key.second), measured_band, gap_s, key.first,
                                                    pv ? &*pv : nullptr, gated)).first;
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));

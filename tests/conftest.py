@@ -473,11 +473,11 @@ def _codes_substitutions(native):
 
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
-GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
+GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
 # GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
 # energy) that models with those inputs read in Python only
-PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "energies"}
+PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now"}
 
 
 @provider
@@ -549,10 +549,10 @@ def _gear_substitutions(native):
 
     py_outcome_inputs = P.outcome_inputs
 
-    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS, noise=False):
-        if noise:  # the noise profile's inputs: Python only, until a model with them ships
-            return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise)
-        return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands))
+    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS, noise=False, link=False, energy=False):
+        if noise or link:  # the noise profile's and link history's inputs: Python only (studies)
+            return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise, link, energy)
+        return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands), bool(energy))
 
     def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None, model=None):
         if model is not None:  # another model than the installed one (a gate's): Python
@@ -576,6 +576,17 @@ def _gear_substitutions(native):
 
         def observe(self, measured, submode, now):
             self._n.observe(measured, submode, float(now))
+
+        def observe_energy(self, snr_db, now):
+            if snr_db is not None:
+                self._n.observe_energy(float(snr_db), float(now))
+
+        def energy_features(self):
+            e = self._n.energy_features()
+            return None if e is None else list(e)
+
+        def expected_reply(self):
+            return self._n.expected_reply()
 
         def outcome(self, submode, decoded, sent, usable=None):
             self._n.outcome(submode, int(decoded), int(sent), None if usable is None else bool(usable))

@@ -72,6 +72,15 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
 # ponytail: thresholds from one ladder study, not learned; the retrain on this
 # branch's sessions should make the ladder rare
+# The CPM floor (a stopgap; DATA2G_CPM_FLOOR="snr:X" or "energy:X", studies):
+# when the median snr_est of the peer's last CPM_FLOOR_HIST bursts (snr), or
+# the energy inputs' mean (energy), is under X dB, data goes in CPM modes only.
+# On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
+# mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
+# through 75%+. Off unless set.
+_CF = os.environ.get("DATA2G_CPM_FLOOR")
+CPM_FLOOR = (_CF.split(":")[0], float(_CF.split(":")[1])) if _CF else None
+CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
 LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
@@ -189,6 +198,7 @@ class GearShifter:
     link_now: list | None = None  # link_features() at the last recommendation
     energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
     spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
+    snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -284,6 +294,17 @@ class GearShifter:
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
         self.heard = submode
         self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
+        self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
+
+    def cpm_floor(self) -> bool:
+        """CPM_FLOOR holds: data in CPM modes only."""
+        if CPM_FLOOR is None:
+            return False
+        kind, x = CPM_FLOOR
+        if kind == "snr":
+            return bool(self.snrs) and float(np.median(self.snrs)) < x
+        e = self.energy_features()
+        return e is not None and e[0] < x
 
     def gate(self):
         """The gate's model (predictor.GATE) if its conditions hold, else None (the installed one)."""
@@ -338,6 +359,19 @@ class GearShifter:
         if snr_db is None:
             return
         self.energies = (self.energies + [snr_db])[-ENERGY_HIST:]
+
+    def expected_reply(self) -> tuple[str, float] | None:
+        """The burst I asked the peer for last, its mode and length on air (s):
+        data in the mode and size I recommended if it had data, else a
+        control-only reply (the engine's energy reading for a missed one)."""
+        if not self.log:
+            return None
+        data, hint, reply = self.log[-1]
+        if self.peer_had_data:
+            spec = MODES[data]
+            return data, burst_seconds(spec, slots_for(spec, SIZE_S[hint]))
+        spec = MODES[reply]
+        return reply, burst_seconds(spec, ctl_slots(spec))
 
     def energy_features(self) -> list | None:
         """The energy inputs (predictor.N_ENERGY); None before any."""
@@ -441,6 +475,8 @@ class GearShifter:
             data_cands = [s for s in cands if all(map(lambda t, c: t <= c, MODE_THRESHOLDS[s.name], self.ceiling))]
             # none that robust: the most robust there is (the lowest worst-case threshold)
             data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
+        if self.cpm_floor():
+            data_cands = [s for s in data_cands if is_cpm(s)] or [s for s in cands if is_cpm(s)] or data_cands
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):

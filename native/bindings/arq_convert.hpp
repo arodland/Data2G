@@ -77,6 +77,10 @@ inline arq::Measured measured(const py::dict& d) {
         l.impulses_per_min = n["impulses_per_min"].cast<double>();
         m.noise = l;
     }
+    if (d.contains("energy") && !d["energy"].is_none()) {
+        const auto e = d["energy"].cast<std::vector<double>>();
+        m.energy = std::array<double, 3>{e.at(0), e.at(1), e.at(2)};
+    }
     return m;
 }
 
@@ -95,6 +99,7 @@ inline py::dict to_dict(const arq::Measured& m) {
         n["impulses_per_min"] = m.noise->impulses_per_min;
         d["noise"] = n;
     }
+    if (m.energy) d["energy"] = std::vector<double>(m.energy->begin(), m.energy->end());
     return d;
 }
 

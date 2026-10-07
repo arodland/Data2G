@@ -295,7 +295,7 @@ def predictor_cpp() -> str:
         """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
         rows = []
         for i, m in enumerate(ms):
-            assert m.bands == model.bands and not (m.noise or m.link or m.energy)
+            assert m.bands == model.bands and not (m.noise or m.link)  # energy inputs are ported
             out.append(f"constexpr double mean_{tag}{i}[] = {{\n{doubles(m.mean)}}};\n")
             out.append(f"constexpr double std_{tag}{i}[] = {{\n{doubles(m.std)}}};\n")
             layers = []
@@ -332,7 +332,12 @@ def predictor_cpp() -> str:
     caps = ", ".join(f"{{{cxx(c)}, cap_{i}}}" for i, c in enumerate(P.CONSTS))
     out.append(f"constexpr CapacityTable caps[] = {{{caps}}};\n")
     thr = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(float(v)) for v in t)}}}}}" for m, t in G.MODE_THRESHOLDS.items())
-    out.append(f"constexpr ModeThreshold thresholds[] = {{\n{thr}}};\n\n}}  // namespace\n\n")
+    out.append(f"constexpr ModeThreshold thresholds[] = {{\n{thr}}};\n")
+    from data2g.arq import phy as PHY
+    from data2g.arq.modes import MODES as ALL_MODES
+
+    peaks = ",\n".join(f"    {{{cxx(m)}, {repr(PHY.peak_db(m))}}}" for m in ALL_MODES)
+    out.append(f"constexpr ModePeak peaks[] = {{\n{peaks}}};\n\n}}  // namespace\n\n")
     out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
                "const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = gate_members;\n"
                f"const double OUTCOME_GATE_SPREAD_HZ = {cxx(P.GATE_SPREAD_HZ)};\n"
@@ -342,7 +347,10 @@ def predictor_cpp() -> str:
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"
                "const std::span<const CapacityTable> CAPACITY = caps;\n"
-               "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n\n}  // namespace data2g::tables\n")
+               "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n"
+               f"const bool OUTCOME_ENERGY = {cxx(bool(model.energy))};\n"
+               f"const bool OUTCOME_GATE_ENERGY = {cxx(bool(gate.energy))};\n"
+               "const std::span<const ModePeak> MODE_PEAK_DB = peaks;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 
 

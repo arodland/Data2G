@@ -339,16 +339,11 @@ class Engine:
             self._timeouts = n
             return
         self._timeouts = n
-        if self._tx_end is None or not getattr(pol, "log", None):
+        exp = pol.expected_reply() if hasattr(pol, "expected_reply") else None
+        if self._tx_end is None or exp is None:
             return
-        from . import policy as G
-
-        data, hint, reply = pol.log[-1]
-        mode = data if pol.peer_had_data else reply
-        spec = MODES[mode]
-        k = G.slots_for(spec, G.SIZE_S[hint]) if pol.peer_had_data else G.ctl_slots(spec)
         start = self._tx_end + EXPECT_REPLY_S
-        self._energy(start, start + burst_seconds(spec, k), mode, self.now)
+        self._energy(start, start + exp[1], exp[0], self.now)
 
     def _kiss_burst(self, k: int):
         """The next KISS burst if it may go now. A burst that waited on BUSY

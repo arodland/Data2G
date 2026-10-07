@@ -133,6 +133,10 @@ public:
     virtual std::optional<double> reply_hold(Station&, const TxBurst&) { return std::nullopt; }
     // engine: the receiver's measurements of a peer burst
     virtual void observe(const Measured&, const std::string& /*submode*/, double /*now*/) {}
+    // engine: a peer burst's in-band SNR from power alone (the energy inputs)
+    virtual void observe_energy(double /*snr_db*/, double /*now*/) {}
+    // engine: the burst I asked the peer for last, its mode and seconds on air (nullopt: none)
+    virtual std::optional<std::pair<std::string, double>> expected_reply() const { return std::nullopt; }
 };
 
 struct Codeword {
