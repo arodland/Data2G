@@ -100,14 +100,15 @@ void bind_arq(py::module_& m) {
                                  {var.data(), static_cast<std::size_t>(var.size())}, c);
     });
     a.def("outcome_inputs", [](const py::dict& md, const std::string& band, double gap, double seconds,
-                               const py::object& p, std::optional<std::vector<std::string>> bands) {
+                               const py::object& p, std::optional<std::vector<std::string>> bands, bool energy) {
         const auto pv = prev(p);
         std::vector<std::string_view> bv;
         if (bands) bv.assign(bands->begin(), bands->end());
         return np(arq::outcome_inputs(measured(md), band, gap, seconds, pv ? &*pv : nullptr,
-                                      bands ? std::span<const std::string_view>(bv) : tables::OUTCOME_BANDS));
+                                      bands ? std::span<const std::string_view>(bv) : tables::OUTCOME_BANDS, energy));
     }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none(),
-       py::arg("bands") = py::none());
+       py::arg("bands") = py::none(), py::arg("energy") = false);
+    a.def("peak_db", [](const std::string& m) { return arq::peak_db(m); });
     a.def("outcome_logits", [](const In<double>& x) {
         return np(arq::outcome_logits({x.data(), static_cast<std::size_t>(x.size())}));
     });
@@ -168,6 +169,14 @@ void bind_arq(py::module_& m) {
         .def_readwrite("ceiling", &Shifter::ceiling)
         .def_readwrite("ladder_top", &Shifter::ladder_top)
         .def_readwrite("data_lost", &Shifter::data_lost)
+        .def_readwrite("ladder_left", &Shifter::ladder_left)
+        .def_readwrite("spreads", &Shifter::spreads)
+        .def_readwrite("energies", &Shifter::energies)
+        .def_readwrite("snrs", &Shifter::snrs)
+        .def("cpm_floor", &Shifter::cpm_floor)
+        .def("observe_energy", &Shifter::observe_energy)
+        .def("energy_features", &Shifter::energy_features)
+        .def("expected_reply", &Shifter::expected_reply)
         .def_property("measured",
             [](const Shifter& s) -> py::object { return s.measured ? py::object(to_dict(*s.measured)) : py::none(); },
             [](Shifter& s, const py::object& d) {
@@ -221,6 +230,7 @@ void bind_arq(py::module_& m) {
         .def("outcome", [](Shifter& s, const std::string& submode, int decoded, int sent, std::optional<bool> usable) {
             s.outcome(submode, decoded, sent, usable);
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())
+        .def("gate", &Shifter::gate)
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));
             return py::make_tuple(r.data, r.hint, r.reply);

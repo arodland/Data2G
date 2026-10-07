@@ -42,8 +42,12 @@ struct Measured {
     std::array<double, CONSTS.size()> mi{};
     double headroom = 0.0, frames = 16.0;
     std::optional<NoiseLevels> noise;  // the receiver's, with it (the gear shifter's noise rule)
+    // the energy inputs (GearShifter::energy_features: mean dB, fill, 1); nullopt: none yet
+    std::optional<std::array<double, 3>> energy;
 };
 
+// A mode's burst peak-to-average, dB (arq/phy.py peak_db; tables::MODE_PEAK_DB).
+double peak_db(std::string_view mode);
 // What a sync band (OFDM band or CPM grid) occupies, Hz (predictor.band_span_hz).
 std::array<double, 2> band_span_hz(std::string_view band);
 // How much worse a burst in `band` should fare than the one measured in
@@ -60,11 +64,14 @@ struct Prev {
     double age = 0.0;
 };
 
+// `energy`: the energy inputs too (a model trained with --energy-inputs; zeros without any)
 std::vector<double> outcome_inputs(const Measured& m, std::string_view band, double gap, double seconds,
                                    const Prev* prev = nullptr,
-                                   std::span<const std::string_view> bands = tables::OUTCOME_BANDS);
+                                   std::span<const std::string_view> bands = tables::OUTCOME_BANDS,
+                                   bool energy = false);
 // The ensemble's logits (mean member probability), LOGIT_OFFSETS not applied.
-std::vector<double> outcome_logits(std::span<const double> x);
+// `gate`: the gate's model (tables::OUTCOME_GATE_MEMBERS) instead of the installed one.
+std::vector<double> outcome_logits(std::span<const double> x, bool gate = false);
 
 int outcome_index(std::string_view submode);  // its row in OUTCOME_MODES, -1: unknown
 bool outcome_knows(std::string_view submode);
@@ -75,6 +82,6 @@ struct Outcome {
 };
 // Indexed by outcome_index, LOGIT_OFFSETS applied.
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev = nullptr);
+                                     const Prev* prev = nullptr, bool gate = false);
 
 }  // namespace data2g::arq

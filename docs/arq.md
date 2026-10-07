@@ -112,7 +112,7 @@ extensions, so C = 1.
 | 7 | peer cumulative | the next peer seq this station expects; all below received |
 | 1 | reply lost | the peer's last burst repeated one this station already had (§6) |
 | 6 | K | resends in this burst |
-| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`) |
+| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-7; 8-15 under CPM are n10's indices 16-23, `policy.N10_HIGH`) |
 | 2 | size hint | peer burst length: shrink / hold / grow / max |
 
 Where the rest comes from:

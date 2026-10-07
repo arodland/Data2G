@@ -36,7 +36,21 @@ def noise_of(r) -> dict | None:
             "impulses_per_min": float(r["impulses_per_min"])}
 
 
-def load(path, stale_header=(), noise=False):
+def link_of(r) -> list | None:
+    """A row's link history (session_data's LINK_COLS), None if it has none."""
+    if not r.get("link_n"):
+        return None
+    return [float(r["link_lost"]), float(r["link_miss"]), float(r["link_n"]), 1.0]
+
+
+def energy_of(r) -> list | None:
+    """A row's energy inputs (session_data's ENERGY_COLS), None if it has none."""
+    if not r.get("energy_n"):
+        return None
+    return [float(r["energy_db"]), float(r["energy_n"]), 1.0]
+
+
+def load(path, stale_header=(), noise=False, link=False, energy=False):
     """`stale_header`: data from before the header copy (PROTOCOL_VERSION
     11): its w/w48 candidates' burst labels are not today's (their codeword
     labels, given a usable burst, still are). `noise`: the noise profile's
@@ -51,10 +65,14 @@ def load(path, stale_header=(), noise=False):
         m = {k: float(r[k]) for k in MEAS}
         if noise:
             m["noise"] = noise_of(r)
+        if link:
+            m["link"] = link_of(r)
+        if energy:
+            m["energy"] = energy_of(r)
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link, energy))
         mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
@@ -100,6 +118,88 @@ def combine(paths, out):
     print(f"{out}: {len(paths)} members")
 
 
+def extend(base: str, data: str, new: list, out: str, epochs: int = 300):
+    """Output units for `new` modes added to an installed model (each
+    ensemble member), trained on `data`'s rows for those modes; every
+    other weight frozen, so the modes it knew predict exactly as before.
+    Each member is fitted on its own bootstrap of the samples."""
+    d = np.load(base)
+    tags = sorted({k.split("_", 1)[0] for k in d.files}) if "m0_mean" in d.files else [""]
+    noise = bool(d[f"{tags[0]}_noise_inputs" if tags[0] else "noise_inputs"]) if any(
+        k.endswith("noise_inputs") for k in d.files) else False
+    link = any(k.endswith("link_inputs") and bool(d[k]) for k in d.files)
+    x, mode, bok, dsent, dok, rows, bmask = load(data, noise=noise, link=link)
+    keep = np.isin([MODES[i] for i in mode], new)
+    x, bok, dsent, dok, bmask = x[keep], bok[keep], dsent[keep], dok[keep], bmask[keep]
+    mode = np.array([new.index(MODES[i]) for i in mode[keep]])
+    seeds = np.array([int(r["seed"]) for r, k in zip(rows, keep) if k])
+    us = np.unique(seeds)
+    te = np.isin(seeds, np.random.default_rng(0).choice(us, len(us) // 5, replace=False))
+    rest = np.setdiff1d(us, seeds[te])
+    va = np.isin(seeds, np.random.default_rng(1).choice(rest, len(rest) // 8, replace=False))
+    trn = ~te & ~va
+    k = len(new)
+    T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt)  # noqa: E731
+    arrays, z_te = {}, []
+    for i, tag in enumerate(tags):
+        pre = f"{tag}_" if tag else ""
+        md = {key[len(pre):]: d[key] for key in d.files if key.startswith(pre)}
+        modes, n = tuple(str(m) for m in md["modes"]), len(md["modes"])
+        assert tuple(str(b) for b in md["bands"]) == BANDS and not set(new) & set(modes)
+        depth = sum(1 for key in md if key.startswith("W"))
+        h = P.clip_noise(x, md["noise_lo"], md["noise_hi"]) if noise and "noise_lo" in md else x
+        h = (h - md["mean"]) / md["std"]
+        for j in range(depth - 1):
+            h = np.tanh(h @ md[f"W{j}"] + md[f"b{j}"])
+        tr_s = np.unique(seeds[trn])
+        count = dict(zip(*np.unique(np.random.default_rng(i + 1).choice(tr_s, len(tr_s)), return_counts=True)))
+        tr = np.repeat(np.flatnonzero(trn), [count.get(s, 0) for s in seeds[trn]])
+        torch.manual_seed(i + 1)
+        head = torch.nn.Linear(h.shape[1], 2 * k)
+        opt = torch.optim.Adam(head.parameters(), lr=1e-2, weight_decay=1e-4)
+        tr_t = [T(h[tr]), T(mode[tr], torch.long), T(bok[tr]), T(dsent[tr]), T(dok[tr]), T(bmask[tr])]
+        va_t = [T(h[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va]), T(bmask[va])]
+        best, state = float("inf"), None
+        for ep in range(epochs):
+            perm = torch.randperm(len(tr_t[0]))
+            for s in range(0, len(perm), 512):
+                b = perm[s:s + 512]
+                loss = loss_fn(head(tr_t[0][b]), *(t[b] for t in tr_t[1:]), k)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+            with torch.no_grad():
+                v = loss_fn(head(va_t[0]), *va_t[1:], k).item()
+            if v < best:
+                best, state = v, {key: t.clone() for key, t in head.state_dict().items()}
+        head.load_state_dict(state)
+        print(f"member {tag or 0}: {len(tr)} training rows, best validation {best:.4f}", flush=True)
+        w, b = head.weight.detach().numpy().T.astype(np.float64), head.bias.detach().numpy().astype(np.float64)
+        wl, bl = md[f"W{depth - 1}"], md[f"b{depth - 1}"]
+        md[f"W{depth - 1}"] = np.concatenate([wl[:, :n], w[:, :k], wl[:, n:], w[:, k:]], axis=1)
+        md[f"b{depth - 1}"] = np.concatenate([bl[:n], b[:k], bl[n:], b[k:]])
+        md["modes"] = np.array(modes + tuple(new))
+        arrays.update({pre + key: v for key, v in md.items()})
+        with torch.no_grad():
+            z_te.append(head(T(h[te])).numpy())
+    np.savez(out, **arrays)
+    # held out: the members' mean P, as the ensemble gives it
+    idx = np.arange(te.sum())
+    pb = np.mean([1 / (1 + np.exp(-z[idx, mode[te]])) for z in z_te], axis=0)
+    pc = np.mean([1 / (1 + np.exp(-z[idx, mode[te] + k])) for z in z_te], axis=0)
+    frac = np.where(dsent[te] > 0, dok[te] / np.maximum(dsent[te], 1), bok[te])
+    snr = np.array([float(r["snr"]) for r, kk in zip(rows, keep) if kk])[te]
+    kind = np.array([r["kind"] for r, kk in zip(rows, keep) if kk])[te]
+    print(f"{out}: {len(tags)} members, {k} modes added; held out, P(codeword) vs decoded fraction:")
+    for j, m in enumerate(new):
+        for kd in ("awgn", "mpg", "mpp", "mpd", "random"):
+            for lo in range(0, 40, 8):
+                s = (mode[te] == j) & (kind == kd) & (snr >= lo) & (snr < lo + 8)
+                if s.any():
+                    print(f"  {m:15s} {kd:6s} {lo:2d}-{lo + 8:2d} dB n {s.sum():4d}: "
+                          f"{(pb * pc)[s].mean():.3f} vs {frac[s].mean():.3f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data", help="csv, or several comma-separated")
@@ -112,12 +212,19 @@ def main():
     ap.add_argument("--input-noise", type=float, default=0.0,
                     help="augmentation: Gaussian noise on the continuous inputs, in standard deviations, per batch")
     ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
+    ap.add_argument("--link-inputs", action="store_true", help="the link history as inputs too (predictor.N_LINK)")
+    ap.add_argument("--energy-inputs", action="store_true", help="the energy SNR as inputs too (predictor.N_ENERGY)")
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
+    ap.add_argument("--extend", metavar="BASE", help="add --new modes' outputs to this model, all else frozen")
+    ap.add_argument("--new", default="", help="comma-separated modes, with --extend")
     a = ap.parse_args()
+    if a.extend:
+        return extend(a.extend, a.data, a.new.split(","), a.out, a.epochs)
     if a.ensemble:
         return combine(a.ensemble.split(","), a.out)
     torch.manual_seed(a.seed)
-    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs)
+    x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs,
+                                                 a.link_inputs, a.energy_inputs)
     n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
@@ -205,6 +312,7 @@ def main():
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
     layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
+             link_inputs=np.array(a.link_inputs), energy_inputs=np.array(a.energy_inputs),
              **clip,
              **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})

@@ -118,17 +118,18 @@ const Wht& wht(std::string_view band) {
 
 // valid_words' 10-bit values (word >> 6), in order
 std::vector<int> valid_values(std::string_view band, const Accept* accept) {
-    std::array<int, 16> lim{};  // submode index -> codewords taken (0: none)
+    const int b = cw_bits(band);
+    std::array<int, 32> lim{};  // submode index -> codewords taken (0: none)
     if (accept) {
         for (const auto& [s, cw] : accept->max_cw)
             if (s->sync_band == band) lim[static_cast<size_t>(s->index)] = cw;
     } else {
         for (const auto& s : SUBMODES)
-            if (s.sync_band == band) lim[static_cast<size_t>(s.index)] = MAX_CODEWORDS;
+            if (s.sync_band == band) lim[static_cast<size_t>(s.index)] = max_codewords(band);
     }
     std::vector<int> out;
     for (int v = 0; v < 1024; ++v)
-        if ((v & 0x3F) < lim[static_cast<size_t>(v >> 6)]) out.push_back(v);
+        if ((v & ((1 << b) - 1)) < lim[static_cast<size_t>(v >> b)]) out.push_back(v);
     return out;
 }
 
@@ -228,7 +229,7 @@ Accept Accept::of(std::span<const std::string_view> names, std::optional<double>
     for (auto n : all) {
         const Spec* s = codes::submode(n);
         if (!s) throw std::out_of_range("no submode " + std::string(n));
-        int cw = MAX_CODEWORDS;
+        int cw = max_codewords(s->sync_band);
         if (max_secs) {
             int fixed = preamble_samples(band(s->sync_band)) + header_samples(s->sync_band) + NSYM;
             fixed += FRAME_SAMPLES * copies(s->sync_band);
@@ -273,9 +274,13 @@ std::vector<std::uint8_t> codeword(int word, std::string_view band) {
 }
 
 std::vector<std::uint8_t> header_bits(int submode, int n_cw, std::string_view band) {
-    if (n_cw < 1 || n_cw > MAX_CODEWORDS)
-        throw std::invalid_argument("1.." + std::to_string(MAX_CODEWORDS) + " codewords per burst");
-    const int v = submode << 6 | (n_cw - 1);
+    const int b = cw_bits(band);
+    if (n_cw < 1 || n_cw > 1 << b)
+        throw std::invalid_argument("1.." + std::to_string(1 << b) + " codewords per burst on " + std::string(band));
+    if (submode < 0 || submode >= 1 << (10 - b))
+        throw std::invalid_argument("submode index " + std::to_string(submode) + " does not fit " + std::string(band) +
+                                    "'s header");
+    const int v = submode << b | (n_cw - 1);
     return codeword(v << 6 | crc6(v), band);
 }
 
@@ -302,10 +307,10 @@ Header decode_header(std::span<const double> soft, std::string_view band, const 
     Header h;
     h.word = vs[i] << 6 | crc6(vs[i]);
     h.score = static_cast<double>(corr[i]) / (norm + 1e-12);
-    const int v = h.word >> 6;
-    h.spec = by_index(band, v >> 6);
+    const int v = h.word >> 6, b = cw_bits(band);
+    h.spec = by_index(band, v >> b);
     if (!h.spec) throw std::logic_error("valid word without a submode");
-    h.n_cw = (v & 0x3F) + 1;
+    h.n_cw = (v & ((1 << b) - 1)) + 1;
     return h;
 }
 
@@ -458,8 +463,8 @@ std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec
 
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
                              std::span<const int> rvs) {
-    if (payloads.empty() || payloads.size() > static_cast<size_t>(MAX_CODEWORDS))
-        throw std::invalid_argument("1.." + std::to_string(MAX_CODEWORDS) + " codewords per burst, got " +
+    if (payloads.empty() || payloads.size() > static_cast<size_t>(max_codewords(spec.sync_band)))
+        throw std::invalid_argument("1.." + std::to_string(max_codewords(spec.sync_band)) + " codewords per burst, got " +
                                     std::to_string(payloads.size()));
     if (!rvs.empty() && rvs.size() != payloads.size()) throw std::invalid_argument("one rv per codeword");
     const auto& cs = codes::spec(spec);

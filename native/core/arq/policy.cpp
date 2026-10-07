@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "cpm/cpm.hpp"
+#include "dsp/dsp.hpp"
 
 namespace data2g::arq {
 
@@ -89,15 +90,26 @@ std::vector<const Mode*> allowed(int cap) {
     return out;
 }
 
+// CPM_SPECS fits under N10_HIGH: policy.py asserts it, and the tables are generated from it
+
 int encode(std::string_view submode) {
     const Mode& m = mode_at(submode);
     if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
+    if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
+        if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
+        return CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
+    }
     return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
 }
 
 const Mode* decode(int rec) {
     if (rec >> 4 == CPM_CODE) {
         const auto i = static_cast<std::size_t>(rec & 15);
+        if (i >= static_cast<std::size_t>(N10_HIGH)) {
+            for (const auto& s : config::SUBMODES)
+                if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
+            return nullptr;
+        }
         return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
     }
     for (const auto& [band, code] : BANDS_CODE)
@@ -113,8 +125,9 @@ int ctl_slots(const Mode& m) { return std::min(max_ctl(m), cdiv(CTL_BYTES, ctl_p
 
 int slots_for(const Mode& m, double seconds, bool data, bool dup) {
     if (m.is_cpm()) seconds = std::min(seconds * CPM_SIZE_SCALE, CPM_MAX_S);
+    const int lim = m.is_cpm() ? 64 : config::max_codewords(m.ofdm->sync_band);
     int n = 1;
-    while (n < 64 && burst_seconds(m, n + 1) <= seconds) ++n;
+    while (n < lim && burst_seconds(m, n + 1) <= seconds) ++n;
     n = std::max({n, min_cw(m, data), ctl_slots(m) + data});
     if (m.is_cpm()) n = std::min(n + (dup && data), 1 + dup + tables::CPM.max_data);
     return n;
@@ -154,6 +167,53 @@ void GearShifter::observe(const Measured& m, std::string_view submode, double no
     measured_band = std::string(mode_at(submode).band);
     measured_at = now;
     heard = std::string(submode);
+    spreads.push_back(m.spread_est);
+    snrs.push_back(m.snr_est);
+    if (snrs.size() > CPM_FLOOR_HIST) snrs.erase(snrs.begin(), snrs.end() - CPM_FLOOR_HIST);
+    if (spreads.size() > static_cast<std::size_t>(tables::OUTCOME_GATE_HIST))
+        spreads.erase(spreads.begin(), spreads.end() - tables::OUTCOME_GATE_HIST);
+}
+
+void GearShifter::observe_energy(double snr_db, double) {
+    energies.push_back(snr_db);
+    if (energies.size() > ENERGY_HIST) energies.erase(energies.begin(), energies.end() - ENERGY_HIST);
+}
+
+std::optional<std::array<double, 3>> GearShifter::energy_features() const {
+    if (energies.empty()) return std::nullopt;
+    std::vector<double> lin;
+    for (const double e : energies) lin.push_back(std::pow(10.0, e / 10));
+    const double mean = dsp::pairwise_sum(lin) / static_cast<double>(lin.size());
+    return std::array<double, 3>{10 * std::log10(mean), static_cast<double>(energies.size()) / ENERGY_HIST, 1.0};
+}
+
+std::optional<std::pair<std::string, double>> GearShifter::expected_reply() const {
+    if (log.empty()) return std::nullopt;
+    const auto& e = log.back();
+    if (peer_had_data) {
+        const Mode& m = mode_at(e.data);
+        return std::pair{e.data, burst_seconds(m, slots_for(m, SIZE_S.at(static_cast<std::size_t>(e.hint))))};
+    }
+    const Mode& m = mode_at(e.reply);
+    return std::pair{e.reply, burst_seconds(m, ctl_slots(m))};
+}
+
+bool GearShifter::cpm_floor() const {
+    if (!cpm_floor_on || snrs.empty()) return false;
+    std::vector<double> v = snrs;  // np.median
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    return med < CPM_FLOOR_SNR_DB;
+}
+
+bool GearShifter::gate() const {
+    if (spreads.empty() || !measured) return false;
+    std::vector<double> v = spreads;  // np.median: the middle one, or the mean of the middle two
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    return med < tables::OUTCOME_GATE_SPREAD_HZ && measured->snr_est < tables::OUTCOME_GATE_SNR_DB;
 }
 
 double GearShifter::reply_hold(const StationView& st, std::string_view submode) const {
@@ -171,16 +231,18 @@ double GearShifter::reply_hold(const StationView& st, std::string_view submode) 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
     if (usable && *usable && sent) {
         data_lost = 0;
+        ladder_left = false;
         if (ceiling) {  // climb a step; back at the mode whose losses started it, it's off
             bool off = true;
             for (std::size_t i = 0; i < 4; ++i) {
                 (*ceiling)[i] += LADDER_STEP_DB;
                 off = off && (*ceiling)[i] >= (*ladder_top)[i];
             }
-            if (off) ceiling.reset(), ladder_top.reset();
+            if (off) ceiling.reset(), ladder_top.reset(), ladder_left = true;
         }
     } else if (usable && !*usable && !log.empty() && submode == log.back().data) {
-        if (++data_lost >= LADDER_AFTER) {  // step down from the mode that failed
+        if (++data_lost >= LADDER_AFTER || ladder_left) {  // step down from the mode that failed
+            ladder_left = false;
             std::array<double, 4> down = mode_thresholds(submode);
             for (std::size_t i = 0; i < 4; ++i) {
                 down[i] -= LADDER_STEP_DB;
@@ -207,7 +269,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     }
     std::vector<const Mode*> cands;
     for (const Mode* s : allowed(st.cap))
-        if (!s->is_cpm() || (use_cpm && outcome_knows(s->name))) cands.push_back(s);
+        if (outcome_knows(s->name) && (!s->is_cpm() || use_cpm)) cands.push_back(s);  // a mode added since: not until a model knows it
     std::optional<Prev> pv;
     // older history is used as PREV_MAX_S old, not dropped (policy.py)
     if (prev) pv = Prev{prev->m, prev->band, std::min(measured_at - prev->at, PREV_MAX_S)};
@@ -219,13 +281,16 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         for (const Mode* s : cands)
             if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
     std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
+    const bool gated = gate();
+    Measured me = *measured;  // with the energy inputs (a model with them reads them)
+    me.energy = energy_features();
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
         const auto sh = shift.find(s.band);
         const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
         auto it = memo.find(key);
         if (it == memo.end())
-            it = memo.emplace(key, predict_outcome(shifted(*measured, key.second), measured_band, gap_s, key.first,
-                                                   pv ? &*pv : nullptr)).first;
+            it = memo.emplace(key, predict_outcome(shifted(me, key.second), measured_band, gap_s, key.first,
+                                                   pv ? &*pv : nullptr, gated)).first;
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
         return it->second[static_cast<std::size_t>(i)];
@@ -267,6 +332,15 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             data_cands = {*std::min_element(cands.begin(), cands.end(),
                                             [&](const Mode* a, const Mode* b) { return worst(a) < worst(b); })};
         }
+    }
+    if (cpm_floor()) {  // data in CPM modes only (policy.py CPM_FLOOR)
+        std::vector<const Mode*> c;
+        for (const Mode* s : data_cands)
+            if (s->is_cpm()) c.push_back(s);
+        if (c.empty())
+            for (const Mode* s : cands)
+                if (s->is_cpm()) c.push_back(s);
+        if (!c.empty()) data_cands = std::move(c);
     }
     for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);

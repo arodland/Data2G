@@ -33,7 +33,7 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 from . import codes, modem  # noqa: E402
-from .config import BANDS, FS, LEADIN_SAMPLES, MAX_CODEWORDS, NSYM  # noqa: E402
+from .config import BANDS, FS, LEADIN_SAMPLES, NSYM, SNR_REF_BW_HZ, max_codewords  # noqa: E402
 
 log = logging.getLogger("data2g.tnc")
 
@@ -75,9 +75,10 @@ class KissDecoder:
 
 # --- framing ----------------------------------------------------------------
 
-def capacity(spec, max_cw: int = MAX_CODEWORDS) -> int:
-    """Bytes a burst of at most `max_cw` codewords carries, length fields included."""
-    return max_cw * codes.payload_bytes(spec)
+def capacity(spec, max_cw: int | None = None) -> int:
+    """Bytes a burst of at most `max_cw` codewords (default: what its header
+    can announce) carries, length fields included."""
+    return (max_cw or max_codewords(spec.sync_band)) * codes.payload_bytes(spec)
 
 
 def pack(packets: list[bytes], spec) -> list[bytes]:
@@ -186,6 +187,7 @@ class NoiseProfile:
     RECOVER_S = 0.6  # after our own transmission (the radio's receiver comes back: -86 dB on air)
     PIECE = FS // 100  # impulse detection: 10 ms pieces
     IMPULSE_X = 10.0  # 20 dB
+    RECENT = 400  # blocks (40 s) of spectra kept for span energy (span_snr_db)
 
     def __init__(self):
         f = np.fft.rfftfreq(self.BLOCK, 1 / FS)
@@ -197,6 +199,8 @@ class NoiseProfile:
         self._busy = []  # marked (start, end)
         self.kept = deque(maxlen=self.WINDOW)  # band powers
         self.kept_impulses = deque(maxlen=self.WINDOW)  # impulses per kept block
+        self.kept_spec = deque(maxlen=self.WINDOW)  # each kept block's power spectrum (span_snr_db's floor)
+        self.recent = deque(maxlen=self.RECENT)  # (start, end, power spectrum) of every block fed
 
     def feed(self, x: np.ndarray, t_start: float):
         """Audio heard from t_start (s). A gap since the last feed (we
@@ -208,20 +212,53 @@ class NoiseProfile:
             self._buf, self._s0 = np.asarray(x, dtype=np.float64), s
         while len(self._buf) >= self.BLOCK:
             blk = self._buf[:self.BLOCK]
-            spec = np.abs(np.fft.rfft(blk * self._win)) ** 2
+            spec = self.spectrum(blk)
+            self.recent.append((self._s0, self._s0 + self.BLOCK, spec))
             pieces = blk.reshape(-1, self.PIECE)
             ref = np.median(np.sqrt(np.mean(pieces ** 2, axis=1)))
             imp = int(np.sum(np.max(np.abs(pieces), axis=1) > self.IMPULSE_X * ref)) if ref > 0 else 0
-            self._pending.append((self._s0, self._s0 + self.BLOCK, [float(spec[b].mean()) for b in self._bins], imp))
+            self._pending.append((self._s0, self._s0 + self.BLOCK, [float(spec[b].mean()) for b in self._bins], imp, spec))
             self._buf, self._s0 = self._buf[self.BLOCK:], self._s0 + self.BLOCK
         now = s + len(x)
         commit = round(self.COMMIT_S * FS)
         while self._pending and self._pending[0][1] <= now - commit:
-            a, b, p, imp = self._pending.popleft()
+            a, b, p, imp, spec = self._pending.popleft()
             if not any(s0 < b and a < e for s0, e in self._busy):
                 self.kept.append(p)
                 self.kept_impulses.append(imp)
+                self.kept_spec.append(spec)
         self._busy = [(s0, e) for s0, e in self._busy if e > now - 2 * commit]
+
+    def spectrum(self, blk: np.ndarray) -> np.ndarray:
+        """A BLOCK's power spectrum (Hann window), as every block is measured."""
+        return np.abs(np.fft.rfft(blk * self._win)) ** 2
+
+    def _in_band(self, lo: float, hi: float) -> np.ndarray:
+        f = np.fft.rfftfreq(self.BLOCK, 1 / FS)
+        return (f >= lo) & (f < hi)
+
+    def span_snr_db(self, spectra, lo: float, hi: float, floor_spectra=None) -> float | None:
+        """A burst's in-band SNR from power alone (energy inputs, predictor.N_ENERGY):
+        its blocks' mean power in lo..hi Hz over the noise floor there (the
+        median of the kept blocks'), excess over 1, in SNR_REF_BW_HZ; dB.
+        None without a floor or blocks. `spectra`: the burst's block power
+        spectra (spectrum(); span_spectra() for audio already fed).
+        `floor_spectra`: the noise to measure against instead of the kept
+        blocks (the sim's noise is set per burst, against its peak)."""
+        ref = self.kept_spec if floor_spectra is None else floor_spectra
+        if (floor_spectra is None and len(ref) < self.MIN_BLOCKS) or not len(ref) or not len(spectra):
+            return None
+        band = self._in_band(lo, hi)
+        floor = float(np.median([s[band].mean() for s in ref]))
+        power = float(np.mean([s[band].mean() for s in spectra]))
+        if floor <= 0:
+            return None
+        return float(10 * np.log10(max(power / floor - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ))
+
+    def span_spectra(self, start: float, end: float) -> list:
+        """The fed blocks wholly inside start..end (s)."""
+        a, b = round(start * FS), round(end * FS)
+        return [s for s0, e0, s in self.recent if s0 >= a and e0 <= b]
 
     def mark(self, start: float, end: float):
         """Not noise from start to end (s)."""

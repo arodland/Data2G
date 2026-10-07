@@ -53,6 +53,17 @@ SLOW = False
 # v10's sessions gone, a retrain lost 13-22% at MPD +20, MPP +15 and MPG +15
 # against v12 (runs/cpmc_round.sh, 2026-10-03).
 HIGH = False
+# --fastlow: sustained low SNR on fast fading, where the models smear the
+# steep edges of the faster modes (MPD 0: w48-qpsk-r1/3 predicted 0.38-0.46
+# at -2..0 dB, decoded 0; MPP -8: qpsk-r1/5 0.6 vs 0.21) because the steering
+# model avoids them there and uniform exploration rarely lands on them. MPP
+# and MPD presets, else Doppler 1-3 Hz and 0-5 ms; SNR fixed, -8..+6 dB;
+# 600 s. Exploration FASTLOW_EXPLORE, of it FASTLOW_FASTER at a mode faster
+# than the recommendation by up to FASTLOW_SPAN in asymptotic payload rate
+# (the ladder is dense: the next two after fsk32r62-r1/2 are polar modes).
+FASTLOW = False
+FASTLOW_EXPLORE, FASTLOW_FASTER, FASTLOW_SPAN = 0.35, 0.7, 2.5
+KINDS_ONLY = ()  # --kinds: only these channel kinds (outcome_data.KINDS names); with --high, AWGN allowed
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
@@ -60,7 +71,10 @@ FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "ban
 # the receiver's noise profile at the recommendation (tnc.NoiseProfile.snapshot()), and its interference
 NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in range(1, 6)]
               + ["impulses_per_min"])
-FIELDS = FIELDS + NOISE_COLS + ["intf"]
+# the link history at the recommendation (GearShifter.link_features; empty before any expected burst)
+LINK_COLS = ["link_lost", "link_miss", "link_n"]
+ENERGY_COLS = ["energy_db", "energy_n"]  # GearShifter.energy_features at the recommendation
+FIELDS = FIELDS + NOISE_COLS + ["intf"] + LINK_COLS + ENERGY_COLS
 # --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
 INTERFERENCE = None
 WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
@@ -88,12 +102,18 @@ class Explorer(G.GearShifter):
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], G.PREV_MAX_S))
         ok = [s.name for s in G.allowed(station.cap) if not G.is_cpm(s) or P.outcome_knows(s.name)]
         explored = False
-        if self.rng.random() < EXPLORE:
-            rec, hint, explored = G.encode(self.rng.choice(ok)), self.rng.randrange(len(G.SIZE_S)), True
+        explore = FASTLOW_EXPLORE if FASTLOW else EXPLORE
+        if self.rng.random() < explore:
+            pick = self.rng.choice(ok)
+            if FASTLOW and self.rng.random() < FASTLOW_FASTER:
+                cur = G.decode(rec)
+                faster = [m for m in ok if cur in MODES and rate(cur) < rate(m) <= FASTLOW_SPAN * rate(cur)]
+                pick = self.rng.choice(faster) if faster else pick
+            rec, hint, explored = G.encode(pick), self.rng.randrange(len(G.SIZE_S)), True
         if self.rng.random() < EXPLORE:
             reply = G.encode(self.rng.choice(ok))
         self.snap = dict(m=dict(self.measured, noise=self.noise), band=self.measured_band, t=self.measured_at,
-                         prev=prev, explored=explored)
+                         prev=prev, explored=explored, link=self.link_now, energy=self.energy_features())
         return rec, hint, reply
 
 
@@ -125,20 +145,36 @@ class DataPhy(LS.AuditPhy):
                 row.update({f"noise_db{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_db"])})
                 row.update({f"noise_tail{i + 1}": round(v, 2) for i, v in enumerate(noise["noise_tail_db"])})
                 row["impulses_per_min"] = round(noise["impulses_per_min"], 1)
+            if snap["link"]:
+                row.update(zip(LINK_COLS, (round(v, 4) for v in snap["link"][:3])))
+            if snap["energy"]:
+                row.update(zip(ENERGY_COLS, (round(v, 3) for v in snap["energy"][:2])))
             row["intf"] = INTF.describe(self.ch.intf[1 - (burst.slots[0].mask_id[1] & 1)].spec)
             self.out.append(row)
         return res
 
 
+def rate(name: str) -> float:
+    """A mode's asymptotic payload rate (bytes/s over a long burst), for --fastlow's 'faster'."""
+    s = MODES[name]
+    return G.codes.payload_bytes(s) / (burst_seconds(s, 9) - burst_seconds(s, 1)) * 8
+
+
 def session(seed):
     rng = np.random.default_rng(seed)
-    if SLOW:
+    if FASTLOW:
+        u = rng.random()
+        kind = "mpp" if u < 0.35 else "mpd" if u < 0.7 else "random"
+        doppler, delay = (PS.L.PRESETS[kind] if kind != "random"
+                          else (float(np.exp(rng.uniform(np.log(1.0), np.log(3.0)))), float(rng.uniform(0, 5))))
+        snr0, drift = float(rng.uniform(-8, 6)), 0.0
+    elif SLOW:
         kind = "mpg" if rng.random() < 0.7 else "random"
         doppler, delay = (PS.L.PRESETS["mpg"] if kind == "mpg"
                           else (float(np.exp(rng.uniform(np.log(0.05), np.log(0.3)))), float(rng.uniform(0, 2))))
         snr0, drift = float(rng.uniform(-8, 0)), 0.0
     else:
-        kinds = [(k, w) for k, w in O.KINDS if not (HIGH and k == "awgn")]
+        kinds = [(k, w) for k, w in O.KINDS if (k in KINDS_ONLY if KINDS_ONLY else not (HIGH and k == "awgn"))]
         ws = np.array([w for _, w in kinds])
         kind = str(rng.choice([k for k, _ in kinds], p=ws / ws.sum()))
         if kind == "random":
@@ -150,7 +186,7 @@ def session(seed):
                      else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
     cap = 0 if rng.random() < 0.25 else 2
-    horizon = 600.0 if SLOW else 300.0
+    horizon = 600.0 if SLOW or FASTLOW else 300.0
     intf = None
     if INTERFERENCE:
         irng = np.random.default_rng(np.random.SeedSequence([seed, 5]))
@@ -175,7 +211,9 @@ def main():
     ap.add_argument("--first", type=int, default=300000)
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
+    ap.add_argument("--fastlow", action="store_true", help="sustained low SNR on fast fading, edges explored (FASTLOW)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
+    ap.add_argument("--kinds", default="", help="comma-separated channel kinds only (KINDS_ONLY), e.g. awgn")
     ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
                     help="each station's interference drawn from interference.DRAWS[this] (default v1)")
     ap.add_argument("--wander", type=float, default=0.0, help="each station's floor wanders by this (dB)")
@@ -186,9 +224,11 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE, WANDER_DB
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW
     # set before the pool forks: the workers inherit them
     SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
+    KINDS_ONLY = tuple(filter(None, a.kinds.split(",")))
+    FASTLOW = a.fastlow
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]

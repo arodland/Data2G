@@ -473,8 +473,11 @@ def _codes_substitutions(native):
 
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
-GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
+GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
+# GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
+# energy) that models with those inputs read in Python only
+PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now"}
 
 
 @provider
@@ -498,6 +501,7 @@ def _gear_substitutions(native):
                                          "burst_end", "head_samples", "burst_seconds")}
     py.update({f"modes.{k}": getattr(modes, k) for k in ("burst_seconds", "ctl_payload_bytes", "max_ctl", "min_cw")})
     py.update({f"G.{k}": getattr(G, k) for k in ("width_hz", "ctl_slots", "slots_for")})
+    py["predict_outcome"] = P.predict_outcome
 
     def own(spec):
         return config.SUBMODES.get(spec.name) == spec
@@ -545,14 +549,16 @@ def _gear_substitutions(native):
 
     py_outcome_inputs = P.outcome_inputs
 
-    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS, noise=False):
-        if noise:  # the noise profile's inputs: Python only, until a model with them ships
-            return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise)
-        return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands))
+    def outcome_inputs(measured, band, gap, seconds, prev=None, bands=P.BANDS, noise=False, link=False, energy=False):
+        if noise or link:  # the noise profile's and link history's inputs: Python only (studies)
+            return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise, link, energy)
+        return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands), bool(energy))
 
-    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None):
+    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None, model=None):
+        if model is not None:  # another model than the installed one (a gate's): Python
+            return py["predict_outcome"](measured, band, gap, seconds, submodes, prev, model)
         d = A.predict_outcome(measured, band, gap, seconds, prev)
-        return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values())}
+        return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values()) if s.name in d}
 
     class GearShifter(G.GearShifter):
         """State in the C++ object; dict and list fields cross by copy (assign
@@ -570,6 +576,17 @@ def _gear_substitutions(native):
 
         def observe(self, measured, submode, now):
             self._n.observe(measured, submode, float(now))
+
+        def observe_energy(self, snr_db, now):
+            if snr_db is not None:
+                self._n.observe_energy(float(snr_db), float(now))
+
+        def energy_features(self):
+            e = self._n.energy_features()
+            return None if e is None else list(e)
+
+        def expected_reply(self):
+            return self._n.expected_reply()
 
         def outcome(self, submode, decoded, sent, usable=None):
             self._n.outcome(submode, int(decoded), int(sent), None if usable is None else bool(usable))
@@ -602,6 +619,8 @@ def _gear_substitutions(native):
             return A.decode(int(rec)) or f"?{rec}"
 
     for f in dataclasses.fields(G.GearShifter):
+        if f.name in PY_ONLY_GEAR:  # study state the C++ shifter doesn't keep (link history, energy)
+            continue
         setattr(GearShifter, f.name, property(lambda s, f=f.name: getattr(s._n, f),
                                               lambda s, v, f=f.name: setattr(s._n, f, v)))
 
@@ -804,8 +823,9 @@ def _modem_substitutions(native):
 
     @guarded("modulate", lambda payloads, submode, rvs=None: own(submode))
     def modulate(payloads, submode, rvs=None):
-        if not 1 <= len(payloads) <= config.MAX_CODEWORDS:
-            raise ValueError(f"1..{config.MAX_CODEWORDS} codewords per burst, got {len(payloads)}")
+        top = config.max_codewords((config.SUBMODES[submode] if isinstance(submode, str) else submode).sync_band)
+        if not 1 <= len(payloads) <= top:
+            raise ValueError(f"1..{top} codewords per burst, got {len(payloads)}")
         return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)))
 
     @guarded("modulate_bits", lambda bits, spec: own(spec) and isinstance(bits, np.ndarray))
@@ -970,8 +990,8 @@ def _tnc_substitutions(native):
         channel_busy = property(lambda s: PyReceiver.channel_busy.fget(s) if s._n is None else s._n.channel_busy)
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
-    def capacity(spec, max_cw=config.MAX_CODEWORDS):
-        return T.capacity(spec.name, int(max_cw)) if own(spec) else py["capacity"](spec, max_cw)
+    def capacity(spec, max_cw=None):
+        return T.capacity(spec.name, int(max_cw or 0)) if own(spec) else py["capacity"](spec, max_cw)
 
     def pack(packets, spec):
         return T.pack([bytes(p) for p in packets], spec.name) if own(spec) else py["pack"](packets, spec)

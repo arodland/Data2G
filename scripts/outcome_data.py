@@ -54,6 +54,9 @@ REPLY_MODES = {"ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f", "qpsk
 # only in an up-fade, as a receiver in such a session measures), candidates
 # at the long size classes the shifter sends at low SNR.
 SUSTAINED = False
+# --cands: every candidate one of these modes (a supplement for modes added
+# to an installed model: train_outcome.py --extend), SNR across their range
+ONLY: tuple = ()
 KINDS = (("awgn", 0.15), ("mpg", 0.2), ("mpp", 0.2), ("mpd", 0.15), ("random", 0.3))
 THRESHOLDS = I.thresholds()
 # CPM modes' 1% end-to-end points (the CPM prototype's study, 1% v2), for
@@ -128,6 +131,8 @@ def sample(seed):
     drift = float(rng.normal(0, 1.5))  # dB per 30 s
     if SUSTAINED:
         snr0, drift = float(rng.uniform(-10, 4)), 0.0
+    if ONLY:
+        snr0 = float(rng.uniform(0, 36))
     cap = 0 if rng.random() < 0.25 else 2
     allowed = [s.name for s in G.allowed(cap)]
     ch = PS.ContinuousChannel(fam, snr0, seed, 120.0, doppler=doppler, delay_ms=delay)
@@ -183,6 +188,8 @@ def sample(seed):
             cands.insert(1, pick)
     while len(cands) < CANDIDATES:
         cands.append(str(rng.choice(allowed)))
+    if ONLY:
+        cands = [str(rng.choice(ONLY)) for _ in range(CANDIDATES)]
     base = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2),
                 snr_next=round(snr0 + drift * t_next / 30, 2), cap=cap, band=MODES[cur_name].band, gap=round(gap, 2),
                 **{k: v for k, v in cur.items()})
@@ -214,12 +221,14 @@ def main():
     ap.add_argument("--sustained", action="store_true", help="the sustained-low-SNR supplement (see SUSTAINED)")
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
+    ap.add_argument("--cands", default="", help="comma-separated: every candidate one of these (see ONLY)")
     a = ap.parse_args()
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SUSTAINED
+    global SUSTAINED, ONLY
     SUSTAINED = a.sustained
+    ONLY = tuple(filter(None, a.cands.split(",")))
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
               + ["prev_band", "prev_age"] + [f"prev_{k}" for k in meas]

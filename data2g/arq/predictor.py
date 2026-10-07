@@ -74,6 +74,18 @@ def abstraction(path: str = str(DATA / "link_abstraction.json")) -> dict:
 OUTCOME_MODES = tuple(SUBMODES)  # a model file without its own list (the OFDM-only v2)
 
 
+# The link history's inputs (policy.GearShifter.link_features): of the last
+# LINK_HIST peer bursts I expected, the fraction heard but lost (control
+# failed) and the fraction missed outright (my timeouts), how full that window
+# is, and 1; all 0 without a history (offline rows, older session data). A
+# receiver measures only the bursts that synced: at MPP -8 dB its snr_est read
+# +3.7 dB (median) over the true SNR, so it looked like -4 dB, where QPSK works.
+N_LINK = 4
+# The energy inputs (policy.GearShifter.energy_features): the peer's last
+# ENERGY_HIST bursts' in-band SNR from power alone (whole bursts, synced or
+# not; dB, mean over them in power), how many, and 1; all 0 without any.
+N_ENERGY = 3
+
 NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))  # tnc.NoiseProfile.BANDS_HZ
 N_NOISE = 2 * len(NOISE_BANDS_HZ) + 2
 
@@ -147,7 +159,7 @@ def shifted(measured: dict, shift_db: float) -> dict:
 
 
 def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS,
-                   noise: bool = False) -> np.ndarray:
+                   noise: bool = False, link: bool = False, energy: bool = False) -> np.ndarray:
     """measured, prev: as inputs(); `seconds`: the next burst's length on air;
     `bands`: the model's band one-hot (OFDM bands, then CPM grids); `noise`:
     a model with the noise profile's inputs (measured["noise"], noise_features)."""
@@ -159,6 +171,10 @@ def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=N
     x += [float(prev is not None), *(pm[f"mi_{c}"] for c in CONSTS), pm["snr_est"], np.log(0.05 + pm["spread_est"]),
           np.log2(1 + age), float(pb == band), np.log2(pm.get("frames", 16))]
     x += [gap, np.log2(seconds)]
+    if link:  # before the noise inputs: clip_noise takes the last N_NOISE
+        x += list(measured.get("link") or [0.0] * N_LINK)
+    if energy:
+        x += list(measured.get("energy") or [0.0] * N_ENERGY)
     if noise:
         x += noise_features(measured.get("noise"), band)
     return np.array(x, dtype=np.float64)
@@ -172,6 +188,8 @@ class OutcomeMlp:
     modes: tuple = OUTCOME_MODES  # its outputs' order
     bands: tuple = tuple(BANDS)  # its band one-hot
     noise: bool = False  # takes the noise profile's inputs (outcome_inputs)
+    link: bool = False  # takes the link history's inputs (N_LINK)
+    energy: bool = False  # takes the energy inputs (N_ENERGY)
     noise_lo: np.ndarray | None = None  # its noise inputs clipped to these (clip_noise)
     noise_hi: np.ndarray | None = None
 
@@ -220,7 +238,9 @@ def _mlp(d: dict) -> OutcomeMlp:
     extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
     clip = {k: d[k] for k in ("noise_lo", "noise_hi") if k in d}
     return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)],
-                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False, **clip, **extra)
+                      noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False,
+                      link=bool(d["link_inputs"]) if "link_inputs" in d else False,
+                      energy=bool(d["energy_inputs"]) if "energy_inputs" in d else False, **clip, **extra)
 
 
 # DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its
@@ -251,6 +271,14 @@ class OutcomeEnsemble:
     def noise(self):
         return self.members[0].noise
 
+    @property
+    def link(self):
+        return self.members[0].link
+
+    @property
+    def energy(self):
+        return self.members[0].energy
+
     def __call__(self, x: np.ndarray) -> np.ndarray:
         z = np.array([np.clip(m(x), -40, 40) for m in self.members])
         p = np.clip(np.mean(1 / (1 + np.exp(-z)), axis=0), 1e-9, 1 - 1e-9)
@@ -271,7 +299,9 @@ def outcome_knows(submode: str) -> bool:
 # never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
 # picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
 # nothing elsewhere (old README in git history, outcome model v12).
-LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0}
+# n10-256l-r3/4 (v12 + the n10 extension): tried below its threshold at AWGN
+# 20 dB, BW500 (speedtrials); -0.5 trades some of 25 dB for it (the user's call, 2026-09-29)
+LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0, "n10-256l-r3/4": -0.5}
 # DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
 # whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
 # installed model only.
@@ -280,12 +310,33 @@ if _ENV_OFFSETS is not None:
     LOGIT_OFFSETS = {m: float(v) for m, v in (e.rsplit(":", 1) for e in _ENV_OFFSETS.split(",") if e)}
 
 
+# The gate: a second model, used when the median spread_est of the peer's last
+# GATE_HIST bursts is under GATE_SPREAD_HZ and snr_est under GATE_SNR_DB
+# (policy.GearShifter.gate); the installed one otherwise. The gate's model
+# (runs/n10f_round.sh's n10qf: AWGN and slow-fading coverage the installed v12
+# lacks) against the installed one alone, 26 cells x 12 seeds
+# (runs/n10g_round.sh): AWGN 0 +35%, AWGN +4/+8 +3.6/+1.8%, MPG -4/+8 +2-3%;
+# no cell worse beyond its SE (worst MPP -8 -3.4 +- 5.1%). A band-aid until one
+# model wins everywhere (docs/outcome-training-data.md).
+# DATA2G_OUTCOME_GATE (studies): "path:spread:snr", or '' for none; unset, the
+# gate applies to the installed model only (not to DATA2G_OUTCOME_MODEL's).
+GATE_MODEL = DATA / "outcome_predictor_gate.npz"
+GATE_SPREAD_HZ, GATE_SNR_DB = 0.5, 12.0
+GATE_HIST = 5
+_GATE = os.environ.get("DATA2G_OUTCOME_GATE")
+if _GATE is not None:
+    GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+else:
+    GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") else (str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
+
+
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
-                    prev=None) -> dict[str, tuple[float, float]]:
+                    prev=None, model=None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
-    next burst `seconds` long."""
-    model = outcome_model()
-    z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise))
+    next burst `seconds` long. `model`: another than the installed one (a gate's)."""
+    model = model or outcome_model()
+    z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,
+                             model.energy))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
     if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()
@@ -293,4 +344,5 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
             if m in idx:
                 z[idx[m]] += off
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))
-    return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]])) for s in (submodes or SUBMODES.values())}
+    return {s.name: (float(p[idx[s.name]]), float(p[n + idx[s.name]]))
+            for s in (submodes or SUBMODES.values()) if s.name in idx}  # a model knows the modes it was trained on

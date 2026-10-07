@@ -121,10 +121,12 @@ def test_outcome_model(A, pure):
     for i in range(300):
         band = rng.choice(model.bands)
         m = random_measured(rng, band)
+        if model.energy and i % 4:  # the energy inputs: none yet, or some
+            m = dict(m, energy=[float(rng.uniform(-12, 30)), float(rng.choice([0.25, 0.5, 1.0])), 1.0])
         prev = None if i % 3 == 0 else (random_measured(rng), rng.choice(model.bands), rng.uniform(0, 30))
         gap, sec = rng.uniform(1, 5), round(rng.uniform(0.5, 50), 2)
-        x = P.outcome_inputs(m, band, gap, sec, prev, model.bands)
-        xn = A.outcome_inputs(m, band, gap, sec, prev, list(model.bands))
+        x = P.outcome_inputs(m, band, gap, sec, prev, model.bands, False, False, model.energy)
+        xn = A.outcome_inputs(m, band, gap, sec, prev, list(model.bands), bool(model.energy))
         np.testing.assert_allclose(xn, x, rtol=1e-15, atol=1e-15)
         z, zn = model(x), A.outcome_logits(x)
         np.testing.assert_allclose(zn, z, rtol=LOGIT_TOL, atol=LOGIT_TOL)
@@ -162,10 +164,12 @@ def station(rng, cap, rec=None):
                            peer_reply_recommend=rec[2] if rec else None, peer_wants_dup=rng.random() < 0.3)
 
 
-@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("seed", range(11))
 def test_shifter_decisions_match(A, pure, seed):
     """Random sessions: observations, recommendations, outcomes, choices.
-    Every decision identical; probabilities and biases to LOGIT_TOL."""
+    Every decision identical; probabilities and biases to LOGIT_TOL. Seeds 6-8:
+    flat, under 12 dB, so the gate's model (predictor.GATE) decides; 9-10:
+    under -4 dB, so the CPM floor (policy.CPM_FLOOR) holds; energy readings throughout."""
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
     kw = dict(gap_s=rng.choice([2.5, 1.5, 4.0]), use_cpm=seed % 3 != 2, min_success=rng.choice([0.0, 0.0, 0.5]))
@@ -178,9 +182,17 @@ def test_shifter_decisions_match(A, pure, seed):
             cap = rng.choice(list(G.CAP_HZ))
         heard = rng.choice(G.allowed(cap)).name
         m = random_measured(nrng, modes.MODES[heard].band, noise=True)
+        if 6 <= seed <= 8:
+            m = dict(m, spread_est=0.05, snr_est=min(m["snr_est"], 10.0))
+        if seed >= 9:
+            m = dict(m, snr_est=min(m["snr_est"], -5.0))
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
+        e = float(nrng.uniform(-12, 30))
+        ref.observe_energy(e, now)
+        nat.observe_energy(e, now)
+        assert nat.gate() == (ref.gate() is not None) and nat.cpm_floor() == ref.cpm_floor()
         st = station(rng, cap)
         want, got = ref.recommend(st), nat.recommend(st)
         assert got == want, (seed, step, [G.decode(r) for r in (want[0], want[2])], [A.decode(r) for r in (got[0], got[2])])

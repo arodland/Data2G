@@ -122,7 +122,7 @@ void bind_tnc(py::module_& m) {
             return out;
         });
     t.def("capacity", [](const std::string& s, int max_cw) { return tnc::capacity(spec(s), max_cw); },
-          py::arg("spec"), py::arg("max_cw") = config::MAX_CODEWORDS);
+          py::arg("spec"), py::arg("max_cw") = 0);
     t.def("pack", [](const std::vector<py::bytes>& packets, const std::string& s) {
         return py_bytes_list(tnc::pack(bytes_list(packets), spec(s)));
     });

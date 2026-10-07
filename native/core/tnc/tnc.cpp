@@ -49,7 +49,9 @@ std::vector<std::pair<int, Bytes>> KissDecoder::feed(std::span<const std::uint8_
 
 // --- framing ----------------------------------------------------------------
 
-int capacity(const modem::Spec& spec, int max_cw) { return max_cw * spec.payload_bytes; }
+int capacity(const modem::Spec& spec, int max_cw) {
+    return (max_cw ? max_cw : config::max_codewords(spec.sync_band)) * spec.payload_bytes;
+}
 
 std::vector<Bytes> pack(const std::vector<Bytes>& packets, const modem::Spec& spec) {
     const std::size_t p = static_cast<std::size_t>(spec.payload_bytes);
@@ -235,7 +237,11 @@ void NoiseProfile::feed(std::span<const double> x, double t_start) {
     while (buf_.size() - off >= static_cast<std::size_t>(BLOCK)) {
         for (int n = 0; n < BLOCK; ++n) z[n] = buf_[off + n] * win_[n];
         const auto spec = dsp::fft(z, true);
-        Block b{s0_, s0_ + BLOCK, {}, 0};
+        Block b{s0_, s0_ + BLOCK, {}, 0, {}};
+        b.spec.resize(BLOCK / 2 + 1);
+        for (std::size_t k = 0; k < b.spec.size(); ++k) b.spec[k] = std::norm(spec[k]);
+        recent_.push_back({s0_, s0_ + BLOCK, b.spec});
+        if (recent_.size() > RECENT) recent_.pop_front();
         {  // impulses: 10 ms pieces whose peak is over IMPULSE_X x the median piece RMS
             std::vector<double> rms, peak;
             for (int q = 0; q < BLOCK; q += PIECE) {
@@ -260,7 +266,7 @@ void NoiseProfile::feed(std::span<const double> x, double t_start) {
             for (int k = k0; k < k1; ++k) sum += std::norm(spec[static_cast<std::size_t>(k)]);
             b.p[i] = sum / (k1 - k0);
         }
-        pending_.push_back(b);
+        pending_.push_back(std::move(b));
         off += BLOCK;
         s0_ += BLOCK;
     }
@@ -268,17 +274,65 @@ void NoiseProfile::feed(std::span<const double> x, double t_start) {
     const std::int64_t now = s + static_cast<std::int64_t>(x.size());
     const auto commit = static_cast<std::int64_t>(std::nearbyint(COMMIT_S * config::FS));
     while (!pending_.empty() && pending_.front().end <= now - commit) {
-        const Block b = pending_.front();
+        Block b = std::move(pending_.front());
         pending_.pop_front();
         const bool marked = std::any_of(busy_.begin(), busy_.end(),
                                         [&](const auto& m) { return m.first < b.end && b.start < m.second; });
         if (!marked) {
             kept_.push_back(b.p);
             kept_impulses_.push_back(b.impulses);
-            if (kept_.size() > WINDOW) kept_.pop_front(), kept_impulses_.pop_front();
+            kept_spec_.push_back(std::move(b.spec));
+            if (kept_.size() > WINDOW) kept_.pop_front(), kept_impulses_.pop_front(), kept_spec_.pop_front();
         }
     }
     std::erase_if(busy_, [&](const auto& m) { return m.second <= now - 2 * commit; });
+}
+
+NoiseProfile::Spectrum NoiseProfile::spectrum(std::span<const double> blk) const {
+    std::vector<dsp::cdouble> z(BLOCK);
+    for (int n = 0; n < BLOCK; ++n) z[n] = blk[static_cast<std::size_t>(n)] * win_[n];
+    const auto spec = dsp::fft(z, true);
+    Spectrum out(BLOCK / 2 + 1);
+    for (std::size_t k = 0; k < out.size(); ++k) out[k] = std::norm(spec[k]);
+    return out;
+}
+
+std::vector<NoiseProfile::Spectrum> NoiseProfile::span_spectra(double start, double end) const {
+    const auto a = static_cast<std::int64_t>(std::nearbyint(start * config::FS));
+    const auto b = static_cast<std::int64_t>(std::nearbyint(end * config::FS));
+    std::vector<Spectrum> out;
+    for (const auto& r : recent_)
+        if (r.start >= a && r.end <= b) out.push_back(r.spec);
+    return out;
+}
+
+std::optional<double> NoiseProfile::span_snr_db(const std::vector<Spectrum>& spectra, double lo, double hi,
+                                                const std::vector<Spectrum>* floor_spectra) const {
+    const std::size_t n_ref = floor_spectra ? floor_spectra->size() : kept_spec_.size();
+    if ((!floor_spectra && n_ref < MIN_BLOCKS) || n_ref == 0 || spectra.empty()) return std::nullopt;
+    // rfft bins k (f = k * FS / BLOCK Hz) with lo <= f < hi, as np.fft.rfftfreq
+    const double df = static_cast<double>(config::FS) / BLOCK;
+    std::vector<std::size_t> band;
+    for (std::size_t k = 0; k <= static_cast<std::size_t>(BLOCK / 2); ++k) {
+        const double f = static_cast<double>(k) * df;
+        if (f >= lo && f < hi) band.push_back(k);
+    }
+    const auto in_band = [&](const Spectrum& s) {
+        std::vector<double> v;
+        v.reserve(band.size());
+        for (const auto k : band) v.push_back(s[k]);
+        return dsp::pairwise_sum(v) / static_cast<double>(v.size());
+    };
+    std::vector<double> ref, pw;
+    if (floor_spectra)
+        for (const auto& s : *floor_spectra) ref.push_back(in_band(s));
+    else
+        for (const auto& s : kept_spec_) ref.push_back(in_band(s));
+    for (const auto& s : spectra) pw.push_back(in_band(s));
+    const double floor = dsp::quantile(ref, 0.5);
+    const double power = dsp::pairwise_sum(pw) / static_cast<double>(pw.size());
+    if (floor <= 0) return std::nullopt;
+    return 10 * std::log10(std::max(power / floor - 1, 1e-3) * (hi - lo) / config::SNR_REF_BW_HZ);
 }
 
 void NoiseProfile::mark(double start, double end) {

@@ -36,10 +36,17 @@ inline constexpr double NOISE_RULE = 1.0;  // the noise rule's tail weight (poli
 // data only in modes LADDER_STEP_DB more robust on every channel
 inline constexpr int LADDER_AFTER = 2;
 inline constexpr double LADDER_STEP_DB = 3.0;
+inline constexpr std::size_t ENERGY_HIST = 4;  // the energy inputs' window: the peer's last bursts
+// The CPM floor (policy.py CPM_FLOOR, default snr:-4): data in CPM modes only
+// while the median snr_est of the peer's last CPM_FLOOR_HIST bursts is under it.
+inline constexpr std::size_t CPM_FLOOR_HIST = 3;
+inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
 inline constexpr int CPM_CODE = 3;
+// CPM_CODE's indices from here carry n10's past 15 (16-23; policy.py N10_HIGH)
+inline constexpr int N10_HIGH = 8;
 inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
 inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = "fsk16r25-r1/2";
@@ -99,12 +106,17 @@ public:
     int data_lost = 0;  // bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     std::optional<std::array<double, 4>> ceiling;  // the data ladder: per channel, the highest threshold data may have
     std::optional<std::array<double, 4>> ladder_top;  // the thresholds of the mode whose losses started it
+    bool ladder_left = false;  // just climbed off the ladder: one data burst lost puts it back
     std::optional<Heard> prev;  // the peer burst before the last
     Map bias, bias_burst;
     bool want_dup = false;
     std::map<std::string, std::pair<double, double>, std::less<>> predicted;
     bool peer_had_data = true;
     std::vector<LogEntry> log;
+    std::vector<double> spreads;  // the peer's last bursts' spread_est (tables::OUTCOME_GATE_HIST)
+    std::vector<double> energies;  // the peer's last ENERGY_HIST bursts' energy SNR, dB (policy.py)
+    std::vector<double> snrs;  // the peer's last CPM_FLOOR_HIST bursts' snr_est (the CPM floor)
+    bool cpm_floor_on = true;  // DATA2G_CPM_FLOOR='' (Python, studies) turns it off
 
     std::pair<std::string_view, int> choose(const StationView& st, int escalation) const;
     int next_capacity(const StationView& st) const;
@@ -112,6 +124,15 @@ public:
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
+    // the gate's model applies (policy.py GearShifter.gate)
+    bool gate() const;
+    // the CPM floor holds (policy.py GearShifter.cpm_floor)
+    bool cpm_floor() const;
+    void observe_energy(double snr_db, double now);
+    // the energy inputs (mean dB in power, fill, 1); nullopt before any
+    std::optional<std::array<double, 3>> energy_features() const;
+    // the burst I asked the peer for last: its mode and seconds on air
+    std::optional<std::pair<std::string, double>> expected_reply() const;
     // seconds past t_turn to wait for a reply to a burst in `submode`
     double reply_hold(const StationView& st, std::string_view submode) const;
 };
@@ -144,6 +165,8 @@ public:
         return shifter.reply_hold(view(st), burst.submode);
     }
     void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
+    void observe_energy(double snr_db, double now) override { shifter.observe_energy(snr_db, now); }
+    std::optional<std::pair<std::string, double>> expected_reply() const override { return shifter.expected_reply(); }
     int next_capacity(const Station& st) const { return shifter.next_capacity(view(st)); }  // the host's BUFFER
 };
 

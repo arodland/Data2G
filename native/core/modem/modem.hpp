@@ -48,7 +48,7 @@ struct Accept {
 int crc6(int v);  // CRC-6 over 10 bits, seeded with PROTOCOL_VERSION
 std::span<const std::uint16_t> header_cols(std::string_view band);  // the code's column masks
 std::vector<std::uint8_t> codeword(int word, std::string_view band);  // 16-bit word -> coded header bits
-// Throws std::invalid_argument unless 1 <= n_cw <= MAX_CODEWORDS.
+// Throws std::invalid_argument unless 1 <= n_cw <= config::max_codewords(band) and the index fits.
 std::vector<std::uint8_t> header_bits(int submode, int n_cw, std::string_view band = "w");
 std::vector<int> valid_words(std::string_view band, const Accept* accept = nullptr);
 // The ML correlation with each valid word, float32 as in Python: summed in

@@ -47,7 +47,7 @@ private:
 
 // --- framing: [length, 2 bytes big-endian][frame] back to back, zero-padded --
 
-int capacity(const modem::Spec& spec, int max_cw = config::MAX_CODEWORDS);
+int capacity(const modem::Spec& spec, int max_cw = 0);  // 0: what its header can announce
 // Packets -> codeword payloads for one burst. Throws std::invalid_argument past capacity().
 std::vector<Bytes> pack(const std::vector<Bytes>& packets, const modem::Spec& spec);
 // Payloads and their CRC results -> (whole packets, packets lost).
@@ -132,17 +132,33 @@ public:
     static constexpr double RECOVER_S = 0.6;
     static constexpr int PIECE = config::FS / 100;  // impulse detection: 10 ms pieces
     static constexpr double IMPULSE_X = 10.0;       // over the block's median piece RMS
+    static constexpr std::size_t RECENT = 400;      // blocks (40 s) of spectra kept for span_snr_db
+    using Spectrum = std::vector<double>;           // a block's power spectrum, rfft bins 0..BLOCK/2
 
     NoiseProfile();
     void feed(std::span<const double> x, double t_start);  // heard from t_start (s); a gap starts a new block
     void mark(double start, double end);                    // not noise from start to end (s)
     std::optional<NoiseSnapshot> snapshot() const;
+    // A BLOCK's power spectrum (Hann window), as every block is measured.
+    Spectrum spectrum(std::span<const double> blk) const;
+    // The fed blocks wholly inside start..end (s).
+    std::vector<Spectrum> span_spectra(double start, double end) const;
+    // A burst's in-band SNR from power alone (tnc.py NoiseProfile.span_snr_db):
+    // its blocks' mean power in lo..hi Hz over the floor (the kept blocks'
+    // median, or floor_spectra's), excess over 1, in SNR_REF_BW_HZ; dB.
+    std::optional<double> span_snr_db(const std::vector<Spectrum>& spectra, double lo, double hi,
+                                      const std::vector<Spectrum>* floor_spectra = nullptr) const;
 
 private:
     struct Block {
         std::int64_t start, end;
         std::array<double, 5> p;
         int impulses;
+        Spectrum spec;
+    };
+    struct Recent {
+        std::int64_t start, end;
+        Spectrum spec;
     };
     std::vector<double> win_, buf_;
     std::int64_t s0_ = 0;
@@ -150,6 +166,8 @@ private:
     std::vector<std::pair<std::int64_t, std::int64_t>> busy_;
     std::deque<std::array<double, 5>> kept_;
     std::deque<int> kept_impulses_;
+    std::deque<Spectrum> kept_spec_;
+    std::deque<Recent> recent_;
 };
 
 class Receiver {

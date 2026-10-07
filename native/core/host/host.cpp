@@ -70,7 +70,7 @@ std::vector<std::string> mode_lines(int cap) {
     });
     std::vector<std::string> out;
     for (const auto* m : ms) {
-        const int n = m->is_cpm() ? 1 + tables::CPM.max_data : config::MAX_CODEWORDS;
+        const int n = m->is_cpm() ? 1 + tables::CPM.max_data : config::max_codewords(m->ofdm->sync_band);
         char buf[160];
         std::snprintf(buf, sizeof buf, "MODE %s %.0f %d %d %.2f %.2f", std::string(m->name).c_str(), arq::width_hz(*m),
                       arq::payload_bytes(*m), n, arq::burst_seconds(*m, 1, false), arq::burst_seconds(*m, n, false));

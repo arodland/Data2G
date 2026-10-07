@@ -97,7 +97,7 @@ def test_inputs_match_model_with_and_without_history():
     model = P.outcome_model()
     mean = (model.members[0] if isinstance(model, P.OutcomeEnsemble) else model).mean
     for prev in (None, (m, "w", 4.0)):
-        x = P.outcome_inputs(m, "w", 2.5, 6.0, prev, model.bands)
+        x = P.outcome_inputs(m, "w", 2.5, 6.0, prev, model.bands, model.noise, model.link, model.energy)
         assert x.shape == mean.shape
 
 
@@ -188,7 +188,8 @@ def test_robust_floor_sends_control_only_bursts_robust():
 def test_lost_data_steps_down_the_ladder():
     """LADDER_AFTER data bursts lost in a row in the mode I recommended: data
     goes only in modes LADDER_STEP_DB more robust on every channel; a further
-    loss steps down from the mode that failed, a usable data burst climbs."""
+    loss steps down from the mode that failed, a usable data burst climbs;
+    climbed off it, one loss puts it back."""
     T, step = G.MODE_THRESHOLDS, G.LADDER_STEP_DB
 
     def below(a, b, by):  # a at least `by` dB more robust than b on every channel
@@ -205,6 +206,56 @@ def test_lost_data_steps_down_the_ladder():
     g.outcome(down, 0, 0, usable=False)
     lower = G.decode(g.recommend(st)[0])
     assert lower == down == min(T, key=lambda m: max(T[m])) or below(lower, down, step)
-    for _ in range(20):  # data gets through: it climbs off the ladder
-        g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
-    assert g.ceiling is None
+    def climb_off():  # data gets through: it climbs off the ladder
+        for _ in range(20):
+            g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)
+            if g.ceiling is None:
+                return
+        raise AssertionError("still on the ladder")
+
+    climb_off()
+    top = G.decode(g.recommend(st)[0])
+    g.outcome(top, 0, 0, usable=False)  # one loss right after the climb out
+    assert g.ceiling is not None and below(G.decode(g.recommend(st)[0]), top, step)
+    climb_off()
+    g.outcome(G.decode(g.recommend(st)[0]), 3, 3, usable=True)  # a usable burst after the climb out
+    g.outcome(G.decode(g.recommend(st)[0]), 0, 0, usable=False)
+    assert g.ceiling is None  # one loss later: LADDER_AFTER again
+
+
+def test_link_features_count_lost_and_missed_peer_bursts():
+    """The link history (predictor.N_LINK): heard-but-lost bursts from
+    outcome(), missed ones from my timeouts, over the last LINK_HIST."""
+    sh = G.GearShifter()
+    if hasattr(sh, "_n"):
+        import pytest
+
+        pytest.skip("the link history is Python-only (study inputs; the C++ shifter keeps none)")
+    st = SimpleNamespace(stats={"timeouts": 0})
+    assert sh.link_features(st) is None
+    sh.outcome("qpsk-r1/5", 3, 4, usable=True)
+    sh.outcome("qpsk-r1/5", 0, 0, usable=False)
+    st.stats["timeouts"] = 2
+    assert sh.link_features(st) == [0.25, 0.5, 4 / G.LINK_HIST, 1.0]
+    assert sh.link_features(st) == [0.25, 0.5, 4 / G.LINK_HIST, 1.0]  # timeouts counted once
+    for _ in range(G.LINK_HIST):
+        sh.outcome("qpsk-r1/5", 4, 4, usable=True)
+    assert sh.link_features(st) == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_gate_takes_the_second_model_on_flat_low_snr_channels():
+    """predictor.GATE: the gate's model when the median spread_est of the last
+    GATE_HIST peer bursts is under GATE_SPREAD_HZ and snr_est under GATE_SNR_DB."""
+    if P.GATE is None:
+        import pytest
+
+        pytest.skip("gate off (DATA2G_OUTCOME_GATE / DATA2G_OUTCOME_MODEL)")
+    sh = G.GearShifter()
+    for _ in range(P.GATE_HIST):
+        sh.observe(measured(5.0, 0.05), "qpsk-r1/2", 1.0)
+    assert sh.gate() is not None
+    sh.observe(measured(P.GATE_SNR_DB + 1, 0.05), "qpsk-r1/2", 2.0)
+    assert sh.gate() is None  # SNR over the gate
+    for _ in range(3):
+        sh.observe(measured(5.0, 2.0), "qpsk-r1/2", 3.0)
+    assert sh.gate() is None  # fading: the median spread over the gate

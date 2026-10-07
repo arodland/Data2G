@@ -70,7 +70,8 @@ FIRST_PATH_FRAC = 0.5
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 HEADER_SYMS = 4
 PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
-# 12: polar codewords carry CRC-24 (k + 8, payloads kept)
+# 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
+# in place: development, one operator)
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
@@ -80,7 +81,17 @@ PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09
 # contiguous (an 8-symbol header: w48 MPP -1 4.8%); 1-4 frames later alike.
 HEADER_COPY_BANDS = ("w", "w48")
 HEADER_COPY_AFTER = 2
-MAX_CODEWORDS = 64  # the header carries n_cw - 1 in 6 bits
+MAX_CODEWORDS = 64  # the header carries n_cw - 1 in 6 bits (CW_BITS: fewer on n10)
+# The header word's 10 bits split per sync band: submode | n_cw - 1, 6 bits
+# of count unless listed. n10's 16 indices (n10 and n4) were full; its
+# bursts never need 64 codewords (at 16 s, MAX_BURST_S, the most is 55
+# n4-ack-2f, which the shifter never plans past 12 s), so it takes 5 | 5.
+CW_BITS = {"n10": 5}
+
+
+def max_codewords(sync_band: str) -> int:
+    """Codewords a burst's header can announce on this sync band."""
+    return 1 << CW_BITS.get(sync_band, 6)
 
 LEADIN_SAMPLES = 800  # 100 ms of silence before the preamble
 LEADOUT_SAMPLES = 800
@@ -179,7 +190,7 @@ class BandSpec:
 # --- submodes ---------------------------------------------------------------
 @dataclass(frozen=True)
 class SubmodeSpec:
-    index: int  # 0..15, sent in the header
+    index: int  # sent in the header: 0..15 (0..31 on n10, CW_BITS)
     name: str
     code: str  # "ldpc" | "polar"
     constellation: str  # name for data2g.constellation.load
@@ -331,6 +342,10 @@ SUBMODES = dict([
     _m(13, "n10-16qam-r1/2", "ldpc", "gray-qam16", 10, 1000, band="n10", headroom=0),  # 672 bps
     _m(14, "n10-16qam-r2/3", "ldpc", "gray-qam16", 10, 1336, band="n10", headroom=2),  # 906 bps
     _m(15, "n10-16qam-r3/4", "ldpc", "gray-qam16", 10, 1504, band="n10", headroom=3),  # 1022 bps
+    # past n10's first 16 indices (CW_BITS), toward VARA 500's ~10 kB/min at
+    # 25 dB: learned sets, headroom by pick_headroom (runs/clip_n10_top.csv)
+    _m(16, "n10-64l-r3/4", "ldpc", "c64-w48-r34", 10, 2256, band="n10", headroom=6),  # 1544 bps
+    _m(17, "n10-256l-r3/4", "ldpc", "c256-w48-r58", 10, 3008, band="n10", headroom=8),  # 2067 bps
     # 2400 Hz, data only
     _m(0, "w48-qpsk-r1/5", "ldpc", "gray-qam4", 4, 384, band="w48", headroom=0),  # 639 bps
     _m(1, "w48-qpsk-r1/3", "ldpc", "gray-qam4", 4, 640, band="w48", headroom=0),  # 1056 bps

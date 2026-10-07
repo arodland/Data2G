@@ -272,10 +272,30 @@ class RealPhy:
 
     def hear(self, x, t0, rx=None):
         """The receiver's result for audio x sent at t0 (either family), or None."""
+        self.last_y = y = self.ch.apply(x, t0, rx)
+        self.last_rx = rx
         try:
-            return receive_any(self.ch.apply(x, t0, rx), lead=int(PAD_S * FS) + FS // 2)
+            return receive_any(y, lead=int(PAD_S * FS) + FS // 2)
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
             return None
+
+    def burst_energy_db(self, burst) -> float | None:
+        """The last burst heard, as the engine measures it (data2g.arq.engine
+        Engine._energy): its blocks' in-band power over the receiving
+        station's noise floor (NoiseProfile.span_snr_db), against its peak
+        (PHY.peak_db). Every burst sent gets one; the engine reports a missed
+        one at its timeout over the span it expected (ponytail: here the
+        exact span; and a reply never sent gets none here)."""
+        from data2g.arq import predictor as P
+
+        prof = self.noise.profile[self.last_rx or 0]
+        pad, y = int(PAD_S * FS), self.last_y
+        blocks = lambda a: [prof.spectrum(a[i:i + prof.BLOCK]) for i in range(0, len(a) - prof.BLOCK + 1, prof.BLOCK)]  # noqa: E731
+        lo, hi = P.band_span_hz(PHY.MODES[burst.submode].band)
+        # the floor from the burst's own pads: this sim sets each burst's noise
+        # against its peak (as a full-scale transmitter in fixed noise would see)
+        snr = prof.span_snr_db(blocks(y[pad:len(y) - pad]), lo, hi, blocks(y[:pad]) + blocks(y[len(y) - pad:]))
+        return None if snr is None else snr + PHY.peak_db(burst.submode)
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""

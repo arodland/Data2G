@@ -20,6 +20,7 @@ import numpy as np
 
 from .. import codes, modem
 from .. import cpm
+from ..config import max_codewords
 from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
 from . import frames as F
 from . import predictor as P
@@ -65,14 +66,35 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # The data ladder: after LADDER_AFTER bursts in a row lost in the data mode I
 # recommended, data may only go in modes LADDER_STEP_DB more robust than it on
 # every channel (MODE_THRESHOLDS); each further loss steps down from the mode
-# that failed, each usable data burst climbs a step. On air
+# that failed, each usable data burst climbs a step. Climbed off it, the next
+# data burst lost re-enters at once (on air, AG7EW 2026-10-06: the climbs out
+# went straight to modes that failed). On air
 # (recordings/20261002-232711) every fsk16r25 poll decoded and 0 of 12 data
 # bursts did, predicted 0.74-0.93: the model had never seen CPM polls measured
 # on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
 # ponytail: thresholds from one ladder study, not learned; the retrain on this
 # branch's sessions should make the ladder rare
+# The CPM floor (a stopgap; DATA2G_CPM_FLOOR="snr:X" or "energy:X", studies):
+# when the median snr_est of the peer's last CPM_FLOOR_HIST bursts (snr), or
+# the energy inputs' mean (energy), is under X dB, data goes in CPM modes only.
+# On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
+# mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
+# through 75%+. On by default at snr:-4 (CPM_FLOOR_DEFAULT): on n10pe gated with
+# n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6 +12.5/+7.2/+3.7%,
+# no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD -8 -2.0%); snr:-3
+# cost MPG -4 7.5%. DATA2G_CPM_FLOOR='' turns it off.
+# "snr:X:S" also wants the median spread_est of those bursts at least S Hz
+# (fast fading: on slow fading a fade holds the median down, and OFDM recovers).
+_CF = os.environ.get("DATA2G_CPM_FLOOR")
+CPM_FLOOR_DEFAULT = ("snr", -4.0, 0.0)
+CPM_FLOOR = CPM_FLOOR_DEFAULT if _CF is None else (
+    (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) if _CF
+    else None)
+CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
+LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
+ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
 CAP_HZ = {0: 500, 1: 1200, 2: 2400}
@@ -92,12 +114,19 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 
 
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
+# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
+# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
+N10_HIGH = 8
+assert len(cpm.SPECS) <= N10_HIGH
 
 
 def encode(submode: str) -> int:
     s = MODES[submode]
     if is_cpm(s):
         return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
+    if s.sync_band == "n10" and s.index >= 16:
+        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
+        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
     return F.BANDS_CODE[s.sync_band] << 4 | s.index
 
 
@@ -105,8 +134,11 @@ def decode(rec: int) -> str | None:
     from ..modem import BY_INDEX
 
     if rec >> 4 == CPM_CODE:
-        names = list(cpm.SPECS)
-        return names[rec & 15] if (rec & 15) < len(names) else None
+        i, names = rec & 15, list(cpm.SPECS)
+        if i >= N10_HIGH:
+            s = BY_INDEX.get(("n10", 16 + i - N10_HIGH))
+            return s.name if s else None
+        return names[i] if i < len(names) else None
     band = BY_CODE.get(rec >> 4)
     s = BY_INDEX.get((band, rec & 15)) if band else None
     return s.name if s else None
@@ -144,8 +176,8 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     longer (a CPM data codeword is 3-10 s)."""
     if is_cpm(spec):
         seconds = min(seconds * CPM_SIZE_SCALE, CPM_MAX_S)
-    n = 1
-    while n < 64 and burst_seconds(spec, n + 1) <= seconds:
+    n, lim = 1, 64 if is_cpm(spec) else max_codewords(spec.sync_band)
+    while n < lim and burst_seconds(spec, n + 1) <= seconds:
         n += 1
     n = max(n, min_cw(spec, data), ctl_slots(spec) + data)
     if is_cpm(spec):
@@ -168,9 +200,16 @@ class GearShifter:
     data_lost: int = 0  # bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     ceiling: tuple | None = None  # the data ladder: per channel, the highest threshold data may have
     ladder_top: tuple | None = None  # the thresholds of the mode whose losses started it: climbed back there, it's off
+    ladder_left: bool = False  # just climbed off the ladder: one data burst lost puts it back
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
+    turns: list = field(default_factory=list)  # the last LINK_HIST expected peer bursts: "ok" | "lost" | "miss"
+    timeouts_seen: int = 0  # station.stats["timeouts"] already counted as misses
+    link_now: list | None = None  # link_features() at the last recommendation
+    energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
+    spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
+    snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -265,6 +304,29 @@ class GearShifter:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
         self.heard = submode
+        self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
+        self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
+
+    def cpm_floor(self) -> bool:
+        """CPM_FLOOR holds: data in CPM modes only."""
+        if CPM_FLOOR is None:
+            return False
+        kind, x, spread = CPM_FLOOR
+        if spread and (not self.spreads or float(np.median(self.spreads[-CPM_FLOOR_HIST:])) < spread):
+            return False
+        if kind == "snr":
+            return bool(self.snrs) and float(np.median(self.snrs)) < x
+        e = self.energy_features()
+        return e is not None and e[0] < x
+
+    def gate(self):
+        """The gate's model (predictor.GATE) if its conditions hold, else None (the installed one)."""
+        if P.GATE is None or not self.spreads or self.measured is None:
+            return None
+        path, spread, snr = P.GATE
+        if float(np.median(self.spreads)) < spread and self.measured["snr_est"] < snr:
+            return P.outcome_model(path)
+        return None
 
     def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
         """Codeword outcomes of a peer burst against what I predicted for its
@@ -275,15 +337,19 @@ class GearShifter:
         `usable`: its control decoded, with decoded/sent its data codewords
         alone (counted with them, the control made a 0/7 burst score 1/8);
         None (KISS: no control): any codeword decoded."""
+        if usable is not None:
+            self.turns = (self.turns + ["ok" if usable else "lost"])[-LINK_HIST:]
         if usable and sent:
-            self.data_lost = 0
+            self.data_lost, self.ladder_left = 0, False
             if self.ceiling is not None:  # climb a step
                 self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
                 if all(map(lambda c, t: c >= t, self.ceiling, self.ladder_top)):
                     self.ceiling = self.ladder_top = None
+                    self.ladder_left = True
         elif usable is False and self.log and submode == self.log[-1][0]:
             self.data_lost += 1
-            if self.data_lost >= LADDER_AFTER:  # step down from the mode that failed
+            if self.data_lost >= LADDER_AFTER or self.ladder_left:  # step down from the mode that failed
+                self.ladder_left = False
                 down = tuple(t - LADDER_STEP_DB for t in MODE_THRESHOLDS[submode])
                 if self.ceiling is None:
                     self.ceiling, self.ladder_top = down, MODE_THRESHOLDS[submode]
@@ -303,13 +369,55 @@ class GearShifter:
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
         self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
 
+    def observe_energy(self, snr_db: float, now: float):
+        """A peer burst's in-band SNR from its power alone (heard or not)."""
+        if snr_db is None:
+            return
+        self.energies = (self.energies + [snr_db])[-ENERGY_HIST:]
+
+    def expected_reply(self) -> tuple[str, float] | None:
+        """The burst I asked the peer for last, its mode and length on air (s):
+        data in the mode and size I recommended if it had data, else a
+        control-only reply (the engine's energy reading for a missed one)."""
+        if not self.log:
+            return None
+        data, hint, reply = self.log[-1]
+        if self.peer_had_data:
+            spec = MODES[data]
+            return data, burst_seconds(spec, slots_for(spec, SIZE_S[hint]))
+        spec = MODES[reply]
+        return reply, burst_seconds(spec, ctl_slots(spec))
+
+    def energy_features(self) -> list | None:
+        """The energy inputs (predictor.N_ENERGY); None before any."""
+        if not self.energies:
+            return None
+        mean = 10 * np.log10(np.mean(10 ** (np.array(self.energies) / 10)))
+        return [float(mean), len(self.energies) / ENERGY_HIST, 1.0]
+
+    def link_features(self, station) -> list | None:
+        """The link history as the outcome model reads it (predictor.N_LINK):
+        my timeouts since the last call count as missed peer bursts. None
+        before any expected burst."""
+        t = getattr(station, "stats", {}).get("timeouts", 0)
+        if t > self.timeouts_seen:
+            self.turns = (self.turns + ["miss"] * (t - self.timeouts_seen))[-LINK_HIST:]
+        self.timeouts_seen = t
+        if not self.turns:
+            return None
+        n = len(self.turns)
+        return [self.turns.count("lost") / n, self.turns.count("miss") / n, n / LINK_HIST, 1.0]
+
     def recommend(self, station) -> tuple[int, int, int]:
         """-> (data mode, size hint, reply mode) for the peer's next burst:
         the mode it should use if it sends data, and if it sends none."""
+        self.link_now = self.link_features(station)
         if self.measured is None:
             return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
-        cands = [s for s in allowed(station.cap) if (not is_cpm(s) or (self.use_cpm and P.outcome_knows(s.name)))]
-        m = self.measured
+        # only modes the outcome model has learned (a mode added since is
+        # left out until a model trained with it ships)
+        cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
+        m = dict(self.measured, link=self.link_now, energy=self.energy_features())
         prev = None
         if self.prev is not None:
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))
@@ -318,6 +426,7 @@ class GearShifter:
         # replaced the MI predictor's output corrections: at -4 dB AWGN on
         # the real modem, control losses 24% -> 3% of data bursts and 141 ->
         # 196 bps (scripts/loss_study.py). It ships with the package.
+        gated = self.gate()
         if P.outcome_model() is None:
             raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
@@ -332,7 +441,8 @@ class GearShifter:
         def predicted(s, n_cw):
             key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
             if key not in omemo:
-                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev)
+                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev,
+                                               gated)
             return omemo[key][s.name]
 
         def logit_shift(q, b):
@@ -380,6 +490,8 @@ class GearShifter:
             data_cands = [s for s in cands if all(map(lambda t, c: t <= c, MODE_THRESHOLDS[s.name], self.ceiling))]
             # none that robust: the most robust there is (the lowest worst-case threshold)
             data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
+        if self.cpm_floor():
+            data_cands = [s for s in data_cands if is_cpm(s)] or [s for s in cands if is_cpm(s)] or data_cands
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):

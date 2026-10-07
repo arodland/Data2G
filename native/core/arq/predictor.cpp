@@ -14,7 +14,7 @@ namespace data2g::arq {
 namespace {
 
 // predictor.LOGIT_OFFSETS for the installed model.
-constexpr std::pair<std::string_view, double> LOGIT_OFFSETS[] = {{"w48-16qam-r1/2", -1.0}};
+constexpr std::pair<std::string_view, double> LOGIT_OFFSETS[] = {{"w48-16qam-r1/2", -1.0}, {"n10-256l-r3/4", -0.5}};
 
 const tables::CapacityTable& table(std::string_view constellation) {
     const auto family = const_family(constellation);
@@ -46,6 +46,12 @@ std::string_view const_family(std::string_view name) {
 
 double capacity(double snr_db, std::string_view constellation) {
     return interp(snr_db, tables::CAPACITY_GRID, table(constellation).mi);
+}
+
+double peak_db(std::string_view mode) {
+    for (const auto& p : tables::MODE_PEAK_DB)
+        if (p.mode == mode) return p.db;
+    throw std::out_of_range("no peak for mode " + std::string(mode));
 }
 
 std::array<double, 2> band_span_hz(std::string_view band) {
@@ -107,7 +113,7 @@ double effective_mi(std::span<const std::complex<double>> h, std::span<const dou
 }
 
 std::vector<double> outcome_inputs(const Measured& m, std::string_view band, double gap, double seconds,
-                                   const Prev* prev, std::span<const std::string_view> bands) {
+                                   const Prev* prev, std::span<const std::string_view> bands, bool energy) {
     std::vector<double> x = {m.snr_est, std::log(0.05 + m.spread_est), m.delay_est_ms};
     x.insert(x.end(), m.mi.begin(), m.mi.end());
     x.push_back(m.headroom);
@@ -125,11 +131,15 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
     x.push_back(std::log2(pm.frames));
     x.push_back(gap);
     x.push_back(std::log2(seconds));
+    if (energy) {
+        const std::array<double, 3> e = m.energy.value_or(std::array<double, 3>{});
+        x.insert(x.end(), e.begin(), e.end());
+    }
     return x;
 }
 
-std::vector<double> outcome_logits(std::span<const double> x) {
-    const auto& members = tables::OUTCOME_MEMBERS;
+std::vector<double> outcome_logits(std::span<const double> x, bool gate) {
+    const auto& members = gate ? tables::OUTCOME_GATE_MEMBERS : tables::OUTCOME_MEMBERS;
     std::vector<double> psum;
     for (const auto& mem : members) {
         if (x.size() != mem.mean.size()) throw std::invalid_argument("outcome_logits: wrong input size");
@@ -165,8 +175,9 @@ int outcome_index(std::string_view submode) {
 bool outcome_knows(std::string_view submode) { return outcome_index(submode) >= 0; }
 
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev) {
-    auto z = outcome_logits(outcome_inputs(m, band, gap, seconds, prev));
+                                     const Prev* prev, bool gate) {
+    const bool energy = gate ? tables::OUTCOME_GATE_ENERGY : tables::OUTCOME_ENERGY;
+    auto z = outcome_logits(outcome_inputs(m, band, gap, seconds, prev, tables::OUTCOME_BANDS, energy), gate);
     const std::size_t n = tables::OUTCOME_MODES.size();
     for (const auto& [name, off] : LOGIT_OFFSETS)
         if (const int i = outcome_index(name); i >= 0) z[i] += off;
