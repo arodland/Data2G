@@ -37,7 +37,7 @@ def test_round_trip_with_a_header_lost(lost):
     assert modem.LEADIN_SAMPLES < FS
 
 
-def test_listen_prints_in_order_as_blocks_finalize():
+def test_listen_prints_in_order_as_blocks_finalize(monkeypatch):
     """Printer (data2g-bulk listen): text in block order while audio still
     arrives; a burst lost whole (an r1/2 copy at RV 1 can't decode alone)
     shows as its blocks' markers. The DD cap reaches every ModemRx."""
@@ -54,13 +54,13 @@ def test_listen_prints_in_order_as_blocks_finalize():
     y = hfchannel.apply_channel(y, snr_db=15, freq_offset_hz=20, ppm=30, seed=1)
     out, seen = io.BytesIO(), []
     rx = bulk.Rx(dd_cap=0.25)
-    made = []
-    orig = rx._rx
-    rx._rx = lambda r: made.append(orig(r)) or made[-1]
+    budgets, real = [], PHY.ModemRx  # the budget as passed: --native's ModemRx keeps it in C++
+    monkeypatch.setattr(PHY, "ModemRx", lambda r, store, dd_budget=None: budgets.append(dd_budget) or
+                        real(r, store, dd_budget))
     printer = bulk.Printer(out)
     chunks = [y[i:i + FS] for i in range(0, len(y), FS)]
     bulk.receive(chunks, rx=rx, on_chunk=lambda r: (printer(r), seen.append(len(out.getvalue()))))
     want = b"".join(b"[block %d lost]" % k if 6 <= k < 12 else F.inflate(b"", b) for k, b in enumerate(blocks))
     assert out.getvalue() == want
     assert 0 < seen[len(chunks) // 2] < len(want)  # printing began mid-transfer
-    assert made and all(m.dd_until is not None for m in made)
+    assert budgets and all(b is not None for b in budgets)
