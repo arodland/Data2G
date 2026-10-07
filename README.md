@@ -2,7 +2,17 @@
 
 Data2G is an HF data modem for amateur radio operators with speeds and robustness rivaling VARA HF and Pactor. It supports connected (ARQ) and unconnected/broadcast (FEC) operation, with effective one-way speeds as high as 6400 bps (48,000 bytes per minute, 8000 words per minute) at 25+ dB SNR, and sensitivity down to around -10 dB, albeit at 0.5% of the speed. It's suitable for chat, BBSes, email delivery, or APRS. 2400Hz is required for full speed, but Data2G can be configured for a maximum bandwidth of 500Hz to fit within narrowband segments of the bandplan.
 
-There is currently a VARA-compatible TNC, as well as a KISS TNC. KISS defaults to running in a slow robust mode, but if it detects that you're using it to send AX.25 connected mode packets it will automatically select a faster speed using information from the remote station.
+## Versatile
+
+Data2G has a VARA-compatible TNC for connected mode (Winlink, BBS), and a KISS TNC for applications like HF APRS. But there is also an extended non-connected mode where apps can send frames to designated "broadcast groups", with full control over the mode they're using, and subscribe to those groups on KISS ports. This lets you build chat or other sorts of interesting apps on top of Data2G without having to stick to the in-order guaranteed-delivery ARQ model.
+
+There is also an experimental option to detect connected-mode AX.25 over KISS and enable automatic rate shifting using metadata injected into the burst headers, so that you can go much faster than the default robust KISS mode, under good conditions.
+
+It's even possible to do reliable one-way bulk data transfer, a la FLAMP.
+
+## Monitorable
+
+The spec is open, and Data2G comes with a built-in monitor mode that shows all decoded packets, with session reconstruction, and sender and receiver callsigns if you've heard the CONNECT or ID bursts.
 
 ## Modern Techniques
 
