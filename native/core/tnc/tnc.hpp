@@ -176,6 +176,7 @@ public:
     static constexpr double ON_AIR_DB = 3.0;
     static constexpr std::size_t FLOOR_BLOCKS = 1200;
     static constexpr int REVISIT = 2 * HOP;
+    static constexpr int CPM_TAIL = config::FS / 20;  // kept before a CPM burst's end (tnc.Receiver.CPM_TAIL)
     static constexpr double SUPERSEDE_MARGIN = 0.05;
     static constexpr double SUSPECT_SCORE = 0.36;
 
