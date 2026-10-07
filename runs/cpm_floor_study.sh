@@ -11,7 +11,7 @@ export DATA2G_OUTCOME_GATE=data2g/codes_data/outcome_predictor_gate.npz:0.5:12
 export DATA2G_LOGIT_OFFSETS=w48-16qam-r1/2:-1.0,n10-256l-r3/4:-0.5
 T1="env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1"
 CF=mpp:-10,mpp:-8,mpp:-6,mpp:-4,mpp:0,mpd:-8,mpd:-6,mpd:-4,mpd:0,mpg:-4,mpg:0,awgn:-4,awgn:0
-for arm in off snr:-3 snr:-1; do
+for arm in ${ARMS:-off snr:-3 snr:-1}; do
   tag=${arm//:/}
   [ -s runs/loss_cf_$tag.csv ] && continue
   floor=""; [ $arm != off ] && floor=$arm
@@ -19,6 +19,6 @@ for arm in off snr:-3 snr:-1; do
     --seeds 12 --horizon 600 --jobs 8 --policy shift+cpm --cells $CF > runs/loss_cf_$tag.log 2>&1
   date
 done
-for arm in snr-3 snr-1; do
+for arm in $(for a in ${ARMS:-off snr:-3 snr:-1}; do [ $a != off ] && echo ${a//:/}; done); do
   echo "== CPM floor off vs $arm"; $PY scripts/paired_loss.py runs/loss_cf_off.csv runs/loss_cf_$arm.csv
 done

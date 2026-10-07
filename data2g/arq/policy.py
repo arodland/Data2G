@@ -78,8 +78,11 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
 # mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
 # through 75%+. Off unless set.
+# "snr:X:S" also wants the median spread_est of those bursts at least S Hz
+# (fast fading: on slow fading a fade holds the median down, and OFDM recovers).
 _CF = os.environ.get("DATA2G_CPM_FLOOR")
-CPM_FLOOR = (_CF.split(":")[0], float(_CF.split(":")[1])) if _CF else None
+CPM_FLOOR = (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) \
+    if _CF else None
 CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
@@ -300,7 +303,9 @@ class GearShifter:
         """CPM_FLOOR holds: data in CPM modes only."""
         if CPM_FLOOR is None:
             return False
-        kind, x = CPM_FLOOR
+        kind, x, spread = CPM_FLOOR
+        if spread and (not self.spreads or float(np.median(self.spreads[-CPM_FLOOR_HIST:])) < spread):
+            return False
         if kind == "snr":
             return bool(self.snrs) and float(np.median(self.snrs)) < x
         e = self.energy_features()
