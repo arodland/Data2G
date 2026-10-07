@@ -25,7 +25,9 @@ import numpy as np
 
 from data2g import codes, modem
 from data2g.arq import phy as PHY
-from data2g.config import BANDS, SUBMODES
+from data2g.arq.modes import MODES, is_cpm
+from data2g.config import BANDS
+from data2g.tnc import receive_any
 from data2g.waveform import ofdm, sync
 
 SLACK_S = 3.0  # a burst's end to the receiver's rx event, at most
@@ -58,7 +60,7 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
     rows = []
     used = set()
     for tx in sender["tx"]:
-        spec = SUBMODES[tx["submode"]]
+        spec = MODES[tx["submode"]]
         end = sender["wall"] + tx["t"] + tx["seconds"]
         best = None
         for j, rx in enumerate(receiver["rx"]):
@@ -75,14 +77,22 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
             rx = receiver["rx"][best[0]]
             audio = np.load(receiver["dir"] / rx["file"])["audio"].astype(np.float64)
             try:
-                r = modem.receive(audio, [spec.sync_band])
-                oc = slot_outcomes(spec, r, slots)
+                if is_cpm(spec):  # CPM: the receiver as the engine runs it, every slot through ModemRx
+                    r = receive_any(audio)
+                    if r is None or r["spec"].name != spec.name:
+                        raise modem.SyncError("not this burst")
+                    mrx = PHY.ModemRx(r, {})
+                    oc = [None if sl["rv"] else mrx.decode(i, tuple(sl["mask"]), 0, None) == bytes.fromhex(sl["payload"])
+                          for i, sl in enumerate(slots)]
+                else:
+                    r = modem.receive(audio, [spec.sync_band])
+                    oc = slot_outcomes(spec, r, slots)
             except modem.SyncError:
                 oc = [False] * len(slots)
             data = [o for o, s in zip(oc, slots) if s["mask"][2] < 128 and o is not None]
             # control: each codeword alone, or with its RV 1 copy (ARQ_DUP)
             ctl_ok = all(o for o, s in zip(oc[:n_ctl], slots) if not s["rv"])
-            if not ctl_ok and n_ctl >= 2 and slots[1]["rv"] == 1:
+            if not ctl_ok and n_ctl >= 2 and slots[1]["rv"] == 1 and not is_cpm(spec):
                 try:
                     soft = PHY.soft_bits(r)
                     m = PHY.mask_value(tuple(slots[0]["mask"]))
@@ -90,7 +100,7 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
                     buf = codes.combine(spec, buf, codes.flip(spec, 1, 1) * soft[1:2], 1)
                     p, good = codes.decode_buffer(spec, buf, 1, m, index=codes.PLAIN)[0]
                     ctl_ok = good and p == bytes.fromhex(slots[0]["payload"])
-                except (NameError, modem.SyncError):
+                except (NameError, ValueError, modem.SyncError):  # ponytail: the pair path is stale (codes.flip length)
                     pass
             row.update(ctl_ok=ctl_ok, data_first=len(data), data_ok=sum(data),
                        data_ok_ctl_lost=sum(data) if not ctl_ok else 0,
@@ -106,7 +116,7 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
             # needs some noise
             x = x + np.random.default_rng(0).normal(0, 1e-5, len(x))
             row.update(ctl_ok=False)
-            if len(x) > fs:
+            if len(x) > fs and not is_cpm(spec):  # the OFDM detector's statistic
                 band = ofdm.band(spec.sync_band)
                 S, _ = sync.detection_stat(modem.to_baseband(x), band)
                 row.update(peak=round(float(S.max()), 1), threshold=BANDS[spec.sync_band].preamble_threshold)
