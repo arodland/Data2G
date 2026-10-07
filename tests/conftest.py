@@ -877,7 +877,9 @@ def _modem_substitutions(native):
     def _copy_header(z, lock):
         return hdr_dict(N.copy_header(z, lock))
 
-    @guarded("receive", lambda x, bands=None, accept=None, head=None, copy=None: copy is None or lock_ok(copy))
+    # `known` (data2g-bulk's receive at a known position) has no native port: Python's
+    @guarded("receive", lambda x, bands=None, accept=None, head=None, copy=None, known=None:
+             known is None and (copy is None or lock_ok(copy)))
     def receive(x, bands=None, accept=None, head=None, copy=None):
         d = N.receive(f64(x), bands_arg(bands), accept, None if head is None else int(head), copy)
         return dict(d, spec=config.SUBMODES[d["spec"]], acq=acq(d["acq"]))
