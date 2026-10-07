@@ -20,7 +20,7 @@ recordings/
 .claude/worktrees/
 
 # native/ build products
-native/build/
+native/build*/
 native/build-*/
 # pinned downloads (FetchContent, appimagetool, NSIS) and staged packages
 native/.deps/
