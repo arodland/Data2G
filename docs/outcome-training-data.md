@@ -33,6 +33,11 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_n10p_high.csv` | `--high --sessions 1200 --first 3600000` (same) | high | same | 8ab5379 | |
 | `session_data_n10p_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 3700000` (`runs/n10p2_round.sh`) | +10..+30 dB AWGN | same | bea359f | `--high` has no AWGN: with energy, AWGN +15 lost 10% |
 | `session_data_n10p_fastlow.csv` | `--fastlow --sessions 1200 --first 3800000` (`runs/n10f_round.sh`) | sustained -8..+6 dB on MPP/MPD/random 1-3 Hz, 600 s; exploration 0.35, 70% of it at modes up to 2.5x faster than the pick | same | 55162be | the faster modes' failure edges at MPD 0 and MPP -8 |
+| `session_data_e2.csv` | `--sessions 2900 --first 5000000` (`runs/e2_round.sh`) | regular; energy as the engine measures it (NoiseProfile.span_snr_db against PHY.peak_db) | v12 + n10 extension gated with n10qf (`codes_data/outcome_predictor{,_gate}.npz`, 0.5 Hz / 12 dB), offsets as the n10p sets, Python shifter | 570cf8a | the engine-measured energy inputs |
+| `session_data_e2_slow.csv` | `--slow --sessions 800 --first 5100000` (same) | slow | same | 570cf8a | |
+| `session_data_e2_high.csv` | `--high --sessions 1200 --first 5200000` (same) | high | same | 570cf8a | |
+| `session_data_e2_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 5300000` (same) | high AWGN | same | 570cf8a | |
+| `session_data_e2_fastlow.csv` | `--fastlow --sessions 1200 --first 5400000` (same) | fastlow | same | 570cf8a | |
 
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
@@ -52,5 +57,8 @@ sent at the same moment; one row per candidate.
 - **Shipped (v12 + n10 extension):** v12 as trained (v10's sessions and offline set, v11, slow;
   lost) plus output units for the n10 modes from `outcome_data_n10top.csv`
   (`train_outcome --extend`).
-- **n10pf / n10qf** (`runs/n10f_round.sh`): every file above; n10pf with `--energy-inputs`.
+- **n10pf / n10qf** (`runs/n10f_round.sh`): the n10p sets, the older sets and both offline sets; n10pf with
+  `--energy-inputs` (the sim's oracle energy, superseded). n10qf ships as the gate's model.
+- **n10pe / n10qe** (`runs/e2_round.sh`): the e2 sets instead of the n10p ones, plus the general offline set, the
+  older sets and `outcome_data_n10top.csv`; n10pe with `--energy-inputs` (engine-measured).
   Five bootstrap members, seeds 1-5, averaged.
