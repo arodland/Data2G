@@ -214,9 +214,17 @@ class Rx:
     """Bursts in, blocks out. `store`: soft bits of blocks not yet decoded,
     kept across bursts and passes (phy.ModemRx)."""
 
-    def __init__(self):
-        self.store, self.streams, self.cur = {}, {}, None
+    def __init__(self, dd_cap: float | None = None):
+        """`dd_cap`: DD (phy.ModemRx's decision-directed re-estimation) starts
+        no refine past this share of a burst's airtime from the burst's
+        decode start, so a live receiver keeps up (a 12 s 256l burst with
+        every slot failing took 54 s of DD). None: no cap (files, studies)."""
+        self.store, self.streams, self.cur, self.dd_cap = {}, {}, None, dd_cap
         self.waiting = []  # (start, r) heard before any control placed them
+
+    def _rx(self, r: dict):
+        budget = None if self.dd_cap is None else self.dd_cap * modem.burst_seconds(r["spec"], r["n_cw"])
+        return PHY.ModemRx(r, self.store, budget)
 
     def control(self, rx, n_cw: int) -> tuple | None:
         c = rx.decode(0, CTL_MASK, 0, None)
@@ -236,7 +244,7 @@ class Rx:
     def heard(self, start: int, r: dict | None):
         """A burst the streaming receiver found, its preamble at `start`
         (r: modem.receive's dict, None if it failed past the header)."""
-        rx = None if r is None else PHY.ModemRx(r, self.store, None)
+        rx = None if r is None else self._rx(r)
         ctl = None if rx is None else self.control(rx, r["n_cw"])
         if ctl is not None:
             stream, b, n, h, p = ctl
@@ -320,12 +328,13 @@ class Rx:
                 st.done.add(g)
                 continue
             log.info("burst %d: header lost, received at its known position", g)
-            self._burst(st, g, PHY.ModemRx(r, self.store, None), r, headerless=True)
+            self._burst(st, g, self._rx(r), r, headerless=True)
 
 
-def receive(chunks, accept=None) -> Rx:
-    """Audio chunks at FS -> the Rx with everything heard."""
-    rx, rcv = Rx(), Receiver(accept or modem.Accept.of(None))
+def receive(chunks, accept=None, rx: Rx | None = None, on_chunk=None) -> Rx:
+    """Audio chunks at FS -> the Rx with everything heard (`on_chunk(rx)`
+    after each chunk is handled)."""
+    rx, rcv = rx or Rx(), Receiver(accept or modem.Accept.of(None))
     buf, off = np.zeros(0), 0
     for x in chunks:
         buf = np.concatenate([buf, x])
@@ -343,6 +352,8 @@ def receive(chunks, accept=None) -> Rx:
             keep = min(keep, round(st.due(g)) - modem.LEADIN_SAMPLES - off)
         if keep > 0:
             buf, off = buf[keep:], off + keep
+        if on_chunk:
+            on_chunk(rx)
     for kind, ev in rcv.feed(np.zeros(FLUSH)):
         if kind == "burst":
             rx.heard(ev["header"]["start"], ev["rx"])
@@ -367,6 +378,82 @@ def read_audio(path: str, chunk_s: float = 1.0):
         yield x[i:i + n]
 
 
+class Printer:
+    """The current stream's text to `out` in block order, each block once it
+    is final: decoded, or lost when the burst carrying its copy has been
+    handled. A later pass can still fill a lost block in: `path`, if given,
+    is rewritten with the whole text as it stands whenever a block arrives
+    (the first stream's; a later one's at path.<id>)."""
+
+    def __init__(self, out, path: str | None = None):
+        self.out, self.path, self.st, self.k, self.n_got, self.first = out, path, None, 0, -1, None
+
+    def __call__(self, rx: Rx):
+        st = rx.cur
+        if st is None:
+            return
+        if st is not self.st:
+            self.st, self.k, self.n_got = st, 0, -1
+            self.first = self.first or st.stream
+            print(f"\n== stream {st.stream:04x}: {st.lay.n} blocks, {st.lay.spec.name}, "
+                  f"{st.lay.h} per burst ==", file=sys.stderr, flush=True)
+        handled = {g % st.lay.per_pass for g in st.done}
+        start = self.k
+        while self.k < st.lay.n:
+            k = self.k
+            if k in st.blocks:
+                try:
+                    b = F.inflate(b"", st.blocks[k])
+                except ValueError:
+                    b = b"[block %d unreadable]" % k
+            elif k // st.lay.h + 1 in handled:
+                b = b"[block %d lost]" % k
+            else:
+                break
+            self.out.write(b)
+            self.k += 1
+        self.out.flush()
+        if self.k == st.lay.n and start < st.lay.n:
+            print(f"\n== stream {st.stream:04x}: {len(st.blocks)}/{st.lay.n} blocks ==", file=sys.stderr, flush=True)
+        if self.path and len(st.blocks) != self.n_got:
+            self.n_got = len(st.blocks)
+            path = self.path if st.stream == self.first else f"{self.path}.{st.stream:04x}"
+            open(path, "wb").write(unpack(st.blocks, st.lay.n)[0])
+
+
+def read_device(device: str | None, rate: int, chunk_s: float = 0.5):
+    """Chunks at FS from a PortAudio input (data2g-host's capture and decimator)."""
+    import threading
+
+    import pyaudio
+
+    from .host import Capture, _channels
+    from .tnc import Decimator, _device
+
+    pa = pyaudio.PyAudio()
+    try:
+        dev = _device(pa, device, "input")
+        inp, dec, never = Capture(pa, _channels(pa, dev, "input"), rate, dev), Decimator(rate), threading.Event()
+        try:
+            while (x := inp.read(int(chunk_s * rate), never)) is not None:
+                yield dec(x)
+        finally:
+            inp.close()
+    finally:
+        pa.terminate()
+
+
+def list_devices():
+    import pyaudio
+
+    pa = pyaudio.PyAudio()
+    for i in range(pa.get_device_count()):
+        d = pa.get_device_info_by_index(i)
+        if d["maxInputChannels"]:
+            print(f"{i:3d}  in {d['maxInputChannels']:2d}  {int(d['defaultSampleRate']):6d} Hz  {d['name']}")
+    pa.terminate()
+
+
 # --- command line -------------------------------------------------------------------
 
 def main(argv=None):
@@ -383,6 +470,15 @@ def main(argv=None):
     r = sub.add_parser("recv", help="WAV (or raw float32 at 8 kHz on stdin) -> text")
     r.add_argument("audio", help="WAV file, or '-' for raw float32 mono at 8 kHz on stdin")
     r.add_argument("-o", "--output", required=True, help="text file to write (several streams: .<id> appended)")
+    r.add_argument("--dd-cap", type=float, help="DD stops starting refines past this share of a burst's airtime "
+                   "(default: no cap)")
+    li = sub.add_parser("listen", help="an audio device -> text on stdout as it arrives")
+    li.add_argument("--input-device", help="index or name substring (default: the system's)")
+    li.add_argument("--sample-rate", type=int, default=48000, help="a multiple of 8000 (default %(default)s)")
+    li.add_argument("--list-audio-devices", action="store_true")
+    li.add_argument("-o", "--output", help="also keep the whole text here, rewritten as blocks arrive")
+    li.add_argument("--dd-cap", type=float, default=0.25, help="DD stops starting refines past this share of a "
+                    "burst's airtime, so decoding keeps up with the audio (default %(default)s)")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(message)s")
     if a.cmd == "send":
@@ -393,7 +489,21 @@ def main(argv=None):
         wavfile.write(a.output, FS, np.round(x * 32000).astype(np.int16))
         print(f"{len(bs)} bursts, {len(x) / FS:.1f} s -> {a.output}", file=sys.stderr)
         return
-    rx = receive(read_audio(a.audio))
+    if a.cmd == "listen":
+        if a.list_audio_devices:
+            return list_devices()
+        if a.sample_rate % FS:
+            ap.error(f"--sample-rate must be a multiple of {FS}")
+        print("listening (Ctrl-C to stop)", file=sys.stderr)
+        rx = Rx(a.dd_cap)
+        try:
+            receive(read_device(a.input_device, a.sample_rate), rx=rx, on_chunk=Printer(sys.stdout.buffer, a.output))
+        except KeyboardInterrupt:
+            pass
+        for stream, st in rx.streams.items():
+            print(f"\nstream {stream:04x}: {len(st.blocks)}/{st.lay.n} blocks", file=sys.stderr)
+        return
+    rx = receive(read_audio(a.audio), rx=Rx(a.dd_cap))
     if not rx.streams:
         raise SystemExit("no stream heard")
     for stream, st in rx.streams.items():
