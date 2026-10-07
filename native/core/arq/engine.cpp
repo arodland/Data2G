@@ -348,6 +348,7 @@ TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
     const auto payloads = ctl.pack(session_->policy->payload_bytes(mode));
     auto b = std::make_shared<TxBurst>();
     b->submode = mode;
+    b->cap = cap;
     for (std::size_t i = 0; i < payloads.size(); ++i) b->slots.push_back({ctl_mask(0, static_cast<int>(i), 0), 0, payloads[i]});
     return b;
 }
@@ -592,9 +593,15 @@ void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {
 void Engine::energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db) {
     const auto [lo, hi] = band_span_hz(mode_at(mode).band);
     if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi)) {
-        const double e = *snr + peak_db(mode);
+        const double e = *snr + peak_db(mode, rx_cap());
         if (!min_db || e >= *min_db) session_->policy->observe_energy(e, t);
     }
+}
+
+int Engine::rx_cap() const {
+    // the session's (before a CONNECT is answered, my own), or between sessions the KISS link's
+    if (cfg_.kiss && idle()) return cfg_.kiss->cap;
+    return session_->cap;
 }
 
 void Engine::missed_energy() {

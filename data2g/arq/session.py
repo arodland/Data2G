@@ -372,7 +372,7 @@ class Session:
             slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
-        return L.TxBurst(mode, slots, 0)
+        return L.TxBurst(mode, slots, 0, self.cap)
 
     def _compact(self, mode: str) -> bool:
         """A CONNECT in `mode` goes compact (frames.pack_connect): in its

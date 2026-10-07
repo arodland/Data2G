@@ -91,14 +91,14 @@ void bind_cpm(py::module_& m) {
     c.def("to_tones", [](const std::string& g, const In<std::uint8_t>& bits) {
         return ints(cpm::to_tones(grid(g), {bits.data(), static_cast<std::size_t>(bits.size())}));
     });
-    c.def("tones", [](const std::string& g, const In<int>& sym) {
-        return np(cpm::tones(grid(g), {sym.data(), static_cast<std::size_t>(sym.size())}));
-    });
-    c.def("modulate", [](const std::string& s, const std::vector<In<std::uint8_t>>& coded, bool dup) {
+    c.def("tones", [](const std::string& g, const In<int>& sym, double glide) {
+        return np(cpm::tones(grid(g), {sym.data(), static_cast<std::size_t>(sym.size())}, glide));
+    }, py::arg("g"), py::arg("sym"), py::arg("glide") = 0.0);
+    c.def("modulate", [](const std::string& s, const std::vector<In<std::uint8_t>>& coded, bool dup, int cap) {
         std::vector<std::vector<std::uint8_t>> v;
         for (const auto& a : coded) v.push_back(vec(a));
-        return np(cpm::modulate(cspec(s), v, dup));
-    }, "audio before the TX bandpass");
+        return np(cpm::modulate(cspec(s), v, dup, cap));
+    }, "audio before the TX bandpass", py::arg("spec"), py::arg("coded"), py::arg("dup"), py::arg("cap") = 0);
     c.def("energies", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo, int extra) {
         return np(cpm::energies(grid(g), view(x), start, n_sym, cfo, extra));
     }, py::arg("grid"), py::arg("x"), py::arg("start"), py::arg("n_sym"), py::arg("cfo"), py::arg("extra") = 0);

@@ -75,13 +75,17 @@ def test_tx_audio(native, pure):
     for name, n in (("qpsk-r1/2", 3), ("w48-16qam-r1/2", 5), ("n4-qpsk-r1/3", 2), ("ack-4f", 1)):
         b, _ = ofdm_burst(name, n, rv=1)
         close(native.phy.tx_audio(b), PHY.tx_audio(b))
-    spec = cpm.SPECS["fsk8r50-r1/2"]
-    ctl = bytes(codes.payload_bytes(cpm.CTL[spec.grid]))
-    for dup in (False, True):
-        slots = [Slot(ctl_mask(0, 0, 3), 0, ctl)] + ([Slot(ctl_mask(0, 0, 3), 1, ctl)] if dup else [])
-        slots += [Slot(data_mask(0, i, 3), 0, bytes([i]) * codes.payload_bytes(spec)) for i in range(2)]
-        b = TxBurst(spec.name, slots, 0)
-        close(native.phy.tx_audio(b), PHY.tx_audio(b))
+    for name in ("fsk8r50-r1/2", "fsk32r62-r1/3"):
+        spec = cpm.SPECS[name]
+        ctl = bytes(codes.payload_bytes(cpm.CTL[spec.grid]))
+        for dup, cap in ((False, 0), (True, 0), (False, 1), (True, 2)):  # each cap's filter (cpm.TX_FILTERS)
+            slots = [Slot(ctl_mask(0, 0, 3), 0, ctl)] + ([Slot(ctl_mask(0, 0, 3), 1, ctl)] if dup else [])
+            slots += [Slot(data_mask(0, i, 3), 0, bytes([i]) * codes.payload_bytes(spec)) for i in range(2)]
+            b = TxBurst(spec.name, slots, 0, cap)
+            close(native.phy.tx_audio(b), PHY.tx_audio(b))
+    for name in PHY.MODES:
+        for cap in range(3):
+            assert native.arq.peak_db(name, cap) == PHY.peak_db(name, cap)
 
 
 def test_soft_bits_and_measure(native, pure):

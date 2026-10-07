@@ -4,10 +4,11 @@ Prototyped in the cpm-modes fork (scripts/cpm_study.py, cpm_spectrum.py):
 4-7 dB better than OFDM of similar rate on fading, PEP-fair, 10% points.
 
 Signal: M tones spaced by the symbol rate R (h = 1), continuous phase, the
-OFDM bands' TX bandpass over the tones +- Grid.bp with clip-and-filter at
-no headroom (envelope peak 0.9-1.1 dB over average; beyond the segment or
-band edge under -37 dB: GRIDS). A grid (tones, spacing) is what OFDM calls
-a sync band.
+OFDM bands' TX bandpass over the tones with clip-and-filter at no headroom,
+its margin (and a glide at each tone change) by the session's bandwidth cap
+(TX_FILTERS: envelope peak 0.1-0.6 dB over average; beyond the segment or
+band edge under -37 dB). A grid (tones, spacing) is what OFDM calls a sync
+band.
 
 Codewords go through data2g.codes like OFDM's (CRC masks, scrambler, RVs,
 soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
@@ -29,7 +30,7 @@ from itertools import permutations
 
 import numpy as np
 
-from .config import FS
+from .config import CLIP_OVERSHOOT, FS
 
 PREAMBLE_S = 0.45  # the front sync block
 BLOCK_S = 0.25  # the later sync blocks, about
@@ -51,7 +52,7 @@ class Grid:
     m: int  # tones
     rate: float  # symbols/s = tone spacing (Hz)
     center: float = 1500.0
-    bp: float = 50.0  # TX bandpass margin beyond the outer tones, Hz
+    bp: float = 50.0  # nominal margin beyond the outer tones, Hz: the width the caps judge (TX_FILTERS: the TX's)
     clip_db: float = 0.0  # clip-and-filter headroom
 
     @property
@@ -71,17 +72,50 @@ class Grid:
         return self.m * self.rate + 2 * self.bp
 
 
-# TX filter (scripts/cpm_papr_study.py, 2026-09-28): SSB PEP is the
-# envelope, and the old 30 Hz margin rang at every tone jump (fsk32r62's
-# envelope 2.8 dB over its average). Wider margins and no clip headroom:
-# PEP-fair 10% points 0.5-1.9 dB lower (c32r62 -1.9 AWGN / -1.8 MPP; c8r50
-# -0.8 / -0.9; c16r25 -0.5 / -1.0). Out of band still under -37 dB at the
-# segment or band edge (OFDM: -3 to -5). Receivers are unchanged.
 GRIDS = {g.name: g for g in [
     Grid("c16r25", 16, 25.0),  # 400 Hz of tones: a 500 Hz segment
     Grid("c8r50", 8, 50.0),  # the same
     Grid("c32r62", 32, 62.5, bp=150.0),  # 2000 Hz of tones, 2300 Hz wide (the 2400 Hz cap)
 ]}
+
+
+@dataclass(frozen=True)
+class TxFilter:
+    """A grid's TX filter: the bandpass margin beyond the outer tones (Hz),
+    the frequency trajectory smoothed (raised cosine) over this fraction of
+    a symbol at each tone change, and clip-and-filter passes (overshoot as
+    config.CLIP_OVERSHOOT, its last factor repeated). Receivers don't see it."""
+    bp: float
+    glide: float = 0.0
+    passes: int = 3
+
+    @property
+    def overshoot(self) -> tuple:
+        return CLIP_OVERSHOOT + CLIP_OVERSHOOT[-1:] * (self.passes - len(CLIP_OVERSHOOT))
+
+
+# The TX filter by bandwidth cap code (arq.policy.CAP_HZ: 0 500 Hz, 1 1200,
+# 2 2400). SSB PEP is the envelope, and a narrow margin rings at every tone
+# jump; a wider margin where the cap leaves room, more passes and a short
+# glide take the envelope to within 0.1-0.6 dB of its average. scripts/
+# cpm_papr_study.py (2026-10-07), end to end, 150 trials a point, PEP-fair
+# 10% points against the filter before (bp 50 / 150, 3 passes, no glide):
+#   c8r50   500 Hz -0.3 AWGN / -0.8 MPP; wider -1.0 / -1.0 (bp 350: no more)
+#   c16r25  500 Hz -0.85 / -0.4;        wider -0.9 / -0.9 (bp 350: no more)
+#   c32r62  -0.1 / -0.5
+# Out of band under -37 dB beyond the cap's edges around the tones' centre
+# (tests/test_cpm.py; OFDM: -3 to -5). c32r62 is allowed at 2400 Hz only.
+# The receivers are unchanged; the energy inputs read each cap's peak
+# (arq.phy.peak_db).
+TX_FILTERS = {
+    "c16r25": (TxFilter(75.0, 0.2, 6), TxFilter(150.0, 0.1, 6), TxFilter(150.0, 0.1, 6)),
+    "c8r50": (TxFilter(75.0, 0.2, 6), TxFilter(150.0, 0.1, 6), TxFilter(150.0, 0.1, 6)),
+    "c32r62": (TxFilter(200.0, 0.1, 6),) * 3,
+}
+
+
+def tx_filter(grid: str, cap: int) -> TxFilter:
+    return TX_FILTERS[grid][cap]
 
 
 @dataclass(frozen=True)
@@ -291,10 +325,15 @@ def to_tones(g: Grid, bits: np.ndarray) -> np.ndarray:
     return _gray(g.m)[idx]
 
 
-def tones(g: Grid, sym: np.ndarray) -> np.ndarray:
-    """Tone indices -> constant-envelope audio (unit RMS), phase continuous."""
+def tones(g: Grid, sym: np.ndarray, glide: float = 0.0) -> np.ndarray:
+    """Tone indices -> constant-envelope audio (unit RMS), phase continuous;
+    `glide`: TxFilter.glide."""
     T = g.T
     a = np.repeat(sym.astype(float), T)
+    n = int(glide * T)
+    if n > 1:
+        w = np.hanning(n + 2)[1:-1]
+        a = np.convolve(np.pad(a, n, mode="edge"), w / w.sum(), mode="same")[n:-n]
     x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
     n_ramp = int(RAMP_S * FS)
     ramp = (1 - np.cos(np.pi * (np.arange(n_ramp) + 0.5) / n_ramp)) / 2
@@ -303,16 +342,18 @@ def tones(g: Grid, sym: np.ndarray) -> np.ndarray:
     return x
 
 
-def bandpass(g: Grid, x: np.ndarray) -> np.ndarray:
-    """The OFDM bands' TX filter over the tones +- g.bp, one clip-and-filter pass."""
+def bandpass(g: Grid, x: np.ndarray, cap: int = 0) -> np.ndarray:
+    """The OFDM bands' TX filter over the tones +- the cap's margin, clip and filter (TX_FILTERS)."""
     from .waveform.dsp import tx_condition
 
-    return tx_condition(x, g.clip_db, bandpass=(g.f0 - g.bp, g.f0 + (g.m - 1) * g.rate + g.bp))
+    f = tx_filter(g.name, cap)
+    return tx_condition(x, g.clip_db, f.overshoot, bandpass=(g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp))
 
 
-def modulate(spec: CpmSpec, coded: list, dup: bool) -> np.ndarray:
+def modulate(spec: CpmSpec, coded: list, dup: bool, cap: int = 0) -> np.ndarray:
     """Every slot's coded bits (data2g.codes.encode's, mapping order; the
-    control codeword first, twice if dup) -> audio."""
+    control codeword first, twice if dup) -> audio, filtered for the
+    bandwidth cap `cap` (TX_FILTERS)."""
     g = GRIDS[spec.grid]
     n_data = len(coded) - 1 - dup
     stream = np.concatenate([to_tones(g, c) for c in coded])
@@ -323,7 +364,7 @@ def modulate(spec: CpmSpec, coded: list, dup: bool) -> np.ndarray:
     for rows in lay.hdr_rows:
         sym[rows] = h
     sym[lay.data_rows] = stream
-    return bandpass(g, tones(g, sym))
+    return bandpass(g, tones(g, sym, tx_filter(g.name, cap).glide), cap)
 
 
 # --- receive -------------------------------------------------------------------------

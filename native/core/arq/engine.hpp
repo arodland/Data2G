@@ -263,6 +263,7 @@ private:
     std::int64_t timeouts_ = 0;  // the station's timeouts already reported
     void energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db = std::nullopt);
     void missed_energy();
+    int rx_cap() const;  // the bandwidth cap a heard burst's TX filter was most likely for
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
 

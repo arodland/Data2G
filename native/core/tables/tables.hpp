@@ -36,7 +36,13 @@ struct Constellation {
 extern const std::span<const Constellation> CONSTELLATIONS;
 // data2g/cpm.py. Grid row i owns CPM_CTL[i]. header_tones: 1024 rows of
 // hdr_len, row v = (mode index + 2 x dup) << 6 | n_data (the header word
-// before its CRC-6), as numpy's PCG64 drew them.
+// before its CRC-6), as numpy's PCG64 drew them. tx: cpm.TX_FILTERS, by
+// bandwidth cap code (0: 500 Hz, 1: 1200, 2: 2400).
+struct CpmTxFilter {
+    double bp, glide;
+    int passes;
+};
+
 struct CpmGrid {
     std::string_view name;
     int m;
@@ -45,6 +51,7 @@ struct CpmGrid {
     double f0, sync_threshold, header_threshold;
     int hdr_len, costas_len;
     std::span<const std::uint8_t> preamble, mid_block, header_tones;
+    CpmTxFilter tx[3];
 };
 
 struct CpmSpec {
@@ -104,10 +111,11 @@ extern const double OUTCOME_GATE_SPREAD_HZ, OUTCOME_GATE_SNR_DB;
 extern const int OUTCOME_GATE_HIST;
 // whether each model takes the energy inputs (predictor.N_ENERGY)
 extern const bool OUTCOME_ENERGY, OUTCOME_GATE_ENERGY;
-// each mode's burst peak-to-average (arq/phy.py peak_db): the energy inputs' peak reference
+// each mode's burst peak-to-average (arq/phy.py peak_db) by bandwidth cap
+// code: the energy inputs' peak reference
 struct ModePeak {
     std::string_view mode;
-    double db;
+    double db[3];
 };
 extern const std::span<const ModePeak> MODE_PEAK_DB;
 extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;

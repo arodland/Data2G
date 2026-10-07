@@ -303,10 +303,10 @@ def _cpm_substitutions(native):
     def burst_seconds(spec, n_cw, dup=False):
         return n.burst_seconds(spec.name, n_cw, dup) if own_spec(spec) else py["burst_seconds"](spec, n_cw, dup)
 
-    def modulate(spec, coded, dup):
+    def modulate(spec, coded, dup, cap=0):
         if not own_spec(spec):
-            return py["modulate"](spec, coded, dup)
-        return cpm.bandpass(cpm.GRIDS[spec.grid], n.modulate(spec.name, list(coded), dup))
+            return py["modulate"](spec, coded, dup, cap)
+        return cpm.bandpass(cpm.GRIDS[spec.grid], n.modulate(spec.name, list(coded), dup, cap), cap)
 
     def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0):
         if not own_grid(g):

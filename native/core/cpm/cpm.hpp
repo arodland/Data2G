@@ -45,9 +45,13 @@ Layout layout(const Grid& g, int n_sym);
 double burst_seconds(const Spec& s, int n_cw, bool dup = false);
 
 std::vector<int> to_tones(const Grid& g, std::span<const std::uint8_t> bits);
-std::vector<double> tones(const Grid& g, std::span<const int> sym);
-// Every slot's coded bits (control first, twice if dup) -> audio before the TX bandpass.
-std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup);
+// glide: the frequency trajectory smoothed over this fraction of a symbol (CpmTxFilter).
+std::vector<double> tones(const Grid& g, std::span<const int> sym, double glide = 0.0);
+// Every slot's coded bits (control first, twice if dup) -> audio before the
+// TX bandpass, with the bandwidth cap's glide (tx_filter).
+std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap = 0);
+// cpm.tx_filter: the grid's TX filter under bandwidth cap code `cap` (0..2).
+const tables::CpmTxFilter& tx_filter(const Grid& g, int cap);
 
 // (n_sym, m + 2 extra) tone energies from `start`, CFO removed; shares per row.
 Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra = 0);

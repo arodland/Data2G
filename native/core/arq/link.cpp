@@ -398,6 +398,7 @@ TxBurstPtr Station::build(bool fresh) {
         it = snapshots.erase(it);
     }
     burst->burst_seq = bursts_sent;
+    burst->cap = cap;
     bursts_sent += 1;
     last_sent = burst;
     std::int64_t n_comp = 0, n_bytes = 0;

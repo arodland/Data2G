@@ -377,6 +377,7 @@ TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std
     const int cpb = policy->ctl_payload_bytes(m);
     auto b = std::make_shared<TxBurst>();
     b->submode = m;
+    b->cap = cap;
     if (body[0] == CONNECT && compact(m)) {
         Bytes p = pack_connect(body);
         p.resize(static_cast<std::size_t>(cpb), 0);

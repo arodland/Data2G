@@ -3,15 +3,17 @@
 With the old filter, fsk32r62-r1/2's envelope peaked 2.8 dB over its
 average (its real waveform 1.1 dB): a tight TX bandpass (bp 30 Hz past the
 outer tones) rang at every tone jump, and SSB PEP is the envelope. This
-chose the current one (bp 150/50, clip 0). Variants, TX only (the receiver
-reads tone energies, not these); parts joined by "+" combine:
-  base       as cpm.GRIDS ships
-  old        bp 30 Hz, clip_db 0.5 (the filter before 2026-09-29: bp30+clip0.5)
+chose bp 150/50, clip 0 (2026-09-29), and the per-cap filters of
+cpm.TX_FILTERS (2026-10-07). Variants of the bandwidth cap's filter (--cap),
+TX only (the receiver reads tone energies, not these); parts joined by "+"
+combine:
+  base       as cpm.TX_FILTERS ships
+  old        bp 30 Hz, clip_db 0.5, 3 passes (the filter before 2026-09-29)
   clip<d>    clip_db d
-  bp<hz>     a wider TX bandpass margin
+  bp<hz>     the TX bandpass margin
   glide<b>   the frequency trajectory smoothed over a fraction b of a
-             symbol (raised cosine); the CPM prototype judged this at one
-             AWGN SNR, genie sync, average power only
+             symbol (raised cosine)
+  ps<n>      n clip-and-filter passes
 Per variant: envelope peak over average (per-burst max, median of bursts),
 99% occupied bandwidth, and the 10% end-to-end failure point of a data
 codeword (sync, header, codeword) on AWGN and MPP through
@@ -49,43 +51,38 @@ import phy_session as PS  # noqa: E402
 MODE = "fsk32r62-r1/2"
 VARIANTS = ("base", "old", "clip0.25", "clip0", "bp60", "bp100", "bp150", "glide0.1", "glide0.2", "glide0.3")
 SNRS = {"awgn": np.arange(-15.0, -5.0), "mpp": np.arange(-11.0, 0.0)}
-_TONES, _BANDPASS = cpm.tones, cpm.bandpass
+CAP = 2  # bandwidth cap code the bursts are sent under (--cap)
+_GRIDS, _FILTERS = dict(cpm.GRIDS), dict(cpm.TX_FILTERS)
 
 
 def apply(variant: str):
-    """Patch the CPM transmitter for `variant` (per worker process); parts
-    joined by "+" combine (bp150+glide0.3)."""
-    cpm.tones, cpm.bandpass = _TONES, _BANDPASS
-    fields = {}
+    """Patch the CPM transmitter for `variant` (per worker process): the
+    mode's grid and its TX filter at CAP; parts joined by "+" combine
+    (bp150+glide0.3)."""
+    cpm.GRIDS.update(_GRIDS)
+    cpm.TX_FILTERS.update(_FILTERS)
+    grid = PHY.MODES[MODE].grid
+    g, f = {}, {}
     for part in variant.split("+"):
         if part.startswith("clip"):
-            fields["clip_db"] = float(part[4:])
+            g["clip_db"] = float(part[4:])
         elif part.startswith("bp"):
-            fields["bp"] = float(part[2:])
-        elif part == "old":
-            fields.update(bp=30.0, clip_db=0.5)
+            f["bp"] = float(part[2:])
         elif part.startswith("glide"):
-            cpm.tones = glide_tones(float(part[5:]))
-    if fields:
-        cpm.bandpass = lambda g, x: _BANDPASS(replace(g, **fields), x)
+            f["glide"] = float(part[5:])
+        elif part.startswith("ps"):
+            f["passes"] = int(part[2:])
+        elif part == "old":
+            g["clip_db"] = 0.5
+            f.update(bp=30.0, glide=0.0, passes=3)
+    cpm.GRIDS[grid] = replace(cpm.GRIDS[grid], **g)
+    filters = list(cpm.TX_FILTERS[grid])
+    filters[CAP] = replace(filters[CAP], **f)
+    cpm.TX_FILTERS[grid] = tuple(filters)
 
 
-def glide_tones(beta: float):
-    def tones(g, sym):
-        T = g.T
-        a = np.repeat(sym.astype(float), T)
-        n = max(1, int(beta * T))
-        if n > 1:
-            w = np.hanning(n + 2)[1:-1]
-            a = np.convolve(np.pad(a, n, mode="edge"), w / w.sum(), mode="same")[n:-n]
-        x = np.sqrt(2) * np.cos(2 * np.pi * np.cumsum(g.f0 + a * g.rate) / FS)
-        n_ramp = int(cpm.RAMP_S * FS)
-        ramp = (1 - np.cos(np.pi * (np.arange(n_ramp) + 0.5) / n_ramp)) / 2
-        x[:n_ramp] *= ramp
-        x[-n_ramp:] *= ramp[::-1]
-        return x
-
-    return tones
+def burst(n: int, rng):
+    return replace(O.burst(MODE, n, rng), cap=CAP)
 
 
 def shape(variant, n=40):
@@ -95,7 +92,7 @@ def shape(variant, n=40):
     rng = np.random.default_rng(1)
     papr, xs = [], []
     for _ in range(n):
-        x = PHY.tx_audio(O.burst(MODE, 9, rng))
+        x = PHY.tx_audio(burst(9, rng))
         z = hfchannel._analytic(x)
         papr.append(10 * np.log10(np.max(np.abs(z)) ** 2 / np.mean(np.abs(z) ** 2)))
         xs.append(x)
@@ -112,7 +109,7 @@ def trial(args):
     variant, chan, snr, seed = args
     apply(variant)
     rng = np.random.default_rng(seed)
-    b = O.burst(MODE, 2, rng)
+    b = burst(2, rng)
     ch = PS.ContinuousChannel(chan, snr, seed, 120.0)
     r = O.receive(ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100))), MODE)
     if r is None or r["spec"].name != MODE or r["n_cw"] != 2:
@@ -130,19 +127,20 @@ def point(snrs, fail, target=0.1):
 
 
 def main():
-    global MODE
+    global MODE, CAP
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="runs/cpm_papr.csv")
     ap.add_argument("--trials", type=int, default=120)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--variants", default=",".join(VARIANTS))
     ap.add_argument("--mode", default=MODE)
+    ap.add_argument("--cap", type=int, default=CAP, help="bandwidth cap code (0: 500 Hz, 1: 1200, 2: 2400)")
     ap.add_argument("--shift", type=float, default=0.0, help="dB added to the SNR grids (a lower mode: negative)")
     a = ap.parse_args()
     if PS.PEP_REF_DB is None:
         ap.error("DATA2G_PEP_REF_DB must be set (PEP-fair thresholds)")
     variants = a.variants.split(",")
-    MODE = a.mode
+    MODE, CAP = a.mode, a.cap
     for c in SNRS:
         SNRS[c] = SNRS[c] + a.shift
     jobs = [(v, c, float(s), 90000 + i) for v in variants for c in SNRS for s in SNRS[c] for i in range(a.trials)]

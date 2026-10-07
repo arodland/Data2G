@@ -46,8 +46,8 @@ struct Measured {
     std::optional<std::array<double, 3>> energy;
 };
 
-// A mode's burst peak-to-average, dB (arq/phy.py peak_db; tables::MODE_PEAK_DB).
-double peak_db(std::string_view mode);
+// A mode's burst peak-to-average under bandwidth cap code `cap`, dB (arq/phy.py peak_db; tables::MODE_PEAK_DB).
+double peak_db(std::string_view mode, int cap = 0);
 // What a sync band (OFDM band or CPM grid) occupies, Hz (predictor.band_span_hz).
 std::array<double, 2> band_span_hz(std::string_view band);
 // How much worse a burst in `band` should fare than the one measured in

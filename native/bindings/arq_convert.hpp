@@ -47,7 +47,7 @@ inline py::object burst_py(const TxBurstPtr& b) {
     auto Slot = link_attr("Slot");
     py::list slots;
     for (const auto& s : b->slots) slots.append(Slot(mask_tuple(s.mask_id), s.rv, pyb(s.payload)));
-    return link_attr("TxBurst")(b->submode, slots, b->burst_seq);
+    return link_attr("TxBurst")(b->submode, slots, b->burst_seq, b->cap);
 }
 
 inline TxBurstPtr burst_cpp(const py::handle& o) {
@@ -56,6 +56,7 @@ inline TxBurstPtr burst_cpp(const py::handle& o) {
     b->submode = o.attr("submode").cast<std::string>();
     for (auto s : o.attr("slots")) b->slots.push_back({mask_of(s.attr("mask_id")), s.attr("rv").cast<int>(), bytes_of(s.attr("payload"))});
     b->burst_seq = o.attr("burst_seq").cast<std::int64_t>();
+    b->cap = o.attr("cap").cast<int>();
     return b;
 }
 

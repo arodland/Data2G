@@ -403,7 +403,7 @@ class KissLink:
         slots = [Slot(ctl_mask(0, i, key), 0, p) for i, p in enumerate(ctl)]
         slots += [Slot(data_mask(0, len(ctl) + j, key), 0, p) for j, p in enumerate(data)]
         self.n_sent += 1
-        burst = TxBurst(mode, slots, self.n_sent)
+        burst = TxBurst(mode, slots, self.n_sent, self.cap)
         self._inflight = (burst, [(n, q[2]) for q in taken if q[2] is not None])
         return burst
 

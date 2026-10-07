@@ -180,7 +180,8 @@ def cpm_cpp() -> str:
         rows.append(f'    {{"{g.name}", {g.m}, {cxx(float(g.rate))}, {cxx(float(g.center))}, {cxx(float(g.bp))}, '
                     f"{cxx(float(g.clip_db))}, {g.T}, {g.bits}, {cxx(float(g.f0))}, "
                     f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.HEADER_THRESHOLD[g.name]))}, "
-                    f"{cpm.hdr_len(g)}, {len(cpm.costas(g.m))}, pre_{i}, mid_{i}, hdr_{i}}},\n")
+                    f"{cpm.hdr_len(g)}, {len(cpm.costas(g.m))}, pre_{i}, mid_{i}, hdr_{i}, "
+                    f"{{{', '.join(f'{{{cxx(float(f.bp))}, {cxx(float(f.glide))}, {f.passes}}}' for f in cpm.TX_FILTERS[g.name])}}}}},\n")
 
     # interleavers: codes.compute_interleaver's PCG64 permutations (no format file)
     all_specs = [*cpm.SPECS.values(), *cpm.CTL.values()]
@@ -336,7 +337,7 @@ def predictor_cpp() -> str:
     from data2g.arq import phy as PHY
     from data2g.arq.modes import MODES as ALL_MODES
 
-    peaks = ",\n".join(f"    {{{cxx(m)}, {repr(PHY.peak_db(m))}}}" for m in ALL_MODES)
+    peaks = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(PHY.peak_db(m, c)) for c in range(3))}}}}}" for m in ALL_MODES)
     out.append(f"constexpr ModePeak peaks[] = {{\n{peaks}}};\n\n}}  // namespace\n\n")
     out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
                "const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = gate_members;\n"
