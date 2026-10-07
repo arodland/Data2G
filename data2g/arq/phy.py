@@ -47,7 +47,9 @@ def peak_db(submode: str) -> float:
     """A mode's burst envelope peak over its average power (dB), measured once
     on a fixed burst (a control and a data codeword, seeded payloads): the
     energy inputs report a burst's SNR against its peak (a peak-limited
-    transmitter), with this per mode."""
+    transmitter), with this per mode. Rounded to 0.001 dB: the FFT differs
+    by an ulp across machines, and gen_native_tables must regenerate the same
+    bytes everywhere."""
     from .. import hfchannel
     from .link import Slot, TxBurst, ctl_mask, data_mask
 
@@ -56,7 +58,7 @@ def peak_db(submode: str) -> float:
     rand = lambda sp: bytes(rng.integers(0, 256, codes.payload_bytes(sp), dtype=np.uint8))  # noqa: E731
     burst = TxBurst(submode, [Slot(ctl_mask(0, 0, 5), 0, rand(ctl_spec(spec))), Slot(data_mask(0, 1, 5), 0, rand(spec))], 0)
     x = tx_audio(burst)
-    return float(10 * np.log10(np.max(np.abs(hfchannel._analytic(x)) ** 2) / 2 / hfchannel.active_power(x)))
+    return round(float(10 * np.log10(np.max(np.abs(hfchannel._analytic(x)) ** 2) / 2 / hfchannel.active_power(x))), 3)
 
 
 def tx_audio(burst) -> np.ndarray:
