@@ -168,6 +168,8 @@ void GearShifter::observe(const Measured& m, std::string_view submode, double no
     measured_at = now;
     heard = std::string(submode);
     spreads.push_back(m.spread_est);
+    snrs.push_back(m.snr_est);
+    if (snrs.size() > CPM_FLOOR_HIST) snrs.erase(snrs.begin(), snrs.end() - CPM_FLOOR_HIST);
     if (spreads.size() > static_cast<std::size_t>(tables::OUTCOME_GATE_HIST))
         spreads.erase(spreads.begin(), spreads.end() - tables::OUTCOME_GATE_HIST);
 }
@@ -194,6 +196,15 @@ std::optional<std::pair<std::string, double>> GearShifter::expected_reply() cons
     }
     const Mode& m = mode_at(e.reply);
     return std::pair{e.reply, burst_seconds(m, ctl_slots(m))};
+}
+
+bool GearShifter::cpm_floor() const {
+    if (!cpm_floor_on || snrs.empty()) return false;
+    std::vector<double> v = snrs;  // np.median
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    return med < CPM_FLOOR_SNR_DB;
 }
 
 bool GearShifter::gate() const {
@@ -319,6 +330,15 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             data_cands = {*std::min_element(cands.begin(), cands.end(),
                                             [&](const Mode* a, const Mode* b) { return worst(a) < worst(b); })};
         }
+    }
+    if (cpm_floor()) {  // data in CPM modes only (policy.py CPM_FLOOR)
+        std::vector<const Mode*> c;
+        for (const Mode* s : data_cands)
+            if (s->is_cpm()) c.push_back(s);
+        if (c.empty())
+            for (const Mode* s : cands)
+                if (s->is_cpm()) c.push_back(s);
+        if (!c.empty()) data_cands = std::move(c);
     }
     for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);

@@ -171,6 +171,8 @@ void bind_arq(py::module_& m) {
         .def_readwrite("data_lost", &Shifter::data_lost)
         .def_readwrite("spreads", &Shifter::spreads)
         .def_readwrite("energies", &Shifter::energies)
+        .def_readwrite("snrs", &Shifter::snrs)
+        .def("cpm_floor", &Shifter::cpm_floor)
         .def("observe_energy", &Shifter::observe_energy)
         .def("energy_features", &Shifter::energy_features)
         .def("expected_reply", &Shifter::expected_reply)

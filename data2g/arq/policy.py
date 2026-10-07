@@ -77,12 +77,17 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # the energy inputs' mean (energy), is under X dB, data goes in CPM modes only.
 # On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
 # mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
-# through 75%+. Off unless set.
+# through 75%+. On by default at snr:-4 (CPM_FLOOR_DEFAULT): on n10pe gated with
+# n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6 +12.5/+7.2/+3.7%,
+# no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD -8 -2.0%); snr:-3
+# cost MPG -4 7.5%. DATA2G_CPM_FLOOR='' turns it off.
 # "snr:X:S" also wants the median spread_est of those bursts at least S Hz
 # (fast fading: on slow fading a fade holds the median down, and OFDM recovers).
 _CF = os.environ.get("DATA2G_CPM_FLOOR")
-CPM_FLOOR = (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) \
-    if _CF else None
+CPM_FLOOR_DEFAULT = ("snr", -4.0, 0.0)
+CPM_FLOOR = CPM_FLOOR_DEFAULT if _CF is None else (
+    (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) if _CF
+    else None)
 CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
