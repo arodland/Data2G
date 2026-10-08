@@ -8,8 +8,8 @@
 # that would mean teaching install() rules to deploy Qt, for containers that
 # are three lines of hdiutil, appimagetool and makensis.
 #
-# Stages data2g-host (required), and data2g-gui and data2g-audio-check when
-# they were built. Layout:
+# Stages data2g-host (required), and data2g-gui, data2g-monitor and
+# data2g-audio-check when they were built. Layout:
 #   Windows  dist/data2g/*.exe, flat, windeployqt beside them
 #   macOS    dist/Data2G.app: the GUI bundle, or a bundle made here around
 #            data2g-host when there is no GUI; other tools in Contents/MacOS
@@ -32,7 +32,7 @@ HAMLIB_RUNTIME_DIR="$(cache_value DATA2G_HAMLIB_RUNTIME_DIR || true)"
 exe_suffix=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; esac
 apps=()
-for a in data2g-host data2g-gui data2g-audio-check; do
+for a in data2g-host data2g-gui data2g-monitor data2g-audio-check; do
     [ -f "$BUILD_DIR/$a$exe_suffix" ] && apps+=("$a")
 done
 if [ ! -f "$BUILD_DIR/data2g-host$exe_suffix" ]; then

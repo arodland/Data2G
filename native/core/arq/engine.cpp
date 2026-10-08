@@ -25,6 +25,8 @@ std::string upper(std::string s) {
     return s;
 }
 
+}  // namespace
+
 std::string spec_name(const tnc::Pending& p) {
     return std::string(p.is_cpm() ? p.cpm().spec->name : p.ofdm().spec->name);
 }
@@ -41,6 +43,8 @@ std::vector<std::string_view> all_grids() {
     for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
     return out;
 }
+
+namespace {
 
 void put16(std::vector<std::uint8_t>& b, unsigned v) {
     b.push_back(static_cast<std::uint8_t>(v));
@@ -621,13 +625,16 @@ void Engine::missed_energy() {
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     std::optional<Heard> r;
     std::optional<Measured> meas;
+    std::shared_ptr<const SlotSoft> soft;
     if (ev.rx) {
         r = heard_of(std::move(*ev.rx));
         meas = measure(*r);
+        soft = soft_bits(*r);
     }
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
     if (on_burst_)
-        on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt});
+        on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
+                   r ? *r : Heard{}, soft});
     if (!r) {
         if (log_enabled(LOG, INFO))
             log_write(LOG, INFO, format("RX %s x%d: header heard (score %.2f), burst lost", spec_name(ev.header).c_str(),
@@ -635,7 +642,6 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         if (cfg_.kiss && idle()) cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw());  // maybe an open port's
         return;
     }
-    auto soft = soft_bits(*r);
     ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
     // in a session, its peer's bursts are the likely ones: a control
     // codeword under the session's key claims the burst before KISS tries

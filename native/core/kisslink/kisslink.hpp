@@ -125,13 +125,16 @@ public:
                                                                std::shared_ptr<const arq::SlotSoft> soft = nullptr,
                                                                std::optional<double> dd_budget = arq::DD_BUDGET_S);
 
+    // A burst's broadcast control, checked under the key of the group it
+    // names -> (control, n_ctl); nullopt: not a broadcast burst.
+    static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
+
 private:
     void check_mode(const std::string& mode) const;
     void check_fits(int n, const Port& p, const std::string& mode, bool shift) const;
     void drop_where(int port, const std::function<bool(const Queued&)>& which);
     std::pair<std::string, int> route(const Port& port, ByteView frame) const;
     std::vector<Bytes> control(const arq::Mode& m, int n, const Port& port, int sender);
-    std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
     void learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, const std::vector<bool>& ok,
                double now);
     Peer* peer(int h);
