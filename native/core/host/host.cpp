@@ -269,10 +269,11 @@ void Host::after_step(bool ptt) {
     // So while more than the next burst waits, BUFFER is the unsent bytes
     // past it (the credit); once it has all gone, 1 until the peer acks it
     // all. --buffer-credit 0 reports the plain VARA figure. (host.py has the
-    // full story.)
+    // full story.) CHAT ON also reports it: the client watches BUFFER fall to
+    // see which of its messages were ACKed.
     const Queued q = queued();
     std::int64_t buffered = q.unacked;
-    if (q.station && buffer_credit != 0) {
+    if (q.station && buffer_credit != 0 && !engine.session().chat) {
         if (auto c = next_capacity()) {
             std::int64_t credit = *c;
             if (buffer_credit) credit = std::min<std::int64_t>(credit, *buffer_credit);
