@@ -845,6 +845,7 @@ void Station::start() {
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = a_.record_dir;
+        cfg.record_async = true;  // a slow disk must not delay a decode or an ACK
         cfg.min_header_score = a_.min_header_score;
         cfg.kiss = link_.get();
         cfg.stats_interval_s = a_.stats_interval;

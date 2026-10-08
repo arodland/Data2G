@@ -118,6 +118,46 @@ void sync_session(const std::filesystem::path& dir) {
                  static_cast<long long>(2 * a.n()), "audio_in.f16: every sample");
 }
 
+// An async recorder writes what a synchronous one does, in the same order, with nothing lost at flush() or
+// at destruction.
+void recorder_async(const std::filesystem::path& base) {
+    check::current_step = "recorder: async";
+    auto slurp = [](const std::filesystem::path& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    auto drive = [](Recorder& r) {
+        for (int i = 0; i < 300; ++i) {
+            r.audio(std::vector<double>(BLOCK, 0.001 * (i % 50)));
+            if (i % 6 == 0) r.event("tx", {{"t", json_num(0.1 * i)}, {"n", std::to_string(i)}});
+        }
+    };
+    const auto sync_dir = base / "sync", async_dir = base / "async";
+    {
+        Recorder r(sync_dir.string(), "W1AW");
+        drive(r);
+    }
+    {
+        Recorder r(async_dir.string(), "W1AW", true);
+        drive(r);
+        r.flush();
+        check::equal(static_cast<long long>(std::filesystem::file_size(async_dir / "audio_in.f16")),
+                     static_cast<long long>(2 * 300 * BLOCK), "async: flush() leaves every sample on disk");
+        r.event("tx", {{"t", "1.0"}});  // after the flush: the destructor must write it
+    }
+    check::is_true(slurp(sync_dir / "audio_in.f16") == slurp(async_dir / "audio_in.f16"), "async: audio bytes match");
+    auto lines = [&](const std::filesystem::path& p) {  // all but the start event, whose wall clock differs
+        std::vector<std::string> out;
+        std::ifstream f(p);
+        for (std::string l; std::getline(f, l);) out.push_back(l);
+        out.erase(out.begin());
+        return out;
+    };
+    const auto a = lines(sync_dir / "events.jsonl"), b = lines(async_dir / "events.jsonl");
+    check::equal(b.size(), a.size() + 1, "async: events, plus the one after the flush");
+    check::is_true(std::equal(a.begin(), a.end(), b.begin()), "async: events in order");
+}
+
 void sync_kiss() {
     check::current_step = "sync: KISS";
     kisslink::KissLink ka, kb;
@@ -363,6 +403,7 @@ int main() {
     check::Watchdog dog(TSAN ? 1800 : 600, "test_engine");
     const auto dir = std::filesystem::temp_directory_path() / ("data2g_test_engine_" + std::to_string(clk::now().time_since_epoch().count()));
     units();
+    recorder_async(dir / "rec");
     noise_rule_config();
     sync_session(dir);
     sync_kiss();

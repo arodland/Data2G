@@ -61,9 +61,16 @@ inline constexpr double ID_GUARD_S = REPLY_START_S;
 // JSON object per line, as json.dumps writes it), rx_NNNNN.npz per burst
 // heard (an "audio" float32 array; stored, not deflated), and audio_in.f16:
 // everything the receiver was fed, float16 at FS (zeros while transmitting).
+//
+// async: the files are written by a thread of its own, in order, so a slow disk (an SD card) never delays the
+// engine; flush() waits until everything handed over is on disk. Without it each call writes before it returns.
 class Recorder {
 public:
-    Recorder(const std::string& dir, const std::string& call);  // throws std::runtime_error
+    Recorder(const std::string& dir, const std::string& call, bool async = false);  // throws std::runtime_error
+    ~Recorder();
+    Recorder(const Recorder&) = delete;
+    Recorder& operator=(const Recorder&) = delete;
+    void flush();
     void audio(std::span<const double> x);
     // fields: (key, JSON value) pairs after "kind"
     void event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields);
@@ -71,9 +78,19 @@ public:
                    const std::optional<Measured>& meas, const std::optional<tnc::NoiseSnapshot>& noise = std::nullopt);
 
 private:
+    void post(std::function<void()> job, std::size_t bytes);
+    void loop();
+
     std::string dir_;
     std::ofstream log_, audio_;
     int n_ = 0;
+    bool async_;
+    std::mutex m_;
+    std::condition_variable wake_, done_;
+    std::deque<std::pair<std::function<void()>, std::size_t>> q_;
+    std::size_t queued_bytes_ = 0;
+    bool busy_ = false, stop_ = false;
+    std::thread thread_;
 };
 
 // JSON values as Python's json.dumps writes them.
@@ -88,6 +105,7 @@ std::uint16_t to_half(double x);  // numpy's float64 -> float16: round to neares
 struct EngineConfig {
     double ptt_delay_s = 0.1;
     std::string record_dir;  // empty: no recording
+    bool record_async = false;  // the recording written by a thread of its own (Recorder)
     std::optional<std::uint64_t> seed;  // the engine's DefaultRng (nullopt: random)
     double min_header_score = 0.0;
     kisslink::KissLink* kiss = nullptr;  // served too (the KISS personality); not owned
@@ -147,6 +165,9 @@ public:
     // subclass overriding a seam calls it from its own destructor, before
     // its part is gone.
     void stop();
+    void flush_recorder() {
+        if (rec_) rec_->flush();
+    }
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
