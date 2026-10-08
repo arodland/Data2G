@@ -1,6 +1,7 @@
 #include "tnc/tnc.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
