@@ -5,6 +5,7 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 
 #include "dsp/dsp.hpp"
 
