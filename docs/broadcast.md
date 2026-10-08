@@ -12,8 +12,17 @@ KISS under the group name "KISS 0", with rate shifting off by default.
 ## 1. Terms
 
 - **Group:** up to 10 characters in the packed callsign alphabet (A-Z 0-9 / - and
-  space, space padded at the end). It names an application, like `APRS` or `CHAT`, not
-  a station.
+  space, space padded at the end). It names an application, like `APRS` or `CHAT`.
+  A group name must not be a valid callsign: that keeps the callsign namespace free
+  for addressing (below).
+- **Callsign as destination:** a broadcast-mode packet may use a callsign as its
+  destination, in place of a group name. This is a way to send non-connected or
+  side-channel information to one specific station. It isn't truly broadcast, but
+  neither is connected-mode AX.25 over our KISS: the air is shared and every receiver
+  can decode it, and the destination only says who it is meant for. A station opens
+  its own callsign as a group (`BCAST OPEN call`) to receive such packets. Because
+  application groups are never valid callsigns, a callsign destination can't collide
+  with one.
 - **Group key:** a nonzero 16-bit hash of the packed group (FNV-1a, as
   `session.session_key`).
 - **Port:** a KISS port number (1-15) a host has opened for one group. Port 0 is
