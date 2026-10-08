@@ -1,15 +1,12 @@
-// Sound card capture and playback through QtMultimedia (data2g_audio,
-// built with DATA2G_BUILD_QTAUDIO). The thin part: device enumeration and
-// moving bytes. Conversion and buffering are in core/audio/{audio,fifo}.hpp,
-// Qt-free and tested against a fake device.
+// Sound card capture and playback through miniaudio (data2g_audio with
+// -DDATA2G_AUDIO_BACKEND=miniaudio). The same interface as audio/qt/qtaudio.hpp,
+// so audio/card.hpp can swap them; conversion and buffering are shared
+// (core/audio/{audio,fifo}.hpp).
 //
-// Lifted from SSTVAE's core/audio/qt/qtaudio.{hpp,cpp}. Each stream runs on
-// its own QThread with its own event loop: a busy engine thread can't delay
-// the drain, and WASAPI only moves bytes for a sink whose owning thread
-// pumps events. Unlike SSTVAE, playback is a stream (pull mode from the
-// PlaybackFifo) rather than one waveform per call, as host.py's Player is.
-//
-// Needs a QCoreApplication to exist (QMediaDevices).
+// No Qt and no event loop: miniaudio calls back on its own thread per
+// device. DATA2G_AUDIO_BACKEND in the environment (e.g. ALSA, PulseAudio,
+// JACK, WASAPI, DirectSound, WinMM, "Core Audio"; any case) forces one
+// backend instead of miniaudio's first working one.
 #pragma once
 
 #include <cstdint>
@@ -22,18 +19,19 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 
-namespace data2g::audio::qt {
+namespace data2g::audio::ma {
 
-using Report = std::function<void(const std::string&)>;  // called from the stream's thread
+using Report = std::function<void(const std::string&)>;  // called from miniaudio's device thread
 
-// Each direction's devices, in Qt's order: what select_device() indexes.
+// Each direction's devices, in the backend's order: what select_device() indexes.
 std::vector<DeviceInfo> input_devices();
 std::vector<DeviceInfo> output_devices();
 
 // Opens `device` (an index into input_devices(); nothing: the default) at
-// `rate` (a multiple of FS), stereo where it has two channels, and feeds
-// channel 0 through a CapturePipeline into `fifo` at FS. Throws if the
-// device can't be opened.
+// `rate` (a multiple of FS) as float32 at the device's own channel count,
+// and feeds channel 0 through a CapturePipeline into `fifo` at FS. A device
+// that can't run at `rate` is resampled by miniaudio (device_name() says
+// so). Throws if the device can't be opened.
 class Capture {
 public:
     Capture(std::optional<std::size_t> device, int rate, CaptureFifo& fifo, Report on_error = {});
@@ -42,6 +40,7 @@ public:
     Capture& operator=(const Capture&) = delete;
 
     void stop();
+    // The name, then what the backend actually opened: "NAME [ALSA: s16 2 ch 48000 Hz, period 2048 x 2]".
     std::string device_name() const;
     int channels() const;
     std::uint64_t frames_in() const;  // device frames seen: "is audio arriving"
@@ -72,4 +71,4 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace data2g::audio::qt
+}  // namespace data2g::audio::ma

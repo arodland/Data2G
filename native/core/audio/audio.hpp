@@ -2,7 +2,8 @@
 // formats, and the capture conversion chain. Qt-free and device-free so it
 // is tested against a fake device (SSTVAE's lesson: the audio bugs lived in
 // conversion and matching, not in the driver calls). The device layer is
-// core/audio/qt/ (data2g_audio_qt); the FIFOs are in fifo.hpp.
+// core/audio/qt/ or core/audio/miniaudio/ (data2g_audio, picked by
+// audio/card.hpp); the FIFOs are in fifo.hpp.
 //
 // Lifted from SSTVAE's core/audio/audio.hpp (sample formats, the capture
 // pipeline), with Data2G's host.py semantics where they differ: channel 0

@@ -17,8 +17,8 @@
 #include "app/station.hpp"
 #include "generated/config.hpp"
 
-#ifdef DATA2G_HAVE_QTAUDIO
-#include "audio/qt/qtaudio.hpp"
+#ifdef DATA2G_HAVE_AUDIO
+#include "audio/card.hpp"
 #endif
 
 using namespace data2g;
@@ -53,13 +53,13 @@ int main(int argc, char** argv) {
 
     QCoreApplication app(argc, argv);
     if (a.list_audio_devices) {
-#ifdef DATA2G_HAVE_QTAUDIO
-        for (const auto& [what, devs] : {std::pair{"input", audio::qt::input_devices()}, {"output", audio::qt::output_devices()}}) {
+#ifdef DATA2G_HAVE_AUDIO
+        for (const auto& [what, devs] : {std::pair{"input", audio::card::input_devices()}, {"output", audio::card::output_devices()}}) {
             std::printf("%s:\n", what);
             for (std::size_t i = 0; i < devs.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devs[i].channels, devs[i].name.c_str());
         }
 #else
-        std::printf("built without Qt Multimedia: no sound cards (use --audio-io)\n");
+        std::printf("built without sound card audio: no sound cards (use --audio-io)\n");
 #endif
         return 0;
     }

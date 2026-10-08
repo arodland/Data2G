@@ -16,7 +16,7 @@
 
 #include "arq/modes.hpp"
 #include "arq/policy.hpp"
-#include "audio/qt/qtaudio.hpp"
+#include "audio/card.hpp"
 #include "monitor/monitor.hpp"
 #include "settings_dialog.hpp"
 #include "waterfall.hpp"
@@ -300,7 +300,7 @@ void MainWindow::open_monitor() {
 }
 
 void MainWindow::open_settings() {
-    SettingsDialog d(station_->args(), names(audio::qt::input_devices()), names(audio::qt::output_devices()), this);
+    SettingsDialog d(station_->args(), names(audio::card::input_devices()), names(audio::card::output_devices()), this);
     if (d.exec() != QDialog::Accepted) return;
     app::Args a = station_->args();
     d.apply_to(a);
