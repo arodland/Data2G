@@ -482,7 +482,7 @@ class Session:
         elif sub == F.CONNECT_ACK and self.state == CONNECTING and key == 0:
             if int.from_bytes(body[1:3], "big") != self._nonce:
                 return
-            self.cap = body[3]
+            self.cap = min(body[3], self.cap)
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()

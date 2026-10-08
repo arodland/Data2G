@@ -512,7 +512,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         queue(accept_burst(), now);
     } else if (sub == CONNECT_ACK && state == SessionState::CONNECTING && f.key == 0) {
         if (be(body, 1, 3) != nonce) return;
-        cap = at(body, 3);
+        cap = std::min<int>(at(body, 3), cap);
         station = make_station(0, true, session_key(call, peer, nonce));
         flush_writes();
         connected(now);
