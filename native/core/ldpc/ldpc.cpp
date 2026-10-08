@@ -10,6 +10,7 @@
 #include <string>
 #include <type_traits>
 
+#include "util/cancel.hpp"
 #include "util/pool.hpp"
 #include "util/simd.hpp"
 
@@ -379,9 +380,11 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
     };
     std::vector<std::uint8_t> ok(B, 0);
     for (int it = 0; it < iters; ++it) {
+        cancel::check();
         const bool bp = alpha.empty();
         const float a = bp ? 0.0f : alpha.size() == 1 ? alpha[0] : alpha[static_cast<std::size_t>(it)];
         pool::parallel_for(B, [&](std::size_t b) {
+            cancel::check();
             thread_local Scratch w;
             w.mag.resize(E);
             w.ph.resize(E);

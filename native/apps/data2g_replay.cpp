@@ -39,13 +39,14 @@ double half_to_double(std::uint16_t h) {
 
 [[noreturn]] void usage(int code) {
     std::fprintf(code ? stderr : stdout,
-                 "usage: data2g-replay DIR [--call CALL] [--seconds S] [--worker] [--threads N]\n"
+                 "usage: data2g-replay DIR [--call CALL] [--seconds S] [--worker] [--threads N] [--dd-budget S]\n"
                  "                     [--log-level DEBUG|INFO|WARNING] [--repeat N]\n"
                  "\n"
                  "Runs DIR/audio_in.f16 through the engine listening as CALL (default NOCALL).\n"
                  "  --seconds     only the first S seconds of audio\n"
                  "  --worker      the session stage on its own thread, as the host runs it (default: inline)\n"
                  "  --threads     the decode pool's size (default: the host's)\n"
+                 "  --dd-budget   seconds of DD per burst (default 1; 0: none), as data2g-host's\n"
                  "  --log-level   default INFO\n"
                  "  --repeat      run N times; the log is of the first run, the others report their time only\n");
     std::exit(code);
@@ -73,6 +74,7 @@ int main(int argc, char** argv) {
     double seconds = 1e18;
     bool worker = false, quiet = false;
     int threads = 0, repeat = 1;
+    double dd_budget = arq::DD_BUDGET_S;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char* {
@@ -84,6 +86,7 @@ int main(int argc, char** argv) {
         else if (a == "--seconds") seconds = std::atof(value());
         else if (a == "--worker") worker = true;
         else if (a == "--threads") threads = std::atoi(value());
+        else if (a == "--dd-budget") dd_budget = std::atof(value());
         else if (a == "--repeat") repeat = std::max(1, std::atoi(value()));
         else if (a == "--log-level") {
             const std::string l = value();
@@ -114,6 +117,7 @@ int main(int argc, char** argv) {
         quiet = run > 0;
         arq::EngineConfig cfg;
         cfg.worker = worker;
+        cfg.dd_budget_s = dd_budget;
         cfg.seed = 1;
         arq::Engine eng(call, cfg, {});
         eng.listen(true);

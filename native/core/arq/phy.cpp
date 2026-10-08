@@ -8,6 +8,7 @@
 #include <limits>
 
 #include "constellation/constellation.hpp"
+#include "util/cancel.hpp"
 #include "cpm/cpm.hpp"
 #include "equalizer/equalizer.hpp"
 #include "waveform/dsp.hpp"
@@ -292,7 +293,7 @@ const ModemRx::Raw& ModemRx::decoded(int slot, const codes::Spec& s) {
             break;
         }
         if (i == DD_ITERS || late()) break;
-        refine(slot, s, std::move(p.post));
+        if (!refine(slot, s, std::move(p.post))) break;
     }
     if (std::none_of(out.usable.begin(), out.usable.end(), [](auto u) { return u != 0; })) undo(slot, saved);
     return raw_[slot] = std::move(out);
@@ -350,7 +351,7 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
         }
         if (i == DD_ITERS || late()) break;
         for (std::size_t j = 0; j < d.post.size(); ++j) d.post[j] *= fl[j];  // back to the bits as sent
-        refine(slot, s, std::move(d.post));
+        if (!refine(slot, s, std::move(d.post))) break;
     }
     if (cur_.est != saved.est) {
         undo(slot, saved);
@@ -366,9 +367,24 @@ void ModemRx::learn(int slot, const codes::Spec& s, const Bytes& payload, int rv
 
 // DD after a failed decode of `slot`: its posterior joins the other slots'
 // as soft pilots, the channel is re-estimated and the soft bits remade.
-void ModemRx::refine(int slot, const codes::Spec& s, std::vector<double> post) {
+bool ModemRx::refine(int slot, const codes::Spec& s, std::vector<double> post) {
     ++refines_;
     post_[slot] = std::move(post);
+    // The budget holds inside the work, not just between passes: a pass can cost seconds on a slow machine.
+    const cancel::Expired expired = [this] { return late(); };
+    const cancel::Scope scope(dd_until_ ? &expired : nullptr);
+    try {
+        remake_estimate(s);
+        return true;
+    } catch (const cancel::Cancelled&) {
+        post_.erase(slot);  // a failed decode's posterior doesn't outlive the attempt
+        dd_until_ = clock_();  // spent
+        return false;
+    }
+}
+
+// The blind pass (once), then the estimate re-made from every posterior held.
+void ModemRx::remake_estimate(const codes::Spec& s) {
     if (!blind_) {
         // RV 0 slots the link has not asked about yet: parity checks alone
         // say they decoded (a resend at another RV simply fails).
@@ -434,6 +450,7 @@ ModemRx::Est ModemRx::dd_estimate() const {
     }
     // split: per symbol, independent
     for (std::size_t j = 0; j < n_sym; ++j) {
+        if ((j & 255) == 0) cancel::check();
         // no posterior for this symbol's codeword: no soft pilot (z, w stay 0), whatever the math says
         if (!K[j * m]) continue;
         const std::size_t row = j / nc, c = j % nc;

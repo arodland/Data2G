@@ -121,7 +121,8 @@ private:
     bool dd(const codes::Spec& s) const;
     bool late() const;
     void learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m);
-    void refine(int slot, const codes::Spec& s, std::vector<double> post);
+    bool refine(int slot, const codes::Spec& s, std::vector<double> post);  // false: the budget ran out inside it
+    void remake_estimate(const codes::Spec& s);
     void undo(int slot, const DdState& saved);
     Est dd_estimate() const;
 

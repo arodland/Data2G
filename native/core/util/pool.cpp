@@ -1,5 +1,7 @@
 #include "util/pool.hpp"
 
+#include "util/cancel.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -60,6 +62,7 @@ public:
             std::unique_lock lk(m_);
             idle_.wait(lk, [&] { return active_ == 0; });  // a late waker of the last job has left
             fn_ = &fn;
+            cancel_ = cancel::current();
             n_ = n;
             next_.store(0, std::memory_order_relaxed);
             error_ = nullptr;
@@ -78,6 +81,7 @@ public:
 private:
     // Claims indices until none are left.
     void work() {
+        const cancel::Scope scope(cancel_);  // the caller's, whichever thread runs this
         for (std::size_t i; (i = next_.fetch_add(1, std::memory_order_relaxed)) < n_;) {
             try {
                 (*fn_)(i);
@@ -140,6 +144,7 @@ private:
     std::mutex m_;  // guards the job below and the wakeups
     std::condition_variable wake_, idle_;
     const std::function<void(std::size_t)>* fn_ = nullptr;
+    const cancel::Expired* cancel_ = nullptr;  // the submitter's, valid until it returns
     std::size_t n_ = 0;
     std::atomic<std::size_t> next_{0};
     std::exception_ptr error_;

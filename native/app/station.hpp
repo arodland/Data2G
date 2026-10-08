@@ -115,6 +115,7 @@ struct Args {
     std::string log_level = "INFO";
     double stats_interval = 60.0;
     double noise_rule = 1.0;  // the gear shifter's noise rule, its tail weight; 0: off
+    double dd_budget = 1.0;   // seconds of decision-directed decoding per burst (arq::DD_BUDGET_S); 0: none
     // additions
     bool decode_worker = true;
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
