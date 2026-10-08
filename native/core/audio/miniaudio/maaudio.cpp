@@ -41,15 +41,19 @@ struct Context {
         ma_backend enabled[ma_backend_null + 1];
         size_t n = 0;
         check(ma_get_enabled_backends(enabled, ma_backend_null + 1, &n), "audio backends");
+        // What the sound server shows (pavucontrol, qpwgraph), not "miniaudio".
+        ma_context_config c = ma_context_config_init();
+        c.pulse.pApplicationName = "Data2G";
+        c.jack.pClientName = "Data2G";
         const char* want = std::getenv("DATA2G_AUDIO_BACKEND");
         if (want == nullptr || *want == '\0') {
-            check(ma_context_init(nullptr, 0, nullptr, &ctx), "no working audio backend");
+            check(ma_context_init(nullptr, 0, &c, &ctx), "no working audio backend");
             return;
         }
         std::string names;
         for (size_t i = 0; i < n; ++i) {
             if (lowered(ma_get_backend_name(enabled[i])) == lowered(want)) {
-                check(ma_context_init(&enabled[i], 1, nullptr, &ctx), std::string("audio backend ") + want);
+                check(ma_context_init(&enabled[i], 1, &c, &ctx), std::string("audio backend ") + want);
                 return;
             }
             names += std::string(i ? ", " : "") + ma_get_backend_name(enabled[i]);
@@ -136,6 +140,8 @@ public:
             static_cast<Stream*>(n->pDevice->pUserData)->notify(n->type);
         };
         c.pUserData = this;
+        c.pulse.pStreamNameCapture = "Receive";
+        c.pulse.pStreamNamePlayback = "Transmit";
         check(ma_device_init(&context(), &c, &dev_), std::string("could not open audio ") + dir_);
         inited_ = true;
         prepare();
