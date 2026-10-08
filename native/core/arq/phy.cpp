@@ -367,6 +367,7 @@ void ModemRx::learn(int slot, const codes::Spec& s, const Bytes& payload, int rv
 // DD after a failed decode of `slot`: its posterior joins the other slots'
 // as soft pilots, the channel is re-estimated and the soft bits remade.
 void ModemRx::refine(int slot, const codes::Spec& s, std::vector<double> post) {
+    ++refines_;
     post_[slot] = std::move(post);
     if (!blind_) {
         // RV 0 slots the link has not asked about yet: parity checks alone

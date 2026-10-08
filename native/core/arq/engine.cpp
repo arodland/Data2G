@@ -638,6 +638,27 @@ void Engine::missed_energy() {
 }
 
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
+    // DEBUG: what this burst cost to decode, from the first look at it to the session having read it
+    // (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
+    using Clock = std::chrono::steady_clock;
+    struct Timing {
+        tnc::BurstEvent& ev;
+        Clock::time_point t0 = Clock::now(), t_soft = t0;
+        const ModemRx* rx = nullptr;
+        ~Timing() {
+            if (!log_enabled(LOG, 10)) return;
+            const auto ms = [](Clock::time_point a, Clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            const auto t1 = Clock::now();
+            log_write(LOG, 10,
+                      format("RX decode %s x%d: %.0f ms (soft bits %.0f ms)%s", spec_name(ev.header).c_str(), ev.header.n_cw(),
+                             ms(t0, t1), ms(t0, t_soft),
+                             rx && rx->dd_refines()
+                                 ? format(", DD: %d re-estimates%s", rx->dd_refines(), rx->dd_spent() ? ", budget spent" : "").c_str()
+                                 : ""));
+        }
+    } timing{ev};
     std::optional<Heard> r;
     std::optional<Measured> meas;
     std::shared_ptr<const SlotSoft> soft;
@@ -646,6 +667,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         meas = measure(*r);
         soft = soft_bits(*r);
     }
+    timing.t_soft = Clock::now();
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
     if (on_burst_)
         on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
@@ -658,6 +680,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         return;
     }
     ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    timing.rx = &rx;
     // in a session, its peer's bursts are the likely ones: a control
     // codeword under the session's key claims the burst before KISS tries
     // its keys on it

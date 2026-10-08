@@ -86,6 +86,11 @@ public:
     std::optional<Bytes> decode(int slot, const MaskId& mask, int rv, const SoftKey* key) override;
     void forget(const SoftKey& key) override;
 
+    // How the decodes so far went, for the log: channel re-estimates made (DD passes) and whether the DD
+    // budget ran out.
+    int dd_refines() const { return refines_; }
+    bool dd_spent() const { return late(); }
+
     // decode() without a store: `stored` is what the key holds (nullopt:
     // nothing); a failed decode replaces it, a miss before decoding (slot
     // out of range, CPM control/data mismatch) leaves it. An entry stored under
@@ -134,6 +139,7 @@ private:
     std::map<int, Raw> raw_;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;
+    int refines_ = 0;
     // dd_estimate()'s per-symbol results, keyed on the symbol's input LLRs: a DD iteration changes
     // one codeword's posterior, and the rest of the burst's symbols come out the same again.
     struct SymCache {
