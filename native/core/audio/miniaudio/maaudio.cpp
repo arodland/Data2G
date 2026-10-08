@@ -15,6 +15,7 @@
 #define MA_NO_RESOURCE_MANAGER
 #define MA_NO_NODE_GRAPH
 #define MA_NO_ENGINE
+#define NOMINMAX  // miniaudio includes <windows.h>, whose max() macro breaks std::max
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
