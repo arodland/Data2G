@@ -6,9 +6,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <set>
 
 #include "constellation/constellation.hpp"
 #include "util/cancel.hpp"
+#include "util/pool.hpp"
 #include "cpm/cpm.hpp"
 #include "equalizer/equalizer.hpp"
 #include "waveform/dsp.hpp"
@@ -77,6 +79,49 @@ Post decode_post(const codes::Spec& s, const std::vector<double>* buf, int top, 
     std::vector<double> post(static_cast<std::size_t>(s.coded_bits));
     for (std::size_t i = 0; i < post.size(); ++i) post[i] = code[s.perm[i]];
     return {std::vector<std::uint8_t>(d.bits.data.begin(), d.bits.data.end()), d.ok[0] != 0, std::move(post)};
+}
+
+// The buffer decode_stored decodes: `soft` (this slot's, as received) flipped by the slot's scrambling and
+// combined into what is stored (nullptr: nothing) at `rv`.
+std::vector<double> combined_buffer(const codes::Spec& s, int slot, int rv, std::span<const double> soft,
+                                    const std::vector<double>* stored) {
+    const auto fl = codes::flip(s, slot, rv);
+    const int rvs[1] = {rv};
+    Mat<double> buf;
+    if (stored) {
+        buf = Mat<double>(1, stored->size());
+        buf.data = *stored;
+    }
+    Mat<double> x(1, soft.size());
+    for (std::size_t i = 0; i < soft.size(); ++i) x.data[i] = fl[i] * soft[i];
+    codes::combine(s, buf, x, rvs);
+    return std::move(buf.data);
+}
+
+// decode_stored's body for one pass: combine, decode (with the posterior if DD), check the CRC under mask m.
+DecodePass decode_pass(const codes::Spec& s, bool dd, int slot, int rv, std::uint32_t m, int top,
+                       std::span<const double> soft, const std::vector<double>* stored) {
+    DecodePass out;
+    out.buf = combined_buffer(s, slot, rv, soft, stored);
+    const std::uint32_t masks[1] = {m};
+    const int plain[1] = {codes::PLAIN};
+    if (!dd) {
+        Mat<double> b(1, out.buf.size());
+        b.data = out.buf;
+        auto p = codes::decode_buffer(s, b, top, masks, plain)[0];
+        out.ok = p.ok;
+        if (p.ok) out.data = std::move(p.data);
+        return out;
+    }
+    auto d = decode_post(s, &out.buf, top, rv, {});
+    Mat<std::uint8_t> bits(1, d.bits.size());
+    bits.data = d.bits;
+    const std::uint8_t conv[1] = {static_cast<std::uint8_t>(d.ok)};
+    auto p = codes::payloads(s, bits, conv, masks, plain)[0];
+    out.ok = p.ok;
+    if (p.ok) out.data = std::move(p.data);
+    out.post = std::move(d.post);
+    return out;
 }
 
 }  // namespace
@@ -312,53 +357,71 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
     }
     const int top = std::max(stored ? stored->top : 0, rv);
     const DdState saved = cur_;
-    // the buffer holds unscrambled soft bits: each slot's flipped by its own
-    // scrambling, so a resend in any slot combines
-    const auto fl = codes::flip(s, slot, rv);
-    const int rvs[1] = {rv};
-    auto combined = [&] {
-        Mat<double> buf;
-        if (stored) {
-            buf = Mat<double>(1, stored->buf.size());
-            buf.data = stored->buf;
-        }
-        const auto& soft = slot_soft(slot);
-        Mat<double> x(1, soft.size());
-        for (std::size_t i = 0; i < soft.size(); ++i) x.data[i] = fl[i] * soft[i];
-        codes::combine(s, buf, x, rvs);
-        return std::move(buf.data);
-    };
+    const std::vector<double>* kept = stored ? &stored->buf : nullptr;
     std::vector<double> buf;
-    const std::uint32_t masks[1] = {m};
-    const int plain[1] = {codes::PLAIN};
     for (int i = 0; i <= DD_ITERS; ++i) {
-        buf = combined();
+        DecodePass ps;
+        const auto pre = prepared_.find(slot);
+        if (i == 0 && pre != prepared_.end() && !cur_.est && pre->second.rv == rv && pre->second.mask == m &&
+            pre->second.had_stored == stored.has_value()) {
+            ps = std::move(pre->second.pass);  // made ahead, on this same estimate and these same bits
+            prepared_.erase(pre);
+        } else {
+            ps = decode_pass(s, dd(s), slot, rv, m, top, slot_soft(slot), kept);
+        }
+        buf = std::move(ps.buf);
         if (!dd(s)) {
-            Mat<double> b(1, buf.size());
-            b.data = buf;
-            auto p = codes::decode_buffer(s, b, top, masks, plain)[0];
-            if (p.ok) return std::move(p.data);
+            if (ps.ok) return std::move(ps.data);
             break;
         }
-        auto d = decode_post(s, &buf, top, rv, {});
-        Mat<std::uint8_t> bits(1, d.bits.size());
-        bits.data = d.bits;
-        const std::uint8_t conv[1] = {static_cast<std::uint8_t>(d.ok)};
-        auto p = codes::payloads(s, bits, conv, masks, plain)[0];
-        if (p.ok) {
-            learn(slot, s, p.data, rv, m);
-            return std::move(p.data);
+        if (ps.ok) {
+            learn(slot, s, ps.data, rv, m);
+            return std::move(ps.data);
         }
         if (i == DD_ITERS || late()) break;
-        for (std::size_t j = 0; j < d.post.size(); ++j) d.post[j] *= fl[j];  // back to the bits as sent
-        if (!refine(slot, s, std::move(d.post))) break;
+        const auto fl = codes::flip(s, slot, rv);
+        for (std::size_t j = 0; j < ps.post.size(); ++j) ps.post[j] *= fl[j];  // back to the bits as sent
+        if (!refine(slot, s, std::move(ps.post))) break;
     }
+    prepared_.erase(slot);
     if (cur_.est != saved.est) {
         undo(slot, saved);
-        buf = combined();
+        buf = combined_buffer(s, slot, rv, slot_soft(slot), kept);
     }
     stored = SoftEntry{std::move(buf), top, submode_, slot, rv, mask};
     return std::nullopt;
+}
+
+// decode_stored's first pass for each request at once: the LDPC decodes are independent, and the session then
+// asks for them one at a time. Only on the burst's own estimate (a DD re-estimate changes every slot's soft bits)
+// and with every key distinct (two slots sharing one combine into the same stored buffer, in order).
+void ModemRx::prepare(std::span<const DecodeRequest> reqs) {
+    prepared_.clear();
+    if (reqs.size() < 2 || cur_.est || pool::threads() < 2) return;
+    std::set<SoftKey> keys;
+    std::vector<const DecodeRequest*> todo;
+    for (const auto& q : reqs) {
+        if (q.slot >= n_cw_ || (n_ctl_slots_ && (q.mask.seq >= SEQ_MOD) != (q.slot < n_ctl_slots_))) continue;
+        if (!keys.insert(q.key).second) return;
+        todo.push_back(&q);
+    }
+    if (todo.size() < 2) return;
+    std::vector<Prepared> out(todo.size());
+    try {
+        pool::parallel_for(todo.size(), [&](std::size_t t) {
+            const DecodeRequest& q = *todo[t];
+            const std::vector<double>* kept = nullptr;
+            if (store_)
+                if (const auto it = store_->find(q.key); it != store_->end() && it->second.submode == submode_) kept = &it->second.buf;
+            int top = q.rv;
+            if (kept) top = std::max(store_->find(q.key)->second.top, q.rv);
+            out[t] = {q.rv, mask_value(q.mask), kept != nullptr,
+                      decode_pass(spec(q.slot), dd(spec(q.slot)), q.slot, q.rv, mask_value(q.mask), top, (*soft_)[static_cast<std::size_t>(q.slot)], kept)};
+        });
+    } catch (...) {
+        return;  // the sequential decodes will meet whatever it was themselves
+    }
+    for (std::size_t t = 0; t < todo.size(); ++t) prepared_[todo[t]->slot] = std::move(out[t]);
 }
 
 void ModemRx::learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m) {

@@ -583,6 +583,16 @@ bool Station::handle_inner(RxBurst& rxb) {
     for (std::size_t j = 0; j < slots.size(); ++j) comp.push_back(bits[j] || (slots[j].first && rx.comp_seqs.count(*slots[j].first)));
     last_rx_data = !slots.empty();
     int n_ok = 0, n_new = 0, n_dec = 0, n_old = 0;
+    {
+        std::vector<DecodeRequest> reqs;
+        for (std::size_t j = 0; j < slots.size(); ++j) {
+            const auto& [seq, rv] = slots[j];
+            if (seq && *seq >= rx.cum)
+                reqs.push_back({n_ctl_slots + static_cast<int>(j), data_mask(peer(), *seq, key, comp[j], peer_epoch), rv,
+                                SoftKey{false, peer(), *seq, 0}});
+        }
+        rxb.prepare(reqs);
+    }
     for (std::size_t j = 0; j < slots.size(); ++j) {
         const int i = n_ctl_slots + static_cast<int>(j);
         const auto& [seq, rv] = slots[j];

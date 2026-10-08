@@ -91,6 +91,14 @@ struct SoftKey {
     auto operator<=>(const SoftKey&) const = default;
 };
 
+// One decode() the caller is about to ask for.
+struct DecodeRequest {
+    int slot;
+    MaskId mask;
+    int rv;
+    SoftKey key;
+};
+
 class RxBurst {
 public:
     virtual ~RxBurst() = default;
@@ -100,6 +108,9 @@ public:
     // bits under key, which a failed decode adds to).
     virtual std::optional<Bytes> decode(int slot, const MaskId& mask, int rv, const SoftKey* key) = 0;
     virtual void forget(const SoftKey& key) = 0;
+    // The decode()s the caller is about to make, in this order, offered up front so an implementation can run
+    // their independent parts at once (a slow machine's idle cores). Optional, and the answers are the same.
+    virtual void prepare(std::span<const DecodeRequest>) {}
 };
 
 class Station;

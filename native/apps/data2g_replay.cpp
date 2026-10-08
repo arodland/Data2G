@@ -104,7 +104,7 @@ int main(int argc, char** argv) {
     std::vector<std::uint16_t> raw(static_cast<std::size_t>(in.tellg()) / 2);  // little-endian halves, as numpy writes them
     in.seekg(0);
     in.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size() * 2));
-    std::vector<double> audio(std::min<std::size_t>(raw.size(), static_cast<std::size_t>(seconds * config::FS)));
+    std::vector<double> audio(static_cast<std::size_t>(std::min(static_cast<double>(raw.size()), seconds * config::FS)));
     for (std::size_t i = 0; i < audio.size(); ++i) audio[i] = half_to_double(raw[i]);
 
     if (threads > 0) pool::set_threads(threads);

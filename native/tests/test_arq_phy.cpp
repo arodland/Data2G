@@ -9,6 +9,7 @@
 #include "arq/phy.hpp"
 #include "check.hpp"
 #include "kisslink/kisslink.hpp"
+#include "util/pool.hpp"
 
 using namespace data2g;
 using namespace data2g::arq;
@@ -101,6 +102,40 @@ int main() {
         check::is_true(!rx.decode_plain(5, {7, 0, 5}), "past the burst");
         const auto m = measure(hear(on_air(tx_audio(burst(0)), 0.02, 1)));
         check::is_true(m.snr_est > 15 && m.frames == 12 && m.mi[0] > 0.9, "measure: a clean burst");
+    }
+
+    check::current_step = "prepared decodes";
+    {
+        // prepare() runs each slot's first pass at once; decode() then answers, and stores, exactly as it would have
+        pool::set_threads(3);
+        for (const bool dd : {false, true}) {
+            SoftStore plain, prepared;
+            std::vector<std::optional<Bytes>> got_plain, got_prepared;
+            for (const bool prep : {false, true}) {
+                auto& store = prep ? prepared : plain;
+                auto& got = prep ? got_prepared : got_plain;
+                ModemRx rx(hear(on_air(tx_audio(burst(0)), 1.2, 3)), &store, std::nullopt, nullptr, dd);
+                if (prep) {
+                    std::vector<DecodeRequest> reqs;
+                    for (int i = 0; i < 3; ++i) reqs.push_back({i, {7, 0, i}, 0, SoftKey{false, 0, i, 0}});
+                    rx.prepare(reqs);
+                }
+                for (int i = 0; i < 3; ++i) {
+                    SoftKey k{false, 0, i, 0};
+                    got.push_back(rx.decode(i, {7, 0, i}, 0, &k));
+                }
+            }
+            const std::string what = dd ? "DD" : "no DD";
+            check::is_true(got_plain == got_prepared, "prepared: the same payloads, " + what);
+            bool same = plain.size() == prepared.size();
+            for (const auto& [k, v] : plain) {
+                const auto it = prepared.find(k);
+                same = same && it != prepared.end() && it->second.buf == v.buf && it->second.top == v.top;
+            }
+            check::is_true(same, "prepared: the same stored soft bits, " + what);
+            check::is_true(!plain.empty(), "prepared: some slot failed, so the comparison covers a store, " + what);
+        }
+        pool::set_threads(0);
     }
 
     check::current_step = "resend combining";
