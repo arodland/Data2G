@@ -106,6 +106,10 @@ endif()
 # with Qt Multimedia; raw float32 input (--input-file) always.
 add_executable(data2g-monitor apps/data2g_monitor.cpp)
 target_link_libraries(data2g-monitor PRIVATE data2g_core)
+
+# data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
+add_executable(data2g-replay apps/data2g_replay.cpp)
+target_link_libraries(data2g-replay PRIVATE data2g_core)
 if(TARGET data2g_audio_qt)
   target_link_libraries(data2g-monitor PRIVATE data2g_audio_qt)
   target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_QTAUDIO)
