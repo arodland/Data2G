@@ -24,6 +24,9 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 #include "audio/filters.hpp"
+#ifdef __linux__
+#include <pthread.h>
+#endif
 #include "app/realtime.hpp"
 #include "audio/pipe.hpp"
 #include "audio/thread.hpp"
@@ -808,11 +811,23 @@ AudioCounters Station::counters() const {
 // acquisition (and, with no decode worker, the decode) and so can be busy for a long stretch; nothing it does
 // is on the transmitter's path.
 void Station::engine_loop() {
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "d2g-engine");  // visible in top -H and tools/sample_threads.py
+#endif
     const std::size_t block = config::FS / 10;
     int slow = 0;
+    // Every 10 s at DEBUG: where the loop spends its time. A backlog that grows while "read" is ~0 and "step" is
+    // small means the time goes between the two (tap, hand-over); a large "step" with low CPU means it waits.
+    using clk = std::chrono::steady_clock;
+    const auto secs = [](clk::duration d) { return std::chrono::duration<double>(d).count(); };
+    clk::duration read_t{}, step_t{}, step_max{};
+    int blocks = 0;
+    auto window = clk::now();
     try {
         while (!stop_) {
+            const auto r0 = clk::now();
             auto x = cap_->read(block);
+            read_t += clk::now() - r0;
             if (!x) break;
             const std::vector<double> heard = *x;
             if (tx_active_) std::fill(x->begin(), x->end(), 0.0);  // the radio's receive audio is muted while it transmits
@@ -826,6 +841,16 @@ void Station::engine_loop() {
             if (took > static_cast<double>(block) / config::FS) {
                 ++slow;
                 logf(DEBUG, "step took %.2f s (%d slow)", took, slow);
+            }
+            step_t += std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(took));
+            step_max = std::max(step_max, std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(took)));
+            ++blocks;
+            if (const auto now = clk::now(); now - window >= std::chrono::seconds(10)) {
+                logf(DEBUG, "engine loop: %d blocks in %.1f s, read wait %.2f s, step %.2f s (max %.2f), backlog %.2f s", blocks,
+                     secs(now - window), secs(read_t), secs(step_t), secs(step_max), cap_->backlog_s());
+                read_t = step_t = step_max = {};
+                blocks = 0;
+                window = now;
             }
             if (out.tx_abort) tx_abort();
             if (out.tx_burst) tx_submit(std::move(out.tx_burst));
@@ -860,6 +885,9 @@ void Station::tx_abort() {
 // drain and the off delay all block here, not on the receive side; real-time scheduling, where granted, keeps
 // the feeding on time under load.
 void Station::tx_loop() {
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "d2g-tx");
+#endif
     audio::thread_init("tx");
     const std::size_t block = config::FS / 10;
     const double gain = std::pow(10.0, a_.output_volume / 20);
