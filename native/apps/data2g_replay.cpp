@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "arq/engine.hpp"
+#include "host/host.hpp"
 #include "util/pool.hpp"
 
 using namespace data2g;
@@ -48,6 +49,7 @@ double half_to_double(std::uint16_t h) {
                  "  --threads     the decode pool's size (default: the host's)\n"
                  "  --dd-budget   seconds of DD per burst (default 1; 0: none), as data2g-host's\n"
                  "  --slow-ms     warn about an engine step slower than this (default 200)\n"
+                 "  --host        run data2g-host's per-step work too (the VARA host layer: BUFFER, events)\n"
                  "  --log-level   default INFO\n"
                  "  --repeat      run N times; the log is of the first run, the others report their time only\n");
     std::exit(code);
@@ -76,6 +78,7 @@ int main(int argc, char** argv) {
     bool worker = false, quiet = false;
     int threads = 0, repeat = 1;
     double dd_budget = arq::DD_BUDGET_S, slow_ms = 200;
+    bool with_host = false;
     bool mono = std::getenv("DATA2G_REPLAY_MONO") != nullptr;  // slow steps' CLOCK_MONOTONIC span, to match perf samples
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -90,6 +93,7 @@ int main(int argc, char** argv) {
         else if (a == "--threads") threads = std::atoi(value());
         else if (a == "--dd-budget") dd_budget = std::atof(value());
         else if (a == "--slow-ms") slow_ms = std::atof(value());
+        else if (a == "--host") with_host = true;
         else if (a == "--repeat") repeat = std::max(1, std::atoi(value()));
         else if (a == "--log-level") {
             const std::string l = value();
@@ -124,11 +128,24 @@ int main(int argc, char** argv) {
         cfg.seed = 1;
         arq::Engine eng(call, cfg, {});
         eng.listen(true);
+        // the host's per-step work, as the live Station runs it inside every engine step (BUFFER report etc.)
+        std::unique_ptr<host::Host> host;
+        if (with_host) {
+            host = std::make_unique<host::Host>(eng);
+            host->listening = true;
+            eng.set_after_block([&host](bool ptt) {
+                host->after_step(ptt);
+                host->out_cmd.clear();
+                host->out_data.clear();
+            });
+        }
         std::vector<double> step_ms;
+        std::vector<bool> ptt_trace;
         const auto t_all = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i + BLOCK <= audio.size(); i += BLOCK) {
             const auto t0 = std::chrono::steady_clock::now();
-            eng.step(std::span<const double>(audio).subspan(i, BLOCK));
+            const auto o = eng.step(std::span<const double>(audio).subspan(i, BLOCK));
+            ptt_trace.push_back(o.ptt);
             if (mono && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() >= slow_ms)
                 std::fprintf(stderr, "MONO %.6f %.6f\n", std::chrono::duration<double>(t0.time_since_epoch()).count(),
                              std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -138,6 +155,14 @@ int main(int argc, char** argv) {
                                  std::to_string(static_cast<int>(step_ms.back())) + " ms");
         }
         const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
+        if (std::getenv("DATA2G_REPLAY_TX")) {  // the steps around each end of our own transmissions
+            for (std::size_t k = 1; k < ptt_trace.size(); ++k)
+                if (ptt_trace[k - 1] && !ptt_trace[k]) {
+                    std::fprintf(stderr, "TX ends at audio t=%.1f s; steps (ms) from 2 before:", static_cast<double>(k * BLOCK) / config::FS);
+                    for (std::size_t j = k >= 2 ? k - 2 : 0; j < std::min(k + 6, step_ms.size()); ++j) std::fprintf(stderr, " %.0f", step_ms[j]);
+                    std::fprintf(stderr, "\n");
+                }
+        }
         double sum = 0, worst = 0;
         for (const double m : step_ms) {
             sum += m;
