@@ -77,6 +77,17 @@ inline void fft_into(const cdouble* in, cdouble* out, std::size_t n, bool forwar
                    in, out, scale);
 }
 
+// `rows` transforms of length n, one batched pocketfft call (rows contiguous, n apart): the
+// lines are processed several to a vector op, which a lone fft_into can't.
+inline void fft_rows_into(const cdouble* in, cdouble* out, std::size_t rows, std::size_t n, bool forward) {
+    if (n == 0 || rows == 0) return;
+    const pocketfft::shape_t shape{rows, n};
+    const pocketfft::stride_t stride{
+        static_cast<std::ptrdiff_t>(n * sizeof(cdouble)), static_cast<std::ptrdiff_t>(sizeof(cdouble))};
+    const double scale = forward ? 1.0 : 1.0 / static_cast<double>(n);
+    pocketfft::c2c(shape, stride, stride, pocketfft::shape_t{1}, forward, in, out, scale);
+}
+
 // In-place-free complex FFT. `forward` selects the sign convention;
 // the inverse is scaled by 1/n so that ifft(fft(x)) == x, matching
 // numpy and scipy. A lone transform, so single-threaded by construction

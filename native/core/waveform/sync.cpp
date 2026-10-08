@@ -214,28 +214,41 @@ void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span
     const std::vector<cdouble> Z = dsp::fft(zp, true);
     const auto Gp = template_spectrum(t, L);
     const std::vector<cdouble>& G0 = *Gp;
-    per_bin(z.size(), freqs.size(), [&](std::size_t i) {
+    // Bins in tasks of B: the inverse FFTs of a task are one batched call. Only while a task's
+    // buffers stay cache-sized; a whole-buffer acquire does one bin per task, as before.
+    // (Measured: 4 bins per call is 15-30% faster up to ~2 s of signal; above that the pool has too few
+    // tasks and the buffers fall out of cache, 1.3-1.5x slower on 4 threads.)
+    constexpr std::size_t BATCH = 4, BATCH_MAX_L = 20480;
+    const std::size_t B = L <= BATCH_MAX_L ? BATCH : 1, nb = freqs.size(), n_tasks = (nb + B - 1) / B;
+    per_bin(z.size(), n_tasks, [&](std::size_t task) {
         Scratch& s = scratch();
-        s.prod.resize(L);
-        s.c.resize(L);
-        const auto k = static_cast<std::int64_t>(std::llround(freqs[i] / STEP_HZ));
-        const auto shift = static_cast<std::size_t>(((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L)
-                                                     + static_cast<std::int64_t>(L)) % static_cast<std::int64_t>(L));
-        cdouble* prod = s.prod.data();
-        cmul(Z.data(), G0.data() + (L - shift), prod, shift);  // np.roll(G0, shift)
-        cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
-        dsp::fft_into(prod, s.c.data(), L, false);
-        // exp(-2j pi f (M-1) / FS) = exp(-2j pi k (M-1) / PER): an exact turn
-        std::int64_t q = (k * static_cast<std::int64_t>(m - 1)) % PER;
-        if (q < 0) q += PER;
-        const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
-        cdouble* row = dest(i);
-        if (!row) {
-            s.row.resize(n_out);
-            row = s.row.data();
+        const std::size_t i0 = task * B, rows = std::min(B, nb - i0);
+        s.prod.resize(rows * L);
+        s.c.resize(rows * L);
+        std::int64_t ks[BATCH];
+        for (std::size_t r = 0; r < rows; ++r) {
+            const auto k = static_cast<std::int64_t>(std::llround(freqs[i0 + r] / STEP_HZ));
+            ks[r] = k;
+            const auto shift = static_cast<std::size_t>(((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L)
+                                                         + static_cast<std::int64_t>(L)) % static_cast<std::int64_t>(L));
+            cdouble* prod = s.prod.data() + r * L;
+            cmul(Z.data(), G0.data() + (L - shift), prod, shift);  // np.roll(G0, shift)
+            cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
         }
-        cscale(s.c.data() + (m - 1), ph, row, n_out);
-        if (use) use(i, row);
+        dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, L, false);
+        for (std::size_t r = 0; r < rows; ++r) {
+            // exp(-2j pi f (M-1) / FS) = exp(-2j pi k (M-1) / PER): an exact turn
+            std::int64_t q = (ks[r] * static_cast<std::int64_t>(m - 1)) % PER;
+            if (q < 0) q += PER;
+            const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
+            cdouble* row = dest(i0 + r);
+            if (!row) {
+                s.row.resize(n_out);
+                row = s.row.data();
+            }
+            cscale(s.c.data() + r * L + (m - 1), ph, row, n_out);
+            if (use) use(i0 + r, row);
+        }
         release_big(s);
     });
 }
