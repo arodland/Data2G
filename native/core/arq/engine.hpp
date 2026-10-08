@@ -220,6 +220,7 @@ private:
     void new_session();
     bool idle() const;
     Done process(Block& b);  // the session stage
+    Done process_safe(Block& b);  // process(); a throw drops the session and plays silence
     void hear(std::vector<tnc::Receiver::Item>& items, double t);
     TxBurstPtr kiss_burst(std::int64_t k, bool busy);
     bool cq(ModemRx& rx);

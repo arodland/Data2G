@@ -133,3 +133,21 @@ def test_capture_keeps_every_sample():
     assert cap.overflows == 1
     stop.set()
     assert cap.read(4800, stop) is None  # 400 frames left: not a block, and stopping
+
+
+def test_bad_callsigns_are_wrong_not_fatal():
+    from data2g.arq.engine import Engine
+
+    h = host.Host(Engine("W1AW", seed=1))
+    h.command("CONNECT W1AW SOMETHINGLONG")
+    h.command("MYCALL BAD!CALL")
+    assert h.out_cmd == ["WRONG", "WRONG"]
+    assert h.engine.call == "W1AW" and h.engine.session.state == "idle"
+
+
+def test_empty_kiss_frame_is_not_queued():
+    from data2g.kisslink import KissLink
+
+    k = KissLink()
+    k.enqueue(b"")
+    assert not k.queue

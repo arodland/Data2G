@@ -129,7 +129,11 @@ void Host::command(std::string_view line) {
     auto& e = engine;
     bool ok = true;
     if (cmd == "MYCALL" && !args.empty()) {
-        e.set_call(args[0], {args.begin() + 1, args.end()});  // VARA takes several: all answer connects
+        try {
+            e.set_call(args[0], {args.begin() + 1, args.end()});  // VARA takes several: all answer connects
+        } catch (const std::invalid_argument&) {
+            ok = false;
+        }
     } else if (cmd == "LISTEN" && a0 == "CQ") {
         // CQ frames are always reported
     } else if (cmd == "LISTEN" && (a0 == "ON" || a0 == "OFF")) {
@@ -141,6 +145,8 @@ void Host::command(std::string_view line) {
             e.set_call(args[0], aliases);
             e.connect(args[1], cap);
         } catch (const std::runtime_error&) {
+            ok = false;
+        } catch (const std::invalid_argument&) {
             ok = false;
         }
     } else if (cmd == "DISCONNECT") {

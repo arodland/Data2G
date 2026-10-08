@@ -150,7 +150,9 @@ class Engine:
 
     def set_call(self, call: str, *aliases: str):
         """Takes effect now if no session is under way, else for the next.
-        `aliases`: more calls to answer connects to."""
+        `aliases`: more calls to answer connects to. ValueError for a call that won't pack."""
+        for c in (call, *aliases):
+            F.pack_call(c)
         self.call = call.upper()
         self.aliases = tuple(a.upper() for a in aliases)
         if self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
@@ -166,6 +168,7 @@ class Engine:
     def connect(self, peer: str, cap: int):
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
+        F.pack_call(peer)  # ValueError before any state changes
         self._new_session()
         self.session.connect(peer, cap, self.now)
 

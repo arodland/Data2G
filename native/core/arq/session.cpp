@@ -256,6 +256,8 @@ void Session::heard(double now) {
 }
 
 void Session::disconnect() {
+    // Nothing to close: a flag left set here would end the next session at its first burst.
+    if (state == SessionState::IDLE || state == SessionState::LISTEN || state == SessionState::CLOSED) return;
     want_disc = true;
     if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
 }

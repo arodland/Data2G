@@ -37,7 +37,7 @@ public:
     std::uint64_t failures() const { return failures_; }
 
 private:
-    void ptt(bool on);
+    bool ptt(bool on);  // false: the rig did not take it
 
     Ptt ptt_;
     audio::PlaybackFifo& out_;
@@ -46,6 +46,7 @@ private:
     MustRelease must_release_;
     bool keyed_ = false, sent_on_ = false;
     std::uint64_t failures_ = 0;
+    int off_failed_ = 0;  // consecutive failed PTT offs, retried on the next unkey() up to MAX_OFF_TRIES
 };
 
 }  // namespace data2g::rig

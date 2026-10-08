@@ -56,6 +56,7 @@ struct RigSession {
     // For the exit path (keyed_since_open): open() succeeded, and a PTT on
     // was attempted on the open rig since.
     bool opened = false;
+    bool dead = false;  // open() failed and the worker has gone: nobody will service a PTT job
     bool keyed = false;
 
     // A keying request waiting to be run, and its result. Only ever one:
@@ -123,6 +124,11 @@ void run(std::shared_ptr<RigSession> s) {
         }
         s->publish_status("Rig: " + s->backend->description(), false);
     } catch (const std::exception& e) {
+        {
+            std::lock_guard<std::mutex> lock(s->m);
+            s->dead = true;
+        }
+        s->cv.notify_all();
         s->publish_status(first_line(e.what()), true);
         return;
     }
@@ -313,6 +319,7 @@ void RigController::set_ptt(bool on) {
     {
         std::lock_guard<std::mutex> lock(s->m);
         if (s->stopping) throw RigError("rig control is shutting down");
+        if (s->dead) throw RigError("rig is not open");
         // Replaces any pending keying request rather than queueing: the
         // rig is either keyed or not. Pending *polls* are not a queue at
         // all here -- the worker only ever holds one poll deadline -- so
@@ -324,7 +331,7 @@ void RigController::set_ptt(bool on) {
 
     std::unique_lock<std::mutex> lock(s->m);
     const bool finished = s->cv.wait_for(lock, secs(s->config.operation_timeout_s),
-                                         [&] { return job->done || s->stopping; });
+                                         [&] { return job->done || s->stopping || s->dead; });
     if (!finished || !job->done) {
         // The backstop for a backend whose own timeout did not fire.
         // Reported rather than waited out, because the caller is the

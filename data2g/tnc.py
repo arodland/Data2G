@@ -686,9 +686,10 @@ class Rigctld:
         self.addr, self.sock = (host, port), None
         self.keyed = False  # a PTT on reached a connected rigctld
 
-    def ptt(self, on: bool):
+    def ptt(self, on: bool) -> bool:
+        """True if rigctld took it (or there is no rigctld); False: try again later."""
         if not self.addr[1]:
-            return
+            return True
         for _ in range(2):  # one reconnect
             try:
                 if self.sock is None:
@@ -696,13 +697,16 @@ class Rigctld:
                 self.sock.sendall(b"T 1\n" if on else b"T 0\n")
                 self.keyed |= on
                 reply = self.sock.recv(64)
+                if not reply:  # rigctld closed on us
+                    raise ConnectionError("connection closed")
                 if not reply.startswith(b"RPRT 0"):
                     log.warning("rigctld answered %r to PTT %s", reply, "on" if on else "off")
-                return
+                return True
             except OSError as e:
                 log.warning("rigctld %s:%d: %s", *self.addr, e)
                 self.close()
         log.error("PTT %s failed", "on" if on else "off")
+        return False
 
     def release(self):
         """At exit: PTT off only if we keyed the radio. Never connected, or

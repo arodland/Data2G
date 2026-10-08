@@ -708,6 +708,7 @@ void Station::watchdog(bool progress) {
     if (progress) {
         no_progress = 0;
         resyncs = 0;
+        resync_due = false;  // a deferred resync is moot once data moves
         return;
     }
     if (!tx.pending()) return;

@@ -825,6 +825,10 @@ void Station::engine_loop() {
     } catch (const std::exception& e) {
         logf(CRITICAL, "engine thread: %s", e.what());
         failed_ = true;
+        try {
+            if (keyer_) keyer_->unkey();  // never leave the radio transmitting
+        } catch (...) {
+        }
     }
 }
 
