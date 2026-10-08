@@ -424,8 +424,28 @@ ModemRx::Est ModemRx::dd_estimate() const {
     Mat<cd> z(rows, nc);
     Mat<double> w(rows, nc);
     std::vector<double> la1(static_cast<std::size_t>(m)), la0(static_cast<std::size_t>(m)), lp(M), prob(M);
+    SymCache& cache = sym_cache_;
+    if (cache.valid.size() != n_sym) {
+        cache.L.assign(n_sym * static_cast<std::size_t>(m), 0.0);
+        cache.z.assign(n_sym, 0.0);
+        cache.w.assign(n_sym, 0.0);
+        cache.valid.assign(n_sym, 0);
+    }
     // split: per symbol, independent
     for (std::size_t j = 0; j < n_sym; ++j) {
+        // no posterior for this symbol's codeword: no soft pilot (z, w stay 0), whatever the math says
+        if (!K[j * m]) continue;
+        const std::size_t row = j / nc, c = j % nc;
+        double* cL = &cache.L[j * static_cast<std::size_t>(m)];
+        if (cache.valid[j] && std::equal(cL, cL + m, &L[j * m])) {
+            z[row][c] = cache.z[j];
+            w[row][c] = cache.w[j];
+            continue;
+        }
+        std::copy(&L[j * m], &L[j * m] + m, cL);
+        cache.valid[j] = 1;
+        cache.z[j] = 0.0;
+        cache.w[j] = 0.0;
         // log P(label) per point, labels MSB first (modulate's order)
         for (int b = 0; b < m; ++b) {
             const double l = std::clamp(L[j * m + b], -30.0, 30.0);
@@ -454,11 +474,12 @@ ModemRx::Est ModemRx::dd_estimate() const {
             e2 += prob[a] * std::norm(pts.points[a]);
         }
         const double v = e2 - std::norm(x);
-        const std::size_t row = j / nc, c = j % nc;
-        if (!K[j * m] || !(std::abs(x) > 1e-3)) continue;
-        z[row][c] = R.raw[row / S * config::SYMS_PER_FRAME + 1 + row % S][c] / (g * x);
+        if (!(std::abs(x) > 1e-3)) continue;
+        cache.z[j] = R.raw[row / S * config::SYMS_PER_FRAME + 1 + row % S][c] / (g * x);
         const double n0 = est.n0_k.empty() ? est.n0 : est.n0_k[c];
-        w[row][c] = g * g * std::norm(x) / (n0 + est.clip_ratio * (g * g) * p + g * g * p * v);
+        cache.w[j] = g * g * std::norm(x) / (n0 + est.clip_ratio * (g * g) * p + g * g * p * v);
+        z[row][c] = cache.z[j];
+        w[row][c] = cache.w[j];
     }
     const std::size_t n_f = rows / S;
     Mat<double> t_rows(n_f, S);

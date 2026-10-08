@@ -7,6 +7,7 @@
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <utility>
 
 #include "dsp/dsp.hpp"
 
@@ -76,24 +77,36 @@ void llr_square(std::span<const cd> y, std::span<const cd> h, std::span<const do
 void llr_general(std::span<const cd> y, std::span<const cd> h, std::span<const double> var, const Constellation& c,
                  double* out) {
     const std::size_t M = c.points.size();
-    std::vector<double> d(M), s1(c.m);
+    // The sums over the points whose bit j is 0 / 1, from a tree of partial sums: each pass pairs
+    // neighbouring entries (labels differing in their last remaining bit), so the even and odd entries
+    // summed on the way are bit j's two halves, 2 M adds in all instead of M c.m data-dependent ones.
+    std::vector<double> d(M), ping(M), pong(M), s0(c.m), s1(c.m);
     for (std::size_t i = 0; i < y.size(); ++i) {
         double mx = -std::numeric_limits<double>::infinity();
         for (std::size_t p = 0; p < M; ++p) {
             const cd hx = mul(h[i], c.points[p]);
-            const double a = std::hypot(y[i].real() - hx.real(), y[i].imag() - hx.imag());
-            d[p] = -(a * a) / var[i];
+            const double dr = y[i].real() - hx.real(), di = y[i].imag() - hx.imag();
+            d[p] = -(dr * dr + di * di) / var[i];  // numpy's hypot, squared, to rounding
             mx = std::max(mx, d[p]);
         }
-        double* o = out + i * c.m;
-        std::fill(o, o + c.m, 0.0);
-        std::fill(s1.begin(), s1.end(), 0.0);
-        for (std::size_t p = 0; p < M; ++p) {
-            const double e = std::exp(d[p] - mx);
-            for (int j = 0; j < c.m; ++j) (p >> (c.m - 1 - j) & 1 ? s1[j] : o[j]) += e;
+        for (std::size_t p = 0; p < M; ++p) ping[p] = std::exp(d[p] - mx);
+        double *a = ping.data(), *b = pong.data();
+        std::size_t n = M;
+        for (int j = c.m - 1; j >= 0; --j) {
+            double zeros = 0.0, ones = 0.0;
+            for (std::size_t q = 0; q < n; q += 2) {
+                b[q / 2] = a[q] + a[q + 1];
+                zeros += a[q];
+                ones += a[q + 1];
+            }
+            s0[j] = zeros;
+            s1[j] = ones;
+            n /= 2;
+            std::swap(a, b);
         }
+        double* o = out + i * c.m;
         // A half underflowing (|LLR| > ~690) is floored, as in the reference.
-        for (int j = 0; j < c.m; ++j) o[j] = std::log(std::max(o[j], 1e-300)) - std::log(std::max(s1[j], 1e-300));
+        for (int j = 0; j < c.m; ++j) o[j] = std::log(std::max(s0[j], 1e-300)) - std::log(std::max(s1[j], 1e-300));
     }
 }
 

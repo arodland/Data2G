@@ -134,6 +134,15 @@ private:
     std::map<int, Raw> raw_;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;
+    // dd_estimate()'s per-symbol results, keyed on the symbol's input LLRs: a DD iteration changes
+    // one codeword's posterior, and the rest of the burst's symbols come out the same again.
+    struct SymCache {
+        std::vector<double> L;               // m LLRs per symbol, as last computed
+        std::vector<std::complex<double>> z;  // the soft pilot (0: none)
+        std::vector<double> w;                // its weight
+        std::vector<std::uint8_t> valid;
+    };
+    mutable SymCache sym_cache_;
     DdState cur_{nullptr, std::make_shared<std::map<int, std::vector<double>>>()};
 };
 
