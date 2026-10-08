@@ -68,11 +68,6 @@ struct SoftEntry {
     MaskId mask;
 };
 
-// Soft bits of a resend stored under another submode (Python's AssertionError).
-struct StoreMismatch : std::logic_error {
-    using std::logic_error::logic_error;
-};
-
 using SoftStore = std::map<SoftKey, SoftEntry>;
 using Clock = std::function<double()>;  // seconds, monotonic
 double monotonic();
@@ -93,7 +88,8 @@ public:
 
     // decode() without a store: `stored` is what the key holds (nullopt:
     // nothing); a failed decode replaces it, a miss before decoding (slot
-    // out of range, CPM control/data mismatch) leaves it. Throws StoreMismatch.
+    // out of range, CPM control/data mismatch) leaves it. An entry stored under
+    // another submode is dropped (logged) and the decode starts fresh.
     std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored);
     std::optional<Bytes> decode_plain(int slot, const MaskId& mask);  // no key
     // The slot's mask-free decode as payload bytes, CRC unchecked: polar's

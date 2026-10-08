@@ -5,29 +5,17 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <span>
 #include <stdexcept>
+
+#include "dsp/dsp.hpp"
 
 namespace data2g::constellation {
 
 namespace {
 
-// numpy's pairwise sum for n <= 128 (one block), so per-axis LLRs sum in
-// the reference's order.
-double np_sum(const double* a, int n) {
-    if (n < 8) {
-        double r = 0.;
-        for (int i = 0; i < n; ++i) r += a[i];
-        return r;
-    }
-    double r[8];
-    std::copy(a, a + 8, r);
-    int i = 8;
-    for (; i < n - n % 8; i += 8)
-        for (int j = 0; j < 8; ++j) r[j] += a[i + j];
-    double res = ((r[0] + r[1]) + (r[2] + r[3])) + ((r[4] + r[5]) + (r[6] + r[7]));
-    for (; i < n; ++i) res += a[i];
-    return res;
-}
+// numpy's pairwise sum, so per-axis LLRs sum in the reference's order.
+double np_sum(const double* a, int n) { return dsp::pairwise_sum(std::span<const double>(a, static_cast<std::size_t>(n))); }
 
 // numpy's complex multiply on FMA hardware (its SIMD loop; measured on
 // numpy 2.5, AVX-512): both parts rounded through one fma. Matching it makes

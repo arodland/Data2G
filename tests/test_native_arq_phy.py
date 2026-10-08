@@ -168,8 +168,8 @@ def test_budget_spent_and_store_mismatch(native, pure):
     t[0] = 2.0
     assert [nat.decode(i, m, 0, None) for i, m in enumerate(mids)] == [pays[0], None]
     store = {("p", 1): (np.zeros((1, 10)), 0, "w-other", (0, 0, (7, 1, 1)))}
-    with pytest.raises(AssertionError, match="stored in w-other"):
-        native.phy.ModemRx(dict(r), store, None, True).decode(1, mids[1], 0, ("p", 1))
+    # a resend in another submode drops the stale entry instead of raising
+    assert native.phy.ModemRx(dict(r), store, None, True).decode(1, mids[1], 0, ("p", 1)) == pays[1]
 
 
 def test_cpm_decodes_match(native, pure):

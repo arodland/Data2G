@@ -129,15 +129,10 @@ int main() {
             if (failed[static_cast<std::size_t>(i)]) got += again.decode(i, {7, 0, i}, 1, &k) == pl[static_cast<std::size_t>(i)];
         }
         check::equal(got, static_cast<int>(n_failed), "resends combine");
-        bool threw = false;
         store[SoftKey{false, 0, 9, 0}] = SoftEntry{std::vector<double>(10), 0, "qpsk-r1/2", 0, 0, {}};
-        try {
-            SoftKey k{false, 0, 9, 0};
-            again.decode(0, {7, 0, 9}, 1, &k);
-        } catch (const StoreMismatch&) {
-            threw = true;
-        }
-        check::is_true(threw, "a resend in another submode");
+        SoftKey k9{false, 0, 9, 0};
+        again.decode(0, {7, 0, 9}, 1, &k9);  // no throw: the stale entry is dropped
+        check::is_true(store.at(k9).submode != "qpsk-r1/2", "a resend in another submode starts fresh");
     }
 
     check::current_step = "kiss links";

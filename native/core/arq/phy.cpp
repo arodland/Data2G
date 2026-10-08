@@ -303,10 +303,12 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
     if (n_ctl_slots_ && (mask.seq >= SEQ_MOD) != (slot < n_ctl_slots_)) return std::nullopt;
     const std::uint32_t m = mask_value(mask);
     const auto& s = spec(slot);
-    if (stored && stored->submode != submode_)
-        throw StoreMismatch("soft bits stored in " + stored->submode + " (slot " + std::to_string(stored->slot) +
-                            " rv " + std::to_string(stored->rv) + "), resent in " + submode_ + " slot " +
-                            std::to_string(slot) + " rv " + std::to_string(rv));
+    if (stored && stored->submode != submode_) {  // a resend in another mode: what was kept can't combine
+        log_write("data2g.arq.phy", 30,
+                  format("soft bits stored in %s (slot %d rv %d), resent in %s slot %d rv %d: dropped",
+                         stored->submode.c_str(), stored->slot, stored->rv, submode_.c_str(), slot, rv));
+        stored.reset();
+    }
     const int top = std::max(stored ? stored->top : 0, rv);
     const DdState saved = cur_;
     // the buffer holds unscrambled soft bits: each slot's flipped by its own

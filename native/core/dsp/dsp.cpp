@@ -150,8 +150,7 @@ std::vector<cdouble> fftconvolve_valid(std::span<const cdouble> a, std::span<con
     std::vector<cdouble> pa(n), pv(n);
     std::copy(a.begin(), a.end(), pa.begin());
     std::copy(v.begin(), v.end(), pv.begin());
-    std::vector<cdouble> fa = fft(pa, true);
-    const std::vector<cdouble> fv = fft(pv, true);
+    auto [fa, fv] = fft_pair(pa, pv, true);
     for (std::size_t i = 0; i < n; ++i) fa[i] *= fv[i];
     const std::vector<cdouble> conv = fft(fa, false);
     const auto first = conv.begin() + static_cast<std::ptrdiff_t>(v.size() - 1);

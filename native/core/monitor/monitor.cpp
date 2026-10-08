@@ -393,12 +393,7 @@ void Monitor::arq_burst(ModemRx& rx, const Control& ctl, int key, int dir, int d
                 // combined with what earlier sends left (IR), and kept for the next resend
                 std::optional<SoftEntry> stored;
                 if (it != s.soft.end()) stored = it->second;
-                try {
-                    p = rx.decode_stored(slot, mask(hint), rv, stored);
-                } catch (const StoreMismatch&) {  // stored under an older mode
-                    stored.reset();
-                    p = rx.decode_stored(slot, mask(hint), rv, stored);
-                }
+                p = rx.decode_stored(slot, mask(hint), rv, stored);  // an entry from an older mode is dropped
                 if (!p && stored) s.soft[seq] = std::move(*stored);
             }
             if (p) s.soft.erase(seq);

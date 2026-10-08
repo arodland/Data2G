@@ -6,6 +6,7 @@ Used by scripts/phy_session.py (phase G: whole sessions through the modem
 and hfchannel) and the live stack (phase H).
 """
 
+import logging
 import os
 import time
 import zlib
@@ -19,6 +20,8 @@ from ..waveform import ofdm
 from . import predictor as P
 from .frames import SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
+
+log = logging.getLogger(__name__)
 
 # DATA2G_DD (default 1; 0 turns it off): decision-directed re-estimation. When a slot
 # fails, its decoder's a-posteriori LLRs and every decoded codeword of the
@@ -242,9 +245,10 @@ class ModemRx:
                 self._memo[(slot, m)] = codes.check(spec, *self._decoded(slot, spec), m)
             return self._memo[(slot, m)]
         buf0, top, name, where = self.store.get(key, (None, 0, self.submode, None))
-        if name != self.submode:
-            raise AssertionError(f"soft bits of {key} stored in {name} ({where}), resent in {self.submode} "
-                                 f"slot {slot} rv {rv}")
+        if name != self.submode:  # a resend in another mode: what was kept can't combine, so start over
+            log.warning("soft bits of %s stored in %s (%s), resent in %s slot %d rv %d: dropped", key, name, where,
+                        self.submode, slot, rv)
+            buf0, top = None, 0
         top = max(top, rv)
         soft0 = (self._est, self._soft_dd)
         # the buffer holds unscrambled soft bits: each slot's flipped by its
