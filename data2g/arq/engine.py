@@ -193,7 +193,7 @@ class Engine:
         policy = self.session.policy
         mode = policy.connect_mode(cap)
         payloads = F.Control(F.Core(ftype=F.SESSION), {ext: body}).pack(policy.payload_bytes(mode))
-        return L.TxBurst(mode, [L.Slot(L.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0)
+        return L.TxBurst(mode, [L.Slot(L.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, cap)
 
     def _id_frame(self, s: S.Session) -> L.TxBurst:
         log.info("TX ID %s", s.call)
@@ -321,8 +321,9 @@ class Engine:
 
     def _energy(self, start: float, end: float, mode: str, t: float, min_db: float | None = None):
         """The energy inputs (predictor.N_ENERGY): a peer burst's in-band SNR
-        over start..end from power alone, against its peak (PHY.peak_db),
-        to the shifter. None under min_db."""
+        over start..end from power alone, against its peak (PHY.peak_db, at
+        the cap it was most likely filtered for: _rx_cap), to the shifter.
+        None under min_db."""
         observe = getattr(self.session.policy, "observe_energy", None)
         if observe is None:
             return
@@ -330,8 +331,17 @@ class Engine:
 
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
-        if snr is not None and (min_db is None or snr + PHY.peak_db(mode) >= min_db):
-            observe(snr + PHY.peak_db(mode), t)
+        peak = PHY.peak_db(mode, self._rx_cap())
+        if snr is not None and (min_db is None or snr + peak >= min_db):
+            observe(snr + peak, t)
+
+    def _rx_cap(self) -> int:
+        """The bandwidth cap a heard burst's TX filter was most likely for: the
+        session's (before a CONNECT is answered, my own), or between sessions
+        the KISS link's."""
+        if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
+            return self.kiss.cap
+        return self.session.cap
 
     def _missed_energy(self):
         """A timeout (no reply heard): the energy where the reply should

@@ -96,6 +96,7 @@ class TxBurst:
     submode: str
     slots: list[Slot]
     burst_seq: int  # absolute count of this station's bursts
+    cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; policy.CAP_HZ)
 
 
 class RxBurst(Protocol):
@@ -495,7 +496,7 @@ class Station:
         for old in [k for k in self._snapshots if k < self._confirmed]:
             self._snapshots.pop(old, None)
             self._sent_seqs.pop(old, None)
-        burst = TxBurst(submode, slots, self.bursts_sent)
+        burst = TxBurst(submode, slots, self.bursts_sent, self.cap)
         self.bursts_sent += 1
         self.last_sent = burst
         self.stats["cw_new"] += len(new)

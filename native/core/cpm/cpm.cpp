@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
+#include <string>
 
 #include "dsp/fft.hpp"
 
@@ -191,15 +192,37 @@ std::vector<int> to_tones(const Grid& g, std::span<const std::uint8_t> bits) {
     return out;
 }
 
-std::vector<double> tones(const Grid& g, std::span<const int> sym) {
+std::vector<double> tones(const Grid& g, std::span<const int> sym, double glide) {
     const int T = g.T;
     std::vector<double> x(sym.size() * T);
+    const int ng = static_cast<int>(glide * T);  // samples of glide
     double acc = 0.0;  // np.cumsum: sequential
-    for (std::size_t i = 0; i < sym.size(); ++i) {
-        const double f = g.f0 + static_cast<double>(sym[i]) * g.rate;
-        for (int k = 0; k < T; ++k) {
-            acc += f;
-            x[i * T + k] = std::numbers::sqrt2 * std::cos(2 * PI * acc / FS);
+    if (ng > 1) {
+        // the tone index per sample, smoothed: np.convolve(np.pad(a, ng, "edge"),
+        // hanning(ng + 2)[1:-1] normalized, "same")[ng:-ng], whose output i is
+        // the full convolution's i + (ng - 1) / 2
+        std::vector<double> w(ng);
+        double sum = 0.0;
+        for (int j = 0; j < ng; ++j) sum += w[j] = 0.5 - 0.5 * std::cos(2 * PI * (j + 1) / (ng + 1));
+        for (auto& v : w) v /= sum;
+        const auto L = static_cast<std::int64_t>(x.size());
+        const auto at = [&](std::int64_t k) {  // the edge-padded sequence
+            return static_cast<double>(sym[std::clamp<std::int64_t>(k - ng, 0, L - 1) / T]);
+        };
+        for (std::int64_t i = 0; i < L; ++i) {
+            const std::int64_t c = i + ng + (ng - 1) / 2;
+            double a = 0.0;
+            for (int j = 0; j < ng; ++j) a += at(c - j) * w[j];
+            acc += g.f0 + a * g.rate;
+            x[i] = std::numbers::sqrt2 * std::cos(2 * PI * acc / FS);
+        }
+    } else {
+        for (std::size_t i = 0; i < sym.size(); ++i) {
+            const double f = g.f0 + static_cast<double>(sym[i]) * g.rate;
+            for (int k = 0; k < T; ++k) {
+                acc += f;
+                x[i * T + k] = std::numbers::sqrt2 * std::cos(2 * PI * acc / FS);
+            }
         }
     }
     const int n_ramp = static_cast<int>(tables::CPM.ramp_s * FS);
@@ -212,7 +235,12 @@ std::vector<double> tones(const Grid& g, std::span<const int> sym) {
     return x;
 }
 
-std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup) {
+const tables::CpmTxFilter& tx_filter(const Grid& g, int cap) {
+    if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
+    return g.tx[cap];
+}
+
+std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap) {
     const Grid& g = grid_of(s);
     const int n_data = static_cast<int>(coded.size()) - 1 - dup;
     std::vector<int> stream;
@@ -227,7 +255,7 @@ std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::u
     for (const auto& rows : L.hdr_rows)
         for (std::size_t i = 0; i < rows.size(); ++i) sym[rows[i]] = h[i];
     for (std::size_t i = 0; i < L.data_rows.size(); ++i) sym[L.data_rows[i]] = stream[i];
-    return tones(g, sym);
+    return tones(g, sym, tx_filter(g, cap).glide);
 }
 
 Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra) {

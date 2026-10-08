@@ -24,6 +24,43 @@ def test_front_lock_and_mid_blocks_unlike_the_front():
         assert lock is None or lock["n_data"] == 3 and lock["spec"].name == name, (name, lock)
 
 
+def test_tx_filter_by_cap():
+    """Each grid's TX filter under every cap it may be used in (cpm.TX_FILTERS):
+    out of band under -37 dB (PSD against the mean between the outer tones)
+    beyond the cap's edges around the tones' centre (Grid.f0 rounds to a
+    tone: c8r50's sits at 1475 Hz), a lower peak where the cap is wider, and
+    the unchanged receiver still locks and decodes."""
+    from scipy import signal
+
+    from data2g.arq import phy as PHY
+    from data2g.arq import policy as G
+    from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
+    from data2g.config import FS
+
+    rng = np.random.default_rng(2)
+    for name, spec in cpm.SPECS.items():
+        if not name.endswith("r1/2"):
+            continue
+        g = cpm.GRIDS[spec.grid]
+        peaks = []
+        for cap, hz in G.CAP_HZ.items():
+            if spec not in G.allowed(cap):
+                continue
+            slots = [Slot(ctl_mask(0, 0, 3), 0, rng.bytes(codes.payload_bytes(cpm.CTL[g.name])))]
+            slots += [Slot(data_mask(0, i, 3), 0, rng.bytes(codes.payload_bytes(spec))) for i in range(1, 3)]
+            b = TxBurst(name, slots, 0, cap)
+            x = PHY.tx_audio(b)
+            f, p = signal.welch(x, FS, nperseg=4096)
+            ref = p[(f >= g.f0) & (f <= g.f0 + (g.m - 1) * g.rate)].mean()
+            out = p[np.abs(f - (g.f0 + (g.m - 1) * g.rate / 2)) >= hz / 2].max()
+            assert 10 * np.log10(out / ref) < -37, (name, cap, 10 * np.log10(out / ref))
+            peaks.append(PHY.peak_db(name, cap))
+            y = np.concatenate([np.zeros(2000), x, np.zeros(2000)]) + rng.normal(0, 0.05, len(x) + 4000)
+            rx = PHY.ModemRx(cpm.receive(y, cpm.find(g, y)), {})
+            assert [rx.decode(i, s.mask_id, 0, None) for i, s in enumerate(slots)] == [s.payload for s in slots], (name, cap)
+        assert peaks == sorted(peaks, reverse=True), (name, peaks)
+
+
 def test_pair_probe_on_a_data_slot_is_a_miss():
     """The link's blind ARQ_DUP probe (slot 0 failed alone: try slots 0+1 as
     one control codeword) must not combine a CPM data slot into control:

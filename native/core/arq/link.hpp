@@ -74,6 +74,7 @@ struct TxBurst {
     std::string submode;
     std::vector<Slot> slots;
     std::int64_t burst_seq = 0;  // absolute count of this station's bursts
+    int cap = 0;                 // bandwidth cap code the TX filter is for (cpm::tx_filter; policy CAP_HZ)
 };
 using TxBurstPtr = std::shared_ptr<const TxBurst>;
 

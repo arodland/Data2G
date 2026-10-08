@@ -251,7 +251,8 @@ void KissLink::enqueue(Bytes frame, int port, std::optional<std::int64_t> ack) {
 
 namespace {
 bool same_burst(const arq::TxBurst& a, const arq::TxBurst& b) {  // TxBurst's == in Python (a dataclass)
-    if (a.submode != b.submode || a.burst_seq != b.burst_seq || a.slots.size() != b.slots.size()) return false;
+    if (a.submode != b.submode || a.burst_seq != b.burst_seq || a.cap != b.cap || a.slots.size() != b.slots.size())
+        return false;
     for (std::size_t i = 0; i < a.slots.size(); ++i) {
         const auto &x = a.slots[i], &y = b.slots[i];
         if (x.mask_id.key != y.mask_id.key || x.mask_id.direction != y.mask_id.direction || x.mask_id.seq != y.mask_id.seq ||
@@ -393,6 +394,7 @@ arq::TxBurstPtr KissLink::next_burst() {
                                 Bytes(stream.begin() + static_cast<std::ptrdiff_t>(j * pb),
                                       stream.begin() + static_cast<std::ptrdiff_t>((j + 1) * pb))});
         b->burst_seq = ++n_sent;
+        b->cap = cap;
         inflight_ = b;
         inflight_acks_.clear();
         for (const auto& q : taken)

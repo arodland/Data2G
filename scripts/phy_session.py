@@ -295,7 +295,7 @@ class RealPhy:
         # the floor from the burst's own pads: this sim sets each burst's noise
         # against its peak (as a full-scale transmitter in fixed noise would see)
         snr = prof.span_snr_db(blocks(y[pad:len(y) - pad]), lo, hi, blocks(y[:pad]) + blocks(y[len(y) - pad:]))
-        return None if snr is None else snr + PHY.peak_db(burst.submode)
+        return None if snr is None else snr + PHY.peak_db(burst.submode, burst.cap)
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
