@@ -50,19 +50,26 @@ def kiss_encode(data: bytes, port: int = 0, cmd: int = DATA) -> bytes:
     return bytes([FEND]) + body + bytes([FEND])
 
 
+KISS_MAX_FRAME = 1 << 16  # a longer frame is junk (a client that never sends FEND)
+
+
 class KissDecoder:
     """Bytes in, whole frames (command byte, data) out, across reads."""
 
     def __init__(self):
-        self.buf, self.esc = bytearray(), False
+        self.buf, self.esc, self.skip = bytearray(), False, False
 
     def feed(self, data: bytes) -> list[tuple[int, bytes]]:
         out = []
         for b in data:
             if b == FEND:
-                if self.buf:
+                if self.buf and not self.skip:
                     out.append((self.buf[0], bytes(self.buf[1:])))
-                self.buf, self.esc = bytearray(), False
+                self.buf, self.esc, self.skip = bytearray(), False, False
+            elif self.skip:
+                pass
+            elif len(self.buf) >= KISS_MAX_FRAME:  # no FEND in sight: discard to the next one
+                self.buf, self.skip = bytearray(), True
             elif self.esc:
                 self.buf.append({TFEND: FEND, TFESC: FESC}.get(b, b))
                 self.esc = False
@@ -373,8 +380,9 @@ class Receiver:
             self.pilots_ok = ok
 
     def _trim(self, n: int):
-        self.off += len(self.buf) - n if n < len(self.buf) else 0
-        self.buf = self.buf[-n:] if n < len(self.buf) else self.buf
+        if n < len(self.buf):
+            self.off += len(self.buf) - n
+            self.buf = self.buf[len(self.buf) - n:]  # not [-n:], which for n = 0 is everything
         for d in self.detectors.values():
             d.trim(self.off)
 
@@ -686,9 +694,10 @@ class Rigctld:
         self.addr, self.sock = (host, port), None
         self.keyed = False  # a PTT on reached a connected rigctld
 
-    def ptt(self, on: bool):
+    def ptt(self, on: bool) -> bool:
+        """True if rigctld took it (or there is no rigctld); False: try again later."""
         if not self.addr[1]:
-            return
+            return True
         for _ in range(2):  # one reconnect
             try:
                 if self.sock is None:
@@ -696,13 +705,16 @@ class Rigctld:
                 self.sock.sendall(b"T 1\n" if on else b"T 0\n")
                 self.keyed |= on
                 reply = self.sock.recv(64)
+                if not reply:  # rigctld closed on us
+                    raise ConnectionError("connection closed")
                 if not reply.startswith(b"RPRT 0"):
                     log.warning("rigctld answered %r to PTT %s", reply, "on" if on else "off")
-                return
+                return True
             except OSError as e:
                 log.warning("rigctld %s:%d: %s", *self.addr, e)
                 self.close()
         log.error("PTT %s failed", "on" if on else "off")
+        return False
 
     def release(self):
         """At exit: PTT off only if we keyed the radio. Never connected, or

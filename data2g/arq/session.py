@@ -120,6 +120,8 @@ class Session:
         self._queue(self._connect_burst(), now)
 
     def disconnect(self):
+        if self.state in (IDLE, LISTEN, CLOSED):
+            return  # nothing to close; a flag left set would end the next session at its first burst
         self._want_disc = True
         if self._build_at is not None:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead

@@ -30,6 +30,7 @@ using Bytes = std::vector<std::uint8_t>;
 // --- KISS -------------------------------------------------------------------
 
 inline constexpr std::uint8_t FEND = 0xC0, FESC = 0xDB, TFEND = 0xDC, TFESC = 0xDD;
+inline constexpr std::size_t KISS_MAX_FRAME = 1u << 16;  // a longer frame is junk (a client that never sends FEND)
 
 inline constexpr int KISS_DATA = 0x00, KISS_ACKMODE = 0x0C;  // KISS commands (low nibble; the port is the high one)
 // A KISS frame: a data frame (command 0) for `data` on `port` by default.
@@ -42,7 +43,7 @@ public:
 
 private:
     Bytes buf_;
-    bool esc_ = false;
+    bool esc_ = false, skip_ = false;  // skip_: over-long frame, discarding to the next FEND
 };
 
 // --- framing: [length, 2 bytes big-endian][frame] back to back, zero-padded --

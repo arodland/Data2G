@@ -18,7 +18,9 @@ from pathlib import Path
 
 # The caps must be in place before numpy loads (data2g/threads.py), and this
 # wrapper loads it before the script does. --threads N overrides 1.
-if "--threads" in sys.argv:
+# Only before the script path: after it, --threads belongs to the script.
+_end = next((j for j, x in enumerate(sys.argv[1:], 1) if x.endswith(".py")), len(sys.argv))
+if "--threads" in sys.argv[:_end - 1] and sys.argv.index("--threads") + 1 < _end:
     i = sys.argv.index("--threads")
     _n = sys.argv.pop(i + 1)
     sys.argv.pop(i)

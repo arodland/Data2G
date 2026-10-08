@@ -683,6 +683,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
        length puts its copy frame there and it clears the header floor.
     4. The best-scoring word whose burst's frame pilots are coherent
        (COPY_COHERENCE; the live BUSY floors pass noise)."""
+    if C is not None and level is None:
+        raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
     z0 = to_baseband(np.asarray(x, dtype=np.float64))
     freqs = _sync._cfo_grid()
@@ -773,11 +775,11 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     origin as x): no preamble search, the header its copy read."""
     z0 = to_baseband(np.asarray(x, dtype=np.float64))
     if copy is not None:
+        if copy["end"] > len(z0):
+            raise SyncError("burst runs past the buffer")
         z = freq_correct(z0, copy["cfo"])
         hd = _copy_header(z, copy)
         acq = _sync.Acquisition(copy["start"], copy["cfo"], 0.0)
-        if copy["end"] > len(z0):
-            raise SyncError("burst runs past the buffer")
     elif head is None:
         hd, acq, z = _best_header(z0, bands, accept=accept)
     else:

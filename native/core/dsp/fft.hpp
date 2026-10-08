@@ -66,20 +66,35 @@ inline std::size_t fft_thread_count() {
     return n;
 }
 
-// In-place-free complex FFT. `forward` selects the sign convention;
-// the inverse is scaled by 1/n so that ifft(fft(x)) == x, matching
-// numpy and scipy. A lone transform, so single-threaded by construction
-// (see fft_thread_count) -- nthreads=1 here is not a missed opportunity.
-inline std::vector<cdouble> fft(const std::vector<cdouble>& x, bool forward) {
-    const std::size_t n = x.size();
-    std::vector<cdouble> out(n);
-    if (n == 0) return out;
+// fft() into a caller's buffer: `in` and `out` n long, not overlapping.
+inline void fft_into(const cdouble* in, cdouble* out, std::size_t n, bool forward) {
+    if (n == 0) return;
     const pocketfft::shape_t shape{n};
     const pocketfft::stride_t stride{
         static_cast<std::ptrdiff_t>(sizeof(cdouble))};
     const double scale = forward ? 1.0 : 1.0 / static_cast<double>(n);
     pocketfft::c2c(shape, stride, stride, pocketfft::shape_t{0}, forward,
-                   x.data(), out.data(), scale);
+                   in, out, scale);
+}
+
+// `rows` transforms of length n, one batched pocketfft call (rows contiguous, n apart): the
+// lines are processed several to a vector op, which a lone fft_into can't.
+inline void fft_rows_into(const cdouble* in, cdouble* out, std::size_t rows, std::size_t n, bool forward) {
+    if (n == 0 || rows == 0) return;
+    const pocketfft::shape_t shape{rows, n};
+    const pocketfft::stride_t stride{
+        static_cast<std::ptrdiff_t>(n * sizeof(cdouble)), static_cast<std::ptrdiff_t>(sizeof(cdouble))};
+    const double scale = forward ? 1.0 : 1.0 / static_cast<double>(n);
+    pocketfft::c2c(shape, stride, stride, pocketfft::shape_t{1}, forward, in, out, scale);
+}
+
+// In-place-free complex FFT. `forward` selects the sign convention;
+// the inverse is scaled by 1/n so that ifft(fft(x)) == x, matching
+// numpy and scipy. A lone transform, so single-threaded by construction
+// (see fft_thread_count) -- nthreads=1 here is not a missed opportunity.
+inline std::vector<cdouble> fft(const std::vector<cdouble>& x, bool forward) {
+    std::vector<cdouble> out(x.size());
+    fft_into(x.data(), out.data(), x.size(), forward);
     return out;
 }
 

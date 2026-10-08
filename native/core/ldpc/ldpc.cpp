@@ -305,6 +305,8 @@ Decoder::Decoder(const Code& code)
 Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float> alpha, bool posterior) const {
     if (llr.cols != sent_.size()) throw std::invalid_argument("expected (B, n) LLRs");
     if (iters < 1) throw std::invalid_argument("iters must be >= 1");
+    if (alpha.size() > 1 && alpha.size() < static_cast<std::size_t>(iters))
+        throw std::invalid_argument("alpha: empty, one value, or one per iteration");
     const std::size_t B = llr.rows, E = var_.size();
     Mat<float> ch(B, n_cols_, 0.0f), tot(B, n_cols_), c2v(B, E, 0.0f);
     for (std::size_t b = 0; b < B; ++b) {

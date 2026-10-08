@@ -307,6 +307,8 @@ void Engine::listen(bool on) {
 }
 
 void Engine::set_call(const std::string& call, const std::vector<std::string>& aliases) {
+    pack_call(call);  // invalid_argument for a call that won't pack, before anything changes
+    for (const auto& a : aliases) pack_call(a);
     call_ = upper(call);
     aliases_.clear();
     for (const auto& a : aliases) aliases_.push_back(upper(a));
@@ -322,6 +324,7 @@ void Engine::abort() {
 
 void Engine::connect(const std::string& peer, int cap) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
+    pack_call(peer);  // invalid_argument before any state changes
     new_session();
     session_->connect(peer, cap, now());
 }
@@ -449,7 +452,7 @@ Engine::Out Engine::step(std::span<const double> x) {
     channel_busy_now_ = receiver_channel_busy();
     if (!cfg_.worker) {
         run_posted();
-        Done d = process(b);
+        Done d = process_safe(b);
         if (after_block_) after_block_(d.out.ptt);
         return std::move(d.out);
     }
@@ -496,7 +499,7 @@ void Engine::work() {
                                       [](const auto& it) { return !std::holds_alternative<tnc::HeaderEvent>(it); });
         lock.unlock();
         run_posted();
-        Done d = process(b);
+        Done d = process_safe(b);
         if (after_block_) after_block_(d.out.ptt);
         lock.lock();
         if (slow) --slow_;
@@ -507,6 +510,18 @@ void Engine::work() {
 }
 
 // --- the session stage -----------------------------------------------------------------
+
+// A throw here would end the worker thread (std::terminate) or the station's engine loop with
+// the radio possibly keyed. Drop the session and the transmission instead, and keep listening.
+Engine::Done Engine::process_safe(Block& b) {
+    try {
+        return process(b);
+    } catch (const std::exception& e) {
+        log_write(LOG, 40, format("session stage: %s: session dropped", e.what()));
+        abort();
+        return {Out{std::vector<double>(b.x.size(), 0.0), false}, false};
+    }
+}
 
 Engine::Done Engine::process(Block& b) {
     if (b.gap) {  // dropped blocks before this one: their time passes, recorded as silence

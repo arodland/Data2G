@@ -282,3 +282,9 @@ def test_exit_unkeys_only_a_radio_we_keyed(caplog):
     time.sleep(0.2)
     assert got[-1] == b"T 0\n"
     srv.close()
+
+
+def test_kiss_decoder_discards_a_frame_that_never_ends():
+    dec = tnc.KissDecoder()
+    assert dec.feed(b"\x00" + b"a" * (1 << 17)) == []  # no FEND: junk, not buffered forever
+    assert dec.feed(b"zz\xc0\x00hi\xc0") == [(0, b"hi")]  # the next frame is read normally

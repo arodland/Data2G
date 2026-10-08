@@ -298,6 +298,8 @@ class KissLink:
         if port not in self.ports:
             self.events.append(f"BCAST {port} DROPPED 1")
             return
+        if not frame:
+            return  # a zero length is the burst's end marker (tnc.unpack)
         self.queue.append((port, frame, ack))
 
     def take_events(self) -> list[str]:

@@ -54,6 +54,9 @@ VIAddVersionKey "FileDescription" "Data2G installer"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
+; The uninstaller removes $INSTDIR recursively, so the install folder is always
+; one of ours: a picked "C:\Tools" becomes "C:\Tools\Data2G".
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirLeave
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 ; Launched through explorer.exe so the app gets the user's token, not this
@@ -67,6 +70,12 @@ VIAddVersionKey "FileDescription" "Data2G installer"
 !insertmacro MUI_UNPAGE_INSTFILES
 
 !insertmacro MUI_LANGUAGE "English"
+
+Function DirLeave
+  StrCpy $0 $INSTDIR 7 -7
+  StrCmp $0 "\Data2G" +2
+  StrCpy $INSTDIR "$INSTDIR\Data2G"
+FunctionEnd
 
 Section "Data2G (required)" SecMain
   SectionIn RO

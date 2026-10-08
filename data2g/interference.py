@@ -65,6 +65,7 @@ class Interference:
     spec: Spec
     seed: int
     horizon: float
+    _max_len: int = field(init=False, repr=False)  # longest impulse, samples (floor 64)
     _imp: np.ndarray = field(init=False, repr=False)  # (start sample, height, length samples, seed) rows
     _episodes: list = field(init=False, repr=False)  # per QRM source: (starts, ends) in samples
 
@@ -79,13 +80,14 @@ class Interference:
                 t += rng.exponential(60.0 / im.trains_per_min)
                 if t * FS >= n_end:
                     break
-                k = 1 + rng.geometric(1.0 / max(im.per_train, 1.0)) - 1
+                k = rng.geometric(1.0 / max(im.per_train, 1.0))  # numpy counts trials, from 1
                 s = t
                 for _ in range(k):
                     rows.append((int(s * FS), rng.normal(im.height_db, im.height_sd_db),
                                  max(1, int(rng.uniform(*im.length_ms) * 1e-3 * FS)), int(rng.integers(1 << 31))))
                     s += max(0.005, rng.exponential(im.gap_ms * 1e-3))
         self._imp = np.array(sorted(rows), dtype=float).reshape(-1, 4)
+        self._max_len = max(64, int(self._imp[:, 2].max())) if len(self._imp) else 64
         self._episodes = []
         for q in self.spec.qrm:
             starts, ends = [], []
@@ -108,7 +110,7 @@ class Interference:
         n0 = sigma**2 / (FS / 2)  # the floor's density, per Hz
         if len(self._imp):
             ring = len(_PASS)
-            lo = np.searchsorted(self._imp[:, 0], s0 - 64 - ring)
+            lo = np.searchsorted(self._imp[:, 0], s0 - self._max_len - ring)
             hi = np.searchsorted(self._imp[:, 0], s1)
             for start, h_db, length, seed in self._imp[lo:hi]:
                 w = _impulse(int(length), int(seed))

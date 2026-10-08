@@ -136,14 +136,9 @@ public:
             // slot -1: not written back unless the decode stores
             e = SoftEntry{vec(t[0].cast<In<double>>()), t[1].cast<int>(), t[2].cast<std::string>(), -1, 0, {}};
         }
-        try {
+        {
             py::gil_scoped_release nogil;
             out = rx_->decode_stored(slot, m, rv, e);
-        } catch (const StoreMismatch&) {
-            const std::string msg = py::str("soft bits of {} stored in {} ({}), resent in {} slot {} rv {}")
-                                        .format(key, t[2], t[3], rx_->submode(), slot, rv).cast<std::string>();
-            PyErr_SetString(PyExc_AssertionError, msg.c_str());
-            throw py::error_already_set();
         }
         if (out) return pyb(*out);
         if (e && e->slot >= 0) {

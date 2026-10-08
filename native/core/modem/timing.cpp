@@ -33,7 +33,7 @@ std::vector<bool> header_layout(std::string_view name) {
 
 int header_samples(std::string_view name) { return static_cast<int>(header_layout(name).size()) * NSYM; }
 
-static bool copies(std::string_view name) {
+bool copies(std::string_view name) {
     return std::find(HEADER_COPY_BANDS.begin(), HEADER_COPY_BANDS.end(), name) != HEADER_COPY_BANDS.end();
 }
 

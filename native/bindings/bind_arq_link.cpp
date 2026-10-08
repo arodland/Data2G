@@ -503,7 +503,7 @@ void bind_arq_link(py::module_& m) {
             return l;
         })
         .def_readonly("close_reason", &Session::close_reason)
-        .def_readonly("chat", &Session::chat)
+        .def_readwrite("chat", &Session::chat)  // Python's attribute: set_chat() is the one that reaches the station
         .def_property_readonly("aliases", [](const Session& s) { return py::tuple(py::cast(s.aliases)); })
         .def_readwrite("stats_interval_s", &Session::stats_interval_s)
         .def_property_readonly("_out", [](const Session& s) { return burst_py(s.out); })

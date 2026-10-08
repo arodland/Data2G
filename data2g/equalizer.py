@@ -21,7 +21,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .config import FRAME_SAMPLES, FS, NC, NCP, RS, SYMS_PER_FRAME
+from .config import FRAME_SAMPLES, FS, NCP, SYMS_PER_FRAME
 from .waveform import ofdm
 
 FRAME_S = FRAME_SAMPLES / FS
@@ -90,6 +90,9 @@ def window_shift(support: tuple[int, int]) -> int:
     return int(round((support[0] + support[1] - NCP) / 2))
 
 
+SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see _freq_smooth
+
+
 @lru_cache(maxsize=1024)
 def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
     """(orthonormal basis of the support's delays across the carriers, its
@@ -97,7 +100,7 @@ def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
     support (the SVD was 7% of a Pat exchange's CPU, once per header read)."""
     bb = np.frombuffer(bb_bytes)
     nc = len(bb)
-    slack = 4  # see _freq_smooth
+    slack = SUPPORT_SLACK
     d = np.arange(d0 - slack, d1 + slack + 1)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
     U, s, _ = np.linalg.svd(B, full_matrices=False)
@@ -281,7 +284,7 @@ def refine(h_pilot: np.ndarray, t_pilot: np.ndarray, z: np.ndarray, w: np.ndarra
     U, r, _ = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]))
     p_sig, spread = est["p_sig"], est["spread_hz"]
     hs_p = (h_pilot @ np.conj(U)) @ U.T
-    d = np.arange(support[0] - 4, support[1] + 5)  # _support_basis's slack
+    d = np.arange(support[0] - SUPPORT_SLACK, support[1] + SUPPORT_SLACK + 1)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
     Rf = p_sig / len(d) * (B @ B.conj().T)
     # data rows, batched by which carriers they know (after decoding: all)

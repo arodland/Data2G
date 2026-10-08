@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from scipy.signal import firwin
 
-from . import config, constellation, equalizer, modem
+from . import config, constellation, equalizer, hfchannel, modem
 from .config import (
     DATA_SYMS_PER_FRAME,
     DEMOD_BACKOFF,
@@ -51,15 +51,8 @@ class Channel:
     delay_ms: float = 0.0
 
 
-CHANNELS = {
-    "awgn": Channel("awgn"),
-    "mpg": Channel("mpg", 0.1, 0.5),
-    "mpp": Channel("mpp", 1.0, 2.0),
-    "mpd": Channel("mpd", 2.0, 4.0),
-    # SSTVAE's measured path (hfchannel.py there): slow like mpg,
-    # selective like mpp. The hard case for interleaving.
-    "mps": Channel("mps", 0.15, 2.0),
-}
+CHANNELS = {"awgn": Channel("awgn"),
+            **{k: Channel(k, p.doppler_hz, p.delay_ms) for k, p in hfchannel.FADING_PRESETS.items()}}
 
 
 def _analytic(x: torch.Tensor) -> torch.Tensor:

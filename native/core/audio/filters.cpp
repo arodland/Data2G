@@ -35,6 +35,22 @@ double median(std::span<const double> v) {
     return (lo + s[h]) / 2.0;
 }
 
+// sum a[i] * b[i], four accumulators (the reduction vectorizes only if its order is ours to choose)
+double dot(const double* a, const double* b, std::size_t n) {
+    double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    std::size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        s0 += a[i] * b[i];
+        s1 += a[i + 1] * b[i + 1];
+        s2 += a[i + 2] * b[i + 2];
+        s3 += a[i + 3] * b[i + 3];
+    }
+    for (; i < n; ++i) s0 += a[i] * b[i];
+    return (s0 + s1) + (s2 + s3);
+}
+
+constexpr std::size_t PH_LEN = 33;  // taps per polyphase branch: (32 u + 1 + u - 1) / u, the phase-0 branch's
+
 }  // namespace
 
 std::vector<double> lfilter_fir(std::span<const double> b, std::span<const double> x, std::vector<double>& zi) {
@@ -55,25 +71,47 @@ std::vector<double> lfilter_fir(std::span<const double> b, std::span<const doubl
     return y;
 }
 
-Decimator::Decimator(int rate) : d_(ratio(rate)), taps_(design(d_, rate, 1.0)), zi_(taps_.size() - 1, 0.0) {}
+Decimator::Decimator(int rate)
+    : d_(ratio(rate)), taps_(design(d_, rate, 1.0)), rtaps_(taps_.rbegin(), taps_.rend()), hist_(taps_.size() - 1, 0.0) {}
 
 std::vector<double> Decimator::operator()(std::span<const double> x) {
-    const std::vector<double> y = lfilter_fir(taps_, x, zi_);
+    // y[n] = sum_k h[k] buf[H + n - k] = sum_j rh[j] buf[n + j], buf = history then x, H = len(h) - 1
+    const std::size_t L = taps_.size(), H = L - 1, d = static_cast<std::size_t>(d_);
+    std::vector<double> buf(H + x.size());
+    std::copy(hist_.begin(), hist_.end(), buf.begin());
+    std::copy(x.begin(), x.end(), buf.begin() + static_cast<std::ptrdiff_t>(H));
     std::vector<double> out;
-    out.reserve(y.size() / static_cast<std::size_t>(d_) + 1);
-    for (std::size_t i = static_cast<std::size_t>(phase_); i < y.size(); i += static_cast<std::size_t>(d_))
-        out.push_back(y[i]);
+    out.reserve(x.size() / d + 1);
+    for (std::size_t i = static_cast<std::size_t>(phase_); i < x.size(); i += d)
+        out.push_back(dot(rtaps_.data(), buf.data() + i, L));
+    std::copy(buf.end() - static_cast<std::ptrdiff_t>(H), buf.end(), hist_.begin());
     phase_ = ((phase_ - static_cast<std::int64_t>(x.size())) % d_ + d_) % d_;
     return out;
 }
 
 Interpolator::Interpolator(int rate)
-    : u_(ratio(rate)), taps_(design(u_, rate, static_cast<double>(u_))), zi_(taps_.size() - 1, 0.0) {}
+    : u_(ratio(rate)), taps_(design(u_, rate, static_cast<double>(u_))),
+      phases_(static_cast<std::size_t>(u_) * PH_LEN, 0.0), hist_(PH_LEN - 1, 0.0) {
+    // out[i u + p] = sum_j h[p + j u] x[i - j]; reversed, so it is a dot product with buf[i ..]
+    if (u_ == 1) {
+        phases_[PH_LEN - 1] = taps_[0];  // the identity filter
+        return;
+    }
+    for (std::size_t p = 0; p < static_cast<std::size_t>(u_); ++p)
+        for (std::size_t j = 0; p + j * static_cast<std::size_t>(u_) < taps_.size(); ++j)
+            phases_[p * PH_LEN + (PH_LEN - 1 - j)] = taps_[p + j * static_cast<std::size_t>(u_)];
+}
 
 std::vector<double> Interpolator::operator()(std::span<const double> x) {
-    std::vector<double> up(x.size() * static_cast<std::size_t>(u_), 0.0);
-    for (std::size_t i = 0; i < x.size(); ++i) up[i * static_cast<std::size_t>(u_)] = x[i];
-    return lfilter_fir(taps_, up, zi_);
+    const std::size_t H = PH_LEN - 1, u = static_cast<std::size_t>(u_);
+    std::vector<double> buf(H + x.size());
+    std::copy(hist_.begin(), hist_.end(), buf.begin());
+    std::copy(x.begin(), x.end(), buf.begin() + static_cast<std::ptrdiff_t>(H));
+    std::vector<double> out(x.size() * u);
+    for (std::size_t i = 0; i < x.size(); ++i)
+        for (std::size_t p = 0; p < u; ++p) out[i * u + p] = dot(phases_.data() + p * PH_LEN, buf.data() + i, PH_LEN);
+    std::copy(buf.end() - static_cast<std::ptrdiff_t>(H), buf.end(), hist_.begin());
+    return out;
 }
 
 std::vector<double> Blanker::operator()(std::span<const double> x) {

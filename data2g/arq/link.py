@@ -818,6 +818,7 @@ class Station:
         if progress:
             self.no_progress = 0
             self.resyncs = 0
+            self.resync_due = False  # a deferred resync is moot once data moves
             return
         if not self.tx.pending():
             return

@@ -106,7 +106,10 @@ class Host:
         e = self.engine
         ok = True
         if cmd == "MYCALL" and len(args) >= 1:
-            e.set_call(*args)  # VARA takes several: all answer connects
+            try:
+                e.set_call(*args)  # VARA takes several: all answer connects
+            except ValueError:
+                ok = False
         elif cmd == "LISTEN" and args and args[0].upper() == "CQ":
             pass  # CQ frames are always reported
         elif cmd == "LISTEN" and args and args[0].upper() in ("ON", "OFF"):
@@ -116,7 +119,7 @@ class Host:
             try:
                 e.set_call(args[0], *e.aliases)
                 e.connect(args[1], self.cap)
-            except RuntimeError:
+            except (RuntimeError, ValueError):
                 ok = False
         elif cmd == "DISCONNECT":
             e.session.disconnect()
@@ -393,15 +396,14 @@ class _Port:
             except OSError:
                 d = b""
             if not d:
-                if self.client is c:
-                    self.client = None
-                    if self.on_close:
-                        self.on_close()
+                self._drop(c)
                 return
             if not self.lines:
                 self.on_input(d)
                 continue
             buf += d
+            if len(buf) > 65536 and b"\r" not in buf and b"\n" not in buf:
+                buf = b""  # a client that never ends its line
             while b"\r" in buf or b"\n" in buf:
                 i = min(x for x in (buf.find(b"\r"), buf.find(b"\n")) if x >= 0)
                 line, buf = buf[:i], buf[i + 1:]
@@ -414,7 +416,15 @@ class _Port:
             try:
                 c.sendall(data)
             except OSError:
-                self.client = None
+                self._drop(c)
+
+    def _drop(self, c):
+        """Forget client c and tell the host, once, whichever of recv or send saw it go."""
+        if self.client is c:
+            self.client = None
+            c.close()
+            if self.on_close:
+                self.on_close()
 
     def close(self):
         self.srv.close()
@@ -461,7 +471,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     log.info("commands on %s:%d, data on %d", a.host, a.command_port, a.command_port + 1)
     log.info("KISS on %s:%d: %d Hz cap, broadcasts in %s", a.kiss_address, a.kiss_port, a.kiss_bw, link.broadcast)
     log.info("recording to %s", a.record_dir or "(off)")
-    keyed, slow = False, 0
+    keyed, off_pending, slow = False, False, 0
     try:
         while not stop.is_set():
             while not inbox.empty():
@@ -489,6 +499,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                 log.debug("step took %.2f s (%d slow)", time.perf_counter() - t0, slow)
             if ptt and not keyed:
                 rig.ptt(True)
+                off_pending = False
                 out.start()
                 keyed = True
             if keyed:
@@ -496,8 +507,10 @@ def serve(a, pa, stop: threading.Event | None = None):
             if keyed and not ptt:
                 out.drain()
                 time.sleep(a.ptt_off_delay_ms / 1000)
-                rig.ptt(False)
                 keyed = False
+                off_pending = not rig.ptt(False)
+            elif off_pending and not keyed:
+                off_pending = not rig.ptt(False)  # a PTT off that failed: until it lands
             host.after_step(ptt)
             for line in host.out_cmd:
                 cmd.send(line.encode() + b"\r")

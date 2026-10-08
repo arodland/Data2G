@@ -32,9 +32,13 @@ std::vector<std::pair<int, Bytes>> KissDecoder::feed(std::span<const std::uint8_
     std::vector<std::pair<int, Bytes>> out;
     for (const std::uint8_t b : data) {
         if (b == FEND) {
-            if (!buf_.empty()) out.emplace_back(buf_[0], Bytes(buf_.begin() + 1, buf_.end()));
+            if (!buf_.empty() && !skip_) out.emplace_back(buf_[0], Bytes(buf_.begin() + 1, buf_.end()));
             buf_.clear();
-            esc_ = false;
+            esc_ = skip_ = false;
+        } else if (skip_) {
+        } else if (buf_.size() >= KISS_MAX_FRAME) {  // no FEND in sight
+            buf_.clear();
+            skip_ = true;
         } else if (esc_) {
             buf_.push_back(b == TFEND ? FEND : b == TFESC ? FESC : b);
             esc_ = false;

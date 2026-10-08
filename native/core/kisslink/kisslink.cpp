@@ -246,6 +246,7 @@ void KissLink::enqueue(Bytes frame, int port, std::optional<std::int64_t> ack) {
         events.push_back("BCAST " + std::to_string(port) + " DROPPED 1");
         return;
     }
+    if (frame.empty()) return;  // a zero length is the burst's end marker
     queue.push_back({port, std::move(frame), ack});
 }
 

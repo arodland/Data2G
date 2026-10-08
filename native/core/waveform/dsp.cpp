@@ -5,6 +5,7 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <stdexcept>
 
 #include "dsp/dsp.hpp"
 
@@ -66,7 +67,7 @@ std::vector<double> tx_condition(std::span<const double> x, double clip_headroom
     const auto active = [&](std::span<const double> v) { return v.subspan(active_lo, active_hi - active_lo); };
     std::vector<double> out(x.begin(), x.end());
     const double power = mean_square(active(x));
-    if (power == 0) return out;
+    if (!(power > 0)) return out;  // silence, or (NaN) an empty active range
     // mean envelope power is 2x mean real power
     const double thresh = std::sqrt(2 * power) * std::pow(10.0, clip_headroom_db / 20);
     const std::vector<double> taps = dsp::firwin_bandpass(201, bandpass.first, bandpass.second, FS);
@@ -91,6 +92,7 @@ std::vector<double> tx_condition(std::span<const double> x, double clip_headroom
 }
 
 double papr_db(std::span<const double> x) {
+    if (x.empty()) throw std::invalid_argument("papr_db of no samples");
     const std::vector<cdouble> z = dsp::hilbert(x);
     std::vector<double> env2(z.size());
     for (std::size_t i = 0; i < z.size(); ++i) {

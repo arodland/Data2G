@@ -406,7 +406,7 @@ if [ "$MODE" = app ]; then
     # would look inside, and SmartScreen's reputation attaches to the
     # executable the user launches -- which is this list.
     found=""
-    for exe in data2g-host.exe data2g-gui.exe data2g-audio-check.exe; do
+    for exe in data2g-host.exe data2g-gui.exe data2g-monitor.exe data2g-audio-check.exe; do
         [ -f "$dir/$exe" ] && found="$found $exe"
     done
     [ -n "$found" ] || { echo "sign: no executables found in $dir" >&2; exit 1; }
