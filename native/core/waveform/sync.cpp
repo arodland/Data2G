@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <numbers>
 #include <string>
 #include <tuple>
@@ -37,10 +39,8 @@ constexpr std::size_t PARALLEL_MIN = 6000;
 // summed over repeats in Python's order, repeat-major so the loop over
 // starts vectorizes; the products spelled out (no std::complex NaN
 // fallback). Most of a StreamDetector hop after its FFTs: SIMD clones.
-DATA2G_SIMD_CLONES void repeat_stat(const cdouble* __restrict c, int repeats, std::size_t n, double* __restrict S) {
-    std::vector<double> re(n), im(n);
-    double* __restrict pr = re.data();
-    double* __restrict pi = im.data();
+DATA2G_SIMD_CLONES void repeat_stat(const cdouble* __restrict c, int repeats, std::size_t n, double* __restrict S,
+                                   double* __restrict pr, double* __restrict pi) {  // pr, pi: n zeros
     for (int rr = 1; rr < repeats; ++rr) {
         const cdouble* x = c + PREAMBLE_CP + static_cast<std::size_t>(rr) * M;
         const cdouble* y = x - M;
@@ -51,6 +51,49 @@ DATA2G_SIMD_CLONES void repeat_stat(const cdouble* __restrict c, int repeats, st
     }
     for (std::size_t k = 0; k < n; ++k) S[k] = std::sqrt(pr[k] * pr[k] + pi[k] * pi[k]);
 }
+// out[j] = a[j] * b[j] with the products spelled out: std::complex's operator* carries a NaN
+// fallback that stops this vectorizing, and for finite input the values are the same.
+DATA2G_SIMD_CLONES void cmul(const cdouble* __restrict a, const cdouble* __restrict b, cdouble* __restrict out, std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    double* o = reinterpret_cast<double*>(out);
+    for (std::size_t j = 0; j < n; ++j) {
+        const double ar = x[2 * j], ai = x[2 * j + 1], br = y[2 * j], bi = y[2 * j + 1];
+        o[2 * j] = ar * br - ai * bi;
+        o[2 * j + 1] = ar * bi + ai * br;
+    }
+}
+
+// out[j] = a[j] * w, w one complex factor
+DATA2G_SIMD_CLONES void cscale(const cdouble* __restrict a, cdouble w, cdouble* __restrict out, std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    double* o = reinterpret_cast<double*>(out);
+    const double br = w.real(), bi = w.imag();
+    for (std::size_t j = 0; j < n; ++j) {
+        const double ar = x[2 * j], ai = x[2 * j + 1];
+        o[2 * j] = ar * br - ai * bi;
+        o[2 * j + 1] = ar * bi + ai * br;
+    }
+}
+
+// Per-thread work buffers, kept between calls: a live hop is a few thousand samples and
+// ~27 bins, so allocating them per bin cost more than it saved. A whole-buffer acquire's
+// (megabytes) are given back after each task instead of held.
+struct Scratch {
+    std::vector<cdouble> prod, c, row;
+    std::vector<double> p, pn, re, im;
+};
+constexpr std::size_t SCRATCH_KEEP = 1 << 16;  // elements per buffer worth holding
+
+Scratch& scratch() {
+    thread_local Scratch s;
+    return s;
+}
+
+void release_big(Scratch& s) {
+    if (s.prod.capacity() > SCRATCH_KEEP || s.row.capacity() > SCRATCH_KEEP) s = Scratch{};
+}
+
 void per_bin(std::size_t samples, std::size_t bins, const std::function<void(std::size_t)>& fn) {
     if (samples >= PARALLEL_MIN) {
         pool::parallel_for(bins, fn);
@@ -128,31 +171,80 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
     return dsp::fftconvolve_valid(z, g);
 }
 
-Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs) {
+namespace {
+
+// FFT(conj(reversed t)) zero-padded to L: the same for every call of a given length, and a
+// StreamDetector calls at a handful of lengths, so the last few are kept.
+std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cdouble> t, std::size_t L) {
+    struct Entry {
+        std::vector<cdouble> t;
+        std::size_t L;
+        std::shared_ptr<const std::vector<cdouble>> G;
+    };
+    static std::mutex mu;
+    static std::vector<Entry> cache;
+    constexpr std::size_t KEEP = 8;
+    {
+        std::lock_guard lock(mu);
+        for (const Entry& e : cache)
+            if (e.L == L && std::equal(e.t.begin(), e.t.end(), t.begin(), t.end())) return e.G;
+    }
+    std::vector<cdouble> gp(L);
+    for (std::size_t k = 0; k < t.size(); ++k) gp[k] = std::conj(t[t.size() - 1 - k]);
+    auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
+    std::lock_guard lock(mu);
+    cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
+    if (cache.size() > KEEP) cache.erase(cache.begin());
+    return G;
+}
+
+// Each f's repeat_corr row: dest(i) is where bin i's row (z.size() - t.size() + 1 long) goes, or
+// null for a scratch row; use(i, row) then sees it while it is still in cache. One FFT of z and
+// the cached spectrum of t, then per f an inverse FFT of the product with t's spectrum rolled by
+// whole bins (sync._repeat_corrs).
+void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs,
+               const std::function<cdouble*(std::size_t)>& dest,
+               const std::function<void(std::size_t, const cdouble*)>& use) {
     const std::size_t m = t.size();
     if (z.size() < m) throw std::invalid_argument("repeat_corrs: signal shorter than the template");
     const std::size_t n = z.size() + m - 1, n_out = z.size() - m + 1;
     const std::size_t L = PER * dsp::next_fast_len((n + PER - 1) / PER), bins_per_step = L / PER;
-    std::vector<cdouble> zp(L), gp(L);
+    std::vector<cdouble> zp(L);
     std::copy(z.begin(), z.end(), zp.begin());
-    for (std::size_t k = 0; k < m; ++k) gp[k] = std::conj(t[m - 1 - k]);
-    const std::vector<cdouble> Z = dsp::fft(zp, true), G0 = dsp::fft(gp, true);
-    Mat<cdouble> out(freqs.size(), n_out);
-    // independent per frequency: one pool task each
+    const std::vector<cdouble> Z = dsp::fft(zp, true);
+    const auto Gp = template_spectrum(t, L);
+    const std::vector<cdouble>& G0 = *Gp;
     per_bin(z.size(), freqs.size(), [&](std::size_t i) {
+        Scratch& s = scratch();
+        s.prod.resize(L);
+        s.c.resize(L);
         const auto k = static_cast<std::int64_t>(std::llround(freqs[i] / STEP_HZ));
         const auto shift = static_cast<std::size_t>(((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L)
                                                      + static_cast<std::int64_t>(L)) % static_cast<std::int64_t>(L));
-        std::vector<cdouble> prod(L);
-        for (std::size_t j = 0; j < shift; ++j) prod[j] = Z[j] * G0[j + L - shift];  // np.roll(G0, shift)
-        for (std::size_t j = shift; j < L; ++j) prod[j] = Z[j] * G0[j - shift];
-        const std::vector<cdouble> c = dsp::fft(prod, false);
+        cdouble* prod = s.prod.data();
+        cmul(Z.data(), G0.data() + (L - shift), prod, shift);  // np.roll(G0, shift)
+        cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
+        dsp::fft_into(prod, s.c.data(), L, false);
         // exp(-2j pi f (M-1) / FS) = exp(-2j pi k (M-1) / PER): an exact turn
         std::int64_t q = (k * static_cast<std::int64_t>(m - 1)) % PER;
         if (q < 0) q += PER;
         const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
-        for (std::size_t j = 0; j < n_out; ++j) out[i][j] = c[m - 1 + j] * ph;
+        cdouble* row = dest(i);
+        if (!row) {
+            s.row.resize(n_out);
+            row = s.row.data();
+        }
+        cscale(s.c.data() + (m - 1), ph, row, n_out);
+        if (use) use(i, row);
+        release_big(s);
     });
+}
+
+}  // namespace
+
+Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs) {
+    Mat<cdouble> out(freqs.size(), z.size() >= t.size() ? z.size() - t.size() + 1 : 0);
+    corr_rows(z, t, freqs, [&](std::size_t i) { return out[i]; }, nullptr);
     return out;
 }
 
@@ -167,34 +259,40 @@ RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int
     const auto n_out = static_cast<std::size_t>(n_out_s);
     std::vector<double> all(r.freqs);
     all.insert(all.end(), NOISE_REF_HZ.begin(), NOISE_REF_HZ.end());
-    const Mat<cdouble> cs = repeat_corrs(z, t, all);
-    r.S = Mat<double>(r.freqs.size(), n_out);
+    const std::size_t nf = r.freqs.size(), nc = z.size() - t.size() + 1;
+    r.S = Mat<double>(nf, n_out);
     r.q.resize(all.size());
-    if (keep_outs) r.outs = Mat<cdouble>(r.freqs.size(), cs.cols);
+    if (keep_outs) r.outs = Mat<cdouble>(nf, nc);
     const double expo_mean = -std::log(1 - NOISE_QUANTILE);  // quantile -> mean of an exponential
-    // independent per bin, like repeat_corrs
-    per_bin(z.size(), all.size(), [&](std::size_t i) {
-        const cdouble* c = cs[i];
-        std::vector<double> p(cs.cols);
-        for (std::size_t j = 0; j < p.size(); ++j) p[j] = power(c[j]);
-        double q;
-        if (!levels_from) {
-            q = dsp::quantile(p, NOISE_QUANTILE) / expo_mean;
-        } else {
-            std::vector<double> pn(p.begin() + static_cast<std::ptrdiff_t>(std::min(*levels_from, p.size())), p.end());
-            const auto k = static_cast<std::size_t>(NOISE_QUANTILE * (static_cast<double>(pn.size()) - 1));
-            std::nth_element(pn.begin(), pn.begin() + static_cast<std::ptrdiff_t>(k), pn.end());
-            q = pn[k] / expo_mean;
-        }
-        r.q[i] = std::max(q, 1e-12 * (dsp::pairwise_sum(p) / static_cast<double>(p.size())) + 1e-300);  // silence (tests)
-        if (i >= r.freqs.size()) return;
-        if (keep_outs) std::copy(c, c + cs.cols, r.outs[i]);
-        // each window against the one before it, summed over repeats in
-        // Python's order; repeat-major so the loop over starts vectorizes.
-        // c[a + M] * conj(c[a]) spelled out: the same products without
-        // std::complex's NaN fallback
-        repeat_stat(c, repeats, n_out, r.S[i]);
-    });
+    // Per bin, in the pass that makes the row (still in cache): its noise level, and for the
+    // searched bins the statistic. A searched bin's row is written straight into outs.
+    corr_rows(
+        z, t, all, [&](std::size_t i) { return keep_outs && i < nf ? r.outs[i] : nullptr; },
+        [&](std::size_t i, const cdouble* c) {
+            Scratch& s = scratch();
+            s.p.resize(nc);
+            std::vector<double>& p = s.p;
+            for (std::size_t j = 0; j < nc; ++j) p[j] = power(c[j]);
+            double q;
+            if (!levels_from) {
+                q = dsp::quantile(p, NOISE_QUANTILE) / expo_mean;
+            } else {
+                s.pn.assign(p.begin() + static_cast<std::ptrdiff_t>(std::min(*levels_from, p.size())), p.end());
+                std::vector<double>& pn = s.pn;
+                const auto k = static_cast<std::size_t>(NOISE_QUANTILE * (static_cast<double>(pn.size()) - 1));
+                std::nth_element(pn.begin(), pn.begin() + static_cast<std::ptrdiff_t>(k), pn.end());
+                q = pn[k] / expo_mean;
+            }
+            r.q[i] = std::max(q, 1e-12 * (dsp::pairwise_sum(p) / static_cast<double>(p.size())) + 1e-300);  // silence (tests)
+            if (i >= nf) return;
+            // each window against the one before it, summed over repeats in
+            // Python's order; repeat-major so the loop over starts vectorizes.
+            // c[a + M] * conj(c[a]) spelled out: the same products without
+            // std::complex's NaN fallback
+            s.re.assign(n_out, 0.0);
+            s.im.assign(n_out, 0.0);
+            repeat_stat(c, repeats, n_out, r.S[i], s.re.data(), s.im.data());
+        });
     return r;
 }
 
