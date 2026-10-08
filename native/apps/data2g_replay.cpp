@@ -47,6 +47,7 @@ double half_to_double(std::uint16_t h) {
                  "  --worker      the session stage on its own thread, as the host runs it (default: inline)\n"
                  "  --threads     the decode pool's size (default: the host's)\n"
                  "  --dd-budget   seconds of DD per burst (default 1; 0: none), as data2g-host's\n"
+                 "  --slow-ms     warn about an engine step slower than this (default 200)\n"
                  "  --log-level   default INFO\n"
                  "  --repeat      run N times; the log is of the first run, the others report their time only\n");
     std::exit(code);
@@ -74,7 +75,7 @@ int main(int argc, char** argv) {
     double seconds = 1e18;
     bool worker = false, quiet = false;
     int threads = 0, repeat = 1;
-    double dd_budget = arq::DD_BUDGET_S;
+    double dd_budget = arq::DD_BUDGET_S, slow_ms = 200;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char* {
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
         else if (a == "--worker") worker = true;
         else if (a == "--threads") threads = std::atoi(value());
         else if (a == "--dd-budget") dd_budget = std::atof(value());
+        else if (a == "--slow-ms") slow_ms = std::atof(value());
         else if (a == "--repeat") repeat = std::max(1, std::atoi(value()));
         else if (a == "--log-level") {
             const std::string l = value();
@@ -127,6 +129,9 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             eng.step(std::span<const double>(audio).subspan(i, BLOCK));
             step_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            if (step_ms.back() >= slow_ms && !quiet)
+                log_line(30, "slow step at audio t=" + std::to_string(static_cast<double>(i) / config::FS).substr(0, 6) + " s: " +
+                                 std::to_string(static_cast<int>(step_ms.back())) + " ms");
         }
         const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();
         double sum = 0, worst = 0;

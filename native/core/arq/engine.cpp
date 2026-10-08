@@ -718,15 +718,15 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
             const auto t1 = Clock::now();
-            std::string stages;
+            std::string stages = format("receive %.0f", ev.receive_ms);  // before t0: tnc::decode's, ahead of this
             auto prev = t0;
             for (const auto& [name, at] : marks) {
-                stages += format("%s%s %.0f", stages.empty() ? "" : ", ", name, ms(prev, at));
+                stages += format(", %s %.0f", name, ms(prev, at));
                 prev = at;
             }
-            stages += format("%srest %.0f ms", stages.empty() ? "" : ", ", ms(prev, t1));
+            stages += format(", rest %.0f ms", ms(prev, t1));
             log_write(LOG, 10,
-                      format("RX decode %s x%d: %.0f ms (%s)%s", spec_name(ev.header).c_str(), ev.header.n_cw(), ms(t0, t1),
+                      format("RX decode %s x%d: %.0f ms (%s)%s", spec_name(ev.header).c_str(), ev.header.n_cw(), ev.receive_ms + ms(t0, t1),
                              stages.c_str(),
                              rx && rx->dd_refines()
                                  ? format(", DD: %d re-estimates%s", rx->dd_refines(), rx->dd_spent() ? ", budget spent" : "").c_str()

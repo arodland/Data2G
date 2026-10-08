@@ -190,6 +190,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
     BurstEvent ev{req.header, std::nullopt, {}};
     Pending p = req.header;
     p.shift(-req.at);
+    const auto t0 = std::chrono::steady_clock::now();
     if (p.is_cpm()) {
         ev.rx = cpm::receive(req.seg, p.cpm());
     } else {
@@ -204,6 +205,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
             // the burst is lost: rx stays empty
         }
     }
+    ev.receive_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (req.audio_lo == 0 && req.audio_hi == static_cast<int64_t>(req.seg.size())) ev.audio = std::move(req.seg);
     else ev.audio.assign(req.seg.begin() + req.audio_lo, req.seg.begin() + req.audio_hi);
     return ev;
