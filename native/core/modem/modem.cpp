@@ -799,13 +799,17 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     std::vector<cd> drow(mm * FR);
     for (size_t f = 0; f < F; ++f) {
         const cd* c = C_rows[f];
+        // c[FR + u] * conj(c[u]) with the products spelled out: std::complex's operator* carries
+        // numpy-unlike NaN handling that stops the loop vectorizing (same values for finite input)
         for (size_t t = 0; t < mm * FR; ++t) {
-            cd s = 0.0;
+            double sr = 0.0, si = 0.0;
             for (size_t j = 0; j < static_cast<size_t>(COPY_PAIRS); ++j) {
                 const size_t u = j * FR + t;
-                s += c[FR + u] * std::conj(c[u]);
+                const double ar = c[FR + u].real(), ai = c[FR + u].imag(), br = c[u].real(), bi = c[u].imag();
+                sr += ar * br + ai * bi;
+                si += ai * br - ar * bi;
             }
-            drow[t] = s;
+            drow[t] = {sr, si};
         }
         for (size_t i = 0; i < mm; ++i)
             for (size_t ph = 0; ph < FR; ++ph) fold[f][ph] = i ? fold[f][ph] + drow[i * FR + ph] : drow[ph];

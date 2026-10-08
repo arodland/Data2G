@@ -10,7 +10,7 @@ OUT=$(realpath "$1"); N=${2:-40}
 for k in a b; do
   D=$OUT/perf_$k.data
   [ -f "$D" ] || continue
-  perf report -i $D --no-children --sort tid --stdio -g none 2>/dev/null | grep -v '^#' | grep -v '^$' > $OUT/perf_${k}_threads.txt
+  perf report -i $D --no-children --sort pid --stdio -g none 2>/dev/null | grep -v '^#' | grep -v '^$' > $OUT/perf_${k}_threads.txt
   perf report -i $D --no-children --sort sym --stdio -g none 2>/dev/null | grep -v '^#' | grep -v '^$' > $OUT/perf_${k}_self.txt
   perf report -i $D --children --sort sym --stdio -g none 2>/dev/null | grep -v '^#' | grep -v '^$' > $OUT/perf_${k}_incl.txt
   echo "=== host $k: threads"; head -12 $OUT/perf_${k}_threads.txt

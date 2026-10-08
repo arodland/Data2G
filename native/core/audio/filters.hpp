@@ -17,7 +17,9 @@ namespace data2g::audio {
 std::vector<double> lfilter_fir(std::span<const double> b, std::span<const double> x, std::vector<double>& zi);
 
 // Device rate (a multiple of FS) -> FS: firwin(32 d + 1, 0.9 FS / 2) then
-// every d-th sample, the phase carried across chunks.
+// every d-th sample, the phase carried across chunks. Only the kept outputs
+// are computed (a dot product each), so a stream agrees with lfilter then
+// [::d] to rounding, not bits.
 class Decimator {
 public:
     explicit Decimator(int rate);
@@ -27,11 +29,13 @@ public:
 
 private:
     int d_;
-    std::vector<double> taps_, zi_;
+    std::vector<double> taps_, rtaps_, hist_;  // rtaps_: taps reversed; hist_: the last len - 1 inputs
     std::int64_t phase_ = 0;
 };
 
 // FS -> device rate: zero-stuff by u, then firwin(32 u + 1, 0.9 FS / 2) * u.
+// Polyphase: the zero-stuffed samples are never multiplied (agrees with the
+// zero-stuffed lfilter to rounding, not bits).
 class Interpolator {
 public:
     explicit Interpolator(int rate);
@@ -41,7 +45,7 @@ public:
 
 private:
     int u_;
-    std::vector<double> taps_, zi_;
+    std::vector<double> taps_, phases_, hist_;  // phases_: u rows of PH_LEN reversed polyphase taps
 };
 
 // Impulse blanker, after modem73's; tnc.Blanker has the reasoning. In
