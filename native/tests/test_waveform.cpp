@@ -167,6 +167,26 @@ int main() {
             for (std::size_t j = 0; j < whole.S.cols; ++j) worst = std::max(worst, std::abs(d.S(i)[j] - whole.S[i][j]));
         check::is_true(same && worst < 1e-9, "chunked statistic equals the whole signal's");
     }
+    check::current_step = "StreamDetector::skip_to";
+    {
+        // skipping the samples before `from` leaves the statistic from there on as feeding them all would
+        const auto& b = waveform::band("w48");
+        const auto z = noise(rng, 30000, 1.0);
+        waveform::StreamDetector all(b), skipped(b);
+        all.feed(z);
+        const std::int64_t from = 14000;
+        skipped.skip_to(from);
+        skipped.feed(std::span(z).subspan(static_cast<std::size_t>(from)));
+        check::equal(skipped.fed, all.fed, "skip_to: the same stream position");
+        const std::int64_t lo = from + 3000, hi = static_cast<std::int64_t>(z.size()) - all.span + 1;
+        // the noise level (the statistic's normalization) comes from one feed's outputs against the whole: similar, not equal
+        check::is_true(std::abs(all.level().value() / skipped.level().value() - 1.0) < 0.2, "skip_to: a similar noise level");
+        bool same_rows = true;
+        for (std::size_t i = 0; i < all.bins(); ++i)
+            for (std::int64_t k = lo; k < hi; ++k)
+                same_rows = same_rows && std::abs(all.S(i)[static_cast<std::size_t>(k - all.s0)] - skipped.S(i)[static_cast<std::size_t>(k - skipped.s0)]) < 1e-9;
+        check::is_true(same_rows, "skip_to: the raw statistic from there on is the same");
+    }
     // one live-receiver hop (tnc: FS / 4 new samples, ~2.5 s kept): feed, trim, stat
     for (const char* name : {"w", "n10", "w48"}) {
         waveform::StreamDetector d(waveform::band(name));

@@ -456,6 +456,14 @@ void StreamDetector::reset() {
     levels.clear();
 }
 
+void StreamDetector::skip_to(std::int64_t pos) {
+    tail.clear();
+    for (auto& row : S_) row.clear();
+    for (auto& row : C_) row.clear();
+    s_off_ = c_off_ = 0;
+    s0 = c0 = fed = pos;
+}
+
 void StreamDetector::feed(std::span<const cdouble> z_new) {
     if (S(0).empty() && tail.empty()) s0 = fed;
     fed += static_cast<std::int64_t>(z_new.size());

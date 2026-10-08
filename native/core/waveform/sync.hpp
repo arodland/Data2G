@@ -97,6 +97,7 @@ public:
     explicit StreamDetector(const Band& band, double reach = config::ACQUIRE_REACH_HZ);
 
     void reset();
+    void skip_to(std::int64_t pos);  // jump over the samples before stream index `pos` (>= fed); the noise-level history stays
     void feed(std::span<const cdouble> z);  // the next contiguous baseband samples
     void trim(std::int64_t start);          // drop starts before stream index `start`
     std::optional<double> level() const;    // the noise level stat() divides by

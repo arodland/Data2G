@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
     bool worker = false, quiet = false;
     int threads = 0, repeat = 1;
     double dd_budget = arq::DD_BUDGET_S, slow_ms = 200;
+    bool mono = std::getenv("DATA2G_REPLAY_MONO") != nullptr;  // slow steps' CLOCK_MONOTONIC span, to match perf samples
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto value = [&]() -> const char* {
@@ -128,6 +129,9 @@ int main(int argc, char** argv) {
         for (std::size_t i = 0; i + BLOCK <= audio.size(); i += BLOCK) {
             const auto t0 = std::chrono::steady_clock::now();
             eng.step(std::span<const double>(audio).subspan(i, BLOCK));
+            if (mono && std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() >= slow_ms)
+                std::fprintf(stderr, "MONO %.6f %.6f\n", std::chrono::duration<double>(t0.time_since_epoch()).count(),
+                             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
             step_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             if (step_ms.back() >= slow_ms && !quiet)
                 log_line(30, "slow step at audio t=" + std::to_string(static_cast<double>(i) / config::FS).substr(0, 6) + " s: " +
