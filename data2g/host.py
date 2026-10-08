@@ -243,14 +243,15 @@ class Host:
         # burst waits, BUFFER is the unsent bytes past it (the credit); once
         # it has all gone, 1 until the peer acks it all, so Flush still waits
         # for delivery but writes never block. --buffer-credit 0 reports the
-        # plain VARA figure.
+        # plain VARA figure. CHAT ON also reports it: the client watches
+        # BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
         unsent = unacked = len(e.session._pending_write)
         if st:
             unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
             unacked += len(st.tx.buf)  # from the first unacked codeword on
         buffered = unacked
-        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0:
+        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
             credit = e.session.policy.next_capacity(st)
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)
