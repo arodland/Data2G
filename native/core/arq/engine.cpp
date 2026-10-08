@@ -643,7 +643,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     using Clock = std::chrono::steady_clock;
     struct Timing {
         tnc::BurstEvent& ev;
-        Clock::time_point t0 = Clock::now(), t_soft = t0;
+        Clock::time_point t0 = Clock::now(), t_soft = t0, t_rec = t0;
         const ModemRx* rx = nullptr;
         ~Timing() {
             if (!log_enabled(LOG, 10)) return;
@@ -652,8 +652,8 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
             };
             const auto t1 = Clock::now();
             log_write(LOG, 10,
-                      format("RX decode %s x%d: %.0f ms (soft bits %.0f ms)%s", spec_name(ev.header).c_str(), ev.header.n_cw(),
-                             ms(t0, t1), ms(t0, t_soft),
+                      format("RX decode %s x%d: %.0f ms (soft bits %.0f ms, recorder %.0f ms)%s", spec_name(ev.header).c_str(),
+                             ev.header.n_cw(), ms(t0, t1), ms(t0, t_soft), ms(t_soft, t_rec),
                              rx && rx->dd_refines()
                                  ? format(", DD: %d re-estimates%s", rx->dd_refines(), rx->dd_spent() ? ", budget spent" : "").c_str()
                                  : ""));
@@ -669,6 +669,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     }
     timing.t_soft = Clock::now();
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
+    timing.t_rec = Clock::now();
     if (on_burst_)
         on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
                    r ? *r : Heard{}, soft});
