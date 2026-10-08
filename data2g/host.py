@@ -401,6 +401,8 @@ class _Port:
                 self.on_input(d)
                 continue
             buf += d
+            if len(buf) > 65536 and b"\r" not in buf and b"\n" not in buf:
+                buf = b""  # a client that never ends its line
             while b"\r" in buf or b"\n" in buf:
                 i = min(x for x in (buf.find(b"\r"), buf.find(b"\n")) if x >= 0)
                 line, buf = buf[:i], buf[i + 1:]

@@ -229,7 +229,7 @@ class StreamDetector:
         out = np.full((len(self.S), max(0, hi - lo)), -1.0)
         a, b = max(lo, self.s0), min(hi, self.s0 + len(self.S[0]))
         if b > a and self.levels:
-            q = np.median(np.array(self.levels), axis=0).min()
+            q = self.level()
             out[:, a - lo:b - lo] = self.S[:, a - self.s0:b - self.s0] / q
         return out
 
@@ -274,8 +274,6 @@ def first_path(
         elif i < 1:
             continue
         lo, hi = (i - 1) % n, (i + 1) % n
-        if not cyclic and (i - 1 < 0 or i + 1 >= n):
-            continue
         if power[i] >= thr and power[i] >= power[lo] and power[i] >= power[hi]:
             return int(i)
     return int(peak)

@@ -18,6 +18,7 @@ int preamble_samples(const config::Band& b);
 bool hosts(std::string_view band);                          // _hosts: other bands' frames follow its header
 std::vector<bool> header_layout(std::string_view band);     // per header symbol: true = pilot
 int header_samples(std::string_view band);
+bool copies(std::string_view band);  // the band repeats its header after the first frames
 std::optional<int> copy_frame(std::string_view band, int n_f);  // nullopt: no header copy
 int frames_on_air(const config::Submode& spec, int n_cw);
 std::int64_t burst_end(std::int64_t p0, const config::Submode& spec, int n_cw);

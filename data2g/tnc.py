@@ -50,19 +50,26 @@ def kiss_encode(data: bytes, port: int = 0, cmd: int = DATA) -> bytes:
     return bytes([FEND]) + body + bytes([FEND])
 
 
+KISS_MAX_FRAME = 1 << 16  # a longer frame is junk (a client that never sends FEND)
+
+
 class KissDecoder:
     """Bytes in, whole frames (command byte, data) out, across reads."""
 
     def __init__(self):
-        self.buf, self.esc = bytearray(), False
+        self.buf, self.esc, self.skip = bytearray(), False, False
 
     def feed(self, data: bytes) -> list[tuple[int, bytes]]:
         out = []
         for b in data:
             if b == FEND:
-                if self.buf:
+                if self.buf and not self.skip:
                     out.append((self.buf[0], bytes(self.buf[1:])))
-                self.buf, self.esc = bytearray(), False
+                self.buf, self.esc, self.skip = bytearray(), False, False
+            elif self.skip:
+                pass
+            elif len(self.buf) >= KISS_MAX_FRAME:  # no FEND in sight: discard to the next one
+                self.buf, self.skip = bytearray(), True
             elif self.esc:
                 self.buf.append({TFEND: FEND, TFESC: FESC}.get(b, b))
                 self.esc = False
@@ -373,8 +380,9 @@ class Receiver:
             self.pilots_ok = ok
 
     def _trim(self, n: int):
-        self.off += len(self.buf) - n if n < len(self.buf) else 0
-        self.buf = self.buf[-n:] if n < len(self.buf) else self.buf
+        if n < len(self.buf):
+            self.off += len(self.buf) - n
+            self.buf = self.buf[len(self.buf) - n:]  # not [-n:], which for n = 0 is everything
         for d in self.detectors.values():
             d.trim(self.off)
 

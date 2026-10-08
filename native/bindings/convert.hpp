@@ -58,6 +58,13 @@ auto np(const Mat<T>& m) {
     return a;
 }
 
+// An input array as a span, without vec()'s copy: modem demodulates one
+// window at a time out of a whole burst.
+template <typename T>
+std::span<const T> view(const In<T>& a) {
+    return {a.data(), static_cast<std::size_t>(a.size())};
+}
+
 inline std::span<const std::uint8_t> bytes_view(const py::bytes& b) {
     const std::string_view s(b);
     return {reinterpret_cast<const std::uint8_t*>(s.data()), s.size()};

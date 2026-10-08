@@ -18,8 +18,6 @@ const cpm::Spec& cspec(const std::string& name) {
     return *s;
 }
 
-std::span<const double> view(const In<double>& x) { return {x.data(), static_cast<std::size_t>(x.size())}; }
-
 py::array_t<std::int64_t> ints(std::span<const int> v) { return np<std::int64_t>(v); }
 
 }  // namespace

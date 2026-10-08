@@ -43,10 +43,6 @@ const constellation::Constellation& points_of(const Spec& spec) {
 
 std::vector<double> bb_of(std::string_view name) { return equalizer::bb(band(name)); }
 
-bool copies(std::string_view name) {
-    return std::find(HEADER_COPY_BANDS.begin(), HEADER_COPY_BANDS.end(), name) != HEADER_COPY_BANDS.end();
-}
-
 double sq_abs(cd x) {
     const double a = std::abs(x);  // np.abs(x) ** 2
     return a * a;
@@ -119,6 +115,7 @@ const Wht& wht(std::string_view band) {
 // valid_words' 10-bit values (word >> 6), in order
 std::vector<int> valid_values(std::string_view band, const Accept* accept) {
     const int b = cw_bits(band);
+    if (b < 5) throw std::logic_error("valid_values: lim covers 1024 >> 5 submode indices");
     std::array<int, 32> lim{};  // submode index -> codewords taken (0: none)
     if (accept) {
         for (const auto& [s, cw] : accept->max_cw)
@@ -706,7 +703,7 @@ BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view>
     for (size_t i = 1; i < good.size(); ++i)
         if (good[i].rank > good[best].rank) best = i;
     if (waiting && good[best].rank < STREAM_COMMIT_SCORE) throw SyncError("a header is still arriving");
-    return {std::move(good[best].hd), std::move(good[best].acq), *good[best].z};
+    return {std::move(good[best].hd), std::move(good[best].acq), good[best].z};
 }
 
 Lock find_burst(std::span<const double> x, std::span<const std::string_view> bands, const Accept* accept,
@@ -925,15 +922,15 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     waveform::Acquisition acq;
     std::vector<cd> z;
     if (copy) {
+        if (copy->end > len) throw SyncError("burst runs past the buffer");
         z = waveform::freq_correct(z0, copy->cfo);
         hd = copy_header(z, *copy);
         acq = {copy->start, copy->cfo, 0.0, {}};
-        if (copy->end > len) throw SyncError("burst runs past the buffer");
     } else if (!head) {
         auto b = best_header(z0, bands, true, accept);
         hd = std::move(b.hd);
         acq = std::move(b.acq);
-        z = std::move(b.z);
+        z = *b.z;
     } else {
         auto b = best_header(pyslice(std::span<const cd>(z0), 0, *head), bands, false, accept, {}, true);
         hd = std::move(b.hd);

@@ -9,6 +9,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -116,7 +117,7 @@ struct BandStat {
 struct BestHeader {
     HeaderRead hd;
     waveform::Acquisition acq;
-    std::vector<cd> z;  // z0 corrected by acq.freq_offset
+    std::shared_ptr<const std::vector<cd>> z;  // z0 corrected by acq.freq_offset (shared: find_burst never copies it)
 };
 // bands empty: accept's (sorted) or SYNC_BANDS. Throws SyncError. final (with
 // complete false): z0 is the head of a burst that has wholly arrived, so

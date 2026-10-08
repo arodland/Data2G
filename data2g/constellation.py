@@ -38,12 +38,15 @@ def gray_qam(m: int) -> np.ndarray:
 
 
 _QPSK = gray_qam(2)
+_QPSK.setflags(write=False)
 
 
 @lru_cache(maxsize=None)
 def load(name: str) -> np.ndarray:
     if name.startswith("gray-qam"):
-        return gray_qam(int(np.log2(int(name[len("gray-qam"):]))))
+        pts = gray_qam(int(np.log2(int(name[len("gray-qam"):]))))
+        pts.setflags(write=False)  # cached: shared by every caller
+        return pts
     pts = np.load(DIR / f"{name}.npy")
     pts.setflags(write=False)
     return pts
@@ -124,7 +127,9 @@ def llr(y: np.ndarray, h: np.ndarray, var: np.ndarray, points: np.ndarray) -> np
 
 @lru_cache(maxsize=None)
 def _square(m: int) -> np.ndarray:
-    return gray_qam(m)
+    pts = gray_qam(m)
+    pts.setflags(write=False)
+    return pts
 
 
 def _llr_square(y, h, var, m):

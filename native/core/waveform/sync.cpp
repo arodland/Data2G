@@ -268,15 +268,22 @@ Acquisition acquire(std::span<const cdouble> z, const Band& band, std::optional<
     const double threshold = threshold_in ? *threshold_in : band.preamble_threshold();
     const std::size_t n_pre = static_cast<std::size_t>(band.preamble_samples());
     if (z.size() < n_pre + 2 * M) throw SyncError("signal too short");
-    Mat<double> S;
+    Mat<double> S_own;  // a caller's S is only copied if the search window masks it
+    const Mat<double>* Sp = &S_own;
     std::vector<double> freqs;
     if (S_in) {
-        S = *S_in;
+        Sp = S_in;
         freqs = cfo_grid(reach);
+        if (S_in->rows != freqs.size()) throw std::invalid_argument("acquire: S has rows for a different CFO grid");
     } else {
-        std::tie(S, freqs) = detection_stat(z, band, reach);
+        std::tie(S_own, freqs) = detection_stat(z, band, reach);
     }
     if (search) {
+        if (Sp != &S_own) {
+            S_own = *Sp;
+            Sp = &S_own;
+        }
+        Mat<double>& S = S_own;
         const auto cols = static_cast<std::int64_t>(S.cols);
         const std::int64_t s0 = std::max<std::int64_t>(0, search->first), s1 = std::min(cols, search->second);
         if (s1 - s0 < 1)
@@ -285,6 +292,7 @@ Acquisition acquire(std::span<const cdouble> z, const Band& band, std::optional<
             for (std::int64_t j = 0; j < cols; ++j)
                 if (j < s0 || j >= s1) S[i][static_cast<std::size_t>(j)] = -1.0;
     }
+    const Mat<double>& S = *Sp;
     std::vector<double> D(S.cols, -INFINITY);
     for (std::size_t i = 0; i < S.rows; ++i)
         for (std::size_t j = 0; j < S.cols; ++j) D[j] = std::max(D[j], S[i][j]);

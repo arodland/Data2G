@@ -236,12 +236,12 @@ bool Monitor::keyed(ModemRx& rx, Dump& d) {
             const Control ctl = Control::unpack(payloads);
             if (c0.ftype == SESSION) {
                 if (const auto it = ctl.ext.find(T_SESS); it != ctl.ext.end()) session_frame(it->second, key, dir, d);
-                else if (const auto id = ctl.ext.find(T_ID); id != ctl.ext.end()) {
+                else if (const auto id = ctl.ext.find(T_ID); id != ctl.ext.end() && id->second.size() >= 10) {
                     const std::string call = unpack_call(ByteView(id->second).first(8));
                     const int k = be16(id->second, 8);
                     learn(k, {}, {}, call);
                     d.head += "  ID " + call + " (session key " + hex4(k) + ")\n";
-                } else if (const auto cq = ctl.ext.find(T_CQ); cq != ctl.ext.end()) {
+                } else if (const auto cq = ctl.ext.find(T_CQ); cq != ctl.ext.end() && cq->second.size() >= 9) {
                     d.head += "  CQ " + unpack_call(ByteView(cq->second).first(8)) + " bw " + std::to_string(at(cq->second, 8)) + "\n";
                 } else {
                     d.head += "  session frame (" + kind + "), no body: " + ext_desc(ctl.ext) + "\n";
@@ -260,6 +260,10 @@ bool Monitor::keyed(ModemRx& rx, Dump& d) {
 void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
     const int sub = at(body, 0);
     std::string s;
+    if (sub == CONNECT && body.size() < 22) {  // another VERSION's: not ours to decode
+        d.head += "  CONNECT of " + std::to_string(body.size()) + " B, not read\n";
+        return;
+    }
     if (sub == CONNECT) {
         const std::string caller = unpack_call(ByteView(body).subspan(2, 8)), callee = unpack_call(ByteView(body).subspan(10, 8));
         const int nonce = be16(body, 18);

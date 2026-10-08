@@ -16,11 +16,6 @@ namespace {
 
 using modem::cd;
 
-template <typename T>
-std::span<const T> view(const In<T>& a) {
-    return {a.data(), static_cast<std::size_t>(a.size())};
-}
-
 std::string name_of(const py::handle& spec) {
     return py::isinstance<py::str>(spec) ? spec.cast<std::string>() : spec.attr("name").cast<std::string>();
 }
@@ -307,7 +302,7 @@ void bind_modem(py::module_& m) {
             py::gil_scoped_release nogil;
             r = mo::best_header(view(z0), bs, complete, a ? &*a : nullptr, st.v, final);
         }
-        return py::make_tuple(header_dict(r.hd), acq_tuple(r.acq), np(r.z));
+        return py::make_tuple(header_dict(r.hd), acq_tuple(r.acq), np(*r.z));
     }, py::arg("z0"), py::arg("bands") = py::none(), py::arg("complete") = true, py::arg("accept") = py::none(),
        py::arg("stats") = py::none(), py::arg("final") = false);
     d.def("find_burst", [](const In<double>& x, const OptBands& bands, const py::object& accept, const OptStats& stats) {

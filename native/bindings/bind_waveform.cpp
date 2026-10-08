@@ -12,13 +12,6 @@ namespace {
 
 using waveform::cdouble;
 
-// An input array as a span, without vec()'s copy: modem demodulates one
-// window at a time out of a whole burst.
-template <typename T>
-std::span<const T> view(const In<T>& a) {
-    return {a.data(), static_cast<std::size_t>(a.size())};
-}
-
 const waveform::Band& band_of(const std::string& name) {
     try {
         return waveform::band(name);
