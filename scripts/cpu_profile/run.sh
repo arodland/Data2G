@@ -13,7 +13,7 @@
 #   scripts/cpu_profile/run.sh <idle|pat|pat-text|pat-mixed|raw|raw-text|raw-mixed> <seconds | timeout> <out dir>
 # then: python scripts/cpu_profile/analyze.py <out>/prof_a.txt <out>/prof_b.txt
 # Needs pactl, pacat, pat (pat phases), uvx (py-spy). PY: the python with Data2G's
-# dependencies (default: the repo's .venv). Uses ports 8300/8400 (+1, +20)
+# dependencies (default: the repo's .venv). Uses ports PORT_A/PORT_B (8300/8400; +1, +20)
 # and Pat HTTP 5061/5062. HOST_ARGS: extra data2g.host flags for both hosts;
 # A_BYTES, B_BYTES: W1AW's and K2XYZ's attachment sizes (default 8000, 4000;
 # B_BYTES=0: K2XYZ sends nothing). DATA2G_COMPRESS=0: both
@@ -24,7 +24,11 @@
 # it to the other's RX sink. Unset or awgn: noise only (its WGN mode). SNR
 # (noise.py): the input's PEP over the noise in 3000 Hz; NOISE_SNR=<dB> holds
 # it constant, else it wanders (snr.log).
+# NATIVE=1: profile the C++ host (native/build/data2g-host, HOST_BIN overrides) with perf instead of
+# py-spy: perf_a.data/perf_b.data in <out>, read with scripts/cpu_profile/analyze_perf.sh <out>. User-space
+# samples only (perf_event_paranoid 2); PERF_HZ (199), PERF_STACK (DWARF stack bytes, 16384). Needs perf.
 set -u
+PORT_A=${PORT_A:-8300}; PORT_B=${PORT_B:-8400}
 PHASE=$1; T=$2; OUT=$(realpath -m "$3")
 case $PHASE in idle|pat|pat-text|pat-mixed|raw|raw-text|raw-mixed) ;; *) echo "unknown phase $PHASE" >&2; exit 2;; esac
 W=$(cd "$(dirname "$0")" && pwd)
@@ -35,10 +39,15 @@ cd $WT
 
 mods=()
 # on any exit, a killed run too: leaked sinks pile up and break other apps (Wine lists them all)
-trap 'for m in $(pactl list short modules | grep -E "sink_name=d2g_" | cut -f1); do pactl unload-module $m; done' EXIT
+trap 'for m in $(pactl list short modules | grep -E "(sink|source)_name=d2g_" | cut -f1); do pactl unload-module $m; done' EXIT
 for s in d2g_ab d2g_ba; do
   mods+=($(pactl load-module module-null-sink sink_name=$s sink_properties=device.description=$s rate=48000 channels=1 format=float32le))
 done
+if [ -n "${NATIVE:-}" ]; then  # the native host lists no monitor sources: a remap of each is an ordinary one
+  for s in d2g_ab d2g_ba; do
+    mods+=($(pactl load-module module-remap-source master=$s.monitor source_name=${s}_src source_properties=device.description=${s}_src))
+  done
+fi
 TX_A=d2g_ab TX_B=d2g_ba
 if [ "${CHANNEL:-awgn}" != awgn ]; then
   TX_A=d2g_a_tx TX_B=d2g_b_tx
@@ -51,16 +60,26 @@ fi
 $PY $W/noise.py 7 $OUT/snr.log & NOISE=$!
 sleep 2
 
+HOSTPIDS=()
 start_host() {  # name call port sink source
-  PULSE_SINK=$4 PULSE_SOURCE=$5 PYTHONPATH=$WT OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-    uvx py-spy record --rate 100 --format raw --output $OUT/prof_$1.txt --nonblocking -- \
-    $PY -m data2g.host --mycall $2 --input-device pulse --output-device pulse --rigctld-port 0 \
-    --command-port $3 --kiss-port $(( $3 + 20 )) --record-dir $OUT/rec_$1 ${HOST_ARGS:-} > $OUT/host_$1.log 2>&1 &
+  if [ -n "${NATIVE:-}" ]; then  # perf, user space only (perf_event_paranoid 2), DWARF call graphs
+    perf record -F ${PERF_HZ:-199} --call-graph dwarf,${PERF_STACK:-16384} -o $OUT/perf_$1.data -- \
+      ${HOST_BIN:-$WT/native/build/data2g-host} --mycall $2 --input-device ${5%.monitor}_src --output-device $4 \
+      --rigctld-port 0 --command-port $3 --kiss-port $(( $3 + 20 )) --record-dir $OUT/rec_$1 ${HOST_ARGS:-} \
+      > $OUT/host_$1.log 2>&1 &
+  else
+    PULSE_SINK=$4 PULSE_SOURCE=$5 PYTHONPATH=$WT OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+      uvx py-spy record --rate 100 --format raw --output $OUT/prof_$1.txt --nonblocking -- \
+      $PY -m data2g.host --mycall $2 --input-device pulse --output-device pulse --rigctld-port 0 \
+      --command-port $3 --kiss-port $(( $3 + 20 )) --record-dir $OUT/rec_$1 ${HOST_ARGS:-} > $OUT/host_$1.log 2>&1 &
+  fi
+  HOSTPIDS+=($!)
 }
-start_host a W1AW 8300 $TX_A d2g_ba.monitor
-start_host b K2XYZ 8400 $TX_B d2g_ab.monitor
+start_host a W1AW $PORT_A $TX_A d2g_ba.monitor
+start_host b K2XYZ $PORT_B $TX_B d2g_ab.monitor
 sleep 6
-PIDS=$(pgrep -f "^$PY -m data2g.host" | tr '\n' ' ')
+if [ -n "${NATIVE:-}" ]; then PIDS=$(pgrep -x data2g-host | tr '\n' ' ')
+else PIDS=$(pgrep -f "^$PY -m data2g.host" | tr '\n' ' '); fi
 # CPU timeline, 1 s, from /proc (utime+stime ticks per host)
 ( while true; do echo "$(date +%s) $(for p in $PIDS; do awk '{print $14+$15}' /proc/$p/stat 2>/dev/null || echo -; done)"; sleep 1; done ) > $OUT/cpu.log &
 MON=$!
@@ -78,12 +97,12 @@ if [ "$PHASE" = idle ]; then
   sleep $T
 elif [[ $PHASE == raw* ]]; then
   attachment ${A_BYTES:-8000} > $OUT/a8k.bin; attachment ${B_BYTES:-4000} > $OUT/b4k.bin
-  $PY $W/raw.py 8300 8400 $OUT/a8k.bin $OUT/b4k.bin $T > $OUT/raw_result.txt 2>&1
+  $PY $W/raw.py $PORT_A $PORT_B $OUT/a8k.bin $OUT/b4k.bin $T > $OUT/raw_result.txt 2>&1
   echo "exit $?" >> $OUT/raw_result.txt
   sleep 10
 else
   P=$OUT/pat; mkdir -p $P/forms $P/prehooks
-  for s in a:W1AW:8300:5061 b:K2XYZ:8400:5062; do IFS=: read k call port http <<< "$s"; mkdir -p $P/$k
+  for s in a:W1AW:$PORT_A:5061 b:K2XYZ:$PORT_B:5062; do IFS=: read k call port http <<< "$s"; mkdir -p $P/$k
     printf '{"mycall": "%s", "locator": "FN31pr", "http_addr": "127.0.0.1:%s", "listen": [], "version_reporting_disabled": true,\n "varahf": {"addr": "localhost:%s", "bandwidth": 2300, "rig": "", "ptt_ctrl": false}}\n' $call $http $port > $P/$k/config.json
   done
   pa() { k=$1; shift; pat --config $P/$k/config.json --mbox $P/$k/mbox --event-log $P/$k/events.json --log $P/$k/pat.log --forms $P/forms --prehooks $P/prehooks "$@"; }
@@ -102,6 +121,10 @@ else
 fi
 
 kill $MON
-pkill -INT -f "^$PY -m data2g.host" ; sleep 8   # py-spy writes its profile when the child exits
+if [ -n "${NATIVE:-}" ]; then
+  pkill -INT -x data2g-host; wait "${HOSTPIDS[@]}"   # perf writes its data when the child exits
+else
+  pkill -INT -f "^$PY -m data2g.host" ; sleep 8   # py-spy writes its profile when the child exits
+fi
 kill $NOISE ${CHA:-} ${CHB:-}; pkill -f "[p]acat --(playback|record) --device=d2g_" ; sleep 1
 echo done
