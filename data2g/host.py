@@ -558,6 +558,8 @@ def main():
     ap.add_argument("--ptt-off-delay-ms", type=int, default=50)
     ap.add_argument("--tx-lead-ms", type=int, default=100,
                     help="TX audio queued ahead of the sound card: slack for a late audio step")
+    ap.add_argument("--short-frames", action="store_true",
+                    help="cap bursts at 6 s (OFDM) and 12 s (CPM); a slow mode still gets one data codeword")
     ap.add_argument("--min-header-score", type=float, default=0.0)
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
@@ -570,6 +572,10 @@ def main():
                     help="log a connection's throughput this often (0: only at disconnect)")
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
+    if a.short_frames:
+        from .arq import policy
+
+        policy.SHORT_FRAMES = True
     if a.list_modes:
         print("\n".join(mode_lines({2400: 2, 500: 0}[a.kiss_bw])))
         return

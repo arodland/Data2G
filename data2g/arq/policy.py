@@ -56,6 +56,10 @@ CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewo
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
 # helped run out the 90 s link-lost clock)
 CPM_MAX_S = 24.0
+# host --short-frames: bursts at most this long (s), OFDM and CPM; a data burst
+# still gets one data codeword (slots_for's floors) however slow the mode
+SHORT_FRAMES = False
+SHORT_OFDM_S, SHORT_CPM_S = 6.0, 12.0
 # a lost data burst spends the session's link-lost clock (session.LINK_LOST_S);
 # recovering takes polls of about T_RECOVER_S each, and a session that runs
 # out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
@@ -175,7 +179,9 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     its header can announce. CPM size classes are CPM_SIZE_SCALE times
     longer (a CPM data codeword is 3-10 s)."""
     if is_cpm(spec):
-        seconds = min(seconds * CPM_SIZE_SCALE, CPM_MAX_S)
+        seconds = min(seconds * CPM_SIZE_SCALE, SHORT_CPM_S if SHORT_FRAMES else CPM_MAX_S)
+    elif SHORT_FRAMES:
+        seconds = min(seconds, SHORT_OFDM_S)
     n, lim = 1, 64 if is_cpm(spec) else max_codewords(spec.sync_band)
     while n < lim and burst_seconds(spec, n + 1) <= seconds:
         n += 1
