@@ -638,22 +638,31 @@ void Engine::missed_energy() {
 }
 
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
-    // DEBUG: what this burst cost to decode, from the first look at it to the session having read it
-    // (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
+    // DEBUG: what this burst cost to decode, stage by stage, from the first look at it to the session having
+    // read it (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
     using Clock = std::chrono::steady_clock;
     struct Timing {
         tnc::BurstEvent& ev;
-        Clock::time_point t0 = Clock::now(), t_soft = t0, t_rec = t0;
+        Clock::time_point t0 = Clock::now();
+        std::vector<std::pair<const char*, Clock::time_point>> marks{};  // each stage's name and when it ended
         const ModemRx* rx = nullptr;
+        void mark(const char* stage) { marks.emplace_back(stage, Clock::now()); }
         ~Timing() {
             if (!log_enabled(LOG, 10)) return;
             const auto ms = [](Clock::time_point a, Clock::time_point b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
             const auto t1 = Clock::now();
+            std::string stages;
+            auto prev = t0;
+            for (const auto& [name, at] : marks) {
+                stages += format("%s%s %.0f", stages.empty() ? "" : ", ", name, ms(prev, at));
+                prev = at;
+            }
+            stages += format("%srest %.0f ms", stages.empty() ? "" : ", ", ms(prev, t1));
             log_write(LOG, 10,
-                      format("RX decode %s x%d: %.0f ms (soft bits %.0f ms, recorder %.0f ms)%s", spec_name(ev.header).c_str(),
-                             ev.header.n_cw(), ms(t0, t1), ms(t0, t_soft), ms(t_soft, t_rec),
+                      format("RX decode %s x%d: %.0f ms (%s)%s", spec_name(ev.header).c_str(), ev.header.n_cw(), ms(t0, t1),
+                             stages.c_str(),
                              rx && rx->dd_refines()
                                  ? format(", DD: %d re-estimates%s", rx->dd_refines(), rx->dd_spent() ? ", budget spent" : "").c_str()
                                  : ""));
@@ -667,12 +676,13 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         meas = measure(*r);
         soft = soft_bits(*r);
     }
-    timing.t_soft = Clock::now();
+    timing.mark("soft bits");
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
-    timing.t_rec = Clock::now();
+    timing.mark("recorder");
     if (on_burst_)
         on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
                    r ? *r : Heard{}, soft});
+    timing.mark("hook");
     if (!r) {
         if (log_enabled(LOG, INFO))
             log_write(LOG, INFO, format("RX %s x%d: header heard (score %.2f), burst lost", spec_name(ev.header).c_str(),
@@ -695,10 +705,12 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         }
     }
     if (cq(rx)) return;
+    timing.mark("probe");
     // the noise profile too (the gear shifter's noise rule reads it)
     Measured m = *meas;
     if (const auto s = noise_.snapshot()) m.noise = NoiseLevels{s->db, s->tail_db, s->impulses_per_min};
     session_->policy->observe(m, rx.submode(), t);
+    timing.mark("observe");
     session_->on_rx(rx, t);
 }
 
