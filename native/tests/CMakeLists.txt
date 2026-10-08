@@ -7,7 +7,7 @@ endfunction()
 
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
-list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args)\\.cpp$")
+list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx)\\.cpp$")
 foreach(src ${DATA2G_TESTS})
   get_filename_component(stem ${src} NAME_WE)
   string(REGEX REPLACE "^test_" "" name ${stem})
@@ -35,6 +35,14 @@ if(TARGET data2g_station)
   data2g_test(args)
   target_link_libraries(test_args PRIVATE data2g_station)
   data2g_rig_rpath(test_args)
+  # real-time scheduling for the audio threads (app/realtime.*)
+  data2g_test(realtime)
+  target_link_libraries(test_realtime PRIVATE data2g_station)
+  # the transmit thread: no hole in a burst while the receive loop is stalled, and ABORT (over pipe audio)
+  data2g_test(station_tx)
+  target_link_libraries(test_station_tx PRIVATE data2g_station)
+  data2g_rig_rpath(test_station_tx)
+  set_tests_properties(station_tx PROPERTIES TIMEOUT 300)
 endif()
 
 # data2g-gui's window, offscreen, over pipe audio (no device, no display).

@@ -152,6 +152,10 @@ public:
     struct Out {
         std::vector<double> audio;  // a burst's peak at 1.0
         bool ptt = false;
+        // Set on the step a transmission starts: the whole burst's audio (its first block is `audio`'s start),
+        // so a front end can play it on a clock of its own instead of block by block from this step's.
+        std::shared_ptr<const std::vector<double>> tx_burst;
+        bool tx_abort = false;  // abort() was called since the last step: whatever is playing should stop
     };
     struct Tx {
         TxBurstPtr burst;
@@ -161,6 +165,11 @@ public:
 
     explicit Engine(std::string call, EngineConfig cfg = {}, EngineHooks hooks = {});
     virtual ~Engine();  // stop()s
+    static Out silence(std::size_t samples) {
+        Out o;
+        o.audio.assign(samples, 0.0);
+        return o;
+    }
     // Joins the worker after the block in hand; no step() after it. A
     // subclass overriding a seam calls it from its own destructor, before
     // its part is gone.
@@ -297,7 +306,7 @@ private:
     std::function<void(const BurstHeard&)> on_burst_;
 
     // between the stages
-    std::atomic<bool> transmitting_{false}, busy_now_{false}, channel_busy_now_{false};
+    std::atomic<bool> transmitting_{false}, busy_now_{false}, channel_busy_now_{false}, abort_pending_{false};
     std::atomic<std::uint64_t> want_gen_{0};  // the session stage asks for a receiver reset
     std::uint64_t gen_ = 0, seq_ = 0;          // the receiver stage's
     std::int64_t gap_ = 0;                     // the receiver stage's: samples dropped since the last block queued

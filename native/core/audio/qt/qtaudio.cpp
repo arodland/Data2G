@@ -1,5 +1,7 @@
 #include "audio/qt/qtaudio.hpp"
 
+#include "audio/thread.hpp"
+
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
@@ -80,6 +82,7 @@ public:
 
     void start() {
         try {
+            audio::thread_init(role());  // on this stream's own thread
             open();
             started_.store(true, std::memory_order_release);
         } catch (const std::exception& e) {
@@ -97,6 +100,7 @@ public:
 
 protected:
     virtual void open() = 0;
+    virtual const char* role() const = 0;
 
     void report(const char* dir, QAudio::Error e) {
         if (e == last_error_) return;
@@ -155,6 +159,7 @@ class CaptureWorker final : public Worker {
 public:
     CaptureWorker(QAudioDevice device, int rate, CaptureFifo& fifo, Report report)
         : Worker(std::move(device), rate, std::move(report)), fifo_(fifo) {}
+    const char* role() const override { return "capture"; }
 
     void close() override {
         if (io_ != nullptr) disconnect(io_, nullptr, this, nullptr);
@@ -226,6 +231,7 @@ class PlaybackWorker final : public Worker {
 public:
     PlaybackWorker(QAudioDevice device, int rate, PlaybackFifo& fifo, Report report)
         : Worker(std::move(device), rate, std::move(report)), fifo_(fifo) {}
+    const char* role() const override { return "playback"; }
 
     void close() override {
         if (sink_) sink_->stop();

@@ -94,6 +94,13 @@ void test_noise_rule() {
                  "negative refused");
 }
 
+void test_realtime_switch() {
+    check::current_step = "realtime";
+    check::is_true(parse({}).realtime, "on by default");
+    check::is_true(!parse({"--no-realtime"}).realtime, "--no-realtime");
+    check::is_true(parse({"--no-realtime", "--realtime"}).realtime, "--realtime");
+}
+
 void test_dd_budget() {
     check::current_step = "dd budget";
     check::is_true(parse({}).dd_budget == 1.0, "default 1");
@@ -111,5 +118,6 @@ int main() {
     test_check();
     test_noise_rule();
     test_dd_budget();
+    test_realtime_switch();
     return check::report("args");
 }

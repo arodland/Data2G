@@ -1,5 +1,7 @@
 #include "audio/pipe.hpp"
 
+#include "audio/thread.hpp"
+
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -69,6 +71,7 @@ void PipeIo::stop() {
 }
 
 void PipeIo::read_loop() {
+    thread_init("capture");
     bool paced = !is_fifo(in_);
     std::FILE* f = std::fopen(in_.c_str(), "rb");
     in_opened_ = true;
@@ -101,6 +104,7 @@ void PipeIo::read_loop() {
 }
 
 void PipeIo::write_loop() {
+    thread_init("playback");
     std::FILE* f = std::fopen(out_.c_str(), "wb");
     out_opened_ = true;
     if (!f) {

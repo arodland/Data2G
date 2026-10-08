@@ -381,6 +381,7 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
 }
 
 void Engine::abort() {
+    abort_pending_ = true;
     tx_.reset();
     transmitting_ = false;
     request_reset();
@@ -540,7 +541,7 @@ Engine::Out Engine::step(std::span<const double> x) {
 Engine::Out Engine::next_out(std::size_t k) {
     // catching up: silence the session stage made while it lagged is dropped
     while (out_.size() > 1 && !out_.front().sound) out_.pop_front();
-    if (out_.empty()) return {std::vector<double>(k, 0.0), false};
+    if (out_.empty()) return silence(k);
     Out o = std::move(out_.front().out);
     out_.pop_front();
     return o;
@@ -584,7 +585,7 @@ Engine::Done Engine::process_safe(Block& b) {
     } catch (const std::exception& e) {
         log_write(LOG, 40, format("session stage: %s: session dropped", e.what()));
         abort();
-        return {Out{std::vector<double>(b.x.size(), 0.0), false}, false};
+        return {silence(b.x.size()), false};
     }
 }
 
@@ -630,6 +631,7 @@ Engine::Done Engine::process(Block& b) {
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
     }
     if (tx_) {
+        if (tx_->pos == 0) d.out.tx_burst = std::make_shared<const std::vector<double>>(tx_->audio);
         const auto n = std::min<std::size_t>(static_cast<std::size_t>(k), tx_->audio.size() - tx_->pos);
         std::copy_n(tx_->audio.begin() + static_cast<std::ptrdiff_t>(tx_->pos), n, d.out.audio.begin());
         tx_->pos += n;
@@ -645,6 +647,7 @@ Engine::Done Engine::process(Block& b) {
         }
     }
     n_ += k;
+    d.out.tx_abort = abort_pending_.exchange(false);
     d.out.ptt = tx_.has_value();
     transmitting_ = d.out.ptt;
     return d;

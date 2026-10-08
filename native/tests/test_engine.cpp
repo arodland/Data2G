@@ -158,6 +158,48 @@ void recorder_async(const std::filesystem::path& base) {
     check::is_true(std::equal(a.begin(), a.end(), b.begin()), "async: events in order");
 }
 
+// The engine hands a front end the whole burst when a transmission starts, once, and says when an abort cut it.
+void tx_burst_and_abort() {
+    check::current_step = "tx burst and abort";
+    const std::vector<double> silence(BLOCK, 0.0);
+    {
+        Engine e("W1AW");
+        e.send_cq("W1AW", 2);
+        int starts = 0, steps_on = 0;
+        std::size_t whole = 0, got = 0;
+        bool started = false, aborted_seen = false;
+        for (int i = 0; i < 400 && !(started && !e.tx()); ++i) {
+            const auto o = e.step(silence);
+            if (o.tx_burst) {
+                ++starts;
+                whole = o.tx_burst->size();
+                check::is_true(o.ptt, "the burst arrives with PTT up");
+            }
+            aborted_seen |= o.tx_abort;
+            if (o.ptt || o.tx_burst) {
+                started = true;
+                ++steps_on;
+            }
+            if (started) got += o.audio.size();
+        }
+        check::equal(starts, 1, "tx_burst once per transmission");
+        check::is_true(whole > 0 && got >= whole && got < whole + BLOCK, "the blocks add up to the burst");
+        check::is_true(!aborted_seen, "no abort, no tx_abort");
+        check::is_true(steps_on > 10, "it took several steps");
+    }
+    {
+        Engine e("W1AW");
+        e.send_cq("W1AW", 2);
+        bool on = false;
+        for (int i = 0; i < 100 && !on; ++i) on = e.step(silence).ptt;
+        check::is_true(on, "transmitting");
+        e.abort();
+        const auto o = e.step(silence);
+        check::is_true(!o.ptt && o.tx_abort, "abort: PTT down and tx_abort set");
+        check::is_true(!e.step(silence).tx_abort, "tx_abort is reported once");
+    }
+}
+
 void sync_kiss() {
     check::current_step = "sync: KISS";
     kisslink::KissLink ka, kb;
@@ -404,6 +446,7 @@ int main() {
     const auto dir = std::filesystem::temp_directory_path() / ("data2g_test_engine_" + std::to_string(clk::now().time_since_epoch().count()));
     units();
     recorder_async(dir / "rec");
+    tx_burst_and_abort();
     noise_rule_config();
     sync_session(dir);
     sync_kiss();
