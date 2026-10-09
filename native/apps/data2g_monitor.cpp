@@ -21,10 +21,10 @@
 #include "audio/fifo.hpp"
 #include "monitor/monitor.hpp"
 
-#ifdef DATA2G_HAVE_QTAUDIO
+#ifdef DATA2G_HAVE_AUDIO
 #include <QCoreApplication>
 
-#include "audio/qt/qtaudio.hpp"
+#include "audio/card.hpp"
 #endif
 
 using namespace data2g;
@@ -106,9 +106,9 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-#ifdef DATA2G_HAVE_QTAUDIO
+#ifdef DATA2G_HAVE_AUDIO
     QCoreApplication app(argc, argv);
-    const auto devs = audio::qt::input_devices();
+    const auto devs = audio::card::input_devices();
     if (list) {
         for (std::size_t i = 0; i < devs.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devs[i].channels, devs[i].name.c_str());
         return 0;
@@ -118,10 +118,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     audio::CaptureFifo fifo(config::FS);
-    std::unique_ptr<audio::qt::Capture> cap;
+    std::unique_ptr<audio::card::Capture> cap;
     try {
-        cap = std::make_unique<audio::qt::Capture>(audio::select_device(devs, device.value_or(""), "input"), rate, fifo,
-                                                   [](const std::string& s) { std::fprintf(stderr, "data2g-monitor: %s\n", s.c_str()); });
+        cap = std::make_unique<audio::card::Capture>(audio::select_device(devs, device.value_or(""), "input"), rate, fifo,
+                                                     [](const std::string& s) { std::fprintf(stderr, "data2g-monitor: %s\n", s.c_str()); });
     } catch (const std::exception& e) {
         std::fprintf(stderr, "data2g-monitor: %s (see --list-audio-devices)\n", e.what());
         return 1;
@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     return 0;
 #else
     (void)device, (void)rate, (void)list;
-    std::fprintf(stderr, "data2g-monitor: built without Qt Multimedia: only --input-file\n");
+    std::fprintf(stderr, "data2g-monitor: built without sound card audio: only --input-file\n");
     return 2;
 #endif
 }

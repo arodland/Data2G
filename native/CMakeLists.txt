@@ -8,8 +8,10 @@
 # Options:
 #   DATA2G_BUILD_PYMODULE  pybind11 module, so pytest can drive the C++ core
 #   DATA2G_SANITIZE        ASan + UBSan
-#   DATA2G_BUILD_QTAUDIO   AUTO/ON/OFF: data2g_audio_qt (Qt Multimedia) and
+#   DATA2G_BUILD_QTAUDIO   AUTO/ON/OFF: data2g_audio (sound cards) and
 #                          data2g-audio-check
+#   DATA2G_AUDIO_BACKEND   qt (Qt Multimedia) or miniaudio (vendored in
+#                          third_party/; needs no Qt Multimedia)
 #   DATA2G_BUILD_HOST      AUTO/ON/OFF: data2g-host (Qt Core + Network; sound
 #                          cards when Qt Multimedia is there, PTT with RIG)
 #   DATA2G_BUILD_GUI       AUTO/ON/OFF: data2g-gui (Qt Widgets, Network,
@@ -34,6 +36,8 @@ option(DATA2G_BUILD_PYMODULE "Build the pybind11 module for pytest parity runs" 
 option(DATA2G_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 set(DATA2G_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
+set(DATA2G_AUDIO_BACKEND "qt" CACHE STRING "Sound card backend (qt/miniaudio)")
+set_property(CACHE DATA2G_AUDIO_BACKEND PROPERTY STRINGS qt miniaudio)
 option(DATA2G_BUILD_RIG "Build libhamlib rig control" ON)
 set(DATA2G_BUILD_HOST "AUTO" CACHE STRING "Build the data2g-host app (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_HOST PROPERTY STRINGS ON OFF AUTO)
@@ -64,10 +68,10 @@ endif()
 
 # --- core: no Qt, no files to find at run time (tools/check_layering.py) ----
 # Globbed so modules ported in parallel don't collide here. Device backends
-# (core/*/qt/, core/*/android/, core/*/hamlib/) are separate libraries and
+# (core/*/qt/, core/*/android/, core/*/hamlib/, core/*/miniaudio/) are separate libraries and
 # excluded.
 file(GLOB_RECURSE DATA2G_CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
-list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android|hamlib)/")
+list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android|hamlib|miniaudio)/")
 add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
 target_include_directories(data2g_core PUBLIC core)
 target_include_directories(data2g_core SYSTEM PUBLIC third_party/pocketfft)
@@ -86,33 +90,48 @@ set_source_files_properties(core/polar/polar.cpp PROPERTIES
   COMPILE_OPTIONS "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<NOT:$<CONFIG:Debug>>>:-O3>")
 
 # --- device backends -----------------------------------------------------------
-if(NOT DATA2G_BUILD_QTAUDIO STREQUAL "OFF")
+# data2g_audio: audio/card.hpp's backend. The apps start a QCoreApplication
+# either way (Qt Multimedia needs one), so Qt Core comes with it.
+if(DATA2G_BUILD_QTAUDIO STREQUAL "OFF")
+elseif(DATA2G_AUDIO_BACKEND STREQUAL "miniaudio")
+  find_package(Qt6 6.2 COMPONENTS Core REQUIRED)
+  add_library(data2g_audio STATIC core/audio/miniaudio/maaudio.cpp)
+  set_target_properties(data2g_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(data2g_audio SYSTEM PRIVATE third_party/miniaudio)
+  target_compile_definitions(data2g_audio PUBLIC DATA2G_AUDIO_MINIAUDIO)
+  target_link_libraries(data2g_audio PUBLIC data2g_core Qt6::Core PRIVATE ${CMAKE_DL_LIBS})
+  message(STATUS "miniaudio audio")
+elseif(NOT DATA2G_AUDIO_BACKEND STREQUAL "qt")
+  message(FATAL_ERROR "DATA2G_AUDIO_BACKEND=${DATA2G_AUDIO_BACKEND}: want qt or miniaudio")
+else()
   find_package(Qt6 6.2 COMPONENTS Core Multimedia QUIET)
   if(Qt6Multimedia_FOUND)
-    add_library(data2g_audio_qt STATIC core/audio/qt/qtaudio.cpp)
-    set_target_properties(data2g_audio_qt PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_link_libraries(data2g_audio_qt PUBLIC data2g_core Qt6::Core Qt6::Multimedia)
+    add_library(data2g_audio STATIC core/audio/qt/qtaudio.cpp)
+    set_target_properties(data2g_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(data2g_audio PUBLIC data2g_core Qt6::Core Qt6::Multimedia)
     message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
-    add_executable(data2g-audio-check apps/data2g_audio_check.cpp)
-    target_link_libraries(data2g-audio-check PRIVATE data2g_audio_qt)
   elseif(DATA2G_BUILD_QTAUDIO STREQUAL "ON")
     message(FATAL_ERROR "DATA2G_BUILD_QTAUDIO=ON but Qt6 Multimedia was not found")
   else()
     message(STATUS "Qt6 Multimedia not found; building without sound card audio")
   endif()
 endif()
+if(TARGET data2g_audio)
+  add_executable(data2g-audio-check apps/data2g_audio_check.cpp)
+  target_link_libraries(data2g-audio-check PRIVATE data2g_audio)
+endif()
 
 # data2g-monitor: receive only, every burst as a packet dump. A sound card
-# with Qt Multimedia; raw float32 input (--input-file) always.
+# with data2g_audio; raw float32 input (--input-file) always.
 add_executable(data2g-monitor apps/data2g_monitor.cpp)
 target_link_libraries(data2g-monitor PRIVATE data2g_core)
 
 # data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
 add_executable(data2g-replay apps/data2g_replay.cpp)
 target_link_libraries(data2g-replay PRIVATE data2g_core)
-if(TARGET data2g_audio_qt)
-  target_link_libraries(data2g-monitor PRIVATE data2g_audio_qt)
-  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_QTAUDIO)
+if(TARGET data2g_audio)
+  target_link_libraries(data2g-monitor PRIVATE data2g_audio)
+  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
 endif()
 
 if(DATA2G_BUILD_RIG)
@@ -152,9 +171,9 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
         message(STATUS "Qt6 DBus not found: real-time audio threads only by direct permission, not RealtimeKit")
       endif()
     endif()
-    if(TARGET data2g_audio_qt)
-      target_link_libraries(data2g_station PUBLIC data2g_audio_qt)
-      target_compile_definitions(data2g_station PUBLIC DATA2G_HAVE_QTAUDIO)
+    if(TARGET data2g_audio)
+      target_link_libraries(data2g_station PUBLIC data2g_audio)
+      target_compile_definitions(data2g_station PUBLIC DATA2G_HAVE_AUDIO)
     endif()
     if(TARGET data2g_rig)
       target_link_libraries(data2g_station PUBLIC data2g_rig)
@@ -198,8 +217,8 @@ if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   if(NOT TARGET data2g_station)
     list(APPEND _gui_missing "Qt6 Network")
   endif()
-  if(NOT TARGET data2g_audio_qt)
-    list(APPEND _gui_missing "Qt6 Multimedia (DATA2G_BUILD_QTAUDIO)")
+  if(NOT TARGET data2g_audio)
+    list(APPEND _gui_missing "sound card audio (Qt6 Multimedia, or -DDATA2G_AUDIO_BACKEND=miniaudio)")
   endif()
   string(REPLACE ";" ", " _gui_missing_text "${_gui_missing}")
   if(NOT _gui_missing)

@@ -11,6 +11,8 @@
 //   pactl load-module module-remap-source source_name=d2g_loop master=d2g-null.monitor
 //       source_properties=device.description=D2G-Loopback   (one line)
 //   data2g-audio-check --loop --out d2g-null --in D2G-Loopback
+// The miniaudio backend lists monitors (after the real sources), so with it
+// the null sink alone will do: --out d2g-null --in "monitor of d2g-null".
 
 #include <QCoreApplication>
 
@@ -25,7 +27,7 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 #include "audio/filters.hpp"
-#include "audio/qt/qtaudio.hpp"
+#include "audio/card.hpp"
 #include "generated/config.hpp"
 
 using namespace data2g;
@@ -71,7 +73,7 @@ int main(int argc, char** argv) {
         }
     }
     try {
-        const auto ins = audio::qt::input_devices(), outs = audio::qt::output_devices();
+        const auto ins = audio::card::input_devices(), outs = audio::card::output_devices();
         if (!loop) {
             list("input", ins);
             list("output", outs);
@@ -80,8 +82,8 @@ int main(int argc, char** argv) {
         const auto report = [](const std::string& s) { std::fprintf(stderr, "%s\n", s.c_str()); };
         audio::CaptureFifo cap(config::FS);
         audio::PlaybackFifo play(rate, 0.1);
-        audio::qt::Capture capture(audio::select_device(ins, in, "input"), rate, cap, report);
-        audio::qt::Playback playback(audio::select_device(outs, out, "output"), rate, play, report);
+        audio::card::Capture capture(audio::select_device(ins, in, "input"), rate, cap, report);
+        audio::card::Playback playback(audio::select_device(outs, out, "output"), rate, play, report);
         std::printf("in:  %s (%d ch)\nout: %s (%d ch)\n", capture.device_name().c_str(), capture.channels(),
                     playback.device_name().c_str(), playback.channels());
 

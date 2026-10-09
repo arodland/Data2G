@@ -39,8 +39,8 @@
 #include "rig/ptt.hpp"
 #include "tnc/tnc.hpp"
 
-#ifdef DATA2G_HAVE_QTAUDIO
-#include "audio/qt/qtaudio.hpp"
+#ifdef DATA2G_HAVE_AUDIO
+#include "audio/card.hpp"
 #endif
 // Always: its types and constants need no libhamlib (only its functions,
 // called under DATA2G_HAVE_RIG, do).
@@ -620,10 +620,10 @@ private:
     std::function<void(int, tnc::Bytes)> on_command_;
 };
 
-#ifdef DATA2G_HAVE_QTAUDIO
+#ifdef DATA2G_HAVE_AUDIO
 struct Station::SoundCard {
-    std::unique_ptr<audio::qt::Capture> cap;
-    std::unique_ptr<audio::qt::Playback> play;
+    std::unique_ptr<audio::card::Capture> cap;
+    std::unique_ptr<audio::card::Playback> play;
 };
 #else
 struct Station::SoundCard {};
@@ -1057,20 +1057,20 @@ void Station::start() {
             pipe_ = std::make_unique<audio::PipeIo>(in, out, *cap_, *play_, report);
             logf(INFO, "audio: in %s, out %s (float32 at %d Hz)", in.c_str(), out.c_str(), config::FS);
         } else {
-#ifdef DATA2G_HAVE_QTAUDIO
+#ifdef DATA2G_HAVE_AUDIO
             rate_ = a_.sample_rate;
             if (rate_ <= 0 || rate_ % config::FS)
                 throw UsageError("--sample-rate must be a multiple of " + std::to_string(config::FS));
             play_ = std::make_unique<audio::PlaybackFifo>(rate_, lead_s);
-            const auto in = audio::select_device(audio::qt::input_devices(), a_.input_device.value_or(""), "input");
-            const auto out = audio::select_device(audio::qt::output_devices(), a_.output_device.value_or(""), "output");
+            const auto in = audio::select_device(audio::card::input_devices(), a_.input_device.value_or(""), "input");
+            const auto out = audio::select_device(audio::card::output_devices(), a_.output_device.value_or(""), "output");
             card_ = std::make_unique<SoundCard>();
-            card_->cap = std::make_unique<audio::qt::Capture>(in, rate_, *cap_, report);
-            card_->play = std::make_unique<audio::qt::Playback>(out, rate_, *play_, report);
+            card_->cap = std::make_unique<audio::card::Capture>(in, rate_, *cap_, report);
+            card_->play = std::make_unique<audio::card::Playback>(out, rate_, *play_, report);
             logf(INFO, "audio: in %s (%d ch), out %s (%d ch) at %d Hz", card_->cap->device_name().c_str(), card_->cap->channels(),
                  card_->play->device_name().c_str(), card_->play->channels(), rate_);
 #else
-            throw UsageError("built without Qt Multimedia: only --audio-io pipe:IN,OUT");
+            throw UsageError("built without sound card audio: only --audio-io pipe:IN,OUT");
 #endif
         }
         keyer_ = std::make_unique<rig::Keyer>(ptt, *play_, a_.ptt_off_delay_ms / 1000.0,
@@ -1119,7 +1119,7 @@ void Station::stop() {
     }
     if (kiss_) kiss_->close_clients();
     if (pipe_) pipe_->stop();
-#ifdef DATA2G_HAVE_QTAUDIO
+#ifdef DATA2G_HAVE_AUDIO
     if (card_) {
         if (card_->cap) card_->cap->stop();
         if (card_->play) card_->play->stop();

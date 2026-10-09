@@ -177,6 +177,7 @@ jobs:
             ${OSX_ARCH:+-DCMAKE_OSX_ARCHITECTURES=$OSX_ARCH} \
             ${OSX_ARCH:+-DDATA2G_BUILD_PYMODULE=OFF} \
             -DDATA2G_BUILD_HOST=ON -DDATA2G_BUILD_QTAUDIO=ON -DDATA2G_BUILD_RIG=ON \
+            -DDATA2G_AUDIO_BACKEND=miniaudio \
             -DDATA2G_BUILD_GUI=ON \
             -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
             -DPython3_EXECUTABLE="$DATA2G_PYTHON" \
