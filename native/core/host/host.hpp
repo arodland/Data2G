@@ -53,6 +53,8 @@ public:
     arq::Engine& engine;
     int cap = 2;
     bool listening = false;
+    // false: the owner sends PTT ON/OFF itself, when the rig is keyed and released (the engine's PTT runs ahead of both)
+    bool announce_ptt = true;
     std::optional<int> buffer_credit;
     std::vector<std::string> out_cmd;  // lines for the command port, without CR
     arq::Bytes out_data;               // bytes for the data port

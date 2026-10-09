@@ -259,7 +259,7 @@ void Host::after_step(bool ptt) {
     }
     if (ptt != ptt_) {
         ptt_ = ptt;
-        out_cmd.emplace_back(ptt ? "PTT ON" : "PTT OFF");
+        if (announce_ptt) out_cmd.emplace_back(ptt ? "PTT ON" : "PTT OFF");
         if (ptt && e.tx() && e.tx()->burst->submode != mode_) {
             mode_ = e.tx()->burst->submode;
             out_cmd.push_back("MODE " + *mode_);

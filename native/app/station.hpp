@@ -227,6 +227,7 @@ private:
     // session stage
     void flush(std::uint64_t asker = 0);
     void note_link();
+    void announce_ptt(bool on);
     // owner's thread
     void deliver(const Outbox& o);
     // engine thread

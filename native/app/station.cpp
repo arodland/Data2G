@@ -923,6 +923,7 @@ void Station::tx_loop() {
             tx_active_ = true;
             keyer_->key();  // PTT on, the lead queued
             ptt_ = true;
+            announce_ptt(true);
             audio::Interpolator interp(rate_);
             const auto& a = *job.audio;
             for (std::size_t pos = 0; pos < a.size() && !stopped(); pos += block) {
@@ -946,9 +947,18 @@ void Station::tx_loop() {
             } catch (...) {
             }
         }
+        if (ptt_) announce_ptt(false);  // clients that key the rig themselves release it now
         ptt_ = false;
         tx_active_ = false;
     }
+}
+
+// PTT ON/OFF to the command clients from the transmit thread, at the moment the rig is keyed or released: a client
+// that controls the rig itself follows these, so they cannot wait for (or come from) the engine's block step.
+void Station::announce_ptt(bool on) {
+    Outbox o;
+    o.cmd.emplace_back(on ? "PTT ON" : "PTT OFF", 0);
+    QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
 
 std::optional<double> Station::rig_frequency() const { return rig_ ? rig_->frequency_hz() : std::nullopt; }
@@ -973,6 +983,7 @@ void Station::start() {
         cfg.worker = a_.decode_worker;
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
+        host_->announce_ptt = false;  // tx_loop tells the clients, as it keys and unkeys the rig
         engine_->set_after_block([this](bool ptt) {
             host_->after_step(ptt);
             note_link();
