@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -25,8 +26,13 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// How much the capture device may hold before our thread drains it.
-constexpr double CAPTURE_BUFFER_S = 2.0;
+// The capture device's buffer. Some backends (PulseAudio on a Raspberry Pi) deliver a whole buffer at a time, so
+// this is also the latency of the received audio: keep it short. DATA2G_CAPTURE_BUFFER_MS overrides it.
+double capture_buffer_s() {
+    const char* e = std::getenv("DATA2G_CAPTURE_BUFFER_MS");
+    const double ms = e ? std::atof(e) : 0;
+    return ms > 0 ? ms / 1000 : 0.5;
+}
 
 std::vector<DeviceInfo> infos(const QList<QAudioDevice>& devices) {
     std::vector<DeviceInfo> out;
@@ -176,7 +182,7 @@ protected:
         channels_ = f.qt.channelCount();
         pipeline_ = std::make_unique<CapturePipeline>(f.ours, f.qt.channelCount(), rate_, fifo_);
         source_ = std::make_unique<QAudioSource>(device_, f.qt);
-        source_->setBufferSize(f.qt.bytesForDuration(static_cast<qint64>(CAPTURE_BUFFER_S * 1e6)));
+        source_->setBufferSize(f.qt.bytesForDuration(static_cast<qint64>(capture_buffer_s() * 1e6)));
         connect(source_.get(), &QAudioSource::stateChanged, this, [this] { report("in", source_->error()); });
         io_ = source_->start();
         if (io_ == nullptr) throw std::runtime_error("could not start capture on \"" + name() + "\"");
