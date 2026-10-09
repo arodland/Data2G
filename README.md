@@ -2,6 +2,10 @@
 
 Data2G is an HF data modem for amateur radio operators with speeds and robustness rivaling VARA HF and Pactor. It supports connected (ARQ) and unconnected/broadcast (FEC) operation, with effective one-way speeds as high as 6400 bps (48,000 bytes per minute, 8000 words per minute) at 25+ dB SNR, and sensitivity down to around -10 dB, albeit at 0.5% of the speed. It's suitable for chat, BBSes, email delivery, or APRS. 2400Hz is required for full speed, but Data2G can be configured for a maximum bandwidth of 500Hz to fit within narrowband segments of the bandplan.
 
+## Status
+
+This is beta-quality software. It's been tested on air, and I've successfully sent emails using it. I encourage people to try it out, but I don't guarantee that it's bug-free, I don't guarantee that the protocol won't still change, and I especially don't guarantee it for any life-safety purposes. This is an experiment for fun.
+
 ## Versatile
 
 Data2G has a VARA-compatible TNC for connected mode (Winlink, BBS), and a KISS TNC for applications like HF APRS. But there is also an extended non-connected mode where apps can send frames to designated "broadcast groups", with full control over the mode they're using, and subscribe to those groups on KISS ports. This lets you build chat or other sorts of interesting apps on top of Data2G without having to stick to the in-order guaranteed-delivery ARQ model.
@@ -30,6 +34,10 @@ simulated end-to-end QSOs to prove their value.
 * **Transparent Compression**: Text takes up less airtime, automatically, with no cost to binary data.
 * **Intelligent Rate Shifting**: The receiver feeds the current band conditions to the world's tiniest neural net model (61,280 parameters) which was trained on thousands of simulated sessions spanning over a quarter million transmissions in varying conditions. The model is used to predict which mode has the best balance of speed and probability of being decoded.
 * **Submode Zoo**: Many modems have a carefully crafted set of modulations, arranged in a "ladder" from slowest and most robust to fastest and most fragile, so that their rate-shifters can "climb the ladder" when conditions are good and go back down it when conditions are poor. Data2G has 50 submodes spanning four bandwidths, seven modulations, and a gamut of parity levels. They don't fall into a "ladder", but each one is the best possible mode under _some_ set of conditions, whether that's high SNR, low SNR, fast fading, slow fading, or acknowledging packets as fast as possible. If it isn't somewhere on the Pareto frontier, it gets dropped.
+
+## Discuss
+
+Join the [Digital Oddballs Radio Club Discord](https://discord.gg/JJgNszRMce).
 
 ## License
 
