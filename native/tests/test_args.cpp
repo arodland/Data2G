@@ -94,6 +94,22 @@ void test_noise_rule() {
                  "negative refused");
 }
 
+void test_realtime_switch() {
+    check::current_step = "realtime";
+    check::is_true(parse({}).realtime, "on by default");
+    check::is_true(!parse({"--no-realtime"}).realtime, "--no-realtime");
+    check::is_true(parse({"--no-realtime", "--realtime"}).realtime, "--realtime");
+}
+
+void test_dd_budget() {
+    check::current_step = "dd budget";
+    check::is_true(parse({}).dd_budget == 1.0, "default 1");
+    check::is_true(parse({"--dd-budget", "0.3"}).dd_budget == 0.3, "--dd-budget 0.3");
+    check::is_true(parse({"--dd-budget=0"}).dd_budget == 0.0 && !app::check(parse({"--dd-budget=0"})), "0: none, valid");
+    check::equal(app::check(parse({"--dd-budget", "-1"})).value_or(""), std::string("--dd-budget: must be 0 (no DD) or more"),
+                 "negative refused");
+}
+
 }  // namespace
 
 int main() {
@@ -101,5 +117,7 @@ int main() {
     test_every_flag();
     test_check();
     test_noise_rule();
+    test_dd_budget();
+    test_realtime_switch();
     return check::report("args");
 }

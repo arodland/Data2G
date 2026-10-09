@@ -12,6 +12,7 @@
 
 #include "tables/tables.hpp"
 #include "util/linalg.hpp"
+#include "util/cancel.hpp"
 #include "util/pool.hpp"
 
 namespace data2g::equalizer {
@@ -366,6 +367,7 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
     };
     std::vector<RowObs> row_obs(F * S);
     pool::parallel_for(F * S, [&](size_t i) {
+        cancel::check();
         std::vector<size_t> known;
         std::vector<cd> a, x;
         for (size_t c = 0; c < nc; ++c)
@@ -432,6 +434,7 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
     Mat<cd> h(F * S, nc);
     Mat<double> mse(F * S, nc);
     pool::parallel_for(F, [&](size_t f) {
+        cancel::check();
         std::vector<size_t> obs;
         std::vector<double> rt, rdp, ar, xr;
         // t_rows.mean(axis=1) bit for bit (a sequential sum: measured), since

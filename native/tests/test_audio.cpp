@@ -286,6 +286,23 @@ void test_playback() {
     for (std::size_t i = 0; i < burst.size(); ++i) same &= p[4800 + i] == static_cast<float>(burst[i]);
     check::is_true(same && p[0] == 0.0f, "played in order after the lead");
 
+    // flush(): queued audio is dropped by the device thread's next pull
+    {
+        audio::PlaybackFifo f(rate, 0.0);
+        f.start();
+        f.write(std::vector<double>(rate, 0.25));  // a second queued, nobody pulling yet
+        std::thread device([&] {
+            std::vector<float> out(256);
+            for (int i = 0; i < 20; ++i) {
+                f.pull(out);
+                std::this_thread::sleep_for(2ms);
+            }
+        });
+        f.flush();
+        device.join();
+        check::is_true(f.queued() < static_cast<std::size_t>(rate) / 10, "flush: the queued second is gone");
+    }
+
     // Starved while keyed: counted.
     audio::PlaybackFifo starved(rate, 0.0);
     starved.start();

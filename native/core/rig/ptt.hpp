@@ -3,6 +3,7 @@
 // silence ahead of a burst (Engine ptt_delay_s, --ptt-on-delay-ms).
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -32,7 +33,7 @@ public:
 
     void key();    // PTT on, then the TX lead queued
     void unkey();  // drain the FIFO and the device, wait off_delay_s, PTT off
-    bool keyed() const { return keyed_; }
+    bool keyed() const { return keyed_.load(std::memory_order_acquire); }
     // PTT calls that failed (logged and carried on from, as tnc.Rigctld does).
     std::uint64_t failures() const { return failures_; }
 
@@ -44,7 +45,8 @@ private:
     double off_delay_s_;
     Report report_;
     MustRelease must_release_;
-    bool keyed_ = false, sent_on_ = false;
+    std::atomic<bool> keyed_{false};  // the transmit thread keys and unkeys; the receive thread mutes while it is set
+    bool sent_on_ = false;
     std::uint64_t failures_ = 0;
     int off_failed_ = 0;  // consecutive failed PTT offs, retried on the next unkey() up to MAX_OFF_TRIES
 };

@@ -94,6 +94,7 @@ struct BurstEvent {
     Pending header;
     std::optional<Rx> rx;  // nullopt: lost
     std::vector<double> audio;  // the segment received
+    double receive_ms = 0;      // wall time modem::receive took (sync check, header, channel estimate), for the log
 };
 using Event = std::variant<HeaderEvent, BurstEvent>;
 

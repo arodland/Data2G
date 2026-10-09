@@ -71,7 +71,14 @@ void PlaybackFifo::drain() {
     sleep_s(output_latency());
 }
 
+void PlaybackFifo::flush() {
+    flush_.store(true, std::memory_order_release);
+    for (int i = 0; i < 100 && flush_.load(std::memory_order_acquire); ++i) sleep_s(0.002);
+    flush_.store(false, std::memory_order_release);
+}
+
 std::size_t PlaybackFifo::pull(std::span<float> out) {
+    if (flush_.exchange(false, std::memory_order_acq_rel)) ring_.discard();
     const std::size_t n = ring_.read(out);
     std::fill(out.begin() + static_cast<std::ptrdiff_t>(n), out.end(), 0.0f);
     if (n < out.size() && active_.load(std::memory_order_acquire)) underruns_.fetch_add(1, std::memory_order_relaxed);

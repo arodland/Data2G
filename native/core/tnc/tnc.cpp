@@ -1,6 +1,7 @@
 #include "tnc/tnc.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
@@ -190,6 +191,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
     BurstEvent ev{req.header, std::nullopt, {}};
     Pending p = req.header;
     p.shift(-req.at);
+    const auto t0 = std::chrono::steady_clock::now();
     if (p.is_cpm()) {
         ev.rx = cpm::receive(req.seg, p.cpm());
     } else {
@@ -204,6 +206,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
             // the burst is lost: rx stays empty
         }
     }
+    ev.receive_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (req.audio_lo == 0 && req.audio_hi == static_cast<int64_t>(req.seg.size())) ev.audio = std::move(req.seg);
     else ev.audio.assign(req.seg.begin() + req.audio_lo, req.seg.begin() + req.audio_hi);
     return ev;
@@ -422,7 +425,15 @@ Receiver::Stats Receiver::stats(int64_t w0) {
             d.reset();
             d.fed = off_;
         }
-        const auto from = static_cast<std::size_t>(d.fed - off_);
+        auto from = static_cast<std::size_t>(d.fed - off_);
+        // A confirmed burst isn't searched, so its audio goes unfed until a search is wanted again (a late
+        // flip to unconfirmed): the catch-up is the burst's whole length in one step, and the trim just below
+        // throws all but the last keep_ away. Start that far back instead (a span more, for the rows' overlap).
+        const auto want = static_cast<std::size_t>(std::max<int64_t>(0, len() - keep_ - 2 * d.span));
+        if (from < want) {
+            d.skip_to(d.fed + static_cast<int64_t>(want - from));
+            from = want;
+        }
         d.feed(waveform::to_baseband(std::span<const double>(buf_).subspan(from), d.fed));
         // no search looks further back than keep_ (the statistic grew with
         // a long burst in the buffer)

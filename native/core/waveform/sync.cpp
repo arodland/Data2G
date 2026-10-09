@@ -1,8 +1,11 @@
 #include "waveform/sync.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -94,11 +97,36 @@ void release_big(Scratch& s) {
     if (s.prod.capacity() > SCRATCH_KEEP || s.row.capacity() > SCRATCH_KEEP) s = Scratch{};
 }
 
+// A serial call that would take longer than this goes on the pool whatever its size: PARALLEL_MIN is a
+// desktop's break-even, but a hop that costs a fifth of a second serially (a Raspberry Pi) keeps the engine
+// thread nearly all busy just listening, and the pool's wakeups are cheap beside that.
+// DATA2G_PARALLEL_SERIAL_MS overrides the 40 ms.
+double parallel_serial_ns() {
+    static const double ns = [] {
+        const char* v = std::getenv("DATA2G_PARALLEL_SERIAL_MS");
+        const double ms = v ? std::atof(v) : 40.0;
+        return (ms > 0 ? ms : 40.0) * 1e6;
+    }();
+    return ns;
+}
+
+// What a bin costs serially per sample, from the serial calls so far (an average; 0 until the first), used to
+// predict the next one. Only serial calls update it, so a machine that turned out to be slow stays "slow".
+std::atomic<double> serial_ns_per_unit{0.0};
+std::atomic<int> per_bin_calls{0};  // the first few are cold (plans, scratch, page faults) and don't inform the estimate
+
 void per_bin(std::size_t samples, std::size_t bins, const std::function<void(std::size_t)>& fn) {
-    if (samples >= PARALLEL_MIN) {
+    const double units = static_cast<double>(samples) * static_cast<double>(bins);
+    if (samples >= PARALLEL_MIN || serial_ns_per_unit.load(std::memory_order_relaxed) * units > parallel_serial_ns()) {
         pool::parallel_for(bins, fn);
-    } else {
-        for (std::size_t i = 0; i < bins; ++i) fn(i);
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < bins; ++i) fn(i);
+    if (units > 0 && per_bin_calls.fetch_add(1, std::memory_order_relaxed) >= 4) {
+        const double per = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / units;
+        const double old = serial_ns_per_unit.load(std::memory_order_relaxed);
+        serial_ns_per_unit.store(old == 0.0 ? per : 0.8 * old + 0.2 * per, std::memory_order_relaxed);
     }
 }
 
@@ -454,6 +482,14 @@ void StreamDetector::reset() {
     s_off_ = c_off_ = 0;
     s0 = c0 = fed = 0;
     levels.clear();
+}
+
+void StreamDetector::skip_to(std::int64_t pos) {
+    tail.clear();
+    for (auto& row : S_) row.clear();
+    for (auto& row : C_) row.clear();
+    s_off_ = c_off_ = 0;
+    s0 = c0 = fed = pos;
 }
 
 void StreamDetector::feed(std::span<const cdouble> z_new) {

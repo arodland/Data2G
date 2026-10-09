@@ -72,6 +72,15 @@ using SoftStore = std::map<SoftKey, SoftEntry>;
 using Clock = std::function<double()>;  // seconds, monotonic
 double monotonic();
 
+// One decode of a slot's soft bits combined with what is stored for it: ModemRx::decode_stored's work for one
+// DD pass, as a value, so it can be made ahead (prepare) and used where the sequential decode wants it.
+struct DecodePass {
+    std::vector<double> buf;   // the combined buffer
+    bool ok = false;
+    Bytes data;                // the payload, if ok
+    std::vector<double> post;  // DD: the coded bits' a-posteriori LLRs, mapping order
+};
+
 class ModemRx : public RxBurst {
 public:
     // store: this station's soft bits across bursts (nullptr: decode() with
@@ -85,6 +94,14 @@ public:
     int n_cw() const override { return n_cw_; }
     std::optional<Bytes> decode(int slot, const MaskId& mask, int rv, const SoftKey* key) override;
     void forget(const SoftKey& key) override;
+    // Runs the first pass of each request's slot at once on the pool (only on the burst's own estimate, and
+    // with every key distinct), for decode() to use. Same answers as decoding one at a time.
+    void prepare(std::span<const DecodeRequest> reqs) override;
+
+    // How the decodes so far went, for the log: channel re-estimates made (DD passes) and whether the DD
+    // budget ran out.
+    int dd_refines() const { return refines_; }
+    bool dd_spent() const { return late(); }
 
     // decode() without a store: `stored` is what the key holds (nullopt:
     // nothing); a failed decode replaces it, a miss before decoding (slot
@@ -116,7 +133,8 @@ private:
     bool dd(const codes::Spec& s) const;
     bool late() const;
     void learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m);
-    void refine(int slot, const codes::Spec& s, std::vector<double> post);
+    bool refine(int slot, const codes::Spec& s, std::vector<double> post);  // false: the budget ran out inside it
+    void remake_estimate(const codes::Spec& s);
     void undo(int slot, const DdState& saved);
     Est dd_estimate() const;
 
@@ -134,6 +152,23 @@ private:
     std::map<int, Raw> raw_;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;
+    int refines_ = 0;
+    struct Prepared {
+        int rv;
+        std::uint32_t mask;
+        bool had_stored;
+        DecodePass pass;
+    };
+    std::map<int, Prepared> prepared_;  // by slot
+    // dd_estimate()'s per-symbol results, keyed on the symbol's input LLRs: a DD iteration changes
+    // one codeword's posterior, and the rest of the burst's symbols come out the same again.
+    struct SymCache {
+        std::vector<double> L;               // m LLRs per symbol, as last computed
+        std::vector<std::complex<double>> z;  // the soft pilot (0: none)
+        std::vector<double> w;                // its weight
+        std::vector<std::uint8_t> valid;
+    };
+    mutable SymCache sym_cache_;
     DdState cur_{nullptr, std::make_shared<std::map<int, std::vector<double>>>()};
 };
 

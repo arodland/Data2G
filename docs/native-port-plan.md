@@ -108,9 +108,27 @@ core.
 
 - Capture QThread: device rate -> ring buffer at 8 kHz (stateful resampler).
 - Playback QThread: pulls from a TX FIFO.
-- Engine thread (std::thread): reads the ring, runs `Engine::step`, writes TX
-  audio, posts events. Sample-clocked like the Python engine, so its timing
-  logic ports unchanged.
+- Engine thread (std::thread): reads the ring, runs `Engine::step`, posts
+  events. Sample-clocked like the Python engine, so its timing logic ports
+  unchanged. It never touches the transmitter.
+- Transmit thread (std::thread, 2026-10-08): when the engine starts a
+  transmission it hands over the whole burst's audio (`Engine::Out::tx_burst`);
+  this thread keys PTT, feeds the playback FIFO from its own clock (at most
+  half a second ahead of the card, so ABORT is quick), waits for the card to
+  finish and unkeys. The rig's slow PTT calls, the drain and the off delay
+  block here, and nothing the receive side computes (a 300 ms detection hop
+  on a Raspberry Pi) can leave a hole in a burst. The receive side mutes its
+  input while this thread is keyed. A Raspberry Pi 4 log showed TX underruns
+  at the end of ACKs whenever a step ran long.
+- Real-time scheduling (`--realtime`, default on; `app/realtime.*`, Linux):
+  the transmit thread and the sound card's capture and playback threads ask
+  for it, directly (SCHED_FIFO, if RLIMIT_RTPRIO allows) or through
+  RealtimeKit on D-Bus (SCHED_RR). `RLIMIT_RTTIME` is set to 200 ms, which
+  RealtimeKit requires and which the kernel enforces by killing a process
+  whose real-time thread runs that long without blocking. So only threads
+  that do a little and block may be real-time; the engine and decode threads
+  compute for hundreds of milliseconds on a small machine and stay normal.
+  Other platforms later (`audio::set_thread_init` is the seam).
 - Main thread: Qt event loop, TCP sockets, rig. Talks to the engine through
   two queues (commands in, events out).
 
@@ -332,8 +350,9 @@ Status 2026-10-02: headless host landed (`data2g-host`, not yet on air).
   substitutes it (test_host, test_engine).
 - `apps/data2g_host.cpp`: host.py main's flags, plus `--decode-worker`
   (default on) and `--audio-io pipe:IN,OUT`. Threads: main (Qt loop, TCP
-  ports), engine (capture -> step -> Keyer), decode worker (session stage
-  and the Host, reached by `post()`), audio, rig.
+  ports), engine (capture -> step, hands bursts to the transmit thread),
+  transmit (Keyer, playback FIFO), decode worker (session stage and the
+  Host, reached by `post()`), audio, rig.
 - `core/audio/pipe.*`: raw float32 8 kHz files or named pipes at real
   time. `test_native_host_e2e.py`: two hosts over two mkfifo pipes, VARA
   session (2 kB each way) and KISS both ways, worker on and off, no

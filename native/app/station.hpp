@@ -6,11 +6,17 @@
 // Threads:
 // - the owner's (a Qt event loop): the TCP servers (command, data, KISS),
 //   start(), stop() and every poll below;
-// - engine: reads the capture FIFO a block (0.1 s) at a time, steps the
-//   Engine, keys PTT and queues TX audio (rig::Keyer);
+// - engine (the receive thread): reads the capture FIFO a block (0.1 s) at a
+//   time and steps the Engine; it never touches the transmitter;
+// - transmit: keys PTT (rig::Keyer), plays each burst the engine hands over
+//   on the sound card's own clock and releases PTT, so nothing the receive
+//   side computes, or the rig's slow answers, can leave a hole in a burst;
 // - decode worker (decode_worker, the default): the engine's session stage,
 //   so a burst's decode and DD don't delay search and BUSY;
 // - capture and playback (Qt Multimedia QThreads, or PipeIo's two);
+// The transmit, capture and playback threads ask for real-time scheduling
+// (--realtime, app/realtime.hpp): they do a little work and block. The
+// engine and decode threads compute for long stretches and are left alone.
 // - the rig controller's worker (Hamlib).
 // The Host (VARA semantics) lives on the session stage: the owner reaches it
 // with Engine::post(); what it says comes back as queued calls.
@@ -23,6 +29,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -115,8 +122,11 @@ struct Args {
     std::string log_level = "INFO";
     double stats_interval = 60.0;
     double noise_rule = 1.0;  // the gear shifter's noise rule, its tail weight; 0: off
+    double dd_budget = 1.0;   // seconds of decision-directed decoding per burst (arq::DD_BUDGET_S); 0: none
     // additions
     bool decode_worker = true;
+    int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)
+    bool realtime = true;  // real-time scheduling for the audio and transmit threads, where available
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
 
     bool operator==(const Args&) const = default;
@@ -221,6 +231,9 @@ private:
     void deliver(const Outbox& o);
     // engine thread
     void engine_loop();
+    void tx_loop();
+    void tx_submit(std::shared_ptr<const std::vector<double>> burst);
+    void tx_abort();
     void watch_counters();
     void tap(std::span<const double> x, bool tx);
 
@@ -240,8 +253,19 @@ private:
     std::unique_ptr<rig::Keyer> keyer_;
     std::unique_ptr<MonitorThread> monitor_;  // made in start(), before the engine runs
     std::atomic<bool> monitor_on_{false};
-    std::thread engine_thread_;
+    std::thread engine_thread_, tx_thread_;
     std::atomic<bool> stop_{false}, failed_{false}, ptt_{false};
+    // transmit: bursts handed over by the engine thread, played in order by tx_thread_
+    struct TxJob {
+        std::shared_ptr<const std::vector<double>> audio;
+        unsigned generation;  // an abort moves the generation on: older jobs are dropped, a playing one stops
+    };
+    std::mutex tx_mu_;
+    std::condition_variable tx_cv_;
+    std::deque<TxJob> tx_q_;
+    std::atomic<unsigned> tx_generation_{0};
+    std::atomic<bool> rt_warned_{false};
+    std::atomic<bool> tx_stop_{false}, tx_active_{false};  // tx_active_: from keying to PTT off; the receive side mutes
     bool running_ = false;
     std::uint64_t overflows_ = 0, underruns_ = 0, late_ = 0, dropped_ = 0;  // engine thread
 

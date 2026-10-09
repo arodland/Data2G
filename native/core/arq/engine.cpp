@@ -201,36 +201,101 @@ std::vector<std::uint8_t> npz_f32(const std::string& name, std::span<const float
     return out;
 }
 
-Recorder::Recorder(const std::string& dir, const std::string& call) : dir_(dir) {
+Recorder::Recorder(const std::string& dir, const std::string& call, bool async) : dir_(dir), async_(async) {
     std::filesystem::create_directories(dir_);
     log_.open(dir_ + "/events.jsonl", std::ios::app);
     audio_.open(dir_ + "/audio_in.f16", std::ios::app | std::ios::binary);
     if (!log_ || !audio_) throw std::runtime_error("cannot record to " + dir_);
+    if (async_) thread_ = std::thread(&Recorder::loop, this);
     const double wall = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
     event("start", {{"call", json_str(call)}, {"wall", json_num(wall)}, {"fs", std::to_string(config::FS)}});
+}
+
+Recorder::~Recorder() {
+    if (!thread_.joinable()) return;
+    {
+        std::lock_guard lock(m_);
+        stop_ = true;
+    }
+    wake_.notify_all();
+    thread_.join();  // writes what is queued first
+}
+
+// A job for the writer thread (or run now): in order, and no more than QUEUE_MAX bytes waiting, so a disk that
+// stalls for good ends in the engine waiting rather than in the machine's memory.
+void Recorder::post(std::function<void()> job, std::size_t bytes) {
+    if (!async_) {
+        job();
+        return;
+    }
+    constexpr std::size_t QUEUE_MAX = 64u << 20;
+    std::unique_lock lock(m_);
+    done_.wait(lock, [&] { return queued_bytes_ < QUEUE_MAX; });
+    queued_bytes_ += bytes;
+    q_.emplace_back(std::move(job), bytes);
+    wake_.notify_one();
+}
+
+void Recorder::loop() {
+    std::unique_lock lock(m_);
+    for (;;) {
+        wake_.wait(lock, [&] { return stop_ || !q_.empty(); });
+        if (q_.empty()) return;  // stopped, and nothing left
+        auto [job, bytes] = std::move(q_.front());
+        q_.pop_front();
+        busy_ = true;
+        lock.unlock();
+        try {
+            job();
+        } catch (...) {  // a full disk must not end the engine's thread
+        }
+        lock.lock();
+        busy_ = false;
+        queued_bytes_ -= bytes;
+        done_.notify_all();
+    }
+}
+
+void Recorder::flush() {
+    if (!async_) return;
+    std::unique_lock lock(m_);
+    done_.wait(lock, [&] { return q_.empty() && !busy_; });
 }
 
 void Recorder::audio(std::span<const double> x) {
     std::vector<std::uint16_t> h(x.size());
     std::transform(x.begin(), x.end(), h.begin(), to_half);  // little-endian hosts, as numpy writes it
-    audio_.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size() * 2));
-    audio_.flush();  // whole on disk at every block: readable while live, nothing lost on a crash
+    const std::size_t bytes = h.size() * 2;
+    post(
+        [this, h = std::move(h)] {
+            audio_.write(reinterpret_cast<const char*>(h.data()), static_cast<std::streamsize>(h.size() * 2));
+            audio_.flush();  // whole on disk at every block: readable while live, nothing lost on a crash
+        },
+        bytes);
 }
 
 void Recorder::event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields) {
     std::vector<std::pair<std::string, std::string>> f = {{"kind", json_str(kind)}};
     f.insert(f.end(), fields.begin(), fields.end());
-    log_ << json_obj(f) << '\n' << std::flush;  // line-buffered, as Python opens it
+    std::string line = json_obj(f) + '\n';
+    const std::size_t bytes = line.size();
+    post([this, line = std::move(line)] { log_ << line << std::flush; }, bytes);  // line-buffered, as Python opens it
 }
 
 std::string Recorder::rx(double t, std::span<const double> audio, const tnc::Pending& header, bool lost,
                          const std::optional<Measured>& meas, const std::optional<tnc::NoiseSnapshot>& noise) {
     char name[32];
     std::snprintf(name, sizeof name, "rx_%05d.npz", n_++);
-    const std::vector<float> a(audio.begin(), audio.end());
-    const auto bytes = npz_f32("audio", a);
-    std::ofstream(dir_ + "/" + name, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()),
-                                                              static_cast<std::streamsize>(bytes.size()));
+    std::vector<float> a(audio.begin(), audio.end());
+    const std::size_t bytes = a.size() * 4;
+    // the file, then its line in the log: both in the writer's hands, in that order
+    post(
+        [this, path = dir_ + "/" + name, a = std::move(a)] {
+            const auto npz = npz_f32("audio", a);
+            std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(npz.data()),
+                                                        static_cast<std::streamsize>(npz.size()));
+        },
+        bytes);
     event("rx", {{"t", json_num(t)},
                  {"file", json_str(name)},
                  {"submode", json_str(spec_name(header))},
@@ -253,7 +318,7 @@ Engine::Engine(std::string call, EngineConfig cfg, EngineHooks hooks)
       accept_(modem::Accept::of({}, MAX_BURST_S, cfg_.min_header_score)),
       receiver_(accept_, all_grids()),
       ptt_delay_(static_cast<std::int64_t>(cfg_.ptt_delay_s * config::FS)) {
-    if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_);
+    if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_, cfg_.record_async);
     new_session();
     if (cfg_.worker) worker_ = std::thread(&Engine::work, this);
 }
@@ -316,6 +381,7 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
 }
 
 void Engine::abort() {
+    abort_pending_ = true;
     tx_.reset();
     transmitting_ = false;
     request_reset();
@@ -475,7 +541,7 @@ Engine::Out Engine::step(std::span<const double> x) {
 Engine::Out Engine::next_out(std::size_t k) {
     // catching up: silence the session stage made while it lagged is dropped
     while (out_.size() > 1 && !out_.front().sound) out_.pop_front();
-    if (out_.empty()) return {std::vector<double>(k, 0.0), false};
+    if (out_.empty()) return silence(k);
     Out o = std::move(out_.front().out);
     out_.pop_front();
     return o;
@@ -519,7 +585,7 @@ Engine::Done Engine::process_safe(Block& b) {
     } catch (const std::exception& e) {
         log_write(LOG, 40, format("session stage: %s: session dropped", e.what()));
         abort();
-        return {Out{std::vector<double>(b.x.size(), 0.0), false}, false};
+        return {silence(b.x.size()), false};
     }
 }
 
@@ -565,6 +631,7 @@ Engine::Done Engine::process(Block& b) {
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
     }
     if (tx_) {
+        if (tx_->pos == 0) d.out.tx_burst = std::make_shared<const std::vector<double>>(tx_->audio);
         const auto n = std::min<std::size_t>(static_cast<std::size_t>(k), tx_->audio.size() - tx_->pos);
         std::copy_n(tx_->audio.begin() + static_cast<std::ptrdiff_t>(tx_->pos), n, d.out.audio.begin());
         tx_->pos += n;
@@ -580,6 +647,7 @@ Engine::Done Engine::process(Block& b) {
         }
     }
     n_ += k;
+    d.out.tx_abort = abort_pending_.exchange(false);
     d.out.ptt = tx_.has_value();
     transmitting_ = d.out.ptt;
     return d;
@@ -638,6 +706,36 @@ void Engine::missed_energy() {
 }
 
 void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
+    // DEBUG: what this burst cost to decode, stage by stage, from the first look at it to the session having
+    // read it (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
+    using Clock = std::chrono::steady_clock;
+    struct Timing {
+        tnc::BurstEvent& ev;
+        Clock::time_point t0 = Clock::now();
+        std::vector<std::pair<const char*, Clock::time_point>> marks{};  // each stage's name and when it ended
+        const ModemRx* rx = nullptr;
+        void mark(const char* stage) { marks.emplace_back(stage, Clock::now()); }
+        ~Timing() {
+            if (!log_enabled(LOG, 10)) return;
+            const auto ms = [](Clock::time_point a, Clock::time_point b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            const auto t1 = Clock::now();
+            std::string stages = format("receive %.0f", ev.receive_ms);  // before t0: tnc::decode's, ahead of this
+            auto prev = t0;
+            for (const auto& [name, at] : marks) {
+                stages += format(", %s %.0f", name, ms(prev, at));
+                prev = at;
+            }
+            stages += format(", rest %.0f ms", ms(prev, t1));
+            log_write(LOG, 10,
+                      format("RX decode %s x%d: %.0f ms (%s)%s", spec_name(ev.header).c_str(), ev.header.n_cw(), ev.receive_ms + ms(t0, t1),
+                             stages.c_str(),
+                             rx && rx->dd_refines()
+                                 ? format(", DD: %d re-estimates%s", rx->dd_refines(), rx->dd_spent() ? ", budget spent" : "").c_str()
+                                 : ""));
+        }
+    } timing{ev};
     std::optional<Heard> r;
     std::optional<Measured> meas;
     std::shared_ptr<const SlotSoft> soft;
@@ -646,10 +744,13 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         meas = measure(*r);
         soft = soft_bits(*r);
     }
+    timing.mark("soft bits");
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
+    timing.mark("recorder");
     if (on_burst_)
         on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
                    r ? *r : Heard{}, soft});
+    timing.mark("hook");
     if (!r) {
         if (log_enabled(LOG, INFO))
             log_write(LOG, INFO, format("RX %s x%d: header heard (score %.2f), burst lost", spec_name(ev.header).c_str(),
@@ -658,6 +759,7 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         return;
     }
     ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    timing.rx = &rx;
     // in a session, its peer's bursts are the likely ones: a control
     // codeword under the session's key claims the burst before KISS tries
     // its keys on it
@@ -671,10 +773,12 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
         }
     }
     if (cq(rx)) return;
+    timing.mark("probe");
     // the noise profile too (the gear shifter's noise rule reads it)
     Measured m = *meas;
     if (const auto s = noise_.snapshot()) m.noise = NoiseLevels{s->db, s->tail_db, s->impulses_per_min};
     session_->policy->observe(m, rx.submode(), t);
+    timing.mark("observe");
     session_->on_rx(rx, t);
 }
 

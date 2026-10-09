@@ -24,7 +24,12 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 #include "audio/filters.hpp"
+#ifdef __linux__
+#include <pthread.h>
+#endif
+#include "app/realtime.hpp"
 #include "audio/pipe.hpp"
+#include "audio/thread.hpp"
 #include "util/pool.hpp"
 #include "generated/config.hpp"
 #include "host/host.hpp"
@@ -134,6 +139,8 @@ const char* USAGE =
     "                   [--record-dir RECORD_DIR] [--log-level LOG_LEVEL] [--stats-interval S] [--list-modes]\n"
     "                   [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
+    "                   [--realtime | --no-realtime]\n"
+    "                   [--dd-budget S]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
     "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
     "                   [--rig-parity {default,none,odd,even}] [--rig-handshake {default,none,xonxoff,hardware}]\n"
@@ -189,6 +196,14 @@ const char* HELP =
     "                        or named pipes), both at real time, silence while not keyed. Two hosts cross-\n"
     "                        connect through two mkfifo pipes. --sample-rate and the devices are then unused.\n"
     "  --threads N           threads for decode and sync, the calling one included (default: min(4, cores / 2))\n"
+    "  --realtime, --no-realtime\n"
+    "                        real-time scheduling for the transmit and sound card threads (Linux: directly\n"
+    "                        if the user's limits allow it, else through RealtimeKit), so a loaded machine\n"
+    "                        doesn't leave holes in a transmission. The decode threads are left alone.\n"
+    "                        (default: on)\n"
+    "  --dd-budget S         seconds a burst's decode may spend re-estimating the channel from its own\n"
+    "                        decoded codewords (DD), counted from its soft bits; the pass in progress is\n"
+    "                        abandoned when it runs out. 0: none. Lower it on a slow machine (default 1)\n"
     "\nrig control (Hamlib, linked in; SSTVAE's settings):\n"
     "  --rig, --no-rig       rig control at all; --no-rig: no PTT (default: on)\n"
     "  --list-rigs           Hamlib's rig models: number, manufacturer, model, status\n"
@@ -247,6 +262,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--list-audio-devices", &a.list_audio_devices}, {"--list-modes", &a.list_modes}, {"--list-rigs", &a.list_rigs}};
     std::map<std::string, std::pair<bool*, bool>> switches = {
         {"--decode-worker", {&a.decode_worker, true}}, {"--no-decode-worker", {&a.decode_worker, false}},
+        {"--realtime", {&a.realtime, true}},   {"--no-realtime", {&a.realtime, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
         {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
     const auto i_ = [prog](auto& o, auto& v) { return number<int>(o, v, prog); };
@@ -281,6 +297,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--noise-rule", [&](auto& o, auto& v) { a.noise_rule = d_(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
         {"--threads", [&](auto& o, auto& v) { pool::set_threads(i_(o, v)); }},
+        {"--dd-budget", [&](auto& o, auto& v) { a.dd_budget = d_(o, v); }},
         {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
         {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
         {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
@@ -438,6 +455,7 @@ std::optional<std::string> check(const Args& a) {
     if (a.rig_retries < 0) return "--rig-retries: must be 0 or more";
     if (a.rig_poll_interval < 0) return "--rig-poll-interval: must be 0 (key only) or more";
     if (!(a.noise_rule >= 0)) return "--noise-rule: must be 0 (off) or more";
+    if (!(a.dd_budget >= 0)) return "--dd-budget: must be 0 (no DD) or more";
 #ifdef DATA2G_HAVE_RIG
     if (rig_enabled(a) && !rig::model_info(a.rig_model))
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";
@@ -789,17 +807,30 @@ AudioCounters Station::counters() const {
             engine_ ? engine_->decode_dropped() : 0};
 }
 
+// The receive thread: capture block in, engine step, burst out to the transmit thread. It runs the engine's
+// acquisition (and, with no decode worker, the decode) and so can be busy for a long stretch; nothing it does
+// is on the transmitter's path.
 void Station::engine_loop() {
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "d2g-engine");  // visible in top -H and tools/sample_threads.py
+#endif
     const std::size_t block = config::FS / 10;
-    audio::Interpolator interp(rate_);
-    const double gain = std::pow(10.0, a_.output_volume / 20);
     int slow = 0;
+    // Every 10 s at DEBUG: where the loop spends its time. A backlog that grows while "read" is ~0 and "step" is
+    // small means the time goes between the two (tap, hand-over); a large "step" with low CPU means it waits.
+    using clk = std::chrono::steady_clock;
+    const auto secs = [](clk::duration d) { return std::chrono::duration<double>(d).count(); };
+    clk::duration read_t{}, step_t{}, step_max{};
+    int blocks = 0;
+    auto window = clk::now();
     try {
         while (!stop_) {
+            const auto r0 = clk::now();
             auto x = cap_->read(block);
+            read_t += clk::now() - r0;
             if (!x) break;
             const std::vector<double> heard = *x;
-            if (keyer_->keyed()) std::fill(x->begin(), x->end(), 0.0);
+            if (tx_active_) std::fill(x->begin(), x->end(), 0.0);  // the radio's receive audio is muted while it transmits
             const auto t0 = std::chrono::steady_clock::now();
             auto out = engine_->step(*x);
             // the waterfall shows what we send while we send it (the radio's
@@ -811,24 +842,96 @@ void Station::engine_loop() {
                 ++slow;
                 logf(DEBUG, "step took %.2f s (%d slow)", took, slow);
             }
-            if (out.ptt && !keyer_->keyed()) keyer_->key();
-            ptt_ = keyer_->keyed();
-            if (keyer_->keyed()) {
-                auto y = interp(out.audio);
-                for (auto& v : y) v = std::clamp(v * gain, -1.0, 1.0);
-                play_->write(y);
+            step_t += std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(took));
+            step_max = std::max(step_max, std::chrono::duration_cast<clk::duration>(std::chrono::duration<double>(took)));
+            ++blocks;
+            if (const auto now = clk::now(); now - window >= std::chrono::seconds(10)) {
+                logf(DEBUG, "engine loop: %d blocks in %.1f s, read wait %.2f s, step %.2f s (max %.2f), backlog %.2f s", blocks,
+                     secs(now - window), secs(read_t), secs(step_t), secs(step_max), cap_->backlog_s());
+                read_t = step_t = step_max = {};
+                blocks = 0;
+                window = now;
             }
-            if (keyer_->keyed() && !out.ptt) keyer_->unkey();
-            ptt_ = keyer_->keyed();
+            if (out.tx_abort) tx_abort();
+            if (out.tx_burst) tx_submit(std::move(out.tx_burst));
             watch_counters();
+            if (a_.rx_stall_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(a_.rx_stall_ms));
         }
     } catch (const std::exception& e) {
         logf(CRITICAL, "engine thread: %s", e.what());
         failed_ = true;
-        try {
-            if (keyer_) keyer_->unkey();  // never leave the radio transmitting
-        } catch (...) {
+        tx_abort();  // never leave the radio transmitting
+    }
+}
+
+void Station::tx_submit(std::shared_ptr<const std::vector<double>> burst) {
+    {
+        std::lock_guard lock(tx_mu_);
+        tx_q_.push_back({std::move(burst), tx_generation_.load()});
+    }
+    tx_cv_.notify_one();
+}
+
+// ABORT, or the engine dying: what is playing stops (the FIFO is flushed, PTT drops) and what is queued is dropped.
+void Station::tx_abort() {
+    std::lock_guard lock(tx_mu_);
+    ++tx_generation_;
+    tx_q_.clear();
+    tx_cv_.notify_all();
+}
+
+// The transmit thread: for each burst, key, feed the playback FIFO a block at a time (never more than half a second
+// ahead of the card, so an abort is quick), wait for the card to finish, and unkey. The rig's PTT calls, the
+// drain and the off delay all block here, not on the receive side; real-time scheduling, where granted, keeps
+// the feeding on time under load.
+void Station::tx_loop() {
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "d2g-tx");
+#endif
+    audio::thread_init("tx");
+    const std::size_t block = config::FS / 10;
+    const double gain = std::pow(10.0, a_.output_volume / 20);
+    const std::size_t ahead = static_cast<std::size_t>(rate_) / 2;
+    for (;;) {
+        TxJob job;
+        {
+            std::unique_lock lock(tx_mu_);
+            tx_cv_.wait(lock, [&] { return tx_stop_ || !tx_q_.empty(); });
+            if (tx_stop_) break;
+            job = std::move(tx_q_.front());
+            tx_q_.pop_front();
         }
+        if (job.generation != tx_generation_) continue;  // aborted before it began
+        const auto stopped = [&] { return tx_stop_ || job.generation != tx_generation_; };
+        try {
+            tx_active_ = true;
+            keyer_->key();  // PTT on, the lead queued
+            ptt_ = true;
+            audio::Interpolator interp(rate_);
+            const auto& a = *job.audio;
+            for (std::size_t pos = 0; pos < a.size() && !stopped(); pos += block) {
+                while (play_->queued() > ahead && !stopped()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                if (stopped()) break;
+                auto y = interp(std::span<const double>(a).subspan(pos, std::min(block, a.size() - pos)));
+                for (auto& v : y) v = std::clamp(v * gain, -1.0, 1.0);
+                play_->write(y);
+            }
+            if (stopped()) play_->flush();
+            keyer_->unkey();  // drain, off delay, PTT off
+            // a PTT off the rig didn't take stays pending in the keyer, and is tried again (it gives up after a few)
+            for (int i = 0; keyer_->keyed() && i < 10; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                keyer_->unkey();
+            }
+        } catch (const std::exception& e) {
+            logf(ERROR, "transmit: %s", e.what());
+            try {
+                keyer_->unkey();  // never leave the radio transmitting
+            } catch (...) {
+            }
+        }
+        ptt_ = false;
+        tx_active_ = false;
     }
 }
 
@@ -845,10 +948,12 @@ void Station::start() {
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = a_.record_dir;
+        cfg.record_async = true;  // a slow disk must not delay a decode or an ACK
         cfg.min_header_score = a_.min_header_score;
         cfg.kiss = link_.get();
         cfg.stats_interval_s = a_.stats_interval;
         cfg.noise_rule = a_.noise_rule;
+        cfg.dd_budget_s = a_.dd_budget;
         cfg.worker = a_.decode_worker;
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
@@ -934,6 +1039,13 @@ void Station::start() {
         }
 
         // audio
+        if (a_.realtime) {
+            audio::set_thread_init([this](const char* role) {
+                const auto r = request_realtime(20);
+                if (r.ok) logf(INFO, "real-time %s thread: %s", role, r.how.c_str());
+                else if (!rt_warned_.exchange(true)) logf(WARNING, "no real-time scheduling for the audio threads: %s", r.how.c_str());
+            });
+        }
         const double lead_s = a_.tx_lead_ms / 1000.0;
         cap_ = std::make_unique<audio::CaptureFifo>(config::FS);
         const auto report = [](const std::string& s) { log_line(ERROR, s); };
@@ -971,6 +1083,8 @@ void Station::start() {
         logf(INFO, "decode worker %s", a_.decode_worker ? "on" : "off");
 
         running_ = true;
+        tx_stop_ = false;
+        tx_thread_ = std::thread(&Station::tx_loop, this);
         engine_thread_ = std::thread(&Station::engine_loop, this);
     } catch (...) {
         running_ = true;  // so stop() undoes whatever got started
@@ -985,6 +1099,13 @@ void Station::stop() {
     stop_ = true;
     if (cap_) cap_->close();
     if (engine_thread_.joinable()) engine_thread_.join();
+    {
+        std::lock_guard lock(tx_mu_);
+        tx_stop_ = true;
+    }
+    tx_cv_.notify_all();
+    if (tx_thread_.joinable()) tx_thread_.join();  // PTT is off when it returns
+    tx_q_.clear();
     if (engine_) engine_->stop();
     monitor_.reset();  // after the engine: nothing pushes to it now
     keyer_.reset();  // PTT off, if the rig was ever keyed
@@ -1016,6 +1137,8 @@ void Station::stop() {
     link_.reset();
     play_.reset();
     cap_.reset();
+    audio::set_thread_init({});
+    rt_warned_ = false;
     rate_ = config::FS;
     overflows_ = underruns_ = late_ = dropped_ = 0;
 }

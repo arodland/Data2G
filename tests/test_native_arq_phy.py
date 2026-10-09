@@ -231,3 +231,23 @@ def test_kiss_links_match(native, pure):
     k.command(2, bytes([127]))
     k.command(3, bytes([200]))
     assert (k.persist, k.slot_s) == (127, 2.0)
+
+
+def test_dd_budget_expiring_inside_a_pass_ends_it(native, pure):
+    """A clock that runs out partway through the first re-estimate: the pass is abandoned (the budget holds
+    inside the work, not just between passes) and the decode is the budget-spent one. Without a limit the same
+    burst is rescued."""
+    from test_dd import _burst
+
+    r, mids, pays = _burst()
+    calls = [0]
+
+    def clock():  # 1 ms a look: a 30 ms budget is gone 30 looks in, a few of them before the first pass
+        calls[0] += 1
+        return calls[0] * 1e-3
+
+    nat = native.phy.ModemRx(dict(r), {}, 0.03, True, clock)
+    assert [nat.decode(i, m, 0, None) for i, m in enumerate(mids)] == [pays[0], None]
+    assert 30 <= calls[0] < 100  # it ran out inside the work; the whole DD run takes 106 looks
+    free = native.phy.ModemRx(dict(r), {}, None, True)
+    assert [free.decode(i, m, 0, None) for i, m in enumerate(mids)] == pays

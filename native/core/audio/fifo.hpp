@@ -56,6 +56,9 @@ public:
         return n;
     }
 
+    // Consumer only: throws away what is queued.
+    void discard() noexcept { tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release); }
+
     std::size_t size() const noexcept {
         return static_cast<std::size_t>(head_.load(std::memory_order_acquire) - tail_.load(std::memory_order_acquire));
     }
@@ -123,6 +126,9 @@ public:
     void start();
     // Waits for room rather than dropping TX audio.
     void write(std::span<const double> y);
+    // Throws away what is queued but not yet pulled (an abort), done by the device thread on its next pull();
+    // waits for that, up to 0.2 s (a stopped device never pulls).
+    void flush();
     // Waits until everything queued has left the sound card (FIFO empty,
     // then the backend's output latency), so PTT can drop without clipping.
     void drain();
@@ -143,7 +149,7 @@ private:
     int rate_;
     std::size_t lead_;
     SpscRing<float> ring_;
-    std::atomic<bool> active_{false};
+    std::atomic<bool> active_{false}, flush_{false};
     std::atomic<double> latency_s_{0.0};
     std::atomic<std::uint64_t> underruns_{0};
     std::vector<float> scratch_;  // engine thread only
