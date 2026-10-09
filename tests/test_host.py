@@ -151,3 +151,71 @@ def test_empty_kiss_frame_is_not_queued():
     k = KissLink()
     k.enqueue(b"")
     assert not k.queue
+
+
+def test_command_port_takes_several_clients():
+    got, closed = [], []
+    p = host._Port(("127.0.0.1", 0), lambda line, cid: got.append((line, cid)), True, on_close=lambda: closed.append(1), multi=True)
+    port = p.srv.getsockname()[1]
+    a, b = (socket.create_connection(("127.0.0.1", port)) for _ in range(2))
+    for c in (a, b):
+        c.settimeout(2)
+    deadline = time.time() + 2
+    while len(p.clients) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    a.sendall(b"YO\r")
+    b.sendall(b"HI\r")
+    while len(got) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert sorted(line for line, _ in got) == ["HI", "YO"]
+    who = dict(got)  # line -> client id
+    p.send(b"PTT ON\r")  # news: everyone
+    assert a.recv(9) == b"PTT ON\r" and b.recv(9) == b"PTT ON\r"
+    p.send(b"OK\r", to=who["HI"])  # a reply: only the client that asked (b sent HI)
+    assert b.recv(9) == b"OK\r"
+    a.settimeout(0.3)
+    try:
+        a.recv(9)
+        raise AssertionError("a got b's reply")
+    except TimeoutError:
+        pass
+    a.settimeout(2)
+    b.close()
+    time.sleep(0.2)
+    assert not closed  # one client left: the session stays
+    p.send(b"X\r")
+    assert a.recv(9) == b"X\r"
+    a.close()
+    deadline = time.time() + 2
+    while not closed and time.time() < deadline:
+        time.sleep(0.01)
+    assert closed == [1]  # the last one gone
+    p.close()
+
+
+def test_data_port_new_client_replaces_old():
+    p = host._Port(("127.0.0.1", 0), lambda d, cid: None, False)
+    port = p.srv.getsockname()[1]
+    a = socket.create_connection(("127.0.0.1", port))
+    time.sleep(0.1)
+    b = socket.create_connection(("127.0.0.1", port))
+    a.settimeout(2)
+    assert a.recv(9) == b""  # closed by the host
+    time.sleep(0.1)
+    assert len(p.clients) == 1
+    b.close()
+    p.close()
+
+
+def test_command_reply_goes_to_the_asker_news_to_all():
+    from data2g.arq.engine import Engine
+
+    sent = []
+    port = SimpleNamespace(send=lambda data, to=None: sent.append((data, to)))
+    h = host.Host(Engine("W1AW", seed=1))
+    h.out_cmd.append("PTT ON")  # pending news
+    host._send_cmd(port, h)
+    h.command("ABORT")
+    host._send_cmd(port, h, 7)
+    assert sent == [(b"PTT ON\r", None), (b"DISCONNECTED\r", None), (b"OK\r", 7)]
+    assert not h.out_cmd

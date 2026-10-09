@@ -34,6 +34,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
 import argparse  # noqa: E402
+import itertools  # noqa: E402
 import logging  # noqa: E402
 import queue  # noqa: E402
 import signal  # noqa: E402
@@ -368,11 +369,25 @@ class Capture:
 
 # --- sockets and audio ---------------------------------------------------------------
 
-class _Port:
-    """One TCP listener holding at most one client; lines or bytes go to `on_input`."""
+def _shut(c):
+    """Close a socket another thread may be blocked reading: close() alone would hold the connection open."""
+    try:
+        c.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    c.close()
 
-    def __init__(self, addr, on_input, lines: bool, on_close=None):
-        self.on_input, self.lines, self.client, self.on_close = on_input, lines, None, on_close
+
+class _Port:
+    """One TCP listener; lines or bytes go to `on_input(item, client_id)`. With `multi` any number of clients may be
+    connected and `on_close` fires when the last leaves; otherwise a new client replaces the old. send() goes to
+    every client, or to one by id (nowhere if it has gone)."""
+
+    def __init__(self, addr, on_input, lines: bool, on_close=None, multi: bool = False):
+        self.on_input, self.lines, self.on_close, self.multi = on_input, lines, on_close, multi
+        self.clients: dict[int, socket.socket] = {}
+        self._ids = itertools.count(1)
+        self._lock = threading.Lock()
         self.srv = socket.create_server(addr, reuse_port=False)
         threading.Thread(target=self._accept, daemon=True).start()
 
@@ -383,12 +398,15 @@ class _Port:
             except OSError:
                 return
             log.info("client %s:%d on port %d", *peer, self.srv.getsockname()[1])
-            old, self.client = self.client, c  # the new client first: the old one's close isn't a loss
-            if old is not None:
-                old.close()
-            threading.Thread(target=self._read, args=(c,), daemon=True).start()
+            cid = next(self._ids)
+            with self._lock:
+                old = [] if self.multi else list(self.clients.values())  # the new client first: the old one's close isn't a loss
+                self.clients = {**self.clients, cid: c} if self.multi else {cid: c}
+            for o in old:
+                _shut(o)
+            threading.Thread(target=self._read, args=(cid, c), daemon=True).start()
 
-    def _read(self, c):
+    def _read(self, cid, c):
         buf = b""
         while True:
             try:
@@ -396,10 +414,10 @@ class _Port:
             except OSError:
                 d = b""
             if not d:
-                self._drop(c)
+                self._drop(cid, c)
                 return
             if not self.lines:
-                self.on_input(d)
+                self.on_input(d, cid)
                 continue
             buf += d
             if len(buf) > 65536 and b"\r" not in buf and b"\n" not in buf:
@@ -408,28 +426,42 @@ class _Port:
                 i = min(x for x in (buf.find(b"\r"), buf.find(b"\n")) if x >= 0)
                 line, buf = buf[:i], buf[i + 1:]
                 if line.strip():
-                    self.on_input(line.decode("ascii", "replace"))
+                    self.on_input(line.decode("ascii", "replace"), cid)
 
-    def send(self, data: bytes):
-        c = self.client
-        if c is not None and data:
+    def send(self, data: bytes, to: int | None = None):
+        if not data:
+            return
+        for cid, c in list(self.clients.items()):
+            if to is not None and cid != to:
+                continue
             try:
                 c.sendall(data)
             except OSError:
-                self._drop(c)
+                self._drop(cid, c)
 
-    def _drop(self, c):
-        """Forget client c and tell the host, once, whichever of recv or send saw it go."""
-        if self.client is c:
-            self.client = None
-            c.close()
-            if self.on_close:
-                self.on_close()
+    def _drop(self, cid, c):
+        """Forget a client and tell the host if it was the last, once, whichever of recv or send saw it go."""
+        with self._lock:
+            if self.clients.get(cid) is not c:
+                return
+            self.clients = {k: v for k, v in self.clients.items() if k != cid}
+            last = not self.clients
+        c.close()
+        if last and self.on_close:
+            self.on_close()
 
     def close(self):
         self.srv.close()
-        if self.client is not None:
-            self.client.close()
+        for c in self.clients.values():
+            _shut(c)
+
+
+def _send_cmd(port, host, asker=None):
+    """Send the lines the host has queued. Those a command from client `asker` produced are its reply and go to it
+    alone, except DISCONNECTED (ABORT's), which is news for every client; with no asker everything is for all."""
+    for line in host.out_cmd:
+        port.send(line.encode() + b"\r", None if line == "DISCONNECTED" else asker)
+    host.out_cmd.clear()
 
 
 def _channels(pa, index: int | None, kind: str) -> int:
@@ -449,9 +481,9 @@ def serve(a, pa, stop: threading.Event | None = None):
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
-    cmd = _Port((a.host, a.command_port), lambda line: inbox.put(("cmd", line)), lines=True,
-                on_close=lambda: inbox.put(("gone", None)))
-    data = _Port((a.host, a.command_port + 1), lambda d: inbox.put(("data", d)), lines=False)
+    cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
+                on_close=lambda: inbox.put(("gone", None)), multi=True)
+    data = _Port((a.host, a.command_port + 1), lambda d, cid: inbox.put(("data", d)), lines=False)
     kiss = KissServer((a.kiss_address, a.kiss_port), lambda *f: inbox.put(("kiss", f)), link.command)
     threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
@@ -477,8 +509,11 @@ def serve(a, pa, stop: threading.Event | None = None):
             while not inbox.empty():
                 kind, v = inbox.get()
                 if kind == "cmd":
-                    log.info("command: %s", v)
-                    host.command(v)
+                    line, cid = v
+                    log.info("command: %s", line)
+                    _send_cmd(cmd, host)  # what was already pending goes first, to everyone
+                    host.command(line)
+                    _send_cmd(cmd, host, cid)  # the reply goes to the client that asked
                 elif kind == "gone":
                     host.client_gone()
                 elif kind == "kiss":
@@ -486,9 +521,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                     link.enqueue(frame, port, ack)
                 else:
                     host.data_in(v)
-            for line in host.out_cmd:  # replies at once, not after the audio step (clients time out at ~2 s)
-                cmd.send(line.encode() + b"\r")
-            host.out_cmd.clear()
+            _send_cmd(cmd, host)  # replies at once, not after the audio step (clients time out at ~2 s)
             x = inp.read(per, stop)
             if x is None:
                 break
