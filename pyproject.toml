@@ -3,6 +3,7 @@ name = "data2g"
 version = "0.0.1"
 description = "HF data modem on the SSTVAE OFDM waveform, with ML-optimized submodes"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
 dependencies = ["numpy>=1.24", "scipy>=1.10"]
 
 [project.optional-dependencies]
