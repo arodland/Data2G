@@ -111,6 +111,7 @@ class Engine:
         self.kiss = kiss
         self.stats_interval_s = stats_interval_s
         self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
+        self._tx_kiss = False  # the burst on air is a KISS one
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
         self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
         self._kiss_slot = 0  # next p-persistence slot, samples
@@ -254,9 +255,10 @@ class Engine:
                 elif self._extra and t >= self._hold:
                     bursts = [self._extra.pop(0)]
             if (bursts is None and self.kiss is not None and t >= self._hold
-                    and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)):
-                burst = self._kiss_burst(k)  # KISS only between ARQ sessions
+                    and (self.session.state in (S.IDLE, S.LISTEN, S.CLOSED) or self.session.idle())):
+                burst = self._kiss_burst(k)  # KISS between ARQ sessions, or while one is idle
                 bursts = [burst] if burst is not None else None
+                self._tx_kiss = burst is not None
             else:
                 self._kiss_busy = 0
             if bursts is not None:
@@ -271,7 +273,9 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
                 self._tx_end = self.now + n / FS
-                self.session.on_tx_end(burst, self.now + n / FS)
+                if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
+                    self.session.on_tx_end(burst, self.now + n / FS)
+                self._tx_kiss = False
                 if self.kiss is not None:
                     self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
         self.n += k

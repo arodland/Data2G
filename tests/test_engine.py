@@ -412,9 +412,15 @@ def test_kiss_and_vara_personalities_share_one_engine():
     got = bytearray()
     assert link(a, b, 12, 120, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=1)
     assert bytes(got) == up and (0, late) not in b.kiss_rx  # held while the session runs
+    assert link(a, b, 12, 90, lambda: (0, late) in b.kiss_rx, seed=2)  # then idle: it goes
+    assert a.session.state == b.session.state == S.CONNECTED
+    more = np.random.default_rng(24).bytes(100)  # the session survived the broadcast burst
+    a.session.write(more)
+    got.clear()
+    assert link(a, b, 12, 120, lambda: got.extend(b.session.read()) or len(got) >= len(more), seed=3)
+    assert bytes(got) == more
     a.session.disconnect()
-    assert link(a, b, 12, 90, lambda: (0, late) in b.kiss_rx, seed=2)
-    assert a.session.state == S.CLOSED
+    assert link(a, b, 12, 90, lambda: a.session.state == S.CLOSED, seed=4)
 
 
 class _Busy:

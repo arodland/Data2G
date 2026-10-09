@@ -625,8 +625,9 @@ Engine::Done Engine::process(Block& b) {
                 extra_.pop_front();
             }
         }
-        if (bursts.empty() && cfg_.kiss && t >= hold_ && idle()) {  // KISS only between ARQ sessions
+        if (bursts.empty() && cfg_.kiss && t >= hold_ && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
             if (auto kb = kiss_burst(k, busy)) bursts = {kb};
+            tx_kiss_ = !bursts.empty();
         } else kiss_busy_ = 0;
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
     }
@@ -642,7 +643,8 @@ Engine::Done Engine::process(Block& b) {
             request_reset();  // our own transmission was not heard
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + tnc::NoiseProfile::RECOVER_S);
             tx_end_ = now() + static_cast<double>(n) / config::FS;
-            session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);
+            if (!tx_kiss_) session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);  // a broadcast burst is not the session's: no reply timer
+            tx_kiss_ = false;
             if (cfg_.kiss) cfg_.kiss->on_sent(sent);  // a broadcast burst's frames are acked
         }
     }
