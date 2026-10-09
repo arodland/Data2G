@@ -122,6 +122,11 @@ public:
     // clock side
     TxBurstPtr poll(double now);
     std::optional<double> next_event();
+    // connected with nothing in flight or queued, either way: free air for a broadcast burst
+    bool idle_connected() const {
+        return state == SessionState::CONNECTED && station && !out && !deadline && !want_disc
+               && pending_write.empty() && !station->tx.pending();
+    }
     void on_tx_end(const TxBurstPtr& burst, double now);
     void on_header(const std::string& submode, int n_cw, double now);
     void on_rx(RxBurst& rx, double now);

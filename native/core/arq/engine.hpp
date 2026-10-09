@@ -283,6 +283,7 @@ private:
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
     std::vector<std::string> events_;  // host notifications from outside the session
     std::vector<std::pair<int, Bytes>> kiss_rx_;
+    bool tx_kiss_ = false;  // the burst on air is a KISS one
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited
     bool kiss_deferred_ = false;  // ... and it has waited on BUSY
     std::int64_t kiss_slot_ = 0;  // next p-persistence slot, samples

@@ -181,6 +181,13 @@ class Session:
             return out
         return None
 
+    def idle(self) -> bool:
+        """Connected with nothing in flight or queued, either way: the air is
+        free for a broadcast burst (the engine's KISS link)."""
+        return (self.state == CONNECTED and self.station is not None and self._out is None
+                and self._deadline is None and not self._want_disc and not self._pending_write
+                and not self.station.tx.pending())
+
     def next_event(self) -> float | None:
         """The earliest time poll() may do something (for an event loop)."""
         ts = [t for t in (self._due, self._deadline, self._build_at, self._wake_time()) if t is not None]
