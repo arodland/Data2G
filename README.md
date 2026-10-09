@@ -30,3 +30,7 @@ simulated end-to-end QSOs to prove their value.
 * **Transparent Compression**: Text takes up less airtime, automatically, with no cost to binary data.
 * **Intelligent Rate Shifting**: The receiver feeds the current band conditions to the world's tiniest neural net model (61,280 parameters) which was trained on thousands of simulated sessions spanning over a quarter million transmissions in varying conditions. The model is used to predict which mode has the best balance of speed and probability of being decoded.
 * **Submode Zoo**: Many modems have a carefully crafted set of modulations, arranged in a "ladder" from slowest and most robust to fastest and most fragile, so that their rate-shifters can "climb the ladder" when conditions are good and go back down it when conditions are poor. Data2G has 50 submodes spanning four bandwidths, seven modulations, and a gamut of parity levels. They don't fall into a "ladder", but each one is the best possible mode under _some_ set of conditions, whether that's high SNR, low SNR, fast fading, slow fading, or acknowledging packets as fast as possible. If it isn't somewhere on the Pareto frontier, it gets dropped.
+
+## License
+
+[Artistic License 2.0](LICENSE).
