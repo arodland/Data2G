@@ -475,12 +475,13 @@ void list_modes(int kiss_bw) {
 
 // --- the servers -------------------------------------------------------------------------
 
-// One TCP listener holding at most one client (host.py's _Port): a new
-// client replaces the old one, whose close then isn't a loss.
+// One TCP listener (host.py's _Port). With `multi` any number of clients may be connected: output goes to all of
+// them and on_close fires when the last one leaves. Otherwise a new client replaces the old, whose close then
+// isn't a loss.
 struct Station::Port : QObject {
-    Port(const QHostAddress& addr, quint16 port, bool lines, std::function<void(const QByteArray&)> on_input,
-         std::function<void()> on_close = {})
-        : lines_(lines), on_input_(std::move(on_input)), on_close_(std::move(on_close)) {
+    Port(const QHostAddress& addr, quint16 port, bool lines, std::function<void(const QByteArray&, std::uint64_t)> on_input,
+         std::function<void()> on_close = {}, bool multi = false)
+        : lines_(lines), multi_(multi), on_input_(std::move(on_input)), on_close_(std::move(on_close)) {
         if (!srv_.listen(addr, port))
             throw std::runtime_error("can't listen on " + addr.toString().toStdString() + ":" + std::to_string(port) + ": " +
                                      srv_.errorString().toStdString());
@@ -492,55 +493,64 @@ struct Station::Port : QObject {
         for (auto* c : srv_.findChildren<QTcpSocket*>()) c->disconnect(this);
     }
 
-    void send(const QByteArray& data) {
-        if (client_ && !data.isEmpty()) client_->write(data);
+    // To every client, or to one by id (nowhere if it has gone).
+    void send(const QByteArray& data, std::uint64_t to = 0) {
+        if (data.isEmpty()) return;
+        for (auto& [c, cl] : clients_)
+            if (to == 0 || cl.id == to) c->write(data);
     }
 
 private:
     void accept() {
         while (QTcpSocket* c = srv_.nextPendingConnection()) {
             logf(INFO, "client %s:%d on port %d", c->peerAddress().toString().toStdString().c_str(), c->peerPort(), srv_.serverPort());
-            QPointer<QTcpSocket> old = client_;
-            client_ = c;  // the new client first: the old one's close isn't a loss
-            buf_.clear();
-            if (old) {
-                old->disconnect(this);
-                old->close();
-                old->deleteLater();
+            if (!multi_) {
+                // the new client first: the old one's close isn't a loss
+                auto old = std::move(clients_);
+                clients_.clear();
+                for (auto& [o, _] : old) {
+                    o->disconnect(this);
+                    o->close();
+                    o->deleteLater();
+                }
             }
+            clients_[c].id = ++last_id_;
             connect(c, &QTcpSocket::readyRead, this, [this, c] { read(c); });
             connect(c, &QTcpSocket::disconnected, this, [this, c] {
                 c->deleteLater();
-                if (client_ == c) {
-                    client_ = nullptr;
-                    if (on_close_) on_close_();
-                }
+                if (clients_.erase(c) && clients_.empty() && on_close_) on_close_();
             });
         }
     }
 
     void read(QTcpSocket* c) {
         const QByteArray d = c->readAll();
+        Client& cl = clients_[c];
         if (!lines_) {
-            on_input_(d);
+            on_input_(d, cl.id);
             return;
         }
-        buf_ += d;
+        QByteArray& buf = cl.buf;
+        buf += d;
         while (true) {
-            const qsizetype r = buf_.indexOf('\r'), n = buf_.indexOf('\n');
+            const qsizetype r = buf.indexOf('\r'), n = buf.indexOf('\n');
             const qsizetype i = r < 0 ? n : (n < 0 ? r : std::min(r, n));
             if (i < 0) break;
-            const QByteArray line = buf_.left(i);
-            buf_.remove(0, i + 1);
-            if (!line.trimmed().isEmpty()) on_input_(line);
+            const QByteArray line = buf.left(i);
+            buf.remove(0, i + 1);
+            if (!line.trimmed().isEmpty()) on_input_(line, cl.id);
         }
     }
 
     QTcpServer srv_;
-    QPointer<QTcpSocket> client_;
-    QByteArray buf_;
-    bool lines_;
-    std::function<void(const QByteArray&)> on_input_;
+    struct Client {
+        std::uint64_t id = 0;
+        QByteArray buf;  // its partial line
+    };
+    std::map<QTcpSocket*, Client> clients_;
+    std::uint64_t last_id_ = 0;
+    bool lines_, multi_;
+    std::function<void(const QByteArray&, std::uint64_t)> on_input_;
     std::function<void()> on_close_;
 };
 
@@ -694,7 +704,7 @@ struct Station::MonitorThread {
 
 // What the session stage hands the owner after a command or a block.
 struct Station::Outbox {
-    std::vector<std::string> cmd;
+    std::vector<std::pair<std::string, std::uint64_t>> cmd;  // (line, client it is for; 0: all)
     arq::Bytes data;
     std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
@@ -706,9 +716,15 @@ Station::Station(Args a) : a_(std::move(a)), rate_(config::FS), tap_(TAP_SAMPLES
 
 Station::~Station() { stop(); }
 
-void Station::flush() {
+// `asker`: the client whose command produced what the host has queued. That is its reply and goes to it alone,
+// except DISCONNECTED (ABORT's), which is news for every client. 0: everything is for all.
+void Station::flush(std::uint64_t asker) {
     Outbox o;
-    o.cmd.swap(host_->out_cmd);
+    for (auto& line : host_->out_cmd) {
+        const auto to = line == "DISCONNECTED" ? 0 : asker;
+        o.cmd.emplace_back(std::move(line), to);
+    }
+    host_->out_cmd.clear();
     o.data.swap(host_->out_data);
     o.kiss.swap(engine_->kiss_rx());
     o.acks.swap(link_->acks);
@@ -735,7 +751,7 @@ void Station::note_link() {
 
 void Station::deliver(const Outbox& o) {
     if (cmd_)
-        for (const auto& line : o.cmd) cmd_->send(QByteArray::fromStdString(line + "\r"));
+        for (const auto& [line, to] : o.cmd) cmd_->send(QByteArray::fromStdString(line + "\r"), to);
     if (data_ && !o.data.empty())
         data_->send(QByteArray(reinterpret_cast<const char*>(o.data.data()), static_cast<qsizetype>(o.data.size())));
     if (kiss_) {
@@ -980,14 +996,18 @@ void Station::start() {
             const QHostAddress addr = resolve(a_.host);
             cmd_ = std::make_unique<Port>(
                 addr, a_.command_port, true,
-                [this, post](const QByteArray& line) {
+                [this, post](const QByteArray& line, std::uint64_t client) {
                     std::string text;  // ascii, as host.py decodes it (others replaced)
                     for (unsigned char c : line) text += c < 128 ? static_cast<char>(c) : '?';
                     logf(INFO, "command: %s", text.c_str());
-                    post([this, text] { host_->command(text); });
+                    post([this, text, client] {
+                        flush();  // what was already pending goes first, to everyone
+                        host_->command(text);
+                        flush(client);  // the reply goes to the client that asked
+                    });
                 },
-                [post, this] { post([this] { host_->client_gone(); }); });
-            data_ = std::make_unique<Port>(addr, a_.command_port + 1, false, [this, post](const QByteArray& d) {
+                [post, this] { post([this] { host_->client_gone(); }); }, true);
+            data_ = std::make_unique<Port>(addr, a_.command_port + 1, false, [this, post](const QByteArray& d, std::uint64_t) {
                 arq::Bytes b(d.begin(), d.end());
                 post([this, b = std::move(b)] { host_->data_in(b); });
             });

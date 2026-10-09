@@ -237,6 +237,28 @@ void test_window(const QTemporaryDir& dir) {
     client.write("LISTEN ON\r");
     check::is_true(wait_for([&] { return link->text() == QStringLiteral("listening"); }, 5000), "link listening");
 
+    // a second client on the command port joins the first; neither is dropped, a reply goes to the asker only
+    check::current_step = "window: second client";
+    QTcpSocket second;
+    second.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(a.command_port));
+    check::is_true(second.waitForConnected(5000), "second client connected");
+    second.write("VERSION\r");
+    QByteArray first_heard, second_heard;
+    check::is_true(wait_for([&] {
+                       first_heard += client.readAll();
+                       second_heard += second.readAll();
+                       return second_heard.contains("VERSION");
+                   }, 5000),
+                   "the asker got the reply");
+    wait_for([] { return false; }, 300);
+    first_heard += client.readAll();
+    check::is_true(!first_heard.contains("VERSION"), "the other client did not");
+    check::is_true(client.state() == QAbstractSocket::ConnectedState, "the first client is still connected");
+    second.disconnectFromHost();
+    wait_for([&] { return second.state() == QAbstractSocket::UnconnectedState; }, 2000);
+    wait_for([] { return false; }, 200);
+    check::is_true(link->text() == QStringLiteral("listening"), "one client gone, the session stays");
+
     check::current_step = "window: hear the CQ";
     bool busy_seen = false;
     const bool heard = wait_for(

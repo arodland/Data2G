@@ -225,7 +225,7 @@ private:
     struct SoundCard;
     struct MonitorThread;
     // session stage
-    void flush();
+    void flush(std::uint64_t asker = 0);
     void note_link();
     // owner's thread
     void deliver(const Outbox& o);
