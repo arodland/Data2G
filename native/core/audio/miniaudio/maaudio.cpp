@@ -1,5 +1,7 @@
 #include "audio/miniaudio/maaudio.hpp"
 
+#include "audio/thread.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -134,6 +136,12 @@ public:
         c.periods = 2;
         c.resampling.linear.lpfOrder = MA_MAX_FILTER_ORDER;
         c.dataCallback = [](ma_device* d, void* out, const void* in, ma_uint32 frames) {
+            // On miniaudio's device thread, once per thread (a reroute may bring a new one).
+            thread_local bool initialised = false;
+            if (!initialised) {
+                initialised = true;
+                audio::thread_init(d->type == ma_device_type_capture ? "capture" : "playback");
+            }
             static_cast<Stream*>(d->pUserData)->data(out, in, frames);
         };
         c.notificationCallback = [](const ma_device_notification* n) {

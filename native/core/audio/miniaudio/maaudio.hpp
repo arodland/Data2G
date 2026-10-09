@@ -4,7 +4,8 @@
 // (core/audio/{audio,fifo}.hpp).
 //
 // No Qt and no event loop: miniaudio calls back on its own thread per
-// device. DATA2G_AUDIO_BACKEND in the environment (e.g. ALSA, PulseAudio,
+// device, which calls audio::thread_init() (audio/thread.hpp) on its first
+// callback. DATA2G_AUDIO_BACKEND in the environment (e.g. ALSA, PulseAudio,
 // JACK, WASAPI, DirectSound, WinMM, "Core Audio"; any case) forces one
 // backend instead of miniaudio's first working one.
 #pragma once
