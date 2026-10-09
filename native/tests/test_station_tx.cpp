@@ -105,7 +105,9 @@ void run(bool abort_midway) {
     QElapsedTimer keyed;
     keyed.start();
     if (abort_midway) {
-        wait_for([] { return false; }, 1500);  // let it play for a while
+        // Early: the TX thread keeps up to half a second queued ahead of the card and the abort waits out a stalled
+        // receive block, so a late ABORT (slow runner) finds the whole ~2 s burst already handed over.
+        wait_for([] { return false; }, 400);
         QElapsedTimer t;
         t.start();
         client.write("ABORT\r");
