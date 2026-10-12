@@ -842,7 +842,7 @@ RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
     RxConstellation plot;
     plot.mode = mode;
     plot.tones = true;
-    plot.points = {{1.0f, 0.0f}};
+    plot.points = {{1.0f, 1.0f}};
     const std::size_t step = shares.rows / RxConstellation::MAX_SYMBOLS + 1;
     for (std::size_t i = 0; i < shares.rows; i += step) {
         double top = 0, second = 0;
@@ -851,7 +851,7 @@ RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
             if (e > top) second = std::exchange(top, e);
             else if (e > second) second = e;
         }
-        plot.symbols.emplace_back(static_cast<float>(top), static_cast<float>(second));
+        plot.symbols.emplace_back(static_cast<float>(1 - second), static_cast<float>(top));
     }
     return plot;
 }

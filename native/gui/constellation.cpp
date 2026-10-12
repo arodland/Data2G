@@ -53,14 +53,15 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
 
     p.setPen(QColor(60, 60, 60));
     if (c_.tones) {
-        // shares 0..1 on both axes, a small margin so the ideal (1, 0) stays clear of the edge
+        // 0..1 on both axes, a small margin so the ideal (1, 1) stays clear of the edges
         const double margin = side * 0.08, span = side - 2 * margin;
         const QPointF origin = mid + QPointF(-side / 2 + margin, side / 2 - margin);
         at = [=](std::complex<float> z) { return origin + QPointF(z.real() * span, -z.imag() * span); };
         p.drawLine(at({0, 0}), at({1, 0}));
         p.drawLine(at({0, 0}), at({0, 1}));
+        p.drawLine(at({0, 0}), at({1, 1}));  // top + runner-up == 1: no noise in the other tones
         p.setPen(QPen(QColor(90, 90, 90), 1, Qt::DashLine));
-        p.drawLine(at({0, 0}), at({0.5f, 0.5f}));  // top == runner-up: the tone was a tie
+        p.drawLine(at({0.5f, 0.5f}), at({1, 0}));  // top == runner-up: the tone was a tie
     } else {
         // the constellation's outermost point at 2/3 of the half-width: room for the spread around it
         double reach = 0.0;

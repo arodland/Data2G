@@ -181,7 +181,8 @@ struct BurstLogEntry {
 };
 
 // The newest burst's data symbols, for a constellation plot. OFDM: equalized
-// IQ. CPM (tones): each symbol's strongest tone share + i * the runner-up's.
+// IQ. CPM (tones): each symbol's 1 - the runner-up tone's share + i * the
+// strongest's, so a clean one is 1 + 1i and a weaker one falls below the diagonal.
 // live: the burst is still arriving (--live-constellation), OFDM frames
 // equalized one at a time (modem::preview_frame); lost: it ended undecoded,
 // the live view all there is.
