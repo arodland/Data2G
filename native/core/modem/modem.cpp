@@ -1052,6 +1052,39 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
     return constellation::llr(y, h.data, var.data, points_of(spec));
 }
 
+std::vector<cd> equalized(const Received& r) {
+    const auto& h = r.est.h;
+    const size_t nc = r.raw.cols, n_f = r.raw.rows / SYMS_PER_FRAME;
+    std::vector<cd> out;
+    out.reserve(h.data.size());
+    for (size_t f = 0; f < n_f; ++f)
+        for (size_t s = 1; s < SYMS_PER_FRAME; ++s)
+            for (size_t k = 0; k < nc; ++k) {
+                const cd hk = h[f * DATA_SYMS_PER_FRAME + s - 1][k];
+                out.push_back(std::norm(hk) > 0 ? r.raw[f * SYMS_PER_FRAME + s][k] / hk : cd{});
+            }
+    return out;
+}
+
+std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f) {
+    const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, {}, spec.band);
+    const auto c = clip_consts(spec);
+    double g = c.gain;
+    for (const auto& [k, v] : c.gains)
+        if (k == n_f) g = v;
+    const size_t nc = fr.raw.cols;
+    std::vector<cd> out;
+    out.reserve(DATA_SYMS_PER_FRAME * nc);
+    for (int s = 1; s < SYMS_PER_FRAME; ++s) {
+        const double t = static_cast<double>(s) / SYMS_PER_FRAME;
+        for (size_t k = 0; k < nc; ++k) {
+            const cd h = g * ((1 - t) * fr.hp[0][k] + t * fr.hp[1][k]);
+            out.push_back(std::norm(h) > 0 ? fr.raw[static_cast<size_t>(s)][k] / h : cd{});
+        }
+    }
+    return out;
+}
+
 Burst decode_received(const Received& r) {
     const Spec& spec = *r.spec;
     const auto& est = r.est;

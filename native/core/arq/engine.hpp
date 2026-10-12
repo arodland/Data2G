@@ -26,6 +26,7 @@
 #pragma once
 
 #include <atomic>
+#include <complex>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -142,6 +143,15 @@ struct BurstHeard {
     std::shared_ptr<const SlotSoft> soft;  // soft_bits(heard), shared
 };
 
+// A burst still arriving (Engine::set_on_preview), for a live constellation: its data symbols
+// received so far, each block adding to the last.
+struct BurstPreview {
+    std::string submode;
+    const modem::Spec* ofdm = nullptr;     // OFDM: the spec, and its symbols (modem::preview_frame)
+    std::vector<std::complex<double>> iq;
+    Mat<double> shares;                    // CPM: each data symbol's tone shares (cpm::shares)
+};
+
 // The engine's receive helpers, for a receiver of its own (monitor::Monitor).
 Heard heard_of(tnc::Rx&& rx);
 std::string spec_name(const tnc::Pending& p);
@@ -193,6 +203,10 @@ public:
     void set_after_block(std::function<void(bool ptt)> f) { after_block_ = std::move(f); }
     // Every burst heard, on the session stage. Set it before the first step().
     void set_on_burst(std::function<void(const BurstHeard&)> f) { on_burst_ = std::move(f); }
+    // Called on the receiving thread (step's) as a burst arrives, while set_preview(true): a few
+    // FFTs per block. Set before the engine runs.
+    void set_on_preview(std::function<void(const BurstPreview&)> f) { on_preview_ = std::move(f); }
+    void set_preview(bool on) { preview_on_ = on; }
 
     const std::string& call() const { return call_; }
     const std::vector<std::string>& aliases() const { return aliases_; }
@@ -305,6 +319,16 @@ private:
     int rx_cap() const;  // the bandwidth cap a heard burst's TX filter was most likely for
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
+    std::function<void(const BurstPreview&)> on_preview_;
+    std::atomic<bool> preview_on_{false};
+    // the receiving thread's: the burst being previewed, keyed by its lock's start
+    struct Preview {
+        std::int64_t start = -1;
+        int done = 0;  // on-air frames (OFDM) or stream symbols (CPM) read
+        BurstPreview out;
+    };
+    Preview preview_;
+    void preview();
 
     // between the stages
     std::atomic<bool> transmitting_{false}, busy_now_{false}, channel_busy_now_{false}, abort_pending_{false};

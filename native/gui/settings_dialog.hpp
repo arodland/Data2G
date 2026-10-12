@@ -29,7 +29,7 @@ class QSpinBox;
 namespace data2g::gui {
 
 // The persisted subset of `base`'s fields: callsign, devices, sample rate,
-// volume, PTT and rig, ports, decode worker.
+// volume, PTT and rig, ports, decode worker, live constellation.
 app::Args load_settings(QSettings& s, app::Args base = {});
 void save_settings(QSettings& s, const app::Args& a);
 
@@ -67,6 +67,7 @@ private:
     QLineEdit* kiss_address_;
     QSpinBox* kiss_port_;
     QCheckBox* worker_;
+    QCheckBox* live_;
     QSlider* noise_rule_;  // the noise rule's weight x 100 (NOISE_RULE_STEPS)
 };
 

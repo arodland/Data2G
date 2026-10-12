@@ -8,6 +8,7 @@
 #include <QSlider>
 #include <QComboBox>
 #include <QElapsedTimer>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QSettings>
@@ -17,14 +18,19 @@
 #include <QTemporaryDir>
 #include <QThread>
 
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <random>
 
 #include "arq/engine.hpp"
+#include "arq/modes.hpp"
+#include "arq/phy.hpp"
+#include "tnc/tnc.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
 #include "main_window.hpp"
+#include "constellation.hpp"
 #include "waterfall.hpp"
 #include "settings_dialog.hpp"
 
@@ -110,6 +116,7 @@ app::Args persisted() {
     a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
     a.decode_worker = false;
+    a.live_constellation = false;
     a.noise_rule = 0.5;
     return a;
 }
@@ -274,6 +281,18 @@ void test_window(const QTemporaryDir& dir) {
         check::equal(log->item(0, 3)->text().toStdString(), std::string("ok"), "logged ok");
         check::is_true(log->item(0, 2)->text() != QStringLiteral("-"), "an SNR logged");
         check::is_true(mode->text().startsWith(QString::fromStdString(cq_mode)), "mode label shows it");
+        const auto& plot = w.findChild<gui::ConstellationPlot*>(QStringLiteral("constellation"))->shown();
+        check::equal(plot.mode, cq_mode, "constellation plot shows the CQ");
+        check::is_true(!plot.live && !plot.lost, "the decoded burst's plot, not the live view");
+        check::is_true(!plot.symbols.empty() && !plot.points.empty(), "with symbols and the mode's points");
+        // a clean loopback, but our TX clipping spreads each point: 0.5 is half QPSK's spacing
+        std::size_t near = 0;
+        for (const auto& z : plot.symbols) {
+            float d = 1e9f;
+            for (const auto& q : plot.points) d = std::min(d, std::abs(z - q));
+            near += d < 0.5f;
+        }
+        check::is_true(near > plot.symbols.size() * 9 / 10, "symbols land on the constellation");
     }
     check::is_true(wait_for([&] { return monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")); }, 5000),
                    "the monitor dumped the CQ");
@@ -354,6 +373,52 @@ void test_waterfall_tx() {
     check::is_true(wf.peak() > 0.9 && wf.clip_latched(), "full-scale input does latch CLIP");
 }
 
+// A clean CPM burst on the tone view: most symbols' strongest tone holds
+// nearly all the energy. And the plot's width as its window resizes.
+void test_constellation_plot() {
+    check::current_step = "constellation: CPM";
+    const auto& m = arq::mode_at("fsk8r50-r1/2");
+    arq::TxBurst b{std::string(m.name), {}, 0};
+    b.slots.push_back({{7, 0, 0}, 0, arq::Bytes(static_cast<std::size_t>(arq::payload_bytes(m)), 0x55)});
+    b.slots.push_back({{7, 0, 1}, 0, arq::Bytes(static_cast<std::size_t>(arq::payload_bytes(m)), 0xa3)});
+    std::vector<double> y(config::FS / 2, 0.0);
+    const auto x = arq::tx_audio(b);
+    y.insert(y.end(), x.begin(), x.end());
+    y.insert(y.end(), config::FS / 2, 0.0);
+    auto rx = tnc::receive_any(y, config::FS);
+    check::is_true(rx.has_value(), "the CPM burst received");
+    if (rx) {
+        arq::BurstHeard heard;
+        heard.submode = b.submode;
+        heard.heard = arq::heard_of(std::move(*rx));
+        const auto plot = app::rx_constellation(heard);
+        check::is_true(plot && plot->tones && !plot->symbols.empty(), "a tone plot");
+        if (plot) {
+            std::size_t clean = 0;
+            for (const auto& z : plot->symbols) clean += z.real() > 0.9f && z.imag() > 0.8f;
+            check::is_true(clean > plot->symbols.size() * 9 / 10, "symbols near the ideal (1, 1)");
+            std::size_t wedge = 0;  // shares sum to 1: under the diagonal, over the tie line
+            for (const auto& z : plot->symbols) wedge += z.imag() <= z.real() + 1e-6f && z.imag() >= 1 - z.real() - 1e-6f;
+            check::equal(wedge, plot->symbols.size(), "every symbol between the diagonal and the tie line");
+        }
+    }
+
+    check::current_step = "constellation: square";
+    QWidget host;
+    auto* row = new QHBoxLayout(&host);
+    row->addWidget(new QWidget, 1);
+    auto* c = new gui::ConstellationPlot;
+    row->addWidget(c);
+    host.show();
+    // wide windows: as wide as the row is tall; narrow ones: 30% of the window wide, the height spare
+    for (const QSize s : {QSize(900, 200), QSize(700, 320), QSize(400, 150), QSize(400, 300), QSize(300, 400)}) {
+        host.resize(s);
+        wait_for([] { return false; }, 50);
+        const std::string at = " at " + std::to_string(s.width()) + "x" + std::to_string(s.height());
+        check::equal(c->width(), std::min(c->height(), s.width() * 3 / 10), "as wide as tall, up to 30%" + at);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -367,6 +432,7 @@ int main(int argc, char** argv) {
     test_settings(dir);
     test_noise_rule_slider();
     test_waterfall_tx();
+    test_constellation_plot();
     test_window(dir);
     return check::report("gui");
 }

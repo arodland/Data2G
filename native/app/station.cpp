@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <utility>
 #include <cstdlib>
 
 #include "arq/engine.hpp"
@@ -24,6 +25,8 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 #include "audio/filters.hpp"
+#include "constellation/constellation.hpp"
+#include "cpm/cpm.hpp"
 #ifdef __linux__
 #include <pthread.h>
 #endif
@@ -34,6 +37,7 @@
 #include "generated/config.hpp"
 #include "host/host.hpp"
 #include "kisslink/kisslink.hpp"
+#include "modem/modem.hpp"
 #include "monitor/monitor.hpp"
 #include "rig/controller.hpp"
 #include "rig/ptt.hpp"
@@ -140,6 +144,7 @@ const char* USAGE =
     "                   [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
     "                   [--realtime | --no-realtime]\n"
+    "                   [--live-constellation | --no-live-constellation]\n"
     "                   [--dd-budget S]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
     "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
@@ -201,6 +206,10 @@ const char* HELP =
     "                        if the user's limits allow it, else through RealtimeKit), so a loaded machine\n"
     "                        doesn't leave holes in a transmission. The decode threads are left alone.\n"
     "                        (default: on)\n"
+    "  --live-constellation, --no-live-constellation\n"
+    "                        data2g-gui's constellation plot fills in as a burst arrives (a frame's FFTs\n"
+    "                        per block on the receive thread), not only once it is decoded. Unused by\n"
+    "                        data2g-host. (default: on)\n"
     "  --dd-budget S         seconds a burst's decode may spend re-estimating the channel from its own\n"
     "                        decoded codewords (DD), counted from its soft bits; the pass in progress is\n"
     "                        abandoned when it runs out. 0: none. Lower it on a slow machine (default 1)\n"
@@ -263,6 +272,8 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
     std::map<std::string, std::pair<bool*, bool>> switches = {
         {"--decode-worker", {&a.decode_worker, true}}, {"--no-decode-worker", {&a.decode_worker, false}},
         {"--realtime", {&a.realtime, true}},   {"--no-realtime", {&a.realtime, false}},
+        {"--live-constellation", {&a.live_constellation, true}},
+        {"--no-live-constellation", {&a.live_constellation, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
         {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
     const auto i_ = [prog](auto& o, auto& v) { return number<int>(o, v, prog); };
@@ -815,6 +826,59 @@ std::vector<BurstLogEntry> Station::take_bursts() {
     return out;
 }
 
+namespace {
+
+RxConstellation iq_plot(const std::string& mode, std::span<const std::complex<double>> y, const modem::Spec& spec) {
+    RxConstellation plot;
+    plot.mode = mode;
+    const std::size_t step = y.size() / RxConstellation::MAX_SYMBOLS + 1;
+    for (std::size_t i = 0; i < y.size(); i += step) plot.symbols.emplace_back(y[i]);
+    if (const auto* c = constellation::find(spec.constellation))
+        for (const auto& p : c->points) plot.points.emplace_back(p);
+    return plot;
+}
+
+RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
+    RxConstellation plot;
+    plot.mode = mode;
+    plot.tones = true;
+    plot.points = {{1.0f, 1.0f}};
+    const std::size_t step = shares.rows / RxConstellation::MAX_SYMBOLS + 1;
+    for (std::size_t i = 0; i < shares.rows; i += step) {
+        double top = 0, second = 0;
+        for (std::size_t k = 0; k < shares.cols; ++k) {
+            const double e = shares[i][k];
+            if (e > top) second = std::exchange(top, e);
+            else if (e > second) second = e;
+        }
+        plot.symbols.emplace_back(static_cast<float>(1 - second), static_cast<float>(top));
+    }
+    return plot;
+}
+
+}  // namespace
+
+std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b) {
+    if (b.heard.ofdm) return iq_plot(b.submode, modem::equalized(*b.heard.ofdm), *b.heard.ofdm->spec);
+    if (b.heard.cpm) return tone_plot(b.submode, cpm::shares(b.heard.cpm->E));
+    return std::nullopt;
+}
+
+RxConstellation rx_constellation(const arq::BurstPreview& p) {
+    auto plot = p.ofdm ? iq_plot(p.submode, p.iq, *p.ofdm) : tone_plot(p.submode, p.shares);
+    plot.live = true;
+    return plot;
+}
+
+std::optional<RxConstellation> Station::take_constellation() {
+    if (!live_asked_ && engine_ && a_.live_constellation) {
+        live_asked_ = true;
+        engine_->set_preview(true);  // only a front end that shows it pays for it
+    }
+    std::lock_guard lock(status_mu_);
+    return std::exchange(constellation_, std::nullopt);
+}
+
 bool Station::busy() const { return engine_ && engine_->channel_busy(); }
 
 AudioCounters Station::counters() const {
@@ -989,9 +1053,23 @@ void Station::start() {
             note_link();
             flush();
         });
+        engine_->set_on_preview([this](const arq::BurstPreview& p) {
+            auto plot = rx_constellation(p);
+            std::lock_guard lock(status_mu_);
+            constellation_ = plot;
+            live_ = std::move(plot);
+        });
         engine_->set_on_burst([this](const arq::BurstHeard& b) {
             mode_ = b.submode;
+            auto plot = rx_constellation(b);
             std::lock_guard lock(status_mu_);
+            if (plot) constellation_ = std::move(plot);
+            else if (b.lost && live_) {  // undecoded: the live view stays, marked
+                constellation_ = std::move(live_);
+                constellation_->live = false;
+                constellation_->lost = true;
+            }
+            live_.reset();
             bursts_.push_back({std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db});
             if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
             if (monitor_on_) monitor_->push(b);

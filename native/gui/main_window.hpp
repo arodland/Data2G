@@ -3,7 +3,7 @@
 // its snapshots and atomics, as SSTVAE's rx_panel polls its decoder. Nothing
 // here waits on the engine.
 //
-// Shown: the RX waterfall and input level, link state, mode and bandwidth,
+// Shown: the RX waterfall and input level, the last OFDM burst's constellation, link state, mode and bandwidth,
 // BUSY and PTT, throughput, the received-burst log, the audio counters, and
 // the dial frequency when the rig is polled.
 // Monitor... opens a window with every burst heard as a packet dump.
@@ -26,6 +26,7 @@ class QTableWidget;
 
 namespace data2g::gui {
 
+class ConstellationPlot;
 class MonitorWindow;
 class Waterfall;
 
@@ -55,6 +56,7 @@ private:
     int starts_ = 0;
     std::string record_base_;
     Waterfall* waterfall_;
+    ConstellationPlot* constellation_;
     QLabel *link_, *mode_, *busy_, *ptt_, *rx_, *tx_, *counters_, *status_;
     QLabel *dial_label_, *dial_;  // shown only with --rig-poll-interval
     QTableWidget* log_;
