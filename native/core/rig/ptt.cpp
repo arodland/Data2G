@@ -22,12 +22,13 @@ void Keyer::key() {
     keyed_ = true;
 }
 
-void Keyer::unkey() {
+void Keyer::unkey(const std::function<void()>& drained) {
     if (!keyed_) return;
     if (off_failed_ == 0) {  // a retry has drained and waited already
         out_.drain();
         if (off_delay_s_ > 0) std::this_thread::sleep_for(std::chrono::duration<double>(off_delay_s_));
     }
+    if (drained) drained();
     // A failed off leaves keyed_ set so the next call tries again, a few times: a rig stuck
     // transmitting is worse than one more try, but a dead one must not hold the loop forever.
     constexpr int MAX_OFF_TRIES = 5;

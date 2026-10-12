@@ -322,12 +322,13 @@ void test_keyer() {
         check::equal(fifo.queued(), std::size_t{4800}, "key: TX lead queued");
         std::vector<float> buf(4800);
         fifo.pull(buf);  // the card plays it
-        k.unkey();
-        check::is_true(!k.keyed() && calls.back() == "off", "unkey: PTT off after drain");
+        k.unkey([&] { calls.push_back("drained"); });
+        check::is_true(!k.keyed() && calls == std::vector<std::string>{"on", "drained", "off"},
+                       "unkey: drained reported before PTT off");
     }
-    check::equal(calls.size(), std::size_t{3}, "destructor: PTT off again, once keyed");
+    check::equal(calls.size(), std::size_t{4}, "destructor: PTT off again, once keyed");
     { rig::Keyer idle([&](bool on) { calls.push_back(on ? "on" : "off"); }, fifo, 0.0); }
-    check::equal(calls.size(), std::size_t{3}, "destructor: never keyed, no PTT off");
+    check::equal(calls.size(), std::size_t{4}, "destructor: never keyed, no PTT off");
 
     std::string reported;
     rig::Keyer failing([](bool) { throw std::runtime_error("rigctld gone"); }, fifo, 0.0,
