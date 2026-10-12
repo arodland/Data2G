@@ -1066,6 +1066,25 @@ std::vector<cd> equalized(const Received& r) {
     return out;
 }
 
+std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f) {
+    const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, {}, spec.band);
+    const auto c = clip_consts(spec);
+    double g = c.gain;
+    for (const auto& [k, v] : c.gains)
+        if (k == n_f) g = v;
+    const size_t nc = fr.raw.cols;
+    std::vector<cd> out;
+    out.reserve(DATA_SYMS_PER_FRAME * nc);
+    for (int s = 1; s < SYMS_PER_FRAME; ++s) {
+        const double t = static_cast<double>(s) / SYMS_PER_FRAME;
+        for (size_t k = 0; k < nc; ++k) {
+            const cd h = g * ((1 - t) * fr.hp[0][k] + t * fr.hp[1][k]);
+            out.push_back(std::norm(h) > 0 ? fr.raw[static_cast<size_t>(s)][k] / h : cd{});
+        }
+    }
+    return out;
+}
+
 Burst decode_received(const Received& r) {
     const Spec& spec = *r.spec;
     const auto& est = r.est;

@@ -129,6 +129,7 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.kiss_address = str("kiss_address", a.kiss_address);
     a.kiss_port = s.value("kiss_port", a.kiss_port).toInt();
     a.decode_worker = s.value("decode_worker", a.decode_worker).toBool();
+    a.live_constellation = s.value("live_constellation", a.live_constellation).toBool();
     a.noise_rule = s.value("noise_rule", a.noise_rule).toDouble();
     return a;
 }
@@ -156,6 +157,7 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("kiss_address", qs(a.kiss_address));
     s.setValue("kiss_port", a.kiss_port);
     s.setValue("decode_worker", a.decode_worker);
+    s.setValue("live_constellation", a.live_constellation);
     s.setValue("noise_rule", a.noise_rule);
 }
 
@@ -184,6 +186,12 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     worker_->setChecked(a.decode_worker);
     worker_->setToolTip(tr("Keeps preamble search and BUSY running during a burst's decode"));
     station->addRow(worker_);
+    live_ = new QCheckBox(tr("Live constellation"));
+    live_->setObjectName(QStringLiteral("live_constellation"));
+    live_->setChecked(a.live_constellation);
+    live_->setToolTip(tr("Fills the constellation plot in as a burst arrives, not only once it is decoded. "
+                         "Costs a little CPU on the receive thread"));
+    station->addRow(live_);
 
     // The noise rule's weight, 0.00-1.50 in 0.01 steps: a detent at the
     // default (1.00) while dragging; 0 is off.
@@ -488,6 +496,7 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.kiss_address = kiss_address_->text().trimmed().toStdString();
     a.kiss_port = kiss_port_->value();
     a.decode_worker = worker_->isChecked();
+    a.live_constellation = live_->isChecked();
     // left where it opened: the value it came with (a command line may set more than the slider's top)
     const int shown = static_cast<int>(std::lround(std::min(base_.noise_rule, NOISE_RULE_MAX / 100.0) * 100));
     a.noise_rule = noise_rule_->value() == shown ? base_.noise_rule : noise_rule_->value() / 100.0;

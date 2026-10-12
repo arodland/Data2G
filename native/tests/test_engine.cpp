@@ -8,12 +8,18 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <complex>
+#include <optional>
+#include <string>
 #include <filesystem>
 #include <fstream>
 #include <random>
 #include <cstdlib>
 
 #include "arq/engine.hpp"
+#include "constellation/constellation.hpp"
+#include "cpm/cpm.hpp"
+#include "modem/modem.hpp"
 #include "check.hpp"
 
 using namespace data2g;
@@ -438,6 +444,75 @@ void worker_session() {
     check::is_true(got == data, "worker: data intact");
 }
 
+// The live view (set_preview): a burst's symbols handed on block by block as it arrives, all of
+// them by its end. OFDM: each frame equalized on its own, close to the points on a clean channel;
+// CPM: the same tone shares the decode reads. Off: no previews.
+void live_preview() {
+    for (const char* name : {"qpsk-r1/5", "fsk8r50-r1/2"}) {
+        check::current_step = "live preview";
+        TxBurst burst;
+        burst.submode = name;
+        const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(name)));
+        const int slots = mode_at(name).is_cpm() ? 2 : 4;  // fsk8r50 x4 is 29 s
+        for (int i = 0; i < slots; ++i) burst.slots.push_back({{7, 0, i}, 0, bytes(pb, 20 + static_cast<unsigned>(i))});
+        const auto x = tx_audio(burst);
+        std::vector<double> y(config::FS, 0.0);
+        y.insert(y.end(), x.begin(), x.end());
+        y.insert(y.end(), 6 * config::FS, 0.0);  // 2 s was too short for the CPM burst to be heard, preview or not
+        y.resize(y.size() / BLOCK * BLOCK);
+        std::mt19937 rng(21);
+        std::normal_distribution<double> noise(0.0, 0.02);
+        for (double& v : y) v += noise(rng);
+
+        for (const bool on : {true, false}) {
+            Engine e("W1AW", {});
+            e.set_preview(on);
+            int previews = 0, before = 0;
+            BurstPreview last;
+            std::optional<BurstHeard> heard;
+            e.set_on_preview([&](const BurstPreview& p) {
+                ++previews;
+                last = p;
+            });
+            e.set_on_burst([&](const BurstHeard& b) {
+                if (!heard) before = previews;
+                heard = b;
+            });
+            const auto t0 = clk::now();
+            for (std::size_t i = 0; i < y.size() / BLOCK; ++i) e.step(std::span<const double>(y).subspan(i * BLOCK, BLOCK));
+            std::printf("%s, preview %s: %.0f ms for %.1f s of audio\n", name, on ? "on" : "off",
+                        std::chrono::duration<double, std::milli>(clk::now() - t0).count(), static_cast<double>(y.size()) / config::FS);
+            check::is_true(heard && !heard->lost, std::string(name) + " heard");
+            if (!on) {
+                check::equal(previews, 0, "off: no previews");
+                continue;
+            }
+            check::is_true(before >= 3, "several previews before the burst was decoded: " + std::to_string(before));
+            check::equal(last.submode, std::string(name), "the preview's mode");
+            if (!heard || heard->lost) continue;
+            if (heard->heard.ofdm) {
+                const auto final_iq = modem::equalized(*heard->heard.ofdm);
+                check::equal(last.iq.size(), final_iq.size(), "every data symbol previewed");
+                const auto* c = constellation::find(last.ofdm->constellation);
+                std::size_t near = 0;
+                for (const auto& z : last.iq) {
+                    double d = 1e9;
+                    for (const auto& q : c->points) d = std::min(d, std::abs(z - q));
+                    near += d < 0.5;
+                }
+                check::is_true(near > last.iq.size() * 9 / 10, "previewed symbols land on the constellation");
+            } else {
+                const auto final_shares = cpm::shares(heard->heard.cpm->E);
+                check::equal(last.shares.rows, final_shares.rows, "every data symbol previewed");
+                double worst = 0;
+                for (std::size_t i = 0; i < std::min(last.shares.data.size(), final_shares.data.size()); ++i)
+                    worst = std::max(worst, std::abs(last.shares.data[i] - final_shares.data[i]));
+                check::is_true(last.shares.cols == final_shares.cols && worst < 1e-9, "the decode's tone shares");
+            }
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -453,6 +528,7 @@ int main() {
     worker_latency();
     worker_backlog();
     worker_session();
+    live_preview();
     std::filesystem::remove_all(dir);
     return check::report("test_engine");
 }

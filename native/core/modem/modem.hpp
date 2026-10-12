@@ -201,6 +201,13 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
 // raw's data symbols divided by r.est.h (0 where h is): what soft_bits holds against the
 // constellation, for a display. Frame by frame, carrier fastest.
 std::vector<cd> equalized(const Received& r);
+// A live view of a burst still arriving: one on-air frame's data symbols, each divided by the
+// channel read off the frame's own pilot and the next one's, linear between them, and by spec's
+// clip gain for a burst of n_f frames. x: the frame's FRAME_SAMPLES and the next pilot's NSYM,
+// from the frame's start; cfo: the lock's. No residual CFO, timing tracking, delay window or
+// smoothing across frames, so rougher than equalized(receive()).
+inline constexpr int PREVIEW_SAMPLES = config::FRAME_SAMPLES + config::NSYM;
+std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f);
 
 struct Burst {
     const Spec* spec = nullptr;

@@ -50,6 +50,7 @@ namespace data2g {
 namespace arq {
 class Engine;
 struct BurstHeard;
+struct BurstPreview;
 }
 namespace audio {
 class CaptureFifo;
@@ -129,6 +130,7 @@ struct Args {
     bool decode_worker = true;
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)
     bool realtime = true;  // real-time scheduling for the audio and transmit threads, where available
+    bool live_constellation = true;  // fill the constellation plot in as a burst arrives, once a front end polls it
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
 
     bool operator==(const Args&) const = default;
@@ -180,15 +182,19 @@ struct BurstLogEntry {
 
 // The newest burst's data symbols, for a constellation plot. OFDM: equalized
 // IQ. CPM (tones): each symbol's strongest tone share + i * the runner-up's.
+// live: the burst is still arriving (--live-constellation), OFDM frames
+// equalized one at a time (modem::preview_frame); lost: it ended undecoded,
+// the live view all there is.
 struct RxConstellation {
     std::string mode;
-    bool tones = false;
+    bool tones = false, live = false, lost = false;
     std::vector<std::complex<float>> symbols;  // at most MAX_SYMBOLS, spread over the burst
     std::vector<std::complex<float>> points;   // the ideal: the mode's constellation, or 1 + 0i
     static constexpr std::size_t MAX_SYMBOLS = 4000;
 };
 // A heard burst's plot; nullopt when it was lost.
 std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b);
+RxConstellation rx_constellation(const arq::BurstPreview& p);  // live
 
 struct AudioCounters {
     std::uint64_t overflows = 0, underruns = 0, late = 0, dropped = 0;
@@ -218,7 +224,8 @@ public:
     // -- polled by the owner, never blocking on the engine
     LinkStatus link() const;
     std::vector<BurstLogEntry> take_bursts();  // since the last call (the newest 256 kept)
-    std::optional<RxConstellation> take_constellation();  // the newest since the last call
+    // The newest since the last call. The first call starts the live view (--live-constellation).
+    std::optional<RxConstellation> take_constellation();
     bool ptt() const { return ptt_; }
     bool busy() const;  // the host's BUSY
     AudioCounters counters() const;
@@ -290,6 +297,8 @@ private:
     LinkStatus link_status_;
     std::deque<BurstLogEntry> bursts_;
     std::optional<RxConstellation> constellation_;
+    std::optional<RxConstellation> live_;  // the burst arriving's, kept for when it is lost
+    bool live_asked_ = false;              // owner's thread
     mutable std::mutex tap_mu_;
     std::vector<double> tap_;  // ring of the newest input
     std::uint64_t tapped_ = 0;

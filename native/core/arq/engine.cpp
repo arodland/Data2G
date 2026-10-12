@@ -513,6 +513,7 @@ Engine::Out Engine::step(std::span<const double> x) {
     b.gen = gen_;
     b.seq = seq_++;
     if (!transmitting_) b.items = receiver_feed(x);  // our own transmission is not heard
+    if (!transmitting_ && preview_on_ && on_preview_) preview();
     b.busy = receiver_busy();
     busy_now_ = b.busy;
     channel_busy_now_ = receiver_channel_busy();
@@ -653,6 +654,60 @@ Engine::Done Engine::process(Block& b) {
     d.out.ptt = tx_.has_value();
     transmitting_ = d.out.ptt;
     return d;
+}
+
+// The pending burst's symbols that have arrived since the last block, added to preview_ and
+// handed on. A new lock (a new burst, or a superseding one) starts over.
+void Engine::preview() {
+    const auto& p = receiver_.pending();
+    if (!p) return;
+    if (preview_.start != p->start()) {
+        preview_ = {};
+        preview_.start = p->start();
+        preview_.out.submode = spec_name(*p);
+    }
+    const std::int64_t end = receiver_.stream_end();
+    auto& out = preview_.out;
+    bool added = false;
+    if (!p->is_cpm()) {
+        const auto& l = p->ofdm();
+        const int n_f = l.n_cw * l.spec->frames_per_cw;
+        const auto kc = modem::copy_frame(l.spec->sync_band, n_f);
+        const int n_air = n_f + kc.has_value();
+        out.ofdm = l.spec;
+        for (; preview_.done < n_air; ++preview_.done) {
+            const std::int64_t at = l.p0 + static_cast<std::int64_t>(preview_.done) * config::FRAME_SAMPLES;
+            if (at + modem::PREVIEW_SAMPLES > end) break;
+            if (preview_.done == kc) continue;  // the header's copy, not data
+            const auto x = receiver_.audio(at, modem::PREVIEW_SAMPLES);
+            if (x.empty()) continue;
+            const auto y = modem::preview_frame(x, l.cfo, *l.spec, n_f);
+            out.iq.insert(out.iq.end(), y.begin(), y.end());
+            added = true;
+        }
+    } else {
+        const auto& l = p->cpm();
+        const auto& g = cpm::grid_of(*l.spec);
+        const auto L = cpm::layout(g, cpm::stream_symbols(g, l.n_data, l.dup));
+        const auto T = static_cast<std::int64_t>(g.T);
+        const int have = static_cast<int>(std::min<std::int64_t>(L.n, std::max<std::int64_t>(0, (end - l.start) / T)));
+        if (have > preview_.done) {
+            const auto x = receiver_.audio(l.start + preview_.done * T, (have - preview_.done) * T);
+            if (!x.empty()) {
+                const auto E = cpm::shares(cpm::energies(g, x, 0, have - preview_.done, l.cfo));
+                if (out.shares.cols == 0) out.shares.cols = E.cols;
+                for (int r = preview_.done; r < have; ++r)
+                    if (std::binary_search(L.data_rows.begin(), L.data_rows.end(), r)) {
+                        const auto* row = E[static_cast<std::size_t>(r - preview_.done)];
+                        out.shares.data.insert(out.shares.data.end(), row, row + E.cols);
+                        ++out.shares.rows;
+                        added = true;
+                    }
+            }
+            preview_.done = have;
+        }
+    }
+    if (added) on_preview_(out);
 }
 
 void Engine::hear(std::vector<tnc::Receiver::Item>& items, double t) {

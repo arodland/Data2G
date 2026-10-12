@@ -193,6 +193,13 @@ public:
     bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }
     bool on_air() const;
     const std::optional<Pending>& pending() const { return pending_; }
+    // The (blanked) audio fed so far: its end's stream index, and n samples from stream index
+    // `from` (empty unless all of them are still held).
+    std::int64_t stream_end() const { return off_ + len(); }
+    std::span<const double> audio(std::int64_t from, std::int64_t n) const {
+        if (from < off_ || n < 0 || from + n > stream_end()) return {};
+        return std::span<const double>(buf_).subspan(static_cast<std::size_t>(from - off_), static_cast<std::size_t>(n));
+    }
     const modem::Accept& accept() const { return accept_; }
     std::int64_t n_blanked() const { return blanker_ ? blanker_->n_blanked : 0; }
 

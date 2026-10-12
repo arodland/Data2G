@@ -71,7 +71,7 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(0, mid.y()), QPointF(side, mid.y()));
     }
 
-    p.setPen(QColor(0, 255, 120, 140));
+    p.setPen(c_.live || c_.lost ? QColor(0, 255, 120, 70) : QColor(0, 255, 120, 140));  // a live view is rougher
     for (const auto& z : c_.symbols) p.drawPoint(at(z));
 
     p.setPen(QColor(255, 80, 80));
@@ -82,7 +82,7 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
     }
 
     p.setPen(Qt::gray);
-    p.drawText(square.adjusted(4, 2, -4, -2), Qt::AlignTop | Qt::AlignLeft, QString::fromStdString(c_.mode));
+    p.drawText(square.adjusted(4, 2, -4, -2), Qt::AlignTop | Qt::AlignLeft, QString::fromStdString(c_.mode) + (c_.live ? tr(" (live)") : c_.lost ? tr(" (lost)") : QString()));
 }
 
 }  // namespace data2g::gui

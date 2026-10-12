@@ -2,6 +2,7 @@
 // constellation plot: dots over the ideal points (crosses). OFDM: equalized
 // IQ. CPM: each symbol's strongest tone share (x) against the runner-up's (y),
 // ideally (1, 0); a dot near the diagonal was nearly another tone.
+// A live view (still arriving) or a lost burst's is dimmer, and says so.
 // Kept until the next burst replaces it. Square: as wide as the row is tall,
 // but no wider than 30% of the window; then it loses height (the square sits
 // at the top, the rest of the row left empty).

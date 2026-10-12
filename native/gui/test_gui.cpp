@@ -116,6 +116,7 @@ app::Args persisted() {
     a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
     a.decode_worker = false;
+    a.live_constellation = false;
     a.noise_rule = 0.5;
     return a;
 }
@@ -282,6 +283,7 @@ void test_window(const QTemporaryDir& dir) {
         check::is_true(mode->text().startsWith(QString::fromStdString(cq_mode)), "mode label shows it");
         const auto& plot = w.findChild<gui::ConstellationPlot*>(QStringLiteral("constellation"))->shown();
         check::equal(plot.mode, cq_mode, "constellation plot shows the CQ");
+        check::is_true(!plot.live && !plot.lost, "the decoded burst's plot, not the live view");
         check::is_true(!plot.symbols.empty() && !plot.points.empty(), "with symbols and the mode's points");
         // a clean loopback, but our TX clipping spreads each point: 0.5 is half QPSK's spacing
         std::size_t near = 0;
