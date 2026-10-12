@@ -316,3 +316,39 @@ def test_compact_connect_round_trip():
     assert len(p) == F.COMPACT_BYTES and F.unpack_connect(p) == body
     with pytest.raises(ValueError):
         F.pack_connect(body[:-1] + bytes([64]))  # t_turn over 6.3 s
+
+
+def test_reply_lost_is_answered_at_once():
+    """The callee's data burst is lost and its control-only answer to the
+    caller's repeat says so (reply_lost): the caller must answer at once.
+    That control-only burst would otherwise look idle and wait out a
+    keepalive, though the callee holds data the caller never heard of."""
+    a = S.Session("W1AW", Policy(random.Random(1), change=0.0), rng=random.Random(2))
+    b = S.Session("K2XYZ-7", Policy(random.Random(3), change=0.0), rng=random.Random(4))
+    b.listen()
+    a.connect("K2XYZ-7", 2, 0.0)
+
+    def send(me, other, t, drop=False, before_rx=None):
+        burst = None
+        while burst is None:
+            t = me.next_event()
+            burst = me.poll(t)
+        end = t + me.policy.airtime(burst.submode, len(burst.slots))
+        me.on_tx_end(burst, end)
+        if before_rx:
+            before_rx()
+        if not drop:
+            other.on_rx(FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0}), end + DECODE_S)
+        return burst, end + DECODE_S
+
+    t = 0.0
+    for _ in range(3):  # CONNECT, its ACK, and the caller's first ARQ burst
+        _, t = send(a, b, t)
+        _, t = send(b, a, t)
+    assert a.next_event() > t + S.KEEPALIVE_S[0] - 1  # idle: the keepalive poll is armed
+    _, t = send(a, b, t, before_rx=lambda: b.write(bytes(500)))
+    data, t = send(b, a, t, drop=True)
+    assert data.slots and b.station.tx.pending()
+    _, t = send(a, b, t)  # the caller's timeout repeat
+    reply, t = send(b, a, t)
+    assert a.station.peer_reply_lost and a.next_event() < t + 1  # answered now, not at a keepalive

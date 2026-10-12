@@ -302,6 +302,7 @@ class Station:
     peer_chat: bool = False  # the peer's, from its last burst
     peer_queued: int = 0  # bytes the peer had queued at its last burst (T_BUFFER, chat only)
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
+    peer_reply_lost: bool = False  # the peer's last burst said its previous reply was lost
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
     stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_comp, cw_resend, rx_ok, rx_lost, timeouts
@@ -625,6 +626,7 @@ class Station:
         self.peer_reply_recommend = ext[F.T_REPLY][0] if F.T_REPLY in ext and ext[F.T_REPLY] else None
         self.peer_chat = F.T_CHAT in ext
         self.peer_wants_dup = F.T_DUPCTL in ext
+        self.peer_reply_lost = core.reply_lost
         self.peer_queued = int.from_bytes(ext[F.T_BUFFER], "big") if len(ext.get(F.T_BUFFER, b"")) == 2 else 0
         seen = self.peer_burst is not None and core.burst_seq == self.peer_burst
         repeat = seen and self._answered

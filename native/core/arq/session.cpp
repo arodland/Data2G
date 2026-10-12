@@ -145,7 +145,9 @@ TxBurstPtr Session::poll(double now) {
         if (disc(now)) {
             log_write(LOG, INFO, "wake: breaking idle with DISC");
         } else if (wakes == 1) {
-            log_write(LOG, INFO, format("wake: breaking idle with %lld B queued", static_cast<long long>(station->new_available())));
+            log_write(LOG, INFO, format("wake: breaking idle with %lld unacked, %lld B queued",
+                                        static_cast<long long>(station->tx.next - station->tx.base),
+                                        static_cast<long long>(station->new_available())));
             queue(station->build(), now);
         } else {
             log_write(LOG, INFO, format("wake %d: no answer, repeating", wakes));
@@ -223,7 +225,8 @@ void Session::on_rx(RxBurst& rx, double now) {
     // the caller: go on now, or after an idle backoff when neither side has data
     const bool woke = build_at.has_value();
     build_at.reset();
-    const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke;
+    // the peer's reply was lost: it may hold data I never heard of
+    const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost;
     if (busy) {
         idle_wait = 0.0;
         queue(st->build(), now);
