@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <utility>
 #include <cstdlib>
 
 #include "arq/engine.hpp"
@@ -24,6 +25,8 @@
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
 #include "audio/filters.hpp"
+#include "constellation/constellation.hpp"
+#include "cpm/cpm.hpp"
 #ifdef __linux__
 #include <pthread.h>
 #endif
@@ -34,6 +37,7 @@
 #include "generated/config.hpp"
 #include "host/host.hpp"
 #include "kisslink/kisslink.hpp"
+#include "modem/modem.hpp"
 #include "monitor/monitor.hpp"
 #include "rig/controller.hpp"
 #include "rig/ptt.hpp"
@@ -815,6 +819,42 @@ std::vector<BurstLogEntry> Station::take_bursts() {
     return out;
 }
 
+std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b) {
+    std::optional<RxConstellation> plot;
+    if (b.heard.ofdm) {
+        const auto& r = *b.heard.ofdm;
+        const auto y = modem::equalized(r);
+        plot.emplace();
+        plot->mode = b.submode;
+        const std::size_t step = y.size() / RxConstellation::MAX_SYMBOLS + 1;
+        for (std::size_t i = 0; i < y.size(); i += step) plot->symbols.emplace_back(y[i]);
+        if (const auto* c = constellation::find(r.spec->constellation))
+            for (const auto& p : c->points) plot->points.emplace_back(p);
+    } else if (b.heard.cpm) {
+        const auto E = cpm::shares(b.heard.cpm->E);
+        plot.emplace();
+        plot->mode = b.submode;
+        plot->tones = true;
+        plot->points = {{1.0f, 0.0f}};
+        const std::size_t step = E.rows / RxConstellation::MAX_SYMBOLS + 1;
+        for (std::size_t i = 0; i < E.rows; i += step) {
+            double top = 0, second = 0;
+            for (std::size_t k = 0; k < E.cols; ++k) {
+                const double e = E[i][k];
+                if (e > top) second = std::exchange(top, e);
+                else if (e > second) second = e;
+            }
+            plot->symbols.emplace_back(static_cast<float>(top), static_cast<float>(second));
+        }
+    }
+    return plot;
+}
+
+std::optional<RxConstellation> Station::take_constellation() {
+    std::lock_guard lock(status_mu_);
+    return std::exchange(constellation_, std::nullopt);
+}
+
 bool Station::busy() const { return engine_ && engine_->channel_busy(); }
 
 AudioCounters Station::counters() const {
@@ -991,7 +1031,9 @@ void Station::start() {
         });
         engine_->set_on_burst([this](const arq::BurstHeard& b) {
             mode_ = b.submode;
+            auto plot = rx_constellation(b);
             std::lock_guard lock(status_mu_);
+            if (plot) constellation_ = std::move(plot);
             bursts_.push_back({std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db});
             if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
             if (monitor_on_) monitor_->push(b);

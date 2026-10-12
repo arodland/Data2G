@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <complex>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -48,6 +49,7 @@
 namespace data2g {
 namespace arq {
 class Engine;
+struct BurstHeard;
 }
 namespace audio {
 class CaptureFifo;
@@ -176,6 +178,18 @@ struct BurstLogEntry {
     std::optional<double> snr_db;
 };
 
+// The newest burst's data symbols, for a constellation plot. OFDM: equalized
+// IQ. CPM (tones): each symbol's strongest tone share + i * the runner-up's.
+struct RxConstellation {
+    std::string mode;
+    bool tones = false;
+    std::vector<std::complex<float>> symbols;  // at most MAX_SYMBOLS, spread over the burst
+    std::vector<std::complex<float>> points;   // the ideal: the mode's constellation, or 1 + 0i
+    static constexpr std::size_t MAX_SYMBOLS = 4000;
+};
+// A heard burst's plot; nullopt when it was lost.
+std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b);
+
 struct AudioCounters {
     std::uint64_t overflows = 0, underruns = 0, late = 0, dropped = 0;
     double backlog_s = 0.0;
@@ -204,6 +218,7 @@ public:
     // -- polled by the owner, never blocking on the engine
     LinkStatus link() const;
     std::vector<BurstLogEntry> take_bursts();  // since the last call (the newest 256 kept)
+    std::optional<RxConstellation> take_constellation();  // the newest since the last call
     bool ptt() const { return ptt_; }
     bool busy() const;  // the host's BUSY
     AudioCounters counters() const;
@@ -274,6 +289,7 @@ private:
     mutable std::mutex status_mu_;
     LinkStatus link_status_;
     std::deque<BurstLogEntry> bursts_;
+    std::optional<RxConstellation> constellation_;
     mutable std::mutex tap_mu_;
     std::vector<double> tap_;  // ring of the newest input
     std::uint64_t tapped_ = 0;

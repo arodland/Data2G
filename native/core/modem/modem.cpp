@@ -1052,6 +1052,20 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
     return constellation::llr(y, h.data, var.data, points_of(spec));
 }
 
+std::vector<cd> equalized(const Received& r) {
+    const auto& h = r.est.h;
+    const size_t nc = r.raw.cols, n_f = r.raw.rows / SYMS_PER_FRAME;
+    std::vector<cd> out;
+    out.reserve(h.data.size());
+    for (size_t f = 0; f < n_f; ++f)
+        for (size_t s = 1; s < SYMS_PER_FRAME; ++s)
+            for (size_t k = 0; k < nc; ++k) {
+                const cd hk = h[f * DATA_SYMS_PER_FRAME + s - 1][k];
+                out.push_back(std::norm(hk) > 0 ? r.raw[f * SYMS_PER_FRAME + s][k] / hk : cd{});
+            }
+    return out;
+}
+
 Burst decode_received(const Received& r) {
     const Spec& spec = *r.spec;
     const auto& est = r.est;

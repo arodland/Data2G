@@ -198,6 +198,9 @@ double resolve_alias(double fine, double coarse);
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est);
 // LLRs of raw's data symbols (rows f * 6 + 1..5) given h, var (n_f * 5, nc).
 std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<double>& var, const Spec& spec);
+// raw's data symbols divided by r.est.h (0 where h is): what soft_bits holds against the
+// constellation, for a display. Frame by frame, carrier fastest.
+std::vector<cd> equalized(const Received& r);
 
 struct Burst {
     const Spec* spec = nullptr;

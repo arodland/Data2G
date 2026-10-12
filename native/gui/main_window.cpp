@@ -19,6 +19,7 @@
 #include "audio/card.hpp"
 #include "monitor/monitor.hpp"
 #include "settings_dialog.hpp"
+#include "constellation.hpp"
 #include "waterfall.hpp"
 
 namespace data2g::gui {
@@ -118,7 +119,12 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     waterfall_->set_source([this](std::size_t n, std::uint64_t* total, bool* tx) {
         return station_ ? station_->input_tail(n, total, tx) : std::vector<double>{};
     });
-    top->addWidget(waterfall_, 2);
+    constellation_ = new ConstellationPlot;
+    constellation_->setObjectName(QStringLiteral("constellation"));
+    auto* scope = new QHBoxLayout;
+    scope->addWidget(waterfall_, 1);
+    scope->addWidget(constellation_);
+    top->addLayout(scope, 2);
 
     auto* grid = new QGridLayout;
     const auto value = [&](const char* name, int row, int col, const QString& label) {
@@ -276,6 +282,7 @@ void MainWindow::poll() {
                                  ? QStringLiteral("color: #d03030")
                                  : QString());
 
+    if (auto c = s.take_constellation()) constellation_->set(std::move(*c));
     for (const auto& b : s.take_bursts()) {
         log_->insertRow(0);  // newest first
         const auto when = QDateTime::fromMSecsSinceEpoch(
