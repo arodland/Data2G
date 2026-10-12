@@ -2,7 +2,9 @@
 // constellation plot: dots over the ideal points (crosses). OFDM: equalized
 // IQ. CPM: each symbol's strongest tone share (x) against the runner-up's (y),
 // ideally (1, 0); a dot near the diagonal was nearly another tone.
-// Kept until the next burst replaces it, and as wide as it is tall.
+// Kept until the next burst replaces it. Square: as wide as the row is tall,
+// but no wider than 30% of the window; then it loses height (the square sits
+// at the top, the rest of the row left empty).
 #pragma once
 
 #include <QWidget>
@@ -24,8 +26,12 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;  // the window's resizes
 
 private:
+    void fit();
+
     app::RxConstellation c_;
 };
 

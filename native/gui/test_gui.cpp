@@ -18,6 +18,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 
+#include <algorithm>
 #include <fstream>
 #include <functional>
 #include <random>
@@ -371,7 +372,7 @@ void test_waterfall_tx() {
 }
 
 // A clean CPM burst on the tone view: most symbols' strongest tone holds
-// nearly all the energy. And the plot stays square as its row resizes.
+// nearly all the energy. And the plot's width as its window resizes.
 void test_constellation_plot() {
     check::current_step = "constellation: CPM";
     const auto& m = arq::mode_at("fsk8r50-r1/2");
@@ -404,10 +405,12 @@ void test_constellation_plot() {
     auto* c = new gui::ConstellationPlot;
     row->addWidget(c);
     host.show();
-    for (const QSize s : {QSize(500, 200), QSize(700, 320), QSize(400, 150)}) {
+    // wide windows: as wide as the row is tall; narrow ones: 30% of the window wide, the height spare
+    for (const QSize s : {QSize(900, 200), QSize(700, 320), QSize(400, 150), QSize(400, 300), QSize(300, 400)}) {
         host.resize(s);
         wait_for([] { return false; }, 50);
-        check::equal(c->width(), c->height(), "square at " + std::to_string(s.width()) + "x" + std::to_string(s.height()));
+        const std::string at = " at " + std::to_string(s.width()) + "x" + std::to_string(s.height());
+        check::equal(c->width(), std::min(c->height(), s.width() * 3 / 10), "as wide as tall, up to 30%" + at);
     }
 }
 

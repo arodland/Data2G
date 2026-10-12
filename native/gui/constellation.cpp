@@ -2,15 +2,16 @@
 
 #include <QPainter>
 #include <QResizeEvent>
+#include <QShowEvent>
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <utility>
 
 namespace data2g::gui {
 
 ConstellationPlot::ConstellationPlot(QWidget* parent) : QWidget(parent) {
-    setMinimumSize(80, 80);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
 }
 
@@ -19,16 +20,35 @@ void ConstellationPlot::set(app::RxConstellation c) {
     update();
 }
 
-// The layout sets our height (the row's); the width follows it.
-void ConstellationPlot::resizeEvent(QResizeEvent* event) {
-    if (event->size().height() != width()) setFixedWidth(std::max(event->size().height(), minimumHeight()));
+constexpr double MAX_WINDOW_SHARE = 0.3;
+
+// The layout sets our height (the row's); the width follows it, up to
+// MAX_WINDOW_SHARE of the window's.
+void ConstellationPlot::fit() {
+    const int cap = static_cast<int>(MAX_WINDOW_SHARE * window()->width());
+    const int side = std::max(1, std::min(height(), cap));
+    if (side != width()) setFixedWidth(side);
+}
+
+void ConstellationPlot::resizeEvent(QResizeEvent*) { fit(); }
+
+void ConstellationPlot::showEvent(QShowEvent*) {
+    window()->installEventFilter(this);  // a narrower window, same height: no resize of ours to react to
+    fit();
+}
+
+bool ConstellationPlot::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == window() && event->type() == QEvent::Resize) fit();
+    return false;
 }
 
 void ConstellationPlot::paintEvent(QPaintEvent*) {
     QPainter p(this);
-    p.fillRect(rect(), Qt::black);
-    const double side = std::min(width(), height());
-    const QPointF mid(width() / 2.0, height() / 2.0);
+    const int side = std::min(width(), height());
+    const QRect square(0, 0, side, side);  // at the top; below it, the row's spare height stays empty
+    p.setClipRect(square);
+    p.fillRect(square, Qt::black);
+    const QPointF mid = QRectF(square).center();
     std::function<QPointF(std::complex<float>)> at;
 
     p.setPen(QColor(60, 60, 60));
@@ -47,8 +67,8 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
         for (const auto& q : c_.points) reach = std::max({reach, double(std::abs(q.real())), double(std::abs(q.imag()))});
         const double scale = side / 2.0 / (reach > 0 ? 1.5 * reach : 1.5);
         at = [=](std::complex<float> z) { return mid + QPointF(z.real() * scale, -z.imag() * scale); };
-        p.drawLine(QPointF(mid.x(), 0), QPointF(mid.x(), height()));
-        p.drawLine(QPointF(0, mid.y()), QPointF(width(), mid.y()));
+        p.drawLine(QPointF(mid.x(), 0), QPointF(mid.x(), side));
+        p.drawLine(QPointF(0, mid.y()), QPointF(side, mid.y()));
     }
 
     p.setPen(QColor(0, 255, 120, 140));
@@ -62,7 +82,7 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
     }
 
     p.setPen(Qt::gray);
-    p.drawText(rect().adjusted(4, 2, -4, -2), Qt::AlignTop | Qt::AlignLeft, QString::fromStdString(c_.mode));
+    p.drawText(square.adjusted(4, 2, -4, -2), Qt::AlignTop | Qt::AlignLeft, QString::fromStdString(c_.mode));
 }
 
 }  // namespace data2g::gui
