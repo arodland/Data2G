@@ -220,6 +220,7 @@ public:
     bool peer_chat = false;
     int peer_queued = 0;
     bool peer_wants_dup = false;
+    bool peer_reply_lost = false;  // the peer's last burst said its previous reply was lost
     std::optional<int> peer_reply_recommend;
     TxSide tx;
     std::map<std::string, std::int64_t> stats;

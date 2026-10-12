@@ -171,7 +171,8 @@ class Session:
             if self._disc(now):
                 log.info("wake: breaking idle with DISC")
             elif self._wakes == 1:
-                log.info("wake: breaking idle with %d B queued", st._new_available())
+                log.info("wake: breaking idle with %d unacked, %d B queued", st.tx.next - st.tx.base,
+                         st._new_available())
                 self._queue(st.build(), now)
             else:
                 log.info("wake %d: no answer, repeating", self._wakes)
@@ -250,7 +251,8 @@ class Session:
         # a burst while the idle poll waits is the callee's wake: answer it
         # at once even without data in it (its policy may have sent control only)
         woke, self._build_at = self._build_at is not None, None
-        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke
+        # the peer's reply was lost: it may hold data I never heard of
+        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
         if busy:
             self._idle_wait = 0.0
             self._queue(st.build(), now)

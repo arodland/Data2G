@@ -505,6 +505,7 @@ bool Station::handle_inner(RxBurst& rxb) {
     peer_reply_recommend = (e_reply != ext.end() && !e_reply->second.empty()) ? std::optional<int>(e_reply->second[0]) : std::nullopt;
     peer_chat = ext.count(T_CHAT) > 0;
     peer_wants_dup = ext.count(T_DUPCTL) > 0;
+    peer_reply_lost = core.reply_lost;
     auto e_buf = ext.find(T_BUFFER);
     peer_queued = (e_buf != ext.end() && e_buf->second.size() == 2) ? (e_buf->second[0] << 8 | e_buf->second[1]) : 0;
     const bool seen = peer_burst && core.burst_seq == *peer_burst;

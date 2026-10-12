@@ -409,6 +409,7 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("peer_chat", &Station::peer_chat)
         .def_readonly("peer_queued", &Station::peer_queued)
         .def_readonly("peer_wants_dup", &Station::peer_wants_dup)
+        .def_readonly("peer_reply_lost", &Station::peer_reply_lost)
         .def_readwrite("peer_reply_recommend", &Station::peer_reply_recommend)
         .def_property_readonly("tx", [](Station& s) { return &s.tx; }, py::return_value_policy::reference_internal)
         .def_property_readonly("rx", [](Station& s) { return &s.rx; }, py::return_value_policy::reference_internal)
