@@ -934,7 +934,7 @@ void Station::tx_loop() {
                 play_->write(y);
             }
             if (stopped()) play_->flush();
-            keyer_->unkey();  // drain, off delay, PTT off
+            keyer_->unkey([this] { tx_active_ = false; });  // drain, off delay, unmute, PTT off
             // a PTT off the rig didn't take stays pending in the keyer, and is tried again (it gives up after a few)
             for (int i = 0; keyer_->keyed() && i < 10; ++i) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));

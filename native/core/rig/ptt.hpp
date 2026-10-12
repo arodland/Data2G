@@ -32,7 +32,10 @@ public:
     Keyer& operator=(const Keyer&) = delete;
 
     void key();    // PTT on, then the TX lead queued
-    void unkey();  // drain the FIFO and the device, wait off_delay_s, PTT off
+    // Drain the FIFO and the device, wait off_delay_s, call `drained`, PTT off. `drained` comes before the
+    // PTT off on purpose: the CAT round trip can take longer than the peer's turnaround, and receiving
+    // must not wait for it (recordings/20261011-223759: acks lost to a mute held through it).
+    void unkey(const std::function<void()>& drained = {});
     bool keyed() const { return keyed_.load(std::memory_order_acquire); }
     // PTT calls that failed (logged and carried on from, as tnc.Rigctld does).
     std::uint64_t failures() const { return failures_; }
@@ -45,7 +48,7 @@ private:
     double off_delay_s_;
     Report report_;
     MustRelease must_release_;
-    std::atomic<bool> keyed_{false};  // the transmit thread keys and unkeys; the receive thread mutes while it is set
+    std::atomic<bool> keyed_{false};  // the transmit thread keys and unkeys
     bool sent_on_ = false;
     std::uint64_t failures_ = 0;
     int off_failed_ = 0;  // consecutive failed PTT offs, retried on the next unkey() up to MAX_OFF_TRIES

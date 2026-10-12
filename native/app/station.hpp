@@ -266,7 +266,7 @@ private:
     std::deque<TxJob> tx_q_;
     std::atomic<unsigned> tx_generation_{0};
     std::atomic<bool> rt_warned_{false};
-    std::atomic<bool> tx_stop_{false}, tx_active_{false};  // tx_active_: from keying to PTT off; the receive side mutes
+    std::atomic<bool> tx_stop_{false}, tx_active_{false};  // tx_active_: from keying until our audio has drained (not the PTT off); the receive side mutes
     bool running_ = false;
     std::uint64_t overflows_ = 0, underruns_ = 0, late_ = 0, dropped_ = 0;  // engine thread
 
