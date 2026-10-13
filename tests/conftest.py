@@ -1136,7 +1136,7 @@ def _engine_substitutions(native):
             self._n = N.Engine(call, policy or E.GearShifter, ptt_delay_s, record_dir, None, min_header_score, kiss,
                                stats_interval_s, rng=random.Random(seed), tx_audio=lambda b: PHY.tx_audio(b),
                                dd=bool(PHY.DD))
-            self.accept = modem.Accept.of(None, E.MAX_BURST_S, min_header_score)
+            self.accept = E.receive_accept(min_header_score)
             self._kiss_rx = []
 
         def __getattr__(self, name):  # step, session, connect, events, tx, _extra, ...

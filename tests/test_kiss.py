@@ -260,3 +260,22 @@ def test_every_mode_fits_its_control_or_is_refused():
         KissLink().set_mode(0, "no-such-mode")
     with pytest.raises(ValueError):
         KissLink(cap=0).set_mode(0, "w48-qpsk-r1/5")  # 2400 Hz under a 500 Hz cap
+
+
+def test_a_256_byte_frame_burst_is_one_receivers_accept():
+    """A KISS burst grows to carry its first frame: with a full control, a
+    256-byte frame's burst still has a header receivers take (engine.receive_accept)."""
+    from data2g.arq.engine import receive_accept
+    from data2g.arq.modes import is_cpm
+
+    cap = dict(receive_accept().max_cw)
+    for spec in G.allowed(len(G.CAP_HZ) - 1):
+        if is_cpm(spec) or "ack" in spec.name:
+            continue
+        a = KissLink()
+        n = a.open("CHAT", from_call="VK2ABC-15")
+        a.set_mode(n, spec.name, auto=True)
+        a.enqueue(frame("CQ", "VK2ABC", 0x03, bytes(256 - 16)), n)
+        burst = a.next_burst()
+        assert burst is not None and burst.submode == spec.name
+        assert len(burst.slots) <= cap[spec.name], spec.name

@@ -69,6 +69,11 @@ arq::Engine& engine_of(const py::handle& h) { return h.cast<PyEngine&>(); }
 void bind_engine(py::module_& m) {
     auto e = m.def_submodule("engine", "data2g.arq.engine");
     e.attr("MAX_BURST_S") = MAX_BURST_S;
+    e.def("receive_accept", [](double min_header_score) {  // its max_cw: ((submode, codewords), ...)
+        py::list out;
+        for (const auto& [s, cw] : receive_accept(min_header_score).max_cw) out.append(py::make_tuple(s->name, cw));
+        return py::tuple(out);
+    }, py::arg("min_header_score") = 0.0);
     e.def("to_f16", [](const In<double>& x) {
         py::array_t<std::uint16_t> out(x.size());
         for (py::ssize_t i = 0; i < x.size(); ++i) out.mutable_data()[i] = to_half(x.data()[i]);

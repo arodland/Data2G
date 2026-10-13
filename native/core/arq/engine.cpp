@@ -309,13 +309,23 @@ std::string Recorder::rx(double t, std::span<const double> audio, const tnc::Pen
 
 // --- engine ----------------------------------------------------------------------------
 
+modem::Accept receive_accept(double min_header_score) {
+    auto a = modem::Accept::of({}, MAX_BURST_S, min_header_score);
+    for (auto& [s, cw] : a.max_cw) {
+        if (s->name.find("ack") != std::string_view::npos) continue;
+        const int need = 4 + (2 + KISS_FRAME_BYTES + codes::payload_bytes(*s) - 1) / codes::payload_bytes(*s);
+        cw = std::max(cw, std::min(need, config::max_codewords(s->sync_band)));
+    }
+    return a;
+}
+
 Engine::Engine(std::string call, EngineConfig cfg, EngineHooks hooks)
     : call_(upper(std::move(call))),
       cfg_(std::move(cfg)),
       hooks_(std::move(hooks)),
       rng_(hooks_.rng ? hooks_.rng
                       : std::make_shared<DefaultRng>(cfg_.seed ? *cfg_.seed : std::random_device{}())),
-      accept_(modem::Accept::of({}, MAX_BURST_S, cfg_.min_header_score)),
+      accept_(receive_accept(cfg_.min_header_score)),
       receiver_(accept_, all_grids()),
       ptt_delay_(static_cast<std::int64_t>(cfg_.ptt_delay_s * config::FS)) {
     if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_, cfg_.record_async);

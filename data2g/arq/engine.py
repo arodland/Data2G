@@ -22,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import cpm, modem
-from ..config import FS, LEADIN_SAMPLES
+from .. import codes, cpm, modem
+from ..config import FS, LEADIN_SAMPLES, max_codewords
 from . import frames as F
 from . import link as L
 from ..tnc import NoiseProfile, Receiver
@@ -35,6 +35,11 @@ from .policy import GearShifter
 log = logging.getLogger("data2g.engine")
 
 MAX_BURST_S = 16.0  # longest burst accepted from a header (the shifter's largest is 12 s)
+# ...raised per submode to hold one KISS frame this long, with a full control
+# (4 codewords) and its length: a KISS burst grows to carry its first frame
+# (kisslink.next_burst), past 16 s in n4, polar and the slowest n10 modes.
+# Ack submodes carry no KISS data and keep the 16 s cap.
+KISS_FRAME_BYTES = 256  # AX.25 PACLEN
 EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_MARGIN_S: 0.4-0.6 s measured)
 # A timeout's window reading under this is no reply at all (the peer missed my
 # burst), which the sim never measures: none. Missed replies read -9..-14 dB at
@@ -86,6 +91,20 @@ def _jsonable(v):
     return str(v)
 
 
+def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
+    """The headers a station takes: MAX_BURST_S, or room for a
+    KISS_FRAME_BYTES frame where that is longer."""
+    a = modem.Accept.of(None, MAX_BURST_S, min_header_score)
+    out = []
+    for n, cw in a.max_cw:
+        s = modem.SUBMODES[n]
+        if "ack" not in n:
+            need = 4 + -(-(2 + KISS_FRAME_BYTES) // codes.payload_bytes(s))
+            cw = max(cw, min(need, max_codewords(s.sync_band)))
+        out.append((n, cw))
+    return modem.Accept(tuple(out), a.min_score)
+
+
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
                  min_header_score: float = 0.0, kiss=None, stats_interval_s: float = 60.0):
@@ -96,7 +115,7 @@ class Engine:
         self.aliases = ()
         self.policy_factory = policy or GearShifter
         self.rng = random.Random(seed)
-        self.accept = modem.Accept.of(None, MAX_BURST_S, min_header_score)
+        self.accept = receive_accept(min_header_score)
         self.receiver = Receiver(self.accept, cpm_grids=tuple(cpm.GRIDS))
         self.noise = NoiseProfile()  # the passband's noise between bursts (recorded with each burst heard)
         self.ptt_delay = int(ptt_delay_s * FS)

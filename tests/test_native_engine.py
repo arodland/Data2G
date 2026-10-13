@@ -124,6 +124,10 @@ def test_broadcast_groups_between_cpp_and_python_engines(native, reference):
     assert f"BCAST {nc} HEARD K2XYZ" in cpp.kiss.take_events() and py.kiss.take_acks() == [(np_, "tag-p")]
 
 
+def test_receive_accept_matches_python(native):
+    assert native.engine.receive_accept() == E.receive_accept().max_cw
+
+
 def test_float16_and_json_numbers_as_numpy_and_json_write_them(native):
     rng = np.random.default_rng(0)
     x = np.concatenate([rng.normal(0, 1, 10000), rng.normal(0, 1e-5, 1000), [0.0, -0.0, 65504.0, 65519.9, 65520.0,
