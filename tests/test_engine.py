@@ -515,6 +515,11 @@ def test_bcast_commands_and_statuses():
     assert h.out_cmd[-1] == "OK" and len(h.out_cmd) > 10
     name, hz, nb, n_cw, t1, tmax = h.out_cmd[0].split()[1:]
     assert float(t1) < float(tmax) and int(n_cw) >= 1
+    from data2g.arq.engine import receive_accept  # max codewords: what a receiver takes, not the header's 64
+
+    rx = dict(receive_accept().max_cw)
+    lines = {ln.split()[1]: int(ln.split()[4]) for ln in h.out_cmd[:-1]}
+    assert all(lines[n] == rx[n] for n in lines if n in rx) and lines["qpsk-r1/5"] == 13
     h.client_gone()
     assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto) == (BROADCAST[2], False)
     link.missed("qpsk-r1/5", 3)

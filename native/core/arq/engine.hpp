@@ -49,6 +49,10 @@
 namespace data2g::arq {
 
 inline constexpr double MAX_BURST_S = 16.0;  // longest burst accepted from a header
+inline constexpr int KISS_FRAME_BYTES = 256;  // ...raised per submode to hold a KISS frame this long (engine.py)
+// The headers a station takes: MAX_BURST_S, or room for a KISS_FRAME_BYTES
+// frame where that is longer (engine.receive_accept).
+modem::Accept receive_accept(double min_header_score = 0.0);
 inline constexpr double EXPECT_REPLY_S = 0.5;  // a reply's start past my burst's end (engine.py)
 inline constexpr double MISSED_MIN_DB = -18.0;  // a timeout's window under this: no reply at all (engine.py)
 // ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's

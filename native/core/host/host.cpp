@@ -68,9 +68,13 @@ std::vector<std::string> mode_lines(int cap) {
         const double wx = arq::width_hz(*x), wy = arq::width_hz(*y);
         return wx != wy ? wx < wy : x->name < y->name;
     });
+    const auto rx = arq::receive_accept();  // max codewords: what a receiver takes
     std::vector<std::string> out;
     for (const auto* m : ms) {
-        const int n = m->is_cpm() ? 1 + tables::CPM.max_data : config::max_codewords(m->ofdm->sync_band);
+        int n = 1 + tables::CPM.max_data;
+        if (!m->is_cpm())
+            for (const auto& [s, cw] : rx.max_cw)
+                if (s->name == m->name) n = cw;
         char buf[160];
         std::snprintf(buf, sizeof buf, "MODE %s %.0f %d %d %.2f %.2f", std::string(m->name).c_str(), arq::width_hz(*m),
                       arq::payload_bytes(*m), n, arq::burst_seconds(*m, 1, false), arq::burst_seconds(*m, n, false));

@@ -532,7 +532,7 @@ void Monitor::flush(Side& s, int key, int dir, Dump& d) {
 }
 
 std::vector<Dump> Monitor::feed(std::span<const double> x, const std::function<std::string(double t)>& when) {
-    if (!receiver_) receiver_ = std::make_unique<tnc::Receiver>(modem::Accept::of({}, MAX_BURST_S), all_grids());
+    if (!receiver_) receiver_ = std::make_unique<tnc::Receiver>(receive_accept(), all_grids());
     std::vector<Dump> out;
     for (auto& ev : receiver_->feed(x)) {
         auto* b = std::get_if<tnc::BurstEvent>(&ev);

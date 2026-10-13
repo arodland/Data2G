@@ -65,16 +65,17 @@ IGNORED = {"COMPRESSION", "PUBLIC", "CWID", "P2P", "WINLINK", "REGISTERED", "ENC
 
 def mode_lines(cap: int) -> list[str]:
     """MODES: one line per mode within the cap, narrowest first: name,
-    bandwidth (Hz), bytes per codeword, max codewords, and airtime (s) at 1
-    and at max codewords."""
+    bandwidth (Hz), bytes per codeword, max codewords (what a receiver
+    takes: engine.receive_accept), and airtime (s) at 1 and at max codewords."""
     from . import codes, cpm
     from .arq import policy as G
+    from .arq.engine import receive_accept
     from .arq.modes import burst_seconds, is_cpm
-    from .config import max_codewords
 
+    rx = dict(receive_accept().max_cw)
     out = []
     for s in sorted(G.allowed(cap), key=lambda s: (G.width_hz(s), s.name)):
-        n = 1 + cpm.MAX_DATA if is_cpm(s) else max_codewords(s.sync_band)
+        n = 1 + cpm.MAX_DATA if is_cpm(s) else rx[s.name]
         out.append(f"MODE {s.name} {G.width_hz(s):.0f} {codes.payload_bytes(s)} {n} "
                    f"{burst_seconds(s, 1):.2f} {burst_seconds(s, n):.2f}")
     return out
