@@ -46,7 +46,7 @@ DEFAULT_SPREAD_HZ = 2.0
 # tenth; 256l at threshold lost 1.3 bits/cu), and the default is too wide
 # for a slow channel's short burst (scripts/llr_scale_sweep.py, 2026-10-13).
 # Too narrow costs far more than too wide, so the widest spread within
-# LOO_TOL of the best error wins.
+# LOO_TOL of the best error above the noise floor wins.
 LOO_SPREAD = True
 LOO_MIN_PILOTS = 6
 LOO_TOL = 0.1
@@ -220,9 +220,10 @@ def measure_spread(hs: np.ndarray, n0_s: float) -> float:
 def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
     """The Doppler spread for the time Wiener filters: of SPREAD_GRID and
     `measured`, the widest whose Gaussian-process model predicts each
-    smoothed pilot from the others within LOO_TOL of the best (closed-form
-    leave-one-out residual, [K^-1 h]_i / [K^-1]_ii). `measured` below
-    LOO_MIN_PILOTS or with LOO_SPREAD off."""
+    smoothed pilot from the others within LOO_TOL of the best, counting
+    only the error above the noise floor (closed-form leave-one-out
+    residual, [K^-1 h]_i / [K^-1]_ii). `measured` below LOO_MIN_PILOTS or
+    with LOO_SPREAD off."""
     n_p = len(hs)
     if not LOO_SPREAD or n_p < LOO_MIN_PILOTS:
         return measured
@@ -233,7 +234,10 @@ def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
     for i, s in enumerate(cand):
         ki = np.linalg.inv(p * _doppler_corr(dt, s) + n0_s * np.eye(n_p))
         err[i] = np.mean(np.abs((ki @ hs) / np.diag(ki)[:, None]) ** 2)
-    return float(cand[err <= err.min() * (1 + LOO_TOL)].max())
+    # the tolerance is on the error above the noise floor (n0_s): taken on
+    # the whole error, at low SNR every spread was within it and the widest
+    # won (mpp: 1.4 Hz of 1, costing the long QPSK r1/5 bursts)
+    return float(cand[err <= err.min() + LOO_TOL * max(err.min() - n0_s, 0.0)].max())
 
 
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,

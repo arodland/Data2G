@@ -298,7 +298,9 @@ double filter_spread(const Mat<cd>& hs, double n0_s, double measured) {
         }
         err[i] = e / (static_cast<double>(n_p) * nc);
     }
-    const double lim = *std::min_element(err.begin(), err.end()) * (1 + LOO_TOL);
+    // the tolerance counts the error above the noise floor only (equalizer.py)
+    const double emin = *std::min_element(err.begin(), err.end());
+    const double lim = emin + LOO_TOL * std::max(emin - n0_s, 0.0);
     double best = 0.0;
     for (size_t i = 0; i < cand.size(); ++i)
         if (err[i] <= lim) best = std::max(best, cand[i]);
