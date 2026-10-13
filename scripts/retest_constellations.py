@@ -24,6 +24,7 @@ import torch
 torch.set_num_threads(4)
 
 from data2g.config import SubmodeSpec, clip_peak_db  # noqa: E402
+import thresholds  # noqa: E402
 from thresholds import Sim, threshold  # noqa: E402
 
 BURST_FRAMES = 16
@@ -35,8 +36,10 @@ def main():
     ap.add_argument("ladder")
     ap.add_argument("--swap", nargs="+", required=True, help="candidate=constellation")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--per", type=float, default=thresholds.PER_TARGET, help="codeword error rate to pass")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
+    thresholds.PER_TARGET = a.per
     rows = list(csv.DictReader(open(a.ladder)))
     old = {(r["name"], r["channel"]): float(r["threshold_db"]) for r in rows}
     meta = {r["name"]: r for r in rows}

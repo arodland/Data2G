@@ -32,6 +32,7 @@ from data2g.channel_torch import CHANNELS, BurstChannel, llr
 from data2g.config import DATA_SYMS_PER_FRAME, SubmodeSpec
 
 MIN_BURSTS = 2000
+PER_TARGET = 1e-2  # pass criterion; retest_constellations --per sets 0.1 for 10% points
 
 
 def _payloads(spec, n, rng):
@@ -88,11 +89,11 @@ def point(sim: Sim, chan: str, snr: float, seed: int = 0, verbose=False) -> dict
         per = tot["cw_err"] / tot["cws"]
         # Codewords in one burst fade together, so evidence is counted
         # in bursts: >= 200 before an early fail, MIN_BURSTS to pass.
-        if tot["bursts"] >= 200 and tot["cw_err"] >= 100 and per > 3e-2:  # clearly failing
+        if tot["bursts"] >= 200 and tot["cw_err"] >= 100 and per > 3 * PER_TARGET:  # clearly failing
             tot["pass"] = False
             break
         if tot["bursts"] >= MIN_BURSTS:
-            tot["pass"] = per <= 1e-2
+            tot["pass"] = per <= PER_TARGET
             break
     tot["ber"] = tot["bit_err"] / tot["bits"]
     tot["per"] = tot["cw_err"] / tot["cws"]
