@@ -72,7 +72,7 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(0, mid.y()), QPointF(side, mid.y()));
     }
 
-    p.setPen(c_.live || c_.lost ? QColor(0, 255, 120, 70) : QColor(0, 255, 120, 140));  // a live view is rougher
+    p.setPen(QColor(0, 255, 120, 140));
     for (const auto& z : c_.symbols) p.drawPoint(at(z));
 
     p.setPen(QColor(255, 80, 80));
