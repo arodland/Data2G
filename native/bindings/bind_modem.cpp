@@ -146,6 +146,7 @@ py::dict est_dict(const modem::DataEstimate& e) {
     d["n0_k"] = np(e.n0_k);
     d["p_sig"] = e.p_sig;
     d["spread_hz"] = e.spread_hz;
+    d["filter_spread_hz"] = e.filter_spread_hz;
     d["clip_ratio"] = e.clip_ratio;
     d["gain"] = e.gain;
     d["band"] = std::string(e.band);

@@ -572,7 +572,7 @@ ModemRx::Est ModemRx::dd_estimate() const {
     std::vector<double> t_pilot(R.hp.rows);
     for (std::size_t i = 0; i < t_pilot.size(); ++i)
         t_pilot[i] = static_cast<double>(i * config::SYMS_PER_FRAME * config::NSYM) / config::FS;
-    auto [h, mse] = equalizer::refine(R.hp, t_pilot, z, w, t_rows, R.support, est.p_sig, est.spread_hz, est.n0,
+    auto [h, mse] = equalizer::refine(R.hp, t_pilot, z, w, t_rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
                                       equalizer::bb(modem::band(spec.band)));
     auto out = std::make_shared<modem::DataEstimate>(est);
     for (std::size_t i = 0; i < h.data.size(); ++i) {
