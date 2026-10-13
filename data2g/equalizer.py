@@ -43,12 +43,12 @@ DEFAULT_SPREAD_HZ = 2.0
 # prediction (filter_spread): measure_spread's lag-1 estimate scatters low
 # in 6-16 frame bursts (mpp, 6 frames: p10 0.34 Hz of 1), which over-
 # smooths h and shrinks its mse (|y - h x|^2 / var 2.6, 16 in the worst
-# tenth; 256l at threshold lost 1.3 bits/cu), and the default is too wide
-# for a slow channel's short burst (scripts/llr_scale_sweep.py, 2026-10-13).
+# tenth; 256l at threshold lost 1.3 bits/cu); scripts/llr_scale_sweep.py,
+# 2026-10-13; spread_screen.py: mpp up to 2 dB at 10%, never -> passing at 1%).
 # Too narrow costs far more than too wide, so the widest spread within
 # LOO_TOL of the best error above the noise floor wins.
 LOO_SPREAD = True
-LOO_MIN_PILOTS = 6
+LOO_MIN_PILOTS = 8  # as measure_spread: with 6 (4-frame bursts) mpd lost 1.75 dB to never at 1%
 LOO_TOL = 0.1
 SPREAD_GRID = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0)
 # Per-carrier noise for the demapper (narrowband interference: a carrier
