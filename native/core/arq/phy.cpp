@@ -296,7 +296,10 @@ std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
     if (it != memo_.end()) return it->second;
     const auto& s = spec(slot);
     const Raw& d = decoded(slot, s);
-    return memo_[{slot, m}] = codes::check(s, d.cands, d.usable, m);
+    auto& out = memo_[{slot, m}] = codes::check(s, d.cands, d.usable, m);
+    tried_.insert(slot);
+    if (out) ok_.insert(slot);
+    return out;
 }
 
 std::vector<Bytes> ModemRx::raw(int slot) {
@@ -349,6 +352,7 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
     if (n_ctl_slots_ && (mask.seq >= SEQ_MOD) != (slot < n_ctl_slots_)) return std::nullopt;
     const std::uint32_t m = mask_value(mask);
     const auto& s = spec(slot);
+    tried_.insert(slot);
     if (stored && stored->submode != submode_) {  // a resend in another mode: what was kept can't combine
         log_write("data2g.arq.phy", 30,
                   format("soft bits stored in %s (slot %d rv %d), resent in %s slot %d rv %d: dropped",
@@ -371,11 +375,13 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
         }
         buf = std::move(ps.buf);
         if (!dd(s)) {
-            if (ps.ok) return std::move(ps.data);
-            break;
+            if (!ps.ok) break;
+            ok_.insert(slot);
+            return std::move(ps.data);
         }
         if (ps.ok) {
             learn(slot, s, ps.data, rv, m);
+            ok_.insert(slot);
             return std::move(ps.data);
         }
         if (i == DD_ITERS || late()) break;

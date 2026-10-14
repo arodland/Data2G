@@ -85,6 +85,12 @@ void sync_session(const std::filesystem::path& dir) {
     cb.seed = 2;
     Engine a("w1aw", ca), b("K2XYZ", cb);
     check::equal(a.call(), std::string("W1AW"), "call upper-cased");
+    int heard = 0, tallied = 0, whole = 0;
+    b.set_on_burst([&](const BurstHeard& h) { heard += !h.lost; });
+    b.set_on_decoded([&](int decoded, int failed) {
+        ++tallied;
+        whole += decoded > 0 && failed == 0;
+    });
     b.listen();
     a.connect("K2XYZ", 2);
     check::is_true(link(a, b, 12, 60, [&] { return both(a, b, SessionState::CONNECTED); }, 0), "connected");
@@ -99,6 +105,8 @@ void sync_session(const std::filesystem::path& dir) {
         return got_b.size() >= up.size() && got_a.size() >= down.size();
     }, 1), "data both ways");
     check::is_true(got_b == up && got_a == down, "data intact");
+    check::is_true(heard > 0 && tallied == heard, "on_decoded once per heard burst");
+    check::is_true(whole > 0, "a clean link's bursts decode whole");
     a.session().disconnect();
     check::is_true(link(a, b, 12, 60, [&] { return both(a, b, SessionState::CLOSED); }, 2), "closed");
     const auto ev = a.events();

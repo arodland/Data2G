@@ -178,6 +178,7 @@ struct BurstLogEntry {
     int n_cw = 0;
     bool lost = false;
     std::optional<double> snr_db;
+    int decoded = 0, failed = 0;  // slots (Engine::set_on_decoded)
 };
 
 // The newest burst's data symbols, for a constellation plot. OFDM: equalized
@@ -250,6 +251,7 @@ private:
     // session stage
     void flush(std::uint64_t asker = 0);
     void note_link();
+    void log_burst();  // reading_ into bursts_; status_mu_ held
     void announce_ptt(bool on);
     // owner's thread
     void deliver(const Outbox& o);
@@ -297,6 +299,7 @@ private:
     mutable std::mutex status_mu_;
     LinkStatus link_status_;
     std::deque<BurstLogEntry> bursts_;
+    BurstLogEntry reading_;  // heard, awaiting on_decoded; engine's thread
     std::optional<RxConstellation> constellation_;
     std::optional<RxConstellation> live_;  // the burst arriving's, kept for when it is lost
     bool live_asked_ = false;              // owner's thread

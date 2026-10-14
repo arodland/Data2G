@@ -870,6 +870,11 @@ RxConstellation rx_constellation(const arq::BurstPreview& p) {
     return plot;
 }
 
+void Station::log_burst() {
+    bursts_.push_back(reading_);
+    if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
+}
+
 std::optional<RxConstellation> Station::take_constellation() {
     if (!live_asked_ && engine_ && a_.live_constellation) {
         live_asked_ = true;
@@ -1055,6 +1060,7 @@ void Station::start() {
         });
         engine_->set_on_preview([this](const arq::BurstPreview& p) {
             auto plot = rx_constellation(p);
+            if (plot.symbols.empty()) return;  // nothing to show yet: keep the last plot
             std::lock_guard lock(status_mu_);
             constellation_ = plot;
             live_ = std::move(plot);
@@ -1063,16 +1069,22 @@ void Station::start() {
             mode_ = b.submode;
             auto plot = rx_constellation(b);
             std::lock_guard lock(status_mu_);
-            if (plot) constellation_ = std::move(plot);
+            if (plot && !plot->symbols.empty()) constellation_ = std::move(plot);
             else if (b.lost && live_) {  // undecoded: the live view stays, marked
                 constellation_ = std::move(live_);
                 constellation_->live = false;
                 constellation_->lost = true;
             }
             live_.reset();
-            bursts_.push_back({std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db});
-            if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
+            reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};
+            if (b.lost) log_burst();  // else once read (on_decoded)
             if (monitor_on_) monitor_->push(b);
+        });
+        engine_->set_on_decoded([this](int decoded, int failed) {
+            reading_.decoded = decoded;
+            reading_.failed = failed;
+            std::lock_guard lock(status_mu_);
+            log_burst();
         });
         auto post = [this](std::function<void()> f) {
             engine_->post([this, f = std::move(f)] {

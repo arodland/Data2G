@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -102,6 +103,9 @@ public:
     // budget ran out.
     int dd_refines() const { return refines_; }
     bool dd_spent() const { return late(); }
+    // Slots decoded so far (under any mask), and slots tried that never did, for a burst log.
+    int n_decoded() const { return static_cast<int>(ok_.size()); }
+    int n_failed() const { return static_cast<int>(tried_.size() - ok_.size()); }
 
     // decode() without a store: `stored` is what the key holds (nullopt:
     // nothing); a failed decode replaces it, a miss before decoding (slot
@@ -150,6 +154,7 @@ private:
     const codes::Spec* ctl_spec_;
     std::map<std::pair<int, std::uint32_t>, std::optional<Bytes>> memo_;
     std::map<int, Raw> raw_;
+    std::set<int> tried_, ok_;  // ok_ within tried_
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;
     int refines_ = 0;

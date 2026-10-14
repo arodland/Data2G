@@ -289,7 +289,10 @@ void MainWindow::poll() {
             std::chrono::duration_cast<std::chrono::milliseconds>(b.when.time_since_epoch()).count());
         const QStringList cells = {when.toString(QStringLiteral("HH:mm:ss")), tr("%1 x%2").arg(qs(b.mode)).arg(b.n_cw),
                                    b.snr_db ? QString::number(*b.snr_db, 'f', 1) : QStringLiteral("-"),
-                                   b.lost ? tr("lost") : tr("ok")};
+                                   b.lost             ? tr("lost")
+                                   : b.decoded == 0   ? tr("undecoded")  // none of it ours, or none of it decoded
+                                   : b.failed         ? tr("incomplete data (%1/%2)").arg(b.n_cw - b.failed).arg(b.n_cw)
+                                                      : tr("ok")};
         for (int i = 0; i < cells.size(); ++i) log_->setItem(0, i, new QTableWidgetItem(cells[i]));
     }
     while (log_->rowCount() > MAX_LOG_ROWS) log_->removeRow(log_->rowCount() - 1);
