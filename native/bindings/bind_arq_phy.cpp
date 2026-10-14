@@ -57,6 +57,7 @@ Heard heard_of(const py::dict& r) {
     if (e.contains("n0_k")) o->est.n0_k = vec(e["n0_k"].cast<In<double>>());
     o->est.p_sig = e["p_sig"].cast<double>();
     o->est.spread_hz = e.contains("spread_hz") ? e["spread_hz"].cast<double>() : 0.0;
+    o->est.filter_spread_hz = e.contains("filter_spread_hz") ? e["filter_spread_hz"].cast<double>() : o->est.spread_hz;
     o->est.clip_ratio = e["clip_ratio"].cast<double>();
     o->est.gain = e.contains("gain") ? e["gain"].cast<double>() : 1.0;
     o->band = modem::band(r["band"].cast<std::string>()).name;

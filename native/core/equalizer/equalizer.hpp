@@ -5,6 +5,7 @@
 // Mat<cd> (pilots or rows, carriers), as in Python.
 #pragma once
 
+#include <array>
 #include <complex>
 #include <limits>
 #include <memory>
@@ -25,6 +26,10 @@ inline constexpr int DELAY_MIN = -2 * config::NCP, DELAY_MAX = 2 * config::NCP; 
 inline constexpr int TIME_TAPS = 4;
 inline constexpr int DD_TAPS = 2;
 inline constexpr double DEFAULT_SPREAD_HZ = 2.0;
+inline constexpr bool LOO_SPREAD = true;  // equalizer.filter_spread's, see equalizer.py
+inline constexpr int LOO_MIN_PILOTS = 8;
+inline constexpr double LOO_TOL = 0.1;
+inline constexpr std::array<double, 12> SPREAD_GRID = {0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0};
 inline constexpr bool PER_CARRIER_NOISE = true;
 inline constexpr double NOISE_SHAPE_PRIOR = 8.0;
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
@@ -63,12 +68,14 @@ std::vector<double> preamble_noise_k(const Mat<cd>& h_repeats);
 std::vector<double> per_carrier_noise(std::span<const double> power_k, int samples);
 double doppler_corr(double dt, double spread_hz);
 double measure_spread(const Mat<cd>& hs, double n0_s);
+double filter_spread(const Mat<cd>& hs, double n0_s, double measured);
 
 struct Estimate {
     int n_f = 0, nc = 0;
     Mat<cd> h;        // (n_f * 5, nc): frame f, data symbol s at row f * 5 + s
     Mat<double> mse;  // the same shape
     double n0 = 0, p_sig = 0, spread_hz = 0;
+    double filter_spread_hz = 0;  // the time filters' (refine's too); spread_hz is the reported one
     std::vector<double> n0_k;
 };
 // n0_pre_k empty: None. Throws std::invalid_argument without a noise estimate.

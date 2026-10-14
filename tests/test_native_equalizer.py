@@ -85,7 +85,7 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     assert set(got) == set(want)
     for k in ("h", "mse", "n0_k"):
         close(got[k], want[k], k)
-    for k in ("n0", "p_sig", "spread_hz"):
+    for k in ("n0", "p_sig", "spread_hz", "filter_spread_hz"):
         assert got[k] == pytest.approx(want[k], rel=RTOL), k
     steps = np.arange(n_p) * 0.37 - 3
     close(ne.time_shift_phase(steps, bb), py.time_shift_phase(steps, bb))
@@ -183,7 +183,7 @@ def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n
         got = native.equalizer.estimate(*a, **k)
         for key in ("h", "mse", "n0_k"):
             close(got[key], want[key], key)
-        for key in ("n0", "p_sig", "spread_hz"):
+        for key in ("n0", "p_sig", "spread_hz", "filter_spread_hz"):
             assert got[key] == pytest.approx(want[key], rel=RTOL), key
     for a, k, want in ref_calls:
         got = native.equalizer.refine(*a, **k)

@@ -78,6 +78,7 @@ void bind_equalizer(py::module_& m) {
         d["n0_k"] = np(r.n0_k);
         d["p_sig"] = r.p_sig;
         d["spread_hz"] = r.spread_hz;
+        d["filter_spread_hz"] = r.filter_spread_hz;
         return d;
     }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("n0_pre") = eq::INF,
        py::arg("n0_pre_k") = std::optional<In<double>>());
@@ -95,7 +96,8 @@ void bind_equalizer(py::module_& m) {
             const auto tp = vec(t_pilot);
             const auto zm = mat(z);
             const auto wm = mat(w);
-            const double p_sig = est["p_sig"].cast<double>(), spread = est["spread_hz"].cast<double>(),
+            const double p_sig = est["p_sig"].cast<double>(),
+                         spread = est[est.contains("filter_spread_hz") ? "filter_spread_hz" : "spread_hz"].cast<double>(),
                          n0 = est["n0"].cast<double>();
             py::gil_scoped_release nogil;
             r = eq::refine(hp, tp, zm, wm, tr, s, p_sig, spread, n0, bbv);

@@ -150,6 +150,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="runs/loss_study.csv")
     ap.add_argument("--seeds", type=int, default=4)
+    ap.add_argument("--seed0", type=int, default=0, help="first seed (a second, independent set: --seed0 12)")
     ap.add_argument("--horizon", type=float, default=300.0)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--policy", default="shift", help='linksim.make_policy spec ("shift+cpm": CPM modes too)')
@@ -174,7 +175,8 @@ def main():
         global REC_NOISE
         REC_NOISE = G.load_recorded_noise(sorted(p.parent for p in Path(a.recordings).glob("*/audio_in.f16")))
         print(f"recorded noise: {len(REC_NOISE) / G.FS / 60:.1f} min", flush=True)
-    jobs = [(c, s, seed, a.horizon, a.policy, i) for c, s, i in cells for seed in range(a.seeds)]
+    jobs = [(c, s, seed, a.horizon, a.policy, i) for c, s, i in cells
+            for seed in range(a.seed0, a.seed0 + a.seeds)]
     with Pool(a.jobs) as pool, open(a.out, "w", newline="") as f:
         w = None
         for rows in pool.imap_unordered(one, jobs):

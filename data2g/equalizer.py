@@ -13,8 +13,9 @@ is buffered before decoding, so every estimate can use every pilot:
 - `estimate`: 2-D LMMSE (Li/Cimini/Sollenberger robust form). Across
   carriers, a projection onto the delay support; in time, Wiener
   interpolation over the nearest pilots with a Gaussian (ITU-R F.1487)
-  Doppler correlation whose spread is measured from the pilots. Returns
-  the per-cu estimate MSE so the demapper can discount it.
+  Doppler correlation whose spread is picked per burst from the pilots
+  (filter_spread). Returns the per-cu estimate MSE so the demapper can
+  discount it.
 """
 
 from functools import lru_cache
@@ -38,6 +39,18 @@ TIME_TAPS = 4
 DD_TAPS = 2
 # Doppler spread assumed when the burst is too short to measure one.
 DEFAULT_SPREAD_HZ = 2.0
+# The Wiener filters' spread, picked per burst by leave-one-out pilot
+# prediction (filter_spread): measure_spread's lag-1 estimate scatters low
+# in 6-16 frame bursts (mpp, 6 frames: p10 0.34 Hz of 1), which over-
+# smooths h and shrinks its mse (|y - h x|^2 / var 2.6, 16 in the worst
+# tenth; 256l at threshold lost 1.3 bits/cu); scripts/llr_scale_sweep.py,
+# 2026-10-13; spread_screen.py: mpp up to 2 dB at 10%, never -> passing at 1%).
+# Too narrow costs far more than too wide, so the widest spread within
+# LOO_TOL of the best error above the noise floor wins.
+LOO_SPREAD = True
+LOO_MIN_PILOTS = 8  # as measure_spread: with 6 (4-frame bursts) mpd lost 1.75 dB to never at 1%
+LOO_TOL = 0.1
+SPREAD_GRID = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0)
 # Per-carrier noise for the demapper (narrowband interference: a carrier
 # on one tone): per_carrier_noise, with this many samples' worth of prior.
 PER_CARRIER_NOISE = True
@@ -204,6 +217,29 @@ def measure_spread(hs: np.ndarray, n0_s: float) -> float:
     return float(np.clip(2 * sigma, 0.02, 4.0))
 
 
+def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
+    """The Doppler spread for the time Wiener filters: of SPREAD_GRID and
+    `measured`, the widest whose Gaussian-process model predicts each
+    smoothed pilot from the others within LOO_TOL of the best, counting
+    only the error above the noise floor (closed-form leave-one-out
+    residual, [K^-1 h]_i / [K^-1]_ii). `measured` below LOO_MIN_PILOTS or
+    with LOO_SPREAD off."""
+    n_p = len(hs)
+    if not LOO_SPREAD or n_p < LOO_MIN_PILOTS:
+        return measured
+    p = max(float(np.mean(np.abs(hs) ** 2) - n0_s), 1e-12)
+    dt = (np.arange(n_p)[:, None] - np.arange(n_p)[None, :]) * FRAME_S
+    cand = np.array([*SPREAD_GRID, measured])
+    err = np.empty(len(cand))
+    for i, s in enumerate(cand):
+        ki = np.linalg.inv(p * _doppler_corr(dt, s) + n0_s * np.eye(n_p))
+        err[i] = np.mean(np.abs((ki @ hs) / np.diag(ki)[:, None]) ** 2)
+    # the tolerance is on the error above the noise floor (n0_s): taken on
+    # the whole error, at low SNR every spread was within it and the widest
+    # won (mpp: 1.4 Hz of 1, costing the long QPSK r1/5 bursts)
+    return float(cand[err <= err.min() + LOO_TOL * max(err.min() - n0_s, 0.0)].max())
+
+
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
              n0_pre: float = np.inf, n0_pre_k: np.ndarray | None = None) -> dict:
     """h_pilot (F+1, NC): LS estimates at every pilot, the closing one
@@ -212,7 +248,8 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     n0 (thermal noise variance per carrier, in the same units), n0_k (the
     same per carrier: narrowband interference raises its carriers; from the
     pilot residual, or `n0_pre_k` (preamble_noise_k) where that has no room),
-    signal power, and the measured Doppler spread."""
+    signal power, the measured Doppler spread (spread_hz) and the one the
+    time filter used (filter_spread_hz)."""
     n_p = len(h_pilot)
     n_f = n_p - 1
     nc = len(bb)
@@ -235,7 +272,8 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     if not np.isfinite(n0):
         raise ValueError("no noise estimate: pass n0_pre on a band this narrow")
     n0_s = n0 * r / nc  # noise left on a smoothed pilot
-    spread = measure_spread(hs, n0_s)
+    spread = measure_spread(hs, n0_s)  # reported (a predictor input)
+    fspread = filter_spread(hs, n0_s, spread)
     p_sig = max(float(np.mean(np.abs(hs) ** 2) - n0_s), 1e-12)
 
     t_p = np.arange(n_p) * FRAME_S
@@ -245,15 +283,16 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     for f in range(n_f):
         lo = max(0, min(f - TIME_TAPS + 1, n_p - 2 * TIME_TAPS))
         j = np.arange(lo, min(n_p, lo + 2 * TIME_TAPS))
-        Rpp = p_sig * _doppler_corr(t_p[j, None] - t_p[None, j], spread) + n0_s * np.eye(len(j))
+        Rpp = p_sig * _doppler_corr(t_p[j, None] - t_p[None, j], fspread) + n0_s * np.eye(len(j))
         t = f * FRAME_S + offs
-        Rdp = p_sig * _doppler_corr(t[:, None] - t_p[None, j], spread)  # (5, J)
+        Rdp = p_sig * _doppler_corr(t[:, None] - t_p[None, j], fspread)  # (5, J)
         W = np.linalg.solve(Rpp, Rdp.T).T  # (5, J)
         h[f] = W @ hs[j]
         mse[f] = np.maximum(p_sig - np.real(np.sum(W * np.conj(Rdp), axis=1)), 0)[:, None]
     if n0_k is None or not PER_CARRIER_NOISE:
         n0_k = np.full(nc, n0)
-    return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "p_sig": p_sig, "spread_hz": spread}
+    return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "p_sig": p_sig, "spread_hz": spread,
+            "filter_spread_hz": fspread}
 
 
 def time_shift_phase(shift: np.ndarray, bb: np.ndarray = BB_FREQS) -> np.ndarray:
@@ -278,11 +317,11 @@ def refine(h_pilot: np.ndarray, t_pilot: np.ndarray, z: np.ndarray, w: np.ndarra
     one codeword's), keeping each carrier's posterior variance. Then per
     carrier, every data row is Wiener-interpolated in time over the
     nearby pilot and data rows, each with its own noise. `est`:
-    estimate()'s result for p_sig, spread and n0. Returns h and mse
+    estimate()'s result for p_sig, filter_spread_hz and n0. Returns h and mse
     (F, S, NC), in the pilots' units."""
     nc = len(bb)
     U, r, _ = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]))
-    p_sig, spread = est["p_sig"], est["spread_hz"]
+    p_sig, spread = est["p_sig"], est.get("filter_spread_hz", est["spread_hz"])
     hs_p = (h_pilot @ np.conj(U)) @ U.T
     d = np.arange(support[0] - SUPPORT_SLACK, support[1] + SUPPORT_SLACK + 1)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
