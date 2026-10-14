@@ -858,6 +858,15 @@ RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
 
 }  // namespace
 
+bool plot_visible(const RxConstellation& c) {
+    if (c.tones) return !c.symbols.empty();
+    float reach = 0;
+    for (const auto& q : c.points) reach = std::max({reach, std::abs(q.real()), std::abs(q.imag())});
+    const float edge = 1.5f * (reach > 0 ? reach : 1.0f);
+    return std::any_of(c.symbols.begin(), c.symbols.end(),
+                       [&](const auto& z) { return std::abs(z.real()) <= edge && std::abs(z.imag()) <= edge; });
+}
+
 std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b) {
     if (b.heard.ofdm) return iq_plot(b.submode, modem::equalized(*b.heard.ofdm), *b.heard.ofdm->spec);
     if (b.heard.cpm) return tone_plot(b.submode, cpm::shares(b.heard.cpm->E));
@@ -868,6 +877,11 @@ RxConstellation rx_constellation(const arq::BurstPreview& p) {
     auto plot = p.ofdm ? iq_plot(p.submode, p.iq, *p.ofdm) : tone_plot(p.submode, p.shares);
     plot.live = true;
     return plot;
+}
+
+void Station::log_burst() {
+    bursts_.push_back(reading_);
+    if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
 }
 
 std::optional<RxConstellation> Station::take_constellation() {
@@ -1055,6 +1069,7 @@ void Station::start() {
         });
         engine_->set_on_preview([this](const arq::BurstPreview& p) {
             auto plot = rx_constellation(p);
+            if (!plot_visible(plot)) return;  // nothing to show yet: keep the last plot
             std::lock_guard lock(status_mu_);
             constellation_ = plot;
             live_ = std::move(plot);
@@ -1063,16 +1078,22 @@ void Station::start() {
             mode_ = b.submode;
             auto plot = rx_constellation(b);
             std::lock_guard lock(status_mu_);
-            if (plot) constellation_ = std::move(plot);
-            else if (b.lost && live_) {  // undecoded: the live view stays, marked
+            if (plot && plot_visible(*plot)) constellation_ = std::move(plot);
+            else if (live_) {  // lost, or nothing on the plot: the live view stays (lost ones marked)
                 constellation_ = std::move(live_);
                 constellation_->live = false;
-                constellation_->lost = true;
+                constellation_->lost = b.lost;
             }
             live_.reset();
-            bursts_.push_back({std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db});
-            if (bursts_.size() > MAX_BURSTS) bursts_.pop_front();
+            reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};
+            if (b.lost) log_burst();  // else once read (on_decoded)
             if (monitor_on_) monitor_->push(b);
+        });
+        engine_->set_on_decoded([this](int decoded, int failed) {
+            reading_.decoded = decoded;
+            reading_.failed = failed;
+            std::lock_guard lock(status_mu_);
+            log_burst();
         });
         auto post = [this](std::function<void()> f) {
             engine_->post([this, f = std::move(f)] {

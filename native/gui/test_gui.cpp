@@ -19,6 +19,7 @@
 #include <QThread>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <functional>
 #include <random>
@@ -401,6 +402,17 @@ void test_constellation_plot() {
             for (const auto& z : plot->symbols) wedge += z.imag() <= z.real() + 1e-6f && z.imag() >= 1 - z.real() - 1e-6f;
             check::equal(wedge, plot->symbols.size(), "every symbol between the diagonal and the tie line");
         }
+    }
+
+    check::current_step = "constellation: visible";
+    {
+        app::RxConstellation c;
+        c.points = {{1, 1}, {-1, -1}};
+        check::is_true(!app::plot_visible(c), "no symbols: nothing to show");
+        c.symbols = {{3e7f, -2e7f}, {std::nanf(""), 0}};
+        check::is_true(!app::plot_visible(c), "a broken estimate's symbols, all off the plot");
+        c.symbols.push_back({0.9f, -1.1f});
+        check::is_true(app::plot_visible(c), "one on the plot is enough");
     }
 
     check::current_step = "constellation: square";

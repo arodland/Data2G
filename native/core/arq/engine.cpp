@@ -827,6 +827,13 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
     }
     ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
     timing.rx = &rx;
+    struct Tally {  // whichever return below: what decoded, for on_decoded
+        const ModemRx& rx;
+        const std::function<void(int, int)>& f;
+        ~Tally() {
+            if (f) f(rx.n_decoded(), rx.n_failed());
+        }
+    } tally{rx, on_decoded_};
     // in a session, its peer's bursts are the likely ones: a control
     // codeword under the session's key claims the burst before KISS tries
     // its keys on it
