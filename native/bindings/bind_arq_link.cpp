@@ -68,6 +68,10 @@ public:
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
+    std::optional<int> next_capacity(const Station& st) const override {
+        if (!py::hasattr(obj, "next_capacity")) return std::nullopt;
+        return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference)).cast<int>();
+    }
 };
 
 std::shared_ptr<Policy> policy_of(py::object o) { return std::make_shared<PyPolicy>(std::move(o)); }

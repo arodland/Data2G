@@ -243,6 +243,42 @@ def test_chat_wakes_back_off():
     assert r["b_done"] - r["b_written"] < budget + 5
 
 
+@pytest.mark.parametrize("chat", [False, True])
+def test_short_write_coalesces(chat):
+    """CHAT OFF: short writes to an idle caller hold its idle poll
+    COALESCE_S for more; a full burst's worth, or CHAT ON, sends at once."""
+    from data2g.arq import policy as G
+
+    class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
+        def recommend(self, station):
+            return G.encode("qpsk-r1/2"), 1, G.encode("qpsk-r1/2")
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", Good(), rng=random.Random(2))
+    a.set_chat(chat)
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    t, src, dst = 0.0, a, b
+    while a._build_at is None:  # CONNECT, accept, then empty bursts until the caller idles
+        assert t < 30
+        burst = src.poll(t)
+        if burst is None:
+            t = max(t + 0.1, src.next_event() or t)
+            continue
+        src.on_tx_end(burst, t + 1.0)
+        t += 1.5
+        dst.on_rx(FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0}), t)
+        src, dst = dst, src
+    a.poll(t)  # the session's clock
+    cap = a.policy.next_capacity(a.station)
+    assert cap > 100
+    a.write(b"x" * 30)
+    a.write(b"x" * 30)  # inside the hold: it keeps its end
+    assert a._build_at == (float("-inf") if chat else t + S.COALESCE_S)
+    a.write(b"x" * cap)  # a full burst
+    assert a._build_at == float("-inf")
+
+
 def _frame(body, direction):
     """A CRC-valid session frame (key 0) carrying `body`."""
     ctl = F.Control(F.Core(ftype=F.SESSION), {S.T_SESS: body}).pack(46)

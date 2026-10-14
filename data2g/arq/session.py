@@ -51,6 +51,7 @@ WAKE_TRIES = 2
 CHAT_WAKE_TRIES = 6
 CHAT_KEEPALIVE_S = KEEPALIVE_S  # CHAT ON: the callee's wakes carry its lines (v1 polled every 2-4 s)
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
+COALESCE_S = 0.1  # CHAT OFF: a short write to an idle link waits this long for more before it goes
 
 log = logging.getLogger("data2g.session")
 
@@ -101,6 +102,7 @@ class Session:
     _stats_since: float = 0.0
     _stats_prev: dict = field(default_factory=dict)
     _connected_at: float = 0.0
+    _coalesce_until: float | None = None  # write(): an idle poll or wake held for more data
 
     # -- host side -------------------------------------------------------------------
 
@@ -127,13 +129,25 @@ class Session:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
     def write(self, data: bytes):
-        if self.station is not None:
-            self.station.write(data)
-            if self._build_at is not None:
-                self._build_at = float("-inf")  # an idle poll due: send it now, with the data
-                self._idle_wait = 0.0
-        else:
+        st = self.station
+        if st is None:
             self._pending_write += data
+            return
+        # CHAT OFF: a write to an empty buffer, less than a full burst, holds
+        # the idle poll or wake it brings forward COALESCE_S for more (clients
+        # write a message in pieces). A full burst's worth ends the hold.
+        holding = self._coalesce_until is not None and self._now < self._coalesce_until
+        fresh = holding or not st.tx.pending()
+        st.write(data)
+        cap = getattr(self.policy, "next_capacity", None)
+        if fresh and not self.chat and cap is not None and st._new_available() < cap(st):
+            if not holding:
+                self._coalesce_until = self._now + COALESCE_S
+        else:
+            self._coalesce_until = None
+        if self._build_at is not None:  # an idle poll due: send it now (or at the hold's end), with the data
+            self._build_at = self._coalesce_until if self._coalesce_until is not None else float("-inf")
+            self._idle_wait = 0.0
 
     def read(self) -> bytes:
         return self.station.read() if self.station else b""
@@ -301,7 +315,7 @@ class Session:
         disc = self._want_disc and not st.tx.pending()
         if not self._wakes and not disc and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
             return None
-        return self._quiet_from + self._wake_wait
+        return max(self._quiet_from + self._wake_wait, self._coalesce_until or float("-inf"))
 
     def _close(self, why: str, final: L.TxBurst | None = None, now: float = 0.0):
         """-> None. `final`: one last burst to send (a DISC_ACK)."""
