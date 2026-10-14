@@ -122,6 +122,7 @@ void bind_engine(py::module_& m) {
         .def("abort", &PyEngine::abort)
         .def("connect", &PyEngine::connect)
         .def("set_chat", &PyEngine::set_chat)
+        .def_readwrite("accept_connect", &PyEngine::accept_connect)
         .def("events", &PyEngine::events)
         .def("send_cq", &PyEngine::send_cq)
         .def_property_readonly("now", &PyEngine::now)

@@ -11,7 +11,11 @@ to. The station itself is an arq.engine.Engine clocked by the sound card;
 PTT through rigctld; every burst heard and sent recorded for offline
 replay (scripts/replay.py).
 
-Commands: MYCALL call, LISTEN ON|OFF, CONNECT from to, DISCONNECT, ABORT,
+Commands: MYCALL call, LISTEN ON|OFF, ACCEPT [host]:port (Data2G: LISTEN ON,
+but each session's data goes over a connection Data2G makes to host:port,
+default 127.0.0.1, instead of the data port; a connect is refused if that
+fails, and the session disconnects when the far end closes it; LISTEN ON|OFF
+ends it), CONNECT from to, DISCONNECT, ABORT,
 CQFRAME call bw (a CQ frame at 500 | 1200 | 2300 | 2750 Hz: no session;
 one heard is notified the same way, the sender's call and bandwidth),
 BW500 | BW1200 | BW2300 | BW2750 (session bandwidth cap: BW500 keeps a
@@ -56,6 +60,7 @@ VERSION = "Data2G 0.1"
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = {0: "500", 1: "1200", 2: "2300"}
 BLOCK = FS // 10  # audio block: 0.1 s
+DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
@@ -90,6 +95,9 @@ class Host:
         """`buffer_credit`: queued bytes BUFFER may leave out, at most (None:
         the next burst's whole capacity; 0: plain VARA, all of them)."""
         self.engine, self.cap, self.listening = engine, 2, False
+        self.accept_addr: tuple[str, int] | None = None  # ACCEPT host:port
+        self.dial = None  # serve(): (host, port) -> True once a connection there carries the session's data
+        engine.accept_connect = engine.session.accept_connect = self._accept_connect
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.out_cmd: list[str] = []
@@ -115,8 +123,11 @@ class Host:
         elif cmd == "LISTEN" and args and args[0].upper() == "CQ":
             pass  # CQ frames are always reported
         elif cmd == "LISTEN" and args and args[0].upper() in ("ON", "OFF"):
-            self.listening = args[0].upper() == "ON"
+            self.listening, self.accept_addr = args[0].upper() == "ON", None
             e.listen(self.listening)
+        elif cmd == "ACCEPT" and len(args) == 1 and (addr := _addr(args[0])):
+            self.listening, self.accept_addr = True, addr
+            e.listen()
         elif cmd == "CONNECT" and len(args) == 2:
             try:
                 e.set_call(args[0], *e.aliases)
@@ -187,7 +198,7 @@ class Host:
             e.session.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening = False
+        self.listening, self.accept_addr = False, None
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
@@ -195,6 +206,12 @@ class Host:
                 e.kiss.close(n)
             e.kiss.set_mode(0, e.kiss.broadcast)
             self._bcast = False
+
+    def _accept_connect(self, caller: str, callee: str) -> bool:
+        if self.accept_addr is None:
+            return True
+        log.info("ACCEPT: %s calling %s, connecting to %s:%d", caller, callee, *self.accept_addr)
+        return self.dial is not None and self.dial(self.accept_addr)
 
     def data_in(self, data: bytes):
         self.engine.session.write(data)
@@ -263,6 +280,14 @@ class Host:
             self._buffer = buffered
             self._buffer_t = e.now
             self.out_cmd.append(f"BUFFER {buffered}")
+
+
+def _addr(s: str) -> tuple[str, int] | None:
+    """ACCEPT's [host]:port, or None."""
+    host, sep, port = s.rpartition(":")
+    if not sep or not port.isdigit() or not 0 < int(port) < 65536:
+        return None
+    return host.strip("[]") or "127.0.0.1", int(port)
 
 
 class Interpolator:
@@ -457,6 +482,48 @@ class _Port:
             _shut(c)
 
 
+class _Dialer:
+    """ACCEPT: the session's own connection, made when a call is answered.
+    What it reads goes to `inbox` as ("dialed", (sock, bytes)), b"" when it closed."""
+
+    def __init__(self, inbox: queue.Queue):
+        self.inbox, self.sock = inbox, None
+
+    def __call__(self, addr: tuple[str, int]) -> bool:
+        self.close()
+        try:
+            # ponytail: blocks the audio loop up to DIAL_TIMEOUT_S; a connect thread if a slow far end matters
+            c = socket.create_connection(addr, timeout=DIAL_TIMEOUT_S)
+        except OSError as ex:
+            log.warning("ACCEPT: can't connect to %s:%d: %s", *addr, ex)
+            return False
+        c.settimeout(None)
+        self.sock = c
+        threading.Thread(target=self._read, args=(c,), daemon=True).start()
+        return True
+
+    def _read(self, c):
+        while True:
+            try:
+                d = c.recv(4096)
+            except OSError:
+                d = b""
+            self.inbox.put(("dialed", (c, d)))
+            if not d:
+                return
+
+    def send(self, data: bytes):
+        try:
+            self.sock.sendall(data)
+        except OSError:
+            pass  # its reader sees it go
+
+    def close(self):
+        if self.sock is not None:
+            _shut(self.sock)
+            self.sock = None
+
+
 def _send_cmd(port, host, asker=None):
     """Send the lines the host has queued. Those a command from client `asker` produced are its reply and go to it
     alone, except DISCONNECTED (ABORT's), which is news for every client; with no asker everything is for all."""
@@ -485,6 +552,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
                 on_close=lambda: inbox.put(("gone", None)), multi=True)
     data = _Port((a.host, a.command_port + 1), lambda d, cid: inbox.put(("data", d)), lines=False)
+    host.dial = dialer = _Dialer(inbox)
     kiss = KissServer((a.kiss_address, a.kiss_port), lambda *f: inbox.put(("kiss", f)), link.command)
     threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
@@ -517,6 +585,15 @@ def serve(a, pa, stop: threading.Event | None = None):
                     _send_cmd(cmd, host, cid)  # the reply goes to the client that asked
                 elif kind == "gone":
                     host.client_gone()
+                elif kind == "dialed":
+                    c, d = v
+                    if c is not dialer.sock:
+                        continue  # a closed session's
+                    if d:
+                        host.data_in(d)
+                    else:
+                        log.info("ACCEPT: the far end closed: disconnecting")
+                        engine.session.disconnect()
                 elif kind == "kiss":
                     port, frame, ack = v
                     link.enqueue(frame, port, ack)
@@ -549,7 +626,12 @@ def serve(a, pa, stop: threading.Event | None = None):
             for line in host.out_cmd:
                 cmd.send(line.encode() + b"\r")
             host.out_cmd.clear()
-            data.send(bytes(host.out_data))
+            if dialer.sock is not None:
+                dialer.send(bytes(host.out_data))
+                if engine.session.state not in (S.CONNECTED, S.DISCONNECTING):
+                    dialer.close()  # the session is over
+            else:
+                data.send(bytes(host.out_data))
             host.out_data.clear()
             for port, f in engine.kiss_rx:
                 kiss.broadcast(f, port)
@@ -561,6 +643,7 @@ def serve(a, pa, stop: threading.Event | None = None):
         rig.release()
         cmd.close()
         data.close()
+        dialer.close()
         kiss.shutdown()
         kiss.close_clients()
         kiss.server_close()

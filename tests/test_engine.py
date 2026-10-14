@@ -526,3 +526,122 @@ def test_bcast_commands_and_statuses():
     h.out_cmd.clear()
     h.after_step(False)
     assert not any(c.startswith("BCAST") for c in h.out_cmd)
+
+
+def test_a_station_not_listening_refuses_a_connect_at_once():
+    a, b = Engine("W1AW", seed=61), Engine("K2XYZ", seed=62)
+    a.connect("K2XYZ", 2)
+    t0 = a.now
+    assert link(a, b, 20, 60, lambda: a.session.state == S.CLOSED)
+    assert a.session.close_reason == "refused: not listening"
+    assert a.now - t0 < 10  # the first try's answer: no retries
+    assert b.session.state == S.IDLE
+
+
+def test_a_station_in_a_session_refuses_a_third_and_keeps_its_session():
+    a, b, c = Engine("W1AW", seed=63), Engine("K2XYZ", seed=64), Engine("N0CALL", seed=65)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 20, 60, lambda: a.session.state == S.CONNECTED == b.session.state)
+    c.connect("K2XYZ", 2)
+    rng = np.random.default_rng(66)
+    sigma = np.sqrt((FS / 2) / SNR_REF_BW_HZ / 10 ** 2)
+    outs = [np.zeros(BLOCK)] * 3
+    for _ in range(int(60 * FS / BLOCK)):  # three on one channel
+        outs = [e.step(2.2 * sum(o for j, o in enumerate(outs) if j != i) + rng.normal(0, sigma, BLOCK))[0]
+                for i, e in enumerate((a, b, c))]
+        if c.session.state == S.CLOSED:
+            break
+    assert c.session.close_reason == "refused: busy"
+    assert a.session.state == S.CONNECTED == b.session.state
+    a.session.write(b"still here")
+    assert link(a, b, 20, 120, lambda: b.session.read() == b"still here", seed=67)
+
+
+def _accepting(b, inbox):
+    """b's Host with serve()'s ACCEPT plumbing: its _Dialer, the "dialed" inbox items handled as serve() does."""
+    from data2g.host import _Dialer
+
+    b.dial = dialer = _Dialer(inbox)
+
+    def step():
+        while not inbox.empty():
+            _, (c, d) = inbox.get()
+            if c is dialer.sock:
+                b.data_in(d) if d else b.engine.session.disconnect()
+        b.after_step(bool(b.engine.tx))
+        if dialer.sock is not None:
+            dialer.send(bytes(b.out_data))
+            b.out_data.clear()
+            if b.engine.session.state not in (S.CONNECTED, S.DISCONNECTING):
+                dialer.close()
+    return dialer, step
+
+
+def test_accept_puts_a_session_on_its_own_connection():
+    import queue
+    import socket
+
+    from data2g.host import Host
+
+    srv = socket.create_server(("127.0.0.1", 0))
+    a, b = Host(Engine("W1AW", seed=71)), Host(Engine("K2XYZ", seed=72))
+    b.command(f"ACCEPT :{srv.getsockname()[1]}")
+    assert b.out_cmd == ["OK"] and b.engine.session.state == S.LISTEN
+    dialer, b_step = _accepting(b, queue.Queue())
+    a.command("CONNECT W1AW K2XYZ")
+
+    def pump(cond):
+        def f():
+            a.after_step(bool(a.engine.tx))
+            b_step()
+            return cond()
+        return f
+    assert link(a.engine, b.engine, 20, 60, pump(lambda: "CONNECTED W1AW K2XYZ 2300" in a.out_cmd))
+    conn, _ = srv.accept()  # made when the CONNECT was answered
+    conn.settimeout(0.01)
+    a.data_in(b"to the server")
+    got = bytearray()
+
+    def server_got():
+        try:
+            got.extend(conn.recv(100))
+        except TimeoutError:
+            pass
+        return got == b"to the server"
+    assert link(a.engine, b.engine, 20, 120, pump(server_got), seed=73)
+    assert not b.out_data  # nothing went to the data port
+    conn.sendall(b"from the server")
+    assert link(a.engine, b.engine, 20, 120, pump(lambda: bytes(a.out_data) == b"from the server"), seed=74)
+    conn.close()  # the server hangs up: the session ends
+    assert link(a.engine, b.engine, 20, 60, pump(lambda: "DISCONNECTED" in a.out_cmd and dialer.sock is None),
+                seed=75)
+    assert b.engine.session.state == S.LISTEN  # still accepting
+    srv.close()
+
+
+def test_accept_refuses_a_connect_it_cannot_route():
+    import queue
+    import socket
+
+    from data2g.host import Host
+
+    srv = socket.create_server(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    srv.close()  # nothing there
+    a, b = Host(Engine("W1AW", seed=76)), Host(Engine("K2XYZ", seed=77))
+    for bad in ("ACCEPT", "ACCEPT 8301", "ACCEPT :x", "ACCEPT :0", "ACCEPT :70000"):
+        b.command(bad)
+    assert b.out_cmd == ["WRONG"] * 5
+    b.out_cmd.clear()
+    b.command(f"ACCEPT 127.0.0.1:{port}")
+    _, b_step = _accepting(b, queue.Queue())
+    a.command("CONNECT W1AW K2XYZ")
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b_step()
+        return a.engine.session.state == S.CLOSED
+    assert link(a.engine, b.engine, 20, 60, pump)
+    assert a.engine.session.close_reason == "refused: refused by host"
+    assert "DISCONNECTED" in a.out_cmd and not any(x.startswith("CONNECTED") for x in a.out_cmd + b.out_cmd)

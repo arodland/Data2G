@@ -7,6 +7,7 @@
 // - a TxBurst crosses as data2g.arq.link.TxBurst / Slot;
 // - logging goes to Python's "data2g.link" / "data2g.session" loggers.
 
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -472,14 +473,16 @@ void bind_arq_link(py::module_& m) {
     };
     py::class_<Session, std::shared_ptr<Session>>(a, "Session", py::dynamic_attr())
         .def(py::init([](std::string call, py::object policy, double t_turn, py::object rng, std::vector<std::string> aliases,
-                         double stats_interval_s) {
+                         double stats_interval_s, std::function<bool(const std::string&, const std::string&)> accept_connect) {
                  std::shared_ptr<Rng> r;
                  if (!rng.is_none()) r = std::make_shared<PyRng>(rng);
                  auto* s = new PySession(std::move(call), policy_of(std::move(policy)), t_turn, r, std::move(aliases), stats_interval_s);
+                 s->accept_connect = std::move(accept_connect);
                  return static_cast<Session*>(s);
              }),
              py::arg("call"), py::arg("policy"), py::arg("t_turn") = 1.0, py::arg("rng") = py::none(),
-             py::arg("aliases") = std::vector<std::string>{}, py::arg("stats_interval_s") = 60.0)
+             py::arg("aliases") = std::vector<std::string>{}, py::arg("stats_interval_s") = 60.0,
+             py::arg("accept_connect") = py::none())
         .def_readwrite("call", &Session::call)
         .def_property_readonly("policy", [](const Session& s) { return policy_py(s.policy); })
         .def_readwrite("t_turn", &Session::t_turn)
@@ -507,6 +510,7 @@ void bind_arq_link(py::module_& m) {
         .def_readwrite("chat", &Session::chat)  // Python's attribute: set_chat() is the one that reaches the station
         .def_property_readonly("aliases", [](const Session& s) { return py::tuple(py::cast(s.aliases)); })
         .def_readwrite("stats_interval_s", &Session::stats_interval_s)
+        .def_readwrite("accept_connect", &Session::accept_connect)
         .def_property_readonly("_out", [](const Session& s) { return burst_py(s.out); })
         .def_readonly("_due", &Session::due)
         .def_readonly("_deadline", &Session::deadline)

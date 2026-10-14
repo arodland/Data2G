@@ -216,6 +216,8 @@ public:
 
     const std::string& call() const { return call_; }
     const std::vector<std::string>& aliases() const { return aliases_; }
+    // Session::accept_connect, for every session from the next on (the host's ACCEPT)
+    std::function<bool(const std::string&, const std::string&)> accept_connect;
     Session& session() { return *session_; }
     const std::shared_ptr<Session>& session_ptr() const { return session_; }
     double now() const { return static_cast<double>(n_) / config::FS; }

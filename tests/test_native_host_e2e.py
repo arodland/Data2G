@@ -189,6 +189,43 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         for c in (a, b):
             assert any(x.startswith("BUFFER") for x in c.lines) and "PTT ON" in c.lines and "BUSY ON" in c.lines
 
+        # ACCEPT: B's session data on a connection B makes to a server; the server hanging up ends it
+        srv = socket.create_server(("127.0.0.1", 0))
+        srv.settimeout(0.05)
+        a.lines.clear()
+        b.lines.clear()
+        b.got.clear()
+        b.send(f"ACCEPT :{srv.getsockname()[1]}")
+        a.send("CONNECT A B")
+        wait([a, b], lambda: "CONNECTED A B 2300" in a.lines, 60, "CONNECTED (ACCEPT)")
+        conn, _ = srv.accept()
+        conn.settimeout(0.05)
+        a.data.sendall(b"to the server")
+        got = bytearray()
+
+        def server_got():
+            try:
+                got.extend(conn.recv(100))
+            except socket.timeout:
+                pass
+            return got == b"to the server"
+        wait([a, b], server_got, 120, "data at the ACCEPT server")
+        conn.sendall(b"from the server")
+        a.got.clear()
+        wait([a, b], lambda: bytes(a.got) == b"from the server", 120, "data from the ACCEPT server")
+        assert not b.got  # nothing on B's data port
+        conn.close()
+        wait([a, b], lambda: "DISCONNECTED" in a.lines, 60, "DISCONNECTED (server hung up)")
+        # nothing there now: B refuses the next call at once (CONNECT_NAK), A stops dialing
+        srv.close()
+        a.lines.clear()
+        t_nak = time.monotonic()
+        a.send("CONNECT A B")
+        wait([a, b], lambda: "DISCONNECTED" in a.lines, 30, "DISCONNECTED (refused)")
+        assert not any(x.startswith("CONNECTED") for x in a.lines)
+        t_nak = time.monotonic() - t_nak
+        b.send("LISTEN OFF")
+
         # KISS, between sessions: a UI frame each way
         ka = socket.create_connection(("127.0.0.1", ports["A"] + 2), timeout=0.1)
         kb = socket.create_connection(("127.0.0.1", ports["B"] + 2), timeout=0.1)
@@ -229,7 +266,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
             print(f"--- host {n} stderr ---\n{logs[n].read_text()[-4000:]}")
     text = {n: logs[n].read_text() for n in logs}
     print(f"\n{worker}: connect {t_conn:.1f} s; 2 kB each way {t_data:.1f} s "
-          f"({8 * 2 * 2048 / t_data:.0f} bit/s both ways); KISS both ways {t_kiss:.1f} s")
+          f"({8 * 2 * 2048 / t_data:.0f} bit/s both ways); ACCEPT refusal {t_nak:.1f} s; KISS both ways {t_kiss:.1f} s")
     for n, t in text.items():
         bad = [line for line in t.splitlines() if BAD.search(line)]
         assert not bad, (n, bad)

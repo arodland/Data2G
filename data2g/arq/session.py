@@ -56,6 +56,10 @@ log = logging.getLogger("data2g.session")
 
 IDLE, LISTEN, CONNECTING, CONNECTED, DISCONNECTING, CLOSED = (
     "idle", "listen", "connecting", "connected", "disconnecting", "closed")
+# CONNECT_NAK reasons: the caller stops dialing on any of them
+NAK_VERSION, NAK_NOT_LISTENING, NAK_BUSY, NAK_REFUSED = 1, 2, 3, 4
+NAK_NAMES = {NAK_VERSION: "version", NAK_NOT_LISTENING: "not listening", NAK_BUSY: "busy",
+             NAK_REFUSED: "refused by host"}
 
 
 def session_key(caller: str, callee: str, nonce: int) -> int:
@@ -94,8 +98,10 @@ class Session:
     _want_disc: bool = False
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
+    _nak: L.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     chat: bool = False  # CHAT ON: set with set_chat()
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
+    accept_connect: object = None  # (caller, callee) -> bool, before a CONNECT is answered: False refuses it (host ACCEPT)
     stats_interval_s: float = 60.0  # throughput line in the log this often while connected (0: off)
     _now: float = 0.0  # the latest time the caller gave
     _stats_since: float = 0.0
@@ -199,6 +205,9 @@ class Session:
     def on_tx_end(self, burst: L.TxBurst, now: float):
         """Arm the reply timer (only the caller retries, §6, and a callee's
         DISC), or the callee's wake."""
+        if burst is self._nak:
+            self._nak = None
+            return
         if (self._master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
             hold = getattr(self.policy, "reply_hold", None)
@@ -405,18 +414,15 @@ class Session:
         """Decode rx as a session frame addressed to this station, if it is one.
         What each state accepts:
           station exists   DISC / DISC_ACK from the peer under the session key
-          callee           a repeated CONNECT (its CONNECT_ACK was lost), key 0
-          LISTEN           CONNECT, key 0
-          CONNECTING       CONNECT_ACK / CONNECT_NAK, key 0"""
+          CONNECTING       CONNECT_ACK / CONNECT_NAK, key 0
+          any              CONNECT, key 0: answered, or refused with a CONNECT_NAK
+        A decode is memoised per slot (ModemRx), so each extra mask is a CRC check."""
         tries = []
         if self.station is not None:
             tries.append((self.station.peer, self.station.key))
-            if not self.station.master:
-                tries.append((0, 0))
-        elif self.state == LISTEN:
-            tries.append((0, 0))
         elif self.state == CONNECTING:
             tries.append((1, 0))
+        tries.append((0, 0))
         if (0, 0) in tries and self._compact(rx.submode):
             p = rx.decode(0, L.COMPACT_CONNECT, 0, None)
             if p is not None:
@@ -462,7 +468,7 @@ class Session:
             nonce = int.from_bytes(body[18:20], "big")
             if callee != self.call.upper() and callee not in self.aliases:
                 return
-            if self.station is not None and nonce == self._nonce:
+            if self.station is not None and not self._master and nonce == self._nonce:
                 self._answer_mode = f["mode"]
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
@@ -475,10 +481,12 @@ class Session:
                 self._close("peer reconnected", now=now)
                 self.state, self._want_disc, self._sent_disc_ack, self._tries = LISTEN, False, False, 0
             if self.state != LISTEN:
-                return
+                busy = self.state in (CONNECTING, CONNECTED, DISCONNECTING)
+                return self._refuse(body, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
             if body[1] != VERSION:
-                self._queue(self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + b"\x01", f["mode"]), now)
-                return
+                return self._refuse(body, f["mode"], NAK_VERSION, now)
+            if self.accept_connect is not None and not self.accept_connect(caller, callee):
+                return self._refuse(body, f["mode"], NAK_REFUSED, now)
             self.call = callee  # the call it dialed (the session key derives from it)
             self.peer, self._nonce, self.cap = caller, nonce, min(body[20], self.cap)
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
@@ -500,7 +508,7 @@ class Session:
             self._queue(self.station.build(), now)
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
             if int.from_bytes(body[1:3], "big") == self._nonce:
-                self._close("refused")
+                self._close(f"refused: {NAK_NAMES.get(body[3], f'reason {body[3]}')}")
         elif sub == F.DISC and self.station is not None and key == self.station.key:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
@@ -508,6 +516,14 @@ class Session:
                         final=self._session_burst(self.station.direction, key, bytes([F.DISC_ACK]), f["mode"]), now=now)
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
             self._close("disconnected")
+
+    def _refuse(self, body: bytes, mode: str, reason: int, now: float):
+        """A CONNECT_NAK for this CONNECT, unless a burst of the session's own
+        is queued (that goes; the caller's next try is refused instead)."""
+        log.info("refusing CONNECT from %s: %s", F.unpack_call(body[2:10]), NAK_NAMES[reason])
+        if self._out is None:
+            self._nak = self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + bytes([reason]), mode)
+            self._queue(self._nak, now)
 
     def _accept_burst(self) -> L.TxBurst:
         body = bytes([F.CONNECT_ACK]) + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)])

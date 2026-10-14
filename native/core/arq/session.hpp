@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -36,6 +37,9 @@ inline constexpr double WAKE_JITTER_S = 1.0;
 inline constexpr int WAKE_TRIES = 2;
 inline constexpr int CHAT_WAKE_TRIES = 6;
 inline constexpr double REPEAT_MAX_S = 3.0;
+// CONNECT_NAK reasons: the caller stops dialing on any of them
+inline constexpr int NAK_VERSION = 1, NAK_NOT_LISTENING = 2, NAK_BUSY = 3, NAK_REFUSED = 4;
+const char* nak_name(int reason);  // nullptr for an unknown one
 
 // random.Random's two draws the session makes. Not bit-exact with Python's
 // by default; a binding passes Python's own generator to keep seeded runs.
@@ -95,11 +99,14 @@ public:
     std::string close_reason;
     bool chat = false;
     std::vector<std::string> aliases;
+    // before a CONNECT is answered: false refuses it (host ACCEPT)
+    std::function<bool(const std::string& caller, const std::string& callee)> accept_connect;
     double stats_interval_s;
     SessionTuning tune;
 
     std::int64_t nonce = 0;
     TxBurstPtr out;
+    TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
     std::optional<double> due, deadline, build_at;
     std::optional<std::string> answer_mode;
     int tries = 0;
@@ -158,6 +165,7 @@ private:
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();
     TxBurstPtr accept_burst();
+    void refuse(const Bytes& body, const std::string& mode, int reason, double now);
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
     void on_session_frame(const Frame& f, double now);
