@@ -178,6 +178,7 @@ py::dict received_dict(const modem::Received& r) {
     d["p0"] = r.p0;
     d["shift"] = r.shift;
     d["steps"] = np(r.steps);
+    d["slips"] = np(r.slips);
     d["phi_ref"] = r.phi_ref;
     d["support"] = py::make_tuple(r.support.first, r.support.second);
     d["preamble_start"] = r.preamble_start;
@@ -278,12 +279,14 @@ void bind_modem(py::module_& m) {
 
     d.def("bin_phase_step", [](const In<cd>& h) { return mo::bin_phase_step(view(h)); });
     d.def("demod_frames", [](const In<cd>& z, std::int64_t p, int n_f, int shift, double phi_ref,
-                             const std::optional<In<double>>& steps_in, const std::string& band) {
+                             const std::optional<In<double>>& steps_in, const std::string& band,
+                             const std::optional<In<std::int64_t>>& slips_in) {
         const std::vector<double> si = steps_in ? vec(*steps_in) : std::vector<double>();
-        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band);
-        return py::make_tuple(np3(f.raw, config::SYMS_PER_FRAME), np(f.hp), np(f.steps));
+        const std::vector<std::int64_t> sl = slips_in ? vec(*slips_in) : std::vector<std::int64_t>();
+        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl);
+        return py::make_tuple(np3(f.raw, config::SYMS_PER_FRAME), np(f.hp), np(f.steps), np(f.slips));
     }, py::arg("z"), py::arg("p"), py::arg("n_f"), py::arg("shift"), py::arg("phi_ref"),
-       py::arg("steps_in") = py::none(), py::arg("band") = "w");
+       py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none());
     d.def("read_header", [](const In<cd>& z, std::int64_t start, const std::string& band, const py::object& accept) {
         const auto a = accept_of(accept);
         return header_dict(mo::read_header(view(z), start, band, a ? &*a : nullptr));

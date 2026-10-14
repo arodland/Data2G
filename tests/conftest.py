@@ -842,8 +842,8 @@ def _modem_substitutions(native):
         return full[:, config.NCP:], full
 
     @guarded("_demod_frames")
-    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w"):
-        return N.demod_frames(z, int(p), int(n_f), int(shift), float(phi_ref), steps_in, band)
+    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w", slips_in=None):
+        return N.demod_frames(z, int(p), int(n_f), int(shift), float(phi_ref), steps_in, band, slips_in)
 
     @guarded("_read_header")
     def _read_header(z, start, band="w", accept=None):

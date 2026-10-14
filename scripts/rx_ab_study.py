@@ -65,7 +65,8 @@ def pilots(y, r):
     n_f = r["n_cw"] * spec.frames_per_cw
     n_air = n_f + (modem.copy_frame(spec.sync_band, n_f) is not None)
     z = freq_correct(to_baseband(y), r["cfo"])
-    _, hp, _ = modem._demod_frames(z, r["p0"], n_air, r["shift"], r["phi_ref"], steps_in=r["steps"], band=spec.band)
+    _, hp, _, _ = modem._demod_frames(z, r["p0"], n_air, r["shift"], r["phi_ref"], steps_in=r["steps"], band=spec.band,
+                                     slips_in=r.get("slips"))
     return hp
 
 
