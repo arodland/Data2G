@@ -129,6 +129,8 @@ void accept() {
     const auto local = host::parse_addr(":8400"), named = host::parse_addr("[::1]:22");
     check::is_true(local && local->host == "127.0.0.1" && local->port == 8400, ":port is localhost");
     check::is_true(named && named->host == "::1" && named->port == 22, "[host]:port");
+    const auto from = host::parse_addr(":8400", "192.0.2.7");
+    check::is_true(from && from->host == "192.0.2.7", ":port is the command client's host");
 
     Pair p(seeded(21), seeded(22));
     std::vector<int> dialed;

@@ -7,7 +7,7 @@
 //
 // Commands: MYCALL call..., LISTEN ON|OFF|CQ, ACCEPT [host]:port (LISTEN ON,
 // each session's data over a connection made to host:port, default
-// 127.0.0.1: host.py), CONNECT from to, DISCONNECT,
+// the command client's own: host.py), CONNECT from to, DISCONNECT,
 // ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
 // and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
 // [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
@@ -37,7 +37,7 @@ struct Addr {
     int port;
 };
 // ACCEPT's [host]:port, or nullopt.
-std::optional<Addr> parse_addr(std::string_view s);
+std::optional<Addr> parse_addr(std::string_view s, std::string_view default_host = "127.0.0.1");
 
 // VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 bool ignored(std::string_view cmd);
@@ -55,7 +55,8 @@ public:
     explicit Host(arq::Engine& engine, std::optional<int> buffer_credit = std::nullopt);
     virtual ~Host() = default;
 
-    void command(std::string_view line);
+    // `peer`: the address the command came from (ACCEPT's default host).
+    void command(std::string_view line, std::string_view peer = "127.0.0.1");
     // The command client's TCP connection closed: it owned the session.
     void client_gone();
     void data_in(arq::ByteView data);

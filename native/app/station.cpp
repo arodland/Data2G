@@ -504,6 +504,18 @@ struct Station::Port : QObject {
         for (auto* c : srv_.findChildren<QTcpSocket*>()) c->disconnect(this);
     }
 
+    // Client `id`'s address (127.0.0.1 if it has gone), IPv4 without its IPv6 mapping.
+    std::string peer(std::uint64_t id) const {
+        for (const auto& [c, cl] : clients_) {
+            if (cl.id != id) continue;
+            bool v4 = false;
+            const QHostAddress a = c->peerAddress();
+            const quint32 ip = a.toIPv4Address(&v4);
+            return (v4 ? QHostAddress(ip) : a).toString().toStdString();
+        }
+        return "127.0.0.1";
+    }
+
     // To every client, or to one by id (nowhere if it has gone).
     void send(const QByteArray& data, std::uint64_t to = 0) {
         if (data.isEmpty()) return;
@@ -1192,9 +1204,9 @@ void Station::start() {
                     std::string text;  // ascii, as host.py decodes it (others replaced)
                     for (unsigned char c : line) text += c < 128 ? static_cast<char>(c) : '?';
                     logf(INFO, "command: %s", text.c_str());
-                    post([this, text, client] {
+                    post([this, text, client, peer = cmd_->peer(client)] {
                         flush();  // what was already pending goes first, to everyone
-                        host_->command(text);
+                        host_->command(text, peer);
                         flush(client);  // the reply goes to the client that asked
                     });
                 },

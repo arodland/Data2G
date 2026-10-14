@@ -634,6 +634,10 @@ def test_accept_refuses_a_connect_it_cannot_route():
         b.command(bad)
     assert b.out_cmd == ["WRONG"] * 5
     b.out_cmd.clear()
+    b.command("ACCEPT :8400", "192.0.2.7")  # the default host: where the command came from
+    assert b.accept_addr == ("192.0.2.7", 8400)
+    b.command("ACCEPT 10.0.0.1:8400", "192.0.2.7")
+    assert b.accept_addr == ("10.0.0.1", 8400)
     b.command(f"ACCEPT 127.0.0.1:{port}")
     _, b_step = _accepting(b, queue.Queue())
     a.command("CONNECT W1AW K2XYZ")

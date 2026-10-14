@@ -383,7 +383,7 @@ As built (data2g/arq/policy.py):
 - **Commands:** MYCALL, LISTEN ON/OFF, CONNECT from to, DISCONNECT, ABORT,
   BW500 / BW2300 / BW2750, and CQFRAME call bw.
   - **ACCEPT [host]:port** (Data2G) is LISTEN ON with the session's data on a
-    connection Data2G makes to host:port (default 127.0.0.1) when it answers a call,
+    connection Data2G makes to host:port (default: the address the command client connected from) when it answers a call,
     instead of the data port. One session at a time, as with LISTEN.
     - If the connection fails (1 s timeout), the call is refused (CONNECT_NAK 4).
     - When the far end closes it, the session disconnects gracefully.

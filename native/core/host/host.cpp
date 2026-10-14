@@ -83,7 +83,7 @@ std::vector<std::string> mode_lines(int cap) {
     return out;
 }
 
-std::optional<Addr> parse_addr(std::string_view s) {
+std::optional<Addr> parse_addr(std::string_view s, std::string_view default_host) {
     const auto i = s.rfind(':');
     if (i == std::string_view::npos) return std::nullopt;
     const auto port = s.substr(i + 1);
@@ -93,7 +93,7 @@ std::optional<Addr> parse_addr(std::string_view s) {
     if (n < 1 || n > 65535) return std::nullopt;
     std::string host(s.substr(0, i));
     if (host.size() >= 2 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
-    return Addr{host.empty() ? "127.0.0.1" : host, n};
+    return Addr{host.empty() ? std::string(default_host) : host, n};
 }
 
 Host::Host(arq::Engine& e, std::optional<int> credit) : engine(e), buffer_credit(credit) {
@@ -148,7 +148,7 @@ std::optional<std::string> Host::bcast_command(const std::vector<std::string>& a
     return std::nullopt;
 }
 
-void Host::command(std::string_view line) {
+void Host::command(std::string_view line, std::string_view peer) {
     const auto words = split(line);
     if (words.empty()) return;
     const std::string cmd = upper(words[0]);
@@ -168,9 +168,9 @@ void Host::command(std::string_view line) {
         listening = a0 == "ON";
         accept_addr.reset();
         e.listen(listening);
-    } else if (cmd == "ACCEPT" && args.size() == 1 && parse_addr(args[0])) {
+    } else if (cmd == "ACCEPT" && args.size() == 1 && parse_addr(args[0], peer)) {
         listening = true;
-        accept_addr = parse_addr(args[0]);
+        accept_addr = parse_addr(args[0], peer);
         e.listen();
     } else if (cmd == "CONNECT" && args.size() == 2) {
         try {

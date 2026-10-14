@@ -1193,8 +1193,8 @@ def _host_substitutions(native):
             self.out_data += self._n.take_data()
             return result
 
-        def command(self, line):
-            return self._take(self._n.command(line))
+        def command(self, line, peer="127.0.0.1"):
+            return self._take(self._n.command(line, peer))
 
         def client_gone(self):
             return self._take(self._n.client_gone())

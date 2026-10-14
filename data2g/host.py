@@ -13,7 +13,7 @@ replay (scripts/replay.py).
 
 Commands: MYCALL call, LISTEN ON|OFF, ACCEPT [host]:port (Data2G: LISTEN ON,
 but each session's data goes over a connection Data2G makes to host:port,
-default 127.0.0.1, instead of the data port; a connect is refused if that
+default the command client's own, instead of the data port; a connect is refused if that
 fails, and the session disconnects when the far end closes it; LISTEN ON|OFF
 ends it), CONNECT from to, DISCONNECT, ABORT,
 CQFRAME call bw (a CQ frame at 500 | 1200 | 2300 | 2750 Hz: no session;
@@ -108,7 +108,8 @@ class Host:
         self._mode = None
         self._alive = 0.0  # engine time of the last IAMALIVE
 
-    def command(self, line: str):
+    def command(self, line: str, peer: str = "127.0.0.1"):
+        """`peer`: the address the command came from (ACCEPT's default host)."""
         words = line.strip().split()
         if not words:
             return
@@ -125,7 +126,7 @@ class Host:
         elif cmd == "LISTEN" and args and args[0].upper() in ("ON", "OFF"):
             self.listening, self.accept_addr = args[0].upper() == "ON", None
             e.listen(self.listening)
-        elif cmd == "ACCEPT" and len(args) == 1 and (addr := _addr(args[0])):
+        elif cmd == "ACCEPT" and len(args) == 1 and (addr := _addr(args[0], peer)):
             self.listening, self.accept_addr = True, addr
             e.listen()
         elif cmd == "CONNECT" and len(args) == 2:
@@ -282,12 +283,12 @@ class Host:
             self.out_cmd.append(f"BUFFER {buffered}")
 
 
-def _addr(s: str) -> tuple[str, int] | None:
+def _addr(s: str, default_host: str) -> tuple[str, int] | None:
     """ACCEPT's [host]:port, or None."""
     host, sep, port = s.rpartition(":")
     if not sep or not port.isdigit() or not 0 < int(port) < 65536:
         return None
-    return host.strip("[]") or "127.0.0.1", int(port)
+    return host.strip("[]") or default_host, int(port)
 
 
 class Interpolator:
@@ -454,6 +455,13 @@ class _Port:
                 if line.strip():
                     self.on_input(line.decode("ascii", "replace"), cid)
 
+    def peer(self, cid: int) -> str:
+        """Client `cid`'s address (127.0.0.1 if it has gone)."""
+        try:
+            return self.clients[cid].getpeername()[0]
+        except (KeyError, OSError):
+            return "127.0.0.1"
+
     def send(self, data: bytes, to: int | None = None):
         if not data:
             return
@@ -581,7 +589,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                     line, cid = v
                     log.info("command: %s", line)
                     _send_cmd(cmd, host)  # what was already pending goes first, to everyone
-                    host.command(line)
+                    host.command(line, cmd.peer(cid))
                     _send_cmd(cmd, host, cid)  # the reply goes to the client that asked
                 elif kind == "gone":
                     host.client_gone()
