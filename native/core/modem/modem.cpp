@@ -481,8 +481,64 @@ double bin_phase_step(std::span<const cd> h) {
     return std::arg(dot_conj(h.subspan(1), h.first(h.size() - 1)));
 }
 
+namespace {
+
+constexpr int64_t SLIP_MIN = 40, SLIP_MAX = 240;  // modem.py's
+constexpr double SLIP_TRIGGER = 0.5, SLIP_ACCEPT = 0.45;
+
+// modem._coherence: |<ref, h>| / (|ref| |h|)
+double coherence(std::span<const cd> h, std::span<const cd> ref) {
+    cd acc{};
+    double eh = 0.0, er = 0.0;
+    for (size_t k = 0; k < h.size(); ++k) {
+        acc += h[k] * std::conj(ref[k]);
+        eh += std::norm(h[k]);
+        er += std::norm(ref[k]);
+    }
+    return std::abs(acc) / (std::sqrt(eh) * std::sqrt(er) + 1e-30);
+}
+
+// modem._find_slip. Every offset's pilot by a sliding DFT (one update per
+// carrier a sample, not a window's demod): cheap enough for a Pi.
+int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const cd> prev, const waveform::Band& b) {
+    if (coherence(over_pilot(b.demod_window(z, p + NCP, DEMOD_BACKOFF), b), prev) >= SLIP_TRIGGER) return 0;
+    const auto zlen = static_cast<int64_t>(z.size());
+    const auto at_z = [&](int64_t i) { return i < zlen ? z[static_cast<size_t>(i)] : cd{}; };
+    const int64_t lo = std::max(-SLIP_MAX, -p);
+    const auto n_off = static_cast<size_t>(SLIP_MAX - lo + 1);
+    const size_t nc = static_cast<size_t>(b.nc());
+    std::vector<cd> rot(nc), x, h(nc);
+    for (size_t k = 0; k < nc; ++k) rot[k] = waveform::phasor(b.bb[k], 1);
+    std::vector<double> score(n_off, 0.0);
+    std::vector<std::vector<double>> at;
+    for (int j = 0; j <= std::min(2, n_left); ++j) {
+        const int64_t a = p + j * FRAME_SAMPLES + NCP - DEMOD_BACKOFF + lo;  // offset lo's window
+        x = b.demod_window(z, a, 0);
+        auto& c = at.emplace_back(n_off);
+        for (size_t i = 0; i < n_off; ++i) {
+            if (i) {
+                const int64_t s = a + static_cast<int64_t>(i) - 1;
+                const cd d = (2.0 / M) * (at_z(s + M) - at_z(s));
+                for (size_t k = 0; k < nc; ++k) x[k] = (x[k] + d) * rot[k];
+            }
+            for (size_t k = 0; k < nc; ++k) h[k] = x[k] / b.pilot[k];
+            c[i] = coherence(h, prev);
+            score[i] += c[i];
+        }
+    }
+    size_t best = n_off;
+    for (size_t i = 0; i < n_off; ++i)
+        if (std::abs(lo + static_cast<int64_t>(i)) >= SLIP_MIN && (best == n_off || score[i] > score[best])) best = i;
+    if (best == n_off) return 0;
+    for (const auto& c : at)
+        if (c[best] < std::max(2 * c[static_cast<size_t>(-lo)], SLIP_ACCEPT)) return 0;
+    return lo + static_cast<int64_t>(best);
+}
+
+}  // namespace
+
 Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double phi_ref,
-                    std::span<const double> steps_in, std::string_view band) {
+                    std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in) {
     const auto& b = ob(band);
     const size_t nc = static_cast<size_t>(b.nc());
     phi_ref = phi_ref + 2 * PI * RS * shift / FS;  // the shift's own slope
@@ -491,10 +547,19 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
     Frames out;
     Mat<cd> raw(static_cast<size_t>(n_f + 1) * SYMS_PER_FRAME, nc);
     std::vector<double> steps(static_cast<size_t>(n_f + 1), 0.0), powers;
+    std::vector<std::int64_t> slips(static_cast<size_t>(n_f + 1), 0);
+    const bool search = steps_in.empty() && slips_in.empty();
     double tau_ema = 0.0;
     int total = 0;
     for (int f = 0; f <= n_f; ++f) {
         const int n_s = f < n_f ? SYMS_PER_FRAME : 1;
+        auto& slip = slips[static_cast<size_t>(f)];
+        if (!slips_in.empty()) slip = slips_in[static_cast<size_t>(f)];
+        else if (search && f > 0 && f < n_f) {
+            const auto* prev = raw[static_cast<size_t>((f - 1) * SYMS_PER_FRAME)];
+            slip = find_slip(z, p, n_f - f, over_pilot({prev, prev + nc}, b), b);
+        }
+        p += slip;
         if (p + n_s * NSYM > zlen) throw SyncError("burst truncated");
         for (int s = 0; s < n_s; ++s) {
             const auto w = b.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
@@ -533,6 +598,7 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
     raw.data.resize(raw.rows * nc);
     out.raw = std::move(raw);
     out.steps = std::move(steps);
+    out.slips = std::move(slips);
     return out;
 }
 
@@ -991,13 +1057,16 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     for (const auto& run : runs)
         for (size_t i = 0; i + 1 < run.size(); ++i) dsum += dot_conj(run[i + 1], run[i]);
     const double coarse = std::arg(dsum) / (2 * PI * NSYM / FS);
-    const double fine = equalizer::residual_cfo(demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db).hp);
+    // slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
+    auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db);
+    const double fine = equalizer::residual_cfo(first.hp);
+    const auto slips = std::move(first.slips);
     const double cfo_res = resolve_alias(fine, coarse);
     z = waveform::freq_correct(z, cfo_res);
     const auto bbd = bb_of(db);
-    auto support = equalizer::delay_support(demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db).hp, bbd);
+    auto support = equalizer::delay_support(demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips).hp, bbd);
     const int shift = equalizer::window_shift(support);
-    auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db);
+    auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips);
     support = {support.first - shift, support.second - shift};
     const auto clip = clip_consts(spec);
     Received out;
@@ -1025,6 +1094,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     out.p0 = hd.p0;
     out.shift = shift;
     out.steps = std::move(fr.steps);
+    out.slips = slips;
     out.phi_ref = phi_ref;
     out.support = support;
     out.preamble_start = hd.start;

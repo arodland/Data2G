@@ -195,13 +195,27 @@ def test_search_parts_match(native, py):
     close(native.modem.copy_llr(z, hd["p0"] + config.FRAME_SAMPLES, "w", 4),
           py._copy_llr(z, hd["p0"] + config.FRAME_SAMPLES, "w", 4))
     assert native.modem.copy_llr(z, len(z), "w", 4) is None
-    raw, hp, steps = py._demod_frames(z, hd["p0"], 9, 3, 0.4)
-    nraw, nhp, nsteps = native.modem.demod_frames(z, hd["p0"], 9, 3, 0.4)
+    raw, hp, steps, slips = py._demod_frames(z, hd["p0"], 9, 3, 0.4)
+    nraw, nhp, nsteps, nslips = native.modem.demod_frames(z, hd["p0"], 9, 3, 0.4)
     np.testing.assert_array_equal(nsteps, steps)
+    np.testing.assert_array_equal(nslips, slips)
     close(nraw, raw)
     close(nhp, hp)
     replay = np.array([0, 1, 1, 0, -1, 0, 0, 2, 2, 2], float)
     close(native.modem.demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0], py._demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0])
+    # a slip found (the sliding DFT against the matrix) and replayed
+    zs = modem.to_baseband(_burst("qpsk-r1/3", 2, 15.0, seed=3))
+    shd, _, zs = py._best_header(zs)
+    cut = shd["p0"] + 4 * config.FRAME_SAMPLES + 300  # after frame 4's pilot
+    zs = np.concatenate([zs[:cut], np.zeros(85), zs[cut:]])
+    phi = py._bin_phase_step(shd["h_pre"])
+    raw, hp, steps, slips = py._demod_frames(zs, shd["p0"], 8, 0, phi)
+    nraw, nhp, nsteps, nslips = native.modem.demod_frames(zs, shd["p0"], 8, 0, phi)
+    assert slips[5] == 85 and not np.delete(slips, 5).any()
+    np.testing.assert_array_equal(nslips, slips)
+    close(nraw, raw)
+    close(native.modem.demod_frames(zs, shd["p0"], 8, 0, phi, None, "w", slips)[0],
+          py._demod_frames(zs, shd["p0"], 8, 0, phi, None, "w", slips)[0])
     est = py.data_channel(hp, (-3, 20), "w", 0.1, None, None, 8)
     nest = native.modem.data_channel(hp, (-3, 20), "w", 0.1, None, None, 8)
     for k in ("h", "mse", "n0", "gain", "clip_ratio"):

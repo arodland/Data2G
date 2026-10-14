@@ -87,10 +87,13 @@ struct Frames {
     Mat<cd> raw;  // (n_f * 6, nc): frame f, symbol s at row f * 6 + s
     Mat<cd> hp;   // (n_f + 1, nc) pilots, the closing one last
     std::vector<double> steps;  // (n_f + 1,)
+    std::vector<std::int64_t> slips;  // (n_f + 1,): each frame's timing jump (modem._find_slip), samples
 };
-// steps_in: replay a previous run's steps. Throws SyncError past the buffer.
+// steps_in / slips_in: replay a previous run's steps / slips (searched for
+// only when neither is given). Throws SyncError past the buffer.
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
-                    std::span<const double> steps_in = {}, std::string_view band = "w");
+                    std::span<const double> steps_in = {}, std::string_view band = "w",
+                    std::span<const std::int64_t> slips_in = {});
 
 struct HeaderRead {
     Header hdr;
@@ -184,6 +187,7 @@ struct Received {
     std::int64_t p0 = 0;
     int shift = 0;
     std::vector<double> steps;
+    std::vector<std::int64_t> slips;  // Frames::slips
     double phi_ref = 0.0;
     equalizer::Support support;
     std::int64_t preamble_start = 0;

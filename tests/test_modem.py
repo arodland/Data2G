@@ -126,6 +126,34 @@ def test_zero_payloads_decode_like_random_ones():
         assert b.payloads == pl and all(b.crc_ok)
 
 
+@pytest.mark.parametrize("slip", [85, -64])
+def test_timing_slip_recovered(slip):
+    """Samples inserted (a sender's playback underrun: recordings/20261013-234857
+    had 85 of silence, a 512-frame period at 48 kHz) or dropped mid-burst: the
+    frames after are demodulated where they moved to, and the burst decodes."""
+    spec = SUBMODES["qpsk-r1/5"]
+    sent = _payloads(spec, 3, 5)
+    x = np.concatenate([np.zeros(3000), modem.modulate(sent, spec), np.zeros(3000)])
+    at = len(x) // 2
+    x = np.concatenate([x[:at], np.zeros(slip), x[at:]]) if slip > 0 else np.concatenate([x[:at], x[at - slip:]])
+    r = modem.receive(hfchannel.apply_channel(x, snr_db=10, freq_offset_hz=37.0, ppm=10, seed=4))
+    found = r["slips"][r["slips"] != 0]
+    assert len(found) == 1 and abs(found[0] - slip) <= 3
+    b = modem.decode_received(r)
+    assert b.payloads == sent and all(b.crc_ok)
+
+
+@pytest.mark.parametrize("channel", ["mpp", "mpd"])
+def test_no_slip_from_fading(channel):
+    """A path fading in or out moves the pilots' timing by its delay (mpd's
+    4 ms): not a slip (SLIP_MIN), nor a deep fade's noise (the acceptance)."""
+    spec = SUBMODES["qpsk-r1/5"]
+    for seed in range(4):
+        x = np.concatenate([np.zeros(3000), modem.modulate(_payloads(spec, 3, seed), spec), np.zeros(3000)])
+        r = modem.receive(hfchannel.apply_channel(x, snr_db=5, freq_offset_hz=37.0, ppm=10, fading_preset=channel, seed=seed))
+        assert not r["slips"].any()
+
+
 def test_no_burst_from_a_tone():
     """SSTVAE's 1b05ba4 false lock: a steady carrier read as a burst with a
     random header before the wide band had a header score floor. (Data

@@ -406,10 +406,55 @@ def _bin_phase_step(h: np.ndarray) -> float:
     return float(np.angle(np.sum(h[1:] * np.conj(h[:-1]))))
 
 
+SLIP_MIN = 40  # samples: under it, a path fading in or out (CCIR mpd's 4 ms is 32) looks like one
+SLIP_MAX = 240  # samples: a 1024-frame buffer at 48 kHz is 171
+SLIP_TRIGGER = 0.5  # a pilot this unlike the last one's prompts a search
+SLIP_ACCEPT = 0.45  # each pilot after a slip, this like the last one at the new offset (and twice as like as before)
+
+
+def _coherence(h: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """|<ref, h>| / (|ref| |h|) along h's last axis: 1 for the same channel
+    seen again (common phase aside), near 0 once a timing jump tilts it."""
+    return np.abs(h @ np.conj(ref)) / (np.linalg.norm(h, axis=-1) * np.linalg.norm(ref) + 1e-30)
+
+
+def _find_slip(z: np.ndarray, p: int, n_left: int, prev: np.ndarray, b) -> int:
+    """A jump in the audio's timing just before the frame at p (samples
+    inserted: positive; dropped: negative), or 0. A sender's playback
+    underrun inserts a buffer's worth of silence (recordings/20261013-234857:
+    85 samples, 512 at 48 kHz, between frames 2 and 3); the drift tracker
+    moves 2 samples a frame at most, and the burst's channel estimate
+    (whole-burst support, CFO) is lost from there on.
+
+    The pilot at p and the next ones (n_left: up to two more, the closing
+    pilot counting) are tried at every offset within SLIP_MAX against the
+    previous frame's pilot `prev`; the best joint offset is taken only if
+    each of them is twice as like `prev` there as at p, and SLIP_ACCEPT like
+    it (simulated: no false slip in 1200 bursts, AWGN to mpd, -3 to 20 dB)."""
+    hf = b.demod_window(z, p + NCP, DEMOD_BACKOFF) / b.pilot
+    if _coherence(hf, prev) >= SLIP_TRIGGER:
+        return 0
+    lo = max(-SLIP_MAX, -p)
+    offs = np.arange(lo, SLIP_MAX + 1)
+    at, base = [], []
+    for j in range(1 + min(2, n_left)):
+        a = p + j * FRAME_SAMPLES + NCP - DEMOD_BACKOFF
+        seg = z[a + lo : a + SLIP_MAX + M]
+        seg = np.pad(seg, (0, len(offs) - 1 + M - len(seg)))
+        h = (2.0 / M) * (np.lib.stride_tricks.sliding_window_view(seg, M) @ b.demod.T) / b.pilot  # every offset's pilot
+        at.append(_coherence(h, prev))
+        base.append(at[-1][-lo])
+    score = np.sum(at, axis=0)
+    score[np.abs(offs) < SLIP_MIN] = -np.inf
+    k = int(np.argmax(score))
+    ok = all(c[k] >= max(2 * c0, SLIP_ACCEPT) for c, c0 in zip(at, base))
+    return int(offs[k]) if ok else 0
+
+
 def _demod_frames(
     z: np.ndarray, p: int, n_f: int, shift: int, phi_ref: float,
-    steps_in: np.ndarray | None = None, band: str = "w",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    steps_in: np.ndarray | None = None, band: str = "w", slips_in: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Demodulate n_f frames and the closing pilot, window moved `shift`
     samples later than nominal.
 
@@ -417,18 +462,28 @@ def _demod_frames(
     carriers, slow EMA, +-2 sample steps), but each step's phase is then
     undone so the symbols share one timing reference and the channel
     looks smooth to the interpolator; SSTVAE interpolated straight across
-    the steps. Returns raw (n_f, 6, NC), pilots (n_f + 1, NC), and the
-    per-frame step total. `steps_in` replays a previous run's steps
-    instead of tracking (scripts/eq_floor.py's genie uses it).
+    the steps. A jump in the audio's timing (_find_slip) moves the window
+    with it, its phase left alone: the channel after it is the one before.
+    Returns raw (n_f, 6, NC), pilots (n_f + 1, NC), the per-frame step
+    total, and each frame's slip. `steps_in` replays a previous run's
+    steps instead of tracking (scripts/eq_floor.py's genie uses it), and
+    `slips_in` its slips (searched for only when neither is given).
     """
     b = ofdm.band(band)
     phi_ref = phi_ref + 2 * np.pi * RS * shift / FS  # the shift's own slope
     p = p + shift
     raw = np.zeros((n_f + 1, SYMS_PER_FRAME, b.nc), dtype=np.complex128)
     steps = np.zeros(n_f + 1)
+    slips = np.zeros(n_f + 1, dtype=np.int64)
+    search = steps_in is None and slips_in is None
     tau_ema, powers, total = 0.0, [], 0
     for f in range(n_f + 1):
         n_s = SYMS_PER_FRAME if f < n_f else 1
+        if slips_in is not None:
+            slips[f] = slips_in[f]
+        elif search and 0 < f < n_f:
+            slips[f] = _find_slip(z, p, n_f - f, raw[f - 1, 0] / b.pilot, b)
+        p += int(slips[f])
         if p + n_s * NSYM > len(z):
             raise SyncError("burst truncated")
         for s in range(n_s):
@@ -452,7 +507,7 @@ def _demod_frames(
                 tau_ema -= step
         p += FRAME_SAMPLES
     raw *= equalizer.time_shift_phase(steps, b.bb)[:, None, :]
-    return raw[:n_f], raw[:, 0] / b.pilot, steps
+    return raw[:n_f], raw[:, 0] / b.pilot, steps, slips
 
 
 def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | None = None) -> dict:
@@ -824,14 +879,15 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         runs.append([y * np.conj(r) for y, r in zip(ys, ref2)])
     d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
     coarse = float(np.angle(d) / (2 * np.pi * NSYM / FS))
-    _, hp, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
+    # slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
+    _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
     fine = equalizer.residual_cfo(hp)
     cfo_res = resolve_alias(fine, coarse)
     z = freq_correct(z, cfo_res)
-    _, hp, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
+    _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
     support = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
     shift = equalizer.window_shift(support)
-    raw, hp, steps = _demod_frames(z, p0, n_air, shift, phi_ref, band=db)
+    raw, hp, steps, _ = _demod_frames(z, p0, n_air, shift, phi_ref, band=db, slips_in=slips)
     support = (support[0] - shift, support[1] - shift)
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
@@ -842,7 +898,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         est["h"], est["mse"] = np.delete(est["h"], kc, axis=0), np.delete(est["mse"], kc, axis=0)
     return dict(
         spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc,
-        cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, phi_ref=phi_ref, support=support,
+        cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support,
         preamble_start=hd["start"], score=hd["score"],
     )
 
