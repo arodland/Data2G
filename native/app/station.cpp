@@ -858,6 +858,15 @@ RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
 
 }  // namespace
 
+bool plot_visible(const RxConstellation& c) {
+    if (c.tones) return !c.symbols.empty();
+    float reach = 0;
+    for (const auto& q : c.points) reach = std::max({reach, std::abs(q.real()), std::abs(q.imag())});
+    const float edge = 1.5f * (reach > 0 ? reach : 1.0f);
+    return std::any_of(c.symbols.begin(), c.symbols.end(),
+                       [&](const auto& z) { return std::abs(z.real()) <= edge && std::abs(z.imag()) <= edge; });
+}
+
 std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b) {
     if (b.heard.ofdm) return iq_plot(b.submode, modem::equalized(*b.heard.ofdm), *b.heard.ofdm->spec);
     if (b.heard.cpm) return tone_plot(b.submode, cpm::shares(b.heard.cpm->E));
@@ -1060,7 +1069,7 @@ void Station::start() {
         });
         engine_->set_on_preview([this](const arq::BurstPreview& p) {
             auto plot = rx_constellation(p);
-            if (plot.symbols.empty()) return;  // nothing to show yet: keep the last plot
+            if (!plot_visible(plot)) return;  // nothing to show yet: keep the last plot
             std::lock_guard lock(status_mu_);
             constellation_ = plot;
             live_ = std::move(plot);
@@ -1069,11 +1078,11 @@ void Station::start() {
             mode_ = b.submode;
             auto plot = rx_constellation(b);
             std::lock_guard lock(status_mu_);
-            if (plot && !plot->symbols.empty()) constellation_ = std::move(plot);
-            else if (b.lost && live_) {  // undecoded: the live view stays, marked
+            if (plot && plot_visible(*plot)) constellation_ = std::move(plot);
+            else if (live_) {  // lost, or nothing on the plot: the live view stays (lost ones marked)
                 constellation_ = std::move(live_);
                 constellation_->live = false;
-                constellation_->lost = true;
+                constellation_->lost = b.lost;
             }
             live_.reset();
             reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};

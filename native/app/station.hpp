@@ -197,6 +197,10 @@ struct RxConstellation {
 // A heard burst's plot; nullopt when it was lost.
 std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b);
 RxConstellation rx_constellation(const arq::BurstPreview& p);  // live
+// Any symbol inside the plot's square? A broken channel estimate puts
+// every one far outside (recordings/20261013-234857 burst 0: a 10.7 ms
+// gap mid-burst, |eq| ~3e7), a NaN nowhere: then the live view stays.
+bool plot_visible(const RxConstellation& c);
 
 struct AudioCounters {
     std::uint64_t overflows = 0, underruns = 0, late = 0, dropped = 0;
