@@ -264,6 +264,49 @@ double measure_spread(const Mat<cd>& hs, double n0_s) {
     return std::clamp(2 * sigma, 0.02, 4.0);
 }
 
+double filter_spread(const Mat<cd>& hs, double n0_s, double measured) {
+    const int n_p = static_cast<int>(hs.rows), nc = static_cast<int>(hs.cols);
+    if (!LOO_SPREAD || n_p < LOO_MIN_PILOTS) return measured;
+    double pw = 0.0;
+    for (const cd& x : hs.data) pw += sq_abs(x);
+    const double p = std::max(pw / static_cast<double>(hs.data.size()) - n0_s, 1e-12);
+    std::array<double, SPREAD_GRID.size() + 1> cand{}, err{};
+    std::copy(SPREAD_GRID.begin(), SPREAD_GRID.end(), cand.begin());
+    cand.back() = measured;
+    // K is real: [I | Re hs | Im hs] gives K^-1's diagonal and K^-1 hs from one real solve
+    const int w = n_p + 2 * nc;
+    std::vector<double> a, b;
+    for (size_t i = 0; i < cand.size(); ++i) {
+        a.assign(static_cast<size_t>(n_p * n_p), 0.0);
+        b.assign(static_cast<size_t>(n_p * w), 0.0);
+        for (int r = 0; r < n_p; ++r) {
+            for (int c = 0; c < n_p; ++c)
+                a[static_cast<size_t>(r * n_p + c)] = p * doppler_corr((r - c) * FRAME_S, cand[i]) + (r == c ? n0_s : 0.0);
+            b[static_cast<size_t>(r * w + r)] = 1.0;
+            for (int k = 0; k < nc; ++k) {
+                b[static_cast<size_t>(r * w + n_p + k)] = hs[static_cast<size_t>(r)][k].real();
+                b[static_cast<size_t>(r * w + n_p + nc + k)] = hs[static_cast<size_t>(r)][k].imag();
+            }
+        }
+        linalg::lu_solve(a.data(), n_p, b.data(), w);
+        double e = 0.0;
+        for (int r = 0; r < n_p; ++r) {
+            const double* row = &b[static_cast<size_t>(r * w)];
+            double s = 0.0;
+            for (int k = 0; k < nc; ++k) s += row[n_p + k] * row[n_p + k] + row[n_p + nc + k] * row[n_p + nc + k];
+            e += s / (row[r] * row[r]);
+        }
+        err[i] = e / (static_cast<double>(n_p) * nc);
+    }
+    // the tolerance counts the error above the noise floor only (equalizer.py)
+    const double emin = *std::min_element(err.begin(), err.end());
+    const double lim = emin + LOO_TOL * std::max(emin - n0_s, 0.0);
+    double best = 0.0;
+    for (size_t i = 0; i < cand.size(); ++i)
+        if (err[i] <= lim) best = std::max(best, cand[i]);
+    return best;
+}
+
 Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const double> bb, double n0_pre,
                   std::span<const double> n0_pre_k) {
     constexpr int S = config::SYMS_PER_FRAME - 1;
@@ -288,7 +331,8 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
     if (!std::isfinite(n0)) n0 = n0_pre;
     if (!std::isfinite(n0)) throw std::invalid_argument("no noise estimate: pass n0_pre on a band this narrow");
     const double n0_s = n0 * sm.r / nc;
-    const double spread = measure_spread(hs, n0_s);
+    const double spread = measure_spread(hs, n0_s);  // reported (a predictor input)
+    const double fspread = filter_spread(hs, n0_s, spread);
     double pw = 0.0;
     for (const cd& x : hs.data) pw += sq_abs(x);
     const double p_sig = std::max(pw / static_cast<double>(hs.data.size()) - n0_s, 1e-12);
@@ -303,13 +347,13 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
         for (int i = 0; i < J; ++i)
             for (int j = 0; j < J; ++j)
                 a[static_cast<size_t>(i * J + j)] =
-                    p_sig * doppler_corr((lo + i) * FRAME_S - (lo + j) * FRAME_S, spread) + (i == j ? n0_s : 0.0);
+                    p_sig * doppler_corr((lo + i) * FRAME_S - (lo + j) * FRAME_S, fspread) + (i == j ? n0_s : 0.0);
         rdp.assign(static_cast<size_t>(S * J), 0.0);
         x.assign(static_cast<size_t>(J * S), 0.0);
         for (int s = 0; s < S; ++s) {
             const double t = f * FRAME_S + (s + 1) / static_cast<double>(config::SYMS_PER_FRAME) * FRAME_S;
             for (int j = 0; j < J; ++j) {
-                const double v = p_sig * doppler_corr(t - (lo + j) * FRAME_S, spread);
+                const double v = p_sig * doppler_corr(t - (lo + j) * FRAME_S, fspread);
                 rdp[static_cast<size_t>(s * J + j)] = v;
                 x[static_cast<size_t>(j * S + s)] = v;
             }
@@ -331,6 +375,7 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
     e.n0 = n0;
     e.p_sig = p_sig;
     e.spread_hz = spread;
+    e.filter_spread_hz = fspread;
     return e;
 }
 

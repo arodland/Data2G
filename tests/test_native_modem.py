@@ -153,7 +153,7 @@ def same_received(n, r):
     close(n["score"], r["score"], CORR_TOL)
     for k in ("raw", "hp"):
         close(n[k], r[k])
-    for k in ("h", "mse", "n0", "n0_k", "p_sig", "spread_hz", "clip_ratio", "gain"):
+    for k in ("h", "mse", "n0", "n0_k", "p_sig", "spread_hz", "filter_spread_hz", "clip_ratio", "gain"):
         close(n["est"][k], r["est"][k], 1e-8)
     assert n["est"]["band"] == r["est"]["band"]
 
