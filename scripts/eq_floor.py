@@ -90,7 +90,8 @@ def measure(preset, snr, bursts, taps, submode="qpsk-r1/2", frames=20):
         n_air = modem.frames_on_air(spec, len(sent))
         twin = hfchannel.apply_channel(_pilot_only_twin(len(x), n_air, spec), **kw)
         zt = freq_correct(to_baseband(twin), r["cfo"])
-        rt, _, _ = modem._demod_frames(zt, r["p0"], n_air, r["shift"], r["phi_ref"], r["steps"], band=spec.band)
+        rt, _, _, _ = modem._demod_frames(zt, r["p0"], n_air, r["shift"], r["phi_ref"], r["steps"], band=spec.band,
+                                          slips_in=r["slips"])
         if n_air > n_f:  # receive() drops the header copy's frame; so must the genie
             rt = np.delete(rt, modem.copy_frame(spec.sync_band, n_f), axis=0)
         h_true = rt / pilot
