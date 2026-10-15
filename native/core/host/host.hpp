@@ -8,7 +8,8 @@
 // Commands: MYCALL call..., LISTEN ON|OFF|CQ, ACCEPT [host]:port (LISTEN ON,
 // each session's data over a connection made to host:port, default
 // the command client's own: host.py), CONNECT from to, DISCONNECT,
-// ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
+// ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF,
+// WINLINK SESSION (Pat: BUFFER credit), VERSION,
 // and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
 // [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
 // WRONG. Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
@@ -71,6 +72,7 @@ public:
     // false: the owner sends PTT ON/OFF itself, when the rig is keyed and released (the engine's PTT runs ahead of both)
     bool announce_ptt = true;
     std::optional<int> buffer_credit;
+    bool winlink = false;  // WINLINK SESSION: the client is Pat, BUFFER gets the credit
     std::vector<std::string> out_cmd;  // lines for the command port, without CR
     arq::Bytes out_data;               // bytes for the data port
 

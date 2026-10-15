@@ -1208,6 +1208,7 @@ def _host_substitutions(native):
         cap = property(lambda s: s._n.cap, lambda s, v: setattr(s._n, "cap", v))
         listening = property(lambda s: s._n.listening, lambda s, v: setattr(s._n, "listening", v))
         buffer_credit = property(lambda s: s._n.buffer_credit, lambda s, v: setattr(s._n, "buffer_credit", v))
+        winlink = property(lambda s: s._n.winlink, lambda s, v: setattr(s._n, "winlink", v))
         accept_addr = property(lambda s: s._n.accept_addr)
         dial = property(lambda s: None, lambda s, v: setattr(s._n, "dial", v))
 

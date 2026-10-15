@@ -77,6 +77,7 @@ void bind_host(py::module_& m) {
         .def_readwrite("cap", &PyHost::cap)
         .def_readwrite("listening", &PyHost::listening)
         .def_readwrite("buffer_credit", &PyHost::buffer_credit)
+        .def_readwrite("winlink", &PyHost::winlink)
         .def_property_readonly("accept_addr", [](const PyHost& s) -> py::object {
             return s.accept_addr ? py::object(py::make_tuple(s.accept_addr->host, s.accept_addr->port)) : py::none();
         })

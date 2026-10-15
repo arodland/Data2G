@@ -20,7 +20,8 @@ CQFRAME call bw (a CQ frame at 500 | 1200 | 2300 | 2750 Hz: no session;
 one heard is notified the same way, the sender's call and bandwidth),
 BW500 | BW1200 | BW2300 | BW2750 (session bandwidth cap: BW500 keeps a
 session inside a 500 Hz band-plan segment; BW2300/BW2750 are the full
-2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION; broadcast:
+2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, WINLINK SESSION
+(Pat sends it before CONNECT: BUFFER credit, below), VERSION; broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG. Notifications: CONNECTED src dst bw, DISCONNECTED,
@@ -99,6 +100,7 @@ class Host:
         self.dial = None  # serve(): (host, port) -> True once a connection there carries the session's data
         engine.accept_connect = engine.session.accept_connect = self._accept_connect
         self.buffer_credit = buffer_credit
+        self.winlink = False  # WINLINK SESSION: the client is Pat, BUFFER gets the credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
@@ -151,6 +153,8 @@ class Host:
             self.cap = BW[cmd]
         elif cmd == "CHAT" and args and args[0].upper() in ("ON", "OFF"):
             e.set_chat(args[0].upper() == "ON")
+        elif cmd == "WINLINK" and args and args[0].upper() == "SESSION":
+            self.winlink = True
         elif cmd == "BCAST" and e.kiss is not None:
             self._bcast = True
             reply = self._bcast_command(args)
@@ -199,7 +203,7 @@ class Host:
             e.session.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening, self.accept_addr = False, None
+        self.listening, self.accept_addr, self.winlink = False, None, False
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
@@ -262,16 +266,17 @@ class Host:
         # as the same bytes written at once. So while more than the next
         # burst waits, BUFFER is the unsent bytes past it (the credit); once
         # it has all gone, 1 until the peer acks it all, so Flush still waits
-        # for delivery but writes never block. --buffer-credit 0 reports the
-        # plain VARA figure. CHAT ON also reports it: the client watches
-        # BUFFER fall to see which of its messages were ACKed.
+        # for delivery but writes never block. Only after WINLINK SESSION
+        # (Pat sends it before CONNECT): other clients get the plain VARA
+        # figure, as does --buffer-credit 0. A chat client watches BUFFER
+        # fall to see which of its messages were ACKed.
         st = e.session.station
         unsent = unacked = len(e.session._pending_write)
         if st:
             unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
             unacked += len(st.tx.buf)  # from the first unacked codeword on
         buffered = unacked
-        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
+        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and self.winlink:
             credit = e.session.policy.next_capacity(st)
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)

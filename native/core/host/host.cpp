@@ -200,6 +200,8 @@ void Host::command(std::string_view line, std::string_view peer) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
         e.set_chat(a0 == "ON");
+    } else if (cmd == "WINLINK" && a0 == "SESSION") {
+        winlink = true;
     } else if (cmd == "BCAST" && e.kiss()) {
         bcast_ = true;
         out_cmd.push_back(bcast_command(args).value_or("WRONG"));
@@ -225,6 +227,7 @@ void Host::client_gone() {
     else if (s == SessionState::CONNECTING) e.abort();
     listening = false;
     accept_addr.reset();
+    winlink = false;
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
     if (auto* link = e.kiss()) {  // its ports go, and port 0 back to its defaults
@@ -308,12 +311,12 @@ void Host::after_step(bool ptt) {
     // Flush waits for BUFFER 0; counting everything kept Data2G bursts short.
     // So while more than the next burst waits, BUFFER is the unsent bytes
     // past it (the credit); once it has all gone, 1 until the peer acks it
-    // all. --buffer-credit 0 reports the plain VARA figure. (host.py has the
-    // full story.) CHAT ON also reports it: the client watches BUFFER fall to
-    // see which of its messages were ACKed.
+    // all. Only after WINLINK SESSION (Pat sends it before CONNECT): other
+    // clients, and --buffer-credit 0, get the plain VARA figure. (host.py
+    // has the full story.)
     const Queued q = queued();
     std::int64_t buffered = q.unacked;
-    if (q.station && buffer_credit != 0 && !engine.session().chat) {
+    if (q.station && buffer_credit != 0 && winlink) {
         if (auto c = next_capacity()) {
             std::int64_t credit = *c;
             if (buffer_credit) credit = std::min<std::int64_t>(credit, *buffer_credit);
