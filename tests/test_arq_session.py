@@ -185,8 +185,12 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     never connected when every try went in qpsk-r1/5)."""
     from data2g.arq import policy as G
 
-    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
-    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
+        def recommend(self, station):
+            return G.encode("qpsk-r1/2"), 1, G.encode("qpsk-r1/2")
+
+    a = S.Session("W1AW", Good(), rng=random.Random(1))
+    b = S.Session("K2XYZ", Good(), rng=random.Random(2))
     b.listen()
     a.connect("K2XYZ", 2, 0.0)
     first = a.poll(0.0)
@@ -277,6 +281,49 @@ def test_short_write_coalesces(chat):
     assert a._build_at == (float("-inf") if chat else t + S.COALESCE_S)
     a.write(b"x" * cap)  # a full burst
     assert a._build_at == float("-inf")
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_callee_holds_reply_for_host_answer(answer):
+    """A burst that brings the callee's host data, with nothing to send,
+    holds the reply REPLY_HOLD_S: the host's answer (a BBS prompt) rides
+    it instead of waiting for a wake. No answer: a plain ACK at the end."""
+    from data2g.arq import policy as G
+
+    class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
+        def recommend(self, station):
+            return G.encode("qpsk-r1/2"), 1, G.encode("qpsk-r1/2")
+
+    a = S.Session("W1AW", Good(), rng=random.Random(1))
+    b = S.Session("K2XYZ", Good(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    t, src, dst = 0.0, a, b
+
+    def step(src, dst, t):
+        burst = src.poll(t)
+        while burst is None:
+            assert t < 60
+            t = max(t + 0.01, src.next_event() or t)
+            burst = src.poll(t)
+        src.on_tx_end(burst, t + 1.0)
+        t += 1.5
+        dst.on_rx(FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0}), t)
+        return t
+
+    while a._build_at is None:  # CONNECT, accept, then empty bursts until the caller idles
+        assert t < 30
+        t = step(src, dst, t)
+        src, dst = dst, src
+    a.write(b"LIST")
+    t = step(a, b, t)
+    assert b._out is None and b._build_at == t + S.REPLY_HOLD_S
+    assert b.read() == b"LIST"
+    if answer:
+        b.write(b"prompt>")
+    t2 = step(b, a, t)
+    assert t2 - 1.5 <= t + (S.COALESCE_S if answer else S.REPLY_HOLD_S) + 0.02
+    assert a.read() == (b"prompt>" if answer else b"")
 
 
 def _frame(body, direction):

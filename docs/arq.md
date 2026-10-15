@@ -218,6 +218,7 @@ Where the rest comes from:
 | buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
 | id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
+| drained (17) | empty: this burst's new codewords end the sender's queued data (a hint, §6a reply hold) | the burst that slices the last queued byte, only if it fits the control's padding |
 
 ## 6. Turn rules and timers
 
@@ -272,6 +273,15 @@ Where the rest comes from:
     backoff that doubles with each send (0-1, 0-2, 0-4 s, ...: CSMA-like). At most 2
     sends per idle period, 6 with chat on. After that the caller's keepalive
     collects the data. Any burst from the caller cancels a wake.
+  - Reply hold: when a burst brings the callee's host data, carries `drained` (the
+    caller's buffer is empty), and the callee has nothing to send, the callee holds its
+    reply 250 ms (REPLY_HOLD_S). An interactive host's answer
+    (a BBS prompt) then rides the reply instead of waiting for a wake. A host write
+    ends the hold (or starts the 100 ms coalesce, CHAT OFF). The reply stays a fresh
+    build: the callee's receive state changes only on the caller's next burst. Bulk
+    bursts don't carry `drained`, so they are answered at once. linksim winlink
+    (40 paired seeds): sessions 11% shorter on awgn 10 and mpp 10, 4% on mpg 5; 0.5 s
+    gained nothing over 0.25 s.
   - The caller answers a burst that arrives while its idle poll waits at once, data
     or not. It stays the only station that retries on a timeout, except for DISC.
   - DISCONNECT breaks idle the same way: the caller sends DISC in place of its

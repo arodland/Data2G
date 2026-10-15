@@ -220,6 +220,7 @@ void Session::on_rx(RxBurst& rx, double now) {
     }
     Station* st = station.get();
     if (!st || !live(state)) return;
+    const size_t undrained = st->rx.out.size();
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
     heard(now);
     if (st->state == LinkState::FAILED) {
@@ -229,8 +230,13 @@ void Session::on_rx(RxBurst& rx, double now) {
     if (!st->rx.out.empty() || st->last_rx_data || st->tx.pending()) last_data = now;
     if (disc(now)) return;
     if (!master()) {
-        queue(st->build(), now);
-        st->answered();
+        if (st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty()) {
+            build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
+        } else {
+            build_at.reset();
+            queue(st->build(), now);
+            st->answered();
+        }
         return;
     }
     // the caller: go on now, or after an idle backoff when neither side has data

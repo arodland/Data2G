@@ -52,6 +52,11 @@ CHAT_WAKE_TRIES = 6
 CHAT_KEEPALIVE_S = KEEPALIVE_S  # CHAT ON: the callee's wakes carry its lines (v1 polled every 2-4 s)
 REPEAT_MAX_S = 3.0  # repeat a timed-out burst identically only if it is this short
 COALESCE_S = 0.1  # CHAT OFF: a short write to an idle link waits this long for more before it goes
+# the callee, with nothing to send, holds its reply this long to a burst
+# that brought its host data and ended the caller's (T_DRAINED): an
+# interactive host's answer (a BBS prompt) then rides it instead of
+# waiting ~5 s for a wake. A write ends the hold.
+REPLY_HOLD_S = 0.25
 
 log = logging.getLogger("data2g.session")
 
@@ -88,7 +93,7 @@ class Session:
     _last_heard: float = 0.0
     _last_data: float = 0.0
     _idle_wait: float = 0.0
-    _build_at: float | None = None  # the caller's idle poll: built when it goes
+    _build_at: float | None = None  # the caller's idle poll, or the callee's held reply: built when it goes
     _quiet_from: float = 0.0  # callee: the end of its last burst, or the last burst heard since
     _wake_wait: float = 0.0  # callee: silence after _quiet_from before a wake
     _wakes: int = 0  # callee: wake bursts sent since the caller was last heard
@@ -245,6 +250,7 @@ class Session:
         st = self.station
         if st is None or self.state not in (CONNECTED, DISCONNECTING):
             return
+        undrained = len(st.rx.out)
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
         self._heard(now)
@@ -256,8 +262,12 @@ class Session:
         if self._disc(now):
             return
         if not self._master:
-            self._queue(st.build(), now)
-            st.answered()
+            if len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending() and not self._pending_write:
+                self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
+            else:
+                self._build_at = None
+                self._queue(st.build(), now)
+                st.answered()
             return
         # the caller: go on now, or after an idle backoff when neither side
         # has data. The idle poll is built when it goes, so data the host
