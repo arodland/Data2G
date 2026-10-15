@@ -316,10 +316,16 @@ characters plus SSID, space padded at the end (a space inside a name is kept).
 |---|---|
 | CONNECT | protocol version, caller, callee, nonce, bandwidth cap, `T_turn` |
 | CONNECT_ACK | nonce echo, accepted cap (the minimum of both), `T_turn` |
-| CONNECT_NAK | reason (busy, version, refused) |
+| CONNECT_NAK | nonce echo, reason: 1 version, 2 not listening, 3 busy (a session or a call of its own under way), 4 refused by the host (ACCEPT couldn't connect) |
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
 CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+A CONNECT_NAK ends them at once: the caller closes with `refused: <reason>`.
+
+A CONNECT addressed to a station is decoded in every state, so it is always
+answered: CONNECT_ACK while listening, CONNECT_NAK otherwise. The NAK is not the
+session's burst: it starts no reply timer or wake. A station with its own burst
+queued sends that instead, and refuses the caller's next try.
 
 ## 7a. ID frames
 
@@ -386,6 +392,12 @@ As built (data2g/arq/policy.py):
     slowest mode that fit a line.
 - **Commands:** MYCALL, LISTEN ON/OFF, CONNECT from to, DISCONNECT, ABORT,
   BW500 / BW2300 / BW2750, and CQFRAME call bw.
+  - **ACCEPT [host]:port** (Data2G) is LISTEN ON with the session's data on a
+    connection Data2G makes to host:port (default: the address the command client connected from) when it answers a call,
+    instead of the data port. One session at a time, as with LISTEN.
+    - If the connection fails (1 s timeout), the call is refused (CONNECT_NAK 4).
+    - When the far end closes it, the session disconnects gracefully.
+    - LISTEN ON/OFF, or the command client leaving, ends ACCEPT.
   - **CQFRAME** sends a CQ frame: a control-only burst (frame type SESSION, key 0,
     mask 0) with a `T_CQ` = 13 extension, the packed callsign plus the bandwidth
     cap code. It goes in the robust connect mode for that bandwidth, so at 500 it

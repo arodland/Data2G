@@ -58,7 +58,8 @@ void bind_host(py::module_& m) {
                  return new PyHost(std::move(engine), credit);
              }),
              py::arg("engine"), py::arg("buffer_credit") = py::none())
-        .def("command", [](PyHost& s, const std::string& line) { s.command(line); })
+        .def("command", [](PyHost& s, const std::string& line, const std::string& peer) { s.command(line, peer); },
+             py::arg("line"), py::arg("peer") = "127.0.0.1")
         .def("client_gone", &PyHost::client_gone)
         .def("data_in", [](PyHost& s, const py::object& b) { s.data_in(bytes_of(b)); })
         .def("after_step", &PyHost::after_step)
@@ -75,7 +76,15 @@ void bind_host(py::module_& m) {
         .def_readonly("engine", &PyHost::engine_obj)
         .def_readwrite("cap", &PyHost::cap)
         .def_readwrite("listening", &PyHost::listening)
-        .def_readwrite("buffer_credit", &PyHost::buffer_credit);
+        .def_readwrite("buffer_credit", &PyHost::buffer_credit)
+        .def_property_readonly("accept_addr", [](const PyHost& s) -> py::object {
+            return s.accept_addr ? py::object(py::make_tuple(s.accept_addr->host, s.accept_addr->port)) : py::none();
+        })
+        // host.py's dial: (host, port) -> bool
+        .def_property("dial", [](const PyHost&) { return py::none(); }, [](PyHost& s, py::object f) {
+            if (f.is_none()) s.dial = nullptr;
+            else s.dial = [f](const host::Addr& a) { return f(py::make_tuple(a.host, a.port)).cast<bool>(); };
+        });
 }
 
 }  // namespace data2g::bind

@@ -55,6 +55,11 @@ const char* state_name(SessionState s) {
     return names[static_cast<int>(s)];
 }
 
+const char* nak_name(int reason) {
+    static const char* names[] = {nullptr, "version", "not listening", "busy", "refused by host"};
+    return reason >= NAK_VERSION && reason <= NAK_REFUSED ? names[reason] : nullptr;
+}
+
 int session_key(const std::string& caller, const std::string& callee, std::int64_t nonce) {
     std::uint32_t h = 0x811C9DC5;
     for (unsigned char b : caller + "|" + callee + "|" + std::to_string(nonce)) h = (h ^ b) * 0x01000193u;
@@ -188,6 +193,10 @@ std::optional<double> Session::next_event() {
 }
 
 void Session::on_tx_end(const TxBurstPtr& burst, double now) {
+    if (burst && burst == nak) {
+        nak = nullptr;
+        return;
+    }
     const bool m = master();
     // only the caller retries (§6), and a callee's DISC
     if ((m && (state == SessionState::CONNECTING || state == SessionState::CONNECTED)) || state == SessionState::DISCONNECTING) {
@@ -437,17 +446,21 @@ TxBurstPtr Session::accept_burst() {
     return session_burst(1, 0, cat({head, n, tail}), answer_mode);
 }
 
+// A CONNECT_NAK for this CONNECT, unless a burst of the session's own is
+// queued (that goes; the caller's next try is refused instead).
+void Session::refuse(const Bytes& body, const std::string& mode, int reason, double now) {
+    log_write(LOG, INFO, "refusing CONNECT from " + unpack_call(ByteView(body).subspan(2, 8)) + ": " + nak_name(reason));
+    if (out) return;
+    nak = session_burst(1, 0, Bytes{CONNECT_NAK, body[18], body[19], static_cast<std::uint8_t>(reason)}, mode);
+    queue(nak, now);
+}
+
 std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
     std::vector<std::pair<int, int>> keys;  // (direction, key)
-    if (station) {
-        keys.emplace_back(station->peer(), station->key);
-        if (!station->master) keys.emplace_back(0, 0);
-    } else if (state == SessionState::LISTEN) {
-        keys.emplace_back(0, 0);
-    } else if (state == SessionState::CONNECTING) {
-        keys.emplace_back(1, 0);
-    }
-    if (std::find(keys.begin(), keys.end(), std::pair{0, 0}) != keys.end() && compact(rx.submode())) {
+    if (station) keys.emplace_back(station->peer(), station->key);
+    else if (state == SessionState::CONNECTING) keys.emplace_back(1, 0);
+    keys.emplace_back(0, 0);  // a CONNECT, in any state: answered or refused
+    if (compact(rx.submode())) {
         if (auto p = rx.decode(0, COMPACT_CONNECT, 0, nullptr)) {
             Bytes body = unpack_connect(*p);
             if (auto why = check_frame(body)) {
@@ -502,7 +515,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         for (auto& c : me)
             if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
         if (callee != me && std::find(aliases.begin(), aliases.end(), callee) == aliases.end()) return;
-        if (station && n == nonce) {
+        if (station && !master() && n == nonce) {
             answer_mode = f.mode;
             queue(accept_burst(), now);  // our ACK was lost: say it again
             return;
@@ -514,12 +527,12 @@ void Session::on_session_frame(const Frame& f, double now) {
             want_disc = sent_disc_ack = false;
             tries = 0;
         }
-        if (state != SessionState::LISTEN) return;
-        if (body[1] != VERSION) {
-            const Bytes nak{CONNECT_NAK, body[18], body[19], 1};
-            queue(session_burst(1, 0, nak, f.mode), now);
-            return;
+        if (state != SessionState::LISTEN) {
+            const bool busy = state == SessionState::CONNECTING || live(state);
+            return refuse(body, f.mode, busy ? NAK_BUSY : NAK_NOT_LISTENING, now);
         }
+        if (body[1] != VERSION) return refuse(body, f.mode, NAK_VERSION, now);
+        if (accept_connect && !accept_connect(caller, callee)) return refuse(body, f.mode, NAK_REFUSED, now);
         call = callee;  // the call it dialed (the session key derives from it)
         peer = caller;
         nonce = n;
@@ -539,7 +552,10 @@ void Session::on_session_frame(const Frame& f, double now) {
         events.push_back("CONNECTED " + peer);
         queue(station->build(), now);
     } else if (sub == CONNECT_NAK && state == SessionState::CONNECTING && f.key == 0) {
-        if (be(body, 1, 3) == nonce) close("refused");
+        if (be(body, 1, 3) == nonce) {
+            const char* why = nak_name(at(body, 3));
+            close(std::string("refused: ") + (why ? why : "reason " + std::to_string(at(body, 3))));
+        }
     } else if (sub == DISC && station && f.key == station->key) {
         // also when already closed: our DISC_ACK may have been lost
         heard(now);

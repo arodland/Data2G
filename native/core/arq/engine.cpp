@@ -371,6 +371,7 @@ void Engine::new_session() {
                               : std::make_shared<Session>(call_, std::move(policy), 1.0, std::move(rng), aliases_,
                                                           cfg_.stats_interval_s);
     session_->set_chat(chat_);
+    session_->accept_connect = accept_connect;
     store_.clear();
 }
 

@@ -5,7 +5,9 @@
 // stage, so in worker mode it runs only through Engine::post() and the
 // after_block callback.
 //
-// Commands: MYCALL call..., LISTEN ON|OFF|CQ, CONNECT from to, DISCONNECT,
+// Commands: MYCALL call..., LISTEN ON|OFF|CQ, ACCEPT [host]:port (LISTEN ON,
+// each session's data over a connection made to host:port, default
+// the command client's own: host.py), CONNECT from to, DISCONNECT,
 // ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
 // and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
 // [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
@@ -15,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,6 +30,14 @@ namespace data2g::host {
 inline constexpr std::string_view VERSION = "Data2G 0.1";
 inline constexpr double ALIVE_S = 60.0;          // IAMALIVE on the command port this often, as VARA does
 inline constexpr double BUFFER_REPEAT_S = 30.0;  // a nonzero BUFFER is repeated this often
+inline constexpr double DIAL_TIMEOUT_S = 1.0;    // ACCEPT's connection must be up by then (the caller waits ~3.5 s)
+
+struct Addr {
+    std::string host;
+    int port;
+};
+// ACCEPT's [host]:port, or nullopt.
+std::optional<Addr> parse_addr(std::string_view s, std::string_view default_host = "127.0.0.1");
 
 // VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 bool ignored(std::string_view cmd);
@@ -44,7 +55,8 @@ public:
     explicit Host(arq::Engine& engine, std::optional<int> buffer_credit = std::nullopt);
     virtual ~Host() = default;
 
-    void command(std::string_view line);
+    // `peer`: the address the command came from (ACCEPT's default host).
+    void command(std::string_view line, std::string_view peer = "127.0.0.1");
     // The command client's TCP connection closed: it owned the session.
     void client_gone();
     void data_in(arq::ByteView data);
@@ -53,6 +65,9 @@ public:
     arq::Engine& engine;
     int cap = 2;
     bool listening = false;
+    std::optional<Addr> accept_addr;  // ACCEPT host:port
+    // the owner's: true once a connection to the address carries the session's data
+    std::function<bool(const Addr&)> dial;
     // false: the owner sends PTT ON/OFF itself, when the rig is keyed and released (the engine's PTT runs ahead of both)
     bool announce_ptt = true;
     std::optional<int> buffer_credit;
@@ -73,6 +88,7 @@ protected:
 private:
     // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the reply, nullopt for WRONG.
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
+    bool accept_connect(const std::string& caller, const std::string& callee);
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
     bool ptt_ = false, busy_ = false;

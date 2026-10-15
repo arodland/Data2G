@@ -504,6 +504,18 @@ struct Station::Port : QObject {
         for (auto* c : srv_.findChildren<QTcpSocket*>()) c->disconnect(this);
     }
 
+    // Client `id`'s address (127.0.0.1 if it has gone), IPv4 without its IPv6 mapping.
+    std::string peer(std::uint64_t id) const {
+        for (const auto& [c, cl] : clients_) {
+            if (cl.id != id) continue;
+            bool v4 = false;
+            const QHostAddress a = c->peerAddress();
+            const quint32 ip = a.toIPv4Address(&v4);
+            return (v4 ? QHostAddress(ip) : a).toString().toStdString();
+        }
+        return "127.0.0.1";
+    }
+
     // To every client, or to one by id (nowhere if it has gone).
     void send(const QByteArray& data, std::uint64_t to = 0) {
         if (data.isEmpty()) return;
@@ -719,6 +731,17 @@ struct Station::Outbox {
     arq::Bytes data;
     std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
+    unsigned dial = 0;     // data goes to ACCEPT's connection of this dial generation (0: the data port)
+    unsigned hang_up = 0;  // then that connection closes: its session is over
+};
+
+// ACCEPT: the session stage waits for the owner's thread to connect, at most
+// host::DIAL_TIMEOUT_S; a connection made after it gave up is closed.
+struct Station::Dial {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::optional<bool> up;
+    bool abandoned = false;
 };
 
 // --- the station -------------------------------------------------------------------------
@@ -739,7 +762,11 @@ void Station::flush(std::uint64_t asker) {
     o.data.swap(host_->out_data);
     o.kiss.swap(engine_->kiss_rx());
     o.acks.swap(link_->acks);
-    if (o.cmd.empty() && o.data.empty() && o.kiss.empty() && o.acks.empty()) return;
+    o.dial = dial_live_;
+    if (const auto st = engine_->session().state;
+        dial_live_ && st != arq::SessionState::CONNECTED && st != arq::SessionState::DISCONNECTING)
+        o.hang_up = std::exchange(dial_live_, 0u);
+    if (o.cmd.empty() && o.data.empty() && o.kiss.empty() && o.acks.empty() && !o.hang_up) return;
     QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
 
@@ -763,12 +790,65 @@ void Station::note_link() {
 void Station::deliver(const Outbox& o) {
     if (cmd_)
         for (const auto& [line, to] : o.cmd) cmd_->send(QByteArray::fromStdString(line + "\r"), to);
-    if (data_ && !o.data.empty())
-        data_->send(QByteArray(reinterpret_cast<const char*>(o.data.data()), static_cast<qsizetype>(o.data.size())));
+    const QByteArray data(reinterpret_cast<const char*>(o.data.data()), static_cast<qsizetype>(o.data.size()));
+    if (o.dial) {
+        if (dialed_ && dialed_gen_ == o.dial && !data.isEmpty()) dialed_->write(data);
+    } else if (data_ && !data.isEmpty()) {
+        data_->send(data);
+    }
+    if (o.hang_up && dialed_gen_ == o.hang_up) hang_up();
     if (kiss_) {
         for (const auto& [port, f] : o.kiss) kiss_->broadcast(f, port);
         for (const auto& [port, id] : o.acks) kiss_->send_ack(id, port);
     }
+}
+
+void Station::hang_up() {
+    if (!dialed_) return;
+    dialed_->disconnect(&ctx_);
+    dialed_->disconnectFromHost();  // after what is written
+    dialed_->deleteLater();
+    dialed_ = nullptr;
+}
+
+void Station::dial(const std::string& host, int port, unsigned gen, std::shared_ptr<Dial> d) {
+    hang_up();  // a session before (a peer that reconnected)
+    auto* s = new QTcpSocket(&ctx_);
+    dialed_ = s;
+    dialed_gen_ = gen;
+    auto settle = [this, s, d](bool up) {
+        std::unique_lock lock(d->mu);
+        if (d->up) return;
+        if (d->abandoned) {
+            lock.unlock();
+            if (up && dialed_ == s) hang_up();
+            return;
+        }
+        d->up = up;
+        d->cv.notify_all();
+    };
+    QObject::connect(s, &QTcpSocket::connected, &ctx_, [settle] { settle(true); });
+    QObject::connect(s, &QTcpSocket::errorOccurred, &ctx_, [this, s, settle](QAbstractSocket::SocketError) {
+        logf(WARNING, "ACCEPT: %s", s->errorString().toStdString().c_str());
+        settle(false);
+    });
+    QObject::connect(s, &QTcpSocket::readyRead, &ctx_, [this, s, gen] {
+        const QByteArray d = s->readAll();
+        engine_->post([this, gen, b = arq::Bytes(d.begin(), d.end())] {
+            if (dial_live_ == gen) host_->data_in(b);
+            flush();
+        });
+    });
+    QObject::connect(s, &QTcpSocket::disconnected, &ctx_, [this, s, gen] {
+        if (dialed_ == s) hang_up();
+        engine_->post([this, gen] {
+            if (dial_live_ != gen) return;
+            logf(INFO, "ACCEPT: the far end closed: disconnecting");
+            engine_->session().disconnect();
+            flush();
+        });
+    });
+    s->connectToHost(QString::fromStdString(host), static_cast<quint16>(port));
 }
 
 void Station::watch_counters() {
@@ -1062,6 +1142,20 @@ void Station::start() {
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->announce_ptt = false;  // tx_loop tells the clients, as it keys and unkeys the rig
+        host_->dial = [this](const host::Addr& addr) {
+            const unsigned gen = ++dial_gen_;
+            auto d = std::make_shared<Dial>();
+            QMetaObject::invokeMethod(&ctx_, [this, addr, gen, d] { dial(addr.host, addr.port, gen, d); }, Qt::QueuedConnection);
+            std::unique_lock lock(d->mu);
+            // ponytail: holds the session stage up to DIAL_TIMEOUT_S; fine for a local server
+            if (!d->cv.wait_for(lock, std::chrono::duration<double>(host::DIAL_TIMEOUT_S), [&] { return d->up.has_value(); })) {
+                d->abandoned = true;
+                logf(WARNING, "ACCEPT: no connection to %s:%d within %.1f s", addr.host.c_str(), addr.port, host::DIAL_TIMEOUT_S);
+                return false;
+            }
+            if (*d->up) dial_live_ = gen;
+            return *d->up;
+        };
         engine_->set_after_block([this](bool ptt) {
             host_->after_step(ptt);
             note_link();
@@ -1110,9 +1204,9 @@ void Station::start() {
                     std::string text;  // ascii, as host.py decodes it (others replaced)
                     for (unsigned char c : line) text += c < 128 ? static_cast<char>(c) : '?';
                     logf(INFO, "command: %s", text.c_str());
-                    post([this, text, client] {
+                    post([this, text, client, peer = cmd_->peer(client)] {
                         flush();  // what was already pending goes first, to everyone
-                        host_->command(text);
+                        host_->command(text, peer);
                         flush(client);  // the reply goes to the client that asked
                     });
                 },

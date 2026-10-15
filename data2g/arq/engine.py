@@ -113,6 +113,7 @@ class Engine:
         when no ARQ session is under way and the channel is free."""
         self.call = call.upper()
         self.aliases = ()
+        self.accept_connect = None  # Session.accept_connect, for every session (the host's ACCEPT)
         self.policy_factory = policy or GearShifter
         self.rng = random.Random(seed)
         self.accept = receive_accept(min_header_score)
@@ -157,7 +158,8 @@ class Engine:
 
     def _new_session(self):
         self.session = S.Session(self.call, self.policy_factory(), rng=random.Random(self.rng.random()),
-                                 aliases=self.aliases, stats_interval_s=self.stats_interval_s)
+                                 aliases=self.aliases, stats_interval_s=self.stats_interval_s,
+                                 accept_connect=self.accept_connect)
         self.session.set_chat(self.chat)
         self.store = {}
 

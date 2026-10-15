@@ -26,6 +26,7 @@
 #pragma once
 
 #include <QObject>
+class QTcpSocket;
 
 #include <atomic>
 #include <chrono>
@@ -252,6 +253,7 @@ private:
     struct KissServer;
     struct SoundCard;
     struct MonitorThread;
+    struct Dial;
     // session stage
     void flush(std::uint64_t asker = 0);
     void note_link();
@@ -259,6 +261,8 @@ private:
     void announce_ptt(bool on);
     // owner's thread
     void deliver(const Outbox& o);
+    void dial(const std::string& host, int port, unsigned gen, std::shared_ptr<Dial> d);  // ACCEPT's connection
+    void hang_up();
     // engine thread
     void engine_loop();
     void tx_loop();
@@ -273,6 +277,9 @@ private:
     std::unique_ptr<arq::Engine> engine_;
     std::unique_ptr<host::Host> host_;
     std::unique_ptr<Port> cmd_, data_;
+    unsigned dial_gen_ = 0, dial_live_ = 0;  // session stage: the last dial; the live session's (0: the data port)
+    QTcpSocket* dialed_ = nullptr;           // owner's thread: ACCEPT's connection, dial generation dialed_gen_
+    unsigned dialed_gen_ = 0;
     std::unique_ptr<KissServer> kiss_;
     int rate_;
     std::unique_ptr<audio::CaptureFifo> cap_;

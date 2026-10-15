@@ -122,6 +122,37 @@ void session() {
     check::is_true(p.eb.session().state == arq::SessionState::LISTEN, "the callee listens again");
 }
 
+void accept() {
+    check::current_step = "accept";
+    check::is_true(!host::parse_addr("8301") && !host::parse_addr(":x") && !host::parse_addr(":0") && !host::parse_addr(":70000"),
+                   "bad addresses");
+    const auto local = host::parse_addr(":8400"), named = host::parse_addr("[::1]:22");
+    check::is_true(local && local->host == "127.0.0.1" && local->port == 8400, ":port is localhost");
+    check::is_true(named && named->host == "::1" && named->port == 22, "[host]:port");
+    const auto from = host::parse_addr(":8400", "192.0.2.7");
+    check::is_true(from && from->host == "192.0.2.7", ":port is the command client's host");
+
+    Pair p(seeded(21), seeded(22));
+    std::vector<int> dialed;
+    bool up = false;
+    p.b.dial = [&](const host::Addr& a) {
+        dialed.push_back(a.port);
+        return up;
+    };
+    for (const char* line : {"MYCALL K2XYZ", "ACCEPT :8400"}) p.b.command(line);
+    check::is_true(p.b.listening && p.eb.session().state == arq::SessionState::LISTEN, "ACCEPT listens");
+    p.a.command("CONNECT W1AW K2XYZ");
+    p.take();
+    check::is_true(p.run(60, [&] { return has(p.seen_a, "DISCONNECTED"); }), "no connection: refused");
+    check::equal(p.ea.session().close_reason, std::string("refused: refused by host"), "the NAK's reason");
+    check::is_true(dialed == std::vector<int>{8400} && !has(p.seen_b, "CONNECTED W1AW K2XYZ 2300"), "dialed once, never connected");
+    up = true;
+    p.a.command("CONNECT W1AW K2XYZ");
+    check::is_true(p.run(60, [&] { return has(p.seen_a, "CONNECTED W1AW K2XYZ 2300"); }), "connected once dialed");
+    p.b.command("LISTEN ON");
+    check::is_true(!p.b.accept_addr, "LISTEN ON ends ACCEPT");
+}
+
 }  // namespace
 
 int main() {
@@ -129,5 +160,6 @@ int main() {
     check::Watchdog dog(600, "test_host");
     commands();
     session();
+    accept();
     return check::report("test_host");
 }

@@ -1193,8 +1193,8 @@ def _host_substitutions(native):
             self.out_data += self._n.take_data()
             return result
 
-        def command(self, line):
-            return self._take(self._n.command(line))
+        def command(self, line, peer="127.0.0.1"):
+            return self._take(self._n.command(line, peer))
 
         def client_gone(self):
             return self._take(self._n.client_gone())
@@ -1208,5 +1208,7 @@ def _host_substitutions(native):
         cap = property(lambda s: s._n.cap, lambda s, v: setattr(s._n, "cap", v))
         listening = property(lambda s: s._n.listening, lambda s, v: setattr(s._n, "listening", v))
         buffer_credit = property(lambda s: s._n.buffer_credit, lambda s, v: setattr(s._n, "buffer_credit", v))
+        accept_addr = property(lambda s: s._n.accept_addr)
+        dial = property(lambda s: None, lambda s, v: setattr(s._n, "dial", v))
 
     return {(host, "Host"): Host}

@@ -83,7 +83,31 @@ std::vector<std::string> mode_lines(int cap) {
     return out;
 }
 
-Host::Host(arq::Engine& e, std::optional<int> credit) : engine(e), buffer_credit(credit) {}
+std::optional<Addr> parse_addr(std::string_view s, std::string_view default_host) {
+    const auto i = s.rfind(':');
+    if (i == std::string_view::npos) return std::nullopt;
+    const auto port = s.substr(i + 1);
+    if (port.empty() || port.size() > 5 || !std::all_of(port.begin(), port.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        return std::nullopt;
+    const int n = std::stoi(std::string(port));
+    if (n < 1 || n > 65535) return std::nullopt;
+    std::string host(s.substr(0, i));
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') host = host.substr(1, host.size() - 2);
+    return Addr{host.empty() ? std::string(default_host) : host, n};
+}
+
+Host::Host(arq::Engine& e, std::optional<int> credit) : engine(e), buffer_credit(credit) {
+    auto f = [this](const std::string& caller, const std::string& callee) { return accept_connect(caller, callee); };
+    engine.accept_connect = f;
+    engine.session().accept_connect = f;
+}
+
+bool Host::accept_connect(const std::string& caller, const std::string& callee) {
+    if (!accept_addr) return true;
+    arq::log_write(LOG, INFO, "ACCEPT: " + caller + " calling " + callee + ", connecting to " + accept_addr->host + ":" +
+                                  std::to_string(accept_addr->port));
+    return dial && dial(*accept_addr);
+}
 
 std::optional<std::string> Host::bcast_command(const std::vector<std::string>& args) {
     auto* link = engine.kiss();
@@ -124,7 +148,7 @@ std::optional<std::string> Host::bcast_command(const std::vector<std::string>& a
     return std::nullopt;
 }
 
-void Host::command(std::string_view line) {
+void Host::command(std::string_view line, std::string_view peer) {
     const auto words = split(line);
     if (words.empty()) return;
     const std::string cmd = upper(words[0]);
@@ -142,7 +166,12 @@ void Host::command(std::string_view line) {
         // CQ frames are always reported
     } else if (cmd == "LISTEN" && (a0 == "ON" || a0 == "OFF")) {
         listening = a0 == "ON";
+        accept_addr.reset();
         e.listen(listening);
+    } else if (cmd == "ACCEPT" && args.size() == 1 && parse_addr(args[0], peer)) {
+        listening = true;
+        accept_addr = parse_addr(args[0], peer);
+        e.listen();
     } else if (cmd == "CONNECT" && args.size() == 2) {
         try {
             const auto aliases = e.aliases();
@@ -195,6 +224,7 @@ void Host::client_gone() {
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.session().disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
     listening = false;
+    accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
     if (auto* link = e.kiss()) {  // its ports go, and port 0 back to its defaults
