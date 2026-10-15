@@ -284,6 +284,9 @@ Where the rest comes from:
     gained nothing over 0.25 s.
   - The caller answers a burst that arrives while its idle poll waits at once, data
     or not. It stays the only station that retries on a timeout, except for DISC.
+  - The caller also answers at once a burst carrying `reply lost` or an abandon. The
+    callee holds data either way, and an escalated answer can be control only: idling
+    would leave it to a wake about 5 s later.
   - DISCONNECT breaks idle the same way: the caller sends DISC in place of its
     waiting poll, the callee as a wake. A station with unacked data sends it first.
     Either side retries its DISC on a timeout (DISC_TRIES).

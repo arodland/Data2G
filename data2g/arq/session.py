@@ -284,8 +284,11 @@ class Session:
         # a burst while the idle poll waits is the callee's wake: answer it
         # at once even without data in it (its policy may have sent control only)
         woke, self._build_at = self._build_at is not None, None
-        # the peer's reply was lost: it may hold data I never heard of
-        busy = st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
+        # the peer's reply was lost: it may hold data I never heard of. An
+        # abandon re-sliced data the peer holds, maybe in a control-only
+        # (escalated) burst: idling would leave it to wake me ~5 s later
+        busy = (st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
+                or st.peer_abandon)
         if busy:
             self._idle_wait = 0.0
             self._queue(st.build(), now)

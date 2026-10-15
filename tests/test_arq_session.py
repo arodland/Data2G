@@ -435,3 +435,46 @@ def test_reply_lost_is_answered_at_once():
     _, t = send(a, b, t)  # the caller's timeout repeat
     reply, t = send(b, a, t)
     assert a.station.peer_reply_lost and a.next_event() < t + 1  # answered now, not at a keepalive
+
+
+def test_abandon_is_answered_at_once(monkeypatch):
+    """The callee's data burst is lost; the caller polls (not a repeat), and
+    the callee's escalated answer abandons (a submode change) in a
+    control-only burst. The caller must answer at once: the callee holds
+    re-sliced data, and idling left it to a wake ~5 s later (on air,
+    2026-10-15: b3 abandon, then the b4 wake, both control only)."""
+    class OneCwEscalation(Policy):
+        def choose(self, station, escalation):
+            return ("m46", 1) if escalation else ("m22", 6)
+
+    monkeypatch.setattr(S, "REPEAT_MAX_S", 0.0)  # every timeout polls
+    a = S.Session("W1AW", OneCwEscalation(random.Random(1), change=0.0), rng=random.Random(2))
+    b = S.Session("K2XYZ-7", OneCwEscalation(random.Random(3), change=0.0), rng=random.Random(4))
+    b.listen()
+    a.connect("K2XYZ-7", 2, 0.0)
+
+    def send(me, other, t, drop=False, before_rx=None):
+        burst = None
+        while burst is None:
+            t = me.next_event()
+            burst = me.poll(t)
+        end = t + me.policy.airtime(burst.submode, len(burst.slots))
+        me.on_tx_end(burst, end)
+        if before_rx:
+            before_rx()
+        if not drop:
+            other.on_rx(FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0}), end + DECODE_S)
+        return burst, end + DECODE_S
+
+    t = 0.0
+    for _ in range(3):  # CONNECT, its ACK, and the caller's first ARQ burst
+        _, t = send(a, b, t)
+        _, t = send(b, a, t)
+    _, t = send(a, b, t, before_rx=lambda: b.write(bytes(500)))
+    data, t = send(b, a, t, drop=True)
+    assert data.slots and b.station.tx.pending()
+    poll, t = send(a, b, t)  # the caller's timeout poll
+    assert len(poll.slots) == 1
+    reply, t = send(b, a, t)
+    assert len(reply.slots) == 1 and a.station.peer_abandon and not a.station.peer_reply_lost
+    assert a.next_event() < t + 1  # answered now, not at a keepalive

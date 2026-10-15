@@ -304,6 +304,7 @@ class Station:
     peer_drained: bool = False  # the peer's last burst ended its queued data (T_DRAINED)
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_lost: bool = False  # the peer's last burst said its previous reply was lost
+    peer_abandon: bool = False  # the peer's last burst carried T_ABANDON: it holds re-sliced data
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
     tx: TxSide = field(default_factory=TxSide)
     stats: Counter = field(default_factory=Counter)  # for the log: cw_new, cw_comp, cw_resend, rx_ok, rx_lost, timeouts
@@ -633,6 +634,7 @@ class Station:
         self.peer_drained = F.T_DRAINED in ext
         self.peer_wants_dup = F.T_DUPCTL in ext
         self.peer_reply_lost = core.reply_lost
+        self.peer_abandon = F.T_ABANDON in ext
         self.peer_queued = int.from_bytes(ext[F.T_BUFFER], "big") if len(ext.get(F.T_BUFFER, b"")) == 2 else 0
         seen = self.peer_burst is not None and core.burst_seq == self.peer_burst
         repeat = seen and self._answered

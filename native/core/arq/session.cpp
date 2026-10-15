@@ -251,8 +251,11 @@ void Session::on_rx(RxBurst& rx, double now) {
     // the caller: go on now, or after an idle backoff when neither side has data
     const bool woke = build_at.has_value();
     build_at.reset();
-    // the peer's reply was lost: it may hold data I never heard of
-    const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost;
+    // the peer's reply was lost: it may hold data I never heard of. An
+    // abandon re-sliced data the peer holds, maybe in a control-only
+    // (escalated) burst: idling would leave it to wake me ~5 s later
+    const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost
+                      || st->peer_abandon;
     if (busy) {
         idle_wait = 0.0;
         queue(st->build(), now);
