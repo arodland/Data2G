@@ -329,13 +329,12 @@ def test_cli_rig_flags(request):
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
-@pytest.mark.parametrize("app,sig", [("data2g-host", signal.SIGINT), ("data2g-host", signal.SIGHUP),
-                                     ("data2g-gui", signal.SIGINT)])
+@pytest.mark.parametrize("app,sig", [("data2g-host", "SIGINT"), ("data2g-host", "SIGHUP"), ("data2g-gui", "SIGINT")])
 def test_signal_while_keyed_unkeys(tmp_path, request, app, sig):
     """A signal mid-burst (^C, a closed terminal) still ends with PTT off: Hamlib's dummy rig, keyed by a CONNECT."""
     binary = BINARY.with_name(app)
     if not binary.exists():
-        if request.config.getoption("--native"):
+        if app == "data2g-host" and request.config.getoption("--native"):  # the GUI is optional (no Qt Widgets)
             pytest.fail(f"--native: {binary} not built (tools/build_native.sh)")
         pytest.skip(f"{binary} not built")
     port = free_ports(3)
@@ -348,7 +347,7 @@ def test_signal_while_keyed_unkeys(tmp_path, request, app, sig):
         c = Client(port, p)
         c.send("CONNECT A B")
         wait([c], lambda: "PTT ON" in c.lines, 30, "PTT ON")
-        p.send_signal(sig)
+        p.send_signal(getattr(signal, sig))
         code = p.wait(timeout=20)
         c.close()
     finally:
