@@ -513,6 +513,7 @@ bool Station::handle_inner(RxBurst& rxb) {
     peer_drained = ext.count(T_DRAINED) > 0;
     peer_wants_dup = ext.count(T_DUPCTL) > 0;
     peer_reply_lost = core.reply_lost;
+    peer_abandon = ext.count(T_ABANDON) > 0;
     auto e_buf = ext.find(T_BUFFER);
     peer_queued = (e_buf != ext.end() && e_buf->second.size() == 2) ? (e_buf->second[0] << 8 | e_buf->second[1]) : 0;
     const bool seen = peer_burst && core.burst_seq == *peer_burst;

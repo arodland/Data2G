@@ -224,6 +224,7 @@ public:
     bool peer_drained = false;  // the peer's last burst ended its queued data (T_DRAINED)
     bool peer_wants_dup = false;
     bool peer_reply_lost = false;  // the peer's last burst said its previous reply was lost
+    bool peer_abandon = false;  // the peer's last burst carried T_ABANDON: it holds re-sliced data
     std::optional<int> peer_reply_recommend;
     TxSide tx;
     std::map<std::string, std::int64_t> stats;
