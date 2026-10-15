@@ -301,6 +301,7 @@ class Station:
     chat: bool = False  # my host's CHAT ON
     peer_chat: bool = False  # the peer's, from its last burst
     peer_queued: int = 0  # bytes the peer had queued at its last burst (T_BUFFER, chat only)
+    peer_drained: bool = False  # the peer's last burst ended its queued data (T_DRAINED)
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_lost: bool = False  # the peer's last burst said its previous reply was lost
     peer_reply_recommend: int | None = None  # ... for my control-only bursts
@@ -483,6 +484,10 @@ class Station:
             dup = 1  # nothing but control after all
         if dup == 2:
             core.ftype = F.ARQ_DUP
+        if new and not self._new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
+            # my host's data ends here: the peer may hold its reply for its
+            # host's answer (session.REPLY_HOLD_S). Only in the padding, like T_COMP
+            ext[F.T_DRAINED] = b""
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
         slots = [Slot(ctl_mask(self.direction, i, self.key), rv, p) for i, p in enumerate(ctl) for rv in range(dup)]
@@ -625,6 +630,7 @@ class Station:
         self.peer_recommend, self.peer_size_hint = core.recommend, core.size_hint
         self.peer_reply_recommend = ext[F.T_REPLY][0] if F.T_REPLY in ext and ext[F.T_REPLY] else None
         self.peer_chat = F.T_CHAT in ext
+        self.peer_drained = F.T_DRAINED in ext
         self.peer_wants_dup = F.T_DUPCTL in ext
         self.peer_reply_lost = core.reply_lost
         self.peer_queued = int.from_bytes(ext[F.T_BUFFER], "big") if len(ext.get(F.T_BUFFER, b"")) == 2 else 0

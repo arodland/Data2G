@@ -149,6 +149,8 @@ public:
     virtual void observe_energy(double /*snr_db*/, double /*now*/) {}
     // engine: the burst I asked the peer for last, its mode and seconds on air (nullopt: none)
     virtual std::optional<std::pair<std::string, double>> expected_reply() const { return std::nullopt; }
+    // payload bytes the next data burst will carry (nullopt: unknown; the host's BUFFER, the session's coalescing)
+    virtual std::optional<int> next_capacity(const Station&) const { return std::nullopt; }
 };
 
 struct Codeword {
@@ -219,6 +221,7 @@ public:
     bool chat;
     bool peer_chat = false;
     int peer_queued = 0;
+    bool peer_drained = false;  // the peer's last burst ended its queued data (T_DRAINED)
     bool peer_wants_dup = false;
     bool peer_reply_lost = false;  // the peer's last burst said its previous reply was lost
     std::optional<int> peer_reply_recommend;

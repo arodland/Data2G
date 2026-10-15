@@ -39,6 +39,7 @@ MAX_INFLATE = 1 << 16  # bytes one compressed codeword may inflate to
 T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), no session
 # packed callsign + the session key it identifies for: an ID frame (docs/arq.md §7a), mask 0
 T_ID = 16
+T_DRAINED = 17  # empty: this burst's new codewords end the sender's queued data (a hint: the peer may hold its reply)
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
 

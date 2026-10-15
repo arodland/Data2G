@@ -98,14 +98,25 @@ void Session::connect(const std::string& peer_, int cap_, double now) {
 }
 
 void Session::write(ByteView data) {
-    if (station) {
-        station->write(data);
-        if (build_at) {
-            build_at = -INF;  // an idle poll due: send it now, with the data
-            idle_wait = 0.0;
-        }
-    } else {
+    Station* st = station.get();
+    if (!st) {
         pending_write.insert(pending_write.end(), data.begin(), data.end());
+        return;
+    }
+    // CHAT OFF: a write to an empty buffer, less than a full burst, holds
+    // the idle poll or wake it brings forward COALESCE_S for more (session.py)
+    const bool holding = coalesce_until && now_ < *coalesce_until;
+    const bool fresh = holding || !st->tx.pending();
+    st->write(data);
+    const auto cap = policy->next_capacity(*st);
+    if (fresh && !chat && cap && st->new_available() < *cap) {
+        if (!holding) coalesce_until = now_ + COALESCE_S;
+    } else {
+        coalesce_until.reset();
+    }
+    if (build_at) {
+        build_at = coalesce_until ? *coalesce_until : -INF;  // an idle poll due: send it now (or at the hold's end), with the data
+        idle_wait = 0.0;
     }
 }
 
@@ -209,6 +220,7 @@ void Session::on_rx(RxBurst& rx, double now) {
     }
     Station* st = station.get();
     if (!st || !live(state)) return;
+    const size_t undrained = st->rx.out.size();
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
     heard(now);
     if (st->state == LinkState::FAILED) {
@@ -218,8 +230,13 @@ void Session::on_rx(RxBurst& rx, double now) {
     if (!st->rx.out.empty() || st->last_rx_data || st->tx.pending()) last_data = now;
     if (disc(now)) return;
     if (!master()) {
-        queue(st->build(), now);
-        st->answered();
+        if (st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty()) {
+            build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
+        } else {
+            build_at.reset();
+            queue(st->build(), now);
+            st->answered();
+        }
         return;
     }
     // the caller: go on now, or after an idle backoff when neither side has data
@@ -282,7 +299,7 @@ std::optional<double> Session::wake_time() {
         auto it = st->sent_seqs.find(st->latest);
         if ((it != st->sent_seqs.end() && !it->second.empty()) || !st->tx.pending()) return std::nullopt;
     }
-    return quiet_from + wake_wait;
+    return std::max(quiet_from + wake_wait, coalesce_until.value_or(-INF));
 }
 
 void Session::close(const std::string& why, TxBurstPtr final_burst, double now) {

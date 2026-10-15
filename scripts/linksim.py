@@ -536,14 +536,6 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
                 sent_data[w] += data
                 written[w] += n
                 t_write[i] = t
-        ends = {"a": 0, "b": 0}
-        for i, (w, n, _, _) in enumerate(steps):
-            if t_write[i] is not None:
-                ends[w] += n
-                if t_done[i] is None and delivered[w] >= ends[w]:
-                    t_done[i] = t
-        if all(x is not None for x in t_done):
-            break
         for me, other in ((a, b), (b, a)):
             if any(f <= t for f in hold[id(me)].values()):
                 continue
@@ -585,6 +577,15 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
         for w in "ab":
             assert bytes(got[w]) == bytes(sent_data[w][:len(got[w])])
             delivered[w] = len(got[w])
+        # delivered when read, as the host sees it (not at the next event)
+        ends = {"a": 0, "b": 0}
+        for i, (w, n, _, _) in enumerate(steps):
+            if t_write[i] is not None:
+                ends[w] += n
+                if t_done[i] is None and delivered[w] >= ends[w]:
+                    t_done[i] = t
+        if all(x is not None for x in t_done):
+            break
         if a.state == S.CLOSED and b.state == S.CLOSED:
             break
         # a held station's timers wait for the burst event that releases it

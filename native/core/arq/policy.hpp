@@ -167,7 +167,7 @@ public:
     void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
     void observe_energy(double snr_db, double now) override { shifter.observe_energy(snr_db, now); }
     std::optional<std::pair<std::string, double>> expected_reply() const override { return shifter.expected_reply(); }
-    int next_capacity(const Station& st) const { return shifter.next_capacity(view(st)); }  // the host's BUFFER
+    std::optional<int> next_capacity(const Station& st) const override { return shifter.next_capacity(view(st)); }
 };
 
 }  // namespace data2g::arq

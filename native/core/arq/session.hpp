@@ -35,6 +35,8 @@ inline constexpr double WAKE_GUARD_S = 1.0;
 inline constexpr double WAKE_JITTER_S = 1.0;
 inline constexpr int WAKE_TRIES = 2;
 inline constexpr int CHAT_WAKE_TRIES = 6;
+inline constexpr double COALESCE_S = 0.1;  // CHAT OFF: a short write to an idle link waits this long for more
+inline constexpr double REPLY_HOLD_S = 0.25;  // callee: a reply to a burst that brought the host data and ended the caller's (T_DRAINED) waits this long for its answer (session.py)
 inline constexpr double REPEAT_MAX_S = 3.0;
 
 // random.Random's two draws the session makes. Not bit-exact with Python's
@@ -101,6 +103,7 @@ public:
     std::int64_t nonce = 0;
     TxBurstPtr out;
     std::optional<double> due, deadline, build_at;
+    std::optional<double> coalesce_until;  // write(): an idle poll or wake held for more data
     std::optional<std::string> answer_mode;
     int tries = 0;
     double last_heard = 0, last_data = 0, idle_wait = 0;

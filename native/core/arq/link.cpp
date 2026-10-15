@@ -375,6 +375,12 @@ TxBurstPtr Station::build(bool fresh) {
     if (Bytes comp = pack_flags(flags); !comp.empty()) ext[T_COMP] = comp;
     if (dup == 2 && resend.empty() && fresh_cws.empty()) dup = 1;  // nothing but control after all
     if (dup == 2) core.ftype = ARQ_DUP;
+    if (!fresh_cws.empty() && new_available() <= 0 &&
+        ctl_bytes(ext, 0, false, 0) + 2 <= static_cast<std::int64_t>(n_ctl) * cpb) {
+        // my host's data ends here: the peer may hold its reply for its
+        // host's answer (session REPLY_HOLD_S). Only in the padding, like T_COMP
+        ext[T_DRAINED] = Bytes{};
+    }
     Control control{core, ext};
     const auto ctl = control.pack(cpb);
     core.n_ctl = control.core.n_ctl;
@@ -504,6 +510,7 @@ bool Station::handle_inner(RxBurst& rxb) {
     auto e_reply = ext.find(T_REPLY);
     peer_reply_recommend = (e_reply != ext.end() && !e_reply->second.empty()) ? std::optional<int>(e_reply->second[0]) : std::nullopt;
     peer_chat = ext.count(T_CHAT) > 0;
+    peer_drained = ext.count(T_DRAINED) > 0;
     peer_wants_dup = ext.count(T_DUPCTL) > 0;
     peer_reply_lost = core.reply_lost;
     auto e_buf = ext.find(T_BUFFER);
