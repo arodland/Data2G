@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -125,6 +126,22 @@ void install_arq_log() {
     arq::set_log_sink({[](const char*, int level) { return level >= g_level; },
                        [](const char*, int level, const std::string& msg) { log_line(level, msg); }});
 }
+
+namespace {
+std::atomic<bool> g_quit{false};
+extern "C" void on_quit_signal(int) { g_quit = true; }
+}  // namespace
+
+void quit_on_signals() {
+    std::signal(SIGINT, on_quit_signal);
+    std::signal(SIGTERM, on_quit_signal);
+#ifndef _WIN32
+    std::signal(SIGHUP, on_quit_signal);
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+}
+
+bool quit_requested() { return g_quit; }
 
 // --- the options -------------------------------------------------------------------------
 
@@ -1242,6 +1259,7 @@ void Station::start() {
             if (hc.ptt_method != rig::PttMethod::Vox) {
                 // no polls while keyed; resumed after the off, so none delays it
                 ptt = [r](bool on) {
+                    logf(DEBUG, "PTT %s", on ? "on" : "off");
                     if (on) {
                         r->pause_polling();
                         r->set_ptt(true);
@@ -1321,15 +1339,16 @@ void Station::stop() {
     if (!running_) return;
     running_ = false;
     stop_ = true;
-    if (cap_) cap_->close();
-    if (engine_thread_.joinable()) engine_thread_.join();
+    // the transmitter first: PTT drops now, not after the engine's step (a long decode, a dial wait) ends
     {
         std::lock_guard lock(tx_mu_);
         tx_stop_ = true;
     }
     tx_cv_.notify_all();
     if (tx_thread_.joinable()) tx_thread_.join();  // PTT is off when it returns
-    tx_q_.clear();
+    if (cap_) cap_->close();
+    if (engine_thread_.joinable()) engine_thread_.join();
+    tx_q_.clear();  // what the engine queued after the transmitter went
     if (engine_) engine_->stop();
     monitor_.reset();  // after the engine: nothing pushes to it now
     keyer_.reset();  // PTT off, if the rig was ever keyed

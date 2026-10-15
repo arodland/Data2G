@@ -326,3 +326,34 @@ def test_cli_rig_flags(request):
     ]:
         r = run(*args)
         assert r.returncode == 2 and says in r.stderr, (args, r.returncode, r.stderr[-300:])
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX signals")
+@pytest.mark.parametrize("app,sig", [("data2g-host", signal.SIGINT), ("data2g-host", signal.SIGHUP),
+                                     ("data2g-gui", signal.SIGINT)])
+def test_signal_while_keyed_unkeys(tmp_path, request, app, sig):
+    """A signal mid-burst (^C, a closed terminal) still ends with PTT off: Hamlib's dummy rig, keyed by a CONNECT."""
+    binary = BINARY.with_name(app)
+    if not binary.exists():
+        if request.config.getoption("--native"):
+            pytest.fail(f"--native: {binary} not built (tools/build_native.sh)")
+        pytest.skip(f"{binary} not built")
+    port = free_ports(3)
+    log = tmp_path / "log"
+    env = dict(os.environ, OMP_NUM_THREADS="1", QT_QPA_PLATFORM="offscreen", XDG_CONFIG_HOME=str(tmp_path))
+    p = subprocess.Popen([str(binary), "--mycall", "A", "--command-port", str(port), "--kiss-port", str(port + 2),
+                          "--audio-io", "pipe:/dev/zero,/dev/null", "--rig-model", "1", "--log-level", "DEBUG",
+                          "--stats-interval", "0"], stdout=subprocess.DEVNULL, stderr=open(log, "w"), env=env)
+    try:
+        c = Client(port, p)
+        c.send("CONNECT A B")
+        wait([c], lambda: "PTT ON" in c.lines, 30, "PTT ON")
+        p.send_signal(sig)
+        code = p.wait(timeout=20)
+        c.close()
+    finally:
+        if p.poll() is None:
+            p.kill()
+    text = log.read_text()
+    ptt = re.findall(r"PTT (on|off)$", text, re.M)
+    assert code == 0 and ptt and ptt[0] == "on" and ptt[-1] == "off", (code, ptt, text[-2000:])

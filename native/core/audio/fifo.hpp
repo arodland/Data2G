@@ -131,6 +131,7 @@ public:
     void flush();
     // Waits until everything queued has left the sound card (FIFO empty,
     // then the backend's output latency), so PTT can drop without clipping.
+    // Gives up after 1 s with nothing pulled (a stopped device).
     void drain();
 
     // Device thread: fills `out` (mono), zero-padding a shortfall. Returns

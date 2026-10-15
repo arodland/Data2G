@@ -4,8 +4,8 @@
 
 #include <QApplication>
 #include <QSettings>
+#include <QTimer>
 
-#include <csignal>
 #include <cstdio>
 
 #include "app/station.hpp"
@@ -29,10 +29,13 @@ int main(int argc, char** argv) {
     }
     app::g_level = *level;
     app::install_arq_log();
-#ifndef _WIN32
-    std::signal(SIGPIPE, SIG_IGN);  // --audio-io pipes, sockets: an error, not death
-#endif
+    app::quit_on_signals();
     gui::MainWindow w(a, store);
     w.show();
+    QTimer quit_check;  // a signal quits like closing the window: the station stops, PTT off
+    QObject::connect(&quit_check, &QTimer::timeout, [] {
+        if (app::quit_requested()) QApplication::quit();
+    });
+    quit_check.start(100);
     return QApplication::exec();
 }
