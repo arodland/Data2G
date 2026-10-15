@@ -13,8 +13,10 @@ backlog (see LATENCY_S).
 A calls B, both send `--warm` bytes, then A writes `--bytes` of random
 data at once; the time runs from that write until A holds every byte
 acked (B's copy checked). As run.sh with A_BYTES=n, B_BYTES=0, without Pat.
+With `--reverse`, B (the callee) writes the bulk data and A receives it: as
+A_BYTES=0, B_BYTES=n.
 
-    python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0]
+    python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0] [--reverse]
 """
 import argparse
 import logging
@@ -48,6 +50,10 @@ def log_arg(ap):
     """--log-level: data2g's log (data2g-host's), to stderr. Unconfigured,
     Python prints its warnings bare (receiver "burst lost" lines)."""
     ap.add_argument("--log-level", default="ERROR", help="data2g's log on stderr (the host's is INFO)")
+
+
+def reverse_arg(ap):
+    ap.add_argument("--reverse", action="store_true", help="the callee sends the bulk data, the caller receives")
 
 
 def log_setup(a):
@@ -91,8 +97,10 @@ class Side:
         return len(s._pending_write) + (len(s.station.tx.buf) if s.station else 0)
 
 
-def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=3600.0, record=None):
-    """-> dict: phase reached ('done' or where it failed), times, rates."""
+def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=3600.0, record=None,
+        reverse=False):
+    """-> dict: phase reached ('done' or where it failed), times, rates.
+    reverse: the callee (B) sends the bulk data, not the caller (A)."""
     fade = None
     if chan != "awgn":
         dop, dly = (map(float, chan.split(":")) if ":" in chan else
@@ -130,16 +138,17 @@ def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=36
         return dict(res, phase="exchange", t=a.eng.now)
     assert bytes(got_b) == wa and bytes(got_a) == wb, "warm-up data corrupted"
     data = rng.bytes(nbytes)
-    got_b.clear()
-    a.airtime.clear()
+    tx, got = (b, got_a) if reverse else (a, got_b)
+    got.clear()
+    tx.airtime.clear()
     t0 = a.eng.now
-    a.eng.session.write(data)
-    if not until(lambda: a.unacked() == 0 and len(got_b) >= nbytes):
-        return dict(res, phase="bulk", t=a.eng.now, delivered=len(got_b))
-    assert bytes(got_b) == data, "bulk data corrupted"
+    tx.eng.session.write(data)
+    if not until(lambda: tx.unacked() == 0 and len(got) >= nbytes):
+        return dict(res, phase="bulk", t=a.eng.now, delivered=len(got))
+    assert bytes(got) == data, "bulk data corrupted"
     dt = a.eng.now - t0
     return dict(res, phase="done", t=a.eng.now, seconds=dt, bps=8 * nbytes / dt, bpm=60 * nbytes / dt,
-                airtime=a.airtime)
+                airtime=tx.airtime)
 
 
 def top2(airtime: dict) -> str:
@@ -159,11 +168,12 @@ def main():
     ap.add_argument("--latency", type=float, default=LATENCY_S, help="one-way audio latency, s")
     ap.add_argument("--record", metavar="DIR", help="record both stations (DIR/rec_a, rec_b), as data2g-host does")
     ap.add_argument("--limit", type=float, default=3600.0, help="give up after this much simulated time, s")
+    reverse_arg(ap)
     log_arg(ap)
     a = ap.parse_args()
     log_setup(a)
-    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record)
-    head = f"{a.channel} {a.snr:g} dB seed {a.seed}:"
+    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record, a.reverse)
+    head = f"{a.channel} {a.snr:g} dB seed {a.seed}{' reverse' if a.reverse else ''}:"
     if r["phase"] == "done":
         print(f"{head} {a.bytes} B in {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min"
               f" (connected at {r['t_connect']:.1f} s; {top2(r['airtime'])})")
