@@ -498,7 +498,7 @@ def _gear_substitutions(native):
 
     T, A = native.timing, native.arq
     py = {k: getattr(modem, k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "frames_on_air",
-                                         "burst_end", "head_samples", "burst_seconds")}
+                                         "burst_end", "head_samples", "receive_head", "burst_seconds")}
     py.update({f"modes.{k}": getattr(modes, k) for k in ("burst_seconds", "ctl_payload_bytes", "max_ctl", "min_cw")})
     py.update({f"G.{k}": getattr(G, k) for k in ("width_hz", "ctl_slots", "slots_for")})
     py["predict_outcome"] = P.predict_outcome
@@ -527,7 +527,8 @@ def _gear_substitutions(native):
     max_ctl = by_spec(A.max_ctl, py["modes.max_ctl"])
     min_cw = by_spec(lambda n, data: A.min_cw(n, bool(data)), py["modes.min_cw"])
     subs = {
-        **{(modem, k): by_band(k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "head_samples")},
+        **{(modem, k): by_band(k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "head_samples",
+                                               "receive_head")},
         (modem, "frames_on_air"): by_spec(T.frames_on_air, py["frames_on_air"], own),
         (modem, "burst_end"): burst_end,
         (modem, "burst_seconds"): by_spec(T.burst_seconds, py["burst_seconds"], own),

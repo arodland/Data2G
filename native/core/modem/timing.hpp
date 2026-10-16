@@ -23,6 +23,7 @@ std::optional<int> copy_frame(std::string_view band, int n_f);  // nullopt: no h
 int frames_on_air(const config::Submode& spec, int n_cw);
 std::int64_t burst_end(std::int64_t p0, const config::Submode& spec, int n_cw);
 int head_samples(std::string_view band);
+int receive_head(std::string_view band);  // receive(head=...)'s audio from a found preamble's first sample
 double burst_seconds(const config::Submode& spec, int n_cw);
 
 }  // namespace data2g::modem

@@ -33,7 +33,7 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 from . import codes, modem  # noqa: E402
-from .config import BANDS, FS, LEADIN_SAMPLES, NSYM, SNR_REF_BW_HZ, max_codewords  # noqa: E402
+from .config import BANDS, FS, LEADIN_SAMPLES, SNR_REF_BW_HZ, max_codewords  # noqa: E402
 
 log = logging.getLogger("data2g.tnc")
 
@@ -593,7 +593,7 @@ class Receiver:
                 continue
             s0 = max(0, p["start"] - LEADIN_SAMPLES - self.off)
             seg = self.buf[s0 : p["end"] + LEADIN_SAMPLES - self.off]
-            head = p["start"] - self.off - s0 + modem.head_samples(p["band"]) + NSYM + 3 * modem.M
+            head = p["start"] - self.off - s0 + modem.receive_head(p["band"])
             try:
                 if "copy" in p:
                     at = self.off + s0  # seg's stream index

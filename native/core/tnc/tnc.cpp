@@ -642,7 +642,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         const int64_t s1 = std::clamp<int64_t>(p.end() + config::LEADIN_SAMPLES - off_, s0, len());
         req.seg.assign(buf_.begin() + s0, buf_.begin() + s1);
         req.at = off_ + s0;
-        req.head = p.start() - off_ - s0 + modem::head_samples(p.ofdm().band) + config::NSYM + 3 * config::M;
+        req.head = p.start() - off_ - s0 + modem::receive_head(p.ofdm().band);
         req.audio_hi = s1 - s0;
         out.push_back(std::move(req));
         last_start_ = p.start();

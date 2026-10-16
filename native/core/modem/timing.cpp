@@ -56,6 +56,9 @@ int head_samples(std::string_view name) {
     return copies(name) ? n + (HEADER_COPY_AFTER + 1) * FRAME_SAMPLES : n;
 }
 
+// head_samples, plus room for best_header's reads up to two repeats late (2 M) and a symbol and a repeat to spare
+int receive_head(std::string_view name) { return head_samples(name) + NSYM + 3 * M; }
+
 double burst_seconds(const Submode& spec, int n_cw) {
     const std::int64_t n = LEADIN_SAMPLES + preamble_samples(band(spec.sync_band)) + header_samples(spec.sync_band) +
                    static_cast<std::int64_t>(frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM + LEADOUT_SAMPLES;

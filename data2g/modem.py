@@ -271,6 +271,14 @@ def head_samples(band: str) -> int:
     return n + (HEADER_COPY_AFTER + 1) * FRAME_SAMPLES if band in HEADER_COPY_BANDS else n
 
 
+def receive_head(band: str) -> int:
+    """From the first sample of a preamble a streaming receiver found, the
+    audio to pass as receive(head=...): head_samples, plus room for
+    _best_header's reads up to two repeats late (2 M) and a symbol and a
+    repeat to spare."""
+    return head_samples(band) + NSYM + 3 * M
+
+
 def burst_seconds(spec: SubmodeSpec, n_cw: int) -> float:
     """On-air length of an n_cw-codeword burst, lead-in/out silence included."""
     sb = BANDS[spec.sync_band]
