@@ -15,7 +15,7 @@ from functools import lru_cache
 import numpy as np
 
 from .. import codes, constellation, cpm, equalizer, modem
-from ..waveform import ofdm
+from ..waveform import dsp, ofdm
 from . import predictor as P
 from .frames import SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
@@ -57,7 +57,6 @@ def peak_db(submode: str, cap: int = 0) -> float:
 
 @lru_cache(maxsize=None)
 def _peak_db(submode: str, cap: int) -> float:
-    from .. import hfchannel
     from .link import Slot, TxBurst, ctl_mask, data_mask
 
     spec = MODES[submode]
@@ -65,7 +64,7 @@ def _peak_db(submode: str, cap: int) -> float:
     rand = lambda sp: bytes(rng.integers(0, 256, codes.payload_bytes(sp), dtype=np.uint8))  # noqa: E731
     burst = TxBurst(submode, [Slot(ctl_mask(0, 0, 5), 0, rand(ctl_spec(spec))), Slot(data_mask(0, 1, 5), 0, rand(spec))], 0, cap)
     x = tx_audio(burst)
-    return round(float(10 * np.log10(np.max(np.abs(hfchannel._analytic(x)) ** 2) / 2 / hfchannel.active_power(x))), 3)
+    return round(float(10 * np.log10(np.max(dsp.envelope(x) ** 2) / 2 / dsp.active_power(x))), 3)
 
 
 def tx_audio(burst) -> np.ndarray:

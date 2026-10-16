@@ -6,6 +6,8 @@
 - tx_condition: envelope clip and filter, the last TX step (modem's OFDM
   bursts, cpm.bandpass).
 - papr_db: envelope peak-to-average, for tests and studies.
+- envelope, active_power: Python only, for the channel simulator
+  (hfchannel's SNRs) and arq/phy.peak_db (frozen into generated tables).
 """
 
 from math import gcd
@@ -119,6 +121,19 @@ def tx_condition(
         if project and i < len(overshoot):
             x = project(x)
     return x / np.sqrt(np.mean(x[active] ** 2))
+
+
+def envelope(x: np.ndarray) -> np.ndarray:
+    """Real passband audio's envelope, |analytic signal|."""
+    return np.abs(signal.hilbert(x))
+
+
+def active_power(x: np.ndarray) -> float:
+    """Mean power over the active portion (envelope above 10% of the
+    overall RMS), so lead-in/out silence doesn't skew it."""
+    env = envelope(x)
+    active = env > 0.1 * np.sqrt(np.mean(x**2))
+    return float(np.mean(x[active] ** 2) if active.any() else np.mean(x**2))
 
 
 def papr_db(x: np.ndarray) -> float:
