@@ -23,7 +23,8 @@ decoders_torch has it on torch for GPU studies.
 
 Native: native/core/ldpc (shift tables compiled in from
 codes_data/ldpc_shifts.npz). Parity: tests/test_native_ldpc.py; under
-`pytest --native` qc_code and Decoder are substituted.
+`pytest --native` qc_code and Decoder (and MinSumDecoder, its old name)
+are substituted.
 """
 
 from dataclasses import dataclass, field

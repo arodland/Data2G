@@ -32,8 +32,9 @@ void bind_host(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
-    // Bumped when the module's Python-facing signatures change, so tests/native_subs (ABI)
-    // refuses a stale build instead of failing confusingly.
+    // Bumped when the module's Python-facing signatures change, so
+    // tests/native_subs (its ABI) refuses a stale build instead of failing
+    // confusingly.
     m.attr("__abi__") = 2;
     data2g::bind::bind_codes(m);
     data2g::bind::bind_config(m);
