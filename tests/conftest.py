@@ -96,7 +96,7 @@ def _substitutions(native):
     def frozen(spec):
         if config.SUBMODES.get(spec.name) != spec:
             return py_frozen(spec)
-        d = {"fingerprint": codes._fingerprint(spec), "perm": native.codes.interleaver(spec.name)}
+        d = {"fingerprint": codes.fingerprint(spec), "perm": native.codes.interleaver(spec.name)}
         if spec.code == "polar":
             d["info_pos"] = native.codes.info_pos(spec.name)
         return d

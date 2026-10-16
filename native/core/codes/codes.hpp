@@ -1,5 +1,13 @@
-// data2g/codes.py: CRCs, the PN9 scrambler, interleavers, and the codec
-// (encode, HARQ combining, batched decode) over ldpc:: and polar::.
+// data2g/codes.py: the codec over ldpc:: and polar:: (which know nothing of
+// submodes): CRC framing, the PN9 scrambler, interleavers, burst order
+// (spread/despread), encode, IR combining and the batched decodes.
+//
+// Keyed by codes::Spec (Python's codes.CodeSpec): a submode, a CPM mode or a
+// CPM control codeword, with its interleaver and info set from the generated
+// tables. Callers: modem (encode, spread, decode_many), arq::phy (IR,
+// decode_raw + check, decode_posterior), arq::modes (the rules on raw rows).
+// Parity with Python: tests/test_native_codes.py through native.codes
+// (bindings/bind_codes.cpp).
 #pragma once
 
 #include <cstdint>

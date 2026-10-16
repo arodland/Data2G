@@ -1,28 +1,78 @@
-"""Payload codecs: bytes <-> coded bits, and soft bits -> bytes.
+"""Payload codecs: bytes <-> coded bits, and soft bits -> bytes. The codes
+themselves (ldpc.py, polar.py) know nothing of submodes: this module keys
+them by spec (CodeSpec) and frames what they carry.
+
+TX: payload -> info_bits (payload, its CRC XORed with the ARQ's mask, zero
+fill, PN9-scrambled by burst position) -> encode_info (LDPC or polar, then
+the BICM interleaver) -> spread (burst symbol order). RX undoes it:
+despread -> a decode -> descramble and check the CRC.
+
+  framing       crc_bits, payload_bytes, info_bits, payloads, crc_ok
+  codes, format ldpc_code, polar_code, frozen (format/*.npz), fingerprint
+  interleaving  interleaver, compute_interleaver (design time)
+  burst order   spread, despread
+  scrambling    scramble_seed, scrambler, PLAIN, flip, descramble
+  encode        encode, encode_info
+  IR (HARQ)     rv_cycle, rv_positions, buffer_len, ir_extent, combine,
+                decode_buffer
+  decode        decode_many: a burst, masks known (modem);
+                decode_raw + check: decode once, try each CRC mask (ARQ);
+                decode_posterior: with the LDPC posterior (ARQ's DD);
+                decode_llrs: info bits and success, no framing
+  studies only  decode_llrs(device=) (torch: decoders_torch),
+                label_reliability; decode (one codeword) is for tests
+
+Callers: modem.py and cpm.py (encode, spread, despread, combine,
+decode_many), arq/phy.py (the IR and decode entry points), the ARQ, KISS
+and the TNC (payload_bytes, rv_cycle).
 
 Soft convention everywhere: positive means bit 0 (an LLR log P0/P1).
 Every codeword's info bits end in a CRC over its payload: CRC-16/CCITT-
-FALSE for short codewords, CRC-32 (zlib) once k >= 512, where CRC-16's
-2^-16 miss rate would dominate the 1e-6 undetected-error target.
-
+FALSE for short LDPC codewords, CRC-32 (zlib) once k >= 512, where
+CRC-16's 2^-16 miss rate would dominate the 1e-6 undetected-error target;
+CRC-24C on polar (crc_bits).
 Coded bits leave here already interleaved (bit-interleaved coded
-modulation): `encode` returns them in constellation-mapping order and
-`decode` takes soft bits in that order.
+modulation): `encode` returns them in constellation-mapping order and the
+decoders take soft bits in that order.
+
+Native: native/core/codes (codes::Spec: CodeSpec with the interleaver,
+info set and CRC size looked up once). Parity:
+tests/test_native_codes.py, and tests/conftest.py's _codes_substitutions
+swaps these functions for C++ under pytest --native.
 """
 
 import binascii
 from pathlib import Path
 from functools import lru_cache
+from typing import Protocol
 
 import numpy as np
 
 from . import constellation, ldpc, polar
-from .config import SubmodeSpec
+
+
+class CodeSpec(Protocol):
+    """What this module reads of a spec: config.SubmodeSpec and
+    cpm.CpmSpec both have it. Specs key lru_caches, so they are frozen
+    (hashable). Native: codes::Spec, built from config::SUBMODES and the
+    CPM tables."""
+    name: str
+    code: str  # "ldpc" | "polar"
+    k: int  # info bits incl. CRC
+    coded_bits: int
+    index: int  # interleaver seed and frozen-file name
+    constellation: str  # LDPC interleaver: label reliabilities ("fsk*": none)
+    band: str  # frozen-file name
+    frames_per_cw: int  # fingerprint only
+    headroom: float  # fingerprint only
+
 
 INTERLEAVER_SEED = 2026
 
 
-def crc_bits(spec: SubmodeSpec) -> int:
+# --- framing: CRCs -------------------------------------------------------------------
+
+def crc_bits(spec: CodeSpec) -> int:
     """CRC-24 on polar codewords: CRC-aided list decoding takes the first of
     its 8 paths whose CRC checks, so a failed decode passed CRC-16 8 in 65536
     times, and a random control word fails the session (scripts/crc_study.py;
@@ -53,7 +103,7 @@ def crc24(data: bytes, crc: int = 0xFFFFFF) -> int:
     return crc
 
 
-def payload_bytes(spec: SubmodeSpec) -> int:
+def payload_bytes(spec: CodeSpec) -> int:
     return (spec.k - crc_bits(spec)) // 8
 
 
@@ -67,8 +117,10 @@ def _with_crc(payload: bytes, n_crc: int, mask: int = 0) -> bytes:
     return payload + (binascii.crc32(payload) ^ mask & 0xFFFFFFFF).to_bytes(4, "big")
 
 
+# --- the codes per spec, and frozen formats ------------------------------------------
+
 @lru_cache(maxsize=None)
-def ldpc_code(spec: SubmodeSpec) -> ldpc.QCLDPC:
+def ldpc_code(spec: CodeSpec) -> ldpc.QCLDPC:
     return ldpc.qc_code(spec.k, spec.coded_bits)
 
 
@@ -82,7 +134,7 @@ LDPC_ITERS = 40  # the modem's LDPC decoder iterations (native codes::ITERS)
 FORMAT_DIR = Path(__file__).parent / "format"
 
 
-def _fingerprint(spec: SubmodeSpec) -> str:
+def fingerprint(spec: CodeSpec) -> str:
     """Everything a frozen file depends on; a mismatch means it is stale.
     (The empty field was a protograph path, never set; kept so the frozen
     fingerprints still match.)"""
@@ -90,7 +142,7 @@ def _fingerprint(spec: SubmodeSpec) -> str:
             f"{spec.k}||{spec.headroom:g}")
 
 
-def frozen(spec: SubmodeSpec) -> dict | None:
+def frozen(spec: CodeSpec) -> dict | None:
     """The committed on-air data for a submode (tools/freeze_format.py),
     or None if there is none for exactly this spec (a candidate, or a
     submode whose parameters changed since it was frozen)."""
@@ -98,15 +150,17 @@ def frozen(spec: SubmodeSpec) -> dict | None:
     if not path.exists():
         return None
     d = np.load(path)
-    return dict(d) if str(d["fingerprint"]) == _fingerprint(spec) else None
+    return dict(d) if str(d["fingerprint"]) == fingerprint(spec) else None
 
 
 @lru_cache(maxsize=None)
-def polar_code(spec: SubmodeSpec) -> polar.PolarCode:
+def polar_code(spec: CodeSpec) -> polar.PolarCode:
     f = frozen(spec)
     info = tuple(int(i) for i in f["info_pos"]) if f is not None and "info_pos" in f else None
     return polar.PolarCode(spec.k, spec.coded_bits, design_snr_db=POLAR_DESIGN_SNR_DB, frozen_override=info)
 
+
+# --- interleaving (BICM) -------------------------------------------------------------
 
 def label_reliability(points: np.ndarray, rate: float, n: int = 20000) -> np.ndarray:
     """Per-label-bit BMI on AWGN at the operating point: the Es/N0 where
@@ -131,13 +185,13 @@ def label_reliability(points: np.ndarray, rate: float, n: int = 20000) -> np.nda
 
 
 @lru_cache(maxsize=None)
-def interleaver(spec: SubmodeSpec) -> np.ndarray:
+def interleaver(spec: CodeSpec) -> np.ndarray:
     """The frozen permutation if this submode has one, else computed."""
     f = frozen(spec)
     return f["perm"] if f is not None else compute_interleaver(spec)
 
 
-def _deinterleave(spec: SubmodeSpec, soft, dtype=None):
+def _deinterleave(spec: CodeSpec, soft, dtype=None):
     """(B, coded_bits) soft bits in mapping order -> code order: out[:,
     perm[i]] = soft[:, i], undoing encode_info's coded[:, perm]. numpy (in
     `dtype`, default soft's), or torch on soft's device."""
@@ -153,7 +207,7 @@ def _deinterleave(spec: SubmodeSpec, soft, dtype=None):
     return out
 
 
-def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
+def compute_interleaver(spec: CodeSpec) -> np.ndarray:
     """perm[i] = which code bit goes to mapping position i (label bit
     i % m of symbol i // m).
 
@@ -178,6 +232,8 @@ def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
         perm[rng.permutation(np.arange(lab, n, m))] = order[g * per : (g + 1) * per]
     return perm
 
+
+# --- burst order, scrambling, encode -------------------------------------------------
 
 def spread(coded, m: int):
     """(..., n_cw, N) coded bits -> (..., n_cw * N) in burst order: every
@@ -211,7 +267,7 @@ def scramble_seed(index: int = 0) -> int:
 
 
 @lru_cache(maxsize=None)
-def flip(spec: SubmodeSpec, index: int, rv: int = 0) -> np.ndarray:
+def flip(spec: CodeSpec, index: int, rv: int = 0) -> np.ndarray:
     """(coded_bits,) +-1 in mapping order: soft bits of a codeword sent at
     burst position `index` and RV `rv`, times this, are those of the same
     codeword unscrambled (the code is linear: C(u ^ s) = C(u) ^ C(s)).
@@ -236,7 +292,7 @@ def scrambler(k: int, seed: int = 0x1FF) -> np.ndarray:
     return out
 
 
-def info_bits(spec: SubmodeSpec, payload: bytes, crc_mask: int = 0, index: int = 0) -> np.ndarray:
+def info_bits(spec: CodeSpec, payload: bytes, crc_mask: int = 0, index: int = 0) -> np.ndarray:
     """payload -> the k info bits the encoder takes: payload, masked CRC,
     zero fill, scrambled."""
     if len(payload) != payload_bytes(spec):
@@ -245,13 +301,13 @@ def info_bits(spec: SubmodeSpec, payload: bytes, crc_mask: int = 0, index: int =
     return np.pad(bits, (0, spec.k - len(bits))) ^ scrambler(spec.k, scramble_seed(index))
 
 
-def encode(spec: SubmodeSpec, payload: bytes, rv: int = 0, crc_mask: int = 0, index: int = 0) -> np.ndarray:
+def encode(spec: CodeSpec, payload: bytes, rv: int = 0, crc_mask: int = 0, index: int = 0) -> np.ndarray:
     """One codeword's payload -> (coded_bits,) array of 0/1, interleaved.
     `index`: its position in the burst (the scrambler seed)."""
     return encode_info(spec, info_bits(spec, payload, crc_mask, index)[None], rv)[0]
 
 
-def encode_info(spec: SubmodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
+def encode_info(spec: CodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
     """(B, k) info bits (CRC included) -> (B, coded_bits), interleaved.
     `rv`: redundancy version (rv_positions); 0 is the first transmission."""
     if rv and spec.code == "ldpc":
@@ -269,16 +325,16 @@ def encode_info(spec: SubmodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
 # repeats (Chase). Polar: every RV is the same codeword (Chase).
 # Soft bits accumulate over the buffer in code order ("buffer": (B, L)).
 
-def rv_cycle(spec: SubmodeSpec) -> int:
+def rv_cycle(spec: CodeSpec) -> int:
     """Distinct redundancy versions: resend r uses RV r mod this."""
     return 4 if spec.code == "ldpc" else 1
 
 
-def buffer_len(spec: SubmodeSpec) -> int:
+def buffer_len(spec: CodeSpec) -> int:
     return ldpc_code(spec).mother().n if spec.code == "ldpc" else spec.coded_bits
 
 
-def rv_positions(spec: SubmodeSpec, rv: int) -> np.ndarray:
+def rv_positions(spec: CodeSpec, rv: int) -> np.ndarray:
     """Buffer positions RV `rv` carries, in code order."""
     n = spec.coded_bits
     if spec.code != "ldpc":
@@ -286,7 +342,7 @@ def rv_positions(spec: SubmodeSpec, rv: int) -> np.ndarray:
     return (rv % rv_cycle(spec) * n + np.arange(n)) % buffer_len(spec)
 
 
-def combine(spec: SubmodeSpec, buf: np.ndarray | None, soft: np.ndarray, rvs) -> np.ndarray:
+def combine(spec: CodeSpec, buf: np.ndarray | None, soft: np.ndarray, rvs) -> np.ndarray:
     """Add (B, coded_bits) soft bits in mapping order, sent at RVs `rvs`,
     into the (B, L) buffer (None: a fresh one). -> the buffer."""
     soft = np.atleast_2d(soft)
@@ -298,14 +354,14 @@ def combine(spec: SubmodeSpec, buf: np.ndarray | None, soft: np.ndarray, rvs) ->
     return buf
 
 
-def ir_extent(spec: SubmodeSpec, max_rv: int) -> int:
+def ir_extent(spec: CodeSpec, max_rv: int) -> int:
     """The buffer positions an LDPC decode reads with RVs up to `max_rv`
     received: the mother code is cut there (unreceived parity would only
     slow it)."""
     return min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
 
 
-def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
+def decode_buffer(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
     """(B, L) combined buffers, with RVs up to `max_rv` received -> [(payload,
     crc_ok)]: LDPC decodes the mother code cut to ir_extent."""
     masks = np.broadcast_to(crc_mask, len(buf))
@@ -317,7 +373,7 @@ def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=
     return payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
 
 
-def decode_posterior(spec: SubmodeSpec, soft=None, buf=None, max_rv: int = 0, rv: int = 0) -> tuple:
+def decode_posterior(spec: CodeSpec, soft=None, buf=None, max_rv: int = 0, rv: int = 0) -> tuple:
     """One LDPC decode as decode_raw (`soft`: a slot's (coded_bits,) soft
     bits alone) or decode_buffer (`buf`: a (1, L) combined buffer, RVs up
     to `max_rv`, the slot sent at `rv`) would -> (info bits (k,) as decoded,
@@ -337,11 +393,13 @@ def decode_posterior(spec: SubmodeSpec, soft=None, buf=None, max_rv: int = 0, rv
 
 
 @lru_cache(maxsize=None)
-def _ext_decoder(spec: SubmodeSpec, extent: int):
+def _ext_decoder(spec: CodeSpec, extent: int):
     return ldpc.Decoder(ldpc_code(spec).mother(extent))
 
 
-def payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
+# --- decode --------------------------------------------------------------------------
+
+def payloads(spec: CodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
     """Decoded (scrambled) info bits -> [(payload, ok)]; row i was sent
     with CRC mask masks[i] at burst position index[i] (default: i). ok:
     the CRC checks and the decoder converged (LDPC: every parity check
@@ -361,12 +419,12 @@ def payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=N
     return out
 
 
-def decode(spec: SubmodeSpec, soft: np.ndarray) -> tuple[bytes, bool]:
+def decode(spec: CodeSpec, soft: np.ndarray) -> tuple[bytes, bool]:
     """(coded_bits,) soft values in mapping order -> (payload, crc_ok)."""
     return decode_many(spec, soft[None])[0]
 
 
-def decode_many(spec: SubmodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
+def decode_many(spec: CodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
     """(B, coded_bits) -> [(payload, crc_ok)] in one batched decode: 64
     polar codewords take 0.04-0.08 s batched, 1.6-3.3 s one at a time
     (scripts/decode_latency.py). `crc_mask`, `index`: per row, the CRC mask
@@ -376,7 +434,7 @@ def decode_many(spec: SubmodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> 
     return payloads(spec, *decode_llrs(spec, soft, crc_mask=masks, index=idx), masks, idx)
 
 
-def decode_llrs(spec: SubmodeSpec, llr, iters: int = LDPC_ITERS, device=None, crc_mask=0, index=0):
+def decode_llrs(spec: CodeSpec, llr, iters: int = LDPC_ITERS, device=None, crc_mask=0, index=0):
     """Batched decode: (B, coded_bits) LLRs in mapping order (numpy, or
     torch with `device`) -> (info bits (B, k) numpy uint8, success (B,)
     numpy bool). LDPC: success = H satisfied. Polar: the first list path
@@ -391,7 +449,7 @@ def decode_llrs(spec: SubmodeSpec, llr, iters: int = LDPC_ITERS, device=None, cr
     return _decode_code_order(spec, _decoder(spec, device), deint, iters, crc_mask, index)
 
 
-def decode_raw(spec: SubmodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray, np.ndarray]:
+def decode_raw(spec: CodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray, np.ndarray]:
     """(B, coded_bits) soft bits in mapping order -> (candidates (B, L, k)
     uint8, descrambled; usable (B, L) bool), with the CRC mask left open:
     decode once, then check() each mask in question. LDPC: one candidate,
@@ -410,12 +468,12 @@ def decode_raw(spec: SubmodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndar
     return np.stack([descramble(spec, c, i) for c, i in zip(cands, idx)]), usable
 
 
-def descramble(spec: SubmodeSpec, bits: np.ndarray, index: int) -> np.ndarray:
+def descramble(spec: CodeSpec, bits: np.ndarray, index: int) -> np.ndarray:
     """(..., k) decoded info bits sent at burst position `index` -> unscrambled."""
     return bits.astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(index)))[: bits.shape[-1]]
 
 
-def check(spec: SubmodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) -> bytes | None:
+def check(spec: CodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) -> bytes | None:
     """One row of decode_raw -> the payload of its first usable candidate
     whose CRC passes under `crc_mask`, or None."""
     n_crc = crc_bits(spec)
@@ -432,7 +490,7 @@ def _numpy(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
 
-def _decode_code_order(spec: SubmodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_mask=0, index=0):
+def _decode_code_order(spec: CodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_mask=0, index=0):
     """decode_llrs after deinterleaving: LLRs in the decoder's code order."""
     if spec.code == "ldpc":
         out, ok = dec.decode(deint, iters=iters)
@@ -445,7 +503,7 @@ def _decode_code_order(spec: SubmodeSpec, dec, deint, iters: int = LDPC_ITERS, c
     return paths[np.arange(len(paths)), pick], crc.any(axis=1)
 
 
-def crc_ok(spec: SubmodeSpec, bits: np.ndarray, crc_mask=0, index=0) -> np.ndarray:
+def crc_ok(spec: CodeSpec, bits: np.ndarray, crc_mask=0, index=0) -> np.ndarray:
     """(B, >= payload+CRC bits) decoded (scrambled) info bits -> (B,) CRC
     matches, row i sent with crc_mask[i] at burst position index[i]."""
     n_crc = crc_bits(spec)
@@ -458,7 +516,7 @@ def crc_ok(spec: SubmodeSpec, bits: np.ndarray, crc_mask=0, index=0) -> np.ndarr
 
 
 @lru_cache(maxsize=None)
-def _decoder(spec: SubmodeSpec, device=None):
+def _decoder(spec: CodeSpec, device=None):
     """The numpy decoder, or with `device` the torch one there (studies)."""
     if device is not None:
         from . import decoders_torch
