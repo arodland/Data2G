@@ -32,9 +32,9 @@
 #ifdef DATA2G_HAVE_AUDIO
 #include "audio/card.hpp"
 #endif
-// Always: its types and constants need no libhamlib (only its functions,
-// called under DATA2G_HAVE_RIG, do).
+#ifdef DATA2G_HAVE_RIG
 #include "rig/hamlib/hamlib.hpp"
+#endif
 
 namespace data2g::app {
 

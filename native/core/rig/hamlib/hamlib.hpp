@@ -6,6 +6,9 @@
 //
 // Not lifted: serial_defaults() (only SSTVAE's Android bridge needs it; it
 // reads struct rig_caps the same way model_info() does here).
+//
+// The settings themselves (HamlibConfig, its enums, RigModel) are
+// rig/config.hpp, in data2g_core: only the functions here need libhamlib.
 #pragma once
 
 #include <functional>
@@ -15,26 +18,9 @@
 #include <vector>
 
 #include "rig/backend.hpp"
+#include "rig/config.hpp"
 
 namespace data2g::rig {
-
-inline constexpr int MODEL_DUMMY = 1;
-inline constexpr int MODEL_NET_RIGCTL = 2;
-
-// What the model's rig_pathname names, so a settings page shows only the
-// fields that mean something: a serial device and its line settings, a
-// host:port, some other device path, or nothing (the dummy).
-enum class PortType { None, Serial, Network, Other };
-
-struct RigModel {
-    int model = 0;
-    std::string manufacturer, name, version;
-    std::string status;  // Hamlib's backend status: Alpha, Beta, Stable...
-    PortType port = PortType::Other;
-
-    // "Elecraft K4 (Stable)": what a picker shows.
-    std::string label() const;
-};
 
 // Every model this Hamlib knows, sorted by manufacturer then name. Read from
 // struct rig_caps (no pthread members, so safe under the MSVC shim), not by
@@ -42,44 +28,6 @@ struct RigModel {
 std::vector<RigModel> list_models();
 // One model's entry; nullopt if this Hamlib does not know it.
 std::optional<RigModel> model_info(int model);
-
-// Vox: do not key at all (the rig keys on its own audio).
-enum class PttMethod { Vox, Cat, Dtr, Rts };
-// Which input CAT keying selects on a rig with two (RIG_PTT_RIG_MICDATA).
-enum class PttAudio { Mic, Data };
-// Serial line settings. Default: leave the token unset, the backend's own.
-enum class DataBits { Default, Seven, Eight };
-enum class StopBits { Default, One, Two };
-enum class Parity { Default, None, Odd, Even };
-enum class Handshake { Default, None, XonXoff, Hardware };
-// Held for the session: an interface powered from the control lines.
-enum class LineState { Default, High, Low };
-// Set once the rig is open; None leaves the operator's mode alone.
-enum class RigMode { None, Usb, PktUsb };
-
-struct HamlibConfig {
-    int model = MODEL_NET_RIGCTL;
-    // Serial device, or "host:port" for MODEL_NET_RIGCTL. Empty: Hamlib's default.
-    std::string device = "localhost:4532";
-    int baud = 0;  // 0: the backend's default
-    DataBits data_bits = DataBits::Default;
-    StopBits stop_bits = StopBits::Default;
-    Parity parity = Parity::Default;
-    Handshake handshake = Handshake::Default;
-    LineState dtr = LineState::Default;
-    LineState rts = LineState::Default;
-
-    PttMethod ptt_method = PttMethod::Cat;
-    PttAudio ptt_audio = PttAudio::Mic;
-    std::string ptt_device;  // DTR/RTS keying on another port; empty: the CAT device
-
-    RigMode mode = RigMode::None;
-
-    // One timeout and one retry, both ours: RigController::stop() abandons a
-    // worker that only exits when its call gives up.
-    int timeout_ms = 1000;
-    int retries = 1;
-};
 
 std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config);
 

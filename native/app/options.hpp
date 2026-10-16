@@ -10,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-#include "rig/hamlib/hamlib.hpp"  // types only: no libhamlib needed
+#include "rig/config.hpp"
 
 namespace data2g::app {
 

@@ -1,6 +1,8 @@
 #include "options.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -12,6 +14,9 @@
 #include <utility>
 
 #include "app/log.hpp"
+#ifdef DATA2G_HAVE_RIG
+#include "rig/hamlib/hamlib.hpp"  // list_models, model_info
+#endif
 #include "arq/modes.hpp"
 #include "arq/policy.hpp"
 #include "host/host.hpp"
@@ -273,19 +278,35 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
 
 int kiss_cap(int hz) { return hz == 500 ? 0 : 2; }
 
-// In the order of the matching enums in rig/hamlib/hamlib.hpp: hamlib_config()
-// maps a value by its index.
+namespace {
+
+template <typename E, std::size_t N>
+std::vector<std::string> names(const std::array<rig::Named<E>, N>& table) {
+    std::vector<std::string> out;
+    for (const auto& n : table) out.emplace_back(n.name);
+    return out;
+}
+
+// `a` passed check(): every value is one of its table's names.
+template <typename E, std::size_t N>
+E named(const std::array<rig::Named<E>, N>& table, const std::string& value) {
+    return rig::from_name(table, value).value();
+}
+
+}  // namespace
+
+// The spellings are rig/config.hpp's name tables, in their order.
 const std::vector<std::string>& rig_choices(std::string_view field) {
     static const std::map<std::string, std::vector<std::string>, std::less<>> choices = {
-        {"rig_data_bits", {"default", "7", "8"}},
-        {"rig_stop_bits", {"default", "1", "2"}},
-        {"rig_parity", {"default", "none", "odd", "even"}},
-        {"rig_handshake", {"default", "none", "xonxoff", "hardware"}},
-        {"rig_dtr", {"default", "high", "low"}},
-        {"rig_rts", {"default", "high", "low"}},
-        {"ptt_method", {"vox", "cat", "dtr", "rts"}},
-        {"ptt_audio", {"mic", "data"}},
-        {"rig_mode", {"none", "usb", "pkt_usb"}},
+        {"rig_data_bits", names(rig::DATA_BITS_NAMES)},
+        {"rig_stop_bits", names(rig::STOP_BITS_NAMES)},
+        {"rig_parity", names(rig::PARITY_NAMES)},
+        {"rig_handshake", names(rig::HANDSHAKE_NAMES)},
+        {"rig_dtr", names(rig::LINE_STATE_NAMES)},
+        {"rig_rts", names(rig::LINE_STATE_NAMES)},
+        {"ptt_method", names(rig::PTT_METHOD_NAMES)},
+        {"ptt_audio", names(rig::PTT_AUDIO_NAMES)},
+        {"rig_mode", names(rig::RIG_MODE_NAMES)},
     };
     return choices.find(field)->second;
 }
@@ -299,30 +320,21 @@ std::string rig_device(const Args& a) {
     return a.rig_device;
 }
 
-namespace {
-
-int choice_index(const std::string& field, const std::string& value) {
-    const auto& c = rig_choices(field);
-    return static_cast<int>(std::find(c.begin(), c.end(), value) - c.begin());
-}
-
-}  // namespace
-
 rig::HamlibConfig hamlib_config(const Args& a) {
     rig::HamlibConfig h;
     h.model = a.rig_model;
     h.device = rig_device(a);
     h.baud = a.rig_baud;
-    h.data_bits = static_cast<rig::DataBits>(choice_index("rig_data_bits", a.rig_data_bits));
-    h.stop_bits = static_cast<rig::StopBits>(choice_index("rig_stop_bits", a.rig_stop_bits));
-    h.parity = static_cast<rig::Parity>(choice_index("rig_parity", a.rig_parity));
-    h.handshake = static_cast<rig::Handshake>(choice_index("rig_handshake", a.rig_handshake));
-    h.dtr = static_cast<rig::LineState>(choice_index("rig_dtr", a.rig_dtr));
-    h.rts = static_cast<rig::LineState>(choice_index("rig_rts", a.rig_rts));
-    h.ptt_method = static_cast<rig::PttMethod>(choice_index("ptt_method", a.ptt_method));
+    h.data_bits = named(rig::DATA_BITS_NAMES, a.rig_data_bits);
+    h.stop_bits = named(rig::STOP_BITS_NAMES, a.rig_stop_bits);
+    h.parity = named(rig::PARITY_NAMES, a.rig_parity);
+    h.handshake = named(rig::HANDSHAKE_NAMES, a.rig_handshake);
+    h.dtr = named(rig::LINE_STATE_NAMES, a.rig_dtr);
+    h.rts = named(rig::LINE_STATE_NAMES, a.rig_rts);
+    h.ptt_method = named(rig::PTT_METHOD_NAMES, a.ptt_method);
     h.ptt_device = a.ptt_device;
-    h.ptt_audio = static_cast<rig::PttAudio>(choice_index("ptt_audio", a.ptt_audio));
-    h.mode = static_cast<rig::RigMode>(choice_index("rig_mode", a.rig_mode));
+    h.ptt_audio = named(rig::PTT_AUDIO_NAMES, a.ptt_audio);
+    h.mode = named(rig::RIG_MODE_NAMES, a.rig_mode);
     h.timeout_ms = a.rig_timeout_ms;
     h.retries = a.rig_retries;
     return h;
