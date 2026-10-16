@@ -12,8 +12,6 @@ namespace data2g::arq {
 
 inline constexpr std::array<std::string_view, 4> CONSTS = {"gray-qam4", "gray-qam16", "c64-snr18", "c256-snr26"};
 
-// The receiver's measurements of a burst (phy.measure, cpm.measure);
-// mi in CONSTS order. headroom and frames: Python's .get defaults.
 // The receiver's noise profile (tnc::NoiseProfile's snapshot), per NOISE_BANDS_HZ.
 inline constexpr std::array<std::array<double, 2>, 5> NOISE_BANDS_HZ = {
     {{350, 950}, {950, 1300}, {1300, 1750}, {1750, 2100}, {2100, 2700}}};
@@ -22,6 +20,8 @@ struct NoiseLevels {
     double impulses_per_min = 0.0;
 };
 
+// The receiver's measurements of a burst (phy.measure, cpm.measure);
+// mi in CONSTS order. headroom and frames: Python's .get defaults.
 struct Measured {
     double snr_est = 0.0, spread_est = 0.0, delay_est_ms = 0.0;
     std::array<double, CONSTS.size()> mi{};
