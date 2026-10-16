@@ -28,9 +28,10 @@ import logging
 import os
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from . import frames as F
+# the PHY abstraction; named here too, for link's callers
+from .burst import COMPACT_CONNECT, EPOCH_MOD, RxBurst, Slot, TxBurst, ctl_mask, data_mask, dup_ctl  # noqa: F401
 from .frames import SEQ_MOD, WINDOW
 
 NO_PROGRESS_TURNS = 8
@@ -59,58 +60,7 @@ def unwrap(s7: int, anchor: int) -> int:
     return anchor + d
 
 
-def ctl_mask(direction: int, i: int, key: int = 0) -> tuple:
-    return (key, direction, SEQ_MOD + i)
-
-
-COMPACT_CONNECT = ctl_mask(0, 4)  # a compact CONNECT's mask (frames.pack_connect); ctl_mask's i is 0-3
-
-
-def dup_ctl(burst) -> bool:
-    """Its control sent twice (ARQ_DUP): a control slot at RV 1."""
-    return any(s.rv for s in burst.slots if s.mask_id[2] >= SEQ_MOD)
-
-
-EPOCH_MOD = 64  # abandon epochs in a data codeword's identity: the direction byte's 6 spare bits
-
-
-def data_mask(direction: int, seq: int, key: int = 0, comp: bool = False, epoch: int = 0) -> tuple:
-    """A data codeword's identity. `comp`: deflated (T_COMP); `epoch`: the
-    sender's abandon epoch (its slicing). Both are folded into the
-    direction byte, so a codeword decoded under the wrong compression or
-    slicing assumption fails its CRC (docs/arq.md §2, §9a)."""
-    return (key, direction | 2 * comp | 4 * (epoch % EPOCH_MOD), seq % SEQ_MOD)
-
-
-# --- PHY abstraction -----------------------------------------------------------
-
-@dataclass
-class Slot:
-    mask_id: tuple  # (session key, direction, 7-bit seq or 128 + control index)
-    rv: int
-    payload: bytes
-
-
-@dataclass
-class TxBurst:
-    submode: str
-    slots: list[Slot]
-    burst_seq: int  # absolute count of this station's bursts
-    cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; modes.CAP_HZ)
-
-
-class RxBurst(Protocol):
-    submode: str
-    n_cw: int
-
-    def decode(self, slot: int, mask_id: tuple, rv: int, key: tuple | None) -> bytes | None:
-        """Payload if slot `slot` decodes with this mask at this RV
-        (combined with soft bits stored under `key`, which a failed
-        decode adds to), else None."""
-
-    def forget(self, key: tuple) -> None:
-        """Drop soft bits stored under `key`."""
-
+# --- the policy ----------------------------------------------------------------------
 
 class Policy:
     """Everything Station, Session and Engine ask of the mode choice:

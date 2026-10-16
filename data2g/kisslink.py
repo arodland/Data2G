@@ -48,7 +48,7 @@ from .config import max_codewords
 from .arq import frames as F
 from .arq import phy as PHY
 from .arq import policy as G
-from .arq.link import Slot, TxBurst, ctl_mask, data_mask
+from .arq.burst import Slot, TxBurst, ctl_mask, data_mask
 from .arq.modes import MODES, ctl_payload_bytes, is_cpm, max_ctl
 
 log = logging.getLogger("data2g.kiss")

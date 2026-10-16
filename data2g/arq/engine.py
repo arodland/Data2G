@@ -24,8 +24,8 @@ import numpy as np
 
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
+from . import burst as B
 from . import frames as F
-from . import link as L
 from ..tnc import NoiseProfile, Receiver
 from . import phy as PHY
 from . import session as S
@@ -212,15 +212,15 @@ class Engine:
             raise RuntimeError(f"session {self.session.state}")
         self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_call(call) + bytes([cap])))
 
-    def _open_frame(self, cap: int, ext: int, body: bytes) -> L.TxBurst:
+    def _open_frame(self, cap: int, ext: int, body: bytes) -> B.TxBurst:
         """A control-only burst anyone can read (frame type SESSION, mask 0),
         in the cap's connect mode."""
         policy = self.session.policy
         mode = policy.connect_mode(cap)
         payloads = F.Control(F.Core(ftype=F.SESSION), {ext: body}).pack(policy.payload_bytes(mode))
-        return L.TxBurst(mode, [L.Slot(L.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, cap)
+        return B.TxBurst(mode, [B.Slot(B.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, cap)
 
-    def _id_frame(self, s: S.Session) -> L.TxBurst:
+    def _id_frame(self, s: S.Session) -> B.TxBurst:
         log.info("TX ID %s", s.call)
         return self._open_frame(s.cap, F.T_ID, F.pack_call(s.call) + s.station.key.to_bytes(2, "big"))
 
@@ -236,7 +236,7 @@ class Engine:
             self._id_pending = [s, t + ID_GUARD_S]
             self._hold = t + ID_GUARD_S
 
-    def _with_id(self, burst: L.TxBurst, t: float) -> list:
+    def _with_id(self, burst: B.TxBurst, t: float) -> list:
         """A session's burst -> the bursts to send back to back: an ID first
         when one is due, or the pending last ID after a closed session's
         final burst (its DISC_ACK)."""
@@ -335,7 +335,7 @@ class Engine:
             # (two failed decodes per ARQ burst: ~10% of a Pat exchange's CPU)
             st = self.session.station
             ours = (st is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING)
-                    and rx.decode(0, L.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
+                    and rx.decode(0, B.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's
@@ -415,13 +415,13 @@ class Engine:
     def _cq(self, rx) -> bool:
         """A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)?
         Then nothing else to do."""
-        first = rx.decode(0, L.ctl_mask(0, 0, 0), 0, None)
+        first = rx.decode(0, B.ctl_mask(0, 0, 0), 0, None)
         if first is None:
             return False
         core = F.Core.unpack(first)
         if core.ftype != F.SESSION or core.n_ctl > rx.n_cw:
             return False
-        payloads = [first] + [rx.decode(i, L.ctl_mask(0, i, 0), 0, None) for i in range(1, core.n_ctl)]
+        payloads = [first] + [rx.decode(i, B.ctl_mask(0, i, 0), 0, None) for i in range(1, core.n_ctl)]
         if None in payloads:
             return False
         # a malformed one (docs/arq.md §4) is dropped as if it had not decoded
@@ -446,7 +446,7 @@ class Engine:
             log.warning("RX malformed CQ/ID frame (%s): dropped", e)
             return False
 
-    def _start_tx(self, bursts: list, t: float, main: L.TxBurst):
+    def _start_tx(self, bursts: list, t: float, main: B.TxBurst):
         """Bursts back to back on one PTT (an ID frame with a session's
         burst). `main`: the one the session is told has gone, when all have."""
         xs = [PHY.tx_audio(b) for b in bursts]
