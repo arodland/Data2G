@@ -229,6 +229,7 @@ def test_data_from_the_client_is_always_answered_with_buffer():
 def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
     from types import SimpleNamespace
 
+    from data2g.arq import link as L
     from data2g.host import Host
 
     # 400 of the 1000 bytes sent and not yet acked: VARA counts them. With a
@@ -238,7 +239,8 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
     for credit, chat, expect in ((None, False, 1), (100, False, 500), (0, False, 1000), (None, True, 1000)):
         h = Host(Engine("W1AW", seed=1), credit)
         h.engine.session.chat = chat
-        st = SimpleNamespace(tx=SimpleNamespace(buf_off=0, buf=bytearray(1000), stream_end=400), read=lambda: b"")
+        st = SimpleNamespace(tx=L.TxSide(), read=lambda: b"")
+        st.tx.buf, st.tx.stream_end = bytearray(1000), 400
         h.engine.session.station = st
         h.engine.session.policy.next_capacity = lambda station: 5000
         h.after_step(False)

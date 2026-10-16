@@ -247,14 +247,8 @@ void Host::data_in(arq::ByteView data) {
 
 Host::Queued Host::queued() {
     const auto& s = engine.session();
-    Queued q;
-    q.unsent = q.unacked = static_cast<std::int64_t>(s.pending_write.size());
-    if (const auto& st = s.station) {
-        q.station = true;
-        q.unsent += st->new_available();
-        q.unacked += static_cast<std::int64_t>(st->tx.buf.size());  // from the first unacked codeword on
-    }
-    return q;
+    const auto [unsent, unacked] = s.queued_bytes();
+    return {unsent, unacked, static_cast<bool>(s.station)};
 }
 
 std::optional<std::int64_t> Host::next_capacity() {

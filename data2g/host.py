@@ -230,7 +230,7 @@ class Host:
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
                 me = e.session.call  # the call dialed, when MYCALL gave several
-                src, dst = (me, peer) if e.session._master else (peer, me)
+                src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
@@ -266,10 +266,7 @@ class Host:
         # plain VARA figure. CHAT ON also reports it: the client watches
         # BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
-        unsent = unacked = len(e.session._pending_write)
-        if st:
-            unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
-            unacked += len(st.tx.buf)  # from the first unacked codeword on
+        unsent, unacked = e.session.queued_bytes()
         buffered = unacked
         if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
             credit = e.session.policy.next_capacity(st)

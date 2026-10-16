@@ -151,7 +151,7 @@ class Session:
         fresh = holding or not st.tx.pending()
         st.write(data)
         cap = getattr(self.policy, "next_capacity", None)
-        if fresh and not self.chat and cap is not None and st._new_available() < cap(st):
+        if fresh and not self.chat and cap is not None and st.new_available() < cap(st):
             if not holding:
                 self._coalesce_until = self._now + COALESCE_S
         else:
@@ -162,6 +162,14 @@ class Session:
 
     def read(self) -> bytes:
         return self.station.read() if self.station else b""
+
+    def queued_bytes(self) -> tuple[int, int]:
+        """(unsent, unacked): bytes the host wrote that are in no codeword
+        yet, and that the peer has not acked, sent or not. Writes waiting
+        for the session count as both."""
+        n = len(self._pending_write)
+        st = self.station
+        return (n, n) if st is None else (n + st.tx.unsent(), n + st.tx.unacked())
 
     # -- clock side ------------------------------------------------------------------
 
@@ -197,7 +205,7 @@ class Session:
                 log.info("wake: breaking idle with DISC")
             elif self._wakes == 1:
                 log.info("wake: breaking idle with %d unacked, %d B queued", st.tx.next - st.tx.base,
-                         st._new_available())
+                         st.new_available())
                 self._queue(st.build(), now)
             else:
                 log.info("wake %d: no answer, repeating", self._wakes)
@@ -227,14 +235,14 @@ class Session:
         if burst is self._nak:
             self._nak = None
             return
-        if (self._master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
+        if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
             hold = getattr(self.policy, "reply_hold", None)
             if hold and self.state == CONNECTED and self.station is not None:
                 # a reply whose header I miss is still on air: don't poll over it
                 wait = max(wait, hold(self.station, burst))
             self._deadline = now + self.t_turn + wait
-        elif not self._master:
+        elif not self.master:
             self._quiet_from = now
             self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
@@ -248,7 +256,7 @@ class Session:
             # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
             is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
             self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
-        if not self._master:
+        if not self.master:
             self._quiet_from = max(self._quiet_from, end)
 
     def on_rx(self, rx: L.RxBurst, now: float):
@@ -270,7 +278,7 @@ class Session:
             self._last_data = now  # data moving either way; a sender that hears no data is not idle
         if self._disc(now):
             return
-        if not self._master:
+        if not self.master:
             if len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending() and not self._pending_write:
                 self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
             else:
@@ -301,11 +309,12 @@ class Session:
                 self._idle_wait = self.rng.uniform(lo, hi)
             self._build_at = now + self._idle_wait
 
-    # -- internals ---------------------------------------------------------------------
-
     @property
-    def _master(self) -> bool:
+    def master(self) -> bool:
+        """The caller: the station that retries (its link.Station's, once there is one)."""
         return self.station.master if self.station else self.state == CONNECTING
+
+    # -- internals ---------------------------------------------------------------------
 
     def _queue(self, burst: L.TxBurst, when: float):
         self._out, self._due = burst, when
@@ -330,12 +339,12 @@ class Session:
         receive state is what this station last heard it ack and a fresh
         build is exact (link.Station.build). Not while a burst is queued."""
         st = self.station
-        if (st is None or self._master or self.state != CONNECTED or self._out is not None
+        if (st is None or self.master or self.state != CONNECTED or self._out is not None
                 or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
                 or st.last_sent is None):
             return None
         disc = self._want_disc and not st.tx.pending()
-        if not self._wakes and not disc and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
+        if not self._wakes and not disc and (st.data_in_flight() or not st.tx.pending()):
             return None
         return max(self._quiet_from + self._wake_wait, self._coalesce_until or float("-inf"))
 
@@ -495,11 +504,11 @@ class Session:
             nonce = int.from_bytes(body[18:20], "big")
             if callee != self.call.upper() and callee not in self.aliases:
                 return
-            if self.station is not None and not self._master and nonce == self._nonce:
+            if self.station is not None and not self.master and nonce == self._nonce:
                 self._answer_mode = f["mode"]
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
-            if (self.station is not None and not self._master and caller == self.peer
+            if (self.station is not None and not self.master and caller == self.peer
                     and self.state in (CONNECTED, DISCONNECTING)):
                 # my caller dialed again: it gave up on our session (lost my
                 # CONNECT_ACK and ran out of tries), so take the new one. Held

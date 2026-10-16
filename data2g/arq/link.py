@@ -168,7 +168,16 @@ class TxSide:
         self.buf += F.to_records(data)
 
     def pending(self) -> bool:
-        return bool(self.cws) or self.stream_end < self.buf_off + len(self.buf)
+        return bool(self.cws) or self.unsent() > 0
+
+    def unsent(self) -> int:
+        """Stream bytes written but in no codeword yet."""
+        return self.buf_off + len(self.buf) - self.stream_end
+
+    def unacked(self) -> int:
+        """Stream bytes the peer has not acked, sent or not (buf holds
+        them from the first unacked codeword on)."""
+        return len(self.buf)
 
     def on_ack(self, cum: int, received: frozenset) -> bool:
         """-> whether the base advanced. cum must lie in [base, next]."""
@@ -422,7 +431,7 @@ class Station:
         if self.chat or self.peer_chat:
             # what I have queued, so the peer's CHAT objective plans for a file
             # rather than a chat line when there is one (informational only)
-            queued = self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
+            queued = self.new_available()
             if queued > F.CHAT_LINE_BYTES:  # below it the peer plans for a line anyway
                 ext[F.T_BUFFER] = min(queued, 65535).to_bytes(2, "big")
         core = F.Core(ftype=F.ARQ if fresh else F.PROBE, burst_seq=bn % F.BURST_MOD, acted_on=self._acted_on,
@@ -432,7 +441,7 @@ class Station:
         # what this burst's ACK conveys, exactly (the snapshot must match it)
         bitmap = F.pack_bitmap({s % SEQ_MOD for s in self.rx.buf}, core.cum)
         missing = self.tx.missing() if fresh else []
-        has_new = fresh and self._new_available() > 0
+        has_new = fresh and self.new_available() > 0
         k = min(len(missing), max(0, max_cw - 1))
         while True:
             e = dict(ext)
@@ -470,7 +479,7 @@ class Station:
         # control's padding: compression never costs a control codeword
         spare = n_ctl * cpb - self._ctl_bytes(ext, k, has_new, 0)
         while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
-            if self._new_available() <= 0:
+            if self.new_available() <= 0:
                 break
             fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
             new.append(self.tx.new_codeword(submode, pb, fits, bn))
@@ -485,7 +494,7 @@ class Station:
             dup = 1  # nothing but control after all
         if dup == 2:
             core.ftype = F.ARQ_DUP
-        if new and not self._new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
+        if new and not self.new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
             # my host's data ends here: the peer may hold its reply for its
             # host's answer (session.REPLY_HOLD_S). Only in the padding, like T_COMP
             ext[F.T_DRAINED] = b""
@@ -519,7 +528,7 @@ class Station:
                              + f" {sum(c.length for c in new)} B"
                              + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
             if self.tx.pending():
-                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self._new_available()} B")
+                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self.new_available()} B")
             parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
             parts.append(f"ask data {self._mode(rec)} size {hint}, reply {self._mode(reply)}")
             flags = [f"escalated {escalation}"] * bool(escalation) + [f"timeout {self.misses}"] * bool(self.misses)
@@ -544,8 +553,14 @@ class Station:
         c = self.tx.cws[seq]
         return c.comp and not c.comp_known
 
-    def _new_available(self) -> int:
-        return self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
+    def new_available(self) -> int:
+        """Bytes my next new codewords can take (TxSide.unsent)."""
+        return self.tx.unsent()
+
+    def data_in_flight(self) -> bool:
+        """My latest burst carried data codewords and the peer has not acted
+        on it yet (its reply would say what arrived)."""
+        return bool(self._sent_seqs.get(self._latest))
 
     @staticmethod
     def _ctl_bytes(ext, k, has_new, zk) -> int:

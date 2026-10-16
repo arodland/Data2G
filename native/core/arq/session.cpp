@@ -273,6 +273,12 @@ void Session::on_rx(RxBurst& rx, double now) {
 
 // --- internals ------------------------------------------------------------------------
 
+Session::Queued Session::queued_bytes() const {
+    const auto n = static_cast<std::int64_t>(pending_write.size());
+    if (!station) return {n, n};
+    return {n + station->tx.unsent(), n + station->tx.unacked()};
+}
+
 bool Session::master() const { return station ? station->master : state == SessionState::CONNECTING; }
 
 void Session::queue(TxBurstPtr burst, double when) {
@@ -307,10 +313,7 @@ std::optional<double> Session::wake_time() {
     if (!st || master() || state != SessionState::CONNECTED || out ||
         wakes >= ((st->chat || st->peer_chat) ? tune.chat_wake_tries : tune.wake_tries) || !st->last_sent)
         return std::nullopt;
-    if (!wakes && !(want_disc && !st->tx.pending())) {
-        auto it = st->sent_seqs.find(st->latest);
-        if ((it != st->sent_seqs.end() && !it->second.empty()) || !st->tx.pending()) return std::nullopt;
-    }
+    if (!wakes && !(want_disc && !st->tx.pending()) && (st->data_in_flight() || !st->tx.pending())) return std::nullopt;
     return std::max(quiet_from + wake_wait, coalesce_until.value_or(-INF));
 }
 

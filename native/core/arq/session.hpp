@@ -127,6 +127,12 @@ public:
     void disconnect();
     void write(ByteView data);
     Bytes read();
+    // bytes the host wrote that are in no codeword yet (unsent), and that the
+    // peer has not acked, sent or not (unacked); writes waiting for the session count as both
+    struct Queued {
+        std::int64_t unsent = 0, unacked = 0;
+    };
+    Queued queued_bytes() const;
 
     // clock side
     TxBurstPtr poll(double now);
@@ -140,7 +146,7 @@ public:
     void on_header(const std::string& submode, int n_cw, double now);
     void on_rx(RxBurst& rx, double now);
 
-    bool master() const;
+    bool master() const;  // the caller: the station that retries
     std::optional<double> wake_time();
     bool disc(double now);  // queue a DISC if asked for and all our data is acked
     std::map<std::string, std::int64_t> stats();

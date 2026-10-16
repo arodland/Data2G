@@ -181,6 +181,10 @@ public:
 
     void write(ByteView data);
     bool pending() const;
+    // stream bytes written but in no codeword yet
+    std::int64_t unsent() const { return buf_off + static_cast<std::int64_t>(buf.size()) - stream_end; }
+    // stream bytes the peer has not acked, sent or not (buf holds them from the first unacked codeword on)
+    std::int64_t unacked() const { return static_cast<std::int64_t>(buf.size()); }
     bool on_ack(std::int64_t cum, const std::set<std::int64_t>& received);
     Codeword& new_codeword(const std::string& submode, int pb, bool compress, std::int64_t bn);
     std::vector<std::int64_t> missing() const;
@@ -266,7 +270,12 @@ public:
     bool handle(RxBurst& rx);
     void answered() { answered_ = true; }
     std::optional<Bytes> ctl_pair(RxBurst& rx, int slot, int i);
-    std::int64_t new_available() const { return tx.buf_off + static_cast<std::int64_t>(tx.buf.size()) - tx.stream_end; }
+    std::int64_t new_available() const { return tx.unsent(); }  // bytes my next new codewords can take
+    // my latest burst carried data codewords and the peer has not acted on it yet
+    bool data_in_flight() const {
+        auto it = sent_seqs.find(latest);
+        return it != sent_seqs.end() && !it->second.empty();
+    }
 
 private:
     bool handle_inner(RxBurst& rx);

@@ -380,6 +380,8 @@ void bind_arq_link(py::module_& m) {
         .def_property_readonly("hist", [](const TxSide& t) { return pyb(t.hist); })
         .def_readonly("hist_off", &TxSide::hist_off)
         .def("pending", &TxSide::pending)
+        .def("unsent", &TxSide::unsent)
+        .def("unacked", &TxSide::unacked)
         .def("missing", &TxSide::missing);
 
     py::class_<RxSide>(a, "RxSide")
@@ -457,7 +459,8 @@ void bind_arq_link(py::module_& m) {
             auto p = s.ctl_pair(r, slot, i);
             return p ? py::object(pyb(*p)) : py::none();
         })
-        .def("_new_available", &Station::new_available);
+        .def("new_available", &Station::new_available)
+        .def("data_in_flight", &Station::data_in_flight);
 
     // --- session ---
     a.def("session_key", &session_key);
@@ -521,7 +524,7 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("_due", &Session::due)
         .def_readonly("_deadline", &Session::deadline)
         .def_readonly("_build_at", &Session::build_at)
-        .def_property_readonly("_master", &Session::master)
+        .def_property_readonly("master", &Session::master)
         .def_property_readonly("_pending_write", [](const Session& s) { return pyb(s.pending_write); })
         .def_readonly("_nonce", &Session::nonce)
         .def_readonly("_tries", &Session::tries)
@@ -533,6 +536,10 @@ void bind_arq_link(py::module_& m) {
         .def("disconnect", &Session::disconnect)
         .def("write", [](Session& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Session& s) { return pyb(s.read()); })
+        .def("queued_bytes", [](const Session& s) {
+            const auto [unsent, unacked] = s.queued_bytes();
+            return py::make_tuple(unsent, unacked);
+        })
         .def("poll", [](Session& s, double now) {
             auto* p = dynamic_cast<PySession*>(&s);
             return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));
