@@ -32,7 +32,8 @@ public:
     bool overrides(const char* name) const {
         py::object f = py::getattr(obj, name, py::none());
         if (f.is_none()) return false;
-        py::object base = py::getattr(link_attr("Policy"), name, py::none());
+        static const py::handle Policy = link_attr("Policy").release();  // kept for the process
+        py::object base = py::getattr(Policy, name, py::none());
         return base.is_none() || !py::getattr(f, "__func__", f).is(base);
     }
 
