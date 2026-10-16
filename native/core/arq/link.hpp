@@ -20,7 +20,7 @@
 
 #include "arq/burst.hpp"
 #include "arq/frames.hpp"
-#include "arq/predictor.hpp"
+#include "arq/measured.hpp"
 
 namespace data2g::arq {
 
