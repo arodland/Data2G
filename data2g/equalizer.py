@@ -103,7 +103,7 @@ def window_shift(support: tuple[int, int]) -> int:
     return int(round((support[0] + support[1] - NCP) / 2))
 
 
-SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see _freq_smooth
+SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see freq_smooth
 
 
 @lru_cache(maxsize=1024)
@@ -124,7 +124,7 @@ def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
     return U, r, r_full
 
 
-def _freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
+def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
     """Project each pilot vector onto the delay support. Returns the
     smoothed pilots, the per-carrier noise variance from the residual
     (inf where the support would take all but < 2 dimensions, i.e. narrow
@@ -253,7 +253,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     n_p = len(h_pilot)
     n_f = n_p - 1
     nc = len(bb)
-    hs, n0, r, keep = _freq_smooth(h_pilot, support, bb)
+    hs, n0, r, keep = freq_smooth(h_pilot, support, bb)
     # The residual's when it has room (wide band: it includes the pilots'
     # own clip distortion, which the preamble's estimate cannot see:
     # identical repeats clip identically, so it cancels in their

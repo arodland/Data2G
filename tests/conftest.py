@@ -42,7 +42,7 @@ def import_native():
 
 # Every data2g.equalizer function but _support_basis (its cache is internal
 # to the C++ one).
-EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "_freq_smooth",
+EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "freq_smooth",
                     "preamble_noise", "preamble_noise_k", "per_carrier_noise", "_doppler_corr", "measure_spread",
                     "estimate", "time_shift_phase", "refine")
 

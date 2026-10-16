@@ -4,7 +4,7 @@ can gain without air time:
 
   base    modem._read_header as it is
   fs      pilots and preamble reference projected onto a CP-long delay
-          support (equalizer._freq_smooth) before interpolation
+          support (equalizer.freq_smooth) before interpolation
   all     reference from every preamble repeat instead of the last 4
   valid   ML over valid words only (CRC-6 right and a defined submode),
           instead of ML over all 65536 then the CRC check
@@ -69,7 +69,7 @@ def read(z, start, band, opts):
 
     def solve(t_p, h_p, t_d, y_d):
         if "fs" in opts:
-            h_p = equalizer._freq_smooth(h_p, support, b.bb)[0]
+            h_p = equalizer.freq_smooth(h_p, support, b.bb)[0]
         j = np.clip(np.searchsorted(t_p, t_d) - 1, 0, len(t_p) - 2)
         a = ((t_d - t_p[j]) / (t_p[j + 1] - t_p[j]))[:, None]
         hs = (1 - a) * h_p[j] + a * h_p[j + 1]
@@ -88,7 +88,7 @@ def read(z, start, band, opts):
         t_all = np.concatenate([[u0 + ref * M / 2], t_sym, [p0 + NCP + M / 2]])
         hh = np.concatenate([h_pre[None], h_all, h_first[None]])
         if "fs" in opts:
-            hh = equalizer._freq_smooth(hh, support, b.bb)[0]
+            hh = equalizer.freq_smooth(hh, support, b.bb)[0]
         hs = 0.5 * (hh[:-2] + hh[2:])[~layout]
         word, score = decode(constellation.llr(y_all[~layout], hs, np.ones(hs.shape), QPSK), band, "valid" in opts)
     return word, score

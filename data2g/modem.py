@@ -543,7 +543,7 @@ def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | No
     # frequency-smoothed onto a CP-long delay support (as the backed-off
     # window sees it) before interpolating: genie-sync header failures,
     # wide band, -8 dB AWGN 43% -> 14%, mpd 0 dB 4.7% -> 3.2%
-    h_p = equalizer._freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
+    h_p = equalizer.freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
     ys, hs = y_all[~layout], (1 - a) * h_p[j] + a * h_p[j + 1]
     soft = constellation.llr(ys, hs, np.ones(ys.shape), QPSK)
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
