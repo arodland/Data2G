@@ -23,7 +23,7 @@ namespace data2g::arq {
 
 inline constexpr int VERSION = 3;
 inline constexpr int CONNECT_TRIES = 5;
-inline constexpr int CONNECT_CTL_BYTES = 28;  // a CONNECT's Control: core 4, T_SESS header 2, body 22
+inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;
 inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
 inline constexpr double IDLE_CLOSE_S = 300.0;
@@ -173,7 +173,7 @@ private:
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();
     TxBurstPtr accept_burst();
-    void refuse(const Bytes& body, const std::string& mode, int reason, double now);
+    void refuse(const Connect& c, const std::string& mode, int reason, double now);
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
     void on_session_frame(const Frame& f, double now);

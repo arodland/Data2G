@@ -221,15 +221,101 @@ def unpack_call(b: bytes) -> str:
     return "".join(CALL_ALPHABET[c] for c in codes).rstrip()
 
 
+# --- session frame bodies (docs/arq.md §7, §7a) ------------------------------------
+# A T_SESS body is its subtype byte (CONNECT ... DISC_ACK) and the fields
+# below; DISC and DISC_ACK are the subtype alone. T_CQ and T_ID bodies have
+# no subtype.
+
+@dataclass(frozen=True)
+class Connect:
+    """subtype, version, caller and callee (pack_call, 8 B each), nonce
+    (2 B), bandwidth cap code, t_turn in tenths of a second."""
+    version: int
+    caller: str
+    callee: str
+    nonce: int
+    cap: int
+    t_turn10: int
+    BYTES = 22
+
+    def pack(self) -> bytes:
+        return (bytes([CONNECT, self.version]) + pack_call(self.caller) + pack_call(self.callee)
+                + self.nonce.to_bytes(2, "big") + bytes([self.cap, self.t_turn10]))
+
+    @classmethod
+    def unpack(cls, body: bytes) -> "Connect":
+        """A body of BYTES at least; ValueError for a callsign that won't unpack."""
+        caller, callee = cls.calls(body)
+        return cls(body[1], caller, callee, int.from_bytes(body[18:20], "big"), body[20], body[21])
+
+    @staticmethod
+    def calls(body: bytes) -> tuple[str, str]:
+        """(caller, callee) from the first 18 bytes."""
+        return unpack_call(body[2:10]), unpack_call(body[10:18])
+
+
+@dataclass(frozen=True)
+class ConnectAck:
+    """subtype, the CONNECT's nonce (2 B), the agreed cap code, the callee's t_turn in tenths."""
+    nonce: int
+    cap: int
+    t_turn10: int
+    BYTES = 5
+
+    def pack(self) -> bytes:
+        return bytes([CONNECT_ACK]) + self.nonce.to_bytes(2, "big") + bytes([self.cap, self.t_turn10])
+
+    @classmethod
+    def unpack(cls, body: bytes) -> "ConnectAck":
+        return cls(int.from_bytes(body[1:3], "big"), body[3], body[4])
+
+
+@dataclass(frozen=True)
+class ConnectNak:
+    """subtype, the CONNECT's nonce (2 B), the reason (session.NAK_*)."""
+    nonce: int
+    reason: int
+    BYTES = 4
+
+    def pack(self) -> bytes:
+        return bytes([CONNECT_NAK]) + self.nonce.to_bytes(2, "big") + bytes([self.reason])
+
+    @classmethod
+    def unpack(cls, body: bytes) -> "ConnectNak":
+        return cls(int.from_bytes(body[1:3], "big"), body[3])
+
+
+def pack_cq(call: str, cap: int) -> bytes:
+    """A T_CQ body: the call and its bandwidth cap code."""
+    return pack_call(call) + bytes([cap])
+
+
+def unpack_cq(body: bytes) -> tuple[str, int]:
+    if len(body) < 9:
+        raise ValueError(f"CQ of {len(body)} B")
+    return unpack_call(body[:8]), body[8]
+
+
+def pack_id(call: str, key: int) -> bytes:
+    """A T_ID body: the call and the session key it identifies for."""
+    return pack_call(call) + key.to_bytes(2, "big")
+
+
+def unpack_id(body: bytes) -> tuple[str, int]:
+    if len(body) < 10:
+        raise ValueError(f"ID of {len(body)} B")
+    return unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
+
+
 # A CONNECT in 20 B, for a CPM control codeword: no Core or TLV (28 B with
-# them), bit-packed. Its own CRC mask (link.COMPACT_CONNECT) says what it is.
-# (bits, body offset) of version, the two calls, nonce, cap, t_turn x10
+# them), bit-packed. Its own CRC mask (burst.COMPACT_CONNECT) says what it is.
+# (bits, offset, bytes) in Connect's body of version, the two calls, nonce, cap, t_turn x10
 _COMPACT = ((4, 1, 1), (60, 2, 8), (60, 10, 8), (16, 18, 2), (2, 20, 1), (6, 21, 1))
 COMPACT_BYTES = 20
 
 
 def pack_connect(body: bytes) -> bytes:
-    """A 22-byte CONNECT session body -> COMPACT_BYTES."""
+    """A Connect body (Connect.BYTES) -> COMPACT_BYTES."""
     v = 0
     for bits, at, n in _COMPACT:
         x = int.from_bytes(body[at:at + n], "big")
@@ -241,7 +327,7 @@ def pack_connect(body: bytes) -> bytes:
 
 def unpack_connect(p: bytes) -> bytes:
     v = int.from_bytes(p, "big") >> (8 * COMPACT_BYTES - 148)
-    out = bytearray(22)
+    out = bytearray(Connect.BYTES)
     out[0] = CONNECT
     for bits, at, n in reversed(_COMPACT):
         out[at:at + n] = (v & ((1 << bits) - 1)).to_bytes(n, "big")

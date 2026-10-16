@@ -27,7 +27,7 @@ from . import link as L
 T_SESS = F.T_SESS  # the extension carrying a session frame
 VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
 CONNECT_TRIES = 5
-CONNECT_CTL_BYTES = 28  # a CONNECT's Control: core 4, T_SESS header 2, body 22
+CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
@@ -437,8 +437,7 @@ class Session:
         return -(-CONNECT_CTL_BYTES // self.policy.ctl_payload_bytes(mode)) > self.policy.max_ctl(mode)
 
     def _connect_burst(self) -> B.TxBurst:
-        body = (bytes([F.CONNECT, VERSION]) + F.pack_call(self.call) + F.pack_call(self.peer)
-                + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)]))
+        body = F.Connect(VERSION, self.call, self.peer, self._nonce, self.cap, round(self.t_turn * 10)).pack()
         return self._session_burst(0, 0, body)
 
     def _disc_burst(self) -> B.TxBurst:
@@ -498,9 +497,9 @@ class Session:
         body, key = f["body"], f["key"]
         sub = body[0]
         log.info("RX %s %s", _frame_desc(body), f["mode"])
-        if sub == F.CONNECT and len(body) >= 22 and key == 0:
-            caller, callee = F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
-            nonce = int.from_bytes(body[18:20], "big")
+        if sub == F.CONNECT and len(body) >= F.Connect.BYTES and key == 0:
+            c = F.Connect.unpack(body)
+            caller, callee, nonce = c.caller, c.callee, c.nonce
             if callee != self.call.upper() and callee not in self.aliases:
                 return
             if self.station is not None and not self.master and nonce == self._nonce:
@@ -517,13 +516,13 @@ class Session:
                 self.state, self._want_disc, self._sent_disc_ack, self._tries = LISTEN, False, False, 0
             if self.state != LISTEN:
                 busy = self.state in (CONNECTING, CONNECTED, DISCONNECTING)
-                return self._refuse(body, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
-            if body[1] != VERSION:
-                return self._refuse(body, f["mode"], NAK_VERSION, now)
+                return self._refuse(c, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
+            if c.version != VERSION:
+                return self._refuse(c, f["mode"], NAK_VERSION, now)
             if self.accept_connect is not None and not self.accept_connect(caller, callee):
-                return self._refuse(body, f["mode"], NAK_REFUSED, now)
+                return self._refuse(c, f["mode"], NAK_REFUSED, now)
             self.call = callee  # the call it dialed (the session key derives from it)
-            self.peer, self._nonce, self.cap = caller, nonce, min(body[20], self.cap)
+            self.peer, self._nonce, self.cap = caller, nonce, min(c.cap, self.cap)
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
@@ -532,9 +531,10 @@ class Session:
             self._answer_mode = f["mode"]
             self._queue(self._accept_burst(), now)
         elif sub == F.CONNECT_ACK and self.state == CONNECTING and key == 0:
-            if int.from_bytes(body[1:3], "big") != self._nonce:
+            a = F.ConnectAck.unpack(body)
+            if a.nonce != self._nonce:
                 return
-            self.cap = min(body[3], self.cap)
+            self.cap = min(a.cap, self.cap)
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
@@ -542,8 +542,9 @@ class Session:
             self.events.append(f"CONNECTED {self.peer}")
             self._queue(self.station.build(), now)
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
-            if int.from_bytes(body[1:3], "big") == self._nonce:
-                self._close(f"refused: {NAK_NAMES.get(body[3], f'reason {body[3]}')}")
+            n = F.ConnectNak.unpack(body)
+            if n.nonce == self._nonce:
+                self._close(f"refused: {NAK_NAMES.get(n.reason, f'reason {n.reason}')}")
         elif sub == F.DISC and self.station is not None and key == self.station.key:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
@@ -552,16 +553,16 @@ class Session:
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
             self._close("disconnected")
 
-    def _refuse(self, body: bytes, mode: str, reason: int, now: float):
+    def _refuse(self, c: F.Connect, mode: str, reason: int, now: float):
         """A CONNECT_NAK for this CONNECT, unless a burst of the session's own
         is queued (that goes; the caller's next try is refused instead)."""
-        log.info("refusing CONNECT from %s: %s", F.unpack_call(body[2:10]), NAK_NAMES[reason])
+        log.info("refusing CONNECT from %s: %s", c.caller, NAK_NAMES[reason])
         if self._out is None:
-            self._nak = self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + bytes([reason]), mode)
+            self._nak = self._session_burst(1, 0, F.ConnectNak(c.nonce, reason).pack(), mode)
             self._queue(self._nak, now)
 
     def _accept_burst(self) -> B.TxBurst:
-        body = bytes([F.CONNECT_ACK]) + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)])
+        body = F.ConnectAck(self._nonce, self.cap, round(self.t_turn * 10)).pack()
         return self._session_burst(1, 0, body, self._answer_mode)
 
     def _flush_writes(self):
@@ -572,8 +573,7 @@ class Session:
 
 FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
                F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
-# body length as sent: subtype, version, 2 callsigns, nonce, cap, t_turn / subtype, nonce, cap, t_turn / subtype, nonce, reason
-FRAME_BYTES = {F.CONNECT: 22, F.CONNECT_ACK: 5, F.CONNECT_NAK: 4}
+FRAME_BYTES = {F.CONNECT: F.Connect.BYTES, F.CONNECT_ACK: F.ConnectAck.BYTES, F.CONNECT_NAK: F.ConnectNak.BYTES}
 
 
 def _check_frame(body: bytes) -> str | None:
@@ -584,16 +584,16 @@ def _check_frame(body: bytes) -> str | None:
         return f"{name} of {len(body)} B"
     if body[0] == F.CONNECT:
         try:
-            F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
+            F.Connect.unpack(body)
         except ValueError as e:
             return f"{name}: {e}"
-    if body[0] == F.CONNECT_ACK and body[3] > 2:
-        return f"{name}: cap code {body[3]}"
+    if body[0] == F.CONNECT_ACK and (cap := F.ConnectAck.unpack(body).cap) > 2:
+        return f"{name}: cap code {cap}"
     return None
 
 
 def _frame_desc(body: bytes) -> str:
     out = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
     if body[0] == F.CONNECT and len(body) >= 18:
-        out += f" {F.unpack_call(body[2:10])}>{F.unpack_call(body[10:18])}"
+        out += " {}>{}".format(*F.Connect.calls(body))
     return out

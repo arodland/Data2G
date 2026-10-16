@@ -210,7 +210,7 @@ class Engine:
         no session. Not while one is under way."""
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
-        self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_call(call) + bytes([cap])))
+        self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_cq(call, cap)))
 
     def _open_frame(self, cap: int, ext: int, body: bytes) -> B.TxBurst:
         """A control-only burst anyone can read (frame type SESSION, mask 0),
@@ -222,7 +222,7 @@ class Engine:
 
     def _id_frame(self, s: S.Session) -> B.TxBurst:
         log.info("TX ID %s", s.call)
-        return self._open_frame(s.cap, F.T_ID, F.pack_call(s.call) + s.station.key.to_bytes(2, "big"))
+        return self._open_frame(s.cap, F.T_ID, F.pack_id(s.call, s.station.key))
 
     def _id_check(self, t: float):
         """Track the session ID frames are owed for; once it closes, its last ID is pending."""
@@ -428,19 +428,14 @@ class Engine:
         try:
             ext = F.Control.unpack(payloads).ext
             if F.T_ID in ext:
-                body = ext[F.T_ID]
-                if len(body) < 10:
-                    raise ValueError(f"ID of {len(body)} B")
-                call, key = F.unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
+                call, key = F.unpack_id(ext[F.T_ID])
                 log.info("RX ID %s (session %04x)", call, key)
                 self._events.append(f"ID {call} {key}")
                 return True
             if F.T_CQ not in ext:
                 return False
-            body = ext[F.T_CQ]
-            if len(body) < 9:
-                raise ValueError(f"CQ of {len(body)} B")
-            self._events.append(f"CQFRAME {F.unpack_call(body[:8])} {body[8]}")
+            call, cap = F.unpack_cq(ext[F.T_CQ])
+            self._events.append(f"CQFRAME {call} {cap}")
             return True
         except ValueError as e:
             log.warning("RX malformed CQ/ID frame (%s): dropped", e)
