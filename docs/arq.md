@@ -1,6 +1,6 @@
-# Data2G ARQ protocol (draft for review)
+# Data2G ARQ protocol
 
-Status: approved 2026-09-24, with the state-agreement rules of §2 and §10 added at review. Written
+Status: the spec. Approved 2026-09-24, with the state-agreement rules of §2 and §10 added at review. Written
 before the code as one step of the gear-shifter plan; the "As built" notes record where the code went
 further.
 
