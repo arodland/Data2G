@@ -55,6 +55,10 @@ SPREAD_GRID = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0)
 # on one tone): per_carrier_noise, with this many samples' worth of prior.
 PER_CARRIER_NOISE = True
 NOISE_SHAPE_PRIOR = 8.0
+# preamble_noise_k's samples per carrier: the differences between the
+# default 8 repeats (config.PREAMBLE_REPEATS - 1). Fixed: a repeats
+# override (DATA2G_PREAMBLE_REPEATS) does not reach it.
+PREAMBLE_DIFFS = 7
 
 
 def residual_cfo(h_pilot: np.ndarray) -> float:
@@ -266,7 +270,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
         # noisier (n10 at -5 dB: 0.45 -> 0.38 decoded)
         n0_k = per_carrier_noise(np.mean(np.abs(h_pilot - hs) ** 2, axis=0) / np.maximum(keep, 1e-3), n_p)
     elif n0_pre_k is not None and len(n0_pre_k) == nc:
-        n0_k = per_carrier_noise(n0_pre_k, 7)
+        n0_k = per_carrier_noise(n0_pre_k, PREAMBLE_DIFFS)
     if not np.isfinite(n0):
         n0 = n0_pre
     if not np.isfinite(n0):
