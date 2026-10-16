@@ -241,8 +241,6 @@ def _waveform_substitutions(native):
     return {
         (ofdm, "band"): band,
         (ofdm, "_W"): w,
-        (ofdm, "MOD_MATRIX"): w.mod,
-        (ofdm, "DEMOD_MATRIX"): w.demod,
         (ofdm, "modulate_symbols"): w.modulate_symbols,
         (ofdm, "demod_window"): w.demod_window,
         (ofdm, "preamble_waveform"): w.preamble_waveform,

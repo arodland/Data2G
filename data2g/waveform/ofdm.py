@@ -109,8 +109,7 @@ def band(name: str = "w") -> Band:
 # Wide-band aliases (SSTVAE's names): tests (test_ofdm, test_sstvae_golden)
 # and equalizer's default `bb`; live code goes through band(name).
 _W = band("w")
-CARRIER_FREQS, BASEBAND_FREQS = _W.freqs, _W.bb
-MOD_MATRIX, DEMOD_MATRIX = _W.mod, _W.demod
+BASEBAND_FREQS = _W.bb
 modulate_symbols, demod_window = _W.modulate_symbols, _W.demod_window
 preamble_waveform, preamble_template = _W.preamble_waveform, _W.preamble_template
 
