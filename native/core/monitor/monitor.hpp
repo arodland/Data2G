@@ -109,7 +109,7 @@ private:
     std::map<int, std::pair<std::string, std::string>> connects_;  // CONNECT nonce -> (caller, callee)
     std::map<std::pair<int, int>, Side> sides_;           // (key, direction)
     std::uint64_t seen_ = 0;
-    std::unique_ptr<receiver::Receiver> receiver_;             // feed()'s, made on first use
+    std::unique_ptr<receiver::Receiver> receiver_;        // feed()'s, made on first use
 };
 
 }  // namespace data2g::monitor

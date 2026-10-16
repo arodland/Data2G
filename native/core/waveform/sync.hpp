@@ -103,7 +103,7 @@ public:
 
     void reset();
     void restart_at(std::int64_t pos);  // reset(), the stream resuming at index `pos`
-    // Native only (tnc.cpp's catch-up after a confirmed burst; Python's
+    // Native only (receiver.cpp's catch-up after a confirmed burst; Python's
     // receiver feeds it all): jump over the samples before stream index
     // `pos` (>= fed), keeping the noise-level history.
     void skip_to(std::int64_t pos);

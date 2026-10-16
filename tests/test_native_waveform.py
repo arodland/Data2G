@@ -233,7 +233,7 @@ def test_acquire_errors(native, py):
 
 @pytest.mark.parametrize("name", ["w", "n10", "w48"])
 def test_stream_detector(native, py, name):
-    """Fed the same chunks (as tnc feeds them: real audio through
+    """Fed the same chunks (as the receiver feeds them: real audio through
     to_baseband with the stream index), trimmed alike: the same state."""
     rng = np.random.default_rng(7)
     sm = config.SUBMODES[{"w": "ack-4f", "n10": "n10-ack-4f", "w48": "w48-qpsk-r1/5"}[name]]
@@ -264,6 +264,6 @@ def test_stream_detector(native, py, name):
         if k == 7:
             a.trim(fed - 5000)
             c.trim(fed - 5000)
-        if k == 10:  # tnc: trimmed away, start over
+        if k == 10:  # the receiver: trimmed away, start over
             a.restart_at(fed)
             c.restart_at(fed)

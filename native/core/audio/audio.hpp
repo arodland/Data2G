@@ -39,7 +39,7 @@ std::optional<std::size_t> select_device(std::span<const DeviceInfo> devices, st
 // --list-audio-devices' lines (the apps'): index, channels, name, to stdout.
 void print_devices(std::span<const DeviceInfo> devices);
 
-// host._channels: 2 where the device has two or more, else 1. Stereo
+// audio.channels: 2 where the device has two or more, else 1. Stereo
 // because PortAudio's ALSA backend corrupted the heap on mono over
 // PipeWire; kept so the device sees the same streams as the Python host.
 inline int open_channels(const DeviceInfo& d) { return d.channels >= 2 ? 2 : 1; }
