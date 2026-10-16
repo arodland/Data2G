@@ -414,7 +414,7 @@ def modem_hpp() -> str:
         assert list(gains) == [1]
         return f"{{{cxx(float(gains[1]))}, {cxx(float(default))}, {cxx(float(ratio))}}}"
 
-    subs = [clip(config.clip_consts(s.band, s.headroom, s.ace, s.constellation)) for s in config.SUBMODES.values()]
+    subs = [clip(s.clip) for s in config.SUBMODES.values()]
     out.append(f"// receive()'s, per config::SUBMODES row\ninline constexpr std::array<Clip, {len(subs)}> CLIP_SUBMODE = "
                f"{{{{\n    {', '.join(subs)}}}}};\n")
     bands = [clip(config.CLIP[b]) for b in config.BANDS]

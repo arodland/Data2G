@@ -49,7 +49,7 @@ from .config import (
     BANDS,
     BY_INDEX,
     CLIP,
-    clip_consts,
+    ClipConsts,
     DATA_SYMS_PER_FRAME,
     DEMOD_BACKOFF,
     FRAME_SAMPLES,
@@ -1004,7 +1004,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     support = (support[0] - shift, support[1] - shift)
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
-    est = data_channel(hp, support, db, hd["n0_pre"], clip_consts(db, spec.headroom, spec.ace, spec.constellation),
+    est = data_channel(hp, support, db, hd["n0_pre"], spec.clip,
                        n0_pre_k=hd["n0_pre_k"] if db == band else None, n_frames=n_f)
     if kc is not None:
         raw = np.delete(raw, kc, axis=0)
@@ -1022,14 +1022,14 @@ def resolve_alias(fine: float, coarse: float) -> float:
 
 
 def data_channel(h_pilot: np.ndarray, support: tuple[int, int], band: str = "w",
-                 n0_pre: float = np.inf, clip: tuple | None = None, n0_pre_k=None, n_frames: int | None = None) -> DataEstimate:
+                 n0_pre: float = np.inf, clip: ClipConsts | None = None, n0_pre_k=None, n_frames: int | None = None) -> DataEstimate:
     """equalizer.estimate, rescaled from the pilots' channel to the one
     the data see. `clip` overrides config.CLIP[band] (clipper studies).
     `n_frames`: data frames, when the pilots include a header copy's."""
     est = equalizer.estimate(h_pilot, support, bb=ofdm.band(band).bb, n0_pre=n0_pre, n0_pre_k=n0_pre_k)
-    gains, default, ratio = clip or CLIP[band]
-    est["clip_ratio"] = ratio
-    g = gains.get(len(h_pilot) - 1 if n_frames is None else n_frames, default)
+    c = ClipConsts(*(clip or CLIP[band]))
+    est["clip_ratio"] = c.ratio
+    g = c.gain_for(len(h_pilot) - 1 if n_frames is None else n_frames)
     est["h"] = est["h"] * g
     est["mse"] = est["mse"] * g**2
     est["gain"] = g

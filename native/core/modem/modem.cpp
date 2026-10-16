@@ -946,10 +946,7 @@ DataEstimate data_channel(const Mat<cd>& h_pilot, equalizer::Support support, st
     const ClipConsts own = clip ? ClipConsts{} : clip_consts(band);
     const ClipConsts& c = clip ? *clip : own;
     est.clip_ratio = c.ratio;
-    const int key = n_frames < 0 ? static_cast<int>(h_pilot.rows) - 1 : n_frames;
-    double g = c.gain;
-    for (const auto& [k, v] : c.gains)
-        if (k == key) g = v;
+    const double g = c.gain_for(n_frames < 0 ? static_cast<int>(h_pilot.rows) - 1 : n_frames);
     for (auto& v : est.h.data) v *= g;
     for (auto& v : est.mse.data) v *= g * g;
     est.gain = g;
@@ -1156,10 +1153,7 @@ std::vector<cd> equalized(const Received& r) {
 
 std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f) {
     const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, {}, spec.band);
-    const auto c = clip_consts(spec);
-    double g = c.gain;
-    for (const auto& [k, v] : c.gains)
-        if (k == n_f) g = v;
+    const double g = clip_consts(spec).gain_for(n_f);
     const size_t nc = fr.raw.cols;
     std::vector<cd> out;
     out.reserve(DATA_SYMS_PER_FRAME * nc);

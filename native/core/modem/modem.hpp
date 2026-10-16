@@ -167,6 +167,13 @@ struct DataEstimate : equalizer::Estimate {
 struct ClipConsts {
     std::vector<std::pair<int, double>> gains;
     double gain = 1.0, ratio = 0.0;
+
+    double gain_for(int n_frames) const {  // the data's gain in a burst of n_frames
+        double g = gain;
+        for (const auto& [k, v] : gains)
+            if (k == n_frames) g = v;
+        return g;
+    }
 };
 ClipConsts clip_consts(const Spec& spec);       // receive()'s
 ClipConsts clip_consts(std::string_view band);  // config.CLIP[band]

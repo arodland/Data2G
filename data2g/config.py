@@ -15,6 +15,7 @@ change run tools/gen_native_tables.py, whose --check fails until then.
 
 import os
 from dataclasses import dataclass
+from typing import NamedTuple
 
 FS = 8000  # audio sample rate, Hz
 
@@ -220,6 +221,11 @@ class SubmodeSpec:
         return BANDS[self.band].clip_headroom_db if self.clip_headroom_db is None else self.clip_headroom_db
 
     @property
+    def clip(self) -> "ClipConsts":
+        """The clip constants of this submode's bursts (native modem::clip_consts(spec))."""
+        return clip_consts(self.band, self.headroom, self.ace, self.constellation)
+
+    @property
     def coded_bits(self) -> int:
         return self.cu_per_frame * self.frames_per_cw * self.bits_per_cu
 
@@ -289,11 +295,23 @@ def clip_key(band: str, headroom: float, ace: tuple = (), const: str = "") -> st
     return k + f"+ace{'-'.join(f'{v:g}' for v in ace)}:{const}" if ace else k
 
 
-def clip_consts(band: str, headroom: float, ace: tuple = (), const: str = "") -> tuple:
-    """(gain by frame count, default gain, clip-noise ratio) for a band at a
-    headroom, from codes_data/clip_constants.json (stock overshoot)."""
+class ClipConsts(NamedTuple):
+    """What the clipper does to the data, as a receiver sees it (native
+    modem::ClipConsts)."""
+
+    gains: dict  # data over pilot amplitude, by burst length in frames where it differs from `gain`
+    gain: float  # the same, any other length
+    ratio: float  # clip-noise power over the data's
+
+    def gain_for(self, n_frames: int) -> float:
+        return self.gains.get(n_frames, self.gain)
+
+
+def clip_consts(band: str, headroom: float, ace: tuple = (), const: str = "") -> ClipConsts:
+    """A band's at a headroom (and ACE and constellation, if it uses ACE),
+    from codes_data/clip_constants.json (stock overshoot)."""
     e = _CLIP_ENTRIES[clip_key(band, headroom, ace, const)]
-    return {1: e["gain_1f"]}, e["gain"], 10 ** (-e["sdr_db"] / 10)
+    return ClipConsts({1: e["gain_1f"]}, e["gain"], 10 ** (-e["sdr_db"] / 10))
 
 
 def clip_peak_db(band: str, headroom: float, ace: tuple = (), const: str = "") -> float:
