@@ -163,7 +163,7 @@ target_link_libraries(data2g_applog PUBLIC data2g_core)
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
+    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
                                       app/realtime.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)

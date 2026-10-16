@@ -8,9 +8,10 @@
 //   start(), stop() and every poll below;
 // - engine (the receive thread): reads the capture FIFO a block (0.1 s) at a
 //   time and steps the Engine; it never touches the transmitter;
-// - transmit: keys PTT (rig::Keyer), plays each burst the engine hands over
-//   on the sound card's own clock and releases PTT, so nothing the receive
-//   side computes, or the rig's slow answers, can leave a hole in a burst;
+// - transmit (app/transmitter.hpp): keys PTT (rig::Keyer), plays each burst
+//   the engine hands over on the sound card's own clock and releases PTT, so
+//   nothing the receive side computes, or the rig's slow answers, can leave
+//   a hole in a burst;
 // - decode worker (decode_worker, the default): the engine's session stage,
 //   so a burst's decode and DD don't delay search and BUSY;
 // - capture and playback (Qt Multimedia QThreads, or PipeIo's two);
@@ -27,7 +28,8 @@
 // The rest of data2g_station, each its own file: app/options.hpp (the
 // command line and settings, Args), app/log.hpp (the log and the quit
 // signals), app/tcp_servers.hpp (the command, data and KISS listeners),
-// app/rx_plot.hpp (constellation-plot points), app/realtime.hpp.
+// app/rx_plot.hpp (constellation-plot points), app/transmitter.hpp (the
+// transmit thread), app/realtime.hpp.
 #pragma once
 
 #include <QObject>
@@ -35,7 +37,6 @@ class QTcpSocket;
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -72,7 +73,6 @@ struct Dump;
 }
 namespace rig {
 class RigController;
-class Keyer;
 }  // namespace rig
 }  // namespace data2g
 
@@ -80,6 +80,7 @@ namespace data2g::app {
 
 class Port;
 class KissServer;
+class Transmitter;
 
 // Bad options found only at start() (argparse would have exited with 2).
 struct UsageError : std::runtime_error {
@@ -134,7 +135,7 @@ public:
     std::vector<BurstLogEntry> take_bursts();  // since the last call (the newest 256 kept)
     // The newest since the last call. The first call starts the live view (--live-constellation).
     std::optional<RxConstellation> take_constellation();
-    bool ptt() const { return ptt_; }
+    bool ptt() const;  // the rig keyed (or, with no rig, would be)
     bool busy() const;  // the host's BUSY
     AudioCounters counters() const;
     // The newest `n` samples (FS) the engine read, and how many it has read
@@ -157,16 +158,14 @@ private:
     void flush(std::uint64_t asker = 0);
     void note_link();
     void log_burst();  // reading_ into bursts_; status_mu_ held
-    void announce_ptt(bool on);
     // owner's thread
     void deliver(const Outbox& o);
     void dial(const std::string& host, int port, unsigned gen, std::shared_ptr<Dial> d);  // ACCEPT's connection
     void hang_up();
-    // engine thread
+    // transmit thread (Transmitter's on_ptt)
+    void announce_ptt(bool on);
+    // engine (receive) thread
     void engine_loop();
-    void tx_loop();
-    void tx_submit(std::shared_ptr<const std::vector<double>> burst);
-    void tx_abort();
     void watch_counters();
     void tap(std::span<const double> x, bool tx);
 
@@ -186,22 +185,12 @@ private:
     std::unique_ptr<audio::PipeIo> pipe_;
     std::unique_ptr<SoundCard> card_;
     std::unique_ptr<rig::RigController> rig_;
-    std::unique_ptr<rig::Keyer> keyer_;
     std::unique_ptr<MonitorThread> monitor_;  // made in start(), before the engine runs
     std::atomic<bool> monitor_on_{false};
-    std::thread engine_thread_, tx_thread_;
-    std::atomic<bool> stop_{false}, failed_{false}, ptt_{false};
-    // transmit: bursts handed over by the engine thread, played in order by tx_thread_
-    struct TxJob {
-        std::shared_ptr<const std::vector<double>> audio;
-        unsigned generation;  // an abort moves the generation on: older jobs are dropped, a playing one stops
-    };
-    std::mutex tx_mu_;
-    std::condition_variable tx_cv_;
-    std::deque<TxJob> tx_q_;
-    std::atomic<unsigned> tx_generation_{0};
+    std::unique_ptr<Transmitter> tx_;  // made last in start(), its thread with it; the engine thread submits to it
+    std::thread engine_thread_;
+    std::atomic<bool> stop_{false}, failed_{false};
     std::atomic<bool> rt_warned_{false};
-    std::atomic<bool> tx_stop_{false}, tx_active_{false};  // tx_active_: from keying until our audio has drained (not the PTT off); the receive side mutes
     bool running_ = false;
     std::uint64_t overflows_ = 0, underruns_ = 0, late_ = 0, dropped_ = 0;  // engine thread
 

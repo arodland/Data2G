@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <ctime>
 #include <functional>
 #include <utility>
@@ -16,9 +17,9 @@
 #endif
 #include "app/realtime.hpp"
 #include "app/tcp_servers.hpp"
+#include "app/transmitter.hpp"
 #include "audio/audio.hpp"
 #include "audio/fifo.hpp"
-#include "audio/filters.hpp"
 #include "audio/pipe.hpp"
 #include "audio/thread.hpp"
 #include "generated/config.hpp"
@@ -336,7 +337,7 @@ void Station::engine_loop() {
             read_t += clk::now() - r0;
             if (!x) break;
             const std::vector<double> heard = *x;
-            if (tx_active_) std::fill(x->begin(), x->end(), 0.0);  // the radio's receive audio is muted while it transmits
+            if (tx_->active()) std::fill(x->begin(), x->end(), 0.0);  // the radio's receive audio is muted while it transmits
             const auto t0 = std::chrono::steady_clock::now();
             auto out = engine_->step(*x);
             // the waterfall shows what we send while we send it (the radio's
@@ -358,88 +359,15 @@ void Station::engine_loop() {
                 blocks = 0;
                 window = now;
             }
-            if (out.tx_abort) tx_abort();
-            if (out.tx_burst) tx_submit(std::move(out.tx_burst));
+            if (out.tx_abort) tx_->abort();
+            if (out.tx_burst) tx_->submit(std::move(out.tx_burst));
             watch_counters();
             if (a_.rx_stall_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(a_.rx_stall_ms));
         }
     } catch (const std::exception& e) {
         logf(CRITICAL, "engine thread: %s", e.what());
         failed_ = true;
-        tx_abort();  // never leave the radio transmitting
-    }
-}
-
-void Station::tx_submit(std::shared_ptr<const std::vector<double>> burst) {
-    {
-        std::lock_guard lock(tx_mu_);
-        tx_q_.push_back({std::move(burst), tx_generation_.load()});
-    }
-    tx_cv_.notify_one();
-}
-
-// ABORT, or the engine dying: what is playing stops (the FIFO is flushed, PTT drops) and what is queued is dropped.
-void Station::tx_abort() {
-    std::lock_guard lock(tx_mu_);
-    ++tx_generation_;
-    tx_q_.clear();
-    tx_cv_.notify_all();
-}
-
-// The transmit thread: for each burst, key, feed the playback FIFO a block at a time (never more than half a second
-// ahead of the card, so an abort is quick), wait for the card to finish, and unkey. The rig's PTT calls, the
-// drain and the off delay all block here, not on the receive side; real-time scheduling, where granted, keeps
-// the feeding on time under load.
-void Station::tx_loop() {
-#ifdef __linux__
-    pthread_setname_np(pthread_self(), "d2g-tx");
-#endif
-    audio::thread_init("tx");
-    const std::size_t block = config::FS / 10;
-    const double gain = std::pow(10.0, a_.output_volume / 20);
-    const std::size_t ahead = static_cast<std::size_t>(rate_) / 2;
-    for (;;) {
-        TxJob job;
-        {
-            std::unique_lock lock(tx_mu_);
-            tx_cv_.wait(lock, [&] { return tx_stop_ || !tx_q_.empty(); });
-            if (tx_stop_) break;
-            job = std::move(tx_q_.front());
-            tx_q_.pop_front();
-        }
-        if (job.generation != tx_generation_) continue;  // aborted before it began
-        const auto stopped = [&] { return tx_stop_ || job.generation != tx_generation_; };
-        try {
-            tx_active_ = true;
-            keyer_->key();  // PTT on, the lead queued
-            ptt_ = true;
-            announce_ptt(true);
-            audio::Interpolator interp(rate_);
-            const auto& a = *job.audio;
-            for (std::size_t pos = 0; pos < a.size() && !stopped(); pos += block) {
-                while (play_->queued() > ahead && !stopped()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                if (stopped()) break;
-                auto y = interp(std::span<const double>(a).subspan(pos, std::min(block, a.size() - pos)));
-                for (auto& v : y) v = std::clamp(v * gain, -1.0, 1.0);
-                play_->write(y);
-            }
-            if (stopped()) play_->flush();
-            keyer_->unkey([this] { tx_active_ = false; });  // drain, off delay, unmute, PTT off
-            // a PTT off the rig didn't take stays pending in the keyer, and is tried again (it gives up after a few)
-            for (int i = 0; keyer_->keyed() && i < 10; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                keyer_->unkey();
-            }
-        } catch (const std::exception& e) {
-            logf(ERROR, "transmit: %s", e.what());
-            try {
-                keyer_->unkey();  // never leave the radio transmitting
-            } catch (...) {
-            }
-        }
-        if (ptt_) announce_ptt(false);  // clients that key the rig themselves release it now
-        ptt_ = false;
-        tx_active_ = false;
+        tx_->abort();  // never leave the radio transmitting
     }
 }
 
@@ -450,6 +378,8 @@ void Station::announce_ptt(bool on) {
     o.cmd.emplace_back(on ? "PTT ON" : "PTT OFF", 0);
     QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
+
+bool Station::ptt() const { return tx_ && tx_->ptt(); }
 
 std::optional<double> Station::rig_frequency() const { return rig_ ? rig_->frequency_hz() : std::nullopt; }
 
@@ -473,7 +403,7 @@ void Station::start() {
         cfg.worker = a_.decode_worker;
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
-        host_->announce_ptt = false;  // tx_loop tells the clients, as it keys and unkeys the rig
+        host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig
         host_->dial = [this](const host::Addr& addr) {
             const unsigned gen = ++dial_gen_;
             auto d = std::make_shared<Dial>();
@@ -630,8 +560,6 @@ void Station::start() {
             throw UsageError("built without sound card audio: only --audio-io pipe:IN,OUT");
 #endif
         }
-        keyer_ = std::make_unique<rig::Keyer>(ptt, *play_, a_.ptt_off_delay_ms / 1000.0,
-                                              [](const std::string& s) { log_line(ERROR, s); }, must_release);
 
         logf(INFO, "commands on %s:%d, data on %d", a_.host.c_str(), a_.command_port, a_.command_port + 1);
         logf(INFO, "KISS on %s:%d: %d Hz cap, broadcasts in %s", a_.kiss_address.c_str(), a_.kiss_port, a_.kiss_bw,
@@ -640,8 +568,8 @@ void Station::start() {
         logf(INFO, "decode worker %s", a_.decode_worker ? "on" : "off");
 
         running_ = true;
-        tx_stop_ = false;
-        tx_thread_ = std::thread(&Station::tx_loop, this);
+        tx_ = std::make_unique<Transmitter>(*play_, rate_, std::pow(10.0, a_.output_volume / 20), std::move(ptt), std::move(must_release),
+                                            a_.ptt_off_delay_ms / 1000.0, [this](bool on) { announce_ptt(on); });
         engine_thread_ = std::thread(&Station::engine_loop, this);
     } catch (...) {
         running_ = true;  // so stop() undoes whatever got started
@@ -655,19 +583,12 @@ void Station::stop() {
     running_ = false;
     stop_ = true;
     // the transmitter first: PTT drops now, not after the engine's step (a long decode, a dial wait) ends
-    {
-        std::lock_guard lock(tx_mu_);
-        tx_stop_ = true;
-    }
-    tx_cv_.notify_all();
-    if (tx_thread_.joinable()) tx_thread_.join();  // PTT is off when it returns
+    if (tx_) tx_->stop();  // PTT is off when it returns
     if (cap_) cap_->close();
     if (engine_thread_.joinable()) engine_thread_.join();
-    tx_q_.clear();  // what the engine queued after the transmitter went
     if (engine_) engine_->stop();
     monitor_.reset();  // after the engine: nothing pushes to it now
-    keyer_.reset();  // PTT off, if the rig was ever keyed
-    ptt_ = false;
+    tx_.reset();  // PTT off, if the rig was ever keyed (~Keyer)
     if (rig_) {
         rig_->stop();
         rig_->wait_for_shutdown(2.0);
