@@ -11,7 +11,7 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 
 ## Directories
 
-| | |
+| Directory | What |
 |---|---|
 | `core/` | The library, `data2g_core`: no Qt, no files read at run time. One directory per Python module, `core/<module>/<module>.{hpp,cpp}`; every header's first line names its Python counterpart. |
 | `core/generated/` | Constants and frozen tables written by `tools/gen_native_tables.py` from `data2g/`. Never edited. |

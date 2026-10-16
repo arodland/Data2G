@@ -6,7 +6,7 @@ page is the map. `docs/README.md` lists the other docs.
 
 ## The repository
 
-| | |
+| Path | What |
 |---|---|
 | `data2g/` | The Python package: the **normative reference** for the on-air format, the receiver and the protocols, and a working station (`data2g-host`). |
 | `native/` | The C++20 / Qt 6 port of the live path: `data2g-host`, `data2g-gui`, `data2g-monitor`. Checked against `data2g/`. See `native/README.md`. |

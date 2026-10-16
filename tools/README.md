@@ -2,7 +2,7 @@
 
 Each file's header has its usage.
 
-| Tool | |
+| Tool | What |
 |---|---|
 | **Generated data** | |
 | `gen_native_tables.py` | `native/core/generated/` from `data2g/` (constants, submodes, frozen tables). `--check` in CI: fails until regenerated. |

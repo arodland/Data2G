@@ -34,7 +34,7 @@ Rerun to change the file; `data2g/codes_data/README.md` has the readers.
 Imported by other scripts (via `sys.path`) and, for the first three, by
 tests: change them with care.
 
-| Module | |
+| Module | What |
 |---|---|
 | `outcome_data.py` | seeded test bursts through the real modem (`burst`), the dataset generator |
 | `phy_session.py` | whole ARQ sessions through the real modem and a continuous fading channel (`RealPhy`) |
@@ -50,7 +50,7 @@ test_kiss.py).
 
 ## The live stack
 
-| | |
+| Script | What |
 |---|---|
 | `replay.py` | Replay a session recorded at both ends (`data2g-host --record-dir`) with exact knowledge of what was on air. |
 | `cpu_profile/` | End-to-end runs of two hosts: `run.sh` (profiling over a PipeWire loopback, Pat or raw transfers), `speedtest.py` and `speedtrials.py` (one-way bulk speed, off the clock; `tests/test_speedtest.py` runs it), the VARA comparison (`vara_ref.sh`, `varatrials.py`, `vara_sweep.sh`), `tnc_proxy.py` (log an app talking to a TNC), and their helpers. |
