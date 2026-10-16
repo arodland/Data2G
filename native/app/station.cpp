@@ -158,7 +158,7 @@ void Station::flush(std::uint64_t asker) {
 void Station::note_link() {
     auto& s = engine_->session();
     LinkStatus l;
-    l.state = arq::state_name(s.state);
+    l.state = s.state;
     l.peer = s.peer;
     l.cap = s.cap;
     if (s.station) {

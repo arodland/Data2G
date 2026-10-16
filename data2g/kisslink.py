@@ -42,14 +42,13 @@ import logging
 import struct
 import time
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 from . import codes, cpm
 from .config import max_codewords
 from .arq import frames as F
 from .arq import phy as PHY
 from .arq import policy as G
-from .arq.link import Slot, TxBurst, ctl_mask, data_mask
+from .arq.burst import Slot, TxBurst, ctl_mask, data_mask
 from .arq.modes import MODES, ctl_payload_bytes, is_cpm, max_ctl
 
 log = logging.getLogger("data2g.kiss")
@@ -223,8 +222,6 @@ class KissLink:
         self.broadcast = self.broadcast or BROADCAST[self.cap]
         self._check_mode(self.broadcast)
         self.ports.setdefault(0, Port(PORT0_GROUP, self.broadcast))
-        self._stub = SimpleNamespace(cap=self.cap, rx=SimpleNamespace(buf={}), chat=False, peer_chat=False,
-                                     peer_queued=0)
 
     def _check_mode(self, mode: str):
         s = MODES.get(mode)
@@ -281,7 +278,7 @@ class KissLink:
         fit the mode's control codewords."""
         spec = MODES[mode]
         need = 1 + len(self._group_tlv(n, p)) + (len(_tlv(T_REPORTS, bytes(2))) if auto else 0)  # reports: the sender at least
-        if need > min(4, max_ctl(spec)) * ctl_payload_bytes(spec):
+        if need > min(F.MAX_CTL, max_ctl(spec)) * ctl_payload_bytes(spec):
             raise ValueError(f"mode {mode}: a {need}-byte control doesn't fit")
 
     def _drop(self, which, port: int):
@@ -344,7 +341,7 @@ class KissLink:
     def _control(self, spec, n: int, port: Port, sender: int) -> list[bytes]:
         """Control codeword payloads: header, the group, and on a shifting
         port as many fresh reports as fit."""
-        pb, n_max = ctl_payload_bytes(spec), min(4, max_ctl(spec))
+        pb, n_max = ctl_payload_bytes(spec), min(F.MAX_CTL, max_ctl(spec))
         body = self._group_tlv(n, port)
         if port.auto:
             now = self.clock()
@@ -353,7 +350,7 @@ class KissLink:
             room = min((n_max * pb - 1 - len(body) - 4) // 3, (255 - 2) // 3)
             rep = struct.pack(">H", sender)
             for h, p in fresh[:max(0, room)]:
-                rec, hint, _ = p.shifter.recommend(self._stub)
+                rec, hint, _ = p.shifter.recommend(G.StationView(cap=self.cap))  # no session: an idle one
                 rep += struct.pack(">HB", h, (rec << 2) | hint)
             body += _tlv(T_REPORTS, rep)
         n_ctl = max(1, -(-(1 + len(body)) // pb))

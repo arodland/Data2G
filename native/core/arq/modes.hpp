@@ -4,7 +4,9 @@
 #pragma once
 
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "generated/config.hpp"
 #include "tables/tables.hpp"
@@ -28,5 +30,19 @@ int ctl_payload_bytes(const Mode& m);  // its control codeword's (CPM: the grid'
 int max_ctl(const Mode& m);
 int min_cw(const Mode& m, bool data);
 int rv_cycle(const Mode& m);
+
+// Bandwidth: a cap code (a session's, KISS's) and what each mode occupies.
+int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap
+std::string bw_name(int cap);  // BW_NAME, VARA's name for it (500, 1200, 2300); throws for an unknown cap
+double width_hz(const Mode& m);
+std::vector<const Mode*> allowed(int cap);  // within the cap, MODES' order
+
+// The recommendation code (the core word's 6-bit recommend): sync band code
+// (frames BANDS_CODE) << 4 | index; CPM modes take the spare band code.
+inline constexpr int CPM_CODE = 3;
+// CPM_CODE's indices from here carry n10's past 15 (16-23)
+inline constexpr int N10_HIGH = 8;
+int encode(std::string_view submode);  // throws for an unknown mode
+const Mode* decode(int rec);           // nullptr: no such mode
 
 }  // namespace data2g::arq

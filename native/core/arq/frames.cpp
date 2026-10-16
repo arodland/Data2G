@@ -18,7 +18,7 @@ std::uint8_t at(ByteView b, std::size_t i) {
 // --- core word ----------------------------------------------------------------
 
 Bytes Core::pack() const {
-    if (!(1 <= n_ctl && n_ctl <= 4 && 0 <= k && k < 64) || ftype < 0 || ftype > 3)
+    if (!(1 <= n_ctl && n_ctl <= MAX_CTL && 0 <= k && k < 64) || ftype < 0 || ftype > 3)
         throw std::logic_error("Core.pack: field out of range");
     std::uint32_t v = static_cast<std::uint32_t>(ftype);
     const std::pair<int, int> fields[] = {{n_ctl - 1, 2}, {burst_seq, 3}, {acted_on, 3}, {cum, 7},
@@ -63,9 +63,9 @@ std::vector<Bytes> Control::pack(int payload_bytes) {
     }
     const auto total = static_cast<std::int64_t>(4 + body.size());
     const auto n = std::max<std::int64_t>(1, ceil_div(total, payload_bytes));
-    if (n > 4)
+    if (n > MAX_CTL)
         throw std::invalid_argument("control needs " + std::to_string(n) + " codewords of " +
-                                    std::to_string(payload_bytes) + " B (max 4)");
+                                    std::to_string(payload_bytes) + " B (max " + std::to_string(MAX_CTL) + ")");
     core.n_ctl = static_cast<int>(n);
     Bytes stream = core.pack();
     stream.insert(stream.end(), body.begin(), body.end());
@@ -271,8 +271,88 @@ struct CompactField { int bits, at, n; };  // bits, body offset, body bytes
 constexpr CompactField COMPACT[] = {{4, 1, 1}, {60, 2, 8}, {60, 10, 8}, {16, 18, 2}, {2, 20, 1}, {6, 21, 1}};
 }  // namespace
 
+// --- session frame bodies -------------------------------------------------------------
+
+namespace {
+
+std::uint8_t u8(std::int64_t v) {  // bytes([v])
+    if (v < 0 || v > 255) throw std::invalid_argument("bytes must be in range(0, 256)");
+    return static_cast<std::uint8_t>(v);
+}
+
+void put_u16(Bytes& out, std::int64_t v) {  // v.to_bytes(2, "big")
+    out.push_back(static_cast<std::uint8_t>(v >> 8));
+    out.push_back(static_cast<std::uint8_t>(v));
+}
+
+std::int64_t u16_at(ByteView b, std::size_t i) { return b[i] << 8 | b[i + 1]; }
+
+}  // namespace
+
+Bytes Connect::pack() const {
+    Bytes out{CONNECT, u8(version)};
+    const Bytes from = pack_call(caller), to = pack_call(callee);
+    out.insert(out.end(), from.begin(), from.end());
+    out.insert(out.end(), to.begin(), to.end());
+    put_u16(out, nonce);
+    out.push_back(u8(cap));
+    out.push_back(u8(t_turn10));
+    return out;
+}
+
+Connect Connect::unpack(ByteView body) {
+    auto [caller, callee] = calls(body);
+    return {body[1], std::move(caller), std::move(callee), u16_at(body, 18), body[20], body[21]};
+}
+
+std::pair<std::string, std::string> Connect::calls(ByteView body) {
+    return {unpack_call(body.subspan(2, 8)), unpack_call(body.subspan(10, 8))};
+}
+
+Bytes ConnectAck::pack() const {
+    Bytes out{CONNECT_ACK};
+    put_u16(out, nonce);
+    out.push_back(u8(cap));
+    out.push_back(u8(t_turn10));
+    return out;
+}
+
+ConnectAck ConnectAck::unpack(ByteView body) { return {u16_at(body, 1), body[3], body[4]}; }
+
+Bytes ConnectNak::pack() const {
+    Bytes out{CONNECT_NAK};
+    put_u16(out, nonce);
+    out.push_back(u8(reason));
+    return out;
+}
+
+ConnectNak ConnectNak::unpack(ByteView body) { return {u16_at(body, 1), body[3]}; }
+
+Bytes pack_cq(const std::string& call, int cap) {
+    Bytes out = pack_call(call);
+    out.push_back(static_cast<std::uint8_t>(cap));
+    return out;
+}
+
+std::pair<std::string, int> unpack_cq(ByteView body) {
+    if (body.size() < 9) throw std::invalid_argument("CQ of " + std::to_string(body.size()) + " B");
+    return {unpack_call(body.first(8)), body[8]};
+}
+
+Bytes pack_id(const std::string& call, int key) {
+    Bytes out = pack_call(call);
+    out.push_back(static_cast<std::uint8_t>(key >> 8));
+    out.push_back(static_cast<std::uint8_t>(key & 255));
+    return out;
+}
+
+std::pair<std::string, int> unpack_id(ByteView body) {
+    if (body.size() < 10) throw std::invalid_argument("ID of " + std::to_string(body.size()) + " B");
+    return {unpack_call(body.first(8)), body[8] << 8 | body[9]};
+}
+
 Bytes pack_connect(ByteView body) {
-    if (body.size() < 22) throw std::invalid_argument("CONNECT body of " + std::to_string(body.size()) + " B");
+    if (body.size() < Connect::BYTES) throw std::invalid_argument("CONNECT body of " + std::to_string(body.size()) + " B");
     Bytes out(COMPACT_BYTES, 0);
     int pos = 0;  // bits written, MSB first
     for (const auto& f : COMPACT) {
@@ -288,7 +368,7 @@ Bytes pack_connect(ByteView body) {
 }
 
 Bytes unpack_connect(ByteView p) {
-    Bytes out(22, 0);
+    Bytes out(Connect::BYTES, 0);
     out[0] = CONNECT;
     int pos = 0;
     for (const auto& f : COMPACT) {

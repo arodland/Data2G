@@ -50,6 +50,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
+from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
 from .config import FS  # noqa: E402
@@ -58,7 +59,7 @@ from .tnc import Decimator, Rigctld, _device, _pa_float  # noqa: E402
 log = logging.getLogger("data2g.host")
 VERSION = "Data2G 0.1"
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
-BW_NAME = {0: "500", 1: "1200", 2: "2300"}
+BW_NAME = modes.BW_NAME
 BLOCK = FS // 10  # audio block: 0.1 s
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
@@ -230,7 +231,7 @@ class Host:
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
                 me = e.session.call  # the call dialed, when MYCALL gave several
-                src, dst = (me, peer) if e.session._master else (peer, me)
+                src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
@@ -266,13 +267,10 @@ class Host:
         # plain VARA figure. CHAT ON also reports it: the client watches
         # BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
-        unsent = unacked = len(e.session._pending_write)
-        if st:
-            unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
-            unacked += len(st.tx.buf)  # from the first unacked codeword on
+        unsent, unacked = e.session.queued_bytes()
         buffered = unacked
-        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
-            credit = e.session.policy.next_capacity(st)
+        if (st and self.buffer_credit != 0 and not e.session.chat
+                and (credit := e.session.policy.next_capacity(st)) is not None):
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)
             buffered = unsent - credit if unsent > credit else min(unacked, 1)

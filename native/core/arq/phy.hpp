@@ -38,7 +38,8 @@ inline constexpr int DD_ITERS = 2;
 // A live receiver's DD starts no refines this long after the burst's decode began.
 inline constexpr double DD_BUDGET_S = 1.0;
 
-// A slot's CRC mask (zlib.crc32 of key, direction, seq; key 0: mask 0).
+// A slot's CRC mask from its identity (burst.hpp): zlib.crc32 of key,
+// direction, seq; key 0: mask 0, but a compact CONNECT's.
 std::uint32_t mask_value(const MaskId& m);
 
 // A TxBurst -> unit-RMS audio. Throws std::out_of_range for an unknown mode.

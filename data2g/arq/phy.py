@@ -1,9 +1,9 @@
-"""The ARQ layer on the real modem: link.TxBurst -> audio, a received
-burst -> link.RxBurst (masked CRCs, docs/arq.md §2; soft-bit combining
+"""The ARQ layer on the real modem: burst.TxBurst -> audio, a received
+burst -> burst.RxBurst (masked CRCs, docs/arq.md §2; soft-bit combining
 across resends, §5), and the gear shifter's measurements.
 
-Used by scripts/phy_session.py (phase G: whole sessions through the modem
-and hfchannel) and the live stack (phase H).
+Used by the live stack (engine.py) and by scripts/phy_session.py (whole
+sessions through the modem and hfchannel).
 """
 
 import logging
@@ -17,7 +17,7 @@ import numpy as np
 from .. import codes, constellation, cpm, equalizer, modem
 from ..waveform import dsp, ofdm
 from . import predictor as P
-from .frames import SEQ_MOD
+from .burst import COMPACT_CONNECT
 from .modes import MODES, ctl_spec, is_cpm
 
 log = logging.getLogger(__name__)
@@ -35,12 +35,12 @@ DD_BUDGET_S = 1.0
 
 
 def mask_value(mask_id: tuple) -> int:
-    """A slot's CRC mask from (session key, direction, seq or 128 + control
-    index). Key 0 (connect frames, before a session) is mask 0, except a
-    compact CONNECT's (link.COMPACT_CONNECT)."""
+    """A slot's CRC mask from its identity (burst.ctl_mask, data_mask).
+    Key 0 (connect frames, before a session) is mask 0, except a compact
+    CONNECT's (burst.COMPACT_CONNECT)."""
     key, direction, s = mask_id
     if key == 0:
-        return 0xC0C0C0 if s == SEQ_MOD + 4 else 0
+        return 0xC0C0C0 if s == COMPACT_CONNECT[2] else 0
     return zlib.crc32(bytes([key >> 8, key & 255, direction, s])) or 1
 
 
@@ -57,7 +57,7 @@ def peak_db(submode: str, cap: int = 0) -> float:
 
 @lru_cache(maxsize=None)
 def _peak_db(submode: str, cap: int) -> float:
-    from .link import Slot, TxBurst, ctl_mask, data_mask
+    from .burst import Slot, TxBurst, ctl_mask, data_mask
 
     spec = MODES[submode]
     rng = np.random.default_rng(0)

@@ -35,8 +35,24 @@ std::optional<int> opt_int(const py::object& o, const char* name) {
     return o.attr(name).cast<int>();
 }
 
+// policy.view(): a policy.StationView field by field, else a link.Station
+// (or a test's stub of one: a missing attribute keeps the default)
 arq::StationView station(const py::object& s) {
     arq::StationView v;
+    if (py::isinstance(s, py::module_::import("data2g.arq.policy").attr("StationView"))) {
+        v.cap = s.attr("cap").cast<int>();
+        v.pending = s.attr("pending").cast<bool>();
+        v.peer_recommend = opt_int(s, "peer_recommend");
+        v.peer_reply_recommend = opt_int(s, "peer_reply_recommend");
+        v.peer_size_hint = s.attr("peer_size_hint").cast<int>();
+        v.peer_wants_dup = s.attr("peer_wants_dup").cast<bool>();
+        v.chat = s.attr("chat").cast<bool>();
+        v.peer_queued = s.attr("peer_queued").cast<std::int64_t>();
+        v.held = s.attr("held").cast<std::int64_t>();
+        v.misses = s.attr("misses").cast<int>();
+        v.esc_floor = s.attr("esc_floor").cast<int>();
+        return v;
+    }
     v.cap = s.attr("cap").cast<int>();
     if (py::hasattr(s, "tx")) v.pending = py::bool_(s.attr("tx").attr("pending")());
     v.peer_recommend = opt_int(s, "peer_recommend");

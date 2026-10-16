@@ -12,6 +12,13 @@ def feed(p, x, t0=0.0, step=FS // 25):
         p.feed(x[i:i + step], t0 + i / FS)
 
 
+def test_predictor_weighs_the_same_sub_bands():
+    """The outcome model's noise inputs (predictor.noise_features) are per these sub-bands."""
+    from data2g.arq import predictor as P
+
+    assert P.NOISE_BANDS_HZ == tuple(map(tuple, NoiseProfile.BANDS_HZ))
+
+
 def test_white_noise_is_flat():
     p = NoiseProfile()
     feed(p, np.random.default_rng(1).normal(0, 0.1, 30 * FS))

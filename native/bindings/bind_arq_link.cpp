@@ -22,10 +22,20 @@ namespace {
 
 // --- adapters to the Python objects ---------------------------------------------------
 
+// A member the Python policy leaves at link.Policy's default (or lacks)
+// takes the C++ default, which is the same.
 class PyPolicy : public Policy {
 public:
     explicit PyPolicy(py::object o) : obj(std::move(o)) {}
     py::object obj;
+
+    bool overrides(const char* name) const {
+        py::object f = py::getattr(obj, name, py::none());
+        if (f.is_none()) return false;
+        static const py::handle Policy = link_attr("Policy").release();  // kept for the process
+        py::object base = py::getattr(Policy, name, py::none());
+        return base.is_none() || !py::getattr(f, "__func__", f).is(base);
+    }
 
     std::pair<std::string, int> choose(Station& st, int escalation) override {
         auto r = obj.attr("choose")(py::cast(&st, py::return_value_policy::reference), escalation).cast<py::sequence>();
@@ -33,24 +43,24 @@ public:
     }
     int payload_bytes(const std::string& m) override { return obj.attr("payload_bytes")(m).cast<int>(); }
     int ctl_payload_bytes(const std::string& m) override {
-        return py::hasattr(obj, "ctl_payload_bytes") ? obj.attr("ctl_payload_bytes")(m).cast<int>() : payload_bytes(m);
+        return overrides("ctl_payload_bytes") ? obj.attr("ctl_payload_bytes")(m).cast<int>() : payload_bytes(m);
     }
-    int max_ctl(const std::string& m) override { return py::hasattr(obj, "max_ctl") ? obj.attr("max_ctl")(m).cast<int>() : 4; }
+    int max_ctl(const std::string& m) override { return overrides("max_ctl") ? obj.attr("max_ctl")(m).cast<int>() : MAX_CTL; }
     std::optional<Recommendation> recommend(Station& st) override {
-        if (!py::hasattr(obj, "recommend")) return std::nullopt;
+        if (!overrides("recommend")) return std::nullopt;
         auto r = obj.attr("recommend")(py::cast(&st, py::return_value_policy::reference)).cast<py::sequence>();
         return Recommendation{r[0].cast<int>(), r[1].cast<int>(), r[2].is_none() ? std::nullopt : std::optional<int>(r[2].cast<int>())};
     }
     bool want_dup() override { return py::bool_(py::getattr(obj, "want_dup", py::bool_(false))); }
     int rv_cycle(const std::string& m) override { return obj.attr("rv_cycle")(m).cast<int>(); }
-    bool has_outcome() override { return py::hasattr(obj, "outcome"); }
+    bool has_outcome() override { return overrides("outcome"); }
     void outcome(const std::string& m, int decoded, int sent, bool usable) override {
         obj.attr("outcome")(m, decoded, sent, py::arg("usable") = usable);
     }
     std::string mode_name(int rec) override {
-        return py::hasattr(obj, "mode_name") ? py::str(obj.attr("mode_name")(rec)).cast<std::string>() : std::to_string(rec);
+        return overrides("mode_name") ? py::str(obj.attr("mode_name")(rec)).cast<std::string>() : std::to_string(rec);
     }
-    bool has_airtime() override { return py::hasattr(obj, "airtime"); }
+    bool has_airtime() override { return overrides("airtime"); }
     std::optional<double> snr_est() override {
         auto m = py::getattr(obj, "measured", py::none());
         if (!py::bool_(m) || !m.contains("snr_est")) return std::nullopt;
@@ -62,16 +72,17 @@ public:
     }
     std::string connect_mode(int cap, int tries) override { return obj.attr("connect_mode")(cap, tries).cast<std::string>(); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
-        if (!py::hasattr(obj, "reply_hold")) return std::nullopt;
+        if (!overrides("reply_hold")) return std::nullopt;
         return obj.attr("reply_hold")(py::cast(&st, py::return_value_policy::reference),
-                                      burst_py(std::make_shared<TxBurst>(burst))).cast<double>();
+                                      burst_py(std::make_shared<TxBurst>(burst))).cast<std::optional<double>>();
     }
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
     std::optional<int> next_capacity(const Station& st) const override {
-        if (!py::hasattr(obj, "next_capacity")) return std::nullopt;
-        return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference)).cast<int>();
+        if (!overrides("next_capacity")) return std::nullopt;
+        return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference))
+            .cast<std::optional<int>>();
     }
 };
 
@@ -380,6 +391,8 @@ void bind_arq_link(py::module_& m) {
         .def_property_readonly("hist", [](const TxSide& t) { return pyb(t.hist); })
         .def_readonly("hist_off", &TxSide::hist_off)
         .def("pending", &TxSide::pending)
+        .def("unsent", &TxSide::unsent)
+        .def("unacked", &TxSide::unacked)
         .def("missing", &TxSide::missing);
 
     py::class_<RxSide>(a, "RxSide")
@@ -457,7 +470,8 @@ void bind_arq_link(py::module_& m) {
             auto p = s.ctl_pair(r, slot, i);
             return p ? py::object(pyb(*p)) : py::none();
         })
-        .def("_new_available", &Station::new_available);
+        .def("new_available", &Station::new_available)
+        .def("data_in_flight", &Station::data_in_flight);
 
     // --- session ---
     a.def("session_key", &session_key);
@@ -521,7 +535,7 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("_due", &Session::due)
         .def_readonly("_deadline", &Session::deadline)
         .def_readonly("_build_at", &Session::build_at)
-        .def_property_readonly("_master", &Session::master)
+        .def_property_readonly("master", &Session::master)
         .def_property_readonly("_pending_write", [](const Session& s) { return pyb(s.pending_write); })
         .def_readonly("_nonce", &Session::nonce)
         .def_readonly("_tries", &Session::tries)
@@ -533,11 +547,19 @@ void bind_arq_link(py::module_& m) {
         .def("disconnect", &Session::disconnect)
         .def("write", [](Session& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Session& s) { return pyb(s.read()); })
+        .def("queued_bytes", [](const Session& s) {
+            const auto [unsent, unacked] = s.queued_bytes();
+            return py::make_tuple(unsent, unacked);
+        })
         .def("poll", [](Session& s, double now) {
             auto* p = dynamic_cast<PySession*>(&s);
             return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));
         })
         .def("next_event", &Session::next_event)
+        .def("claims", [](const Session& s, py::object rx) {
+            PyRx r(std::move(rx));
+            return s.claims(r);
+        })
         .def("on_tx_end", [](Session& s, const py::object& burst, double now) { s.on_tx_end(burst_cpp(burst), now); })
         .def("on_header", &Session::on_header)
         .def("on_rx", [](Session& s, py::object rx, double now) {

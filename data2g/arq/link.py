@@ -1,6 +1,10 @@
 """ARQ link core (docs/arq.md §3-§6, §9a, §10): one station's data
 transfer state for both directions, independent of the PHY.
 
+Station.build() -> the next TxBurst; Station.handle(rx) takes a received
+burst (burst.RxBurst); on_timeout() is the master's retry. The mode
+choice comes from a Policy (declared here; policy.GearShifter on air).
+
 Accounting rules, all from docs/arq.md §10 (the failure to design out is
 two stations that hear each other fine and exchange bursts forever
 because they disagree about state):
@@ -8,7 +12,8 @@ because they disagree about state):
 - Seqs are unbounded ints here; 7 bits on the wire, unwrapped against a
   known anchor (the receiver's cumulative, the sender's base).
 - Every data codeword's CRC mask includes its direction, seq,
-  compression and abandon epoch (Phy.decode's mask_id), so a slot mapped
+  compression and abandon epoch (burst.data_mask, the mask_id an
+  RxBurst decodes under), so a slot mapped
   to the wrong seq, taken under the wrong T_COMP flag or from an older
   slicing fails its CRC: accounting errors can cost progress, never
   correctness.
@@ -28,9 +33,10 @@ import logging
 import os
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from . import frames as F
+# the PHY abstraction; named here too, for link's callers
+from .burst import COMPACT_CONNECT, EPOCH_MOD, RxBurst, Slot, TxBurst, ctl_mask, data_mask, dup_ctl  # noqa: F401
 from .frames import SEQ_MOD, WINDOW
 
 NO_PROGRESS_TURNS = 8
@@ -59,74 +65,87 @@ def unwrap(s7: int, anchor: int) -> int:
     return anchor + d
 
 
-def ctl_mask(direction: int, i: int, key: int = 0) -> tuple:
-    return (key, direction, SEQ_MOD + i)
+# --- the policy ----------------------------------------------------------------------
 
+class Policy:
+    """Everything Station, Session and Engine ask of the mode choice:
+    policy.GearShifter on air; tests and scripts/linksim.py subclass it with
+    simpler ones. choose, payload_bytes and rv_cycle are required (Session
+    also needs connect_mode and airtime); the rest default to having no
+    opinion. Native: arq::Policy (link.hpp), whose has_*() say which
+    defaults a policy keeps."""
 
-COMPACT_CONNECT = ctl_mask(0, 4)  # a compact CONNECT's mask (frames.pack_connect); ctl_mask's i is 0-3
+    # -- link.Station
 
-
-def dup_ctl(burst) -> bool:
-    """Its control sent twice (ARQ_DUP): a control slot at RV 1."""
-    return any(s.rv for s in burst.slots if s.mask_id[2] >= SEQ_MOD)
-
-
-EPOCH_MOD = 64  # abandon epochs in a data codeword's identity: the direction byte's 6 spare bits
-
-
-def data_mask(direction: int, seq: int, key: int = 0, comp: bool = False, epoch: int = 0) -> tuple:
-    """A data codeword's identity. `comp`: deflated (T_COMP); `epoch`: the
-    sender's abandon epoch (its slicing). Both are folded into the
-    direction byte, so a codeword decoded under the wrong compression or
-    slicing assumption fails its CRC (docs/arq.md §2, §9a)."""
-    return (key, direction | 2 * comp | 4 * (epoch % EPOCH_MOD), seq % SEQ_MOD)
-
-
-# --- PHY abstraction -----------------------------------------------------------
-
-@dataclass
-class Slot:
-    mask_id: tuple  # (session key, direction, 7-bit seq or 128 + control index)
-    rv: int
-    payload: bytes
-
-
-@dataclass
-class TxBurst:
-    submode: str
-    slots: list[Slot]
-    burst_seq: int  # absolute count of this station's bursts
-    cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; policy.CAP_HZ)
-
-
-class RxBurst(Protocol):
-    submode: str
-    n_cw: int
-
-    def decode(self, slot: int, mask_id: tuple, rv: int, key: tuple | None) -> bytes | None:
-        """Payload if slot `slot` decodes with this mask at this RV
-        (combined with soft bits stored under `key`, which a failed
-        decode adds to), else None."""
-
-    def forget(self, key: tuple) -> None:
-        """Drop soft bits stored under `key`."""
-
-
-class Policy(Protocol):
     def choose(self, station: "Station", escalation: int) -> tuple[str, int]:
         """-> (submode name, max codewords) for this station's next burst."""
+        raise NotImplementedError
 
-    def payload_bytes(self, submode: str) -> int: ...
+    def payload_bytes(self, submode: str) -> int:
+        raise NotImplementedError
 
-    # optional: outcome(submode, decoded, sent) after each received burst,
-    # its control and first-transmission codewords (the gear shifter's
-    # online correction)
+    def ctl_payload_bytes(self, submode: str) -> int:
+        """A control codeword's payload (CPM carries control in a short one)."""
+        return self.payload_bytes(submode)
+
+    def max_ctl(self, submode: str) -> int:
+        return F.MAX_CTL
 
     def rv_cycle(self, submode: str) -> int:
         """Distinct RVs the submode's code has (4 LDPC, 1 polar)."""
+        raise NotImplementedError
 
-    # optional, for the log: mode_name(recommendation code) -> str,
-    # airtime(submode, n_cw) -> s, measured (the last burst's measurements)
+    def recommend(self, station: "Station") -> tuple[int, int, int | None]:
+        """-> (data mode, size hint, reply mode or None): what the peer
+        should send me next (§8), as the core word's codes."""
+        return 0, 1, None
+
+    want_dup = False  # ask the peer to duplicate its next data burst's control (T_DUPCTL)
+
+    def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
+        """After each received burst: its first-transmission codewords
+        decoded of those sent, `usable`: its control decoded (the gear
+        shifter's online correction)."""
+
+    # for the log
+    measured: dict | None = None  # the peer's last burst, as measured
+
+    def mode_name(self, rec: int) -> str:
+        """A recommendation code's mode."""
+        return str(rec)
+
+    def airtime(self, submode: str, n_cw: int, dup: bool = False) -> float | None:
+        """A burst's seconds on air (`dup`: its control twice); None:
+        unknown, left out of the log. Session needs it."""
+        return None
+
+    # -- session.Session
+
+    def connect_mode(self, cap: int, tries: int = 0) -> str:
+        """The mode of session frames at bandwidth cap `cap`, `tries` retries in."""
+        raise NotImplementedError
+
+    def reply_hold(self, station: "Station", burst: "TxBurst") -> float | None:
+        """Seconds past t_turn to wait for a reply to `burst` (None:
+        session.REPLY_START_S alone)."""
+        return None
+
+    def next_capacity(self, station: "Station") -> int | None:
+        """Payload bytes the next data burst will carry (None: unknown; the
+        session's write coalescing and the host's BUFFER)."""
+        return None
+
+    # -- engine.Engine
+
+    def observe(self, measured: dict, submode: str, now: float):
+        """The receiver's measurements of a peer burst."""
+
+    def observe_energy(self, snr_db: float, now: float):
+        """A peer burst's in-band SNR from its power alone, heard or not."""
+
+    def expected_reply(self) -> tuple[str, float] | None:
+        """The burst I asked the peer for last: its mode and seconds on air."""
+        return None
 
 
 # --- the two directions -----------------------------------------------------------
@@ -168,7 +187,16 @@ class TxSide:
         self.buf += F.to_records(data)
 
     def pending(self) -> bool:
-        return bool(self.cws) or self.stream_end < self.buf_off + len(self.buf)
+        return bool(self.cws) or self.unsent() > 0
+
+    def unsent(self) -> int:
+        """Stream bytes written but in no codeword yet."""
+        return self.buf_off + len(self.buf) - self.stream_end
+
+    def unacked(self) -> int:
+        """Stream bytes the peer has not acked, sent or not (buf holds
+        them from the first unacked codeword on)."""
+        return len(self.buf)
 
     def on_ack(self, cum: int, received: frozenset) -> bool:
         """-> whether the base advanced. cum must lie in [base, next]."""
@@ -340,6 +368,7 @@ class Station:
     _abandon_epoch: int = 0
     _peer_epoch: int = 0  # the last peer abandon epoch applied
     _stale: bool = False  # the last burst handled repeated one already answered: its ACK may be stale
+    _answered: bool = False  # answered() since the last burst handled: a repeat of it means my reply was lost
 
     @property
     def peer(self) -> int:
@@ -383,8 +412,8 @@ class Station:
         submode, max_cw = self.policy.choose(self, escalation)
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(submode)
-        max_ctl = getattr(self.policy, "max_ctl", lambda m: 4)(submode)
+        cpb = self.policy.ctl_payload_bytes(submode)
+        max_ctl = self.policy.max_ctl(submode)
         ext = {}
         reset = None
         stale, self._stale = self._stale, False
@@ -411,18 +440,17 @@ class Station:
             self._abandon_bursts.add(bn)
             if self._abandon[1] & 1:
                 ext[F.T_RESYNC] = b""
-        rec = getattr(self.policy, "recommend", None)
-        rec, hint, reply = rec(self) if rec else (0, 1, None)  # what the peer should send me next (§8)
+        rec, hint, reply = self.policy.recommend(self)  # what the peer should send me next (§8)
         if reply is not None:
             ext[F.T_REPLY] = bytes([reply])
         if self.chat:
             ext[F.T_CHAT] = b""
-        if getattr(self.policy, "want_dup", False):
+        if self.policy.want_dup:
             ext[F.T_DUPCTL] = b""  # the peer's next data burst: duplicate its control (ARQ_DUP)
         if self.chat or self.peer_chat:
             # what I have queued, so the peer's CHAT objective plans for a file
             # rather than a chat line when there is one (informational only)
-            queued = self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
+            queued = self.new_available()
             if queued > F.CHAT_LINE_BYTES:  # below it the peer plans for a line anyway
                 ext[F.T_BUFFER] = min(queued, 65535).to_bytes(2, "big")
         core = F.Core(ftype=F.ARQ if fresh else F.PROBE, burst_seq=bn % F.BURST_MOD, acted_on=self._acted_on,
@@ -432,7 +460,7 @@ class Station:
         # what this burst's ACK conveys, exactly (the snapshot must match it)
         bitmap = F.pack_bitmap({s % SEQ_MOD for s in self.rx.buf}, core.cum)
         missing = self.tx.missing() if fresh else []
-        has_new = fresh and self._new_available() > 0
+        has_new = fresh and self.new_available() > 0
         k = min(len(missing), max(0, max_cw - 1))
         while True:
             e = dict(ext)
@@ -470,7 +498,7 @@ class Station:
         # control's padding: compression never costs a control codeword
         spare = n_ctl * cpb - self._ctl_bytes(ext, k, has_new, 0)
         while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
-            if self._new_available() <= 0:
+            if self.new_available() <= 0:
                 break
             fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
             new.append(self.tx.new_codeword(submode, pb, fits, bn))
@@ -485,7 +513,7 @@ class Station:
             dup = 1  # nothing but control after all
         if dup == 2:
             core.ftype = F.ARQ_DUP
-        if new and not self._new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
+        if new and not self.new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
             # my host's data ends here: the peer may hold its reply for its
             # host's answer (session.REPLY_HOLD_S). Only in the padding, like T_COMP
             ext[F.T_DRAINED] = b""
@@ -519,7 +547,7 @@ class Station:
                              + f" {sum(c.length for c in new)} B"
                              + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
             if self.tx.pending():
-                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self._new_available()} B")
+                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self.new_available()} B")
             parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
             parts.append(f"ask data {self._mode(rec)} size {hint}, reply {self._mode(reply)}")
             flags = [f"escalated {escalation}"] * bool(escalation) + [f"timeout {self.misses}"] * bool(self.misses)
@@ -530,22 +558,28 @@ class Station:
         return burst
 
     def _mode(self, rec: int | None) -> str:
-        return "-" if rec is None else getattr(self.policy, "mode_name", str)(rec)
+        return "-" if rec is None else self.policy.mode_name(rec)
 
     def _burst_desc(self, submode: str, n_cw: int, dup: bool = False) -> str:
-        airtime = getattr(self.policy, "airtime", None)
-        return f"{submode} x{n_cw}" + (f" {airtime(submode, n_cw, dup):.1f}s" if airtime else "")
+        t = self.policy.airtime(submode, n_cw, dup)
+        return f"{submode} x{n_cw}" + (f" {t:.1f}s" if t is not None else "")
 
     def _snr(self) -> str:
-        m = getattr(self.policy, "measured", None)
+        m = self.policy.measured
         return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
 
     def _comp_bit(self, seq: int) -> bool:
         c = self.tx.cws[seq]
         return c.comp and not c.comp_known
 
-    def _new_available(self) -> int:
-        return self.tx.buf_off + len(self.tx.buf) - self.tx.stream_end
+    def new_available(self) -> int:
+        """Bytes my next new codewords can take (TxSide.unsent)."""
+        return self.tx.unsent()
+
+    def data_in_flight(self) -> bool:
+        """My latest burst carried data codewords and the peer has not acted
+        on it yet (its reply would say what arrived)."""
+        return bool(self._sent_seqs.get(self._latest))
 
     @staticmethod
     def _ctl_bytes(ext, k, has_new, zk) -> int:
@@ -599,10 +633,8 @@ class Station:
             # fails the masked CRC)
             first = self._ctl_pair(rx, 0, 0)
             paired = first is not None
-        outcome = getattr(self.policy, "outcome", None)  # first transmissions only (resends gain from IR)
         if first is None:
-            if outcome:
-                outcome(rx.submode, 0, 0, usable=False)
+            self.policy.outcome(rx.submode, 0, 0, usable=False)
             return False
         try:
             core = F.Core.unpack(first)
@@ -695,7 +727,7 @@ class Station:
             self.rx.abandon(a)
             # every seq from a on is re-sliced: soft bits held for any of
             # them (the failed ones, not only the decoded ones) belong to
-            # the old codewords (phase G found them combined into new ones)
+            # the old codewords (scripts/phy_session.py found them combined into new ones)
             self._forget_all(rx)
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
@@ -724,8 +756,7 @@ class Station:
                 except ProtocolError as e:
                     self._fail(f"protocol: {e}")
                     return True
-        if outcome:
-            outcome(rx.submode, n_ok, n_new, usable=True)
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
 
         if log.isEnabledFor(logging.INFO):
             kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
@@ -752,8 +783,6 @@ class Station:
         self._answered = False
         self._watchdog(progress)
         return True
-
-    _answered: bool = False
 
     @staticmethod
     def _check(core, ext, n_data) -> str | None:

@@ -62,7 +62,7 @@ MODES.update(CPM_LIKE)
 CTL_BYTES = 20
 
 
-class RandomPolicy:
+class RandomPolicy(L.Policy):
     def __init__(self, rng, change=0.2, modes=("m4", "m22", "m46"), max_cw=20):
         self.rng, self.change, self.modes, self.max_cw = rng, change, modes, max_cw
         self.dup_rng = random.Random(max_cw * 1000 + int(change * 100))
@@ -481,7 +481,7 @@ def test_flipped_comp_bit_fails_the_crc():
 # into the data CRC identity and the two ACK rules of docs/arq.md §4.
 # Taking the Station class lets the native tests run them on C++ too.
 
-class Script:
+class Script(L.Policy):
     """A policy that plays a list of (submode, max codewords), then repeats the last."""
 
     def __init__(self, plan):

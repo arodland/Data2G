@@ -56,6 +56,7 @@ class QTcpSocket;
 namespace data2g {
 namespace arq {
 class Engine;
+enum class SessionState;  // arq/session.hpp
 }
 namespace audio {
 class CaptureFifo;
@@ -89,9 +90,9 @@ struct UsageError : std::runtime_error {
 
 // The link as the session stage last saw it (after every block).
 struct LinkStatus {
-    std::string state = "idle";  // arq::state_name: idle, listen, connecting, connected, disconnecting, closed
+    arq::SessionState state{};  // IDLE
     std::string peer;
-    int cap = 2;                    // 0: 500 Hz, 1: 1200, 2: 2300
+    int cap = 2;                    // arq::bw_name(cap): 500, 1200, 2300
     std::string mode;               // the last burst's submode, heard or sent
     std::int64_t rx_bytes = 0, tx_bytes = 0;  // this connection's, delivered / acked
 };

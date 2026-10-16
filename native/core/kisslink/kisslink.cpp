@@ -201,7 +201,7 @@ void KissLink::command(int cmd, ByteView payload) {
 void KissLink::check_fits(int n, const Port& p, const std::string& mode, bool shift) const {
     const arq::Mode& m = arq::mode_at(mode);
     const std::size_t need = 1 + group_tlv(n, p).size() + (shift ? 4 : 0);
-    if (need > static_cast<std::size_t>(std::min(4, arq::max_ctl(m)) * arq::ctl_payload_bytes(m)))
+    if (need > static_cast<std::size_t>(std::min(arq::MAX_CTL, arq::max_ctl(m)) * arq::ctl_payload_bytes(m)))
         throw std::invalid_argument("mode " + mode + ": a " + std::to_string(need) + "-byte control doesn't fit");
 }
 
@@ -307,7 +307,7 @@ std::pair<std::string, int> KissLink::route(const Port& port, ByteView frame) co
 // many fresh reports as fit.
 std::vector<Bytes> KissLink::control(const arq::Mode& m, int n, const Port& port, int sender) {
     const std::size_t pb = static_cast<std::size_t>(arq::ctl_payload_bytes(m));
-    const int n_max = std::min(4, arq::max_ctl(m));
+    const int n_max = std::min(arq::MAX_CTL, arq::max_ctl(m));
     Bytes body = group_tlv(n, port);
     if (port.shift) {
         const double now = clock();

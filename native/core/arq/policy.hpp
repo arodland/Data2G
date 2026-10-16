@@ -1,6 +1,8 @@
 // data2g/arq/policy.py: the gear shifter (docs/arq.md §8), one per station.
-// The study toggles DATA2G_DROP_MODES and DATA2G_BIAS_FIX are Python only:
-// no dropped modes, BIAS_MAX 6.
+// GearShifter is the model; GearPolicy (below) is its link.Policy, the
+// methods policy.py's GearShifter has for the link and the session.
+// policy.py's study toggles are Python only: here their defaults (no
+// dropped modes, BIAS_MAX 6; noise_rule and cpm_floor_on are fields).
 #pragma once
 
 #include <array>
@@ -25,7 +27,6 @@ inline constexpr double TIMEOUT_S = 1.0 + 1.0 + 1.5;
 inline constexpr double PREV_MAX_S = 30.0;
 inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
 inline constexpr double DUP_BELOW = 0.9;
-inline constexpr int CHAT_BYTES = 200;  // frames.CHAT_LINE_BYTES
 inline constexpr double CPM_SIZE_SCALE = 4.0;
 inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
 inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply
@@ -44,26 +45,17 @@ inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
-inline constexpr int CPM_CODE = 3;
-// CPM_CODE's indices from here carry n10's past 15 (16-23; policy.py N10_HIGH)
-inline constexpr int N10_HIGH = 8;
 inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
 inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = "fsk16r25-r1/2";
 
-int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap
 std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0);
-double width_hz(const Mode& m);
-std::vector<const Mode*> allowed(int cap);  // MODES' order
-
-int encode(std::string_view submode);  // throws for an unknown mode
-const Mode* decode(int rec);           // nullptr: no such mode
-
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 
-// What the shifter reads from its link.Station.
+// What the shifter reads from its link.Station (policy.py StationView, which
+// also carries the timeouts its Python-only link history reads).
 struct StationView {
     int cap = 2;
     bool pending = true;  // tx.pending()

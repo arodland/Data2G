@@ -13,21 +13,6 @@ constexpr double INF = std::numeric_limits<double>::infinity();
 
 bool live(SessionState s) { return s == SessionState::CONNECTED || s == SessionState::DISCONNECTING; }
 
-// int.from_bytes(b[lo:hi], "big"), slicing as Python does
-std::int64_t be(ByteView b, std::size_t lo, std::size_t hi) {
-    std::int64_t v = 0;
-    for (std::size_t i = lo; i < std::min(hi, b.size()); ++i) v = v << 8 | b[i];
-    return v;
-}
-
-Bytes cat(std::initializer_list<ByteView> parts) {
-    Bytes out;
-    for (auto p : parts) out.insert(out.end(), p.begin(), p.end());
-    return out;
-}
-
-Bytes u16(std::int64_t v) { return {static_cast<std::uint8_t>(v >> 8), static_cast<std::uint8_t>(v)}; }
-
 std::uint8_t byte(std::int64_t v) {
     if (v < 0 || v > 255) throw std::invalid_argument("bytes must be in range(0, 256)");
     return static_cast<std::uint8_t>(v);
@@ -38,14 +23,18 @@ std::uint8_t tenths(double t_turn) { return byte(static_cast<std::int64_t>(std::
 // is dropped as if it had not decoded (the peer retries).
 std::optional<std::string> check_frame(ByteView body) {
     const int sub = body[0];
-    const std::size_t need = sub == CONNECT ? 22 : sub == CONNECT_ACK ? 5 : sub == CONNECT_NAK ? 4 : 1;
+    const std::size_t need = sub == CONNECT ? Connect::BYTES : sub == CONNECT_ACK ? ConnectAck::BYTES
+                             : sub == CONNECT_NAK ? ConnectNak::BYTES : 1;
     if (body.size() < need) return frame_desc(body.first(1)) + " of " + std::to_string(body.size()) + " B";
     try {
-        if (sub == CONNECT) unpack_call(body.subspan(2, 8)), unpack_call(body.subspan(10, 8));
+        if (sub == CONNECT) Connect::unpack(body);
     } catch (const std::invalid_argument& e) {
         return frame_desc(body.first(1)) + ": " + e.what();
     }
-    if (sub == CONNECT_ACK && body[3] > 2) return "CONNECT_ACK: cap code " + std::to_string(body[3]);
+    if (sub == CONNECT_ACK) {
+        const int cap = ConnectAck::unpack(body).cap;
+        if (cap > 2) return "CONNECT_ACK: cap code " + std::to_string(cap);
+    }
     return std::nullopt;
 }
 }  // namespace
@@ -70,7 +59,10 @@ std::string frame_desc(ByteView body) {
     const int sub = at(body, 0);
     static const char* names[] = {nullptr, "CONNECT", "CONNECT_ACK", "CONNECT_NAK", "DISC", "DISC_ACK"};
     std::string out = (sub >= CONNECT && sub <= DISC_ACK) ? names[sub] : "session frame " + std::to_string(sub);
-    if (sub == CONNECT && body.size() >= 18) out += " " + unpack_call(body.subspan(2, 8)) + ">" + unpack_call(body.subspan(10, 8));
+    if (sub == CONNECT && body.size() >= 18) {
+        const auto [caller, callee] = Connect::calls(body);
+        out += " " + caller + ">" + callee;
+    }
     return out;
 }
 
@@ -273,6 +265,16 @@ void Session::on_rx(RxBurst& rx, double now) {
 
 // --- internals ------------------------------------------------------------------------
 
+bool Session::claims(RxBurst& rx) const {
+    return station && live(state) && rx.decode(0, ctl_mask(station->peer(), 0, station->key), 0, nullptr).has_value();
+}
+
+Session::Queued Session::queued_bytes() const {
+    const auto n = static_cast<std::int64_t>(pending_write.size());
+    if (!station) return {n, n};
+    return {n + station->tx.unsent(), n + station->tx.unacked()};
+}
+
 bool Session::master() const { return station ? station->master : state == SessionState::CONNECTING; }
 
 void Session::queue(TxBurstPtr burst, double when) {
@@ -307,10 +309,7 @@ std::optional<double> Session::wake_time() {
     if (!st || master() || state != SessionState::CONNECTED || out ||
         wakes >= ((st->chat || st->peer_chat) ? tune.chat_wake_tries : tune.wake_tries) || !st->last_sent)
         return std::nullopt;
-    if (!wakes && !(want_disc && !st->tx.pending())) {
-        auto it = st->sent_seqs.find(st->latest);
-        if ((it != st->sent_seqs.end() && !it->second.empty()) || !st->tx.pending()) return std::nullopt;
-    }
+    if (!wakes && !(want_disc && !st->tx.pending()) && (st->data_in_flight() || !st->tx.pending())) return std::nullopt;
     return std::max(quiet_from + wake_wait, coalesce_until.value_or(-INF));
 }
 
@@ -436,25 +435,21 @@ bool Session::compact(const std::string& mode) {
 }
 
 TxBurstPtr Session::connect_burst() {
-    const Bytes me = pack_call(call), them = pack_call(peer), n = u16(nonce);
-    const Bytes tail{byte(cap), tenths(t_turn)};
-    const Bytes head{CONNECT, VERSION};
-    return session_burst(0, 0, cat({head, me, them, n, tail}));
+    return session_burst(0, 0, Connect{VERSION, call, peer, nonce, cap, tenths(t_turn)}.pack());
 }
 
 TxBurstPtr Session::disc_burst() { return session_burst(station->direction, station->key, Bytes{DISC}); }
 
 TxBurstPtr Session::accept_burst() {
-    const Bytes head{CONNECT_ACK}, n = u16(nonce), tail{byte(cap), tenths(t_turn)};
-    return session_burst(1, 0, cat({head, n, tail}), answer_mode);
+    return session_burst(1, 0, ConnectAck{nonce, cap, tenths(t_turn)}.pack(), answer_mode);
 }
 
 // A CONNECT_NAK for this CONNECT, unless a burst of the session's own is
 // queued (that goes; the caller's next try is refused instead).
-void Session::refuse(const Bytes& body, const std::string& mode, int reason, double now) {
-    log_write(LOG, INFO, "refusing CONNECT from " + unpack_call(ByteView(body).subspan(2, 8)) + ": " + nak_name(reason));
+void Session::refuse(const Connect& c, const std::string& mode, int reason, double now) {
+    log_write(LOG, INFO, "refusing CONNECT from " + c.caller + ": " + nak_name(reason));
     if (out) return;
-    nak = session_burst(1, 0, Bytes{CONNECT_NAK, body[18], body[19], static_cast<std::uint8_t>(reason)}, mode);
+    nak = session_burst(1, 0, ConnectNak{c.nonce, reason}.pack(), mode);
     queue(nak, now);
 }
 
@@ -511,9 +506,10 @@ void Session::on_session_frame(const Frame& f, double now) {
     const Bytes& body = f.body;
     const int sub = body[0];
     log_write(LOG, INFO, "RX " + frame_desc(body) + " " + f.mode);
-    if (sub == CONNECT && body.size() >= 22 && f.key == 0) {
-        const std::string caller = unpack_call(ByteView(body).subspan(2, 8)), callee = unpack_call(ByteView(body).subspan(10, 8));
-        const std::int64_t n = be(body, 18, 20);
+    if (sub == CONNECT && body.size() >= Connect::BYTES && f.key == 0) {
+        const Connect c = Connect::unpack(body);
+        const std::string &caller = c.caller, &callee = c.callee;
+        const std::int64_t n = c.nonce;
         std::string me = call;
         for (auto& c : me)
             if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
@@ -532,14 +528,14 @@ void Session::on_session_frame(const Frame& f, double now) {
         }
         if (state != SessionState::LISTEN) {
             const bool busy = state == SessionState::CONNECTING || live(state);
-            return refuse(body, f.mode, busy ? NAK_BUSY : NAK_NOT_LISTENING, now);
+            return refuse(c, f.mode, busy ? NAK_BUSY : NAK_NOT_LISTENING, now);
         }
-        if (body[1] != VERSION) return refuse(body, f.mode, NAK_VERSION, now);
-        if (accept_connect && !accept_connect(caller, callee)) return refuse(body, f.mode, NAK_REFUSED, now);
+        if (c.version != VERSION) return refuse(c, f.mode, NAK_VERSION, now);
+        if (accept_connect && !accept_connect(caller, callee)) return refuse(c, f.mode, NAK_REFUSED, now);
         call = callee;  // the call it dialed (the session key derives from it)
         peer = caller;
         nonce = n;
-        cap = std::min<int>(body[20], cap);
+        cap = std::min(c.cap, cap);
         station = make_station(1, false, session_key(caller, call, n));
         flush_writes();
         connected(now);
@@ -547,17 +543,18 @@ void Session::on_session_frame(const Frame& f, double now) {
         answer_mode = f.mode;
         queue(accept_burst(), now);
     } else if (sub == CONNECT_ACK && state == SessionState::CONNECTING && f.key == 0) {
-        if (be(body, 1, 3) != nonce) return;
-        cap = std::min<int>(at(body, 3), cap);
+        const ConnectAck a = ConnectAck::unpack(body);
+        if (a.nonce != nonce) return;
+        cap = std::min(a.cap, cap);
         station = make_station(0, true, session_key(call, peer, nonce));
         flush_writes();
         connected(now);
         events.push_back("CONNECTED " + peer);
         queue(station->build(), now);
     } else if (sub == CONNECT_NAK && state == SessionState::CONNECTING && f.key == 0) {
-        if (be(body, 1, 3) == nonce) {
-            const char* why = nak_name(at(body, 3));
-            close(std::string("refused: ") + (why ? why : "reason " + std::to_string(at(body, 3))));
+        if (const ConnectNak k = ConnectNak::unpack(body); k.nonce == nonce) {
+            const char* why = nak_name(k.reason);
+            close(std::string("refused: ") + (why ? why : "reason " + std::to_string(k.reason)));
         }
     } else if (sub == DISC && station && f.key == station->key) {
         // also when already closed: our DISC_ACK may have been lost

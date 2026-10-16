@@ -295,7 +295,7 @@ def test_session_policy_is_the_python_object(native):
     s = native.arq.Session("W1AW", pol, rng=random.Random(2))
     assert s.policy is pol and s.state == "idle" and s.station is None
     s.connect("k2xyz", 2, 0.0)
-    assert s.state == "connecting" and s.peer == "K2XYZ" and s._master
+    assert s.state == "connecting" and s.peer == "K2XYZ" and s.master
     b = s.poll(0.0)
     assert b.submode == "m46" and isinstance(b, L.TxBurst) and s.next_event() is None
     s.on_tx_end(b, 1.0)

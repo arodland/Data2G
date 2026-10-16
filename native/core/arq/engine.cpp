@@ -421,9 +421,7 @@ std::vector<std::string> Engine::events() {
 
 void Engine::send_cq(const std::string& call, int cap) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
-    Bytes body = pack_call(call);
-    body.push_back(static_cast<std::uint8_t>(cap));
-    extra_.push_back(open_frame(cap, T_CQ, body));
+    extra_.push_back(open_frame(cap, T_CQ, pack_cq(call, cap)));
 }
 
 TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
@@ -439,10 +437,7 @@ TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
 
 TxBurstPtr Engine::id_frame(const Session& s) const {
     log_write(LOG, INFO, format("TX ID %s", s.call.c_str()));
-    Bytes body = pack_call(s.call);
-    body.push_back(static_cast<std::uint8_t>(s.station->key >> 8));
-    body.push_back(static_cast<std::uint8_t>(s.station->key & 255));
-    return open_frame(s.cap, T_ID, body);
+    return open_frame(s.cap, T_ID, pack_id(s.call, s.station->key));
 }
 
 // Track the session ID frames are owed for; once it closes, its last ID is pending.
@@ -835,12 +830,10 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
             if (f) f(rx.n_decoded(), rx.n_failed());
         }
     } tally{rx, on_decoded_};
-    // in a session, its peer's bursts are the likely ones: a control
-    // codeword under the session's key claims the burst before KISS tries
-    // its keys on it
-    const auto st = session_->station;
-    const bool ours = st && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING) &&
-                      rx.decode(0, ctl_mask(st->peer(), 0, st->key), 0, nullptr).has_value();
+    // in a session, its peer's bursts are the likely ones: the session claims
+    // the burst before KISS tries its keys on it (asked with or without KISS:
+    // its decode comes first either way)
+    const bool ours = session_->claims(rx);
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's
             kiss_rx_.insert(kiss_rx_.end(), std::make_move_iterator(frames->begin()), std::make_move_iterator(frames->end()));
@@ -904,19 +897,15 @@ bool Engine::cq(ModemRx& rx) {
     try {
         const auto ext = Control::unpack(payloads).ext;
         if (const auto it = ext.find(T_ID); it != ext.end()) {
-            const Bytes& body = it->second;
-            if (body.size() < 10) throw std::invalid_argument("ID of " + std::to_string(body.size()) + " B");
-            const std::string call = unpack_call(ByteView(body).first(8));
-            const int key = body[8] << 8 | body[9];
+            const auto [call, key] = unpack_id(it->second);
             if (log_enabled(LOG, INFO)) log_write(LOG, INFO, format("RX ID %s (session %04x)", call.c_str(), key));
             events_.push_back("ID " + call + " " + std::to_string(key));
             return true;
         }
         const auto it = ext.find(T_CQ);
         if (it == ext.end()) return false;
-        const Bytes& body = it->second;
-        if (body.size() < 9) throw std::invalid_argument("CQ of " + std::to_string(body.size()) + " B");
-        events_.push_back("CQFRAME " + unpack_call(ByteView(body).first(8)) + " " + std::to_string(body[8]));
+        const auto [call, cap] = unpack_cq(it->second);
+        events_.push_back("CQFRAME " + call + " " + std::to_string(cap));
         return true;
     } catch (const std::invalid_argument& e) {
         log_write(LOG, WARNING, format("RX malformed CQ/ID frame (%s): dropped", e.what()));

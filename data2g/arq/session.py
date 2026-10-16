@@ -20,13 +20,14 @@ import logging
 import random
 from dataclasses import dataclass, field
 
+from . import burst as B
 from . import frames as F
 from . import link as L
 
-T_SESS = 10  # extension type carrying a session frame
+T_SESS = F.T_SESS  # the extension carrying a session frame
 VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
 CONNECT_TRIES = 5
-CONNECT_CTL_BYTES = 28  # a CONNECT's Control: core 4, T_SESS header 2, body 22
+CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
@@ -79,7 +80,7 @@ def session_key(caller: str, callee: str, nonce: int) -> int:
 @dataclass
 class Session:
     call: str
-    policy: object  # link.Policy plus connect_mode(cap_code) -> submode, airtime(submode, n_cw) -> s
+    policy: L.Policy  # connect_mode and airtime too
     t_turn: float = 1.0
     rng: random.Random = field(default_factory=random.Random)
     state: str = IDLE
@@ -89,7 +90,7 @@ class Session:
     events: list = field(default_factory=list)  # host notifications, oldest first
     close_reason: str = ""
     _nonce: int = 0
-    _out: L.TxBurst | None = None
+    _out: B.TxBurst | None = None
     _due: float | None = None  # when _out may go
     _deadline: float | None = None  # master: reply must be heard by then
     _answer_mode: str | None = None  # callee: the mode the CONNECT came in (its ACK goes in it)
@@ -104,7 +105,7 @@ class Session:
     _want_disc: bool = False
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
-    _nak: L.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
+    _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     chat: bool = False  # CHAT ON: set with set_chat()
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
     accept_connect: object = None  # (caller, callee) -> bool, before a CONNECT is answered: False refuses it (host ACCEPT)
@@ -150,8 +151,7 @@ class Session:
         holding = self._coalesce_until is not None and self._now < self._coalesce_until
         fresh = holding or not st.tx.pending()
         st.write(data)
-        cap = getattr(self.policy, "next_capacity", None)
-        if fresh and not self.chat and cap is not None and st._new_available() < cap(st):
+        if fresh and not self.chat and (cap := self.policy.next_capacity(st)) is not None and st.new_available() < cap:
             if not holding:
                 self._coalesce_until = self._now + COALESCE_S
         else:
@@ -163,9 +163,17 @@ class Session:
     def read(self) -> bytes:
         return self.station.read() if self.station else b""
 
+    def queued_bytes(self) -> tuple[int, int]:
+        """(unsent, unacked): bytes the host wrote that are in no codeword
+        yet, and that the peer has not acked, sent or not. Writes waiting
+        for the session count as both."""
+        n = len(self._pending_write)
+        st = self.station
+        return (n, n) if st is None else (n + st.tx.unsent(), n + st.tx.unacked())
+
     # -- clock side ------------------------------------------------------------------
 
-    def poll(self, now: float) -> L.TxBurst | None:
+    def poll(self, now: float) -> B.TxBurst | None:
         self._now = now
         if (self.stats_interval_s and self.state in (CONNECTED, DISCONNECTING)
                 and now >= self._stats_since + self.stats_interval_s):
@@ -197,7 +205,7 @@ class Session:
                 log.info("wake: breaking idle with DISC")
             elif self._wakes == 1:
                 log.info("wake: breaking idle with %d unacked, %d B queued", st.tx.next - st.tx.base,
-                         st._new_available())
+                         st.new_available())
                 self._queue(st.build(), now)
             else:
                 log.info("wake %d: no answer, repeating", self._wakes)
@@ -206,6 +214,14 @@ class Session:
             out, self._out, self._due = self._out, None, None
             return out
         return None
+
+    def claims(self, rx: B.RxBurst) -> bool:
+        """`rx` is my peer's: connected (or disconnecting) and its first
+        control codeword decodes under the session key (the station's own
+        decode of it is then a memo hit, phy.ModemRx)."""
+        st = self.station
+        return (st is not None and self.state in (CONNECTED, DISCONNECTING)
+                and rx.decode(0, B.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
 
     def idle(self) -> bool:
         """Connected with nothing in flight or queued, either way: the air is
@@ -221,20 +237,20 @@ class Session:
             ts.append(self._last_heard + LINK_LOST_S)
         return min(ts) if ts else None
 
-    def on_tx_end(self, burst: L.TxBurst, now: float):
+    def on_tx_end(self, burst: B.TxBurst, now: float):
         """Arm the reply timer (only the caller retries, §6, and a callee's
         DISC), or the callee's wake."""
         if burst is self._nak:
             self._nak = None
             return
-        if (self._master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
+        if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
-            hold = getattr(self.policy, "reply_hold", None)
-            if hold and self.state == CONNECTED and self.station is not None:
+            if (self.state == CONNECTED and self.station is not None
+                    and (hold := self.policy.reply_hold(self.station, burst)) is not None):
                 # a reply whose header I miss is still on air: don't poll over it
-                wait = max(wait, hold(self.station, burst))
+                wait = max(wait, hold)
             self._deadline = now + self.t_turn + wait
-        elif not self._master:
+        elif not self.master:
             self._quiet_from = now
             self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
@@ -248,10 +264,10 @@ class Session:
             # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
             is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
             self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
-        if not self._master:
+        if not self.master:
             self._quiet_from = max(self._quiet_from, end)
 
-    def on_rx(self, rx: L.RxBurst, now: float):
+    def on_rx(self, rx: B.RxBurst, now: float):
         ctl = self._session_frame(rx)
         if ctl is not None:
             self._on_session_frame(ctl, now)
@@ -270,7 +286,7 @@ class Session:
             self._last_data = now  # data moving either way; a sender that hears no data is not idle
         if self._disc(now):
             return
-        if not self._master:
+        if not self.master:
             if len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending() and not self._pending_write:
                 self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
             else:
@@ -301,13 +317,14 @@ class Session:
                 self._idle_wait = self.rng.uniform(lo, hi)
             self._build_at = now + self._idle_wait
 
-    # -- internals ---------------------------------------------------------------------
-
     @property
-    def _master(self) -> bool:
+    def master(self) -> bool:
+        """The caller: the station that retries (its link.Station's, once there is one)."""
         return self.station.master if self.station else self.state == CONNECTING
 
-    def _queue(self, burst: L.TxBurst, when: float):
+    # -- internals ---------------------------------------------------------------------
+
+    def _queue(self, burst: B.TxBurst, when: float):
         self._out, self._due = burst, when
 
     def _heard(self, now: float):
@@ -330,16 +347,16 @@ class Session:
         receive state is what this station last heard it ack and a fresh
         build is exact (link.Station.build). Not while a burst is queued."""
         st = self.station
-        if (st is None or self._master or self.state != CONNECTED or self._out is not None
+        if (st is None or self.master or self.state != CONNECTED or self._out is not None
                 or self._wakes >= (CHAT_WAKE_TRIES if st.chat or st.peer_chat else WAKE_TRIES)
                 or st.last_sent is None):
             return None
         disc = self._want_disc and not st.tx.pending()
-        if not self._wakes and not disc and (st._sent_seqs.get(st._latest) or not st.tx.pending()):
+        if not self._wakes and not disc and (st.data_in_flight() or not st.tx.pending()):
             return None
         return max(self._quiet_from + self._wake_wait, self._coalesce_until or float("-inf"))
 
-    def _close(self, why: str, final: L.TxBurst | None = None, now: float = 0.0):
+    def _close(self, why: str, final: B.TxBurst | None = None, now: float = 0.0):
         """-> None. `final`: one last burst to send (a DISC_ACK)."""
         self._build_at = None
         if self.state != CLOSED:
@@ -396,7 +413,7 @@ class Session:
             # instead of the whole burst again (linksim: repeats of 12 s
             # bursts took 30% of the time on mpg)
             last = self.station.last_sent
-            short = last is None or self.policy.airtime(last.submode, len(last.slots), L.dup_ctl(last)) <= REPEAT_MAX_S
+            short = last is None or self.policy.airtime(last.submode, len(last.slots), B.dup_ctl(last)) <= REPEAT_MAX_S
             b = self.station.on_timeout(allow_repeat=short)
             if b is None:
                 self._close(f"link failed: {self.station.fail_reason}")
@@ -406,34 +423,32 @@ class Session:
     # session frames: control-only bursts with a T_SESS extension. Connect
     # frames use key 0 (no session yet); DISC / DISC_ACK the session key.
 
-    def _session_burst(self, direction: int, key: int, body: bytes, mode: str | None = None) -> L.TxBurst:
+    def _session_burst(self, direction: int, key: int, body: bytes, mode: str | None = None) -> B.TxBurst:
         """`mode`: an answer goes in the mode its frame came in (a caller that
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
         mode = mode or self.policy.connect_mode(self.cap, self._tries)
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
+        cpb = self.policy.ctl_payload_bytes(mode)
         if body[0] == F.CONNECT and self._compact(mode):
-            slots = [L.Slot(L.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
+            slots = [B.Slot(B.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
         else:
-            ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(cpb)
-            slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
+            ctl = F.Control(F.Core(ftype=F.SESSION), {F.T_SESS: body}).pack(cpb)
+            slots = [B.Slot(B.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
-        return L.TxBurst(mode, slots, 0, self.cap)
+        return B.TxBurst(mode, slots, 0, self.cap)
 
     def _compact(self, mode: str) -> bool:
         """A CONNECT in `mode` goes compact (frames.pack_connect): in its
         Control envelope it needs more codewords than the mode's control
         may have (CPM: one of 20 B)."""
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
-        return -(-CONNECT_CTL_BYTES // cpb) > getattr(self.policy, "max_ctl", lambda m: 4)(mode)
+        return -(-CONNECT_CTL_BYTES // self.policy.ctl_payload_bytes(mode)) > self.policy.max_ctl(mode)
 
-    def _connect_burst(self) -> L.TxBurst:
-        body = (bytes([F.CONNECT, VERSION]) + F.pack_call(self.call) + F.pack_call(self.peer)
-                + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)]))
+    def _connect_burst(self) -> B.TxBurst:
+        body = F.Connect(VERSION, self.call, self.peer, self._nonce, self.cap, round(self.t_turn * 10)).pack()
         return self._session_burst(0, 0, body)
 
-    def _disc_burst(self) -> L.TxBurst:
+    def _disc_burst(self) -> B.TxBurst:
         st = self.station
         return self._session_burst(st.direction, st.key, bytes([F.DISC]))
 
@@ -451,7 +466,7 @@ class Session:
             tries.append((1, 0))
         tries.append((0, 0))
         if (0, 0) in tries and self._compact(rx.submode):
-            p = rx.decode(0, L.COMPACT_CONNECT, 0, None)
+            p = rx.decode(0, B.COMPACT_CONNECT, 0, None)
             if p is not None:
                 body = F.unpack_connect(p[:F.COMPACT_BYTES])
                 if why := _check_frame(body):
@@ -459,7 +474,7 @@ class Session:
                     return None
                 return {"key": 0, "body": body, "mode": rx.submode}
         for direction, key in tries:
-            first = rx.decode(0, L.ctl_mask(direction, 0, key), 0, None)
+            first = rx.decode(0, B.ctl_mask(direction, 0, key), 0, None)
             if first is None:
                 continue
             core = F.Core.unpack(first)
@@ -471,12 +486,12 @@ class Session:
                 return None
             payloads = [first]
             for i in range(1, core.n_ctl):
-                p = rx.decode(i, L.ctl_mask(direction, i, key), 0, None)
+                p = rx.decode(i, B.ctl_mask(direction, i, key), 0, None)
                 if p is None:
                     return None
                 payloads.append(p)
             try:
-                body = F.Control.unpack(payloads).ext.get(T_SESS, b"")
+                body = F.Control.unpack(payloads).ext.get(F.T_SESS, b"")
             except ValueError as e:
                 log.warning("RX malformed session frame (%s): dropped", e)
                 return None
@@ -490,16 +505,16 @@ class Session:
         body, key = f["body"], f["key"]
         sub = body[0]
         log.info("RX %s %s", _frame_desc(body), f["mode"])
-        if sub == F.CONNECT and len(body) >= 22 and key == 0:
-            caller, callee = F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
-            nonce = int.from_bytes(body[18:20], "big")
+        if sub == F.CONNECT and len(body) >= F.Connect.BYTES and key == 0:
+            c = F.Connect.unpack(body)
+            caller, callee, nonce = c.caller, c.callee, c.nonce
             if callee != self.call.upper() and callee not in self.aliases:
                 return
-            if self.station is not None and not self._master and nonce == self._nonce:
+            if self.station is not None and not self.master and nonce == self._nonce:
                 self._answer_mode = f["mode"]
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
-            if (self.station is not None and not self._master and caller == self.peer
+            if (self.station is not None and not self.master and caller == self.peer
                     and self.state in (CONNECTED, DISCONNECTING)):
                 # my caller dialed again: it gave up on our session (lost my
                 # CONNECT_ACK and ran out of tries), so take the new one. Held
@@ -509,13 +524,13 @@ class Session:
                 self.state, self._want_disc, self._sent_disc_ack, self._tries = LISTEN, False, False, 0
             if self.state != LISTEN:
                 busy = self.state in (CONNECTING, CONNECTED, DISCONNECTING)
-                return self._refuse(body, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
-            if body[1] != VERSION:
-                return self._refuse(body, f["mode"], NAK_VERSION, now)
+                return self._refuse(c, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
+            if c.version != VERSION:
+                return self._refuse(c, f["mode"], NAK_VERSION, now)
             if self.accept_connect is not None and not self.accept_connect(caller, callee):
-                return self._refuse(body, f["mode"], NAK_REFUSED, now)
+                return self._refuse(c, f["mode"], NAK_REFUSED, now)
             self.call = callee  # the call it dialed (the session key derives from it)
-            self.peer, self._nonce, self.cap = caller, nonce, min(body[20], self.cap)
+            self.peer, self._nonce, self.cap = caller, nonce, min(c.cap, self.cap)
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
@@ -524,9 +539,10 @@ class Session:
             self._answer_mode = f["mode"]
             self._queue(self._accept_burst(), now)
         elif sub == F.CONNECT_ACK and self.state == CONNECTING and key == 0:
-            if int.from_bytes(body[1:3], "big") != self._nonce:
+            a = F.ConnectAck.unpack(body)
+            if a.nonce != self._nonce:
                 return
-            self.cap = min(body[3], self.cap)
+            self.cap = min(a.cap, self.cap)
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat)
             self._flush_writes()
@@ -534,8 +550,9 @@ class Session:
             self.events.append(f"CONNECTED {self.peer}")
             self._queue(self.station.build(), now)
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
-            if int.from_bytes(body[1:3], "big") == self._nonce:
-                self._close(f"refused: {NAK_NAMES.get(body[3], f'reason {body[3]}')}")
+            n = F.ConnectNak.unpack(body)
+            if n.nonce == self._nonce:
+                self._close(f"refused: {NAK_NAMES.get(n.reason, f'reason {n.reason}')}")
         elif sub == F.DISC and self.station is not None and key == self.station.key:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
@@ -544,16 +561,16 @@ class Session:
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
             self._close("disconnected")
 
-    def _refuse(self, body: bytes, mode: str, reason: int, now: float):
+    def _refuse(self, c: F.Connect, mode: str, reason: int, now: float):
         """A CONNECT_NAK for this CONNECT, unless a burst of the session's own
         is queued (that goes; the caller's next try is refused instead)."""
-        log.info("refusing CONNECT from %s: %s", F.unpack_call(body[2:10]), NAK_NAMES[reason])
+        log.info("refusing CONNECT from %s: %s", c.caller, NAK_NAMES[reason])
         if self._out is None:
-            self._nak = self._session_burst(1, 0, bytes([F.CONNECT_NAK]) + body[18:20] + bytes([reason]), mode)
+            self._nak = self._session_burst(1, 0, F.ConnectNak(c.nonce, reason).pack(), mode)
             self._queue(self._nak, now)
 
-    def _accept_burst(self) -> L.TxBurst:
-        body = bytes([F.CONNECT_ACK]) + self._nonce.to_bytes(2, "big") + bytes([self.cap, round(self.t_turn * 10)])
+    def _accept_burst(self) -> B.TxBurst:
+        body = F.ConnectAck(self._nonce, self.cap, round(self.t_turn * 10)).pack()
         return self._session_burst(1, 0, body, self._answer_mode)
 
     def _flush_writes(self):
@@ -564,8 +581,7 @@ class Session:
 
 FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
                F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
-# body length as sent: subtype, version, 2 callsigns, nonce, cap, t_turn / subtype, nonce, cap, t_turn / subtype, nonce, reason
-FRAME_BYTES = {F.CONNECT: 22, F.CONNECT_ACK: 5, F.CONNECT_NAK: 4}
+FRAME_BYTES = {F.CONNECT: F.Connect.BYTES, F.CONNECT_ACK: F.ConnectAck.BYTES, F.CONNECT_NAK: F.ConnectNak.BYTES}
 
 
 def _check_frame(body: bytes) -> str | None:
@@ -576,16 +592,16 @@ def _check_frame(body: bytes) -> str | None:
         return f"{name} of {len(body)} B"
     if body[0] == F.CONNECT:
         try:
-            F.unpack_call(body[2:10]), F.unpack_call(body[10:18])
+            F.Connect.unpack(body)
         except ValueError as e:
             return f"{name}: {e}"
-    if body[0] == F.CONNECT_ACK and body[3] > 2:
-        return f"{name}: cap code {body[3]}"
+    if body[0] == F.CONNECT_ACK and (cap := F.ConnectAck.unpack(body).cap) > 2:
+        return f"{name}: cap code {cap}"
     return None
 
 
 def _frame_desc(body: bytes) -> str:
     out = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
     if body[0] == F.CONNECT and len(body) >= 18:
-        out += f" {F.unpack_call(body[2:10])}>{F.unpack_call(body[10:18])}"
+        out += " {}>{}".format(*F.Connect.calls(body))
     return out

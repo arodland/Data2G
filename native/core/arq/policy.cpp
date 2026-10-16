@@ -14,15 +14,6 @@ namespace data2g::arq {
 
 namespace {
 
-// frames.BANDS_CODE: sync bands, 2 bits.
-constexpr std::pair<std::string_view, int> BANDS_CODE[] = {{"w", 0}, {"n10", 1}, {"w48", 2}};
-
-int band_code(std::string_view sync_band) {
-    for (const auto& [b, c] : BANDS_CODE)
-        if (b == sync_band) return c;
-    throw std::out_of_range("no band code for " + std::string(sync_band));
-}
-
 // Python's round(x, 2): the correctly rounded decimal, ties to even.
 double round2(double x) {
     char buf[64];
@@ -50,15 +41,6 @@ const std::array<double, 4>& mode_thresholds(std::string_view submode) {
     throw std::out_of_range("no ladder thresholds for " + std::string(submode));
 }
 
-int cap_hz(int cap) {
-    switch (cap) {
-        case 0: return 500;
-        case 1: return 1200;
-        case 2: return 2400;
-    }
-    throw std::out_of_range("no cap " + std::to_string(cap));
-}
-
 std::string_view fallback(int cap) {
     cap_hz(cap);
     return cap == 0 ? "n10-ack-4f" : "ack-4f";
@@ -68,57 +50,6 @@ std::string_view connect_mode(int cap, int tries) {
     cap_hz(cap);
     if (tries) return ROBUST_CONNECT;
     return cap == 0 ? "n10-qpsk-r1/3" : "qpsk-r1/5";
-}
-
-double width_hz(const Mode& m) {
-    if (m.is_cpm()) {
-        const auto& g = cpm::grid_of(*m.cpm);
-        return g.m * g.rate + 2 * g.bp;
-    }
-    if (m.band == "n4") return 200;
-    if (m.band == "n10") return 500;
-    if (m.band == "w") return 1200;
-    if (m.band == "w48") return 2400;
-    throw std::out_of_range("no width for band " + std::string(m.band));
-}
-
-std::vector<const Mode*> allowed(int cap) {
-    const int hz = cap_hz(cap);
-    std::vector<const Mode*> out;
-    for (const auto& m : modes())
-        if (width_hz(m) <= hz) out.push_back(&m);
-    return out;
-}
-
-// CPM_SPECS fits under N10_HIGH: policy.py asserts it, and the tables are generated from it
-
-int encode(std::string_view submode) {
-    const Mode& m = mode_at(submode);
-    if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
-    if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
-        if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
-        return CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
-    }
-    return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
-}
-
-const Mode* decode(int rec) {
-    if (rec >> 4 == CPM_CODE) {
-        const auto i = static_cast<std::size_t>(rec & 15);
-        if (i >= static_cast<std::size_t>(N10_HIGH)) {
-            for (const auto& s : config::SUBMODES)
-                if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
-            return nullptr;
-        }
-        return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
-    }
-    for (const auto& [band, code] : BANDS_CODE)
-        if (code == rec >> 4) {
-            for (const auto& s : config::SUBMODES)
-                if (s.sync_band == band && s.index == (rec & 15)) return mode(s.name);
-            return nullptr;
-        }
-    return nullptr;
 }
 
 int ctl_slots(const Mode& m) { return std::min(max_ctl(m), cdiv(CTL_BYTES, ctl_payload_bytes(m))); }
@@ -311,7 +242,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
     const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
     const bool chat = st.chat;
-    const std::int64_t queued = std::max<std::int64_t>(CHAT_BYTES, st.peer_queued);
+    const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
     const Mode* best = nullptr;
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;

@@ -24,12 +24,11 @@ protected:
         Queued q;
         q.unsent = q.unacked = static_cast<std::int64_t>(py::len(s.attr("_pending_write")));
         py::object st = s.attr("station");
-        if (!st.is_none()) {
+        if (!st.is_none()) {  // session.py's queued_bytes over the test's station
             q.station = true;
             py::object tx = st.attr("tx");
-            const auto n = static_cast<std::int64_t>(py::len(tx.attr("buf")));
-            q.unsent += tx.attr("buf_off").cast<std::int64_t>() + n - tx.attr("stream_end").cast<std::int64_t>();
-            q.unacked += n;
+            q.unsent += tx.attr("unsent")().cast<std::int64_t>();
+            q.unacked += tx.attr("unacked")().cast<std::int64_t>();
         }
         return q;
     }
@@ -38,8 +37,8 @@ protected:
         py::object policy = s.attr("policy");
         if (policy.is_none()) return Host::next_capacity();  // a C++ policy
         py::object st = s.attr("station");
-        if (st.is_none() || !py::hasattr(policy, "next_capacity")) return std::nullopt;
-        return policy.attr("next_capacity")(st).cast<std::int64_t>();
+        if (st.is_none()) return std::nullopt;
+        return policy.attr("next_capacity")(st).cast<std::optional<std::int64_t>>();
     }
 };
 
