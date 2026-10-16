@@ -85,6 +85,10 @@ void log_line(int level, const std::string& msg);
 std::optional<int> parse_level(const std::string& s);
 // Routes the arq log (sessions, engine) through log_line at g_level.
 void install_arq_log();
+// SIGINT, SIGTERM and SIGHUP (a closed terminal) set quit_requested() instead of ending the process, so the exit
+// path runs and the rig is unkeyed. SIGPIPE is ignored: a pipe or socket whose reader went is an error, not death.
+void quit_on_signals();
+bool quit_requested();
 
 // --- the options: host.py main()'s argparse ---------------------------------------------
 

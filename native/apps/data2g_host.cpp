@@ -9,8 +9,6 @@
 #include <QCoreApplication>
 #include <QTimer>
 
-#include <atomic>
-#include <csignal>
 #include <cstdio>
 #include <utility>
 
@@ -23,13 +21,6 @@
 
 using namespace data2g;
 using namespace data2g::app;
-
-namespace {
-
-std::atomic<bool> g_quit{false};
-extern "C" void on_signal(int) { g_quit = true; }
-
-}  // namespace
 
 int main(int argc, char** argv) {
     const Args a = parse(argc, argv);
@@ -65,11 +56,7 @@ int main(int argc, char** argv) {
     }
     if (a.audio_io.empty() && a.sample_rate % config::FS)
         usage_error("--sample-rate must be a multiple of " + std::to_string(config::FS));
-#ifndef _WIN32
-    std::signal(SIGPIPE, SIG_IGN);  // a pipe or socket whose reader went: an error, not death
-#endif
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    quit_on_signals();
     try {
         Station s(a);
         try {
@@ -82,7 +69,7 @@ int main(int argc, char** argv) {
         }
         QTimer quit_check;
         QObject::connect(&quit_check, &QTimer::timeout, [&s] {
-            if (g_quit || s.failed()) QCoreApplication::quit();
+            if (quit_requested() || s.failed()) QCoreApplication::quit();
         });
         quit_check.start(100);
         QCoreApplication::exec();

@@ -67,7 +67,15 @@ void PlaybackFifo::write(std::span<const double> y) {
 
 void PlaybackFifo::drain() {
     active_.store(false, std::memory_order_release);  // the last pull coming up short is the end, not an underrun
-    while (const std::size_t left = ring_.size()) sleep_s(static_cast<double>(left) / rate_ + 0.002);
+    // a consumer that stopped pulling (a card gone, a stopped pipe) must not hold PTT on forever
+    auto moved = std::chrono::steady_clock::now();
+    for (std::size_t left = ring_.size(); left;) {
+        sleep_s(static_cast<double>(left) / rate_ + 0.002);
+        const std::size_t now = ring_.size();
+        if (now < left) moved = std::chrono::steady_clock::now();
+        else if (std::chrono::steady_clock::now() - moved > std::chrono::seconds(1)) break;
+        left = now;
+    }
     sleep_s(output_latency());
 }
 

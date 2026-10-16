@@ -575,7 +575,8 @@ def serve(a, pa, stop: threading.Event | None = None):
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        # SIGHUP: a closed terminal; the finally below must still unkey
+        for sig in (signal.SIGINT, signal.SIGTERM) + ((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ()):
             signal.signal(sig, lambda *_: stop.set())
     log.info("commands on %s:%d, data on %d", a.host, a.command_port, a.command_port + 1)
     log.info("KISS on %s:%d: %d Hz cap, broadcasts in %s", a.kiss_address, a.kiss_port, a.kiss_bw, link.broadcast)

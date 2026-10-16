@@ -340,6 +340,19 @@ void test_keyer() {
     fifo.pull(buf);
     failing.unkey();
 
+    {  // a device that stopped pulling: unkey still gets to PTT off
+        calls.clear();
+        rig::Keyer k([&](bool on) { calls.push_back(on ? "on" : "off"); }, fifo, 0.0);
+        k.key();
+        const auto t0 = std::chrono::steady_clock::now();
+        k.unkey();
+        const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        check::is_true(!k.keyed() && calls == std::vector<std::string>{"on", "off"} && waited < 2.0,
+                       "unkey: PTT off though nothing pulls");
+        fifo.flush();  // nothing pulls this either; the lead stays queued
+        fifo.pull(buf);
+    }
+
     rig::Keyer none({}, fifo, 0.0);  // --rigctld-port 0
     none.key();
     check::is_true(none.keyed() && none.failures() == 0, "no PTT: keys the audio only");
