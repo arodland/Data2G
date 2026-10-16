@@ -167,8 +167,7 @@ def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
     n = spec.coded_bits
     if spec.code != "ldpc" or spec.constellation.startswith("fsk"):
         return rng.permutation(n)  # (M-FSK: no labels to rank, data2g.cpm)
-    code = ldpc_code(spec)
-    deg = np.bincount(code.edges[1], minlength=code.n_cols)[code.sent]
+    deg = ldpc.sent_degrees(ldpc_code(spec))
     order = np.lexsort((rng.random(n), -deg))  # highest degree first
     pts = constellation.load(spec.constellation)
     m = constellation.bits_per_symbol(pts)

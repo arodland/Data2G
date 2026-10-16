@@ -70,6 +70,13 @@ def qc_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
     return QCLDPC(base=base, z=z, kb=KB[bg], k=k, n=n)
 
 
+def sent_degrees(code: "QCLDPC") -> np.ndarray:
+    """Each transmitted bit's variable-node degree, in sent order: what
+    codes.compute_interleaver ranks code bits by (so H's layout reaches
+    every interleaver not frozen in data2g/format)."""
+    return np.bincount(code.edges[1], minlength=code.n_cols)[code.sent]
+
+
 def _gf2_inv(a: np.ndarray) -> np.ndarray:
     n = len(a)
     m = np.concatenate([a.astype(bool), np.eye(n, dtype=bool)], axis=1)
