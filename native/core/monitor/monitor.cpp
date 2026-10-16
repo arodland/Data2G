@@ -25,11 +25,9 @@ std::string hex4(int v) {
 bool printable(std::uint8_t c) { return c >= 0x20 && c < 0x7F; }
 
 std::string ext_desc(const Ext& ext) {
-    static const char* names[] = {"pad",  "new",   "abandon", "rv",    "bitmap", "resync", "report", "survey", "sound",
-                                  "buffer", "sess", "reply",  "chat",  "cq",     "dupctl", "comp",   "id"};
     std::vector<std::string> out;
     for (const auto& [t, v] : ext) {
-        std::string s = t < static_cast<int>(std::size(names)) ? names[t] : "ext " + std::to_string(t);
+        std::string s = ext_name(t);
         if (t == T_NEW && !v.empty()) s += " " + std::to_string(v[0]);
         if (t == T_ABANDON && v.size() >= 2) s += " " + std::to_string(v[0]) + " epoch " + std::to_string(v[1] >> 1);
         if (t == T_BUFFER && v.size() == 2) s += " " + std::to_string(v[0] << 8 | v[1]);
@@ -228,12 +226,12 @@ bool Monitor::keyed(ModemRx& rx, Dump& d) {
             if (c0.ftype == SESSION) {
                 if (const auto it = ctl.ext.find(T_SESS); it != ctl.ext.end()) session_frame(it->second, key, dir, d);
                 else if (const auto id = ctl.ext.find(T_ID); id != ctl.ext.end() && id->second.size() >= 10) {
-                    const std::string call = unpack_call(ByteView(id->second).first(8));
-                    const int k = be16(id->second, 8);
+                    const auto [call, k] = unpack_id(id->second);
                     learn(k, {}, {}, call);
                     d.head += "  ID " + call + " (session key " + hex4(k) + ")\n";
                 } else if (const auto cq = ctl.ext.find(T_CQ); cq != ctl.ext.end() && cq->second.size() >= 9) {
-                    d.head += "  CQ " + unpack_call(ByteView(cq->second).first(8)) + " bw " + std::to_string(at(cq->second, 8)) + "\n";
+                    const auto [call, cap] = unpack_cq(cq->second);
+                    d.head += "  CQ " + call + " bw " + std::to_string(cap) + "\n";
                 } else {
                     d.head += "  session frame (" + kind + "), no body: " + ext_desc(ctl.ext) + "\n";
                 }
@@ -251,13 +249,14 @@ bool Monitor::keyed(ModemRx& rx, Dump& d) {
 void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
     const int sub = at(body, 0);
     std::string s;
-    if (sub == CONNECT && body.size() < 22) {  // another VERSION's: not ours to decode
+    if (sub == CONNECT && body.size() < Connect::BYTES) {  // another VERSION's: not ours to decode
         d.head += "  CONNECT of " + std::to_string(body.size()) + " B, not read\n";
         return;
     }
     if (sub == CONNECT) {
-        const std::string caller = unpack_call(ByteView(body).subspan(2, 8)), callee = unpack_call(ByteView(body).subspan(10, 8));
-        const int nonce = be16(body, 18);
+        const Connect c = Connect::unpack(body);
+        const std::string &caller = c.caller, &callee = c.callee;
+        const int nonce = static_cast<int>(c.nonce);
         const int k = session_key(caller, callee, nonce);
         connects_[nonce] = {caller, callee};
         if (connects_.size() > MAX_KEYS) connects_.erase(connects_.begin());  // ponytail: by nonce, not age
@@ -265,8 +264,8 @@ void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
         for (int dir : {0, 1})  // a retry, or a late copy, leaves a stream under way alone
             if (Side& x = sides_[{k, dir}]; !x.started) x.fresh = true;
         char t[96];
-        std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s -> key %04x", at(body, 1), nonce, at(body, 20),
-                      at(body, 21) / 10.0, k);
+        std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s -> key %04x", c.version, nonce, c.cap,
+                      c.t_turn10 / 10.0, k);
         s = "CONNECT " + caller + ">" + callee + t;
     } else if (sub == CONNECT_ACK || sub == CONNECT_NAK) {
         const int nonce = be16(body, 1);

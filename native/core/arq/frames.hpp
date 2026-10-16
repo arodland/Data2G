@@ -38,6 +38,9 @@ inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4
                      T_COMP = 15,
                      T_ID = 16,  // packed callsign + session key: an ID frame (docs/arq.md §7a), mask 0
                      T_DRAINED = 17;  // empty: this burst's new codewords end the sender's queued data
+// An extension type's short name ("ext N" for one not listed): monitor/'s
+// dumps. A new T_* gets its name here too. (Native only.)
+std::string ext_name(int t);
 inline constexpr int CHAT_LINE_BYTES = 200;
 inline constexpr int HIST = 4096;
 inline constexpr int MAX_INFLATE = 1 << 16;
