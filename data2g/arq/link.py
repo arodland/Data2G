@@ -363,6 +363,7 @@ class Station:
     _abandon_epoch: int = 0
     _peer_epoch: int = 0  # the last peer abandon epoch applied
     _stale: bool = False  # the last burst handled repeated one already answered: its ACK may be stale
+    _answered: bool = False  # answered() since the last burst handled: a repeat of it means my reply was lost
 
     @property
     def peer(self) -> int:
@@ -777,8 +778,6 @@ class Station:
         self._answered = False
         self._watchdog(progress)
         return True
-
-    _answered: bool = False
 
     @staticmethod
     def _check(core, ext, n_data) -> str | None:

@@ -86,7 +86,8 @@ N_LINK = 4
 # not; dB, mean over them in power), how many, and 1; all 0 without any.
 N_ENERGY = 3
 
-NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))  # tnc.NoiseProfile.BANDS_HZ
+# tnc.NoiseProfile.BANDS_HZ (tests/test_noise_profile.py holds them equal; tnc can't import arq)
+NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))
 N_NOISE = 2 * len(NOISE_BANDS_HZ) + 2
 
 
@@ -113,9 +114,7 @@ def noise_features(noise: dict | None, band: str) -> list[float]:
     if not noise:
         return [0.0] * N_NOISE
     db = np.asarray(noise["noise_db"], dtype=np.float64)
-    lo, hi = band_span_hz(band)
-    w = np.array([max(0.0, min(hi, b) - max(lo, a)) for a, b in NOISE_BANDS_HZ])
-    ref = 10 * np.log10(np.sum(w * 10 ** (db / 10)) / np.sum(w)) if w.sum() > 0 else float(np.median(db))
+    ref = _band_level(db, band)
     return [*(db - ref), *noise["noise_tail_db"], float(np.log10(1 + noise["impulses_per_min"])), 1.0]
 
 
