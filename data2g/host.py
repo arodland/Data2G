@@ -57,8 +57,10 @@ from .tnc import KissServer, Rigctld  # noqa: E402
 
 log = logging.getLogger("data2g.host")
 VERSION = "Data2G 0.1"
+# caps are policy.CAP_HZ's keys (0: 500 Hz, 1: 1200, 2: 2400)
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = modes.BW_NAME
+KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
@@ -203,9 +205,7 @@ class Host:
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
-            for n in [n for n in e.kiss.ports if n]:
-                e.kiss.close(n)
-            e.kiss.set_mode(0, e.kiss.broadcast)
+            e.kiss.reset()
             self._bcast = False
 
     def _accept_connect(self, caller: str, callee: str) -> bool:
@@ -438,7 +438,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     """Run until SIGINT/SIGTERM (or `stop` is set)."""
     from .kisslink import KissLink
 
-    link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
+    link = KissLink(cap=KISS_BW_CAP[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
@@ -582,13 +582,14 @@ def main():
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
     if a.list_modes:
-        print("\n".join(mode_lines({2400: 2, 500: 0}[a.kiss_bw])))
+        print("\n".join(mode_lines(KISS_BW_CAP[a.kiss_bw])))
         return
     if a.broadcast_mode is not None:
-        from .arq import policy as G
-        from .arq.modes import MODES
+        from .kisslink import check_mode
 
-        if a.broadcast_mode not in MODES or MODES[a.broadcast_mode] not in G.allowed({2400: 2, 500: 0}[a.kiss_bw]):
+        try:
+            check_mode(a.broadcast_mode, KISS_BW_CAP[a.kiss_bw])
+        except ValueError:
             ap.error(f"--broadcast-mode {a.broadcast_mode}: not a mode within {a.kiss_bw} Hz")
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(message)s")
     a.record_dir = Path(a.record_dir) if a.record_dir else None

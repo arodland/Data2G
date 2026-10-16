@@ -6,7 +6,7 @@
 
 #include "arq/modes.hpp"
 #include "kisslink/kisslink.hpp"
-#include "tables/tables.hpp"
+#include "tables/zdict.hpp"
 
 namespace data2g::monitor {
 

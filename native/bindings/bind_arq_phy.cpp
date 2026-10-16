@@ -312,6 +312,7 @@ void bind_arq_phy(py::module_& m) {
         .def("open", &KissLink::open, py::arg("group"), py::arg("from_call") = std::nullopt)
         .def("close", &KissLink::close)
         .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false)
+        .def("reset", &KissLink::reset)
         .def("enqueue",
              [ack_objs](const py::object& self, const py::handle& f, int port, const py::object& ack) {
                  std::optional<std::int64_t> id;

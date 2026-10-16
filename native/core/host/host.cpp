@@ -4,10 +4,11 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <iterator>
 #include <stdexcept>
 
 #include "arq/modes.hpp"
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 
 namespace data2g::host {
 
@@ -222,11 +223,7 @@ void Host::client_gone() {
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
     if (auto* link = e.kiss()) {  // its ports go, and port 0 back to its defaults
-        std::vector<int> open;
-        for (const auto& [n, p] : link->ports)
-            if (n) open.push_back(n);
-        for (int n : open) link->close(n);
-        link->set_mode(0, link->broadcast);
+        link->reset();
         bcast_ = false;
     }
 }
@@ -276,8 +273,8 @@ void Host::after_step(bool ptt) {
     const auto got = e.session().read();
     out_data.insert(out_data.end(), got.begin(), got.end());
     if (auto* link = e.kiss()) {
-        if (bcast_) out_cmd.insert(out_cmd.end(), link->events.begin(), link->events.end());
-        link->events.clear();
+        auto events = link->take_events();
+        if (bcast_) out_cmd.insert(out_cmd.end(), std::make_move_iterator(events.begin()), std::make_move_iterator(events.end()));
     }
     if (ptt != ptt_) {
         ptt_ = ptt;

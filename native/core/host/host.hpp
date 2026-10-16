@@ -1,5 +1,6 @@
 // data2g/host.py's Host: VARA command semantics over an arq::Engine. No
-// sockets, no audio (those are the app's, apps/data2g_host.cpp). command()
+// sockets, no audio (those are the app's: app/station.cpp runs the loop,
+// app/tcp_servers.hpp the command, data and KISS ports). command()
 // and data_in() take the client's side; after_step() collects what goes
 // back after each block. Everything here touches the engine's session
 // stage, so in worker mode it runs only through Engine::post() and the

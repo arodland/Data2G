@@ -180,6 +180,13 @@ def read_control(tlvs: dict) -> tuple[str, str | None, bytes | None]:
     return group, call, rep
 
 
+def check_mode(mode: str, cap: int):
+    """ValueError unless `mode` is a mode within bandwidth cap `cap`."""
+    s = MODES.get(mode)
+    if s is None or s not in G.allowed(cap):
+        raise ValueError(f"mode {mode!r}: not a mode within the bandwidth cap")
+
+
 def _tlv(t: int, v: bytes) -> bytes:
     return bytes([t, len(v)]) + v
 
@@ -257,13 +264,8 @@ class KissLink:
 
     def __post_init__(self):
         self.broadcast = self.broadcast or BROADCAST[self.cap]
-        self._check_mode(self.broadcast)
+        check_mode(self.broadcast, self.cap)
         self.ports.setdefault(0, Port(PORT0_GROUP, self.broadcast))
-
-    def _check_mode(self, mode: str):
-        s = MODES.get(mode)
-        if s is None or s not in G.allowed(self.cap):
-            raise ValueError(f"mode {mode!r}: not a mode within the bandwidth cap")
 
     def command(self, cmd: int, payload: bytes):
         """A KISS command from a client. P is kept. SLOTTIME (10 ms units)
@@ -306,9 +308,16 @@ class KissLink:
         closed, or the mode is outside the cap or too small for the control."""
         if n not in self.ports:
             raise ValueError(f"port {n} is not open")
-        self._check_mode(mode)
+        check_mode(mode, self.cap)
         self._check_fits(self.ports[n], mode, auto, n)
         self.ports[n].mode, self.ports[n].auto = mode, auto
+
+    def reset(self):
+        """Ports as a new link has them: 1-15 closed (frames queued for them
+        DROPPED, in port order), port 0 back in the broadcast mode."""
+        for n in [n for n in self.ports if n]:
+            self.close(n)
+        self.set_mode(0, self.broadcast)
 
     def _check_fits(self, p: Port, mode: str, auto: bool, n: int):
         """The control a port needs (its group, and room for a report) must

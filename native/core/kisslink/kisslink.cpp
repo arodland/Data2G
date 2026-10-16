@@ -171,11 +171,11 @@ ControlRead read_control(const std::map<int, Bytes>& tlvs) {
 
 KissLink::KissLink(int cap_, std::string broadcast_, arq::Clock clock_)
     : cap(cap_), clock(std::move(clock_)), broadcast(broadcast_.empty() ? std::string(broadcast_mode(cap_)) : broadcast_) {
-    check_mode(broadcast);
+    check_mode(broadcast, cap);
     ports.emplace(0, Port{std::string(PORT0_GROUP), broadcast, false, std::nullopt});
 }
 
-void KissLink::check_mode(const std::string& mode) const {
+void check_mode(const std::string& mode, int cap) {
     const arq::Mode* m = arq::mode(mode);
     const auto ok = arq::allowed(cap);
     if (!m || std::find(ok.begin(), ok.end(), m) == ok.end())
@@ -224,10 +224,18 @@ void KissLink::close(int n) {
     drop_where(n, [n](const Queued& q) { return q.port == n; });
 }
 
+void KissLink::reset() {
+    std::vector<int> open;
+    for (const auto& [n, p] : ports)
+        if (n) open.push_back(n);
+    for (int n : open) close(n);
+    set_mode(0, broadcast);
+}
+
 void KissLink::set_mode(int n, const std::string& mode, bool shift) {
     auto it = ports.find(n);
     if (it == ports.end()) throw std::invalid_argument("port " + std::to_string(n) + " is not open");
-    check_mode(mode);
+    check_mode(mode, cap);
     check_fits(n, it->second, mode, shift);
     it->second.mode = mode;
     it->second.shift = shift;
