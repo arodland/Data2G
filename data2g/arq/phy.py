@@ -171,26 +171,6 @@ def _soft_slot(r: dict, est: dict, slot: int) -> np.ndarray:
                              constellation.load(r["spec"].constellation))
 
 
-def _decode_post(spec, buf, top: int, rv: int, soft) -> tuple:
-    """One LDPC decode as codes.decode_raw (buf None: the slot's soft bits
-    alone) or codes.decode_buffer (the combined buffer `buf`, RVs up to
-    `top`, this slot sent at `rv`) would -> (info bits as decoded, still
-    scrambled unless `buf`; converged; a-posteriori LLRs of the slot's
-    coded bits in mapping order): DD needs the posterior of every failed
-    decode, so it comes from the same pass."""
-    perm = codes.interleaver(spec)
-    if buf is None:
-        d = np.empty(spec.coded_bits)
-        d[perm] = soft
-        dec, llr = codes._decoder(spec), d[None]
-    else:
-        extent = min(codes.buffer_len(spec), (min(top, codes.rv_cycle(spec) - 1) + 1) * spec.coded_bits)
-        dec, llr = codes._ext_decoder(spec, extent), buf[:, :extent]
-    out, ok, post = dec.decode(llr, iters=40, posterior=True)
-    code = post[0]
-    return codes._numpy(out)[0], bool(codes._numpy(ok)[0]), (code if buf is None else code[codes.rv_positions(spec, rv)])[perm]
-
-
 class ModemRx:
     """link.RxBurst over a received burst. `store`: this station's soft
     bits per codeword key, {key: (buffer, highest RV, submode, where)}, kept
@@ -261,8 +241,8 @@ class ModemRx:
                 if ok:
                     return payload
                 break
-            bits, conv, post = _decode_post(spec, buf, top, rv, None)
-            payload, ok = codes._payloads(spec, bits[None], [conv], [m], [codes.PLAIN])[0]
+            bits, conv, post = codes.decode_posterior(spec, buf=buf, max_rv=top, rv=rv)
+            payload, ok = codes.payloads(spec, bits[None], [conv], [m], [codes.PLAIN])[0]
             if ok:
                 self._learn(slot, spec, payload, rv, m)
                 return payload
@@ -298,7 +278,7 @@ class ModemRx:
                     cands, usable = codes.decode_raw(spec, np.asarray(self._soft(slot))[None], index=slot)
                     cands, usable = cands[0], usable[0]
                     break
-                bits, conv, post = _decode_post(spec, None, 0, 0, self._soft(slot))
+                bits, conv, post = codes.decode_posterior(spec, self._soft(slot))
                 cands, usable = codes.descramble(spec, bits, slot)[None], np.array([conv])
                 if conv:
                     self._post[slot] = 30.0 * (1 - 2.0 * codes.encode_info(spec, bits[None], 0)[0])

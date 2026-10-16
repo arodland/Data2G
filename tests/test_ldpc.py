@@ -110,7 +110,7 @@ def test_a_crc_match_needs_a_converged_decode():
 
     spec = SUBMODES["qpsk-r1/5"]
     bits = codes.info_bits(spec, bytes(range(codes.payload_bytes(spec))))[None]
-    assert codes._payloads(spec, bits, [True], index=[0])[0][1]
-    assert not codes._payloads(spec, bits, [False], index=[0])[0][1]
+    assert codes.payloads(spec, bits, [True], index=[0])[0][1]
+    assert not codes.payloads(spec, bits, [False], index=[0])[0][1]
     soft = (1 - 2 * codes.encode_info(spec, bits).astype(int)) * 4.0
     assert codes.decode_many(spec, soft)[0] == (bytes(range(codes.payload_bytes(spec))), True)

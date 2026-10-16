@@ -27,7 +27,7 @@ def crc_bits(spec: SubmodeSpec) -> int:
     its 8 paths whose CRC checks, so a failed decode passed CRC-16 8 in 65536
     times, and a random control word fails the session (scripts/crc_study.py;
     k + 8 kept the payloads). LDPC: CRC-32 from k 512, else CRC-16 (a decode
-    must also converge: _payloads)."""
+    must also converge: payloads)."""
     if spec.code == "polar":
         return 24
     return 32 if spec.k >= 512 else 16
@@ -76,6 +76,7 @@ def ldpc_code(spec: SubmodeSpec) -> ldpc.QCLDPC:
 # scripts/design_polar.py searches one per submode.
 POLAR_DESIGN_SNR_DB = -3.0
 POLAR_LIST = 8
+LDPC_ITERS = 40  # the modem's LDPC decoder iterations (native codes::ITERS)
 
 
 FORMAT_DIR = Path(__file__).parent / "format"
@@ -134,6 +135,22 @@ def interleaver(spec: SubmodeSpec) -> np.ndarray:
     """The frozen permutation if this submode has one, else computed."""
     f = frozen(spec)
     return f["perm"] if f is not None else compute_interleaver(spec)
+
+
+def _deinterleave(spec: SubmodeSpec, soft, dtype=None):
+    """(B, coded_bits) soft bits in mapping order -> code order: out[:,
+    perm[i]] = soft[:, i], undoing encode_info's coded[:, perm]. numpy (in
+    `dtype`, default soft's), or torch on soft's device."""
+    perm = interleaver(spec)
+    if isinstance(soft, np.ndarray):
+        out = np.empty_like(soft, dtype=dtype)
+        out[:, perm] = soft
+        return out
+    import torch
+
+    out = torch.empty_like(soft)
+    out[:, torch.as_tensor(perm, device=soft.device)] = soft
+    return out
 
 
 def compute_interleaver(spec: SubmodeSpec) -> np.ndarray:
@@ -276,24 +293,48 @@ def combine(spec: SubmodeSpec, buf: np.ndarray | None, soft: np.ndarray, rvs) ->
     soft = np.atleast_2d(soft)
     if buf is None:
         buf = np.zeros((len(soft), buffer_len(spec)))
-    deint = np.empty_like(soft, dtype=float)
-    deint[:, interleaver(spec)] = soft
+    deint = _deinterleave(spec, soft, float)
     for b, rv in enumerate(np.broadcast_to(rvs, len(soft))):
         np.add.at(buf[b], rv_positions(spec, int(rv)), deint[b])
     return buf
 
 
+def ir_extent(spec: SubmodeSpec, max_rv: int) -> int:
+    """The buffer positions an LDPC decode reads with RVs up to `max_rv`
+    received: the mother code is cut there (unreceived parity would only
+    slow it)."""
+    return min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
+
+
 def decode_buffer(spec: SubmodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
     """(B, L) combined buffers, with RVs up to `max_rv` received -> [(payload,
-    crc_ok)]: LDPC decodes the mother code cut to the buffer's received
-    extent (unreceived parity would only slow it)."""
+    crc_ok)]: LDPC decodes the mother code cut to ir_extent."""
     masks = np.broadcast_to(crc_mask, len(buf))
     idx = np.arange(len(buf)) if index is None else np.broadcast_to(index, len(buf))
     if spec.code != "ldpc":
-        return _payloads(spec, *_decode_code_order(spec, _decoder(spec), buf, crc_mask=masks, index=idx),
-                         masks, idx)
-    extent = min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
-    return _payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
+        return payloads(spec, *_decode_code_order(spec, _decoder(spec), buf, crc_mask=masks, index=idx),
+                        masks, idx)
+    extent = ir_extent(spec, max_rv)
+    return payloads(spec, *_decode_code_order(spec, _ext_decoder(spec, extent), buf[:, :extent]), masks, idx)
+
+
+def decode_posterior(spec: SubmodeSpec, soft=None, buf=None, max_rv: int = 0, rv: int = 0) -> tuple:
+    """One LDPC decode as decode_raw (`soft`: a slot's (coded_bits,) soft
+    bits alone) or decode_buffer (`buf`: a (1, L) combined buffer, RVs up
+    to `max_rv`, the slot sent at `rv`) would -> (info bits (k,) as decoded,
+    still scrambled unless from `buf`; converged; a-posteriori LLRs of the
+    slot's coded bits in mapping order). Decision-directed re-estimation
+    (arq/phy.py, DD) needs the posterior of every failed decode, so it
+    comes from the same pass. Native: codes::decode_posterior."""
+    perm = interleaver(spec)
+    if buf is None:
+        dec, llr = _decoder(spec), _deinterleave(spec, np.atleast_2d(soft), float)
+    else:
+        extent = ir_extent(spec, max_rv)
+        dec, llr = _ext_decoder(spec, extent), buf[:, :extent]
+    out, ok, post = dec.decode(llr, iters=LDPC_ITERS, posterior=True)
+    code = post[0]
+    return _numpy(out)[0], bool(_numpy(ok)[0]), (code if buf is None else code[rv_positions(spec, rv)])[perm]
 
 
 @lru_cache(maxsize=None)
@@ -301,7 +342,7 @@ def _ext_decoder(spec: SubmodeSpec, extent: int):
     return ldpc.MinSumDecoder(ldpc_code(spec).mother(extent))
 
 
-def _payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
+def payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
     """Decoded (scrambled) info bits -> [(payload, ok)]; row i was sent
     with CRC mask masks[i] at burst position index[i] (default: i). ok:
     the CRC checks and the decoder converged (LDPC: every parity check
@@ -333,10 +374,10 @@ def decode_many(spec: SubmodeSpec, soft: np.ndarray, crc_mask=0, index=None) -> 
     and burst position it was sent with (default 0 and the row number)."""
     masks = np.broadcast_to(crc_mask, len(soft))
     idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
-    return _payloads(spec, *decode_llrs(spec, soft, crc_mask=masks, index=idx), masks, idx)
+    return payloads(spec, *decode_llrs(spec, soft, crc_mask=masks, index=idx), masks, idx)
 
 
-def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device=None, crc_mask=0, index=0):
+def decode_llrs(spec: SubmodeSpec, llr, iters: int = LDPC_ITERS, device=None, crc_mask=0, index=0):
     """Batched decode: (B, coded_bits) LLRs in mapping order (numpy, or
     torch with `device`) -> (info bits (B, k) numpy uint8, success (B,)
     numpy bool). LDPC: success = H satisfied. Polar: the first list path
@@ -345,13 +386,9 @@ def decode_llrs(spec: SubmodeSpec, llr, iters: int = 40, device=None, crc_mask=0
     if device is not None:
         import torch
 
-        llr = torch.as_tensor(llr, dtype=torch.float32, device=device)
-        deint = torch.empty_like(llr)
-        deint[:, torch.as_tensor(interleaver(spec), device=device)] = llr
+        deint = _deinterleave(spec, torch.as_tensor(llr, dtype=torch.float32, device=device))
     else:
-        llr = np.asarray(llr, dtype=np.float32)
-        deint = np.empty_like(llr)
-        deint[:, interleaver(spec)] = llr
+        deint = _deinterleave(spec, np.asarray(llr, dtype=np.float32))
     return _decode_code_order(spec, _decoder(spec, device), deint, iters, crc_mask, index)
 
 
@@ -363,10 +400,9 @@ def decode_raw(spec: SubmodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndar
     usable (the CRC picks). `index`: per row, the burst position (default
     the row number)."""
     soft = np.asarray(soft, dtype=np.float32)
-    deint = np.empty_like(soft)
-    deint[:, interleaver(spec)] = soft
+    deint = _deinterleave(spec, soft)
     if spec.code == "ldpc":
-        out, ok = _decoder(spec).decode(deint, iters=40)
+        out, ok = _decoder(spec).decode(deint, iters=LDPC_ITERS)
         cands, usable = _numpy(out)[:, None], _numpy(ok)[:, None]
     else:
         cands = _numpy(_decoder(spec).decode(deint)[0])
@@ -397,7 +433,7 @@ def _numpy(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
 
-def _decode_code_order(spec: SubmodeSpec, dec, deint, iters: int = 40, crc_mask=0, index=0):
+def _decode_code_order(spec: SubmodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_mask=0, index=0):
     """decode_llrs after deinterleaving: LLRs in the decoder's code order."""
     if spec.code == "ldpc":
         out, ok = dec.decode(deint, iters=iters)

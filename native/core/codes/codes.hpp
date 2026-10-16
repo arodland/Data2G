@@ -75,6 +75,9 @@ inline constexpr int ITERS = 40;  // LDPC decoder iterations
 int rv_cycle(const Spec& s);
 int buffer_len(const Spec& s);
 std::vector<int> rv_positions(const Spec& s, int rv);
+// Buffer positions an LDPC decode reads with RVs up to max_rv received: the
+// mother code is cut there (unreceived parity would only slow it).
+int ir_extent(const Spec& s, int max_rv);
 
 // payload (exactly payload_bytes) -> k info bits: payload, masked CRC, zero fill, scrambled.
 std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t> payload, std::uint32_t crc_mask = 0,
@@ -134,6 +137,18 @@ std::vector<Payload> decode_many(const Spec& s, const Mat<float>& soft, std::spa
 // (B, buffer_len) combined buffers, RVs up to max_rv received.
 std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int max_rv = 0,
                                    std::span<const std::uint32_t> masks = {}, std::span<const int> index = {});
+
+struct Posterior {
+    std::vector<std::uint8_t> bits;  // (k,) info bits as decoded (still scrambled unless from a buffer)
+    bool ok;                         // converged
+    std::vector<double> post;        // a-posteriori LLRs of the slot's coded bits, mapping order
+};
+// One LDPC decode as decode_raw (buf empty: a slot's coded_bits soft bits
+// alone) or decode_buffer (buf: one combined buffer row, RVs up to max_rv,
+// the slot sent at rv) would, with the posterior DD (arq::ModemRx) needs
+// from the same pass.
+Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::span<const double> buf = {},
+                           int max_rv = 0, int rv = 0);
 
 struct Raw {
     int list;                  // candidates per row: 1 (LDPC) or POLAR_LIST

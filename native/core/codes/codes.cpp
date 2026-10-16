@@ -274,6 +274,10 @@ std::vector<int> rv_positions(const Spec& s, int rv) {
     return out;
 }
 
+int ir_extent(const Spec& s, int max_rv) {
+    return std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
+}
+
 std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
                                     int index) {
     if (static_cast<int>(payload.size()) != s.payload_bytes)
@@ -363,10 +367,40 @@ std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int ma
                                          masks, index);
         return payloads(s, d.bits, d.ok, masks, index);
     }
-    const int extent = std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
+    const int extent = ir_extent(s, max_rv);
     const auto d = decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),
                                      ITERS, {}, {});
     return payloads(s, d.bits, d.ok, masks, index);
+}
+
+Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::span<const double> buf, int max_rv,
+                           int rv) {
+    Mat<float> llr;
+    const ldpc::Decoder* dec;
+    if (buf.empty()) {
+        if (static_cast<int>(soft.size()) != s.coded_bits)
+            throw std::invalid_argument(std::string(s.name) + ": expected coded_bits soft bits");
+        llr = Mat<float>(1, soft.size());
+        for (std::size_t i = 0; i < soft.size(); ++i) llr[0][s.perm[i]] = static_cast<float>(soft[i]);
+        dec = &ldpc_decoder(s);
+    } else {
+        const int extent = ir_extent(s, max_rv);
+        if (static_cast<int>(buf.size()) < extent) throw std::invalid_argument(std::string(s.name) + ": buffer shape");
+        llr = Mat<float>(1, static_cast<std::size_t>(extent));
+        std::copy_n(buf.begin(), extent, llr.data.begin());
+        dec = &ldpc_decoder(s, extent);
+    }
+    const auto d = dec->decode(llr, ITERS, {}, true);
+    std::vector<double> code(d.posterior.data.begin(), d.posterior.data.end());
+    if (!buf.empty()) {
+        const auto pos = rv_positions(s, rv);
+        std::vector<double> c(pos.size());
+        for (std::size_t j = 0; j < pos.size(); ++j) c[j] = code[static_cast<std::size_t>(pos[j])];
+        code = std::move(c);
+    }
+    std::vector<double> post(static_cast<std::size_t>(s.coded_bits));
+    for (std::size_t i = 0; i < post.size(); ++i) post[i] = code[s.perm[i]];
+    return {std::vector<std::uint8_t>(d.bits.data.begin(), d.bits.data.end()), d.ok[0] != 0, std::move(post)};
 }
 
 Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index) {
