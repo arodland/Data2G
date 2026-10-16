@@ -1,4 +1,12 @@
-"""Small DSP helpers shared by the modem."""
+"""Sample-level DSP at the ends of the chain (native: core/waveform/dsp).
+
+- to_baseband: real audio -> complex baseband, the first step of the OFDM
+  receivers (modem, tnc's StreamDetector feed); cpm reads real audio.
+- freq_correct: remove a CFO from baseband.
+- tx_condition: envelope clip and filter, the last TX step (modem's OFDM
+  bursts, cpm.bandpass).
+- papr_db: envelope peak-to-average, for tests and studies.
+"""
 
 from math import gcd
 from typing import Sequence
@@ -14,7 +22,7 @@ from ..config import CLIP_OVERSHOOT, FS, FCENTER, TX_BANDPASS
 #
 # This is the same range-reduction argument as in ofdm.py but it matters
 # far more here, because `n` runs over a whole recording rather than one
-# symbol. Measured over a mode C transmission (760k samples), the old
+# symbol. Measured over an SSTVAE mode C transmission (760k samples), the old
 # form reached |theta| = 895,000 rad -- where one ulp is 1.16e-10 --
 # and accumulated 1.47e-10 rad of phase error, ~5000x the error in the
 # OFDM matrices. Still nothing on air (1e-10 rad is 6e-9 degrees), but
@@ -81,8 +89,8 @@ def tx_condition(
     above 1 clips past the threshold on that pass so the next filter
     regrows back toward it rather than above it (CESSB's "more than
     clipping"), applied as `scale ** k` because the additive form
-    inverts the envelope where this clipper bites hardest. See
-    `config.CLIP_OVERSHOOT` for the measurements and for why the pass
+    inverts the envelope where this clipper bites hardest. The factors
+    are SSTVAE's, measured there (its config.CLIP_OVERSHOOT): the pass
     count, not the overshoot, is most of the gain.
 
     `project`: active constellation extension (modem.ace_projector): after

@@ -1,6 +1,7 @@
 // numpy / scipy primitives the waveform needs, replicated closely enough
 // that the Python reference and the port agree to the last bit where IEEE
-// allows, and to an FFT's rounding where it does not.
+// allows, and to an FFT's rounding where it does not. No data2g module
+// corresponds: data2g/waveform/dsp.py is native/core/waveform/dsp.*.
 //
 // firwin, hilbert, fftconvolve and convolve_same are lifted from SSTVAE's
 // native/core/dsp/dsp.cpp; pairwise_sum and quantile are new.

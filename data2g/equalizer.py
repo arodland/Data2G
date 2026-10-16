@@ -5,7 +5,7 @@ is buffered before decoding, so every estimate can use every pilot:
 
 - `residual_cfo`: common phase rotation between consecutive pilots,
   summed over the burst. Fixes acquisition CFO errors of a few Hz that
-  fading during the 88 ms preamble can cause.
+  fading during the preamble (168 ms at 8 repeats) can cause.
 - `delay_support`: which delays hold channel energy, from the burst-
   averaged power delay profile. Used to place the FFT window so every
   path lands inside the cyclic prefix, and as the frequency-correlation

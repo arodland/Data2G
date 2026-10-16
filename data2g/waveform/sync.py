@@ -272,17 +272,20 @@ def first_path(
     `peak` that still holds `frac` of its power. `peak` itself if there
     is none.
 
-    `power` is a correlation power profile against a known reference --
-    the pilot fold for the blind path, |template correlation|**2 for the
-    preamble path -- and `peak` its argmax.
+    `power` is a correlation power profile against a known reference
+    (_refine: the repeat-summed |template correlation|**2) and `peak` its
+    argmax. `cyclic` wraps the search around `power`: SSTVAE's blind path
+    used it on a pilot fold; nothing here passes it, the native parity
+    test still covers it.
 
     Why this exists rather than the argmax: on a multipath channel the
     argmax is the *strongest* path, which is not the *first* one, and
     which of the two is stronger changes as the channel fades. Syncing
     to a late path pushes the early path's energy in front of the
-    demodulation window, where the cyclic prefix cannot cover it. See
-    config.FIRST_PATH_SEARCH for the measurements and for why the caller
-    must keep scoring at the argmax rather than here.
+    demodulation window, where the cyclic prefix cannot cover it. The
+    search span and fraction are SSTVAE's (config.FIRST_PATH_SEARCH,
+    FIRST_PATH_FRAC). Only the start moves: acquire scores a detection
+    at the statistic's peak, not here.
 
     The local-maximum requirement is load-bearing and not tidiness. A
     plain "earliest bin above the threshold" walks down the argmax's own
