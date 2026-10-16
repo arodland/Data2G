@@ -24,6 +24,12 @@ def test_reverse_bulk_transfer_reports_rate():
     assert "reverse:" in r.stdout and "2000 B in" in r.stdout and "bit/s" in r.stdout
 
 
+def test_both_ways_bulk_transfer_reports_each_direction():
+    r = speedtest("awgn", "20", "--bytes", "2001", "--both")
+    assert r.returncode == 0, r.stderr
+    assert "both:" in r.stdout and "2001 B in" in r.stdout and "A->B" in r.stdout and "B->A" in r.stdout
+
+
 def test_dead_channel_fails_during_connect():
     r = speedtest("awgn", "-20", "--bytes", "2000")
     assert r.returncode == 1 and "FAILED during connect" in r.stdout

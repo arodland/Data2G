@@ -2,7 +2,7 @@
 complete or 10 fail. Reports the success rate and the mean speed: of the
 middle three with 5 successes (high and low dropped), else of all of them.
 
-    python scripts/cpu_profile/speedtrials.py <channel> <snr_db> [--bytes 20000] [--bw 2300] [--seed 0] [--reverse]
+    python scripts/cpu_profile/speedtrials.py <channel> <snr_db> [--bytes 20000] [--bw 2300] [--seed 0] [--reverse | --both]
 """
 import argparse
 
@@ -19,12 +19,12 @@ def main():
     ap.add_argument("--bw", choices=["500", "1200", "2300", "2750"], default="2300")
     ap.add_argument("--seed", type=int, default=0, help="first seed")
     ap.add_argument("--latency", type=float, default=T.LATENCY_S)
-    T.reverse_arg(ap)
+    T.direction_arg(ap)
     T.log_arg(ap)
     a = ap.parse_args()
     T.log_setup(a)
 
-    def airtime(results):  # the sender's top two submodes, pooled over the results
+    def airtime(results):  # the senders' top two submodes, pooled over the results
         pooled = {}
         for r in results:
             for k, v in r["airtime"].items():
@@ -32,8 +32,9 @@ def main():
         return "; " + T.top2(pooled)
 
     trials.run(lambda seed: T.run(a.channel, a.snr, a.bytes, seed, cap=T.BW["BW" + a.bw], latency=a.latency,
-                                  reverse=a.reverse),
-               a.seed, f"{a.channel} {a.snr:g} dB, {a.bytes} B, BW{a.bw}{', reverse' if a.reverse else ''}", airtime)
+                                  direction=a.direction),
+               a.seed, f"{a.channel} {a.snr:g} dB, {a.bytes} B, BW{a.bw}{T.direction_tag(a.direction).replace(' ', ', ')}",
+               airtime)
 
 
 if __name__ == "__main__":
