@@ -195,7 +195,7 @@ std::vector<std::uint8_t> Code::syndrome_ok(const Mat<std::uint8_t>& full) const
 
 namespace {
 
-// ph.sum(axis=-1) in MinSumDecoder, over a check's n = dmax slots: a[0..d)
+// ph.sum(axis=-1) in ldpc.Decoder, over a check's n = dmax slots: a[0..d)
 // real, a[d..n) zero padding. numpy's order depends on the batch size:
 // v2c[:, chk] comes out batch-innermost for B > 1, so numpy adds the slots
 // in turn; for B = 1 the slots are contiguous and it sums pairwise (8

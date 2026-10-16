@@ -69,7 +69,7 @@ public:
 
     // (B, n) channel LLRs of the sent bits. alpha empty: sum-product (BP);
     // one value: min-sum normalized by it; more: alpha[it] per iteration.
-    // Stops once every codeword in the batch satisfies H, as MinSumDecoder.
+    // Stops once every codeword in the batch satisfies H, as ldpc.Decoder.
     Decoded decode(const Mat<float>& llr, int iters = 30, std::span<const float> alpha = {},
                    bool posterior = false) const;
 

@@ -55,7 +55,7 @@ def test_a_lifting_size_without_a_table_is_an_error():
 
 def test_min_sum_decodes_noise_free_and_corrects_errors():
     code = ldpc.qc_code(500, 1000)
-    dec = ldpc.MinSumDecoder(code)
+    dec = ldpc.Decoder(code)
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, (8, 500))
     x = 1.0 - 2.0 * code.encode(bits)

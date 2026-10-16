@@ -139,7 +139,8 @@ def _substitutions(native):
         # every LDPC code (codes.ldpc_code, mother(), IR extents) and decoder
         # (codes._decoder, _ext_decoder, decode_posterior) is then C++
         (ldpc, "qc_code"): native.ldpc.qc_code,
-        (ldpc, "MinSumDecoder"): native.ldpc.MinSumDecoder,
+        (ldpc, "Decoder"): native.ldpc.Decoder,
+        (ldpc, "MinSumDecoder"): native.ldpc.Decoder,  # the old name, for scripts/
     }
 
 

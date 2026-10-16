@@ -339,7 +339,7 @@ def decode_posterior(spec: SubmodeSpec, soft=None, buf=None, max_rv: int = 0, rv
 
 @lru_cache(maxsize=None)
 def _ext_decoder(spec: SubmodeSpec, extent: int):
-    return ldpc.MinSumDecoder(ldpc_code(spec).mother(extent))
+    return ldpc.Decoder(ldpc_code(spec).mother(extent))
 
 
 def payloads(spec: SubmodeSpec, bits: np.ndarray, converged, masks=None, index=None) -> list[tuple[bytes, bool]]:
@@ -465,8 +465,8 @@ def _decoder(spec: SubmodeSpec, device=None):
         from . import decoders_torch
 
         if spec.code == "ldpc":
-            return decoders_torch.MinSumDecoder(ldpc_code(spec), device=device)
+            return decoders_torch.Decoder(ldpc_code(spec), device=device)
         return decoders_torch.SCLDecoder(polar_code(spec), POLAR_LIST, device=device)
     if spec.code == "ldpc":
-        return ldpc.MinSumDecoder(ldpc_code(spec))
+        return ldpc.Decoder(ldpc_code(spec))
     return polar.SCLDecoder(polar_code(spec), POLAR_LIST)

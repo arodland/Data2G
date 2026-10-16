@@ -196,14 +196,34 @@ def _phi(x):
     return -np.log(np.tanh(x / 2))
 
 
-class MinSumDecoder:
+def check_layout(code: QCLDPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The flooding decoders' edge layout (Decoder, decoders_torch.Decoder):
+    var (n_edges,): each edge's variable, edges in check order; chk
+    (checks, dmax): each check's edge ids, padded with n_edges (a slot that
+    reads +BIG); pad (checks, dmax): which slots are padding. Edges are in
+    check order, so out[:, ~pad] of a (B, checks, dmax) array lists them in
+    edge order."""
+    r, c = code.edges
+    order = np.argsort(r, kind="stable")
+    r, c = r[order], c[order]
+    deg = np.bincount(r, minlength=code.mb * code.z)
+    start = np.concatenate([[0], np.cumsum(deg)[:-1]])
+    j = np.arange(deg.max())
+    pad = j[None, :] >= deg[:, None]
+    chk = start[:, None] + j
+    chk[pad] = len(r)
+    return c, chk, pad
+
+
+class Decoder:
     """Batched flooding decoder on a QCLDPC, in numpy: sum-product (BP,
     `alpha=None`, the default) or normalized min-sum with `alpha`.
 
     BP is the default because this modem's bit rate (a few kb/s) makes
     its cost irrelevant even on a phone; min-sum exists for hardware.
     Stops early once every codeword in the batch satisfies H.
-    decoders_torch.MinSumDecoder is the same on torch, for GPU studies.
+    decoders_torch.Decoder is the same on torch, for GPU studies; native:
+    ldpc::Decoder.
     """
 
     BIG = 1e4  # LLR for filler bits: known zeros
@@ -212,20 +232,9 @@ class MinSumDecoder:
         import scipy.sparse
 
         self.code = code
-        r, c = code.edges
-        order = np.argsort(r, kind="stable")
-        r, c = r[order], c[order]
-        self.n_edges = len(r)
-        self.var = c
-        deg = np.bincount(r, minlength=code.mb * code.z)
-        dmax = deg.max()
-        # (checks, dmax) edge ids, padded with n_edges (a slot that reads +BIG).
-        # Edges are in check order, so out[:, ~pad] lists them in edge order.
-        start = np.concatenate([[0], np.cumsum(deg)[:-1]])
-        j = np.arange(dmax)
-        self.pad = j[None, :] >= deg[:, None]
-        self.chk = start[:, None] + j
-        self.chk[self.pad] = self.n_edges
+        self.var, self.chk, self.pad = check_layout(code)
+        c = self.var
+        self.n_edges = len(c)
         # (n_cols, n_edges): sums each variable's incoming messages
         self.gather = scipy.sparse.csr_matrix(
             (np.ones(len(c), np.float32), (c, np.arange(len(c)))), shape=(code.n_cols, len(c)))
@@ -241,7 +250,8 @@ class MinSumDecoder:
 
     def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False):
         """-> (info bit decisions (B, k) uint8, converged (B,) bool), and
-        with `posterior` the a-posteriori LLRs of the sent bits (B, n)."""
+        with `posterior` the a-posteriori LLRs of the sent bits (B, n).
+        (The modem passes iters=codes.LDPC_ITERS.)"""
         ch = self.channel_llrs(np.clip(np.asarray(llr_sent, np.float32), -CH_CLAMP, CH_CLAMP))
         b = ch.shape[0]
         c2v = np.zeros((b, self.n_edges), np.float32)
@@ -279,3 +289,6 @@ class MinSumDecoder:
     def syndrome(self, hard):
         h = np.concatenate([hard[:, self.var], np.zeros((hard.shape[0], 1), hard.dtype)], 1)
         return (h[:, self.chk].sum(axis=-1) % 2 == 0).all(axis=1)
+
+
+MinSumDecoder = Decoder  # the old name, kept for scripts/
