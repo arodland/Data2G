@@ -49,6 +49,7 @@ if(TARGET data2g_station)
 endif()
 
 # data2g-gui's window, offscreen, over pipe audio (no device, no display).
+# Its source is gui/test_gui.cpp: Qt Widgets stay under gui/ (tools/check_layering.py).
 if(TARGET data2g_gui)
   add_executable(test_gui ${PROJECT_SOURCE_DIR}/gui/test_gui.cpp)
   target_link_libraries(test_gui PRIVATE data2g_gui)
