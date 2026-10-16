@@ -329,13 +329,11 @@ class Engine:
                     self.kiss.missed(h["spec"].name, h["n_cw"])  # maybe an open port's: BCAST * MISSED
                 continue
             rx = PHY.ModemRx(r, self.store, PHY.DD_BUDGET_S)
-            # in a session, its peer's bursts are the likely ones: a control
-            # codeword under the session's key (the station's first decode,
-            # remembered) claims the burst before KISS tries its keys on it
-            # (two failed decodes per ARQ burst: ~10% of a Pat exchange's CPU)
-            st = self.session.station
-            ours = (st is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING)
-                    and rx.decode(0, B.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
+            # in a session, its peer's bursts are the likely ones: the session
+            # claims the burst before KISS tries its keys on it (two failed
+            # decodes per ARQ burst: ~10% of a Pat exchange's CPU). Asked
+            # with or without KISS: its decode comes first either way
+            ours = self.session.claims(rx)
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

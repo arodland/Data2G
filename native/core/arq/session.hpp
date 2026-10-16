@@ -137,6 +137,10 @@ public:
     // clock side
     TxBurstPtr poll(double now);
     std::optional<double> next_event();
+    // rx is my peer's: connected (or disconnecting) and its first control
+    // codeword decodes under the session key (the station's own decode of it
+    // is then a memo hit)
+    bool claims(RxBurst& rx) const;
     // connected with nothing in flight or queued, either way: free air for a broadcast burst
     bool idle_connected() const {
         return state == SessionState::CONNECTED && station && !out && !deadline && !want_disc

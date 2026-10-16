@@ -215,6 +215,14 @@ class Session:
             return out
         return None
 
+    def claims(self, rx: B.RxBurst) -> bool:
+        """`rx` is my peer's: connected (or disconnecting) and its first
+        control codeword decodes under the session key (the station's own
+        decode of it is then a memo hit, phy.ModemRx)."""
+        st = self.station
+        return (st is not None and self.state in (CONNECTED, DISCONNECTING)
+                and rx.decode(0, B.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
+
     def idle(self) -> bool:
         """Connected with nothing in flight or queued, either way: the air is
         free for a broadcast burst (the engine's KISS link)."""

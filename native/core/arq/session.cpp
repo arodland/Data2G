@@ -265,6 +265,10 @@ void Session::on_rx(RxBurst& rx, double now) {
 
 // --- internals ------------------------------------------------------------------------
 
+bool Session::claims(RxBurst& rx) const {
+    return station && live(state) && rx.decode(0, ctl_mask(station->peer(), 0, station->key), 0, nullptr).has_value();
+}
+
 Session::Queued Session::queued_bytes() const {
     const auto n = static_cast<std::int64_t>(pending_write.size());
     if (!station) return {n, n};

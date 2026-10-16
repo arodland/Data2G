@@ -830,12 +830,10 @@ void Engine::hear_burst(tnc::BurstEvent& ev, double t) {
             if (f) f(rx.n_decoded(), rx.n_failed());
         }
     } tally{rx, on_decoded_};
-    // in a session, its peer's bursts are the likely ones: a control
-    // codeword under the session's key claims the burst before KISS tries
-    // its keys on it
-    const auto st = session_->station;
-    const bool ours = st && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING) &&
-                      rx.decode(0, ctl_mask(st->peer(), 0, st->key), 0, nullptr).has_value();
+    // in a session, its peer's bursts are the likely ones: the session claims
+    // the burst before KISS tries its keys on it (asked with or without KISS:
+    // its decode comes first either way)
+    const bool ours = session_->claims(rx);
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's
             kiss_rx_.insert(kiss_rx_.end(), std::make_move_iterator(frames->begin()), std::make_move_iterator(frames->end()));
