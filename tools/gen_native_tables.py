@@ -173,7 +173,7 @@ def cpm_cpp() -> str:
     rows = []
     for i, g in enumerate(cpm.GRIDS.values()):
         assert g.m <= 256
-        tones = [cpm.header_symbols(g.name, (v << 6) | modem._crc6(v)) for v in range(1024)]
+        tones = [cpm.header_symbols(g.name, (v << 6) | modem.crc6(v)) for v in range(1024)]
         out.append(f"constexpr std::uint8_t pre_{i}[] = {{{ints(cpm.preamble_pattern(g))}}};\n")
         out.append(f"constexpr std::uint8_t mid_{i}[] = {{{ints(cpm.mid_block(g))}}};\n")
         out.append(f"constexpr std::uint8_t hdr_{i}[] = {{{ints(np.concatenate(tones))}}};\n")

@@ -45,7 +45,7 @@ def genie_receive(y: np.ndarray, spec, n_cw: int) -> dict | None:
     z = freq_correct(to_baseband(y), G.CFO_HZ)
     hd = modem._read_header(z, start, spec.sync_band)
     v = (spec.index << 6) | (n_cw - 1)
-    hd.update(hdr=(spec, n_cw), word=(v << 6) | modem._crc6(v))
+    hd.update(hdr=(spec, n_cw), word=(v << 6) | modem.crc6(v))
     acq = SimpleNamespace(freq_offset=G.CFO_HZ, preamble_start=start)
     real = modem._best_header
     modem._best_header = lambda *a, **k: (hd, acq, z)

@@ -738,7 +738,7 @@ def _modem_substitutions(native):
     from data2g.waveform import sync
 
     N, W = native.modem, native.waveform
-    names = ("_crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
+    names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
              "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
              "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate",
@@ -790,8 +790,8 @@ def _modem_substitutions(native):
     def f64(x):
         return np.asarray(x, dtype=np.float64)
 
-    @guarded("_crc6")
-    def _crc6(v):
+    @guarded("crc6")
+    def crc6(v):
         return N.crc6(int(v))
 
     @guarded("header_bits")
@@ -917,7 +917,7 @@ def _modem_substitutions(native):
     return {
         **{(modem, k): guarded(k)(fn) for k, fn in small.items()},
         **{(modem, k): v for k, v in {
-            "_crc6": _crc6, "header_bits": header_bits, "_signs": _signs, "_valid_words": _valid_words,
+            "crc6": crc6, "header_bits": header_bits, "_signs": _signs, "_valid_words": _valid_words,
             "_valid_signs": _valid_signs, "decode_header": decode_header, "modulate": modulate,
             "modulate_bits": modulate_bits, "burst_waveform": burst_waveform, "ace_cells": ace_cells,
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,

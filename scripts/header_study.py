@@ -26,7 +26,7 @@ import numpy as np
 
 from data2g import codes, constellation, equalizer, hfchannel, modem
 from data2g.config import FS, LEADIN_SAMPLES, M, NCP, NSYM, PREAMBLE_CP, SUBMODES
-from data2g.modem import HEADER_BACKOFF, QPSK, _crc6, header_code, header_layout, header_samples
+from data2g.modem import HEADER_BACKOFF, QPSK, crc6, header_code, header_layout, header_samples
 from data2g.waveform import ofdm
 from data2g.waveform.dsp import freq_correct, to_baseband
 
@@ -37,7 +37,7 @@ BURST = {"w": "ack-1f", "n10": "n10-ack-4f", "n4": "n4-ack-2f", "w48": "w48-qpsk
 def valid_mask(band):
     w = np.arange(2**16)
     v, crc = w >> 6, w & 0x3F
-    ok = np.array([_crc6(int(x)) for x in v]) == crc
+    ok = np.array([crc6(int(x)) for x in v]) == crc
     idx = {s.index for s in SUBMODES.values() if s.band == band}
     return ok & np.isin(v >> 6, list(idx))
 
@@ -105,7 +105,7 @@ def trial(args):
     y = hfchannel.apply_channel(x, snr_db=snr, freq_offset_hz=f0, ppm=10,
                                 fading_preset=None if chan == "awgn" else chan, seed=seed)
     z = freq_correct(to_baseband(y), f0)
-    truth = (spec.index << 12) | _crc6(spec.index << 6)  # n_cw = 1
+    truth = (spec.index << 12) | crc6(spec.index << 6)  # n_cw = 1
     out = []
     for v in variants:
         word, score = read(z, lead + LEADIN_SAMPLES, band, set(v.split("+")))
