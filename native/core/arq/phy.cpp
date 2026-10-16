@@ -496,7 +496,7 @@ ModemRx::Est ModemRx::dd_estimate() const {
         cache.z[j] = modem::data_row(R.raw, row)[c] / (g * x);
         // modem::noise_var's with |h|^2 at its expectation g^2 p, plus the soft symbol's own variance
         const double n0 = est.n0_k.empty() ? est.n0 : est.n0_k[c];
-        cache.w[j] =g * g * std::norm(x) / (n0 + est.clip_ratio * (g * g) * p + g * g * p * v);
+        cache.w[j] = g * g * std::norm(x) / (n0 + est.clip_ratio * (g * g) * p + g * g * p * v);
         z[row][c] = cache.z[j];
         w[row][c] = cache.w[j];
     }

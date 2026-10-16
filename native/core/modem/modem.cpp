@@ -28,7 +28,6 @@ namespace {
 constexpr double PI = std::numbers::pi;
 constexpr int HB = HEADER_BACKOFF;
 
-
 const constellation::Constellation& qpsk() {
     static const auto* c = constellation::find("gray-qam4");
     return *c;
@@ -185,8 +184,6 @@ std::span<const T> pyslice(std::span<const T> x, int64_t lo, int64_t hi) {
     const int64_t a = clamp_slice(lo, n), b = clamp_slice(hi, n);
     return b > a ? x.subspan(static_cast<size_t>(a), static_cast<size_t>(b - a)) : std::span<const T>();
 }
-
-
 
 }  // namespace
 

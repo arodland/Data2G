@@ -23,7 +23,9 @@ Sections, in file order:
   receive() the head or the lock.
 - receive, frames: _demod_frames (sample-clock tracking from the pilots,
   timing slips), receive() up to the channel estimate and raw symbols.
-- decode: data_channel, noise_var, soft_bits, decode_received.
+- decode: data_channel, noise_var, soft_bits, burst_soft and slot_soft
+  (arq/phy's, on its DD re-estimate too), snr_db, symbol_times,
+  decode_received.
 
 The receive side's results are dicts typed by Lock, HeaderRead, Received
 and DataEstimate (after Burst). receive()'s Received is what tnc.Receiver
@@ -71,9 +73,8 @@ from .config import (
     SYMS_PER_FRAME,
     SubmodeSpec,
 )
-from .waveform import ofdm
+from .waveform import dsp, ofdm
 from .waveform import sync as _sync
-from .waveform import dsp
 from .waveform.sync import SyncError
 
 # The receiver's constants are mirrored into native/core/generated/modem.hpp
@@ -872,7 +873,7 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
     # search's CPU) only past COPY_DETECT. Left on the function for tests
     # (instrumentation, not an interface: native returns it by out-param)
-    find_copy.peak =float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
+    find_copy.peak = float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
     if find_copy.peak < COPY_DETECT:
         return None
     grids = []

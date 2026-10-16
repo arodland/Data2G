@@ -51,7 +51,7 @@ def burst(spec, rng, n_frames=8):
         data[k, :len(hdr)] = hdr
     x = modem.burst_waveform(data, spec)
     x = tx_condition(x, spec.headroom, b.spec.clip_overshoot, active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES),
-                           bandpass=BANDS[spec.sync_band].tx_bandpass)
+                     bandpass=BANDS[spec.sync_band].tx_bandpass)
     return x, n_cw, len(hdr)
 
 
