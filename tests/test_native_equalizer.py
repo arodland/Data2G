@@ -11,7 +11,7 @@ import copy
 
 import numpy as np
 import pytest
-from conftest import EQUALIZER_NATIVE
+from native_subs.base import EQUALIZER_NATIVE
 
 from data2g import codes, equalizer, hfchannel, modem
 from data2g.arq import phy

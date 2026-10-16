@@ -1,3 +1,5 @@
+"""data2g.waveform.ofdm: symbols through passband and back."""
+
 import numpy as np
 
 from data2g.config import NC, NCP

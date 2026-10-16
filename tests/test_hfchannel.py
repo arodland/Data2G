@@ -1,3 +1,5 @@
+"""data2g.hfchannel: the fading simulator's Doppler spread."""
+
 import numpy as np
 import pytest
 

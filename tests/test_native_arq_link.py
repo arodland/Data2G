@@ -15,7 +15,7 @@ import zlib
 
 import pytest
 
-import conftest
+import native_subs
 from data2g.arq import frames as F
 from data2g.arq import link as L
 from data2g.arq import session as S
@@ -35,7 +35,7 @@ def logged(caplog, fn, *args, **kw):
 @pytest.fixture
 def pure(monkeypatch):
     """The Python modules as written, whether or not --native substituted them."""
-    for (module, attr), fn in conftest._originals.items():
+    for (module, attr), fn in native_subs.originals.items():
         monkeypatch.setattr(module, attr, fn)
 
 
@@ -309,7 +309,7 @@ def test_session_on_timeout_override_and_tuning(native, monkeypatch):
     session, as they do the Python one."""
     monkeypatch.setattr(S, "REPLY_START_S", 4.0)
     monkeypatch.setattr(S, "CONNECT_TRIES", 2)
-    for cls in (conftest._originals.get((S, "Session"), S.Session), native.arq.Session):
+    for cls in (native_subs.originals.get((S, "Session"), S.Session), native.arq.Session):
         s = cls("W1AW", SessionPolicy(random.Random(1)), rng=random.Random(2))
         seen, ot = [], s._on_timeout
         s._on_timeout = lambda now, ot=ot: (seen.append(now), ot(now))

@@ -1,3 +1,6 @@
+"""data2g.ldpc: every on-air code's H, the decoder, IR extension and the CRC
+gate."""
+
 import numpy as np
 import pytest
 

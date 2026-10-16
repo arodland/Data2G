@@ -1,3 +1,5 @@
+"""data2g.constellation: Gray-labelled QAM and the bit LLRs' fast paths."""
+
 import numpy as np
 import pytest
 

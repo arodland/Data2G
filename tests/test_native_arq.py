@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import conftest
+import native_subs
 from data2g import codes, config, modem
 from data2g.arq import modes
 from data2g.arq import policy as G
@@ -35,7 +35,7 @@ CAP_RTOL = 0.0 if (sys.platform == "linux" and platform.machine() == "x86_64") e
 def pure(monkeypatch):
     """Every --native substitution undone for the test: the reference is all
     Python (its callees included), the native side called directly."""
-    for (module, attr), fn in conftest._originals.items():
+    for (module, attr), fn in native_subs.originals.items():
         monkeypatch.setattr(module, attr, fn)
 
 

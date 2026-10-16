@@ -9,7 +9,7 @@ ports agree with Python to float32 ulps in the header correlation)."""
 import sys
 from pathlib import Path
 
-import conftest
+import native_subs
 import numpy as np
 import pytest
 
@@ -75,11 +75,8 @@ def _events(rx, y, chunk):
 
 
 def _wrapper(native):
-    """The --native Receiver wrapper (tests/conftest.py), with or without --native."""
-    for p in conftest._PROVIDERS:
-        if p.__name__ == "_receiver_substitutions":
-            return p(native)[receiver, "Receiver"]
-    raise AssertionError("no receiver provider")
+    """The --native Receiver wrapper (tests/native_subs/receiver.py), with or without --native."""
+    return native_subs.PROVIDERS["receiver"](native)[receiver, "Receiver"]
 
 
 @pytest.fixture(scope="module")
