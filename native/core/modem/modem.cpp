@@ -483,9 +483,6 @@ double bin_phase_step(std::span<const cd> h) {
 
 namespace {
 
-constexpr int64_t SLIP_MIN = 40, SLIP_MAX = 240;  // modem.py's
-constexpr double SLIP_TRIGGER = 0.5, SLIP_ACCEPT = 0.45;
-
 // modem._coherence: |<ref, h>| / (|ref| |h|)
 double coherence(std::span<const cd> h, std::span<const cd> ref) {
     cd acc{};
@@ -504,7 +501,7 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
     if (coherence(over_pilot(b.demod_window(z, p + NCP, DEMOD_BACKOFF), b), prev) >= SLIP_TRIGGER) return 0;
     const auto zlen = static_cast<int64_t>(z.size());
     const auto at_z = [&](int64_t i) { return i < zlen ? z[static_cast<size_t>(i)] : cd{}; };
-    const int64_t lo = std::max(-SLIP_MAX, -p);
+    const int64_t lo = std::max<int64_t>(-SLIP_MAX, -p);
     const auto n_off = static_cast<size_t>(SLIP_MAX - lo + 1);
     const size_t nc = static_cast<size_t>(b.nc());
     std::vector<cd> rot(nc), x, h(nc);
