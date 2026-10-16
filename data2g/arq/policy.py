@@ -20,6 +20,7 @@ grouped below the tuned constants; native has their defaults.
 import json
 import os
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -167,8 +168,7 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
-@dataclass(frozen=True)
-class StationView:
+class StationView(NamedTuple):
     """What the shifter reads of its link.Station (native: arq::StationView).
     KISS, with no station, passes one of its own."""
     cap: int = 2
@@ -191,6 +191,13 @@ def view(station) -> StationView:
     station(): tests hand the shifter stubs with only what one method reads."""
     if isinstance(station, StationView):
         return station
+    try:  # a whole station (once per burst built: keep it cheap)
+        return StationView(station.cap, station.tx.pending(), station.peer_recommend, station.peer_reply_recommend,
+                           station.peer_size_hint, station.peer_wants_dup, bool(station.chat or station.peer_chat),
+                           station.peer_queued, len(station.rx.buf), station.misses, station.esc_floor,
+                           station.stats.get("timeouts", 0))
+    except AttributeError:
+        pass
 
     def g(name, default):
         return getattr(station, name, default)
