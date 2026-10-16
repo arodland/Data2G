@@ -121,7 +121,8 @@ def tx_filter(grid: str, cap: int) -> TxFilter:
 @dataclass(frozen=True)
 class CpmSpec:
     """A CPM mode (or a grid's control codeword), shaped like
-    config.SubmodeSpec where data2g.codes and the ARQ read it."""
+    config.SubmodeSpec where data2g.codes (codes.CodeSpec) and the ARQ
+    read it."""
     name: str
     grid: str
     index: int  # in its grid's header (-1: the control codeword)

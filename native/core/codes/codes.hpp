@@ -1,5 +1,13 @@
-// data2g/codes.py: CRCs, the PN9 scrambler, interleavers, and the codec
-// (encode, HARQ combining, batched decode) over ldpc:: and polar::.
+// data2g/codes.py: the codec over ldpc:: and polar:: (which know nothing of
+// submodes): CRC framing, the PN9 scrambler, interleavers, burst order
+// (spread/despread), encode, IR combining and the batched decodes.
+//
+// Keyed by codes::Spec (Python's codes.CodeSpec): a submode, a CPM mode or a
+// CPM control codeword, with its interleaver and info set from the generated
+// tables. Callers: modem (encode, spread, decode_many), arq::phy (IR,
+// decode_raw + check, decode_posterior), arq::modes (the rules on raw rows).
+// Parity with Python: tests/test_native_codes.py through native.codes
+// (bindings/bind_codes.cpp).
 #pragma once
 
 #include <cstdint>
@@ -11,6 +19,7 @@
 #include "generated/config.hpp"
 #include "ldpc/ldpc.hpp"
 #include "polar/polar.hpp"
+#include "tables/tables.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::codes {
@@ -27,23 +36,28 @@ std::vector<std::uint8_t> with_crc(std::span<const std::uint8_t> payload, int n_
 int scramble_seed(int index);
 std::vector<std::uint8_t> scrambler(int k, int seed = 0x1FF);  // PN9, k bits
 
-// Any spec with .code and .k (config::Submode, tables::CpmSpec).
-template <typename Spec>
-int crc_bits(const Spec& spec) {
-    if (spec.code == "polar") return 24;
-    return spec.k >= 512 ? 32 : 16;
+// The codec's rules (codes.crc_bits, payload_bytes, rv_cycle) on a raw
+// table row with .code and .k (config::Submode, tables::CpmSpec): Spec is
+// built with them, and callers holding a row (arq::modes) ask them here.
+// Inline on the row: the ARQ asks per decision.
+template <typename Row>
+int crc_bits(const Row& r) {
+    if (r.code == "polar") return 24;
+    return r.k >= 512 ? 32 : 16;
 }
 
-template <typename Spec>
-int payload_bytes(const Spec& spec) {
-    return (spec.k - crc_bits(spec)) / 8;
+template <typename Row>
+int payload_bytes(const Row& r) {
+    return (r.k - crc_bits(r)) / 8;
+}
+
+template <typename Row>
+int rv_cycle(const Row& r) {
+    return r.code == "ldpc" ? 4 : 1;
 }
 
 // nullptr if there is no such submode.
 const config::Submode* submode(std::string_view name);
-// spec must be an element of config::SUBMODES.
-std::span<const std::uint16_t> interleaver(const config::Submode& spec);
-std::span<const std::uint16_t> info_pos(const config::Submode& spec);
 
 // --- the codec (codes.encode / decode / combine) ------------------------------
 //
@@ -62,9 +76,11 @@ struct Spec {
 };
 
 const Spec* spec(std::string_view name);  // nullptr if none
-const Spec& spec(const config::Submode& s);
+const Spec& spec(const config::Submode& s);  // s an element of config::SUBMODES
+const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS or CPM_CTL
 
 const ldpc::Code& ldpc_code(const Spec& s);  // LDPC specs
+const polar::PolarCode& polar_code(const Spec& s);  // polar specs, on their frozen info set
 // codes._decoder (extent 0) or codes._ext_decoder(spec, extent).
 const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent = 0);
 const polar::SCLDecoder& polar_decoder(const Spec& s);  // polar specs, list POLAR_LIST
@@ -75,6 +91,9 @@ inline constexpr int ITERS = 40;  // LDPC decoder iterations
 int rv_cycle(const Spec& s);
 int buffer_len(const Spec& s);
 std::vector<int> rv_positions(const Spec& s, int rv);
+// Buffer positions an LDPC decode reads with RVs up to max_rv received: the
+// mother code is cut there (unreceived parity would only slow it).
+int ir_extent(const Spec& s, int max_rv);
 
 // payload (exactly payload_bytes) -> k info bits: payload, masked CRC, zero fill, scrambled.
 std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t> payload, std::uint32_t crc_mask = 0,
@@ -116,7 +135,7 @@ struct Payload {
     bool ok;  // CRC matches and the decoder converged
 };
 
-// Decoded (scrambled) info bits -> payloads (codes._payloads).
+// Decoded (scrambled) info bits -> payloads (codes.payloads).
 std::vector<Payload> payloads(const Spec& s, const Mat<std::uint8_t>& bits, std::span<const std::uint8_t> converged,
                               std::span<const std::uint32_t> masks = {}, std::span<const int> index = {});
 
@@ -134,6 +153,18 @@ std::vector<Payload> decode_many(const Spec& s, const Mat<float>& soft, std::spa
 // (B, buffer_len) combined buffers, RVs up to max_rv received.
 std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int max_rv = 0,
                                    std::span<const std::uint32_t> masks = {}, std::span<const int> index = {});
+
+struct Posterior {
+    std::vector<std::uint8_t> bits;  // (k,) info bits as decoded (still scrambled unless from a buffer)
+    bool ok;                         // converged
+    std::vector<double> post;        // a-posteriori LLRs of the slot's coded bits, mapping order
+};
+// One LDPC decode as decode_raw (buf empty: a slot's coded_bits soft bits
+// alone) or decode_buffer (buf: one combined buffer row, RVs up to max_rv,
+// the slot sent at rv) would, with the posterior DD (arq::ModemRx) needs
+// from the same pass.
+Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::span<const double> buf = {},
+                           int max_rv = 0, int rv = 0);
 
 struct Raw {
     int list;                  // candidates per row: 1 (LDPC) or POLAR_LIST

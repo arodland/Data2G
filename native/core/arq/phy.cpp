@@ -20,17 +20,11 @@ namespace {
 using cd = std::complex<double>;
 constexpr std::size_t S = config::DATA_SYMS_PER_FRAME;
 
-const codes::Spec& cspec(std::string_view name) {
-    const auto* s = codes::spec(name);
-    if (!s) throw std::out_of_range("no code spec " + std::string(name));
-    return *s;
-}
-
 const codes::Spec& ctl_code(const Mode& m) {
-    return m.is_cpm() ? cspec(cpm::ctl(cpm::grid_of(*m.cpm)).name) : codes::spec(*m.ofdm);
+    return m.is_cpm() ? codes::spec(cpm::ctl(cpm::grid_of(*m.cpm))) : codes::spec(*m.ofdm);
 }
 
-const codes::Spec& data_code(const Mode& m) { return m.is_cpm() ? cspec(m.cpm->name) : codes::spec(*m.ofdm); }
+const codes::Spec& data_code(const Mode& m) { return m.is_cpm() ? codes::spec(*m.cpm) : codes::spec(*m.ofdm); }
 
 Mat<float> row_f(std::span<const double> v) {
     Mat<float> out(1, v.size());
@@ -43,40 +37,6 @@ std::vector<double> known(std::span<const std::uint8_t> bits) {
     std::vector<double> out(bits.size());
     for (std::size_t i = 0; i < bits.size(); ++i) out[i] = 30.0 * (1 - 2.0 * bits[i]);
     return out;
-}
-
-struct Post {
-    std::vector<std::uint8_t> bits;  // info bits as decoded (still scrambled unless from a buffer)
-    bool ok;
-    std::vector<double> post;  // a-posteriori LLRs of the slot's coded bits, mapping order
-};
-
-// phy._decode_post: one LLR decode as decode_raw (buf nullptr: soft alone)
-// or decode_buffer (RVs up to top, the slot sent at rv) would, with the
-// posterior DD needs from the same pass.
-Post decode_post(const codes::Spec& s, const std::vector<double>* buf, int top, int rv, std::span<const double> soft) {
-    Mat<float> llr;
-    const ldpc::Decoder* dec;
-    if (!buf) {
-        llr = Mat<float>(1, soft.size());
-        for (std::size_t i = 0; i < soft.size(); ++i) llr[0][s.perm[i]] = static_cast<float>(soft[i]);
-        dec = &codes::ldpc_decoder(s);
-    } else {
-        const int extent = std::min(codes::buffer_len(s), (std::min(top, codes::rv_cycle(s) - 1) + 1) * s.coded_bits);
-        llr = row_f(std::span(*buf).first(static_cast<std::size_t>(extent)));
-        dec = &codes::ldpc_decoder(s, extent);
-    }
-    const auto d = dec->decode(llr, codes::ITERS, {}, true);
-    std::vector<double> code(d.posterior.data.begin(), d.posterior.data.end());
-    if (buf) {
-        const auto pos = codes::rv_positions(s, rv);
-        std::vector<double> c(pos.size());
-        for (std::size_t j = 0; j < pos.size(); ++j) c[j] = code[static_cast<std::size_t>(pos[j])];
-        code = std::move(c);
-    }
-    std::vector<double> post(static_cast<std::size_t>(s.coded_bits));
-    for (std::size_t i = 0; i < post.size(); ++i) post[i] = code[s.perm[i]];
-    return {std::vector<std::uint8_t>(d.bits.data.begin(), d.bits.data.end()), d.ok[0] != 0, std::move(post)};
 }
 
 // The buffer decode_stored decodes: `soft` (this slot's, as received) flipped by the slot's scrambling and
@@ -111,7 +71,7 @@ DecodePass decode_pass(const codes::Spec& s, bool dd, int slot, int rv, std::uin
         if (p.ok) out.data = std::move(p.data);
         return out;
     }
-    auto d = decode_post(s, &out.buf, top, rv, {});
+    auto d = codes::decode_posterior(s, {}, out.buf, top, rv);
     Mat<std::uint8_t> bits(1, d.bits.size());
     bits.data = d.bits;
     const std::uint8_t conv[1] = {static_cast<std::uint8_t>(d.ok)};
@@ -323,7 +283,7 @@ const ModemRx::Raw& ModemRx::decoded(int slot, const codes::Spec& s) {
             out = {std::move(d.cands.data), std::move(d.usable.data)};
             break;
         }
-        auto p = decode_post(s, nullptr, 0, 0, slot_soft(slot));
+        auto p = codes::decode_posterior(s, slot_soft(slot));
         out = {codes::descramble(s, p.bits, slot), {static_cast<std::uint8_t>(p.ok)}};
         if (p.ok) {
             Mat<std::uint8_t> b(1, p.bits.size());

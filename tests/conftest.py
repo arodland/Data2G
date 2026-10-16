@@ -96,7 +96,7 @@ def _substitutions(native):
     def frozen(spec):
         if config.SUBMODES.get(spec.name) != spec:
             return py_frozen(spec)
-        d = {"fingerprint": codes._fingerprint(spec), "perm": native.codes.interleaver(spec.name)}
+        d = {"fingerprint": codes.fingerprint(spec), "perm": native.codes.interleaver(spec.name)}
         if spec.code == "polar":
             d["info_pos"] = native.codes.info_pos(spec.name)
         return d
@@ -137,9 +137,10 @@ def _substitutions(native):
         (constellation, "ace_project"): ace_project,
         **{(equalizer, name): getattr(native.equalizer, name) for name in EQUALIZER_NATIVE},
         # every LDPC code (codes.ldpc_code, mother(), IR extents) and decoder
-        # (codes._decoder, _ext_decoder, arq.phy's posteriors) is then C++
+        # (codes._decoder, _ext_decoder, decode_posterior) is then C++
         (ldpc, "qc_code"): native.ldpc.qc_code,
-        (ldpc, "MinSumDecoder"): native.ldpc.MinSumDecoder,
+        (ldpc, "Decoder"): native.ldpc.Decoder,
+        (ldpc, "MinSumDecoder"): native.ldpc.Decoder,  # the old name, for scripts/
     }
 
 
@@ -383,8 +384,8 @@ def _codes_substitutions(native):
     n = native.codes
     py = {k: getattr(codes, k) for k in (
         "crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
-        "flip", "spread", "despread", "combine", "decode_buffer", "_payloads", "decode_many", "decode_llrs",
-        "decode_raw", "descramble", "check", "crc_ok", "interleaver")}
+        "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
+        "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior")}
 
     @functools.lru_cache(maxsize=None)
     def own(spec):
@@ -439,12 +440,12 @@ def _codes_substitutions(native):
             return py["combine"](spec, buf, soft, rvs)
         return n.combine(spec.name, buf, np.atleast_2d(soft), rvs)
 
-    def _payloads(spec, bits, converged, masks=None, index=None):
+    def payloads(spec, bits, converged, masks=None, index=None):
         if not own(spec):
-            return py["_payloads"](spec, bits, converged, masks, index)
+            return py["payloads"](spec, bits, converged, masks, index)
         return n.payloads(spec.name, np.asarray(bits), np.asarray(converged, np.uint8), masks, index)
 
-    def decode_llrs(spec, llr, iters=40, device=None, crc_mask=0, index=0):
+    def decode_llrs(spec, llr, iters=codes.LDPC_ITERS, device=None, crc_mask=0, index=0):
         if device is not None or not own(spec):
             return py["decode_llrs"](spec, llr, iters, device, crc_mask, index)
         return n.decode_llrs(spec.name, llr, iters, crc_mask, index)
@@ -457,7 +458,7 @@ def _codes_substitutions(native):
     return {
         **{(codes, a): by_name(a) for a in ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions",
                                              "encode_info", "decode_buffer", "decode_many", "decode_raw", "check",
-                                             "crc_ok")},
+                                             "crc_ok", "ir_extent", "decode_posterior")},
         (codes, "flip"): flip,
         (codes, "interleaver"): interleaver,
         (codes, "spread"): spread,
@@ -465,7 +466,7 @@ def _codes_substitutions(native):
         (codes, "info_bits"): info_bits,
         (codes, "encode"): encode,
         (codes, "combine"): combine,
-        (codes, "_payloads"): _payloads,
+        (codes, "payloads"): payloads,
         (codes, "decode_llrs"): decode_llrs,
         (codes, "descramble"): descramble,
     }
@@ -1030,8 +1031,8 @@ def _phy_substitutions(native):
 
     P, K = native.phy, native.kisslink
     py_rx, py_tx, py_soft, py_measure = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure
-    watched = ("decode_raw", "decode_buffer", "decode_llrs", "_payloads", "check", "combine", "flip", "encode",
-               "encode_info", "descramble")
+    watched = ("decode_raw", "decode_buffer", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
+               "encode", "encode_info", "descramble")
 
     def own(spec):
         return modes.MODES.get(spec.name) == spec

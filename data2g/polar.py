@@ -43,6 +43,8 @@ def bitrev(n_bits: int) -> np.ndarray:
 
 
 def _phi(m):
+    # Chung, Richardson and Urbanke's approximation of the Gaussian
+    # approximation's phi (IEEE Trans. IT 47(2), 2001): published constants
     m = np.maximum(m, 1e-12)
     return np.where(m < 10, np.exp(-0.4527 * m**0.86 + 0.0218), np.sqrt(np.pi / m) * np.exp(-m / 4) * (1 - 10 / (7 * m)))
 

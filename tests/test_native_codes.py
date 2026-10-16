@@ -17,8 +17,8 @@ from data2g import codes, config, cpm
 SPECS = [*config.SUBMODES.values(), *cpm.SPECS.values(), *cpm.CTL.values()]
 IDS = [s.name for s in SPECS]
 CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
-         "flip", "spread", "despread", "combine", "decode_buffer", "_payloads", "decode_many", "decode_llrs",
-         "decode_raw", "descramble", "check", "crc_ok", "interleaver")
+         "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
+         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior")
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_decode(native, py, spec):
     np.testing.assert_array_equal(ok, pok)
     np.testing.assert_array_equal(bits[ok], pbits[pok])
     np.testing.assert_array_equal(n.crc_ok(spec.name, pbits, masks, index), py.crc_ok(spec, pbits, masks, index))
-    _same(n.payloads(spec.name, pbits, pok.astype(np.uint8), masks, index), py._payloads(spec, pbits, pok, masks, index))
+    _same(n.payloads(spec.name, pbits, pok.astype(np.uint8), masks, index), py.payloads(spec, pbits, pok, masks, index))
     np.testing.assert_array_equal(n.descramble(spec.name, pbits, 5), py.descramble(spec, pbits, 5))
 
     cands, usable = n.decode_raw(spec.name, soft, index)
@@ -122,3 +122,31 @@ def test_decode(native, py, spec):
     for top in (0, 1, 3):
         _same(n.decode_buffer(spec.name, buf, top, masks, codes.PLAIN),
               py.decode_buffer(spec, pbuf, top, masks, index=codes.PLAIN))
+
+
+LDPC = [s for s in SPECS if s.code == "ldpc"]
+
+
+@pytest.mark.parametrize("spec", LDPC, ids=[s.name for s in LDPC])
+def test_decode_posterior(native, py, spec):
+    """DD's decode (arq/phy.py): a slot alone, and a combined buffer."""
+    n = native.codes
+    rng = np.random.default_rng(spec.k + 5)
+    for top in range(5):
+        assert n.ir_extent(spec.name, top) == py.ir_extent(spec, top)
+    pls = _payloads(spec, rng, 2)
+    soft = _noisy(spec, np.stack([py.encode(spec, p, 0, 0, i) for i, p in enumerate(pls)]), rng, [0.6, 1.4])
+    soft1 = _noisy(spec, np.stack([py.encode(spec, p, 1, 0, i) for i, p in enumerate(pls)]), rng, [0.6, 1.4])
+
+    def same(got, want):
+        assert got[1] == want[1]
+        assert got[2].shape == want[2].shape == (spec.coded_bits,)
+        if want[1]:
+            np.testing.assert_array_equal(got[0], want[0])
+            np.testing.assert_array_equal(np.sign(got[2]), np.sign(want[2]))
+
+    for b in range(2):
+        same(n.decode_posterior(spec.name, soft[b]), py.decode_posterior(spec, soft[b]))
+        buf = py.combine(spec, None, py.flip(spec, b, 0) * soft[b], 0)
+        buf = py.combine(spec, buf, py.flip(spec, b, 1) * soft1[b], 1)
+        same(n.decode_posterior(spec.name, buf=buf, max_rv=1, rv=1), py.decode_posterior(spec, buf=buf, max_rv=1, rv=1))

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "check.hpp"
+#include "codes/codes.hpp"
 #include "polar/polar.hpp"
 
 using namespace data2g;
@@ -66,7 +67,7 @@ int main() {
     for (const auto& s : config::SUBMODES) {
         if (s.code != "polar") continue;
         ++n_codes;
-        const auto code = polar::polar_code(s);
+        const auto& code = codes::polar_code(codes::spec(s));
         const std::string name(s.name);
         check::equal(code.n, static_cast<int>(std::bit_ceil(static_cast<unsigned>(s.coded_bits))), name + " n");
         check::equal(round_trip(code, 16, 0.0, 1, name), 16, name + " noiseless round trip");
@@ -84,7 +85,7 @@ int main() {
     check::is_true(threw, "no GA design for an unknown (k, e)");
 
     // tests/test_polar.py's noisy case: k 48 of e 480, sigma 0.8, > 95% at path 0.
-    const auto ack = polar::polar_code(*std::ranges::find_if(config::SUBMODES, [](auto& s) { return s.name == "ack-4f"; }));
+    const auto& ack = codes::polar_code(*codes::spec("ack-4f"));
     check::is_true(round_trip(ack, 64, 0.8, 3, "ack-4f noisy") > 60, "ack-4f decodes at sigma 0.8");
     return check::report("polar");
 }

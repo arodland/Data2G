@@ -46,6 +46,6 @@ int max_ctl(const Mode& m) { return m.is_cpm() ? 1 : 4; }
 
 int min_cw(const Mode& m, bool data) { return data && m.is_cpm() ? 2 : 1; }
 
-int rv_cycle(const Mode& m) { return (m.is_cpm() ? m.cpm->code : m.ofdm->code) == "ldpc" ? 4 : 1; }
+int rv_cycle(const Mode& m) { return m.is_cpm() ? codes::rv_cycle(*m.cpm) : codes::rv_cycle(*m.ofdm); }
 
 }  // namespace data2g::arq
