@@ -1112,6 +1112,47 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
     return constellation::llr(y, h.data, var.data, points_of(spec));
 }
 
+Mat<double> burst_soft(const Received& r, const DataEstimate& est) {
+    auto var = noise_var(est.h, est);
+    for (size_t i = 0; i < var.data.size(); ++i) var.data[i] += est.mse.data[i];
+    Mat<double> out;
+    out.data = codes::despread<double>(soft_bits(r.raw, est.h, var, *r.spec), r.n_cw, r.spec->bits_per_cu);
+    out.rows = static_cast<size_t>(r.n_cw);
+    out.cols = out.data.size() / out.rows;
+    return out;
+}
+
+std::vector<double> slot_soft(const Received& r, const DataEstimate& est, int slot) {
+    const size_t nc = r.raw.cols, total = est.h.data.size(), n = static_cast<size_t>(r.n_cw);
+    std::vector<cd> y, h;
+    std::vector<double> var;
+    for (size_t j = static_cast<size_t>(slot); j < total; j += n) {
+        const size_t row = j / nc, c = j % nc;
+        const cd hj = est.h.data[j];
+        y.push_back(data_row(r.raw, row)[c]);
+        h.push_back(hj);
+        var.push_back((est.n0_k.empty() ? est.n0 : est.n0_k[c]) + est.clip_ratio * std::norm(hj) + est.mse.data[j]);
+    }
+    return constellation::llr(y, h, var, points_of(*r.spec));
+}
+
+double snr_db(const equalizer::Estimate& est, std::string_view b) {
+    return 10 * std::log10(est.p_sig / est.n0 * band(b).nc * RS / SNR_REF_BW_HZ);
+}
+
+SymbolTimes symbol_times(const Received& r) {
+    const size_t S = DATA_SYMS_PER_FRAME, n_f = r.raw.rows / SYMS_PER_FRAME;
+    SymbolTimes out{Mat<double>(n_f, S), std::vector<double>(r.hp.rows)};
+    for (size_t f = 0; f < n_f; ++f) {
+        const size_t air = f + (r.kc && static_cast<int>(f) >= *r.kc ? 1 : 0);
+        for (size_t s = 0; s < S; ++s)
+            out.rows[f][s] = static_cast<double>((air * SYMS_PER_FRAME + s + 1) * NSYM) / FS;
+    }
+    for (size_t i = 0; i < out.pilots.size(); ++i)
+        out.pilots[i] = static_cast<double>(i * SYMS_PER_FRAME * NSYM) / FS;
+    return out;
+}
+
 std::vector<cd> equalized(const Received& r) {
     const auto& h = r.est.h;
     const size_t nc = r.raw.cols, n_f = r.raw.rows / SYMS_PER_FRAME;
@@ -1147,16 +1188,10 @@ std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec&
 
 Burst decode_received(const Received& r) {
     const Spec& spec = *r.spec;
-    const auto& est = r.est;
-    auto var = noise_var(est.h, est);
-    for (size_t i = 0; i < var.data.size(); ++i) var.data[i] += est.mse.data[i];
-    const auto sb = soft_bits(r.raw, est.h, var, spec);
-    const auto soft = codes::despread<double>(sb, r.n_cw, spec.bits_per_cu);
     Burst out;
-    out.soft = Mat<double>(static_cast<size_t>(r.n_cw), soft.size() / static_cast<size_t>(r.n_cw));
-    out.soft.data = soft;
+    out.soft = burst_soft(r);
     Mat<float> sf(out.soft.rows, out.soft.cols);
-    std::copy(soft.begin(), soft.end(), sf.data.begin());
+    std::copy(out.soft.data.begin(), out.soft.data.end(), sf.data.begin());
     for (auto& p : codes::decode_many(codes::spec(spec), sf)) {
         out.payloads.push_back(std::move(p.data));
         out.crc_ok.push_back(p.ok);
@@ -1164,7 +1199,7 @@ Burst decode_received(const Received& r) {
     out.spec = &spec;
     out.freq_offset = r.cfo;
     out.preamble_start = r.preamble_start;
-    out.snr_db = 10 * std::log10(est.p_sig / est.n0 * band(spec.band).nc * RS / SNR_REF_BW_HZ);
+    out.snr_db = snr_db(r.est, spec.band);
     return out;
 }
 

@@ -204,6 +204,25 @@ double resolve_alias(double fine, double coarse);
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est);
 // LLRs of raw's data symbols (rows f * 6 + 1..5) given h, var (n_f * 5, nc).
 std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<double>& var, const Spec& spec);
+// raw's symbols for est.h's row `row` (frame * 5 + data symbol): past each frame's pilot.
+inline const cd* data_row(const Mat<cd>& raw, std::size_t row) {
+    return raw[row / config::DATA_SYMS_PER_FRAME * config::SYMS_PER_FRAME + 1 + row % config::DATA_SYMS_PER_FRAME];
+}
+// (n_cw, coded_bits) soft bits in mapping order on est (r.est, or arq/phy's DD re-estimate): noise_var plus the
+// estimate's mse, soft_bits, codes::despread.
+Mat<double> burst_soft(const Received& r, const DataEstimate& est);
+inline Mat<double> burst_soft(const Received& r) { return burst_soft(r, r.est); }
+// burst_soft(r, est)'s row `slot` alone: codes::spread deals codeword symbols round-robin, so the slot's are every
+// n_cw-th of the burst's.
+std::vector<double> slot_soft(const Received& r, const DataEstimate& est, int slot);
+// Pilot SNR (dB) on `band`'s carriers, in the SNR_REF_BW_HZ convention.
+double snr_db(const equalizer::Estimate& est, std::string_view band);
+// On-air seconds from the first frame pilot, the header copy's frame accounted for.
+struct SymbolTimes {
+    Mat<double> rows;             // (n_f, 5): each data symbol, as est.h's rows
+    std::vector<double> pilots;   // each of hp's pilots
+};
+SymbolTimes symbol_times(const Received& r);
 // raw's data symbols divided by r.est.h (0 where h is): what soft_bits holds against the
 // constellation, for a display. Frame by frame, carrier fastest.
 std::vector<cd> equalized(const Received& r);

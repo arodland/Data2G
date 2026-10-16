@@ -24,7 +24,8 @@ TOL = 1e-9
 OWN = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
        "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
        "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases", "_copy_header",
-       "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate", "decode_received")
+       "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft", "slot_soft", "snr_db",
+       "symbol_times", "demodulate", "decode_received")
 
 
 @pytest.fixture
@@ -174,6 +175,14 @@ def test_receive_matches(native, py, name, n_cw, snr, preset):
     var = py.noise_var(r["est"]["h"], r["est"]) + r["est"]["mse"]
     close(native.modem.noise_var(r["est"]["h"], r["est"]["n0_k"], r["est"]["clip_ratio"]) + r["est"]["mse"], var)
     close(native.modem.soft_bits(r["raw"], r["est"]["h"], var, name), py.soft_bits(r["raw"], r["est"]["h"], var, r["spec"]))
+    soft = py.burst_soft(r)
+    close(native.modem.burst_soft(r), soft)
+    for slot in {0, r["n_cw"] - 1}:
+        close(py.slot_soft(r, r["est"], slot), soft[slot])
+        close(native.modem.slot_soft(r, r["est"], slot), soft[slot])
+    close(native.modem.snr_db(r["est"], r["band"]), py.snr_db(r["est"], r["band"]))
+    for got, want in zip(native.modem.symbol_times(r), py.symbol_times(r)):
+        np.testing.assert_array_equal(got, want)
 
 
 def test_search_parts_match(native, py):

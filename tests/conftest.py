@@ -741,8 +741,8 @@ def _modem_substitutions(native):
     names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
              "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
-             "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate",
-             "decode_received")
+             "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft",
+             "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received")
     py = {k: getattr(modem, k) for k in names}
     min_score = dict(modem.HEADER_MIN_SCORE)
 
@@ -896,6 +896,25 @@ def _modem_substitutions(native):
     def soft_bits(raw, h, var, spec):
         return N.soft_bits(raw, h, np.broadcast_to(var, h.shape), spec)
 
+    def arrays(r, est=None):
+        return own(r["spec"]) and all(isinstance(e["h"], np.ndarray) for e in (r["est"], est or r["est"]))
+
+    @guarded("burst_soft", arrays)
+    def burst_soft(r, est=None):
+        return N.burst_soft(r, est)
+
+    @guarded("slot_soft", lambda r, est, slot: arrays(r, est))
+    def slot_soft(r, est, slot):
+        return N.slot_soft(r, est, int(slot))
+
+    @guarded("snr_db", lambda est, band: band in config.BANDS)
+    def snr_db(est, band):
+        return N.snr_db(est, band)
+
+    @guarded("symbol_times", lambda r: own(r["spec"]))
+    def symbol_times(r):
+        return N.symbol_times(r)
+
     def burst(t):
         name, payloads, ok, f, start, snr, soft = t
         return modem.Burst(submode=config.SUBMODES[name], payloads=payloads, crc_ok=ok, freq_offset=f,
@@ -923,7 +942,8 @@ def _modem_substitutions(native):
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,
             "_best_header": _best_header, "find_burst": find_burst, "pilot_coherence": pilot_coherence,
             "find_copy": find_copy, "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
-            "noise_var": noise_var, "soft_bits": soft_bits, "decode_received": decode_received,
+            "noise_var": noise_var, "soft_bits": soft_bits, "burst_soft": burst_soft, "slot_soft": slot_soft,
+            "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received,
             "demodulate": demodulate}.items()},
     }
 

@@ -1052,7 +1052,46 @@ def noise_var(h: np.ndarray, est: DataEstimate) -> np.ndarray:
 
 def soft_bits(raw: np.ndarray, h: np.ndarray, var: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     """LLRs from data symbols `raw`, channel `h` and per-cu noise `var`."""
-    return constellation.llr(raw[:, 1:], h, var, constellation.load(spec.constellation))
+    return constellation.llr(data_symbols(raw), h, var, constellation.load(spec.constellation))
+
+
+def data_symbols(raw: np.ndarray) -> np.ndarray:
+    """(n_f, 5, nc): receive()'s raw past each frame's pilot, aligned with est["h"]."""
+    return raw[:, 1:]
+
+
+def burst_soft(r: Received, est: DataEstimate | None = None) -> np.ndarray:
+    """(n_cw, coded_bits) soft bits in mapping order on `est` (r["est"], or
+    arq/phy's DD re-estimate): thermal, clip and estimation noise."""
+    spec, est = r["spec"], est or r["est"]
+    var = noise_var(est["h"], est) + est["mse"]
+    return np.asarray(codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
+
+
+def slot_soft(r: Received, est: DataEstimate, slot: int) -> np.ndarray:
+    """burst_soft(r, est)[slot] alone: codes.spread deals codeword symbols
+    round-robin, so the slot's are every n_cw-th of the burst's."""
+    n = r["n_cw"]
+    var = noise_var(est["h"], est) + est["mse"]
+    pick = lambda a: a.reshape(-1)[slot::n]  # noqa: E731
+    return constellation.llr(pick(data_symbols(r["raw"])), pick(est["h"]), pick(var),
+                             constellation.load(r["spec"].constellation))
+
+
+def snr_db(est: equalizer.ChannelEstimate, band: str) -> float:
+    """Pilot SNR (dB) on `band`'s carriers, in the SNR_REF_BW_HZ convention."""
+    return 10 * np.log10(est["p_sig"] / est["n0"] * BANDS[band].nc * RS / SNR_REF_BW_HZ)
+
+
+def symbol_times(r: Received) -> tuple[np.ndarray, np.ndarray]:
+    """On-air seconds from the first frame pilot of each data symbol, (n_f,
+    5) as est["h"]'s, and of each of r["hp"]'s pilots; the header copy's
+    frame accounted for."""
+    n_f, kc = len(r["raw"]), r["kc"]
+    air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
+    t_rows = (air[:, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)) * NSYM / FS
+    t_pilot = np.arange(len(r["hp"])) * SYMS_PER_FRAME * NSYM / FS
+    return t_rows, t_pilot
 
 
 def demodulate(x: np.ndarray, bands=None, accept: Accept | None = None) -> Burst:
@@ -1062,16 +1101,15 @@ def demodulate(x: np.ndarray, bands=None, accept: Accept | None = None) -> Burst
 
 def decode_received(r: Received) -> Burst:
     """receive()'s result -> the decoded Burst (plain modem use: no CRC masks)."""
-    spec, est = r["spec"], r["est"]
-    var = noise_var(est["h"], est) + est["mse"]
-    soft = codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu)
-    decoded = codes.decode_many(spec, np.asarray(soft))
+    spec = r["spec"]
+    soft = burst_soft(r)
+    decoded = codes.decode_many(spec, soft)
     return Burst(
         submode=spec,
         payloads=[d[0] for d in decoded],
         crc_ok=[d[1] for d in decoded],
         freq_offset=r["cfo"],
         preamble_start=r["preamble_start"],
-        snr_db=float(10 * np.log10(est["p_sig"] / est["n0"] * BANDS[spec.band].nc * RS / SNR_REF_BW_HZ)),
-        soft=np.asarray(soft),
+        snr_db=float(snr_db(r["est"], spec.band)),
+        soft=soft,
     )
