@@ -116,24 +116,6 @@ else()
     message(STATUS "Qt6 Multimedia not found; building without sound card audio")
   endif()
 endif()
-if(TARGET data2g_audio)
-  add_executable(data2g-audio-check apps/data2g_audio_check.cpp)
-  target_link_libraries(data2g-audio-check PRIVATE data2g_audio)
-endif()
-
-# data2g-monitor: receive only, every burst as a packet dump. A sound card
-# with data2g_audio; raw float32 input (--input-file) always.
-add_executable(data2g-monitor apps/data2g_monitor.cpp)
-target_link_libraries(data2g-monitor PRIVATE data2g_core)
-
-# data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
-add_executable(data2g-replay apps/data2g_replay.cpp)
-target_link_libraries(data2g-replay PRIVATE data2g_core)
-if(TARGET data2g_audio)
-  target_link_libraries(data2g-monitor PRIVATE data2g_audio)
-  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
-endif()
-
 if(DATA2G_BUILD_RIG)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(hamlib)
@@ -151,14 +133,40 @@ if(DATA2G_BUILD_RIG)
 endif()
 
 # --- apps ----------------------------------------------------------------------
-# data2g_station: the runtime both apps share (app/station.*: options,
-# servers, engine thread, audio, PTT). Qt Core + Network, never Widgets.
+# data2g_applog: the apps' log and quit signals (app/log.*). No Qt, so the
+# core-only tools log as the host does.
+add_library(data2g_applog STATIC app/log.cpp)
+target_include_directories(data2g_applog PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(data2g_applog PUBLIC data2g_core)
+
+# The tools on the core alone (and data2g_audio, if built): no station.
+# data2g-audio-check: the sound cards data2g_audio sees, and a loopback test.
+if(TARGET data2g_audio)
+  add_executable(data2g-audio-check apps/data2g_audio_check.cpp)
+  target_link_libraries(data2g-audio-check PRIVATE data2g_audio)
+endif()
+# data2g-monitor: receive only, every burst as a packet dump. A sound card
+# with data2g_audio; raw float32 input (--input-file) always.
+add_executable(data2g-monitor apps/data2g_monitor.cpp)
+target_link_libraries(data2g-monitor PRIVATE data2g_core)
+if(TARGET data2g_audio)
+  target_link_libraries(data2g-monitor PRIVATE data2g_audio)
+  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
+endif()
+# data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
+add_executable(data2g-replay apps/data2g_replay.cpp)
+target_link_libraries(data2g-replay PRIVATE data2g_core data2g_applog)
+
+# data2g_station: the runtime both apps share (app/station.*, with its
+# options, TCP servers and plot conversion beside it). Qt Core + Network,
+# never Widgets.
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/realtime.cpp)
+    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
+                                      app/realtime.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(data2g_station PUBLIC data2g_core Qt6::Core Qt6::Network)
+    target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
     target_compile_definitions(data2g_station PUBLIC QT_NO_KEYWORDS)  # the core has members named slots
     # RealtimeKit (real-time scheduling for the audio threads) is a D-Bus service: Linux, when Qt has DBus
     if(UNIX AND NOT APPLE AND NOT ANDROID)

@@ -25,6 +25,10 @@
 #include <memory>
 #include <utility>
 
+#ifdef DATA2G_HAVE_RIG
+#include "rig/hamlib/hamlib.hpp"
+#endif
+
 namespace data2g::gui {
 
 namespace {

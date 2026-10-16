@@ -58,7 +58,7 @@ void PlaybackFifo::start() {
 void PlaybackFifo::write(std::span<const double> y) {
     scratch_.assign(y.begin(), y.end());
     std::span<const float> left(scratch_);
-    // ponytail: polls for room; it only waits if the engine runs capacity_s ahead of the card
+    // ponytail: polls for room; it only waits if the writer runs capacity_s ahead of the card
     while (!left.empty()) {
         left = left.subspan(ring_.write(left));
         if (!left.empty()) sleep_s(0.002);

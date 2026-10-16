@@ -35,9 +35,10 @@
 //     worker's frequency or status. The reference achieves this by
 //     passing locals into the thread; same idea, enforced by ownership.
 //
-// Qt-free, like the rx and tx engines: the GUI adapts the callbacks to
-// signals. Blocking calls (`set_ptt`) are for worker threads only --
-// `TxEngine` already runs on one.
+// Qt-free, like the rest of data2g_core: a front end adapts the callbacks
+// to signals. Blocking calls (`set_ptt`) are for worker threads only --
+// the station's transmit thread (app::Transmitter, through rig::Keyer) is
+// one.
 
 #ifndef DATA2G_RIG_CONTROLLER_HPP
 #define DATA2G_RIG_CONTROLLER_HPP
@@ -134,18 +135,22 @@ public:
 
     // Key or unkey, blocking until the rig has actually been told.
     //
-    // Blocking on purpose: `TxEngine` needs the rig keyed *before* it
-    // waits out `ptt_lead_s`, so an asynchronous version would make that
-    // delay measure the wrong interval. Call it from the transmit
+    // Blocking on purpose: rig::Keyer needs the rig keyed *before* it
+    // starts the burst's audio, whose leading silence (the engine's
+    // ptt_delay_s, --ptt-on-delay-ms) is the PTT on delay, so an
+    // asynchronous version would make that delay measure the wrong
+    // interval. Call it from the transmit
     // worker, never from a UI thread. Throws RigError if there is no
     // session, if the rig refuses, or if the operation outlives
     // `operation_timeout_s`.
     void set_ptt(bool on);
 
-    // A `tx::Ptt` for `TxEngine`. Keeps working across `start`/`stop`:
-    // keying with no session throws RigError, which the engine reports
-    // and treats as a failure to key -- the right answer for a
-    // transmission that cannot key the radio.
+    // A `rig::Keyer::Ptt`: set_ptt with the transmit interlock around it.
+    // Polling pauses before the key and resumes after the unkey (even a
+    // failed one), so no poll sits between them or delays the off. Keeps
+    // working across `start`/`stop`: keying with no session throws
+    // RigError, which the Keyer reports and treats as a failure to key --
+    // the right answer for a transmission that cannot key the radio.
     std::function<void(bool)> ptt_function();
 
     // Whether this session's rig opened and a PTT on was then sent to it
@@ -154,9 +159,9 @@ public:
     // unkey (and waiting on one that never opened costs the full timeout).
     bool keyed_since_open() const;
 
-    // Transmit interlock. Polling stops while keyed: the answer is not
-    // interesting mid-over, and some rigs dislike CAT traffic while
-    // transmitting.
+    // Transmit interlock (ptt_function() uses it). Polling stops while
+    // keyed: the answer is not interesting mid-over, and some rigs dislike
+    // CAT traffic while transmitting.
     void pause_polling();
     void resume_polling();
 

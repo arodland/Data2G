@@ -12,7 +12,7 @@
 
 #include <QWidget>
 
-#include "app/station.hpp"
+#include "app/rx_plot.hpp"
 
 namespace data2g::gui {
 

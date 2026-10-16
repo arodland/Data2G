@@ -1,6 +1,7 @@
 // host.py serve()'s key-up / key-down sequence around the TX FIFO, on the
-// engine thread. The PTT on delay is not here: the engine puts that much
-// silence ahead of a burst (Engine ptt_delay_s, --ptt-on-delay-ms).
+// station's transmit thread (app::Transmitter). The PTT on delay is not
+// here: the engine puts that much silence ahead of a burst (Engine
+// ptt_delay_s, --ptt-on-delay-ms).
 #pragma once
 
 #include <atomic>
