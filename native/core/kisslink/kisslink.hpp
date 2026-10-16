@@ -5,7 +5,8 @@
 // checks it under that name's key. Rate shifting per port (off by default):
 // a connected-mode AX.25 frame goes in its next hop's reported mode, anything
 // else in the port's mode. The burst layout is in the Python module's
-// docstring.
+// docstring. monitor/ reads broadcast bursts through read_burst_control and
+// read_burst_frames.
 #pragma once
 
 #include <cstdint>
@@ -36,6 +37,7 @@ inline constexpr double SLOT_S = 1.0;          // the shortest p-persistence slo
 inline constexpr double MIN_SUCCESS = 0.9;     // recommended modes' first-transmission success
 inline constexpr double BROADCAST_S = arq::SIZE_S.back();
 std::string_view broadcast_mode(int cap);  // BROADCAST; throws std::out_of_range
+void check_mode(const std::string& mode, int cap);  // throws std::invalid_argument unless a mode within the cap
 
 struct Ax25 {
     std::string dst, src;
@@ -58,6 +60,12 @@ struct ControlRead {
     std::optional<Bytes> reports;      // T_REPORTS
 };
 ControlRead read_control(const std::map<int, Bytes>& tlvs);
+
+// Data codewords: [length, 2 bytes big-endian][frame] back to back, zero-padded.
+std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb);
+// Payloads and their CRC results -> (whole frames, frames lost). Parsing
+// stops at a length it can not trust.
+std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
 
 struct Peer {
     arq::GearShifter shifter;
@@ -105,6 +113,8 @@ public:
     int open(const std::string& group, const std::optional<std::string>& from_call = std::nullopt);
     void close(int n);  // frames queued for it are dropped (DROPPED)
     void set_mode(int n, const std::string& mode, bool shift = false);
+    // Ports as a new link has them: 1-15 closed (DROPPED, in port order), port 0 in the broadcast mode.
+    void reset();
 
     // A frame for `port`; to a closed port: DROPPED.
     void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt);
@@ -128,9 +138,10 @@ public:
     // A burst's broadcast control, checked under the key of the group it
     // names -> (control, n_ctl); nullopt: not a broadcast burst.
     static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
+    // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
+    static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::ModemRx& rx, int start, int key);
 
 private:
-    void check_mode(const std::string& mode) const;
     void check_fits(int n, const Port& p, const std::string& mode, bool shift) const;
     void drop_where(int port, const std::function<bool(const Queued&)>& which);
     std::pair<std::string, int> route(const Port& port, ByteView frame) const;

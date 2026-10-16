@@ -9,6 +9,7 @@
 #include <functional>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -19,6 +20,7 @@
 #endif
 #include "arq/modes.hpp"
 #include "host/host.hpp"
+#include "kisslink/kisslink.hpp"
 #include "util/pool.hpp"
 
 namespace data2g::app {
@@ -374,10 +376,11 @@ std::optional<std::string> check(const Args& a) {
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";
 #endif
     if (a.broadcast_mode) {
-        const auto ok = arq::allowed(kiss_cap(a.kiss_bw));
-        const auto* m = arq::mode(*a.broadcast_mode);
-        if (!m || std::find(ok.begin(), ok.end(), m) == ok.end())
+        try {
+            kisslink::check_mode(*a.broadcast_mode, kiss_cap(a.kiss_bw));
+        } catch (const std::invalid_argument&) {
             return "--broadcast-mode " + *a.broadcast_mode + ": not a mode within " + std::to_string(a.kiss_bw) + " Hz";
+        }
     }
     return std::nullopt;
 }

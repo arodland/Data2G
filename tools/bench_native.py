@@ -13,7 +13,7 @@ import time
 import numpy as np
 
 import data2g_native
-from data2g import codes, hfchannel, modem, tnc
+from data2g import codes, hfchannel, modem, receiver
 from data2g.arq import phy
 from data2g.config import BANDS, FS, SUBMODES
 from data2g.hfchannel import FadingPreset
@@ -64,7 +64,7 @@ def cases(rng):
     out["DD pass w48 64 frames (failed)"] = (lambda rx: rx.decode(0, mids[0], 0, None),
                                              lambda: phy.ModemRx(dict(r), {}, dd_budget=None))
 
-    # live receive, head-limited as tnc.Receiver does, of the same burst at 10 dB
+    # live receive, head-limited as receiver.Receiver does, of the same burst at 10 dB
     accept = modem.Accept.of()
     lead = 2000
     seg = np.concatenate([np.zeros(lead), x[3000:-3000], np.zeros(2000)])
@@ -74,7 +74,7 @@ def cases(rng):
     out["live receive w48 16cw (head)"] = (lambda _: modem.receive(seg, ["w48"], accept, head=head), None)
     out["receive w48 16cw (whole buffer)"] = (lambda _: modem.receive(seg), None)
 
-    # StreamDetector: one hop (tnc.Receiver.HOP) of new audio per band
+    # StreamDetector: one hop (receiver.Receiver.HOP) of new audio per band
     noise = rng.normal(size=FS * 30)
     for b in sorted({BANDS[b].sync_band for b in BANDS}):
         def setup(b=b):
@@ -83,14 +83,14 @@ def cases(rng):
             return d
 
         def hop(d, b=b):
-            d.feed(dsp.to_baseband(noise[FS:FS + tnc.Receiver.HOP], FS))
+            d.feed(dsp.to_baseband(noise[FS:FS + receiver.Receiver.HOP], FS))
 
         out[f"StreamDetector hop {b}"] = (hop, setup)
     return out
 
 
 def receiver_cpu(rng, threads):
-    """CPU per second of audio, tnc.Receiver on 60 s: bursts in w, n10 and
+    """CPU per second of audio, receiver.Receiver on 60 s: bursts in w, n10 and
     w48 at 3-12 dB with noise between, fed 1024 samples at a time."""
     parts = []
     for name, n_cw in (("qpsk-r1/2", 8), ("n10-qpsk-r1/2", 2), ("w48-16qam-r1/2", 8), ("polar-k192-f8", 4),
@@ -100,7 +100,7 @@ def receiver_cpu(rng, threads):
     audio = np.concatenate(parts)
     audio = np.concatenate([audio, np.zeros(max(0, 60 * FS - len(audio)))])[:60 * FS]
     audio = hfchannel.apply_channel(audio, snr_db=6.0, fading_preset=FadingPreset("mpg", 0.5, 1.0), seed=3)
-    rx = tnc.Receiver(modem.Accept.of())
+    rx = receiver.Receiver(modem.Accept.of())
     set_threads(threads)
     bursts = 0
     w, c = time.perf_counter(), time.process_time()
@@ -131,7 +131,7 @@ def main():
     if not a.only or a.only in "receiver":
         for n in threads:
             w, c, k = receiver_cpu(np.random.default_rng(1), n)
-            print(f"{'tnc Receiver 60 s, per s audio':34s} {n}t wall {w * 1e3:.1f} ms cpu {c * 1e3:.1f} ms "
+            print(f"{'Receiver 60 s, per s audio':34s} {n}t wall {w * 1e3:.1f} ms cpu {c * 1e3:.1f} ms "
                   f"({k} bursts)", flush=True)
 
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from data2g import host
+from data2g import audio, host
 
 
 class FakeStream:
@@ -123,7 +123,7 @@ def test_capture_keeps_every_sample():
             return FakeStream(48000, 2)
 
     pa = PA()
-    cap = host.Capture(pa, 2, 48000, None)
+    cap = audio.Capture(pa, 2, 48000, None)
     ramp = np.arange(10_000, dtype=np.float32)
     for i in range(0, len(ramp), 512):  # the loop stalled: 10k frames arrive before any read
         pa.cb(np.repeat(ramp[i:i + 512], 2).tobytes(), 512, None, 2 if i == 0 else 0)

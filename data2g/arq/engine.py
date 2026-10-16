@@ -1,7 +1,7 @@
 """One station's live stack, clocked by audio samples.
 
 `Engine.step(audio_in) -> (audio_out, ptt)` is called once per audio block
-at FS: it feeds what was heard to the streaming receiver (tnc.Receiver),
+at FS: it feeds what was heard to the streaming receiver (receiver.Receiver),
 hands headers and bursts to the ARQ session and the gear shifter, and
 plays out whatever the session sends, half duplex. Its clock is the
 sample count, so the same code runs behind a sound card (data2g/host.py)
@@ -24,9 +24,9 @@ import numpy as np
 
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
+from ..receiver import NoiseProfile, Receiver
 from . import burst as B
 from . import frames as F
-from ..tnc import NoiseProfile, Receiver
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -108,9 +108,9 @@ def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
                  min_header_score: float = 0.0, kiss=None, stats_interval_s: float = 60.0):
-        """`kiss`: a data2g.kisslink.KissLink to serve too (the KISS
-        personality): its bursts are peeled off what's heard, and it sends
-        when no ARQ session is under way and the channel is free."""
+        """`kiss`: a data2g.kisslink.KissLink to serve too (broadcast):
+        its bursts are peeled off what's heard, and it sends when no ARQ
+        session is under way and the channel is free."""
         self.call = call.upper()
         self.aliases = ()
         self.accept_connect = None  # Session.accept_connect, for every session (the host's ACCEPT)
@@ -146,10 +146,34 @@ class Engine:
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
+    # What data2g/host.py (and native core/host) drives: the session through
+    # listen/connect/disconnect/abort, events() for its notifications, and
+    # channel_busy, tx_submode and take_kiss_rx for what it reports. The host
+    # still reads the session itself for its state, call, cap and bytes.
 
     @property
     def now(self) -> float:
         return self.n / FS
+
+    @property
+    def channel_busy(self) -> bool:
+        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy)."""
+        return self.receiver.channel_busy
+
+    @property
+    def tx_submode(self) -> str | None:
+        """The submode of the burst on air (the session's, when an ID rides with it), None if none."""
+        return self.tx[0].submode if self.tx else None
+
+    def take_kiss_rx(self) -> list[tuple[int, bytes]]:
+        """(port, frame)s heard for KISS clients since the last call."""
+        out, self.kiss_rx = self.kiss_rx, []
+        return out
+
+    def set_accept_connect(self, f):
+        """`f(caller, callee) -> bool` answers each incoming CONNECT (the
+        host's ACCEPT), for the session now and every later one."""
+        self.accept_connect = self.session.accept_connect = f
 
     @property
     def tx_samples(self) -> int:
@@ -181,6 +205,10 @@ class Engine:
             listening = self.session.state == S.LISTEN
             self.listen(listening)
 
+    def disconnect(self):
+        """End the session gracefully: the peer is told, and what's queued still goes."""
+        self.session.disconnect()
+
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""
         self.tx = None
@@ -199,8 +227,11 @@ class Engine:
         self.session.set_chat(on)
 
     def events(self) -> list[str]:
-        """Host notifications since the last call (CONNECTED ..., DISCONNECTED ...,
-        CQFRAME call cap)."""
+        """Host notifications since the last call, oldest first, one line of
+        space-separated words each (the host splits them; native Engine::events
+        gives the same lines): "CONNECTED peer", "DISCONNECTED why" (why may
+        be several words), "CQFRAME call cap" (cap: policy.CAP_HZ's key),
+        "ID call key" (key: the session key, decimal)."""
         ev, self.session.events[:] = self._events + list(self.session.events), []
         self._events = []
         return ev

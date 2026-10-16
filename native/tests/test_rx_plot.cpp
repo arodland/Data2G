@@ -13,7 +13,7 @@
 #include "arq/phy.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
-#include "tnc/tnc.hpp"
+#include "receiver/receiver.hpp"
 
 using namespace data2g;
 
@@ -30,7 +30,7 @@ void test_cpm() {
     const auto x = arq::tx_audio(b);
     y.insert(y.end(), x.begin(), x.end());
     y.insert(y.end(), config::FS / 2, 0.0);
-    auto rx = tnc::receive_any(y, config::FS);
+    auto rx = receiver::receive_any(y, config::FS);
     check::is_true(rx.has_value(), "the CPM burst received");
     if (!rx) return;
     arq::BurstHeard heard;

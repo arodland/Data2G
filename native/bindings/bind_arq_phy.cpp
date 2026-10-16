@@ -216,6 +216,21 @@ void bind_arq_phy(py::module_& m) {
         const auto [g, c] = kisslink::unpack_pair(bytes_view(b));
         return py::make_tuple(g, c);
     });
+    k.def("pack_frames", [](const py::list& frames, std::size_t pb) {
+        std::vector<Bytes> f;
+        for (const auto& x : frames) f.push_back(bytes_of(x));
+        py::list out;
+        for (const auto& p : kisslink::pack_frames(f, pb)) out.append(pyb(p));
+        return out;
+    });
+    k.def("unpack_frames", [](const py::list& payloads, const std::vector<bool>& ok) {
+        std::vector<Bytes> pl;
+        for (const auto& x : payloads) pl.push_back(bytes_of(x));
+        auto [frames, lost] = kisslink::unpack_frames(pl, ok);
+        py::list out;
+        for (const auto& f : frames) out.append(pyb(f));
+        return py::make_tuple(out, lost);
+    });
     py::class_<kisslink::Port>(k, "Port")
         .def_readonly("group", &kisslink::Port::group)
         .def_readonly("mode", &kisslink::Port::mode)
@@ -297,6 +312,7 @@ void bind_arq_phy(py::module_& m) {
         .def("open", &KissLink::open, py::arg("group"), py::arg("from_call") = std::nullopt)
         .def("close", &KissLink::close)
         .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false)
+        .def("reset", &KissLink::reset)
         .def("enqueue",
              [ack_objs](const py::object& self, const py::handle& f, int port, const py::object& ack) {
                  std::optional<std::int64_t> id;

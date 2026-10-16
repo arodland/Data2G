@@ -30,7 +30,8 @@ import numpy as np
 from data2g import codes, constellation, hfchannel, modem
 from data2g.arq import phy as PHY
 from data2g.config import FS
-from data2g.tnc import Blanker, receive_any
+from data2g.audio import Blanker
+from data2g.receiver import receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import outcome_data as O  # noqa: E402

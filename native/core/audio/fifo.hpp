@@ -1,6 +1,6 @@
 // The two FIFOs between the sound card's threads and the station's (the
 // receive thread reads capture, the transmit thread writes playback), with
-// host.py's Capture and Player semantics.
+// data2g/audio.py's Capture and Player semantics.
 //
 // Capture: a stall in the reader becomes latency, never lost samples (a
 // blocking read once dropped ~50 s of a 14 min session, holes inside

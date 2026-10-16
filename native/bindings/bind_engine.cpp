@@ -34,7 +34,7 @@ public:
     bool compat;
 
 protected:
-    std::vector<tnc::Receiver::Item> receiver_feed(std::span<const double> x) override {
+    std::vector<receiver::Receiver::Item> receiver_feed(std::span<const double> x) override {
         if (receiver.is_none()) return Engine::receiver_feed(x);
         if (py::len(receiver.attr("feed")(np<double>(x))))
             throw std::logic_error("a Python receiver's events can't cross into the C++ engine");
@@ -122,7 +122,9 @@ void bind_engine(py::module_& m) {
         .def("abort", &PyEngine::abort)
         .def("connect", &PyEngine::connect)
         .def("set_chat", &PyEngine::set_chat)
+        .def("disconnect", &PyEngine::disconnect)
         .def_readwrite("accept_connect", &PyEngine::accept_connect)
+        .def("set_accept_connect", &PyEngine::set_accept_connect)
         .def("events", &PyEngine::events)
         .def("send_cq", &PyEngine::send_cq)
         .def_property_readonly("now", &PyEngine::now)
@@ -154,10 +156,13 @@ void bind_engine(py::module_& m) {
             for (const auto& b : self.extra()) out.append(burst_py(b));
             return out;
         })
+        .def_property_readonly("tx_submode", [](const PyEngine& self) -> py::object {
+            const auto* m = self.tx_submode();
+            return m ? py::object(py::str(*m)) : py::none();
+        })
         .def("take_kiss_rx", [](PyEngine& self) {
             py::list out;
-            for (const auto& [port, f] : self.kiss_rx()) out.append(py::make_tuple(port, pyb(f)));
-            self.kiss_rx().clear();
+            for (const auto& [port, f] : self.take_kiss_rx()) out.append(py::make_tuple(port, pyb(f)));
             return out;
         })
         .def_property_readonly("kiss", [](const PyEngine& self) { return self.kiss_obj; })

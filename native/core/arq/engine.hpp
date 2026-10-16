@@ -1,7 +1,7 @@
 // data2g/arq/engine.py: one station's live stack, clocked by audio samples.
 //
 // step(x) -> (audio out, PTT) once per block at FS: what was heard goes to
-// the streaming receiver (tnc::Receiver), headers and bursts to the ARQ
+// the streaming receiver (receiver::Receiver), headers and bursts to the ARQ
 // session and the gear shifter (and to KISS, when the engine serves it
 // too), and whatever the session sends is played out, half duplex. Its
 // clock is the sample count, so the same code runs behind a sound card or
@@ -38,13 +38,15 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
 #include "arq/session.hpp"
 #include "kisslink/kisslink.hpp"
-#include "tnc/tnc.hpp"
+#include "receiver/noise_profile.hpp"
+#include "receiver/receiver.hpp"
 
 namespace data2g::arq {
 
@@ -79,8 +81,8 @@ public:
     void audio(std::span<const double> x);
     // fields: (key, JSON value) pairs after "kind"
     void event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields);
-    std::string rx(double t, std::span<const double> audio, const tnc::Pending& header, bool lost,
-                   const std::optional<Measured>& meas, const std::optional<tnc::NoiseSnapshot>& noise = std::nullopt);
+    std::string rx(double t, std::span<const double> audio, const receiver::Pending& header, bool lost,
+                   const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise = std::nullopt);
 
 private:
     void post(std::function<void()> job, std::size_t bytes);
@@ -102,7 +104,7 @@ private:
 std::string json_str(std::string_view s);
 std::string json_num(double v);
 std::string json_measured(const Measured& m);  // phy.measure's dict
-std::string json_noise(const tnc::NoiseSnapshot& n);  // tnc.NoiseProfile.snapshot()'s dict
+std::string json_noise(const receiver::NoiseSnapshot& n);  // receiver.NoiseProfile.snapshot()'s dict
 // The bytes of a .npz holding one float32 array (np.load reads it).
 std::vector<std::uint8_t> npz_f32(const std::string& name, std::span<const float> a);
 std::uint16_t to_half(double x);  // numpy's float64 -> float16: round to nearest even
@@ -113,7 +115,7 @@ struct EngineConfig {
     bool record_async = false;  // the recording written by a thread of its own (Recorder)
     std::optional<std::uint64_t> seed;  // the engine's DefaultRng (nullopt: random)
     double min_header_score = 0.0;
-    kisslink::KissLink* kiss = nullptr;  // served too (the KISS personality); not owned
+    kisslink::KissLink* kiss = nullptr;  // served too (broadcast over KISS); not owned
     double stats_interval_s = 60.0;
     bool dd = dd_default();
     std::optional<double> dd_budget_s = DD_BUDGET_S;  // nullopt: no limit
@@ -157,8 +159,8 @@ struct BurstPreview {
 };
 
 // The engine's receive helpers, for a receiver of its own (monitor::Monitor).
-Heard heard_of(tnc::Rx&& rx);
-std::string spec_name(const tnc::Pending& p);
+Heard heard_of(receiver::Rx&& rx);
+std::string spec_name(const receiver::Pending& p);
 std::vector<std::string_view> all_grids();  // every CPM grid, as the engine's receiver searches
 
 class Engine {
@@ -218,6 +220,11 @@ public:
     const std::vector<std::string>& aliases() const { return aliases_; }
     // Session::accept_connect, for every session from the next on (the host's ACCEPT)
     std::function<bool(const std::string&, const std::string&)> accept_connect;
+    // ... set for the session now as well
+    void set_accept_connect(std::function<bool(const std::string&, const std::string&)> f) {
+        accept_connect = f;
+        session_->accept_connect = std::move(f);
+    }
     Session& session() { return *session_; }
     const std::shared_ptr<Session>& session_ptr() const { return session_; }
     double now() const { return static_cast<double>(n_) / config::FS; }
@@ -225,20 +232,25 @@ public:
     void set_n(std::int64_t n) { n_ = n; }
     void listen(bool on = true);
     void set_call(const std::string& call, const std::vector<std::string>& aliases = {});
+    void disconnect() { session_->disconnect(); }  // gracefully: the peer is told, what's queued still goes
     void abort();
     void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
     void set_chat(bool on);
-    std::vector<std::string> events();  // CONNECTED ..., DISCONNECTED ..., CQFRAME call cap, ID call key
+    // Host notifications since the last call, as engine.py's events() words them: "CONNECTED peer",
+    // "DISCONNECTED why", "CQFRAME call cap", "ID call key".
+    std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
+    // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
+    const std::string* tx_submode() const { return tx_ ? &tx_->burst->submode : nullptr; }
     std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
-    // (port, frame)s heard for KISS clients; the host clears it
-    std::vector<std::pair<int, Bytes>>& kiss_rx() { return kiss_rx_; }
+    // (port, frame)s heard for KISS clients since the last call
+    std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
     const modem::Accept& accept() const { return accept_; }
     SoftStore& store() { return store_; }
@@ -247,19 +259,19 @@ public:
 protected:
     // Seams for a binding (a Python receiver, a patched phy.tx_audio) and
     // for tests (a slow decode).
-    virtual std::vector<tnc::Receiver::Item> receiver_feed(std::span<const double> x) {
+    virtual std::vector<receiver::Receiver::Item> receiver_feed(std::span<const double> x) {
         return receiver_.feed_deferred(x);
     }
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
     virtual void receiver_reset() { receiver_.reset(); }
     virtual std::vector<double> tx_audio(const TxBurst& b) { return arq::tx_audio(b); }
-    virtual void hear_burst(tnc::BurstEvent& ev, double t);
+    virtual void hear_burst(receiver::BurstEvent& ev, double t);
 
 private:
     struct Block {
         std::vector<double> x;
-        std::vector<tnc::Receiver::Item> items;
+        std::vector<receiver::Receiver::Item> items;
         bool busy = false;
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
@@ -273,7 +285,7 @@ private:
     bool idle() const;
     Done process(Block& b);  // the session stage
     Done process_safe(Block& b);  // process(); a throw drops the session and plays silence
-    void hear(std::vector<tnc::Receiver::Item>& items, double t);
+    void hear(std::vector<receiver::Receiver::Item>& items, double t);
     TxBurstPtr kiss_burst(std::int64_t k, bool busy);
     bool cq(ModemRx& rx);
     TxBurstPtr id_frame(const Session& s) const;
@@ -293,8 +305,8 @@ private:
     EngineHooks hooks_;
     std::shared_ptr<Rng> rng_;
     modem::Accept accept_;
-    tnc::Receiver receiver_;
-    tnc::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
+    receiver::Receiver receiver_;
+    receiver::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
     std::int64_t ptt_delay_;
     std::optional<Recorder> rec_;
     std::int64_t n_ = 0;

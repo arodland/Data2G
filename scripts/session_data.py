@@ -68,7 +68,7 @@ MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
           + ["prev_band", "prev_age"] + [f"prev_{k}" for k in MEAS]
           + ["cand", "cand_n", "cand_seconds", "burst_ok", "data_sent", "data_ok", "explored"])
-# the receiver's noise profile at the recommendation (tnc.NoiseProfile.snapshot()), and its interference
+# the receiver's noise profile at the recommendation (receiver.NoiseProfile.snapshot()), and its interference
 NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in range(1, 6)]
               + ["impulses_per_min"])
 # the link history at the recommendation (GearShifter.link_features; empty before any expected burst)

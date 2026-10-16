@@ -12,7 +12,7 @@ namespace data2g::arq {
 
 inline constexpr std::array<std::string_view, 4> CONSTS = {"gray-qam4", "gray-qam16", "c64-snr18", "c256-snr26"};
 
-// The receiver's noise profile (tnc::NoiseProfile's snapshot), per NOISE_BANDS_HZ.
+// The receiver's noise profile (receiver::NoiseProfile's snapshot), per NOISE_BANDS_HZ.
 inline constexpr std::array<std::array<double, 2>, 5> NOISE_BANDS_HZ = {
     {{350, 950}, {950, 1300}, {1300, 1750}, {1750, 2100}, {2100, 2700}}};
 struct NoiseLevels {

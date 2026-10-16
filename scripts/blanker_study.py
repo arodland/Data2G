@@ -1,4 +1,4 @@
-"""The impulse blanker (data2g.tnc.Blanker) against clicks: the smallest
+"""The impulse blanker (data2g.audio.Blanker) against clicks: the smallest
 ARQ data burst (ladder_study's trial) at each mode's 10% point, with
 Poisson clicks (hfchannel.clicks) added, received with and without the
 blanker on the same audio. Then false locks: the streaming receiver on
@@ -24,7 +24,8 @@ from data2g import hfchannel, modem
 from data2g.arq import phy as PHY
 from data2g.arq.engine import MAX_BURST_S
 from data2g.config import FS
-from data2g.tnc import Blanker, Receiver, receive_any
+from data2g.audio import Blanker
+from data2g.receiver import Receiver, receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import outcome_data as O  # noqa: E402

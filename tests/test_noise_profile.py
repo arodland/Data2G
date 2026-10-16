@@ -1,10 +1,10 @@
-"""tnc.NoiseProfile: the passband's noise between bursts, per sub-band."""
+"""receiver.NoiseProfile: the passband's noise between bursts, per sub-band."""
 
 import numpy as np
 import pytest
 
 from data2g.config import FS
-from data2g.tnc import NoiseProfile
+from data2g.receiver import NoiseProfile
 
 
 def feed(p, x, t0=0.0, step=FS // 25):
@@ -92,7 +92,7 @@ def test_native_matches(native, native_side):
     x = rng.normal(0, 0.1, n) * (1 + 0.5 * (t > 15)) + ((t % 4) < 1) * 0.2 * np.sin(2 * np.pi * 600 * t)
     x[rng.integers(0, n, 200)] += 3.0  # impulses
     outs = []
-    for cls in (NoiseProfile, native.tnc.NoiseProfile):
+    for cls in (NoiseProfile, native.receiver.NoiseProfile):
         p = cls()
         p.mark(5.0, 7.5)
         feed(p, x)

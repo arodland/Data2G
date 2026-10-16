@@ -4,6 +4,7 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <iterator>
 #include <stdexcept>
 
 #include "tables/tables.hpp"
@@ -298,6 +299,13 @@ Bytes Connect::pack() const {
     out.push_back(u8(cap));
     out.push_back(u8(t_turn10));
     return out;
+}
+
+std::string ext_name(int t) {
+    static const char* names[] = {"pad",  "new",   "abandon", "rv",    "bitmap", "resync", "report", "survey", "sound",
+                                  "buffer", "sess", "reply",  "chat",  "cq",     "dupctl", "comp",   "id",     "drained"};
+    static_assert(std::size(names) == T_DRAINED + 1);
+    return t >= 0 && t < static_cast<int>(std::size(names)) ? names[t] : "ext " + std::to_string(t);
 }
 
 Connect Connect::unpack(ByteView body) {

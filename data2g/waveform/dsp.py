@@ -1,7 +1,7 @@
 """Sample-level DSP at the ends of the chain (native: core/waveform/dsp).
 
 - to_baseband: real audio -> complex baseband, the first step of the OFDM
-  receivers (modem, tnc's StreamDetector feed); cpm reads real audio.
+  receivers (modem, receiver's StreamDetector feed); cpm reads real audio.
 - freq_correct: remove a CFO from baseband.
 - tx_condition: envelope clip and filter, the last TX step (modem's OFDM
   bursts, cpm.bandpass).

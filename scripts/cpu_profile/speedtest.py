@@ -3,10 +3,10 @@ receiver, ARQ session, gear shifter, PTT delay) stepped in 0.1 s blocks
 through run.sh's path, with no sound devices and no waiting on real time.
 
 Each direction is what the loopback does to it: the sender's host
-(host.Interpolator to 48 kHz, clipped at full scale, zeros fed to the
+(audio.Interpolator to 48 kHz, clipped at full scale, zeros fed to the
 engine while keyed), channel.py's Fader (CHANNEL != awgn), `--latency` of
 delay, noise.py's Noise (SNR: the input's PEP over the noise in 3000 Hz, as
-ARSFI's HFSimulator), tnc.Decimator back to 8 kHz. `--latency` stands for
+ARSFI's HFSimulator), audio.Decimator back to 8 kHz. `--latency` stands for
 what the sample clock can't see: TX lead, sound-card buffers and decode
 backlog (see LATENCY_S).
 
@@ -36,10 +36,10 @@ import numpy as np  # noqa: E402
 
 from data2g.arq import session as S  # noqa: E402
 from data2g.arq.engine import Engine  # noqa: E402
+from data2g.audio import Decimator, Interpolator  # noqa: E402
 from data2g.config import FS  # noqa: E402
 from data2g.hfchannel import FADING_PRESETS  # noqa: E402
-from data2g.host import BW, Interpolator  # noqa: E402
-from data2g.tnc import Decimator  # noqa: E402
+from data2g.host import BW  # noqa: E402
 
 from channel import Fader  # noqa: E402
 from noise import BLK, Noise  # noqa: E402

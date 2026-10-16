@@ -1,4 +1,4 @@
-"""Receiver CPU with and without the copy search (tnc.Receiver._find_copy),
+"""Receiver CPU with and without the copy search (receiver.Receiver._find_copy),
 the streaming receiver fed 20 ms blocks as the host does: on noise, and
 on low-SNR traffic (w/w48/n10 bursts 0.3-1.5 s apart on MPP). CPU seconds
 per audio minute, and the copy search's own share.
@@ -20,7 +20,7 @@ import numpy as np
 logging.disable(logging.WARNING)
 sys.path.insert(0, str(Path(__file__).parent))
 
-from data2g import cpm, hfchannel, modem, tnc  # noqa: E402
+from data2g import cpm, hfchannel, modem, receiver  # noqa: E402
 from data2g.arq import phy as PHY  # noqa: E402
 from data2g.config import FS  # noqa: E402
 
@@ -45,7 +45,7 @@ def traffic(seed: int, snr: float) -> np.ndarray:
 
 def run(y: np.ndarray, copy: bool) -> tuple[float, float, int, int]:
     """-> (CPU s per audio minute, of it the copy search's, bursts, copy locks)."""
-    r = tnc.Receiver(modem.Accept.of(None, 16.0), cpm_grids=tuple(cpm.GRIDS))
+    r = receiver.Receiver(modem.Accept.of(None, 16.0), cpm_grids=tuple(cpm.GRIDS))
     spent = [0.0]
     find = r._find_copy
 

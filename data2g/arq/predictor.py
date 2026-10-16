@@ -86,7 +86,7 @@ N_LINK = 4
 # not; dB, mean over them in power), how many, and 1; all 0 without any.
 N_ENERGY = 3
 
-# tnc.NoiseProfile.BANDS_HZ (tests/test_noise_profile.py holds them equal; tnc can't import arq)
+# receiver.NoiseProfile.BANDS_HZ (tests/test_noise_profile.py holds them equal; receiver can't import arq)
 NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))
 N_NOISE = 2 * len(NOISE_BANDS_HZ) + 2
 
@@ -106,7 +106,7 @@ def band_span_hz(band: str) -> tuple[float, float]:
 
 
 def noise_features(noise: dict | None, band: str) -> list[float]:
-    """The receiver's noise profile (tnc.NoiseProfile.snapshot()) as model
+    """The receiver's noise profile (receiver.NoiseProfile.snapshot()) as model
     inputs: each sub-band's median over the noise in the band `band`'s burst
     was measured in (power-weighted over the sub-bands it overlaps), each
     sub-band's p90/median, log10(1 + impulses per minute), and 1; all 0

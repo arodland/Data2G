@@ -37,7 +37,7 @@ from data2g.arq import phy as PHY
 from data2g.arq import policy as G
 from data2g.arq.modes import MODES
 from data2g.config import FS
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 
 NAMES = ("qpsk-r1/5", "w48-qpsk-r1/5", "n10-qpsk-r1/5", "n10-qpsk-r1/2", "n4-qpsk-r1/5", "ack-1f", "ack-4f",
          "n10-ack-4f", "polar-k96-f4")

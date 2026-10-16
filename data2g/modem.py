@@ -17,7 +17,7 @@ Sections, in file order:
 - transmit: modulate, modulate_bits, burst_waveform, ACE.
 - receive, search: _best_header tries each preamble hypothesis at +-2
   repeat alignments, reading a header at each (_read_header). Offline,
-  receive() searches x itself. A streaming receiver (tnc.Receiver) calls
+  receive() searches x itself. A streaming receiver (receiver.Receiver) calls
   find_burst, confirms the lock with pilot_coherence, finds a burst whose
   preamble faded with find_copy (from the header copy), then hands
   receive() the head or the lock.
@@ -28,7 +28,7 @@ Sections, in file order:
   decode_received.
 
 The receive side's results are dicts typed by Lock, HeaderRead, Received
-and DataEstimate (after Burst). receive()'s Received is what tnc.Receiver
+and DataEstimate (after Burst). receive()'s Received is what receiver.Receiver
 and arq/phy build on; decode_received is the plain decode of it (no CRC
 masks).
 Channel estimation is data2g.equalizer (burst-wide, 2-D LMMSE), not
