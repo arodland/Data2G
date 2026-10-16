@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -99,14 +100,6 @@ const config::Submode* submode(std::string_view name) {
     return nullptr;
 }
 
-std::span<const std::uint16_t> interleaver(const config::Submode& spec) {
-    return tables::FORMATS.at(row(spec)).perm;
-}
-
-std::span<const std::uint16_t> info_pos(const config::Submode& spec) {
-    return tables::FORMATS.at(row(spec)).info_pos;
-}
-
 // --- the codec ---------------------------------------------------------------
 
 namespace {
@@ -121,11 +114,11 @@ std::vector<Spec> build_specs() {
     for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
         for (const auto& s : table) {
             const bool polar = s.code == "polar";
-            const int crc = polar ? 24 : s.k >= 512 ? 32 : 16;  // codes.crc_bits
+            const int crc = crc_bits(s);
             int bits = 0;
             for (const auto& g : tables::CPM_GRIDS)
                 if (g.name == s.grid) bits = g.bits;
-            v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, (s.k - crc) / 8, s.perm,
+            v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, payload_bytes(s), s.perm,
                          polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{}});
         }
     return v;
@@ -140,6 +133,7 @@ const std::vector<Spec>& specs() {
 // replaced, so references stay valid; the lock covers construction only.
 struct Codecs {
     std::optional<ldpc::Code> code, mother;
+    std::optional<polar::PolarCode> polar;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
     std::unique_ptr<polar::SCLDecoder> scl;
 };
@@ -239,6 +233,18 @@ const Spec* spec(std::string_view name) {
 
 const Spec& spec(const config::Submode& s) { return specs().at(row(s)); }
 
+const Spec& spec(const tables::CpmSpec& s) {
+    // specs() is SUBMODES, then CPM_SPECS, then CPM_CTL
+    const std::less<const tables::CpmSpec*> lt;
+    std::size_t at = config::SUBMODES.size();
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL}) {
+        if (!lt(&s, table.data()) && lt(&s, table.data() + table.size()))
+            return specs()[at + static_cast<std::size_t>(&s - table.data())];
+        at += table.size();
+    }
+    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_SPECS or CPM_CTL row");
+}
+
 const ldpc::Code& ldpc_code(const Spec& s) {
     if (s.polar) throw std::invalid_argument(std::string(s.name) + " is not LDPC");
     std::lock_guard lock(cache_mutex);
@@ -255,11 +261,19 @@ const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent) {
     return *d;
 }
 
-const polar::SCLDecoder& polar_decoder(const Spec& s) {
+const polar::PolarCode& polar_code(const Spec& s) {
     if (!s.polar) throw std::invalid_argument(std::string(s.name) + " is not polar");
     std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.polar) c.polar.emplace(s.k, s.coded_bits, s.info_pos);
+    return *c.polar;
+}
+
+const polar::SCLDecoder& polar_decoder(const Spec& s) {
+    const auto& code = polar_code(s);
+    std::lock_guard lock(cache_mutex);
     auto& d = cache[&s].scl;
-    if (!d) d = std::make_unique<polar::SCLDecoder>(polar::PolarCode(s.k, s.coded_bits, s.info_pos), POLAR_LIST);
+    if (!d) d = std::make_unique<polar::SCLDecoder>(code, POLAR_LIST);
     return *d;
 }
 
@@ -298,7 +312,7 @@ Mat<std::uint8_t> encode_info(const Spec& s, const Mat<std::uint8_t>& bits, int 
         for (std::size_t b = 0; b < bits.rows; ++b)
             for (std::size_t j = 0; j < pos.size(); ++j) coded[b][j] = full[b][pos[j]];
     } else {
-        coded = s.polar ? polar_decoder(s).code().encode(bits) : ldpc_code(s).encode(bits);
+        coded = s.polar ? polar_code(s).encode(bits) : ldpc_code(s).encode(bits);
     }
     Mat<std::uint8_t> out(coded.rows, coded.cols);
     for (std::size_t b = 0; b < coded.rows; ++b)

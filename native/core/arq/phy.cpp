@@ -22,17 +22,11 @@ namespace {
 using cd = std::complex<double>;
 constexpr std::size_t S = config::DATA_SYMS_PER_FRAME;
 
-const codes::Spec& cspec(std::string_view name) {
-    const auto* s = codes::spec(name);
-    if (!s) throw std::out_of_range("no code spec " + std::string(name));
-    return *s;
-}
-
 const codes::Spec& ctl_code(const Mode& m) {
-    return m.is_cpm() ? cspec(cpm::ctl(cpm::grid_of(*m.cpm)).name) : codes::spec(*m.ofdm);
+    return m.is_cpm() ? codes::spec(cpm::ctl(cpm::grid_of(*m.cpm))) : codes::spec(*m.ofdm);
 }
 
-const codes::Spec& data_code(const Mode& m) { return m.is_cpm() ? cspec(m.cpm->name) : codes::spec(*m.ofdm); }
+const codes::Spec& data_code(const Mode& m) { return m.is_cpm() ? codes::spec(*m.cpm) : codes::spec(*m.ofdm); }
 
 Mat<float> row_f(std::span<const double> v) {
     Mat<float> out(1, v.size());

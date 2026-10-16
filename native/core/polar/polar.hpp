@@ -2,15 +2,15 @@
 // its successive-cancellation list decoder.
 //
 // The Gaussian-approximation design (polar.ga_reliability) is not ported:
-// submodes carry frozen info sets (codes::info_pos) and the CPM control
-// codewords' GA design is frozen by (k, e) in tables::POLAR_GA.
+// submodes carry frozen info sets (codes::Spec::info_pos) and the CPM
+// control codewords' GA design is frozen by (k, e) in tables::POLAR_GA.
+// Nothing here knows about submodes: a spec's code is codes::polar_code.
 #pragma once
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-#include "generated/config.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::polar {
@@ -31,8 +31,6 @@ struct PolarCode {
     Mat<std::uint8_t> encode(const Mat<std::uint8_t>& bits) const;
 };
 
-// A submode's code, with its frozen info set (spec in config::SUBMODES, code "polar").
-PolarCode polar_code(const config::Submode& spec);
 // The frozen GA design for (k, e); throws std::out_of_range if there is none.
 std::span<const std::uint16_t> ga_info_pos(int k, int e);
 

@@ -11,6 +11,7 @@
 #include "generated/config.hpp"
 #include "ldpc/ldpc.hpp"
 #include "polar/polar.hpp"
+#include "tables/tables.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::codes {
@@ -27,23 +28,28 @@ std::vector<std::uint8_t> with_crc(std::span<const std::uint8_t> payload, int n_
 int scramble_seed(int index);
 std::vector<std::uint8_t> scrambler(int k, int seed = 0x1FF);  // PN9, k bits
 
-// Any spec with .code and .k (config::Submode, tables::CpmSpec).
-template <typename Spec>
-int crc_bits(const Spec& spec) {
-    if (spec.code == "polar") return 24;
-    return spec.k >= 512 ? 32 : 16;
+// The codec's rules (codes.crc_bits, payload_bytes, rv_cycle) on a raw
+// table row with .code and .k (config::Submode, tables::CpmSpec): Spec is
+// built with them, and callers holding a row (arq::modes) ask them here.
+// Inline on the row: the ARQ asks per decision.
+template <typename Row>
+int crc_bits(const Row& r) {
+    if (r.code == "polar") return 24;
+    return r.k >= 512 ? 32 : 16;
 }
 
-template <typename Spec>
-int payload_bytes(const Spec& spec) {
-    return (spec.k - crc_bits(spec)) / 8;
+template <typename Row>
+int payload_bytes(const Row& r) {
+    return (r.k - crc_bits(r)) / 8;
+}
+
+template <typename Row>
+int rv_cycle(const Row& r) {
+    return r.code == "ldpc" ? 4 : 1;
 }
 
 // nullptr if there is no such submode.
 const config::Submode* submode(std::string_view name);
-// spec must be an element of config::SUBMODES.
-std::span<const std::uint16_t> interleaver(const config::Submode& spec);
-std::span<const std::uint16_t> info_pos(const config::Submode& spec);
 
 // --- the codec (codes.encode / decode / combine) ------------------------------
 //
@@ -62,9 +68,11 @@ struct Spec {
 };
 
 const Spec* spec(std::string_view name);  // nullptr if none
-const Spec& spec(const config::Submode& s);
+const Spec& spec(const config::Submode& s);  // s an element of config::SUBMODES
+const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS or CPM_CTL
 
 const ldpc::Code& ldpc_code(const Spec& s);  // LDPC specs
+const polar::PolarCode& polar_code(const Spec& s);  // polar specs, on their frozen info set
 // codes._decoder (extent 0) or codes._ext_decoder(spec, extent).
 const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent = 0);
 const polar::SCLDecoder& polar_decoder(const Spec& s);  // polar specs, list POLAR_LIST
