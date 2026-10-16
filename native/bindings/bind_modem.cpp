@@ -1,4 +1,4 @@
-// data2g.modem, dict-shaped as in Python. Submodes go out by name (conftest
+// data2g.modem, dict-shaped as in Python. Submodes go out by name (native_subs
 // maps them back to SubmodeSpec); going in, "spec" may be a name or any
 // object with .name. `accept` is None or anything with .max_cw ((name, cw)
 // pairs) and .min_score (modem.Accept).

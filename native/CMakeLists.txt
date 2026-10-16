@@ -1,7 +1,8 @@
 # Native Data2G: C++20 core, a headless host and a Qt Widgets GUI.
 #
-# See docs/native-port-plan.md. The Python package stays the normative
-# definition of the on-air format; everything here is checked against it.
+# See native/README.md (the layout) and docs/native-port-plan.md (its
+# history). The Python package stays the normative definition of the
+# on-air format; everything here is checked against it.
 #
 #   tools/build_native.sh --test     # configure, build, ctest, pytest --native
 #

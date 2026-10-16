@@ -1,5 +1,7 @@
 # Interference in the session sim, and a model that measures it
 
+> Historical plan with its results; names may have moved. The simulator is `data2g/interference.py`.
+
 ## Why
 
 On air the noise is not white. Recordings from 2026-09/10 show:

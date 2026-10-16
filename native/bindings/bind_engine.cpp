@@ -1,7 +1,7 @@
 // data2g.arq.engine over the C++ Engine. Two ways to make one:
 // - pure C++ (policy, rng, tx_audio None): GearPolicy, DefaultRng, C++ TX
 //   audio; step() releases the GIL, and `worker` is allowed.
-// - Python-compatible (tests/conftest.py's substitution): `rng` a
+// - Python-compatible (tests/native_subs/engine.py's substitution): `rng` a
 //   random.Random, drawn from as engine.py draws; sessions are bind_arq_link's
 //   Session with its Python view; `policy` a factory of Python policies;
 //   `tx_audio` read at each burst (a test's patch of phy.tx_audio). Sync

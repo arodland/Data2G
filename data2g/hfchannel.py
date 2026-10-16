@@ -3,6 +3,8 @@ offset, sample-clock error. Operates on real passband audio at FS.
 
 SNR is signal power relative to the noise power falling in
 `config.SNR_REF_BW_HZ`.
+
+Simulation only, not on the live path and not ported to native.
 """
 
 from dataclasses import dataclass

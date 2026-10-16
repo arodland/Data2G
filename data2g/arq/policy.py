@@ -28,7 +28,7 @@ from .. import codes, modem
 from .. import cpm
 from ..config import max_codewords
 # the bandwidth and recommendation-code helpers are modes'; named here too,
-# where the shifter and its callers (and tests/conftest.py) find them
+# where the shifter and its callers (and tests/native_subs/gear.py) find them
 from .modes import (CAP_HZ, MODES, burst_seconds, ctl_payload_bytes, decode, encode, is_cpm, max_ctl, min_cw,
                     width_hz)
 from . import frames as F
@@ -99,7 +99,7 @@ ROBUST_ESCALATION = 4  # from here on ROBUST_CONNECT (link caps escalation at 4)
 ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 
 # --- study toggles (Python only; native has the defaults) --------------------
-# Set any and tests/conftest.py's GEAR_STUDY_ENV keeps the shifter in Python.
+# Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
 
 # The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
 # w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords

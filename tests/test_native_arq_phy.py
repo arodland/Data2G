@@ -11,7 +11,7 @@ passes than numpy within DD_BUDGET_S, so results may legitimately differ.
 import numpy as np
 import pytest
 
-import conftest
+import native_subs
 from data2g import codes, cpm, hfchannel, modem
 from data2g import kisslink as KL
 from data2g.arq import phy as PHY
@@ -30,7 +30,7 @@ BUF_TOL = 1e-4  # measurements (effective MI sums over float32-rounded tables)
 @pytest.fixture
 def pure(monkeypatch):
     """The Python modules as written, whether or not --native substituted them."""
-    for (module, attr), fn in conftest._originals.items():
+    for (module, attr), fn in native_subs.originals.items():
         monkeypatch.setattr(module, attr, fn)
 
 

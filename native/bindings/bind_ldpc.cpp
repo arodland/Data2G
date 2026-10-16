@@ -1,3 +1,6 @@
+// data2g.ldpc over native/core/ldpc: qc_code and the batched Decoder
+// (MinSumDecoder, its old name, as an alias), shaped where codes.py reads
+// them like the Python ones.
 #include <optional>
 
 #include "convert.hpp"

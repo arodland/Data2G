@@ -1,3 +1,6 @@
+// data2g.audio's filters over native/core/audio/filters.hpp: Decimator,
+// Interpolator and Blanker, each a callable keeping its state across blocks
+// (tests/native_subs/audio.py substitutes them).
 #include "audio/filters.hpp"
 #include "convert.hpp"
 

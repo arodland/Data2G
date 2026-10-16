@@ -1,3 +1,6 @@
+"""data2g.decoders_torch against the numpy decoders (ldpc, polar) it
+mirrors for GPU studies."""
+
 import numpy as np
 import pytest
 

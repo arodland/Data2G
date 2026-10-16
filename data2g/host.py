@@ -1,6 +1,6 @@
 """The Data2G server: one radio, one integrated server, every port always on.
 
-ARQ sessions (gear-shifter phase H) on two TCP ports, as VARA: commands
+ARQ sessions (data2g.arq) on two TCP ports, as VARA: commands
 (8300, CR-terminated lines) and data (8301, the session's byte stream).
 
 Broadcast (docs/broadcast.md): frames on KISS port 8100 (VARA HF's KISS
@@ -30,6 +30,10 @@ BCAST * MISSED submode n_cw, BCAST n DROPPED k) once the client has sent a
 BCAST command, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
+
+Native: the Host (command semantics) is native/core/host; serve() is
+native/app/station.cpp and main() native/apps/data2g_host.cpp. Under
+`pytest --native` tests/native_subs/host.py substitutes Host.
 """
 
 from . import threads

@@ -1,6 +1,6 @@
 // data2g.receiver: search_span, receive_any, NoiseProfile and the streaming
 // Receiver. Results are Python's dicts with submodes / CPM specs by name
-// (conftest restores the spec objects); events are (kind, dict).
+// (tests/native_subs/receiver.py restores the spec objects); events are (kind, dict).
 #include "convert.hpp"
 #include "modem_dicts.hpp"
 #include "receiver/noise_profile.hpp"

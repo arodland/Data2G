@@ -1,3 +1,6 @@
+"""data2g.modem end to end: burst loopback per submode, the header code,
+framing, HARQ through the modem, timing slips and the header copy."""
+
 import numpy as np
 import pytest
 

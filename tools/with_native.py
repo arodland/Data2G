@@ -38,7 +38,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--python", action="store_true", help="substitute nothing")
     ap.add_argument("--dd-budget", type=float, default=None)
-    ap.add_argument("--skip", default="", help="conftest providers to leave in Python, e.g. arq,gear "
+    ap.add_argument("--skip", default="", help="tests/native_subs providers to leave in Python, e.g. arq,gear "
                     "(studies that reach into Session/GearShifter internals)")
     ap.add_argument("script")
     a, rest = ap.parse_known_args()
@@ -48,21 +48,16 @@ def main():
 
         phy.DD_BUDGET_S = a.dd_budget
     if not a.python:
-        import conftest
+        import native_subs
 
-        native = conftest.import_native()
+        native, why = native_subs.import_native()
         if native is None:
-            sys.exit(f"data2g_native: {conftest._import_error} (tools/build_native.sh builds it)")
-        subs = conftest._substitutions(native)
-        skip = {f"_{s}_substitutions" for s in a.skip.split(",") if s}
-        unknown = skip - {p.__name__ for p in conftest._PROVIDERS}
-        if unknown:
-            sys.exit(f"--skip: no provider {', '.join(sorted(unknown))}")
-        for p in conftest._PROVIDERS:
-            if p.__name__ not in skip:
-                subs.update(p(native))
-        for (module, attr), fn in subs.items():
-            setattr(module, attr, fn)
+            sys.exit(f"data2g_native: {why} (tools/build_native.sh builds it)")
+        try:
+            subs = native_subs.build(native, skip={s for s in a.skip.split(",") if s})
+        except KeyError as e:
+            sys.exit(f"--skip: {e.args[0]}")
+        native_subs.apply(subs)
         print(f"with_native: {len(subs)} substitutions", file=sys.stderr)
     sys.argv = [a.script, *rest]
     sys.path.insert(0, str(Path(a.script).resolve().parent))

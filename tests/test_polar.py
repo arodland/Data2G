@@ -1,3 +1,5 @@
+"""data2g.polar: the transform and the CA-SCL decoder."""
+
 import numpy as np
 import pytest
 

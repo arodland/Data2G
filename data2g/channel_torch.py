@@ -17,6 +17,8 @@ and the modem cannot drift apart.
 
 `tests/test_channel_torch.py` pins the TX against numpy and the whole
 path against `scripts/eq_floor.py`'s measurement.
+
+Training only (torch), not on the live path and not ported to native.
 """
 
 from dataclasses import dataclass

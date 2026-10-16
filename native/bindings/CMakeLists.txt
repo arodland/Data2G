@@ -1,6 +1,6 @@
 # The pybind11 module that lets pytest drive the C++ core. It must be built
 # for the interpreter that runs pytest (tools/build_native.sh passes the
-# venv's), and lands in build/python, which tests/conftest.py puts on
+# venv's), and lands in build/python, which tests/native_subs puts on
 # sys.path: a test fixture, never installed, so a stale copy can't shadow it.
 find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 set(PYBIND11_FINDPYTHON ON)

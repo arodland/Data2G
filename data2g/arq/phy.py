@@ -4,6 +4,8 @@ across resends, §5), and the gear shifter's measurements.
 
 Used by the live stack (engine.py) and by scripts/phy_session.py (whole
 sessions through the modem and hfchannel).
+
+Native: arq/phy.hpp.
 """
 
 import logging

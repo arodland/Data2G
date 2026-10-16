@@ -12,6 +12,9 @@ Recording (`record_dir`): every burst heard is saved as audio with what
 the receiver made of it, and every burst sent as its slots, so a session
 recorded at both ends can be replayed offline with exact knowledge of
 what was on air (scripts/replay.py).
+
+Native: arq/engine.hpp (the same step(); with `worker`, the session stage
+on its own thread).
 """
 
 import json

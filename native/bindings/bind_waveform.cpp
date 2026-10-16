@@ -1,7 +1,9 @@
+// data2g.waveform (ofdm, dsp, sync) over native/core/waveform. Bands cross
+// by name; a band is a read-only view of the C++ one. StreamDetector's
+// statistics come back as numpy arrays without a copy.
 #include <pybind11/functional.h>
 
 #include "convert.hpp"
-#include "dsp/dsp.hpp"
 #include "waveform/dsp.hpp"
 #include "waveform/ofdm.hpp"
 #include "waveform/sync.hpp"
@@ -46,18 +48,6 @@ py::tuple acquisition(const waveform::Acquisition& a) {
 }  // namespace
 
 void bind_waveform(py::module_& m) {
-    auto d = m.def_submodule("dsp");
-    d.def("pairwise_sum", [](const In<double>& a) { return dsp::pairwise_sum(view(a)); });
-    d.def("pairwise_sum_complex", [](const In<cdouble>& a) { return dsp::pairwise_sum(view(a)); });
-    d.def("quantile", [](const In<double>& a, double q) { return dsp::quantile(vec(a), q); });
-    d.def("firwin_bandpass", [](int n, double lo, double hi, double fs) { return np(dsp::firwin_bandpass(n, lo, hi, fs)); });
-    d.def("hilbert", [](const In<double>& x) { return np(dsp::hilbert(view(x))); });
-    d.def("convolve_same", [](const In<double>& a, const In<double>& v) { return np(dsp::convolve_same(view(a), view(v))); });
-    d.def("next_fast_len", &dsp::next_fast_len);
-    d.def("fftconvolve_valid", [](const In<cdouble>& a, const In<cdouble>& v) {
-        return np(dsp::fftconvolve_valid(view(a), view(v)));
-    });
-
     auto w = m.def_submodule("waveform");
     py::register_exception<waveform::SyncError>(w, "SyncError");
 

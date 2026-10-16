@@ -37,8 +37,9 @@ decoders take soft bits in that order.
 
 Native: native/core/codes (codes::Spec: CodeSpec with the interleaver,
 info set and CRC size looked up once). Parity:
-tests/test_native_codes.py, and tests/conftest.py's _codes_substitutions
-swaps these functions for C++ under pytest --native.
+tests/test_native_codes.py, and tests/native_subs/{base,codes}.py swap
+these functions for C++ under pytest --native, private ones included
+(_decoder, _with_crc).
 """
 
 import binascii
@@ -125,7 +126,7 @@ def ldpc_code(spec: CodeSpec) -> ldpc.QCLDPC:
 
 
 # ponytail: GA-DE frozen set at a fixed design point until
-# scripts/design_polar.py searches one per submode.
+# a per-submode search (planned; no script yet) designs one.
 POLAR_DESIGN_SNR_DB = -3.0
 POLAR_LIST = 8
 LDPC_ITERS = 40  # the modem's LDPC decoder iterations (native codes::ITERS)
@@ -281,8 +282,9 @@ def scrambler(k: int, seed: int = 0x1FF) -> np.ndarray:
     bits are XORed with it before encoding: an unscrambled zero-padded
     payload (control codewords, a stream's last codeword) codes to ~10%
     ones, piles OFDM symbols onto a few points, and the clipper wrecks them
-    (phase G: 3-codeword bursts failed their control at 8 dB AWGN, every
-    time). Seeds differ per codeword: identical payloads in one burst,
+    (in real-modem sessions, scripts/phy_session.py: 3-codeword bursts
+    failed their control at 8 dB AWGN, every time). Seeds differ per
+    codeword: identical payloads in one burst,
     scrambled alike, still decoded half the time at 8 dB."""
     reg, out = seed, np.empty(k, np.uint8)
     for i in range(k):

@@ -1,3 +1,6 @@
+// data2g.codes over native/core/codes. Specs cross by name (a submode, a
+// CPM mode or a CPM control codeword); per-row arguments may be scalars;
+// bits and soft bits are numpy arrays, payloads bytes.
 #include "convert.hpp"
 #include <optional>
 
@@ -207,25 +210,6 @@ void bind_codes(py::module_& m) {
     c.def("interleaver", [](const std::string& name) { return np<std::int64_t>(cspec(name).perm); });
     c.def("info_pos", [](const std::string& name) { return np<std::int64_t>(cspec(name).info_pos); });
     bind_codec(c);
-
-    auto cfg = m.def_submodule("config");
-    cfg.def("submodes", [] {
-        py::list out;
-        for (const auto& s : config::SUBMODES) {
-            py::dict d;
-            d["index"] = s.index;
-            d["name"] = std::string(s.name);
-            d["code"] = std::string(s.code);
-            d["constellation"] = std::string(s.constellation);
-            d["band"] = std::string(s.band);
-            d["frames_per_cw"] = s.frames_per_cw;
-            d["k"] = s.k;
-            d["coded_bits"] = s.coded_bits;
-            d["headroom"] = s.headroom;
-            out.append(d);
-        }
-        return out;
-    });
 }
 
 }  // namespace data2g::bind

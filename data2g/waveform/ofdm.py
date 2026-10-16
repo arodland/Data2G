@@ -3,6 +3,9 @@
 Passband modulation generates the real transmit waveform directly.
 Demodulation operates on the complex baseband signal produced by
 dsp.to_baseband, where carrier k sits at Band.bb[k] = freqs[k] - FCENTER Hz.
+
+Native: native/core/waveform/ofdm (tests/native_subs/waveform.py; _W
+is a substitution key).
 """
 
 import numpy as np

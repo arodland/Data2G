@@ -23,7 +23,7 @@ live path).
 Native counterparts: native/core/waveform/{dsp,ofdm,sync}, and
 native/core/{equalizer,constellation,cpm}. native/core/dsp/ is not this
 dsp: it emulates numpy/scipy (quantile, firwin, hilbert, FFTs) for every
-native module. Under `pytest --native`, tests/conftest.py substitutes these
+native module. Under `pytest --native`, tests/native_subs/ substitutes these
 functions by name, private ones included (sync._raw_stat, _refine,
 _crossings; equalizer._doppler_corr; cpm._energies, _shares, _peak_ratio):
 renaming one means renaming its substitution and binding too.

@@ -1,5 +1,8 @@
 """ARQ frame codecs (docs/arq.md §4, §5, §7, §9a): the 32-bit core
-control word, extension TLVs, callsign packing and stream records."""
+control word, extension TLVs, callsign packing and stream records.
+
+Native: arq/frames.hpp.
+"""
 
 import zlib
 from dataclasses import dataclass, field
