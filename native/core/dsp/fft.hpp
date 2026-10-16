@@ -26,7 +26,7 @@
 // 5.45% of total CPU time in `cfftp<double>::cfftp` -- the plan
 // *constructor*, not the transform itself -- because every FFT call
 // anywhere in the native code, including 67 back-to-back same-length
-// calls inside a single acquire_blind() invocation, was rebuilding its
+// calls inside a single (SSTVAE) acquire_blind() invocation, was rebuilding its
 // twiddle-factor table from scratch. The cache is a thread-safe,
 // mutex-protected LRU keyed by transform length (pocketfft_hdronly.h's
 // own `get_plan`), so this only removes redundant setup work; the

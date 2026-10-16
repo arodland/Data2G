@@ -229,7 +229,7 @@ std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cd
 // Each f's repeat_corr row: dest(i) is where bin i's row (z.size() - t.size() + 1 long) goes, or
 // null for a scratch row; use(i, row) then sees it while it is still in cache. One FFT of z and
 // the cached spectrum of t, then per f an inverse FFT of the product with t's spectrum rolled by
-// whole bins (sync._repeat_corrs).
+// whole bins (sync.repeat_corrs).
 void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs,
                const std::function<cdouble*(std::size_t)>& dest,
                const std::function<void(std::size_t, const cdouble*)>& use) {
@@ -287,6 +287,17 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
     Mat<cdouble> out(freqs.size(), z.size() >= t.size() ? z.size() - t.size() + 1 : 0);
     corr_rows(z, t, freqs, [&](std::size_t i) { return out[i]; }, nullptr);
     return out;
+}
+
+double noise_level(const Mat<cdouble>& C) {
+    double lv = INFINITY;
+    for (std::size_t i = 0; i < C.rows; ++i) {
+        // re^2 + im^2: np.abs(C) ** 2 to an ulp, without a hypot per output
+        std::vector<double> p(C.cols);
+        for (std::size_t j = 0; j < p.size(); ++j) p[j] = std::norm(C[i][j]);
+        lv = std::min(lv, dsp::quantile(std::move(p), NOISE_QUANTILE) / -std::log(1 - NOISE_QUANTILE));
+    }
+    return lv;
 }
 
 RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int repeats,
@@ -482,6 +493,20 @@ void StreamDetector::reset() {
     s_off_ = c_off_ = 0;
     s0 = c0 = fed = 0;
     levels.clear();
+}
+
+void StreamDetector::restart_at(std::int64_t pos) {
+    reset();
+    fed = pos;
+}
+
+StreamDetector::Outputs StreamDetector::outputs_from(std::int64_t start) const {
+    Outputs o{std::max(c0, start), {}, 0};
+    const std::size_t k = clamp_to(o.start - c0, C(0).size());
+    o.cols = C(0).size() - k;
+    o.rows.reserve(bins());
+    for (std::size_t i = 0; i < bins(); ++i) o.rows.push_back(C(i).data() + k);
+    return o;
 }
 
 void StreamDetector::skip_to(std::int64_t pos) {

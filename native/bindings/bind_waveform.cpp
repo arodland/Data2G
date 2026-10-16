@@ -123,6 +123,7 @@ void bind_waveform(py::module_& m) {
     w.def("refine", [](const In<cdouble>& z, const std::string& b, std::int64_t n, double f) {
         return waveform::refine(view(z), band_of(b), n, f);
     });
+    w.def("noise_level", [](const In<cdouble>& C) { return waveform::noise_level(mat(C)); });
     w.def("crossings", [](const In<double>& D, double thr, std::size_t span, std::size_t limit) {
         return waveform::crossings(view(D), thr, span, limit);
     });
@@ -140,6 +141,13 @@ void bind_waveform(py::module_& m) {
              py::arg("band"), py::arg("reach") = config::ACQUIRE_REACH_HZ)
         .def_readonly_static("CHUNKS", &SD::CHUNKS)
         .def("reset", &SD::reset)
+        .def("restart_at", &SD::restart_at)
+        .def("outputs_from", [](const SD& d, std::int64_t start) {
+            const auto o = d.outputs_from(start);
+            return py::make_tuple(o.start, rows<cdouble>(o.rows.size(), [&](std::size_t i) {
+                return std::span<const cdouble>(o.rows[i], o.cols);
+            }));
+        })
         .def("feed", [](SD& d, const In<cdouble>& z) { d.feed(view(z)); })
         .def("trim", &SD::trim)
         .def("level", &SD::level)
@@ -147,7 +155,7 @@ void bind_waveform(py::module_& m) {
         .def_property_readonly("band_name", [](const SD& d) { return std::string(d.band.spec->name); })
         .def_readonly("reach", &SD::reach)
         .def_readonly("span", &SD::span)
-        .def_readwrite("fed", &SD::fed)
+        .def_readonly("fed", &SD::fed)
         .def_readonly("s0", &SD::s0)
         .def_readonly("c0", &SD::c0)
         .def_property_readonly("S", [](const SD& d) { return rows<double>(d.bins(), [&](std::size_t i) { return d.S(i); }); })

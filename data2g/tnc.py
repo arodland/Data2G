@@ -392,8 +392,7 @@ class Receiver:
         out = {}
         for b, d in self.detectors.items():
             if d.fed < self.off:  # its audio was trimmed away: start over
-                d.reset()
-                d.fed = self.off
+                d.restart_at(self.off)
             d.feed(modem.to_baseband(self.buf[d.fed - self.off:], d.fed))
             # no search looks further back than `keep` (the statistic grew
             # with a long burst in the buffer, and was copied every hop)
@@ -484,8 +483,7 @@ class Receiver:
             level = d.level() if d is not None else None
             if level is None:
                 continue
-            a = max(d.c0, self.off)  # the stream index both the buffer and C cover from
-            C = d.C[:, a - d.c0:]
+            a, C = d.outputs_from(self.off)  # from the stream index both the buffer and C cover
             x = self.buf[a - self.off:]
             C = C[:, :max(0, len(x) - modem.M + 1)]
             lock = modem.find_copy(x, band, self.accept, C, level)
@@ -540,8 +538,7 @@ class Receiver:
                 if np.sqrt(np.mean(self.buf[-self.min_search :] ** 2)) < SILENCE_RMS:
                     self._trim(self.keep)
                     for d in self.detectors.values():  # no noise level in silence: skip it
-                        d.reset()
-                        d.fed = self.off + len(self.buf)
+                        d.restart_at(self.off + len(self.buf))
                     break
                 try:
                     try:

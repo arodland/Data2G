@@ -32,6 +32,7 @@ inline constexpr double LOO_TOL = 0.1;
 inline constexpr std::array<double, 12> SPREAD_GRID = {0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0};
 inline constexpr bool PER_CARRIER_NOISE = true;
 inline constexpr double NOISE_SHAPE_PRIOR = 8.0;
+inline constexpr int PREAMBLE_DIFFS = 7;  // preamble_noise_k's samples: the default 8 repeats' differences
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
 inline constexpr double INF = std::numeric_limits<double>::infinity();
 

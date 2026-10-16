@@ -4,7 +4,7 @@ can gain without air time:
 
   base    modem._read_header as it is
   fs      pilots and preamble reference projected onto a CP-long delay
-          support (equalizer._freq_smooth) before interpolation
+          support (equalizer.freq_smooth) before interpolation
   all     reference from every preamble repeat instead of the last 4
   valid   ML over valid words only (CRC-6 right and a defined submode),
           instead of ML over all 65536 then the CRC check
@@ -26,7 +26,7 @@ import numpy as np
 
 from data2g import codes, constellation, equalizer, hfchannel, modem
 from data2g.config import FS, LEADIN_SAMPLES, M, NCP, NSYM, PREAMBLE_CP, SUBMODES
-from data2g.modem import HEADER_BACKOFF, QPSK, _crc6, header_code, header_layout, header_samples
+from data2g.modem import HEADER_BACKOFF, QPSK, crc6, header_code, header_layout, header_samples
 from data2g.waveform import ofdm
 from data2g.waveform.dsp import freq_correct, to_baseband
 
@@ -37,7 +37,7 @@ BURST = {"w": "ack-1f", "n10": "n10-ack-4f", "n4": "n4-ack-2f", "w48": "w48-qpsk
 def valid_mask(band):
     w = np.arange(2**16)
     v, crc = w >> 6, w & 0x3F
-    ok = np.array([_crc6(int(x)) for x in v]) == crc
+    ok = np.array([crc6(int(x)) for x in v]) == crc
     idx = {s.index for s in SUBMODES.values() if s.band == band}
     return ok & np.isin(v >> 6, list(idx))
 
@@ -69,7 +69,7 @@ def read(z, start, band, opts):
 
     def solve(t_p, h_p, t_d, y_d):
         if "fs" in opts:
-            h_p = equalizer._freq_smooth(h_p, support, b.bb)[0]
+            h_p = equalizer.freq_smooth(h_p, support, b.bb)[0]
         j = np.clip(np.searchsorted(t_p, t_d) - 1, 0, len(t_p) - 2)
         a = ((t_d - t_p[j]) / (t_p[j + 1] - t_p[j]))[:, None]
         hs = (1 - a) * h_p[j] + a * h_p[j + 1]
@@ -88,7 +88,7 @@ def read(z, start, band, opts):
         t_all = np.concatenate([[u0 + ref * M / 2], t_sym, [p0 + NCP + M / 2]])
         hh = np.concatenate([h_pre[None], h_all, h_first[None]])
         if "fs" in opts:
-            hh = equalizer._freq_smooth(hh, support, b.bb)[0]
+            hh = equalizer.freq_smooth(hh, support, b.bb)[0]
         hs = 0.5 * (hh[:-2] + hh[2:])[~layout]
         word, score = decode(constellation.llr(y_all[~layout], hs, np.ones(hs.shape), QPSK), band, "valid" in opts)
     return word, score
@@ -105,7 +105,7 @@ def trial(args):
     y = hfchannel.apply_channel(x, snr_db=snr, freq_offset_hz=f0, ppm=10,
                                 fading_preset=None if chan == "awgn" else chan, seed=seed)
     z = freq_correct(to_baseband(y), f0)
-    truth = (spec.index << 12) | _crc6(spec.index << 6)  # n_cw = 1
+    truth = (spec.index << 12) | crc6(spec.index << 6)  # n_cw = 1
     out = []
     for v in variants:
         word, score = read(z, lead + LEADIN_SAMPLES, band, set(v.split("+")))

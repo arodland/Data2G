@@ -6,7 +6,7 @@ import pytest
 
 from data2g import codes, cpm
 from data2g.config import FS
-from data2g.modem import _crc6
+from data2g.modem import crc6
 
 GRIDS = list(cpm.GRIDS.values())
 ALL_SPECS = list(cpm.SPECS.values()) + list(cpm.CTL.values())
@@ -23,11 +23,11 @@ def test_header_tables_are_the_rng_draws(native, reference):
     for g in GRIDS:
         for v in range(1024):
             np.testing.assert_array_equal(native.cpm.header_symbols(g.name, v),
-                                          header_symbols(g.name, (v << 6) | _crc6(v)), err_msg=f"{g.name} {v}")
+                                          header_symbols(g.name, (v << 6) | crc6(v)), err_msg=f"{g.name} {v}")
         for s in cpm.grid_specs(g.name):
             for d in (False, True):
                 for n in range(cpm.MAX_DATA + 1):
-                    assert native.cpm.header_value(s.index, n, d) << 6 | _crc6(native.cpm.header_value(s.index, n, d)) \
+                    assert native.cpm.header_value(s.index, n, d) << 6 | crc6(native.cpm.header_value(s.index, n, d)) \
                         == cpm.header_word(s.index, n, d)
 
 
@@ -93,8 +93,11 @@ def test_modulate(native, reference):
             np.testing.assert_allclose(native.cpm.tones(g.name, sym), ref(reference, "tones")(g, sym), rtol=0,
                                        atol=1e-12)
             want = ref(reference, "modulate")(spec, coded, dup)
-            got = cpm.bandpass(g, native.cpm.modulate(spec.name, coded, dup))
-            np.testing.assert_allclose(got, want, rtol=0, atol=1e-9)
+            x = native.cpm.modulate(spec.name, coded, dup)
+            np.testing.assert_allclose(native.cpm.bandpass(g.name, x), want, rtol=0, atol=1e-9)
+            for cap in (1, 2):  # ARQ phy's TX filter at each bandwidth cap
+                np.testing.assert_allclose(native.cpm.bandpass(g.name, x, cap), ref(reference, "bandpass")(g, x, cap),
+                                           rtol=0, atol=1e-9)
 
 
 # (spec, n_data, dup, cfo Hz, noise sigma)

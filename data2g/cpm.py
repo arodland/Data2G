@@ -240,10 +240,10 @@ def hdr_len(g: Grid) -> int:
 def header_word(index: int, n_data: int, dup: bool) -> int:
     """16 bits as the OFDM header's: index (4) | n field (6) | CRC-6; index
     = mode index + 2 x duplicated control, n field = data codewords + 1."""
-    from .modem import _crc6
+    from .modem import crc6
 
     v = ((index + 2 * dup) << 6) | n_data
-    return (v << 6) | _crc6(v)
+    return (v << 6) | crc6(v)
 
 
 @lru_cache(maxsize=None)

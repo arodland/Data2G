@@ -21,7 +21,7 @@ CORR_TOL = 1e-6
 TOL = 1e-9
 # modem's own functions: restored to Python together, so a reference call
 # never reaches the native ones through module globals (--native)
-OWN = ("_crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
+OWN = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
        "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
        "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases", "_copy_header",
        "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate", "decode_received")
@@ -73,7 +73,7 @@ def _burst(name, n_cw=2, snr=12.0, preset=None, seed=1, cfo=23.0, pad=3000):
 
 def test_header_tables(native, py):
     N = native.modem
-    assert [N.crc6(v) for v in range(1024)] == [py._crc6(v) for v in range(1024)]
+    assert [N.crc6(v) for v in range(1024)] == [py.crc6(v) for v in range(1024)]
     for band in modem.SYNC_BANDS:
         np.testing.assert_array_equal(N.valid_words(band), py._valid_words(band))
         np.testing.assert_array_equal(N.signs(py._valid_words(band), band), py._valid_signs(band))

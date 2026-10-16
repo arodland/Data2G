@@ -1,4 +1,6 @@
-"""Simulated interference for the session studies (docs/interference-plan.md):
+"""Simulation only, not on the live path and not ported to native.
+
+Simulated interference for the session studies (docs/interference-plan.md):
 what one station's receiver hears besides the Gaussian floor, over a whole
 session, rendered for any time span from a seed (bursts and the gaps between
 them see one consistent timeline).

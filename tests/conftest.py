@@ -42,7 +42,7 @@ def import_native():
 
 # Every data2g.equalizer function but _support_basis (its cache is internal
 # to the C++ one).
-EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "_freq_smooth",
+EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "freq_smooth",
                     "preamble_noise", "preamble_noise_k", "per_carrier_noise", "_doppler_corr", "measure_spread",
                     "estimate", "time_shift_phase", "refine")
 
@@ -241,8 +241,6 @@ def _waveform_substitutions(native):
     return {
         (ofdm, "band"): band,
         (ofdm, "_W"): w,
-        (ofdm, "MOD_MATRIX"): w.mod,
-        (ofdm, "DEMOD_MATRIX"): w.demod,
         (ofdm, "modulate_symbols"): w.modulate_symbols,
         (ofdm, "demod_window"): w.demod_window,
         (ofdm, "preamble_waveform"): w.preamble_waveform,
@@ -259,8 +257,9 @@ def _waveform_substitutions(native):
         (modem, "acquire"): acquire,
         (sync, "detection_stat"): detection_stat,
         (sync, "_raw_stat"): _raw_stat,
-        (sync, "_repeat_corr"): W.repeat_corr,
-        (sync, "_repeat_corrs"): lambda z, t, freqs: W.repeat_corrs(z, t, list(freqs)),
+        (sync, "repeat_corr"): W.repeat_corr,
+        (sync, "repeat_corrs"): lambda z, t, freqs: W.repeat_corrs(z, t, list(freqs)),
+        (sync, "noise_level"): lambda C: W.noise_level(np.asarray(C)),
         (sync, "first_path"): lambda power, peak, search=config.FIRST_PATH_SEARCH, frac=config.FIRST_PATH_FRAC,
         cyclic=False: W.first_path(power, int(peak), search, frac, cyclic),
         (sync, "_refine"): _refine,
@@ -273,8 +272,8 @@ def _waveform_substitutions(native):
 @provider
 def _cpm_substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
-    stays in Python. The TX bandpass (dsp) and the MI features (predictor)
-    are still Python's, applied to the native results."""
+    stays in Python. The MI features (predictor) are still Python's,
+    applied to the native results."""
     n = native.cpm
     import functools
 
@@ -306,7 +305,7 @@ def _cpm_substitutions(native):
     def modulate(spec, coded, dup, cap=0):
         if not own_spec(spec):
             return py["modulate"](spec, coded, dup, cap)
-        return cpm.bandpass(cpm.GRIDS[spec.grid], n.modulate(spec.name, list(coded), dup, cap), cap)
+        return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
 
     def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0):
         if not own_grid(g):
@@ -355,6 +354,7 @@ def _cpm_substitutions(native):
         (cpm, "to_tones"): by_grid(n.to_tones, cpm.to_tones),
         (cpm, "tones"): by_grid(n.tones, cpm.tones),
         (cpm, "modulate"): modulate,
+        (cpm, "bandpass"): by_grid(n.bandpass, cpm.bandpass),
         (cpm, "_energies"): by_grid(n.energies, cpm._energies),
         (cpm, "_shares"): n.shares,
         (cpm, "detect"): detect,
@@ -737,7 +737,7 @@ def _modem_substitutions(native):
     from data2g.waveform import sync
 
     N, W = native.modem, native.waveform
-    names = ("_crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
+    names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
              "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
              "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate",
@@ -789,8 +789,8 @@ def _modem_substitutions(native):
     def f64(x):
         return np.asarray(x, dtype=np.float64)
 
-    @guarded("_crc6")
-    def _crc6(v):
+    @guarded("crc6")
+    def crc6(v):
         return N.crc6(int(v))
 
     @guarded("header_bits")
@@ -916,7 +916,7 @@ def _modem_substitutions(native):
     return {
         **{(modem, k): guarded(k)(fn) for k, fn in small.items()},
         **{(modem, k): v for k, v in {
-            "_crc6": _crc6, "header_bits": header_bits, "_signs": _signs, "_valid_words": _valid_words,
+            "crc6": crc6, "header_bits": header_bits, "_signs": _signs, "_valid_words": _valid_words,
             "_valid_signs": _valid_signs, "decode_header": decode_header, "modulate": modulate,
             "modulate_bits": modulate_bits, "burst_waveform": burst_waveform, "ace_cells": ace_cells,
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,

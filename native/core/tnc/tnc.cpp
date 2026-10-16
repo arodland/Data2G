@@ -421,10 +421,7 @@ Receiver::Stats Receiver::stats(int64_t w0) {
     Stats out;
     out.mats.reserve(detectors_.size());
     for (auto& [band, d] : detectors_) {
-        if (d.fed < off_) {  // its audio was trimmed away: start over
-            d.reset();
-            d.fed = off_;
-        }
+        if (d.fed < off_) d.restart_at(off_);  // its audio was trimmed away: start over
         auto from = static_cast<std::size_t>(d.fed - off_);
         // A confirmed burst isn't searched, so its audio goes unfed until a search is wanted again (a late
         // flip to unconfirmed): the catch-up is the burst's whole length in one step, and the trim just below
@@ -470,14 +467,12 @@ std::optional<modem::Lock> Receiver::find_copy() const {
         const auto& d = it->d;
         const auto level = d.level();
         if (!level) continue;
-        const int64_t a = std::max(d.c0, off_);  // the stream index both the buffer and C cover from
+        const auto c = d.outputs_from(off_);  // from the stream index both the buffer and C cover
+        const int64_t a = c.start;
         const auto x = std::span<const double>(buf_).subspan(static_cast<std::size_t>(a - off_));
-        const int64_t have = static_cast<int64_t>(d.C(0).size()) - (a - d.c0);
-        const auto cols = static_cast<std::size_t>(
-            std::max<int64_t>(0, std::min(have, static_cast<int64_t>(x.size()) - config::M + 1)));
-        std::vector<const modem::cd*> rows;
-        for (std::size_t i = 0; i < d.bins(); ++i) rows.push_back(d.C(i).data() + (a - d.c0));
-        const auto lock = modem::find_copy(x, band, &accept_, rows, cols, level);
+        const auto cols = static_cast<std::size_t>(std::max<int64_t>(
+            0, std::min(static_cast<int64_t>(c.cols), static_cast<int64_t>(x.size()) - config::M + 1)));
+        const auto lock = modem::find_copy(x, band, &accept_, c.rows, cols, level);
         if (lock && (!best || lock->score > best->score)) {
             best = lock;
             best_k = a - off_;
@@ -591,10 +586,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 for (std::size_t i = 0; i < tail.size(); ++i) sq[i] = tail[i] * tail[i];
                 if (std::sqrt(mean(sq)) < SILENCE_RMS) {
                     trim(keep_);
-                    for (auto& d : detectors_) {  // no noise level in silence: skip it
-                        d.d.reset();
-                        d.d.fed = off_ + len();
-                    }
+                    for (auto& d : detectors_) d.d.restart_at(off_ + len());  // no noise level in silence: skip it
                     break;
                 }
             }

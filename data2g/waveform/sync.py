@@ -77,18 +77,34 @@ class Acquisition:
 NOISE_REF_HZ = (-625.0, 625.0)  # far bins for the noise level only (not searched)
 
 
-def _cfo_grid(reach: float = ACQUIRE_REACH_HZ) -> np.ndarray:
+def cfo_grid(reach: float = ACQUIRE_REACH_HZ) -> np.ndarray:
+    """The searched CFO hypotheses, -reach..reach in STEP_HZ."""
     return np.arange(-reach, reach + STEP_HZ / 2, STEP_HZ)
 
 
-def _repeat_corr(z: np.ndarray, t: np.ndarray, f: float) -> np.ndarray:
+def unit_template(band) -> np.ndarray:
+    """The band's preamble template's repeat window, unit norm: the
+    matched filter (the frame pilot is the same symbol: modem.find_copy)."""
+    t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
+    return t / np.linalg.norm(t)
+
+
+def noise_level(C: np.ndarray) -> float:
+    """The noise level of matched filter outputs C (bins, starts), as
+    _raw_stat reads it per bin (NOISE_QUANTILE of |c_f|^2, scaled to an
+    exponential's mean), the lowest bin's (modem.find_copy, without a
+    StreamDetector's level)."""
+    return float((np.quantile(np.abs(C) ** 2, NOISE_QUANTILE, axis=1) / -np.log(1 - NOISE_QUANTILE)).min())
+
+
+def repeat_corr(z: np.ndarray, t: np.ndarray, f: float) -> np.ndarray:
     """c_f[n] = sum_k z[n+k] conj(t[k] e^{j 2 pi f k / FS})."""
     tf = t * np.exp(2j * np.pi * f * np.arange(M) / FS)
     return signal.fftconvolve(z, np.conj(tf[::-1]), mode="valid")
 
 
-def _repeat_corrs(z: np.ndarray, t: np.ndarray, freqs) -> np.ndarray:
-    """_repeat_corr for every f in `freqs` (multiples of STEP_HZ): one
+def repeat_corrs(z: np.ndarray, t: np.ndarray, freqs) -> np.ndarray:
+    """repeat_corr for every f in `freqs` (multiples of STEP_HZ): one
     forward FFT of z and of the template, then per f one inverse FFT of
     their product with the template's spectrum rolled by f. With the FFT
     length a multiple of FS / STEP_HZ every f is a whole number of bins,
@@ -134,13 +150,12 @@ def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: i
     `outs`: gets each searched bin's matched filter outputs, c_f."""
     band = band or ofdm.band("w")
     repeats = repeats or band.spec.preamble_repeats
-    t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
-    t = t / np.linalg.norm(t)
-    freqs = _cfo_grid(reach)
+    t = unit_template(band)
+    freqs = cfo_grid(reach)
     n_out = len(z) - PREAMBLE_CP - repeats * M + 1
     S = np.empty((len(freqs), n_out))
     q = np.empty(len(freqs) + len(NOISE_REF_HZ))
-    for i, c in enumerate(_repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
+    for i, c in enumerate(repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
         p = np.abs(c) ** 2
         if levels_from is None:
             q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
@@ -184,12 +199,18 @@ class StreamDetector:
 
     def reset(self):
         self.tail = np.zeros(0, dtype=np.complex128)  # the last span - 1 samples fed
-        self.S = np.zeros((len(_cfo_grid(self.reach)), 0))
+        self.S = np.zeros((len(cfo_grid(self.reach)), 0))
         self.s0 = 0  # stream index of the start S[:, 0] is for
         self.fed = 0  # stream index one past the last sample fed
         self.levels: list = []  # per chunk, each bin's noise level
-        self.C = np.zeros((len(_cfo_grid(self.reach)), 0), dtype=np.complex128)  # c_f per stream start
+        self.C = np.zeros((len(cfo_grid(self.reach)), 0), dtype=np.complex128)  # c_f per stream start
         self.c0 = 0  # stream index of C[:, 0]
+
+    def restart_at(self, pos: int):
+        """reset(), the stream resuming at index `pos` (its audio before
+        that trimmed away or skipped)."""
+        self.reset()
+        self.fed = pos
 
     def feed(self, z: np.ndarray):
         """The next baseband samples of the stream (contiguous)."""
@@ -220,6 +241,12 @@ class StreamDetector:
         k = min(max(0, start - self.c0), len(self.C[0]))
         self.C, self.c0 = self.C[:, k:], self.c0 + k
 
+    def outputs_from(self, start: int) -> tuple[int, np.ndarray]:
+        """(a, the kept matched filter outputs c_f for stream starts from
+        a on), a = max(start, c0): the first start both cover."""
+        a = max(self.c0, start)
+        return a, self.C[:, a - self.c0:]
+
     def level(self) -> float | None:
         """The noise level stat() normalizes by (None before any)."""
         return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
@@ -245,17 +272,20 @@ def first_path(
     `peak` that still holds `frac` of its power. `peak` itself if there
     is none.
 
-    `power` is a correlation power profile against a known reference --
-    the pilot fold for the blind path, |template correlation|**2 for the
-    preamble path -- and `peak` its argmax.
+    `power` is a correlation power profile against a known reference
+    (_refine: the repeat-summed |template correlation|**2) and `peak` its
+    argmax. `cyclic` wraps the search around `power`: SSTVAE's blind path
+    used it on a pilot fold; nothing here passes it, the native parity
+    test still covers it.
 
     Why this exists rather than the argmax: on a multipath channel the
     argmax is the *strongest* path, which is not the *first* one, and
     which of the two is stronger changes as the channel fades. Syncing
     to a late path pushes the early path's energy in front of the
-    demodulation window, where the cyclic prefix cannot cover it. See
-    config.FIRST_PATH_SEARCH for the measurements and for why the caller
-    must keep scoring at the argmax rather than here.
+    demodulation window, where the cyclic prefix cannot cover it. The
+    search span and fraction are SSTVAE's (config.FIRST_PATH_SEARCH,
+    FIRST_PATH_FRAC). Only the start moves: acquire scores a detection
+    at the statistic's peak, not here.
 
     The local-maximum requirement is load-bearing and not tidiness. A
     plain "earliest bin above the threshold" walks down the argmax's own
@@ -307,14 +337,13 @@ def _refine(z: np.ndarray, band, n: int, f: float) -> tuple[int, float]:
     CFO: the phase advance between the matched-filter outputs of
     successive repeats (in-band noise only), modulo 50 Hz, the alias
     nearest the grid's f (off by <= STEP_HZ / 2)."""
-    t = band.preamble_template()[PREAMBLE_CP : PREAMBLE_CP + M]
-    t = t / np.linalg.norm(t)
+    t = unit_template(band)
     R, n_pre = band.spec.preamble_repeats, band.spec.preamble_samples
     lo = max(0, n - FIRST_PATH_SEARCH - 8)
     hi = min(len(z) - n_pre, n + 8)
     if hi <= lo:
         return n, f
-    c = _repeat_corr(z[lo : hi + n_pre], t, f)
+    c = repeat_corr(z[lo : hi + n_pre], t, f)
     m = np.arange(hi - lo + 1)
     prof = sum(np.abs(c[m + PREAMBLE_CP + r * M]) ** 2 for r in range(R))
     start = lo + first_path(prof, int(np.argmax(prof)))
@@ -369,7 +398,7 @@ def acquire(
     if S is None:
         S, freqs = detection_stat(z, band, reach)
     else:
-        S, freqs = S.copy(), _cfo_grid(reach)
+        S, freqs = S.copy(), cfo_grid(reach)
     if search is not None:
         s0, s1 = max(0, int(search[0])), min(S.shape[1], int(search[1]))
         if s1 - s0 < 1:

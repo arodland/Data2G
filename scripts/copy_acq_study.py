@@ -3,7 +3,7 @@ the bursts the real receiver missed, lock on the frame pilots after the
 fade and read the header from its copy.
 
 acquire_from_copy:
-1. Frame-pilot detector: the preamble's matched filter (sync._repeat_corrs:
+1. Frame-pilot detector: the preamble's matched filter (sync.repeat_corrs:
    the frame pilot is the preamble's repeat symbol), its outputs one frame
    apart correlated as the preamble's are one repeat apart, over PAIRS
    consecutive pilot pairs, noise-normalized as detection_stat, then
@@ -68,8 +68,8 @@ def pilot_stat(z0: np.ndarray, band: str):
     b = ofdm.band(band)
     t = b.preamble_template()[sync.PREAMBLE_CP:sync.PREAMBLE_CP + sync.M]
     t = t / np.linalg.norm(t)
-    freqs = sync._cfo_grid()
-    C = sync._repeat_corrs(z0, t, list(freqs))
+    freqs = sync.cfo_grid()
+    C = sync.repeat_corrs(z0, t, list(freqs))
     n = C.shape[1] - PAIRS * FRAME_SAMPLES
     if n <= 0:
         return None, freqs

@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <set>
 
 #include "constellation/constellation.hpp"
@@ -13,7 +12,6 @@
 #include "util/pool.hpp"
 #include "cpm/cpm.hpp"
 #include "equalizer/equalizer.hpp"
-#include "waveform/dsp.hpp"
 
 namespace data2g::arq {
 
@@ -160,14 +158,7 @@ std::vector<double> tx_audio(const TxBurst& burst) {
             coded.push_back(codes::encode(static_cast<std::ptrdiff_t>(i) < n_ctl ? ctl_code(md) : data_code(md),
                                           s.payload, s.rv, mask_value(s.mask_id), static_cast<int>(i)));
         }
-        // the bandwidth cap's TX filter (cpm.bandpass): overshoot as CLIP_OVERSHOOT, its last factor repeated
-        const auto& g = cpm::grid_of(*md.cpm);
-        const auto& f = cpm::tx_filter(g, burst.cap);
-        std::vector<double> overshoot(config::CLIP_OVERSHOOT.begin(), config::CLIP_OVERSHOOT.end());
-        overshoot.resize(static_cast<std::size_t>(f.passes), config::CLIP_OVERSHOOT.back());
-        return waveform::tx_condition(cpm::modulate(*md.cpm, coded, n_ctl == 2, burst.cap), g.clip_db, overshoot, 0,
-                                      std::numeric_limits<std::size_t>::max(),
-                                      {g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp});
+        return cpm::bandpass(cpm::grid_of(*md.cpm), cpm::modulate(*md.cpm, coded, n_ctl == 2, burst.cap), burst.cap);
     }
     const auto& s = codes::spec(*md.ofdm);
     std::vector<std::uint8_t> bits;

@@ -189,8 +189,10 @@ def burst_seconds(spec: SubmodeSpec, n_cw: int) -> float:
     return n / FS
 
 
-def _crc6(v: int) -> int:
-    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version."""
+def crc6(v: int) -> int:
+    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version.
+    On air in every header word, v << 6 | crc6(v): the OFDM header's and
+    the CPM header's (cpm.header_word)."""
     reg = PROTOCOL_VERSION & 0x3F
     for i in range(9, -1, -1):
         fb = ((reg >> 5) & 1) ^ ((v >> i) & 1)
@@ -220,7 +222,7 @@ def header_bits(submode: int, n_cw: int, band: str = "w") -> np.ndarray:
     if not 0 <= submode < 1 << (10 - b):
         raise ValueError(f"submode index {submode} does not fit {band}'s header")
     v = (submode << b) | (n_cw - 1)
-    return (_word_bits((v << 6) | _crc6(v)) @ header_code(band)) % 2
+    return (_word_bits((v << 6) | crc6(v)) @ header_code(band)) % 2
 
 
 def _signs(words: np.ndarray, band: str) -> np.ndarray:
@@ -279,7 +281,7 @@ def _valid_words(band: str, accept: Accept | None = None) -> np.ndarray:
     else:
         lim = {SUBMODES[n].index: cw for n, cw in accept.max_cw if SUBMODES[n].sync_band == band}
         v = v[[(i := _split(int(x), band))[0] in lim and i[1] <= lim[i[0]] for x in v]]
-    return (v << 6) | np.array([_crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
+    return (v << 6) | np.array([crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
 
 
 @lru_cache(maxsize=None)
@@ -543,7 +545,7 @@ def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | No
     # frequency-smoothed onto a CP-long delay support (as the backed-off
     # window sees it) before interpolating: genie-sync header failures,
     # wide band, -8 dB AWGN 43% -> 14%, mpd 0 dB 4.7% -> 3.2%
-    h_p = equalizer._freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
+    h_p = equalizer.freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
     ys, hs = y_all[~layout], (1 - a) * h_p[j] + a * h_p[j + 1]
     soft = constellation.llr(ys, hs, np.ones(ys.shape), QPSK)
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
@@ -742,12 +744,10 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
     z0 = to_baseband(np.asarray(x, dtype=np.float64))
-    freqs = _sync._cfo_grid()
+    freqs = _sync.cfo_grid()
     if C is None:
-        t = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
-        C = _sync._repeat_corrs(z0, t / np.linalg.norm(t), list(freqs))
-        level = float((np.quantile(np.abs(C) ** 2, _sync.NOISE_QUANTILE, axis=1)
-                       / -np.log(1 - _sync.NOISE_QUANTILE)).min())
+        C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
+        level = _sync.noise_level(C)
     n = C.shape[1] - COPY_PAIRS * FRAME_SAMPLES
     m = n // FRAME_SAMPLES
     if m < 1:

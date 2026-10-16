@@ -48,8 +48,13 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 
 // repeat_corr for each f in `freqs` (multiples of STEP_HZ), one row each:
 // one FFT of z and of t, then per f an inverse FFT of the product with
-// t's spectrum rolled by whole bins (sync._repeat_corrs).
+// t's spectrum rolled by whole bins (sync.repeat_corrs).
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs);
+
+// The noise level of matched filter outputs C (bins, starts): per bin
+// NOISE_QUANTILE of |c_f|^2 scaled to an exponential's mean, the lowest
+// bin's (modem::find_copy without a StreamDetector's level).
+double noise_level(const Mat<cdouble>& C);
 
 struct RawStat {
     Mat<double> S;             // (grid, starts) before noise normalization
@@ -97,7 +102,11 @@ public:
     explicit StreamDetector(const Band& band, double reach = config::ACQUIRE_REACH_HZ);
 
     void reset();
-    void skip_to(std::int64_t pos);  // jump over the samples before stream index `pos` (>= fed); the noise-level history stays
+    void restart_at(std::int64_t pos);  // reset(), the stream resuming at index `pos`
+    // Native only (tnc.cpp's catch-up after a confirmed burst; Python's
+    // receiver feeds it all): jump over the samples before stream index
+    // `pos` (>= fed), keeping the noise-level history.
+    void skip_to(std::int64_t pos);
     void feed(std::span<const cdouble> z);  // the next contiguous baseband samples
     void trim(std::int64_t start);          // drop starts before stream index `start`
     std::optional<double> level() const;    // the noise level stat() divides by
@@ -107,10 +116,19 @@ public:
     std::span<const double> S(std::size_t bin) const { return std::span(S_[bin]).subspan(s_off_); }  // from s0
     std::span<const cdouble> C(std::size_t bin) const { return std::span(C_[bin]).subspan(c_off_); }  // from c0
 
+    // The kept outputs for stream starts from max(start, c0): that index,
+    // and per bin a pointer to its row there (cols columns each).
+    struct Outputs {
+        std::int64_t start;
+        std::vector<const cdouble*> rows;
+        std::size_t cols;
+    };
+    Outputs outputs_from(std::int64_t start) const;
+
     const Band& band;
     double reach;
     std::int64_t span;
-    // State, public as in Python (the receiver reads and sets `fed`).
+    // State, public as in Python (read-only outside: restart_at / skip_to move `fed`).
     std::vector<cdouble> tail;  // the last span - 1 samples fed
     std::int64_t s0 = 0, fed = 0, c0 = 0;
     std::vector<std::vector<double>> levels;  // per chunk, each bin's level

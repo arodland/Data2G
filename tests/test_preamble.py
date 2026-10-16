@@ -67,7 +67,7 @@ def test_search_reaches_150_hz_and_no_further():
     from data2g.config import ACQUIRE_REACH_HZ
     from data2g.waveform import sync
 
-    g = sync._cfo_grid()
+    g = sync.cfo_grid()
     assert ACQUIRE_REACH_HZ == 150 and g.min() == -150 and g.max() == 150
 
 
