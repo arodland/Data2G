@@ -247,7 +247,6 @@ def _waveform_substitutions(native):
         (ofdm, "preamble_waveform"): w.preamble_waveform,
         (ofdm, "preamble_template"): w.preamble_template,
         (ofdm, "pilot_sequence"): lambda: w.pilot,
-        (modem, "PILOT"): w.pilot,
         (dsp, "to_baseband"): to_baseband,
         (dsp, "freq_correct"): freq_correct,
         (dsp, "tx_condition"): tx_condition,

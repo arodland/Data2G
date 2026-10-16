@@ -1,15 +1,38 @@
 """Burst modem: codeword payloads <-> passband audio.
 
-Burst: silence | preamble | header | n_cw codewords of whole frames |
-closing pilot | silence. Frames are SSTVAE's (1 pilot + 5 data symbols,
-every carrier of the submode's band). The closing pilot is one extra pilot symbol so
-the last frame is interpolated between two pilots rather than
-extrapolated from one; it costs 24 ms and matters most to short bursts.
+Burst on air: silence | preamble | header | n_cw codewords of whole frames
+(on w and w48 a header copy's frame among them) | closing pilot | silence.
+Frames are SSTVAE's (1 pilot + 5 data symbols, every carrier of the
+submode's band). The closing pilot is one extra pilot symbol so the last
+frame is interpolated between two pilots rather than extrapolated from
+one; it costs 24 ms and matters most to short bursts. A submode's frames
+may be on other carriers than its preamble and header, which are its sync
+band's (config.BandSpec.sync).
 
-RX follows SSTVAE's `Modem.demodulate`: preamble acquisition, channel
-reference from the preamble, soft-combined Golay header, per-frame
-sample-clock tracking from the pilot phase slope. Channel estimation is
-data2g.equalizer (burst-wide, 2-D LMMSE), not SSTVAE's Catmull-Rom.
+Sections, in file order:
+- burst timing: header_layout .. burst_seconds, arithmetic on config.
+- header: a (N, 16) linear code (codes_data/header_code*.npy) over
+  submode | n_cw - 1 | CRC-6, ML-decoded over the valid words only; Accept
+  narrows which words count.
+- transmit: modulate, modulate_bits, burst_waveform, ACE.
+- receive, search: _best_header tries each preamble hypothesis at +-2
+  repeat alignments, reading a header at each (_read_header). Offline,
+  receive() searches x itself. A streaming receiver (tnc.Receiver) calls
+  find_burst, confirms the lock with pilot_coherence, finds a burst whose
+  preamble faded with find_copy (from the header copy), then hands
+  receive() the head or the lock.
+- receive, frames: _demod_frames (sample-clock tracking from the pilots,
+  timing slips), receive() up to the channel estimate and raw symbols.
+- decode: data_channel, noise_var, soft_bits, decode_received.
+
+receive()'s result is what tnc.Receiver and arq/phy build on;
+decode_received is the plain decode of it (no CRC masks).
+Channel estimation is data2g.equalizer (burst-wide, 2-D LMMSE), not
+SSTVAE's Catmull-Rom.
+
+Native: native/core/modem/modem.hpp (this module; results as structs),
+modem/timing.hpp (burst timing), generated/modem.hpp (the constants and
+header codes, written by tools/gen_native_tables.py).
 """
 
 from dataclasses import dataclass, replace
@@ -49,9 +72,8 @@ from .waveform import sync as _sync
 from .waveform.dsp import freq_correct, to_baseband, tx_condition
 from .waveform.sync import SyncError, acquire
 
-__all__ = ["modulate", "demodulate", "receive", "Burst", "SyncError"]
-
-PILOT = ofdm.pilot_sequence()  # wide band's; per-band code uses band.pilot
+# The receiver's constants are mirrored into native/core/generated/modem.hpp
+# (tools/gen_native_tables.py modem_hpp names them): regenerate after a change.
 REF_REPEATS = 4
 # The header is read before the delay profile is known, at acquisition's
 # timing: window centred in the CP, so timing may be off by +-16 samples
@@ -103,11 +125,6 @@ BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}
 SYNC_BANDS = [name for name, b in BANDS.items() if not b.sync]
 
 
-def _hosts(band: str) -> bool:
-    """Whether other bands' frames follow this band's header."""
-    return any(b.sync == band for b in BANDS.values())
-
-
 @dataclass
 class Burst:
     submode: SubmodeSpec
@@ -119,20 +136,11 @@ class Burst:
     soft: np.ndarray | None = None  # (n_cw, coded_bits) soft bits, mapping order: codes.combine for resends
 
 
-# --- header -----------------------------------------------------------------
-# Per band: 16 bits coded to 2 * nc * header_syms bits on QPSK, decoded by
-# exact ML (config: header). Codes from scripts/design_header.py.
+# --- burst timing (native: modem/timing.hpp) ----------------------------------
 
-QPSK = constellation.gray_qam(2)
-
-
-@lru_cache(maxsize=None)
-def header_code(band: str) -> np.ndarray:
-    name = "header_code.npy" if band == "w" else f"header_code_{band}.npy"
-    g = np.load(Path(__file__).parent / "codes_data" / name)
-    b = BANDS[band]
-    assert g.shape == (16, 2 * b.nc * b.header_syms), (band, g.shape)
-    return g
+def _hosts(band: str) -> bool:
+    """Whether other bands' frames follow this band's header."""
+    return any(b.sync == band for b in BANDS.values())
 
 
 def header_layout(band: str) -> np.ndarray:
@@ -187,6 +195,22 @@ def burst_seconds(spec: SubmodeSpec, n_cw: int) -> float:
     n = (LEADIN_SAMPLES + sb.preamble_samples + header_samples(spec.sync_band)
          + (frames_on_air(spec, n_cw) * SYMS_PER_FRAME + 1) * NSYM + LEADOUT_SAMPLES)
     return n / FS
+
+
+# --- header -----------------------------------------------------------------
+# Per band: 16 bits coded to 2 * nc * header_syms bits on QPSK, decoded by
+# exact ML (config: header). Codes from scripts/design_header.py.
+
+QPSK = constellation.gray_qam(2)
+
+
+@lru_cache(maxsize=None)
+def header_code(band: str) -> np.ndarray:
+    name = "header_code.npy" if band == "w" else f"header_code_{band}.npy"
+    g = np.load(Path(__file__).parent / "codes_data" / name)
+    b = BANDS[band]
+    assert g.shape == (16, 2 * b.nc * b.header_syms), (band, g.shape)
+    return g
 
 
 def crc6(v: int) -> int:
@@ -758,8 +782,9 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     mag = np.abs(fold).max(axis=0)
     # on noise each product's magnitude is about the level, and the m x
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
-    # search's CPU) only past COPY_DETECT
-    find_copy.peak = float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
+    # search's CPU) only past COPY_DETECT. Left on the function for tests
+    # (instrumentation, not an interface: native returns it by out-param)
+    find_copy.peak =float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
     if find_copy.peak < COPY_DETECT:
         return None
     grids = []
