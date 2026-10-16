@@ -1,4 +1,4 @@
-// data2g-host's rig options (app/station.*): what the flags set, how the
+// data2g-host's rig options (app/options.*): what the flags set, how the
 // legacy --rigctld-host/--rigctld-port map onto Hamlib model 2, the mapping
 // to HamlibConfig, and check()'s messages. The usage errors (which exit)
 // are tested on the binary, in tests/test_native_host_e2e.py.
@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "app/station.hpp"
+#include "app/options.hpp"
 #include "check.hpp"
 
 using namespace data2g;

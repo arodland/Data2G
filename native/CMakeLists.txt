@@ -151,14 +151,22 @@ if(DATA2G_BUILD_RIG)
 endif()
 
 # --- apps ----------------------------------------------------------------------
-# data2g_station: the runtime both apps share (app/station.*: options,
-# servers, engine thread, audio, PTT). Qt Core + Network, never Widgets.
+# data2g_applog: the apps' log and quit signals (app/log.*). No Qt, so the
+# core-only tools log as the host does.
+add_library(data2g_applog STATIC app/log.cpp)
+target_include_directories(data2g_applog PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(data2g_applog PUBLIC data2g_core)
+
+# data2g_station: the runtime both apps share (app/station.*, with its
+# options, TCP servers and plot conversion beside it). Qt Core + Network,
+# never Widgets.
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/realtime.cpp)
+    add_library(data2g_station STATIC app/station.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
+                                      app/realtime.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(data2g_station PUBLIC data2g_core Qt6::Core Qt6::Network)
+    target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
     target_compile_definitions(data2g_station PUBLIC QT_NO_KEYWORDS)  # the core has members named slots
     # RealtimeKit (real-time scheduling for the audio threads) is a D-Bus service: Linux, when Qt has DBus
     if(UNIX AND NOT APPLE AND NOT ANDROID)
