@@ -1,5 +1,5 @@
 // data2g.arq values <-> Python, shared by the arq bindings: bytes, mask
-// ids, link.TxBurst, predictor measurement dicts.
+// ids, link.TxBurst, predictor measurement dicts, received bursts.
 #pragma once
 
 #include "arq/engine.hpp"
@@ -19,6 +19,15 @@ std::shared_ptr<arq::Rng> py_rng(py::object o);
 std::shared_ptr<arq::Session> py_session(const std::string& call, std::shared_ptr<arq::Policy> policy,
                                          std::shared_ptr<arq::Rng> rng, const std::vector<std::string>& aliases,
                                          double stats_interval_s);
+
+// A received burst, modem.receive's / cpm.receive's dict, as the PHY's
+// Heard; its soft bits, made once and cached in r["_soft"] in Python's
+// format; a Python clock (None: monotonic). bind_arq_phy.cpp, used by
+// bind_kisslink.cpp too.
+arq::Heard heard_of(const py::dict& r);
+py::object soft_py(const arq::Heard& h, const arq::SlotSoft& s);
+std::shared_ptr<const arq::SlotSoft> cached_soft(py::dict r, const arq::Heard& h);
+std::function<double()> clock_of(const py::object& c);
 
 using arq::Bytes;
 using arq::MaskId;

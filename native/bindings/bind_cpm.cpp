@@ -1,3 +1,5 @@
+// data2g.cpm over native/core/cpm. Grids and specs cross by name
+// (tests/native_subs/cpm.py restores the Python objects).
 #include "convert.hpp"
 #include "cpm/cpm.hpp"
 

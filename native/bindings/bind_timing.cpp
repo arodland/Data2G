@@ -1,3 +1,5 @@
+// data2g.modem's burst timing (native/core/modem/timing.hpp) as
+// data2g_native.timing: bands and submodes by name.
 #include "convert.hpp"
 #include "modem/timing.hpp"
 

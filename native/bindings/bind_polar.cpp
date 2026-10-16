@@ -1,3 +1,5 @@
+// data2g.polar over native/core/polar: PolarCode, the CA-SCL decoder and
+// the GA designs compiled in.
 #include "convert.hpp"
 #include "polar/polar.hpp"
 
