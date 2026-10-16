@@ -14,9 +14,11 @@ A calls B, both send `--warm` bytes, then A writes `--bytes` of random
 data at once; the time runs from that write until A holds every byte
 acked (B's copy checked). As run.sh with A_BYTES=n, B_BYTES=0, without Pat.
 With `--reverse`, B (the callee) writes the bulk data and A receives it: as
-A_BYTES=0, B_BYTES=n.
+A_BYTES=0, B_BYTES=n. With `--both`, both write at once, A ceil(n/2) bytes
+and B floor(n/2), and the time runs until both hold all of theirs acked (and
+both copies checked).
 
-    python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0] [--reverse]
+    python scripts/cpu_profile/speedtest.py <awgn|mpg|mpp|mpd|mps | doppler_hz:delay_ms> <snr_db> [--bytes 20000] [--seed 0] [--reverse | --both]
 """
 import argparse
 import logging
@@ -52,8 +54,18 @@ def log_arg(ap):
     ap.add_argument("--log-level", default="ERROR", help="data2g's log on stderr (the host's is INFO)")
 
 
-def reverse_arg(ap):
-    ap.add_argument("--reverse", action="store_true", help="the callee sends the bulk data, the caller receives")
+def direction_arg(ap):
+    """--reverse / --both -> a.direction: who sends the bulk data."""
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--reverse", dest="direction", action="store_const", const="reverse", default="forward",
+                   help="the callee sends the bulk data, the caller receives")
+    g.add_argument("--both", dest="direction", action="store_const", const="both",
+                   help="both send at once, half the bytes each (the caller the odd one)")
+
+
+def direction_tag(direction):
+    """'' for forward, else ' reverse' / ' both'."""
+    return "" if direction == "forward" else f" {direction}"
 
 
 def log_setup(a):
@@ -98,9 +110,12 @@ class Side:
 
 
 def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=3600.0, record=None,
-        reverse=False):
+        direction="forward"):
     """-> dict: phase reached ('done' or where it failed), times, rates.
-    reverse: the callee (B) sends the bulk data, not the caller (A)."""
+    direction: who sends the bulk data: 'forward' the caller (A), 'reverse'
+    the callee (B), 'both' each half of it at once (A the odd byte); then
+    seconds is until both are done, and seconds_a/seconds_b each one's."""
+    assert direction in ("forward", "reverse", "both"), direction
     fade = None
     if chan != "awgn":
         dop, dly = (map(float, chan.split(":")) if ":" in chan else
@@ -137,22 +152,39 @@ def run(chan, snr, nbytes, seed=0, warm=32, cap=2, latency=LATENCY_S, limit_s=36
     if not until(lambda: len(got_b) >= warm and len(got_a) >= warm and a.unacked() == b.unacked() == 0):
         return dict(res, phase="exchange", t=a.eng.now)
     assert bytes(got_b) == wa and bytes(got_a) == wb, "warm-up data corrupted"
-    data = rng.bytes(nbytes)
-    tx, got = (b, got_a) if reverse else (a, got_b)
-    got.clear()
-    tx.airtime.clear()
+    n_a = {"forward": nbytes, "reverse": 0, "both": (nbytes + 1) // 2}[direction]
+    # (name, sender, its data, what the other side has read of it), for each side that sends
+    flows = [(k, tx, rng.bytes(n), got) for k, tx, n, got in (("a", a, n_a, got_b), ("b", b, nbytes - n_a, got_a))
+             if n]
+    for _, tx, _, got in flows:
+        got.clear()
+        tx.airtime.clear()
     t0 = a.eng.now
-    tx.eng.session.write(data)
-    if not until(lambda: tx.unacked() == 0 and len(got) >= nbytes):
-        return dict(res, phase="bulk", t=a.eng.now, delivered=len(got))
-    assert bytes(got) == data, "bulk data corrupted"
+    for _, tx, data, _ in flows:
+        tx.eng.session.write(data)
+    finished = {}  # name -> seconds from t0 until its sender held all of it acked and the other read it
+
+    def all_done():
+        for k, tx, data, got in flows:
+            if k not in finished and tx.unacked() == 0 and len(got) >= len(data):
+                finished[k] = a.eng.now - t0
+        return len(finished) == len(flows)
+
+    if not until(all_done):
+        return dict(res, phase="bulk", t=a.eng.now, delivered=sum(len(got) for *_, got in flows))
+    for _, _, data, got in flows:
+        assert bytes(got) == data, "bulk data corrupted"
     dt = a.eng.now - t0
+    airtime = {}  # pooled over the senders
+    for _, tx, _, _ in flows:
+        for k, v in tx.airtime.items():
+            airtime[k] = airtime.get(k, 0.0) + v
     return dict(res, phase="done", t=a.eng.now, seconds=dt, bps=8 * nbytes / dt, bpm=60 * nbytes / dt,
-                airtime=tx.airtime)
+                airtime=airtime, **{f"seconds_{k}": v for k, v in finished.items()})
 
 
 def top2(airtime: dict) -> str:
-    """The sender's two most-used submodes, as % of its airtime."""
+    """The sender's (senders') two most-used submodes, as % of its airtime."""
     tot = sum(airtime.values()) or 1.0
     return ", ".join(f"{k} {100 * v / tot:.0f}%" for k, v in sorted(airtime.items(), key=lambda kv: -kv[1])[:2])
 
@@ -168,15 +200,17 @@ def main():
     ap.add_argument("--latency", type=float, default=LATENCY_S, help="one-way audio latency, s")
     ap.add_argument("--record", metavar="DIR", help="record both stations (DIR/rec_a, rec_b), as data2g-host does")
     ap.add_argument("--limit", type=float, default=3600.0, help="give up after this much simulated time, s")
-    reverse_arg(ap)
+    direction_arg(ap)
     log_arg(ap)
     a = ap.parse_args()
     log_setup(a)
-    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record, a.reverse)
-    head = f"{a.channel} {a.snr:g} dB seed {a.seed}{' reverse' if a.reverse else ''}:"
+    r = run(a.channel, a.snr, a.bytes, a.seed, a.warm, BW["BW" + a.bw], a.latency, a.limit, a.record, a.direction)
+    head = f"{a.channel} {a.snr:g} dB seed {a.seed}{direction_tag(a.direction)}:"
     if r["phase"] == "done":
+        each = (f"; A->B {r['seconds_a']:.1f} s, B->A {r['seconds_b']:.1f} s"
+                if "seconds_a" in r and "seconds_b" in r else "")
         print(f"{head} {a.bytes} B in {r['seconds']:.1f} s = {r['bps']:.0f} bit/s = {r['bpm']:.0f} B/min"
-              f" (connected at {r['t_connect']:.1f} s; {top2(r['airtime'])})")
+              f" (connected at {r['t_connect']:.1f} s{each}; {top2(r['airtime'])})")
     else:
         extra = f", {r['delivered']} of {a.bytes} B delivered" if r["phase"] == "bulk" else ""
         print(f"{head} FAILED during {r['phase']} at {r['t']:.1f} s{extra}")
