@@ -128,7 +128,7 @@ public:
     virtual std::pair<std::string, int> choose(Station& st, int escalation) = 0;
     virtual int payload_bytes(const std::string& submode) = 0;
     virtual int ctl_payload_bytes(const std::string& submode) { return payload_bytes(submode); }
-    virtual int max_ctl(const std::string&) { return 4; }
+    virtual int max_ctl(const std::string&) { return MAX_CTL; }
     virtual std::optional<Recommendation> recommend(Station&) { return std::nullopt; }  // nullopt: none (0, 1, -)
     virtual bool want_dup() { return false; }
     virtual int rv_cycle(const std::string& submode) = 0;

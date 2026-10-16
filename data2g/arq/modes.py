@@ -4,6 +4,7 @@ family: burst length, control codeword, how a burst goes on air."""
 
 from .. import codes, cpm, modem
 from ..config import SUBMODES
+from .frames import MAX_CTL
 
 MODES = {**SUBMODES, **cpm.SPECS}
 
@@ -29,7 +30,7 @@ def ctl_payload_bytes(spec) -> int:
 def max_ctl(spec) -> int:
     """Control codewords a burst may carry: CPM's header can say only one
     (twice when duplicated)."""
-    return 1 if is_cpm(spec) else 4
+    return 1 if is_cpm(spec) else MAX_CTL
 
 
 def min_cw(spec, data: bool) -> int:

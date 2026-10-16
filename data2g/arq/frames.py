@@ -13,6 +13,7 @@ BITMAP_BITS = 64  # the bitmap extension's width (MAX_CODEWORDS)
 # bits: tests/test_arq.py test_full_window_bursts)
 WINDOW = SEQ_MOD // 2 - 1
 BURST_MOD = 8
+MAX_CTL = 4  # control codewords a burst may have: the core's 2-bit n_ctl
 
 # frame types (core word)
 # ARQ_DUP: an ARQ burst whose control codewords each go twice, RV 0 then
@@ -21,7 +22,8 @@ BURST_MOD = 8
 ARQ, SESSION, PROBE, ARQ_DUP = 0, 1, 2, 3
 # extension types
 T_PAD, T_NEW, T_ABANDON, T_RV, T_BITMAP, T_RESYNC, T_REPORT, T_SURVEY, T_SOUND, T_BUFFER = range(10)
-T_REPLY = 11  # recommended submode for the peer's control-only bursts (10 is session.T_SESS)
+T_SESS = 10  # a session frame's body (data2g.arq.session)
+T_REPLY = 11  # recommended submode for the peer's control-only bursts
 T_CHAT = 12  # empty: the sender's host has CHAT ON (latency over throughput, docs/arq.md §9)
 CHAT_LINE_BYTES = 200  # CHAT ON plans for at least a chat line; T_BUFFER is sent only above it
 T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the burst's receiver
@@ -49,7 +51,7 @@ BANDS_CODE = {"w": 0, "n10": 1, "w48": 2}  # sync bands, 2 bits
 @dataclass
 class Core:
     ftype: int = ARQ  # 2 bits
-    n_ctl: int = 1  # 1-4 control codewords
+    n_ctl: int = 1  # 1-MAX_CTL control codewords
     burst_seq: int = 0  # 3 bits
     acted_on: int = 0  # 3 bits: peer burst seq whose ACK this burst acts on
     cum: int = 0  # 7 bits: next peer seq this station expects
@@ -59,7 +61,7 @@ class Core:
     size_hint: int = 1  # 2 bits: shrink / hold / grow / max
 
     def pack(self) -> bytes:
-        assert 1 <= self.n_ctl <= 4 and 0 <= self.k < 64
+        assert 1 <= self.n_ctl <= MAX_CTL and 0 <= self.k < 64
         v = self.ftype
         for val, bits in ((self.n_ctl - 1, 2), (self.burst_seq, 3), (self.acted_on, 3), (self.cum, 7),
                           (int(self.reply_lost), 1), (self.k, 6), (self.recommend, 6), (self.size_hint, 2)):
@@ -90,8 +92,8 @@ class Control:
         body = b"".join(bytes([t, len(v)]) + v for t, v in sorted(self.ext.items()))
         total = 4 + len(body)
         n = max(1, -(-total // payload_bytes))
-        if n > 4:
-            raise ValueError(f"control needs {n} codewords of {payload_bytes} B (max 4)")
+        if n > MAX_CTL:
+            raise ValueError(f"control needs {n} codewords of {payload_bytes} B (max {MAX_CTL})")
         self.core.n_ctl = n
         stream = self.core.pack() + body
         stream += bytes(n * payload_bytes - len(stream))

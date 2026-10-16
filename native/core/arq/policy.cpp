@@ -311,7 +311,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
     const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
     const bool chat = st.chat;
-    const std::int64_t queued = std::max<std::int64_t>(CHAT_BYTES, st.peer_queued);
+    const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
     const Mode* best = nullptr;
     int best_hint = 0;
     double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;

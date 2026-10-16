@@ -25,7 +25,6 @@ inline constexpr double TIMEOUT_S = 1.0 + 1.0 + 1.5;
 inline constexpr double PREV_MAX_S = 30.0;
 inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
 inline constexpr double DUP_BELOW = 0.9;
-inline constexpr int CHAT_BYTES = 200;  // frames.CHAT_LINE_BYTES
 inline constexpr double CPM_SIZE_SCALE = 4.0;
 inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
 inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply

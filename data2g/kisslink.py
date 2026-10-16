@@ -281,7 +281,7 @@ class KissLink:
         fit the mode's control codewords."""
         spec = MODES[mode]
         need = 1 + len(self._group_tlv(n, p)) + (len(_tlv(T_REPORTS, bytes(2))) if auto else 0)  # reports: the sender at least
-        if need > min(4, max_ctl(spec)) * ctl_payload_bytes(spec):
+        if need > min(F.MAX_CTL, max_ctl(spec)) * ctl_payload_bytes(spec):
             raise ValueError(f"mode {mode}: a {need}-byte control doesn't fit")
 
     def _drop(self, which, port: int):
@@ -344,7 +344,7 @@ class KissLink:
     def _control(self, spec, n: int, port: Port, sender: int) -> list[bytes]:
         """Control codeword payloads: header, the group, and on a shifting
         port as many fresh reports as fit."""
-        pb, n_max = ctl_payload_bytes(spec), min(4, max_ctl(spec))
+        pb, n_max = ctl_payload_bytes(spec), min(F.MAX_CTL, max_ctl(spec))
         body = self._group_tlv(n, port)
         if port.auto:
             now = self.clock()

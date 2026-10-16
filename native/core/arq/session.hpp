@@ -21,7 +21,6 @@
 
 namespace data2g::arq {
 
-inline constexpr int T_SESS = 10;
 inline constexpr int VERSION = 3;
 inline constexpr int CONNECT_TRIES = 5;
 inline constexpr int CONNECT_CTL_BYTES = 28;  // a CONNECT's Control: core 4, T_SESS header 2, body 22

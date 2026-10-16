@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from . import frames as F
 from . import link as L
 
-T_SESS = 10  # extension type carrying a session frame
+T_SESS = F.T_SESS  # the extension carrying a session frame
 VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 28  # a CONNECT's Control: core 4, T_SESS header 2, body 22
@@ -415,7 +415,7 @@ class Session:
         if body[0] == F.CONNECT and self._compact(mode):
             slots = [L.Slot(L.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
         else:
-            ctl = F.Control(F.Core(ftype=F.SESSION), {T_SESS: body}).pack(cpb)
+            ctl = F.Control(F.Core(ftype=F.SESSION), {F.T_SESS: body}).pack(cpb)
             slots = [L.Slot(L.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
@@ -426,7 +426,7 @@ class Session:
         Control envelope it needs more codewords than the mode's control
         may have (CPM: one of 20 B)."""
         cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
-        return -(-CONNECT_CTL_BYTES // cpb) > getattr(self.policy, "max_ctl", lambda m: 4)(mode)
+        return -(-CONNECT_CTL_BYTES // cpb) > getattr(self.policy, "max_ctl", lambda m: F.MAX_CTL)(mode)
 
     def _connect_burst(self) -> L.TxBurst:
         body = (bytes([F.CONNECT, VERSION]) + F.pack_call(self.call) + F.pack_call(self.peer)
@@ -476,7 +476,7 @@ class Session:
                     return None
                 payloads.append(p)
             try:
-                body = F.Control.unpack(payloads).ext.get(T_SESS, b"")
+                body = F.Control.unpack(payloads).ext.get(F.T_SESS, b"")
             except ValueError as e:
                 log.warning("RX malformed session frame (%s): dropped", e)
                 return None

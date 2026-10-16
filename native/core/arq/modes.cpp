@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "arq/frames.hpp"
 #include "codes/codes.hpp"
 #include "cpm/cpm.hpp"
 #include "modem/timing.hpp"
@@ -42,7 +43,7 @@ int ctl_payload_bytes(const Mode& m) {
     return m.is_cpm() ? codes::payload_bytes(cpm::ctl(cpm::grid_of(*m.cpm))) : codes::payload_bytes(*m.ofdm);
 }
 
-int max_ctl(const Mode& m) { return m.is_cpm() ? 1 : 4; }
+int max_ctl(const Mode& m) { return m.is_cpm() ? 1 : MAX_CTL; }
 
 int min_cw(const Mode& m, bool data) { return data && m.is_cpm() ? 2 : 1; }
 

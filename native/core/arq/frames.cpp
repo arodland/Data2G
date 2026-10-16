@@ -18,7 +18,7 @@ std::uint8_t at(ByteView b, std::size_t i) {
 // --- core word ----------------------------------------------------------------
 
 Bytes Core::pack() const {
-    if (!(1 <= n_ctl && n_ctl <= 4 && 0 <= k && k < 64) || ftype < 0 || ftype > 3)
+    if (!(1 <= n_ctl && n_ctl <= MAX_CTL && 0 <= k && k < 64) || ftype < 0 || ftype > 3)
         throw std::logic_error("Core.pack: field out of range");
     std::uint32_t v = static_cast<std::uint32_t>(ftype);
     const std::pair<int, int> fields[] = {{n_ctl - 1, 2}, {burst_seq, 3}, {acted_on, 3}, {cum, 7},
@@ -63,9 +63,9 @@ std::vector<Bytes> Control::pack(int payload_bytes) {
     }
     const auto total = static_cast<std::int64_t>(4 + body.size());
     const auto n = std::max<std::int64_t>(1, ceil_div(total, payload_bytes));
-    if (n > 4)
+    if (n > MAX_CTL)
         throw std::invalid_argument("control needs " + std::to_string(n) + " codewords of " +
-                                    std::to_string(payload_bytes) + " B (max 4)");
+                                    std::to_string(payload_bytes) + " B (max " + std::to_string(MAX_CTL) + ")");
     core.n_ctl = static_cast<int>(n);
     Bytes stream = core.pack();
     stream.insert(stream.end(), body.begin(), body.end());

@@ -26,12 +26,15 @@ inline constexpr int SEQ_MOD = 1 << SEQ_BITS;
 inline constexpr int BITMAP_BITS = 64;
 inline constexpr int WINDOW = SEQ_MOD / 2 - 1;
 inline constexpr int BURST_MOD = 8;
+inline constexpr int MAX_CTL = 4;  // control codewords a burst may have: the core's 2-bit n_ctl
 
 // frame types (core word)
 inline constexpr int ARQ = 0, SESSION = 1, PROBE = 2, ARQ_DUP = 3;
 // extension types
 inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4, T_RESYNC = 5, T_REPORT = 6,
-                     T_SURVEY = 7, T_SOUND = 8, T_BUFFER = 9, T_REPLY = 11, T_CHAT = 12, T_CQ = 13, T_DUPCTL = 14,
+                     T_SURVEY = 7, T_SOUND = 8, T_BUFFER = 9,
+                     T_SESS = 10,  // a session frame's body (arq/session.hpp)
+                     T_REPLY = 11, T_CHAT = 12, T_CQ = 13, T_DUPCTL = 14,
                      T_COMP = 15,
                      T_ID = 16,  // packed callsign + session key: an ID frame (docs/arq.md §7a), mask 0
                      T_DRAINED = 17;  // empty: this burst's new codewords end the sender's queued data
@@ -54,7 +57,7 @@ std::uint8_t at(ByteView b, std::size_t i);
 
 struct Core {
     int ftype = ARQ;     // 2 bits
-    int n_ctl = 1;       // 1-4 control codewords
+    int n_ctl = 1;       // 1-MAX_CTL control codewords
     int burst_seq = 0;   // 3 bits
     int acted_on = 0;    // 3 bits
     int cum = 0;         // 7 bits

@@ -24,6 +24,7 @@ from ..config import max_codewords
 from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
 from . import frames as F
 from . import predictor as P
+from .session import LINK_LOST_S
 
 SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
@@ -50,16 +51,14 @@ NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR)
 if BIAS_FIX:
     BIAS_MAX = 6.0
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
-CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
 # helped run out the 90 s link-lost clock)
 CPM_MAX_S = 24.0
-# a lost data burst spends the session's link-lost clock (session.LINK_LOST_S);
+# a lost data burst spends the session's link-lost clock (LINK_LOST_S);
 # recovering takes polls of about T_RECOVER_S each, and a session that runs
 # out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
-LINK_LOST_S = 90.0
 T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
 LOST_LINK_COST_S = 300.0
 REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
@@ -482,7 +481,7 @@ class GearShifter:
         # bursts, a line in the fewest codewords (a VARA client with CHAT ON
         # sent a file 242 bytes per burst when this planned for 200 B always)
         chat = station.chat or station.peer_chat
-        queued = max(CHAT_BYTES, getattr(station, "peer_queued", 0))
+        queued = max(F.CHAT_LINE_BYTES, getattr(station, "peer_queued", 0))  # a chat line at least
         if chat:
             best_v = -float("inf")
         data_cands = cands

@@ -384,7 +384,7 @@ class Station:
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
         cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(submode)
-        max_ctl = getattr(self.policy, "max_ctl", lambda m: 4)(submode)
+        max_ctl = getattr(self.policy, "max_ctl", lambda m: F.MAX_CTL)(submode)
         ext = {}
         reset = None
         stale, self._stale = self._stale, False
