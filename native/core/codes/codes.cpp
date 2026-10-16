@@ -261,20 +261,28 @@ const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent) {
     return *d;
 }
 
-const polar::PolarCode& polar_code(const Spec& s) {
+namespace {
+
+// s's cache entry with its polar code built; cache_mutex held.
+Codecs& polar_entry(const Spec& s) {
     if (!s.polar) throw std::invalid_argument(std::string(s.name) + " is not polar");
-    std::lock_guard lock(cache_mutex);
     auto& c = cache[&s];
     if (!c.polar) c.polar.emplace(s.k, s.coded_bits, s.info_pos);
-    return *c.polar;
+    return c;
+}
+
+}  // namespace
+
+const polar::PolarCode& polar_code(const Spec& s) {
+    std::lock_guard lock(cache_mutex);
+    return *polar_entry(s).polar;
 }
 
 const polar::SCLDecoder& polar_decoder(const Spec& s) {
-    const auto& code = polar_code(s);
-    std::lock_guard lock(cache_mutex);
-    auto& d = cache[&s].scl;
-    if (!d) d = std::make_unique<polar::SCLDecoder>(code, POLAR_LIST);
-    return *d;
+    std::lock_guard lock(cache_mutex);  // once: the decoder is fetched per decode
+    auto& c = polar_entry(s);
+    if (!c.scl) c.scl = std::make_unique<polar::SCLDecoder>(*c.polar, POLAR_LIST);
+    return *c.scl;
 }
 
 int rv_cycle(const Spec& s) { return s.polar ? 1 : 4; }

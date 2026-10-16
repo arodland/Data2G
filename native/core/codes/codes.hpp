@@ -135,7 +135,7 @@ struct Payload {
     bool ok;  // CRC matches and the decoder converged
 };
 
-// Decoded (scrambled) info bits -> payloads (codes._payloads).
+// Decoded (scrambled) info bits -> payloads (codes.payloads).
 std::vector<Payload> payloads(const Spec& s, const Mat<std::uint8_t>& bits, std::span<const std::uint8_t> converged,
                               std::span<const std::uint32_t> masks = {}, std::span<const int> index = {});
 
