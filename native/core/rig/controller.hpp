@@ -142,10 +142,12 @@ public:
     // `operation_timeout_s`.
     void set_ptt(bool on);
 
-    // A `tx::Ptt` for `TxEngine`. Keeps working across `start`/`stop`:
-    // keying with no session throws RigError, which the engine reports
-    // and treats as a failure to key -- the right answer for a
-    // transmission that cannot key the radio.
+    // A `rig::Keyer::Ptt`: set_ptt with the transmit interlock around it.
+    // Polling pauses before the key and resumes after the unkey (even a
+    // failed one), so no poll sits between them or delays the off. Keeps
+    // working across `start`/`stop`: keying with no session throws
+    // RigError, which the Keyer reports and treats as a failure to key --
+    // the right answer for a transmission that cannot key the radio.
     std::function<void(bool)> ptt_function();
 
     // Whether this session's rig opened and a PTT on was then sent to it
@@ -154,9 +156,9 @@ public:
     // unkey (and waiting on one that never opened costs the full timeout).
     bool keyed_since_open() const;
 
-    // Transmit interlock. Polling stops while keyed: the answer is not
-    // interesting mid-over, and some rigs dislike CAT traffic while
-    // transmitting.
+    // Transmit interlock (ptt_function() uses it). Polling stops while
+    // keyed: the answer is not interesting mid-over, and some rigs dislike
+    // CAT traffic while transmitting.
     void pause_polling();
     void resume_polling();
 

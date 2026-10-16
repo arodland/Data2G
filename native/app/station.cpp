@@ -502,21 +502,9 @@ void Station::start() {
             rig_->start(rig::make_hamlib_backend(hc), rc);
             rig::RigController* r = rig_.get();
             if (hc.ptt_method != rig::PttMethod::Vox) {
-                // no polls while keyed; resumed after the off, so none delays it
-                ptt = [r](bool on) {
+                ptt = [set = r->ptt_function()](bool on) {  // no polls while keyed
                     logf(DEBUG, "PTT %s", on ? "on" : "off");
-                    if (on) {
-                        r->pause_polling();
-                        r->set_ptt(true);
-                        return;
-                    }
-                    try {
-                        r->set_ptt(false);
-                    } catch (...) {
-                        r->resume_polling();
-                        throw;
-                    }
-                    r->resume_polling();
+                    set(on);
                 };
                 must_release = [r] { return r->keyed_since_open(); };
             }

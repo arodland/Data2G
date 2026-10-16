@@ -354,7 +354,21 @@ bool RigController::keyed_since_open() const {
 }
 
 std::function<void(bool)> RigController::ptt_function() {
-    return [this](bool on) { set_ptt(on); };
+    return [this](bool on) {
+        if (on) {
+            pause_polling();
+            set_ptt(true);
+            return;
+        }
+        // resumed after the off, so no poll delays it; and resumed even if the off failed
+        try {
+            set_ptt(false);
+        } catch (...) {
+            resume_polling();
+            throw;
+        }
+        resume_polling();
+    };
 }
 
 void RigController::pause_polling() {

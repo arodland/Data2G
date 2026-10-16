@@ -22,6 +22,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -478,6 +479,36 @@ void test_polling_pauses_while_transmitting() {
     controller.stop();
 }
 
+void test_ptt_function_pauses_polling_while_keyed() {
+    // The station keys through ptt_function(): it must hold polling off
+    // for the whole over, not just for the instant of keying.
+    auto probe = std::make_shared<Probe>();
+    probe->open_gate();
+    Published pub;
+    rig::RigController controller(pub.freq_fn(), pub.status_fn());
+    rig::RigConfig config;
+    config.poll_interval_s = 0.02;
+    controller.start(make(probe), config);
+    pub.wait_for_frequency();
+
+    const std::function<void(bool)> ptt = controller.ptt_function();
+    ptt(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // ten intervals: polls, if anything let them
+    ptt(false);
+    const std::size_t polls_after_over = pub.frequency_count();
+
+    const std::vector<std::string> calls = probe->call_log();
+    std::size_t on_idx = calls.size();
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+        if (calls[i] == "ptt-on") on_idx = i;
+    }
+    check::is_true(on_idx + 1 < calls.size() && calls[on_idx + 1] == "ptt-off",
+                   "rig/interlock: no poll between ptt_function's key and unkey");
+    check::is_true(pub.wait_for_frequency_count(polls_after_over + 1),
+                   "rig/interlock: polling resumes after the unkey");
+    controller.stop();
+}
+
 void test_destruction_stops_a_running_controller() {
     auto probe = std::make_shared<Probe>();
     probe->open_gate();
@@ -600,6 +631,7 @@ int main() {
         test_a_superseded_worker_does_not_publish();
         test_keying_is_not_stuck_behind_status_chatter();
         test_polling_pauses_while_transmitting();
+        test_ptt_function_pauses_polling_while_keyed();
         test_destruction_stops_a_running_controller();
         test_poll_interval_zero_only_keys();
         test_exit_releases_ptt_only_if_the_rig_was_keyed();
