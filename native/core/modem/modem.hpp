@@ -2,9 +2,11 @@
 // modulation, preamble/header search, the header-copy search, receive up
 // to soft bits, decode). Timing arithmetic is in modem/timing.hpp.
 //
-// Results are structs (Python's dicts). Positions are sample indices into
-// the caller's buffer. Every function is reentrant: the only shared state
-// is const tables built once (thread-safe statics).
+// Results are structs where Python has dicts, typed there by TypedDicts of
+// the same names (Lock, HeaderRead, Received, DataEstimate);
+// bindings/bind_modem.cpp converts these to those keys. Positions are
+// sample indices into the caller's buffer. Every function is reentrant:
+// the only shared state is const tables built once (thread-safe statics).
 #pragma once
 
 #include <complex>
