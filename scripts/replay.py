@@ -28,7 +28,7 @@ from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES, is_cpm
 from data2g.config import BANDS
 from data2g.tnc import receive_any
-from data2g.waveform import ofdm, sync
+from data2g.waveform import dsp, ofdm, sync
 
 SLACK_S = 3.0  # a burst's end to the receiver's rx event, at most
 
@@ -118,7 +118,7 @@ def replay(sender: dict, receiver: dict) -> list[dict]:
             row.update(ctl_ok=False)
             if len(x) > fs and not is_cpm(spec):  # the OFDM detector's statistic
                 band = ofdm.band(spec.sync_band)
-                S, _ = sync.detection_stat(modem.to_baseband(x), band)
+                S, _ = sync.detection_stat(dsp.to_baseband(x), band)
                 row.update(peak=round(float(S.max()), 1), threshold=BANDS[spec.sync_band].preamble_threshold)
                 try:
                     r = modem.receive(x, [spec.sync_band])

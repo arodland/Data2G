@@ -30,7 +30,7 @@ import numpy as np
 from data2g import codes, constellation, hfchannel, modem
 from data2g.config import BANDS, DATA_SYMS_PER_FRAME, FRAME_SAMPLES, FS, LEADIN_SAMPLES, LEADOUT_SAMPLES, M, NCP, NSYM, SUBMODES
 from data2g.waveform import ofdm
-from data2g.waveform.dsp import freq_correct, to_baseband
+from data2g.waveform.dsp import freq_correct, to_baseband, tx_condition
 from data2g.waveform.sync import SyncError, acquire
 
 MODE = {"w": "qpsk-r1/2", "w48": "w48-qpsk-r1/2"}
@@ -50,7 +50,7 @@ def burst(spec, rng, n_frames=8):
     for k in FRAME.values():
         data[k, :len(hdr)] = hdr
     x = modem.burst_waveform(data, spec)
-    x = modem.tx_condition(x, spec.headroom, b.spec.clip_overshoot, active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES),
+    x = tx_condition(x, spec.headroom, b.spec.clip_overshoot, active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES),
                            bandpass=BANDS[spec.sync_band].tx_bandpass)
     return x, n_cw, len(hdr)
 

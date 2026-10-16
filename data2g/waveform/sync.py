@@ -382,7 +382,7 @@ def acquire(
     band=None,
     S: np.ndarray | None = None,
 ) -> Acquisition:
-    """Find the preamble in baseband signal z (modem.to_baseband output,
+    """Find the preamble in baseband signal z (dsp.to_baseband output,
     unfiltered: the matched filter is the band filter).
 
     `search` optionally restricts the preamble hunt to a [start, end)

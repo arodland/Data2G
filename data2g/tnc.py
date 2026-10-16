@@ -33,6 +33,7 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 from . import codes, modem  # noqa: E402
+from .waveform import dsp  # noqa: E402
 from .config import BANDS, FS, LEADIN_SAMPLES, SNR_REF_BW_HZ, max_codewords  # noqa: E402
 
 log = logging.getLogger("data2g.tnc")
@@ -393,7 +394,7 @@ class Receiver:
         for b, d in self.detectors.items():
             if d.fed < self.off:  # its audio was trimmed away: start over
                 d.restart_at(self.off)
-            d.feed(modem.to_baseband(self.buf[d.fed - self.off:], d.fed))
+            d.feed(dsp.to_baseband(self.buf[d.fed - self.off:], d.fed))
             # no search looks further back than `keep` (the statistic grew
             # with a long burst in the buffer, and was copied every hop)
             d.trim(self.off + len(self.buf) - self.keep - d.span)

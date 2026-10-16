@@ -72,8 +72,8 @@ from .config import (
 )
 from .waveform import ofdm
 from .waveform import sync as _sync
-from .waveform.dsp import freq_correct, to_baseband, tx_condition
-from .waveform.sync import SyncError, acquire
+from .waveform import dsp
+from .waveform.sync import SyncError
 
 # The receiver's constants are mirrored into native/core/generated/modem.hpp
 # (tools/gen_native_tables.py modem_hpp names them): regenerate after a change.
@@ -448,7 +448,7 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
         idx = (bits.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))).reshape(data.shape)
         project = ace_projector(spec, data, constellation.ace_dirs(spec.constellation)[idx])
     # the sync band's filter: it contains the data band (BandSpec.sync)
-    return tx_condition(
+    return dsp.tx_condition(
         x, spec.headroom, b.spec.clip_overshoot,
         active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES), bandpass=BANDS[spec.sync_band].tx_bandpass,
         project=project, closing=spec.ace,
@@ -731,7 +731,7 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
     good, detected, waiting = [], 0, False
     for name in bands or (accept.bands if accept else SYNC_BANDS):
         try:
-            acq_b = acquire(z0, band=ofdm.band(name), S=stats.get(name) if stats else None)
+            acq_b = _sync.acquire(z0, band=ofdm.band(name), S=stats.get(name) if stats else None)
         except SyncError:
             continue
         detected += 1
@@ -748,7 +748,7 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
             if not complete and start + 2 * M > len(z0) - hdr_end:
                 waiting |= not final
                 continue
-            zb = freq_correct(z0, f)
+            zb = dsp.freq_correct(z0, f)
             for k in (0, -1, 1, -2, 2):
                 if not 0 <= start + k * M <= len(z0) - hdr_end:
                     continue
@@ -776,7 +776,7 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: d
     alone, so a streaming receiver knows how much audio to wait for
     (`stats`: per band, sync.StreamDetector's statistic for x's starts).
     The burst may run past the end of `x`. Raises SyncError."""
-    hd, acq, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
+    hd, acq, _ = _best_header(dsp.to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
                               stats=stats)
     spec, n_cw = hd["hdr"]
     return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
@@ -808,7 +808,7 @@ def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = Fa
         return []
     lo = max(0, lock["p0"] + f0 * FRAME_SAMPLES - 2 * NSYM)
     hi = lock["p0"] + (f1 - 1) * FRAME_SAMPLES + 3 * NSYM
-    z = freq_correct(to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
+    z = dsp.freq_correct(dsp.to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
     y = [b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + NCP, DEMOD_BACKOFF) for f in range(f0, f1)]
     return [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
                   / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
@@ -856,7 +856,7 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     if C is not None and level is None:
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
-    z0 = to_baseband(np.asarray(x, dtype=np.float64))
+    z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     freqs = _sync.cfo_grid()
     if C is None:
         C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
@@ -888,7 +888,7 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     for ph in grids:
         i = int(np.argmax(np.abs(fold[:, ph])))
         for f in _cfo_aliases(fold[i, ph], float(freqs[i])):
-            z = freq_correct(z0, f)
+            z = dsp.freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
                     llr = _copy_llr(z, pc, band, sb.header_syms)
@@ -942,18 +942,18 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     only those. Acquisition over a whole 11 s burst took 1-4 s of CPU,
     nearly all of receive's time. `copy`: find_copy's lock (same sample
     origin as x): no preamble search, the header its copy read."""
-    z0 = to_baseband(np.asarray(x, dtype=np.float64))
+    z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     if copy is not None:
         if copy["end"] > len(z0):
             raise SyncError("burst runs past the buffer")
-        z = freq_correct(z0, copy["cfo"])
+        z = dsp.freq_correct(z0, copy["cfo"])
         hd = _copy_header(z, copy)
         acq = _sync.Acquisition(copy["start"], copy["cfo"], 0.0)
     elif head is None:
         hd, acq, z = _best_header(z0, bands, accept=accept)
     else:
         hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept, final=True)
-        z = freq_correct(z0, acq.freq_offset)
+        z = dsp.freq_correct(z0, acq.freq_offset)
         spec, n_cw = hd["hdr"]
         if burst_end(hd["p0"], spec, n_cw) > len(z0):
             raise SyncError("burst runs past the buffer")
@@ -997,7 +997,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
     fine = equalizer.residual_cfo(hp)
     cfo_res = resolve_alias(fine, coarse)
-    z = freq_correct(z, cfo_res)
+    z = dsp.freq_correct(z, cfo_res)
     _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
     support = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
     shift = equalizer.window_shift(support)

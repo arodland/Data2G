@@ -17,7 +17,7 @@ from data2g import codes, hfchannel, modem, tnc
 from data2g.arq import phy
 from data2g.config import BANDS, FS, SUBMODES
 from data2g.hfchannel import FadingPreset
-from data2g.waveform import ofdm, sync
+from data2g.waveform import dsp, ofdm, sync
 
 set_threads = getattr(data2g_native, "set_threads", lambda n: None)  # before the pool existed
 
@@ -79,11 +79,11 @@ def cases(rng):
     for b in sorted({BANDS[b].sync_band for b in BANDS}):
         def setup(b=b):
             d = sync.StreamDetector(ofdm.band(b))
-            d.feed(modem.to_baseband(noise[:FS], 0))
+            d.feed(dsp.to_baseband(noise[:FS], 0))
             return d
 
         def hop(d, b=b):
-            d.feed(modem.to_baseband(noise[FS:FS + tnc.Receiver.HOP], FS))
+            d.feed(dsp.to_baseband(noise[FS:FS + tnc.Receiver.HOP], FS))
 
         out[f"StreamDetector hop {b}"] = (hop, setup)
     return out

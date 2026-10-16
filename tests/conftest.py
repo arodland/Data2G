@@ -147,13 +147,12 @@ def _substitutions(native):
 @provider
 def _waveform_substitutions(native):
     """data2g.waveform. Bands cross by name; a band whose spec isn't the
-    configured one stays in Python. Modules that from-imported a name hold
-    their own reference, so modem is listed too."""
+    configured one stays in Python."""
     import functools
 
     import numpy as np
 
-    from data2g import config, modem
+    from data2g import config
     from data2g.waveform import dsp, ofdm, sync
 
     W = native.waveform
@@ -251,10 +250,6 @@ def _waveform_substitutions(native):
         (dsp, "freq_correct"): freq_correct,
         (dsp, "tx_condition"): tx_condition,
         (dsp, "papr_db"): W.papr_db,
-        (modem, "to_baseband"): to_baseband,
-        (modem, "freq_correct"): freq_correct,
-        (modem, "tx_condition"): tx_condition,
-        (modem, "acquire"): acquire,
         (sync, "detection_stat"): detection_stat,
         (sync, "_raw_stat"): _raw_stat,
         (sync, "repeat_corr"): W.repeat_corr,

@@ -16,6 +16,7 @@ import pytest
 
 from data2g import codes, config, hfchannel, modem
 from data2g.config import BANDS, SUBMODES
+from data2g.waveform import dsp
 
 CORR_TOL = 1e-6
 TOL = 1e-9
@@ -189,7 +190,7 @@ def test_search_parts_match(native, py):
     """_best_header (complete and streaming), _read_header at each shift,
     the copy LLRs, _demod_frames with replayed steps, data_channel."""
     y = _burst("qpsk-r1/3", 1, 2.0, "mpd", seed=9)
-    z0 = modem.to_baseband(y)
+    z0 = dsp.to_baseband(y)
     hd, acq, z = py._best_header(z0)
     nhd, nacq, nz = native.modem.best_header(z0)
     assert nhd["word"] == hd["word"] and nhd["start"] == hd["start"] and nacq[0] == acq.preamble_start
@@ -213,7 +214,7 @@ def test_search_parts_match(native, py):
     replay = np.array([0, 1, 1, 0, -1, 0, 0, 2, 2, 2], float)
     close(native.modem.demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0], py._demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0])
     # a slip found (the sliding DFT against the matrix) and replayed
-    zs = modem.to_baseband(_burst("qpsk-r1/3", 2, 15.0, seed=3))
+    zs = dsp.to_baseband(_burst("qpsk-r1/3", 2, 15.0, seed=3))
     shd, _, zs = py._best_header(zs)
     cut = shd["p0"] + 4 * config.FRAME_SAMPLES + 300  # after frame 4's pilot
     zs = np.concatenate([zs[:cut], np.zeros(85), zs[cut:]])
