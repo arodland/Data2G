@@ -1,5 +1,5 @@
 """A/B: the receiver's old whole-buffer search vs the incremental one
-(tnc.Receiver with and without its StreamDetector statistics): weak-burst
+(receiver.Receiver with and without its StreamDetector statistics): weak-burst
 detection per cell on the same seeds, and header locks on noise. Edit
 rx_for() to A/B another receiver change.
 
@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from multiprocessing import Pool  # noqa: E402
 
-from data2g import cpm, hfchannel, modem, tnc  # noqa: E402
+from data2g import cpm, hfchannel, modem, receiver  # noqa: E402
 from data2g.arq import phy as PHY  # noqa: E402
 from data2g.config import FS  # noqa: E402
 
@@ -27,7 +27,7 @@ ACC = modem.Accept.of(None, 16.0)
 
 
 def rx_for(mode):
-    r = tnc.Receiver(ACC, cpm_grids=tuple(cpm.GRIDS))
+    r = receiver.Receiver(ACC, cpm_grids=tuple(cpm.GRIDS))
     if mode == "old":  # whole-buffer search, and the later-header search always on
         r._stats = lambda w0=0: None
         r._searched = lambda: None

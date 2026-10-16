@@ -4,7 +4,7 @@ TX (modem.modulate_bits): constellation.modulate -> ofdm.Band.modulate_symbols
 (preamble, header, frames) -> dsp.tx_condition (envelope clip and filter).
 
 RX (modem.receive): dsp.to_baseband -> sync.acquire, or sync.StreamDetector
-live (tnc) -> ofdm.Band.demod_window per symbol -> equalizer.estimate (pilots;
+live (receiver) -> ofdm.Band.demod_window per symbol -> equalizer.estimate (pilots;
 equalizer.refine for decision-directed passes) -> constellation.llr.
 
 Here:

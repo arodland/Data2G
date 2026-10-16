@@ -1,5 +1,5 @@
 // Rate conversion and input conditioning between the sound card and the
-// modem: tnc.Decimator, host.Interpolator and tnc.Blanker. Each keeps its
+// modem: data2g/audio.py's Decimator, Interpolator and Blanker. Each keeps its
 // state across calls, so a stream cut into chunks comes out as if it had
 // been processed whole (per-chunk filtering clicks at every edge).
 #pragma once
@@ -48,7 +48,7 @@ private:
     std::vector<double> taps_, phases_, hist_;  // phases_: u rows of PH_LEN reversed polyphase taps
 };
 
-// Impulse blanker, after modem73's; tnc.Blanker has the reasoning. In
+// Impulse blanker, after modem73's; audio.Blanker has the reasoning. In
 // 10 ms blocks against a slow envelope of |x|: samples over ZERO x env are
 // zeroed (with GUARD neighbours), those over LIMIT x env limited to it; a
 // block whose median is over RESYNC x env is a level step and resets env.

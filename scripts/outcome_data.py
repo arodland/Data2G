@@ -40,7 +40,7 @@ from data2g.arq import policy as G
 from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
 from data2g.arq.modes import MODES, burst_seconds, ctl_spec, is_cpm
 from data2g.config import FS
-from data2g.tnc import search_span
+from data2g.receiver import search_span
 
 sys.path.insert(0, str(Path(__file__).parent))
 import ir_study as I  # noqa: E402

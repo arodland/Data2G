@@ -42,7 +42,7 @@ from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES, is_cpm
 from data2g.config import BANDS, FRAME_SAMPLES, FS, NCP
 from data2g.waveform import ofdm, sync
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 from data2g.waveform.dsp import freq_correct, to_baseband
 
 sys.path.insert(0, str(Path(__file__).parent))

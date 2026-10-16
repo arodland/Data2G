@@ -32,10 +32,9 @@ BCAST command, so VARA clients never see them.
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
 """
 
-import os
+from . import threads
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.cap_env(1)  # before numpy loads: receiver.py has the reasoning
 
 import argparse  # noqa: E402
 import itertools  # noqa: E402
@@ -48,13 +47,13 @@ import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
-from scipy import signal as sps  # noqa: E402
 
+from . import audio  # noqa: E402
 from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
 from .config import FS  # noqa: E402
-from .tnc import Decimator, Rigctld, _device, _pa_float  # noqa: E402
+from .tnc import KissServer, Rigctld  # noqa: E402
 
 log = logging.getLogger("data2g.host")
 VERSION = "Data2G 0.1"
@@ -289,110 +288,7 @@ def _addr(s: str, default_host: str) -> tuple[str, int] | None:
     return host.strip("[]") or default_host, int(port)
 
 
-class Interpolator:
-    """FS -> device rate, keeping filter state across blocks (per-block
-    resampling would click at every block edge and splatter)."""
-
-    def __init__(self, rate: int):
-        self.u = rate // FS
-        self.taps = sps.firwin(32 * self.u + 1, 0.9 * FS / 2, fs=rate) * self.u if self.u > 1 else np.ones(1)
-        self.zi = np.zeros(len(self.taps) - 1)
-
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        up = np.zeros(len(x) * self.u)
-        up[:: self.u] = x
-        y, self.zi = sps.lfilter(self.taps, 1.0, up, zi=self.zi)
-        return y
-
-
-class Player:
-    """Output from our own FIFO through a PortAudio callback. The loop runs on the input clock and hands
-    over 0.1 s at a time, which a blocking write can't bridge: with 4800-frame buffers PipeWire padded
-    64 zeros after every block (a 1.3 ms hole each 0.1 s, on air too), and with its default buffers
-    (~11 ms) any late step underruns. Callback periods are a multiple of 256 frames (2048 at 48 kHz: a
-    main thread holding the GIL made 1024 late), and the FIFO starts `lead` ahead of the card."""
-
-    def __init__(self, pa, nout: int, rate: int, device: int | None, lead_s: float):
-        self.nout, self.rate, self.lead = nout, rate, int(lead_s * rate)
-        self.fifo, self.lock, self.active, self.underruns = bytearray(), threading.Lock(), False, 0
-        self.s = pa.open(format=_pa_float(), channels=nout, rate=rate, output=True, output_device_index=device,
-                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._fill)
-
-    def _fill(self, _in, n, _t, _status):
-        need = n * self.nout * 4
-        with self.lock:
-            b = bytes(self.fifo[:need])
-            del self.fifo[:need]
-        if len(b) < need and self.active:
-            self.underruns += 1
-            log.warning("TX audio underrun (%d)", self.underruns)
-        return b + bytes(need - len(b)), 0  # 0: paContinue
-
-    def start(self):
-        """Key-up: queue the lead, so a late step doesn't leave the device empty."""
-        self.write(np.zeros(self.lead))
-        self.active = True
-
-    def write(self, y: np.ndarray):
-        with self.lock:
-            self.fifo += np.repeat(y.astype(np.float32), self.nout).tobytes()
-
-    def drain(self):
-        """Wait until everything queued has left the sound card (then PTT can drop without clipping)."""
-        self.active = False  # the last callback coming up short is the end, not an underrun
-        while True:
-            with self.lock:
-                left = len(self.fifo)
-            if not left:
-                break
-            time.sleep(left / (self.nout * 4 * self.rate) + 0.002)
-        time.sleep(self.s.get_output_latency())
-
-    def close(self):
-        self.s.close()
-
-
-class Capture:
-    """Input through a PortAudio callback into our own FIFO, read a block at a time. A blocking read
-    dropped whatever the card's small buffer couldn't hold while the loop was busy (a slow step, the
-    drain after TX): ~50 s of a 14 min session, holes of 60-290 ms inside bursts, each one fatal."""
-
-    def __init__(self, pa, nin: int, rate: int, device: int | None):
-        self.nin, self.rate = nin, rate
-        self.fifo, self.cond, self.overflows, self._late = bytearray(), threading.Condition(), 0, False
-        self.s = pa.open(format=_pa_float(), channels=nin, rate=rate, input=True, input_device_index=device,
-                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._take)
-
-    def _take(self, data, _n, _t, status):
-        if status & 2:  # paInputOverflow: the callback itself was late (GIL), samples are gone
-            self.overflows += 1
-            log.warning("RX audio overflow (%d)", self.overflows)
-        with self.cond:
-            self.fifo += data
-            self.cond.notify()
-        return None, 0  # 0: paContinue
-
-    def read(self, frames: int, stop: threading.Event) -> np.ndarray | None:
-        """The next `frames` frames, left channel (None once `stop` is set)."""
-        need = frames * self.nin * 4
-        with self.cond:
-            while len(self.fifo) < need:
-                if stop.is_set():
-                    return None
-                self.cond.wait(0.5)
-            b = bytes(self.fifo[:need])
-            del self.fifo[:need]
-            behind = len(self.fifo) / (self.nin * 4 * self.rate)
-        if behind > 1.0 and not self._late:
-            log.warning("RX audio %.1f s behind the card", behind)
-        self._late = behind > 1.0
-        return np.frombuffer(b, dtype=np.float32)[::self.nin].astype(np.float64)
-
-    def close(self):
-        self.s.close()
-
-
-# --- sockets and audio ---------------------------------------------------------------
+# --- sockets ------------------------------------------------------------------------
 
 def _shut(c):
     """Close a socket another thread may be blocked reading: close() alone would hold the connection open."""
@@ -538,17 +434,9 @@ def _send_cmd(port, host, asker=None):
     host.out_cmd.clear()
 
 
-def _channels(pa, index: int | None, kind: str) -> int:
-    """2 if the device (None: the default) has two or more channels of this kind, else 1."""
-    d = pa.get_device_info_by_index(index) if index is not None else (
-        pa.get_default_input_device_info() if kind == "input" else pa.get_default_output_device_info())
-    return 2 if d["maxInputChannels" if kind == "input" else "maxOutputChannels"] >= 2 else 1
-
-
 def serve(a, pa, stop: threading.Event | None = None):
     """Run until SIGINT/SIGTERM (or `stop` is set)."""
     from .kisslink import KissLink
-    from .tnc import KissServer
 
     link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
@@ -562,14 +450,14 @@ def serve(a, pa, stop: threading.Event | None = None):
     kiss = KissServer((a.kiss_address, a.kiss_port), lambda *f: inbox.put(("kiss", f)), link.command)
     threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
-    dec, interp = Decimator(a.sample_rate), Interpolator(a.sample_rate)
+    dec, interp = audio.Decimator(a.sample_rate), audio.Interpolator(a.sample_rate)
     per = BLOCK * (a.sample_rate // FS)
     # Stereo where the device has it (left channel in, the same signal on both out): PortAudio's ALSA
     # host API corrupts the heap reading or writing a mono stream on a PipeWire device that has more
     # channels (glibc aborts in the first read, e.g. "malloc(): invalid size (unsorted)").
-    nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
-    inp = Capture(pa, nin, a.sample_rate, a.input_device)
-    out = Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
+    nin, nout = audio.channels(pa, a.input_device, "input"), audio.channels(pa, a.output_device, "output")
+    inp = audio.Capture(pa, nin, a.sample_rate, a.input_device)
+    out = audio.Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
@@ -711,15 +599,12 @@ def main():
     pa = pyaudio.PyAudio()
     try:
         if a.list_audio_devices:
-            for i in range(pa.get_device_count()):
-                d = pa.get_device_info_by_index(i)
-                print(f"{i:3d}  in {d['maxInputChannels']:2d}  out {d['maxOutputChannels']:2d}  "
-                      f"{int(d['defaultSampleRate']):6d} Hz  {d['name']}")
+            audio.list_devices(pa)
             return
         if a.sample_rate % FS:
             ap.error(f"--sample-rate must be a multiple of {FS}")
-        a.input_device = _device(pa, a.input_device, "input")
-        a.output_device = _device(pa, a.output_device, "output")
+        a.input_device = audio.find_device(pa, a.input_device, "input")
+        a.output_device = audio.find_device(pa, a.output_device, "output")
         serve(a, pa)
     finally:
         pa.terminate()

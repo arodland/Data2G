@@ -28,7 +28,7 @@ from data2g import modem
 from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES, is_cpm
 from data2g.config import FS, LEADIN_SAMPLES
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 from data2g.waveform.dsp import freq_correct, to_baseband
 
 sys.path.insert(0, str(Path(__file__).parent))

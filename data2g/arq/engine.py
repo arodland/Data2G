@@ -1,7 +1,7 @@
 """One station's live stack, clocked by audio samples.
 
 `Engine.step(audio_in) -> (audio_out, ptt)` is called once per audio block
-at FS: it feeds what was heard to the streaming receiver (tnc.Receiver),
+at FS: it feeds what was heard to the streaming receiver (receiver.Receiver),
 hands headers and bursts to the ARQ session and the gear shifter, and
 plays out whatever the session sends, half duplex. Its clock is the
 sample count, so the same code runs behind a sound card (data2g/host.py)
@@ -24,9 +24,9 @@ import numpy as np
 
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
+from ..receiver import NoiseProfile, Receiver
 from . import burst as B
 from . import frames as F
-from ..tnc import NoiseProfile, Receiver
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -108,9 +108,9 @@ def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
                  min_header_score: float = 0.0, kiss=None, stats_interval_s: float = 60.0):
-        """`kiss`: a data2g.kisslink.KissLink to serve too (the KISS
-        personality): its bursts are peeled off what's heard, and it sends
-        when no ARQ session is under way and the channel is free."""
+        """`kiss`: a data2g.kisslink.KissLink to serve too (broadcast):
+        its bursts are peeled off what's heard, and it sends when no ARQ
+        session is under way and the channel is free."""
         self.call = call.upper()
         self.aliases = ()
         self.accept_connect = None  # Session.accept_connect, for every session (the host's ACCEPT)

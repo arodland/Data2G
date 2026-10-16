@@ -175,16 +175,7 @@ bool Monitor::broadcast(ModemRx& rx, Dump& d) {
     const auto ctl = kisslink::KissLink::read_burst_control(rx, rx.n_cw());
     if (!ctl) return false;
     const auto& [c, n_ctl] = *ctl;
-    const int key = kisslink::group_key(c.group);
-    const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(rx.submode())));
-    std::vector<Bytes> payloads;
-    std::vector<bool> ok;
-    for (int i = n_ctl; i < rx.n_cw(); ++i) {
-        auto p = rx.decode_plain(i, data_mask(0, i, key));
-        ok.push_back(p.has_value());
-        payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
-    }
-    auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : tnc::unpack(payloads, ok);
+    auto [frames, ok, lost] = kisslink::KissLink::read_burst_frames(rx, n_ctl, kisslink::group_key(c.group));
     d.head += "  BCAST \"" + c.group + "\"" + (c.call ? " from " + *c.call : "") + ": " + std::to_string(frames.size()) +
               " frame(s)" + (lost ? ", " + std::to_string(lost) + " lost" : "") + (c.reports ? ", rate reports" : "") + "\n";
     for (std::size_t i = 0; i < frames.size(); ++i) {
@@ -532,10 +523,10 @@ void Monitor::flush(Side& s, int key, int dir, Dump& d) {
 }
 
 std::vector<Dump> Monitor::feed(std::span<const double> x, const std::function<std::string(double t)>& when) {
-    if (!receiver_) receiver_ = std::make_unique<tnc::Receiver>(receive_accept(), all_grids());
+    if (!receiver_) receiver_ = std::make_unique<receiver::Receiver>(receive_accept(), all_grids());
     std::vector<Dump> out;
     for (auto& ev : receiver_->feed(x)) {
-        auto* b = std::get_if<tnc::BurstEvent>(&ev);
+        auto* b = std::get_if<receiver::BurstEvent>(&ev);
         if (!b) continue;
         BurstHeard h;
         h.t = static_cast<double>(b->header.start()) / config::FS;

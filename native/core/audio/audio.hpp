@@ -6,7 +6,7 @@
 // audio/card.hpp); the FIFOs are in fifo.hpp.
 //
 // Lifted from SSTVAE's core/audio/audio.hpp (sample formats, the capture
-// pipeline), with Data2G's host.py semantics where they differ: channel 0
+// pipeline), with data2g/audio.py's semantics where they differ: channel 0
 // rather than a mixdown, first substring match rather than a unique one,
 // integer rate ratios through Decimator rather than resample_poly.
 #pragma once
@@ -29,7 +29,7 @@ struct DeviceInfo {
     int channels;  // the most this device offers in its direction
 };
 
-// tnc._device: an all-digit `want` is an index; otherwise the first device
+// audio.find_device: an all-digit `want` is an index; otherwise the first device
 // with channels whose name contains `want`, ignoring case. Empty `want`:
 // nothing (the system default). Throws std::invalid_argument when nothing
 // matches or the index is out of range.

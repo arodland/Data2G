@@ -264,7 +264,7 @@ public:
     ~SlowEngine() override { stop(); }
 
 protected:
-    void hear_burst(tnc::BurstEvent& ev, double t) override {
+    void hear_burst(receiver::BurstEvent& ev, double t) override {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         Engine::hear_burst(ev, t);
     }
@@ -345,7 +345,7 @@ public:
     std::atomic<bool> open{false};
 
 protected:
-    void hear_burst(tnc::BurstEvent& ev, double t) override {
+    void hear_burst(receiver::BurstEvent& ev, double t) override {
         while (!open) std::this_thread::sleep_for(std::chrono::milliseconds(5));
         Engine::hear_burst(ev, t);
     }

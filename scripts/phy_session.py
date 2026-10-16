@@ -32,7 +32,7 @@ from data2g import hfchannel, modem
 from data2g import interference as INTF
 from data2g.arq import phy as PHY
 from data2g.config import BANDS, FS, LEADIN_SAMPLES, SNR_REF_BW_HZ, SUBMODES
-from data2g.tnc import NoiseProfile, receive_any
+from data2g.receiver import NoiseProfile, receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import linksim as L  # noqa: E402

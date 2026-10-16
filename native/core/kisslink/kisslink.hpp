@@ -5,7 +5,8 @@
 // checks it under that name's key. Rate shifting per port (off by default):
 // a connected-mode AX.25 frame goes in its next hop's reported mode, anything
 // else in the port's mode. The burst layout is in the Python module's
-// docstring.
+// docstring. monitor/ reads broadcast bursts through read_burst_control and
+// read_burst_frames.
 #pragma once
 
 #include <cstdint>
@@ -58,6 +59,12 @@ struct ControlRead {
     std::optional<Bytes> reports;      // T_REPORTS
 };
 ControlRead read_control(const std::map<int, Bytes>& tlvs);
+
+// Data codewords: [length, 2 bytes big-endian][frame] back to back, zero-padded.
+std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb);
+// Payloads and their CRC results -> (whole frames, frames lost). Parsing
+// stops at a length it can not trust.
+std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
 
 struct Peer {
     arq::GearShifter shifter;
@@ -128,6 +135,8 @@ public:
     // A burst's broadcast control, checked under the key of the group it
     // names -> (control, n_ctl); nullopt: not a broadcast burst.
     static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
+    // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
+    static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::ModemRx& rx, int start, int key);
 
 private:
     void check_mode(const std::string& mode) const;

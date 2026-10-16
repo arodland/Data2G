@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" / "python"
-NATIVE_ABI = 1
+NATIVE_ABI = 2
 _import_error = None
 _originals = {}  # (module, attribute) -> the Python function --native replaced
 _PROVIDERS = []  # more substitutions: functions native -> {(module, attr): replacement}
@@ -679,17 +679,16 @@ def reference():
 
 @provider
 def _audio_substitutions(native):
-    """The host's rate conversion and input conditioning. host.py
-    from-imports Decimator, so it is listed there too; tnc.Receiver looks
-    Blanker up at construction, so it gets the native one."""
-    from data2g import host, tnc
+    """data2g.audio: the host's rate conversion and input conditioning.
+    host.py and receiver.Receiver look them up in data2g.audio when they
+    make one, so they get the native ones."""
+    from data2g import audio
 
     A = native.audio
     return {
-        (tnc, "Decimator"): A.Decimator,
-        (host, "Decimator"): A.Decimator,
-        (host, "Interpolator"): A.Interpolator,
-        (tnc, "Blanker"): A.Blanker,
+        (audio, "Decimator"): A.Decimator,
+        (audio, "Interpolator"): A.Interpolator,
+        (audio, "Blanker"): A.Blanker,
     }
 
 @provider
@@ -939,27 +938,36 @@ def _modem_substitutions(native):
 
 @provider
 def _tnc_substitutions(native):
-    """data2g.tnc: KISS framing, burst packing, search_span, receive_any and
-    the streaming Receiver. Receiver is the C++ one behind tnc.Receiver's
-    interface (engine from-imports it, so it is listed there too); it is the
-    Python one when a test patches its search (_stats, _searched) or modem's
-    compiled-in constants. Specs come back by name and are restored here."""
+    """data2g.tnc: the KISS byte codec."""
+    from data2g import tnc
+
+    T = native.tnc
+    return {
+        (tnc, "kiss_encode"): lambda data, port=0, cmd=0: T.kiss_encode(bytes(data), int(port), int(cmd)),
+        (tnc, "KissDecoder"): T.KissDecoder,
+    }
+
+
+@provider
+def _receiver_substitutions(native):
+    """data2g.receiver: search_span, receive_any and the streaming Receiver.
+    Receiver is the C++ one behind receiver.Receiver's interface (engine
+    from-imports it, so it is listed there too); it is the Python one when a
+    test patches its search (_stats, _searched) or modem's compiled-in
+    constants. Specs come back by name and are restored here."""
     import numpy as np
 
-    from data2g import config, cpm, modem, tnc
+    from data2g import config, cpm, modem, receiver
     from data2g.arq import engine
     from data2g.waveform import sync
 
-    T = native.tnc
-    PyReceiver = tnc.Receiver
-    py = {k: getattr(tnc, k) for k in ("capacity", "pack", "receive_any")}
+    T = native.receiver
+    PyReceiver = receiver.Receiver
+    py_receive_any = receiver.receive_any
     min_score = dict(modem.HEADER_MIN_SCORE)
 
     def same_config():
         return modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION and modem.HEADER_MIN_SCORE == min_score
-
-    def own(spec):
-        return config.SUBMODES.get(spec.name) == spec
 
     def header(d):
         return dict(d, spec=(cpm.SPECS if d.get("family") == "cpm" else config.SUBMODES)[d["spec"]])
@@ -1000,27 +1008,16 @@ def _tnc_substitutions(native):
         channel_busy = property(lambda s: PyReceiver.channel_busy.fget(s) if s._n is None else s._n.channel_busy)
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
-    def capacity(spec, max_cw=None):
-        return T.capacity(spec.name, int(max_cw or 0)) if own(spec) else py["capacity"](spec, max_cw)
-
-    def pack(packets, spec):
-        return T.pack([bytes(p) for p in packets], spec.name) if own(spec) else py["pack"](packets, spec)
-
     def receive_any(y, lead=0, cpm_grids=None):
         if not same_config():
-            return py["receive_any"](y, lead, cpm_grids)
+            return py_receive_any(y, lead, cpm_grids)
         return rx(T.receive_any(np.asarray(y, dtype=np.float64), int(lead),
                                 None if cpm_grids is None else list(cpm_grids)))
 
     return {
-        (tnc, "kiss_encode"): lambda data, port=0, cmd=0: T.kiss_encode(bytes(data), int(port), int(cmd)),
-        (tnc, "KissDecoder"): T.KissDecoder,
-        (tnc, "capacity"): capacity,
-        (tnc, "pack"): pack,
-        (tnc, "unpack"): lambda payloads, ok: T.unpack([bytes(p) for p in payloads], [bool(o) for o in ok]),
-        (tnc, "search_span"): lambda bands, cpm_grids=(): T.search_span(list(bands), list(cpm_grids)),
-        (tnc, "receive_any"): receive_any,
-        (tnc, "Receiver"): Receiver,
+        (receiver, "search_span"): lambda bands, cpm_grids=(): T.search_span(list(bands), list(cpm_grids)),
+        (receiver, "receive_any"): receive_any,
+        (receiver, "Receiver"): Receiver,
         (engine, "Receiver"): Receiver,
     }
 
@@ -1028,7 +1025,7 @@ def _tnc_substitutions(native):
 @provider
 def _phy_substitutions(native):
     """data2g.arq.phy (TX audio, ModemRx with DD, measure) and
-    data2g.kisslink (KissLink, AX.25 parsing) in C++. ModemRx stays Python
+    data2g.kisslink (KissLink, AX.25 parsing, data framing) in C++. ModemRx stays Python
     for a mode that isn't the configured one, or while a test patches a
     codec function it calls (C++ never calls back into them); it reads
     phy.DD when made, and its store stays the caller's dict."""
@@ -1103,6 +1100,9 @@ def _phy_substitutions(native):
         (PHY, "ModemRx"): ModemRx,
         (kisslink, "parse_ax25"): parse_ax25,
         (kisslink, "station_hash"): K.station_hash,
+        (kisslink, "pack_frames"): lambda frames, pb: K.pack_frames([bytes(f) for f in frames], int(pb)),
+        (kisslink, "unpack_frames"): lambda payloads, ok: tuple(K.unpack_frames([bytes(p) for p in payloads],
+                                                                                [bool(o) for o in ok])),
         (kisslink, "KissLink"): KissLink,
     }
 

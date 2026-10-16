@@ -27,7 +27,7 @@ from data2g import codes, modem
 from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES, is_cpm
 from data2g.config import BANDS
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 from data2g.waveform import dsp, ofdm, sync
 
 SLACK_S = 3.0  # a burst's end to the receiver's rx event, at most

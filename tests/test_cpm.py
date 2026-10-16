@@ -94,7 +94,7 @@ def test_a_strong_cpm_burst_is_not_lost_to_a_weak_ofdm_header():
     from data2g import hfchannel
     from data2g.arq import phy as PHY
     from data2g.config import FS
-    from data2g.tnc import receive_any
+    from data2g.receiver import receive_any
 
     sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
     import outcome_data as O

@@ -14,7 +14,7 @@ Burst: control codeword(s), then data codewords. Control: a 1-byte header
 [value] (zero padded): T_GROUP (the packed group), or T_GROUP_FROM (group
 and the sender's callsign, 120 bits packed together), and T_REPORTS on a
 port with rate shifting on. Data: [length, 2][frame] back to back (a zero
-length ends it). A failed codeword loses the frames it touches, and the
+length ends it: pack_frames, unpack_frames). A failed codeword loses the frames it touches, and the
 rest if it held a length. No resends: AX.25 retries at layer 2.
 
 Rate shifting (BCAST MODE n AUTO mode; off by default). KISS gives the
@@ -36,12 +36,18 @@ Statuses (KissLink.events, for the host): BCAST n HEARD [call], BCAST n
 LOST k, BCAST * MISSED submode n_cw, BCAST n DROPPED k. KISS ACKMODE acks
 (KissLink.acks): (port, ack) for each frame enqueued with an ack, once the
 burst carrying it has gone (on_sent).
+
+Native: native/core/kisslink. KissLink.read_burst_control and
+read_burst_frames are also native/core/monitor's way into a broadcast
+burst.
 """
 
 import logging
 import struct
 import time
 from dataclasses import dataclass, field
+
+import numpy as np
 
 from . import codes, cpm
 from .config import max_codewords
@@ -178,6 +184,37 @@ def _tlv(t: int, v: bytes) -> bytes:
     return bytes([t, len(v)]) + v
 
 
+# --- data -------------------------------------------------------------------
+
+def pack_frames(frames: list[bytes], pb: int) -> list[bytes]:
+    """Frames -> data codeword payloads of `pb` bytes: [length, 2][frame]
+    back to back, zero-padded (a zero length ends it)."""
+    stream = b"".join(struct.pack(">H", len(f)) + f for f in frames)
+    stream += bytes(-len(stream) % pb)
+    return [stream[i:i + pb] for i in range(0, len(stream), pb)]
+
+
+def unpack_frames(payloads: list[bytes], ok: list[bool]) -> tuple[list[bytes], int]:
+    """Data codeword payloads and their CRC results -> (whole frames,
+    frames lost). Parsing stops at a length it can not trust."""
+    stream = b"".join(payloads)
+    good = np.repeat(np.array(ok, dtype=bool), [len(x) for x in payloads])
+    out, lost, pos = [], 0, 0
+    while pos + 2 <= len(stream):
+        if not good[pos : pos + 2].all():
+            lost += 1  # at least this one; the rest can not be found
+            break
+        n = struct.unpack(">H", stream[pos : pos + 2])[0]
+        if n == 0 or pos + 2 + n > len(stream):
+            break
+        if good[pos + 2 : pos + 2 + n].all():
+            out.append(stream[pos + 2 : pos + 2 + n])
+        else:
+            lost += 1
+        pos += 2 + n
+    return out, lost
+
+
 # --- the link ---------------------------------------------------------------
 
 @dataclass
@@ -296,7 +333,7 @@ class KissLink:
             self.events.append(f"BCAST {port} DROPPED 1")
             return
         if not frame:
-            return  # a zero length is the burst's end marker (tnc.unpack)
+            return  # a zero length is the burst's end marker (unpack_frames)
         self.queue.append((port, frame, ack))
 
     def take_events(self) -> list[str]:
@@ -395,9 +432,7 @@ class KissLink:
             self.events.append(f"BCAST {n} DROPPED 1")
             return self.next_burst()
         self.queue = rest
-        stream = b"".join(struct.pack(">H", len(q[1])) + q[1] for q in taken)
-        stream += bytes(-len(stream) % pb) if stream else bytes(pb)
-        data = [stream[i:i + pb] for i in range(0, len(stream), pb)]
+        data = pack_frames([q[1] for q in taken], pb)
         key = port.key
         slots = [Slot(ctl_mask(0, i, key), 0, p) for i, p in enumerate(ctl)]
         slots += [Slot(data_mask(0, len(ctl) + j, key), 0, p) for j, p in enumerate(data)]
@@ -408,7 +443,8 @@ class KissLink:
 
     # -- receiving -----------------------------------------------------------
 
-    def _read_control(self, rx, n_cw: int):
+    @staticmethod
+    def read_burst_control(rx, n_cw: int):
         """The burst's control, checked under the key of the group it names
         -> (group, sender's call, reports, n_ctl), or None."""
         for c0 in rx.raw(0):
@@ -431,16 +467,15 @@ class KissLink:
                 return None
         return None
 
-    def _data(self, rx, r: dict, start: int, key: int) -> tuple[list, list, int]:
+    @staticmethod
+    def read_burst_frames(rx, start: int, key: int) -> tuple[list, list, int]:
         """Data slots from `start` under `key` -> (frames, per-slot ok, frames lost)."""
-        from .tnc import unpack
-
         payloads, ok = [], []
-        for i in range(start, r["n_cw"]):
+        for i in range(start, rx.n_cw):
             p = rx.decode(i, data_mask(0, i, key), 0, None)
-            payloads.append(p or bytes(codes.payload_bytes(r["spec"])))
+            payloads.append(p or bytes(codes.payload_bytes(rx.spec)))
             ok.append(p is not None)
-        frames, lost = unpack(payloads, ok) if payloads else ([], 0)
+        frames, lost = unpack_frames(payloads, ok) if payloads else ([], 0)
         return frames, ok, lost
 
     def on_burst(self, r: dict, rx=None) -> list[tuple[int, bytes]] | None:
@@ -451,10 +486,10 @@ class KissLink:
         Statuses go to `events`; a shifting port learns from its sender."""
         rx = rx or PHY.ModemRx(r, {}, PHY.DD_BUDGET_S)  # never DD unbounded
         now = self.clock()
-        ctl = self._read_control(rx, r["n_cw"])
+        ctl = self.read_burst_control(rx, r["n_cw"])
         if ctl is not None:
             group, call, rep, n_ctl = ctl
-            frames, ok, lost = self._data(rx, r, n_ctl, group_key(group))
+            frames, ok, lost = self.read_burst_frames(rx, n_ctl, group_key(group))
             ports = sorted(i for i, p in self.ports.items() if p.group == group)
             if rep is not None and any(self.ports[i].auto for i in ports):
                 self._learn(rep, frames, r, ok, now)
@@ -471,7 +506,7 @@ class KissLink:
         key = next((k for k in keys if rx.decode(1, data_mask(0, 1, k), 0, None) is not None), None)
         if key is None:
             return None
-        frames, _, lost = self._data(rx, r, 1, key)
+        frames, _, lost = self.read_burst_frames(rx, 1, key)
         ports = sorted(i for i, p in self.ports.items() if p.key == key)
         if len({self.ports[i].group for i in ports}) > 1:  # two groups, one key: whose it is can't be told
             log.warning("broadcast burst under a key %d open groups share: dropped", len(ports))

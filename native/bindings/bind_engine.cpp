@@ -34,7 +34,7 @@ public:
     bool compat;
 
 protected:
-    std::vector<tnc::Receiver::Item> receiver_feed(std::span<const double> x) override {
+    std::vector<receiver::Receiver::Item> receiver_feed(std::span<const double> x) override {
         if (receiver.is_none()) return Engine::receiver_feed(x);
         if (py::len(receiver.attr("feed")(np<double>(x))))
             throw std::logic_error("a Python receiver's events can't cross into the C++ engine");
