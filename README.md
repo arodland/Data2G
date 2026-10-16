@@ -48,6 +48,10 @@ simulated end-to-end QSOs to prove their value.
 
 Join the [Digital Oddballs Radio Club Discord](https://discord.gg/JJgNszRMce).
 
+## LLM Use
+
+Oh yes, lots. I'm a professional programmer with decades of experience, and an experienced amateur radio operator. I've been mixing the two for quite some time. I like to think that I know what I'm doing when it comes to developing multiplatform ham apps. When it comes to DSP and error-correcting codes, I know the principles, but I'm not an expert on the details, especially the details of doing them _efficiently_. I set the goals and the direction, Claude turned the spec into tests and the tests into code, and created something that would have taken me years otherwise. It's occasionally a bit spaghetti, but it's actually reasonably understandable.
+
 ## License
 
 [Artistic License 2.0](LICENSE).
