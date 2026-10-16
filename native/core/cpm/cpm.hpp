@@ -2,9 +2,9 @@
 // layout, modulation, Costas sync, header ML, noncoherent soft bits).
 //
 // Every on-air tone pattern (sync blocks, header tones) is a frozen table
-// (tables::CPM_GRIDS); nothing here draws random numbers. The TX bandpass
-// (cpm.bandpass, dsp.tx_condition) belongs to the dsp port: modulate()
-// returns the audio before it.
+// (tables::CPM_GRIDS); nothing here draws random numbers. Unlike Python's,
+// modulate() returns the audio before the TX bandpass: bandpass() is that
+// step (cpm.modulate = bandpass(modulate)).
 #pragma once
 
 #include <complex>
@@ -52,6 +52,11 @@ std::vector<double> tones(const Grid& g, std::span<const int> sym, double glide 
 std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap = 0);
 // cpm.tx_filter: the grid's TX filter under bandwidth cap code `cap` (0..2).
 const tables::CpmTxFilter& tx_filter(const Grid& g, int cap);
+// cpm.TxFilter.overshoot: CLIP_OVERSHOOT, its last factor repeated to `passes`.
+std::vector<double> overshoot(const tables::CpmTxFilter& f);
+// cpm.bandpass: modulate()'s audio through the TX filter of cap code `cap`,
+// clip and filter (waveform::tx_condition) over the tones +- its margin.
+std::vector<double> bandpass(const Grid& g, std::span<const double> x, int cap = 0);
 
 // (n_sym, m + 2 extra) tone energies from `start`, CFO removed; shares per row.
 Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra = 0);

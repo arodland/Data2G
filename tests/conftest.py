@@ -274,8 +274,8 @@ def _waveform_substitutions(native):
 @provider
 def _cpm_substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
-    stays in Python. The TX bandpass (dsp) and the MI features (predictor)
-    are still Python's, applied to the native results."""
+    stays in Python. The MI features (predictor) are still Python's,
+    applied to the native results."""
     n = native.cpm
     import functools
 
@@ -307,7 +307,7 @@ def _cpm_substitutions(native):
     def modulate(spec, coded, dup, cap=0):
         if not own_spec(spec):
             return py["modulate"](spec, coded, dup, cap)
-        return cpm.bandpass(cpm.GRIDS[spec.grid], n.modulate(spec.name, list(coded), dup, cap), cap)
+        return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
 
     def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0):
         if not own_grid(g):
@@ -356,6 +356,7 @@ def _cpm_substitutions(native):
         (cpm, "to_tones"): by_grid(n.to_tones, cpm.to_tones),
         (cpm, "tones"): by_grid(n.tones, cpm.tones),
         (cpm, "modulate"): modulate,
+        (cpm, "bandpass"): by_grid(n.bandpass, cpm.bandpass),
         (cpm, "_energies"): by_grid(n.energies, cpm._energies),
         (cpm, "_shares"): n.shares,
         (cpm, "detect"): detect,
