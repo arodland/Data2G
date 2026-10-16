@@ -38,6 +38,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "arq/phy.hpp"
@@ -219,6 +220,11 @@ public:
     const std::vector<std::string>& aliases() const { return aliases_; }
     // Session::accept_connect, for every session from the next on (the host's ACCEPT)
     std::function<bool(const std::string&, const std::string&)> accept_connect;
+    // ... set for the session now as well
+    void set_accept_connect(std::function<bool(const std::string&, const std::string&)> f) {
+        accept_connect = f;
+        session_->accept_connect = std::move(f);
+    }
     Session& session() { return *session_; }
     const std::shared_ptr<Session>& session_ptr() const { return session_; }
     double now() const { return static_cast<double>(n_) / config::FS; }
@@ -226,20 +232,25 @@ public:
     void set_n(std::int64_t n) { n_ = n; }
     void listen(bool on = true);
     void set_call(const std::string& call, const std::vector<std::string>& aliases = {});
+    void disconnect() { session_->disconnect(); }  // gracefully: the peer is told, what's queued still goes
     void abort();
     void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
     void set_chat(bool on);
-    std::vector<std::string> events();  // CONNECTED ..., DISCONNECTED ..., CQFRAME call cap, ID call key
+    // Host notifications since the last call, as engine.py's events() words them: "CONNECTED peer",
+    // "DISCONNECTED why", "CQFRAME call cap", "ID call key".
+    std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
+    // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
+    const std::string* tx_submode() const { return tx_ ? &tx_->burst->submode : nullptr; }
     std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
-    // (port, frame)s heard for KISS clients; the host clears it
-    std::vector<std::pair<int, Bytes>>& kiss_rx() { return kiss_rx_; }
+    // (port, frame)s heard for KISS clients since the last call
+    std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
     const modem::Accept& accept() const { return accept_; }
     SoftStore& store() { return store_; }

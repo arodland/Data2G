@@ -145,7 +145,7 @@ void Station::flush(std::uint64_t asker) {
     }
     host_->out_cmd.clear();
     o.data.swap(host_->out_data);
-    o.kiss.swap(engine_->kiss_rx());
+    o.kiss = engine_->take_kiss_rx();
     o.acks = link_->take_acks();
     o.dial = dial_live_;
     if (const auto st = engine_->session().state;
@@ -229,7 +229,7 @@ void Station::dial(const std::string& host, int port, unsigned gen, std::shared_
         engine_->post([this, gen] {
             if (dial_live_ != gen) return;
             logf(INFO, "ACCEPT: the far end closed: disconnecting");
-            engine_->session().disconnect();
+            engine_->disconnect();
             flush();
         });
     });

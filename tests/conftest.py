@@ -1125,13 +1125,6 @@ def _engine_substitutions(native):
 
     PyEngine, N, KL = E.Engine, native.engine, native.kisslink.KissLink
 
-    class _Receiver:  # what the host reads of engine.receiver
-        def __init__(self, n):
-            self._n = n
-
-        busy = property(lambda s: s._n.busy)
-        channel_busy = property(lambda s: s._n.channel_busy)
-
     class Engine:
         __doc__ = PyEngine.__doc__
 
@@ -1163,14 +1156,12 @@ def _engine_substitutions(native):
             self._kiss_rx += self._n.take_kiss_rx()
             return self._kiss_rx
 
-        @property
-        def receiver(self):
-            r = self._n.receiver
-            return _Receiver(self._n) if r is None else r
+        def take_kiss_rx(self):
+            out, self._kiss_rx = self.kiss_rx, []
+            return out
 
-        @receiver.setter
-        def receiver(self, r):
-            self._n.receiver = r
+        # None while the C++ receiver is the engine's own; a test may set a Python one
+        receiver = property(lambda s: s._n.receiver, lambda s, r: setattr(s._n, "receiver", r))
 
     return {(E, "Engine"): Engine, (host, "Engine"): Engine}
 

@@ -225,8 +225,10 @@ void sync_kiss() {
     Engine a("W1AW", ca), b("K2XYZ", cb);
     const Bytes ui = ui_frame("!beacon");
     ka.enqueue(ui);
+    std::vector<std::pair<int, Bytes>> heard;
     check::is_true(link(a, b, 12, 30, [&] {
-        return std::find(b.kiss_rx().begin(), b.kiss_rx().end(), std::pair<int, Bytes>{0, ui}) != b.kiss_rx().end();
+        for (auto& f : b.take_kiss_rx()) heard.push_back(std::move(f));
+        return std::find(heard.begin(), heard.end(), std::pair<int, Bytes>{0, ui}) != heard.end();
     }, 5), "a UI frame crosses");
 }
 

@@ -97,7 +97,7 @@ class Host:
         self.engine, self.cap, self.listening = engine, 2, False
         self.accept_addr: tuple[str, int] | None = None  # ACCEPT host:port
         self.dial = None  # serve(): (host, port) -> True once a connection there carries the session's data
-        engine.accept_connect = engine.session.accept_connect = self._accept_connect
+        engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.out_cmd: list[str] = []
@@ -136,7 +136,7 @@ class Host:
             except (RuntimeError, ValueError):
                 ok = False
         elif cmd == "DISCONNECT":
-            e.session.disconnect()
+            e.disconnect()
         elif cmd == "ABORT":
             e.abort()
             self.out_cmd.append("DISCONNECTED")
@@ -196,7 +196,7 @@ class Host:
         e = self.engine
         log.info("command client gone")
         if e.session.state in (S.CONNECTED, S.DISCONNECTING):
-            e.session.disconnect()
+            e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr = False, None
@@ -248,11 +248,11 @@ class Host:
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")
-            if ptt and e.tx and e.tx[0].submode != self._mode:
-                self._mode = e.tx[0].submode
+            if ptt and e.tx_submode is not None and e.tx_submode != self._mode:
+                self._mode = e.tx_submode
                 self.out_cmd.append(f"MODE {self._mode}")
-        if e.receiver.channel_busy != self._busy:
-            self._busy = e.receiver.channel_busy
+        if e.channel_busy != self._busy:
+            self._busy = e.channel_busy
             self.out_cmd.append("BUSY ON" if self._busy else "BUSY OFF")
         # BUFFER, as VARA defines it: bytes the peer hasn't acknowledged yet,
         # sent or not. Pat blocks writes while BUFFER >= 7x its write (<= 250
@@ -488,7 +488,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                         host.data_in(d)
                     else:
                         log.info("ACCEPT: the far end closed: disconnecting")
-                        engine.session.disconnect()
+                        engine.disconnect()
                 elif kind == "kiss":
                     port, frame, ack = v
                     link.enqueue(frame, port, ack)
@@ -528,9 +528,8 @@ def serve(a, pa, stop: threading.Event | None = None):
             else:
                 data.send(bytes(host.out_data))
             host.out_data.clear()
-            for port, f in engine.kiss_rx:
+            for port, f in engine.take_kiss_rx():
                 kiss.broadcast(f, port)
-            engine.kiss_rx.clear()
             for port, ack in link.take_acks():
                 kiss.send_ack(ack, port)
     finally:
