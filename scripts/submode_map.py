@@ -2,7 +2,7 @@
 
     uv run python scripts/submode_map.py --out <page.html> [--csv runs/ladder_dd_10pct.csv]
 
-Rows: the four bands (CPM counts as its nearest: fsk8r50 and fsk16r25 at 500,
+Rows: the four bands (the FSK modes count as their nearest: fsk8r50 and fsk16r25 at 500,
 fsk32r62 at 2400). Within a band, one lane per modulation: a bar over its bps
 range and a dot per code rate, labeled rate / bps / AWGN 10% point. Modes
 outside a code-rate family (polar acks and short-block polar) share a
@@ -17,8 +17,8 @@ import csv
 import html
 import json
 import math
-import re
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -26,8 +26,9 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data2g.arq.modes import MODES, is_cpm  # noqa: E402
-import ladder_page as L  # noqa: E402
+import ladder_page as L
+
+from data2g.arq.modes import MODES
 
 CH = L.CH
 FADE_LEAD = 5
@@ -66,23 +67,21 @@ def x_of(bps: float) -> float:
 
 
 def snr_txt(v) -> str:
-    if v is None or v != v:
+    if v is None or math.isnan(v):
         return "—"
     return f"{v:.1f}".replace("-", "−")
 
 
 def load(path) -> dict:
-    out = {}
-    for r in csv.DictReader(open(path)):
-        out[r["name"]] = {c: (float(r[c]) if r.get(c) else math.nan) for c in CH}
-    return out
+    with open(path) as f:
+        return {r["name"]: {c: (float(r[c]) if r.get(c) else math.nan) for c in CH} for r in csv.DictReader(f)}
 
 
 def ranks(th: dict) -> dict:
     """1 = most robust; ties share the better rank; never-reaches ranks last."""
     out = {}
     for c in CH:
-        key = {m: (th[m][c] if th[m][c] == th[m][c] else math.inf) for m in th}
+        key = {m: (math.inf if math.isnan(th[m][c]) else th[m][c]) for m in th}
         for m in th:
             out[(m, c)] = 1 + sum(1 for o in th if key[o] < key[m])
     return out
@@ -120,10 +119,10 @@ def build(th: dict) -> str:
         best = max(lead, key=lead.get)
         nom = re.search(r"-r(\d+/\d+)$", m)
         rtxt = nom.group(1) if nom and s.code != "polar" else L.rate(s)[0]
-        modes.append(dict(
-            name=m, band=band(s), mod=mod(m, s), bps=L.bps(s), x=x_of(L.bps(s)), rate=rtxt,
-            hz=L.width(s), cpm=is_cpm(s), th={c: th[m][c] for c in CH}, rk={c: rk[(m, c)] for c in CH},
-            fade=best if lead[best] >= FADE_LEAD else None, lead=lead[best]))
+        modes.append({
+            "name": m, "band": band(s), "mod": mod(m, s), "bps": L.bps(s), "x": x_of(L.bps(s)), "rate": rtxt,
+            "hz": L.width(s), "th": {c: th[m][c] for c in CH}, "rk": {c: rk[(m, c)] for c in CH},
+            "fade": best if lead[best] >= FADE_LEAD else None, "lead": lead[best]})
 
     svg, y = [], 46
     tip = {}
@@ -153,8 +152,6 @@ def build(th: dict) -> str:
                 sep = cy - 12 - (nl * LINE if any(d["side"] == "up" for d in ds) else 0) - LANE_PAD
                 svg.append(f'<line class="lanesep" x1="24" x2="{W - 24}" y1="{sep}" y2="{sep}"/>')
             note = MOD_NOTE.get(md, "")
-            if md != "Specialty" and ds[0]["cpm"]:
-                note = "CPM"
             svg.append(f'<g class="lanelabel"><rect x="24" y="{cy - 6}" width="12" height="12" rx="{6 if md != "Specialty" else 2}" '
                        f'style="fill:var(--{v})"/><text class="modname" x="44" y="{cy + 4.5}">{md}</text>'
                        + (f'<text class="modnote" x="44" y="{cy + 17}">{note}</text>' if note else "") + "</g>")
@@ -217,10 +214,10 @@ def build(th: dict) -> str:
     svgdoc = (f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" '
               f'aria-label="Data2G submodes by band and modulation against raw bits per second">{body}</svg>')
 
-    data = {m: {k: d[k] for k in ("band", "mod", "bps", "rate", "hz", "cpm", "th", "rk", "fade", "lead")}
+    data = {m: {k: d[k] for k in ("band", "mod", "bps", "rate", "hz", "th", "rk", "fade", "lead")}
             for m, d in tip.items()}
     for d in data.values():
-        d["th"] = {c: (None if v != v else v) for c, v in d["th"].items()}
+        d["th"] = {c: (None if math.isnan(v) else v) for c, v in d["th"].items()}
 
     table = []
     for d in sorted(modes, key=lambda d: (d["band"], MODS.index(d["mod"]), d["bps"])):
@@ -326,7 +323,7 @@ tr.faded td.nm{color:var(--fadeink);font-weight:600}
 <div class="notes">
 <p>Thresholds: the smallest ARQ data burst (a control codeword plus one data codeword) through the receiver the ARQ uses, 200 trials a point, 10% failure. SNR is average transmitted power over noise in 2500 Hz. MPG, MPP and MPD are ITU-R F.1487 channels: 0.1/0.5, 1/2 and 2/4 Hz Doppler / ms delay.</p>
 <p>Fading rank: every mode is ranked 1 to {N} by threshold on each channel (1 is most robust). The ring tag names the fading channel with the biggest gain over the mode's AWGN rank. Hover or focus a dot for all four channels.</p>
-<p>Raw bps is payload rate without CRC or burst overhead, as on the submode ladder. Bands: CPM modes sit with their nearest neighbor (the 8-FSK and 16-FSK modes at 500 Hz, 32-FSK at 2400 Hz). QAM64 and QAM256 are learned, non-square constellations.</p>
+<p>Raw bps is payload rate without CRC or burst overhead, as on the submode ladder. Bands: the FSK modes sit with their nearest neighbor (8-FSK and 16-FSK at 500 Hz, 32-FSK, 2300 Hz wide, at 2400 Hz). QAM64 and QAM256 are learned, non-square constellations.</p>
 </div>
 <details><summary>Table view</summary>
 <div class="twrap"><table>
@@ -344,7 +341,7 @@ const f=v=>v==null?"never":v.toFixed(2).replace("-","\\u2212");
 function show(g){
   const m=g.dataset.m,d=D[m];if(!d)return;
   const rows=CHS.map(c=>`<tr class="${d.fade===c?"hl":""}"><td>${c.toUpperCase()}</td><td>${f(d.th[c])} dB</td><td>#${d.rk[c]}</td></tr>`).join("");
-  tip.innerHTML=`<h3>${m}</h3><div class="sub">${d.hz} Hz · ${d.mod}${d.cpm?" (CPM)":""} · rate ${d.rate} · ${Math.round(d.bps)} bps</div>`+
+  tip.innerHTML=`<h3>${m}</h3><div class="sub">${d.hz} Hz · ${d.mod} · rate ${d.rate} · ${Math.round(d.bps)} bps</div>`+
     `<table><tr><th></th><th>10% point</th><th>rank</th></tr>${rows}</table>`;
   tip.hidden=false;
   const r=g.getBoundingClientRect(),w=wrap.getBoundingClientRect();
