@@ -111,7 +111,7 @@ def ints(values) -> str:
 
 def format_cpp() -> str:
     """Every submode's frozen interleaver and polar info set (data2g/format)."""
-    out = [HEADER.format(src="data2g/format/*.npz"), '#include "tables/tables.hpp"\n\n',
+    out = [HEADER.format(src="data2g/format/*.npz"), '#include "tables/format.hpp"\n\n',
            "namespace data2g::tables {\nnamespace {\n\n"]
     rows = []
     for i, s in enumerate(config.SUBMODES.values()):
@@ -143,7 +143,7 @@ def constellation_cpp() -> str:
     (constellation.ace_dirs runs scipy's ConvexHull on learned sets)."""
     names = [f"gray-qam{4**k}" for k in range(1, 5)] + sorted(p.stem for p in constellation.DIR.glob("*.npy"))
     out = [HEADER.format(src="data2g/constellation.py, data2g/constellations/*.npy"),
-           '#include "tables/tables.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
+           '#include "tables/constellation.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
     rows = []
     for i, name in enumerate(names):
         pts, dirs = constellation.load(name), constellation.ace_dirs(name)
@@ -168,7 +168,7 @@ def cpm_cpp() -> str:
     RNG is ported)."""
     from data2g import cpm, modem
 
-    out = [HEADER.format(src="data2g/cpm.py"), '#include "tables/tables.hpp"\n\n',
+    out = [HEADER.format(src="data2g/cpm.py"), '#include "tables/cpm.hpp"\n\n',
            "namespace data2g::tables {\nnamespace {\n\n"]
     rows = []
     for i, g in enumerate(cpm.GRIDS.values()):
@@ -216,7 +216,7 @@ def polar_ga_cpp() -> str:
     one: the CPM control codewords. Keyed by (k, e)."""
     from data2g import cpm
 
-    out = [HEADER.format(src="data2g/polar.py (codes.polar_code of cpm.CTL)"), '#include "tables/tables.hpp"\n\n',
+    out = [HEADER.format(src="data2g/polar.py (codes.polar_code of cpm.CTL)"), '#include "tables/polar_ga.hpp"\n\n',
            f"// Design SNR {cxx(float(codes.POLAR_DESIGN_SNR_DB))} dB.\n",
            "namespace data2g::tables {\nnamespace {\n\n"]
     rows, seen = [], set()
@@ -249,7 +249,7 @@ def gamma_q99_cpp() -> str:
     n = np.arange(1, GAMMA_Q99_MAX + 1)
     q = gamma.ppf(0.99, n) / n
     rows = ",\n".join(", ".join(repr(float(v)) for v in q[i:i + 4]) for i in range(0, len(q), 4))
-    return (HEADER.format(src="scipy.stats.gamma") + '#include "tables/tables.hpp"\n\nnamespace data2g::tables {\n\n'
+    return (HEADER.format(src="scipy.stats.gamma") + '#include "tables/gamma_q99.hpp"\n\nnamespace data2g::tables {\n\n'
             f"const std::array<double, GAMMA_Q99_MAX> GAMMA_Q99 = {{{{\n{rows}}}}};\n\n}}  // namespace data2g::tables\n")
 
 
@@ -258,7 +258,7 @@ def ldpc_cpp() -> str:
     """Every QC-LDPC shift table (data2g/codes_data/ldpc_shifts.npz)."""
     from data2g import ldpc
 
-    out = [HEADER.format(src="data2g/codes_data/ldpc_shifts.npz"), '#include "tables/tables.hpp"\n\n',
+    out = [HEADER.format(src="data2g/codes_data/ldpc_shifts.npz"), '#include "tables/ldpc.hpp"\n\n',
            "namespace data2g::tables {\nnamespace {\n\n"]
     rows = []
     for key, base in ldpc.tables().items():
@@ -290,7 +290,7 @@ def predictor_cpp() -> str:
     model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
     members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
     out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,capacity_tables}.npz"),
-           '#include "tables/tables.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
+           '#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
 
     def emit(tag, ms, order=None):
         """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
@@ -363,7 +363,7 @@ def zdict_cpp() -> str:
 
     z = frames.ZDICT
     rows = ",\n".join(", ".join(str(b) for b in z[i:i + 24]) for i in range(0, len(z), 24))
-    return (HEADER.format(src="data2g/arq/zdict.bin") + '#include "tables/tables.hpp"\n\nnamespace data2g::tables {\n\n'
+    return (HEADER.format(src="data2g/arq/zdict.bin") + '#include "tables/zdict.hpp"\n\nnamespace data2g::tables {\n\n'
             f"namespace {{\nconstexpr std::uint8_t zdict[{len(z)}] = {{\n{rows}}};\n}}  // namespace\n\n"
             "const std::span<const std::uint8_t> ZDICT = zdict;\n\n}  // namespace data2g::tables\n")
 

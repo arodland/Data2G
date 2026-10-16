@@ -10,7 +10,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
+#include "tables/format.hpp"
 
 namespace data2g::codes {
 

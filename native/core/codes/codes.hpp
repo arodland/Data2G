@@ -19,7 +19,7 @@
 #include "config/config.hpp"
 #include "ldpc/ldpc.hpp"
 #include "polar/polar.hpp"
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::codes {

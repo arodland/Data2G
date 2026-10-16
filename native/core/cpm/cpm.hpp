@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::cpm {

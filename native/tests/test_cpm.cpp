@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "check.hpp"
+#include "config/config.hpp"
 #include "cpm/cpm.hpp"
 
 using namespace data2g;
