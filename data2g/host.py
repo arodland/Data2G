@@ -50,6 +50,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
+from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
 from .config import FS  # noqa: E402
@@ -58,7 +59,7 @@ from .tnc import Decimator, Rigctld, _device, _pa_float  # noqa: E402
 log = logging.getLogger("data2g.host")
 VERSION = "Data2G 0.1"
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
-BW_NAME = {0: "500", 1: "1200", 2: "2300"}
+BW_NAME = modes.BW_NAME
 BLOCK = FS // 10  # audio block: 0.1 s
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does

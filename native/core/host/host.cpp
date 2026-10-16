@@ -13,6 +13,7 @@ namespace data2g::host {
 
 namespace {
 
+using arq::bw_name;  // host.py: BW_NAME[cap], a KeyError otherwise
 using arq::SessionState;
 
 constexpr const char* LOG = "data2g.host";
@@ -21,11 +22,6 @@ constexpr int INFO = 20;
 // ponytail: from memory of VARA clients, not a checked list (as host.py); check the log on first contact with Pat
 constexpr std::array<std::string_view, 8> IGNORED = {"COMPRESSION", "PUBLIC",     "CWID",       "P2P",
                                                      "WINLINK",     "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"};
-
-std::string bw_name(int cap) {
-    static const std::array<const char*, 3> names = {"500", "1200", "2300"};
-    return names.at(static_cast<std::size_t>(cap));  // host.py: BW_NAME[cap], a KeyError otherwise
-}
 
 std::string upper(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));

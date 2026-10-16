@@ -45,22 +45,12 @@ inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
-inline constexpr int CPM_CODE = 3;
-// CPM_CODE's indices from here carry n10's past 15 (16-23; policy.py N10_HIGH)
-inline constexpr int N10_HIGH = 8;
 inline constexpr std::string_view ALT_POLL = "n4-ack-8f";  // escalation 2's mode
 inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = "fsk16r25-r1/2";
 
-int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap
 std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0);
-double width_hz(const Mode& m);
-std::vector<const Mode*> allowed(int cap);  // MODES' order
-
-int encode(std::string_view submode);  // throws for an unknown mode
-const Mode* decode(int rec);           // nullptr: no such mode
-
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 

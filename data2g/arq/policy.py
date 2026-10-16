@@ -26,7 +26,10 @@ import numpy as np
 from .. import codes, modem
 from .. import cpm
 from ..config import max_codewords
-from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
+# the bandwidth and recommendation-code helpers are modes'; named here too,
+# where the shifter and its callers (and tests/conftest.py) find them
+from .modes import (CAP_HZ, MODES, burst_seconds, ctl_payload_bytes, decode, encode, is_cpm, max_ctl, min_cw,
+                    width_hz)
 from . import frames as F
 from . import link as L
 from . import predictor as P
@@ -82,9 +85,6 @@ LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
-CAP_HZ = {0: 500, 1: 1200, 2: 2400}
-WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
-BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
 # vs ack-4f's 79%): the loss study got worse in every cell (MPP 0 dB 248 ->
 # 187 bps), likely because polls are what the receiver measures, and a 500 Hz
@@ -136,43 +136,9 @@ DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")
 assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
 
 
-CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
-# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
-# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
-N10_HIGH = 8
-assert len(cpm.SPECS) <= N10_HIGH
-
-
-def encode(submode: str) -> int:
-    s = MODES[submode]
-    if is_cpm(s):
-        return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
-    if s.sync_band == "n10" and s.index >= 16:
-        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
-        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
-    return F.BANDS_CODE[s.sync_band] << 4 | s.index
-
-
-def decode(rec: int) -> str | None:
-    from ..modem import BY_INDEX
-
-    if rec >> 4 == CPM_CODE:
-        i, names = rec & 15, list(cpm.SPECS)
-        if i >= N10_HIGH:
-            s = BY_INDEX.get(("n10", 16 + i - N10_HIGH))
-            return s.name if s else None
-        return names[i] if i < len(names) else None
-    band = BY_CODE.get(rec >> 4)
-    s = BY_INDEX.get((band, rec & 15)) if band else None
-    return s.name if s else None
-
-
 def allowed(cap: int) -> list:
+    """The modes the shifter may pick within cap `cap` (modes.allowed less DROP)."""
     return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
-
-
-def width_hz(s) -> float:
-    return cpm.GRIDS[s.band].bandwidth if is_cpm(s) else WIDTH_HZ[s.band]
 
 
 CTL_BYTES = 12  # a data burst's typical control: core 4, new 3, rv 3, a flag or two

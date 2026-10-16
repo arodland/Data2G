@@ -18,7 +18,6 @@
 #include "rig/hamlib/hamlib.hpp"  // list_models, model_info
 #endif
 #include "arq/modes.hpp"
-#include "arq/policy.hpp"
 #include "host/host.hpp"
 #include "util/pool.hpp"
 

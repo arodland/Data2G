@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-#include "arq/policy.hpp"
+#include "arq/modes.hpp"
 #include "kisslink/kisslink.hpp"
 #include "tables/tables.hpp"
 

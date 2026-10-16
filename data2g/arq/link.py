@@ -96,7 +96,7 @@ class TxBurst:
     submode: str
     slots: list[Slot]
     burst_seq: int  # absolute count of this station's bursts
-    cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; policy.CAP_HZ)
+    cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; modes.CAP_HZ)
 
 
 class RxBurst(Protocol):
