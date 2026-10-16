@@ -128,7 +128,7 @@ target_link_libraries(data2g-monitor PRIVATE data2g_core)
 
 # data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
 add_executable(data2g-replay apps/data2g_replay.cpp)
-target_link_libraries(data2g-replay PRIVATE data2g_core)
+target_link_libraries(data2g-replay PRIVATE data2g_core data2g_applog)
 if(TARGET data2g_audio)
   target_link_libraries(data2g-monitor PRIVATE data2g_audio)
   target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
