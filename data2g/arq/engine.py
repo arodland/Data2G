@@ -1,4 +1,4 @@
-"""One station's live stack, clocked by audio samples (gear-shifter phase H).
+"""One station's live stack, clocked by audio samples.
 
 `Engine.step(audio_in) -> (audio_out, ptt)` is called once per audio block
 at FS: it feeds what was heard to the streaming receiver (tnc.Receiver),

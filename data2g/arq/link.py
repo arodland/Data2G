@@ -1,6 +1,10 @@
 """ARQ link core (docs/arq.md §3-§6, §9a, §10): one station's data
 transfer state for both directions, independent of the PHY.
 
+Station.build() -> the next TxBurst; Station.handle(rx) takes a received
+burst (burst.RxBurst); on_timeout() is the master's retry. The mode
+choice comes from a Policy (declared here; policy.GearShifter on air).
+
 Accounting rules, all from docs/arq.md §10 (the failure to design out is
 two stations that hear each other fine and exchange bursts forever
 because they disagree about state):
@@ -8,7 +12,8 @@ because they disagree about state):
 - Seqs are unbounded ints here; 7 bits on the wire, unwrapped against a
   known anchor (the receiver's cumulative, the sender's base).
 - Every data codeword's CRC mask includes its direction, seq,
-  compression and abandon epoch (Phy.decode's mask_id), so a slot mapped
+  compression and abandon epoch (burst.data_mask, the mask_id an
+  RxBurst decodes under), so a slot mapped
   to the wrong seq, taken under the wrong T_COMP flag or from an older
   slicing fails its CRC: accounting errors can cost progress, never
   correctness.
@@ -722,7 +727,7 @@ class Station:
             self.rx.abandon(a)
             # every seq from a on is re-sliced: soft bits held for any of
             # them (the failed ones, not only the decoded ones) belong to
-            # the old codewords (phase G found them combined into new ones)
+            # the old codewords (scripts/phy_session.py found them combined into new ones)
             self._forget_all(rx)
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
