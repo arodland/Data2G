@@ -25,7 +25,7 @@
 #include "audio/filters.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 using namespace data2g;
 using namespace std::chrono_literals;

@@ -34,7 +34,7 @@
 #include "audio/fifo.hpp"
 #include "check.hpp"
 #include "rig/controller.hpp"
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 using namespace data2g;
 

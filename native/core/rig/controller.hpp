@@ -35,9 +35,10 @@
 //     worker's frequency or status. The reference achieves this by
 //     passing locals into the thread; same idea, enforced by ownership.
 //
-// Qt-free, like the rx and tx engines: the GUI adapts the callbacks to
-// signals. Blocking calls (`set_ptt`) are for worker threads only --
-// `TxEngine` already runs on one.
+// Qt-free, like the rest of data2g_core: a front end adapts the callbacks
+// to signals. Blocking calls (`set_ptt`) are for worker threads only --
+// the station's transmit thread (app::Transmitter, through rig::Keyer) is
+// one.
 
 #ifndef DATA2G_RIG_CONTROLLER_HPP
 #define DATA2G_RIG_CONTROLLER_HPP
@@ -134,9 +135,11 @@ public:
 
     // Key or unkey, blocking until the rig has actually been told.
     //
-    // Blocking on purpose: `TxEngine` needs the rig keyed *before* it
-    // waits out `ptt_lead_s`, so an asynchronous version would make that
-    // delay measure the wrong interval. Call it from the transmit
+    // Blocking on purpose: rig::Keyer needs the rig keyed *before* it
+    // starts the burst's audio, whose leading silence (the engine's
+    // ptt_delay_s, --ptt-on-delay-ms) is the PTT on delay, so an
+    // asynchronous version would make that delay measure the wrong
+    // interval. Call it from the transmit
     // worker, never from a UI thread. Throws RigError if there is no
     // session, if the rig refuses, or if the operation outlives
     // `operation_timeout_s`.

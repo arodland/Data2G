@@ -1,9 +1,10 @@
-// The two FIFOs between the sound card's threads and the engine thread,
-// with host.py's Capture and Player semantics.
+// The two FIFOs between the sound card's threads and the station's (the
+// receive thread reads capture, the transmit thread writes playback), with
+// host.py's Capture and Player semantics.
 //
 // Capture: a stall in the reader becomes latency, never lost samples (a
 // blocking read once dropped ~50 s of a 14 min session, holes inside
-// bursts). Player: the engine hands over 0.1 s at a time and the device
+// bursts). Player: the writer hands over 0.1 s at a time and the device
 // pulls in small periods, with `lead` queued ahead at key-up so a late
 // step does not leave the device empty.
 //
@@ -77,7 +78,7 @@ private:
 };
 
 // Capture: the device thread write()s mono samples (already at the
-// engine's rate, see CapturePipeline), the engine thread read()s blocks.
+// engine's rate, see CapturePipeline), the receive (engine) thread read()s blocks.
 class CaptureFifo {
 public:
     // `rate`: of the samples written. Holds `capacity_s` of backlog; beyond
@@ -115,13 +116,13 @@ private:
     std::atomic<std::uint64_t> overflows_{0}, dropped_{0}, late_events_{0};
 };
 
-// Playback: the engine thread write()s mono samples at the device rate,
-// the device thread pull()s periods.
+// Playback: the transmit thread (app::Transmitter, rig::Keyer) write()s
+// mono samples at the device rate, the device thread pull()s periods.
 class PlaybackFifo {
 public:
     PlaybackFifo(int rate, double lead_s, double capacity_s = 30.0);
 
-    // Engine thread. Key-up: queue the lead, then count short pulls as
+    // Writer's thread. Key-up: queue the lead, then count short pulls as
     // underruns.
     void start();
     // Waits for room rather than dropping TX audio.
@@ -153,7 +154,7 @@ private:
     std::atomic<bool> active_{false}, flush_{false};
     std::atomic<double> latency_s_{0.0};
     std::atomic<std::uint64_t> underruns_{0};
-    std::vector<float> scratch_;  // engine thread only
+    std::vector<float> scratch_;  // writer's thread only
 };
 
 }  // namespace data2g::audio

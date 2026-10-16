@@ -21,7 +21,7 @@
 #include <thread>
 #include <vector>
 
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 namespace data2g::audio {
 class PlaybackFifo;

@@ -23,7 +23,7 @@
 #include "check.hpp"
 #include "rig/controller.hpp"
 #include "rig/hamlib/hamlib.hpp"
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 extern char** environ;
 

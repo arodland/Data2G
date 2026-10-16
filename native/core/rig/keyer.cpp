@@ -1,4 +1,4 @@
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 #include <chrono>
 #include <exception>

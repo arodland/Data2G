@@ -27,7 +27,7 @@
 #include "kisslink/kisslink.hpp"
 #include "monitor/monitor.hpp"
 #include "rig/controller.hpp"
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 #ifdef DATA2G_HAVE_AUDIO
 #include "audio/card.hpp"
