@@ -60,7 +60,7 @@ Heard heard_of(const py::dict& r) {
     o->est.filter_spread_hz = e.contains("filter_spread_hz") ? e["filter_spread_hz"].cast<double>() : o->est.spread_hz;
     o->est.clip_ratio = e["clip_ratio"].cast<double>();
     o->est.gain = e.contains("gain") ? e["gain"].cast<double>() : 1.0;
-    o->band = modem::band(r["band"].cast<std::string>()).name;
+    o->band = config::band(r["band"].cast<std::string>()).name;
     if (r.contains("hp")) o->hp = rows<cd>(r["hp"]);
     if (r.contains("kc") && !r["kc"].is_none()) o->kc = r["kc"].cast<int>();
     const auto sup = r["support"].cast<py::sequence>();

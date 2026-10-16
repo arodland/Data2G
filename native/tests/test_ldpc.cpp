@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "check.hpp"
+#include "config/config.hpp"
 #include "ldpc/ldpc.hpp"
 
 using namespace data2g;

@@ -15,9 +15,9 @@ import numpy as np
 import data2g_native
 from data2g import codes, hfchannel, modem, tnc
 from data2g.arq import phy
-from data2g.config import BANDS, FS, NSYM, SUBMODES
+from data2g.config import BANDS, FS, SUBMODES
 from data2g.hfchannel import FadingPreset
-from data2g.waveform import ofdm, sync
+from data2g.waveform import dsp, ofdm, sync
 
 set_threads = getattr(data2g_native, "set_threads", lambda n: None)  # before the pool existed
 
@@ -69,7 +69,7 @@ def cases(rng):
     lead = 2000
     seg = np.concatenate([np.zeros(lead), x[3000:-3000], np.zeros(2000)])
     seg = hfchannel.apply_channel(seg, snr_db=10.0, seed=2)
-    head = lead + modem.head_samples("w48") + NSYM + 3 * modem.M
+    head = lead + modem.receive_head("w48")
     assert modem.receive(seg, ["w48"], accept, head=head)["n_cw"] == 16
     out["live receive w48 16cw (head)"] = (lambda _: modem.receive(seg, ["w48"], accept, head=head), None)
     out["receive w48 16cw (whole buffer)"] = (lambda _: modem.receive(seg), None)
@@ -79,11 +79,11 @@ def cases(rng):
     for b in sorted({BANDS[b].sync_band for b in BANDS}):
         def setup(b=b):
             d = sync.StreamDetector(ofdm.band(b))
-            d.feed(modem.to_baseband(noise[:FS], 0))
+            d.feed(dsp.to_baseband(noise[:FS], 0))
             return d
 
         def hop(d, b=b):
-            d.feed(modem.to_baseband(noise[FS:FS + tnc.Receiver.HOP], FS))
+            d.feed(dsp.to_baseband(noise[FS:FS + tnc.Receiver.HOP], FS))
 
         out[f"StreamDetector hop {b}"] = (hop, setup)
     return out

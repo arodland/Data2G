@@ -491,11 +491,11 @@ def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int
 
 
 def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
-    """The gear shifter's inputs, as arq.phy.measure gives them for OFDM:
-    per-symbol SNR from the winning tone's energy over the noise bins,
-    effective MI per constellation over it, SNR in the 2500 Hz reference,
-    and a fading-rate proxy for spread (symbol energies' decorrelation)."""
-    from .arq import predictor as P
+    """The gear shifter's measurements, as arq.phy.measure gives them for
+    OFDM: SNR in the 2500 Hz reference, a fading-rate proxy for spread
+    (symbol energies' decorrelation), and `snr`, per symbol, from the
+    winning tone's energy over the noise bins (phy.measure makes the
+    effective-MI features of it). Native cpm::measure."""
     from .config import FRAME_SAMPLES, SNR_REF_BW_HZ
 
     top = E.max(axis=1)
@@ -504,11 +504,8 @@ def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
     es = max(float(np.mean(top) - n0), 1e-12)
     rho = np.corrcoef(top[:-1], top[1:])[0, 1] if len(top) > 3 and np.std(top) > 0 else 1.0
     spread = float(np.clip(np.sqrt(max(-np.log(max(rho, 1e-3)), 0)) * g.rate / np.pi, 0.0, 3.0))
-    out = dict(snr_est=10 * np.log10(es / n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread, delay_est_ms=0.0,
-               headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES))
-    for c in P.CONSTS:
-        out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
-    return out
+    return dict(snr_est=10 * np.log10(es / n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread, delay_est_ms=0.0,
+                headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
 
 
 def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float) -> float:

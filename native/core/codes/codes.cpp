@@ -10,7 +10,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
+#include "tables/format.hpp"
 
 namespace data2g::codes {
 
@@ -42,10 +43,6 @@ constexpr std::array<std::uint32_t, 256> crc32_table() {
     return t;
 }
 constexpr auto CRC32 = crc32_table();
-
-std::size_t row(const config::Submode& spec) {
-    return static_cast<std::size_t>(&spec - config::SUBMODES.data());
-}
 
 }  // namespace
 
@@ -92,12 +89,6 @@ std::vector<std::uint8_t> scrambler(int k, int seed) {
         reg = ((reg << 1) | bit) & 0x1FF;
     }
     return out;
-}
-
-const config::Submode* submode(std::string_view name) {
-    for (const auto& s : config::SUBMODES)
-        if (s.name == name) return &s;
-    return nullptr;
 }
 
 // --- the codec ---------------------------------------------------------------
@@ -231,7 +222,7 @@ const Spec* spec(std::string_view name) {
     return nullptr;
 }
 
-const Spec& spec(const config::Submode& s) { return specs().at(row(s)); }
+const Spec& spec(const config::Submode& s) { return specs().at(config::row(s)); }
 
 const Spec& spec(const tables::CpmSpec& s) {
     // specs() is SUBMODES, then CPM_SPECS, then CPM_CTL

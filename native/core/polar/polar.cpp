@@ -7,7 +7,7 @@
 #include <string>
 #include <utility>
 
-#include "tables/tables.hpp"
+#include "tables/polar_ga.hpp"
 #include "util/pool.hpp"
 
 // Built with -O3 under GCC (native/CMakeLists.txt): at -O2 its very-cheap

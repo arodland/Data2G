@@ -15,8 +15,7 @@ from functools import lru_cache
 import numpy as np
 
 from .. import codes, constellation, cpm, equalizer, modem
-from ..config import BANDS, NSYM, RS, SNR_REF_BW_HZ, SUBMODES, SYMS_PER_FRAME
-from ..waveform import ofdm
+from ..waveform import dsp, ofdm
 from . import predictor as P
 from .frames import SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
@@ -58,7 +57,6 @@ def peak_db(submode: str, cap: int = 0) -> float:
 
 @lru_cache(maxsize=None)
 def _peak_db(submode: str, cap: int) -> float:
-    from .. import hfchannel
     from .link import Slot, TxBurst, ctl_mask, data_mask
 
     spec = MODES[submode]
@@ -66,7 +64,7 @@ def _peak_db(submode: str, cap: int) -> float:
     rand = lambda sp: bytes(rng.integers(0, 256, codes.payload_bytes(sp), dtype=np.uint8))  # noqa: E731
     burst = TxBurst(submode, [Slot(ctl_mask(0, 0, 5), 0, rand(ctl_spec(spec))), Slot(data_mask(0, 1, 5), 0, rand(spec))], 0, cap)
     x = tx_audio(burst)
-    return round(float(10 * np.log10(np.max(np.abs(hfchannel._analytic(x)) ** 2) / 2 / hfchannel.active_power(x))), 3)
+    return round(float(10 * np.log10(np.max(dsp.envelope(x) ** 2) / 2 / dsp.active_power(x))), 3)
 
 
 def tx_audio(burst) -> np.ndarray:
@@ -87,20 +85,26 @@ def tx_audio(burst) -> np.ndarray:
 
 
 def measure(r: dict) -> dict:
+    """The gear shifter's inputs (arq/predictor's features) from a received
+    burst (modem.receive's Received, or cpm.receive's dict, family "cpm"):
+    the modem's measurements plus effective MI per constellation."""
     if r.get("family") == "cpm":
-        return cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
+        out = cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
+        snr = out.pop("snr")
+        for c in P.CONSTS:
+            out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
+        return out
     return _measure_ofdm(r)
 
 
-def _measure_ofdm(r: dict) -> dict:
+def _measure_ofdm(r: modem.Received) -> dict:
     """The gear shifter's inputs from modem.receive's result: effective MI
     against thermal noise and estimation error, not the transmitter's clip
     noise (it belongs to the submode sent, not to the channel)."""
     est = r["est"]
     h, var = est["h"], est["n0"] + est["mse"]
-    nc = BANDS[r["band"]].nc
     d0, d1 = r["support"]
-    out = dict(snr_est=10 * np.log10(est["p_sig"] / est["n0"] * nc * RS / SNR_REF_BW_HZ),
+    out = dict(snr_est=modem.snr_db(est, r["band"]),
                spread_est=est["spread_hz"], delay_est_ms=(d1 - d0) / modem.FS * 1000,
                headroom=r["spec"].headroom, frames=r["n_cw"] * r["spec"].frames_per_cw)
     for c in P.CONSTS:
@@ -113,21 +117,21 @@ def soft_bits(r: dict):
     list, control and data lengths differing, for CPM)."""
     if r.get("family") == "cpm":
         return r["soft"]
-    return _soft_ofdm(r)
+    return modem.burst_soft(r)
 
 
-def _dd_estimate(r: dict, post: dict) -> dict:
+def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     """r["est"] re-made by equalizer.refine with soft symbols as pilots:
     `post` {slot: a-posteriori LLRs of its coded bits, mapping order}
     (a decoded codeword's are its bits, as large LLRs)."""
-    spec, est, raw = r["spec"], r["est"], r["raw"]
+    spec, est, y = r["spec"], r["est"], modem.data_symbols(r["raw"])
     pts = constellation.load(spec.constellation)
     m = constellation.bits_per_symbol(pts)
     llr = np.zeros((r["n_cw"], spec.coded_bits))
     have = np.zeros(llr.shape, dtype=np.uint8)
     for s, v in post.items():
         llr[s], have[s] = v, 1
-    shape = raw[:, 1:].shape
+    shape = y.shape
     L = np.clip(codes.spread(llr, m).reshape(-1, m), -30, 30)
     labels = (np.arange(len(pts))[:, None] >> np.arange(m - 1, -1, -1)) & 1  # (M, m), modulate's order
     # log P(label) as matmuls: the (symbols, M, m) select-and-sum was 70% of a 256l refine
@@ -137,38 +141,19 @@ def _dd_estimate(r: dict, post: dict) -> dict:
     x = (prob @ pts).reshape(shape)
     v = (prob @ np.abs(pts) ** 2).reshape(shape) - np.abs(x) ** 2
     k = codes.spread(have, m)[::m].reshape(shape).astype(bool) & (np.abs(x) > 1e-3)
-    g, n_f, nc = est["gain"], shape[0], shape[2]
+    g, nc = est["gain"], shape[2]
     p = est["p_sig"]
     with np.errstate(divide="ignore", invalid="ignore"):
-        z = np.where(k, raw[:, 1:] / (g * x), 0)
+        z = np.where(k, y / (g * x), 0)
+    # modem.noise_var's with |h|^2 at its expectation g^2 p, plus the soft symbol's own variance
     w = np.where(k, g**2 * np.abs(x) ** 2 / (est.get("n0_k", est["n0"]) + est["clip_ratio"] * g**2 * p + g**2 * p * v), 0)
-    kc = r["kc"]
-    air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
-    t_rows = (air[:, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)) * NSYM / modem.FS
-    t_pilot = np.arange(len(r["hp"])) * SYMS_PER_FRAME * NSYM / modem.FS
+    t_rows, t_pilot = modem.symbol_times(r)
     h, mse = equalizer.refine(r["hp"], t_pilot, z.reshape(-1, nc), w.reshape(-1, nc), t_rows, r["support"], est,
                               ofdm.band(spec.band).bb)
     out = dict(est)
     out["h"] = g * h.reshape(shape)
     out["mse"] = g**2 * mse.reshape(shape)
     return out
-
-
-def _soft_ofdm(r: dict, est: dict | None = None) -> np.ndarray:
-    """(n_cw, coded_bits) soft bits in mapping order from modem.receive's result."""
-    spec, est = r["spec"], est or r["est"]
-    var = modem.noise_var(est["h"], est) + est["mse"]
-    return np.asarray(codes.despread(modem.soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
-
-
-def _soft_slot(r: dict, est: dict, slot: int) -> np.ndarray:
-    """_soft_ofdm(r, est)[slot] alone: codes.spread deals codeword
-    symbols round-robin, so the slot's are every n_cw-th of the burst's."""
-    n = r["n_cw"]
-    var = modem.noise_var(est["h"], est) + est["mse"]
-    pick = lambda a: a.reshape(-1)[slot::n]
-    return constellation.llr(pick(r["raw"][:, 1:]), pick(est["h"]), pick(var),
-                             constellation.load(r["spec"].constellation))
 
 
 class ModemRx:
@@ -205,7 +190,7 @@ class ModemRx:
         if self._est is None:
             return self.soft[slot]
         if slot not in self._soft_dd:
-            self._soft_dd[slot] = _soft_slot(self.r, self._est, slot)
+            self._soft_dd[slot] = modem.slot_soft(self.r, self._est, slot)
         return self._soft_dd[slot]
 
     def _spec(self, slot: int):

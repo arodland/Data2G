@@ -147,13 +147,12 @@ def _substitutions(native):
 @provider
 def _waveform_substitutions(native):
     """data2g.waveform. Bands cross by name; a band whose spec isn't the
-    configured one stays in Python. Modules that from-imported a name hold
-    their own reference, so modem is listed too."""
+    configured one stays in Python."""
     import functools
 
     import numpy as np
 
-    from data2g import config, modem
+    from data2g import config
     from data2g.waveform import dsp, ofdm, sync
 
     W = native.waveform
@@ -247,15 +246,10 @@ def _waveform_substitutions(native):
         (ofdm, "preamble_waveform"): w.preamble_waveform,
         (ofdm, "preamble_template"): w.preamble_template,
         (ofdm, "pilot_sequence"): lambda: w.pilot,
-        (modem, "PILOT"): w.pilot,
         (dsp, "to_baseband"): to_baseband,
         (dsp, "freq_correct"): freq_correct,
         (dsp, "tx_condition"): tx_condition,
         (dsp, "papr_db"): W.papr_db,
-        (modem, "to_baseband"): to_baseband,
-        (modem, "freq_correct"): freq_correct,
-        (modem, "tx_condition"): tx_condition,
-        (modem, "acquire"): acquire,
         (sync, "detection_stat"): detection_stat,
         (sync, "_raw_stat"): _raw_stat,
         (sync, "repeat_corr"): W.repeat_corr,
@@ -273,15 +267,11 @@ def _waveform_substitutions(native):
 @provider
 def _cpm_substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
-    stays in Python. The MI features (predictor) are still Python's,
-    applied to the native results."""
+    stays in Python."""
     n = native.cpm
     import functools
 
-    import numpy as np
-
     from data2g import cpm
-    from data2g.arq import predictor as P
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
                                        "read_header", "soft", "find", "measure")}
@@ -338,11 +328,8 @@ def _cpm_substitutions(native):
         if not own_grid(g):
             return py["measure"](g, E, n_sym)
         m = n.measure(g.name, E, n_sym)
-        snr = m.pop("snr")
-        out = dict(snr_est=m["snr_est"], spread_est=m["spread_est"], delay_est_ms=0.0, headroom=0.0, frames=m["frames"])
-        for c in P.CONSTS:
-            out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
-        return out
+        return dict(snr_est=m["snr_est"], spread_est=m["spread_est"], delay_est_ms=0.0, headroom=0.0,
+                    frames=m["frames"], snr=m["snr"])
 
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)
@@ -499,7 +486,7 @@ def _gear_substitutions(native):
 
     T, A = native.timing, native.arq
     py = {k: getattr(modem, k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "frames_on_air",
-                                         "burst_end", "head_samples", "burst_seconds")}
+                                         "burst_end", "head_samples", "receive_head", "burst_seconds")}
     py.update({f"modes.{k}": getattr(modes, k) for k in ("burst_seconds", "ctl_payload_bytes", "max_ctl", "min_cw")})
     py.update({f"G.{k}": getattr(G, k) for k in ("width_hz", "ctl_slots", "slots_for")})
     py["predict_outcome"] = P.predict_outcome
@@ -528,7 +515,8 @@ def _gear_substitutions(native):
     max_ctl = by_spec(A.max_ctl, py["modes.max_ctl"])
     min_cw = by_spec(lambda n, data: A.min_cw(n, bool(data)), py["modes.min_cw"])
     subs = {
-        **{(modem, k): by_band(k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "head_samples")},
+        **{(modem, k): by_band(k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "head_samples",
+                                               "receive_head")},
         (modem, "frames_on_air"): by_spec(T.frames_on_air, py["frames_on_air"], own),
         (modem, "burst_end"): burst_end,
         (modem, "burst_seconds"): by_spec(T.burst_seconds, py["burst_seconds"], own),
@@ -741,8 +729,8 @@ def _modem_substitutions(native):
     names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
              "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
-             "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "demodulate",
-             "decode_received")
+             "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft",
+             "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received")
     py = {k: getattr(modem, k) for k in names}
     min_score = dict(modem.HEADER_MIN_SCORE)
 
@@ -896,6 +884,25 @@ def _modem_substitutions(native):
     def soft_bits(raw, h, var, spec):
         return N.soft_bits(raw, h, np.broadcast_to(var, h.shape), spec)
 
+    def arrays(r, est=None):
+        return own(r["spec"]) and all(isinstance(e["h"], np.ndarray) for e in (r["est"], est or r["est"]))
+
+    @guarded("burst_soft", arrays)
+    def burst_soft(r, est=None):
+        return N.burst_soft(r, est)
+
+    @guarded("slot_soft", lambda r, est, slot: arrays(r, est))
+    def slot_soft(r, est, slot):
+        return N.slot_soft(r, est, int(slot))
+
+    @guarded("snr_db", lambda est, band: band in config.BANDS)
+    def snr_db(est, band):
+        return N.snr_db(est, band)
+
+    @guarded("symbol_times", lambda r: own(r["spec"]))
+    def symbol_times(r):
+        return N.symbol_times(r)
+
     def burst(t):
         name, payloads, ok, f, start, snr, soft = t
         return modem.Burst(submode=config.SUBMODES[name], payloads=payloads, crc_ok=ok, freq_offset=f,
@@ -923,7 +930,8 @@ def _modem_substitutions(native):
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,
             "_best_header": _best_header, "find_burst": find_burst, "pilot_coherence": pilot_coherence,
             "find_copy": find_copy, "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
-            "noise_var": noise_var, "soft_bits": soft_bits, "decode_received": decode_received,
+            "noise_var": noise_var, "soft_bits": soft_bits, "burst_soft": burst_soft, "slot_soft": slot_soft,
+            "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received,
             "demodulate": demodulate}.items()},
     }
 

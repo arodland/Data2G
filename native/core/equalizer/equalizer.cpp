@@ -10,7 +10,7 @@
 #include <string>
 #include <tuple>
 
-#include "tables/tables.hpp"
+#include "tables/gamma_q99.hpp"
 #include "util/linalg.hpp"
 #include "util/cancel.hpp"
 #include "util/pool.hpp"

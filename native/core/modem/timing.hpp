@@ -7,13 +7,9 @@
 #include <vector>
 #include <cstdint>
 
-#include "generated/config.hpp"
+#include "config/config.hpp"
 
 namespace data2g::modem {
-
-// Throws std::out_of_range for an unknown band.
-const config::Band& band(std::string_view name);
-int preamble_samples(const config::Band& b);
 
 bool hosts(std::string_view band);                          // _hosts: other bands' frames follow its header
 std::vector<bool> header_layout(std::string_view band);     // per header symbol: true = pilot
@@ -23,6 +19,7 @@ std::optional<int> copy_frame(std::string_view band, int n_f);  // nullopt: no h
 int frames_on_air(const config::Submode& spec, int n_cw);
 std::int64_t burst_end(std::int64_t p0, const config::Submode& spec, int n_cw);
 int head_samples(std::string_view band);
+int receive_head(std::string_view band);  // receive(head=...)'s audio from a found preamble's first sample
 double burst_seconds(const config::Submode& spec, int n_cw);
 
 }  // namespace data2g::modem

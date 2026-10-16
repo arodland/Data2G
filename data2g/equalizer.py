@@ -19,6 +19,7 @@ is buffered before decoding, so every estimate can use every pilot:
 """
 
 from functools import lru_cache
+from typing import TypedDict
 
 import numpy as np
 
@@ -244,8 +245,21 @@ def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
     return float(cand[err <= err.min() + LOO_TOL * max(err.min() - n0_s, 0.0)].max())
 
 
+class ChannelEstimate(TypedDict):
+    """estimate()'s result, a plain dict (native equalizer::Estimate, whose
+    rows are frame * 5 + symbol). modem.DataEstimate extends it."""
+
+    h: np.ndarray  # (F, 5, nc) the channel at each data symbol
+    mse: np.ndarray  # (F, 5, nc) its estimation error variance
+    n0: float  # thermal noise variance per carrier
+    n0_k: np.ndarray  # (nc,) the same per carrier
+    p_sig: float  # mean pilot power per carrier, noise removed
+    spread_hz: float  # measured Doppler spread (reported)
+    filter_spread_hz: float  # the one the time filters used (refine's too)
+
+
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
-             n0_pre: float = np.inf, n0_pre_k: np.ndarray | None = None) -> dict:
+             n0_pre: float = np.inf, n0_pre_k: np.ndarray | None = None) -> ChannelEstimate:
     """h_pilot (F+1, NC): LS estimates at every pilot, the closing one
     included; `n0_pre` a noise estimate from the preamble
     (preamble_noise). Returns h (F, 5, NC) at the data symbols, mse (F, 5, NC),

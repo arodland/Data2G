@@ -14,7 +14,7 @@
 #include <string_view>
 #include <vector>
 
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::cpm {
@@ -102,8 +102,8 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
                          double reach_hz = 150.0, bool front_only = true, std::int64_t lo = 0,
                          std::optional<std::int64_t> hi = std::nullopt);
 
-// cpm.measure without the effective-MI features (arq/predictor's, Phase 2):
-// those are computed from `snr`, per symbol.
+// cpm.measure: arq/phy's measure makes the effective-MI features (arq/predictor's)
+// of `snr`, per symbol.
 struct Measure {
     double snr_est, spread_est, frames;
     std::vector<double> snr;

@@ -48,7 +48,7 @@ int main() {
         check::is_true(got[i].first == 0x30 && got[i].second == frames[i], "kiss frame " + std::to_string(i));
 
     check::current_step = "framing";
-    const auto& spec = *codes::submode("qpsk-r1/5");
+    const auto& spec = *config::submode("qpsk-r1/5");
     std::vector<tnc::Bytes> packets = {tnc::Bytes(10, 7), tnc::Bytes(60, 9), tnc::Bytes(1, 1)};
     const auto pl = tnc::pack(packets, spec);
     check::equal(static_cast<int>(pl.size()), 2, "pack: codewords");
@@ -63,7 +63,7 @@ int main() {
     check::is_true(threw, "pack past capacity throws");
 
     check::current_step = "receiver";
-    const auto& s = *codes::submode("qpsk-r1/2");
+    const auto& s = *config::submode("qpsk-r1/2");
     std::vector<std::vector<std::uint8_t>> sent(3);
     for (auto& p : sent)
         for (int i = 0; i < s.payload_bytes; ++i) p.push_back(static_cast<std::uint8_t>(rng() & 0xFF));

@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-#include "tables/tables.hpp"
+#include "tables/constellation.hpp"
 
 namespace data2g::constellation {
 

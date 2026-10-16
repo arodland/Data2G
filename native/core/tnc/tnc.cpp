@@ -450,9 +450,9 @@ Receiver::Stats Receiver::stats(int64_t w0) {
 void Receiver::searched() {
     const int64_t end = off_ + len();
     for (const auto& det : detectors_) {
-        const auto& b = modem::band(det.band);
+        const auto& b = config::band(det.band);
         decided_[det.band] = std::max(decided(det.band),
-                                      end - modem::head_samples(det.band) - modem::preamble_samples(b) - REVISIT);
+                                      end - modem::head_samples(det.band) - config::preamble_samples(b) - REVISIT);
     }
     for (const auto* g : grids_)
         decided_[g->name] = std::max(decided(g->name), end - grid_span(*g) - g->T);
@@ -500,7 +500,7 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     const Pending p = *pending_;
     if (p.is_cpm()) return false;  // scores aren't comparable across families
     const auto band = p.ofdm().band;
-    const int64_t hdr_end = p.start() + modem::preamble_samples(modem::band(band)) + modem::header_samples(band) - off_;
+    const int64_t hdr_end = p.start() + config::preamble_samples(config::band(band)) + modem::header_samples(band) - off_;
     const int64_t w0 = whole ? hdr_end : std::max(hdr_end, len() - keep_);
     if (len() - w0 < keep_ / 2) return false;
     std::optional<modem::Lock> q;
@@ -642,7 +642,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         const int64_t s1 = std::clamp<int64_t>(p.end() + config::LEADIN_SAMPLES - off_, s0, len());
         req.seg.assign(buf_.begin() + s0, buf_.begin() + s1);
         req.at = off_ + s0;
-        req.head = p.start() - off_ - s0 + modem::head_samples(p.ofdm().band) + config::NSYM + 3 * config::M;
+        req.head = p.start() - off_ - s0 + modem::receive_head(p.ofdm().band);
         req.audio_hi = s1 - s0;
         out.push_back(std::move(req));
         last_start_ = p.start();

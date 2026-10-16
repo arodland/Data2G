@@ -16,10 +16,10 @@
 #include <string_view>
 #include <vector>
 
-#include "generated/config.hpp"
+#include "config/config.hpp"
 #include "ldpc/ldpc.hpp"
 #include "polar/polar.hpp"
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::codes {
@@ -55,9 +55,6 @@ template <typename Row>
 int rv_cycle(const Row& r) {
     return r.code == "ldpc" ? 4 : 1;
 }
-
-// nullptr if there is no such submode.
-const config::Submode* submode(std::string_view name);
 
 // --- the codec (codes.encode / decode / combine) ------------------------------
 //

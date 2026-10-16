@@ -5,10 +5,17 @@ copied rather than imported so this project owns its on-air format; the
 measurements behind each number are recorded there. Two deliberate
 differences: the beacon carrier is reclaimed for data (all 24 carriers
 carry payload), and the preamble repeat count is ours to raise.
+
+The single source of on-air constants. Every module-level UPPER_CASE
+name here becomes a constexpr in native/core/generated/config.hpp (BANDS
+and SUBMODES as structs with their derived fields; the generator's SKIP
+lists the rest it emits in another form or not at all), so after a
+change run tools/gen_native_tables.py, whose --check fails until then.
 """
 
 import os
 from dataclasses import dataclass
+from typing import NamedTuple
 
 FS = 8000  # audio sample rate, Hz
 
@@ -68,7 +75,7 @@ FIRST_PATH_FRAC = 0.5
 # span to interpolate the channel over).
 # The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
-HEADER_SYMS = 4
+# Header symbols per band: BandSpec.header_syms.
 PROTOCOL_VERSION = 12  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
 # 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
 # in place: development, one operator)
@@ -100,24 +107,14 @@ LEADOUT_SAMPLES = 800
 CLIP_HEADROOM_DB = 1.0
 CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
 TX_BANDPASS = (850.0, 2200.0)
-# What the clipper does to data symbols, as seen by a receiver whose
-# channel estimate comes from the pilots, per band and headroom:
-# codes_data/clip_constants.json, measured through channel_torch on a
-# clean channel (scripts/clip_constants.py --write regenerates it; do it
-# whenever the clipper changes). Identical for QAM 4..256: after the IDFT
-# every constellation looks Gaussian.
-#
-# Gain: data arrive at 0.72-0.99 of the pilot-referenced channel, because
-# the data clip hard and the ~1 dB-PAPR pilots barely at all (Bussgang
-# gain; ignoring it cost 16-QAM 0.1 BMI at 20 dB). A one-frame burst is
-# mostly preamble, header and pilots, which shifts the clip threshold,
-# hence a separate 1-frame gain. SDR: distortion power on each carrier
-# relative to the wanted data power after that gain, flat from 1 to 60
-# frames; made at TX, so it fades with its carrier (|h|^2 at RX).
-# At the stock 1 dB: w 13.1 dB, n10 13.5, n4 15.1 (fewer carriers, less
-# Gaussian, less clipping), w48 12.3.
-DEMOD_BACKOFF = 6
+# (what the clipper does to the data, as a receiver sees it: CLIP, below BANDS)
 
+# --- receiver -----------------------------------------------------------------
+# Samples the data symbols' FFT window starts before the cyclic prefix's
+# end (SSTVAE's value; the header, read before the delay profile is known,
+# backs off further: modem.HEADER_BACKOFF).
+DEMOD_BACKOFF = 6
+# Noise bandwidth every reported SNR is referred to (Hz).
 SNR_REF_BW_HZ = 2500.0
 
 # Minimized-crest-factor pilot, 0.99 dB envelope PAPR. SSTVAE's config.py
@@ -224,6 +221,11 @@ class SubmodeSpec:
         return BANDS[self.band].clip_headroom_db if self.clip_headroom_db is None else self.clip_headroom_db
 
     @property
+    def clip(self) -> "ClipConsts":
+        """The clip constants of this submode's bursts (native modem::clip_consts(spec))."""
+        return clip_consts(self.band, self.headroom, self.ace, self.constellation)
+
+    @property
     def coded_bits(self) -> int:
         return self.cu_per_frame * self.frames_per_cw * self.bits_per_cu
 
@@ -259,6 +261,22 @@ BANDS = {
 }
 
 
+# What the clipper does to data symbols, as seen by a receiver whose
+# channel estimate comes from the pilots, per band and headroom:
+# codes_data/clip_constants.json, measured through channel_torch on a
+# clean channel (scripts/clip_constants.py --write regenerates it; do it
+# whenever the clipper changes). Identical for QAM 4..256: after the IDFT
+# every constellation looks Gaussian.
+#
+# Gain: data arrive at 0.72-0.99 of the pilot-referenced channel, because
+# the data clip hard and the ~1 dB-PAPR pilots barely at all (Bussgang
+# gain; ignoring it cost 16-QAM 0.1 BMI at 20 dB). A one-frame burst is
+# mostly preamble, header and pilots, which shifts the clip threshold,
+# hence a separate 1-frame gain. SDR: distortion power on each carrier
+# relative to the wanted data power after that gain, flat from 1 to 60
+# frames; made at TX, so it fades with its carrier (|h|^2 at RX).
+# At the stock 1 dB: w 13.1 dB, n10 13.5, n4 15.1 (fewer carriers, less
+# Gaussian, less clipping), w48 12.3.
 def _load_clip_table():
     import json
     from pathlib import Path
@@ -277,11 +295,23 @@ def clip_key(band: str, headroom: float, ace: tuple = (), const: str = "") -> st
     return k + f"+ace{'-'.join(f'{v:g}' for v in ace)}:{const}" if ace else k
 
 
-def clip_consts(band: str, headroom: float, ace: tuple = (), const: str = "") -> tuple:
-    """(gain by frame count, default gain, clip-noise ratio) for a band at a
-    headroom, from codes_data/clip_constants.json (stock overshoot)."""
+class ClipConsts(NamedTuple):
+    """What the clipper does to the data, as a receiver sees it (native
+    modem::ClipConsts)."""
+
+    gains: dict  # data over pilot amplitude, by burst length in frames where it differs from `gain`
+    gain: float  # the same, any other length
+    ratio: float  # clip-noise power over the data's
+
+    def gain_for(self, n_frames: int) -> float:
+        return self.gains.get(n_frames, self.gain)
+
+
+def clip_consts(band: str, headroom: float, ace: tuple = (), const: str = "") -> ClipConsts:
+    """A band's at a headroom (and ACE and constellation, if it uses ACE),
+    from codes_data/clip_constants.json (stock overshoot)."""
     e = _CLIP_ENTRIES[clip_key(band, headroom, ace, const)]
-    return {1: e["gain_1f"]}, e["gain"], 10 ** (-e["sdr_db"] / 10)
+    return ClipConsts({1: e["gain_1f"]}, e["gain"], 10 ** (-e["sdr_db"] / 10))
 
 
 def clip_peak_db(band: str, headroom: float, ace: tuple = (), const: str = "") -> float:
@@ -294,23 +324,20 @@ CLIP = {b: clip_consts(b, BANDS[b].clip_headroom_db) for b in BANDS}
 assert CLIP_OVERSHOOT_TABLE == CLIP_OVERSHOOT, "clip table measured with another overshoot"
 
 
-# The ladder, provisional (2026-09-23): the survivors of scripts/prune.py
-# over runs/ladder.csv, minus the cuts agreed then (0.083 and 0.183
-# polar: below the sync floor / within 1 dB of 0.167; learned-256: 8 dB
-# worse on AWGN than learned-64 at the same rate). Indices are not frozen;
-# plan step 9 freezes them with their constellations and interleavers.
-# Payload bits/cu (CRC excluded) in the comments.
 def _m(i, name, code, const, frames, k, band="w", headroom=None, ace=()):
     return name, SubmodeSpec(i, name, code, const, frames, k=k, band=band, clip_headroom_db=headroom, ace=ace)
 
 
 # The pruned ladder (2026-09-23): scripts/prune.py runs/ladder_final.csv
 # --sync runs/sync_floor.csv --keep polar-gray-qam4-f1-k48@h0
-# n4-polar-gray-qam4-f2-k48@h0; thresholds
-# in CANDIDATES.md. Indices by payload rate within each header index
-# space (w; n10 with n4, which syncs on it; w48). Clip headroom per
-# submode (scripts/pick_headroom.py). Provisional: the narrow ladder may
-# be trimmed once there is on-air experience.
+# n4-polar-gray-qam4-f2-k48@h0, minus the cuts agreed then (0.083 and
+# 0.183 polar: below the sync floor / within 1 dB of 0.167; learned-256:
+# 8 dB worse on AWGN than learned-64 at the same rate); thresholds in
+# CANDIDATES.md. Indices by payload rate within each header index space
+# (w; n10 with n4, which syncs on it; w48). Clip headroom per submode
+# (scripts/pick_headroom.py). Provisional: the narrow ladder may be
+# trimmed once there is on-air experience. Payload rate (CRC excluded)
+# in the comments.
 SUBMODES = dict([
     # 1200 Hz. ack-1f is kept for latency (432 ms), not by domination.
     _m(0, "ack-4f", "polar", "gray-qam4", 4, 56, headroom=0),  # 56 bps
@@ -363,3 +390,6 @@ SUBMODES = dict([
     _m(13, "w48-64l-r3/4", "ldpc", "c64-w48-r34", 2, 2160, band="w48", headroom=5),  # 7389 bps
     _m(14, "w48-256l-r5/8", "ldpc", "c256-w48-r58", 2, 2400, band="w48", headroom=6),  # 8222 bps
 ])
+# (sync band, header index) -> submode: what a header's index means
+# (native config::by_index)
+BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}

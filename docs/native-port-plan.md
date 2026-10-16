@@ -668,7 +668,7 @@ Not planned, low priority, but no choice may rule it out. In practice:
   CMake globs `core/*.cpp`, `bindings/*.cpp` and `tests/test_*.cpp`.
 - Frozen data: a generator function in `tools/gen_native_tables.py`
   registered with `FILES["<name>.cpp"] = fn` under its definition;
-  declarations in `native/core/tables/tables.hpp`. Nothing is loaded from
+  declarations in `native/core/tables/<name>.hpp` (`tables.hpp` includes them all). Nothing is loaded from
   files at run time.
 - Precision follows the Python: float64 -> double, float32 -> float. No
   fast-math. Integers and decisions exact; floats to a stated tolerance.

@@ -34,7 +34,7 @@ std::optional<modem::Accept> accept_of(const py::object& a) {
 }
 
 // Band names as views into config::BANDS (the core keeps string_views).
-std::string_view band_view(const std::string& name) { return modem::band(name).name; }
+std::string_view band_view(const std::string& name) { return config::band(name).name; }
 
 std::vector<std::string_view> bands_of(const std::optional<std::vector<std::string>>& bands) {
     std::vector<std::string_view> out;
@@ -163,6 +163,20 @@ modem::DataEstimate est_of(const py::dict& d) {
     e.p_sig = get<double>(d, "p_sig", 0.0);
     e.clip_ratio = d["clip_ratio"].cast<double>();
     return e;
+}
+
+// The Received fields the decode helpers read (burst_soft .. decode_received), from receive()'s dict.
+modem::Received received_of(const py::dict& r) {
+    modem::Received rx;
+    rx.spec = &spec_of(r["spec"]);
+    rx.n_cw = r["n_cw"].cast<int>();
+    rx.raw = mat2(r["raw"].cast<In<cd>>());
+    rx.est = est_of(r["est"].cast<py::dict>());
+    if (r.contains("hp")) rx.hp = mat2(r["hp"].cast<In<cd>>());
+    if (r.contains("kc") && !r["kc"].is_none()) rx.kc = r["kc"].cast<int>();
+    rx.cfo = get<double>(r, "cfo", 0.0);
+    rx.preamble_start = get<std::int64_t>(r, "preamble_start", 0);
+    return rx;
 }
 
 py::dict received_dict(const modem::Received& r) {
@@ -382,14 +396,21 @@ void bind_modem(py::module_& m) {
     d.def("soft_bits", [](const In<cd>& raw, const In<cd>& h, const In<double>& var, const py::object& s) {
         return np(mo::soft_bits(mat2(raw), mat2(h), mat2(var), spec_of(s)));
     });
+    d.def("burst_soft", [](const py::dict& r, const std::optional<py::dict>& est) {
+        const auto rx = received_of(r);
+        const auto m = est ? mo::burst_soft(rx, est_of(*est)) : mo::burst_soft(rx);
+        return np(m);
+    }, py::arg("r"), py::arg("est") = py::none());
+    d.def("slot_soft", [](const py::dict& r, const py::dict& est, int slot) {
+        return np(mo::slot_soft(received_of(r), est_of(est), slot));
+    });
+    d.def("snr_db", [](const py::dict& est, const std::string& band) { return mo::snr_db(est_of(est), band); });
+    d.def("symbol_times", [](const py::dict& r) {
+        const auto t = mo::symbol_times(received_of(r));
+        return py::make_tuple(np(t.rows), np(t.pilots));
+    });
     d.def("decode_received", [](const py::dict& r) {
-        mo::Received rx;
-        rx.spec = &spec_of(r["spec"]);
-        rx.n_cw = r["n_cw"].cast<int>();
-        rx.raw = mat2(r["raw"].cast<In<cd>>());
-        rx.est = est_of(r["est"].cast<py::dict>());
-        rx.cfo = r["cfo"].cast<double>();
-        rx.preamble_start = r["preamble_start"].cast<std::int64_t>();
+        const auto rx = received_of(r);
         mo::Burst b;
         {
             py::gil_scoped_release nogil;

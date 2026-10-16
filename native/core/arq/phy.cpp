@@ -18,7 +18,6 @@ namespace data2g::arq {
 namespace {
 
 using cd = std::complex<double>;
-constexpr std::size_t S = config::DATA_SYMS_PER_FRAME;
 
 const codes::Spec& ctl_code(const Mode& m) {
     return m.is_cpm() ? codes::spec(cpm::ctl(cpm::grid_of(*m.cpm))) : codes::spec(*m.ofdm);
@@ -135,14 +134,9 @@ int Heard::n_cw() const { return ofdm ? ofdm->n_cw : static_cast<int>(cpm->soft.
 
 std::shared_ptr<const SlotSoft> soft_bits(const Heard& r) {
     if (r.cpm) return std::make_shared<const SlotSoft>(r.cpm->soft);
-    const auto& R = *r.ofdm;
-    auto var = modem::noise_var(R.est.h, R.est);
-    for (std::size_t i = 0; i < var.data.size(); ++i) var.data[i] += R.est.mse.data[i];
-    const auto burst = modem::soft_bits(R.raw, R.est.h, var, *R.spec);
-    const auto flat = codes::despread<double>(burst, R.n_cw, R.spec->bits_per_cu);
-    const std::size_t n = flat.size() / static_cast<std::size_t>(R.n_cw);
+    const auto soft = modem::burst_soft(*r.ofdm);
     auto out = std::make_shared<SlotSoft>();
-    for (int c = 0; c < R.n_cw; ++c) out->emplace_back(flat.begin() + c * n, flat.begin() + (c + 1) * n);
+    for (std::size_t c = 0; c < soft.rows; ++c) out->emplace_back(soft[c], soft[c] + soft.cols);
     return out;
 }
 
@@ -166,8 +160,7 @@ Measured measure(const Heard& r) {
     const auto& est = R.est;
     std::vector<double> var(est.mse.data.size());
     for (std::size_t i = 0; i < var.size(); ++i) var[i] = est.n0 + est.mse.data[i];
-    const int nc = modem::band(R.band).nc;
-    out.snr_est = 10 * std::log10(est.p_sig / est.n0 * nc * config::RS / config::SNR_REF_BW_HZ);
+    out.snr_est = modem::snr_db(est, R.band);
     out.spread_est = est.spread_hz;
     out.delay_est_ms = static_cast<double>(R.support.second - R.support.first) / config::FS * 1000;
     out.headroom = R.spec->headroom;
@@ -199,26 +192,13 @@ bool ModemRx::dd(const codes::Spec& s) const {
 bool ModemRx::late() const { return dd_until_ && clock_() >= *dd_until_; }
 
 // The slot's soft bits on the estimate in use. A refined estimate's are
-// made per slot as asked: codes::spread deals codeword symbols round-robin,
-// so the slot's are every n_cw-th of the burst's.
+// made per slot as asked (modem::slot_soft).
 const std::vector<double>& ModemRx::slot_soft(int slot) {
     if (!cur_.est) return (*soft_)[static_cast<std::size_t>(slot)];
     auto& cache = *cur_.soft;
     auto it = cache.find(slot);
     if (it != cache.end()) return it->second;
-    const auto& R = *r_.ofdm;
-    const auto& est = *cur_.est;
-    const std::size_t nc = R.raw.cols, total = est.h.data.size(), n = static_cast<std::size_t>(n_cw_);
-    std::vector<cd> y, h;
-    std::vector<double> var;
-    for (std::size_t j = static_cast<std::size_t>(slot); j < total; j += n) {
-        const std::size_t row = j / nc, c = j % nc;
-        const cd hj = est.h.data[j];
-        y.push_back(R.raw[row / S * config::SYMS_PER_FRAME + 1 + row % S][c]);
-        h.push_back(hj);
-        var.push_back((est.n0_k.empty() ? est.n0 : est.n0_k[c]) + est.clip_ratio * std::norm(hj) + est.mse.data[j]);
-    }
-    return cache[slot] = constellation::llr(y, h, var, *constellation::find(R.spec->constellation));
+    return cache[slot] = modem::slot_soft(*r_.ofdm, *cur_.est, slot);
 }
 
 std::optional<Bytes> ModemRx::decode(int slot, const MaskId& mask, int rv, const SoftKey* key) {
@@ -513,24 +493,16 @@ ModemRx::Est ModemRx::dd_estimate() const {
         }
         const double v = e2 - std::norm(x);
         if (!(std::abs(x) > 1e-3)) continue;
-        cache.z[j] = R.raw[row / S * config::SYMS_PER_FRAME + 1 + row % S][c] / (g * x);
+        cache.z[j] = modem::data_row(R.raw, row)[c] / (g * x);
+        // modem::noise_var's with |h|^2 at its expectation g^2 p, plus the soft symbol's own variance
         const double n0 = est.n0_k.empty() ? est.n0 : est.n0_k[c];
         cache.w[j] = g * g * std::norm(x) / (n0 + est.clip_ratio * (g * g) * p + g * g * p * v);
         z[row][c] = cache.z[j];
         w[row][c] = cache.w[j];
     }
-    const std::size_t n_f = rows / S;
-    Mat<double> t_rows(n_f, S);
-    for (std::size_t f = 0; f < n_f; ++f) {
-        const std::size_t air = f + (R.kc && static_cast<int>(f) >= *R.kc ? 1 : 0);
-        for (std::size_t s = 0; s < S; ++s)
-            t_rows[f][s] = static_cast<double>((air * config::SYMS_PER_FRAME + s + 1) * config::NSYM) / config::FS;
-    }
-    std::vector<double> t_pilot(R.hp.rows);
-    for (std::size_t i = 0; i < t_pilot.size(); ++i)
-        t_pilot[i] = static_cast<double>(i * config::SYMS_PER_FRAME * config::NSYM) / config::FS;
-    auto [h, mse] = equalizer::refine(R.hp, t_pilot, z, w, t_rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
-                                      equalizer::bb(modem::band(spec.band)));
+    const auto t = modem::symbol_times(R);
+    auto [h, mse] = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
+                                      equalizer::bb(config::band(spec.band)));
     auto out = std::make_shared<modem::DataEstimate>(est);
     for (std::size_t i = 0; i < h.data.size(); ++i) {
         out->h.data[i] = g * h.data[i];

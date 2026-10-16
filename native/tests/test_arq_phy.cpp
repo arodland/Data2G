@@ -82,7 +82,7 @@ int main() {
     }
 
     const std::string name = "w48-qpsk-r1/2";
-    const auto& spec = *codes::submode(name);
+    const auto& spec = *config::submode(name);
     std::vector<Bytes> pl;
     for (unsigned i = 0; i < 3; ++i) pl.push_back(payload(spec.payload_bytes, i));
     auto burst = [&](int rv) {

@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-#include "tables/tables.hpp"
+#include "tables/ldpc.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::ldpc {
