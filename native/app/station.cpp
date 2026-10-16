@@ -146,7 +146,7 @@ void Station::flush(std::uint64_t asker) {
     host_->out_cmd.clear();
     o.data.swap(host_->out_data);
     o.kiss.swap(engine_->kiss_rx());
-    o.acks.swap(link_->acks);
+    o.acks = link_->take_acks();
     o.dial = dial_live_;
     if (const auto st = engine_->session().state;
         dial_live_ && st != arq::SessionState::CONNECTED && st != arq::SessionState::DISCONNECTING)

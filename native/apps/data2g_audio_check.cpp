@@ -36,7 +36,7 @@ namespace {
 
 void list(const char* what, const std::vector<audio::DeviceInfo>& devs) {
     std::printf("%s:\n", what);
-    for (std::size_t i = 0; i < devs.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devs[i].channels, devs[i].name.c_str());
+    audio::print_devices(devs);
 }
 
 // Power of the tone at `f` against the rest, dB (a single-bin DFT).

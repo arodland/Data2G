@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -73,6 +74,10 @@ void write_sample(std::byte* p, SampleFormat f, float x) {
 }
 
 }  // namespace
+
+void print_devices(std::span<const DeviceInfo> devices) {
+    for (std::size_t i = 0; i < devices.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devices[i].channels, devices[i].name.c_str());
+}
 
 std::optional<std::size_t> select_device(std::span<const DeviceInfo> devices, std::string_view want,
                                          std::string_view kind) {
