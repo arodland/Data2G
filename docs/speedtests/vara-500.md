@@ -17,6 +17,10 @@ Hollow points average fewer than 5 good seeds and are left off the line. The
 y axis is log scale: a horizontal gap between the lines is the same number of
 dB at any rate.
 
+AWGN is additive white Gaussian noise (the paper's WGN); MPG and MPP are CCIR
+"good" and "poor" multipath, simulated with 2 rays (the paper's MPG 2 and
+MPP 2).
+
 ### AWGN
 
 ![AWGN: Data2G, VARA HF 500 and PACTOR 2 throughput against SNR](bw500-awgn.svg)

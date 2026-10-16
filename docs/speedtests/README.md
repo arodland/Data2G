@@ -1,8 +1,13 @@
 # Speed tests
 
 Data2G's throughput against VARA HF and PACTOR on the channel models of the
-IONOS SIM paper (WGN, MPG 2 and MPP 2; AWGN, MPG and MPP in the charts), from
-40 dB down to −5 dB SNR.
+IONOS SIM paper, from 40 dB down to −5 dB SNR:
+
+- **AWGN**: additive white Gaussian noise (the paper's WGN).
+- **MPG**: CCIR "good" multipath, simulated with 2 rays (the paper's MPG 2).
+- **MPP**: CCIR "poor" multipath, simulated with 2 rays (the paper's MPP 2).
+
+## Results
 
 - [2300 Hz: Data2G vs VARA HF 2300 and PACTOR 4](vara-2300.md)
 - [500 Hz: Data2G BW500 vs VARA HF 500 and PACTOR 2](vara-500.md)
