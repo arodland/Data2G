@@ -1,6 +1,8 @@
 // data2g/arq/policy.py: the gear shifter (docs/arq.md §8), one per station.
-// The study toggles DATA2G_DROP_MODES and DATA2G_BIAS_FIX are Python only:
-// no dropped modes, BIAS_MAX 6.
+// GearShifter is the model; GearPolicy (below) is its link.Policy, the
+// methods policy.py's GearShifter has for the link and the session.
+// policy.py's study toggles are Python only: here their defaults (no
+// dropped modes, BIAS_MAX 6; noise_rule and cpm_floor_on are fields).
 #pragma once
 
 #include <array>

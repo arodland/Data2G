@@ -10,6 +10,11 @@ repeats and polls saying its replies are lost): then the robust mode.
 
 The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
+
+GearShifter is also the link.Policy the engine runs, its plumbing methods
+forwarding to modes and codes; native splits the two (GearShifter, which
+reads a StationView, and GearPolicy). The env-driven study toggles are
+grouped below the tuned constants; native has their defaults.
 """
 
 import json
@@ -35,22 +40,7 @@ TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost
 # gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
 # and escalation's long gaps sent 12 s 64-ary bursts that all failed
 PREV_MAX_S = 30.0
-BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
-# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
-# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
-# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
-# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
-# On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
-BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
-# The noise rule (recommend(): candidates whose band is noisier in the
-# receiver's profile than the measured one predicted at a lower SNR), its
-# tail weight: on by default (runs/noise_rule_study.sh: carriers +54..+209%,
-# edge +8..+37%, clean and wandering-floor cells unchanged). DATA2G_NOISE_RULE
-# (studies): a weight, or '' / 'off' for none.
-_NR = os.environ.get("DATA2G_NOISE_RULE")
-NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
-if BIAS_FIX:
-    BIAS_MAX = 6.0
+BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
@@ -74,22 +64,17 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
 # ponytail: thresholds from one ladder study, not learned; the retrain on this
 # branch's sessions should make the ladder rare
-# The CPM floor (a stopgap; DATA2G_CPM_FLOOR="snr:X" or "energy:X", studies):
-# when the median snr_est of the peer's last CPM_FLOOR_HIST bursts (snr), or
-# the energy inputs' mean (energy), is under X dB, data goes in CPM modes only.
-# On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
-# mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
-# through 75%+. On by default at snr:-4 (CPM_FLOOR_DEFAULT): on n10pe gated with
-# n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6 +12.5/+7.2/+3.7%,
-# no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD -8 -2.0%); snr:-3
-# cost MPG -4 7.5%. DATA2G_CPM_FLOOR='' turns it off.
-# "snr:X:S" also wants the median spread_est of those bursts at least S Hz
-# (fast fading: on slow fading a fade holds the median down, and OFDM recovers).
-_CF = os.environ.get("DATA2G_CPM_FLOOR")
+# The CPM floor (a stopgap): when the median snr_est of the peer's last
+# CPM_FLOOR_HIST bursts (snr), or the energy inputs' mean (energy), is under
+# X dB, data goes in CPM modes only. On air (KC2G-AG7EW, 2026-10-06, snr_est
+# -2..-9 on fading) every OFDM data mode the model rated 0.5-0.8 decoded 0 of
+# 24 while the CPM polls got through 75%+. On by default at snr:-4: on n10pe
+# gated with n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6
+# +12.5/+7.2/+3.7%, no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD
+# -8 -2.0%); snr:-3 cost MPG -4 7.5%. (kind, X, S): "snr" also wants the
+# median spread_est of those bursts at least S Hz (fast fading: on slow
+# fading a fade holds the median down, and OFDM recovers).
 CPM_FLOOR_DEFAULT = ("snr", -4.0, 0.0)
-CPM_FLOOR = CPM_FLOOR_DEFAULT if _CF is None else (
-    (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) if _CF
-    else None)
 CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
@@ -111,6 +96,44 @@ CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payloa
 ALT_POLL = "n4-ack-8f"
 ROBUST_ESCALATION = 4  # from here on ROBUST_CONNECT (link caps escalation at 4)
 ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
+
+# --- study toggles (Python only; native has the defaults) --------------------
+# Set any and tests/conftest.py's GEAR_STUDY_ENV keeps the shifter in Python.
+
+# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
+# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
+# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
+# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
+# On since v12; DATA2G_BIAS_FIX=0 is the old bound.
+BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+BIAS_MAX = 6.0 if BIAS_FIX else 3.0
+# The noise rule (recommend(): candidates whose band is noisier in the
+# receiver's profile than the measured one predicted at a lower SNR), its
+# tail weight: on by default (runs/noise_rule_study.sh: carriers +54..+209%,
+# edge +8..+37%, clean and wandering-floor cells unchanged).
+# DATA2G_NOISE_RULE: a weight, or '' / 'off' for none.
+_NR = os.environ.get("DATA2G_NOISE_RULE")
+NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
+
+
+def _env_cpm_floor():
+    """DATA2G_CPM_FLOOR: unset, CPM_FLOOR_DEFAULT; "snr:X[:S]" or
+    "energy:X[:S]" (S default 0); '' turns the floor off (None)."""
+    v = os.environ.get("DATA2G_CPM_FLOOR")
+    if v is None:
+        return CPM_FLOOR_DEFAULT
+    if not v:
+        return None
+    f = v.split(":")
+    return f[0], float(f[1]), float(f[2]) if len(f) > 2 else 0.0
+
+
+CPM_FLOOR = _env_cpm_floor()
+# DATA2G_DROP_MODES: comma-separated modes nobody picks (a pruned ladder):
+# not a candidate, not taken from a peer, not trained on
+# (scripts/train_outcome.py). They still decode when received.
+DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")))
+assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
 
 
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
@@ -142,13 +165,6 @@ def decode(rec: int) -> str | None:
     band = BY_CODE.get(rec >> 4)
     s = BY_INDEX.get((band, rec & 15)) if band else None
     return s.name if s else None
-
-
-# DATA2G_DROP_MODES (studies): comma-separated modes nobody picks (a pruned
-# ladder): not a candidate, not taken from a peer, not trained on
-# (scripts/train_outcome.py). They still decode when received.
-DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")))
-assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
 
 
 def allowed(cap: int) -> list:
@@ -252,7 +268,35 @@ class GearShifter(L.Policy):
     peer_had_data: bool = True
     log: list = field(default_factory=list)
 
-    # -- link.Policy ------------------------------------------------------------------
+    # -- link.Policy plumbing (native: GearPolicy): forwards to modes and codes -------
+
+    def payload_bytes(self, m):
+        return codes.payload_bytes(MODES[m])
+
+    def ctl_payload_bytes(self, m):
+        return ctl_payload_bytes(MODES[m])
+
+    def max_ctl(self, m):
+        return max_ctl(MODES[m])
+
+    def rv_cycle(self, m):
+        return codes.rv_cycle(MODES[m])
+
+    def connect_mode(self, cap, tries: int = 0):
+        """Session frames: the cap's connect mode first, then ROBUST_CONNECT
+        (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
+        loss-study sessions there never connected in qpsk-r1/5)."""
+        return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
+
+    def airtime(self, m, n_cw, dup=False):
+        """`dup`: a CPM burst's control twice (the second copy is a short
+        control codeword, not a data one: an x10 burst is 30.4 s, not 32.6)."""
+        return burst_seconds(MODES[m], n_cw, dup)
+
+    def mode_name(self, rec: int) -> str:
+        return decode(rec) or f"?{rec}"
+
+    # -- as a sender (native: GearShifter): my next burst, from the peer's advice -------
 
     def choose(self, station, escalation: int) -> tuple[str, int]:
         st = view(station)
@@ -294,24 +338,6 @@ class GearShifter(L.Policy):
         n = slots_for(spec, SIZE_S[st.peer_size_hint])
         return (n - ctl_slots(spec)) * codes.payload_bytes(spec)
 
-    def payload_bytes(self, m):
-        return codes.payload_bytes(MODES[m])
-
-    def ctl_payload_bytes(self, m):
-        return ctl_payload_bytes(MODES[m])
-
-    def max_ctl(self, m):
-        return max_ctl(MODES[m])
-
-    def rv_cycle(self, m):
-        return codes.rv_cycle(MODES[m])
-
-    def connect_mode(self, cap, tries: int = 0):
-        """Session frames: the cap's connect mode first, then ROBUST_CONNECT
-        (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
-        loss-study sessions there never connected in qpsk-r1/5)."""
-        return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
-
     def reply_hold(self, station, burst) -> float:
         """Seconds past t_turn to wait for a reply to `burst` before timing
         out: the longest control-only reply the peer may send (the reply
@@ -327,15 +353,7 @@ class GearShifter(L.Policy):
             modes.append(ROBUST_CONNECT)
         return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
 
-    def airtime(self, m, n_cw, dup=False):
-        """`dup`: a CPM burst's control twice (the second copy is a short
-        control codeword, not a data one: an x10 burst is 30.4 s, not 32.6)."""
-        return burst_seconds(MODES[m], n_cw, dup)
-
-    def mode_name(self, rec: int) -> str:
-        return decode(rec) or f"?{rec}"
-
-    # -- receiver side ------------------------------------------------------------------
+    # -- as a receiver: the peer's next burst, from my measurements of its last -------
 
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
