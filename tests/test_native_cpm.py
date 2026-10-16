@@ -93,8 +93,11 @@ def test_modulate(native, reference):
             np.testing.assert_allclose(native.cpm.tones(g.name, sym), ref(reference, "tones")(g, sym), rtol=0,
                                        atol=1e-12)
             want = ref(reference, "modulate")(spec, coded, dup)
-            got = cpm.bandpass(g, native.cpm.modulate(spec.name, coded, dup))
-            np.testing.assert_allclose(got, want, rtol=0, atol=1e-9)
+            x = native.cpm.modulate(spec.name, coded, dup)
+            np.testing.assert_allclose(native.cpm.bandpass(g.name, x), want, rtol=0, atol=1e-9)
+            for cap in (1, 2):  # ARQ phy's TX filter at each bandwidth cap
+                np.testing.assert_allclose(native.cpm.bandpass(g.name, x, cap), ref(reference, "bandpass")(g, x, cap),
+                                           rtol=0, atol=1e-9)
 
 
 # (spec, n_data, dup, cfo Hz, noise sigma)

@@ -48,7 +48,7 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 
 // repeat_corr for each f in `freqs` (multiples of STEP_HZ), one row each:
 // one FFT of z and of t, then per f an inverse FFT of the product with
-// t's spectrum rolled by whole bins (sync._repeat_corrs).
+// t's spectrum rolled by whole bins (sync.repeat_corrs).
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs);
 
 // The noise level of matched filter outputs C (bins, starts): per bin

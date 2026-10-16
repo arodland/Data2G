@@ -229,7 +229,7 @@ std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cd
 // Each f's repeat_corr row: dest(i) is where bin i's row (z.size() - t.size() + 1 long) goes, or
 // null for a scratch row; use(i, row) then sees it while it is still in cache. One FFT of z and
 // the cached spectrum of t, then per f an inverse FFT of the product with t's spectrum rolled by
-// whole bins (sync._repeat_corrs).
+// whole bins (sync.repeat_corrs).
 void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs,
                const std::function<cdouble*(std::size_t)>& dest,
                const std::function<void(std::size_t, const cdouble*)>& use) {
