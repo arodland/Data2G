@@ -34,6 +34,7 @@ import numpy as np
 
 from data2g import codes, modem
 from data2g.arq import frames as F
+from data2g.arq import link as L
 from data2g.arq.modes import MODES, ctl_payload_bytes, max_ctl
 from data2g.arq.modes import burst_seconds as mode_seconds
 from data2g.arq import predictor as P
@@ -285,7 +286,7 @@ def rv_cycle(submode):
     return codes.rv_cycle(SUBMODES[submode])
 
 
-class FixedPolicy:
+class FixedPolicy(L.Policy):
     """One data mode, fixed burst size (the baseline and the validation).
     Any ARQ mode, CPM included (real-modem sessions only for CPM: the link
     abstraction models OFDM)."""
@@ -544,7 +545,8 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
                 continue
             start = t + PTT_S
             end, hdr, make_rx, meas = phy.send(burst, start)
-            if hasattr(phy, "burst_energy_db") and hasattr(other.policy, "observe_energy"):
+            # only a policy that reads the energy inputs (the gear shifter) is told
+            if hasattr(phy, "burst_energy_db") and type(other.policy).observe_energy is not L.Policy.observe_energy:
                 other.policy.observe_energy(phy.burst_energy_db(burst), end)
             hit = [x for x in air[-4:] if x[2] is other and x[0] < end and start < x[1]] if cs_s is not None else []
             if hit:  # half duplex: neither hears the other's burst

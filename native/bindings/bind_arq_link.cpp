@@ -22,10 +22,19 @@ namespace {
 
 // --- adapters to the Python objects ---------------------------------------------------
 
+// A member the Python policy leaves at link.Policy's default (or lacks)
+// takes the C++ default, which is the same.
 class PyPolicy : public Policy {
 public:
     explicit PyPolicy(py::object o) : obj(std::move(o)) {}
     py::object obj;
+
+    bool overrides(const char* name) const {
+        py::object f = py::getattr(obj, name, py::none());
+        if (f.is_none()) return false;
+        py::object base = py::getattr(link_attr("Policy"), name, py::none());
+        return base.is_none() || !py::getattr(f, "__func__", f).is(base);
+    }
 
     std::pair<std::string, int> choose(Station& st, int escalation) override {
         auto r = obj.attr("choose")(py::cast(&st, py::return_value_policy::reference), escalation).cast<py::sequence>();
@@ -33,24 +42,24 @@ public:
     }
     int payload_bytes(const std::string& m) override { return obj.attr("payload_bytes")(m).cast<int>(); }
     int ctl_payload_bytes(const std::string& m) override {
-        return py::hasattr(obj, "ctl_payload_bytes") ? obj.attr("ctl_payload_bytes")(m).cast<int>() : payload_bytes(m);
+        return overrides("ctl_payload_bytes") ? obj.attr("ctl_payload_bytes")(m).cast<int>() : payload_bytes(m);
     }
-    int max_ctl(const std::string& m) override { return py::hasattr(obj, "max_ctl") ? obj.attr("max_ctl")(m).cast<int>() : 4; }
+    int max_ctl(const std::string& m) override { return overrides("max_ctl") ? obj.attr("max_ctl")(m).cast<int>() : MAX_CTL; }
     std::optional<Recommendation> recommend(Station& st) override {
-        if (!py::hasattr(obj, "recommend")) return std::nullopt;
+        if (!overrides("recommend")) return std::nullopt;
         auto r = obj.attr("recommend")(py::cast(&st, py::return_value_policy::reference)).cast<py::sequence>();
         return Recommendation{r[0].cast<int>(), r[1].cast<int>(), r[2].is_none() ? std::nullopt : std::optional<int>(r[2].cast<int>())};
     }
     bool want_dup() override { return py::bool_(py::getattr(obj, "want_dup", py::bool_(false))); }
     int rv_cycle(const std::string& m) override { return obj.attr("rv_cycle")(m).cast<int>(); }
-    bool has_outcome() override { return py::hasattr(obj, "outcome"); }
+    bool has_outcome() override { return overrides("outcome"); }
     void outcome(const std::string& m, int decoded, int sent, bool usable) override {
         obj.attr("outcome")(m, decoded, sent, py::arg("usable") = usable);
     }
     std::string mode_name(int rec) override {
-        return py::hasattr(obj, "mode_name") ? py::str(obj.attr("mode_name")(rec)).cast<std::string>() : std::to_string(rec);
+        return overrides("mode_name") ? py::str(obj.attr("mode_name")(rec)).cast<std::string>() : std::to_string(rec);
     }
-    bool has_airtime() override { return py::hasattr(obj, "airtime"); }
+    bool has_airtime() override { return overrides("airtime"); }
     std::optional<double> snr_est() override {
         auto m = py::getattr(obj, "measured", py::none());
         if (!py::bool_(m) || !m.contains("snr_est")) return std::nullopt;
@@ -62,16 +71,17 @@ public:
     }
     std::string connect_mode(int cap, int tries) override { return obj.attr("connect_mode")(cap, tries).cast<std::string>(); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
-        if (!py::hasattr(obj, "reply_hold")) return std::nullopt;
+        if (!overrides("reply_hold")) return std::nullopt;
         return obj.attr("reply_hold")(py::cast(&st, py::return_value_policy::reference),
-                                      burst_py(std::make_shared<TxBurst>(burst))).cast<double>();
+                                      burst_py(std::make_shared<TxBurst>(burst))).cast<std::optional<double>>();
     }
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
     std::optional<int> next_capacity(const Station& st) const override {
-        if (!py::hasattr(obj, "next_capacity")) return std::nullopt;
-        return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference)).cast<int>();
+        if (!overrides("next_capacity")) return std::nullopt;
+        return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference))
+            .cast<std::optional<int>>();
     }
 };
 

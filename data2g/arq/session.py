@@ -79,7 +79,7 @@ def session_key(caller: str, callee: str, nonce: int) -> int:
 @dataclass
 class Session:
     call: str
-    policy: object  # link.Policy plus connect_mode(cap_code) -> submode, airtime(submode, n_cw) -> s
+    policy: L.Policy  # connect_mode and airtime too
     t_turn: float = 1.0
     rng: random.Random = field(default_factory=random.Random)
     state: str = IDLE
@@ -150,8 +150,7 @@ class Session:
         holding = self._coalesce_until is not None and self._now < self._coalesce_until
         fresh = holding or not st.tx.pending()
         st.write(data)
-        cap = getattr(self.policy, "next_capacity", None)
-        if fresh and not self.chat and cap is not None and st.new_available() < cap(st):
+        if fresh and not self.chat and (cap := self.policy.next_capacity(st)) is not None and st.new_available() < cap:
             if not holding:
                 self._coalesce_until = self._now + COALESCE_S
         else:
@@ -237,10 +236,10 @@ class Session:
             return
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
-            hold = getattr(self.policy, "reply_hold", None)
-            if hold and self.state == CONNECTED and self.station is not None:
+            if (self.state == CONNECTED and self.station is not None
+                    and (hold := self.policy.reply_hold(self.station, burst)) is not None):
                 # a reply whose header I miss is still on air: don't poll over it
-                wait = max(wait, hold(self.station, burst))
+                wait = max(wait, hold)
             self._deadline = now + self.t_turn + wait
         elif not self.master:
             self._quiet_from = now
@@ -420,7 +419,7 @@ class Session:
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
         mode = mode or self.policy.connect_mode(self.cap, self._tries)
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
+        cpb = self.policy.ctl_payload_bytes(mode)
         if body[0] == F.CONNECT and self._compact(mode):
             slots = [L.Slot(L.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
         else:
@@ -434,8 +433,7 @@ class Session:
         """A CONNECT in `mode` goes compact (frames.pack_connect): in its
         Control envelope it needs more codewords than the mode's control
         may have (CPM: one of 20 B)."""
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(mode)
-        return -(-CONNECT_CTL_BYTES // cpb) > getattr(self.policy, "max_ctl", lambda m: F.MAX_CTL)(mode)
+        return -(-CONNECT_CTL_BYTES // self.policy.ctl_payload_bytes(mode)) > self.policy.max_ctl(mode)
 
     def _connect_burst(self) -> L.TxBurst:
         body = (bytes([F.CONNECT, VERSION]) + F.pack_call(self.call) + F.pack_call(self.peer)

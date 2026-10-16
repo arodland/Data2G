@@ -352,16 +352,13 @@ class Engine:
         over start..end from power alone, against its peak (PHY.peak_db, at
         the cap it was most likely filtered for: _rx_cap), to the shifter.
         None under min_db."""
-        observe = getattr(self.session.policy, "observe_energy", None)
-        if observe is None:
-            return
         from . import predictor as P
 
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
         peak = PHY.peak_db(mode, self._rx_cap())
         if snr is not None and (min_db is None or snr + peak >= min_db):
-            observe(snr + peak, t)
+            self.session.policy.observe_energy(snr + peak, t)
 
     def _rx_cap(self) -> int:
         """The bandwidth cap a heard burst's TX filter was most likely for: the
@@ -381,7 +378,7 @@ class Engine:
             self._timeouts = n
             return
         self._timeouts = n
-        exp = pol.expected_reply() if hasattr(pol, "expected_reply") else None
+        exp = pol.expected_reply()
         if self._tx_end is None or exp is None:
             return
         start = self._tx_end + EXPECT_REPLY_S

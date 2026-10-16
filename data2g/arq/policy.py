@@ -23,6 +23,7 @@ from .. import cpm
 from ..config import max_codewords
 from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
 from . import frames as F
+from . import link as L
 from . import predictor as P
 from .session import LINK_LOST_S
 
@@ -185,7 +186,7 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
 
 
 @dataclass
-class GearShifter:
+class GearShifter(L.Policy):
     gap_s: float = 2.5
     use_cpm: bool = True  # recommend CPM modes (only once the outcome model has learned them)
     # data modes need P(usable) x P(codeword) at least this: the KISS TNC

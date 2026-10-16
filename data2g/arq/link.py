@@ -112,21 +112,85 @@ class RxBurst(Protocol):
         """Drop soft bits stored under `key`."""
 
 
-class Policy(Protocol):
+class Policy:
+    """Everything Station, Session and Engine ask of the mode choice:
+    policy.GearShifter on air; tests and scripts/linksim.py subclass it with
+    simpler ones. choose, payload_bytes and rv_cycle are required (Session
+    also needs connect_mode and airtime); the rest default to having no
+    opinion. Native: arq::Policy (link.hpp), whose has_*() say which
+    defaults a policy keeps."""
+
+    # -- link.Station
+
     def choose(self, station: "Station", escalation: int) -> tuple[str, int]:
         """-> (submode name, max codewords) for this station's next burst."""
+        raise NotImplementedError
 
-    def payload_bytes(self, submode: str) -> int: ...
+    def payload_bytes(self, submode: str) -> int:
+        raise NotImplementedError
 
-    # optional: outcome(submode, decoded, sent) after each received burst,
-    # its control and first-transmission codewords (the gear shifter's
-    # online correction)
+    def ctl_payload_bytes(self, submode: str) -> int:
+        """A control codeword's payload (CPM carries control in a short one)."""
+        return self.payload_bytes(submode)
+
+    def max_ctl(self, submode: str) -> int:
+        return F.MAX_CTL
 
     def rv_cycle(self, submode: str) -> int:
         """Distinct RVs the submode's code has (4 LDPC, 1 polar)."""
+        raise NotImplementedError
 
-    # optional, for the log: mode_name(recommendation code) -> str,
-    # airtime(submode, n_cw) -> s, measured (the last burst's measurements)
+    def recommend(self, station: "Station") -> tuple[int, int, int | None]:
+        """-> (data mode, size hint, reply mode or None): what the peer
+        should send me next (§8), as the core word's codes."""
+        return 0, 1, None
+
+    want_dup = False  # ask the peer to duplicate its next data burst's control (T_DUPCTL)
+
+    def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):
+        """After each received burst: its first-transmission codewords
+        decoded of those sent, `usable`: its control decoded (the gear
+        shifter's online correction)."""
+
+    # for the log
+    measured: dict | None = None  # the peer's last burst, as measured
+
+    def mode_name(self, rec: int) -> str:
+        """A recommendation code's mode."""
+        return str(rec)
+
+    def airtime(self, submode: str, n_cw: int, dup: bool = False) -> float | None:
+        """A burst's seconds on air (`dup`: its control twice); None:
+        unknown, left out of the log. Session needs it."""
+        return None
+
+    # -- session.Session
+
+    def connect_mode(self, cap: int, tries: int = 0) -> str:
+        """The mode of session frames at bandwidth cap `cap`, `tries` retries in."""
+        raise NotImplementedError
+
+    def reply_hold(self, station: "Station", burst: "TxBurst") -> float | None:
+        """Seconds past t_turn to wait for a reply to `burst` (None:
+        session.REPLY_START_S alone)."""
+        return None
+
+    def next_capacity(self, station: "Station") -> int | None:
+        """Payload bytes the next data burst will carry (None: unknown; the
+        session's write coalescing and the host's BUFFER)."""
+        return None
+
+    # -- engine.Engine
+
+    def observe(self, measured: dict, submode: str, now: float):
+        """The receiver's measurements of a peer burst."""
+
+    def observe_energy(self, snr_db: float, now: float):
+        """A peer burst's in-band SNR from its power alone, heard or not."""
+
+    def expected_reply(self) -> tuple[str, float] | None:
+        """The burst I asked the peer for last: its mode and seconds on air."""
+        return None
 
 
 # --- the two directions -----------------------------------------------------------
@@ -392,8 +456,8 @@ class Station:
         submode, max_cw = self.policy.choose(self, escalation)
         pb = self.policy.payload_bytes(submode)
         # control codewords: CPM carries control in a short codeword, one per burst
-        cpb = getattr(self.policy, "ctl_payload_bytes", self.policy.payload_bytes)(submode)
-        max_ctl = getattr(self.policy, "max_ctl", lambda m: F.MAX_CTL)(submode)
+        cpb = self.policy.ctl_payload_bytes(submode)
+        max_ctl = self.policy.max_ctl(submode)
         ext = {}
         reset = None
         stale, self._stale = self._stale, False
@@ -420,13 +484,12 @@ class Station:
             self._abandon_bursts.add(bn)
             if self._abandon[1] & 1:
                 ext[F.T_RESYNC] = b""
-        rec = getattr(self.policy, "recommend", None)
-        rec, hint, reply = rec(self) if rec else (0, 1, None)  # what the peer should send me next (§8)
+        rec, hint, reply = self.policy.recommend(self)  # what the peer should send me next (§8)
         if reply is not None:
             ext[F.T_REPLY] = bytes([reply])
         if self.chat:
             ext[F.T_CHAT] = b""
-        if getattr(self.policy, "want_dup", False):
+        if self.policy.want_dup:
             ext[F.T_DUPCTL] = b""  # the peer's next data burst: duplicate its control (ARQ_DUP)
         if self.chat or self.peer_chat:
             # what I have queued, so the peer's CHAT objective plans for a file
@@ -539,14 +602,14 @@ class Station:
         return burst
 
     def _mode(self, rec: int | None) -> str:
-        return "-" if rec is None else getattr(self.policy, "mode_name", str)(rec)
+        return "-" if rec is None else self.policy.mode_name(rec)
 
     def _burst_desc(self, submode: str, n_cw: int, dup: bool = False) -> str:
-        airtime = getattr(self.policy, "airtime", None)
-        return f"{submode} x{n_cw}" + (f" {airtime(submode, n_cw, dup):.1f}s" if airtime else "")
+        t = self.policy.airtime(submode, n_cw, dup)
+        return f"{submode} x{n_cw}" + (f" {t:.1f}s" if t is not None else "")
 
     def _snr(self) -> str:
-        m = getattr(self.policy, "measured", None)
+        m = self.policy.measured
         return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
 
     def _comp_bit(self, seq: int) -> bool:
@@ -614,10 +677,8 @@ class Station:
             # fails the masked CRC)
             first = self._ctl_pair(rx, 0, 0)
             paired = first is not None
-        outcome = getattr(self.policy, "outcome", None)  # first transmissions only (resends gain from IR)
         if first is None:
-            if outcome:
-                outcome(rx.submode, 0, 0, usable=False)
+            self.policy.outcome(rx.submode, 0, 0, usable=False)
             return False
         try:
             core = F.Core.unpack(first)
@@ -739,8 +800,7 @@ class Station:
                 except ProtocolError as e:
                     self._fail(f"protocol: {e}")
                     return True
-        if outcome:
-            outcome(rx.submode, n_ok, n_new, usable=True)
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
 
         if log.isEnabledFor(logging.INFO):
             kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")

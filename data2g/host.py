@@ -268,8 +268,8 @@ class Host:
         st = e.session.station
         unsent, unacked = e.session.queued_bytes()
         buffered = unacked
-        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
-            credit = e.session.policy.next_capacity(st)
+        if (st and self.buffer_credit != 0 and not e.session.chat
+                and (credit := e.session.policy.next_capacity(st)) is not None):
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)
             buffered = unsent - credit if unsent > credit else min(unacked, 1)

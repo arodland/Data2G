@@ -120,8 +120,9 @@ struct Recommendation {
     std::optional<int> reply;
 };
 
-// link.Policy plus what Session needs. The optional Python methods have
-// defaults here; has_*() say whether the policy has them at all.
+// link.Policy: everything Station, Session and Engine ask of the mode
+// choice (GearPolicy on air), with the same defaults; has_*() say whether
+// a policy keeps the default (outcome: none; airtime: left out of the log).
 class Policy {
 public:
     virtual ~Policy() = default;

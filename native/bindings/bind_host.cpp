@@ -37,8 +37,8 @@ protected:
         py::object policy = s.attr("policy");
         if (policy.is_none()) return Host::next_capacity();  // a C++ policy
         py::object st = s.attr("station");
-        if (st.is_none() || !py::hasattr(policy, "next_capacity")) return std::nullopt;
-        return policy.attr("next_capacity")(st).cast<std::int64_t>();
+        if (st.is_none()) return std::nullopt;
+        return policy.attr("next_capacity")(st).cast<std::optional<std::int64_t>>();
     }
 };
 
