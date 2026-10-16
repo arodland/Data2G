@@ -86,7 +86,8 @@ def tx_audio(burst) -> np.ndarray:
 
 def measure(r: dict) -> dict:
     """The gear shifter's inputs (arq/predictor's features) from a received
-    burst: the modem's measurements plus effective MI per constellation."""
+    burst (modem.receive's Received, or cpm.receive's dict, family "cpm"):
+    the modem's measurements plus effective MI per constellation."""
     if r.get("family") == "cpm":
         out = cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
         snr = out.pop("snr")
@@ -96,7 +97,7 @@ def measure(r: dict) -> dict:
     return _measure_ofdm(r)
 
 
-def _measure_ofdm(r: dict) -> dict:
+def _measure_ofdm(r: modem.Received) -> dict:
     """The gear shifter's inputs from modem.receive's result: effective MI
     against thermal noise and estimation error, not the transmitter's clip
     noise (it belongs to the submode sent, not to the channel)."""
@@ -119,7 +120,7 @@ def soft_bits(r: dict):
     return modem.burst_soft(r)
 
 
-def _dd_estimate(r: dict, post: dict) -> dict:
+def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     """r["est"] re-made by equalizer.refine with soft symbols as pilots:
     `post` {slot: a-posteriori LLRs of its coded bits, mapping order}
     (a decoded codeword's are its bits, as large LLRs)."""
