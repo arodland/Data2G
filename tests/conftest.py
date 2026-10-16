@@ -267,15 +267,11 @@ def _waveform_substitutions(native):
 @provider
 def _cpm_substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
-    stays in Python. The MI features (predictor) are still Python's,
-    applied to the native results."""
+    stays in Python."""
     n = native.cpm
     import functools
 
-    import numpy as np
-
     from data2g import cpm
-    from data2g.arq import predictor as P
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
                                        "read_header", "soft", "find", "measure")}
@@ -332,11 +328,8 @@ def _cpm_substitutions(native):
         if not own_grid(g):
             return py["measure"](g, E, n_sym)
         m = n.measure(g.name, E, n_sym)
-        snr = m.pop("snr")
-        out = dict(snr_est=m["snr_est"], spread_est=m["spread_est"], delay_est_ms=0.0, headroom=0.0, frames=m["frames"])
-        for c in P.CONSTS:
-            out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
-        return out
+        return dict(snr_est=m["snr_est"], spread_est=m["spread_est"], delay_est_ms=0.0, headroom=0.0,
+                    frames=m["frames"], snr=m["snr"])
 
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)

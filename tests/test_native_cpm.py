@@ -155,6 +155,7 @@ def test_receive_chain(native, reference, case):
     m, m_ref = native.cpm.measure(g.name, E_ref, len(E_ref)), ref(reference, "measure")(g, E_ref, len(E_ref))
     for k in ("snr_est", "spread_est", "frames"):
         assert m[k] == pytest.approx(m_ref[k], rel=1e-9, abs=1e-12), k
+    np.testing.assert_allclose(m["snr"], m_ref["snr"], rtol=RTOL, atol=1e-12)
 
 
 def test_llrs_zero_padded(native, reference):

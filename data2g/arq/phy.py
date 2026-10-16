@@ -85,8 +85,14 @@ def tx_audio(burst) -> np.ndarray:
 
 
 def measure(r: dict) -> dict:
+    """The gear shifter's inputs (arq/predictor's features) from a received
+    burst: the modem's measurements plus effective MI per constellation."""
     if r.get("family") == "cpm":
-        return cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
+        out = cpm.measure(cpm.GRIDS[r["band"]], r["E"], len(r["E"]))
+        snr = out.pop("snr")
+        for c in P.CONSTS:
+            out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
+        return out
     return _measure_ofdm(r)
 
 
