@@ -185,6 +185,43 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
+@dataclass(frozen=True)
+class StationView:
+    """What the shifter reads of its link.Station (native: arq::StationView).
+    KISS, with no station, passes one of its own."""
+    cap: int = 2
+    pending: bool = True  # tx.pending()
+    peer_recommend: int | None = None
+    peer_reply_recommend: int | None = None
+    peer_size_hint: int = 1
+    peer_wants_dup: bool = False
+    chat: bool = False  # station.chat or station.peer_chat
+    peer_queued: int = 0
+    held: int = 0  # codewords held beyond the cumulative ACK: len(rx.buf)
+    misses: int = 0
+    esc_floor: int = 0
+    timeouts: int = 0  # stats["timeouts"] (link_features: Python only)
+
+
+def view(station) -> StationView:
+    """A link.Station as the shifter reads it (a StationView as it is). An
+    attribute it lacks takes the field's default, as in the binding's
+    station(): tests hand the shifter stubs with only what one method reads."""
+    if isinstance(station, StationView):
+        return station
+
+    def g(name, default):
+        return getattr(station, name, default)
+
+    tx, rx = g("tx", None), g("rx", None)
+    return StationView(cap=g("cap", 2), pending=tx.pending() if tx is not None else True,
+                       peer_recommend=g("peer_recommend", None), peer_reply_recommend=g("peer_reply_recommend", None),
+                       peer_size_hint=g("peer_size_hint", 1), peer_wants_dup=g("peer_wants_dup", False),
+                       chat=bool(g("chat", False) or g("peer_chat", False)), peer_queued=g("peer_queued", 0),
+                       held=len(rx.buf) if rx is not None else 0, misses=g("misses", 0), esc_floor=g("esc_floor", 0),
+                       timeouts=g("stats", {}).get("timeouts", 0))
+
+
 @dataclass
 class GearShifter(L.Policy):
     gap_s: float = 2.5
@@ -218,42 +255,43 @@ class GearShifter(L.Policy):
     # -- link.Policy ------------------------------------------------------------------
 
     def choose(self, station, escalation: int) -> tuple[str, int]:
-        cap = station.cap
+        st = view(station)
+        cap = st.cap
         # (strikes, a hold on modes that went unanswered, were removed: the
         # online bias routes around a mangled mode too, tests/test_engine.py,
         # and at -4 to 0 dB fading they held working modes: 12 seeds x 600 s,
         # 12-48% lower throughput with them)
-        rec = station.peer_recommend if station.tx.pending() else station.peer_reply_recommend
+        rec = st.peer_recommend if st.pending else st.peer_reply_recommend
         # escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, or
         # answering the peer's robust poll: control only in the connect
         # retry's mode (ack-4f polls went unanswered until the link was lost)
         # the floor there too (the last drop took it): my control-only bursts
         # as well, not only polls (MPP -8: the peer heard 4 of my 11
         # n4-ack-8f acks and 13 of 17 robust polls; its data waited on them)
-        robust_floor = getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION and not station.tx.pending()
+        robust_floor = st.esc_floor >= ROBUST_ESCALATION and not st.pending
         if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT) or robust_floor:
             return ROBUST_CONNECT, 1
         if escalation == 2:
             return ALT_POLL, 2
         if escalation:
-            reply = decode(station.peer_reply_recommend) if station.peer_reply_recommend is not None else None
+            reply = decode(st.peer_reply_recommend) if st.peer_reply_recommend is not None else None
             return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
         if rec is None:
             return FALLBACK[cap], 2
         mode = decode(rec)
         if mode is None or MODES[mode] not in allowed(cap):
             return FALLBACK[cap], 2
-        return mode, slots_for(MODES[mode], SIZE_S[station.peer_size_hint], station.tx.pending(),
-                               getattr(station, "peer_wants_dup", False))
+        return mode, slots_for(MODES[mode], SIZE_S[st.peer_size_hint], st.pending, st.peer_wants_dup)
 
     def next_capacity(self, station) -> int:
         """Payload bytes the next data burst will carry if it follows the
         peer's recommendation (no side effects: the host's BUFFER report)."""
-        mode = decode(station.peer_recommend) if station.peer_recommend is not None else None
-        if mode is None or MODES[mode] not in allowed(station.cap):
-            mode = FALLBACK[station.cap]
+        st = view(station)
+        mode = decode(st.peer_recommend) if st.peer_recommend is not None else None
+        if mode is None or MODES[mode] not in allowed(st.cap):
+            mode = FALLBACK[st.cap]
         spec = MODES[mode]
-        n = slots_for(spec, SIZE_S[station.peer_size_hint])
+        n = slots_for(spec, SIZE_S[st.peer_size_hint])
         return (n - ctl_slots(spec)) * codes.payload_bytes(spec)
 
     def payload_bytes(self, m):
@@ -281,10 +319,11 @@ class GearShifter(L.Policy):
         mode if `burst` was in it or my floor is there). At MPP -8 the
         master missed reply headers and polled into the replies 2 s in
         (8 times in 717 s). A data reply (up to CPM_MAX_S) is not covered."""
-        modes = [self.log[-1][2] if self.log else FALLBACK[station.cap]]
-        if station.misses:
-            modes += [FALLBACK[station.cap], ALT_POLL]
-        if burst.submode == ROBUST_CONNECT or getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION:
+        st = view(station)
+        modes = [self.log[-1][2] if self.log else FALLBACK[st.cap]]
+        if st.misses:
+            modes += [FALLBACK[st.cap], ALT_POLL]
+        if burst.submode == ROBUST_CONNECT or st.esc_floor >= ROBUST_ESCALATION:
             modes.append(ROBUST_CONNECT)
         return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
 
@@ -399,7 +438,7 @@ class GearShifter(L.Policy):
         """The link history as the outcome model reads it (predictor.N_LINK):
         my timeouts since the last call count as missed peer bursts. None
         before any expected burst."""
-        t = getattr(station, "stats", {}).get("timeouts", 0)
+        t = view(station).timeouts
         if t > self.timeouts_seen:
             self.turns = (self.turns + ["miss"] * (t - self.timeouts_seen))[-LINK_HIST:]
         self.timeouts_seen = t
@@ -411,12 +450,13 @@ class GearShifter(L.Policy):
     def recommend(self, station) -> tuple[int, int, int]:
         """-> (data mode, size hint, reply mode) for the peer's next burst:
         the mode it should use if it sends data, and if it sends none."""
-        self.link_now = self.link_features(station)
+        st = view(station)
+        self.link_now = self.link_features(st)
         if self.measured is None:
-            return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
+            return encode(FALLBACK[st.cap]), 1, encode(FALLBACK[st.cap])
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
-        cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
+        cands = [s for s in allowed(st.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
         m = dict(self.measured, link=self.link_now, energy=self.energy_features())
         prev = None
         if self.prev is not None:
@@ -476,13 +516,13 @@ class GearShifter(L.Policy):
         # priced as payload not delivered this turn (linksim: mpg rate hopping
         # scored below every fixed mode it hopped between).
         cur = self.log[-1][0] if self.log else None
-        held = len(station.rx.buf) * codes.payload_bytes(MODES[cur]) if cur else 0
+        held = st.held * codes.payload_bytes(MODES[cur]) if cur else 0
         # CHAT ON: the least expected time to deliver what the peer has queued
         # (its T_BUFFER; a chat line at least). A file is then sent in full
         # bursts, a line in the fewest codewords (a VARA client with CHAT ON
         # sent a file 242 bytes per burst when this planned for 200 B always)
-        chat = station.chat or station.peer_chat
-        queued = max(F.CHAT_LINE_BYTES, getattr(station, "peer_queued", 0))  # a chat line at least
+        chat = st.chat
+        queued = max(F.CHAT_LINE_BYTES, st.peer_queued)  # a chat line at least
         if chat:
             best_v = -float("inf")
         data_cands = cands
@@ -529,7 +569,7 @@ class GearShifter(L.Policy):
                 if chat:
                     break
         if best is None:
-            best = (FALLBACK[station.cap], 1)
+            best = (FALLBACK[st.cap], 1)
         else:
             s = MODES[best[0]]
             nb = slots_for(s, SIZE_S[best[1]])
@@ -540,6 +580,6 @@ class GearShifter(L.Policy):
             self.want_dup = self.predicted[s.name][0] < DUP_BELOW
             if reply:
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
-        reply = reply or FALLBACK[station.cap]
+        reply = reply or FALLBACK[st.cap]
         self.log.append((best[0], best[1], reply))
         return encode(best[0]), best[1], encode(reply)

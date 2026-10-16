@@ -62,7 +62,8 @@ const Mode* decode(int rec);           // nullptr: no such mode
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 
-// What the shifter reads from its link.Station.
+// What the shifter reads from its link.Station (policy.py StationView, which
+// also carries the timeouts its Python-only link history reads).
 struct StationView {
     int cap = 2;
     bool pending = true;  // tx.pending()

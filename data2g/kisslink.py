@@ -42,7 +42,6 @@ import logging
 import struct
 import time
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 from . import codes, cpm
 from .config import max_codewords
@@ -223,8 +222,6 @@ class KissLink:
         self.broadcast = self.broadcast or BROADCAST[self.cap]
         self._check_mode(self.broadcast)
         self.ports.setdefault(0, Port(PORT0_GROUP, self.broadcast))
-        self._stub = SimpleNamespace(cap=self.cap, rx=SimpleNamespace(buf={}), chat=False, peer_chat=False,
-                                     peer_queued=0)
 
     def _check_mode(self, mode: str):
         s = MODES.get(mode)
@@ -353,7 +350,7 @@ class KissLink:
             room = min((n_max * pb - 1 - len(body) - 4) // 3, (255 - 2) // 3)
             rep = struct.pack(">H", sender)
             for h, p in fresh[:max(0, room)]:
-                rec, hint, _ = p.shifter.recommend(self._stub)
+                rec, hint, _ = p.shifter.recommend(G.StationView(cap=self.cap))  # no session: an idle one
                 rep += struct.pack(">HB", h, (rec << 2) | hint)
             body += _tlv(T_REPORTS, rep)
         n_ctl = max(1, -(-(1 + len(body)) // pb))
