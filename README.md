@@ -1,6 +1,10 @@
 # Data2G
 
-Data2G is an HF data modem for amateur radio operators with speeds and robustness rivaling VARA HF and Pactor. It supports connected (ARQ) and unconnected/broadcast (FEC) operation, with effective one-way speeds as high as 6400 bps (48,000 bytes per minute, 8000 words per minute) at 25+ dB SNR, and sensitivity down to around -10 dB, albeit at 0.5% of the speed. It's suitable for chat, BBSes, email delivery, or APRS. 2400Hz is required for full speed, but Data2G can be configured for a maximum bandwidth of 500Hz to fit within narrowband segments of the bandplan.
+Data2G is an HF data modem designed to foster fun and experimentation in amateur radio. You get state-of-the-art speeds and error correction (up to 6400 bits per second net throughput on a good channel), a flexible programming interface (compatible with apps that expect the VARA HF TNC, but extended), and most importantly it's open-source and free to use without speed restrictions.
+
+Both connected (hybrid ARQ) and broadcast (FEC) modes are available.
+
+A 2400Hz channel is required for full speed but Data2G can be configured for a maximum bandwidth of 500Hz to fit within narrowband segments of the bandplan.
 
 ## Status
 
@@ -11,8 +15,6 @@ This is beta-quality software. It's been tested on air, and I've successfully se
 Data2G has a VARA-compatible TNC for connected mode (Winlink, BBS), and a KISS TNC for applications like HF APRS. But there is also an extended non-connected mode where apps can send frames to designated "broadcast groups", with full control over the mode they're using, and subscribe to those groups on KISS ports. This lets you build chat or other sorts of interesting apps on top of Data2G without having to stick to the in-order guaranteed-delivery ARQ model.
 
 There is also an experimental option to detect connected-mode AX.25 over KISS and enable automatic rate shifting using metadata injected into the burst headers, so that you can go much faster than the default robust KISS mode, under good conditions.
-
-It's even possible to do reliable one-way bulk data transfer, a la FLAMP.
 
 ## Monitorable
 
@@ -34,6 +36,13 @@ simulated end-to-end QSOs to prove their value.
 * **Transparent Compression**: Text takes up less airtime, automatically, with no cost to binary data.
 * **Intelligent Rate Shifting**: The receiver feeds the current band conditions to the world's tiniest neural net model (61,280 parameters) which was trained on thousands of simulated sessions spanning over a quarter million transmissions in varying conditions. The model is used to predict which mode has the best balance of speed and probability of being decoded.
 * **Submode Zoo**: Many modems have a carefully crafted set of modulations, arranged in a "ladder" from slowest and most robust to fastest and most fragile, so that their rate-shifters can "climb the ladder" when conditions are good and go back down it when conditions are poor. Data2G has 50 submodes spanning four bandwidths, seven modulations, and a gamut of parity levels. They don't fall into a "ladder", but each one is the best possible mode under _some_ set of conditions, whether that's high SNR, low SNR, fast fading, slow fading, or acknowledging packets as fast as possible. If it isn't somewhere on the Pareto frontier, it gets dropped.
+
+## Applications Tested with Data2G
+
+* [Glissando](https://github.com/baitisj/glissando) by AG7EW: While Glissando comes with its own FSK modem that works down to quite low SNR (and sounds nifty), it also serves as a chat client for Data2G, with broadcast and connected messaging, direct file-transfer, and broadcast file-transfer with fill-ins, a la FLAMP.
+* [PixelQSO](https://github.com/tcarwash/pixelqso) by AG7SU: Some people say FT8 is like stamp collecting. What if it was card collecting instead, and you got to make the art for your own cards?
+* [Pat](https://github.com/la5nta/pat) by LA5NTA: The Pat Winlink client can send and receive email using Data2G if you configure it as VARA HF. There are (as of this writing) no RMS servers running Data2G, but P2P works fine.
+* [VarAC](https://www.varac-hamradio.com/) by 4Z1AC: Has a few glitches, and is full of VARA-specific opinions about operating procedures and frequencies. Consider using Glissando instead. But if you configure it to avoid stepping on actual VARA users, it's possible to use all of VarAC's features with Data2G.
 
 ## Discuss
 
