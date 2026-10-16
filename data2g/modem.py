@@ -742,12 +742,10 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
     z0 = to_baseband(np.asarray(x, dtype=np.float64))
-    freqs = _sync._cfo_grid()
+    freqs = _sync.cfo_grid()
     if C is None:
-        t = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
-        C = _sync._repeat_corrs(z0, t / np.linalg.norm(t), list(freqs))
-        level = float((np.quantile(np.abs(C) ** 2, _sync.NOISE_QUANTILE, axis=1)
-                       / -np.log(1 - _sync.NOISE_QUANTILE)).min())
+        C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
+        level = _sync.noise_level(C)
     n = C.shape[1] - COPY_PAIRS * FRAME_SAMPLES
     m = n // FRAME_SAMPLES
     if m < 1:

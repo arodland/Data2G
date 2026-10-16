@@ -840,14 +840,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     if (C_rows.empty()) {
         if (level) throw std::invalid_argument("find_copy: level without C");
         C_own = waveform::repeat_corrs(z0, waveform::unit_template(b), freqs);
-        double lv = equalizer::INF;
-        for (size_t i = 0; i < C_own.rows; ++i) {
-            // re^2 + im^2: np.abs(C) ** 2 to an ulp, without a hypot per output
-            std::vector<double> p(C_own.cols);
-            for (size_t j = 0; j < p.size(); ++j) p[j] = std::norm(C_own[i][j]);
-            lv = std::min(lv, dsp::quantile(std::move(p), waveform::NOISE_QUANTILE) / -std::log(1 - waveform::NOISE_QUANTILE));
-        }
-        level = lv;
+        level = waveform::noise_level(C_own);
         for (size_t i = 0; i < C_own.rows; ++i) own_rows.push_back(C_own[i]);
         C_rows = own_rows;
         cols = C_own.cols;

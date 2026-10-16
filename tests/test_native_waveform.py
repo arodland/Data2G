@@ -30,8 +30,9 @@ def py(reference):
         freq_correct = staticmethod(reference(dsp, "freq_correct"))
         tx_condition = staticmethod(reference(dsp, "tx_condition"))
         papr_db = staticmethod(reference(dsp, "papr_db"))
-        repeat_corr = staticmethod(reference(sync, "_repeat_corr"))
-        repeat_corrs = staticmethod(reference(sync, "_repeat_corrs"))
+        repeat_corr = staticmethod(reference(sync, "repeat_corr"))
+        repeat_corrs = staticmethod(reference(sync, "repeat_corrs"))
+        noise_level = staticmethod(reference(sync, "noise_level"))
         raw_stat = staticmethod(reference(sync, "_raw_stat"))
         detection_stat = staticmethod(reference(sync, "detection_stat"))
         first_path = staticmethod(reference(sync, "first_path"))
@@ -146,10 +147,12 @@ def test_matched_filter_and_statistic(native, py, name):
     t = b.preamble_template()[config.PREAMBLE_CP:config.PREAMBLE_CP + config.M]
     t = t / np.linalg.norm(t)
     close(W.unit_template(name), t, PHASOR_TOL)
-    freqs = list(sync._cfo_grid()) + list(sync.NOISE_REF_HZ)
-    np.testing.assert_array_equal(W.cfo_grid(), sync._cfo_grid())
-    np.testing.assert_array_equal(W.cfo_grid(50.0), sync._cfo_grid(50.0))
-    close(W.repeat_corrs(z, t, freqs), py.repeat_corrs(z, t, freqs), SUM_TOL)
+    freqs = list(sync.cfo_grid()) + list(sync.NOISE_REF_HZ)
+    np.testing.assert_array_equal(W.cfo_grid(), sync.cfo_grid())
+    np.testing.assert_array_equal(W.cfo_grid(50.0), sync.cfo_grid(50.0))
+    C = py.repeat_corrs(z, t, freqs)
+    close(W.repeat_corrs(z, t, freqs), C, SUM_TOL)
+    assert abs(W.noise_level(C) - py.noise_level(C)) <= SUM_TOL * py.noise_level(C)
     for f in (-150.0, 37.5, 0.0):
         close(W.repeat_corr(z, t, f), py.repeat_corr(z, t, f), SUM_TOL)
     for kw in ({}, {"levels_from": 3000}, {"reach": 50.0, "repeats": 5}):
@@ -262,6 +265,5 @@ def test_stream_detector(native, py, name):
             a.trim(fed - 5000)
             c.trim(fed - 5000)
         if k == 10:  # tnc: trimmed away, start over
-            a.reset()
-            c.reset()
-            a.fed = c.fed = fed
+            a.restart_at(fed)
+            c.restart_at(fed)

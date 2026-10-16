@@ -289,6 +289,17 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
     return out;
 }
 
+double noise_level(const Mat<cdouble>& C) {
+    double lv = INFINITY;
+    for (std::size_t i = 0; i < C.rows; ++i) {
+        // re^2 + im^2: np.abs(C) ** 2 to an ulp, without a hypot per output
+        std::vector<double> p(C.cols);
+        for (std::size_t j = 0; j < p.size(); ++j) p[j] = std::norm(C[i][j]);
+        lv = std::min(lv, dsp::quantile(std::move(p), NOISE_QUANTILE) / -std::log(1 - NOISE_QUANTILE));
+    }
+    return lv;
+}
+
 RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int repeats,
                  std::optional<std::size_t> levels_from, bool keep_outs) {
     if (repeats <= 0) repeats = band.spec->preamble_repeats;
@@ -482,6 +493,20 @@ void StreamDetector::reset() {
     s_off_ = c_off_ = 0;
     s0 = c0 = fed = 0;
     levels.clear();
+}
+
+void StreamDetector::restart_at(std::int64_t pos) {
+    reset();
+    fed = pos;
+}
+
+StreamDetector::Outputs StreamDetector::outputs_from(std::int64_t start) const {
+    Outputs o{std::max(c0, start), {}, 0};
+    const std::size_t k = clamp_to(o.start - c0, C(0).size());
+    o.cols = C(0).size() - k;
+    o.rows.reserve(bins());
+    for (std::size_t i = 0; i < bins(); ++i) o.rows.push_back(C(i).data() + k);
+    return o;
 }
 
 void StreamDetector::skip_to(std::int64_t pos) {
