@@ -29,7 +29,7 @@ int kb_of(int bg) {
 
 namespace {
 
-// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8.
+// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8 (TS 38.212 Table 5.3.2-1).
 bool lifting_size(int z) {
     for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
         for (int j = 0; j < 8; ++j)
@@ -39,6 +39,7 @@ bool lifting_size(int z) {
 
 }  // namespace
 
+// ldpc.layout: 5G NR's rules (TS 38.212 7.2.2 base graph, 5.2.2 graph 2's k_b).
 std::pair<int, int> layout(int k, int n, int bg) {
     const double rate = static_cast<double>(k) / n;
     if (bg == 0) bg = (k <= 292 || (k <= 3824 && rate <= 0.67) || rate <= 0.25) ? 2 : 1;

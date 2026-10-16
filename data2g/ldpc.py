@@ -31,9 +31,9 @@ import numpy as np
 DATA = Path(__file__).parent / "codes_data"
 SHIFTS = DATA / "ldpc_shifts.npz"
 CORE = 4
-KB = {1: 22, 2: 10}  # info columns per base graph
+KB = {1: 22, 2: 10}  # info columns per base graph (5G NR, 3GPP TS 38.212 5.3.2)
 
-# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15}.
+# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15} (TS 38.212 Table 5.3.2-1).
 LIFTING_SIZES = sorted({a << j for a in (2, 3, 5, 7, 9, 11, 13, 15) for j in range(8) if a << j <= 384})
 
 
@@ -51,7 +51,9 @@ def mask(bg: int) -> np.ndarray:
 def layout(k: int, n: int, bg: int | None = None) -> tuple[int, int]:
     """(base graph, Z) for k bits in n: graph 2 for short blocks and low
     rates, and the smallest lifting size whose (graph 2: k-dependent)
-    info columns hold k."""
+    info columns hold k. The thresholds are 5G NR's, not tuned here: base
+    graph selection as TS 38.212 7.2.2 (with k for its A), graph 2's k_b
+    as its code block segmentation (5.2.2)."""
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
