@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "generated/config.hpp"
+#include "config/config.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::waveform {
@@ -36,7 +36,7 @@ struct Band {
     std::vector<cdouble> preamble_template;  // complex baseband preamble replica
 
     int nc() const { return spec->nc; }
-    int preamble_samples() const { return config::PREAMBLE_CP + spec->preamble_repeats * config::M; }
+    int preamble_samples() const { return config::preamble_samples(*spec); }
     double preamble_threshold() const;
     // BandSpec.tx_bandpass: the carriers plus 75 Hz each side ("w": TX_BANDPASS).
     std::pair<double, double> tx_bandpass() const;

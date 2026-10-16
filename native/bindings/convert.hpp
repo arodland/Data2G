@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "codes/codes.hpp"
+#include "config/config.hpp"
 #include "util/mat.hpp"
 
 namespace data2g::bind {
@@ -76,7 +77,7 @@ inline py::bytes to_bytes(std::span<const std::uint8_t> v) {
 
 // Submodes cross the boundary by SubmodeSpec.name.
 inline const config::Submode& spec(const std::string& name) {
-    const auto* s = codes::submode(name);
+    const auto* s = config::submode(name);
     if (!s) throw py::key_error("no submode " + name);
     return *s;
 }

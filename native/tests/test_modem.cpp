@@ -65,7 +65,7 @@ int main() {
 
     check::current_step = "loopback";
     for (const char* name : {"ack-1f", "qpsk-r1/2", "n4-ack-2f", "n10-qpsk-r1/3", "w48-16qam-r1/2", "w48-64l-r1/2"}) {
-        const auto& s = *codes::submode(name);
+        const auto& s = *config::submode(name);
         const auto sent = payloads(s, 2, 7);
         const auto y = on_air(modem::modulate(sent, s), 3000, 0.05, 3);
         const auto b = modem::demodulate(y);
@@ -84,10 +84,10 @@ int main() {
 
     check::current_step = "header copy";
     {
-        const auto& s = *codes::submode("qpsk-r1/5");
+        const auto& s = *config::submode("qpsk-r1/5");
         const auto sent = payloads(s, 1, 9);
         auto x = modem::modulate(sent, s);
-        const int wipe = modem::preamble_samples(modem::band("w")) + modem::header_samples("w");
+        const int wipe = config::preamble_samples(config::band("w")) + modem::header_samples("w");
         std::fill(x.begin() + config::LEADIN_SAMPLES, x.begin() + config::LEADIN_SAMPLES + wipe, 0.0);
         const auto y = on_air(x, 2000, 0.05, 5);
         bool threw = false;

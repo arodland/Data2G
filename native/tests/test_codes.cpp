@@ -48,7 +48,7 @@ int main() {
         check::equal(info_pos.empty(), s.code != "polar", std::string(s.name) + " info set iff polar");
         if (s.code == "polar") check::equal(static_cast<int>(info_pos.size()), s.k, std::string(s.name) + " info set size");
     }
-    check::is_true(codes::submode("w48-256l-r5/8") != nullptr && codes::submode("nope") == nullptr, "submode lookup");
+    check::is_true(config::submode("w48-256l-r5/8") != nullptr && config::submode("nope") == nullptr, "submode lookup");
 
     // The codec: every spec round-trips noise-free, through each decode path.
     check::is_true(codes::spec("fsk16r25-ctl") && codes::spec("fsk8r50-r1/2") && !codes::spec("nope"), "spec lookup");

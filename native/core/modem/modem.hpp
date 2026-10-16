@@ -32,7 +32,6 @@ using Spec = config::Submode;
 
 double header_min_score(std::string_view band);  // HEADER_MIN_SCORE[band]; throws std::out_of_range
 double pilot_noise(std::string_view band);       // PILOT_NOISE[band]
-const Spec* by_index(std::string_view sync_band, int index);  // BY_INDEX; nullptr if none
 
 // Which headers a receiver takes beyond validity (modem.Accept). nullptr
 // where a function takes `const Accept*` is Python's None.

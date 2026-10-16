@@ -372,3 +372,6 @@ SUBMODES = dict([
     _m(13, "w48-64l-r3/4", "ldpc", "c64-w48-r34", 2, 2160, band="w48", headroom=5),  # 7389 bps
     _m(14, "w48-256l-r5/8", "ldpc", "c256-w48-r58", 2, 2400, band="w48", headroom=6),  # 8222 bps
 ])
+# (sync band, header index) -> submode: what a header's index means
+# (native config::by_index)
+BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}

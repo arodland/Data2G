@@ -28,7 +28,6 @@ namespace {
 constexpr double PI = std::numbers::pi;
 constexpr int HB = HEADER_BACKOFF;
 
-const waveform::Band& ob(std::string_view name) { return waveform::band(name); }
 
 const constellation::Constellation& qpsk() {
     static const auto* c = constellation::find("gray-qam4");
@@ -188,11 +187,6 @@ std::span<const T> pyslice(std::span<const T> x, int64_t lo, int64_t hi) {
 }
 
 
-size_t submode_row(const Spec& spec) {
-    for (size_t i = 0; i < SUBMODES.size(); ++i)
-        if (&SUBMODES[i] == &spec) return i;
-    throw std::invalid_argument("spec is not an element of config::SUBMODES");
-}
 
 }  // namespace
 
@@ -208,13 +202,6 @@ double pilot_noise(std::string_view band) {
     throw std::out_of_range("no PILOT_NOISE for band " + std::string(band));
 }
 
-const Spec* by_index(std::string_view sync_band, int index) {
-    const Spec* out = nullptr;  // the dict keeps the last
-    for (const auto& s : SUBMODES)
-        if (s.sync_band == sync_band && s.index == index) out = &s;
-    return out;
-}
-
 Accept Accept::of(std::span<const std::string_view> names, std::optional<double> max_secs, double min_score) {
     Accept a;
     a.min_score = min_score;
@@ -224,7 +211,7 @@ Accept Accept::of(std::span<const std::string_view> names, std::optional<double>
     else
         all.assign(names.begin(), names.end());
     for (auto n : all) {
-        const Spec* s = codes::submode(n);
+        const Spec* s = config::submode(n);
         if (!s) throw std::out_of_range("no submode " + std::string(n));
         int cw = max_codewords(s->sync_band);
         if (max_secs) {
@@ -325,8 +312,8 @@ std::vector<int64_t> ace_cells(const Spec& spec, int n_f) {
 }
 
 std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec) {
-    const auto& b = ob(spec.band);
-    const auto& sb = ob(spec.sync_band);
+    const auto& b = waveform::band(spec.band);
+    const auto& sb = waveform::band(spec.sync_band);
     const size_t nc = static_cast<size_t>(b.nc()), snc = static_cast<size_t>(sb.nc());
     if (data_in.cols != nc || data_in.rows % DATA_SYMS_PER_FRAME)
         throw std::invalid_argument("burst_waveform: need (n_f * 5, nc) data symbols");
@@ -389,7 +376,7 @@ namespace {
 // modem.ace_projector: each data cell of the clipped burst moved into its
 // point's region (the point scaled by the carrier's clip gain).
 waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::vector<cd> dirs) {
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const size_t nc = static_cast<size_t>(b.nc());
     auto cells = std::make_shared<std::vector<int64_t>>(ace_cells(spec, static_cast<int>(data.rows / DATA_SYMS_PER_FRAME)));
     auto X = std::make_shared<Mat<cd>>(data);
@@ -434,7 +421,7 @@ waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::ve
 }  // namespace
 
 std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec) {
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const auto& pts = points_of(spec);
     const size_t nc = static_cast<size_t>(b.nc());
     const auto sym = constellation::modulate(bits, pts);
@@ -455,7 +442,7 @@ std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec
         project = ace_projector(spec, data, std::move(dirs));
     }
     return waveform::tx_condition(x, spec.headroom, b.spec->clip_overshoot, LEADIN_SAMPLES, x.size() - LEADOUT_SAMPLES,
-                                  ob(spec.sync_band).tx_bandpass(), project, spec.ace);
+                                  waveform::band(spec.sync_band).tx_bandpass(), project, spec.ace);
 }
 
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
@@ -536,7 +523,7 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
 
 Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     phi_ref = phi_ref + 2 * PI * RS * shift / FS;  // the shift's own slope
     p += shift;
@@ -600,7 +587,7 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
 }
 
 std::optional<std::vector<double>> copy_llr(std::span<const cd> z, int64_t p, std::string_view band, int n_hdr) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     if (p + FRAME_SAMPLES + NSYM > static_cast<int64_t>(z.size())) return std::nullopt;
     std::vector<std::vector<cd>> win;
     for (int s = 0; s <= SYMS_PER_FRAME; ++s) win.push_back(b.demod_window(z, p + s * NSYM + NCP, HB));
@@ -621,7 +608,7 @@ std::optional<std::vector<double>> copy_llr(std::span<const cd> z, int64_t p, st
 }
 
 HeaderRead read_header(std::span<const cd> z, int64_t start, std::string_view band, const Accept* accept) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     const int R = b.spec->preamble_repeats, ref = std::min(R, REF_REPEATS);
     const int64_t u0 = start + PREAMBLE_CP + static_cast<int64_t>(R - ref) * M;
@@ -728,7 +715,7 @@ BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view>
             if (st.band == name) S = st.S;
         waveform::Acquisition acq_b;
         try {
-            acq_b = waveform::acquire(z0, ob(name), {}, ACQUIRE_REACH_HZ, {}, S);
+            acq_b = waveform::acquire(z0, waveform::band(name), {}, ACQUIRE_REACH_HZ, {}, S);
         } catch (const SyncError&) {
             continue;
         }
@@ -787,7 +774,7 @@ Lock find_burst(std::span<const double> x, std::span<const std::string_view> ban
 
 std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max, bool latest) {
     const Spec& spec = *lock.spec;
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const auto len = static_cast<int64_t>(x.size());
     const int total = frames_on_air(spec, lock.n_cw) + 1;
     int avail = 0;
@@ -829,7 +816,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               std::span<const cd* const> C_rows, size_t cols, std::optional<double> level,
                               double* peak) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const auto z0 = waveform::to_baseband(x);
     const auto freqs = waveform::cfo_grid();
     Mat<cd> C_own;
@@ -888,7 +875,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
             if (static_cast<int>(grids.size()) == COPY_GRIDS) break;
         }
     }
-    const auto& sb = modem::band(band);
+    const auto& sb = config::band(band);
     const double floor = floor_of(band, accept);
     const int64_t len = static_cast<int64_t>(z0.size());
     std::vector<Lock> found;
@@ -933,7 +920,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 }
 
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
-    const auto& b = ob(lock.band);
+    const auto& b = waveform::band(lock.band);
     auto hd = read_header(z, lock.start, lock.band);
     hd.hdr = Header{lock.copy->word, lock.spec, lock.n_cw, lock.score};
     hd.valid = true;
@@ -942,7 +929,7 @@ HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
 }
 
 ClipConsts clip_consts(const Spec& spec) {
-    const auto& c = CLIP_SUBMODE[submode_row(spec)];
+    const auto& c = CLIP_SUBMODE[config::row(spec)];
     return {{{1, c.gain_1f}}, c.gain, c.ratio};
 }
 
@@ -966,7 +953,7 @@ DataEstimate data_channel(const Mat<cd>& h_pilot, equalizer::Support support, st
     for (auto& v : est.h.data) v *= g;
     for (auto& v : est.mse.data) v *= g * g;
     est.gain = g;
-    est.band = modem::band(band).name;
+    est.band = config::band(band).name;
     return est;
 }
 
@@ -999,7 +986,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
         if (burst_end(hd.p0, *hd.hdr.spec, hd.hdr.n_cw) > len) throw SyncError("burst runs past the buffer");
     }
     const std::string_view sband = hd.band;  // the sync band; frames are on spec.band's carriers
-    const auto& b = ob(sband);
+    const auto& b = waveform::band(sband);
     const size_t nc = static_cast<size_t>(b.nc());
     const Spec& spec = *hd.hdr.spec;
     const int n_cw = hd.hdr.n_cw;

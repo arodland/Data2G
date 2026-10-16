@@ -34,7 +34,7 @@ std::optional<modem::Accept> accept_of(const py::object& a) {
 }
 
 // Band names as views into config::BANDS (the core keeps string_views).
-std::string_view band_view(const std::string& name) { return modem::band(name).name; }
+std::string_view band_view(const std::string& name) { return config::band(name).name; }
 
 std::vector<std::string_view> bands_of(const std::optional<std::vector<std::string>>& bands) {
     std::vector<std::string_view> out;

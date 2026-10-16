@@ -47,6 +47,7 @@ import numpy as np
 from . import codes, constellation, equalizer
 from .config import (
     BANDS,
+    BY_INDEX,
     CLIP,
     clip_consts,
     DATA_SYMS_PER_FRAME,
@@ -122,8 +123,6 @@ HEADER_MIN_SCORE = {"w": 0.33, "n10": 0.30, "w48": 0.26}
 # it. Wide AWGN -8 dB end to end: fail 6.25% -> 3.5% (0.08: 4.0%); no
 # change on mpd, where the other hypotheses do the rescuing.
 ALT_PENALTY = 0.04
-# (sync band name, header index) -> submode
-BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}
 # bands that carry a header, i.e. whose preambles the receiver looks for
 SYNC_BANDS = [name for name, b in BANDS.items() if not b.sync]
 

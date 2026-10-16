@@ -9,14 +9,6 @@ namespace data2g::modem {
 
 using namespace config;
 
-const Band& band(std::string_view name) {
-    for (const auto& b : BANDS)
-        if (b.name == name) return b;
-    throw std::out_of_range("no band " + std::string(name));
-}
-
-int preamble_samples(const Band& b) { return PREAMBLE_CP + b.preamble_repeats * M; }
-
 bool hosts(std::string_view name) {
     return std::any_of(BANDS.begin(), BANDS.end(), [&](const Band& b) { return b.name != name && b.sync_band == name; });
 }

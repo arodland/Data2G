@@ -39,7 +39,7 @@ std::vector<std::string_view> grid_views(const std::vector<std::string>& names) 
 
 std::vector<std::string_view> band_views(const std::vector<std::string>& names) {
     std::vector<std::string_view> out;
-    for (const auto& n : names) out.push_back(modem::band(n).name);
+    for (const auto& n : names) out.push_back(config::band(n).name);
     return out;
 }
 
