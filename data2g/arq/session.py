@@ -14,6 +14,8 @@ poll after a random 15-30 s (KEEPALIVE_S). The callee may break idle with its ne
 data (a wake burst, WAKE_*), but owns no retry timer: any burst from the
 caller cancels its wake, and the caller stays the only station that
 retries on a timeout.
+
+Native: arq/session.hpp.
 """
 
 import logging

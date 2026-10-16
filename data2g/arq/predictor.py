@@ -11,6 +11,9 @@
 
 (An MI-forecasting MLP, link_predictor.npz, was the shifter's fallback
 without the outcome model; it is gone, as the outcome model always ships.)
+
+Native: arq/predictor.hpp (the live path: features and the outcome
+model); the link abstraction is Python only.
 """
 
 import json

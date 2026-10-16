@@ -27,6 +27,8 @@ because they disagree about state):
 - Watchdog: turns with the peer's control decoded but no progress while
   this station has data outstanding lead to resync (abandon from the
   base, drop soft bits); resyncs without progress to FAILED.
+
+Native: arq/link.hpp (Station, TxSide, RxSide).
 """
 
 import logging

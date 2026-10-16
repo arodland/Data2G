@@ -6,7 +6,10 @@ machine is shared): a wrapper that imported data2g's numpy users first
 (`python -c "import ...; loss_study.main()"`) made a loss study's 8 workers
 run 25 threads each, 50x slower, and limit() fails loudly instead.
 data2g-host and the receiver (data2g.receiver has why) call cap_env(1) as
-they are imported."""
+they are imported.
+
+Python only: native sizes its own pool (native/core/util/pool.hpp).
+"""
 
 import os
 import sys

@@ -7,6 +7,11 @@ index-to-bits rule never changes. Points are unit average power.
 Frozen point sets live in data2g/constellations/<name>.npy (complex128).
 `gray-qamN` names are built in: Gray-labelled square QAM, the baseline
 every learned set is judged against.
+
+Native: native/core/constellation (the frozen sets compiled in,
+tables::CONSTELLATIONS). Parity: tests/test_native_constellation.py;
+under `pytest --native` tests/native_subs/base.py substitutes load,
+ace_dirs, modulate, llr and ace_project.
 """
 
 from functools import lru_cache

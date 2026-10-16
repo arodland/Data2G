@@ -20,6 +20,10 @@ Circulant convention: row i of a block with shift s connects to column
 Encoder and decoder: numpy. Decoder: batched BP, or normalized min-sum
 with an optional per-iteration normalization (neural min-sum);
 decoders_torch has it on torch for GPU studies.
+
+Native: native/core/ldpc (shift tables compiled in from
+codes_data/ldpc_shifts.npz). Parity: tests/test_native_ldpc.py; under
+`pytest --native` qc_code and Decoder are substituted.
 """
 
 from dataclasses import dataclass, field

@@ -11,6 +11,9 @@ name here becomes a constexpr in native/core/generated/config.hpp (BANDS
 and SUBMODES as structs with their derived fields; the generator's SKIP
 lists the rest it emits in another form or not at all), so after a
 change run tools/gen_native_tables.py, whose --check fails until then.
+
+Native lookups on the generated tables (BANDS[name], SUBMODES[name],
+BY_INDEX) are native/core/config/config.hpp.
 """
 
 import os

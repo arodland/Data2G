@@ -1,6 +1,6 @@
 """Single-carrier constant-envelope modes (continuous-phase M-FSK,
 noncoherent) with Costas-array sync and a header: the ARQ's bottom rungs.
-Prototyped in the cpm-modes fork (scripts/cpm_study.py, cpm_spectrum.py):
+Prototyped in the cpm-modes fork (its scripts/cpm_study.py, cpm_spectrum.py):
 4-7 dB better than OFDM of similar rate on fading, PEP-fair, 10% points.
 
 Signal: M tones spaced by the symbol rate R (h = 1), continuous phase, the
@@ -22,6 +22,11 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
   burst's length, so the receiver finds them before it knows the length;
 - header (twice, after the first two blocks): 16 bits as OFDM's: index =
   mode index + 2 x duplicated, n field = data codewords + 1, CRC-6.
+
+Native: native/core/cpm (grids and specs compiled in, tables::CPM_*).
+Parity: tests/test_native_cpm.py; under `pytest --native`
+tests/native_subs/cpm.py substitutes by name, private _energies, _shares
+and _peak_ratio included.
 """
 
 from dataclasses import dataclass, field

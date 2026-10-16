@@ -25,6 +25,6 @@ module that reaches into codes and the modem; policy, predictor and modes
 are the gear shifter's.
 
 Native: native/core/arq/<module>.hpp|.cpp, each header citing its Python
-file; tests/conftest.py's _arq_, _gear_ and _phy_substitutions run this
-package's tests on it under pytest --native.
+file; tests/native_subs/{arq,gear,phy,engine}.py run this package's
+tests on it under pytest --native.
 """

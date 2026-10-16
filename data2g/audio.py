@@ -11,7 +11,8 @@ blanking, and data2g-host's PortAudio streams.
 
 Native: native/core/audio/filters.hpp (Decimator, Interpolator, Blanker),
 fifo.hpp (Capture's and Player's FIFOs), audio.hpp (device selection).
-Under `pytest --native` tests/conftest.py substitutes the three filters.
+Under `pytest --native` tests/native_subs/audio.py substitutes the three
+filters.
 """
 
 import logging

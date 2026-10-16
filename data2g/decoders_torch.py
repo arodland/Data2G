@@ -2,6 +2,8 @@
 GPU (`codes.decode_llrs(..., device=...)`). The modem decodes with the
 numpy ones in ldpc.py and polar.py; tests/test_decoders_torch.py pins
 these against them.
+
+Studies only, not ported to native.
 """
 
 import numpy as np

@@ -16,6 +16,11 @@ is buffered before decoding, so every estimate can use every pilot:
   Doppler correlation whose spread is picked per burst from the pilots
   (filter_spread). Returns the per-cu estimate MSE so the demapper can
   discount it.
+
+Native: native/core/equalizer. Parity: tests/test_native_equalizer.py;
+under `pytest --native` every function here but _support_basis is
+substituted (tests/native_subs/base.py's EQUALIZER_NATIVE, private
+_doppler_corr included).
 """
 
 from functools import lru_cache

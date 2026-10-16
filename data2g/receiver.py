@@ -22,8 +22,8 @@ reset); _shift moves a lock between origins.
 Native: native/core/receiver/receiver.hpp (Receiver, receive_any, and
 decode: a burst's receive, split out so arq::Engine can run it on its
 worker) and receiver/noise_profile.hpp. Under `pytest --native`,
-tests/conftest.py substitutes Receiver, receive_any and search_span (and
-engine.Receiver) by name.
+tests/native_subs/receiver.py substitutes Receiver, receive_any and
+search_span (and engine.Receiver) by name.
 """
 
 from . import threads

@@ -31,6 +31,10 @@ Nothing here decides whether a peak is a preamble beyond the noise
 threshold: at high SNR a transmission's own data symbols clear it too.
 acquire() returns the best peak and runner-ups, and the header (exact ML
 + CRC-6 + score floor, modem.receive) is the gate.
+
+Native: native/core/waveform/sync. Under `pytest --native`
+tests/native_subs/waveform.py substitutes by name, private _raw_stat,
+_refine and _crossings included.
 """
 
 from dataclasses import dataclass, field as dataclass_field
