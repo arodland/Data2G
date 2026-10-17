@@ -1,3 +1,6 @@
+"""data2g.ldpc: every on-air code's H, the decoder, IR extension and the CRC
+gate."""
+
 import numpy as np
 import pytest
 
@@ -55,7 +58,7 @@ def test_a_lifting_size_without_a_table_is_an_error():
 
 def test_min_sum_decodes_noise_free_and_corrects_errors():
     code = ldpc.qc_code(500, 1000)
-    dec = ldpc.MinSumDecoder(code)
+    dec = ldpc.Decoder(code)
     rng = np.random.default_rng(0)
     bits = rng.integers(0, 2, (8, 500))
     x = 1.0 - 2.0 * code.encode(bits)
@@ -110,7 +113,7 @@ def test_a_crc_match_needs_a_converged_decode():
 
     spec = SUBMODES["qpsk-r1/5"]
     bits = codes.info_bits(spec, bytes(range(codes.payload_bytes(spec))))[None]
-    assert codes._payloads(spec, bits, [True], index=[0])[0][1]
-    assert not codes._payloads(spec, bits, [False], index=[0])[0][1]
+    assert codes.payloads(spec, bits, [True], index=[0])[0][1]
+    assert not codes.payloads(spec, bits, [False], index=[0])[0][1]
     soft = (1 - 2 * codes.encode_info(spec, bits).astype(int)) * 4.0
     assert codes.decode_many(spec, soft)[0] == (bytes(range(codes.payload_bytes(spec))), True)

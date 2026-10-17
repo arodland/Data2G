@@ -34,7 +34,7 @@ def job(args):
     seed, minutes = args
     rng = np.random.default_rng(seed)
     accs = {"old": modem.Accept.of(None, 16.0), "new": receive_accept()}
-    rx = {k: N.tnc.Receiver(a, list(cpm.GRIDS), True) for k, a in accs.items()}
+    rx = {k: N.receiver.Receiver(a, list(cpm.GRIDS), True) for k, a in accs.items()}
     out = {k: [] for k in rx}
     t = 0
     while t < minutes * 60 * FS:

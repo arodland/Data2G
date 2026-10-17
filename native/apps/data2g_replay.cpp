@@ -14,11 +14,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "app/log.hpp"
 #include "arq/engine.hpp"
 #include "host/host.hpp"
 #include "util/pool.hpp"
@@ -41,7 +41,7 @@ double half_to_double(std::uint16_t h) {
 [[noreturn]] void usage(int code) {
     std::fprintf(code ? stderr : stdout,
                  "usage: data2g-replay DIR [--call CALL] [--seconds S] [--worker] [--threads N] [--dd-budget S]\n"
-                 "                     [--log-level DEBUG|INFO|WARNING] [--repeat N]\n"
+                 "                     [--log-level LEVEL] [--repeat N]\n"
                  "\n"
                  "Runs DIR/audio_in.f16 through the engine listening as CALL (default NOCALL).\n"
                  "  --seconds     only the first S seconds of audio\n"
@@ -50,24 +50,9 @@ double half_to_double(std::uint16_t h) {
                  "  --dd-budget   seconds of DD per burst (default 1; 0: none), as data2g-host's\n"
                  "  --slow-ms     warn about an engine step slower than this (default 200)\n"
                  "  --host        run data2g-host's per-step work too (the VARA host layer: BUFFER, events)\n"
-                 "  --log-level   default INFO\n"
+                 "  --log-level   DEBUG, INFO, WARNING, ERROR or CRITICAL (default INFO)\n"
                  "  --repeat      run N times; the log is of the first run, the others report their time only\n");
     std::exit(code);
-}
-
-int g_level = 20;
-
-const char* level_name(int level) {
-    return level >= 40 ? "ERROR" : level >= 30 ? "WARNING" : level >= 20 ? "INFO" : "DEBUG";
-}
-
-void log_line(int level, const std::string& msg) {
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t t = std::chrono::system_clock::to_time_t(now);
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
-    char ts[24];
-    std::strftime(ts, sizeof ts, "%H:%M:%S", std::localtime(&t));
-    std::fprintf(stderr, "%s.%03d %s %s\n", ts, static_cast<int>(ms), level_name(level), msg.c_str());
 }
 
 }  // namespace
@@ -96,8 +81,9 @@ int main(int argc, char** argv) {
         else if (a == "--host") with_host = true;
         else if (a == "--repeat") repeat = std::max(1, std::atoi(value()));
         else if (a == "--log-level") {
-            const std::string l = value();
-            g_level = l == "DEBUG" ? 10 : l == "INFO" ? 20 : l == "WARNING" ? 30 : 20;
+            const auto l = app::parse_level(value());
+            if (!l) usage(2);
+            app::g_level = *l;
         } else if (!a.empty() && a[0] != '-' && dir.empty()) dir = a;
         else usage(2);
     }
@@ -115,9 +101,10 @@ int main(int argc, char** argv) {
     for (std::size_t i = 0; i < audio.size(); ++i) audio[i] = half_to_double(raw[i]);
 
     if (threads > 0) pool::set_threads(threads);
-    arq::set_log_sink({[&quiet](const char*, int level) { return !quiet && level >= g_level; },
+    // the host's log (app/log.hpp), quiet on repeat runs
+    arq::set_log_sink({[&quiet](const char*, int level) { return !quiet && level >= app::g_level; },
                        [&quiet](const char*, int level, const std::string& msg) {
-                           if (!quiet) log_line(level, msg);
+                           if (!quiet) app::log_line(level, msg);
                        }});
 
     for (int run = 0; run < repeat; ++run) {
@@ -151,7 +138,7 @@ int main(int argc, char** argv) {
                              std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
             step_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
             if (step_ms.back() >= slow_ms && !quiet)
-                log_line(30, "slow step at audio t=" + std::to_string(static_cast<double>(i) / config::FS).substr(0, 6) + " s: " +
+                app::log_line(app::WARNING, "slow step at audio t=" + std::to_string(static_cast<double>(i) / config::FS).substr(0, 6) + " s: " +
                                  std::to_string(static_cast<int>(step_ms.back())) + " ms");
         }
         const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_all).count();

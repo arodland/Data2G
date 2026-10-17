@@ -47,10 +47,6 @@ std::string format(const char* fmt, ...) {
     return out;
 }
 
-bool dup_ctl(const TxBurst& b) {
-    return std::any_of(b.slots.begin(), b.slots.end(), [](const Slot& s) { return s.rv && s.mask_id.seq >= SEQ_MOD; });
-}
-
 // --- the two directions -------------------------------------------------------------
 
 void TxSide::write(ByteView data) {
@@ -58,7 +54,7 @@ void TxSide::write(ByteView data) {
     buf.insert(buf.end(), r.begin(), r.end());
 }
 
-bool TxSide::pending() const { return !cws.empty() || stream_end < buf_off + static_cast<std::int64_t>(buf.size()); }
+bool TxSide::pending() const { return !cws.empty() || unsent() > 0; }
 
 bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
     if (!(base <= cum && cum <= next))
@@ -301,7 +297,7 @@ TxBurstPtr Station::build(bool fresh) {
     if (chat) ext[T_CHAT] = {};
     if (policy->want_dup()) ext[T_DUPCTL] = {};
     if (chat || peer_chat) {
-        const std::int64_t queued = tx.buf_off + static_cast<std::int64_t>(tx.buf.size()) - tx.stream_end;
+        const std::int64_t queued = new_available();
         if (queued > CHAT_LINE_BYTES) {
             const auto q = std::min<std::int64_t>(queued, 65535);
             ext[T_BUFFER] = Bytes{static_cast<std::uint8_t>(q >> 8), static_cast<std::uint8_t>(q)};

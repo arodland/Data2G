@@ -7,7 +7,7 @@
 // its own QThread with its own event loop: a busy engine thread can't delay
 // the drain, and WASAPI only moves bytes for a sink whose owning thread
 // pumps events. Unlike SSTVAE, playback is a stream (pull mode from the
-// PlaybackFifo) rather than one waveform per call, as host.py's Player is.
+// PlaybackFifo) rather than one waveform per call, as audio.py's Player is.
 //
 // Needs a QCoreApplication to exist (QMediaDevices).
 #pragma once

@@ -3,7 +3,8 @@
 Every dataset in the current training mix: how it was made, what steered it,
 and why it is there, so a future retrain can rebuild or extend the mix.
 
-**Archive.** `runs/` is gitignored and worktrees get deleted (v10's 2900
+**Archive.** `runs/` is gitignored (but for a few inputs and the `*.sh`
+drivers) and worktrees get deleted (v10's 2900
 sessions and 83,000 offline samples went with `outcome-capacity`). Copies of
 every file below, with `MANIFEST.sha256` (sha256, rows), are in the main
 checkout's `runs/outcome-data/`. Keep it outside any worktree.

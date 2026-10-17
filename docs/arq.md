@@ -1,7 +1,8 @@
-# Data2G ARQ protocol (draft for review)
+# Data2G ARQ protocol
 
-Status: approved 2026-09-24, with the state-agreement rules of §2 and §10 added at review. Plan: gear-shifter
-phases A-H (/home/andrew/.claude/plans/sleepy-jumping-whisper.md); this is phase B.
+Status: the spec. Approved 2026-09-24, with the state-agreement rules of §2 and §10 added at review. Written
+before the code as one step of the gear-shifter plan; the "As built" notes record where the code went
+further.
 
 TLDR: a connected, half-duplex, turn-based ARQ. Both directions use one burst format:
 a control word first, then resent codewords, then new ones.
@@ -12,6 +13,22 @@ a control word first, then resent codewords, then new ones.
   header is untouched.
 - **No silent disagreement:** whatever the two stations must agree on is either sent
   explicitly or checked by every codeword's CRC (§10).
+
+## Code map
+
+data2g/arq/__init__.py lists the modules and how they layer. By section (Python in
+`data2g/arq/`, native in `native/core/arq/` under the same names):
+
+| section | where |
+|---|---|
+| §2 codeword identity, masked CRC | `burst.py` (`ctl_mask`, `data_mask`), `phy.py` (`mask_value`) |
+| §3 burst layout, §4 core word, §5 extensions | `frames.py` (`Core`, `Control`, `T_*`); `link.py` (`Station.build`, `Station.handle`) |
+| §6, §6a turns, timers, idle | `session.py` |
+| §7 session frames, §7a ID frames | `frames.py` (`Connect`, `ConnectAck`, `ConnectNak`, `pack_cq`, `pack_id`); `session.py`; `engine.py` |
+| §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
+| §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
+| §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
+| §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
 
@@ -63,7 +80,8 @@ a control word first, then resent codewords, then new ones.
 - `codes.encode` / `decode_many` / `decode_buffer` take `crc_mask`, from
   `arq.phy.mask_value(mask_id)`.
 - **Scrambler:** info bits are XORed with PN9 before encoding (`codes.scrambler`).
-  Without it, zero-padded codewords were wrecked by the clipper (phase G).
+  Without it, zero-padded codewords were wrecked by the clipper (found running whole
+  sessions through the modem, scripts/phy_session.py).
   - The seed is the codeword's burst position alone (`codes.scramble_seed`), never the
     key, so seeds differ within a burst.
   - A resend in another slot is scrambled differently. It still combines, because the
@@ -353,7 +371,7 @@ Station identification, readable by anyone listening (data2g/arq/engine.py).
     trailing ID is heard and not keyed over. A KISS frame queued during a session was
     lost that way.
 
-## 8. Gear-shift loop (summary; details in the phase E policy doc)
+## 8. Gear-shift loop (summary; details in data2g/arq/policy.py)
 
 1. The receiver predicts P(decode) per candidate submode, using the link predictor on
    its measured features plus the survey.
@@ -369,9 +387,11 @@ As built (data2g/arq/policy.py):
 
 - The predictor sees the peer's last two bursts, not one. One burst can't tell a steady
   channel from 0.1 Hz fading. Two can: average them, or read the change between them.
-- Online correction: after each peer burst, the receiver compares the burst's decoded
-  fraction (control plus first transmissions) with the P it predicted for that mode. It
-  moves a logit bias per (band, constellation family) by the difference, bounded at ±3.
+- Online correction: after each peer burst, the receiver compares what decoded with the
+  P it predicted for that mode: whether the burst was usable (its control decoded)
+  against P(usable), and the decoded fraction of its first-transmission data codewords
+  against P(codeword). Each moves a logit bias per submode by the difference, bounded at
+  ±6 (`BIAS_MAX`; a family-wide bias, bounded at ±3, came first).
   This absorbs what the predictor gets wrong on the actual link.
 - Switching away from the mode of the peer's outstanding codewords abandons them (§4).
   The recommender charges a switch with the bytes it holds beyond its cumulative ACK.
@@ -504,7 +524,7 @@ forever without progress, because they disagree about protocol state.
 
 ## Review decisions (2026-09-24)
 
-1. One control codeword first per burst; overhead to be measured in phase D.
+1. One control codeword first per burst; overhead to be measured.
 2. The 7-bit seq space is fine.
 3. BW500 caps at 500 Hz (important). BW2300 / BW2750 mean no cap. BW1200 is an
    optional extension.

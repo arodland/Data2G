@@ -3,6 +3,8 @@ offset, sample-clock error. Operates on real passband audio at FS.
 
 SNR is signal power relative to the noise power falling in
 `config.SNR_REF_BW_HZ`.
+
+Simulation only, not on the live path and not ported to native.
 """
 
 from dataclasses import dataclass
@@ -125,12 +127,7 @@ def fading(
     return np.real((z * g1 + z2 * g2) / np.sqrt(2))
 
 
-def active_power(x: np.ndarray) -> float:
-    """Mean power over the active portion (envelope above 10% of the
-    overall RMS), so lead-in/out silence doesn't skew it."""
-    env = np.abs(_analytic(x))
-    active = env > 0.1 * np.sqrt(np.mean(x**2))
-    return float(np.mean(x[active] ** 2) if active.any() else np.mean(x**2))
+active_power = dsp.active_power  # its home is waveform.dsp; scripts import it from here
 
 
 def awgn(x: np.ndarray, snr_db: float, seed: int = 0, s_power: float | None = None) -> np.ndarray:

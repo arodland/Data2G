@@ -17,6 +17,8 @@ and the modem cannot drift apart.
 
 `tests/test_channel_torch.py` pins the TX against numpy and the whole
 path against `scripts/eq_floor.py`'s measurement.
+
+Training only (torch), not on the live path and not ported to native.
 """
 
 from dataclasses import dataclass
@@ -78,7 +80,7 @@ class BurstChannel:
         self.band = b = ofdm.band(spec.band)
         cs = clip_setting or (spec.headroom, b.spec.clip_overshoot, spec.ace)
         self.headroom, self.overshoot, self.ace = cs[0], cs[1], tuple(cs[2]) if len(cs) > 2 else ()
-        self.clip_consts = clip_consts or config.clip_consts(spec.band, spec.headroom, spec.ace, spec.constellation)
+        self.clip_consts = clip_consts or spec.clip
         if self.ace:
             win, full = modem.ace_cells(spec, n_frames)
             self.ace_win, self.ace_full = torch.tensor(win, device=device), torch.tensor(full, device=device)

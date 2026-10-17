@@ -28,8 +28,6 @@ namespace {
 constexpr double PI = std::numbers::pi;
 constexpr int HB = HEADER_BACKOFF;
 
-const waveform::Band& ob(std::string_view name) { return waveform::band(name); }
-
 const constellation::Constellation& qpsk() {
     static const auto* c = constellation::find("gray-qam4");
     return *c;
@@ -187,13 +185,6 @@ std::span<const T> pyslice(std::span<const T> x, int64_t lo, int64_t hi) {
     return b > a ? x.subspan(static_cast<size_t>(a), static_cast<size_t>(b - a)) : std::span<const T>();
 }
 
-
-size_t submode_row(const Spec& spec) {
-    for (size_t i = 0; i < SUBMODES.size(); ++i)
-        if (&SUBMODES[i] == &spec) return i;
-    throw std::invalid_argument("spec is not an element of config::SUBMODES");
-}
-
 }  // namespace
 
 double header_min_score(std::string_view band) {
@@ -208,13 +199,6 @@ double pilot_noise(std::string_view band) {
     throw std::out_of_range("no PILOT_NOISE for band " + std::string(band));
 }
 
-const Spec* by_index(std::string_view sync_band, int index) {
-    const Spec* out = nullptr;  // the dict keeps the last
-    for (const auto& s : SUBMODES)
-        if (s.sync_band == sync_band && s.index == index) out = &s;
-    return out;
-}
-
 Accept Accept::of(std::span<const std::string_view> names, std::optional<double> max_secs, double min_score) {
     Accept a;
     a.min_score = min_score;
@@ -224,7 +208,7 @@ Accept Accept::of(std::span<const std::string_view> names, std::optional<double>
     else
         all.assign(names.begin(), names.end());
     for (auto n : all) {
-        const Spec* s = codes::submode(n);
+        const Spec* s = config::submode(n);
         if (!s) throw std::out_of_range("no submode " + std::string(n));
         int cw = max_codewords(s->sync_band);
         if (max_secs) {
@@ -325,8 +309,8 @@ std::vector<int64_t> ace_cells(const Spec& spec, int n_f) {
 }
 
 std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec) {
-    const auto& b = ob(spec.band);
-    const auto& sb = ob(spec.sync_band);
+    const auto& b = waveform::band(spec.band);
+    const auto& sb = waveform::band(spec.sync_band);
     const size_t nc = static_cast<size_t>(b.nc()), snc = static_cast<size_t>(sb.nc());
     if (data_in.cols != nc || data_in.rows % DATA_SYMS_PER_FRAME)
         throw std::invalid_argument("burst_waveform: need (n_f * 5, nc) data symbols");
@@ -389,7 +373,7 @@ namespace {
 // modem.ace_projector: each data cell of the clipped burst moved into its
 // point's region (the point scaled by the carrier's clip gain).
 waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::vector<cd> dirs) {
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const size_t nc = static_cast<size_t>(b.nc());
     auto cells = std::make_shared<std::vector<int64_t>>(ace_cells(spec, static_cast<int>(data.rows / DATA_SYMS_PER_FRAME)));
     auto X = std::make_shared<Mat<cd>>(data);
@@ -434,7 +418,7 @@ waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::ve
 }  // namespace
 
 std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec) {
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const auto& pts = points_of(spec);
     const size_t nc = static_cast<size_t>(b.nc());
     const auto sym = constellation::modulate(bits, pts);
@@ -455,7 +439,7 @@ std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec
         project = ace_projector(spec, data, std::move(dirs));
     }
     return waveform::tx_condition(x, spec.headroom, b.spec->clip_overshoot, LEADIN_SAMPLES, x.size() - LEADOUT_SAMPLES,
-                                  ob(spec.sync_band).tx_bandpass(), project, spec.ace);
+                                  waveform::band(spec.sync_band).tx_bandpass(), project, spec.ace);
 }
 
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
@@ -483,9 +467,6 @@ double bin_phase_step(std::span<const cd> h) {
 
 namespace {
 
-constexpr int64_t SLIP_MIN = 40, SLIP_MAX = 240;  // modem.py's
-constexpr double SLIP_TRIGGER = 0.5, SLIP_ACCEPT = 0.45;
-
 // modem._coherence: |<ref, h>| / (|ref| |h|)
 double coherence(std::span<const cd> h, std::span<const cd> ref) {
     cd acc{};
@@ -504,7 +485,7 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
     if (coherence(over_pilot(b.demod_window(z, p + NCP, DEMOD_BACKOFF), b), prev) >= SLIP_TRIGGER) return 0;
     const auto zlen = static_cast<int64_t>(z.size());
     const auto at_z = [&](int64_t i) { return i < zlen ? z[static_cast<size_t>(i)] : cd{}; };
-    const int64_t lo = std::max(-SLIP_MAX, -p);
+    const int64_t lo = std::max<int64_t>(-SLIP_MAX, -p);
     const auto n_off = static_cast<size_t>(SLIP_MAX - lo + 1);
     const size_t nc = static_cast<size_t>(b.nc());
     std::vector<cd> rot(nc), x, h(nc);
@@ -539,7 +520,7 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
 
 Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     phi_ref = phi_ref + 2 * PI * RS * shift / FS;  // the shift's own slope
     p += shift;
@@ -603,7 +584,7 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
 }
 
 std::optional<std::vector<double>> copy_llr(std::span<const cd> z, int64_t p, std::string_view band, int n_hdr) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     if (p + FRAME_SAMPLES + NSYM > static_cast<int64_t>(z.size())) return std::nullopt;
     std::vector<std::vector<cd>> win;
     for (int s = 0; s <= SYMS_PER_FRAME; ++s) win.push_back(b.demod_window(z, p + s * NSYM + NCP, HB));
@@ -624,7 +605,7 @@ std::optional<std::vector<double>> copy_llr(std::span<const cd> z, int64_t p, st
 }
 
 HeaderRead read_header(std::span<const cd> z, int64_t start, std::string_view band, const Accept* accept) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     const int R = b.spec->preamble_repeats, ref = std::min(R, REF_REPEATS);
     const int64_t u0 = start + PREAMBLE_CP + static_cast<int64_t>(R - ref) * M;
@@ -731,7 +712,7 @@ BestHeader best_header(std::span<const cd> z0, std::span<const std::string_view>
             if (st.band == name) S = st.S;
         waveform::Acquisition acq_b;
         try {
-            acq_b = waveform::acquire(z0, ob(name), {}, ACQUIRE_REACH_HZ, {}, S);
+            acq_b = waveform::acquire(z0, waveform::band(name), {}, ACQUIRE_REACH_HZ, {}, S);
         } catch (const SyncError&) {
             continue;
         }
@@ -790,7 +771,7 @@ Lock find_burst(std::span<const double> x, std::span<const std::string_view> ban
 
 std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max, bool latest) {
     const Spec& spec = *lock.spec;
-    const auto& b = ob(spec.band);
+    const auto& b = waveform::band(spec.band);
     const auto len = static_cast<int64_t>(x.size());
     const int total = frames_on_air(spec, lock.n_cw) + 1;
     int avail = 0;
@@ -832,7 +813,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               std::span<const cd* const> C_rows, size_t cols, std::optional<double> level,
                               double* peak) {
-    const auto& b = ob(band);
+    const auto& b = waveform::band(band);
     const auto z0 = waveform::to_baseband(x);
     const auto freqs = waveform::cfo_grid();
     Mat<cd> C_own;
@@ -840,14 +821,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     if (C_rows.empty()) {
         if (level) throw std::invalid_argument("find_copy: level without C");
         C_own = waveform::repeat_corrs(z0, waveform::unit_template(b), freqs);
-        double lv = equalizer::INF;
-        for (size_t i = 0; i < C_own.rows; ++i) {
-            // re^2 + im^2: np.abs(C) ** 2 to an ulp, without a hypot per output
-            std::vector<double> p(C_own.cols);
-            for (size_t j = 0; j < p.size(); ++j) p[j] = std::norm(C_own[i][j]);
-            lv = std::min(lv, dsp::quantile(std::move(p), waveform::NOISE_QUANTILE) / -std::log(1 - waveform::NOISE_QUANTILE));
-        }
-        level = lv;
+        level = waveform::noise_level(C_own);
         for (size_t i = 0; i < C_own.rows; ++i) own_rows.push_back(C_own[i]);
         C_rows = own_rows;
         cols = C_own.cols;
@@ -898,7 +872,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
             if (static_cast<int>(grids.size()) == COPY_GRIDS) break;
         }
     }
-    const auto& sb = modem::band(band);
+    const auto& sb = config::band(band);
     const double floor = floor_of(band, accept);
     const int64_t len = static_cast<int64_t>(z0.size());
     std::vector<Lock> found;
@@ -943,7 +917,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 }
 
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
-    const auto& b = ob(lock.band);
+    const auto& b = waveform::band(lock.band);
     auto hd = read_header(z, lock.start, lock.band);
     hd.hdr = Header{lock.copy->word, lock.spec, lock.n_cw, lock.score};
     hd.valid = true;
@@ -952,7 +926,7 @@ HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
 }
 
 ClipConsts clip_consts(const Spec& spec) {
-    const auto& c = CLIP_SUBMODE[submode_row(spec)];
+    const auto& c = CLIP_SUBMODE[config::row(spec)];
     return {{{1, c.gain_1f}}, c.gain, c.ratio};
 }
 
@@ -969,14 +943,11 @@ DataEstimate data_channel(const Mat<cd>& h_pilot, equalizer::Support support, st
     const ClipConsts own = clip ? ClipConsts{} : clip_consts(band);
     const ClipConsts& c = clip ? *clip : own;
     est.clip_ratio = c.ratio;
-    const int key = n_frames < 0 ? static_cast<int>(h_pilot.rows) - 1 : n_frames;
-    double g = c.gain;
-    for (const auto& [k, v] : c.gains)
-        if (k == key) g = v;
+    const double g = c.gain_for(n_frames < 0 ? static_cast<int>(h_pilot.rows) - 1 : n_frames);
     for (auto& v : est.h.data) v *= g;
     for (auto& v : est.mse.data) v *= g * g;
     est.gain = g;
-    est.band = modem::band(band).name;
+    est.band = config::band(band).name;
     return est;
 }
 
@@ -1009,7 +980,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
         if (burst_end(hd.p0, *hd.hdr.spec, hd.hdr.n_cw) > len) throw SyncError("burst runs past the buffer");
     }
     const std::string_view sband = hd.band;  // the sync band; frames are on spec.band's carriers
-    const auto& b = ob(sband);
+    const auto& b = waveform::band(sband);
     const size_t nc = static_cast<size_t>(b.nc());
     const Spec& spec = *hd.hdr.spec;
     const int n_cw = hd.hdr.n_cw;
@@ -1122,6 +1093,47 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
     return constellation::llr(y, h.data, var.data, points_of(spec));
 }
 
+Mat<double> burst_soft(const Received& r, const DataEstimate& est) {
+    auto var = noise_var(est.h, est);
+    for (size_t i = 0; i < var.data.size(); ++i) var.data[i] += est.mse.data[i];
+    Mat<double> out;
+    out.data = codes::despread<double>(soft_bits(r.raw, est.h, var, *r.spec), r.n_cw, r.spec->bits_per_cu);
+    out.rows = static_cast<size_t>(r.n_cw);
+    out.cols = out.data.size() / out.rows;
+    return out;
+}
+
+std::vector<double> slot_soft(const Received& r, const DataEstimate& est, int slot) {
+    const size_t nc = r.raw.cols, total = est.h.data.size(), n = static_cast<size_t>(r.n_cw);
+    std::vector<cd> y, h;
+    std::vector<double> var;
+    for (size_t j = static_cast<size_t>(slot); j < total; j += n) {
+        const size_t row = j / nc, c = j % nc;
+        const cd hj = est.h.data[j];
+        y.push_back(data_row(r.raw, row)[c]);
+        h.push_back(hj);
+        var.push_back((est.n0_k.empty() ? est.n0 : est.n0_k[c]) + est.clip_ratio * std::norm(hj) + est.mse.data[j]);
+    }
+    return constellation::llr(y, h, var, points_of(*r.spec));
+}
+
+double snr_db(const equalizer::Estimate& est, std::string_view b) {
+    return 10 * std::log10(est.p_sig / est.n0 * band(b).nc * RS / SNR_REF_BW_HZ);
+}
+
+SymbolTimes symbol_times(const Received& r) {
+    const size_t S = DATA_SYMS_PER_FRAME, n_f = r.raw.rows / SYMS_PER_FRAME;
+    SymbolTimes out{Mat<double>(n_f, S), std::vector<double>(r.hp.rows)};
+    for (size_t f = 0; f < n_f; ++f) {
+        const size_t air = f + (r.kc && static_cast<int>(f) >= *r.kc ? 1 : 0);
+        for (size_t s = 0; s < S; ++s)
+            out.rows[f][s] = static_cast<double>((air * SYMS_PER_FRAME + s + 1) * NSYM) / FS;
+    }
+    for (size_t i = 0; i < out.pilots.size(); ++i)
+        out.pilots[i] = static_cast<double>(i * SYMS_PER_FRAME * NSYM) / FS;
+    return out;
+}
+
 std::vector<cd> equalized(const Received& r) {
     const auto& h = r.est.h;
     const size_t nc = r.raw.cols, n_f = r.raw.rows / SYMS_PER_FRAME;
@@ -1138,10 +1150,7 @@ std::vector<cd> equalized(const Received& r) {
 
 std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f) {
     const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, {}, spec.band);
-    const auto c = clip_consts(spec);
-    double g = c.gain;
-    for (const auto& [k, v] : c.gains)
-        if (k == n_f) g = v;
+    const double g = clip_consts(spec).gain_for(n_f);
     const size_t nc = fr.raw.cols;
     std::vector<cd> out;
     out.reserve(DATA_SYMS_PER_FRAME * nc);
@@ -1157,16 +1166,10 @@ std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec&
 
 Burst decode_received(const Received& r) {
     const Spec& spec = *r.spec;
-    const auto& est = r.est;
-    auto var = noise_var(est.h, est);
-    for (size_t i = 0; i < var.data.size(); ++i) var.data[i] += est.mse.data[i];
-    const auto sb = soft_bits(r.raw, est.h, var, spec);
-    const auto soft = codes::despread<double>(sb, r.n_cw, spec.bits_per_cu);
     Burst out;
-    out.soft = Mat<double>(static_cast<size_t>(r.n_cw), soft.size() / static_cast<size_t>(r.n_cw));
-    out.soft.data = soft;
+    out.soft = burst_soft(r);
     Mat<float> sf(out.soft.rows, out.soft.cols);
-    std::copy(soft.begin(), soft.end(), sf.data.begin());
+    std::copy(out.soft.data.begin(), out.soft.data.end(), sf.data.begin());
     for (auto& p : codes::decode_many(codes::spec(spec), sf)) {
         out.payloads.push_back(std::move(p.data));
         out.crc_ok.push_back(p.ok);
@@ -1174,7 +1177,7 @@ Burst decode_received(const Received& r) {
     out.spec = &spec;
     out.freq_offset = r.cfo;
     out.preamble_start = r.preamble_start;
-    out.snr_db = 10 * std::log10(est.p_sig / est.n0 * band(spec.band).nc * RS / SNR_REF_BW_HZ);
+    out.snr_db = snr_db(r.est, spec.band);
     return out;
 }
 

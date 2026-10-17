@@ -3,13 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
+#include "tables/format.hpp"
 
 namespace data2g::codes {
 
@@ -41,10 +43,6 @@ constexpr std::array<std::uint32_t, 256> crc32_table() {
     return t;
 }
 constexpr auto CRC32 = crc32_table();
-
-std::size_t row(const config::Submode& spec) {
-    return static_cast<std::size_t>(&spec - config::SUBMODES.data());
-}
 
 }  // namespace
 
@@ -93,20 +91,6 @@ std::vector<std::uint8_t> scrambler(int k, int seed) {
     return out;
 }
 
-const config::Submode* submode(std::string_view name) {
-    for (const auto& s : config::SUBMODES)
-        if (s.name == name) return &s;
-    return nullptr;
-}
-
-std::span<const std::uint16_t> interleaver(const config::Submode& spec) {
-    return tables::FORMATS.at(row(spec)).perm;
-}
-
-std::span<const std::uint16_t> info_pos(const config::Submode& spec) {
-    return tables::FORMATS.at(row(spec)).info_pos;
-}
-
 // --- the codec ---------------------------------------------------------------
 
 namespace {
@@ -121,11 +105,11 @@ std::vector<Spec> build_specs() {
     for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
         for (const auto& s : table) {
             const bool polar = s.code == "polar";
-            const int crc = polar ? 24 : s.k >= 512 ? 32 : 16;  // codes.crc_bits
+            const int crc = crc_bits(s);
             int bits = 0;
             for (const auto& g : tables::CPM_GRIDS)
                 if (g.name == s.grid) bits = g.bits;
-            v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, (s.k - crc) / 8, s.perm,
+            v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, payload_bytes(s), s.perm,
                          polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{}});
         }
     return v;
@@ -140,6 +124,7 @@ const std::vector<Spec>& specs() {
 // replaced, so references stay valid; the lock covers construction only.
 struct Codecs {
     std::optional<ldpc::Code> code, mother;
+    std::optional<polar::PolarCode> polar;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
     std::unique_ptr<polar::SCLDecoder> scl;
 };
@@ -237,7 +222,19 @@ const Spec* spec(std::string_view name) {
     return nullptr;
 }
 
-const Spec& spec(const config::Submode& s) { return specs().at(row(s)); }
+const Spec& spec(const config::Submode& s) { return specs().at(config::row(s)); }
+
+const Spec& spec(const tables::CpmSpec& s) {
+    // specs() is SUBMODES, then CPM_SPECS, then CPM_CTL
+    const std::less<const tables::CpmSpec*> lt;
+    std::size_t at = config::SUBMODES.size();
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL}) {
+        if (!lt(&s, table.data()) && lt(&s, table.data() + table.size()))
+            return specs()[at + static_cast<std::size_t>(&s - table.data())];
+        at += table.size();
+    }
+    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_SPECS or CPM_CTL row");
+}
 
 const ldpc::Code& ldpc_code(const Spec& s) {
     if (s.polar) throw std::invalid_argument(std::string(s.name) + " is not LDPC");
@@ -255,12 +252,28 @@ const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent) {
     return *d;
 }
 
-const polar::SCLDecoder& polar_decoder(const Spec& s) {
+namespace {
+
+// s's cache entry with its polar code built; cache_mutex held.
+Codecs& polar_entry(const Spec& s) {
     if (!s.polar) throw std::invalid_argument(std::string(s.name) + " is not polar");
+    auto& c = cache[&s];
+    if (!c.polar) c.polar.emplace(s.k, s.coded_bits, s.info_pos);
+    return c;
+}
+
+}  // namespace
+
+const polar::PolarCode& polar_code(const Spec& s) {
     std::lock_guard lock(cache_mutex);
-    auto& d = cache[&s].scl;
-    if (!d) d = std::make_unique<polar::SCLDecoder>(polar::PolarCode(s.k, s.coded_bits, s.info_pos), POLAR_LIST);
-    return *d;
+    return *polar_entry(s).polar;
+}
+
+const polar::SCLDecoder& polar_decoder(const Spec& s) {
+    std::lock_guard lock(cache_mutex);  // once: the decoder is fetched per decode
+    auto& c = polar_entry(s);
+    if (!c.scl) c.scl = std::make_unique<polar::SCLDecoder>(*c.polar, POLAR_LIST);
+    return *c.scl;
 }
 
 int rv_cycle(const Spec& s) { return s.polar ? 1 : 4; }
@@ -272,6 +285,10 @@ std::vector<int> rv_positions(const Spec& s, int rv) {
     std::vector<int> out(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) out[i] = s.polar ? i : (((rv % c) + c) % c * n + i) % L;
     return out;
+}
+
+int ir_extent(const Spec& s, int max_rv) {
+    return std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
 }
 
 std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
@@ -294,7 +311,7 @@ Mat<std::uint8_t> encode_info(const Spec& s, const Mat<std::uint8_t>& bits, int 
         for (std::size_t b = 0; b < bits.rows; ++b)
             for (std::size_t j = 0; j < pos.size(); ++j) coded[b][j] = full[b][pos[j]];
     } else {
-        coded = s.polar ? polar_decoder(s).code().encode(bits) : ldpc_code(s).encode(bits);
+        coded = s.polar ? polar_code(s).encode(bits) : ldpc_code(s).encode(bits);
     }
     Mat<std::uint8_t> out(coded.rows, coded.cols);
     for (std::size_t b = 0; b < coded.rows; ++b)
@@ -363,10 +380,40 @@ std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int ma
                                          masks, index);
         return payloads(s, d.bits, d.ok, masks, index);
     }
-    const int extent = std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
+    const int extent = ir_extent(s, max_rv);
     const auto d = decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),
                                      ITERS, {}, {});
     return payloads(s, d.bits, d.ok, masks, index);
+}
+
+Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::span<const double> buf, int max_rv,
+                           int rv) {
+    Mat<float> llr;
+    const ldpc::Decoder* dec;
+    if (buf.empty()) {
+        if (static_cast<int>(soft.size()) != s.coded_bits)
+            throw std::invalid_argument(std::string(s.name) + ": expected coded_bits soft bits");
+        llr = Mat<float>(1, soft.size());
+        for (std::size_t i = 0; i < soft.size(); ++i) llr[0][s.perm[i]] = static_cast<float>(soft[i]);
+        dec = &ldpc_decoder(s);
+    } else {
+        const int extent = ir_extent(s, max_rv);
+        if (static_cast<int>(buf.size()) < extent) throw std::invalid_argument(std::string(s.name) + ": buffer shape");
+        llr = Mat<float>(1, static_cast<std::size_t>(extent));
+        std::copy_n(buf.begin(), extent, llr.data.begin());
+        dec = &ldpc_decoder(s, extent);
+    }
+    const auto d = dec->decode(llr, ITERS, {}, true);
+    std::vector<double> code(d.posterior.data.begin(), d.posterior.data.end());
+    if (!buf.empty()) {
+        const auto pos = rv_positions(s, rv);
+        std::vector<double> c(pos.size());
+        for (std::size_t j = 0; j < pos.size(); ++j) c[j] = code[static_cast<std::size_t>(pos[j])];
+        code = std::move(c);
+    }
+    std::vector<double> post(static_cast<std::size_t>(s.coded_bits));
+    for (std::size_t i = 0; i < post.size(); ++i) post[i] = code[s.perm[i]];
+    return {std::vector<std::uint8_t>(d.bits.data.begin(), d.bits.data.end()), d.ok[0] != 0, std::move(post)};
 }
 
 Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index) {

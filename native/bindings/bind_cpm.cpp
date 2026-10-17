@@ -1,3 +1,5 @@
+// data2g.cpm over native/core/cpm. Grids and specs cross by name
+// (tests/native_subs/cpm.py restores the Python objects).
 #include "convert.hpp"
 #include "cpm/cpm.hpp"
 
@@ -97,6 +99,9 @@ void bind_cpm(py::module_& m) {
         for (const auto& a : coded) v.push_back(vec(a));
         return np(cpm::modulate(cspec(s), v, dup, cap));
     }, "audio before the TX bandpass", py::arg("spec"), py::arg("coded"), py::arg("dup"), py::arg("cap") = 0);
+    c.def("bandpass", [](const std::string& g, const In<double>& x, int cap) {
+        return np(cpm::bandpass(grid(g), view(x), cap));
+    }, py::arg("g"), py::arg("x"), py::arg("cap") = 0);
     c.def("energies", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo, int extra) {
         return np(cpm::energies(grid(g), view(x), start, n_sym, cfo, extra));
     }, py::arg("grid"), py::arg("x"), py::arg("start"), py::arg("n_sym"), py::arg("cfo"), py::arg("extra") = 0);

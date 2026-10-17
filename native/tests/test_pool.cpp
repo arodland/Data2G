@@ -41,7 +41,7 @@ std::vector<std::string> run(const std::vector<double>& y_fail, const std::vecto
 
     // LDPC: 64 codewords, sum-product with posteriors and min-sum, half
     // converging (scaled noise around +-8), half pure noise
-    const auto& big = codes::spec(*codes::submode("w48-16qam-r1/2"));
+    const auto& big = codes::spec(*config::submode("w48-16qam-r1/2"));
     Mat<float> llr(64, static_cast<std::size_t>(big.coded_bits));
     for (std::size_t b = 0; b < llr.rows; ++b)
         for (std::size_t j = 0; j < llr.cols; ++j) llr[b][j] = b % 2 ? 2.0f * n01(rng) : 3.0f + 2.5f * n01(rng);
@@ -53,7 +53,7 @@ std::vector<std::string> run(const std::vector<double>& y_fail, const std::vecto
     out.push_back(bits(ms.bits) + bits(ms.ok) + bits(ms.posterior));
 
     // polar: 16 rows
-    const auto& pol = codes::spec(*codes::submode("polar-k192-f8"));
+    const auto& pol = codes::spec(*config::submode("polar-k192-f8"));
     Mat<float> pl(16, static_cast<std::size_t>(pol.coded_bits));
     for (auto& v : pl.data) v = 1.0f + 2.0f * n01(rng);
     const auto sr = codes::polar_decoder(pol).decode(pl);
@@ -165,7 +165,7 @@ int main() {
 
     check::current_step = "bitwise across pool sizes";
     const std::string name = "w48-qpsk-r1/2";
-    const auto& spec = *codes::submode(name);
+    const auto& spec = *config::submode(name);
     arq::TxBurst burst{name, {}, 0};
     for (int i = 0; i < 16; ++i) {
         arq::Bytes p(static_cast<std::size_t>(spec.payload_bytes));

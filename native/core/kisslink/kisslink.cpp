@@ -6,7 +6,6 @@
 
 #include "arq/frames.hpp"
 #include "codes/codes.hpp"
-#include "tnc/tnc.hpp"
 
 namespace data2g::kisslink {
 
@@ -172,11 +171,11 @@ ControlRead read_control(const std::map<int, Bytes>& tlvs) {
 
 KissLink::KissLink(int cap_, std::string broadcast_, arq::Clock clock_)
     : cap(cap_), clock(std::move(clock_)), broadcast(broadcast_.empty() ? std::string(broadcast_mode(cap_)) : broadcast_) {
-    check_mode(broadcast);
+    check_mode(broadcast, cap);
     ports.emplace(0, Port{std::string(PORT0_GROUP), broadcast, false, std::nullopt});
 }
 
-void KissLink::check_mode(const std::string& mode) const {
+void check_mode(const std::string& mode, int cap) {
     const arq::Mode* m = arq::mode(mode);
     const auto ok = arq::allowed(cap);
     if (!m || std::find(ok.begin(), ok.end(), m) == ok.end())
@@ -201,7 +200,7 @@ void KissLink::command(int cmd, ByteView payload) {
 void KissLink::check_fits(int n, const Port& p, const std::string& mode, bool shift) const {
     const arq::Mode& m = arq::mode_at(mode);
     const std::size_t need = 1 + group_tlv(n, p).size() + (shift ? 4 : 0);
-    if (need > static_cast<std::size_t>(std::min(4, arq::max_ctl(m)) * arq::ctl_payload_bytes(m)))
+    if (need > static_cast<std::size_t>(std::min(arq::MAX_CTL, arq::max_ctl(m)) * arq::ctl_payload_bytes(m)))
         throw std::invalid_argument("mode " + mode + ": a " + std::to_string(need) + "-byte control doesn't fit");
 }
 
@@ -225,10 +224,18 @@ void KissLink::close(int n) {
     drop_where(n, [n](const Queued& q) { return q.port == n; });
 }
 
+void KissLink::reset() {
+    std::vector<int> open;
+    for (const auto& [n, p] : ports)
+        if (n) open.push_back(n);
+    for (int n : open) close(n);
+    set_mode(0, broadcast);
+}
+
 void KissLink::set_mode(int n, const std::string& mode, bool shift) {
     auto it = ports.find(n);
     if (it == ports.end()) throw std::invalid_argument("port " + std::to_string(n) + " is not open");
-    check_mode(mode);
+    check_mode(mode, cap);
     check_fits(n, it->second, mode, shift);
     it->second.mode = mode;
     it->second.shift = shift;
@@ -307,7 +314,7 @@ std::pair<std::string, int> KissLink::route(const Port& port, ByteView frame) co
 // many fresh reports as fit.
 std::vector<Bytes> KissLink::control(const arq::Mode& m, int n, const Port& port, int sender) {
     const std::size_t pb = static_cast<std::size_t>(arq::ctl_payload_bytes(m));
-    const int n_max = std::min(4, arq::max_ctl(m));
+    const int n_max = std::min(arq::MAX_CTL, arq::max_ctl(m));
     Bytes body = group_tlv(n, port);
     if (port.shift) {
         const double now = clock();
@@ -336,6 +343,47 @@ std::vector<Bytes> KissLink::control(const arq::Mode& m, int n, const Port& port
         out.emplace_back(stream.begin() + static_cast<std::ptrdiff_t>(i * pb),
                          stream.begin() + static_cast<std::ptrdiff_t>((i + 1) * pb));
     return out;
+}
+
+std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb) {
+    Bytes stream;
+    for (const auto& f : frames) {
+        if (f.size() > 0xFFFF) throw std::invalid_argument("frame longer than 65535 bytes");  // struct.error in Python
+        stream.push_back(static_cast<std::uint8_t>(f.size() >> 8));
+        stream.push_back(static_cast<std::uint8_t>(f.size() & 0xFF));
+        stream.insert(stream.end(), f.begin(), f.end());
+    }
+    stream.resize((stream.size() + pb - 1) / pb * pb, 0);
+    std::vector<Bytes> out;
+    for (std::size_t i = 0; i < stream.size(); i += pb) out.emplace_back(stream.begin() + i, stream.begin() + i + pb);
+    return out;
+}
+
+std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok) {
+    Bytes stream;
+    std::vector<bool> good;
+    for (std::size_t i = 0; i < payloads.size(); ++i) {
+        stream.insert(stream.end(), payloads[i].begin(), payloads[i].end());
+        good.insert(good.end(), payloads[i].size(), ok.at(i));
+    }
+    const auto all_good = [&](std::size_t a, std::size_t b) {
+        return std::all_of(good.begin() + a, good.begin() + std::min(b, good.size()), [](bool g) { return g; });
+    };
+    std::vector<Bytes> out;
+    int lost = 0;
+    std::size_t pos = 0;
+    while (pos + 2 <= stream.size()) {
+        if (!all_good(pos, pos + 2)) {
+            ++lost;  // at least this one; the rest can not be found
+            break;
+        }
+        const std::size_t n = static_cast<std::size_t>(stream[pos]) << 8 | stream[pos + 1];
+        if (n == 0 || pos + 2 + n > stream.size()) break;
+        if (all_good(pos + 2, pos + 2 + n)) out.emplace_back(stream.begin() + pos + 2, stream.begin() + pos + 2 + n);
+        else ++lost;
+        pos += 2 + n;
+    }
+    return {out, lost};
 }
 
 arq::TxBurstPtr KissLink::next_burst() {
@@ -379,21 +427,15 @@ arq::TxBurstPtr KissLink::next_burst() {
             continue;
         }
         queue = std::move(rest);
-        Bytes stream;
-        for (const auto& q : taken) {
-            stream.push_back(static_cast<std::uint8_t>(q.frame.size() >> 8));
-            stream.push_back(static_cast<std::uint8_t>(q.frame.size() & 255));
-            stream.insert(stream.end(), q.frame.begin(), q.frame.end());
-        }
-        stream.resize(stream.size() + (pb - stream.size() % pb) % pb, 0);
+        std::vector<Bytes> frames;
+        for (auto& q : taken) frames.push_back(std::move(q.frame));
+        auto data = pack_frames(frames, pb);
         const int key = port.key();
         auto b = std::make_shared<arq::TxBurst>();
         b->submode = mode;
         for (std::size_t i = 0; i < ctl.size(); ++i) b->slots.push_back({arq::ctl_mask(0, static_cast<int>(i), key), 0, ctl[i]});
-        for (std::size_t j = 0; j * pb < stream.size(); ++j)
-            b->slots.push_back({arq::data_mask(0, static_cast<std::int64_t>(ctl.size() + j), key), 0,
-                                Bytes(stream.begin() + static_cast<std::ptrdiff_t>(j * pb),
-                                      stream.begin() + static_cast<std::ptrdiff_t>((j + 1) * pb))});
+        for (std::size_t j = 0; j < data.size(); ++j)
+            b->slots.push_back({arq::data_mask(0, static_cast<std::int64_t>(ctl.size() + j), key), 0, std::move(data[j])});
         b->burst_seq = ++n_sent;
         b->cap = cap;
         inflight_ = b;
@@ -440,6 +482,19 @@ std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::Mo
     return std::nullopt;
 }
 
+std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_frames(arq::ModemRx& rx, int start, int key) {
+    const auto pb = static_cast<std::size_t>(arq::payload_bytes(arq::mode_at(rx.submode())));
+    std::vector<Bytes> payloads;
+    std::vector<bool> ok;
+    for (int i = start; i < rx.n_cw(); ++i) {
+        auto p = rx.decode_plain(i, arq::data_mask(0, i, key));
+        ok.push_back(p.has_value());
+        payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
+    }
+    auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : unpack_frames(payloads, ok);
+    return {std::move(frames), std::move(ok), lost};
+}
+
 std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::Heard& r,
                                                                      std::shared_ptr<const arq::SlotSoft> soft,
                                                                      std::optional<double> dd_budget) {
@@ -450,18 +505,6 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
 std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::Heard& r, arq::ModemRx& rx) {
     const int n = rx.n_cw();
     const double now = clock();
-    const std::size_t pb = static_cast<std::size_t>(arq::payload_bytes(r.mode()));
-    auto data = [&](int start, int key) {  // data slots from `start` under `key` -> (frames, per-slot ok, frames lost)
-        std::vector<Bytes> payloads;
-        std::vector<bool> ok;
-        for (int i = start; i < n; ++i) {
-            auto p = rx.decode_plain(i, arq::data_mask(0, i, key));
-            ok.push_back(p.has_value());
-            payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
-        }
-        auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : tnc::unpack(payloads, ok);
-        return std::tuple{std::move(frames), std::move(ok), lost};
-    };
     auto ports_where = [&](auto pred) {
         std::vector<int> out;
         for (const auto& [i, p] : ports)
@@ -471,7 +514,7 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
     std::vector<std::pair<int, Bytes>> out;
     if (auto ctl = read_burst_control(rx, n)) {
         auto& [c, n_ctl] = *ctl;
-        auto [frames, ok, lost] = data(n_ctl, group_key(c.group));
+        auto [frames, ok, lost] = read_burst_frames(rx, n_ctl, group_key(c.group));
         const auto mine = ports_where([&](const Port& p) { return p.group == c.group; });
         if (c.reports && std::any_of(mine.begin(), mine.end(), [&](int i) { return ports.at(i).shift; }))
             learn(*c.reports, frames, r, ok, now);
@@ -494,7 +537,7 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
             break;
         }
     if (!key) return std::nullopt;
-    auto [frames, ok, lost] = data(1, *key);
+    auto [frames, ok, lost] = read_burst_frames(rx, 1, *key);
     const auto mine = ports_where([&](const Port& p) { return p.key() == *key; });
     std::set<std::string> groups;
     for (int i : mine) groups.insert(ports.at(i).group);

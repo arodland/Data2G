@@ -5,9 +5,9 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
-#include "codes/codes.hpp"
-#include "tables/tables.hpp"
+#include "tables/polar_ga.hpp"
 #include "util/pool.hpp"
 
 // Built with -O3 under GCC (native/CMakeLists.txt): at -O2 its very-cheap
@@ -181,11 +181,6 @@ Mat<std::uint8_t> PolarCode::encode(const Mat<std::uint8_t>& bits) const {
         for (int j = 0; j < e; ++j) out[b][j] = u[sent[j]];
     }
     return out;
-}
-
-PolarCode polar_code(const config::Submode& spec) {
-    if (spec.code != "polar") throw std::invalid_argument(std::string(spec.name) + " is not a polar submode");
-    return PolarCode(spec.k, spec.coded_bits, codes::info_pos(spec));
 }
 
 std::span<const std::uint16_t> ga_info_pos(int k, int e) {

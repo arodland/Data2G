@@ -1,6 +1,6 @@
 """Single-carrier constant-envelope modes (continuous-phase M-FSK,
 noncoherent) with Costas-array sync and a header: the ARQ's bottom rungs.
-Prototyped in the cpm-modes fork (scripts/cpm_study.py, cpm_spectrum.py):
+Prototyped in the cpm-modes fork (its scripts/cpm_study.py, cpm_spectrum.py):
 4-7 dB better than OFDM of similar rate on fading, PEP-fair, 10% points.
 
 Signal: M tones spaced by the symbol rate R (h = 1), continuous phase, the
@@ -22,6 +22,11 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
   burst's length, so the receiver finds them before it knows the length;
 - header (twice, after the first two blocks): 16 bits as OFDM's: index =
   mode index + 2 x duplicated, n field = data codewords + 1, CRC-6.
+
+Native: native/core/cpm (grids and specs compiled in, tables::CPM_*).
+Parity: tests/test_native_cpm.py; under `pytest --native`
+tests/native_subs/cpm.py substitutes by name, private _energies, _shares
+and _peak_ratio included.
 """
 
 from dataclasses import dataclass, field
@@ -121,7 +126,8 @@ def tx_filter(grid: str, cap: int) -> TxFilter:
 @dataclass(frozen=True)
 class CpmSpec:
     """A CPM mode (or a grid's control codeword), shaped like
-    config.SubmodeSpec where data2g.codes and the ARQ read it."""
+    config.SubmodeSpec where data2g.codes (codes.CodeSpec) and the ARQ
+    read it."""
     name: str
     grid: str
     index: int  # in its grid's header (-1: the control codeword)
@@ -240,10 +246,10 @@ def hdr_len(g: Grid) -> int:
 def header_word(index: int, n_data: int, dup: bool) -> int:
     """16 bits as the OFDM header's: index (4) | n field (6) | CRC-6; index
     = mode index + 2 x duplicated control, n field = data codewords + 1."""
-    from .modem import _crc6
+    from .modem import crc6
 
     v = ((index + 2 * dup) << 6) | n_data
-    return (v << 6) | _crc6(v)
+    return (v << 6) | crc6(v)
 
 
 @lru_cache(maxsize=None)
@@ -490,11 +496,11 @@ def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int
 
 
 def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
-    """The gear shifter's inputs, as arq.phy.measure gives them for OFDM:
-    per-symbol SNR from the winning tone's energy over the noise bins,
-    effective MI per constellation over it, SNR in the 2500 Hz reference,
-    and a fading-rate proxy for spread (symbol energies' decorrelation)."""
-    from .arq import predictor as P
+    """The gear shifter's measurements, as arq.phy.measure gives them for
+    OFDM: SNR in the 2500 Hz reference, a fading-rate proxy for spread
+    (symbol energies' decorrelation), and `snr`, per symbol, from the
+    winning tone's energy over the noise bins (phy.measure makes the
+    effective-MI features of it). Native cpm::measure."""
     from .config import FRAME_SAMPLES, SNR_REF_BW_HZ
 
     top = E.max(axis=1)
@@ -503,11 +509,8 @@ def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
     es = max(float(np.mean(top) - n0), 1e-12)
     rho = np.corrcoef(top[:-1], top[1:])[0, 1] if len(top) > 3 and np.std(top) > 0 else 1.0
     spread = float(np.clip(np.sqrt(max(-np.log(max(rho, 1e-3)), 0)) * g.rate / np.pi, 0.0, 3.0))
-    out = dict(snr_est=10 * np.log10(es / n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread, delay_est_ms=0.0,
-               headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES))
-    for c in P.CONSTS:
-        out[f"mi_{c}"] = P.effective_mi(np.sqrt(snr), np.ones_like(snr), c)
-    return out
+    return dict(snr_est=10 * np.log10(es / n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread, delay_est_ms=0.0,
+                headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
 
 
 def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float) -> float:

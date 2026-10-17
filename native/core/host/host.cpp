@@ -4,15 +4,17 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <iterator>
 #include <stdexcept>
 
 #include "arq/modes.hpp"
-#include "tables/tables.hpp"
+#include "tables/cpm.hpp"
 
 namespace data2g::host {
 
 namespace {
 
+using arq::bw_name;  // host.py: BW_NAME[cap], a KeyError otherwise
 using arq::SessionState;
 
 constexpr const char* LOG = "data2g.host";
@@ -21,11 +23,6 @@ constexpr int INFO = 20;
 // ponytail: from memory of VARA clients, not a checked list (as host.py); check the log on first contact with Pat
 constexpr std::array<std::string_view, 8> IGNORED = {"COMPRESSION", "PUBLIC",     "CWID",       "P2P",
                                                      "WINLINK",     "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"};
-
-std::string bw_name(int cap) {
-    static const std::array<const char*, 3> names = {"500", "1200", "2300"};
-    return names.at(static_cast<std::size_t>(cap));  // host.py: BW_NAME[cap], a KeyError otherwise
-}
 
 std::string upper(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -97,9 +94,7 @@ std::optional<Addr> parse_addr(std::string_view s, std::string_view default_host
 }
 
 Host::Host(arq::Engine& e, std::optional<int> credit) : engine(e), buffer_credit(credit) {
-    auto f = [this](const std::string& caller, const std::string& callee) { return accept_connect(caller, callee); };
-    engine.accept_connect = f;
-    engine.session().accept_connect = f;
+    engine.set_accept_connect([this](const std::string& caller, const std::string& callee) { return accept_connect(caller, callee); });
 }
 
 bool Host::accept_connect(const std::string& caller, const std::string& callee) {
@@ -183,7 +178,7 @@ void Host::command(std::string_view line, std::string_view peer) {
             ok = false;
         }
     } else if (cmd == "DISCONNECT") {
-        e.session().disconnect();
+        e.disconnect();
     } else if (cmd == "ABORT") {
         e.abort();
         out_cmd.emplace_back("DISCONNECTED");
@@ -221,18 +216,14 @@ void Host::client_gone() {
     auto& e = engine;
     arq::log_write(LOG, INFO, "command client gone");
     const auto s = e.session().state;
-    if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.session().disconnect();
+    if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
     listening = false;
     accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
     if (auto* link = e.kiss()) {  // its ports go, and port 0 back to its defaults
-        std::vector<int> open;
-        for (const auto& [n, p] : link->ports)
-            if (n) open.push_back(n);
-        for (int n : open) link->close(n);
-        link->set_mode(0, link->broadcast);
+        link->reset();
         bcast_ = false;
     }
 }
@@ -247,14 +238,8 @@ void Host::data_in(arq::ByteView data) {
 
 Host::Queued Host::queued() {
     const auto& s = engine.session();
-    Queued q;
-    q.unsent = q.unacked = static_cast<std::int64_t>(s.pending_write.size());
-    if (const auto& st = s.station) {
-        q.station = true;
-        q.unsent += st->new_available();
-        q.unacked += static_cast<std::int64_t>(st->tx.buf.size());  // from the first unacked codeword on
-    }
-    return q;
+    const auto [unsent, unacked] = s.queued_bytes();
+    return {unsent, unacked, static_cast<bool>(s.station)};
 }
 
 std::optional<std::int64_t> Host::next_capacity() {
@@ -288,14 +273,14 @@ void Host::after_step(bool ptt) {
     const auto got = e.session().read();
     out_data.insert(out_data.end(), got.begin(), got.end());
     if (auto* link = e.kiss()) {
-        if (bcast_) out_cmd.insert(out_cmd.end(), link->events.begin(), link->events.end());
-        link->events.clear();
+        auto events = link->take_events();
+        if (bcast_) out_cmd.insert(out_cmd.end(), std::make_move_iterator(events.begin()), std::make_move_iterator(events.end()));
     }
     if (ptt != ptt_) {
         ptt_ = ptt;
         if (announce_ptt) out_cmd.emplace_back(ptt ? "PTT ON" : "PTT OFF");
-        if (ptt && e.tx() && e.tx()->burst->submode != mode_) {
-            mode_ = e.tx()->burst->submode;
+        if (const auto* m = e.tx_submode(); ptt && m && *m != mode_) {
+            mode_ = *m;
             out_cmd.push_back("MODE " + *mode_);
         }
     }

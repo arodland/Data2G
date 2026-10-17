@@ -24,6 +24,7 @@
 #ifdef DATA2G_HAVE_AUDIO
 #include <QCoreApplication>
 
+#include "audio/audio.hpp"
 #include "audio/card.hpp"
 #endif
 
@@ -110,7 +111,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     const auto devs = audio::card::input_devices();
     if (list) {
-        for (std::size_t i = 0; i < devs.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devs[i].channels, devs[i].name.c_str());
+        audio::print_devices(devs);
         return 0;
     }
     if (rate <= 0 || rate % config::FS) {

@@ -1,6 +1,6 @@
 // Known answers and a Python-free run of two stations and two sessions
 // through a lossy fake channel. Parity with data2g/arq is
-// tests/test_native_arq.py's job.
+// tests/test_native_arq_link.py's job.
 
 #include <algorithm>
 #include <cstdint>

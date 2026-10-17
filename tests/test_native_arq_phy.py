@@ -11,7 +11,7 @@ passes than numpy within DD_BUDGET_S, so results may legitimately differ.
 import numpy as np
 import pytest
 
-import conftest
+import native_subs
 from data2g import codes, cpm, hfchannel, modem
 from data2g import kisslink as KL
 from data2g.arq import phy as PHY
@@ -30,7 +30,7 @@ BUF_TOL = 1e-4  # measurements (effective MI sums over float32-rounded tables)
 @pytest.fixture
 def pure(monkeypatch):
     """The Python modules as written, whether or not --native substituted them."""
-    for (module, attr), fn in conftest._originals.items():
+    for (module, attr), fn in native_subs.originals.items():
         monkeypatch.setattr(module, attr, fn)
 
 
@@ -199,10 +199,21 @@ def test_ax25(native, pure):
             assert native.kisslink.station_hash(want.sender) == KL.station_hash(want.sender)
 
 
+def test_data_framing(native, pure):
+    rng = np.random.default_rng(0)
+    for pb in (46, 9, 120):
+        frames = [bytes(rng.integers(0, 256, int(n), dtype=np.uint8)) for n in rng.integers(1, 90, 5)]
+        payloads = native.kisslink.pack_frames(frames, pb)
+        assert payloads == KL.pack_frames(frames, pb)
+        for _ in range(10):
+            ok = list(rng.random(len(payloads)) > 0.3)
+            assert tuple(native.kisslink.unpack_frames(payloads, ok)) == KL.unpack_frames(payloads, ok)
+
+
 def test_kiss_links_match(native, pure):
     """Two Python TNCs and two native ones exchange the same frames over the
     same channel: every burst and every frame heard is the same."""
-    from data2g.tnc import receive_any
+    from data2g.receiver import receive_any
 
     t = [0.0]
     clock = lambda: t[0]  # noqa: E731

@@ -268,14 +268,6 @@ private:
 
 }  // namespace
 
-std::string RigModel::label() const {
-    std::string out = manufacturer;
-    if (!out.empty() && !name.empty()) out += " ";
-    out += name;
-    if (!status.empty()) out += " (" + status + ")";
-    return out;
-}
-
 std::vector<RigModel> list_models() {
     load_backends_once();
     std::vector<RigModel> models;

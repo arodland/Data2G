@@ -33,7 +33,7 @@ from data2g import hfchannel
 from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES
 from data2g.config import FS
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import outcome_data as O  # noqa: E402

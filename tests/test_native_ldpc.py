@@ -77,8 +77,8 @@ def test_min_sum_bitwise(native, reference, spec):
     for i, (p, c) in enumerate(_pairs(native, reference, spec, whole=False)):
         llr = _llrs(p, rng)
         for alpha in [(0.8, np.linspace(0.6, 0.9, 40))[i % 2]]:  # one number, or one per iteration
-            want = reference(ldpc, "MinSumDecoder")(p).decode(llr, iters=40, alpha=alpha, posterior=True)
-            got = native.ldpc.MinSumDecoder(c).decode(llr, iters=40, alpha=alpha, posterior=True)
+            want = reference(ldpc, "Decoder")(p).decode(llr, iters=40, alpha=alpha, posterior=True)
+            got = native.ldpc.Decoder(c).decode(llr, iters=40, alpha=alpha, posterior=True)
             for g, w in zip(got, want):
                 assert g.dtype == w.dtype
                 np.testing.assert_array_equal(g, w)
@@ -108,8 +108,8 @@ def test_sum_product_matches_with_exact_phi(native, reference, spec, monkeypatch
     for p, c in _pairs(native, reference, spec, whole=False):
         llr = _llrs(p, rng)
         for rows in (llr, llr[:1]):  # B = 1: numpy sums each check pairwise
-            want = reference(ldpc, "MinSumDecoder")(p).decode(rows, iters=40, posterior=True)
-            got = native.ldpc.MinSumDecoder(c).decode(rows, iters=40, posterior=True)
+            want = reference(ldpc, "Decoder")(p).decode(rows, iters=40, posterior=True)
+            got = native.ldpc.Decoder(c).decode(rows, iters=40, posterior=True)
             for g, w in zip(got, want):
                 assert g.dtype == w.dtype
             np.testing.assert_array_equal(got[0], want[0])
@@ -123,8 +123,8 @@ def test_sum_product(native, reference, spec):
     agree = total = 0
     for p, c in _pairs(native, reference, spec, whole=False):
         llr = _llrs(p, rng)
-        out, ok, post = reference(ldpc, "MinSumDecoder")(p).decode(llr, iters=40, posterior=True)
-        c_out, c_ok, c_post = native.ldpc.MinSumDecoder(c).decode(llr, iters=40, posterior=True)
+        out, ok, post = reference(ldpc, "Decoder")(p).decode(llr, iters=40, posterior=True)
+        c_out, c_ok, c_post = native.ldpc.Decoder(c).decode(llr, iters=40, posterior=True)
         np.testing.assert_array_equal(c_ok, ok)
         np.testing.assert_array_equal(c_out[ok], out[ok])
         assert np.array_equal(np.sign(c_post[ok]), np.sign(post[ok]))
@@ -146,8 +146,8 @@ def test_default_iterations_and_early_stop(native, reference):
     llr = (8 * (1.0 - 2.0 * p.encode(rng.integers(0, 2, (3, spec.k))))).astype(np.float32)
     llr[1] = rng.normal(size=spec.coded_bits)
     for kw in ({}, {"iters": 1}, {"iters": 40}):
-        want = reference(ldpc, "MinSumDecoder")(p).decode(llr, posterior=True, **kw)
-        got = native.ldpc.MinSumDecoder(c).decode(llr, posterior=True, **kw)
+        want = reference(ldpc, "Decoder")(p).decode(llr, posterior=True, **kw)
+        got = native.ldpc.Decoder(c).decode(llr, posterior=True, **kw)
         np.testing.assert_array_equal(got[1], want[1])
         assert list(want[1]) == [True, False, True]
         np.testing.assert_array_equal(got[0][[0, 2]], want[0][[0, 2]])
@@ -159,11 +159,11 @@ def test_float64_input_and_clamp(native, reference):
     p, c = reference(ldpc, "qc_code")(spec.k, spec.coded_bits), native.ldpc.qc_code(spec.k, spec.coded_bits)
     llr = 100 * (1.0 - 2.0 * p.encode(np.zeros((1, spec.k), int)))
     llr[0, :50] = -1e-3
-    want = reference(ldpc, "MinSumDecoder")(p).decode(llr, iters=40, posterior=True)
-    got = native.ldpc.MinSumDecoder(c).decode(llr, iters=40, posterior=True)
+    want = reference(ldpc, "Decoder")(p).decode(llr, iters=40, posterior=True)
+    got = native.ldpc.Decoder(c).decode(llr, iters=40, posterior=True)
     np.testing.assert_array_equal(got[1], want[1])
     np.testing.assert_array_equal(got[0], want[0])
-    assert native.ldpc.CH_CLAMP == ldpc.CH_CLAMP and native.ldpc.BIG == reference(ldpc, "MinSumDecoder").BIG
+    assert native.ldpc.CH_CLAMP == ldpc.CH_CLAMP and native.ldpc.BIG == reference(ldpc, "Decoder").BIG
 
 
 def test_missing_shift_table(native):
@@ -182,6 +182,6 @@ def test_codes_level_round_trip(native, reference):
     extent = _extents(spec)[1]
     m = c.mother(extent)
     llr = (6 * (1.0 - 2.0 * m.encode(bits))).astype(np.float32)
-    out, ok = native.ldpc.MinSumDecoder(m).decode(llr, iters=40)
+    out, ok = native.ldpc.Decoder(m).decode(llr, iters=40)
     assert ok.all() and np.array_equal(out, bits)
     assert codes.buffer_len(spec) == c.mother().n

@@ -5,7 +5,7 @@ punctured quasi-uniformly (the first N - E positions in bit-reversed
 order), and the punctured bits reach the decoder as LLR 0. The frozen
 set is whatever `design` says: here Gaussian-approximation density
 evolution at a design SNR with the punctured bits carrying nothing, a
-starting point for the genetic search in scripts/design_polar.py.
+starting point for a per-submode genetic search (planned; no script yet).
 
 u (N bits, frozen = 0, info in the rest in increasing index) -> x = u G,
 G = F^(kron n), F = [[1, 0], [1, 1]], natural order. G is its own
@@ -13,6 +13,10 @@ inverse over GF(2), so a decoder's re-encoded x gives u back.
 
 Decoder: successive-cancellation list, batched in numpy, with the CRC
 picking among the survivors (CA-SCL).
+
+Native: native/core/polar. Parity: tests/test_native_polar.py; under
+`pytest --native` codes.polar_code and codes._decoder hand out the C++
+code and decoder (tests/native_subs/base.py).
 """
 
 from dataclasses import dataclass
@@ -43,6 +47,8 @@ def bitrev(n_bits: int) -> np.ndarray:
 
 
 def _phi(m):
+    # Chung, Richardson and Urbanke's approximation of the Gaussian
+    # approximation's phi (IEEE Trans. IT 47(2), 2001): published constants
     m = np.maximum(m, 1e-12)
     return np.where(m < 10, np.exp(-0.4527 * m**0.86 + 0.0218), np.sqrt(np.pi / m) * np.exp(-m / 4) * (1 - 10 / (7 * m)))
 

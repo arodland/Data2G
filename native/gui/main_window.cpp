@@ -15,7 +15,7 @@
 #include <QVBoxLayout>
 
 #include "arq/modes.hpp"
-#include "arq/policy.hpp"
+#include "arq/session.hpp"
 #include "audio/card.hpp"
 #include "monitor/monitor.hpp"
 #include "settings_dialog.hpp"
@@ -31,13 +31,16 @@ constexpr int MAX_LOG_ROWS = 500;
 QString qs(const std::string& s) { return QString::fromStdString(s); }
 
 QString link_text(const app::LinkStatus& l) {
-    static const char* caps[] = {"500", "1200", "2300"};
+    using arq::SessionState;
     const QString peer = qs(l.peer);
-    if (l.state == "listen") return QObject::tr("listening");
-    if (l.state == "connecting") return QObject::tr("connecting to %1").arg(peer);
-    if (l.state == "connected") return QObject::tr("connected to %1 (BW%2)").arg(peer, caps[std::clamp(l.cap, 0, 2)]);
-    if (l.state == "disconnecting") return QObject::tr("disconnecting from %1").arg(peer);
-    return qs(l.state);  // idle, closed
+    switch (l.state) {
+        case SessionState::LISTEN: return QObject::tr("listening");
+        case SessionState::CONNECTING: return QObject::tr("connecting to %1").arg(peer);
+        case SessionState::CONNECTED:
+            return QObject::tr("connected to %1 (BW%2)").arg(peer, qs(arq::bw_name(std::clamp(l.cap, 0, 2))));
+        case SessionState::DISCONNECTING: return QObject::tr("disconnecting from %1").arg(peer);
+        default: return QString::fromLatin1(arq::state_name(l.state));  // idle, closed
+    }
 }
 
 QString bytes_text(std::int64_t n) {

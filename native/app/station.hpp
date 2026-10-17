@@ -8,9 +8,10 @@
 //   start(), stop() and every poll below;
 // - engine (the receive thread): reads the capture FIFO a block (0.1 s) at a
 //   time and steps the Engine; it never touches the transmitter;
-// - transmit: keys PTT (rig::Keyer), plays each burst the engine hands over
-//   on the sound card's own clock and releases PTT, so nothing the receive
-//   side computes, or the rig's slow answers, can leave a hole in a burst;
+// - transmit (app/transmitter.hpp): keys PTT (rig::Keyer), plays each burst
+//   the engine hands over on the sound card's own clock and releases PTT, so
+//   nothing the receive side computes, or the rig's slow answers, can leave
+//   a hole in a burst;
 // - decode worker (decode_worker, the default): the engine's session stage,
 //   so a burst's decode and DD don't delay search and BUSY;
 // - capture and playback (Qt Multimedia QThreads, or PipeIo's two);
@@ -23,6 +24,12 @@
 //
 // QtCore and QtNetwork only: no Widgets, no desktop assumptions (a mobile
 // front end could own one too).
+//
+// The rest of data2g_station, each its own file: app/options.hpp (the
+// command line and settings, Args), app/log.hpp (the log and the quit
+// signals), app/tcp_servers.hpp (the command, data and KISS listeners),
+// app/rx_plot.hpp (constellation-plot points), app/transmitter.hpp (the
+// transmit thread), app/realtime.hpp.
 #pragma once
 
 #include <QObject>
@@ -30,8 +37,6 @@ class QTcpSocket;
 
 #include <atomic>
 #include <chrono>
-#include <complex>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -39,19 +44,19 @@ class QTcpSocket;
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <thread>
 #include <vector>
 #include <cstddef>
 #include <span>
 
-#include "rig/hamlib/hamlib.hpp"  // types only: no libhamlib needed
+#include "app/log.hpp"
+#include "app/options.hpp"
+#include "app/rx_plot.hpp"
 
 namespace data2g {
 namespace arq {
 class Engine;
-struct BurstHeard;
-struct BurstPreview;
+enum class SessionState;  // arq/session.hpp
 }
 namespace audio {
 class CaptureFifo;
@@ -69,99 +74,14 @@ struct Dump;
 }
 namespace rig {
 class RigController;
-class Keyer;
 }  // namespace rig
 }  // namespace data2g
 
 namespace data2g::app {
 
-// --- logging: Python's basicConfig(format="%(asctime)s %(levelname)s %(message)s") ---
-
-enum Level { DEBUG = 10, INFO = 20, WARNING = 30, ERROR = 40, CRITICAL = 50 };
-extern std::atomic<int> g_level;
-void log_line(int level, const std::string& msg);
-[[gnu::format(printf, 2, 3)]] void logf(int level, const char* fmt, ...);
-// --log-level's value -> a level; nullopt: not one.
-std::optional<int> parse_level(const std::string& s);
-// Routes the arq log (sessions, engine) through log_line at g_level.
-void install_arq_log();
-// SIGINT, SIGTERM and SIGHUP (a closed terminal) set quit_requested() instead of ending the process, so the exit
-// path runs and the rig is unkeyed. SIGPIPE is ignored: a pipe or socket whose reader went is an error, not death.
-void quit_on_signals();
-bool quit_requested();
-
-// --- the options: host.py main()'s argparse ---------------------------------------------
-
-std::string default_record_dir();  // recordings/YYYYmmdd-HHMMSS
-
-struct Args {
-    int kiss_port = 8100;
-    std::string kiss_address = "127.0.0.1";
-    double kiss_busy_limit = 60.0;
-    int kiss_bw = 2400;
-    std::optional<std::string> broadcast_mode, mycall, input_device, output_device;
-    std::string host = "127.0.0.1";
-    int command_port = 8300;
-    bool list_audio_devices = false, list_modes = false;
-    int sample_rate = 48000;
-    double output_volume = 0.0;
-    std::string rigctld_host = "localhost";
-    int rigctld_port = 4532;
-    // Hamlib (SSTVAE's rig settings). Model 2 with no rig_device is rigctld
-    // at rigctld_host:rigctld_port, so the two flags above work as before.
-    // Enumerated values in SSTVAE's lowercase spellings; "default": leave
-    // the backend's own. See rig_choices().
-    bool rig = true;  // false: no rig (so no PTT)
-    int rig_model = 2;
-    std::string rig_device;  // serial device or host:port; empty: model 2's rigctld, else Hamlib's
-    int rig_baud = 0;        // 0: the backend's
-    std::string rig_data_bits = "default", rig_stop_bits = "default", rig_parity = "default",
-                rig_handshake = "default", rig_dtr = "default", rig_rts = "default";
-    std::string ptt_method = "cat", ptt_device, ptt_audio = "mic";
-    std::string rig_mode = "none";
-    int rig_timeout_ms = 1000, rig_retries = 1;
-    double rig_poll_interval = 0.0;  // s; 0: key only (frequency not read)
-    bool rig_debug = false;          // Hamlib's trace into the log
-    bool list_rigs = false;
-    int ptt_on_delay_ms = 100, ptt_off_delay_ms = 50, tx_lead_ms = 100;
-    double min_header_score = 0.0;
-    int buffer_credit = -1;
-    std::string record_dir = default_record_dir();
-    std::string log_level = "INFO";
-    double stats_interval = 60.0;
-    double noise_rule = 1.0;  // the gear shifter's noise rule, its tail weight; 0: off
-    double dd_budget = 1.0;   // seconds of decision-directed decoding per burst (arq::DD_BUDGET_S); 0: none
-    // additions
-    bool decode_worker = true;
-    int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)
-    bool realtime = true;  // real-time scheduling for the audio and transmit threads, where available
-    bool live_constellation = true;  // fill the constellation plot in as a burst arrives, once a front end polls it
-    std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
-
-    bool operator==(const Args&) const = default;
-};
-
-// The command line over `a` (defaults, or what a front end saved). Exits as
-// argparse does on -h and on a bad flag. `prog` names the binary in errors.
-Args parse(int argc, char** argv, Args a = {}, const char* prog = "data2g-host");
-[[noreturn]] void usage_error(const std::string& msg, const char* prog = "data2g-host");
-// What main() checks once parsed; the message, or nullopt when fine.
-std::optional<std::string> check(const Args& a);
-int kiss_cap(int hz);
-// The rig settings' allowed values, by Args field name ("rig_parity", ...).
-const std::vector<std::string>& rig_choices(std::string_view field);
-// Whether `a` asks for a rig at all, and the device Hamlib is given.
-bool rig_enabled(const Args& a);
-std::string rig_device(const Args& a);
-// The one mapping from the options to Hamlib's (the GUI's test buttons use it
-// too). `a` must have passed check().
-rig::HamlibConfig hamlib_config(const Args& a);
-// --list-rigs: Hamlib's models (number, manufacturer, model, status). False
-// when built without Hamlib.
-bool list_rigs();
-void list_modes(int kiss_bw);
-
-// --- the runtime -------------------------------------------------------------------------
+class Port;
+class KissServer;
+class Transmitter;
 
 // Bad options found only at start() (argparse would have exited with 2).
 struct UsageError : std::runtime_error {
@@ -170,9 +90,9 @@ struct UsageError : std::runtime_error {
 
 // The link as the session stage last saw it (after every block).
 struct LinkStatus {
-    std::string state = "idle";  // arq::state_name: idle, listen, connecting, connected, disconnecting, closed
+    arq::SessionState state{};  // IDLE
     std::string peer;
-    int cap = 2;                    // 0: 500 Hz, 1: 1200, 2: 2300
+    int cap = 2;                    // arq::bw_name(cap): 500, 1200, 2300
     std::string mode;               // the last burst's submode, heard or sent
     std::int64_t rx_bytes = 0, tx_bytes = 0;  // this connection's, delivered / acked
 };
@@ -185,27 +105,6 @@ struct BurstLogEntry {
     std::optional<double> snr_db;
     int decoded = 0, failed = 0;  // slots (Engine::set_on_decoded)
 };
-
-// The newest burst's data symbols, for a constellation plot. OFDM: equalized
-// IQ. CPM (tones): each symbol's 1 - the runner-up tone's share + i * the
-// strongest's, so a clean one is 1 + 1i and a weaker one falls below the diagonal.
-// live: the burst is still arriving (--live-constellation), OFDM frames
-// equalized one at a time (modem::preview_frame); lost: it ended undecoded,
-// the live view all there is.
-struct RxConstellation {
-    std::string mode;
-    bool tones = false, live = false, lost = false;
-    std::vector<std::complex<float>> symbols;  // at most MAX_SYMBOLS, spread over the burst
-    std::vector<std::complex<float>> points;   // the ideal: the mode's constellation, or 1 + 0i
-    static constexpr std::size_t MAX_SYMBOLS = 4000;
-};
-// A heard burst's plot; nullopt when it was lost.
-std::optional<RxConstellation> rx_constellation(const arq::BurstHeard& b);
-RxConstellation rx_constellation(const arq::BurstPreview& p);  // live
-// Any symbol inside the plot's square? A broken channel estimate puts
-// every one far outside (recordings/20261013-234857 burst 0: a 10.7 ms
-// gap mid-burst, |eq| ~3e7), a NaN nowhere: then the live view stays.
-bool plot_visible(const RxConstellation& c);
 
 struct AudioCounters {
     std::uint64_t overflows = 0, underruns = 0, late = 0, dropped = 0;
@@ -237,7 +136,7 @@ public:
     std::vector<BurstLogEntry> take_bursts();  // since the last call (the newest 256 kept)
     // The newest since the last call. The first call starts the live view (--live-constellation).
     std::optional<RxConstellation> take_constellation();
-    bool ptt() const { return ptt_; }
+    bool ptt() const;  // the rig keyed (or, with no rig, would be)
     bool busy() const;  // the host's BUSY
     AudioCounters counters() const;
     // The newest `n` samples (FS) the engine read, and how many it has read
@@ -253,8 +152,6 @@ public:
 
 private:
     struct Outbox;
-    struct Port;
-    struct KissServer;
     struct SoundCard;
     struct MonitorThread;
     struct Dial;
@@ -262,16 +159,14 @@ private:
     void flush(std::uint64_t asker = 0);
     void note_link();
     void log_burst();  // reading_ into bursts_; status_mu_ held
-    void announce_ptt(bool on);
     // owner's thread
     void deliver(const Outbox& o);
     void dial(const std::string& host, int port, unsigned gen, std::shared_ptr<Dial> d);  // ACCEPT's connection
     void hang_up();
-    // engine thread
+    // transmit thread (Transmitter's on_ptt)
+    void announce_ptt(bool on);
+    // engine (receive) thread
     void engine_loop();
-    void tx_loop();
-    void tx_submit(std::shared_ptr<const std::vector<double>> burst);
-    void tx_abort();
     void watch_counters();
     void tap(std::span<const double> x, bool tx);
 
@@ -291,22 +186,12 @@ private:
     std::unique_ptr<audio::PipeIo> pipe_;
     std::unique_ptr<SoundCard> card_;
     std::unique_ptr<rig::RigController> rig_;
-    std::unique_ptr<rig::Keyer> keyer_;
     std::unique_ptr<MonitorThread> monitor_;  // made in start(), before the engine runs
     std::atomic<bool> monitor_on_{false};
-    std::thread engine_thread_, tx_thread_;
-    std::atomic<bool> stop_{false}, failed_{false}, ptt_{false};
-    // transmit: bursts handed over by the engine thread, played in order by tx_thread_
-    struct TxJob {
-        std::shared_ptr<const std::vector<double>> audio;
-        unsigned generation;  // an abort moves the generation on: older jobs are dropped, a playing one stops
-    };
-    std::mutex tx_mu_;
-    std::condition_variable tx_cv_;
-    std::deque<TxJob> tx_q_;
-    std::atomic<unsigned> tx_generation_{0};
+    std::unique_ptr<Transmitter> tx_;  // made last in start(), its thread with it; the engine thread submits to it
+    std::thread engine_thread_;
+    std::atomic<bool> stop_{false}, failed_{false};
     std::atomic<bool> rt_warned_{false};
-    std::atomic<bool> tx_stop_{false}, tx_active_{false};  // tx_active_: from keying until our audio has drained (not the PTT off); the receive side mutes
     bool running_ = false;
     std::uint64_t overflows_ = 0, underruns_ = 0, late_ = 0, dropped_ = 0;  // engine thread
 

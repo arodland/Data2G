@@ -4,7 +4,7 @@ seeds give the same session. Every command reply, notification and data
 byte, step by step, must be identical. Skips if the module isn't built;
 `pytest --native` errors instead."""
 
-import conftest
+import native_subs
 import numpy as np
 import pytest
 
@@ -17,8 +17,8 @@ from test_engine import BLOCK, link
 
 @pytest.fixture
 def classes(native, reference):
-    engine = conftest._engine_substitutions(native)[(E, "Engine")]
-    return engine, {"python": reference(host, "Host"), "cpp": conftest._host_substitutions(native)[(host, "Host")]}
+    engine = native_subs.PROVIDERS["engine"](native)[(E, "Engine")]
+    return engine, {"python": reference(host, "Host"), "cpp": native_subs.PROVIDERS["host"](native)[(host, "Host")]}
 
 
 def transcript(Engine, Host, credit=None):

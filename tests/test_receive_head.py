@@ -9,7 +9,7 @@ from data2g import modem
 from data2g.arq import link as L
 from data2g.arq import phy as PHY
 from data2g.arq.engine import MAX_BURST_S
-from data2g.config import LEADIN_SAMPLES, NSYM
+from data2g.config import LEADIN_SAMPLES
 
 
 def test_weak_header_at_the_burst_end_is_received():
@@ -19,7 +19,7 @@ def test_weak_header_at_the_burst_end_is_received():
     window's end. The live receiver lost it ("a header is still arriving");
     its three control codewords decode (session key 4818, the callee's)."""
     seg = np.load(Path(__file__).parent / "data" / "ag7ew_ack4f.npz")["audio"].astype(np.float64)
-    head = LEADIN_SAMPLES + modem.head_samples("w") + NSYM + 3 * modem.M
+    head = LEADIN_SAMPLES + modem.receive_head("w")
     r = modem.receive(seg, ["w"], modem.Accept.of(None, MAX_BURST_S, 0.0), head=min(head, len(seg)))
     assert r["spec"].name == "ack-4f" and r["n_cw"] == 3 and r["score"] < modem.STREAM_COMMIT_SCORE
     rx = PHY.ModemRx(r, {}, None)

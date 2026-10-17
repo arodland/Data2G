@@ -44,6 +44,16 @@ simulated end-to-end QSOs to prove their value.
 * [Pat](https://github.com/la5nta/pat) by LA5NTA: The Pat Winlink client can send and receive email using Data2G if you configure it as VARA HF. There are (as of this writing) no RMS servers running Data2G, but P2P works fine.
 * [VarAC](https://www.varac-hamradio.com/) by 4Z1AC: Has a few glitches, and is full of VARA-specific opinions about operating procedures and frequencies. Consider using Glissando instead. But if you configure it to avoid stepping on actual VARA users, it's possible to use all of VarAC's features with Data2G.
 
+## Developing
+
+`data2g/` is the Python reference implementation, which defines the on-air format; `native/` is the C++/Qt port that ships as `data2g-host` and `data2g-gui`, tested against the Python. Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): the TX and RX pipelines, the module map on both sides, how the parity tests work, and where to start for each kind of change. [docs/README.md](docs/README.md) indexes the protocol specs.
+
+```
+uv sync --extra dev
+uv run pytest tests -q                # the Python reference
+tools/build_native.sh --test          # build native/, then ctest and pytest --native
+```
+
 ## Discuss
 
 Join the [Digital Oddballs Radio Club Discord](https://discord.gg/JJgNszRMce).

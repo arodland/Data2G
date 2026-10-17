@@ -51,7 +51,7 @@ void bind_equalizer(py::module_& m) {
         const auto b = eq::support_basis(vec(bb), d0, d1);
         return py::make_tuple(np(b->u), b->r, b->r_full, np(b->keep));
     });
-    e.def("_freq_smooth", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb) {
+    e.def("freq_smooth", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb) {
         auto r = eq::freq_smooth(mat(h), s, bb_of(bb));
         return py::make_tuple(np(r.hs), r.n0, r.r, np(r.keep));
     }, py::arg("h_pilot"), py::arg("support"), no_bb);

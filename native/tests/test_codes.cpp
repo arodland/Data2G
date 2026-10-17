@@ -39,19 +39,21 @@ int main() {
     check::equal(codes::scramble_seed(codes::PLAIN), 0, "PLAIN seed");
 
     for (const auto& s : config::SUBMODES) {
-        auto perm = codes::interleaver(s);
+        const auto perm = codes::spec(s).perm, info_pos = codes::spec(s).info_pos;
         std::vector<int> sorted(perm.begin(), perm.end());
         std::ranges::sort(sorted);
         bool ok = static_cast<int>(sorted.size()) == s.coded_bits;
         for (int i = 0; ok && i < s.coded_bits; ++i) ok = sorted[i] == i;
         check::is_true(ok, std::string(s.name) + " interleaver is a permutation of coded_bits");
-        check::equal(codes::info_pos(s).empty(), s.code != "polar", std::string(s.name) + " info set iff polar");
-        if (s.code == "polar") check::equal(static_cast<int>(codes::info_pos(s).size()), s.k, std::string(s.name) + " info set size");
+        check::equal(info_pos.empty(), s.code != "polar", std::string(s.name) + " info set iff polar");
+        if (s.code == "polar") check::equal(static_cast<int>(info_pos.size()), s.k, std::string(s.name) + " info set size");
     }
-    check::is_true(codes::submode("w48-256l-r5/8") != nullptr && codes::submode("nope") == nullptr, "submode lookup");
+    check::is_true(config::submode("w48-256l-r5/8") != nullptr && config::submode("nope") == nullptr, "submode lookup");
 
     // The codec: every spec round-trips noise-free, through each decode path.
     check::is_true(codes::spec("fsk16r25-ctl") && codes::spec("fsk8r50-r1/2") && !codes::spec("nope"), "spec lookup");
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+        for (const auto& c : table) check::is_true(codes::spec(c).name == c.name, std::string(c.name) + " spec by row");
     std::vector<const codes::Spec*> all;
     for (const auto& s : config::SUBMODES) all.push_back(&codes::spec(s));
     for (auto name : {"fsk16r25-r1/3", "fsk8r50-r1/2", "fsk32r62-ctl"}) all.push_back(codes::spec(name));

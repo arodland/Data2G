@@ -10,7 +10,7 @@
 #include <string>
 #include <tuple>
 
-#include "tables/tables.hpp"
+#include "tables/gamma_q99.hpp"
 #include "util/linalg.hpp"
 #include "util/cancel.hpp"
 #include "util/pool.hpp"
@@ -326,7 +326,7 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
             pk[static_cast<size_t>(c)] = pk[static_cast<size_t>(c)] / n_p / std::max(sm.keep[static_cast<size_t>(c)], 1e-3);
         e.n0_k = per_carrier_noise(pk, n_p);
     } else if (static_cast<int>(n0_pre_k.size()) == nc) {
-        e.n0_k = per_carrier_noise(n0_pre_k, 7);
+        e.n0_k = per_carrier_noise(n0_pre_k, PREAMBLE_DIFFS);
     }
     if (!std::isfinite(n0)) n0 = n0_pre;
     if (!std::isfinite(n0)) throw std::invalid_argument("no noise estimate: pass n0_pre on a band this narrow");

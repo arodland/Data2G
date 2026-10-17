@@ -1,6 +1,6 @@
 // The audio layer against a fake sound card: no device, no Qt. Parity of
 // Decimator / Interpolator / Blanker with the Python is in
-// tests/test_native_audio.py; this checks behaviour (host.py's Capture and
+// tests/test_native_audio.py; this checks behaviour (audio.py's Capture and
 // Player semantics) and thread safety (run it under TSan).
 
 #include <algorithm>
@@ -25,7 +25,7 @@
 #include "audio/filters.hpp"
 #include "check.hpp"
 #include "generated/config.hpp"
-#include "rig/ptt.hpp"
+#include "rig/keyer.hpp"
 
 using namespace data2g;
 using namespace std::chrono_literals;

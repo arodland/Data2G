@@ -18,8 +18,9 @@
 #include <utility>
 #include <vector>
 
+#include "arq/burst.hpp"
 #include "arq/frames.hpp"
-#include "arq/predictor.hpp"
+#include "arq/measured.hpp"
 
 namespace data2g::arq {
 
@@ -41,77 +42,12 @@ bool log_enabled(const char* logger, int level);
 void log_write(const char* logger, int level, const std::string& msg);
 std::string format(const char* fmt, ...);
 
-// (session key, direction, 7-bit seq or SEQ_MOD + control index)
-struct MaskId {
-    int key = 0, direction = 0, seq = 0;
-    bool operator==(const MaskId&) const = default;
-};
-
-inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
-inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // a compact CONNECT's mask (frames pack_connect); ctl_mask's i is 0-3
-inline constexpr int EPOCH_MOD = 64;  // abandon epochs in a data codeword's identity
-// comp: deflated (T_COMP); epoch: the sender's abandon epoch (its slicing).
-// Both folded into the direction byte, so a codeword decoded under the
-// wrong compression or slicing assumption fails its CRC.
-inline MaskId data_mask(int direction, std::int64_t seq, int key = 0, bool comp = false, int epoch = 0) {
-    return {key, direction | (comp ? 2 : 0) | static_cast<int>(pmod(epoch, EPOCH_MOD)) << 2,
-            static_cast<int>(pmod(seq, SEQ_MOD))};
-}
 // The absolute seq = s7 (mod SEQ_MOD) nearest anchor.
 inline std::int64_t unwrap(std::int64_t s7, std::int64_t anchor) {
     std::int64_t d = pmod(s7 - anchor, SEQ_MOD);
     if (d >= SEQ_MOD / 2) d -= SEQ_MOD;
     return anchor + d;
 }
-
-struct Slot {
-    MaskId mask_id;
-    int rv = 0;
-    Bytes payload;
-};
-
-struct TxBurst {
-    std::string submode;
-    std::vector<Slot> slots;
-    std::int64_t burst_seq = 0;  // absolute count of this station's bursts
-    int cap = 0;                 // bandwidth cap code the TX filter is for (cpm::tx_filter; policy CAP_HZ)
-};
-using TxBurstPtr = std::shared_ptr<const TxBurst>;
-
-bool dup_ctl(const TxBurst& b);  // its control sent twice (ARQ_DUP)
-
-// A soft-bit store key: data seq `seq` of direction `peer` (Python's
-// (peer, seq)), or control codeword `index` of this burst, combined as a
-// pair (Python's ("ctl", id(rx), index)).
-struct SoftKey {
-    bool ctl = false;
-    int peer = 0;
-    std::int64_t seq = 0;
-    int index = 0;
-    auto operator<=>(const SoftKey&) const = default;
-};
-
-// One decode() the caller is about to ask for.
-struct DecodeRequest {
-    int slot;
-    MaskId mask;
-    int rv;
-    SoftKey key;
-};
-
-class RxBurst {
-public:
-    virtual ~RxBurst() = default;
-    virtual const std::string& submode() const = 0;
-    virtual int n_cw() const = 0;
-    // Payload if slot decodes with this mask at this RV (combined with soft
-    // bits under key, which a failed decode adds to).
-    virtual std::optional<Bytes> decode(int slot, const MaskId& mask, int rv, const SoftKey* key) = 0;
-    virtual void forget(const SoftKey& key) = 0;
-    // The decode()s the caller is about to make, in this order, offered up front so an implementation can run
-    // their independent parts at once (a slow machine's idle cores). Optional, and the answers are the same.
-    virtual void prepare(std::span<const DecodeRequest>) {}
-};
 
 class Station;
 
@@ -120,15 +56,16 @@ struct Recommendation {
     std::optional<int> reply;
 };
 
-// link.Policy plus what Session needs. The optional Python methods have
-// defaults here; has_*() say whether the policy has them at all.
+// link.Policy: everything Station, Session and Engine ask of the mode
+// choice (GearPolicy on air), with the same defaults; has_*() say whether
+// a policy keeps the default (outcome: none; airtime: left out of the log).
 class Policy {
 public:
     virtual ~Policy() = default;
     virtual std::pair<std::string, int> choose(Station& st, int escalation) = 0;
     virtual int payload_bytes(const std::string& submode) = 0;
     virtual int ctl_payload_bytes(const std::string& submode) { return payload_bytes(submode); }
-    virtual int max_ctl(const std::string&) { return 4; }
+    virtual int max_ctl(const std::string&) { return MAX_CTL; }
     virtual std::optional<Recommendation> recommend(Station&) { return std::nullopt; }  // nullopt: none (0, 1, -)
     virtual bool want_dup() { return false; }
     virtual int rv_cycle(const std::string& submode) = 0;
@@ -181,6 +118,10 @@ public:
 
     void write(ByteView data);
     bool pending() const;
+    // stream bytes written but in no codeword yet
+    std::int64_t unsent() const { return buf_off + static_cast<std::int64_t>(buf.size()) - stream_end; }
+    // stream bytes the peer has not acked, sent or not (buf holds them from the first unacked codeword on)
+    std::int64_t unacked() const { return static_cast<std::int64_t>(buf.size()); }
     bool on_ack(std::int64_t cum, const std::set<std::int64_t>& received);
     Codeword& new_codeword(const std::string& submode, int pb, bool compress, std::int64_t bn);
     std::vector<std::int64_t> missing() const;
@@ -266,7 +207,12 @@ public:
     bool handle(RxBurst& rx);
     void answered() { answered_ = true; }
     std::optional<Bytes> ctl_pair(RxBurst& rx, int slot, int i);
-    std::int64_t new_available() const { return tx.buf_off + static_cast<std::int64_t>(tx.buf.size()) - tx.stream_end; }
+    std::int64_t new_available() const { return tx.unsent(); }  // bytes my next new codewords can take
+    // my latest burst carried data codewords and the peer has not acted on it yet
+    bool data_in_flight() const {
+        auto it = sent_seqs.find(latest);
+        return it != sent_seqs.end() && !it->second.empty();
+    }
 
 private:
     bool handle_inner(RxBurst& rx);

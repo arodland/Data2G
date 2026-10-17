@@ -1,5 +1,7 @@
 # Plan: ideas from modem73 and aicodix/modem
 
+> Historical; names may have moved. Items 1-3 landed (`audio.Blanker`, `KissLink.persist`, `KissLink.busy_limit_s`); the studies are `scripts/polar_list_study.py`, `erasure_retry_study.py`, `slm_study.py` and `slm_blind_study.py`. The worktree below is gone.
+
 Approved 2026-09-27: all six items below. Sources, both permissive
 (modem73: public domain; aicodix/modem: 0BSD):
 - https://github.com/RFnexus/modem73 (at 3a37c29)

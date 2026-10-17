@@ -1,3 +1,6 @@
+"""data2g.channel_torch (constellation training's channel) against the numpy
+modem it stands in for."""
+
 import numpy as np
 import pytest
 

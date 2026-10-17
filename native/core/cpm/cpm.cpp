@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <string>
 
 #include "dsp/dsp.hpp"
 #include "dsp/fft.hpp"
+#include "waveform/dsp.hpp"
 
 namespace data2g::cpm {
 
@@ -220,6 +222,18 @@ std::vector<double> tones(const Grid& g, std::span<const int> sym, double glide)
 const tables::CpmTxFilter& tx_filter(const Grid& g, int cap) {
     if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
     return g.tx[cap];
+}
+
+std::vector<double> overshoot(const tables::CpmTxFilter& f) {
+    std::vector<double> o(config::CLIP_OVERSHOOT.begin(), config::CLIP_OVERSHOOT.end());
+    o.resize(static_cast<std::size_t>(f.passes), config::CLIP_OVERSHOOT.back());
+    return o;
+}
+
+std::vector<double> bandpass(const Grid& g, std::span<const double> x, int cap) {
+    const auto& f = tx_filter(g, cap);
+    return waveform::tx_condition(x, g.clip_db, overshoot(f), 0, std::numeric_limits<std::size_t>::max(),
+                                  {g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp});
 }
 
 std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap) {

@@ -11,6 +11,9 @@
 
 (An MI-forecasting MLP, link_predictor.npz, was the shifter's fallback
 without the outcome model; it is gone, as the outcome model always ships.)
+
+Native: arq/predictor.hpp (the live path: features and the outcome
+model); the link abstraction is Python only.
 """
 
 import json
@@ -86,7 +89,8 @@ N_LINK = 4
 # not; dB, mean over them in power), how many, and 1; all 0 without any.
 N_ENERGY = 3
 
-NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))  # tnc.NoiseProfile.BANDS_HZ
+# receiver.NoiseProfile.BANDS_HZ (tests/test_noise_profile.py holds them equal; receiver can't import arq)
+NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))
 N_NOISE = 2 * len(NOISE_BANDS_HZ) + 2
 
 
@@ -105,7 +109,7 @@ def band_span_hz(band: str) -> tuple[float, float]:
 
 
 def noise_features(noise: dict | None, band: str) -> list[float]:
-    """The receiver's noise profile (tnc.NoiseProfile.snapshot()) as model
+    """The receiver's noise profile (receiver.NoiseProfile.snapshot()) as model
     inputs: each sub-band's median over the noise in the band `band`'s burst
     was measured in (power-weighted over the sub-bands it overlaps), each
     sub-band's p90/median, log10(1 + impulses per minute), and 1; all 0
@@ -113,9 +117,7 @@ def noise_features(noise: dict | None, band: str) -> list[float]:
     if not noise:
         return [0.0] * N_NOISE
     db = np.asarray(noise["noise_db"], dtype=np.float64)
-    lo, hi = band_span_hz(band)
-    w = np.array([max(0.0, min(hi, b) - max(lo, a)) for a, b in NOISE_BANDS_HZ])
-    ref = 10 * np.log10(np.sum(w * 10 ** (db / 10)) / np.sum(w)) if w.sum() > 0 else float(np.median(db))
+    ref = _band_level(db, band)
     return [*(db - ref), *noise["noise_tail_db"], float(np.log10(1 + noise["impulses_per_min"])), 1.0]
 
 

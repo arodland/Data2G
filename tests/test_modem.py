@@ -1,3 +1,6 @@
+"""data2g.modem end to end: burst loopback per submode, the header code,
+framing, HARQ through the modem, timing slips and the header copy."""
+
 import numpy as np
 import pytest
 
@@ -158,7 +161,7 @@ def test_no_burst_from_a_tone():
     """SSTVAE's 1b05ba4 false lock: a steady carrier read as a burst with a
     random header before the wide band had a header score floor. (Data
     whose preamble was lost may still read as one at the 0.25 floor; that
-    is tnc.Receiver's supersede search's job: tests/test_tnc.py.)"""
+    is receiver.Receiver's supersede search's job: tests/test_receiver.py.)"""
     from data2g.config import FS
 
     for seed in range(3):

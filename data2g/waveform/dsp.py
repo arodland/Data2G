@@ -1,4 +1,14 @@
-"""Small DSP helpers shared by the modem."""
+"""Sample-level DSP at the ends of the chain (native: core/waveform/dsp).
+
+- to_baseband: real audio -> complex baseband, the first step of the OFDM
+  receivers (modem, receiver's StreamDetector feed); cpm reads real audio.
+- freq_correct: remove a CFO from baseband.
+- tx_condition: envelope clip and filter, the last TX step (modem's OFDM
+  bursts, cpm.bandpass).
+- papr_db: envelope peak-to-average, for tests and studies.
+- envelope, active_power: Python only, for the channel simulator
+  (hfchannel's SNRs) and arq/phy.peak_db (frozen into generated tables).
+"""
 
 from math import gcd
 from typing import Sequence
@@ -14,7 +24,7 @@ from ..config import CLIP_OVERSHOOT, FS, FCENTER, TX_BANDPASS
 #
 # This is the same range-reduction argument as in ofdm.py but it matters
 # far more here, because `n` runs over a whole recording rather than one
-# symbol. Measured over a mode C transmission (760k samples), the old
+# symbol. Measured over an SSTVAE mode C transmission (760k samples), the old
 # form reached |theta| = 895,000 rad -- where one ulp is 1.16e-10 --
 # and accumulated 1.47e-10 rad of phase error, ~5000x the error in the
 # OFDM matrices. Still nothing on air (1e-10 rad is 6e-9 degrees), but
@@ -81,8 +91,8 @@ def tx_condition(
     above 1 clips past the threshold on that pass so the next filter
     regrows back toward it rather than above it (CESSB's "more than
     clipping"), applied as `scale ** k` because the additive form
-    inverts the envelope where this clipper bites hardest. See
-    `config.CLIP_OVERSHOOT` for the measurements and for why the pass
+    inverts the envelope where this clipper bites hardest. The factors
+    are SSTVAE's, measured there (its config.CLIP_OVERSHOOT): the pass
     count, not the overshoot, is most of the gain.
 
     `project`: active constellation extension (modem.ace_projector): after
@@ -111,6 +121,19 @@ def tx_condition(
         if project and i < len(overshoot):
             x = project(x)
     return x / np.sqrt(np.mean(x[active] ** 2))
+
+
+def envelope(x: np.ndarray) -> np.ndarray:
+    """Real passband audio's envelope, |analytic signal|."""
+    return np.abs(signal.hilbert(x))
+
+
+def active_power(x: np.ndarray) -> float:
+    """Mean power over the active portion (envelope above 10% of the
+    overall RMS), so lead-in/out silence doesn't skew it."""
+    env = envelope(x)
+    active = env > 0.1 * np.sqrt(np.mean(x**2))
+    return float(np.mean(x[active] ** 2) if active.any() else np.mean(x**2))
 
 
 def papr_db(x: np.ndarray) -> float:

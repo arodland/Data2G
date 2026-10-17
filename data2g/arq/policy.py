@@ -10,20 +10,31 @@ repeats and polls saying its replies are lost): then the robust mode.
 
 The recommendation rides the core control word: 6 bits of submode (sync
 band, index), 2 bits of burst length (an airtime class, SIZE_S).
+
+GearShifter is also the link.Policy the engine runs, its plumbing methods
+forwarding to modes and codes; native splits the two (GearShifter, which
+reads a StationView, and GearPolicy). The env-driven study toggles are
+grouped below the tuned constants; native has their defaults.
 """
 
 import json
 import os
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
 from .. import codes, modem
 from .. import cpm
 from ..config import max_codewords
-from .modes import MODES, burst_seconds, ctl_payload_bytes, is_cpm, max_ctl, min_cw
+# the bandwidth and recommendation-code helpers are modes'; named here too,
+# where the shifter and its callers (and tests/native_subs/gear.py) find them
+from .modes import (CAP_HZ, MODES, burst_seconds, ctl_payload_bytes, decode, encode, is_cpm, max_ctl, min_cw,
+                    width_hz)
 from . import frames as F
+from . import link as L
 from . import predictor as P
+from .session import LINK_LOST_S
 
 SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
@@ -33,33 +44,16 @@ TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost
 # gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
 # and escalation's long gaps sent 12 s 64-ary bursts that all failed
 PREV_MAX_S = 30.0
-BIAS_STEP, BIAS_MAX = 1.0, 3.0  # online correction: logit step per unit of surprise, and its bound
-# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
-# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
-# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
-# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
-# On since v12; DATA2G_BIAS_FIX=0 (studies) is the old bound.
-BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
-# The noise rule (recommend(): candidates whose band is noisier in the
-# receiver's profile than the measured one predicted at a lower SNR), its
-# tail weight: on by default (runs/noise_rule_study.sh: carriers +54..+209%,
-# edge +8..+37%, clean and wandering-floor cells unchanged). DATA2G_NOISE_RULE
-# (studies): a weight, or '' / 'off' for none.
-_NR = os.environ.get("DATA2G_NOISE_RULE")
-NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
-if BIAS_FIX:
-    BIAS_MAX = 6.0
+BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
-CHAT_BYTES = F.CHAT_LINE_BYTES  # a chat line, the least the latency objective plans for (more: T_BUFFER)
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
 # helped run out the 90 s link-lost clock)
 CPM_MAX_S = 24.0
-# a lost data burst spends the session's link-lost clock (session.LINK_LOST_S);
+# a lost data burst spends the session's link-lost clock (LINK_LOST_S);
 # recovering takes polls of about T_RECOVER_S each, and a session that runs
 # out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
-LINK_LOST_S = 90.0
 T_RECOVER_S = TIMEOUT_S + 2 * 5.0  # a timeout, a robust poll and its reply
 LOST_LINK_COST_S = 300.0
 REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s measured) and decode lag
@@ -74,22 +68,17 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # on a bad channel, and the per-mode bias hopped to unpenalised neighbours.
 # ponytail: thresholds from one ladder study, not learned; the retrain on this
 # branch's sessions should make the ladder rare
-# The CPM floor (a stopgap; DATA2G_CPM_FLOOR="snr:X" or "energy:X", studies):
-# when the median snr_est of the peer's last CPM_FLOOR_HIST bursts (snr), or
-# the energy inputs' mean (energy), is under X dB, data goes in CPM modes only.
-# On air (KC2G-AG7EW, 2026-10-06, snr_est -2..-9 on fading) every OFDM data
-# mode the model rated 0.5-0.8 decoded 0 of 24 while the CPM polls got
-# through 75%+. On by default at snr:-4 (CPM_FLOOR_DEFAULT): on n10pe gated with
-# n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6 +12.5/+7.2/+3.7%,
-# no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD -8 -2.0%); snr:-3
-# cost MPG -4 7.5%. DATA2G_CPM_FLOOR='' turns it off.
-# "snr:X:S" also wants the median spread_est of those bursts at least S Hz
-# (fast fading: on slow fading a fade holds the median down, and OFDM recovers).
-_CF = os.environ.get("DATA2G_CPM_FLOOR")
+# The CPM floor (a stopgap): when the median snr_est of the peer's last
+# CPM_FLOOR_HIST bursts (snr), or the energy inputs' mean (energy), is under
+# X dB, data goes in CPM modes only. On air (KC2G-AG7EW, 2026-10-06, snr_est
+# -2..-9 on fading) every OFDM data mode the model rated 0.5-0.8 decoded 0 of
+# 24 while the CPM polls got through 75%+. On by default at snr:-4: on n10pe
+# gated with n10qf (runs/cpm_floor_pe.sh, 13 cells x 12 seeds) MPP -10/-8/-6
+# +12.5/+7.2/+3.7%, no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD
+# -8 -2.0%); snr:-3 cost MPG -4 7.5%. (kind, X, S): "snr" also wants the
+# median spread_est of those bursts at least S Hz (fast fading: on slow
+# fading a fade holds the median down, and OFDM recovers).
 CPM_FLOOR_DEFAULT = ("snr", -4.0, 0.0)
-CPM_FLOOR = CPM_FLOOR_DEFAULT if _CF is None else (
-    (_CF.split(":")[0], float(_CF.split(":")[1]), float(_CF.split(":")[2]) if _CF.count(":") > 1 else 0.0) if _CF
-    else None)
 CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
@@ -97,9 +86,6 @@ LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
-CAP_HZ = {0: 500, 1: 1200, 2: 2400}
-WIDTH_HZ = {"n4": 200, "n10": 500, "w": 1200, "w48": 2400}
-BY_CODE = {code: band for band, code in F.BANDS_CODE.items()}
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
 # vs ack-4f's 79%): the loss study got worse in every cell (MPP 0 dB 248 ->
 # 187 bps), likely because polls are what the receiver measures, and a 500 Hz
@@ -112,51 +98,48 @@ ALT_POLL = "n4-ack-8f"
 ROBUST_ESCALATION = 4  # from here on ROBUST_CONNECT (link caps escalation at 4)
 ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 
+# --- study toggles (Python only; native has the defaults) --------------------
+# Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
 
-CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
-# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
-# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
-N10_HIGH = 8
-assert len(cpm.SPECS) <= N10_HIGH
-
-
-def encode(submode: str) -> int:
-    s = MODES[submode]
-    if is_cpm(s):
-        return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
-    if s.sync_band == "n10" and s.index >= 16:
-        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
-        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
-    return F.BANDS_CODE[s.sync_band] << 4 | s.index
-
-
-def decode(rec: int) -> str | None:
-    from ..modem import BY_INDEX
-
-    if rec >> 4 == CPM_CODE:
-        i, names = rec & 15, list(cpm.SPECS)
-        if i >= N10_HIGH:
-            s = BY_INDEX.get(("n10", 16 + i - N10_HIGH))
-            return s.name if s else None
-        return names[i] if i < len(names) else None
-    band = BY_CODE.get(rec >> 4)
-    s = BY_INDEX.get((band, rec & 15)) if band else None
-    return s.name if s else None
+# The online correction bounded at 6, not 3: without LOGIT_OFFSETS v10 sent
+# w48-qpsk-r1/3 in 78% of MPP 0 dB data bursts, 13% of its codewords
+# decoding, for a whole session; at a predicted 0.99 a -3 bound still leaves
+# 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
+# On since v12; DATA2G_BIAS_FIX=0 is the old bound.
+BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+BIAS_MAX = 6.0 if BIAS_FIX else 3.0
+# The noise rule (recommend(): candidates whose band is noisier in the
+# receiver's profile than the measured one predicted at a lower SNR), its
+# tail weight: on by default (runs/noise_rule_study.sh: carriers +54..+209%,
+# edge +8..+37%, clean and wandering-floor cells unchanged).
+# DATA2G_NOISE_RULE: a weight, or '' / 'off' for none.
+_NR = os.environ.get("DATA2G_NOISE_RULE")
+NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
 
 
-# DATA2G_DROP_MODES (studies): comma-separated modes nobody picks (a pruned
-# ladder): not a candidate, not taken from a peer, not trained on
+def _env_cpm_floor():
+    """DATA2G_CPM_FLOOR: unset, CPM_FLOOR_DEFAULT; "snr:X[:S]" or
+    "energy:X[:S]" (S default 0); '' turns the floor off (None)."""
+    v = os.environ.get("DATA2G_CPM_FLOOR")
+    if v is None:
+        return CPM_FLOOR_DEFAULT
+    if not v:
+        return None
+    f = v.split(":")
+    return f[0], float(f[1]), float(f[2]) if len(f) > 2 else 0.0
+
+
+CPM_FLOOR = _env_cpm_floor()
+# DATA2G_DROP_MODES: comma-separated modes nobody picks (a pruned ladder):
+# not a candidate, not taken from a peer, not trained on
 # (scripts/train_outcome.py). They still decode when received.
 DROP = frozenset(filter(None, os.environ.get("DATA2G_DROP_MODES", "").split(",")))
 assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES))}"
 
 
 def allowed(cap: int) -> list:
+    """The modes the shifter may pick within cap `cap` (modes.allowed less DROP)."""
     return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
-
-
-def width_hz(s) -> float:
-    return cpm.GRIDS[s.band].bandwidth if is_cpm(s) else WIDTH_HZ[s.band]
 
 
 CTL_BYTES = 12  # a data burst's typical control: core 4, new 3, rv 3, a flag or two
@@ -185,8 +168,51 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
+class StationView(NamedTuple):
+    """What the shifter reads of its link.Station (native: arq::StationView).
+    KISS, with no station, passes one of its own."""
+    cap: int = 2
+    pending: bool = True  # tx.pending()
+    peer_recommend: int | None = None
+    peer_reply_recommend: int | None = None
+    peer_size_hint: int = 1
+    peer_wants_dup: bool = False
+    chat: bool = False  # station.chat or station.peer_chat
+    peer_queued: int = 0
+    held: int = 0  # codewords held beyond the cumulative ACK: len(rx.buf)
+    misses: int = 0
+    esc_floor: int = 0
+    timeouts: int = 0  # stats["timeouts"] (link_features: Python only)
+
+
+def view(station) -> StationView:
+    """A link.Station as the shifter reads it (a StationView as it is). An
+    attribute it lacks takes the field's default, as in the binding's
+    station(): tests hand the shifter stubs with only what one method reads."""
+    if isinstance(station, StationView):
+        return station
+    try:  # a whole station (once per burst built: keep it cheap)
+        return StationView(station.cap, station.tx.pending(), station.peer_recommend, station.peer_reply_recommend,
+                           station.peer_size_hint, station.peer_wants_dup, bool(station.chat or station.peer_chat),
+                           station.peer_queued, len(station.rx.buf), station.misses, station.esc_floor,
+                           station.stats.get("timeouts", 0))
+    except AttributeError:
+        pass
+
+    def g(name, default):
+        return getattr(station, name, default)
+
+    tx, rx = g("tx", None), g("rx", None)
+    return StationView(cap=g("cap", 2), pending=tx.pending() if tx is not None else True,
+                       peer_recommend=g("peer_recommend", None), peer_reply_recommend=g("peer_reply_recommend", None),
+                       peer_size_hint=g("peer_size_hint", 1), peer_wants_dup=g("peer_wants_dup", False),
+                       chat=bool(g("chat", False) or g("peer_chat", False)), peer_queued=g("peer_queued", 0),
+                       held=len(rx.buf) if rx is not None else 0, misses=g("misses", 0), esc_floor=g("esc_floor", 0),
+                       timeouts=g("stats", {}).get("timeouts", 0))
+
+
 @dataclass
-class GearShifter:
+class GearShifter(L.Policy):
     gap_s: float = 2.5
     use_cpm: bool = True  # recommend CPM modes (only once the outcome model has learned them)
     # data modes need P(usable) x P(codeword) at least this: the KISS TNC
@@ -215,46 +241,7 @@ class GearShifter:
     peer_had_data: bool = True
     log: list = field(default_factory=list)
 
-    # -- link.Policy ------------------------------------------------------------------
-
-    def choose(self, station, escalation: int) -> tuple[str, int]:
-        cap = station.cap
-        # (strikes, a hold on modes that went unanswered, were removed: the
-        # online bias routes around a mangled mode too, tests/test_engine.py,
-        # and at -4 to 0 dB fading they held working modes: 12 seeds x 600 s,
-        # 12-48% lower throughput with them)
-        rec = station.peer_recommend if station.tx.pending() else station.peer_reply_recommend
-        # escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, or
-        # answering the peer's robust poll: control only in the connect
-        # retry's mode (ack-4f polls went unanswered until the link was lost)
-        # the floor there too (the last drop took it): my control-only bursts
-        # as well, not only polls (MPP -8: the peer heard 4 of my 11
-        # n4-ack-8f acks and 13 of 17 robust polls; its data waited on them)
-        robust_floor = getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION and not station.tx.pending()
-        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT) or robust_floor:
-            return ROBUST_CONNECT, 1
-        if escalation == 2:
-            return ALT_POLL, 2
-        if escalation:
-            reply = decode(station.peer_reply_recommend) if station.peer_reply_recommend is not None else None
-            return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
-        if rec is None:
-            return FALLBACK[cap], 2
-        mode = decode(rec)
-        if mode is None or MODES[mode] not in allowed(cap):
-            return FALLBACK[cap], 2
-        return mode, slots_for(MODES[mode], SIZE_S[station.peer_size_hint], station.tx.pending(),
-                               getattr(station, "peer_wants_dup", False))
-
-    def next_capacity(self, station) -> int:
-        """Payload bytes the next data burst will carry if it follows the
-        peer's recommendation (no side effects: the host's BUFFER report)."""
-        mode = decode(station.peer_recommend) if station.peer_recommend is not None else None
-        if mode is None or MODES[mode] not in allowed(station.cap):
-            mode = FALLBACK[station.cap]
-        spec = MODES[mode]
-        n = slots_for(spec, SIZE_S[station.peer_size_hint])
-        return (n - ctl_slots(spec)) * codes.payload_bytes(spec)
+    # -- link.Policy plumbing (native: GearPolicy): forwards to modes and codes -------
 
     def payload_bytes(self, m):
         return codes.payload_bytes(MODES[m])
@@ -274,20 +261,6 @@ class GearShifter:
         loss-study sessions there never connected in qpsk-r1/5)."""
         return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
 
-    def reply_hold(self, station, burst) -> float:
-        """Seconds past t_turn to wait for a reply to `burst` before timing
-        out: the longest control-only reply the peer may send (the reply
-        mode I asked for; its ladder's if `burst` was a poll; the robust
-        mode if `burst` was in it or my floor is there). At MPP -8 the
-        master missed reply headers and polled into the replies 2 s in
-        (8 times in 717 s). A data reply (up to CPM_MAX_S) is not covered."""
-        modes = [self.log[-1][2] if self.log else FALLBACK[station.cap]]
-        if station.misses:
-            modes += [FALLBACK[station.cap], ALT_POLL]
-        if burst.submode == ROBUST_CONNECT or getattr(station, "esc_floor", 0) >= ROBUST_ESCALATION:
-            modes.append(ROBUST_CONNECT)
-        return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
-
     def airtime(self, m, n_cw, dup=False):
         """`dup`: a CPM burst's control twice (the second copy is a short
         control codeword, not a data one: an x10 burst is 30.4 s, not 32.6)."""
@@ -296,7 +269,64 @@ class GearShifter:
     def mode_name(self, rec: int) -> str:
         return decode(rec) or f"?{rec}"
 
-    # -- receiver side ------------------------------------------------------------------
+    # -- as a sender (native: GearShifter): my next burst, from the peer's advice -------
+
+    def choose(self, station, escalation: int) -> tuple[str, int]:
+        st = view(station)
+        cap = st.cap
+        # (strikes, a hold on modes that went unanswered, were removed: the
+        # online bias routes around a mangled mode too, tests/test_engine.py,
+        # and at -4 to 0 dB fading they held working modes: 12 seeds x 600 s,
+        # 12-48% lower throughput with them)
+        rec = st.peer_recommend if st.pending else st.peer_reply_recommend
+        # escalation 1 and 3: the peer's reply mode; 2: ALT_POLL; 4 on, or
+        # answering the peer's robust poll: control only in the connect
+        # retry's mode (ack-4f polls went unanswered until the link was lost)
+        # the floor there too (the last drop took it): my control-only bursts
+        # as well, not only polls (MPP -8: the peer heard 4 of my 11
+        # n4-ack-8f acks and 13 of 17 robust polls; its data waited on them)
+        robust_floor = st.esc_floor >= ROBUST_ESCALATION and not st.pending
+        if escalation >= ROBUST_ESCALATION or (escalation and self.heard == ROBUST_CONNECT) or robust_floor:
+            return ROBUST_CONNECT, 1
+        if escalation == 2:
+            return ALT_POLL, 2
+        if escalation:
+            reply = decode(st.peer_reply_recommend) if st.peer_reply_recommend is not None else None
+            return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
+        if rec is None:
+            return FALLBACK[cap], 2
+        mode = decode(rec)
+        if mode is None or MODES[mode] not in allowed(cap):
+            return FALLBACK[cap], 2
+        return mode, slots_for(MODES[mode], SIZE_S[st.peer_size_hint], st.pending, st.peer_wants_dup)
+
+    def next_capacity(self, station) -> int:
+        """Payload bytes the next data burst will carry if it follows the
+        peer's recommendation (no side effects: the host's BUFFER report)."""
+        st = view(station)
+        mode = decode(st.peer_recommend) if st.peer_recommend is not None else None
+        if mode is None or MODES[mode] not in allowed(st.cap):
+            mode = FALLBACK[st.cap]
+        spec = MODES[mode]
+        n = slots_for(spec, SIZE_S[st.peer_size_hint])
+        return (n - ctl_slots(spec)) * codes.payload_bytes(spec)
+
+    def reply_hold(self, station, burst) -> float:
+        """Seconds past t_turn to wait for a reply to `burst` before timing
+        out: the longest control-only reply the peer may send (the reply
+        mode I asked for; its ladder's if `burst` was a poll; the robust
+        mode if `burst` was in it or my floor is there). At MPP -8 the
+        master missed reply headers and polled into the replies 2 s in
+        (8 times in 717 s). A data reply (up to CPM_MAX_S) is not covered."""
+        st = view(station)
+        modes = [self.log[-1][2] if self.log else FALLBACK[st.cap]]
+        if st.misses:
+            modes += [FALLBACK[st.cap], ALT_POLL]
+        if burst.submode == ROBUST_CONNECT or st.esc_floor >= ROBUST_ESCALATION:
+            modes.append(ROBUST_CONNECT)
+        return max(burst_seconds(MODES[m], ctl_slots(MODES[m])) for m in modes) + REPLY_HOLD_MARGIN_S
+
+    # -- as a receiver: the peer's next burst, from my measurements of its last -------
 
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
@@ -399,7 +429,7 @@ class GearShifter:
         """The link history as the outcome model reads it (predictor.N_LINK):
         my timeouts since the last call count as missed peer bursts. None
         before any expected burst."""
-        t = getattr(station, "stats", {}).get("timeouts", 0)
+        t = view(station).timeouts
         if t > self.timeouts_seen:
             self.turns = (self.turns + ["miss"] * (t - self.timeouts_seen))[-LINK_HIST:]
         self.timeouts_seen = t
@@ -411,12 +441,13 @@ class GearShifter:
     def recommend(self, station) -> tuple[int, int, int]:
         """-> (data mode, size hint, reply mode) for the peer's next burst:
         the mode it should use if it sends data, and if it sends none."""
-        self.link_now = self.link_features(station)
+        st = view(station)
+        self.link_now = self.link_features(st)
         if self.measured is None:
-            return encode(FALLBACK[station.cap]), 1, encode(FALLBACK[station.cap])
+            return encode(FALLBACK[st.cap]), 1, encode(FALLBACK[st.cap])
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
-        cands = [s for s in allowed(station.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
+        cands = [s for s in allowed(st.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
         m = dict(self.measured, link=self.link_now, energy=self.energy_features())
         prev = None
         if self.prev is not None:
@@ -476,13 +507,13 @@ class GearShifter:
         # priced as payload not delivered this turn (linksim: mpg rate hopping
         # scored below every fixed mode it hopped between).
         cur = self.log[-1][0] if self.log else None
-        held = len(station.rx.buf) * codes.payload_bytes(MODES[cur]) if cur else 0
+        held = st.held * codes.payload_bytes(MODES[cur]) if cur else 0
         # CHAT ON: the least expected time to deliver what the peer has queued
         # (its T_BUFFER; a chat line at least). A file is then sent in full
         # bursts, a line in the fewest codewords (a VARA client with CHAT ON
         # sent a file 242 bytes per burst when this planned for 200 B always)
-        chat = station.chat or station.peer_chat
-        queued = max(CHAT_BYTES, getattr(station, "peer_queued", 0))
+        chat = st.chat
+        queued = max(F.CHAT_LINE_BYTES, st.peer_queued)  # a chat line at least
         if chat:
             best_v = -float("inf")
         data_cands = cands
@@ -529,7 +560,7 @@ class GearShifter:
                 if chat:
                     break
         if best is None:
-            best = (FALLBACK[station.cap], 1)
+            best = (FALLBACK[st.cap], 1)
         else:
             s = MODES[best[0]]
             nb = slots_for(s, SIZE_S[best[1]])
@@ -540,6 +571,6 @@ class GearShifter:
             self.want_dup = self.predicted[s.name][0] < DUP_BELOW
             if reply:
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
-        reply = reply or FALLBACK[station.cap]
+        reply = reply or FALLBACK[st.cap]
         self.log.append((best[0], best[1], reply))
         return encode(best[0]), best[1], encode(reply)

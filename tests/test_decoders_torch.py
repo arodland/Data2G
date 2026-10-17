@@ -1,3 +1,6 @@
+"""data2g.decoders_torch against the numpy decoders (ldpc, polar) it
+mirrors for GPU studies."""
+
 import numpy as np
 import pytest
 
@@ -12,8 +15,8 @@ def test_ldpc_numpy_matches_torch(alpha):
     rng = np.random.default_rng(1)
     x = 1.0 - 2.0 * code.encode(rng.integers(0, 2, (16, 500)))
     llr = (2 * (x + rng.normal(scale=0.9, size=x.shape)) / 0.81).astype(np.float32)
-    out, ok, post = ldpc.MinSumDecoder(code).decode(llr, iters=40, alpha=alpha, posterior=True)
-    t_out, t_ok, t_post = decoders_torch.MinSumDecoder(code).decode(torch.tensor(llr), iters=40, alpha=alpha,
+    out, ok, post = ldpc.Decoder(code).decode(llr, iters=40, alpha=alpha, posterior=True)
+    t_out, t_ok, t_post = decoders_torch.Decoder(code).decode(torch.tensor(llr), iters=40, alpha=alpha,
                                                                     posterior=True)
     assert 0 < ok.sum() < len(ok)  # a mix of converged and failed decodes
     assert np.array_equal(ok, t_ok.numpy())

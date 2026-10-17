@@ -5,7 +5,7 @@ is buffered before decoding, so every estimate can use every pilot:
 
 - `residual_cfo`: common phase rotation between consecutive pilots,
   summed over the burst. Fixes acquisition CFO errors of a few Hz that
-  fading during the 88 ms preamble can cause.
+  fading during the preamble (168 ms at 8 repeats) can cause.
 - `delay_support`: which delays hold channel energy, from the burst-
   averaged power delay profile. Used to place the FFT window so every
   path lands inside the cyclic prefix, and as the frequency-correlation
@@ -16,9 +16,15 @@ is buffered before decoding, so every estimate can use every pilot:
   Doppler correlation whose spread is picked per burst from the pilots
   (filter_spread). Returns the per-cu estimate MSE so the demapper can
   discount it.
+
+Native: native/core/equalizer. Parity: tests/test_native_equalizer.py;
+under `pytest --native` every function here but _support_basis is
+substituted (tests/native_subs/base.py's EQUALIZER_NATIVE, private
+_doppler_corr included).
 """
 
 from functools import lru_cache
+from typing import TypedDict
 
 import numpy as np
 
@@ -55,6 +61,10 @@ SPREAD_GRID = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0)
 # on one tone): per_carrier_noise, with this many samples' worth of prior.
 PER_CARRIER_NOISE = True
 NOISE_SHAPE_PRIOR = 8.0
+# preamble_noise_k's samples per carrier: the differences between the
+# default 8 repeats (config.PREAMBLE_REPEATS - 1). Fixed: a repeats
+# override (DATA2G_PREAMBLE_REPEATS) does not reach it.
+PREAMBLE_DIFFS = 7
 
 
 def residual_cfo(h_pilot: np.ndarray) -> float:
@@ -103,7 +113,7 @@ def window_shift(support: tuple[int, int]) -> int:
     return int(round((support[0] + support[1] - NCP) / 2))
 
 
-SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see _freq_smooth
+SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see freq_smooth
 
 
 @lru_cache(maxsize=1024)
@@ -124,7 +134,7 @@ def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
     return U, r, r_full
 
 
-def _freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
+def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
     """Project each pilot vector onto the delay support. Returns the
     smoothed pilots, the per-carrier noise variance from the residual
     (inf where the support would take all but < 2 dimensions, i.e. narrow
@@ -240,8 +250,21 @@ def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
     return float(cand[err <= err.min() + LOO_TOL * max(err.min() - n0_s, 0.0)].max())
 
 
+class ChannelEstimate(TypedDict):
+    """estimate()'s result, a plain dict (native equalizer::Estimate, whose
+    rows are frame * 5 + symbol). modem.DataEstimate extends it."""
+
+    h: np.ndarray  # (F, 5, nc) the channel at each data symbol
+    mse: np.ndarray  # (F, 5, nc) its estimation error variance
+    n0: float  # thermal noise variance per carrier
+    n0_k: np.ndarray  # (nc,) the same per carrier
+    p_sig: float  # mean pilot power per carrier, noise removed
+    spread_hz: float  # measured Doppler spread (reported)
+    filter_spread_hz: float  # the one the time filters used (refine's too)
+
+
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
-             n0_pre: float = np.inf, n0_pre_k: np.ndarray | None = None) -> dict:
+             n0_pre: float = np.inf, n0_pre_k: np.ndarray | None = None) -> ChannelEstimate:
     """h_pilot (F+1, NC): LS estimates at every pilot, the closing one
     included; `n0_pre` a noise estimate from the preamble
     (preamble_noise). Returns h (F, 5, NC) at the data symbols, mse (F, 5, NC),
@@ -253,7 +276,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     n_p = len(h_pilot)
     n_f = n_p - 1
     nc = len(bb)
-    hs, n0, r, keep = _freq_smooth(h_pilot, support, bb)
+    hs, n0, r, keep = freq_smooth(h_pilot, support, bb)
     # The residual's when it has room (wide band: it includes the pilots'
     # own clip distortion, which the preamble's estimate cannot see:
     # identical repeats clip identically, so it cancels in their
@@ -266,7 +289,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
         # noisier (n10 at -5 dB: 0.45 -> 0.38 decoded)
         n0_k = per_carrier_noise(np.mean(np.abs(h_pilot - hs) ** 2, axis=0) / np.maximum(keep, 1e-3), n_p)
     elif n0_pre_k is not None and len(n0_pre_k) == nc:
-        n0_k = per_carrier_noise(n0_pre_k, 7)
+        n0_k = per_carrier_noise(n0_pre_k, PREAMBLE_DIFFS)
     if not np.isfinite(n0):
         n0 = n0_pre
     if not np.isfinite(n0):

@@ -29,7 +29,7 @@ int kb_of(int bg) {
 
 namespace {
 
-// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8.
+// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8 (TS 38.212 Table 5.3.2-1).
 bool lifting_size(int z) {
     for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
         for (int j = 0; j < 8; ++j)
@@ -39,6 +39,7 @@ bool lifting_size(int z) {
 
 }  // namespace
 
+// ldpc.layout: 5G NR's rules (TS 38.212 7.2.2 base graph, 5.2.2 graph 2's k_b).
 std::pair<int, int> layout(int k, int n, int bg) {
     const double rate = static_cast<double>(k) / n;
     if (bg == 0) bg = (k <= 292 || (k <= 3824 && rate <= 0.67) || rate <= 0.25) ? 2 : 1;
@@ -195,7 +196,7 @@ std::vector<std::uint8_t> Code::syndrome_ok(const Mat<std::uint8_t>& full) const
 
 namespace {
 
-// ph.sum(axis=-1) in MinSumDecoder, over a check's n = dmax slots: a[0..d)
+// ph.sum(axis=-1) in ldpc.Decoder, over a check's n = dmax slots: a[0..d)
 // real, a[d..n) zero padding. numpy's order depends on the batch size:
 // v2c[:, chk] comes out batch-innermost for B > 1, so numpy adds the slots
 // in turn; for B = 1 the slots are contiguous and it sums pairwise (8

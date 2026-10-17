@@ -9,14 +9,6 @@ namespace data2g::modem {
 
 using namespace config;
 
-const Band& band(std::string_view name) {
-    for (const auto& b : BANDS)
-        if (b.name == name) return b;
-    throw std::out_of_range("no band " + std::string(name));
-}
-
-int preamble_samples(const Band& b) { return PREAMBLE_CP + b.preamble_repeats * M; }
-
 bool hosts(std::string_view name) {
     return std::any_of(BANDS.begin(), BANDS.end(), [&](const Band& b) { return b.name != name && b.sync_band == name; });
 }
@@ -55,6 +47,9 @@ int head_samples(std::string_view name) {
     const int n = preamble_samples(band(name)) + header_samples(name) + NSYM;
     return copies(name) ? n + (HEADER_COPY_AFTER + 1) * FRAME_SAMPLES : n;
 }
+
+// head_samples, plus room for best_header's reads up to two repeats late (2 M) and a symbol and a repeat to spare
+int receive_head(std::string_view name) { return head_samples(name) + NSYM + 3 * M; }
 
 double burst_seconds(const Submode& spec, int n_cw) {
     const std::int64_t n = LEADIN_SAMPLES + preamble_samples(band(spec.sync_band)) + header_samples(spec.sync_band) +

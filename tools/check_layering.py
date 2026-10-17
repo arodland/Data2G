@@ -7,6 +7,8 @@
   them. Widgets headers are known by the QtWidgets/ prefix or by name.
 - generated files are only written by tools/gen_native_tables.py: each
   must still carry its header.
+- core/ldpc and core/polar are code primitives: they know nothing of
+  submodes, so they include no codes/ (codes:: keys them by spec).
 
     python tools/check_layering.py   # exit 1 and list violations
 """
@@ -37,6 +39,9 @@ def main() -> int:
             if (inc == "jni.h" and "android" not in rel.parts
                     or re.match(r"Q[A-Za-z]", inc) and "qt" not in rel.parts):
                 bad.append(f"{rel}: includes <{inc}> outside a device backend")
+        if rel.parts[1] in ("ldpc", "polar"):
+            bad += [f"{rel}: includes <{inc}>: a code primitive, below codes/"
+                    for inc in INCLUDE.findall(text) if inc.startswith(("codes/", "generated/config"))]
         if "generated" in rel.parts and not text.startswith(GENERATED):
             bad.append(f"{rel}: in core/generated/ but not generated")
     for path in sorted(NATIVE.rglob("*.[ch]pp")):

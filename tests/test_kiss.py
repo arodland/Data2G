@@ -10,7 +10,7 @@ from data2g.arq import policy as G
 from data2g.arq.modes import MODES
 from data2g.config import FS
 from data2g.kisslink import BROADCAST, REPORT_MAX_S, KissLink, group_key, parse_ax25
-from data2g.tnc import receive_any
+from data2g.receiver import receive_any
 
 
 def addr(call: str, last: bool = False, h: bool = False) -> bytes:
@@ -279,3 +279,17 @@ def test_a_256_byte_frame_burst_is_one_receivers_accept():
         burst = a.next_burst()
         assert burst is not None and burst.submode == spec.name
         assert len(burst.slots) <= cap[spec.name], spec.name
+
+
+def test_framing_loses_only_what_a_bad_codeword_touches():
+    from data2g.kisslink import pack_frames, unpack_frames
+
+    packets = [bytes([i]) * n for i, n in enumerate((10, 60, 20, 5))]
+    payloads = pack_frames(packets, 46)  # qpsk-r1/5's payload
+    assert len(payloads) == 3 and all(len(p) == 46 for p in payloads)
+    assert unpack_frames(payloads, [True] * len(payloads)) == (packets, 0)
+    # codeword 1 (bytes 46-91) holds the middle of packet 1 and the length
+    # of packet 2: packet 0 survives, packet 1 is lost, parsing stops there
+    ok = [True] * len(payloads)
+    ok[1] = False
+    assert unpack_frames(payloads, ok) == (packets[:1], 2)

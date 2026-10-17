@@ -80,9 +80,17 @@ int main() {
         const std::string junk = "not an ax.25 frame at all";
         check::is_true(!kisslink::parse_ax25(Bytes(junk.begin(), junk.end())), "not AX.25");
     }
+    {  // broadcast data: frames packed across codewords, a lost codeword loses what it touches
+        const std::vector<Bytes> frames = {Bytes(10, 7), Bytes(60, 9), Bytes(1, 1)};
+        const auto pl = kisslink::pack_frames(frames, 46);  // qpsk-r1/5's payload
+        check::equal(static_cast<int>(pl.size()), 2, "pack_frames: codewords");
+        check::is_true(kisslink::unpack_frames(pl, {true, true}) == std::pair{frames, 0}, "unpack_frames all good");
+        check::is_true(kisslink::unpack_frames(pl, {true, false}) == std::pair{std::vector<Bytes>{frames[0]}, 2},
+                       "unpack_frames lost");
+    }
 
     const std::string name = "w48-qpsk-r1/2";
-    const auto& spec = *codes::submode(name);
+    const auto& spec = *config::submode(name);
     std::vector<Bytes> pl;
     for (unsigned i = 0; i < 3; ++i) pl.push_back(payload(spec.payload_bytes, i));
     auto burst = [&](int rv) {

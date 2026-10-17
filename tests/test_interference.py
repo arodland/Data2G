@@ -5,7 +5,7 @@ import pytest
 
 from data2g import interference as I
 from data2g.config import FS
-from data2g.tnc import NoiseProfile
+from data2g.receiver import NoiseProfile
 
 SIGMA = 0.01
 

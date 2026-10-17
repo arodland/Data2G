@@ -7,7 +7,7 @@ endfunction()
 
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
-list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx)\\.cpp$")
+list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot)\\.cpp$")
 foreach(src ${DATA2G_TESTS})
   get_filename_component(stem ${src} NAME_WE)
   string(REGEX REPLACE "^test_" "" name ${stem})
@@ -30,7 +30,7 @@ if(TARGET data2g_rig AND NOT WIN32)
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
 endif()
 
-# data2g-host's rig options (app/station.*).
+# data2g-host's rig options (app/options.*).
 if(TARGET data2g_station)
   data2g_test(args)
   target_link_libraries(test_args PRIVATE data2g_station)
@@ -38,6 +38,9 @@ if(TARGET data2g_station)
   # real-time scheduling for the audio threads (app/realtime.*)
   data2g_test(realtime)
   target_link_libraries(test_realtime PRIVATE data2g_station)
+  # a burst as constellation-plot points (app/rx_plot.*)
+  data2g_test(rx_plot)
+  target_link_libraries(test_rx_plot PRIVATE data2g_station)
   # the transmit thread: no hole in a burst while the receive loop is stalled, and ABORT (over pipe audio)
   data2g_test(station_tx)
   target_link_libraries(test_station_tx PRIVATE data2g_station)
@@ -46,6 +49,7 @@ if(TARGET data2g_station)
 endif()
 
 # data2g-gui's window, offscreen, over pipe audio (no device, no display).
+# Its source is gui/test_gui.cpp: Qt Widgets stay under gui/ (tools/check_layering.py).
 if(TARGET data2g_gui)
   add_executable(test_gui ${PROJECT_SOURCE_DIR}/gui/test_gui.cpp)
   target_link_libraries(test_gui PRIVATE data2g_gui)

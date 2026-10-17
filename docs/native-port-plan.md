@@ -1,5 +1,7 @@
 # Plan: native C++ / Qt 6 port
 
+> Historical: the plan and log of the port; names may have moved since. `native/README.md` and `docs/ARCHITECTURE.md` describe the code as it is; the Threads, What must be frozen and Working conventions sections still hold.
+
 Approved 2026-10-02 with all four recommendations, plus two tweaks (more
 threads where they cut latency; Android kept possible). Based on master
 157ca38.
@@ -668,7 +670,7 @@ Not planned, low priority, but no choice may rule it out. In practice:
   CMake globs `core/*.cpp`, `bindings/*.cpp` and `tests/test_*.cpp`.
 - Frozen data: a generator function in `tools/gen_native_tables.py`
   registered with `FILES["<name>.cpp"] = fn` under its definition;
-  declarations in `native/core/tables/tables.hpp`. Nothing is loaded from
+  declarations in `native/core/tables/<name>.hpp` (`tables.hpp` includes them all). Nothing is loaded from
   files at run time.
 - Precision follows the Python: float64 -> double, float32 -> float. No
   fast-math. Integers and decisions exact; floats to a stated tolerance.
@@ -678,7 +680,8 @@ Not planned, low priority, but no choice may rule it out. In practice:
   `bindings/convert.hpp`. Submodes, bands, grids cross by name.
 - Tests: a Python-free `native/tests/test_<module>.cpp` (check.hpp); direct
   comparisons in `tests/test_native_<module>.py` (fixtures `native`,
-  `reference`); `--native` substitutions as one `@provider` function per
-  module, appended at the end of `tests/conftest.py`.
+  `reference`); `--native` substitutions as `substitutions(native)` in
+  `tests/native_subs/<area>.py`, listed in `tests/native_subs/__init__.py`'s
+  `PROVIDERS`.
 - Python in `data2g/` is not changed by a port. Reference bugs are reported.
 - Build and test: `JOBS=4 tools/build_native.sh --test`.

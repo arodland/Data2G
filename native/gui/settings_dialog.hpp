@@ -14,7 +14,7 @@
 #include <QDialog>
 #include <QStringList>
 
-#include "app/station.hpp"
+#include "app/options.hpp"
 
 class QCheckBox;
 class QComboBox;

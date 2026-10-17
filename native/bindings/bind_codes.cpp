@@ -1,3 +1,6 @@
+// data2g.codes over native/core/codes. Specs cross by name (a submode, a
+// CPM mode or a CPM control codeword); per-row arguments may be scalars;
+// bits and soft bits are numpy arrays, payloads bytes.
 #include "convert.hpp"
 #include <optional>
 
@@ -54,6 +57,7 @@ void bind_codec(py::module_& c) {
     c.def("payload_bytes", by_name([](const Spec& s) { return s.payload_bytes; }));
     c.def("rv_cycle", by_name([](const Spec& s) { return codes::rv_cycle(s); }));
     c.def("buffer_len", by_name([](const Spec& s) { return codes::buffer_len(s); }));
+    c.def("ir_extent", [](const std::string& name, int max_rv) { return codes::ir_extent(cspec(name), max_rv); });
     c.def("rv_positions", [](const std::string& name, int rv) {
         return np<std::int64_t>(std::span<const int>(codes::rv_positions(cspec(name), rv)));
     });
@@ -134,6 +138,22 @@ void bind_codec(py::module_& c) {
         return payload_list(r);
     }, py::arg("spec"), py::arg("buf"), py::arg("max_rv") = 0, py::arg("crc_mask") = py::none(),
        py::arg("index") = py::none());
+    // codes.decode_posterior: soft a slot's (coded_bits,) soft bits, or buf one (1, L) combined buffer.
+    c.def("decode_posterior", [](const std::string& name, std::optional<In<double>> soft,
+                                 std::optional<In<double>> buf, int max_rv, int rv) {
+        const auto& s = cspec(name);
+        if (!buf && !soft) throw py::value_error("decode_posterior: soft or buf");
+        if (buf && buf->ndim() == 2 && buf->shape(0) != 1) throw py::value_error("decode_posterior: one buffer row");
+        const auto b = buf ? view(*buf) : std::span<const double>{};
+        const auto x = buf ? std::span<const double>{} : view(*soft);
+        codes::Posterior r;
+        {
+            py::gil_scoped_release unlocked;
+            r = codes::decode_posterior(s, x, b, max_rv, rv);
+        }
+        return py::make_tuple(np(r.bits), r.ok, np(r.post));
+    }, py::arg("spec"), py::arg("soft") = py::none(), py::arg("buf") = py::none(), py::arg("max_rv") = 0,
+       py::arg("rv") = 0);
     c.def("decode_raw", [](const std::string& name, const In<float>& soft, py::object index) {
         const auto& s = cspec(name);
         const auto in = mat(soft);
@@ -190,25 +210,6 @@ void bind_codes(py::module_& m) {
     c.def("interleaver", [](const std::string& name) { return np<std::int64_t>(cspec(name).perm); });
     c.def("info_pos", [](const std::string& name) { return np<std::int64_t>(cspec(name).info_pos); });
     bind_codec(c);
-
-    auto cfg = m.def_submodule("config");
-    cfg.def("submodes", [] {
-        py::list out;
-        for (const auto& s : config::SUBMODES) {
-            py::dict d;
-            d["index"] = s.index;
-            d["name"] = std::string(s.name);
-            d["code"] = std::string(s.code);
-            d["constellation"] = std::string(s.constellation);
-            d["band"] = std::string(s.band);
-            d["frames_per_cw"] = s.frames_per_cw;
-            d["k"] = s.k;
-            d["coded_bits"] = s.coded_bits;
-            d["headroom"] = s.headroom;
-            out.append(d);
-        }
-        return out;
-    });
 }
 
 }  // namespace data2g::bind

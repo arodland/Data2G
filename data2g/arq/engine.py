@@ -1,7 +1,7 @@
-"""One station's live stack, clocked by audio samples (gear-shifter phase H).
+"""One station's live stack, clocked by audio samples.
 
 `Engine.step(audio_in) -> (audio_out, ptt)` is called once per audio block
-at FS: it feeds what was heard to the streaming receiver (tnc.Receiver),
+at FS: it feeds what was heard to the streaming receiver (receiver.Receiver),
 hands headers and bursts to the ARQ session and the gear shifter, and
 plays out whatever the session sends, half duplex. Its clock is the
 sample count, so the same code runs behind a sound card (data2g/host.py)
@@ -12,6 +12,9 @@ Recording (`record_dir`): every burst heard is saved as audio with what
 the receiver made of it, and every burst sent as its slots, so a session
 recorded at both ends can be replayed offline with exact knowledge of
 what was on air (scripts/replay.py).
+
+Native: arq/engine.hpp (the same step(); with `worker`, the session stage
+on its own thread).
 """
 
 import json
@@ -24,9 +27,9 @@ import numpy as np
 
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
+from ..receiver import NoiseProfile, Receiver
+from . import burst as B
 from . import frames as F
-from . import link as L
-from ..tnc import NoiseProfile, Receiver
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -108,9 +111,9 @@ def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
 class Engine:
     def __init__(self, call: str, policy=None, ptt_delay_s: float = 0.1, record_dir=None, seed: int | None = None,
                  min_header_score: float = 0.0, kiss=None, stats_interval_s: float = 60.0):
-        """`kiss`: a data2g.kisslink.KissLink to serve too (the KISS
-        personality): its bursts are peeled off what's heard, and it sends
-        when no ARQ session is under way and the channel is free."""
+        """`kiss`: a data2g.kisslink.KissLink to serve too (broadcast):
+        its bursts are peeled off what's heard, and it sends when no ARQ
+        session is under way and the channel is free."""
         self.call = call.upper()
         self.aliases = ()
         self.accept_connect = None  # Session.accept_connect, for every session (the host's ACCEPT)
@@ -146,10 +149,34 @@ class Engine:
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
+    # What data2g/host.py (and native core/host) drives: the session through
+    # listen/connect/disconnect/abort, events() for its notifications, and
+    # channel_busy, tx_submode and take_kiss_rx for what it reports. The host
+    # still reads the session itself for its state, call, cap and bytes.
 
     @property
     def now(self) -> float:
         return self.n / FS
+
+    @property
+    def channel_busy(self) -> bool:
+        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy)."""
+        return self.receiver.channel_busy
+
+    @property
+    def tx_submode(self) -> str | None:
+        """The submode of the burst on air (the session's, when an ID rides with it), None if none."""
+        return self.tx[0].submode if self.tx else None
+
+    def take_kiss_rx(self) -> list[tuple[int, bytes]]:
+        """(port, frame)s heard for KISS clients since the last call."""
+        out, self.kiss_rx = self.kiss_rx, []
+        return out
+
+    def set_accept_connect(self, f):
+        """`f(caller, callee) -> bool` answers each incoming CONNECT (the
+        host's ACCEPT), for the session now and every later one."""
+        self.accept_connect = self.session.accept_connect = f
 
     @property
     def tx_samples(self) -> int:
@@ -181,6 +208,10 @@ class Engine:
             listening = self.session.state == S.LISTEN
             self.listen(listening)
 
+    def disconnect(self):
+        """End the session gracefully: the peer is told, and what's queued still goes."""
+        self.session.disconnect()
+
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""
         self.tx = None
@@ -199,8 +230,11 @@ class Engine:
         self.session.set_chat(on)
 
     def events(self) -> list[str]:
-        """Host notifications since the last call (CONNECTED ..., DISCONNECTED ...,
-        CQFRAME call cap)."""
+        """Host notifications since the last call, oldest first, one line of
+        space-separated words each (the host splits them; native Engine::events
+        gives the same lines): "CONNECTED peer", "DISCONNECTED why" (why may
+        be several words), "CQFRAME call cap" (cap: policy.CAP_HZ's key),
+        "ID call key" (key: the session key, decimal)."""
         ev, self.session.events[:] = self._events + list(self.session.events), []
         self._events = []
         return ev
@@ -210,19 +244,19 @@ class Engine:
         no session. Not while one is under way."""
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
-        self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_call(call) + bytes([cap])))
+        self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_cq(call, cap)))
 
-    def _open_frame(self, cap: int, ext: int, body: bytes) -> L.TxBurst:
+    def _open_frame(self, cap: int, ext: int, body: bytes) -> B.TxBurst:
         """A control-only burst anyone can read (frame type SESSION, mask 0),
         in the cap's connect mode."""
         policy = self.session.policy
         mode = policy.connect_mode(cap)
         payloads = F.Control(F.Core(ftype=F.SESSION), {ext: body}).pack(policy.payload_bytes(mode))
-        return L.TxBurst(mode, [L.Slot(L.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, cap)
+        return B.TxBurst(mode, [B.Slot(B.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, cap)
 
-    def _id_frame(self, s: S.Session) -> L.TxBurst:
+    def _id_frame(self, s: S.Session) -> B.TxBurst:
         log.info("TX ID %s", s.call)
-        return self._open_frame(s.cap, F.T_ID, F.pack_call(s.call) + s.station.key.to_bytes(2, "big"))
+        return self._open_frame(s.cap, F.T_ID, F.pack_id(s.call, s.station.key))
 
     def _id_check(self, t: float):
         """Track the session ID frames are owed for; once it closes, its last ID is pending."""
@@ -236,7 +270,7 @@ class Engine:
             self._id_pending = [s, t + ID_GUARD_S]
             self._hold = t + ID_GUARD_S
 
-    def _with_id(self, burst: L.TxBurst, t: float) -> list:
+    def _with_id(self, burst: B.TxBurst, t: float) -> list:
         """A session's burst -> the bursts to send back to back: an ID first
         when one is due, or the pending last ID after a closed session's
         final burst (its DISC_ACK)."""
@@ -329,13 +363,11 @@ class Engine:
                     self.kiss.missed(h["spec"].name, h["n_cw"])  # maybe an open port's: BCAST * MISSED
                 continue
             rx = PHY.ModemRx(r, self.store, PHY.DD_BUDGET_S)
-            # in a session, its peer's bursts are the likely ones: a control
-            # codeword under the session's key (the station's first decode,
-            # remembered) claims the burst before KISS tries its keys on it
-            # (two failed decodes per ARQ burst: ~10% of a Pat exchange's CPU)
-            st = self.session.station
-            ours = (st is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING)
-                    and rx.decode(0, L.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
+            # in a session, its peer's bursts are the likely ones: the session
+            # claims the burst before KISS tries its keys on it (two failed
+            # decodes per ARQ burst: ~10% of a Pat exchange's CPU). Asked
+            # with or without KISS: its decode comes first either way
+            ours = self.session.claims(rx)
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's
@@ -352,16 +384,13 @@ class Engine:
         over start..end from power alone, against its peak (PHY.peak_db, at
         the cap it was most likely filtered for: _rx_cap), to the shifter.
         None under min_db."""
-        observe = getattr(self.session.policy, "observe_energy", None)
-        if observe is None:
-            return
         from . import predictor as P
 
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
         peak = PHY.peak_db(mode, self._rx_cap())
         if snr is not None and (min_db is None or snr + peak >= min_db):
-            observe(snr + peak, t)
+            self.session.policy.observe_energy(snr + peak, t)
 
     def _rx_cap(self) -> int:
         """The bandwidth cap a heard burst's TX filter was most likely for: the
@@ -381,7 +410,7 @@ class Engine:
             self._timeouts = n
             return
         self._timeouts = n
-        exp = pol.expected_reply() if hasattr(pol, "expected_reply") else None
+        exp = pol.expected_reply()
         if self._tx_end is None or exp is None:
             return
         start = self._tx_end + EXPECT_REPLY_S
@@ -418,38 +447,33 @@ class Engine:
     def _cq(self, rx) -> bool:
         """A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)?
         Then nothing else to do."""
-        first = rx.decode(0, L.ctl_mask(0, 0, 0), 0, None)
+        first = rx.decode(0, B.ctl_mask(0, 0, 0), 0, None)
         if first is None:
             return False
         core = F.Core.unpack(first)
         if core.ftype != F.SESSION or core.n_ctl > rx.n_cw:
             return False
-        payloads = [first] + [rx.decode(i, L.ctl_mask(0, i, 0), 0, None) for i in range(1, core.n_ctl)]
+        payloads = [first] + [rx.decode(i, B.ctl_mask(0, i, 0), 0, None) for i in range(1, core.n_ctl)]
         if None in payloads:
             return False
         # a malformed one (docs/arq.md §4) is dropped as if it had not decoded
         try:
             ext = F.Control.unpack(payloads).ext
             if F.T_ID in ext:
-                body = ext[F.T_ID]
-                if len(body) < 10:
-                    raise ValueError(f"ID of {len(body)} B")
-                call, key = F.unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
+                call, key = F.unpack_id(ext[F.T_ID])
                 log.info("RX ID %s (session %04x)", call, key)
                 self._events.append(f"ID {call} {key}")
                 return True
             if F.T_CQ not in ext:
                 return False
-            body = ext[F.T_CQ]
-            if len(body) < 9:
-                raise ValueError(f"CQ of {len(body)} B")
-            self._events.append(f"CQFRAME {F.unpack_call(body[:8])} {body[8]}")
+            call, cap = F.unpack_cq(ext[F.T_CQ])
+            self._events.append(f"CQFRAME {call} {cap}")
             return True
         except ValueError as e:
             log.warning("RX malformed CQ/ID frame (%s): dropped", e)
             return False
 
-    def _start_tx(self, bursts: list, t: float, main: L.TxBurst):
+    def _start_tx(self, bursts: list, t: float, main: B.TxBurst):
         """Bursts back to back on one PTT (an ID frame with a session's
         burst). `main`: the one the session is told has gone, when all have."""
         xs = [PHY.tx_audio(b) for b in bursts]

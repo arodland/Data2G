@@ -1,6 +1,6 @@
 """The Data2G server: one radio, one integrated server, every port always on.
 
-ARQ sessions (gear-shifter phase H) on two TCP ports, as VARA: commands
+ARQ sessions (data2g.arq) on two TCP ports, as VARA: commands
 (8300, CR-terminated lines) and data (8301, the session's byte stream).
 
 Broadcast (docs/broadcast.md): frames on KISS port 8100 (VARA HF's KISS
@@ -30,12 +30,15 @@ BCAST * MISSED submode n_cw, BCAST n DROPPED k) once the client has sent a
 BCAST command, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
+
+Native: the Host (command semantics) is native/core/host; serve() is
+native/app/station.cpp and main() native/apps/data2g_host.cpp. Under
+`pytest --native` tests/native_subs/host.py substitutes Host.
 """
 
-import os
+from . import threads
 
-for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_v, "1")
+threads.cap_env(1)  # before numpy loads: receiver.py has the reasoning
 
 import argparse  # noqa: E402
 import itertools  # noqa: E402
@@ -48,17 +51,20 @@ import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
-from scipy import signal as sps  # noqa: E402
 
+from . import audio  # noqa: E402
+from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
 from .config import FS  # noqa: E402
-from .tnc import Decimator, Rigctld, _device, _pa_float  # noqa: E402
+from .tnc import KissServer, Rigctld  # noqa: E402
 
 log = logging.getLogger("data2g.host")
 VERSION = "Data2G 0.1"
+# caps are policy.CAP_HZ's keys (0: 500 Hz, 1: 1200, 2: 2400)
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
-BW_NAME = {0: "500", 1: "1200", 2: "2300"}
+BW_NAME = modes.BW_NAME
+KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
@@ -97,7 +103,7 @@ class Host:
         self.engine, self.cap, self.listening = engine, 2, False
         self.accept_addr: tuple[str, int] | None = None  # ACCEPT host:port
         self.dial = None  # serve(): (host, port) -> True once a connection there carries the session's data
-        engine.accept_connect = engine.session.accept_connect = self._accept_connect
+        engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.out_cmd: list[str] = []
@@ -136,7 +142,7 @@ class Host:
             except (RuntimeError, ValueError):
                 ok = False
         elif cmd == "DISCONNECT":
-            e.session.disconnect()
+            e.disconnect()
         elif cmd == "ABORT":
             e.abort()
             self.out_cmd.append("DISCONNECTED")
@@ -196,16 +202,14 @@ class Host:
         e = self.engine
         log.info("command client gone")
         if e.session.state in (S.CONNECTED, S.DISCONNECTING):
-            e.session.disconnect()
+            e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr = False, None
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
-            for n in [n for n in e.kiss.ports if n]:
-                e.kiss.close(n)
-            e.kiss.set_mode(0, e.kiss.broadcast)
+            e.kiss.reset()
             self._bcast = False
 
     def _accept_connect(self, caller: str, callee: str) -> bool:
@@ -230,7 +234,7 @@ class Host:
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
                 me = e.session.call  # the call dialed, when MYCALL gave several
-                src, dst = (me, peer) if e.session._master else (peer, me)
+                src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
@@ -248,11 +252,11 @@ class Host:
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")
-            if ptt and e.tx and e.tx[0].submode != self._mode:
-                self._mode = e.tx[0].submode
+            if ptt and e.tx_submode is not None and e.tx_submode != self._mode:
+                self._mode = e.tx_submode
                 self.out_cmd.append(f"MODE {self._mode}")
-        if e.receiver.channel_busy != self._busy:
-            self._busy = e.receiver.channel_busy
+        if e.channel_busy != self._busy:
+            self._busy = e.channel_busy
             self.out_cmd.append("BUSY ON" if self._busy else "BUSY OFF")
         # BUFFER, as VARA defines it: bytes the peer hasn't acknowledged yet,
         # sent or not. Pat blocks writes while BUFFER >= 7x its write (<= 250
@@ -266,13 +270,10 @@ class Host:
         # plain VARA figure. CHAT ON also reports it: the client watches
         # BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
-        unsent = unacked = len(e.session._pending_write)
-        if st:
-            unsent += st.tx.buf_off + len(st.tx.buf) - st.tx.stream_end
-            unacked += len(st.tx.buf)  # from the first unacked codeword on
+        unsent, unacked = e.session.queued_bytes()
         buffered = unacked
-        if st and hasattr(e.session.policy, "next_capacity") and self.buffer_credit != 0 and not e.session.chat:
-            credit = e.session.policy.next_capacity(st)
+        if (st and self.buffer_credit != 0 and not e.session.chat
+                and (credit := e.session.policy.next_capacity(st)) is not None):
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)
             buffered = unsent - credit if unsent > credit else min(unacked, 1)
@@ -291,110 +292,7 @@ def _addr(s: str, default_host: str) -> tuple[str, int] | None:
     return host.strip("[]") or default_host, int(port)
 
 
-class Interpolator:
-    """FS -> device rate, keeping filter state across blocks (per-block
-    resampling would click at every block edge and splatter)."""
-
-    def __init__(self, rate: int):
-        self.u = rate // FS
-        self.taps = sps.firwin(32 * self.u + 1, 0.9 * FS / 2, fs=rate) * self.u if self.u > 1 else np.ones(1)
-        self.zi = np.zeros(len(self.taps) - 1)
-
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        up = np.zeros(len(x) * self.u)
-        up[:: self.u] = x
-        y, self.zi = sps.lfilter(self.taps, 1.0, up, zi=self.zi)
-        return y
-
-
-class Player:
-    """Output from our own FIFO through a PortAudio callback. The loop runs on the input clock and hands
-    over 0.1 s at a time, which a blocking write can't bridge: with 4800-frame buffers PipeWire padded
-    64 zeros after every block (a 1.3 ms hole each 0.1 s, on air too), and with its default buffers
-    (~11 ms) any late step underruns. Callback periods are a multiple of 256 frames (2048 at 48 kHz: a
-    main thread holding the GIL made 1024 late), and the FIFO starts `lead` ahead of the card."""
-
-    def __init__(self, pa, nout: int, rate: int, device: int | None, lead_s: float):
-        self.nout, self.rate, self.lead = nout, rate, int(lead_s * rate)
-        self.fifo, self.lock, self.active, self.underruns = bytearray(), threading.Lock(), False, 0
-        self.s = pa.open(format=_pa_float(), channels=nout, rate=rate, output=True, output_device_index=device,
-                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._fill)
-
-    def _fill(self, _in, n, _t, _status):
-        need = n * self.nout * 4
-        with self.lock:
-            b = bytes(self.fifo[:need])
-            del self.fifo[:need]
-        if len(b) < need and self.active:
-            self.underruns += 1
-            log.warning("TX audio underrun (%d)", self.underruns)
-        return b + bytes(need - len(b)), 0  # 0: paContinue
-
-    def start(self):
-        """Key-up: queue the lead, so a late step doesn't leave the device empty."""
-        self.write(np.zeros(self.lead))
-        self.active = True
-
-    def write(self, y: np.ndarray):
-        with self.lock:
-            self.fifo += np.repeat(y.astype(np.float32), self.nout).tobytes()
-
-    def drain(self):
-        """Wait until everything queued has left the sound card (then PTT can drop without clipping)."""
-        self.active = False  # the last callback coming up short is the end, not an underrun
-        while True:
-            with self.lock:
-                left = len(self.fifo)
-            if not left:
-                break
-            time.sleep(left / (self.nout * 4 * self.rate) + 0.002)
-        time.sleep(self.s.get_output_latency())
-
-    def close(self):
-        self.s.close()
-
-
-class Capture:
-    """Input through a PortAudio callback into our own FIFO, read a block at a time. A blocking read
-    dropped whatever the card's small buffer couldn't hold while the loop was busy (a slow step, the
-    drain after TX): ~50 s of a 14 min session, holes of 60-290 ms inside bursts, each one fatal."""
-
-    def __init__(self, pa, nin: int, rate: int, device: int | None):
-        self.nin, self.rate = nin, rate
-        self.fifo, self.cond, self.overflows, self._late = bytearray(), threading.Condition(), 0, False
-        self.s = pa.open(format=_pa_float(), channels=nin, rate=rate, input=True, input_device_index=device,
-                         frames_per_buffer=256 * max(1, rate // 6000), stream_callback=self._take)
-
-    def _take(self, data, _n, _t, status):
-        if status & 2:  # paInputOverflow: the callback itself was late (GIL), samples are gone
-            self.overflows += 1
-            log.warning("RX audio overflow (%d)", self.overflows)
-        with self.cond:
-            self.fifo += data
-            self.cond.notify()
-        return None, 0  # 0: paContinue
-
-    def read(self, frames: int, stop: threading.Event) -> np.ndarray | None:
-        """The next `frames` frames, left channel (None once `stop` is set)."""
-        need = frames * self.nin * 4
-        with self.cond:
-            while len(self.fifo) < need:
-                if stop.is_set():
-                    return None
-                self.cond.wait(0.5)
-            b = bytes(self.fifo[:need])
-            del self.fifo[:need]
-            behind = len(self.fifo) / (self.nin * 4 * self.rate)
-        if behind > 1.0 and not self._late:
-            log.warning("RX audio %.1f s behind the card", behind)
-        self._late = behind > 1.0
-        return np.frombuffer(b, dtype=np.float32)[::self.nin].astype(np.float64)
-
-    def close(self):
-        self.s.close()
-
-
-# --- sockets and audio ---------------------------------------------------------------
+# --- sockets ------------------------------------------------------------------------
 
 def _shut(c):
     """Close a socket another thread may be blocked reading: close() alone would hold the connection open."""
@@ -540,19 +438,11 @@ def _send_cmd(port, host, asker=None):
     host.out_cmd.clear()
 
 
-def _channels(pa, index: int | None, kind: str) -> int:
-    """2 if the device (None: the default) has two or more channels of this kind, else 1."""
-    d = pa.get_device_info_by_index(index) if index is not None else (
-        pa.get_default_input_device_info() if kind == "input" else pa.get_default_output_device_info())
-    return 2 if d["maxInputChannels" if kind == "input" else "maxOutputChannels"] >= 2 else 1
-
-
 def serve(a, pa, stop: threading.Event | None = None):
     """Run until SIGINT/SIGTERM (or `stop` is set)."""
     from .kisslink import KissLink
-    from .tnc import KissServer
 
-    link = KissLink(cap={2400: 2, 500: 0}[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
+    link = KissLink(cap=KISS_BW_CAP[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
@@ -564,14 +454,14 @@ def serve(a, pa, stop: threading.Event | None = None):
     kiss = KissServer((a.kiss_address, a.kiss_port), lambda *f: inbox.put(("kiss", f)), link.command)
     threading.Thread(target=kiss.serve_forever, name="kiss", daemon=True).start()
     rig = Rigctld(a.rigctld_host, a.rigctld_port)
-    dec, interp = Decimator(a.sample_rate), Interpolator(a.sample_rate)
+    dec, interp = audio.Decimator(a.sample_rate), audio.Interpolator(a.sample_rate)
     per = BLOCK * (a.sample_rate // FS)
     # Stereo where the device has it (left channel in, the same signal on both out): PortAudio's ALSA
     # host API corrupts the heap reading or writing a mono stream on a PipeWire device that has more
     # channels (glibc aborts in the first read, e.g. "malloc(): invalid size (unsorted)").
-    nin, nout = _channels(pa, a.input_device, "input"), _channels(pa, a.output_device, "output")
-    inp = Capture(pa, nin, a.sample_rate, a.input_device)
-    out = Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
+    nin, nout = audio.channels(pa, a.input_device, "input"), audio.channels(pa, a.output_device, "output")
+    inp = audio.Capture(pa, nin, a.sample_rate, a.input_device)
+    out = audio.Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
     gain = 10 ** (a.output_volume / 20)
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
@@ -602,7 +492,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                         host.data_in(d)
                     else:
                         log.info("ACCEPT: the far end closed: disconnecting")
-                        engine.session.disconnect()
+                        engine.disconnect()
                 elif kind == "kiss":
                     port, frame, ack = v
                     link.enqueue(frame, port, ack)
@@ -642,9 +532,8 @@ def serve(a, pa, stop: threading.Event | None = None):
             else:
                 data.send(bytes(host.out_data))
             host.out_data.clear()
-            for port, f in engine.kiss_rx:
+            for port, f in engine.take_kiss_rx():
                 kiss.broadcast(f, port)
-            engine.kiss_rx.clear()
             for port, ack in link.take_acks():
                 kiss.send_ack(ack, port)
     finally:
@@ -697,13 +586,14 @@ def main():
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
     a = ap.parse_args()
     if a.list_modes:
-        print("\n".join(mode_lines({2400: 2, 500: 0}[a.kiss_bw])))
+        print("\n".join(mode_lines(KISS_BW_CAP[a.kiss_bw])))
         return
     if a.broadcast_mode is not None:
-        from .arq import policy as G
-        from .arq.modes import MODES
+        from .kisslink import check_mode
 
-        if a.broadcast_mode not in MODES or MODES[a.broadcast_mode] not in G.allowed({2400: 2, 500: 0}[a.kiss_bw]):
+        try:
+            check_mode(a.broadcast_mode, KISS_BW_CAP[a.kiss_bw])
+        except ValueError:
             ap.error(f"--broadcast-mode {a.broadcast_mode}: not a mode within {a.kiss_bw} Hz")
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(message)s")
     a.record_dir = Path(a.record_dir) if a.record_dir else None
@@ -713,15 +603,12 @@ def main():
     pa = pyaudio.PyAudio()
     try:
         if a.list_audio_devices:
-            for i in range(pa.get_device_count()):
-                d = pa.get_device_info_by_index(i)
-                print(f"{i:3d}  in {d['maxInputChannels']:2d}  out {d['maxOutputChannels']:2d}  "
-                      f"{int(d['defaultSampleRate']):6d} Hz  {d['name']}")
+            audio.list_devices(pa)
             return
         if a.sample_rate % FS:
             ap.error(f"--sample-rate must be a multiple of {FS}")
-        a.input_device = _device(pa, a.input_device, "input")
-        a.output_device = _device(pa, a.output_device, "output")
+        a.input_device = audio.find_device(pa, a.input_device, "input")
+        a.output_device = audio.find_device(pa, a.output_device, "output")
         serve(a, pa)
     finally:
         pa.terminate()

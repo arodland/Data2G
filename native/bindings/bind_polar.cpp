@@ -1,3 +1,5 @@
+// data2g.polar over native/core/polar: PolarCode, the CA-SCL decoder and
+// the GA designs compiled in.
 #include "convert.hpp"
 #include "polar/polar.hpp"
 
@@ -30,7 +32,7 @@ void bind_polar(py::module_& m) {
         .def_property_readonly("sent", [](const PolarCode& c) { return np<std::int64_t>(std::span<const std::uint16_t>(c.sent)); })
         .def_property_readonly("punctured", [](const PolarCode& c) { return np<std::int64_t>(std::span<const std::uint16_t>(c.punctured)); })
         .def("encode", [](const PolarCode& c, const In<std::uint8_t>& bits) { return np(c.encode(mat(bits))); });
-    p.def("polar_code", [](const std::string& name) { return polar::polar_code(spec(name)); });
+    p.def("polar_code", [](const std::string& name) { return codes::polar_code(codes::spec(spec(name))); });
 
     py::class_<SCLDecoder>(p, "SCLDecoder")
         .def(py::init<PolarCode, int>(), py::arg("code"), py::arg("list_size") = 8)

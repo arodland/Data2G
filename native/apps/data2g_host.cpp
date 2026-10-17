@@ -16,6 +16,7 @@
 #include "generated/config.hpp"
 
 #ifdef DATA2G_HAVE_AUDIO
+#include "audio/audio.hpp"
 #include "audio/card.hpp"
 #endif
 
@@ -47,7 +48,7 @@ int main(int argc, char** argv) {
 #ifdef DATA2G_HAVE_AUDIO
         for (const auto& [what, devs] : {std::pair{"input", audio::card::input_devices()}, {"output", audio::card::output_devices()}}) {
             std::printf("%s:\n", what);
-            for (std::size_t i = 0; i < devs.size(); ++i) std::printf("%3zu  %2d ch  %s\n", i, devs[i].channels, devs[i].name.c_str());
+            audio::print_devices(devs);
         }
 #else
         std::printf("built without sound card audio: no sound cards (use --audio-io)\n");

@@ -25,7 +25,7 @@ from data2g.config import SUBMODES
 
 
 def compute(spec) -> dict:
-    out = {"fingerprint": codes._fingerprint(spec), "perm": codes.compute_interleaver(spec)}
+    out = {"fingerprint": codes.fingerprint(spec), "perm": codes.compute_interleaver(spec)}
     if spec.code == "polar":
         from data2g import polar
 

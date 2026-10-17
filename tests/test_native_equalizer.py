@@ -11,7 +11,7 @@ import copy
 
 import numpy as np
 import pytest
-from conftest import EQUALIZER_NATIVE
+from native_subs.base import EQUALIZER_NATIVE
 
 from data2g import codes, equalizer, hfchannel, modem
 from data2g.arq import phy
@@ -72,7 +72,7 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     shift = py.window_shift(sup)
     assert ne.window_shift(sup) == shift
     sup = (sup[0] - shift, sup[1] - shift)
-    a, b = ne._freq_smooth(h, sup, bb), py._freq_smooth(h, sup, bb)
+    a, b = ne.freq_smooth(h, sup, bb), py.freq_smooth(h, sup, bb)
     close(a[0], b[0], "hs")
     assert a[2] == b[2]
     assert a[1] == pytest.approx(b[1], rel=RTOL)  # inf == inf on narrow bands

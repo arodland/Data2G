@@ -1,3 +1,5 @@
+// data2g.modem's burst timing (native/core/modem/timing.hpp) as
+// data2g_native.timing: bands and submodes by name.
 #include "convert.hpp"
 #include "modem/timing.hpp"
 
@@ -17,6 +19,7 @@ void bind_timing(py::module_& m) {
     t.def("frames_on_air", [](const std::string& name, int n_cw) { return modem::frames_on_air(spec(name), n_cw); });
     t.def("burst_end", [](long p0, const std::string& name, int n_cw) { return modem::burst_end(p0, spec(name), n_cw); });
     t.def("head_samples", [](const std::string& band) { return modem::head_samples(band); });
+    t.def("receive_head", [](const std::string& band) { return modem::receive_head(band); });
     t.def("burst_seconds", [](const std::string& name, int n_cw) { return modem::burst_seconds(spec(name), n_cw); });
 }
 

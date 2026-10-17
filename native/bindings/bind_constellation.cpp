@@ -1,3 +1,5 @@
+// data2g.constellation over native/core/constellation: the frozen point
+// sets by name, mapping, LLRs and the ACE projection.
 #include "constellation/constellation.hpp"
 #include "convert.hpp"
 

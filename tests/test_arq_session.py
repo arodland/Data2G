@@ -16,7 +16,7 @@ from test_arq import MODES, FakeRx
 PTT_S, HEADER_S, DECODE_S = 0.1, 0.25, 0.2
 
 
-class Policy:
+class Policy(L.Policy):
     def __init__(self, rng, change=0.1):
         self.rng, self.change, self.mode = rng, change, "m22"
 

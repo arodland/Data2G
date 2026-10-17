@@ -20,6 +20,11 @@ Circulant convention: row i of a block with shift s connects to column
 Encoder and decoder: numpy. Decoder: batched BP, or normalized min-sum
 with an optional per-iteration normalization (neural min-sum);
 decoders_torch has it on torch for GPU studies.
+
+Native: native/core/ldpc (shift tables compiled in from
+codes_data/ldpc_shifts.npz). Parity: tests/test_native_ldpc.py; under
+`pytest --native` qc_code and Decoder (and MinSumDecoder, its old name)
+are substituted.
 """
 
 from dataclasses import dataclass, field
@@ -31,9 +36,9 @@ import numpy as np
 DATA = Path(__file__).parent / "codes_data"
 SHIFTS = DATA / "ldpc_shifts.npz"
 CORE = 4
-KB = {1: 22, 2: 10}  # info columns per base graph
+KB = {1: 22, 2: 10}  # info columns per base graph (5G NR, 3GPP TS 38.212 5.3.2)
 
-# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15}.
+# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15} (TS 38.212 Table 5.3.2-1).
 LIFTING_SIZES = sorted({a << j for a in (2, 3, 5, 7, 9, 11, 13, 15) for j in range(8) if a << j <= 384})
 
 
@@ -51,7 +56,9 @@ def mask(bg: int) -> np.ndarray:
 def layout(k: int, n: int, bg: int | None = None) -> tuple[int, int]:
     """(base graph, Z) for k bits in n: graph 2 for short blocks and low
     rates, and the smallest lifting size whose (graph 2: k-dependent)
-    info columns hold k."""
+    info columns hold k. The thresholds are 5G NR's, not tuned here: base
+    graph selection as TS 38.212 7.2.2 (with k for its A), graph 2's k_b
+    as its code block segmentation (5.2.2)."""
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
@@ -68,6 +75,13 @@ def qc_code(k: int, n: int, bg: int | None = None) -> "QCLDPC":
         raise KeyError(f"no shift table for base graph {bg}, Z={z} (k={k}): "
                        "add one with scripts/own_shifts.py (gen, screen, PICKS, export)") from None
     return QCLDPC(base=base, z=z, kb=KB[bg], k=k, n=n)
+
+
+def sent_degrees(code: "QCLDPC") -> np.ndarray:
+    """Each transmitted bit's variable-node degree, in sent order: what
+    codes.compute_interleaver ranks code bits by (so H's layout reaches
+    every interleaver not frozen in data2g/format)."""
+    return np.bincount(code.edges[1], minlength=code.n_cols)[code.sent]
 
 
 def _gf2_inv(a: np.ndarray) -> np.ndarray:
@@ -196,14 +210,34 @@ def _phi(x):
     return -np.log(np.tanh(x / 2))
 
 
-class MinSumDecoder:
+def check_layout(code: QCLDPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The flooding decoders' edge layout (Decoder, decoders_torch.Decoder):
+    var (n_edges,): each edge's variable, edges in check order; chk
+    (checks, dmax): each check's edge ids, padded with n_edges (a slot that
+    reads +BIG); pad (checks, dmax): which slots are padding. Edges are in
+    check order, so out[:, ~pad] of a (B, checks, dmax) array lists them in
+    edge order."""
+    r, c = code.edges
+    order = np.argsort(r, kind="stable")
+    r, c = r[order], c[order]
+    deg = np.bincount(r, minlength=code.mb * code.z)
+    start = np.concatenate([[0], np.cumsum(deg)[:-1]])
+    j = np.arange(deg.max())
+    pad = j[None, :] >= deg[:, None]
+    chk = start[:, None] + j
+    chk[pad] = len(r)
+    return c, chk, pad
+
+
+class Decoder:
     """Batched flooding decoder on a QCLDPC, in numpy: sum-product (BP,
     `alpha=None`, the default) or normalized min-sum with `alpha`.
 
     BP is the default because this modem's bit rate (a few kb/s) makes
     its cost irrelevant even on a phone; min-sum exists for hardware.
     Stops early once every codeword in the batch satisfies H.
-    decoders_torch.MinSumDecoder is the same on torch, for GPU studies.
+    decoders_torch.Decoder is the same on torch, for GPU studies; native:
+    ldpc::Decoder.
     """
 
     BIG = 1e4  # LLR for filler bits: known zeros
@@ -212,20 +246,9 @@ class MinSumDecoder:
         import scipy.sparse
 
         self.code = code
-        r, c = code.edges
-        order = np.argsort(r, kind="stable")
-        r, c = r[order], c[order]
-        self.n_edges = len(r)
-        self.var = c
-        deg = np.bincount(r, minlength=code.mb * code.z)
-        dmax = deg.max()
-        # (checks, dmax) edge ids, padded with n_edges (a slot that reads +BIG).
-        # Edges are in check order, so out[:, ~pad] lists them in edge order.
-        start = np.concatenate([[0], np.cumsum(deg)[:-1]])
-        j = np.arange(dmax)
-        self.pad = j[None, :] >= deg[:, None]
-        self.chk = start[:, None] + j
-        self.chk[self.pad] = self.n_edges
+        self.var, self.chk, self.pad = check_layout(code)
+        c = self.var
+        self.n_edges = len(c)
         # (n_cols, n_edges): sums each variable's incoming messages
         self.gather = scipy.sparse.csr_matrix(
             (np.ones(len(c), np.float32), (c, np.arange(len(c)))), shape=(code.n_cols, len(c)))
@@ -241,7 +264,8 @@ class MinSumDecoder:
 
     def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False):
         """-> (info bit decisions (B, k) uint8, converged (B,) bool), and
-        with `posterior` the a-posteriori LLRs of the sent bits (B, n)."""
+        with `posterior` the a-posteriori LLRs of the sent bits (B, n).
+        (The modem passes iters=codes.LDPC_ITERS.)"""
         ch = self.channel_llrs(np.clip(np.asarray(llr_sent, np.float32), -CH_CLAMP, CH_CLAMP))
         b = ch.shape[0]
         c2v = np.zeros((b, self.n_edges), np.float32)
@@ -279,3 +303,6 @@ class MinSumDecoder:
     def syndrome(self, hard):
         h = np.concatenate([hard[:, self.var], np.zeros((hard.shape[0], 1), hard.dtype)], 1)
         return (h[:, self.chk].sum(axis=-1) % 2 == 0).all(axis=1)
+
+
+MinSumDecoder = Decoder  # the old name, kept for scripts/

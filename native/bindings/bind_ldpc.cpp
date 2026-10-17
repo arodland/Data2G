@@ -1,3 +1,6 @@
+// data2g.ldpc over native/core/ldpc: qc_code and the batched Decoder
+// (MinSumDecoder, its old name, as an alias), shaped where codes.py reads
+// them like the Python ones.
 #include <optional>
 
 #include "convert.hpp"
@@ -63,9 +66,9 @@ void bind_ldpc(py::module_& m) {
         }
     }, py::arg("k"), py::arg("n"), py::arg("bg") = py::none());
 
-    // ldpc.MinSumDecoder: decode(llr_sent, iters, alpha, posterior) -> (bits
+    // ldpc.Decoder: decode(llr_sent, iters, alpha, posterior) -> (bits
     // uint8 (B, k), ok bool (B,)), plus posterior float32 (B, n) if asked.
-    py::class_<ldpc::Decoder>(l, "MinSumDecoder")
+    py::class_<ldpc::Decoder>(l, "Decoder")
         .def(py::init<const ldpc::Code&>())
         .def("decode", [](const ldpc::Decoder& d, const In<float>& llr, int iters, py::object alpha, bool posterior) {
             std::vector<float> a;
@@ -85,6 +88,7 @@ void bind_ldpc(py::module_& m) {
             if (posterior) return py::tuple(py::make_tuple(np(r.bits), flags(r.ok), np(r.posterior)));
             return py::tuple(py::make_tuple(np(r.bits), flags(r.ok)));
         }, py::arg("llr_sent"), py::arg("iters") = 30, py::arg("alpha") = py::none(), py::arg("posterior") = false);
+    l.attr("MinSumDecoder") = l.attr("Decoder");  // the old name, kept for scripts/
 }
 
 }  // namespace data2g::bind

@@ -1,28 +1,57 @@
 """Burst modem: codeword payloads <-> passband audio.
 
-Burst: silence | preamble | header | n_cw codewords of whole frames |
-closing pilot | silence. Frames are SSTVAE's (1 pilot + 5 data symbols,
-every carrier of the submode's band). The closing pilot is one extra pilot symbol so
-the last frame is interpolated between two pilots rather than
-extrapolated from one; it costs 24 ms and matters most to short bursts.
+Burst on air: silence | preamble | header | n_cw codewords of whole frames
+(on w and w48 a header copy's frame among them) | closing pilot | silence.
+Frames are SSTVAE's (1 pilot + 5 data symbols, every carrier of the
+submode's band). The closing pilot is one extra pilot symbol so the last
+frame is interpolated between two pilots rather than extrapolated from
+one; it costs 24 ms and matters most to short bursts. A submode's frames
+may be on other carriers than its preamble and header, which are its sync
+band's (config.BandSpec.sync).
 
-RX follows SSTVAE's `Modem.demodulate`: preamble acquisition, channel
-reference from the preamble, soft-combined Golay header, per-frame
-sample-clock tracking from the pilot phase slope. Channel estimation is
-data2g.equalizer (burst-wide, 2-D LMMSE), not SSTVAE's Catmull-Rom.
+Sections, in file order:
+- burst timing: header_layout .. burst_seconds, arithmetic on config.
+- header: a (N, 16) linear code (codes_data/header_code*.npy) over
+  submode | n_cw - 1 | CRC-6, ML-decoded over the valid words only; Accept
+  narrows which words count.
+- transmit: modulate, modulate_bits, burst_waveform, ACE.
+- receive, search: _best_header tries each preamble hypothesis at +-2
+  repeat alignments, reading a header at each (_read_header). Offline,
+  receive() searches x itself. A streaming receiver (receiver.Receiver) calls
+  find_burst, confirms the lock with pilot_coherence, finds a burst whose
+  preamble faded with find_copy (from the header copy), then hands
+  receive() the head or the lock.
+- receive, frames: _demod_frames (sample-clock tracking from the pilots,
+  timing slips), receive() up to the channel estimate and raw symbols.
+- decode: data_channel, noise_var, soft_bits, burst_soft and slot_soft
+  (arq/phy's, on its DD re-estimate too), snr_db, symbol_times,
+  decode_received.
+
+The receive side's results are dicts typed by Lock, HeaderRead, Received
+and DataEstimate (after Burst). receive()'s Received is what receiver.Receiver
+and arq/phy build on; decode_received is the plain decode of it (no CRC
+masks).
+Channel estimation is data2g.equalizer (burst-wide, 2-D LMMSE), not
+SSTVAE's Catmull-Rom.
+
+Native: native/core/modem/modem.hpp (this module; results as structs),
+modem/timing.hpp (burst timing), generated/modem.hpp (the constants and
+header codes, written by tools/gen_native_tables.py).
 """
 
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 import numpy as np
 
 from . import codes, constellation, equalizer
 from .config import (
     BANDS,
+    BY_INDEX,
     CLIP,
-    clip_consts,
+    ClipConsts,
     DATA_SYMS_PER_FRAME,
     DEMOD_BACKOFF,
     FRAME_SAMPLES,
@@ -44,14 +73,12 @@ from .config import (
     SYMS_PER_FRAME,
     SubmodeSpec,
 )
-from .waveform import ofdm
+from .waveform import dsp, ofdm
 from .waveform import sync as _sync
-from .waveform.dsp import freq_correct, to_baseband, tx_condition
-from .waveform.sync import SyncError, acquire
+from .waveform.sync import SyncError
 
-__all__ = ["modulate", "demodulate", "receive", "Burst", "SyncError"]
-
-PILOT = ofdm.pilot_sequence()  # wide band's; per-band code uses band.pilot
+# The receiver's constants are mirrored into native/core/generated/modem.hpp
+# (tools/gen_native_tables.py modem_hpp names them): regenerate after a change.
 REF_REPEATS = 4
 # The header is read before the delay profile is known, at acquisition's
 # timing: window centred in the CP, so timing may be off by +-16 samples
@@ -97,15 +124,8 @@ HEADER_MIN_SCORE = {"w": 0.33, "n10": 0.30, "w48": 0.26}
 # it. Wide AWGN -8 dB end to end: fail 6.25% -> 3.5% (0.08: 4.0%); no
 # change on mpd, where the other hypotheses do the rescuing.
 ALT_PENALTY = 0.04
-# (sync band name, header index) -> submode
-BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}
 # bands that carry a header, i.e. whose preambles the receiver looks for
 SYNC_BANDS = [name for name, b in BANDS.items() if not b.sync]
-
-
-def _hosts(band: str) -> bool:
-    """Whether other bands' frames follow this band's header."""
-    return any(b.sync == band for b in BANDS.values())
 
 
 @dataclass
@@ -119,20 +139,90 @@ class Burst:
     soft: np.ndarray | None = None  # (n_cw, coded_bits) soft bits, mapping order: codes.combine for resends
 
 
-# --- header -----------------------------------------------------------------
-# Per band: 16 bits coded to 2 * nc * header_syms bits on QPSK, decoded by
-# exact ML (config: header). Codes from scripts/design_header.py.
+# --- result types -------------------------------------------------------------
+# The receive side's results are plain dicts (native returns the same keys:
+# modem.hpp's structs, converted in native/bindings/bind_modem.cpp); these
+# say what they hold. Positions are sample indices into the caller's buffer.
+# "band" is the sync band in a Lock or HeaderRead, the data band in a
+# Received and DataEstimate (they differ for n4, which syncs on n10).
 
-QPSK = constellation.gray_qam(2)
+class CopyRef(TypedDict):
+    word: int  # the 16-bit header word the copy read
+    pc: int  # the copy frame's first sample
 
 
-@lru_cache(maxsize=None)
-def header_code(band: str) -> np.ndarray:
-    name = "header_code.npy" if band == "w" else f"header_code_{band}.npy"
-    g = np.load(Path(__file__).parent / "codes_data" / name)
-    b = BANDS[band]
-    assert g.shape == (16, 2 * b.nc * b.header_syms), (band, g.shape)
-    return g
+class Lock(TypedDict):
+    """find_burst's or find_copy's: where a burst is (it may run past the
+    buffer). Native modem::Lock."""
+
+    spec: SubmodeSpec
+    n_cw: int
+    start: int  # the preamble's first sample
+    score: float  # the header's normalized ML correlation
+    band: str  # the sync band
+    end: int  # one past the closing pilot
+    p0: int  # the first frame's first sample
+    cfo: float  # Hz
+    copy: NotRequired[CopyRef]  # set by find_copy only
+
+
+class HeaderRead(TypedDict):
+    """_read_header's (and _copy_header's): a header read at one start.
+    Native modem::HeaderRead."""
+
+    word: int
+    hdr: tuple[SubmodeSpec, int] | None  # (spec, n_cw); None under the score floor
+    score: float
+    pending_copy: bool  # the header copy is not yet in the buffer
+    y: np.ndarray  # (header_syms, nc) the header's data symbols
+    y_all: np.ndarray  # every header symbol, pilots among them (header_layout)
+    h_pre: np.ndarray  # (nc,) channel from the preamble's last REF_REPEATS repeats
+    h_first: np.ndarray  # (nc,) channel at the first frame pilot
+    p0: int  # the first frame's first sample
+    start: int  # the preamble's first sample
+    band: str  # the sync band
+    n0_pre: float  # noise from the preamble (equalizer.preamble_noise)
+    n0_pre_k: np.ndarray  # the same per carrier
+
+
+class DataEstimate(equalizer.ChannelEstimate):
+    """data_channel's: the pilots' estimate scaled to the channel the data
+    see (h and mse already include gain). Native modem::DataEstimate."""
+
+    clip_ratio: float  # clip noise over |h|^2 (noise_var)
+    gain: float  # data over pilot amplitude (Bussgang; config.CLIP)
+    band: str  # the data band
+
+
+class Received(TypedDict):
+    """receive()'s: a burst synchronized and equalized, up to soft bits.
+    Native modem::Received. cpm.receive's dict is another shape, marked
+    family="cpm"; arq/phy adds "_soft" (its soft bits, cached)."""
+
+    spec: SubmodeSpec
+    n_cw: int
+    raw: np.ndarray  # (n_f, 6, nc) data frames, the header copy's dropped; [:, 0] each frame's pilot
+    est: DataEstimate  # h, mse (n_f, 5, nc): aligned with raw[:, 1:]
+    acq: _sync.Acquisition
+    band: str  # the data band
+    hp: np.ndarray  # (frames on air + 1, nc) pilots, the copy frame's and the closing one included
+    kc: int | None  # the header copy's frame among those on air (copy_frame)
+    cfo: float  # Hz, the residual included
+    p0: int  # the first frame's first sample
+    shift: int  # samples the demod window was moved (equalizer.window_shift)
+    steps: np.ndarray  # (frames on air + 1,) the drift tracker's step total per frame
+    slips: np.ndarray  # (frames on air + 1,) each frame's timing jump (_find_slip)
+    phi_ref: float  # the preamble channel's phase step across carriers (_bin_phase_step)
+    support: tuple[int, int]  # the delay support, after the shift
+    preamble_start: int
+    score: float  # the header's
+
+
+# --- burst timing (native: modem/timing.hpp) ----------------------------------
+
+def _hosts(band: str) -> bool:
+    """Whether other bands' frames follow this band's header."""
+    return any(b.sync == band for b in BANDS.values())
 
 
 def header_layout(band: str) -> np.ndarray:
@@ -181,6 +271,14 @@ def head_samples(band: str) -> int:
     return n + (HEADER_COPY_AFTER + 1) * FRAME_SAMPLES if band in HEADER_COPY_BANDS else n
 
 
+def receive_head(band: str) -> int:
+    """From the first sample of a preamble a streaming receiver found, the
+    audio to pass as receive(head=...): head_samples, plus room for
+    _best_header's reads up to two repeats late (2 M) and a symbol and a
+    repeat to spare."""
+    return head_samples(band) + NSYM + 3 * M
+
+
 def burst_seconds(spec: SubmodeSpec, n_cw: int) -> float:
     """On-air length of an n_cw-codeword burst, lead-in/out silence included."""
     sb = BANDS[spec.sync_band]
@@ -189,8 +287,26 @@ def burst_seconds(spec: SubmodeSpec, n_cw: int) -> float:
     return n / FS
 
 
-def _crc6(v: int) -> int:
-    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version."""
+# --- header -----------------------------------------------------------------
+# Per band: 16 bits coded to 2 * nc * header_syms bits on QPSK, decoded by
+# exact ML (config: header). Codes from scripts/design_header.py.
+
+QPSK = constellation.gray_qam(2)
+
+
+@lru_cache(maxsize=None)
+def header_code(band: str) -> np.ndarray:
+    name = "header_code.npy" if band == "w" else f"header_code_{band}.npy"
+    g = np.load(Path(__file__).parent / "codes_data" / name)
+    b = BANDS[band]
+    assert g.shape == (16, 2 * b.nc * b.header_syms), (band, g.shape)
+    return g
+
+
+def crc6(v: int) -> int:
+    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version.
+    On air in every header word, v << 6 | crc6(v): the OFDM header's and
+    the CPM header's (cpm.header_word)."""
     reg = PROTOCOL_VERSION & 0x3F
     for i in range(9, -1, -1):
         fb = ((reg >> 5) & 1) ^ ((v >> i) & 1)
@@ -220,7 +336,7 @@ def header_bits(submode: int, n_cw: int, band: str = "w") -> np.ndarray:
     if not 0 <= submode < 1 << (10 - b):
         raise ValueError(f"submode index {submode} does not fit {band}'s header")
     v = (submode << b) | (n_cw - 1)
-    return (_word_bits((v << 6) | _crc6(v)) @ header_code(band)) % 2
+    return (_word_bits((v << 6) | crc6(v)) @ header_code(band)) % 2
 
 
 def _signs(words: np.ndarray, band: str) -> np.ndarray:
@@ -279,7 +395,7 @@ def _valid_words(band: str, accept: Accept | None = None) -> np.ndarray:
     else:
         lim = {SUBMODES[n].index: cw for n, cw in accept.max_cw if SUBMODES[n].sync_band == band}
         v = v[[(i := _split(int(x), band))[0] in lim and i[1] <= lim[i[0]] for x in v]]
-    return (v << 6) | np.array([_crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
+    return (v << 6) | np.array([crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
 
 
 @lru_cache(maxsize=None)
@@ -332,7 +448,7 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
         idx = (bits.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))).reshape(data.shape)
         project = ace_projector(spec, data, constellation.ace_dirs(spec.constellation)[idx])
     # the sync band's filter: it contains the data band (BandSpec.sync)
-    return tx_condition(
+    return dsp.tx_condition(
         x, spec.headroom, b.spec.clip_overshoot,
         active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES), bandpass=BANDS[spec.sync_band].tx_bandpass,
         project=project, closing=spec.ace,
@@ -510,7 +626,7 @@ def _demod_frames(
     return raw[:n_f], raw[:, 0] / b.pilot, steps, slips
 
 
-def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | None = None) -> dict:
+def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | None = None) -> HeaderRead:
     """Header decode assuming the preamble starts at `start`."""
     b = ofdm.band(band)
     # Channel reference from the last REF_REPEATS repeats only. Detection
@@ -543,7 +659,7 @@ def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | No
     # frequency-smoothed onto a CP-long delay support (as the backed-off
     # window sees it) before interpolating: genie-sync header failures,
     # wide band, -8 dB AWGN 43% -> 14%, mpd 0 dB 4.7% -> 3.2%
-    h_p = equalizer._freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
+    h_p = equalizer.freq_smooth(h_p, (HEADER_BACKOFF, HEADER_BACKOFF + NCP), b.bb)[0]
     ys, hs = y_all[~layout], (1 - a) * h_p[j] + a * h_p[j + 1]
     soft = constellation.llr(ys, hs, np.ones(ys.shape), QPSK)
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
@@ -615,7 +731,7 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
     good, detected, waiting = [], 0, False
     for name in bands or (accept.bands if accept else SYNC_BANDS):
         try:
-            acq_b = acquire(z0, band=ofdm.band(name), S=stats.get(name) if stats else None)
+            acq_b = _sync.acquire(z0, band=ofdm.band(name), S=stats.get(name) if stats else None)
         except SyncError:
             continue
         detected += 1
@@ -632,7 +748,7 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
             if not complete and start + 2 * M > len(z0) - hdr_end:
                 waiting |= not final
                 continue
-            zb = freq_correct(z0, f)
+            zb = dsp.freq_correct(z0, f)
             for k in (0, -1, 1, -2, 2):
                 if not 0 <= start + k * M <= len(z0) - hdr_end:
                     continue
@@ -655,13 +771,12 @@ def _best_header(z0: np.ndarray, bands=None, complete: bool = True, accept: Acce
     return hd, acq, z
 
 
-def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: dict | None = None) -> dict:
+def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: dict | None = None) -> Lock:
     """Where the first burst in `x` is, from its preamble and header
     alone, so a streaming receiver knows how much audio to wait for
-    (`stats`: per band, sync.StreamDetector's statistic for x's starts):
-    {spec, n_cw, start (first preamble sample), end (one past the closing
-    pilot)}. The burst may run past the end of `x`. Raises SyncError."""
-    hd, acq, _ = _best_header(to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
+    (`stats`: per band, sync.StreamDetector's statistic for x's starts).
+    The burst may run past the end of `x`. Raises SyncError."""
+    hd, acq, _ = _best_header(dsp.to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
                               stats=stats)
     spec, n_cw = hd["hdr"]
     return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
@@ -676,7 +791,7 @@ PILOT_PAIRS = 4
 PILOT_NOISE = {"w": 0.30, "n10": 0.44, "n4": 0.68, "w48": 0.20}
 
 
-def pilot_coherence(x: np.ndarray, lock: dict, n_max: int = 8, latest: bool = False) -> list[float]:
+def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = False) -> list[float]:
     """For a streaming lock (find_burst's dict, same sample origin as x):
     per consecutive pair of the frame pilots already in x (the first n_max
     pairs, or with `latest` the newest), |sum over carriers of y_f
@@ -693,7 +808,7 @@ def pilot_coherence(x: np.ndarray, lock: dict, n_max: int = 8, latest: bool = Fa
         return []
     lo = max(0, lock["p0"] + f0 * FRAME_SAMPLES - 2 * NSYM)
     hi = lock["p0"] + (f1 - 1) * FRAME_SAMPLES + 3 * NSYM
-    z = freq_correct(to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
+    z = dsp.freq_correct(dsp.to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
     y = [b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + NCP, DEMOD_BACKOFF) for f in range(f0, f1)]
     return [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
                   / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
@@ -717,10 +832,10 @@ COPY_DETECT = 14.0
 
 
 def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndarray | None = None,
-              level: float | None = None) -> dict | None:
+              level: float | None = None) -> Lock | None:
     """A burst in real audio `x` found from its frame pilots and header copy
-    alone (the preamble and first header lost): find_burst's dict plus
-    "copy" (what receive() needs to rebuild the header), or None. The burst
+    alone (the preamble and first header lost): a Lock with "copy" (what
+    receive() needs to rebuild the header), or None. The burst
     may run past the end of x. `C`, `level`: the preamble matched filter's
     outputs for x's starts (sync.StreamDetector.C) and noise level, if a
     stream has them; computed here otherwise.
@@ -741,13 +856,11 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     if C is not None and level is None:
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
-    z0 = to_baseband(np.asarray(x, dtype=np.float64))
-    freqs = _sync._cfo_grid()
+    z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
+    freqs = _sync.cfo_grid()
     if C is None:
-        t = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
-        C = _sync._repeat_corrs(z0, t / np.linalg.norm(t), list(freqs))
-        level = float((np.quantile(np.abs(C) ** 2, _sync.NOISE_QUANTILE, axis=1)
-                       / -np.log(1 - _sync.NOISE_QUANTILE)).min())
+        C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
+        level = _sync.noise_level(C)
     n = C.shape[1] - COPY_PAIRS * FRAME_SAMPLES
     m = n // FRAME_SAMPLES
     if m < 1:
@@ -758,7 +871,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     mag = np.abs(fold).max(axis=0)
     # on noise each product's magnitude is about the level, and the m x
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
-    # search's CPU) only past COPY_DETECT
+    # search's CPU) only past COPY_DETECT. Left on the function for tests
+    # (instrumentation, not an interface: native returns it by out-param)
     find_copy.peak = float(mag.max() / (level * np.sqrt(m * COPY_PAIRS)))
     if find_copy.peak < COPY_DETECT:
         return None
@@ -774,7 +888,7 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     for ph in grids:
         i = int(np.argmax(np.abs(fold[:, ph])))
         for f in _cfo_aliases(fold[i, ph], float(freqs[i])):
-            z = freq_correct(z0, f)
+            z = dsp.freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
                     llr = _copy_llr(z, pc, band, sb.header_syms)
@@ -806,7 +920,7 @@ def _cfo_aliases(d: complex, centre: float) -> list[float]:
     return [frac + k * alias for k in (k0 - 1, k0, k0 + 1) if abs(frac + k * alias - centre) <= _sync.STEP_HZ / 2 + 0.5]
 
 
-def _copy_header(z: np.ndarray, lock: dict) -> dict:
+def _copy_header(z: np.ndarray, lock: Lock) -> HeaderRead:
     """_read_header's dict for a copy lock (z frequency-corrected): the header
     it read, its phase reference from the copy frame's pilot (the preamble
     faded)."""
@@ -819,7 +933,7 @@ def _copy_header(z: np.ndarray, lock: dict) -> dict:
 
 
 def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None,
-            copy: dict | None = None) -> dict:
+            copy: Lock | None = None) -> Received:
     """Everything up to soft bits for the first burst in `x`: the
     synchronisation state (so an analysis script can replay it on
     another signal) and the equalizer output. `bands`: the sync bands to
@@ -828,18 +942,18 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     only those. Acquisition over a whole 11 s burst took 1-4 s of CPU,
     nearly all of receive's time. `copy`: find_copy's lock (same sample
     origin as x): no preamble search, the header its copy read."""
-    z0 = to_baseband(np.asarray(x, dtype=np.float64))
+    z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     if copy is not None:
         if copy["end"] > len(z0):
             raise SyncError("burst runs past the buffer")
-        z = freq_correct(z0, copy["cfo"])
+        z = dsp.freq_correct(z0, copy["cfo"])
         hd = _copy_header(z, copy)
         acq = _sync.Acquisition(copy["start"], copy["cfo"], 0.0)
     elif head is None:
         hd, acq, z = _best_header(z0, bands, accept=accept)
     else:
         hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept, final=True)
-        z = freq_correct(z0, acq.freq_offset)
+        z = dsp.freq_correct(z0, acq.freq_offset)
         spec, n_cw = hd["hdr"]
         if burst_end(hd["p0"], spec, n_cw) > len(z0):
             raise SyncError("burst runs past the buffer")
@@ -883,7 +997,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
     fine = equalizer.residual_cfo(hp)
     cfo_res = resolve_alias(fine, coarse)
-    z = freq_correct(z, cfo_res)
+    z = dsp.freq_correct(z, cfo_res)
     _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
     support = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
     shift = equalizer.window_shift(support)
@@ -891,7 +1005,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     support = (support[0] - shift, support[1] - shift)
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
-    est = data_channel(hp, support, db, hd["n0_pre"], clip_consts(db, spec.headroom, spec.ace, spec.constellation),
+    est = data_channel(hp, support, db, hd["n0_pre"], spec.clip,
                        n0_pre_k=hd["n0_pre_k"] if db == band else None, n_frames=n_f)
     if kc is not None:
         raw = np.delete(raw, kc, axis=0)
@@ -909,14 +1023,14 @@ def resolve_alias(fine: float, coarse: float) -> float:
 
 
 def data_channel(h_pilot: np.ndarray, support: tuple[int, int], band: str = "w",
-                 n0_pre: float = np.inf, clip: tuple | None = None, n0_pre_k=None, n_frames: int | None = None) -> dict:
+                 n0_pre: float = np.inf, clip: ClipConsts | None = None, n0_pre_k=None, n_frames: int | None = None) -> DataEstimate:
     """equalizer.estimate, rescaled from the pilots' channel to the one
     the data see. `clip` overrides config.CLIP[band] (clipper studies).
     `n_frames`: data frames, when the pilots include a header copy's."""
     est = equalizer.estimate(h_pilot, support, bb=ofdm.band(band).bb, n0_pre=n0_pre, n0_pre_k=n0_pre_k)
-    gains, default, ratio = clip or CLIP[band]
-    est["clip_ratio"] = ratio
-    g = gains.get(len(h_pilot) - 1 if n_frames is None else n_frames, default)
+    c = ClipConsts(*(clip or CLIP[band]))
+    est["clip_ratio"] = c.ratio
+    g = c.gain_for(len(h_pilot) - 1 if n_frames is None else n_frames)
     est["h"] = est["h"] * g
     est["mse"] = est["mse"] * g**2
     est["gain"] = g
@@ -924,7 +1038,7 @@ def data_channel(h_pilot: np.ndarray, support: tuple[int, int], band: str = "w",
     return est
 
 
-def noise_var(h: np.ndarray, est: dict) -> np.ndarray:
+def noise_var(h: np.ndarray, est: DataEstimate) -> np.ndarray:
     """Per-cu variance of thermal plus clip noise; add the estimate's own
     MSE when `h` is an estimate.
 
@@ -938,7 +1052,46 @@ def noise_var(h: np.ndarray, est: dict) -> np.ndarray:
 
 def soft_bits(raw: np.ndarray, h: np.ndarray, var: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     """LLRs from data symbols `raw`, channel `h` and per-cu noise `var`."""
-    return constellation.llr(raw[:, 1:], h, var, constellation.load(spec.constellation))
+    return constellation.llr(data_symbols(raw), h, var, constellation.load(spec.constellation))
+
+
+def data_symbols(raw: np.ndarray) -> np.ndarray:
+    """(n_f, 5, nc): receive()'s raw past each frame's pilot, aligned with est["h"]."""
+    return raw[:, 1:]
+
+
+def burst_soft(r: Received, est: DataEstimate | None = None) -> np.ndarray:
+    """(n_cw, coded_bits) soft bits in mapping order on `est` (r["est"], or
+    arq/phy's DD re-estimate): thermal, clip and estimation noise."""
+    spec, est = r["spec"], est or r["est"]
+    var = noise_var(est["h"], est) + est["mse"]
+    return np.asarray(codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
+
+
+def slot_soft(r: Received, est: DataEstimate, slot: int) -> np.ndarray:
+    """burst_soft(r, est)[slot] alone: codes.spread deals codeword symbols
+    round-robin, so the slot's are every n_cw-th of the burst's."""
+    n = r["n_cw"]
+    var = noise_var(est["h"], est) + est["mse"]
+    pick = lambda a: a.reshape(-1)[slot::n]  # noqa: E731
+    return constellation.llr(pick(data_symbols(r["raw"])), pick(est["h"]), pick(var),
+                             constellation.load(r["spec"].constellation))
+
+
+def snr_db(est: equalizer.ChannelEstimate, band: str) -> float:
+    """Pilot SNR (dB) on `band`'s carriers, in the SNR_REF_BW_HZ convention."""
+    return 10 * np.log10(est["p_sig"] / est["n0"] * BANDS[band].nc * RS / SNR_REF_BW_HZ)
+
+
+def symbol_times(r: Received) -> tuple[np.ndarray, np.ndarray]:
+    """On-air seconds from the first frame pilot of each data symbol, (n_f,
+    5) as est["h"]'s, and of each of r["hp"]'s pilots; the header copy's
+    frame accounted for."""
+    n_f, kc = len(r["raw"]), r["kc"]
+    air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
+    t_rows = (air[:, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)) * NSYM / FS
+    t_pilot = np.arange(len(r["hp"])) * SYMS_PER_FRAME * NSYM / FS
+    return t_rows, t_pilot
 
 
 def demodulate(x: np.ndarray, bands=None, accept: Accept | None = None) -> Burst:
@@ -946,18 +1099,17 @@ def demodulate(x: np.ndarray, bands=None, accept: Accept | None = None) -> Burst
     return decode_received(receive(x, bands, accept))
 
 
-def decode_received(r: dict) -> Burst:
+def decode_received(r: Received) -> Burst:
     """receive()'s result -> the decoded Burst (plain modem use: no CRC masks)."""
-    spec, est = r["spec"], r["est"]
-    var = noise_var(est["h"], est) + est["mse"]
-    soft = codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu)
-    decoded = codes.decode_many(spec, np.asarray(soft))
+    spec = r["spec"]
+    soft = burst_soft(r)
+    decoded = codes.decode_many(spec, soft)
     return Burst(
         submode=spec,
         payloads=[d[0] for d in decoded],
         crc_ok=[d[1] for d in decoded],
         freq_offset=r["cfo"],
         preamble_start=r["preamble_start"],
-        snr_db=float(10 * np.log10(est["p_sig"] / est["n0"] * BANDS[spec.band].nc * RS / SNR_REF_BW_HZ)),
-        soft=np.asarray(soft),
+        snr_db=float(snr_db(r["est"], spec.band)),
+        soft=soft,
     )

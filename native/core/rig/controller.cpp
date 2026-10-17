@@ -354,7 +354,24 @@ bool RigController::keyed_since_open() const {
 }
 
 std::function<void(bool)> RigController::ptt_function() {
-    return [this](bool on) { set_ptt(on); };
+    return [this](bool on) {
+        if (on) {
+            // A failed key leaves polling paused on purpose: a timed-out key may
+            // still have keyed the rig, so no poll until the unkey, which the
+            // Keyer always sends (it counts the over as keyed either way).
+            pause_polling();
+            set_ptt(true);
+            return;
+        }
+        // resumed after the off, so no poll delays it; and resumed even if the off failed
+        try {
+            set_ptt(false);
+        } catch (...) {
+            resume_polling();
+            throw;
+        }
+        resume_polling();
+    };
 }
 
 void RigController::pause_polling() {
