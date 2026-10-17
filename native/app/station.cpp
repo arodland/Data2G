@@ -393,7 +393,7 @@ void Station::start() {
         monitor_ = std::make_unique<MonitorThread>();
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
-        cfg.record_dir = a_.record_dir;
+        cfg.record_dir = record_path(a_);
         cfg.record_async = true;  // a slow disk must not delay a decode or an ACK
         cfg.min_header_score = a_.min_header_score;
         cfg.kiss = link_.get();
@@ -459,7 +459,7 @@ void Station::start() {
         };
 
         {
-            const QHostAddress addr = resolve(a_.host);
+            const QHostAddress addr = resolve(a_.listen);
             cmd_ = std::make_unique<Port>(
                 addr, a_.command_port, true,
                 [this, post](const QByteArray& line, std::uint64_t client) {
@@ -479,7 +479,7 @@ void Station::start() {
             });
         }
         kiss_ = std::make_unique<KissServer>(
-            resolve(a_.kiss_address), a_.kiss_port,
+            resolve(a_.listen), a_.kiss_port,
             [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack) {
                 post([this, port, ack, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack); });
             },
@@ -488,7 +488,7 @@ void Station::start() {
         // PTT
         rig::Keyer::Ptt ptt;
         rig::Keyer::MustRelease must_release;
-        if (rig_enabled(a_)) {
+        if (a_.rig) {
 #ifdef DATA2G_HAVE_RIG
             if (a_.rig_debug) rig::set_debug_sink([](const std::string& line) { log_line(INFO, "hamlib: " + line); });
             const bool polling = a_.rig_poll_interval > 0;
@@ -549,10 +549,10 @@ void Station::start() {
 #endif
         }
 
-        logf(INFO, "commands on %s:%d, data on %d", a_.host.c_str(), a_.command_port, a_.command_port + 1);
-        logf(INFO, "KISS on %s:%d: %d Hz cap, broadcasts in %s", a_.kiss_address.c_str(), a_.kiss_port, a_.kiss_bw,
+        logf(INFO, "commands on %s:%d, data on %d", a_.listen.c_str(), a_.command_port, a_.command_port + 1);
+        logf(INFO, "KISS on %s:%d: %d Hz cap, broadcasts in %s", a_.listen.c_str(), a_.kiss_port, a_.kiss_bw,
              link_->broadcast.c_str());
-        logf(INFO, "recording to %s", a_.record_dir.empty() ? "(off)" : a_.record_dir.c_str());
+        logf(INFO, "recording to %s", cfg.record_dir.empty() ? "(off)" : cfg.record_dir.c_str());
         logf(INFO, "decode worker %s", a_.decode_worker ? "on" : "off");
 
         running_ = true;

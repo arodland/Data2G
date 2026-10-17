@@ -159,7 +159,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         logs[name] = tmp_path / f"{name}.log"
         procs[name] = subprocess.Popen(
             [str(BINARY), "--mycall", name, "--command-port", str(base), "--kiss-port", str(base + 2),
-             "--audio-io", f"pipe:{inp},{out}", "--rigctld-port", "0", "--record-dir", str(tmp_path / f"rec{name}"),
+             "--audio-io", f"pipe:{inp},{out}", "--no-rig", "--record-dir", str(tmp_path / f"rec{name}"),
              "--stats-interval", "0", worker],
             stdout=subprocess.DEVNULL, stderr=open(logs[name], "w"), env=env)
     clients = {}
@@ -274,8 +274,13 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         assert codes[n] == 0, (n, codes[n], t[-2000:])
 
 
+# host.py's flags data2g-host replaces: --listen for both addresses, and
+# --rig-device (empty for model 2: rigctld on localhost:4532) or --no-rig.
+DROPPED_HOST_PY_FLAGS = {"--host", "--kiss-address", "--rigctld-host", "--rigctld-port"}
+
+
 def test_cli_has_every_host_py_flag(request):
-    """data2g-host takes host.py's command line: every flag in its --help."""
+    """data2g-host takes host.py's command line: every flag in its --help, but the ones it replaces."""
     import sys
 
     if not BINARY.exists():
@@ -285,7 +290,7 @@ def test_cli_has_every_host_py_flag(request):
     flags = re.compile(r"--[a-z][a-z0-9-]*")
     py = subprocess.run([sys.executable, "-m", "data2g.host", "--help"], capture_output=True, text=True, check=True).stdout
     cpp = subprocess.run([str(BINARY), "--help"], capture_output=True, text=True, check=True).stdout
-    assert set(flags.findall(py)) - set(flags.findall(cpp)) == set()
+    assert set(flags.findall(py)) - set(flags.findall(cpp)) == DROPPED_HOST_PY_FLAGS
     bad = subprocess.run([str(BINARY), "--kiss-bw", "600"], capture_output=True, text=True)
     assert bad.returncode == 2 and "invalid choice" in bad.stderr
     out = subprocess.run([str(BINARY), "--list-modes", "--kiss-bw", "500"], capture_output=True, text=True, check=True).stdout
@@ -317,9 +322,8 @@ def test_cli_rig_flags(request):
                  "--rig-debug", "--list-rigs", "--no-rig"):
         assert flag in helptext, flag
     for args, says in [
-        (("--rigctld-port", "4533", "--rig-model", "3073"), "mean --rig-model 2"),
-        (("--rigctld-host", "radio", "--rig-device", "/dev/ttyUSB0"), "use one"),
         (("--no-rig", "--rig-model", "1"), "--no-rig with a rig"),
+        (("--no-record", "--record-dir", "x"), "--no-record with a directory"),
         (("--ptt-device", "/dev/ttyUSB1"), "--ptt-method dtr or rts"),
         (("--rig-model", "999999"), "not a model this Hamlib knows"),
         (("--rig-parity", "mark"), "invalid choice"),

@@ -29,7 +29,7 @@ class QSpinBox;
 namespace data2g::gui {
 
 // The persisted subset of `base`'s fields: callsign, devices, sample rate,
-// volume, PTT and rig, ports, decode worker, live constellation.
+// volume, PTT and rig, ports, recording, decode worker, live constellation.
 app::Args load_settings(QSettings& s, app::Args base = {});
 void save_settings(QSettings& s, const app::Args& a);
 
@@ -46,7 +46,6 @@ private:
     int rig_model() const;
     void sync_rig();  // which rig fields show (model's port type) and are enabled (PTT method)
     void test_rig(bool key_ptt);
-    QString rigctld_text() const;  // model 2's device when none is set: rigctld's host:port
 
     app::Args base_;  // what apply_to keeps for fields the dialog doesn't show
     QWidget *serial_row_, *serial_row2_, *lines_row_;
@@ -62,10 +61,10 @@ private:
     QSpinBox *timeout_, *retries_;
     QDoubleSpinBox* poll_;
     QPushButton *test_cat_ = nullptr, *test_ptt_ = nullptr;
-    QLineEdit* host_;
-    QSpinBox* cmd_port_;
-    QLineEdit* kiss_address_;
-    QSpinBox* kiss_port_;
+    QLineEdit* listen_;
+    QSpinBox *cmd_port_, *kiss_port_;
+    QCheckBox* record_;
+    QLineEdit* record_dir_;
     QCheckBox* worker_;
     QCheckBox* live_;
     QSlider* noise_rule_;  // the noise rule's weight x 100 (NOISE_RULE_STEPS)

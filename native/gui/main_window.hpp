@@ -53,8 +53,6 @@ private:
     QSettings& store_;
     std::unique_ptr<app::Station> station_;
     QString error_;
-    int starts_ = 0;
-    std::string record_base_;
     Waterfall* waterfall_;
     ConstellationPlot* constellation_;
     QLabel *link_, *mode_, *busy_, *ptt_, *rx_, *tx_, *counters_, *status_;

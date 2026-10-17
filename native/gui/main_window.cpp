@@ -199,13 +199,8 @@ void MainWindow::restart(const app::Args& args) {
     station_.reset();  // stops it: PTT down, ports closed
     samples_.clear();
     error_.clear();
-    // each run records to its own directory: a second Recorder in one would
-    // number its rx_NNNNN.npz from 0 again, over the first one's
-    app::Args a = args;
-    if (starts_++ == 0) record_base_ = a.record_dir;
-    else if (!record_base_.empty()) a.record_dir = record_base_ + "." + std::to_string(starts_);
-    station_ = std::make_unique<app::Station>(a);
-    if (const auto bad = app::check(a)) {
+    station_ = std::make_unique<app::Station>(args);
+    if (const auto bad = app::check(args)) {
         error_ = qs(*bad);
     } else {
         try {
@@ -236,8 +231,8 @@ void MainWindow::poll() {
         status_->setText(tr("%1: stopped: %2").arg(call, error_));
     } else {
         QStringList on;
-        on << tr("VARA %1:%2").arg(qs(a.host)).arg(a.command_port);
-        on << tr("KISS %1:%2").arg(qs(a.kiss_address)).arg(a.kiss_port);
+        on << tr("VARA %1:%2").arg(qs(a.listen)).arg(a.command_port);
+        on << tr("KISS %1:%2").arg(qs(a.listen)).arg(a.kiss_port);
         on << (a.audio_io.empty() ? tr("audio %1 / %2").arg(qs(a.input_device.value_or("default")), qs(a.output_device.value_or("default")))
                                   : tr("audio %1").arg(qs(a.audio_io)));
         status_->setText(tr("%1 on %2").arg(call, on.join(QStringLiteral(", "))));

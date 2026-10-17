@@ -353,7 +353,7 @@ void test_keyer() {
         fifo.pull(buf);
     }
 
-    rig::Keyer none({}, fifo, 0.0);  // --rigctld-port 0
+    rig::Keyer none({}, fifo, 0.0);  // --no-rig
     none.key();
     check::is_true(none.keyed() && none.failures() == 0, "no PTT: keys the audio only");
     fifo.pull(buf);

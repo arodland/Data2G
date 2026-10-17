@@ -1,8 +1,8 @@
 // The radio through libhamlib, linked in-process (data2g_rig, built with
 // DATA2G_BUILD_RIG). Lifted from SSTVAE's core/rig/hamlib.hpp, which has
 // the longer reasoning; its settings surface is WSJT-X's Radio tab. Model 2
-// (NET rigctl) is a rigctld client, so `--rigctld-host/--rigctld-port` keep
-// working as device "host:port".
+// (NET rigctl) is a rigctld client: device "host:port", empty for
+// localhost:4532.
 //
 // Not lifted: serial_defaults() (only SSTVAE's Android bridge needs it; it
 // reads struct rig_caps the same way model_info() does here).

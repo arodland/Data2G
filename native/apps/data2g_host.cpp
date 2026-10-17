@@ -1,7 +1,6 @@
-// data2g-host: data2g/host.py's server in C++, headless. Same command line
-// as host.py's main(), plus --audio-io, --decode-worker / --no-decode-worker.
+// data2g-host: data2g/host.py's server in C++, headless. Options: app/options.*.
 //
-//   data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
+//   data2g-host --mycall W1AW --input-device USB --output-device USB --rig-model 3073 --rig-device /dev/ttyUSB0
 //
 // The station itself (servers, engine, audio, PTT, and their threads) is
 // app/station.{hpp,cpp}, shared with data2g-gui.

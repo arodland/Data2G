@@ -65,7 +65,7 @@ start_host() {  # name call port sink source
   if [ -n "${NATIVE:-}" ]; then  # perf, user space only (perf_event_paranoid 2), DWARF call graphs
     perf record -F ${PERF_HZ:-199} --call-graph dwarf,${PERF_STACK:-16384} -o $OUT/perf_$1.data -- \
       ${HOST_BIN:-$WT/native/build/data2g-host} --mycall $2 --input-device ${5%.monitor}_src --output-device $4 \
-      --rigctld-port 0 --command-port $3 --kiss-port $(( $3 + 20 )) --record-dir $OUT/rec_$1 ${HOST_ARGS:-} \
+      --no-rig --command-port $3 --kiss-port $(( $3 + 20 )) --record-dir $OUT/rec_$1 ${HOST_ARGS:-} \
       > $OUT/host_$1.log 2>&1 &
   else
     PULSE_SINK=$4 PULSE_SOURCE=$5 PYTHONPATH=$WT OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \

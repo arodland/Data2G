@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <set>
@@ -29,16 +30,14 @@ namespace {
 
 // After "usage: PROG ", PROG padded to data2g-host's width so the columns line up.
 const char* USAGE =
-    "[-h] [--kiss-port KISS_PORT]\n"
-    "                   [--kiss-address KISS_ADDRESS] [--kiss-busy-limit S] [--kiss-bw {2400,500}]\n"
-    "                   [--broadcast-mode MODE] [--mycall MYCALL] [--host HOST] [--command-port COMMAND_PORT]\n"
+    "[-h] [--mycall MYCALL] [--listen ADDRESS] [--command-port COMMAND_PORT] [--kiss-port KISS_PORT]\n"
+    "                   [--kiss-busy-limit S] [--kiss-bw {2400,500}] [--broadcast-mode MODE]\n"
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
-    "                   [--sample-rate SAMPLE_RATE] [--output-volume OUTPUT_VOLUME] [--rigctld-host RIGCTLD_HOST]\n"
-    "                   [--rigctld-port RIGCTLD_PORT] [--ptt-on-delay-ms PTT_ON_DELAY_MS]\n"
+    "                   [--sample-rate SAMPLE_RATE] [--output-volume OUTPUT_VOLUME] [--ptt-on-delay-ms PTT_ON_DELAY_MS]\n"
     "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
     "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
-    "                   [--record-dir RECORD_DIR] [--log-level LOG_LEVEL] [--stats-interval S] [--list-modes]\n"
-    "                   [--noise-rule W]\n"
+    "                   [--record | --no-record] [--record-dir RECORD_DIR] [--log-level LOG_LEVEL]\n"
+    "                   [--stats-interval S] [--list-modes] [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
     "                   [--realtime | --no-realtime]\n"
     "                   [--live-constellation | --no-live-constellation]\n"
@@ -55,22 +54,19 @@ const char* HELP =
     "\nData2G server: VARA-style ARQ sessions and KISS broadcast on one radio\n\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
-    "  --kiss-port KISS_PORT as VARA HF's (default 8100)\n"
-    "  --kiss-address KISS_ADDRESS (default 127.0.0.1)\n"
+    "  --mycall MYCALL\n"
+    "  --listen ADDRESS      the VARA and KISS ports' address (default 127.0.0.1)\n"
+    "  --command-port COMMAND_PORT  data is on the next port (default 8300)\n"
+    "  --kiss-port KISS_PORT KISS over TCP, as VARA HF's (default 8100)\n"
     "  --kiss-busy-limit S   a KISS burst held this long by BUSY is sent anyway (default 60)\n"
     "  --kiss-bw {2400,500}  KISS bandwidth cap, Hz (default 2400)\n"
     "  --broadcast-mode MODE a broadcast port's transmit mode until BCAST MODE sets one\n"
     "                        (default: qpsk-r1/5, n10-qpsk-r1/5 with --kiss-bw 500)\n"
-    "  --mycall MYCALL\n"
-    "  --host HOST           (default 127.0.0.1)\n"
-    "  --command-port COMMAND_PORT  data is on the next port (default 8300)\n"
     "  --list-audio-devices\n"
     "  --input-device INPUT_DEVICE   index or name substring (see --list-audio-devices)\n"
     "  --output-device OUTPUT_DEVICE index or name substring\n"
     "  --sample-rate SAMPLE_RATE     a multiple of 8000 (default 48000)\n"
     "  --output-volume OUTPUT_VOLUME dB; 0 puts a burst's peak at full scale (default 0)\n"
-    "  --rigctld-host RIGCTLD_HOST   (default localhost)\n"
-    "  --rigctld-port RIGCTLD_PORT   0: no PTT (default 4532)\n"
     "  --ptt-on-delay-ms PTT_ON_DELAY_MS   (default 100)\n"
     "  --ptt-off-delay-ms PTT_OFF_DELAY_MS (default 50)\n"
     "  --tx-lead-ms TX_LEAD_MS       TX audio queued ahead of the sound card: slack for a late audio step\n"
@@ -79,8 +75,9 @@ const char* HELP =
     "  --buffer-credit BUFFER_CREDIT bytes queued for the next burst that BUFFER leaves out, at most, so VARA\n"
     "                                clients that throttle on it (Pat) keep a whole burst queued; -1: the next\n"
     "                                burst's full capacity, 0: report every unacked byte (plain VARA) (default -1)\n"
-    "  --record-dir RECORD_DIR       where every burst heard and sent is logged ('' turns it off)\n"
-    "                                (default recordings/YYYYmmdd-HHMMSS)\n"
+    "  --record, --no-record         log every burst heard and sent (default: off)\n"
+    "  --record-dir RECORD_DIR       where: each run in its own RECORD_DIR/YYYYmmdd-HHMMSS; implies --record\n"
+    "                                (default recordings)\n"
     "  --log-level LOG_LEVEL         (default INFO)\n"
     "  --stats-interval S            log a connection's throughput this often (0: only at disconnect)\n"
     "                                (default 60)\n"
@@ -88,7 +85,6 @@ const char* HELP =
     "  --noise-rule W                the gear shifter's noise rule: a mode whose band is noisier in the\n"
     "                                receiver's noise profile than the band last measured is predicted at\n"
     "                                a lower SNR; W weighs its often-loud moments (0: off) (default 1)\n"
-    "\nadded in the C++ host:\n"
     "  --decode-worker, --no-decode-worker\n"
     "                        burst decode, DD and the session on their own thread, so preamble search and\n"
     "                        BUSY keep running during a decode (BUSY lag with a 1 s DD in flight: 0.02 s\n"
@@ -110,13 +106,12 @@ const char* HELP =
     "  --dd-budget S         seconds a burst's decode may spend re-estimating the channel from its own\n"
     "                        decoded codewords (DD), counted from its soft bits; the pass in progress is\n"
     "                        abandoned when it runs out. 0: none. Lower it on a slow machine (default 1)\n"
-    "\nrig control (Hamlib, linked in; SSTVAE's settings):\n"
+    "\nrig control (Hamlib, linked in):\n"
     "  --rig, --no-rig       rig control at all; --no-rig: no PTT (default: on)\n"
     "  --list-rigs           Hamlib's rig models: number, manufacturer, model, status\n"
     "  --rig-model N         Hamlib model (see --list-rigs); 2 is NET rigctl, a rigctld client (default 2)\n"
-    "  --rig-device DEVICE   serial device (/dev/ttyUSB0, COM5) or host:port; for model 2, default\n"
-    "                        RIGCTLD_HOST:RIGCTLD_PORT. --rigctld-host/--rigctld-port mean --rig-model 2 at\n"
-    "                        that address (port 0: no rig), so neither goes with --rig-model or --rig-device\n"
+    "  --rig-device DEVICE   serial device (/dev/ttyUSB0, COM5) or host:port; default: Hamlib's\n"
+    "                        (for model 2, rigctld at localhost:4532)\n"
     "  --rig-baud BAUD       serial speed; 0: the model's (default 0)\n"
     "  --rig-data-bits, --rig-stop-bits, --rig-parity, --rig-handshake\n"
     "                        serial line settings; default: the model's\n"
@@ -155,12 +150,15 @@ void usage_error(const std::string& msg, const char* prog) {
     std::exit(2);
 }
 
-std::string default_record_dir() {
-    const std::time_t t = std::time(nullptr);
-    const std::tm tm = local_tm(t);
+std::string record_path(const Args& a) {
+    if (!a.record) return "";
+    const std::tm tm = local_tm(std::time(nullptr));
     char buf[32];
     std::strftime(buf, sizeof buf, "%Y%m%d-%H%M%S", &tm);
-    return std::string("recordings/") + buf;
+    const std::filesystem::path base = std::filesystem::path(a.record_dir) / buf;
+    std::filesystem::path p = base;
+    for (int n = 2; std::filesystem::exists(p); ++n) p = base.string() + "." + std::to_string(n);
+    return p.string();
 }
 
 Args parse(int argc, char** argv, Args a, const char* prog) {
@@ -172,12 +170,12 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--live-constellation", {&a.live_constellation, true}},
         {"--no-live-constellation", {&a.live_constellation, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
+        {"--record", {&a.record, true}}, {"--no-record", {&a.record, false}},
         {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
     const auto i_ = [prog](auto& o, auto& v) { return number<int>(o, v, prog); };
     const auto d_ = [prog](auto& o, auto& v) { return number<double>(o, v, prog); };
     std::map<std::string, std::function<void(const std::string&, const std::string&)>> valued = {
         {"--kiss-port", [&](auto& o, auto& v) { a.kiss_port = i_(o, v); }},
-        {"--kiss-address", [&](auto&, auto& v) { a.kiss_address = v; }},
         {"--kiss-busy-limit", [&](auto& o, auto& v) { a.kiss_busy_limit = d_(o, v); }},
         {"--kiss-bw", [&](auto& o, auto& v) {
              a.kiss_bw = i_(o, v);
@@ -186,14 +184,12 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
          }},
         {"--broadcast-mode", [&](auto&, auto& v) { a.broadcast_mode = v; }},
         {"--mycall", [&](auto&, auto& v) { a.mycall = v; }},
-        {"--host", [&](auto&, auto& v) { a.host = v; }},
+        {"--listen", [&](auto&, auto& v) { a.listen = v; }},
         {"--command-port", [&](auto& o, auto& v) { a.command_port = i_(o, v); }},
         {"--input-device", [&](auto&, auto& v) { a.input_device = v; }},
         {"--output-device", [&](auto&, auto& v) { a.output_device = v; }},
         {"--sample-rate", [&](auto& o, auto& v) { a.sample_rate = i_(o, v); }},
         {"--output-volume", [&](auto& o, auto& v) { a.output_volume = d_(o, v); }},
-        {"--rigctld-host", [&](auto&, auto& v) { a.rigctld_host = v; }},
-        {"--rigctld-port", [&](auto& o, auto& v) { a.rigctld_port = i_(o, v); }},
         {"--ptt-on-delay-ms", [&](auto& o, auto& v) { a.ptt_on_delay_ms = i_(o, v); }},
         {"--ptt-off-delay-ms", [&](auto& o, auto& v) { a.ptt_off_delay_ms = i_(o, v); }},
         {"--tx-lead-ms", [&](auto& o, auto& v) { a.tx_lead_ms = i_(o, v); }},
@@ -223,10 +219,10 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--rig-retries", [&](auto& o, auto& v) { a.rig_retries = i_(o, v); }},
         {"--rig-poll-interval", [&](auto& o, auto& v) { a.rig_poll_interval = d_(o, v); }},
     };
-    // The rig flags on this command line (value: the last one given).
+    // The flags on this command line that others depend on (value: the last one given).
     std::map<std::string, std::string> given;
-    static const std::set<std::string> rig_flags = {"--rigctld-host", "--rigctld-port", "--rig-model", "--rig-device",
-                                                    "--no-rig", "--ptt-device"};
+    static const std::set<std::string> tracked = {"--rig-model", "--rig-device", "--no-rig", "--ptt-device",
+                                                    "--record-dir", "--no-record"};
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
@@ -246,32 +242,23 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
             if (!inline_value && i + 1 >= argc) usage_error("argument " + arg + ": expected one argument", prog);
             const std::string value = inline_value ? *inline_value : std::string(argv[++i]);
             v->second(arg, value);
-            if (rig_flags.count(arg)) given[arg] = value;
+            if (tracked.count(arg)) given[arg] = value;
             continue;
         } else {
             usage_error("unrecognized arguments: " + std::string(argv[i]), prog);
         }
-        if (rig_flags.count(arg)) given[arg] = "";
+        if (tracked.count(arg)) given[arg] = "";
         if (arg == "--rig") given.erase("--no-rig");
+        if (arg == "--record") given.erase("--no-record");
     }
-    // The rig flags given here override saved settings as a whole: rigctld
-    // means model 2 at that address, and a model or device turns the rig on.
-    const bool rigctld = given.count("--rigctld-host") || given.count("--rigctld-port");
-    if (rigctld && given.count("--rig-model") && a.rig_model != rig::MODEL_NET_RIGCTL)
-        usage_error("--rigctld-host/--rigctld-port mean --rig-model 2 (NET rigctl), not --rig-model " + given["--rig-model"] +
-                        " (give that model's address as --rig-device)",
-                    prog);
-    if (rigctld && given.count("--rig-device"))
-        usage_error("--rigctld-host/--rigctld-port and --rig-device both give the rig's address: use one", prog);
-    if (given.count("--no-rig") && (given.count("--rig-model") || given.count("--rig-device") || (rigctld && a.rigctld_port != 0)))
-        usage_error("--no-rig with a rig to use (--rig-model, --rig-device or --rigctld-*)", prog);
-    if (rigctld) {
-        a.rig_model = rig::MODEL_NET_RIGCTL;
-        a.rig_device.clear();
-        a.rig = a.rigctld_port != 0;
-    } else if (given.count("--rig-model") || given.count("--rig-device")) {
-        a.rig = true;
-    }
+    // A model or device given here turns a saved 'no rig' on, as a directory
+    // to record to turns recording on.
+    if (given.count("--no-rig") && (given.count("--rig-model") || given.count("--rig-device")))
+        usage_error("--no-rig with a rig to use (--rig-model or --rig-device)", prog);
+    if (given.count("--rig-model") || given.count("--rig-device")) a.rig = true;
+    if (given.count("--no-record") && given.count("--record-dir"))
+        usage_error("--no-record with a directory to record to (--record-dir)", prog);
+    if (given.count("--record-dir")) a.record = true;
     if (given.count("--ptt-device") && a.ptt_method != "dtr" && a.ptt_method != "rts")
         usage_error("--ptt-device is the port whose DTR or RTS keys: it needs --ptt-method dtr or rts, not " + a.ptt_method, prog);
     return a;
@@ -312,19 +299,10 @@ const std::vector<std::string>& rig_choices(std::string_view field) {
     return choices.find(field)->second;
 }
 
-bool rig_enabled(const Args& a) {
-    return a.rig && !(a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty() && a.rigctld_port == 0);
-}
-
-std::string rig_device(const Args& a) {
-    if (a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty()) return a.rigctld_host + ":" + std::to_string(a.rigctld_port);
-    return a.rig_device;
-}
-
 rig::HamlibConfig hamlib_config(const Args& a) {
     rig::HamlibConfig h;
     h.model = a.rig_model;
-    h.device = rig_device(a);
+    h.device = a.rig_device;
     h.baud = a.rig_baud;
     h.data_bits = named(rig::DATA_BITS_NAMES, a.rig_data_bits);
     h.stop_bits = named(rig::STOP_BITS_NAMES, a.rig_stop_bits);
@@ -372,7 +350,7 @@ std::optional<std::string> check(const Args& a) {
     if (!(a.noise_rule >= 0)) return "--noise-rule: must be 0 (off) or more";
     if (!(a.dd_budget >= 0)) return "--dd-budget: must be 0 (no DD) or more";
 #ifdef DATA2G_HAVE_RIG
-    if (rig_enabled(a) && !rig::model_info(a.rig_model))
+    if (a.rig && !rig::model_info(a.rig_model))
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";
 #endif
     if (a.broadcast_mode) {
