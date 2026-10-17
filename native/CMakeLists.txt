@@ -35,6 +35,8 @@ endif()
 
 option(DATA2G_BUILD_PYMODULE "Build the pybind11 module for pytest parity runs" ON)
 option(DATA2G_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+# On for a plain configure (CI); tools/build_native.sh turns it off unless --test.
+option(DATA2G_BUILD_TESTS "Build the ctest executables" ON)
 set(DATA2G_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 set(DATA2G_AUDIO_BACKEND "qt" CACHE STRING "Sound card backend (qt/miniaudio)")
@@ -247,8 +249,10 @@ if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   endif()
 endif()
 
-enable_testing()
-add_subdirectory(tests)
+if(DATA2G_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()
 
 if(DATA2G_BUILD_PYMODULE)
   add_subdirectory(bindings)
