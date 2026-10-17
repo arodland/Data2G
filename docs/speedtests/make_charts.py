@@ -60,8 +60,8 @@ BW500 = {
 ORANGE, BLUE, GREEN = "#eb6834", "#2a78d6", "#1baf7a"
 SNRS = [40, 35, 30, 25, 20, 15, 10, 5, 0, -5]
 
-W, H = 760, 420
-ML, MR, MT, MB = 52, 96, 40, 40
+W, H = 760, 450
+ML, MR, MT, MB = 52, 24, 40, 70
 X0, X1 = -5, 40
 
 
@@ -98,9 +98,8 @@ def svg_chart(title, series, y0, y1, yticks):
         out.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{MT}" y2="{H - MB}" stroke="#e1e0d9" stroke-dasharray="2 3"/>')
         out.append(f'<text x="{x:.1f}" y="{H - MB + 16}" font-size="11" fill="#898781" text-anchor="middle">{s}</text>')
     out.append(f'<line x1="{ML}" x2="{W - MR}" y1="{H - MB}" y2="{H - MB}" stroke="#c3c2b7"/>')
-    out.append(f'<text x="{(ML + W - MR) / 2:.1f}" y="{H - 6}" font-size="11" fill="#898781" text-anchor="middle">SNR, dB (PEP over noise in 3 kHz)</text>')
+    out.append(f'<text x="{(ML + W - MR) / 2:.1f}" y="{H - MB + 34}" font-size="11" fill="#898781" text-anchor="middle">SNR, dB (PEP over noise in 3 kHz)</text>')
 
-    ends = []
     for label, color, dashed, pts in series:
         pts = sorted((norm(p) for p in pts), key=lambda p: p[0])
         full = [p for p in pts if p[2] >= 5]
@@ -112,14 +111,18 @@ def svg_chart(title, series, y0, y1, yticks):
                 out.append(f'<circle cx="{lx(s):.1f}" cy="{ly(v):.1f}" r="4" fill="#fcfcfb" stroke="{color}" stroke-width="2"/>')
             else:
                 out.append(f'<circle cx="{lx(s):.1f}" cy="{ly(v):.1f}" r="4" fill="{color}" stroke="#fcfcfb" stroke-width="2"/>')
-        ends.append((full[-1], label))
 
-    # end labels beside each line's end, top to bottom, at least 13px apart
-    prev = -math.inf
-    for (s, v, _, _), label in sorted(ends, key=lambda e: -e[0][1]):
-        y = max(ly(v) + 4, prev + 13)
-        out.append(f'<text x="{lx(s) + 8:.1f}" y="{y:.1f}" font-size="11" font-weight="600" fill="#52514e">{label}</text>')
-        prev = y
+    # legend row centred under the axis title: a line-and-dot swatch, then the label
+    sw, gap, pad = 28, 6, 24
+    widths = [sw + gap + len(label) * 6.5 for label, *_ in series]
+    x = (ML + W - MR - sum(widths) - pad * (len(series) - 1)) / 2
+    y = H - 14
+    for (label, color, dashed, _), w in zip(series, widths):
+        dash = ' stroke-dasharray="5 4"' if dashed else ""
+        out.append(f'<line x1="{x:.1f}" x2="{x + sw:.1f}" y1="{y}" y2="{y}" stroke="{color}" stroke-width="2" stroke-linecap="round"{dash}/>')
+        out.append(f'<circle cx="{x + sw / 2:.1f}" cy="{y}" r="4" fill="{color}" stroke="#fcfcfb" stroke-width="2"/>')
+        out.append(f'<text x="{x + sw + gap:.1f}" y="{y + 4}" font-size="11" font-weight="600" fill="#52514e">{label}</text>')
+        x += w + pad
     out.append("</svg>")
     return "\n".join(out) + "\n"
 
