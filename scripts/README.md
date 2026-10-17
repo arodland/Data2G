@@ -76,6 +76,7 @@ One question each, answered in the docstring. By area:
 - **ARQ and the gear shifter**: `arq_stress.py`, `idle_study.py`,
   `ir_study.py`, `decode_latency.py`, `compress_study.py`,
   `predictor_data.py`, `calibration.py`, `ood_probe.py`.
+- **One-way text** (`data2g-bulk`): `bulk_study.py`.
 
 "Gear-shifter phase A..H" in older docstrings: see the glossary in
 `docs/ARCHITECTURE.md`.

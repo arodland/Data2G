@@ -8,6 +8,7 @@ at the time, with names that may since have moved.
 |---|---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Map | Pipelines, layers, Python and native, the parity contract, where to start. |
 | [arq.md](arq.md) | Spec | The connected ARQ protocol: burst layout, control word, sessions, the gear shifter, state agreement. |
+| [bulk.md](bulk.md) | Spec | data2g-bulk: one-way text transfer with RV 1 copies and timed bursts, and its studies. |
 | [broadcast.md](broadcast.md) | Spec | Broadcast over KISS: named groups, group keys, rate-shifting reports. |
 | [outcome-training-data.md](outcome-training-data.md) | Provenance | Every dataset in the outcome model's training mix and how to rebuild it. |
 | [native-port-plan.md](native-port-plan.md) | Plan (history) | The C++ / Qt port, phase by phase. Its threads, frozen-data and conventions sections still hold. |

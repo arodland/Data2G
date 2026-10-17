@@ -933,7 +933,7 @@ def _copy_header(z: np.ndarray, lock: Lock) -> HeaderRead:
 
 
 def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None,
-            copy: Lock | None = None) -> Received:
+            copy: Lock | None = None, known: dict | None = None) -> Received:
     """Everything up to soft bits for the first burst in `x`: the
     synchronisation state (so an analysis script can replay it on
     another signal) and the equalizer output. `bands`: the sync bands to
@@ -941,9 +941,21 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     first `head` samples (a streaming receiver found them there): search
     only those. Acquisition over a whole 11 s burst took 1-4 s of CPU,
     nearly all of receive's time. `copy`: find_copy's lock (same sample
-    origin as x): no preamble search, the header its copy read."""
+    origin as x): no preamble search, the header its copy read. `known`:
+    {start, cfo, spec, n_cw} of a burst whose timing the receiver knows
+    already (data2g.bulk): no search, the header neither read nor needed,
+    its known word the coarse CFO's reference."""
     z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
-    if copy is not None:
+    if known is not None:
+        ks, kn = known["spec"], known["n_cw"]
+        z = dsp.freq_correct(z0, known["cfo"])
+        hd = _read_header(z, known["start"], ks.sync_band)
+        v = (ks.index << CW_BITS.get(ks.sync_band, 6)) | (kn - 1)
+        hd.update(hdr=(ks, kn), word=(v << 6) | crc6(v))
+        acq = _sync.Acquisition(known["start"], known["cfo"], 0.0)
+        if burst_end(hd["p0"], ks, kn) > len(z0):
+            raise SyncError("burst runs past the buffer")
+    elif copy is not None:
         if copy["end"] > len(z0):
             raise SyncError("burst runs past the buffer")
         z = dsp.freq_correct(z0, copy["cfo"])
@@ -996,7 +1008,9 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     # slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
     _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
     fine = equalizer.residual_cfo(hp)
-    cfo_res = resolve_alias(fine, coarse)
+    # a known burst's CFO is the same transmitter's, measured seconds ago: its
+    # header may be the part that faded, so the alias nearest no change
+    cfo_res = resolve_alias(fine, 0.0 if known is not None else coarse)
     z = dsp.freq_correct(z, cfo_res)
     _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
     support = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
