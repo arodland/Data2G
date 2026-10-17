@@ -14,6 +14,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 #include "arq/modes.hpp"
 #include "arq/session.hpp"
 #include "audio/card.hpp"
@@ -160,6 +162,12 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     lamps->addWidget(busy_);
     lamps->addWidget(ptt_);
     lamps->addStretch();
+    abort_ = new QPushButton(tr("Abort"));
+    abort_->setObjectName(QStringLiteral("abort"));
+    abort_->setToolTip(tr("Drop the session at once, without a disconnect handshake; the client is told DISCONNECTED"));
+    abort_->setEnabled(false);
+    connect(abort_, &QPushButton::clicked, this, [this] { station_->abort_session(); });
+    lamps->addWidget(abort_);
     auto* monitor = new QPushButton(tr("Monitor..."));
     monitor->setObjectName(QStringLiteral("open_monitor"));
     connect(monitor, &QPushButton::clicked, this, &MainWindow::open_monitor);
@@ -176,6 +184,20 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     log_->setObjectName(QStringLiteral("burst_log"));
     log_->setHorizontalHeaderLabels({tr("Time"), tr("Mode"), tr("SNR (dB)"), tr("Result")});
     log_->horizontalHeader()->setStretchLastSection(true);
+    {
+        // Each column as wide as its widest cell (the longest mode name), Result taking what is left.
+        const QFontMetrics fm = log_->fontMetrics();
+        const int pad = 2 * fm.horizontalAdvance(QLatin1Char('M'));
+        int mode_w = 0;
+        for (const arq::Mode& m : arq::modes()) mode_w = std::max(mode_w, fm.horizontalAdvance(tr("%1 x%2").arg(qs(std::string(m.name))).arg(99)));
+        const auto fit = [&](int col, int text_w) {
+            const int header_w = log_->horizontalHeader()->fontMetrics().horizontalAdvance(log_->horizontalHeaderItem(col)->text());
+            log_->setColumnWidth(col, std::max(text_w, header_w) + pad);
+        };
+        fit(0, fm.horizontalAdvance(QStringLiteral("00:00:00")));
+        fit(1, mode_w);
+        fit(2, fm.horizontalAdvance(QStringLiteral("-00.0")));
+    }
     log_->verticalHeader()->setVisible(false);
     log_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     log_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -199,13 +221,8 @@ void MainWindow::restart(const app::Args& args) {
     station_.reset();  // stops it: PTT down, ports closed
     samples_.clear();
     error_.clear();
-    // each run records to its own directory: a second Recorder in one would
-    // number its rx_NNNNN.npz from 0 again, over the first one's
-    app::Args a = args;
-    if (starts_++ == 0) record_base_ = a.record_dir;
-    else if (!record_base_.empty()) a.record_dir = record_base_ + "." + std::to_string(starts_);
-    station_ = std::make_unique<app::Station>(a);
-    if (const auto bad = app::check(a)) {
+    station_ = std::make_unique<app::Station>(args);
+    if (const auto bad = app::check(args)) {
         error_ = qs(*bad);
     } else {
         try {
@@ -236,14 +253,16 @@ void MainWindow::poll() {
         status_->setText(tr("%1: stopped: %2").arg(call, error_));
     } else {
         QStringList on;
-        on << tr("VARA %1:%2").arg(qs(a.host)).arg(a.command_port);
-        on << tr("KISS %1:%2").arg(qs(a.kiss_address)).arg(a.kiss_port);
+        on << tr("VARA %1:%2").arg(qs(a.listen)).arg(a.command_port);
+        on << tr("KISS %1:%2").arg(qs(a.listen)).arg(a.kiss_port);
         on << (a.audio_io.empty() ? tr("audio %1 / %2").arg(qs(a.input_device.value_or("default")), qs(a.output_device.value_or("default")))
                                   : tr("audio %1").arg(qs(a.audio_io)));
         status_->setText(tr("%1 on %2").arg(call, on.join(QStringLiteral(", "))));
     }
 
     const app::LinkStatus l = s.link();
+    abort_->setEnabled(s.running() && (l.state == arq::SessionState::CONNECTING || l.state == arq::SessionState::CONNECTED ||
+                                       l.state == arq::SessionState::DISCONNECTING));
     link_->setText(link_text(l));
     if (l.mode.empty()) {
         mode_->setText(QStringLiteral("-"));

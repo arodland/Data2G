@@ -5,6 +5,7 @@
 #include <QCompleter>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -116,8 +117,6 @@ app::Args load_settings(QSettings& s, app::Args a) {
     if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
     a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
     a.output_volume = s.value("output_volume", a.output_volume).toDouble();
-    a.rigctld_host = str("rigctld_host", a.rigctld_host);
-    a.rigctld_port = s.value("rigctld_port", a.rigctld_port).toInt();
     a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
     a.ptt_off_delay_ms = s.value("ptt_off_delay_ms", a.ptt_off_delay_ms).toInt();
     a.rig = s.value("rig", a.rig).toBool();
@@ -128,10 +127,19 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.rig_retries = s.value("rig_retries", a.rig_retries).toInt();
     a.rig_poll_interval = s.value("rig_poll_interval", a.rig_poll_interval).toDouble();
     a.rig_debug = s.value("rig_debug", a.rig_debug).toBool();
-    a.host = str("host", a.host);
+    // Before --listen and model 2's empty device: "host", and rigctld's
+    // address apart (port 0: no rig). Read once; save_settings drops them.
+    if (a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty() && s.contains("rigctld_port")) {
+        const int port = s.value("rigctld_port").toInt();
+        const std::string host = str("rigctld_host", "localhost");
+        if (port == 0) a.rig = false;
+        else if (host != "localhost" || port != 4532) a.rig_device = host + ":" + std::to_string(port);
+    }
+    a.listen = str("listen", str("host", a.listen));
     a.command_port = s.value("command_port", a.command_port).toInt();
-    a.kiss_address = str("kiss_address", a.kiss_address);
     a.kiss_port = s.value("kiss_port", a.kiss_port).toInt();
+    a.record = s.value("record", a.record).toBool();
+    a.record_dir = str("record_dir", a.record_dir);
     a.decode_worker = s.value("decode_worker", a.decode_worker).toBool();
     a.live_constellation = s.value("live_constellation", a.live_constellation).toBool();
     a.noise_rule = s.value("noise_rule", a.noise_rule).toDouble();
@@ -144,8 +152,6 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("output_device", qs(a.output_device));
     s.setValue("sample_rate", a.sample_rate);
     s.setValue("output_volume", a.output_volume);
-    s.setValue("rigctld_host", qs(a.rigctld_host));
-    s.setValue("rigctld_port", a.rigctld_port);
     s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);
     s.setValue("ptt_off_delay_ms", a.ptt_off_delay_ms);
     s.setValue("rig", a.rig);
@@ -156,10 +162,12 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("rig_retries", a.rig_retries);
     s.setValue("rig_poll_interval", a.rig_poll_interval);
     s.setValue("rig_debug", a.rig_debug);
-    s.setValue("host", qs(a.host));
+    s.setValue("listen", qs(a.listen));
     s.setValue("command_port", a.command_port);
-    s.setValue("kiss_address", qs(a.kiss_address));
     s.setValue("kiss_port", a.kiss_port);
+    s.setValue("record", a.record);
+    s.setValue("record_dir", qs(a.record_dir));
+    for (const char* old : {"host", "kiss_address", "rigctld_host", "rigctld_port"}) s.remove(old);
     s.setValue("decode_worker", a.decode_worker);
     s.setValue("live_constellation", a.live_constellation);
     s.setValue("noise_rule", a.noise_rule);
@@ -251,9 +259,11 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     if (!a.audio_io.empty())
         audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
 
-    auto* vara = group(tr("VARA ports"));
-    host_ = new QLineEdit(qs(a.host));
-    vara->addRow(tr("Address"), host_);
+    auto* net = group(tr("Ports"));
+    listen_ = new QLineEdit(qs(a.listen));
+    listen_->setToolTip(tr("The address the VARA and KISS ports listen on: 127.0.0.1 for this machine only, "
+                           "0.0.0.0 for any"));
+    net->addRow(tr("Listen address"), listen_);
     cmd_port_ = spin(1, 65534, a.command_port);
     auto* data_port = new QLabel;
     const auto show_data = [data_port](int p) { data_port->setText(tr("data on %1").arg(p + 1)); };
@@ -262,13 +272,33 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     auto* port_row = new QHBoxLayout;
     port_row->addWidget(cmd_port_);
     port_row->addWidget(data_port);
-    vara->addRow(tr("Command port"), port_row);
-
-    auto* kiss = group(tr("KISS"));
-    kiss_address_ = new QLineEdit(qs(a.kiss_address));
-    kiss->addRow(tr("Address"), kiss_address_);
+    net->addRow(tr("VARA command port"), port_row);
     kiss_port_ = spin(1, 65535, a.kiss_port);
-    kiss->addRow(tr("Port"), kiss_port_);
+    net->addRow(tr("KISS port"), kiss_port_);
+
+    auto* rec = group(tr("Recording"));
+    record_ = new QCheckBox(tr("Record every burst heard and sent"));
+    record_->setObjectName(QStringLiteral("record"));
+    record_->setChecked(a.record);
+    record_->setToolTip(tr("For replaying a session offline; each run in a timestamped folder of its own"));
+    rec->addRow(record_);
+    record_dir_ = new QLineEdit(qs(a.record_dir));
+    record_dir_->setObjectName(QStringLiteral("record_dir"));
+    auto* browse = new QPushButton(tr("Browse..."));
+    connect(browse, &QPushButton::clicked, this, [this] {
+        const QString d = QFileDialog::getExistingDirectory(this, tr("Recording folder"), record_dir_->text());
+        if (!d.isEmpty()) record_dir_->setText(d);
+    });
+    auto* dir_row = new QHBoxLayout;
+    dir_row->addWidget(record_dir_, 1);
+    dir_row->addWidget(browse);
+    rec->addRow(tr("Folder"), dir_row);
+    const auto sync_record = [this, browse](bool on) {
+        record_dir_->setEnabled(on);
+        browse->setEnabled(on);
+    };
+    sync_record(a.record);
+    connect(record_, &QCheckBox::toggled, this, sync_record);
     top->addStretch();
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -283,7 +313,7 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a) {
     auto* form = rig_form_ = new QFormLayout(page);
 
     rig_on_ = new QCheckBox(tr("Use rig control (PTT through Hamlib)"));
-    rig_on_->setChecked(app::rig_enabled(a));
+    rig_on_->setChecked(a.rig);
     form->addRow(rig_on_);
 
     // Editable: the list may be missing (no Hamlib) or lack a saved model,
@@ -302,8 +332,7 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a) {
     else rig_model_->setEditText(QString::number(a.rig_model));
     form->addRow(tr("Rig"), rig_model_);
 
-    // Model 2 with no device is rigctld at --rigctld-host:--rigctld-port: shown as such.
-    rig_device_ = new QLineEdit(a.rig_device.empty() && a.rig_model == rig::MODEL_NET_RIGCTL ? rigctld_text() : qs(a.rig_device));
+    rig_device_ = new QLineEdit(qs(a.rig_device));
     form->addRow(tr("Device"), rig_device_);
 
     baud_ = new QComboBox;
@@ -378,10 +407,6 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a) {
     return page;
 }
 
-QString SettingsDialog::rigctld_text() const {
-    return tr("%1:%2").arg(qs(base_.rigctld_host)).arg(base_.rigctld_port ? base_.rigctld_port : 4532);
-}
-
 int SettingsDialog::rig_model() const {
     // An item carries its number; typed text is a label, a bare number, or a
     // label ending "(N)".
@@ -407,6 +432,7 @@ void SettingsDialog::sync_rig() {
     const bool serial = port == rig::PortType::Serial;
     set_row_visible(rig_form_, rig_device_, port != rig::PortType::None);
     rig_device_->setPlaceholderText(serial                               ? tr("/dev/ttyUSB0 or COM5")
+                                    : model == rig::MODEL_NET_RIGCTL ? tr("localhost:4532")
                                     : port == rig::PortType::Network ? tr("host:port")
                                                                      : tr("(Hamlib's default)"));
     for (QWidget* w : {serial_row_, serial_row2_, lines_row_}) set_row_visible(rig_form_, w, serial);
@@ -470,14 +496,7 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.output_volume = volume_->value();
     a.rig = rig_on_->isChecked();
     a.rig_model = rig_model();
-    a.rigctld_host = base_.rigctld_host;
-    a.rigctld_port = base_.rigctld_port;
     a.rig_device = rig_device_->text().trimmed().toStdString();
-    // Model 2 still at rigctld's address: kept as --rigctld-host/--rigctld-port.
-    if (a.rig_model == rig::MODEL_NET_RIGCTL && QString::fromStdString(a.rig_device) == rigctld_text()) {
-        a.rig_device.clear();
-        if (a.rig && !a.rigctld_port) a.rigctld_port = 4532;  // turned on after --rigctld-port 0
-    }
     a.rig_baud = baud_->currentData().toInt();
     a.rig_data_bits = chosen(data_bits_);
     a.rig_stop_bits = chosen(stop_bits_);
@@ -495,10 +514,11 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.rig_debug = rig_debug_->isChecked();
     a.ptt_on_delay_ms = ptt_on_->value();
     a.ptt_off_delay_ms = ptt_off_->value();
-    a.host = host_->text().trimmed().toStdString();
+    a.listen = listen_->text().trimmed().toStdString();
     a.command_port = cmd_port_->value();
-    a.kiss_address = kiss_address_->text().trimmed().toStdString();
     a.kiss_port = kiss_port_->value();
+    a.record = record_->isChecked();
+    a.record_dir = record_dir_->text().trimmed().toStdString();
     a.decode_worker = worker_->isChecked();
     a.live_constellation = live_->isChecked();
     // left where it opened: the value it came with (a command line may set more than the slider's top)

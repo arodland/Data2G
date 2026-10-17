@@ -1,8 +1,8 @@
-// data2g-host's rig options (app/options.*): what the flags set, how the
-// legacy --rigctld-host/--rigctld-port map onto Hamlib model 2, the mapping
+// data2g-host's options (app/options.*): what the flags set, the mapping
 // to HamlibConfig, and check()'s messages. The usage errors (which exit)
 // are tested on the binary, in tests/test_native_host_e2e.py.
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -20,27 +20,40 @@ app::Args parse(std::vector<std::string> args, app::Args base = {}) {
     return app::parse(static_cast<int>(argv.size()), argv.data(), base);
 }
 
-void test_rigctld_is_model_2() {
-    check::current_step = "rigctld";
+void test_rig_flags() {
+    check::current_step = "rig";
     const app::Args d = parse({});
-    check::is_true(app::rig_enabled(d) && d.rig_model == rig::MODEL_NET_RIGCTL, "default: a rig, model 2");
-    check::equal(app::rig_device(d), std::string("localhost:4532"), "default: rigctld on localhost:4532");
-    check::is_true(!app::rig_enabled(parse({"--rigctld-port", "0"})), "--rigctld-port 0: no rig");
-    check::is_true(!app::rig_enabled(parse({"--no-rig"})), "--no-rig: no rig");
+    check::is_true(d.rig && d.rig_model == rig::MODEL_NET_RIGCTL && d.rig_device.empty(), "default: model 2, Hamlib's device");
+    check::is_true(!parse({"--no-rig"}).rig, "--no-rig: no rig");
 
-    // flags override saved settings as a whole
+    // a model or device turns a saved 'off' on
     app::Args saved;
-    saved.rig_model = 3073;
-    saved.rig_device = "/dev/ttyUSB0";
     saved.rig = false;
-    const app::Args r = parse({"--rigctld-host", "radio.lan", "--rigctld-port=4600"}, saved);
-    check::is_true(app::rig_enabled(r) && r.rig_model == rig::MODEL_NET_RIGCTL && r.rig_device.empty(),
-                   "--rigctld-*: model 2 over a saved serial rig, turned on");
-    check::equal(app::rig_device(r), std::string("radio.lan:4600"), "--rigctld-*: that address");
     check::is_true(parse({"--rig-model", "1"}, saved).rig, "--rig-model turns a saved 'off' on");
-    check::is_true(parse({"--rigctld-port", "4532", "--rig-model", "2"}).rig_model == 2, "--rig-model 2 with --rigctld-*: fine");
+    check::is_true(parse({"--rig-device", "shack:4532"}, saved).rig, "--rig-device turns a saved 'off' on");
+    check::is_true(!parse({}, saved).rig, "...and nothing else does");
     const app::Args dev = parse({"--rig-model", "2", "--rig-device", "shack:4532"});
-    check::equal(app::rig_device(dev), std::string("shack:4532"), "model 2 with --rig-device");
+    check::equal(app::hamlib_config(dev).device, std::string("shack:4532"), "model 2 with --rig-device");
+}
+
+void test_listen() {
+    check::current_step = "listen";
+    check::equal(parse({}).listen, std::string("127.0.0.1"), "default 127.0.0.1");
+    check::equal(parse({"--listen", "0.0.0.0"}).listen, std::string("0.0.0.0"), "--listen");
+}
+
+void test_record() {
+    check::current_step = "record";
+    const app::Args d = parse({});
+    check::is_true(!d.record && app::record_path(d).empty(), "off by default");
+    const app::Args on = parse({"--record"});
+    check::is_true(on.record && std::filesystem::path(app::record_path(on)).parent_path() == "recordings", "--record: under recordings/");
+    const app::Args dir = parse({"--record-dir", "elsewhere"});
+    check::is_true(dir.record && std::filesystem::path(app::record_path(dir)).parent_path() == "elsewhere", "--record-dir implies --record");
+    app::Args saved;
+    saved.record = true;
+    check::is_true(!parse({"--no-record"}, saved).record, "--no-record over a saved 'on'");
+    check::is_true(parse({"--no-record", "--record"}).record, "the last of --record/--no-record wins");
 }
 
 void test_every_flag() {
@@ -62,7 +75,7 @@ void test_every_flag() {
                    "PTT method, device, audio");
     check::is_true(h.mode == rig::RigMode::PktUsb && h.timeout_ms == 750 && h.retries == 3, "mode, timeout, retries");
     const rig::HamlibConfig d = app::hamlib_config(parse({}));
-    check::is_true(d.model == 2 && d.device == "localhost:4532" && d.ptt_method == rig::PttMethod::Cat &&
+    check::is_true(d.model == 2 && d.device.empty() && d.ptt_method == rig::PttMethod::Cat &&
                        d.parity == rig::Parity::Default && d.mode == rig::RigMode::None,
                    "defaults map to the backend's own");
     check::is_true(app::hamlib_config(parse({"--ptt-method", "vox"})).ptt_method == rig::PttMethod::Vox, "vox");
@@ -113,7 +126,9 @@ void test_dd_budget() {
 }  // namespace
 
 int main() {
-    test_rigctld_is_model_2();
+    test_rig_flags();
+    test_listen();
+    test_record();
     test_every_flag();
     test_check();
     test_noise_rule();

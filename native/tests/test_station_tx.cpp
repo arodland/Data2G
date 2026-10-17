@@ -87,8 +87,7 @@ void run(bool abort_midway) {
     app::Args a;
     a.mycall = "N0TX";
     a.audio_io = "pipe:" + in + "," + out;
-    a.rigctld_port = 0;
-    a.record_dir = "";
+    a.rig = false;
     a.command_port = free_port_triple();
     a.kiss_port = a.command_port + 2;
     a.rx_stall_ms = 250;  // 2.5x a block: the old block-by-block feeding would have starved the card at once

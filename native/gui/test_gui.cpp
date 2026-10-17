@@ -89,8 +89,6 @@ app::Args persisted() {
     a.output_device = "Gone Card";  // not in the dialog's list: kept, marked
     a.sample_rate = 96000;
     a.output_volume = -6.5;
-    a.rigctld_host = "radio.lan";
-    a.rigctld_port = 4533;
     a.ptt_on_delay_ms = 150;
     a.ptt_off_delay_ms = 70;
     a.rig_model = 3073;  // IC-7300: serial, so the serial fields show
@@ -110,10 +108,11 @@ app::Args persisted() {
     a.rig_retries = 3;
     a.rig_poll_interval = 2.5;
     a.rig_debug = true;
-    a.host = "0.0.0.0";
+    a.listen = "0.0.0.0";
     a.command_port = 8400;
-    a.kiss_address = "0.0.0.0";
     a.kiss_port = 8101;
+    a.record = true;
+    a.record_dir = "/srv/rec";
     a.decode_worker = false;
     a.live_constellation = false;
     a.noise_rule = 0.5;
@@ -159,43 +158,40 @@ void test_settings(const QTemporaryDir& dir) {
         gui::save_settings(s, a);
     }
     QSettings s(ini, QSettings::IniFormat);
-    app::Args b = gui::load_settings(s);
-    b.record_dir = a.record_dir;  // not persisted; a timestamp
+    const app::Args b = gui::load_settings(s);
     check::is_true(b == a, "settings round trip through QSettings");
     // unset optionals come back unset
-    app::Args none;
-    none.record_dir = a.record_dir;
+    const app::Args none;
     gui::save_settings(s, none);
-    app::Args c = gui::load_settings(s, a);
-    c.record_dir = a.record_dir;
+    const app::Args c = gui::load_settings(s, a);
     check::is_true(c == none, "cleared callsign and devices round trip");
 
     gui::SettingsDialog d(a, {QStringLiteral("Built-in"), QStringLiteral("USB Audio")}, {QStringLiteral("Built-in")});
     app::Args e;
-    e.record_dir = a.record_dir;
     d.apply_to(e);
     check::is_true(e == a, "settings round trip through the dialog");
 
-    // model 2 at rigctld's address stays that (no device), and a saved
+    // model 2 with no device (rigctld on localhost) stays that, and a saved
     // 'no rig' stays off; neither opens anything
     app::Args r;
-    r.record_dir = a.record_dir;
-    r.rigctld_host = "radio.lan";
-    r.rigctld_port = 4533;
     for (bool on : {true, false}) {
         r.rig = on;
         gui::SettingsDialog rd(r, {}, {});
         app::Args f;
-        f.record_dir = a.record_dir;
         rd.apply_to(f);
-        check::is_true(f == r, on ? "rigctld settings round trip through the dialog" : "rig off round trips");
+        check::is_true(f == r, on ? "model 2 default round trips through the dialog" : "rig off round trips");
     }
-    // legacy settings (no rig keys): rigctld at their host and port
+    // older settings: rigctld's address apart, "host" for --listen
     QSettings legacy(dir.filePath(QStringLiteral("legacy.ini")), QSettings::IniFormat);
     legacy.setValue("rigctld_host", QStringLiteral("old.lan"));
     legacy.setValue("rigctld_port", 4534);
+    legacy.setValue("host", QStringLiteral("0.0.0.0"));
     const app::Args l = gui::load_settings(legacy);
-    check::is_true(app::rig_enabled(l) && app::rig_device(l) == "old.lan:4534", "legacy rigctld settings: model 2 there");
+    check::is_true(l.rig && l.rig_device == "old.lan:4534" && l.listen == "0.0.0.0", "older settings: rigctld's address, host");
+    legacy.setValue("rigctld_port", 0);
+    check::is_true(!gui::load_settings(legacy).rig, "older settings: rigctld port 0 is no rig");
+    gui::save_settings(legacy, l);
+    check::is_true(!legacy.contains("rigctld_port") && !legacy.contains("host"), "...and saving drops the old keys");
 }
 
 void test_window(const QTemporaryDir& dir) {
@@ -211,8 +207,7 @@ void test_window(const QTemporaryDir& dir) {
     app::Args a;
     a.mycall = "N0GUI";
     a.audio_io = "pipe:" + in + "," + out;
-    a.rigctld_port = 0;  // no rig
-    a.record_dir = "";
+    a.rig = false;
     a.command_port = free_port_triple();
     a.kiss_port = a.command_port + 2;  // KISS always runs: a port of its own
     QSettings store(dir.filePath(QStringLiteral("window.ini")), QSettings::IniFormat);

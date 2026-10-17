@@ -148,6 +148,9 @@ public:
     // The Monitor window: while on, every burst heard is also decoded as a
     // packet dump (core/monitor), whoever it is for, on a thread of its own.
     void set_monitor(bool on) { monitor_on_ = on; }
+    // The operator's Abort: any session under way is dropped at once and the
+    // command clients told DISCONNECTED (host::Host::abort_session).
+    void abort_session();
     std::vector<monitor::Dump> take_dumps();  // since the last call (the newest 256 kept)
 
 private:
