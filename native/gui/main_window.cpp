@@ -14,6 +14,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 #include "arq/modes.hpp"
 #include "arq/session.hpp"
 #include "audio/card.hpp"
@@ -176,6 +178,20 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     log_->setObjectName(QStringLiteral("burst_log"));
     log_->setHorizontalHeaderLabels({tr("Time"), tr("Mode"), tr("SNR (dB)"), tr("Result")});
     log_->horizontalHeader()->setStretchLastSection(true);
+    {
+        // Each column as wide as its widest cell (the longest mode name), Result taking what is left.
+        const QFontMetrics fm = log_->fontMetrics();
+        const int pad = 2 * fm.horizontalAdvance(QLatin1Char('M'));
+        int mode_w = 0;
+        for (const arq::Mode& m : arq::modes()) mode_w = std::max(mode_w, fm.horizontalAdvance(tr("%1 x%2").arg(qs(std::string(m.name))).arg(99)));
+        const auto fit = [&](int col, int text_w) {
+            const int header_w = log_->horizontalHeader()->fontMetrics().horizontalAdvance(log_->horizontalHeaderItem(col)->text());
+            log_->setColumnWidth(col, std::max(text_w, header_w) + pad);
+        };
+        fit(0, fm.horizontalAdvance(QStringLiteral("00:00:00")));
+        fit(1, mode_w);
+        fit(2, fm.horizontalAdvance(QStringLiteral("-00.0")));
+    }
     log_->verticalHeader()->setVisible(false);
     log_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     log_->setSelectionBehavior(QAbstractItemView::SelectRows);
