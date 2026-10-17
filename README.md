@@ -2,6 +2,8 @@
 
 Data2G is an HF data modem designed to foster fun and experimentation in amateur radio. You get state-of-the-art speeds and error correction (up to 6400 bits per second net throughput on a good channel), a flexible programming interface (compatible with apps that expect the VARA HF TNC, but extended), and most importantly it's open-source and free to use without speed restrictions.
 
+And did I mention [it's fast](docs/speedtests/README.md)?
+
 Both connected (hybrid ARQ) and broadcast (FEC) modes are available.
 
 A 2400Hz channel is required for full speed but Data2G can be configured for a maximum bandwidth of 500Hz to fit within narrowband segments of the bandplan.
