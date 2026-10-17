@@ -162,6 +162,12 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     lamps->addWidget(busy_);
     lamps->addWidget(ptt_);
     lamps->addStretch();
+    abort_ = new QPushButton(tr("Abort"));
+    abort_->setObjectName(QStringLiteral("abort"));
+    abort_->setToolTip(tr("Drop the session at once, without a disconnect handshake; the client is told DISCONNECTED"));
+    abort_->setEnabled(false);
+    connect(abort_, &QPushButton::clicked, this, [this] { station_->abort_session(); });
+    lamps->addWidget(abort_);
     auto* monitor = new QPushButton(tr("Monitor..."));
     monitor->setObjectName(QStringLiteral("open_monitor"));
     connect(monitor, &QPushButton::clicked, this, &MainWindow::open_monitor);
@@ -255,6 +261,8 @@ void MainWindow::poll() {
     }
 
     const app::LinkStatus l = s.link();
+    abort_->setEnabled(s.running() && (l.state == arq::SessionState::CONNECTING || l.state == arq::SessionState::CONNECTED ||
+                                       l.state == arq::SessionState::DISCONNECTING));
     link_->setText(link_text(l));
     if (l.mode.empty()) {
         mode_->setText(QStringLiteral("-"));

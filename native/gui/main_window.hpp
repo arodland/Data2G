@@ -21,6 +21,7 @@
 #include "app/station.hpp"
 
 class QLabel;
+class QPushButton;
 class QSettings;
 class QTableWidget;
 
@@ -56,6 +57,7 @@ private:
     Waterfall* waterfall_;
     ConstellationPlot* constellation_;
     QLabel *link_, *mode_, *busy_, *ptt_, *rx_, *tx_, *counters_, *status_;
+    QPushButton* abort_;  // enabled while a session is under way
     QLabel *dial_label_, *dial_;  // shown only with --rig-poll-interval
     QTableWidget* log_;
     MonitorWindow* monitor_ = nullptr;  // made when first opened

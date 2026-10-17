@@ -228,6 +228,17 @@ void Host::client_gone() {
     }
 }
 
+bool Host::abort_session() {
+    auto& e = engine;
+    const auto s = e.session().state;
+    if (s != SessionState::CONNECTING && s != SessionState::CONNECTED && s != SessionState::DISCONNECTING) return false;
+    arq::log_write(LOG, INFO, "session with " + e.session().peer + " aborted by the operator");
+    e.abort();
+    out_cmd.emplace_back("DISCONNECTED");
+    if (listening) e.listen();
+    return true;
+}
+
 void Host::data_in(arq::ByteView data) {
     engine.session().write(data);
     // always answer data with a BUFFER line, changed or not: Pat counts what

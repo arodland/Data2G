@@ -276,6 +276,13 @@ LinkStatus Station::link() const {
     return link_status_;
 }
 
+void Station::abort_session() {
+    if (!running_) return;
+    engine_->post([this] {
+        if (host_->abort_session()) flush();
+    });
+}
+
 std::vector<monitor::Dump> Station::take_dumps() {
     if (!monitor_) return {};
     std::lock_guard lock(monitor_->mu);

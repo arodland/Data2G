@@ -153,6 +153,23 @@ void accept() {
     check::is_true(!p.b.accept_addr, "LISTEN ON ends ACCEPT");
 }
 
+void operator_abort() {
+    check::current_step = "operator abort";
+    Pair p(seeded(31), seeded(32));
+    for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) p.b.command(line);
+    p.b.out_cmd.clear();
+    check::is_true(!p.b.abort_session() && p.b.out_cmd.empty(), "only listening: nothing to abort, nothing sent");
+    p.a.command("CONNECT W1AW K2XYZ");
+    p.take();
+    check::is_true(p.run(60, [&] { return has(p.seen_a, "CONNECTED W1AW K2XYZ 2300") && has(p.seen_b, "CONNECTED W1AW K2XYZ 2300"); }),
+                   "connected");
+    check::is_true(p.b.abort_session(), "aborted");
+    check::is_true(p.b.out_cmd == std::vector<std::string>{"DISCONNECTED"}, "the client told DISCONNECTED (no OK: not its command)");
+    check::is_true(p.eb.session().state == arq::SessionState::LISTEN, "still listening");
+    p.b.out_cmd.clear();
+    check::is_true(!p.b.abort_session() && p.b.out_cmd.empty(), "again: nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -161,5 +178,6 @@ int main() {
     commands();
     session();
     accept();
+    operator_abort();
     return check::report("test_host");
 }

@@ -60,6 +60,10 @@ public:
     void command(std::string_view line, std::string_view peer = "127.0.0.1");
     // The command client's TCP connection closed: it owned the session.
     void client_gone();
+    // The operator's Abort: a session under way (connecting, connected or
+    // disconnecting) is dropped at once, as ABORT does, and the client told
+    // DISCONNECTED. False, and nothing sent, when there was none.
+    bool abort_session();
     void data_in(arq::ByteView data);
     void after_step(bool ptt);
 
