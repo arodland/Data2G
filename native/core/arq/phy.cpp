@@ -31,6 +31,12 @@ Mat<float> row_f(std::span<const double> v) {
     return out;
 }
 
+// A control mask's codeword index in the control stream (a compact CONNECT's is its only codeword).
+int ctl_index(const MaskId& m) {
+    const int i = m.seq - SEQ_MOD;
+    return i < MAX_CTL ? i : 0;
+}
+
 // 30 (1 - 2 bit): a decoded codeword's bits as large LLRs.
 std::vector<double> known(std::span<const std::uint8_t> bits) {
     std::vector<double> out(bits.size());
@@ -228,7 +234,7 @@ std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
     const auto& s = spec(slot);
     const Raw& d = decoded(slot, s);
     auto got = codes::check(s, d.cands, d.usable, m);
-    if (!got && mask.seq >= SEQ_MOD) got = check_pinned(slot, s, m);  // a control (ctl_mask)
+    if (!got && mask.seq >= SEQ_MOD) got = check_pinned(slot, s, m, ctl_index(mask));  // a control (ctl_mask)
     auto& out = memo_[{slot, m}] = std::move(got);
     tried_.insert(slot);
     if (out) ok_.insert(slot);
@@ -250,35 +256,40 @@ std::vector<Bytes> ModemRx::raw(int slot) {
         }
     };
     add(d);
-    if (out.empty())
-        for (int cut : cuts(s)) add(pinned(slot, s, cut));
-    return out;
+    // pinned candidates after the plain ones: LDPC's when it did not converge; polar's always (its list is never
+    // empty). A broadcast control is one codeword per slot (CPM: one, twice at most).
+    if (out.empty() || s.polar)
+        for (int off : offsets(s, n_ctl_slots_ ? 0 : slot)) add(pinned(slot, s, off));
+    std::vector<Bytes> uniq;
+    for (auto& p : out)
+        if (std::find(uniq.begin(), uniq.end(), p) == uniq.end()) uniq.push_back(std::move(p));
+    return uniq;
 }
 
-std::vector<int> ModemRx::cuts(const codes::Spec& s) const {
+// Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.
+std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
     std::vector<int> out;
-    if (!s.polar)
-        for (int c : PIN_CUTS)
-            if (c < s.payload_bytes) out.push_back(c);
+    const std::span<const int> cuts = s.polar ? std::span<const int>(POLAR_PIN_CUTS) : std::span<const int>(PIN_CUTS);
+    for (int c : cuts) {
+        const int off = c - i * s.payload_bytes;
+        if (off > 0 && off < s.payload_bytes && std::find(out.begin(), out.end(), off) == out.end()) out.push_back(off);
+    }
     return out;
 }
 
-// The slot decoded alone with its payload past `cut` bytes pinned to zero (one candidate).
-const ModemRx::Raw& ModemRx::pinned(int slot, const codes::Spec& s, int cut) {
-    auto it = pinned_.find({slot, cut});
+// The slot decoded alone with its payload past `off` bytes known zero.
+const ModemRx::Raw& ModemRx::pinned(int slot, const codes::Spec& s, int off) {
+    auto it = pinned_.find({slot, off});
     if (it != pinned_.end()) return it->second;
-    const int idx[1] = {slot};
-    Mat<float> soft(1, static_cast<std::size_t>(s.coded_bits));
-    soft.data = codes::pin(s, slot_soft(slot), codes::zero_tail(s, cut), slot);
-    auto d = codes::decode_raw(s, soft, idx);
-    return pinned_[{slot, cut}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
+    auto d = codes::decode_raw_pinned(s, row_f(slot_soft(slot)), codes::zero_tail(s, off), slot);
+    return pinned_[{slot, off}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
 }
 
-// A control slot that failed alone, decoded again with its padding pinned,
+// Control codeword i that failed alone, decoded again with its padding known,
 // the shortest cut first; each try CRC-checked under m like any decode.
-std::optional<Bytes> ModemRx::check_pinned(int slot, const codes::Spec& s, std::uint32_t m) {
-    for (int cut : cuts(s)) {
-        const Raw& d = pinned(slot, s, cut);
+std::optional<Bytes> ModemRx::check_pinned(int slot, const codes::Spec& s, std::uint32_t m, int i) {
+    for (int off : offsets(s, i)) {
+        const Raw& d = pinned(slot, s, off);
         if (auto got = codes::check(s, d.cands, d.usable, m)) {
             learn(slot, s, *got, 0, m);
             return got;
@@ -364,13 +375,11 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
         undo(slot, saved);
         buf = combined_buffer(s, slot, rv, slot_soft(slot), kept);
     }
-    if (kept && mask.seq >= SEQ_MOD) {  // a control combined (ARQ_DUP): its padding pinned (phy.PIN_CUTS)
-        const std::uint32_t masks[1] = {m};
-        const int plain[1] = {codes::PLAIN};
-        for (int cut : cuts(s)) {
+    if (kept && mask.seq >= SEQ_MOD) {  // a control combined (ARQ_DUP): its padding known
+        for (int off : offsets(s, ctl_index(mask))) {
             Mat<double> b(1, buf.size());
-            b.data = codes::pin_buffer(s, buf, codes::zero_tail(s, cut));
-            auto p = codes::decode_buffer(s, b, top, masks, plain)[0];
+            b.data = buf;
+            auto p = codes::decode_buffer_pinned(s, b, top, codes::zero_tail(s, off), m)[0];
             if (p.ok) {
                 learn(slot, s, p.data, rv, m);
                 ok_.insert(slot);

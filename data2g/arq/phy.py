@@ -20,7 +20,7 @@ from .. import codes, constellation, cpm, equalizer, modem
 from ..waveform import dsp, ofdm
 from . import predictor as P
 from .burst import COMPACT_CONNECT
-from .frames import SEQ_MOD
+from .frames import MAX_CTL, SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
 
 log = logging.getLogger(__name__)
@@ -37,12 +37,21 @@ DD_ITERS = 2
 DD_BUDGET_S = 1.0
 # A control is a few bytes (median 12, at most 28 in linksim sessions) zeroed
 # to its codeword's payload (frames.Control.pack). A control slot that fails
-# is decoded again with its payload past each of these byte counts in turn
-# pinned to zero (codes.pin): at code level, 10% of controls failed 1-6 dB
-# lower, 4 dB the median over the LDPC modes (scripts/ctl_prior_study.py).
-# The same for an ARQ_DUP pair once combined. LDPC only: polar sends no info
-# bits.
+# is decoded again with the control stream past each of these byte counts in
+# turn known to be zero (codes.decode_raw_pinned): at code level, 10% of LDPC
+# controls failed 1-6 dB lower, 4 dB the median over the modes
+# (scripts/ctl_prior_study.py). The same for an ARQ_DUP pair once combined.
+# Polar: CPM's control carries 9-16 B of its 20 (median 12) in real-modem
+# sessions, so shorter cuts.
 PIN_CUTS = (16, 32)
+POLAR_PIN_CUTS = (12, 16)
+
+
+def _ctl_index(mask_id: tuple) -> int:
+    """A control mask's codeword index in the control stream (a compact
+    CONNECT's, burst.COMPACT_CONNECT, is its only codeword)."""
+    i = mask_id[2] - SEQ_MOD
+    return i if i < MAX_CTL else 0
 
 
 def mask_value(mask_id: tuple) -> int:
@@ -221,7 +230,7 @@ class ModemRx:
             if (slot, m) not in self._memo:
                 got = codes.check(spec, *self._decoded(slot, spec), m)
                 if got is None and mask_id[2] >= SEQ_MOD:  # a control (burst.ctl_mask)
-                    got = self._check_pinned(slot, spec, m)
+                    got = self._check_pinned(slot, spec, m, _ctl_index(mask_id))
                 self._memo[(slot, m)] = got
             return self._memo[(slot, m)]
         buf0, top, name, where = self.store.get(key, (None, 0, self.submode, None))
@@ -253,9 +262,8 @@ class ModemRx:
             self._undo(slot, soft0)
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), fl * self._soft(slot), rv)
         if buf0 is not None and mask_id[2] >= SEQ_MOD:  # a control combined (ARQ_DUP): its padding pinned
-            for cut in self._cuts(spec):
-                pinned = codes.pin_buffer(spec, buf, codes.zero_tail(spec, cut))
-                payload, ok = codes.decode_buffer(spec, pinned, top, m, index=codes.PLAIN)[0]
+            for off in self._offsets(spec, _ctl_index(mask_id)):
+                payload, ok = codes.decode_buffer_pinned(spec, buf, top, codes.zero_tail(spec, off), m)[0]
                 if ok:
                     self._learn(slot, spec, payload, rv, m)
                     return payload
@@ -273,29 +281,36 @@ class ModemRx:
         cands, usable = self._decoded(slot, spec)
         nb = codes.payload_bytes(spec)
         out = [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
-        for cut in () if out else self._cuts(spec):
-            c, u = self._pinned(slot, spec, cut)
-            out += [np.packbits(c[0, :8 * nb]).tobytes()] if u[0] else []
-        return out
+        # pinned candidates after the plain ones: LDPC's when it did not
+        # converge; polar's always, as its list is never empty. A broadcast
+        # control is one codeword per slot (CPM: one, twice at most).
+        for off in () if out and spec.code == "ldpc" else self._offsets(spec, 0 if self.n_ctl_slots else slot):
+            c, u = self._pinned(slot, spec, off)
+            out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
+        return list(dict.fromkeys(out))
 
-    def _cuts(self, spec) -> tuple:
-        return tuple(c for c in PIN_CUTS if c < codes.payload_bytes(spec)) if spec.code == "ldpc" else ()
+    def _offsets(self, spec, i: int) -> tuple:
+        """Control codeword i's payload offsets past which a cut (PIN_CUTS,
+        POLAR_PIN_CUTS: bytes of the control stream) knows it zero."""
+        pb = codes.payload_bytes(spec)
+        cuts = PIN_CUTS if spec.code == "ldpc" else POLAR_PIN_CUTS
+        return tuple(dict.fromkeys(c - i * pb for c in cuts if 0 < c - i * pb < pb))
 
-    def _pinned(self, slot: int, spec, cut: int) -> tuple:
-        """`slot` decoded alone with its payload past `cut` bytes pinned to
-        zero, as decode_raw's row (one candidate)."""
-        if (slot, cut) not in self._pin:
-            soft = codes.pin(spec, np.asarray(self._soft(slot)), codes.zero_tail(spec, cut), slot)
-            cands, usable = codes.decode_raw(spec, soft[None], index=slot)
-            self._pin[(slot, cut)] = cands[0], usable[0]
-        return self._pin[(slot, cut)]
+    def _pinned(self, slot: int, spec, off: int) -> tuple:
+        """`slot` decoded alone with its payload past `off` bytes known zero,
+        as decode_raw's row."""
+        if (slot, off) not in self._pin:
+            cands, usable = codes.decode_raw_pinned(spec, np.asarray(self._soft(slot))[None], codes.zero_tail(spec, off),
+                                                    slot)
+            self._pin[(slot, off)] = cands[0], usable[0]
+        return self._pin[(slot, off)]
 
-    def _check_pinned(self, slot: int, spec, m: int) -> bytes | None:
-        """A control slot that failed alone: decoded again with its padding
-        pinned, the shortest cut first. Each try is CRC-checked under `m`
-        like any decode."""
-        for cut in self._cuts(spec):
-            got = codes.check(spec, *self._pinned(slot, spec, cut), m)
+    def _check_pinned(self, slot: int, spec, m: int, i: int) -> bytes | None:
+        """Control codeword i that failed alone: decoded again with its
+        padding known, the shortest cut first. Each try is CRC-checked under
+        `m` like any decode."""
+        for off in self._offsets(spec, i):
+            got = codes.check(spec, *self._pinned(slot, spec, off), m)
             if got is not None:
                 self._learn(slot, spec, got, 0, m)
                 return got
