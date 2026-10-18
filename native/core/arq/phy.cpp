@@ -364,6 +364,20 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
         undo(slot, saved);
         buf = combined_buffer(s, slot, rv, slot_soft(slot), kept);
     }
+    if (kept && mask.seq >= SEQ_MOD) {  // a control combined (ARQ_DUP): its padding pinned (phy.PIN_CUTS)
+        const std::uint32_t masks[1] = {m};
+        const int plain[1] = {codes::PLAIN};
+        for (int cut : cuts(s)) {
+            Mat<double> b(1, buf.size());
+            b.data = codes::pin_buffer(s, buf, codes::zero_tail(s, cut));
+            auto p = codes::decode_buffer(s, b, top, masks, plain)[0];
+            if (p.ok) {
+                learn(slot, s, p.data, rv, m);
+                ok_.insert(slot);
+                return std::move(p.data);
+            }
+        }
+    }
     stored = SoftEntry{std::move(buf), top, submode_, slot, rv, mask};
     return std::nullopt;
 }

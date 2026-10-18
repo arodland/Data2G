@@ -127,7 +127,7 @@ struct Codecs {
     std::optional<polar::PolarCode> polar;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
     std::unique_ptr<polar::SCLDecoder> scl;
-    std::optional<std::vector<int>> systematic;  // systematic_positions
+    std::optional<std::vector<int>> systematic, info_code;  // systematic_positions, info_code_positions
 };
 std::mutex cache_mutex;
 std::map<const Spec*, Codecs> cache;
@@ -456,15 +456,31 @@ std::optional<std::vector<std::uint8_t>> check(const Spec& s, std::span<const st
     return std::nullopt;
 }
 
-const std::vector<int>& systematic_positions(const Spec& s) {
+namespace {
+
+// Where each info bit is sent at RV 0 in code order (its IR buffer position too), or -1 (codes._info_code_positions).
+const std::vector<int>& info_code_positions(const Spec& s) {
     std::vector<int> out(static_cast<std::size_t>(s.k), -1);
     if (!s.polar) {
         const auto& sent = ldpc_code(s).sent();
-        std::vector<int> where(static_cast<std::size_t>(s.coded_bits));  // code order -> mapping order
-        for (int i = 0; i < s.coded_bits; ++i) where[s.perm[i]] = i;
         for (std::size_t p = 0; p < sent.size(); ++p)
-            if (sent[p] < s.k) out[static_cast<std::size_t>(sent[p])] = where[p];
+            if (sent[p] < s.k) out[static_cast<std::size_t>(sent[p])] = static_cast<int>(p);
     }
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.info_code) c.info_code = std::move(out);
+    return *c.info_code;
+}
+
+}  // namespace
+
+const std::vector<int>& systematic_positions(const Spec& s) {
+    const auto& code = info_code_positions(s);
+    std::vector<int> where(static_cast<std::size_t>(s.coded_bits));  // code order -> mapping order
+    for (int i = 0; i < s.coded_bits; ++i) where[s.perm[i]] = i;
+    std::vector<int> out(code.size(), -1);
+    for (std::size_t i = 0; i < code.size(); ++i)
+        if (code[i] >= 0) out[i] = where[static_cast<std::size_t>(code[i])];
     std::lock_guard lock(cache_mutex);
     auto& c = cache[&s];
     if (!c.systematic) c.systematic = std::move(out);
@@ -485,6 +501,14 @@ std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<co
     for (std::size_t i = 0; i < known.size() && i < pos.size(); ++i)
         if (known[i] >= 0 && pos[i] >= 0)
             out[static_cast<std::size_t>(pos[i])] = ldpc::CH_CLAMP * (1.0f - 2.0f * static_cast<float>((known[i] ^ pn[i]) & 1));
+    return out;
+}
+
+std::vector<double> pin_buffer(const Spec& s, std::span<const double> buf, std::span<const std::int8_t> known) {
+    std::vector<double> out(buf.begin(), buf.end());
+    const auto& pos = info_code_positions(s);
+    for (std::size_t i = 0; i < known.size() && i < pos.size(); ++i)
+        if (known[i] >= 0 && pos[i] >= 0) out[static_cast<std::size_t>(pos[i])] = ldpc::CH_CLAMP * (1.0 - 2.0 * known[i]);
     return out;
 }
 

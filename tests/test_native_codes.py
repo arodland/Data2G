@@ -19,7 +19,7 @@ IDS = [s.name for s in SPECS]
 CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
          "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
-         "systematic_positions", "zero_tail", "pin")
+         "systematic_positions", "zero_tail", "pin", "pin_buffer")
 
 
 @pytest.fixture
@@ -165,3 +165,5 @@ def test_pin(native, py, spec):
     known = rng.integers(-1, 2, spec.k)
     for index in (0, 3):
         np.testing.assert_array_equal(n.pin(spec.name, soft, known, index), py.pin(spec, soft, known, index))
+    buf = rng.normal(size=(2, py.buffer_len(spec))) * 3
+    np.testing.assert_array_equal(n.pin_buffer(spec.name, buf, known), py.pin_buffer(spec, buf, known))

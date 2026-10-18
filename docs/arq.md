@@ -179,8 +179,8 @@ Where the rest comes from:
   (46-396 B in the LDPC modes). LDPC is systematic, so the receiver sets the sent info bits
   past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
   `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
-  nothing on air changes. Not yet for polar control (CPM, the ACK modes) or for the
-  `ARQ_DUP` pair decode.
+  nothing on air changes. An `ARQ_DUP` pair that fails combined is pinned the same way in
+  its IR buffer (`codes.pin_buffer`). Not yet for polar control (CPM, the ACK modes).
   - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
     constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
     the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),

@@ -497,18 +497,26 @@ def check(spec: CodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) 
 # polar's info bits have no soft bit to pin. Nothing on air changes.
 
 @lru_cache(maxsize=None)
-def systematic_positions(spec: CodeSpec) -> np.ndarray:
-    """(k,) where each info bit is sent at RV 0, in mapping order, or -1
-    (punctured, filler; polar: every one)."""
+def _info_code_positions(spec: CodeSpec) -> np.ndarray:
+    """(k,) where each info bit is sent at RV 0 in code order (its position
+    in an IR buffer too: the mother code starts with the codeword), or -1."""
     out = np.full(spec.k, -1, dtype=np.int64)
     if spec.code != "ldpc":
         return out
     sent = np.asarray(ldpc_code(spec).sent)
     p = np.flatnonzero(sent < spec.k)  # sent positions (code order) carrying info bits
+    out[sent[p]] = p
+    return out
+
+
+@lru_cache(maxsize=None)
+def systematic_positions(spec: CodeSpec) -> np.ndarray:
+    """(k,) where each info bit is sent at RV 0, in mapping order, or -1
+    (punctured, filler; polar: every one)."""
+    code = _info_code_positions(spec)
     where = np.empty(spec.coded_bits, dtype=np.int64)
     where[np.asarray(interleaver(spec))] = np.arange(spec.coded_bits)  # code order -> mapping order
-    out[sent[p]] = where[p]
-    return out
+    return np.where(code >= 0, where[np.maximum(code, 0)], -1)
 
 
 def zero_tail(spec: CodeSpec, nbytes: int) -> np.ndarray:
@@ -530,6 +538,16 @@ def pin(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> np.n
     out = np.array(soft, dtype=np.float32)
     bit = np.asarray(known)[sel].astype(np.uint8) ^ scrambler(spec.k, scramble_seed(index))[sel]
     out[pos[sel]] = ldpc.CH_CLAMP * (1.0 - 2.0 * bit)
+    return out
+
+
+def pin_buffer(spec: CodeSpec, buf: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """codes.pin for a combined IR buffer ((B, L), code order, unscrambled:
+    decode_buffer's input). Unchanged for polar."""
+    pos = _info_code_positions(spec)
+    sel = (np.asarray(known) >= 0) & (pos >= 0)
+    out = np.array(buf, dtype=float)
+    out[:, pos[sel]] = ldpc.CH_CLAMP * (1.0 - 2.0 * np.asarray(known)[sel])
     return out
 
 

@@ -19,7 +19,7 @@ def substitutions(native):
         "crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
         "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
-        "systematic_positions", "zero_tail", "pin")}
+        "systematic_positions", "zero_tail", "pin", "pin_buffer")}
 
     @functools.lru_cache(maxsize=None)
     def own(spec):
@@ -102,6 +102,11 @@ def substitutions(native):
             return py["pin"](spec, soft, known, index)
         return n.pin(spec.name, np.asarray(soft, np.float64), np.asarray(known, np.int64), int(index))
 
+    def pin_buffer(spec, buf, known):
+        if not own(spec):
+            return py["pin_buffer"](spec, buf, known)
+        return n.pin_buffer(spec.name, np.atleast_2d(np.asarray(buf, np.float64)), np.asarray(known, np.int64))
+
     return {
         **{(codes, a): by_name(a) for a in ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions",
                                              "encode_info", "decode_buffer", "decode_many", "decode_raw", "check",
@@ -109,6 +114,7 @@ def substitutions(native):
         (codes, "flip"): flip,
         (codes, "systematic_positions"): systematic_positions,
         (codes, "pin"): pin,
+        (codes, "pin_buffer"): pin_buffer,
         (codes, "interleaver"): interleaver,
         (codes, "spread"): spread,
         (codes, "despread"): despread,

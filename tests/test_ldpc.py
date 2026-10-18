@@ -157,3 +157,26 @@ def test_systematic_positions():
     assert (codes.systematic_positions(ctl) == -1).all()
     soft = np.arange(ctl.coded_bits, dtype=float)
     np.testing.assert_array_equal(codes.pin(ctl, soft, codes.zero_tail(ctl, 4), 0), soft)
+
+
+def test_pinned_buffer_bits_are_the_sent_bits():
+    """codes.pin_buffer: a combined IR buffer (code order, unscrambled) with
+    each known, sent info bit at the clamp, its sign the bit's; the rest as
+    it was."""
+    from data2g import codes
+    from data2g.config import SUBMODES
+
+    spec = SUBMODES["w48-qpsk-r2/3"]
+    rng = np.random.default_rng(2)
+    payload = rng.bytes(20) + bytes(codes.payload_bytes(spec) - 20)
+    sent = [codes.encode(spec, payload, rv, 0, i) for i, rv in ((0, 0), (1, 1))]
+    buf = codes.combine(spec, None, codes.flip(spec, 0, 0) * (1 - 2.0 * sent[0]), 0)
+    buf = codes.combine(spec, buf, codes.flip(spec, 1, 1) * (1 - 2.0 * sent[1]), 1)
+    known = codes.zero_tail(spec, 20)
+    pinned = codes.pin_buffer(spec, buf * 0.1, known)
+    info = codes.info_bits(spec, payload, 0, codes.PLAIN)  # unscrambled
+    z = codes.ldpc_code(spec).z
+    at = np.flatnonzero(known[2 * z:] >= 0)  # info bit 2z + j sits at buffer position j
+    np.testing.assert_array_equal(pinned[0, at], ldpc.CH_CLAMP * (1 - 2.0 * info[2 * z + at]))
+    rest = np.setdiff1d(np.arange(buf.shape[1]), at)
+    np.testing.assert_array_equal(pinned[0, rest], buf[0, rest] * 0.1)

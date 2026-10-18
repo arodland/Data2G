@@ -185,6 +185,8 @@ std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes);
 // sent info bit `known` gives (0/1, -1 unknown; unscrambled) pinned to
 // ldpc::CH_CLAMP. Unchanged for polar.
 std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<const std::int8_t> known, int index);
+// pin() for one combined IR buffer row (code order, unscrambled: decode_buffer's input).
+std::vector<double> pin_buffer(const Spec& s, std::span<const double> buf, std::span<const std::int8_t> known);
 
 std::vector<std::uint8_t> descramble(const Spec& s, std::span<const std::uint8_t> bits, int index);
 // (B, >= payload + CRC bits) scrambled info bits -> (B,) CRC matches.

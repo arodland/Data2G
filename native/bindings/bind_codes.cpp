@@ -197,6 +197,18 @@ void bind_codec(py::module_& c) {
         for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
         return np<float>(std::span<const float>(codes::pin(cspec(name), vec(soft), k, index)));
     });
+    c.def("pin_buffer", [](const std::string& name, const In<double>& buf, const In<std::int64_t>& known) {
+        const auto& s = cspec(name);
+        const auto b = mat(buf);
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        Mat<double> out(b.rows, b.cols);
+        for (std::size_t r = 0; r < b.rows; ++r) {
+            const auto v = codes::pin_buffer(s, b.row(r), k);
+            std::copy(v.begin(), v.end(), out[r]);
+        }
+        return np(out);
+    });
     c.def("crc_ok", [](const std::string& name, const In<std::uint8_t>& bits, py::object masks, py::object index) {
         return flags(codes::crc_ok(cspec(name), mat(bits), per_row<std::uint32_t>(masks), per_row<int>(index)));
     }, py::arg("spec"), py::arg("bits"), py::arg("crc_mask") = py::none(), py::arg("index") = py::none());

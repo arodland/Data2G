@@ -40,7 +40,8 @@ DD_BUDGET_S = 1.0
 # is decoded again with its payload past each of these byte counts in turn
 # pinned to zero (codes.pin): at code level, 10% of controls failed 1-6 dB
 # lower, 4 dB the median over the LDPC modes (scripts/ctl_prior_study.py).
-# LDPC only: polar sends no info bits.
+# The same for an ARQ_DUP pair once combined. LDPC only: polar sends no info
+# bits.
 PIN_CUTS = (16, 32)
 
 
@@ -251,6 +252,13 @@ class ModemRx:
         if self._est is not soft0[0]:
             self._undo(slot, soft0)
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), fl * self._soft(slot), rv)
+        if buf0 is not None and mask_id[2] >= SEQ_MOD:  # a control combined (ARQ_DUP): its padding pinned
+            for cut in self._cuts(spec):
+                pinned = codes.pin_buffer(spec, buf, codes.zero_tail(spec, cut))
+                payload, ok = codes.decode_buffer(spec, pinned, top, m, index=codes.PLAIN)[0]
+                if ok:
+                    self._learn(slot, spec, payload, rv, m)
+                    return payload
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))
         return None
 
