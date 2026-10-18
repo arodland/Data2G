@@ -186,6 +186,17 @@ void bind_codec(py::module_& c) {
         }
         return out;
     });
+    c.def("systematic_positions", [](const std::string& name) {
+        return np<std::int64_t>(std::span<const int>(codes::systematic_positions(cspec(name))));
+    });
+    c.def("zero_tail", [](const std::string& name, int nbytes) {
+        return np<std::int8_t>(std::span<const std::int8_t>(codes::zero_tail(cspec(name), nbytes)));
+    });
+    c.def("pin", [](const std::string& name, const In<double>& soft, const In<std::int64_t>& known, int index) {
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        return np<float>(std::span<const float>(codes::pin(cspec(name), vec(soft), k, index)));
+    });
     c.def("crc_ok", [](const std::string& name, const In<std::uint8_t>& bits, py::object masks, py::object index) {
         return flags(codes::crc_ok(cspec(name), mat(bits), per_row<std::uint32_t>(masks), per_row<int>(index)));
     }, py::arg("spec"), py::arg("bits"), py::arg("crc_mask") = py::none(), py::arg("index") = py::none());

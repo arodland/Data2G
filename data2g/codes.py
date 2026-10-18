@@ -488,6 +488,51 @@ def check(spec: CodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) 
     return None
 
 
+# --- known info bits (source-aware decoding) -------------------------------------------
+# A receiver often knows part of a codeword before decoding it: a control
+# codeword is a few bytes of content and then zeros to its payload size
+# (frames.Control.pack). LDPC is systematic, so a known info bit that is sent
+# is pinned at the decoder's input, its soft bit set to the clamp; the code
+# is then effectively shortened. The punctured first 2Z info columns and
+# polar's info bits have no soft bit to pin. Nothing on air changes.
+
+@lru_cache(maxsize=None)
+def systematic_positions(spec: CodeSpec) -> np.ndarray:
+    """(k,) where each info bit is sent at RV 0, in mapping order, or -1
+    (punctured, filler; polar: every one)."""
+    out = np.full(spec.k, -1, dtype=np.int64)
+    if spec.code != "ldpc":
+        return out
+    sent = np.asarray(ldpc_code(spec).sent)
+    p = np.flatnonzero(sent < spec.k)  # sent positions (code order) carrying info bits
+    where = np.empty(spec.coded_bits, dtype=np.int64)
+    where[np.asarray(interleaver(spec))] = np.arange(spec.coded_bits)  # code order -> mapping order
+    out[sent[p]] = where[p]
+    return out
+
+
+def zero_tail(spec: CodeSpec, nbytes: int) -> np.ndarray:
+    """(k,) int8 known info bits, -1 unknown: payload bytes from `nbytes`
+    on are zero (a control's padding), and the zero fill past the CRC."""
+    known = np.full(spec.k, -1, dtype=np.int8)
+    known[8 * nbytes : 8 * payload_bytes(spec)] = 0
+    known[8 * payload_bytes(spec) + crc_bits(spec):] = 0
+    return known
+
+
+def pin(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> np.ndarray:
+    """(coded_bits,) soft bits of an RV 0 codeword sent at burst position
+    `index`, with every sent info bit that `known` gives ((k,) 0/1, -1
+    unknown; unscrambled) pinned to the decoder's clamp. Unchanged for
+    polar (no sent info bits)."""
+    pos = systematic_positions(spec)
+    sel = (np.asarray(known) >= 0) & (pos >= 0)
+    out = np.array(soft, dtype=np.float32)
+    bit = np.asarray(known)[sel].astype(np.uint8) ^ scrambler(spec.k, scramble_seed(index))[sel]
+    out[pos[sel]] = ldpc.CH_CLAMP * (1.0 - 2.0 * bit)
+    return out
+
+
 def _numpy(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 

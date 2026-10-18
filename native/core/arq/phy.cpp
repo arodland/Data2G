@@ -227,7 +227,9 @@ std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
     if (it != memo_.end()) return it->second;
     const auto& s = spec(slot);
     const Raw& d = decoded(slot, s);
-    auto& out = memo_[{slot, m}] = codes::check(s, d.cands, d.usable, m);
+    auto got = codes::check(s, d.cands, d.usable, m);
+    if (!got && mask.seq >= SEQ_MOD) got = check_pinned(slot, s, m);  // a control (ctl_mask)
+    auto& out = memo_[{slot, m}] = std::move(got);
     tried_.insert(slot);
     if (out) ok_.insert(slot);
     return out;
@@ -239,13 +241,50 @@ std::vector<Bytes> ModemRx::raw(int slot) {
     const Raw& d = decoded(slot, s);
     const std::size_t k = static_cast<std::size_t>(s.k), nb = static_cast<std::size_t>(s.payload_bytes);
     std::vector<Bytes> out;
-    for (std::size_t l = 0; l < d.usable.size(); ++l) {
-        if (!d.usable[l]) continue;
-        Bytes p(nb, 0);
-        for (std::size_t i = 0; i < 8 * nb; ++i) p[i / 8] |= static_cast<std::uint8_t>((d.cands[l * k + i] & 1) << (7 - i % 8));
-        out.push_back(std::move(p));
-    }
+    auto add = [&](const Raw& r) {
+        for (std::size_t l = 0; l < r.usable.size(); ++l) {
+            if (!r.usable[l]) continue;
+            Bytes p(nb, 0);
+            for (std::size_t i = 0; i < 8 * nb; ++i) p[i / 8] |= static_cast<std::uint8_t>((r.cands[l * k + i] & 1) << (7 - i % 8));
+            out.push_back(std::move(p));
+        }
+    };
+    add(d);
+    if (out.empty())
+        for (int cut : cuts(s)) add(pinned(slot, s, cut));
     return out;
+}
+
+std::vector<int> ModemRx::cuts(const codes::Spec& s) const {
+    std::vector<int> out;
+    if (!s.polar)
+        for (int c : PIN_CUTS)
+            if (c < s.payload_bytes) out.push_back(c);
+    return out;
+}
+
+// The slot decoded alone with its payload past `cut` bytes pinned to zero (one candidate).
+const ModemRx::Raw& ModemRx::pinned(int slot, const codes::Spec& s, int cut) {
+    auto it = pinned_.find({slot, cut});
+    if (it != pinned_.end()) return it->second;
+    const int idx[1] = {slot};
+    Mat<float> soft(1, static_cast<std::size_t>(s.coded_bits));
+    soft.data = codes::pin(s, slot_soft(slot), codes::zero_tail(s, cut), slot);
+    auto d = codes::decode_raw(s, soft, idx);
+    return pinned_[{slot, cut}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
+}
+
+// A control slot that failed alone, decoded again with its padding pinned,
+// the shortest cut first; each try CRC-checked under m like any decode.
+std::optional<Bytes> ModemRx::check_pinned(int slot, const codes::Spec& s, std::uint32_t m) {
+    for (int cut : cuts(s)) {
+        const Raw& d = pinned(slot, s, cut);
+        if (auto got = codes::check(s, d.cands, d.usable, m)) {
+            learn(slot, s, *got, 0, m);
+            return got;
+        }
+    }
+    return std::nullopt;
 }
 
 // The slot decoded alone, mask left open, with DD while it fails to

@@ -37,6 +37,9 @@ bool dd_default();
 inline constexpr int DD_ITERS = 2;
 // A live receiver's DD starts no refines this long after the burst's decode began.
 inline constexpr double DD_BUDGET_S = 1.0;
+// A control slot that fails is decoded again with its payload past each of
+// these byte counts in turn pinned to zero (codes::pin; phy.PIN_CUTS).
+inline constexpr int PIN_CUTS[] = {16, 32};
 
 // A slot's CRC mask from its identity (burst.hpp): zlib.crc32 of key,
 // direction, seq; key 0: mask 0, but a compact CONNECT's.
@@ -135,6 +138,9 @@ private:
     const codes::Spec& spec(int slot) const;
     const std::vector<double>& slot_soft(int slot);
     const Raw& decoded(int slot, const codes::Spec& s);
+    std::vector<int> cuts(const codes::Spec& s) const;
+    const Raw& pinned(int slot, const codes::Spec& s, int cut);
+    std::optional<Bytes> check_pinned(int slot, const codes::Spec& s, std::uint32_t m);
     bool dd(const codes::Spec& s) const;
     bool late() const;
     void learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m);
@@ -155,6 +161,7 @@ private:
     const codes::Spec* ctl_spec_;
     std::map<std::pair<int, std::uint32_t>, std::optional<Bytes>> memo_;
     std::map<int, Raw> raw_;
+    std::map<std::pair<int, int>, Raw> pinned_;  // (slot, cut): decoded with the payload past cut bytes pinned to zero
     std::set<int> tried_, ok_;  // ok_ within tried_
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;

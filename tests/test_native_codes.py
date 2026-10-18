@@ -18,7 +18,8 @@ SPECS = [*config.SUBMODES.values(), *cpm.SPECS.values(), *cpm.CTL.values()]
 IDS = [s.name for s in SPECS]
 CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
-         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior")
+         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
+         "systematic_positions", "zero_tail", "pin")
 
 
 @pytest.fixture
@@ -150,3 +151,17 @@ def test_decode_posterior(native, py, spec):
         buf = py.combine(spec, None, py.flip(spec, b, 0) * soft[b], 0)
         buf = py.combine(spec, buf, py.flip(spec, b, 1) * soft1[b], 1)
         same(n.decode_posterior(spec.name, buf=buf, max_rv=1, rv=1), py.decode_posterior(spec, buf=buf, max_rv=1, rv=1))
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=IDS)
+def test_pin(native, py, spec):
+    """Source-aware decoding's inputs (codes.pin): bitwise but for float32."""
+    n = native.codes
+    rng = np.random.default_rng(spec.k + 9)
+    np.testing.assert_array_equal(n.systematic_positions(spec.name), py.systematic_positions(spec))
+    for cut in (0, 16, 32):
+        np.testing.assert_array_equal(n.zero_tail(spec.name, cut), py.zero_tail(spec, cut))
+    soft = rng.normal(size=spec.coded_bits) * 3
+    known = rng.integers(-1, 2, spec.k)
+    for index in (0, 3):
+        np.testing.assert_array_equal(n.pin(spec.name, soft, known, index), py.pin(spec, soft, known, index))

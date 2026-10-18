@@ -117,3 +117,43 @@ def test_a_crc_match_needs_a_converged_decode():
     assert not codes.payloads(spec, bits, [False], index=[0])[0][1]
     soft = (1 - 2 * codes.encode_info(spec, bits).astype(int)) * 4.0
     assert codes.decode_many(spec, soft)[0] == (bytes(range(codes.payload_bytes(spec))), True)
+
+
+@pytest.mark.parametrize("name", ["qpsk-r1/5", "w48-qpsk-r2/3", "w48-16qam-r3/4", "n10-qpsk-r3/4"])
+def test_pinned_bits_are_the_sent_bits(name):
+    """codes.pin sets each known, sent info bit to the clamp with the sign it
+    went on air with (scrambled, interleaved), and touches nothing else."""
+    from data2g import codes
+    from data2g.config import SUBMODES
+
+    spec = SUBMODES[name]
+    rng = np.random.default_rng(1)
+    payload = rng.bytes(20) + bytes(codes.payload_bytes(spec) - 20)
+    known = codes.zero_tail(spec, 20)
+    pos = codes.systematic_positions(spec)
+    for index in (0, 3):
+        sent = codes.encode(spec, payload, 0, 0x1234, index)
+        soft = rng.normal(size=spec.coded_bits)
+        pinned = codes.pin(spec, soft, known, index)
+        at = pos[(known >= 0) & (pos >= 0)]
+        assert len(at) > 0
+        np.testing.assert_array_equal(pinned[at], ldpc.CH_CLAMP * (1 - 2.0 * sent[at]))
+        rest = np.setdiff1d(np.arange(spec.coded_bits), at)
+        np.testing.assert_array_equal(pinned[rest], soft[rest].astype(np.float32))
+
+
+def test_systematic_positions():
+    """LDPC: every info bit but the punctured first 2Z is sent, each once;
+    polar sends none."""
+    from data2g import codes, cpm
+    from data2g.config import SUBMODES
+
+    spec = SUBMODES["w48-qpsk-r2/3"]
+    pos = codes.systematic_positions(spec)
+    z = codes.ldpc_code(spec).z
+    assert (pos[: 2 * z] == -1).all() and (pos[2 * z:] >= 0).all()
+    assert len(set(pos[2 * z:])) == spec.k - 2 * z
+    ctl = next(iter(cpm.CTL.values()))
+    assert (codes.systematic_positions(ctl) == -1).all()
+    soft = np.arange(ctl.coded_bits, dtype=float)
+    np.testing.assert_array_equal(codes.pin(ctl, soft, codes.zero_tail(ctl, 4), 0), soft)

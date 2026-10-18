@@ -174,6 +174,18 @@ Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index
 std::optional<std::vector<std::uint8_t>> check(const Spec& s, std::span<const std::uint8_t> cands,
                                                std::span<const std::uint8_t> usable, std::uint32_t crc_mask);
 
+// Known info bits (codes.py's "source-aware decoding"): a sent info bit the
+// receiver already knows is pinned at the decoder's input. Where each info
+// bit is sent at RV 0, in mapping order, -1 if it isn't (LDPC's punctured
+// first 2Z columns and filler; polar: every one).
+const std::vector<int>& systematic_positions(const Spec& s);
+// (k,) known info bits, -1 unknown: payload bytes from nbytes on are zero, and the zero fill past the CRC.
+std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes);
+// An RV 0 codeword's soft bits (sent at burst position `index`) with every
+// sent info bit `known` gives (0/1, -1 unknown; unscrambled) pinned to
+// ldpc::CH_CLAMP. Unchanged for polar.
+std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<const std::int8_t> known, int index);
+
 std::vector<std::uint8_t> descramble(const Spec& s, std::span<const std::uint8_t> bits, int index);
 // (B, >= payload + CRC bits) scrambled info bits -> (B,) CRC matches.
 std::vector<std::uint8_t> crc_ok(const Spec& s, const Mat<std::uint8_t>& bits,

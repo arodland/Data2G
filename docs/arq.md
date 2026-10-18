@@ -174,6 +174,13 @@ Where the rest comes from:
   reply the sender acted on, taken in ascending order. The sender doesn't merge older
   ACKs. The receiver keeps a snapshot (cumulative + received set) for each of its last
   8 burst seqs, and computes the same first K.
+- **A failed control slot is decoded again with its padding pinned.** A control is a few
+  bytes (median 12, at most 28 in linksim sessions) zeroed to its codeword's payload
+  (46-396 B in the LDPC modes). LDPC is systematic, so the receiver sets the sent info bits
+  past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
+  `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
+  nothing on air changes. Not yet for polar control (CPM, the ACK modes) or for the
+  `ARQ_DUP` pair decode. `scripts/ctl_prior_study.py` measures it.
 - **If any control codeword fails, the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
