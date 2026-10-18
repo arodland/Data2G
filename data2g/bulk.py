@@ -1,5 +1,9 @@
 """data2g-bulk: one-way transfer of a text over the modem, no ARQ (docs/bulk.md).
 
+Experimental: kept on master so it doesn't go stale, not finished. The
+design is unsettled, there is no native port, and the on-air format may
+change without notice (docs/bulk.md, the status note).
+
 Send: the text is cut into blocks, one codeword each, every block its own
 raw-deflate stream (zdict, no history: a lost codeword loses only its own
 text). Burst b of a pass carries a control codeword, blocks [b h, (b+1) h)
@@ -522,7 +526,8 @@ def list_devices():
 # --- command line -------------------------------------------------------------------
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="data2g-bulk", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="data2g-bulk", description=__doc__.split("\n\n")[0],
+                                 epilog="Experimental: the on-air format may change without notice (docs/bulk.md).")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("send", help="text -> WAV")

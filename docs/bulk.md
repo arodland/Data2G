@@ -2,6 +2,12 @@
 
 Status: proposed 2026-10-04, measured (§6). Implemented in `data2g/bulk.py` (`data2g-bulk`), outside data2g-host.
 
+> **Experimental.** Merged so it doesn't go stale on a branch, not because it is finished.
+> The design and its usefulness are still open questions, it has no native port, and its
+> on-air format (control layout, masks, `VERSION`) may change without notice. It may be
+> reworked and fully integrated later, or dropped. Nothing else depends on it: the only
+> shared hooks are `modem.receive(known=)` and `receiver.Receiver.CPM_TAIL`.
+
 TLDR: every block goes twice, a burst apart: once at RV 0 among a burst's new blocks, then
 at RV 1 in the next burst. Bursts go back to back with exact timing. Once the receiver has
 read one control, it knows where every burst starts, so a lost control or even a lost PHY
