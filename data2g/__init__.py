@@ -22,6 +22,8 @@ lazy look-up of a constellation's size):
     kisslink        broadcast over KISS (named groups)
     tnc             the KISS byte codec and rigctld PTT
     host            data2g-host: the VARA-compatible server around an Engine
+    bulk            data2g-bulk: one-way text over the modem, no ARQ
+                    (experimental, Python only; docs/bulk.md)
 
 Beside them: threads (BLAS thread caps, set before numpy loads). Studies
 only, never on the live path or ported: hfchannel and interference

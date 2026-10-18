@@ -83,6 +83,7 @@ audio, receiver                          the sound card side, the streaming rece
 arq/ (frames, burst, link, session, modes, predictor, policy, phy, engine)
 kisslink, tnc                            broadcast, the KISS byte codec, PTT
 host                                     data2g-host
+bulk                                     data2g-bulk (one-way text, no ARQ; experimental)
 ```
 
 Off to the side, never on the live path and never ported: `hfchannel` and
@@ -119,6 +120,7 @@ The exceptions:
 | `host.py` | `core/host` (Host); `serve()` is `app/station`; `main()` is `apps/data2g_host.cpp` |
 | `config.py` | `core/generated/config.hpp` (generated) and `core/config` (lookups) |
 | `arq/policy.py` | `GearShifter` (the model) and `GearPolicy` (its link.Policy) in `core/arq/policy` |
+| `bulk.py` | none (experimental, Python only) |
 | none | `core/rig`, `core/monitor`, `core/util`, `gui/` |
 
 `native/README.md` has the full table, with each area's binding, parity
@@ -196,6 +198,9 @@ it.
 - **The gear shifter and its model**: `arq/policy.py`, `arq/predictor.py`;
   data and training in `docs/outcome-training-data.md`.
 - **Broadcast / KISS**: `docs/broadcast.md`, `kisslink.py`.
+- **One-way text** (`data2g-bulk`, an experiment: unfinished, Python only,
+  its format not frozen): `docs/bulk.md`, `bulk.py`, `tests/test_bulk.py`;
+  `scripts/bulk_study.py` measures it.
 - **The host's commands**: `host.py`'s docstring is the command reference;
   `native/core/host` mirrors it, `tests/test_host.py` and
   `test_native_host.py` check both.
