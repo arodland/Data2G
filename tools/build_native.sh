@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Configure and build native/, including the pybind11 module, for the
 # project's virtualenv. Without pybind11 the module is skipped; --test needs it.
+# The ctests are only built with --test.
 #
-#   tools/build_native.sh              # build
-#   tools/build_native.sh --test       # build, then ctest and pytest --native
+#   tools/build_native.sh              # build (no ctests)
+#   tools/build_native.sh --test       # build with ctests, then ctest and pytest --native
 #   tools/build_native.sh --sanitize   # ASan + UBSan
 #
 # The module must be built for the Python that runs pytest, or the import
@@ -29,19 +30,24 @@ if pybind11_dir="$("$py" -c 'import pybind11; print(pybind11.get_cmake_dir())' 2
    pybind11_dir="$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())' 2>/dev/null)"; then
     cmake_args+=("-Dpybind11_DIR=$pybind11_dir" -DDATA2G_BUILD_PYMODULE=ON)
 else
-    # Without it, skip the module; the core, apps and ctests still build.
+    # Without it, skip the module; the core and apps still build.
     echo "pybind11 not found: not building the data2g_native module" >&2
     cmake_args+=(-DDATA2G_BUILD_PYMODULE=OFF)
 fi
 
 run_tests=0
+extra_args=()
 for arg in "$@"; do
     case "$arg" in
-        --sanitize) cmake_args+=(-DDATA2G_SANITIZE=ON) ;;
+        --sanitize) extra_args+=(-DDATA2G_SANITIZE=ON) ;;
         --test)     run_tests=1 ;;
-        *)          cmake_args+=("$arg") ;;
+        *)          extra_args+=("$arg") ;;
     esac
 done
+
+# Set every run: the build directory's cache would otherwise keep the last one.
+# Before the pass-through arguments, so an explicit -D still wins.
+cmake_args+=("-DDATA2G_BUILD_TESTS=$( (( run_tests )) && echo ON || echo OFF )" ${extra_args[@]+"${extra_args[@]}"})
 
 if (( run_tests )) && [[ -z "$pybind11_dir" ]]; then
     echo "--test runs pytest --native, which needs pybind11" >&2

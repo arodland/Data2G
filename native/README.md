@@ -7,7 +7,7 @@ and the station, as `data2g-host` (headless) and `data2g-gui`, plus
 it (`docs/ARCHITECTURE.md`, "The parity contract").
 
     tools/build_native.sh            # configure + build into native/build
-    tools/build_native.sh --test     # then ctest and pytest --native
+    tools/build_native.sh --test     # also build the ctests, then ctest and pytest --native
 
 ## Directories
 
