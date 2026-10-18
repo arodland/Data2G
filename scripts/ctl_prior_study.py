@@ -14,6 +14,14 @@ codewords fail, for
   genie  pinned past the content's exact length (the bound)
 
     uv run python scripts/ctl_prior_study.py --out runs/ctl_prior_study.csv
+
+Found (2026-10-18, 200 codewords a point, 0.5 dB steps): plain controls fail
+where data does (within 0.5 dB). Pinned, the 10% point moves 1.0-6.0 dB
+lower, median 4.0 over the 36 LDPC modes: 1.0 in n4/n10 qpsk-r1/5 (22-23 B
+payloads, little padding), 3.5-4.5 in most qpsk and 16qam modes, 5-6 at
+high rates (qpsk-r3/4, w48-16qam-r3/4 and r5/6, the 64l and 256l modes).
+Cut 16 gets all of it for a 12 B control (32 is for longer ones); the
+genie is at most 1 dB better, and only in the smallest payloads.
 """
 
 from data2g import threads  # noqa: E402

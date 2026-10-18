@@ -38,8 +38,9 @@ DD_BUDGET_S = 1.0
 # A control is a few bytes (median 12, at most 28 in linksim sessions) zeroed
 # to its codeword's payload (frames.Control.pack). A control slot that fails
 # is decoded again with its payload past each of these byte counts in turn
-# pinned to zero (codes.pin): at code level, 10% of controls failed 3.5-4 dB
-# lower (scripts/ctl_prior_study.py). LDPC only: polar sends no info bits.
+# pinned to zero (codes.pin): at code level, 10% of controls failed 1-6 dB
+# lower, 4 dB the median over the LDPC modes (scripts/ctl_prior_study.py).
+# LDPC only: polar sends no info bits.
 PIN_CUTS = (16, 32)
 
 

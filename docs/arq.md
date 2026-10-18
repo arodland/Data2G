@@ -180,7 +180,14 @@ Where the rest comes from:
   past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
   `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
   nothing on air changes. Not yet for polar control (CPM, the ACK modes) or for the
-  `ARQ_DUP` pair decode. `scripts/ctl_prior_study.py` measures it.
+  `ARQ_DUP` pair decode.
+  - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
+    constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
+    the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),
+    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5). Cut 16 alone gets all of it,
+    within 1 dB of knowing the content's exact length.
+  - The outcome model and the link abstraction still assume the old control failure rate,
+    so the gear shifter picks modes as before until they are retrained.
 - **If any control codeword fails, the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
