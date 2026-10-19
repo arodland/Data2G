@@ -20,6 +20,7 @@ from .. import codes, constellation, cpm, equalizer, modem
 from ..waveform import dsp, ofdm
 from . import predictor as P
 from .burst import COMPACT_CONNECT
+from .frames import MAX_CTL, SEQ_MOD
 from .modes import MODES, ctl_spec, is_cpm
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,23 @@ DD_ITERS = 2
 # decode began: the reply must start within REPLY_START_S of the sender's
 # turn, and a 12 s 256l burst with every slot failing took 54 s of DD
 DD_BUDGET_S = 1.0
+# A control is a few bytes (median 12, at most 28 in linksim sessions) zeroed
+# to its codeword's payload (frames.Control.pack). A control slot that fails
+# is decoded again with the control stream past each of these byte counts in
+# turn known to be zero (codes.decode_raw_pinned): at code level, 10% of LDPC
+# controls failed 1-6 dB lower, 4 dB the median over the modes
+# (scripts/ctl_prior_study.py). The same for an ARQ_DUP pair once combined.
+# Polar: CPM's control carries 9-16 B of its 20 (median 12) in real-modem
+# sessions, so shorter cuts.
+PIN_CUTS = (16, 32)
+POLAR_PIN_CUTS = (12, 16)
+
+
+def _ctl_index(mask_id: tuple) -> int:
+    """A control mask's codeword index in the control stream (a compact
+    CONNECT's, burst.COMPACT_CONNECT, is its only codeword)."""
+    i = mask_id[2] - SEQ_MOD
+    return i if i < MAX_CTL else 0
 
 
 def mask_value(mask_id: tuple) -> int:
@@ -180,6 +198,7 @@ class ModemRx:
         # unkeyed, so each slot decodes once and every mask asked is a CRC
         # check (a burst's slot 0 is asked under the session's key, KISS's, mask 0)
         self._raw = {}
+        self._pin = {}  # (slot, cut) -> its decode with the payload past cut bytes pinned to zero
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
         self.r = r
         self._post, self._blind = {}, False  # DD: slot -> LLRs of its coded bits
@@ -209,7 +228,10 @@ class ModemRx:
         spec = self._spec(slot)
         if key is None:
             if (slot, m) not in self._memo:
-                self._memo[(slot, m)] = codes.check(spec, *self._decoded(slot, spec), m)
+                got = codes.check(spec, *self._decoded(slot, spec), m)
+                if got is None and mask_id[2] >= SEQ_MOD:  # a control (burst.ctl_mask)
+                    got = self._check_pinned(slot, spec, m, _ctl_index(mask_id))
+                self._memo[(slot, m)] = got
             return self._memo[(slot, m)]
         buf0, top, name, where = self.store.get(key, (None, 0, self.submode, None))
         if name != self.submode:  # a resend in another mode: what was kept can't combine, so start over
@@ -239,6 +261,12 @@ class ModemRx:
         if self._est is not soft0[0]:
             self._undo(slot, soft0)
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), fl * self._soft(slot), rv)
+        if buf0 is not None and mask_id[2] >= SEQ_MOD:  # a control combined (ARQ_DUP): its padding pinned
+            for off in self._offsets(spec, _ctl_index(mask_id)):
+                payload, ok = codes.decode_buffer_pinned(spec, buf, top, codes.zero_tail(spec, off), m)[0]
+                if ok:
+                    self._learn(slot, spec, payload, rv, m)
+                    return payload
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))
         return None
 
@@ -252,7 +280,41 @@ class ModemRx:
         spec = self._spec(slot)
         cands, usable = self._decoded(slot, spec)
         nb = codes.payload_bytes(spec)
-        return [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
+        out = [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
+        # pinned candidates after the plain ones: LDPC's when it did not
+        # converge; polar's always, as its list is never empty. A broadcast
+        # control is one codeword per slot (CPM: one, twice at most).
+        for off in () if out and spec.code == "ldpc" else self._offsets(spec, 0 if self.n_ctl_slots else slot):
+            c, u = self._pinned(slot, spec, off)
+            out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
+        return list(dict.fromkeys(out))
+
+    def _offsets(self, spec, i: int) -> tuple:
+        """Control codeword i's payload offsets past which a cut (PIN_CUTS,
+        POLAR_PIN_CUTS: bytes of the control stream) knows it zero."""
+        pb = codes.payload_bytes(spec)
+        cuts = PIN_CUTS if spec.code == "ldpc" else POLAR_PIN_CUTS
+        return tuple(dict.fromkeys(c - i * pb for c in cuts if 0 < c - i * pb < pb))
+
+    def _pinned(self, slot: int, spec, off: int) -> tuple:
+        """`slot` decoded alone with its payload past `off` bytes known zero,
+        as decode_raw's row."""
+        if (slot, off) not in self._pin:
+            cands, usable = codes.decode_raw_pinned(spec, np.asarray(self._soft(slot))[None], codes.zero_tail(spec, off),
+                                                    slot)
+            self._pin[(slot, off)] = cands[0], usable[0]
+        return self._pin[(slot, off)]
+
+    def _check_pinned(self, slot: int, spec, m: int, i: int) -> bytes | None:
+        """Control codeword i that failed alone: decoded again with its
+        padding known, the shortest cut first. Each try is CRC-checked under
+        `m` like any decode."""
+        for off in self._offsets(spec, i):
+            got = codes.check(spec, *self._pinned(slot, spec, off), m)
+            if got is not None:
+                self._learn(slot, spec, got, 0, m)
+                return got
+        return None
 
     def _decoded(self, slot: int, spec) -> tuple:
         """`slot` decoded alone, mask left open (codes.decode_raw's row), with

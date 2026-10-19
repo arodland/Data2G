@@ -127,6 +127,7 @@ struct Codecs {
     std::optional<polar::PolarCode> polar;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
     std::unique_ptr<polar::SCLDecoder> scl;
+    std::optional<std::vector<int>> systematic, info_code, order;  // systematic_positions, info_code_positions, polar_order
 };
 std::mutex cache_mutex;
 std::map<const Spec*, Codecs> cache;
@@ -188,6 +189,19 @@ Mat<float> deinterleave_llr(const Spec& s, const Mat<float>& llr) {
     return out;
 }
 
+// (B, L * k) polar paths in the code's order -> the info bits' (polar_order is its own inverse).
+void reorder_paths(const Spec& s, Mat<std::uint8_t>& paths) {
+    const auto& order = polar_order(s);
+    const std::size_t k = order.size();
+    std::vector<std::uint8_t> tmp(k);
+    for (std::size_t r = 0; r < paths.rows; ++r)
+        for (std::size_t off = 0; off + k <= paths.cols; off += k) {
+            std::uint8_t* p = paths[r] + off;
+            for (std::size_t j = 0; j < k; ++j) tmp[j] = p[order[j]];
+            std::copy(tmp.begin(), tmp.end(), p);
+        }
+}
+
 // codes._decode_code_order: LLRs in the decoder's code order.
 Info decode_code_order(const Spec& s, const ldpc::Decoder* dec, const Mat<float>& deint, int iters,
                        std::span<const std::uint32_t> masks, std::span<const int> index) {
@@ -196,7 +210,8 @@ Info decode_code_order(const Spec& s, const ldpc::Decoder* dec, const Mat<float>
         return {std::move(r.bits), std::move(r.ok)};
     }
     const auto& scl = polar_decoder(s);
-    const auto r = scl.decode(deint);
+    auto r = scl.decode(deint);
+    reorder_paths(s, r.paths);
     const std::size_t B = deint.rows, L = static_cast<std::size_t>(scl.list_size()), k = static_cast<std::size_t>(s.k);
     Info out{Mat<std::uint8_t>(B, k), std::vector<std::uint8_t>(B, 0)};
     for (std::size_t b = 0; b < B; ++b) {
@@ -310,8 +325,14 @@ Mat<std::uint8_t> encode_info(const Spec& s, const Mat<std::uint8_t>& bits, int 
         coded = Mat<std::uint8_t>(bits.rows, pos.size());
         for (std::size_t b = 0; b < bits.rows; ++b)
             for (std::size_t j = 0; j < pos.size(); ++j) coded[b][j] = full[b][pos[j]];
+    } else if (s.polar) {
+        const auto& order = polar_order(s);
+        Mat<std::uint8_t> in(bits.rows, bits.cols);
+        for (std::size_t b = 0; b < bits.rows; ++b)
+            for (std::size_t j = 0; j < order.size(); ++j) in[b][j] = bits[b][static_cast<std::size_t>(order[j])];
+        coded = polar_code(s).encode(in);
     } else {
-        coded = s.polar ? polar_code(s).encode(bits) : ldpc_code(s).encode(bits);
+        coded = ldpc_code(s).encode(bits);
     }
     Mat<std::uint8_t> out(coded.rows, coded.cols);
     for (std::size_t b = 0; b < coded.rows; ++b)
@@ -422,6 +443,7 @@ Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index
     Raw out;
     if (s.polar) {
         auto r = polar_decoder(s).decode(deint);
+        reorder_paths(s, r.paths);
         out.list = POLAR_LIST;
         out.cands = std::move(r.paths);
         out.usable = Mat<std::uint8_t>(B, POLAR_LIST, 1);
@@ -453,6 +475,194 @@ std::optional<std::vector<std::uint8_t>> check(const Spec& s, std::span<const st
             }
         }
     return std::nullopt;
+}
+
+namespace {
+
+// Where each info bit is sent at RV 0 in code order (its IR buffer position too), or -1 (codes._info_code_positions).
+const std::vector<int>& info_code_positions(const Spec& s) {
+    std::vector<int> out(static_cast<std::size_t>(s.k), -1);
+    if (!s.polar) {
+        const auto& sent = ldpc_code(s).sent();
+        for (std::size_t p = 0; p < sent.size(); ++p)
+            if (sent[p] < s.k) out[static_cast<std::size_t>(sent[p])] = static_cast<int>(p);
+    }
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.info_code) c.info_code = std::move(out);
+    return *c.info_code;
+}
+
+}  // namespace
+
+const std::vector<int>& systematic_positions(const Spec& s) {
+    const auto& code = info_code_positions(s);
+    std::vector<int> where(static_cast<std::size_t>(s.coded_bits));  // code order -> mapping order
+    for (int i = 0; i < s.coded_bits; ++i) where[s.perm[i]] = i;
+    std::vector<int> out(code.size(), -1);
+    for (std::size_t i = 0; i < code.size(); ++i)
+        if (code[i] >= 0) out[i] = where[static_cast<std::size_t>(code[i])];
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.systematic) c.systematic = std::move(out);
+    return *c.systematic;
+}
+
+std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes) {
+    std::vector<std::int8_t> out(static_cast<std::size_t>(s.k), -1);
+    for (int i = 8 * nbytes; i < 8 * s.payload_bytes; ++i) out[static_cast<std::size_t>(i)] = 0;
+    for (int i = 8 * s.payload_bytes + s.crc_bits; i < s.k; ++i) out[static_cast<std::size_t>(i)] = 0;
+    return out;
+}
+
+std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<const std::int8_t> known, int index) {
+    std::vector<float> out(soft.begin(), soft.end());
+    const auto& pos = systematic_positions(s);
+    const auto pn = pn_at(s, index);
+    for (std::size_t i = 0; i < known.size() && i < pos.size(); ++i)
+        if (known[i] >= 0 && pos[i] >= 0)
+            out[static_cast<std::size_t>(pos[i])] = ldpc::CH_CLAMP * (1.0f - 2.0f * static_cast<float>((known[i] ^ pn[i]) & 1));
+    return out;
+}
+
+std::vector<double> pin_buffer(const Spec& s, std::span<const double> buf, std::span<const std::int8_t> known) {
+    std::vector<double> out(buf.begin(), buf.end());
+    const auto& pos = info_code_positions(s);
+    for (std::size_t i = 0; i < known.size() && i < pos.size(); ++i)
+        if (known[i] >= 0 && pos[i] >= 0) out[static_cast<std::size_t>(pos[i])] = ldpc::CH_CLAMP * (1.0 - 2.0 * known[i]);
+    return out;
+}
+
+const std::vector<int>& polar_order(const Spec& s) {
+    const int nb = 8 * s.payload_bytes;
+    std::vector<int> out(static_cast<std::size_t>(s.k));
+    for (int j = 0; j < s.k; ++j) out[static_cast<std::size_t>(j)] = j < nb ? nb - 1 - j : j;
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.order) c.order = std::move(out);
+    return *c.order;
+}
+
+namespace {
+
+// The full code, and the decoder of the code with `known` (code-order info indices) frozen; built once per pattern.
+struct PinnedPolar {
+    std::unique_ptr<polar::PolarCode> full;
+    std::unique_ptr<polar::SCLDecoder> dec;
+    std::vector<int> rest;  // code-order info indices it decodes
+};
+std::mutex pinned_mutex;
+std::map<std::pair<const Spec*, std::vector<int>>, PinnedPolar> pinned_cache;
+
+const PinnedPolar& pinned_polar(const Spec& s, const std::vector<int>& known) {
+    const auto& code = polar_code(s);
+    std::lock_guard lock(pinned_mutex);
+    auto& p = pinned_cache[{&s, known}];
+    if (!p.dec) {
+        std::vector<std::uint16_t> info;
+        std::vector<std::uint8_t> is_known(static_cast<std::size_t>(s.k), 0);
+        for (int j : known) is_known[static_cast<std::size_t>(j)] = 1;
+        for (int j = 0; j < s.k; ++j)
+            if (!is_known[static_cast<std::size_t>(j)]) {
+                p.rest.push_back(j);
+                info.push_back(code.info_pos[static_cast<std::size_t>(j)]);
+            }
+        p.full = std::make_unique<polar::PolarCode>(s.k, s.coded_bits, code.info_pos);
+        p.dec = std::make_unique<polar::SCLDecoder>(polar::PolarCode(static_cast<int>(info.size()), s.coded_bits, info),
+                                                    POLAR_LIST);
+    }
+    return p;
+}
+
+// codes._pinned_paths: (B, coded_bits) code-order LLRs, sent at `index` -> (B, L * k) info bits, scrambled, in
+// the info bits' order, best first.
+Mat<std::uint8_t> pinned_paths(const Spec& s, const Mat<float>& deint, std::span<const std::int8_t> known, int index) {
+    const auto& order = polar_order(s);
+    const auto pn = pn_at(s, index);
+    const std::size_t k = static_cast<std::size_t>(s.k);
+    std::vector<std::int8_t> kc(k);  // known, in the code's order
+    std::vector<std::uint8_t> u(k, 0);
+    std::vector<int> kp;
+    for (std::size_t j = 0; j < k; ++j) {
+        const std::size_t i = static_cast<std::size_t>(order[j]);
+        kc[j] = i < known.size() ? known[i] : -1;
+        if (kc[j] >= 0) {
+            u[j] = static_cast<std::uint8_t>((kc[j] ^ pn[i]) & 1);
+            kp.push_back(static_cast<int>(j));
+        }
+    }
+    const auto& p = pinned_polar(s, kp);
+    Mat<std::uint8_t> ub(1, k);
+    ub.data = u;
+    const auto xk = p.full->encode(ub);
+    Mat<float> llr(deint.rows, deint.cols);
+    for (std::size_t b = 0; b < deint.rows; ++b)
+        for (std::size_t i = 0; i < deint.cols; ++i) llr[b][i] = xk[0][i] ? -deint[b][i] : deint[b][i];
+    const auto r = p.dec->decode(llr);
+    const std::size_t L = static_cast<std::size_t>(p.dec->list_size()), kr = p.rest.size();
+    Mat<std::uint8_t> out(deint.rows, L * k);
+    for (std::size_t b = 0; b < deint.rows; ++b)
+        for (std::size_t l = 0; l < L; ++l) {
+            std::uint8_t* o = out[b] + l * k;
+            for (int j : kp) o[j] = u[static_cast<std::size_t>(j)];
+            for (std::size_t t = 0; t < kr; ++t) o[p.rest[t]] = r.paths[b][l * kr + t];
+        }
+    reorder_paths(s, out);
+    return out;
+}
+
+}  // namespace
+
+Raw decode_raw_pinned(const Spec& s, const Mat<float>& soft, std::span<const std::int8_t> known, int index) {
+    const std::vector<int> idx(soft.rows, index);
+    if (!s.polar) {
+        Mat<float> pinned(soft.rows, soft.cols);
+        for (std::size_t b = 0; b < soft.rows; ++b) {
+            const std::vector<double> row(soft[b], soft[b] + soft.cols);
+            const auto v = pin(s, row, known, index);
+            std::copy(v.begin(), v.end(), pinned[b]);
+        }
+        return decode_raw(s, pinned, idx);
+    }
+    Raw out;
+    out.list = POLAR_LIST;
+    out.cands = pinned_paths(s, deinterleave_llr(s, soft), known, index);
+    out.usable = Mat<std::uint8_t>(soft.rows, POLAR_LIST, 1);
+    const auto pn = pn_at(s, index);
+    const std::size_t k = static_cast<std::size_t>(s.k);
+    for (std::size_t b = 0; b < soft.rows; ++b)
+        for (std::size_t l = 0; l < static_cast<std::size_t>(POLAR_LIST); ++l)
+            for (std::size_t j = 0; j < k; ++j) out.cands[b][l * k + j] ^= pn[j];
+    return out;
+}
+
+std::vector<Payload> decode_buffer_pinned(const Spec& s, const Mat<double>& buf, int max_rv,
+                                          std::span<const std::int8_t> known, std::uint32_t crc_mask) {
+    const std::uint32_t masks[1] = {crc_mask};
+    const int plain[1] = {PLAIN};
+    if (!s.polar) {
+        Mat<double> pinned(buf.rows, buf.cols);
+        for (std::size_t b = 0; b < buf.rows; ++b) {
+            const auto v = pin_buffer(s, buf.row(b), known);
+            std::copy(v.begin(), v.end(), pinned[b]);
+        }
+        return decode_buffer(s, pinned, max_rv, masks, plain);
+    }
+    const auto paths = pinned_paths(s, cut(s, buf, static_cast<std::size_t>(s.coded_bits)), known, PLAIN);
+    const std::size_t B = buf.rows, L = static_cast<std::size_t>(POLAR_LIST), k = static_cast<std::size_t>(s.k);
+    Mat<std::uint8_t> bits(B, k);
+    std::vector<std::uint8_t> ok(B, 0);
+    for (std::size_t b = 0; b < B; ++b) {
+        std::size_t pick = 0;
+        for (std::size_t l = 0; l < L; ++l)
+            if (crc_matches(s, pack(s, paths[b] + l * k, nullptr), crc_mask)) {
+                pick = l;
+                ok[b] = 1;
+                break;
+            }
+        std::copy_n(paths[b] + pick * k, k, bits[b]);
+    }
+    return payloads(s, bits, ok, masks, plain);
 }
 
 std::vector<std::uint8_t> descramble(const Spec& s, std::span<const std::uint8_t> bits, int index) {

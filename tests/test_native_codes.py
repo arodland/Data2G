@@ -18,7 +18,9 @@ SPECS = [*config.SUBMODES.values(), *cpm.SPECS.values(), *cpm.CTL.values()]
 IDS = [s.name for s in SPECS]
 CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
-         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior")
+         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
+         "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
+         "decode_buffer_pinned")
 
 
 @pytest.fixture
@@ -150,3 +152,37 @@ def test_decode_posterior(native, py, spec):
         buf = py.combine(spec, None, py.flip(spec, b, 0) * soft[b], 0)
         buf = py.combine(spec, buf, py.flip(spec, b, 1) * soft1[b], 1)
         same(n.decode_posterior(spec.name, buf=buf, max_rv=1, rv=1), py.decode_posterior(spec, buf=buf, max_rv=1, rv=1))
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=IDS)
+def test_pin(native, py, spec):
+    """Source-aware decoding's inputs (codes.pin): bitwise but for float32."""
+    n = native.codes
+    rng = np.random.default_rng(spec.k + 9)
+    np.testing.assert_array_equal(n.systematic_positions(spec.name), py.systematic_positions(spec))
+    for cut in (0, 16, 32):
+        np.testing.assert_array_equal(n.zero_tail(spec.name, cut), py.zero_tail(spec, cut))
+    soft = rng.normal(size=spec.coded_bits) * 3
+    known = rng.integers(-1, 2, spec.k)
+    for index in (0, 3):
+        np.testing.assert_array_equal(n.pin(spec.name, soft, known, index), py.pin(spec, soft, known, index))
+    buf = rng.normal(size=(2, py.buffer_len(spec))) * 3
+    np.testing.assert_array_equal(n.pin_buffer(spec.name, buf, known), py.pin_buffer(spec, buf, known))
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=IDS)
+def test_decode_pinned(native, py, spec):
+    """decode_raw_pinned / decode_buffer_pinned: LDPC pins, polar freezes
+    (polar_order's payload reversal included); compared where they decode."""
+    n = native.codes
+    if spec.code == "polar":
+        np.testing.assert_array_equal(n.polar_order(spec.name), py.polar_order(spec))
+    rng = np.random.default_rng(spec.k + 11)
+    pb = py.payload_bytes(spec)
+    pay = rng.bytes(pb // 2) + bytes(pb - pb // 2)
+    known = py.zero_tail(spec, pb // 2)
+    soft = _noisy(spec, py.encode(spec, pay, 0, 0x99, 2)[None], rng, [0.5])
+    got, want = n.decode_raw_pinned(spec.name, soft, known, 2), py.decode_raw_pinned(spec, soft, known, 2)
+    assert py.check(spec, got[0][0], got[1][0], 0x99) == py.check(spec, want[0][0], want[1][0], 0x99) == pay
+    buf = py.combine(spec, None, py.flip(spec, 2, 0) * soft, 0)
+    assert n.decode_buffer_pinned(spec.name, buf, 0, known, 0x99) == py.decode_buffer_pinned(spec, buf, 0, known, 0x99)

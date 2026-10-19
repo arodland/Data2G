@@ -111,3 +111,66 @@ def test_duplicated_control_pair_combines():
         alone += rx.decode(0, L.ctl_mask(0, 0, 7), 0, None) == pl[0]
         paired += st._ctl_pair(rx, 0, 0) == pl[0]
     assert alone <= 4 and paired >= 8, (alone, paired)
+
+
+def test_control_padding_is_pinned_when_a_control_fails():
+    """A control is a few bytes, zeroed to its payload (frames.Control.pack).
+    At -1 dB, where the plain decode fails, the receiver decodes the slot
+    again with the padding pinned (phy.PIN_CUTS) and gets it; raw() offers
+    the same candidate (a broadcast control's group is read from it)."""
+    from data2g.arq import frames as F
+    from data2g.arq.burst import ctl_mask, data_mask
+
+    ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=17, k=1, recommend=5), {F.T_REPLY: b"\x05"}).pack(
+        codes.payload_bytes(SPEC))[0]
+    data = bytes(np.random.default_rng(5).integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8))
+    b = TxBurst(SPEC.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
+    for seed in range(3):
+        r = hear(b, snr=-1.0, seed=seed)
+        cands, usable = codes.decode_raw(SPEC, PHY.soft_bits(r)[:1], index=[0])
+        assert codes.check(SPEC, cands[0], usable[0], PHY.mask_value(ctl_mask(0, 0, 7))) is None  # plain fails
+        rx = PHY.ModemRx(r, {})
+        assert ctl in rx.raw(0)
+        assert rx.decode(0, ctl_mask(0, 0, 7), 0, None) == ctl
+        assert rx.decode(0, ctl_mask(0, 0, 8), 0, None) is None  # another session's key still fails
+
+
+def test_data_slots_are_not_pinned(monkeypatch):
+    """Only a control mask (burst.ctl_mask) earns the retry: a failed data
+    slot costs no extra decode."""
+    from data2g.arq.burst import data_mask
+
+    pl = [bytes(codes.payload_bytes(SPEC))] * 2  # all padding: pinning would rescue it
+    r = hear(TxBurst(SPEC.name, [Slot(data_mask(0, i, 7), 0, p) for i, p in enumerate(pl)], 0), snr=-1.0, seed=0)
+    calls = []
+    pin = codes.pin
+    monkeypatch.setattr(codes, "pin", lambda *a, **k: calls.append(1) or pin(*a, **k))
+    monkeypatch.setattr(PHY, "DD", False)
+    assert PHY.ModemRx(r, {}).decode(1, data_mask(0, 1, 7), 0, None) is None
+    assert calls == []
+
+
+def test_duplicated_control_pair_is_pinned_once_combined():
+    """ARQ_DUP: at -4 dB a padded control fails alone even pinned, and the
+    pair combined fails plain; combined and pinned (codes.pin_buffer), it
+    decodes."""
+    from data2g.arq import frames as F
+    from data2g.arq import link as L
+    from data2g.arq.policy import GearShifter
+
+    ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=17, k=1, recommend=5), {F.T_REPLY: b"\x05"}).pack(
+        codes.payload_bytes(SPEC))[0]
+    data = bytes(np.random.default_rng(5).integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8))
+    b = TxBurst(SPEC.name, [Slot(L.ctl_mask(0, 0, 7), 0, ctl), Slot(L.ctl_mask(0, 0, 7), 1, ctl),
+                            Slot(L.data_mask(0, 0, 7), 0, data)], 0)
+    st = L.Station(1, GearShifter(), key=7)
+    m = PHY.mask_value(L.ctl_mask(0, 0, 7))
+    for seed in range(3):
+        r = hear(b, snr=-4.0, seed=seed)
+        soft = PHY.soft_bits(r)
+        buf = codes.combine(SPEC, codes.combine(SPEC, None, codes.flip(SPEC, 0, 0) * soft[0], 0),
+                            codes.flip(SPEC, 1, 1) * soft[1], 1)
+        assert not codes.decode_buffer(SPEC, buf, 1, m, index=codes.PLAIN)[0][1]  # the pair, plain, fails
+        rx = PHY.ModemRx(r, {})
+        assert rx.decode(0, L.ctl_mask(0, 0, 7), 0, None) is None  # alone, pinned, fails
+        assert st._ctl_pair(rx, 0, 0) == ctl

@@ -186,6 +186,57 @@ void bind_codec(py::module_& c) {
         }
         return out;
     });
+    c.def("systematic_positions", [](const std::string& name) {
+        return np<std::int64_t>(std::span<const int>(codes::systematic_positions(cspec(name))));
+    });
+    c.def("zero_tail", [](const std::string& name, int nbytes) {
+        return np<std::int8_t>(std::span<const std::int8_t>(codes::zero_tail(cspec(name), nbytes)));
+    });
+    c.def("pin", [](const std::string& name, const In<double>& soft, const In<std::int64_t>& known, int index) {
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        return np<float>(std::span<const float>(codes::pin(cspec(name), vec(soft), k, index)));
+    });
+    c.def("pin_buffer", [](const std::string& name, const In<double>& buf, const In<std::int64_t>& known) {
+        const auto& s = cspec(name);
+        const auto b = mat(buf);
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        Mat<double> out(b.rows, b.cols);
+        for (std::size_t r = 0; r < b.rows; ++r) {
+            const auto v = codes::pin_buffer(s, b.row(r), k);
+            std::copy(v.begin(), v.end(), out[r]);
+        }
+        return np(out);
+    });
+    c.def("polar_order", [](const std::string& name) {
+        return np<std::int64_t>(std::span<const int>(codes::polar_order(cspec(name))));
+    });
+    c.def("decode_raw_pinned", [](const std::string& name, const In<float>& soft, const In<std::int64_t>& known,
+                                  int index) {
+        const auto& s = cspec(name);
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        const auto in = mat(soft);
+        codes::Raw r;
+        {
+            py::gil_scoped_release unlocked;
+            r = codes::decode_raw_pinned(s, in, k, index);
+        }
+        const py::ssize_t B = static_cast<py::ssize_t>(r.cands.rows), L = r.list, K = s.k;
+        py::array_t<std::uint8_t> cands({B, L, K});
+        std::copy(r.cands.data.begin(), r.cands.data.end(), cands.mutable_data());
+        py::array_t<bool> usable({B, L});
+        std::copy(r.usable.data.begin(), r.usable.data.end(), usable.mutable_data());
+        return py::make_tuple(cands, usable);
+    });
+    c.def("decode_buffer_pinned", [](const std::string& name, const In<double>& buf, int max_rv,
+                                     const In<std::int64_t>& known, std::int64_t mask) {
+        const auto& s = cspec(name);
+        std::vector<std::int8_t> k(static_cast<std::size_t>(known.size()));
+        for (std::size_t i = 0; i < k.size(); ++i) k[i] = static_cast<std::int8_t>(known.data()[i]);
+        return payload_list(codes::decode_buffer_pinned(s, mat(buf), max_rv, k, static_cast<std::uint32_t>(mask)));
+    });
     c.def("crc_ok", [](const std::string& name, const In<std::uint8_t>& bits, py::object masks, py::object index) {
         return flags(codes::crc_ok(cspec(name), mat(bits), per_row<std::uint32_t>(masks), per_row<int>(index)));
     }, py::arg("spec"), py::arg("bits"), py::arg("crc_mask") = py::none(), py::arg("index") = py::none());

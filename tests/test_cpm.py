@@ -118,3 +118,31 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
     monkeypatch.setattr(cpm, "detect", lambda *a, **k: (1.0, -g.T // 8, 0.0))
     x = np.random.default_rng(0).normal(0, 0.05, 40 * g.T)
     assert cpm.find(g, x) is None
+
+
+def test_cpm_control_padding_is_known_when_it_fails():
+    """CPM's control is a polar codeword: its payload enters the code
+    reversed (codes.polar_order), so a short control's padding sits on the
+    weakest positions. At -11 dB these draws fail plain and decode with the
+    padding known (phy.POLAR_PIN_CUTS)."""
+    from data2g import hfchannel
+    from data2g.arq import frames as F
+    from data2g.arq import phy as PHY
+    from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
+
+    spec = cpm.SPECS["fsk8r50-r1/2"]
+    cs = cpm.CTL[spec.grid]
+    ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=17, k=1, recommend=5), {F.T_REPLY: b"\x05"}).pack(
+        codes.payload_bytes(cs))[0]
+    data = bytes(np.random.default_rng(5).integers(0, 256, codes.payload_bytes(spec), dtype=np.uint8))
+    b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
+    x = np.concatenate([np.zeros(4000), PHY.tx_audio(b), np.zeros(4000)])
+    m = PHY.mask_value(ctl_mask(0, 0, 7))
+    for seed in (2, 3, 4):
+        y = hfchannel.apply_channel(x, snr_db=-11.0, seed=seed)
+        r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
+        cands, usable = codes.decode_raw(cs, np.asarray(PHY.soft_bits(r)[0])[None], index=[0])
+        assert codes.check(cs, cands[0], usable[0], m) is None  # plain fails
+        rx = PHY.ModemRx(r, {})
+        assert ctl in rx.raw(0)
+        assert rx.decode(0, ctl_mask(0, 0, 7), 0, None) == ctl

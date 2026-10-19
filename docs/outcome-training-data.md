@@ -39,6 +39,11 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_e2_high.csv` | `--high --sessions 1200 --first 5200000` (same) | high | same | 570cf8a | |
 | `session_data_e2_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 5300000` (same) | high AWGN | same | 570cf8a | |
 | `session_data_e2_fastlow.csv` | `--fastlow --sessions 1200 --first 5400000` (same) | fastlow | same | 570cf8a | |
+| `session_data_cp.csv` | `--sessions 2900 --first 6000000` (`runs/cp_round.sh`) | regular; control padding pinned (`phy.PIN_CUTS`) | n10pe gated with n10qf, CPM floor, offsets w48-16qam-r1/2 -1.0, n10-256l-r3/4 -0.5, Python shifter | 7e54f2d | the pinned receiver in sessions |
+| `session_data_cp_slow.csv` | `--slow --sessions 800 --first 6100000` (same) | slow, pinned | same | 7e54f2d | |
+| `session_data_cp_high.csv` | `--high --sessions 1200 --first 6200000` (same) | high, pinned | same | 7e54f2d | |
+| `session_data_cp_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 6300000` (same) | high AWGN, pinned | same | 7e54f2d | |
+| `session_data_cp_fastlow.csv` | `--fastlow --sessions 1200 --first 6400000` (same) | fastlow, pinned | same | 7e54f2d | |
 
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
@@ -52,6 +57,7 @@ sent at the same moment; one row per candidate.
 |---|---|---|---|---|
 | `outcome_data_n10top.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 3000000` (`runs/n10_top_data.sh`) | none (candidates fixed) | 2613567 | the two new 500 Hz modes, 0..36 dB |
 | `outcome_data_general.csv` | `with_native outcome_data --samples 40000 --first 4000000` (`runs/n10p3_round.sh`) | none | 046f8be | stands in for v10's lost offline set: retrains without one lost 4-10% on MPD |
+| `outcome_data_general_cp.csv` | `with_native outcome_data --samples 40000 --first 4000000` (`runs/cp_round.sh`) | none | 7e54f2d | the general set's seeds again, control padding pinned: only the decoder differs |
 
 ## Mixes
 
@@ -63,3 +69,8 @@ sent at the same moment; one row per candidate.
 - **n10pe / n10qe** (`runs/e2_round.sh`): the e2 sets instead of the n10p ones, plus the general offline set, the
   older sets and `outcome_data_n10top.csv`; n10pe with `--energy-inputs` (engine-measured).
   Five bootstrap members, seeds 1-5, averaged.
+- **cpe / cpo / cpn** (`runs/cp_round.sh`, `runs/cp_round2.sh`; not shipped): the cp sets in place of the e2
+  ones. cpe and cpo with the older sets as n10pe (cpe with `outcome_data_general_cp.csv`, cpo with the
+  original general set); cpn the cp sets, `outcome_data_general_cp.csv` and `outcome_data_n10top.csv` only.
+  `--energy-inputs`, five members each. Against n10pe on the pinned receiver (`runs/cp_judge.sh`) all three
+  traded cells: +4 to +9% at MPD 0 and MPP -4/0, losses at MPP -6, MPG +8 and high-SNR fading.

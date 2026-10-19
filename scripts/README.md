@@ -68,7 +68,8 @@ One question each, answered in the docstring. By area:
   `header_study.py`, `header_diversity.py`, `copy_acq_study.py`,
   `copy_cpu.py`, `accept_false_locks.py`.
 - **Receiver variants**: `rx_ab_study.py`, `blanker_study.py`,
-  `erasure_retry_study.py`, `polar_list_study.py`, `polar_gate_study.py`.
+  `erasure_retry_study.py`, `polar_list_study.py`, `polar_gate_study.py`,
+  `ctl_prior_study.py`.
 - **Peak power**: `clip_study.py`, `ace_study.py`, `slm_study.py`,
   `slm_blind_study.py`, `cpm_papr_study.py`, `plot_constellations.py`.
 - **CRC and false accepts**: `crc_study.py`, `crc_cost.py`,

@@ -174,6 +174,27 @@ Where the rest comes from:
   reply the sender acted on, taken in ascending order. The sender doesn't merge older
   ACKs. The receiver keeps a snapshot (cumulative + received set) for each of its last
   8 burst seqs, and computes the same first K.
+- **A failed control slot is decoded again with its padding pinned.** A control is a few
+  bytes (median 12, at most 28 in linksim sessions) zeroed to its codeword's payload
+  (46-396 B in the LDPC modes). LDPC is systematic, so the receiver sets the sent info bits
+  past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
+  `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
+  nothing on air changes. An `ARQ_DUP` pair that fails combined is pinned the same way in
+  its IR buffer (`codes.pin_buffer`).
+  - Polar sends no info bits: known ones are frozen instead (`codes.decode_raw_pinned`), and
+    a polar codeword's payload enters its info set reversed (`codes.polar_order`, a wire
+    format choice) so that a control's padding sits on the weakest positions. Cuts 12 and
+    16 B (`phy.POLAR_PIN_CUTS`: CPM's control carries 9-16 B of its 20), counted along the
+    control stream, so a control spanning two polar codewords has its second one pinned.
+    Code level (`ctl_prior_study.py --polar`, BPSK): CPM control 1.0 dB, polar-k192 1.5 dB,
+    polar-k96's last codeword 3-4 dB; the ACK modes (4 B codewords) none.
+  - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
+    constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
+    the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),
+    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5). Cut 16 alone gets all of it,
+    within 1 dB of knowing the content's exact length.
+  - The outcome model and the link abstraction still assume the old control failure rate,
+    so the gear shifter picks modes as before until they are retrained.
 - **If any control codeword fails, the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.

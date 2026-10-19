@@ -3,8 +3,9 @@ themselves (ldpc.py, polar.py) know nothing of submodes: this module keys
 them by spec (CodeSpec) and frames what they carry.
 
 TX: payload -> info_bits (payload, its CRC XORed with the ARQ's mask, zero
-fill, PN9-scrambled by burst position) -> encode_info (LDPC or polar, then
-the BICM interleaver) -> spread (burst symbol order). RX undoes it:
+fill, PN9-scrambled by burst position) -> encode_info (LDPC, or polar with
+the payload's bits reversed: polar_order; then the BICM interleaver) ->
+spread (burst symbol order). RX undoes it:
 despread -> a decode -> descramble and check the CRC.
 
   framing       crc_bits, payload_bytes, info_bits, payloads, crc_ok
@@ -152,6 +153,18 @@ def frozen(spec: CodeSpec) -> dict | None:
         return None
     d = np.load(path)
     return dict(d) if str(d["fingerprint"]) == fingerprint(spec) else None
+
+
+@lru_cache(maxsize=None)
+def polar_order(spec: CodeSpec) -> np.ndarray:
+    """(k,) the order info bits enter a polar code (its info set, increasing
+    index): the payload's bits reversed, then the CRC and fill. A control's
+    trailing zeros (frames.Control.pack) then sit on the least reliable
+    positions, where knowing them buys most (decode_raw_pinned): CPM control
+    with 12 B of content, 10% failure about -4.3 dB pinned against -3.0 with
+    the payload in order (-2.8 plain). Its own inverse."""
+    nb = 8 * payload_bytes(spec)
+    return np.concatenate([np.arange(nb)[::-1], np.arange(nb, spec.k)])
 
 
 @lru_cache(maxsize=None)
@@ -314,9 +327,10 @@ def encode_info(spec: CodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
     `rv`: redundancy version (rv_positions); 0 is the first transmission."""
     if rv and spec.code == "ldpc":
         coded = ldpc_code(spec).mother().encode(bits)[:, rv_positions(spec, rv)]
+    elif spec.code == "ldpc":
+        coded = ldpc_code(spec).encode(bits)
     else:
-        code = ldpc_code(spec) if spec.code == "ldpc" else polar_code(spec)
-        coded = code.encode(bits)
+        coded = polar_code(spec).encode(np.asarray(bits)[:, polar_order(spec)])
     return coded[:, interleaver(spec)]
 
 
@@ -464,7 +478,7 @@ def decode_raw(spec: CodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray
         out, ok = _decoder(spec).decode(deint, iters=LDPC_ITERS)
         cands, usable = _numpy(out)[:, None], _numpy(ok)[:, None]
     else:
-        cands = _numpy(_decoder(spec).decode(deint)[0])
+        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)]
         usable = np.ones(cands.shape[:2], bool)
     idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
     return np.stack([descramble(spec, c, i) for c, i in zip(cands, idx)]), usable
@@ -488,6 +502,127 @@ def check(spec: CodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) 
     return None
 
 
+# --- known info bits (source-aware decoding) -------------------------------------------
+# A receiver often knows part of a codeword before decoding it: a control
+# codeword is a few bytes of content and then zeros to its payload size
+# (frames.Control.pack). LDPC is systematic, so a known info bit that is sent
+# is pinned at the decoder's input, its soft bit set to the clamp; the code
+# is then effectively shortened (the punctured first 2Z info columns have no
+# soft bit to pin). Polar sends no info bits: known ones are frozen instead,
+# in a code with the rest as its info set, after their own codeword is taken
+# off the soft bits (the code is linear); polar_order puts the payload's tail
+# on its weakest positions so that this pays. LDPC: nothing on air changes.
+# decode_raw_pinned and decode_buffer_pinned do either.
+
+@lru_cache(maxsize=None)
+def _info_code_positions(spec: CodeSpec) -> np.ndarray:
+    """(k,) where each info bit is sent at RV 0 in code order (its position
+    in an IR buffer too: the mother code starts with the codeword), or -1."""
+    out = np.full(spec.k, -1, dtype=np.int64)
+    if spec.code != "ldpc":
+        return out
+    sent = np.asarray(ldpc_code(spec).sent)
+    p = np.flatnonzero(sent < spec.k)  # sent positions (code order) carrying info bits
+    out[sent[p]] = p
+    return out
+
+
+@lru_cache(maxsize=None)
+def systematic_positions(spec: CodeSpec) -> np.ndarray:
+    """(k,) where each info bit is sent at RV 0, in mapping order, or -1
+    (punctured, filler; polar: every one)."""
+    code = _info_code_positions(spec)
+    where = np.empty(spec.coded_bits, dtype=np.int64)
+    where[np.asarray(interleaver(spec))] = np.arange(spec.coded_bits)  # code order -> mapping order
+    return np.where(code >= 0, where[np.maximum(code, 0)], -1)
+
+
+def zero_tail(spec: CodeSpec, nbytes: int) -> np.ndarray:
+    """(k,) int8 known info bits, -1 unknown: payload bytes from `nbytes`
+    on are zero (a control's padding), and the zero fill past the CRC."""
+    known = np.full(spec.k, -1, dtype=np.int8)
+    known[8 * nbytes : 8 * payload_bytes(spec)] = 0
+    known[8 * payload_bytes(spec) + crc_bits(spec):] = 0
+    return known
+
+
+def pin(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> np.ndarray:
+    """(coded_bits,) soft bits of an RV 0 codeword sent at burst position
+    `index`, with every sent info bit that `known` gives ((k,) 0/1, -1
+    unknown; unscrambled) pinned to the decoder's clamp. Unchanged for
+    polar (no sent info bits)."""
+    pos = systematic_positions(spec)
+    sel = (np.asarray(known) >= 0) & (pos >= 0)
+    out = np.array(soft, dtype=np.float32)
+    bit = np.asarray(known)[sel].astype(np.uint8) ^ scrambler(spec.k, scramble_seed(index))[sel]
+    out[pos[sel]] = ldpc.CH_CLAMP * (1.0 - 2.0 * bit)
+    return out
+
+
+def pin_buffer(spec: CodeSpec, buf: np.ndarray, known: np.ndarray) -> np.ndarray:
+    """codes.pin for a combined IR buffer ((B, L), code order, unscrambled:
+    decode_buffer's input). Unchanged for polar."""
+    pos = _info_code_positions(spec)
+    sel = (np.asarray(known) >= 0) & (pos >= 0)
+    out = np.array(buf, dtype=float)
+    out[:, pos[sel]] = ldpc.CH_CLAMP * (1.0 - 2.0 * np.asarray(known)[sel])
+    return out
+
+
+@lru_cache(maxsize=None)
+def _pinned_polar(spec: CodeSpec, known_pos: tuple) -> tuple:
+    """(the full code, the decoder of the code with info bits `known_pos`
+    frozen, the info bits it decodes), numpy's."""
+    info = np.asarray(polar_code(spec).info_pos)
+    full = polar.PolarCode(spec.k, spec.coded_bits, POLAR_DESIGN_SNR_DB, tuple(int(i) for i in info))
+    rest = np.setdiff1d(np.arange(spec.k), known_pos)
+    code = polar.PolarCode(len(rest), spec.coded_bits, POLAR_DESIGN_SNR_DB, tuple(int(i) for i in info[rest]))
+    return full, polar.SCLDecoder(code, POLAR_LIST), rest
+
+
+def _pinned_paths(spec: CodeSpec, deint: np.ndarray, known: np.ndarray, index: int) -> np.ndarray:
+    """Polar: (B, coded_bits) LLRs in code order, sent at burst position
+    `index`, with the info bits `known` gives -> the list (B, L, k) of info
+    bits as decoded (scrambled), best first."""
+    order = polar_order(spec)
+    known = np.asarray(known)
+    u = np.where(known >= 0, known, 0).astype(np.uint8) ^ scrambler(spec.k, scramble_seed(int(index)))
+    known, u = known[order], u[order]  # in the code's order
+    kp = np.flatnonzero(known >= 0)
+    full, dec, rest = _pinned_polar(spec, tuple(int(i) for i in kp))
+    u[known < 0] = 0
+    paths, _ = dec.decode(np.asarray(deint, np.float32) * (1.0 - 2.0 * full.encode(u[None])[0]))
+    out = np.empty((*paths.shape[:2], spec.k), np.uint8)
+    out[..., rest] = paths
+    out[..., kp] = u[kp]
+    return out[..., order]
+
+
+def decode_raw_pinned(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray]:
+    """decode_raw of (B, coded_bits) soft bits sent at burst position
+    `index`, with the info bits `known` gives ((k,) 0/1, -1 unknown;
+    unscrambled) known: LDPC pinned (pin), polar frozen."""
+    if spec.code == "ldpc":
+        return decode_raw(spec, np.stack([pin(spec, s, known, index) for s in np.atleast_2d(soft)]),
+                          index=np.full(len(np.atleast_2d(soft)), index))
+    cands = _pinned_paths(spec, _deinterleave(spec, np.atleast_2d(np.asarray(soft, np.float32))), known, index)
+    return descramble(spec, cands, index), np.ones(cands.shape[:2], bool)
+
+
+def decode_buffer_pinned(spec: CodeSpec, buf: np.ndarray, max_rv: int, known: np.ndarray, crc_mask=0) -> list[tuple[bytes, bool]]:
+    """decode_buffer (index PLAIN) with the info bits `known` gives known:
+    LDPC pinned (pin_buffer), polar frozen."""
+    if spec.code == "ldpc":
+        return decode_buffer(spec, pin_buffer(spec, buf, known), max_rv, crc_mask, index=PLAIN)
+    paths = _pinned_paths(spec, np.asarray(buf)[:, : spec.coded_bits], known, PLAIN)
+    masks = np.broadcast_to(crc_mask, len(paths))
+    rep = lambda v: np.repeat(np.broadcast_to(v, len(paths)), paths.shape[1])  # noqa: E731
+    crc = crc_ok(spec, paths.reshape(-1, spec.k), rep(masks), rep(PLAIN)).reshape(paths.shape[:2])
+    pick = np.where(crc.any(axis=1), crc.argmax(axis=1), 0)
+    idx = np.full(len(paths), PLAIN)
+    return payloads(spec, paths[np.arange(len(paths)), pick], crc.any(axis=1), masks, idx)
+
+
 def _numpy(x):
     return x.cpu().numpy() if hasattr(x, "cpu") else np.asarray(x)
 
@@ -498,7 +633,7 @@ def _decode_code_order(spec: CodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_
         out, ok = dec.decode(deint, iters=iters)
         return _numpy(out), _numpy(ok)
     paths, _ = dec.decode(deint)
-    paths = _numpy(paths)  # (B, L, k), best first
+    paths = _numpy(paths)[..., polar_order(spec)]  # (B, L, k), best first
     rep = lambda v: np.repeat(np.broadcast_to(v, len(paths)), paths.shape[1])  # noqa: E731
     crc = crc_ok(spec, paths.reshape(-1, spec.k), rep(crc_mask), rep(index)).reshape(paths.shape[:2])
     pick = np.where(crc.any(axis=1), crc.argmax(axis=1), 0)
