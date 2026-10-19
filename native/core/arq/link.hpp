@@ -215,6 +215,28 @@ public:
     }
 
 private:
+    // build()'s phases, as link.py splits Station.build
+    struct Fit {
+        int k;  // resends
+        bool has_new;
+        Bytes bitmap;
+        int n_ctl, dup;
+    };
+    int escalation() const;
+    bool data_allowed(bool fresh, const std::string& submode);
+    void start_abandon(int reset);
+    Ext control_tlvs(std::int64_t bn, std::optional<int> reply);
+    Fit fit(Ext& ext, int cum, const std::vector<std::int64_t>& missing, bool has_new, int max_cw,
+            const std::string& submode, bool fresh);
+    std::vector<const Codeword*> new_codewords(const std::string& submode, int room, int k, std::int64_t spare,
+                                               std::int64_t bn);
+    void add_slots(TxBurst& burst, const std::vector<Bytes>& ctl, int dup, const std::vector<std::int64_t>& resend,
+                   const std::vector<int>& rvs, const std::vector<const Codeword*>& fresh_cws);
+    void record(std::int64_t bn, const TxBurstPtr& burst, std::set<std::int64_t> conveyed,
+                const std::vector<std::int64_t>& resend, const std::vector<const Codeword*>& fresh_cws);
+    void log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Core& core, const Ext& ext, int dup,
+                const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
+                const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply);
     bool handle_inner(RxBurst& rx);
     // What is wrong with a CRC-valid control, checked before any state changes.
     static std::optional<std::string> check(const Core& core, const Ext& ext, int n_data);

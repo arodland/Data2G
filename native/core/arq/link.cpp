@@ -255,54 +255,13 @@ TxBurstPtr Station::build(bool fresh) {
         return last_sent;
     }
     const std::int64_t bn = latest + 1;
-    const int raw = std::max(misses, reply_escalation);
-    const int escalation = raw ? std::min(std::max(raw, esc_floor + raw - 1), MAX_ESCALATION) : 0;
-    sent_esc_ = escalation;
-    auto [submode, max_cw] = policy->choose(*this, escalation);
-    const int pb = policy->payload_bytes(submode);
-    const int cpb = policy->ctl_payload_bytes(submode);
-    const int max_ctl = policy->max_ctl(submode);
-    Ext ext;
-    std::optional<int> reset;
-    const bool stale = std::exchange(stale_, false);
-    const bool other_mode =
-        std::any_of(tx.cws.begin(), tx.cws.end(), [&](const auto& kv) { return kv.second.submode != submode; });
-    if (!fresh) {
-        max_cw = 0;  // control only
-    } else if (stale && (resync_due || other_mode)) {
-        // answering a repeat of the peer burst I last answered: its ACK may
-        // predate my last burst, so it may not abandon (§4)
-        max_cw = 0;
-    } else if (resync_due) {
-        reset = 1;
-        resync_due = false;
-    } else if (other_mode) {
-        reset = 0;  // a resend must keep its submode (§4)
-    }
-    if (reset) {
-        const std::int64_t a = tx.abandon();
-        abandon_epoch = (abandon_epoch + 1) % 128;
-        abandon_tlv = Bytes{static_cast<std::uint8_t>(pmod(a, SEQ_MOD)), static_cast<std::uint8_t>(*reset | abandon_epoch << 1)};
-        abandon_bursts.clear();
-    }
-    if (abandon_tlv) {
-        ext[T_ABANDON] = *abandon_tlv;
-        abandon_bursts.insert(bn);
-        if ((*abandon_tlv)[1] & 1) ext[T_RESYNC] = {};
-    }
+    const int esc = sent_esc_ = escalation();
+    auto [submode, max_cw] = policy->choose(*this, esc);
+    if (!data_allowed(fresh, submode)) max_cw = 0;  // control only
     const auto r = policy->recommend(*this);
     const int rec = r ? r->rec : 0, hint = r ? r->hint : 1;
     const std::optional<int> reply = r ? r->reply : std::nullopt;
-    if (reply) ext[T_REPLY] = Bytes{static_cast<std::uint8_t>(*reply)};
-    if (chat) ext[T_CHAT] = {};
-    if (policy->want_dup()) ext[T_DUPCTL] = {};
-    if (chat || peer_chat) {
-        const std::int64_t queued = new_available();
-        if (queued > CHAT_LINE_BYTES) {
-            const auto q = std::min<std::int64_t>(queued, 65535);
-            ext[T_BUFFER] = Bytes{static_cast<std::uint8_t>(q >> 8), static_cast<std::uint8_t>(q)};
-        }
-    }
+    Ext ext = control_tlvs(bn, reply);
     Core core;
     core.ftype = fresh ? ARQ : PROBE;
     core.burst_seq = static_cast<int>(pmod(bn, BURST_MOD));
@@ -313,36 +272,10 @@ TxBurstPtr Station::build(bool fresh) {
     core.size_hint = hint;
     reply_lost = false;
 
-    // what this burst's ACK conveys, exactly (the snapshot must match it)
-    std::set<int> held7;
-    for (const auto& [s, _] : rx.buf) held7.insert(static_cast<int>(pmod(s, SEQ_MOD)));
-    Bytes bitmap = pack_bitmap(held7, core.cum);
+    const int cpb = policy->ctl_payload_bytes(submode);
     const std::vector<std::int64_t> missing = fresh ? tx.missing() : std::vector<std::int64_t>{};
-    bool has_new = fresh && new_available() > 0;
-    int k = static_cast<int>(std::min<std::int64_t>(static_cast<std::int64_t>(missing.size()), std::max(0, max_cw - 1)));
-    int n_ctl = 0, dup = 1;
-    while (true) {
-        Ext e = ext;
-        if (!bitmap.empty()) e[T_BITMAP] = bitmap;
-        int zk = 0;
-        for (int j = 0; j < k; ++j)
-            if (comp_bit(missing[static_cast<std::size_t>(j)])) zk = j + 1;
-        n_ctl = ctl_size(e, cpb, k, has_new, zk);
-        dup = (fresh && peer_wants_dup && (k || has_new)) ? 2 : 1;
-        if (n_ctl <= max_ctl && dup * n_ctl + k <= std::max(max_cw, dup * n_ctl) && (fresh || !has_new)) break;
-        const int* opt = std::find_if(std::begin(OPTIONAL_TLVS), std::end(OPTIONAL_TLVS), [&](int t) { return ext.count(t) > 0; });
-        if (k) {
-            k -= 1;
-        } else if (opt != std::end(OPTIONAL_TLVS)) {
-            ext.erase(*opt);  // hints and requests: a later burst carries them
-        } else if (!bitmap.empty()) {
-            bitmap.clear();  // costs extra resends, never wrong ones
-        } else if (has_new) {
-            has_new = false;
-        } else {
-            throw std::invalid_argument("control does not fit " + submode);
-        }
-    }
+    auto [k, has_new, bitmap, n_ctl, dup] = fit(ext, core.cum, missing, fresh && new_available() > 0, max_cw, submode, fresh);
+    // what this burst's ACK conveys, exactly (the snapshot must match it)
     if (!bitmap.empty()) ext[T_BITMAP] = bitmap;
     std::set<std::int64_t> conveyed;
     if (!bitmap.empty())
@@ -352,16 +285,11 @@ TxBurstPtr Station::build(bool fresh) {
     const int cycle = policy->rv_cycle(submode);
     std::vector<int> rvs;
     for (auto x : resend) rvs.push_back(static_cast<int>(pmod(tx.cws.at(x).heard, cycle)));
-    std::vector<const Codeword*> fresh_cws;
-    const int room = std::max(0, max_cw - dup * n_ctl - static_cast<int>(resend.size()));
+    const int room = has_new ? std::max(0, max_cw - dup * n_ctl - static_cast<int>(resend.size())) : 0;
     // a new codeword is compressed only when its T_COMP bit fits the
     // control's padding: compression never costs a control codeword
     const std::int64_t spare = static_cast<std::int64_t>(n_ctl) * cpb - ctl_bytes(ext, k, has_new, 0);
-    while (has_new && static_cast<int>(fresh_cws.size()) < room && tx.next - tx.base < WINDOW) {
-        if (new_available() <= 0) break;
-        const bool fits = compress && 2 + ceil_div(k + static_cast<std::int64_t>(fresh_cws.size()) + 1, 8) <= spare;
-        fresh_cws.push_back(&tx.new_codeword(submode, pb, fits, bn));
-    }
+    const auto fresh_cws = new_codewords(submode, room, k, spare, bn);
     core.k = static_cast<int>(resend.size());
     if (!resend.empty()) ext[T_RV] = pack_rv(rvs);
     if (!fresh_cws.empty()) ext[T_NEW] = Bytes{static_cast<std::uint8_t>(pmod(fresh_cws[0]->seq, SEQ_MOD))};
@@ -381,17 +309,134 @@ TxBurstPtr Station::build(bool fresh) {
     const auto ctl = control.pack(cpb);
     core.n_ctl = control.core.n_ctl;
     if (core.n_ctl > n_ctl) throw std::logic_error("T_COMP outgrew the control's padding");
+
     auto burst = std::make_shared<TxBurst>();
     burst->submode = submode;
+    burst->burst_seq = bursts_sent;
+    burst->cap = cap;
+    add_slots(*burst, ctl, dup, resend, rvs, fresh_cws);
+    record(bn, burst, std::move(conveyed), resend, fresh_cws);
+    if (log_enabled(LOG, INFO)) log_tx(bn, *burst, fresh, core, ext, dup, resend, rvs, fresh_cws, esc, hint, reply);
+    return burst;
+}
+
+// My own timeouts (master), or the peer telling me my replies are lost (it
+// repeats or polls: §6), climbing from the last recovery's floor.
+int Station::escalation() const {
+    const int raw = std::max(misses, reply_escalation);
+    return raw ? std::min(std::max(raw, esc_floor + raw - 1), MAX_ESCALATION) : 0;
+}
+
+// Whether this burst may carry data codewords. Abandons the outstanding ones
+// first when a resync is due or they are in another submode (§4).
+bool Station::data_allowed(bool fresh, const std::string& submode) {
+    const bool stale = std::exchange(stale_, false);
+    if (!fresh) return false;
+    const bool other_mode =
+        std::any_of(tx.cws.begin(), tx.cws.end(), [&](const auto& kv) { return kv.second.submode != submode; });
+    // answering a repeat of the peer burst I last answered: its ACK may
+    // predate my last burst, so it may not abandon (§4)
+    if (stale && (resync_due || other_mode)) return false;
+    if (resync_due) {
+        resync_due = false;
+        start_abandon(1);
+    } else if (other_mode) {
+        start_abandon(0);  // a resend must keep its submode (§4)
+    }
+    return true;
+}
+
+void Station::start_abandon(int reset) {
+    const std::int64_t a = tx.abandon();
+    abandon_epoch = (abandon_epoch + 1) % 128;
+    abandon_tlv = Bytes{static_cast<std::uint8_t>(pmod(a, SEQ_MOD)), static_cast<std::uint8_t>(reset | abandon_epoch << 1)};
+    abandon_bursts.clear();
+}
+
+// The TLVs that do not depend on what data the burst carries.
+Ext Station::control_tlvs(std::int64_t bn, std::optional<int> reply) {
+    Ext ext;
+    if (abandon_tlv) {
+        ext[T_ABANDON] = *abandon_tlv;
+        abandon_bursts.insert(bn);
+        if ((*abandon_tlv)[1] & 1) ext[T_RESYNC] = {};
+    }
+    if (reply) ext[T_REPLY] = Bytes{static_cast<std::uint8_t>(*reply)};
+    if (chat) ext[T_CHAT] = {};
+    if (policy->want_dup()) ext[T_DUPCTL] = {};
+    if (chat || peer_chat) {
+        const std::int64_t queued = new_available();
+        if (queued > CHAT_LINE_BYTES) {
+            const auto q = std::min<std::int64_t>(queued, 65535);
+            ext[T_BUFFER] = Bytes{static_cast<std::uint8_t>(q >> 8), static_cast<std::uint8_t>(q)};
+        }
+    }
+    return ext;
+}
+
+// Shrink the burst until control and resends fit: resends first, then
+// optional TLVs (erased from `ext`), the bitmap, new data.
+Station::Fit Station::fit(Ext& ext, int cum, const std::vector<std::int64_t>& missing, bool has_new, int max_cw,
+                          const std::string& submode, bool fresh) {
+    const int cpb = policy->ctl_payload_bytes(submode);
+    const int max_ctl = policy->max_ctl(submode);
+    std::set<int> held7;
+    for (const auto& [s, _] : rx.buf) held7.insert(static_cast<int>(pmod(s, SEQ_MOD)));
+    Bytes bitmap = pack_bitmap(held7, cum);
+    int k = static_cast<int>(std::min<std::int64_t>(static_cast<std::int64_t>(missing.size()), std::max(0, max_cw - 1)));
+    while (true) {
+        Ext e = ext;
+        if (!bitmap.empty()) e[T_BITMAP] = bitmap;
+        int zk = 0;
+        for (int j = 0; j < k; ++j)
+            if (comp_bit(missing[static_cast<std::size_t>(j)])) zk = j + 1;
+        const int n_ctl = ctl_size(e, cpb, k, has_new, zk);
+        const int dup = (fresh && peer_wants_dup && (k || has_new)) ? 2 : 1;
+        if (n_ctl <= max_ctl && dup * n_ctl + k <= std::max(max_cw, dup * n_ctl)) return {k, has_new, bitmap, n_ctl, dup};
+        const int* opt = std::find_if(std::begin(OPTIONAL_TLVS), std::end(OPTIONAL_TLVS), [&](int t) { return ext.count(t) > 0; });
+        if (k) {
+            k -= 1;
+        } else if (opt != std::end(OPTIONAL_TLVS)) {
+            ext.erase(*opt);  // hints and requests: a later burst carries them
+        } else if (!bitmap.empty()) {
+            bitmap.clear();  // costs extra resends, never wrong ones
+        } else if (has_new) {
+            has_new = false;
+        } else {
+            throw std::invalid_argument("control does not fit " + submode);
+        }
+    }
+}
+
+// Up to `room` new codewords; `spare` control padding bytes decide compression.
+std::vector<const Codeword*> Station::new_codewords(const std::string& submode, int room, int k, std::int64_t spare,
+                                                    std::int64_t bn) {
+    const int pb = policy->payload_bytes(submode);
+    std::vector<const Codeword*> out;
+    while (static_cast<int>(out.size()) < room && tx.next - tx.base < WINDOW && new_available() > 0) {
+        const bool fits = compress && 2 + ceil_div(k + static_cast<std::int64_t>(out.size()) + 1, 8) <= spare;
+        out.push_back(&tx.new_codeword(submode, pb, fits, bn));
+    }
+    return out;
+}
+
+void Station::add_slots(TxBurst& burst, const std::vector<Bytes>& ctl, int dup, const std::vector<std::int64_t>& resend,
+                        const std::vector<int>& rvs, const std::vector<const Codeword*>& fresh_cws) {
     for (std::size_t i = 0; i < ctl.size(); ++i)
-        for (int rv = 0; rv < dup; ++rv) burst->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), rv, ctl[i]});
+        for (int rv = 0; rv < dup; ++rv) burst.slots.push_back({ctl_mask(direction, static_cast<int>(i), key), rv, ctl[i]});
+    // every outstanding codeword was sliced in the current epoch (abandon clears them)
     for (std::size_t j = 0; j < resend.size(); ++j)
-        burst->slots.push_back(
+        burst.slots.push_back(
             {data_mask(direction, resend[j], key, tx.cws.at(resend[j]).comp, abandon_epoch), rvs[j],
              tx.cws.at(resend[j]).payload});
     for (auto* c : fresh_cws)
-        burst->slots.push_back({data_mask(direction, c->seq, key, c->comp, abandon_epoch), 0, c->payload});
-    snapshots[bn] = {rx.cum, conveyed};
+        burst.slots.push_back({data_mask(direction, c->seq, key, c->comp, abandon_epoch), 0, c->payload});
+}
+
+// Remember what burst `bn` conveyed and carried, for the peer's ACK of it.
+void Station::record(std::int64_t bn, const TxBurstPtr& burst, std::set<std::int64_t> conveyed,
+                     const std::vector<std::int64_t>& resend, const std::vector<const Codeword*>& fresh_cws) {
+    snapshots[bn] = {rx.cum, std::move(conveyed)};
     auto& sent = sent_seqs[bn] = resend;
     for (auto* c : fresh_cws) sent.push_back(c->seq);
     latest = bn;
@@ -399,44 +444,46 @@ TxBurstPtr Station::build(bool fresh) {
         sent_seqs.erase(it->first);
         it = snapshots.erase(it);
     }
-    burst->burst_seq = bursts_sent;
-    burst->cap = cap;
     bursts_sent += 1;
     last_sent = burst;
-    std::int64_t n_comp = 0, n_bytes = 0;
-    for (auto* c : fresh_cws) {
-        n_comp += c->comp;
-        n_bytes += c->length;
-    }
+    std::int64_t n_comp = 0;
+    for (auto* c : fresh_cws) n_comp += c->comp;
     stats["cw_new"] += static_cast<std::int64_t>(fresh_cws.size());
     stats["cw_comp"] += n_comp;
     stats["cw_resend"] += static_cast<std::int64_t>(resend.size());
-    if (log_enabled(LOG, INFO)) {
-        const char* kind = (!resend.empty() || !fresh_cws.empty()) ? "data" : (fresh ? "ack" : "poll");
-        std::vector<std::string> parts{std::string(kind) + " " + burst_desc(submode, static_cast<int>(burst->slots.size()), dup == 2)};
-        if (!resend.empty()) {
-            std::vector<std::string> rs;
-            for (std::size_t j = 0; j < resend.size(); ++j) rs.push_back(str(resend[j]) + "/rv" + str(rvs[j]));
-            parts.push_back("resend " + join(rs, " "));
-        }
-        if (!fresh_cws.empty()) {
-            std::string s = "new " + str(fresh_cws.front()->seq);
-            if (fresh_cws.size() > 1) s += "-" + str(fresh_cws.back()->seq);
-            s += " " + str(n_bytes) + " B";
-            if (n_comp) s += " (" + str(n_comp) + " compressed)";
-            parts.push_back(s);
-        }
-        if (tx.pending()) parts.push_back("unacked " + str(tx.next - tx.base) + ", queued " + str(new_available()) + " B");
-        parts.push_back("ack cum " + str(rx.cum) + (rx.buf.empty() ? "" : " +" + str(rx.buf.size()) + " held"));
-        parts.push_back("ask data " + mode(rec) + " size " + str(hint) + ", reply " + mode(reply));
-        if (escalation) parts.push_back("escalated " + str(escalation));
-        if (misses) parts.push_back("timeout " + str(misses));
-        if (ext.count(T_ABANDON)) parts.push_back(std::string(ext.count(T_RESYNC) ? "resync" : "abandon") + " at " + str(tx.base));
-        if (dup == 2) parts.push_back("dup ctl");
-        if (core.reply_lost) parts.push_back("reply lost");
-        log_write(LOG, INFO, format("TX b%d %s", static_cast<int>(pmod(bn, BURST_MOD)), join(parts, " | ").c_str()));
+}
+
+void Station::log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Core& core, const Ext& ext, int dup,
+                     const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
+                     const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply) {
+    const char* kind = (!resend.empty() || !fresh_cws.empty()) ? "data" : (fresh ? "ack" : "poll");
+    std::vector<std::string> parts{std::string(kind) + " " + burst_desc(burst.submode, static_cast<int>(burst.slots.size()), dup == 2)};
+    if (!resend.empty()) {
+        std::vector<std::string> rs;
+        for (std::size_t j = 0; j < resend.size(); ++j) rs.push_back(str(resend[j]) + "/rv" + str(rvs[j]));
+        parts.push_back("resend " + join(rs, " "));
     }
-    return burst;
+    if (!fresh_cws.empty()) {
+        std::int64_t n_comp = 0, n_bytes = 0;
+        for (auto* c : fresh_cws) {
+            n_comp += c->comp;
+            n_bytes += c->length;
+        }
+        std::string s = "new " + str(fresh_cws.front()->seq);
+        if (fresh_cws.size() > 1) s += "-" + str(fresh_cws.back()->seq);
+        s += " " + str(n_bytes) + " B";
+        if (n_comp) s += " (" + str(n_comp) + " compressed)";
+        parts.push_back(s);
+    }
+    if (tx.pending()) parts.push_back("unacked " + str(tx.next - tx.base) + ", queued " + str(new_available()) + " B");
+    parts.push_back("ack cum " + str(rx.cum) + (rx.buf.empty() ? "" : " +" + str(rx.buf.size()) + " held"));
+    parts.push_back("ask data " + mode(core.recommend) + " size " + str(hint) + ", reply " + mode(reply));
+    if (escalation) parts.push_back("escalated " + str(escalation));
+    if (misses) parts.push_back("timeout " + str(misses));
+    if (ext.count(T_ABANDON)) parts.push_back(std::string(ext.count(T_RESYNC) ? "resync" : "abandon") + " at " + str(tx.base));
+    if (dup == 2) parts.push_back("dup ctl");
+    if (core.reply_lost) parts.push_back("reply lost");
+    log_write(LOG, INFO, format("TX b%d %s", static_cast<int>(pmod(bn, BURST_MOD)), join(parts, " | ").c_str()));
 }
 
 TxBurstPtr Station::on_timeout(bool allow_repeat) {
