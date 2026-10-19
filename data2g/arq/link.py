@@ -667,6 +667,32 @@ class Station:
         return ok
 
     def _handle(self, rx: RxBurst) -> bool:
+        got = self._read_control(rx)
+        if not got:
+            return False
+        ctl, dup = got
+        core, ext = ctl.core, ctl.ext
+        was, repeat = self._note_peer(core, ext)
+        before = (self.tx.base, self.tx.next, self.rx.cum)
+        try:
+            # never guess on a protocol error: a blind resync can corrupt
+            acted, progress = self._take_ack(core, ext)
+            abandoned = self._take_abandon(rx, ext)
+            slots, n_dec, n_old, delivered = self._take_data(rx, core, ext, dup, acted)
+        except ProtocolError as e:
+            self._fail(f"protocol: {e}")
+            return True
+        if log.isEnabledFor(logging.INFO):
+            self._log_rx(rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned)
+        self.reply_lost = repeat
+        self._stale = repeat
+        self.peer_burst = core.burst_seq
+        self._answered = False
+        self._watchdog(progress or delivered)
+        return True
+
+    def _read_control(self, rx: RxBurst) -> tuple[F.Control, int] | None:
+        """The burst's control and its dup factor; falsy if lost or malformed."""
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
         paired = False
         if first is None and rx.n_cw >= 2:
@@ -676,12 +702,12 @@ class Station:
             paired = first is not None
         if first is None:
             self.policy.outcome(rx.submode, 0, 0, usable=False)
-            return False
+            return None
         try:
             core = F.Core.unpack(first)
             dup = 2 if core.ftype == F.ARQ_DUP else 1
             if paired and dup == 1:
-                return False  # combined as a pair, but not sent as one
+                return None  # combined as a pair, but not sent as one
             if dup * core.n_ctl > rx.n_cw:
                 return self._malformed(f"{core.n_ctl} control codewords x{dup} in a burst of {rx.n_cw}")
             payloads = [first]
@@ -690,14 +716,18 @@ class Station:
                 if p is None and dup == 2:
                     p = self._ctl_pair(rx, 2 * i, i)
                 if p is None:
-                    return False
+                    return None
                 payloads.append(p)
             ctl = F.Control.unpack(payloads)
         except ValueError as e:
             return self._malformed(str(e))
-        core, ext = ctl.core, ctl.ext
-        if why := self._check(core, ext, rx.n_cw - dup * core.n_ctl):
+        if why := self._check(ctl.core, ctl.ext, rx.n_cw - dup * ctl.core.n_ctl):
             return self._malformed(why)
+        return ctl, dup
+
+    def _note_peer(self, core, ext) -> tuple[tuple, bool]:
+        """Take the peer's requests and flags, and move my escalation.
+        -> (its previous recommendation and size hint, whether this burst repeats one I answered)."""
         escalated = bool(self.misses or self.reply_escalation)
         self.misses = 0
         was = (self.peer_recommend, self.peer_size_hint)
@@ -721,16 +751,16 @@ class Station:
                 self._clean += 1
                 if self._clean >= FLOOR_DECAY_TURNS:
                     self.esc_floor, self._clean = self.esc_floor - 1, 0
-        progress = False
-        base0, next0, cum0 = self.tx.base, self.tx.next, self.rx.cum
+        return was, repeat
 
-        # their ACK of my data (their cum / bitmap), acted on in my next burst
+    def _take_ack(self, core, ext) -> tuple[int, bool]:
+        """Their ACK of my data (their cum / bitmap), acted on in my next burst.
+        -> (my burst it acted on, progress). Raises ProtocolError."""
         # which of my bursts the peer acted on: its 3-bit seq, resolved in
         # [confirmed, latest], at most 8 long (build keeps it so)
         acted = [k for k in range(self._confirmed, self._latest + 1) if k % F.BURST_MOD == core.acted_on]
         if len(acted) != 1:
-            self._fail(f"protocol: acted-on {core.acted_on} outside my bursts {self._confirmed}..{self._latest}")
-            return True
+            raise ProtocolError(f"acted-on {core.acted_on} outside my bursts {self._confirmed}..{self._latest}")
         acted = acted[0]
         self._confirmed = acted
         if self._abandon is not None and acted in self._abandon_bursts:
@@ -745,31 +775,32 @@ class Station:
             # an ACK of a burst from before my pending abandon describes the
             # old slicing: past the abandon point it can't be mapped (a late
             # burst delivered old codewords there). Never guess (§4).
-            self._fail(f"protocol: ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
-            return True
-        try:
-            cum = unwrap(core.cum, self.tx.base)
-            received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
-            received = frozenset(unwrap(x, cum) for x in received)
-            progress |= self.tx.on_ack(cum, received)
-            self._acted_on = core.burst_seq
-        except ProtocolError as e:
-            self._fail(f"protocol: {e}")  # never guess: a blind resync can corrupt
-            return True
+            raise ProtocolError(f"ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
+        cum = unwrap(core.cum, self.tx.base)
+        received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
+        received = frozenset(unwrap(x, cum) for x in received)
+        progress = self.tx.on_ack(cum, received)
+        self._acted_on = core.burst_seq
+        return acted, progress
 
-        # their data
-        abandoned = F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch
-        if abandoned:
-            a = unwrap(ext[F.T_ABANDON][0], self.rx.cum)
-            if a != self.rx.cum:
-                self._fail(f"protocol: abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
-                return True
-            self._peer_epoch = ext[F.T_ABANDON][1] >> 1
-            self.rx.abandon(a)
-            # every seq from a on is re-sliced: soft bits held for any of
-            # them (the failed ones, not only the decoded ones) belong to
-            # the old codewords (scripts/phy_session.py found them combined into new ones)
-            self._forget_all(rx)
+    def _take_abandon(self, rx: RxBurst, ext) -> bool:
+        """Apply the peer's abandon if it is a new one. -> whether it was. Raises ProtocolError."""
+        if not (F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch):
+            return False
+        a = unwrap(ext[F.T_ABANDON][0], self.rx.cum)
+        if a != self.rx.cum:
+            raise ProtocolError(f"abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
+        self._peer_epoch = ext[F.T_ABANDON][1] >> 1
+        self.rx.abandon(a)
+        # every seq from a on is re-sliced: soft bits held for any of
+        # them (the failed ones, not only the decoded ones) belong to
+        # the old codewords (scripts/phy_session.py found them combined into new ones)
+        self._forget_all(rx)
+        return True
+
+    def _take_data(self, rx: RxBurst, core, ext, dup: int, acted: int) -> tuple[list, int, int, bool]:
+        """Decode and deliver their data slots.
+        -> (slots, decoded, already had, progress). Raises ProtocolError."""
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
         bits = F.unpack_flags(ext.get(F.T_COMP, b""), len(slots))
@@ -779,6 +810,7 @@ class Station:
                               if z and seq is not None and seq >= self.rx.cum}
         comp = [z or seq in self.rx.comp_seqs for (seq, _), z in zip(slots, bits)]
         self.last_rx_data = bool(slots)
+        progress = False
         n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
             if seq is None or seq < self.rx.cum:
@@ -792,38 +824,30 @@ class Station:
             if p is not None:
                 n_dec += 1
                 rx.forget(key)
-                try:
-                    progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
-                except ProtocolError as e:
-                    self._fail(f"protocol: {e}")
-                    return True
+                progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
         self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
+        return slots, n_dec, n_old, progress
 
-        if log.isEnabledFor(logging.INFO):
-            kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
-            parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw, dup == 2)}" + self._snr()]
-            if slots:
-                parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
-                             + (f", {n_old} already had" if n_old else "")
-                             + f", cum {cum0}->{self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
-            if self.tx.base != base0:
-                parts.append(f"acked {base0}->{self.tx.base}")
-            elif next0 > base0:
-                parts.append(f"acked none of {base0}-{next0 - 1}")
-            now = (self.peer_recommend, self.peer_size_hint)
-            ask = f"wants data {self._mode(now[0])} size {now[1]}"
-            if was[0] is not None and was != now:
-                ask += f" (was {self._mode(was[0])} size {was[1]})"
-            parts.append(ask + f", reply {self._mode(self.peer_reply_recommend)}")
-            flags = (["repeat (my reply lost)"] * repeat + ["abandon"] * abandoned + ["dup ctl"] * (dup == 2)
-                     + ["wants dup ctl"] * self.peer_wants_dup)
-            log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
-        self.reply_lost = repeat
-        self._stale = repeat
-        self.peer_burst = core.burst_seq
-        self._answered = False
-        self._watchdog(progress)
-        return True
+    def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):
+        base0, next0, cum0 = before
+        kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
+        parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw, dup == 2)}" + self._snr()]
+        if slots:
+            parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
+                         + (f", {n_old} already had" if n_old else "")
+                         + f", cum {cum0}->{self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
+        if self.tx.base != base0:
+            parts.append(f"acked {base0}->{self.tx.base}")
+        elif next0 > base0:
+            parts.append(f"acked none of {base0}-{next0 - 1}")
+        now = (self.peer_recommend, self.peer_size_hint)
+        ask = f"wants data {self._mode(now[0])} size {now[1]}"
+        if was[0] is not None and was != now:
+            ask += f" (was {self._mode(was[0])} size {was[1]})"
+        parts.append(ask + f", reply {self._mode(self.peer_reply_recommend)}")
+        flags = (["repeat (my reply lost)"] * repeat + ["abandon"] * abandoned + ["dup ctl"] * (dup == 2)
+                 + ["wants dup ctl"] * self.peer_wants_dup)
+        log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
 
     @staticmethod
     def _check(core, ext, n_data) -> str | None:
