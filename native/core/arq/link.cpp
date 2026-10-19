@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <tuple>
 #include <utility>
 
 namespace data2g::arq {
@@ -512,6 +513,37 @@ bool Station::handle(RxBurst& rx_) {
 }
 
 bool Station::handle_inner(RxBurst& rxb) {
+    const bool outcome = policy->has_outcome();
+    auto got = read_control(rxb, outcome);
+    if (!got) return false;
+    const auto& [ctl, dup] = *got;
+    const Core& core = ctl.core;
+    const Ext& ext = ctl.ext;
+    const auto [was, repeat] = note_peer(core, ext);
+    const std::int64_t base0 = tx.base, next0 = tx.next, cum0 = rx.cum;
+    bool progress = false, abandoned = false;
+    DataTaken data;
+    try {
+        // never guess on a protocol error: a blind resync can corrupt
+        std::int64_t acted;
+        std::tie(acted, progress) = take_ack(core, ext);
+        abandoned = take_abandon(rxb, ext);
+        data = take_data(rxb, core, ext, dup, acted, outcome);
+    } catch (const ProtocolError& e) {
+        fail(std::string("protocol: ") + e.what());
+        return true;
+    }
+    if (log_enabled(LOG, INFO)) log_rx(rxb, core, dup, data, base0, next0, cum0, was, repeat, abandoned);
+    reply_lost = repeat;
+    stale_ = repeat;
+    peer_burst = core.burst_seq;
+    answered_ = false;
+    watchdog(progress || data.progress);
+    return true;
+}
+
+// The burst's control and its dup factor; nullopt if lost or malformed.
+std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool outcome) {
     std::optional<Bytes> first = rxb.decode(0, ctl_mask(peer(), 0, key), 0, nullptr);
     bool paired = false;
     if (!first && rxb.n_cw() >= 2) {
@@ -519,35 +551,44 @@ bool Station::handle_inner(RxBurst& rxb) {
         first = ctl_pair(rxb, 0, 0);
         paired = first.has_value();
     }
-    const bool outcome = policy->has_outcome();
     if (!first) {
         if (outcome) policy->outcome(rxb.submode(), 0, 0, false);
-        return false;
+        return std::nullopt;
     }
     Core core0 = Core::unpack(*first);
     const int dup = core0.ftype == ARQ_DUP ? 2 : 1;
-    if (paired && dup == 1) return false;  // combined as a pair, but not sent as one
-    if (dup * core0.n_ctl > rxb.n_cw())
-        return malformed(format("%d control codewords x%d in a burst of %d", core0.n_ctl, dup, rxb.n_cw()));
+    if (paired && dup == 1) return std::nullopt;  // combined as a pair, but not sent as one
+    if (dup * core0.n_ctl > rxb.n_cw()) {
+        malformed(format("%d control codewords x%d in a burst of %d", core0.n_ctl, dup, rxb.n_cw()));
+        return std::nullopt;
+    }
     std::vector<Bytes> payloads{*first};
     for (int i = 1; i < core0.n_ctl; ++i) {
         auto p = rxb.decode(dup * i, ctl_mask(peer(), i, key), 0, nullptr);
         if (!p && dup == 2) p = ctl_pair(rxb, 2 * i, i);
-        if (!p) return false;
+        if (!p) return std::nullopt;
         payloads.push_back(std::move(*p));
     }
     Control ctl;
     try {
         ctl = Control::unpack(payloads);
     } catch (const std::invalid_argument& e) {
-        return malformed(e.what());
+        malformed(e.what());
+        return std::nullopt;
     }
-    const Core& core = ctl.core;
-    const Ext& ext = ctl.ext;
-    if (auto why = check(core, ext, rxb.n_cw() - dup * core.n_ctl)) return malformed(*why);
+    if (auto why = check(ctl.core, ctl.ext, rxb.n_cw() - dup * ctl.core.n_ctl)) {
+        malformed(*why);
+        return std::nullopt;
+    }
+    return std::make_pair(std::move(ctl), dup);
+}
+
+// Take the peer's requests and flags, and move my escalation.
+// -> (its previous recommendation and size hint, whether this burst repeats one I answered)
+std::pair<Station::PeerAsk, bool> Station::note_peer(const Core& core, const Ext& ext) {
     const bool escalated = misses || reply_escalation;
     misses = 0;
-    const auto was = std::make_pair(peer_recommend, peer_size_hint);
+    const PeerAsk was{peer_recommend, peer_size_hint};
     peer_recommend = core.recommend;
     peer_size_hint = core.size_hint;
     auto e_reply = ext.find(T_REPLY);
@@ -570,17 +611,18 @@ bool Station::handle_inner(RxBurst& rxb) {
             --esc_floor, clean_ = 0;
         }
     }
-    bool progress = false;
-    const std::int64_t base0 = tx.base, next0 = tx.next, cum0 = rx.cum;
+    return {was, repeat};
+}
 
+// Their ACK of my data (their cum / bitmap), acted on in my next burst.
+// -> (my burst it acted on, progress). Throws ProtocolError.
+std::pair<std::int64_t, bool> Station::take_ack(const Core& core, const Ext& ext) {
     // which of my bursts the peer acted on: its 3-bit seq, resolved in [confirmed, latest]
     std::vector<std::int64_t> acted_list;
     for (std::int64_t k = confirmed; k <= latest; ++k)
         if (pmod(k, BURST_MOD) == core.acted_on) acted_list.push_back(k);
-    if (acted_list.size() != 1) {
-        fail("protocol: acted-on " + str(core.acted_on) + " outside my bursts " + str(confirmed) + ".." + str(latest));
-        return true;
-    }
+    if (acted_list.size() != 1)
+        throw ProtocolError("acted-on " + str(core.acted_on) + " outside my bursts " + str(confirmed) + ".." + str(latest));
     const std::int64_t acted = acted_list[0];
     confirmed = acted;
     if (abandon_tlv && abandon_bursts.count(acted)) abandon_tlv.reset();  // the peer has applied it
@@ -596,37 +638,36 @@ bool Station::handle_inner(RxBurst& rxb) {
     if (abandon_tlv && !abandon_bursts.empty() && acted < *abandon_bursts.begin() && unwrap(core.cum, tx.base) > tx.base) {
         // an ACK of a burst from before my pending abandon describes the old
         // slicing: past the abandon point it can't be mapped (§4)
-        fail(format("protocol: ACK of pre-abandon burst %d past the abandon at %lld", static_cast<int>(pmod(acted, BURST_MOD)),
-                    static_cast<long long>(tx.base)));
-        return true;
+        throw ProtocolError(format("ACK of pre-abandon burst %d past the abandon at %lld", static_cast<int>(pmod(acted, BURST_MOD)),
+                                   static_cast<long long>(tx.base)));
     }
-    try {
-        const std::int64_t cum = unwrap(core.cum, tx.base);
-        std::set<std::int64_t> received;
-        if (auto b = ext.find(T_BITMAP); b != ext.end())
-            for (int x : unpack_bitmap(b->second, core.cum)) received.insert(unwrap(x, cum));
-        progress |= tx.on_ack(cum, received);
-        acted_on_ = core.burst_seq;
-    } catch (const ProtocolError& e) {
-        fail(std::string("protocol: ") + e.what());  // never guess: a blind resync can corrupt
-        return true;
-    }
+    const std::int64_t cum = unwrap(core.cum, tx.base);
+    std::set<std::int64_t> received;
+    if (auto b = ext.find(T_BITMAP); b != ext.end())
+        for (int x : unpack_bitmap(b->second, core.cum)) received.insert(unwrap(x, cum));
+    const bool progress = tx.on_ack(cum, received);
+    acted_on_ = core.burst_seq;
+    return {acted, progress};
+}
 
-    // their data
+// Apply the peer's abandon if it is a new one. -> whether it was. Throws ProtocolError.
+bool Station::take_abandon(RxBurst& rxb, const Ext& ext) {
     auto e_ab = ext.find(T_ABANDON);
-    const bool abandoned = e_ab != ext.end() && at(e_ab->second, 1) >> 1 != peer_epoch;
-    if (abandoned) {
-        const std::int64_t a = unwrap(at(e_ab->second, 0), rx.cum);
-        if (a != rx.cum) {
-            fail("protocol: abandon at " + str(a) + ", cumulative " + str(rx.cum));
-            return true;
-        }
-        peer_epoch = e_ab->second[1] >> 1;
-        rx.abandon(a);
-        forget_all(rxb);
-    }
+    if (e_ab == ext.end() || at(e_ab->second, 1) >> 1 == peer_epoch) return false;
+    const std::int64_t a = unwrap(at(e_ab->second, 0), rx.cum);
+    if (a != rx.cum) throw ProtocolError("abandon at " + str(a) + ", cumulative " + str(rx.cum));
+    peer_epoch = e_ab->second[1] >> 1;
+    rx.abandon(a);
+    forget_all(rxb);
+    return true;
+}
+
+// Decode and deliver their data slots. Throws ProtocolError.
+Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext& ext, int dup, std::int64_t acted,
+                                      bool outcome) {
+    DataTaken out;
     const int n_ctl_slots = dup * core.n_ctl;
-    const auto slots = map_slots(core, ext, rxb.n_cw() - n_ctl_slots + core.n_ctl, acted);
+    const auto& slots = out.slots = map_slots(core, ext, rxb.n_cw() - n_ctl_slots + core.n_ctl, acted);
     auto e_comp = ext.find(T_COMP);
     const auto bits = unpack_flags(e_comp == ext.end() ? ByteView{} : ByteView(e_comp->second), static_cast<int>(slots.size()));
     for (std::size_t j = static_cast<std::size_t>(core.k); j < slots.size(); ++j)
@@ -634,7 +675,7 @@ bool Station::handle_inner(RxBurst& rxb) {
     std::vector<bool> comp;
     for (std::size_t j = 0; j < slots.size(); ++j) comp.push_back(bits[j] || (slots[j].first && rx.comp_seqs.count(*slots[j].first)));
     last_rx_data = !slots.empty();
-    int n_ok = 0, n_new = 0, n_dec = 0, n_old = 0;
+    int n_ok = 0, n_new = 0;
     {
         std::vector<DecodeRequest> reqs;
         for (std::size_t j = 0; j < slots.size(); ++j) {
@@ -649,7 +690,7 @@ bool Station::handle_inner(RxBurst& rxb) {
         const int i = n_ctl_slots + static_cast<int>(j);
         const auto& [seq, rv] = slots[j];
         if (!seq || *seq < rx.cum) {
-            n_old += 1;
+            out.n_old += 1;
             continue;
         }
         const SoftKey skey{false, peer(), *seq, 0};
@@ -659,46 +700,38 @@ bool Station::handle_inner(RxBurst& rxb) {
             n_ok += p.has_value();
         }
         if (p) {
-            n_dec += 1;
+            out.n_dec += 1;
             rxb.forget(skey);
-            try {
-                progress |= rx.accept(*seq, std::move(*p), comp[j]);
-            } catch (const ProtocolError& e) {
-                fail(std::string("protocol: ") + e.what());
-                return true;
-            }
+            out.progress |= rx.accept(*seq, std::move(*p), comp[j]);
         }
     }
     if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, true);
+    return out;
+}
 
-    if (log_enabled(LOG, INFO)) {
-        const char* kind = !slots.empty() ? "data" : (core.ftype == PROBE ? "poll" : "ack");
-        std::vector<std::string> parts{std::string(kind) + " " + burst_desc(rxb.submode(), rxb.n_cw(), dup == 2) + snr()};
-        if (!slots.empty())
-            parts.push_back("resend " + str(core.k) + " + new " + str(static_cast<int>(slots.size()) - core.k) + ", decoded " +
-                            str(n_dec) + "/" + str(static_cast<int>(slots.size()) - n_old) +
-                            (n_old ? ", " + str(n_old) + " already had" : "") + ", cum " + str(cum0) + "->" + str(rx.cum) +
-                            (rx.buf.empty() ? "" : " +" + str(rx.buf.size()) + " held"));
-        if (tx.base != base0)
-            parts.push_back("acked " + str(base0) + "->" + str(tx.base));
-        else if (next0 > base0)
-            parts.push_back("acked none of " + str(base0) + "-" + str(next0 - 1));
-        const auto now = std::make_pair(peer_recommend, peer_size_hint);
-        std::string ask = "wants data " + mode(now.first) + " size " + str(now.second);
-        if (was.first && was != now) ask += " (was " + mode(was.first) + " size " + str(was.second) + ")";
-        parts.push_back(ask + ", reply " + mode(peer_reply_recommend));
-        if (repeat) parts.push_back("repeat (my reply lost)");
-        if (abandoned) parts.push_back("abandon");
-        if (dup == 2) parts.push_back("dup ctl");
-        if (peer_wants_dup) parts.push_back("wants dup ctl");
-        log_write(LOG, INFO, format("RX b%d %s", core.burst_seq, join(parts, " | ").c_str()));
-    }
-    reply_lost = repeat;
-    stale_ = repeat;
-    peer_burst = core.burst_seq;
-    answered_ = false;
-    watchdog(progress);
-    return true;
+void Station::log_rx(RxBurst& rxb, const Core& core, int dup, const DataTaken& data, std::int64_t base0, std::int64_t next0,
+                     std::int64_t cum0, const PeerAsk& was, bool repeat, bool abandoned) {
+    const auto& slots = data.slots;
+    const char* kind = !slots.empty() ? "data" : (core.ftype == PROBE ? "poll" : "ack");
+    std::vector<std::string> parts{std::string(kind) + " " + burst_desc(rxb.submode(), rxb.n_cw(), dup == 2) + snr()};
+    if (!slots.empty())
+        parts.push_back("resend " + str(core.k) + " + new " + str(static_cast<int>(slots.size()) - core.k) + ", decoded " +
+                        str(data.n_dec) + "/" + str(static_cast<int>(slots.size()) - data.n_old) +
+                        (data.n_old ? ", " + str(data.n_old) + " already had" : "") + ", cum " + str(cum0) + "->" + str(rx.cum) +
+                        (rx.buf.empty() ? "" : " +" + str(rx.buf.size()) + " held"));
+    if (tx.base != base0)
+        parts.push_back("acked " + str(base0) + "->" + str(tx.base));
+    else if (next0 > base0)
+        parts.push_back("acked none of " + str(base0) + "-" + str(next0 - 1));
+    const PeerAsk now{peer_recommend, peer_size_hint};
+    std::string ask = "wants data " + mode(now.first) + " size " + str(now.second);
+    if (was.first && was != now) ask += " (was " + mode(was.first) + " size " + str(was.second) + ")";
+    parts.push_back(ask + ", reply " + mode(peer_reply_recommend));
+    if (repeat) parts.push_back("repeat (my reply lost)");
+    if (abandoned) parts.push_back("abandon");
+    if (dup == 2) parts.push_back("dup ctl");
+    if (peer_wants_dup) parts.push_back("wants dup ctl");
+    log_write(LOG, INFO, format("RX b%d %s", core.burst_seq, join(parts, " | ").c_str()));
 }
 
 std::optional<std::string> Station::check(const Core& core, const Ext& ext, int n_data) {

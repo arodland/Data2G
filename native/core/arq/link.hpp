@@ -237,7 +237,21 @@ private:
     void log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Core& core, const Ext& ext, int dup,
                 const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
                 const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply);
+    // handle()'s phases, as link.py splits Station._handle
+    using PeerAsk = std::pair<std::optional<int>, int>;  // the peer's recommendation and size hint
+    struct DataTaken {
+        std::vector<std::pair<std::optional<std::int64_t>, int>> slots;
+        int n_dec = 0, n_old = 0;  // decoded; already had
+        bool progress = false;
+    };
     bool handle_inner(RxBurst& rx);
+    std::optional<std::pair<Control, int>> read_control(RxBurst& rx, bool outcome);
+    std::pair<PeerAsk, bool> note_peer(const Core& core, const Ext& ext);
+    std::pair<std::int64_t, bool> take_ack(const Core& core, const Ext& ext);
+    bool take_abandon(RxBurst& rx, const Ext& ext);
+    DataTaken take_data(RxBurst& rx, const Core& core, const Ext& ext, int dup, std::int64_t acted, bool outcome);
+    void log_rx(RxBurst& rx, const Core& core, int dup, const DataTaken& data, std::int64_t base0, std::int64_t next0,
+                std::int64_t cum0, const PeerAsk& was, bool repeat, bool abandoned);
     // What is wrong with a CRC-valid control, checked before any state changes.
     static std::optional<std::string> check(const Core& core, const Ext& ext, int n_data);
     bool malformed(const std::string& why);  // log, -> false: dropped like a failed control
