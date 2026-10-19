@@ -406,86 +406,22 @@ class Station:
             self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
             return self.last_sent
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
-        # escalation: my own timeouts (master), or the peer telling me my
-        # replies are lost (it repeats or polls: §6)
-        raw = max(self.misses, self.reply_escalation)
-        escalation = min(max(raw, self.esc_floor + raw - 1), MAX_ESCALATION) if raw else 0
-        self._sent_esc = escalation
+        escalation = self._sent_esc = self._escalation()
         submode, max_cw = self.policy.choose(self, escalation)
-        pb = self.policy.payload_bytes(submode)
-        # control codewords: CPM carries control in a short codeword, one per burst
-        cpb = self.policy.ctl_payload_bytes(submode)
-        max_ctl = self.policy.max_ctl(submode)
-        ext = {}
-        reset = None
-        stale, self._stale = self._stale, False
-        if not fresh:
+        if not self._data_allowed(fresh, submode):
             max_cw = 0  # control only
-        elif stale and (self.resync_due or any(c.submode != submode for c in self.tx.cws.values())):
-            # answering a repeat of the peer burst I last answered: its ACK
-            # may predate my last burst, so it may not abandon (§4). Control
-            # only until a reply to this one; the resync waits for it too.
-            max_cw = 0
-        elif self.resync_due:
-            reset, self.resync_due = 1, False
-        elif any(c.submode != submode for c in self.tx.cws.values()):
-            reset = 0  # a resend must keep its submode (§4)
-        if reset is not None:
-            a = self.tx.abandon()
-            self._abandon_epoch = (self._abandon_epoch + 1) % 128
-            self._abandon = bytes([a % SEQ_MOD, reset | self._abandon_epoch << 1])
-            self._abandon_bursts = set()
-        if self._abandon is not None:
-            # every burst carries it until the peer answers one that did: a
-            # receiver that missed it would join old and new slicing
-            ext[F.T_ABANDON] = self._abandon
-            self._abandon_bursts.add(bn)
-            if self._abandon[1] & 1:
-                ext[F.T_RESYNC] = b""
         rec, hint, reply = self.policy.recommend(self)  # what the peer should send me next (§8)
-        if reply is not None:
-            ext[F.T_REPLY] = bytes([reply])
-        if self.chat:
-            ext[F.T_CHAT] = b""
-        if self.policy.want_dup:
-            ext[F.T_DUPCTL] = b""  # the peer's next data burst: duplicate its control (ARQ_DUP)
-        if self.chat or self.peer_chat:
-            # what I have queued, so the peer's CHAT objective plans for a file
-            # rather than a chat line when there is one (informational only)
-            queued = self.new_available()
-            if queued > F.CHAT_LINE_BYTES:  # below it the peer plans for a line anyway
-                ext[F.T_BUFFER] = min(queued, 65535).to_bytes(2, "big")
+        ext = self._control_tlvs(bn, reply)
         core = F.Core(ftype=F.ARQ if fresh else F.PROBE, burst_seq=bn % F.BURST_MOD, acted_on=self._acted_on,
                       cum=self.rx.cum % SEQ_MOD, reply_lost=self.reply_lost, recommend=rec, size_hint=hint)
         self.reply_lost = False
 
-        # what this burst's ACK conveys, exactly (the snapshot must match it)
-        bitmap = F.pack_bitmap({s % SEQ_MOD for s in self.rx.buf}, core.cum)
+        # control codewords: CPM carries control in a short codeword, one per burst
+        cpb = self.policy.ctl_payload_bytes(submode)
         missing = self.tx.missing() if fresh else []
         has_new = fresh and self.new_available() > 0
-        k = min(len(missing), max(0, max_cw - 1))
-        while True:
-            e = dict(ext)
-            if bitmap:
-                e[F.T_BITMAP] = bitmap
-            # a compressed resend's T_COMP bit, if the peer may lack it, is
-            # mandatory: reserved like T_RV
-            zk = max((j + 1 for j, x in enumerate(missing[:k]) if self._comp_bit(x)), default=0)
-            n_ctl = self._ctl_size(e, cpb, k, has_new, zk)
-            # the peer asked for duplicated control: data bursts only
-            dup = 2 if (fresh and self.peer_wants_dup and (k or has_new)) else 1
-            if n_ctl <= max_ctl and dup * n_ctl + k <= max(max_cw, dup * n_ctl) and (fresh or not has_new):
-                break
-            if k:
-                k -= 1
-            elif optional := [t for t in OPTIONAL_TLVS if t in ext]:
-                del ext[optional[0]]  # hints and requests: a later burst carries them
-            elif bitmap:
-                bitmap = b""  # costs extra resends, never wrong ones
-            elif has_new:
-                has_new = False
-            else:
-                raise ValueError(f"control does not fit {submode}")
+        k, has_new, bitmap, n_ctl, dup = self._fit(ext, core.cum, missing, has_new, max_cw, submode, fresh)
+        # what this burst's ACK conveys, exactly (the snapshot must match it)
         if bitmap:
             ext[F.T_BITMAP] = bitmap
         conveyed = F.unpack_bitmap(bitmap, core.cum) if bitmap else set()
@@ -494,16 +430,11 @@ class Station:
         resend = missing[:k]
         cycle = self.policy.rv_cycle(submode)
         rvs = [self.tx.cws[x].heard % cycle for x in resend]
-        new = []
-        room = max(0, max_cw - dup * n_ctl - len(resend))
+        room = max(0, max_cw - dup * n_ctl - len(resend)) if has_new else 0
         # a new codeword is compressed only when its T_COMP bit fits the
         # control's padding: compression never costs a control codeword
         spare = n_ctl * cpb - self._ctl_bytes(ext, k, has_new, 0)
-        while has_new and len(new) < room and self.tx.next - self.tx.base < WINDOW:
-            if self.new_available() <= 0:
-                break
-            fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
-            new.append(self.tx.new_codeword(submode, pb, fits, bn))
+        new = self._new_codewords(submode, room, k, spare, bn)
         core.k = len(resend)
         if resend:
             ext[F.T_RV] = F.pack_rv(rvs)
@@ -521,43 +452,151 @@ class Station:
             ext[F.T_DRAINED] = b""
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
+
+        burst = TxBurst(submode, self._slots(ctl, dup, resend, rvs, new), self.bursts_sent, self.cap)
+        self._record(bn, burst, conveyed, resend, new)
+        if log.isEnabledFor(logging.INFO):
+            self._log_tx(bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply)
+        return burst
+
+    def _escalation(self) -> int:
+        """My own timeouts (master), or the peer telling me my replies are
+        lost (it repeats or polls: §6), climbing from the last recovery's floor."""
+        raw = max(self.misses, self.reply_escalation)
+        return min(max(raw, self.esc_floor + raw - 1), MAX_ESCALATION) if raw else 0
+
+    def _data_allowed(self, fresh: bool, submode: str) -> bool:
+        """Whether this burst may carry data codewords. Abandons the
+        outstanding ones first when a resync is due or they are in another
+        submode (§4)."""
+        stale, self._stale = self._stale, False
+        if not fresh:
+            return False
+        reslice = any(c.submode != submode for c in self.tx.cws.values())
+        if stale and (self.resync_due or reslice):
+            # answering a repeat of the peer burst I last answered: its ACK
+            # may predate my last burst, so it may not abandon (§4). Control
+            # only until a reply to this one; the resync waits for it too.
+            return False
+        if self.resync_due:
+            self.resync_due = False
+            self._start_abandon(1)
+        elif reslice:
+            self._start_abandon(0)  # a resend must keep its submode (§4)
+        return True
+
+    def _start_abandon(self, reset: int):
+        a = self.tx.abandon()
+        self._abandon_epoch = (self._abandon_epoch + 1) % 128
+        self._abandon = bytes([a % SEQ_MOD, reset | self._abandon_epoch << 1])
+        self._abandon_bursts = set()
+
+    def _control_tlvs(self, bn: int, reply: int | None) -> dict:
+        """The TLVs that do not depend on what data the burst carries."""
+        ext = {}
+        if self._abandon is not None:
+            # every burst carries it until the peer answers one that did: a
+            # receiver that missed it would join old and new slicing
+            ext[F.T_ABANDON] = self._abandon
+            self._abandon_bursts.add(bn)
+            if self._abandon[1] & 1:
+                ext[F.T_RESYNC] = b""
+        if reply is not None:
+            ext[F.T_REPLY] = bytes([reply])
+        if self.chat:
+            ext[F.T_CHAT] = b""
+        if self.policy.want_dup:
+            ext[F.T_DUPCTL] = b""  # the peer's next data burst: duplicate its control (ARQ_DUP)
+        if self.chat or self.peer_chat:
+            # what I have queued, so the peer's CHAT objective plans for a file
+            # rather than a chat line when there is one (informational only)
+            queued = self.new_available()
+            if queued > F.CHAT_LINE_BYTES:  # below it the peer plans for a line anyway
+                ext[F.T_BUFFER] = min(queued, 65535).to_bytes(2, "big")
+        return ext
+
+    def _fit(self, ext: dict, cum: int, missing: list[int], has_new: bool, max_cw: int, submode: str,
+             fresh: bool) -> tuple[int, bool, bytes, int, int]:
+        """Shrink the burst until control and resends fit: resends first,
+        then optional TLVs (deleted from `ext`), the bitmap, new data.
+        -> (resends k, has_new, bitmap, control codewords, dup factor)."""
+        cpb = self.policy.ctl_payload_bytes(submode)
+        max_ctl = self.policy.max_ctl(submode)
+        bitmap = F.pack_bitmap({s % SEQ_MOD for s in self.rx.buf}, cum)
+        k = min(len(missing), max(0, max_cw - 1))
+        while True:
+            e = dict(ext)
+            if bitmap:
+                e[F.T_BITMAP] = bitmap
+            # a compressed resend's T_COMP bit, if the peer may lack it, is
+            # mandatory: reserved like T_RV
+            zk = max((j + 1 for j, x in enumerate(missing[:k]) if self._comp_bit(x)), default=0)
+            n_ctl = self._ctl_size(e, cpb, k, has_new, zk)
+            # the peer asked for duplicated control: data bursts only
+            dup = 2 if (fresh and self.peer_wants_dup and (k or has_new)) else 1
+            if n_ctl <= max_ctl and dup * n_ctl + k <= max(max_cw, dup * n_ctl):
+                return k, has_new, bitmap, n_ctl, dup
+            if k:
+                k -= 1
+            elif optional := [t for t in OPTIONAL_TLVS if t in ext]:
+                del ext[optional[0]]  # hints and requests: a later burst carries them
+            elif bitmap:
+                bitmap = b""  # costs extra resends, never wrong ones
+            elif has_new:
+                has_new = False
+            else:
+                raise ValueError(f"control does not fit {submode}")
+
+    def _new_codewords(self, submode: str, room: int, k: int, spare: int, bn: int) -> list[Codeword]:
+        """Up to `room` new codewords; `spare` control padding bytes decide compression."""
+        pb = self.policy.payload_bytes(submode)
+        new = []
+        while len(new) < room and self.tx.next - self.tx.base < WINDOW and self.new_available() > 0:
+            fits = COMPRESS and 2 + -(-(k + len(new) + 1) // 8) <= spare
+            new.append(self.tx.new_codeword(submode, pb, fits, bn))
+        return new
+
+    def _slots(self, ctl: list[bytes], dup: int, resend: list[int], rvs: list[int], new: list[Codeword]) -> list[Slot]:
         slots = [Slot(ctl_mask(self.direction, i, self.key), rv, p) for i, p in enumerate(ctl) for rv in range(dup)]
         # every outstanding codeword was sliced in the current epoch (abandon clears them)
         ep = self._abandon_epoch
         slots += [Slot(data_mask(self.direction, x, self.key, self.tx.cws[x].comp, ep), rv, self.tx.cws[x].payload)
                   for x, rv in zip(resend, rvs)]
         slots += [Slot(data_mask(self.direction, c.seq, self.key, c.comp, ep), 0, c.payload) for c in new]
+        return slots
+
+    def _record(self, bn: int, burst: TxBurst, conveyed: frozenset, resend: list[int], new: list[Codeword]):
+        """Remember what burst `bn` conveyed and carried, for the peer's ACK of it."""
         self._snapshots[bn] = (self.rx.cum, conveyed)
         self._sent_seqs[bn] = resend + [c.seq for c in new]
         self._latest = bn
-        for old in [k for k in self._snapshots if k < self._confirmed]:
+        for old in [b for b in self._snapshots if b < self._confirmed]:
             self._snapshots.pop(old, None)
             self._sent_seqs.pop(old, None)
-        burst = TxBurst(submode, slots, self.bursts_sent, self.cap)
         self.bursts_sent += 1
         self.last_sent = burst
         self.stats["cw_new"] += len(new)
         self.stats["cw_comp"] += sum(c.comp for c in new)
         self.stats["cw_resend"] += len(resend)
-        if log.isEnabledFor(logging.INFO):
-            kind = "data" if resend or new else ("ack" if fresh else "poll")
-            parts = [f"{kind} {self._burst_desc(submode, len(slots), dup == 2)}"]
-            if resend:
-                parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
-            if new:
-                parts.append(f"new {new[0].seq}" + (f"-{new[-1].seq}" if len(new) > 1 else "")
-                             + f" {sum(c.length for c in new)} B"
-                             + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
-            if self.tx.pending():
-                parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self.new_available()} B")
-            parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
-            parts.append(f"ask data {self._mode(rec)} size {hint}, reply {self._mode(reply)}")
-            flags = [f"escalated {escalation}"] * bool(escalation) + [f"timeout {self.misses}"] * bool(self.misses)
-            if F.T_ABANDON in ext:
-                flags.append(("resync" if F.T_RESYNC in ext else "abandon") + f" at {self.tx.base}")
-            flags += ["dup ctl"] * (dup == 2) + ["reply lost"] * core.reply_lost
-            log.info("TX b%d %s", bn % F.BURST_MOD, " | ".join(parts + flags))
-        return burst
+
+    def _log_tx(self, bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply):
+        kind = "data" if resend or new else ("ack" if fresh else "poll")
+        parts = [f"{kind} {self._burst_desc(burst.submode, len(burst.slots), dup == 2)}"]
+        if resend:
+            parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
+        if new:
+            parts.append(f"new {new[0].seq}" + (f"-{new[-1].seq}" if len(new) > 1 else "")
+                         + f" {sum(c.length for c in new)} B"
+                         + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
+        if self.tx.pending():
+            parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self.new_available()} B")
+        parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
+        parts.append(f"ask data {self._mode(core.recommend)} size {hint}, reply {self._mode(reply)}")
+        flags = [f"escalated {escalation}"] * bool(escalation) + [f"timeout {self.misses}"] * bool(self.misses)
+        if F.T_ABANDON in ext:
+            flags.append(("resync" if F.T_RESYNC in ext else "abandon") + f" at {self.tx.base}")
+        flags += ["dup ctl"] * (dup == 2) + ["reply lost"] * core.reply_lost
+        log.info("TX b%d %s", bn % F.BURST_MOD, " | ".join(parts + flags))
 
     def _mode(self, rec: int | None) -> str:
         return "-" if rec is None else self.policy.mode_name(rec)
@@ -628,6 +667,32 @@ class Station:
         return ok
 
     def _handle(self, rx: RxBurst) -> bool:
+        got = self._read_control(rx)
+        if not got:
+            return False
+        ctl, dup = got
+        core, ext = ctl.core, ctl.ext
+        was, repeat = self._note_peer(core, ext)
+        before = (self.tx.base, self.tx.next, self.rx.cum)
+        try:
+            # never guess on a protocol error: a blind resync can corrupt
+            acted, progress = self._take_ack(core, ext)
+            abandoned = self._take_abandon(rx, ext)
+            slots, n_dec, n_old, delivered = self._take_data(rx, core, ext, dup, acted)
+        except ProtocolError as e:
+            self._fail(f"protocol: {e}")
+            return True
+        if log.isEnabledFor(logging.INFO):
+            self._log_rx(rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned)
+        self.reply_lost = repeat
+        self._stale = repeat
+        self.peer_burst = core.burst_seq
+        self._answered = False
+        self._watchdog(progress or delivered)
+        return True
+
+    def _read_control(self, rx: RxBurst) -> tuple[F.Control, int] | None:
+        """The burst's control and its dup factor; falsy if lost or malformed."""
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
         paired = False
         if first is None and rx.n_cw >= 2:
@@ -637,12 +702,12 @@ class Station:
             paired = first is not None
         if first is None:
             self.policy.outcome(rx.submode, 0, 0, usable=False)
-            return False
+            return None
         try:
             core = F.Core.unpack(first)
             dup = 2 if core.ftype == F.ARQ_DUP else 1
             if paired and dup == 1:
-                return False  # combined as a pair, but not sent as one
+                return None  # combined as a pair, but not sent as one
             if dup * core.n_ctl > rx.n_cw:
                 return self._malformed(f"{core.n_ctl} control codewords x{dup} in a burst of {rx.n_cw}")
             payloads = [first]
@@ -651,14 +716,18 @@ class Station:
                 if p is None and dup == 2:
                     p = self._ctl_pair(rx, 2 * i, i)
                 if p is None:
-                    return False
+                    return None
                 payloads.append(p)
             ctl = F.Control.unpack(payloads)
         except ValueError as e:
             return self._malformed(str(e))
-        core, ext = ctl.core, ctl.ext
-        if why := self._check(core, ext, rx.n_cw - dup * core.n_ctl):
+        if why := self._check(ctl.core, ctl.ext, rx.n_cw - dup * ctl.core.n_ctl):
             return self._malformed(why)
+        return ctl, dup
+
+    def _note_peer(self, core, ext) -> tuple[tuple, bool]:
+        """Take the peer's requests and flags, and move my escalation.
+        -> (its previous recommendation and size hint, whether this burst repeats one I answered)."""
         escalated = bool(self.misses or self.reply_escalation)
         self.misses = 0
         was = (self.peer_recommend, self.peer_size_hint)
@@ -682,16 +751,16 @@ class Station:
                 self._clean += 1
                 if self._clean >= FLOOR_DECAY_TURNS:
                     self.esc_floor, self._clean = self.esc_floor - 1, 0
-        progress = False
-        base0, next0, cum0 = self.tx.base, self.tx.next, self.rx.cum
+        return was, repeat
 
-        # their ACK of my data (their cum / bitmap), acted on in my next burst
+    def _take_ack(self, core, ext) -> tuple[int, bool]:
+        """Their ACK of my data (their cum / bitmap), acted on in my next burst.
+        -> (my burst it acted on, progress). Raises ProtocolError."""
         # which of my bursts the peer acted on: its 3-bit seq, resolved in
         # [confirmed, latest], at most 8 long (build keeps it so)
         acted = [k for k in range(self._confirmed, self._latest + 1) if k % F.BURST_MOD == core.acted_on]
         if len(acted) != 1:
-            self._fail(f"protocol: acted-on {core.acted_on} outside my bursts {self._confirmed}..{self._latest}")
-            return True
+            raise ProtocolError(f"acted-on {core.acted_on} outside my bursts {self._confirmed}..{self._latest}")
         acted = acted[0]
         self._confirmed = acted
         if self._abandon is not None and acted in self._abandon_bursts:
@@ -706,31 +775,32 @@ class Station:
             # an ACK of a burst from before my pending abandon describes the
             # old slicing: past the abandon point it can't be mapped (a late
             # burst delivered old codewords there). Never guess (§4).
-            self._fail(f"protocol: ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
-            return True
-        try:
-            cum = unwrap(core.cum, self.tx.base)
-            received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
-            received = frozenset(unwrap(x, cum) for x in received)
-            progress |= self.tx.on_ack(cum, received)
-            self._acted_on = core.burst_seq
-        except ProtocolError as e:
-            self._fail(f"protocol: {e}")  # never guess: a blind resync can corrupt
-            return True
+            raise ProtocolError(f"ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
+        cum = unwrap(core.cum, self.tx.base)
+        received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
+        received = frozenset(unwrap(x, cum) for x in received)
+        progress = self.tx.on_ack(cum, received)
+        self._acted_on = core.burst_seq
+        return acted, progress
 
-        # their data
-        abandoned = F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch
-        if abandoned:
-            a = unwrap(ext[F.T_ABANDON][0], self.rx.cum)
-            if a != self.rx.cum:
-                self._fail(f"protocol: abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
-                return True
-            self._peer_epoch = ext[F.T_ABANDON][1] >> 1
-            self.rx.abandon(a)
-            # every seq from a on is re-sliced: soft bits held for any of
-            # them (the failed ones, not only the decoded ones) belong to
-            # the old codewords (scripts/phy_session.py found them combined into new ones)
-            self._forget_all(rx)
+    def _take_abandon(self, rx: RxBurst, ext) -> bool:
+        """Apply the peer's abandon if it is a new one. -> whether it was. Raises ProtocolError."""
+        if not (F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch):
+            return False
+        a = unwrap(ext[F.T_ABANDON][0], self.rx.cum)
+        if a != self.rx.cum:
+            raise ProtocolError(f"abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
+        self._peer_epoch = ext[F.T_ABANDON][1] >> 1
+        self.rx.abandon(a)
+        # every seq from a on is re-sliced: soft bits held for any of
+        # them (the failed ones, not only the decoded ones) belong to
+        # the old codewords (scripts/phy_session.py found them combined into new ones)
+        self._forget_all(rx)
+        return True
+
+    def _take_data(self, rx: RxBurst, core, ext, dup: int, acted: int) -> tuple[list, int, int, bool]:
+        """Decode and deliver their data slots.
+        -> (slots, decoded, already had, progress). Raises ProtocolError."""
         n_ctl_slots = dup * core.n_ctl
         slots = self._map(core, ext, rx.n_cw - n_ctl_slots + core.n_ctl, acted)
         bits = F.unpack_flags(ext.get(F.T_COMP, b""), len(slots))
@@ -740,6 +810,7 @@ class Station:
                               if z and seq is not None and seq >= self.rx.cum}
         comp = [z or seq in self.rx.comp_seqs for (seq, _), z in zip(slots, bits)]
         self.last_rx_data = bool(slots)
+        progress = False
         n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
             if seq is None or seq < self.rx.cum:
@@ -753,38 +824,30 @@ class Station:
             if p is not None:
                 n_dec += 1
                 rx.forget(key)
-                try:
-                    progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
-                except ProtocolError as e:
-                    self._fail(f"protocol: {e}")
-                    return True
+                progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
         self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
+        return slots, n_dec, n_old, progress
 
-        if log.isEnabledFor(logging.INFO):
-            kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
-            parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw, dup == 2)}" + self._snr()]
-            if slots:
-                parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
-                             + (f", {n_old} already had" if n_old else "")
-                             + f", cum {cum0}->{self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
-            if self.tx.base != base0:
-                parts.append(f"acked {base0}->{self.tx.base}")
-            elif next0 > base0:
-                parts.append(f"acked none of {base0}-{next0 - 1}")
-            now = (self.peer_recommend, self.peer_size_hint)
-            ask = f"wants data {self._mode(now[0])} size {now[1]}"
-            if was[0] is not None and was != now:
-                ask += f" (was {self._mode(was[0])} size {was[1]})"
-            parts.append(ask + f", reply {self._mode(self.peer_reply_recommend)}")
-            flags = (["repeat (my reply lost)"] * repeat + ["abandon"] * abandoned + ["dup ctl"] * (dup == 2)
-                     + ["wants dup ctl"] * self.peer_wants_dup)
-            log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
-        self.reply_lost = repeat
-        self._stale = repeat
-        self.peer_burst = core.burst_seq
-        self._answered = False
-        self._watchdog(progress)
-        return True
+    def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):
+        base0, next0, cum0 = before
+        kind = "data" if slots else ("poll" if core.ftype == F.PROBE else "ack")
+        parts = [f"{kind} {self._burst_desc(rx.submode, rx.n_cw, dup == 2)}" + self._snr()]
+        if slots:
+            parts.append(f"resend {core.k} + new {len(slots) - core.k}, decoded {n_dec}/{len(slots) - n_old}"
+                         + (f", {n_old} already had" if n_old else "")
+                         + f", cum {cum0}->{self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
+        if self.tx.base != base0:
+            parts.append(f"acked {base0}->{self.tx.base}")
+        elif next0 > base0:
+            parts.append(f"acked none of {base0}-{next0 - 1}")
+        now = (self.peer_recommend, self.peer_size_hint)
+        ask = f"wants data {self._mode(now[0])} size {now[1]}"
+        if was[0] is not None and was != now:
+            ask += f" (was {self._mode(was[0])} size {was[1]})"
+        parts.append(ask + f", reply {self._mode(self.peer_reply_recommend)}")
+        flags = (["repeat (my reply lost)"] * repeat + ["abandon"] * abandoned + ["dup ctl"] * (dup == 2)
+                 + ["wants dup ctl"] * self.peer_wants_dup)
+        log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
 
     @staticmethod
     def _check(core, ext, n_data) -> str | None:
