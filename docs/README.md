@@ -14,6 +14,7 @@ at the time, with names that may since have moved.
 | [native-port-plan.md](native-port-plan.md) | Plan (history) | The C++ / Qt port, phase by phase. Its threads, frozen-data and conventions sections still hold. |
 | [modem73-ideas-plan.md](modem73-ideas-plan.md) | Plan (history) | Ideas taken from modem73 and aicodix/modem: the blanker, KISS channel access, studies. |
 | [interference-plan.md](interference-plan.md) | Plan (history) | Interference in the session simulator, and how the outcome model should account for it, with results. |
+| [bicm-id-study.md](bicm-id-study.md) | Study (shelved) | Iterative demapping: up to 0.6 dB on the learned 64/256-point modes, not worth its CPU for now. |
 
 Elsewhere: [native/README.md](../native/README.md) (the port's layout),
 [data2g/codes_data/README.md](../data2g/codes_data/README.md) (committed
