@@ -6,10 +6,12 @@
 set -e
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 BASE=${BASE:-$HERE/../Data2G-base}
-MODES=$(cd "$HERE" && uv run --no-sync python -c "from data2g.arq.modes import MODES; print(' '.join(m for m in MODES if not m.startswith('fsk')))")
+PY=${PY:-python}  # the project's venv python (a worktree has no .venv of its own)
+JOBS=${JOBS:-2}  # pool workers per tree; both trees run at once
+MODES=$(cd "$HERE" && "$PY" -c "from data2g.arq.modes import MODES; print(' '.join(m for m in MODES if not m.startswith('fsk')))")
 run() {  # tree out
-    (cd "$1" && uv run --no-sync --project "$HERE" python tools/with_native.py --dd-budget inf scripts/ladder_study.py \
-        --fail 0.1 --jobs 2 --seed 0 --start "$HERE/runs/ladder_dd_10pct.csv" --modes $MODES --out "$2")
+    (cd "$1" && "$PY" tools/with_native.py --dd-budget inf scripts/ladder_study.py \
+        --fail 0.1 --jobs "$JOBS" --seed 0 --start "$HERE/runs/ladder_dd_10pct.csv" --modes $MODES --out "$2")
 }
 run "$BASE" "$HERE/runs/support_ladder_base.csv" > "$HERE/runs/support_ladder_base.log" 2>&1 &
 run "$HERE" "$HERE/runs/support_ladder_new.csv" > "$HERE/runs/support_ladder_new.log" 2>&1
