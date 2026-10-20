@@ -20,7 +20,7 @@ There is also an experimental option to detect connected-mode AX.25 over KISS an
 
 ## Monitorable
 
-The spec is open, and Data2G comes with a built-in monitor mode that shows all decoded packets, with session reconstruction, and sender and receiver callsigns if you've heard the CONNECT or ID bursts.
+The spec is open, and Data2G comes with a built-in monitor mode that shows all decoded packets, with session reconstruction, and sender and receiver callsigns if you've heard the CONNECT or ID bursts. In the GUI, monitoring is a switch that runs whether or not the monitor window is open, and it includes your own transmissions (in their own color), so both sides of your sessions are followed.
 
 ## Modern Techniques
 

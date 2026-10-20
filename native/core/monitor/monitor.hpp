@@ -10,6 +10,10 @@
 // receiver would: resends mapped from the other side's last ACK, each
 // direction's codewords reassembled in seq order and inflated, so the dump
 // shows the host bytes. A burst no mask fits is dumped raw, unverified.
+//
+// A station that monitors while it works also shows the monitor its own
+// bursts as it sends them (sent()), read from their payloads rather than
+// heard: our side of a session is followed like any other.
 #pragma once
 
 #include <cstdint>
@@ -41,6 +45,7 @@ struct Payload {
 struct Dump {
     std::string head;  // lines, each ending in '\n'
     std::vector<Payload> payloads;
+    bool tx = false;  // ours, sent (Monitor::sent), not heard
 };
 
 // Non-printables as <AB>, unknown bytes as <??>; a line break follows each <0A>.
@@ -56,6 +61,8 @@ public:
     // A burst the engine heard (BurstHeard::heard set unless lost). `when`
     // starts the first line: the caller's clock.
     Dump burst(const arq::BurstHeard& b, const std::string& when);
+    // A burst we transmitted (Engine::set_on_send), as it goes out.
+    Dump sent(const arq::TxBurst& b, const std::string& when);
 
     // Its own receiver, for the CLI: audio at FS -> the bursts it completes,
     // as (engine time s, dump). when(t) stamps each.
@@ -94,10 +101,11 @@ private:
 
     std::string who(int key, int direction) const;
     void learn(int key, const std::string& caller = {}, const std::string& callee = {}, const std::string& id = {});
-    bool broadcast(arq::ModemRx& rx, Dump& d);
-    bool keyed(arq::ModemRx& rx, Dump& d);
+    void read(arq::PlainRx& rx, Dump& d);
+    bool broadcast(arq::PlainRx& rx, Dump& d);
+    bool keyed(arq::PlainRx& rx, Dump& d);
     void session_frame(const Bytes& body, int key, int direction, Dump& d);
-    void arq_burst(arq::ModemRx& rx, const arq::Control& ctl, int key, int direction, int dup, Dump& d);
+    void arq_burst(arq::PlainRx& rx, const arq::Control& ctl, int key, int direction, int dup, Dump& d);
     void start(Side& s, std::int64_t cum);
     void forget(Side& s);  // history and framing lost: a gap, or a stream joined late
     void take(Side& s, const Bytes& plain, const std::vector<bool>& unknown);  // a codeword's stream bytes, in order

@@ -5,6 +5,7 @@
 // Saves a screenshot to DATA2G_GUI_SHOT.
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QSlider>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -15,6 +16,8 @@
 #include <QTableWidget>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTextBlock>
+#include <QTextDocument>
 #include <QTemporaryDir>
 #include <QThread>
 
@@ -225,11 +228,15 @@ void test_window(const QTemporaryDir& dir) {
     check::equal(link->text().toStdString(), std::string("idle"), "link idle at start");
     auto* dial = w.findChild<QLabel*>(QStringLiteral("dial"));
     check::is_true(dial && dial->isHidden(), "no dial frequency unless the rig is polled");
-    w.open_monitor();  // before the CQ arrives (after a second of silence)
+    // monitoring on before the CQ arrives (after a second of silence), its window still closed
+    auto* monitoring = w.findChild<QCheckBox*>(QStringLiteral("monitoring"));
     auto* monitor = w.findChild<QPlainTextEdit*>(QStringLiteral("monitor_text"));
     auto* monitor_format = w.findChild<QComboBox*>(QStringLiteral("monitor_format"));
-    check::is_true(monitor && monitor_format && monitor->isVisible(), "monitor window open");
-    if (!(monitor && monitor_format)) return;
+    check::is_true(monitoring && !monitoring->isChecked(), "monitoring off at first");
+    check::is_true(monitor && monitor_format && !monitor->isVisible(), "monitor window closed");
+    if (!(monitoring && monitor && monitor_format)) return;
+    monitoring->setChecked(true);
+    check::is_true(store.value(QStringLiteral("gui/monitoring")).toBool(), "monitoring saved");
 
     check::current_step = "window: VARA client";
     QTcpSocket client;
@@ -289,7 +296,10 @@ void test_window(const QTemporaryDir& dir) {
         check::is_true(near > plot.symbols.size() * 9 / 10, "symbols land on the constellation");
     }
     check::is_true(wait_for([&] { return monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")); }, 5000),
-                   "the monitor dumped the CQ");
+                   "the monitor dumped the CQ, its window closed");
+    w.open_monitor();
+    check::is_true(monitor->isVisible() && monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")),
+                   "opened, the CQ in its scrollback");
     monitor_format->setCurrentIndex(1);
     check::is_true(monitor->toPlainText().contains(QStringLiteral("CQ N0CQ bw 2")), "re-rendered as hex, the CQ kept");
     QByteArray said;
@@ -319,6 +329,20 @@ void test_window(const QTemporaryDir& dir) {
         30000);
     check::is_true(sent, "PTT up for our CQ, then down");
     check::is_true(tapped_tx, "the waterfall was fed our TX audio while keyed");
+    monitor_format->setCurrentIndex(0);
+    check::is_true(wait_for([&] { return monitor->toPlainText().contains(QStringLiteral("CQ N0GUI bw 0")); }, 5000),
+                   "the monitor dumped our CQ");
+    {
+        // ours in a colour of its own, what was heard in the view's
+        const auto colour = [&](const QString& line) {
+            for (QTextBlock b = monitor->document()->begin(); b.isValid(); b = b.next())
+                if (b.text().contains(line)) return b.charFormat().foreground().color();
+            return QColor();
+        };
+        const QColor ours = colour(QStringLiteral("CQ N0GUI bw 0")), theirs = colour(QStringLiteral("CQ N0CQ bw 2"));
+        check::is_true(ours.isValid() && ours != theirs, "our CQ in a colour of its own");
+        check::is_true(monitor->toPlainText().contains(QStringLiteral(" TX ")), "marked TX");
+    }
 
     check::current_step = "window: screenshot";
     check::is_true(w.grab().save(QStringLiteral(DATA2G_GUI_SHOT)), "screenshot saved");

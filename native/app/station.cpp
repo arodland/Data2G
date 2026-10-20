@@ -10,6 +10,7 @@
 #include <ctime>
 #include <functional>
 #include <utility>
+#include <variant>
 
 #include "arq/engine.hpp"
 #ifdef __linux__
@@ -64,13 +65,14 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 
 }  // namespace
 
-// The monitor window's decoder: bursts from the session stage, dumped on a
-// thread of its own so its decodes never delay the session's.
+// The monitor's decoder: bursts heard and sent, from the session stage, in
+// order, dumped on a thread of its own so its decodes never delay the session's.
 struct Station::MonitorThread {
+    using Burst = std::variant<arq::BurstHeard, arq::TxBurstPtr>;
     monitor::Monitor m;
     std::mutex mu;
     std::condition_variable cv;
-    std::deque<std::pair<arq::BurstHeard, std::string>> in;
+    std::deque<std::pair<Burst, std::string>> in;
     std::deque<monitor::Dump> out;
     bool stop = false;
     std::thread thread{[this] { run(); }};  // last: everything above is ready
@@ -83,7 +85,7 @@ struct Station::MonitorThread {
         cv.notify_one();
         thread.join();
     }
-    void push(const arq::BurstHeard& b) {
+    void push(Burst b) {
         const auto now = std::chrono::system_clock::now();
         const std::time_t t = std::chrono::system_clock::to_time_t(now);
         const std::tm tm = local_tm(t);
@@ -91,7 +93,7 @@ struct Station::MonitorThread {
         std::strftime(when, sizeof when, "%H:%M:%S", &tm);
         std::lock_guard lock(mu);
         if (in.size() >= MAX_BURSTS) return;  // ponytail: a decoder this far behind loses bursts (shown as gaps)
-        in.emplace_back(b, when);
+        in.emplace_back(std::move(b), when);
         cv.notify_one();
     }
     void run() {
@@ -102,7 +104,8 @@ struct Station::MonitorThread {
             auto [b, when] = std::move(in.front());
             in.pop_front();
             lock.unlock();
-            monitor::Dump d = m.burst(b, when);
+            monitor::Dump d = std::holds_alternative<arq::TxBurstPtr>(b) ? m.sent(*std::get<arq::TxBurstPtr>(b), when)
+                                                                          : m.burst(std::get<arq::BurstHeard>(b), when);
             lock.lock();
             out.push_back(std::move(d));
             if (out.size() > MAX_BURSTS) out.pop_front();
@@ -450,6 +453,9 @@ void Station::start() {
             live_.reset();
             reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};
             if (b.lost) log_burst();  // else once read (on_decoded)
+            if (monitor_on_) monitor_->push(b);
+        });
+        engine_->set_on_send([this](const arq::TxBurstPtr& b) {
             if (monitor_on_) monitor_->push(b);
         });
         engine_->set_on_decoded([this](int decoded, int failed) {

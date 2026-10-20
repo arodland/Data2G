@@ -923,6 +923,7 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
         for (double v : x) peak = std::max(peak, std::fabs(v));
         for (double v : x) tx.audio.push_back(v / peak);
         lens.push_back(x.size());
+        if (on_send_) on_send_(b);
     }
     if (rec_) {
         // one event per burst, at its own start: the first's seconds include

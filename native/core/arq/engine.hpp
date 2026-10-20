@@ -209,6 +209,9 @@ public:
     void set_after_block(std::function<void(bool ptt)> f) { after_block_ = std::move(f); }
     // Every burst heard, on the session stage. Set it before the first step().
     void set_on_burst(std::function<void(const BurstHeard&)> f) { on_burst_ = std::move(f); }
+    // Every burst we transmit (ARQ, ID, KISS), on the session stage as it is keyed, in the order sent:
+    // a monitor's view of our own side. Set it before the first step().
+    void set_on_send(std::function<void(const TxBurstPtr&)> f) { on_send_ = std::move(f); }
     // After a heard (not lost) burst's on_burst, once it has been read: its slots decoded, and tried but not.
     void set_on_decoded(std::function<void(int decoded, int failed)> f) { on_decoded_ = std::move(f); }
     // Called on the receiving thread (step's) as a burst arrives, while set_preview(true): a few
@@ -339,6 +342,7 @@ private:
     int rx_cap() const;  // the bandwidth cap a heard burst's TX filter was most likely for
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
+    std::function<void(const TxBurstPtr&)> on_send_;
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
     std::atomic<bool> preview_on_{false};
