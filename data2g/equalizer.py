@@ -83,12 +83,21 @@ def delay_profile(h_pilot: np.ndarray, bb: np.ndarray = BB_FREQS) -> np.ndarray:
     return np.mean(np.abs(g) ** 2, axis=0)
 
 
-def delay_support(h_pilot: np.ndarray, floor_db: float = -15.0, bb: np.ndarray = BB_FREQS) -> tuple[int, int]:
+def delay_support(h_pilot: np.ndarray, floor_db: float = -15.0, bb: np.ndarray = BB_FREQS,
+                  n0: float = np.inf) -> tuple[int, int]:
     """(first, last) delay in samples holding power within `floor_db` of
     the strongest, as local maxima of the profile (a lone path's
-    mainlobe is ~10 samples wide and must not read as spread)."""
+    mainlobe is ~10 samples wide and must not read as spread). Given the
+    thermal noise `n0` (per carrier), a peak must also clear the profile's
+    noise floor (n0 sum(w^2), w the profile's taper) by SUPPORT_NOISE_Z
+    sigma: a bin's noise is gamma(n_p)/n_p over n_p pilots, its quantile
+    by Wilson-Hilferty (within 0.6% of scipy's from 5 pilots)."""
     p = delay_profile(h_pilot, bb)
     thr = p.max() * 10 ** (floor_db / 10)
+    if np.isfinite(n0) and SUPPORT_NOISE_Z:
+        c = 1 / (9 * len(h_pilot))
+        w = np.hanning(len(bb) + 2)[1:-1]
+        thr = max(thr, n0 * float(np.sum(w**2)) * (1 - c + SUPPORT_NOISE_Z * np.sqrt(c)) ** 3)
     peaks = [
         i for i in range(1, len(p) - 1)
         if p[i] >= thr and p[i] >= p[i - 1] and p[i] >= p[i + 1]
@@ -113,6 +122,11 @@ def window_shift(support: tuple[int, int]) -> int:
     return int(round((support[0] + support[1] - NCP) / 2))
 
 
+# delay_support's noise gate: at a per-carrier SNR near 0 dB the profile's
+# noise floor is ~10 dB under a lone path, above the -15 dB floor, so noise
+# peaks spread an AWGN support over the whole delay window (rank 20 of 24
+# on w at -5.5 dB). The gate's quantile in sigmas (3.09: 0.999); 0: off.
+SUPPORT_NOISE_Z = 3.09
 SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see freq_smooth
 # The padded order support_slack may pick for a burst's data estimate: past
 # a narrow band's delay resolution (16 samples on n10), so a second path the

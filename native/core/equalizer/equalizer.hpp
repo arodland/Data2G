@@ -33,6 +33,7 @@ inline constexpr std::array<double, 12> SPREAD_GRID = {0.02, 0.05, 0.1, 0.2, 0.3
 inline constexpr bool PER_CARRIER_NOISE = true;
 inline constexpr double NOISE_SHAPE_PRIOR = 8.0;
 inline constexpr int PREAMBLE_DIFFS = 7;  // preamble_noise_k's samples: the default 8 repeats' differences
+inline constexpr double SUPPORT_NOISE_Z = 3.09;  // delay_support's noise gate, sigmas; 0: off
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
 inline constexpr int PADDED_SLACK = 20;  // support_slack's padded order
 inline constexpr double PADDED_GAIN = 2.0;
@@ -43,7 +44,9 @@ std::vector<double> bb(const config::Band& band);
 
 double residual_cfo(const Mat<cd>& h_pilot);
 std::vector<double> delay_profile(const Mat<cd>& h_pilot, std::span<const double> bb);
-Support delay_support(const Mat<cd>& h_pilot, std::span<const double> bb, double floor_db = -15.0);
+// n0: the thermal noise per carrier, for the noise gate (INF: none).
+Support delay_support(const Mat<cd>& h_pilot, std::span<const double> bb, double floor_db = -15.0,
+                      double n0 = INF);
 int window_shift(Support support);
 
 // _support_basis: an orthonormal basis U (nc x r) of the support's delays

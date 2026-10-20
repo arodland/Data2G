@@ -1035,10 +1035,15 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     const double cfo_res = resolve_alias(fine, coarse);
     z = waveform::freq_correct(z, cfo_res);
     const auto bbd = bb_of(db);
-    auto support = equalizer::delay_support(demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips).hp, bbd);
-    const int shift = equalizer::window_shift(support);
+    // the window and the reported delay on the support as before the noise
+    // gate (the gear shifter was trained on it); the estimate on the gated one
+    const auto hp0 = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips).hp;
+    auto seen = equalizer::delay_support(hp0, bbd);
+    auto support = equalizer::delay_support(hp0, bbd, -15.0, hd.n0_pre);
+    const int shift = equalizer::window_shift(seen);
     auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips);
     support = {support.first - shift, support.second - shift};
+    seen = {seen.first - shift, seen.second - shift};
     const auto clip = clip_consts(spec);
     Received out;
     out.est = data_channel(fr.hp, support, db, hd.n0_pre, &clip, db == sband ? std::span<const double>(hd.n0_pre_k)
@@ -1068,6 +1073,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     out.slips = slips;
     out.phi_ref = phi_ref;
     out.support = support;
+    out.seen_support = seen;
     out.preamble_start = hd.start;
     out.score = hd.hdr.score;
     return out;

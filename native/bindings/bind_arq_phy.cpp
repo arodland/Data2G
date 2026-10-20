@@ -67,6 +67,8 @@ Heard heard_of(const py::dict& r) {
     if (r.contains("kc") && !r["kc"].is_none()) o->kc = r["kc"].cast<int>();
     const auto sup = r["support"].cast<py::sequence>();
     o->support = {sup[0].cast<int>(), sup[1].cast<int>()};
+    const auto seen = (r.contains("seen_support") ? r["seen_support"] : r["support"]).cast<py::sequence>();
+    o->seen_support = {seen[0].cast<int>(), seen[1].cast<int>()};
     h.ofdm = std::move(o);
     return h;
 }

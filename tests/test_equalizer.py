@@ -115,3 +115,20 @@ def test_support_order_stays_tight_on_a_flat_channel_in_noise():
         sup = equalizer.delay_support(hp, bb=bb)
         picks.append(equalizer.support_slack(hp, sup, bb, n0_pre=3.0))
     assert picks.count(equalizer.SUPPORT_SLACK) >= 49
+
+
+def test_delay_support_noise_gate_keeps_a_lone_path_narrow():
+    """One path at -3 dB per carrier: the profile's noise floor is ~10 dB
+    under it, so ungated noise peaks spread the support; gated on n0 it
+    stays on the path."""
+    from data2g import equalizer
+
+    wide, narrow = [], []
+    for seed in range(20):
+        _, hp, bb = _two_path_pilots(seed, 2.0, late=0.0)
+        d0, d1 = equalizer.delay_support(hp, bb=bb)
+        g0, g1 = equalizer.delay_support(hp, bb=bb, n0=2.0)
+        wide.append(d1 - d0)
+        narrow.append(g1 - g0)
+    assert np.median(wide) > 40
+    assert max(narrow) <= 8

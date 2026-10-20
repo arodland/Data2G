@@ -62,7 +62,19 @@ points, no DD, so a few tenths off mode_thresholds.json):
   0-0.75 dB on awgn and mpg~ everywhere; on mpp~/mpd~ the low-rate modes
   lose most: qpsk-r1/5 1.69/1.88, w48-qpsk-r1/5 1.69/1.88, n4-qpsk-r1/3
   1.50/1.69, n10-qpsk-r1/5 1.12/0.75, qpsk-r1/3 1.50/0.56; rate 1/2 and up
-  0-0.75; the polar ACKs 0-0.75.
+  0-0.75; the polar ACKs 0-0.75. DD (/dd) recovers 0-0.75 of it; left
+  with DD on mpp~/mpd~: qpsk-r1/5 1.50/1.12, w48-qpsk-r1/5 1.50/1.50,
+  n4-qpsk-r1/3 1.12/1.69, n4-qpsk-r1/2 1.50/never.
+- Most of that was the delay support reading noise peaks as paths: within
+  -15 dB of the strongest, but near 0 dB per carrier the profile's noise
+  floor is ~10 dB under a lone path (w, awgn -5.5 dB: support ~100
+  samples, rank 20 of 24). delay_support's noise gate (SUPPORT_NOISE_Z,
+  runs/support_gate.sh, with DD, paired): qpsk-r1/5 -0.56/-0.56/-1.12/
+  -0.75 dB (awgn/mpg~/mpp~/mpd~), w48-qpsk-r1/5 -0.56/-0.75/-1.31/-1.12,
+  qpsk-r1/3 mpg~ -0.94, n10 and n4 up to -0.75; one cell +0.19 (n10-16qam
+  -r1/3 mpg~, one step); rate 1/2 and up on w/w48 unchanged. Left against
+  the genie (no DD there): n4-qpsk-r1/3 mpp~/mpd~ 1.12/1.69, n4-qpsk-r1/2
+  mpp~ 0.94, the rest 0.75 or less. TIME_TAPS 8 (/t8) on top: nothing.
 - DFT-spread against the better OFDM arm: awgn -0.6 to -1.35 dB PEP-fair
   (2.4-5 dB less clip noise at a headroom, so it clips harder), n10 mpg
   -0.2 to -0.8; but mpp 0 to +2 dB worse, w48 mpg +0.2 to +3, mpd worse or
@@ -118,7 +130,9 @@ def parse_arm(arm: str, spec) -> tuple[bool, float]:
     """'ofdm' (the shipped mode), 'ofdm@H' (its headroom H, ACE as shipped),
     'dfts' (the mode's headroom) or 'dfts@H' -> (dft-spread, headroom). A
     '/sN' suffix (receiver only) is use_slack's; '/genie' decodes on the
-    true channel (true_channel), the sync and the noise estimate as shipped."""
+    true channel (true_channel), the sync and the noise estimate as shipped;
+    '/dd' (ofdm only, last) decodes through arq.phy.ModemRx, DD unbudgeted;
+    '/q0' turns delay_support's noise gate off, '/tN' sets TIME_TAPS N."""
     kind, _, h = arm.split("/")[0].partition("@")
     return kind == "dfts", float(h) if h else spec.headroom
 
@@ -136,6 +150,15 @@ def use_slack(arm: str) -> None:
         equalizer._support_basis.cache_clear()
 
 
+def use_rx(arm: str) -> None:
+    """The arm's other receiver knobs: '/q0' (SUPPORT_NOISE_Z off) and '/tN' (TIME_TAPS)."""
+    opts = arm.split("/")[1:]
+    equalizer.SUPPORT_NOISE_Z = 0.0 if "q0" in opts else SHIPPED_Z
+    equalizer.TIME_TAPS = next((int(o[1:]) for o in opts if o[:1] == "t" and o[1:].isdigit()), SHIPPED_TAPS)
+
+
+SHIPPED_Z = equalizer.SUPPORT_NOISE_Z
+SHIPPED_TAPS = equalizer.TIME_TAPS
 SHIPPED_SLACK = equalizer.SUPPORT_SLACK
 SHIPPED_PADDED = equalizer.PADDED_SLACK
 SHIPPED_ESTIMATE = equalizer.estimate
@@ -295,8 +318,10 @@ def trial(args) -> int:
     spec = SUBMODES[name]
     dfts, hr = parse_arm(arm, spec)
     use_slack("")  # clip constants on the shipped estimator, as clip_constants.py
+    use_rx("")
     gain, ratio, _ = consts(name, dfts, hr)
     use_slack(arm)
+    use_rx(arm)
     n_cw = n_codewords(spec)
     rng = np.random.default_rng(seed)
     payloads, bits = make_burst(spec, n_cw, rng)
@@ -311,6 +336,11 @@ def trial(args) -> int:
         return n_cw
     if r["spec"].name != name or r["n_cw"] != n_cw:
         return n_cw
+    if arm.endswith("/dd"):  # the ARQ's receiver: DD unbudgeted, its own clip constants
+        from data2g.arq import phy
+
+        rx = phy.ModemRx(r, {})
+        return sum(p not in rx.raw(i) for i, p in enumerate(payloads))
     h_true = true_channel(r, spec, x, lead, kw) if arm.endswith("/genie") else None
     got = codes.decode_many(spec, soft(r, spec, dfts, gain, ratio, h_true))
     return sum(not (ok and p == q) for (p, ok), q in zip(got, payloads))

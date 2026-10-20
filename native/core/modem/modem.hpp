@@ -197,7 +197,8 @@ struct Received {
     std::vector<double> steps;
     std::vector<std::int64_t> slips;  // Frames::slips
     double phi_ref = 0.0;
-    equalizer::Support support;
+    equalizer::Support support;  // the estimate's (noise-gated), after the shift
+    equalizer::Support seen_support;  // ungated: the window shift's, the reported delay's
     std::int64_t preamble_start = 0;
     double score = 0.0;
 };

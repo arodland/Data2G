@@ -147,6 +147,7 @@ def same_received(n, r):
         assert n[k] == r[k], k
     assert n["spec"] == r["spec"].name
     assert tuple(n["support"]) == tuple(r["support"])
+    assert tuple(n["seen_support"]) == tuple(r["seen_support"])
     np.testing.assert_array_equal(n["steps"], r["steps"])
     s, f, metric, alts = n["acq"]
     assert (s, [a[0] for a in alts]) == (r["acq"].preamble_start, [a[0] for a in r["acq"].alternatives])
