@@ -20,7 +20,7 @@ each outer iteration; the decoder restarts each pass. Runs with the same
 seed share codewords and noise, so `--outer 0 --inner N*(outer+1)` is a
 paired control: same decoder work, no feedback.
 
-Found (2026-10-20). EXIT (I_E at I_A = 0 -> 1): gray-qam16 r1/2
+Shelved (docs/bicm-id-study.md). Found (2026-10-20). EXIT (I_E at I_A = 0 -> 1): gray-qam16 r1/2
 0.499 -> 0.518; c64-w48-r12 0.496 -> 0.551; c64-w48-r712 0.580 -> 0.620;
 c64-w48-r23 0.663 -> 0.691; c64-w48-r34 0.748 -> 0.763; c256-w48-r58
 0.625 -> 0.671. The learned sets, trained for BMI through the clipper,
