@@ -43,9 +43,9 @@ void bind_equalizer(py::module_& m) {
     e.def("delay_profile", [](const In<cd>& h, const std::optional<In<double>>& bb) {
         return np(eq::delay_profile(mat(h), bb_of(bb)));
     }, py::arg("h_pilot"), no_bb);
-    e.def("delay_support", [](const In<cd>& h, double floor_db, const std::optional<In<double>>& bb) {
-        return eq::delay_support(mat(h), bb_of(bb), floor_db);
-    }, py::arg("h_pilot"), py::arg("floor_db") = -15.0, no_bb);
+    e.def("delay_support", [](const In<cd>& h, double floor_db, const std::optional<In<double>>& bb, double n0) {
+        return eq::delay_support(mat(h), bb_of(bb), floor_db, n0);
+    }, py::arg("h_pilot"), py::arg("floor_db") = -15.0, no_bb, py::arg("n0") = eq::INF);
     e.def("window_shift", &eq::window_shift);
     e.def("support_basis", [](const In<double>& bb, int d0, int d1, int slack) {
         const auto b = eq::support_basis(vec(bb), d0, d1, slack);

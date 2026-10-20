@@ -63,6 +63,10 @@ HIGH = False
 # (the ladder is dense: the next two after fsk32r62-r1/2 are polar modes).
 FASTLOW = False
 FASTLOW_EXPLORE, FASTLOW_FASTER, FASTLOW_SPAN = 0.35, 0.7, 2.5
+# --explore-faster: FASTLOW's exploration on any session kind. After the
+# receiver gains dB the steering model still avoids the modes that got
+# faster, so uniform exploration rarely shows them working.
+EXPLORE_FASTER = False
 KINDS_ONLY = ()  # --kinds: only these channel kinds (outcome_data.KINDS names); with --high, AWGN allowed
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
@@ -102,10 +106,11 @@ class Explorer(G.GearShifter):
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], G.PREV_MAX_S))
         ok = [s.name for s in G.allowed(station.cap) if not G.is_cpm(s) or P.outcome_knows(s.name)]
         explored = False
-        explore = FASTLOW_EXPLORE if FASTLOW else EXPLORE
+        edge = FASTLOW or EXPLORE_FASTER
+        explore = FASTLOW_EXPLORE if edge else EXPLORE
         if self.rng.random() < explore:
             pick = self.rng.choice(ok)
-            if FASTLOW and self.rng.random() < FASTLOW_FASTER:
+            if edge and self.rng.random() < FASTLOW_FASTER:
                 cur = G.decode(rec)
                 faster = [m for m in ok if cur in MODES and rate(cur) < rate(m) <= FASTLOW_SPAN * rate(cur)]
                 pick = self.rng.choice(faster) if faster else pick
@@ -212,6 +217,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=16)
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
     ap.add_argument("--fastlow", action="store_true", help="sustained low SNR on fast fading, edges explored (FASTLOW)")
+    ap.add_argument("--explore-faster", action="store_true", help="FASTLOW's exploration on any kind (EXPLORE_FASTER)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
     ap.add_argument("--kinds", default="", help="comma-separated channel kinds only (KINDS_ONLY), e.g. awgn")
     ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
@@ -224,11 +230,11 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW, EXPLORE_FASTER
     # set before the pool forks: the workers inherit them
     SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
     KINDS_ONLY = tuple(filter(None, a.kinds.split(",")))
-    FASTLOW = a.fastlow
+    FASTLOW, EXPLORE_FASTER = a.fastlow, a.explore_faster
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]

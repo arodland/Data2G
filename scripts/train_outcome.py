@@ -214,6 +214,9 @@ def main():
     ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
     ap.add_argument("--link-inputs", action="store_true", help="the link history as inputs too (predictor.N_LINK)")
     ap.add_argument("--energy-inputs", action="store_true", help="the energy SNR as inputs too (predictor.N_ENERGY)")
+    ap.add_argument("--init", metavar="NPZ", help="start from this single model's weights and input scaling "
+                    "(a distilled student, scripts/distill_outcome.py): fine-tuning on the outcomes")
+    ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--extend", metavar="BASE", help="add --new modes' outputs to this model, all else frozen")
     ap.add_argument("--new", default="", help="comma-separated modes, with --extend")
@@ -255,16 +258,32 @@ def main():
         clip = dict(noise_lo=lo, noise_hi=hi)
         print("noise inputs clipped to", np.round(lo, 2), np.round(hi, 2))
     mean, std = x[trn].mean(0), x[trn].std(0) + 1e-6
+    init = np.load(a.init) if a.init else None
+    if init is not None:
+        assert tuple(str(m) for m in init["modes"]) == MODES and tuple(str(b) for b in init["bands"]) == BANDS
+        mean, std = init["mean"], init["std"]
+        a.depth = sum(1 for k in init.files if k.startswith("W")) - 1
+        a.hidden = init["W0"].shape[1]
     # the noise leaves one-hots and flags (columns of only 0 and 1) alone
     cont = ~np.all(np.isin(x[trn], (0.0, 1.0)), axis=0)
     noise_scale = torch.tensor(a.input_noise * std * cont, dtype=torch.float32)
     net = Net(x.shape[1], n, mean, std, a.hidden, a.depth)
-    opt = torch.optim.Adam(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    if init is not None:
+        with torch.no_grad():
+            for i, layer in enumerate(net.layers):
+                layer.weight.copy_(torch.tensor(init[f"W{i}"].T))
+                layer.bias.copy_(torch.tensor(init[f"b{i}"]))
+    opt = torch.optim.Adam(net.parameters(), lr=a.lr, weight_decay=1e-4)
     T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt)  # noqa: E731
     tr_t = [T(x[trn]), T(mode[trn], torch.long), T(bok[trn]), T(dsent[trn]), T(dok[trn]), T(bmask[trn])]
     va_t = [T(x[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va]), T(bmask[va])]
     best_val, best_state = float("inf"), None
     te_t = [T(x[te]), T(mode[te], torch.long), T(bok[te]), T(dsent[te]), T(dok[te]), T(bmask[te])]
+    if init is not None:  # the starting point is a candidate: a fine-tune never ends worse on validation
+        with torch.no_grad():
+            best_val = loss_fn(net(va_t[0]), *va_t[1:], n).item()
+        best_state = {k: t.clone() for k, t in net.state_dict().items()}
+        print(f"start: validation {best_val:.4f}")
     for ep in range(a.epochs):
         perm = torch.randperm(len(tr_t[0]))
         for i in range(0, len(perm), 512):

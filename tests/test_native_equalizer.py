@@ -69,6 +69,8 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     close(ne.delay_profile(h, bb), py.delay_profile(h, bb), "delay_profile")
     sup = py.delay_support(h, bb=bb)
     assert ne.delay_support(h, bb=bb) == sup
+    n0 = float(np.mean(np.abs(h) ** 2)) * 10 ** (-snr / 10)
+    assert ne.delay_support(h, bb=bb, n0=n0) == py.delay_support(h, bb=bb, n0=n0)
     shift = py.window_shift(sup)
     assert ne.window_shift(sup) == shift
     sup = (sup[0] - shift, sup[1] - shift)

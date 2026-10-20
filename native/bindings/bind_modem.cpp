@@ -197,6 +197,7 @@ py::dict received_dict(const modem::Received& r) {
     d["slips"] = np(r.slips);
     d["phi_ref"] = r.phi_ref;
     d["support"] = py::make_tuple(r.support.first, r.support.second);
+    d["seen_support"] = py::make_tuple(r.seen_support.first, r.seen_support.second);
     d["preamble_start"] = r.preamble_start;
     d["score"] = r.score;
     return d;

@@ -117,7 +117,8 @@ public:
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
     // the gate's model applies (policy.py GearShifter.gate)
-    bool gate() const;
+    // 0 the installed model, 1 the gate's, 2 the fast region's
+    int gate() const;
     // the CPM floor holds (policy.py GearShifter.cpm_floor)
     bool cpm_floor() const;
     void observe_energy(double snr_db, double now);

@@ -168,7 +168,7 @@ Measured measure(const Heard& r) {
     for (std::size_t i = 0; i < var.size(); ++i) var[i] = est.n0 + est.mse.data[i];
     out.snr_est = modem::snr_db(est, R.band);
     out.spread_est = est.spread_hz;
-    out.delay_est_ms = static_cast<double>(R.support.second - R.support.first) / config::FS * 1000;
+    out.delay_est_ms = static_cast<double>(R.seen_support.second - R.seen_support.first) / config::FS * 1000;
     out.headroom = R.spec->headroom;
     out.frames = R.n_cw * R.spec->frames_per_cw;
     for (std::size_t c = 0; c < CONSTS.size(); ++c) out.mi[c] = effective_mi(est.h.data, var, CONSTS[c]);

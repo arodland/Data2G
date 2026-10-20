@@ -121,9 +121,18 @@ std::vector<double> delay_profile(const Mat<cd>& h, std::span<const double> bb) 
     return p;
 }
 
-Support delay_support(const Mat<cd>& h, std::span<const double> bb, double floor_db) {
+Support delay_support(const Mat<cd>& h, std::span<const double> bb, double floor_db, double n0) {
     const auto p = delay_profile(h, bb);
-    const double thr = *std::max_element(p.begin(), p.end()) * std::pow(10.0, floor_db / 10);
+    double thr = *std::max_element(p.begin(), p.end()) * std::pow(10.0, floor_db / 10);
+    if (std::isfinite(n0) && SUPPORT_NOISE_Z != 0.0) {  // the profile's noise floor, gamma(n_p)/n_p (Wilson-Hilferty)
+        const double nc = static_cast<double>(bb.size()), m = nc + 2, c = 1.0 / (9.0 * static_cast<double>(h.rows));
+        double w2 = 0.0;
+        for (size_t k = 0; k < bb.size(); ++k) {
+            const double w = 0.5 + 0.5 * std::cos(PI * (1.0 - m + 2.0 * static_cast<double>(k + 1)) / (m - 1));
+            w2 += w * w;
+        }
+        thr = std::max(thr, n0 * w2 * std::pow(1.0 - c + SUPPORT_NOISE_Z * std::sqrt(c), 3));
+    }
     int first = -1, last = -1;
     for (size_t i = 1; i + 1 < p.size(); ++i)
         if (p[i] >= thr && p[i] >= p[i - 1] && p[i] >= p[i + 1]) {

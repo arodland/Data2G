@@ -139,32 +139,61 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
     return x;
 }
 
-std::vector<double> outcome_logits(std::span<const double> x, bool gate) {
-    const auto& members = gate ? tables::OUTCOME_GATE_MEMBERS : tables::OUTCOME_MEMBERS;
-    std::vector<double> psum;
+std::vector<std::vector<double>> outcome_logits_batch(const std::vector<std::vector<double>>& xs, int model) {
+    const auto& members = model == 1   ? tables::OUTCOME_GATE_MEMBERS
+                          : model == 2 ? tables::OUTCOME_FAST_MEMBERS
+                                       : tables::OUTCOME_MEMBERS;
+    if (members.empty()) throw std::invalid_argument("outcome_logits: no such model shipped");
+    const std::size_t B = xs.size();
+    std::vector<std::vector<double>> psum(B);
     for (const auto& mem : members) {
-        if (x.size() != mem.mean.size()) throw std::invalid_argument("outcome_logits: wrong input size");
-        std::vector<double> h(x.size());
-        for (std::size_t i = 0; i < h.size(); ++i) h[i] = (x[i] - mem.mean[i]) / mem.std[i];
+        const std::size_t n_in = mem.mean.size();
+        std::vector<float> h(B * n_in);  // (B, width) row-major
+        for (std::size_t b = 0; b < B; ++b) {
+            if (xs[b].size() != n_in) throw std::invalid_argument("outcome_logits: wrong input size");
+            for (std::size_t i = 0; i < n_in; ++i) h[b * n_in + i] = static_cast<float>((xs[b][i] - mem.mean[i]) / mem.std[i]);
+        }
         for (std::size_t l = 0; l < mem.layers.size(); ++l) {
             const auto& L = mem.layers[l];
-            std::vector<double> o(static_cast<std::size_t>(L.out));
-            for (int j = 0; j < L.out; ++j) {
-                double acc = 0.0;
-                for (int i = 0; i < L.in; ++i) acc += h[i] * L.W[static_cast<std::size_t>(i) * L.out + j];
-                o[j] = acc + L.b[j];
-                if (l + 1 < mem.layers.size()) o[j] = std::tanh(o[j]);
+            const std::size_t in = static_cast<std::size_t>(L.in), out = static_cast<std::size_t>(L.out);
+            // W row by row, each row used for every input while it is in cache.
+            // numpy's float32 matmul sums in another order: the parity tests
+            // allow float32 rounding (test_native_arq.LOGIT_TOL)
+            std::vector<float> o(B * out, 0.0f);
+            for (std::size_t i = 0; i < in; ++i) {
+                const float* w = L.W.data() + i * out;
+                for (std::size_t b = 0; b < B; ++b) {
+                    const float hi = h[b * in + i];
+                    float* ob = o.data() + b * out;
+                    for (std::size_t j = 0; j < out; ++j) ob[j] += hi * w[j];
+                }
             }
+            const bool last = l + 1 == mem.layers.size();
+            for (std::size_t b = 0; b < B; ++b)
+                for (std::size_t j = 0; j < out; ++j) {
+                    float& v = o[b * out + j];
+                    v += L.b[j];
+                    if (!last) v = std::tanh(v);
+                }
             h = std::move(o);
         }
-        if (psum.empty()) psum.assign(h.size(), 0.0);
-        for (std::size_t j = 0; j < h.size(); ++j) psum[j] += sigmoid(std::clamp(h[j], -40.0, 40.0));
+        const std::size_t n_out = h.size() / std::max<std::size_t>(B, 1);
+        for (std::size_t b = 0; b < B; ++b) {
+            if (psum[b].empty()) psum[b].assign(n_out, 0.0);
+            for (std::size_t j = 0; j < n_out; ++j)
+                psum[b][j] += sigmoid(std::clamp(static_cast<double>(h[b * n_out + j]), -40.0, 40.0));
+        }
     }
-    for (auto& v : psum) {
-        const double p = std::clamp(v / static_cast<double>(members.size()), 1e-9, 1 - 1e-9);
-        v = std::log(p / (1 - p));
-    }
+    for (auto& row : psum)
+        for (auto& v : row) {
+            const double p = std::clamp(v / static_cast<double>(members.size()), 1e-9, 1 - 1e-9);
+            v = std::log(p / (1 - p));
+        }
     return psum;
+}
+
+std::vector<double> outcome_logits(std::span<const double> x, int model) {
+    return outcome_logits_batch({std::vector<double>(x.begin(), x.end())}, model)[0];
 }
 
 int outcome_index(std::string_view submode) {
@@ -175,17 +204,30 @@ int outcome_index(std::string_view submode) {
 
 bool outcome_knows(std::string_view submode) { return outcome_index(submode) >= 0; }
 
-std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev, bool gate) {
-    const bool energy = gate ? tables::OUTCOME_GATE_ENERGY : tables::OUTCOME_ENERGY;
-    auto z = outcome_logits(outcome_inputs(m, band, gap, seconds, prev, tables::OUTCOME_BANDS, energy), gate);
+std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuery>& qs, std::string_view band,
+                                                   double gap, const Prev* prev, int model) {
+    const bool energy = model == 1   ? tables::OUTCOME_GATE_ENERGY
+                        : model == 2 ? tables::OUTCOME_FAST_ENERGY
+                                     : tables::OUTCOME_ENERGY;
+    std::vector<std::vector<double>> xs;
+    xs.reserve(qs.size());
+    for (const auto& q : qs) xs.push_back(outcome_inputs(q.m, band, gap, q.seconds, prev, tables::OUTCOME_BANDS, energy));
+    auto zs = outcome_logits_batch(xs, model);
     const std::size_t n = tables::OUTCOME_MODES.size();
-    for (const auto& [name, off] : LOGIT_OFFSETS)
-        if (const int i = outcome_index(name); i >= 0) z[i] += off;
-    std::vector<Outcome> out(n);
-    for (std::size_t i = 0; i < n; ++i)
-        out[i] = {sigmoid(std::clamp(z[i], -40.0, 40.0)), sigmoid(std::clamp(z[n + i], -40.0, 40.0))};
+    std::vector<std::vector<Outcome>> out(qs.size(), std::vector<Outcome>(n));
+    for (std::size_t q = 0; q < qs.size(); ++q) {
+        auto& z = zs[q];
+        for (const auto& [name, off] : LOGIT_OFFSETS)
+            if (const int i = outcome_index(name); i >= 0) z[i] += off;
+        for (std::size_t i = 0; i < n; ++i)
+            out[q][i] = {sigmoid(std::clamp(z[i], -40.0, 40.0)), sigmoid(std::clamp(z[n + i], -40.0, 40.0))};
+    }
     return out;
+}
+
+std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
+                                     const Prev* prev, int model) {
+    return predict_outcomes({{m, seconds}}, band, gap, prev, model)[0];
 }
 
 }  // namespace data2g::arq

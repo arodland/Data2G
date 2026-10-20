@@ -123,7 +123,7 @@ def _measure_ofdm(r: modem.Received) -> dict:
     noise (it belongs to the submode sent, not to the channel)."""
     est = r["est"]
     h, var = est["h"], est["n0"] + est["mse"]
-    d0, d1 = r["support"]
+    d0, d1 = r.get("seen_support", r["support"])
     out = dict(snr_est=modem.snr_db(est, r["band"]),
                spread_est=est["spread_hz"], delay_est_ms=(d1 - d0) / modem.FS * 1000,
                headroom=r["spec"].headroom, frames=r["n_cw"] * r["spec"].frames_per_cw)

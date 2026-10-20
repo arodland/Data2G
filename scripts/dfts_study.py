@@ -49,6 +49,32 @@ points, no DD, so a few tenths off mode_thresholds.json):
   n10-16qam-r2/3 never -> 12.71, r3/4 never -> 15.15, n10-64l-r3/4 never ->
   21.73, n10-256l-r3/4 never -> 30.45; on mpg 64l -0.94, 256l -1.13. n4 and
   the 1200 Hz modes unchanged (n4's rank cap; w resolves the paths).
+- The same off the presets' round delays (runs/support_delays.sh: the
+  second path 0.5-1.5x the preset's, per trial; no DD), tight-only /s4
+  against shipped support_slack, 10% points: mpp~ n10-qpsk-r1/2 1.56 ->
+  1.00, 16qam-r1/2 never -> 6.13, r2/3 never -> 9.75, 64l never -> 15.63;
+  mpd~ qpsk-r1/2 4.56 -> 4.19, 16qam-r1/2 never -> 11.69; mpg~ 64l 20.06 ->
+  19.13; n10-qpsk-r1/5 and every other cell unchanged. Not an artefact of
+  mpp's 2 ms (n10's resolution exactly), and it reaches mpd once its path
+  is off the CP's 4 ms.
+- What estimation costs the bottom and middle (runs/genie_gap.sh: 10% points
+  on the estimate against the true channel, delays drawn per trial, no DD):
+  0-0.75 dB on awgn and mpg~ everywhere; on mpp~/mpd~ the low-rate modes
+  lose most: qpsk-r1/5 1.69/1.88, w48-qpsk-r1/5 1.69/1.88, n4-qpsk-r1/3
+  1.50/1.69, n10-qpsk-r1/5 1.12/0.75, qpsk-r1/3 1.50/0.56; rate 1/2 and up
+  0-0.75; the polar ACKs 0-0.75. DD (/dd) recovers 0-0.75 of it; left
+  with DD on mpp~/mpd~: qpsk-r1/5 1.50/1.12, w48-qpsk-r1/5 1.50/1.50,
+  n4-qpsk-r1/3 1.12/1.69, n4-qpsk-r1/2 1.50/never.
+- Most of that was the delay support reading noise peaks as paths: within
+  -15 dB of the strongest, but near 0 dB per carrier the profile's noise
+  floor is ~10 dB under a lone path (w, awgn -5.5 dB: support ~100
+  samples, rank 20 of 24). delay_support's noise gate (SUPPORT_NOISE_Z,
+  runs/support_gate.sh, with DD, paired): qpsk-r1/5 -0.56/-0.56/-1.12/
+  -0.75 dB (awgn/mpg~/mpp~/mpd~), w48-qpsk-r1/5 -0.56/-0.75/-1.31/-1.12,
+  qpsk-r1/3 mpg~ -0.94, n10 and n4 up to -0.75; one cell +0.19 (n10-16qam
+  -r1/3 mpg~, one step); rate 1/2 and up on w/w48 unchanged. Left against
+  the genie (no DD there): n4-qpsk-r1/3 mpp~/mpd~ 1.12/1.69, n4-qpsk-r1/2
+  mpp~ 0.94, the rest 0.75 or less. TIME_TAPS 8 (/t8) on top: nothing.
 - DFT-spread against the better OFDM arm: awgn -0.6 to -1.35 dB PEP-fair
   (2.4-5 dB less clip noise at a headroom, so it clips harder), n10 mpg
   -0.2 to -0.8; but mpp 0 to +2 dB worse, w48 mpg +0.2 to +3, mpd worse or
@@ -75,10 +101,24 @@ from multiprocessing import Pool
 import numpy as np
 
 from data2g import codes, constellation, equalizer, hfchannel, modem
-from data2g.config import BANDS, FS, LEADIN_SAMPLES, LEADOUT_SAMPLES, SUBMODES
+from data2g.config import BANDS, FS, LEADIN_SAMPLES, LEADOUT_SAMPLES, NSYM, SUBMODES, SYMS_PER_FRAME
 from data2g.waveform import dsp, ofdm
 
 CHANNELS = ("awgn", "mpg", "mpp", "mpd")
+# "<preset>~": the preset's Doppler, its second path's delay drawn per trial
+# uniformly over DELAY_SPREAD x the preset's, so no result hangs on a round
+# delay (mpp's 2 ms is exactly n10's delay resolution, 16 samples).
+DELAY_SPREAD = (0.5, 1.5)
+
+
+def fading(chan: str, rng):
+    """apply_channel's fading_preset for `chan`."""
+    if chan == "awgn":
+        return None
+    if not chan.endswith("~"):
+        return chan
+    p = hfchannel.FADING_PRESETS[chan[:-1]]
+    return hfchannel.FadingPreset(chan, p.doppler_hz, p.delay_ms * float(rng.uniform(*DELAY_SPREAD)))
 FRAMES = 16  # burst length the codewords spread over, about
 TRIALS = 100  # bursts per SNR point
 CONST_BURSTS = 24
@@ -89,23 +129,38 @@ CONST_BURSTS = 24
 def parse_arm(arm: str, spec) -> tuple[bool, float]:
     """'ofdm' (the shipped mode), 'ofdm@H' (its headroom H, ACE as shipped),
     'dfts' (the mode's headroom) or 'dfts@H' -> (dft-spread, headroom). A
-    '/sN' suffix (receiver only) is use_slack's."""
+    '/sN' suffix (receiver only) is use_slack's; '/genie' decodes on the
+    true channel (true_channel), the sync and the noise estimate as shipped;
+    '/dd' (ofdm only, last) decodes through arq.phy.ModemRx, DD unbudgeted;
+    '/q0' turns delay_support's noise gate off, '/tN' sets TIME_TAPS N."""
     kind, _, h = arm.split("/")[0].partition("@")
     return kind == "dfts", float(h) if h else spec.headroom
 
 
 def use_slack(arm: str) -> None:
-    """The arm's equalizer.SUPPORT_SLACK ('/sN'; the shipped one without),
-    or '/sauto': per-burst model order (auto_estimate)."""
+    """The arm's support order: '/sN' a fixed order N (/s4: the receiver
+    before support_slack); '/sauto' this study's own per-burst pick
+    (auto_estimate, as support_slack shipped); none: the shipped receiver."""
     _, _, s = arm.partition("/s")
     equalizer.estimate = auto_estimate if s == "auto" else SHIPPED_ESTIMATE
-    slack = int(s) if s and s != "auto" else SHIPPED_SLACK
-    if equalizer.SUPPORT_SLACK != slack:
-        equalizer.SUPPORT_SLACK = slack
-        equalizer._support_basis.cache_clear()  # keyed by support, not slack
+    fixed = int(s) if s and s != "auto" else None
+    tight, padded = (fixed, fixed) if fixed is not None else (SHIPPED_SLACK, SHIPPED_PADDED)
+    if (equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK) != (tight, padded):
+        equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK = tight, padded
+        equalizer._support_basis.cache_clear()
 
 
+def use_rx(arm: str) -> None:
+    """The arm's other receiver knobs: '/q0' (SUPPORT_NOISE_Z off) and '/tN' (TIME_TAPS)."""
+    opts = arm.split("/")[1:]
+    equalizer.SUPPORT_NOISE_Z = 0.0 if "q0" in opts else SHIPPED_Z
+    equalizer.TIME_TAPS = next((int(o[1:]) for o in opts if o[:1] == "t" and o[1:].isdigit()), SHIPPED_TAPS)
+
+
+SHIPPED_Z = equalizer.SUPPORT_NOISE_Z
+SHIPPED_TAPS = equalizer.TIME_TAPS
 SHIPPED_SLACK = equalizer.SUPPORT_SLACK
+SHIPPED_PADDED = equalizer.PADDED_SLACK
 SHIPPED_ESTIMATE = equalizer.estimate
 AUTO_SLACK = 20  # the padded support auto_estimate may pick
 AUTO_K = 2.0  # pick it when the energy it adds per dimension exceeds AUTO_K x the noise
@@ -207,12 +262,41 @@ def consts(name: str, dfts: bool, headroom: float) -> tuple[float, float, float]
 
 # --- receive --------------------------------------------------------------------
 
-def soft(r, spec, dfts: bool, gain: float, ratio: float) -> np.ndarray:
-    """(n_cw, coded_bits) soft bits on this arm's clip constants."""
+def true_channel(r, spec, x, lead: int, kw: dict) -> np.ndarray:
+    """The channel the data saw at every data cell, (n_f, 5, nc), in r's
+    units (pilot-referenced, before the clip gain): a pilot-only twin of the
+    burst (eq_floor.py's) through the same seeded channel without noise,
+    demodulated on r's timing, scaled per carrier to the real burst's
+    noiseless pilots (the twin skips the clipper and the TX bandpass)."""
+    b, sb = ofdm.band(spec.band), ofdm.band(spec.sync_band)
+    n_f = len(r["raw"])
+    n_air = modem.frames_on_air(spec, r["n_cw"])
+    syms = np.tile(b.pilot, (n_air * SYMS_PER_FRAME + 1, 1))
+    hdr = np.tile(sb.pilot, (modem.header_samples(spec.sync_band) // NSYM, 1))
+    twin = np.concatenate([np.zeros(LEADIN_SAMPLES), sb.preamble_waveform(), sb.modulate_symbols(hdr),
+                           b.modulate_symbols(syms), np.zeros(LEADOUT_SAMPLES)])
+    pad = lambda v: np.concatenate([np.zeros(lead), v, np.zeros(FS // 2 + len(x) - len(v))])  # noqa: E731
+
+    def cells(v):
+        z = dsp.freq_correct(dsp.to_baseband(hfchannel.apply_channel(pad(v), **kw)), r["cfo"])
+        raw = modem._demod_frames(z, r["p0"], n_air, r["shift"], r["phi_ref"], r["steps"], band=spec.band,
+                                  slips_in=r["slips"])[0]
+        return np.delete(raw, r["kc"], axis=0) if n_air > n_f else raw
+
+    ht, clean = cells(twin) / b.pilot, cells(x)
+    hp_t, hp_c = ht[:, 0], clean[:, 0] / b.pilot
+    g = np.sum(hp_c * np.conj(hp_t), axis=0) / np.sum(np.abs(hp_t) ** 2, axis=0)
+    return ht[:, 1:] * g
+
+
+def soft(r, spec, dfts: bool, gain: float, ratio: float, h_true=None) -> np.ndarray:
+    """(n_cw, coded_bits) soft bits on this arm's clip constants; on
+    `h_true` (true_channel's) with no estimation error when given."""
     est = r["est"]
     g0 = est["gain"]
-    h = est["h"] / g0 * gain
-    var = est.get("n0_k", est["n0"]) + ratio * np.abs(h) ** 2 + est["mse"] / g0**2 * gain**2
+    h = (est["h"] / g0 if h_true is None else h_true) * gain
+    mse = 0.0 if h_true is not None else est["mse"] / g0**2 * gain**2
+    var = est.get("n0_k", est["n0"]) + ratio * np.abs(h) ** 2 + mse
     Y = modem.data_symbols(r["raw"])
     pts = constellation.load(spec.constellation)
     if not dfts:
@@ -234,23 +318,31 @@ def trial(args) -> int:
     spec = SUBMODES[name]
     dfts, hr = parse_arm(arm, spec)
     use_slack("")  # clip constants on the shipped estimator, as clip_constants.py
+    use_rx("")
     gain, ratio, _ = consts(name, dfts, hr)
     use_slack(arm)
+    use_rx(arm)
     n_cw = n_codewords(spec)
     rng = np.random.default_rng(seed)
     payloads, bits = make_burst(spec, n_cw, rng)
     x, _ = tx(bits, spec, dfts, hr)
     lead = int(rng.uniform(0.3, 1.0) * FS)
-    y = hfchannel.apply_channel(np.concatenate([np.zeros(lead), x, np.zeros(FS // 2)]), snr_db=snr,
-                                freq_offset_hz=float(rng.uniform(-50, 50)), ppm=10,
-                                fading_preset=None if chan == "awgn" else chan, seed=seed)
+    cfo = float(rng.uniform(-50, 50))
+    kw = dict(freq_offset_hz=cfo, ppm=10, fading_preset=fading(chan, rng), seed=seed)
+    y = hfchannel.apply_channel(np.concatenate([np.zeros(lead), x, np.zeros(FS // 2)]), snr_db=snr, **kw)
     try:
         r = modem.receive(y, bands=[spec.sync_band], head=FS + FS // 4 + modem.receive_head(spec.sync_band))
     except Exception:  # noqa: BLE001 (no lock, or a header read past the audio)
         return n_cw
     if r["spec"].name != name or r["n_cw"] != n_cw:
         return n_cw
-    got = codes.decode_many(spec, soft(r, spec, dfts, gain, ratio))
+    if arm.endswith("/dd"):  # the ARQ's receiver: DD unbudgeted, its own clip constants
+        from data2g.arq import phy
+
+        rx = phy.ModemRx(r, {})
+        return sum(p not in rx.raw(i) for i, p in enumerate(payloads))
+    h_true = true_channel(r, spec, x, lead, kw) if arm.endswith("/genie") else None
+    got = codes.decode_many(spec, soft(r, spec, dfts, gain, ratio, h_true))
     return sum(not (ok and p == q) for (p, ok), q in zip(got, payloads))
 
 
@@ -330,7 +422,7 @@ def main():
                     for ch in a.channels:
                         if (name, arm, ch) in done:
                             continue
-                        ref = shipped["modes"].get(name, [0] * 4)[CHANNELS.index(ch)]
+                        ref = shipped["modes"].get(name, [0] * 4)[CHANNELS.index(ch.rstrip("~"))]
                         start = a.start if a.start is not None else (ref - 2 if ref < 90 else 15.0)
                         th = threshold(pool, name, arm, ch, a.fail, round(start * 4) / 4, a.seed)
                         row = dict(mode=name, arm=arm, channel=ch, avg_db=th, peak_db=round(peak, 2),

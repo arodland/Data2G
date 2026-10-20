@@ -213,7 +213,8 @@ class Received(TypedDict):
     steps: np.ndarray  # (frames on air + 1,) the drift tracker's step total per frame
     slips: np.ndarray  # (frames on air + 1,) each frame's timing jump (_find_slip)
     phi_ref: float  # the preamble channel's phase step across carriers (_bin_phase_step)
-    support: tuple[int, int]  # the delay support, after the shift
+    support: tuple[int, int]  # the estimate's delay support (noise-gated), after the shift
+    seen_support: tuple[int, int]  # the same ungated: the window shift's, the reported delay's
     preamble_start: int
     score: float  # the header's
 
@@ -1013,10 +1014,14 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     cfo_res = resolve_alias(fine, 0.0 if known is not None else coarse)
     z = dsp.freq_correct(z, cfo_res)
     _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
-    support = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
-    shift = equalizer.window_shift(support)
+    # the window and the reported delay on the support as before the noise
+    # gate (the gear shifter was trained on it); the estimate on the gated one
+    seen = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
+    support = equalizer.delay_support(hp, bb=ofdm.band(db).bb, n0=hd["n0_pre"])
+    shift = equalizer.window_shift(seen)
     raw, hp, steps, _ = _demod_frames(z, p0, n_air, shift, phi_ref, band=db, slips_in=slips)
     support = (support[0] - shift, support[1] - shift)
+    seen = (seen[0] - shift, seen[1] - shift)
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
     est = data_channel(hp, support, db, hd["n0_pre"], spec.clip,
@@ -1026,7 +1031,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         est["h"], est["mse"] = np.delete(est["h"], kc, axis=0), np.delete(est["mse"], kc, axis=0)
     return dict(
         spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc,
-        cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support,
+        cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support, seen_support=seen,
         preamble_start=hd["start"], score=hd["score"],
     )
 

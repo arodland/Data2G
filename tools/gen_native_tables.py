@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 OUT = ROOT / "native" / "core" / "generated"
+MODEL = None  # --model: a measurement build's outcome model, no regions
 
 for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL"):
     if var in os.environ:
@@ -280,6 +281,13 @@ def doubles(values) -> str:
     return ",\n".join(", ".join(repr(float(v)) for v in values[i:i + 6]) for i in range(0, len(values), 6))
 
 
+def floats(values) -> str:
+    """float32 literals: the shortest text that reads back to the same float."""
+    v = np.asarray(values, dtype=np.float32)
+    return ",\n".join(", ".join(f"{np.format_float_positional(x, unique=True, trim='0')}f" for x in v[i:i + 8])
+                       for i in range(0, len(v), 8))
+
+
 def predictor_cpp() -> str:
     """The gear shifter's outcome model (codes_data/outcome_predictor.npz,
     the installed ensemble; DATA2G_OUTCOME_MODEL is study-only) and the AWGN
@@ -287,9 +295,9 @@ def predictor_cpp() -> str:
     from data2g.arq import policy as G
     from data2g.arq import predictor as P
 
-    model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
+    model = P.outcome_model(MODEL) if MODEL else P.outcome_model()
     members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
-    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,capacity_tables}.npz"),
+    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,outcome_predictor_fast,capacity_tables}.npz"),
            '#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
 
     def emit(tag, ms, order=None):
@@ -301,13 +309,13 @@ def predictor_cpp() -> str:
             out.append(f"constexpr double std_{tag}{i}[] = {{\n{doubles(m.std)}}};\n")
             layers = []
             for j, (w, b) in enumerate(m.layers):
-                assert w.dtype == b.dtype == np.float64 and w.shape[1] == b.shape[0]
+                assert w.shape[1] == b.shape[0]
                 if order is not None and j == len(m.layers) - 1:
                     n = len(m.modes)
                     cols = [m.modes.index(x) for x in order] + [n + m.modes.index(x) for x in order]
                     w, b = w[:, cols], b[cols]
-                out.append(f"constexpr double w_{tag}{i}_{j}[] = {{\n{doubles(w.reshape(-1))}}};\n")
-                out.append(f"constexpr double b_{tag}{i}_{j}[] = {{\n{doubles(b)}}};\n")
+                out.append(f"constexpr float w_{tag}{i}_{j}[] = {{\n{floats(w.reshape(-1))}}};\n")
+                out.append(f"constexpr float b_{tag}{i}_{j}[] = {{\n{floats(b)}}};\n")
                 layers.append(f"{{{w.shape[0]}, {w.shape[1]}, w_{tag}{i}_{j}, b_{tag}{i}_{j}}}")
             out.append(f"constexpr MlpLayer layers_{tag}{i}[] = {{{', '.join(layers)}}};\n\n")
             rows.append(f"    {{mean_{tag}{i}, std_{tag}{i}, layers_{tag}{i}}},\n")
@@ -317,11 +325,18 @@ def predictor_cpp() -> str:
         assert m.modes == model.modes
     rows = emit("", members)
     # the gate's model (predictor.GATE_MODEL), its outputs in the installed model's order
-    gate = P.outcome_model(str(P.GATE_MODEL))
-    gmembers = gate.members if isinstance(gate, P.OutcomeEnsemble) else [gate]
-    assert all(set(g.modes) == set(model.modes) for g in gmembers), "the gate's model knows other modes"
-    grows = emit("g", gmembers, model.modes)
-    out.append(f"constexpr OutcomeMember gate_members[] = {{\n{''.join(grows)}}};\n")
+    # (none shipped: an empty span, and GearShifter::gate never picks it)
+    regions = {}
+    for tag, name, cfg in (("g", "gate", P.GATE), ("f", "fast", P.FAST)):  # as the runtime has them
+        reg = P.outcome_model(cfg[0]) if cfg and not MODEL else None
+        regions[name] = reg
+        if reg is None:
+            continue
+        rm = reg.members if isinstance(reg, P.OutcomeEnsemble) else [reg]
+        assert all(set(r.modes) == set(model.modes) for r in rm), f"the {name} model knows other modes"
+        rows_r = emit(tag, rm, model.modes)
+        out.append(f"constexpr OutcomeMember {name}_members[] = {{\n{''.join(rows_r)}}};\n")
+    span = lambda name: f"{name}_members" if regions[name] is not None else "{}"  # noqa: E731
     out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr std::string_view modes[] = {{{', '.join(cxx(m) for m in model.modes)}}};\n")
     out.append(f"constexpr std::string_view bands[] = {{{', '.join(cxx(b) for b in model.bands)}}};\n\n")
@@ -340,17 +355,22 @@ def predictor_cpp() -> str:
     peaks = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(PHY.peak_db(m, c)) for c in range(3))}}}}}" for m in ALL_MODES)
     out.append(f"constexpr ModePeak peaks[] = {{\n{peaks}}};\n\n}}  // namespace\n\n")
     out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
-               "const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = gate_members;\n"
+               f"const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = {span('gate')};\n"
                f"const double OUTCOME_GATE_SPREAD_HZ = {cxx(P.GATE_SPREAD_HZ)};\n"
                f"const double OUTCOME_GATE_SNR_DB = {cxx(P.GATE_SNR_DB)};\n"
                f"const int OUTCOME_GATE_HIST = {P.GATE_HIST};\n"
+               f"const std::span<const OutcomeMember> OUTCOME_FAST_MEMBERS = {span('fast')};\n"
+               f"const double OUTCOME_FAST_SPREAD_HZ = {cxx(P.FAST_SPREAD_HZ)};\n"
+               f"const double OUTCOME_FAST_SNR_LO_DB = {cxx(P.FAST_SNR_LO_DB)};\n"
+               f"const double OUTCOME_FAST_SNR_HI_DB = {cxx(P.FAST_SNR_HI_DB)};\n"
                "const std::span<const std::string_view> OUTCOME_MODES = modes;\n"
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"
                "const std::span<const CapacityTable> CAPACITY = caps;\n"
                "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n"
                f"const bool OUTCOME_ENERGY = {cxx(bool(model.energy))};\n"
-               f"const bool OUTCOME_GATE_ENERGY = {cxx(bool(gate.energy))};\n"
+               f"const bool OUTCOME_GATE_ENERGY = {cxx(bool(regions['gate'] and regions['gate'].energy))};\n"
+               f"const bool OUTCOME_FAST_ENERGY = {cxx(bool(regions['fast'] and regions['fast'].energy))};\n"
                "const std::span<const ModePeak> MODE_PEAK_DB = peaks;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 
@@ -430,7 +450,11 @@ FILES["modem.hpp"] = modem_hpp
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="compare, write nothing")
+    ap.add_argument("--model", metavar="NPZ", help="measurement builds only: this outcome model installed, no gate "
+                    "or fast region (regenerate without it before committing)")
     args = ap.parse_args()
+    global MODEL
+    MODEL = args.model
     stale = []
     for name, gen in FILES.items():
         path, text = OUT / name, gen()

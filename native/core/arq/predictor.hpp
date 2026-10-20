@@ -51,8 +51,12 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
                                    std::span<const std::string_view> bands = tables::OUTCOME_BANDS,
                                    bool energy = false);
 // The ensemble's logits (mean member probability), LOGIT_OFFSETS not applied.
-// `gate`: the gate's model (tables::OUTCOME_GATE_MEMBERS) instead of the installed one.
-std::vector<double> outcome_logits(std::span<const double> x, bool gate = false);
+// `model`: which model (GearShifter::gate's): 0 the installed one, 1 the gate's
+// (tables::OUTCOME_GATE_MEMBERS), 2 the fast region's (tables::OUTCOME_FAST_MEMBERS).
+std::vector<double> outcome_logits(std::span<const double> x, int model = 0);
+// The same for many inputs at once: each layer's weights read once for all
+// of them (a decision's ~30 predictions; the weights outsize a Pi's cache).
+std::vector<std::vector<double>> outcome_logits_batch(const std::vector<std::vector<double>>& xs, int model = 0);
 
 int outcome_index(std::string_view submode);  // its row in OUTCOME_MODES, -1: unknown
 bool outcome_knows(std::string_view submode);
@@ -63,6 +67,13 @@ struct Outcome {
 };
 // Indexed by outcome_index, LOGIT_OFFSETS applied.
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev = nullptr, bool gate = false);
+                                     const Prev* prev = nullptr, int model = 0);
+// predict_outcome for several (measurements, burst length) pairs in one batch.
+struct OutcomeQuery {
+    Measured m;
+    double seconds;
+};
+std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuery>& qs, std::string_view band,
+                                                   double gap, const Prev* prev = nullptr, int model = 0);
 
 }  // namespace data2g::arq

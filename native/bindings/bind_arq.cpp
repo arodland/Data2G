@@ -125,21 +125,22 @@ void bind_arq(py::module_& m) {
     }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none(),
        py::arg("bands") = py::none(), py::arg("energy") = false);
     a.def("peak_db", [](const std::string& m, int cap) { return arq::peak_db(m, cap); }, py::arg("mode"), py::arg("cap") = 0);
-    a.def("outcome_logits", [](const In<double>& x) {
-        return np(arq::outcome_logits({x.data(), static_cast<std::size_t>(x.size())}));
-    });
+    a.def("outcome_logits", [](const In<double>& x, int model) {
+        return np(arq::outcome_logits({x.data(), static_cast<std::size_t>(x.size())}, model));
+    }, py::arg("x"), py::arg("model") = 0);
     a.def("outcome_modes", [] { return std::vector<std::string>(tables::OUTCOME_MODES.begin(), tables::OUTCOME_MODES.end()); });
     a.def("outcome_bands", [] { return std::vector<std::string>(tables::OUTCOME_BANDS.begin(), tables::OUTCOME_BANDS.end()); });
     a.def("outcome_knows", [](const std::string& n) { return arq::outcome_knows(n); });
     a.def("predict_outcome", [](const py::dict& md, const std::string& band, double gap, double seconds,
-                                const py::object& p) {
+                                const py::object& p, int model) {
         const auto pv = prev(p);
-        const auto out = arq::predict_outcome(measured(md), band, gap, seconds, pv ? &*pv : nullptr);
+        const auto out = arq::predict_outcome(measured(md), band, gap, seconds, pv ? &*pv : nullptr, model);
         py::dict d;
         for (std::size_t i = 0; i < out.size(); ++i)
             d[py::str(std::string(tables::OUTCOME_MODES[i]))] = py::make_tuple(out[i].burst, out[i].cw);
         return d;
-    }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none());
+    }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none(),
+       py::arg("model") = 0);
 
     // -- policy
     a.def("band_span_hz", [](const std::string& b) { const auto s = arq::band_span_hz(b); return py::make_tuple(s[0], s[1]); });

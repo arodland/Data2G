@@ -199,12 +199,13 @@ class OutcomeMlp:
         """-> (..., 2 * len(OUTCOME_MODES)) logits: burst ok, then codeword ok."""
         if self.noise and self.noise_lo is not None:
             x = clip_noise(x, self.noise_lo, self.noise_hi)
-        h = (x - self.mean) / self.std
+        # float32 layers, as the C++ core's (inputs scaled in float64 first)
+        h = ((x - self.mean) / self.std).astype(np.float32)
         for i, (w, b) in enumerate(self.layers):
             h = h @ w + b
             if i < len(self.layers) - 1:
                 h = np.tanh(h)
-        return h
+        return h.astype(np.float64)
 
 
 @lru_cache(maxsize=None)
@@ -239,7 +240,8 @@ def _mlp(d: dict) -> OutcomeMlp:
     n = sum(1 for k in d if k.startswith("W"))
     extra = {k: tuple(str(v) for v in d[k]) for k in ("modes", "bands") if k in d}  # older files: OFDM only
     clip = {k: d[k] for k in ("noise_lo", "noise_hi") if k in d}
-    return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"], d[f"b{i}"]) for i in range(n)],
+    return OutcomeMlp(d["mean"], d["std"], [(d[f"W{i}"].astype(np.float32), d[f"b{i}"].astype(np.float32))
+                                            for i in range(n)],
                       noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False,
                       link=bool(d["link_inputs"]) if "link_inputs" in d else False,
                       energy=bool(d["energy_inputs"]) if "energy_inputs" in d else False, **clip, **extra)
@@ -318,8 +320,11 @@ if _ENV_OFFSETS is not None:
 # (runs/n10f_round.sh's n10qf: AWGN and slow-fading coverage the installed v12
 # lacks) against the installed one alone, 26 cells x 12 seeds
 # (runs/n10g_round.sh): AWGN 0 +35%, AWGN +4/+8 +3.6/+1.8%, MPG -4/+8 +2-3%;
-# no cell worse beyond its SE (worst MPP -8 -3.4 +- 5.1%). A band-aid until one
-# model wins everywhere (docs/outcome-training-data.md).
+# no cell worse beyond its SE (worst MPP -8 -3.4 +- 5.1%). Not shipped since
+# one model replaced the router (gate + fast region): a 512x3 student distilled
+# from it (scripts/distill_outcome.py), level with it on fresh seeds. The gate
+# and the fast region stay as the way to fit a new model to where it wins
+# before distilling again; each is off while its model file is absent.
 # DATA2G_OUTCOME_GATE (studies): "path:spread:snr", or '' for none; unset, the
 # gate applies to the installed model only (not to DATA2G_OUTCOME_MODEL's).
 GATE_MODEL = DATA / "outcome_predictor_gate.npz"
@@ -329,7 +334,26 @@ _GATE = os.environ.get("DATA2G_OUTCOME_GATE")
 if _GATE is not None:
     GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
 else:
-    GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") else (str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
+    GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") or not GATE_MODEL.exists() else (
+        str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
+
+# The fast region: a third model, used when the median spread_est of the
+# peer's last GATE_HIST bursts is at least FAST_SPREAD_HZ and snr_est is in
+# [FAST_SNR_LO_DB, FAST_SNR_HI_DB) (policy.GearShifter.gate). Its model
+# (runs/gt_round.sh's gtp: fresh data on the noise-gated receiver) won fast
+# fading near 0 dB but traded cells elsewhere; routed here only, against the
+# shipped pair on fresh seeds (runs/fast_judge.sh). DATA2G_OUTCOME_FAST
+# (studies): "path:spread:lo:hi", or '' for none; unset, it applies to the
+# installed model only, as the gate does.
+FAST_MODEL = DATA / "outcome_predictor_fast.npz"
+FAST_SPREAD_HZ, FAST_SNR_LO_DB, FAST_SNR_HI_DB = 0.7, 0.0, 8.0
+_FAST = os.environ.get("DATA2G_OUTCOME_FAST")
+if _FAST is not None:
+    _f = _FAST.split(":")
+    FAST = (_f[0], float(_f[1]), float(_f[2]), float(_f[3])) if _FAST else None
+else:
+    FAST = None if os.environ.get("DATA2G_OUTCOME_MODEL") or not FAST_MODEL.exists() else (
+        str(FAST_MODEL), FAST_SPREAD_HZ, FAST_SNR_LO_DB, FAST_SNR_HI_DB)
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
