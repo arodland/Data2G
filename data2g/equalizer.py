@@ -184,7 +184,8 @@ def support_slack(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray 
     would cost there (Mallows' Cp between the two): per added dimension,
     the mean over pilots of the energy the padded projection keeps outside
     the tight one, against PADDED_GAIN x the thermal noise (the
-    preamble's, else the tight projection's residual).
+    preamble's, else the tight projection's residual). Never a padded
+    order the nc - 2 rank cap would cut.
 
     The tight order lost a 2 ms second path on n10 (10 carriers can't
     resolve it), which held its estimate to a median 16.5 dB SINR on mpp,
@@ -195,8 +196,10 @@ def support_slack(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray 
     12.7 (scripts/dfts_study.py, 2026-10-20)."""
     key = np.asarray(bb, dtype=np.float64).tobytes()
     Ut, rt, _ = _support_basis(key, int(support[0]), int(support[1]), SUPPORT_SLACK)
-    Up, rp, _ = _support_basis(key, int(support[0]), int(support[1]), PADDED_SLACK)
-    if rp <= rt:
+    Up, rp, rp_full = _support_basis(key, int(support[0]), int(support[1]), PADDED_SLACK)
+    # capped at nc - 2, the padded subspace is nearly all of them, and which
+    # dimensions the cap drops is arbitrary (near-equal singular values)
+    if rp <= rt or rp_full > rp:
         return SUPPORT_SLACK
     hp = (h_pilot @ np.conj(Up)) @ Up.T
     extra = hp - (hp @ np.conj(Ut)) @ Ut.T

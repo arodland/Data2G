@@ -212,7 +212,7 @@ Smoothed freq_smooth(const Mat<cd>& h, Support support, std::span<const double> 
 int support_slack(const Mat<cd>& h, Support support, std::span<const double> bb, double n0_pre) {
     const auto t = support_basis(bb, support.first, support.second, SUPPORT_SLACK);
     const auto p = support_basis(bb, support.first, support.second, PADDED_SLACK);
-    if (p->r <= t->r) return SUPPORT_SLACK;
+    if (p->r <= t->r || p->r_full > p->r) return SUPPORT_SLACK;  // the cap's cut is arbitrary (equalizer.py)
     const Mat<cd> hp = project(h, *p);
     const Mat<cd> ht = project(hp, *t);
     double n0 = n0_pre;

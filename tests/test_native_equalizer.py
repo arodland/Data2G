@@ -72,15 +72,17 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     shift = py.window_shift(sup)
     assert ne.window_shift(sup) == shift
     sup = (sup[0] - shift, sup[1] - shift)
-    for slack in (py.SUPPORT_SLACK, py.PADDED_SLACK):
+    reps = pilots(bb.astype(float), 8, "awgn", seed=3, snr_db=snr)
+    slacks = {py.SUPPORT_SLACK}
+    for n0_pre in (np.inf, py.preamble_noise(reps)):
+        slacks.add(py.support_slack(h, sup, bb, n0_pre))
+        assert ne.support_slack(h, sup, bb, n0_pre) == py.support_slack(h, sup, bb, n0_pre)
+    for slack in slacks:  # the orders the receiver uses (a capped padded one it never does)
         a, b = ne.freq_smooth(h, sup, bb, slack), py.freq_smooth(h, sup, bb, slack)
         close(a[0], b[0], "hs")
         assert a[2] == b[2]
         assert a[1] == pytest.approx(b[1], rel=RTOL)  # inf == inf on narrow bands
         close(a[3], b[3], "keep")
-    reps = pilots(bb.astype(float), 8, "awgn", seed=3, snr_db=snr)
-    for n0_pre in (np.inf, py.preamble_noise(reps)):
-        assert ne.support_slack(h, sup, bb, n0_pre) == py.support_slack(h, sup, bb, n0_pre)
     assert ne.preamble_noise(reps) == pytest.approx(py.preamble_noise(reps), rel=RTOL)
     close(ne.preamble_noise_k(reps), py.preamble_noise_k(reps))
     kw = {"bb": bb, "n0_pre": py.preamble_noise(reps), "n0_pre_k": py.preamble_noise_k(reps)}
@@ -118,6 +120,8 @@ def test_support_rank_and_subspace(native, band):
                 U, r, r_full = py_basis(bb.tobytes(), d0, d0 + width, slack)
                 u, r2, r_full2, keep = native.equalizer.support_basis(bb, d0, d0 + width, slack)
                 assert (r2, r_full2) == (r, r_full), (width, d0, slack)
+                if slack != equalizer.SUPPORT_SLACK and r_full > r:
+                    continue  # support_slack never uses a capped padded basis: its subspace is arbitrary
                 close(u @ u.conj().T, U @ U.conj().T, f"projector {width} {d0} {slack}")
                 close(keep, 1 - np.sum(np.abs(U) ** 2, axis=1), "keep")
 
