@@ -350,12 +350,15 @@ class GearShifter(L.Policy):
         return e is not None and e[0] < x
 
     def gate(self):
-        """The gate's model (predictor.GATE) if its conditions hold, else None (the installed one)."""
-        if P.GATE is None or not self.spreads or self.measured is None:
+        """The gate's model (predictor.GATE) or the fast region's
+        (predictor.FAST) if its conditions hold, else None (the installed one)."""
+        if not self.spreads or self.measured is None:
             return None
-        path, spread, snr = P.GATE
-        if float(np.median(self.spreads)) < spread and self.measured["snr_est"] < snr:
-            return P.outcome_model(path)
+        med, snr = float(np.median(self.spreads)), self.measured["snr_est"]
+        if P.GATE is not None and med < P.GATE[1] and snr < P.GATE[2]:
+            return P.outcome_model(P.GATE[0])
+        if P.FAST is not None and med >= P.FAST[1] and P.FAST[2] <= snr < P.FAST[3]:
+            return P.outcome_model(P.FAST[0])
         return None
 
     def outcome(self, submode: str, decoded: int, sent: int, usable: bool | None = None):

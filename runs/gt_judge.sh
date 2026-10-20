@@ -19,13 +19,14 @@ study() {  # tag, cells, env...
     --seeds 12 --horizon 600 --jobs $J --policy shift+cpm --cells $cells > runs/loss_gt_$tag.log 2>&1
   date
 }
+T=${TAG:-${M:-gtp}}  # the arm's file tag (M and G both)
 NEW=(DATA2G_OUTCOME_MODEL=runs/outcome_${M:-gtp}.npz DATA2G_OUTCOME_GATE=runs/outcome_${G:-gtq}.npz:0.5:12
      DATA2G_LOGIT_OFFSETS=w48-16qam-r1/2:-1.0,n10-256l-r3/4:-0.5)
 for c in 9 12 x l; do
   cells=C$c; [ $c = x ] && cells=CX; [ $c = l ] && cells=CL
   study ship_c$c "${!cells}" X=1
-  study ${M:-gtp}_c$c "${!cells}" "${NEW[@]}"
+  study ${T}_c$c "${!cells}" "${NEW[@]}"
 done
 for c in 9 12 x l; do
-  echo "== c$c: shipped vs ${M:-gtp}"; $PY scripts/paired_loss.py runs/loss_gt_ship_c$c.csv runs/loss_gt_${M:-gtp}_c$c.csv
+  echo "== c$c: shipped vs $T"; $PY scripts/paired_loss.py runs/loss_gt_ship_c$c.csv runs/loss_gt_${T}_c$c.csv
 done

@@ -258,4 +258,22 @@ def test_gate_takes_the_second_model_on_flat_low_snr_channels():
     assert sh.gate() is None  # SNR over the gate
     for _ in range(3):
         sh.observe(measured(5.0, 2.0), "qpsk-r1/2", 3.0)
-    assert sh.gate() is None  # fading: the median spread over the gate
+    assert sh.gate() is not P.outcome_model(P.GATE[0])  # fading: the median spread over the gate
+
+
+def test_fast_region_takes_the_third_model_on_fast_fading_near_0_db():
+    """predictor.FAST: its model when the median spread_est is at least
+    FAST_SPREAD_HZ and snr_est in [FAST_SNR_LO_DB, FAST_SNR_HI_DB); the
+    installed one outside."""
+    if P.FAST is None:
+        import pytest
+
+        pytest.skip("fast region off (DATA2G_OUTCOME_FAST / DATA2G_OUTCOME_MODEL)")
+    sh = G.GearShifter()
+    for _ in range(P.GATE_HIST):
+        sh.observe(measured(P.FAST_SNR_LO_DB + 1, 2.0), "qpsk-r1/2", 1.0)
+    assert sh.gate() is P.outcome_model(P.FAST[0])
+    sh.observe(measured(P.FAST_SNR_HI_DB, 2.0), "qpsk-r1/2", 2.0)
+    assert sh.gate() is None  # SNR at the top edge
+    sh.observe(measured(P.FAST_SNR_LO_DB - 0.5, 2.0), "qpsk-r1/2", 3.0)
+    assert sh.gate() is None  # under the bottom edge

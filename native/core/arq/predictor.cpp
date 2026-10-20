@@ -139,8 +139,10 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
     return x;
 }
 
-std::vector<double> outcome_logits(std::span<const double> x, bool gate) {
-    const auto& members = gate ? tables::OUTCOME_GATE_MEMBERS : tables::OUTCOME_MEMBERS;
+std::vector<double> outcome_logits(std::span<const double> x, int model) {
+    const auto& members = model == 1   ? tables::OUTCOME_GATE_MEMBERS
+                          : model == 2 ? tables::OUTCOME_FAST_MEMBERS
+                                       : tables::OUTCOME_MEMBERS;
     std::vector<double> psum;
     for (const auto& mem : members) {
         if (x.size() != mem.mean.size()) throw std::invalid_argument("outcome_logits: wrong input size");
@@ -176,9 +178,11 @@ int outcome_index(std::string_view submode) {
 bool outcome_knows(std::string_view submode) { return outcome_index(submode) >= 0; }
 
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
-                                     const Prev* prev, bool gate) {
-    const bool energy = gate ? tables::OUTCOME_GATE_ENERGY : tables::OUTCOME_ENERGY;
-    auto z = outcome_logits(outcome_inputs(m, band, gap, seconds, prev, tables::OUTCOME_BANDS, energy), gate);
+                                     const Prev* prev, int model) {
+    const bool energy = model == 1   ? tables::OUTCOME_GATE_ENERGY
+                        : model == 2 ? tables::OUTCOME_FAST_ENERGY
+                                     : tables::OUTCOME_ENERGY;
+    auto z = outcome_logits(outcome_inputs(m, band, gap, seconds, prev, tables::OUTCOME_BANDS, energy), model);
     const std::size_t n = tables::OUTCOME_MODES.size();
     for (const auto& [name, off] : LOGIT_OFFSETS)
         if (const int i = outcome_index(name); i >= 0) z[i] += off;

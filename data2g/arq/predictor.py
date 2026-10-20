@@ -331,6 +331,24 @@ if _GATE is not None:
 else:
     GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") else (str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
 
+# The fast region: a third model, used when the median spread_est of the
+# peer's last GATE_HIST bursts is at least FAST_SPREAD_HZ and snr_est is in
+# [FAST_SNR_LO_DB, FAST_SNR_HI_DB) (policy.GearShifter.gate). Its model
+# (runs/gt_round.sh's gtp: fresh data on the noise-gated receiver) won fast
+# fading near 0 dB but traded cells elsewhere; routed here only, against the
+# shipped pair on fresh seeds (runs/fast_judge.sh). DATA2G_OUTCOME_FAST
+# (studies): "path:spread:lo:hi", or '' for none; unset, it applies to the
+# installed model only, as the gate does.
+FAST_MODEL = DATA / "outcome_predictor_fast.npz"
+FAST_SPREAD_HZ, FAST_SNR_LO_DB, FAST_SNR_HI_DB = 0.7, 0.0, 8.0
+_FAST = os.environ.get("DATA2G_OUTCOME_FAST")
+if _FAST is not None:
+    _f = _FAST.split(":")
+    FAST = (_f[0], float(_f[1]), float(_f[2]), float(_f[3])) if _FAST else None
+else:
+    FAST = None if os.environ.get("DATA2G_OUTCOME_MODEL") else (str(FAST_MODEL), FAST_SPREAD_HZ, FAST_SNR_LO_DB,
+                                                                 FAST_SNR_HI_DB)
+
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
                     prev=None, model=None) -> dict[str, tuple[float, float]]:

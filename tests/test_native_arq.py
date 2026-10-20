@@ -135,6 +135,12 @@ def test_outcome_model(A, pure):
         got = A.predict_outcome(m, band, gap, sec, prev)
         for k, (pb, pc) in want.items():
             assert got[k] == pytest.approx((pb, pc), rel=LOGIT_TOL, abs=LOGIT_TOL), k
+        for which, path in ((1, P.GATE_MODEL), (2, P.FAST_MODEL)):  # the gate's and the fast region's
+            other = P.outcome_model(str(path))
+            want = P.predict_outcome(m, band, gap, sec, None, prev, other)
+            got = A.predict_outcome(m, band, gap, sec, prev, which)
+            for k, (pb, pc) in want.items():
+                assert got[k] == pytest.approx((pb, pc), rel=LOGIT_TOL, abs=LOGIT_TOL), (which, k)
     assert worst < LOGIT_TOL
     for name in modes.MODES:
         assert A.outcome_knows(name) == P.outcome_knows(name)
@@ -164,12 +170,13 @@ def station(rng, cap, rec=None):
                            peer_reply_recommend=rec[2] if rec else None, peer_wants_dup=rng.random() < 0.3)
 
 
-@pytest.mark.parametrize("seed", range(11))
+@pytest.mark.parametrize("seed", range(13))
 def test_shifter_decisions_match(A, pure, seed):
     """Random sessions: observations, recommendations, outcomes, choices.
     Every decision identical; probabilities and biases to LOGIT_TOL. Seeds 6-8:
     flat, under 12 dB, so the gate's model (predictor.GATE) decides; 9-10:
-    under -4 dB, so the CPM floor (policy.CPM_FLOOR) holds; energy readings throughout."""
+    under -4 dB, so the CPM floor (policy.CPM_FLOOR) holds; 11-12: fast fading
+    at 0-8 dB, the fast region's model (predictor.FAST); energy readings throughout."""
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
     kw = dict(gap_s=rng.choice([2.5, 1.5, 4.0]), use_cpm=seed % 3 != 2, min_success=rng.choice([0.0, 0.0, 0.5]))
@@ -184,15 +191,19 @@ def test_shifter_decisions_match(A, pure, seed):
         m = random_measured(nrng, modes.MODES[heard].band, noise=True)
         if 6 <= seed <= 8:
             m = dict(m, spread_est=0.05, snr_est=min(m["snr_est"], 10.0))
-        if seed >= 9:
+        if 9 <= seed <= 10:
             m = dict(m, snr_est=min(m["snr_est"], -5.0))
+        if seed >= 11:
+            m = dict(m, spread_est=2.0, snr_est=float(rng.uniform(0.0, 7.9)))
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
         e = float(nrng.uniform(-12, 30))
         ref.observe_energy(e, now)
         nat.observe_energy(e, now)
-        assert nat.gate() == (ref.gate() is not None) and nat.cpm_floor() == ref.cpm_floor()
+        g = ref.gate()
+        which = 0 if g is None else 1 if g is P.outcome_model(P.GATE[0]) else 2 if g is P.outcome_model(P.FAST[0]) else -1
+        assert nat.gate() == which and nat.cpm_floor() == ref.cpm_floor()
         st = station(rng, cap)
         want, got = ref.recommend(st), nat.recommend(st)
         assert got == want, (seed, step, [G.decode(r) for r in (want[0], want[2])], [A.decode(r) for r in (got[0], got[2])])

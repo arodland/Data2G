@@ -289,7 +289,7 @@ def predictor_cpp() -> str:
 
     model = P.outcome_model(str(P.DATA / "outcome_predictor.npz"))
     members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
-    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,capacity_tables}.npz"),
+    out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,outcome_predictor_fast,capacity_tables}.npz"),
            '#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
 
     def emit(tag, ms, order=None):
@@ -322,6 +322,12 @@ def predictor_cpp() -> str:
     assert all(set(g.modes) == set(model.modes) for g in gmembers), "the gate's model knows other modes"
     grows = emit("g", gmembers, model.modes)
     out.append(f"constexpr OutcomeMember gate_members[] = {{\n{''.join(grows)}}};\n")
+    # the fast region's model (predictor.FAST_MODEL), likewise
+    fast = P.outcome_model(str(P.FAST_MODEL))
+    fmembers = fast.members if isinstance(fast, P.OutcomeEnsemble) else [fast]
+    assert all(set(f.modes) == set(model.modes) for f in fmembers), "the fast region's model knows other modes"
+    frows = emit("f", fmembers, model.modes)
+    out.append(f"constexpr OutcomeMember fast_members[] = {{\n{''.join(frows)}}};\n")
     out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr std::string_view modes[] = {{{', '.join(cxx(m) for m in model.modes)}}};\n")
     out.append(f"constexpr std::string_view bands[] = {{{', '.join(cxx(b) for b in model.bands)}}};\n\n")
@@ -344,6 +350,10 @@ def predictor_cpp() -> str:
                f"const double OUTCOME_GATE_SPREAD_HZ = {cxx(P.GATE_SPREAD_HZ)};\n"
                f"const double OUTCOME_GATE_SNR_DB = {cxx(P.GATE_SNR_DB)};\n"
                f"const int OUTCOME_GATE_HIST = {P.GATE_HIST};\n"
+               "const std::span<const OutcomeMember> OUTCOME_FAST_MEMBERS = fast_members;\n"
+               f"const double OUTCOME_FAST_SPREAD_HZ = {cxx(P.FAST_SPREAD_HZ)};\n"
+               f"const double OUTCOME_FAST_SNR_LO_DB = {cxx(P.FAST_SNR_LO_DB)};\n"
+               f"const double OUTCOME_FAST_SNR_HI_DB = {cxx(P.FAST_SNR_HI_DB)};\n"
                "const std::span<const std::string_view> OUTCOME_MODES = modes;\n"
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"
@@ -351,6 +361,7 @@ def predictor_cpp() -> str:
                "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n"
                f"const bool OUTCOME_ENERGY = {cxx(bool(model.energy))};\n"
                f"const bool OUTCOME_GATE_ENERGY = {cxx(bool(gate.energy))};\n"
+               f"const bool OUTCOME_FAST_ENERGY = {cxx(bool(fast.energy))};\n"
                "const std::span<const ModePeak> MODE_PEAK_DB = peaks;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 

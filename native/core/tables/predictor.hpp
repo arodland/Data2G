@@ -26,8 +26,12 @@ extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
 extern const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS;
 extern const double OUTCOME_GATE_SPREAD_HZ, OUTCOME_GATE_SNR_DB;
 extern const int OUTCOME_GATE_HIST;
+// The fast region's model (predictor.FAST_MODEL), in OUTCOME_MODES' order: median
+// spread_est at least FAST_SPREAD_HZ and snr_est in [FAST_SNR_LO_DB, FAST_SNR_HI_DB).
+extern const std::span<const OutcomeMember> OUTCOME_FAST_MEMBERS;
+extern const double OUTCOME_FAST_SPREAD_HZ, OUTCOME_FAST_SNR_LO_DB, OUTCOME_FAST_SNR_HI_DB;
 // whether each model takes the energy inputs (predictor.N_ENERGY)
-extern const bool OUTCOME_ENERGY, OUTCOME_GATE_ENERGY;
+extern const bool OUTCOME_ENERGY, OUTCOME_GATE_ENERGY, OUTCOME_FAST_ENERGY;
 // each mode's burst peak-to-average (arq/phy.py peak_db) by bandwidth cap
 // code: the energy inputs' peak reference
 struct ModePeak {

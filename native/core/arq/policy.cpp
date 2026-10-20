@@ -138,13 +138,18 @@ bool GearShifter::cpm_floor() const {
     return med < CPM_FLOOR_SNR_DB;
 }
 
-bool GearShifter::gate() const {
-    if (spreads.empty() || !measured) return false;
+int GearShifter::gate() const {
+    if (spreads.empty() || !measured) return 0;
     std::vector<double> v = spreads;  // np.median: the middle one, or the mean of the middle two
     std::sort(v.begin(), v.end());
     const std::size_t n = v.size();
     const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
-    return med < tables::OUTCOME_GATE_SPREAD_HZ && measured->snr_est < tables::OUTCOME_GATE_SNR_DB;
+    const double snr = measured->snr_est;
+    if (med < tables::OUTCOME_GATE_SPREAD_HZ && snr < tables::OUTCOME_GATE_SNR_DB) return 1;
+    if (med >= tables::OUTCOME_FAST_SPREAD_HZ && snr >= tables::OUTCOME_FAST_SNR_LO_DB &&
+        snr < tables::OUTCOME_FAST_SNR_HI_DB)
+        return 2;
+    return 0;
 }
 
 double GearShifter::reply_hold(const StationView& st, std::string_view submode) const {
@@ -212,7 +217,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         for (const Mode* s : cands)
             if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
     std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
-    const bool gated = gate();
+    const int gated = gate();
     Measured me = *measured;  // with the energy inputs (a model with them reads them)
     me.energy = energy_features();
     auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {

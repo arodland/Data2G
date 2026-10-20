@@ -45,6 +45,11 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_cp_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 6300000` (same) | high AWGN, pinned | same | 7e54f2d | |
 | `session_data_cp_fastlow.csv` | `--fastlow --sessions 1200 --first 6400000` (same) | fastlow, pinned | same | 7e54f2d | |
 
+| `session_data_gt.csv` | `--explore-faster --sessions 2900 --first 7000000` (`runs/gt_round.sh`) | regular; FASTLOW's exploration on every kind (`--explore-faster`) | n10pe gated with n10qf, CPM floor, offsets w48-16qam-r1/2 -1.0, n10-256l-r3/4 -0.5, Python shifter | 8340bbf (PR #91's noise-gated receiver) | the fast region's model (gtp) |
+| `session_data_gt_slow.csv` | `--slow --explore-faster --sessions 800 --first 7100000` (same) | slow | same | 8340bbf | |
+| `session_data_gt_high.csv` | `--high --explore-faster --sessions 1200 --first 7200000` (same) | high | same | 8340bbf | |
+| `session_data_gt_awgnhigh.csv` | `--high --kinds awgn --explore-faster --sessions 400 --first 7300000` (same) | high AWGN | same | 8340bbf | |
+| `session_data_gt_fastlow.csv` | `--fastlow --explore-faster --sessions 1200 --first 7400000` (same) | fastlow | same | 8340bbf | |
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
@@ -58,6 +63,8 @@ sent at the same moment; one row per candidate.
 | `outcome_data_n10top.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 3000000` (`runs/n10_top_data.sh`) | none (candidates fixed) | 2613567 | the two new 500 Hz modes, 0..36 dB |
 | `outcome_data_general.csv` | `with_native outcome_data --samples 40000 --first 4000000` (`runs/n10p3_round.sh`) | none | 046f8be | stands in for v10's lost offline set: retrains without one lost 4-10% on MPD |
 | `outcome_data_general_cp.csv` | `with_native outcome_data --samples 40000 --first 4000000` (`runs/cp_round.sh`) | none | 7e54f2d | the general set's seeds again, control padding pinned: only the decoder differs |
+| `outcome_data_general_gt.csv` | `with_native outcome_data --samples 40000 --first 7500000` (`runs/gt_round.sh`) | none | 8340bbf | the general set on the noise-gated receiver, new seeds |
+| `outcome_data_n10top_gt.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 7600000` (same) | none | 8340bbf | the two top n10 modes, likewise |
 
 ## Mixes
 
@@ -74,3 +81,8 @@ sent at the same moment; one row per candidate.
   original general set); cpn the cp sets, `outcome_data_general_cp.csv` and `outcome_data_n10top.csv` only.
   `--energy-inputs`, five members each. Against n10pe on the pinned receiver (`runs/cp_judge.sh`) all three
   traded cells: +4 to +9% at MPD 0 and MPP -4/0, losses at MPP -6, MPG +8 and high-SNR fading.
+- **gtp / gtq** (`runs/gt_round.sh`): the gt sets only (no set from an older receiver), five members each;
+  gtp `--energy-inputs`. As a pair against the shipped pair (`runs/gt_judge.sh`): MPD 0 +16%, MPP 0 +7%, but
+  AWGN 0 -20%, AWGN +4 -12% (gtq's codeword head reads 0.83-0.95 where 1.00 decoded) and MPG -2..-4%. A second
+  gtp on the same data (seeds 6-10, `runs/gt_var.sh`) moved mid/high-SNR cells by under 1%: the trades are the
+  data's, not training noise. gtp ships as the fast region's model only (`predictor.FAST`, `runs/fast_judge.sh`).
