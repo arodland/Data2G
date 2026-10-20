@@ -107,6 +107,13 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 # 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
 # On since v12; DATA2G_BIAS_FIX=0 is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+# DATA2G_SPREAD_CARRY=1 (studies): a burst too short or weak for a Doppler
+# estimate reports equalizer.DEFAULT_SPREAD_HZ (2.0, what MPD measures), so on
+# AWGN 20-50% of w-band readings looked like fast fading and every outcome
+# model blended the two (P(usable) low on AWGN, high on fading). With it, such
+# a reading takes the peer's last measured spread instead (none yet: as is).
+SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY") == "1"
+UNMEASURED_SPREAD_HZ = 2.0  # equalizer.DEFAULT_SPREAD_HZ (arq doesn't import the modem)
 BIAS_MAX = 6.0 if BIAS_FIX else 3.0
 # The noise rule (recommend(): candidates whose band is noisier in the
 # receiver's profile than the measured one predicted at a lower SNR), its
@@ -235,6 +242,7 @@ class GearShifter(L.Policy):
     link_now: list | None = None  # link_features() at the last recommendation
     energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
     spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
+    last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
@@ -330,6 +338,11 @@ class GearShifter(L.Policy):
 
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
+        s = measured.get("spread_est")
+        if s is not None and s != UNMEASURED_SPREAD_HZ:
+            self.last_spread = float(s)
+        elif SPREAD_CARRY and s is not None and self.last_spread is not None:
+            measured = dict(measured, spread_est=self.last_spread)
         if self.measured is not None:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now

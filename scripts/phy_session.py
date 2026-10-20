@@ -60,20 +60,23 @@ class ContinuousChannel:
     each receiving station's own interference (data2g.interference)."""
 
     def __init__(self, chan: str, snr_db: float, seed: int, horizon: float, doppler=None, delay_ms=None,
-                 interference=None, recorded=None, wander_db: float = 0.0):
+                 interference=None, recorded=None, wander_db: float = 0.0, wander_tau: float = WANDER_TAU_S,
+                 wander_shared: bool = False):
         """`chan`: a preset name, unless `doppler` (Hz) and `delay_ms` are given.
         `interference`: (station 0's, station 1's) interference.Spec; None: clean.
         `recorded`: a RecordedNoise in place of the Gaussian floor.
         `wander_db`: each station's floor wanders by this (standard deviation, dB;
-        WANDER_TAU_S) about the cell's level; its interference doesn't."""
+        `wander_tau`, s) about the cell's level; its interference doesn't.
+        `wander_shared`: one wander for both stations, as a slow fade of the
+        signal itself (propagation) moves the SNR both ways at once."""
         self.recorded = recorded
         self.wander = None
         if wander_db:
             # Ornstein-Uhlenbeck in dB at 1 Hz, from -PRE_S
             n = int(PRE_S + horizon + 62)
-            a = np.exp(-1.0 / WANDER_TAU_S)
+            a = np.exp(-1.0 / wander_tau)
             self.wander = []
-            for i in range(2):
+            for i in (0, 0) if wander_shared else (0, 1):
                 e = np.random.default_rng(np.random.SeedSequence([seed, 11, i])).normal(size=n)
                 w = np.empty(n)
                 w[0] = wander_db * e[0]
