@@ -86,3 +86,9 @@ sent at the same moment; one row per candidate.
   AWGN 0 -20%, AWGN +4 -12% (gtq's codeword head reads 0.83-0.95 where 1.00 decoded) and MPG -2..-4%. A second
   gtp on the same data (seeds 6-10, `runs/gt_var.sh`) moved mid/high-SNR cells by under 1%: the trades are the
   data's, not training noise. gtp ships as the fast region's model only (`predictor.FAST`, `runs/fast_judge.sh`).
+- **h512d3 (installed; distilled):** one 512x3 tanh MLP trained on the router's (n10pe, n10qf gate, gtp fast
+  region) dense outputs over every gt row (`scripts/distill_outcome.py`; no outcome labels). Smaller students
+  fall behind on flat channels (64x2: AWGN +8 -31%; 256x3 close), so capacity, not data, limits a single
+  model there. Level with the router on seeds 24-35 and 36-47 (`runs/distill_judge.sh`). Fine-tuning a
+  student on the outcomes (`train_outcome --init`) found gains (256x3: MPG 0 +13%, AWGN 0 +6%) but brought
+  back the labels' trades (AWGN +4 -7%, MPG +8 -4%): next, a fine-tune anchored to the teacher.

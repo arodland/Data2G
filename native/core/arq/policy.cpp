@@ -145,8 +145,10 @@ int GearShifter::gate() const {
     const std::size_t n = v.size();
     const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
     const double snr = measured->snr_est;
-    if (med < tables::OUTCOME_GATE_SPREAD_HZ && snr < tables::OUTCOME_GATE_SNR_DB) return 1;
-    if (med >= tables::OUTCOME_FAST_SPREAD_HZ && snr >= tables::OUTCOME_FAST_SNR_LO_DB &&
+    if (!tables::OUTCOME_GATE_MEMBERS.empty() && med < tables::OUTCOME_GATE_SPREAD_HZ &&
+        snr < tables::OUTCOME_GATE_SNR_DB)
+        return 1;
+    if (!tables::OUTCOME_FAST_MEMBERS.empty() && med >= tables::OUTCOME_FAST_SPREAD_HZ && snr >= tables::OUTCOME_FAST_SNR_LO_DB &&
         snr < tables::OUTCOME_FAST_SNR_HI_DB)
         return 2;
     return 0;
@@ -234,23 +236,6 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     auto q_burst = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).burst, get(bias_burst, s.name)); };
     auto q_cw = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).cw, get(bias, s.name)); };
 
-    // my reply: the cheapest in expectation, a lost one costing a timeout
-    const Mode* reply = nullptr;
-    double reply_c = std::numeric_limits<double>::infinity(), reply_p = 0.0;
-    for (const Mode* s : cands) {
-        const double t = burst_seconds(*s, 1);
-        const double ok = q_burst(*s, 1);
-        const double c = t + (1 - ok) * (TIMEOUT_S + t) / std::max(ok, 1e-3);
-        if (c < reply_c) reply = s, reply_c = c, reply_p = ok;
-    }
-
-    const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
-    const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
-    const bool chat = st.chat;
-    const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
-    const Mode* best = nullptr;
-    int best_hint = 0;
-    double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
     std::vector<const Mode*> data_cands = cands;
     if (ceiling && !cands.empty()) {
         data_cands.clear();
@@ -278,6 +263,40 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
                 if (s->is_cpm()) c.push_back(s);
         if (!c.empty()) data_cands = std::move(c);
     }
+    {  // every prediction the loops below ask for, in one batch (the weights read once);
+       // predicted_at computes any other lazily (the chat size cut, the final pick)
+        std::vector<std::pair<double, double>> keys;
+        auto want = [&](const Mode& s, int n_cw) {
+            const auto sh = shift.find(s.band);
+            const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
+            if (!memo.count(key) && std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
+        };
+        for (const Mode* s : cands) want(*s, 1);
+        for (const Mode* s : data_cands)
+            for (const double sz : SIZE_S) want(*s, slots_for(*s, sz));
+        std::vector<OutcomeQuery> qs;
+        for (const auto& k : keys) qs.push_back({shifted(me, k.second), k.first});
+        auto got = predict_outcomes(qs, measured_band, gap_s, pv ? &*pv : nullptr, gated);
+        for (std::size_t i = 0; i < keys.size(); ++i) memo.emplace(keys[i], std::move(got[i]));
+    }
+
+    // my reply: the cheapest in expectation, a lost one costing a timeout
+    const Mode* reply = nullptr;
+    double reply_c = std::numeric_limits<double>::infinity(), reply_p = 0.0;
+    for (const Mode* s : cands) {
+        const double t = burst_seconds(*s, 1);
+        const double ok = q_burst(*s, 1);
+        const double c = t + (1 - ok) * (TIMEOUT_S + t) / std::max(ok, 1e-3);
+        if (c < reply_c) reply = s, reply_c = c, reply_p = ok;
+    }
+
+    const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
+    const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
+    const bool chat = st.chat;
+    const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
+    const Mode* best = nullptr;
+    int best_hint = 0;
+    double best_v = chat ? -std::numeric_limits<double>::infinity() : -1.0;
     for (const Mode* s : data_cands) {
         const int pb = payload_bytes(*s), c = ctl_slots(*s);
         for (int hint = 0; hint < static_cast<int>(SIZE_S.size()); ++hint) {

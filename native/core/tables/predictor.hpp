@@ -9,11 +9,11 @@
 namespace data2g::tables {
 
 // The outcome model: bootstrap members, each an MLP (x - mean) / std ->
-// tanh layers -> logits, W row-major (in, out). Outputs: P(burst usable)
-// per OUTCOME_MODES, then P(codeword).
+// tanh layers -> logits, W row-major (in, out), float32 (inputs scaled in
+// double, then float). Outputs: P(burst usable) per OUTCOME_MODES, then P(codeword).
 struct MlpLayer {
     int in, out;
-    std::span<const double> W, b;
+    std::span<const float> W, b;
 };
 struct OutcomeMember {
     std::span<const double> mean, std;
