@@ -72,12 +72,15 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     shift = py.window_shift(sup)
     assert ne.window_shift(sup) == shift
     sup = (sup[0] - shift, sup[1] - shift)
-    a, b = ne.freq_smooth(h, sup, bb), py.freq_smooth(h, sup, bb)
-    close(a[0], b[0], "hs")
-    assert a[2] == b[2]
-    assert a[1] == pytest.approx(b[1], rel=RTOL)  # inf == inf on narrow bands
-    close(a[3], b[3], "keep")
+    for slack in (py.SUPPORT_SLACK, py.PADDED_SLACK):
+        a, b = ne.freq_smooth(h, sup, bb, slack), py.freq_smooth(h, sup, bb, slack)
+        close(a[0], b[0], "hs")
+        assert a[2] == b[2]
+        assert a[1] == pytest.approx(b[1], rel=RTOL)  # inf == inf on narrow bands
+        close(a[3], b[3], "keep")
     reps = pilots(bb.astype(float), 8, "awgn", seed=3, snr_db=snr)
+    for n0_pre in (np.inf, py.preamble_noise(reps)):
+        assert ne.support_slack(h, sup, bb, n0_pre) == py.support_slack(h, sup, bb, n0_pre)
     assert ne.preamble_noise(reps) == pytest.approx(py.preamble_noise(reps), rel=RTOL)
     close(ne.preamble_noise_k(reps), py.preamble_noise_k(reps))
     kw = {"bb": bb, "n0_pre": py.preamble_noise(reps), "n0_pre_k": py.preamble_noise_k(reps)}
@@ -87,6 +90,7 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
         close(got[k], want[k], k)
     for k in ("n0", "p_sig", "spread_hz", "filter_spread_hz"):
         assert got[k] == pytest.approx(want[k], rel=RTOL), k
+    assert got["slack"] == want["slack"]
     steps = np.arange(n_p) * 0.37 - 3
     close(ne.time_shift_phase(steps, bb), py.time_shift_phase(steps, bb))
 
@@ -108,13 +112,14 @@ def test_support_rank_and_subspace(native, band):
     (n10 width 93), far above rounding."""
     bb = ofdm.band(band).bb.astype(np.float64)
     py_basis = equalizer._support_basis.__wrapped__
-    for width in range(4 * NCP + 1):
-        for d0 in {(NCP - width) // 2, -7}:
-            U, r, r_full = py_basis(bb.tobytes(), d0, d0 + width)
-            u, r2, r_full2, keep = native.equalizer.support_basis(bb, d0, d0 + width)
-            assert (r2, r_full2) == (r, r_full), (width, d0)
-            close(u @ u.conj().T, U @ U.conj().T, f"projector {width} {d0}")
-            close(keep, 1 - np.sum(np.abs(U) ** 2, axis=1), "keep")
+    for slack in (equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK):
+        for width in range(4 * NCP + 1):
+            for d0 in {(NCP - width) // 2, -7}:
+                U, r, r_full = py_basis(bb.tobytes(), d0, d0 + width, slack)
+                u, r2, r_full2, keep = native.equalizer.support_basis(bb, d0, d0 + width, slack)
+                assert (r2, r_full2) == (r, r_full), (width, d0, slack)
+                close(u @ u.conj().T, U @ U.conj().T, f"projector {width} {d0} {slack}")
+                close(keep, 1 - np.sum(np.abs(U) ** 2, axis=1), "keep")
 
 
 def test_per_carrier_noise(native, py):

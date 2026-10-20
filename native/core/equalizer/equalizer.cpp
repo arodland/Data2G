@@ -53,17 +53,17 @@ Mat<cd> project(const Mat<cd>& h, const Basis& b) {
 }
 
 // B over the support plus slack (nc x nd): B[k, j] = phasor(bb_k * d_j).
-std::vector<cd> steering(std::span<const double> bb, int d0, int d1) {
+std::vector<cd> steering(std::span<const double> bb, int d0, int d1, int slack) {
     std::vector<cd> B;
     for (size_t k = 0; k < bb.size(); ++k)
-        for (int d = d0 - SUPPORT_SLACK; d <= d1 + SUPPORT_SLACK; ++d) B.push_back(phasor(bb[k] * d));
+        for (int d = d0 - slack; d <= d1 + slack; ++d) B.push_back(phasor(bb[k] * d));
     return B;
 }
 
 // B B^H
-std::vector<cd> gram(std::span<const double> bb, int d0, int d1) {
+std::vector<cd> gram(std::span<const double> bb, int d0, int d1, int slack) {
     const size_t nc = bb.size();
-    const auto B = steering(bb, d0, d1);
+    const auto B = steering(bb, d0, d1, slack);
     const size_t nd = B.size() / nc;
     std::vector<cd> g(nc * nc);
     for (size_t k = 0; k < nc; ++k)
@@ -139,20 +139,20 @@ int window_shift(Support s) {
     return static_cast<int>(std::nearbyint((s.first + s.second - NCP) / 2.0));
 }
 
-std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1) {
-    using Key = std::tuple<std::vector<double>, int, int>;
+std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack) {
+    using Key = std::tuple<std::vector<double>, int, int, int>;
     static std::mutex mutex;
     static std::map<Key, std::shared_ptr<const Basis>> cache;
-    Key key{std::vector<double>(bb.begin(), bb.end()), d0, d1};
+    Key key{std::vector<double>(bb.begin(), bb.end()), d0, d1, slack};
     {
         std::lock_guard lock(mutex);
         if (auto it = cache.find(key); it != cache.end()) return it->second;
     }
     const int nc = static_cast<int>(bb.size());
-    if (nc < 3 || d1 < d0 - 2 * SUPPORT_SLACK) throw std::invalid_argument("support_basis: bad band or support");
+    if (nc < 3 || slack < 0 || d1 < d0 - 2 * slack) throw std::invalid_argument("support_basis: bad band or support");
     // The SVD from an eigen-solve of the smaller Gram matrix: B B^H's
     // eigenvectors are U, B^H B's are V (then U = B V / s); s = sqrt(lambda).
-    const auto B = steering(bb, d0, d1);
+    const auto B = steering(bb, d0, d1, slack);
     const size_t NC = static_cast<size_t>(nc), nd = B.size() / NC;
     const bool left = NC <= nd;
     const size_t n = left ? NC : nd;
@@ -200,13 +200,30 @@ std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, i
     return cache.emplace(std::move(key), std::move(b)).first->second;
 }
 
-Smoothed freq_smooth(const Mat<cd>& h, Support support, std::span<const double> bb) {
-    const auto basis = support_basis(bb, support.first, support.second);
+Smoothed freq_smooth(const Mat<cd>& h, Support support, std::span<const double> bb, int slack) {
+    const auto basis = support_basis(bb, support.first, support.second, slack);
     const int nc = static_cast<int>(bb.size());
     if (h.cols != bb.size()) throw std::invalid_argument("freq_smooth: h_pilot and bb disagree on carriers");
     Smoothed out{project(h, *basis), INF, basis->r, basis->keep};
     if (nc - basis->r_full >= 2) out.n0 = mean_sq_diff(h, out.hs) * nc / (nc - basis->r);
     return out;
+}
+
+int support_slack(const Mat<cd>& h, Support support, std::span<const double> bb, double n0_pre) {
+    const auto t = support_basis(bb, support.first, support.second, SUPPORT_SLACK);
+    const auto p = support_basis(bb, support.first, support.second, PADDED_SLACK);
+    if (p->r <= t->r) return SUPPORT_SLACK;
+    const Mat<cd> hp = project(h, *p);
+    const Mat<cd> ht = project(hp, *t);
+    double n0 = n0_pre;
+    if (!std::isfinite(n0)) {
+        const int nc = static_cast<int>(bb.size());
+        n0 = mean_sq_diff(h, project(h, *t)) * nc / (nc - t->r);
+    }
+    double gained = 0.0;
+    for (size_t i = 0; i < hp.data.size(); ++i) gained += sq_abs(hp.data[i] - ht.data[i]);
+    gained = gained / static_cast<double>(h.rows) / (p->r - t->r);
+    return gained > PADDED_GAIN * n0 ? PADDED_SLACK : SUPPORT_SLACK;
 }
 
 std::vector<double> preamble_noise_k(const Mat<cd>& h) {
@@ -312,9 +329,11 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
     constexpr int S = config::SYMS_PER_FRAME - 1;
     const int n_p = static_cast<int>(h_pilot.rows), n_f = n_p - 1, nc = static_cast<int>(bb.size());
     if (n_p < 2) throw std::invalid_argument("estimate: need at least two pilots");
-    auto sm = freq_smooth(h_pilot, support, bb);
+    const int slack = support_slack(h_pilot, support, bb, n0_pre);
+    auto sm = freq_smooth(h_pilot, support, bb, slack);
     const Mat<cd>& hs = sm.hs;
     Estimate e;
+    e.slack = slack;
     e.n_f = n_f;
     e.nc = nc;
     double n0 = sm.n0;
@@ -388,14 +407,15 @@ Mat<cd> time_shift_phase(std::span<const double> shift, std::span<const double> 
 
 std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const double> t_pilot, const Mat<cd>& z,
                                        const Mat<double>& w, const Mat<double>& t_rows, Support support,
-                                       double p_sig, double spread, double n0, std::span<const double> bb) {
+                                       double p_sig, double spread, double n0, std::span<const double> bb,
+                                       int slack) {
     const size_t nc = bb.size(), F = t_rows.rows, S = t_rows.cols, P = h_pilot.rows;
     if (h_pilot.cols != nc || z.cols != nc || w.cols != nc || z.rows != F * S || w.rows != F * S || t_pilot.size() != P)
         throw std::invalid_argument("refine: shapes disagree");
-    const auto basis = support_basis(bb, support.first, support.second);
+    const auto basis = support_basis(bb, support.first, support.second, slack);
     const Mat<cd> hs_p = project(h_pilot, *basis);
-    std::vector<cd> rf = gram(bb, support.first, support.second);
-    const double scale = p_sig / (support.second - support.first + 2 * SUPPORT_SLACK + 1);
+    std::vector<cd> rf = gram(bb, support.first, support.second, slack);
+    const double scale = p_sig / (support.second - support.first + 2 * slack + 1);
     for (cd& x : rf) x = scale * x;
     auto Rf = [&](size_t r, size_t c) { return rf[r * nc + c]; };
 
