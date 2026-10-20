@@ -34,6 +34,8 @@ inline constexpr bool PER_CARRIER_NOISE = true;
 inline constexpr double NOISE_SHAPE_PRIOR = 8.0;
 inline constexpr int PREAMBLE_DIFFS = 7;  // preamble_noise_k's samples: the default 8 repeats' differences
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
+inline constexpr int PADDED_SLACK = 20;  // support_slack's padded order
+inline constexpr double PADDED_GAIN = 2.0;
 inline constexpr double INF = std::numeric_limits<double>::infinity();
 
 // CARRIER0 + RS * (k0 + k) - FCENTER.
@@ -47,13 +49,13 @@ int window_shift(Support support);
 // _support_basis: an orthonormal basis U (nc x r) of the support's delays
 // across the carriers (the span of the SVD's leading r vectors; which basis
 // is not specified), r, the uncapped rank, and 1 - each carrier's leverage.
-// Cached per (bb, support), thread-safe.
+// Cached per (bb, support, slack), thread-safe.
 struct Basis {
     Mat<cd> u;
     int r = 0, r_full = 0;
     std::vector<double> keep;
 };
-std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1);
+std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack = SUPPORT_SLACK);
 
 struct Smoothed {
     Mat<cd> hs;
@@ -61,7 +63,9 @@ struct Smoothed {
     int r = 0;
     std::vector<double> keep;
 };
-Smoothed freq_smooth(const Mat<cd>& h_pilot, Support support, std::span<const double> bb);
+Smoothed freq_smooth(const Mat<cd>& h_pilot, Support support, std::span<const double> bb, int slack = SUPPORT_SLACK);
+// The burst's projection order: SUPPORT_SLACK or PADDED_SLACK (equalizer.py).
+int support_slack(const Mat<cd>& h_pilot, Support support, std::span<const double> bb, double n0_pre = INF);
 
 double preamble_noise(const Mat<cd>& h_repeats);
 std::vector<double> preamble_noise_k(const Mat<cd>& h_repeats);
@@ -77,6 +81,7 @@ struct Estimate {
     Mat<double> mse;  // the same shape
     double n0 = 0, p_sig = 0, spread_hz = 0;
     double filter_spread_hz = 0;  // the time filters' (refine's too); spread_hz is the reported one
+    int slack = SUPPORT_SLACK;  // the support's padding (support_slack; refine's too)
     std::vector<double> n0_k;
 };
 // n0_pre_k empty: None. Throws std::invalid_argument without a noise estimate.
@@ -85,9 +90,10 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
 
 Mat<cd> time_shift_phase(std::span<const double> shift, std::span<const double> bb);
 
-// Returns h and mse, (F * S, nc). p_sig, spread_hz, n0: estimate()'s.
+// Returns h and mse, (F * S, nc). p_sig, spread_hz, n0, slack: estimate()'s.
 std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const double> t_pilot, const Mat<cd>& z,
                                        const Mat<double>& w, const Mat<double>& t_rows, Support support,
-                                       double p_sig, double spread_hz, double n0, std::span<const double> bb);
+                                       double p_sig, double spread_hz, double n0, std::span<const double> bb,
+                                       int slack = SUPPORT_SLACK);
 
 }  // namespace data2g::equalizer

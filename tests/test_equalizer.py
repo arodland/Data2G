@@ -71,3 +71,47 @@ def test_per_carrier_noise_is_the_band_level_on_a_clean_channel():
         n0 = np.array([modem.equalizer.per_carrier_noise(row, m) for row in p])
         assert np.mean(n0 != n0[:, :1]) < 0.04  # 1-3% flagged by chance (the median reference is noisy too)
         assert abs(np.median(n0) - 1) < 0.05
+
+
+def _two_path_pilots(seed, n0, delay=24, late=0.5, n_p=17):
+    """n10's LS pilots on a static channel of two paths `delay` samples
+    apart, the late one `late` x the first's amplitude, unit power, plus
+    noise of variance n0 per carrier."""
+    from data2g.waveform import ofdm
+
+    bb = ofdm.band("n10").bb.astype(float)
+    rng = np.random.default_rng(seed)
+    h = 1 + late * np.exp(-2j * np.pi * bb * delay / modem.FS + 0.7j)
+    h /= np.sqrt(np.mean(np.abs(h) ** 2))
+    noise = rng.normal(size=(n_p, len(bb))) + 1j * rng.normal(size=(n_p, len(bb)))
+    return h, h[None] + np.sqrt(n0 / 2) * noise, bb
+
+
+def test_support_order_pads_for_a_path_a_narrow_band_cannot_resolve():
+    """n10 at 30 dB on two paths 3 ms apart, the late one 6 dB down: the
+    delay profile reads one, the tight projection drops the other (an
+    error floor near -9 dB), the padded one keeps it (-32 dB), and
+    support_slack picks the padded one."""
+    from data2g import equalizer
+
+    h, hp, bb = _two_path_pilots(0, 1e-3)
+    sup = equalizer.delay_support(hp, bb=bb)
+    assert equalizer.support_slack(hp, sup, bb, n0_pre=1e-3) == equalizer.PADDED_SLACK
+    err = {s: np.mean(np.abs(equalizer.freq_smooth(hp, sup, bb, s)[0] - h) ** 2)
+           for s in (equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK)}
+    assert err[equalizer.PADDED_SLACK] < err[equalizer.SUPPORT_SLACK] / 10
+    est = equalizer.estimate(hp, sup, bb=bb, n0_pre=1e-3)
+    assert est["slack"] == equalizer.PADDED_SLACK
+
+
+def test_support_order_stays_tight_on_a_flat_channel_in_noise():
+    """One path at -5 dB: the padded dimensions hold only noise, so the
+    tight projection (more noise averaging) is kept, burst after burst."""
+    from data2g import equalizer
+
+    picks = []
+    for seed in range(50):
+        _, hp, bb = _two_path_pilots(seed, 3.0, late=0.0)
+        sup = equalizer.delay_support(hp, bb=bb)
+        picks.append(equalizer.support_slack(hp, sup, bb, n0_pre=3.0))
+    assert picks.count(equalizer.SUPPORT_SLACK) >= 49

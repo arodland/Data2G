@@ -47,14 +47,17 @@ void bind_equalizer(py::module_& m) {
         return eq::delay_support(mat(h), bb_of(bb), floor_db);
     }, py::arg("h_pilot"), py::arg("floor_db") = -15.0, no_bb);
     e.def("window_shift", &eq::window_shift);
-    e.def("support_basis", [](const In<double>& bb, int d0, int d1) {
-        const auto b = eq::support_basis(vec(bb), d0, d1);
+    e.def("support_basis", [](const In<double>& bb, int d0, int d1, int slack) {
+        const auto b = eq::support_basis(vec(bb), d0, d1, slack);
         return py::make_tuple(np(b->u), b->r, b->r_full, np(b->keep));
-    });
-    e.def("freq_smooth", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb) {
-        auto r = eq::freq_smooth(mat(h), s, bb_of(bb));
+    }, py::arg("bb"), py::arg("d0"), py::arg("d1"), py::arg("slack") = eq::SUPPORT_SLACK);
+    e.def("freq_smooth", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb, int slack) {
+        auto r = eq::freq_smooth(mat(h), s, bb_of(bb), slack);
         return py::make_tuple(np(r.hs), r.n0, r.r, np(r.keep));
-    }, py::arg("h_pilot"), py::arg("support"), no_bb);
+    }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("slack") = eq::SUPPORT_SLACK);
+    e.def("support_slack", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb, double n0_pre) {
+        return eq::support_slack(mat(h), s, bb_of(bb), n0_pre);
+    }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("n0_pre") = eq::INF);
     e.def("preamble_noise", [](const In<cd>& h) { return eq::preamble_noise(mat(h)); });
     e.def("preamble_noise_k", [](const In<cd>& h) { return np(eq::preamble_noise_k(mat(h))); });
     e.def("per_carrier_noise", [](const In<double>& p, int samples) {
@@ -79,6 +82,7 @@ void bind_equalizer(py::module_& m) {
         d["p_sig"] = r.p_sig;
         d["spread_hz"] = r.spread_hz;
         d["filter_spread_hz"] = r.filter_spread_hz;
+        d["slack"] = r.slack;
         return d;
     }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("n0_pre") = eq::INF,
        py::arg("n0_pre_k") = std::optional<In<double>>());
@@ -99,8 +103,9 @@ void bind_equalizer(py::module_& m) {
             const double p_sig = est["p_sig"].cast<double>(),
                          spread = est[est.contains("filter_spread_hz") ? "filter_spread_hz" : "spread_hz"].cast<double>(),
                          n0 = est["n0"].cast<double>();
+            const int slack = est.contains("slack") ? est["slack"].cast<int>() : eq::SUPPORT_SLACK;
             py::gil_scoped_release nogil;
-            r = eq::refine(hp, tp, zm, wm, tr, s, p_sig, spread, n0, bbv);
+            r = eq::refine(hp, tp, zm, wm, tr, s, p_sig, spread, n0, bbv, slack);
         }
         return py::make_tuple(np3(r.first, tr.rows, tr.cols), np3(r.second, tr.rows, tr.cols));
     }, py::arg("h_pilot"), py::arg("t_pilot"), py::arg("z"), py::arg("w"), py::arg("t_rows"), py::arg("support"),

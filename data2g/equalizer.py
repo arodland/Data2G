@@ -114,16 +114,23 @@ def window_shift(support: tuple[int, int]) -> int:
 
 
 SUPPORT_SLACK = 4  # taps of margin either side of the measured delay support; see freq_smooth
+# The padded order support_slack may pick for a burst's data estimate: past
+# a narrow band's delay resolution (16 samples on n10), so a second path the
+# profile can't separate stays in the projection.
+PADDED_SLACK = 20
+# support_slack picks PADDED_SLACK when the pilots' energy in the dimensions
+# it adds, per dimension, exceeds this many times the noise (1.5-3 alike;
+# scripts/dfts_study.py, /sauto).
+PADDED_GAIN = 2.0
 
 
 @lru_cache(maxsize=1024)
-def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
+def _support_basis(bb_bytes: bytes, d0: int, d1: int, slack: int = SUPPORT_SLACK) -> tuple:
     """(orthonormal basis of the support's delays across the carriers, its
     rank, the uncapped rank): geometry only, so computed once per band and
     support (the SVD was 7% of a Pat exchange's CPU, once per header read)."""
     bb = np.frombuffer(bb_bytes)
     nc = len(bb)
-    slack = SUPPORT_SLACK
     d = np.arange(d0 - slack, d1 + slack + 1)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
     U, s, _ = np.linalg.svd(B, full_matrices=False)
@@ -134,8 +141,10 @@ def _support_basis(bb_bytes: bytes, d0: int, d1: int) -> tuple:
     return U, r, r_full
 
 
-def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS) -> tuple:
-    """Project each pilot vector onto the delay support. Returns the
+def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
+                slack: int = SUPPORT_SLACK) -> tuple:
+    """Project each pilot vector onto the delay support, `slack` taps
+    wider each side (support_slack picks it for data). Returns the
     smoothed pilots, the per-carrier noise variance from the residual
     (inf where the support would take all but < 2 dimensions, i.e. narrow
     bands), the rank, and per carrier the fraction of its noise the
@@ -160,12 +169,45 @@ def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = 
     # WORSE on every narrow candidate, AWGN included (runs/
     # ladder_narrowpad.csv, 2026-09-24: +0.25-0.75 dB typical, n4 16-QAM
     # k1280 AWGN +2.5): the tight projection's noise averaging is worth
-    # more than its bias at the SNRs these modes run at. Per-burst model
-    # order selection could have both; untried.
-    U, r, r_full = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(d0), int(d1))
+    # more than its bias at the SNRs these modes run at. support_slack
+    # picks per burst between the two for the data estimate.
+    U, r, r_full = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(d0), int(d1), int(slack))
     hs = (h_pilot @ np.conj(U)) @ U.T
     n0 = float(np.mean(np.abs(h_pilot - hs) ** 2) * nc / (nc - r)) if nc - r_full >= 2 else np.inf
     return hs, n0, r, 1 - np.sum(np.abs(U) ** 2, axis=1)
+
+
+def support_slack(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
+                  n0_pre: float = np.inf) -> int:
+    """The burst's projection order: SUPPORT_SLACK, or PADDED_SLACK when the
+    pilots hold more energy in the dimensions padding adds than its noise
+    would cost there (Mallows' Cp between the two): per added dimension,
+    the mean over pilots of the energy the padded projection keeps outside
+    the tight one, against PADDED_GAIN x the thermal noise (the
+    preamble's, else the tight projection's residual). Never a padded
+    order the nc - 2 rank cap would cut.
+
+    The tight order lost a 2 ms second path on n10 (10 carriers can't
+    resolve it), which held its estimate to a median 16.5 dB SINR on mpp,
+    noiseless (padded: 26.9), and every n10 mode above 16qam-r1/2 never
+    reached its 10% point there; padding always cost low-SNR cells up to
+    0.75 dB (freq_smooth). Chosen per burst it cost none of 56 cells and
+    moved mpp's n10-16qam-r1/2 from 12.1 to 8.9 dB, r2/3 from never to
+    12.7 (scripts/dfts_study.py, 2026-10-20)."""
+    key = np.asarray(bb, dtype=np.float64).tobytes()
+    Ut, rt, _ = _support_basis(key, int(support[0]), int(support[1]), SUPPORT_SLACK)
+    Up, rp, rp_full = _support_basis(key, int(support[0]), int(support[1]), PADDED_SLACK)
+    # capped at nc - 2, the padded subspace is nearly all of them, and which
+    # dimensions the cap drops is arbitrary (near-equal singular values)
+    if rp <= rt or rp_full > rp:
+        return SUPPORT_SLACK
+    hp = (h_pilot @ np.conj(Up)) @ Up.T
+    extra = hp - (hp @ np.conj(Ut)) @ Ut.T
+    n0 = n0_pre
+    if not np.isfinite(n0):
+        n0 = float(np.mean(np.abs(h_pilot - (h_pilot @ np.conj(Ut)) @ Ut.T) ** 2) * len(bb) / (len(bb) - rt))
+    gained = float(np.sum(np.abs(extra) ** 2)) / len(h_pilot) / (rp - rt)
+    return PADDED_SLACK if gained > PADDED_GAIN * n0 else SUPPORT_SLACK
 
 
 def preamble_noise(h_repeats: np.ndarray) -> float:
@@ -261,6 +303,7 @@ class ChannelEstimate(TypedDict):
     p_sig: float  # mean pilot power per carrier, noise removed
     spread_hz: float  # measured Doppler spread (reported)
     filter_spread_hz: float  # the one the time filters used (refine's too)
+    slack: int  # the delay support's padding the projection used (support_slack; refine's too)
 
 
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
@@ -276,7 +319,8 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     n_p = len(h_pilot)
     n_f = n_p - 1
     nc = len(bb)
-    hs, n0, r, keep = freq_smooth(h_pilot, support, bb)
+    slack = support_slack(h_pilot, support, bb, n0_pre)
+    hs, n0, r, keep = freq_smooth(h_pilot, support, bb, slack)
     # The residual's when it has room (wide band: it includes the pilots'
     # own clip distortion, which the preamble's estimate cannot see:
     # identical repeats clip identically, so it cancels in their
@@ -315,7 +359,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
     if n0_k is None or not PER_CARRIER_NOISE:
         n0_k = np.full(nc, n0)
     return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "p_sig": p_sig, "spread_hz": spread,
-            "filter_spread_hz": fspread}
+            "filter_spread_hz": fspread, "slack": slack}
 
 
 def time_shift_phase(shift: np.ndarray, bb: np.ndarray = BB_FREQS) -> np.ndarray:
@@ -340,13 +384,15 @@ def refine(h_pilot: np.ndarray, t_pilot: np.ndarray, z: np.ndarray, w: np.ndarra
     one codeword's), keeping each carrier's posterior variance. Then per
     carrier, every data row is Wiener-interpolated in time over the
     nearby pilot and data rows, each with its own noise. `est`:
-    estimate()'s result for p_sig, filter_spread_hz and n0. Returns h and mse
+    estimate()'s result for p_sig, filter_spread_hz, n0 and slack (the
+    support's order, support_slack). Returns h and mse
     (F, S, NC), in the pilots' units."""
     nc = len(bb)
-    U, r, _ = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]))
+    slack = int(est.get("slack", SUPPORT_SLACK))
+    U, r, _ = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]), slack)
     p_sig, spread = est["p_sig"], est.get("filter_spread_hz", est["spread_hz"])
     hs_p = (h_pilot @ np.conj(U)) @ U.T
-    d = np.arange(support[0] - SUPPORT_SLACK, support[1] + SUPPORT_SLACK + 1)
+    d = np.arange(support[0] - slack, support[1] + slack + 1)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
     Rf = p_sig / len(d) * (B @ B.conj().T)
     # data rows, batched by which carriers they know (after decoding: all)

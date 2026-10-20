@@ -59,6 +59,7 @@ Heard heard_of(const py::dict& r) {
     o->est.p_sig = e["p_sig"].cast<double>();
     o->est.spread_hz = e.contains("spread_hz") ? e["spread_hz"].cast<double>() : 0.0;
     o->est.filter_spread_hz = e.contains("filter_spread_hz") ? e["filter_spread_hz"].cast<double>() : o->est.spread_hz;
+    o->est.slack = e.contains("slack") ? e["slack"].cast<int>() : equalizer::SUPPORT_SLACK;
     o->est.clip_ratio = e["clip_ratio"].cast<double>();
     o->est.gain = e.contains("gain") ? e["gain"].cast<double>() : 1.0;
     o->band = config::band(r["band"].cast<std::string>()).name;

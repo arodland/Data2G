@@ -564,7 +564,7 @@ ModemRx::Est ModemRx::dd_estimate() const {
     }
     const auto t = modem::symbol_times(R);
     auto [h, mse] = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
-                                      equalizer::bb(config::band(spec.band)));
+                                      equalizer::bb(config::band(spec.band)), est.slack);
     auto out = std::make_shared<modem::DataEstimate>(est);
     for (std::size_t i = 0; i < h.data.size(); ++i) {
         out->h.data[i] = g * h.data[i];

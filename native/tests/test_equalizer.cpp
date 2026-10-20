@@ -142,6 +142,20 @@ int main() {
         check::equal(equalizer::estimate(h, {0, 10}, n4, 0.02, pre).n0, 0.02, "n4 takes n0_pre");
     }
 
+    // support_slack: n10 can't resolve a path 3 ms late, so at 30 dB the
+    // padded order is picked (and carried to refine by estimate); in noise
+    // on a flat channel the padded dimensions hold only noise.
+    {
+        const auto n10 = equalizer::bb(config::BANDS[1]);
+        const auto h = two_path(n10, 17, 0, 24, 1e-3, rng);
+        const auto sup = equalizer::delay_support(h, n10);
+        check::equal(equalizer::support_slack(h, sup, n10, 1e-3), equalizer::PADDED_SLACK, "n10 3 ms path: padded");
+        check::equal(equalizer::estimate(h, sup, n10, 1e-3).slack, equalizer::PADDED_SLACK, "estimate carries it");
+        const auto flat = two_path(n10, 17, 0, 0, 3.0, rng);
+        check::equal(equalizer::support_slack(flat, equalizer::delay_support(flat, n10), n10, 3.0),
+                     equalizer::SUPPORT_SLACK, "flat in noise: tight");
+    }
+
     // per_carrier_noise: one hot carrier gets its own (shrunk) level.
     {
         std::vector<double> p(24, 1.0);
