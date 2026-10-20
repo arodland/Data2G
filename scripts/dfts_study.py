@@ -57,6 +57,12 @@ points, no DD, so a few tenths off mode_thresholds.json):
   19.13; n10-qpsk-r1/5 and every other cell unchanged. Not an artefact of
   mpp's 2 ms (n10's resolution exactly), and it reaches mpd once its path
   is off the CP's 4 ms.
+- What estimation costs the bottom and middle (runs/genie_gap.sh: 10% points
+  on the estimate against the true channel, delays drawn per trial, no DD):
+  0-0.75 dB on awgn and mpg~ everywhere; on mpp~/mpd~ the low-rate modes
+  lose most: qpsk-r1/5 1.69/1.88, w48-qpsk-r1/5 1.69/1.88, n4-qpsk-r1/3
+  1.50/1.69, n10-qpsk-r1/5 1.12/0.75, qpsk-r1/3 1.50/0.56; rate 1/2 and up
+  0-0.75; the polar ACKs 0-0.75.
 - DFT-spread against the better OFDM arm: awgn -0.6 to -1.35 dB PEP-fair
   (2.4-5 dB less clip noise at a headroom, so it clips harder), n10 mpg
   -0.2 to -0.8; but mpp 0 to +2 dB worse, w48 mpg +0.2 to +3, mpd worse or
