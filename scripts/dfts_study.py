@@ -32,6 +32,30 @@ bursts of about 16 frames (codewords spread over them, as CANDIDATES.md),
 a burst whose header fails counting all its codewords failed. Common
 random numbers: trial k has the same seed at every SNR and on every arm.
 
+Found (2026-10-19/20; runs/dfts_round1.sh, dfts_round2.sh; PEP-fair 10%
+points, no DD, so a few tenths off mode_thresholds.json):
+
+- The n10 fading floor is the channel estimate, not clipping or diversity.
+  Noiseless and unclipped on mpp, the pilots' estimate held n10 to a median
+  16.5 dB SINR (p10 10.4): freq_smooth's tight support drops a 2 ms second
+  path 10 carriers can't resolve. Padding it (SUPPORT_SLACK 20) gave 26.9
+  (p10 24.8). mpd's floor (median 19.6, p10 9.7) did not move: its 4 ms
+  path sits on the CP.
+- Padding everywhere costs low SNR (+0.2 to +0.75 dB on some awgn/mpg/mpp
+  cells, as the rejected narrow pad did). /sauto (auto_estimate: the padded
+  order when the energy it adds per dimension tops AUTO_K x the noise; 1.5
+  to 3 alike) cost nothing in any of 56 cells (14 modes x 4 channels) and
+  gave, on mpp: n10-16qam-r1/2 12.08 -> 8.89, n10-qpsk-r3/4 9.80 -> 7.55,
+  n10-16qam-r2/3 never -> 12.71, r3/4 never -> 15.15, n10-64l-r3/4 never ->
+  21.73, n10-256l-r3/4 never -> 30.45; on mpg 64l -0.94, 256l -1.13. n4 and
+  the 1200 Hz modes unchanged (n4's rank cap; w resolves the paths).
+- DFT-spread against the better OFDM arm: awgn -0.6 to -1.35 dB PEP-fair
+  (2.4-5 dB less clip noise at a headroom, so it clips harder), n10 mpg
+  -0.2 to -0.8; but mpp 0 to +2 dB worse, w48 mpg +0.2 to +3, mpd worse or
+  never (linear MMSE-FDE's noise enhancement in notches; BICM over long
+  spread codewords does better here). Not pursued: a flat-channel niche at
+  best, unless turbo equalization wins the fading back.
+
     uv run python scripts/dfts_study.py consts --modes n10-16qam-r2/3 --headroom 0 2 4
     uv run python scripts/dfts_study.py thresholds --modes n10-16qam-r2/3 \\
         --arms ofdm dfts@2 --channels awgn mpp --out runs/dfts.csv
