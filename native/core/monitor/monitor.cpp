@@ -43,11 +43,35 @@ std::string ext_desc(const Ext& ext) {
 }
 
 // An ARQ_DUP control pair (RV 0 then RV 1) combined.
-std::optional<Bytes> pair(ModemRx& rx, int slot, const MaskId& mask) {
+std::optional<Bytes> pair(PlainRx& rx, int slot, const MaskId& mask) {
     std::optional<SoftEntry> st;
     rx.decode_stored(slot, mask, 0, st);
     return rx.decode_stored(slot + 1, mask, 1, st);
 }
+
+// A burst of ours, read back from what was sent: a slot decodes, at any RV,
+// under a mask with the CRC value it was sent under.
+class SentRx : public PlainRx {
+public:
+    explicit SentRx(const TxBurst& b) : b_(b) {}
+    const std::string& submode() const override { return b_.submode; }
+    int n_cw() const override { return static_cast<int>(b_.slots.size()); }
+    std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int, std::optional<SoftEntry>&) override {
+        return decode_plain(slot, mask);
+    }
+    std::optional<Bytes> decode_plain(int slot, const MaskId& mask) override {
+        if (slot < 0 || slot >= n_cw() || mask_value(b_.slots[static_cast<std::size_t>(slot)].mask_id) != mask_value(mask))
+            return std::nullopt;
+        return b_.slots[static_cast<std::size_t>(slot)].payload;
+    }
+    std::vector<Bytes> raw(int slot) override {
+        if (slot < 0 || slot >= n_cw()) return {};
+        return {b_.slots[static_cast<std::size_t>(slot)].payload};
+    }
+
+private:
+    const TxBurst& b_;
+};
 
 std::uint16_t be16(ByteView b, std::size_t i) { return static_cast<std::uint16_t>(at(b, i) << 8 | at(b, i + 1)); }
 
@@ -152,11 +176,25 @@ Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
         return d;
     }
     ModemRx rx(b.heard, nullptr, DD_BUDGET_S, b.soft);
+    read(rx, d);
+    return d;
+}
+
+Dump Monitor::sent(const TxBurst& b, const std::string& when) {
+    Dump d;
+    d.tx = true;
+    d.head = when + "  TX " + b.submode + " x" + std::to_string(b.slots.size()) + "\n";
+    SentRx rx(b);
+    read(rx, d);
+    return d;
+}
+
+void Monitor::read(PlainRx& rx, Dump& d) {
     try {
-        if (broadcast(rx, d) || keyed(rx, d)) return d;
+        if (broadcast(rx, d) || keyed(rx, d)) return;
     } catch (const std::exception& e) {  // passed a CRC but doesn't parse
         d.head += std::string("  malformed: ") + e.what() + "\n";
-        return d;
+        return;
     }
     d.head += "  unidentified (no CRC passes under a mask known here); raw codewords, unverified\n";
     std::string none;
@@ -166,10 +204,9 @@ Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
         else d.payloads.push_back({"slot " + std::to_string(i), r[0], {}});
     }
     if (!none.empty()) d.head += "  no decode: slot" + none + "\n";
-    return d;
 }
 
-bool Monitor::broadcast(ModemRx& rx, Dump& d) {
+bool Monitor::broadcast(PlainRx& rx, Dump& d) {
     const auto ctl = kisslink::KissLink::read_burst_control(rx, rx.n_cw());
     if (!ctl) return false;
     const auto& [c, n_ctl] = *ctl;
@@ -185,7 +222,7 @@ bool Monitor::broadcast(ModemRx& rx, Dump& d) {
     return true;
 }
 
-bool Monitor::keyed(ModemRx& rx, Dump& d) {
+bool Monitor::keyed(PlainRx& rx, Dump& d) {
     // a compact CONNECT (CPM's one short control codeword): its own mask
     const Mode& m = mode_at(rx.submode());
     if (ceil_div(CONNECT_CTL_BYTES, ctl_payload_bytes(m)) > max_ctl(m))
@@ -281,7 +318,7 @@ void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
     d.head += "  " + s + "\n";
 }
 
-void Monitor::arq_burst(ModemRx& rx, const Control& ctl, int key, int dir, int dup, Dump& d) {
+void Monitor::arq_burst(PlainRx& rx, const Control& ctl, int key, int dir, int dup, Dump& d) {
     const Core& c = ctl.core;
     const Ext& ext = ctl.ext;
     static const char* hints[] = {"shrink", "hold", "grow", "max"};

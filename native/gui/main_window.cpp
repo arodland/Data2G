@@ -1,5 +1,7 @@
 #include "main_window.hpp"
 
+#include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QDateTime>
 #include <QFontDatabase>
@@ -8,9 +10,12 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTextCharFormat>
+#include <QTextCursor>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -57,7 +62,9 @@ QStringList names(const std::vector<audio::DeviceInfo>& devs) {
 
 }  // namespace
 
-// Every burst heard, as a packet dump, in a terminal-style scrolling view.
+// Every burst heard, and every one we send (in TX_COLOR), as a packet dump,
+// in a terminal-style scrolling view. Made with the main window and fed
+// while monitoring is on, shown or not: opened, its scrollback is complete.
 class MonitorWindow : public QWidget {
 public:
     static constexpr std::size_t MAX_DUMPS = 1000;  // kept to re-render on a format change
@@ -85,9 +92,8 @@ public:
         view_->setStyleSheet(QStringLiteral("QPlainTextEdit { background: black; color: #d8d8d8; }"));
         top->addWidget(view_);
         connect(format_, &QComboBox::currentIndexChanged, this, [this] {
-            QStringList all;
-            for (const auto& d : dumps_) all << text(d);
-            view_->setPlainText(all.join(QLatin1Char('\n')));
+            view_->clear();
+            for (const auto& d : dumps_) append(d);
             view_->moveCursor(QTextCursor::End);
         });
         connect(clear, &QPushButton::clicked, this, [this] {
@@ -99,15 +105,30 @@ public:
 
     void add(std::vector<monitor::Dump> dumps) {
         for (auto& d : dumps) {
-            view_->appendPlainText(text(d));  // follows the end while it is scrolled there
+            append(d);
             dumps_.push_back(std::move(d));
             if (dumps_.size() > MAX_DUMPS) dumps_.pop_front();
         }
     }
 
 private:
+    static constexpr const char* TX_COLOR = "#f0a040";
+
     QString text(const monitor::Dump& d) const {
         return qs(monitor::render(d, format_->currentIndex() == 1 ? monitor::Format::HEX : monitor::Format::TEXT));
+    }
+    // As appendPlainText: a block of its own after the last, the view
+    // following the end while it is scrolled there.
+    void append(const monitor::Dump& d) {
+        QScrollBar* bar = view_->verticalScrollBar();
+        const bool at_end = bar->value() == bar->maximum();
+        QTextCursor c(view_->document());
+        c.movePosition(QTextCursor::End);
+        if (!view_->document()->isEmpty()) c.insertBlock();
+        QTextCharFormat f;
+        if (d.tx) f.setForeground(QColor(QLatin1String(TX_COLOR)));
+        c.insertText(text(d), f);
+        if (at_end) bar->setValue(bar->maximum());
     }
 
     QComboBox* format_;
@@ -168,10 +189,20 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     abort_->setEnabled(false);
     connect(abort_, &QPushButton::clicked, this, [this] { station_->abort_session(); });
     lamps->addWidget(abort_);
+    monitoring_ = new QCheckBox(tr("Monitor"));
+    monitoring_->setObjectName(QStringLiteral("monitoring"));
+    monitoring_->setToolTip(tr("Decode every burst heard and sent, whoever it is for, into the monitor window's log, open or not"));
+    monitoring_->setChecked(store_.value(QStringLiteral("gui/monitoring"), false).toBool());
+    connect(monitoring_, &QCheckBox::toggled, this, [this](bool on) {
+        store_.setValue(QStringLiteral("gui/monitoring"), on);
+        station_->set_monitor(on);
+    });
+    lamps->addWidget(monitoring_);
     auto* monitor = new QPushButton(tr("Monitor..."));
     monitor->setObjectName(QStringLiteral("open_monitor"));
     connect(monitor, &QPushButton::clicked, this, &MainWindow::open_monitor);
     lamps->addWidget(monitor);
+    monitor_ = new MonitorWindow(this);
     auto* settings = new QPushButton(tr("Settings..."));
     connect(settings, &QPushButton::clicked, this, &MainWindow::open_settings);
     lamps->addWidget(settings);
@@ -319,12 +350,12 @@ void MainWindow::poll() {
     }
     while (log_->rowCount() > MAX_LOG_ROWS) log_->removeRow(log_->rowCount() - 1);
 
-    s.set_monitor(monitor_ && monitor_->isVisible());  // decodes only while someone watches
-    if (monitor_) monitor_->add(s.take_dumps());
+    s.set_monitor(monitoring_->isChecked());  // a restarted station's too
+    monitor_->add(s.take_dumps());
 }
 
 void MainWindow::open_monitor() {
-    if (!monitor_) monitor_ = new MonitorWindow(this);
+    monitoring_->setChecked(true);  // the window is for watching
     monitor_->show();
     monitor_->raise();
     monitor_->activateWindow();

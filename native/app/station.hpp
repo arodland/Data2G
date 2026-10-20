@@ -145,8 +145,10 @@ public:
     std::vector<double> input_tail(std::size_t n, std::uint64_t* total = nullptr, bool* tx = nullptr) const;
     // The dial frequency the rig last reported (--rig-poll-interval > 0), or nothing.
     std::optional<double> rig_frequency() const;
-    // The Monitor window: while on, every burst heard is also decoded as a
-    // packet dump (core/monitor), whoever it is for, on a thread of its own.
+    // Monitoring: while on, every burst heard, and every one we send, is
+    // also decoded as a packet dump (core/monitor), whoever it is for, on a
+    // thread of its own. Its sessions are followed from one turning on to
+    // the next stop().
     void set_monitor(bool on) { monitor_on_ = on; }
     // The operator's Abort: any session under way is dropped at once and the
     // command clients told DISCONNECTED (host::Host::abort_session).

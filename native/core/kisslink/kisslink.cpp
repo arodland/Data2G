@@ -448,7 +448,7 @@ arq::TxBurstPtr KissLink::next_burst() {
 }
 
 // The burst's control, checked under the key of the group it names.
-std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::ModemRx& rx, int n_cw) {
+std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::PlainRx& rx, int n_cw) {
     for (const auto& c0 : rx.raw(0)) {
         const int n_ctl = (c0[0] & 3) + 1;
         if (c0[0] >> 4 != VERSION || n_ctl > n_cw) continue;
@@ -482,7 +482,7 @@ std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::Mo
     return std::nullopt;
 }
 
-std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_frames(arq::ModemRx& rx, int start, int key) {
+std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_frames(arq::PlainRx& rx, int start, int key) {
     const auto pb = static_cast<std::size_t>(arq::payload_bytes(arq::mode_at(rx.submode())));
     std::vector<Bytes> payloads;
     std::vector<bool> ok;

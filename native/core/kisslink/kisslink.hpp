@@ -137,9 +137,9 @@ public:
 
     // A burst's broadcast control, checked under the key of the group it
     // names -> (control, n_ctl); nullopt: not a broadcast burst.
-    static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::ModemRx& rx, int n_cw);
+    static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::PlainRx& rx, int n_cw);
     // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
-    static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::ModemRx& rx, int start, int key);
+    static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::PlainRx& rx, int start, int key);
 
 private:
     void check_fits(int n, const Port& p, const std::string& mode, bool shift) const;

@@ -76,6 +76,20 @@ struct SoftEntry {
 };
 
 using SoftStore = std::map<SoftKey, SoftEntry>;
+
+// A burst read under masks, with no store of its own: what a monitor (and
+// a broadcast's reader) needs. ModemRx decodes one heard; a monitor shown
+// our own transmission reads the payloads it sent (monitor::Monitor::sent).
+class PlainRx {
+public:
+    virtual ~PlainRx() = default;
+    virtual const std::string& submode() const = 0;
+    virtual int n_cw() const = 0;
+    // ModemRx's, below.
+    virtual std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) = 0;
+    virtual std::optional<Bytes> decode_plain(int slot, const MaskId& mask) = 0;
+    virtual std::vector<Bytes> raw(int slot) = 0;
+};
 using Clock = std::function<double()>;  // seconds, monotonic
 double monotonic();
 
@@ -88,7 +102,7 @@ struct DecodePass {
     std::vector<double> post;  // DD: the coded bits' a-posteriori LLRs, mapping order
 };
 
-class ModemRx : public RxBurst {
+class ModemRx : public RxBurst, public PlainRx {
 public:
     // store: this station's soft bits across bursts (nullptr: decode() with
     // a key keeps nothing). dd_budget: seconds from here after which DD
@@ -117,12 +131,12 @@ public:
     // nothing); a failed decode replaces it, a miss before decoding (slot
     // out of range, CPM control/data mismatch) leaves it. An entry stored under
     // another submode is dropped (logged) and the decode starts fresh.
-    std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored);
-    std::optional<Bytes> decode_plain(int slot, const MaskId& mask);  // no key
+    std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) override;
+    std::optional<Bytes> decode_plain(int slot, const MaskId& mask) override;  // no key
     // The slot's mask-free decode as payload bytes, CRC unchecked: polar's
     // list best first, LDPC's one candidate if it converged. A broadcast
     // control reads its group from these (docs/broadcast.md §2).
-    std::vector<Bytes> raw(int slot);
+    std::vector<Bytes> raw(int slot) override;
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 

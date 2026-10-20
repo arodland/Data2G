@@ -1,6 +1,7 @@
 // monitor::Monitor: the dump formats, then a third station hearing two
 // engines: a session (CONNECT, both streams, compressed text included,
-// DISC, the trailing ID) and a KISS broadcast frame.
+// DISC, the trailing ID) and a KISS broadcast frame. Then one of the two
+// monitoring itself: the other heard, its own bursts shown as sent.
 
 #include <algorithm>
 #include <cstdlib>
@@ -42,6 +43,7 @@ void units() {
 // (noise only while g_deaf), until until() or `seconds` pass.
 double g_snr_db = 12.0;
 bool g_deaf = false;
+bool g_hear_a = true;  // false: the monitor is A's own, hearing B alone (A's bursts come from Monitor::sent)
 
 bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, double seconds,
          const std::function<bool()>& until, unsigned seed) {
@@ -49,7 +51,7 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
     std::normal_distribution<double> noise(0.0, std::sqrt((config::FS / 2.0) / config::SNR_REF_BW_HZ / std::pow(10.0, g_snr_db / 10)));
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK), y(BLOCK);
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-        for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : 2.2 * (ao[j] + bo[j])) + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : 2.2 * ((g_hear_a ? ao[j] : 0.0) + bo[j])) + noise(rng);
         for (auto& dump : m.feed(y, [](double t) {
                  char s[16];
                  std::snprintf(s, sizeof s, "%.1f", t);
@@ -142,14 +144,63 @@ void broadcast() {
     const Bytes info = text("!beacon");
     ui.insert(ui.end(), info.begin(), info.end());
     ka.enqueue(ui);
-    monitor::Monitor m;
-    std::vector<Dump> dumps;
+    monitor::Monitor m, own;
+    std::vector<Dump> dumps, sent;
+    a.set_on_send([&](const TxBurstPtr& t) { sent.push_back(own.sent(*t, "tx")); });
     check::is_true(run(a, b, m, dumps, 30, [&] { return !dumps.empty() && ka.queue.empty(); }, 5), "heard");
     run(a, b, m, dumps, 3, [] { return false; }, 6);
     const std::string out = all(dumps);
     check::is_true(out.find("BCAST \"KISS 0\": 1 frame(s)") != std::string::npos, "group named");
     check::is_true(stream(dumps, "frame 1 (AX.25 W1AW>APRS, UI)") == ui, "the frame, AX.25 addresses read");
+    check::is_true(stream(sent, "frame 1 (AX.25 W1AW>APRS, UI)") == ui, "the frame, as sent");
     if (check::failures) std::fputs(out.c_str(), stderr);
+}
+
+// A station monitoring itself: B heard, A's own bursts shown as it sends
+// them. Both sides of the session are followed, A's included.
+void own_side() {
+    check::current_step = "own side";
+    g_hear_a = false;
+    EngineConfig ca, cb;
+    ca.seed = 71;
+    cb.seed = 72;
+    Engine a("W1AW", ca), b("K2XYZ", cb);
+    monitor::Monitor m;
+    std::vector<Dump> dumps;
+    a.set_on_send([&](const TxBurstPtr& t) { dumps.push_back(m.sent(*t, "tx")); });
+    b.listen();
+    a.connect("K2XYZ", 2);
+    auto both = [&](SessionState s) { return a.session().state == s && b.session().state == s; };
+    check::is_true(run(a, b, m, dumps, 60, [&] { return both(SessionState::CONNECTED); }, 7), "connected");
+    std::string up;
+    while (up.size() < 2000) up += "Sent by the monitoring station itself, line " + std::to_string(up.size()) + ".\n";
+    const std::string down = "73 de K2XYZ\n";
+    a.session().write(text(up));
+    b.session().write(text(down));
+    std::size_t got_b = 0, got_a = 0;
+    check::is_true(run(a, b, m, dumps, 240, [&] {
+        got_b += b.session().read().size();
+        got_a += a.session().read().size();
+        return got_b >= up.size() && got_a >= down.size();
+    }, 8), "data both ways");
+    a.session().disconnect();
+    check::is_true(run(a, b, m, dumps, 60, [&] { return both(SessionState::CLOSED); }, 9), "closed");
+    run(a, b, m, dumps, 3, [] { return false; }, 10);
+    g_hear_a = true;
+
+    const std::string out = all(dumps);
+    const auto tx = std::count_if(dumps.begin(), dumps.end(), [](const Dump& d) { return d.tx; });
+    check::is_true(tx > 0 && tx < static_cast<long>(dumps.size()), "sent and heard bursts both dumped");
+    check::is_true(std::all_of(dumps.begin(), dumps.end(), [](const Dump& d) { return !d.tx || d.head.rfind("tx  TX ", 0) == 0; }),
+                   "sent bursts marked TX");
+    check::is_true(out.find("CONNECT W1AW>K2XYZ") != std::string::npos, "our CONNECT, sent");
+    check::is_true(out.find("CONNECT_ACK K2XYZ>W1AW") != std::string::npos, "their CONNECT_ACK, named from ours");
+    check::is_true(out.find("ARQ W1AW>K2XYZ key") != std::string::npos, "our bursts named");
+    check::is_true(out.find("ARQ K2XYZ>W1AW key") != std::string::npos, "theirs named");
+    check::is_true(out.find("unidentified") == std::string::npos, "no burst unidentified");
+    check::is_true(stream(dumps, "W1AW>K2XYZ stream") == text(up), "our stream as sent");
+    check::is_true(stream(dumps, "K2XYZ>W1AW stream") == text(down), "theirs as sent");
+    if (check::failures || std::getenv("SHOW")) std::fputs(out.c_str(), stderr);
 }
 
 }  // namespace
@@ -254,6 +305,7 @@ int main() {
     units();
     session();
     broadcast();
+    own_side();
     compressed_gap();
     for (double snr : {2.0, 0.0, -2.0}) lossy(snr, static_cast<unsigned>(50 + snr));
     return check::report("test_monitor");
