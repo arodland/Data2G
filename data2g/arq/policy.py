@@ -428,6 +428,12 @@ class GearShifter(L.Policy):
         mean = 10 * np.log10(np.mean(10 ** (np.array(self.energies) / 10)))
         return [float(mean), len(self.energies) / ENERGY_HIST, 1.0]
 
+    def hist_features(self) -> list | None:
+        """The history inputs (predictor.N_HIST); None before any burst."""
+        if not self.spreads:
+            return None
+        return [float(np.median(self.spreads)), float(np.median(self.snrs)), len(self.spreads) / P.GATE_HIST, 1.0]
+
     def link_features(self, station) -> list | None:
         """The link history as the outcome model reads it (predictor.N_LINK):
         my timeouts since the last call count as missed peer bursts. None
@@ -451,7 +457,7 @@ class GearShifter(L.Policy):
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
         cands = [s for s in allowed(st.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
-        m = dict(self.measured, link=self.link_now, energy=self.energy_features())
+        m = dict(self.measured, link=self.link_now, energy=self.energy_features(), hist=self.hist_features())
         prev = None
         if self.prev is not None:
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))

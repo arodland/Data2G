@@ -304,7 +304,7 @@ def predictor_cpp() -> str:
         """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
         rows = []
         for i, m in enumerate(ms):
-            assert m.bands == model.bands and not (m.noise or m.link)  # energy inputs are ported
+            assert m.bands == model.bands and not (m.noise or m.link or m.hist)  # energy inputs are ported
             out.append(f"constexpr double mean_{tag}{i}[] = {{\n{doubles(m.mean)}}};\n")
             out.append(f"constexpr double std_{tag}{i}[] = {{\n{doubles(m.std)}}};\n")
             layers = []

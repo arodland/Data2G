@@ -50,7 +50,14 @@ def energy_of(r) -> list | None:
     return [float(r["energy_db"]), float(r["energy_n"]), 1.0]
 
 
-def load(path, stale_header=(), noise=False, link=False, energy=False):
+def hist_of(r) -> list | None:
+    """A row's history inputs (session_data's HIST_COLS), None if it has none."""
+    if not r.get("hist_n"):
+        return None
+    return [float(r["hist_spread"]), float(r["hist_snr"]), float(r["hist_n"]), 1.0]
+
+
+def load(path, stale_header=(), noise=False, link=False, energy=False, hist=False):
     """`stale_header`: data from before the header copy (PROTOCOL_VERSION
     11): its w/w48 candidates' burst labels are not today's (their codeword
     labels, given a usable burst, still are). `noise`: the noise profile's
@@ -69,10 +76,13 @@ def load(path, stale_header=(), noise=False, link=False, energy=False):
             m["link"] = link_of(r)
         if energy:
             m["energy"] = energy_of(r)
+        if hist:
+            m["hist"] = hist_of(r)
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link, energy))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link, energy,
+                                  hist))
         mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
@@ -214,6 +224,7 @@ def main():
     ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
     ap.add_argument("--link-inputs", action="store_true", help="the link history as inputs too (predictor.N_LINK)")
     ap.add_argument("--energy-inputs", action="store_true", help="the energy SNR as inputs too (predictor.N_ENERGY)")
+    ap.add_argument("--hist-inputs", action="store_true", help="the spread/SNR history as inputs too (predictor.N_HIST)")
     ap.add_argument("--init", metavar="NPZ", help="start from this single model's weights and input scaling "
                     "(a distilled student, scripts/distill_outcome.py): fine-tuning on the outcomes")
     ap.add_argument("--lr", type=float, default=2e-3)
@@ -231,7 +242,7 @@ def main():
         return combine(a.ensemble.split(","), a.out)
     torch.manual_seed(a.seed)
     x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs,
-                                                 a.link_inputs, a.energy_inputs)
+                                                 a.link_inputs, a.energy_inputs, a.hist_inputs)
     n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
@@ -266,6 +277,9 @@ def main():
     if init is not None:
         assert tuple(str(m) for m in init["modes"]) == MODES and tuple(str(b) for b in init["bands"]) == BANDS
         mean, std = init["mean"], init["std"]
+        if len(mean) < x.shape[1]:  # inputs the --init model lacks (appended last): scaled on the data, zero weight
+            k = len(mean)
+            mean, std = np.concatenate([mean, x[trn][:, k:].mean(0)]), np.concatenate([std, x[trn][:, k:].std(0) + 1e-6])
         a.depth = sum(1 for k in init.files if k.startswith("W")) - 1
         a.hidden = init["W0"].shape[1]
     # the noise leaves one-hots and flags (columns of only 0 and 1) alone
@@ -275,7 +289,10 @@ def main():
     if init is not None:
         with torch.no_grad():
             for i, layer in enumerate(net.layers):
-                layer.weight.copy_(torch.tensor(init[f"W{i}"].T))
+                w0 = init[f"W{i}"]
+                if i == 0 and w0.shape[0] < x.shape[1]:
+                    w0 = np.concatenate([w0, np.zeros((x.shape[1] - w0.shape[0], w0.shape[1]))])
+                layer.weight.copy_(torch.tensor(w0.T))
                 layer.bias.copy_(torch.tensor(init[f"b{i}"]))
     dev = torch.device(a.device)
     net = net.to(dev)
@@ -352,6 +369,7 @@ def main():
     layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
              link_inputs=np.array(a.link_inputs), energy_inputs=np.array(a.energy_inputs),
+             hist_inputs=np.array(a.hist_inputs),
              **clip,
              **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})
