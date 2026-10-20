@@ -277,3 +277,22 @@ def test_fast_region_takes_the_third_model_on_fast_fading_near_0_db():
     assert sh.gate() is None  # SNR at the top edge
     sh.observe(measured(P.FAST_SNR_LO_DB - 0.5, 2.0), "qpsk-r1/2", 3.0)
     assert sh.gate() is None  # under the bottom edge
+
+
+def test_cnp_outcome_model_takes_one_input_or_many(tmp_path):
+    """predictor.OutcomeCNP (scripts/cnp_outcome.py): one input row gives one
+    row of logits, as OutcomeMlp does, and agrees with the batched call."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n_in, n_desc, n_modes, z, h = 31, 5, 3, 4, 6
+    p = dict(mean=np.zeros(n_in - 1, np.float32), std=np.ones(n_in - 1, np.float32))
+    for name, shapes in (("enc", [(8, n_in - 1), (8, 8), (z, 8)]), ("head", [(h, z + n_desc + 1), (h, h), (2, h)])):
+        for i, s in zip((0, 2, 4), shapes):
+            p[f"{name}.{i}.weight"] = rng.normal(size=s).astype(np.float32)
+            p[f"{name}.{i}.bias"] = rng.normal(size=s[0]).astype(np.float32)
+    m = P.OutcomeCNP(p, rng.normal(size=(n_modes, n_desc)), 27, ("a", "b", "c"))
+    x = rng.normal(size=(4, n_in))
+    batch = m(x)
+    assert batch.shape == (4, 2 * n_modes)
+    np.testing.assert_allclose(m(x[1]), batch[1], rtol=1e-6)

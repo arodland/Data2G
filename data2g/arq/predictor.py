@@ -217,6 +217,38 @@ class OutcomeMlp:
         return h.astype(np.float64)
 
 
+@dataclass
+class OutcomeCNP:
+    """An encoder of the measured conditions and a query head per mode
+    (scripts/cnp_outcome.py): a mode's logits from its descriptor row and the
+    burst's length. Outputs in `modes` order, as OutcomeMlp's."""
+    p: dict  # torch state dict as float32 arrays: enc.{0,2,4}, head.{0,2,4} (weight, bias), mean, std
+    desc: np.ndarray  # (modes, n_desc), normalized
+    secs_col: int
+    modes: tuple = OUTCOME_MODES
+    bands: tuple = tuple(BANDS)
+    noise: bool = False
+    link: bool = False
+    energy: bool = True
+    hist: bool = False
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        if x.ndim == 1:  # one input, as OutcomeMlp takes it: one row of logits back
+            return self(x[None])[0]
+        secs = x[:, self.secs_col].astype(np.float32)
+        h = ((np.delete(x, self.secs_col, axis=1) - self.p["mean"]) / self.p["std"]).astype(np.float32)
+        for i in (0, 2, 4):
+            h = np.tanh(h @ self.p[f"enc.{i}.weight"].T + self.p[f"enc.{i}.bias"])
+        B, M = len(h), len(self.desc)
+        q = np.concatenate([np.repeat(h[:, None], M, 1), np.repeat(self.desc[None], B, 0).astype(np.float32),
+                            np.repeat(secs[:, None, None], M, 1)], -1)
+        for i in (0, 2, 4):
+            q = q @ self.p[f"head.{i}.weight"].T + self.p[f"head.{i}.bias"]
+            if i < 4:
+                q = np.tanh(q)
+        return np.concatenate([q[..., 0], q[..., 1]], -1).astype(np.float64)
+
+
 @lru_cache(maxsize=None)
 def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA / "outcome_predictor.npz")
                   ) -> OutcomeMlp | None:
@@ -226,6 +258,9 @@ def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA
     if not p.exists():
         return None
     d = np.load(p)
+    if "kind" in d.files and str(d["kind"]) == "cnp":
+        return OutcomeCNP({k[2:]: d[k] for k in d.files if k.startswith("p_")}, (d["desc"] - d["dmean"]) / d["dstd"],
+                          int(d["secs_col"]), tuple(str(m) for m in d["modes"]), tuple(str(b) for b in d["bands"]))
     if "m0_mean" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
         members = sorted({k.split("_", 1)[0] for k in d.files})
         return OutcomeEnsemble([_mlp({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
