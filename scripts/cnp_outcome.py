@@ -132,6 +132,7 @@ def main():
     ap.add_argument("data")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--hold", default="", help="modes left out of training (zero-shot test)")
+    ap.add_argument("--cond", default="", help="policy.COND_OFFSETS' spec, applied to the teacher's targets")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--enc", type=int, default=512)
     ap.add_argument("--z", type=int, default=256)
@@ -146,8 +147,16 @@ def main():
     x, *_, rows, _ = T.load(a.data, energy=True)
     teach = P.outcome_model(a.teacher)
     assert tuple(teach.modes) == T.MODES
-    z_t = teach(x)
+    z_t = np.concatenate([teach(x[i:i + 4096]) for i in range(0, len(x), 4096)])  # (DATA2G_OUTCOME_LCB applies)
     n = len(T.MODES)
+    if a.cond:  # the shifter's conditional offsets (policy.COND_OFFSETS), on each row's own spread_est
+        spread = np.array([float(r["spread_est"]) for r in rows])
+        snr_est = np.array([float(r["snr_est"]) for r in rows])
+        for e in a.cond.split(";"):
+            lo, hi, m, off = e.split(":")
+            sel = (spread >= float(lo)) & (snr_est < float(hi))
+            z_t[sel, T.MODES.index(m)] += float(off)
+            print(f"cond {e}: {sel.mean():.1%} of rows")
     assert np.allclose(x[:200, SECS_COL], [np.log2(float(r["cand_seconds"])) for r in rows[:200]])
     secs = x[:, SECS_COL].copy()
     xe = np.delete(x, SECS_COL, axis=1)

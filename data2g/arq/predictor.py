@@ -415,9 +415,11 @@ else:
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
-                    prev=None, model=None) -> dict[str, tuple[float, float]]:
+                    prev=None, model=None, extra: dict | None = None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
-    next burst `seconds` long. `model`: another than the installed one (a gate's)."""
+    next burst `seconds` long. `model`: another than the installed one (a gate's).
+    `extra`: {mode: logit} added to P(usable) on top of LOGIT_OFFSETS (the
+    shifter's conditional offsets, policy.COND_OFFSETS)."""
     model = model or outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,
                              model.energy, model.hist))
@@ -425,6 +427,11 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()
         for m, off in LOGIT_OFFSETS.items():
+            if m in idx:
+                z[idx[m]] += off
+    if extra:
+        z = z.copy()
+        for m, off in extra.items():
             if m in idx:
                 z[idx[m]] += off
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))

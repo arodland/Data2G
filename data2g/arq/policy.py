@@ -113,6 +113,12 @@ BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
 # model blended the two (P(usable) low on AWGN, high on fading). With it, such
 # a reading takes the peer's last measured spread instead (none yet: as is).
 SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY") == "1"
+# DATA2G_COND_OFFSETS="spread_min:snr_max:mode:logit;..." (studies): P(usable)
+# logit offsets that apply only while the peer's median spread_est is at least
+# spread_min and snr_est under snr_max (a model's error confined to a regime,
+# e.g. QPSK overrated at the CPM floor's edge on fast fading).
+COND_OFFSETS = [(float(a), float(b), m, float(o)) for a, b, m, o in
+                (e.split(":") for e in os.environ.get("DATA2G_COND_OFFSETS", "").split(";") if e)]
 UNMEASURED_SPREAD_HZ = 2.0  # equalizer.DEFAULT_SPREAD_HZ (arq doesn't import the modem)
 BIAS_MAX = 6.0 if BIAS_FIX else 3.0
 # The noise rule (recommend(): candidates whose band is noisier in the
@@ -483,6 +489,10 @@ class GearShifter(L.Policy):
         # the real modem, control losses 24% -> 3% of data bursts and 141 ->
         # 196 bps (scripts/loss_study.py). It ships with the package.
         gated = self.gate()
+        cond = None
+        if COND_OFFSETS and self.spreads:
+            med = float(np.median(self.spreads))
+            cond = {mo: o for a, b, mo, o in COND_OFFSETS if med >= a and self.measured["snr_est"] < b} or None
         if P.outcome_model() is None:
             raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
@@ -498,7 +508,7 @@ class GearShifter(L.Policy):
             key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
             if key not in omemo:
                 omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev,
-                                               gated)
+                                               gated, cond)
             return omemo[key][s.name]
 
         def logit_shift(q, b):

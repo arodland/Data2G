@@ -3,7 +3,7 @@ data2g.arq.modes, .predictor and .policy. See __init__.py."""
 
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
-GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_FAST", "DATA2G_SPREAD_CARRY", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
+GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_FAST", "DATA2G_SPREAD_CARRY", "DATA2G_COND_OFFSETS", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
 # GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
 # energy) that models with those inputs read in Python only
@@ -84,9 +84,9 @@ def substitutions(native):
             return py_outcome_inputs(measured, band, gap, seconds, prev, bands, noise, link, energy)
         return A.outcome_inputs(measured, band, gap, seconds, prev, list(bands), bool(energy))
 
-    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None, model=None):
-        if model is not None:  # another model than the installed one (a gate's): Python
-            return py["predict_outcome"](measured, band, gap, seconds, submodes, prev, model)
+    def predict_outcome(measured, band, gap, seconds, submodes=None, prev=None, model=None, extra=None):
+        if model is not None or extra:  # another model than the installed one (a gate's): Python
+            return py["predict_outcome"](measured, band, gap, seconds, submodes, prev, model, extra)
         d = A.predict_outcome(measured, band, gap, seconds, prev)
         return {s.name: d[s.name] for s in (submodes or config.SUBMODES.values()) if s.name in d}
 
