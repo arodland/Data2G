@@ -258,14 +258,19 @@ def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA
     if not p.exists():
         return None
     d = np.load(p)
-    if "kind" in d.files and str(d["kind"]) == "cnp":
-        return OutcomeCNP({k[2:]: d[k] for k in d.files if k.startswith("p_")}, (d["desc"] - d["dmean"]) / d["dstd"],
-                          int(d["secs_col"]), tuple(str(m) for m in d["modes"]), tuple(str(b) for b in d["bands"]))
-    if "m0_mean" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
+    if "m0_mean" in d.files or "m0_kind" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
         members = sorted({k.split("_", 1)[0] for k in d.files})
-        return OutcomeEnsemble([_mlp({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
+        return OutcomeEnsemble([_member({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
                                 for m in members])
-    return _mlp({k: d[k] for k in d.files})
+    return _member({k: d[k] for k in d.files})
+
+
+def _member(d: dict):
+    """One model's arrays: a CNP (kind=cnp, scripts/cnp_outcome.py) or an MLP."""
+    if "kind" in d and str(d["kind"]) == "cnp":
+        return OutcomeCNP({k[2:]: v for k, v in d.items() if k.startswith("p_")}, (d["desc"] - d["dmean"]) / d["dstd"],
+                          int(d["secs_col"]), tuple(str(m) for m in d["modes"]), tuple(str(b) for b in d["bands"]))
+    return _mlp(d)
 
 
 def clip_noise(x: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
