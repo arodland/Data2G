@@ -395,6 +395,19 @@ std::string GearPolicy::mode_name(int rec) {
 std::optional<double> GearPolicy::snr_est() {
     return shifter.measured ? std::optional(shifter.measured->snr_est) : std::nullopt;
 }
+std::string GearPolicy::measured_extra() {
+    if (!shifter.measured) return {};
+    const Measured& m = *shifter.measured;
+    char buf[128];
+    std::snprintf(buf, sizeof buf, ", spread %.2f Hz, delay %.1f ms, mi %.2f/%.2f/%.2f/%.2f", m.spread_est,
+                  m.delay_est_ms, m.mi[0], m.mi[1], m.mi[2], m.mi[3]);
+    std::string out = buf;
+    if (!shifter.energies.empty()) {
+        std::snprintf(buf, sizeof buf, ", energy %.1f dB", shifter.energies.back());
+        out += buf;
+    }
+    return out;
+}
 double GearPolicy::airtime(const std::string& m, int n_cw, bool dup) { return burst_seconds(mode_at(m), n_cw, dup); }
 std::string GearPolicy::connect_mode(int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); }
 

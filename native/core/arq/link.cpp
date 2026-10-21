@@ -239,7 +239,7 @@ std::string Station::burst_desc(const std::string& submode, int n_cw, bool dup) 
 
 std::string Station::snr() {
     auto s = policy->snr_est();
-    return s ? format(" | snr %.1f dB", *s) : "";
+    return s ? format(" | snr %.1f dB", *s) + policy->measured_extra() : "";
 }
 
 bool Station::comp_bit(std::int64_t seq) const {
