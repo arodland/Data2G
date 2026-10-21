@@ -48,6 +48,11 @@ EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_M
 # burst), which the sim never measures: none. Missed replies read -9..-14 dB at
 # MPP -8, empty windows -21..-36 (the clamp); training's lowest is -9.2.
 MISSED_MIN_DB = -18.0
+# a measured burst's energy reading is at least its snr_est less this (_energy).
+# Sessions read under snr_est - 3 in 0.3% of bursts (gs data, w and w48):
+# right at snr_est (the floor binding in 8.5%), MPG +12 lost 4.1% (11/12
+# seeds, 2026-10-21); here the floor is for receiver AGC, 20 dB under
+ENERGY_FLOOR_DB = 3.0
 # ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 # turn at least this often (FCC 97.119: every 10 minutes), and one more once
 # the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
@@ -350,11 +355,12 @@ class Engine:
                 self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 self._span = (start, start + burst_seconds(spec, ev["n_cw"]), spec.name) if spec else None
                 continue
-            if self._span is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING):
-                self._energy(*self._span, t)  # heard (decoded or not): the peer's, most likely
-            self._span = None
+            span, self._span = self._span, None
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
+            if span is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING):
+                # heard (decoded or not): the peer's, most likely
+                self._energy(*span, t, floor_db=meas["snr_est"] if meas else None)
             if self.rec:
                 self.rec.rx(t, ev["audio"], h, r, meas, self.noise.snapshot())
             if r is None:
@@ -379,18 +385,25 @@ class Engine:
             self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
             self.session.on_rx(rx, t)
 
-    def _energy(self, start: float, end: float, mode: str, t: float, min_db: float | None = None):
+    def _energy(self, start: float, end: float, mode: str, t: float, min_db: float | None = None,
+                floor_db: float | None = None):
         """The energy inputs (predictor.N_ENERGY): a peer burst's in-band SNR
         over start..end from power alone, against its peak (PHY.peak_db, at
         the cap it was most likely filtered for: _rx_cap), to the shifter.
-        None under min_db."""
+        None under min_db. `floor_db`: the burst's pilot snr_est, measured: the
+        reading is at least that less ENERGY_FLOOR_DB. Receiver AGC lifts the
+        gaps' noise under a strong signal: on air (recordings/20261021-161109,
+        20 dB snr_est) the gaps read 23 dB louder out of band than the bursts,
+        the energy ~0 dB, and the shifter held w48-qpsk-r1/2."""
         from . import predictor as P
 
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
-        peak = PHY.peak_db(mode, self._rx_cap())
-        if snr is not None and (min_db is None or snr + peak >= min_db):
-            self.session.policy.observe_energy(snr + peak, t)
+        e = None if snr is None else snr + PHY.peak_db(mode, self._rx_cap())
+        if floor_db is not None:
+            e = max(e if e is not None else -np.inf, floor_db - ENERGY_FLOOR_DB)
+        if e is not None and (min_db is None or e >= min_db):
+            self.session.policy.observe_energy(e, t)
 
     def _rx_cap(self) -> int:
         """The bandwidth cap a heard burst's TX filter was most likely for: the

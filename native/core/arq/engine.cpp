@@ -730,8 +730,9 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
                       : std::nullopt;
             continue;
         }
-        if (span_ && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
-            energy(span_->start, span_->end, span_->mode, t);  // heard (decoded or not): the peer's, most likely
+        // heard (decoded or not): the peer's, most likely; its energy once measured (hear_burst)
+        energy_span_ = span_ && (session_->state == SessionState::CONNECTED ||
+                                 session_->state == SessionState::DISCONNECTING) ? span_ : std::nullopt;
         span_.reset();
         receiver::BurstEvent ev = std::holds_alternative<receiver::DecodeRequest>(it)
                                  ? receiver::decode(std::move(std::get<receiver::DecodeRequest>(it)), accept_)
@@ -740,12 +741,15 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
     }
 }
 
-void Engine::energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db) {
+void Engine::energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db,
+                    std::optional<double> floor_db) {
+    // floor_db: the burst's pilot snr_est, measured: the reading is at least
+    // that less ENERGY_FLOOR_DB (receiver AGC lifts the gaps' noise under a strong signal, engine.py)
     const auto [lo, hi] = band_span_hz(mode_at(mode).band);
-    if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi)) {
-        const double e = *snr + peak_db(mode, rx_cap());
-        if (!min_db || e >= *min_db) session_->policy->observe_energy(e, t);
-    }
+    std::optional<double> e;
+    if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi)) e = *snr + peak_db(mode, rx_cap());
+    if (floor_db) e = std::max(e.value_or(-std::numeric_limits<double>::infinity()), *floor_db - ENERGY_FLOOR_DB);
+    if (e && (!min_db || *e >= *min_db)) session_->policy->observe_energy(*e, t);
 }
 
 int Engine::rx_cap() const {
@@ -806,6 +810,11 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
         r = heard_of(std::move(*ev.rx));
         meas = measure(*r);
         soft = soft_bits(*r);
+    }
+    if (energy_span_) {
+        const Span s = *energy_span_;
+        energy_span_.reset();
+        energy(s.start, s.end, s.mode, t, std::nullopt, meas ? std::optional(meas->snr_est) : std::nullopt);
     }
     timing.mark("soft bits");
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());

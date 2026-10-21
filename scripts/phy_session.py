@@ -282,13 +282,15 @@ class RealPhy:
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
             return None
 
-    def burst_energy_db(self, burst) -> float | None:
+    def burst_energy_db(self, burst, floor_db: float | None = None) -> float | None:
         """The last burst heard, as the engine measures it (data2g.arq.engine
         Engine._energy): its blocks' in-band power over the receiving
         station's noise floor (NoiseProfile.span_snr_db), against its peak
         (PHY.peak_db). Every burst sent gets one; the engine reports a missed
         one at its timeout over the span it expected (ponytail: here the
-        exact span; and a reply never sent gets none here)."""
+        exact span; and a reply never sent gets none here). `floor_db`: the
+        burst's snr_est if measured, the reading at least that less
+        engine.ENERGY_FLOOR_DB (the engine's floor)."""
         from data2g.arq import predictor as P
 
         prof = self.noise.profile[self.last_rx or 0]
@@ -298,7 +300,11 @@ class RealPhy:
         # the floor from the burst's own pads: this sim sets each burst's noise
         # against its peak (as a full-scale transmitter in fixed noise would see)
         snr = prof.span_snr_db(blocks(y[pad:len(y) - pad]), lo, hi, blocks(y[:pad]) + blocks(y[len(y) - pad:]))
-        return None if snr is None else snr + PHY.peak_db(burst.submode, burst.cap)
+        e = None if snr is None else snr + PHY.peak_db(burst.submode, burst.cap)
+        if floor_db is not None:
+            from data2g.arq.engine import ENERGY_FLOOR_DB
+            e = max(e if e is not None else -np.inf, floor_db - ENERGY_FLOOR_DB)
+        return e
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
