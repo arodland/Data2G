@@ -107,12 +107,13 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 # 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
 # On since v12; DATA2G_BIAS_FIX=0 is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
-# DATA2G_SPREAD_CARRY=1 (studies): a burst too short or weak for a Doppler
-# estimate reports equalizer.DEFAULT_SPREAD_HZ (2.0, what MPD measures), so on
-# AWGN 20-50% of w-band readings looked like fast fading and every outcome
-# model blended the two (P(usable) low on AWGN, high on fading). With it, such
-# a reading takes the peer's last measured spread instead (none yet: as is).
-SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY") == "1"
+# A burst too short or weak for a Doppler estimate reports
+# equalizer.DEFAULT_SPREAD_HZ (2.0, what MPD measures), so on AWGN 20-50% of
+# w-band readings looked like fast fading and every outcome model blended the
+# two (P(usable) low on AWGN, high on fading). Such a reading takes the peer's
+# last measured spread instead (none yet: as is); the installed model is
+# trained on it. DATA2G_SPREAD_CARRY=0 (studies): off.
+SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY", "1") == "1"
 # DATA2G_COND_OFFSETS="spread_min:snr_max:mode:logit;..." (studies): P(usable)
 # logit offsets that apply only while the peer's median spread_est is at least
 # spread_min and snr_est under snr_max (a model's error confined to a regime,

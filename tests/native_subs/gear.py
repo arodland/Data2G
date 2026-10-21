@@ -7,7 +7,7 @@ GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
 # GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
 # energy) that models with those inputs read in Python only
-PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "last_spread", "snrs_long"}
+PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "snrs_long"}
 
 
 def substitutions(native):

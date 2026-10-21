@@ -95,10 +95,9 @@ def test_numpy_runtime_has_no_torch():
 def test_inputs_match_model_with_and_without_history():
     m = dict(measured(5, 0.1), frames=8)
     model = P.outcome_model()
-    mean = (model.members[0] if isinstance(model, P.OutcomeEnsemble) else model).mean
     for prev in (None, (m, "w", 4.0)):
         x = P.outcome_inputs(m, "w", 2.5, 6.0, prev, model.bands, model.noise, model.link, model.energy)
-        assert x.shape == mean.shape
+        assert model(x).shape == (2 * len(model.modes),)  # the model takes these inputs as built
 
 
 def test_online_bias_follows_outcomes():

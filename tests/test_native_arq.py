@@ -197,6 +197,8 @@ def test_shifter_decisions_match(A, pure, seed):
             m = dict(m, snr_est=min(m["snr_est"], -5.0))
         if seed >= 11:
             m = dict(m, spread_est=2.0, snr_est=float(rng.uniform(0.0, 7.9)))
+        elif step % 4 == 3:  # a defaulted reading (short or weak burst): the shifter carries the last measured one
+            m = dict(m, spread_est=2.0)
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)

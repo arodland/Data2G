@@ -75,5 +75,14 @@ struct OutcomeQuery {
 };
 std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuery>& qs, std::string_view band,
                                                    double gap, const Prev* prev = nullptr, int model = 0);
+// One measurement, several (burst length, mode index) queries: each its
+// Outcome, LOGIT_OFFSETS applied. A CNP encodes once and runs its head per
+// query; MLP members run once per distinct burst length.
+struct ModeQuery {
+    double seconds;
+    int mode;
+};
+std::vector<Outcome> predict_queries(const Measured& m, std::string_view band, double gap, const Prev* prev, int model,
+                                     const std::vector<ModeQuery>& qs);
 
 }  // namespace data2g::arq

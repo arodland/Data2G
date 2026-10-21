@@ -42,6 +42,7 @@ inline constexpr std::size_t ENERGY_HIST = 4;  // the energy inputs' window: the
 // while the median snr_est of the peer's last CPM_FLOOR_HIST bursts is under it.
 inline constexpr std::size_t CPM_FLOOR_HIST = 3;
 inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
+inline constexpr double UNMEASURED_SPREAD_HZ = 2.0;  // equalizer::DEFAULT_SPREAD_HZ (policy.py)
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
 inline constexpr int CTL_BYTES = 12;
@@ -106,6 +107,9 @@ public:
     bool peer_had_data = true;
     std::vector<LogEntry> log;
     std::vector<double> spreads;  // the peer's last bursts' spread_est (tables::OUTCOME_GATE_HIST)
+    // the peer's last measured (not defaulted) spread_est: a defaulted reading
+    // takes it instead (policy.py SPREAD_CARRY)
+    std::optional<double> last_spread;
     std::vector<double> energies;  // the peer's last ENERGY_HIST bursts' energy SNR, dB (policy.py)
     std::vector<double> snrs;  // the peer's last CPM_FLOOR_HIST bursts' snr_est (the CPM floor)
     bool cpm_floor_on = true;  // DATA2G_CPM_FLOOR='' (Python, studies) turns it off
