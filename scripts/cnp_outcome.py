@@ -69,6 +69,64 @@ class CNP(torch.nn.Module):
 SECS_COL = 27  # outcome_inputs' log2(seconds) column (after gap); the encoder gets the rest
 
 
+def train_labels(a):
+    """The CNP on the outcomes themselves: each row queries the mode it tried
+    (train_outcome's loss: the burst's usability, its codewords binomial),
+    early stopping on held-out sessions."""
+    x, mode, bok, dsent, dok, rows, bmask = T.load(a.data, energy=True)
+    secs = x[:, SECS_COL].copy()
+    xe = np.delete(x, SECS_COL, axis=1)
+    desc = np.array([descriptor(m) for m in T.MODES], dtype=np.float64)
+    dmean, dstd = desc.mean(0), desc.std(0) + 1e-6
+    hold = [m for m in a.hold.split(",") if m]
+    seeds = np.array([int(r["seed"]) for r in rows])
+    us = np.unique(seeds)
+    te = np.isin(seeds, np.random.default_rng(0).choice(us, len(us) // 5, replace=False))
+    rest = np.setdiff1d(us, seeds[te])
+    va = np.isin(seeds, np.random.default_rng(1).choice(rest, len(rest) // 8, replace=False))
+    trn = ~te & ~va & ~np.isin(mode, [T.MODES.index(m) for m in hold])
+    mean, std = xe[trn].mean(0), xe[trn].std(0) + 1e-6
+    dev = torch.device(a.device)
+    Tt = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt, device=dev)  # noqa: E731
+    D = Tt((desc - dmean) / dstd)
+    torch.manual_seed(a.seed)
+    net = CNP(xe.shape[1], desc.shape[1], mean, std, a.enc, a.z, a.head).to(dev)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+
+    def loss(sel_t):
+        X, S, M, B, DS, DO = sel_t
+        z = net.head(torch.cat([net.enc((X - net.mean) / net.std), D[M], S[:, None]], -1))
+        lb = torch.nn.functional.binary_cross_entropy_with_logits(z[:, 0], B)
+        w = B * (DS > 0)
+        lc = -(w * (DO * torch.nn.functional.logsigmoid(z[:, 1]) + (DS - DO) * torch.nn.functional.logsigmoid(-z[:, 1]))).mean()
+        return lb + lc
+
+    pack = lambda s: [Tt(xe[s]), Tt(secs[s]), Tt(mode[s], torch.long), Tt(bok[s]), Tt(dsent[s]), Tt(dok[s])]  # noqa: E731
+    tr, vl, ts = pack(trn), pack(va), pack(te)
+    best, state = float("inf"), None
+    for ep in range(a.epochs):
+        perm = torch.randperm(len(tr[0]), device=dev)
+        for i in range(0, len(perm), 512):
+            b = perm[i:i + 512]
+            l = loss([t[b] for t in tr])
+            opt.zero_grad()
+            l.backward()
+            opt.step()
+        with torch.no_grad():
+            v = loss(vl).item()
+        if v < best:
+            best, state = v, {k: t.clone() for k, t in net.state_dict().items()}
+        if ep % 10 == 0:
+            print(f"epoch {ep:3d} train {l.item():.4f} validation {v:.4f} (best {best:.4f})", flush=True)
+    net.load_state_dict(state)
+    with torch.no_grad():
+        print(f"best validation {best:.4f}; held-out test {loss(ts).item():.4f}")
+    sd = {k: v.detach().cpu().numpy().astype(np.float32) for k, v in net.state_dict().items()}
+    np.savez(a.out, kind=np.array("cnp"), modes=np.array(T.MODES), bands=np.array(T.BANDS), desc=desc, dmean=dmean,
+             dstd=dstd, secs_col=np.array(SECS_COL), energy_inputs=np.array(True), hold=np.array(hold),
+             **{f"p_{k}": v for k, v in sd.items()})
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data")
@@ -80,7 +138,11 @@ def main():
     ap.add_argument("--head", type=int, default=256)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--labels", action="store_true", help="train on the rows' outcomes (the tried mode's), not a teacher")
+    ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
+    if a.labels:
+        return train_labels(a)
     x, *_, rows, _ = T.load(a.data, energy=True)
     teach = P.outcome_model(a.teacher)
     assert tuple(teach.modes) == T.MODES

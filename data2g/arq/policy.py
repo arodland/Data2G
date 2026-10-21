@@ -244,6 +244,7 @@ class GearShifter(L.Policy):
     spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
     last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
+    snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -349,6 +350,7 @@ class GearShifter(L.Policy):
         self.heard = submode
         self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
         self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
+        self.snrs_long = (self.snrs_long + [float(measured["snr_est"])])[-P.GATE_HIST:]
 
     def cpm_floor(self) -> bool:
         """CPM_FLOOR holds: data in CPM modes only."""
@@ -368,7 +370,8 @@ class GearShifter(L.Policy):
         if not self.spreads or self.measured is None:
             return None
         med, snr = float(np.median(self.spreads)), self.measured["snr_est"]
-        if P.GATE is not None and med < P.GATE[1] and snr < P.GATE[2]:
+        if P.GATE is not None and med < P.GATE[1] and snr < P.GATE[2] and (
+                len(P.GATE) < 4 or (len(self.snrs_long) == P.GATE_HIST and float(np.std(self.snrs_long)) < P.GATE[3])):
             return P.outcome_model(P.GATE[0])
         if P.FAST is not None and med >= P.FAST[1] and P.FAST[2] <= snr < P.FAST[3]:
             return P.outcome_model(P.FAST[0])

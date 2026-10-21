@@ -381,7 +381,11 @@ GATE_SPREAD_HZ, GATE_SNR_DB = 0.5, 12.0
 GATE_HIST = 5
 _GATE = os.environ.get("DATA2G_OUTCOME_GATE")
 if _GATE is not None:
-    GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+    _g = _GATE.split(":")
+    # an optional 4th field: the gate also needs the peer's last GATE_HIST
+    # snr_est readings steady, standard deviation under it (dB): AWGN reads
+    # steady, MPG's fades swing it (studies)
+    GATE = ((_g[0], float(_g[1]), float(_g[2])) + ((float(_g[3]),) if len(_g) > 3 else ())) if _GATE else None
 else:
     GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") or not GATE_MODEL.exists() else (
         str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
