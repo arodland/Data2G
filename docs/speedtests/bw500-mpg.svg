@@ -62,16 +62,16 @@
 <circle cx="584.0" cy="101.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="660.0" cy="98.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="736.0" cy="96.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M52.0,323.7L128.0,250.1L204.0,193.8L280.0,160.6L356.0,134.0L432.0,114.2L508.0,100.1L584.0,84.1L660.0,80.1L736.0,80.0" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="52.0" cy="323.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="128.0" cy="250.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="204.0" cy="193.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="280.0" cy="160.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="356.0" cy="134.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="432.0" cy="114.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="508.0" cy="100.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="584.0" cy="84.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="660.0" cy="80.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M52.0,323.3L128.0,241.1L204.0,195.1L280.0,157.2L356.0,131.1L432.0,114.7L508.0,99.2L584.0,83.9L660.0,80.0L736.0,80.0" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="52.0" cy="323.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="128.0" cy="241.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="204.0" cy="195.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="280.0" cy="157.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="356.0" cy="131.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="432.0" cy="114.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="508.0" cy="99.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="584.0" cy="83.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="660.0" cy="80.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="736.0" cy="80.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <line x1="247.5" x2="275.5" y1="436" y2="436" stroke="#1baf7a" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
 <circle cx="261.5" cy="436" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
