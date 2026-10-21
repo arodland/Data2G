@@ -607,7 +607,12 @@ class Station:
 
     def _snr(self) -> str:
         m = self.policy.measured
-        return f" | snr {m['snr_est']:.1f} dB" if m and "snr_est" in m else ""
+        if not m or "snr_est" not in m:
+            return ""
+        mi = "/".join(f"{v:.2f}" for k, v in m.items() if k.startswith("mi_"))  # predictor.CONSTS' order
+        return (f" | snr {m['snr_est']:.1f} dB, spread {m.get('spread_est', 0.0):.2f} Hz,"
+                f" delay {m.get('delay_est_ms', 0.0):.1f} ms" + (f", mi {mi}" if mi else "")
+                + (f", energy {self.policy.energies[-1]:.1f} dB" if getattr(self.policy, "energies", None) else ""))
 
     def _comp_bit(self, seq: int) -> bool:
         c = self.tx.cws[seq]

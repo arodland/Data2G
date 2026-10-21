@@ -336,8 +336,11 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             t += (1 - ok_ctl) * std::pow(1 - reply_p * reply_p, tries) * LOST_LINK_COST_S;
             double v;
             if (chat) {
-                const double ok_all = std::max(ok_ctl * std::pow(pn, static_cast<double>(n - c)), 1e-3);
-                v = -t * cdiv(k, std::max(n - c, 1)) / ok_all + 1e-6 * (n - c) * pb;
+                // one burst: retried until all of it arrives; past one, each
+                // codeword is resent until it does (policy.py)
+                const int bursts = cdiv(k, std::max(n - c, 1));
+                const double ok = std::max(ok_ctl * (bursts == 1 ? std::pow(pn, static_cast<double>(n - c)) : pn), 1e-3);
+                v = -t * bursts / ok + 1e-6 * (n - c) * pb;
             } else {
                 v = (ok_ctl * pn * (n - c) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
@@ -394,6 +397,19 @@ std::string GearPolicy::mode_name(int rec) {
 }
 std::optional<double> GearPolicy::snr_est() {
     return shifter.measured ? std::optional(shifter.measured->snr_est) : std::nullopt;
+}
+std::string GearPolicy::measured_extra() {
+    if (!shifter.measured) return {};
+    const Measured& m = *shifter.measured;
+    char buf[128];
+    std::snprintf(buf, sizeof buf, ", spread %.2f Hz, delay %.1f ms, mi %.2f/%.2f/%.2f/%.2f", m.spread_est,
+                  m.delay_est_ms, m.mi[0], m.mi[1], m.mi[2], m.mi[3]);
+    std::string out = buf;
+    if (!shifter.energies.empty()) {
+        std::snprintf(buf, sizeof buf, ", energy %.1f dB", shifter.energies.back());
+        out += buf;
+    }
+    return out;
 }
 double GearPolicy::airtime(const std::string& m, int n_cw, bool dup) { return burst_seconds(mode_at(m), n_cw, dup); }
 std::string GearPolicy::connect_mode(int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); }

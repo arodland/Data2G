@@ -75,6 +75,7 @@ public:
     virtual std::string mode_name(int rec) { return std::to_string(rec); }
     virtual bool has_airtime() { return false; }
     virtual std::optional<double> snr_est() { return std::nullopt; }
+    virtual std::string measured_extra() { return {}; }  // after snr_est: spread, delay, MI
     // session
     virtual double airtime(const std::string&, int /*n_cw*/, bool /*dup*/) { return 0.0; }
     virtual std::string connect_mode(int /*cap*/, int /*tries*/) { return {}; }

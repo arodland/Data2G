@@ -156,6 +156,7 @@ public:
     std::string mode_name(int rec) override;
     bool has_airtime() override { return true; }
     std::optional<double> snr_est() override;
+    std::string measured_extra() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
     std::string connect_mode(int cap, int tries) override;
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
