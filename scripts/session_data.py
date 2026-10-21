@@ -78,7 +78,8 @@ NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in
 # the link history at the recommendation (GearShifter.link_features; empty before any expected burst)
 LINK_COLS = ["link_lost", "link_miss", "link_n"]
 ENERGY_COLS = ["energy_db", "energy_n"]  # GearShifter.energy_features at the recommendation
-FIELDS = FIELDS + NOISE_COLS + ["intf"] + LINK_COLS + ENERGY_COLS
+HIST_COLS = ["hist_spread", "hist_snr", "hist_n"]  # GearShifter.hist_features at the recommendation
+FIELDS = FIELDS + NOISE_COLS + ["intf"] + LINK_COLS + ENERGY_COLS + HIST_COLS
 # --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
 INTERFERENCE = None
 WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
@@ -118,7 +119,8 @@ class Explorer(G.GearShifter):
         if self.rng.random() < EXPLORE:
             reply = G.encode(self.rng.choice(ok))
         self.snap = dict(m=dict(self.measured, noise=self.noise), band=self.measured_band, t=self.measured_at,
-                         prev=prev, explored=explored, link=self.link_now, energy=self.energy_features())
+                         prev=prev, explored=explored, link=self.link_now, energy=self.energy_features(),
+                         hist=self.hist_features())
         return rec, hint, reply
 
 
@@ -154,6 +156,8 @@ class DataPhy(LS.AuditPhy):
                 row.update(zip(LINK_COLS, (round(v, 4) for v in snap["link"][:3])))
             if snap["energy"]:
                 row.update(zip(ENERGY_COLS, (round(v, 3) for v in snap["energy"][:2])))
+            if snap.get("hist"):
+                row.update(zip(HIST_COLS, (round(v, 4) for v in snap["hist"][:3])))
             row["intf"] = INTF.describe(self.ch.intf[1 - (burst.slots[0].mask_id[1] & 1)].spec)
             self.out.append(row)
         return res

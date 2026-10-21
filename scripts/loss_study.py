@@ -93,6 +93,10 @@ def ctl_decoded(r, slots) -> bool:
 
 REC_NOISE = None  # recorded noise for 'rec' cells (main loads it before the pool forks)
 WANDER_DB = 1.0  # 'wander' cells: a clean channel whose floor wanders (phy_session.ContinuousChannel)
+# 'slow' cells: the SNR itself wanders, both ways at once, as slow propagation
+# fading does on air (a few dB to 10+ over 1-3 minutes): SLOW_DB standard
+# deviation, SLOW_TAU_S time constant.
+SLOW_DB, SLOW_TAU_S = 3.0, 60.0
 
 
 def one(args):
@@ -100,8 +104,10 @@ def one(args):
     rows = []
     spec = INTF.PRESETS.get(intf or "clean", INTF.Spec())
     rec = G.RecordedNoise(REC_NOISE, seed) if intf == "rec" else None
-    ch = G.ContinuousChannel(chan, snr, seed, horizon, interference=(spec, spec), recorded=rec,
-                             wander_db=WANDER_DB if intf == "wander" else 0.0)
+    wander = dict(wander_db=WANDER_DB) if intf == "wander" else {}
+    if intf == "slow":
+        wander = dict(wander_db=SLOW_DB, wander_tau=SLOW_TAU_S, wander_shared=True)
+    ch = G.ContinuousChannel(chan, snr, seed, horizon, interference=(spec, spec), recorded=rec, **wander)
     # an interfered cell is its own 'channel' (paired_loss groups by channel and SNR)
     tag = dict(channel=chan if intf in (None, "clean") else f"{chan}/{intf}", snr=snr, seed=seed)
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, L.WORKLOADS["bulk"](random.Random(seed + 7)),
@@ -166,7 +172,7 @@ def main():
                  "transmits) or pass --average-snr")
     cells = ([(f[0], float(f[1]), f[2] if len(f) > 2 else None) for f in (x.split(":") for x in a.cells.split(","))]
              if a.cells else [(c, s, None) for c, s in CELLS])
-    unknown = {i for *_, i in cells if i not in (None, "rec", "wander") and i not in INTF.PRESETS}
+    unknown = {i for *_, i in cells if i not in (None, "rec", "wander", "slow") and i not in INTF.PRESETS}
     if unknown:
         ap.error(f"unknown interference {sorted(unknown)}: {sorted(INTF.PRESETS)}, rec or wander")
     if any(i == "rec" for *_, i in cells):

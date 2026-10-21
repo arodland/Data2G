@@ -107,6 +107,20 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 # 0.83. (That it learns from data codewords alone is outcome()'s `usable`.)
 # On since v12; DATA2G_BIAS_FIX=0 is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
+# A burst too short or weak for a Doppler estimate reports
+# equalizer.DEFAULT_SPREAD_HZ (2.0, what MPD measures), so on AWGN 20-50% of
+# w-band readings looked like fast fading and every outcome model blended the
+# two (P(usable) low on AWGN, high on fading). Such a reading takes the peer's
+# last measured spread instead (none yet: as is); the installed model is
+# trained on it. DATA2G_SPREAD_CARRY=0 (studies): off.
+SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY", "1") == "1"
+# DATA2G_COND_OFFSETS="spread_min:snr_max:mode:logit;..." (studies): P(usable)
+# logit offsets that apply only while the peer's median spread_est is at least
+# spread_min and snr_est under snr_max (a model's error confined to a regime,
+# e.g. QPSK overrated at the CPM floor's edge on fast fading).
+COND_OFFSETS = [(float(a), float(b), m, float(o)) for a, b, m, o in
+                (e.split(":") for e in os.environ.get("DATA2G_COND_OFFSETS", "").split(";") if e)]
+UNMEASURED_SPREAD_HZ = 2.0  # equalizer.DEFAULT_SPREAD_HZ (arq doesn't import the modem)
 BIAS_MAX = 6.0 if BIAS_FIX else 3.0
 # The noise rule (recommend(): candidates whose band is noisier in the
 # receiver's profile than the measured one predicted at a lower SNR), its
@@ -235,7 +249,9 @@ class GearShifter(L.Policy):
     link_now: list | None = None  # link_features() at the last recommendation
     energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
     spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
+    last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
+    snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
     peer_had_data: bool = True
@@ -330,12 +346,18 @@ class GearShifter(L.Policy):
 
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
+        s = measured.get("spread_est")
+        if s is not None and s != UNMEASURED_SPREAD_HZ:
+            self.last_spread = float(s)
+        elif SPREAD_CARRY and s is not None and self.last_spread is not None:
+            measured = dict(measured, spread_est=self.last_spread)
         if self.measured is not None:
             self.prev = (self.measured, self.measured_band, self.measured_at)
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
         self.heard = submode
         self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
         self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
+        self.snrs_long = (self.snrs_long + [float(measured["snr_est"])])[-P.GATE_HIST:]
 
     def cpm_floor(self) -> bool:
         """CPM_FLOOR holds: data in CPM modes only."""
@@ -355,7 +377,8 @@ class GearShifter(L.Policy):
         if not self.spreads or self.measured is None:
             return None
         med, snr = float(np.median(self.spreads)), self.measured["snr_est"]
-        if P.GATE is not None and med < P.GATE[1] and snr < P.GATE[2]:
+        if P.GATE is not None and med < P.GATE[1] and snr < P.GATE[2] and (
+                len(P.GATE) < 4 or (len(self.snrs_long) == P.GATE_HIST and float(np.std(self.snrs_long)) < P.GATE[3])):
             return P.outcome_model(P.GATE[0])
         if P.FAST is not None and med >= P.FAST[1] and P.FAST[2] <= snr < P.FAST[3]:
             return P.outcome_model(P.FAST[0])
@@ -428,6 +451,12 @@ class GearShifter(L.Policy):
         mean = 10 * np.log10(np.mean(10 ** (np.array(self.energies) / 10)))
         return [float(mean), len(self.energies) / ENERGY_HIST, 1.0]
 
+    def hist_features(self) -> list | None:
+        """The history inputs (predictor.N_HIST); None before any burst."""
+        if not self.spreads:
+            return None
+        return [float(np.median(self.spreads)), float(np.median(self.snrs)), len(self.spreads) / P.GATE_HIST, 1.0]
+
     def link_features(self, station) -> list | None:
         """The link history as the outcome model reads it (predictor.N_LINK):
         my timeouts since the last call count as missed peer bursts. None
@@ -451,7 +480,7 @@ class GearShifter(L.Policy):
         # only modes the outcome model has learned (a mode added since is
         # left out until a model trained with it ships)
         cands = [s for s in allowed(st.cap) if P.outcome_knows(s.name) and (not is_cpm(s) or self.use_cpm)]
-        m = dict(self.measured, link=self.link_now, energy=self.energy_features())
+        m = dict(self.measured, link=self.link_now, energy=self.energy_features(), hist=self.hist_features())
         prev = None
         if self.prev is not None:
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], PREV_MAX_S))
@@ -461,6 +490,10 @@ class GearShifter(L.Policy):
         # the real modem, control losses 24% -> 3% of data bursts and 141 ->
         # 196 bps (scripts/loss_study.py). It ships with the package.
         gated = self.gate()
+        cond = None
+        if COND_OFFSETS and self.spreads:
+            med = float(np.median(self.spreads))
+            cond = {mo: o for a, b, mo, o in COND_OFFSETS if med >= a and self.measured["snr_est"] < b} or None
         if P.outcome_model() is None:
             raise RuntimeError(f"no outcome model: {P.DATA / 'outcome_predictor.npz'} (scripts/train_outcome.py)")
         omemo = {}
@@ -476,7 +509,7 @@ class GearShifter(L.Policy):
             key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
             if key not in omemo:
                 omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, self.gap_s, key[0], cands, prev,
-                                               gated)
+                                               gated, cond)
             return omemo[key][s.name]
 
         def logit_shift(q, b):

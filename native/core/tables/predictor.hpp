@@ -20,6 +20,19 @@ struct OutcomeMember {
     std::span<const MlpLayer> layers;
 };
 extern const std::span<const OutcomeMember> OUTCOME_MEMBERS;
+// Or the installed model is a CNP (predictor.OutcomeCNP, scripts/cnp_outcome.py):
+// an encoder of the inputs without log2(seconds) (column secs_col), scaled by
+// mean/std, tanh after every layer; and a head on [encoding, the mode's
+// descriptor row, log2(seconds)], tanh between layers, 2 logits (P(usable),
+// P(codeword)). OUTCOME_MEMBERS is then empty.
+struct CnpModel {
+    std::span<const double> mean, std;
+    std::span<const MlpLayer> enc, head;
+    std::span<const float> desc;  // (OUTCOME_MODES, n_desc), normalized
+    int n_desc, secs_col;
+};
+extern const bool OUTCOME_IS_CNP;
+extern const CnpModel OUTCOME_CNP;
 // The gate's model (predictor.GATE_MODEL), its outputs in OUTCOME_MODES' order,
 // and the gate (policy.GearShifter.gate): median spread_est of the last
 // OUTCOME_GATE_HIST peer bursts under SPREAD_HZ and snr_est under SNR_DB.

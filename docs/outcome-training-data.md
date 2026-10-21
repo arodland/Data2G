@@ -50,6 +50,11 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_gt_high.csv` | `--high --explore-faster --sessions 1200 --first 7200000` (same) | high | same | 8340bbf | |
 | `session_data_gt_awgnhigh.csv` | `--high --kinds awgn --explore-faster --sessions 400 --first 7300000` (same) | high AWGN | same | 8340bbf | |
 | `session_data_gt_fastlow.csv` | `--fastlow --explore-faster --sessions 1200 --first 7400000` (same) | fastlow | same | 8340bbf | |
+| `session_data_gs.csv` | `--sessions 2900 --first 10000000` (`runs/gs_round.sh`), `DATA2G_SPREAD_CARRY=1` | regular; a defaulted spread_est carries the peer's last measured one; no `--explore-faster` | the 512x3 student (PR #93), offsets as shipped, Python shifter | 3f50fe9 | the installed CNP's data |
+| `session_data_gs_slow.csv` | `--slow --sessions 800 --first 10100000` (same) | slow | same | 3f50fe9 | |
+| `session_data_gs_high.csv` | `--high --sessions 1200 --first 10200000` (same) | high | same | 3f50fe9 | |
+| `session_data_gs_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 10300000` (same) | high AWGN | same | 3f50fe9 | |
+| `session_data_gs_fastlow.csv` | `--fastlow --sessions 1200 --first 10400000` (same) | fastlow | same | 3f50fe9 | |
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
@@ -92,3 +97,12 @@ sent at the same moment; one row per candidate.
   model there. Level with the router on seeds 24-35 and 36-47 (`runs/distill_judge.sh`). Fine-tuning a
   student on the outcomes (`train_outcome --init`) found gains (256x3: MPG 0 +13%, AWGN 0 +6%) but brought
   back the labels' trades (AWGN +4 -7%, MPG +8 -4%): next, a fine-tune anchored to the teacher.
+- **cnpd (installed; CNP):** `scripts/cnp_outcome.py`, an encoder of the conditions and a query head per mode
+  descriptor (ladder thresholds, constellation, code rate, band, payload, frames; `descriptor()`) and burst
+  length. Five CNPs trained on the outcomes (`--labels`, seeds 1-5) of the gs sets plus
+  `outcome_data_general_gt.csv` and `outcome_data_n10top_gt.csv`; ensembled with LCB 0.5; qpsk-r1/5 -1.0 on
+  fast fading under -2 dB (MPP -8, the CPM floor's edge); distilled into one CNP (`runs/cnpd_round.sh`).
+  Against the 512x3 student on fresh seeds 132-143: mean +1.8% over 28 cells, AWGN 0 +8.2%, MPG 0 +13.9%; the
+  MPP bottom -4..-6% (about 1 SE each). Why it held where label-trained MLPs traded cells: the spread carry
+  (the 2.0 Hz default read as MPD), no `--explore-faster` (it cost AWGN 0/+4), and the shared query head
+  (gsx, a 512x3 MLP on the same data, lost MPP -8 -16% and MPD +8 -5%).

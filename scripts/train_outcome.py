@@ -50,7 +50,14 @@ def energy_of(r) -> list | None:
     return [float(r["energy_db"]), float(r["energy_n"]), 1.0]
 
 
-def load(path, stale_header=(), noise=False, link=False, energy=False):
+def hist_of(r) -> list | None:
+    """A row's history inputs (session_data's HIST_COLS), None if it has none."""
+    if not r.get("hist_n"):
+        return None
+    return [float(r["hist_spread"]), float(r["hist_snr"]), float(r["hist_n"]), 1.0]
+
+
+def load(path, stale_header=(), noise=False, link=False, energy=False, hist=False):
     """`stale_header`: data from before the header copy (PROTOCOL_VERSION
     11): its w/w48 candidates' burst labels are not today's (their codeword
     labels, given a usable burst, still are). `noise`: the noise profile's
@@ -69,10 +76,13 @@ def load(path, stale_header=(), noise=False, link=False, energy=False):
             m["link"] = link_of(r)
         if energy:
             m["energy"] = energy_of(r)
+        if hist:
+            m["hist"] = hist_of(r)
         prev = None
         if r["prev_band"]:
             prev = ({k: float(r["prev_" + k]) for k in MEAS}, r["prev_band"], float(r["prev_age"]))
-        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link, energy))
+        x.append(P.outcome_inputs(m, r["band"], float(r["gap"]), float(r["cand_seconds"]), prev, BANDS, noise, link, energy,
+                                  hist))
         mode.append(MODES.index(r["cand"]))
         bok.append(float(r["burst_ok"]))
         dsent.append(float(r["data_sent"]))
@@ -161,7 +171,7 @@ def extend(base: str, data: str, new: list, out: str, epochs: int = 300):
         va_t = [T(h[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va]), T(bmask[va])]
         best, state = float("inf"), None
         for ep in range(epochs):
-            perm = torch.randperm(len(tr_t[0]))
+            perm = torch.randperm(len(tr_t[0]), device=dev)
             for s in range(0, len(perm), 512):
                 b = perm[s:s + 512]
                 loss = loss_fn(head(tr_t[0][b]), *(t[b] for t in tr_t[1:]), k)
@@ -214,9 +224,14 @@ def main():
     ap.add_argument("--noise-inputs", action="store_true", help="the receiver's noise profile as inputs too")
     ap.add_argument("--link-inputs", action="store_true", help="the link history as inputs too (predictor.N_LINK)")
     ap.add_argument("--energy-inputs", action="store_true", help="the energy SNR as inputs too (predictor.N_ENERGY)")
+    ap.add_argument("--hist-inputs", action="store_true", help="the spread/SNR history as inputs too (predictor.N_HIST)")
     ap.add_argument("--init", metavar="NPZ", help="start from this single model's weights and input scaling "
                     "(a distilled student, scripts/distill_outcome.py): fine-tuning on the outcomes")
     ap.add_argument("--lr", type=float, default=2e-3)
+    ap.add_argument("--anchor", type=float, default=0.0,
+                    help="with --init: plus this times the KL from the starting model's outputs, every mode (dense), "
+                         "so the fine-tune moves only where the outcomes outweigh it")
+    ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--extend", metavar="BASE", help="add --new modes' outputs to this model, all else frozen")
     ap.add_argument("--new", default="", help="comma-separated modes, with --extend")
@@ -227,7 +242,7 @@ def main():
         return combine(a.ensemble.split(","), a.out)
     torch.manual_seed(a.seed)
     x, mode, bok, dsent, dok, rows, bmask = load(a.data, set(filter(None, a.stale_header.split(","))), a.noise_inputs,
-                                                 a.link_inputs, a.energy_inputs)
+                                                 a.link_inputs, a.energy_inputs, a.hist_inputs)
     n = len(MODES)
     # held out by sample (a sample's candidates share its measurements)
     seeds = np.array([int(r["seed"]) for r in rows])
@@ -262,6 +277,9 @@ def main():
     if init is not None:
         assert tuple(str(m) for m in init["modes"]) == MODES and tuple(str(b) for b in init["bands"]) == BANDS
         mean, std = init["mean"], init["std"]
+        if len(mean) < x.shape[1]:  # inputs the --init model lacks (appended last): scaled on the data, zero weight
+            k = len(mean)
+            mean, std = np.concatenate([mean, x[trn][:, k:].mean(0)]), np.concatenate([std, x[trn][:, k:].std(0) + 1e-6])
         a.depth = sum(1 for k in init.files if k.startswith("W")) - 1
         a.hidden = init["W0"].shape[1]
     # the noise leaves one-hots and flags (columns of only 0 and 1) alone
@@ -271,10 +289,25 @@ def main():
     if init is not None:
         with torch.no_grad():
             for i, layer in enumerate(net.layers):
-                layer.weight.copy_(torch.tensor(init[f"W{i}"].T))
+                w0 = init[f"W{i}"]
+                if i == 0 and w0.shape[0] < x.shape[1]:
+                    w0 = np.concatenate([w0, np.zeros((x.shape[1] - w0.shape[0], w0.shape[1]))])
+                layer.weight.copy_(torch.tensor(w0.T))
                 layer.bias.copy_(torch.tensor(init[f"b{i}"]))
+    dev = torch.device(a.device)
+    net = net.to(dev)
     opt = torch.optim.Adam(net.parameters(), lr=a.lr, weight_decay=1e-4)
-    T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt)  # noqa: E731
+    T = lambda v, dt=torch.float32: torch.tensor(v, dtype=dt, device=dev)  # noqa: E731
+    p0 = None
+    if a.anchor:
+        assert init is not None, "--anchor needs --init"
+        with torch.no_grad():
+            p0 = torch.sigmoid(net(T(x[trn])))  # the starting model's outputs: the anchor's targets
+
+    def kl(z, q):
+        """Mean over rows of the summed Bernoulli KL(q || sigmoid(z)) over every output."""
+        ent = -(q * torch.log(q.clamp_min(1e-7)) + (1 - q) * torch.log((1 - q).clamp_min(1e-7)))
+        return (torch.nn.functional.binary_cross_entropy_with_logits(z, q, reduction="none") - ent).sum(1).mean()
     tr_t = [T(x[trn]), T(mode[trn], torch.long), T(bok[trn]), T(dsent[trn]), T(dok[trn]), T(bmask[trn])]
     va_t = [T(x[va]), T(mode[va], torch.long), T(bok[va]), T(dsent[va]), T(dok[va]), T(bmask[va])]
     best_val, best_state = float("inf"), None
@@ -290,8 +323,11 @@ def main():
             b = perm[i:i + 512]
             xb = tr_t[0][b]
             if a.input_noise:
-                xb = xb + torch.randn_like(xb) * noise_scale
-            loss = loss_fn(net(xb), *(t[b] for t in tr_t[1:]), n)
+                xb = xb + torch.randn_like(xb) * noise_scale.to(xb.device)
+            z = net(xb)
+            loss = loss_fn(z, *(t[b] for t in tr_t[1:]), n)
+            if p0 is not None:
+                loss = loss + a.anchor * kl(z, p0[b])
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -306,7 +342,7 @@ def main():
     with torch.no_grad():
         print(f"best validation {best_val:.4f}; held-out test {loss_fn(net(te_t[0]), *te_t[1:], n).item():.4f}")
     with torch.no_grad():
-        z = net(te_t[0]).numpy()
+        z = net(te_t[0]).cpu().numpy()
     idx = np.arange(len(z))
     pb = 1 / (1 + np.exp(-z[idx, mode[te]]))
     pc = 1 / (1 + np.exp(-z[idx, mode[te] + n]))
@@ -329,9 +365,11 @@ def main():
         ii = np.array(g[k])
         print(f"  {k[0]:6s} {k[1]:5s} n {len(ii):5d}: {pj[ii].mean():.3f} vs {frac[ii].mean():.3f}   "
               f"Brier {np.mean((pj[ii] - frac[ii]) ** 2):.4f}")
+    net = net.cpu()
     layers = list(net.layers)
     np.savez(a.out, mean=mean, std=std, modes=np.array(MODES), bands=np.array(BANDS), noise_inputs=np.array(a.noise_inputs),
              link_inputs=np.array(a.link_inputs), energy_inputs=np.array(a.energy_inputs),
+             hist_inputs=np.array(a.hist_inputs),
              **clip,
              **{f"W{i}": l.weight.detach().numpy().T.astype(np.float64) for i, l in enumerate(layers)},
              **{f"b{i}": l.bias.detach().numpy().astype(np.float64) for i, l in enumerate(layers)})

@@ -296,7 +296,8 @@ def predictor_cpp() -> str:
     from data2g.arq import predictor as P
 
     model = P.outcome_model(MODEL) if MODEL else P.outcome_model()
-    members = model.members if isinstance(model, P.OutcomeEnsemble) else [model]
+    cnp = isinstance(model, P.OutcomeCNP)
+    members = [] if cnp else model.members if isinstance(model, P.OutcomeEnsemble) else [model]
     out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,outcome_predictor_fast,capacity_tables}.npz"),
            '#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
 
@@ -304,7 +305,7 @@ def predictor_cpp() -> str:
         """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
         rows = []
         for i, m in enumerate(ms):
-            assert m.bands == model.bands and not (m.noise or m.link)  # energy inputs are ported
+            assert m.bands == model.bands and not (m.noise or m.link or m.hist)  # energy inputs are ported
             out.append(f"constexpr double mean_{tag}{i}[] = {{\n{doubles(m.mean)}}};\n")
             out.append(f"constexpr double std_{tag}{i}[] = {{\n{doubles(m.std)}}};\n")
             layers = []
@@ -337,7 +338,21 @@ def predictor_cpp() -> str:
         rows_r = emit(tag, rm, model.modes)
         out.append(f"constexpr OutcomeMember {name}_members[] = {{\n{''.join(rows_r)}}};\n")
     span = lambda name: f"{name}_members" if regions[name] is not None else "{}"  # noqa: E731
-    out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
+    if cnp:  # the CNP's layers (torch Linear: weight (out, in), so W = weight.T) and its descriptor table
+        assert not (model.noise or model.link or model.hist)
+        out.append(f"constexpr double cnp_mean[] = {{\n{doubles(model.p['mean'])}}};\n")
+        out.append(f"constexpr double cnp_std[] = {{\n{doubles(model.p['std'])}}};\n")
+        for part in ("enc", "head"):
+            layers = []
+            for j in (0, 2, 4):
+                w, b = model.p[f"{part}.{j}.weight"].T, model.p[f"{part}.{j}.bias"]
+                out.append(f"constexpr float w_{part}{j}[] = {{\n{floats(w.reshape(-1))}}};\n")
+                out.append(f"constexpr float b_{part}{j}[] = {{\n{floats(b)}}};\n")
+                layers.append(f"{{{w.shape[0]}, {w.shape[1]}, w_{part}{j}, b_{part}{j}}}")
+            out.append(f"constexpr MlpLayer cnp_{part}[] = {{{', '.join(layers)}}};\n")
+        out.append(f"constexpr float cnp_desc[] = {{\n{floats(np.asarray(model.desc).reshape(-1))}}};\n\n")
+    else:
+        out.append(f"constexpr OutcomeMember members[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr std::string_view modes[] = {{{', '.join(cxx(m) for m in model.modes)}}};\n")
     out.append(f"constexpr std::string_view bands[] = {{{', '.join(cxx(b) for b in model.bands)}}};\n\n")
     grid, tables = P._capacity()
@@ -354,8 +369,13 @@ def predictor_cpp() -> str:
 
     peaks = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(PHY.peak_db(m, c)) for c in range(3))}}}}}" for m in ALL_MODES)
     out.append(f"constexpr ModePeak peaks[] = {{\n{peaks}}};\n\n}}  // namespace\n\n")
-    out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n"
-               f"const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = {span('gate')};\n"
+    cnp_def = (f"const bool OUTCOME_IS_CNP = true;\nconst CnpModel OUTCOME_CNP = {{cnp_mean, cnp_std, cnp_enc, cnp_head, cnp_desc, "
+               f"{np.asarray(model.desc).shape[1]}, {model.secs_col}}};\n" if cnp else
+               "const bool OUTCOME_IS_CNP = false;\nconst CnpModel OUTCOME_CNP = {};\n")
+    out.append(cnp_def)
+    out.append("const std::span<const OutcomeMember> OUTCOME_MEMBERS = {};\n" if cnp else
+               "const std::span<const OutcomeMember> OUTCOME_MEMBERS = members;\n")
+    out.append(f"const std::span<const OutcomeMember> OUTCOME_GATE_MEMBERS = {span('gate')};\n"
                f"const double OUTCOME_GATE_SPREAD_HZ = {cxx(P.GATE_SPREAD_HZ)};\n"
                f"const double OUTCOME_GATE_SNR_DB = {cxx(P.GATE_SNR_DB)};\n"
                f"const int OUTCOME_GATE_HIST = {P.GATE_HIST};\n"

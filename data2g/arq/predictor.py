@@ -88,6 +88,12 @@ N_LINK = 4
 # ENERGY_HIST bursts' in-band SNR from power alone (whole bursts, synced or
 # not; dB, mean over them in power), how many, and 1; all 0 without any.
 N_ENERGY = 3
+# The history inputs (policy.GearShifter.hist_features, studies): the median
+# spread_est of the peer's last GATE_HIST bursts and median snr_est of its
+# last CPM_FLOOR_HIST (what the gate and the CPM floor read; one burst's
+# spread_est is noisy at low SNR), the spread window's fill, and 1; all 0
+# without any.
+N_HIST = 4
 
 # receiver.NoiseProfile.BANDS_HZ (tests/test_noise_profile.py holds them equal; receiver can't import arq)
 NOISE_BANDS_HZ = ((350, 950), (950, 1300), (1300, 1750), (1750, 2100), (2100, 2700))
@@ -161,7 +167,7 @@ def shifted(measured: dict, shift_db: float) -> dict:
 
 
 def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS,
-                   noise: bool = False, link: bool = False, energy: bool = False) -> np.ndarray:
+                   noise: bool = False, link: bool = False, energy: bool = False, hist: bool = False) -> np.ndarray:
     """measured, prev: as inputs(); `seconds`: the next burst's length on air;
     `bands`: the model's band one-hot (OFDM bands, then CPM grids); `noise`:
     a model with the noise profile's inputs (measured["noise"], noise_features)."""
@@ -177,6 +183,8 @@ def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=N
         x += list(measured.get("link") or [0.0] * N_LINK)
     if energy:
         x += list(measured.get("energy") or [0.0] * N_ENERGY)
+    if hist:
+        x += list(measured.get("hist") or [0.0] * N_HIST)
     if noise:
         x += noise_features(measured.get("noise"), band)
     return np.array(x, dtype=np.float64)
@@ -192,6 +200,7 @@ class OutcomeMlp:
     noise: bool = False  # takes the noise profile's inputs (outcome_inputs)
     link: bool = False  # takes the link history's inputs (N_LINK)
     energy: bool = False  # takes the energy inputs (N_ENERGY)
+    hist: bool = False  # takes the history inputs (N_HIST)
     noise_lo: np.ndarray | None = None  # its noise inputs clipped to these (clip_noise)
     noise_hi: np.ndarray | None = None
 
@@ -208,6 +217,38 @@ class OutcomeMlp:
         return h.astype(np.float64)
 
 
+@dataclass
+class OutcomeCNP:
+    """An encoder of the measured conditions and a query head per mode
+    (scripts/cnp_outcome.py): a mode's logits from its descriptor row and the
+    burst's length. Outputs in `modes` order, as OutcomeMlp's."""
+    p: dict  # torch state dict as float32 arrays: enc.{0,2,4}, head.{0,2,4} (weight, bias), mean, std
+    desc: np.ndarray  # (modes, n_desc), normalized
+    secs_col: int
+    modes: tuple = OUTCOME_MODES
+    bands: tuple = tuple(BANDS)
+    noise: bool = False
+    link: bool = False
+    energy: bool = True
+    hist: bool = False
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        if x.ndim == 1:  # one input, as OutcomeMlp takes it: one row of logits back
+            return self(x[None])[0]
+        secs = x[:, self.secs_col].astype(np.float32)
+        h = ((np.delete(x, self.secs_col, axis=1) - self.p["mean"]) / self.p["std"]).astype(np.float32)
+        for i in (0, 2, 4):
+            h = np.tanh(h @ self.p[f"enc.{i}.weight"].T + self.p[f"enc.{i}.bias"])
+        B, M = len(h), len(self.desc)
+        q = np.concatenate([np.repeat(h[:, None], M, 1), np.repeat(self.desc[None], B, 0).astype(np.float32),
+                            np.repeat(secs[:, None, None], M, 1)], -1)
+        for i in (0, 2, 4):
+            q = q @ self.p[f"head.{i}.weight"].T + self.p[f"head.{i}.bias"]
+            if i < 4:
+                q = np.tanh(q)
+        return np.concatenate([q[..., 0], q[..., 1]], -1).astype(np.float64)
+
+
 @lru_cache(maxsize=None)
 def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA / "outcome_predictor.npz")
                   ) -> OutcomeMlp | None:
@@ -217,11 +258,19 @@ def outcome_model(path: str = os.environ.get("DATA2G_OUTCOME_MODEL") or str(DATA
     if not p.exists():
         return None
     d = np.load(p)
-    if "m0_mean" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
+    if "m0_mean" in d.files or "m0_kind" in d.files:  # an ensemble (scripts/train_outcome.py --ensemble)
         members = sorted({k.split("_", 1)[0] for k in d.files})
-        return OutcomeEnsemble([_mlp({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
+        return OutcomeEnsemble([_member({k.split("_", 1)[1]: d[k] for k in d.files if k.startswith(m + "_")})
                                 for m in members])
-    return _mlp({k: d[k] for k in d.files})
+    return _member({k: d[k] for k in d.files})
+
+
+def _member(d: dict):
+    """One model's arrays: a CNP (kind=cnp, scripts/cnp_outcome.py) or an MLP."""
+    if "kind" in d and str(d["kind"]) == "cnp":
+        return OutcomeCNP({k[2:]: v for k, v in d.items() if k.startswith("p_")}, (d["desc"] - d["dmean"]) / d["dstd"],
+                          int(d["secs_col"]), tuple(str(m) for m in d["modes"]), tuple(str(b) for b in d["bands"]))
+    return _mlp(d)
 
 
 def clip_noise(x: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
@@ -244,7 +293,8 @@ def _mlp(d: dict) -> OutcomeMlp:
                                             for i in range(n)],
                       noise=bool(d["noise_inputs"]) if "noise_inputs" in d else False,
                       link=bool(d["link_inputs"]) if "link_inputs" in d else False,
-                      energy=bool(d["energy_inputs"]) if "energy_inputs" in d else False, **clip, **extra)
+                      energy=bool(d["energy_inputs"]) if "energy_inputs" in d else False,
+                      hist=bool(d["hist_inputs"]) if "hist_inputs" in d else False, **clip, **extra)
 
 
 # DATA2G_OUTCOME_LCB=k (studies): an ensemble's logits minus k times its
@@ -282,6 +332,10 @@ class OutcomeEnsemble:
     @property
     def energy(self):
         return self.members[0].energy
+
+    @property
+    def hist(self):
+        return self.members[0].hist
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
         z = np.array([np.clip(m(x), -40, 40) for m in self.members])
@@ -332,7 +386,11 @@ GATE_SPREAD_HZ, GATE_SNR_DB = 0.5, 12.0
 GATE_HIST = 5
 _GATE = os.environ.get("DATA2G_OUTCOME_GATE")
 if _GATE is not None:
-    GATE = (_GATE.split(":")[0], float(_GATE.split(":")[1]), float(_GATE.split(":")[2])) if _GATE else None
+    _g = _GATE.split(":")
+    # an optional 4th field: the gate also needs the peer's last GATE_HIST
+    # snr_est readings steady, standard deviation under it (dB): AWGN reads
+    # steady, MPG's fades swing it (studies)
+    GATE = ((_g[0], float(_g[1]), float(_g[2])) + ((float(_g[3]),) if len(_g) > 3 else ())) if _GATE else None
 else:
     GATE = None if os.environ.get("DATA2G_OUTCOME_MODEL") or not GATE_MODEL.exists() else (
         str(GATE_MODEL), GATE_SPREAD_HZ, GATE_SNR_DB)
@@ -357,16 +415,23 @@ else:
 
 
 def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submodes=None,
-                    prev=None, model=None) -> dict[str, tuple[float, float]]:
+                    prev=None, model=None, extra: dict | None = None) -> dict[str, tuple[float, float]]:
     """-> {submode: (P(burst usable), P(codeword decodes | usable))} for a
-    next burst `seconds` long. `model`: another than the installed one (a gate's)."""
+    next burst `seconds` long. `model`: another than the installed one (a gate's).
+    `extra`: {mode: logit} added to P(usable) on top of LOGIT_OFFSETS (the
+    shifter's conditional offsets, policy.COND_OFFSETS)."""
     model = model or outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,
-                             model.energy))
+                             model.energy, model.hist))
     n, idx = len(model.modes), {m: i for i, m in enumerate(model.modes)}
     if LOGIT_OFFSETS and (_ENV_OFFSETS is not None or not os.environ.get("DATA2G_OUTCOME_MODEL")):
         z = z.copy()
         for m, off in LOGIT_OFFSETS.items():
+            if m in idx:
+                z[idx[m]] += off
+    if extra:
+        z = z.copy()
+        for m, off in extra.items():
             if m in idx:
                 z[idx[m]] += off
     p = 1 / (1 + np.exp(-np.clip(z, -40, 40)))

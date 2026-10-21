@@ -1,6 +1,7 @@
 #include "arq/predictor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -139,10 +140,83 @@ std::vector<double> outcome_inputs(const Measured& m, std::string_view band, dou
     return x;
 }
 
+namespace {
+
+// One dense layer over a batch: h (B, L.in) row-major -> (B, L.out), tanh if `act`.
+// W row by row, each row used for every input while it is in cache. numpy's
+// float32 matmul sums in another order: the parity tests allow float32
+// rounding (test_native_arq.LOGIT_TOL)
+std::vector<float> dense(const tables::MlpLayer& L, const std::vector<float>& h, std::size_t B, bool act) {
+    const std::size_t in = static_cast<std::size_t>(L.in), out = static_cast<std::size_t>(L.out);
+    std::vector<float> o(B * out, 0.0f);
+    for (std::size_t i = 0; i < in; ++i) {
+        const float* w = L.W.data() + i * out;
+        for (std::size_t b = 0; b < B; ++b) {
+            const float hi = h[b * in + i];
+            float* ob = o.data() + b * out;
+            for (std::size_t j = 0; j < out; ++j) ob[j] += hi * w[j];
+        }
+    }
+    for (std::size_t b = 0; b < B; ++b)
+        for (std::size_t j = 0; j < out; ++j) {
+            float& v = o[b * out + j];
+            v += L.b[j];
+            if (act) v = std::tanh(v);
+        }
+    return o;
+}
+
+// The CNP's encoding of one input (with its log2(seconds) column, dropped here).
+std::vector<float> cnp_encode(std::span<const double> x) {
+    const auto& C = tables::OUTCOME_CNP;
+    if (x.size() != C.mean.size() + 1) throw std::invalid_argument("outcome_logits: wrong input size");
+    std::vector<float> h;
+    h.reserve(C.mean.size());
+    for (std::size_t i = 0, k = 0; i < x.size(); ++i)
+        if (static_cast<int>(i) != C.secs_col) h.push_back(static_cast<float>((x[i] - C.mean[k]) / C.std[k])), ++k;
+    for (const auto& L : C.enc) h = dense(L, h, 1, true);
+    return h;
+}
+
+// Head logits (P(usable), P(codeword)) per (mode, log2 seconds) query from one encoding.
+std::vector<std::array<double, 2>> cnp_heads(const std::vector<float>& z, const std::vector<std::pair<int, double>>& q) {
+    const auto& C = tables::OUTCOME_CNP;
+    const std::size_t nz = z.size(), nd = static_cast<std::size_t>(C.n_desc), w = nz + nd + 1, B = q.size();
+    std::vector<float> h(B * w);
+    for (std::size_t b = 0; b < B; ++b) {
+        float* r = h.data() + b * w;
+        std::copy(z.begin(), z.end(), r);
+        const float* d = C.desc.data() + static_cast<std::size_t>(q[b].first) * nd;
+        std::copy(d, d + nd, r + nz);
+        r[nz + nd] = static_cast<float>(q[b].second);
+    }
+    for (std::size_t l = 0; l < C.head.size(); ++l) h = dense(C.head[l], h, B, l + 1 < C.head.size());
+    std::vector<std::array<double, 2>> out(B);
+    for (std::size_t b = 0; b < B; ++b) out[b] = {h[2 * b], h[2 * b + 1]};
+    return out;
+}
+
+bool is_cnp(int model) { return model == 0 && tables::OUTCOME_IS_CNP; }
+
+}  // namespace
+
 std::vector<std::vector<double>> outcome_logits_batch(const std::vector<std::vector<double>>& xs, int model) {
     const auto& members = model == 1   ? tables::OUTCOME_GATE_MEMBERS
                           : model == 2 ? tables::OUTCOME_FAST_MEMBERS
                                        : tables::OUTCOME_MEMBERS;
+    if (is_cnp(model)) {  // every mode at each input's own burst length
+        const std::size_t n = tables::OUTCOME_MODES.size();
+        std::vector<std::vector<double>> out;
+        for (const auto& x : xs) {
+            std::vector<std::pair<int, double>> q(n);
+            for (std::size_t k = 0; k < n; ++k) q[k] = {static_cast<int>(k), x[static_cast<std::size_t>(tables::OUTCOME_CNP.secs_col)]};
+            const auto z = cnp_heads(cnp_encode(x), q);
+            std::vector<double> row(2 * n);
+            for (std::size_t k = 0; k < n; ++k) row[k] = z[k][0], row[n + k] = z[k][1];
+            out.push_back(std::move(row));
+        }
+        return out;
+    }
     if (members.empty()) throw std::invalid_argument("outcome_logits: no such model shipped");
     const std::size_t B = xs.size();
     std::vector<std::vector<double>> psum(B);
@@ -153,30 +227,7 @@ std::vector<std::vector<double>> outcome_logits_batch(const std::vector<std::vec
             if (xs[b].size() != n_in) throw std::invalid_argument("outcome_logits: wrong input size");
             for (std::size_t i = 0; i < n_in; ++i) h[b * n_in + i] = static_cast<float>((xs[b][i] - mem.mean[i]) / mem.std[i]);
         }
-        for (std::size_t l = 0; l < mem.layers.size(); ++l) {
-            const auto& L = mem.layers[l];
-            const std::size_t in = static_cast<std::size_t>(L.in), out = static_cast<std::size_t>(L.out);
-            // W row by row, each row used for every input while it is in cache.
-            // numpy's float32 matmul sums in another order: the parity tests
-            // allow float32 rounding (test_native_arq.LOGIT_TOL)
-            std::vector<float> o(B * out, 0.0f);
-            for (std::size_t i = 0; i < in; ++i) {
-                const float* w = L.W.data() + i * out;
-                for (std::size_t b = 0; b < B; ++b) {
-                    const float hi = h[b * in + i];
-                    float* ob = o.data() + b * out;
-                    for (std::size_t j = 0; j < out; ++j) ob[j] += hi * w[j];
-                }
-            }
-            const bool last = l + 1 == mem.layers.size();
-            for (std::size_t b = 0; b < B; ++b)
-                for (std::size_t j = 0; j < out; ++j) {
-                    float& v = o[b * out + j];
-                    v += L.b[j];
-                    if (!last) v = std::tanh(v);
-                }
-            h = std::move(o);
-        }
+        for (std::size_t l = 0; l < mem.layers.size(); ++l) h = dense(mem.layers[l], h, B, l + 1 < mem.layers.size());
         const std::size_t n_out = h.size() / std::max<std::size_t>(B, 1);
         for (std::size_t b = 0; b < B; ++b) {
             if (psum[b].empty()) psum[b].assign(n_out, 0.0);
@@ -221,6 +272,37 @@ std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuer
             if (const int i = outcome_index(name); i >= 0) z[i] += off;
         for (std::size_t i = 0; i < n; ++i)
             out[q][i] = {sigmoid(std::clamp(z[i], -40.0, 40.0)), sigmoid(std::clamp(z[n + i], -40.0, 40.0))};
+    }
+    return out;
+}
+
+std::vector<Outcome> predict_queries(const Measured& m, std::string_view band, double gap, const Prev* prev, int model,
+                                     const std::vector<ModeQuery>& qs) {
+    std::vector<Outcome> out(qs.size());
+    auto offset = [](int mode) {
+        double off = 0.0;
+        for (const auto& [name, o] : LOGIT_OFFSETS)
+            if (outcome_index(name) == mode) off += o;
+        return off;
+    };
+    if (is_cnp(model)) {
+        const auto x = outcome_inputs(m, band, gap, 1.0, prev, tables::OUTCOME_BANDS, tables::OUTCOME_ENERGY);
+        std::vector<std::pair<int, double>> q;
+        for (const auto& mq : qs) q.push_back({mq.mode, std::log2(mq.seconds)});
+        const auto z = cnp_heads(cnp_encode(x), q);
+        for (std::size_t i = 0; i < qs.size(); ++i)
+            out[i] = {sigmoid(std::clamp(z[i][0] + offset(qs[i].mode), -40.0, 40.0)), sigmoid(std::clamp(z[i][1], -40.0, 40.0))};
+        return out;
+    }
+    std::vector<double> secs;
+    for (const auto& mq : qs)
+        if (std::find(secs.begin(), secs.end(), mq.seconds) == secs.end()) secs.push_back(mq.seconds);
+    std::vector<OutcomeQuery> oq;
+    for (const double sec : secs) oq.push_back({m, sec});
+    const auto all = predict_outcomes(oq, band, gap, prev, model);
+    for (std::size_t i = 0; i < qs.size(); ++i) {
+        const auto k = static_cast<std::size_t>(std::find(secs.begin(), secs.end(), qs[i].seconds) - secs.begin());
+        out[i] = all[k][static_cast<std::size_t>(qs[i].mode)];
     }
     return out;
 }

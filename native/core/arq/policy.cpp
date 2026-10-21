@@ -1,6 +1,7 @@
 #include "arq/policy.hpp"
 
 #include <algorithm>
+#include <tuple>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -92,7 +93,14 @@ int GearShifter::next_capacity(const StationView& st) const {
     return (n - ctl_slots(*m)) * payload_bytes(*m);
 }
 
-void GearShifter::observe(const Measured& m, std::string_view submode, double now) {
+void GearShifter::observe(const Measured& m_in, std::string_view submode, double now) {
+    // a burst too short or weak for a Doppler estimate reports the 2.0 Hz
+    // default (what MPD measures): it takes the peer's last measured spread
+    Measured m = m_in;
+    if (m.spread_est != UNMEASURED_SPREAD_HZ)
+        last_spread = m.spread_est;
+    else if (last_spread)
+        m.spread_est = *last_spread;
     if (measured) prev = Heard{*measured, measured_band, measured_at};
     measured = m;
     measured_band = std::string(mode_at(submode).band);
@@ -218,20 +226,26 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     if (noise_rule)
         for (const Mode* s : cands)
             if (!shift.count(s->band)) shift[std::string(s->band)] = noise_shift_db(measured->noise, measured_band, s->band, *noise_rule);
-    std::map<std::pair<double, double>, std::vector<Outcome>> memo;  // by the burst's rounded length and shift
+    // by the burst's rounded length, the noise rule's shift and the mode
+    std::map<std::tuple<double, double, int>, Outcome> memo;
     const int gated = gate();
     Measured me = *measured;  // with the energy inputs (a model with them reads them)
     me.energy = energy_features();
-    auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
-        const auto sh = shift.find(s.band);
-        const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
-        auto it = memo.find(key);
-        if (it == memo.end())
-            it = memo.emplace(key, predict_outcome(shifted(me, key.second), measured_band, gap_s, key.first,
-                                                   pv ? &*pv : nullptr, gated)).first;
+    auto key_of = [&](const Mode& s, int n_cw) {
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
-        return it->second[static_cast<std::size_t>(i)];
+        const auto sh = shift.find(s.band);
+        return std::tuple<double, double, int>{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second, i};
+    };
+    auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
+        const auto key = key_of(s, n_cw);
+        auto it = memo.find(key);
+        if (it == memo.end()) {
+            const auto [sec, sh, i] = key;
+            it = memo.emplace(key, predict_queries(shifted(me, sh), measured_band, gap_s, pv ? &*pv : nullptr, gated,
+                                                   {{sec, i}})[0]).first;
+        }
+        return it->second;
     };
     auto q_burst = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).burst, get(bias_burst, s.name)); };
     auto q_cw = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).cw, get(bias, s.name)); };
@@ -265,19 +279,22 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     }
     {  // every prediction the loops below ask for, in one batch (the weights read once);
        // predicted_at computes any other lazily (the chat size cut, the final pick)
-        std::vector<std::pair<double, double>> keys;
+        std::vector<std::tuple<double, double, int>> keys;
         auto want = [&](const Mode& s, int n_cw) {
-            const auto sh = shift.find(s.band);
-            const std::pair<double, double> key{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second};
+            const auto key = key_of(s, n_cw);
             if (!memo.count(key) && std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
         };
         for (const Mode* s : cands) want(*s, 1);
         for (const Mode* s : data_cands)
             for (const double sz : SIZE_S) want(*s, slots_for(*s, sz));
-        std::vector<OutcomeQuery> qs;
-        for (const auto& k : keys) qs.push_back({shifted(me, k.second), k.first});
-        auto got = predict_outcomes(qs, measured_band, gap_s, pv ? &*pv : nullptr, gated);
-        for (std::size_t i = 0; i < keys.size(); ++i) memo.emplace(keys[i], std::move(got[i]));
+        std::map<double, std::vector<std::size_t>> by_shift;  // one batch per noise-rule shift
+        for (std::size_t k = 0; k < keys.size(); ++k) by_shift[std::get<1>(keys[k])].push_back(k);
+        for (const auto& [sh, ks] : by_shift) {
+            std::vector<ModeQuery> qs;
+            for (const std::size_t k : ks) qs.push_back({std::get<0>(keys[k]), std::get<2>(keys[k])});
+            const auto got = predict_queries(shifted(me, sh), measured_band, gap_s, pv ? &*pv : nullptr, gated, qs);
+            for (std::size_t j = 0; j < ks.size(); ++j) memo.emplace(keys[ks[j]], got[j]);
+        }
     }
 
     // my reply: the cheapest in expectation, a lost one costing a timeout
