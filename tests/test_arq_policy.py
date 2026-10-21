@@ -64,6 +64,25 @@ def test_chat_trades_rate_for_latency():
     assert p[out[True][0]] >= p[out[False][0]] - 0.02
 
 
+def test_chat_bulk_queue_goes_for_goodput():
+    """CHAT ON with more queued than one burst carries (a file): codewords a
+    burst loses are resent, so not every one need decode. At the 20 dB a
+    client sending a file with CHAT ON measured (recordings/20261021-165549)
+    a chat line goes robust; the file goes faster than 16-QAM."""
+    m = dict(snr_est=20.3, spread_est=0.2, delay_est_ms=0.0, headroom=1.0, frames=76.0,
+             **{f"mi_{c}": v for c, v in zip(P.CONSTS, (1.0, 1.0, 0.91, 0.74))})
+    picks = {}
+    for queued in (200, 60000):
+        g = G.GearShifter()
+        g.observe(m, "w48-16qam-r3/4", 0.0)
+        g.observe_energy(m["snr_est"], 0.0)
+        rec, _, _ = g.recommend(G.StationView(cap=2, chat=True, peer_queued=queued))
+        picks[queued] = MODES[G.decode(rec)]
+    rate = lambda s: s.k / s.frames_per_cw  # noqa: E731  info bits per frame, w48 alike
+    assert rate(picks[60000]) > rate(picks[200])
+    assert rate(picks[60000]) > rate(MODES["w48-16qam-r5/6"])
+
+
 def test_shifter_respects_cap_and_falls_back():
     g = G.GearShifter()
     st = station(0)

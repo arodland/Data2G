@@ -584,11 +584,17 @@ class GearShifter(L.Policy):
                 tries = max(0, int((LINK_LOST_S - tb - TIMEOUT_S) // T_RECOVER_S))
                 t += (1 - ok_ctl) * (1 - reply_p ** 2) ** tries * LOST_LINK_COST_S
                 if chat:
-                    # every burst the message takes, each retried until it all arrives
-                    ok_all = max(ok_ctl * pn ** (n - c), 1e-3)
+                    # every burst the message takes: one is retried until all
+                    # of it arrives; past one, each codeword is resent (IR)
+                    # until it does, so what a burst delivers is what counts
+                    # (a client with CHAT ON sending a file: every codeword of
+                    # an 18-codeword burst held 64-ary modes out at 20 dB,
+                    # recordings/20261021-165549)
+                    bursts = -(-k // max(n - c, 1))
+                    ok = max(ok_ctl * (pn ** (n - c) if bursts == 1 else pn), 1e-3)
                     # ties (a line fits alike in several rates) go to the one
                     # carrying more, for whatever follows it
-                    v = -t * -(-k // max(n - c, 1)) / ok_all + 1e-6 * (n - c) * pb
+                    v = -t * bursts / ok + 1e-6 * (n - c) * pb
                 else:
                     v = (ok_ctl * pn * (n - c) * pb - (held if s.name != cur else 0)) / t
                 if v > best_v:

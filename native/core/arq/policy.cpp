@@ -336,8 +336,11 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             t += (1 - ok_ctl) * std::pow(1 - reply_p * reply_p, tries) * LOST_LINK_COST_S;
             double v;
             if (chat) {
-                const double ok_all = std::max(ok_ctl * std::pow(pn, static_cast<double>(n - c)), 1e-3);
-                v = -t * cdiv(k, std::max(n - c, 1)) / ok_all + 1e-6 * (n - c) * pb;
+                // one burst: retried until all of it arrives; past one, each
+                // codeword is resent until it does (policy.py)
+                const int bursts = cdiv(k, std::max(n - c, 1));
+                const double ok = std::max(ok_ctl * (bursts == 1 ? std::pow(pn, static_cast<double>(n - c)) : pn), 1e-3);
+                v = -t * bursts / ok + 1e-6 * (n - c) * pb;
             } else {
                 v = (ok_ctl * pn * (n - c) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
