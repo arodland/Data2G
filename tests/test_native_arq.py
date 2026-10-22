@@ -177,7 +177,8 @@ def test_shifter_decisions_match(A, pure, seed):
     """Random sessions: observations, recommendations, outcomes, choices.
     Every decision identical; probabilities and biases to LOGIT_TOL. Seeds 6-8:
     flat, under 12 dB, so the gate's model (predictor.GATE) decides; 9-10:
-    under -4 dB, so the CPM floor (policy.CPM_FLOOR) holds; 11-12: fast fading
+    under -4 dB, the CPM floor (policy.CPM_FLOOR) holding while the spread is
+    at least its 1 Hz; 11-12: fast fading
     at 0-8 dB, the fast region's model (predictor.FAST); energy readings throughout."""
     rng = random.Random(seed)
     nrng = np.random.default_rng(seed)
@@ -194,7 +195,7 @@ def test_shifter_decisions_match(A, pure, seed):
         if 6 <= seed <= 8:
             m = dict(m, spread_est=0.05, snr_est=min(m["snr_est"], 10.0))
         if 9 <= seed <= 10:
-            m = dict(m, snr_est=min(m["snr_est"], -5.0))
+            m = dict(m, snr_est=min(m["snr_est"], -5.0), spread_est=rng.choice([0.3, 1.5]))
         if seed >= 11:
             m = dict(m, spread_est=2.0, snr_est=float(rng.uniform(0.0, 7.9)))
         elif step % 4 == 3:  # a defaulted reading (short or weak burst): the shifter carries the last measured one

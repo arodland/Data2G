@@ -77,8 +77,13 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # +12.5/+7.2/+3.7%, no cell worse beyond its SE (MPG 0 -2.8% on 2 seeds, MPD
 # -8 -2.0%); snr:-3 cost MPG -4 7.5%. (kind, X, S): "snr" also wants the
 # median spread_est of those bursts at least S Hz (fast fading: on slow
-# fading a fade holds the median down, and OFDM recovers).
-CPM_FLOOR_DEFAULT = ("snr", -4.0, 0.0)
+# fading a fade holds the median down, and OFDM recovers). S = 1 since
+# 2026-10-22, with the CNP shifter (runs/cpm_floor_cap.sh, 22 cells x 2 caps,
+# confirmed on seeds 12-23): AWGN -10/-8 +82/+76% at 500 Hz, -8 +69% at
+# 2400; MPG -8..-4 +20-35% and MPP -6 +29% at 500 Hz; MPD unchanged; MPP -10
+# at 500 Hz -9% on both seed sets (2 of 25 bps). Off cost MPP -10 36% and MPD
+# -10/-8 20% at 500 Hz; snr:-6/-8 no better than off.
+CPM_FLOOR_DEFAULT = ("snr", -4.0, 1.0)
 CPM_FLOOR_HIST = 3
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0

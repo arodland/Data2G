@@ -14,25 +14,21 @@ threads.limit(1)
 
 import argparse
 import csv
-import functools
 import sys
 from collections import Counter, defaultdict
 from multiprocessing import Pool
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-import linksim  # noqa: E402
 import loss_study as LS  # noqa: E402
 
-RUN = linksim.run
 CAPS = (0, 1, 2)
 RARE = 0.01
 
 
 def job(args):
     cap, chan, snr, seed, horizon = args
-    LS.L.run = functools.partial(RUN, cap=cap)
-    return [dict(r, cap=cap) for r in LS.one((chan, snr, seed, horizon, "shift+cpm", None))]
+    return [dict(r, cap=cap) for r in LS.one((chan, snr, seed, horizon, "shift+cpm", None, cap))]
 
 
 def summarize(path):
