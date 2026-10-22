@@ -1,7 +1,8 @@
 # Analog slots: client-defined latents over Data2G
 
-Status: draft, 2026-10-18. Not started; nothing here is decided beyond what
-"Agreed" marks.
+Status: shelved, 2026-10-21 (drafted 2026-10-18). Part 97 rules out the
+mixed data and analog session; see Regulatory. Nothing here is decided
+beyond what "Agreed" marks.
 
 TLDR: Data2G carries bursts of real values for a client, instead of
 codewords. It owns sync, a digital control codeword, pilots, equalization,
@@ -118,6 +119,20 @@ the precision of de-emphasized values. Two ways:
 - Analog values can't be decision-directed pilots. A mostly analog burst
   gets DD from its digital slots only.
 - Monitor mode shows "analog burst, group X, n values", not the content.
+
+## Regulatory (US, Part 97)
+
+Analog latents are arguably "image" (SSTVAE) or "phone" (RADE), with
+Data2G's digital framing incidental. But almost nowhere in the HF bandplan
+allows both data and image or phone, so:
+
+- A session can't mix analog slots with ordinary data without changing
+  frequency to another band segment. Not something to take on now.
+- The one shape that fits: a single-class session run entirely in the
+  phone/image segment, analog payload plus its digital control and ACKs as
+  incidental framing. An SSTVAE picture session or RADE voice messaging,
+  never switching emission type.
+- Bandwidth-based bandplans elsewhere may allow the mixed case; not checked.
 
 ## Open questions
 
