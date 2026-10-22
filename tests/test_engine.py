@@ -153,7 +153,7 @@ def test_vara_commands_drive_a_session(tmp_path):
         b.command(line)
     a.command("BW500")
     a.command("CONNECT W1AW K2XYZ")
-    assert a.out_cmd == ["OK", "OK"] and b.out_cmd == ["OK"] * 3
+    assert a.out_cmd == ["OK", "OK"] and b.out_cmd == ["OK", "REGISTERED K2XYZ", "OK", "OK"]
 
     def pump():
         a.after_step(bool(a.engine.tx))
@@ -310,7 +310,7 @@ def test_mycall_with_several_calls_answers_each():
     a, b = Host(Engine("NOCALL", seed=31)), Host(Engine("NOCALL", seed=32))
     for line in ("MYCALL KC2G KC2G-T", "LISTEN CQ", "LISTEN ON", "IGNOREKISSDCD ON"):
         b.command(line)
-    assert b.out_cmd == ["OK"] * 4
+    assert b.out_cmd == ["OK", "REGISTERED KC2G", "REGISTERED KC2G-T"] + ["OK"] * 3
     a.command("CONNECT W1AW KC2G-T")
 
     def up():
