@@ -117,11 +117,11 @@ def test_broadcast_groups_between_cpp_and_python_engines(native, reference):
     nc, np_ = cpp.kiss.open("CHAT", "W1AW"), py.kiss.open("chat", "k2xyz")
     cpp.kiss.enqueue(b"hello from C++", nc, ack="tag-c")
     assert link(cpp, py, 12, 30, lambda: (np_, b"hello from C++") in py.kiss_rx)
-    assert f"BCAST {np_} HEARD W1AW" in py.kiss.take_events() and cpp.kiss.take_acks() == [(nc, "tag-c")]
+    assert any(e.startswith(f"BCAST {np_} HEARD W1AW ") for e in py.kiss.take_events()) and cpp.kiss.take_acks() == [(nc, "tag-c")]
     heard = []
     py.kiss.enqueue(b"hello from Python", np_, ack="tag-p")
     assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (nc, b"hello from Python") in heard, seed=1)
-    assert f"BCAST {nc} HEARD K2XYZ" in cpp.kiss.take_events() and py.kiss.take_acks() == [(np_, "tag-p")]
+    assert any(e.startswith(f"BCAST {nc} HEARD K2XYZ ") for e in cpp.kiss.take_events()) and py.kiss.take_acks() == [(np_, "tag-p")]
 
 
 def test_receive_accept_matches_python(native):

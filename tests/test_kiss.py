@@ -52,6 +52,14 @@ def heard(burst, rx: KissLink, snr: float = 20.0, seed: int = 0):
     return burst, (rx.on_burst(r) if r is not None else [])
 
 
+def heard_snr(events: list, n: int, call: str = "") -> float:
+    """The SNR of the one status, BCAST n HEARD [call] snr."""
+    (ev,) = events
+    head, snr = ev.rsplit(" ", 1)
+    assert head == f"BCAST {n} HEARD" + (f" {call}" if call else ""), ev
+    return float(snr)
+
+
 def shifting(**kw):
     """A link with rate shifting on port 0 (BCAST MODE 0 AUTO), the cap's
     robust mode as the fallback."""
@@ -150,7 +158,7 @@ def test_groups_go_to_their_ports_only():
     f = b"!beacon, not AX.25"
     a.enqueue(f, na)
     _, got = over_air(a, b, seed=30)
-    assert got == [(nb, f)] and b.events == [f"BCAST {nb} HEARD"]
+    assert got == [(nb, f)] and abs(heard_snr(b.events, nb) - 20) < 3  # over_air's 20 dB
     a.enqueue(f, na)  # a station without the group: a broadcast burst, nothing for it
     _, got = over_air(a, c, seed=31)
     assert got == [] and c.events == []
@@ -164,7 +172,7 @@ def test_group_from_names_the_sender():
     na, nb = a.open("CHAT", from_call="w1aw"), b.open("CHAT")
     a.enqueue(b"hello", na)
     _, got = over_air(a, b, seed=33)
-    assert got == [(nb, b"hello")] and b.events == [f"BCAST {nb} HEARD W1AW"]
+    assert got == [(nb, b"hello")] and heard_snr(b.events, nb, "W1AW")
 
 
 def control_lost(burst):
@@ -181,7 +189,7 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     na, nb = a.open("APRS"), b.open("APRS")
     a.enqueue(b"x" * 40, na)
     _, got = heard(control_lost(a.next_burst()), b, seed=34)
-    assert got == [(nb, b"x" * 40)] and b.events == [f"BCAST {nb} HEARD"]
+    assert got == [(nb, b"x" * 40)] and heard_snr(b.events, nb)
     assert group_key("G102291") == group_key("APRS")  # another group, the same key: open it too
     nc = b.open("G102291")
     b.take_events()
@@ -190,7 +198,7 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     assert got == [] and sorted(b.take_events()) == sorted([f"BCAST {nb} LOST 1", f"BCAST {nc} LOST 1"])
     a.enqueue(b"z", na)  # with its control, the name settles it
     _, got = over_air(a, b, seed=36)
-    assert got == [(nb, b"z")] and b.events == [f"BCAST {nb} HEARD"]
+    assert got == [(nb, b"z")] and heard_snr(b.events, nb)
 
 
 def test_acks_when_sent_and_drops_reported():

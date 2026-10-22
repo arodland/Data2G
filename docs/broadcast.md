@@ -121,16 +121,19 @@ cap's robust broadcast mode). A group may be several words in `BCAST OPEN`; open
 twice, both ports get its frames. `MODE` lines read `MODE name bandwidth-Hz
 bytes-per-codeword max-codewords seconds-at-1 seconds-at-max`.
 
-- `BCAST n HEARD [call]`: a burst's control checked for port n (call from group+from).
+- `BCAST n HEARD [call] snr`: a burst's control checked for port n (call from group+from).
   Its frames follow on the KISS port. It's known only at the burst's end: the receiver
-  decodes whole bursts.
+  decodes whole bursts. `snr` is the burst's pilot SNR (dB, average power in 2500 Hz,
+  as the monitor shows it), always the last word: a callsign always has a letter.
 - `BCAST n LOST k`: the burst is the port's (control checked, or data under its key),
   but k frames were lost.
 - Control lost: if a data slot passes under an open port's key, the burst is that
   port's (HEARD / LOST as usual; an ambiguous key as in §2 Collisions). Control and
   all data lost can't be tied to a port: the frozen 16-bit PHY header has no room for
-  a group. Every open port gets a `BCAST * MISSED submode n_cw` hint; it may be
-  another group's burst. Only outside an ARQ session: during one, a lost burst is
+  a group. Every open port gets a `BCAST * MISSED submode n_cw [snr]` hint; it may be
+  another group's burst. `snr` is the in-band energy over the burst against the noise
+  floor, on HEARD's scale; absent until a noise floor is known (a few seconds after
+  start). Receiver AGC can pull it low under strong signals. Only outside an ARQ session: during one, a lost burst is
   most likely the peer's.
 
 Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
