@@ -15,7 +15,7 @@ hands per round. SNR is in 2500 Hz, against the Hand's own (constant
 envelope: PEP = average) power, so a shorter Hand carries less energy.
 
 Receiver: net control knows the slot and channel; each trial puts the Hand
-within +-0.2 s and +-3 Hz of nominal, and the receiver searches +-0.25 s
+within +-0.2 s (--dt) and +-3 Hz of nominal, and the receiver searches +-0.25 s (--search)
 (T/8 steps) x +-5 Hz (R/4 steps) on the sync blocks' tone shares, decodes
 the best TOP candidates, and takes the first list path whose CRC passes.
 A wrong payload that passes is counted apart (false).
@@ -50,7 +50,7 @@ K = PAYLOAD + CRC
 SPACINGS = (6.25, 12.5, 25.0)
 CHANNELS = ("awgn", "mpg", "mpp", "mpd", "mps")
 TAG = 0x5A  # the request tag the CRC is seeded with
-LEAD_S = 0.3  # silence either side of the nominal slot
+LEAD_S = 0.8  # silence either side of the nominal slot: more than any --dt
 DT_S, DF_HZ = 0.2, 3.0  # where the Hand really lands
 SEARCH_S, SEARCH_HZ = 0.25, 5.0  # where net control looks
 TOP = 3
@@ -100,12 +100,12 @@ def modulate(g: cpm.Grid, payload: np.ndarray) -> np.ndarray:
     return cpm.tones(g, sym)
 
 
-def search(g: cpm.Grid, y: np.ndarray, nominal: int) -> list:
+def search(g: cpm.Grid, y: np.ndarray, nominal: int, span_s: float = SEARCH_S) -> list:
     """Top candidates (start, cfo) by the sync blocks' tone shares."""
     T = g.T
     cands = []
     for cfo in np.arange(-SEARCH_HZ, SEARCH_HZ + 1e-9, g.rate / 4):
-        for start in range(nominal - int(SEARCH_S * FS), nominal + int(SEARCH_S * FS) + 1, T // 8):
+        for start in range(nominal - int(span_s * FS), nominal + int(span_s * FS) + 1, T // 8):
             s = 0.0
             for r0 in (0, len(SYNC) + HALF):
                 E_ = cpm._shares(cpm._energies(g, y, start + r0 * T, len(SYNC), cfo))
@@ -121,9 +121,10 @@ def search(g: cpm.Grid, y: np.ndarray, nominal: int) -> list:
     return out
 
 
-def receive(g: cpm.Grid, y: np.ndarray, nominal: int, dec: polar.SCLDecoder) -> np.ndarray | None:
+def receive(g: cpm.Grid, y: np.ndarray, nominal: int, dec: polar.SCLDecoder,
+            span_s: float = SEARCH_S) -> np.ndarray | None:
     """The payload of the first candidate and list path whose CRC passes, or None."""
-    cands = search(g, y, nominal)
+    cands = search(g, y, nominal, span_s)
     llr = np.empty((len(cands), E))
     for i, (start, cfo) in enumerate(cands):
         En = cpm._energies(g, y, start, N_SYM, cfo)[DATA_ROWS]
@@ -136,11 +137,11 @@ def receive(g: cpm.Grid, y: np.ndarray, nominal: int, dec: polar.SCLDecoder) -> 
     return None
 
 
-def _arrival(g: cpm.Grid, rng, chan: str, seed: int, shift_hz: float = 0.0):
+def _arrival(g: cpm.Grid, rng, chan: str, seed: int, shift_hz: float = 0.0, dt_s: float = DT_S):
     """One Hand as received, noise-free: (payload, audio). Its own timing and
     CFO draw, its own fading, `shift_hz` off the wanted channel."""
     payload = rng.integers(0, 2, PAYLOAD).astype(np.uint8)
-    dt, df = rng.uniform(-DT_S, DT_S), rng.uniform(-DF_HZ, DF_HZ)
+    dt, df = rng.uniform(-dt_s, dt_s), rng.uniform(-DF_HZ, DF_HZ)
     lead = int(LEAD_S * FS)
     pad = np.zeros(lead + int(round(dt * FS)))
     tx = np.concatenate([pad, modulate(g, payload), np.zeros(2 * lead - len(pad))])
@@ -153,19 +154,19 @@ def _arrival(g: cpm.Grid, rng, chan: str, seed: int, shift_hz: float = 0.0):
 def trial(args) -> list:
     """Decode outcomes per SNR: 1 right, 0 none, -1 a wrong payload. With
     `nb_db`, a Hand `pitch` Hz either side, each nb_db over the wanted one."""
-    rate, chan, seed, snrs, nb_db, pitch = args
+    rate, chan, seed, snrs, nb_db, pitch, dt_s, span_s = args
     g = grid(rate)
     rng = np.random.default_rng(seed)
-    payload, y0 = _arrival(g, rng, chan, seed)
+    payload, y0 = _arrival(g, rng, chan, seed, dt_s=dt_s)
     s_power = 1.0  # cpm.tones is unit RMS and the taps unit power: SNR against the TX, as apply_channel
     if nb_db is not None:
         for k, side in enumerate((-1, 1)):
-            y0 = y0 + 10 ** (nb_db / 20) * _arrival(g, rng, chan, seed + 1000003 * (k + 1), side * pitch)[1]
+            y0 = y0 + 10 ** (nb_db / 20) * _arrival(g, rng, chan, seed + 1000003 * (k + 1), side * pitch, dt_s)[1]
     lead = int(LEAD_S * FS)
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for snr in snrs:
-        got = receive(g, hfchannel.awgn(y0, snr, seed=seed + 1, s_power=s_power), lead, dec)
+        got = receive(g, hfchannel.awgn(y0, snr, seed=seed + 1, s_power=s_power), lead, dec, span_s)
         out.append(0 if got is None else 1 if np.array_equal(got, payload) else -1)
     return out
 
@@ -201,6 +202,8 @@ def main():
     ap.add_argument("--neighbours", type=float, nargs="+", default=None, metavar="DB",
                     help="a Hand each side, this many dB over the wanted one (one run per value)")
     ap.add_argument("--pitch", type=float, default=None, help="channel pitch, Hz (default: 9.6 x spacing, 60 Hz at 6.25)")
+    ap.add_argument("--dt", type=float, default=DT_S, help="Hands land within +-this of nominal, s")
+    ap.add_argument("--search", type=float, default=SEARCH_S, help="net control searches +-this, s")
     ap.add_argument("--out", default="runs/hand_study/link.json")
     ap.add_argument("--demo", action="store_true")
     a = ap.parse_args()
@@ -209,12 +212,12 @@ def main():
     snrs = list(np.arange(a.snr[0], a.snr[1] + 1e-9, a.snr[2]))
     nbs = a.neighbours or [None]
     pitch = lambda r: a.pitch or 9.6 * r  # noqa: E731  (the response's 60 / 120 Hz)
-    jobs = [(r, c, s, snrs, nb, pitch(r)) for r in a.spacings for c in a.channels for nb in nbs
+    jobs = [(r, c, s, snrs, nb, pitch(r), a.dt, a.search) for r in a.spacings for c in a.channels for nb in nbs
             for s in range(a.trials)]
     with Pool(a.workers) as pool:
         res = pool.map(trial, jobs, chunksize=4)
     table = {}
-    for (r, c, _, _, nb, _), out in zip(jobs, res):
+    for (r, c, _, _, nb, *_), out in zip(jobs, res):
         table.setdefault(f"{r:g}/{c}" + ("" if nb is None else f"/{nb:+g}"), []).append(out)
     summary = {}
     print(f"{'case':>16} {'10% pt':>7} {'1% pt':>6} {'false':>5}")
@@ -226,7 +229,7 @@ def main():
         f = lambda v: f"{v:7.1f}" if v is not None else "      -"  # noqa: E731
         print(f"{key:>16} {f(p10)} {f(p1)[1:]} {summary[key]['false']:5d}")
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps(dict(snrs=snrs, trials=a.trials, k=K, e=E, pitch={f"{r:g}": pitch(r) for r in a.spacings},
+    Path(a.out).write_text(json.dumps(dict(snrs=snrs, trials=a.trials, dt=a.dt, search=a.search, k=K, e=E, pitch={f"{r:g}": pitch(r) for r in a.spacings},
                                           summary=summary), indent=1))
 
 
