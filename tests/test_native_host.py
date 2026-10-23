@@ -94,7 +94,7 @@ def test_cpp_host_matches_python(classes, credit):
     Engine, hosts = classes
     py, cpp = (transcript(Engine, hosts[k], credit) for k in ("python", "cpp"))
     flat = [line for _, _, cmd, _ in py for line in cmd]
-    for want in ("VERSION Data2G 0.1", "CQFRAME W1AW 500", "CONNECTED W1AW K2XYZ-1 500", "DISCONNECTED", "BUSY ON",
+    for want in (f"VERSION {host.VERSION}", "CQFRAME W1AW 500", "CONNECTED W1AW K2XYZ-1 500", "DISCONNECTED", "BUSY ON",
                  "PTT ON", "IAMALIVE", "WRONG"):
         assert want in flat, want
     assert any(line.startswith("MODE ") for line in flat) and any(line.startswith("BUFFER ") for line in flat)

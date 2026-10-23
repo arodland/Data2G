@@ -30,3 +30,8 @@ only, never on the live path or ported: hfchannel and interference
 (channel simulators), channel_torch and decoders_torch (torch, for
 training and GPU studies).
 """
+
+# The release version, set by tools/bump_version.sh with pyproject.toml's.
+# A literal, not importlib.metadata: an editable install's metadata is stale
+# until re-synced, and the C++ host (CMake's copy) must give the same reply.
+__version__ = "0.0.1"

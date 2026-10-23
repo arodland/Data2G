@@ -39,7 +39,7 @@ native/app/station.cpp and main() native/apps/data2g_host.cpp. Under
 `pytest --native` tests/native_subs/host.py substitutes Host.
 """
 
-from . import threads
+from . import __version__, threads
 
 threads.cap_env(1)  # before numpy loads: receiver.py has the reasoning
 
@@ -63,7 +63,7 @@ from .config import FS  # noqa: E402
 from .tnc import KissServer, Rigctld  # noqa: E402
 
 log = logging.getLogger("data2g.host")
-VERSION = "Data2G 0.1"
+VERSION = f"Data2G {__version__}"
 # caps are policy.CAP_HZ's keys (0: 500 Hz, 1: 1200, 2: 2400)
 BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = modes.BW_NAME

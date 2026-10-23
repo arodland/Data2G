@@ -4,20 +4,19 @@
 #
 #   tools/bump_version.sh <x.y.z> [--dry-run] [--force] [--no-commit]
 #
-# The version is written down in three places: native/CMakeLists.txt,
-# pyproject.toml and uv.lock. `.github/workflows/release.yml` checks the
-# first two against the tag before it builds anything, so a mismatch fails
-# early rather than shipping a download called 0.2.0 whose About box says
-# 0.1.0. CMake's copy also reaches the .exe version block, the macOS
-# bundle and the About box. uv.lock records the project's own version in
-# its `[[package]]` entry; nothing checks it, which is why it drifts
-# (SSTVAE v0.1.1 shipped with its lock at 0.1.0).
+# The version is written down in four places: native/CMakeLists.txt,
+# pyproject.toml, data2g/__init__.py and uv.lock. `.github/workflows/release.yml`
+# checks the first two against the tag before it builds anything, so a
+# mismatch fails early rather than shipping a download called 0.2.0 whose
+# About box says 0.1.0. CMake's copy also reaches the .exe version block,
+# the macOS bundle, the About box and the C++ host's VERSION reply;
+# `data2g.__version__` is the Python host's (tests/test_native_host.py
+# checks the two agree). uv.lock records the project's own version in its
+# `[[package]]` entry; nothing checks it, which is why it drifts (SSTVAE
+# v0.1.1 shipped with its lock at 0.1.0).
 #
-# Not touched:
-#   - host::VERSION / host.py's VERSION ("Data2G 0.1"): the VARA host's
-#     VERSION reply, a protocol string, not the release number.
-#   - the metainfo <releases> list: an entry needs a hand-written
-#     description, so add it by hand when a release deserves one.
+# Not touched: the metainfo <releases> list. An entry needs a hand-written
+# description, so add it by hand when a release deserves one.
 #
 # The current version is read with the release workflow's own sed
 # expressions, and the result is read back the same way: a bump that
@@ -73,9 +72,10 @@ cd "$repo"
 
 cmake_file="native/CMakeLists.txt"
 pyproject_file="pyproject.toml"
+init_file="data2g/__init__.py"
 lock_file="uv.lock"
 
-for f in "$cmake_file" "$pyproject_file" "$lock_file"; do
+for f in "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"; do
     [ -f "$f" ] || { echo "missing $f -- is $repo the right tree?" >&2; exit 1; }
 done
 
@@ -108,7 +108,7 @@ fi
 # Unrelated working-tree edits are fine; they are never staged here. An
 # unstaged edit to a file this script will `git add` is not.
 if [ "$commit" -eq 1 ]; then
-    dirty="$(git diff --name-only -- "$cmake_file" "$pyproject_file" "$lock_file")"
+    dirty="$(git diff --name-only -- "$cmake_file" "$pyproject_file" "$init_file" "$lock_file")"
     if [ -n "$dirty" ]; then
         echo "uncommitted changes in files this script commits:" >&2
         printf '  %s\n' $dirty >&2
@@ -120,6 +120,7 @@ fi
 # The first two expressions are copied verbatim from release.yml's check.
 read_cmake()     { sed -n 's/^project(data2g_native VERSION \([0-9.]*\).*/\1/p' "$cmake_file" | head -1; }
 read_pyproject() { sed -n 's/^version = "\([0-9.]*\)".*/\1/p' "$pyproject_file" | head -1; }
+read_init()      { sed -n 's/^__version__ = "\([0-9.]*\)".*/\1/p' "$init_file" | head -1; }
 
 # The `data2g` entry's version, not the file's first `version =` line,
 # which belongs to some dependency.
@@ -131,25 +132,27 @@ read_lock() {
 
 cmake_now="$(read_cmake)"
 pyproject_now="$(read_pyproject)"
+init_now="$(read_init)"
 lock_now="$(read_lock)"
 
-for pair in "$cmake_file:$cmake_now" "$pyproject_file:$pyproject_now" "$lock_file:$lock_now"; do
+for pair in "$cmake_file:$cmake_now" "$pyproject_file:$pyproject_now" "$init_file:$init_now" "$lock_file:$lock_now"; do
     if [ -z "${pair#*:}" ]; then
         echo "could not read a version from ${pair%%:*} -- has the line moved?" >&2
         exit 1
     fi
 done
 
-echo "current: $cmake_file=$cmake_now  $pyproject_file=$pyproject_now  $lock_file=$lock_now"
+echo "current: $cmake_file=$cmake_now  $pyproject_file=$pyproject_now"
+echo "         $init_file=$init_now  $lock_file=$lock_now"
 echo "new:     $version"
 
-if [ "$cmake_now" != "$pyproject_now" ] || [ "$cmake_now" != "$lock_now" ]; then
+if [ "$cmake_now" != "$pyproject_now" ] || [ "$cmake_now" != "$init_now" ] || [ "$cmake_now" != "$lock_now" ]; then
     echo "note: the files disagree today; this run makes them agree." >&2
 fi
 
 # Against the highest of them, so a half-finished previous bump cannot
 # make a real increase look like a decrease. `sort -V`: 0.10.0 > 0.9.0.
-highest="$(printf '%s\n' "$cmake_now" "$pyproject_now" "$lock_now" | sort -V | tail -1)"
+highest="$(printf '%s\n' "$cmake_now" "$pyproject_now" "$init_now" "$lock_now" | sort -V | tail -1)"
 if [ "$version" = "$highest" ]; then
     if [ "$force" -eq 0 ]; then
         echo "already at $version (use --force to rewrite anyway)" >&2
@@ -194,6 +197,9 @@ bump "$cmake_file" \
 bump "$pyproject_file" \
      '^version = "[0-9]+\.[0-9]+\.[0-9]+"' \
      "version = \"$version\""
+bump "$init_file" \
+     '^__version__ = "[0-9]+\.[0-9]+\.[0-9]+"' \
+     "__version__ = \"$version\""
 
 if [ "$dry_run" -eq 1 ]; then
     echo "  would run  uv lock                 ($lock_file: $lock_now -> $version)"
@@ -208,7 +214,8 @@ uv lock
 # Read back through the gate's expressions: sed exits 0 whether or not
 # anything matched.
 ok=1
-for pair in "$cmake_file:$(read_cmake)" "$pyproject_file:$(read_pyproject)" "$lock_file:$(read_lock)"; do
+for pair in "$cmake_file:$(read_cmake)" "$pyproject_file:$(read_pyproject)" "$init_file:$(read_init)" \
+            "$lock_file:$(read_lock)"; do
     got="${pair#*:}"
     if [ "$got" != "$version" ]; then
         echo "${pair%%:*} still reads '$got' after the edit" >&2
@@ -218,21 +225,21 @@ done
 [ "$ok" -eq 1 ] || exit 1
 
 echo "bumped to $version in:"
-printf '  %s\n' "$cmake_file" "$pyproject_file" "$lock_file"
+printf '  %s\n' "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"
 
 if [ "$commit" -eq 0 ]; then
     cat <<EOF
 
 Left in the working tree (--no-commit). Next:
 
-  git diff -- $cmake_file $pyproject_file $lock_file
+  git diff -- $cmake_file $pyproject_file $init_file $lock_file
 EOF
     exit 0
 fi
 
 # The index was empty at the top and these files had no unstaged edits,
 # so what is staged is exactly what this script wrote.
-git add -- "$cmake_file" "$pyproject_file" "$lock_file"
+git add -- "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"
 git commit -q -m "Release v$version"
 echo
 git --no-pager show --stat --oneline HEAD

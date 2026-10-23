@@ -29,7 +29,7 @@
 
 namespace data2g::host {
 
-inline constexpr std::string_view VERSION = "Data2G 0.1";
+inline constexpr std::string_view VERSION = "Data2G " DATA2G_VERSION;  // data2g.__version__ in host.py
 inline constexpr double ALIVE_S = 60.0;          // IAMALIVE on the command port this often, as VARA does
 inline constexpr double BUFFER_REPEAT_S = 30.0;  // a nonzero BUFFER is repeated this often
 inline constexpr double DIAL_TIMEOUT_S = 1.0;    // ACCEPT's connection must be up by then (the caller waits ~3.5 s)

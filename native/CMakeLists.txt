@@ -77,6 +77,9 @@ file(GLOB_RECURSE DATA2G_CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
 list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android|hamlib|miniaudio)/")
 add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
 target_include_directories(data2g_core PUBLIC core)
+# The release version (tools/bump_version.sh): the host's VERSION reply and the About box,
+# the same number as the .exe's version block and the macOS bundle's.
+target_compile_definitions(data2g_core PUBLIC DATA2G_VERSION="${PROJECT_VERSION}")
 target_include_directories(data2g_core SYSTEM PUBLIC third_party/pocketfft)
 find_package(Threads REQUIRED)
 find_package(ZLIB)
@@ -238,8 +241,6 @@ if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
     set_target_properties(data2g_gui PROPERTIES AUTOMOC ON)
     target_include_directories(data2g_gui PUBLIC gui)
     target_link_libraries(data2g_gui PUBLIC data2g_station Qt6::Gui Qt6::Widgets)
-    # The About box's version: the same number as the .exe's version block and the macOS bundle's.
-    target_compile_definitions(data2g_gui PUBLIC DATA2G_VERSION="${PROJECT_VERSION}")
     add_executable(data2g-gui gui/main.cpp packaging/icons.qrc)
     set_target_properties(data2g-gui PROPERTIES AUTORCC ON)
     target_link_libraries(data2g-gui PRIVATE data2g_gui)

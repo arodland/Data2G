@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from data2g import tnc
+from data2g import host, tnc
 
 BINARY = Path(__file__).resolve().parent.parent / "native" / "build" / ("data2g-host.exe" if os.name == "nt" else "data2g-host")
 BAD = re.compile(r"overflow|underrun|behind the card|dropped|CRITICAL|Traceback")
@@ -171,7 +171,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         a.send("MYCALL A")
         a.send("VERSION")
         # a reply needs audio flowing both ways: the engine steps on capture
-        wait([a, b], lambda: len(b.lines) >= 3 and "VERSION Data2G 0.1" in a.lines, 30, "replies")
+        wait([a, b], lambda: len(b.lines) >= 3 and f"VERSION {host.VERSION}" in a.lines, 30, "replies")
         assert b.lines[:3] == ["OK", "REGISTERED B", "OK"]
         t0 = time.monotonic()
         a.send("CONNECT A B")
