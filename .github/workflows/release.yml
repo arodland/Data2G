@@ -1,11 +1,10 @@
 # Turn a draft release into a published one. Lifted from SSTVAE.
 #
-#   1. tools/bump_version.sh X.Y.Z: native/CMakeLists.txt, pyproject.toml,
-#      data2g/__init__.py and uv.lock, committed as "Release vX.Y.Z". Push.
-#   2. Create a draft release on GitHub for tag vX.Y.Z (the tag need not
+#   1. Create a draft release on GitHub for tag vX.Y.Z (the tag need not
 #      exist yet; GitHub creates it on publish) and write the notes.
-#   3. Run this workflow by hand with that tag. It checks the tag against
-#      the declared versions, builds and signs all five platforms with the
+#   2. Run this workflow by hand with that tag. If the declared versions
+#      are not X.Y.Z it runs tools/bump_version.sh X.Y.Z and pushes the
+#      "Release vX.Y.Z" commit to the draft's target branch. It then builds and signs all five platforms with the
 #      same workflow CI runs, attaches the downloads, appends a Downloads
 #      table below the notes (tools/release_notes.py), and publishes.
 #
@@ -50,6 +49,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # For bump_version.sh's `uv lock`, the same uv CI uses.
+      - uses: astral-sh/setup-uv@v8.3.2
       # Inputs arrive as environment variables, with no ${{ }} inside the
       # script, so the script also runs outside Actions.
       - name: Parse the tag and check it against the source
@@ -76,10 +77,14 @@ jobs:
           # the draft's target (a branch or a SHA), resolved to one SHA here
           # so all five builds use one commit even if the branch moves.
           # `--verify -q`: a bare rev-parse echoes what it cannot resolve.
+          # BRANCH is set only when the target is a branch: the one case
+          # where a version bump has somewhere to be pushed.
+          BRANCH=""
           if SHA="$(git rev-parse --verify -q "refs/tags/$TAG^{commit}")"; then
             echo "tag $TAG exists, building $SHA"
           else
             TARGET="${TARGET:-$DEFAULT_BRANCH}"
+            git rev-parse --verify -q "refs/remotes/origin/$TARGET" >/dev/null && BRANCH="$TARGET"
             SHA="$(git rev-parse --verify -q "origin/$TARGET^{commit}" \
                    || git rev-parse --verify -q "$TARGET^{commit}")" \
               || { echo "::error::cannot resolve the draft's target '$TARGET' to a commit"; exit 1; }
@@ -89,13 +94,28 @@ jobs:
 
           # Checked against the source, never written into it: a mismatch
           # would ship a download named one version reporting another.
-          CMAKE_V="$(sed -n 's/^project(data2g_native VERSION \([0-9.]*\).*/\1/p' native/CMakeLists.txt | head -1)"
-          PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          # bump_version.sh reads with these same expressions.
+          read_versions() {
+            CMAKE_V="$(sed -n 's/^project(data2g_native VERSION \([0-9.]*\).*/\1/p' native/CMakeLists.txt | head -1)"
+            PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          }
+          read_versions
+          # Not bumped already: commit the bump to the target branch and
+          # build that commit. A push that is not a fast-forward (the
+          # branch moved since the checkout) fails the run; re-run it.
+          if [ -n "$BRANCH" ] && { [ "$CMAKE_V" != "$VERSION" ] || [ "$PY_V" != "$VERSION" ]; }; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            tools/bump_version.sh "$VERSION"
+            git push origin "HEAD:refs/heads/$BRANCH"
+            SHA="$(git rev-parse HEAD)"
+            read_versions
+          fi
           echo "tag=$VERSION native/CMakeLists.txt=$CMAKE_V pyproject.toml=$PY_V"
           fail=0
           [ "$CMAKE_V" = "$VERSION" ] || { echo "::error::native/CMakeLists.txt says $CMAKE_V"; fail=1; }
           [ "$PY_V" = "$VERSION" ]    || { echo "::error::pyproject.toml says $PY_V"; fail=1; }
-          [ "$fail" -eq 0 ] || { echo "Run tools/bump_version.sh $VERSION, push, and re-run." >&2; exit 1; }
+          [ "$fail" -eq 0 ] || { echo "The tag or a SHA target cannot take a bump commit: run tools/bump_version.sh $VERSION, push, and re-run." >&2; exit 1; }
 
           { echo "tag=$TAG"; echo "version=$VERSION"; echo "sha=$SHA"; } >> "$GITHUB_OUTPUT"
 

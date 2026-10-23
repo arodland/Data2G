@@ -23,7 +23,7 @@
 # edits a line the gate does not match is as broken as no bump at all,
 # and would be found a tag later.
 #
-# Linux/bash: a developer's pre-release step, not something CI runs.
+# Linux/bash. release.yml runs it when the versions do not match the tag.
 
 set -euo pipefail
 
