@@ -10,9 +10,10 @@
 // each session's data over a connection made to host:port, default
 // the command client's own: host.py), CONNECT from to, DISCONNECT,
 // ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
+// SN (-> SN snr, the session peer's last burst decoded; WRONG before one),
 // and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
 // [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
-// WRONG. Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
+// WRONG (MYCALL's OK followed by REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
 // ON|OFF, BUFFER n, IAMALIVE, MODE; broadcast statuses (BCAST ...) once the
 // client has sent a BCAST command.
 #pragma once

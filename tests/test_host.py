@@ -68,13 +68,14 @@ def test_commands_over_tcp(tmp_path):
     c.sendall(b"VERSION\rMYCALL K2XYZ\rLISTEN ON\rBW500\rFOO\r")
     got = b""
     deadline = time.time() + 20
-    while got.count(b"\r") < 5 and time.time() < deadline:
+    while got.count(b"\r") < 6 and time.time() < deadline:
         got += c.recv(4096)
     stop.set()
     th.join(timeout=20)
     c.close()
     d.close()
-    assert got.split(b"\r")[:5] == [f"VERSION {host.VERSION}".encode(), b"OK", b"OK", b"OK", b"WRONG"]
+    assert got.split(b"\r")[:6] == [f"VERSION {host.VERSION}".encode(), b"OK", b"REGISTERED K2XYZ", b"OK", b"OK",
+                                     b"WRONG"]
     assert (tmp_path / "events.jsonl").exists()
 
 
@@ -141,7 +142,8 @@ def test_bad_callsigns_are_wrong_not_fatal():
     h = host.Host(Engine("W1AW", seed=1))
     h.command("CONNECT W1AW SOMETHINGLONG")
     h.command("MYCALL BAD!CALL")
-    assert h.out_cmd == ["WRONG", "WRONG"]
+    h.command("MYCALL W1AW BAD!CALL")  # all or nothing: no REGISTERED
+    assert h.out_cmd == ["WRONG", "WRONG", "WRONG"]
     assert h.engine.call == "W1AW" and h.engine.session.state == "idle"
 
 

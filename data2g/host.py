@@ -20,13 +20,16 @@ CQFRAME call bw (a CQ frame at 500 | 1200 | 2300 | 2750 Hz: no session;
 one heard is notified the same way, the sender's call and bandwidth),
 BW500 | BW1200 | BW2300 | BW2750 (session bandwidth cap: BW500 keeps a
 session inside a 500 Hz band-plan segment; BW2300/BW2750 are the full
-2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION; broadcast:
+2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION, SN (-> SN
+snr: the pilot SNR, dB, of the session peer's last burst decoded; WRONG
+before one); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
-seconds-at-1 seconds-at-max lines). Replies OK / WRONG. Notifications: CONNECTED src dst bw, DISCONNECTED,
+seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
+REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED,
 PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
-MODE submode; broadcast statuses (BCAST n HEARD [call], BCAST n LOST k,
-BCAST * MISSED submode n_cw, BCAST n DROPPED k) once the client has sent a
+MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
+BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has sent a
 BCAST command, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
@@ -127,6 +130,9 @@ class Host:
                 e.set_call(*args)  # VARA takes several: all answer connects
             except ValueError:
                 ok = False
+            else:  # VARA tells a registered station so, per call; to us, every station is
+                self.out_cmd += ["OK"] + [f"REGISTERED {c}" for c in (e.call, *e.aliases)]
+                return
         elif cmd == "LISTEN" and args and args[0].upper() == "CQ":
             pass  # CQ frames are always reported
         elif cmd == "LISTEN" and args and args[0].upper() in ("ON", "OFF"):
@@ -168,6 +174,9 @@ class Host:
             log.info("accepted, not implemented: %s", line.strip())
         elif cmd == "VERSION":
             self.out_cmd.append(f"VERSION {VERSION}")
+            return
+        elif cmd == "SN" and e.session_snr is not None:
+            self.out_cmd.append(f"SN {e.session_snr:.1f}")
             return
         else:
             ok = False

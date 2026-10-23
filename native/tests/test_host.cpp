@@ -67,7 +67,8 @@ void commands() {
     for (const char* line : {"VERSION", "mycall k2xyz K2XYZ-1", "LISTEN CQ", "LISTEN on", "BW1200", "CHAT OFF", "PUBLIC ON",
                              "FOO", "   ", "LISTEN", "CQFRAME K2XYZ 9999", "CONNECT W1AW"})
         h.command(line);
-    const std::vector<std::string> want = {"VERSION Data2G 0.1", "OK", "OK", "OK", "OK", "OK", "OK", "WRONG", "WRONG", "WRONG", "WRONG"};
+    const std::vector<std::string> want = {"VERSION Data2G 0.1", "OK", "REGISTERED K2XYZ", "REGISTERED K2XYZ-1", "OK", "OK", "OK",
+                                           "OK", "OK", "WRONG", "WRONG", "WRONG", "WRONG"};
     check::is_true(h.out_cmd == want, "replies");
     check::equal(e.call(), std::string("K2XYZ"), "MYCALL: first call");
     check::is_true(e.aliases() == std::vector<std::string>{"K2XYZ-1"}, "MYCALL: aliases");

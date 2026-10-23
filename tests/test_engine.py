@@ -151,9 +151,10 @@ def test_vara_commands_drive_a_session(tmp_path):
     b = Host(Engine("NOCALL", seed=5, record_dir=tmp_path / "b"))
     for line in ("MYCALL K2XYZ", "LISTEN ON", "BW500"):
         b.command(line)
+    a.command("SN")  # no session burst heard yet
     a.command("BW500")
     a.command("CONNECT W1AW K2XYZ")
-    assert a.out_cmd == ["OK", "OK"] and b.out_cmd == ["OK"] * 3
+    assert a.out_cmd == ["WRONG", "OK", "OK"] and b.out_cmd == ["OK", "REGISTERED K2XYZ", "OK", "OK"]
 
     def pump():
         a.after_step(bool(a.engine.tx))
@@ -167,6 +168,8 @@ def test_vara_commands_drive_a_session(tmp_path):
         pump()
         return bytes(b.out_data) == b"hello from W1AW"
     assert link(a.engine, b.engine, 12, 120, got, seed=4)
+    b.command("SN")  # the last of W1AW's bursts: the link's 12 dB
+    assert b.out_cmd[-1].startswith("SN ") and abs(float(b.out_cmd[-1].split()[1]) - 12) < 3
     a.command("DISCONNECT")
 
     def closed():
@@ -310,7 +313,7 @@ def test_mycall_with_several_calls_answers_each():
     a, b = Host(Engine("NOCALL", seed=31)), Host(Engine("NOCALL", seed=32))
     for line in ("MYCALL KC2G KC2G-T", "LISTEN CQ", "LISTEN ON", "IGNOREKISSDCD ON"):
         b.command(line)
-    assert b.out_cmd == ["OK"] * 4
+    assert b.out_cmd == ["OK", "REGISTERED KC2G", "REGISTERED KC2G-T"] + ["OK"] * 3
     a.command("CONNECT W1AW KC2G-T")
 
     def up():
@@ -510,8 +513,10 @@ def test_bcast_commands_and_statuses():
     link.enqueue(b"queued", 1)
     h.command("BCAST CLOSE 1")
     link.missed("qpsk-r1/5", 3)
+    link.missed("qpsk-r1/5", 3, -4.3)
     h.after_step(False)
     assert "OK" in h.out_cmd and "BCAST 1 DROPPED 1" in h.out_cmd and "BCAST * MISSED qpsk-r1/5 3" in h.out_cmd
+    assert "BCAST * MISSED qpsk-r1/5 3 -4.3" in h.out_cmd
     h.out_cmd.clear()
     h.command("MODES")
     assert h.out_cmd[-1] == "OK" and len(h.out_cmd) > 10
