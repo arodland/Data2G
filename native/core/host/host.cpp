@@ -211,6 +211,9 @@ void Host::command(std::string_view line, std::string_view peer) {
     } else if (cmd == "VERSION") {
         out_cmd.push_back("VERSION " + std::string(VERSION));
         return;
+    } else if (const auto snr = e.session_snr(); cmd == "SN" && snr) {
+        out_cmd.push_back(arq::format("SN %.1f", *snr));
+        return;
     } else {
         ok = false;
     }

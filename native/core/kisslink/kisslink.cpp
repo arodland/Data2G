@@ -283,8 +283,8 @@ void KissLink::on_sent(const arq::TxBurstPtr& burst) {
     }
 }
 
-void KissLink::missed(const std::string& submode, int n_cw) {
-    events.push_back("BCAST * MISSED " + submode + " " + std::to_string(n_cw));
+void KissLink::missed(const std::string& submode, int n_cw, std::optional<double> snr) {
+    events.push_back("BCAST * MISSED " + submode + " " + std::to_string(n_cw) + (snr ? arq::format(" %.1f", *snr) : ""));
 }
 
 Peer* KissLink::peer(int h) {
@@ -495,6 +495,9 @@ std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_fram
     return {std::move(frames), std::move(ok), lost};
 }
 
+// A heard burst's status suffix: its pilot SNR (snr_est, dB), as the monitor shows it.
+static std::string snr_suffix(const arq::Heard& r) { return arq::format(" %.1f", arq::measure(r).snr_est); }
+
 std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::Heard& r,
                                                                      std::shared_ptr<const arq::SlotSoft> soft,
                                                                      std::optional<double> dd_budget) {
@@ -518,8 +521,9 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
         const auto mine = ports_where([&](const Port& p) { return p.group == c.group; });
         if (c.reports && std::any_of(mine.begin(), mine.end(), [&](int i) { return ports.at(i).shift; }))
             learn(*c.reports, frames, r, ok, now);
+        const std::string snr = mine.empty() ? "" : snr_suffix(r);
         for (int i : mine) {
-            events.push_back("BCAST " + std::to_string(i) + " HEARD" + (c.call ? " " + *c.call : ""));
+            events.push_back("BCAST " + std::to_string(i) + " HEARD" + (c.call ? " " + *c.call : "") + snr);
             if (lost) events.push_back("BCAST " + std::to_string(i) + " LOST " + std::to_string(lost));
             for (const auto& f : frames) out.emplace_back(i, f);
         }
@@ -547,8 +551,9 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
             events.push_back("BCAST " + std::to_string(i) + " LOST " + std::to_string(frames.size() + static_cast<std::size_t>(lost)));
         return out;
     }
+    const std::string snr = mine.empty() ? "" : snr_suffix(r);
     for (int i : mine) {
-        events.push_back("BCAST " + std::to_string(i) + " HEARD");
+        events.push_back("BCAST " + std::to_string(i) + " HEARD" + snr);
         if (lost) events.push_back("BCAST " + std::to_string(i) + " LOST " + std::to_string(lost));
         for (const auto& f : frames) out.emplace_back(i, f);
     }
