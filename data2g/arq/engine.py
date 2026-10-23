@@ -28,6 +28,7 @@ import numpy as np
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
 from ..receiver import NoiseProfile, Receiver
+from ..waveform import dsp
 from . import burst as B
 from . import frames as F
 from . import phy as PHY
@@ -499,9 +500,12 @@ class Engine:
         """Bursts back to back on one PTT (an ID frame with a session's
         burst). `main`: the one the session is told has gone, when all have."""
         xs = [PHY.tx_audio(b) for b in bursts]
-        # peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a
-        # sound card clips at 1 (the audio loopback found 64-QAM bursts wrecked)
-        audio = np.concatenate([np.zeros(self.ptt_delay)] + [x / np.max(np.abs(x)) for x in xs])
+        # envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3,
+        # and a sound card clips at 1 (the audio loopback found 64-QAM bursts
+        # wrecked). The envelope, not the samples: w48's crests fall up to
+        # 1.8 dB between 8 kHz samples, which went out over full scale (clipped
+        # at 48 kHz) and above the PEP that the sim and PHY.peak_db assume
+        audio = np.concatenate([np.zeros(self.ptt_delay)] + [x / np.max(dsp.envelope(x)) for x in xs])
         self.tx = [main, audio, 0]
         if self.rec:
             # one event per burst, at its own start: the first's seconds include
