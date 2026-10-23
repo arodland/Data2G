@@ -616,6 +616,24 @@ Kept:
   the bitwise match with Python: `ldpc::set_exact_phi` or
   `DATA2G_EXACT_PHI` brings `phi_all` back (the bitwise test, paired
   native/Python runs).
+- Soft bits on the pool (512-symbol chunks, same bits for any pool size)
+  and, where the AVX2/AVX-512 clones exist, a branch-free exp in
+  `llr_general` (2.4x/5.3x `std::exp` per 256-point symbol; SSE2 even;
+  slower than glibc's on a Pi 4, so not used there). DD's blind pass one
+  decode per slot on the pool (one batch stopped together). Refine's time
+  pass by Cholesky and forward solves. `data2g-bench-rx`, 10 bursts
+  (w48-16qam-r2/3 x19, 64l-r3/4 and 256l-r5/8 x39, MPP, across the
+  cliff), the same 236 codewords decoded, totals old -> new:
+  x86 clones 1t 3982 -> 3379 ms, 4t 2019 -> 1698; SSE2 1t 5014 -> 4453,
+  4t 2776 -> 2531; Pi 4 with no DD budget 2t 68.0 -> 64.4 s, 4t 55.6 ->
+  51.8 (soft bits 776 -> 212 ms). 96 seeded bursts (MPP and MPD): every
+  burst decodes the same slots before and after.
+- Pi 4 at the live settings (2 threads, 1 s DD budget): the link's
+  prepare, the first LDPC pass of every slot, takes 1.6-2.0 s on a bad
+  39-codeword burst and spends the DD budget before DD starts (10.4 of
+  13.8 s over the 10 bursts). What would move it: fewer iterations on
+  codewords that will not converge (an early stop, or a layered schedule
+  at fewer iterations), each needing a paired FER check.
 - `demod_window`'s carrier sums and the sync repeat statistic in cloned
   loops: live receive 1.4x, a hop 10%.
 - Pool in refine and on the CFO grid above 6000 samples (see "Threads").

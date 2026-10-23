@@ -47,6 +47,37 @@ void forward_solve(const cd* l, int n, cd* b, int nrhs) {
     }
 }
 
+bool cholesky(double* a, int n) {
+    for (int j = 0; j < n; ++j) {
+        const double* rj = a + j * n;
+        double d = rj[j];
+        for (int m = 0; m < j; ++m) d -= rj[m] * rj[m];
+        if (!(d > 0.0)) return false;
+        const double ljj = std::sqrt(d), inv = 1.0 / ljj;
+        a[j * n + j] = ljj;
+        for (int i = j + 1; i < n; ++i) {
+            double* ri = a + i * n;
+            double s = ri[j];
+            for (int m = 0; m < j; ++m) s -= ri[m] * rj[m];
+            ri[j] = s * inv;
+        }
+    }
+    return true;
+}
+
+void forward_solve(const double* l, int n, double* b, int nrhs) {
+    for (int i = 0; i < n; ++i) {
+        double* bi = b + i * nrhs;
+        for (int j = 0; j < i; ++j) {
+            const double lij = l[i * n + j];
+            const double* bj = b + j * nrhs;
+            for (int c = 0; c < nrhs; ++c) bi[c] -= lij * bj[c];
+        }
+        const double inv = 1.0 / l[i * n + i];
+        for (int c = 0; c < nrhs; ++c) bi[c] *= inv;
+    }
+}
+
 // Cyclic Jacobi, after SSTVAE's real jacobi_eigen (native/core/modem/
 // modem.cpp), made Hermitian: each rotation first turns a_pq real with a
 // phase e on q, then is the real one. Only rows p and q are read (columns

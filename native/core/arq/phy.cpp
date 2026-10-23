@@ -450,26 +450,22 @@ void ModemRx::remake_estimate(const codes::Spec& s) {
     if (!blind_) {
         // RV 0 slots the link has not asked about yet: parity checks alone
         // say they decoded (a resend at another RV simply fails).
-        // split: one batch here, as Python (an LDPC batch stops together);
-        // per-codeword decodes would parallelize at a small cost in parity.
+        // split: one decode per slot on the pool, each stopping when it converges. Python decodes them as one
+        // batch, which stops together: a burst's failing slots kept every converged one iterating to the limit.
         blind_ = true;
         std::vector<int> todo;
         for (int i = 0; i < n_cw_; ++i)
             if (!post_.count(i)) todo.push_back(i);
-        if (!todo.empty()) {
-            Mat<float> llr(todo.size(), static_cast<std::size_t>(s.coded_bits));
-            for (std::size_t t = 0; t < todo.size(); ++t) {
-                const auto& v = (*soft_)[static_cast<std::size_t>(todo[t])];
-                std::copy(v.begin(), v.end(), llr[t]);
-            }
+        std::vector<std::vector<double>> got(todo.size());
+        pool::parallel_for(todo.size(), [&](std::size_t t) {
+            const auto& v = (*soft_)[static_cast<std::size_t>(todo[t])];
+            Mat<float> llr(1, v.size());
+            std::copy(v.begin(), v.end(), llr[0]);
             const auto info = codes::decode_llrs(s, llr);
-            for (std::size_t t = 0; t < todo.size(); ++t)
-                if (info.ok[t]) {
-                    Mat<std::uint8_t> b(1, info.bits.cols);
-                    std::copy_n(info.bits[t], info.bits.cols, b.data.begin());
-                    post_[todo[t]] = known(codes::encode_info(s, b, 0).data);
-                }
-        }
+            if (info.ok[0]) got[t] = known(codes::encode_info(s, info.bits, 0).data);
+        });
+        for (std::size_t t = 0; t < todo.size(); ++t)
+            if (!got[t].empty()) post_[todo[t]] = std::move(got[t]);
     }
     cur_ = {dd_estimate(), std::make_shared<std::map<int, std::vector<double>>>()};
 }

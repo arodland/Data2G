@@ -164,6 +164,10 @@ endif()
 add_executable(data2g-replay apps/data2g_replay.cpp)
 target_link_libraries(data2g-replay PRIVATE data2g_core data2g_applog)
 
+# data2g-bench-rx: a burst's decode latency by stage (receive, soft bits, prepare, decodes), offline.
+add_executable(data2g-bench-rx apps/data2g_bench_rx.cpp)
+target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
+
 # data2g_station: the runtime both apps share (app/station.*, with its
 # options, TCP servers and plot conversion beside it). Qt Core + Network,
 # never Widgets.

@@ -73,3 +73,21 @@ def test_ace_project(native, reference, name):
     want = 0.9 * pts[idx]
     np.testing.assert_array_equal(bits_of(native.constellation.ace_project(got, want, dirs[idx])),
                                   bits_of(reference(C, "ace_project")(got, want, dirs[idx])))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_llr_any_pool_size(native, name):
+    """llr splits a call into chunks on the pool: the same bits on 1 thread as on 4."""
+    rng = np.random.default_rng(7)
+    n = 2011  # chunks of 512 and a ragged end
+    y, h = rng.normal(size=(2, n)) + 1j * rng.normal(size=(2, n))
+    var = rng.uniform(0.01, 1.0, n)
+    was = native.threads()
+    try:
+        native.set_threads(1)
+        one = native.constellation.llr(y, h, var, name)
+        native.set_threads(4)
+        four = native.constellation.llr(y, h, var, name)
+    finally:
+        native.set_threads(was)
+    np.testing.assert_array_equal(bits_of(one), bits_of(four))
