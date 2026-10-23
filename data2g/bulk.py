@@ -45,6 +45,7 @@ from .arq.burst import Slot, TxBurst  # noqa: E402
 from .arq.modes import MODES, ctl_payload_bytes, ctl_spec, is_cpm  # noqa: E402
 from .config import FS, MAX_CODEWORDS, max_codewords  # noqa: E402
 from .receiver import Receiver  # noqa: E402
+from .waveform import dsp  # noqa: E402
 
 log = logging.getLogger("data2g.bulk")
 VERSION = 2
@@ -219,9 +220,9 @@ def undeal(r: dict) -> dict:
 
 
 def tx_audio(bs: list[TxBurst]) -> np.ndarray:
-    """Bursts back to back, each at full-scale peak (as the engine sends them)."""
+    """Bursts back to back, each at a full-scale envelope peak (as the engine sends them)."""
     xs = [cpm_audio(b) if is_cpm(MODES[b.submode]) else PHY.tx_audio(b) for b in bs]
-    return np.concatenate([x / np.max(np.abs(x)) for x in xs])
+    return np.concatenate([x / np.max(dsp.envelope(x)) for x in xs])
 
 
 def check_mode(mode: str, h: int):

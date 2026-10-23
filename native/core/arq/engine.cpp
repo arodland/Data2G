@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "codes/codes.hpp"
+#include "dsp/dsp.hpp"
 
 namespace data2g::arq {
 
@@ -927,9 +928,11 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
     std::vector<std::size_t> lens;
     for (const auto& b : bursts) {
         const auto x = tx_audio(*b);
-        // peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound card clips at 1
+        // envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound
+        // card clips at 1; the envelope, not the samples: w48's crests fall up to 1.8 dB
+        // between samples (engine.py)
         double peak = 0.0;
-        for (double v : x) peak = std::max(peak, std::fabs(v));
+        for (const dsp::cdouble& z : dsp::hilbert(x)) peak = std::max(peak, std::abs(z));
         for (double v : x) tx.audio.push_back(v / peak);
         lens.push_back(x.size());
         if (on_send_) on_send_(b);
