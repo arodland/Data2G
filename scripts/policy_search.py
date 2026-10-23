@@ -37,19 +37,22 @@ CELLS = ("awgn:0,mpg:0,mpg:8,mpp:-4,mpp:0,mpp:8,mpd:-4,mpd:0,mpd:8,mpd:-6,mpp:-8
          "awgn:4:slow,awgn:15:slow,mpg:8:slow,mpp:0:slow,mpd:0:slow")
 
 # The installed model's decision knobs, at their shipped values (predictor.LOGIT_OFFSETS,
-# policy.CPM_FLOOR_DEFAULT, policy.NOISE_RULE; the qpsk-r1/5 fast-fading bias is baked
+# policy.CPM_FLOOR_DEFAULT, policy.NOISE_RULE, .BIAS_STEP, .DUP_BELOW; the qpsk-r1/5 fast-fading bias is baked
 # into the distilled CNP, so cond_qpsk is on top of it).
-SHIPPED = dict(off_16qam=-1.0, off_256l=-0.5, cond_qpsk=0.0, floor_snr=-4.0, floor_s=1.0, noise_rule=1.0)
+SHIPPED = dict(off_16qam=-1.0, off_256l=-0.5, cond_qpsk=0.0, floor_snr=-4.0, floor_s=1.0, noise_rule=1.0,
+               bias_step=1.0, dup_below=0.9)
 
 
 def suggest(t):
     p = dict(off_16qam=t.suggest_float("off_16qam", -2.5, 0.5), off_256l=t.suggest_float("off_256l", -2.0, 0.5),
              cond_qpsk=t.suggest_float("cond_qpsk", -1.5, 1.0), floor_snr=t.suggest_float("floor_snr", -7.0, -1.0),
-             floor_s=t.suggest_float("floor_s", 0.0, 2.0), noise_rule=t.suggest_float("noise_rule", 0.0, 2.0))
+             floor_s=t.suggest_float("floor_s", 0.0, 2.0), noise_rule=t.suggest_float("noise_rule", 0.0, 2.0),
+             bias_step=t.suggest_float("bias_step", 0.0, 2.5), dup_below=t.suggest_float("dup_below", 0.5, 1.0))
     return {"DATA2G_LOGIT_OFFSETS": f"w48-16qam-r1/2:{p['off_16qam']:.3f},n10-256l-r3/4:{p['off_256l']:.3f}",
             "DATA2G_COND_OFFSETS": f"0.7:-2:qpsk-r1/5:{p['cond_qpsk']:.3f}",
             "DATA2G_CPM_FLOOR": f"snr:{p['floor_snr']:.3f}:{p['floor_s']:.3f}",
-            "DATA2G_NOISE_RULE": f"{p['noise_rule']:.3f}"}
+            "DATA2G_NOISE_RULE": f"{p['noise_rule']:.3f}",
+            "DATA2G_BIAS_STEP": f"{p['bias_step']:.3f}", "DATA2G_DUP_BELOW": f"{p['dup_below']:.3f}"}
 
 
 def run(out: Path, env: dict, a, seed0: int):

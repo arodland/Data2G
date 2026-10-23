@@ -44,8 +44,9 @@ TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost
 # gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
 # and escalation's long gaps sent 12 s 64-ary bursts that all failed
 PREV_MAX_S = 30.0
-BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
-DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
+# DATA2G_BIAS_STEP, DATA2G_DUP_BELOW (studies): these instead
+BIAS_STEP = float(os.environ.get("DATA2G_BIAS_STEP") or 1.0)  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
+DUP_BELOW = float(os.environ.get("DATA2G_DUP_BELOW") or 0.9)  # predicted P(burst usable) under which control is duplicated
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
