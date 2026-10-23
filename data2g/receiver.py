@@ -203,6 +203,24 @@ class NoiseProfile:
             return None
         return float(10 * np.log10(max(power / floor - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ))
 
+    def span_z(self, spectra, lo: float, hi: float) -> float | None:
+        """How far `spectra`'s mean power in lo..hi Hz is over the noise
+        floor, in the kept blocks' own spread (median, MAD) of one block
+        scaled to the span: a carrier sense that is the same test in any
+        band and any span (span_snr_db's reading scales with both: a 3.5 s
+        2.4 kHz window of noise read over -18 dB 44% of the time). None
+        without a floor or blocks."""
+        if len(self.kept_spec) < self.MIN_BLOCKS or not len(spectra):
+            return None
+        band = self._in_band(lo, hi)
+        ref = np.array([s[band].mean() for s in self.kept_spec])
+        floor = float(np.median(ref))
+        spread = 1.4826 * float(np.median(np.abs(ref - floor)))
+        if spread <= 0:
+            return None
+        power = float(np.mean([s[band].mean() for s in spectra]))
+        return (power - floor) / spread * np.sqrt(len(spectra))
+
     def span_spectra(self, start: float, end: float) -> list:
         """The fed blocks wholly inside start..end (s)."""
         a, b = round(start * FS), round(end * FS)

@@ -49,6 +49,14 @@ EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_M
 # burst), which the sim never measures: none. Missed replies read -9..-14 dB at
 # MPP -8, empty windows -21..-36 (the clamp); training's lowest is -9.2.
 MISSED_MIN_DB = -18.0
+# _carrier_hold: something is on air when the last CARRIER_TAIL_S read at least
+# CARRIER_Z (NoiseProfile.span_z), re-checked every CARRIER_STEP_S. AWGN, 3.5 s
+# spans: noise alone at most 4.1 (750); 16/8-tone CPM at -11 dB all over 9; z
+# falls with sqrt(span), so over 1 s ~0.53x that. The whole span since my burst
+# held on a reply already over: 2400 MPG/MPP -5 dB lost 3-12%, with failures.
+CARRIER_Z = 5.0
+CARRIER_TAIL_S = 1.0
+CARRIER_STEP_S = 0.25
 # a measured burst's energy reading is at least its snr_est less this (_energy).
 # Sessions read under snr_est - 3 in 0.3% of bursts (gs data, w and w48):
 # right at snr_est (the floor binding in 8.5%), MPG +12 lost 4.1% (11/12
@@ -141,6 +149,7 @@ class Engine:
         self.stats_interval_s = stats_interval_s
         self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
         self._tx_kiss = False  # the burst on air is a KISS one
+        self._carrier_for = None  # the burst end (_tx_end) a carrier hold was logged for
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
         self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
         self._kiss_slot = 0  # next p-persistence slot, samples
@@ -307,6 +316,7 @@ class Engine:
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
             if not self.receiver.busy and not held:  # a burst still arriving holds any reply (half duplex)
+                self._carrier_hold(t)
                 burst = self.session.poll(t)
                 self._missed_energy()
                 self._id_check(t)
@@ -422,6 +432,30 @@ class Engine:
         if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
             return self.kiss.cap
         return self.session.cap
+
+    def _carrier_hold(self, t: float):
+        """A reply timeout due with no header heard: while the last
+        CARRIER_TAIL_S read as something on air (CARRIER_Z, the energy alone),
+        hold it, up to the end of the reply I asked for. A weak CPM data
+        reply's header is missed, and policy.reply_hold covers only a
+        control-only one."""
+        s = self.session
+        exp = s.policy.expected_reply()
+        if s._deadline is None or t < s._deadline or self._tx_end is None or exp is None:
+            return
+        start = self._tx_end + EXPECT_REPLY_S
+        until = start + exp[1] + s.t_turn  # the reply's end, as on_header waits for one heard
+        if until <= t:
+            return
+        from . import predictor as P
+
+        spectra = self.noise.span_spectra(max(start, t - CARRIER_TAIL_S), t)
+        z = self.noise.span_z(spectra, *P.band_span_hz(MODES[exp[0]].band))
+        if z is not None and z >= CARRIER_Z:
+            if self._carrier_for != self._tx_end:
+                self._carrier_for = self._tx_end
+                log.info("no reply header, but energy on air: holding the timeout (up to %.1f s)", until - t)
+            s._deadline = min(until, t + CARRIER_STEP_S)
 
     def _missed_energy(self):
         """A timeout (no reply heard): the energy where the reply should
