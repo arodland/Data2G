@@ -306,3 +306,60 @@ class Decoder:
 
 
 MinSumDecoder = Decoder  # the old name, kept for scripts/
+
+
+class LayeredDecoder(Decoder):
+    """Decoder with a row-layered schedule (sum-product only): each base row's Z checks are a layer, which
+    touches each variable at most once, so after a layer's check update the variable totals take its new
+    messages at once and the next layer reads them. Information then crosses the graph within an iteration,
+    not one hop per iteration as in flooding: about half the iterations for the same FER (prototype; not
+    substituted by native, not used by the modem).
+
+    decode(..., record=True) also returns each codeword's convergence iteration (1-based; iters + 1 if it
+    never converged), its decisions taken there: a decode to N iterations answers for every cap up to N."""
+
+    def __init__(self, code: QCLDPC):
+        super().__init__(code)
+        z, mb = code.z, code.mb
+        # per layer: its checks' edge ids (Z, dmax) and pad, the edges' variables
+        self.layers = []
+        for l in range(mb):
+            e = self.chk[l * z:(l + 1) * z]
+            p = self.pad[l * z:(l + 1) * z]
+            v = self.var[e[~p]]
+            assert len(np.unique(v)) == len(v), "a layer touches a variable twice"
+            self.layers.append((e, p, e[~p], v))
+
+    def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False, record: bool = False):
+        if alpha is not None:
+            raise ValueError("LayeredDecoder: sum-product only")
+        ch = self.channel_llrs(np.clip(np.asarray(llr_sent, np.float32), -CH_CLAMP, CH_CLAMP))
+        b = ch.shape[0]
+        tot = ch.copy()
+        c2v = np.zeros((b, self.n_edges + 1), np.float32)  # the last slot: padding, never written
+        conv = np.full(b, iters + 1)
+        first = np.zeros((b, self.code.k), np.uint8)
+        for it in range(iters):
+            for e, p, ev, v in self.layers:
+                m = np.where(p, np.float32(self.BIG), tot[:, self.var[np.where(p, 0, e)]] - c2v[:, e])
+                neg = m < 0
+                sgn = np.where(neg, np.float32(-1), np.float32(1))
+                sprod = np.where(np.logical_xor.reduce(neg, axis=-1, keepdims=True), np.float32(-1), np.float32(1))
+                ph = _phi(np.abs(m))
+                out = sprod * sgn * _phi(ph.sum(axis=-1, keepdims=True) - ph)
+                new = out[:, ~p]
+                tot[:, v] = m[:, ~p] + new
+                c2v[:, ev] = new
+            hard = (tot < 0).astype(np.uint8)
+            ok = self.syndrome(hard)
+            fresh = ok & (conv > iters)
+            conv[fresh] = it + 1
+            first[fresh] = hard[fresh, : self.code.k]
+            if ok.all():
+                break
+        out = (hard[:, : self.code.k], ok)
+        if posterior:
+            out += (tot[:, self.sent],)
+        if record:
+            out += (conv, np.where((conv <= iters)[:, None], first, hard[:, : self.code.k]))
+        return out

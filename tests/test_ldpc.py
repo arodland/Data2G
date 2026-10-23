@@ -180,3 +180,17 @@ def test_pinned_buffer_bits_are_the_sent_bits():
     np.testing.assert_array_equal(pinned[0, at], ldpc.CH_CLAMP * (1 - 2.0 * info[2 * z + at]))
     rest = np.setdiff1d(np.arange(buf.shape[1]), at)
     np.testing.assert_array_equal(pinned[0, rest], buf[0, rest] * 0.1)
+
+
+def test_layered_decodes_what_flooding_does_in_fewer_iterations():
+    code = ldpc.qc_code(2560, 3840)
+    rng = np.random.default_rng(3)
+    bits = rng.integers(0, 2, (64, 2560))
+    x = 1.0 - 2.0 * code.encode(bits)
+    sigma = 0.66
+    llr = 2 * (x + rng.normal(scale=sigma, size=x.shape)) / sigma**2
+    out, ok = ldpc.Decoder(code).decode(llr, iters=40)
+    l_out, l_ok, conv, first = ldpc.LayeredDecoder(code).decode(llr, iters=20, record=True)
+    assert ok.all() and l_ok.all()
+    assert np.array_equal(l_out, bits) and np.array_equal(first, bits)
+    assert conv.max() <= 20 and conv.mean() < 10  # flooding needs ~12 here
