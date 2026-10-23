@@ -39,9 +39,6 @@ MPP 2).
   high SNR, down to 8,640 B), so Data2G and VARA include the same start-up
   share. PACTOR 2 used smaller files in the paper (69,311 B on WGN, 19,451 B
   on fading, down to 8,654 B), which costs it some rate to start-up.
-- At −5 dB on MPG, 5 of 10 Data2G transfers completed: the other 5 were still
-  running when the simulation's 1-hour limit stopped them (8,640 B at ~160
-  B/min takes about an hour).
 
 ## Table
 
@@ -59,4 +56,4 @@ seeds.
 | 10 dB | 4,969 | 3,199 | 2,372 | 2,786 | 1,382 | 1,731 | 3,215 | 1,601 | 1,282 |
 | 5 dB | 3,245 | 1,183 | 2,362 | 1,489 | 526 | 1,353 | 1,973 | 839 | 894 |
 | 0 dB | 1,527 | 462 | 1,161 | 690 | 193 | 726 | 814 | 312 | 672 |
-| -5 dB | 717 | 211 | 541 | 169 | 84 | 355 | 237 | 104 | 250 |
+| -5 dB | 717 | 211 | 541 | 192 | 84 | 355 | 306 | 104 | 250 |
