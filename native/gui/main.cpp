@@ -3,6 +3,7 @@
 // the command line override them for this run.
 
 #include <QApplication>
+#include <QIcon>
 #include <QSettings>
 #include <QTimer>
 
@@ -18,8 +19,13 @@ int main(int argc, char** argv) {
     QApplication qapp(argc, argv);  // takes Qt's own flags out of argv first
     QCoreApplication::setOrganizationName(QStringLiteral("Data2G"));
     QCoreApplication::setApplicationName(QStringLiteral("data2g-gui"));
+    QCoreApplication::setApplicationVersion(QStringLiteral(DATA2G_VERSION));  // read back by the About box
     // Wayland's app_id: the compositor finds the icon through the .desktop file
     QGuiApplication::setDesktopFileName(QStringLiteral("org.cleverdomain.data2g"));
+    QIcon icon;  // packaging/icons.qrc
+    icon.addFile(QStringLiteral(":/data2g-48.png"));
+    icon.addFile(QStringLiteral(":/data2g-256.png"));
+    QApplication::setWindowIcon(icon);
     QSettings store;
     const app::Args a = app::parse(argc, argv, gui::load_settings(store), "data2g-gui");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)

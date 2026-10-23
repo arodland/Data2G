@@ -11,6 +11,7 @@
 // that window (and turns monitoring on).
 // Settings... opens the dialog; OK saves to QSettings and, when anything
 // changed, restarts the station.
+// Menus: File > Settings... (the same dialog) and Exit, Help > About.
 #pragma once
 
 #include <QMainWindow>
@@ -50,8 +51,10 @@ public Q_SLOTS:
     void poll();  // a slot so a test can drive it
     void open_settings();
     void open_monitor();  // the Monitor window: every burst heard and sent, as a packet dump
+    void show_about();
 
 private:
+    void build_menu();
     void set_lamp(QLabel* lamp, bool lit, const char* color);
 
     QSettings& store_;
