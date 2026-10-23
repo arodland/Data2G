@@ -11,6 +11,7 @@
 // a machine without the wider ISAs runs.
 #if defined(__x86_64__) && defined(__linux__) && defined(__GNUC__) && !defined(__SANITIZE_THREAD__) && !defined(DATA2G_NO_SIMD_CLONES)
 #define DATA2G_SIMD_CLONES __attribute__((target_clones("avx512f", "avx2", "default")))
+#define DATA2G_HAVE_SIMD_CLONES 1
 #else
 #define DATA2G_SIMD_CLONES
 #endif

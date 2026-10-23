@@ -2,14 +2,18 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <stdexcept>
 #include <utility>
 
 #include "dsp/dsp.hpp"
+#include "util/pool.hpp"
+#include "util/simd.hpp"
 
 namespace data2g::constellation {
 
@@ -74,6 +78,30 @@ void llr_square(std::span<const cd> y, std::span<const cd> h, std::span<const do
     }
 }
 
+#ifdef DATA2G_HAVE_SIMD_CLONES
+// exp(v[i]) in place for v[i] <= 0, branch-free so it vectorizes (std::exp does not): 2^k exp(r), |r| <= ln2 / 2,
+// Taylor to r^11 (relative error < 1e-14). Scaled by 2^(k + 64), then 2^-64, so a result below 2^-1022 rounds to
+// a subnormal as libm's does: those terms count when the rest of a half's sum sits just above llr_general's
+// 1e-300 floor. Clamped at -746, which rounds to 0 as exp does; NaN passes through. Only with the AVX2 and
+// AVX-512 clones: per 256-point symbol 2.4x and 5.3x std::exp, SSE2 even, and slower than glibc's on a Pi 4's
+// NEON, vectorized or not (7.5 against 3.6-5.9 us).
+DATA2G_SIMD_CLONES void exp_nonpos(double* __restrict v, std::size_t n) {
+    constexpr double LN2 = 0x1.62e42fefa39efp-1;
+    constexpr double LN2_HI = 0x1.62e42fee00000p-1, LN2_LO = 0x1.a39ef35793c76p-33;
+    constexpr double SHIFTER = 0x1.8p52;  // adding it rounds to an integer, held in the low bits
+    for (std::size_t i = 0; i < n; ++i) {
+        const double x = v[i] < -746.0 ? -746.0 : v[i];  // NaN stays NaN; std::max became a branch
+        const double m = x * (1.0 / LN2) + SHIFTER;
+        const double k = m - SHIFTER;
+        const double r = (x - k * LN2_HI) - k * LN2_LO;
+        const double p = 1 + r * (1 + r * (1. / 2 + r * (1. / 6 + r * (1. / 24 + r * (1. / 120 + r * (1. / 720 +
+                         r * (1. / 5040 + r * (1. / 40320 + r * (1. / 362880 + r * (1. / 3628800 + r * (1. / 39916800)))))))))));
+        v[i] = std::bit_cast<double>((std::bit_cast<std::uint64_t>(m) << 52) + (std::uint64_t{1023 + 64} << 52)) * p *
+               0x1p-64;
+    }
+}
+#endif
+
 void llr_general(std::span<const cd> y, std::span<const cd> h, std::span<const double> var, const Constellation& c,
                  double* out) {
     const std::size_t M = c.points.size();
@@ -89,7 +117,12 @@ void llr_general(std::span<const cd> y, std::span<const cd> h, std::span<const d
             d[p] = -(dr * dr + di * di) / var[i];  // numpy's hypot, squared, to rounding
             mx = std::max(mx, d[p]);
         }
+#ifdef DATA2G_HAVE_SIMD_CLONES
+        for (std::size_t p = 0; p < M; ++p) ping[p] = d[p] - mx;
+        exp_nonpos(ping.data(), M);
+#else
         for (std::size_t p = 0; p < M; ++p) ping[p] = std::exp(d[p] - mx);
+#endif
         double *a = ping.data(), *b = pong.data();
         std::size_t n = M;
         for (int j = c.m - 1; j >= 0; --j) {
@@ -137,12 +170,21 @@ std::vector<double> llr(std::span<const cd> y, std::span<const cd> h, std::span<
                         const Constellation& c) {
     if (h.size() != y.size() || var.size() != y.size()) throw std::invalid_argument("y, h, var sizes differ");
     std::vector<double> out(y.size() * c.m);
-    if (gray_square(c) && c.m == 2)
-        llr_qpsk(y, h, var, out.data());
-    else if (gray_square(c) && c.m <= 8)
-        llr_square(y, h, var, c, out.data());
-    else
-        llr_general(y, h, var, c, out.data());
+    // Symbols are independent: chunks on the pool, the same bits for any pool size. A burst's 256-point
+    // soft bits were a third of its decode on one core.
+    constexpr std::size_t CHUNK = 512;
+    pool::parallel_for((y.size() + CHUNK - 1) / CHUNK, [&](std::size_t k) {
+        const std::size_t lo = k * CHUNK, n = std::min(CHUNK, y.size() - lo);
+        const auto ys = y.subspan(lo, n), hs = h.subspan(lo, n);
+        const auto vs = var.subspan(lo, n);
+        double* o = out.data() + lo * static_cast<std::size_t>(c.m);
+        if (gray_square(c) && c.m == 2)
+            llr_qpsk(ys, hs, vs, o);
+        else if (gray_square(c) && c.m <= 8)
+            llr_square(ys, hs, vs, c, o);
+        else
+            llr_general(ys, hs, vs, c, o);
+    });
     return out;
 }
 
