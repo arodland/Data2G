@@ -31,10 +31,10 @@ import outcome_data as O  # noqa: E402
 CH = ("awgn", "mpg", "mpp", "mpd")
 # the shipped shifter rarely picks it: under 1% of its first-transmission data
 # codewords at every bandwidth cap that allows the mode (scripts/pick_share.py,
-# 2026-10-22: 674c268, 4 seeds x 300 s, channel x -12..30 dB x cap)
-COVERED = {"fsk16r25-r1/3", "fsk32r62-r1/3", "fsk8r50-r1/3", "n10-qpsk-r1/5", "n10-qpsk-r3/4", "n4-16qam-r1/3",
-           "n4-qpsk-r1/2", "n4-qpsk-r1/3", "n4-qpsk-r1/5", "n4-qpsk-r2/3", "polar-k192-f8", "polar-k96-f4",
-           "polar-k96-f8", "qpsk-r3/4", "w48-16qam-r3/4", "w48-16qam-r5/6", "w48-qpsk-r2/3", "w48-qpsk-r3/4"}
+# 2026-10-22: the spread-gated CPM floor, 4 seeds x 300 s, channel x -12..30 dB x cap)
+COVERED = {"fsk16r25-r1/3", "fsk32r62-r1/3", "fsk8r50-r1/3", "n10-qpsk-r3/4", "n4-16qam-r1/3", "n4-qpsk-r1/2",
+           "n4-qpsk-r1/3", "n4-qpsk-r1/5", "n4-qpsk-r2/3", "polar-k96-f4", "polar-k96-f8", "qpsk-r3/4",
+           "w48-16qam-r3/4", "w48-16qam-r5/6", "w48-qpsk-r2/3", "w48-qpsk-r3/4"}
 ROLES = {m: ["reply"] for m in ("ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f")}
 for cap, m in G.CONNECT.items():
     ROLES.setdefault(m, []).append("connect")
