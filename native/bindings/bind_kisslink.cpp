@@ -138,7 +138,7 @@ void bind_kisslink(py::module_& m) {
              },
              py::arg("frame"), py::arg("port") = 0, py::arg("ack") = py::none())
         .def("on_sent", [](KissLink& l, const py::handle& burst) { l.on_sent(burst_cpp(burst)); })
-        .def("missed", &KissLink::missed)
+        .def("missed", &KissLink::missed, py::arg("submode"), py::arg("n_cw"), py::arg("snr") = py::none())
         .def("next_burst", [](KissLink& l) { return burst_py(l.next_burst()); })
         .def("on_burst", [](KissLink& l, py::dict r, const py::object&) -> py::object {
             auto h = heard_of(r);

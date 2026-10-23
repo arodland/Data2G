@@ -121,7 +121,8 @@ public:
     std::vector<std::string> take_events();                  // the statuses since the last call
     std::vector<std::pair<int, std::int64_t>> take_acks();   // (port, ack) gone out since the last call
     void on_sent(const arq::TxBurstPtr& burst);  // a burst finished transmitting: its acks are due
-    void missed(const std::string& submode, int n_cw);  // BCAST * MISSED
+    // BCAST * MISSED; snr: its in-band energy reading (snr_est's scale), if one was made
+    void missed(const std::string& submode, int n_cw, std::optional<double> snr = std::nullopt);
     // The first queued frame's port and mode, with every queued frame of that
     // port that goes in it, as many as fit. nullptr: nothing queued.
     arq::TxBurstPtr next_burst();

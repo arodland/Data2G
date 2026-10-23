@@ -155,8 +155,13 @@ void Host::command(std::string_view line, std::string_view peer) {
         try {
             e.set_call(args[0], {args.begin() + 1, args.end()});  // VARA takes several: all answer connects
         } catch (const std::invalid_argument&) {
-            ok = false;
+            out_cmd.emplace_back("WRONG");
+            return;
         }
+        out_cmd.emplace_back("OK");  // VARA tells a registered station so, per call; to us, every station is
+        out_cmd.push_back("REGISTERED " + e.call());
+        for (const auto& a : e.aliases()) out_cmd.push_back("REGISTERED " + a);
+        return;
     } else if (cmd == "LISTEN" && a0 == "CQ") {
         // CQ frames are always reported
     } else if (cmd == "LISTEN" && (a0 == "ON" || a0 == "OFF")) {
@@ -205,6 +210,9 @@ void Host::command(std::string_view line, std::string_view peer) {
         arq::log_write(LOG, INFO, "accepted, not implemented: " + std::string(strip(line)));
     } else if (cmd == "VERSION") {
         out_cmd.push_back("VERSION " + std::string(VERSION));
+        return;
+    } else if (const auto snr = e.session_snr(); cmd == "SN" && snr) {
+        out_cmd.push_back(arq::format("SN %.1f", *snr));
         return;
     } else {
         ok = false;

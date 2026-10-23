@@ -201,6 +201,8 @@ public:
     Out step(std::span<const double> x);
     bool busy() const { return busy_now_; }  // a burst arriving (the receiver stage's, latest)
     bool channel_busy() const { return channel_busy_now_; }  // the host's BUSY ON/OFF
+    // the session peer's last burst it claimed: snr_est (the host's SN); nullopt before one
+    std::optional<double> session_snr() const { return session_snr_; }
     // Samples dropped because the worker fell max_backlog_s behind (any thread).
     std::uint64_t decode_dropped() const { return dropped_.load(std::memory_order_relaxed); }
 
@@ -336,12 +338,14 @@ private:
         std::string mode;
     };
     std::optional<Span> span_;  // the burst being heard
-    std::optional<Span> energy_span_;  // ... heard in a session: its energy once measured (hear_burst)
+    std::optional<Span> heard_span_;  // ... being decoded: its energy once measured (hear_burst)
+    std::optional<double> session_snr_;
     std::optional<double> tx_end_;  // when my last burst ended
     std::int64_t timeouts_ = 0;  // the station's timeouts already reported
     void energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db = std::nullopt,
                 std::optional<double> floor_db = std::nullopt);
     void missed_energy();
+    std::optional<double> span_snr(const Span& s);  // its in-band SNR from power alone (snr_est's scale)
     int rx_cap() const;  // the bandwidth cap a heard burst's TX filter was most likely for
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;

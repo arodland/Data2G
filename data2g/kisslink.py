@@ -32,8 +32,8 @@ U frames other than UI) and that station has reported on us lately;
 anything else goes in the port's fallback mode. Off, frames are never
 parsed as AX.25 and reports heard are ignored.
 
-Statuses (KissLink.events, for the host): BCAST n HEARD [call], BCAST n
-LOST k, BCAST * MISSED submode n_cw, BCAST n DROPPED k. KISS ACKMODE acks
+Statuses (KissLink.events, for the host): BCAST n HEARD [call] snr, BCAST n
+LOST k, BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k. KISS ACKMODE acks
 (KissLink.acks): (port, ack) for each frame enqueued with an ack, once the
 burst carrying it has gone (on_sent).
 
@@ -185,6 +185,11 @@ def check_mode(mode: str, cap: int):
     s = MODES.get(mode)
     if s is None or s not in G.allowed(cap):
         raise ValueError(f"mode {mode!r}: not a mode within the bandwidth cap")
+
+
+def _snr(r: dict) -> str:
+    """A heard burst's status suffix: its pilot SNR (snr_est, dB), as the monitor shows it."""
+    return f" {PHY.measure(r)['snr_est']:.1f}"
 
 
 def _tlv(t: int, v: bytes) -> bytes:
@@ -361,10 +366,11 @@ class KissLink:
             self.acks += self._inflight[1]
             self._inflight = None
 
-    def missed(self, submode: str, n_cw: int):
+    def missed(self, submode: str, n_cw: int, snr: float | None = None):
         """A burst heard whose header decoded but nothing else: it can't be
-        tied to a port (docs/broadcast.md §5)."""
-        self.events.append(f"BCAST * MISSED {submode} {n_cw}")
+        tied to a port (docs/broadcast.md §5). `snr`: its in-band energy
+        reading (dB, snr_est's scale), if one was made."""
+        self.events.append(f"BCAST * MISSED {submode} {n_cw}" + (f" {snr:.1f}" if snr is not None else ""))
 
     def _route(self, port: Port, frame: bytes) -> tuple[str, int]:
         """-> (mode, size hint) for a frame on `port`."""
@@ -502,8 +508,9 @@ class KissLink:
             ports = sorted(i for i, p in self.ports.items() if p.group == group)
             if rep is not None and any(self.ports[i].auto for i in ports):
                 self._learn(rep, frames, r, ok, now)
+            snr = _snr(r) if ports else ""
             for i in ports:
-                self.events.append(f"BCAST {i} HEARD" + (f" {call}" if call else ""))
+                self.events.append(f"BCAST {i} HEARD" + (f" {call}" if call else "") + snr)
                 if lost:
                     self.events.append(f"BCAST {i} LOST {lost}")
             return [(i, f) for i in ports for f in frames]
@@ -522,8 +529,9 @@ class KissLink:
             for i in ports:
                 self.events.append(f"BCAST {i} LOST {len(frames) + lost}")
             return []
+        snr = _snr(r) if ports else ""
         for i in ports:
-            self.events.append(f"BCAST {i} HEARD")
+            self.events.append(f"BCAST {i} HEARD{snr}")
             if lost:
                 self.events.append(f"BCAST {i} LOST {lost}")
         return [(i, f) for i in ports for f in frames]

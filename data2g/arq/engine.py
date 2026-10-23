@@ -194,6 +194,7 @@ class Engine:
                                  accept_connect=self.accept_connect)
         self.session.set_chat(self.chat)
         self.store = {}
+        self.session_snr = None  # the last of its peer's bursts claimed: snr_est (host SN)
 
     def listen(self, on: bool = True):
         """Answer calls to this station (on), or stop (an idle session)."""
@@ -366,7 +367,8 @@ class Engine:
             if r is None:
                 log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
                 if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
-                    self.kiss.missed(h["spec"].name, h["n_cw"])  # maybe an open port's: BCAST * MISSED
+                    # maybe an open port's: BCAST * MISSED
+                    self.kiss.missed(h["spec"].name, h["n_cw"], self._span_snr(*span) if span else None)
                 continue
             rx = PHY.ModemRx(r, self.store, PHY.DD_BUDGET_S)
             # in a session, its peer's bursts are the likely ones: the session
@@ -374,6 +376,8 @@ class Engine:
             # decodes per ARQ burst: ~10% of a Pat exchange's CPU). Asked
             # with or without KISS: its decode comes first either way
             ours = self.session.claims(rx)
+            if ours:
+                self.session_snr = meas["snr_est"]
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's
@@ -395,15 +399,20 @@ class Engine:
         gaps' noise under a strong signal: on air (recordings/20261021-161109,
         20 dB snr_est) the gaps read 23 dB louder out of band than the bursts,
         the energy ~0 dB, and the shifter held w48-qpsk-r1/2."""
-        from . import predictor as P
-
-        lo, hi = P.band_span_hz(MODES[mode].band)
-        snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
+        snr = self._span_snr(start, end, mode)
         e = None if snr is None else snr + PHY.peak_db(mode, self._rx_cap())
         if e is not None and floor_db is not None:  # a reading floored, never one made up
             e = max(e, floor_db - ENERGY_FLOOR_DB)
         if e is not None and (min_db is None or e >= min_db):
             self.session.policy.observe_energy(e, t)
+
+    def _span_snr(self, start: float, end: float, mode: str) -> float | None:
+        """A burst's in-band SNR from power alone over start..end (dB,
+        average power: snr_est's scale), or None without a noise floor."""
+        from . import predictor as P
+
+        lo, hi = P.band_span_hz(MODES[mode].band)
+        return self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
 
     def _rx_cap(self) -> int:
         """The bandwidth cap a heard burst's TX filter was most likely for: the

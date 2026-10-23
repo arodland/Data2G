@@ -171,8 +171,8 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         a.send("MYCALL A")
         a.send("VERSION")
         # a reply needs audio flowing both ways: the engine steps on capture
-        wait([a, b], lambda: len(b.lines) >= 2 and "VERSION Data2G 0.1" in a.lines, 30, "replies")
-        assert b.lines[:2] == ["OK", "OK"]
+        wait([a, b], lambda: len(b.lines) >= 3 and "VERSION Data2G 0.1" in a.lines, 30, "replies")
+        assert b.lines[:3] == ["OK", "REGISTERED B", "OK"]
         t0 = time.monotonic()
         a.send("CONNECT A B")
         t_conn = wait([a, b], lambda: "CONNECTED A B 2300" in a.lines and "CONNECTED A B 2300" in b.lines, 60,
@@ -245,7 +245,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         ka.sendall(tnc.kiss_encode(b"\x00\x07" + b"group hello", 1, tnc.ACKMODE))
         assert kiss_wait(kb, tnc.KissDecoder(), 30, (1 << 4 | tnc.DATA, b"group hello"))
         assert kiss_wait(ka, tnc.KissDecoder(), 30, (1 << 4 | tnc.ACKMODE, b"\x00\x07"))
-        wait([a, b], lambda: "BCAST 1 HEARD A" in b.lines, 30, "BCAST 1 HEARD A")
+        wait([a, b], lambda: any(ln.startswith("BCAST 1 HEARD A ") for ln in b.lines), 30, "BCAST 1 HEARD A")
         ka.close()
         kb.close()
     finally:

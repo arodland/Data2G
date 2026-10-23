@@ -454,6 +454,10 @@ As built (data2g/arq/policy.py):
     band-plan segment.
   - BW2300 and BW2750 set no cap (2400 Hz, the widest band).
   - BW1200 is an extension, not in VARA; a minor feature.
+  - **SN** answers `SN snr`: the pilot SNR (snr_est, dB, average power in 2500 Hz,
+    as the monitor shows it) of the last burst decoded from the session's peer.
+    Only bursts that decode under the session's key count. WRONG before the
+    first one, and again once a new session starts. No OK follows.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
   BUFFER n, PTT ON/OFF, BUSY ON/OFF, and a Data2G-specific `MODE name`.
 
