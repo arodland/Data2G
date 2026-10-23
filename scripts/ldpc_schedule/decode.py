@@ -1,4 +1,4 @@
-"""Flooding vs layered sum-product (ldpc.Decoder, ldpc.LayeredDecoder) on gen_llrs.py's points: per codeword,
+"""Flooding vs layered sum-product (flood_record below; ldpc.Decoder, layered) on gen_llrs.py's points: per codeword,
 the iteration it converged at (41: never, cap 40) and whether its decisions there were right, so one decode
 answers for every cap. Same numpy phi on both sides.
 
@@ -23,7 +23,8 @@ NAMES = {m.replace("/", "_"): m for m in SUBMODES}
 
 
 def flood_record(d, llr):
-    """ldpc.Decoder.decode's loop (sum-product), recording each codeword's convergence."""
+    """The flooding sum-product ldpc.Decoder ran before the layered schedule, recording each codeword's
+    convergence."""
     ch = d.channel_llrs(np.clip(np.asarray(llr, np.float32), -ldpc.CH_CLAMP, ldpc.CH_CLAMP))
     b = ch.shape[0]
     c2v = np.zeros((b, d.n_edges), np.float32)
@@ -56,7 +57,7 @@ def work(f):
         return f.name, "skip"
     s = SUBMODES[NAMES[f.name.split("__")[0]]]
     code = codes.ldpc_code(s)
-    fl, la = ldpc.Decoder(code), ldpc.LayeredDecoder(code)
+    fl = la = ldpc.Decoder(code)
     z = np.load(f)
     llr, info = z["llr"][:MAX_CW], z["info"][:MAX_CW]
     res = {}

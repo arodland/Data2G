@@ -182,15 +182,25 @@ def test_pinned_buffer_bits_are_the_sent_bits():
     np.testing.assert_array_equal(pinned[0, rest], buf[0, rest] * 0.1)
 
 
-def test_layered_decodes_what_flooding_does_in_fewer_iterations():
+def test_layered_sum_product_converges_in_few_iterations():
     code = ldpc.qc_code(2560, 3840)
     rng = np.random.default_rng(3)
     bits = rng.integers(0, 2, (64, 2560))
     x = 1.0 - 2.0 * code.encode(bits)
     sigma = 0.66
     llr = 2 * (x + rng.normal(scale=sigma, size=x.shape)) / sigma**2
-    out, ok = ldpc.Decoder(code).decode(llr, iters=40)
-    l_out, l_ok, conv, first = ldpc.LayeredDecoder(code).decode(llr, iters=20, record=True)
-    assert ok.all() and l_ok.all()
-    assert np.array_equal(l_out, bits) and np.array_equal(first, bits)
-    assert conv.max() <= 20 and conv.mean() < 10  # flooding needs ~12 here
+    out, ok = ldpc.Decoder(code).decode(llr, iters=15)  # layered: 6.8 on average, 12 at most; flooding averaged ~12
+    assert ok.all() and np.array_equal(out, bits)
+
+
+def test_record_gives_each_codewords_convergence(reference):
+    code = reference(ldpc, "qc_code")(500, 1000)
+    rng = np.random.default_rng(4)
+    bits = rng.integers(0, 2, (16, 500))
+    x = 1.0 - 2.0 * code.encode(bits)
+    llr = 2 * (x + rng.normal(scale=0.8, size=x.shape)) / 0.64
+    dec = reference(ldpc, "Decoder")  # the numpy decoder (native's has no record)
+    out, ok, conv, first = dec(code).decode(llr, iters=30, record=True)
+    for c in sorted(set(conv[conv <= 30])):
+        o, k = dec(code).decode(llr, iters=int(c))
+        assert k[conv <= c].all()  # every codeword recorded by c has converged by c

@@ -36,9 +36,9 @@ import numpy as np
 DATA = Path(__file__).parent / "codes_data"
 SHIFTS = DATA / "ldpc_shifts.npz"
 CORE = 4
-KB = {1: 22, 2: 10}  # info columns per base graph (5G NR, 3GPP TS 38.212 5.3.2)
+KB = {1: 22, 2: 10}  # info columns per base graph
 
-# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15} (TS 38.212 Table 5.3.2-1).
+# Lifting sizes: a * 2^j up to 384, a in {2, 3, 5, ..., 15}.
 LIFTING_SIZES = sorted({a << j for a in (2, 3, 5, 7, 9, 11, 13, 15) for j in range(8) if a << j <= 384})
 
 
@@ -56,9 +56,7 @@ def mask(bg: int) -> np.ndarray:
 def layout(k: int, n: int, bg: int | None = None) -> tuple[int, int]:
     """(base graph, Z) for k bits in n: graph 2 for short blocks and low
     rates, and the smallest lifting size whose (graph 2: k-dependent)
-    info columns hold k. The thresholds are 5G NR's, not tuned here: base
-    graph selection as TS 38.212 7.2.2 (with k for its A), graph 2's k_b
-    as its code block segmentation (5.2.2)."""
+    info columns hold k. The thresholds are not tuned here."""
     rate = k / n
     if bg is None:
         bg = 2 if (k <= 292 or (k <= 3824 and rate <= 0.67) or rate <= 0.25) else 1
@@ -230,8 +228,17 @@ def check_layout(code: QCLDPC) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 class Decoder:
-    """Batched flooding decoder on a QCLDPC, in numpy: sum-product (BP,
-    `alpha=None`, the default) or normalized min-sum with `alpha`.
+    """Batched decoder on a QCLDPC, in numpy: sum-product (BP, `alpha=None`,
+    the default) on a row-layered schedule, or normalized min-sum with
+    `alpha`, flooding.
+
+    Layered: each base row's Z checks are a layer, which touches each
+    variable at most once, so the variable totals take a layer's new
+    messages before the next layer reads them and information crosses the
+    graph within an iteration. Capped at 20 iterations it matched flooding
+    at 40 within 0.1 dB at the 10% and 1% FER points (6 modes, AWGN/MPP/MPD,
+    480k paired codewords: scripts/ldpc_schedule), with half the iterations
+    per codeword at the cliff; the modem's cap is codes.LDPC_ITERS.
 
     BP is the default because this modem's bit rate (a few kb/s) makes
     its cost irrelevant even on a phone; min-sum exists for hardware.
@@ -254,6 +261,14 @@ class Decoder:
             (np.ones(len(c), np.float32), (c, np.arange(len(c)))), shape=(code.n_cols, len(c)))
         self.sent = code.sent
         self.filler = np.arange(code.k, code.kb * code.z)
+        # BP's layers: per base row, its checks' edge ids (Z, dmax) and pad, the real edges and their variables
+        z = code.z
+        self.layers = []
+        for l in range(code.mb):
+            e, p = self.chk[l * z:(l + 1) * z], self.pad[l * z:(l + 1) * z]
+            v = self.var[e[~p]]
+            assert len(np.unique(v)) == len(v), "a layer touches a variable twice"
+            self.layers.append((e, p, e[~p], v))
 
     def channel_llrs(self, llr_sent):
         """(B, n) LLRs of transmitted bits -> (B, n_cols) for every column."""
@@ -262,11 +277,17 @@ class Decoder:
         full[:, self.filler] = self.BIG
         return full
 
-    def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False):
+    def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False, record: bool = False):
         """-> (info bit decisions (B, k) uint8, converged (B,) bool), and
         with `posterior` the a-posteriori LLRs of the sent bits (B, n).
-        (The modem passes iters=codes.LDPC_ITERS.)"""
+        (The modem passes iters=codes.LDPC_ITERS.) `record` (BP) adds each
+        codeword's convergence iteration (1-based; iters + 1 if never) and
+        its decisions there: one decode answers for every cap up to iters."""
         ch = self.channel_llrs(np.clip(np.asarray(llr_sent, np.float32), -CH_CLAMP, CH_CLAMP))
+        if alpha is None:
+            return self._layered(ch, iters, posterior, record)
+        if record:
+            raise ValueError("record: sum-product only")
         b = ch.shape[0]
         c2v = np.zeros((b, self.n_edges), np.float32)
         v2c = np.full((b, self.n_edges + 1), self.BIG, np.float32)
@@ -279,17 +300,11 @@ class Decoder:
             sgn = np.where(neg, np.float32(-1), np.float32(1))
             sprod = np.where(np.logical_xor.reduce(neg, axis=-1, keepdims=True), np.float32(-1), np.float32(1))
             mag = np.abs(m)
-            if a is None:
-                # BP in the log domain: phi(x) = -log tanh(x/2), its own
-                # inverse; padding (|m| = BIG) contributes phi = 0.
-                ph = _phi(mag)
-                out = sprod * sgn * _phi(ph.sum(axis=-1, keepdims=True) - ph)
-            else:
-                i1 = mag.argmin(axis=-1)[..., None]
-                min1 = np.take_along_axis(mag, i1, -1)
-                np.put_along_axis(mag, i1, np.inf, -1)
-                min2 = mag.min(axis=-1, keepdims=True)
-                out = np.float32(a) * sprod * sgn * np.where(np.arange(mag.shape[-1]) == i1, min2, min1)
+            i1 = mag.argmin(axis=-1)[..., None]
+            min1 = np.take_along_axis(mag, i1, -1)
+            np.put_along_axis(mag, i1, np.inf, -1)
+            min2 = mag.min(axis=-1, keepdims=True)
+            out = np.float32(a) * sprod * sgn * np.where(np.arange(mag.shape[-1]) == i1, min2, min1)
             c2v = out[:, ~self.pad]
             tot = ch + (self.gather @ c2v.T).T
             hard = (tot < 0).astype(np.uint8)
@@ -300,40 +315,9 @@ class Decoder:
             return hard[:, : self.code.k], ok, tot[:, self.sent]
         return hard[:, : self.code.k], ok
 
-    def syndrome(self, hard):
-        h = np.concatenate([hard[:, self.var], np.zeros((hard.shape[0], 1), hard.dtype)], 1)
-        return (h[:, self.chk].sum(axis=-1) % 2 == 0).all(axis=1)
-
-
-MinSumDecoder = Decoder  # the old name, kept for scripts/
-
-
-class LayeredDecoder(Decoder):
-    """Decoder with a row-layered schedule (sum-product only): each base row's Z checks are a layer, which
-    touches each variable at most once, so after a layer's check update the variable totals take its new
-    messages at once and the next layer reads them. Information then crosses the graph within an iteration,
-    not one hop per iteration as in flooding: about half the iterations for the same FER (prototype; not
-    substituted by native, not used by the modem).
-
-    decode(..., record=True) also returns each codeword's convergence iteration (1-based; iters + 1 if it
-    never converged), its decisions taken there: a decode to N iterations answers for every cap up to N."""
-
-    def __init__(self, code: QCLDPC):
-        super().__init__(code)
-        z, mb = code.z, code.mb
-        # per layer: its checks' edge ids (Z, dmax) and pad, the edges' variables
-        self.layers = []
-        for l in range(mb):
-            e = self.chk[l * z:(l + 1) * z]
-            p = self.pad[l * z:(l + 1) * z]
-            v = self.var[e[~p]]
-            assert len(np.unique(v)) == len(v), "a layer touches a variable twice"
-            self.layers.append((e, p, e[~p], v))
-
-    def decode(self, llr_sent, iters: int = 30, alpha=None, posterior: bool = False, record: bool = False):
-        if alpha is not None:
-            raise ValueError("LayeredDecoder: sum-product only")
-        ch = self.channel_llrs(np.clip(np.asarray(llr_sent, np.float32), -CH_CLAMP, CH_CLAMP))
+    def _layered(self, ch, iters, posterior, record):
+        """BP, layer by layer: a layer's messages from the totals less its old ones, then the totals take the
+        new ones. In the log domain, phi(x) = -log tanh(x/2), its own inverse; padding (|m| = BIG) gives 0."""
         b = ch.shape[0]
         tot = ch.copy()
         c2v = np.zeros((b, self.n_edges + 1), np.float32)  # the last slot: padding, never written
@@ -346,15 +330,15 @@ class LayeredDecoder(Decoder):
                 sgn = np.where(neg, np.float32(-1), np.float32(1))
                 sprod = np.where(np.logical_xor.reduce(neg, axis=-1, keepdims=True), np.float32(-1), np.float32(1))
                 ph = _phi(np.abs(m))
-                out = sprod * sgn * _phi(ph.sum(axis=-1, keepdims=True) - ph)
-                new = out[:, ~p]
+                new = (sprod * sgn * _phi(ph.sum(axis=-1, keepdims=True) - ph))[:, ~p]
                 tot[:, v] = m[:, ~p] + new
                 c2v[:, ev] = new
             hard = (tot < 0).astype(np.uint8)
             ok = self.syndrome(hard)
-            fresh = ok & (conv > iters)
-            conv[fresh] = it + 1
-            first[fresh] = hard[fresh, : self.code.k]
+            if record:
+                fresh = ok & (conv > iters)
+                conv[fresh] = it + 1
+                first[fresh] = hard[fresh, : self.code.k]
             if ok.all():
                 break
         out = (hard[:, : self.code.k], ok)
@@ -363,3 +347,11 @@ class LayeredDecoder(Decoder):
         if record:
             out += (conv, np.where((conv <= iters)[:, None], first, hard[:, : self.code.k]))
         return out
+
+    def syndrome(self, hard):
+        h = np.concatenate([hard[:, self.var], np.zeros((hard.shape[0], 1), hard.dtype)], 1)
+        return (h[:, self.chk].sum(axis=-1) % 2 == 0).all(axis=1)
+
+
+MinSumDecoder = Decoder  # the old name, kept for scripts/
+

@@ -30,7 +30,7 @@ int kb_of(int bg) {
 
 namespace {
 
-// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8 (TS 38.212 Table 5.3.2-1).
+// ldpc.LIFTING_SIZES: a * 2^j up to 384, a in {2, 3, 5, ..., 15}, j < 8.
 bool lifting_size(int z) {
     for (int a : {2, 3, 5, 7, 9, 11, 13, 15})
         for (int j = 0; j < 8; ++j)
@@ -40,7 +40,7 @@ bool lifting_size(int z) {
 
 }  // namespace
 
-// ldpc.layout: 5G NR's rules (TS 38.212 7.2.2 base graph, 5.2.2 graph 2's k_b).
+// ldpc.layout: base graph by size and rate, graph 2's k_b by k.
 std::pair<int, int> layout(int k, int n, int bg) {
     const double rate = static_cast<double>(k) / n;
     if (bg == 0) bg = (k <= 292 || (k <= 3824 && rate <= 0.67) || rate <= 0.25) ? 2 : 1;
@@ -342,6 +342,7 @@ Decoder::Decoder(const Code& code)
             dmax_ = std::max(dmax_, chk_ptr_.back() - chk_ptr_[chk_ptr_.size() - 2]);
         }
     if (dmax_ > 128) throw std::invalid_argument("check degree above numpy's pairwise block");
+    layers_ = code.mb;
     var_ptr_.assign(n_cols_ + 1, 0);
     for (int v : var_) ++var_ptr_[v + 1];
     for (int v = 0; v < n_cols_; ++v) var_ptr_[v + 1] += var_ptr_[v];
@@ -376,9 +377,10 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
     // Codewords are independent within an iteration: one pool task each.
     // Only the stop (every codeword at once) couples them, as in Python.
     struct Scratch {
-        std::vector<float> mag, ph;
+        std::vector<float> m, mag, ph;
         std::vector<std::uint8_t> neg, hard;
     };
+    const int z = n_checks_ / layers_;
     std::vector<std::uint8_t> ok(B, 0);
     const auto phi_fn = exact_phi.load(std::memory_order_relaxed) ? phi_all : phi_all_fast;
     for (int it = 0; it < iters; ++it) {
@@ -388,6 +390,7 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
         pool::parallel_for(B, [&](std::size_t b) {
             cancel::check();
             thread_local Scratch w;
+            w.m.resize(E);
             w.mag.resize(E);
             w.ph.resize(E);
             w.neg.resize(E);
@@ -397,28 +400,40 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
             auto& neg = w.neg;
             auto& hard = w.hard;
             float* c = c2v[b];
-            const float* t = tot[b];
-            v2c(t, c, var_.data(), E, neg.data(), mag.data());
+            float* t = tot[b];
             if (bp) {
-                std::copy(mag.begin(), mag.end(), ph.begin());
-                phi_fn(ph.data(), E);
-                for (int q = 0; q < n_checks_; ++q) {
-                    const int e0 = chk_ptr_[q], d = chk_ptr_[q + 1] - e0;
-                    const float S = numpy_sum(&ph[e0], d, dmax_, B == 1);
-                    std::uint8_t sneg = 0;
-                    for (int e = e0; e < e0 + d; ++e) sneg ^= neg[e];
-                    for (int e = e0; e < e0 + d; ++e) {
-                        mag[e] = S - ph[e];
-                        neg[e] ^= sneg;
+                // ldpc.Decoder._layered: each base row's Z checks (a contiguous edge range, each variable at most
+                // once) from the totals less their old messages, then the totals take the new ones at once
+                for (int l = 0; l < layers_; ++l) {
+                    const int lo = chk_ptr_[l * z], hi = chk_ptr_[(l + 1) * z], n = hi - lo;
+                    for (int e = lo; e < hi; ++e) w.m[e] = t[var_[e]] - c[e];
+                    for (int e = lo; e < hi; ++e) {
+                        neg[e] = w.m[e] < 0;
+                        mag[e] = std::fabs(w.m[e]);
+                    }
+                    std::copy(mag.begin() + lo, mag.begin() + hi, ph.begin() + lo);
+                    phi_fn(ph.data() + lo, static_cast<std::size_t>(n));
+                    for (int q = l * z; q < (l + 1) * z; ++q) {
+                        const int e0 = chk_ptr_[q], d = chk_ptr_[q + 1] - e0;
+                        const float S = numpy_sum(&ph[e0], d, dmax_, B == 1);
+                        std::uint8_t sneg = 0;
+                        for (int e = e0; e < e0 + d; ++e) sneg ^= neg[e];
+                        for (int e = e0; e < e0 + d; ++e) {
+                            mag[e] = S - ph[e];
+                            neg[e] ^= sneg;
+                        }
+                    }
+                    phi_fn(mag.data() + lo, static_cast<std::size_t>(n));
+                    // -x is x with the sign bit flipped: spelled so, since the
+                    // ?: became a branch mispredicted on half the edges (55% of
+                    // a failing decode)
+                    for (int e = lo; e < hi; ++e) {
+                        c[e] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(mag[e]) ^ (std::uint32_t{neg[e]} << 31));
+                        t[var_[e]] = w.m[e] + c[e];
                     }
                 }
-                phi_fn(mag.data(), E);
-                // -x is x with the sign bit flipped: spelled so, since the
-                // ?: became a branch mispredicted on half the edges (55% of
-                // a failing decode)
-                for (std::size_t e = 0; e < E; ++e)
-                    c[e] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(mag[e]) ^ (std::uint32_t{neg[e]} << 31));
             } else {
+                v2c(t, c, var_.data(), E, neg.data(), mag.data());
                 // Normalized min-sum over the check's dmax slots, padding
                 // reading BIG; ties go to the first slot (argmin).
                 for (int q = 0; q < n_checks_; ++q) {
@@ -442,8 +457,8 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
                         c[e0 + j] = (neg[e0 + j] ^ sneg) ? -out : out;
                     }
                 }
+                total(b);
             }
-            total(b);
             for (int v = 0; v < n_cols_; ++v) hard[v] = tot[b][v] < 0;
             bool good = true;
             for (int q = 0; q < n_checks_ && good; ++q) {

@@ -73,14 +73,15 @@ class Decoder {
 public:
     explicit Decoder(const Code& code);
 
-    // (B, n) channel LLRs of the sent bits. alpha empty: sum-product (BP);
-    // one value: min-sum normalized by it; more: alpha[it] per iteration.
+    // (B, n) channel LLRs of the sent bits. alpha empty: sum-product (BP),
+    // row-layered as ldpc.Decoder (each base row's Z checks a layer); one
+    // value: min-sum normalized by it, flooding; more: alpha[it] per iteration.
     // Stops once every codeword in the batch satisfies H, as ldpc.Decoder.
     Decoded decode(const Mat<float>& llr, int iters = 30, std::span<const float> alpha = {},
                    bool posterior = false) const;
 
 private:
-    int k_, n_cols_, filler_end_, n_checks_, dmax_;
+    int k_, n_cols_, filler_end_, n_checks_, dmax_, layers_ = 0;  // layers_: base rows, Z checks each
     std::vector<int> sent_;
     std::vector<int> var_;      // edge -> variable; edges in check order
     std::vector<int> chk_ptr_;  // check -> its first edge
