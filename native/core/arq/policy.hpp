@@ -38,10 +38,12 @@ inline constexpr double NOISE_RULE = 1.0;  // the noise rule's tail weight (poli
 inline constexpr int LADDER_AFTER = 2;
 inline constexpr double LADDER_STEP_DB = 3.0;
 inline constexpr std::size_t ENERGY_HIST = 4;  // the energy inputs' window: the peer's last bursts
-// The CPM floor (policy.py CPM_FLOOR, default snr:-4): data in CPM modes only
-// while the median snr_est of the peer's last CPM_FLOOR_HIST bursts is under it.
+// The CPM floor (policy.py CPM_FLOOR, default snr:-4:1): data in CPM modes only
+// while the median snr_est of the peer's last CPM_FLOOR_HIST bursts is under
+// CPM_FLOOR_SNR_DB and their median spread_est at least CPM_FLOOR_SPREAD_HZ.
 inline constexpr std::size_t CPM_FLOOR_HIST = 3;
 inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
+inline constexpr double CPM_FLOOR_SPREAD_HZ = 1.0;
 inline constexpr double UNMEASURED_SPREAD_HZ = 2.0;  // equalizer::DEFAULT_SPREAD_HZ (policy.py)
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);

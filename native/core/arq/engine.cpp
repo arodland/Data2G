@@ -746,7 +746,7 @@ void Engine::energy(double start, double end, const std::string& mode, double t,
     // that less ENERGY_FLOOR_DB (receiver AGC lifts the gaps' noise under a strong signal, engine.py)
     std::optional<double> e;
     if (const auto snr = span_snr({start, end, mode})) e = *snr + peak_db(mode, rx_cap());
-    if (floor_db) e = std::max(e.value_or(-std::numeric_limits<double>::infinity()), *floor_db - ENERGY_FLOOR_DB);
+    if (e && floor_db) e = std::max(*e, *floor_db - ENERGY_FLOOR_DB);  // a reading floored, never one made up
     if (e && (!min_db || *e >= *min_db)) session_->policy->observe_energy(*e, t);
 }
 

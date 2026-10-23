@@ -138,12 +138,16 @@ std::optional<std::pair<std::string, double>> GearShifter::expected_reply() cons
 }
 
 bool GearShifter::cpm_floor() const {
-    if (!cpm_floor_on || snrs.empty()) return false;
-    std::vector<double> v = snrs;  // np.median
-    std::sort(v.begin(), v.end());
-    const std::size_t n = v.size();
-    const double med = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
-    return med < CPM_FLOOR_SNR_DB;
+    if (!cpm_floor_on || snrs.empty() || spreads.empty()) return false;
+    const auto median = [](std::vector<double> v) {  // np.median
+        std::sort(v.begin(), v.end());
+        const std::size_t n = v.size();
+        return n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+    };
+    const std::size_t k = std::min(spreads.size(), CPM_FLOOR_HIST);
+    if (median(std::vector<double>(spreads.end() - static_cast<std::ptrdiff_t>(k), spreads.end())) < CPM_FLOOR_SPREAD_HZ)
+        return false;
+    return median(snrs) < CPM_FLOOR_SNR_DB;
 }
 
 int GearShifter::gate() const {

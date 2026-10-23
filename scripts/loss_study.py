@@ -100,7 +100,7 @@ SLOW_DB, SLOW_TAU_S = 3.0, 60.0
 
 
 def one(args):
-    chan, snr, seed, horizon, policy, intf = args
+    chan, snr, seed, horizon, policy, intf, *cap = args  # cap: the session's bandwidth cap code (default 2)
     rows = []
     spec = INTF.PRESETS.get(intf or "clean", INTF.Spec())
     rec = G.RecordedNoise(REC_NOISE, seed) if intf == "rec" else None
@@ -111,7 +111,7 @@ def one(args):
     # an interfered cell is its own 'channel' (paired_loss groups by channel and SNR)
     tag = dict(channel=chan if intf in (None, "clean") else f"{chan}/{intf}", snr=snr, seed=seed)
     res = L.run(L.make_policy(policy), L.make_policy(policy), None, L.WORKLOADS["bulk"](random.Random(seed + 7)),
-                seed=seed, horizon=horizon, phy=AuditPhy(ch, rows, tag))
+                seed=seed, horizon=horizon, phy=AuditPhy(ch, rows, tag), cap=cap[0] if cap else 2)
     for r in rows:
         r["delivered_Bps"] = round(res["delivered"] / horizon, 1)
     return rows
@@ -159,6 +159,7 @@ def main():
     ap.add_argument("--seed0", type=int, default=0, help="first seed (a second, independent set: --seed0 12)")
     ap.add_argument("--horizon", type=float, default=300.0)
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--cap", type=int, default=2, choices=(0, 1, 2), help="bandwidth cap code (modes.CAP_HZ)")
     ap.add_argument("--policy", default="shift", help='linksim.make_policy spec ("shift+cpm": CPM modes too)')
     ap.add_argument("--cells", default=None,
                     help="channel:snr[:interference],... (default CELLS); interference: an interference.PRESETS "
@@ -181,7 +182,7 @@ def main():
         global REC_NOISE
         REC_NOISE = G.load_recorded_noise(sorted(p.parent for p in Path(a.recordings).glob("*/audio_in.f16")))
         print(f"recorded noise: {len(REC_NOISE) / G.FS / 60:.1f} min", flush=True)
-    jobs = [(c, s, seed, a.horizon, a.policy, i) for c, s, i in cells
+    jobs = [(c, s, seed, a.horizon, a.policy, i, a.cap) for c, s, i in cells
             for seed in range(a.seed0, a.seed0 + a.seeds)]
     with Pool(a.jobs) as pool, open(a.out, "w", newline="") as f:
         w = None

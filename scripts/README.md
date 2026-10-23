@@ -60,7 +60,7 @@ test_kiss.py).
 One question each, answered in the docstring. By area:
 
 - **Ladder and thresholds**: `ladder_study.py`, `ladder_order_check.py`,
-  `compare_ladders.py`, `ladder_page.py`, `paired_loss.py`,
+  `compare_ladders.py`, `ladder_page.py`, `pick_share.py`, `paired_loss.py`,
   `spread_screen.py`, `eq_floor.py`, `llr_scale_sweep.py`,
   `llr_clamp_study.py`.
 - **Sync and the header**: `sync_floor.py`, `sync_sweep.py`, `sync_diag.py`,

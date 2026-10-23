@@ -1,9 +1,11 @@
 """The ladder artifact (HTML) from the ladder study's CSVs.
 
-    uv run python scripts/ladder_page.py runs/ladder_10pct.csv --p1 runs/ladder_1pct.csv --out <page.html>
+    uv run python scripts/ladder_page.py data2g/codes_data/mode_thresholds.json --p1 runs/ladder_dd_1pct.csv --out <page.html>
 
 Both columns: scripts/ladder_study.py (the smallest ARQ data burst through
-the ARQ's receiver, seeded: the same trials at every SNR). Without --p1,
+the ARQ's receiver, seeded: the same trials at every SNR); the 10% one may
+be the shipped table (mode_thresholds.json: the study plus paired deltas,
+its _source). Without --p1,
 the 1% column is the freeze (runs/ladder_final.csv and runs/sync_floor.csv:
 the larger of the code's and the band's sync point; CPM's from the
 prototype study).
@@ -12,6 +14,7 @@ prototype study).
 import argparse
 import csv
 import html
+import json
 import sys
 from fractions import Fraction
 from pathlib import Path
@@ -26,11 +29,12 @@ import ir_study as I  # noqa: E402
 import outcome_data as O  # noqa: E402
 
 CH = ("awgn", "mpg", "mpp", "mpd")
-# another mode of no greater width does as well at every channel x 2 dB cell
-# of the outcome data (greedy envelope, <= 0.2% loss; old README, CPM section)
-COVERED = {"polar-k96-f8", "polar-k192-f8", "n4-16qam-r1/3", "n4-qpsk-r1/2", "n4-qpsk-r2/3", "n4-qpsk-r1/5",
-           "n4-ack-8f", "n4-ack-2f", "fsk16r25-r1/3", "fsk8r50-r1/3", "fsk8r50-r1/2", "w48-qpsk-r2/3",
-           "w48-16qam-r3/4"}
+# the shipped shifter rarely picks it: under 1% of its first-transmission data
+# codewords at every bandwidth cap that allows the mode (scripts/pick_share.py,
+# 2026-10-22: the spread-gated CPM floor, 4 seeds x 300 s, channel x -12..30 dB x cap)
+COVERED = {"fsk16r25-r1/3", "fsk32r62-r1/3", "fsk8r50-r1/3", "n10-qpsk-r3/4", "n4-16qam-r1/3", "n4-qpsk-r1/2",
+           "n4-qpsk-r1/3", "n4-qpsk-r1/5", "n4-qpsk-r2/3", "polar-k96-f4", "polar-k96-f8", "qpsk-r3/4",
+           "w48-16qam-r3/4", "w48-16qam-r5/6", "w48-qpsk-r2/3", "w48-qpsk-r3/4"}
 ROLES = {m: ["reply"] for m in ("ack-1f", "ack-4f", "n10-ack-4f", "n4-ack-2f", "n4-ack-8f")}
 for cap, m in G.CONNECT.items():
     ROLES.setdefault(m, []).append("connect")
@@ -87,7 +91,7 @@ def fmt(v) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".").replace("-", "−")
 
 
-def page(p10: dict, p1: dict, p1_measured: bool = False) -> str:
+def page(p10: dict, p1: dict, p1_measured: bool = False, shipped: bool = False) -> str:
     import prune
 
     rows = sorted(MODES, key=lambda m: (bps(MODES[m]), width(MODES[m])))
@@ -108,7 +112,7 @@ def page(p10: dict, p1: dict, p1_measured: bool = False) -> str:
                     f'<td><span class="bw {chip}">{w}</span></td><td>{code}</td>'
                     f"<td>{rtxt}</td><td>{const_name(s)}</td><td>{fmt(papr[m])}</td>{cells10}{cells1}</tr>")
     n10 = sum(1 for m in MODES for c in CH if (m, c) in p10)
-    notes = NOTES_MEASURED if p1_measured else NOTES_FREEZE
+    notes = (NOTES_MEASURED if p1_measured else NOTES_FREEZE) + (NOTES_SHIPPED if shipped else "")
     head1 = "1% failure, dB" if p1_measured else "1% failure, dB (freeze)"
     return TEMPLATE.replace("{NOTES}", notes).replace("{P1HEAD}", head1).replace(
         "{ROWS}", "\n".join(body)).replace("{N}", str(len(MODES))).replace(
@@ -158,7 +162,7 @@ tr.covered .bw{opacity:.55}
 <main>
 <h1>Data2G Submode Ladder</h1>
 <p class="lede">All {N} modes the gear shifter can choose from (OFDM, and constant-envelope CPM), by payload rate. Each threshold is the SNR where bursts fail at most the stated fraction of the time; lower is more robust.</p>
-<div class="key"><span><span class="sw"></span>Greyed: another mode no wider does as well everywhere, so the shifter rarely picks it</span><span><span class="tag" style="margin:0 6px 0 0">reply</span>role besides data</span></div>
+<div class="key"><span><span class="sw"></span>Greyed: the shifter rarely picks it (under 1% of data codewords at every bandwidth cap that allows it, in simulated sessions from −12 to 30 dB)</span><span><span class="tag" style="margin:0 6px 0 0">reply</span>role besides data</span></div>
 {DONE}
 <div class="wrap"><table>
 <thead><tr><th rowspan="2" class="name">Mode</th><th rowspan="2">bps</th><th rowspan="2">Hz</th><th rowspan="2">Code</th><th rowspan="2">FEC rate</th><th rowspan="2">Const.</th><th rowspan="2">PAPR, dB</th><th class="grp c10" colspan="4">10% failure, dB</th><th class="grp c1" colspan="4">{P1HEAD}</th></tr>
@@ -180,6 +184,8 @@ NOTES_10 = ("<p><b>10% and 1%:</b> the smallest ARQ data burst (a control codewo
             "through the receiver the ARQ uses: header right and both codewords decoded, 200 (10%) or 400 (1%) "
             "trials a point, the same trials at every SNR, 0.25 dB steps, ±50 Hz and 10 ppm offsets.</p>")
 NOTES_MEASURED = NOTES_10
+NOTES_SHIPPED = ("\n<p><b>10% column:</b> the shipped table (<code>mode_thresholds.json</code>): the seeded "
+                 "ladder plus paired deltas from later receiver changes, measured the same way.</p>")
 NOTES_FREEZE = (NOTES_10.replace("10% and 1%:", "10%:").replace(" 200 (10%) or 400 (1%) trials", " 200 trials")
                 + "\n<p><b>1% (freeze):</b> 16-frame bursts; the larger of the code’s 1% packet-error point and "
                   "the band’s 1% sync point. † CPM: the prototype study’s one-codeword bursts, measured before the "
@@ -187,6 +193,9 @@ NOTES_FREEZE = (NOTES_10.replace("10% and 1%:", "10%:").replace(" 200 (10%) or 4
 
 
 def load_col(path) -> dict:
+    if str(path).endswith(".json"):  # mode_thresholds.json; 99: never reached
+        d = json.load(open(path))
+        return {(m, c): (float("nan") if x >= 99 else x) for m, v in d["modes"].items() for c, x in zip(d["channels"], v)}
     out = {}
     for r in csv.DictReader(open(path)):
         for c in CH:
@@ -202,7 +211,7 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     p1 = load_col(a.p1) if a.p1 else freeze_1pct()
-    Path(a.out).write_text(page(load_col(a.p10), p1, p1_measured=bool(a.p1)))
+    Path(a.out).write_text(page(load_col(a.p10), p1, p1_measured=bool(a.p1), shipped=a.p10.endswith(".json")))
 
 
 if __name__ == "__main__":
