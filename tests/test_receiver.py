@@ -185,3 +185,43 @@ def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
     y = np.random.default_rng(4).normal(size=60 * FS)
     rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
     assert not [k for i in range(0, len(y), FS // 10) for k, _ in rx.feed(y[i:i + FS // 10])]
+
+
+def test_a_cpm_burst_whose_first_header_copy_faded_locks_on_both():
+    """Front sync clear, first header copy lost (a fade): cpm.find waits for
+    the second copy (a candidate before it, a lock from both after), and the
+    streaming receiver decodes the burst from that late lock. (Not c8r50:
+    with its first copy blanked, a tile alignment two periods early reads
+    the front's tiles as a header and early-locks a wrong word.)"""
+    import sys
+    from pathlib import Path
+
+    from data2g import cpm
+    from data2g.arq import phy as PHY
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import outcome_data as O
+
+    acc = modem.Accept.of(None, 16.0)
+    for name, n in (("fsk16r25-r1/2", 2), ("fsk32r62-r1/2", 1), ("fsk32r62-r1/2", 4)):
+        g = cpm.GRIDS[cpm.SPECS[name].grid]
+        b = O.burst(name, n, np.random.default_rng(3))
+        x = PHY.tx_audio(b).copy()
+        rows = cpm.layout(g.name, cpm.stream_symbols(g.name, n - 1, False)).hdr_rows[0]
+        x[rows[0] * g.T:(rows[-1] + 1) * g.T] = 0  # copy 1 faded out
+        lead = 2 * FS
+        x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
+        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        cand = cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS], wait=True)
+        assert cand is not None and cand.get("wait"), (name, cand)
+        assert cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS]) is None, name
+        lock = cpm.find(g, y)
+        assert lock is not None and lock["spec"].name == name and lock["n_data"] == n - 1, (name, lock)
+        assert lock["header_end"] - lock["start"] == (cpm.layout(g.name, cpm.stream_symbols(g.name, n - 1, False))
+                                                      .hdr_rows[1][-1] + 1) * g.T, name
+        rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
+        got = [ev for i in range(0, len(y), FS // 10) for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
+        ok = [ev for ev in got if ev["rx"] is not None and ev["rx"]["spec"].name == name
+              and all(PHY.ModemRx(ev["rx"], {}).decode(i, s.mask_id, 0, None) == s.payload
+                      for i, s in enumerate(b.slots))]
+        assert ok, (name, [ev["header"]["spec"].name for ev in got])

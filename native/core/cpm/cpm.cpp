@@ -375,19 +375,80 @@ std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
     return out;
 }
 
+namespace {
+
+// cpm.header_rows: per grid, per number of copies (1..HDR_COPIES), each valid
+// word's header rows (valid_words' order), and the span they reach (symbols).
+struct WordRows {
+    std::vector<std::vector<std::vector<int>>> rows;  // [copies - 1][word]
+    std::vector<int> span;                           // [copies - 1]
+};
+
+const WordRows& word_rows(const Grid& g) {
+    static const auto cache = [] {
+        std::vector<std::pair<std::string_view, WordRows>> out;
+        for (const auto& gg : tables::CPM_GRIDS) {
+            WordRows w{std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
+                       std::vector<int>(tables::CPM.hdr_copies, 0)};
+            for (const auto& s : tables::CPM_SPECS) {
+                if (s.grid != gg.name) continue;
+                for (bool d : {false, true})
+                    for (int n = 0; n <= tables::CPM.max_data; ++n) {
+                        const Layout L = layout(gg, stream_symbols(gg, n, d));
+                        std::vector<int> r;
+                        for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
+                            r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
+                            w.span[c] = std::max(w.span[c], r.back() + 1);
+                            w.rows[c].push_back(r);
+                        }
+                    }
+            }
+            out.emplace_back(gg.name, std::move(w));
+        }
+        return out;
+    }();
+    for (const auto& [name, w] : cache)
+        if (name == g.name) return w;
+    throw std::out_of_range("no CPM grid " + std::string(g.name));
+}
+
+// cpm._tile_starts: a front lock's candidate starts (a tiled front also
+// matches whole periods late; the alignment whose header reads best is the burst's).
+std::vector<std::int64_t> tile_starts(const Grid& g, std::int64_t s0) {
+    const std::int64_t period = g.costas_len * g.T, tiles = static_cast<std::int64_t>(g.preamble.size()) * g.T / period;
+    std::vector<std::int64_t> out;
+    for (std::int64_t k = 0; k < tiles; ++k)
+        if (s0 - k * period >= 0) out.push_back(s0 - k * period);
+    return out;
+}
+
+Lock make_lock(const Grid& g, std::int64_t s0, double cfo, double score, const Header& h, int copies) {
+    const Layout L = layout(g, stream_symbols(g, h.n_data, h.dup));
+    return Lock{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
+                s0 + L.n * g.T, s0 + static_cast<std::int64_t>(L.hdr_rows[copies - 1].back() + 1) * g.T};
+}
+
+}  // namespace
+
+std::int64_t hdr_span(const Grid& g, int copies) {
+    return static_cast<std::int64_t>(word_rows(g).span.at(copies - 1)) * g.T;
+}
+
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies) {
-    const Layout L = layout(g, stream_symbols(g, 0, false));
-    std::vector<int> rows;
-    for (int c = 0; c < copies; ++c) rows.insert(rows.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
-    const Mat<double> E = take_rows(shares(energies(g, x, s0, rows.back() + 1, cfo)), rows);
+    const WordRows& W = word_rows(g);
+    const auto& rows = W.rows.at(copies - 1);
+    const Mat<double> E = shares(energies(g, x, s0, W.span[copies - 1], cfo));
     Header best{nullptr, 0, false, -INFINITY, -INFINITY};
-    std::vector<double> v(rows.size());
+    std::vector<double> v;
+    std::size_t k = 0;
     for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
         if (s.grid != g.name) continue;
         for (bool d : {false, true})
             for (int n = 0; n <= tables::CPM.max_data; ++n) {
                 const auto t = header_symbols(g, header_value(s.index, n, d));
-                for (std::size_t i = 0; i < rows.size(); ++i) v[i] = E[i][t[i % t.size()]];
+                const auto& r = rows[k++];
+                v.resize(r.size());
+                for (std::size_t i = 0; i < r.size(); ++i) v[i] = E[r[i]][t[i % t.size()]];
                 const double score = np_mean(v);
                 // ties: the later word, as argsort(...)[::-1] over a stable sort
                 if (score >= best.score) {
@@ -425,7 +486,7 @@ double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, dou
 }
 
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold, double reach_hz,
-                         bool front_only, std::int64_t lo, std::optional<std::int64_t> hi) {
+                         bool front_only, std::int64_t lo, std::optional<std::int64_t> hi, bool wait) {
     const double floor = threshold.value_or(g.sync_threshold);
     const std::int64_t len = static_cast<std::int64_t>(x.size()), T = g.T;
     const Layout L0 = layout(g, stream_symbols(g, 0, false));
@@ -440,24 +501,42 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
         d = detect(g, x, reach_hz, true, front_only, 0, floor);
     }
     if (d.score < floor) return std::nullopt;
-    const std::int64_t hdr_end = (L0.hdr_rows[0].back() + 1) * T;
-    if (d.start + hdr_end > len) return std::nullopt;  // its header copy is still arriving
-    // a tiled front also matches whole periods late: the alignment whose header reads best
-    const std::int64_t period = g.costas_len * T, tiles = static_cast<std::int64_t>(g.preamble.size()) * T / period;
+    if (d.start + hdr_span(g, 1) > len) return std::nullopt;  // its header copy is still arriving
+    const auto starts = tile_starts(g, d.start);
+    if (starts.empty()) return std::nullopt;  // its front is cut off
     std::optional<std::pair<std::int64_t, Header>> best;
-    for (std::int64_t k = 0; k < tiles; ++k) {
-        const std::int64_t s = d.start - k * period;
-        if (s < 0) continue;
+    for (const auto s : starts) {
         const Header h = read_header(g, x, s, d.cfo, 1);
         if (!best || h.score > best->second.score) best.emplace(s, h);
     }
-    if (!best) return std::nullopt;  // its front is cut off
     const auto [s0, h] = *best;
-    if (peak_ratio(g, x, s0, d.cfo) < tables::CPM.peak_ratio) return std::nullopt;
-    if (!threshold && h.score < g.header_threshold) return std::nullopt;
-    const Layout L = layout(g, stream_symbols(g, h.n_data, h.dup));
-    return Lock{h.spec, h.n_data, h.dup, s0, d.cfo, d.score, h.score, h.score - h.runner_up,
-                s0 + L.n * T, s0 + hdr_end};
+    if (peak_ratio(g, x, s0, d.cfo) >= tables::CPM.peak_ratio && (threshold || h.score >= g.header_threshold))
+        return make_lock(g, s0, d.cfo, d.score, h, 1);
+    if (threshold || std::all_of(starts.begin(), starts.end(), [&](std::int64_t s) {
+            return peak_ratio(g, x, s, d.cfo) < tables::CPM.peak_ratio;
+        }))
+        return std::nullopt;  // a burst's data or a later sync block, its front missed
+    // the front is there but its first header copy faded: both copies, once the second is in
+    Lock cand{};
+    cand.wait = true;
+    cand.start = d.start;
+    cand.cfo = d.cfo;
+    cand.score = d.score;
+    cand.header_end = cand.end = starts.back() + hdr_span(g, 2);
+    if (cand.header_end <= len) return late_lock(g, x, cand);
+    if (wait) return cand;
+    return std::nullopt;
+}
+
+std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
+    std::optional<std::pair<std::int64_t, Header>> best;
+    for (const auto s : tile_starts(g, cand.start)) {
+        if (peak_ratio(g, x, s, cand.cfo) < tables::CPM.peak_ratio) continue;
+        const Header h = read_header(g, x, s, cand.cfo, tables::CPM.hdr_copies);
+        if (!best || h.score > best->second.score) best.emplace(s, h);
+    }
+    if (!best || best->second.score < g.header2_threshold) return std::nullopt;
+    return make_lock(g, best->first, cand.cfo, cand.score, best->second, tables::CPM.hdr_copies);
 }
 
 Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {

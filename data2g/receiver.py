@@ -2,7 +2,8 @@
 
 Receiver is what arq.engine.Engine feeds every block it hears. It searches
 a short rolling buffer for a preamble and header (modem.find_burst over
-sync.StreamDetector's statistics), a CPM grid's early lock (cpm.find), or
+sync.StreamDetector's statistics), a CPM grid's early lock (cpm.find; a
+front whose first header copy faded waits for its second, cpm.late_lock), or
 a burst whose head faded (modem.find_copy, from its header copy); holds
 BUSY while the burst arrives; replaces a false lock by a better header
 (supersede); and hands the whole burst's audio to modem.receive /
@@ -89,7 +90,9 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
     except modem.SyncError:
         r = None
     for g in grids:
-        lock = cpm.find(cpm.GRIDS[g], y[:head])
+        lock = cpm.find(cpm.GRIDS[g], y[:head], wait=True)
+        if lock is not None and lock.get("wait"):  # its first header copy faded: both, as Receiver waits for
+            lock = cpm.late_lock(cpm.GRIDS[g], y, lock) if lock["header_end"] <= len(y) else None
         if lock is not None:
             return cpm.receive(y, lock)  # a CPM lock beats a suspect OFDM header
     if r is None:
@@ -270,6 +273,9 @@ class Receiver:
         # per band / CPM grid: starts before this stream index have been
         # searched with all the audio their header needs (not searched again)
         self.decided: dict = {}
+        # CPM fronts whose first header copy fell short (cpm.find's candidates,
+        # stream indices): read again with both copies once the second is in
+        self.cpm_wait: list = []
         for d in getattr(self, "detectors", {}).values():
             d.reset()
 
@@ -434,14 +440,32 @@ class Receiver:
         return _shift(lock, k)
 
     def _find_cpm(self) -> dict | None:
-        """An early lock on any listened-for CPM grid, as find_burst's dict."""
+        """A lock on any listened-for CPM grid, as find_burst's dict: a
+        waiting candidate's (both header copies) once its second copy is in,
+        else an early lock. A front whose first copy fell short waits."""
         from . import cpm
 
-        for g in self.grids:
-            lock = cpm.find(g, self.buf, lo=max(0, self.decided.get(g.name, 0) - self.off),
-                            hi=len(self.buf) - search_span((), (g.name,)) + 2 * g.T)
+        end = self.off + len(self.buf)
+        self.cpm_wait = [c for c in self.cpm_wait if c["first"] >= self.off]  # trimmed with a burst handled
+        for c in [c for c in self.cpm_wait if c["header_end"] <= end]:
+            self.cpm_wait.remove(c)
+            g = cpm.GRIDS[c["band"]]
+            lock = cpm.late_lock(g, self.buf, dict(c, start=c["start"] - self.off))
             if lock is not None:
                 return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
+        for g in self.grids:
+            lock = cpm.find(g, self.buf, lo=max(0, self.decided.get(g.name, 0) - self.off),
+                            hi=len(self.buf) - search_span((), (g.name,)) + 2 * g.T, wait=True)
+            if lock is None:
+                continue
+            if not lock.get("wait"):
+                return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
+            c = dict(lock, start=lock["start"] + self.off, header_end=lock["header_end"] + self.off)
+            c["first"] = c["header_end"] - cpm.hdr_span(g.name, 2)  # its earliest tile start: kept until read
+            # the next search may meet the same front again before it is decided
+            if not any(w["band"] == g.name and abs(w["start"] - c["start"]) < cpm.hdr_span(g.name, 1)
+                       for w in self.cpm_wait):
+                self.cpm_wait.append(c)
         return None
 
     def feed(self, x: np.ndarray) -> list[tuple[str, dict]]:
@@ -490,7 +514,7 @@ class Receiver:
                 if p is None:
                     p = self._find_copy()  # the preamble faded: the frame pilots and header copy
                 if p is None:
-                    self._trim(self.keep)
+                    self._trim(max([self.keep] + [self.off + len(self.buf) - c["first"] for c in self.cpm_wait]))
                     break
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window

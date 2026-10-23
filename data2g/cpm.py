@@ -21,7 +21,10 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
 - sync blocks every SPACING_S of symbols, at positions independent of the
   burst's length, so the receiver finds them before it knows the length;
 - header (twice, after the first two blocks): 16 bits as OFDM's: index =
-  mode index + 2 x duplicated, n field = data codewords + 1, CRC-6.
+  mode index + 2 x duplicated, n field = data codewords + 1, CRC-6. The
+  receiver locks on the front and the first copy (find); if that copy
+  faded, on both once the second is in (late_lock). A short burst's
+  second copy sits after its data, so each word is read at its own rows.
 
 Native: native/core/cpm (grids and specs compiled in, tables::CPM_*).
 Parity: tests/test_native_cpm.py; under `pytest --native`
@@ -181,6 +184,13 @@ CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", CTL_K, CTL_N) f
 # bottom miss their early lock (the fork measured 66-100% at threshold).
 SYNC_THRESHOLD = {"c16r25": 0.11, "c8r50": 0.20, "c32r62": 0.085}
 HEADER_THRESHOLD = {"c16r25": 0.20, "c8r50": 0.29, "c32r62": 0.11}
+# Late lock (late_lock): both header copies, for a front whose first copy
+# alone fell short. scripts/cpm_header2_fit.py (2026-10-23, 1600 buffers a
+# grid: noise, OFDM, other grids, the grid's own burst past its front): 1.1x
+# the largest score at a placement passing PEAK_RATIO; c32r62 had none pass,
+# so 1.1x noise's and OFDM's largest at any placement (0.119). Bursts lost
+# with a clear front at MPP/MPG -8/-11 dB scored 0.07-0.6 (c32r62 median 0.18).
+HEADER2_THRESHOLD = {"c16r25": 0.15, "c8r50": 0.25, "c32r62": 0.13}
 
 
 def grid_specs(grid: str) -> list:
@@ -468,15 +478,22 @@ def llrs(g: Grid, E: np.ndarray) -> np.ndarray:
 
 
 
+@lru_cache(maxsize=None)
+def header_rows(grid: str, copies: int) -> tuple:
+    """Per valid word, the rows of its first `copies` header copies: the
+    second's depend on the word's length when the burst is short."""
+    return tuple(np.concatenate(layout(grid, stream_symbols(grid, n, d)).hdr_rows[:copies])
+                 for _, n, d, _ in valid_words(grid))
+
+
 def read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
     """-> (spec, n_data, dup, score, runner-up score): ML over the grid's
     valid words, shares summed over the first `copies` header copies (1: all
-    an early lock has)."""
-    lay = layout(g.name, stream_symbols(g.name, 0, False))
-    rows = np.concatenate(lay.hdr_rows[:copies])
-    E = _shares(_energies(g, x, s0, rows[-1] + 1, cfo))[rows]
+    an early lock has), each word's at its own rows."""
+    rows = header_rows(g.name, copies)
+    E = _shares(_energies(g, x, s0, max(r[-1] for r in rows) + 1, cfo))
     words = valid_words(g.name)
-    scores = np.array([E[np.arange(len(rows)), np.tile(t, copies)].mean() for *_, t in words])
+    scores = np.array([E[r, np.tile(t, copies)].mean() for r, (*_, t) in zip(rows, words)])
     order = np.argsort(scores)[::-1]
     spec, n, d, _ = words[order[0]]
     return spec, n, d, float(scores[order[0]]), float(scores[order[1]])
@@ -524,11 +541,14 @@ def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float) -> float:
 
 
 def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float = 150.0, front_only: bool = True,
-         lo: int = 0, hi: int | None = None):
+         lo: int = 0, hi: int | None = None, wait: bool = False):
     """-> early lock {spec, n_data, dup, start, end, score, header score} of
     a burst of grid g in x, or None: the sync pattern (front block alone by
     default) scoring over `threshold` (default SYNC_THRESHOLD; given: no
-    header floor either), then its first header copy (HEADER_THRESHOLD).
+    header floor either), then its first header copy (HEADER_THRESHOLD), or
+    under that both copies (late_lock, HEADER2_THRESHOLD) once x holds the
+    second. `wait`: before then, a candidate {wait, start, cfo, score,
+    header_end: where x must reach} for late_lock instead of None.
     `end`: one past its last sample, in x's samples (it may run past x).
     `lo`, `hi`: only starts in [lo, hi) are searched (a streaming receiver
     searches each start once: detect's cost is the audio it is given)."""
@@ -546,26 +566,62 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
         score, s0, cfo = detect(g, x, reach_hz=reach_hz, front_only=front_only, floor=floor)
     if score < (SYNC_THRESHOLD[g.name] if threshold is None else threshold):
         return None
-    if s0 + (layout(g.name, stream_symbols(g.name, 0, False)).hdr_rows[0][-1] + 1) * g.T > len(x):
+    if s0 + hdr_span(g.name, 1) > len(x):
         return None  # its header copy is still arriving
-    # a tiled front (c8r50: a 6-symbol Costas array four times) also matches
-    # whole periods late, with the header's first symbols standing in for the
-    # last tile: fsk8r50-r1/3 locked one period late in 3-8% of bursts at
-    # MPP -3 dB. The alignment whose header reads best is the burst's.
-    period = len(costas(g.m)) * g.T
-    tiles = len(preamble_pattern(g)) * g.T // period
-    starts = [s for s in (s0 - k * period for k in range(tiles)) if s >= 0]
+    starts = _tile_starts(g, s0)
     if not starts:
         return None  # fine timing moved a lock at x's first sample before it: its front is cut off
-    s0, (spec, n, d, hs, h2) = max(((s, read_header(g, x, s, cfo, copies=1)) for s in starts),
-                                   key=lambda c: c[1][3])
-    if _peak_ratio(g, x, s0, cfo) < PEAK_RATIO:
+    best, h = max(((s, read_header(g, x, s, cfo, copies=1)) for s in starts), key=lambda c: c[1][3])
+    if _peak_ratio(g, x, best, cfo) >= PEAK_RATIO and (threshold is not None or h[3] >= HEADER_THRESHOLD[g.name]):
+        return _lock(g, best, cfo, score, h, 1)
+    if threshold is not None or all(_peak_ratio(g, x, s, cfo) < PEAK_RATIO for s in starts):
         return None  # a burst's data or a later sync block, its front missed
-    if threshold is None and hs < HEADER_THRESHOLD[g.name]:
+    # the front is there but its first header copy faded: both copies, once the second is in
+    cand = dict(wait=True, band=g.name, start=s0, cfo=cfo, score=score, header_end=min(starts) + hdr_span(g.name, 2),
+                family="cpm")
+    if cand["header_end"] <= len(x):
+        return late_lock(g, x, cand)
+    return cand if wait else None
+
+
+def late_lock(g: Grid, x: np.ndarray, cand: dict):
+    """find's candidate (x holding its header_end) -> its lock from both
+    header copies (HEADER2_THRESHOLD), or None."""
+    reads = [(s, read_header(g, x, s, cand["cfo"], copies=HDR_COPIES)) for s in _tile_starts(g, cand["start"])
+             if _peak_ratio(g, x, s, cand["cfo"]) >= PEAK_RATIO]
+    if not reads:
         return None
+    s0, h = max(reads, key=lambda c: c[1][3])
+    if h[3] < HEADER2_THRESHOLD[g.name]:
+        return None
+    return _lock(g, s0, cand["cfo"], cand["score"], h, HDR_COPIES)
+
+
+def _tile_starts(g: Grid, s0: int) -> list:
+    """A front lock's candidate starts. A tiled front (c8r50: a 6-symbol
+    Costas array four times) also matches whole periods late, with the
+    header's first symbols standing in for the last tile: fsk8r50-r1/3
+    locked one period late in 3-8% of bursts at MPP -3 dB. The alignment
+    whose header reads best is the burst's."""
+    period = len(costas(g.m)) * g.T
+    tiles = len(preamble_pattern(g)) * g.T // period
+    return [s for s in (s0 - k * period for k in range(tiles)) if s >= 0]
+
+
+@lru_cache(maxsize=None)
+def hdr_span(grid: str, copies: int) -> int:
+    """Samples from a burst's start to the end of its first `copies` header
+    copies, the latest any word puts them."""
+    return int(max(r[-1] for r in header_rows(grid, copies)) + 1) * GRIDS[grid].T
+
+
+def _lock(g: Grid, s0: int, cfo: float, score: float, h: tuple, copies: int) -> dict:
+    """find's lock dict from a header read at s0 over `copies` copies."""
+    spec, n, d, hs, h2 = h
     lay = layout(g.name, stream_symbols(g.name, n, d))
     return dict(spec=spec, n_data=n, dup=d, start=s0, cfo=cfo, score=score, header_score=hs, header_margin=hs - h2,
-                end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[0][-1] + 1) * g.T, band=g.name, family="cpm")
+                end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[copies - 1][-1] + 1) * g.T, band=g.name,
+                family="cpm")
 
 
 def receive(x: np.ndarray, lock: dict) -> dict:

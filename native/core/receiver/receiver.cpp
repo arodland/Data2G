@@ -55,7 +55,11 @@ std::optional<Rx> receive_any(std::span<const double> y, int64_t lead,
         r.reset();
     }
     for (const auto g : grids) {
-        const auto lock = cpm::find(grid_named(g), y.first(static_cast<std::size_t>(std::clamp<int64_t>(head, 0, len))));
+        const auto& gr = grid_named(g);
+        auto lock = cpm::find(gr, y.first(static_cast<std::size_t>(std::clamp<int64_t>(head, 0, len))), std::nullopt,
+                              150.0, true, 0, std::nullopt, true);
+        if (lock && lock->wait)  // its first header copy faded: both, as Receiver waits for
+            lock = lock->header_end <= len ? cpm::late_lock(gr, y, *lock) : std::nullopt;
         if (lock) return Rx(cpm::receive(y, *lock));  // a CPM lock beats a suspect OFDM header
     }
     if (!r) {
@@ -144,6 +148,7 @@ void Receiver::reset() {
     fresh_ = HOP;  // search at once
     last_start_ = -1;
     decided_.clear();
+    cpm_wait_.clear();
     for (auto& d : detectors_) d.d.reset();
 }
 
@@ -254,11 +259,35 @@ std::optional<modem::Lock> Receiver::find_copy() const {
     return best;
 }
 
-std::optional<cpm::Lock> Receiver::find_cpm() const {
+std::optional<cpm::Lock> Receiver::find_cpm() {
+    // a waiting candidate's lock (both header copies) once its second copy is in
+    std::erase_if(cpm_wait_, [&](const CpmWait& w) { return w.first < off_; });  // trimmed with a burst handled
+    for (std::size_t i = 0; i < cpm_wait_.size();) {
+        if (cpm_wait_[i].cand.header_end > off_ + len()) {
+            ++i;
+            continue;
+        }
+        const CpmWait w = cpm_wait_[i];
+        cpm_wait_.erase(cpm_wait_.begin() + static_cast<std::ptrdiff_t>(i));
+        cpm::Lock c = w.cand;
+        c.start -= off_;
+        c.header_end -= off_;
+        c.end -= off_;
+        if (auto lock = cpm::late_lock(*w.g, buf_, c)) return lock;
+    }
     for (const auto* g : grids_) {
-        const auto lock = cpm::find(*g, buf_, std::nullopt, 150.0, true, std::max<int64_t>(0, decided(g->name) - off_),
-                                    len() - grid_span(*g) + 2 * g->T);
-        if (lock) return lock;
+        auto lock = cpm::find(*g, buf_, std::nullopt, 150.0, true, std::max<int64_t>(0, decided(g->name) - off_),
+                              len() - grid_span(*g) + 2 * g->T, true);
+        if (!lock) continue;
+        if (!lock->wait) return lock;
+        lock->start += off_;
+        lock->header_end += off_;
+        lock->end += off_;
+        // the next search may meet the same front again before it is decided
+        const bool known = std::any_of(cpm_wait_.begin(), cpm_wait_.end(), [&](const CpmWait& w) {
+            return w.g == g && std::abs(w.cand.start - lock->start) < cpm::hdr_span(*g, 1);
+        });
+        if (!known) cpm_wait_.push_back({g, *lock, lock->header_end - cpm::hdr_span(*g, 2)});
     }
     return std::nullopt;
 }
@@ -371,7 +400,9 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (!p)
                 if (auto c = find_copy()) p = Pending{*c};  // the preamble faded: the frame pilots and header copy
             if (!p) {
-                trim(keep_);
+                int64_t n = keep_;
+                for (const auto& w : cpm_wait_) n = std::max(n, off_ + len() - w.first);
+                trim(n);
                 break;
             }
             if (p->start() + off_ <= last_start_) break;  // the suspect burst just handled, still in the kept window

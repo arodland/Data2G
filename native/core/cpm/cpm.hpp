@@ -96,11 +96,22 @@ struct Lock {
     std::int64_t start;
     double cfo, score, header_score, header_margin;
     std::int64_t end, header_end;
+    // find's candidate (wait): a front whose first header copy fell short. Only
+    // start (the detected one), cfo, score and header_end (where x must reach
+    // for late_lock) are set; spec is nullptr.
+    bool wait = false;
 };
 // threshold: nullopt = SYNC_THRESHOLD plus the header floor. hi: nullopt = len(x).
+// wait: a candidate instead of nullopt while the second header copy is still arriving.
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold = std::nullopt,
                          double reach_hz = 150.0, bool front_only = true, std::int64_t lo = 0,
-                         std::optional<std::int64_t> hi = std::nullopt);
+                         std::optional<std::int64_t> hi = std::nullopt, bool wait = false);
+// find's candidate (x holding its header_end) -> its lock from both header copies
+// (header2_threshold), or nullopt.
+std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand);
+// Samples from a burst's start to the end of its first `copies` header copies,
+// the latest any word puts them.
+std::int64_t hdr_span(const Grid& g, int copies);
 
 // cpm.measure: arq/phy's measure makes the effective-MI features (arq/predictor's)
 // of `snr`, per symbol.
