@@ -748,7 +748,7 @@ void Engine::energy(double start, double end, const std::string& mode, double t,
     const auto [lo, hi] = band_span_hz(mode_at(mode).band);
     std::optional<double> e;
     if (const auto snr = noise_.span_snr_db(noise_.span_spectra(start, end), lo, hi)) e = *snr + peak_db(mode, rx_cap());
-    if (floor_db) e = std::max(e.value_or(-std::numeric_limits<double>::infinity()), *floor_db - ENERGY_FLOOR_DB);
+    if (e && floor_db) e = std::max(*e, *floor_db - ENERGY_FLOOR_DB);  // a reading floored, never one made up
     if (e && (!min_db || *e >= *min_db)) session_->policy->observe_energy(*e, t);
 }
 

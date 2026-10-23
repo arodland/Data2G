@@ -301,9 +301,9 @@ class RealPhy:
         # against its peak (as a full-scale transmitter in fixed noise would see)
         snr = prof.span_snr_db(blocks(y[pad:len(y) - pad]), lo, hi, blocks(y[:pad]) + blocks(y[len(y) - pad:]))
         e = None if snr is None else snr + PHY.peak_db(burst.submode, burst.cap)
-        if floor_db is not None:
+        if e is not None and floor_db is not None:  # a reading floored, never one made up
             from data2g.arq.engine import ENERGY_FLOOR_DB
-            e = max(e if e is not None else -np.inf, floor_db - ENERGY_FLOOR_DB)
+            e = max(e, floor_db - ENERGY_FLOOR_DB)
         return e
 
     def send(self, burst, t0):

@@ -400,8 +400,8 @@ class Engine:
         lo, hi = P.band_span_hz(MODES[mode].band)
         snr = self.noise.span_snr_db(self.noise.span_spectra(start, end), lo, hi)
         e = None if snr is None else snr + PHY.peak_db(mode, self._rx_cap())
-        if floor_db is not None:
-            e = max(e if e is not None else -np.inf, floor_db - ENERGY_FLOOR_DB)
+        if e is not None and floor_db is not None:  # a reading floored, never one made up
+            e = max(e, floor_db - ENERGY_FLOOR_DB)
         if e is not None and (min_db is None or e >= min_db):
             self.session.policy.observe_energy(e, t)
 
