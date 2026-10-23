@@ -246,7 +246,8 @@ git --no-pager show --stat --oneline HEAD
 
 cat <<EOF
 
-Next: check that commit, then tag it:
+Next: check that commit and push it. Write the notes on a draft release for
+tag v$version (targeting that commit or its branch), then release it:
 
-  git tag -a v$version -m 'Data2G $version' && git push origin v$version
+  gh workflow run release.yml -f tag=v$version
 EOF

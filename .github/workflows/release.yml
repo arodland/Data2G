@@ -1,11 +1,19 @@
-# Build, sign and publish a release. Lifted from SSTVAE, triggered by a tag.
+# Turn a draft release into a published one. Lifted from SSTVAE.
 #
 #   1. tools/bump_version.sh X.Y.Z: native/CMakeLists.txt, pyproject.toml,
-#      data2g/__init__.py and uv.lock, committed as "Release vX.Y.Z".
-#   2. Tag it vX.Y.Z and push the tag (or run this by hand with the tag).
-#   3. This checks the tag against both declared versions, creates a draft
-#      release, builds and signs all five platforms with the same workflow
-#      CI runs, attaches the downloads, and publishes.
+#      data2g/__init__.py and uv.lock, committed as "Release vX.Y.Z". Push.
+#   2. Create a draft release on GitHub for tag vX.Y.Z (the tag need not
+#      exist yet; GitHub creates it on publish) and write the notes.
+#   3. Run this workflow by hand with that tag. It checks the tag against
+#      the declared versions, builds and signs all five platforms with the
+#      same workflow CI runs, attaches the downloads, appends a Downloads
+#      table below the notes (tools/release_notes.py), and publishes.
+#
+# Manual only. A tag push would release before the notes are written, and
+# GitHub does not fire `release: created` for drafts. Re-running against
+# the same tag rebuilds, replaces the assets and regenerates the table,
+# keeping the hand-written notes; that is how a release that half-failed
+# is retried.
 #
 # A release requires signing (native-build.yml sets DATA2G_REQUIRE_SIGNING
 # when release-tag is set), so it fails until the signing secrets exist.
@@ -13,20 +21,17 @@
 name: Release
 
 on:
-  push:
-    tags: ["v[0-9]*"]
-  # A re-run for an existing tag: rebuilds, replaces the assets, publishes.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build and publish, e.g. v0.1.0"
+        description: "Tag of the draft release to build and publish, e.g. v0.2.0"
         required: true
         type: string
 
 # Never two runs against one tag, and never cancel one: by the time a
 # second starts the first may be most of the way through signed builds.
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -41,6 +46,7 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       sha: ${{ steps.v.outputs.sha }}
     steps:
+      # fetch-depth 0 for the tags: an existing tag is what gets built.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
@@ -50,7 +56,8 @@ jobs:
         id: v
         shell: bash
         env:
-          TAG: ${{ inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -60,8 +67,24 @@ jobs:
           esac
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
             || { echo "::error::'$VERSION' is not X.Y.Z"; exit 1; }
-          SHA="$(git rev-parse --verify -q "refs/tags/$TAG^{commit}")" \
-            || { echo "::error::tag $TAG does not exist"; exit 1; }
+
+          # The notes are written by hand on a draft, never generated here.
+          TARGET="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish -q .targetCommitish)" \
+            || { echo "::error::no release for $TAG: create a draft release with your notes first"; exit 1; }
+
+          # A tag that exists wins: it is what the release names. Otherwise
+          # the draft's target (a branch or a SHA), resolved to one SHA here
+          # so all five builds use one commit even if the branch moves.
+          # `--verify -q`: a bare rev-parse echoes what it cannot resolve.
+          if SHA="$(git rev-parse --verify -q "refs/tags/$TAG^{commit}")"; then
+            echo "tag $TAG exists, building $SHA"
+          else
+            TARGET="${TARGET:-$DEFAULT_BRANCH}"
+            SHA="$(git rev-parse --verify -q "origin/$TARGET^{commit}" \
+                   || git rev-parse --verify -q "$TARGET^{commit}")" \
+              || { echo "::error::cannot resolve the draft's target '$TARGET' to a commit"; exit 1; }
+            echo "tag $TAG does not exist yet; building $TARGET at $SHA"
+          fi
           git checkout -q "$SHA"
 
           # Checked against the source, never written into it: a mismatch
@@ -72,11 +95,8 @@ jobs:
           fail=0
           [ "$CMAKE_V" = "$VERSION" ] || { echo "::error::native/CMakeLists.txt says $CMAKE_V"; fail=1; }
           [ "$PY_V" = "$VERSION" ]    || { echo "::error::pyproject.toml says $PY_V"; fail=1; }
-          [ "$fail" -eq 0 ] || exit 1
+          [ "$fail" -eq 0 ] || { echo "Run tools/bump_version.sh $VERSION, push, and re-run." >&2; exit 1; }
 
-          # A draft to attach to; kept if it exists (a re-run keeps notes).
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --generate-notes
           { echo "tag=$TAG"; echo "version=$VERSION"; echo "sha=$SHA"; } >> "$GITHUB_OUTPUT"
 
   build:
@@ -91,12 +111,30 @@ jobs:
     secrets: inherit
 
   publish:
-    name: Publish
+    name: Write the download table and publish
     needs: [resolve, build]
     runs-on: ubuntu-latest
     steps:
-      - name: Drop the draft flag
+      # The commit that was built, so its own release_notes.py writes the table.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Append the downloads and drop the draft flag
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve.outputs.tag }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          SHA: ${{ needs.resolve.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # From the assets actually on the release, never a filename
+          # pattern reconstructed here (make_installer.sh owns the suffixes).
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body,assets > release.json
+          python3 tools/release_notes.py release.json "$TAG" "$GITHUB_REPOSITORY" > body.md
+          # --target: a draft's tag is created on publish from its target,
+          # and a branch may have moved since the build; pin it to what was
+          # built (ignored when the tag already exists).
+          # --notes-file: notes carry backticks and dollar signs.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --notes-file body.md --target "$SHA" --draft=false
+          echo "published $TAG"
