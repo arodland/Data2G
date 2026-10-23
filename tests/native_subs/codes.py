@@ -15,6 +15,7 @@ def substitutions(native):
     from data2g import codes, config, cpm
 
     n = native.codes
+    n.set_ldpc_iters(codes.LDPC_ITERS)  # the C++ decodes' cap, as Python's stands now
     py = {k: getattr(codes, k) for k in (
         "crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", "info_bits", "encode", "encode_info",
         "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",

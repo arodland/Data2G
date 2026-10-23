@@ -99,6 +99,9 @@ void bind_codec(py::module_& c) {
                                             per_row<int>(index)));
     }, py::arg("spec"), py::arg("bits"), py::arg("converged"), py::arg("crc_mask") = py::none(),
        py::arg("index") = py::none());
+    c.def("ldpc_iters", &codes::ldpc_iters);
+    c.def("set_ldpc_iters", &codes::set_ldpc_iters, py::arg("n"));
+    // iters 0: the configured cap (codes::ldpc_iters)
     c.def("decode_llrs", [](const std::string& name, const In<float>& llr, int iters, py::object masks, py::object index) {
         const auto& s = cspec(name);
         const auto in = mat(llr);
@@ -110,7 +113,7 @@ void bind_codec(py::module_& c) {
             r = codes::decode_llrs(s, in, iters, m, i);
         }
         return py::make_tuple(np(r.bits), flags(r.ok));
-    }, py::arg("spec"), py::arg("llr"), py::arg("iters") = codes::ITERS, py::arg("crc_mask") = py::none(),
+    }, py::arg("spec"), py::arg("llr"), py::arg("iters") = 0, py::arg("crc_mask") = py::none(),
        py::arg("index") = py::none());
     c.def("decode_many", [](const std::string& name, const In<float>& soft, py::object masks, py::object index) {
         const auto& s = cspec(name);

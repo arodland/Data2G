@@ -83,7 +83,11 @@ const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent = 0);
 const polar::SCLDecoder& polar_decoder(const Spec& s);  // polar specs, list POLAR_LIST
 
 inline constexpr int POLAR_LIST = 8;
-inline constexpr int ITERS = 40;  // LDPC decoder iterations
+// The LDPC decoder's iteration cap, process-wide: the app's "decoder effort" (--decoder-effort). The
+// layered sum-product decoder at 20 matched the old flooding one at 40; 25 is about 0.1 dB better.
+inline constexpr int DEFAULT_ITERS = 25;
+int ldpc_iters();
+void set_ldpc_iters(int n);  // n >= 1; takes effect from the next decode
 
 int rv_cycle(const Spec& s);
 int buffer_len(const Spec& s);
@@ -143,7 +147,8 @@ struct Info {
 
 // (B, coded_bits) LLRs in mapping order, decoded as one batch (LDPC: the
 // batch stops together, so a row's result depends on its batch mates).
-Info decode_llrs(const Spec& s, const Mat<float>& llr, int iters = ITERS, std::span<const std::uint32_t> masks = {},
+Info decode_llrs(const Spec& s, const Mat<float>& llr, int iters = 0,  // 0: ldpc_iters()
+                 std::span<const std::uint32_t> masks = {},
                  std::span<const int> index = {});
 std::vector<Payload> decode_many(const Spec& s, const Mat<float>& soft, std::span<const std::uint32_t> masks = {},
                                  std::span<const int> index = {});

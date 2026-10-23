@@ -634,8 +634,13 @@ Not done:
   a per-codeword stop (each converged codeword frozen, so batch-mates
   stop costing iterations; needs a batch-independent check sum, now
   pairwise only at B = 1); a cheaper `phi` (table or offset min-sum,
-  as in most LDPC decoders) since `phi` is still ~40% of a decode;
-  layered scheduling (about half the iterations to converge).
+  as in most LDPC decoders) since `phi` is still ~40% of a decode.
+- Done since: sum-product on a row-layered schedule (ldpc.Decoder, its
+  torch port and ldpc::Decoder alike; min-sum stays flooding). Capped at
+  20 it matched flooding at 40 within 0.1 dB at the 10% and 1% FER
+  points, with half the iterations per codeword at the cliff
+  (scripts/ldpc_schedule); the cap is the app's decoder effort
+  (`--decoder-effort`, codes::set_ldpc_iters), 25 by default.
 
 ## Android stays possible
 

@@ -46,10 +46,10 @@ std::vector<std::string> run(const std::vector<double>& y_fail, const std::vecto
     for (std::size_t b = 0; b < llr.rows; ++b)
         for (std::size_t j = 0; j < llr.cols; ++j) llr[b][j] = b % 2 ? 2.0f * n01(rng) : 3.0f + 2.5f * n01(rng);
     const auto& dec = codes::ldpc_decoder(big);
-    const auto bp = dec.decode(llr, codes::ITERS, {}, true);
+    const auto bp = dec.decode(llr, codes::ldpc_iters(), {}, true);
     out.push_back(bits(bp.bits) + bits(bp.ok) + bits(bp.posterior));
     const float alpha = 0.75f;
-    const auto ms = dec.decode(llr, codes::ITERS, std::span(&alpha, 1), true);
+    const auto ms = dec.decode(llr, codes::ldpc_iters(), std::span(&alpha, 1), true);
     out.push_back(bits(ms.bits) + bits(ms.ok) + bits(ms.posterior));
 
     // polar: 16 rows

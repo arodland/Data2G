@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "app/options.hpp"
+#include "codes/codes.hpp"
 #include "check.hpp"
 
 using namespace data2g;
@@ -107,6 +108,15 @@ void test_noise_rule() {
                  "negative refused");
 }
 
+void test_decoder_effort() {
+    check::current_step = "decoder effort";
+    check::is_true(parse({}).decoder_effort == codes::DEFAULT_ITERS, "default: codes::DEFAULT_ITERS");
+    check::is_true(parse({"--decoder-effort", "17"}).decoder_effort == 17 && !app::check(parse({"--decoder-effort=17"})),
+                   "--decoder-effort 17: any cap, not only the GUI's steps");
+    check::equal(app::check(parse({"--decoder-effort", "0"})).value_or(""), std::string("--decoder-effort: must be 1 or more"),
+                 "0 refused");
+}
+
 void test_realtime_switch() {
     check::current_step = "realtime";
     check::is_true(parse({}).realtime, "on by default");
@@ -132,6 +142,7 @@ int main() {
     test_every_flag();
     test_check();
     test_noise_rule();
+    test_decoder_effort();
     test_dd_budget();
     test_realtime_switch();
     return check::report("args");

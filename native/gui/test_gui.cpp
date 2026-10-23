@@ -120,6 +120,7 @@ app::Args persisted() {
     a.decode_worker = false;
     a.live_constellation = false;
     a.noise_rule = 0.5;
+    a.decoder_effort = 35;
     return a;
 }
 
@@ -151,6 +152,30 @@ void test_noise_rule_slider() {
     gui::SettingsDialog high(a, {}, {});
     high.apply_to(e);
     check::is_true(e.noise_rule == 2.0, "a weight past the slider's top kept when untouched");
+}
+
+// Decoder effort's slider: 15-40 in steps of 5, 25 by default; a command line's cap off a step (or past the
+// ends) is kept when it isn't touched.
+void test_decoder_effort() {
+    check::current_step = "decoder effort";
+    app::Args a;
+    gui::SettingsDialog d(a, {}, {});
+    auto* s = d.findChild<QSlider*>(QStringLiteral("decoder_effort"));
+    auto* label = d.findChild<QLabel*>(QStringLiteral("decoder_effort_value"));
+    check::is_true(s && label, "slider and its value shown");
+    check::is_true(s->minimum() == 3 && s->maximum() == 8 && s->value() == 5, "15-40 in steps of 5, at 25");
+    check::equal(label->text().toStdString(), std::string("25 (default)"), "the default named");
+    s->setValue(6);
+    check::equal(label->text().toStdString(), std::string("30"), "30 shown");
+    app::Args e;
+    d.apply_to(e);
+    check::is_true(e.decoder_effort == 30, "30 applied");
+    for (int off : {33, 60}) {
+        a.decoder_effort = off;
+        gui::SettingsDialog keep(a, {}, {});
+        keep.apply_to(e);
+        check::is_true(e.decoder_effort == off, "a cap off the slider's steps kept when untouched");
+    }
 }
 
 void test_settings(const QTemporaryDir& dir) {
@@ -434,6 +459,7 @@ int main(int argc, char** argv) {
     QTemporaryDir dir;
     test_settings(dir);
     test_noise_rule_slider();
+    test_decoder_effort();
     test_waterfall_tx();
     test_constellation_plot();
     test_window(dir);
