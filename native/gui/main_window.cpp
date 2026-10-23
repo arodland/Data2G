@@ -7,7 +7,10 @@
 #include <QFontDatabase>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QKeySequence>
 #include <QLabel>
+#include <QMenuBar>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
@@ -25,6 +28,9 @@
 #include "arq/session.hpp"
 #include "audio/card.hpp"
 #include "monitor/monitor.hpp"
+#ifdef DATA2G_HAVE_RIG
+#include "rig/hamlib/hamlib.hpp"  // hamlib_version
+#endif
 #include "settings_dialog.hpp"
 #include "constellation.hpp"
 #include "waterfall.hpp"
@@ -138,6 +144,7 @@ private:
 
 MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMainWindow(parent), store_(store) {
     setWindowTitle(tr("Data2G"));
+    build_menu();
     auto* central = new QWidget;
     auto* top = new QVBoxLayout(central);
 
@@ -247,6 +254,47 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
 }
 
 MainWindow::~MainWindow() = default;
+
+void MainWindow::build_menu() {
+    // NoRole on all three is load-bearing on macOS (as in SSTVAE): Qt's Cocoa
+    // plugin moves anything whose text looks like Settings, Exit or About into
+    // the application menu, which would empty File, and macOS hides an empty
+    // menu. The shortcuts are the platform's own (Cmd+, and Cmd+Q on macOS,
+    // Ctrl+Q elsewhere), so Settings stays reachable whatever the menu bar does.
+    QMenu* file = menuBar()->addMenu(tr("&File"));
+    QAction* settings = file->addAction(tr("&Settings..."));
+    settings->setMenuRole(QAction::NoRole);
+    settings->setShortcut(QKeySequence::Preferences);
+    connect(settings, &QAction::triggered, this, &MainWindow::open_settings);
+    file->addSeparator();
+    QAction* exit = file->addAction(tr("E&xit"));
+    exit->setMenuRole(QAction::NoRole);
+    exit->setShortcut(QKeySequence::Quit);
+    connect(exit, &QAction::triggered, this, &MainWindow::close);
+
+    QMenu* help = menuBar()->addMenu(tr("&Help"));
+    QAction* about = help->addAction(tr("&About Data2G"));
+    about->setMenuRole(QAction::NoRole);
+    connect(about, &QAction::triggered, this, &MainWindow::show_about);
+}
+
+void MainWindow::show_about() {
+    // Our version first: the number a bug report needs. Hamlib's too, as
+    // "which Hamlib" is the first question a rig problem raises.
+    QString text = tr("<b>Data2G %1</b><br>"
+                      "by Andrew Rodland, KC2G<br>"
+                      "An HF data modem.<br><br>"
+                      "<a href=\"https://github.com/arodland/Data2G\">GitHub</a>"
+                      " &middot; "
+                      "<a href=\"https://discord.gg/JJgNszRMce\">Discord</a>"
+                      "<br><br>")
+                       .arg(QCoreApplication::applicationVersion());
+#ifdef DATA2G_HAVE_RIG
+    text += tr("Hamlib %1<br>").arg(qs(rig::hamlib_version()));
+#endif
+    text += tr("Qt %1").arg(QString::fromLatin1(qVersion()));
+    QMessageBox::about(this, tr("About Data2G"), text);
+}
 
 void MainWindow::restart(const app::Args& args) {
     station_.reset();  // stops it: PTT down, ports closed

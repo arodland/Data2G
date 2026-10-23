@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QSettings>
 #include <QTableWidget>
@@ -218,6 +219,18 @@ void test_window(const QTemporaryDir& dir) {
     gui::MainWindow w(a, store);
     w.show();
     check::is_true(w.station().running(), "station running");
+    {
+        // macOS: any other role and Qt moves the entry to the application menu, emptying File
+        QStringList seen;
+        for (const QAction* m : w.menuBar()->actions())
+            for (const QAction* e : m->menu()->actions())
+                if (!e->isSeparator()) {
+                    seen << m->text() + QLatin1Char('>') + e->text();
+                    check::is_true(e->menuRole() == QAction::NoRole, "menu entries keep NoRole");
+                }
+        check::equal(seen.join(QLatin1Char(' ')).toStdString(),
+                     std::string("&File>&Settings... &File>E&xit &Help>&About Data2G"), "File and Help menus");
+    }
     auto* link = w.findChild<QLabel*>(QStringLiteral("link_state"));
     auto* mode = w.findChild<QLabel*>(QStringLiteral("mode"));
     auto* busy = w.findChild<QLabel*>(QStringLiteral("busy"));

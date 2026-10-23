@@ -1,0 +1,14 @@
+<!--
+  The icon compiled into data2g-gui, as QApplication's window icon: the X11
+  window icon, Wayland's fallback when no .desktop file is installed, and the
+  About box's picture. Explorer, the Dock and installed Linux menus read the
+  platform formats instead (data2g.ico, data2g.icns, icons/ via the .desktop
+  file). Compiled in because the build tree, an AppImage and a .app put a
+  file path in three different places. Two sizes; Qt scales between them.
+-->
+<RCC>
+  <qresource prefix="/">
+    <file alias="data2g-48.png">icons/data2g-48.png</file>
+    <file alias="data2g-256.png">icons/data2g-256.png</file>
+  </qresource>
+</RCC>
