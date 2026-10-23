@@ -127,9 +127,22 @@ def train_labels(a):
              **{f"p_{k}": v for k, v in sd.items()})
 
 
+def redescribe(src: str, out: str):
+    """`src`'s CNP with every mode's descriptor row recomputed (descriptor:
+    MODE_THRESHOLDS as they are now), weights and normalization kept: a
+    mode's re-measured ladder reaches the model without a retrain."""
+    d = dict(np.load(src))
+    assert str(d["kind"]) == "cnp", src
+    modes = [str(m) for m in d["modes"]]
+    new = np.array([descriptor(m) for m in modes], dtype=d["desc"].dtype)
+    print("changed:", [m for m, a, b in zip(modes, new, d["desc"]) if not np.array_equal(a, b)])
+    np.savez(out, **dict(d, desc=new))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("data")
+    ap.add_argument("data", nargs="?")
+    ap.add_argument("--redescribe", metavar="NPZ", help="rewrite NPZ's descriptors (no training) into --out")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--hold", default="", help="modes left out of training (zero-shot test)")
     ap.add_argument("--cond", default="", help="policy.COND_OFFSETS' spec, applied to the teacher's targets")
@@ -142,6 +155,8 @@ def main():
     ap.add_argument("--labels", action="store_true", help="train on the rows' outcomes (the tried mode's), not a teacher")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
+    if a.redescribe:
+        return redescribe(a.redescribe, a.out)
     if a.labels:
         return train_labels(a)
     x, *_, rows, _ = T.load(a.data, energy=True)
