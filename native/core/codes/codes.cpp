@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -383,27 +384,39 @@ std::vector<Payload> payloads(const Spec& s, const Mat<std::uint8_t>& bits, std:
     return out;
 }
 
+namespace {
+std::atomic<int> iters_cap{DEFAULT_ITERS};
+}  // namespace
+
+int ldpc_iters() { return iters_cap.load(std::memory_order_relaxed); }
+
+void set_ldpc_iters(int n) {
+    if (n < 1) throw std::invalid_argument("LDPC iterations must be >= 1");
+    iters_cap.store(n, std::memory_order_relaxed);
+}
+
 Info decode_llrs(const Spec& s, const Mat<float>& llr, int iters, std::span<const std::uint32_t> masks,
                  std::span<const int> index) {
-    return decode_code_order(s, s.polar ? nullptr : &ldpc_decoder(s), deinterleave_llr(s, llr), iters, masks, index);
+    return decode_code_order(s, s.polar ? nullptr : &ldpc_decoder(s), deinterleave_llr(s, llr),
+                             iters > 0 ? iters : ldpc_iters(), masks, index);
 }
 
 std::vector<Payload> decode_many(const Spec& s, const Mat<float>& soft, std::span<const std::uint32_t> masks,
                                  std::span<const int> index) {
-    const auto d = decode_llrs(s, soft, ITERS, masks, index);
+    const auto d = decode_llrs(s, soft, 0, masks, index);
     return payloads(s, d.bits, d.ok, masks, index);
 }
 
 std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int max_rv, std::span<const std::uint32_t> masks,
                                    std::span<const int> index) {
     if (s.polar) {
-        const auto d = decode_code_order(s, nullptr, cut(s, buf, static_cast<std::size_t>(s.coded_bits)), ITERS,
+        const auto d = decode_code_order(s, nullptr, cut(s, buf, static_cast<std::size_t>(s.coded_bits)), ldpc_iters(),
                                          masks, index);
         return payloads(s, d.bits, d.ok, masks, index);
     }
     const int extent = ir_extent(s, max_rv);
     const auto d = decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),
-                                     ITERS, {}, {});
+                                     ldpc_iters(), {}, {});
     return payloads(s, d.bits, d.ok, masks, index);
 }
 
@@ -424,7 +437,7 @@ Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::spa
         std::copy_n(buf.begin(), extent, llr.data.begin());
         dec = &ldpc_decoder(s, extent);
     }
-    const auto d = dec->decode(llr, ITERS, {}, true);
+    const auto d = dec->decode(llr, ldpc_iters(), {}, true);
     std::vector<double> code(d.posterior.data.begin(), d.posterior.data.end());
     if (!buf.empty()) {
         const auto pos = rv_positions(s, rv);
@@ -448,7 +461,7 @@ Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index
         out.cands = std::move(r.paths);
         out.usable = Mat<std::uint8_t>(B, POLAR_LIST, 1);
     } else {
-        auto r = ldpc_decoder(s).decode(deint, ITERS);
+        auto r = ldpc_decoder(s).decode(deint, ldpc_iters());
         out.list = 1;
         out.cands = std::move(r.bits);
         out.usable = Mat<std::uint8_t>(B, 1);

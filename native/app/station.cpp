@@ -23,6 +23,7 @@
 #include "audio/fifo.hpp"
 #include "audio/pipe.hpp"
 #include "audio/thread.hpp"
+#include "codes/codes.hpp"
 #include "generated/config.hpp"
 #include "host/host.hpp"
 #include "kisslink/kisslink.hpp"
@@ -411,6 +412,7 @@ void Station::start() {
         cfg.noise_rule = a_.noise_rule;
         cfg.dd_budget_s = a_.dd_budget;
         cfg.worker = a_.decode_worker;
+        codes::set_ldpc_iters(a_.decoder_effort);  // process-wide: every decoder this station runs
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig

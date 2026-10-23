@@ -130,7 +130,9 @@ def ldpc_code(spec: CodeSpec) -> ldpc.QCLDPC:
 # a per-submode search (planned; no script yet) designs one.
 POLAR_DESIGN_SNR_DB = -3.0
 POLAR_LIST = 8
-LDPC_ITERS = 40  # the modem's LDPC decoder iterations (native codes::ITERS)
+# The modem's LDPC iteration cap (native codes::ldpc_iters, the app's "decoder effort"): the layered
+# decoder at 20 matched the old flooding one at 40; 25 is about 0.1 dB better (scripts/ldpc_schedule).
+LDPC_ITERS = 25
 
 
 FORMAT_DIR = Path(__file__).parent / "format"

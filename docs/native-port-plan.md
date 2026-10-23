@@ -652,8 +652,18 @@ Not done:
   a per-codeword stop (each converged codeword frozen, so batch-mates
   stop costing iterations; needs a batch-independent check sum, now
   pairwise only at B = 1); a cheaper `phi` (table or offset min-sum,
-  as in most LDPC decoders) since `phi` is still ~40% of a decode;
-  layered scheduling (about half the iterations to converge).
+  as in most LDPC decoders) since `phi` is still ~40% of a decode.
+- Done since: sum-product on a row-layered schedule (ldpc.Decoder, its
+  torch port and ldpc::Decoder alike; min-sum stays flooding). Capped at
+  20 it matched flooding at 40 within 0.1 dB at the 10% and 1% FER
+  points, with half the iterations per codeword at the cliff
+  (scripts/ldpc_schedule); the cap is the app's decoder effort
+  (`--decoder-effort`, codes::set_ldpc_iters), 25 by default. Against
+  flooding at 40 (data2g-bench-rx, 10 bursts across the cliff): Pi 4 at
+  live settings (2 threads, 1 s DD budget) prepare 11.1 -> 6.2 s, total
+  14.3 -> 10.3 s, worst burst 2.28 -> 1.53 s, 191 -> 196 codewords; x86 4
+  threads total 2027 -> 1763 ms. Paired loss study (10 cells, 12 seeds x
+  600 s, PEP5): every cell within 1 SE, -0.5% to +1.3%.
 
 ## Android stays possible
 

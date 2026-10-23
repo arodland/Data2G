@@ -47,6 +47,7 @@ struct Args {
     double stats_interval = 60.0;
     double noise_rule = 1.0;  // the gear shifter's noise rule, its tail weight; 0: off
     double dd_budget = 1.0;   // seconds of decision-directed decoding per burst (arq::DD_BUDGET_S); 0: none
+    int decoder_effort = 25;  // the LDPC decoder's iteration cap (codes::set_ldpc_iters), >= 1
     // additions
     bool decode_worker = true;
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)

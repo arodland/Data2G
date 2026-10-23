@@ -41,7 +41,7 @@ const char* USAGE =
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
     "                   [--realtime | --no-realtime]\n"
     "                   [--live-constellation | --no-live-constellation]\n"
-    "                   [--dd-budget S]\n"
+    "                   [--dd-budget S] [--decoder-effort N]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
     "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
     "                   [--rig-parity {default,none,odd,even}] [--rig-handshake {default,none,xonxoff,hardware}]\n"
@@ -106,6 +106,9 @@ const char* HELP =
     "  --dd-budget S         seconds a burst's decode may spend re-estimating the channel from its own\n"
     "                        decoded codewords (DD), counted from its soft bits; the pass in progress is\n"
     "                        abandoned when it runs out. 0: none. Lower it on a slow machine (default 1)\n"
+    "  --decoder-effort N    the LDPC decoder's iteration cap (data2g-gui offers 15-40). More decodes a little\n"
+    "                        further into a fade (about 0.1 dB from 20 to 25) and spends longer on a burst\n"
+    "                        that fails. Lower it on a slow machine (default 25)\n"
     "\nrig control (Hamlib, linked in):\n"
     "  --rig, --no-rig       rig control at all; --no-rig: no PTT (default: on)\n"
     "  --list-rigs           Hamlib's rig models: number, manufacturer, model, status\n"
@@ -202,6 +205,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
         {"--threads", [&](auto& o, auto& v) { pool::set_threads(i_(o, v)); }},
         {"--dd-budget", [&](auto& o, auto& v) { a.dd_budget = d_(o, v); }},
+        {"--decoder-effort", [&](auto& o, auto& v) { a.decoder_effort = i_(o, v); }},
         {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
         {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
         {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
@@ -349,6 +353,7 @@ std::optional<std::string> check(const Args& a) {
     if (a.rig_poll_interval < 0) return "--rig-poll-interval: must be 0 (key only) or more";
     if (!(a.noise_rule >= 0)) return "--noise-rule: must be 0 (off) or more";
     if (!(a.dd_budget >= 0)) return "--dd-budget: must be 0 (no DD) or more";
+    if (a.decoder_effort < 1) return "--decoder-effort: must be 1 or more";
 #ifdef DATA2G_HAVE_RIG
     if (a.rig && !rig::model_info(a.rig_model))
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";

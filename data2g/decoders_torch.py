@@ -19,8 +19,8 @@ def _phi(x):
 
 
 class Decoder:
-    """torch port of ldpc.Decoder (same algorithm, layout and conventions),
-    for GPU studies."""
+    """torch port of ldpc.Decoder (same algorithm, layout and conventions:
+    sum-product row-layered, min-sum flooding), for GPU studies."""
 
     BIG = 1e4  # LLR for filler bits: known zeros
 
@@ -31,6 +31,12 @@ class Decoder:
         self.var, self.chk, self.pad = (torch.tensor(a, device=device) for a in (var, chk, pad))
         self.sent = torch.tensor(code.sent, device=device)
         self.filler = torch.arange(code.k, code.kb * code.z, device=device)
+        # ldpc.Decoder's layers: per base row, its edge ids (Z, dmax) with padding read as edge 0, the pad, the
+        # real edges and their variables
+        z, self.layers = code.z, []
+        for l in range(code.mb):
+            e, p = chk[l * z:(l + 1) * z], pad[l * z:(l + 1) * z]
+            self.layers.append(tuple(torch.tensor(a, device=device) for a in (np.where(p, 0, e), p, e[~p], var[e[~p]])))
 
     def channel_llrs(self, llr_sent):
         """(B, n) LLRs of transmitted bits -> (B, n_cols) for every column."""
@@ -43,6 +49,8 @@ class Decoder:
         """-> (info bit decisions (B, k) uint8, converged (B,) bool), and
         with `posterior` the a-posteriori LLRs of the sent bits (B, n)."""
         ch = self.channel_llrs(llr_sent.clamp(-CH_CLAMP, CH_CLAMP))
+        if alpha is None:
+            return self._layered(ch, iters, posterior)
         b = ch.shape[0]
         c2v = torch.zeros(b, self.n_edges, device=self.device, dtype=ch.dtype)
         for it in range(iters):
@@ -54,21 +62,38 @@ class Decoder:
             sgn = torch.where(m < 0, -1.0, 1.0).to(ch.dtype)
             mag = m.abs()
             sprod = sgn.prod(dim=-1, keepdim=True)
-            if a is None:
-                # BP in the log domain: phi(x) = -log tanh(x/2), its own
-                # inverse; padding (|m| = BIG) contributes phi = 0.
-                ph = _phi(mag)
-                out = sprod * sgn * _phi(ph.sum(dim=-1, keepdim=True) - ph)
-            else:
-                two = mag.topk(2, dim=-1, largest=False)
-                min1, min2 = two.values[..., :1], two.values[..., 1:]
-                is_min = torch.arange(mag.shape[-1], device=self.device) == two.indices[..., :1]
-                out = a * sprod * sgn * torch.where(is_min, min2, min1)
+            two = mag.topk(2, dim=-1, largest=False)
+            min1, min2 = two.values[..., :1], two.values[..., 1:]
+            is_min = torch.arange(mag.shape[-1], device=self.device) == two.indices[..., :1]
+            out = a * sprod * sgn * torch.where(is_min, min2, min1)
             out = out.masked_fill(self.pad, 0.0)
             c2v = torch.zeros(b, self.n_edges + 1, device=self.device, dtype=ch.dtype)
             c2v.scatter_(1, self.chk.reshape(1, -1).expand(b, -1), out.reshape(b, -1))
             c2v = c2v[:, :-1]
             tot = ch.index_add(1, self.var, c2v)
+            hard = (tot < 0).to(torch.uint8)
+            ok = self.syndrome(hard)
+            if bool(ok.all()):
+                break
+        if posterior:
+            return hard[:, : self.code.k], ok, tot[:, self.sent]
+        return hard[:, : self.code.k], ok
+
+    def _layered(self, ch, iters, posterior):
+        """ldpc.Decoder._layered: BP, layer by layer; padding (|m| = BIG) gives phi = 0."""
+        b = ch.shape[0]
+        tot = ch.clone()
+        c2v = torch.zeros(b, self.n_edges, device=self.device, dtype=ch.dtype)
+        big = torch.tensor(self.BIG, device=self.device, dtype=ch.dtype)
+        for it in range(iters):
+            for e, p, ev, v in self.layers:
+                m = torch.where(p, big, tot[:, self.var[e]] - c2v[:, e])
+                sgn = torch.where(m < 0, -1.0, 1.0).to(ch.dtype)
+                sprod = sgn.prod(dim=-1, keepdim=True)
+                ph = _phi(m.abs())
+                new = (sprod * sgn * _phi(ph.sum(dim=-1, keepdim=True) - ph))[:, ~p]
+                tot[:, v] = m[:, ~p] + new
+                c2v[:, ev] = new
             hard = (tot < 0).to(torch.uint8)
             ok = self.syndrome(hard)
             if bool(ok.all()):
