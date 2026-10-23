@@ -60,6 +60,10 @@ bool cholesky(cd* a, int n);
 // Solve L Y = B in place for lower-triangular L (cholesky's), B n x nrhs.
 void forward_solve(const cd* l, int n, cd* b, int nrhs);
 
+// The same for a real symmetric `a`.
+bool cholesky(double* a, int n);
+void forward_solve(const double* l, int n, double* b, int nrhs);
+
 // Eigen-decomposition of a Hermitian n x n matrix by cyclic Jacobi: `a`
 // (row-major) is destroyed, column j of `v` (n x n) is the eigenvector of
 // eigenvalue j. Unsorted. Accurate to a few ulps of the largest eigenvalue.

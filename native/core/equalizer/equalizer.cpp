@@ -528,6 +528,33 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
         for (size_t c = 0; c < nc; ++c) {
             ar = rt;
             for (size_t u = 0; u < J; ++u) ar[u * J + u] += var[obs[u]][c];
+            // A = rt + diag(var) is symmetric positive definite: with A = L L^T and Y = L^-1 [Rdp^T | Re v | Im v],
+            // rdp_s^T A^-1 v = Y_s . Y_v and rdp_s^T A^-1 rdp_s = |Y_s|^2, forward solves only (the observation
+            // pass's trick; LU, as numpy, only where A is not numerically positive definite).
+            if (J && linalg::cholesky(ar.data(), static_cast<int>(J))) {
+                const size_t W = S + 2;
+                xr.resize(J * W);
+                for (size_t u = 0; u < J; ++u) {
+                    for (size_t s = 0; s < S; ++s) xr[u * W + s] = rdp[s * J + u];
+                    xr[u * W + S] = vals[obs[u]][c].real();
+                    xr[u * W + S + 1] = vals[obs[u]][c].imag();
+                }
+                linalg::forward_solve(ar.data(), static_cast<int>(J), xr.data(), static_cast<int>(W));
+                for (size_t s = 0; s < S; ++s) {
+                    double hr = 0.0, hi = 0.0, m = 0.0;
+                    for (size_t u = 0; u < J; ++u) {
+                        const double y = xr[u * W + s];
+                        hr += y * xr[u * W + S];
+                        hi += y * xr[u * W + S + 1];
+                        m += y * y;
+                    }
+                    h[f * S + s][c] = cd(hr, hi);
+                    mse[f * S + s][c] = std::max(p_sig - m, 0.0);
+                }
+                continue;
+            }
+            ar = rt;
+            for (size_t u = 0; u < J; ++u) ar[u * J + u] += var[obs[u]][c];
             xr.resize(J * S);
             for (size_t u = 0; u < J; ++u)
                 for (size_t s = 0; s < S; ++s) xr[u * S + s] = rdp[s * J + u];
