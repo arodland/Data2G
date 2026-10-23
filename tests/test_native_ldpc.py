@@ -4,16 +4,18 @@ every LDPC code on air and every incremental-redundancy extent.
 Tolerances. Construction, encoding and the min-sum decoder are bitwise:
 integer work, and float32 + - * in numpy's order. Sum-product, the default,
 also sums each check's _phi values (in numpy's order, which depends on the
-batch size) and goes through _phi's float32 tanh and log. C++ rounds each correctly
-(but ~1 in 10^5); numpy's SIMD float32 tanh and log are an ULP off in about
-1 result in 5, and that alone moves posteriors by whole steps of log(j)
-where a check message floors (_phi then works on a few float32 ULPs). So:
-- against Python with _phi made correctly rounded, everything matches:
-  flags and decisions exactly, posteriors to 1e-3 + 0.1% (C++'s rare
-  misroundings, drifting a little in failed decodes);
-- against Python as it is, converged flags and converged decisions are
-  exact, signs agree, failed decodes' decisions agree to 99.9%, and
-  posteriors are not compared elementwise beyond that.
+batch size) and goes through _phi's float32 tanh and log. C++'s exact phi
+(ldpc.set_exact_phi) rounds each correctly (but ~1 in 10^5); its default
+single-precision one is within about 1e-6 relative; numpy's SIMD float32
+tanh and log are an ULP off in about 1 result in 5, and that alone moves
+posteriors by whole steps of log(j) where a check message floors (_phi
+then works on a few float32 ULPs). So:
+- against Python with _phi made correctly rounded, on the exact phi,
+  everything matches: flags and decisions exactly, posteriors to 1e-3 +
+  0.1% (C++'s rare misroundings, drifting a little in failed decodes);
+- against Python as it is, on the default phi, converged flags and
+  converged decisions are exact, signs agree, failed decodes' decisions
+  agree to 99.9%, and posteriors are not compared elementwise beyond that.
 """
 
 import numpy as np
@@ -101,8 +103,16 @@ def test_phi(native):
     assert np.mean(got == ldpc._phi(x)) > 0.5  # numpy's own float32 tanh/log
 
 
+@pytest.fixture
+def exact_phi(native):
+    """The decoders on C++'s exact phi (their default single-precision one is not bitwise)."""
+    was = native.ldpc.set_exact_phi(True)
+    yield
+    native.ldpc.set_exact_phi(was)
+
+
 @pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
-def test_sum_product_matches_with_exact_phi(native, reference, spec, monkeypatch):
+def test_sum_product_matches_with_exact_phi(native, reference, spec, monkeypatch, exact_phi):
     monkeypatch.setattr(ldpc, "_phi", _phi_correctly_rounded)
     rng = np.random.default_rng(spec.k + 2)
     for p, c in _pairs(native, reference, spec, whole=False):
@@ -131,9 +141,9 @@ def test_sum_product(native, reference, spec):
         agree += (c_out[~ok] == out[~ok]).sum()
         total += out[~ok].size
     # Failed decodes only: numpy's SIMD float32 tanh/log differ by an ulp
-    # from C++'s correctly rounded phi, and by CPU (aarch64 agreed on 99.898%
-    # against x86-64's >= 99.9%). Accepted 2026-10-02 (plan, Findings);
-    # converged decodes above stay exact.
+    # from a correctly rounded phi (C++'s default is ~1e-6 off), and by CPU
+    # (aarch64 agreed on 99.898% against x86-64's >= 99.9%). Accepted
+    # 2026-10-02 (plan, Findings); converged decodes above stay exact.
     assert agree >= 0.995 * total
 
 

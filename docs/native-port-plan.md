@@ -609,6 +609,13 @@ Kept:
   sign applied by a bit flip (the `?:` was a branch mispredicted on half
   the edges: 1.5x); the variable-to-check gather in its own cloned loop
   (1.15x). Then codeword-parallel per iteration (3.9x at 4 threads).
+- LDPC: single-precision `phi_all_fast` as the decoders' default (1.6x
+  on a decode, x86-64). Same frame error rate on 1.6M codewords (6 modes,
+  AWGN/MPP/MPD waterfalls and floors: 11 vs 13 codewords lost by one side
+  only, of 61.5k errors; the same iterations to converge). It gives up
+  the bitwise match with Python: `ldpc::set_exact_phi` or
+  `DATA2G_EXACT_PHI` brings `phi_all` back (the bitwise test, paired
+  native/Python runs).
 - `demod_window`'s carrier sums and the sync repeat statistic in cloned
   loops: live receive 1.4x, a hop 10%.
 - Pool in refine and on the CFO grid above 6000 samples (see "Threads").

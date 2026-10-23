@@ -53,6 +53,12 @@ private:
 // ldpc._phi, -log(tanh(clip(x, 1e-7, 30) / 2)) in float32, in place.
 void phi(std::span<float> v);
 
+// Decoders use a single-precision phi by default: 1.6x faster, the same frame
+// error rate. Exact uses phi() and matches the Python reference bit for bit
+// (tests, paired native/Python runs); DATA2G_EXACT_PHI in the environment
+// starts it on. Takes effect from the next decode; returns the old setting.
+bool set_exact_phi(bool exact);
+
 // Throws std::out_of_range if there is no shift table for the layout.
 Code qc_code(int k, int n, int bg = 0);
 

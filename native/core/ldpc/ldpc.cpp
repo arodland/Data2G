@@ -1,6 +1,7 @@
 #include "ldpc/ldpc.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <array>
 #include <bit>
@@ -270,12 +271,12 @@ DATA2G_SIMD_CLONES void phi_all(float* __restrict v, std::size_t n) {
     }
 }
 
-// phi_all in single precision, opt-in with DATA2G_FAST_PHI=1: the same -log(tanh(x / 2)) with the
+// phi_all in single precision, the decoders' default (set_exact_phi): the same -log(tanh(x / 2)) with the
 // polynomials cut to what a float result needs (relative error about 1e-6 against phi_all), four lanes on
-// NEON and SSE rather than two, and about half the arithmetic: a decode takes half the time, with the same
-// frame error rate (400 codewords around the w48-16qam-r2/3 threshold: identical at every point). The
-// decoder is receiver-only, so this changes nothing on the wire; it does give up phi_all's bit-for-bit
-// match with the Python reference, which the default keeps.
+// NEON and SSE rather than two, and about half the arithmetic: a decode is 1.6x faster on x86-64, with the
+// same frame error rate (1.6M codewords, 6 modes, AWGN/MPP/MPD waterfalls and floors: 11 vs 13 codewords
+// lost by one side only, out of 61.5k errors). The decoder is receiver-only, so this changes nothing on
+// the wire; it does give up phi_all's bit-for-bit match with the Python reference.
 DATA2G_SIMD_CLONES void phi_all_fast(float* __restrict v, std::size_t n) {
     constexpr float LOG2E = 1.442695041f, LN2_HI_F = 0.693145752f, LN2_LO_F = 1.42860677e-6f, SHIFT_F = 12582912.0f;
     constexpr float LN2_F = 0.693147182f;
@@ -310,10 +311,7 @@ DATA2G_SIMD_CLONES void phi_all_fast(float* __restrict v, std::size_t n) {
     }
 }
 
-bool fast_phi() {
-    static const bool on = std::getenv("DATA2G_FAST_PHI") != nullptr;
-    return on;
-}
+std::atomic<bool> exact_phi{std::getenv("DATA2G_EXACT_PHI") != nullptr};
 
 // Variable-to-check messages: m = tot[var[e]] - c2v[e], as sign and size.
 DATA2G_SIMD_CLONES void v2c(const float* __restrict t, const float* __restrict c, const int* __restrict var,
@@ -328,6 +326,8 @@ DATA2G_SIMD_CLONES void v2c(const float* __restrict t, const float* __restrict c
 }  // namespace
 
 void phi(std::span<float> v) { phi_all(v.data(), v.size()); }
+
+bool set_exact_phi(bool exact) { return exact_phi.exchange(exact); }
 
 Decoder::Decoder(const Code& code)
     : k_(code.k), n_cols_(code.n_cols()), filler_end_(code.kb * code.z), n_checks_(code.mb * code.z), dmax_(0),
@@ -380,6 +380,7 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
         std::vector<std::uint8_t> neg, hard;
     };
     std::vector<std::uint8_t> ok(B, 0);
+    const auto phi_fn = exact_phi.load(std::memory_order_relaxed) ? phi_all : phi_all_fast;
     for (int it = 0; it < iters; ++it) {
         cancel::check();
         const bool bp = alpha.empty();
@@ -400,7 +401,7 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
             v2c(t, c, var_.data(), E, neg.data(), mag.data());
             if (bp) {
                 std::copy(mag.begin(), mag.end(), ph.begin());
-                fast_phi() ? phi_all_fast(ph.data(), E) : phi_all(ph.data(), E);
+                phi_fn(ph.data(), E);
                 for (int q = 0; q < n_checks_; ++q) {
                     const int e0 = chk_ptr_[q], d = chk_ptr_[q + 1] - e0;
                     const float S = numpy_sum(&ph[e0], d, dmax_, B == 1);
@@ -411,7 +412,7 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
                         neg[e] ^= sneg;
                     }
                 }
-                fast_phi() ? phi_all_fast(mag.data(), E) : phi_all(mag.data(), E);
+                phi_fn(mag.data(), E);
                 // -x is x with the sign bit flipped: spelled so, since the
                 // ?: became a branch mispredicted on half the edges (55% of
                 // a failing decode)
