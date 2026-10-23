@@ -34,6 +34,7 @@ void bind_ldpc(py::module_& m) {
         ldpc::phi(v);
         return np(v);
     });
+    l.def("set_exact_phi", &ldpc::set_exact_phi, py::arg("exact"));
     l.def("layout", [](int k, int n, std::optional<int> bg) { return ldpc::layout(k, n, bg.value_or(0)); },
           py::arg("k"), py::arg("n"), py::arg("bg") = py::none());
 
