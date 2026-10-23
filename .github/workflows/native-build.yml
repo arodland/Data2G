@@ -254,13 +254,20 @@ jobs:
           esac
           $host --help > /dev/null
           echo "data2g-host starts"
-          if [ -e "$dir/data2g-gui" ] || [ -e "$dir/data2g-gui.exe" ] || [ -e "$dir/bin/data2g-gui" ]; then
-            # No `timeout` on macOS: run it, and require it to still be up.
-            QT_QPA_PLATFORM=offscreen $gui & pid=$!
-            sleep 8
-            if kill -0 "$pid" 2>/dev/null; then kill "$pid" || true; echo "data2g-gui started and stayed up"
-            else wait "$pid"; echo "the packaged GUI exited on its own" >&2; exit 1; fi
+          # Configured with DATA2G_BUILD_GUI=ON, so the GUI must be packaged, and on macOS be
+          # what the bundle launches. This check was optional, and v0.1.0's macOS bundle shipped the host.
+          if ! { [ -e "$dir/data2g-gui" ] || [ -e "$dir/data2g-gui.exe" ] || [ -e "$dir/bin/data2g-gui" ]; }; then
+            echo "data2g-gui was built but not packaged" >&2; exit 1
           fi
+          if [ "$(uname -s)" = Darwin ]; then
+            exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' dist/Data2G.app/Contents/Info.plist)"
+            [ "$exe" = data2g-gui ] || { echo "Data2G.app launches $exe, not data2g-gui" >&2; exit 1; }
+          fi
+          # No `timeout` on macOS: run it, and require it to still be up.
+          QT_QPA_PLATFORM=offscreen $gui & pid=$!
+          sleep 8
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid" || true; echo "data2g-gui started and stayed up"
+          else wait "$pid"; echo "the packaged GUI exited on its own" >&2; exit 1; fi
       # Named after what they run on, not the runner image; versioned only
       # for a release (a CI run is identified by its run).
       - name: Name the package

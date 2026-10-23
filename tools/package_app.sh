@@ -29,18 +29,22 @@ cache_value() { sed -n "s|^$1:[A-Z]*=||p" "$BUILD_DIR/CMakeCache.txt" | head -1;
 HAMLIB_RUNTIME_DIR="$(cache_value DATA2G_HAMLIB_RUNTIME_DIR || true)"
 
 # Which executables exist. data2g-host is the product; refuse without it.
+# On macOS the GUI is a bundle (MACOSX_BUNDLE): data2g-gui.app, a directory,
+# with no data2g-gui file beside it. Testing only for the file packaged the
+# host as Data2G.app in v0.1.0.
 exe_suffix=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; esac
+built() { [ -f "$BUILD_DIR/$1$exe_suffix" ] || [ -d "$BUILD_DIR/$1.app" ]; }
 apps=()
 for a in data2g-host data2g-gui data2g-monitor data2g-audio-check; do
-    [ -f "$BUILD_DIR/$a$exe_suffix" ] && apps+=("$a")
+    built "$a" && apps+=("$a")
 done
 if [ ! -f "$BUILD_DIR/data2g-host$exe_suffix" ]; then
     echo "package_app: $BUILD_DIR/data2g-host$exe_suffix was not built" >&2
     exit 1
 fi
 main=data2g-host
-[ -f "$BUILD_DIR/data2g-gui$exe_suffix" ] && main=data2g-gui
+built data2g-gui && main=data2g-gui
 echo "package_app: staging ${apps[*]} (main: $main)"
 
 rm -rf "$STAGE_DIR"
