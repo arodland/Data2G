@@ -95,10 +95,7 @@ std::vector<NoiseProfile::Spectrum> NoiseProfile::span_spectra(double start, dou
     return out;
 }
 
-std::optional<double> NoiseProfile::span_snr_db(const std::vector<Spectrum>& spectra, double lo, double hi,
-                                                const std::vector<Spectrum>* floor_spectra) const {
-    const std::size_t n_ref = floor_spectra ? floor_spectra->size() : kept_spec_.size();
-    if ((!floor_spectra && n_ref < MIN_BLOCKS) || n_ref == 0 || spectra.empty()) return std::nullopt;
+std::vector<std::size_t> NoiseProfile::band_bins(double lo, double hi) {
     // rfft bins k (f = k * FS / BLOCK Hz) with lo <= f < hi, as np.fft.rfftfreq
     const double df = static_cast<double>(config::FS) / BLOCK;
     std::vector<std::size_t> band;
@@ -106,22 +103,45 @@ std::optional<double> NoiseProfile::span_snr_db(const std::vector<Spectrum>& spe
         const double f = static_cast<double>(k) * df;
         if (f >= lo && f < hi) band.push_back(k);
     }
-    const auto in_band = [&](const Spectrum& s) {
-        std::vector<double> v;
-        v.reserve(band.size());
-        for (const auto k : band) v.push_back(s[k]);
-        return dsp::pairwise_sum(v) / static_cast<double>(v.size());
-    };
+    return band;
+}
+
+double NoiseProfile::band_mean(const Spectrum& s, const std::vector<std::size_t>& band) {
+    std::vector<double> v;
+    v.reserve(band.size());
+    for (const auto k : band) v.push_back(s[k]);
+    return dsp::pairwise_sum(v) / static_cast<double>(v.size());
+}
+
+std::optional<double> NoiseProfile::span_snr_db(const std::vector<Spectrum>& spectra, double lo, double hi,
+                                                const std::vector<Spectrum>* floor_spectra) const {
+    const std::size_t n_ref = floor_spectra ? floor_spectra->size() : kept_spec_.size();
+    if ((!floor_spectra && n_ref < MIN_BLOCKS) || n_ref == 0 || spectra.empty()) return std::nullopt;
+    const auto band = band_bins(lo, hi);
     std::vector<double> ref, pw;
     if (floor_spectra)
-        for (const auto& s : *floor_spectra) ref.push_back(in_band(s));
+        for (const auto& s : *floor_spectra) ref.push_back(band_mean(s, band));
     else
-        for (const auto& s : kept_spec_) ref.push_back(in_band(s));
-    for (const auto& s : spectra) pw.push_back(in_band(s));
+        for (const auto& s : kept_spec_) ref.push_back(band_mean(s, band));
+    for (const auto& s : spectra) pw.push_back(band_mean(s, band));
     const double floor = dsp::quantile(ref, 0.5);
     const double power = dsp::pairwise_sum(pw) / static_cast<double>(pw.size());
     if (floor <= 0) return std::nullopt;
     return 10 * std::log10(std::max(power / floor - 1, 1e-3) * (hi - lo) / config::SNR_REF_BW_HZ);
+}
+
+std::optional<double> NoiseProfile::span_z(const std::vector<Spectrum>& spectra, double lo, double hi) const {
+    if (kept_spec_.size() < MIN_BLOCKS || spectra.empty()) return std::nullopt;
+    const auto band = band_bins(lo, hi);
+    std::vector<double> ref, dev, pw;
+    for (const auto& s : kept_spec_) ref.push_back(band_mean(s, band));
+    const double floor = dsp::quantile(ref, 0.5);
+    for (const auto r : ref) dev.push_back(std::abs(r - floor));
+    const double spread = 1.4826 * dsp::quantile(dev, 0.5);
+    if (spread <= 0) return std::nullopt;
+    for (const auto& s : spectra) pw.push_back(band_mean(s, band));
+    const double power = dsp::pairwise_sum(pw) / static_cast<double>(pw.size());
+    return (power - floor) / spread * std::sqrt(static_cast<double>(pw.size()));
 }
 
 void NoiseProfile::mark(double start, double end) {

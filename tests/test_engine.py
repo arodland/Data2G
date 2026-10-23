@@ -2,6 +2,7 @@
 on the sample clock: connect, data both ways, disconnect."""
 
 import numpy as np
+import pytest
 
 from data2g.arq import frames as F
 from data2g.arq import phy as PHY
@@ -656,3 +657,40 @@ def test_accept_refuses_a_connect_it_cannot_route():
     assert link(a.engine, b.engine, 20, 60, pump)
     assert a.engine.session.close_reason == "refused: refused by host"
     assert "DISCONNECTED" in a.out_cmd and not any(x.startswith("CONNECTED") for x in a.out_cmd + b.out_cmd)
+
+
+def test_a_reply_whose_header_is_missed_is_not_polled_over(caplog):
+    """The master's receiver misses every header (a weak CPM reply's): the
+    energy on air holds its timeout until the data reply it asked for ends
+    (Engine._carrier_hold), and a window of noise alone does not."""
+    import logging
+
+    a, b = Engine("W1AW", seed=21), Engine("K2XYZ", seed=22)
+    b.listen()
+    link(a, b, 10, 8, lambda: False, seed=20)  # the noise floor: a quiet channel heard first
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    b.session.write(np.random.default_rng(23).bytes(20000))
+    got = bytearray()
+    assert link(a, b, 10, 120, lambda: got.extend(a.session.read()) or (len(got) > 0 and b.tx is not None), seed=24)
+    if a.receiver is None:
+        pytest.skip("the C++ engine's receiver can't be made deaf (span_z parity: test_noise_profile)")
+    a.receiver.feed = lambda x: []  # deaf to headers; the noise profile still hears the audio
+    rng = np.random.default_rng(25)
+    sigma = np.sqrt((FS / 2) / SNR_REF_BW_HZ / 10 ** (10 / 10))
+    a_out = b_out = np.zeros(BLOCK)
+    a_on = b_off = None  # a's first key-up, and the end of b's reply (on air as a went deaf)
+    with caplog.at_level(logging.INFO, logger="data2g.engine"):
+        while a_on is None:
+            a_out, a_ptt = a.step(2.2 * b_out + rng.normal(0, sigma, BLOCK))
+            b_out, b_ptt = b.step(2.2 * a_out + rng.normal(0, sigma, BLOCK))
+            a_on = a.now if a_ptt else None
+            b_off = b_off or (None if b_ptt else b.now)
+    assert "holding the timeout" in caplog.text
+    assert b_off is not None and a_on > b_off
+    caplog.clear()
+    with caplog.at_level(logging.INFO):  # the peer is gone: noise only
+        for _ in range(int(30 * FS / BLOCK)):
+            a.step(rng.normal(0, sigma, BLOCK))
+    assert "timeout" in caplog.text
+    assert "holding the timeout" not in caplog.text
