@@ -57,7 +57,9 @@ inline constexpr int KISS_FRAME_BYTES = 256;  // ...raised per submode to hold a
 modem::Accept receive_accept(double min_header_score = 0.0);
 inline constexpr double EXPECT_REPLY_S = 0.5;  // a reply's start past my burst's end (engine.py)
 inline constexpr double MISSED_MIN_DB = -18.0;  // a timeout's window under this: no reply at all (engine.py)
-inline constexpr double CARRIER_Z = 5.0;  // carrier_hold: a reply on air reads at least this (span_z, engine.py)
+inline constexpr double CARRIER_Z = 5.0;  // carrier_hold: on air when the last CARRIER_TAIL_S read this (span_z, engine.py)
+inline constexpr double CARRIER_TAIL_S = 1.0;
+inline constexpr double CARRIER_STEP_S = 0.25;  // ... re-checked this often
 inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at least its snr_est less this (engine.py)
 // ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 // turn at least this often (FCC 97.119: every 10 minutes), and one more once
@@ -347,6 +349,7 @@ private:
                 std::optional<double> floor_db = std::nullopt);
     void missed_energy();
     void carrier_hold(double t);  // a timeout held while a reply whose header I missed is on air
+    std::optional<double> carrier_for_;  // the burst end (tx_end_) a carrier hold was logged for
     std::optional<double> span_snr(const Span& s);  // its in-band SNR from power alone (snr_est's scale)
     int rx_cap() const;  // the bandwidth cap a heard burst's TX filter was most likely for
     std::function<void(bool)> after_block_;
