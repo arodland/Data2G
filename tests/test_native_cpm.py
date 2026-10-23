@@ -158,6 +158,37 @@ def test_receive_chain(native, reference, case):
     np.testing.assert_allclose(m["snr"], m_ref["snr"], rtol=RTOL, atol=1e-12)
 
 
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+                                         for n in (0, 3)])
+def test_late_lock(native, reference, name, n_data):
+    """A burst whose first header copy faded: find's candidate before the
+    second copy is in (wait), late_lock's lock after, and find on the whole
+    burst, alike in both."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(n_data)
+    x = ref(reference, "modulate")(spec, _burst(spec, n_data, False, rng), False).copy()
+    rows = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, False)).hdr_rows[0]
+    x[rows[0] * g.T:(rows[-1] + 1) * g.T] = 0
+    y = _channel(x, rng, lead=1777, cfo=3.0, sigma=0.3)
+    assert native.cpm.hdr_span(g.name, 2) == ref(reference, "hdr_span")(g.name, 2)
+    early = y[:1777 + cpm.hdr_span(g.name, 1) + FS // 2]
+    for wait in (False, True):
+        a, b = native.cpm.find(g.name, early, wait=wait), ref(reference, "find")(g, early, wait=wait)
+        assert (a is None) == (b is None) and (a or {}).get("wait") == (b or {}).get("wait"), (wait, a, b)
+    cand = b
+    for a, b in ((native.cpm.find(g.name, y), ref(reference, "find")(g, y)),
+                 (cand and native.cpm.late_lock(g.name, y, cand["start"], cand["cfo"], cand["score"], cand["header_end"]),
+                  cand and ref(reference, "late_lock")(g, y, cand))):
+        assert (a is None) == (b is None), (a, b)
+        if b is not None:
+            assert a["spec"] == b["spec"].name
+            for k in ("n_data", "dup", "start", "end", "header_end", "cfo"):
+                assert a[k] == b[k], k
+            for k in ("score", "header_score", "header_margin"):
+                assert a[k] == pytest.approx(b[k], rel=RTOL, abs=1e-12), k
+
+
 def test_llrs_zero_padded(native, reference):
     """A codeword past the audio's end (all-zero energies) reads as erasures in both."""
     g = cpm.GRIDS["c8r50"]
@@ -175,3 +206,31 @@ def test_codes_roundtrip_through_native_modulate(native):
     y = _channel(cpm.bandpass(g, native.cpm.modulate(spec.name, [ctl, data], False)), rng, sigma=0.1)
     lock = cpm.find(g, y)
     assert lock is not None and lock["n_data"] == 1 and lock["spec"] is spec
+
+
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+                                         for n in (0, 3)])
+def test_find_mid(native, reference, name, n_data):
+    """A burst whose front and first header copy faded: the mid block's
+    detection, peak ratio and find_mid's lock, alike in both."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(10 + n_data)
+    x = ref(reference, "modulate")(spec, _burst(spec, n_data, False, rng), False).copy()
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, False))
+    x[:(lay.hdr_rows[0][-1] + 1) * g.T] = 0
+    y = _channel(x, rng, lead=1777, cfo=3.0, sigma=0.3)
+    a, b = native.cpm.detect(g.name, y, mid=True), ref(reference, "detect")(g, y, mid=True)
+    assert a[1:] == b[1:] and a[0] == pytest.approx(b[0], rel=RTOL)
+    assert native.cpm.peak_ratio(g.name, y, b[1], b[2], mid=True) == pytest.approx(
+        ref(reference, "_peak_ratio")(g, y, b[1], b[2], mid=True), rel=RTOL)
+    for kw in (dict(), dict(lo=b[1] + 1), dict(lo=1000, hi=b[1] + 1)):
+        a, c = native.cpm.find_mid(g.name, y, **kw), ref(reference, "find_mid")(g, y, **kw)
+        assert (a is None) == (c is None), (kw, a, c)
+        assert c is not None or kw, "no mid lock on the whole burst"
+        if c is not None:
+            assert a["spec"] == c["spec"].name
+            for k in ("n_data", "dup", "start", "end", "header_end", "cfo"):
+                assert a[k] == c[k], (kw, k)
+            for k in ("score", "header_score", "header_margin"):
+                assert a[k] == pytest.approx(c[k], rel=RTOL, abs=1e-12), (kw, k)

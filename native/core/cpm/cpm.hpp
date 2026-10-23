@@ -67,8 +67,9 @@ struct Detection {
     std::int64_t start;
     double cfo;
 };
+// mid: the mid block alone, its first sample for the start (find_mid).
 Detection detect(const Grid& g, std::span<const double> x, double reach_hz = 150.0, bool fine = true,
-                 bool front_only = false, int n_sym = 0, double floor = -1.0);
+                 bool front_only = false, int n_sym = 0, double floor = -1.0, bool mid = false);
 
 // (n_sym, m) energies of one codeword -> n_sym * bits LLRs, mapping order.
 std::vector<double> llrs(const Grid& g, const Mat<double>& E);
@@ -87,7 +88,7 @@ struct Soft {
 };
 Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int n_data, bool dup);
 
-double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo);
+double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, bool mid = false);
 
 struct Lock {
     const Spec* spec;
@@ -96,11 +97,26 @@ struct Lock {
     std::int64_t start;
     double cfo, score, header_score, header_margin;
     std::int64_t end, header_end;
+    // find's candidate (wait): a front whose first header copy fell short. Only
+    // start (the detected one), cfo, score and header_end (where x must reach
+    // for late_lock) are set; spec is nullptr.
+    bool wait = false;
 };
 // threshold: nullopt = SYNC_THRESHOLD plus the header floor. hi: nullopt = len(x).
+// wait: a candidate instead of nullopt while the second header copy is still arriving.
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold = std::nullopt,
                          double reach_hz = 150.0, bool front_only = true, std::int64_t lo = 0,
-                         std::optional<std::int64_t> hi = std::nullopt);
+                         std::optional<std::int64_t> hi = std::nullopt, bool wait = false);
+// find's candidate (x holding its header_end) -> its lock from both header copies
+// (header2_threshold), or nullopt.
+std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand);
+// A burst whose front was missed, from its mid block and both header copies
+// (cpm.find_mid): the mid block's start in [lo, hi). hi: nullopt = len(x).
+std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int64_t lo = 0,
+                             std::optional<std::int64_t> hi = std::nullopt);
+// Samples from a burst's start to the end of its first `copies` header copies,
+// the latest any word puts them.
+std::int64_t hdr_span(const Grid& g, int copies);
 
 // cpm.measure: arq/phy's measure makes the effective-MI features (arq/predictor's)
 // of `snr`, per symbol.

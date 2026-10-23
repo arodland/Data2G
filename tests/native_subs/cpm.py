@@ -10,7 +10,7 @@ def substitutions(native):
     from data2g import cpm
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
-                                       "read_header", "soft", "find", "measure")}
+                                       "read_header", "soft", "find", "late_lock", "find_mid", "measure")}
 
     def own_grid(g):
         return cpm.GRIDS.get(g.name) == g
@@ -34,10 +34,10 @@ def substitutions(native):
             return py["modulate"](spec, coded, dup, cap)
         return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
 
-    def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0):
+    def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0, mid=False):
         if not own_grid(g):
-            return py["detect"](g, x, reach_hz, fine, front_only, n_sym, floor)
-        return n.detect(g.name, x, reach_hz, fine, front_only, n_sym, floor)
+            return py["detect"](g, x, reach_hz, fine, front_only, n_sym, floor, mid)
+        return n.detect(g.name, x, reach_hz, fine, front_only, n_sym, floor, mid)
 
     def read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
         if not own_grid(g):
@@ -51,14 +51,27 @@ def substitutions(native):
         slots, E = n.soft(g.name, x, s0, cfo, n_data, dup)
         return list(slots), E
 
-    def find(g, x, threshold=None, reach_hz=150.0, front_only=True, lo=0, hi=None):
-        if not own_grid(g):
-            return py["find"](g, x, threshold, reach_hz, front_only, lo, hi)
-        d = n.find(g.name, x, threshold, reach_hz, front_only, lo, hi)
+    def lock(g, d):
         if d is None:
             return None
-        d["spec"] = cpm.SPECS[d["spec"]]
+        if not d.get("wait"):
+            d["spec"] = cpm.SPECS[d["spec"]]
         return {**d, "band": g.name, "family": "cpm"}
+
+    def find(g, x, threshold=None, reach_hz=150.0, front_only=True, lo=0, hi=None, wait=False):
+        if not own_grid(g):
+            return py["find"](g, x, threshold, reach_hz, front_only, lo, hi, wait)
+        return lock(g, n.find(g.name, x, threshold, reach_hz, front_only, lo, hi, wait))
+
+    def late_lock(g, x, cand):
+        if not own_grid(g):
+            return py["late_lock"](g, x, cand)
+        return lock(g, n.late_lock(g.name, x, cand["start"], cand["cfo"], cand["score"], cand["header_end"]))
+
+    def find_mid(g, x, lo=0, hi=None):
+        if not own_grid(g):
+            return py["find_mid"](g, x, lo, hi)
+        return lock(g, n.find_mid(g.name, x, lo, hi))
 
     def measure(g, E, n_sym):
         if not own_grid(g):
@@ -87,5 +100,8 @@ def substitutions(native):
         (cpm, "soft"): soft,
         (cpm, "_peak_ratio"): by_grid(n.peak_ratio, cpm._peak_ratio),
         (cpm, "find"): find,
+        (cpm, "late_lock"): late_lock,
+        (cpm, "find_mid"): find_mid,
+        (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies),
         (cpm, "measure"): measure,
     }

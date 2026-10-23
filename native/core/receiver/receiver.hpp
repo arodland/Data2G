@@ -136,14 +136,15 @@ private:
     void searched();
     bool supersede(std::vector<Item>& out, bool whole = false);
     std::optional<modem::Lock> find_copy() const;
-    std::optional<cpm::Lock> find_cpm() const;
+    std::optional<cpm::Lock> find_cpm();
     std::int64_t decided(std::string_view key) const;
+    std::int64_t decided_mid(const cpm::Grid& g) const;
     std::int64_t len() const { return static_cast<std::int64_t>(buf_.size()); }
 
     modem::Accept accept_;
     std::vector<std::string_view> bands_;
     std::vector<const cpm::Grid*> grids_;
-    std::int64_t min_search_, keep_;
+    std::int64_t min_search_, keep_, hold_;
     std::vector<Detector> detectors_;
     std::optional<audio::Blanker> blanker_;
 
@@ -156,6 +157,15 @@ private:
     int pn_ = 0;
     std::int64_t fresh_ = HOP, last_start_ = -1;
     std::map<std::string_view, std::int64_t> decided_;
+    std::map<std::string_view, std::int64_t> decided_mid_;  // per CPM grid, its mid block's (Python's "<grid>/mid")
+    // CPM fronts whose first header copy fell short (cpm::find's candidates,
+    // stream indices): read again with both copies once the second is in
+    struct CpmWait {
+        const cpm::Grid* g;
+        cpm::Lock cand;
+        std::int64_t first;  // its earliest tile start: kept until read
+    };
+    std::vector<CpmWait> cpm_wait_;
 };
 
 

@@ -37,10 +37,15 @@ def test_round_trip_with_a_header_lost(lost):
     assert modem.LEADIN_SAMPLES < FS
 
 
-def test_cpm_round_trip_with_a_front_lost():
+@pytest.mark.parametrize("mid_lost", [False, True])
+def test_cpm_round_trip_with_a_front_lost(mid_lost):
     """fsk32r62-r1/2: the control in its two polar slots, timing from the CPM
     layout (not cpm.burst_seconds, which counts the ramps on top), and a
-    burst whose front sync and first header are gone received by its timing."""
+    burst whose front sync and first header are gone received from its mid
+    block (cpm.find_mid), or with that and the second header gone too, by
+    its timing."""
+    from data2g import cpm
+
     mode, h = "fsk32r62-r1/2", 2
     text = TEXT[:900]
     bs = bulk.bursts(text, mode, h, 1)
@@ -51,10 +56,15 @@ def test_cpm_round_trip_with_a_front_lost():
     y = np.concatenate([np.zeros(lead), bulk.tx_audio(bs), np.zeros(FS)])
     s = lead + lay.offset(1)
     y[s:s + FS] = 0  # burst 1's front sync block, first header copy, part of its control
+    if mid_lost:
+        spec = bulk.MODES[mode]
+        g, k = cpm.GRIDS[spec.grid], bulk.n_ctl(spec)
+        L = cpm.layout(g.name, cpm.stream_symbols(g.name, len(bs[1].slots) - k, k == 2))
+        y[s + L.sync_rows[L.front] * g.T:s + (L.hdr_rows[1][-1] + 1) * g.T] = 0  # its mid block and second header
     y = hfchannel.apply_channel(y, snr_db=10, freq_offset_hz=20, ppm=30, seed=1)
     rx = bulk.receive((y[i:i + FS] for i in range(0, len(y), FS)), mode)  # back to back at 30 ppm: Receiver.CPM_TAIL
     (st,) = rx.streams.values()
-    assert st.stats["headerless"] == 1
+    assert st.stats["headerless"] == int(mid_lost)
     assert bulk.unpack(st.blocks, st.lay.n) == (text, [])
 
 
