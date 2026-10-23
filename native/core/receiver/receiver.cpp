@@ -62,6 +62,12 @@ std::optional<Rx> receive_any(std::span<const double> y, int64_t lead,
             lock = lock->header_end <= len ? cpm::late_lock(gr, y, *lock) : std::nullopt;
         if (lock) return Rx(cpm::receive(y, *lock));  // a CPM lock beats a suspect OFDM header
     }
+    for (const auto g : grids) {  // the front missed: the mid block and both header copies (as Receiver's find_cpm)
+        const auto& gr = grid_named(g);
+        const int64_t n = std::clamp<int64_t>(lead + cpm::hdr_span(gr, 2) + gr.T, 0, len);
+        const auto lock = cpm::find_mid(gr, y.first(static_cast<std::size_t>(n)));
+        if (lock && lock->start <= lead) return Rx(cpm::receive(y, *lock));
+    }
     if (!r) {
         // no preamble: the header copy of a burst whose head faded (as Receiver's find_copy)
         std::optional<modem::Lock> best;
@@ -131,6 +137,10 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     // what a trim keeps (so one still arriving survives it)
     min_search_ = search_span(bands_, cpm_grids);
     keep_ = min_search_ + config::FS;
+    // what a trim with nothing found holds: a CPM burst's start until its
+    // mid block and second header copy are in (find_mid)
+    hold_ = keep_;
+    for (const auto* g : grids_) hold_ = std::max(hold_, cpm::hdr_span(*g, 2) + config::FS);
     detectors_.reserve(bands_.size());
     for (const auto b : bands_) detectors_.push_back({b, waveform::StreamDetector(waveform::band(b))});
     if (blank) blanker_.emplace();
@@ -148,6 +158,7 @@ void Receiver::reset() {
     fresh_ = HOP;  // search at once
     last_start_ = -1;
     decided_.clear();
+    decided_mid_.clear();
     cpm_wait_.clear();
     for (auto& d : detectors_) d.d.reset();
 }
@@ -227,8 +238,12 @@ void Receiver::searched() {
         decided_[det.band] = std::max(decided(det.band),
                                       end - modem::head_samples(det.band) - config::preamble_samples(b) - REVISIT);
     }
-    for (const auto* g : grids_)
+    for (const auto* g : grids_) {
         decided_[g->name] = std::max(decided(g->name), end - grid_span(*g) - g->T);
+        // a mid block is decided once its second header copy is in
+        decided_mid_[g->name] = std::max(
+            decided_mid(*g), end - (static_cast<int64_t>(g->mid_block.size()) + g->hdr_len) * g->T - g->T);
+    }
 }
 
 std::optional<modem::Lock> Receiver::find_copy() const {
@@ -289,7 +304,17 @@ std::optional<cpm::Lock> Receiver::find_cpm() {
         });
         if (!known) cpm_wait_.push_back({g, *lock, lock->header_end - cpm::hdr_span(*g, 2)});
     }
+    for (const auto* g : grids_) {  // the front missed: the mid block and both header copies
+        const auto lock = cpm::find_mid(*g, buf_, std::max<int64_t>(0, decided_mid(*g) - off_),
+                                        len() - (static_cast<int64_t>(g->mid_block.size()) + g->hdr_len - 1) * g->T);
+        if (lock) return lock;
+    }
     return std::nullopt;
+}
+
+int64_t Receiver::decided_mid(const cpm::Grid& g) const {
+    const auto it = decided_mid_.find(g.name);
+    return it == decided_mid_.end() ? 0 : it->second;
 }
 
 bool Receiver::supersede(std::vector<Item>& out, bool whole) {
@@ -400,9 +425,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (!p)
                 if (auto c = find_copy()) p = Pending{*c};  // the preamble faded: the frame pilots and header copy
             if (!p) {
-                int64_t n = keep_;
-                for (const auto& w : cpm_wait_) n = std::max(n, off_ + len() - w.first);
-                trim(n);
+                trim(hold_);  // (a waiting candidate's start is within it)
                 break;
             }
             if (p->start() + off_ <= last_start_) break;  // the suspect burst just handled, still in the kept window

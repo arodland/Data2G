@@ -13,18 +13,22 @@ band.
 Codewords go through data2g.codes like OFDM's (CRC masks, scrambler, RVs,
 soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
 
-    [front Costas block][header][ctl][ctl RV1?][data ...][short block][header][data ...][short block] ...
+    [front Costas block][header][ctl][ctl RV1?][data ...][mid block][header][data ...]
 
 - ctl: the grid's short control codeword (polar, CTL_K of CTL_N), one per
   burst, twice (RV 0, RV 1) when the ARQ duplicates control (ARQ_DUP);
 - data: 0..MAX_DATA LDPC codewords of the mode (n = 960);
-- sync blocks every SPACING_S of symbols, at positions independent of the
-  burst's length, so the receiver finds them before it knows the length;
-- header (twice, after the first two blocks): 16 bits as OFDM's: index =
-  mode index + 2 x duplicated, n field = data codewords + 1, CRC-6. The
-  receiver locks on the front and the first copy (find); if that copy
-  faded, on both once the second is in (late_lock). A short burst's
-  second copy sits after its data, so each word is read at its own rows.
+- two sync blocks: the front, and a mid block SPACING_S of symbols later
+  (after the data, on a burst shorter than that). Nothing else in the burst
+  tracks timing or CFO: 30 ppm over a 90 s burst is ~22 samples of T = 320.
+  Later blocks (every SPACING_S) were dropped on 2026-10-23: no receiver
+  path read them, and they were ~8% of a long burst's air;
+- header (twice, after each block): 16 bits as OFDM's: index = mode index
+  + 2 x duplicated, n field = data codewords + 1, CRC-6. The receiver
+  locks on the front and the first copy (find); if that copy faded, on
+  both once the second is in (late_lock); if the front was missed, on the
+  mid block and both copies (find_mid). A short burst's second copy sits
+  after its data, so each word is read at its own rows.
 
 Native: native/core/cpm (grids and specs compiled in, tables::CPM_*).
 Parity: tests/test_native_cpm.py; under `pytest --native`
@@ -41,10 +45,10 @@ import numpy as np
 from .config import CLIP_OVERSHOOT, FS
 
 PREAMBLE_S = 0.45  # the front sync block
-BLOCK_S = 0.25  # the later sync blocks, about
-SPACING_S = 2.5  # symbols between sync blocks, about (MPG fades last ~1-3 s)
+BLOCK_S = 0.25  # the mid sync block, about
+SPACING_S = 2.5  # symbols from the front block to the mid one, about (MPG fades last ~1-3 s)
 HDR_S = 0.25  # a header copy, about
-HDR_COPIES = 2  # after the first two sync blocks
+HDR_COPIES = 2  # one after each sync block
 MAX_DATA = 8  # data codewords per burst
 PEAK_RATIO = 0.7  # a lock's floor on _peak_ratio: fronts 0.82+, locks inside a burst 0.59 at most
 RAMP_S = 0.01  # amplitude ramp at a burst's ends (key clicks)
@@ -191,6 +195,18 @@ HEADER_THRESHOLD = {"c16r25": 0.20, "c8r50": 0.29, "c32r62": 0.11}
 # so 1.1x noise's and OFDM's largest at any placement (0.119). Bursts lost
 # with a clear front at MPP/MPG -8/-11 dB scored 0.07-0.6 (c32r62 median 0.18).
 HEADER2_THRESHOLD = {"c16r25": 0.15, "c8r50": 0.25, "c32r62": 0.13}
+# Mid lock (find_mid), scripts/cpm_mid_fit.py (2026-10-23). The mid block
+# alone: 1.1x the largest score 200 buffers each of 1.9 s of noise or an
+# OFDM burst gave (0.162 / 0.221, 0.199 / 0.327, 0.070 / 0.112); front-missed
+# c32r62 bursts that decoded (genie) at MPP/MPG -8/-11 dB scored 0.08-0.42
+# there, 17 of 21 over. Its two-copy header: 1.1x the largest a false mid
+# lock read on one or two overlapping bursts of the grid (two runs, 300
+# buffers a grid: 0.340, 0.360, 0.155; real ones 0.320, 0.282, 0.126 and
+# up). The short c16r25 and c8r50 mid blocks met other bursts' data often
+# (a three-station engine test held BUSY on an x5 false lock at 0.15), so
+# those grids' bar is high.
+MID_THRESHOLD = {"c16r25": 0.24, "c8r50": 0.36, "c32r62": 0.12}
+MID_HEADER_THRESHOLD = {"c16r25": 0.38, "c8r50": 0.40, "c32r62": 0.17}
 
 
 def grid_specs(grid: str) -> list:
@@ -234,7 +250,7 @@ def preamble_pattern(g: Grid) -> np.ndarray:
 
 
 def mid_block(g: Grid) -> np.ndarray:
-    """A later sync block, ~BLOCK_S: the largest Welch Costas array that
+    """The mid sync block, ~BLOCK_S: the largest Welch Costas array that
     fits, its tones spread over the band (scaling keeps the Costas property)."""
     target = max(4, round(BLOCK_S * g.rate))
     p = max(q for q in range(3, min(target, g.m) + 2) if _prime(q))
@@ -303,11 +319,11 @@ def layout(grid: str, n_sym: int) -> Layout:
     segs = [min(D, n_sym - i) for i in range(0, max(n_sym, 1), D)]
     rows, tones_, hdr, data, r = [], [], [], [], 0
     for i, d in enumerate(segs):
-        b = preamble_pattern(g) if i == 0 else mid_block(g)
-        rows += range(r, r + len(b))
-        tones_ += list(b)
-        r += len(b)
-        if i < HDR_COPIES:
+        if i < HDR_COPIES:  # a sync block before each header copy, none after
+            b = preamble_pattern(g) if i == 0 else mid_block(g)
+            rows += range(r, r + len(b))
+            tones_ += list(b)
+            r += len(b)
             hdr.append(np.arange(r, r + H))
             r += H
         data += range(r, r + d)
@@ -407,18 +423,22 @@ def _shares(E: np.ndarray) -> np.ndarray:
 
 
 def detect(g: Grid, x: np.ndarray, reach_hz: float = 150.0, fine=True, front_only: bool = False, n_sym: int = 0,
-           floor: float = -1.0):
+           floor: float = -1.0, mid: bool = False):
     """-> (score, burst start sample, cfo Hz): the sync pattern's best
     placement. Coarse: symbol energies at T/4 hops and quarter-bin CFO
     steps, as shares, summed over the sync symbols of the shortest burst
     (`n_sym` stream symbols; default a control-only burst's) at every start
     and whole-bin shift. Score: the mean share on the pattern (0..1).
-    `front_only`: the first block alone (an early lock); `floor`: no fine
-    stage under this score (the search's CPU on noise)."""
+    `front_only`: the first block alone (an early lock); `mid`: the mid
+    block alone, its first sample for the burst's start (find_mid);
+    `floor`: no fine stage under this score (the search's CPU on noise)."""
     lay = layout(g.name, n_sym or stream_symbols(g.name, 0, False))
     rows, tones_ = lay.sync_rows, lay.sync_tones
     if front_only:
         rows, tones_ = rows[:lay.front], tones_[:lay.front]
+    if mid:
+        tones_ = mid_block(g)
+        rows = np.arange(len(tones_))
     span = rows[-1] + 1
     T = g.T
     extra = int(np.ceil(reach_hz / g.rate))
@@ -530,12 +550,13 @@ def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
                 headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
 
 
-def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float) -> float:
-    """The front pattern's share over each symbol's strongest share there:
-    ~1 on a front at any SNR (0.82 and up, -10 to 25 dB), low where the
-    pattern met a burst's data by chance (on a clean signal each symbol is
-    one tone, and 5 of 24 on the pattern cleared the sync threshold)."""
-    f = preamble_pattern(g)
+def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float, mid: bool = False) -> float:
+    """The front pattern's (`mid`: the mid block's) share over each symbol's
+    strongest share there: ~1 on a front at any SNR (0.82 and up, -10 to 25
+    dB), low where the pattern met a burst's data by chance (on a clean
+    signal each symbol is one tone, and 5 of 24 on the pattern cleared the
+    sync threshold)."""
+    f = mid_block(g) if mid else preamble_pattern(g)
     E = _shares(_energies(g, x, s0, len(f), cfo))
     return float(E[np.arange(len(f)), f].mean() / E.max(axis=1).mean())
 
@@ -595,6 +616,47 @@ def late_lock(g: Grid, x: np.ndarray, cand: dict):
     if h[3] < HEADER2_THRESHOLD[g.name]:
         return None
     return _lock(g, s0, cand["cfo"], cand["score"], h, HDR_COPIES)
+
+
+def find_mid(g: Grid, x: np.ndarray, lo: int = 0, hi: int | None = None):
+    """-> find's lock of a burst whose front was missed, from its mid block
+    (the sync block before header copy 2) and both header copies, or None.
+    Block 1's start in [lo, hi); each word puts it at its own row (a short
+    burst's after its data), so each is read at the start it implies, and
+    a start before x is no reading."""
+    T, nb = g.T, len(mid_block(g))
+    a = max(0, lo - T)
+    b = len(x) if hi is None else min(len(x), hi + (nb + 1) * T)
+    score, p, cfo = detect(g, x[a:b], mid=True, floor=MID_THRESHOLD[g.name])
+    p += a
+    if score < MID_THRESHOLD[g.name] or not lo <= p < (len(x) if hi is None else hi):
+        return None
+    if p + (nb + hdr_len(g)) * T > len(x):
+        return None  # its second header copy is still arriving
+    if _peak_ratio(g, x, p, cfo, mid=True) < PEAK_RATIO:
+        return None  # data that met the pattern by chance
+    words, rows = valid_words(g.name), header_rows(g.name, HDR_COPIES)
+    n = max(r[-1] for r in rows) + 1
+    E, scores = {}, np.full(len(words), -np.inf)
+    for k, ((*_, t), r, b1) in enumerate(zip(words, rows, mid_rows(g.name))):
+        s = p - b1 * T
+        if s >= 0:
+            if s not in E:
+                E[s] = _shares(_energies(g, x, s, n, cfo))
+            scores[k] = E[s][r, np.tile(t, HDR_COPIES)].mean()
+    order = np.argsort(scores)[::-1]
+    if scores[order[0]] < MID_HEADER_THRESHOLD[g.name]:
+        return None
+    spec, nd, d, _ = words[order[0]]
+    return _lock(g, p - mid_rows(g.name)[order[0]] * T, cfo, score,
+                 (spec, nd, d, float(scores[order[0]]), float(scores[order[1]])), HDR_COPIES)
+
+
+@lru_cache(maxsize=None)
+def mid_rows(grid: str) -> tuple:
+    """Per valid word, the row its mid block starts at."""
+    return tuple(int(layout(grid, stream_symbols(grid, n, d)).sync_rows[len(preamble_pattern(GRIDS[grid]))])
+                 for _, n, d, _ in valid_words(grid))
 
 
 def _tile_starts(g: Grid, s0: int) -> list:

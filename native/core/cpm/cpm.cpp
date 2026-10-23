@@ -145,8 +145,10 @@ Layout layout(const Grid& g, int n_sym) {
         for (int k = 0; k < H; ++k) L.hdr_rows.back()[k] = r++;
     };
     for (int s = 0; s < std::max(n_sym, 1); s += D, ++i) {
-        block(i == 0 ? g.preamble : g.mid_block);
-        if (i < tables::CPM.hdr_copies) header();
+        if (i < tables::CPM.hdr_copies) {  // a sync block before each header copy, none after
+            block(i == 0 ? g.preamble : g.mid_block);
+            header();
+        }
         for (int d = std::min(D, n_sym - s); d > 0; --d) L.data_rows.push_back(r++);
     }
     while (static_cast<int>(L.hdr_rows.size()) < tables::CPM.hdr_copies) {
@@ -278,12 +280,19 @@ Mat<double> shares(const Mat<double>& E) {
 }
 
 Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool fine, bool front_only, int n_sym,
-                 double floor) {
+                 double floor, bool mid) {
     const Layout L = layout(g, n_sym ? n_sym : stream_symbols(g, 0, false));
     std::span<const int> rows = L.sync_rows, tones_ = L.sync_tones;
     if (front_only) {
         rows = rows.first(L.front);
         tones_ = tones_.first(L.front);
+    }
+    std::vector<int> mid_rows_, mid_tones;
+    if (mid) {
+        mid_tones.assign(g.mid_block.begin(), g.mid_block.end());
+        for (std::size_t i = 0; i < mid_tones.size(); ++i) mid_rows_.push_back(static_cast<int>(i));
+        rows = mid_rows_;
+        tones_ = mid_tones;
     }
     const std::size_t R = rows.size();
     const std::int64_t span = rows.back() + 1, T = g.T;
@@ -382,6 +391,7 @@ namespace {
 struct WordRows {
     std::vector<std::vector<std::vector<int>>> rows;  // [copies - 1][word]
     std::vector<int> span;                           // [copies - 1]
+    std::vector<int> mid;                            // [word]: the row its mid block starts at (cpm.mid_rows)
 };
 
 const WordRows& word_rows(const Grid& g) {
@@ -389,12 +399,13 @@ const WordRows& word_rows(const Grid& g) {
         std::vector<std::pair<std::string_view, WordRows>> out;
         for (const auto& gg : tables::CPM_GRIDS) {
             WordRows w{std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
-                       std::vector<int>(tables::CPM.hdr_copies, 0)};
+                       std::vector<int>(tables::CPM.hdr_copies, 0), {}};
             for (const auto& s : tables::CPM_SPECS) {
                 if (s.grid != gg.name) continue;
                 for (bool d : {false, true})
                     for (int n = 0; n <= tables::CPM.max_data; ++n) {
                         const Layout L = layout(gg, stream_symbols(gg, n, d));
+                        w.mid.push_back(L.sync_rows[L.front]);
                         std::vector<int> r;
                         for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
                             r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
@@ -477,8 +488,8 @@ Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
     return out;
 }
 
-double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo) {
-    const auto f = g.preamble;
+double peak_ratio(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, bool mid) {
+    const auto f = mid ? g.mid_block : g.preamble;
     const Mat<double> E = shares(energies(g, x, s0, static_cast<int>(f.size()), cfo));
     std::vector<double> on(f.size());
     for (std::size_t i = 0; i < f.size(); ++i) on[i] = E[i][f[i]];
@@ -526,6 +537,55 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     if (cand.header_end <= len) return late_lock(g, x, cand);
     if (wait) return cand;
     return std::nullopt;
+}
+
+std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int64_t lo,
+                             std::optional<std::int64_t> hi) {
+    const std::int64_t T = g.T, nb = static_cast<std::int64_t>(g.mid_block.size()),
+                       len = static_cast<std::int64_t>(x.size());
+    const std::int64_t a = std::min(len, std::max<std::int64_t>(0, lo - T)),
+                       b = hi ? std::min(len, *hi + (nb + 1) * T) : len;
+    Detection d = detect(g, x.subspan(a, std::max<std::int64_t>(0, b - a)), 150.0, true, false, 0, g.mid_threshold, true);
+    d.start += a;
+    if (d.score < g.mid_threshold || !(lo <= d.start && d.start < hi.value_or(len))) return std::nullopt;
+    if (d.start + (nb + g.hdr_len) * T > len) return std::nullopt;  // its second header copy is still arriving
+    if (peak_ratio(g, x, d.start, d.cfo, true) < tables::CPM.peak_ratio) return std::nullopt;
+    // each word puts its mid block at its own row: read at the start it implies
+    const WordRows& W = word_rows(g);
+    const int copies = tables::CPM.hdr_copies;
+    const auto& rows = W.rows[copies - 1];
+    std::vector<std::pair<std::int64_t, Mat<double>>> E;
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY};
+    std::int64_t best_s = 0;
+    std::vector<double> v;
+    std::size_t k = 0;
+    for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
+        if (s.grid != g.name) continue;
+        for (bool dup : {false, true})
+            for (int n = 0; n <= tables::CPM.max_data; ++n, ++k) {
+                const std::int64_t s0 = d.start - static_cast<std::int64_t>(W.mid[k]) * T;
+                if (s0 < 0) continue;
+                auto it = std::find_if(E.begin(), E.end(), [&](const auto& e) { return e.first == s0; });
+                if (it == E.end()) {
+                    E.emplace_back(s0, shares(energies(g, x, s0, W.span[copies - 1], d.cfo)));
+                    it = E.end() - 1;
+                }
+                const auto t = header_symbols(g, header_value(s.index, n, dup));
+                const auto& r = rows[k];
+                v.resize(r.size());
+                for (std::size_t i = 0; i < r.size(); ++i) v[i] = it->second[r[i]][t[i % t.size()]];
+                const double score = np_mean(v);
+                if (score >= best.score) {  // ties: the later word (read_header)
+                    best.runner_up = best.score;
+                    best = {&s, n, dup, score, best.runner_up};
+                    best_s = s0;
+                } else if (score > best.runner_up) {
+                    best.runner_up = score;
+                }
+            }
+    }
+    if (!best.spec || best.score < g.mid_header_threshold) return std::nullopt;
+    return make_lock(g, best_s, d.cfo, d.score, best, copies);
 }
 
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {

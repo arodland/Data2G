@@ -181,7 +181,8 @@ def cpm_cpp() -> str:
         rows.append(f'    {{"{g.name}", {g.m}, {cxx(float(g.rate))}, {cxx(float(g.center))}, {cxx(float(g.bp))}, '
                     f"{cxx(float(g.clip_db))}, {g.T}, {g.bits}, {cxx(float(g.f0))}, "
                     f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.HEADER_THRESHOLD[g.name]))}, "
-                    f"{cxx(float(cpm.HEADER2_THRESHOLD[g.name]))}, "
+                    f"{cxx(float(cpm.HEADER2_THRESHOLD[g.name]))}, {cxx(float(cpm.MID_THRESHOLD[g.name]))}, "
+                    f"{cxx(float(cpm.MID_HEADER_THRESHOLD[g.name]))}, "
                     f"{cpm.hdr_len(g)}, {len(cpm.costas(g.m))}, pre_{i}, mid_{i}, hdr_{i}, "
                     f"{{{', '.join(f'{{{cxx(float(f.bp))}, {cxx(float(f.glide))}, {f.passes}}}' for f in cpm.TX_FILTERS[g.name])}}}}},\n")
 

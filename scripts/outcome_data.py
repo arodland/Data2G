@@ -106,6 +106,10 @@ def receive(y: np.ndarray, name: str) -> dict | None:
     lock = cpm.find(g, y[:int(PS.PAD_S * FS) + FS // 2 + search_span((), (s.grid,))], wait=True)
     if lock is not None and lock.get("wait"):  # its first header copy faded: both (as receive_any)
         lock = cpm.late_lock(g, y, lock) if lock["header_end"] <= len(y) else None
+    if lock is None:  # the front missed: the mid block (as receive_any)
+        lead = int(PS.PAD_S * FS) + FS // 2
+        lock = cpm.find_mid(g, y[:lead + cpm.hdr_span(g.name, 2) + g.T])
+        lock = lock if lock is not None and lock["start"] <= lead else None
     return cpm.receive(y, lock) if lock is not None else None
 
 

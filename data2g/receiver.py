@@ -95,6 +95,11 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
             lock = cpm.late_lock(cpm.GRIDS[g], y, lock) if lock["header_end"] <= len(y) else None
         if lock is not None:
             return cpm.receive(y, lock)  # a CPM lock beats a suspect OFDM header
+    for g in grids:  # the front missed: the mid block and both header copies (as Receiver._find_cpm)
+        gr = cpm.GRIDS[g]
+        lock = cpm.find_mid(gr, y[:lead + cpm.hdr_span(g, 2) + gr.T])
+        if lock is not None and lock["start"] <= lead:
+            return cpm.receive(y, lock)
     if r is None:
         # no preamble: the header copy of a burst whose head faded (as Receiver._find_copy)
         locks = [c for c in (modem.find_copy(y, b) for b in modem.HEADER_COPY_BANDS) if c is not None]
@@ -248,6 +253,9 @@ class Receiver:
         # what a trim keeps (so one still arriving survives it)
         self.min_search = search_span(self.bands, cpm_grids)
         self.keep = self.min_search + FS
+        # what a trim with nothing found holds: a CPM burst's start until its
+        # mid block and second header copy are in (find_mid)
+        self.hold = max([self.keep] + [cpm.hdr_span(g, 2) + FS for g in cpm_grids])
         from .waveform import ofdm, sync
 
         # each band's detection statistic, computed once per sample (not per search)
@@ -367,6 +375,9 @@ class Receiver:
                                   end - modem.head_samples(b) - BANDS[b].preamble_samples - self.REVISIT)
         for g in self.grids:
             self.decided[g.name] = max(self.decided.get(g.name, 0), end - search_span((), (g.name,)) - g.T)
+            # a mid block is decided once its second header copy is in
+            self.decided[g.name + "/mid"] = max(self.decided.get(g.name + "/mid", 0),
+                                                end - (len(cpm.mid_block(g)) + cpm.hdr_len(g)) * g.T - g.T)
 
     CPM_TAIL = FS // 20  # kept before a CPM burst's end (Receiver.feed): 440 ppm over a 90 s burst
     SUPERSEDE_MARGIN = 0.05  # header score a later header needs over the pending one
@@ -466,6 +477,11 @@ class Receiver:
             if not any(w["band"] == g.name and abs(w["start"] - c["start"]) < cpm.hdr_span(g.name, 1)
                        for w in self.cpm_wait):
                 self.cpm_wait.append(c)
+        for g in self.grids:  # the front missed: the mid block and both header copies
+            lock = cpm.find_mid(g, self.buf, lo=max(0, self.decided.get(g.name + "/mid", 0) - self.off),
+                                hi=len(self.buf) - (len(cpm.mid_block(g)) + cpm.hdr_len(g) - 1) * g.T)
+            if lock is not None:
+                return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
         return None
 
     def feed(self, x: np.ndarray) -> list[tuple[str, dict]]:
@@ -514,7 +530,7 @@ class Receiver:
                 if p is None:
                     p = self._find_copy()  # the preamble faded: the frame pilots and header copy
                 if p is None:
-                    self._trim(max([self.keep] + [self.off + len(self.buf) - c["first"] for c in self.cpm_wait]))
+                    self._trim(self.hold)  # (a waiting candidate's start is within it)
                     break
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window

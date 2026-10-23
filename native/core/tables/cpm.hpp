@@ -22,7 +22,7 @@ struct CpmGrid {
     int m;
     double rate, center, bp, clip_db;
     int T, bits;
-    double f0, sync_threshold, header_threshold, header2_threshold;
+    double f0, sync_threshold, header_threshold, header2_threshold, mid_threshold, mid_header_threshold;
     int hdr_len, costas_len;
     std::span<const std::uint8_t> preamble, mid_block, header_tones;
     CpmTxFilter tx[3];

@@ -155,11 +155,11 @@ def test_outcome_ensemble_averages_member_probabilities(tmp_path):
 
 def test_cpm_airtime_counts_a_duplicated_control_as_control():
     """ARQ_DUP's second control copy is a short control codeword: an
-    fsk32r62-r1/2 x10 burst is 30.4 s on air, not the 32.6 s of 9 data."""
+    fsk32r62-r1/2 x10 burst is 28.1 s on air, not the 30.1 s of 9 data."""
     from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask, dup_ctl
     g = G.GearShifter()
-    assert abs(g.airtime("fsk32r62-r1/2", 10, True) - 30.4) < 0.1
-    assert abs(g.airtime("fsk32r62-r1/2", 10) - 32.6) < 0.1
+    assert abs(g.airtime("fsk32r62-r1/2", 10, True) - 28.1) < 0.1
+    assert abs(g.airtime("fsk32r62-r1/2", 10) - 30.1) < 0.1
     ctl, data = [Slot(ctl_mask(0, 0), 0, b"")], [Slot(data_mask(0, i), 0, b"") for i in range(8)]
     assert dup_ctl(TxBurst("fsk32r62-r1/2", ctl + [Slot(ctl_mask(0, 0), 1, b"")] + data, 0))
     assert not dup_ctl(TxBurst("fsk32r62-r1/2", ctl + data, 0))
