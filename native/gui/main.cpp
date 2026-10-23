@@ -18,6 +18,8 @@ int main(int argc, char** argv) {
     QApplication qapp(argc, argv);  // takes Qt's own flags out of argv first
     QCoreApplication::setOrganizationName(QStringLiteral("Data2G"));
     QCoreApplication::setApplicationName(QStringLiteral("data2g-gui"));
+    // Wayland's app_id: the compositor finds the icon through the .desktop file
+    QGuiApplication::setDesktopFileName(QStringLiteral("org.cleverdomain.data2g"));
     QSettings store;
     const app::Args a = app::parse(argc, argv, gui::load_settings(store), "data2g-gui");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
