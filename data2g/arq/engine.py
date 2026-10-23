@@ -49,6 +49,10 @@ EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_M
 # burst), which the sim never measures: none. Missed replies read -9..-14 dB at
 # MPP -8, empty windows -21..-36 (the clamp); training's lowest is -9.2.
 MISSED_MIN_DB = -18.0
+# _carrier_hold: a reply on air reads at least this (NoiseProfile.span_z) over the
+# 3.5 s window. AWGN: noise alone at most 4.1 (750 windows); 16/8-tone CPM at
+# -14 dB median 7, at -11 dB all over 9; fsk32r62 and w48 at -11 median 5.6, at -8 over 7.9
+CARRIER_Z = 5.0
 # a measured burst's energy reading is at least its snr_est less this (_energy).
 # Sessions read under snr_est - 3 in 0.3% of bursts (gs data, w and w48):
 # right at snr_est (the floor binding in 8.5%), MPG +12 lost 4.1% (11/12
@@ -307,6 +311,7 @@ class Engine:
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
             if not self.receiver.busy and not held:  # a burst still arriving holds any reply (half duplex)
+                self._carrier_hold(t)
                 burst = self.session.poll(t)
                 self._missed_energy()
                 self._id_check(t)
@@ -422,6 +427,27 @@ class Engine:
         if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
             return self.kiss.cap
         return self.session.cap
+
+    def _carrier_hold(self, t: float):
+        """A reply timeout due with no header heard: if the window since my
+        burst ended reads as a reply on air (CARRIER_Z, the energy alone),
+        wait out the reply I asked for instead of polling over it. A weak CPM
+        data reply's header is missed and policy.reply_hold covers only a
+        control-only one. Once per timeout: the new deadline is past the bound."""
+        s = self.session
+        exp = s.policy.expected_reply()
+        if s._deadline is None or t < s._deadline or self._tx_end is None or exp is None:
+            return
+        start = self._tx_end + EXPECT_REPLY_S
+        until = start + exp[1] + s.t_turn  # the reply's end, as on_header waits for one heard
+        if until <= t:
+            return
+        from . import predictor as P
+
+        z = self.noise.span_z(self.noise.span_spectra(start, t), *P.band_span_hz(MODES[exp[0]].band))
+        if z is not None and z >= CARRIER_Z:
+            log.info("no reply header, but energy on air: holding the timeout %.1f s", until - t)
+            s._deadline = until
 
     def _missed_energy(self):
         """A timeout (no reply heard): the energy where the reply should

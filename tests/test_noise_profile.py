@@ -91,17 +91,22 @@ def test_native_matches(native, native_side):
     t = np.arange(n) / FS
     x = rng.normal(0, 0.1, n) * (1 + 0.5 * (t > 15)) + ((t % 4) < 1) * 0.2 * np.sin(2 * np.pi * 600 * t)
     x[rng.integers(0, n, 200)] += 3.0  # impulses
-    outs = []
+    outs, ps = [], []
     for cls in (NoiseProfile, native.receiver.NoiseProfile):
         p = cls()
         p.mark(5.0, 7.5)
         feed(p, x)
         outs.append(p.snapshot())
+        ps.append(p)
     py, cpp = outs
     assert cpp["noise_blocks"] == py["noise_blocks"]
     np.testing.assert_allclose(cpp["noise_db"], py["noise_db"], atol=1e-9)
     np.testing.assert_allclose(cpp["noise_tail_db"], py["noise_tail_db"], atol=1e-9)
     assert cpp["impulses_per_min"] == pytest.approx(py["impulses_per_min"]) and py["impulses_per_min"] > 0
+    for start, end, lo, hi in ((16.0, 19.5, 400, 900), (25.0, 28.5, 950, 2100)):  # the 600 Hz tone's band, and not
+        zp = ps[0].span_z(ps[0].span_spectra(start, end), lo, hi)
+        assert ps[1].span_z(start, end, lo, hi) == pytest.approx(zp, rel=1e-9)
+    assert ps[0].span_z(ps[0].span_spectra(16.0, 19.5), 400, 900) > 5 > ps[0].span_z(ps[0].span_spectra(25.0, 28.5), 950, 2100)
 
 
 def test_recordings_carry_it(tmp_path):

@@ -620,6 +620,7 @@ Engine::Done Engine::process(Block& b) {
         TxBurstPtr main;
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
+            carrier_hold(t);
             auto burst = session_->poll(t);
             missed_energy();
             id_check(t);
@@ -760,6 +761,23 @@ int Engine::rx_cap() const {
     // the session's (before a CONNECT is answered, my own), or between sessions the KISS link's
     if (cfg_.kiss && idle()) return cfg_.kiss->cap;
     return session_->cap;
+}
+
+void Engine::carrier_hold(double t) {
+    // a timeout due, no header heard, but the window since my burst reads as a reply on air: wait out the
+    // reply I asked for instead of polling over it (engine.py _carrier_hold)
+    auto& s = *session_;
+    const auto exp = s.policy->expected_reply();
+    if (!s.deadline || t < *s.deadline || !tx_end_ || !exp) return;
+    const double start = *tx_end_ + EXPECT_REPLY_S;
+    const double until = start + exp->second + s.t_turn;  // the reply's end, as on_header waits for one heard
+    if (until <= t) return;
+    const auto [lo, hi] = band_span_hz(mode_at(exp->first).band);
+    const auto z = noise_.span_z(noise_.span_spectra(start, t), lo, hi);
+    if (z && *z >= CARRIER_Z) {
+        log_write(LOG, INFO, format("no reply header, but energy on air: holding the timeout %.1f s", until - t));
+        s.deadline = until;
+    }
 }
 
 void Engine::missed_energy() {

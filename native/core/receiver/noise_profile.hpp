@@ -51,6 +51,9 @@ public:
     // median, or floor_spectra's), excess over 1, in SNR_REF_BW_HZ; dB.
     std::optional<double> span_snr_db(const std::vector<Spectrum>& spectra, double lo, double hi,
                                       const std::vector<Spectrum>* floor_spectra = nullptr) const;
+    // the span's in-band power over the floor in the kept blocks' own spread (median, MAD), scaled to
+    // the span (receiver.py NoiseProfile.span_z): a carrier sense, the same test in any band and span
+    std::optional<double> span_z(const std::vector<Spectrum>& spectra, double lo, double hi) const;
 
 private:
     struct Block {
@@ -70,6 +73,8 @@ private:
     std::deque<std::array<double, 5>> kept_;
     std::deque<int> kept_impulses_;
     std::deque<Spectrum> kept_spec_;
+    static std::vector<std::size_t> band_bins(double lo, double hi);  // rfft bins in lo..hi Hz
+    static double band_mean(const Spectrum& s, const std::vector<std::size_t>& band);
     std::deque<Recent> recent_;
 };
 
