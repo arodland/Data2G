@@ -1,6 +1,7 @@
 # Build, sign and publish a release. Lifted from SSTVAE, triggered by a tag.
 #
-#   1. Bump the version in native/CMakeLists.txt and pyproject.toml, commit.
+#   1. tools/bump_version.sh X.Y.Z: native/CMakeLists.txt, pyproject.toml
+#      and uv.lock, committed as "Release vX.Y.Z".
 #   2. Tag it vX.Y.Z and push the tag (or run this by hand with the tag).
 #   3. This checks the tag against both declared versions, creates a draft
 #      release, builds and signs all five platforms with the same workflow
