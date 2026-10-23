@@ -117,6 +117,9 @@ void bind_receiver(py::module_& m) {
             p.feed({x.data(), static_cast<std::size_t>(x.size())}, t_start);
         })
         .def("mark", &receiver::NoiseProfile::mark)
+        .def("span_z", [](const receiver::NoiseProfile& p, double start, double end, double lo, double hi) {
+            return p.span_z(p.span_spectra(start, end), lo, hi);  // engine.py's span_z(span_spectra(start, end), lo, hi)
+        })
         .def("snapshot", [](const receiver::NoiseProfile& p) -> py::object {
             const auto s = p.snapshot();
             if (!s) return py::none();
