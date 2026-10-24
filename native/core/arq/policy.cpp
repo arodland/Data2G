@@ -13,6 +13,14 @@
 
 namespace data2g::arq {
 
+int bias_consist() {
+    static const int n = [] {
+        const char* v = std::getenv("DATA2G_BIAS_CONSIST");
+        return v && *v ? std::atoi(v) : 0;
+    }();
+    return n;
+}
+
 namespace {
 
 // Python's round(x, 2): the correctly rounded decimal, ties to even.
@@ -25,6 +33,20 @@ double round2(double x) {
 double logit_shift(double q, double b) {
     q = std::clamp(q, 1e-6, 1 - 1e-6);
     return 1 / (1 + std::exp(-(std::log(q / (1 - q)) + b)));
+}
+
+// policy.py bias_step: the step for `surprise`, scaled by |sum| / sum |.| of
+// the mode's last bias_consist() surprises (this one included)
+double bias_step(std::map<std::string, std::vector<double>, std::less<>>& hist, const std::string& key,
+                 double surprise) {
+    const int n = bias_consist();
+    if (!n) return BIAS_STEP * surprise;
+    auto& h = hist[key];
+    h.push_back(surprise);
+    if (static_cast<int>(h.size()) > n) h.erase(h.begin(), h.end() - n);
+    double sum = 0, tot = 0;
+    for (double x : h) sum += x, tot += std::abs(x);
+    return BIAS_STEP * surprise * (tot > 0 ? std::abs(sum) / tot : 1.0);
 }
 
 double get(const GearShifter::Map& m, std::string_view k) {
@@ -207,9 +229,10 @@ void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::
     const bool ok = usable ? *usable : decoded > 0;
     const auto [pb, p] = it->second;
     const std::string key(submode);
-    bias_burst[key] = std::clamp(get(bias_burst, key) + BIAS_STEP * (ok - pb), -BIAS_MAX, BIAS_MAX);
+    bias_burst[key] = std::clamp(get(bias_burst, key) + bias_step(surprises_burst, key, ok - pb), -BIAS_MAX, BIAS_MAX);
     if (!ok || sent == 0) return;
-    bias[key] = std::clamp(get(bias, key) + BIAS_STEP * (static_cast<double>(decoded) / sent - p), -BIAS_MAX, BIAS_MAX);
+    bias[key] = std::clamp(get(bias, key) + bias_step(surprises, key, static_cast<double>(decoded) / sent - p),
+                           -BIAS_MAX, BIAS_MAX);
 }
 
 GearRecommendation GearShifter::recommend(const StationView& st) {

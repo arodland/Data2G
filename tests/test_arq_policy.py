@@ -129,6 +129,18 @@ def test_online_bias_follows_outcomes():
     assert list(g.bias) == ["qpsk-r1/2"]  # per mode: qpsk-r1/3 is not vouched for
 
 
+def test_online_bias_steps_follow_consistent_surprises(monkeypatch):
+    """BIAS_CONSIST: same-sign surprises keep the full step, alternating ones
+    shrink it (the C++ twin: scripts/loss_study.py under with_native vs --skip gear)."""
+    monkeypatch.setattr(G, "BIAS_CONSIST", 4)
+    steady, noisy = {}, {}
+    assert sum(G.bias_step(steady, "m", -0.5) for _ in range(4)) == -2.0  # four full steps
+    total = sum(G.bias_step(noisy, "m", x) for x in (-0.5, 0.5) * 2)  # -0.5, +0.5 x 0, -0.5 x 1/3, +0.5 x 0
+    assert abs(total + 2 / 3) < 1e-9 and len(noisy["m"]) == 4
+    monkeypatch.setattr(G, "BIAS_CONSIST", 0)
+    assert G.bias_step({}, "m", -0.5) == -0.5 * G.BIAS_STEP
+
+
 def test_outcome_ensemble_averages_member_probabilities(tmp_path):
     """scripts/train_outcome.py --ensemble: members' files in one, loaded
     as an ensemble whose output is the logit of the mean probability."""
