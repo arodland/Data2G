@@ -16,7 +16,7 @@ namespace data2g::arq {
 int bias_consist() {
     static const int n = [] {
         const char* v = std::getenv("DATA2G_BIAS_CONSIST");
-        return v && *v ? std::atoi(v) : 0;
+        return v && *v ? std::atoi(v) : 4;
     }();
     return n;
 }

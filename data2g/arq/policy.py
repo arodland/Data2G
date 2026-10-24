@@ -50,8 +50,11 @@ BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound
 # MPP 0's overrated w48-qpsk-r1/3, BIAS_FIX), near 0 when they alternate (fades
 # the model already prices: a full step chases them). A global step below 1 won
 # MPG/MPD +1..6% but lost MPP 0 (runs/policy_search, branch policy-search).
+# N=4 against off, 29 cells x 12 seeds (runs/bias_consist): +0.7% mean on
+# seeds 0-11 (MPG 0 +7.3%, MPD 0 +4.8%; MPP 0 -3.4%), +1.2% on 144-155 (MPP
+# -6 +8.0%, MPD slow +7.4%, MPP 0 +1.9%; no cell below 2 SE); N=8 alike.
 # 0: a full step always. DATA2G_BIAS_CONSIST: N (both shifters read it, so it stays native).
-BIAS_CONSIST = int(os.environ.get("DATA2G_BIAS_CONSIST") or 0)
+BIAS_CONSIST = int(os.environ.get("DATA2G_BIAS_CONSIST") or 4)
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft

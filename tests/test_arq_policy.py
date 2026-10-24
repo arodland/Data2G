@@ -184,8 +184,9 @@ def test_control_is_not_a_decoded_data_codeword():
     g.predicted = {"qpsk-r1/3": (0.5, 0.9)}
     g.outcome("qpsk-r1/3", 0, 7, usable=True)
     assert g.bias_burst["qpsk-r1/3"] > 0 and g.bias["qpsk-r1/3"] < -0.8
-    g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only
-    assert g.bias_burst["qpsk-r1/3"] < 0.5 and g.bias["qpsk-r1/3"] < -0.8
+    cw = g.bias["qpsk-r1/3"]
+    g.outcome("qpsk-r1/3", 0, 0, usable=False)  # control lost: the burst bias only (down, or held: BIAS_CONSIST)
+    assert g.bias_burst["qpsk-r1/3"] <= 0.5 and g.bias["qpsk-r1/3"] == cw
 
 
 def test_cpm_cap_reply_hold_and_link_lost_price():

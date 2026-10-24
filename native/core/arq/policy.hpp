@@ -26,7 +26,7 @@ inline constexpr double TURN_S = 1.3;
 inline constexpr double TIMEOUT_S = 1.0 + 1.0 + 1.5;
 inline constexpr double PREV_MAX_S = 30.0;
 inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
-int bias_consist();  // policy.py BIAS_CONSIST: DATA2G_BIAS_CONSIST, read once (0: a full step)
+int bias_consist();  // policy.py BIAS_CONSIST: DATA2G_BIAS_CONSIST, read once (default 4; 0: a full step)
 inline constexpr double DUP_BELOW = 0.9;
 inline constexpr double CPM_SIZE_SCALE = 4.0;
 inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
