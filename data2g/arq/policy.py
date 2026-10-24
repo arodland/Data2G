@@ -44,8 +44,20 @@ TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost
 # gave w48-64l-r1/2 0.34-0.55 of usable bursts at MPG -6 (0.07 with it),
 # and escalation's long gaps sent 12 s 64-ary bursts that all failed
 PREV_MAX_S = 30.0
-BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
-DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
+# DATA2G_BIAS_STEP, DATA2G_DUP_BELOW (studies): these instead
+BIAS_STEP = float(os.environ.get("DATA2G_BIAS_STEP") or 1.0)  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
+DUP_BELOW = float(os.environ.get("DATA2G_DUP_BELOW") or 0.9)  # predicted P(burst usable) under which control is duplicated
+# DATA2G_BIAS_STEP_DOWN / _UP (studies): the step when the outcome fell short of /
+# beat the prediction (default BIAS_STEP): MPP 0 needs the downward correction
+# (w48-qpsk-r1/3, BIAS_FIX), while fading cells lost to steps that chased noise
+# (runs/policy_search/knobs1: lower BIAS_STEP, MPG/MPP +15/slow +1..6%, MPP 0 -4.7%)
+BIAS_STEP_DOWN = float(os.environ.get("DATA2G_BIAS_STEP_DOWN") or BIAS_STEP)
+BIAS_STEP_UP = float(os.environ.get("DATA2G_BIAS_STEP_UP") or BIAS_STEP)
+
+
+def bias_step(surprise: float) -> float:
+    """The online correction's logit step for an outcome minus its prediction."""
+    return (BIAS_STEP_UP if surprise > 0 else BIAS_STEP_DOWN) * surprise
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
@@ -422,13 +434,13 @@ class GearShifter(L.Policy):
         if usable is None:
             usable = decoded > 0
         pb, p = p
-        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * (usable - pb),
+        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + bias_step(usable - pb),
                                                  -BIAS_MAX, BIAS_MAX))
         if not usable or sent == 0:
             return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
-        self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
+        self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + bias_step(decoded / sent - p), -BIAS_MAX, BIAS_MAX))
 
     def observe_energy(self, snr_db: float, now: float):
         """A peer burst's in-band SNR from its power alone (heard or not)."""
