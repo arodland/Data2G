@@ -1,14 +1,17 @@
 """Optuna search over the shifter's decision knobs (env study toggles),
 scored by paired loss studies against the shipped values on the same seeds.
 
-    python scripts/policy_search.py --name knobs1 --trials 40
-    python scripts/policy_search.py --name knobs1 --confirm 17 --seed0 144
+    python scripts/policy_search.py --name knobs2 --trials 40
+    python scripts/policy_search.py --name knobs2 --confirm 17 --seed0 144
 
 Each trial is one loss_study.py run (tools/with_native.py; any toggle set
 keeps the shifter in Python, so the baseline sets the shipped values
 explicitly and takes the same path). Two objectives, both maximised:
-the mean per-cell % change in delivered bps, and the worst cell's paired
-t (bottom cells move 4-10% from noise alone, so a % floor would chase it).
+the mean per-cell % change in delivered bps, and the worst cell's upper
+bound, % change + 2 SE: a regression must be material and beyond noise
+(bottom cells move 4-10% from noise alone, so a % floor would chase it;
+near-deterministic AWGN cells gave -0.4% a paired t of -2.8, so a t floor
+chased those, runs/policy_search/knobs1).
 Optuna keeps the Pareto front. The search reuses its seeds every trial, so
 it fits their noise: confirm a pick on untouched seeds (--confirm).
 
@@ -36,23 +39,19 @@ CELLS = ("awgn:0,mpg:0,mpg:8,mpp:-4,mpp:0,mpp:8,mpd:-4,mpd:0,mpd:8,mpd:-6,mpp:-8
          "mpp:15,mpg:-4,awgn:-4,awgn:4,awgn:8,mpg:4,mpg:12,mpp:-10,mpd:-8,"
          "awgn:4:slow,awgn:15:slow,mpg:8:slow,mpp:0:slow,mpd:0:slow")
 
-# The installed model's decision knobs, at their shipped values (predictor.LOGIT_OFFSETS,
-# policy.CPM_FLOOR_DEFAULT, policy.NOISE_RULE, .BIAS_STEP, .DUP_BELOW; the qpsk-r1/5 fast-fading bias is baked
-# into the distilled CNP, so cond_qpsk is on top of it).
-SHIPPED = dict(off_16qam=-1.0, off_256l=-0.5, cond_qpsk=0.0, floor_snr=-4.0, floor_s=1.0, noise_rule=1.0,
-               bias_step=1.0, dup_below=0.9)
+# The online correction's down/up steps (policy.BIAS_STEP_DOWN/_UP) and the
+# w48-16qam-r1/2 logit offset (predictor.LOGIT_OFFSETS), at their shipped
+# values; the other knobs knobs1 searched (n10-256l offset, a qpsk-r1/5
+# fast-fading offset, the CPM floor, the noise rule, DUP_BELOW) moved nothing
+# beyond noise and stay shipped.
+SHIPPED = dict(step_down=1.0, step_up=1.0, off_16qam=-1.0)
 
 
 def suggest(t):
-    p = dict(off_16qam=t.suggest_float("off_16qam", -2.5, 0.5), off_256l=t.suggest_float("off_256l", -2.0, 0.5),
-             cond_qpsk=t.suggest_float("cond_qpsk", -1.5, 1.0), floor_snr=t.suggest_float("floor_snr", -7.0, -1.0),
-             floor_s=t.suggest_float("floor_s", 0.0, 2.0), noise_rule=t.suggest_float("noise_rule", 0.0, 2.0),
-             bias_step=t.suggest_float("bias_step", 0.0, 2.5), dup_below=t.suggest_float("dup_below", 0.5, 1.0))
-    return {"DATA2G_LOGIT_OFFSETS": f"w48-16qam-r1/2:{p['off_16qam']:.3f},n10-256l-r3/4:{p['off_256l']:.3f}",
-            "DATA2G_COND_OFFSETS": f"0.7:-2:qpsk-r1/5:{p['cond_qpsk']:.3f}",
-            "DATA2G_CPM_FLOOR": f"snr:{p['floor_snr']:.3f}:{p['floor_s']:.3f}",
-            "DATA2G_NOISE_RULE": f"{p['noise_rule']:.3f}",
-            "DATA2G_BIAS_STEP": f"{p['bias_step']:.3f}", "DATA2G_DUP_BELOW": f"{p['dup_below']:.3f}"}
+    p = dict(step_down=t.suggest_float("step_down", 0.0, 2.5), step_up=t.suggest_float("step_up", 0.0, 2.5),
+             off_16qam=t.suggest_float("off_16qam", -2.5, 0.5))
+    return {"DATA2G_BIAS_STEP_DOWN": f"{p['step_down']:.3f}", "DATA2G_BIAS_STEP_UP": f"{p['step_up']:.3f}",
+            "DATA2G_LOGIT_OFFSETS": f"w48-16qam-r1/2:{p['off_16qam']:.3f},n10-256l-r3/4:-0.5"}
 
 
 def run(out: Path, env: dict, a, seed0: int):
@@ -72,7 +71,7 @@ def run(out: Path, env: dict, a, seed0: int):
 
 
 def score(base: Path, arm: Path):
-    """-> (mean per-cell % change, worst cell's paired t, {cell: (%, t)})."""
+    """-> (mean per-cell % change, worst cell's % + 2 SE, {cell: (%, paired t, % + 2 SE)})."""
     A, B = paired_loss.delivered(base), paired_loss.delivered(arm)
     cells = {}
     for k in sorted(A):
@@ -82,9 +81,10 @@ def score(base: Path, arm: Path):
             continue
         d = y - x
         se = d.std(ddof=1) / np.sqrt(len(d))
-        cells[f"{k[0]}{k[1]:+.0f}"] = (100 * d.mean() / x.mean(), d.mean() / se if se > 0 else 0.0)
+        cells[f"{k[0]}{k[1]:+.0f}"] = (100 * d.mean() / x.mean(), d.mean() / se if se > 0 else 0.0,
+                                       100 * (d.mean() + 2 * se) / x.mean())
     pct = np.array([v[0] for v in cells.values()])
-    return float(pct.mean()), float(min(v[1] for v in cells.values())), cells
+    return float(pct.mean()), float(min(v[2] for v in cells.values())), cells
 
 
 def main():
@@ -132,13 +132,13 @@ def main():
         run(out, env, a, a.seed0)
         mean, worst, cells = score(base, out)
         trial.set_user_attr("cells", cells)
-        print(f"trial {trial.number}: mean {mean:+.2f}%, worst t {worst:+.2f}  {env}", flush=True)
+        print(f"trial {trial.number}: mean {mean:+.2f}%, worst cell + 2 SE {worst:+.2f}%  {env}", flush=True)
         return mean, worst
 
     study.optimize(objective, n_trials=a.trials)
-    print("\nPareto front (mean %, worst t):")
+    print("\nPareto front (mean %, worst cell % + 2 SE):")
     for t in sorted(study.best_trials, key=lambda t: -t.values[0]):
-        print(f"  trial {t.number}: {t.values[0]:+.2f}%, {t.values[1]:+.2f}  {t.params}")
+        print(f"  trial {t.number}: {t.values[0]:+.2f}%, {t.values[1]:+.2f}%  {t.params}")
 
 
 if __name__ == "__main__":
