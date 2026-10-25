@@ -200,6 +200,11 @@ void Host::command(std::string_view line, std::string_view peer) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
         e.set_chat(a0 == "ON");
+    } else if (cmd == "DATA2G" && (a0 == "ON" || a0 == "OFF")) {
+        data2g = a0 == "ON";
+    } else if (cmd == "CLEANTXBUFFER") {
+        out_cmd.push_back(clean());
+        return;
     } else if (cmd == "BCAST" && e.kiss()) {
         bcast_ = true;
         out_cmd.push_back(bcast_command(args).value_or("WRONG"));
@@ -220,13 +225,25 @@ void Host::command(std::string_view line, std::string_view peer) {
     out_cmd.emplace_back(ok ? "OK" : "WRONG");
 }
 
+// VARA's replies: BUFFEREMPTY with nothing queued, FAILED (its trailing space
+// too) outside a session, else OK. Bytes on air but unacked stay in limbo
+// until an ACK says which arrived (host.py has the story). DATA2G ON: OK
+// dropped limbo, and once settled CLEANTXBUFFER SETTLED delivered dropped.
+std::string Host::clean() {
+    auto& s = engine.session();
+    if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
+    if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
+    const auto [dropped, limbo] = s.station->tx.clean();
+    return data2g ? "CLEANTXBUFFER OK " + std::to_string(dropped) + " " + std::to_string(limbo) : "CLEANTXBUFFER OK";
+}
+
 void Host::client_gone() {
     auto& e = engine;
     arq::log_write(LOG, INFO, "command client gone");
     const auto s = e.session().state;
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
-    listening = false;
+    listening = data2g = false;
     accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
@@ -255,9 +272,9 @@ void Host::data_in(arq::ByteView data) {
     buffer_.reset();
 }
 
-Host::Queued Host::queued() {
+Host::Queued Host::queued(bool vara) {
     const auto& s = engine.session();
-    const auto [unsent, unacked] = s.queued_bytes();
+    const auto [unsent, unacked] = s.queued_bytes(vara);
     return {unsent, unacked, static_cast<bool>(s.station)};
 }
 
@@ -313,11 +330,17 @@ void Host::after_step(bool ptt) {
     // So while more than the next burst waits, BUFFER is the unsent bytes
     // past it (the credit); once it has all gone, 1 until the peer acks it
     // all. --buffer-credit 0 reports the plain VARA figure. (host.py has the
-    // full story.) CHAT ON also reports it: the client watches BUFFER fall to
-    // see which of its messages were ACKed.
-    const Queued q = queued();
+    // full story.) CHAT ON and DATA2G ON also report it: the client watches
+    // BUFFER fall to see which of its messages were ACKed.
+    if (auto& st = e.session().station; st && st->tx.cleaned) {
+        if (data2g)
+            out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(st->tx.cleaned->first) + " " +
+                              std::to_string(st->tx.cleaned->second));
+        st->tx.cleaned.reset();
+    }
+    const Queued q = queued(!data2g);
     std::int64_t buffered = q.unacked;
-    if (q.station && buffer_credit != 0 && !engine.session().chat) {
+    if (q.station && buffer_credit != 0 && !engine.session().chat && !data2g) {
         if (auto c = next_capacity()) {
             std::int64_t credit = *c;
             if (buffer_credit) credit = std::min<std::int64_t>(credit, *buffer_credit);

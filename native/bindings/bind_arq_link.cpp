@@ -393,7 +393,11 @@ void bind_arq_link(py::module_& m) {
         .def("pending", &TxSide::pending)
         .def("unsent", &TxSide::unsent)
         .def("unacked", &TxSide::unacked)
-        .def("missing", &TxSide::missing);
+        .def("missing", &TxSide::missing)
+        .def("clean", &TxSide::clean)
+        .def("before_mark", &TxSide::before_mark)
+        .def_readonly("limbo", &TxSide::limbo)
+        .def_readwrite("cleaned", &TxSide::cleaned);
 
     py::class_<RxSide>(a, "RxSide")
         .def_readonly("cum", &RxSide::cum)
@@ -547,10 +551,10 @@ void bind_arq_link(py::module_& m) {
         .def("disconnect", &Session::disconnect)
         .def("write", [](Session& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Session& s) { return pyb(s.read()); })
-        .def("queued_bytes", [](const Session& s) {
-            const auto [unsent, unacked] = s.queued_bytes();
+        .def("queued_bytes", [](const Session& s, bool vara) {
+            const auto [unsent, unacked] = s.queued_bytes(vara);
             return py::make_tuple(unsent, unacked);
-        })
+        }, py::arg("vara") = false)
         .def("poll", [](Session& s, double now) {
             auto* p = dynamic_cast<PySession*>(&s);
             return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));

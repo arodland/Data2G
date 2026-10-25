@@ -33,6 +33,7 @@ Native: arq/link.hpp (Station, TxSide, RxSide).
 
 import logging
 import os
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -184,9 +185,16 @@ class TxSide:
         # padding): compression's history, from offset hist_off on
         self.hist = bytearray()
         self.hist_off = 0
+        self.recs: list[int] = []  # stream offsets where records start, from buf_off on (clean() cuts only there)
+        self.mark = 0  # stream offset of the first byte written after the last clean()
+        self.limbo: tuple[int, int] | None = None  # clean(): (host bytes on air, unacked; their stream end)
+        self.cleaned: tuple[int, int] | None = None  # the limbo's fate, host bytes (delivered, dropped), for the host
 
     def write(self, data: bytes):
-        self.buf += F.to_records(data)
+        r = F.to_records(data)
+        end = self.buf_off + len(self.buf)
+        self.recs += range(end, end + len(r), 256)
+        self.buf += r
 
     def pending(self) -> bool:
         return bool(self.cws) or self.unsent() > 0
@@ -215,10 +223,13 @@ class TxSide:
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
         del self.buf[: keep - self.buf_off]
         self.buf_off = keep
+        del self.recs[:bisect_left(self.recs, keep)]
         keep = min((c.cstart for c in self.cws.values()), default=self.hist_off + len(self.hist)) - F.HIST
         if keep > self.hist_off:
             del self.hist[: keep - self.hist_off]
             self.hist_off = keep
+        if self.limbo is not None and (lo := self._limbo_start()) == self.limbo[1]:
+            self._settle(lo)  # all of it acked
         return advanced
 
     def new_codeword(self, submode: str, pb: int, compress: bool, bn: int) -> Codeword:
@@ -255,13 +266,63 @@ class TxSide:
         re-sliced codewords cited the pre-abandon reply). No resends until
         a reply to a post-abandon burst arrives, as before the first reply."""
         a = self.base
+        lo = self._limbo_start()
         if a in self.cws:
             self.stream_end = self.cws[a].start
             del self.hist[self.cws[a].cstart - self.hist_off:]
         self.cws.clear()
         self.next = a
         self.ack = None
+        if self.limbo is not None:
+            self._settle(lo)  # abandons are made against an exact ACK: nothing from the base on arrived
         return a
+
+    def clean(self) -> tuple[int, int]:
+        """CLEANTXBUFFER: drop the bytes never on air, but finish a record
+        begun on air (the peer would join the next to it). -> host bytes
+        (dropped, newly in limbo: on air, not acked). The limbo is settled by
+        the next ACK that covers it or the next abandon (Station abandons for it)."""
+        end = self.buf_off + len(self.buf)
+        cut = self._rec(self.stream_end)
+        dropped = self._host(cut, end)
+        self._cut(cut, end)
+        lo = self._limbo_start()
+        old, lo = (0, lo) if self.limbo is None else (self.limbo[0], max(lo, self.limbo[1]))
+        new = self._host(lo, cut)
+        self.limbo = (old + new, cut) if old or new else None
+        self.mark = cut
+        return dropped, new
+
+    def before_mark(self) -> tuple[int, int]:
+        """(unsent, unacked) stream bytes written before the last clean()."""
+        return max(0, self.mark - self.stream_end), max(0, self.mark - self.buf_off)
+
+    def _rec(self, x: int) -> int:
+        """The first record start at or after stream offset x (the stream's end if none)."""
+        i = bisect_left(self.recs, x)
+        return self.recs[i] if i < len(self.recs) else self.buf_off + len(self.buf)
+
+    def _host(self, lo: int, hi: int) -> int:
+        """Host bytes in the whole records from stream offset lo to hi."""
+        return hi - lo - (bisect_left(self.recs, hi) - bisect_left(self.recs, lo))
+
+    def _cut(self, lo: int, hi: int):
+        """Delete whole records [lo, hi), all past stream_end."""
+        del self.buf[lo - self.buf_off:hi - self.buf_off]
+        self.recs[bisect_left(self.recs, lo):] = [r - (hi - lo) for r in self.recs[bisect_left(self.recs, hi):]]
+
+    def _limbo_start(self) -> int:
+        """Where the limbo's unacked records begin (its end: none)."""
+        cut = self.limbo[1] if self.limbo is not None else self._rec(self.stream_end)
+        return min(self._rec(self.cws[self.base].start), cut) if self.base in self.cws else cut
+
+    def _settle(self, lo: int):
+        """The limbo from `lo` on never arrived: drop it."""
+        total, cut = self.limbo
+        dropped = self._host(lo, cut)
+        self._cut(lo, cut)
+        self.mark -= cut - lo
+        self.limbo, self.cleaned = None, (total - dropped, dropped)
 
 
 class RxSide:
@@ -473,7 +534,9 @@ class Station:
         if not fresh:
             return False
         reslice = any(c.submode != submode for c in self.tx.cws.values())
-        if stale and (self.resync_due or reslice):
+        # CLEANTXBUFFER's limbo: the exact ACK says the rest never arrived (TxSide.abandon drops it)
+        limbo = self.tx.limbo is not None
+        if stale and (self.resync_due or reslice or limbo):
             # answering a repeat of the peer burst I last answered: its ACK
             # may predate my last burst, so it may not abandon (§4). Control
             # only until a reply to this one; the resync waits for it too.
@@ -481,7 +544,7 @@ class Station:
         if self.resync_due:
             self.resync_due = False
             self._start_abandon(1)
-        elif reslice:
+        elif reslice or limbo:
             self._start_abandon(0)  # a resend must keep its submode (§4)
         return True
 

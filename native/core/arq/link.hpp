@@ -116,6 +116,12 @@ public:
     std::int64_t acked = 0, acked_wire = 0, acked_plain = 0;
     Bytes hist;
     std::int64_t hist_off = 0;
+    std::vector<std::int64_t> recs;  // stream offsets where records start, from buf_off on (clean() cuts only there)
+    std::int64_t mark = 0;           // stream offset of the first byte written after the last clean()
+    // clean(): host bytes on air and unacked, and their stream end
+    std::optional<std::pair<std::int64_t, std::int64_t>> limbo;
+    // the limbo's fate, host bytes (delivered, dropped), for the host
+    std::optional<std::pair<std::int64_t, std::int64_t>> cleaned;
 
     void write(ByteView data);
     bool pending() const;
@@ -127,6 +133,22 @@ public:
     Codeword& new_codeword(const std::string& submode, int pb, bool compress, std::int64_t bn);
     std::vector<std::int64_t> missing() const;
     std::int64_t abandon();
+    // CLEANTXBUFFER: drop the bytes never on air, but finish a record begun
+    // on air. -> host bytes (dropped, newly in limbo: on air, not acked),
+    // settled by the next ACK that covers them or the next abandon.
+    std::pair<std::int64_t, std::int64_t> clean();
+    // (unsent, unacked) stream bytes written before the last clean()
+    std::pair<std::int64_t, std::int64_t> before_mark() const {
+        return {std::max<std::int64_t>(0, mark - stream_end), std::max<std::int64_t>(0, mark - buf_off)};
+    }
+
+private:
+    std::int64_t end() const { return buf_off + static_cast<std::int64_t>(buf.size()); }
+    std::int64_t rec_at(std::int64_t x) const;                        // the first record start at or after x (end() if none)
+    std::int64_t host_bytes(std::int64_t lo, std::int64_t hi) const;  // in the whole records [lo, hi)
+    void cut(std::int64_t lo, std::int64_t hi);                       // delete whole records [lo, hi), past stream_end
+    std::int64_t limbo_start() const;                                 // where the limbo's unacked records begin
+    void settle(std::int64_t lo);                                     // the limbo from lo on never arrived: drop it
 };
 
 class RxSide {

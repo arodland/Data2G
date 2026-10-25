@@ -269,10 +269,11 @@ bool Session::claims(RxBurst& rx) const {
     return station && live(state) && rx.decode(0, ctl_mask(station->peer(), 0, station->key), 0, nullptr).has_value();
 }
 
-Session::Queued Session::queued_bytes() const {
+Session::Queued Session::queued_bytes(bool vara) const {
     const auto n = static_cast<std::int64_t>(pending_write.size());
     if (!station) return {n, n};
-    return {n + station->tx.unsent(), n + station->tx.unacked()};
+    const auto [u, a] = vara ? station->tx.before_mark() : std::pair<std::int64_t, std::int64_t>{0, 0};
+    return {n + station->tx.unsent() - u, n + station->tx.unacked() - a};
 }
 
 bool Session::master() const { return station ? station->master : state == SessionState::CONNECTING; }

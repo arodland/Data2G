@@ -239,10 +239,12 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
     # 400 of the 1000 bytes sent and not yet acked: VARA counts them. With a
     # credit, only unsent bytes past it count, and 1 stands for the rest
     # until they're acked (Pat's Flush waits for 0; its writes never block)
-    # CHAT ON: no credit either, the client watches BUFFER for its ACKs
-    for credit, chat, expect in ((None, False, 1), (100, False, 500), (0, False, 1000), (None, True, 1000)):
+    # CHAT ON and DATA2G ON: no credit either, the client watches BUFFER for its ACKs
+    for credit, chat, d2g, expect in ((None, False, False, 1), (100, False, False, 500), (0, False, False, 1000),
+                                      (None, True, False, 1000), (None, False, True, 1000)):
         h = Host(Engine("W1AW", seed=1), credit)
         h.engine.session.chat = chat
+        h.command(f"DATA2G {'ON' if d2g else 'OFF'}")
         st = SimpleNamespace(tx=L.TxSide(), read=lambda: b"")
         st.tx.buf, st.tx.stream_end = bytearray(1000), 400
         h.engine.session.station = st
@@ -253,6 +255,64 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
         h.engine.n += int(31 * FS)  # unchanged, but repeated: Pat times out after a minute without one
         h.after_step(False)
         assert f"BUFFER {expect}" in h.out_cmd
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+@pytest.mark.parametrize("snr", [12, 6])
+def test_cleantxbuffer_mid_burst(data2g, snr):
+    """CLEANTXBUFFER while the first data burst is on air: it arrives (12
+    dB) or doesn't (6). VARA's replies and BUFFER 0 at once for a VARA
+    client; DATA2G ON: the bytes dropped and in limbo, then how the limbo
+    settled. Either way the peer gets a prefix of the data, and (DATA2G ON)
+    every byte is accounted for."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("CLEANTXBUFFER")
+    assert a.out_cmd[-1] == "CLEANTXBUFFER BUFFEREMPTY"
+    idle = Host(Engine("NOCALL", seed=6))
+    idle.data_in(b"x")
+    idle.command("CLEANTXBUFFER")
+    assert idle.out_cmd[-1] == "CLEANTXBUFFER FAILED "  # no session
+    if data2g:
+        a.command("DATA2G ON")
+    a.command("CONNECT W1AW K2XYZ")
+    got = bytearray()
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        got.extend(b.out_data)
+        b.out_data.clear()
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
+    up = np.random.default_rng(2).bytes(20000)
+    a.data_in(up)
+    st = a.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
+    a.out_cmd.clear()
+    a.command("CLEANTXBUFFER")
+    reply = a.out_cmd[-1].split()
+    assert reply[:2] == ["CLEANTXBUFFER", "OK"] and len(reply) == (4 if data2g else 2)
+    a.after_step(bool(a.engine.tx))
+    buffer = [x for x in a.out_cmd if x.startswith("BUFFER")]
+    if not data2g:
+        assert buffer == ["BUFFER 0"]  # all gone, as VARA has it
+    else:
+        assert buffer and int(buffer[0].split()[1]) > 0  # the limbo, until settled
+    assert link(a.engine, b.engine, snr, 120,
+                lambda: pump() or (not st.tx.pending() and st.tx.limbo is None and not a.engine.tx), seed=3)
+    pump()
+    assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12) and a.engine.session.state == S.CONNECTED
+    settled = [x.split() for x in a.out_cmd if x.startswith("CLEANTXBUFFER SETTLED")]
+    if data2g:
+        assert len(settled) == 1
+        assert len(got) == len(up) - int(reply[2]) - int(settled[0][3])
+        assert int(settled[0][2]) + int(settled[0][3]) == int(reply[3])
+        assert int(settled[0][3]) == (0 if snr == 12 else int(reply[3]))
+    else:
+        assert not settled
 
 
 def test_cqframe_is_heard_without_a_session():

@@ -165,13 +165,17 @@ class Session:
     def read(self) -> bytes:
         return self.station.read() if self.station else b""
 
-    def queued_bytes(self) -> tuple[int, int]:
+    def queued_bytes(self, vara: bool = False) -> tuple[int, int]:
         """(unsent, unacked): bytes the host wrote that are in no codeword
         yet, and that the peer has not acked, sent or not. Writes waiting
-        for the session count as both."""
+        for the session count as both. `vara`: without those written before
+        the last CLEANTXBUFFER (VARA drops them all, on air or not)."""
         n = len(self._pending_write)
         st = self.station
-        return (n, n) if st is None else (n + st.tx.unsent(), n + st.tx.unacked())
+        if st is None:
+            return n, n
+        u, a = st.tx.before_mark() if vara else (0, 0)
+        return n + st.tx.unsent() - u, n + st.tx.unacked() - a
 
     # -- clock side ------------------------------------------------------------------
 

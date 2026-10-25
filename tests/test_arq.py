@@ -583,6 +583,61 @@ def late_burst_with_a_stale_ack(cls):
     assert got == data and a.state == b.state == L.ACTIVE
 
 
+def clean_settles_limbo(cls):
+    """CLEANTXBUFFER with 5 codewords on air (m22, 22 B each) over 31 B
+    records: never-sent records drop at once, the one the sent bytes end in
+    is kept. b gets seq 0 (half of record 0) and loses seq 1. The ACK leaves
+    record 0 committed (its head arrived) and records 1-3 undelivered: a's
+    next burst abandons and drops them. Every host byte is delivered or
+    reported dropped, and what a writes after arrives intact."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    msgs = [rng.randbytes(30) for _ in range(20)]  # incompressible: 22 B per codeword
+    for m in msgs:
+        a.write(m)
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
+    assert a.tx.clean() == (16 * 30, 4 * 30)  # records 4-19 dropped; 0-3 on air
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned is None  # records 1-3 unacked: an abandon settles them
+    a.write(b"after")
+    n = a.build()
+    a.answered()
+    assert a.tx.cleaned == (30, 3 * 30)
+    got = b.read() + finish(a, b, n)
+    assert got == msgs[0] + b"after" and a.state == b.state == L.ACTIVE
+    assert 30 + 3 * 30 + 16 * 30 == sum(map(len, msgs))
+
+
+def clean_with_everything_acked(cls):
+    """The limbo all acked: settled by that ACK, nothing dropped, no abandon."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    x, y = random.Random(2).randbytes(30), random.Random(3).randbytes(300)
+    a.write(x)
+    a.write(y)
+    p = a.build()  # record 0 and part of record 1
+    a.answered()
+    assert b.handle(clean(p))
+    assert a.tx.clean() == (45, 285)  # y is two records (255 + 45): the second never went
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned == (285, 0)  # all on air acked: the rest of y's record will follow
+    got = b.read() + finish(a, b, a.build())
+    assert got == x + y[:255]
+
+
+def test_clean_settles_limbo():
+    clean_settles_limbo(L.Station)
+
+
+def test_clean_with_everything_acked():
+    clean_with_everything_acked(L.Station)
+
+
 def test_late_burst_from_before_an_abandon():
     late_burst_from_before_an_abandon(L.Station)
 

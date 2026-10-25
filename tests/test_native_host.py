@@ -103,6 +103,51 @@ def test_cpp_host_matches_python(classes, credit):
     assert len(py) == len(cpp)
 
 
+def clean_transcript(Engine, Host, data2g, snr):
+    """CLEANTXBUFFER mid-burst (test_engine's scenario); everything a gave back, per step."""
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    out = []
+
+    def take():
+        out.append((list(a.out_cmd), bytes(b.out_data)))
+        a.out_cmd.clear()
+        b.out_data.clear()
+
+    def pump(until):
+        def f():
+            a.after_step(bool(a.engine.tx))
+            b.after_step(bool(b.engine.tx))
+            take()
+            return until()
+        return f
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("CLEANTXBUFFER")
+    a.command("DATA2G " + ("ON" if data2g else "OFF"))
+    a.command("CONNECT W1AW K2XYZ")
+    assert link(a.engine, b.engine, 12, 60, pump(lambda: a.engine.session.state == S.CONNECTED), seed=1)
+    a.data_in(np.random.default_rng(2).bytes(20000))
+    st = a.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, pump(lambda: bool(a.engine.tx) and st.tx.next > 0), seed=2)
+    a.command("CLEANTXBUFFER")
+    a.command("CLEANTXBUFFER")  # again: nothing new
+    take()
+    assert link(a.engine, b.engine, snr, 120, pump(lambda: not st.tx.pending() and not a.engine.tx), seed=3)
+    return out
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+@pytest.mark.parametrize("snr", [12, 6])
+def test_cpp_cleantxbuffer_matches_python(classes, data2g, snr):
+    Engine, hosts = classes
+    py, cpp = (clean_transcript(Engine, hosts[k], data2g, snr) for k in ("python", "cpp"))
+    flat = [line for cmd, _ in py for line in cmd]
+    assert "CLEANTXBUFFER BUFFEREMPTY" in flat and any(x.startswith("CLEANTXBUFFER SETTLED") for x in flat) == data2g
+    for i, (x, y) in enumerate(zip(py, cpp)):
+        assert x == y, (i, x, y)
+    assert len(py) == len(cpp)
+
+
 def test_constants(native):
     N = native.host
     assert N.VERSION == host.VERSION and N.ALIVE_S == host.ALIVE_S and N.BUFFER_REPEAT_S == host.BUFFER_REPEAT_S

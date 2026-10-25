@@ -22,7 +22,9 @@ BW500 | BW1200 | BW2300 | BW2750 (session bandwidth cap: BW500 keeps a
 session inside a 500 Hz band-plan segment; BW2300/BW2750 are the full
 2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION, SN (-> SN
 snr: the pilot SNR, dB, of the session peer's last burst decoded; WRONG
-before one); broadcast:
+before one), CLEANTXBUFFER (Host._clean), DATA2G ON|OFF (a client that
+knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports bytes;
+off again when the client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
@@ -109,6 +111,7 @@ class Host:
         engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
+        self.data2g = False  # DATA2G ON
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
         self._ptt = self._busy = False
@@ -163,6 +166,11 @@ class Host:
             self.cap = BW[cmd]
         elif cmd == "CHAT" and args and args[0].upper() in ("ON", "OFF"):
             e.set_chat(args[0].upper() == "ON")
+        elif cmd == "DATA2G" and args and args[0].upper() in ("ON", "OFF"):
+            self.data2g = args[0].upper() == "ON"
+        elif cmd == "CLEANTXBUFFER":
+            self.out_cmd.append(self._clean())
+            return
         elif cmd == "BCAST" and e.kiss is not None:
             self._bcast = True
             reply = self._bcast_command(args)
@@ -202,6 +210,23 @@ class Host:
             pass
         return None
 
+    def _clean(self) -> str:
+        """CLEANTXBUFFER, VARA's replies: BUFFEREMPTY with nothing queued,
+        FAILED (its trailing space too) outside a session, else OK. VARA
+        drops the bytes on air but unacked too, though the peer may already
+        have them; here they stay in limbo until an ACK says which arrived,
+        and those that didn't are dropped then. VARA clients see them gone at
+        once (BUFFER leaves them out). DATA2G ON: OK dropped limbo, and once
+        settled CLEANTXBUFFER SETTLED delivered dropped (host bytes; BUFFER
+        counts the limbo until then)."""
+        s = self.engine.session
+        if not s.queued_bytes(not self.data2g)[1]:
+            return "CLEANTXBUFFER BUFFEREMPTY"
+        if s.state != S.CONNECTED or s.station is None:
+            return "CLEANTXBUFFER FAILED "
+        dropped, limbo = s.station.tx.clean()
+        return f"CLEANTXBUFFER OK {dropped} {limbo}" if self.data2g else "CLEANTXBUFFER OK"
+
     def client_gone(self):
         """The command client's TCP connection closed: it owned the session.
         A session under way is disconnected gracefully (the peer is told, and
@@ -214,7 +239,7 @@ class Host:
             e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening, self.accept_addr = False, None
+        self.listening, self.accept_addr, self.data2g = False, None, False
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
@@ -276,12 +301,16 @@ class Host:
         # burst waits, BUFFER is the unsent bytes past it (the credit); once
         # it has all gone, 1 until the peer acks it all, so Flush still waits
         # for delivery but writes never block. --buffer-credit 0 reports the
-        # plain VARA figure. CHAT ON also reports it: the client watches
-        # BUFFER fall to see which of its messages were ACKed.
+        # plain VARA figure. CHAT ON and DATA2G ON also report it: the client
+        # watches BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
-        unsent, unacked = e.session.queued_bytes()
+        if st is not None and (c := st.tx.cleaned) is not None:
+            if self.data2g:
+                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]}")
+            st.tx.cleaned = None
+        unsent, unacked = e.session.queued_bytes(not self.data2g)
         buffered = unacked
-        if (st and self.buffer_credit != 0 and not e.session.chat
+        if (st and self.buffer_credit != 0 and not e.session.chat and not self.data2g
                 and (credit := e.session.policy.next_capacity(st)) is not None):
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)

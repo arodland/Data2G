@@ -52,6 +52,7 @@ std::string format(const char* fmt, ...) {
 
 void TxSide::write(ByteView data) {
     const Bytes r = to_records(data);
+    for (std::int64_t x = end(); x < end() + static_cast<std::int64_t>(r.size()); x += 256) recs.push_back(x);
     buf.insert(buf.end(), r.begin(), r.end());
 }
 
@@ -82,6 +83,7 @@ bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
     }
     buf.erase(buf.begin(), buf.begin() + std::clamp<std::int64_t>(keep - buf_off, 0, static_cast<std::int64_t>(buf.size())));
     buf_off = keep;
+    recs.erase(recs.begin(), std::lower_bound(recs.begin(), recs.end(), keep));
     keep = hist_off + static_cast<std::int64_t>(hist.size());
     if (!cws.empty()) {
         keep = cws.begin()->second.cstart;
@@ -91,6 +93,10 @@ bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
     if (keep > hist_off) {
         hist.erase(hist.begin(), hist.begin() + std::min<std::int64_t>(keep - hist_off, static_cast<std::int64_t>(hist.size())));
         hist_off = keep;
+    }
+    if (limbo) {
+        const std::int64_t lo = limbo_start();
+        if (lo == limbo->second) settle(lo);  // all of it acked
     }
     return advanced;
 }
@@ -141,6 +147,7 @@ std::vector<std::int64_t> TxSide::missing() const {
 
 std::int64_t TxSide::abandon() {
     const std::int64_t a = base;
+    const std::int64_t lo = limbo_start();
     if (auto it = cws.find(a); it != cws.end()) {
         stream_end = it->second.start;
         hist.resize(static_cast<std::size_t>(std::clamp<std::int64_t>(it->second.cstart - hist_off, 0,
@@ -149,7 +156,55 @@ std::int64_t TxSide::abandon() {
     cws.clear();
     next = a;
     ack.reset();
+    if (limbo) settle(lo);  // abandons are made against an exact ACK: nothing from the base on arrived
     return a;
+}
+
+std::pair<std::int64_t, std::int64_t> TxSide::clean() {
+    const std::int64_t e = end(), c = rec_at(stream_end);
+    const std::int64_t dropped = host_bytes(c, e);
+    cut(c, e);
+    std::int64_t old = 0, lo = limbo_start();
+    if (limbo) {
+        old = limbo->first;
+        lo = std::max(lo, limbo->second);
+    }
+    const std::int64_t fresh = host_bytes(lo, c);
+    if (old || fresh) limbo = std::make_pair(old + fresh, c);
+    else limbo.reset();
+    mark = c;
+    return {dropped, fresh};
+}
+
+std::int64_t TxSide::rec_at(std::int64_t x) const {
+    auto it = std::lower_bound(recs.begin(), recs.end(), x);
+    return it != recs.end() ? *it : end();
+}
+
+std::int64_t TxSide::host_bytes(std::int64_t lo, std::int64_t hi) const {
+    return hi - lo - (std::lower_bound(recs.begin(), recs.end(), hi) - std::lower_bound(recs.begin(), recs.end(), lo));
+}
+
+void TxSide::cut(std::int64_t lo, std::int64_t hi) {
+    buf.erase(buf.begin() + (lo - buf_off), buf.begin() + (hi - buf_off));
+    auto i = std::lower_bound(recs.begin(), recs.end(), lo), j = std::lower_bound(recs.begin(), recs.end(), hi);
+    for (auto k = j; k != recs.end(); ++k) *k -= hi - lo;
+    recs.erase(i, j);
+}
+
+std::int64_t TxSide::limbo_start() const {
+    const std::int64_t c = limbo ? limbo->second : rec_at(stream_end);
+    auto it = cws.find(base);
+    return it != cws.end() ? std::min(rec_at(it->second.start), c) : c;
+}
+
+void TxSide::settle(std::int64_t lo) {
+    const auto [total, c] = *limbo;
+    const std::int64_t dropped = host_bytes(lo, c);
+    cut(lo, c);
+    mark -= c - lo;
+    limbo.reset();
+    cleaned = std::make_pair(total - dropped, dropped);
 }
 
 bool RxSide::accept(std::int64_t seq, Bytes payload, bool comp) {
@@ -335,13 +390,15 @@ bool Station::data_allowed(bool fresh, const std::string& submode) {
     if (!fresh) return false;
     const bool other_mode =
         std::any_of(tx.cws.begin(), tx.cws.end(), [&](const auto& kv) { return kv.second.submode != submode; });
+    // CLEANTXBUFFER's limbo: the exact ACK says the rest never arrived (TxSide::abandon drops it)
+    const bool in_limbo = tx.limbo.has_value();
     // answering a repeat of the peer burst I last answered: its ACK may
     // predate my last burst, so it may not abandon (§4)
-    if (stale && (resync_due || other_mode)) return false;
+    if (stale && (resync_due || other_mode || in_limbo)) return false;
     if (resync_due) {
         resync_due = false;
         start_abandon(1);
-    } else if (other_mode) {
+    } else if (other_mode || in_limbo) {
         start_abandon(0);  // a resend must keep its submode (§4)
     }
     return true;

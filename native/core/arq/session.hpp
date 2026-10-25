@@ -132,7 +132,8 @@ public:
     struct Queued {
         std::int64_t unsent = 0, unacked = 0;
     };
-    Queued queued_bytes() const;
+    // `vara`: without those written before the last CLEANTXBUFFER (VARA drops them all, on air or not)
+    Queued queued_bytes(bool vara = false) const;
 
     // clock side
     TxBurstPtr poll(double now);

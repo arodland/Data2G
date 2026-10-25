@@ -458,6 +458,22 @@ As built (data2g/arq/policy.py):
     as the monitor shows it) of the last burst decoded from the session's peer.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
+  - **DATA2G ON / OFF** marks a client that knows Data2G. BUFFER is then the plain
+    VARA count (no next-burst credit) and CLEANTXBUFFER reports bytes. Off again
+    when the command client leaves.
+  - **CLEANTXBUFFER** drops queued data. Replies as VARA's: `CLEANTXBUFFER
+    BUFFEREMPTY` with nothing queued, `CLEANTXBUFFER FAILED ` (trailing space)
+    outside a session, else `CLEANTXBUFFER OK`.
+    - Bytes never on air are dropped at once. A record begun on air is finished
+      (§9a), so the cut falls at a record boundary.
+    - VARA also drops bytes on air but unacked, though the peer may already have
+      them. Here they are in limbo: the next ACK past them says they arrived; the
+      next exact ACK (§4) says the rest did not, and an abandon drops those.
+      No wire change.
+    - VARA clients see the limbo gone at once: BUFFER leaves it out.
+    - DATA2G ON: `CLEANTXBUFFER OK dropped limbo`, then once settled
+      `CLEANTXBUFFER SETTLED delivered dropped` (host bytes). BUFFER counts the
+      limbo until then.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
   BUFFER n, PTT ON/OFF, BUSY ON/OFF, and a Data2G-specific `MODE name`.
 
