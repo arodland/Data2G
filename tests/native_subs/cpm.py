@@ -3,23 +3,27 @@
 
 def substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
-    stays in Python."""
+    stays in Python, as does every grid while a test patches modem's
+    PROTOCOL_VERSION (the header words' CRC-6 seed, compiled in)."""
     n = native.cpm
     import functools
 
-    from data2g import cpm
+    from data2g import config, cpm, modem
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
                                        "read_header", "soft", "find", "late_lock", "find_mid", "measure")}
 
     def own_grid(g):
-        return cpm.GRIDS.get(g.name) == g
+        return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
 
     def own_spec(s):
-        return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s
+        return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
 
     def header_symbols(grid, word):
-        return n.header_symbols(grid, word >> 6) if word < 1 << 16 else py["header_symbols"](grid, word)
+        # the native one recomputes the CRC-6 from word >> 6, with its own seed
+        if word < 1 << 16 and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION:
+            return n.header_symbols(grid, word >> 6)
+        return py["header_symbols"](grid, word)
 
     @functools.lru_cache(maxsize=None)
     def layout(grid, n_sym):

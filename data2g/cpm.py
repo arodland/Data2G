@@ -194,7 +194,9 @@ HEADER_THRESHOLD = {"c16r25": 0.20, "c8r50": 0.29, "c32r62": 0.11}
 # the largest score at a placement passing PEAK_RATIO; c32r62 had none pass,
 # so 1.1x noise's and OFDM's largest at any placement (0.119). Bursts lost
 # with a clear front at MPP/MPG -8/-11 dB scored 0.07-0.6 (c32r62 median 0.18).
-HEADER2_THRESHOLD = {"c16r25": 0.15, "c8r50": 0.25, "c32r62": 0.13}
+# c8r50 refit for protocol 13's front (2026-10-24, 400 a source): 1.1x 0.205
+# (noise, OFDM, other grids; its own cut bursts no longer pass PEAK_RATIO).
+HEADER2_THRESHOLD = {"c16r25": 0.15, "c8r50": 0.23, "c32r62": 0.13}
 # Mid lock (find_mid), scripts/cpm_mid_fit.py (2026-10-23). The mid block
 # alone: 1.1x the largest score 200 buffers each of 1.9 s of noise or an
 # OFDM burst gave (0.162 / 0.221, 0.199 / 0.327, 0.070 / 0.112); front-missed
@@ -243,10 +245,19 @@ def costas(m: int) -> tuple:
     return next(q for q in permutations(range(m)) if _is_costas(q))
 
 
+# c8r50's 8 tones hold a Costas array of 6 only, and tiled to PREAMBLE_S it
+# matched one period off (18 of 24 symbols, sync 0.76, peak ratio 0.94): a
+# search range ending before a burst's start locked a period early and read
+# another header (24 of 223 fsk8r50 locks, scripts/cpm_supersede_study.py).
+# This front is searched instead (scripts/c8r50_front_search.py, protocol
+# 13's header words): each tone 3 times, every other placement and whole-bin
+# shift at most 5 of 24 on itself, 6 with a header after it.
+FRONTS = {"c8r50": (2, 1, 1, 3, 7, 7, 3, 6, 6, 4, 3, 6, 0, 5, 4, 0, 7, 0, 2, 1, 2, 5, 4, 5)}
+
+
 def preamble_pattern(g: Grid) -> np.ndarray:
-    """The front sync block: Costas tiled to ~PREAMBLE_S."""
-    c = np.array(costas(g.m))
-    return np.tile(c, max(1, int(np.ceil(PREAMBLE_S * g.rate / len(c)))))
+    """The front sync block, ~PREAMBLE_S: a Costas array, or FRONTS's."""
+    return np.array(FRONTS.get(g.name, costas(g.m)))
 
 
 def mid_block(g: Grid) -> np.ndarray:
@@ -256,9 +267,10 @@ def mid_block(g: Grid) -> np.ndarray:
     p = max(q for q in range(3, min(target, g.m) + 2) if _prime(q))
     c = _welch(p) * (g.m // (p - 1))
     if np.array_equal(c, costas(g.m)):
-        # the front's own array (c8r50): a mid block then matched half the
-        # front pattern (score 0.50) and whole-burst searches locked on it.
-        # Time-reversed (still Costas): 0.17
+        # c8r50's front array until protocol 13 (tiled: FRONTS): a mid block
+        # then matched half the front pattern (score 0.50) and whole-burst
+        # searches locked on it. Time-reversed (still Costas): 0.17; kept,
+        # and FRONTS's c8r50 front was searched against it (3 of 12 at most)
         c = c[::-1]
     return np.tile(c, max(1, round(target / len(c))))
 
@@ -589,16 +601,16 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
         return None
     if s0 + hdr_span(g.name, 1) > len(x):
         return None  # its header copy is still arriving
-    starts = _tile_starts(g, s0)
-    if not starts:
+    if s0 < 0:
         return None  # fine timing moved a lock at x's first sample before it: its front is cut off
-    best, h = max(((s, read_header(g, x, s, cfo, copies=1)) for s in starts), key=lambda c: c[1][3])
-    if _peak_ratio(g, x, best, cfo) >= PEAK_RATIO and (threshold is not None or h[3] >= HEADER_THRESHOLD[g.name]):
-        return _lock(g, best, cfo, score, h, 1)
-    if threshold is not None or all(_peak_ratio(g, x, s, cfo) < PEAK_RATIO for s in starts):
+    h = read_header(g, x, s0, cfo, copies=1)
+    front = _peak_ratio(g, x, s0, cfo) >= PEAK_RATIO
+    if front and (threshold is not None or h[3] >= HEADER_THRESHOLD[g.name]):
+        return _lock(g, s0, cfo, score, h, 1)
+    if threshold is not None or not front:
         return None  # a burst's data or a later sync block, its front missed
     # the front is there but its first header copy faded: both copies, once the second is in
-    cand = dict(wait=True, band=g.name, start=s0, cfo=cfo, score=score, header_end=min(starts) + hdr_span(g.name, 2),
+    cand = dict(wait=True, band=g.name, start=s0, cfo=cfo, score=score, header_end=s0 + hdr_span(g.name, 2),
                 family="cpm")
     if cand["header_end"] <= len(x):
         return late_lock(g, x, cand)
@@ -608,11 +620,10 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
 def late_lock(g: Grid, x: np.ndarray, cand: dict):
     """find's candidate (x holding its header_end) -> its lock from both
     header copies (HEADER2_THRESHOLD), or None."""
-    reads = [(s, read_header(g, x, s, cand["cfo"], copies=HDR_COPIES)) for s in _tile_starts(g, cand["start"])
-             if _peak_ratio(g, x, s, cand["cfo"]) >= PEAK_RATIO]
-    if not reads:
+    s0 = cand["start"]
+    if _peak_ratio(g, x, s0, cand["cfo"]) < PEAK_RATIO:
         return None
-    s0, h = max(reads, key=lambda c: c[1][3])
+    h = read_header(g, x, s0, cand["cfo"], copies=HDR_COPIES)
     if h[3] < HEADER2_THRESHOLD[g.name]:
         return None
     return _lock(g, s0, cand["cfo"], cand["score"], h, HDR_COPIES)
@@ -657,17 +668,6 @@ def mid_rows(grid: str) -> tuple:
     """Per valid word, the row its mid block starts at."""
     return tuple(int(layout(grid, stream_symbols(grid, n, d)).sync_rows[len(preamble_pattern(GRIDS[grid]))])
                  for _, n, d, _ in valid_words(grid))
-
-
-def _tile_starts(g: Grid, s0: int) -> list:
-    """A front lock's candidate starts. A tiled front (c8r50: a 6-symbol
-    Costas array four times) also matches whole periods late, with the
-    header's first symbols standing in for the last tile: fsk8r50-r1/3
-    locked one period late in 3-8% of bursts at MPP -3 dB. The alignment
-    whose header reads best is the burst's."""
-    period = len(costas(g.m)) * g.T
-    tiles = len(preamble_pattern(g)) * g.T // period
-    return [s for s in (s0 - k * period for k in range(tiles)) if s >= 0]
 
 
 @lru_cache(maxsize=None)

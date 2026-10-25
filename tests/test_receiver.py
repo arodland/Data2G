@@ -177,18 +177,20 @@ def _false_lock_clip(starts):
     return false_locks
 
 
-def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span():
+def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span(protocol):
     """A CPM lock replaces a suspect header while it is pending, and a CPM
     front waiting for its second header copy survives the suspect burst's
     trim. At 180 ms: the n4-qpsk-r1/5 header as on air; at 20 ms a
     polar-k96-f8 one, under which the FSK front waits (its first header copy
     is weak). The starts move with the search span (re-pick them from the
     slow test's sweep)."""
+    protocol(12)  # recorded under it
     assert _false_lock_clip([1440, 160]) == 2, "the clip no longer meets its false headers: re-pick the starts"
 
 
 @pytest.mark.slow
-def test_a_cpm_burst_survives_a_suspect_header_at_every_search_phase():
+def test_a_cpm_burst_survives_a_suspect_header_at_every_search_phase(protocol):
+    protocol(12)
     assert _false_lock_clip(range(0, 13 * 160, 160))
 
 

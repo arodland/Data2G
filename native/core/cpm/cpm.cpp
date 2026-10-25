@@ -423,16 +423,6 @@ const WordRows& word_rows(const Grid& g) {
     throw std::out_of_range("no CPM grid " + std::string(g.name));
 }
 
-// cpm._tile_starts: a front lock's candidate starts (a tiled front also
-// matches whole periods late; the alignment whose header reads best is the burst's).
-std::vector<std::int64_t> tile_starts(const Grid& g, std::int64_t s0) {
-    const std::int64_t period = g.costas_len * g.T, tiles = static_cast<std::int64_t>(g.preamble.size()) * g.T / period;
-    std::vector<std::int64_t> out;
-    for (std::int64_t k = 0; k < tiles; ++k)
-        if (s0 - k * period >= 0) out.push_back(s0 - k * period);
-    return out;
-}
-
 Lock make_lock(const Grid& g, std::int64_t s0, double cfo, double score, const Header& h, int copies) {
     const Layout L = layout(g, stream_symbols(g, h.n_data, h.dup));
     return Lock{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
@@ -513,27 +503,18 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     }
     if (d.score < floor) return std::nullopt;
     if (d.start + hdr_span(g, 1) > len) return std::nullopt;  // its header copy is still arriving
-    const auto starts = tile_starts(g, d.start);
-    if (starts.empty()) return std::nullopt;  // its front is cut off
-    std::optional<std::pair<std::int64_t, Header>> best;
-    for (const auto s : starts) {
-        const Header h = read_header(g, x, s, d.cfo, 1);
-        if (!best || h.score > best->second.score) best.emplace(s, h);
-    }
-    const auto [s0, h] = *best;
-    if (peak_ratio(g, x, s0, d.cfo) >= tables::CPM.peak_ratio && (threshold || h.score >= g.header_threshold))
-        return make_lock(g, s0, d.cfo, d.score, h, 1);
-    if (threshold || std::all_of(starts.begin(), starts.end(), [&](std::int64_t s) {
-            return peak_ratio(g, x, s, d.cfo) < tables::CPM.peak_ratio;
-        }))
-        return std::nullopt;  // a burst's data or a later sync block, its front missed
+    if (d.start < 0) return std::nullopt;  // its front is cut off
+    const Header h = read_header(g, x, d.start, d.cfo, 1);
+    const bool front = peak_ratio(g, x, d.start, d.cfo) >= tables::CPM.peak_ratio;
+    if (front && (threshold || h.score >= g.header_threshold)) return make_lock(g, d.start, d.cfo, d.score, h, 1);
+    if (threshold || !front) return std::nullopt;  // a burst's data or a later sync block, its front missed
     // the front is there but its first header copy faded: both copies, once the second is in
     Lock cand{};
     cand.wait = true;
     cand.start = d.start;
     cand.cfo = d.cfo;
     cand.score = d.score;
-    cand.header_end = cand.end = starts.back() + hdr_span(g, 2);
+    cand.header_end = cand.end = d.start + hdr_span(g, 2);
     if (cand.header_end <= len) return late_lock(g, x, cand);
     if (wait) return cand;
     return std::nullopt;
@@ -589,14 +570,10 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
 }
 
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
-    std::optional<std::pair<std::int64_t, Header>> best;
-    for (const auto s : tile_starts(g, cand.start)) {
-        if (peak_ratio(g, x, s, cand.cfo) < tables::CPM.peak_ratio) continue;
-        const Header h = read_header(g, x, s, cand.cfo, tables::CPM.hdr_copies);
-        if (!best || h.score > best->second.score) best.emplace(s, h);
-    }
-    if (!best || best->second.score < g.header2_threshold) return std::nullopt;
-    return make_lock(g, best->first, cand.cfo, cand.score, best->second, tables::CPM.hdr_copies);
+    if (peak_ratio(g, x, cand.start, cand.cfo) < tables::CPM.peak_ratio) return std::nullopt;
+    const Header h = read_header(g, x, cand.start, cand.cfo, tables::CPM.hdr_copies);
+    if (h.score < g.header2_threshold) return std::nullopt;
+    return make_lock(g, cand.start, cand.cfo, cand.score, h, tables::CPM.hdr_copies);
 }
 
 Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {

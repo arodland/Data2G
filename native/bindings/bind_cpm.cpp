@@ -42,7 +42,6 @@ void bind_cpm(py::module_& m) {
             d["sync_threshold"] = g.sync_threshold;
             d["header_threshold"] = g.header_threshold;
             d["hdr_len"] = g.hdr_len;
-            d["costas_len"] = g.costas_len;
             d["preamble"] = np<std::int64_t>(g.preamble);
             d["mid_block"] = np<std::int64_t>(g.mid_block);
             out.append(d);
