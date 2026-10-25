@@ -36,15 +36,27 @@ simulated end-to-end QSOs to prove their value.
 * **Hybrid ARQ**: When noise and fading prevent a codeword from being decoded, the re-sent codeword carries different parity bits from what was sent the first time. The receiver can soft-combine the two copies of the data bits with the two different sets of parity bits, giving an even higher chance of recovery than with a simple resend.
 * **Decision-Directed Channel Re-Estimation**: With enough CPU, every symbol can be an equalization pilot. Pulls a few dB out of thin air under fast QSB, improving usable transfer rates by 5 to 20 percent in some cases.
 * **Transparent Compression**: Text takes up less airtime, automatically, with no cost to binary data.
-* **Intelligent Rate Shifting**: The receiver feeds the current band conditions to the world's tiniest neural net model (61,280 parameters) which was trained on thousands of simulated sessions spanning over a quarter million transmissions in varying conditions. The model is used to predict which mode has the best balance of speed and probability of being decoded.
+* **Intelligent Rate Shifting**: The receiver feeds the current band conditions to a very small neural net model which was trained on thousands of simulated sessions spanning over a quarter million transmissions in varying conditions. The model is used to predict which mode has the best balance of speed and probability of being decoded.
 * **Submode Zoo**: Many modems have a carefully crafted set of modulations, arranged in a "ladder" from slowest and most robust to fastest and most fragile, so that their rate-shifters can "climb the ladder" when conditions are good and go back down it when conditions are poor. Data2G has 50 submodes spanning four bandwidths, seven modulations, and a gamut of parity levels. They don't fall into a "ladder", but each one is the best possible mode under _some_ set of conditions, whether that's high SNR, low SNR, fast fading, slow fading, or acknowledging packets as fast as possible. If it isn't somewhere on the Pareto frontier, it gets dropped.
 
 ## Applications Tested with Data2G
 
-* [Glissando](https://github.com/baitisj/glissando) by AG7EW: While Glissando comes with its own FSK modem that works down to quite low SNR (and sounds nifty), it also serves as a chat client for Data2G, with broadcast and connected messaging, direct file-transfer, and broadcast file-transfer with fill-ins, a la FLAMP.
+* [Ragtime](https://github.com/baitisj/ragtime) by AG7EW: a very nice chat client for Data2G, with broadcast and connected messaging, direct file-transfer, broadcast file-transfer with fill-ins (a la FLAMP), and experimental chat fill-ins.
 * [PixelQSO](https://github.com/tcarwash/pixelqso) by AG7SU: Some people say FT8 is like stamp collecting. What if it was card collecting instead, and you got to make the art for your own cards?
 * [Pat](https://github.com/la5nta/pat) by LA5NTA: The Pat Winlink client can send and receive email using Data2G if you configure it as VARA HF. There are (as of this writing) no RMS servers running Data2G, but P2P works fine.
 * [VarAC](https://www.varac-hamradio.com/) by 4Z1AC: Has a few glitches, and is full of VARA-specific opinions about operating procedures and frequencies. Consider using Glissando instead. But if you configure it to avoid stepping on actual VARA users, it's possible to use all of VarAC's features with Data2G.
+
+Honorable mention:
+
+* [Glissando](https://github.com/baitisj/glissando) by AG7EW: a nifty (and cool-sounding) chat mode of its own, that works down to lower SNR than Data2G. The Glissando client was the original testing ground for what ended up becoming Ragtime.
+
+## Installing and Running
+
+Go to the [Releases page](https://github.com/arodland/Data2G/releases/latest) and find the download for your platform. Windows, macOS, and Linux are supported. Data2G-GUI is the GUI app with a live waterfall and settings dialog, while Data2G-Host provides all of the same features headless, with command-line flags.
+
+Most 64-bit Intel and all Apple Silicon machines should have plenty of horsepower to run Data2G.
+
+A Raspberry Pi 4 can handle it if it isn't doing very much else, but it might be slightly slow in replying to long packets at the highest speeds, and it might lose a dB or two of sensitivity due to not having enough CPU for decision-directed decoding. A Raspberry Pi 5 or similar can run Data2G with room to spare. You must be running a 64-bit OS version.
 
 ## Developing
 
