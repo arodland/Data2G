@@ -6,6 +6,7 @@
 // (int64) here, 7 bits on the wire.
 #pragma once
 
+#include <algorithm>
 #include <compare>
 #include <cstdint>
 #include <functional>
