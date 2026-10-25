@@ -198,8 +198,7 @@ class TxSide:
 
     def write(self, data: bytes):
         r = F.to_records(data)
-        end = self.buf_off + len(self.buf)
-        self.recs += range(end, end + len(r), 256)
+        self.recs += range(self._end(), self._end() + len(r), 256)
         self.rec_host += range(self.written, self.written + len(data), 255)
         self.written += len(data)
         self.buf += r
@@ -323,14 +322,17 @@ class TxSide:
         lo = self.mark if vara else 0
         return self._host_from(max(self.stream_end, lo)), self._host_from(max(self.buf_off, lo))
 
+    def _end(self) -> int:
+        return self.buf_off + len(self.buf)
+
     def _host_from(self, x: int) -> int:
         """Host bytes from stream offset x to the end: the length bytes of records starting there left out."""
-        return self.buf_off + len(self.buf) - x - (len(self.recs) - bisect_left(self.recs, x))
+        return self._end() - x - (len(self.recs) - bisect_left(self.recs, x))
 
     def _rec(self, x: int) -> int:
         """The first record start at or after stream offset x (the stream's end if none)."""
         i = bisect_left(self.recs, x)
-        return self.recs[i] if i < len(self.recs) else self.buf_off + len(self.buf)
+        return self.recs[i] if i < len(self.recs) else self._end()
 
     def _hoff(self, x: int) -> int:
         """The host offset of stream offset x, a record start or the stream's end."""
@@ -340,9 +342,11 @@ class TxSide:
     def _split(self, h: int) -> int:
         """The stream offset of host offset h, never on air: the record it
         falls in is split there (each part its own length byte)."""
+        if h >= self.written:
+            return self._end()
         i = bisect_right(self.rec_host, h) - 1
-        if h >= self.written or self.rec_host[i] == h:
-            return self.recs[i] if h < self.written else self.buf_off + len(self.buf)
+        if self.rec_host[i] == h:
+            return self.recs[i]
         s, k = self.recs[i], h - self.rec_host[i]
         j = s - self.buf_off
         n = self.buf[j]

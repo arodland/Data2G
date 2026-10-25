@@ -132,7 +132,7 @@ public:
     struct Queued {
         std::int64_t unsent = 0, unacked = 0;
     };
-    // (host bytes). `vara`: without those written before the last CLEANTXBUFFER (VARA drops them all, on air or not)
+    // Host bytes. `vara`: without those written before the last CLEANTXBUFFER (VARA drops them all, on air or not)
     Queued queued_bytes(bool vara = false) const;
 
     // clock side

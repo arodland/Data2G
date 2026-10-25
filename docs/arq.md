@@ -484,8 +484,9 @@ As built (data2g/arq/policy.py):
       client can match them to what it wrote without BUFFER arithmetic (data
       still in the socket would skew that).
       - `CLEANTXBUFFER OK drop_from drop_to limbo_from limbo_to`. drop_to is
-        every byte Data2G has read; later writes are kept. An empty limbo is
-        `drop_from drop_from`. A second clean before the limbo settles repeats it.
+        every byte Data2G has read (n, below, if that is less); later writes are
+        kept. An empty limbo is `drop_from drop_from`. A second clean before the
+        limbo settles repeats it.
       - `CLEANTXBUFFER n` drops only bytes before offset n; those from n on,
         read or not, are kept. `CLEANTXBUFFER LATE`, nothing dropped, if a byte
         at or past n is on air or finishes a record begun on air: the client

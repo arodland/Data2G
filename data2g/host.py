@@ -172,7 +172,8 @@ class Host:
             e.set_chat(args[0].upper() == "ON")
         elif cmd == "DATA2G" and args and args[0].upper() in ("ON", "OFF"):
             self.data2g = args[0].upper() == "ON"
-        elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit())):
+        elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit()
+                                                      and len(args[0]) <= 18)):
             self.out_cmd.append(self._clean(int(args[0]) if args else None))
             return
         elif cmd == "BCAST" and e.kiss is not None:
@@ -215,20 +216,11 @@ class Host:
         return None
 
     def _clean(self, upto: int | None = None) -> str:
-        """CLEANTXBUFFER, VARA's replies: BUFFEREMPTY with nothing queued,
-        FAILED (its trailing space too) outside a session, else OK. VARA
-        drops the bytes on air but unacked too, though the peer may already
-        have them; here they stay in limbo until an ACK says which arrived,
-        and those that didn't are dropped then. VARA clients see them gone at
-        once (BUFFER leaves them out). DATA2G ON, in host byte offsets since
-        CONNECTED, ranges [from, to): OK drop_from drop_to limbo_from
-        limbo_to (drop_to: all Data2G has read; an empty limbo sits at the
-        drop), and once a limbo settles SETTLED from split to (delivered
-        before split, dropped after; BUFFER counts the limbo until then),
-        or, if the session ends first, SETTLED from split to UNKNOWN.
-        CLEANTXBUFFER n (DATA2G ON): only the bytes before offset n; LATE,
-        nothing dropped, if a byte at or past n is on air (or finishes a
-        record that is), so the client can append from n safely."""
+        """CLEANTXBUFFER [n] -> the reply (docs/arq.md §9): VARA's
+        BUFFEREMPTY, FAILED (its trailing space too) or OK; DATA2G ON, OK
+        with host byte offsets, or LATE for an n already on air. Bytes on air
+        but unacked stay in limbo until an ACK settles them (SETTLED, from
+        after_step or _session_over); VARA clients see them gone at once."""
         s = self.engine.session
         if not s.queued_bytes(not self.data2g)[1]:
             return "CLEANTXBUFFER BUFFEREMPTY"

@@ -234,21 +234,17 @@ void Host::command(std::string_view line, std::string_view peer) {
     out_cmd.emplace_back(ok ? "OK" : "WRONG");
 }
 
-// VARA's replies: BUFFEREMPTY with nothing queued, FAILED (its trailing space
-// too) outside a session, else OK. Bytes on air but unacked stay in limbo
-// until an ACK says which arrived (host.py has the story). DATA2G ON, host
-// byte offsets since CONNECTED: OK drop_from drop_to limbo_from limbo_to,
-// and once a limbo settles SETTLED from split to (or, if the session ends
-// first, SETTLED from split to UNKNOWN). CLEANTXBUFFER n (DATA2G ON): only the
-// bytes before offset n; LATE, nothing dropped, if a byte at or past n is on air.
+// CLEANTXBUFFER [n] (docs/arq.md §9): VARA's BUFFEREMPTY, FAILED (its trailing
+// space too) or OK; DATA2G ON, OK with host byte offsets, or LATE for an n
+// already on air. host.py's Host._clean.
 std::string Host::clean(std::optional<std::int64_t> upto) {
     auto& s = engine.session();
     if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
     if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
     const auto r = s.station->tx.clean(upto);
     if (!r) return "CLEANTXBUFFER LATE";
-    const auto [df, dt, lf, lt] = *r;
     if (!data2g) return "CLEANTXBUFFER OK";
+    const auto [df, dt, lf, lt] = *r;
     return "CLEANTXBUFFER OK " + std::to_string(df) + " " + std::to_string(dt) + " " + std::to_string(lf) + " " +
            std::to_string(lt);
 }
