@@ -58,7 +58,10 @@ COALESCE_S = 0.1  # CHAT OFF: a short write to an idle link waits this long for 
 # the callee, with nothing to send, holds its reply this long to a burst
 # that brought its host data and ended the caller's (T_DRAINED): an
 # interactive host's answer (a BBS prompt) then rides it instead of
-# waiting ~5 s for a wake. A write ends the hold.
+# waiting ~5 s for a wake. A write ends the hold. Either station holds its
+# next burst as long when CLEANTXBUFFER's limbo has just settled: the host's
+# client, told SETTLED, writes what goes next (after the rest of a record
+# begun on air, if any).
 REPLY_HOLD_S = 0.25
 
 log = logging.getLogger("data2g.session")
@@ -280,19 +283,22 @@ class Session:
         st = self.station
         if st is None or self.state not in (CONNECTED, DISCONNECTING):
             return
-        undrained = len(st.rx.out)
+        undrained, limbo = len(st.rx.out), st.tx.limbo is not None
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
         self._heard(now)
         if st.state == L.FAILED:
             self._close(f"link failed: {st.fail_reason}")
             return
+        st.settle_limbo()
+        settled = limbo and st.tx.limbo is None
         if st.rx.out or st.last_rx_data or st.tx.pending():
             self._last_data = now  # data moving either way; a sender that hears no data is not idle
         if self._disc(now):
             return
         if not self.master:
-            if len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending() and not self._pending_write:
+            if settled or (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
+                           and not self._pending_write):
                 self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
             else:
                 self._build_at = None
@@ -310,7 +316,10 @@ class Session:
         # (escalated) burst: idling would leave it to wake me ~5 s later
         busy = (st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
                 or st.peer_abandon)
-        if busy:
+        if busy and settled:
+            self._idle_wait = 0.0
+            self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
+        elif busy:
             self._idle_wait = 0.0
             self._queue(st.build(), now)
             st.answered()

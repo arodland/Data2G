@@ -598,6 +598,13 @@ class Station:
             self._start_abandon(0)  # a resend must keep its submode (§4)
         return True
 
+    def settle_limbo(self):
+        """Call after handle(): CLEANTXBUFFER's limbo settles against its ACK
+        when that is exact (not a repeat's), so the host can report SETTLED
+        before the reply is built; else the next fresh build settles it."""
+        if self.tx.limbo is not None and not self._stale:
+            self._start_abandon(0)
+
     def _start_abandon(self, reset: int):
         a = self.tx.abandon()
         self._abandon_epoch = (self._abandon_epoch + 1) % 128
@@ -888,7 +895,8 @@ class Station:
                 c.heard += 1  # the peer decoded that burst: it holds soft bits
                 # and mapped its new slots by T_NEW: it holds their T_COMP bits
                 c.comp_known |= c.first_bn == acted
-        if (self._abandon is not None and acted < min(self._abandon_bursts)
+        # (settle_limbo can start one before any burst carries it: every ACK is from before it)
+        if (self._abandon is not None and acted < min(self._abandon_bursts, default=self._latest + 1)
                 and unwrap(core.cum, self.tx.base) > self.tx.base):
             # an ACK of a burst from before my pending abandon describes the
             # old slicing: past the abandon point it can't be mapped (a late

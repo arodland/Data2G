@@ -495,7 +495,9 @@ As built (data2g/arq/policy.py):
         WRONG without DATA2G ON.
       - Once a non-empty limbo settles: `CLEANTXBUFFER SETTLED from split to`,
         delivered before split, dropped from it. BUFFER counts the limbo until
-        then.
+        then. The ACK that settles it does so at once, and the station holds its
+        next burst `REPLY_HOLD_S` (0.25 s) for a write, so a client that waits
+        for SETTLED before writing still makes that burst.
       - If the session ends first (disconnect, link lost, ABORT), before its
         DISCONNECTED: `CLEANTXBUFFER SETTLED from split to UNKNOWN`. Before split:
         records acked whole. From it: on air unacked, the peer may have it.

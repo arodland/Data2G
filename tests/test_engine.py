@@ -375,6 +375,43 @@ def test_data2g_drops_data_before_connected(data2g):
     assert bytes(got) == (b"late" if data2g else b"early late")
 
 
+@pytest.mark.parametrize("cleaner", ["caller", "callee"])
+def test_a_write_after_settled_goes_at_once(cleaner):
+    """CLEANTXBUFFER mid-transfer, then a message written as SETTLED
+    arrives: the settled station holds its next burst for it
+    (REPLY_HOLD_S), so it arrives in ~2 s, in the next burst, rather than
+    the one after (~5 s without the hold)."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("CONNECT W1AW K2XYZ")
+    h, peer = (a, b) if cleaner == "caller" else (b, a)
+    h.command("DATA2G ON")
+    got, t = bytearray(), {}
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        got.extend(peer.out_data)
+        peer.out_data.clear()
+        if "write" in t and "got" not in t and got.endswith(b"urgent"):
+            t["got"] = h.engine.now
+        if "write" not in t and any(x.startswith("CLEANTXBUFFER SETTLED") for x in h.out_cmd):
+            h.data_in(b"urgent")
+            t["write"] = h.engine.now
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
+    if cleaner == "callee":  # the caller's connect burst: the callee hears it and answers
+        assert link(a.engine, b.engine, 12, 60, lambda: pump() or b.engine.session.state == S.CONNECTED, seed=1)
+    h.data_in(np.random.default_rng(2).bytes(20000))
+    st = h.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(h.engine.tx) and st.tx.next > 0), seed=2)
+    h.command("CLEANTXBUFFER")
+    assert link(a.engine, b.engine, 12, 120, lambda: pump() or got.endswith(b"urgent"), seed=3)
+    assert t["got"] - t["write"] < 3.0, t
+
+
 def test_cqframe_is_heard_without_a_session():
     """VARA's CQFRAME: sent outside any session, heard by a listening and by
     an idle station alike, notified as CQFRAME call bw, no connection made;

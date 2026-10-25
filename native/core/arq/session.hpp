@@ -36,7 +36,10 @@ inline constexpr double WAKE_JITTER_S = 1.0;
 inline constexpr int WAKE_TRIES = 2;
 inline constexpr int CHAT_WAKE_TRIES = 6;
 inline constexpr double COALESCE_S = 0.1;  // CHAT OFF: a short write to an idle link waits this long for more
-inline constexpr double REPLY_HOLD_S = 0.25;  // callee: a reply to a burst that brought the host data and ended the caller's (T_DRAINED) waits this long for its answer (session.py)
+// callee: a reply to a burst that brought the host data and ended the
+// caller's (T_DRAINED) waits this long for its answer; either station's next
+// burst, when CLEANTXBUFFER's limbo has just settled (session.py)
+inline constexpr double REPLY_HOLD_S = 0.25;
 inline constexpr double REPEAT_MAX_S = 3.0;
 // CONNECT_NAK reasons: the caller stops dialing on any of them
 inline constexpr int NAK_VERSION = 1, NAK_NOT_LISTENING = 2, NAK_BUSY = 3, NAK_REFUSED = 4;

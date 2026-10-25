@@ -694,6 +694,62 @@ def test_clean_upto():
     clean_upto(L.Station)
 
 
+def clean_settles_at_the_ack(cls):
+    """settle_limbo() right after handle(): the exact ACK settles the limbo
+    before a's next burst is built (the session holds that burst for the
+    host's answer); a repeat's ACK doesn't. Data written after rides it."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    msgs = [rng.randbytes(30) for _ in range(20)]
+    for m in msgs:
+        a.write(m)
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
+    assert a.tx.clean() == (120, 600, 0, 120)
+    r = b.build()
+    b.answered()
+    assert a.handle(clean(r))
+    a.settle_limbo()
+    assert a.tx.cleaned == (0, 30, 120) and a.tx.limbo is None
+    a.write(b"urgent")
+    n = a.build()
+    a.answered()
+    got = b.read() + finish(a, b, n)
+    assert got == msgs[0] + b"urgent" and a.state == b.state == L.ACTIVE
+
+
+def clean_not_settled_by_a_repeat(cls):
+    """A repeat of the peer burst a already answered may carry a stale ACK:
+    settle_limbo leaves the limbo for the next exact one."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    for _ in range(20):
+        a.write(rng.randbytes(30))
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(2,)))
+    r = b.build()
+    b.answered()
+    assert a.handle(clean(r))
+    a.build()  # answered, lost
+    a.answered()
+    a.tx.clean()
+    assert a.handle(clean(r))  # r again
+    a.settle_limbo()
+    assert a.tx.limbo is not None and a.tx.cleaned is None
+
+
+def test_clean_settles_at_the_ack():
+    clean_settles_at_the_ack(L.Station)
+
+
+def test_clean_not_settled_by_a_repeat():
+    clean_not_settled_by_a_repeat(L.Station)
+
+
 def test_clean_settles_limbo():
     clean_settles_limbo(L.Station)
 

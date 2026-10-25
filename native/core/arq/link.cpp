@@ -719,7 +719,8 @@ std::pair<std::int64_t, bool> Station::take_ack(const Core& core, const Ext& ext
         }
         sent_seqs.erase(it);
     }
-    if (abandon_tlv && !abandon_bursts.empty() && acted < *abandon_bursts.begin() && unwrap(core.cum, tx.base) > tx.base) {
+    // (settle_limbo can start one before any burst carries it: every ACK is from before it)
+    if (abandon_tlv && (abandon_bursts.empty() || acted < *abandon_bursts.begin()) && unwrap(core.cum, tx.base) > tx.base) {
         // an ACK of a burst from before my pending abandon describes the old
         // slicing: past the abandon point it can't be mapped (§4)
         throw ProtocolError(format("ACK of pre-abandon burst %d past the abandon at %lld", static_cast<int>(pmod(acted, BURST_MOD)),
