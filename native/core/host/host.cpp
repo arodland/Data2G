@@ -29,6 +29,11 @@ std::string upper(std::string s) {
     return s;
 }
 
+std::string settled(const arq::TxSide::Offsets3& r) {
+    const auto [f, split, t] = r;
+    return "CLEANTXBUFFER SETTLED " + std::to_string(f) + " " + std::to_string(split) + " " + std::to_string(t);
+}
+
 std::vector<std::string> split(std::string_view s) {  // str.split(): runs of whitespace
     std::vector<std::string> out;
     std::size_t i = 0;
@@ -187,6 +192,7 @@ void Host::command(std::string_view line, std::string_view peer) {
     } else if (cmd == "ABORT") {
         session_over();
         e.abort();
+        up_ = false;
         out_cmd.emplace_back("DISCONNECTED");
         if (listening) e.listen();
     } else if (cmd == "CQFRAME" && args.size() == 2 && bw_cap("BW" + args[1])) {
@@ -228,22 +234,25 @@ void Host::command(std::string_view line, std::string_view peer) {
 
 // VARA's replies: BUFFEREMPTY with nothing queued, FAILED (its trailing space
 // too) outside a session, else OK. Bytes on air but unacked stay in limbo
-// until an ACK says which arrived (host.py has the story). DATA2G ON: OK
-// dropped limbo, and once settled CLEANTXBUFFER SETTLED delivered dropped (or,
-// if the session ends first, SETTLED delivered 0 unknown).
+// until an ACK says which arrived (host.py has the story). DATA2G ON, host
+// byte offsets since CONNECTED: OK drop_from drop_to limbo_from limbo_to,
+// and once a limbo settles SETTLED from split to (or, if the session ends
+// first, SETTLED from split to UNKNOWN).
 std::string Host::clean() {
     auto& s = engine.session();
     if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
     if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
-    const auto [dropped, limbo] = s.station->tx.clean();
-    return data2g ? "CLEANTXBUFFER OK " + std::to_string(dropped) + " " + std::to_string(limbo) : "CLEANTXBUFFER OK";
+    const auto [df, dt, lf, lt] = s.station->tx.clean();
+    if (!data2g) return "CLEANTXBUFFER OK";
+    return "CLEANTXBUFFER OK " + std::to_string(df) + " " + std::to_string(dt) + " " + std::to_string(lf) + " " +
+           std::to_string(lt);
 }
 
 void Host::session_over() {
     auto& st = engine.session().station;
     if (!st) return;
     if (const auto r = st->tx.end_limbo(); r && data2g)
-        out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(r->first) + " 0 " + std::to_string(r->second));
+        out_cmd.push_back(settled(*r) + " UNKNOWN");
 }
 
 void Host::client_gone() {
@@ -269,13 +278,17 @@ bool Host::abort_session() {
     arq::log_write(LOG, INFO, "session with " + e.session().peer + " aborted by the operator");
     session_over();
     e.abort();
+    up_ = false;
     out_cmd.emplace_back("DISCONNECTED");
     if (listening) e.listen();
     return true;
 }
 
 void Host::data_in(arq::ByteView data) {
-    engine.session().write(data);
+    if (data2g && !up_)  // VARA queues it for the session; a Data2G client's offsets start at CONNECTED
+        arq::log_write(LOG, INFO, "DATA2G: " + std::to_string(data.size()) + " B before CONNECTED dropped");
+    else
+        engine.session().write(data);
     // always answer data with a BUFFER line, changed or not: Pat counts what
     // it wrote until one arrives, and blocks once that count passes 7x its
     // next write (it waited forever on a 6-byte B2F line)
@@ -302,9 +315,7 @@ void Host::after_step(bool ptt) {
         out_cmd.emplace_back("IAMALIVE");
     }
     if (auto& st = e.session().station; st && st->tx.cleaned) {  // before a DISCONNECTED below replaces the session
-        if (data2g)
-            out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(st->tx.cleaned->first) + " " +
-                              std::to_string(st->tx.cleaned->second));
+        if (data2g) out_cmd.push_back(settled(*st->tx.cleaned));
         st->tx.cleaned.reset();
     }
     for (const auto& ev : e.events()) {
@@ -314,11 +325,13 @@ void Host::after_step(bool ptt) {
             const std::string& me = e.session().call;  // the call dialed, when MYCALL gave several
             const bool master = e.session().master();
             out_cmd.push_back("CONNECTED " + (master ? me : peer) + " " + (master ? peer : me) + " " + bw_name(e.session().cap));
+            up_ = true;
         } else if (ev.starts_with("CQFRAME")) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));
         } else if (ev.starts_with("DISCONNECTED")) {
             arq::log_write(LOG, INFO, ev);
             session_over();
+            up_ = false;
             out_cmd.emplace_back("DISCONNECTED");
         }
     }

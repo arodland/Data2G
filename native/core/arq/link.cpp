@@ -53,6 +53,8 @@ std::string format(const char* fmt, ...) {
 void TxSide::write(ByteView data) {
     const Bytes r = to_records(data);
     for (std::int64_t x = end(); x < end() + static_cast<std::int64_t>(r.size()); x += 256) recs.push_back(x);
+    for (std::int64_t x = written; x < written + static_cast<std::int64_t>(data.size()); x += 255) rec_host.push_back(x);
+    written += static_cast<std::int64_t>(data.size());
     buf.insert(buf.end(), r.begin(), r.end());
 }
 
@@ -83,7 +85,11 @@ bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
     }
     buf.erase(buf.begin(), buf.begin() + std::clamp<std::int64_t>(keep - buf_off, 0, static_cast<std::int64_t>(buf.size())));
     buf_off = keep;
-    if (auto it = std::upper_bound(recs.begin(), recs.end(), keep); it != recs.begin()) recs.erase(recs.begin(), it - 1);
+    if (auto it = std::upper_bound(recs.begin(), recs.end(), keep); it != recs.begin()) {
+        const auto n = it - 1 - recs.begin();
+        recs.erase(recs.begin(), recs.begin() + n);
+        rec_host.erase(rec_host.begin(), rec_host.begin() + n);
+    }
     keep = hist_off + static_cast<std::int64_t>(hist.size());
     if (!cws.empty()) {
         keep = cws.begin()->second.cstart;
@@ -94,10 +100,7 @@ bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
         hist.erase(hist.begin(), hist.begin() + std::min<std::int64_t>(keep - hist_off, static_cast<std::int64_t>(hist.size())));
         hist_off = keep;
     }
-    if (limbo) {
-        const std::int64_t lo = limbo_start();
-        if (lo == limbo->second) settle(lo);  // all of it acked
-    }
+    if (limbo && limbo_start(std::get<2>(*limbo)) == std::get<2>(*limbo)) settle(std::get<2>(*limbo));  // all of it acked
     return advanced;
 }
 
@@ -147,7 +150,7 @@ std::vector<std::int64_t> TxSide::missing() const {
 
 std::int64_t TxSide::abandon() {
     const std::int64_t a = base;
-    const std::int64_t lo = limbo_start();
+    const std::optional<std::int64_t> lo = limbo ? std::optional(limbo_start(std::get<2>(*limbo))) : std::nullopt;
     if (auto it = cws.find(a); it != cws.end()) {
         stream_end = it->second.start;
         hist.resize(static_cast<std::size_t>(std::clamp<std::int64_t>(it->second.cstart - hist_off, 0,
@@ -156,35 +159,28 @@ std::int64_t TxSide::abandon() {
     cws.clear();
     next = a;
     ack.reset();
-    if (limbo) settle(lo);  // abandons are made against an exact ACK: nothing from the base on arrived
+    if (lo) settle(*lo);  // abandons are made against an exact ACK: nothing from the base on arrived
     return a;
 }
 
-std::pair<std::int64_t, std::int64_t> TxSide::clean() {
-    const std::int64_t e = end(), c = rec_at(stream_end);
-    const std::int64_t dropped = host_bytes(c, e);
-    cut(c, e);
-    std::int64_t old = 0, lo = limbo_start();
-    if (limbo) {
-        old = limbo->first;
-        lo = std::max(lo, limbo->second);
-    }
-    const std::int64_t fresh = host_bytes(lo, c);
-    if (old || fresh) limbo = std::make_pair(old + fresh, c);
-    else limbo.reset();
+std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t> TxSide::clean() {
+    const std::int64_t c = rec_at(stream_end), drop = hoff(c);
+    cut(c, end());
+    if (!limbo)
+        if (const std::int64_t lo = limbo_start(c); lo < c) limbo = Offsets3{hoff(lo), drop, c};
     mark = c;
-    return {dropped, fresh};
+    const auto [lf, lt, _] = limbo.value_or(Offsets3{drop, drop, 0});
+    return {drop, written, lf, lt};
 }
 
-std::optional<std::pair<std::int64_t, std::int64_t>> TxSide::end_limbo() {
+std::optional<TxSide::Offsets3> TxSide::end_limbo() {
     if (!limbo) return std::nullopt;
-    const auto [total, c] = *limbo;
+    const auto [f, t, _] = *limbo;
     auto it = cws.find(base);
     const std::int64_t acked = it != cws.end() ? it->second.start : stream_end;
-    const std::int64_t r = *(std::upper_bound(recs.begin(), recs.end(), acked) - 1);
-    const std::int64_t unknown = std::min(total, host_bytes(r, c));
+    const auto i = std::upper_bound(recs.begin(), recs.end(), acked) - recs.begin() - 1;
     limbo.reset();
-    return std::make_pair(total - unknown, unknown);
+    return Offsets3{f, std::max(f, rec_host[static_cast<std::size_t>(i)]), t};
 }
 
 std::int64_t TxSide::rec_at(std::int64_t x) const {
@@ -192,30 +188,32 @@ std::int64_t TxSide::rec_at(std::int64_t x) const {
     return it != recs.end() ? *it : end();
 }
 
-std::int64_t TxSide::host_bytes(std::int64_t lo, std::int64_t hi) const {
-    return hi - lo - (std::lower_bound(recs.begin(), recs.end(), hi) - std::lower_bound(recs.begin(), recs.end(), lo));
+std::int64_t TxSide::hoff(std::int64_t x) const {
+    const auto i = std::lower_bound(recs.begin(), recs.end(), x) - recs.begin();
+    return i < static_cast<std::ptrdiff_t>(recs.size()) ? rec_host[static_cast<std::size_t>(i)] : written;
 }
 
-void TxSide::cut(std::int64_t lo, std::int64_t hi) {
+void TxSide::cut(std::int64_t lo, std::int64_t hi) {  // host offsets stay
     buf.erase(buf.begin() + (lo - buf_off), buf.begin() + (hi - buf_off));
-    auto i = std::lower_bound(recs.begin(), recs.end(), lo), j = std::lower_bound(recs.begin(), recs.end(), hi);
-    for (auto k = j; k != recs.end(); ++k) *k -= hi - lo;
-    recs.erase(i, j);
+    const auto i = std::lower_bound(recs.begin(), recs.end(), lo) - recs.begin();
+    const auto j = std::lower_bound(recs.begin(), recs.end(), hi) - recs.begin();
+    for (auto k = recs.begin() + j; k != recs.end(); ++k) *k -= hi - lo;
+    recs.erase(recs.begin() + i, recs.begin() + j);
+    rec_host.erase(rec_host.begin() + i, rec_host.begin() + j);
 }
 
-std::int64_t TxSide::limbo_start() const {
-    const std::int64_t c = limbo ? limbo->second : rec_at(stream_end);
+std::int64_t TxSide::limbo_start(std::int64_t c) const {
     auto it = cws.find(base);
     return it != cws.end() ? std::min(rec_at(it->second.start), c) : c;
 }
 
 void TxSide::settle(std::int64_t lo) {
-    const auto [total, c] = *limbo;
-    const std::int64_t dropped = host_bytes(lo, c);
+    const auto [f, t, c] = *limbo;
+    const std::int64_t split = lo < c ? hoff(lo) : t;
     cut(lo, c);
     mark -= c - lo;
     limbo.reset();
-    cleaned = std::make_pair(total - dropped, dropped);
+    cleaned = Offsets3{f, split, t};
 }
 
 bool RxSide::accept(std::int64_t seq, Bytes payload, bool comp) {

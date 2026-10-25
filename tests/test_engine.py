@@ -262,9 +262,9 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
 def test_cleantxbuffer_mid_burst(data2g, snr):
     """CLEANTXBUFFER while the first data burst is on air: it arrives (12
     dB) or doesn't (6). VARA's replies and BUFFER 0 at once for a VARA
-    client; DATA2G ON: the bytes dropped and in limbo, then how the limbo
+    client; DATA2G ON: the offsets dropped and in limbo, then how the limbo
     settled. Either way the peer gets a prefix of the data, and (DATA2G ON)
-    every byte is accounted for."""
+    exactly the bytes before the split."""
     from data2g.host import Host
 
     a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
@@ -294,7 +294,7 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     a.out_cmd.clear()
     a.command("CLEANTXBUFFER")
     reply = a.out_cmd[-1].split()
-    assert reply[:2] == ["CLEANTXBUFFER", "OK"] and len(reply) == (4 if data2g else 2)
+    assert reply[:2] == ["CLEANTXBUFFER", "OK"] and len(reply) == (6 if data2g else 2)
     a.after_step(bool(a.engine.tx))
     buffer = [x for x in a.out_cmd if x.startswith("BUFFER")]
     if not data2g:
@@ -307,10 +307,11 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12) and a.engine.session.state == S.CONNECTED
     settled = [x.split() for x in a.out_cmd if x.startswith("CLEANTXBUFFER SETTLED")]
     if data2g:
-        assert len(settled) == 1
-        assert len(got) == len(up) - int(reply[2]) - int(settled[0][3])
-        assert int(settled[0][2]) + int(settled[0][3]) == int(reply[3])
-        assert int(settled[0][3]) == (0 if snr == 12 else int(reply[3]))
+        drop_from, drop_to, lf, lt = map(int, reply[2:])
+        assert drop_to == len(up) and lf < lt == drop_from
+        assert len(settled) == 1 and len(settled[0]) == 5
+        f, split, t = map(int, settled[0][2:])
+        assert (f, t) == (lf, lt) and split == (lt if snr == 12 else lf) and len(got) == split
     else:
         assert not settled
 
@@ -335,12 +336,38 @@ def test_cleantxbuffer_then_abort():
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
     a.out_cmd.clear()
     a.command("CLEANTXBUFFER")
-    limbo = int(a.out_cmd[-1].split()[3])
-    assert limbo > 0
+    lf, lt = map(int, a.out_cmd[-1].split()[4:])
+    assert lf < lt
     a.command("ABORT")
-    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED 0 0 {limbo}", "DISCONNECTED", "OK"]
+    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED {lf} {lf} {lt} UNKNOWN", "DISCONNECTED", "OK"]
     a.after_step(False)
     assert not any("SETTLED" in x for x in a.out_cmd[4:])
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+def test_data2g_drops_data_before_connected(data2g):
+    """VARA queues data written while the call is placed; DATA2G ON drops it:
+    the queue is empty at CONNECTED, where a Data2G client's offsets start."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command(f"DATA2G {'ON' if data2g else 'OFF'}")
+    a.command("CONNECT W1AW K2XYZ")
+    a.data_in(b"early ")
+    got = bytearray()
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        got.extend(b.out_data)
+        b.out_data.clear()
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or any(x.startswith("CONNECTED") for x in a.out_cmd),
+                seed=1)
+    a.data_in(b"late")
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or got.endswith(b"late"), seed=2)
+    assert bytes(got) == (b"late" if data2g else b"early late")
 
 
 def test_cqframe_is_heard_without_a_session():

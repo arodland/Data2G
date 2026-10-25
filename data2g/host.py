@@ -23,8 +23,9 @@ session inside a 500 Hz band-plan segment; BW2300/BW2750 are the full
 2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION, SN (-> SN
 snr: the pilot SNR, dB, of the session peer's last burst decoded; WRONG
 before one), CLEANTXBUFFER (Host._clean), DATA2G ON|OFF (a client that
-knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports bytes;
-off again when the client goes); broadcast:
+knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports host
+byte offsets, data written before CONNECTED is dropped; off again when the
+client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
@@ -112,6 +113,7 @@ class Host:
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.data2g = False  # DATA2G ON
+        self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
         self._ptt = self._busy = False
@@ -155,6 +157,7 @@ class Host:
         elif cmd == "ABORT":
             self._session_over()
             e.abort()
+            self._up = False
             self.out_cmd.append("DISCONNECTED")
             if self.listening:
                 e.listen()
@@ -217,24 +220,26 @@ class Host:
         drops the bytes on air but unacked too, though the peer may already
         have them; here they stay in limbo until an ACK says which arrived,
         and those that didn't are dropped then. VARA clients see them gone at
-        once (BUFFER leaves them out). DATA2G ON: OK dropped limbo, and once
-        settled CLEANTXBUFFER SETTLED delivered dropped (host bytes; BUFFER
-        counts the limbo until then), or, if the session ends first,
-        SETTLED delivered 0 unknown."""
+        once (BUFFER leaves them out). DATA2G ON, in host byte offsets since
+        CONNECTED, ranges [from, to): OK drop_from drop_to limbo_from
+        limbo_to (drop_to: all Data2G has read; an empty limbo sits at the
+        drop), and once a limbo settles SETTLED from split to (delivered
+        before split, dropped after; BUFFER counts the limbo until then),
+        or, if the session ends first, SETTLED from split to UNKNOWN."""
         s = self.engine.session
         if not s.queued_bytes(not self.data2g)[1]:
             return "CLEANTXBUFFER BUFFEREMPTY"
         if s.state != S.CONNECTED or s.station is None:
             return "CLEANTXBUFFER FAILED "
-        dropped, limbo = s.station.tx.clean()
-        return f"CLEANTXBUFFER OK {dropped} {limbo}" if self.data2g else "CLEANTXBUFFER OK"
+        r = s.station.tx.clean()
+        return "CLEANTXBUFFER OK " + " ".join(map(str, r)) if self.data2g else "CLEANTXBUFFER OK"
 
     def _session_over(self):
         """The session is ending (the engine replaces it next): a limbo still
-        unsettled goes as CLEANTXBUFFER SETTLED delivered 0 unknown."""
+        unsettled goes as CLEANTXBUFFER SETTLED from split to UNKNOWN."""
         st = self.engine.session.station
         if st is not None and (r := st.tx.end_limbo()) is not None and self.data2g:
-            self.out_cmd.append(f"CLEANTXBUFFER SETTLED {r[0]} 0 {r[1]}")
+            self.out_cmd.append(f"CLEANTXBUFFER SETTLED {r[0]} {r[1]} {r[2]} UNKNOWN")
 
     def client_gone(self):
         """The command client's TCP connection closed: it owned the session.
@@ -262,7 +267,11 @@ class Host:
         return self.dial is not None and self.dial(self.accept_addr)
 
     def data_in(self, data: bytes):
-        self.engine.session.write(data)
+        if self.data2g and not self._up:
+            # VARA queues it for the session; a Data2G client's offsets start at CONNECTED
+            log.info("DATA2G: %d B before CONNECTED dropped", len(data))
+        else:
+            self.engine.session.write(data)
         # always answer data with a BUFFER line, changed or not: Pat counts
         # what it wrote until one arrives, and blocks once that count passes
         # 7x its next write (it waited forever on a 6-byte B2F line)
@@ -276,7 +285,7 @@ class Host:
         st = e.session.station
         if st is not None and (c := st.tx.cleaned) is not None:  # before a DISCONNECTED below replaces the session
             if self.data2g:
-                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]}")
+                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]} {c[2]}")
             st.tx.cleaned = None
         for ev in e.events():
             if ev.startswith("CONNECTED"):
@@ -284,12 +293,14 @@ class Host:
                 me = e.session.call  # the call dialed, when MYCALL gave several
                 src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
+                self._up = True
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
                 self.out_cmd.append(f"CQFRAME {call} {BW_NAME[int(cap)]}")
             elif ev.startswith("DISCONNECTED"):
                 log.info("%s", ev)
                 self._session_over()
+                self._up = False
                 self.out_cmd.append("DISCONNECTED")
         if e.session.state == S.CLOSED and self.listening:
             e.listen()

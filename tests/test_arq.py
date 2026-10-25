@@ -599,14 +599,14 @@ def clean_settles_limbo(cls):
     p = a.build()
     a.answered()
     assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
-    assert a.tx.clean() == (16 * 30, 4 * 30)  # records 4-19 dropped; 0-3 on air
+    assert a.tx.clean() == (120, 600, 0, 120)  # records 4-19 dropped; 0-3 on air
     assert a.handle(clean(b.build()))
     b.answered()
     assert a.tx.cleaned is None  # records 1-3 unacked: an abandon settles them
     a.write(b"after")
     n = a.build()
     a.answered()
-    assert a.tx.cleaned == (30, 3 * 30)
+    assert a.tx.cleaned == (0, 30, 120)
     got = b.read() + finish(a, b, n)
     assert got == msgs[0] + b"after" and a.state == b.state == L.ACTIVE
     assert 30 + 3 * 30 + 16 * 30 == sum(map(len, msgs))
@@ -622,10 +622,10 @@ def clean_with_everything_acked(cls):
     p = a.build()  # record 0 and part of record 1
     a.answered()
     assert b.handle(clean(p))
-    assert a.tx.clean() == (45, 285)  # y is two records (255 + 45): the second never went
+    assert a.tx.clean() == (285, 330, 0, 285)  # y is two records (255 + 45): the second never went
     assert a.handle(clean(b.build()))
     b.answered()
-    assert a.tx.cleaned == (285, 0)  # all on air acked: the rest of y's record will follow
+    assert a.tx.cleaned == (0, 285, 285)  # all on air acked: the rest of y's record will follow
     got = b.read() + finish(a, b, a.build())
     assert got == x + y[:255]
 
@@ -641,9 +641,10 @@ def clean_then_session_end(cls):
     p = a.build()
     a.answered()
     assert b.handle(clean(p, lost=(3,))) and b.rx.cum == 2
-    assert a.tx.clean() == (16 * 30, 4 * 30)
+    assert a.tx.clean() == (120, 600, 0, 120)
     assert a.handle(clean(b.build())) and a.tx.limbo is not None
-    assert a.tx.end_limbo() == (30, 90)
+    assert a.tx.clean() == (600, 600, 0, 120)  # again: nothing more to drop, the same limbo
+    assert a.tx.end_limbo() == (0, 30, 120)
     assert a.tx.limbo is None and a.tx.end_limbo() is None
 
 

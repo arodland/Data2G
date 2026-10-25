@@ -185,16 +185,23 @@ class TxSide:
         # padding): compression's history, from offset hist_off on
         self.hist = bytearray()
         self.hist_off = 0
-        # stream offsets where records start, from the one buf_off falls in (clean() cuts only there)
+        # stream offsets where records start, from the one buf_off falls in
+        # (clean() cuts only there), and each one's host offset
         self.recs: list[int] = []
+        self.rec_host: list[int] = []
+        self.written = 0  # host bytes written: the next one's host offset
         self.mark = 0  # stream offset of the first byte written after the last clean()
-        self.limbo: tuple[int, int] | None = None  # clean(): (host bytes on air, unacked; their stream end)
-        self.cleaned: tuple[int, int] | None = None  # the limbo's fate, host bytes (delivered, dropped), for the host
+        # clean(): host offsets [from, to) on air, not acked, and to's stream offset
+        self.limbo: tuple[int, int, int] | None = None
+        # the limbo settled, for the host: host offsets (from, split, to), delivered before split
+        self.cleaned: tuple[int, int, int] | None = None
 
     def write(self, data: bytes):
         r = F.to_records(data)
         end = self.buf_off + len(self.buf)
         self.recs += range(end, end + len(r), 256)
+        self.rec_host += range(self.written, self.written + len(data), 255)
+        self.written += len(data)
         self.buf += r
 
     def pending(self) -> bool:
@@ -224,13 +231,14 @@ class TxSide:
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
         del self.buf[: keep - self.buf_off]
         self.buf_off = keep
-        del self.recs[:max(0, bisect_right(self.recs, keep) - 1)]
+        n = max(0, bisect_right(self.recs, keep) - 1)
+        del self.recs[:n], self.rec_host[:n]
         keep = min((c.cstart for c in self.cws.values()), default=self.hist_off + len(self.hist)) - F.HIST
         if keep > self.hist_off:
             del self.hist[: keep - self.hist_off]
             self.hist_off = keep
-        if self.limbo is not None and (lo := self._limbo_start()) == self.limbo[1]:
-            self._settle(lo)  # all of it acked
+        if self.limbo is not None and self._limbo_start(self.limbo[2]) == self.limbo[2]:
+            self._settle(self.limbo[2])  # all of it acked
         return advanced
 
     def new_codeword(self, submode: str, pb: int, compress: bool, bn: int) -> Codeword:
@@ -267,44 +275,42 @@ class TxSide:
         re-sliced codewords cited the pre-abandon reply). No resends until
         a reply to a post-abandon burst arrives, as before the first reply."""
         a = self.base
-        lo = self._limbo_start()
+        lo = None if self.limbo is None else self._limbo_start(self.limbo[2])
         if a in self.cws:
             self.stream_end = self.cws[a].start
             del self.hist[self.cws[a].cstart - self.hist_off:]
         self.cws.clear()
         self.next = a
         self.ack = None
-        if self.limbo is not None:
+        if lo is not None:
             self._settle(lo)  # abandons are made against an exact ACK: nothing from the base on arrived
         return a
 
-    def clean(self) -> tuple[int, int]:
+    def clean(self) -> tuple[int, int, int, int]:
         """CLEANTXBUFFER: drop the bytes never on air, but finish a record
-        begun on air (the peer would join the next to it). -> host bytes
-        (dropped, newly in limbo: on air, not acked). The limbo is settled by
-        the next ACK that covers it or the next abandon (Station abandons for it)."""
-        end = self.buf_off + len(self.buf)
+        begun on air (the peer would join the next to it). -> host offsets
+        (dropped from, to, limbo from, to). The limbo is on air, not acked:
+        settled by the next ACK that covers it or the next abandon (Station
+        abandons for it). Without one it is empty, at the drop."""
         cut = self._rec(self.stream_end)
-        dropped = self._host(cut, end)
-        self._cut(cut, end)
-        lo = self._limbo_start()
-        old, lo = (0, lo) if self.limbo is None else (self.limbo[0], max(lo, self.limbo[1]))
-        new = self._host(lo, cut)
-        self.limbo = (old + new, cut) if old or new else None
+        drop = self._hoff(cut)
+        self._cut(cut, self.buf_off + len(self.buf))
+        if self.limbo is None and (lo := self._limbo_start(cut)) < cut:
+            self.limbo = (self._hoff(lo), drop, cut)
         self.mark = cut
-        return dropped, new
+        lf, lt = self.limbo[:2] if self.limbo is not None else (drop, drop)
+        return drop, self.written, lf, lt
 
-    def end_limbo(self) -> tuple[int, int] | None:
-        """The session ended with the limbo unsettled. -> host bytes
-        (delivered: in records acked whole; unknown: the rest, on air but
-        unacked), or None without a limbo."""
+    def end_limbo(self) -> tuple[int, int, int] | None:
+        """The session ended with the limbo unsettled. -> host offsets
+        (from, split, to): delivered before split (records acked whole), the
+        rest on air but unacked, fate unknown. None without a limbo."""
         if self.limbo is None:
             return None
-        total, cut = self.limbo
+        f, t, _ = self.limbo
         acked = self.cws[self.base].start if self.base in self.cws else self.stream_end
-        unknown = min(total, self._host(self.recs[bisect_right(self.recs, acked) - 1], cut))
         self.limbo = None
-        return total - unknown, unknown
+        return f, max(f, self.rec_host[bisect_right(self.recs, acked) - 1]), t
 
     def before_mark(self) -> tuple[int, int]:
         """(unsent, unacked) stream bytes written before the last clean()."""
@@ -315,27 +321,29 @@ class TxSide:
         i = bisect_left(self.recs, x)
         return self.recs[i] if i < len(self.recs) else self.buf_off + len(self.buf)
 
-    def _host(self, lo: int, hi: int) -> int:
-        """Host bytes in the whole records from stream offset lo to hi."""
-        return hi - lo - (bisect_left(self.recs, hi) - bisect_left(self.recs, lo))
+    def _hoff(self, x: int) -> int:
+        """The host offset of stream offset x, a record start or the stream's end."""
+        i = bisect_left(self.recs, x)
+        return self.rec_host[i] if i < len(self.recs) else self.written
 
     def _cut(self, lo: int, hi: int):
-        """Delete whole records [lo, hi), all past stream_end."""
+        """Delete whole records [lo, hi), all past stream_end (host offsets stay)."""
         del self.buf[lo - self.buf_off:hi - self.buf_off]
-        self.recs[bisect_left(self.recs, lo):] = [r - (hi - lo) for r in self.recs[bisect_left(self.recs, hi):]]
+        i, j = bisect_left(self.recs, lo), bisect_left(self.recs, hi)
+        self.recs[i:] = [r - (hi - lo) for r in self.recs[j:]]
+        del self.rec_host[i:j]
 
-    def _limbo_start(self) -> int:
-        """Where the limbo's unacked records begin (its end: none)."""
-        cut = self.limbo[1] if self.limbo is not None else self._rec(self.stream_end)
+    def _limbo_start(self, cut: int) -> int:
+        """Where the unacked records before stream offset `cut` begin (cut: none)."""
         return min(self._rec(self.cws[self.base].start), cut) if self.base in self.cws else cut
 
     def _settle(self, lo: int):
-        """The limbo from `lo` on never arrived: drop it."""
-        total, cut = self.limbo
-        dropped = self._host(lo, cut)
+        """The limbo from stream offset `lo` on never arrived: drop it."""
+        f, t, cut = self.limbo
+        split = self._hoff(lo) if lo < cut else t
         self._cut(lo, cut)
         self.mark -= cut - lo
-        self.limbo, self.cleaned = None, (total - dropped, dropped)
+        self.limbo, self.cleaned = None, (f, split, t)
 
 
 class RxSide:
