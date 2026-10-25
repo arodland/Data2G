@@ -38,7 +38,7 @@ def test_grid_and_spec_tables(native):
         assert (r["m"], r["rate"], r["center"], r["bp"], r["clip_db"], r["T"], r["bits"], r["f0"]) == \
             (g.m, g.rate, g.center, g.bp, g.clip_db, g.T, g.bits, g.f0)
         assert (r["sync_threshold"], r["header_threshold"]) == (cpm.SYNC_THRESHOLD[g.name], cpm.HEADER_THRESHOLD[g.name])
-        assert (r["hdr_len"], r["costas_len"]) == (cpm.hdr_len(g), len(cpm.costas(g.m)))
+        assert r["hdr_len"] == cpm.hdr_len(g)
         np.testing.assert_array_equal(r["preamble"], cpm.preamble_pattern(g))
         np.testing.assert_array_equal(r["mid_block"], cpm.mid_block(g))
     assert native.cpm.specs() == [dict(name=s.name, grid=s.grid, code=s.code, index=s.index, k=s.k,

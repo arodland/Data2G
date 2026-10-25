@@ -12,7 +12,7 @@ from data2g.arq.engine import MAX_BURST_S
 from data2g.config import LEADIN_SAMPLES
 
 
-def test_weak_header_at_the_burst_end_is_received():
+def test_weak_header_at_the_burst_end_is_received(protocol):
     """AG7EW's ack-4f x3 on air (recordings/20261002-232711, t 387.6), the
     segment the streaming receiver passed: header score 0.48, under
     STREAM_COMMIT_SCORE, with an acquisition alternative near the head
@@ -21,6 +21,7 @@ def test_weak_header_at_the_burst_end_is_received():
     Recorded before codes.polar_order reversed polar payloads, so they are
     decoded in the order they were sent: no reversal, the CRC checked as
     sent."""
+    protocol(12)  # recorded under it
     from data2g import codes, polar
 
     seg = np.load(Path(__file__).parent / "data" / "ag7ew_ack4f.npz")["audio"].astype(np.float64)

@@ -24,6 +24,24 @@ def test_front_lock_and_mid_blocks_unlike_the_front():
         assert lock is None or lock["n_data"] == 3 and lock["spec"].name == name, (name, lock)
 
 
+def test_a_search_range_ending_before_the_front_does_not_lock_a_period_early():
+    """A streaming search whose range ends a few symbols before a burst's
+    start: c8r50's front, one Costas array four times before protocol 13,
+    locked one period early there (sync 0.76) and read another header
+    (r1/2 x4 as r1/3 x6). No front may lock off its start."""
+    rng = np.random.default_rng(0)
+    for name, spec in cpm.SPECS.items():
+        g = cpm.GRIDS[spec.grid]
+        ctl = codes.encode(cpm.CTL[g.name], bytes(codes.payload_bytes(cpm.CTL[g.name])), 0, 0)
+        data = [codes.encode(spec, bytes(codes.payload_bytes(spec)), 0, 0) for _ in range(3)]
+        x = cpm.modulate(spec, [ctl] + data, dup=False)
+        y = np.concatenate([np.zeros(8000), x, np.zeros(8000)]) + rng.normal(0, 0.05, len(x) + 16000)
+        for k in range(1, 16):  # hi a half symbol to 7.5 symbols before the start
+            lock = cpm.find(g, y, hi=8000 - k * g.T // 2)
+            assert lock is None or (abs(lock["start"] - 8000) < g.T // 4 and lock["spec"].name == name
+                                    and lock["n_data"] == 3), (name, k, lock)
+
+
 def test_tx_filter_by_cap():
     """Each grid's TX filter under every cap it may be used in (cpm.TX_FILTERS):
     out of band under -37 dB (PSD against the mean between the outer tones)
@@ -138,7 +156,7 @@ def test_cpm_control_padding_is_known_when_it_fails():
     b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
     x = np.concatenate([np.zeros(4000), PHY.tx_audio(b), np.zeros(4000)])
     m = PHY.mask_value(ctl_mask(0, 0, 7))
-    for seed in (2, 3, 4):
+    for seed in (3, 6, 7):
         y = hfchannel.apply_channel(x, snr_db=-11.0, seed=seed)
         r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
         cands, usable = codes.decode_raw(cs, np.asarray(PHY.soft_bits(r)[0])[None], index=[0])

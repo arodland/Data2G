@@ -37,12 +37,14 @@ def burst(spec, rng):
 
 
 def score(g, y):
-    """late_lock's two-copy score at detect's best front placement: (over
-    starts passing PEAK_RATIO, as late_lock reads, None if none; over all)."""
-    _, s0, cfo = cpm.detect(g, y[:3 * cpm.hdr_span(g.name, 1)], front_only=True)
-    reads = [(cpm.read_header(g, y, s, cfo)[3], cpm._peak_ratio(g, y, s, cfo) >= cpm.PEAK_RATIO)
-             for s in cpm._tile_starts(g, s0)]
-    return max((v for v, ok in reads if ok), default=None), max((v for v, _ in reads), default=0.0)
+    """At detect's best front placement: late_lock's two-copy score (None
+    unless the placement passes PEAK_RATIO, as late_lock reads), the same
+    over any placement, and the front's sync score and its one-copy header
+    score (find's early lock: SYNC_THRESHOLD, HEADER_THRESHOLD)."""
+    sync, s0, cfo = cpm.detect(g, y[:3 * cpm.hdr_span(g.name, 1)], front_only=True)
+    two = cpm.read_header(g, y, s0, cfo)[3]
+    ok = cpm._peak_ratio(g, y, s0, cfo) >= cpm.PEAK_RATIO
+    return (two if ok else None), two, sync, cpm.read_header(g, y, s0, cfo, copies=1)[3]
 
 
 def one(args):
@@ -83,13 +85,19 @@ def main():
     for g in cpm.GRIDS:
         worst = worst_all = 0.0
         for s in sources:
-            v = [x for x, _ in out[(g, s)] if x is not None]
-            u = [x for _, x in out[(g, s)]]
+            v = [x[0] for x in out[(g, s)] if x[0] is not None]
+            u = [x[1] for x in out[(g, s)]]
             worst, worst_all = max(worst, max(v, default=0.0)), max(worst_all, max(u))
             print(f"{g} {s}: passing PEAK_RATIO {len(v)}/{len(u)}, max {max(v, default=0.0):.3f}; "
                   f"every placement max {max(u):.3f}, 99% {np.quantile(u, 0.99):.3f}")
         print(f"{g}: 1.1 x max = {1.1 * worst:.3f}, every placement {1.1 * worst_all:.3f} "
               f"(now {cpm.HEADER2_THRESHOLD[g]})")
+        # the early lock's two scores on noise and OFDM (SYNC_THRESHOLD and
+        # HEADER_THRESHOLD: 1.1x their largest, the provisional fit's rule)
+        sync = max(x[2] for s in ("noise", "ofdm") for x in out[(g, s)])
+        h1 = max(x[3] for s in ("noise", "ofdm") for x in out[(g, s)])
+        print(f"{g}: noise/OFDM sync max {sync:.3f} -> {1.1 * sync:.3f} (now {cpm.SYNC_THRESHOLD[g]}); "
+              f"one-copy header max {h1:.3f} -> {1.1 * h1:.3f} (now {cpm.HEADER_THRESHOLD[g]})")
 
 
 if __name__ == "__main__":

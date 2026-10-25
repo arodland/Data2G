@@ -59,3 +59,25 @@ def native():
 def reference():
     """reference(module, "name"): the Python function, substituted or not."""
     return native_subs.reference
+
+
+@pytest.fixture
+def protocol(monkeypatch):
+    """protocol(v): audio recorded under another PROTOCOL_VERSION (its
+    headers' CRC-6 seed), with the header tables built from it cleared,
+    --native's and the Python ones behind them; put back after the test."""
+    from data2g import cpm, modem
+
+    names = ((modem, "_valid_words"), (modem, "_valid_signs"), (cpm, "valid_words"), (cpm, "header_rows"),
+             (cpm, "mid_rows"))
+    caches = {f for m, n in names for f in (getattr(m, n), native_subs.reference(m, n)) if hasattr(f, "cache_clear")}
+
+    def use(v):
+        monkeypatch.setattr(modem, "PROTOCOL_VERSION", v)
+        for c in caches:
+            c.cache_clear()
+
+    yield use
+    monkeypatch.undo()
+    for c in caches:
+        c.cache_clear()
