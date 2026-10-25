@@ -617,10 +617,11 @@ class Receiver:
             # a suspect (possibly false) burst may have claimed an end past a
             # real preamble that began inside it: keep the last search window
             # (a confident one keeps nothing of itself: its own data would
-            # false-lock and hold BUSY after every real burst)
+            # false-lock and hold BUSY after every real burst), and every
+            # CPM front waiting inside it for its second header copy
             cut = p["end"] - self.off
             if p["score"] < self.SUSPECT_SCORE:
-                cut = min(cut, len(self.buf) - self.keep)
+                cut = min([cut, len(self.buf) - self.keep] + [c["first"] - self.off for c in self.cpm_wait])
             self._trim(len(self.buf) - max(0, cut))
             self.pending = None
         return out

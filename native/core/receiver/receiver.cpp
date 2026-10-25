@@ -488,9 +488,12 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         }
         // a suspect burst may have claimed an end past a real preamble that
         // began inside it: keep the last search window (a confident one
-        // keeps nothing of itself)
+        // keeps nothing of itself), and every CPM front waiting inside it
         int64_t cut = p.end() - off_;
-        if (p.score() < SUSPECT_SCORE) cut = std::min(cut, len() - keep_);
+        if (p.score() < SUSPECT_SCORE) {
+            cut = std::min(cut, len() - keep_);
+            for (const auto& w : cpm_wait_) cut = std::min(cut, w.first - off_);
+        }
         trim(len() - std::max<int64_t>(0, cut));
         pending_.reset();
     }
