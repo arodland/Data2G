@@ -272,8 +272,8 @@ bool Session::claims(RxBurst& rx) const {
 Session::Queued Session::queued_bytes(bool vara) const {
     const auto n = static_cast<std::int64_t>(pending_write.size());
     if (!station) return {n, n};
-    const auto [u, a] = vara ? station->tx.before_mark() : std::pair<std::int64_t, std::int64_t>{0, 0};
-    return {n + station->tx.unsent() - u, n + station->tx.unacked() - a};
+    const auto [u, a] = station->tx.queued(vara);
+    return {n + u, n + a};
 }
 
 bool Session::master() const { return station ? station->master : state == SessionState::CONNECTING; }

@@ -333,7 +333,9 @@ class Host:
         # it has all gone, 1 until the peer acks it all, so Flush still waits
         # for delivery but writes never block. --buffer-credit 0 reports the
         # plain VARA figure. CHAT ON and DATA2G ON also report it: the client
-        # watches BUFFER fall to see which of its messages were ACKed.
+        # watches BUFFER fall to see which of its messages were ACKed. Host
+        # bytes, as VARA's; the credit is payload bytes, a length byte per
+        # record off, which no client can see.
         st = e.session.station
         unsent, unacked = e.session.queued_bytes(not self.data2g)
         buffered = unacked

@@ -499,7 +499,9 @@ As built (data2g/arq/policy.py):
         DISCONNECTED: `CLEANTXBUFFER SETTLED from split to UNKNOWN`. Before split:
         records acked whole. From it: on air unacked, the peer may have it.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
-  BUFFER n, PTT ON/OFF, BUSY ON/OFF, and a Data2G-specific `MODE name`.
+  BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
+  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, and a
+  Data2G-specific `MODE name`.
 
 ## 9a. Stream framing
 

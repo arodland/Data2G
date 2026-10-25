@@ -673,6 +673,23 @@ def clean_upto(cls):
     assert got == data[:120] + data[315:]
 
 
+def tx_queued_host_bytes(tx):
+    """BUFFER's counts are host bytes: records' length bytes left out, also
+    after a clean drops some and with VARA's view of what came before it."""
+    tx.write(bytes(300))  # two records: 255 + 45, 302 stream bytes
+    assert tx.queued() == (300, 300) and (tx.unsent(), tx.unacked()) == (302, 302)
+    tx.new_codeword("m22", 22, False, 0)  # the length byte and 21 host bytes
+    assert tx.queued() == (279, 300)
+    assert tx.clean() == (255, 300, 0, 255)  # the second record never went
+    assert tx.queued() == (234, 255) and tx.queued(True) == (0, 0)
+    tx.write(bytes(10))
+    assert tx.queued() == (244, 265) and tx.queued(True) == (10, 10)
+
+
+def test_tx_queued_host_bytes():
+    tx_queued_host_bytes(L.TxSide())
+
+
 def test_clean_upto():
     clean_upto(L.Station)
 

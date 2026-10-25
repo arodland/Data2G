@@ -317,9 +317,15 @@ class TxSide:
         self.limbo = None
         return f, max(f, self.rec_host[bisect_right(self.recs, acked) - 1]), t
 
-    def before_mark(self) -> tuple[int, int]:
-        """(unsent, unacked) stream bytes written before the last clean()."""
-        return max(0, self.mark - self.stream_end), max(0, self.mark - self.buf_off)
+    def queued(self, vara: bool = False) -> tuple[int, int]:
+        """(unsent, unacked) host bytes, as unsent() and unacked() count stream
+        bytes. `vara`: only those written after the last clean()."""
+        lo = self.mark if vara else 0
+        return self._host_from(max(self.stream_end, lo)), self._host_from(max(self.buf_off, lo))
+
+    def _host_from(self, x: int) -> int:
+        """Host bytes from stream offset x to the end: the length bytes of records starting there left out."""
+        return self.buf_off + len(self.buf) - x - (len(self.recs) - bisect_left(self.recs, x))
 
     def _rec(self, x: int) -> int:
         """The first record start at or after stream offset x (the stream's end if none)."""

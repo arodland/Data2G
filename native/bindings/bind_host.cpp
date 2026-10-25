@@ -27,13 +27,9 @@ protected:
         if (!st.is_none()) {  // session.py's queued_bytes over the test's station
             q.station = true;
             py::object tx = st.attr("tx");
-            q.unsent += tx.attr("unsent")().cast<std::int64_t>();
-            q.unacked += tx.attr("unacked")().cast<std::int64_t>();
-            if (vara) {
-                const auto [u, a] = tx.attr("before_mark")().cast<std::pair<std::int64_t, std::int64_t>>();
-                q.unsent -= u;
-                q.unacked -= a;
-            }
+            const auto [u, a] = tx.attr("queued")(vara).cast<std::pair<std::int64_t, std::int64_t>>();
+            q.unsent += u;
+            q.unacked += a;
         }
         return q;
     }

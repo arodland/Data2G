@@ -150,15 +150,21 @@ public:
     // The session ended with the limbo unsettled. -> host offsets (from, split,
     // to): delivered before split (records acked whole), the rest unknown.
     std::optional<Offsets3> end_limbo();
-    // (unsent, unacked) stream bytes written before the last clean()
-    std::pair<std::int64_t, std::int64_t> before_mark() const {
-        return {std::max<std::int64_t>(0, mark - stream_end), std::max<std::int64_t>(0, mark - buf_off)};
+    // (unsent, unacked) host bytes, as unsent() and unacked() count stream
+    // bytes. `vara`: only those written after the last clean().
+    std::pair<std::int64_t, std::int64_t> queued(bool vara = false) const {
+        const std::int64_t lo = vara ? mark : 0;
+        return {host_from(std::max(stream_end, lo)), host_from(std::max(buf_off, lo))};
     }
 
 private:
     std::int64_t end() const { return buf_off + static_cast<std::int64_t>(buf.size()); }
     std::int64_t rec_at(std::int64_t x) const;          // the first record start at or after x (end() if none)
     std::int64_t hoff(std::int64_t x) const;            // the host offset of x, a record start or end()
+    // host bytes from x to end(): the length bytes of records starting there left out
+    std::int64_t host_from(std::int64_t x) const {
+        return end() - x - (recs.end() - std::lower_bound(recs.begin(), recs.end(), x));
+    }
     std::int64_t split(std::int64_t h);                 // h's stream offset, never on air: its record split there
     void cut(std::int64_t lo, std::int64_t hi);         // delete whole records [lo, hi), past stream_end
     std::int64_t limbo_start(std::int64_t c) const;     // where the unacked records before c begin (c: none)

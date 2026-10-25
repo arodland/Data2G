@@ -375,6 +375,11 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("comp_known", &Codeword::comp_known);
 
     py::class_<TxSide>(a, "TxSide")
+        .def(py::init<>())
+        .def("write", [](TxSide& t, const py::object& b) { t.write(bytes_of(b)); })
+        .def("new_codeword", [](TxSide& t, const std::string& submode, int pb, bool compress, std::int64_t bn) {
+            return t.new_codeword(submode, pb, compress, bn);  // a copy
+        })
         .def_property_readonly("buf", [](const TxSide& t) { return pyb(t.buf); })
         .def_readonly("buf_off", &TxSide::buf_off)
         .def_readonly("stream_end", &TxSide::stream_end)
@@ -395,7 +400,7 @@ void bind_arq_link(py::module_& m) {
         .def("unacked", &TxSide::unacked)
         .def("missing", &TxSide::missing)
         .def("clean", &TxSide::clean, py::arg("upto") = py::none())
-        .def("before_mark", &TxSide::before_mark)
+        .def("queued", &TxSide::queued, py::arg("vara") = false)
         .def("end_limbo", &TxSide::end_limbo)
         .def_readonly("limbo", &TxSide::limbo)
         .def_readwrite("cleaned", &TxSide::cleaned);
