@@ -153,6 +153,24 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     assert busy_after <= 1.0 < held_after, (busy_after, held_after)
 
 
+def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span():
+    """On air (recordings/20261024-190009, t 1653.5): a false n4-qpsk-r1/5
+    header (score 0.33) claimed 52 s, and the FSK bursts inside it were never
+    searched for. A CPM lock now replaces a suspect header while it is pending."""
+    from pathlib import Path
+
+    from data2g import cpm
+    from data2g.arq.engine import Engine
+
+    y = np.load(Path(__file__).parent / "data" / "kc2g_n4_false_lock_fsk.npz")["audio"].astype(np.float64)
+    rx = receiver.Receiver(Engine("KC2G", seed=1).accept, cpm_grids=tuple(cpm.GRIDS))
+    evs = [ev for i in range(0, len(y), FS // 50) for ev in rx.feed(y[i:i + FS // 50])]
+    heads = [(ev["spec"].name, ev["score"]) for kind, ev in evs if kind == "header"]
+    assert heads[0][0] == "n4-qpsk-r1/5" and heads[0][1] < receiver.Receiver.SUSPECT_SCORE, heads
+    got = [ev for kind, ev in evs if kind == "burst" and ev["rx"] is not None]
+    assert [ev["header"]["spec"].name for ev in got] == ["fsk16r25-r1/2"], heads
+
+
 def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
     """Preamble and header lost (a fade): the streaming receiver finds the
     burst from its frame pilots and mid-burst header copy (modem.find_copy)

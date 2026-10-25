@@ -321,37 +321,46 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     fresh_ = 0;
     const Pending p = *pending_;
     if (p.is_cpm()) return false;  // scores aren't comparable across families
-    const auto band = p.ofdm().band;
-    const int64_t hdr_end = p.start() + config::preamble_samples(config::band(band)) + modem::header_samples(band) - off_;
-    const int64_t w0 = whole ? hdr_end : std::max(hdr_end, len() - keep_);
-    if (len() - w0 < keep_ / 2) return false;
-    std::optional<modem::Lock> q;
-    try {
-        const auto st = stats(w0);
-        q = modem::find_burst(std::span<const double>(buf_).subspan(static_cast<std::size_t>(w0)), bands_, &accept_, st.v);
-        q->start += w0 + off_;
-        q->end += w0 + off_;
-        q->p0 += w0 + off_;
-    } catch (const modem::SyncError&) {
-    }
-    searched();
-    if (p.copy() && (!q || q->score < p.score() + SUPERSEDE_MARGIN)) {
-        // a copy lock can be a copy read off the wrong frame, taken before
-        // the burst's own copy arrived: the true one, later, replaces it
-        if (auto c = find_copy()) {
-            Pending cp{*c};
-            cp.shift(off_);
-            q = cp.ofdm();
+    std::optional<Pending> q;
+    // under a suspect header, any CPM lock replaces it (a false n4 header
+    // claiming 52 s hid three FSK bursts: recordings/20261024-190009)
+    if (!p.copy() && p.score() < SUSPECT_SCORE) {
+        if (auto c = find_cpm()) {  // (else the OFDM search below marks both searched)
+            searched();
+            q = Pending{*c};
+            q->shift(off_);
         }
     }
-    if (!q || q->score < p.score() + SUPERSEDE_MARGIN || q->start == p.start()) return false;
+    if (!q) {
+        const auto band = p.ofdm().band;
+        const int64_t hdr_end = p.start() + config::preamble_samples(config::band(band)) + modem::header_samples(band) - off_;
+        const int64_t w0 = whole ? hdr_end : std::max(hdr_end, len() - keep_);
+        if (len() - w0 < keep_ / 2) return false;
+        try {
+            const auto st = stats(w0);
+            auto l = modem::find_burst(std::span<const double>(buf_).subspan(static_cast<std::size_t>(w0)), bands_, &accept_, st.v);
+            q = Pending{l};
+            q->shift(w0 + off_);
+        } catch (const modem::SyncError&) {
+        }
+        searched();
+        if (p.copy() && (!q || q->score() < p.score() + SUPERSEDE_MARGIN)) {
+            // a copy lock can be a copy read off the wrong frame, taken before
+            // the burst's own copy arrived: the true one, later, replaces it
+            if (auto c = find_copy()) {
+                q = Pending{*c};
+                q->shift(off_);
+            }
+        }
+        if (!q || q->score() < p.score() + SUPERSEDE_MARGIN || q->start() == p.start()) return false;
+    }
     if (!whole) {  // completing: the caller has already handled p
         const auto a = static_cast<std::size_t>(std::max<int64_t>(0, p.start() - off_));
-        const auto b = static_cast<std::size_t>(std::clamp<int64_t>(q->start - off_, 0, len()));
+        const auto b = static_cast<std::size_t>(std::clamp<int64_t>(q->start() - off_, 0, len()));
         out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.begin() + std::max(a, b))});
     }
-    pending_ = Pending{*q};
-    pilots_ok_ = q->copy.has_value() || q->score >= SUSPECT_SCORE;
+    pending_ = q;
+    pilots_ok_ = q->is_cpm() || q->copy() || q->score() >= SUSPECT_SCORE;
     confirmed_ = false;
     out.push_back(HeaderEvent{*pending_, off_ + len()});
     return true;
