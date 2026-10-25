@@ -163,14 +163,17 @@ std::int64_t TxSide::abandon() {
     return a;
 }
 
-std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t> TxSide::clean() {
+std::optional<std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t>> TxSide::clean(
+    std::optional<std::int64_t> upto) {
     const std::int64_t c = rec_at(stream_end), drop = hoff(c);
-    cut(c, end());
+    if (upto && *upto < drop) return std::nullopt;
+    const std::int64_t drop_to = upto ? std::min(*upto, written) : written;
+    cut(c, split(drop_to));
     if (!limbo)
         if (const std::int64_t lo = limbo_start(c); lo < c) limbo = Offsets3{hoff(lo), drop, c};
     mark = c;
     const auto [lf, lt, _] = limbo.value_or(Offsets3{drop, drop, 0});
-    return {drop, written, lf, lt};
+    return std::make_tuple(drop, drop_to, lf, lt);
 }
 
 std::optional<TxSide::Offsets3> TxSide::end_limbo() {
@@ -191,6 +194,21 @@ std::int64_t TxSide::rec_at(std::int64_t x) const {
 std::int64_t TxSide::hoff(std::int64_t x) const {
     const auto i = std::lower_bound(recs.begin(), recs.end(), x) - recs.begin();
     return i < static_cast<std::ptrdiff_t>(recs.size()) ? rec_host[static_cast<std::size_t>(i)] : written;
+}
+
+std::int64_t TxSide::split(std::int64_t h) {
+    if (h >= written) return end();
+    const auto i = static_cast<std::size_t>(std::upper_bound(rec_host.begin(), rec_host.end(), h) - rec_host.begin() - 1);
+    if (rec_host[i] == h) return recs[i];
+    const std::int64_t s = recs[i], k = h - rec_host[i];
+    const auto j = static_cast<std::size_t>(s - buf_off);
+    const std::uint8_t n = buf[j];
+    buf[j] = static_cast<std::uint8_t>(k);
+    buf.insert(buf.begin() + static_cast<std::ptrdiff_t>(j + 1 + static_cast<std::size_t>(k)), static_cast<std::uint8_t>(n - k));
+    for (auto r = recs.begin() + static_cast<std::ptrdiff_t>(i) + 1; r != recs.end(); ++r) *r += 1;
+    recs.insert(recs.begin() + static_cast<std::ptrdiff_t>(i) + 1, s + 1 + k);
+    rec_host.insert(rec_host.begin() + static_cast<std::ptrdiff_t>(i) + 1, h);
+    return s + 1 + k;
 }
 
 void TxSide::cut(std::int64_t lo, std::int64_t hi) {  // host offsets stay

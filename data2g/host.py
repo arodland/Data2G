@@ -172,8 +172,8 @@ class Host:
             e.set_chat(args[0].upper() == "ON")
         elif cmd == "DATA2G" and args and args[0].upper() in ("ON", "OFF"):
             self.data2g = args[0].upper() == "ON"
-        elif cmd == "CLEANTXBUFFER":
-            self.out_cmd.append(self._clean())
+        elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit())):
+            self.out_cmd.append(self._clean(int(args[0]) if args else None))
             return
         elif cmd == "BCAST" and e.kiss is not None:
             self._bcast = True
@@ -214,7 +214,7 @@ class Host:
             pass
         return None
 
-    def _clean(self) -> str:
+    def _clean(self, upto: int | None = None) -> str:
         """CLEANTXBUFFER, VARA's replies: BUFFEREMPTY with nothing queued,
         FAILED (its trailing space too) outside a session, else OK. VARA
         drops the bytes on air but unacked too, though the peer may already
@@ -225,13 +225,18 @@ class Host:
         limbo_to (drop_to: all Data2G has read; an empty limbo sits at the
         drop), and once a limbo settles SETTLED from split to (delivered
         before split, dropped after; BUFFER counts the limbo until then),
-        or, if the session ends first, SETTLED from split to UNKNOWN."""
+        or, if the session ends first, SETTLED from split to UNKNOWN.
+        CLEANTXBUFFER n (DATA2G ON): only the bytes before offset n; LATE,
+        nothing dropped, if a byte at or past n is on air (or finishes a
+        record that is), so the client can append from n safely."""
         s = self.engine.session
         if not s.queued_bytes(not self.data2g)[1]:
             return "CLEANTXBUFFER BUFFEREMPTY"
         if s.state != S.CONNECTED or s.station is None:
             return "CLEANTXBUFFER FAILED "
-        r = s.station.tx.clean()
+        r = s.station.tx.clean(upto)
+        if r is None:
+            return "CLEANTXBUFFER LATE"
         return "CLEANTXBUFFER OK " + " ".join(map(str, r)) if self.data2g else "CLEANTXBUFFER OK"
 
     def _session_over(self):

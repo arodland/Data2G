@@ -286,20 +286,25 @@ class TxSide:
             self._settle(lo)  # abandons are made against an exact ACK: nothing from the base on arrived
         return a
 
-    def clean(self) -> tuple[int, int, int, int]:
+    def clean(self, upto: int | None = None) -> tuple[int, int, int, int] | None:
         """CLEANTXBUFFER: drop the bytes never on air, but finish a record
-        begun on air (the peer would join the next to it). -> host offsets
-        (dropped from, to, limbo from, to). The limbo is on air, not acked:
-        settled by the next ACK that covers it or the next abandon (Station
-        abandons for it). Without one it is empty, at the drop."""
+        begun on air (the peer would join the next to it); `upto`: only those
+        before host offset upto. -> host offsets (dropped from, to, limbo
+        from, to), or None (LATE: a byte at or past upto is on air or
+        finishes a record that is). The limbo is on air, not acked: settled
+        by the next ACK that covers it or the next abandon (Station abandons
+        for it). Without one it is empty, at the drop."""
         cut = self._rec(self.stream_end)
         drop = self._hoff(cut)
-        self._cut(cut, self.buf_off + len(self.buf))
+        if upto is not None and upto < drop:
+            return None
+        drop_to = self.written if upto is None else min(upto, self.written)
+        self._cut(cut, self._split(drop_to))
         if self.limbo is None and (lo := self._limbo_start(cut)) < cut:
             self.limbo = (self._hoff(lo), drop, cut)
         self.mark = cut
         lf, lt = self.limbo[:2] if self.limbo is not None else (drop, drop)
-        return drop, self.written, lf, lt
+        return drop, drop_to, lf, lt
 
     def end_limbo(self) -> tuple[int, int, int] | None:
         """The session ended with the limbo unsettled. -> host offsets
@@ -325,6 +330,20 @@ class TxSide:
         """The host offset of stream offset x, a record start or the stream's end."""
         i = bisect_left(self.recs, x)
         return self.rec_host[i] if i < len(self.recs) else self.written
+
+    def _split(self, h: int) -> int:
+        """The stream offset of host offset h, never on air: the record it
+        falls in is split there (each part its own length byte)."""
+        i = bisect_right(self.rec_host, h) - 1
+        if h >= self.written or self.rec_host[i] == h:
+            return self.recs[i] if h < self.written else self.buf_off + len(self.buf)
+        s, k = self.recs[i], h - self.rec_host[i]
+        j = s - self.buf_off
+        n = self.buf[j]
+        self.buf[j:j + 1 + k] = bytes([k]) + self.buf[j + 1:j + 1 + k] + bytes([n - k])
+        self.recs[i + 1:] = [s + 1 + k] + [r + 1 for r in self.recs[i + 1:]]
+        self.rec_host.insert(i + 1, h)
+        return s + 1 + k
 
     def _cut(self, lo: int, hi: int):
         """Delete whole records [lo, hi), all past stream_end (host offsets stay)."""

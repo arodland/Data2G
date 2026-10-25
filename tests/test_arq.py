@@ -648,6 +648,35 @@ def clean_then_session_end(cls):
     assert a.tx.limbo is None and a.tx.end_limbo() is None
 
 
+def clean_upto(cls):
+    """CLEANTXBUFFER n: 5 codewords on air end in record 3 (offsets
+    90-120). n = 100 is LATE (record 3 will finish), nothing changed; n =
+    120 drops nothing; n = 315, inside record 10, drops 120-315 and splits
+    record 10: the rest, from 315, still arrives."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    data = rng.randbytes(600)
+    for i in range(0, 600, 30):
+        a.write(data[i:i + 30])
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p)) and b.rx.cum == 5
+    buf = bytes(a.tx.buf)
+    assert a.tx.clean(100) is None and bytes(a.tx.buf) == buf and a.tx.limbo is None
+    assert a.tx.clean(120) == (120, 120, 0, 120)
+    assert a.tx.clean(315) == (120, 315, 0, 120)
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned == (0, 120, 120)  # all acked
+    got = b.read() + finish(a, b, a.build())
+    assert got == data[:120] + data[315:]
+
+
+def test_clean_upto():
+    clean_upto(L.Station)
+
+
 def test_clean_settles_limbo():
     clean_settles_limbo(L.Station)
 

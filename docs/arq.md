@@ -486,6 +486,12 @@ As built (data2g/arq/policy.py):
       - `CLEANTXBUFFER OK drop_from drop_to limbo_from limbo_to`. drop_to is
         every byte Data2G has read; later writes are kept. An empty limbo is
         `drop_from drop_from`. A second clean before the limbo settles repeats it.
+      - `CLEANTXBUFFER n` drops only bytes before offset n; those from n on,
+        read or not, are kept. `CLEANTXBUFFER LATE`, nothing dropped, if a byte
+        at or past n is on air or finishes a record begun on air: the client
+        retries with a new offset. On OK it can append from n safely. An n
+        inside a record splits it (the part from n becomes its own record).
+        WRONG without DATA2G ON.
       - Once a non-empty limbo settles: `CLEANTXBUFFER SETTLED from split to`,
         delivered before split, dropped from it. BUFFER counts the limbo until
         then.

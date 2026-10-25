@@ -262,9 +262,10 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
 def test_cleantxbuffer_mid_burst(data2g, snr):
     """CLEANTXBUFFER while the first data burst is on air: it arrives (12
     dB) or doesn't (6). VARA's replies and BUFFER 0 at once for a VARA
-    client; DATA2G ON: the offsets dropped and in limbo, then how the limbo
-    settled. Either way the peer gets a prefix of the data, and (DATA2G ON)
-    exactly the bytes before the split."""
+    client, which gets a prefix of the data. DATA2G ON: LATE for an offset
+    already on air, then a clean that keeps the last 1000 bytes; the offsets
+    dropped and in limbo, how the limbo settled, and the peer gets exactly
+    the bytes before the split and the kept tail."""
     from data2g.host import Host
 
     a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
@@ -292,7 +293,9 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     st = a.engine.session.station
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
     a.out_cmd.clear()
-    a.command("CLEANTXBUFFER")
+    a.command("CLEANTXBUFFER 0")  # DATA2G: only before offset 0, but the first bytes are on air
+    assert a.out_cmd[-1] == ("CLEANTXBUFFER LATE" if data2g else "WRONG")
+    a.command("CLEANTXBUFFER 19000" if data2g else "CLEANTXBUFFER")  # DATA2G: the last 1000 bytes stay
     reply = a.out_cmd[-1].split()
     assert reply[:2] == ["CLEANTXBUFFER", "OK"] and len(reply) == (6 if data2g else 2)
     a.after_step(bool(a.engine.tx))
@@ -304,14 +307,16 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     assert link(a.engine, b.engine, snr, 120,
                 lambda: pump() or (not st.tx.pending() and st.tx.limbo is None and not a.engine.tx), seed=3)
     pump()
-    assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12) and a.engine.session.state == S.CONNECTED
+    assert a.engine.session.state == S.CONNECTED
+    if not data2g:
+        assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12)
     settled = [x.split() for x in a.out_cmd if x.startswith("CLEANTXBUFFER SETTLED")]
     if data2g:
         drop_from, drop_to, lf, lt = map(int, reply[2:])
-        assert drop_to == len(up) and lf < lt == drop_from
+        assert drop_to == 19000 and lf < lt == drop_from
         assert len(settled) == 1 and len(settled[0]) == 5
         f, split, t = map(int, settled[0][2:])
-        assert (f, t) == (lf, lt) and split == (lt if snr == 12 else lf) and len(got) == split
+        assert (f, t) == (lf, lt) and split == (lt if snr == 12 else lf) and bytes(got) == up[:split] + up[19000:]
     else:
         assert not settled
 

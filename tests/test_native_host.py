@@ -129,8 +129,9 @@ def clean_transcript(Engine, Host, data2g, snr):
     a.data_in(np.random.default_rng(2).bytes(20000))
     st = a.engine.session.station
     assert link(a.engine, b.engine, 12, 60, pump(lambda: bool(a.engine.tx) and st.tx.next > 0), seed=2)
-    a.command("CLEANTXBUFFER")
-    a.command("CLEANTXBUFFER")  # again: nothing new
+    a.command("CLEANTXBUFFER 0")  # DATA2G: LATE; VARA: WRONG
+    a.command("CLEANTXBUFFER 19000" if data2g else "CLEANTXBUFFER")
+    a.command("CLEANTXBUFFER")  # again: the rest
     take()
     assert link(a.engine, b.engine, snr, 120, pump(lambda: not st.tx.pending() and not a.engine.tx), seed=3)
     return out

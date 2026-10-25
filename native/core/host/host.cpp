@@ -209,8 +209,10 @@ void Host::command(std::string_view line, std::string_view peer) {
         e.set_chat(a0 == "ON");
     } else if (cmd == "DATA2G" && (a0 == "ON" || a0 == "OFF")) {
         data2g = a0 == "ON";
-    } else if (cmd == "CLEANTXBUFFER") {
-        out_cmd.push_back(clean());
+    } else if (cmd == "CLEANTXBUFFER" &&
+               (args.empty() || (data2g && args.size() == 1 && args[0].size() <= 18 &&
+                                 std::all_of(args[0].begin(), args[0].end(), [](char c) { return c >= '0' && c <= '9'; })))) {
+        out_cmd.push_back(clean(args.empty() ? std::nullopt : std::optional<std::int64_t>(std::stoll(args[0]))));
         return;
     } else if (cmd == "BCAST" && e.kiss()) {
         bcast_ = true;
@@ -237,12 +239,15 @@ void Host::command(std::string_view line, std::string_view peer) {
 // until an ACK says which arrived (host.py has the story). DATA2G ON, host
 // byte offsets since CONNECTED: OK drop_from drop_to limbo_from limbo_to,
 // and once a limbo settles SETTLED from split to (or, if the session ends
-// first, SETTLED from split to UNKNOWN).
-std::string Host::clean() {
+// first, SETTLED from split to UNKNOWN). CLEANTXBUFFER n (DATA2G ON): only the
+// bytes before offset n; LATE, nothing dropped, if a byte at or past n is on air.
+std::string Host::clean(std::optional<std::int64_t> upto) {
     auto& s = engine.session();
     if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
     if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
-    const auto [df, dt, lf, lt] = s.station->tx.clean();
+    const auto r = s.station->tx.clean(upto);
+    if (!r) return "CLEANTXBUFFER LATE";
+    const auto [df, dt, lf, lt] = *r;
     if (!data2g) return "CLEANTXBUFFER OK";
     return "CLEANTXBUFFER OK " + std::to_string(df) + " " + std::to_string(dt) + " " + std::to_string(lf) + " " +
            std::to_string(lt);

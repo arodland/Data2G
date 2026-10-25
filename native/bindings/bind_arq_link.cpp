@@ -394,7 +394,7 @@ void bind_arq_link(py::module_& m) {
         .def("unsent", &TxSide::unsent)
         .def("unacked", &TxSide::unacked)
         .def("missing", &TxSide::missing)
-        .def("clean", &TxSide::clean)
+        .def("clean", &TxSide::clean, py::arg("upto") = py::none())
         .def("before_mark", &TxSide::before_mark)
         .def("end_limbo", &TxSide::end_limbo)
         .def_readonly("limbo", &TxSide::limbo)

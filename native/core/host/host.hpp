@@ -100,7 +100,7 @@ private:
     // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the reply, nullopt for WRONG.
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
     bool accept_connect(const std::string& caller, const std::string& callee);
-    std::string clean();  // CLEANTXBUFFER -> the reply
+    std::string clean(std::optional<std::int64_t> upto);  // CLEANTXBUFFER [n] -> the reply
     void session_over();  // the session is ending: an unsettled limbo goes as SETTLED delivered 0 unknown
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
