@@ -248,6 +248,12 @@ public:
     virtual TxBurstPtr build(bool fresh = true);
     TxBurstPtr on_timeout(bool allow_repeat = true);  // nullptr: link lost
     bool handle(RxBurst& rx);
+    // After handle(): CLEANTXBUFFER's limbo settles against its ACK when that
+    // is exact (not a repeat's), so the host can report SETTLED before the
+    // reply is built; else the next fresh build settles it.
+    void settle_limbo() {
+        if (tx.limbo && !stale_) start_abandon(0);
+    }
     void answered() { answered_ = true; }
     std::optional<Bytes> ctl_pair(RxBurst& rx, int slot, int i);
     std::int64_t new_available() const { return tx.unsent(); }  // bytes my next new codewords can take

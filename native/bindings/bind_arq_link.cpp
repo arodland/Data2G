@@ -475,6 +475,7 @@ void bind_arq_link(py::module_& m) {
             return s.handle(r);
         })
         .def("answered", &Station::answered)
+        .def("settle_limbo", &Station::settle_limbo)
         .def("_ctl_pair", [](Station& s, py::object rx, int slot, int i) -> py::object {
             PyRx r(std::move(rx));
             auto p = s.ctl_pair(r, slot, i);

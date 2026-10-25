@@ -48,7 +48,8 @@ from data2g.arq import link as L
 from data2g.arq import session as S
 from data2g.config import SNR_REF_BW_HZ
 
-from test_arq import (FakeRx, RandomPolicy, Script, clean, clean_settles_limbo, clean_then_session_end, clean_upto,
+from test_arq import (FakeRx, RandomPolicy, Script, clean, clean_not_settled_by_a_repeat, clean_settles_at_the_ack,
+                      clean_settles_limbo, clean_then_session_end, clean_upto,
                       clean_with_everything_acked, finish, tx_queued_host_bytes, late_burst_from_before_an_abandon,
                       late_burst_with_a_stale_ack, payload)
 from test_arq_session import DECODE_S, HEADER_S, PTT_S
@@ -467,6 +468,16 @@ def test_clean_settles_limbo(native, pure, which):
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_tx_queued_host_bytes(native, pure, which):
     tx_queued_host_bytes(L.TxSide() if which == "py" else native.arq.TxSide())
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_clean_settles_at_the_ack(native, pure, which):
+    clean_settles_at_the_ack(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_clean_not_settled_by_a_repeat(native, pure, which):
+    clean_not_settled_by_a_repeat(impl(native, which)[0])
 
 
 @pytest.mark.parametrize("which", ["py", "cpp"])

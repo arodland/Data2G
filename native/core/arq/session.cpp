@@ -222,16 +222,20 @@ void Session::on_rx(RxBurst& rx, double now) {
     Station* st = station.get();
     if (!st || !live(state)) return;
     const size_t undrained = st->rx.out.size();
+    const bool limbo = st->tx.limbo.has_value();
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
     heard(now);
     if (st->state == LinkState::FAILED) {
         close("link failed: " + st->fail_reason);
         return;
     }
+    st->settle_limbo();
+    // CLEANTXBUFFER's limbo just settled: the host's client, told SETTLED, writes what goes next
+    const bool settled = limbo && !st->tx.limbo;
     if (!st->rx.out.empty() || st->last_rx_data || st->tx.pending()) last_data = now;
     if (disc(now)) return;
     if (!master()) {
-        if (st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty()) {
+        if (settled || (st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty())) {
             build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
         } else {
             build_at.reset();
@@ -248,7 +252,10 @@ void Session::on_rx(RxBurst& rx, double now) {
     // (escalated) burst: idling would leave it to wake me ~5 s later
     const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost
                       || st->peer_abandon;
-    if (busy) {
+    if (busy && settled) {
+        idle_wait = 0.0;
+        build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
+    } else if (busy) {
         idle_wait = 0.0;
         queue(st->build(), now);
         st->answered();
