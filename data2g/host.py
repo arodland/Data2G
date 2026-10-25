@@ -22,7 +22,10 @@ BW500 | BW1200 | BW2300 | BW2750 (session bandwidth cap: BW500 keeps a
 session inside a 500 Hz band-plan segment; BW2300/BW2750 are the full
 2400 Hz; BW1200 is a Data2G extension), CHAT ON|OFF, VERSION, SN (-> SN
 snr: the pilot SNR, dB, of the session peer's last burst decoded; WRONG
-before one); broadcast:
+before one), CLEANTXBUFFER (Host._clean), DATA2G ON|OFF (a client that
+knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports host
+byte offsets, data written before CONNECTED is dropped; off again when the
+client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
@@ -109,6 +112,8 @@ class Host:
         engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
+        self.data2g = False  # DATA2G ON
+        self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
         self._ptt = self._busy = False
@@ -150,7 +155,9 @@ class Host:
         elif cmd == "DISCONNECT":
             e.disconnect()
         elif cmd == "ABORT":
+            self._session_over()
             e.abort()
+            self._up = False
             self.out_cmd.append("DISCONNECTED")
             if self.listening:
                 e.listen()
@@ -163,6 +170,12 @@ class Host:
             self.cap = BW[cmd]
         elif cmd == "CHAT" and args and args[0].upper() in ("ON", "OFF"):
             e.set_chat(args[0].upper() == "ON")
+        elif cmd == "DATA2G" and args and args[0].upper() in ("ON", "OFF"):
+            self.data2g = args[0].upper() == "ON"
+        elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit()
+                                                      and len(args[0]) <= 18)):
+            self.out_cmd.append(self._clean(int(args[0]) if args else None))
+            return
         elif cmd == "BCAST" and e.kiss is not None:
             self._bcast = True
             reply = self._bcast_command(args)
@@ -202,6 +215,29 @@ class Host:
             pass
         return None
 
+    def _clean(self, upto: int | None = None) -> str:
+        """CLEANTXBUFFER [n] -> the reply (docs/arq.md §9): VARA's
+        BUFFEREMPTY, FAILED (its trailing space too) or OK; DATA2G ON, OK
+        with host byte offsets, or LATE for an n already on air. Bytes on air
+        but unacked stay in limbo until an ACK settles them (SETTLED, from
+        after_step or _session_over); VARA clients see them gone at once."""
+        s = self.engine.session
+        if not s.queued_bytes(not self.data2g)[1]:
+            return "CLEANTXBUFFER BUFFEREMPTY"
+        if s.state != S.CONNECTED or s.station is None:
+            return "CLEANTXBUFFER FAILED "
+        r = s.station.tx.clean(upto)
+        if r is None:
+            return "CLEANTXBUFFER LATE"
+        return "CLEANTXBUFFER OK " + " ".join(map(str, r)) if self.data2g else "CLEANTXBUFFER OK"
+
+    def _session_over(self):
+        """The session is ending (the engine replaces it next): a limbo still
+        unsettled goes as CLEANTXBUFFER SETTLED from split to UNKNOWN."""
+        st = self.engine.session.station
+        if st is not None and (r := st.tx.end_limbo()) is not None and self.data2g:
+            self.out_cmd.append(f"CLEANTXBUFFER SETTLED {r[0]} {r[1]} {r[2]} UNKNOWN")
+
     def client_gone(self):
         """The command client's TCP connection closed: it owned the session.
         A session under way is disconnected gracefully (the peer is told, and
@@ -214,7 +250,7 @@ class Host:
             e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening, self.accept_addr = False, None
+        self.listening, self.accept_addr, self.data2g = False, None, False
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
@@ -228,7 +264,11 @@ class Host:
         return self.dial is not None and self.dial(self.accept_addr)
 
     def data_in(self, data: bytes):
-        self.engine.session.write(data)
+        if self.data2g and not self._up:
+            # VARA queues it for the session; a Data2G client's offsets start at CONNECTED
+            log.info("DATA2G: %d B before CONNECTED dropped", len(data))
+        else:
+            self.engine.session.write(data)
         # always answer data with a BUFFER line, changed or not: Pat counts
         # what it wrote until one arrives, and blocks once that count passes
         # 7x its next write (it waited forever on a 6-byte B2F line)
@@ -239,17 +279,25 @@ class Host:
         if e.now - self._alive >= ALIVE_S:  # some VARA clients count on it
             self._alive = e.now
             self.out_cmd.append("IAMALIVE")
+        st = e.session.station
+        if st is not None and (c := st.tx.cleaned) is not None:  # before a DISCONNECTED below replaces the session
+            if self.data2g:
+                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]} {c[2]}")
+            st.tx.cleaned = None
         for ev in e.events():
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
                 me = e.session.call  # the call dialed, when MYCALL gave several
                 src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
+                self._up = True
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
                 self.out_cmd.append(f"CQFRAME {call} {BW_NAME[int(cap)]}")
             elif ev.startswith("DISCONNECTED"):
                 log.info("%s", ev)
+                self._session_over()
+                self._up = False
                 self.out_cmd.append("DISCONNECTED")
         if e.session.state == S.CLOSED and self.listening:
             e.listen()
@@ -276,12 +324,14 @@ class Host:
         # burst waits, BUFFER is the unsent bytes past it (the credit); once
         # it has all gone, 1 until the peer acks it all, so Flush still waits
         # for delivery but writes never block. --buffer-credit 0 reports the
-        # plain VARA figure. CHAT ON also reports it: the client watches
-        # BUFFER fall to see which of its messages were ACKed.
+        # plain VARA figure. CHAT ON and DATA2G ON also report it: the client
+        # watches BUFFER fall to see which of its messages were ACKed. Host
+        # bytes, as VARA's; the credit is payload bytes, a length byte per
+        # record off, which no client can see.
         st = e.session.station
-        unsent, unacked = e.session.queued_bytes()
+        unsent, unacked = e.session.queued_bytes(not self.data2g)
         buffered = unacked
-        if (st and self.buffer_credit != 0 and not e.session.chat
+        if (st and self.buffer_credit != 0 and not e.session.chat and not self.data2g
                 and (credit := e.session.policy.next_capacity(st)) is not None):
             if self.buffer_credit is not None:
                 credit = min(credit, self.buffer_credit)

@@ -29,6 +29,11 @@ std::string upper(std::string s) {
     return s;
 }
 
+std::string settled(const arq::TxSide::Offsets3& r) {
+    const auto [f, split, t] = r;
+    return "CLEANTXBUFFER SETTLED " + std::to_string(f) + " " + std::to_string(split) + " " + std::to_string(t);
+}
+
 std::vector<std::string> split(std::string_view s) {  // str.split(): runs of whitespace
     std::vector<std::string> out;
     std::size_t i = 0;
@@ -185,7 +190,9 @@ void Host::command(std::string_view line, std::string_view peer) {
     } else if (cmd == "DISCONNECT") {
         e.disconnect();
     } else if (cmd == "ABORT") {
+        session_over();
         e.abort();
+        up_ = false;
         out_cmd.emplace_back("DISCONNECTED");
         if (listening) e.listen();
     } else if (cmd == "CQFRAME" && args.size() == 2 && bw_cap("BW" + args[1])) {
@@ -200,6 +207,13 @@ void Host::command(std::string_view line, std::string_view peer) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
         e.set_chat(a0 == "ON");
+    } else if (cmd == "DATA2G" && (a0 == "ON" || a0 == "OFF")) {
+        data2g = a0 == "ON";
+    } else if (cmd == "CLEANTXBUFFER" &&
+               (args.empty() || (data2g && args.size() == 1 && args[0].size() <= 18 &&
+                                 std::all_of(args[0].begin(), args[0].end(), [](char c) { return c >= '0' && c <= '9'; })))) {
+        out_cmd.push_back(clean(args.empty() ? std::nullopt : std::optional<std::int64_t>(std::stoll(args[0]))));
+        return;
     } else if (cmd == "BCAST" && e.kiss()) {
         bcast_ = true;
         out_cmd.push_back(bcast_command(args).value_or("WRONG"));
@@ -220,13 +234,35 @@ void Host::command(std::string_view line, std::string_view peer) {
     out_cmd.emplace_back(ok ? "OK" : "WRONG");
 }
 
+// CLEANTXBUFFER [n] (docs/arq.md §9): VARA's BUFFEREMPTY, FAILED (its trailing
+// space too) or OK; DATA2G ON, OK with host byte offsets, or LATE for an n
+// already on air. host.py's Host._clean.
+std::string Host::clean(std::optional<std::int64_t> upto) {
+    auto& s = engine.session();
+    if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
+    if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
+    const auto r = s.station->tx.clean(upto);
+    if (!r) return "CLEANTXBUFFER LATE";
+    if (!data2g) return "CLEANTXBUFFER OK";
+    const auto [df, dt, lf, lt] = *r;
+    return "CLEANTXBUFFER OK " + std::to_string(df) + " " + std::to_string(dt) + " " + std::to_string(lf) + " " +
+           std::to_string(lt);
+}
+
+void Host::session_over() {
+    auto& st = engine.session().station;
+    if (!st) return;
+    if (const auto r = st->tx.end_limbo(); r && data2g)
+        out_cmd.push_back(settled(*r) + " UNKNOWN");
+}
+
 void Host::client_gone() {
     auto& e = engine;
     arq::log_write(LOG, INFO, "command client gone");
     const auto s = e.session().state;
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
-    listening = false;
+    listening = data2g = false;
     accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
@@ -241,23 +277,28 @@ bool Host::abort_session() {
     const auto s = e.session().state;
     if (s != SessionState::CONNECTING && s != SessionState::CONNECTED && s != SessionState::DISCONNECTING) return false;
     arq::log_write(LOG, INFO, "session with " + e.session().peer + " aborted by the operator");
+    session_over();
     e.abort();
+    up_ = false;
     out_cmd.emplace_back("DISCONNECTED");
     if (listening) e.listen();
     return true;
 }
 
 void Host::data_in(arq::ByteView data) {
-    engine.session().write(data);
+    if (data2g && !up_)  // VARA queues it for the session; a Data2G client's offsets start at CONNECTED
+        arq::log_write(LOG, INFO, "DATA2G: " + std::to_string(data.size()) + " B before CONNECTED dropped");
+    else
+        engine.session().write(data);
     // always answer data with a BUFFER line, changed or not: Pat counts what
     // it wrote until one arrives, and blocks once that count passes 7x its
     // next write (it waited forever on a 6-byte B2F line)
     buffer_.reset();
 }
 
-Host::Queued Host::queued() {
+Host::Queued Host::queued(bool vara) {
     const auto& s = engine.session();
-    const auto [unsent, unacked] = s.queued_bytes();
+    const auto [unsent, unacked] = s.queued_bytes(vara);
     return {unsent, unacked, static_cast<bool>(s.station)};
 }
 
@@ -274,6 +315,10 @@ void Host::after_step(bool ptt) {
         alive_ = e.now();
         out_cmd.emplace_back("IAMALIVE");
     }
+    if (auto& st = e.session().station; st && st->tx.cleaned) {  // before a DISCONNECTED below replaces the session
+        if (data2g) out_cmd.push_back(settled(*st->tx.cleaned));
+        st->tx.cleaned.reset();
+    }
     for (const auto& ev : e.events()) {
         const auto w = split(ev);
         if (ev.starts_with("CONNECTED")) {
@@ -281,10 +326,13 @@ void Host::after_step(bool ptt) {
             const std::string& me = e.session().call;  // the call dialed, when MYCALL gave several
             const bool master = e.session().master();
             out_cmd.push_back("CONNECTED " + (master ? me : peer) + " " + (master ? peer : me) + " " + bw_name(e.session().cap));
+            up_ = true;
         } else if (ev.starts_with("CQFRAME")) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));
         } else if (ev.starts_with("DISCONNECTED")) {
             arq::log_write(LOG, INFO, ev);
+            session_over();
+            up_ = false;
             out_cmd.emplace_back("DISCONNECTED");
         }
     }
@@ -313,11 +361,11 @@ void Host::after_step(bool ptt) {
     // So while more than the next burst waits, BUFFER is the unsent bytes
     // past it (the credit); once it has all gone, 1 until the peer acks it
     // all. --buffer-credit 0 reports the plain VARA figure. (host.py has the
-    // full story.) CHAT ON also reports it: the client watches BUFFER fall to
-    // see which of its messages were ACKed.
-    const Queued q = queued();
+    // full story.) CHAT ON and DATA2G ON also report it: the client watches
+    // BUFFER fall to see which of its messages were ACKed.
+    const Queued q = queued(!data2g);
     std::int64_t buffered = q.unacked;
-    if (q.station && buffer_credit != 0 && !engine.session().chat) {
+    if (q.station && buffer_credit != 0 && !engine.session().chat && !data2g) {
         if (auto c = next_capacity()) {
             std::int64_t credit = *c;
             if (buffer_credit) credit = std::min<std::int64_t>(credit, *buffer_credit);

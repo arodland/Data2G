@@ -583,6 +583,129 @@ def late_burst_with_a_stale_ack(cls):
     assert got == data and a.state == b.state == L.ACTIVE
 
 
+def clean_settles_limbo(cls):
+    """CLEANTXBUFFER with 5 codewords on air (m22, 22 B each) over 31 B
+    records: never-sent records drop at once, the one the sent bytes end in
+    is kept. b gets seq 0 (half of record 0) and loses seq 1. The ACK leaves
+    record 0 committed (its head arrived) and records 1-3 undelivered: a's
+    next burst abandons and drops them. Every host byte is delivered or
+    reported dropped, and what a writes after arrives intact."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    msgs = [rng.randbytes(30) for _ in range(20)]  # incompressible: 22 B per codeword
+    for m in msgs:
+        a.write(m)
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(2,))) and b.rx.cum == 1
+    assert a.tx.clean() == (120, 600, 0, 120)  # records 4-19 dropped; 0-3 on air
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned is None  # records 1-3 unacked: an abandon settles them
+    a.write(b"after")
+    n = a.build()
+    a.answered()
+    assert a.tx.cleaned == (0, 30, 120)
+    got = b.read() + finish(a, b, n)
+    assert got == msgs[0] + b"after" and a.state == b.state == L.ACTIVE
+    assert 30 + 3 * 30 + 16 * 30 == sum(map(len, msgs))
+
+
+def clean_with_everything_acked(cls):
+    """The limbo all acked: settled by that ACK, nothing dropped, no abandon."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    x, y = random.Random(2).randbytes(30), random.Random(3).randbytes(300)
+    a.write(x)
+    a.write(y)
+    p = a.build()  # record 0 and part of record 1
+    a.answered()
+    assert b.handle(clean(p))
+    assert a.tx.clean() == (285, 330, 0, 285)  # y is two records (255 + 45): the second never went
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned == (0, 285, 285)  # all on air acked: the rest of y's record will follow
+    got = b.read() + finish(a, b, a.build())
+    assert got == x + y[:255]
+
+
+def clean_then_session_end(cls):
+    """The session ends with the limbo unsettled: b got seqs 0-1 (record 0
+    whole, record 1 begun), so record 0 is delivered and records 1-3 unknown."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    for _ in range(20):
+        a.write(rng.randbytes(30))
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(3,))) and b.rx.cum == 2
+    assert a.tx.clean() == (120, 600, 0, 120)
+    assert a.handle(clean(b.build())) and a.tx.limbo is not None
+    assert a.tx.clean() == (600, 600, 0, 120)  # again: nothing more to drop, the same limbo
+    assert a.tx.end_limbo() == (0, 30, 120)
+    assert a.tx.limbo is None and a.tx.end_limbo() is None
+
+
+def clean_upto(cls):
+    """CLEANTXBUFFER n: 5 codewords on air end in record 3 (offsets
+    90-120). n = 100 is LATE (record 3 will finish), nothing changed; n =
+    120 drops nothing; n = 315, inside record 10, drops 120-315 and splits
+    record 10: the rest, from 315, still arrives."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    data = rng.randbytes(600)
+    for i in range(0, 600, 30):
+        a.write(data[i:i + 30])
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p)) and b.rx.cum == 5
+    buf = bytes(a.tx.buf)
+    assert a.tx.clean(100) is None and bytes(a.tx.buf) == buf and a.tx.limbo is None
+    assert a.tx.clean(120) == (120, 120, 0, 120)
+    assert a.tx.clean(315) == (120, 315, 0, 120)
+    assert a.handle(clean(b.build()))
+    b.answered()
+    assert a.tx.cleaned == (0, 120, 120)  # all acked
+    got = b.read() + finish(a, b, a.build())
+    assert got == data[:120] + data[315:]
+
+
+def tx_queued_host_bytes(tx):
+    """BUFFER's counts are host bytes: records' length bytes left out, also
+    after a clean drops some and with VARA's view of what came before it."""
+    tx.write(bytes(300))  # two records: 255 + 45, 302 stream bytes
+    assert tx.queued() == (300, 300) and (tx.unsent(), tx.unacked()) == (302, 302)
+    tx.new_codeword("m22", 22, False, 0)  # the length byte and 21 host bytes
+    assert tx.queued() == (279, 300)
+    assert tx.clean() == (255, 300, 0, 255)  # the second record never went
+    assert tx.queued() == (234, 255) and tx.queued(True) == (0, 0)
+    tx.write(bytes(10))
+    assert tx.queued() == (244, 265) and tx.queued(True) == (10, 10)
+
+
+def test_tx_queued_host_bytes():
+    tx_queued_host_bytes(L.TxSide())
+
+
+def test_clean_upto():
+    clean_upto(L.Station)
+
+
+def test_clean_settles_limbo():
+    clean_settles_limbo(L.Station)
+
+
+def test_clean_then_session_end():
+    clean_then_session_end(L.Station)
+
+
+def test_clean_with_everything_acked():
+    clean_with_everything_acked(L.Station)
+
+
 def test_late_burst_from_before_an_abandon():
     late_burst_from_before_an_abandon(L.Station)
 

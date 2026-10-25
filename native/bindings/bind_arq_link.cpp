@@ -375,6 +375,11 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("comp_known", &Codeword::comp_known);
 
     py::class_<TxSide>(a, "TxSide")
+        .def(py::init<>())
+        .def("write", [](TxSide& t, const py::object& b) { t.write(bytes_of(b)); })
+        .def("new_codeword", [](TxSide& t, const std::string& submode, int pb, bool compress, std::int64_t bn) {
+            return t.new_codeword(submode, pb, compress, bn);  // a copy
+        })
         .def_property_readonly("buf", [](const TxSide& t) { return pyb(t.buf); })
         .def_readonly("buf_off", &TxSide::buf_off)
         .def_readonly("stream_end", &TxSide::stream_end)
@@ -393,7 +398,12 @@ void bind_arq_link(py::module_& m) {
         .def("pending", &TxSide::pending)
         .def("unsent", &TxSide::unsent)
         .def("unacked", &TxSide::unacked)
-        .def("missing", &TxSide::missing);
+        .def("missing", &TxSide::missing)
+        .def("clean", &TxSide::clean, py::arg("upto") = py::none())
+        .def("queued", &TxSide::queued, py::arg("vara") = false)
+        .def("end_limbo", &TxSide::end_limbo)
+        .def_readonly("limbo", &TxSide::limbo)
+        .def_readwrite("cleaned", &TxSide::cleaned);
 
     py::class_<RxSide>(a, "RxSide")
         .def_readonly("cum", &RxSide::cum)
@@ -547,10 +557,10 @@ void bind_arq_link(py::module_& m) {
         .def("disconnect", &Session::disconnect)
         .def("write", [](Session& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Session& s) { return pyb(s.read()); })
-        .def("queued_bytes", [](const Session& s) {
-            const auto [unsent, unacked] = s.queued_bytes();
+        .def("queued_bytes", [](const Session& s, bool vara) {
+            const auto [unsent, unacked] = s.queued_bytes(vara);
             return py::make_tuple(unsent, unacked);
-        })
+        }, py::arg("vara") = false)
         .def("poll", [](Session& s, double now) {
             auto* p = dynamic_cast<PySession*>(&s);
             return p ? p->burst_obj(s.poll(now)) : burst_py(s.poll(now));

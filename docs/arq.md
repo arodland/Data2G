@@ -458,8 +458,51 @@ As built (data2g/arq/policy.py):
     as the monitor shows it) of the last burst decoded from the session's peer.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
+  - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
+    command client leaves. With it on:
+    - BUFFER is the plain VARA count (no next-burst credit).
+    - CLEANTXBUFFER reports host byte offsets (below).
+    - Data read from the data port before CONNECTED is dropped, so the queue is
+      empty at CONNECTED and offset 0 is the first byte written after it. VARA
+      queues such data for the session. A client must not write before
+      CONNECTED: bytes still in the socket then can't be told apart.
+    - The data port is not exclusive: any connection can write into the session.
+      For a DATA2G client a second writer is undefined behaviour (its bytes
+      shift every offset). Planned: a per-session data port for outgoing
+      sessions, like ACCEPT in reverse.
+  - **CLEANTXBUFFER** drops queued data. Replies as VARA's: `CLEANTXBUFFER
+    BUFFEREMPTY` with nothing queued, `CLEANTXBUFFER FAILED ` (trailing space)
+    outside a session, else `CLEANTXBUFFER OK`.
+    - Bytes never on air are dropped at once. A record begun on air is finished
+      (§9a), so the cut falls at a record boundary.
+    - VARA also drops bytes on air but unacked, though the peer may already have
+      them. Here they are in limbo: the next ACK past them says they arrived; the
+      next exact ACK (§4) says the rest did not, and an abandon drops those.
+      No wire change.
+    - VARA clients see the limbo gone at once: BUFFER leaves it out.
+    - DATA2G ON: host byte offsets since CONNECTED, ranges `[from, to)`, so a
+      client can match them to what it wrote without BUFFER arithmetic (data
+      still in the socket would skew that).
+      - `CLEANTXBUFFER OK drop_from drop_to limbo_from limbo_to`. drop_to is
+        every byte Data2G has read (n, below, if that is less); later writes are
+        kept. An empty limbo is `drop_from drop_from`. A second clean before the
+        limbo settles repeats it.
+      - `CLEANTXBUFFER n` drops only bytes before offset n; those from n on,
+        read or not, are kept. `CLEANTXBUFFER LATE`, nothing dropped, if a byte
+        at or past n is on air or finishes a record begun on air: the client
+        retries with a new offset. On OK it can append from n safely. An n
+        inside a record splits it (the part from n becomes its own record).
+        WRONG without DATA2G ON.
+      - Once a non-empty limbo settles: `CLEANTXBUFFER SETTLED from split to`,
+        delivered before split, dropped from it. BUFFER counts the limbo until
+        then.
+      - If the session ends first (disconnect, link lost, ABORT), before its
+        DISCONNECTED: `CLEANTXBUFFER SETTLED from split to UNKNOWN`. Before split:
+        records acked whole. From it: on air unacked, the peer may have it.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
-  BUFFER n, PTT ON/OFF, BUSY ON/OFF, and a Data2G-specific `MODE name`.
+  BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
+  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, and a
+  Data2G-specific `MODE name`.
 
 ## 9a. Stream framing
 

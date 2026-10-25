@@ -6,6 +6,7 @@
 // (int64) here, 7 bits on the wire.
 #pragma once
 
+#include <algorithm>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -116,6 +118,16 @@ public:
     std::int64_t acked = 0, acked_wire = 0, acked_plain = 0;
     Bytes hist;
     std::int64_t hist_off = 0;
+    // stream offsets where records start, from the one buf_off falls in
+    // (clean() cuts only there), and each one's host offset
+    std::vector<std::int64_t> recs, rec_host;
+    std::int64_t written = 0;  // host bytes written: the next one's host offset
+    std::int64_t mark = 0;     // stream offset of the first byte written after the last clean()
+    using Offsets3 = std::tuple<std::int64_t, std::int64_t, std::int64_t>;
+    // clean(): host offsets [from, to) on air, not acked, and to's stream offset
+    std::optional<Offsets3> limbo;
+    // the limbo settled, for the host: host offsets (from, split, to), delivered before split
+    std::optional<Offsets3> cleaned;
 
     void write(ByteView data);
     bool pending() const;
@@ -127,6 +139,36 @@ public:
     Codeword& new_codeword(const std::string& submode, int pb, bool compress, std::int64_t bn);
     std::vector<std::int64_t> missing() const;
     std::int64_t abandon();
+    // CLEANTXBUFFER: drop the bytes never on air, but finish a record begun
+    // on air; `upto`: only those before host offset upto. -> host offsets
+    // (dropped from, to, limbo from, to), nullopt for LATE (a byte at or past
+    // upto on air, or finishing a record that is). The limbo is on air, not
+    // acked: settled by the next ACK that covers it or the next abandon.
+    // Without one it is empty, at the drop.
+    std::optional<std::tuple<std::int64_t, std::int64_t, std::int64_t, std::int64_t>> clean(
+        std::optional<std::int64_t> upto = std::nullopt);
+    // The session ended with the limbo unsettled. -> host offsets (from, split,
+    // to): delivered before split (records acked whole), the rest unknown.
+    std::optional<Offsets3> end_limbo();
+    // (unsent, unacked) host bytes, as unsent() and unacked() count stream
+    // bytes. `vara`: only those written after the last clean().
+    std::pair<std::int64_t, std::int64_t> queued(bool vara = false) const {
+        const std::int64_t lo = vara ? mark : 0;
+        return {host_from(std::max(stream_end, lo)), host_from(std::max(buf_off, lo))};
+    }
+
+private:
+    std::int64_t end() const { return buf_off + static_cast<std::int64_t>(buf.size()); }
+    std::int64_t rec_at(std::int64_t x) const;          // the first record start at or after x (end() if none)
+    std::int64_t hoff(std::int64_t x) const;            // the host offset of x, a record start or end()
+    // host bytes from x to end(): the length bytes of records starting there left out
+    std::int64_t host_from(std::int64_t x) const {
+        return end() - x - (recs.end() - std::lower_bound(recs.begin(), recs.end(), x));
+    }
+    std::int64_t split(std::int64_t h);                 // h's stream offset, never on air: its record split there
+    void cut(std::int64_t lo, std::int64_t hi);         // delete whole records [lo, hi), past stream_end
+    std::int64_t limbo_start(std::int64_t c) const;     // where the unacked records before c begin (c: none)
+    void settle(std::int64_t lo);                       // the limbo from lo on never arrived: drop it
 };
 
 class RxSide {

@@ -18,17 +18,18 @@ public:
     py::object engine_obj;
 
 protected:
-    Queued queued() override {
+    Queued queued(bool vara) override {
         py::object s = engine_obj.attr("session");
-        if (!py::dict(py::getattr(s, "__dict__")).contains("_station_override")) return Host::queued();
+        if (!py::dict(py::getattr(s, "__dict__")).contains("_station_override")) return Host::queued(vara);
         Queued q;
         q.unsent = q.unacked = static_cast<std::int64_t>(py::len(s.attr("_pending_write")));
         py::object st = s.attr("station");
         if (!st.is_none()) {  // session.py's queued_bytes over the test's station
             q.station = true;
             py::object tx = st.attr("tx");
-            q.unsent += tx.attr("unsent")().cast<std::int64_t>();
-            q.unacked += tx.attr("unacked")().cast<std::int64_t>();
+            const auto [u, a] = tx.attr("queued")(vara).cast<std::pair<std::int64_t, std::int64_t>>();
+            q.unsent += u;
+            q.unacked += a;
         }
         return q;
     }
@@ -76,6 +77,7 @@ void bind_host(py::module_& m) {
         .def_readwrite("cap", &PyHost::cap)
         .def_readwrite("listening", &PyHost::listening)
         .def_readwrite("buffer_credit", &PyHost::buffer_credit)
+        .def_readwrite("data2g", &PyHost::data2g)
         .def_property_readonly("accept_addr", [](const PyHost& s) -> py::object {
             return s.accept_addr ? py::object(py::make_tuple(s.accept_addr->host, s.accept_addr->port)) : py::none();
         })

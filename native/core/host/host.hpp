@@ -11,7 +11,10 @@
 // the command client's own: host.py), CONNECT from to, DISCONNECT,
 // ABORT, CQFRAME call bw, BW500|BW1200|BW2300|BW2750, CHAT ON|OFF, VERSION,
 // SN (-> SN snr, the session peer's last burst decoded; WRONG before one),
-// and IGNORED's settings; broadcast (docs/broadcast.md): BCAST OPEN group
+// CLEANTXBUFFER (host.py's Host._clean), DATA2G ON|OFF (a client that knows
+// Data2G: plain VARA BUFFER, CLEANTXBUFFER reports host byte offsets, data
+// before CONNECTED dropped; off again when the client goes), and IGNORED's
+// settings; broadcast (docs/broadcast.md): BCAST OPEN group
 // [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
 // WRONG (MYCALL's OK followed by REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
 // ON|OFF, BUFFER n, IAMALIVE, MODE; broadcast statuses (BCAST ...) once the
@@ -77,6 +80,7 @@ public:
     // false: the owner sends PTT ON/OFF itself, when the rig is keyed and released (the engine's PTT runs ahead of both)
     bool announce_ptt = true;
     std::optional<int> buffer_credit;
+    bool data2g = false;               // DATA2G ON
     std::vector<std::string> out_cmd;  // lines for the command port, without CR
     arq::Bytes out_data;               // bytes for the data port
 
@@ -87,7 +91,8 @@ protected:
         std::int64_t unsent = 0, unacked = 0;
         bool station = false;
     };
-    virtual Queued queued();
+    // `vara`: Session::queued_bytes's
+    virtual Queued queued(bool vara);
     // The policy's next_capacity(station); nullopt when it has none.
     virtual std::optional<std::int64_t> next_capacity();
 
@@ -95,8 +100,11 @@ private:
     // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the reply, nullopt for WRONG.
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
     bool accept_connect(const std::string& caller, const std::string& callee);
+    std::string clean(std::optional<std::int64_t> upto);  // CLEANTXBUFFER [n] -> the reply
+    void session_over();  // the session is ending: an unsettled limbo goes as SETTLED from split to UNKNOWN
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
+    bool up_ = false;     // CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
     bool ptt_ = false, busy_ = false;
     std::optional<std::int64_t> buffer_ = 0;  // nullopt: answer the next step whatever it is
     double buffer_t_ = 0.0;                   // engine time of the last BUFFER line

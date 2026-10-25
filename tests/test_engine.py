@@ -239,10 +239,12 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
     # 400 of the 1000 bytes sent and not yet acked: VARA counts them. With a
     # credit, only unsent bytes past it count, and 1 stands for the rest
     # until they're acked (Pat's Flush waits for 0; its writes never block)
-    # CHAT ON: no credit either, the client watches BUFFER for its ACKs
-    for credit, chat, expect in ((None, False, 1), (100, False, 500), (0, False, 1000), (None, True, 1000)):
+    # CHAT ON and DATA2G ON: no credit either, the client watches BUFFER for its ACKs
+    for credit, chat, d2g, expect in ((None, False, False, 1), (100, False, False, 500), (0, False, False, 1000),
+                                      (None, True, False, 1000), (None, False, True, 1000)):
         h = Host(Engine("W1AW", seed=1), credit)
         h.engine.session.chat = chat
+        h.command(f"DATA2G {'ON' if d2g else 'OFF'}")
         st = SimpleNamespace(tx=L.TxSide(), read=lambda: b"")
         st.tx.buf, st.tx.stream_end = bytearray(1000), 400
         h.engine.session.station = st
@@ -253,6 +255,124 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
         h.engine.n += int(31 * FS)  # unchanged, but repeated: Pat times out after a minute without one
         h.after_step(False)
         assert f"BUFFER {expect}" in h.out_cmd
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+@pytest.mark.parametrize("snr", [12, 6])
+def test_cleantxbuffer_mid_burst(data2g, snr):
+    """CLEANTXBUFFER while the first data burst is on air: it arrives (12
+    dB) or doesn't (6). VARA's replies and BUFFER 0 at once for a VARA
+    client, which gets a prefix of the data. DATA2G ON: LATE for an offset
+    already on air, then a clean that keeps the last 1000 bytes; the offsets
+    dropped and in limbo, how the limbo settled, and the peer gets exactly
+    the bytes before the split and the kept tail."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("CLEANTXBUFFER")
+    assert a.out_cmd[-1] == "CLEANTXBUFFER BUFFEREMPTY"
+    idle = Host(Engine("NOCALL", seed=6))
+    idle.data_in(b"x")
+    idle.command("CLEANTXBUFFER")
+    assert idle.out_cmd[-1] == "CLEANTXBUFFER FAILED "  # no session
+    if data2g:
+        a.command("DATA2G ON")
+    a.command("CONNECT W1AW K2XYZ")
+    got = bytearray()
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        got.extend(b.out_data)
+        b.out_data.clear()
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
+    up = np.random.default_rng(2).bytes(20000)
+    a.data_in(up)
+    st = a.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
+    a.out_cmd.clear()
+    a.command("CLEANTXBUFFER 0")  # DATA2G: only before offset 0, but the first bytes are on air
+    assert a.out_cmd[-1] == ("CLEANTXBUFFER LATE" if data2g else "WRONG")
+    a.command("CLEANTXBUFFER 19000" if data2g else "CLEANTXBUFFER")  # DATA2G: the last 1000 bytes stay
+    reply = a.out_cmd[-1].split()
+    assert reply[:2] == ["CLEANTXBUFFER", "OK"] and len(reply) == (6 if data2g else 2)
+    a.after_step(bool(a.engine.tx))
+    buffer = [x for x in a.out_cmd if x.startswith("BUFFER")]
+    if not data2g:
+        assert buffer == ["BUFFER 0"]  # all gone, as VARA has it
+    else:
+        assert buffer and int(buffer[0].split()[1]) > 0  # the limbo, until settled
+    assert link(a.engine, b.engine, snr, 120,
+                lambda: pump() or (not st.tx.pending() and st.tx.limbo is None and not a.engine.tx), seed=3)
+    pump()
+    assert a.engine.session.state == S.CONNECTED
+    if not data2g:
+        assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12)
+    settled = [x.split() for x in a.out_cmd if x.startswith("CLEANTXBUFFER SETTLED")]
+    if data2g:
+        drop_from, drop_to, lf, lt = map(int, reply[2:])
+        assert drop_to == 19000 and lf < lt == drop_from
+        assert len(settled) == 1 and len(settled[0]) == 5
+        f, split, t = map(int, settled[0][2:])
+        assert (f, t) == (lf, lt) and split == (lt if snr == 12 else lf) and bytes(got) == up[:split] + up[19000:]
+    else:
+        assert not settled
+
+
+def test_cleantxbuffer_then_abort():
+    """DATA2G ON: a session aborted with the limbo unsettled reports it
+    first, its fate unknown (nothing acked yet)."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("DATA2G ON")
+    a.command("CONNECT W1AW K2XYZ")
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
+    a.data_in(np.random.default_rng(2).bytes(20000))
+    st = a.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
+    a.out_cmd.clear()
+    a.command("CLEANTXBUFFER")
+    lf, lt = map(int, a.out_cmd[-1].split()[4:])
+    assert lf < lt
+    a.command("ABORT")
+    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED {lf} {lf} {lt} UNKNOWN", "DISCONNECTED", "OK"]
+    a.after_step(False)
+    assert not any("SETTLED" in x for x in a.out_cmd[4:])
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+def test_data2g_drops_data_before_connected(data2g):
+    """VARA queues data written while the call is placed; DATA2G ON drops it:
+    the queue is empty at CONNECTED, where a Data2G client's offsets start."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command(f"DATA2G {'ON' if data2g else 'OFF'}")
+    a.command("CONNECT W1AW K2XYZ")
+    a.data_in(b"early ")
+    got = bytearray()
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        got.extend(b.out_data)
+        b.out_data.clear()
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or any(x.startswith("CONNECTED") for x in a.out_cmd),
+                seed=1)
+    a.data_in(b"late")
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or got.endswith(b"late"), seed=2)
+    assert bytes(got) == (b"late" if data2g else b"early late")
 
 
 def test_cqframe_is_heard_without_a_session():
