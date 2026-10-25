@@ -649,6 +649,37 @@ Raw decode_raw_pinned(const Spec& s, const Mat<float>& soft, std::span<const std
     return out;
 }
 
+Raw decode_buffer_raw(const Spec& s, const Mat<double>& buf, int max_rv, std::span<const std::int8_t> known) {
+    const std::size_t B = buf.rows;
+    Raw out;
+    if (s.polar) {
+        const auto deint = cut(s, buf, static_cast<std::size_t>(s.coded_bits));
+        out.list = POLAR_LIST;
+        if (known.empty()) {
+            auto r = polar_decoder(s).decode(deint);
+            reorder_paths(s, r.paths);
+            out.cands = std::move(r.paths);
+        } else {
+            out.cands = pinned_paths(s, deint, known, PLAIN);
+        }
+        out.usable = Mat<std::uint8_t>(B, POLAR_LIST, 1);
+        return out;
+    }
+    const int extent = ir_extent(s, max_rv);
+    Mat<double> b = buf;
+    if (!known.empty())
+        for (std::size_t r = 0; r < B; ++r) {
+            const auto v = pin_buffer(s, buf.row(r), known);
+            std::copy(v.begin(), v.end(), b[r]);
+        }
+    auto r = ldpc_decoder(s, extent).decode(cut(s, b, static_cast<std::size_t>(extent)), ldpc_iters());
+    out.list = 1;
+    out.cands = std::move(r.bits);
+    out.usable = Mat<std::uint8_t>(B, 1);
+    out.usable.data = std::move(r.ok);
+    return out;
+}
+
 std::vector<Payload> decode_buffer_pinned(const Spec& s, const Mat<double>& buf, int max_rv,
                                           std::span<const std::int8_t> known, std::uint32_t crc_mask) {
     const std::uint32_t masks[1] = {crc_mask};

@@ -199,6 +199,7 @@ class ModemRx:
         # check (a burst's slot 0 is asked under the session's key, KISS's, mask 0)
         self._raw = {}
         self._pin = {}  # (slot, cut) -> its decode with the payload past cut bytes pinned to zero
+        self._pairs = {}  # (slot, cut or None) -> slots slot, slot + 1 combined (RV 0, 1), decoded mask open
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
         self.r = r
         self._post, self._blind = {}, False  # DD: slot -> LLRs of its coded bits
@@ -288,6 +289,51 @@ class ModemRx:
             c, u = self._pinned(slot, spec, off)
             out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
         return list(dict.fromkeys(out))
+
+    def raw_pair(self, slot: int) -> list[bytes]:
+        """raw() of a codeword sent twice: `slot` at RV 0 and `slot + 1` at
+        RV 1, combined (a broadcast control under DUP, docs/broadcast.md
+        §3). [] if the two aren't both there, or (CPM) not both control."""
+        if not self._pair_ok(slot):
+            return []
+        spec = self._spec(slot)
+        nb = codes.payload_bytes(spec)
+        cands, usable = self._pair(slot, None)
+        out = [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
+        for off in () if out and spec.code == "ldpc" else self._offsets(spec, slot // 2):
+            c, u = self._pair(slot, off)
+            out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
+        return list(dict.fromkeys(out))
+
+    def decode_pair(self, slot: int, mask_id: tuple) -> bytes | None:
+        """The pair raw_pair reads, CRC-checked under `mask_id` (a control's:
+        its padding pinned if it fails plain), or None."""
+        if not self._pair_ok(slot):
+            return None
+        spec, m = self._spec(slot), mask_value(mask_id)
+        for off in (None, *self._offsets(spec, _ctl_index(mask_id))):
+            got = codes.check(spec, *self._pair(slot, off), m)
+            if got is not None:
+                return got
+        return None
+
+    def _pair_ok(self, slot: int) -> bool:
+        if slot + 1 >= self.n_cw:
+            return False
+        return not self.n_ctl_slots or slot + 1 < self.n_ctl_slots
+
+    def _pair(self, slot: int, off: int | None) -> tuple:
+        """Slots `slot` (RV 0) and `slot + 1` (RV 1) combined and decoded
+        once, mask open (codes.decode_buffer_raw's row); `off`: the payload
+        past it known zero. No DD: a pair is a control, one short decode."""
+        if (slot, off) not in self._pairs:
+            spec = self._spec(slot)
+            buf = codes.combine(spec, None, codes.flip(spec, slot, 0) * self._soft(slot), 0)
+            buf = codes.combine(spec, buf, codes.flip(spec, slot + 1, 1) * self._soft(slot + 1), 1)
+            known = None if off is None else codes.zero_tail(spec, off)
+            cands, usable = codes.decode_buffer_raw(spec, buf, 1, known)
+            self._pairs[(slot, off)] = cands[0], usable[0]
+        return self._pairs[(slot, off)]
 
     def _offsets(self, spec, i: int) -> tuple:
         """Control codeword i's payload offsets past which a cut (PIN_CUTS,

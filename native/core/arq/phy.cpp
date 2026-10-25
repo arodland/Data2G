@@ -241,29 +241,81 @@ std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
     return out;
 }
 
-std::vector<Bytes> ModemRx::raw(int slot) {
-    if (slot >= n_cw_) return {};
-    const auto& s = spec(slot);
-    const Raw& d = decoded(slot, s);
+namespace {
+
+// Raw rows' usable candidates as payload bytes, appended.
+template <class R>
+void add_payloads(const codes::Spec& s, const R& r, std::vector<Bytes>& out) {
     const std::size_t k = static_cast<std::size_t>(s.k), nb = static_cast<std::size_t>(s.payload_bytes);
-    std::vector<Bytes> out;
-    auto add = [&](const Raw& r) {
-        for (std::size_t l = 0; l < r.usable.size(); ++l) {
-            if (!r.usable[l]) continue;
-            Bytes p(nb, 0);
-            for (std::size_t i = 0; i < 8 * nb; ++i) p[i / 8] |= static_cast<std::uint8_t>((r.cands[l * k + i] & 1) << (7 - i % 8));
-            out.push_back(std::move(p));
-        }
-    };
-    add(d);
-    // pinned candidates after the plain ones: LDPC's when it did not converge; polar's always (its list is never
-    // empty). A broadcast control is one codeword per slot (CPM: one, twice at most).
-    if (out.empty() || s.polar)
-        for (int off : offsets(s, n_ctl_slots_ ? 0 : slot)) add(pinned(slot, s, off));
+    for (std::size_t l = 0; l < r.usable.size(); ++l) {
+        if (!r.usable[l]) continue;
+        Bytes p(nb, 0);
+        for (std::size_t i = 0; i < 8 * nb; ++i) p[i / 8] |= static_cast<std::uint8_t>((r.cands[l * k + i] & 1) << (7 - i % 8));
+        out.push_back(std::move(p));
+    }
+}
+
+std::vector<Bytes> unique(std::vector<Bytes> out) {
     std::vector<Bytes> uniq;
     for (auto& p : out)
         if (std::find(uniq.begin(), uniq.end(), p) == uniq.end()) uniq.push_back(std::move(p));
     return uniq;
+}
+
+}  // namespace
+
+std::vector<Bytes> ModemRx::raw(int slot) {
+    if (slot >= n_cw_) return {};
+    const auto& s = spec(slot);
+    std::vector<Bytes> out;
+    add_payloads(s, decoded(slot, s), out);
+    // pinned candidates after the plain ones: LDPC's when it did not converge; polar's always (its list is never
+    // empty). A broadcast control is one codeword per slot (CPM: one, twice at most).
+    if (out.empty() || s.polar)
+        for (int off : offsets(s, n_ctl_slots_ ? 0 : slot)) add_payloads(s, pinned(slot, s, off), out);
+    return unique(std::move(out));
+}
+
+bool ModemRx::pair_ok(int slot) const {
+    if (slot + 1 >= n_cw_) return false;
+    return !n_ctl_slots_ || slot + 1 < n_ctl_slots_;
+}
+
+// Slots `slot` (RV 0) and `slot + 1` (RV 1) combined and decoded once, mask open; `off` >= 0: the payload past
+// it known zero. No DD: a pair is a control, one short decode.
+const ModemRx::Raw& ModemRx::paired(int slot, const codes::Spec& s, int off) {
+    auto it = pairs_.find({slot, off});
+    if (it != pairs_.end()) return it->second;
+    auto b0 = combined_buffer(s, slot, 0, slot_soft(slot), nullptr);
+    auto b1 = combined_buffer(s, slot + 1, 1, slot_soft(slot + 1), &b0);
+    Mat<double> buf(1, b1.size());
+    buf.data = std::move(b1);
+    const auto known = off < 0 ? std::vector<std::int8_t>{} : codes::zero_tail(s, off);
+    auto d = codes::decode_buffer_raw(s, buf, 1, known);
+    return pairs_[{slot, off}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
+}
+
+std::vector<Bytes> ModemRx::raw_pair(int slot) {
+    if (!pair_ok(slot)) return {};
+    const auto& s = spec(slot);
+    std::vector<Bytes> out;
+    add_payloads(s, paired(slot, s, -1), out);
+    if (out.empty() || s.polar)
+        for (int off : offsets(s, slot / 2)) add_payloads(s, paired(slot, s, off), out);
+    return unique(std::move(out));
+}
+
+std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
+    if (!pair_ok(slot)) return std::nullopt;
+    const auto& s = spec(slot);
+    const std::uint32_t m = mask_value(mask);
+    std::vector<int> offs{-1};
+    for (int off : offsets(s, ctl_index(mask))) offs.push_back(off);
+    for (int off : offs) {
+        const Raw& d = paired(slot, s, off);
+        if (auto got = codes::check(s, d.cands, d.usable, m)) return got;
+    }
+    return std::nullopt;
 }
 
 // Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.

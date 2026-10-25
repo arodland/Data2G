@@ -166,6 +166,25 @@ public:
         for (const auto& b : out) l.append(pyb(b));
         return l;
     }
+    py::list raw_pair(int slot) {
+        std::vector<Bytes> out;
+        {
+            py::gil_scoped_release nogil;
+            out = rx_->raw_pair(slot);
+        }
+        py::list l;
+        for (const auto& b : out) l.append(pyb(b));
+        return l;
+    }
+    py::object decode_pair(int slot, const py::handle& mask) {
+        const MaskId m = mask_of(mask);
+        std::optional<Bytes> out;
+        {
+            py::gil_scoped_release nogil;
+            out = rx_->decode_pair(slot, m);
+        }
+        return out ? py::object(pyb(*out)) : py::none();
+    }
     void forget(const py::object& key) { store_.attr("pop")(key, py::none()); }
     const std::string& submode() const { return rx_->submode(); }
     int n_cw() const { return rx_->n_cw(); }
@@ -202,6 +221,8 @@ void bind_arq_phy(py::module_& m) {
              py::arg("dd_budget") = py::none(), py::arg("dd") = dd_default(), py::arg("clock") = py::none())
         .def("decode", &PyModemRx::decode)
         .def("raw", &PyModemRx::raw)
+        .def("raw_pair", &PyModemRx::raw_pair)
+        .def("decode_pair", &PyModemRx::decode_pair)
         .def("forget", &PyModemRx::forget)
         .def_property_readonly("submode", &PyModemRx::submode)
         .def_property_readonly("n_cw", &PyModemRx::n_cw);

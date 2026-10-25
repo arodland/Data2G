@@ -20,7 +20,7 @@ CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", 
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
          "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
          "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
-         "decode_buffer_pinned")
+         "decode_buffer_pinned", "decode_buffer_raw")
 
 
 @pytest.fixture
@@ -186,3 +186,23 @@ def test_decode_pinned(native, py, spec):
     assert py.check(spec, got[0][0], got[1][0], 0x99) == py.check(spec, want[0][0], want[1][0], 0x99) == pay
     buf = py.combine(spec, None, py.flip(spec, 2, 0) * soft, 0)
     assert n.decode_buffer_pinned(spec.name, buf, 0, known, 0x99) == py.decode_buffer_pinned(spec, buf, 0, known, 0x99)
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=IDS)
+def test_decode_buffer_raw(native, py, spec):
+    """decode_buffer_raw: a codeword sent twice (RV 0 in slot 2, RV 1 in
+    slot 3) combined and decoded mask open, plain and pinned; compared
+    where they decode."""
+    n = native.codes
+    rng = np.random.default_rng(spec.k + 13)
+    pb = py.payload_bytes(spec)
+    pay = rng.bytes(pb // 2) + bytes(pb - pb // 2)
+    known = py.zero_tail(spec, pb // 2)
+    s0 = _noisy(spec, py.encode(spec, pay, 0, 0x99, 2)[None], rng, [0.5])
+    s1 = _noisy(spec, py.encode(spec, pay, 1, 0x99, 3)[None], rng, [0.5])
+    buf = py.combine(spec, None, py.flip(spec, 2, 0) * s0, 0)
+    buf = py.combine(spec, buf, py.flip(spec, 3, 1) * s1, 1)
+    for k in (None, known):
+        got, want = n.decode_buffer_raw(spec.name, buf, 1, k), py.decode_buffer_raw(spec, buf, 1, k)
+        assert got[0].shape == want[0].shape and got[1].shape == want[1].shape
+        assert py.check(spec, got[0][0], got[1][0], 0x99) == py.check(spec, want[0][0], want[1][0], 0x99) == pay

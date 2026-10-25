@@ -15,7 +15,7 @@
 // Data2G: plain VARA BUFFER, CLEANTXBUFFER reports host byte offsets, data
 // before CONNECTED dropped; off again when the client goes), and IGNORED's
 // settings; broadcast (docs/broadcast.md): BCAST OPEN group
-// [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] mode, MODES. Replies OK /
+// [FROM call], BCAST CLOSE n, BCAST MODE n [AUTO] [DUP] mode, MODES. Replies OK /
 // WRONG (MYCALL's OK followed by REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
 // ON|OFF, BUFFER n, IAMALIVE, MODE; broadcast statuses (BCAST ...) once the
 // client has sent a BCAST command.
@@ -97,7 +97,7 @@ protected:
     virtual std::optional<std::int64_t> next_capacity();
 
 private:
-    // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the reply, nullopt for WRONG.
+    // BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] [DUP] mode -> the reply, nullopt for WRONG.
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
     bool accept_connect(const std::string& caller, const std::string& callee);
     std::string clean(std::optional<std::int64_t> upto);  // CLEANTXBUFFER [n] -> the reply

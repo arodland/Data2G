@@ -27,7 +27,7 @@ knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports host
 byte offsets, data written before CONNECTED is dropped; off again when the
 client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
-[AUTO] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
+[AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
 REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED,
 PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
@@ -196,8 +196,8 @@ class Host:
         self.out_cmd.append("OK" if ok else "WRONG")
 
     def _bcast_command(self, args: list[str]) -> str | None:
-        """BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] mode -> the
-        reply, or None (WRONG). A group may be several words."""
+        """BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] [DUP] mode ->
+        the reply, or None (WRONG). A group may be several words."""
         link, kw = self.engine.kiss, [w.upper() for w in args]
         try:
             if kw[0] == "OPEN" and len(args) >= 2:
@@ -208,8 +208,9 @@ class Host:
             if kw[0] == "CLOSE" and len(args) == 2:
                 link.close(int(args[1]))
                 return "OK"
-            if kw[0] == "MODE" and (len(args) == 3 or (len(args) == 4 and kw[2] == "AUTO")):
-                link.set_mode(int(args[1]), args[-1].lower(), len(args) == 4)
+            flags = kw[2:-1]
+            if kw[0] == "MODE" and len(args) >= 3 and set(flags) <= {"AUTO", "DUP"} and len(set(flags)) == len(flags):
+                link.set_mode(int(args[1]), args[-1].lower(), "AUTO" in flags, "DUP" in flags)
                 return "OK"
         except (ValueError, IndexError):
             pass

@@ -68,6 +68,13 @@ public:
         if (slot < 0 || slot >= n_cw()) return {};
         return {b_.slots[static_cast<std::size_t>(slot)].payload};
     }
+    std::vector<Bytes> raw_pair(int) override { return {}; }  // raw() always reads: never asked
+    std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override { return decode_plain(slot, mask); }
+    int n_ctl_slots() const override {  // CPM: what its header would say
+        if (!mode_at(b_.submode).is_cpm()) return 0;
+        return static_cast<int>(std::count_if(b_.slots.begin(), b_.slots.end(),
+                                              [](const auto& s) { return s.mask_id.seq >= SEQ_MOD; }));
+    }
 
 private:
     const TxBurst& b_;
@@ -209,8 +216,8 @@ void Monitor::read(PlainRx& rx, Dump& d) {
 bool Monitor::broadcast(PlainRx& rx, Dump& d) {
     const auto ctl = kisslink::KissLink::read_burst_control(rx, rx.n_cw());
     if (!ctl) return false;
-    const auto& [c, n_ctl] = *ctl;
-    auto [frames, ok, lost] = kisslink::KissLink::read_burst_frames(rx, n_ctl, kisslink::group_key(c.group));
+    const auto& [c, start] = *ctl;
+    auto [frames, ok, lost] = kisslink::KissLink::read_burst_frames(rx, start, kisslink::group_key(c.group));
     d.head += "  BCAST \"" + c.group + "\"" + (c.call ? " from " + *c.call : "") + ": " + std::to_string(frames.size()) +
               " frame(s)" + (lost ? ", " + std::to_string(lost) + " lost" : "") + (c.reports ? ", rate reports" : "") + "\n";
     for (std::size_t i = 0; i < frames.size(); ++i) {

@@ -40,8 +40,9 @@ log = logging.getLogger("data2g.engine")
 
 MAX_BURST_S = 16.0  # longest burst accepted from a header (the shifter's largest is 12 s)
 # ...raised per submode to hold one KISS frame this long, with a full control
-# (4 codewords) and its length: a KISS burst grows to carry its first frame
-# (kisslink.next_burst), past 16 s in n4, polar and the slowest n10 modes.
+# (4 codewords, each twice under DUP) and its framing (kisslink.framed_len): a
+# KISS burst grows to carry its first frame (kisslink.next_burst), past 16 s
+# in n4, polar and the slowest n10 modes.
 # Ack submodes carry no KISS data and keep the 16 s cap.
 KISS_FRAME_BYTES = 256  # AX.25 PACLEN
 EXPECT_REPLY_S = 0.5  # a reply's start past my burst's end (policy.REPLY_HOLD_MARGIN_S: 0.4-0.6 s measured)
@@ -111,12 +112,14 @@ def _jsonable(v):
 def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
     """The headers a station takes: MAX_BURST_S, or room for a
     KISS_FRAME_BYTES frame where that is longer."""
+    from ..kisslink import framed_len
+
     a = modem.Accept.of(None, MAX_BURST_S, min_header_score)
     out = []
     for n, cw in a.max_cw:
         s = modem.SUBMODES[n]
         if "ack" not in n:
-            need = 4 + -(-(2 + KISS_FRAME_BYTES) // codes.payload_bytes(s))
+            need = 2 * F.MAX_CTL + -(-framed_len(KISS_FRAME_BYTES) // codes.payload_bytes(s))
             cw = max(cw, min(need, max_codewords(s.sync_band)))
         out.append((n, cw))
     return modem.Accept(tuple(out), a.min_score)

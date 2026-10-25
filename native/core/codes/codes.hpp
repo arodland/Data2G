@@ -197,6 +197,9 @@ const std::vector<int>& polar_order(const Spec& s);
 // decode_raw with the info bits `known` gives known (0/1, -1 unknown; unscrambled), every row sent at burst
 // position `index`: LDPC pinned (pin), polar frozen in a code of the rest (codes.decode_raw_pinned).
 Raw decode_raw_pinned(const Spec& s, const Mat<float>& soft, std::span<const std::int8_t> known, int index);
+// decode_raw of (B, buffer_len) combined buffers, RVs up to max_rv received: candidates already plain (the
+// buffer is unscrambled); `known` (empty: none) as decode_buffer_pinned's (codes.decode_buffer_raw).
+Raw decode_buffer_raw(const Spec& s, const Mat<double>& buf, int max_rv = 0, std::span<const std::int8_t> known = {});
 // decode_buffer (index PLAIN) with the info bits `known` gives known (codes.decode_buffer_pinned).
 std::vector<Payload> decode_buffer_pinned(const Spec& s, const Mat<double>& buf, int max_rv,
                                           std::span<const std::int8_t> known, std::uint32_t crc_mask = 0);

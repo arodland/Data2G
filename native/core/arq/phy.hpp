@@ -89,6 +89,9 @@ public:
     virtual std::optional<Bytes> decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) = 0;
     virtual std::optional<Bytes> decode_plain(int slot, const MaskId& mask) = 0;
     virtual std::vector<Bytes> raw(int slot) = 0;
+    virtual std::vector<Bytes> raw_pair(int slot) = 0;
+    virtual std::optional<Bytes> decode_pair(int slot, const MaskId& mask) = 0;
+    virtual int n_ctl_slots() const = 0;  // CPM: slots its header says are control; OFDM: 0
 };
 using Clock = std::function<double()>;  // seconds, monotonic
 double monotonic();
@@ -137,6 +140,13 @@ public:
     // list best first, LDPC's one candidate if it converged. A broadcast
     // control reads its group from these (docs/broadcast.md §2).
     std::vector<Bytes> raw(int slot) override;
+    // raw() of a codeword sent twice: `slot` at RV 0 and `slot + 1` at RV 1,
+    // combined (a broadcast control under DUP). Empty if the two aren't both
+    // there, or (CPM) not both control.
+    std::vector<Bytes> raw_pair(int slot) override;
+    // The pair raw_pair reads, CRC-checked under `mask` (its padding pinned if it fails plain).
+    std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override;
+    int n_ctl_slots() const override { return n_ctl_slots_; }
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 
@@ -156,6 +166,8 @@ private:
     const Raw& decoded(int slot, const codes::Spec& s);
     std::vector<int> offsets(const codes::Spec& s, int i) const;
     const Raw& pinned(int slot, const codes::Spec& s, int off);
+    bool pair_ok(int slot) const;
+    const Raw& paired(int slot, const codes::Spec& s, int off);  // off -1: nothing pinned
     std::optional<Bytes> check_pinned(int slot, const codes::Spec& s, std::uint32_t m, int i);
     bool dd(const codes::Spec& s) const;
     bool late() const;
@@ -178,6 +190,7 @@ private:
     std::map<std::pair<int, std::uint32_t>, std::optional<Bytes>> memo_;
     std::map<int, Raw> raw_;
     std::map<std::pair<int, int>, Raw> pinned_;  // (slot, offset): decoded with the payload past offset bytes known zero
+    std::map<std::pair<int, int>, Raw> pairs_;   // (slot, offset or -1): slots slot, slot + 1 combined (RV 0, 1)
     std::set<int> tried_, ok_;  // ok_ within tried_
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 
 #include "arq/modes.hpp"
@@ -136,11 +137,15 @@ std::optional<std::string> Host::bcast_command(const std::vector<std::string>& a
             link->close(port(args[1]));
             return "OK";
         }
-        if (kw[0] == "MODE" && (args.size() == 3 || (args.size() == 4 && kw[2] == "AUTO"))) {
-            std::string mode = args.back();
-            for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            link->set_mode(port(args[1]), mode, args.size() == 4);
-            return "OK";
+        if (kw[0] == "MODE" && args.size() >= 3) {  // MODE n [AUTO] [DUP] mode, each flag once
+            std::set<std::string> flags(kw.begin() + 2, kw.end() - 1);
+            const bool known = std::all_of(flags.begin(), flags.end(), [](const auto& f) { return f == "AUTO" || f == "DUP"; });
+            if (known && flags.size() == kw.size() - 3) {
+                std::string mode = args.back();
+                for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                link->set_mode(port(args[1]), mode, flags.count("AUTO") > 0, flags.count("DUP") > 0);
+                return "OK";
+            }
         }
     } catch (const std::invalid_argument&) {
     } catch (const std::out_of_range&) {
