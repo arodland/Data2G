@@ -33,7 +33,7 @@ Native: arq/link.hpp (Station, TxSide, RxSide).
 
 import logging
 import os
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -185,7 +185,8 @@ class TxSide:
         # padding): compression's history, from offset hist_off on
         self.hist = bytearray()
         self.hist_off = 0
-        self.recs: list[int] = []  # stream offsets where records start, from buf_off on (clean() cuts only there)
+        # stream offsets where records start, from the one buf_off falls in (clean() cuts only there)
+        self.recs: list[int] = []
         self.mark = 0  # stream offset of the first byte written after the last clean()
         self.limbo: tuple[int, int] | None = None  # clean(): (host bytes on air, unacked; their stream end)
         self.cleaned: tuple[int, int] | None = None  # the limbo's fate, host bytes (delivered, dropped), for the host
@@ -223,7 +224,7 @@ class TxSide:
         keep = min((c.start for c in self.cws.values()), default=self.stream_end)
         del self.buf[: keep - self.buf_off]
         self.buf_off = keep
-        del self.recs[:bisect_left(self.recs, keep)]
+        del self.recs[:max(0, bisect_right(self.recs, keep) - 1)]
         keep = min((c.cstart for c in self.cws.values()), default=self.hist_off + len(self.hist)) - F.HIST
         if keep > self.hist_off:
             del self.hist[: keep - self.hist_off]
@@ -292,6 +293,18 @@ class TxSide:
         self.limbo = (old + new, cut) if old or new else None
         self.mark = cut
         return dropped, new
+
+    def end_limbo(self) -> tuple[int, int] | None:
+        """The session ended with the limbo unsettled. -> host bytes
+        (delivered: in records acked whole; unknown: the rest, on air but
+        unacked), or None without a limbo."""
+        if self.limbo is None:
+            return None
+        total, cut = self.limbo
+        acked = self.cws[self.base].start if self.base in self.cws else self.stream_end
+        unknown = min(total, self._host(self.recs[bisect_right(self.recs, acked) - 1], cut))
+        self.limbo = None
+        return total - unknown, unknown
 
     def before_mark(self) -> tuple[int, int]:
         """(unsent, unacked) stream bytes written before the last clean()."""

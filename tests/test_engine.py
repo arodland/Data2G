@@ -315,6 +315,34 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
         assert not settled
 
 
+def test_cleantxbuffer_then_abort():
+    """DATA2G ON: a session aborted with the limbo unsettled reports it
+    first, its fate unknown (nothing acked yet)."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("NOCALL", seed=4)), Host(Engine("NOCALL", seed=5))
+    for line in ("MYCALL K2XYZ", "LISTEN ON"):
+        b.command(line)
+    a.command("DATA2G ON")
+    a.command("CONNECT W1AW K2XYZ")
+
+    def pump():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
+    a.data_in(np.random.default_rng(2).bytes(20000))
+    st = a.engine.session.station
+    assert link(a.engine, b.engine, 12, 60, lambda: pump() or (bool(a.engine.tx) and st.tx.next > 0), seed=2)
+    a.out_cmd.clear()
+    a.command("CLEANTXBUFFER")
+    limbo = int(a.out_cmd[-1].split()[3])
+    assert limbo > 0
+    a.command("ABORT")
+    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED 0 0 {limbo}", "DISCONNECTED", "OK"]
+    a.after_step(False)
+    assert not any("SETTLED" in x for x in a.out_cmd[4:])
+
+
 def test_cqframe_is_heard_without_a_session():
     """VARA's CQFRAME: sent outside any session, heard by a listening and by
     an idle station alike, notified as CQFRAME call bw, no connection made;

@@ -116,7 +116,8 @@ public:
     std::int64_t acked = 0, acked_wire = 0, acked_plain = 0;
     Bytes hist;
     std::int64_t hist_off = 0;
-    std::vector<std::int64_t> recs;  // stream offsets where records start, from buf_off on (clean() cuts only there)
+    // stream offsets where records start, from the one buf_off falls in (clean() cuts only there)
+    std::vector<std::int64_t> recs;
     std::int64_t mark = 0;           // stream offset of the first byte written after the last clean()
     // clean(): host bytes on air and unacked, and their stream end
     std::optional<std::pair<std::int64_t, std::int64_t>> limbo;
@@ -137,6 +138,9 @@ public:
     // on air. -> host bytes (dropped, newly in limbo: on air, not acked),
     // settled by the next ACK that covers them or the next abandon.
     std::pair<std::int64_t, std::int64_t> clean();
+    // The session ended with the limbo unsettled. -> host bytes (delivered: in
+    // records acked whole; unknown: the rest), nullopt without a limbo.
+    std::optional<std::pair<std::int64_t, std::int64_t>> end_limbo();
     // (unsent, unacked) stream bytes written before the last clean()
     std::pair<std::int64_t, std::int64_t> before_mark() const {
         return {std::max<std::int64_t>(0, mark - stream_end), std::max<std::int64_t>(0, mark - buf_off)};

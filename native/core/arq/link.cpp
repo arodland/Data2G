@@ -83,7 +83,7 @@ bool TxSide::on_ack(std::int64_t cum, const std::set<std::int64_t>& received) {
     }
     buf.erase(buf.begin(), buf.begin() + std::clamp<std::int64_t>(keep - buf_off, 0, static_cast<std::int64_t>(buf.size())));
     buf_off = keep;
-    recs.erase(recs.begin(), std::lower_bound(recs.begin(), recs.end(), keep));
+    if (auto it = std::upper_bound(recs.begin(), recs.end(), keep); it != recs.begin()) recs.erase(recs.begin(), it - 1);
     keep = hist_off + static_cast<std::int64_t>(hist.size());
     if (!cws.empty()) {
         keep = cws.begin()->second.cstart;
@@ -174,6 +174,17 @@ std::pair<std::int64_t, std::int64_t> TxSide::clean() {
     else limbo.reset();
     mark = c;
     return {dropped, fresh};
+}
+
+std::optional<std::pair<std::int64_t, std::int64_t>> TxSide::end_limbo() {
+    if (!limbo) return std::nullopt;
+    const auto [total, c] = *limbo;
+    auto it = cws.find(base);
+    const std::int64_t acked = it != cws.end() ? it->second.start : stream_end;
+    const std::int64_t r = *(std::upper_bound(recs.begin(), recs.end(), acked) - 1);
+    const std::int64_t unknown = std::min(total, host_bytes(r, c));
+    limbo.reset();
+    return std::make_pair(total - unknown, unknown);
 }
 
 std::int64_t TxSide::rec_at(std::int64_t x) const {

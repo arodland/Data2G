@@ -185,6 +185,7 @@ void Host::command(std::string_view line, std::string_view peer) {
     } else if (cmd == "DISCONNECT") {
         e.disconnect();
     } else if (cmd == "ABORT") {
+        session_over();
         e.abort();
         out_cmd.emplace_back("DISCONNECTED");
         if (listening) e.listen();
@@ -228,13 +229,21 @@ void Host::command(std::string_view line, std::string_view peer) {
 // VARA's replies: BUFFEREMPTY with nothing queued, FAILED (its trailing space
 // too) outside a session, else OK. Bytes on air but unacked stay in limbo
 // until an ACK says which arrived (host.py has the story). DATA2G ON: OK
-// dropped limbo, and once settled CLEANTXBUFFER SETTLED delivered dropped.
+// dropped limbo, and once settled CLEANTXBUFFER SETTLED delivered dropped (or,
+// if the session ends first, SETTLED delivered 0 unknown).
 std::string Host::clean() {
     auto& s = engine.session();
     if (!queued(!data2g).unacked) return "CLEANTXBUFFER BUFFEREMPTY";
     if (s.state != SessionState::CONNECTED || !s.station) return "CLEANTXBUFFER FAILED ";
     const auto [dropped, limbo] = s.station->tx.clean();
     return data2g ? "CLEANTXBUFFER OK " + std::to_string(dropped) + " " + std::to_string(limbo) : "CLEANTXBUFFER OK";
+}
+
+void Host::session_over() {
+    auto& st = engine.session().station;
+    if (!st) return;
+    if (const auto r = st->tx.end_limbo(); r && data2g)
+        out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(r->first) + " 0 " + std::to_string(r->second));
 }
 
 void Host::client_gone() {
@@ -258,6 +267,7 @@ bool Host::abort_session() {
     const auto s = e.session().state;
     if (s != SessionState::CONNECTING && s != SessionState::CONNECTED && s != SessionState::DISCONNECTING) return false;
     arq::log_write(LOG, INFO, "session with " + e.session().peer + " aborted by the operator");
+    session_over();
     e.abort();
     out_cmd.emplace_back("DISCONNECTED");
     if (listening) e.listen();
@@ -291,6 +301,12 @@ void Host::after_step(bool ptt) {
         alive_ = e.now();
         out_cmd.emplace_back("IAMALIVE");
     }
+    if (auto& st = e.session().station; st && st->tx.cleaned) {  // before a DISCONNECTED below replaces the session
+        if (data2g)
+            out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(st->tx.cleaned->first) + " " +
+                              std::to_string(st->tx.cleaned->second));
+        st->tx.cleaned.reset();
+    }
     for (const auto& ev : e.events()) {
         const auto w = split(ev);
         if (ev.starts_with("CONNECTED")) {
@@ -302,6 +318,7 @@ void Host::after_step(bool ptt) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));
         } else if (ev.starts_with("DISCONNECTED")) {
             arq::log_write(LOG, INFO, ev);
+            session_over();
             out_cmd.emplace_back("DISCONNECTED");
         }
     }
@@ -332,12 +349,6 @@ void Host::after_step(bool ptt) {
     // all. --buffer-credit 0 reports the plain VARA figure. (host.py has the
     // full story.) CHAT ON and DATA2G ON also report it: the client watches
     // BUFFER fall to see which of its messages were ACKed.
-    if (auto& st = e.session().station; st && st->tx.cleaned) {
-        if (data2g)
-            out_cmd.push_back("CLEANTXBUFFER SETTLED " + std::to_string(st->tx.cleaned->first) + " " +
-                              std::to_string(st->tx.cleaned->second));
-        st->tx.cleaned.reset();
-    }
     const Queued q = queued(!data2g);
     std::int64_t buffered = q.unacked;
     if (q.station && buffer_credit != 0 && !engine.session().chat && !data2g) {

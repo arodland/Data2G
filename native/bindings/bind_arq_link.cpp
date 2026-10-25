@@ -396,6 +396,7 @@ void bind_arq_link(py::module_& m) {
         .def("missing", &TxSide::missing)
         .def("clean", &TxSide::clean)
         .def("before_mark", &TxSide::before_mark)
+        .def("end_limbo", &TxSide::end_limbo)
         .def_readonly("limbo", &TxSide::limbo)
         .def_readwrite("cleaned", &TxSide::cleaned);
 

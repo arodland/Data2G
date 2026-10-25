@@ -630,8 +630,29 @@ def clean_with_everything_acked(cls):
     assert got == x + y[:255]
 
 
+def clean_then_session_end(cls):
+    """The session ends with the limbo unsettled: b got seqs 0-1 (record 0
+    whole, record 1 begun), so record 0 is delivered and records 1-3 unknown."""
+    a = cls(0, Script([("m22", 6)]), master=True)
+    b = cls(1, Script([("m22", 1)]))
+    rng = random.Random(1)
+    for _ in range(20):
+        a.write(rng.randbytes(30))
+    p = a.build()
+    a.answered()
+    assert b.handle(clean(p, lost=(3,))) and b.rx.cum == 2
+    assert a.tx.clean() == (16 * 30, 4 * 30)
+    assert a.handle(clean(b.build())) and a.tx.limbo is not None
+    assert a.tx.end_limbo() == (30, 90)
+    assert a.tx.limbo is None and a.tx.end_limbo() is None
+
+
 def test_clean_settles_limbo():
     clean_settles_limbo(L.Station)
+
+
+def test_clean_then_session_end():
+    clean_then_session_end(L.Station)
 
 
 def test_clean_with_everything_acked():

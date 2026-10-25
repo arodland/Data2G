@@ -100,6 +100,7 @@ private:
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
     bool accept_connect(const std::string& caller, const std::string& callee);
     std::string clean();  // CLEANTXBUFFER -> the reply
+    void session_over();  // the session is ending: an unsettled limbo goes as SETTLED delivered 0 unknown
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
     bool ptt_ = false, busy_ = false;

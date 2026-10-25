@@ -474,6 +474,9 @@ As built (data2g/arq/policy.py):
     - DATA2G ON: `CLEANTXBUFFER OK dropped limbo`, then once settled
       `CLEANTXBUFFER SETTLED delivered dropped` (host bytes). BUFFER counts the
       limbo until then.
+    - If the session ends first (disconnect, link lost, ABORT), before its
+      DISCONNECTED: `CLEANTXBUFFER SETTLED delivered 0 unknown`. Delivered is the
+      records acked whole; unknown went on air unacked, and the peer may have it.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
   BUFFER n, PTT ON/OFF, BUSY ON/OFF, and a Data2G-specific `MODE name`.
 

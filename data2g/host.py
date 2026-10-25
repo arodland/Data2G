@@ -153,6 +153,7 @@ class Host:
         elif cmd == "DISCONNECT":
             e.disconnect()
         elif cmd == "ABORT":
+            self._session_over()
             e.abort()
             self.out_cmd.append("DISCONNECTED")
             if self.listening:
@@ -218,7 +219,8 @@ class Host:
         and those that didn't are dropped then. VARA clients see them gone at
         once (BUFFER leaves them out). DATA2G ON: OK dropped limbo, and once
         settled CLEANTXBUFFER SETTLED delivered dropped (host bytes; BUFFER
-        counts the limbo until then)."""
+        counts the limbo until then), or, if the session ends first,
+        SETTLED delivered 0 unknown."""
         s = self.engine.session
         if not s.queued_bytes(not self.data2g)[1]:
             return "CLEANTXBUFFER BUFFEREMPTY"
@@ -226,6 +228,13 @@ class Host:
             return "CLEANTXBUFFER FAILED "
         dropped, limbo = s.station.tx.clean()
         return f"CLEANTXBUFFER OK {dropped} {limbo}" if self.data2g else "CLEANTXBUFFER OK"
+
+    def _session_over(self):
+        """The session is ending (the engine replaces it next): a limbo still
+        unsettled goes as CLEANTXBUFFER SETTLED delivered 0 unknown."""
+        st = self.engine.session.station
+        if st is not None and (r := st.tx.end_limbo()) is not None and self.data2g:
+            self.out_cmd.append(f"CLEANTXBUFFER SETTLED {r[0]} 0 {r[1]}")
 
     def client_gone(self):
         """The command client's TCP connection closed: it owned the session.
@@ -264,6 +273,11 @@ class Host:
         if e.now - self._alive >= ALIVE_S:  # some VARA clients count on it
             self._alive = e.now
             self.out_cmd.append("IAMALIVE")
+        st = e.session.station
+        if st is not None and (c := st.tx.cleaned) is not None:  # before a DISCONNECTED below replaces the session
+            if self.data2g:
+                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]}")
+            st.tx.cleaned = None
         for ev in e.events():
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
@@ -275,6 +289,7 @@ class Host:
                 self.out_cmd.append(f"CQFRAME {call} {BW_NAME[int(cap)]}")
             elif ev.startswith("DISCONNECTED"):
                 log.info("%s", ev)
+                self._session_over()
                 self.out_cmd.append("DISCONNECTED")
         if e.session.state == S.CLOSED and self.listening:
             e.listen()
@@ -304,10 +319,6 @@ class Host:
         # plain VARA figure. CHAT ON and DATA2G ON also report it: the client
         # watches BUFFER fall to see which of its messages were ACKed.
         st = e.session.station
-        if st is not None and (c := st.tx.cleaned) is not None:
-            if self.data2g:
-                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]}")
-            st.tx.cleaned = None
         unsent, unacked = e.session.queued_bytes(not self.data2g)
         buffered = unacked
         if (st and self.buffer_credit != 0 and not e.session.chat and not self.data2g
