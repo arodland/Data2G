@@ -408,40 +408,48 @@ class Receiver:
         the time at a 0.25 score floor) then costs a short BUSY, not the
         real burst that follows; the margin keeps a real burst's own data
         from replacing it (false headers score 0.19-0.34, real ones mostly
-        0.4-0.6). `whole`: search everything after the pending header (as it
+        0.4-0.6). Under a suspect header, any CPM lock replaces it: a false
+        n4 header claiming 52 s hid three FSK bursts (recordings/20261024-190009,
+        19:27:36). `whole`: search everything after the pending header (as it
         completes), not just the newest audio."""
         self.fresh = 0
         p = self.pending
         if p.get("family") == "cpm":
             return False  # scores aren't comparable across families; CPM bursts are long and certain
-        hdr_end = p["start"] + BANDS[p["band"]].preamble_samples + modem.header_samples(p["band"]) - self.off
-        w0 = hdr_end if whole else max(hdr_end, len(self.buf) - self.keep)
-        if len(self.buf) - w0 < self.keep // 2:
-            return False
         q = None
-        try:
-            q = modem.find_burst(self.buf[w0:], self.bands, self.accept, stats=self._stats(w0))
-            q = _shift(q, w0 + self.off)
-        except modem.SyncError:
-            pass
-        finally:
-            self._searched()
-        if "copy" in p and (q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN):
-            # a copy lock can be a copy read off the wrong frame, taken before
-            # the burst's own copy arrived (at the header floor, 0.26-0.33):
-            # the true one, later, replaces it
-            c = self._find_copy()
-            if c is not None:
-                q = _shift(c, self.off)
-        if q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN or q["start"] == p["start"]:
-            return False
+        if "copy" not in p and p["score"] < self.SUSPECT_SCORE:
+            q = self._find_cpm()
+            if q is not None:  # (else the OFDM search below marks both searched)
+                self._searched()
+                q = _shift(q, self.off)
+        if q is None:
+            hdr_end = p["start"] + BANDS[p["band"]].preamble_samples + modem.header_samples(p["band"]) - self.off
+            w0 = hdr_end if whole else max(hdr_end, len(self.buf) - self.keep)
+            if len(self.buf) - w0 < self.keep // 2:
+                return False
+            try:
+                q = modem.find_burst(self.buf[w0:], self.bands, self.accept, stats=self._stats(w0))
+                q = _shift(q, w0 + self.off)
+            except modem.SyncError:
+                pass
+            finally:
+                self._searched()
+            if "copy" in p and (q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN):
+                # a copy lock can be a copy read off the wrong frame, taken before
+                # the burst's own copy arrived (at the header floor, 0.26-0.33):
+                # the true one, later, replaces it
+                c = self._find_copy()
+                if c is not None:
+                    q = _shift(c, self.off)
+            if q is None or q["score"] < p["score"] + self.SUPERSEDE_MARGIN or q["start"] == p["start"]:
+                return False
         log.info("%s header (score %.2f) superseded by %s (score %.2f)", p["spec"].name, p["score"],
                  q["spec"].name, q["score"])
         if not whole:  # completing: the caller has already handled p
             out.append(("burst", {"header": p, "rx": None,
-                                  "audio": self.buf[max(0, p["start"] - self.off):q["start"] - self.off]}))
+                                  "audio": self.buf[max(0, p["start"] - self.off):max(0, q["start"] - self.off)]}))
         self.pending = q
-        self.pilots_ok = "copy" in q or q["score"] >= self.SUSPECT_SCORE
+        self.pilots_ok = q.get("family") == "cpm" or "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
         out.append(("header", dict(q, stream_end=self.off + len(self.buf))))
         return True
