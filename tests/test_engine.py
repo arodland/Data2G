@@ -857,3 +857,32 @@ def test_a_reply_whose_header_is_missed_is_not_polled_over(caplog):
             a.step(rng.normal(0, sigma, BLOCK))
     assert "timeout" in caplog.text
     assert "holding the timeout" not in caplog.text
+
+
+def test_timeout_sets_the_idle_close():
+    from data2g.host import Host
+
+    a, b = Host(Engine("W1AW", seed=71)), Host(Engine("K2XYZ", seed=72))
+    for line in ("LISTEN ON", "DATA2G ON"):
+        b.command(line)
+    for line in ("TIMEOUT", "DATA2G ON", "TIMEOUT", "TIMEOUT 0", "TIMEOUT -5", "TIMEOUT inf", "TIMEOUT x",
+                 "TIMEOUT 20", "TIMEOUT"):
+        a.command(line)
+    assert a.out_cmd == ["WRONG", "OK", "TIMEOUT 300.0"] + ["WRONG"] * 4 + ["OK", "TIMEOUT 20.0"]
+    a.command("CONNECT W1AW K2XYZ")
+
+    def pump(until):
+        def f():
+            a.after_step(bool(a.engine.tx))
+            b.after_step(bool(b.engine.tx))
+            return until()
+        return f
+    assert link(a.engine, b.engine, 12, 30, pump(lambda: a.engine.session.state == S.CONNECTED), seed=1)
+    t0 = a.engine.now
+    assert link(a.engine, b.engine, 12, 60, pump(lambda: "DISCONNECTED IDLE" in a.out_cmd), seed=2)
+    assert a.engine.now - t0 < 40  # 20 s, then the DISC exchange
+    assert "DISCONNECTED PEER" in b.out_cmd
+    a.client_gone()
+    a.command("DATA2G ON")
+    a.command("TIMEOUT")
+    assert a.out_cmd[-1] == "TIMEOUT 300.0"  # the default again: the setting was the client's

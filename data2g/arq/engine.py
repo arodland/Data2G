@@ -147,6 +147,7 @@ class Engine:
         self.session = None
         self.store = {}  # soft bits per codeword key, across bursts (phy.ModemRx)
         self.chat = False
+        self._idle_close_s = None  # set_idle_close
         self._extra: list = []  # bursts outside any session (CQ frames), sent when the channel is free
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
@@ -207,6 +208,7 @@ class Engine:
                                  aliases=self.aliases, stats_interval_s=self.stats_interval_s,
                                  accept_connect=self.accept_connect)
         self.session.set_chat(self.chat)
+        self.session.idle_close_s = self._idle_close_s
         self.store = {}
         self.session_snr = None  # the last of its peer's bursts claimed: snr_est (host SN)
 
@@ -248,6 +250,15 @@ class Engine:
     def set_chat(self, on: bool):
         self.chat = on
         self.session.set_chat(on)
+
+    def set_idle_close(self, s: float | None):
+        """A connected session with no data this long, seconds, disconnects;
+        this session and the next. None: session.IDLE_CLOSE_S."""
+        self._idle_close_s = self.session.idle_close_s = s
+
+    @property
+    def idle_close_s(self) -> float:
+        return S.IDLE_CLOSE_S if self._idle_close_s is None else self._idle_close_s
 
     def events(self) -> list[str]:
         """Host notifications since the last call, oldest first, one line of

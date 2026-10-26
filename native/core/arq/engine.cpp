@@ -374,6 +374,7 @@ void Engine::new_session() {
                               : std::make_shared<Session>(call_, std::move(policy), 1.0, std::move(rng), aliases_,
                                                           cfg_.stats_interval_s);
     session_->set_chat(chat_);
+    if (idle_close_) session_->tune.idle_close_s = *idle_close_;
     session_->accept_connect = accept_connect;
     store_.clear();
     session_snr_.reset();
@@ -408,6 +409,11 @@ void Engine::connect(const std::string& peer, int cap) {
     pack_call(peer);  // invalid_argument before any state changes
     new_session();
     session_->connect(peer, cap, now());
+}
+
+void Engine::set_idle_close(std::optional<double> s) {
+    session_->tune.idle_close_s = s.value_or(IDLE_CLOSE_S);
+    idle_close_ = s;
 }
 
 void Engine::set_chat(bool on) {

@@ -466,6 +466,11 @@ As built (data2g/arq/policy.py):
       `TXPOWER dB` sets it, -60 to 20 (0 puts a burst's peak at full scale):
       OK, or WRONG out of range or not a number. Applies from the next audio
       block; the station's own setting (--output-volume, the GUI) is the start.
+    - TIMEOUT gets the link idle timeout, seconds with one decimal
+      (`TIMEOUT 300.0`): a connected session with no data either way for that
+      long disconnects (IDLE). `TIMEOUT s` sets it, any s > 0: OK, else WRONG.
+      It applies to the session under way too, and goes back to the default
+      when the command client leaves.
     - DISCONNECTED carries a reason word, then detail words for some:
       CLIENT (DISCONNECT, or the command client left), IDLE (idle timeout),
       PEER (the peer's DISC), ABORT, LINK_LOST, LINK_FAILED why, NO_ANSWER,

@@ -113,6 +113,7 @@ class Session:
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     chat: bool = False  # CHAT ON: set with set_chat()
+    idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
     accept_connect: object = None  # (caller, callee) -> bool, before a CONNECT is answered: False refuses it (host ACCEPT)
     stats_interval_s: float = 60.0  # throughput line in the log this often while connected (0: off)
@@ -196,7 +197,7 @@ class Session:
             # instant forever (found by scripts/arq_stress.py --sessions)
             if now >= self._last_heard + LINK_LOST_S:
                 return self._close("LINK_LOST" if self.state == CONNECTED else f"{self._disc_why} unconfirmed")
-            if self.state == CONNECTED and now >= self._last_data + IDLE_CLOSE_S and not self._want_disc:
+            if self.state == CONNECTED and now >= self._last_data + (IDLE_CLOSE_S if self.idle_close_s is None else self.idle_close_s) and not self._want_disc:
                 self._want_disc, self._disc_why = True, "IDLE"
         if self._deadline is not None and now >= self._deadline:
             self._deadline = None

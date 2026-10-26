@@ -122,6 +122,8 @@ void bind_engine(py::module_& m) {
         .def("abort", &PyEngine::abort)
         .def("connect", &PyEngine::connect)
         .def("set_chat", &PyEngine::set_chat)
+        .def("set_idle_close", &PyEngine::set_idle_close)
+        .def_property_readonly("idle_close_s", &PyEngine::idle_close_s)
         .def("disconnect", &PyEngine::disconnect)
         .def_readwrite("accept_connect", &PyEngine::accept_connect)
         .def("set_accept_connect", &PyEngine::set_accept_connect)

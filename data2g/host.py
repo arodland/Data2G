@@ -26,7 +26,9 @@ before one), CLEANTXBUFFER (Host._clean), DATA2G ON|OFF (a client that
 knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports host
 byte offsets, data written before CONNECTED is dropped; off again when the
 client goes), TXPOWER [dB] (DATA2G ON: -> TXPOWER db, the output volume;
-with dB, -60 to 20, sets it -> OK); broadcast:
+with dB, -60 to 20, sets it -> OK), TIMEOUT [s] (DATA2G ON: -> TIMEOUT s, the
+link idle timeout; with s > 0 sets it -> OK; back to the default when the
+client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
@@ -187,6 +189,17 @@ class Host:
             ok = VOLUME_DB[0] <= v <= VOLUME_DB[1]
             if ok:
                 self.output_volume = v
+        elif cmd == "TIMEOUT" and self.data2g and not args:
+            self.out_cmd.append(f"TIMEOUT {e.idle_close_s:.1f}")
+            return
+        elif cmd == "TIMEOUT" and self.data2g and len(args) == 1:
+            try:
+                v = float(args[0])
+            except ValueError:
+                v = float("nan")
+            ok = 0 < v < float("inf")
+            if ok:
+                e.set_idle_close(v)
         elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit()
                                                       and len(args[0]) <= 18)):
             self.out_cmd.append(self._clean(int(args[0]) if args else None))
@@ -267,6 +280,7 @@ class Host:
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr, self.data2g = False, None, False
+        e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults

@@ -225,6 +225,15 @@ void Host::command(std::string_view line, std::string_view peer) {
         if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
         ok = v >= VOLUME_MIN_DB && v <= VOLUME_MAX_DB;
         if (ok) output_volume = v;
+    } else if (cmd == "TIMEOUT" && data2g && args.empty()) {
+        out_cmd.push_back(arq::format("TIMEOUT %.1f", e.idle_close_s()));
+        return;
+    } else if (cmd == "TIMEOUT" && data2g && args.size() == 1) {
+        double v = NAN;
+        const auto& s = args[0];
+        if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
+        ok = v > 0 && std::isfinite(v);
+        if (ok) e.set_idle_close(v);
     } else if (cmd == "CLEANTXBUFFER" &&
                (args.empty() || (data2g && args.size() == 1 && args[0].size() <= 18 &&
                                  std::all_of(args[0].begin(), args[0].end(), [](char c) { return c >= '0' && c <= '9'; })))) {
@@ -279,6 +288,7 @@ void Host::client_gone() {
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
     listening = data2g = false;
+    e.set_idle_close(std::nullopt);
     accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
