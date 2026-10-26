@@ -171,6 +171,21 @@ void operator_abort() {
     check::is_true(!p.b.abort_session() && p.b.out_cmd.empty(), "again: nothing");
 }
 
+void txpower() {
+    check::current_step = "TXPOWER";
+    Engine e("W1AW", seeded(5));
+    host::Host h(e);
+    h.command("TXPOWER");  // Data2G only
+    h.command("DATA2G ON");
+    for (const char* line : {"TXPOWER", "TXPOWER -1.2", "TXPOWER", "TXPOWER -60.1", "TXPOWER 20.5", "TXPOWER abc", "TXPOWER nan",
+                             "TXPOWER 1 2", "TXPOWER 1x", "TXPOWER"})
+        h.command(line);
+    const std::vector<std::string> want = {"WRONG", "OK", "TXPOWER 0.0", "OK", "TXPOWER -1.2", "WRONG", "WRONG", "WRONG", "WRONG",
+                                           "WRONG", "WRONG", "TXPOWER -1.2"};
+    check::is_true(h.out_cmd == want, "replies");
+    check::equal(h.output_volume, -1.2, "volume");
+}
+
 }  // namespace
 
 int main() {
@@ -180,5 +195,6 @@ int main() {
     session();
     accept();
     operator_abort();
+    txpower();
     return check::report("test_host");
 }

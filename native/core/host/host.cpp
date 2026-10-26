@@ -3,11 +3,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <locale>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 #include "arq/modes.hpp"
@@ -26,6 +27,16 @@ constexpr int INFO = 20;
 // ponytail: from memory of VARA clients, not a checked list (as host.py); check the log on first contact with Pat
 constexpr std::array<std::string_view, 8> IGNORED = {"COMPRESSION", "PUBLIC",     "CWID",       "P2P",
                                                      "WINLINK",     "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"};
+
+// Apple's libc++ has no floating-point from_chars; strtod follows the
+// locale Qt sets. NAN unless the whole string is a number.
+double parse_double(const std::string& s) {
+    std::istringstream in(s);
+    in.imbue(std::locale::classic());
+    double v = NAN;
+    if (!(in >> v) || in.peek() != std::char_traits<char>::eof()) return NAN;
+    return v;
+}
 
 std::string upper(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -220,18 +231,14 @@ void Host::command(std::string_view line, std::string_view peer) {
         out_cmd.push_back(arq::format("TXPOWER %.1f", output_volume));
         return;
     } else if (cmd == "TXPOWER" && data2g && args.size() == 1) {
-        double v = NAN;
-        const auto& s = args[0];
-        if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
+        const double v = parse_double(args[0]);
         ok = v >= VOLUME_MIN_DB && v <= VOLUME_MAX_DB;
         if (ok) output_volume = v;
     } else if (cmd == "TIMEOUT" && data2g && args.empty()) {
         out_cmd.push_back(arq::format("TIMEOUT %.1f", e.idle_close_s()));
         return;
     } else if (cmd == "TIMEOUT" && data2g && args.size() == 1) {
-        double v = NAN;
-        const auto& s = args[0];
-        if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
+        const double v = parse_double(args[0]);
         ok = v > 0 && std::isfinite(v);
         if (ok) e.set_idle_close(v);
     } else if (cmd == "CLEANTXBUFFER" &&
