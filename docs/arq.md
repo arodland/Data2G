@@ -462,6 +462,10 @@ As built (data2g/arq/policy.py):
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).
     - CLEANTXBUFFER reports host byte offsets (below).
+    - TXPOWER gets the output volume, dB with one decimal (`TXPOWER -1.2`).
+      `TXPOWER dB` sets it, -60 to 20 (0 puts a burst's peak at full scale):
+      OK, or WRONG out of range or not a number. Applies from the next audio
+      block; the station's own setting (--output-volume, the GUI) is the start.
     - DISCONNECTED carries a reason word, then detail words for some:
       CLIENT (DISCONNECT, or the command client left), IDLE (idle timeout),
       PEER (the peer's DISC), ABORT, LINK_LOST, LINK_FAILED why, NO_ANSWER,

@@ -221,3 +221,19 @@ def test_command_reply_goes_to_the_asker_news_to_all():
     host._send_cmd(port, h, 7)
     assert sent == [(b"PTT ON\r", None), (b"DISCONNECTED\r", None), (b"OK\r", 7)]
     assert not h.out_cmd
+
+
+def test_txpower_gets_and_sets_the_output_volume():
+    from data2g.arq.engine import Engine
+
+    h = host.Host(Engine("W1AW", seed=1))
+    h.command("TXPOWER")  # Data2G only
+    h.command("DATA2G ON")
+    h.command("TXPOWER")
+    h.command("TXPOWER -1.2")
+    h.command("TXPOWER")
+    for bad in ("-60.1", "20.5", "abc", "nan", "1 2"):
+        h.command("TXPOWER " + bad)
+    h.command("TXPOWER")
+    assert h.out_cmd == ["WRONG", "OK", "TXPOWER 0.0", "OK", "TXPOWER -1.2"] + ["WRONG"] * 5 + ["TXPOWER -1.2"]
+    assert h.output_volume == -1.2
