@@ -69,6 +69,7 @@ public:
         return {b_.slots[static_cast<std::size_t>(slot)].payload};
     }
     std::vector<Bytes> raw_pair(int) override { return {}; }  // raw() always reads: never asked
+    bool converged(int slot, bool pair) override { return !pair && slot >= 0 && slot < n_cw(); }
     std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override { return decode_plain(slot, mask); }
     int n_ctl_slots() const override {  // CPM: what its header would say
         if (!mode_at(b_.submode).is_cpm()) return 0;

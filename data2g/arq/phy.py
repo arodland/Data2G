@@ -290,6 +290,18 @@ class ModemRx:
             out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
         return list(dict.fromkeys(out))
 
+    def converged(self, slot: int, pair: bool = False) -> bool:
+        """`slot` decoded, mask open and nothing pinned, to a codeword (LDPC:
+        every parity check satisfied): alone, or with `pair` combined with
+        slot + 1 as raw_pair does. Polar always gives a list, so never says:
+        False."""
+        if slot >= self.n_cw or (pair and not self._pair_ok(slot)):
+            return False
+        spec = self._spec(slot)
+        if spec.code != "ldpc":
+            return False
+        return bool((self._pair(slot, None) if pair else self._decoded(slot, spec))[1].any())
+
     def raw_pair(self, slot: int) -> list[bytes]:
         """raw() of a codeword sent twice: `slot` at RV 0 and `slot + 1` at
         RV 1, combined (a broadcast control under DUP, docs/broadcast.md

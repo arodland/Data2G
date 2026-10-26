@@ -377,12 +377,22 @@ std::optional<Bytes> uncobs(ByteView b) {
     return out;
 }
 
+// `frame` as it goes at byte `at` of a burst's data: COBS, its ending zero, and a zero before it if it would
+// start a codeword (else where it starts would be known only from the codeword before).
+static Bytes framed(ByteView frame, std::size_t at, std::size_t pb) {
+    Bytes out;
+    if (at % pb == 0) out.push_back(0);
+    const auto c = cobs(frame);
+    out.insert(out.end(), c.begin(), c.end());
+    out.push_back(0);
+    return out;
+}
+
 std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb) {
     Bytes stream;
     for (const auto& f : frames) {
-        const auto c = cobs(f);
+        const auto c = framed(f, stream.size(), pb);
         stream.insert(stream.end(), c.begin(), c.end());
-        stream.push_back(0);
     }
     stream.resize((stream.size() + pb - 1) / pb * pb, 0);
     std::vector<Bytes> out;
@@ -437,15 +447,15 @@ arq::TxBurstPtr KissLink::next_burst() {
         // the size class is a preference: a burst grows to carry its first
         // frame, up to what its header can say
         const int limit = m.is_cpm() ? start + tables::CPM.max_data : config::max_codewords(m.ofdm->sync_band);
-        const int need = start + ceil_div(cobs(queue[0].frame).size() + 1, pb);
+        const int need = start + ceil_div(framed(queue[0].frame, 0, pb).size(), pb);
         const int n_max = std::min(limit, std::max(arq::slots_for(m, seconds), need));
         const std::size_t room = static_cast<std::size_t>(n_max - start) * pb;
         std::vector<Queued> taken, rest;
         std::size_t size = 0;
         for (auto& q : queue) {
-            const std::size_t framed = cobs(q.frame).size() + 1;
-            if (q.port == n && route(port, q.frame).first == mode && size + framed <= room) {
-                size += framed;
+            const std::size_t k = framed(q.frame, size, pb).size();
+            if (q.port == n && route(port, q.frame).first == mode && size + k <= room) {
+                size += k;
                 taken.push_back(std::move(q));
             } else {
                 rest.push_back(std::move(q));
@@ -454,7 +464,7 @@ arq::TxBurstPtr KissLink::next_burst() {
         if (taken.empty()) {  // the first frame alone doesn't fit: it never will in this mode
             if (arq::log_enabled(LOG, 40))
                 arq::log_write(LOG, 40, arq::format("%zu-byte frame dropped: a %s burst carries at most %zu",
-                                                    rest[0].frame.size(), mode.c_str(), room - 2));
+                                                    rest[0].frame.size(), mode.c_str(), room - 3));
             rest.erase(rest.begin());
             queue = std::move(rest);
             events.push_back("BCAST " + std::to_string(n) + " DROPPED 1");
@@ -551,7 +561,7 @@ std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_fram
 std::optional<std::pair<int, int>> KissLink::find_data(arq::PlainRx& rx, const std::set<int>& keys) {
     std::vector<int> starts(std::begin(DATA_STARTS), std::end(DATA_STARTS));
     if (rx.n_ctl_slots()) starts = {rx.n_ctl_slots()};
-    for (int j = 1; j < std::min(rx.n_cw(), PROBE_SLOTS + 1); ++j)
+    for (int j = 1; j < std::min(rx.n_cw(), PROBE_SLOTS + 1); ++j) {
         for (int start : starts) {
             if (start > j) continue;
             for (int k : keys) {
@@ -562,6 +572,18 @@ std::optional<std::pair<int, int>> KissLink::find_data(arq::PlainRx& rx, const s
                 if (ok) return std::pair{k, start};
             }
         }
+        // a codeword that decoded but is neither an open port's data nor the rest of its control (OFDM: control
+        // codeword 1-3 at RV 0, in slot i or under DUP slot 2i): another burst, so no slot further on is looked at
+        if (rx.converged(j, false)) {
+            bool rest_of_control = false;
+            if (!rx.n_ctl_slots())
+                for (int i : {j, j % 2 ? 0 : j / 2}) {
+                    if (i < 1 || i >= arq::MAX_CTL) continue;
+                    for (int k : keys) rest_of_control = rest_of_control || rx.decode_plain(j, arq::ctl_mask(0, i, k)).has_value();
+                }
+            if (!rest_of_control) return std::nullopt;
+        }
+    }
     return std::nullopt;
 }
 
@@ -600,7 +622,10 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
         return out;
     }
     // control lost: a data slot passing under an open port's key says the
-    // burst is that group's, and its mask where the data starts (docs/broadcast.md §2)
+    // burst is that group's, and its mask where the data starts (docs/broadcast.md §2).
+    // OFDM: a slot 0 that decoded (alone or paired) but wasn't a broadcast
+    // control is another kind of burst (ARQ, CQ), not one whose control was lost
+    if (!rx.n_ctl_slots() && (rx.converged(0, false) || rx.converged(0, true))) return std::nullopt;
     std::set<int> keys;
     for (const auto& [i, p] : ports) keys.insert(p.key());
     const auto found = find_data(rx, keys);

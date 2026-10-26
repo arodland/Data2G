@@ -92,6 +92,9 @@ public:
     virtual std::vector<Bytes> raw_pair(int slot) = 0;
     virtual std::optional<Bytes> decode_pair(int slot, const MaskId& mask) = 0;
     virtual int n_ctl_slots() const = 0;  // CPM: slots its header says are control; OFDM: 0
+    // The slot decoded, mask open and nothing pinned, to a codeword (LDPC: every parity check satisfied): alone,
+    // or with `pair` combined with slot + 1 as raw_pair does. Polar never says: false.
+    virtual bool converged(int slot, bool pair) = 0;
 };
 using Clock = std::function<double()>;  // seconds, monotonic
 double monotonic();
@@ -147,6 +150,7 @@ public:
     // The pair raw_pair reads, CRC-checked under `mask` (its padding pinned if it fails plain).
     std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override;
     int n_ctl_slots() const override { return n_ctl_slots_; }
+    bool converged(int slot, bool pair) override;
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 

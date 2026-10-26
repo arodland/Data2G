@@ -72,7 +72,8 @@ inline arq::MaskId data_start_mask(int slot, int start, int key) { return arq::d
 inline constexpr int DATA_STARTS[] = {1, 2, 3, 4, 6, 8};
 inline constexpr int PROBE_SLOTS = 8;  // control lost: data looked for in slots 1-8
 
-// Data codewords: each frame COBS-encoded and ended by a zero, back to back, zero-padded.
+// Data codewords: each frame COBS-encoded and ended by a zero, back to back, zero-padded; a frame that would start
+// a codeword (the data's first included) gets a zero before it.
 std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb);
 // Payloads and their CRC results -> (whole frames, frames lost). A zero byte
 // in a good codeword always ends a frame, so parsing picks up again after a
@@ -158,7 +159,8 @@ public:
     // `keys`, its mask naming where the data starts -> (key, first data slot).
     // A slot alone counts only as slot 1 starting the data, a burst's only
     // data slot, or at the start CPM's header gives; elsewhere a later slot
-    // must pass under the same key and start too.
+    // must pass under the same key and start too. Stops at a slot that decoded
+    // to a codeword that is neither an open port's data nor the rest of its control.
     static std::optional<std::pair<int, int>> find_data(arq::PlainRx& rx, const std::set<int>& keys);
     // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
     static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::PlainRx& rx, int start, int key);

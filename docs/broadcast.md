@@ -58,7 +58,12 @@ and reads any codeword. A mask only decides whose CRC check passes.
   group is an open port. Promiscuous listening keeps every group's.
 - **Data:** checked under the group read from the control. Data from a burst whose
   control was lost never lands on the wrong port.
-  - Control lost: the receiver looks for data in slots 1-8, the first that passes
+  - Control lost: looked for only when slot 0 didn't decode at all (OFDM: no LDPC
+    codeword, alone or paired with slot 1). A slot 0 that decoded but isn't a
+    broadcast control is another kind of burst (an overheard ARQ exchange, a CQ),
+    not a broadcast whose control was lost, and its data is never decoded. CPM
+    (polar control, which always gives a list) has no such test.
+  - The receiver then looks for data in slots 1-8, the first that passes
     under an open port's key, trying each first data slot the burst could have
     (1, 2, 3, 4, 6 or 8: 1-4 control codewords, each once or twice; CPM: its header
     says). One decode per slot, then up to 6 x 16 CRC checks each. The slot that
@@ -72,6 +77,10 @@ and reads any codeword. A mask only decides whose CRC check passes.
     slot, or the start CPM's header gives. Anywhere else, a later data slot must pass
     under the same key and start too. A burst with its control and all but one
     codeword of a longer data run lost is dropped.
+  - The search stops at the first slot that decoded (an LDPC codeword) but is
+    neither an open port's data nor the rest of its control (codewords 1-3 at RV 0,
+    in slot i or under DUP slot 2i): that is another burst, or another group's. So
+    a burst costs decodes past slot 1 only while its slots keep failing to decode.
 - **Collisions:** two group names share a key 1 time in 65536. The control's name
   settles it. Control-lost data whose key matches two open ports is dropped, and both
   get a LOST notice (one a false positive): a payload is never misdelivered.
@@ -104,14 +113,22 @@ and reads any codeword. A mask only decides whose CRC check passes.
     would be 1 + 10 + 10 = 21 B, which doesn't fit.
 - **Data:** each frame COBS-encoded (Consistent Overhead Byte Stuffing: no zero byte
   left) and ended by a zero byte, back to back, zero padded; one burst carries one
-  group's frames.
+  group's frames. A frame that would start a codeword, the data's first included,
+  gets a zero byte before it.
   - A zero byte in a good codeword always ends a frame, so a failed codeword loses
     only the frames it touches: parsing picks up at the next zero in a good codeword.
-    `BCAST n LOST k` counts each run of frames one failed codeword touched as one:
-    k is at least the frames lost.
+  - The zero before a frame starting a codeword puts where it starts in its own
+    codeword. Without it, that would be the zero ending the frame before, the
+    codeword before's last byte, and a frame whose bytes all arrived would be lost
+    with that codeword. A reader skips it as an empty frame.
+  - `BCAST n LOST k` counts each run of frames one failed codeword touched as one:
+    at least k frames were lost. With frames filling whole codewords, a lost
+    codeword holds one frame and k is exact.
   - Cost: `kisslink.framed_len(n) = n + 2 + n // 254` bytes at most, equal when the
-    frame has no zero byte: n + 2 up to 253 bytes, as the 2-byte length it
-    replaced; 259 for a 256-byte frame.
+    frame has no zero byte (n + 2 up to 253 bytes, as the 2-byte length it
+    replaced; 259 for a 256-byte frame), and 1 more for a frame that starts a
+    codeword. A client that wants its frames to fill k codewords each makes them
+    k x bytes-per-codeword - 3 bytes long (up to 253).
 - **What fits:** `BCAST MODE` refuses a mode whose control codewords (at most 4) can't
   hold the port's control: the header, its group TLV, and on a shifting port a
   reports TLV with at least its sender.
@@ -124,8 +141,8 @@ and reads any codeword. A mask only decides whose CRC check passes.
   size class to carry its first frame, up to what its header can say
   (`kisslink.next_burst`), and receivers take a header that long:
   `engine.receive_accept` raises each OFDM submode's max codewords to hold 4
-  control codewords, sent twice, and a 256-byte frame framed (8 + ⌈259 / bytes per
-  codeword⌉). CPM's 8 data codewords hold 304-464 B whatever the control.
+  control codewords, sent twice, and a 256-byte frame framed as a burst's first
+  (8 + ⌈260 / bytes per codeword⌉). CPM's 8 data codewords hold 304-464 B whatever the control.
 
 ## 4. Modes and channel access
 
@@ -167,13 +184,14 @@ twice, both ports get its frames. `MODE` lines read `MODE name bandwidth-Hz
 bytes-per-codeword max-codewords seconds-at-1 seconds-at-max`.
 
 The largest frame a port can send in a mode, from its `MODE` line: the largest n
-with `framed_len(n) <= (max-codewords - c) x bytes-per-codeword`, where c is the
+with `framed_len(n) + 1 <= (max-codewords - c) x bytes-per-codeword` (the 1: the
+zero before the data's first frame), where c is the
 port's control slots: OFDM, its control codewords (1 unless the header, group TLV
 and reports outgrow one, as reports on a shifting port can; at most 4), twice under
 DUP; CPM, 1 (its max-codewords counts the data and one control: a second control
 copy is extra). A client that wants one number per mode takes c = 4 (8 under DUP).
-Up to 253 bytes, framed is n + 2, as before. A 256-byte frame always fits but on the
-ACK modes (§3).
+Up to 253 bytes, that is n + 3: one byte more than before. A 256-byte frame always
+fits but on the ACK modes (§3).
 
 - `BCAST n HEARD [call] snr`: a burst's control checked for port n (call from group+from).
   Its frames follow on the KISS port. It's known only at the burst's end: the receiver

@@ -54,6 +54,9 @@ def substitutions(native):
         def decode_pair(self, slot, mask_id):
             return self._n.decode_pair(slot, mask_id)
 
+        def converged(self, slot, pair=False):
+            return self._n.converged(slot, pair)
+
         def forget(self, key):
             return self._n.forget(key)
 

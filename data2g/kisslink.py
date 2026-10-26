@@ -16,10 +16,11 @@ Burst: control codeword(s), then data codewords. Control: a 1-byte header
 on a port with rate shifting on. A DUP port (BCAST MODE n DUP mode) sends
 each control codeword twice, RV 0 then RV 1, and a receiver combines the
 two when the first fails alone. Data: each frame COBS-encoded and ended by
-a zero byte, back to back, zero padded (pack_frames, unpack_frames); each
-data codeword's mask carries the slot the data starts at (data_start_mask).
-A failed codeword loses only the frames it touches: the next zero byte in
-a good codeword starts a frame. No resends: AX.25 retries at layer 2.
+a zero byte, back to back, zero padded, with a zero byte more wherever a
+frame would start a codeword (pack_frames, unpack_frames); each data
+codeword's mask carries the slot the data starts at (data_start_mask). A
+failed codeword loses only the frames it touches: the next zero byte in a
+good codeword starts a frame. No resends: AX.25 retries at layer 2.
 
 Rate shifting (BCAST MODE n AUTO mode; off by default). KISS gives the
 TNC frames and nothing back, and a mode can only be chosen from how the
@@ -247,15 +248,35 @@ def data_start_mask(slot: int, start: int, key: int) -> tuple:
     return data_mask(0, slot, key, epoch=start)
 
 
+def _ctl_indices(slot: int, n_ctl_slots: int) -> list[int]:
+    """The control codewords (after the first) an OFDM burst's `slot` may
+    hold at RV 0: i in slot i, or under DUP in slot 2i. CPM: none (its
+    header says which slots are control)."""
+    if n_ctl_slots:
+        return []
+    return sorted({i for i in (slot, slot // 2 if slot % 2 == 0 else 0) if 1 <= i < F.MAX_CTL})
+
+
 # first data slots a burst may have: 1-4 control codewords, each sent once or twice (DUP)
 DATA_STARTS = sorted({f * n for f in (1, 2) for n in range(1, F.MAX_CTL + 1)})
 PROBE_SLOTS = 8  # control lost: data looked for in slots 1-8
 
 
+def _framed(frame: bytes, at: int, pb: int) -> bytes:
+    """`frame` as it goes at byte `at` of a burst's data: COBS, its ending
+    zero, and a zero before it if it would start a codeword. Without that,
+    the zero telling a reader where it starts would be the last byte of the
+    codeword before, and the frame lost with that codeword."""
+    return (b"" if at % pb else b"\0") + cobs(frame) + b"\0"
+
+
 def pack_frames(frames: list[bytes], pb: int) -> list[bytes]:
     """Frames -> data codeword payloads of `pb` bytes: each frame COBS-encoded
-    and ended by a zero, back to back, zero-padded (empty frames to a reader)."""
-    stream = b"".join(cobs(f) + b"\0" for f in frames)
+    and ended by a zero, back to back, zero-padded (empty frames to a
+    reader); a frame that would start a codeword gets a zero before it."""
+    stream = b""
+    for f in frames:
+        stream += _framed(f, len(stream), pb)
     stream += bytes(-len(stream) % pb)
     return [stream[i:i + pb] for i in range(0, len(stream), pb)]
 
@@ -491,18 +512,19 @@ class KissLink:
         # (a 256-byte PACLEN I frame outgrew a 12 s qpsk-r1/5 burst), up to what
         # its header can say
         limit = start + cpm.MAX_DATA if is_cpm(spec) else max_codewords(spec.sync_band)
-        need = start + -(-(len(cobs(first)) + 1) // pb)
+        need = start + -(-len(_framed(first, 0, pb)) // pb)
         n_max = min(limit, max(G.slots_for(spec, seconds), need))
         room = (n_max - start) * pb
         taken, rest, size = [], [], 0
         for q in self.queue:
-            if q[0] == n and self._route(port, q[1])[0] == mode and size + len(cobs(q[1])) + 1 <= room:
+            k = len(_framed(q[1], size, pb))
+            if q[0] == n and self._route(port, q[1])[0] == mode and size + k <= room:
                 taken.append(q)
-                size += len(cobs(q[1])) + 1
+                size += k
             else:
                 rest.append(q)
         if not taken:  # the first frame alone doesn't fit: it never will in this mode
-            log.error("%d-byte frame dropped: a %s burst carries at most %d", len(first), mode, room - 2)
+            log.error("%d-byte frame dropped: a %s burst carries at most %d", len(first), mode, room - 3)
             self.queue = self.queue[1:]
             self.events.append(f"BCAST {n} DROPPED 1")
             return self.next_burst()
@@ -584,6 +606,12 @@ class KissLink:
                     if alone or any(rx.decode(i, data_start_mask(i, start, k), 0, None) is not None
                                     for i in range(j + 1, rx.n_cw)):
                         return k, start
+            # a codeword that decoded but is neither an open port's data nor the
+            # rest of its control (OFDM: control codeword 1-3 at RV 0, in slot i
+            # or under DUP slot 2i): another burst, so no slot further on is looked at
+            if rx.converged(j) and not any(rx.decode(j, ctl_mask(0, i, k), 0, None) is not None
+                                           for i in _ctl_indices(j, rx.n_ctl_slots) for k in keys):
+                return None
         return None
 
     @staticmethod
@@ -619,7 +647,11 @@ class KissLink:
                     self.events.append(f"BCAST {i} LOST {lost}")
             return [(i, f) for i in ports for f in frames]
         # control lost: a data slot passing under an open port's key says the
-        # burst is that group's, and its mask where the data starts (docs/broadcast.md §2)
+        # burst is that group's, and its mask where the data starts (docs/broadcast.md §2).
+        # OFDM: a slot 0 that decoded (alone or paired) but wasn't a broadcast
+        # control is another kind of burst (ARQ, CQ), not one whose control was lost
+        if not rx.n_ctl_slots and (rx.converged(0) or rx.converged(0, pair=True)):
+            return None
         found = self.find_data(rx, sorted({p.key for p in self.ports.values()}))
         if found is None:
             return None

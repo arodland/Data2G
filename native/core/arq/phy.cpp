@@ -295,6 +295,14 @@ const ModemRx::Raw& ModemRx::paired(int slot, const codes::Spec& s, int off) {
     return pairs_[{slot, off}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
 }
 
+bool ModemRx::converged(int slot, bool pair) {
+    if (slot >= n_cw_ || (pair && !pair_ok(slot))) return false;
+    const auto& s = spec(slot);
+    if (s.polar) return false;
+    const Raw& d = pair ? paired(slot, s, -1) : decoded(slot, s);
+    return std::any_of(d.usable.begin(), d.usable.end(), [](auto u) { return u != 0; });
+}
+
 std::vector<Bytes> ModemRx::raw_pair(int slot) {
     if (!pair_ok(slot)) return {};
     const auto& s = spec(slot);
