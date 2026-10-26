@@ -171,11 +171,13 @@ def test_vara_commands_drive_a_session(tmp_path):
     assert link(a.engine, b.engine, 12, 120, got, seed=4)
     b.command("SN")  # the last of W1AW's bursts: the link's 12 dB
     assert b.out_cmd[-1].startswith("SN ") and abs(float(b.out_cmd[-1].split()[1]) - 12) < 3
+    a.command("DATA2G ON")  # DISCONNECTED says why
+    b.command("DATA2G ON")
     a.command("DISCONNECT")
 
     def closed():
         pump()
-        return "DISCONNECTED" in a.out_cmd and "DISCONNECTED" in b.out_cmd
+        return "DISCONNECTED CLIENT" in a.out_cmd and "DISCONNECTED PEER" in b.out_cmd
     assert link(a.engine, b.engine, 12, 60, closed, seed=5)
     assert b.engine.session.state == S.LISTEN  # listening again
     a.command("NONSENSE")
@@ -344,7 +346,7 @@ def test_cleantxbuffer_then_abort():
     lf, lt = map(int, a.out_cmd[-1].split()[4:])
     assert lf < lt
     a.command("ABORT")
-    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED {lf} {lf} {lt} UNKNOWN", "DISCONNECTED", "OK"]
+    assert a.out_cmd[1:] == [f"CLEANTXBUFFER SETTLED {lf} {lf} {lt} UNKNOWN", "DISCONNECTED ABORT", "OK"]
     a.after_step(False)
     assert not any("SETTLED" in x for x in a.out_cmd[4:])
 
@@ -702,7 +704,7 @@ def test_a_station_not_listening_refuses_a_connect_at_once():
     a.connect("K2XYZ", 2)
     t0 = a.now
     assert link(a, b, 20, 60, lambda: a.session.state == S.CLOSED)
-    assert a.session.close_reason == "refused: not listening"
+    assert a.session.close_reason == "NOT_LISTENING"
     assert a.now - t0 < 10  # the first try's answer: no retries
     assert b.session.state == S.IDLE
 
@@ -721,7 +723,7 @@ def test_a_station_in_a_session_refuses_a_third_and_keeps_its_session():
                 for i, e in enumerate((a, b, c))]
         if c.session.state == S.CLOSED:
             break
-    assert c.session.close_reason == "refused: busy"
+    assert c.session.close_reason == "BUSY"
     assert a.session.state == S.CONNECTED == b.session.state
     a.session.write(b"still here")
     assert link(a, b, 20, 120, lambda: b.session.read() == b"still here", seed=67)
@@ -816,7 +818,7 @@ def test_accept_refuses_a_connect_it_cannot_route():
         b_step()
         return a.engine.session.state == S.CLOSED
     assert link(a.engine, b.engine, 20, 60, pump)
-    assert a.engine.session.close_reason == "refused: refused by host"
+    assert a.engine.session.close_reason == "REFUSED"
     assert "DISCONNECTED" in a.out_cmd and not any(x.startswith("CONNECTED") for x in a.out_cmd + b.out_cmd)
 
 

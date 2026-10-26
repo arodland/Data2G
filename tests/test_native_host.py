@@ -134,6 +134,9 @@ def clean_transcript(Engine, Host, data2g, snr):
     a.command("CLEANTXBUFFER")  # again: the rest
     take()
     assert link(a.engine, b.engine, snr, 120, pump(lambda: not st.tx.pending() and not a.engine.tx), seed=3)
+    a.command("DISCONNECT")
+    assert link(a.engine, b.engine, snr, 60, pump(lambda: a.engine.session.state == S.CLOSED), seed=4)
+    take()
     return out
 
 
@@ -144,6 +147,7 @@ def test_cpp_cleantxbuffer_matches_python(classes, data2g, snr):
     py, cpp = (clean_transcript(Engine, hosts[k], data2g, snr) for k in ("python", "cpp"))
     flat = [line for cmd, _ in py for line in cmd]
     assert "CLEANTXBUFFER BUFFEREMPTY" in flat and any(x.startswith("CLEANTXBUFFER SETTLED") for x in flat) == data2g
+    assert ("DISCONNECTED CLIENT" if data2g else "DISCONNECTED") in flat
     for i, (x, y) in enumerate(zip(py, cpp)):
         assert x == y, (i, x, y)
     assert len(py) == len(cpp)

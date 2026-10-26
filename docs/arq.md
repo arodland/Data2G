@@ -462,6 +462,12 @@ As built (data2g/arq/policy.py):
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).
     - CLEANTXBUFFER reports host byte offsets (below).
+    - DISCONNECTED carries a reason word, then detail words for some:
+      CLIENT (DISCONNECT, or the command client left), IDLE (idle timeout),
+      PEER (the peer's DISC), ABORT, LINK_LOST, LINK_FAILED why, NO_ANSWER,
+      PEER_RECONNECTED, and a CONNECT_NAK's BUSY, VERSION, NOT_LISTENING or
+      REFUSED (unknown NAK: REFUSED reason n). CLIENT and IDLE end in
+      `unconfirmed` when the DISC was never acked.
     - Data read from the data port before CONNECTED is dropped, so the queue is
       empty at CONNECTED and offset 0 is the first byte written after it. VARA
       queues such data for the session. A client must not write before
@@ -501,7 +507,7 @@ As built (data2g/arq/policy.py):
       - If the session ends first (disconnect, link lost, ABORT), before its
         DISCONNECTED: `CLEANTXBUFFER SETTLED from split to UNKNOWN`. Before split:
         records acked whole. From it: on air unacked, the peer may have it.
-- **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED,
+- **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED [reason],
   BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
   next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, and a
   Data2G-specific `MODE name`.

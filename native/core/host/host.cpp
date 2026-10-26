@@ -198,7 +198,7 @@ void Host::command(std::string_view line, std::string_view peer) {
         session_over();
         e.abort();
         up_ = false;
-        out_cmd.emplace_back("DISCONNECTED");
+        out_cmd.emplace_back(data2g ? "DISCONNECTED ABORT" : "DISCONNECTED");
         if (listening) e.listen();
     } else if (cmd == "CQFRAME" && args.size() == 2 && bw_cap("BW" + args[1])) {
         try {
@@ -285,7 +285,7 @@ bool Host::abort_session() {
     session_over();
     e.abort();
     up_ = false;
-    out_cmd.emplace_back("DISCONNECTED");
+    out_cmd.emplace_back(data2g ? "DISCONNECTED ABORT" : "DISCONNECTED");
     if (listening) e.listen();
     return true;
 }
@@ -338,7 +338,7 @@ void Host::after_step(bool ptt) {
             arq::log_write(LOG, INFO, ev);
             session_over();
             up_ = false;
-            out_cmd.emplace_back("DISCONNECTED");
+            out_cmd.push_back(data2g ? ev : "DISCONNECTED");
         }
     }
     if (e.session().state == SessionState::CLOSED && listening) e.listen();

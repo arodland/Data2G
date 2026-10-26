@@ -29,7 +29,8 @@ client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
-REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED,
+REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED
+(DATA2G ON: DISCONNECTED reason [detail], docs/arq.md §9),
 PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
 BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has sent a
@@ -158,7 +159,7 @@ class Host:
             self._session_over()
             e.abort()
             self._up = False
-            self.out_cmd.append("DISCONNECTED")
+            self.out_cmd.append("DISCONNECTED ABORT" if self.data2g else "DISCONNECTED")
             if self.listening:
                 e.listen()
         elif cmd == "CQFRAME" and len(args) == 2 and "BW" + args[1] in BW:
@@ -299,7 +300,7 @@ class Host:
                 log.info("%s", ev)
                 self._session_over()
                 self._up = False
-                self.out_cmd.append("DISCONNECTED")
+                self.out_cmd.append(ev if self.data2g else "DISCONNECTED")
         if e.session.state == S.CLOSED and self.listening:
             e.listen()
         self.out_data += e.session.read()
@@ -494,7 +495,7 @@ def _send_cmd(port, host, asker=None):
     """Send the lines the host has queued. Those a command from client `asker` produced are its reply and go to it
     alone, except DISCONNECTED (ABORT's), which is news for every client; with no asker everything is for all."""
     for line in host.out_cmd:
-        port.send(line.encode() + b"\r", None if line == "DISCONNECTED" else asker)
+        port.send(line.encode() + b"\r", None if line.startswith("DISCONNECTED") else asker)
     host.out_cmd.clear()
 
 

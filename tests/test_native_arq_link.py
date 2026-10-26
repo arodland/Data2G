@@ -319,4 +319,4 @@ def test_session_on_timeout_override_and_tuning(native, monkeypatch):
         s.poll(6.0)
         s.on_tx_end(s.poll(s.next_event()), 10.0)
         s.poll(s.next_event())
-        assert seen == [6.0, 10.0 + s.t_turn + 4.0] and s.state == S.CLOSED and s.close_reason == "no answer"
+        assert seen == [6.0, 10.0 + s.t_turn + 4.0] and s.state == S.CLOSED and s.close_reason == "NO_ANSWER"

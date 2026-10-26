@@ -70,8 +70,8 @@ IDLE, LISTEN, CONNECTING, CONNECTED, DISCONNECTING, CLOSED = (
     "idle", "listen", "connecting", "connected", "disconnecting", "closed")
 # CONNECT_NAK reasons: the caller stops dialing on any of them
 NAK_VERSION, NAK_NOT_LISTENING, NAK_BUSY, NAK_REFUSED = 1, 2, 3, 4
-NAK_NAMES = {NAK_VERSION: "version", NAK_NOT_LISTENING: "not listening", NAK_BUSY: "busy",
-             NAK_REFUSED: "refused by host"}
+# close reasons (DISCONNECTED's, docs/arq.md §9) are one of these words, then detail if any
+NAK_NAMES = {NAK_VERSION: "VERSION", NAK_NOT_LISTENING: "NOT_LISTENING", NAK_BUSY: "BUSY", NAK_REFUSED: "REFUSED"}
 
 
 def session_key(caller: str, callee: str, nonce: int) -> int:
@@ -108,6 +108,7 @@ class Session:
     _wake_wait: float = 0.0  # callee: silence after _quiet_from before a wake
     _wakes: int = 0  # callee: wake bursts sent since the caller was last heard
     _want_disc: bool = False
+    _disc_why: str = "CLIENT"  # who wanted the DISC: CLIENT or IDLE
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
@@ -141,7 +142,7 @@ class Session:
     def disconnect(self):
         if self.state in (IDLE, LISTEN, CLOSED):
             return  # nothing to close; a flag left set would end the next session at its first burst
-        self._want_disc = True
+        self._want_disc, self._disc_why = True, "CLIENT"
         if self._build_at is not None:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
@@ -194,9 +195,9 @@ class Session:
             # out a hair under d, and an event loop then spins at that
             # instant forever (found by scripts/arq_stress.py --sessions)
             if now >= self._last_heard + LINK_LOST_S:
-                return self._close("link lost" if self.state == CONNECTED else "disconnected (unconfirmed)")
-            if self.state == CONNECTED and now >= self._last_data + IDLE_CLOSE_S:
-                self._want_disc = True
+                return self._close("LINK_LOST" if self.state == CONNECTED else f"{self._disc_why} unconfirmed")
+            if self.state == CONNECTED and now >= self._last_data + IDLE_CLOSE_S and not self._want_disc:
+                self._want_disc, self._disc_why = True, "IDLE"
         if self._deadline is not None and now >= self._deadline:
             self._deadline = None
             self._on_timeout(now)
@@ -288,7 +289,7 @@ class Session:
             return  # not ours, or unreadable: stay silent (§3)
         self._heard(now)
         if st.state == L.FAILED:
-            self._close(f"link failed: {st.fail_reason}")
+            self._close(f"LINK_FAILED {st.fail_reason}")
             return
         st.settle_limbo()
         settled = limbo and st.tx.limbo is None
@@ -411,14 +412,14 @@ class Session:
             self._tries += 1
             log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, CONNECT_TRIES)
             if self._tries >= CONNECT_TRIES:
-                self._close("no answer")
+                self._close("NO_ANSWER")
             else:
                 self._queue(self._connect_burst(), now + self.rng.uniform(3.0, 5.0))
         elif self.state == DISCONNECTING:
             self._tries += 1
             log.info("no answer to DISC, try %d of %d", self._tries, DISC_TRIES)
             if self._tries >= DISC_TRIES:
-                self._close("disconnected (unconfirmed)")
+                self._close(f"{self._disc_why} unconfirmed")
             else:
                 self._queue(self._disc_burst(), now)
         elif self.state == CONNECTED:
@@ -430,7 +431,7 @@ class Session:
             short = last is None or self.policy.airtime(last.submode, len(last.slots), B.dup_ctl(last)) <= REPEAT_MAX_S
             b = self.station.on_timeout(allow_repeat=short)
             if b is None:
-                self._close(f"link failed: {self.station.fail_reason}")
+                self._close(f"LINK_FAILED {self.station.fail_reason}")
             else:
                 self._queue(b, now)
 
@@ -534,7 +535,7 @@ class Session:
                 # CONNECT_ACK and ran out of tries), so take the new one. Held
                 # on air, the old one ignored it until link lost
                 # (recordings/20261002-232711)
-                self._close("peer reconnected", now=now)
+                self._close("PEER_RECONNECTED", now=now)
                 self.state, self._want_disc, self._sent_disc_ack, self._tries = LISTEN, False, False, 0
             if self.state != LISTEN:
                 busy = self.state in (CONNECTING, CONNECTED, DISCONNECTING)
@@ -566,14 +567,14 @@ class Session:
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
             n = F.ConnectNak.unpack(body)
             if n.nonce == self._nonce:
-                self._close(f"refused: {NAK_NAMES.get(n.reason, f'reason {n.reason}')}")
+                self._close(NAK_NAMES.get(n.reason, f"REFUSED reason {n.reason}"))
         elif sub == F.DISC and self.station is not None and key == self.station.key:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
-            self._close("disconnected by peer",
+            self._close("PEER",
                         final=self._session_burst(self.station.direction, key, bytes([F.DISC_ACK]), f["mode"]), now=now)
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
-            self._close("disconnected")
+            self._close(self._disc_why)
 
     def _refuse(self, c: F.Connect, mode: str, reason: int, now: float):
         """A CONNECT_NAK for this CONNECT, unless a burst of the session's own
