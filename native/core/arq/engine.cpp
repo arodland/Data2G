@@ -314,7 +314,9 @@ modem::Accept receive_accept(double min_header_score) {
     auto a = modem::Accept::of({}, MAX_BURST_S, min_header_score);
     for (auto& [s, cw] : a.max_cw) {
         if (s->name.find("ack") != std::string_view::npos) continue;
-        const int need = 4 + (2 + KISS_FRAME_BYTES + codes::payload_bytes(*s) - 1) / codes::payload_bytes(*s);
+        // a full control, each codeword twice (DUP), and the frame framed as a burst's first (a zero before it)
+        const int pb = codes::payload_bytes(*s);
+        const int need = 2 * MAX_CTL + static_cast<int>((1 + kisslink::framed_len(KISS_FRAME_BYTES) + pb - 1) / pb);
         cw = std::max(cw, std::min(need, config::max_codewords(s->sync_band)));
     }
     return a;

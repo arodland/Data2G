@@ -208,6 +208,10 @@ def test_data_framing(native, pure):
         for _ in range(10):
             ok = list(rng.random(len(payloads)) > 0.3)
             assert tuple(native.kisslink.unpack_frames(payloads, ok)) == KL.unpack_frames(payloads, ok)
+    for f in (b"", b"\0" * 3, b"\1" * 254, b"\1" * 255, bytes(rng.integers(0, 4, 600, dtype=np.uint8))):
+        assert native.kisslink.cobs(f) == KL.cobs(f) and native.kisslink.uncobs(KL.cobs(f)) == f
+        assert native.kisslink.framed_len(len(f)) == KL.framed_len(len(f))
+    assert native.kisslink.uncobs(b"\5ab") is None and native.kisslink.uncobs(b"\0") is None
 
 
 def test_kiss_links_match(native, pure):
@@ -242,6 +246,32 @@ def test_kiss_links_match(native, pure):
     k.command(2, bytes([127]))
     k.command(3, bytes([200]))
     assert (k.persist, k.slot_s) == (127, 2.0)
+
+
+def test_kiss_dup_links_match(native, pure):
+    """DUP ports (control sent twice), OFDM and CPM, near where control
+    fails alone: Python and native send and hear the same."""
+    from data2g.receiver import receive_any
+
+    for mode, snrs in (("qpsk-r1/5", (-6.0, -8.0, -9.0)), ("fsk8r50-r1/2", (-6.0, -8.0))):
+        links = []
+        for make in (KL.KissLink, native.kisslink.KissLink):
+            a, b = make(), make()
+            na = a.open("CHAT", from_call="W1AW")
+            b.open("CHAT")
+            a.set_mode(na, mode, dup=True)
+            links.append((a, b, na))
+        for k, snr in enumerate(snrs):
+            out = []
+            for a, b, na in links:
+                a.enqueue(b"twice %d" % k, na)
+                burst = a.next_burst()
+                x = PHY.tx_audio(burst)
+                y = np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)])
+                y = hfchannel.awgn(y, snr, seed=k, s_power=hfchannel.active_power(x))
+                r = receive_any(y, lead=FS)
+                out.append((burst, b.on_burst(r) if r is not None else None, b.take_events()))
+            assert out[1] == out[0], (mode, snr)
 
 
 def test_dd_budget_expiring_inside_a_pass_ends_it(native, pure):

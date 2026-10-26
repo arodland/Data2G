@@ -662,12 +662,14 @@ def test_bcast_commands_and_statuses():
     for line, want in (("BCAST OPEN APRS", "BCAST PORT 1"), ("BCAST OPEN my chat FROM w1aw", "BCAST PORT 2"),
                        ("BCAST MODE 1 n4-qpsk-r1/3", "OK"), ("BCAST MODE 2 AUTO qpsk-r1/5", "OK"),
                        ("BCAST MODE 1 no-such-mode", "WRONG"), ("BCAST MODE 9 qpsk-r1/5", "WRONG"),
-                       ("BCAST MODE 1 FAST qpsk-r1/5", "WRONG"), ("BCAST CLOSE 0", "WRONG"),
+                       ("BCAST MODE 1 FAST qpsk-r1/5", "WRONG"), ("BCAST MODE 0 DUP AUTO qpsk-r1/5", "OK"),
+                       ("BCAST MODE 0 DUP DUP qpsk-r1/5", "WRONG"), ("BCAST CLOSE 0", "WRONG"),
                        ("BCAST OPEN bad_name", "WRONG"), ("BCAST", "WRONG")):
         h.command(line)
         assert h.out_cmd.pop() == want, line
     assert (link.ports[1].group, link.ports[1].mode, link.ports[1].auto) == ("APRS", "n4-qpsk-r1/3", False)
     assert (link.ports[2].group, link.ports[2].from_call, link.ports[2].auto) == ("MY CHAT", "W1AW", True)
+    assert (link.ports[0].auto, link.ports[0].dup, link.ports[1].dup, link.ports[2].dup) == (True, True, False, False)
     link.enqueue(b"queued", 1)
     h.command("BCAST CLOSE 1")
     link.missed("qpsk-r1/5", 3)
@@ -684,9 +686,11 @@ def test_bcast_commands_and_statuses():
 
     rx = dict(receive_accept().max_cw)
     lines = {ln.split()[1]: int(ln.split()[4]) for ln in h.out_cmd[:-1]}
-    assert all(lines[n] == rx[n] for n in lines if n in rx) and lines["qpsk-r1/5"] == 13
+    # qpsk-r1/5 (46 B): a 256-byte frame (259 B framed) and 4 control codewords sent twice
+    assert all(lines[n] == rx[n] for n in lines if n in rx) and lines["qpsk-r1/5"] == 8 + 6
     h.client_gone()
-    assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto) == (BROADCAST[2], False)
+    assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto, link.ports[0].dup) == (BROADCAST[2],
+                                                                                                       False, False)
     link.missed("qpsk-r1/5", 3)
     h.out_cmd.clear()
     h.after_step(False)

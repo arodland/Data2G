@@ -21,7 +21,7 @@ def substitutions(native):
         "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
         "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
-        "decode_buffer_pinned")}
+        "decode_buffer_pinned", "decode_buffer_raw")}
 
     @functools.lru_cache(maxsize=None)
     def own(spec):
@@ -129,6 +129,12 @@ def substitutions(native):
         return n.decode_buffer_pinned(spec.name, np.atleast_2d(np.asarray(buf, np.float64)), max_rv,
                                       np.asarray(known, np.int64), int(crc_mask))
 
+    def decode_buffer_raw(spec, buf, max_rv=0, known=None):
+        if not own(spec):
+            return py["decode_buffer_raw"](spec, buf, max_rv, known)
+        return n.decode_buffer_raw(spec.name, np.atleast_2d(np.asarray(buf, np.float64)), max_rv,
+                                   None if known is None else np.asarray(known, np.int64))
+
     return {
         **{(codes, a): by_name(a) for a in ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions",
                                              "encode_info", "decode_buffer", "decode_many", "decode_raw", "check",
@@ -140,6 +146,7 @@ def substitutions(native):
         (codes, "polar_order"): polar_order,
         (codes, "decode_raw_pinned"): decode_raw_pinned,
         (codes, "decode_buffer_pinned"): decode_buffer_pinned,
+        (codes, "decode_buffer_raw"): decode_buffer_raw,
         (codes, "interleaver"): interleaver,
         (codes, "spread"): spread,
         (codes, "despread"): despread,

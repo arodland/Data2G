@@ -232,13 +232,14 @@ void KissLink::reset() {
     set_mode(0, broadcast);
 }
 
-void KissLink::set_mode(int n, const std::string& mode, bool shift) {
+void KissLink::set_mode(int n, const std::string& mode, bool shift, bool dup) {
     auto it = ports.find(n);
     if (it == ports.end()) throw std::invalid_argument("port " + std::to_string(n) + " is not open");
     check_mode(mode, cap);
     check_fits(n, it->second, mode, shift);
     it->second.mode = mode;
     it->second.shift = shift;
+    it->second.dup = dup;
 }
 
 void KissLink::drop_where(int port, const std::function<bool(const Queued&)>& which) {
@@ -253,7 +254,7 @@ void KissLink::enqueue(Bytes frame, int port, std::optional<std::int64_t> ack) {
         events.push_back("BCAST " + std::to_string(port) + " DROPPED 1");
         return;
     }
-    if (frame.empty()) return;  // a zero length is the burst's end marker
+    if (frame.empty()) return;  // nothing to send (and an empty frame reads as padding: unpack_frames)
     queue.push_back({port, std::move(frame), ack});
 }
 
@@ -335,7 +336,7 @@ std::vector<Bytes> KissLink::control(const arq::Mode& m, int n, const Port& port
         body.insert(body.end(), t.begin(), t.end());
     }
     const int n_ctl = std::max(1, ceil_div(1 + body.size(), pb));
-    Bytes stream{static_cast<std::uint8_t>(VERSION << 4 | (n_ctl - 1))};
+    Bytes stream{static_cast<std::uint8_t>(VERSION << 4 | (port.dup ? DUP : 0) | (n_ctl - 1))};
     stream.insert(stream.end(), body.begin(), body.end());
     stream.resize(static_cast<std::size_t>(n_ctl) * pb, 0);
     std::vector<Bytes> out;
@@ -345,13 +346,53 @@ std::vector<Bytes> KissLink::control(const arq::Mode& m, int n, const Port& port
     return out;
 }
 
+Bytes cobs(ByteView frame) {
+    Bytes out, run;
+    for (auto b : frame) {
+        if (b) {
+            run.push_back(b);
+            if (run.size() < 254) continue;
+            out.push_back(255);  // a full run: no zero implied after it
+        } else {
+            out.push_back(static_cast<std::uint8_t>(run.size() + 1));
+        }
+        out.insert(out.end(), run.begin(), run.end());
+        run.clear();
+    }
+    out.push_back(static_cast<std::uint8_t>(run.size() + 1));
+    out.insert(out.end(), run.begin(), run.end());
+    return out;
+}
+
+std::optional<Bytes> uncobs(ByteView b) {
+    Bytes out;
+    std::size_t i = 0;
+    while (i < b.size()) {
+        const std::size_t c = b[i];
+        if (!c || i + c > b.size()) return std::nullopt;
+        out.insert(out.end(), b.begin() + static_cast<std::ptrdiff_t>(i + 1), b.begin() + static_cast<std::ptrdiff_t>(i + c));
+        i += c;
+        if (c < 255 && i < b.size()) out.push_back(0);
+    }
+    return out;
+}
+
+// `frame` as it goes at byte `at` of a burst's data: COBS, its ending zero, and a zero before it if it would
+// start a codeword (else where it starts would be known only from the codeword before).
+static Bytes framed(ByteView frame, std::size_t at, std::size_t pb) {
+    Bytes out;
+    if (at % pb == 0) out.push_back(0);
+    const auto c = cobs(frame);
+    out.insert(out.end(), c.begin(), c.end());
+    out.push_back(0);
+    return out;
+}
+
 std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb) {
     Bytes stream;
     for (const auto& f : frames) {
-        if (f.size() > 0xFFFF) throw std::invalid_argument("frame longer than 65535 bytes");  // struct.error in Python
-        stream.push_back(static_cast<std::uint8_t>(f.size() >> 8));
-        stream.push_back(static_cast<std::uint8_t>(f.size() & 0xFF));
-        stream.insert(stream.end(), f.begin(), f.end());
+        const auto c = framed(f, stream.size(), pb);
+        stream.insert(stream.end(), c.begin(), c.end());
     }
     stream.resize((stream.size() + pb - 1) / pb * pb, 0);
     std::vector<Bytes> out;
@@ -366,24 +407,25 @@ std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& paylo
         stream.insert(stream.end(), payloads[i].begin(), payloads[i].end());
         good.insert(good.end(), payloads[i].size(), ok.at(i));
     }
-    const auto all_good = [&](std::size_t a, std::size_t b) {
-        return std::all_of(good.begin() + a, good.begin() + std::min(b, good.size()), [](bool g) { return g; });
-    };
     std::vector<Bytes> out;
     int lost = 0;
-    std::size_t pos = 0;
-    while (pos + 2 <= stream.size()) {
-        if (!all_good(pos, pos + 2)) {
-            ++lost;  // at least this one; the rest can not be found
-            break;
+    std::size_t start = 0;
+    bool damaged = false;
+    for (std::size_t i = 0; i < stream.size(); ++i) {
+        if (!good[i]) {
+            damaged = true;
+        } else if (stream[i] == 0) {
+            if (damaged) {
+                ++lost;
+            } else if (i > start) {
+                if (auto f = uncobs(ByteView(stream).subspan(start, i - start))) out.push_back(std::move(*f));
+                else ++lost;
+            }
+            start = i + 1;
+            damaged = false;
         }
-        const std::size_t n = static_cast<std::size_t>(stream[pos]) << 8 | stream[pos + 1];
-        if (n == 0 || pos + 2 + n > stream.size()) break;
-        if (all_good(pos + 2, pos + 2 + n)) out.emplace_back(stream.begin() + pos + 2, stream.begin() + pos + 2 + n);
-        else ++lost;
-        pos += 2 + n;
     }
-    return {out, lost};
+    return {out, lost + static_cast<int>(damaged)};
 }
 
 arq::TxBurstPtr KissLink::next_burst() {
@@ -399,19 +441,21 @@ arq::TxBurstPtr KissLink::next_burst() {
                 me.insert(sender);
             }
         const auto ctl = control(m, n, port, sender);
+        const int start = (1 + port.dup) * static_cast<int>(ctl.size());  // control slots: the first data slot
         const double seconds = mode != port.mode ? arq::SIZE_S.at(static_cast<std::size_t>(hint)) : BROADCAST_S;
         const std::size_t pb = static_cast<std::size_t>(arq::payload_bytes(m));
         // the size class is a preference: a burst grows to carry its first
         // frame, up to what its header can say
-        const int limit = m.is_cpm() ? 1 + 1 + tables::CPM.max_data : config::max_codewords(m.ofdm->sync_band);
-        const int need = static_cast<int>(ctl.size()) + ceil_div(2 + queue[0].frame.size(), pb);
+        const int limit = m.is_cpm() ? start + tables::CPM.max_data : config::max_codewords(m.ofdm->sync_band);
+        const int need = start + ceil_div(framed(queue[0].frame, 0, pb).size(), pb);
         const int n_max = std::min(limit, std::max(arq::slots_for(m, seconds), need));
-        const std::size_t room = static_cast<std::size_t>(n_max - static_cast<int>(ctl.size())) * pb;
+        const std::size_t room = static_cast<std::size_t>(n_max - start) * pb;
         std::vector<Queued> taken, rest;
         std::size_t size = 0;
         for (auto& q : queue) {
-            if (q.port == n && route(port, q.frame).first == mode && size + 2 + q.frame.size() <= room) {
-                size += 2 + q.frame.size();
+            const std::size_t k = framed(q.frame, size, pb).size();
+            if (q.port == n && route(port, q.frame).first == mode && size + k <= room) {
+                size += k;
                 taken.push_back(std::move(q));
             } else {
                 rest.push_back(std::move(q));
@@ -420,7 +464,7 @@ arq::TxBurstPtr KissLink::next_burst() {
         if (taken.empty()) {  // the first frame alone doesn't fit: it never will in this mode
             if (arq::log_enabled(LOG, 40))
                 arq::log_write(LOG, 40, arq::format("%zu-byte frame dropped: a %s burst carries at most %zu",
-                                                    rest[0].frame.size(), mode.c_str(), room - 2));
+                                                    rest[0].frame.size(), mode.c_str(), room - 3));
             rest.erase(rest.begin());
             queue = std::move(rest);
             events.push_back("BCAST " + std::to_string(n) + " DROPPED 1");
@@ -433,9 +477,11 @@ arq::TxBurstPtr KissLink::next_burst() {
         const int key = port.key();
         auto b = std::make_shared<arq::TxBurst>();
         b->submode = mode;
-        for (std::size_t i = 0; i < ctl.size(); ++i) b->slots.push_back({arq::ctl_mask(0, static_cast<int>(i), key), 0, ctl[i]});
+        for (std::size_t i = 0; i < ctl.size(); ++i)
+            for (int rv = 0; rv <= static_cast<int>(port.dup); ++rv)
+                b->slots.push_back({arq::ctl_mask(0, static_cast<int>(i), key), rv, ctl[i]});
         for (std::size_t j = 0; j < data.size(); ++j)
-            b->slots.push_back({arq::data_mask(0, static_cast<std::int64_t>(ctl.size() + j), key), 0, std::move(data[j])});
+            b->slots.push_back({data_start_mask(start + static_cast<int>(j), start, key), 0, std::move(data[j])});
         b->burst_seq = ++n_sent;
         b->cap = cap;
         inflight_ = b;
@@ -449,12 +495,27 @@ arq::TxBurstPtr KissLink::next_burst() {
 
 // The burst's control, checked under the key of the group it names.
 std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::PlainRx& rx, int n_cw) {
-    for (const auto& c0 : rx.raw(0)) {
-        const int n_ctl = (c0[0] & 3) + 1;
-        if (c0[0] >> 4 != VERSION || n_ctl > n_cw) continue;
+    std::vector<std::pair<Bytes, bool>> reads;  // codeword 0's readings, and whether its RV 1 copy was combined in
+    for (auto& c : rx.raw(0)) reads.emplace_back(std::move(c), false);
+    // the pair only when slot 0 alone didn't decode, so other bursts cost no decode more
+    const bool try_pair = rx.n_ctl_slots() == 2 || (!rx.n_ctl_slots() && reads.empty());
+    bool pair_read = false;
+    for (std::size_t r = 0;; ++r) {
+        if (r == reads.size()) {  // alone exhausted: the pair's readings follow
+            if (!try_pair || pair_read) break;
+            pair_read = true;
+            for (auto& c : rx.raw_pair(0)) reads.emplace_back(std::move(c), true);
+            if (r == reads.size()) break;
+        }
+        const Bytes c0 = reads[r].first;
+        const bool paired = reads[r].second;
+        if (c0[0] >> 4 != VERSION) continue;
+        const int f = (c0[0] & DUP) ? 2 : 1, n_ctl = (c0[0] & 3) + 1;
+        if (paired && f == 1) continue;  // combined as a pair, but not sent as one
+        if (f * n_ctl > n_cw || (rx.n_ctl_slots() && rx.n_ctl_slots() != f * n_ctl)) continue;
         Bytes stream = c0;
         for (int i = 1; i < n_ctl; ++i) {  // the best guess, to read
-            const auto r = rx.raw(i);
+            const auto r = rx.raw(f * i);
             const Bytes& p = r.empty() ? Bytes(c0.size(), 0) : r[0];
             stream.insert(stream.end(), p.begin(), p.end());
         }
@@ -467,13 +528,15 @@ std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::Pl
         Bytes ctl;
         bool all = true;
         for (int i = 0; i < n_ctl && all; ++i) {
-            const auto p = rx.decode_plain(i, arq::ctl_mask(0, i, key));
+            const auto mask = arq::ctl_mask(0, i, key);
+            auto p = rx.decode_plain(f * i, mask);
+            if (!p && f == 2) p = rx.decode_pair(f * i, mask);
             if (!p || (i == 0 && *p != c0)) all = false;
             else ctl.insert(ctl.end(), p->begin(), p->end());
         }
         if (!all) continue;
         try {
-            return std::tuple{read_control(parse_tlvs(ByteView(ctl).subspan(1))), n_ctl};
+            return std::tuple{read_control(parse_tlvs(ByteView(ctl).subspan(1))), f * n_ctl};
         } catch (const std::invalid_argument& e) {
             arq::log_write(LOG, 30, arq::format("RX malformed broadcast control (%s): dropped", e.what()));
             return std::nullopt;
@@ -487,12 +550,41 @@ std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_fram
     std::vector<Bytes> payloads;
     std::vector<bool> ok;
     for (int i = start; i < rx.n_cw(); ++i) {
-        auto p = rx.decode_plain(i, arq::data_mask(0, i, key));
+        auto p = rx.decode_plain(i, data_start_mask(i, start, key));
         ok.push_back(p.has_value());
         payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
     }
     auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : unpack_frames(payloads, ok);
     return {std::move(frames), std::move(ok), lost};
+}
+
+std::optional<std::pair<int, int>> KissLink::find_data(arq::PlainRx& rx, const std::set<int>& keys) {
+    std::vector<int> starts(std::begin(DATA_STARTS), std::end(DATA_STARTS));
+    if (rx.n_ctl_slots()) starts = {rx.n_ctl_slots()};
+    for (int j = 1; j < std::min(rx.n_cw(), PROBE_SLOTS + 1); ++j) {
+        for (int start : starts) {
+            if (start > j) continue;
+            for (int k : keys) {
+                if (!rx.decode_plain(j, data_start_mask(j, start, k))) continue;
+                // a slot alone only where one check per key was all it took before (CRC-16: 1 in 65536 passes)
+                bool ok = j == start && (start == 1 || start == rx.n_cw() - 1 || rx.n_ctl_slots());
+                for (int i = j + 1; i < rx.n_cw() && !ok; ++i) ok = rx.decode_plain(i, data_start_mask(i, start, k)).has_value();
+                if (ok) return std::pair{k, start};
+            }
+        }
+        // a codeword that decoded but is neither an open port's data nor the rest of its control (OFDM: control
+        // codeword 1-3 at RV 0, in slot i or under DUP slot 2i): another burst, so no slot further on is looked at
+        if (rx.converged(j, false)) {
+            bool rest_of_control = false;
+            if (!rx.n_ctl_slots())
+                for (int i : {j, j % 2 ? 0 : j / 2}) {
+                    if (i < 1 || i >= arq::MAX_CTL) continue;
+                    for (int k : keys) rest_of_control = rest_of_control || rx.decode_plain(j, arq::ctl_mask(0, i, k)).has_value();
+                }
+            if (!rest_of_control) return std::nullopt;
+        }
+    }
+    return std::nullopt;
 }
 
 // A heard burst's status suffix: its pilot SNR (snr_est, dB), as the monitor shows it.
@@ -516,8 +608,8 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
     };
     std::vector<std::pair<int, Bytes>> out;
     if (auto ctl = read_burst_control(rx, n)) {
-        auto& [c, n_ctl] = *ctl;
-        auto [frames, ok, lost] = read_burst_frames(rx, n_ctl, group_key(c.group));
+        auto& [c, start] = *ctl;
+        auto [frames, ok, lost] = read_burst_frames(rx, start, group_key(c.group));
         const auto mine = ports_where([&](const Port& p) { return p.group == c.group; });
         if (c.reports && std::any_of(mine.begin(), mine.end(), [&](int i) { return ports.at(i).shift; }))
             learn(*c.reports, frames, r, ok, now);
@@ -529,19 +621,17 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
         }
         return out;
     }
-    // control lost: slot 1 passing as data under an open port's key says the
-    // burst is that group's, with a one-codeword control (docs/broadcast.md §2)
-    if (n < 2) return std::nullopt;
+    // control lost: a data slot passing under an open port's key says the
+    // burst is that group's, and its mask where the data starts (docs/broadcast.md §2).
+    // OFDM: a slot 0 that decoded (alone or paired) but wasn't a broadcast
+    // control is another kind of burst (ARQ, CQ), not one whose control was lost
+    if (!rx.n_ctl_slots() && (rx.converged(0, false) || rx.converged(0, true))) return std::nullopt;
     std::set<int> keys;
     for (const auto& [i, p] : ports) keys.insert(p.key());
-    std::optional<int> key;
-    for (int k : keys)
-        if (rx.decode_plain(1, arq::data_mask(0, 1, k))) {
-            key = k;
-            break;
-        }
-    if (!key) return std::nullopt;
-    auto [frames, ok, lost] = read_burst_frames(rx, 1, *key);
+    const auto found = find_data(rx, keys);
+    if (!found) return std::nullopt;
+    const auto key = std::optional<int>(found->first);
+    auto [frames, ok, lost] = read_burst_frames(rx, found->second, *key);
     const auto mine = ports_where([&](const Port& p) { return p.key() == *key; });
     std::set<std::string> groups;
     for (int i : mine) groups.insert(ports.at(i).group);

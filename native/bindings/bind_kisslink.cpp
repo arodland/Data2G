@@ -27,6 +27,12 @@ void bind_kisslink(py::module_& m) {
         const auto [g, c] = kisslink::unpack_pair(bytes_view(b));
         return py::make_tuple(g, c);
     });
+    k.def("cobs", [](const py::bytes& f) { return pyb(kisslink::cobs(bytes_view(f))); });
+    k.def("uncobs", [](const py::bytes& b) -> py::object {
+        const auto f = kisslink::uncobs(bytes_view(b));
+        return f ? py::object(pyb(*f)) : py::none();
+    });
+    k.def("framed_len", &kisslink::framed_len);
     k.def("pack_frames", [](const py::list& frames, std::size_t pb) {
         std::vector<Bytes> f;
         for (const auto& x : frames) f.push_back(bytes_of(x));
@@ -46,6 +52,7 @@ void bind_kisslink(py::module_& m) {
         .def_readonly("group", &kisslink::Port::group)
         .def_readonly("mode", &kisslink::Port::mode)
         .def_property_readonly("auto", [](const kisslink::Port& p) { return p.shift; })
+        .def_readonly("dup", &kisslink::Port::dup)
         .def_property_readonly("from_call", [](const kisslink::Port& p) -> py::object {
             return p.from_call ? py::object(py::str(*p.from_call)) : py::none();
         })
@@ -122,7 +129,8 @@ void bind_kisslink(py::module_& m) {
         .def("command", [](KissLink& l, int cmd, const py::bytes& payload) { l.command(cmd, bytes_view(payload)); })
         .def("open", &KissLink::open, py::arg("group"), py::arg("from_call") = std::nullopt)
         .def("close", &KissLink::close)
-        .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false)
+        .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false,
+             py::arg("dup") = false)
         .def("reset", &KissLink::reset)
         .def("enqueue",
              [ack_objs](const py::object& self, const py::handle& f, int port, const py::object& ack) {

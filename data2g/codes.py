@@ -15,7 +15,7 @@ despread -> a decode -> descramble and check the CRC.
   scrambling    scramble_seed, scrambler, PLAIN, flip, descramble
   encode        encode, encode_info
   IR (HARQ)     rv_cycle, rv_positions, buffer_len, ir_extent, combine,
-                decode_buffer
+                decode_buffer, decode_buffer_raw (a buffer, mask open)
   decode        decode_many: a burst, masks known (modem);
                 decode_raw + check: decode once, try each CRC mask (ARQ);
                 decode_posterior: with the LDPC posterior (ARQ's DD);
@@ -484,6 +484,26 @@ def decode_raw(spec: CodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray
         usable = np.ones(cands.shape[:2], bool)
     idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
     return np.stack([descramble(spec, c, i) for c, i in zip(cands, idx)]), usable
+
+
+def decode_buffer_raw(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, known=None) -> tuple[np.ndarray, np.ndarray]:
+    """decode_raw of (B, L) combined buffers (decode_buffer's input, RVs up
+    to `max_rv` received): the CRC mask left open, candidates already plain
+    (the buffer is unscrambled). `known`: info bits known as in
+    decode_buffer_pinned. A broadcast control sent twice reads its group
+    from these (kisslink, docs/broadcast.md §2)."""
+    buf = np.asarray(buf)
+    if spec.code == "ldpc":
+        extent = ir_extent(spec, max_rv)
+        b = buf if known is None else pin_buffer(spec, buf, known)
+        out, ok = _ext_decoder(spec, extent).decode(np.asarray(b[:, :extent], np.float32), iters=LDPC_ITERS)
+        return _numpy(out)[:, None].astype(np.uint8), _numpy(ok)[:, None]
+    deint = np.asarray(buf[:, : spec.coded_bits], np.float32)
+    if known is None:
+        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)].astype(np.uint8)
+    else:
+        cands = _pinned_paths(spec, deint, known, PLAIN)
+    return cands, np.ones(cands.shape[:2], bool)
 
 
 def descramble(spec: CodeSpec, bits: np.ndarray, index: int) -> np.ndarray:

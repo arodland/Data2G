@@ -233,6 +233,26 @@ void bind_codec(py::module_& c) {
         std::copy(r.usable.data.begin(), r.usable.data.end(), usable.mutable_data());
         return py::make_tuple(cands, usable);
     });
+    c.def("decode_buffer_raw", [](const std::string& name, const In<double>& buf, int max_rv, py::object known) {
+        const auto& s = cspec(name);
+        std::vector<std::int8_t> k;
+        if (!known.is_none()) {
+            const auto a = known.cast<In<std::int64_t>>();
+            for (py::ssize_t i = 0; i < a.size(); ++i) k.push_back(static_cast<std::int8_t>(a.data()[i]));
+        }
+        const auto in = mat(buf);
+        codes::Raw r;
+        {
+            py::gil_scoped_release unlocked;
+            r = codes::decode_buffer_raw(s, in, max_rv, k);
+        }
+        const py::ssize_t B = static_cast<py::ssize_t>(r.cands.rows), L = r.list, K = s.k;
+        py::array_t<std::uint8_t> cands({B, L, K});
+        std::copy(r.cands.data.begin(), r.cands.data.end(), cands.mutable_data());
+        py::array_t<bool> usable({B, L});
+        std::copy(r.usable.data.begin(), r.usable.data.end(), usable.mutable_data());
+        return py::make_tuple(cands, usable);
+    }, py::arg("spec"), py::arg("buf"), py::arg("max_rv") = 0, py::arg("known") = py::none());
     c.def("decode_buffer_pinned", [](const std::string& name, const In<double>& buf, int max_rv,
                                      const In<std::int64_t>& known, std::int64_t mask) {
         const auto& s = cspec(name);

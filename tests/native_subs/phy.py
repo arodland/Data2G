@@ -15,7 +15,7 @@ def substitutions(native):
 
     P, K = native.phy, native.kisslink
     py_rx, py_tx, py_soft, py_measure = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure
-    watched = ("decode_raw", "decode_buffer", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
+    watched = ("decode_raw", "decode_buffer", "decode_buffer_raw", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
                "encode", "encode_info", "descramble")
 
     def own(spec):
@@ -48,6 +48,15 @@ def substitutions(native):
         def raw(self, slot):
             return self._n.raw(slot)
 
+        def raw_pair(self, slot):
+            return self._n.raw_pair(slot)
+
+        def decode_pair(self, slot, mask_id):
+            return self._n.decode_pair(slot, mask_id)
+
+        def converged(self, slot, pair=False):
+            return self._n.converged(slot, pair)
+
         def forget(self, key):
             return self._n.forget(key)
 
@@ -78,6 +87,9 @@ def substitutions(native):
         (PHY, "ModemRx"): ModemRx,
         (kisslink, "parse_ax25"): parse_ax25,
         (kisslink, "station_hash"): K.station_hash,
+        (kisslink, "cobs"): lambda frame: K.cobs(bytes(frame)),
+        (kisslink, "uncobs"): lambda b: K.uncobs(bytes(b)),
+        (kisslink, "framed_len"): K.framed_len,
         (kisslink, "pack_frames"): lambda frames, pb: K.pack_frames([bytes(f) for f in frames], int(pb)),
         (kisslink, "unpack_frames"): lambda payloads, ok: tuple(K.unpack_frames([bytes(p) for p in payloads],
                                                                                 [bool(o) for o in ok])),

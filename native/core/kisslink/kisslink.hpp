@@ -27,7 +27,8 @@ namespace data2g::kisslink {
 using arq::Bytes;
 using arq::ByteView;
 
-inline constexpr int VERSION = 2;
+inline constexpr int VERSION = 3;
+inline constexpr int DUP = 0x08;  // the control header's dup bit: each control codeword sent twice, RV 0 then RV 1
 inline constexpr int T_GROUP = 1, T_GROUP_FROM = 2, T_REPORTS = 3;  // control TLVs
 inline constexpr std::string_view PORT0_GROUP = "KISS 0";
 inline constexpr int N_PORTS = 16;  // KISS port numbers 0-15
@@ -61,10 +62,22 @@ struct ControlRead {
 };
 ControlRead read_control(const std::map<int, Bytes>& tlvs);
 
-// Data codewords: [length, 2 bytes big-endian][frame] back to back, zero-padded.
+// The most bytes an n-byte frame takes in a burst's data (COBS, then its ending zero).
+inline std::size_t framed_len(std::size_t n) { return n + 2 + n / 254; }
+Bytes cobs(ByteView frame);                   // Consistent Overhead Byte Stuffing: no zero byte left
+std::optional<Bytes> uncobs(ByteView b);      // nullopt: not one cobs() makes
+// A broadcast data codeword's identity: its slot, and the slot its burst's data starts at.
+inline arq::MaskId data_start_mask(int slot, int start, int key) { return arq::data_mask(0, slot, key, false, start); }
+// First data slots a burst may have: 1-4 control codewords, each sent once or twice (DUP).
+inline constexpr int DATA_STARTS[] = {1, 2, 3, 4, 6, 8};
+inline constexpr int PROBE_SLOTS = 8;  // control lost: data looked for in slots 1-8
+
+// Data codewords: each frame COBS-encoded and ended by a zero, back to back, zero-padded; a frame that would start
+// a codeword (the data's first included) gets a zero before it.
 std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb);
-// Payloads and their CRC results -> (whole frames, frames lost). Parsing
-// stops at a length it can not trust.
+// Payloads and their CRC results -> (whole frames, frames lost). A zero byte
+// in a good codeword always ends a frame, so parsing picks up again after a
+// failed codeword; lost counts each run of frames one touched as one.
 std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
 
 struct Peer {
@@ -78,6 +91,7 @@ struct Port {
     std::string mode;   // the transmit mode; with shifting on, the fallback
     bool shift = false;  // rate shifting (BCAST MODE n AUTO mode)
     std::optional<std::string> from_call;  // sent in T_GROUP_FROM
+    bool dup = false;  // each control codeword sent twice (BCAST MODE n DUP mode)
     int key() const { return group_key(group); }
 };
 
@@ -112,7 +126,7 @@ public:
     // Ports (the host's BCAST commands); each throws std::invalid_argument.
     int open(const std::string& group, const std::optional<std::string>& from_call = std::nullopt);
     void close(int n);  // frames queued for it are dropped (DROPPED)
-    void set_mode(int n, const std::string& mode, bool shift = false);
+    void set_mode(int n, const std::string& mode, bool shift = false, bool dup = false);
     // Ports as a new link has them: 1-15 closed (DROPPED, in port order), port 0 in the broadcast mode.
     void reset();
 
@@ -137,8 +151,17 @@ public:
                                                                std::optional<double> dd_budget = arq::DD_BUDGET_S);
 
     // A burst's broadcast control, checked under the key of the group it
-    // names -> (control, n_ctl); nullopt: not a broadcast burst.
+    // names -> (control, the first data slot); nullopt: not a broadcast burst.
+    // Codeword 0 is read alone, then with its RV 1 copy (DUP) when alone it
+    // didn't decode (OFDM: no candidate converged; CPM: two control slots).
     static std::optional<std::tuple<ControlRead, int>> read_burst_control(arq::PlainRx& rx, int n_cw);
+    // Control lost: the first of slots 1-8 passing as data under one of
+    // `keys`, its mask naming where the data starts -> (key, first data slot).
+    // A slot alone counts only as slot 1 starting the data, a burst's only
+    // data slot, or at the start CPM's header gives; elsewhere a later slot
+    // must pass under the same key and start too. Stops at a slot that decoded
+    // to a codeword that is neither an open port's data nor the rest of its control.
+    static std::optional<std::pair<int, int>> find_data(arq::PlainRx& rx, const std::set<int>& keys);
     // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
     static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::PlainRx& rx, int start, int key);
 

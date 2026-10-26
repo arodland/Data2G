@@ -80,13 +80,20 @@ int main() {
         const std::string junk = "not an ax.25 frame at all";
         check::is_true(!kisslink::parse_ax25(Bytes(junk.begin(), junk.end())), "not AX.25");
     }
-    {  // broadcast data: frames packed across codewords, a lost codeword loses what it touches
+    {  // broadcast data: frames COBS-framed across codewords, a lost codeword loses only what it touches
         const std::vector<Bytes> frames = {Bytes(10, 7), Bytes(60, 9), Bytes(1, 1)};
         const auto pl = kisslink::pack_frames(frames, 46);  // qpsk-r1/5's payload
         check::equal(static_cast<int>(pl.size()), 2, "pack_frames: codewords");
         check::is_true(kisslink::unpack_frames(pl, {true, true}) == std::pair{frames, 0}, "unpack_frames all good");
-        check::is_true(kisslink::unpack_frames(pl, {true, false}) == std::pair{std::vector<Bytes>{frames[0]}, 2},
+        check::is_true(kisslink::unpack_frames(pl, {true, false}) == std::pair{std::vector<Bytes>{frames[0]}, 1},
                        "unpack_frames lost");
+        check::is_true(kisslink::unpack_frames(pl, {false, true}) == std::pair{std::vector<Bytes>{frames[2]}, 1},
+                       "unpack_frames picks up after a lost codeword");
+        const Bytes run(254, 5), z(300, 0);
+        check::equal(static_cast<int>(kisslink::cobs(run).size()) + 1, static_cast<int>(kisslink::framed_len(254)),
+                     "cobs: framed_len's bound met");
+        check::is_true(kisslink::uncobs(kisslink::cobs(run)) == run && kisslink::uncobs(kisslink::cobs(z)) == z,
+                       "uncobs undoes cobs");
     }
 
     const std::string name = "w48-qpsk-r1/2";
