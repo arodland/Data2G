@@ -56,6 +56,9 @@ std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0);
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
+inline constexpr int CHAT_RESEND_ROUNDS = 8;
+// expected seconds of resend rounds after one CHAT ON burst of k data codewords (policy.py)
+double chat_resend_s(const Mode& m, int k, int c, double pn, double turn_s);
 
 // What the shifter reads from its link.Station (policy.py StationView, which
 // also carries the timeouts its Python-only link history reads).

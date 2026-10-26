@@ -187,6 +187,21 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
+CHAT_RESEND_ROUNDS = 8  # chat_resend_s: rounds summed (at pn 0.6, 8 codewords: P(still missing) 5e-3)
+
+
+def chat_resend_s(spec, k: int, c: int, pn: float, turn_s: float) -> float:
+    """Expected seconds of resend rounds after one burst of k data codewords
+    (c control), each decoding independently at pn: round r runs if any
+    codeword is still missing after the burst and r - 1 rounds (P 1 -
+    (1 - q^r)^k, q = 1 - pn),
+    a burst of the k q^r expected missing (at least one) plus turn_s."""
+    q, s = 1 - pn, 0.0
+    for r in range(1, CHAT_RESEND_ROUNDS + 1):
+        s += (1 - (1 - q ** r) ** k) * (burst_seconds(spec, max(1, int(np.ceil(k * q ** r))) + c) + turn_s)
+    return s
+
+
 class StationView(NamedTuple):
     """What the shifter reads of its link.Station (native: arq::StationView).
     KISS, with no station, passes one of its own."""
@@ -589,17 +604,24 @@ class GearShifter(L.Policy):
                 tries = max(0, int((LINK_LOST_S - tb - TIMEOUT_S) // T_RECOVER_S))
                 t += (1 - ok_ctl) * (1 - reply_p ** 2) ** tries * LOST_LINK_COST_S
                 if chat:
-                    # every burst the message takes: one is retried until all
-                    # of it arrives; past one, each codeword is resent (IR)
-                    # until it does, so what a burst delivers is what counts
-                    # (a client with CHAT ON sending a file: every codeword of
-                    # an 18-codeword burst held 64-ary modes out at 20 dB,
-                    # recordings/20261021-165549)
+                    # every burst the message takes: each codeword is resent
+                    # (IR) until it arrives, so past one burst what a burst
+                    # delivers is what counts (a client with CHAT ON sending a
+                    # file: every codeword of an 18-codeword burst held 64-ary
+                    # modes out at 20 dB, recordings/20261021-165549). In one
+                    # burst: it, then while any codeword is missing a round
+                    # resending those still missing (chat_resend_s). Pricing
+                    # that burst as retried whole held FM at 25 dB to
+                    # w48-16qam-r1/2 on 2-8 kB queues (recordings/20261026-152554)
                     bursts = -(-k // max(n - c, 1))
-                    ok = max(ok_ctl * (pn ** (n - c) if bursts == 1 else pn), 1e-3)
+                    if bursts == 1:
+                        cost = (t + chat_resend_s(s, n - c, c, pn, 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S)) \
+                            / max(ok_ctl, 1e-3)
+                    else:
+                        cost = t * bursts / max(ok_ctl * pn, 1e-3)
                     # ties (a line fits alike in several rates) go to the one
                     # carrying more, for whatever follows it
-                    v = -t * bursts / ok + 1e-6 * (n - c) * pb
+                    v = -cost + 1e-6 * (n - c) * pb
                 else:
                     v = (ok_ctl * pn * (n - c) * pb - (held if s.name != cur else 0)) / t
                 if v > best_v:

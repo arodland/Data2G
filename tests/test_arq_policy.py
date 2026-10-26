@@ -83,6 +83,20 @@ def test_chat_bulk_queue_goes_for_goodput():
     assert rate(picks[60000]) > rate(MODES["w48-16qam-r5/6"])
 
 
+def test_chat_one_burst_message_resends_what_it_lost():
+    """CHAT ON with a message one burst carries: a codeword it loses is
+    resent, not the burst. Priced as retried whole, 8 kB over FM at 25 dB
+    (recordings/20261026-152554) held w48-16qam-r1/2."""
+    m = dict(snr_est=25.8, spread_est=0.14, delay_est_ms=0.0, headroom=1.0, frames=76.0,
+             **{f"mi_{c}": v for c, v in zip(P.CONSTS, (1.0, 1.0, 0.967, 0.807))})
+    g = G.GearShifter()
+    g.observe(m, "w48-16qam-r1/2", 0.0)
+    g.observe_energy(m["snr_est"] - 3, 0.0)
+    rec, _, _ = g.recommend(G.StationView(cap=2, chat=True, peer_queued=8000))
+    rate = lambda s: s.k / s.frames_per_cw  # noqa: E731
+    assert rate(MODES[G.decode(rec)]) > rate(MODES["w48-16qam-r2/3"])
+
+
 def test_shifter_respects_cap_and_falls_back():
     g = G.GearShifter()
     st = station(0)

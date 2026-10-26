@@ -65,6 +65,17 @@ int slots_for(const Mode& m, double seconds, bool data, bool dup) {
     return n;
 }
 
+double chat_resend_s(const Mode& m, int k, int c, double pn, double turn_s) {
+    const double q = 1 - pn;
+    double s = 0.0;
+    for (int r = 1; r <= CHAT_RESEND_ROUNDS; ++r) {
+        const double qr = std::pow(q, r);
+        const int miss = std::max(1, static_cast<int>(std::ceil(k * qr)));
+        s += (1 - std::pow(1 - qr, k)) * (burst_seconds(m, miss + c) + turn_s);
+    }
+    return s;
+}
+
 std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int escalation) const {
     const auto rec = st.pending ? st.peer_recommend : st.peer_reply_recommend;
     const auto ok = allowed(st.cap);
@@ -340,11 +351,14 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             t += (1 - ok_ctl) * std::pow(1 - reply_p * reply_p, tries) * LOST_LINK_COST_S;
             double v;
             if (chat) {
-                // one burst: retried until all of it arrives; past one, each
-                // codeword is resent until it does (policy.py)
+                // each codeword is resent until it arrives: past one burst, what
+                // a burst delivers counts; in one, it and the resend rounds (policy.py)
                 const int bursts = cdiv(k, std::max(n - c, 1));
-                const double ok = std::max(ok_ctl * (bursts == 1 ? std::pow(pn, static_cast<double>(n - c)) : pn), 1e-3);
-                v = -t * bursts / ok + 1e-6 * (n - c) * pb;
+                const double cost = bursts == 1
+                    ? (t + chat_resend_s(*s, n - c, c, pn, 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S)) /
+                          std::max(ok_ctl, 1e-3)
+                    : t * bursts / std::max(ok_ctl * pn, 1e-3);
+                v = -cost + 1e-6 * (n - c) * pb;
             } else {
                 v = (ok_ctl * pn * (n - c) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
