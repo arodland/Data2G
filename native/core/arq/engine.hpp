@@ -273,6 +273,7 @@ protected:
     }
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
+    virtual bool receiver_on_air() { return receiver_.on_air(); }
     virtual void receiver_reset() { receiver_.reset(); }
     virtual std::vector<double> tx_audio(const TxBurst& b) { return arq::tx_audio(b); }
     virtual void hear_burst(receiver::BurstEvent& ev, double t);
@@ -282,6 +283,7 @@ private:
         std::vector<double> x;
         std::vector<receiver::Receiver::Item> items;
         bool busy = false;
+        bool on_air = false;  // energy without a lock (KISS channel access only)
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
     };
@@ -295,7 +297,7 @@ private:
     Done process(Block& b);  // the session stage
     Done process_safe(Block& b);  // process(); a throw drops the session and plays silence
     void hear(std::vector<receiver::Receiver::Item>& items, double t);
-    TxBurstPtr kiss_burst(std::int64_t k, bool busy);
+    TxBurstPtr kiss_burst(std::int64_t k, bool busy, bool on_air);
     bool cq(ModemRx& rx);
     TxBurstPtr id_frame(const Session& s) const;
     void id_check(double t);

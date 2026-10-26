@@ -27,6 +27,7 @@ import numpy as np
 
 from .. import codes, cpm, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
+from ..kisslink import ENERGY_LIMIT_S
 from ..receiver import NoiseProfile, Receiver
 from ..waveform import dsp
 from . import burst as B
@@ -482,16 +483,19 @@ class Engine:
         is p-persistent after it: each slot (SLOTTIME) is taken with
         probability (P + 1) / 256, so stations that queued under the same
         burst don't all key up as it ends. One queued on a free channel (a
-        reply) goes at once. BUSY holds a burst, but not past busy_limit_s
-        of it unbroken (a stuck BUSY). `k`: this block's samples."""
+        reply) goes at once. A lock holds a burst, but not past busy_limit_s
+        of it unbroken (a stuck BUSY); energy alone (on_air) holds it up to
+        ENERGY_LIMIT_S. `k`: this block's samples."""
         link = self.kiss
         if not link.queue:
             self._kiss_busy, self._kiss_deferred = 0, False
             return None
-        if self.receiver.busy:
+        locked = self.receiver.busy
+        if locked or self.receiver.on_air:
             self._kiss_busy += k
             self._kiss_deferred = True
-            if self._kiss_busy < link.busy_limit_s * FS:
+            limit = link.busy_limit_s if locked else min(link.busy_limit_s, ENERGY_LIMIT_S)
+            if self._kiss_busy < limit * FS:
                 return None
             log.warning("KISS: BUSY for %.0f s, sending anyway", self._kiss_busy / FS)
         else:
