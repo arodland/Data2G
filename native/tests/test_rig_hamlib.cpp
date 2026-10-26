@@ -133,6 +133,8 @@ void test_serial_model_without_a_device() {
         error = e.what();
     }
     check::is_true(!error.empty(), "serial model, no device: open reports (" + error + ")");
+    // rigerror() hands back a trace backlog; only the error line belongs here.
+    check::is_true(error.find('\n') == std::string::npos, "open error is one line: " + error);
     check::is_true(rig->description().find("IC-7300") != std::string::npos, "description names the model: " + rig->description());
 }
 

@@ -38,9 +38,17 @@ void load_backends_once() {
     });
 }
 
+// rigerror() returns Hamlib's saved debug lines with the error string last;
+// the first line is whatever was traced earlier ("not starting multicast
+// publisher"), so keep only the last one.
 std::string hamlib_error(const char* what, int code) {
-    const char* text = rigerror(code);
-    return std::string(what) + ": " + (text != nullptr ? text : "unknown error") + " (" + std::to_string(code) + ")";
+    const char* raw = rigerror(code);
+    std::string text = raw != nullptr ? raw : "";
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+    const std::size_t nl = text.rfind('\n');
+    if (nl != std::string::npos) text.erase(0, nl + 1);
+    if (text.empty()) text = "unknown error";
+    return std::string(what) + ": " + text + " (" + std::to_string(code) + ")";
 }
 
 // --- the trace sink: Hamlib hands us fmt + va_list; a line may span calls --
@@ -234,8 +242,11 @@ private:
     void apply_ptt_settings() {
         switch (config_.ptt_method) {
             case PttMethod::Vox: set_conf("ptt_type", "None"); break;
-            // "RIG" would downgrade a MICDATA rig to plain mic keying.
-            case PttMethod::Cat: set_conf("ptt_type", config_.ptt_audio == PttAudio::Data ? "RIGMICDATA" : "RIG"); break;
+            // Always RIGMICDATA: "RIG" would downgrade ON_DATA to plain mic
+            // keying, and set_ptt already picks ON vs ON_DATA. Under netrigctl
+            // "RIG" also lets rigctld's own ptt_type (e.g. GPIO) replace ours,
+            // so the client drives a port it never opened instead of sending T.
+            case PttMethod::Cat: set_conf("ptt_type", "RIGMICDATA"); break;
             case PttMethod::Dtr: set_conf("ptt_type", "DTR"); break;
             case PttMethod::Rts: set_conf("ptt_type", "RTS"); break;
         }
