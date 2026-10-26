@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <set>
@@ -198,7 +200,7 @@ void Host::command(std::string_view line, std::string_view peer) {
         session_over();
         e.abort();
         up_ = false;
-        out_cmd.emplace_back("DISCONNECTED");
+        out_cmd.emplace_back(data2g ? "DISCONNECTED ABORT" : "DISCONNECTED");
         if (listening) e.listen();
     } else if (cmd == "CQFRAME" && args.size() == 2 && bw_cap("BW" + args[1])) {
         try {
@@ -214,6 +216,24 @@ void Host::command(std::string_view line, std::string_view peer) {
         e.set_chat(a0 == "ON");
     } else if (cmd == "DATA2G" && (a0 == "ON" || a0 == "OFF")) {
         data2g = a0 == "ON";
+    } else if (cmd == "TXPOWER" && data2g && args.empty()) {
+        out_cmd.push_back(arq::format("TXPOWER %.1f", output_volume));
+        return;
+    } else if (cmd == "TXPOWER" && data2g && args.size() == 1) {
+        double v = NAN;
+        const auto& s = args[0];
+        if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
+        ok = v >= VOLUME_MIN_DB && v <= VOLUME_MAX_DB;
+        if (ok) output_volume = v;
+    } else if (cmd == "TIMEOUT" && data2g && args.empty()) {
+        out_cmd.push_back(arq::format("TIMEOUT %.1f", e.idle_close_s()));
+        return;
+    } else if (cmd == "TIMEOUT" && data2g && args.size() == 1) {
+        double v = NAN;
+        const auto& s = args[0];
+        if (std::from_chars(s.data(), s.data() + s.size(), v).ptr != s.data() + s.size()) v = NAN;
+        ok = v > 0 && std::isfinite(v);
+        if (ok) e.set_idle_close(v);
     } else if (cmd == "CLEANTXBUFFER" &&
                (args.empty() || (data2g && args.size() == 1 && args[0].size() <= 18 &&
                                  std::all_of(args[0].begin(), args[0].end(), [](char c) { return c >= '0' && c <= '9'; })))) {
@@ -268,6 +288,7 @@ void Host::client_gone() {
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
     listening = data2g = false;
+    e.set_idle_close(std::nullopt);
     accept_addr.reset();
     const auto now = e.session().state;
     if (now == SessionState::LISTEN || now == SessionState::CLOSED) e.listen(false);
@@ -285,7 +306,7 @@ bool Host::abort_session() {
     session_over();
     e.abort();
     up_ = false;
-    out_cmd.emplace_back("DISCONNECTED");
+    out_cmd.emplace_back(data2g ? "DISCONNECTED ABORT" : "DISCONNECTED");
     if (listening) e.listen();
     return true;
 }
@@ -338,7 +359,7 @@ void Host::after_step(bool ptt) {
             arq::log_write(LOG, INFO, ev);
             session_over();
             up_ = false;
-            out_cmd.emplace_back("DISCONNECTED");
+            out_cmd.push_back(data2g ? ev : "DISCONNECTED");
         }
     }
     if (e.session().state == SessionState::CLOSED && listening) e.listen();

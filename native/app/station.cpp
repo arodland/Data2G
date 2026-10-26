@@ -144,7 +144,7 @@ Station::~Station() { stop(); }
 void Station::flush(std::uint64_t asker) {
     Outbox o;
     for (auto& line : host_->out_cmd) {
-        const auto to = line == "DISCONNECTED" ? 0 : asker;
+        const auto to = line.starts_with("DISCONNECTED") ? 0 : asker;
         o.cmd.emplace_back(std::move(line), to);
     }
     host_->out_cmd.clear();
@@ -415,6 +415,7 @@ void Station::start() {
         codes::set_ldpc_iters(a_.decoder_effort);  // process-wide: every decoder this station runs
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
+        host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig
         host_->dial = [this](const host::Addr& addr) {
             const unsigned gen = ++dial_gen_;
@@ -484,6 +485,7 @@ void Station::start() {
                     post([this, text, client, peer = cmd_->peer(client)] {
                         flush();  // what was already pending goes first, to everyone
                         host_->command(text, peer);
+                        if (tx_) tx_->set_gain(std::pow(10.0, host_->output_volume / 20));  // TXPOWER
                         flush(client);  // the reply goes to the client that asked
                     });
                 },

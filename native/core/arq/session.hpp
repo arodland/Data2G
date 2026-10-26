@@ -119,6 +119,7 @@ public:
     double quiet_from = 0, wake_wait = 0;
     int wakes = 0;
     bool want_disc = false, sent_disc_ack = false;
+    std::string disc_why = "CLIENT";  // who wanted the DISC: CLIENT or IDLE
     Bytes pending_write;
     double now_ = 0, stats_since = 0, connected_at = 0;
     std::map<std::string, std::int64_t> stats_prev;

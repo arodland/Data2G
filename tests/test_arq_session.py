@@ -165,7 +165,7 @@ def test_redial_replaces_a_dead_callee_session():
     assert a2._nonce != a1._nonce
     b.on_rx(heard(a2.poll(40.0)), 41.0)
     ack = b.poll(41.0)
-    assert ack is not None and b.events[-2:] == ["DISCONNECTED peer reconnected", "CONNECTED W1AW"]
+    assert ack is not None and b.events[-2:] == ["DISCONNECTED PEER_RECONNECTED", "CONNECTED W1AW"]
     a2.on_rx(heard(ack), 42.0)
     assert a2.state == S.CONNECTED and a2.station.key == b.station.key
 
@@ -174,7 +174,7 @@ def test_redial_replaces_a_dead_callee_session():
 def test_dead_link_closes_both_within_bound(seed):
     r = run(50 + seed, n_a=50000, die_at=20.0)
     assert r["a"].state == S.CLOSED and r["b"].state == S.CLOSED
-    assert "link" in r["a"].close_reason and "link" in r["b"].close_reason
+    assert "LINK" in r["a"].close_reason and "LINK" in r["b"].close_reason
     assert r["t"] <= 20.0 + S.LINK_LOST_S + 5
     assert r["collisions"] == 0
 
@@ -223,7 +223,7 @@ def test_disconnect_breaks_idle(by):
     for at in range(100, 160, 4):
         r = run(3, n_a=200, n_b=40, disc_at=at, disc_by=by)
         assert r["a"].state == S.CLOSED and r["b"].state == S.CLOSED and r["collisions"] == 0
-        assert r["a"].close_reason.startswith("disconnected") and r["b"].close_reason.startswith("disconnected")
+        assert r["a"].close_reason.startswith(("CLIENT", "PEER")) and r["b"].close_reason.startswith(("CLIENT", "PEER"))
         assert r["t"] - at < 8, at
 
 

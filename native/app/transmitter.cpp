@@ -59,7 +59,6 @@ void Transmitter::run() {
 #endif
     audio::thread_init("tx");
     const std::size_t block = config::FS / 10;
-    const double gain = gain_;
     const std::size_t ahead = static_cast<std::size_t>(rate_) / 2;
     for (;;) {
         Job job;
@@ -83,6 +82,7 @@ void Transmitter::run() {
                 while (play_.queued() > ahead && !stopped()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 if (stopped()) break;
                 auto y = interp(std::span<const double>(a).subspan(pos, std::min(block, a.size() - pos)));
+                const double gain = gain_;
                 for (auto& v : y) v = std::clamp(v * gain, -1.0, 1.0);
                 play_.write(y);
             }

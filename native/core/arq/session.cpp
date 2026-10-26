@@ -45,7 +45,7 @@ const char* state_name(SessionState s) {
 }
 
 const char* nak_name(int reason) {
-    static const char* names[] = {nullptr, "version", "not listening", "busy", "refused by host"};
+    static const char* names[] = {nullptr, "VERSION", "NOT_LISTENING", "BUSY", "REFUSED"};
     return reason >= NAK_VERSION && reason <= NAK_REFUSED ? names[reason] : nullptr;
 }
 
@@ -131,10 +131,13 @@ TxBurstPtr Session::poll(double now) {
     if (state == SessionState::CLOSED && !out) return nullptr;
     if (live(state)) {
         if (now >= last_heard + tune.link_lost_s) {
-            close(state == SessionState::CONNECTED ? "link lost" : "disconnected (unconfirmed)");
+            close(state == SessionState::CONNECTED ? "LINK_LOST" : disc_why + " unconfirmed");
             return nullptr;
         }
-        if (state == SessionState::CONNECTED && now >= last_data + tune.idle_close_s) want_disc = true;
+        if (state == SessionState::CONNECTED && now >= last_data + tune.idle_close_s && !want_disc) {
+            want_disc = true;
+            disc_why = "IDLE";
+        }
     }
     if (deadline && now >= *deadline) {
         deadline.reset();
@@ -226,7 +229,7 @@ void Session::on_rx(RxBurst& rx, double now) {
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
     heard(now);
     if (st->state == LinkState::FAILED) {
-        close("link failed: " + st->fail_reason);
+        close("LINK_FAILED " + st->fail_reason);
         return;
     }
     st->settle_limbo();
@@ -301,6 +304,7 @@ void Session::disconnect() {
     // Nothing to close: a flag left set here would end the next session at its first burst.
     if (state == SessionState::IDLE || state == SessionState::LISTEN || state == SessionState::CLOSED) return;
     want_disc = true;
+    disc_why = "CLIENT";
     if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
 }
 
@@ -386,7 +390,7 @@ void Session::on_timeout(double now) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, tune.connect_tries));
         if (tries >= tune.connect_tries) {
-            close("no answer");
+            close("NO_ANSWER");
         } else {
             auto b = connect_burst();
             queue(std::move(b), now + rng->uniform(3.0, 5.0));
@@ -395,7 +399,7 @@ void Session::on_timeout(double now) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to DISC, try %d of %d", tries, tune.disc_tries));
         if (tries >= tune.disc_tries)
-            close("disconnected (unconfirmed)");
+            close(disc_why + " unconfirmed");
         else
             queue(disc_burst(), now);
     } else if (state == SessionState::CONNECTED) {
@@ -404,7 +408,7 @@ void Session::on_timeout(double now) {
         const bool short_ = !last || policy->airtime(last->submode, static_cast<int>(last->slots.size()), dup_ctl(*last)) <= tune.repeat_max_s;
         auto b = station->on_timeout(short_);
         if (!b)
-            close("link failed: " + station->fail_reason);
+            close("LINK_FAILED " + station->fail_reason);
         else
             queue(std::move(b), now);
     }
@@ -529,7 +533,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         }
         if (station && !master() && caller == peer && live(state)) {
             // my caller dialed again: it gave up on our session, so take the new one (session.py)
-            close("peer reconnected", nullptr, now);
+            close("PEER_RECONNECTED", nullptr, now);
             state = SessionState::LISTEN;
             want_disc = sent_disc_ack = false;
             tries = 0;
@@ -562,15 +566,15 @@ void Session::on_session_frame(const Frame& f, double now) {
     } else if (sub == CONNECT_NAK && state == SessionState::CONNECTING && f.key == 0) {
         if (const ConnectNak k = ConnectNak::unpack(body); k.nonce == nonce) {
             const char* why = nak_name(k.reason);
-            close(std::string("refused: ") + (why ? why : "reason " + std::to_string(k.reason)));
+            close(why ? why : "REFUSED reason " + std::to_string(k.reason));
         }
     } else if (sub == DISC && station && f.key == station->key) {
         // also when already closed: our DISC_ACK may have been lost
         heard(now);
         auto final_burst = session_burst(station->direction, f.key, Bytes{DISC_ACK}, f.mode);
-        close("disconnected by peer", std::move(final_burst), now);
+        close("PEER", std::move(final_burst), now);
     } else if (sub == DISC_ACK && state == SessionState::DISCONNECTING && f.key == station->key) {
-        close("disconnected");
+        close(disc_why);
     }
 }
 

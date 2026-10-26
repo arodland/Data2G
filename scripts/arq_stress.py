@@ -88,14 +88,14 @@ def one_session(args):
         signal.alarm(0)
     a, b = r["a"], r["b"]
     delivered = r["got_b"] == r["data_a"] and r["got_a"] == r["data_b"]
-    if a.close_reason == "no answer" and b.state in ("listen", "closed"):
+    if a.close_reason == "NO_ANSWER" and b.state in ("listen", "closed"):
         out = "closed: no answer"  # the callee never heard a CONNECT, or timed its session out
     elif a.state != "closed" or b.state != "closed":
         out = "stuck"
     elif delivered:
         out = "done"
     else:
-        out = "closed: " + a.close_reason.split(":")[0]
+        out = "closed: " + a.close_reason.split()[0]
     return (pb, pc, out, a.close_reason, r["mismatch"], r["collisions"])
 
 

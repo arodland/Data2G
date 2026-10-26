@@ -52,6 +52,8 @@ public:
     // From keying until our audio has drained (not the PTT off): the receive side mutes.
     bool active() const { return active_; }
     bool ptt() const { return ptt_; }
+    // Linear, as the constructor's; from the next block on.
+    void set_gain(double gain) { gain_ = gain; }
 
 private:
     void run();
@@ -63,7 +65,7 @@ private:
 
     audio::PlaybackFifo& play_;
     const int rate_;
-    const double gain_;
+    std::atomic<double> gain_;
     std::function<void(bool)> on_ptt_;
     rig::Keyer keyer_;
     std::mutex mu_;

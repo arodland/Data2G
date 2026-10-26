@@ -245,6 +245,10 @@ public:
     void abort();
     void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
     void set_chat(bool on);
+    // engine.py's: a connected session with no data this long disconnects; this session and the next.
+    // nullopt: the session's own tuning (IDLE_CLOSE_S).
+    void set_idle_close(std::optional<double> s);
+    double idle_close_s() const { return session_->tune.idle_close_s; }
     // Host notifications since the last call, as engine.py's events() words them: "CONNECTED peer",
     // "DISCONNECTED why", "CQFRAME call cap", "ID call key".
     std::vector<std::string> events();
@@ -323,6 +327,7 @@ private:
     std::shared_ptr<Session> session_;
     SoftStore store_;
     bool chat_ = false;
+    std::optional<double> idle_close_;  // set_idle_close
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
     std::vector<std::string> events_;  // host notifications from outside the session
     std::vector<std::pair<int, Bytes>> kiss_rx_;

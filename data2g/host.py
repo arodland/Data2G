@@ -25,11 +25,15 @@ snr: the pilot SNR, dB, of the session peer's last burst decoded; WRONG
 before one), CLEANTXBUFFER (Host._clean), DATA2G ON|OFF (a client that
 knows Data2G: BUFFER is the plain VARA count, CLEANTXBUFFER reports host
 byte offsets, data written before CONNECTED is dropped; off again when the
+client goes), TXPOWER [dB] (DATA2G ON: -> TXPOWER db, the output volume;
+with dB, -60 to 20, sets it -> OK), TIMEOUT [s] (DATA2G ON: -> TIMEOUT s, the
+link idle timeout; with s > 0 sets it -> OK; back to the default when the
 client goes); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
-REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED,
+REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED
+(DATA2G ON: DISCONNECTED reason [detail], docs/arq.md §9),
 PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
 BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has sent a
@@ -72,6 +76,7 @@ BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = modes.BW_NAME
 KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
+VOLUME_DB = (-60.0, 20.0)  # TXPOWER's range: the native GUI's output volume setting
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
@@ -113,6 +118,7 @@ class Host:
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self.data2g = False  # DATA2G ON
+        self.output_volume = 0.0  # dB, TXPOWER: serve() applies it
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
@@ -158,7 +164,7 @@ class Host:
             self._session_over()
             e.abort()
             self._up = False
-            self.out_cmd.append("DISCONNECTED")
+            self.out_cmd.append("DISCONNECTED ABORT" if self.data2g else "DISCONNECTED")
             if self.listening:
                 e.listen()
         elif cmd == "CQFRAME" and len(args) == 2 and "BW" + args[1] in BW:
@@ -172,6 +178,28 @@ class Host:
             e.set_chat(args[0].upper() == "ON")
         elif cmd == "DATA2G" and args and args[0].upper() in ("ON", "OFF"):
             self.data2g = args[0].upper() == "ON"
+        elif cmd == "TXPOWER" and self.data2g and not args:
+            self.out_cmd.append(f"TXPOWER {self.output_volume:.1f}")
+            return
+        elif cmd == "TXPOWER" and self.data2g and len(args) == 1:
+            try:
+                v = float(args[0])
+            except ValueError:
+                v = float("nan")
+            ok = VOLUME_DB[0] <= v <= VOLUME_DB[1]
+            if ok:
+                self.output_volume = v
+        elif cmd == "TIMEOUT" and self.data2g and not args:
+            self.out_cmd.append(f"TIMEOUT {e.idle_close_s:.1f}")
+            return
+        elif cmd == "TIMEOUT" and self.data2g and len(args) == 1:
+            try:
+                v = float(args[0])
+            except ValueError:
+                v = float("nan")
+            ok = 0 < v < float("inf")
+            if ok:
+                e.set_idle_close(v)
         elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit()
                                                       and len(args[0]) <= 18)):
             self.out_cmd.append(self._clean(int(args[0]) if args else None))
@@ -252,6 +280,7 @@ class Host:
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr, self.data2g = False, None, False
+        e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
@@ -299,7 +328,7 @@ class Host:
                 log.info("%s", ev)
                 self._session_over()
                 self._up = False
-                self.out_cmd.append("DISCONNECTED")
+                self.out_cmd.append(ev if self.data2g else "DISCONNECTED")
         if e.session.state == S.CLOSED and self.listening:
             e.listen()
         self.out_data += e.session.read()
@@ -494,7 +523,7 @@ def _send_cmd(port, host, asker=None):
     """Send the lines the host has queued. Those a command from client `asker` produced are its reply and go to it
     alone, except DISCONNECTED (ABORT's), which is news for every client; with no asker everything is for all."""
     for line in host.out_cmd:
-        port.send(line.encode() + b"\r", None if line == "DISCONNECTED" else asker)
+        port.send(line.encode() + b"\r", None if line.startswith("DISCONNECTED") else asker)
     host.out_cmd.clear()
 
 
@@ -522,7 +551,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     nin, nout = audio.channels(pa, a.input_device, "input"), audio.channels(pa, a.output_device, "output")
     inp = audio.Capture(pa, nin, a.sample_rate, a.input_device)
     out = audio.Player(pa, nout, a.sample_rate, a.output_device, a.tx_lead_ms / 1000)
-    gain = 10 ** (a.output_volume / 20)
+    host.output_volume = a.output_volume
     stop = stop or threading.Event()
     if threading.current_thread() is threading.main_thread():
         # SIGHUP: a closed terminal; the finally below must still unkey
@@ -573,7 +602,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                 out.start()
                 keyed = True
             if keyed:
-                out.write(np.clip(interp(y) * gain, -1, 1))
+                out.write(np.clip(interp(y) * 10 ** (host.output_volume / 20), -1, 1))
             if keyed and not ptt:
                 out.drain()
                 time.sleep(a.ptt_off_delay_ms / 1000)

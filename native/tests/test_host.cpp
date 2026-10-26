@@ -145,7 +145,7 @@ void accept() {
     p.a.command("CONNECT W1AW K2XYZ");
     p.take();
     check::is_true(p.run(60, [&] { return has(p.seen_a, "DISCONNECTED"); }), "no connection: refused");
-    check::equal(p.ea.session().close_reason, std::string("refused: refused by host"), "the NAK's reason");
+    check::equal(p.ea.session().close_reason, std::string("REFUSED"), "the NAK's reason");
     check::is_true(dialed == std::vector<int>{8400} && !has(p.seen_b, "CONNECTED W1AW K2XYZ 2300"), "dialed once, never connected");
     up = true;
     p.a.command("CONNECT W1AW K2XYZ");
