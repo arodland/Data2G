@@ -599,6 +599,7 @@ class _Busy:
         return self.t < self.until
 
     channel_busy = busy
+    on_air = False
 
     def feed(self, x):
         self.t += len(x) / FS
@@ -622,6 +623,18 @@ def test_kiss_waits_out_busy_but_not_a_stuck_one():
     e.receiver = _Busy(until=1e9)
     e.kiss.enqueue(b"frame")
     assert 5.0 <= _first_tx(e, 8) <= 5.2
+
+
+def test_kiss_waits_out_energy_but_not_past_its_limit():
+    """Energy without a lock (a burst we can't read, QRM) holds a KISS
+    burst ENERGY_LIMIT_S at most, under a longer busy_limit_s."""
+    from data2g.kisslink import ENERGY_LIMIT_S, KissLink
+
+    e = Engine("W1AW", seed=1, kiss=KissLink(busy_limit_s=60.0))
+    e.receiver = _Busy(until=0.0)
+    e.receiver.on_air = True
+    e.kiss.enqueue(b"frame")
+    assert ENERGY_LIMIT_S <= _first_tx(e, ENERGY_LIMIT_S + 3) <= ENERGY_LIMIT_S + 0.2
 
 
 def test_kiss_stations_queued_under_one_burst_do_not_all_collide():

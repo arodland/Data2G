@@ -74,6 +74,9 @@ HEARD_MAX_S = 600.0  # stations reported on: heard this recently
 BROADCAST = {0: "n10-qpsk-r1/5", 2: "qpsk-r1/5"}
 BROADCAST_S = G.SIZE_S[-1]  # bursts in a port's own mode: at most the longest size class
 SLOT_S = 1.0  # the shortest p-persistence slot (KissLink.slot_s)
+# in-band energy without a lock (Receiver.on_air: a burst we can't read, QRM)
+# holds a burst this long at most: a noisy band must not mute broadcasts
+ENERGY_LIMIT_S = 15.0
 MIN_SUCCESS = 0.9  # recommended modes: predicted first-transmission codeword success at least this
 
 

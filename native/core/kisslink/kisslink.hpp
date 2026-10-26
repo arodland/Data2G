@@ -35,6 +35,9 @@ inline constexpr int N_PORTS = 16;  // KISS port numbers 0-15
 inline constexpr double REPORT_MAX_S = 180.0;  // a report older than this is not followed
 inline constexpr double HEARD_MAX_S = 600.0;   // stations reported on: heard this recently
 inline constexpr double SLOT_S = 1.0;          // the shortest p-persistence slot
+// in-band energy without a lock (Receiver::on_air: a burst we can't read,
+// QRM) holds a burst this long at most: a noisy band must not mute broadcasts
+inline constexpr double ENERGY_LIMIT_S = 15.0;
 inline constexpr double MIN_SUCCESS = 0.9;     // recommended modes' first-transmission success
 inline constexpr double BROADCAST_S = arq::SIZE_S.back();
 std::string_view broadcast_mode(int cap);  // BROADCAST; throws std::out_of_range

@@ -161,6 +161,9 @@ and reads any codeword. A mask only decides whose CRC check passes.
 - **One queue for all ports:** the next burst takes the first queued frame's port and
   mode, then every queued frame of that port that fits. KISS p-persistence and
   SLOTTIME apply to all ports. Broadcast still goes only between ARQ sessions.
+- **Channel access:** a queued burst waits while a burst is locked (up to
+  `--kiss-busy-limit`, 60 s). In-band energy with no lock, from a burst we can't
+  read or from QRM, also holds it, for 15 s at most.
 
 ## 5. Host interface
 

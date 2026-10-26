@@ -531,6 +531,7 @@ Engine::Out Engine::step(std::span<const double> x) {
     if (!transmitting_) b.items = receiver_feed(x);  // our own transmission is not heard
     if (!transmitting_ && preview_on_ && on_preview_) preview();
     b.busy = receiver_busy();
+    b.on_air = cfg_.kiss && receiver_on_air();
     busy_now_ = b.busy;
     channel_busy_now_ = receiver_channel_busy();
     if (!cfg_.worker) {
@@ -644,7 +645,7 @@ Engine::Done Engine::process(Block& b) {
             }
         }
         if (bursts.empty() && cfg_.kiss && t >= hold_ && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
-            if (auto kb = kiss_burst(k, busy)) bursts = {kb};
+            if (auto kb = kiss_burst(k, busy, fresh && b.on_air)) bursts = {kb};
             tx_kiss_ = !bursts.empty();
         } else kiss_busy_ = 0;
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
@@ -895,19 +896,20 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
 }
 
 // The next KISS burst if it may go now: after waiting on BUSY, p-persistent
-// slots; on a free channel at once; BUSY holds it, but not past
-// busy_limit_s of it unbroken.
-TxBurstPtr Engine::kiss_burst(std::int64_t k, bool busy) {
+// slots; on a free channel at once; a lock holds it, but not past
+// busy_limit_s of it unbroken; energy alone (on_air) up to ENERGY_LIMIT_S.
+TxBurstPtr Engine::kiss_burst(std::int64_t k, bool busy, bool on_air) {
     auto& link = *cfg_.kiss;
     if (link.queue.empty()) {
         kiss_busy_ = 0;
         kiss_deferred_ = false;
         return nullptr;
     }
-    if (busy) {
+    if (busy || on_air) {
         kiss_busy_ += k;
         kiss_deferred_ = true;
-        if (static_cast<double>(kiss_busy_) < link.busy_limit_s * config::FS) return nullptr;
+        const double limit = busy ? link.busy_limit_s : std::min(link.busy_limit_s, kisslink::ENERGY_LIMIT_S);
+        if (static_cast<double>(kiss_busy_) < limit * config::FS) return nullptr;
         log_write(LOG, WARNING, format("KISS: BUSY for %.0f s, sending anyway", static_cast<double>(kiss_busy_) / config::FS));
     } else {
         kiss_busy_ = 0;
