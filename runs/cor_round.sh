@@ -5,11 +5,14 @@
 # offline set, steered by the installed CNP. Eight outcome-trained CNPs
 # (--labels), ensembled; one student started from the installed CNP and
 # distilled on the installed model's OFDM outputs and the ensemble's CPM ones
-# (LCB 0.5), so OFDM predictions stay where they are. Phases: data, train.
+# (LCB 0.5), so OFDM predictions stay where they are. cord: CPM targets from the
+# ensemble everywhere (lost MPP -6 -3.6%); cordf (installed): the ensemble's
+# under snr_est -6 dB, the installed model's above -4, ramped. Phases: data, train.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PY=/home/andrew/code/Data2G/.venv/bin/python
-SHIPPED=data2g/codes_data/outcome_predictor.npz
+# cnpd, installed before this round: git show 12d1235:data2g/codes_data/outcome_predictor.npz > runs/shipped_cnpd.npz
+SHIPPED=${SHIPPED:-runs/shipped_cnpd.npz}
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export DATA2G_PEP_REF_DB=5 DATA2G_SPREAD_CARRY=1
 export DATA2G_LOGIT_OFFSETS=w48-16qam-r1/2:-1.0,n10-256l-r3/4:-0.5
@@ -51,5 +54,7 @@ if [[ $phase == train || $phase == all ]]; then
   [ -s runs/corle8.npz ] || $PY -m scripts.train_outcome x --ensemble $M --out runs/corle8.npz
   [ -s runs/cord.npz ] || DATA2G_OUTCOME_LCB=0.5 OMP_NUM_THREADS=4 $PY -m scripts.cnp_outcome "$D" --teacher $SHIPPED \
     --teacher-cpm runs/corle8.npz --init $SHIPPED --lr 2e-4 --epochs 20 --out runs/cord.npz > runs/cord.log 2>&1
+  [ -s runs/cordf.npz ] || DATA2G_OUTCOME_LCB=0.5 OMP_NUM_THREADS=4 $PY -m scripts.cnp_outcome "$D" --teacher $SHIPPED \
+    --teacher-cpm runs/corle8.npz --cpm-below -4 --init $SHIPPED --lr 2e-4 --epochs 20 --out runs/cordf.npz > runs/cordf.log 2>&1
   date
 fi

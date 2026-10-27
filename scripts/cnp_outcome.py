@@ -145,7 +145,9 @@ def main():
     ap.add_argument("--redescribe", metavar="NPZ", help="rewrite NPZ's descriptors (no training) into --out")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--teacher-cpm", default="", help="the CPM modes' targets from this model instead")
-    ap.add_argument("--init", default="", help="start from this CNP's weights (distillation only)")
+    ap.add_argument("--cpm-below", type=float, default=None,
+                    help="--teacher-cpm only on rows whose snr_est is under this (ramped over 2 dB below it)")
+    ap.add_argument("--init",default="", help="start from this CNP's weights (distillation only)")
     ap.add_argument("--lr", type=float, default=1e-3, help="distillation's learning rate")
     ap.add_argument("--hold", default="", help="modes left out of training (zero-shot test)")
     ap.add_argument("--cond", default="", help="policy.COND_OFFSETS' spec, applied to the teacher's targets")
@@ -176,7 +178,13 @@ def main():
         zc = np.concatenate([tc(x[i:i + 4096]) for i in range(0, len(x), 4096)])
         cols = [k for k, m in enumerate(T.MODES) if m not in SUBMODES]
         cols += [n + k for k in cols]
-        z_t[:, cols] = zc[:, cols]
+        if a.cpm_below is not None:  # only where the row's snr_est is under it (a 2 dB ramp up to it)
+            snr_est = np.array([float(r["snr_est"]) for r in rows])
+            w = np.clip((a.cpm_below - snr_est) / 2, 0, 1)[:, None]
+            z_t[:, cols] = w * zc[:, cols] + (1 - w) * z_t[:, cols]
+            print(f"CPM teacher weight: mean {w.mean():.3f}, full on {np.mean(w == 1):.1%} of rows")
+        else:
+            z_t[:, cols] = zc[:, cols]
         print(f"CPM columns from {a.teacher_cpm}: {[T.MODES[k] for k in cols[:len(cols) // 2]]}")
     if a.cond:  # the shifter's conditional offsets (policy.COND_OFFSETS), on each row's own spread_est
         spread = np.array([float(r["spread_est"]) for r in rows])
