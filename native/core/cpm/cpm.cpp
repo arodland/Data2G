@@ -9,6 +9,7 @@
 
 #include "dsp/dsp.hpp"
 #include "dsp/fft.hpp"
+#include "util/pool.hpp"
 #include "waveform/dsp.hpp"
 
 namespace data2g::cpm {
@@ -690,11 +691,13 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
         for (std::size_t i = 0; i < G0.size(); ++i) G0[i] = E0.data[i] * scale;
         w = np_sum(G0) / tot;
     }
-    std::vector<double> vk(kr.size()), vu(ur.size());
     const std::int64_t len = static_cast<std::int64_t>(x.size()), T = g.T, N = static_cast<std::int64_t>(n) * T;
-    // the likelihood of energies E (n rows); the log-sum over tones max-shifted (numpy's logaddexp.reduce
-    // rounds otherwise, within 1e-15: no tie it could break was seen)
-    const auto ll = [&](const Mat<double>& E) {
+    // the likelihood of mixed samples z (n symbols); the log-sum over tones max-shifted (numpy's
+    // logaddexp.reduce rounds otherwise, within 1e-15: no tie it could break was seen)
+    const auto ll = [&](const cdouble* z) {
+        const std::vector<cdouble> seg(z, z + N);
+        const Mat<double> E = power(fft_rows(seg, n, T), n, T, g.m);
+        std::vector<double> vk(kr.size()), vu(ur.size());
         for (std::size_t i = 0; i < kr.size(); ++i) vk[i] = E[kr[i]][known[kr[i]]] * w;
         for (std::size_t i = 0; i < ur.size(); ++i) {
             const double* e = E[ur[i]];
@@ -706,37 +709,58 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
         return np_sum(vk) + np_sum(vu);
     };
     std::int64_t bs = s0;
-    double bc = cfo;
+    double bc = cfo, bv = 0.0;
     const std::pair<std::int64_t, double> steps[] = {{std::max(1, g.T / 16), g.rate / 16},
                                                      {std::max(1, g.T / 64), g.rate / 64}};
-    std::vector<cdouble> z, seg(N);
+    bool centre_known = false;
     for (const auto& [st, sf] : steps) {
         const std::int64_t s = bs, a0 = s - 2 * st, M = 4 * st + N;
         const double f = bc;
-        double v[5][5];
-        z.assign(M, 0.0);
-        for (int j = -2; j <= 2; ++j) {
-            // energies() mixes by absolute sample: one mix per CFO serves every start (as detect's fine stage)
-            const double w0 = (-2 * PI) * (g.f0 + (f + j * sf));
-            for (std::int64_t q = 0; q < M; ++q) {
-                const std::int64_t t = a0 + q;
-                if (t < 0 || t >= len) {
-                    z[q] = 0.0;
-                    continue;
-                }
-                const double arg = w0 * (static_cast<double>(t) / FS);
-                z[q] = {x[t] * std::cos(arg), x[t] * std::sin(arg)};
-            }
-            for (int i = -2; i <= 2; ++i) {
-                std::copy(z.begin() + (i + 2) * st, z.begin() + (i + 2) * st + N, seg.begin());
-                v[i + 2][j + 2] = ll(power(fft_rows(seg, n, T), n, T, g.m));
-            }
+        // energies() mixes by absolute sample, so one mix per CFO serves every start. The stage mixes once
+        // at its centre CFO; each other CFO is that times a rotation, e^(-2 pi i sf t / FS) to the power j,
+        // whose phase repeats every FS / sf samples: one sincos per table entry, not per sample per CFO.
+        std::vector<cdouble> z[5];
+        z[2].assign(M, 0.0);
+        const double w0 = (-2 * PI) * (g.f0 + f);
+        for (std::int64_t q = 0; q < M; ++q) {
+            const std::int64_t t = a0 + q;
+            if (t < 0 || t >= len) continue;
+            const double arg = w0 * (static_cast<double>(t) / FS);
+            z[2][q] = {x[t] * std::cos(arg), x[t] * std::sin(arg)};
         }
+        const double P = FS / sf;
+        const std::int64_t Lt = (P == std::floor(P) && P <= static_cast<double>(M)) ? static_cast<std::int64_t>(P) : M;
+        std::vector<cdouble> tab(Lt);
+        for (std::int64_t q = 0; q < Lt; ++q) {
+            const double arg = (-2 * PI) * (sf * static_cast<double>(q) / FS);
+            tab[q] = {std::cos(arg), std::sin(arg)};
+        }
+        const double cyc = (-2 * PI) * std::fmod(sf * static_cast<double>(a0) / FS, 1.0);
+        const cdouble c0{std::cos(cyc), std::sin(cyc)};
+        for (int j : {-2, -1, 1, 2}) z[j + 2].resize(M);
+        for (std::int64_t q = 0; q < M; ++q) {
+            const cdouble r1 = c0 * tab[q % Lt], r2 = r1 * r1, b = z[2][q];
+            z[0][q] = b * std::conj(r2);
+            z[1][q] = b * std::conj(r1);
+            z[3][q] = b * r1;
+            z[4][q] = b * r2;
+        }
+        // the 25 placements are independent: one pool task each (bit-identical for any pool size); the
+        // second stage's centre is the first stage's best, already scored
+        double v[5][5];
+        pool::parallel_for(25, [&](std::size_t k) {
+            const int i = static_cast<int>(k / 5), j = static_cast<int>(k % 5);
+            if (centre_known && i == 2 && j == 2) return;
+            v[i][j] = ll(z[j].data() + i * st);
+        });
+        if (centre_known) v[2][2] = bv;
         double top = -INFINITY;
         for (int i = -2; i <= 2; ++i)
             for (int j = -2; j <= 2; ++j)
                 if (v[i + 2][j + 2] > top)  // Python's max: the first best
                     top = v[i + 2][j + 2], bs = s + i * st, bc = f + j * sf;
+        bv = top;
+        centre_known = true;
     }
     return {bs, bc};
 }
