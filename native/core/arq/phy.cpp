@@ -48,7 +48,6 @@ std::vector<double> known(std::span<const std::uint8_t> bits) {
 // combined into what is stored (nullptr: nothing) at `rv`.
 std::vector<double> combined_buffer(const codes::Spec& s, int slot, int rv, std::span<const double> soft,
                                     const std::vector<double>* stored) {
-    const auto fl = codes::flip(s, slot, rv);
     const int rvs[1] = {rv};
     Mat<double> buf;
     if (stored) {
@@ -56,7 +55,7 @@ std::vector<double> combined_buffer(const codes::Spec& s, int slot, int rv, std:
         buf.data = *stored;
     }
     Mat<double> x(1, soft.size());
-    for (std::size_t i = 0; i < soft.size(); ++i) x.data[i] = fl[i] * soft[i];
+    x.data = codes::plain(s, soft, slot, rv);
     codes::combine(s, buf, x, rvs);
     return std::move(buf.data);
 }
@@ -329,6 +328,7 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
 // Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.
 std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
     std::vector<int> out;
+    if (s.gf) return out;  // nothing to pin (codes.decode_raw_pinned)
     const std::span<const int> cuts = s.polar ? std::span<const int>(POLAR_PIN_CUTS) : std::span<const int>(PIN_CUTS);
     for (int c : cuts) {
         const int off = c - i * s.payload_bytes;

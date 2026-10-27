@@ -72,6 +72,10 @@ void bind_codec(py::module_& c) {
     }, py::arg("spec"), py::arg("bits"), py::arg("rv") = 0);
     c.def("flip", [](const std::string& name, int index, int rv) { return np(codes::flip(cspec(name), index, rv)); },
           py::arg("spec"), py::arg("index"), py::arg("rv") = 0);
+    c.def("plain", [](const std::string& name, const In<double>& soft, int index, int rv) {
+        return np(codes::plain(cspec(name), vec(soft), index, rv));
+    }, py::arg("spec"), py::arg("soft"), py::arg("index"), py::arg("rv") = 0);
+    c.def("soft_len", by_name([](const Spec& s) { return codes::soft_len(s); }));
     c.def("spread", &shuffle<true>);
     c.def("despread", &shuffle<false>);
 

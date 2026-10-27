@@ -155,8 +155,10 @@ def test_receive_chain(native, reference, case):
     assert len(slots) == len(slots_ref)
     for a, b in zip(slots, slots_ref):
         np.testing.assert_allclose(a, b, rtol=RTOL, atol=1e-9)
-        np.testing.assert_allclose(native.cpm.llrs(g.name, E_ref[:len(a) // g.bits]),
-                                   ref(reference, "llrs")(g, E_ref[:len(a) // g.bits]), rtol=RTOL, atol=1e-9)
+    n_ctl = cpm.CTL[g.name].n_sym
+    for f in ("llrs", "symbol_ll"):
+        np.testing.assert_allclose(getattr(native.cpm, f)(g.name, E_ref[:n_ctl]), ref(reference, f)(g, E_ref[:n_ctl]),
+                                   rtol=RTOL, atol=1e-9)
 
     m, m_ref = native.cpm.measure(g.name, E_ref, len(E_ref)), ref(reference, "measure")(g, E_ref, len(E_ref))
     for k in ("snr_est", "spread_est", "frames"):

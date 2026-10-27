@@ -186,16 +186,24 @@ def cpm_cpp() -> str:
                     f"{cpm.hdr_len(g)}, pre_{i}, mid_{i}, hdr_{i}, "
                     f"{{{', '.join(f'{{{cxx(float(f.bp))}, {cxx(float(f.glide))}, {f.passes}}}' for f in cpm.TX_FILTERS[g.name])}}}}},\n")
 
-    # interleavers: codes.compute_interleaver's PCG64 permutations (no format file)
+    # interleavers: codes.compute_interleaver's PCG64 permutations (no format file; GF(M): of symbols),
+    # and the GF(M) mother codes (codes_data/gf_codes.npz)
     all_specs = [*cpm.SPECS.values(), *cpm.CTL.values()]
     for j, s in enumerate(all_specs):
         perm = codes.interleaver(s)
-        assert sorted(perm) == list(range(s.coded_bits))
+        assert sorted(perm) == list(range(codes.n_sym(s) if s.code == "gf" else s.coded_bits))
         out.append(f"constexpr std::uint16_t perm_{j}[] = {{{ints(perm)}}};\n")
+        if s.code == "gf":
+            c = codes.gf_code(s)
+            out.append(f"constexpr std::int16_t gf_var_{j}[] = {{{ints(c.chk_var.reshape(-1))}}};\n")
+            out.append(f"constexpr std::uint8_t gf_h_{j}[] = {{{ints(c.chk_h.reshape(-1))}}};\n")
 
     def spec(s):
+        j = all_specs.index(s)
+        gf = (f"{{{codes.gf_code(s).n}, {codes.gf_code(s).core_n}, {codes.gf_code(s).chk_var.shape[1]}, gf_var_{j}, gf_h_{j}}}"
+              if s.code == "gf" else "{}")
         return (f'    {{"{s.name}", "{s.grid}", "{s.code}", {s.index}, {s.k}, {s.coded_bits}, {s.n_sym}, '
-                f"perm_{all_specs.index(s)}}},\n")
+                f"perm_{j}, {gf}}},\n")
 
     out.append(f"\nconstexpr CpmGrid grids[] = {{\n{''.join(rows)}}};\n")
     out.append(f"constexpr CpmSpec specs[] = {{\n{''.join(spec(s) for s in cpm.SPECS.values())}}};\n")

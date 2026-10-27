@@ -36,6 +36,14 @@ Coded bits leave here already interleaved (bit-interleaved coded
 modulation): `encode` returns them in constellation-mapping order and the
 decoders take soft bits in that order.
 
+GF(M) (code "gf": the CPM modes' data, data2g.gfldpc): one code symbol
+per M-FSK tone. Its soft values are q = M log-likelihoods per symbol
+(symbol-major, the symbol's value v carried by tone gray(v)) where binary
+codes have one LLR per bit: soft_len values a codeword, the interleaver
+and RVs move whole symbols, and scrambling permutes each symbol's
+likelihoods (plain) where it flips a bit's sign. Coded bits leave
+encode as for any code: each symbol's p bits, MSB first.
+
 Native: native/core/codes (codes::Spec: CodeSpec with the interleaver,
 info set and CRC size looked up once). Parity:
 tests/test_native_codes.py, and tests/native_subs/{base,codes}.py swap
@@ -50,7 +58,7 @@ from typing import Protocol
 
 import numpy as np
 
-from . import constellation, ldpc, polar
+from . import constellation, gfldpc, ldpc, polar
 
 
 class CodeSpec(Protocol):
@@ -126,6 +134,24 @@ def ldpc_code(spec: CodeSpec) -> ldpc.QCLDPC:
     return ldpc.qc_code(spec.k, spec.coded_bits)
 
 
+@lru_cache(maxsize=None)
+def gf_code(spec: CodeSpec) -> gfldpc.GFCode:
+    """GF(M) specs: the mother code (codes_data/gf_codes.npz), its
+    rate-compatible extension included; the codeword is its first n_sym
+    symbols."""
+    return gfldpc.load(spec.name)
+
+
+def n_sym(spec: CodeSpec) -> int:
+    """GF(M): code symbols a codeword."""
+    return spec.coded_bits // spec.bits_per_cu
+
+
+def soft_len(spec: CodeSpec) -> int:
+    """Soft values a codeword: its coded bits, or GF(M) q per symbol."""
+    return n_sym(spec) << spec.bits_per_cu if spec.code == "gf" else spec.coded_bits
+
+
 # ponytail: GA-DE frozen set at a fixed design point until
 # a per-submode search (planned; no script yet) designs one.
 POLAR_DESIGN_SNR_DB = -3.0
@@ -133,6 +159,7 @@ POLAR_LIST = 8
 # The modem's LDPC iteration cap (native codes::ldpc_iters, the app's "decoder effort"): the layered
 # decoder at 20 matched the old flooding one at 40; 25 is about 0.1 dB better (scripts/ldpc_schedule).
 LDPC_ITERS = 25
+GF_ITERS = 50  # the GF(M) decoder's cap (flooding FFT-BP; scripts/gf_study.py)
 
 
 FORMAT_DIR = Path(__file__).parent / "format"
@@ -210,8 +237,9 @@ def interleaver(spec: CodeSpec) -> np.ndarray:
 def _deinterleave(spec: CodeSpec, soft, dtype=None):
     """(B, coded_bits) soft bits in mapping order -> code order: out[:,
     perm[i]] = soft[:, i], undoing encode_info's coded[:, perm]. numpy (in
-    `dtype`, default soft's), or torch on soft's device."""
-    perm = interleaver(spec)
+    `dtype`, default soft's), or torch on soft's device. GF(M): whole
+    symbols' likelihoods."""
+    perm = _soft_perm(spec)
     if isinstance(soft, np.ndarray):
         out = np.empty_like(soft, dtype=dtype)
         out[:, perm] = soft
@@ -221,6 +249,16 @@ def _deinterleave(spec: CodeSpec, soft, dtype=None):
     out = torch.empty_like(soft)
     out[:, torch.as_tensor(perm, device=soft.device)] = soft
     return out
+
+
+@lru_cache(maxsize=None)
+def _soft_perm(spec: CodeSpec) -> np.ndarray:
+    """The interleaver over soft values: GF(M)'s symbol permutation expanded to its q likelihoods each."""
+    perm = np.asarray(interleaver(spec))
+    if spec.code != "gf":
+        return perm
+    q = 1 << spec.bits_per_cu
+    return (perm[:, None] * q + np.arange(q)).reshape(-1)
 
 
 def compute_interleaver(spec: CodeSpec) -> np.ndarray:
@@ -234,6 +272,8 @@ def compute_interleaver(spec: CodeSpec) -> np.ndarray:
     AWGN BER at 12 dB 1.0e-3 (random) -> 4.2e-5, mpd PER at 19 dB 0.16 ->
     0.088; the reverse assignment fails outright. Others: random."""
     rng = np.random.default_rng(INTERLEAVER_SEED + spec.index)
+    if spec.code == "gf":
+        return rng.permutation(n_sym(spec))  # whole symbols
     n = spec.coded_bits
     if spec.code != "ldpc" or spec.constellation.startswith("fsk"):
         return rng.permutation(n)  # (M-FSK: no labels to rank, data2g.cpm)
@@ -291,6 +331,26 @@ def flip(spec: CodeSpec, index: int, rv: int = 0) -> np.ndarray:
     return 1.0 - 2.0 * encode_info(spec, scrambler(spec.k, scramble_seed(index))[None], rv)[0]
 
 
+def plain(spec: CodeSpec, soft: np.ndarray, index: int, rv: int = 0) -> np.ndarray:
+    """(soft_len,) soft values of a codeword sent at burst position `index`
+    and RV `rv` -> those of the same codeword unscrambled: flip's signs, or
+    GF(M) each symbol's likelihoods permuted (L'[w] = L[w ^ s], s its
+    scrambling: the code is GF(2)-linear too)."""
+    if spec.code != "gf":
+        return flip(spec, index, rv) * soft
+    s = _gf_flip(spec, index, rv)
+    q = 1 << spec.bits_per_cu
+    L = np.asarray(soft).reshape(-1, q)
+    return L[np.arange(len(L))[:, None], np.arange(q)[None] ^ s[:, None]].reshape(-1)
+
+
+@lru_cache(maxsize=None)
+def _gf_flip(spec: CodeSpec, index: int, rv: int) -> np.ndarray:
+    """(n_sym,) the scrambling's symbols, mapping order."""
+    x = encode_info(spec, scrambler(spec.k, scramble_seed(index))[None], rv)
+    return gfldpc.pack(x, spec.bits_per_cu, n_sym(spec))[0]
+
+
 @lru_cache(maxsize=None)
 def scrambler(k: int, seed: int = 0x1FF) -> np.ndarray:
     """PN9 (x^9 + x^5 + 1, output = feedback bit) from `seed`, k bits. Info
@@ -327,6 +387,10 @@ def encode(spec: CodeSpec, payload: bytes, rv: int = 0, crc_mask: int = 0, index
 def encode_info(spec: CodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
     """(B, k) info bits (CRC included) -> (B, coded_bits), interleaved.
     `rv`: redundancy version (rv_positions); 0 is the first transmission."""
+    if spec.code == "gf":
+        c, p = gf_code(spec), spec.bits_per_cu
+        x = c.encode(gfldpc.pack(np.asarray(bits), p, c.k))[:, _rv_symbols(spec, rv)]
+        return gfldpc.unpack(x[:, interleaver(spec)], p)
     if rv and spec.code == "ldpc":
         coded = ldpc_code(spec).mother().encode(bits)[:, rv_positions(spec, rv)]
     elif spec.code == "ldpc":
@@ -340,21 +404,35 @@ def encode_info(spec: CodeSpec, bits: np.ndarray, rv: int = 0) -> np.ndarray:
 # LDPC: RV r sends positions [r n, (r + 1) n) of the mother code's circular
 # buffer (every base row: rate ~1/5), wrapping. RV 0 is the codeword as
 # frozen; RV 1 onwards is fresh parity until the buffer runs out, then
-# repeats (Chase). Polar: every RV is the same codeword (Chase).
+# repeats (Chase). Polar: every RV is the same codeword (Chase). GF(M):
+# the same over symbols, of a raptor-like mother (gfldpc.extend: rate 1/6;
+# on two receptions of fsk8r50-r1/3, ideal channels, 0.3-0.5 dB better
+# than Chase, even on fsk32r62: scripts/gf_study.py ir).
 # Soft bits accumulate over the buffer in code order ("buffer": (B, L)).
 
 def rv_cycle(spec: CodeSpec) -> int:
     """Distinct redundancy versions: resend r uses RV r mod this."""
-    return 4 if spec.code == "ldpc" else 1
+    return 1 if spec.code == "polar" else 4  # LDPC, GF(M): mother codes (rate ~1/5, 1/6)
 
 
 def buffer_len(spec: CodeSpec) -> int:
+    if spec.code == "gf":
+        return gf_code(spec).n << spec.bits_per_cu
     return ldpc_code(spec).mother().n if spec.code == "ldpc" else spec.coded_bits
+
+
+def _rv_symbols(spec: CodeSpec, rv: int) -> np.ndarray:
+    """GF(M): the mother code's symbols RV `rv` carries, as LDPC's bits (rv_positions)."""
+    n = n_sym(spec)
+    return (rv % rv_cycle(spec) * n + np.arange(n)) % gf_code(spec).n
 
 
 def rv_positions(spec: CodeSpec, rv: int) -> np.ndarray:
     """Buffer positions RV `rv` carries, in code order."""
     n = spec.coded_bits
+    if spec.code == "gf":
+        q = 1 << spec.bits_per_cu
+        return (_rv_symbols(spec, rv)[:, None] * q + np.arange(q)).reshape(-1)
     if spec.code != "ldpc":
         return np.arange(n)
     return (rv % rv_cycle(spec) * n + np.arange(n)) % buffer_len(spec)
@@ -376,7 +454,7 @@ def ir_extent(spec: CodeSpec, max_rv: int) -> int:
     """The buffer positions an LDPC decode reads with RVs up to `max_rv`
     received: the mother code is cut there (unreceived parity would only
     slow it)."""
-    return min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * spec.coded_bits)
+    return min(buffer_len(spec), (min(max_rv, rv_cycle(spec) - 1) + 1) * soft_len(spec))
 
 
 def decode_buffer(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, index=None) -> list[tuple[bytes, bool]]:
@@ -384,7 +462,7 @@ def decode_buffer(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, crc_mask=0, 
     crc_ok)]: LDPC decodes the mother code cut to ir_extent."""
     masks = np.broadcast_to(crc_mask, len(buf))
     idx = np.arange(len(buf)) if index is None else np.broadcast_to(index, len(buf))
-    if spec.code != "ldpc":
+    if spec.code == "polar":
         return payloads(spec, *_decode_code_order(spec, _decoder(spec), buf, crc_mask=masks, index=idx),
                         masks, idx)
     extent = ir_extent(spec, max_rv)
@@ -398,7 +476,10 @@ def decode_posterior(spec: CodeSpec, soft=None, buf=None, max_rv: int = 0, rv: i
     still scrambled unless from `buf`; converged; a-posteriori LLRs of the
     slot's coded bits in mapping order). Decision-directed re-estimation
     (arq/phy.py, DD) needs the posterior of every failed decode, so it
-    comes from the same pass. Native: codes::decode_posterior."""
+    comes from the same pass. Native: codes::decode_posterior. LDPC only
+    (DD runs on OFDM)."""
+    if spec.code != "ldpc":
+        raise ValueError(f"decode_posterior: {spec.name} is not LDPC")
     perm = interleaver(spec)
     if buf is None:
         dec, llr = _decoder(spec), _deinterleave(spec, np.atleast_2d(soft), float)
@@ -412,6 +493,8 @@ def decode_posterior(spec: CodeSpec, soft=None, buf=None, max_rv: int = 0, rv: i
 
 @lru_cache(maxsize=None)
 def _ext_decoder(spec: CodeSpec, extent: int):
+    if spec.code == "gf":
+        return gfldpc.Decoder(gfldpc.cut(gf_code(spec), extent >> spec.bits_per_cu))
     return ldpc.Decoder(ldpc_code(spec).mother(extent))
 
 
@@ -476,9 +559,9 @@ def decode_raw(spec: CodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray
     the row number)."""
     soft = np.asarray(soft, dtype=np.float32)
     deint = _deinterleave(spec, soft)
-    if spec.code == "ldpc":
-        out, ok = _decoder(spec).decode(deint, iters=LDPC_ITERS)
-        cands, usable = _numpy(out)[:, None], _numpy(ok)[:, None]
+    if spec.code != "polar":
+        out, ok = _decode_code_order(spec, _decoder(spec), deint)
+        cands, usable = out[:, None], ok[:, None]
     else:
         cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)]
         usable = np.ones(cands.shape[:2], bool)
@@ -493,11 +576,11 @@ def decode_buffer_raw(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, known=No
     decode_buffer_pinned. A broadcast control sent twice reads its group
     from these (kisslink, docs/broadcast.md §2)."""
     buf = np.asarray(buf)
-    if spec.code == "ldpc":
+    if spec.code != "polar":
         extent = ir_extent(spec, max_rv)
         b = buf if known is None else pin_buffer(spec, buf, known)
-        out, ok = _ext_decoder(spec, extent).decode(np.asarray(b[:, :extent], np.float32), iters=LDPC_ITERS)
-        return _numpy(out)[:, None].astype(np.uint8), _numpy(ok)[:, None]
+        out, ok = _decode_code_order(spec, _ext_decoder(spec, extent), np.asarray(b[:, :extent], np.float32))
+        return out[:, None].astype(np.uint8), ok[:, None]
     deint = np.asarray(buf[:, : spec.coded_bits], np.float32)
     if known is None:
         cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)].astype(np.uint8)
@@ -552,7 +635,9 @@ def _info_code_positions(spec: CodeSpec) -> np.ndarray:
 @lru_cache(maxsize=None)
 def systematic_positions(spec: CodeSpec) -> np.ndarray:
     """(k,) where each info bit is sent at RV 0, in mapping order, or -1
-    (punctured, filler; polar: every one)."""
+    (punctured, filler; polar, GF(M): every one)."""
+    if spec.code != "ldpc":
+        return np.full(spec.k, -1, dtype=np.int64)
     code = _info_code_positions(spec)
     where = np.empty(spec.coded_bits, dtype=np.int64)
     where[np.asarray(interleaver(spec))] = np.arange(spec.coded_bits)  # code order -> mapping order
@@ -623,8 +708,8 @@ def _pinned_paths(spec: CodeSpec, deint: np.ndarray, known: np.ndarray, index: i
 def decode_raw_pinned(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray]:
     """decode_raw of (B, coded_bits) soft bits sent at burst position
     `index`, with the info bits `known` gives ((k,) 0/1, -1 unknown;
-    unscrambled) known: LDPC pinned (pin), polar frozen."""
-    if spec.code == "ldpc":
+    unscrambled) known: LDPC pinned (pin), polar frozen; GF(M): nothing known (pin's no-op)."""
+    if spec.code != "polar":
         return decode_raw(spec, np.stack([pin(spec, s, known, index) for s in np.atleast_2d(soft)]),
                           index=np.full(len(np.atleast_2d(soft)), index))
     cands = _pinned_paths(spec, _deinterleave(spec, np.atleast_2d(np.asarray(soft, np.float32))), known, index)
@@ -633,8 +718,8 @@ def decode_raw_pinned(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index
 
 def decode_buffer_pinned(spec: CodeSpec, buf: np.ndarray, max_rv: int, known: np.ndarray, crc_mask=0) -> list[tuple[bytes, bool]]:
     """decode_buffer (index PLAIN) with the info bits `known` gives known:
-    LDPC pinned (pin_buffer), polar frozen."""
-    if spec.code == "ldpc":
+    LDPC pinned (pin_buffer), polar frozen; GF(M): nothing known."""
+    if spec.code != "polar":
         return decode_buffer(spec, pin_buffer(spec, buf, known), max_rv, crc_mask, index=PLAIN)
     paths = _pinned_paths(spec, np.asarray(buf)[:, : spec.coded_bits], known, PLAIN)
     masks = np.broadcast_to(crc_mask, len(paths))
@@ -651,6 +736,9 @@ def _numpy(x):
 
 def _decode_code_order(spec: CodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_mask=0, index=0):
     """decode_llrs after deinterleaving: LLRs in the decoder's code order."""
+    if spec.code == "gf":
+        hard, ok, _ = dec.decode(np.asarray(deint).reshape(len(deint), -1, 1 << spec.bits_per_cu), GF_ITERS)
+        return gfldpc.unpack(hard[:, dec.code.info], spec.bits_per_cu)[:, :spec.k], ok
     if spec.code == "ldpc":
         out, ok = dec.decode(deint, iters=iters)
         return _numpy(out), _numpy(ok)
@@ -683,6 +771,8 @@ def _decoder(spec: CodeSpec, device=None):
         if spec.code == "ldpc":
             return decoders_torch.Decoder(ldpc_code(spec), device=device)
         return decoders_torch.SCLDecoder(polar_code(spec), POLAR_LIST, device=device)
+    if spec.code == "gf":
+        return gfldpc.Decoder(gfldpc.cut(gf_code(spec), n_sym(spec)))
     if spec.code == "ldpc":
         return ldpc.Decoder(ldpc_code(spec))
     return polar.SCLDecoder(polar_code(spec), POLAR_LIST)

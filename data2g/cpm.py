@@ -17,7 +17,9 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
 
 - ctl: the grid's short control codeword (polar, CTL_K of CTL_N), one per
   burst, twice (RV 0, RV 1) when the ARQ duplicates control (ARQ_DUP);
-- data: 0..MAX_DATA LDPC codewords of the mode (n = 960);
+- data: 0..MAX_DATA codewords of the mode (960 bits): GF(M) LDPC, one
+  code symbol per tone (data2g.gfldpc; protocol 14, was binary LDPC on
+  bit LLRs), decoded on each tone's likelihoods (symbol_ll);
 - two sync blocks: the front, and a mid block SPACING_S of symbols later
   (after the data, on a burst shorter than that). Nothing else in the burst
   tracks timing or CFO: 30 ppm over a 90 s burst is ~22 samples of T = 320.
@@ -138,7 +140,7 @@ class CpmSpec:
     name: str
     grid: str
     index: int  # in its grid's header (-1: the control codeword)
-    code: str  # "ldpc" (data) | "polar" (control)
+    code: str  # "gf" (data: GF(M) LDPC) | "polar" (control)
     k: int  # info bits incl. CRC
     coded_bits: int
     frames_per_cw: int = 0
@@ -175,8 +177,8 @@ def _grid_name(g: Grid) -> str:
 
 
 SPECS = {s.name: s for g in GRIDS.values() for s in (
-    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", 320, DATA_N),
-    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", 480, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "gf", 320, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "gf", 480, DATA_N),
 )}
 CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", CTL_K, CTL_N) for g in GRIDS}
 
@@ -503,21 +505,22 @@ def tone_metric(g: Grid, E: np.ndarray) -> np.ndarray:
 
 def llrs(g: Grid, E: np.ndarray) -> np.ndarray:
     """(n_sym, m) tone energies of one codeword -> (n_sym * bits,) coded-bit
-    LLRs (positive: 0) in mapping order (data2g.codes.combine / decode_many's). Noncoherent square-law metric, exact for
-    Rayleigh fading: log P(E | tone m) = E_m g + const, g = Es / (N0 (N0 + Es))."""
-    top = E.max(axis=1)
-    n0 = np.median(np.sort(E, axis=1)[:, :-1]) / np.log(2)  # exponential: median = N0 ln 2
-    n0 = max(n0, 1e-12 * np.mean(top) + 1e-300)  # noise-free tests
-    es = max(np.mean(top) - n0, 1e-3 * n0)
-    # es / (n0 (n0 + es)) without its underflow: a codeword past the audio's
-    # end (zero-padded: a header claiming more than arrived) reads as erasures
-    metric = E * (es / (n0 + es) / n0)
+    LLRs (positive: 0) in mapping order (data2g.codes.combine / decode_many's),
+    marginals of tone_metric: the control codeword's."""
+    metric = tone_metric(g, E)
     label = np.argsort(_gray(g.m))  # tone -> the bit group it carries
     out = np.empty((len(E), g.bits))
     for b in range(g.bits):
         bit = (label >> (g.bits - 1 - b)) & 1
         out[:, b] = np.logaddexp.reduce(metric[:, bit == 0], axis=1) - np.logaddexp.reduce(metric[:, bit == 1], axis=1)
     return out.reshape(-1)
+
+
+def symbol_ll(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone energies of one codeword -> (n_sym * m,) symbol
+    log-likelihoods in mapping order, symbol-major, value v's on tone
+    gray(v) (to_tones): a GF(M) codeword's soft values (data2g.codes)."""
+    return tone_metric(g, E)[:, _gray(g.m)].reshape(-1)
 
 
 
@@ -572,8 +575,8 @@ def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int
     E = _energies(g, x, s0, lay.n, cfo)[lay.data_rows]
     sizes = [CTL[g.name].n_sym] * (1 + dup) + [DATA_N // g.bits] * n_data
     out, i = [], 0
-    for n in sizes:
-        out.append(llrs(g, E[i:i + n]))
+    for j, n in enumerate(sizes):
+        out.append((llrs if j < 1 + dup else symbol_ll)(g, E[i:i + n]))
         i += n
     return out, E
 

@@ -111,7 +111,8 @@ std::vector<Spec> build_specs() {
             for (const auto& g : tables::CPM_GRIDS)
                 if (g.name == s.grid) bits = g.bits;
             v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, payload_bytes(s), s.perm,
-                         polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{}});
+                         polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{},
+                         s.code == "gf" ? &s.gf : nullptr});
         }
     return v;
 }
@@ -125,6 +126,9 @@ const std::vector<Spec>& specs() {
 // replaced, so references stay valid; the lock covers construction only.
 struct Codecs {
     std::optional<ldpc::Code> code, mother;
+    std::optional<gfldpc::Code> gf;
+    std::map<int, std::unique_ptr<gfldpc::Decoder>> gf_dec;  // by extent, 0 = the codeword
+    std::optional<std::vector<int>> soft_perm;
     std::optional<polar::PolarCode> polar;
     std::map<int, std::unique_ptr<ldpc::Decoder>> ldpc;  // by extent, 0 = the code itself
     std::unique_ptr<polar::SCLDecoder> scl;
@@ -182,11 +186,40 @@ Mat<float> cut(const Spec& s, const Mat<T>& x, std::size_t cols) {
     return out;
 }
 
+// The interleaver over soft values (codes._soft_perm): GF(M)'s symbol permutation expanded to q values each.
+const std::vector<int>& soft_perm(const Spec& s) {
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.soft_perm) {
+        std::vector<int> p;
+        const int q = s.gf ? 1 << s.bits_per_cu : 1;
+        for (auto v : s.perm)
+            for (int a = 0; a < q; ++a) p.push_back(v * q + a);
+        c.soft_perm = std::move(p);
+    }
+    return *c.soft_perm;
+}
+
 Mat<float> deinterleave_llr(const Spec& s, const Mat<float>& llr) {
-    if (static_cast<int>(llr.cols) != s.coded_bits) throw std::invalid_argument(std::string(s.name) + ": expected (B, coded_bits)");
+    if (static_cast<int>(llr.cols) != soft_len(s))
+        throw std::invalid_argument(std::string(s.name) + ": expected (B, soft_len)");
+    const auto& perm = soft_perm(s);
     Mat<float> out(llr.rows, llr.cols);
     for (std::size_t b = 0; b < llr.rows; ++b)
-        for (std::size_t i = 0; i < llr.cols; ++i) out[b][s.perm[i]] = llr[b][i];
+        for (std::size_t i = 0; i < llr.cols; ++i) out[b][perm[i]] = llr[b][i];
+    return out;
+}
+
+// GF(M): (B, extent) likelihoods in code order -> info bits (B, k) and convergence (codes._decode_code_order).
+Info decode_gf(const Spec& s, const gfldpc::Decoder& dec, const Mat<float>& deint) {
+    const auto d = dec.decode(deint, GF_ITERS);
+    const auto& info = dec.code().info();
+    Mat<std::uint8_t> u(d.hard.rows, info.size());
+    for (std::size_t b = 0; b < u.rows; ++b)
+        for (std::size_t j = 0; j < info.size(); ++j) u[b][j] = d.hard[b][info[j]];
+    const auto bits = gfldpc::unpack(u, s.bits_per_cu);
+    Info out{Mat<std::uint8_t>(u.rows, static_cast<std::size_t>(s.k)), d.ok};
+    for (std::size_t b = 0; b < u.rows; ++b) std::copy_n(bits[b], s.k, out.bits[b]);
     return out;
 }
 
@@ -252,8 +285,24 @@ const Spec& spec(const tables::CpmSpec& s) {
     throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_SPECS or CPM_CTL row");
 }
 
+const gfldpc::Code& gf_code(const Spec& s) {
+    if (!s.gf) throw std::invalid_argument(std::string(s.name) + " is not GF(M)");
+    std::lock_guard lock(cache_mutex);
+    auto& c = cache[&s];
+    if (!c.gf) c.gf.emplace(s.bits_per_cu, s.gf->n, s.gf->n0, s.gf->dmax, s.gf->var, s.gf->h);
+    return *c.gf;
+}
+
+const gfldpc::Decoder& gf_decoder(const Spec& s, int extent) {
+    const auto& code = gf_code(s);
+    std::lock_guard lock(cache_mutex);
+    auto& d = cache[&s].gf_dec[extent];
+    if (!d) d = std::make_unique<gfldpc::Decoder>(code.cut(extent ? extent >> s.bits_per_cu : n_sym(s)));
+    return *d;
+}
+
 const ldpc::Code& ldpc_code(const Spec& s) {
-    if (s.polar) throw std::invalid_argument(std::string(s.name) + " is not LDPC");
+    if (s.polar || s.gf) throw std::invalid_argument(std::string(s.name) + " is not LDPC");
     std::lock_guard lock(cache_mutex);
     auto& c = cache[&s];
     if (!c.code) c.code = ldpc::qc_code(s.k, s.coded_bits);
@@ -294,9 +343,31 @@ const polar::SCLDecoder& polar_decoder(const Spec& s) {
 
 int rv_cycle(const Spec& s) { return s.polar ? 1 : 4; }
 
-int buffer_len(const Spec& s) { return s.polar ? s.coded_bits : mother_code(s).n; }
+int buffer_len(const Spec& s) {
+    if (s.gf) return s.gf->n << s.bits_per_cu;
+    return s.polar ? s.coded_bits : mother_code(s).n;
+}
+
+namespace {
+
+// GF(M): the mother code's symbols RV rv carries (codes._rv_symbols).
+std::vector<int> rv_symbols(const Spec& s, int rv) {
+    const int n = n_sym(s), c = rv_cycle(s);
+    std::vector<int> out(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) out[i] = (((rv % c) + c) % c * n + i) % s.gf->n;
+    return out;
+}
+
+}  // namespace
 
 std::vector<int> rv_positions(const Spec& s, int rv) {
+    if (s.gf) {
+        const int q = 1 << s.bits_per_cu;
+        std::vector<int> out;
+        for (int v : rv_symbols(s, rv))
+            for (int a = 0; a < q; ++a) out.push_back(v * q + a);
+        return out;
+    }
     const int n = s.coded_bits, c = rv_cycle(s), L = buffer_len(s);
     std::vector<int> out(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) out[i] = s.polar ? i : (((rv % c) + c) % c * n + i) % L;
@@ -304,7 +375,7 @@ std::vector<int> rv_positions(const Spec& s, int rv) {
 }
 
 int ir_extent(const Spec& s, int max_rv) {
-    return std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * s.coded_bits);
+    return std::min(buffer_len(s), (std::min(max_rv, rv_cycle(s) - 1) + 1) * soft_len(s));
 }
 
 std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
@@ -319,6 +390,15 @@ std::vector<std::uint8_t> info_bits(const Spec& s, std::span<const std::uint8_t>
 }
 
 Mat<std::uint8_t> encode_info(const Spec& s, const Mat<std::uint8_t>& bits, int rv) {
+    if (s.gf) {
+        const auto& c = gf_code(s);
+        const auto x = c.encode(gfldpc::pack(bits, s.bits_per_cu, c.k()));
+        const auto pos = rv_symbols(s, rv);
+        Mat<std::uint8_t> sent(x.rows, pos.size());
+        for (std::size_t b = 0; b < x.rows; ++b)
+            for (std::size_t i = 0; i < pos.size(); ++i) sent[b][i] = x[b][pos[s.perm[i]]];
+        return gfldpc::unpack(sent, s.bits_per_cu);
+    }
     Mat<std::uint8_t> coded;
     if (rv && !s.polar) {
         const auto full = mother_code(s).encode(bits);
@@ -357,14 +437,34 @@ std::vector<double> flip(const Spec& s, int index, int rv) {
     return out;
 }
 
+std::vector<double> plain(const Spec& s, std::span<const double> soft, int index, int rv) {
+    if (static_cast<int>(soft.size()) != soft_len(s))
+        throw std::invalid_argument(std::string(s.name) + ": expected soft_len values");
+    std::vector<double> out(soft.size());
+    if (!s.gf) {
+        const auto fl = flip(s, index, rv);
+        for (std::size_t i = 0; i < soft.size(); ++i) out[i] = fl[i] * soft[i];
+        return out;
+    }
+    Mat<std::uint8_t> info(1, static_cast<std::size_t>(s.k));
+    info.data = pn_at(s, index);
+    const auto sc = gfldpc::pack(encode_info(s, info, rv), s.bits_per_cu, n_sym(s));  // the scrambling's symbols
+    const int q = 1 << s.bits_per_cu;
+    for (int i = 0; i < n_sym(s); ++i)
+        for (int w = 0; w < q; ++w) out[i * q + w] = soft[i * q + (w ^ sc[0][i])];
+    return out;
+}
+
 void combine(const Spec& s, Mat<double>& buf, const Mat<double>& soft, std::span<const int> rvs) {
-    if (static_cast<int>(soft.cols) != s.coded_bits) throw std::invalid_argument(std::string(s.name) + ": expected (B, coded_bits)");
+    if (static_cast<int>(soft.cols) != soft_len(s))
+        throw std::invalid_argument(std::string(s.name) + ": expected (B, soft_len)");
     const std::size_t B = soft.rows, L = static_cast<std::size_t>(buffer_len(s));
     if (buf.rows == 0) buf = Mat<double>(B, L, 0.0);
     if (buf.rows < B || buf.cols != L) throw std::invalid_argument(std::string(s.name) + ": buffer shape");
     std::vector<double> deint(soft.cols);
+    const auto& perm = soft_perm(s);
     for (std::size_t b = 0; b < B; ++b) {
-        for (std::size_t i = 0; i < soft.cols; ++i) deint[s.perm[i]] = soft[b][i];
+        for (std::size_t i = 0; i < soft.cols; ++i) deint[perm[i]] = soft[b][i];
         const auto pos = rv_positions(s, at(rvs, b, B, 0));
         for (std::size_t j = 0; j < pos.size(); ++j) buf[b][pos[j]] += deint[j];  // np.add.at: in order
     }
@@ -397,6 +497,7 @@ void set_ldpc_iters(int n) {
 
 Info decode_llrs(const Spec& s, const Mat<float>& llr, int iters, std::span<const std::uint32_t> masks,
                  std::span<const int> index) {
+    if (s.gf) return decode_gf(s, gf_decoder(s), deinterleave_llr(s, llr));
     return decode_code_order(s, s.polar ? nullptr : &ldpc_decoder(s), deinterleave_llr(s, llr),
                              iters > 0 ? iters : ldpc_iters(), masks, index);
 }
@@ -415,13 +516,15 @@ std::vector<Payload> decode_buffer(const Spec& s, const Mat<double>& buf, int ma
         return payloads(s, d.bits, d.ok, masks, index);
     }
     const int extent = ir_extent(s, max_rv);
-    const auto d = decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),
-                                     ldpc_iters(), {}, {});
+    const auto d = s.gf ? decode_gf(s, gf_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)))
+                        : decode_code_order(s, &ldpc_decoder(s, extent), cut(s, buf, static_cast<std::size_t>(extent)),
+                                            ldpc_iters(), {}, {});
     return payloads(s, d.bits, d.ok, masks, index);
 }
 
 Posterior decode_posterior(const Spec& s, std::span<const double> soft, std::span<const double> buf, int max_rv,
                            int rv) {
+    if (s.polar || s.gf) throw std::invalid_argument(std::string(s.name) + ": decode_posterior is LDPC only");
     Mat<float> llr;
     const ldpc::Decoder* dec;
     if (buf.empty()) {
@@ -461,7 +564,10 @@ Raw decode_raw(const Spec& s, const Mat<float>& soft, std::span<const int> index
         out.cands = std::move(r.paths);
         out.usable = Mat<std::uint8_t>(B, POLAR_LIST, 1);
     } else {
-        auto r = ldpc_decoder(s).decode(deint, ldpc_iters());
+        auto r = s.gf ? decode_gf(s, gf_decoder(s), deint) : [&] {
+            auto d = ldpc_decoder(s).decode(deint, ldpc_iters());
+            return Info{std::move(d.bits), std::move(d.ok)};
+        }();
         out.list = 1;
         out.cands = std::move(r.bits);
         out.usable = Mat<std::uint8_t>(B, 1);
@@ -495,7 +601,7 @@ namespace {
 // Where each info bit is sent at RV 0 in code order (its IR buffer position too), or -1 (codes._info_code_positions).
 const std::vector<int>& info_code_positions(const Spec& s) {
     std::vector<int> out(static_cast<std::size_t>(s.k), -1);
-    if (!s.polar) {
+    if (!s.polar && !s.gf) {
         const auto& sent = ldpc_code(s).sent();
         for (std::size_t p = 0; p < sent.size(); ++p)
             if (sent[p] < s.k) out[static_cast<std::size_t>(sent[p])] = static_cast<int>(p);
@@ -511,7 +617,8 @@ const std::vector<int>& info_code_positions(const Spec& s) {
 const std::vector<int>& systematic_positions(const Spec& s) {
     const auto& code = info_code_positions(s);
     std::vector<int> where(static_cast<std::size_t>(s.coded_bits));  // code order -> mapping order
-    for (int i = 0; i < s.coded_bits; ++i) where[s.perm[i]] = i;
+    if (!s.gf)  // GF(M): no info bit is sent as a bit, every one -1
+        for (int i = 0; i < s.coded_bits; ++i) where[s.perm[i]] = i;
     std::vector<int> out(code.size(), -1);
     for (std::size_t i = 0; i < code.size(); ++i)
         if (code[i] >= 0) out[i] = where[static_cast<std::size_t>(code[i])];
@@ -672,7 +779,10 @@ Raw decode_buffer_raw(const Spec& s, const Mat<double>& buf, int max_rv, std::sp
             const auto v = pin_buffer(s, buf.row(r), known);
             std::copy(v.begin(), v.end(), b[r]);
         }
-    auto r = ldpc_decoder(s, extent).decode(cut(s, b, static_cast<std::size_t>(extent)), ldpc_iters());
+    auto r = s.gf ? decode_gf(s, gf_decoder(s, extent), cut(s, b, static_cast<std::size_t>(extent))) : [&] {
+        auto d = ldpc_decoder(s, extent).decode(cut(s, b, static_cast<std::size_t>(extent)), ldpc_iters());
+        return Info{std::move(d.bits), std::move(d.ok)};
+    }();
     out.list = 1;
     out.cands = std::move(r.bits);
     out.usable = Mat<std::uint8_t>(B, 1);

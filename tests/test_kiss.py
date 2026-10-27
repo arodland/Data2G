@@ -277,6 +277,10 @@ def soft_rx(burst, sigma: dict, seed: int = 0):
     for i, s in enumerate(burst.slots):
         sp = ctl_spec(spec) if i < n_ctl else spec
         x = 1.0 - 2.0 * codes.encode(sp, s.payload, s.rv, PHY.mask_value(s.mask_id), i)
+        if sp.code == "gf":  # GF(M): a symbol's likelihoods, the sent value's at +1
+            p = sp.bits_per_cu
+            sym = ((1 - x.reshape(-1, p)) / 2) @ (1 << np.arange(p)[::-1])
+            x = (np.arange(1 << p)[None] == sym[:, None]).reshape(-1).astype(float)
         sg = sigma.get(i, 0.3)
         # lost: noise alone (all-zero LLRs would "decode" to the all-zero codeword)
         soft.append(2 * rng.standard_normal(len(x)) if sg is None else 2 * (x + sg * rng.standard_normal(len(x))) / sg**2)
