@@ -318,7 +318,7 @@ int64_t Receiver::decided_mid(const cpm::Grid& g) const {
 }
 
 bool Receiver::supersede(std::vector<Item>& out, bool whole) {
-    fresh_ = 0;
+    fresh_ %= HOP;  // searches on the stream's HOP grid (receiver.py's fresh)
     const Pending p = *pending_;
     if (p.is_cpm()) return false;  // scores aren't comparable across families
     std::optional<Pending> q;
@@ -408,7 +408,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         if (!pending_) {
             // a burst's end is checked on every call; new preambles only every HOP samples
             if (len() < min_search_ || fresh_ < HOP) break;
-            fresh_ = 0;
+            fresh_ %= HOP;
             // digital silence has no noise to normalize by, and filter
             // ringing then reads as preambles
             {
@@ -451,7 +451,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (fresh_ >= HOP) {
                 check_pilots();
                 // the later-header search is for false locks: a confirmed burst skips it
-                if (confirmed_) fresh_ = 0;
+                if (confirmed_) fresh_ %= HOP;
                 else if (supersede(out)) continue;
             }
             break;

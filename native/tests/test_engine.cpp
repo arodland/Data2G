@@ -463,8 +463,14 @@ void live_preview() {
         TxBurst burst;
         burst.submode = name;
         const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(name)));
-        const int slots = mode_at(name).is_cpm() ? 2 : 4;  // fsk8r50 x4 is 29 s
-        for (int i = 0; i < slots; ++i) burst.slots.push_back({{7, 0, i}, 0, bytes(pb, 20 + static_cast<unsigned>(i))});
+        const bool is_cpm = mode_at(name).is_cpm();
+        const int slots = is_cpm ? 2 : 4;  // fsk8r50 x4 is 29 s
+        // a CPM burst leads with its control codeword (phy's tx_audio): two data slots were sent as
+        // control + data, the header claimed one codeword fewer, and the unclaimed 3 s of tones
+        // read as an n4 header (score 0.30, CRC-6 passing by chance at protocol 14)
+        if (is_cpm)
+            burst.slots.push_back({ctl_mask(0, 0, 7), 0, bytes(static_cast<std::size_t>(ctl_payload_bytes(mode_at(name))), 20)});
+        for (int i = is_cpm; i < slots; ++i) burst.slots.push_back({{7, 0, i}, 0, bytes(pb, 20 + static_cast<unsigned>(i))});
         const auto x = tx_audio(burst);
         std::vector<double> y(config::FS, 0.0);
         y.insert(y.end(), x.begin(), x.end());
