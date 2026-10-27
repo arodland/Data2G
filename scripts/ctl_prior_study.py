@@ -15,6 +15,7 @@ codewords fail, for
 
     uv run python scripts/ctl_prior_study.py --out runs/ctl_prior_study.csv
     uv run python scripts/ctl_prior_study.py --polar --out runs/ctl_prior_polar.csv
+    uv run python scripts/ctl_prior_study.py --content 40 --out runs/ctl_inline_40.csv   # a control carrying T_INLINE
 
 --polar: the polar control codewords (CPM's, and the polar and ACK modes'),
 BPSK LLRs per coded bit (Es/N0 per bit), cuts phy.POLAR_PIN_CUTS. A control
@@ -113,12 +114,12 @@ def sweep(spec, content: int, lo: float, seed: int, target=0.1) -> dict:
     return out
 
 
-def study(name: str) -> dict:
+def study(name: str, content: int = CONTENT) -> dict:
     spec = SUBMODES.get(name) or POLAR[name]
     seed = 1000 + spec.index
     data = sweep(spec, 0, -12.0, seed)["data"]
     row = {"mode": name, "payload_bytes": codes.payload_bytes(spec), "k": spec.k, "data": data}
-    th = sweep(spec, CONTENT, data - 8.0, seed)
+    th = sweep(spec, content, data - 8.0, seed)
     cuts = map(str, CUTS[spec.code])
     return row | {s: th.get(s, float("nan")) for s in ("plain", *cuts, "genie")}
 
@@ -129,10 +130,12 @@ def main():
     ap.add_argument("--modes", nargs="*", default=None)
     ap.add_argument("--polar", action="store_true", help="the polar control codewords (see the docstring)")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--content", type=int, default=CONTENT,
+                    help="control bytes (a control with T_INLINE: its data in the padding, 5 B more)")
     a = ap.parse_args()
     modes = a.modes or (sorted(POLAR) if a.polar else [n for n, s in SUBMODES.items() if s.code == "ldpc"])
     with Pool(a.jobs) as pool:
-        rows = pool.map(study, modes)
+        rows = pool.starmap(study, [(m, a.content) for m in modes])
     with open(a.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()

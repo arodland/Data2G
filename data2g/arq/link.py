@@ -53,6 +53,8 @@ OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
 LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s bound
 # DATA2G_COMPRESS=0: send every codeword raw (for testing); compressed ones are still received
 COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
+# DATA2G_INLINE=0: never send a codeword in the control's padding (T_INLINE; for A/B runs); still received
+INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
 
 ACTIVE, FAILED = "active", "failed"
 
@@ -165,6 +167,7 @@ class Codeword:
     cstart: int = 0  # offset in the delivered stream (hist) where its bytes begin
     first_bn: int = -1  # my burst number that sent it new
     comp_known: bool = False  # the peer acted on first_bn: it holds the flag, resends omit it
+    inlined: bool = False  # first_bn carried it in its control (T_INLINE): no soft bits held, a resend is RV 0
 
 
 class TxSide:
@@ -547,17 +550,30 @@ class Station:
         spare = n_ctl * cpb - self._ctl_bytes(ext, k, has_new, 0)
         new = self._new_codewords(submode, room, k, spare, bn)
         core.k = len(resend)
-        if resend:
-            ext[F.T_RV] = F.pack_rv(rvs)
-        if new:
-            ext[F.T_NEW] = bytes([new[0].seq % SEQ_MOD])
-        if comp := F.pack_flags([self._comp_bit(x) for x in resend] + [c.comp for c in new]):
-            ext[F.T_COMP] = comp
-        if dup == 2 and not (resend or new):
+        data = self._data_tlvs(resend, rvs, new)
+        inline = None
+        if INLINE and new and not self.new_available():
+            # the last codeword of a write fits the control's padding: it goes
+            # there, one codeword fewer on air (docs/arq.md §5a)
+            c = new[-1]
+            body = (bytes([c.seq % SEQ_MOD | c.comp << 7]) + c.payload.rstrip(b"\0")
+                    + F.inline_check(data_mask(self.direction, c.seq, self.key, c.comp, self._abandon_epoch), c.payload))
+            d = self._data_tlvs(resend, rvs, new[:-1]) | {F.T_INLINE: body}
+            # hints and requests make room for it, as for resends in _fit
+            # (CPM's 20 B control: a whole data codeword, 3-10 s, saved)
+            e, shed = dict(ext), [t for t in OPTIONAL_TLVS if t in ext]
+            while self._ctl_bytes(e | d, 0, False, 0) > n_ctl * cpb and shed:
+                del e[shed.pop(0)]
+            if len(body) < 256 and self._ctl_bytes(e | d, 0, False, 0) <= n_ctl * cpb:  # a TLV holds 255 B
+                inline, data, ext = new.pop(), d, e
+                inline.inlined = True
+        ext.update(data)
+        if dup == 2 and not (resend or new or inline):
             dup = 1  # nothing but control after all
         if dup == 2:
             core.ftype = F.ARQ_DUP
-        if new and not self.new_available() and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
+        if ((new or inline) and not self.new_available()
+                and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb):
             # my host's data ends here: the peer may hold its reply for its
             # host's answer (session.REPLY_HOLD_S). Only in the padding, like T_COMP
             ext[F.T_DRAINED] = b""
@@ -565,10 +581,21 @@ class Station:
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
 
         burst = TxBurst(submode, self._slots(ctl, dup, resend, rvs, new), self.bursts_sent, self.cap)
-        self._record(bn, burst, conveyed, resend, new)
+        self._record(bn, burst, conveyed, resend, new + [inline] * bool(inline))
         if log.isEnabledFor(logging.INFO):
-            self._log_tx(bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply)
+            self._log_tx(bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply, inline)
         return burst
+
+    def _data_tlvs(self, resend: list[int], rvs: list[int], new: list[Codeword]) -> dict:
+        """T_RV, T_NEW and T_COMP for these data slots."""
+        d = {}
+        if resend:
+            d[F.T_RV] = F.pack_rv(rvs)
+        if new:
+            d[F.T_NEW] = bytes([new[0].seq % SEQ_MOD])
+        if comp := F.pack_flags([self._comp_bit(x) for x in resend] + [c.comp for c in new]):
+            d[F.T_COMP] = comp
+        return d
 
     def _escalation(self) -> int:
         """My own timeouts (master), or the peer telling me my replies are
@@ -699,8 +726,8 @@ class Station:
         self.stats["cw_comp"] += sum(c.comp for c in new)
         self.stats["cw_resend"] += len(resend)
 
-    def _log_tx(self, bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply):
-        kind = "data" if resend or new else ("ack" if fresh else "poll")
+    def _log_tx(self, bn, burst, fresh, core, ext, dup, resend, rvs, new, escalation, hint, reply, inline):
+        kind = "data" if resend or new or inline else ("ack" if fresh else "poll")
         parts = [f"{kind} {self._burst_desc(burst.submode, len(burst.slots), dup == 2)}"]
         if resend:
             parts.append("resend " + " ".join(f"{x}/rv{rv}" for x, rv in zip(resend, rvs)))
@@ -708,6 +735,8 @@ class Station:
             parts.append(f"new {new[0].seq}" + (f"-{new[-1].seq}" if len(new) > 1 else "")
                          + f" {sum(c.length for c in new)} B"
                          + (f" ({sum(c.comp for c in new)} compressed)" if any(c.comp for c in new) else ""))
+        if inline:
+            parts.append(f"inline {inline.seq} {inline.length} B" + " compressed" * inline.comp)
         if self.tx.pending():
             parts.append(f"unacked {self.tx.next - self.tx.base}, queued {self.new_available()} B")
         parts.append(f"ack cum {self.rx.cum}" + (f" +{len(self.rx.buf)} held" if self.rx.buf else ""))
@@ -846,7 +875,7 @@ class Station:
             ctl = F.Control.unpack(payloads)
         except ValueError as e:
             return self._malformed(str(e))
-        if why := self._check(ctl.core, ctl.ext, rx.n_cw - dup * ctl.core.n_ctl):
+        if why := self._check(ctl.core, ctl.ext, rx.n_cw - dup * ctl.core.n_ctl, self.policy.payload_bytes(rx.submode)):
             return self._malformed(why)
         return ctl, dup
 
@@ -892,7 +921,8 @@ class Station:
             self._abandon = None  # the peer has applied it
         for x in self._sent_seqs.pop(acted, []):
             if c := self.tx.cws.get(x):
-                c.heard += 1  # the peer decoded that burst: it holds soft bits
+                # the peer decoded that burst: it holds soft bits (none for one sent inline)
+                c.heard += not (c.inlined and c.first_bn == acted)
                 # and mapped its new slots by T_NEW: it holds their T_COMP bits
                 c.comp_known |= c.first_bn == acted
         # (settle_limbo can start one before any burst carries it: every ACK is from before it)
@@ -951,6 +981,16 @@ class Station:
                 n_dec += 1
                 rx.forget(key)
                 progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
+        if (b := ext.get(F.T_INLINE)) is not None:
+            self.last_rx_data = True
+            seq, z = unwrap(b[0] & 0x7F, self.rx.cum), bool(b[0] >> 7)
+            p = b[1:-2].ljust(self.policy.payload_bytes(rx.submode), b"\0")
+            # checked under its identity, as a data slot's CRC is (§2): seq, compression, slicing
+            if b[-2:] == F.inline_check(data_mask(self.peer, seq, self.key, z, self._peer_epoch), p):
+                n_dec += seq >= self.rx.cum
+                progress |= self.rx.accept(seq, p, z)
+            else:
+                log.info("RX inline seq %d: check failed, dropped", seq)
         self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
         return slots, n_dec, n_old, progress
 
@@ -976,7 +1016,7 @@ class Station:
         log.info("RX b%d %s", core.burst_seq, " | ".join(parts + flags))
 
     @staticmethod
-    def _check(core, ext, n_data) -> str | None:
+    def _check(core, ext, n_data, pb) -> str | None:
         """What is wrong with a CRC-valid control (a false CRC accept, a
         broken peer), or None. Checked before any state changes: a bad one
         is dropped like a failed control codeword, and the existing
@@ -989,6 +1029,8 @@ class Station:
             return "empty T_NEW"
         if F.T_ABANDON in ext and len(ext[F.T_ABANDON]) < 2:
             return f"T_ABANDON of {len(ext[F.T_ABANDON])} B"
+        if F.T_INLINE in ext and not 3 <= len(ext[F.T_INLINE]) <= 3 + pb:
+            return f"T_INLINE of {len(ext[F.T_INLINE])} B"
         return None
 
     def _malformed(self, why: str) -> bool:

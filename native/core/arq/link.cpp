@@ -277,8 +277,8 @@ std::vector<std::int64_t> RxSide::abandon(std::int64_t a) {
 // --- one station ------------------------------------------------------------------------
 
 namespace {
-bool env_compress() {
-    const char* v = std::getenv("DATA2G_COMPRESS");
+bool env_on(const char* name) {
+    const char* v = std::getenv(name);
     return !(v && std::strcmp(v, "0") == 0);
 }
 
@@ -303,7 +303,7 @@ int ctl_size(const Ext& e, int pb, int k, bool has_new, int zk = 0) {
 Station::Station(int direction_, std::shared_ptr<Policy> policy_, bool master_, int key_, std::optional<int> max_misses_,
                  int cap_, bool chat_)
     : direction(direction_), policy(std::move(policy_)), master(master_), key(key_), max_misses(max_misses_), cap(cap_),
-      chat(chat_), compress(env_compress()) {}
+      chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")) {}
 
 Bytes Station::read() {
     Bytes out = std::move(rx.out);
@@ -372,17 +372,46 @@ TxBurstPtr Station::build(bool fresh) {
     // a new codeword is compressed only when its T_COMP bit fits the
     // control's padding: compression never costs a control codeword
     const std::int64_t spare = static_cast<std::int64_t>(n_ctl) * cpb - ctl_bytes(ext, k, has_new, 0);
-    const auto fresh_cws = new_codewords(submode, room, k, spare, bn);
+    auto fresh_cws = new_codewords(submode, room, k, spare, bn);
     core.k = static_cast<int>(resend.size());
-    if (!resend.empty()) ext[T_RV] = pack_rv(rvs);
-    if (!fresh_cws.empty()) ext[T_NEW] = Bytes{static_cast<std::uint8_t>(pmod(fresh_cws[0]->seq, SEQ_MOD))};
-    std::vector<bool> flags;
-    for (auto x : resend) flags.push_back(comp_bit(x));
-    for (auto* c : fresh_cws) flags.push_back(c->comp);
-    if (Bytes comp = pack_flags(flags); !comp.empty()) ext[T_COMP] = comp;
-    if (dup == 2 && resend.empty() && fresh_cws.empty()) dup = 1;  // nothing but control after all
+    Ext data = data_tlvs(resend, rvs, fresh_cws);
+    Codeword* inl = nullptr;
+    if (inline_data && !fresh_cws.empty() && new_available() <= 0) {
+        // the last codeword of a write fits the control's padding: it goes
+        // there, one codeword fewer on air (docs/arq.md §5a)
+        const Codeword& c = *fresh_cws.back();
+        Bytes body{static_cast<std::uint8_t>(pmod(c.seq, SEQ_MOD) | (c.comp ? 0x80 : 0))};
+        std::size_t n = c.payload.size();
+        while (n && !c.payload[n - 1]) --n;
+        body.insert(body.end(), c.payload.begin(), c.payload.begin() + static_cast<std::ptrdiff_t>(n));
+        const Bytes chk = inline_check(data_mask(direction, c.seq, key, c.comp, abandon_epoch), c.payload);
+        body.insert(body.end(), chk.begin(), chk.end());
+        const std::vector<const Codeword*> rest(fresh_cws.begin(), fresh_cws.end() - 1);
+        Ext d = data_tlvs(resend, rvs, rest);
+        d[T_INLINE] = std::move(body);
+        // hints and requests make room for it, as for resends in fit()
+        // (CPM's 20 B control: a whole data codeword, 3-10 s, saved)
+        Ext kept = ext;
+        auto size = [&] {
+            Ext e = kept;
+            for (const auto& [t, v] : d) e[t] = v;
+            return ctl_bytes(e, 0, false, 0);
+        };
+        const std::int64_t room_b = static_cast<std::int64_t>(n_ctl) * cpb;
+        for (int t : OPTIONAL_TLVS)
+            if (size() > room_b) kept.erase(t);
+        if (d[T_INLINE].size() < 256 && size() <= room_b) {  // a TLV holds 255 B
+            inl = &tx.cws.at(c.seq);
+            inl->inlined = true;
+            fresh_cws.pop_back();
+            data = std::move(d);
+            ext = std::move(kept);
+        }
+    }
+    for (auto& [t, v] : data) ext[t] = std::move(v);
+    if (dup == 2 && resend.empty() && fresh_cws.empty() && !inl) dup = 1;  // nothing but control after all
     if (dup == 2) core.ftype = ARQ_DUP;
-    if (!fresh_cws.empty() && new_available() <= 0 &&
+    if ((!fresh_cws.empty() || inl) && new_available() <= 0 &&
         ctl_bytes(ext, 0, false, 0) + 2 <= static_cast<std::int64_t>(n_ctl) * cpb) {
         // my host's data ends here: the peer may hold its reply for its
         // host's answer (session REPLY_HOLD_S). Only in the padding, like T_COMP
@@ -398,9 +427,24 @@ TxBurstPtr Station::build(bool fresh) {
     burst->burst_seq = bursts_sent;
     burst->cap = cap;
     add_slots(*burst, ctl, dup, resend, rvs, fresh_cws);
-    record(bn, burst, std::move(conveyed), resend, fresh_cws);
-    if (log_enabled(LOG, INFO)) log_tx(bn, *burst, fresh, core, ext, dup, resend, rvs, fresh_cws, esc, hint, reply);
+    std::vector<const Codeword*> carried = fresh_cws;
+    if (inl) carried.push_back(inl);
+    record(bn, burst, std::move(conveyed), resend, carried);
+    if (log_enabled(LOG, INFO)) log_tx(bn, *burst, fresh, core, ext, dup, resend, rvs, fresh_cws, esc, hint, reply, inl);
     return burst;
+}
+
+// T_RV, T_NEW and T_COMP for these data slots.
+Ext Station::data_tlvs(const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
+                       const std::vector<const Codeword*>& fresh_cws) const {
+    Ext d;
+    if (!resend.empty()) d[T_RV] = pack_rv(rvs);
+    if (!fresh_cws.empty()) d[T_NEW] = Bytes{static_cast<std::uint8_t>(pmod(fresh_cws[0]->seq, SEQ_MOD))};
+    std::vector<bool> flags;
+    for (auto x : resend) flags.push_back(comp_bit(x));
+    for (auto* c : fresh_cws) flags.push_back(c->comp);
+    if (Bytes comp = pack_flags(flags); !comp.empty()) d[T_COMP] = comp;
+    return d;
 }
 
 // My own timeouts (master), or the peer telling me my replies are lost (it
@@ -540,8 +584,9 @@ void Station::record(std::int64_t bn, const TxBurstPtr& burst, std::set<std::int
 
 void Station::log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Core& core, const Ext& ext, int dup,
                      const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
-                     const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply) {
-    const char* kind = (!resend.empty() || !fresh_cws.empty()) ? "data" : (fresh ? "ack" : "poll");
+                     const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply,
+                     const Codeword* inl) {
+    const char* kind = (!resend.empty() || !fresh_cws.empty() || inl) ? "data" : (fresh ? "ack" : "poll");
     std::vector<std::string> parts{std::string(kind) + " " + burst_desc(burst.submode, static_cast<int>(burst.slots.size()), dup == 2)};
     if (!resend.empty()) {
         std::vector<std::string> rs;
@@ -560,6 +605,7 @@ void Station::log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Co
         if (n_comp) s += " (" + str(n_comp) + " compressed)";
         parts.push_back(s);
     }
+    if (inl) parts.push_back("inline " + str(inl->seq) + " " + str(inl->length) + " B" + (inl->comp ? " compressed" : ""));
     if (tx.pending()) parts.push_back("unacked " + str(tx.next - tx.base) + ", queued " + str(new_available()) + " B");
     parts.push_back("ack cum " + str(rx.cum) + (rx.buf.empty() ? "" : " +" + str(rx.buf.size()) + " held"));
     parts.push_back("ask data " + mode(core.recommend) + " size " + str(hint) + ", reply " + mode(reply));
@@ -660,7 +706,7 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
         malformed(e.what());
         return std::nullopt;
     }
-    if (auto why = check(ctl.core, ctl.ext, rxb.n_cw() - dup * ctl.core.n_ctl)) {
+    if (auto why = check(ctl.core, ctl.ext, rxb.n_cw() - dup * ctl.core.n_ctl, policy->payload_bytes(rxb.submode()))) {
         malformed(*why);
         return std::nullopt;
     }
@@ -713,7 +759,8 @@ std::pair<std::int64_t, bool> Station::take_ack(const Core& core, const Ext& ext
     if (auto it = sent_seqs.find(acted); it != sent_seqs.end()) {
         for (auto x : it->second) {
             if (auto c = tx.cws.find(x); c != tx.cws.end()) {
-                c->second.heard += 1;
+                // the peer decoded that burst: it holds soft bits (none for one sent inline)
+                c->second.heard += !(c->second.inlined && c->second.first_bn == acted);
                 c->second.comp_known = c->second.comp_known || c->second.first_bn == acted;
             }
         }
@@ -790,6 +837,21 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
             out.progress |= rx.accept(*seq, std::move(*p), comp[j]);
         }
     }
+    if (auto e = ext.find(T_INLINE); e != ext.end()) {
+        last_rx_data = true;
+        const Bytes& b = e->second;
+        const std::int64_t seq = unwrap(b[0] & 0x7F, rx.cum);
+        const bool z = (b[0] >> 7) != 0;
+        Bytes p(b.begin() + 1, b.end() - 2);
+        p.resize(static_cast<std::size_t>(policy->payload_bytes(rxb.submode())), 0);
+        // checked under its identity, as a data slot's CRC is (§2): seq, compression, slicing
+        if (inline_check(data_mask(peer(), seq, key, z, peer_epoch), p) == Bytes(b.end() - 2, b.end())) {
+            out.n_dec += seq >= rx.cum;
+            out.progress |= rx.accept(seq, std::move(p), z);
+        } else {
+            log_write(LOG, INFO, format("RX inline seq %lld: check failed, dropped", static_cast<long long>(seq)));
+        }
+    }
     if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, true);
     return out;
 }
@@ -819,7 +881,7 @@ void Station::log_rx(RxBurst& rxb, const Core& core, int dup, const DataTaken& d
     log_write(LOG, INFO, format("RX b%d %s", core.burst_seq, join(parts, " | ").c_str()));
 }
 
-std::optional<std::string> Station::check(const Core& core, const Ext& ext, int n_data) {
+std::optional<std::string> Station::check(const Core& core, const Ext& ext, int n_data, int pb) {
     if (core.k > n_data) return format("K %d in %d data slots", core.k, n_data);
     auto e_rv = ext.find(T_RV);
     const std::size_t rv_bytes = e_rv == ext.end() ? 0 : e_rv->second.size();
@@ -828,6 +890,8 @@ std::optional<std::string> Station::check(const Core& core, const Ext& ext, int 
     if (auto e = ext.find(T_NEW); e != ext.end() && e->second.empty()) return std::string("empty T_NEW");
     if (auto e = ext.find(T_ABANDON); e != ext.end() && e->second.size() < 2)
         return format("T_ABANDON of %d B", static_cast<int>(e->second.size()));
+    if (auto e = ext.find(T_INLINE); e != ext.end() && (e->second.size() < 3 || static_cast<int>(e->second.size()) > 3 + pb))
+        return format("T_INLINE of %d B", static_cast<int>(e->second.size()));
     return std::nullopt;
 }
 

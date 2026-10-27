@@ -51,7 +51,8 @@ from data2g.config import SNR_REF_BW_HZ
 from test_arq import (FakeRx, RandomPolicy, Script, clean, clean_not_settled_by_a_repeat, clean_settles_at_the_ack,
                       clean_settles_limbo, clean_then_session_end, clean_upto,
                       clean_with_everything_acked, finish, tx_queued_host_bytes, late_burst_from_before_an_abandon,
-                      late_burst_with_a_stale_ack, payload)
+                      late_burst_with_a_stale_ack, inline_capped_at_a_tlv, inline_lost_then_resent_in_a_slot, payload,
+                      short_writes)
 from test_arq_session import DECODE_S, HEADER_S, PTT_S
 from test_arq_session import Policy as SessionPolicy
 from test_engine import BLOCK
@@ -117,7 +118,9 @@ def link_scenario(seed, corrupt=False):
         kind=r.choice(["random", "text", "mixed"]),
         modes=r.choice([("m4", "m22", "m46"), ("m4", "m46", "c60", "c40"), ("m22",), ("m46", "c60")]),
         max_cw=r.choice([2, 3, 10, 20, 64]), change=r.choice([0.05, 0.2, 0.5]),
-        n=(r.randrange(0, 6000), r.randrange(0, 2500)), p_corrupt=0.0)
+        n=(r.randrange(0, 6000), r.randrange(0, 2500)), p_corrupt=0.0,
+        # written in short pieces (T_INLINE); its own draw, so the other fields keep their seeds
+        chunks=random.Random(seed).random() < 0.5)
     if corrupt:
         sc.update(p_corrupt=r.choice([0.02, 0.05, 0.1]), p_late=0.0, fade=None)
     return sc
@@ -131,8 +134,10 @@ def lockstep(sc, cls_a, cls_b, max_turns=30000):
     data_a, data_b = payload(rng, sc["n"][0], sc["kind"]), payload(rng, sc["n"][1], sc["kind"])
     pol = lambda k: RandomPolicy(random.Random(seed + k), sc["change"], sc["modes"], sc["max_cw"])
     a, b = cls_a(0, pol(1), master=True), cls_b(1, pol(2))
-    a.write(data_a)
-    b.write(data_b)
+    wrng = random.Random(seed + 3)
+    todo = [short_writes(data_a, wrng), short_writes(data_b, wrng)] if sc.get("chunks") else [[data_a], [data_b]]
+    for st, q in zip((a, b), todo):
+        st.write(q.pop(0) if q else b"")
     stores, stats, trace = {0: {}, 1: {}}, {"mismatch": 0}, []
     got_a, got_b = bytearray(), bytearray()
     count = {0: 0, 1: 0}  # per station: handled bursts without progress, its data queued
@@ -141,6 +146,9 @@ def lockstep(sc, cls_a, cls_b, max_turns=30000):
     burst, sender = a.build(), a
     stats["max_count"] = stats["max_turns"] = 0
     for turn in range(max_turns):
+        for st, q in zip((a, b), todo):
+            if q and wrng.random() < 0.3:
+                st.write(q.pop(0))
         trace.append((sender.direction, _burst(burst)))
         receiver = b if sender is a else a
         fade = sc["fade"] and sc["fade"][0] <= turn < sc["fade"][0] + sc["fade"][1]
@@ -173,7 +181,7 @@ def lockstep(sc, cls_a, cls_b, max_turns=30000):
         assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)], "stream corrupted"
         if a.state == L.FAILED or b.state == L.FAILED:
             return trace, ("failed", a.fail_reason or b.fail_reason), stats
-        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending() and not any(todo):
             return trace, ("done", a.tx.acked, b.tx.acked), stats
         if ok:
             burst, sender = receiver.build(), receiver
@@ -458,6 +466,16 @@ def test_late_burst_from_before_an_abandon(native, pure, which):
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_late_burst_with_a_stale_ack(native, pure, which):
     late_burst_with_a_stale_ack(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_inline_lost_then_resent_in_a_slot(native, pure, which):
+    inline_lost_then_resent_in_a_slot(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_inline_capped_at_a_tlv(native, pure, which):
+    inline_capped_at_a_tlv(impl(native, which)[0])
 
 
 @pytest.mark.parametrize("which", ["py", "cpp"])

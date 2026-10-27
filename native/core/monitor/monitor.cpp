@@ -441,7 +441,31 @@ void Monitor::arq_burst(PlainRx& rx, const Control& ctl, int key, int dir, int d
         if (!s.started) start(s, seq);
         deliver(s, key, dir, seq, std::move(*p), comp, d);
     }
-    if (n_data) d.head += "  data:" + states + "\n";
+    // a codeword in the control's padding (T_INLINE): seq | comp, payload, its identity's check
+    if (const auto e = ext.find(T_INLINE); e != ext.end() && e->second.size() >= 3) {
+        const Bytes& b = e->second;
+        const int s7 = b[0] & 0x7F;
+        const bool comp = b[0] >> 7;
+        const std::int64_t seq = s.started ? unwrap(s7, s.rx.cum) : s7;
+        Bytes p(b.begin() + 1, b.end() - 2);
+        p.resize(static_cast<std::size_t>(payload_bytes(mode_at(rx.submode()))), 0);
+        const Bytes chk(b.end() - 2, b.end());
+        auto ok = [&](int ep) { return inline_check(data_mask(dir, s7, key, comp, ep), p) == chk; };
+        std::string st = " " + std::to_string(s7) + "i";
+        if (!s.epoch_known)  // joined mid-session: the epoch is in the check, as in every data CRC
+            for (int ep = 0; ep < EPOCH_MOD && !s.epoch_known; ++ep)
+                if (ok(ep)) s.epoch = ep, s.epoch_known = true;
+        if (s.started && seq < s.rx.cum) {
+            states += st + " had";
+        } else if (!s.epoch_known || !ok(s.epoch)) {
+            states += st + " lost";
+        } else {
+            states += st + (comp ? " ok(z)" : " ok");
+            if (!s.started) start(s, seq);
+            deliver(s, key, dir, seq, std::move(p), comp, d);
+        }
+    }
+    if (!states.empty()) d.head += "  data:" + states + "\n";
     flush(s, key, dir, d);
 }
 

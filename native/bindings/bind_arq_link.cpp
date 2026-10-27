@@ -123,7 +123,10 @@ public:
 };
 
 // link.COMPRESS, which tests monkeypatch, read at each build as Python does.
-void sync_compress(Station& s) { s.compress = py::bool_(link_attr("COMPRESS")); }
+void sync_compress(Station& s) {
+    s.compress = py::bool_(link_attr("COMPRESS"));
+    s.inline_data = py::bool_(link_attr("INLINE"));  // link.INLINE likewise
+}
 
 // A Station whose internal builds (from on_timeout, or the session) see an
 // instance override of the Python method, as Python's self.build would.

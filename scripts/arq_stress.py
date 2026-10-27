@@ -3,6 +3,7 @@ across a loss grid; counts outcomes and failure reasons. Any
 "protocol:" failure or accounting mismatch is a bug.
 
     uv run python scripts/arq_stress.py --seeds 2000
+    uv run python scripts/arq_stress.py --seeds 2000 --short-writes   # T_INLINE: data written in short pieces
 """
 
 import argparse
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tests"))
 import test_arq as T  # noqa: E402
 
 GRID = [(pb, pc) for pb in (0.0, 0.1, 0.3, 0.5) for pc in (0.0, 0.1, 0.3, 0.5)]
+SHORT = False  # --short-writes
 
 
 def one(args):
@@ -24,8 +26,10 @@ def one(args):
 
     try:
         big = rng.random() < 0.3  # full-window bursts (64 codewords)
+        kw = dict(chunks=True, modes=rng.choice([("m22", "m46"), ("m4", "m46", "c60", "c40"), ("m46", "m396")]),
+                  kind=rng.choice(["random", "text", "mixed"])) if SHORT else {}
         result, stats = T.run(seed, pb, pc, rng.randrange(0, 30000 if big else 6000), rng.randrange(0, 3000),
-                              max_turns=20000, change=rng.choice([0.0, 0.1, 0.4]), max_cw=64 if big else 20)
+                              max_turns=20000, change=rng.choice([0.0, 0.1, 0.4]), max_cw=64 if big else 20, **kw)
     except AssertionError as e:
         return (pb, pc, "CORRUPT", str(e)[:80], 0)
     return (pb, pc, result, T.LAST_REASON[0], stats["mismatch"])
@@ -36,7 +40,10 @@ def main():
     ap.add_argument("--seeds", type=int, default=2000)
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--sessions", action="store_true", help="whole sessions on a clock instead of the link core")
+    ap.add_argument("--short-writes", action="store_true", help="data written in short pieces (T_INLINE), mixed modes")
     a = ap.parse_args()
+    global SHORT
+    SHORT = a.short_writes
     if a.sessions:
         return sessions(a.seeds, a.jobs)
     jobs = [(1000 + i, *GRID[i % len(GRID)]) for i in range(a.seeds)]
