@@ -67,6 +67,12 @@ FASTLOW_EXPLORE, FASTLOW_FASTER, FASTLOW_SPAN = 0.35, 0.7, 2.5
 # receiver gains dB the steering model still avoids the modes that got
 # faster, so uniform exploration rarely shows them working.
 EXPLORE_FASTER = False
+# --floor: sustained SNR at and under the CPM floor (-19..-4 dB, fixed), any
+# channel kind, 600 s; while the floor holds, exploration picks CPM modes only
+# (what the shifter may send there). The other kinds reach -14 dB 0.5% of the
+# time, so the model had to extrapolate CPM at the floor (awgn -18: 1-codeword
+# bursts where 2 deliver twice the rate).
+FLOOR = False
 KINDS_ONLY = ()  # --kinds: only these channel kinds (outcome_data.KINDS names); with --high, AWGN allowed
 MEAS = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in P.CONSTS]
 FIELDS = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + MEAS
@@ -106,6 +112,8 @@ class Explorer(G.GearShifter):
         if self.prev is not None:  # as recommend() reads it: older history at PREV_MAX_S
             prev = (self.prev[0], self.prev[1], min(self.measured_at - self.prev[2], G.PREV_MAX_S))
         ok = [s.name for s in G.allowed(station.cap) if not G.is_cpm(s) or P.outcome_knows(s.name)]
+        if FLOOR and self.cpm_floor():
+            ok = [m for m in ok if G.is_cpm(MODES[m])] or ok
         explored = False
         edge = FASTLOW or EXPLORE_FASTER
         explore = FASTLOW_EXPLORE if edge else EXPLORE
@@ -171,7 +179,14 @@ def rate(name: str) -> float:
 
 def session(seed):
     rng = np.random.default_rng(seed)
-    if FASTLOW:
+    if FLOOR:
+        kinds = [k for k, _ in O.KINDS]
+        ws = np.array([w for _, w in O.KINDS])
+        kind = str(rng.choice(kinds, p=ws / ws.sum()))
+        doppler, delay = (PS.L.PRESETS[kind] if kind != "random"
+                          else (float(np.exp(rng.uniform(np.log(0.05), np.log(3.0)))), float(rng.uniform(0, 5))))
+        snr0, drift = float(rng.uniform(-19, -4)), 0.0
+    elif FASTLOW:
         u = rng.random()
         kind = "mpp" if u < 0.35 else "mpd" if u < 0.7 else "random"
         doppler, delay = (PS.L.PRESETS[kind] if kind != "random"
@@ -195,7 +210,7 @@ def session(seed):
                      else rng.uniform(22, 40) if u < 0.01 else rng.uniform(-8, 22))
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
     cap = 0 if rng.random() < 0.25 else 2
-    horizon = 600.0 if SLOW or FASTLOW else 300.0
+    horizon = 600.0 if SLOW or FASTLOW or FLOOR else 300.0
     intf = None
     if INTERFERENCE:
         irng = np.random.default_rng(np.random.SeedSequence([seed, 5]))
@@ -222,6 +237,7 @@ def main():
     ap.add_argument("--slow", action="store_true", help="sustained low SNR on slow fading (SLOW)")
     ap.add_argument("--fastlow", action="store_true", help="sustained low SNR on fast fading, edges explored (FASTLOW)")
     ap.add_argument("--explore-faster", action="store_true", help="FASTLOW's exploration on any kind (EXPLORE_FASTER)")
+    ap.add_argument("--floor", action="store_true", help="sustained SNR at the CPM floor, -19..-4 dB (FLOOR)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
     ap.add_argument("--kinds", default="", help="comma-separated channel kinds only (KINDS_ONLY), e.g. awgn")
     ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
@@ -234,11 +250,11 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW, EXPLORE_FASTER
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW, EXPLORE_FASTER, FLOOR
     # set before the pool forks: the workers inherit them
     SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
     KINDS_ONLY = tuple(filter(None, a.kinds.split(",")))
-    FASTLOW, EXPLORE_FASTER = a.fastlow, a.explore_faster
+    FASTLOW, EXPLORE_FASTER, FLOOR = a.fastlow, a.explore_faster, a.floor
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     done = set() if new else {int(r["seed"]) for r in csv.DictReader(open(a.out))}
     todo = [s for s in range(a.first, a.first + a.sessions) if s not in done]
