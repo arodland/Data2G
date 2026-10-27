@@ -40,7 +40,7 @@ void bind_cpm(py::module_& m) {
             d["bits"] = g.bits;
             d["f0"] = g.f0;
             d["sync_threshold"] = g.sync_threshold;
-            d["header_threshold"] = g.header_threshold;
+            d["lock_llr"] = py::make_tuple(g.lock_llr1, g.lock_llr2);
             d["hdr_len"] = g.hdr_len;
             d["preamble"] = np<std::int64_t>(g.preamble);
             d["mid_block"] = np<std::int64_t>(g.mid_block);
@@ -114,8 +114,14 @@ void bind_cpm(py::module_& m) {
     c.def("llrs", [](const std::string& g, const In<double>& E) { return np(cpm::llrs(grid(g), mat(E))); });
     c.def("read_header", [](const std::string& g, const In<double>& x, long s0, double cfo, int copies) {
         const auto h = cpm::read_header(grid(g), view(x), s0, cfo, copies);
-        return py::make_tuple(std::string(h.spec->name), h.n_data, h.dup, h.score, h.runner_up);
+        return py::make_tuple(std::string(h.spec->name), h.n_data, h.dup, h.score, h.runner_up, h.front);
     }, py::arg("grid"), py::arg("x"), py::arg("s0"), py::arg("cfo"), py::arg("copies") = 2);
+    c.def("tone_llr", [](const std::string& g, const In<double>& E) { return np(cpm::tone_llr(grid(g), mat(E))); });
+    c.def("refine", [](const std::string& g, const In<double>& x, long s0, double cfo, const std::string& spec,
+                       int n_data, bool dup) {
+        const auto r = cpm::refine(grid(g), view(x), s0, cfo, cspec(spec), n_data, dup);
+        return py::make_tuple(r.first, r.second);
+    });
     c.def("soft", [](const std::string& g, const In<double>& x, long s0, double cfo, int n_data, bool dup) {
         const auto r = cpm::soft(grid(g), view(x), s0, cfo, n_data, dup);
         py::list slots;

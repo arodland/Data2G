@@ -74,11 +74,15 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz = 150
 // (n_sym, m) energies of one codeword -> n_sym * bits LLRs, mapping order.
 std::vector<double> llrs(const Grid& g, const Mat<double>& E);
 
+// cpm.tone_llr: per row and tone, that tone's log-likelihood ratio against a random one (floored by llr_eps).
+Mat<double> tone_llr(const Grid& g, const Mat<double>& E);
+
 struct Header {
     const Spec* spec;
     int n_data;
     bool dup;
     double score, runner_up;
+    double front;  // the front block's part of score
 };
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 
@@ -102,13 +106,13 @@ struct Lock {
     // for late_lock) are set; spec is nullptr.
     bool wait = false;
 };
-// threshold: nullopt = SYNC_THRESHOLD plus the header floor. hi: nullopt = len(x).
+// threshold: nullopt = SYNC_THRESHOLD plus the lock floors (lock_llr, hdr_margin). hi: nullopt = len(x).
 // wait: a candidate instead of nullopt while the second header copy is still arriving.
 std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional<double> threshold = std::nullopt,
                          double reach_hz = 150.0, bool front_only = true, std::int64_t lo = 0,
                          std::optional<std::int64_t> hi = std::nullopt, bool wait = false);
 // find's candidate (x holding its header_end) -> its lock from both header copies
-// (header2_threshold), or nullopt.
+// (lock_llr2, hdr_margin2), or nullopt.
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand);
 // A burst whose front was missed, from its mid block and both header copies
 // (cpm.find_mid): the mid block's start in [lo, hi). hi: nullopt = len(x).
@@ -137,6 +141,9 @@ struct Received {
     double cfo;
     std::int64_t preamble_start, header_end;
 };
+// cpm.refine: a lock's start and CFO by the likelihood of the burst's first refine_symbols symbols.
+std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
+                                       const Spec& spec, int n_data, bool dup);
 Received receive(std::span<const double> x, const Lock& lock);
 
 }  // namespace data2g::cpm

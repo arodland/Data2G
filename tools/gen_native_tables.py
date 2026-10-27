@@ -180,9 +180,9 @@ def cpm_cpp() -> str:
         out.append(f"constexpr std::uint8_t hdr_{i}[] = {{{ints(np.concatenate(tones))}}};\n")
         rows.append(f'    {{"{g.name}", {g.m}, {cxx(float(g.rate))}, {cxx(float(g.center))}, {cxx(float(g.bp))}, '
                     f"{cxx(float(g.clip_db))}, {g.T}, {g.bits}, {cxx(float(g.f0))}, "
-                    f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.HEADER_THRESHOLD[g.name]))}, "
-                    f"{cxx(float(cpm.HEADER2_THRESHOLD[g.name]))}, {cxx(float(cpm.MID_THRESHOLD[g.name]))}, "
-                    f"{cxx(float(cpm.MID_HEADER_THRESHOLD[g.name]))}, "
+                    f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.MID_THRESHOLD[g.name]))}, "
+                    f"{cxx(float(cpm.LOCK_LLR[g.name][0]))}, {cxx(float(cpm.LOCK_LLR[g.name][1]))}, "
+                    f"{cxx(float(cpm.WAIT_LLR[g.name]))}, {cxx(float(cpm.MID_LLR[g.name]))}, "
                     f"{cpm.hdr_len(g)}, pre_{i}, mid_{i}, hdr_{i}, "
                     f"{{{', '.join(f'{{{cxx(float(f.bp))}, {cxx(float(f.glide))}, {f.passes}}}' for f in cpm.TX_FILTERS[g.name])}}}}},\n")
 
@@ -205,7 +205,8 @@ def cpm_cpp() -> str:
                "const std::span<const CpmSpec> CPM_CTL = ctl;\n")
     c = cpm
     out.append(f"const CpmParams CPM = {{{c.PREAMBLE_S!r}, {c.BLOCK_S!r}, {c.SPACING_S!r}, {c.HDR_S!r}, {c.HDR_COPIES}, "
-               f"{c.MAX_DATA}, {c.PEAK_RATIO!r}, {c.RAMP_S!r}, {c.DATA_N}, {c.CTL_K}, {c.CTL_N}}};\n\n")
+               f"{c.MAX_DATA}, {c.PEAK_RATIO!r}, {c.RAMP_S!r}, {c.DATA_N}, {c.CTL_K}, {c.CTL_N}, "
+               f"{c.HDR_MARGIN[0]!r}, {c.HDR_MARGIN[1]!r}, {c.LLR_EPS!r}, {c.REFINE_SYMBOLS}}};\n\n")
     out.append("}  // namespace data2g::tables\n")
     return "".join(out)
 

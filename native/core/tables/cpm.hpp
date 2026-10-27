@@ -22,7 +22,9 @@ struct CpmGrid {
     int m;
     double rate, center, bp, clip_db;
     int T, bits;
-    double f0, sync_threshold, header_threshold, header2_threshold, mid_threshold, mid_header_threshold;
+    // sync_threshold, mid_threshold: detect's floors (front, mid block); lock_llr1/2:
+    // find's and late_lock's tone_llr score floors, wait_llr: a waiting front's; mid_llr: find_mid's.
+    double f0, sync_threshold, mid_threshold, lock_llr1, lock_llr2, wait_llr, mid_llr;
     int hdr_len;
     std::span<const std::uint8_t> preamble, mid_block, header_tones;
     CpmTxFilter tx[3];
@@ -39,6 +41,8 @@ struct CpmParams {
     int hdr_copies, max_data;
     double peak_ratio, ramp_s;
     int data_n, ctl_k, ctl_n;
+    double hdr_margin1, hdr_margin2, llr_eps;  // cpm.HDR_MARGIN (one copy, both), LLR_EPS
+    int refine_symbols;
 };
 
 extern const std::span<const CpmGrid> CPM_GRIDS;
