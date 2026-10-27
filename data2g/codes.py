@@ -676,6 +676,66 @@ def pin_buffer(spec: CodeSpec, buf: np.ndarray, known: np.ndarray) -> np.ndarray
     return out
 
 
+def info_llrs(spec: CodeSpec, soft: np.ndarray, index: int) -> np.ndarray:
+    """(k,) the channel's LLR (log P0/P1) of each info bit as unscrambled, 0
+    where it isn't sent: an RV 0 codeword's (coded_bits,) soft bits in
+    mapping order, sent at burst position `index` (PLAIN: already plain)."""
+    pos = systematic_positions(spec)
+    sign = 1.0 - 2.0 * scrambler(spec.k, scramble_seed(index))
+    return np.where(pos >= 0, np.asarray(soft, float)[np.maximum(pos, 0)] * sign, 0.0)
+
+
+def info_llrs_buffer(spec: CodeSpec, buf: np.ndarray) -> np.ndarray:
+    """info_llrs of one combined IR buffer row (code order, unscrambled)."""
+    pos = _info_code_positions(spec)
+    return np.where(pos >= 0, np.asarray(buf, float)[np.maximum(pos, 0)], 0.0)
+
+
+def pad_prior(spec: CodeSpec, llr: np.ndarray) -> np.ndarray:
+    """A control's padding, estimated from its info bits' LLRs `llr`
+    (info_llrs) -> (k,) prior LLRs toward 0 per info bit, inf where known
+    zero (the fill past the CRC). Where the padding starts: S(j), the sum
+    over the bits of payload bytes j.. of log 2 P(bit = 0), gains about
+    log 2 a sent bit of padding and loses on a content bit's 1s; softmax(S)
+    over j = 1..payload_bytes is the start's distribution (bytes with no bit
+    sent, LDPC's punctured first 2Z columns, add nothing and stay level). A
+    payload bit is padding with P = P(start <= its byte), and with content
+    bits uniform its prior is log(1 + P) / (1 - P)."""
+    pb = payload_bytes(spec)
+    t = np.log(2) - np.logaddexp(0.0, -np.asarray(llr, float)[: 8 * pb])  # 0 where llr is 0
+    s = np.append(np.cumsum(t[::-1])[::-1][8::8], 0.0)  # S(j), j = 1..pb; one sequential sum, as native adds
+    p = np.exp(s - s.max())
+    pad = np.cumsum(p / np.sum(p))  # P(start <= j), j = 1..pb
+    out = np.zeros(spec.k)
+    out[8 : 8 * pb] = np.repeat(2 * np.arctanh(np.minimum(pad[:-1], 1 - 1e-7)), 8)  # byte 0: content
+    out[8 * pb + crc_bits(spec):] = np.inf
+    return out
+
+
+def add_prior(spec: CodeSpec, soft: np.ndarray, prior: np.ndarray, index: int) -> np.ndarray:
+    """(coded_bits,) soft bits of an RV 0 codeword sent at burst position
+    `index` with each sent info bit's `prior` (pad_prior: toward 0,
+    unscrambled) added, and set to the clamp where it is inf (codes.pin's).
+    Unchanged for polar and GF(M) (no sent info bits)."""
+    pos = systematic_positions(spec)
+    sel = (np.asarray(prior) != 0) & (pos >= 0)
+    sign = 1.0 - 2.0 * scrambler(spec.k, scramble_seed(index))[sel]
+    pr = np.asarray(prior, float)[sel]
+    out = np.array(soft, dtype=np.float32)
+    out[pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP * sign, out[pos[sel]] + pr * sign)
+    return out
+
+
+def add_prior_buffer(spec: CodeSpec, buf: np.ndarray, prior: np.ndarray) -> np.ndarray:
+    """add_prior for combined IR buffers ((B, L), code order, unscrambled)."""
+    pos = _info_code_positions(spec)
+    sel = (np.asarray(prior) != 0) & (pos >= 0)
+    pr = np.asarray(prior, float)[sel]
+    out = np.array(buf, dtype=float)
+    out[:, pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP, out[:, pos[sel]] + pr)
+    return out
+
+
 @lru_cache(maxsize=None)
 def _pinned_polar(spec: CodeSpec, known_pos: tuple) -> tuple:
     """(the full code, the decoder of the code with info bits `known_pos`

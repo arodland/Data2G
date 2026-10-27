@@ -21,7 +21,8 @@ def substitutions(native):
         "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
         "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
-        "decode_buffer_pinned", "decode_buffer_raw", "plain")}
+        "decode_buffer_pinned", "decode_buffer_raw", "plain", "info_llrs", "info_llrs_buffer", "pad_prior", "add_prior",
+        "add_prior_buffer")}
 
     @functools.lru_cache(maxsize=None)
     def own(spec):
@@ -109,6 +110,31 @@ def substitutions(native):
             return py["pin_buffer"](spec, buf, known)
         return n.pin_buffer(spec.name, np.atleast_2d(np.asarray(buf, np.float64)), np.asarray(known, np.int64))
 
+    def info_llrs(spec, soft, index):
+        if not own(spec):
+            return py["info_llrs"](spec, soft, index)
+        return n.info_llrs(spec.name, np.asarray(soft, np.float64).reshape(-1), int(index))
+
+    def info_llrs_buffer(spec, buf):
+        if not own(spec):
+            return py["info_llrs_buffer"](spec, buf)
+        return n.info_llrs_buffer(spec.name, np.asarray(buf, np.float64).reshape(-1))
+
+    def pad_prior(spec, llr):
+        if not own(spec):
+            return py["pad_prior"](spec, llr)
+        return n.pad_prior(spec.name, np.asarray(llr, np.float64))
+
+    def add_prior(spec, soft, prior, index):
+        if not own(spec):
+            return py["add_prior"](spec, soft, prior, index)
+        return n.add_prior(spec.name, np.asarray(soft, np.float64), np.asarray(prior, np.float64), int(index))
+
+    def add_prior_buffer(spec, buf, prior):
+        if not own(spec):
+            return py["add_prior_buffer"](spec, buf, prior)
+        return n.add_prior_buffer(spec.name, np.atleast_2d(np.asarray(buf, np.float64)), np.asarray(prior, np.float64))
+
     @functools.lru_cache(maxsize=None)
     def polar_order(spec):
         if not own(spec):
@@ -149,6 +175,11 @@ def substitutions(native):
         (codes, "systematic_positions"): systematic_positions,
         (codes, "pin"): pin,
         (codes, "pin_buffer"): pin_buffer,
+        (codes, "info_llrs"): info_llrs,
+        (codes, "info_llrs_buffer"): info_llrs_buffer,
+        (codes, "pad_prior"): pad_prior,
+        (codes, "add_prior"): add_prior,
+        (codes, "add_prior_buffer"): add_prior_buffer,
         (codes, "polar_order"): polar_order,
         (codes, "decode_raw_pinned"): decode_raw_pinned,
         (codes, "decode_buffer_pinned"): decode_buffer_pinned,

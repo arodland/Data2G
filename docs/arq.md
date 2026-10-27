@@ -175,13 +175,18 @@ Where the rest comes from:
   reply the sender acted on, taken in ascending order. The sender doesn't merge older
   ACKs. The receiver keeps a snapshot (cumulative + received set) for each of its last
   8 burst seqs, and computes the same first K.
-- **A failed control slot is decoded again with its padding pinned.** A control is a few
-  bytes (median 12, at most 28 in linksim sessions) zeroed to its codeword's payload
-  (46-396 B in the LDPC modes). LDPC is systematic, so the receiver sets the sent info bits
-  past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
-  `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
-  nothing on air changes. An `ARQ_DUP` pair that fails combined is pinned the same way in
-  its IR buffer (`codes.pin_buffer`).
+- **A failed control slot is decoded again leaning on its padding.** A control is a few
+  bytes (median 12, at most 28 in linksim sessions; up to 269 with an inline codeword,
+  §5a) zeroed to its codeword's payload (46-396 B in the LDPC modes). LDPC is systematic,
+  so the slot's own soft bits show where the zeros start: S(j), the sum over the sent
+  payload bits from byte j on of log 2 P(bit = 0), gains about log 2 a bit of padding
+  and loses on content's 1s. softmax(S) is the start's distribution, each payload bit is
+  padding with P = P(start <= its byte), and one more decode adds log (1 + P) / (1 - P)
+  toward zero to its soft bit (`codes.pad_prior`, `codes.add_prior`), CRC-checked under
+  the slot's mask as usual. Receiver only: nothing on air changes. An `ARQ_DUP` pair that
+  fails combined gets the same in its IR buffer (`codes.add_prior_buffer`).
+  `DATA2G_PIN_EST=0` (`phy.PIN_EST`) pins at fixed cuts instead, 16 then 32 B
+  (`phy.PIN_CUTS`, `codes.pin`), for A/B runs.
   - Polar sends no info bits: known ones are frozen instead (`codes.decode_raw_pinned`), and
     a polar codeword's payload enters its info set reversed (`codes.polar_order`, a wire
     format choice) so that a control's padding sits on the weakest positions. Cuts 12 and
@@ -192,8 +197,19 @@ Where the rest comes from:
   - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
     constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
     the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),
-    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5). Cut 16 alone gets all of it,
-    within 1 dB of knowing the content's exact length.
+    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5).
+  - The estimate against pinning at the exact length (`ctl_prior_study.py --boundary`,
+    controls of 12-264 B, 400 a point, AWGN and i.i.d. Rayleigh, 36 modes): 10% failure
+    point 0.0 dB worse (median at every length), 0.6 at most; 1% point 0.0 median, 0.8 at
+    most. The fixed cuts were as good up to 32 B and lost 1.2-3.5 dB median from 48 B
+    on. One decode either way (the cuts averaged 1.13); no wrong codeword passed its CRC
+    in 2.4 M retries. A hard cut at the most likely start (0.1 dB median, up to 2.4 at 1%)
+    and a second, posterior-fed pass (0.2 dB better at most, 1.13 decodes) were measured
+    and not taken. The start itself: exact 70-80% of the time, -1 byte 3-9%.
+  - Polar can only take hard cuts, and its failed list's best path says nothing useful
+    about where the zeros start (a cut there recovered a fifth at most of what the fixed cuts
+    did), so polar keeps them. The CPM control loses to an exact cut only between them
+    (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
 - **If any control codeword fails, the burst is discarded** and not answered. Without
@@ -298,19 +314,20 @@ without). So the last codeword of a write rides in the control's padding when it
   codeword only where the tail would spill into one more, which is the same condition
   (for a raw stream, `len mod payload` in 1..spare). And every inline byte gives up
   pinning (below) for the whole burst.
-- **The cost is control robustness on those bursts.** A control's padding is pinned
-  when it fails plain (§3, 1-6 dB at code level), at 16 and 32 bytes. An inline
-  codeword that pushes the control past 32 B leaves nothing to pin there, and the
-  control then fails where a data codeword does, taking the burst's ACK with it.
-  Before, the burst needed its data codeword to decode anyway; now it needs the
-  control to, at the same code. What is lost is the ACK on bursts whose data failed,
-  and IR combining for that codeword (a lost inline codeword is resent fresh).
+- **The cost is control robustness on those bursts, much reduced by the padding
+  estimate.** A control that fails plain is decoded again leaning on its padding (§3),
+  wherever it starts. With fixed cuts at 16 and 32 B an inline codeword that pushed the
+  control past 32 B left nothing to pin, and the control failed where a data codeword
+  does, taking the burst's ACK with it (and IR combining for that codeword: a lost
+  inline codeword is resent fresh). The estimate keeps the gain at every length, less
+  the padding the inline bytes take.
   - Code level (`ctl_prior_study.py --content N`, the 36 LDPC modes, 10% failure
     point with pinning): a 24 B control (12 B plus a short inline codeword) is 0.5 dB
     (median; -1.5 to +2.5) worse than a 12 B one. At 48 B the pinning gain is gone: 4.0
     dB median (up to 6.0), and the control fails where data does. Pinning past the
-    exact length would win back 3.0 dB median there (not done: the receiver doesn't
-    know the length before decoding, so it would cost a decode per cut).
+    exact length wins back 3.0 dB median there, and the estimate (§3) gets within 0.0
+    dB median of that in one decode: 2.4-3.5 dB over the fixed cuts at 48-96 B, 1.2-2.3
+    at 128-264 (AWGN, Rayleigh).
   - Sessions, 2026-10-27 (paired, DATA2G_PEP_REF_DB=5, native, `chat_probe.py`, first
     message excluded; mean latency change, SE): chat 50-200 B (48 seeds) awgn 10
     -0.51 s (0.02), mpp 5 -0.32 (0.10), mpp 0 -0.93 (0.16), awgn 0 -1.01 (0.08),
