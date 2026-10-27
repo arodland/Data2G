@@ -102,6 +102,7 @@ struct Codeword {
     std::int64_t cstart = 0;
     std::int64_t first_bn = -1;
     bool comp_known = false;
+    bool inlined = false;  // first_bn carried it in its control (T_INLINE): no soft bits held, a resend is RV 0
 };
 
 struct ProtocolError : std::runtime_error {
@@ -230,6 +231,8 @@ public:
     bool resync_due = false;
     // link.COMPRESS (DATA2G_COMPRESS=0 turns it off at construction)
     bool compress;
+    // link.INLINE (DATA2G_INLINE=0 turns it off at construction)
+    bool inline_data;
 
     std::map<std::int64_t, std::pair<std::int64_t, std::set<std::int64_t>>> snapshots;
     std::map<std::int64_t, std::vector<std::int64_t>> sent_seqs;
@@ -285,7 +288,10 @@ private:
                 const std::vector<std::int64_t>& resend, const std::vector<const Codeword*>& fresh_cws);
     void log_tx(std::int64_t bn, const TxBurst& burst, bool fresh, const Core& core, const Ext& ext, int dup,
                 const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
-                const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply);
+                const std::vector<const Codeword*>& fresh_cws, int escalation, int hint, std::optional<int> reply,
+                const Codeword* inl);
+    Ext data_tlvs(const std::vector<std::int64_t>& resend, const std::vector<int>& rvs,
+                  const std::vector<const Codeword*>& fresh_cws) const;
     // handle()'s phases, as link.py splits Station._handle
     using PeerAsk = std::pair<std::optional<int>, int>;  // the peer's recommendation and size hint
     struct DataTaken {
@@ -302,7 +308,7 @@ private:
     void log_rx(RxBurst& rx, const Core& core, int dup, const DataTaken& data, std::int64_t base0, std::int64_t next0,
                 std::int64_t cum0, const PeerAsk& was, bool repeat, bool abandoned);
     // What is wrong with a CRC-valid control, checked before any state changes.
-    static std::optional<std::string> check(const Core& core, const Ext& ext, int n_data);
+    static std::optional<std::string> check(const Core& core, const Ext& ext, int n_data, int pb);
     bool malformed(const std::string& why);  // log, -> false: dropped like a failed control
     bool comp_bit(std::int64_t seq) const;
     std::vector<std::pair<std::optional<std::int64_t>, int>> map_slots(const Core& core, const Ext& ext, int n_cw,

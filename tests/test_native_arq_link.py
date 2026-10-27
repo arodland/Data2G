@@ -20,7 +20,7 @@ from data2g.arq import frames as F
 from data2g.arq import link as L
 from data2g.arq import session as S
 
-from test_arq import MODES, FakeRx, RandomPolicy, payload, text
+from test_arq import MODES, FakeRx, RandomPolicy, payload, short_writes, text
 from test_arq_session import Policy as SessionPolicy
 from test_arq_session import run as session_run
 
@@ -159,19 +159,24 @@ def _burst(b):
 
 
 def lockstep(seed, cls_a, cls_b, p_burst, p_cw, n_a, n_b, kind="random", modes=("m4", "m22", "m46"), max_cw=20,
-             p_dup=0.1, max_turns=3000):
+             p_dup=0.1, max_turns=3000, chunks=False):
     """test_arq.run with chosen classes and duplicated receptions: -> (trace
-    of every burst sent, outcome)."""
+    of every burst sent, outcome). `chunks`: written in short pieces, as test_arq.run."""
     rng = random.Random(seed)
     data_a, data_b = payload(rng, n_a, kind), payload(rng, n_b, kind)
     a = cls_a(0, RandomPolicy(random.Random(seed + 1), 0.2, modes, max_cw), master=True)
     b = cls_b(1, RandomPolicy(random.Random(seed + 2), 0.2, modes, max_cw))
-    a.write(data_a)
-    b.write(data_b)
+    wrng = random.Random(seed + 3)
+    todo = [short_writes(data_a, wrng), short_writes(data_b, wrng)] if chunks else [[data_a], [data_b]]
+    for st, q in zip((a, b), todo):
+        st.write(q.pop(0) if q else b"")
     stores, stats, trace = {0: {}, 1: {}}, {"mismatch": 0}, []
     got_a, got_b = bytearray(), bytearray()
     burst, sender = a.build(), a
     for _ in range(max_turns):
+        for st, q in zip((a, b), todo):
+            if q and wrng.random() < 0.3:
+                st.write(q.pop(0))
         trace.append((sender.direction, _burst(burst)))
         receiver = b if sender is a else a
         ok = False
@@ -184,7 +189,7 @@ def lockstep(seed, cls_a, cls_b, p_burst, p_cw, n_a, n_b, kind="random", modes=(
         assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)]
         if a.state == L.FAILED or b.state == L.FAILED:
             return trace, ("failed", a.fail_reason or b.fail_reason)
-        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending() and not any(todo):
             return trace, ("done", a.tx.acked, b.tx.acked, dict(a.stats), dict(b.stats), stats["mismatch"])
         if ok:
             burst, sender = receiver.build(), receiver
@@ -216,6 +221,33 @@ def test_stations_send_identical_bursts(native, pure, caplog, seed):
         got = lockstep(900 + seed, *pair, *args)
         assert got[1] == want[1]
         assert got[0] == want[0]
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_stations_send_identical_bursts_short_writes(native, pure, caplog, seed):
+    """Short writes: the last codeword of each in the control's padding (T_INLINE)."""
+    caplog.set_level(logging.INFO)
+    p_burst, p_cw, kind = CELLS[seed % len(CELLS)]
+    modes = [("m22", "m46"), ("m4", "m46", "c60", "c40"), ("m46", "m396")][seed % 3]
+    py, cc = L.Station, native.arq.Station
+    args = (p_burst, p_cw, 3000, 1500, kind, modes, [20, 64, 3][seed % 3], 0.1, 6000, True)
+    want, want_log = logged(caplog, lockstep, 950 + seed, py, py, *args)
+    assert want[1][0] in ("done", "failed")
+    assert want[1][0] == "failed" or any(" inline " in m for *_, m in want_log)
+    got, got_log = logged(caplog, lockstep, 950 + seed, cc, cc, *args)
+    assert got == want and got_log == want_log
+    for pair in ((py, cc), (cc, py)):
+        assert lockstep(950 + seed, *pair, *args) == want
+
+
+def test_inline_off_matches(native, pure, monkeypatch):
+    """link.INLINE read at each build, by the C++ too."""
+    monkeypatch.setattr(L, "INLINE", False)
+    py, cc = L.Station, native.arq.Station
+    want = lockstep(5, py, py, 0.1, 0.1, 2000, 500, "text", chunks=True, max_turns=6000)
+    assert want[1][0] == "done"
+    assert not any(F.T_INLINE in F.Control.unpack([p]).ext for _, (_, _, slots) in want[0] for (m, rv, p) in slots[:1])
+    assert lockstep(5, cc, cc, 0.1, 0.1, 2000, 500, "text", chunks=True, max_turns=6000) == want
 
 
 def test_compression_off_matches(native, pure, monkeypatch):

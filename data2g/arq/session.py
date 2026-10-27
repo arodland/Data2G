@@ -27,7 +27,8 @@ from . import frames as F
 from . import link as L
 
 T_SESS = F.T_SESS  # the extension carrying a session frame
-VERSION = 3  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT
+VERSION = 4  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
+# 4: T_INLINE (a v3 peer ignores it: each inline codeword waits for its resend in a slot)
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3

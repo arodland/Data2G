@@ -54,7 +54,7 @@ def test_bitmap_rv_callsign_records():
 
 # --- lockstep harness -------------------------------------------------------------
 
-MODES = {"m4": (4, 1), "m22": (22, 4), "m46": (46, 4)}  # name -> (payload bytes, rv cycle)
+MODES = {"m4": (4, 1), "m22": (22, 4), "m46": (46, 4), "m396": (396, 4)}  # name -> (payload bytes, rv cycle)
 # CPM-like: control in its own short codeword, one per burst (twice when
 # duplicated), at most 8 data codewords
 CPM_LIKE = {"c60": (60, 4), "c40": (40, 4)}
@@ -162,6 +162,7 @@ def count_resends(burst, sender, stats):
     omitted (the peer holds it from the burst that sent the codeword new)."""
     n_ctl = sum(s.mask_id[2] >= F.SEQ_MOD for s in burst.slots)
     c = F.Control.unpack([s.payload for s in burst.slots[:n_ctl] if s.rv == 0])
+    stats["inline"] += F.T_INLINE in c.ext
     bits = F.unpack_flags(c.ext.get(F.T_COMP, b""), c.core.k)
     for s, bit in zip(burst.slots[n_ctl:n_ctl + c.core.k], bits):
         cw = next((x for x in sender.tx.cws.values() if x.seq % F.SEQ_MOD == s.mask_id[2]), None)
@@ -169,15 +170,31 @@ def count_resends(burst, sender, stats):
             stats["resend_raw" if not cw.comp else "resend_comp_bit" if bit else "resend_comp_implicit"] += 1
 
 
+def short_writes(data, rng):
+    """`data` as a host writes chat lines: pieces of 1-150 B."""
+    out, i = [], 0
+    while i < len(data):
+        n = rng.randint(1, 150)
+        out.append(data[i:i + n])
+        i += n
+    return out
+
+
 def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, max_cw=20,
-        modes=("m4", "m22", "m46"), kind="random"):
+        modes=("m4", "m22", "m46"), kind="random", chunks=False):
+    """`chunks`: the data written in short pieces, one each turn a side
+    draws it (a third of turns), so writes end mid-session and their last
+    codewords go in the control's padding (T_INLINE)."""
     rng = random.Random(seed)
     data_a = payload(rng, n_a, kind)
     data_b = payload(rng, n_b, kind)
     a = L.Station(0, RandomPolicy(random.Random(seed + 1), change, modes, max_cw), master=True)
     b = L.Station(1, RandomPolicy(random.Random(seed + 2), change, modes, max_cw))
-    a.write(data_a)
-    b.write(data_b)
+    wrng = random.Random(seed + 3)
+    todo = [short_writes(data_a, wrng), short_writes(data_b, wrng)] if chunks else [[data_a], [data_b]]
+    recs = [sum(len(F.to_records(x)) for x in q) for q in todo]  # stream bytes, each write its own records
+    for st, q in zip((a, b), todo):
+        st.write(q.pop(0) if q else b"")
     stores = {0: {}, 1: {}}
     stats = Counter(mismatch=0, turns=0)
     got_a, got_b = bytearray(), bytearray()
@@ -185,6 +202,9 @@ def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, 
     burst, sender = a.build(), a
     for turn in range(max_turns):
         stats["turns"] = turn
+        for st, q in zip((a, b), todo):
+            if q and wrng.random() < 0.3:
+                st.write(q.pop(0))
         count_resends(burst, sender, stats)
         receiver = b if sender is a else a
         dead = die_at is not None and turn >= die_at
@@ -199,10 +219,10 @@ def run(seed, p_burst, p_cw, n_a, n_b, max_turns=4000, die_at=None, change=0.2, 
         if a.state == L.FAILED or b.state == L.FAILED:
             LAST_REASON[0] = a.fail_reason or b.fail_reason
             return "failed", stats
-        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending() and not any(todo):
             # the log's throughput counters: exact, abandons and resends included
-            assert (a.tx.acked, b.rx.reader.delivered) == (len(F.to_records(data_a)), n_a)
-            assert (b.tx.acked, a.rx.reader.delivered) == (len(F.to_records(data_b)), n_b)
+            assert (a.tx.acked, b.rx.reader.delivered) == (recs[0], n_a)
+            assert (b.tx.acked, a.rx.reader.delivered) == (recs[1], n_b)
             for k in ("cw_new", "cw_comp"):
                 stats[k] = a.stats[k] + b.stats[k]
             return "done", stats
@@ -282,6 +302,22 @@ def test_tiny_bursts_with_losses_still_deliver(seed, max_cw):
     result, stats = run(300 + seed, 0.2, 0.05, 1500, 1500, max_cw=max_cw, modes=("m22",))
     assert result == "done", (result, LAST_REASON[0])
     assert stats["mismatch"] == 0
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_short_writes_inline_deliver_exactly(seed):
+    """Short writes end mid-session, so the last codeword of each often
+    rides in the control's padding (T_INLINE, docs/arq.md §5a): through
+    lost bursts (it is resent in a slot), lost codewords, abandons,
+    duplicated control, CPM's 20 B control and compression, every byte
+    arrives exactly once, in order."""
+    modes = [("m22", "m46"), ("m4", "m46", "c60", "c40"), ("m46", "m396")][seed % 3]
+    p_burst, p_cw = [(0.0, 0.0), (0.1, 0.1), (0.2, 0.05)][seed // 3 % 3]
+    result, stats = run(700 + seed, p_burst, p_cw, 3000, 1500, modes=modes, max_cw=[20, 10, 3][seed % 3],
+                        kind=["random", "text", "mixed"][seed % 3], chunks=True, max_turns=8000)
+    assert result == "done", (result, stats, LAST_REASON[0])
+    assert stats["mismatch"] == 0
+    assert stats["inline"] > 0 or "c40" in modes  # CPM's 20 B control seldom has room
 
 
 @pytest.mark.parametrize("seed", range(30))
@@ -768,3 +804,57 @@ def test_late_burst_from_before_an_abandon():
 
 def test_late_burst_with_a_stale_ack():
     late_burst_with_a_stale_ack(L.Station)
+
+
+def inline_lost_then_resent_in_a_slot(cls):
+    """A short write goes in the control's padding alone (a one-codeword
+    burst). The burst is lost twice; the poll's reply says seq 0 is missing,
+    and it goes again as an ordinary data slot at RV 0 (no soft bits were
+    stored for it)."""
+    a, b = cls(0, Script([("m46", 4)]), master=True), cls(1, Script([("m46", 4)]))
+    a.write(b"73 de W1AW")
+    p = a.build()
+    a.answered()
+    assert len(p.slots) == 1 and F.T_INLINE in F.Control.unpack([p.slots[0].payload]).ext
+    assert not b.handle(clean(p, lost=(0,)))
+    assert [x.payload for x in a.on_timeout().slots] == [x.payload for x in p.slots]  # the identical repeat, lost too
+    q = a.on_timeout()  # a poll: control only, no inline
+    assert len(q.slots) == 1 and F.T_INLINE not in F.Control.unpack([q.slots[0].payload]).ext
+    assert b.handle(clean(q)) and b.read() == b""
+    r = b.build()
+    b.answered()
+    assert a.handle(clean(r))
+    s = a.build()
+    a.answered()
+    assert [(x.mask_id[2], x.rv) for x in s.slots[1:]] == [(0, 0)]
+    assert b.handle(clean(s)) and b.read() == b"73 de W1AW"
+
+
+def inline_capped_at_a_tlv(cls):
+    """A TLV holds 255 B: a tail past that goes in a slot, one under it inline."""
+    for n, inline in ((300, False), (200, True)):
+        a = cls(0, Script([("m396", 4)]), master=True)
+        b = cls(1, Script([("m396", 4)]))
+        data = bytes(random.Random(n).randrange(1, 256) for _ in range(n))
+        a.write(data)
+        p = a.build()
+        a.answered()
+        assert len(p.slots) == (1 if inline else 2)
+        assert b.handle(clean(p)) and b.read() == data
+
+
+def test_inline_lost_then_resent_in_a_slot():
+    inline_lost_then_resent_in_a_slot(L.Station)
+
+
+def test_inline_capped_at_a_tlv():
+    inline_capped_at_a_tlv(L.Station)
+
+
+def test_inline_off_sends_slots(monkeypatch):
+    """DATA2G_INLINE=0 (link.INLINE): the A/B arm without it."""
+    monkeypatch.setattr(L, "INLINE", False)
+    a, b = L.Station(0, Script([("m46", 4)]), master=True), L.Station(1, Script([("m46", 4)]))
+    a.write(b"73")
+    p = a.build()
+    assert len(p.slots) == 2 and b.handle(clean(p)) and b.read() == b"73"

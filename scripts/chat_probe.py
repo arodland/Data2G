@@ -2,11 +2,16 @@
 time went. Write -> delivery per chat message (scripts/linksim.py chat workload, CHAT ON, real modem).
 
     DATA2G_PEP_REF_DB=5 python -m scripts.chat_probe 8 awgn:10 mpp:-6   # seeds, then channel:snr cells
+
+CHAT_PROBE_WORKLOAD=winlink CHAT_PROBE_POLICY=shift+cpm: another linksim workload and policy (defaults
+chat, chat+cpm). CHAT_PROBE_SIZES=2,10: chat messages of 2-10 B ("ok", "73") in place of 50-200.
+CHAT_PROBE_OUT=x.json writes every message's latency per (channel, snr, seed), for paired comparisons.
 """
 from data2g import threads
 
 threads.limit(1)
 
+import json  # noqa: E402
 import os  # noqa: E402
 import random  # noqa: E402
 import sys  # noqa: E402
@@ -19,14 +24,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 import linksim as L  # noqa: E402
 import phy_session as G  # noqa: E402
 
-HORIZON = 900.0
+HORIZON = float(os.environ.get("CHAT_PROBE_HORIZON", 900))
+WORKLOAD = os.environ.get("CHAT_PROBE_WORKLOAD", "chat")
+POLICY = os.environ.get("CHAT_PROBE_POLICY", "chat+cpm")
+SIZES = tuple(map(int, os.environ["CHAT_PROBE_SIZES"].split(","))) if os.environ.get("CHAT_PROBE_SIZES") else None
 
 
 def one(args):
     chan, snr, seed = args
     ch = G.ContinuousChannel(chan, snr, seed, HORIZON)
-    steps = L.WORKLOADS["chat"](random.Random(seed + 7))
-    res = L.run(L.make_policy("chat+cpm"), L.make_policy("chat+cpm"), None, steps, seed=seed, horizon=HORIZON,
+    steps = L.WORKLOADS[WORKLOAD](random.Random(seed + 7))
+    if SIZES:
+        r = random.Random(seed + 8)
+        steps = [(w, r.randint(*SIZES), after, think) for w, _, after, think in steps]
+    res = L.run(L.make_policy(POLICY), L.make_policy(POLICY), None, steps, seed=seed, horizon=HORIZON,
                 phy=G.RealPhy(ch), cs_s=L.CS_S)
     lat = [(d - tw) if d is not None else None for tw, d in zip(res["t_write"], res["t_done"])][1:]
     return chan, snr, seed, lat, res
@@ -43,11 +54,10 @@ if __name__ == "__main__":
         sys.exit()
     cells = [(c, float(s)) for c, s in (x.split(":") for x in sys.argv[2:])]
     seeds = range(int(sys.argv[1]))
-    with Pool(8) as p:
+    with Pool(int(os.environ.get("CHAT_PROBE_WORKERS", 8))) as p:  # shared machine: 8 at most
         out = p.map(one, [(c, s, k) for c, s in cells for k in seeds])
-    if os.environ.get("CHAT_PROBE_OUT"):  # per message, for paired comparisons
-        import json
-        json.dump([(c, s, k, lat) for c, s, k, lat, _ in out], open(os.environ["CHAT_PROBE_OUT"], "w"))
+    if path := os.environ.get("CHAT_PROBE_OUT"):
+        Path(path).write_text(json.dumps([[c, s, k, lat, res["t"], res["mismatch"]] for c, s, k, lat, res in out]))
     for c, s in cells:
         lats = [x for (cc, ss, _, lat, _) in out if (cc, ss) == (c, s) for x in lat]
         ok = [x for x in lats if x is not None]
@@ -57,7 +67,7 @@ if __name__ == "__main__":
 
 def modes_report(cells, n):
     from collections import Counter
-    with Pool(8) as p:
+    with Pool(12) as p:
         out = p.map(one, [(c, s, k) for c, s in cells for k in range(n)])
     for c, s in cells:
         cnt = Counter()
