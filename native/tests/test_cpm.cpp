@@ -2,6 +2,7 @@
 // bandpass, which is dsp's) locks at its front, reads its header, and its
 // soft bits give back the coded bits. Parity: tests/test_native_cpm.py.
 
+#include <algorithm>
 #include <random>
 #include <string>
 #include <vector>
