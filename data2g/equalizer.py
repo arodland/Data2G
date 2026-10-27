@@ -56,6 +56,14 @@ DEFAULT_SPREAD_HZ = 2.0
 LOO_SPREAD = True
 LOO_MIN_PILOTS = 8  # as measure_spread: with 6 (4-frame bursts) mpd lost 1.75 dB to never at 1%
 LOO_TOL = 0.1
+# The estimate's mse times (the pilots' LOO error above the noise floor) /
+# (the error the model predicts there), clamped to [1, LOO_MSE_MAX]
+# (loo_mse_scale; after ion-hf's select_model). 1 turns it off. Off: with
+# LOO-picked spreads the mse is already calibrated (|y - h x|^2 / var 0.96
+# to 1.14, median scale 1.00); 10 moved 2 of 100 threshold cells by one
+# 0.19 dB step, one each way (scripts/dfts_study.py calib/thresholds, 2026-10-26).
+LOO_MSE_MAX = 1.0
+LOO_MSE_DD = True  # the same scale on refine's mse
 SPREAD_GRID = (0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0)
 # Per-carrier noise for the demapper (narrowband interference: a carrier
 # on one tone): per_carrier_noise, with this many samples' worth of prior.
@@ -306,6 +314,23 @@ def filter_spread(hs: np.ndarray, n0_s: float, measured: float) -> float:
     return float(cand[err <= err.min() + LOO_TOL * max(err.min() - n0_s, 0.0)].max())
 
 
+def loo_mse_scale(hs: np.ndarray, n0_s: float, spread: float) -> float:
+    """Measured over predicted leave-one-out error of the smoothed pilots
+    under the time filter's model (spread `spread`), both above the noise
+    floor n0_s, clamped to [1, LOO_MSE_MAX]: how far the model's mse
+    understates the real estimation error. 1 below LOO_MIN_PILOTS."""
+    n_p = len(hs)
+    if LOO_MSE_MAX <= 1 or n_p < LOO_MIN_PILOTS:
+        return 1.0
+    p = max(float(np.mean(np.abs(hs) ** 2) - n0_s), 1e-12)
+    dt = (np.arange(n_p)[:, None] - np.arange(n_p)[None, :]) * FRAME_S
+    ki = np.linalg.inv(p * _doppler_corr(dt, spread) + n0_s * np.eye(n_p))
+    d = np.real(np.diag(ki))
+    got = float(np.mean(np.abs((ki @ hs) / d[:, None]) ** 2)) - n0_s
+    pred = max(float(np.mean(1 / d)) - n0_s, 1e-12 * p)
+    return float(np.clip(got / pred, 1.0, LOO_MSE_MAX))
+
+
 class ChannelEstimate(TypedDict):
     """estimate()'s result, a plain dict (native equalizer::Estimate, whose
     rows are frame * 5 + symbol). modem.DataEstimate extends it."""
@@ -318,6 +343,7 @@ class ChannelEstimate(TypedDict):
     spread_hz: float  # measured Doppler spread (reported)
     filter_spread_hz: float  # the one the time filters used (refine's too)
     slack: int  # the delay support's padding the projection used (support_slack; refine's too)
+    mse_scale: float  # loo_mse_scale, already in mse (refine's too)
 
 
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
@@ -370,10 +396,12 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
         W = np.linalg.solve(Rpp, Rdp.T).T  # (5, J)
         h[f] = W @ hs[j]
         mse[f] = np.maximum(p_sig - np.real(np.sum(W * np.conj(Rdp), axis=1)), 0)[:, None]
+    scale = loo_mse_scale(hs, n0_s, fspread)
+    mse *= scale
     if n0_k is None or not PER_CARRIER_NOISE:
         n0_k = np.full(nc, n0)
     return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "p_sig": p_sig, "spread_hz": spread,
-            "filter_spread_hz": fspread, "slack": slack}
+            "filter_spread_hz": fspread, "slack": slack, "mse_scale": scale}
 
 
 def time_shift_phase(shift: np.ndarray, bb: np.ndarray = BB_FREQS) -> np.ndarray:
@@ -451,4 +479,4 @@ def refine(h_pilot: np.ndarray, t_pilot: np.ndarray, z: np.ndarray, w: np.ndarra
         W = np.linalg.solve(Rpp, np.broadcast_to(Rdp.swapaxes(1, 2)[:, None], (len(ix), nc, J, S_)))  # (f, NC, J, S)
         h[c:c + 16] = np.einsum("fcjs,fjc->fsc", W, vals[ix])
         mse[c:c + 16] = np.maximum(p_sig - np.einsum("fcjs,fsj->fsc", W, Rdp), 0.0)
-    return h, mse
+    return h, mse * (est.get("mse_scale", 1.0) if LOO_MSE_DD else 1.0)

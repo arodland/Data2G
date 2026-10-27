@@ -82,6 +82,19 @@ points, no DD, so a few tenths off mode_thresholds.json):
   spread codewords does better here). Not pursued: a flat-channel niche at
   best, unless turbo equalization wins the fading back.
 
+- LOO-measured mse scale (/m10: mse x clamp(measured / predicted LOO
+  pilot error above the noise, 1, 10), ion-hf's select_model), with DD,
+  2026-10-26: calib at the shipped 10% points, 16 and 6 frames, 5 modes x
+  4 channels: mean |y - h x|^2 / var 0.96-1.14 before (worst tenth up to
+  1.74, w48-16qam-r3/4 mpd~ 6f), 0.96-1.10 after (1.57); median scale 1.00
+  everywhere, p90 up to 3.4 on awgn (sampling noise). The overconfidence
+  left is in the |L| > 8 tail (errors 10-60x claimed on fading), which a
+  burst-wide variance scale does not reach. Thresholds (ofdm/dd vs
+  ofdm/m10/dd, same seeds): 10% at 16f 20/20 cells equal, 10% at 6f one
+  cell +0.19 (n10-64l-r3/4 mpp~), 1% at 16f one cell -0.19 (w48-256l-r5/8
+  mpg~). Not shipped (LOO_MSE_MAX 1).
+
+    uv run python scripts/dfts_study.py calib --modes w48-256l-r5/8 --arms ofdm ofdm/m10 --frames 6
     uv run python scripts/dfts_study.py consts --modes n10-16qam-r2/3 --headroom 0 2 4
     uv run python scripts/dfts_study.py thresholds --modes n10-16qam-r2/3 \\
         --arms ofdm dfts@2 --channels awgn mpp --out runs/dfts.csv
@@ -132,7 +145,9 @@ def parse_arm(arm: str, spec) -> tuple[bool, float]:
     '/sN' suffix (receiver only) is use_slack's; '/genie' decodes on the
     true channel (true_channel), the sync and the noise estimate as shipped;
     '/dd' (ofdm only, last) decodes through arq.phy.ModemRx, DD unbudgeted;
-    '/q0' turns delay_support's noise gate off, '/tN' sets TIME_TAPS N."""
+    '/q0' turns delay_support's noise gate off, '/tN' sets TIME_TAPS N,
+    '/mN' LOO_MSE_MAX N (the LOO-measured mse scale; '/mNe' on estimate's
+    mse only, not refine's)."""
     kind, _, h = arm.split("/")[0].partition("@")
     return kind == "dfts", float(h) if h else spec.headroom
 
@@ -151,14 +166,18 @@ def use_slack(arm: str) -> None:
 
 
 def use_rx(arm: str) -> None:
-    """The arm's other receiver knobs: '/q0' (SUPPORT_NOISE_Z off) and '/tN' (TIME_TAPS)."""
+    """The arm's other receiver knobs: '/q0' (SUPPORT_NOISE_Z off), '/tN' (TIME_TAPS), '/mN[e]' (LOO_MSE_MAX)."""
     opts = arm.split("/")[1:]
+    m = next((o[1:] for o in opts if o[:1] == "m" and o[1:2].isdigit()), None)
+    equalizer.LOO_MSE_MAX = float(m.rstrip("e")) if m else SHIPPED_MSE_MAX
+    equalizer.LOO_MSE_DD = not (m or "").endswith("e")
     equalizer.SUPPORT_NOISE_Z = 0.0 if "q0" in opts else SHIPPED_Z
     equalizer.TIME_TAPS = next((int(o[1:]) for o in opts if o[:1] == "t" and o[1:].isdigit()), SHIPPED_TAPS)
 
 
 SHIPPED_Z = equalizer.SUPPORT_NOISE_Z
 SHIPPED_TAPS = equalizer.TIME_TAPS
+SHIPPED_MSE_MAX = equalizer.LOO_MSE_MAX
 SHIPPED_SLACK = equalizer.SUPPORT_SLACK
 SHIPPED_PADDED = equalizer.PADDED_SLACK
 SHIPPED_ESTIMATE = equalizer.estimate
@@ -346,6 +365,50 @@ def trial(args) -> int:
     return sum(not (ok and p == q) for (p, ok), q in zip(got, payloads))
 
 
+L_BINS = (0, 1, 2, 4, 8, 16, np.inf)
+
+
+def calib_trial(args):
+    """One burst's calibration on arm's receiver: |y - h x|^2 / var on the
+    pilot estimate and on the DD re-estimate (every codeword's true bits
+    as its posterior, as after a full decode), and per |L| bin (L_BINS)
+    of the pilot estimate's soft bits: (count, claimed errors, errors)."""
+    name, arm, chan, snr, seed = args
+    spec = SUBMODES[name]
+    use_slack(arm)
+    use_rx(arm)
+    n_cw = n_codewords(spec)
+    rng = np.random.default_rng(seed)
+    pb = codes.payload_bytes(spec)
+    cw = np.stack([codes.encode(spec, rng.bytes(pb), 0, index=i) for i in range(n_cw)])
+    x, X = tx(codes.spread(cw, spec.bits_per_cu), spec, False, spec.headroom)
+    lead = int(rng.uniform(0.3, 1.0) * FS)
+    kw = dict(freq_offset_hz=float(rng.uniform(-50, 50)), ppm=10, fading_preset=fading(chan, rng), seed=seed)
+    y = hfchannel.apply_channel(np.concatenate([np.zeros(lead), x, np.zeros(FS // 2)]), snr_db=snr, **kw)
+    try:
+        r = modem.receive(y, bands=[spec.sync_band], head=FS + FS // 4 + modem.receive_head(spec.sync_band))
+    except Exception:  # noqa: BLE001
+        return None
+    if r["spec"].name != name or r["n_cw"] != n_cw or len(r["raw"]) != len(X):
+        return None
+    from data2g.arq import phy
+
+    Y = modem.data_symbols(r["raw"])
+
+    def ratio(est):
+        var = modem.noise_var(est["h"], est) + est["mse"]
+        return float(np.mean(np.abs(Y - est["h"] * X) ** 2 / var))
+
+    est = r["est"]
+    dd = phy._dd_estimate(r, {s: 30.0 * (1 - 2 * cw[s].astype(float)) for s in range(n_cw)})
+    sl = modem.burst_soft(r) * (1 - 2 * cw.astype(float))  # positive: right
+    a = np.abs(sl)
+    b = np.digitize(a, L_BINS) - 1
+    bins = np.array([[np.sum(b == k), np.sum(1 / (1 + np.exp(a[b == k]))), np.sum(sl[b == k] < 0)]
+                     for k in range(len(L_BINS) - 1)])
+    return ratio(est), ratio(dd), est.get("mse_scale", 1.0), bins
+
+
 def per(pool, name, arm, chan, snr, seed0) -> float:
     n_cw = n_codewords(SUBMODES[name])
     fails = pool.map(trial, [(name, arm, chan, snr, seed0 + k) for k in range(TRIALS)])
@@ -381,6 +444,7 @@ def _consts_job(a):
 
 
 def main():
+    global FRAMES
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("consts", help="clip gain, SDR and peak per arm")
@@ -396,7 +460,17 @@ def main():
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--jobs", type=int, default=4)
     t.add_argument("--out", required=True)
+    k = sub.add_parser("calib", help="LLR calibration at the shipped 10%% points (+ --offset dB)")
+    k.add_argument("--modes", nargs="+", required=True)
+    k.add_argument("--arms", nargs="+", default=["ofdm", "ofdm/m10"])
+    k.add_argument("--channels", nargs="+", default=list(CHANNELS))
+    k.add_argument("--offset", type=float, default=0.0)
+    k.add_argument("--trials", type=int, default=TRIALS)
+    k.add_argument("--jobs", type=int, default=4)
+    for q in (t, k):
+        q.add_argument("--frames", type=int, default=FRAMES, help="burst length the codewords spread over, about")
     a = ap.parse_args()
+    FRAMES = getattr(a, "frames", FRAMES)
     with Pool(a.jobs) as pool:
         if a.cmd == "consts":
             jobs = [(m, d, h) for m in a.modes for h in a.headroom for d in (False, True)]
@@ -405,6 +479,26 @@ def main():
                       f"peak {peak:5.2f} dB", flush=True)
             return
         import json
+        from pathlib import Path
+
+        shipped = json.loads((Path(__file__).parents[1] / "data2g/codes_data/mode_thresholds.json").read_text())
+        if a.cmd == "calib":
+            for name in a.modes:
+                for ch in a.channels:
+                    ref = shipped["modes"][name][CHANNELS.index(ch.rstrip("~"))]
+                    if ref > 90:
+                        continue
+                    snr = ref + a.offset
+                    for arm in a.arms:
+                        res = [v for v in pool.map(calib_trial, [(name, arm, ch, snr, k) for k in range(a.trials)]) if v]
+                        re_, rd, sc = (np.array([v[i] for v in res]) for i in range(3))
+                        bins = sum(v[3] for v in res)
+                        w10 = lambda v: float(np.sort(v)[-max(1, len(v) // 10):].mean())  # noqa: E731
+                        cal = " ".join(f"{L_BINS[i]:g}:{(e / c if c else np.nan):.2f}" for i, (n, c, e) in enumerate(bins) if n)
+                        print(f"{name:16s} {ch:5s} {snr:6.2f} {arm:10s} n={len(res):3d} ratio {re_.mean():.2f} (w10 {w10(re_):.2f}) "
+                              f"dd {rd.mean():.2f} (w10 {w10(rd):.2f}) scale med {np.median(sc):.2f} p90 {np.quantile(sc, .9):.2f} "
+                              f"| err meas/claimed per |L| bin {cal}", flush=True)
+            return
         from pathlib import Path
 
         shipped = json.loads((Path(__file__).parents[1] / "data2g/codes_data/mode_thresholds.json").read_text())
