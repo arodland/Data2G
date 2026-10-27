@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "config/config.hpp"
+#include "gfldpc/gfldpc.hpp"
 #include "ldpc/ldpc.hpp"
 #include "polar/polar.hpp"
 #include "tables/cpm.hpp"
@@ -53,7 +54,7 @@ int payload_bytes(const Row& r) {
 
 template <typename Row>
 int rv_cycle(const Row& r) {
-    return r.code == "ldpc" ? 4 : 1;
+    return r.code == "polar" ? 1 : 4;
 }
 
 // --- the codec (codes.encode / decode / combine) ------------------------------
@@ -65,12 +66,21 @@ int rv_cycle(const Row& r) {
 
 // A coded format: a submode, a CPM mode or a CPM control codeword
 // (Python's SubmodeSpec / CpmSpec where data2g.codes reads them).
+// GF(M) (gf set: the CPM modes' data, gfldpc::): soft values are q = M
+// log-likelihoods per code symbol, symbol-major (soft_len a codeword); the
+// interleaver (perm) and RVs move whole symbols; scrambling permutes each
+// symbol's likelihoods (plain) where it flips a bit's sign.
 struct Spec {
     std::string_view name;
-    bool polar;  // else LDPC
+    bool polar;  // else LDPC, binary or (gf) GF(M)
     int k, coded_bits, bits_per_cu, crc_bits, payload_bytes;
     std::span<const std::uint16_t> perm, info_pos;  // interleaver; polar info set
+    const tables::GfTable* gf = nullptr;  // GF(M): its mother code
 };
+
+inline int n_sym(const Spec& s) { return s.coded_bits / s.bits_per_cu; }  // GF(M): code symbols a codeword
+// Soft values a codeword: coded bits, or GF(M) q per symbol (codes.soft_len).
+inline int soft_len(const Spec& s) { return s.gf ? n_sym(s) << s.bits_per_cu : s.coded_bits; }
 
 const Spec* spec(std::string_view name);  // nullptr if none
 const Spec& spec(const config::Submode& s);  // s an element of config::SUBMODES
@@ -81,6 +91,10 @@ const polar::PolarCode& polar_code(const Spec& s);  // polar specs, on their fro
 // codes._decoder (extent 0) or codes._ext_decoder(spec, extent).
 const ldpc::Decoder& ldpc_decoder(const Spec& s, int extent = 0);
 const polar::SCLDecoder& polar_decoder(const Spec& s);  // polar specs, list POLAR_LIST
+const gfldpc::Code& gf_code(const Spec& s);  // GF(M) specs: the mother code
+// GF(M): the decoder of the mother code cut to `extent` soft values (0: the codeword).
+const gfldpc::Decoder& gf_decoder(const Spec& s, int extent = 0);
+inline constexpr int GF_ITERS = 50;  // codes.GF_ITERS
 
 inline constexpr int POLAR_LIST = 8;
 // The LDPC decoder's iteration cap, process-wide: the app's "decoder effort" (--decoder-effort). The
@@ -105,6 +119,9 @@ std::vector<std::uint8_t> encode(const Spec& s, std::span<const std::uint8_t> pa
                                  std::uint32_t crc_mask = 0, int index = 0);
 // +-1 per coded bit: soft bits sent at (index, rv) times this are the unscrambled codeword's.
 std::vector<double> flip(const Spec& s, int index, int rv = 0);
+// soft_len soft values sent at (index, rv) -> the unscrambled codeword's: flip's signs, or GF(M) each
+// symbol's likelihoods permuted (codes.plain).
+std::vector<double> plain(const Spec& s, std::span<const double> soft, int index, int rv = 0);
 
 // (n_cw, n) row-major -> burst order, every codeword's m-bit symbols dealt round-robin.
 template <typename T>

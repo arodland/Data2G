@@ -358,13 +358,31 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
     return best;
 }
 
-std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
+namespace {
+
+// cpm.tone_metric's factor: the square law's Es / (N0 (N0 + Es)), the codeword's Es and N0.
+double metric_scale(const Mat<double>& E) {
     const auto top = row_max(E);
     const double mtop = np_mean(top);
     double n0 = median_rest(E) / std::numbers::ln2;  // exponential: median = N0 ln 2
     n0 = std::max(n0, 1e-12 * mtop + 1e-300);
     const double es = std::max(mtop - n0, 1e-3 * n0);
-    const double scale = es / (n0 + es) / n0;
+    return es / (n0 + es) / n0;
+}
+
+}  // namespace
+
+std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E) {
+    const double scale = metric_scale(E);
+    const auto gr = gray(g.m);
+    std::vector<double> out(E.rows * g.m);
+    for (std::size_t r = 0; r < E.rows; ++r)
+        for (int v = 0; v < g.m; ++v) out[r * g.m + v] = E[r][gr[v]] * scale;
+    return out;
+}
+
+std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
+    const double scale = metric_scale(E);
     const auto gr = gray(g.m);
     std::vector<int> label(g.m);  // tone -> the bit group it carries
     for (int i = 0; i < g.m; ++i) label[gr[i]] = i;
@@ -472,7 +490,7 @@ Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
         const std::size_t n = k < 1 + dup ? ctl(g).n_sym : tables::CPM.data_n / g.bits;
         Mat<double> part(n, out.E.cols);
         std::copy(out.E[i], out.E[i] + n * out.E.cols, part.data.begin());
-        out.slots.push_back(llrs(g, part));
+        out.slots.push_back(k < 1 + dup ? llrs(g, part) : symbol_ll(g, part));
         i += n;
     }
     return out;

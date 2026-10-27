@@ -79,10 +79,12 @@ FIRST_PATH_FRAC = 0.5
 # The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
 # version (or SSTVAE) accepts a header only by 1-in-64 chance.
 # Header symbols per band: BandSpec.header_syms.
-PROTOCOL_VERSION = 13  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
+PROTOCOL_VERSION = 14  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
 # 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
 # in place: development, one operator); 13: a non-periodic c8r50 front (2026-10-24: the tiled
-# Costas array matched one period off, sync 0.76, and its header read as another word)
+# Costas array matched one period off, sync 0.76, and its header read as another word); 14: the CPM
+# modes' data codewords GF(M) LDPC on tone likelihoods (data2g.gfldpc, 2026-10-27: 0.7-1.5 dB on
+# ideal channels over the binary LDPC on bit LLRs), same payloads and burst framing
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The

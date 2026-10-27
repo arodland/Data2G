@@ -59,6 +59,7 @@ Binding: `bindings/bind_<x>.cpp`, registering `data2g_native.<x>`. Parity:
 | `equalizer.py` | `equalizer/` | `bind_equalizer` | `test_native_equalizer` | `equalizer` |
 | `ldpc.py` | `ldpc/` | `bind_ldpc` | `test_native_ldpc` | `ldpc` |
 | `polar.py` | `polar/` | `bind_polar` | `test_native_polar` | `polar` |
+| `gfldpc.py` | `gfldpc/` | (through `bind_codes`) | `test_native_codes` | `gfldpc` |
 | `codes.py` | `codes/` | `bind_codes` | `test_native_codes`, `test_native_parity` | `codes` |
 | `modem.py` | `modem/modem`, `modem/timing` | `bind_modem`, `bind_timing` (`timing`) | `test_native_modem`, `test_native_arq` (timing) | `modem` |
 | `cpm.py` | `cpm/` | `bind_cpm` | `test_native_cpm` | `cpm` |

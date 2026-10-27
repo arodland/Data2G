@@ -28,10 +28,19 @@ struct CpmGrid {
     CpmTxFilter tx[3];
 };
 
+// A GF(M) data code's mother code (codes.gf_code, data2g.gfldpc.GFCode): n
+// symbols, the codeword its first n0, rows of dmax slots (var -1: padding).
+struct GfTable {
+    int n = 0, n0 = 0, dmax = 0;
+    std::span<const std::int16_t> var;
+    std::span<const std::uint8_t> h;
+};
+
 struct CpmSpec {
-    std::string_view name, grid, code;
+    std::string_view name, grid, code;  // code: "gf" (data) | "polar" (control)
     int index, k, coded_bits, n_sym;
-    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver)
+    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver; GF(M): of symbols)
+    GfTable gf;  // code "gf" only
 };
 
 struct CpmParams {

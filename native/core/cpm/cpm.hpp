@@ -71,8 +71,10 @@ struct Detection {
 Detection detect(const Grid& g, std::span<const double> x, double reach_hz = 150.0, bool fine = true,
                  bool front_only = false, int n_sym = 0, double floor = -1.0, bool mid = false);
 
-// (n_sym, m) energies of one codeword -> n_sym * bits LLRs, mapping order.
+// (n_sym, m) energies of one codeword -> n_sym * bits LLRs, mapping order (the control codeword's).
 std::vector<double> llrs(const Grid& g, const Mat<double>& E);
+// -> n_sym * m symbol log-likelihoods, mapping order, value v's on tone gray(v) (a GF(M) data codeword's).
+std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E);
 
 struct Header {
     const Spec* spec;

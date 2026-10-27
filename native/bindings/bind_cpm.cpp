@@ -112,6 +112,7 @@ void bind_cpm(py::module_& m) {
     }, py::arg("grid"), py::arg("x"), py::arg("reach_hz") = 150.0, py::arg("fine") = true,
        py::arg("front_only") = false, py::arg("n_sym") = 0, py::arg("floor") = -1.0, py::arg("mid") = false);
     c.def("llrs", [](const std::string& g, const In<double>& E) { return np(cpm::llrs(grid(g), mat(E))); });
+    c.def("symbol_ll", [](const std::string& g, const In<double>& E) { return np(cpm::symbol_ll(grid(g), mat(E))); });
     c.def("read_header", [](const std::string& g, const In<double>& x, long s0, double cfo, int copies) {
         const auto h = cpm::read_header(grid(g), view(x), s0, cfo, copies);
         return py::make_tuple(std::string(h.spec->name), h.n_data, h.dup, h.score, h.runner_up);

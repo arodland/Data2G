@@ -1,7 +1,7 @@
 # data2g/codes_data
 
 Committed data the modem reads at run time. Despite the name, only the
-LDPC shift tables belong to the codes; the rest is the modem's, the
+LDPC shift tables and the GF(M) codes belong to the codes; the rest is the modem's, the
 waveform's and the ARQ's. Each file comes from a script or a study (redo
 that to change the file), and most have a C++ mirror that
 `tools/gen_native_tables.py` writes into `native/core/generated/` (run
@@ -10,6 +10,7 @@ it, then `--check`, after changing one).
 | File | Written by | Read by | Native (generated) |
 |---|---|---|---|
 | `ldpc_shifts.npz` | `scripts/own_shifts.py` (gen, screen, export) | `ldpc.tables` / `qc_code` | `ldpc.cpp` (`tables::LDPC_SHIFTS`) |
+| `gf_codes.npz` | `scripts/gf_study.py write` (PICKS) | `gfldpc.load` / `codes.gf_code` | `cpm.cpp` (`tables::CpmSpec::gf`) |
 | `header_code.npy`, `header_code_w48.npy`, `header_code_n10.npy` | `scripts/design_header.py --out` | `modem.header_code` (per band) | `modem.hpp` |
 | `clip_constants.json` | `scripts/clip_constants.py --write`, `scripts/pick_ace.py --json` | `config.clip_consts` | `modem.hpp` |
 | `outcome_predictor.npz` | `scripts/train_outcome.py` (data: `scripts/outcome_data.py`) | `arq/predictor.py`, `arq/policy.py` | `predictor.cpp` |

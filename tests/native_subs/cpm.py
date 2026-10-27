@@ -100,6 +100,7 @@ def substitutions(native):
         (cpm, "_shares"): n.shares,
         (cpm, "detect"): detect,
         (cpm, "llrs"): by_grid(n.llrs, cpm.llrs),
+        (cpm, "symbol_ll"): by_grid(n.symbol_ll, cpm.symbol_ll),
         (cpm, "read_header"): read_header,
         (cpm, "soft"): soft,
         (cpm, "_peak_ratio"): by_grid(n.peak_ratio, cpm._peak_ratio),
