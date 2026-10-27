@@ -305,7 +305,24 @@ without). So the last codeword of a write rides in the control's padding when it
   Before, the burst needed its data codeword to decode anyway; now it needs the
   control to, at the same code. What is lost is the ACK on bursts whose data failed,
   and IR combining for that codeword (a lost inline codeword is resent fresh).
-  Measured at code level and in sessions below.
+  - Code level (`ctl_prior_study.py --content N`, the 36 LDPC modes, 10% failure
+    point with pinning): a 24 B control (12 B plus a short inline codeword) is 0.5 dB
+    (median; -1.5 to +2.5) worse than a 12 B one. At 48 B the pinning gain is gone: 4.0
+    dB median (up to 6.0), and the control fails where data does. Pinning past the
+    exact length would win back 3.0 dB median there (not done: the receiver doesn't
+    know the length before decoding, so it would cost a decode per cut).
+  - Sessions, 2026-10-27 (paired, DATA2G_PEP_REF_DB=5, native, `chat_probe.py`, first
+    message excluded; mean latency change, SE): chat 50-200 B (48 seeds) awgn 10
+    -0.51 s (0.02), mpp 5 -0.32 (0.10), mpp 0 -0.93 (0.16), awgn 0 -1.01 (0.08),
+    awgn -6 -0.56 (0.06), mpp -6 -1.05 (0.27), awgn -12 and mpp -10 within noise
+    (SE 1.6-1.8). Chat 2-10 B lines: -0.57 s at awgn 10, -1.1 at awgn 0, -3.0 at awgn
+    -6, -3.3 at mpp -6, -5.6 at awgn -12, -5.8 at mpp -10 (medians 5.8 to 2.8 s at -6
+    dB, 10.3 to 4.8 s at -12: CPM sends the line with no data codeword). Shedding the
+    hints doubled the CPM gain. Winlink sessions (48 seeds) 5.0% shorter at awgn 10
+    (SE 0.3), 1.5% at awgn 0 (0.5), within noise on mpp and mpg. Bulk (`loss_study`,
+    16 seeds, 9 cells incl. awgn -10 and mpp -8): bit-identical, its tail is never
+    reached in the horizon. Inlining only when no data slot is left took most of the
+    chat gain away (awgn 0: -0.03 s against -0.89).
 - **Off switch:** `DATA2G_INLINE=0` (`link.INLINE`) never sends one, for A/B runs. A
   station always receives them. A version 3 peer ignores the TLV, and each inline
   codeword then waits for its resend in a slot.
