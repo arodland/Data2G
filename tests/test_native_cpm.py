@@ -37,7 +37,7 @@ def test_grid_and_spec_tables(native):
     for r, g in zip(rows, GRIDS):
         assert (r["m"], r["rate"], r["center"], r["bp"], r["clip_db"], r["T"], r["bits"], r["f0"]) == \
             (g.m, g.rate, g.center, g.bp, g.clip_db, g.T, g.bits, g.f0)
-        assert (r["sync_threshold"], r["header_threshold"]) == (cpm.SYNC_THRESHOLD[g.name], cpm.HEADER_THRESHOLD[g.name])
+        assert (r["sync_threshold"], r["lock_llr"]) == (cpm.SYNC_THRESHOLD[g.name], cpm.LOCK_LLR[g.name])
         assert r["hdr_len"] == cpm.hdr_len(g)
         np.testing.assert_array_equal(r["preamble"], cpm.preamble_pattern(g))
         np.testing.assert_array_equal(r["mid_block"], cpm.mid_block(g))
@@ -131,6 +131,12 @@ def test_receive_chain(native, reference, case):
         a, b = native.cpm.read_header(g.name, y, s0, f, copies), ref(reference, "read_header")(g, y, s0, f, copies)
         assert a[:3] == (b[0].name, *b[1:3])
         assert a[3:] == pytest.approx(b[3:], rel=RTOL)
+    np.testing.assert_allclose(native.cpm.tone_llr(g.name, E_ref), ref(reference, "tone_llr")(g, E_ref), rtol=RTOL,
+                               atol=1e-12)
+    for dt, df in ((0, 0.0), (g.T // 5, -3.3), (-g.T // 7, 2.0)):  # refine from a lock off by this much
+        a = native.cpm.refine(g.name, y, s0 + dt, f + df, name, n_data, dup)
+        b = ref(reference, "refine")(g, y, s0 + dt, f + df, spec, n_data, dup)
+        assert a[0] == b[0] and a[1] == pytest.approx(b[1], rel=RTOL), (dt, df)
     assert native.cpm.peak_ratio(g.name, y, s0, f) == pytest.approx(ref(reference, "_peak_ratio")(g, y, s0, f), rel=RTOL)
 
     for kw in (dict(), dict(threshold=0.05), dict(front_only=False), dict(lo=1000, hi=3000), dict(lo=5000)):
@@ -149,8 +155,10 @@ def test_receive_chain(native, reference, case):
     assert len(slots) == len(slots_ref)
     for a, b in zip(slots, slots_ref):
         np.testing.assert_allclose(a, b, rtol=RTOL, atol=1e-9)
-        np.testing.assert_allclose(native.cpm.llrs(g.name, E_ref[:len(a) // g.bits]),
-                                   ref(reference, "llrs")(g, E_ref[:len(a) // g.bits]), rtol=RTOL, atol=1e-9)
+    n_ctl = cpm.CTL[g.name].n_sym
+    for f in ("llrs", "symbol_ll"):
+        np.testing.assert_allclose(getattr(native.cpm, f)(g.name, E_ref[:n_ctl]), ref(reference, f)(g, E_ref[:n_ctl]),
+                                   rtol=RTOL, atol=1e-9)
 
     m, m_ref = native.cpm.measure(g.name, E_ref, len(E_ref)), ref(reference, "measure")(g, E_ref, len(E_ref))
     for k in ("snr_est", "spread_est", "frames"):

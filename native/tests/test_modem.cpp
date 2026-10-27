@@ -41,11 +41,11 @@ int main() {
     check::Watchdog watchdog(300, "test_modem");
 
     check::current_step = "header";
-    // PROTOCOL_VERSION 13's seed (Python's modem.crc6 and header_bits)
-    check::equal(modem::crc6(0), 63, "crc6(0)");
-    check::equal(modem::crc6(100), 21, "crc6(100)");
-    check::equal(modem::crc6(1023), 14, "crc6(1023)");
-    const std::vector<std::uint8_t> want{1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0};
+    // PROTOCOL_VERSION 14's seed (Python's modem.crc6 and header_bits)
+    check::equal(modem::crc6(0), 44, "crc6(0)");
+    check::equal(modem::crc6(100), 6, "crc6(100)");
+    check::equal(modem::crc6(1023), 29, "crc6(1023)");
+    const std::vector<std::uint8_t> want{1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0};
     const auto hb = modem::header_bits(7, 3, "w");
     check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
     for (auto band : modem::SYNC_BANDS) {

@@ -90,10 +90,11 @@ endif()
 target_link_libraries(data2g_core PUBLIC Threads::Threads ZLIB::ZLIB)
 set_target_properties(data2g_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # GCC's -O2 cost model leaves polar's f/g loops scalar (1.7x on a decode)
-# and the outcome model's layer loops too (2x on a Pi 4 shifter decision);
+# and the outcome model's layer loops too (2x on a Pi 4 shifter decision),
+# and the GF(M) decoder's per-symbol loops (1.3-1.8x on x86, a codeword);
 # Clang and MSVC vectorize them at -O2. Optimization never reassociates
 # without fast-math, so the results are the same bits.
-set_source_files_properties(core/polar/polar.cpp core/arq/predictor.cpp PROPERTIES
+set_source_files_properties(core/polar/polar.cpp core/arq/predictor.cpp core/gfldpc/gfldpc.cpp PROPERTIES
   COMPILE_OPTIONS "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<NOT:$<CONFIG:Debug>>>:-O3>")
 
 # --- device backends -----------------------------------------------------------

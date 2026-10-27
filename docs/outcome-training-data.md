@@ -55,6 +55,12 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_gs_high.csv` | `--high --sessions 1200 --first 10200000` (same) | high | same | 3f50fe9 | |
 | `session_data_gs_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 10300000` (same) | high AWGN | same | 3f50fe9 | |
 | `session_data_gs_fastlow.csv` | `--fastlow --sessions 1200 --first 10400000` (same) | fastlow | same | 3f50fe9 | |
+| `session_data_cor.csv` | `--sessions 2900 --first 13000000` (`runs/cor_round.sh`), `DATA2G_SPREAD_CARRY=1` | regular | the installed CNP (cnpd), offsets as shipped, Python shifter | 12d1235 (#126: CPM acquisition gates + GF(M) code, protocol 14) | CPM outcomes on the new CPM receiver |
+| `session_data_cor_slow.csv` | `--slow --sessions 800 --first 13100000` (same) | slow | same | 12d1235 | |
+| `session_data_cor_high.csv` | `--high --sessions 1200 --first 13200000` (same) | high | same | 12d1235 | |
+| `session_data_cor_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 13300000` (same) | high AWGN | same | 12d1235 | |
+| `session_data_cor_fastlow.csv` | `--fastlow --sessions 1200 --first 13400000` (same) | fastlow | same | 12d1235 | |
+| `session_data_cor_floor.csv` | `--floor --sessions 1500 --first 13500000` (same) | sustained -19..-4 dB, every kind, 600 s; while the CPM floor holds, exploration picks CPM modes only | same | 8bc4f5d (12d1235 + `--floor`) | the CPM floor cells (-18..-9 dB), which the other kinds reach 0.5% of the time |
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
@@ -70,6 +76,7 @@ sent at the same moment; one row per candidate.
 | `outcome_data_general_cp.csv` | `with_native outcome_data --samples 40000 --first 4000000` (`runs/cp_round.sh`) | none | 7e54f2d | the general set's seeds again, control padding pinned: only the decoder differs |
 | `outcome_data_general_gt.csv` | `with_native outcome_data --samples 40000 --first 7500000` (`runs/gt_round.sh`) | none | 8340bbf | the general set on the noise-gated receiver, new seeds |
 | `outcome_data_n10top_gt.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 7600000` (same) | none | 8340bbf | the two top n10 modes, likewise |
+| `outcome_data_general_cor.csv` | `with_native outcome_data --samples 40000 --first 13600000` (`runs/cor_round.sh`) | none | 12d1235 | the general set on the #126 CPM receiver, new seeds |
 
 ## Mixes
 
@@ -106,3 +113,14 @@ sent at the same moment; one row per candidate.
   MPP bottom -4..-6% (about 1 SE each). Why it held where label-trained MLPs traded cells: the spread carry
   (the 2.0 Hz default read as MPD), no `--explore-faster` (it cost AWGN 0/+4), and the shared query head
   (gsx, a 512x3 MLP on the same data, lost MPP -8 -16% and MPD +8 -5%).
+- **corle8 / cordf (installed; CNP):** the CPM receiver of #125/#126 (`runs/cor_round.sh`). corle8: eight CNPs
+  on the outcomes (`--labels`, seeds 1-8) of the cor sets, `outcome_data_general_cor.csv` and
+  `outcome_data_n10top_gt.csv`. cordf: the installed cnpd's weights (`--init`), distilled 20 epochs at lr 2e-4
+  on targets that are cnpd's own for the OFDM modes and, for the CPM modes, corle8 with LCB 0.5 where the
+  row's snr_est is under -6 dB, cnpd's above -4 dB, ramped between (`--teacher-cpm`, `--cpm-below -4`).
+  OFDM outputs stay within 0.001 of cnpd. The descriptors carry the GF code's re-measured ladder thresholds;
+  the code type needs no field (every CPM mode is GF, is_cpm says it). Against cnpd on this tree
+  (`runs/cor_judge.sh`, seeds 200-215 all cells, 300-331 and 400-431 edge and floor cells): AWGN -18/-16
+  +69%/+187%, MPD -15/-13 +36%/+28%, MPP -14 +20%, AWGN -14 +15%; OFDM cells within 1%; MPP -6 -2.3%
+  (+-0.9, 80 seeds). cord, the same without the -4 dB edge (ensemble CPM targets everywhere), lost MPP -6
+  -3.6% on two seed sets.

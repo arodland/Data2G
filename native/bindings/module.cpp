@@ -35,7 +35,7 @@ PYBIND11_MODULE(data2g_native, m) {
     // Bumped when the module's Python-facing signatures change, so
     // tests/native_subs (its ABI) refuses a stale build instead of failing
     // confusingly.
-    m.attr("__abi__") = 3;
+    m.attr("__abi__") = 5;
     data2g::bind::bind_codes(m);
     data2g::bind::bind_config(m);
     data2g::bind::bind_constellation(m);

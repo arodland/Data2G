@@ -156,7 +156,7 @@ def test_cpm_control_padding_is_known_when_it_fails():
     b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
     x = np.concatenate([np.zeros(4000), PHY.tx_audio(b), np.zeros(4000)])
     m = PHY.mask_value(ctl_mask(0, 0, 7))
-    for seed in (3, 6, 7):
+    for seed in (3, 7, 9):
         y = hfchannel.apply_channel(x, snr_db=-11.0, seed=seed)
         r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
         cands, usable = codes.decode_raw(cs, np.asarray(PHY.soft_bits(r)[0])[None], index=[0])

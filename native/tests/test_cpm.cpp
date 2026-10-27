@@ -2,6 +2,7 @@
 // bandpass, which is dsp's) locks at its front, reads its header, and its
 // soft bits give back the coded bits. Parity: tests/test_native_cpm.py.
 
+#include <algorithm>
 #include <random>
 #include <string>
 #include <vector>
@@ -54,8 +55,19 @@ int main() {
             const auto r = cpm::soft(g, y, lock->start, lock->cfo, n_data, dup);
             check::equal(r.slots.size(), coded.size(), name + " slots");
             int errors = 0;
-            for (std::size_t k = 0; k < coded.size(); ++k)
-                for (std::size_t i = 0; i < coded[k].size(); ++i) errors += (r.slots[k][i] < 0) != (coded[k][i] == 1);
+            for (std::size_t k = 0; k < coded.size(); ++k) {
+                if (static_cast<int>(k) < 1 + dup) {  // control: bit LLRs
+                    for (std::size_t i = 0; i < coded[k].size(); ++i) errors += (r.slots[k][i] < 0) != (coded[k][i] == 1);
+                    continue;
+                }
+                const int p = g.bits, q = 1 << p;  // data: GF(M) symbol likelihoods, the sent value's the largest
+                for (std::size_t j = 0; j * p < coded[k].size(); ++j) {
+                    int v = 0;
+                    for (int b = 0; b < p; ++b) v = v << 1 | coded[k][j * p + b];
+                    const double* l = &r.slots[k][j * q];
+                    errors += static_cast<int>(std::max_element(l, l + q) - l) != v;
+                }
+            }
             check::equal(errors, 0, name + " hard decisions");
         }
     }

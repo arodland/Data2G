@@ -17,7 +17,9 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
 
 - ctl: the grid's short control codeword (polar, CTL_K of CTL_N), one per
   burst, twice (RV 0, RV 1) when the ARQ duplicates control (ARQ_DUP);
-- data: 0..MAX_DATA LDPC codewords of the mode (n = 960);
+- data: 0..MAX_DATA codewords of the mode (960 bits): GF(M) LDPC, one
+  code symbol per tone (data2g.gfldpc; protocol 14, was binary LDPC on
+  bit LLRs), decoded on each tone's likelihoods (symbol_ll);
 - two sync blocks: the front, and a mid block SPACING_S of symbols later
   (after the data, on a burst shorter than that). Nothing else in the burst
   tracks timing or CFO: 30 ppm over a 90 s burst is ~22 samples of T = 320.
@@ -50,7 +52,7 @@ SPACING_S = 2.5  # symbols from the front block to the mid one, about (MPG fades
 HDR_S = 0.25  # a header copy, about
 HDR_COPIES = 2  # one after each sync block
 MAX_DATA = 8  # data codewords per burst
-PEAK_RATIO = 0.7  # a lock's floor on _peak_ratio: fronts 0.82+, locks inside a burst 0.59 at most
+PEAK_RATIO = 0.7  # a new front's design bar on _peak_ratio off its start (c8r50_front_search); no lock gate
 RAMP_S = 0.01  # amplitude ramp at a burst's ends (key clicks)
 DATA_N = 960
 CTL_K, CTL_N = 184, 360  # 20 bytes of control (CRC-24); 360 bits fill whole symbols at 3, 4 and 5 bits per tone
@@ -138,7 +140,7 @@ class CpmSpec:
     name: str
     grid: str
     index: int  # in its grid's header (-1: the control codeword)
-    code: str  # "ldpc" (data) | "polar" (control)
+    code: str  # "gf" (data: GF(M) LDPC) | "polar" (control)
     k: int  # info bits incl. CRC
     coded_bits: int
     frames_per_cw: int = 0
@@ -175,40 +177,38 @@ def _grid_name(g: Grid) -> str:
 
 
 SPECS = {s.name: s for g in GRIDS.values() for s in (
-    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "ldpc", 320, DATA_N),
-    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "ldpc", 480, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/3", g.name, 0, "gf", 320, DATA_N),
+    CpmSpec(f"{_grid_name(g)}-r1/2", g.name, 1, "gf", 480, DATA_N),
 )}
 CTL = {g: CpmSpec(f"{_grid_name(GRIDS[g])}-ctl", g, -1, "polar", CTL_K, CTL_N) for g in GRIDS}
 
 
-# Early lock (find): the front block's score, then its header copy's.
-# Provisional, from 120 buffers each (2026-09-25): 1.1x the largest score
-# noise or an OFDM burst gave; CPM bursts near their thresholds (fading mix)
-# scored at least 0.098 / 0.151 / 0.053 in 99%, so a few bursts at the very
-# bottom miss their early lock (the fork measured 66-100% at threshold).
-SYNC_THRESHOLD = {"c16r25": 0.11, "c8r50": 0.20, "c32r62": 0.085}
-HEADER_THRESHOLD = {"c16r25": 0.20, "c8r50": 0.29, "c32r62": 0.11}
-# Late lock (late_lock): both header copies, for a front whose first copy
-# alone fell short. scripts/cpm_header2_fit.py (2026-10-23, 1600 buffers a
-# grid: noise, OFDM, other grids, the grid's own burst past its front): 1.1x
-# the largest score at a placement passing PEAK_RATIO; c32r62 had none pass,
-# so 1.1x noise's and OFDM's largest at any placement (0.119). Bursts lost
-# with a clear front at MPP/MPG -8/-11 dB scored 0.07-0.6 (c32r62 median 0.18).
-# c8r50 refit for protocol 13's front (2026-10-24, 400 a source): 1.1x 0.205
-# (noise, OFDM, other grids; its own cut bursts no longer pass PEAK_RATIO).
-HEADER2_THRESHOLD = {"c16r25": 0.15, "c8r50": 0.23, "c32r62": 0.13}
-# Mid lock (find_mid), scripts/cpm_mid_fit.py (2026-10-23). The mid block
-# alone: 1.1x the largest score 200 buffers each of 1.9 s of noise or an
-# OFDM burst gave (0.162 / 0.221, 0.199 / 0.327, 0.070 / 0.112); front-missed
-# c32r62 bursts that decoded (genie) at MPP/MPG -8/-11 dB scored 0.08-0.42
-# there, 17 of 21 over. Its two-copy header: 1.1x the largest a false mid
-# lock read on one or two overlapping bursts of the grid (two runs, 300
-# buffers a grid: 0.340, 0.360, 0.155; real ones 0.320, 0.282, 0.126 and
-# up). The short c16r25 and c8r50 mid blocks met other bursts' data often
-# (a three-station engine test held BUSY on an x5 false lock at 0.15), so
-# those grids' bar is high.
-MID_THRESHOLD = {"c16r25": 0.24, "c8r50": 0.36, "c32r62": 0.12}
-MID_HEADER_THRESHOLD = {"c16r25": 0.38, "c8r50": 0.40, "c32r62": 0.17}
+# Locks (cpm-acq-gap, 2026-10-26; scripts/cpm_floor_study.py's stage arms,
+# scripts/cpm_acq_fit.py, scripts/cpm_false_locks.py). detect's coarse score
+# is only a CPU floor for its fine stage (about the median a 0.25 s hop of
+# noise scores: the coarse grid's T/8 and R/8 quantisation cost lost fronts
+# 0.03-0.05 there); a lock is judged by tone_llr summed over the known
+# symbols, the best valid word's: front + header copy 1 (find, LOCK_LLR[0]),
+# front + both copies (late_lock, [1]), front + mid block + both copies
+# (find_mid, MID_LLR), each block floored at 0 (_segments), and the word's
+# margin over the runner-up (HDR_MARGIN). That replaced the share thresholds
+# and PEAK_RATIO's gate (fronts at the floor read 0.6-0.7 there): the old
+# gates lost 1-1.7 dB to the genie on fading for c8r50/c16r25 (fronts below
+# PEAK_RATIO and SYNC_THRESHOLD) and 0.7-0.9 dB for c32r62 (both copies right
+# but under HEADER2_THRESHOLD). Largest score on 1000 buffers a source (noise,
+# OFDM, other grids, the grid's own cut bursts; 0-30 dB, AWGN/MPG): front
+# paths 15-20, mid 16-20; bursts the old gates lost read 20-30 (c8r50/c16r25)
+# and 50-80 (c32r62). Streaming Receiver, 8 h a source and grid: 0 false
+# locks on noise, OFDM and other grids (old: 2 on other grids), 4 on two
+# stations' own-grid traffic (old: 25). The margins: a strong front once
+# carried a faded copy's wrong word (0.1-1 apart) past the floor.
+SYNC_THRESHOLD = {"c16r25": 0.07, "c8r50": 0.12, "c32r62": 0.05}
+MID_THRESHOLD = {"c16r25": 0.14, "c8r50": 0.20, "c32r62": 0.07}
+LOCK_LLR = {"c16r25": (24.0, 22.0), "c8r50": (24.0, 22.0), "c32r62": (24.0, 22.0)}
+MID_LLR = {"c16r25": 24.0, "c8r50": 24.0, "c32r62": 24.0}
+HDR_MARGIN = (8.0, 4.0)  # the read word's LLR over the runner-up's: one copy, both
+LLR_EPS = 0.02  # tone_llr's outlier share: a row whose tone the model rejects costs at most -ln(EPS)
+WAIT_LLR = {"c16r25": 0.0, "c8r50": 0.0, "c32r62": 0.0}  # a front waits for its second copy from this LLR
 
 
 def grid_specs(grid: str) -> list:
@@ -489,23 +489,38 @@ def detect(g: Grid, x: np.ndarray, reach_hz: float = 150.0, fine=True, front_onl
     return score, s0, cfo
 
 
-def llrs(g: Grid, E: np.ndarray) -> np.ndarray:
-    """(n_sym, m) tone energies of one codeword -> (n_sym * bits,) coded-bit
-    LLRs (positive: 0) in mapping order (data2g.codes.combine / decode_many's). Noncoherent square-law metric, exact for
-    Rayleigh fading: log P(E | tone m) = E_m g + const, g = Es / (N0 (N0 + Es))."""
+def tone_metric(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone energies of one codeword -> (n_sym, m) log P(E | tone
+    sent) up to a per-symbol constant. Noncoherent square-law metric, exact
+    for Rayleigh fading: E_m g, g = Es / (N0 (N0 + Es)), Es and N0 the
+    codeword's."""
     top = E.max(axis=1)
     n0 = np.median(np.sort(E, axis=1)[:, :-1]) / np.log(2)  # exponential: median = N0 ln 2
     n0 = max(n0, 1e-12 * np.mean(top) + 1e-300)  # noise-free tests
     es = max(np.mean(top) - n0, 1e-3 * n0)
     # es / (n0 (n0 + es)) without its underflow: a codeword past the audio's
     # end (zero-padded: a header claiming more than arrived) reads as erasures
-    metric = E * (es / (n0 + es) / n0)
+    return E * (es / (n0 + es) / n0)
+
+
+def llrs(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone energies of one codeword -> (n_sym * bits,) coded-bit
+    LLRs (positive: 0) in mapping order (data2g.codes.combine / decode_many's),
+    marginals of tone_metric: the control codeword's."""
+    metric = tone_metric(g, E)
     label = np.argsort(_gray(g.m))  # tone -> the bit group it carries
     out = np.empty((len(E), g.bits))
     for b in range(g.bits):
         bit = (label >> (g.bits - 1 - b)) & 1
         out[:, b] = np.logaddexp.reduce(metric[:, bit == 0], axis=1) - np.logaddexp.reduce(metric[:, bit == 1], axis=1)
     return out.reshape(-1)
+
+
+def symbol_ll(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone energies of one codeword -> (n_sym * m,) symbol
+    log-likelihoods in mapping order, symbol-major, value v's on tone
+    gray(v) (to_tones): a GF(M) codeword's soft values (data2g.codes)."""
+    return tone_metric(g, E)[:, _gray(g.m)].reshape(-1)
 
 
 
@@ -518,17 +533,39 @@ def header_rows(grid: str, copies: int) -> tuple:
                  for _, n, d, _ in valid_words(grid))
 
 
+def tone_llr(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(rows, m) energies -> per row and tone, the log-likelihood ratio of
+    that tone sent against a uniformly random one: llrs's square-law metric,
+    es and N0 from these rows. A front or header row scores ~0 on noise, more
+    on its tone as SNR grows, and strongly negative where another tone is
+    strong (a burst's data: what PEAK_RATIO's share test was for)."""
+    G = tone_metric(g, E)
+    L = G - np.logaddexp.reduce(G, axis=1, keepdims=True) + np.log(g.m)
+    return np.logaddexp(np.log1p(-LLR_EPS) + L, np.log(LLR_EPS))
+
+
+def _segments(L: np.ndarray, rows: np.ndarray, t: np.ndarray, H: int) -> float:
+    """tone_llr over header copies (rows: H each, tones t), each copy's sum
+    floored at 0: a faded copy is no evidence either way."""
+    return sum(max(float(L[rows[i:i + H], t].sum()), 0.0) for i in range(0, len(rows), H))
+
+
 def read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
-    """-> (spec, n_data, dup, score, runner-up score): ML over the grid's
-    valid words, shares summed over the first `copies` header copies (1: all
-    an early lock has), each word's at its own rows."""
+    """-> (spec, n_data, dup, score, runner-up score, front): ML over the
+    grid's valid words of tone_llr summed over the front block and the first
+    `copies` header copies (1: all an early lock has), each word's at its own
+    rows, each block's sum floored at 0 (_segments); `front`: the front
+    block's sum, unfloored."""
     rows = header_rows(g.name, copies)
-    E = _shares(_energies(g, x, s0, max(r[-1] for r in rows) + 1, cfo))
+    L = tone_llr(g, _energies(g, x, s0, max(r[-1] for r in rows) + 1, cfo))
+    f = preamble_pattern(g)
+    front = float(L[np.arange(len(f)), f].sum())
     words = valid_words(g.name)
-    scores = np.array([E[r, np.tile(t, copies)].mean() for r, (*_, t) in zip(rows, words)])
+    H = hdr_len(g)
+    scores = max(front, 0.0) + np.array([_segments(L, r, t, H) for r, (*_, t) in zip(rows, words)])
     order = np.argsort(scores)[::-1]
     spec, n, d, _ = words[order[0]]
-    return spec, n, d, float(scores[order[0]]), float(scores[order[1]])
+    return spec, n, d, float(scores[order[0]]), float(scores[order[1]]), front
 
 
 def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int, dup: bool):
@@ -538,10 +575,65 @@ def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int
     E = _energies(g, x, s0, lay.n, cfo)[lay.data_rows]
     sizes = [CTL[g.name].n_sym] * (1 + dup) + [DATA_N // g.bits] * n_data
     out, i = [], 0
-    for n in sizes:
-        out.append(llrs(g, E[i:i + n]))
+    for j, n in enumerate(sizes):
+        out.append((llrs if j < 1 + dup else symbol_ll)(g, E[i:i + n]))
         i += n
     return out, E
+
+
+REFINE_SYMBOLS = 300  # refine's look: the burst's first symbols (the full burst gained nothing more, 2026-10-26)
+
+
+def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: int, dup: bool) -> tuple:
+    """A lock's (start, cfo) -> the noncoherent likelihood's best over the
+    burst's first REFINE_SYMBOLS symbols: known tones (sync blocks, header
+    copies of the word read) by llrs's metric, the rest (control, data) by
+    its log-sum over tones; 5 x 5 grids of T/16 x R/16, then T/64 x R/64.
+    detect's fine stage reads the front alone, and its residual error cost
+    the data 0.5 dB at the AWGN floor (c16r25; 2 Hz or T/32 off: 0.2 dB)."""
+    lay = layout(g.name, stream_symbols(g.name, n_data, dup))
+    h = header_symbols(g.name, header_word(spec.index, n_data, dup))
+    n = min(lay.n, REFINE_SYMBOLS)
+    known = np.full(n, -1)
+    for rows, t in [(lay.sync_rows, lay.sync_tones)] + [(r, h) for r in lay.hdr_rows]:
+        keep = rows < n
+        known[rows[keep]] = np.asarray(t)[keep]
+    kr, ur = np.flatnonzero(known >= 0), np.flatnonzero(known < 0)
+    E0 = _energies(g, x, s0, n, cfo)
+    tot = E0.sum()
+    # the metric's weight fixed at the lock's placement (each candidate's own: 0.2 dB worse, c8r50 AWGN)
+    w = float(tone_metric(g, E0).sum() / tot) if tot > 0 else 0.0
+    T, N = g.T, n * g.T
+
+    def ll(z):  # the likelihood of n symbols of mixed samples, as _energies(...) * w would score them
+        G = np.abs(np.fft.fft(z.reshape(n, T), axis=1)[:, :g.m]) ** 2 * w
+        return G[kr, known[kr]].sum() + np.logaddexp.reduce(G[ur], axis=1).sum()
+    best, bv = (s0, cfo), None
+    for st, sf in ((max(1, g.T // 16), g.rate / 16), (max(1, g.T // 64), g.rate / 64)):
+        s, f = best
+        # _energies mixes by absolute sample, so one mix per CFO serves every start. The stage mixes once at
+        # its centre CFO; each other CFO is that times a rotation, exp(-2 pi i sf t / FS) to the power j,
+        # whose phase repeats every FS / sf samples (native cpm::refine, the same arithmetic)
+        a0, M = s - 2 * st, 4 * st + N
+        seg = np.zeros(M)
+        lo, hi = max(0, a0), min(len(x), a0 + M)
+        if hi > lo:
+            seg[lo - a0:hi - a0] = x[lo:hi]
+        base = seg * np.exp(-2j * np.pi * (g.f0 + f) * ((a0 + np.arange(M)) / FS))
+        P = FS / sf
+        Lt = int(P) if P == np.floor(P) and P <= M else M
+        tab = np.exp(1j * (-2 * np.pi * (sf * np.arange(Lt) / FS)))
+        r1 = np.exp(1j * (-2 * np.pi * np.fmod(sf * a0 / FS, 1.0))) * tab[np.arange(M) % Lt]
+        r2 = r1 * r1
+        z = {-2: base * np.conj(r2), -1: base * np.conj(r1), 0: base, 1: base * r1, 2: base * r2}
+        cands = []
+        for i in range(-2, 3):
+            for j in range(-2, 3):
+                # the second stage's centre is the first stage's best, already scored
+                v = bv if (bv is not None and i == 0 and j == 0) else ll(z[j][(i + 2) * st:(i + 2) * st + N])
+                cands.append((v, (s + i * st, f + j * sf)))
+        bv, best = max(cands, key=lambda c: c[0])  # the first best, as max(..., key=ll) took it
+    return best
 
 
 def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
@@ -578,10 +670,11 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
     """-> early lock {spec, n_data, dup, start, end, score, header score} of
     a burst of grid g in x, or None: the sync pattern (front block alone by
     default) scoring over `threshold` (default SYNC_THRESHOLD; given: no
-    header floor either), then its first header copy (HEADER_THRESHOLD), or
-    under that both copies (late_lock, HEADER2_THRESHOLD) once x holds the
-    second. `wait`: before then, a candidate {wait, start, cfo, score,
-    header_end: where x must reach} for late_lock instead of None.
+    lock floor either), then the front and its first header copy
+    (read_header: LOCK_LLR[0], HDR_MARGIN[0]), or under that, a front over
+    WAIT_LLR, both copies (late_lock) once x holds the second. `wait`: before
+    then, a candidate {wait, start, cfo, score, header_end: where x must
+    reach} for late_lock instead of None.
     `end`: one past its last sample, in x's samples (it may run past x).
     `lo`, `hi`: only starts in [lo, hi) are searched (a streaming receiver
     searches each start once: detect's cost is the audio it is given)."""
@@ -604,12 +697,11 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
     if s0 < 0:
         return None  # fine timing moved a lock at x's first sample before it: its front is cut off
     h = read_header(g, x, s0, cfo, copies=1)
-    front = _peak_ratio(g, x, s0, cfo) >= PEAK_RATIO
-    if front and (threshold is not None or h[3] >= HEADER_THRESHOLD[g.name]):
+    if threshold is not None or (h[3] >= LOCK_LLR[g.name][0] and h[3] - h[4] >= HDR_MARGIN[0]):
         return _lock(g, s0, cfo, score, h, 1)
-    if threshold is not None or not front:
-        return None  # a burst's data or a later sync block, its front missed
-    # the front is there but its first header copy faded: both copies, once the second is in
+    if h[5] < WAIT_LLR[g.name]:
+        return None  # noise, or a burst's data or a later sync block, its front missed
+    # a front, its first header copy faded: both copies, once the second is in
     cand = dict(wait=True, band=g.name, start=s0, cfo=cfo, score=score, header_end=s0 + hdr_span(g.name, 2),
                 family="cpm")
     if cand["header_end"] <= len(x):
@@ -618,15 +710,12 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
 
 
 def late_lock(g: Grid, x: np.ndarray, cand: dict):
-    """find's candidate (x holding its header_end) -> its lock from both
-    header copies (HEADER2_THRESHOLD), or None."""
-    s0 = cand["start"]
-    if _peak_ratio(g, x, s0, cand["cfo"]) < PEAK_RATIO:
+    """find's candidate (x holding its header_end) -> its lock from the front
+    and both header copies (LOCK_LLR), or None."""
+    h = read_header(g, x, cand["start"], cand["cfo"], copies=HDR_COPIES)
+    if h[3] < LOCK_LLR[g.name][1] or h[3] - h[4] < HDR_MARGIN[1]:
         return None
-    h = read_header(g, x, s0, cand["cfo"], copies=HDR_COPIES)
-    if h[3] < HEADER2_THRESHOLD[g.name]:
-        return None
-    return _lock(g, s0, cand["cfo"], cand["score"], h, HDR_COPIES)
+    return _lock(g, cand["start"], cand["cfo"], cand["score"], h, HDR_COPIES)
 
 
 def find_mid(g: Grid, x: np.ndarray, lo: int = 0, hi: int | None = None):
@@ -644,23 +733,36 @@ def find_mid(g: Grid, x: np.ndarray, lo: int = 0, hi: int | None = None):
         return None
     if p + (nb + hdr_len(g)) * T > len(x):
         return None  # its second header copy is still arriving
-    if _peak_ratio(g, x, p, cfo, mid=True) < PEAK_RATIO:
-        return None  # data that met the pattern by chance
+    h = read_mid(g, x, p, cfo)
+    if h is None or h[3] < MID_LLR[g.name] or h[3] - h[4] < HDR_MARGIN[1]:
+        return None
+    return _lock(g, h[5], cfo, score, h, HDR_COPIES)
+
+
+def read_mid(g: Grid, x: np.ndarray, p: int, cfo: float):
+    """A mid block at p -> (spec, n_data, dup, score, runner-up, start) or
+    None: ML over the valid words of tone_llr summed over every known row
+    (the mid block; front and both header copies as read_header floors
+    them), each word read at the start its mid block row implies (a start
+    before x is no reading)."""
+    T = g.T
     words, rows = valid_words(g.name), header_rows(g.name, HDR_COPIES)
     n = max(r[-1] for r in rows) + 1
-    E, scores = {}, np.full(len(words), -np.inf)
+    f, mb = preamble_pattern(g), mid_block(g)
+    L, scores = {}, np.full(len(words), -np.inf)
     for k, ((*_, t), r, b1) in enumerate(zip(words, rows, mid_rows(g.name))):
         s = p - b1 * T
         if s >= 0:
-            if s not in E:
-                E[s] = _shares(_energies(g, x, s, n, cfo))
-            scores[k] = E[s][r, np.tile(t, HDR_COPIES)].mean()
+            if s not in L:
+                L[s] = tone_llr(g, _energies(g, x, s, n, cfo))
+            Ls = L[s]
+            scores[k] = (max(float(Ls[np.arange(len(f)), f].sum()), 0.0) + float(Ls[b1 + np.arange(len(mb)), mb].sum())
+                         + _segments(Ls, r, t, hdr_len(g)))
     order = np.argsort(scores)[::-1]
-    if scores[order[0]] < MID_HEADER_THRESHOLD[g.name]:
+    if not np.isfinite(scores[order[0]]):
         return None
     spec, nd, d, _ = words[order[0]]
-    return _lock(g, p - mid_rows(g.name)[order[0]] * T, cfo, score,
-                 (spec, nd, d, float(scores[order[0]]), float(scores[order[1]])), HDR_COPIES)
+    return spec, nd, d, float(scores[order[0]]), float(scores[order[1]]), p - mid_rows(g.name)[order[0]] * T
 
 
 @lru_cache(maxsize=None)
@@ -679,7 +781,7 @@ def hdr_span(grid: str, copies: int) -> int:
 
 def _lock(g: Grid, s0: int, cfo: float, score: float, h: tuple, copies: int) -> dict:
     """find's lock dict from a header read at s0 over `copies` copies."""
-    spec, n, d, hs, h2 = h
+    spec, n, d, hs, h2 = h[:5]
     lay = layout(g.name, stream_symbols(g.name, n, d))
     return dict(spec=spec, n_data=n, dup=d, start=s0, cfo=cfo, score=score, header_score=hs, header_margin=hs - h2,
                 end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[copies - 1][-1] + 1) * g.T, band=g.name,
@@ -691,7 +793,8 @@ def receive(x: np.ndarray, lock: dict) -> dict:
     result data2g.arq.phy reads: spec, n_cw (slots, control included), the
     per-slot soft bits and the tone energies."""
     g = GRIDS[lock["band"]]
-    soft_, E = soft(g, lock["spec"], x, lock["start"], lock["cfo"], lock["n_data"], lock["dup"])
+    s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"])
+    soft_, E = soft(g, lock["spec"], x, s0, cfo, lock["n_data"], lock["dup"])
     return dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
                 dup=lock["dup"], soft=soft_, E=E, cfo=lock["cfo"], preamble_start=lock["start"],
                 header_end=lock.get("header_end"))

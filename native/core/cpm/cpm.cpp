@@ -9,6 +9,7 @@
 
 #include "dsp/dsp.hpp"
 #include "dsp/fft.hpp"
+#include "util/pool.hpp"
 #include "waveform/dsp.hpp"
 
 namespace data2g::cpm {
@@ -336,12 +337,27 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         bool first = true;
         std::vector<double> on(R), all(R * g.m);
         const std::int64_t step = std::max<std::int64_t>(1, T / 32), lo = floor_div(-T, 8), hi = T / 8;
-        for (std::int64_t dt = lo; dt < hi + 1; dt += step)
-            for (int q = -2; q <= 2; ++q) {
-                const double df = (0.0625 * q) * g.rate;
+        // energies() mixes by absolute sample, so one mix per CFO covers every timing offset (a slice of it
+        // is what energies(x, s, ...) builds, bit for bit): 5 mixes, not 45
+        const std::int64_t a0 = best.start + lo, N = span * T, M = (hi - lo) + N;
+        std::vector<cdouble> zq(M), seg(N);
+        for (int q = -2; q <= 2; ++q) {
+            const double df = (0.0625 * q) * g.rate;
+            const double c = best.cfo + df;
+            const double w = (-2 * PI) * (g.f0 + c);
+            for (std::int64_t i = 0; i < M; ++i) {
+                const std::int64_t s = a0 + i;
+                if (s < 0 || s >= len) {
+                    zq[i] = 0.0;
+                    continue;
+                }
+                const double arg = w * (static_cast<double>(s) / FS);
+                zq[i] = {x[s] * std::cos(arg), x[s] * std::sin(arg)};
+            }
+            for (std::int64_t dt = lo; dt < hi + 1; dt += step) {
                 const std::int64_t s = best.start + dt;
-                const double c = best.cfo + df;
-                const Mat<double> E = energies(g, x, s, static_cast<int>(span), c);
+                std::copy(zq.begin() + (dt - lo), zq.begin() + (dt - lo) + N, seg.begin());
+                const Mat<double> E = power(fft_rows(seg, span, T), span, T, g.m);
                 for (std::size_t r = 0; r < R; ++r) {
                     on[r] = E[rows[r]][tones_[r]];
                     std::copy(E[rows[r]], E[rows[r]] + g.m, all.begin() + r * g.m);
@@ -352,19 +368,38 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
                     top = v, s_best = s, c_best = c, first = false;
                 }
             }
+        }
         best.start = s_best;
         best.cfo = c_best;
     }
     return best;
 }
 
-std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
+namespace {
+
+// cpm.tone_metric's factor: the square law's Es / (N0 (N0 + Es)), the codeword's Es and N0.
+double metric_scale(const Mat<double>& E) {
     const auto top = row_max(E);
     const double mtop = np_mean(top);
     double n0 = median_rest(E) / std::numbers::ln2;  // exponential: median = N0 ln 2
     n0 = std::max(n0, 1e-12 * mtop + 1e-300);
     const double es = std::max(mtop - n0, 1e-3 * n0);
-    const double scale = es / (n0 + es) / n0;
+    return es / (n0 + es) / n0;
+}
+
+}  // namespace
+
+std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E) {
+    const double scale = metric_scale(E);
+    const auto gr = gray(g.m);
+    std::vector<double> out(E.rows * g.m);
+    for (std::size_t r = 0; r < E.rows; ++r)
+        for (int v = 0; v < g.m; ++v) out[r * g.m + v] = E[r][gr[v]] * scale;
+    return out;
+}
+
+std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
+    const double scale = metric_scale(E);
     const auto gr = gray(g.m);
     std::vector<int> label(g.m);  // tone -> the bit group it carries
     for (int i = 0; i < g.m; ++i) label[gr[i]] = i;
@@ -435,26 +470,56 @@ std::int64_t hdr_span(const Grid& g, int copies) {
     return static_cast<std::int64_t>(word_rows(g).span.at(copies - 1)) * g.T;
 }
 
+Mat<double> tone_llr(const Grid& g, const Mat<double>& E) {
+    const double scale = metric_scale(E), lm = std::log(static_cast<double>(g.m));
+    const double keep = std::log1p(-tables::CPM.llr_eps), floor_ = std::log(tables::CPM.llr_eps);
+    Mat<double> L(E.rows, E.cols);
+    for (std::size_t r = 0; r < E.rows; ++r) {
+        double tot = E[r][0] * scale;  // np.logaddexp.reduce: left to right
+        for (std::size_t k = 1; k < E.cols; ++k) tot = logaddexp(tot, E[r][k] * scale);
+        for (std::size_t k = 0; k < E.cols; ++k) L[r][k] = logaddexp(keep + (E[r][k] * scale - tot + lm), floor_);
+    }
+    return L;
+}
+
+namespace {
+
+double front_llr(const Grid& g, const Mat<double>& L) {
+    std::vector<double> v(g.preamble.size());
+    for (std::size_t i = 0; i < v.size(); ++i) v[i] = L[i][g.preamble[i]];
+    return np_sum(v);
+}
+
+// cpm._segments: tone_llr over header copies of hdr_len rows each, each copy's sum floored at 0.
+double segments(const Grid& g, const Mat<double>& L, const std::vector<int>& rows, std::span<const std::uint8_t> t) {
+    double out = 0.0;
+    std::vector<double> v(g.hdr_len);
+    for (std::size_t i = 0; i < rows.size(); i += g.hdr_len) {
+        for (int j = 0; j < g.hdr_len; ++j) v[j] = L[rows[i + j]][t[j]];
+        out += std::max(np_sum(v), 0.0);
+    }
+    return out;
+}
+
+}  // namespace
+
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies) {
     const WordRows& W = word_rows(g);
     const auto& rows = W.rows.at(copies - 1);
-    const Mat<double> E = shares(energies(g, x, s0, W.span[copies - 1], cfo));
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY};
-    std::vector<double> v;
+    const Mat<double> L = tone_llr(g, energies(g, x, s0, W.span[copies - 1], cfo));
+    const double front = front_llr(g, L);
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, front};
     std::size_t k = 0;
     for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
         if (s.grid != g.name) continue;
         for (bool d : {false, true})
             for (int n = 0; n <= tables::CPM.max_data; ++n) {
                 const auto t = header_symbols(g, header_value(s.index, n, d));
-                const auto& r = rows[k++];
-                v.resize(r.size());
-                for (std::size_t i = 0; i < r.size(); ++i) v[i] = E[r[i]][t[i % t.size()]];
-                const double score = np_mean(v);
+                const double score = std::max(front, 0.0) + segments(g, L, rows[k++], t);
                 // ties: the later word, as argsort(...)[::-1] over a stable sort
                 if (score >= best.score) {
                     best.runner_up = best.score;
-                    best = {&s, n, d, score, best.runner_up};
+                    best = {&s, n, d, score, best.runner_up, front};
                 } else if (score > best.runner_up) {
                     best.runner_up = score;
                 }
@@ -472,7 +537,7 @@ Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
         const std::size_t n = k < 1 + dup ? ctl(g).n_sym : tables::CPM.data_n / g.bits;
         Mat<double> part(n, out.E.cols);
         std::copy(out.E[i], out.E[i] + n * out.E.cols, part.data.begin());
-        out.slots.push_back(llrs(g, part));
+        out.slots.push_back(k < 1 + dup ? llrs(g, part) : symbol_ll(g, part));
         i += n;
     }
     return out;
@@ -505,10 +570,10 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     if (d.start + hdr_span(g, 1) > len) return std::nullopt;  // its header copy is still arriving
     if (d.start < 0) return std::nullopt;  // its front is cut off
     const Header h = read_header(g, x, d.start, d.cfo, 1);
-    const bool front = peak_ratio(g, x, d.start, d.cfo) >= tables::CPM.peak_ratio;
-    if (front && (threshold || h.score >= g.header_threshold)) return make_lock(g, d.start, d.cfo, d.score, h, 1);
-    if (threshold || !front) return std::nullopt;  // a burst's data or a later sync block, its front missed
-    // the front is there but its first header copy faded: both copies, once the second is in
+    if (threshold || (h.score >= g.lock_llr1 && h.score - h.runner_up >= tables::CPM.hdr_margin1))
+        return make_lock(g, d.start, d.cfo, d.score, h, 1);
+    if (h.front < g.wait_llr) return std::nullopt;  // noise, or a burst's data or a later sync block, its front missed
+    // a front, its first header copy faded: both copies, once the second is in
     Lock cand{};
     cand.wait = true;
     cand.start = d.start;
@@ -530,49 +595,47 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
     d.start += a;
     if (d.score < g.mid_threshold || !(lo <= d.start && d.start < hi.value_or(len))) return std::nullopt;
     if (d.start + (nb + g.hdr_len) * T > len) return std::nullopt;  // its second header copy is still arriving
-    if (peak_ratio(g, x, d.start, d.cfo, true) < tables::CPM.peak_ratio) return std::nullopt;
-    // each word puts its mid block at its own row: read at the start it implies
+    // each word puts its mid block at its own row: read at the start it implies (cpm.read_mid)
     const WordRows& W = word_rows(g);
     const int copies = tables::CPM.hdr_copies;
     const auto& rows = W.rows[copies - 1];
-    std::vector<std::pair<std::int64_t, Mat<double>>> E;
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY};
+    std::vector<std::pair<std::int64_t, Mat<double>>> L;
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0};
     std::int64_t best_s = 0;
-    std::vector<double> v;
+    std::vector<double> vm(g.mid_block.size());
     std::size_t k = 0;
     for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
         if (s.grid != g.name) continue;
         for (bool dup : {false, true})
             for (int n = 0; n <= tables::CPM.max_data; ++n, ++k) {
-                const std::int64_t s0 = d.start - static_cast<std::int64_t>(W.mid[k]) * T;
+                const std::int64_t b1 = W.mid[k], s0 = d.start - b1 * T;
                 if (s0 < 0) continue;
-                auto it = std::find_if(E.begin(), E.end(), [&](const auto& e) { return e.first == s0; });
-                if (it == E.end()) {
-                    E.emplace_back(s0, shares(energies(g, x, s0, W.span[copies - 1], d.cfo)));
-                    it = E.end() - 1;
+                auto it = std::find_if(L.begin(), L.end(), [&](const auto& e) { return e.first == s0; });
+                if (it == L.end()) {
+                    L.emplace_back(s0, tone_llr(g, energies(g, x, s0, W.span[copies - 1], d.cfo)));
+                    it = L.end() - 1;
                 }
+                const Mat<double>& Ls = it->second;
                 const auto t = header_symbols(g, header_value(s.index, n, dup));
-                const auto& r = rows[k];
-                v.resize(r.size());
-                for (std::size_t i = 0; i < r.size(); ++i) v[i] = it->second[r[i]][t[i % t.size()]];
-                const double score = np_mean(v);
+                for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = Ls[b1 + i][g.mid_block[i]];
+                const double score = std::max(front_llr(g, Ls), 0.0) + np_sum(vm) + segments(g, Ls, rows[k], t);
                 if (score >= best.score) {  // ties: the later word (read_header)
                     best.runner_up = best.score;
-                    best = {&s, n, dup, score, best.runner_up};
+                    best = {&s, n, dup, score, best.runner_up, 0.0};
                     best_s = s0;
                 } else if (score > best.runner_up) {
                     best.runner_up = score;
                 }
             }
     }
-    if (!best.spec || best.score < g.mid_header_threshold) return std::nullopt;
+    if (!best.spec || best.score < g.mid_llr || best.score - best.runner_up < tables::CPM.hdr_margin2)
+        return std::nullopt;
     return make_lock(g, best_s, d.cfo, d.score, best, copies);
 }
 
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
-    if (peak_ratio(g, x, cand.start, cand.cfo) < tables::CPM.peak_ratio) return std::nullopt;
     const Header h = read_header(g, x, cand.start, cand.cfo, tables::CPM.hdr_copies);
-    if (h.score < g.header2_threshold) return std::nullopt;
+    if (h.score < g.lock_llr2 || h.score - h.runner_up < tables::CPM.hdr_margin2) return std::nullopt;
     return make_lock(g, cand.start, cand.cfo, cand.score, h, tables::CPM.hdr_copies);
 }
 
@@ -605,8 +668,107 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
     return out;
 }
 
+std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
+                                       const Spec& spec, int n_data, bool dup) {
+    const Layout L = layout(g, stream_symbols(g, n_data, dup));
+    const auto h = header_symbols(g, header_value(spec.index, n_data, dup));
+    const int n = std::min(L.n, tables::CPM.refine_symbols);
+    std::vector<int> known(n, -1);
+    for (std::size_t i = 0; i < L.sync_rows.size(); ++i)
+        if (L.sync_rows[i] < n) known[L.sync_rows[i]] = L.sync_tones[i];
+    for (const auto& rows : L.hdr_rows)
+        for (std::size_t i = 0; i < rows.size(); ++i)
+            if (rows[i] < n) known[rows[i]] = h[i];
+    std::vector<int> kr, ur;
+    for (int r = 0; r < n; ++r) (known[r] >= 0 ? kr : ur).push_back(r);
+    // the metric's weight fixed at the lock's placement: tone_metric(E0).sum() / E0.sum(), as Python reads it
+    const Mat<double> E0 = energies(g, x, s0, n, cfo);
+    const double tot = np_sum(E0.data.data(), E0.data.size());
+    double w = 0.0;
+    if (tot > 0) {
+        const double scale = metric_scale(E0);
+        std::vector<double> G0(E0.data.size());
+        for (std::size_t i = 0; i < G0.size(); ++i) G0[i] = E0.data[i] * scale;
+        w = np_sum(G0) / tot;
+    }
+    const std::int64_t len = static_cast<std::int64_t>(x.size()), T = g.T, N = static_cast<std::int64_t>(n) * T;
+    // the likelihood of mixed samples z (n symbols); the log-sum over tones max-shifted (numpy's
+    // logaddexp.reduce rounds otherwise, within 1e-15: no tie it could break was seen)
+    const auto ll = [&](const cdouble* z) {
+        const std::vector<cdouble> seg(z, z + N);
+        const Mat<double> E = power(fft_rows(seg, n, T), n, T, g.m);
+        std::vector<double> vk(kr.size()), vu(ur.size());
+        for (std::size_t i = 0; i < kr.size(); ++i) vk[i] = E[kr[i]][known[kr[i]]] * w;
+        for (std::size_t i = 0; i < ur.size(); ++i) {
+            const double* e = E[ur[i]];
+            const double mx = *std::max_element(e, e + g.m) * w;
+            double acc = 0.0;
+            for (int k = 0; k < g.m; ++k) acc += std::exp(e[k] * w - mx);
+            vu[i] = mx + std::log(acc);
+        }
+        return np_sum(vk) + np_sum(vu);
+    };
+    std::int64_t bs = s0;
+    double bc = cfo, bv = 0.0;
+    const std::pair<std::int64_t, double> steps[] = {{std::max(1, g.T / 16), g.rate / 16},
+                                                     {std::max(1, g.T / 64), g.rate / 64}};
+    bool centre_known = false;
+    for (const auto& [st, sf] : steps) {
+        const std::int64_t s = bs, a0 = s - 2 * st, M = 4 * st + N;
+        const double f = bc;
+        // energies() mixes by absolute sample, so one mix per CFO serves every start. The stage mixes once
+        // at its centre CFO; each other CFO is that times a rotation, e^(-2 pi i sf t / FS) to the power j,
+        // whose phase repeats every FS / sf samples: one sincos per table entry, not per sample per CFO.
+        std::vector<cdouble> z[5];
+        z[2].assign(M, 0.0);
+        const double w0 = (-2 * PI) * (g.f0 + f);
+        for (std::int64_t q = 0; q < M; ++q) {
+            const std::int64_t t = a0 + q;
+            if (t < 0 || t >= len) continue;
+            const double arg = w0 * (static_cast<double>(t) / FS);
+            z[2][q] = {x[t] * std::cos(arg), x[t] * std::sin(arg)};
+        }
+        const double P = FS / sf;
+        const std::int64_t Lt = (P == std::floor(P) && P <= static_cast<double>(M)) ? static_cast<std::int64_t>(P) : M;
+        std::vector<cdouble> tab(Lt);
+        for (std::int64_t q = 0; q < Lt; ++q) {
+            const double arg = (-2 * PI) * (sf * static_cast<double>(q) / FS);
+            tab[q] = {std::cos(arg), std::sin(arg)};
+        }
+        const double cyc = (-2 * PI) * std::fmod(sf * static_cast<double>(a0) / FS, 1.0);
+        const cdouble c0{std::cos(cyc), std::sin(cyc)};
+        for (int j : {-2, -1, 1, 2}) z[j + 2].resize(M);
+        for (std::int64_t q = 0; q < M; ++q) {
+            const cdouble r1 = c0 * tab[q % Lt], r2 = r1 * r1, b = z[2][q];
+            z[0][q] = b * std::conj(r2);
+            z[1][q] = b * std::conj(r1);
+            z[3][q] = b * r1;
+            z[4][q] = b * r2;
+        }
+        // the 25 placements are independent: one pool task each (bit-identical for any pool size); the
+        // second stage's centre is the first stage's best, already scored
+        double v[5][5];
+        pool::parallel_for(25, [&](std::size_t k) {
+            const int i = static_cast<int>(k / 5), j = static_cast<int>(k % 5);
+            if (centre_known && i == 2 && j == 2) return;
+            v[i][j] = ll(z[j].data() + i * st);
+        });
+        if (centre_known) v[2][2] = bv;
+        double top = -INFINITY;
+        for (int i = -2; i <= 2; ++i)
+            for (int j = -2; j <= 2; ++j)
+                if (v[i + 2][j + 2] > top)  // Python's max: the first best
+                    top = v[i + 2][j + 2], bs = s + i * st, bc = f + j * sf;
+        bv = top;
+        centre_known = true;
+    }
+    return {bs, bc};
+}
+
 Received receive(std::span<const double> x, const Lock& lock) {
-    Soft s = soft(grid_of(*lock.spec), x, lock.start, lock.cfo, lock.n_data, lock.dup);
+    const Grid& g = grid_of(*lock.spec);
+    const auto [s0, cfo] = refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup);
+    Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
     return {lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
             lock.header_end};

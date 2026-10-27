@@ -1,5 +1,5 @@
 {
- "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never",
+ "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never; CPM rows rerun 2026-10-27 on cpm-gfm-on-acq (GF(M) data code on the cpm-acq-gap receiver, the same seeded study, native; runs/cpm-combined/ladder_cpm_combined.csv)",
  "channels": [
   "awgn",
   "mpg",
@@ -260,40 +260,40 @@
    99.0
   ],
   "fsk16r25-r1/3": [
-   -12.3125,
-   -3.0,
-   -7.75,
-   -8.25
+   -12.6875,
+   -4.5625,
+   -9.0625,
+   -9.0
   ],
   "fsk16r25-r1/2": [
-   -12.125,
-   -2.625,
-   -7.4375,
-   -8.1875
+   -12.75,
+   -3.625,
+   -8.6875,
+   -9.125
   ],
   "fsk8r50-r1/3": [
-   -10.0625,
-   -1.1875,
-   -4.5,
-   -5.5
+   -10.25,
+   -1.8125,
+   -6.375,
+   -6.0625
   ],
   "fsk8r50-r1/2": [
-   -10.0625,
-   0.75,
-   -4.8125,
-   -5.5625
+   -10.25,
+   -0.1875,
+   -6.375,
+   -6.125
   ],
   "fsk32r62-r1/3": [
-   -7.875,
-   -1.4375,
-   -2.375,
-   -2.375
+   -7.9375,
+   -1.375,
+   -3.0,
+   -2.5625
   ],
   "fsk32r62-r1/2": [
-   -7.875,
-   -1.0625,
-   -2.3125,
-   -2.125
+   -8.0,
+   -2.0,
+   -2.75,
+   -2.75
   ],
   "n10-64l-r3/4": [
    8.5625,

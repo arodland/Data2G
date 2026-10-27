@@ -144,6 +144,11 @@ def main():
     ap.add_argument("data", nargs="?")
     ap.add_argument("--redescribe", metavar="NPZ", help="rewrite NPZ's descriptors (no training) into --out")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
+    ap.add_argument("--teacher-cpm", default="", help="the CPM modes' targets from this model instead")
+    ap.add_argument("--cpm-below", type=float, default=None,
+                    help="--teacher-cpm only on rows whose snr_est is under this (ramped over 2 dB below it)")
+    ap.add_argument("--init",default="", help="start from this CNP's weights (distillation only)")
+    ap.add_argument("--lr", type=float, default=1e-3, help="distillation's learning rate")
     ap.add_argument("--hold", default="", help="modes left out of training (zero-shot test)")
     ap.add_argument("--cond", default="", help="policy.COND_OFFSETS' spec, applied to the teacher's targets")
     ap.add_argument("--epochs", type=int, default=40)
@@ -155,6 +160,9 @@ def main():
     ap.add_argument("--labels", action="store_true", help="train on the rows' outcomes (the tried mode's), not a teacher")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
+    torch.set_num_threads(4)
+    if a.device.startswith("cuda"):  # the GPU is shared with the desktop
+        torch.cuda.set_per_process_memory_fraction(0.12)
     if a.redescribe:
         return redescribe(a.redescribe, a.out)
     if a.labels:
@@ -164,6 +172,20 @@ def main():
     assert tuple(teach.modes) == T.MODES
     z_t = np.concatenate([teach(x[i:i + 4096]) for i in range(0, len(x), 4096)])  # (DATA2G_OUTCOME_LCB applies)
     n = len(T.MODES)
+    if a.teacher_cpm:  # the CPM modes' columns from another teacher; the rest stay the main teacher's
+        tc = P.outcome_model(a.teacher_cpm)
+        assert tuple(tc.modes) == T.MODES
+        zc = np.concatenate([tc(x[i:i + 4096]) for i in range(0, len(x), 4096)])
+        cols = [k for k, m in enumerate(T.MODES) if m not in SUBMODES]
+        cols += [n + k for k in cols]
+        if a.cpm_below is not None:  # only where the row's snr_est is under it (a 2 dB ramp up to it)
+            snr_est = np.array([float(r["snr_est"]) for r in rows])
+            w = np.clip((a.cpm_below - snr_est) / 2, 0, 1)[:, None]
+            z_t[:, cols] = w * zc[:, cols] + (1 - w) * z_t[:, cols]
+            print(f"CPM teacher weight: mean {w.mean():.3f}, full on {np.mean(w == 1):.1%} of rows")
+        else:
+            z_t[:, cols] = zc[:, cols]
+        print(f"CPM columns from {a.teacher_cpm}: {[T.MODES[k] for k in cols[:len(cols) // 2]]}")
     if a.cond:  # the shifter's conditional offsets (policy.COND_OFFSETS), on each row's own spread_est
         spread = np.array([float(r["spread_est"]) for r in rows])
         snr_est = np.array([float(r["snr_est"]) for r in rows])
@@ -179,12 +201,18 @@ def main():
     keep = np.array([m not in hold for m in T.MODES])
     desc = np.array([descriptor(m) for m in T.MODES], dtype=np.float64)
     dmean, dstd = desc.mean(0), desc.std(0) + 1e-6
-    descn = (desc - dmean) / dstd
     seeds = np.array([int(r["seed"]) for r in rows])
     us = np.unique(seeds)
     te = np.isin(seeds, np.random.default_rng(0).choice(us, len(us) // 5, replace=False))
     trn = ~te
     mean, std = xe[trn].mean(0), xe[trn].std(0) + 1e-6
+    init = None
+    if a.init:  # start from a CNP: its weights, input and descriptor normalization (descriptors as they are now)
+        init = dict(np.load(a.init))
+        assert str(init["kind"]) == "cnp" and [str(m) for m in init["modes"]] == list(T.MODES), a.init
+        dmean, dstd = init["dmean"], init["dstd"]
+        mean, std = init["p_mean"], init["p_std"]
+    descn = (desc - dmean) / dstd
     dev = torch.device(a.device)
     Tt = lambda v: torch.tensor(v, dtype=torch.float32, device=dev)  # noqa: E731
     X, S = Tt(xe[trn]), Tt(secs[trn])
@@ -194,7 +222,9 @@ def main():
     Yk = Y[:, torch.tensor(np.flatnonzero(keep), device=dev)]
     torch.manual_seed(1)
     net = CNP(xe.shape[1], desc.shape[1], mean, std, a.enc, a.z, a.head).to(dev)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    if init is not None:
+        net.load_state_dict({k[2:]: torch.tensor(v) for k, v in init.items() if k.startswith("p_")})
+    opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, a.epochs)
     for ep in range(a.epochs):
         perm = torch.randperm(len(X), device=dev)
@@ -214,6 +244,8 @@ def main():
     pj_t, pj_s = pt[:, :n] * pt[:, n:], ps[..., 0] * ps[..., 1]
     err = np.abs(pj_s - pj_t).mean(0)
     print(f"held-out rows: mean |dP(codeword)| against the teacher, trained modes {err[keep].mean():.4f}")
+    ofdm = np.array([m in SUBMODES for m in T.MODES])
+    print(f"  OFDM modes {err[keep & ofdm].mean():.4f} (max {err[keep & ofdm].max():.4f}), CPM {err[~ofdm].mean():.4f}")
     for m in hold:
         k = T.MODES.index(m)
         print(f"  held-out mode {m:16s} {err[k]:.4f}  (teacher mean P {pj_t[:, k].mean():.3f}, cnp {pj_s[:, k].mean():.3f})")

@@ -11,7 +11,7 @@ def substitutions(native):
     from data2g import config, cpm, modem
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
-                                       "read_header", "soft", "find", "late_lock", "find_mid", "measure")}
+                                       "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine")}
 
     def own_grid(g):
         return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
@@ -46,8 +46,13 @@ def substitutions(native):
     def read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
         if not own_grid(g):
             return py["read_header"](g, x, s0, cfo, copies)
-        name, nd, d, score, h2 = n.read_header(g.name, x, s0, cfo, copies)
-        return cpm.SPECS[name], nd, d, score, h2
+        name, nd, d, score, h2, front = n.read_header(g.name, x, s0, cfo, copies)
+        return cpm.SPECS[name], nd, d, score, h2, front
+
+    def refine(g, x, s0, cfo, spec, n_data, dup):
+        if not own_grid(g) or not own_spec(spec):
+            return py["refine"](g, x, s0, cfo, spec, n_data, dup)
+        return n.refine(g.name, x, s0, cfo, spec.name, n_data, dup)
 
     def soft(g, spec, x, s0, cfo, n_data, dup):
         if not own_grid(g):
@@ -100,7 +105,10 @@ def substitutions(native):
         (cpm, "_shares"): n.shares,
         (cpm, "detect"): detect,
         (cpm, "llrs"): by_grid(n.llrs, cpm.llrs),
+        (cpm, "symbol_ll"): by_grid(n.symbol_ll, cpm.symbol_ll),
         (cpm, "read_header"): read_header,
+        (cpm, "tone_llr"): by_grid(n.tone_llr, cpm.tone_llr),
+        (cpm, "refine"): refine,
         (cpm, "soft"): soft,
         (cpm, "_peak_ratio"): by_grid(n.peak_ratio, cpm._peak_ratio),
         (cpm, "find"): find,

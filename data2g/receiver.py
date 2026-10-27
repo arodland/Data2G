@@ -294,7 +294,12 @@ class Receiver:
         self.confirmed = False  # the pending burst's header is clear and its pilots are there
         self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
         self._ps, self._pn = 0.0, 0  # the block being summed
-        self.fresh = self.HOP  # samples fed since the last preamble search (search at once)
+        # samples fed since the last preamble search (search at once), less
+        # whole hops only: searches stay on the stream's HOP grid. Reset to 0
+        # (at the first search, once min_search was in, or as a burst
+        # completed: both at a chunk boundary) moved every later search with
+        # the chunking
+        self.fresh = self.HOP
         self.last_start = -1  # stream start of the last burst handled (not to be found again)
         # per band / CPM grid: starts before this stream index have been
         # searched with all the audio their header needs (not searched again)
@@ -412,7 +417,7 @@ class Receiver:
         n4 header claiming 52 s hid three FSK bursts (recordings/20261024-190009,
         19:27:36). `whole`: search everything after the pending header (as it
         completes), not just the newest audio."""
-        self.fresh = 0
+        self.fresh %= self.HOP
         p = self.pending
         if p.get("family") == "cpm":
             return False  # scores aren't comparable across families; CPM bursts are long and certain
@@ -534,7 +539,7 @@ class Receiver:
                 # it); new preambles only every HOP samples
                 if len(self.buf) < self.min_search or self.fresh < self.HOP:
                     break
-                self.fresh = 0
+                self.fresh %= self.HOP
                 # digital silence (a muted or looped-back input) has no noise
                 # to normalize by, and filter ringing then reads as preambles
                 # (a burst's own tail read as a header at 1e-6 noise). A
@@ -577,7 +582,7 @@ class Receiver:
                     # the later-header search is for false locks: a confirmed
                     # burst skips it (it was 30% of a Pat exchange's CPU)
                     if self.confirmed:
-                        self.fresh = 0
+                        self.fresh %= self.HOP
                     elif self._supersede(out):
                         continue
                 break

@@ -213,7 +213,8 @@ def undeal(r: dict) -> dict:
     if r.get("family") == "cpm" and not r.get("_undealt"):
         k, soft = r["n_ctl_slots"], r["soft"]
         if len(soft) > k:
-            data = codes.despread(np.concatenate(soft[k:]), len(soft) - k, cpm.GRIDS[r["band"]].bits)
+            m = codes.soft_len(r["spec"]) // codes.n_sym(r["spec"])  # soft values a symbol (GF(M): q)
+            data = codes.despread(np.concatenate(soft[k:]), len(soft) - k, m)
             r["soft"] = list(soft[:k]) + list(data)
         r["_undealt"] = True
     return r

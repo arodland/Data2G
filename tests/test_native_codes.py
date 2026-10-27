@@ -20,7 +20,7 @@ CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", 
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
          "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
          "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
-         "decode_buffer_pinned", "decode_buffer_raw")
+         "decode_buffer_pinned", "decode_buffer_raw", "plain")
 
 
 @pytest.fixture
@@ -68,10 +68,22 @@ def test_spread(native, py):
 
 
 def _noisy(spec, coded, rng, sigmas):
-    """BPSK-on-AWGN LLRs per row at noise sigmas[row], mapping order."""
+    """BPSK-on-AWGN LLRs per row at noise sigmas[row], mapping order; GF(M):
+    each symbol's one-hot vector on AWGN, its log-likelihoods (soft_len a row)."""
     s = np.asarray(sigmas)[:, None]
+    if spec.code == "gf":
+        p = spec.bits_per_cu
+        sym = coded.reshape(len(coded), -1, p) @ (1 << np.arange(p)[::-1])
+        coded = (np.arange(1 << p) == sym[..., None]).reshape(len(coded), -1)
+        y = (2.0 * coded - 1) + s * rng.normal(size=coded.shape)
+        return 2 * y / s**2
     y = (1 - 2.0 * coded) + s * rng.normal(size=coded.shape)
     return 2 * y / s**2
+
+
+def _plain(py, spec, soft, index, rv):
+    """Rows of soft values sent at burst positions index[row] (or one), RV rv -> unscrambled (codes.plain)."""
+    return np.stack([py.plain(spec, s, int(i), rv) for s, i in zip(soft, np.broadcast_to(index, len(soft)))])
 
 
 def _same(got, want):
@@ -113,14 +125,15 @@ def test_decode(native, py, spec):
     # HARQ: a weak RV 0 plus an RV 1 resend, scrambled per slot and flipped back
     re = np.stack([py.encode(spec, p, 1, int(m), int(i)) for p, m, i in zip(pls, masks, index)])
     soft1 = _noisy(spec, re, rng, sigmas)
-    fl0 = np.stack([py.flip(spec, int(i), 0) for i in index])
-    fl1 = np.stack([py.flip(spec, int(i), 1) for i in index])
-    buf = n.combine(spec.name, None, fl0 * soft, 0)
-    pbuf = py.combine(spec, None, fl0 * soft, 0)
+    p0, p1 = _plain(py, spec, soft, index, 0), _plain(py, spec, soft1, index, 1)
+    for b, i in enumerate(index):
+        np.testing.assert_array_equal(n.plain(spec.name, soft[b], int(i), 1), py.plain(spec, soft[b], int(i), 1))
+    buf = n.combine(spec.name, None, p0, 0)
+    pbuf = py.combine(spec, None, p0, 0)
     np.testing.assert_array_equal(buf, pbuf)
-    same = n.combine(spec.name, buf, fl1 * soft1, [1] * 6)
+    same = n.combine(spec.name, buf, p1, [1] * 6)
     assert same is buf  # in place, as np.add.at
-    np.testing.assert_array_equal(buf, py.combine(spec, pbuf, fl1 * soft1, [1] * 6))
+    np.testing.assert_array_equal(buf, py.combine(spec, pbuf, p1, [1] * 6))
     for top in (0, 1, 3):
         _same(n.decode_buffer(spec.name, buf, top, masks, codes.PLAIN),
               py.decode_buffer(spec, pbuf, top, masks, index=codes.PLAIN))
@@ -184,7 +197,7 @@ def test_decode_pinned(native, py, spec):
     soft = _noisy(spec, py.encode(spec, pay, 0, 0x99, 2)[None], rng, [0.5])
     got, want = n.decode_raw_pinned(spec.name, soft, known, 2), py.decode_raw_pinned(spec, soft, known, 2)
     assert py.check(spec, got[0][0], got[1][0], 0x99) == py.check(spec, want[0][0], want[1][0], 0x99) == pay
-    buf = py.combine(spec, None, py.flip(spec, 2, 0) * soft, 0)
+    buf = py.combine(spec, None, _plain(py, spec, soft, 2, 0), 0)
     assert n.decode_buffer_pinned(spec.name, buf, 0, known, 0x99) == py.decode_buffer_pinned(spec, buf, 0, known, 0x99)
 
 
@@ -200,8 +213,8 @@ def test_decode_buffer_raw(native, py, spec):
     known = py.zero_tail(spec, pb // 2)
     s0 = _noisy(spec, py.encode(spec, pay, 0, 0x99, 2)[None], rng, [0.5])
     s1 = _noisy(spec, py.encode(spec, pay, 1, 0x99, 3)[None], rng, [0.5])
-    buf = py.combine(spec, None, py.flip(spec, 2, 0) * s0, 0)
-    buf = py.combine(spec, buf, py.flip(spec, 3, 1) * s1, 1)
+    buf = py.combine(spec, None, _plain(py, spec, s0, 2, 0), 0)
+    buf = py.combine(spec, buf, _plain(py, spec, s1, 3, 1), 1)
     for k in (None, known):
         got, want = n.decode_buffer_raw(spec.name, buf, 1, k), py.decode_buffer_raw(spec, buf, 1, k)
         assert got[0].shape == want[0].shape and got[1].shape == want[1].shape

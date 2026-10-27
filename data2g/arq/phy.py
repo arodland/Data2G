@@ -243,9 +243,9 @@ class ModemRx:
         soft0 = (self._est, self._soft_dd)
         # the buffer holds unscrambled soft bits: each slot's flipped by its
         # own scrambling, so a resend in any slot combines
-        fl = codes.flip(spec, slot, rv)
         for it in range(DD_ITERS + 1):
-            buf = codes.combine(spec, None if buf0 is None else buf0.copy(), fl * self._soft(slot), rv)
+            plain = codes.plain(spec, self._soft(slot), slot, rv)
+            buf = codes.combine(spec, None if buf0 is None else buf0.copy(), plain, rv)
             if not self._dd(spec):
                 payload, ok = codes.decode_buffer(spec, buf, top, m, index=codes.PLAIN)[0]
                 if ok:
@@ -258,10 +258,11 @@ class ModemRx:
                 return payload
             if it == DD_ITERS or self._late():
                 break
-            self._refine(slot, spec, fl * post)  # back to the bits as sent
+            self._refine(slot, spec, codes.flip(spec, slot, rv) * post)  # back to the bits as sent (LDPC: DD)
         if self._est is not soft0[0]:
             self._undo(slot, soft0)
-            buf = codes.combine(spec, None if buf0 is None else buf0.copy(), fl * self._soft(slot), rv)
+            plain = codes.plain(spec, self._soft(slot), slot, rv)
+            buf = codes.combine(spec, None if buf0 is None else buf0.copy(), plain, rv)
         if buf0 is not None and mask_id[2] >= SEQ_MOD:  # a control combined (ARQ_DUP): its padding pinned
             for off in self._offsets(spec, _ctl_index(mask_id)):
                 payload, ok = codes.decode_buffer_pinned(spec, buf, top, codes.zero_tail(spec, off), m)[0]
@@ -285,7 +286,7 @@ class ModemRx:
         # pinned candidates after the plain ones: LDPC's when it did not
         # converge; polar's always, as its list is never empty. A broadcast
         # control is one codeword per slot (CPM: one, twice at most).
-        for off in () if out and spec.code == "ldpc" else self._offsets(spec, 0 if self.n_ctl_slots else slot):
+        for off in () if out and spec.code != "polar" else self._offsets(spec, 0 if self.n_ctl_slots else slot):
             c, u = self._pinned(slot, spec, off)
             out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
         return list(dict.fromkeys(out))
@@ -298,7 +299,7 @@ class ModemRx:
         if slot >= self.n_cw or (pair and not self._pair_ok(slot)):
             return False
         spec = self._spec(slot)
-        if spec.code != "ldpc":
+        if spec.code == "polar":
             return False
         return bool((self._pair(slot, None) if pair else self._decoded(slot, spec))[1].any())
 
@@ -312,7 +313,7 @@ class ModemRx:
         nb = codes.payload_bytes(spec)
         cands, usable = self._pair(slot, None)
         out = [np.packbits(c[:8 * nb]).tobytes() for c, u in zip(cands, usable) if u]
-        for off in () if out and spec.code == "ldpc" else self._offsets(spec, slot // 2):
+        for off in () if out and spec.code != "polar" else self._offsets(spec, slot // 2):
             c, u = self._pair(slot, off)
             out += [np.packbits(b[:8 * nb]).tobytes() for b, ok in zip(c, u) if ok]
         return list(dict.fromkeys(out))
@@ -340,8 +341,8 @@ class ModemRx:
         past it known zero. No DD: a pair is a control, one short decode."""
         if (slot, off) not in self._pairs:
             spec = self._spec(slot)
-            buf = codes.combine(spec, None, codes.flip(spec, slot, 0) * self._soft(slot), 0)
-            buf = codes.combine(spec, buf, codes.flip(spec, slot + 1, 1) * self._soft(slot + 1), 1)
+            buf = codes.combine(spec, None, codes.plain(spec, self._soft(slot), slot, 0), 0)
+            buf = codes.combine(spec, buf, codes.plain(spec, self._soft(slot + 1), slot + 1, 1), 1)
             known = None if off is None else codes.zero_tail(spec, off)
             cands, usable = codes.decode_buffer_raw(spec, buf, 1, known)
             self._pairs[(slot, off)] = cands[0], usable[0]
@@ -350,6 +351,8 @@ class ModemRx:
     def _offsets(self, spec, i: int) -> tuple:
         """Control codeword i's payload offsets past which a cut (PIN_CUTS,
         POLAR_PIN_CUTS: bytes of the control stream) knows it zero."""
+        if spec.code == "gf":  # nothing to pin (codes.decode_raw_pinned)
+            return ()
         pb = codes.payload_bytes(spec)
         cuts = PIN_CUTS if spec.code == "ldpc" else POLAR_PIN_CUTS
         return tuple(dict.fromkeys(c - i * pb for c in cuts if 0 < c - i * pb < pb))

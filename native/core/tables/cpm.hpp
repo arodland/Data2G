@@ -22,16 +22,27 @@ struct CpmGrid {
     int m;
     double rate, center, bp, clip_db;
     int T, bits;
-    double f0, sync_threshold, header_threshold, header2_threshold, mid_threshold, mid_header_threshold;
+    // sync_threshold, mid_threshold: detect's floors (front, mid block); lock_llr1/2:
+    // find's and late_lock's tone_llr score floors, wait_llr: a waiting front's; mid_llr: find_mid's.
+    double f0, sync_threshold, mid_threshold, lock_llr1, lock_llr2, wait_llr, mid_llr;
     int hdr_len;
     std::span<const std::uint8_t> preamble, mid_block, header_tones;
     CpmTxFilter tx[3];
 };
 
+// A GF(M) data code's mother code (codes.gf_code, data2g.gfldpc.GFCode): n
+// symbols, the codeword its first n0, rows of dmax slots (var -1: padding).
+struct GfTable {
+    int n = 0, n0 = 0, dmax = 0;
+    std::span<const std::int16_t> var;
+    std::span<const std::uint8_t> h;
+};
+
 struct CpmSpec {
-    std::string_view name, grid, code;
+    std::string_view name, grid, code;  // code: "gf" (data) | "polar" (control)
     int index, k, coded_bits, n_sym;
-    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver)
+    std::span<const std::uint16_t> perm;  // interleaver (codes.interleaver; GF(M): of symbols)
+    GfTable gf;  // code "gf" only
 };
 
 struct CpmParams {
@@ -39,6 +50,8 @@ struct CpmParams {
     int hdr_copies, max_data;
     double peak_ratio, ramp_s;
     int data_n, ctl_k, ctl_n;
+    double hdr_margin1, hdr_margin2, llr_eps;  // cpm.HDR_MARGIN (one copy, both), LLR_EPS
+    int refine_symbols;
 };
 
 extern const std::span<const CpmGrid> CPM_GRIDS;
