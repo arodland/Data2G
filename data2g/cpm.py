@@ -603,14 +603,36 @@ def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: i
     tot = E0.sum()
     # the metric's weight fixed at the lock's placement (each candidate's own: 0.2 dB worse, c8r50 AWGN)
     w = float(tone_metric(g, E0).sum() / tot) if tot > 0 else 0.0
+    T, N = g.T, n * g.T
 
-    def ll(c):
-        G = _energies(g, x, c[0], n, c[1]) * w
+    def ll(z):  # the likelihood of n symbols of mixed samples, as _energies(...) * w would score them
+        G = np.abs(np.fft.fft(z.reshape(n, T), axis=1)[:, :g.m]) ** 2 * w
         return G[kr, known[kr]].sum() + np.logaddexp.reduce(G[ur], axis=1).sum()
-    best = (s0, cfo)
+    best, bv = (s0, cfo), None
     for st, sf in ((max(1, g.T // 16), g.rate / 16), (max(1, g.T // 64), g.rate / 64)):
         s, f = best
-        best = max(((s + i * st, f + j * sf) for i in range(-2, 3) for j in range(-2, 3)), key=ll)
+        # _energies mixes by absolute sample, so one mix per CFO serves every start. The stage mixes once at
+        # its centre CFO; each other CFO is that times a rotation, exp(-2 pi i sf t / FS) to the power j,
+        # whose phase repeats every FS / sf samples (native cpm::refine, the same arithmetic)
+        a0, M = s - 2 * st, 4 * st + N
+        seg = np.zeros(M)
+        lo, hi = max(0, a0), min(len(x), a0 + M)
+        if hi > lo:
+            seg[lo - a0:hi - a0] = x[lo:hi]
+        base = seg * np.exp(-2j * np.pi * (g.f0 + f) * ((a0 + np.arange(M)) / FS))
+        P = FS / sf
+        Lt = int(P) if P == np.floor(P) and P <= M else M
+        tab = np.exp(1j * (-2 * np.pi * (sf * np.arange(Lt) / FS)))
+        r1 = np.exp(1j * (-2 * np.pi * np.fmod(sf * a0 / FS, 1.0))) * tab[np.arange(M) % Lt]
+        r2 = r1 * r1
+        z = {-2: base * np.conj(r2), -1: base * np.conj(r1), 0: base, 1: base * r1, 2: base * r2}
+        cands = []
+        for i in range(-2, 3):
+            for j in range(-2, 3):
+                # the second stage's centre is the first stage's best, already scored
+                v = bv if (bv is not None and i == 0 and j == 0) else ll(z[j][(i + 2) * st:(i + 2) * st + N])
+                cands.append((v, (s + i * st, f + j * sf)))
+        bv, best = max(cands, key=lambda c: c[0])  # the first best, as max(..., key=ll) took it
     return best
 
 
