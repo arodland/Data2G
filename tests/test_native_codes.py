@@ -20,7 +20,8 @@ CODEC = ("crc_bits", "payload_bytes", "rv_cycle", "buffer_len", "rv_positions", 
          "flip", "spread", "despread", "combine", "decode_buffer", "payloads", "decode_many", "decode_llrs",
          "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
          "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
-         "decode_buffer_pinned", "decode_buffer_raw", "plain")
+         "decode_buffer_pinned", "decode_buffer_raw", "plain", "info_llrs", "info_llrs_buffer", "pad_prior", "add_prior",
+         "add_prior_buffer")
 
 
 @pytest.fixture
@@ -181,6 +182,36 @@ def test_pin(native, py, spec):
         np.testing.assert_array_equal(n.pin(spec.name, soft, known, index), py.pin(spec, soft, known, index))
     buf = rng.normal(size=(2, py.buffer_len(spec))) * 3
     np.testing.assert_array_equal(n.pin_buffer(spec.name, buf, known), py.pin_buffer(spec, buf, known))
+
+
+@pytest.mark.parametrize("spec", SPECS, ids=IDS)
+def test_pad_prior(native, py, spec):
+    """The padding estimate (codes.pad_prior) and its inputs and use: the
+    LLR gathers bitwise, the prior to rounding (exp, atanh, a sum), on noisy
+    controls of every length and on all-zero, random and saturated LLRs."""
+    n = native.codes
+    rng = np.random.default_rng(spec.k + 10)
+    pb = py.payload_bytes(spec)
+    rows = [np.zeros(spec.k), rng.normal(size=spec.k) * 5, np.full(spec.k, 30.0), np.full(spec.k, -30.0)]
+    for content in sorted({1, 2, pb // 3, pb // 2, pb - 1, pb}):
+        pay = rng.bytes(content) + bytes(pb - content)
+        for index, sigma in ((0, 0.6), (3, 1.0)):
+            soft = _noisy(spec, py.encode(spec, pay, 0, 0x99, index)[None], rng, [sigma])[0]
+            llr = py.info_llrs(spec, soft, index)
+            np.testing.assert_array_equal(n.info_llrs(spec.name, soft, index), llr)
+            rows.append(llr)
+        buf = py.combine(spec, None, _plain(py, spec, soft[None], index, 0), 0)
+        np.testing.assert_array_equal(n.info_llrs_buffer(spec.name, buf[0]), py.info_llrs_buffer(spec, buf[0]))
+        rows.append(py.info_llrs_buffer(spec, buf[0]))
+    for llr in rows:
+        want = py.pad_prior(spec, llr)
+        got = n.pad_prior(spec.name, llr)
+        np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-9)
+        assert (want[: 8 * pb] >= 0).all() and (want[:8] == 0).all()
+    soft = rng.normal(size=py.soft_len(spec)) * 3
+    np.testing.assert_allclose(n.add_prior(spec.name, soft, want, 3), py.add_prior(spec, soft, want, 3), rtol=1e-6)
+    buf = rng.normal(size=(2, py.buffer_len(spec))) * 3
+    np.testing.assert_allclose(n.add_prior_buffer(spec.name, buf, want), py.add_prior_buffer(spec, buf, want))
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=IDS)

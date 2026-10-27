@@ -39,7 +39,11 @@ inline constexpr int DD_ITERS = 2;
 inline constexpr double DD_BUDGET_S = 1.0;
 // A control slot that fails is decoded again with the control stream past
 // each of these byte counts in turn known zero (codes::decode_raw_pinned;
-// phy.PIN_CUTS, POLAR_PIN_CUTS).
+// phy.PIN_CUTS, POLAR_PIN_CUTS). LDPC (phy.PIN_EST; DATA2G_PIN_EST=0, read
+// once, turns it off): once, leaning toward the padding its soft bits show
+// (codes::pad_prior), offset EST in place of the cuts.
+bool pin_est_default();
+inline constexpr int EST = 0;
 inline constexpr int PIN_CUTS[] = {16, 32};
 inline constexpr int POLAR_PIN_CUTS[] = {12, 16};
 

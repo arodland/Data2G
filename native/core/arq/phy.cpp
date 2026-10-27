@@ -31,6 +31,13 @@ Mat<float> row_f(std::span<const double> v) {
     return out;
 }
 
+// A control's combined buffer leaning toward its estimated padding (codes::pad_prior).
+Mat<double> with_prior(const codes::Spec& s, std::span<const double> buf) {
+    Mat<double> out(1, buf.size());
+    out.data = codes::add_prior_buffer(s, buf, codes::pad_prior(s, codes::info_llrs_buffer(s, buf)));
+    return out;
+}
+
 // A control mask's codeword index in the control stream (a compact CONNECT's is its only codeword).
 int ctl_index(const MaskId& m) {
     const int i = m.seq - SEQ_MOD;
@@ -91,6 +98,14 @@ DecodePass decode_pass(const codes::Spec& s, bool dd, int slot, int rv, std::uin
 bool dd_default() {
     static const bool on = [] {
         const char* v = std::getenv("DATA2G_DD");
+        return !v || std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
+bool pin_est_default() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_PIN_EST");
         return !v || std::strcmp(v, "1") == 0;
     }();
     return on;
@@ -289,8 +304,8 @@ const ModemRx::Raw& ModemRx::paired(int slot, const codes::Spec& s, int off) {
     auto b1 = combined_buffer(s, slot + 1, 1, slot_soft(slot + 1), &b0);
     Mat<double> buf(1, b1.size());
     buf.data = std::move(b1);
-    const auto known = off < 0 ? std::vector<std::int8_t>{} : codes::zero_tail(s, off);
-    auto d = codes::decode_buffer_raw(s, buf, 1, known);
+    const auto known = off < 0 || off == EST ? std::vector<std::int8_t>{} : codes::zero_tail(s, off);
+    auto d = codes::decode_buffer_raw(s, off == EST ? with_prior(s, buf.data) : buf, 1, known);
     return pairs_[{slot, off}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
 }
 
@@ -329,6 +344,7 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
 std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
     std::vector<int> out;
     if (s.gf) return out;  // nothing to pin (codes.decode_raw_pinned)
+    if (!s.polar && pin_est_default()) return {EST};
     const std::span<const int> cuts = s.polar ? std::span<const int>(POLAR_PIN_CUTS) : std::span<const int>(PIN_CUTS);
     for (int c : cuts) {
         const int off = c - i * s.payload_bytes;
@@ -341,7 +357,17 @@ std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
 const ModemRx::Raw& ModemRx::pinned(int slot, const codes::Spec& s, int off) {
     auto it = pinned_.find({slot, off});
     if (it != pinned_.end()) return it->second;
-    auto d = codes::decode_raw_pinned(s, row_f(slot_soft(slot)), codes::zero_tail(s, off), slot);
+    const auto& soft = slot_soft(slot);
+    codes::Raw d;
+    if (off == EST) {
+        const auto v = codes::add_prior(s, soft, codes::pad_prior(s, codes::info_llrs(s, soft, slot)), slot);
+        Mat<float> m(1, v.size());
+        m.data = v;
+        const int idx[1] = {slot};
+        d = codes::decode_raw(s, m, idx);
+    } else {
+        d = codes::decode_raw_pinned(s, row_f(soft), codes::zero_tail(s, off), slot);
+    }
     return pinned_[{slot, off}] = Raw{std::move(d.cands.data), std::move(d.usable.data)};
 }
 
@@ -439,7 +465,10 @@ std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv
         for (int off : offsets(s, ctl_index(mask))) {
             Mat<double> b(1, buf.size());
             b.data = buf;
-            auto p = codes::decode_buffer_pinned(s, b, top, codes::zero_tail(s, off), m)[0];
+            const std::uint32_t masks[1] = {m};
+            const int plain[1] = {codes::PLAIN};
+            auto p = off == EST ? codes::decode_buffer(s, with_prior(s, buf), top, masks, plain)[0]
+                                : codes::decode_buffer_pinned(s, b, top, codes::zero_tail(s, off), m)[0];
             if (p.ok) {
                 learn(slot, s, p.data, rv, m);
                 ok_.insert(slot);
