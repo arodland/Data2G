@@ -41,6 +41,9 @@ FADING_PRESETS = {
     # 6.4-7.0 dB against the measured 4.8-6.3, so it is if anything
     # slightly pessimistic.
     "mps": FadingPreset("mps", 0.15, 2.0),  # slow + selective (measured)
+    # ITU-R F.1487 mid-latitude disturbed NVIS: 7 ms, 1 Hz. Past a 4 ms CP;
+    # ion-hf's Long numerology (25 Hz, 10 ms CP) was built for it.
+    "nvis": FadingPreset("nvis", 1.0, 7.0),
 }
 
 

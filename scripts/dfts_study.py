@@ -422,8 +422,11 @@ def main():
                     for ch in a.channels:
                         if (name, arm, ch) in done:
                             continue
-                        ref = shipped["modes"].get(name, [0] * 4)[CHANNELS.index(ch.rstrip("~"))]
-                        start = a.start if a.start is not None else (ref - 2 if ref < 90 else 15.0)
+                        if a.start is not None:
+                            start = a.start
+                        else:
+                            ref = shipped["modes"].get(name, [0] * 4)[CHANNELS.index(ch.rstrip("~"))]
+                            start = ref - 2 if ref < 90 else 15.0
                         th = threshold(pool, name, arm, ch, a.fail, round(start * 4) / 4, a.seed)
                         row = dict(mode=name, arm=arm, channel=ch, avg_db=th, peak_db=round(peak, 2),
                                    pep_db=round(th + peak, 2))

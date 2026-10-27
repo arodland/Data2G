@@ -26,7 +26,7 @@ FS = 8000  # audio sample rate, Hz
 RS = 50  # carrier spacing == symbol rate of one carrier, Hz
 NC = 24  # carriers, all of them data
 M = FS // RS  # useful symbol length, samples (160)
-NCP = 32  # cyclic prefix, samples (4 ms)
+NCP = int(os.environ.get("DATA2G_NCP", 32))  # cyclic prefix, samples (4 ms); override for studies only
 NSYM = M + NCP  # 192 samples, 24 ms
 CARRIER0 = 950  # Hz; occupied ~925..2125 Hz
 FCENTER = 1500  # Hz; baseband conversion frequency
