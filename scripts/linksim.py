@@ -391,8 +391,8 @@ class SnrPolicy(FixedPolicy):
 
 def make_policy(spec: str):
     kind, *args = spec.split(":")
-    if kind == "fixed":
-        return FixedPolicy(args[0], int(args[1]))
+    if kind == "fixed":  # fixed:mode:n_cw[:connect mode]
+        return FixedPolicy(args[0], int(args[1]), *args[2:3])
     if kind == "ardop":
         return ArdopPolicy(size_s=float(args[0]) if args else 6.0)
     if kind == "snr":

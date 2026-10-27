@@ -27,6 +27,9 @@ has the same seed at every SNR and in every arm. Arms:
   win    analysis window (1, 7/8, 3/4, 5/8 T, end-aligned) chosen per
          burst by the known symbols' MI (Ion's), with nbr's metric
   id     BICM-ID, ID_PASSES x LDPC_ITERS; it125 its no-feedback control
+  ir irg two receptions: RV 0, then (failed) RV 1 in a second burst 15 s
+         later on the same channel, combined (ModemRx's store); irg with
+         genie locks; ir1 / irg1 the first reception alone. --below 4
   gt gs gh diag path  the acquisition split (stages(): known timing; known
          timing and CFO; known header; the base lock's diagnosis and path)
 Every arm decodes through cpm.receive, which refines the timing and CFO it
@@ -60,6 +63,15 @@ lock at all: front placements right but under SYNC_THRESHOLD (coarse grid)
 or PEAK_RATIO, and for c32r62 both header copies right but under
 HEADER2_THRESHOLD. The fix (data2g.cpm, LOCK_LLR's notes): tone_llr gates
 and cpm.refine.
+
+GF(M) data code on the cpm-acq-gap receiver (cpm-gfm-on-acq, 2026-10-27,
+300 trials, runs/cpm-combined/e2e_*.csv, master / acq / combined base
+arms on the same seeds): combined - acq at 10% -0.3 to -1.7 dB, every
+mode and channel; fsk16r25-r1/3 awgn -0.99, mpp -0.44, mpd -0.83, mpg
+-0.68; fsk32r62 -1.0 to -1.7. Genie - base on the combined build: 0.5-1.6
+dB on fsk16r25-r1/3 fading, ~0 on fsk32r62. Two receptions (ir, 200
+trials): irg gains ~1 dB over the binary code's IR everywhere, ir
+(receiver locks) only on fsk32r62 / fsk8r50 (acquisition caps fsk16r25).
 """
 
 from data2g import threads  # noqa: E402
@@ -377,7 +389,8 @@ def e2e_trial(args):
     b = replace(O.burst(mode, 2, rng), cap=2)
     dd = CHANS[chan]
     ch = PS.ContinuousChannel("awgn", snr, seed, 120.0, *(dd or (None, None)))
-    y = ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100)))
+    t0 = float(rng.uniform(5, 100))
+    y = ch.apply(PHY.tx_audio(b), t0)
     want = b.slots[1].payload
     mask = PHY.mask_value(b.slots[1].mask_id)
 
@@ -401,6 +414,29 @@ def e2e_trial(args):
         elif arm == "genie":
             gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
             out[arm] = dec(cpm.receive(y, gl))
+        elif arm in ("ir", "irg"):
+            # two receptions: the data codeword at RV 0, then, if that failed, at RV 1 in
+            # a second burst 15 s later on the same channel, combined (ModemRx's store,
+            # the link's resend path); irg with genie locks
+            gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
+            store, key, mid = {}, ("ir",), b.slots[1].mask_id
+            b2 = replace(b, slots=[b.slots[0], replace(b.slots[1], rv=1)])
+            y2 = ch.apply(PHY.tx_audio(b2), t0 + 15.0)
+            ok = 0
+            for k, (yy, rr) in enumerate(((y, r if good else None), (y2, None))):
+                if arm == "irg":
+                    rr = cpm.receive(yy, gl)
+                elif k:
+                    rr = receive_traced(yy, mode)
+                    rr = rr if rr is not None and rr["spec"].name == mode and rr["n_cw"] == 2 else None
+                if rr is not None:
+                    rr = dict(rr)
+                    rr.pop("_soft", None)
+                    if PHY.ModemRx(rr, store).decode(1, mid, k, key) == want:
+                        ok = 1
+                        break
+            out[arm] = ok
+            out[arm + "1"] = int(ok and k == 0)  # first reception alone
         elif not good:
             out[arm] = 0
         elif arm == "base":
@@ -514,15 +550,16 @@ def slot_E(g, r):
     return r["E"][a:a + cpm.DATA_N // g.bits]
 
 
-def e2e_grid(mode, chan):
+def e2e_grid(mode, chan, below=0.0):
+    """`below`: dB more at the bottom (two receptions, ir arms)."""
     lo = {"fsk32r62": -12.0, "fsk8r50": -14.0, "fsk16r25": -16.0}[mode.split("-")[0]]
     if chan != "awgn":
         lo += 2.0
-    return np.arange(lo, lo + (9.0 if chan == "awgn" else 14.0), 1.0)
+    return np.arange(lo - below, lo + (9.0 if chan == "awgn" else 14.0), 1.0)
 
 
 def e2e(a):
-    jobs = [(m, c, float(s), 50000 + i, a.arms) for m in a.modes for c in a.chans for s in e2e_grid(m, c)
+    jobs = [(m, c, float(s), 50000 + i, a.arms) for m in a.modes for c in a.chans for s in e2e_grid(m, c, a.below)
             for i in range(a.trials)]
     rows = []
     with Pool(a.jobs) as p, open(a.out, "w", newline="") as f:
@@ -541,7 +578,7 @@ def summarize(rows, arms):
         for c in [c for c in CHANS if any(r[1] == c and r[0] == m for r in rows)]:
             snrs = sorted({r[2] for r in rows if r[0] == m and r[1] == c})
             pts = {}
-            for arm in [a for a in arms if a not in ("diag", "path")]:
+            for arm in [a for a in arms if a not in ("diag", "path")] + [a + "1" for a in arms if a in ("ir", "irg")]:
                 fail = [1 - np.mean([r[4] for r in rows if r[0] == m and r[1] == c and r[2] == s and r[3] == arm])
                         for s in snrs]
                 pts[arm] = (crossing(snrs, fail, 0.1), crossing(snrs, fail, 0.01))
@@ -562,6 +599,7 @@ def main():
     ap.add_argument("--chans", nargs="+", default=list(CHANS))
     ap.add_argument("--arms", nargs="+", default=list(ARMS))
     ap.add_argument("--trials", type=int, default=100)
+    ap.add_argument("--below", type=float, default=0.0, help="e2e: extend the SNR grid this many dB down")
     ap.add_argument("--out", default="runs/cpm_floor_e2e.csv")
     ap.add_argument("--probe", action="store_true", help="e2e: one trial per mode, timed, no pool")
     a = ap.parse_args()
