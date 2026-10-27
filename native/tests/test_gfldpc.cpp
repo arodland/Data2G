@@ -2,6 +2,7 @@
 // checks, a noisy decode (Rayleigh per tone, as scripts/gf_study.py's
 // ideal channel), and decode time per codeword (printed: the CPU budget a
 // burst's data costs; DATA2G_GF_BENCH=1 for more codewords).
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
