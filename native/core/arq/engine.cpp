@@ -528,8 +528,23 @@ Engine::Out Engine::step(std::span<const double> x) {
     b.x.assign(x.begin(), x.end());
     b.gen = gen_;
     b.seq = seq_++;
-    if (!transmitting_) b.items = receiver_feed(x);  // our own transmission is not heard
-    if (!transmitting_ && preview_on_ && on_preview_) preview();
+    if (!transmitting_ && preview_on_ && on_preview_) {
+        // a burst can end and decode inside one block (Receiver::MARGIN is under one): the
+        // preview reads up to its end first, so it holds every data symbol
+        const auto& p = receiver_.pending();
+        const auto k = p ? static_cast<std::size_t>(std::clamp<std::int64_t>(
+                               p->end() - receiver_.stream_end(), 0, static_cast<std::int64_t>(x.size())))
+                         : std::size_t{0};
+        if (k > 0 && k < x.size()) {
+            b.items = receiver_feed(x.first(k));
+            preview();
+        }
+        auto more = receiver_feed(x.subspan(k < x.size() ? k : 0));
+        b.items.insert(b.items.end(), std::make_move_iterator(more.begin()), std::make_move_iterator(more.end()));
+        preview();
+    } else if (!transmitting_) {
+        b.items = receiver_feed(x);  // our own transmission is not heard
+    }
     b.busy = receiver_busy();
     busy_now_ = b.busy;
     channel_busy_now_ = receiver_channel_busy();

@@ -166,7 +166,7 @@ def test_duplicated_control_pair_is_pinned_once_combined():
     st = L.Station(1, GearShifter(), key=7)
     m = PHY.mask_value(L.ctl_mask(0, 0, 7))
     for seed in range(3):
-        r = hear(b, snr=-4.0, seed=seed)
+        r = hear(b, snr=-4.5, seed=seed)  # at -4.0 seed 2 decodes alone (protocol 15)
         soft = PHY.soft_bits(r)
         buf = codes.combine(SPEC, codes.combine(SPEC, None, codes.flip(SPEC, 0, 0) * soft[0], 0),
                             codes.flip(SPEC, 1, 1) * soft[1], 1)

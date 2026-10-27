@@ -39,6 +39,7 @@ modem/timing.hpp (burst timing), generated/modem.hpp (the constants and
 header codes, written by tools/gen_native_tables.py).
 """
 
+import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -252,7 +253,10 @@ def header_samples(band: str) -> int:
 def copy_frame(band: str, n_f: int) -> int | None:
     """Which on-air frame carries the header copy (config.HEADER_COPY_*) of
     a burst of n_f data frames on sync band `band`; None: no copy."""
-    return min(HEADER_COPY_AFTER, n_f) if band in HEADER_COPY_BANDS else None
+    return min(HEADER_COPY_AFTER, n_f) if band in HEADER_COPY_BANDS and n_f >= COPY_MIN_FRAMES else None
+
+
+COPY_MIN_FRAMES = int(os.environ.get("DATA2G_COPY_MIN_FRAMES", 0))  # study hook: shorter bursts carry no copy
 
 
 def frames_on_air(spec: SubmodeSpec, n_cw: int) -> int:

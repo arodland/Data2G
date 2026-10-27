@@ -29,7 +29,7 @@ int main() {
     check::Watchdog watchdog(120, "test_arq");
 
     check::current_step = "timing";
-    check::equal(modem::burst_seconds(arq::mode_at("qpsk-r1/2").ofdm[0], 3), 4.088, "qpsk-r1/2 x3 seconds");
+    check::equal(modem::burst_seconds(arq::mode_at("qpsk-r1/2").ofdm[0], 3), 3.928, "qpsk-r1/2 x3 seconds");
     check::equal(modem::header_samples("n4"), 28 * config::NSYM, "n4 header: 24 symbols, 4 pilots");
     check::equal(modem::header_samples("n10"), 12 * config::NSYM, "n10 header: 10 symbols, a pilot, the closing pilot");
 

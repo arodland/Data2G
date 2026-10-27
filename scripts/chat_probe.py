@@ -7,6 +7,7 @@ from data2g import threads
 
 threads.limit(1)
 
+import os  # noqa: E402
 import random  # noqa: E402
 import sys  # noqa: E402
 from multiprocessing import Pool  # noqa: E402
@@ -42,8 +43,11 @@ if __name__ == "__main__":
         sys.exit()
     cells = [(c, float(s)) for c, s in (x.split(":") for x in sys.argv[2:])]
     seeds = range(int(sys.argv[1]))
-    with Pool(12) as p:
+    with Pool(8) as p:
         out = p.map(one, [(c, s, k) for c, s in cells for k in seeds])
+    if os.environ.get("CHAT_PROBE_OUT"):  # per message, for paired comparisons
+        import json
+        json.dump([(c, s, k, lat) for c, s, k, lat, _ in out], open(os.environ["CHAT_PROBE_OUT"], "w"))
     for c, s in cells:
         lats = [x for (cc, ss, _, lat, _) in out if (cc, ss) == (c, s) for x in lat]
         ok = [x for x in lats if x is not None]
@@ -53,7 +57,7 @@ if __name__ == "__main__":
 
 def modes_report(cells, n):
     from collections import Counter
-    with Pool(12) as p:
+    with Pool(8) as p:
         out = p.map(one, [(c, s, k) for c, s in cells for k in range(n)])
     for c, s in cells:
         cnt = Counter()

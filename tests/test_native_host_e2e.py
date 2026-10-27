@@ -225,6 +225,11 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         assert not any(x.startswith("CONNECTED") for x in a.lines)
         t_nak = time.monotonic() - t_nak
         b.send("LISTEN OFF")
+        # B may follow its NAK with an ID: a frame sent into it is lost (half
+        # duplex), and A can't hear it for a header's length (protocol 15's
+        # shorter bursts put A's KISS frame there)
+        time.sleep(0.5)
+        wait([a, b], lambda: [x for x in b.lines if x.startswith("PTT ")][-1:] != ["PTT ON"], 30, "B off the air")
 
         # KISS, between sessions: a UI frame each way
         ka = socket.create_connection(("127.0.0.1", ports["A"] + 2), timeout=0.1)

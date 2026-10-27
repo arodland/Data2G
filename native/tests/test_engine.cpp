@@ -1,6 +1,6 @@
 // arq::Engine with no Python: two engines through a noisy channel in sync
 // mode (a session, KISS, the recorder's files), the worker's header
-// latency with a 1 s decode in flight, the worker's bounded queue (a stalled
+// latency with a 1.5 s decode in flight, the worker's bounded queue (a stalled
 // decode: blocks dropped, logged, the engine recovers), and two worker-mode
 // engines in real time. Parity with data2g/arq/engine.py is tests/test_native_engine.py's
 // (a C++ engine against a Python one) and the --native substitution's.
@@ -259,7 +259,8 @@ void units() {
     check::equal(json_str("a\"b"), std::string("\"a\\\"b\""), "json string");
 }
 
-// A burst decode that takes 1 s (a DD pass), on the session stage.
+// A burst decode that takes 1.5 s (a long DD pass), on the session stage: the next header
+// arrives ~1 s after a decode starts (protocol 15), so a 1 s one only just overlapped it.
 class SlowEngine : public Engine {
 public:
     using Engine::Engine;
@@ -267,7 +268,7 @@ public:
 
 protected:
     void hear_burst(receiver::BurstEvent& ev, double t) override {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         Engine::hear_burst(ev, t);
     }
 };
@@ -323,7 +324,7 @@ void worker_latency() {
     SlowEngine sync_e("W1AW", cs), worker_e("W1AW", cw);
     const auto [js, late_sync] = second_header(sync_e, y, true, j);
     const auto [jw, late_worker] = second_header(worker_e, y, true, j);
-    std::printf("second header, 1 s decode in flight: %.3f s late in sync mode, %.3f s with the worker\n", late_sync,
+    std::printf("second header, 1.5 s decode in flight: %.3f s late in sync mode, %.3f s with the worker\n", late_sync,
                 late_worker);
     check::equal(js, j, "sync: same block");
     check::equal(jw, j, "worker: same block");
