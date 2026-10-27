@@ -39,7 +39,6 @@ modem/timing.hpp (burst timing), generated/modem.hpp (the constants and
 header codes, written by tools/gen_native_tables.py).
 """
 
-import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -256,7 +255,7 @@ def copy_frame(band: str, n_f: int) -> int | None:
     return min(HEADER_COPY_AFTER, n_f) if band in HEADER_COPY_BANDS and n_f >= COPY_MIN_FRAMES else None
 
 
-COPY_MIN_FRAMES = int(os.environ.get("DATA2G_COPY_MIN_FRAMES", 0))  # study hook: shorter bursts carry no copy
+COPY_MIN_FRAMES = 0  # a study hook (scripts/burst_trim.py patches it): shorter bursts carry no copy
 
 
 def frames_on_air(spec: SubmodeSpec, n_cw: int) -> int:
