@@ -225,6 +225,18 @@ void bind_codec(py::module_& c) {
     c.def("pad_prior", [](const std::string& name, const In<double>& llr) {
         return np<double>(std::span<const double>(codes::pad_prior(cspec(name), vec(llr))));
     });
+    c.def("known_bits", [](const std::string& name, const py::bytes& tmpl, const py::bytes& mask) {
+        const std::string t = tmpl, m = mask;
+        const auto k = codes::known_bits(cspec(name), std::span(reinterpret_cast<const std::uint8_t*>(t.data()), t.size()),
+                                         std::span(reinterpret_cast<const std::uint8_t*>(m.data()), m.size()));
+        return np<std::int8_t>(std::span<const std::int8_t>(k));
+    });
+    c.def("score", [](const std::string& name, const In<double>& soft, const py::bytes& payload, std::uint32_t crc_mask,
+                      int index) {
+        const std::string p = payload;
+        return codes::score(cspec(name), vec(soft), std::span(reinterpret_cast<const std::uint8_t*>(p.data()), p.size()),
+                            crc_mask, index);
+    });
     c.def("add_prior", [](const std::string& name, const In<double>& soft, const In<double>& prior, int index) {
         return np<float>(std::span<const float>(codes::add_prior(cspec(name), vec(soft), vec(prior), index)));
     });

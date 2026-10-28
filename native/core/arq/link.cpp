@@ -303,7 +303,15 @@ int ctl_size(const Ext& e, int pb, int k, bool has_new, int zk = 0) {
 Station::Station(int direction_, std::shared_ptr<Policy> policy_, bool master_, int key_, std::optional<int> max_misses_,
                  int cap_, bool chat_)
     : direction(direction_), policy(std::move(policy_)), master(master_), key(key_), max_misses(max_misses_), cap(cap_),
-      chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")) {}
+      chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")), prime(env_on("DATA2G_PRIME")) {}
+
+int prime_tries() {
+    static const int n = [] {
+        const char* v = std::getenv("DATA2G_PRIME_TRIES");
+        return v ? std::atoi(v) : 6;
+    }();
+    return n;
+}
 
 Bytes Station::read() {
     Bytes out = std::move(rx.out);
@@ -335,6 +343,7 @@ TxBurstPtr Station::build(bool fresh) {
         log_write(LOG, INFO, format("TX b%d repeat: 7 bursts unconfirmed", static_cast<int>(pmod(latest, BURST_MOD))));
         auto it = sent_seqs.find(latest);
         stats["cw_resend"] += it == sent_seqs.end() ? 0 : static_cast<std::int64_t>(it->second.size());
+        repeated_ = true;
         return last_sent;
     }
     const std::int64_t bn = latest + 1;
@@ -421,6 +430,7 @@ TxBurstPtr Station::build(bool fresh) {
     const auto ctl = control.pack(cpb);
     core.n_ctl = control.core.n_ctl;
     if (core.n_ctl > n_ctl) throw std::logic_error("T_COMP outgrew the control's padding");
+    asked_dup_ = ext.count(T_DUPCTL) > 0;
 
     auto burst = std::make_shared<TxBurst>();
     burst->submode = submode;
@@ -569,6 +579,7 @@ void Station::record(std::int64_t bn, const TxBurstPtr& burst, std::set<std::int
     auto& sent = sent_seqs[bn] = resend;
     for (auto* c : fresh_cws) sent.push_back(c->seq);
     latest = bn;
+    repeated_ = false;
     for (auto it = snapshots.begin(); it != snapshots.end() && it->first < confirmed;) {
         sent_seqs.erase(it->first);
         it = snapshots.erase(it);
@@ -629,6 +640,7 @@ TxBurstPtr Station::on_timeout(bool allow_repeat) {
         log_write(LOG, INFO, format("TX b%d repeat: timeout %d", static_cast<int>(pmod(latest, BURST_MOD)), misses));
         auto it = sent_seqs.find(latest);
         stats["cw_resend"] += it == sent_seqs.end() ? 0 : static_cast<std::int64_t>(it->second.size());
+        repeated_ = true;
         return last_sent;  // identical, same burst seq (§6 step 1)
     }
     return build(false);
@@ -667,19 +679,30 @@ bool Station::handle_inner(RxBurst& rxb) {
     reply_lost = repeat;
     stale_ = repeat;
     peer_burst = core.burst_seq;
+    peer_ctl_[!data.slots.empty()] = last_stream_;
+    peer_last_ = std::make_pair(last_stream_, std::make_pair(rxb.submode(), rxb.n_cw()));
     answered_ = false;
     watchdog(progress || data.progress);
     return true;
 }
 
-// The burst's control and its dup factor; nullopt if lost or malformed.
+// The burst's control and its dup factor; nullopt if lost or malformed. A control codeword that fails blind
+// (alone, then as an ARQ_DUP pair) is retried primed with what I expect of it (§3a).
 std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool outcome) {
     std::optional<Bytes> first = rxb.decode(0, ctl_mask(peer(), 0, key), 0, nullptr);
-    bool paired = false;
+    bool paired = false, was_primed = false;
     if (!first && rxb.n_cw() >= 2) {
         // an ARQ_DUP burst's control pair, combined
         first = ctl_pair(rxb, 0, 0);
         paired = first.has_value();
+    }
+    std::optional<std::vector<Hypothesis>> hyps;
+    if (!first && prime && rxb.can_prime()) {
+        hyps = expect(rxb);
+        auto [p, pair] = primed(rxb, 0, 0, *hyps);
+        first = std::move(p);
+        paired = pair;
+        was_primed = first.has_value();
     }
     if (!first) {
         if (outcome) policy->outcome(rxb.submode(), 0, 0, false);
@@ -696,12 +719,29 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
     for (int i = 1; i < core0.n_ctl; ++i) {
         auto p = rxb.decode(dup * i, ctl_mask(peer(), i, key), 0, nullptr);
         if (!p && dup == 2) p = ctl_pair(rxb, 2 * i, i);
+        if (!p && prime && rxb.can_prime()) {
+            if (!hyps) hyps = expect(rxb);
+            // only hypotheses with this burst's layout and core
+            std::vector<Hypothesis> hs;
+            for (const auto& h : *hyps) {
+                bool same = h.pair == (dup == 2);
+                for (std::size_t j = 0; same && j < 4; ++j)
+                    same = j < h.tmpl.size() && j < first->size() &&
+                           h.tmpl[j] == static_cast<std::uint8_t>(((*first)[j] & h.mask[j]) | (h.tmpl[j] & ~h.mask[j] & 255));
+                if (same) hs.push_back(h);
+            }
+            auto got = primed(rxb, dup * i, i, hs).first;
+            was_primed |= got.has_value();
+            p = std::move(got);
+        }
         if (!p) return std::nullopt;
         payloads.push_back(std::move(*p));
     }
     Control ctl;
     try {
         ctl = Control::unpack(payloads);
+        last_stream_.clear();
+        for (const auto& p : payloads) last_stream_.insert(last_stream_.end(), p.begin(), p.end());
     } catch (const std::invalid_argument& e) {
         malformed(e.what());
         return std::nullopt;
@@ -710,7 +750,220 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
         malformed(*why);
         return std::nullopt;
     }
+    if (was_primed) {
+        if (auto why = implausible(ctl.core, ctl.ext)) {
+            log_write(LOG, INFO, "RX primed control contradicts my state (" + *why + "): dropped");
+            return std::nullopt;
+        }
+        stats["rx_primed"] += 1;
+    }
     return std::make_pair(std::move(ctl), dup);
+}
+
+// Control codeword i (from `slot`) under each hypothesis in turn: -> (payload, decoded as a pair).
+std::pair<std::optional<Bytes>, bool> Station::primed(RxBurst& rxb, int slot, int i, const std::vector<Hypothesis>& hyps) {
+    const std::size_t cpb = static_cast<std::size_t>(policy->ctl_payload_bytes(rxb.submode()));
+    const std::size_t at0 = static_cast<std::size_t>(i) * cpb;
+    for (const auto& h : hyps) {
+        if (h.tmpl.size() <= at0) continue;
+        const std::size_t n = std::min(cpb, h.tmpl.size() - at0);
+        auto p = rxb.decode_known(slot, ctl_mask(peer(), i, key), ByteView(h.tmpl).subspan(at0, n),
+                                  ByteView(h.mask).subspan(at0, n), h.pair);
+        if (p) return {std::move(p), h.pair};
+    }
+    return {std::nullopt, false};
+}
+
+// What a primed control (§3a) says that my state can't explain. Checked before any state changes: a blind
+// control saying so fails the session (ProtocolError), a primed one is only dropped.
+std::optional<std::string> Station::implausible(const Core& core, const Ext& ext) const {
+    int n = 0;
+    for (std::int64_t k = confirmed; k <= latest; ++k) n += pmod(k, BURST_MOD) == core.acted_on;
+    if (n != 1) return "acted-on " + str(core.acted_on);
+    const std::int64_t cum = unwrap(core.cum, tx.base);
+    if (cum < tx.base || cum > tx.next) return "cumulative " + str(core.cum);
+    if (auto e = ext.find(T_ABANDON); e != ext.end() && e->second.size() >= 2 && (e->second[1] >> 1) != peer_epoch &&
+                                      unwrap(e->second[0], rx.cum) != rx.cum)
+        return std::string("abandon point");
+    return std::nullopt;
+}
+
+namespace {
+enum CoreField { F_FTYPE, F_NCTL, F_SEQ, F_ACTED, F_CUM, F_LOST, F_K, F_REC, F_HINT };
+constexpr int CORE_BITS[9] = {2, 2, 3, 3, 7, 1, 6, 6, 2};
+}  // namespace
+
+std::vector<Station::Hypothesis> Station::expect(const RxBurst& rxb) const {
+    const int cpb = policy->ctl_payload_bytes(rxb.submode());
+    const int max_ctl = policy->max_ctl(rxb.submode());
+    const int ctl_slots = rxb.n_ctl_slots();  // CPM: its header says how many (2: duplicated)
+    const int n_cw = rxb.n_cw();
+    std::vector<Hypothesis> out;
+    std::optional<Hypothesis> repeat;
+    if (!master && peer_last_ && peer_last_->second == std::make_pair(rxb.submode(), n_cw)) {
+        // the caller repeated the burst I answered: my reply was lost (§6). Second (after the likeliest
+        // fresh one): a header like the last is mostly a fixed mode
+        const Bytes& t = peer_last_->first;
+        repeat = Hypothesis{t, Bytes(t.size(), 0xFF), Core::unpack(t).ftype == ARQ_DUP};
+    }
+    std::vector<std::pair<bool, bool>> kinds;  // (data, pair)
+    if (ctl_slots) {
+        kinds.emplace_back(n_cw > ctl_slots, ctl_slots == 2);
+    } else {
+        if (n_cw <= max_ctl) kinds.emplace_back(false, false);
+        if (n_cw >= 2) kinds.emplace_back(true, asked_dup_);
+        // the kind the peer sent last first
+        std::stable_sort(kinds.begin(), kinds.end(), [&](const auto& a, const auto& b) {
+            return (a.first != last_rx_data) < (b.first != last_rx_data);
+        });
+    }
+    for (const auto& [data, pair] : kinds) {
+        std::vector<Way> ways = variants(data, n_cw, ctl_slots, pair);
+        // then the same with T_DUPCTL the other way, and with T_REPLY's recommendation unknown
+        const Tlv dupctl{T_DUPCTL, {}, {}};
+        const std::size_t n0 = ways.size();
+        for (std::size_t j = 0; j < n0; ++j) {
+            Way w = ways[j];
+            if (std::find(w.ext.begin(), w.ext.end(), dupctl) != w.ext.end())
+                std::erase_if(w.ext, [](const Tlv& t) { return t.type == T_DUPCTL; });
+            else
+                w.ext.push_back(dupctl);
+            ways.push_back(std::move(w));
+        }
+        for (std::size_t j = 0; j < n0; ++j) {
+            Way w = ways[j];
+            bool has = false;
+            for (auto& t : w.ext)
+                if (t.type == T_REPLY) {
+                    t.mask = Bytes{0xC0};
+                    has = true;
+                }
+            if (has) ways.push_back(std::move(w));
+        }
+        for (const auto& w : ways) {
+            // an OFDM control-only burst is its control: n_cw codewords, the last ones maybe all padding
+            auto h = pack_hypothesis(w, cpb, max_ctl, pair, (ctl_slots || data) ? 0 : n_cw);
+            if (!h || std::find(out.begin(), out.end(), *h) != out.end()) continue;
+            const int n_ctl = static_cast<int>(h->tmpl.size()) / cpb;
+            const int dup = pair ? 2 : 1;
+            if (ctl_slots || (!data ? n_ctl == n_cw : dup * n_ctl < n_cw)) out.push_back(std::move(*h));
+        }
+    }
+    if (repeat && std::find(out.begin(), out.end(), *repeat) == out.end())
+        out.insert(out.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(1, out.size())), *repeat);
+    const int tries = std::max(0, prime_tries());
+    if (static_cast<int>(out.size()) > tries) out.resize(static_cast<std::size_t>(tries));
+    return out;
+}
+
+std::vector<Station::Way> Station::variants(bool data, int n_cw, int ctl_slots, bool pair) const {
+    const Bytes* base = nullptr;
+    if (auto it = peer_ctl_.find(data); it != peer_ctl_.end() && !it->second.empty())
+        base = &it->second;
+    else if (auto it2 = peer_ctl_.find(!data); it2 != peer_ctl_.end() && !it2->second.empty())
+        base = &it2->second;
+    Ext pe;
+    if (base) pe = Control::unpack({*base}).ext;
+    // the peer's cumulative lies in [base, next]: the bits all of those agree on
+    int diff = 0;
+    for (std::int64_t x = tx.base; x <= tx.next; ++x) diff |= static_cast<int>(pmod(x ^ tx.next, SEQ_MOD));
+    Way core;
+    auto& c = core.core;
+    // a caller's control-only burst may be a poll (PROBE: 2), a callee's never is
+    c[F_FTYPE] = {pair ? ARQ_DUP : ARQ, (data || master) ? 3 : 1};
+    c[F_NCTL] = {0, 3};  // set by pack_hypothesis
+    // one past the last I decoded, unless I missed some
+    c[F_SEQ] = {peer_burst ? static_cast<int>(pmod(*peer_burst + 1, BURST_MOD)) : 0, (misses || !(data || master)) ? 0 : 7};
+    // my latest burst, or (a caller's poll: my reply to it was lost) the one before
+    c[F_ACTED] = {static_cast<int>(pmod(latest, BURST_MOD)),
+                  (data || master) ? 7 : static_cast<int>(7 & ~(latest ^ (latest - 1)))};
+    c[F_CUM] = {static_cast<int>(pmod(tx.next, SEQ_MOD)), 127};
+    c[F_LOST] = {0, repeated_ ? 0 : 1};
+    c[F_K] = {0, 63};
+    c[F_REC] = {0, 0};  // the peer's recommendation moves with every measurement: unknown
+    c[F_HINT] = {peer_size_hint, base ? 3 : 0};
+    std::vector<Tlv> common;
+    for (int t : {T_CHAT, T_DUPCTL})
+        if (auto e = pe.find(t); e != pe.end()) common.push_back({t, e->second, Bytes(e->second.size(), 0xFF)});
+    // T_REPLY, a recommendation: as last time
+    if (auto e = pe.find(T_REPLY); e != pe.end() && e->second.size() == 1) common.push_back({T_REPLY, e->second, Bytes{0xFF}});
+    if (auto e = pe.find(T_BUFFER); e != pe.end()) common.push_back({T_BUFFER, e->second, Bytes(e->second.size(), 0)});
+    if (!base) common = {{T_REPLY, Bytes{0}, Bytes{0xC0}}, {T_DUPCTL, {}, {}}};  // its first ARQ burst: the shifter's
+    std::vector<Way> ways;
+    if (!data) {
+        core.ext = common;
+        if (tx.base == tx.next) return {core};
+        Way gap = core;
+        gap.core[F_CUM].mask = 127 & ~diff;
+        Way gapb = gap;
+        gapb.ext.push_back({T_BITMAP, Bytes{0}, Bytes{0}});
+        ways = {core, gapb, gap};
+        if (pe.count(T_BITMAP)) std::swap(ways[0], ways[1]);
+        return ways;
+    }
+    // data: the peer resends what my latest burst's ACK reported missing
+    std::int64_t nxt = std::max<std::int64_t>(peer_next_.value_or(0), rx.cum);
+    if (!rx.buf.empty()) nxt = std::max(nxt, rx.buf.rbegin()->first + 1);
+    int missing = 0;
+    if (auto sn = snapshots.find(latest); sn != snapshots.end())
+        for (std::int64_t x = sn->second.first; x < nxt; ++x) missing += !sn->second.second.count(x);
+    const int n_data = n_cw - (ctl_slots ? ctl_slots : (pair ? 2 : 1));
+    std::vector<Tlv> extra;
+    if (auto e = pe.find(T_DRAINED); e != pe.end()) extra.push_back({T_DRAINED, e->second, Bytes(e->second.size(), 0xFF)});
+    std::vector<int> seen;
+    for (int k : {std::min(missing, n_data), std::min(missing + 1, n_data), 0}) {
+        if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
+        seen.push_back(k);
+        Way w = core;
+        w.core[F_K] = {k, 63};
+        w.ext = common;
+        w.ext.insert(w.ext.end(), extra.begin(), extra.end());
+        const auto rv_bytes = static_cast<std::size_t>(ceil_div(2 * k, 8));
+        if (k) w.ext.push_back({T_RV, Bytes(rv_bytes, 0), Bytes(rv_bytes, 0)});
+        if (n_data > k)
+            w.ext.push_back({T_NEW, Bytes{static_cast<std::uint8_t>(pmod(nxt, SEQ_MOD))},
+                             Bytes{static_cast<std::uint8_t>(peer_next_ ? 0xFF : 0)}});
+        ways.push_back(std::move(w));
+    }
+    return ways;
+}
+
+std::optional<Station::Hypothesis> Station::pack_hypothesis(const Way& w, int cpb, int max_ctl, bool pair, int n_ctl) {
+    std::vector<Tlv> ext = w.ext;
+    std::stable_sort(ext.begin(), ext.end(), [](const Tlv& a, const Tlv& b) {
+        return std::tie(a.type, a.value, a.mask) < std::tie(b.type, b.value, b.mask);
+    });
+    Bytes body, bmask;
+    for (const auto& t : ext) {
+        body.push_back(static_cast<std::uint8_t>(t.type));
+        body.push_back(static_cast<std::uint8_t>(t.value.size()));
+        body.insert(body.end(), t.value.begin(), t.value.end());
+        bmask.push_back(0xFF);
+        bmask.push_back(0xFF);
+        bmask.insert(bmask.end(), t.mask.begin(), t.mask.end());
+    }
+    const int need = std::max<int>(1, static_cast<int>(ceil_div(4 + static_cast<std::int64_t>(body.size()), cpb)));
+    if (!n_ctl) n_ctl = need;
+    if (n_ctl < need || n_ctl > max_ctl) return std::nullopt;
+    auto f = w.core;
+    f[F_NCTL] = {n_ctl - 1, 3};
+    std::uint32_t v = 0, m = 0;
+    for (std::size_t j = 0; j < 9; ++j) {
+        v = (v << CORE_BITS[j]) | static_cast<std::uint32_t>(f[j].value & f[j].mask);
+        m = (m << CORE_BITS[j]) | static_cast<std::uint32_t>(f[j].mask);
+    }
+    Hypothesis h;
+    h.pair = pair;
+    for (int sh = 24; sh >= 0; sh -= 8) {
+        h.tmpl.push_back(static_cast<std::uint8_t>(v >> sh));
+        h.mask.push_back(static_cast<std::uint8_t>(m >> sh));
+    }
+    h.tmpl.insert(h.tmpl.end(), body.begin(), body.end());
+    h.mask.insert(h.mask.end(), bmask.begin(), bmask.end());
+    const std::size_t n = static_cast<std::size_t>(n_ctl) * static_cast<std::size_t>(cpb);
+    h.tmpl.resize(n, 0);
+    h.mask.resize(n, 0xFF);  // the padding: known zero
+    return h;
 }
 
 // Take the peer's requests and flags, and move my escalation.
@@ -837,10 +1090,16 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
             out.progress |= rx.accept(*seq, std::move(*p), comp[j]);
         }
     }
+    for (std::size_t j = slots.size(); j-- > static_cast<std::size_t>(core.k);)
+        if (slots[j].first) {
+            peer_next_ = *slots[j].first + 1;
+            break;
+        }
     if (auto e = ext.find(T_INLINE); e != ext.end()) {
         last_rx_data = true;
         const Bytes& b = e->second;
         const std::int64_t seq = unwrap(b[0] & 0x7F, rx.cum);
+        peer_next_ = std::max<std::int64_t>(peer_next_.value_or(0), seq + 1);
         const bool z = (b[0] >> 7) != 0;
         Bytes p(b.begin() + 1, b.end() - 2);
         p.resize(static_cast<std::size_t>(policy->payload_bytes(rxb.submode())), 0);

@@ -203,6 +203,13 @@ std::optional<std::vector<std::uint8_t>> check(const Spec& s, std::span<const st
 const std::vector<int>& systematic_positions(const Spec& s);
 // (k,) known info bits, -1 unknown: payload bytes from nbytes on are zero, and the zero fill past the CRC.
 std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes);
+// (k,) known info bits, -1 unknown: the payload bits `mask` sets are `tmpl`'s (MSB first; each zero-extended
+// to payload_bytes), and the zero fill past the CRC; never the CRC (codes.known_bits, docs/arq.md §3a).
+std::vector<std::int8_t> known_bits(const Spec& s, std::span<const std::uint8_t> tmpl, std::span<const std::uint8_t> mask);
+// Log-likelihood ratio (nats) of payload's RV 0 codeword sent at `index` against random bits, from its soft
+// bits in mapping order (codes.score).
+double score(const Spec& s, std::span<const double> soft, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
+             int index);
 // An RV 0 codeword's soft bits (sent at burst position `index`) with every
 // sent info bit `known` gives (0/1, -1 unknown; unscrambled) pinned to
 // ldpc::CH_CLAMP. Unchanged for polar.

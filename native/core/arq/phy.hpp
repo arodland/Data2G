@@ -46,6 +46,8 @@ bool pin_est_default();
 inline constexpr int EST = 0;
 inline constexpr int PIN_CUTS[] = {16, 32};
 inline constexpr int POLAR_PIN_CUTS[] = {12, 16};
+// A primed control (docs/arq.md §3a) must also score this many nats over random bits (codes::score).
+inline constexpr double PRIMED_SCORE = 10.0;
 
 // A slot's CRC mask from its identity (burst.hpp): zlib.crc32 of key,
 // direction, seq; key 0: mask 0, but a compact CONNECT's.
@@ -154,6 +156,9 @@ public:
     // The pair raw_pair reads, CRC-checked under `mask` (its padding pinned if it fails plain).
     std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override;
     int n_ctl_slots() const override { return n_ctl_slots_; }
+    // phy.ModemRx.decode_known (RxBurst's).
+    bool can_prime() const override { return true; }
+    std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override;
     bool converged(int slot, bool pair) override;
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }

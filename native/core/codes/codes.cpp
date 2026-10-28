@@ -636,6 +636,28 @@ std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes) {
     return out;
 }
 
+std::vector<std::int8_t> known_bits(const Spec& s, std::span<const std::uint8_t> tmpl, std::span<const std::uint8_t> mask) {
+    std::vector<std::int8_t> out(static_cast<std::size_t>(s.k), -1);
+    const auto bit = [](std::span<const std::uint8_t> v, int i) {
+        return static_cast<std::size_t>(i / 8) < v.size() ? (v[static_cast<std::size_t>(i / 8)] >> (7 - i % 8)) & 1 : 0;
+    };
+    for (int i = 0; i < 8 * s.payload_bytes; ++i)
+        if (bit(mask, i)) out[static_cast<std::size_t>(i)] = static_cast<std::int8_t>(bit(tmpl, i));
+    for (int i = 8 * s.payload_bytes + s.crc_bits; i < s.k; ++i) out[static_cast<std::size_t>(i)] = 0;
+    return out;
+}
+
+double score(const Spec& s, std::span<const double> soft, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
+             int index) {
+    const auto c = encode(s, payload, 0, crc_mask, index);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < c.size() && i < soft.size(); ++i) {
+        const double x = -(1.0 - 2.0 * c[i]) * soft[i];  // log 2 - logaddexp(0, x), as numpy
+        sum += std::log(2.0) - (x > 0.0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x)));
+    }
+    return sum;
+}
+
 std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<const std::int8_t> known, int index) {
     std::vector<float> out(soft.begin(), soft.end());
     const auto& pos = systematic_positions(s);
@@ -708,7 +730,9 @@ std::vector<float> add_prior(const Spec& s, std::span<const double> soft, std::s
         if (prior[i] == 0.0 || pos[i] < 0) continue;
         const double sign = 1.0 - 2.0 * pn[i];
         auto& o = out[static_cast<std::size_t>(pos[i])];
-        o = std::isinf(prior[i]) ? static_cast<float>(ldpc::CH_CLAMP * sign) : static_cast<float>(o + prior[i] * sign);
+        // +inf: known 0, -inf: known 1 (a primed retry's, docs/arq.md §3a)
+        o = std::isinf(prior[i]) ? static_cast<float>(ldpc::CH_CLAMP * sign * (prior[i] > 0 ? 1.0 : -1.0))
+                                 : static_cast<float>(o + prior[i] * sign);
     }
     return out;
 }
@@ -719,7 +743,7 @@ std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf,
     for (std::size_t i = 0; i < prior.size() && i < pos.size(); ++i) {
         if (prior[i] == 0.0 || pos[i] < 0 || static_cast<std::size_t>(pos[i]) >= out.size()) continue;
         auto& o = out[static_cast<std::size_t>(pos[i])];
-        o = std::isinf(prior[i]) ? ldpc::CH_CLAMP : o + prior[i];
+        o = std::isinf(prior[i]) ? (prior[i] > 0 ? ldpc::CH_CLAMP : -ldpc::CH_CLAMP) : o + prior[i];
     }
     return out;
 }

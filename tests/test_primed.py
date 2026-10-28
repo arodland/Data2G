@@ -1,0 +1,260 @@
+"""Primed reception (docs/arq.md §3a): a peer control that fails blind is
+decoded again with what the waiting station expects of it.
+
+Link level: test_arq's lockstep stations through a fake PHY whose control
+slots fail blind and pass a primed retry only when the hypothesis' known
+bits agree with what was sent, or (adversarial) pass forged controls that
+agree with the hypothesis everywhere it pinned. Python and C++ must send
+identical bursts. PHY level: ModemRx.decode_known on real codewords.
+"""
+
+import logging
+import random
+
+import numpy as np
+import pytest
+
+from data2g import codes, cpm
+from data2g.arq import frames as F
+from data2g.arq import link as L
+from data2g.arq import phy as PHY
+from data2g.arq.burst import Slot, TxBurst, ctl_mask
+
+from test_arq import FakeRx, RandomPolicy, payload
+from test_native_arq_link import _burst, logged
+
+
+class PrimeRx(FakeRx):
+    """FakeRx whose control slots fail blind with probability `p_ctl`, and
+    whose primed retries pass when the hypothesis agrees with what was sent
+    (`p_known`), or, with probability `forge`, return a forged control: the
+    hypothesis' known bits, random where it knew nothing (a false accept
+    that passed the CRC)."""
+
+    def __init__(self, burst, rng, p_cw, store, stats, p_ctl=0.0, p_known=0.8, forge=0.0):
+        super().__init__(burst, rng, p_cw, store, stats)
+        for i, s in enumerate(burst.slots):
+            if s.mask_id[2] >= F.SEQ_MOD and rng.random() < p_ctl:
+                self.good[i] = False
+        self.p_known, self.forge = p_known, forge
+
+    def decode_known(self, slot, mask_id, template, tmask, pair=False):
+        self.stats["primed"] += 1
+        if slot >= self.n_cw:
+            return None
+        s = self.burst.slots[slot]
+        if mask_id == s.mask_id and len(template) == len(s.payload) and \
+                all((a ^ b) & m == 0 for a, b, m in zip(s.payload, template, tmask)):
+            if self.rng.random() < self.p_known:
+                self.stats["primed_ok"] += 1
+                return s.payload
+        if self.rng.random() < self.forge:
+            self.stats["forged"] += 1
+            return bytes(t & m | self.rng.randrange(256) & ~m & 255 for t, m in zip(template, tmask))
+        return None
+
+
+def lockstep(seed, cls_a, cls_b, p_burst, p_ctl, n_a, n_b, forge=0.0, modes=("m4", "m22", "m46"), max_cw=20,
+             max_turns=4000):
+    """Two stations, a's data to b and b's to a, through PrimeRx: -> (trace, outcome, stats)."""
+    rng = random.Random(seed)
+    data_a, data_b = payload(rng, n_a, "mixed"), payload(rng, n_b, "mixed")
+    a = cls_a(0, RandomPolicy(random.Random(seed + 1), 0.2, modes, max_cw), master=True)
+    b = cls_b(1, RandomPolicy(random.Random(seed + 2), 0.2, modes, max_cw))
+    a.write(data_a)
+    b.write(data_b)
+    stores, stats, trace = {0: {}, 1: {}}, {"mismatch": 0, "primed": 0, "primed_ok": 0, "forged": 0}, []
+    got_a, got_b = bytearray(), bytearray()
+    burst, sender = a.build(), a
+    for _ in range(max_turns):
+        trace.append((sender.direction, _burst(burst)))
+        receiver = b if sender is a else a
+        ok = False
+        if rng.random() >= p_burst:
+            ok = receiver.handle(PrimeRx(burst, rng, 0.1, stores[receiver.direction], stats, p_ctl, forge=forge))
+        got_a += a.read()
+        got_b += b.read()
+        # the stream is never corrupted, whatever was accepted
+        assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)]
+        if a.state == L.FAILED or b.state == L.FAILED:
+            return trace, ("failed", a.fail_reason or b.fail_reason), stats
+        if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+            return trace, ("done", dict(a.stats), dict(b.stats)), stats
+        if ok:
+            burst, sender = receiver.build(), receiver
+            receiver.answered()
+        else:
+            burst, sender = a.on_timeout(), a
+            if burst is None:
+                return trace, ("failed", a.fail_reason), stats
+    return trace, ("stuck",), stats
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_primed_rescues_controls(seed):
+    """Control codewords lost blind 30% of the time: primed retries rescue many, and
+    every run delivers both streams exactly."""
+    modes = [("m4", "m22", "m46"), ("m4", "m46", "c60", "c40")][seed % 2]
+    _, out, stats = lockstep(700 + seed, L.Station, L.Station, 0.05, 0.3, 3000, 1500, modes=modes)
+    assert out[0] == "done", out
+    # a primed codeword counts once its whole control is taken (another may still fail)
+    assert 0 < out[1].get("rx_primed", 0) + out[2].get("rx_primed", 0) <= stats["primed_ok"]
+
+
+def test_prime_off(monkeypatch):
+    monkeypatch.setattr(L, "PRIME", False)
+    _, out, stats = lockstep(700, L.Station, L.Station, 0.05, 0.3, 3000, 1500)
+    assert out[0] == "done" and stats["primed"] == 0
+
+
+@pytest.mark.parametrize("seed", range(16))
+def test_forged_primed_controls_never_corrupt(seed):
+    """Adversarial: a third of primed retries return a forged control (a
+    false accept). The stream stays an exact prefix (asserted every turn),
+    and every run ends in delivery or a bounded disconnect (§10)."""
+    modes = [("m4", "m22", "m46"), ("m4", "m46", "c60", "c40")][seed % 2]
+    _, out, stats = lockstep(800 + seed, L.Station, L.Station, 0.1, 0.5, 2000, 2000, forge=0.33, modes=modes)
+    assert out[0] in ("done", "failed"), out
+    assert stats["forged"] > 0
+
+
+def test_expect_hits_a_clean_reply():
+    """No loss: the peer's reply is the first hypothesis for every burst
+    after the first exchange (a fixed policy, data one way) until the write's
+    tail (its T_INLINE is not predicted)."""
+    class Fixed(RandomPolicy):
+        def choose(self, station, escalation):
+            return "m22", 6
+
+        @property
+        def want_dup(self):
+            return False
+
+    rng = random.Random(3)
+    a, b = L.Station(0, Fixed(rng), master=True), L.Station(1, Fixed(rng))
+    a.write(payload(rng, 600, "random"))
+    burst, sender, hits = a.build(), a, []
+    for turn in range(12):
+        receiver = b if sender is a else a
+        rx = FakeRx(burst, rng, 0.0, {}, {"mismatch": 0})
+        rx.decode_known = lambda *args: None  # primed reception on: expect() is asked by the test only
+        true = b"".join(s.payload for s in burst.slots if s.mask_id[2] >= F.SEQ_MOD and s.rv == 0)
+        hs = receiver.expect(rx)
+        if 2 <= turn < 10:
+            t, m, _ = hs[0]
+            hits.append(len(t) == len(true) and all((x ^ y) & z == 0 for x, y, z in zip(t, true, m)))
+            if not hits[-1]:
+                print(turn, receiver.master, true.hex(), [(t.hex(), m.hex()) for t, m, _ in hs])
+        assert receiver.handle(rx)
+        burst, sender = receiver.build(), receiver
+        receiver.answered()
+    assert all(hits) and len(hits) == 8
+
+
+# --- C++ parity -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("seed", range(10))
+def test_cpp_stations_prime_identically(native, pure, caplog, seed):
+    """Hypotheses, primed retries and drops: the same calls in the same order,
+    so the same bursts and log lines, Python, C++ and mixed."""
+    caplog.set_level(logging.INFO)
+    modes = [("m4", "m22", "m46"), ("m4", "m46", "c60", "c40")][seed % 2]
+    py, cc = L.Station, native.arq.Station
+    args = (0.1, 0.5, 2500, 1200, [0.0, 0.2][seed % 2], modes)
+    want, want_log = logged(caplog, lockstep, 600 + seed, py, py, *args)
+    assert want[1][0] in ("done", "failed") and want[2]["primed"] > 0
+    got, got_log = logged(caplog, lockstep, 600 + seed, cc, cc, *args)
+    assert got == want and got_log == want_log
+    for pair in ((py, cc), (cc, py)):
+        assert lockstep(600 + seed, *pair, *args) == want
+
+
+# --- PHY: ModemRx.decode_known -------------------------------------------------------------
+
+def _cpm_rx(ctl: bytes, soft: np.ndarray, grid="c16r25"):
+    """A received CPM control-only burst whose control slot reads `soft`."""
+    spec = cpm.SPECS[next(n for n, s in cpm.SPECS.items() if s.grid == grid)]
+    r = dict(family="cpm", spec=spec, band=grid, n_cw=1, n_ctl_slots=1, dup=False, soft=[soft], E=None)
+    return PHY.ModemRx(r, {})
+
+
+def _erased(spec, payload: bytes, mask: int, keep: float, seed: int, flip: float = 0.0) -> np.ndarray:
+    """The codeword's soft bits (index 0) as +-4, a deterministic share `keep`
+    of them kept and the rest erased (0), a share `flip` of the kept wrong."""
+    c = codes.encode(spec, payload, 0, mask, 0)
+    x = 4.0 * (1 - 2.0 * c)
+    r = np.random.default_rng(seed)
+    x[r.random(len(x)) >= keep] = 0.0
+    x[r.random(len(x)) < flip] *= -1
+    return x
+
+
+def test_decode_known_rescues_a_cpm_control():
+    """An ACK control (8 B) that neither the plain decode nor the padding
+    cuts recover: the whole control known but the cumulative ACK (7 bits)
+    does, and only with the right template. Erasures (not noise) make the
+    premise hold on every platform: 30% of the soft bits kept, seed 5."""
+    spec = cpm.CTL["c16r25"]
+    mid = ctl_mask(1, 0, 0x5A5A)
+    m = PHY.mask_value(mid)
+    ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=77, recommend=50, size_hint=2),
+                    {F.T_REPLY: bytes([50]), F.T_DUPCTL: b""}).pack(codes.payload_bytes(spec))[0]
+    rx = _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5))
+    assert rx.decode(0, mid, 0, None) is None
+    known = bytearray(b"\xff" * len(ctl))
+    known[2] &= 0x80  # cum: core bits 21..15
+    known[1] &= 0xC0
+    assert rx.decode_known(0, mid, ctl, bytes(known)) == ctl
+    wrong = bytearray(ctl)
+    wrong[6] ^= 1  # another T_REPLY value, pinned
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, mid, bytes(wrong), bytes(known)) is None
+    other = ctl_mask(1, 0, 0x1234)  # another session's mask: its CRC fails
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, other, ctl, bytes(known)) is None
+
+
+def test_decode_known_on_noise_and_erasures():
+    """Nothing there (all erased, or noise): no primed control, even with
+    every payload bit known (the CRC is never known; the score bounds noise)."""
+    spec = cpm.CTL["c8r50"]
+    mid = ctl_mask(0, 0, 0x5A5A)
+    ctl = F.Control(F.Core(cum=5)).pack(codes.payload_bytes(spec))[0]
+    full = b"\xff" * len(ctl)
+    assert _cpm_rx(ctl, np.zeros(spec.coded_bits), "c8r50").decode_known(0, mid, ctl, full) is None
+    rng = np.random.default_rng(11)
+    for _ in range(20):
+        noise = rng.normal(0, 2.0, spec.coded_bits)
+        assert _cpm_rx(ctl, noise, "c8r50").decode_known(0, mid, ctl, full) is None
+
+
+def test_known_bits_and_score():
+    spec = cpm.CTL["c32r62"]
+    tmpl, mask = bytes([0xA5, 0x0F]), bytes([0xFF, 0x0F])
+    k = codes.known_bits(spec, tmpl, mask)
+    pb = codes.payload_bytes(spec)
+    assert list(k[:8]) == [1, 0, 1, 0, 0, 1, 0, 1] and list(k[8:16]) == [-1] * 4 + [1] * 4
+    assert (k[16:8 * pb + codes.crc_bits(spec)] == -1).all() and (k[8 * pb + codes.crc_bits(spec):] == 0).all()
+    p = bytes(range(pb))
+    x = 30.0 * (1 - 2.0 * codes.encode(spec, p, 0, 7, 0))
+    assert codes.score(spec, x, p, 7, 0) == pytest.approx(spec.coded_bits * np.log(2), rel=1e-6)
+    assert codes.score(spec, np.zeros(spec.coded_bits), p, 7, 0) == 0.0
+
+
+def test_cpp_decode_known_matches(native, pure):
+    """ModemRx.decode_known, known_bits and score: C++ against Python on the same soft bits."""
+    spec = cpm.CTL["c16r25"]
+    mid = ctl_mask(1, 0, 0x5A5A)
+    m = PHY.mask_value(mid)
+    rng = random.Random(4)
+    nphy = native.phy
+    for trial in range(30):
+        ctl = F.Control(F.Core(burst_seq=rng.randrange(8), cum=rng.randrange(128)),
+                        {F.T_REPLY: bytes([rng.randrange(64)])}).pack(codes.payload_bytes(spec))[0]
+        soft = _erased(spec, ctl, m, rng.uniform(0.2, 0.5), trial, rng.uniform(0.0, 0.1))
+        known = bytes(rng.choice([0, 0xFF, 0xF0]) for _ in ctl)
+        r = dict(family="cpm", spec=cpm.SPECS["fsk16r25-r1/3"], band="c16r25", n_cw=1, n_ctl_slots=1, dup=False,
+                 soft=[soft], E=None)
+        want = PHY.ModemRx(dict(r), {}).decode_known(0, mid, ctl, known)
+        got = nphy.ModemRx(dict(r), {}).decode_known(0, mid, ctl, known)
+        assert got == want
+        assert list(native.codes.known_bits(spec.name, ctl, known)) == list(codes.known_bits(spec, ctl, known))
+        assert native.codes.score(spec.name, soft, ctl, m, 0) == pytest.approx(codes.score(spec, soft, ctl, m, 0))

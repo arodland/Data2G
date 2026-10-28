@@ -112,6 +112,15 @@ public:
         return bytes_of(r);
     }
     void forget(const SoftKey& k) override { obj.attr("forget")(key(&k)); }
+    // link.py asks hasattr(rx, "decode_known"), and getattr(rx, "n_ctl_slots", 0)
+    bool can_prime() const override { return py::hasattr(obj, "decode_known"); }
+    std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override {
+        auto r = obj.attr("decode_known")(slot, mask_tuple(mask), pyb(Bytes(tmpl.begin(), tmpl.end())),
+                                          pyb(Bytes(tmask.begin(), tmask.end())), pair);
+        if (r.is_none()) return std::nullopt;
+        return bytes_of(r);
+    }
+    int n_ctl_slots() const override { return py::getattr(obj, "n_ctl_slots", py::int_(0)).cast<int>(); }
 };
 
 class PyRng : public Rng {
@@ -126,6 +135,7 @@ public:
 void sync_compress(Station& s) {
     s.compress = py::bool_(link_attr("COMPRESS"));
     s.inline_data = py::bool_(link_attr("INLINE"));  // link.INLINE likewise
+    s.prime = py::bool_(link_attr("PRIME"));  // link.PRIME likewise (read at each handle)
 }
 
 // A Station whose internal builds (from on_timeout, or the session) see an
@@ -474,8 +484,15 @@ void bind_arq_link(py::module_& m) {
         .def("on_timeout", [](Station& s, bool allow_repeat) { return burst_py(s.on_timeout(allow_repeat)); },
              py::arg("allow_repeat") = true)
         .def("handle", [](Station& s, py::object rx) {
+            sync_compress(s);
             PyRx r(std::move(rx));
             return s.handle(r);
+        })
+        .def("expect", [](const Station& s, py::object rx) {
+            PyRx r(std::move(rx));
+            py::list out;
+            for (const auto& h : s.expect(r)) out.append(py::make_tuple(pyb(h.tmpl), pyb(h.mask), h.pair));
+            return out;
         })
         .def("answered", &Station::answered)
         .def("settle_limbo", &Station::settle_limbo)
