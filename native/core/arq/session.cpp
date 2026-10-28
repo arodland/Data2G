@@ -511,7 +511,66 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
         }
         return Frame{key, std::move(body), rx.submode()};
     }
+    return primed_frame(rx);
+}
+
+std::optional<Session::Frame> Session::primed_frame(RxBurst& rx) {
+    if (!prime_default() || !rx.can_prime()) return std::nullopt;
+    const int cpb = policy->ctl_payload_bytes(rx.submode());
+    const int t10 = tenths(t_turn);
+    if (state == SessionState::CONNECTING && !station) {
+        Control c{Core{}, {{T_SESS, ConnectAck{nonce, cap, t10}.pack()}}};
+        c.core.ftype = SESSION;
+        const auto t = c.pack(cpb);
+        if (t.size() != 1) return std::nullopt;
+        Bytes known(static_cast<std::size_t>(cpb), 0xFF);  // its cap and t_turn: as mine, then unknown
+        known[9] = known[10] = 0;
+        for (const Bytes& m : {Bytes(static_cast<std::size_t>(cpb), 0xFF), known})
+            if (auto p = rx.decode_known(0, ctl_mask(1, 0, 0), t[0], m, false)) {
+                Bytes body;
+                try {
+                    const auto ext = Control::unpack({*p}).ext;
+                    if (auto it = ext.find(T_SESS); it != ext.end()) body = it->second;
+                } catch (const std::invalid_argument&) {
+                }
+                return primed_body(std::move(body), rx);
+            }
+        return std::nullopt;
+    }
+    if (state == SessionState::LISTEN && compact(rx.submode()) && cpb >= COMPACT_BYTES) {
+        Bytes t = pack_connect(Connect{VERSION, "", call, 0, cap, t10}.pack());
+        t.resize(static_cast<std::size_t>(cpb), 0);
+        // the fields' masks packed the same way, the padding known: version, callee, cap, t_turn; then the first two
+        for (const std::vector<int>& fields : {std::vector<int>{1, 10, 20, 21}, std::vector<int>{1, 10}}) {
+            Bytes mb(Connect::BYTES, 0);
+            const auto set = [&](int at, int n, int bits) {
+                if (std::find(fields.begin(), fields.end(), at) == fields.end()) return;
+                const std::uint64_t v = (std::uint64_t{1} << bits) - 1;
+                for (int i = 0; i < n; ++i) mb[static_cast<std::size_t>(at + i)] = static_cast<std::uint8_t>(v >> (8 * (n - 1 - i)));
+            };
+            set(1, 1, 4);
+            set(10, 8, 60);
+            set(20, 1, 2);
+            set(21, 1, 6);
+            Bytes m = pack_connect(mb);
+            m[COMPACT_BYTES - 2] |= 0x0F;  // the last 12 bits: padding
+            m[COMPACT_BYTES - 1] = 0xFF;
+            m.resize(static_cast<std::size_t>(cpb), 0xFF);
+            if (auto p = rx.decode_known(0, COMPACT_CONNECT, t, m, false))
+                return primed_body(unpack_connect(ByteView(*p).first(COMPACT_BYTES)), rx);
+        }
+    }
     return std::nullopt;
+}
+
+std::optional<Session::Frame> Session::primed_body(Bytes body, RxBurst& rx) {
+    std::optional<std::string> why;
+    if (body.empty() || (why = check_frame(body))) {
+        log_write(LOG, INFO, "RX primed session frame malformed (" + (body.empty() ? std::string("empty") : *why) + "): dropped");
+        return std::nullopt;
+    }
+    log_write(LOG, INFO, "RX primed " + frame_desc(body));
+    return Frame{0, std::move(body), rx.submode()};
 }
 
 void Session::on_session_frame(const Frame& f, double now) {

@@ -35,6 +35,8 @@ inline constexpr int FLOOR_DECAY_TURNS = 4;  // clean turns (no escalation) that
 inline constexpr int LINK_LOST_MISSES = 12;
 // Primed retries of a failed control codeword at most (link.PRIME_TRIES; DATA2G_PRIME_TRIES, read once).
 int prime_tries();
+// link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
+bool prime_default();
 
 // Python's logging, by logger name ("data2g.link", "data2g.session") and
 // level (20 info, 30 warning). Unset: silent. Set once, before any use.

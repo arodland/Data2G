@@ -516,7 +516,56 @@ class Session:
                 log.warning("RX malformed %s: dropped", why)
                 return None
             return {"key": key, "body": body, "mode": rx.submode} if body else None
+        return self._primed_frame(rx)
+
+    def _primed_frame(self, rx) -> dict | None:
+        """A connect frame that failed blind, retried primed (docs/arq.md §3a):
+        the caller knows nearly all of its CONNECT_ACK (the nonce it sent, its
+        own cap and t_turn as likely), a listener a third of a compact CONNECT
+        (the version, its own call, then a peer like itself). Each still has
+        to pass its CRC, score and _check_frame (a call's 10 characters each
+        in the alphabet: about 7 bits more against a forged one)."""
+        if not (L.PRIME and hasattr(rx, "decode_known")):
+            return None
+        cpb = self.policy.ctl_payload_bytes(rx.submode)
+        t10 = round(self.t_turn * 10)
+        if self.state == CONNECTING and self.station is None:
+            body = F.ConnectAck(self._nonce, self.cap, t10).pack()
+            t = F.Control(F.Core(ftype=F.SESSION), {F.T_SESS: body}).pack(cpb)
+            if len(t) != 1:
+                return None
+            known = b"\xff" * 9 + b"\0\0" + b"\xff" * (cpb - 11)  # its cap and t_turn: as mine, then unknown
+            for m in (b"\xff" * cpb, known):
+                p = rx.decode_known(0, B.ctl_mask(1, 0, 0), t[0], m)
+                if p is not None:
+                    try:
+                        body = F.Control.unpack([p]).ext.get(F.T_SESS, b"")
+                    except ValueError:
+                        body = b""
+                    return self._primed_body(body, 0, rx)
+            return None
+        if self.state == LISTEN and self._compact(rx.submode) and cpb >= F.COMPACT_BYTES:
+            body = bytearray(F.Connect(VERSION, "", self.call, 0, self.cap, t10).pack())
+            t = F.pack_connect(bytes(body)) + bytes(cpb - F.COMPACT_BYTES)
+            # the fields' masks packed the same way (frames._COMPACT), the padding known
+            for fields in ((1, 10, 20, 21), (1, 10)):  # version, callee, cap, t_turn; then the first two
+                mb = bytearray(F.Connect.BYTES)
+                for at, n in ((1, 1), (2, 8), (10, 8), (18, 2), (20, 1), (21, 1)):
+                    if at in fields:
+                        bits = next(b for b, a, _ in F._COMPACT if a == at)
+                        mb[at:at + n] = ((1 << bits) - 1).to_bytes(n, "big")
+                m = int.from_bytes(F.pack_connect(bytes(mb)), "big") | (1 << (8 * F.COMPACT_BYTES - 148)) - 1
+                p = rx.decode_known(0, B.COMPACT_CONNECT, t, m.to_bytes(F.COMPACT_BYTES, "big") + b"\xff" * (cpb - F.COMPACT_BYTES))
+                if p is not None:
+                    return self._primed_body(F.unpack_connect(p[:F.COMPACT_BYTES]), 0, rx)
         return None
+
+    def _primed_body(self, body: bytes, key: int, rx) -> dict | None:
+        if not body or (why := _check_frame(body)):
+            log.info("RX primed session frame malformed (%s): dropped", why if body else "empty")
+            return None
+        log.info("RX primed %s", _frame_desc(body))
+        return {"key": key, "body": body, "mode": rx.submode}
 
     def _on_session_frame(self, f: dict, now: float):
         body, key = f["body"], f["key"]

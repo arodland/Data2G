@@ -185,6 +185,8 @@ private:
     void refuse(const Connect& c, const std::string& mode, int reason, double now);
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
+    std::optional<Frame> primed_frame(RxBurst& rx);  // a connect frame that failed blind (session.py's, §3a)
+    std::optional<Frame> primed_body(Bytes body, RxBurst& rx);
     void on_session_frame(const Frame& f, double now);
     void flush_writes();
 };

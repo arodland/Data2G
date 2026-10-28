@@ -305,6 +305,11 @@ Station::Station(int direction_, std::shared_ptr<Policy> policy_, bool master_, 
     : direction(direction_), policy(std::move(policy_)), master(master_), key(key_), max_misses(max_misses_), cap(cap_),
       chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")), prime(env_on("DATA2G_PRIME")) {}
 
+bool prime_default() {
+    static const bool on = env_on("DATA2G_PRIME");
+    return on;
+}
+
 int prime_tries() {
     static const int n = [] {
         const char* v = std::getenv("DATA2G_PRIME_TRIES");

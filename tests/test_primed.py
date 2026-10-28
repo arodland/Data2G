@@ -258,3 +258,98 @@ def test_cpp_decode_known_matches(native, pure):
         assert got == want
         assert list(native.codes.known_bits(spec.name, ctl, known)) == list(codes.known_bits(spec, ctl, known))
         assert native.codes.score(spec.name, soft, ctl, m, 0) == pytest.approx(codes.score(spec, soft, ctl, m, 0))
+
+
+# --- connect frames ---------------------------------------------------------------------
+
+class CpmConnect(L.Policy):
+    """Connects in a CPM-like mode: one 20 B control codeword (a compact CONNECT)."""
+
+    def choose(self, station, escalation):
+        return "c60", 2
+
+    def payload_bytes(self, m):
+        return 60
+
+    def ctl_payload_bytes(self, m):
+        return 20
+
+    def max_ctl(self, m):
+        return 1
+
+    def rv_cycle(self, m):
+        return 4
+
+    def connect_mode(self, cap, tries=0):
+        return "c60"
+
+    def airtime(self, m, n_cw, dup=False):
+        return 3.0
+
+
+class BlindFail:
+    """Every blind decode fails; a primed one returns what was sent when the
+    hypothesis agrees with it, else (`forge`) the hypothesis with random bits
+    where it knew nothing."""
+
+    def __init__(self, burst, forge=None):
+        self.burst, self.submode, self.n_cw, self.forge = burst, burst.submode, len(burst.slots), forge
+        self.asked = []
+
+    def decode(self, slot, mask_id, rv, key):
+        return None
+
+    def forget(self, key):
+        pass
+
+    def decode_known(self, slot, mask_id, template, tmask, pair=False):
+        s = self.burst.slots[slot]
+        self.asked.append(tuple(mask_id))
+        if self.forge is not None:
+            return bytes(t & m | self.forge.randrange(256) & ~m & 255 for t, m in zip(template, tmask))
+        if mask_id == s.mask_id and all((a ^ b) & m == 0 for a, b, m in zip(s.payload, template, tmask)):
+            return s.payload
+        return None
+
+
+def handshake(cls, forge=None, t_turn_b=1.0):
+    a = cls("W1AW", CpmConnect(), rng=random.Random(1))
+    b = cls("K2XYZ", CpmConnect(), rng=random.Random(2))
+    b.t_turn = t_turn_b
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    connect = a.poll(0.0)
+    a.on_tx_end(connect, 1.0)
+    b.on_rx(BlindFail(connect, forge), 1.5)
+    ack = b.poll(10.0)
+    if ack is not None:
+        b.on_tx_end(ack, 11.0)
+        a.on_rx(BlindFail(ack, forge), 11.5)
+    return a.state, b.state, list(a.events), list(b.events)
+
+
+def test_primed_connect_and_connect_ack():
+    """Neither connect frame decodes blind: the callee primes the CONNECT with
+    its own call, the caller its CONNECT_ACK with its nonce, and they connect.
+    A callee with another t_turn still gets through (its second hypothesis)."""
+    from data2g.arq import session as S
+    assert handshake(S.Session)[:2] == (S.CONNECTED, S.CONNECTED)
+    assert handshake(S.Session, t_turn_b=2.5)[:2] == (S.CONNECTED, S.CONNECTED)
+
+
+def test_forged_connect_frames_rejected():
+    """Forged primed frames (random where unknown): a CONNECT's caller rarely
+    unpacks (10 characters in a 40 of 64 alphabet), a CONNECT_ACK's cap over
+    2 is dropped; whatever is accepted is a well-formed frame."""
+    from data2g.arq import session as S
+    rng = random.Random(9)
+    states = [handshake(S.Session, forge=rng)[1] for _ in range(200)]
+    assert states.count(S.CONNECTED) < 10  # (5/8)^10 of them, about 1%
+
+
+def test_cpp_sessions_prime_connect_identically(native, pure):
+    from data2g.arq import session as S
+    for kw in (dict(), dict(t_turn_b=2.5)):
+        assert handshake(native.arq.Session, **kw) == handshake(S.Session, **kw)
+    for seed in range(20):
+        assert handshake(native.arq.Session, forge=random.Random(seed)) == handshake(S.Session, forge=random.Random(seed))
