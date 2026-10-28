@@ -435,3 +435,31 @@ def test_receiver_expected_slot():
     ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - 1200, p0 + 1200, cfo))
     assert [k for k, _ in ev] == ["header", "burst"]
     assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"
+
+
+def test_policy_hears_primed_controls_as_lost():
+    """The outcome model learned blind control losses: a control only a primed
+    retry read is reported to the policy as unusable (as the blind decode saw
+    it), a blind one as usable."""
+    class Recording(RandomPolicy):
+        def __init__(self, rng):
+            super().__init__(rng, 0.0, ("m22",), 6)
+            self.seen = []
+
+        def outcome(self, submode, decoded, sent, usable=None):
+            self.seen.append(usable)
+
+        @property
+        def want_dup(self):
+            return False
+
+    rng = random.Random(4)
+    stats = {"mismatch": 0, "primed": 0, "primed_ok": 0, "forged": 0}
+    a, b = L.Station(0, RandomPolicy(rng, 0.0, ("m22",), 6), master=True), L.Station(1, Recording(rng))
+    a.write(payload(rng, 400, "random"))
+    for turn in range(6):
+        assert b.handle(PrimeRx(a.build(), rng, 0.0, {}, stats, p_ctl=float(turn % 2), p_known=1.0))
+        assert a.handle(FakeRx(b.build(), rng, 0.0, {}, stats))
+        b.answered()
+        a.answered()
+    assert b.policy.seen == [True, False, True, False, True, False] and b.stats["rx_primed"] == 3
