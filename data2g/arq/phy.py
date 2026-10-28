@@ -60,6 +60,7 @@ EST = 0  # an offset no cut gives: the estimated prior (codes.pad_prior) in plac
 # random bits (codes.score): noise passes with probability under e^-10 on
 # top of the CRC.
 PRIMED_SCORE = 10.0
+PRIMED_PATHS = 8  # the list paths a primed decode CRC-checks (codes.POLAR_LIST: all)
 
 
 def _with_prior(spec, buf: np.ndarray) -> np.ndarray:
@@ -374,7 +375,9 @@ class ModemRx:
             cands, usable = codes.decode_buffer_raw(spec, buf, 1, known)
         else:
             cands, usable = codes.decode_raw_pinned(spec, np.asarray(self._soft(slot))[None], known, slot)
-        got = codes.check(spec, cands[0], usable[0], m)
+        usable = np.asarray(usable[0]).copy()
+        usable[PRIMED_PATHS:] = False
+        got = codes.check(spec, cands[0], usable, m)
         if got is None:
             return None
         # a pair's RV 1 is the same codeword: one more reception, at its own slot's scrambling

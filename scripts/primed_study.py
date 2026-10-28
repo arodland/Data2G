@@ -207,9 +207,15 @@ def main():
     ap.add_argument("--data", action="store_true", help="a data burst's control (T_NEW) in place of an ACK's")
     ap.add_argument("--jobs", type=int, default=12)
     ap.add_argument("--out", default="runs/primed_ctl.csv")
+    ap.add_argument("--primed-score", type=float, default=None, help="phy.PRIMED_SCORE for this run")
+    ap.add_argument("--primed-paths", type=int, default=None, help="phy.PRIMED_PATHS for this run")
     a = ap.parse_args()
     if a.cmd == "summarize":
         return summarize(a.path)
+    if a.primed_score is not None:
+        PHY.PRIMED_SCORE = a.primed_score
+    if a.primed_paths is not None:
+        PHY.PRIMED_PATHS = a.primed_paths
     if PS.PEP_REF_DB is None:
         ap.error("set DATA2G_PEP_REF_DB (5, as the loss studies)")
     jobs = [(m, c, float(s), 70000 + i, a.data, a.arms) for m in a.modes for c in a.chans for s in grid(m, c)
