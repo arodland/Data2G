@@ -17,9 +17,17 @@ fails, with these payload bits known (codes.known_bits):
            recommendation (6)
   tmpl     core, and the TLVs (types, lengths, the T_REPLY value)
   cum      everything but the cumulative ACK
-  shipped  link.Station's own prediction (link.expect) for the reply
+  free13 / free19 / free21 / all: cum with the recommendation, then T_REPLY's
+           value's low 6, then all 8 bits unknown; every bit known
+  g_<arm>  <arm> on a genie lock (start, CFO and word known; CPM)
+  p<T>_<arm>  <arm> on the expected slot's lock when no blind path locked
+           (cpm.prime_lock in a +-0.15 s window at the known CFO, scoring at
+           least T; CPM)
 Per arm: control decoded (every control codeword) of all bursts sent
 (`ok`), and of those whose header was read right (`hdr`, the code alone).
+--primed-score / --primed-paths: phy.PRIMED_SCORE, PRIMED_PATHS for the run.
+
+Found (2026-10-28, 200 bursts a point): docs/arq.md §3a; runs/primed-rx/.
 """
 
 from data2g import threads  # noqa: E402
@@ -177,7 +185,7 @@ def summarize(path):
         rows[(r["mode"], r["channel"], r["arm"])].append((float(r["snr"]), int(r["hdr"]), int(r["ok"])))
     print("SNR (cell dB) at 10% / 1% control failure: all bursts | given the header read; arm - blind in brackets")
     for mode, chan in sorted({(m, c) for m, c, _ in rows}):
-        arms = [a for a in (*ARMS, "shipped", *("g_" + x for x in ARMS)) if (mode, chan, a) in rows]
+        arms = [a for a in (*ARMS, *("g_" + x for x in ARMS)) if (mode, chan, a) in rows]
         arms += sorted({a for m, c, a in rows if (m, c) == (mode, chan) and a[0] == "p" and "_" in a},
                        key=lambda a: float(a[1:].split("_")[0]))
         pts = {}

@@ -140,7 +140,7 @@ def main():
                 t["s"].append(o["score8"])
             if not np.isnan(o["true_score"]):
                 t.setdefault("ts", []).append(o["true_score"])
-    print("per decode: paths passing the CRC's low w bits (expected 8 x 2^-w on noise), full 24-bit passes,")
+    print(f"per decode: paths passing the CRC's low w bits (expected {PHY.PRIMED_PATHS} x 2^-w on noise), full 24-bit passes,")
     print("and of the w=8 passes, the share scoring >= PRIMED_SCORE")
     for (src, hyp), t in sorted(tot.items()):
         rates = "  ".join(f"w{x} {t[f'w{x}'] / t['n']:.2e} (x{t[f'w{x}'] / t['n'] / (PHY.PRIMED_PATHS * 2.0 ** -x):.2f})" for x in WIDTHS)
