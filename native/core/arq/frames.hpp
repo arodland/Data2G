@@ -37,7 +37,10 @@ inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4
                      T_REPLY = 11, T_CHAT = 12, T_CQ = 13, T_DUPCTL = 14,
                      T_COMP = 15,
                      T_ID = 16,  // packed callsign + session key: an ID frame (docs/arq.md §7a), mask 0
-                     T_DRAINED = 17;  // empty: this burst's new codewords end the sender's queued data
+                     T_DRAINED = 17,  // empty: this burst's new codewords end the sender's queued data
+                     // a data codeword in the control's padding (docs/arq.md §5a): seq | comp << 7, the
+                     // sender's abandon epoch, its payload with trailing zeros cut
+                     T_INLINE = 18;
 // An extension type's short name ("ext N" for one not listed): monitor/'s
 // dumps. A new T_* gets its name here too. (Native only.)
 std::string ext_name(int t);

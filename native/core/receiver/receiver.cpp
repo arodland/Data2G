@@ -447,7 +447,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             out.push_back(HeaderEvent{*p, off_ + len()});
         }
         const Pending p = *pending_;
-        if (off_ + len() < p.end() + config::LEADIN_SAMPLES) {
+        if (off_ + len() < p.end() + MARGIN) {
             if (fresh_ >= HOP) {
                 check_pilots();
                 // the later-header search is for false locks: a confirmed burst skips it
@@ -472,8 +472,8 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             pending_.reset();
             continue;
         }
-        const int64_t s0 = std::max<int64_t>(0, p.start() - config::LEADIN_SAMPLES - off_);
-        const int64_t s1 = std::clamp<int64_t>(p.end() + config::LEADIN_SAMPLES - off_, s0, len());
+        const int64_t s0 = std::max<int64_t>(0, p.start() - MARGIN - off_);
+        const int64_t s1 = std::clamp<int64_t>(p.end() + MARGIN - off_, s0, len());
         req.seg.assign(buf_.begin() + s0, buf_.begin() + s1);
         req.at = off_ + s0;
         req.head = p.start() - off_ - s0 + modem::receive_head(p.ofdm().band);
@@ -483,7 +483,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         // a better header inside this burst's span (it was a false lock, and
         // the real one began before it ended) is next, not trimmed away
         if (!confirmed_ && supersede(out, true)) {
-            trim(len() - std::max<int64_t>(0, pending_->start() - config::LEADIN_SAMPLES - off_));
+            trim(len() - std::max<int64_t>(0, pending_->start() - MARGIN - off_));
             continue;
         }
         // a suspect burst may have claimed an end past a real preamble that

@@ -99,6 +99,19 @@ def wait(clients, until, seconds, what):
     raise AssertionError(f"timed out: {what}; " + " | ".join(str(c.lines[-20:]) for c in clients))
 
 
+def ided(clients, logs, before):
+    """Both hosts have sent their post-session ID since `before` (TX ID lines
+    counted in their logs) and neither is keyed. A call keyed into a peer's
+    ID, or answered while the caller sends its own, loses its CONNECT_ACK and
+    retries in the slowest mode (~20 s, measured)."""
+    return (all(logs[n].read_text().count(" TX ID ") > before[n] for n in logs)
+            and all([x for x in c.lines if x.startswith("PTT ")][-1:] != ["PTT ON"] for c in clients))
+
+
+def id_count(logs):
+    return {n: logs[n].read_text().count(" TX ID ") for n in logs}
+
+
 def kiss_read(sock, dec, seconds):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -184,10 +197,12 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         b.data.sendall(down)
         t_data = wait([a, b], lambda: len(b.got) >= len(up) and len(a.got) >= len(down), 120, "data") - t1
         assert bytes(b.got) == up and bytes(a.got) == down
+        ids = id_count(logs)
         a.send("DISCONNECT")
         wait([a, b], lambda: "DISCONNECTED" in a.lines and "DISCONNECTED" in b.lines, 60, "DISCONNECTED")
         for c in (a, b):
             assert any(x.startswith("BUFFER") for x in c.lines) and "PTT ON" in c.lines and "BUSY ON" in c.lines
+        wait([a, b], lambda: ided([a, b], logs, ids), 30, "post-session IDs")
 
         # ACCEPT: B's session data on a connection B makes to a server; the server hanging up ends it
         srv = socket.create_server(("127.0.0.1", 0))
@@ -214,8 +229,10 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         a.got.clear()
         wait([a, b], lambda: bytes(a.got) == b"from the server", 120, "data from the ACCEPT server")
         assert not b.got  # nothing on B's data port
+        ids = id_count(logs)
         conn.close()
         wait([a, b], lambda: "DISCONNECTED" in a.lines, 60, "DISCONNECTED (server hung up)")
+        wait([a, b], lambda: ided([a, b], logs, ids), 30, "post-session IDs (server hung up)")
         # nothing there now: B refuses the next call at once (CONNECT_NAK), A stops dialing
         srv.close()
         a.lines.clear()
@@ -225,6 +242,11 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         assert not any(x.startswith("CONNECTED") for x in a.lines)
         t_nak = time.monotonic() - t_nak
         b.send("LISTEN OFF")
+        # B may follow its NAK with an ID: a frame sent into it is lost (half
+        # duplex), and A can't hear it for a header's length (protocol 15's
+        # shorter bursts put A's KISS frame there)
+        time.sleep(0.5)
+        wait([a, b], lambda: [x for x in b.lines if x.startswith("PTT ")][-1:] != ["PTT ON"], 30, "B off the air")
 
         # KISS, between sessions: a UI frame each way
         ka = socket.create_connection(("127.0.0.1", ports["A"] + 2), timeout=0.1)

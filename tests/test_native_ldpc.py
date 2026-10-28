@@ -24,6 +24,11 @@ import pytest
 from data2g import codes, config, cpm, ldpc
 
 SPECS = [s for s in config.SUBMODES.values() if s.code == "ldpc"] + list(cpm.SPECS.values())
+# The decoders take a code, (k, n), not a mode: one spec per code on air. Modes
+# sharing a code (qpsk-r1/3, 16qam-r1/3, n4-16qam-r1/3, w48-qpsk-r1/3, ...) drew
+# the same seed (spec.k) and decoded the same codewords; the CPM modes'
+# data is GF(M) (data2g.gfldpc), not on a binary LDPC code.
+CODES = list({(s.k, s.coded_bits): s for s in SPECS if s.code == "ldpc"}.values())
 
 
 def _extents(spec):
@@ -73,7 +78,7 @@ def _llrs(code, rng, b=8):
     return (2 * (x + sigma * rng.normal(size=x.shape)) / sigma**2).astype(np.float32)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", CODES, ids=[s.name for s in CODES])
 def test_min_sum_bitwise(native, reference, spec):
     rng = np.random.default_rng(spec.k + 1)
     for i, (p, c) in enumerate(_pairs(native, reference, spec, whole=False)):
@@ -111,7 +116,7 @@ def exact_phi(native):
     native.ldpc.set_exact_phi(was)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", CODES, ids=[s.name for s in CODES])
 def test_sum_product_matches_with_exact_phi(native, reference, spec, monkeypatch, exact_phi):
     monkeypatch.setattr(ldpc, "_phi", _phi_correctly_rounded)
     rng = np.random.default_rng(spec.k + 2)
@@ -127,7 +132,7 @@ def test_sum_product_matches_with_exact_phi(native, reference, spec, monkeypatch
             np.testing.assert_allclose(got[2], want[2], rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("spec", SPECS, ids=[s.name for s in SPECS])
+@pytest.mark.parametrize("spec", CODES, ids=[s.name for s in CODES])
 def test_sum_product(native, reference, spec):
     rng = np.random.default_rng(spec.k + 3)
     agree = total = 0

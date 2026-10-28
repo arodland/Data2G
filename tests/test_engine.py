@@ -830,7 +830,9 @@ def test_a_reply_whose_header_is_missed_is_not_polled_over(caplog):
 
     a, b = Engine("W1AW", seed=21), Engine("K2XYZ", seed=22)
     b.listen()
-    link(a, b, 10, 8, lambda: False, seed=20)  # the noise floor: a quiet channel heard first
+    # the noise floor: a quiet channel heard first, long enough that a 12 s reply
+    # (20 codewords since protocol 15) does not become the floor before it ends
+    link(a, b, 10, 16, lambda: False, seed=20)
     a.connect("K2XYZ", 2)
     assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
     b.session.write(np.random.default_rng(23).bytes(20000))

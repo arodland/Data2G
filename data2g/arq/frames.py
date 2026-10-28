@@ -45,6 +45,20 @@ T_CQ = 13  # packed callsign + bandwidth cap code: a CQ frame (VARA's CQFRAME), 
 # packed callsign + the session key it identifies for: an ID frame (docs/arq.md §7a), mask 0
 T_ID = 16
 T_DRAINED = 17  # empty: this burst's new codewords end the sender's queued data (a hint: the peer may hold its reply)
+# a data codeword carried in the control's padding (docs/arq.md §5a): seq (7 bits) | comp << 7, its
+# payload with trailing zeros cut (zero padded back to the data mode's payload), then inline_check.
+# Only the last new codeword of a burst, and only where it fits the padding.
+T_INLINE = 18
+
+
+def inline_check(mask_id: tuple, payload: bytes) -> bytes:
+    """T_INLINE's 2-byte check: CRC-32 of the codeword's identity (burst.data_mask:
+    key, direction with compression and abandon epoch, seq) and its padded
+    payload, low 16 bits. As a data slot's masked CRC (§2), a wrong seq,
+    compression or slicing fails it, and so does a control that passed its
+    own CRC corrupted."""
+    key, d, s = mask_id
+    return (zlib.crc32(bytes([key >> 8, key & 255, d, s]) + payload) & 0xFFFF).to_bytes(2, "big")
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
 

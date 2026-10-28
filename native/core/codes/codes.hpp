@@ -209,6 +209,19 @@ std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes);
 std::vector<float> pin(const Spec& s, std::span<const double> soft, std::span<const std::int8_t> known, int index);
 // pin() for one combined IR buffer row (code order, unscrambled: decode_buffer's input).
 std::vector<double> pin_buffer(const Spec& s, std::span<const double> buf, std::span<const std::int8_t> known);
+// (k,) the channel's LLR of each info bit as unscrambled, 0 where not sent:
+// an RV 0 codeword's soft bits (mapping order) sent at burst position `index`
+// (codes.info_llrs), or one combined IR buffer row (codes.info_llrs_buffer).
+std::vector<double> info_llrs(const Spec& s, std::span<const double> soft, int index);
+std::vector<double> info_llrs_buffer(const Spec& s, std::span<const double> buf);
+// A control's padding estimated from info_llrs -> (k,) prior LLRs toward 0
+// per info bit, +inf where known zero (codes.pad_prior).
+std::vector<double> pad_prior(const Spec& s, std::span<const double> llr);
+// An RV 0 codeword's soft bits (sent at `index`) with each sent info bit's
+// prior added, set to the clamp where it is inf (codes.add_prior); one
+// combined IR buffer row the same (codes.add_prior_buffer).
+std::vector<float> add_prior(const Spec& s, std::span<const double> soft, std::span<const double> prior, int index);
+std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf, std::span<const double> prior);
 // The order info bits enter a polar code (codes.polar_order): the payload's bits reversed, then CRC and fill.
 const std::vector<int>& polar_order(const Spec& s);
 // decode_raw with the info bits `known` gives known (0/1, -1 unknown; unscrambled), every row sent at burst

@@ -43,8 +43,22 @@ DD_BUDGET_S = 1.0
 # (scripts/ctl_prior_study.py). The same for an ARQ_DUP pair once combined.
 # Polar: CPM's control carries 9-16 B of its 20 (median 12) in real-modem
 # sessions, so shorter cuts.
+# LDPC: since T_INLINE (docs/arq.md §5a) a control's content can end
+# anywhere up to 269 B, past any fixed cut. Instead, the slot's own soft
+# bits say where its padding likely starts, and one decode leans each
+# payload bit toward zero by how likely it is padding (codes.pad_prior):
+# within 0.0 dB median, 0.6 at most, of pinning at the exact length, at
+# every length, one decode (scripts/ctl_prior_study.py --boundary). DATA2G_PIN_EST=0:
+# the fixed cuts, for A/B runs.
 PIN_CUTS = (16, 32)
 POLAR_PIN_CUTS = (12, 16)
+PIN_EST = os.environ.get("DATA2G_PIN_EST", "1") == "1"
+EST = 0  # an offset no cut gives: the estimated prior (codes.pad_prior) in place of a cut
+
+
+def _with_prior(spec, buf: np.ndarray) -> np.ndarray:
+    """A control's combined buffer (1, L) leaning toward its estimated padding (codes.pad_prior)."""
+    return codes.add_prior_buffer(spec, buf, codes.pad_prior(spec, codes.info_llrs_buffer(spec, buf[0])))
 
 
 def _ctl_index(mask_id: tuple) -> int:
@@ -265,7 +279,10 @@ class ModemRx:
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), plain, rv)
         if buf0 is not None and mask_id[2] >= SEQ_MOD:  # a control combined (ARQ_DUP): its padding pinned
             for off in self._offsets(spec, _ctl_index(mask_id)):
-                payload, ok = codes.decode_buffer_pinned(spec, buf, top, codes.zero_tail(spec, off), m)[0]
+                if off == EST:
+                    payload, ok = codes.decode_buffer(spec, _with_prior(spec, buf), top, m, index=codes.PLAIN)[0]
+                else:
+                    payload, ok = codes.decode_buffer_pinned(spec, buf, top, codes.zero_tail(spec, off), m)[0]
                 if ok:
                     self._learn(slot, spec, payload, rv, m)
                     return payload
@@ -343,26 +360,35 @@ class ModemRx:
             spec = self._spec(slot)
             buf = codes.combine(spec, None, codes.plain(spec, self._soft(slot), slot, 0), 0)
             buf = codes.combine(spec, buf, codes.plain(spec, self._soft(slot + 1), slot + 1, 1), 1)
-            known = None if off is None else codes.zero_tail(spec, off)
-            cands, usable = codes.decode_buffer_raw(spec, buf, 1, known)
+            if off == EST:
+                cands, usable = codes.decode_buffer_raw(spec, _with_prior(spec, buf), 1)
+            else:
+                cands, usable = codes.decode_buffer_raw(spec, buf, 1, None if off is None else codes.zero_tail(spec, off))
             self._pairs[(slot, off)] = cands[0], usable[0]
         return self._pairs[(slot, off)]
 
     def _offsets(self, spec, i: int) -> tuple:
         """Control codeword i's payload offsets past which a cut (PIN_CUTS,
-        POLAR_PIN_CUTS: bytes of the control stream) knows it zero."""
+        POLAR_PIN_CUTS: bytes of the control stream) knows it zero; LDPC
+        (PIN_EST): EST alone."""
         if spec.code == "gf":  # nothing to pin (codes.decode_raw_pinned)
             return ()
+        if spec.code == "ldpc" and PIN_EST:
+            return (EST,)
         pb = codes.payload_bytes(spec)
         cuts = PIN_CUTS if spec.code == "ldpc" else POLAR_PIN_CUTS
         return tuple(dict.fromkeys(c - i * pb for c in cuts if 0 < c - i * pb < pb))
 
     def _pinned(self, slot: int, spec, off: int) -> tuple:
-        """`slot` decoded alone with its payload past `off` bytes known zero,
-        as decode_raw's row."""
+        """`slot` decoded alone with its payload past `off` bytes known zero (EST:
+        its estimated padding prior instead), as decode_raw's row."""
         if (slot, off) not in self._pin:
-            cands, usable = codes.decode_raw_pinned(spec, np.asarray(self._soft(slot))[None], codes.zero_tail(spec, off),
-                                                    slot)
+            soft = np.asarray(self._soft(slot))
+            if off == EST:
+                prior = codes.pad_prior(spec, codes.info_llrs(spec, soft, slot))
+                cands, usable = codes.decode_raw(spec, codes.add_prior(spec, soft, prior, slot)[None], index=[slot])
+            else:
+                cands, usable = codes.decode_raw_pinned(spec, soft[None], codes.zero_tail(spec, off), slot)
             self._pin[(slot, off)] = cands[0], usable[0]
         return self._pin[(slot, off)]
 

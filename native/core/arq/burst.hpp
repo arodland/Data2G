@@ -34,6 +34,10 @@ inline MaskId data_mask(int direction, std::int64_t seq, int key = 0, bool comp 
             static_cast<int>(pmod(seq, SEQ_MOD))};
 }
 
+// T_INLINE's 2-byte check (frames.inline_check): CRC-32 of the codeword's
+// identity and its padded payload, low 16 bits, big-endian.
+Bytes inline_check(const MaskId& m, ByteView payload);
+
 struct Slot {
     MaskId mask_id;
     int rv = 0;

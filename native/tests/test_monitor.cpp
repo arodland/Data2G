@@ -8,8 +8,10 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <iterator>
 #include <random>
 
+#include "arq/frames.hpp"
 #include "check.hpp"
 #include "monitor/monitor.hpp"
 
@@ -228,12 +230,26 @@ void lossy(double snr_db, unsigned seed) {
     run(a, b, m, dumps, 3, [] { return false; }, seed + 3);  // the monitor is a block behind
     const std::string out = all(dumps);
     const Bytes seen = stream(dumps, "W1AW>K2XYZ stream");
-    const bool gap = out.find("not all heard") != std::string::npos;
+    // what the monitor shows stops being the stream as sent where it says so: a codeword it never
+    // heard, or an abandon re-slicing bytes it had already shown
+    const bool gap = out.find("not all heard") != std::string::npos || out.find("re-sliced below what was shown") != std::string::npos;
     std::fprintf(stderr, "lossy %.0f dB: %zu bursts, resends %s, gap %d, %zu of %zu B shown\n", snr_db, dumps.size(),
                  out.find("r ok") != std::string::npos ? "read" : "none read", gap, seen.size(), up.size());
     check::is_true(gap || seen == up, "no gap: the stream as sent");
-    check::is_true(std::search(up.begin(), up.end(), seen.begin(), seen.begin() + std::min<std::size_t>(seen.size(), 200)) != up.end(),
-                   "what was shown is the stream's");
+    // After a gap the monitor shows the codewords it heard back to back, and one that missed the
+    // stream's first codewords has lost its framing: the raw stream, the records' length bytes
+    // inline, zero padding between records. Only the first codeword's bytes are sure to be one
+    // run, so: the first 20 shown (under the smallest data payload, 22 B), zeros dropped, are a run
+    // of the data or of its records, zeros dropped (dropping one byte value from both keeps a
+    // substring a substring).
+    const auto nz = [](const Bytes& v) {
+        Bytes o;
+        std::copy_if(v.begin(), v.end(), std::back_inserter(o), [](std::uint8_t c) { return c != 0; });
+        return o;
+    };
+    const Bytes head = nz(Bytes(seen.begin(), seen.begin() + std::min<std::size_t>(seen.size(), 20)));
+    const auto in = [&](const Bytes& s) { return std::search(s.begin(), s.end(), head.begin(), head.end()) != s.end(); };
+    check::is_true(in(nz(up)) || in(nz(to_records(up))), "what was shown is the stream's");
     if (check::failures || std::getenv("SHOW")) std::fputs(out.c_str(), stderr);
     g_snr_db = 12.0;
 }

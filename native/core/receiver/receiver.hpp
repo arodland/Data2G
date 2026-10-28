@@ -91,6 +91,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept);
 class Receiver {
 public:
     static constexpr int HOP = config::FS / 4;
+    static constexpr int MARGIN = 320;  // audio kept either side of an OFDM burst's span (receiver.Receiver.MARGIN)
     static constexpr double ON_AIR_DB = 3.0;
     static constexpr std::size_t FLOOR_BLOCKS = 1200;
     static constexpr int REVISIT = 2 * HOP;

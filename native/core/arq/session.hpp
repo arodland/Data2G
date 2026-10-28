@@ -21,7 +21,7 @@
 
 namespace data2g::arq {
 
-inline constexpr int VERSION = 3;
+inline constexpr int VERSION = 4;  // session.py VERSION: 4 added T_INLINE
 inline constexpr int CONNECT_TRIES = 5;
 inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;

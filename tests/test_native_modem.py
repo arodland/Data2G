@@ -167,7 +167,7 @@ def test_receive_matches(native, py, name, n_cw, snr, preset):
     r = py.receive(y)
     same_received(native.modem.receive(y), r)
     # the streaming path: head-limited search
-    head = 3000 + 2 * config.LEADIN_SAMPLES + modem.head_samples(SUBMODES[name].sync_band)
+    head = 3000 + config.LEADIN_SAMPLES + modem.receive_head(SUBMODES[name].sync_band)  # as receiver.Receiver
     same_received(native.modem.receive(y, [SUBMODES[name].sync_band], None, head), py.receive(
         y, [SUBMODES[name].sync_band], None, head))
     b, nb = py.decode_received(r), native.modem.decode_received(r)

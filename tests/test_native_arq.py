@@ -19,7 +19,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import native_subs
 from data2g import codes, config, modem
 from data2g.arq import modes
 from data2g.arq import policy as G
@@ -29,14 +28,6 @@ LOGIT_TOL = 1e-4  # float32 layers on both sides, summed in different orders (se
 MI_TOL = 1e-14
 # The bitwise reference platform (plan, Findings: portability).
 CAP_RTOL = 0.0 if (sys.platform == "linux" and platform.machine() == "x86_64") else 1e-15
-
-
-@pytest.fixture
-def pure(monkeypatch):
-    """Every --native substitution undone for the test: the reference is all
-    Python (its callees included), the native side called directly."""
-    for (module, attr), fn in native_subs.originals.items():
-        monkeypatch.setattr(module, attr, fn)
 
 
 @pytest.fixture

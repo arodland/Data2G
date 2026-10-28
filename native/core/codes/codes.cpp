@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -650,6 +651,76 @@ std::vector<double> pin_buffer(const Spec& s, std::span<const double> buf, std::
     const auto& pos = info_code_positions(s);
     for (std::size_t i = 0; i < known.size() && i < pos.size(); ++i)
         if (known[i] >= 0 && pos[i] >= 0) out[static_cast<std::size_t>(pos[i])] = ldpc::CH_CLAMP * (1.0 - 2.0 * known[i]);
+    return out;
+}
+
+std::vector<double> info_llrs(const Spec& s, std::span<const double> soft, int index) {
+    const auto& pos = systematic_positions(s);
+    const auto pn = pn_at(s, index);
+    std::vector<double> out(pos.size(), 0.0);
+    for (std::size_t i = 0; i < pos.size(); ++i)
+        if (pos[i] >= 0 && static_cast<std::size_t>(pos[i]) < soft.size())
+            out[i] = soft[static_cast<std::size_t>(pos[i])] * (1.0 - 2.0 * pn[i]);
+    return out;
+}
+
+std::vector<double> info_llrs_buffer(const Spec& s, std::span<const double> buf) {
+    const auto& pos = info_code_positions(s);
+    std::vector<double> out(pos.size(), 0.0);
+    for (std::size_t i = 0; i < pos.size(); ++i)
+        if (pos[i] >= 0 && static_cast<std::size_t>(pos[i]) < buf.size()) out[i] = buf[static_cast<std::size_t>(pos[i])];
+    return out;
+}
+
+std::vector<double> pad_prior(const Spec& s, std::span<const double> llr) {
+    const int pb = s.payload_bytes;
+    const auto at = [&](int b) { return static_cast<std::size_t>(b) < llr.size() ? llr[static_cast<std::size_t>(b)] : 0.0; };
+    // S(j), j = 1..pb (S(pb) = 0): one sequential sum from the payload's last
+    // bit, as codes.pad_prior's cumsum adds; log 2 - logaddexp(0, -l) as numpy
+    // computes it (0 exactly where l is 0)
+    std::vector<double> S(static_cast<std::size_t>(pb), 0.0);
+    double acc = 0.0;
+    for (int b = 8 * pb - 1; b >= 8; --b) {
+        const double x = -at(b);
+        const double lae = x == 0.0 ? std::log(2.0) : x > 0.0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x));
+        acc += std::log(2.0) - lae;
+        if (b % 8 == 0) S[static_cast<std::size_t>(b / 8 - 1)] = acc;
+    }
+    const double top = *std::max_element(S.begin(), S.end());
+    double sum = 0.0;
+    for (auto& v : S) sum += (v = std::exp(v - top));
+    std::vector<double> out(static_cast<std::size_t>(s.k), 0.0);
+    double pad = 0.0;  // P(start <= byte b)
+    for (int b = 1; b < pb; ++b) {
+        pad += S[static_cast<std::size_t>(b - 1)] / sum;
+        const double v = 2.0 * std::atanh(std::min(pad, 1.0 - 1e-7));
+        for (int i = 8 * b; i < 8 * b + 8; ++i) out[static_cast<std::size_t>(i)] = v;
+    }
+    for (int i = 8 * pb + s.crc_bits; i < s.k; ++i) out[static_cast<std::size_t>(i)] = INFINITY;
+    return out;
+}
+
+std::vector<float> add_prior(const Spec& s, std::span<const double> soft, std::span<const double> prior, int index) {
+    std::vector<float> out(soft.begin(), soft.end());
+    const auto& pos = systematic_positions(s);
+    const auto pn = pn_at(s, index);
+    for (std::size_t i = 0; i < prior.size() && i < pos.size(); ++i) {
+        if (prior[i] == 0.0 || pos[i] < 0) continue;
+        const double sign = 1.0 - 2.0 * pn[i];
+        auto& o = out[static_cast<std::size_t>(pos[i])];
+        o = std::isinf(prior[i]) ? static_cast<float>(ldpc::CH_CLAMP * sign) : static_cast<float>(o + prior[i] * sign);
+    }
+    return out;
+}
+
+std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf, std::span<const double> prior) {
+    std::vector<double> out(buf.begin(), buf.end());
+    const auto& pos = info_code_positions(s);
+    for (std::size_t i = 0; i < prior.size() && i < pos.size(); ++i) {
+        if (prior[i] == 0.0 || pos[i] < 0 || static_cast<std::size_t>(pos[i]) >= out.size()) continue;
+        auto& o = out[static_cast<std::size_t>(pos[i])];
+        o = std::isinf(prior[i]) ? ldpc::CH_CLAMP : o + prior[i];
+    }
     return out;
 }
 

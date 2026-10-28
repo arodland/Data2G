@@ -2,6 +2,7 @@
 // tests/test_native_parity.py's job.
 
 #include <algorithm>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -112,6 +113,21 @@ int main() {
         for (std::size_t i = 0; i < v.size(); ++i) v[i] = static_cast<int>(i);
         const auto sp4 = codes::spread(std::span<const int>(v), 4, s.bits_per_cu);
         check::is_true(codes::despread(std::span<const int>(sp4), 4, s.bits_per_cu) == v, name + " despread(spread)");
+    }
+
+    // codes::pad_prior: clean LLRs of a 40 B control in a 116 B payload lean
+    // its padding to the clamp and leave its content alone; no LLRs (a short
+    // span) is a level start, never out of bounds.
+    {
+        const auto& s = *codes::spec("w48-qpsk-r1/2");
+        std::vector<double> llr(static_cast<std::size_t>(s.k), 0.0);
+        for (int i = 0; i < 8 * s.payload_bytes; ++i) llr[static_cast<std::size_t>(i)] = i < 8 * 40 ? (i % 3 ? 8.0 : -8.0) : 8.0;
+        const auto p = codes::pad_prior(s, llr);
+        check::equal(static_cast<int>(p.size()), s.k, "pad_prior size");
+        check::is_true(p[8 * 30] < 0.01 && p[8 * 45] > 15.0 && p[static_cast<std::size_t>(8 * s.payload_bytes)] == 0.0,
+                       "pad_prior: content level, padding toward zero, CRC unknown");
+        const auto q = codes::pad_prior(s, std::span<const double>());
+        check::is_true(q[0] == 0.0 && q[8] > 0.0 && q[8 * s.payload_bytes - 1] < 17.0, "pad_prior of nothing");
     }
     return check::report("codes");
 }

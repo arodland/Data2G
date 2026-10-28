@@ -135,6 +135,31 @@ def test_control_padding_is_pinned_when_a_control_fails():
         assert rx.decode(0, ctl_mask(0, 0, 8), 0, None) is None  # another session's key still fails
 
 
+def test_long_control_is_pinned_where_its_padding_starts():
+    """A control carrying an inline codeword (T_INLINE) ends past the fixed
+    cuts: at 0 dB a 44 B one fails plain and with PIN_CUTS, and decodes
+    leaning toward the padding its soft bits show (codes.pad_prior)."""
+    from data2g.arq.burst import ctl_mask, data_mask
+
+    rng = np.random.default_rng(5)
+    pb = codes.payload_bytes(SPEC)
+    ctl = bytes(rng.integers(1, 256, 44, dtype=np.uint8)) + bytes(pb - 44)
+    data = bytes(rng.integers(0, 256, pb, dtype=np.uint8))
+    b = TxBurst(SPEC.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
+    # seeds where pinning at the exact length decodes: under protocol 15's timing seed 1 is a
+    # burst even that can't rescue (seeds 0-11 at -0.5/0/+0.5 dB: adaptive 33 of 36, exact 32)
+    for seed in (0, 2, 3):
+        r = hear(b, snr=0.0, seed=seed)
+        prior = codes.pad_prior(SPEC, codes.info_llrs(SPEC, PHY.soft_bits(r)[0], 0))
+        assert (prior[: 8 * 42] < 1).all() and (prior[8 * 50 : 8 * pb] > 10).all()
+        soft, m = PHY.soft_bits(r)[:1], PHY.mask_value(ctl_mask(0, 0, 7))
+        for cut in (None, *PHY.PIN_CUTS):  # plain and each fixed cut fail
+            c, u = (codes.decode_raw(SPEC, soft, index=[0]) if cut is None else
+                    codes.decode_raw_pinned(SPEC, soft, codes.zero_tail(SPEC, cut), 0))
+            assert codes.check(SPEC, c[0], u[0], m) is None
+        assert PHY.ModemRx(r, {}).decode(0, ctl_mask(0, 0, 7), 0, None) == ctl
+
+
 def test_data_slots_are_not_pinned(monkeypatch):
     """Only a control mask (burst.ctl_mask) earns the retry: a failed data
     slot costs no extra decode."""
@@ -166,7 +191,7 @@ def test_duplicated_control_pair_is_pinned_once_combined():
     st = L.Station(1, GearShifter(), key=7)
     m = PHY.mask_value(L.ctl_mask(0, 0, 7))
     for seed in range(3):
-        r = hear(b, snr=-4.0, seed=seed)
+        r = hear(b, snr=-4.5, seed=seed)  # at -4.0 seed 2 decodes alone (protocol 15)
         soft = PHY.soft_bits(r)
         buf = codes.combine(SPEC, codes.combine(SPEC, None, codes.flip(SPEC, 0, 0) * soft[0], 0),
                             codes.flip(SPEC, 1, 1) * soft[1], 1)

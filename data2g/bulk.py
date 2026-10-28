@@ -63,6 +63,7 @@ CTL_SLOTS = 4
 CPM_CTL_SLOTS = 2
 MAX_H = (MAX_CODEWORDS - CTL_SLOTS) // 2
 CPM_MAX_H = cpm.MAX_DATA // 2
+LEAD = FS // 10  # audio kept ahead of a due burst's preamble
 TOL = FS // 5  # a heard burst within this of where burst g is due is burst g
 PRE_S = 180
 FLUSH = 6 * FS  # silence fed after the input ends, so the last burst completes
@@ -372,7 +373,7 @@ class Rx:
                 continue
             s = round(st.due(g))
             n_cw, spec = st.lay.n_cw(g), st.lay.spec
-            lo, hi = s - modem.LEADIN_SAMPLES, s + st.lay.length(g) + FS // 2
+            lo, hi = s - LEAD, s + st.lay.length(g) + FS // 2
             if lo < off:
                 st.done.add(g)  # trimmed away already
                 continue
@@ -423,7 +424,7 @@ def receive(chunks, mode: str | None = None, rx: Rx | None = None, on_chunk=None
             g = 0
             while g in st.done:
                 g += 1
-            keep = min(keep, round(st.due(g)) - modem.LEADIN_SAMPLES - off)
+            keep = min(keep, round(st.due(g)) - LEAD - off)
         if keep > 0:
             buf, off = buf[keep:], off + keep
         if on_chunk:

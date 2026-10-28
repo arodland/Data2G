@@ -17,9 +17,9 @@ def _burst():
     pays = [rng.bytes(codes.payload_bytes(spec)) for _ in mids]
     bits = np.stack([codes.encode(spec, q, 0, phy.mask_value(m), i) for i, (q, m) in enumerate(zip(pays, mids))])
     x = np.concatenate([np.zeros(3000), modem.modulate_bits(codes.spread(bits, spec.bits_per_cu), spec), np.zeros(3000)])
-    # channel seed 53: a draw where codeword 1 fails without DD (which draws
+    # channel seed 73: a draw where codeword 1 fails without DD (which draws
     # do depends on the code's shift tables, the scrambling and the estimator)
-    r = modem.receive(hfchannel.apply_channel(x, snr_db=3.0, fading_preset=FadingPreset("mpd", 2.0, 4.0), seed=53))
+    r = modem.receive(hfchannel.apply_channel(x, snr_db=3.0, fading_preset=FadingPreset("mpd", 2.0, 4.0), seed=73))
     return r, mids, pays
 
 

@@ -216,6 +216,28 @@ void bind_codec(py::module_& c) {
         }
         return np(out);
     });
+    c.def("info_llrs", [](const std::string& name, const In<double>& soft, int index) {
+        return np<double>(std::span<const double>(codes::info_llrs(cspec(name), vec(soft), index)));
+    });
+    c.def("info_llrs_buffer", [](const std::string& name, const In<double>& buf) {
+        return np<double>(std::span<const double>(codes::info_llrs_buffer(cspec(name), vec(buf))));
+    });
+    c.def("pad_prior", [](const std::string& name, const In<double>& llr) {
+        return np<double>(std::span<const double>(codes::pad_prior(cspec(name), vec(llr))));
+    });
+    c.def("add_prior", [](const std::string& name, const In<double>& soft, const In<double>& prior, int index) {
+        return np<float>(std::span<const float>(codes::add_prior(cspec(name), vec(soft), vec(prior), index)));
+    });
+    c.def("add_prior_buffer", [](const std::string& name, const In<double>& buf, const In<double>& prior) {
+        const auto& s = cspec(name);
+        const auto b = mat(buf);
+        Mat<double> out(b.rows, b.cols);
+        for (std::size_t r = 0; r < b.rows; ++r) {
+            const auto v = codes::add_prior_buffer(s, b.row(r), vec(prior));
+            std::copy(v.begin(), v.end(), out[r]);
+        }
+        return np(out);
+    });
     c.def("polar_order", [](const std::string& name) {
         return np<std::int64_t>(std::span<const int>(codes::polar_order(cspec(name))));
     });

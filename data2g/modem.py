@@ -252,7 +252,10 @@ def header_samples(band: str) -> int:
 def copy_frame(band: str, n_f: int) -> int | None:
     """Which on-air frame carries the header copy (config.HEADER_COPY_*) of
     a burst of n_f data frames on sync band `band`; None: no copy."""
-    return min(HEADER_COPY_AFTER, n_f) if band in HEADER_COPY_BANDS else None
+    return min(HEADER_COPY_AFTER, n_f) if band in HEADER_COPY_BANDS and n_f >= COPY_MIN_FRAMES else None
+
+
+COPY_MIN_FRAMES = 0  # a study hook (scripts/burst_trim.py patches it): shorter bursts carry no copy
 
 
 def frames_on_air(spec: SubmodeSpec, n_cw: int) -> int:

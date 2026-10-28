@@ -23,6 +23,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 |---|---|
 | §2 codeword identity, masked CRC | `burst.py` (`ctl_mask`, `data_mask`), `phy.py` (`mask_value`) |
 | §3 burst layout, §4 core word, §5 extensions | `frames.py` (`Core`, `Control`, `T_*`); `link.py` (`Station.build`, `Station.handle`) |
+| §5a inline codewords | `frames.py` (`T_INLINE`, `inline_check`); `link.py` (`Station.build`, `Station._take_data`); native also `monitor/` |
 | §6, §6a turns, timers, idle | `session.py` |
 | §7 session frames, §7a ID frames | `frames.py` (`Connect`, `ConnectAck`, `ConnectNak`, `pack_cq`, `pack_id`); `session.py`; `engine.py` |
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
@@ -117,7 +118,7 @@ is the "ACK burst".
 **Codeword size:** the smallest submodes carry 4 bytes (the polar ACK modes). So the
 core word is exactly 32 bits, and extensions use more codewords only when needed. On
 large-codeword modes (46-396 B) the control codeword's spare bytes carry the
-extensions, so C = 1.
+extensions, so C = 1. They can also carry the last data codeword of a write (§5a).
 
 ## 4. Core control word (32 bits)
 
@@ -174,13 +175,18 @@ Where the rest comes from:
   reply the sender acted on, taken in ascending order. The sender doesn't merge older
   ACKs. The receiver keeps a snapshot (cumulative + received set) for each of its last
   8 burst seqs, and computes the same first K.
-- **A failed control slot is decoded again with its padding pinned.** A control is a few
-  bytes (median 12, at most 28 in linksim sessions) zeroed to its codeword's payload
-  (46-396 B in the LDPC modes). LDPC is systematic, so the receiver sets the sent info bits
-  past the first 16, then 32, payload bytes to zero at the decoder's input (`codes.pin`,
-  `phy.PIN_CUTS`), each try CRC-checked under the slot's mask as usual. Receiver only:
-  nothing on air changes. An `ARQ_DUP` pair that fails combined is pinned the same way in
-  its IR buffer (`codes.pin_buffer`).
+- **A failed control slot is decoded again leaning on its padding.** A control is a few
+  bytes (median 12, at most 28 in linksim sessions; up to 269 with an inline codeword,
+  §5a) zeroed to its codeword's payload (46-396 B in the LDPC modes). LDPC is systematic,
+  so the slot's own soft bits show where the zeros start: S(j), the sum over the sent
+  payload bits from byte j on of log 2 P(bit = 0), gains about log 2 a bit of padding
+  and loses on content's 1s. softmax(S) is the start's distribution, each payload bit is
+  padding with P = P(start <= its byte), and one more decode adds log (1 + P) / (1 - P)
+  toward zero to its soft bit (`codes.pad_prior`, `codes.add_prior`), CRC-checked under
+  the slot's mask as usual. Receiver only: nothing on air changes. An `ARQ_DUP` pair that
+  fails combined gets the same in its IR buffer (`codes.add_prior_buffer`).
+  `DATA2G_PIN_EST=0` (`phy.PIN_EST`) pins at fixed cuts instead, 16 then 32 B
+  (`phy.PIN_CUTS`, `codes.pin`), for A/B runs.
   - Polar sends no info bits: known ones are frozen instead (`codes.decode_raw_pinned`), and
     a polar codeword's payload enters its info set reversed (`codes.polar_order`, a wire
     format choice) so that a control's padding sits on the weakest positions. Cuts 12 and
@@ -191,8 +197,19 @@ Where the rest comes from:
   - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
     constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
     the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),
-    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5). Cut 16 alone gets all of it,
-    within 1 dB of knowing the content's exact length.
+    most at high rates (qpsk-r3/4 6.0, w48-64l-r3/4 5.5).
+  - The estimate against pinning at the exact length (`ctl_prior_study.py --boundary`,
+    controls of 12-264 B, 400 a point, AWGN and i.i.d. Rayleigh, 36 modes): 10% failure
+    point 0.0 dB worse (median at every length), 0.6 at most; 1% point 0.0 median, 0.8 at
+    most. The fixed cuts were as good up to 32 B and lost 1.2-3.5 dB median from 48 B
+    on. One decode either way (the cuts averaged 1.13); no wrong codeword passed its CRC
+    in 2.4 M retries. A hard cut at the most likely start (0.1 dB median, up to 2.4 at 1%)
+    and a second, posterior-fed pass (0.2 dB better at most, 1.13 decodes) were measured
+    and not taken. The start itself: exact 70-80% of the time, -1 byte 3-9%.
+  - Polar can only take hard cuts, and its failed list's best path says nothing useful
+    about where the zeros start (a cut there recovered a fifth at most of what the fixed cuts
+    did), so polar keeps them. The CPM control loses to an exact cut only between them
+    (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
 - **If any control codeword fails, the burst is discarded** and not answered. Without
@@ -258,6 +275,74 @@ Where the rest comes from:
 | id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
 | drained (17) | empty: this burst's new codewords end the sender's queued data (a hint, §6a reply hold) | the burst that slices the last queued byte, only if it fits the control's padding |
+| inline (18) | seq (7 bits) and comp flag, a data codeword's payload with trailing zeros cut, its 2-byte check (§5a) | the burst's last new codeword, when it fits the control's padding |
+
+## 5a. Inline codewords (session version 4)
+
+A short write costs a whole data codeword even though the control codeword in front of
+it is mostly zero padding: 64 B in w48-qpsk-r1/2 is 1.78 s on air against 1.21 s for
+control alone, and on CPM a data codeword is 3-10 s (fsk16r25: 14.58 s with one, 4.98
+without). So the last codeword of a write rides in the control's padding when it fits.
+
+- **Wire:** `T_INLINE` = 18. Its value is one byte, seq mod 128 | comp << 7, then the
+  codeword's payload with its trailing zeros cut, then a 2-byte check. The receiver pads the
+  payload back to the data mode's size (`payload_bytes`), so the codeword is exactly the
+  one a data slot would have carried: 5 B on top of the payload.
+- **The check** is the low 16 bits of CRC-32 over the codeword's identity
+  (`burst.data_mask`: key, direction, compression, abandon epoch, seq) and its padded
+  payload (`frames.inline_check`). It does for the inline codeword what the masked CRC
+  does for a slot (§2). A late burst from an older slicing, or a control that passed
+  its CRC corrupted (a 2^-16 false accept), fails it, and the codeword is ignored as a
+  failed slot would be.
+- **Accounting is a data codeword's.** It has its own seq, the burst's last new one
+  (`T_NEW` starts the slots before it), and is ACKed, held, delivered, abandoned and
+  re-sliced by seq like any other. Nothing in §3's slot mapping changes: a burst whose
+  only new codeword is inline is a control-only burst on air.
+- **Resends go in a slot.** The inline codeword arrives exactly when the control does,
+  so it is missing only when the whole burst was lost. The master's identical repeat
+  carries it inline again. After that, the acted-on ACK lists it missing and it is
+  resent as an ordinary data slot. Its RV is 0: the receiver holds no soft bits for
+  it, so a send inside a decoded burst doesn't count towards its RV (`Codeword.inlined`).
+- **What is inlined:** only the last new codeword, and only when it ends the queued data
+  (the tail of a write) and fits the control's padding after everything else. Optional
+  hints and requests (`T_BUFFER`, `T_CHAT`, `T_REPLY`, `T_DUPCTL`) are shed for it, as
+  they are for resends: on CPM's 20 B control, a 2-10 B line then saves a whole data
+  codeword. `T_DRAINED` goes in after it, if it still fits. At most 252 B, a TLV's
+  255 less the header and check. A bulk burst's last codeword is full, so bulk is
+  unchanged until the stream's last burst.
+- **Why only the tail:** filling every control with the next stream bytes saves a
+  codeword only where the tail would spill into one more, which is the same condition
+  (for a raw stream, `len mod payload` in 1..spare). And every inline byte gives up
+  pinning (below) for the whole burst.
+- **The cost is control robustness on those bursts, much reduced by the padding
+  estimate.** A control that fails plain is decoded again leaning on its padding (§3),
+  wherever it starts. With fixed cuts at 16 and 32 B an inline codeword that pushed the
+  control past 32 B left nothing to pin, and the control failed where a data codeword
+  does, taking the burst's ACK with it (and IR combining for that codeword: a lost
+  inline codeword is resent fresh). The estimate keeps the gain at every length, less
+  the padding the inline bytes take.
+  - Code level (`ctl_prior_study.py --content N`, the 36 LDPC modes, 10% failure
+    point with pinning): a 24 B control (12 B plus a short inline codeword) is 0.5 dB
+    (median; -1.5 to +2.5) worse than a 12 B one. At 48 B the pinning gain is gone: 4.0
+    dB median (up to 6.0), and the control fails where data does. Pinning past the
+    exact length wins back 3.0 dB median there, and the estimate (§3) gets within 0.0
+    dB median of that in one decode: 2.4-3.5 dB over the fixed cuts at 48-96 B, 1.2-2.3
+    at 128-264 (AWGN, Rayleigh).
+  - Sessions, 2026-10-27 (paired, DATA2G_PEP_REF_DB=5, native, `chat_probe.py`, first
+    message excluded; mean latency change, SE): chat 50-200 B (48 seeds) awgn 10
+    -0.51 s (0.02), mpp 5 -0.32 (0.10), mpp 0 -0.93 (0.16), awgn 0 -1.01 (0.08),
+    awgn -6 -0.56 (0.06), mpp -6 -1.05 (0.27), awgn -12 and mpp -10 within noise
+    (SE 1.6-1.8). Chat 2-10 B lines: -0.57 s at awgn 10, -1.1 at awgn 0, -3.0 at awgn
+    -6, -3.3 at mpp -6, -5.6 at awgn -12, -5.8 at mpp -10 (medians 5.8 to 2.8 s at -6
+    dB, 10.3 to 4.8 s at -12: CPM sends the line with no data codeword). Shedding the
+    hints doubled the CPM gain. Winlink sessions (48 seeds) 5.0% shorter at awgn 10
+    (SE 0.3), 1.5% at awgn 0 (0.5), within noise on mpp and mpg. Bulk (`loss_study`,
+    16 seeds, 9 cells incl. awgn -10 and mpp -8): bit-identical, its tail is never
+    reached in the horizon. Inlining only when no data slot is left took most of the
+    chat gain away (awgn 0: -0.03 s against -0.89).
+- **Off switch:** `DATA2G_INLINE=0` (`link.INLINE`) never sends one, for A/B runs. A
+  station always receives them. A version 3 peer ignores the TLV, and each inline
+  codeword then waits for its resend in a slot.
 
 ## 6. Turn rules and timers
 
@@ -564,7 +649,7 @@ Failure mode to design out: two stations that hear each other fine, exchanging b
 forever without progress, because they disagree about protocol state.
 
 - **Nothing implicit can corrupt.** Every slot's seq, and a data slot's compression,
-  is checked by its masked CRC (§2).
+  is checked by its masked CRC (§2), an inline codeword's by its check (§5a).
   RVs are sent explicitly. Cumulative ACK, burst seq and acted-on are in every control
   word, so each burst restates the sender's view.
 - **Progress watchdog.** Progress means the peer's cumulative ACK advanced, or this

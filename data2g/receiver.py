@@ -43,7 +43,7 @@ from collections import deque  # noqa: E402
 import numpy as np  # noqa: E402
 
 from . import audio, modem  # noqa: E402
-from .config import BANDS, FS, LEADIN_SAMPLES, SNR_REF_BW_HZ  # noqa: E402
+from .config import BANDS, FS, SNR_REF_BW_HZ  # noqa: E402
 from .waveform import dsp  # noqa: E402
 
 log = logging.getLogger("data2g.receiver")
@@ -285,6 +285,10 @@ class Receiver:
     # a reply's header must be seen before the sender's deadline (the audio
     # loopback missed replies at 0.5 s and a 1.5 s first search)
     HOP = FS // 4
+    # audio kept either side of an OFDM burst's span for its receive (a slip
+    # moves its end up to modem.SLIP_MAX later); a burst decodes this long
+    # after its closing pilot
+    MARGIN = 320
 
     def reset(self):
         self.buf = np.zeros(0)
@@ -576,7 +580,7 @@ class Receiver:
                 # stream_end: the stream index of the audio fed so far (the caller's now)
                 out.append(("header", dict(self.pending, stream_end=self.off + len(self.buf))))
             p = self.pending
-            if self.off + len(self.buf) < p["end"] + LEADIN_SAMPLES:
+            if self.off + len(self.buf) < p["end"] + self.MARGIN:
                 if self.fresh >= self.HOP:
                     self._check_pilots()
                     # the later-header search is for false locks: a confirmed
@@ -600,8 +604,8 @@ class Receiver:
                 self._trim(len(self.buf) - (p["end"] - self.CPM_TAIL - self.off))
                 self.pending = None
                 continue
-            s0 = max(0, p["start"] - LEADIN_SAMPLES - self.off)
-            seg = self.buf[s0 : p["end"] + LEADIN_SAMPLES - self.off]
+            s0 = max(0, p["start"] - self.MARGIN - self.off)
+            seg = self.buf[s0 : p["end"] + self.MARGIN - self.off]
             head = p["start"] - self.off - s0 + modem.receive_head(p["band"])
             try:
                 if "copy" in p:
@@ -617,7 +621,7 @@ class Receiver:
             # a better header inside this burst's span (it was a false lock,
             # and the real one began before it ended) is next, not trimmed away
             if not self.confirmed and self._supersede(out, whole=True):
-                self._trim(len(self.buf) - max(0, self.pending["start"] - LEADIN_SAMPLES - self.off))
+                self._trim(len(self.buf) - max(0, self.pending["start"] - self.MARGIN - self.off))
                 continue
             # a suspect (possibly false) burst may have claimed an end past a
             # real preamble that began inside it: keep the last search window
