@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <random>
 
+#include "arq/engine.hpp"
+#include "arq/modes.hpp"
 #include "arq/phy.hpp"
+#include "arq/policy.hpp"
 #include "check.hpp"
 #include "receiver/receiver.hpp"
 
@@ -79,6 +82,61 @@ public:
         return s.payload;
     }
 };
+
+// The engine's gear shifter, every burst in fsk32r62 and every reply asked for in it.
+constexpr const char* C32 = "fsk32r62-r1/2";
+class C32Policy : public GearPolicy {
+public:
+    std::pair<std::string, int> choose(Station& st, int escalation) override {
+        if (escalation) return GearPolicy::choose(st, escalation);
+        return {C32, st.tx.pending() ? 3 : 1};
+    }
+    std::optional<Recommendation> recommend(Station& st) override {
+        const auto r = GearPolicy::recommend(st);
+        shifter.log.back() = {C32, r->hint, C32};
+        return Recommendation{encode(C32), r->hint, encode(C32)};
+    }
+};
+
+// An engine whose receiver, once `blind`, is one with no blind path (no CPM grids, no OFDM header passes):
+// its peer's CPM bursts are found only in the expected slot.
+class BlindEngine : public Engine {
+public:
+    using Engine::Engine;
+    ~BlindEngine() override { stop(); }
+    bool blind = false;
+    receiver::Receiver alt{modem::Accept{receive_accept().max_cw, 0.99}, {}};
+
+protected:
+    std::vector<receiver::Receiver::Item> receiver_feed(std::span<const double> x) override {
+        return blind ? alt.feed_deferred(x) : Engine::receiver_feed(x);
+    }
+    bool receiver_busy() override { return blind ? alt.busy() : Engine::receiver_busy(); }
+    bool receiver_channel_busy() override { return blind ? alt.channel_busy() : Engine::receiver_channel_busy(); }
+    void receiver_reset() override { blind ? alt.reset() : Engine::receiver_reset(); }
+    void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo,
+                         Until until) override {
+        blind ? alt.expect(grids, lo, hi, cfo, until) : Engine::receiver_expect(grids, lo, hi, cfo, until);
+    }
+    bool receiver_expect_waits() override { return blind ? alt.expect_waits() : Engine::receiver_expect_waits(); }
+};
+
+// Both engines step in 0.1 s blocks, each hearing the other's last block plus noise (gauss: the same on every
+// platform), until until() or `seconds` pass (tests/test_engine.py's link).
+bool link(Engine& a, Engine& b, double snr_db, double seconds, const std::function<bool()>& until, unsigned seed) {
+    constexpr int BLOCK = config::FS / 10;
+    std::mt19937 rng(seed);
+    const double sigma = std::sqrt((config::FS / 2.0) / config::SNR_REF_BW_HZ / std::pow(10.0, snr_db / 10));
+    std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK);
+    for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
+        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + sigma * gauss(rng);
+        ao = a.step(x).audio;
+        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + sigma * gauss(rng);
+        bo = b.step(x).audio;
+        if (until()) return true;
+    }
+    return false;
+}
 
 }  // namespace
 
@@ -177,6 +235,45 @@ int main() {
         const auto w = s.window(10.0);
         check::is_true(w && std::abs(w->first - (10.35 - s.TOL_S)) < 1e-12 && std::abs(w->second - (10.35 + s.TOL_S)) < 1e-12,
                        "the median gap, either side");
+    }
+
+    // tests/test_primed.py test_engine_reply_deadline_waits_for_the_expected_slot: the caller asks for
+    // fsk32r62 control-only replies (deadline t_turn + 2.92 s past its burst); with no blind path its peer's
+    // replies are found only in the expected slot, whose try (2.4 s of header) must run before the deadline
+    check::current_step = "engine: the reply deadline waits for the expected slot";
+    {
+        EngineHooks h;
+        h.policy = [] { return std::make_shared<C32Policy>(); };
+        EngineConfig ca, cb;
+        ca.seed = 41;
+        cb.seed = 42;
+        BlindEngine a("W1AW", ca, h), b("K2XYZ", cb, h);
+        b.listen();
+        a.connect("K2XYZ", 2);
+        const auto up = [] {
+            std::mt19937 r(43);
+            Bytes v(700);
+            for (auto& c : v) c = static_cast<std::uint8_t>(r() & 255);
+            return v;
+        }();
+        Bytes got;
+        const auto read = [&] {
+            const auto r = b.session().read();
+            got.insert(got.end(), r.begin(), r.end());
+        };
+        check::is_true(link(a, b, 10, 60, [&] { return a.session().state == SessionState::CONNECTED &&
+                                                       b.session().state == SessionState::CONNECTED; }, 1),
+                       "connected");
+        a.session().write(up);
+        check::is_true(link(a, b, 10, 60, [&] { return read(), got.size() >= 100; }, 2), "warm-up data");
+        check::is_true(link(a, b, 10, 30, [&] { return a.tx().has_value(); }, 3), "a transmits");
+        a.blind = true;  // (its expect() comes as this burst ends)
+        auto& st = *a.session().station;
+        const auto t0 = st.stats["timeouts"], r0 = st.stats["rx_ok"];
+        check::is_true(link(a, b, 10, 120, [&] { return read(), got.size() >= up.size(); }, 4), "all data");
+        check::is_true(got == up, "data intact");
+        check::is_true(st.stats["rx_ok"] - r0 >= 3, "replies found in the expected slot");
+        check::equal(st.stats["timeouts"] - t0, std::int64_t{0}, "no timeout over them");
     }
 
     return check::report("test_primed");

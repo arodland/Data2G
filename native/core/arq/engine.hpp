@@ -61,6 +61,7 @@ inline constexpr double MISSED_MIN_DB = -18.0;  // a timeout's window under this
 inline constexpr double CARRIER_Z = 5.0;  // carrier_hold: on air when the last CARRIER_TAIL_S read this (span_z, engine.py)
 inline constexpr double CARRIER_TAIL_S = 1.0;
 inline constexpr double CARRIER_STEP_S = 0.25;  // ... re-checked this often
+inline constexpr double EXPECT_STEP_S = 0.05;  // expect_hold: re-checked this often (engine.py)
 inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at least its snr_est less this (engine.py)
 // ID frames (docs/arq.md §7a): in a session, one goes ahead of this station's
 // turn at least this often (FCC 97.119: every 10 minutes), and one more once
@@ -284,9 +285,12 @@ protected:
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
     virtual void receiver_reset() { receiver_.reset(); }
-    virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) {
-        receiver_.expect(grids, lo, hi, cfo);
+    using Until = std::optional<std::pair<std::string_view, std::int64_t>>;  // receiver::Receiver::expect's
+    virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo,
+                                 Until until) {
+        receiver_.expect(grids, lo, hi, cfo, until);
     }
+    virtual bool receiver_expect_waits() { return receiver_.expect_waits(); }
     virtual std::vector<double> tx_audio(const TxBurst& b) { return arq::tx_audio(b); }
     virtual void hear_burst(receiver::BurstEvent& ev, double t);
 
@@ -295,6 +299,7 @@ private:
         std::vector<double> x;
         std::vector<receiver::Receiver::Item> items;
         bool busy = false;
+        bool expect_waits = false;  // the receiver's expect_waits (the reply deadline holds for it)
         bool cw = false;  // a CW ID heard (cwid::CwSense) with no burst locked
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
@@ -376,9 +381,12 @@ private:
         std::vector<std::string_view> grids;
         std::int64_t lo, hi;
         double cfo;
+        Until until;
     };
     std::optional<Expect> expect_next_;  // under mu_
     void expect_reply();
+    void expect_hold(double t, bool waits);
+    std::optional<double> expect_for_;  // the burst end (tx_end_) an expected-slot hold was logged for
     std::int64_t timeouts_ = 0;  // the station's timeouts already reported
     void energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db = std::nullopt,
                 std::optional<double> floor_db = std::nullopt);

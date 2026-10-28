@@ -545,7 +545,7 @@ void Engine::apply_reset() {
         std::lock_guard lock(mu_);
         e = std::exchange(expect_next_, std::nullopt);
     }
-    if (e && e->gen == gen_) receiver_expect(e->grids, e->lo, e->hi, e->cfo);
+    if (e && e->gen == gen_) receiver_expect(e->grids, e->lo, e->hi, e->cfo, e->until);
     busy_now_ = receiver_busy();
     channel_busy_now_ = receiver_channel_busy();
 }
@@ -562,10 +562,15 @@ void Engine::expect_reply() {
         if (std::find(grids.begin(), grids.end(), g) == grids.end()) grids.push_back(g);
     }
     if (!w || grids.empty() || !prime_default()) return;
+    // the reply my deadline is for: its try runs first (expect_hold)
+    Until until;
+    if (const auto exp = session_->policy->expected_reply(); exp && mode_at(exp->first).is_cpm())
+        until = std::make_pair(cpm::grid_of(*mode_at(exp->first).cpm).name,
+                               static_cast<std::int64_t>(std::nearbyint(exp->second * config::FS)));
     std::lock_guard lock(mu_);
     expect_next_ = Expect{want_gen_ + 1, std::move(grids),
                           std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
-                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo};
+                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo, until};
 }
 
 void Engine::request_reset() {
@@ -617,6 +622,7 @@ Engine::Out Engine::step(std::span<const double> x) {
         receiver_.drop();
     }
     b.busy = receiver_busy();
+    b.expect_waits = receiver_expect_waits();
     busy_now_ = b.busy;
     channel_busy_now_ = receiver_channel_busy() || b.cw;
     if (!cfg_.worker) {
@@ -718,6 +724,7 @@ Engine::Done Engine::process(Block& b) {
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
         const bool free = t >= hold_ && t >= cw_until_;  // for anything outside a session
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
+            expect_hold(t, fresh && b.expect_waits);
             carrier_hold(t);
             auto burst = session_->poll(t);
             missed_energy();
@@ -868,6 +875,18 @@ int Engine::rx_cap() const {
     // the session's (before a CONNECT is answered, my own), or between sessions the KISS link's
     if (cfg_.kiss && idle()) return cfg_.kiss->cap;
     return session_->cap;
+}
+
+void Engine::expect_hold(double t, bool waits) {
+    // a reply timeout due while the expected slot's try for the reply I asked for (or a shorter one) waits for
+    // its audio: hold it until that try has run (engine.py _expect_hold)
+    auto& s = *session_;
+    if (!s.deadline || t < *s.deadline || !waits) return;
+    if (expect_for_ != tx_end_) {
+        expect_for_ = tx_end_;
+        log_write(LOG, INFO, "reply timeout held for the expected slot's try");
+    }
+    s.deadline = t + EXPECT_STEP_S;
 }
 
 void Engine::carrier_hold(double t) {

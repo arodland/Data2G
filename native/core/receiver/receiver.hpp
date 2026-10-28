@@ -107,11 +107,15 @@ public:
     std::vector<Item> feed_deferred(std::span<const double> x);
     void reset();
     // The expected slot (receiver.Receiver.expect, docs/arq.md §3a): a burst of one of these CPM grids should
-    // start between stream indices lo and hi, its CFO near cfo; one grid per search hop, in order, looked at
-    // once (cpm::prime_lock) when the audio holds every second header copy of a start there and nothing has
-    // locked. The window's audio is kept until the last is looked at.
-    void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo);
+    // start between stream indices lo and hi, its CFO near cfo. cpm::prime_lock looks there once a grid's next
+    // words are in (through their second header copy, for a start at hi) and nothing has locked: one try a
+    // search hop, the first grid in order with words not tried yet. The window's audio is kept until every
+    // word is tried. `until`: (grid, samples) the caller's reply deadline waits for (expect_waits).
+    void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo,
+                std::optional<std::pair<std::string_view, std::int64_t>> until = std::nullopt);
     std::size_t n_expected() const { return expected_ ? expected_->grids.size() : 0; }  // grids still queued
+    // expect()'s `until` grid is queued and its words no longer than `until` are not all tried
+    bool expect_waits() const;
     // Forget the pending burst: its header was no burst's (a CW ID keyed over its preamble, arq::Engine)
     void drop() {
         last_start_ = pending_->start();
@@ -150,7 +154,7 @@ private:
     bool supersede(std::vector<Item>& out, bool whole = false);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
-    std::optional<cpm::Lock> primed();  // expect()'s lock in its next grid, buffer indices, once its window is complete
+    std::optional<cpm::Lock> primed();  // expect()'s lock in the first grid with words newly in, buffer indices
     std::int64_t decided(std::string_view key) const;
     std::int64_t decided_mid(const cpm::Grid& g) const;
     std::int64_t len() const { return static_cast<std::int64_t>(buf_.size()); }
@@ -182,8 +186,10 @@ private:
     std::vector<CpmWait> cpm_wait_;
     struct Expected {
         std::vector<const cpm::Grid*> grids;
+        std::vector<int> tried;  // per grid, words tried (cpm::prime_ready's count at its last try)
         std::int64_t lo, hi;
         double cfo;
+        std::optional<std::pair<const cpm::Grid*, std::int64_t>> until;
     };
     std::optional<Expected> expected_;
 };

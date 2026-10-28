@@ -178,6 +178,8 @@ void bind_cpm(py::module_& m) {
         return lock_dict(cpm::prime_lock(grid(g), view(x), lo, hi, cfo));
     });
     c.def("hdr_span",[](const std::string& g, int copies) { return cpm::hdr_span(grid(g), copies); });
+    c.def("prime_ready", [](const std::string& g, long avail) { return cpm::prime_ready(grid(g), avail); });
+    c.def("prime_need", [](const std::string& g, long samples) { return cpm::prime_need(grid(g), samples); });
     c.def("measure", [](const std::string& g, const In<double>& E, int n_sym) {
         const auto r = cpm::measure(grid(g), mat(E), n_sym);
         py::dict d;

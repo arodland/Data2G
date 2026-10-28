@@ -60,6 +60,7 @@ MISSED_MIN_DB = -18.0
 CARRIER_Z = 5.0
 CARRIER_TAIL_S = 1.0
 CARRIER_STEP_S = 0.25
+EXPECT_STEP_S = 0.05  # _expect_hold: re-checked this often
 # a measured burst's energy reading is at least its snr_est less this (_energy).
 # Sessions read under snr_est - 3 in 0.3% of bursts (gs data, w and w48):
 # right at snr_est (the floor binding in 8.5%), MPG +12 lost 4.1% (11/12
@@ -164,6 +165,7 @@ class Engine:
         self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
         self._tx_kiss = False  # the burst on air is a KISS one
         self._carrier_for = None  # the burst end (_tx_end) a carrier hold was logged for
+        self._expect_for = None  # the same for an expected-slot hold
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
         self._kiss_deferred = False  # the queued KISS burst has waited on BUSY
         self._kiss_slot = 0  # next p-persistence slot, samples
@@ -403,6 +405,7 @@ class Engine:
             free = t >= self._hold and t >= self._cw_until  # for anything outside a session
             busy = self.receiver.busy or cw
             if not busy and not held:  # a burst still arriving holds any reply (half duplex)
+                self._expect_hold(t)
                 self._carrier_hold(t)
                 burst = self.session.poll(t)
                 self._missed_energy()
@@ -454,7 +457,10 @@ class Engine:
         w = self.slot.window(0.0)
         grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
         if w is not None and grids and LK.PRIME:
-            self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
+            # the reply my deadline is for: its try runs first (_expect_hold)
+            exp = self.session.policy.expected_reply()
+            until = (MODES[exp[0]].grid, int(round(exp[1] * FS))) if exp and is_cpm(MODES[exp[0]]) else None
+            self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo, until)
 
     def next_event(self) -> float | None:
         return self.session.next_event()
@@ -538,6 +544,21 @@ class Engine:
         if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
             return self.kiss.cap
         return self.session.cap
+
+    def _expect_hold(self, t: float):
+        """A reply timeout due while the expected slot's try for the reply I
+        asked for (or a shorter one) waits for its audio: hold it until that
+        try has run (Receiver.expect_waits; bounded by the audio arriving).
+        The deadline covers a control-only reply's header, but its primed
+        lock reads both header copies: fsk32r62's deadline is 3.9 s past my
+        burst, its expected-slot try ~3.3 s at the earliest."""
+        s = self.session
+        if s._deadline is None or t < s._deadline or not self.receiver.expect_waits:
+            return
+        if self._expect_for != self._tx_end:
+            self._expect_for = self._tx_end
+            log.info("reply timeout held for the expected slot's try")
+        s._deadline = t + EXPECT_STEP_S
 
     def _carrier_hold(self, t: float):
         """A reply timeout due with no header heard: while the last

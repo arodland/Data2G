@@ -51,8 +51,10 @@ def substitutions(native):
         def reset(self):
             return super().reset() if self._n is None else self._n.reset()
 
-        def expect(self, grids, lo, hi, cfo):
-            return super().expect(grids, lo, hi, cfo) if self._n is None else self._n.expect(list(grids), lo, hi, cfo)
+        def expect(self, grids, lo, hi, cfo, until=None):
+            if self._n is None:
+                return super().expect(grids, lo, hi, cfo, until)
+            return self._n.expect(list(grids), lo, hi, cfo, until)
 
         def drop(self):
             return super().drop() if self._n is None else self._n.drop()
@@ -76,6 +78,7 @@ def substitutions(native):
         busy = property(lambda s: PyReceiver.busy.fget(s) if s._n is None else s._n.busy)
         channel_busy = property(lambda s: PyReceiver.channel_busy.fget(s) if s._n is None else s._n.channel_busy)
         n_expected = property(lambda s: PyReceiver.n_expected.fget(s) if s._n is None else s._n.n_expected)
+        expect_waits = property(lambda s: PyReceiver.expect_waits.fget(s) if s._n is None else s._n.expect_waits)
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
     def receive_any(y, lead=0, cpm_grids=None):
