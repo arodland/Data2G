@@ -786,10 +786,18 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     rows = header_rows(g.name, HDR_COPIES)
     f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
     n = max(r[-1] for r in rows) + 1
+    # a start a whole symbol later reads the same symbols one row on: per
+    # phase (a fraction of T) and CFO, one run of tone_llr over the window
+    # and the rows after it (its scale from all of them), sliced per start
+    phases = range(0, g.T, max(1, g.T // PRIME_STEP))
+    n_pos = (hi - lo) // g.T + 1
+    LL = {(p, df): tone_llr(g, _energies(g, x, lo + p, n + n_pos, cfo + df * g.rate)) for p in phases for df in PRIME_CFO}
     best = (-np.inf, 0, 0.0, 0)  # score, start, cfo, word
-    for s0 in range(lo, hi + 1, max(1, g.T // PRIME_STEP)):
+    for s0, p, m in ((lo + m * g.T + p, p, m) for m in range(n_pos) for p in phases):
+        if s0 > hi:
+            continue
         for df in PRIME_CFO:
-            L = tone_llr(g, _energies(g, x, s0, n, cfo + df * g.rate))
+            L = LL[(p, df)][m:m + n]
             front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
             for k, ((*_, t), r, b1) in enumerate(zip(words, rows, mid_rows(g.name))):
                 sc = front + max(float(L[b1 + np.arange(len(mb)), mb].sum()), 0.0) + _segments(L, r, t, H)

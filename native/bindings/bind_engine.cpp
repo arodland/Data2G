@@ -48,6 +48,12 @@ protected:
         if (receiver.is_none()) return Engine::receiver_reset();
         receiver.attr("reset")();
     }
+    void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) override {
+        if (receiver.is_none()) return Engine::receiver_expect(grids, lo, hi, cfo);
+        py::list g;
+        for (auto x : grids) g.append(std::string(x));
+        receiver.attr("expect")(g, lo, hi, cfo);
+    }
     std::vector<double> tx_audio(const TxBurst& b) override {
         if (tx_audio_fn.is_none()) return Engine::tx_audio(b);
         return vec(tx_audio_fn(burst_py(std::make_shared<TxBurst>(b))).cast<In<double>>());

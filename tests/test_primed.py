@@ -413,3 +413,25 @@ def test_cpp_prime_lock_matches(native, pure):
                 assert got["start"] == want["start"] and got["spec"] == want["spec"].name
                 assert got["n_data"] == want["n_data"] and got["cfo"] == pytest.approx(want["cfo"])
                 assert got["score"] == pytest.approx(want["score"], rel=1e-9)
+
+
+def _stream(rcv, y, expect=None):
+    if expect is not None:
+        rcv.expect(*expect)
+    out = []
+    for i in range(0, len(y), 800):
+        out += rcv.feed(y[i:i + 800])
+    return out
+
+
+def test_receiver_expected_slot():
+    """The streaming receiver: seed 0's burst, which no blind path locks,
+    is found in the expected slot (and decodes), and not without it."""
+    from data2g.arq.engine import receive_accept
+    from data2g.receiver import Receiver
+    y, _, p0, cfo = _faded_cpm(0)
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * 8000)])
+    assert not _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y)
+    ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - 1200, p0 + 1200, cfo))
+    assert [k for k, _ in ev] == ["header", "burst"]
+    assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"

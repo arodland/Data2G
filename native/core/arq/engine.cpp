@@ -500,8 +500,32 @@ void Engine::run_posted() {
 void Engine::apply_reset() {
     receiver_reset();
     gen_ = want_gen_;
+    std::optional<Expect> e;
+    {
+        std::lock_guard lock(mu_);
+        e = std::exchange(expect_next_, std::nullopt);
+    }
+    if (e && e->gen == gen_) receiver_expect(e->grids, e->lo, e->hi, e->cfo);
     busy_now_ = receiver_busy();
     channel_busy_now_ = receiver_channel_busy();
+}
+
+void Engine::expect_reply() {
+    // the receiver's expected slot for the peer's reply: the CPM grids my session expects it in, where its
+    // replies have started (stream indices from the reset at my burst's end), its CFO (engine.py)
+    const auto w = slot_.window(0.0);
+    std::vector<std::string_view> grids;
+    for (const auto& m : session_->expecting()) {
+        const Mode* md = mode(m);
+        if (!md || !md->is_cpm()) continue;
+        const std::string_view g = cpm::grid_of(*md->cpm).name;
+        if (std::find(grids.begin(), grids.end(), g) == grids.end()) grids.push_back(g);
+    }
+    if (!w || grids.empty() || !prime_default()) return;
+    std::lock_guard lock(mu_);
+    expect_next_ = Expect{want_gen_ + 1, std::move(grids),
+                          std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
+                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo};
 }
 
 void Engine::request_reset() {
@@ -673,10 +697,13 @@ Engine::Done Engine::process(Block& b) {
         if (tx_->pos >= tx_->audio.size()) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
-            request_reset();  // our own transmission was not heard
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + receiver::NoiseProfile::RECOVER_S);
             tx_end_ = now() + static_cast<double>(n) / config::FS;
-            if (!tx_kiss_) session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);  // a broadcast burst is not the session's: no reply timer
+            if (!tx_kiss_) {
+                session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);  // a broadcast burst is not the session's: no reply timer
+                expect_reply();  // with the reset below
+            }
+            request_reset();  // our own transmission was not heard
             tx_kiss_ = false;
             if (cfg_.kiss) cfg_.kiss->on_sent(sent);  // a broadcast burst's frames are acked
         }
@@ -892,7 +919,11 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     // the burst before KISS tries its keys on it (asked with or without KISS:
     // its decode comes first either way)
     const bool ours = session_->claims(rx);
-    if (ours) session_snr_ = meas->snr_est;
+    if (ours) {
+        session_snr_ = meas->snr_est;
+        // its start from my burst's end (the receiver was reset there): the expected slot learns
+        if (r->cpm) slot_.heard(static_cast<double>(ev.header.start()) / config::FS, r->cpm->cfo);
+    }
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's
             kiss_rx_.insert(kiss_rx_.end(), std::make_move_iterator(frames->begin()), std::make_move_iterator(frames->end()));

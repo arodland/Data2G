@@ -51,6 +51,9 @@ def substitutions(native):
         def reset(self):
             return super().reset() if self._n is None else self._n.reset()
 
+        def expect(self, grids, lo, hi, cfo):
+            return super().expect(grids, lo, hi, cfo) if self._n is None else self._n.expect(list(grids), lo, hi, cfo)
+
         def feed(self, x):
             if self._n is None:
                 return super().feed(x)

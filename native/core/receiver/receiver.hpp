@@ -106,6 +106,10 @@ public:
     using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest>;
     std::vector<Item> feed_deferred(std::span<const double> x);
     void reset();
+    // The expected slot (receiver.Receiver.expect, docs/arq.md §3a): a burst of one of these CPM grids should
+    // start between stream indices lo and hi, its CFO near cfo; looked at once (cpm::prime_lock) when the
+    // audio holds every second header copy of a start there and nothing has locked.
+    void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo);
 
     bool busy() const { return pending_.has_value(); }
     bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }
@@ -138,6 +142,7 @@ private:
     bool supersede(std::vector<Item>& out, bool whole = false);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
+    std::optional<cpm::Lock> primed();  // expect()'s lock, buffer indices, once the window is complete
     std::int64_t decided(std::string_view key) const;
     std::int64_t decided_mid(const cpm::Grid& g) const;
     std::int64_t len() const { return static_cast<std::int64_t>(buf_.size()); }
@@ -167,6 +172,28 @@ private:
         std::int64_t first;  // its earliest tile start: kept until read
     };
     std::vector<CpmWait> cpm_wait_;
+    struct Expected {
+        std::vector<const cpm::Grid*> grids;
+        std::int64_t lo, hi;
+        double cfo;
+    };
+    std::optional<Expected> expected_;
+};
+
+// receiver.ReplySlot: where my peer's next burst should start (past my burst's end: the median of the last
+// GAPS heard) and its CFO (its last burst's).
+class ReplySlot {
+public:
+    static constexpr double TOL_S = 0.15;
+    static constexpr std::size_t GAPS = 8;
+    static constexpr double MAX_GAP_S = 3.0;
+    void heard(std::optional<double> gap_s, std::optional<double> cfo);
+    // (earliest, latest) start of the reply to my burst that ended at tx_end; nullopt before anything was learned
+    std::optional<std::pair<double, double>> window(double tx_end) const;
+    std::optional<double> cfo;
+
+private:
+    std::deque<double> gaps_;
 };
 
 
