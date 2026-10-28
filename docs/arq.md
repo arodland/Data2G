@@ -197,12 +197,17 @@ for Data2G).
     0.0-0.9 dB of a known start and word. ACK modes: ack-1f and n4-ack-2f were control-limited and gain 2-3 dB; the
     4f/8f ACKs and the LDPC modes are header-limited (0.0-0.6 dB).
 - **Measured, sessions** (loss studies, 48 paired seeds, DATA2G_PEP_REF_DB=5, shift+cpm,
-  runs/primed-rx/loss4_paired.txt): the cell SNR where 10 bps is delivered moves -0.31 dB
-  (SE 0.09) awgn, -0.95 (0.15) mpp, -1.00 (0.13) mpd, -0.84 (0.14) mpg; 40 bps -0.13 to
-  -0.46. Floor cells +15-30% (mpp -13 +30.5% SE 5.0, mpd -16 +198%), mid cells unchanged
-  (awgn -4, +10 identical; mpp 0 +1.7% SE 0.9). Forced fsk16r25-r1/3 (forced4_paired.txt):
-  5 bps reached 0.53 dB (SE 0.04) lower on AWGN, 1.73 (0.13) mpp, 1.44 (0.12) mpd, 2.21
-  (0.19) mpg; AWGN -19, where no session delivered, now delivers in 21 of 48.
+  runs/primed-rx/loss5_paired.txt): the cell SNR where 10 bps is delivered moves -0.34 dB
+  (SE 0.08) awgn, -0.96 (0.16) mpp, -0.84 (0.13) mpd, -0.84 (0.14) mpg; 40 bps -0.12 to
+  -0.48. Floor cells +10-30% (mpp -13 +25.9% SE 5.6, mpd -13 +27.8% SE 4.4), mid cells
+  unchanged (awgn -4, +10 identical; mpp 0 -0.2% SE 1.0, mpg 0 +0.7% SE 0.6). Forced
+  fsk16r25-r1/3 (forced5_paired.txt): 5 bps reached 0.53 dB (SE 0.04) lower on AWGN,
+  1.73 (0.13) mpp, 1.44 (0.12) mpd, 2.21 (0.19) mpg; at AWGN -19, where no session
+  delivered, 21 of 48 now do. Chat (`chat_probe.py`, 24 seeds, chat5_paired.txt): mean
+  latency of the messages both runs delivered -2.1 to -4.9 s on mpp -12..-10, mpd -11..-9,
+  mpg -8 (SE 0.9-1.9), -0.5 to +0.5 s on AWGN (within SE); sessions lost to link loss 7
+  and 9 of 72 at mpd -11, 2 and 3 at awgn -12 (chatm5_paired.txt): the three inspected ended on the
+  ACK modes recommended for replies at mpd -9..-11, whose OFDM headers are not heard there.
 - **False accepts.** Each primed decode is a 24-bit CRC check on at most 4 paths: 2^-22.
   A failed control's 6 tries are 24 checks, as many as its blind decode's (plain and two
   cuts, 8 paths each): its false-accept chance stays 24 x 2^-24 (2^-19.4). Measured
@@ -222,8 +227,12 @@ for Data2G).
 - **Not primed:** LDPC controls; OFDM acquisition and headers (the 4f/8f ACK modes are
   header-limited there); a reply that starts outside the window.
 - The outcome model learned the old control failure rate (the ACK modes' and CPM's at the
-  floor): until its data is regenerated and it is retrained, the gear shifter picks modes
-  as before and the session gains above are without it.
+  floor), and the shifter leaves a failing mode on control losses. So a control only a
+  primed retry read is reported to the policy as the blind decode saw it (lost): with it
+  reported as read, chat at awgn -12 stayed in OFDM ACK and polar modes whose data failed
+  (mean latency +2.6 s, SE 1.2, 72 seeds) where the blind run had moved to CPM. Until the
+  outcome data is regenerated with priming on and the model retrained, the shifter picks
+  modes as before and the session gains above are without it.
 
 ## 4. Core control word (32 bits)
 
