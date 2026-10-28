@@ -28,7 +28,9 @@ byte offsets, data written before CONNECTED is dropped; off again when the
 client goes), TXPOWER [dB] (DATA2G ON: -> TXPOWER db, the output volume;
 with dB, -60 to 20, sets it -> OK), TIMEOUT [s] (DATA2G ON: -> TIMEOUT s, the
 link idle timeout; with s > 0 sets it -> OK; back to the default when the
-client goes); broadcast:
+client goes), CWID OFF|ON|ONLY [wpm] (DATA2G ON: the CW ID, docs/arq.md §7b:
+off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
+accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
@@ -62,7 +64,7 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from . import audio  # noqa: E402
+from . import audio, cwid  # noqa: E402
 from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
@@ -82,7 +84,8 @@ ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
 # ponytail: from memory of VARA clients, not a checked list; check the log on first contact with Pat
-IGNORED = {"COMPRESSION", "PUBLIC", "CWID", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"}
+CWID_MODES = {"OFF": "off", "ON": "add", "ONLY": "only"}  # the host's CWID word -> Engine.cw_id
+IGNORED = {"COMPRESSION", "PUBLIC", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"}
 
 
 def mode_lines(cap: int) -> list[str]:
@@ -200,6 +203,18 @@ class Host:
             ok = 0 < v < float("inf")
             if ok:
                 e.set_idle_close(v)
+        elif cmd == "CWID" and self.data2g and args and args[0].upper() in CWID_MODES:
+            wpm = e.cw_wpm
+            if len(args) == 2:
+                try:
+                    wpm = float(args[1])
+                except ValueError:
+                    wpm = float("nan")
+            ok = len(args) <= 2 and cwid.MIN_WPM <= wpm <= cwid.MAX_WPM
+            if ok:
+                e.cw_id, e.cw_wpm = CWID_MODES[args[0].upper()], wpm
+        elif cmd == "CWID" and not self.data2g:
+            log.info("accepted, not implemented without DATA2G ON (--cw-id): %s", line.strip())
         elif cmd == "CLEANTXBUFFER" and (not args or (self.data2g and len(args) == 1 and args[0].isdigit()
                                                       and len(args[0]) <= 18)):
             self.out_cmd.append(self._clean(int(args[0]) if args else None))
@@ -534,6 +549,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     link = KissLink(cap=KISS_BW_CAP[a.kiss_bw], broadcast=a.broadcast_mode, busy_limit_s=a.kiss_busy_limit)
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
+    engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -673,10 +689,15 @@ def main():
     ap.add_argument("--stats-interval", type=float, default=60.0, metavar="S",
                     help="log a connection's throughput this often (0: only at disconnect)")
     ap.add_argument("--list-modes", action="store_true", help="modes within --kiss-bw, narrowest first")
+    ap.add_argument("--cw-id", choices=("off", "add", "only"), default="off",
+                    help="CW ID (docs/arq.md §7b): off (ID frames only), add (with them), only (in their place)")
+    ap.add_argument("--cw-wpm", type=float, default=20.0, help="CW ID speed, 15-40 wpm")
     a = ap.parse_args()
     if a.list_modes:
         print("\n".join(mode_lines(KISS_BW_CAP[a.kiss_bw])))
         return
+    if not cwid.MIN_WPM <= a.cw_wpm <= cwid.MAX_WPM:
+        ap.error(f"--cw-wpm: {cwid.MIN_WPM}-{cwid.MAX_WPM}")
     if a.broadcast_mode is not None:
         from .kisslink import check_mode
 

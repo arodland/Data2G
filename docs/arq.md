@@ -25,7 +25,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §3 burst layout, §4 core word, §5 extensions | `frames.py` (`Core`, `Control`, `T_*`); `link.py` (`Station.build`, `Station.handle`) |
 | §5a inline codewords | `frames.py` (`T_INLINE`, `inline_check`); `link.py` (`Station.build`, `Station._take_data`); native also `monitor/` |
 | §6, §6a turns, timers, idle | `session.py` |
-| §7 session frames, §7a ID frames | `frames.py` (`Connect`, `ConnectAck`, `ConnectNak`, `pack_cq`, `pack_id`); `session.py`; `engine.py` |
+| §7 session frames, §7a ID frames, §7b CW ID | `frames.py` (`Connect`, `ConnectAck`, `ConnectNak`, `pack_cq`, `pack_id`); `session.py`; `engine.py`; `cwid.py` |
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
@@ -590,6 +590,73 @@ Station identification, readable by anyone listening (data2g/arq/engine.py).
   - Nothing new goes out in that guard (KISS, CQ, a new session), so the peer's
     trailing ID is heard and not keyed over. A KISS frame queued during a session was
     lost that way.
+
+## 7b. CW ID (session version 5)
+
+A Morse ID in addition to the ID frames, or in their place (data2g/cwid.py,
+data2g/arq/engine.py). Off by default.
+
+- **Setting:** `Engine.cw_id`: `off` (ID frames only, as before), `add` (a CW ID
+  with each ID frame), `only` (a CW ID in place of each). Speed `cw_wpm`, 15-40,
+  default 20. data2g-host and data2g-gui: `--cw-id {off,add,only}`,
+  `--cw-wpm WPM`, Settings > Station > CW ID; a client with DATA2G ON:
+  `CWID OFF|ON|ONLY [wpm]`. A plain VARA client's `CWID ON|OFF` is accepted and
+  ignored: the operator's setting stands.
+- **Text:** `DE` and the station's call less any SSID (`DE W1AW`); about 4-5 s
+  at 20 wpm for a 4-6 character call.
+- **Tone:** 1500 Hz (config.FCENTER), inside every band and CPM grid (n4's
+  1450-1600 Hz is the narrowest), so it passes any session's TX and RX filters.
+  Constant envelope at the bursts' peak (1.0, engine._start_tx). Each key edge
+  a 5 ms raised cosine: no clicks, under -40 dB of the tone 250 Hz off.
+- **When:** where the ID frames go (§7a), and outside sessions:
+  - ahead of the station's own turn every `ID_INTERVAL_S`, on the same PTT:
+    CW ID, then ID frame (`add`), then the turn's burst;
+  - after a session: after the DISC_ACK (ID frame, then CW ID), or
+    `ID_GUARD_S` after the close;
+  - outside a session (KISS, CQ frames, a refused or unanswered call): one
+    once the station has been quiet `CW_QUIET_S` (30 s) with nothing queued,
+    and one ahead of such a transmission `ID_INTERVAL_S` after the first one
+    no ID covered.
+- **Hearing one (CwSense, every station, whatever its own setting):** per 20 ms,
+  25 Hz bins 1200-1800 Hz (Hann) against a tracked noise floor. A window is a
+  hit (one tone within +-50 Hz of 1500 over 10 dB above the floor, nothing
+  100 Hz or more from it), quiet, or elsewhere (a burst: OFDM fills the
+  bins, n4's other carriers, a CPM tone off the centre). Active when the last
+  50 windows (1 s) hold 12 hits on one tone, 4 quiet ones and at most 6
+  elsewhere.
+  While active:
+  - a waiting caller's reply deadline is at least `REPLY_START_S` away
+    (`Session.on_cw`), as an ID frame's is: the turn follows the ID at once;
+  - a callee's wake counts its silence from it;
+  - nothing new starts (the session's poll waits, as for a burst arriving),
+    and nothing outside a session (KISS, a CQ frame, a pending last ID) goes
+    before `ID_GUARD_S` past it;
+  - the host reports BUSY ON.
+- **False locks:** a dash reads as a preamble (one carrier's tone for its 8
+  repeats), and 1 in 64 such headers pass their CRC; the frame-pilot search
+  finds w header copies in one too. A suspect OFDM lock
+  (`Receiver.SUSPECT_SCORE`) that started before CwSense's third-latest hit
+  while active is dropped (`Receiver.drop`), and the search goes on past it.
+  A clear header is never dropped: CwSense reads n4 near its floor as CW now
+  and then.
+- **Limits:** a waiting peer holds through an ID 93% of the time or more down
+  to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
+  about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an
+  ID (every window reads elsewhere). CwSense sees +-60 Hz of mistuning.
+- **Version:** a v4 caller does not hold for a CW ID ahead of the callee's
+  turn: it times out under it and keys over the reply. Session version 5.
+- **Measured** (scripts/cwid_study.py, 2026-10-28):
+  - CwSense on 1200 s of noise: never active. On 4 bursts of every mode at
+    30/10/0/-5 dB, AWGN/MPP/MPD: active only in n4 and n10 near their floor
+    (-5 dB: up to 1.8 s over 4 bursts) and moments in ack-1f, fsk16r25.
+  - 120 IDs in noise (15-30 wpm, -5 to 30 dB): the receiver alone locked 13
+    headers on them (none on the same length of noise); an Engine kept 1.
+  - Paired whole sessions (speedtest's path, both ways, 20 kB, 12 seeds at
+    AWGN 0, MPP +6, MPD +10, MPG +3 dB PEP in 3 kHz): CwSense on, CW ID off,
+    against no CwSense: median +0.0 s, timeouts 32 vs 33. CW ID only, every
+    60 s: +30 s median (the IDs' own airtime), timeouts 42 vs 32 (10 in 470 IDs).
+  - Airtime: one ID, about 4.5 s at 20 wpm, per station per 10 minutes
+    (0.75%), and one more each at the end.
 
 ## 8. Gear-shift loop (summary; details in data2g/arq/policy.py)
 

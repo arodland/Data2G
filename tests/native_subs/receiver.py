@@ -54,6 +54,20 @@ def substitutions(native):
         def expect(self, grids, lo, hi, cfo):
             return super().expect(grids, lo, hi, cfo) if self._n is None else self._n.expect(list(grids), lo, hi, cfo)
 
+        def drop(self):
+            return super().drop() if self._n is None else self._n.drop()
+
+        @property
+        def pending(self):
+            if self._n is None:
+                return self.__dict__.get("_pending")
+            p = self._n.pending
+            return None if p is None else header(p)
+
+        @pending.setter
+        def pending(self, v):
+            self.__dict__["_pending"] = v
+
         def feed(self, x):
             if self._n is None:
                 return super().feed(x)

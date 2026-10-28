@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include "arq/modes.hpp"
+#include "cwid/cwid.hpp"
 #include "tables/cpm.hpp"
 
 namespace data2g::host {
@@ -25,8 +26,8 @@ constexpr const char* LOG = "data2g.host";
 constexpr int INFO = 20;
 
 // ponytail: from memory of VARA clients, not a checked list (as host.py); check the log on first contact with Pat
-constexpr std::array<std::string_view, 8> IGNORED = {"COMPRESSION", "PUBLIC",     "CWID",       "P2P",
-                                                     "WINLINK",     "REGISTERED", "ENCRYPTION", "IGNOREKISSDCD"};
+constexpr std::array<std::string_view, 7> IGNORED = {"COMPRESSION", "PUBLIC",     "P2P",       "WINLINK",
+                                                     "REGISTERED",  "ENCRYPTION", "IGNOREKISSDCD"};
 
 // Apple's libc++ has no floating-point from_chars; strtod follows the
 // locale Qt sets. NAN unless the whole string is a number.
@@ -241,6 +242,15 @@ void Host::command(std::string_view line, std::string_view peer) {
         const double v = parse_double(args[0]);
         ok = v > 0 && std::isfinite(v);
         if (ok) e.set_idle_close(v);
+    } else if (cmd == "CWID" && data2g && (a0 == "OFF" || a0 == "ON" || a0 == "ONLY") && args.size() <= 2) {
+        const double wpm = args.size() == 2 ? parse_double(args[1]) : e.cw_wpm;  // host.py CWID_MODES
+        ok = wpm >= cwid::MIN_WPM && wpm <= cwid::MAX_WPM;
+        if (ok) {
+            e.cw_id = a0 == "OFF" ? "off" : a0 == "ON" ? "add" : "only";
+            e.cw_wpm = wpm;
+        }
+    } else if (cmd == "CWID" && !data2g) {
+        arq::log_write(LOG, INFO, "accepted, not implemented without DATA2G ON (--cw-id): " + std::string(line));
     } else if (cmd == "CLEANTXBUFFER" &&
                (args.empty() || (data2g && args.size() == 1 && args[0].size() <= 18 &&
                                  std::all_of(args[0].begin(), args[0].end(), [](char c) { return c >= '0' && c <= '9'; })))) {

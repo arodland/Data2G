@@ -27,8 +27,9 @@ from . import frames as F
 from . import link as L
 
 T_SESS = F.T_SESS  # the extension carrying a session frame
-VERSION = 4  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
-# 4: T_INLINE (a v3 peer ignores it: each inline codeword waits for its resend in a slot)
+VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
+# 4: T_INLINE (a v3 peer ignores it: each inline codeword waits for its resend in a slot);
+# 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
@@ -289,6 +290,15 @@ class Session:
             self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
         if not self.master:
             self._quiet_from = max(self._quiet_from, end)
+
+    def on_cw(self, now: float):
+        """A CW ID on air (data2g.cwid.CwSense): the peer's turn follows it on
+        the same PTT, so a reply deadline waits REPLY_START_S past it (as for
+        an ID frame, on_header), and a wake counts silence from it."""
+        if self._deadline is not None:
+            self._deadline = max(self._deadline, now + REPLY_START_S)
+        if not self.master:
+            self._quiet_from = max(self._quiet_from, now)
 
     def on_rx(self, rx: B.RxBurst, now: float):
         ctl = self._session_frame(rx)

@@ -147,6 +147,7 @@ void bind_receiver(py::module_& m) {
         .def("expect", [](receiver::Receiver& r, const std::vector<std::string>& grids, std::int64_t lo, std::int64_t hi,
                           double cfo) { r.expect(grid_views(grids), lo, hi, cfo); })
         .def_property_readonly("n_expected", &receiver::Receiver::n_expected)
+        .def("drop", &receiver::Receiver::drop)
         .def_property_readonly("busy", &receiver::Receiver::busy)
         .def_property_readonly("channel_busy", &receiver::Receiver::channel_busy)
         .def_property_readonly("on_air", &receiver::Receiver::on_air)

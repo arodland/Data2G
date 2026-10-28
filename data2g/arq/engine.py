@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import codes, cpm, modem
+from .. import codes, cpm, cwid, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
 from ..receiver import NoiseProfile, Receiver, ReplySlot
 from ..waveform import dsp
@@ -71,6 +71,14 @@ ENERGY_FLOOR_DB = 3.0
 # after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 ID_INTERVAL_S = 600.0
 ID_GUARD_S = S.REPLY_START_S
+# CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
+# ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
+# frame, CW); "only", a CW ID in their place. With it on, a station that has
+# transmitted outside a session (KISS, a CQ frame, a refused or unanswered
+# call) sends a CW ID once it has been quiet CW_QUIET_S, and one ahead of
+# such a transmission ID_INTERVAL_S after the first that none covered.
+CW_ID_MODES = ("off", "add", "only")
+CW_QUIET_S = 30.0
 
 
 class Recorder:
@@ -164,6 +172,12 @@ class Engine:
         self._id_due: float | None = None  # its next ID (None: closed, its last ID pending or sent)
         self._id_pending: list | None = None  # [session, earliest time]: its last ID, after it closed
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
+        self.cw_id = "off"  # CW_ID_MODES
+        self.cw_wpm = cwid.WPM
+        self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
+        self._cw_heard = False  # the last block's (logged once per ID)
+        self._cw_until = 0.0  # nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
+        self._cw_owed: float | None = None  # the first transmission no CW ID has covered yet
         self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
         self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
@@ -182,8 +196,8 @@ class Engine:
 
     @property
     def channel_busy(self) -> bool:
-        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy)."""
-        return self.receiver.channel_busy
+        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy, or a CW ID heard)."""
+        return self.receiver.channel_busy or self._cw_heard
 
     @property
     def tx_submode(self) -> str | None:
@@ -240,6 +254,7 @@ class Engine:
         """Drop the session and anything on air, at once (no DISC)."""
         self.tx = None
         self.receiver.reset()
+        self.cw.reset()
         self._new_session()
 
     def connect(self, peer: str, cap: int):
@@ -303,6 +318,17 @@ class Engine:
             self._id_pending = [s, t + ID_GUARD_S]
             self._hold = t + ID_GUARD_S
 
+    def _ids(self, s: S.Session, ahead: bool) -> list:
+        """Session `s`'s ID as cw_id has it: an ID frame, a CW ID, or both
+        (`ahead` of a turn: the CW first, so it opens the transmission)."""
+        frame = [] if self.cw_id == "only" else [self._id_frame(s)]
+        cw = [] if self.cw_id == "off" else [self._cw_burst(s.call)]
+        return cw + frame if ahead else frame + cw
+
+    def _cw_burst(self, call: str) -> cwid.CwBurst:
+        log.info("TX CW ID %s", call)
+        return cwid.CwBurst(cwid.id_text(call), self.cw_wpm)
+
     def _with_id(self, burst: B.TxBurst, t: float) -> list:
         """A session's burst -> the bursts to send back to back: an ID first
         when one is due, or the pending last ID after a closed session's
@@ -310,11 +336,48 @@ class Engine:
         s = self.session
         if s.state == S.CLOSED and self._id_pending is not None:
             self._id_pending = None
-            return [burst, self._id_frame(s)]
+            return [burst, *self._ids(s, False)]
         if s is self._id_for and self._id_due is not None and t >= self._id_due:
             self._id_due = t + self.id_interval_s
-            return [self._id_frame(s), burst]
+            return [*self._ids(s, True), burst]
         return [burst]
+
+    def _cw_ahead(self, bursts: list, t: float) -> list:
+        """Outside a session: a CW ID ahead of `bursts` once id_interval_s
+        has passed since the first transmission none covered."""
+        if self.cw_id != "off" and self._cw_owed is not None and t >= self._cw_owed + self.id_interval_s:
+            return [self._cw_burst(self.call), *bursts]
+        return bursts
+
+    def _cw_due(self, t: float) -> bool:
+        """The CW ID after transmissions outside a session: quiet CW_QUIET_S, nothing queued."""
+        return (self.cw_id != "off" and self._cw_owed is not None and self._tx_end is not None
+                and t >= self._tx_end + CW_QUIET_S and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)
+                and self._id_pending is None and not self._extra and not (self.kiss is not None and self.kiss.queue))
+
+    def _cw_false_lock(self):
+        """A suspect OFDM lock (Receiver.SUSPECT_SCORE: a header, or a header
+        copy found from frame pilots) with a CW ID keyed through it (cwid.
+        CwSense.hits_from) is dropped: a dash reads as a preamble (one
+        carrier's tone for 8 repeats), and 1 in 64 headers pass their CRC.
+        A clear header (a real burst; CwSense may read a narrow one near its
+        floor as CW) is not."""
+        p = getattr(self.receiver, "pending", None)  # (a test's stand-in receiver has none)
+        if (p is not None and p.get("family") != "cpm"
+                and p["score"] < Receiver.SUSPECT_SCORE and p["start"] <= self.cw.hits_from):
+            log.info("RX %s header (score %.2f) under a CW ID: dropped", p["spec"].name, p["score"])
+            self.receiver.drop()
+
+    def _cw_hold(self, t: float):
+        """A CW ID heard (cwid.CwSense) with no burst locked: what follows it
+        on the same PTT is the peer's. Its session waits (Session.on_cw), and
+        nothing else of mine goes before ID_GUARD_S past it."""
+        if not self._cw_heard:
+            log.info("CW ID heard: holding")
+        self.session.on_cw(t)
+        self._cw_until = t + ID_GUARD_S
+        if self._id_pending is not None:
+            self._id_pending[1] = max(self._id_pending[1], self._cw_until)
 
     # -- audio side --------------------------------------------------------------------
 
@@ -328,11 +391,18 @@ class Engine:
             self.rec.audio(x if self.tx is None else np.zeros(k))
         if self.tx is None:
             self.noise.feed(x, self.now)
+            cw = self.cw.feed(x)
             self._hear(x, t)
+            self._cw_false_lock()
+            if cw:
+                self._cw_hold(t)
+            self._cw_heard = cw
             self._id_check(t)
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
-            if not self.receiver.busy and not held:  # a burst still arriving holds any reply (half duplex)
+            free = t >= self._hold and t >= self._cw_until  # for anything outside a session
+            busy = self.receiver.busy or cw
+            if not busy and not held:  # a burst still arriving holds any reply (half duplex)
                 self._carrier_hold(t)
                 burst = self.session.poll(t)
                 self._missed_energy()
@@ -340,13 +410,16 @@ class Engine:
                 if burst is not None:
                     bursts, main = self._with_id(burst, t), burst
                 elif self._id_pending is not None and t >= self._id_pending[1]:
-                    bursts, self._id_pending = [self._id_frame(self._id_pending[0])], None
-                elif self._extra and t >= self._hold:
-                    bursts = [self._extra.pop(0)]
-            if (bursts is None and self.kiss is not None and t >= self._hold
+                    bursts, self._id_pending = self._ids(self._id_pending[0], False), None
+                elif self._extra and free:
+                    main = self._extra.pop(0)
+                    bursts = self._cw_ahead([main], t)
+                elif free and self._cw_due(t):
+                    bursts = [self._cw_burst(self.call)]
+            if (bursts is None and self.kiss is not None and free
                     and (self.session.state in (S.IDLE, S.LISTEN, S.CLOSED) or self.session.idle())):
-                burst = self._kiss_burst(k)  # KISS between ARQ sessions, or while one is idle
-                bursts = [burst] if burst is not None else None
+                burst = self._kiss_burst(k, busy)  # KISS between ARQ sessions, or while one is idle
+                bursts, main = (self._cw_ahead([burst], t), burst) if burst is not None else (None, None)
                 self._tx_kiss = burst is not None
             else:
                 self._kiss_busy = 0
@@ -360,6 +433,7 @@ class Engine:
             if self.tx[2] >= len(audio):
                 self.tx = None
                 self.receiver.reset()  # our own transmission was not heard
+                self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
                 self._tx_end = self.now + n / FS
                 if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
@@ -505,18 +579,19 @@ class Engine:
         start = self._tx_end + EXPECT_REPLY_S
         self._energy(start, start + exp[1], exp[0], self.now, MISSED_MIN_DB)
 
-    def _kiss_burst(self, k: int):
+    def _kiss_burst(self, k: int, busy: bool):
         """The next KISS burst if it may go now. A burst that waited on BUSY
         is p-persistent after it: each slot (SLOTTIME) is taken with
         probability (P + 1) / 256, so stations that queued under the same
         burst don't all key up as it ends. One queued on a free channel (a
-        reply) goes at once. BUSY holds a burst, but not past busy_limit_s
-        of it unbroken (a stuck BUSY). `k`: this block's samples."""
+        reply) goes at once. BUSY (`busy`: a burst arriving or a CW ID) holds
+        a burst, but not past busy_limit_s of it unbroken (a stuck BUSY).
+        `k`: this block's samples."""
         link = self.kiss
         if not link.queue:
             self._kiss_busy, self._kiss_deferred = 0, False
             return None
-        if self.receiver.busy:
+        if busy:
             self._kiss_busy += k
             self._kiss_deferred = True
             if self._kiss_busy < link.busy_limit_s * FS:
@@ -565,13 +640,19 @@ class Engine:
     def _start_tx(self, bursts: list, t: float, main: B.TxBurst):
         """Bursts back to back on one PTT (an ID frame with a session's
         burst). `main`: the one the session is told has gone, when all have."""
-        xs = [PHY.tx_audio(b) for b in bursts]
         # envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3,
         # and a sound card clips at 1 (the audio loopback found 64-QAM bursts
         # wrecked). The envelope, not the samples: w48's crests fall up to
         # 1.8 dB between 8 kHz samples, which went out over full scale (clipped
-        # at 48 kHz) and above the PEP that the sim and PHY.peak_db assume
-        audio = np.concatenate([np.zeros(self.ptt_delay)] + [x / np.max(dsp.envelope(x)) for x in xs])
+        # at 48 kHz) and above the PEP that the sim and PHY.peak_db assume.
+        # A CW ID is built at that peak.
+        xs = [cwid.audio(b.text, b.wpm) if isinstance(b, cwid.CwBurst) else PHY.tx_audio(b) for b in bursts]
+        audio = np.concatenate([np.zeros(self.ptt_delay)] + [
+            x if isinstance(b, cwid.CwBurst) else x / np.max(dsp.envelope(x)) for b, x in zip(bursts, xs)])
+        if isinstance(bursts[-1], cwid.CwBurst):
+            self._cw_owed = None  # a CW ID last covers all before it
+        elif self._cw_owed is None or isinstance(bursts[0], cwid.CwBurst):
+            self._cw_owed = t
         self.tx = [main, audio, 0]
         if self.rec:
             # one event per burst, at its own start: the first's seconds include

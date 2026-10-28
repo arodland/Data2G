@@ -133,6 +133,16 @@ void test_dd_budget() {
                  "negative refused");
 }
 
+void test_cw_id() {
+    check::current_step = "cw id";
+    check::is_true(parse({}).cw_id == "off" && parse({}).cw_wpm == 20.0, "default off, 20 wpm");
+    const app::Args a = parse({"--cw-id", "only", "--cw-wpm", "25"});
+    check::is_true(a.cw_id == "only" && a.cw_wpm == 25.0 && !app::check(a), "--cw-id only --cw-wpm 25");
+    check::equal(app::check(parse({"--cw-id", "on"})).value_or(""),
+                 std::string("--cw-id: invalid choice: 'on' (choose from off, add, only)"), "a bad choice is named");
+    check::equal(app::check(parse({"--cw-wpm", "50"})).value_or(""), std::string("--cw-wpm: 15-40"), "too fast");
+}
+
 }  // namespace
 
 int main() {
@@ -144,6 +154,7 @@ int main() {
     test_noise_rule();
     test_decoder_effort();
     test_dd_budget();
+    test_cw_id();
     test_realtime_switch();
     return check::report("args");
 }

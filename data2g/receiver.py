@@ -380,6 +380,13 @@ class Receiver:
         log.info("expected slot: %s locked (score %.1f) where no blind path did", lock["spec"].name, lock["score"])
         return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
 
+    def drop(self):
+        """Forget the pending burst: its header was no burst's (arq.engine:
+        a CW ID was keyed over its preamble). The search goes on past it."""
+        self.last_start = self.pending["start"]
+        self.pending = None
+        self.pilots_ok = self.confirmed = False
+
     @property
     def busy(self) -> bool:
         """A burst is being received (our own replies wait for it)."""

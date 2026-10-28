@@ -224,6 +224,11 @@ void Session::on_header(const std::string& submode, int n_cw, double now) {
     if (!master()) quiet_from = std::max(quiet_from, end);
 }
 
+void Session::on_cw(double now) {
+    if (deadline) deadline = std::max(*deadline, now + tune.reply_start_s);
+    if (!master()) quiet_from = std::max(quiet_from, now);
+}
+
 void Session::on_rx(RxBurst& rx, double now) {
     if (auto f = session_frame(rx)) {
         on_session_frame(*f, now);

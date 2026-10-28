@@ -145,6 +145,8 @@ app::Args load_settings(QSettings& s, app::Args a) {
     a.live_constellation = s.value("live_constellation", a.live_constellation).toBool();
     a.noise_rule = s.value("noise_rule", a.noise_rule).toDouble();
     a.decoder_effort = s.value("decoder_effort", a.decoder_effort).toInt();
+    a.cw_id = str("cw_id", a.cw_id);
+    a.cw_wpm = s.value("cw_wpm", a.cw_wpm).toDouble();
     return a;
 }
 
@@ -174,6 +176,8 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("live_constellation", a.live_constellation);
     s.setValue("noise_rule", a.noise_rule);
     s.setValue("decoder_effort", a.decoder_effort);
+    s.setValue("cw_id", qs(a.cw_id));
+    s.setValue("cw_wpm", a.cw_wpm);
 }
 
 SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent)
@@ -229,6 +233,22 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     effort_row->addWidget(effort_, 1);
     effort_row->addWidget(effort_label);
     station->addRow(tr("Decoder effort"), effort_row);
+    cw_id_ = new QComboBox;
+    cw_id_->setObjectName(QStringLiteral("cw_id"));
+    cw_id_->addItem(tr("Off (ID frames only)"), QStringLiteral("off"));
+    cw_id_->addItem(tr("With the ID frames"), QStringLiteral("add"));
+    cw_id_->addItem(tr("In place of the ID frames"), QStringLiteral("only"));
+    cw_id_->setCurrentIndex(std::max(0, cw_id_->findData(qs(a.cw_id))));
+    cw_id_->setToolTip(tr("A CW (Morse) ID on 1500 Hz: ahead of the station's turn every 10 minutes in a "
+                          "session and once after it, and after KISS or CQ transmissions. Peers need "
+                          "session version 5 to wait it out."));
+    cw_wpm_ = spin(15, 40, static_cast<int>(std::lround(a.cw_wpm)));
+    cw_wpm_->setObjectName(QStringLiteral("cw_wpm"));
+    cw_wpm_->setSuffix(tr(" wpm"));
+    auto* cw_row = new QHBoxLayout;
+    cw_row->addWidget(cw_id_, 1);
+    cw_row->addWidget(cw_wpm_);
+    station->addRow(tr("CW ID"), cw_row);
 
     // The noise rule's weight, 0.00-1.50 in 0.01 steps: a detent at the
     // default (1.00) while dragging; 0 is off.
@@ -549,6 +569,8 @@ void SettingsDialog::apply_to(app::Args& a) const {
     // left where it opened: the cap it came with (a command line's need not be on a step)
     const int effort_shown = std::clamp(static_cast<int>(std::lround(base_.decoder_effort / 5.0)), EFFORT_MIN / 5, EFFORT_MAX / 5);
     a.decoder_effort = effort_->value() == effort_shown ? base_.decoder_effort : 5 * effort_->value();
+    a.cw_id = cw_id_->currentData().toString().toStdString();
+    if (cw_wpm_->value() != static_cast<int>(std::lround(base_.cw_wpm))) a.cw_wpm = cw_wpm_->value();
     // left where it opened: the value it came with (a command line may set more than the slider's top)
     const int shown = static_cast<int>(std::lround(std::min(base_.noise_rule, NOISE_RULE_MAX / 100.0) * 100));
     a.noise_rule = noise_rule_->value() == shown ? base_.noise_rule : noise_rule_->value() / 100.0;

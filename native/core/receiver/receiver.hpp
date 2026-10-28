@@ -112,6 +112,12 @@ public:
     // locked. The window's audio is kept until the last is looked at.
     void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo);
     std::size_t n_expected() const { return expected_ ? expected_->grids.size() : 0; }  // grids still queued
+    // Forget the pending burst: its header was no burst's (a CW ID keyed over its preamble, arq::Engine)
+    void drop() {
+        last_start_ = pending_->start();
+        pending_.reset();
+        pilots_ok_ = confirmed_ = false;
+    }
 
     bool busy() const { return pending_.has_value(); }
     bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }

@@ -49,6 +49,9 @@ struct TxBurst {
     std::vector<Slot> slots;
     std::int64_t burst_seq = 0;  // absolute count of this station's bursts
     int cap = 0;                 // bandwidth cap code the TX filter is for (cpm::tx_filter; modes cap_hz)
+    // submode "cw": a CW ID (cwid::audio(cw_text, cw_wpm)), no slots (engine.py's cwid.CwBurst)
+    std::string cw_text;
+    double cw_wpm = 0.0;
 };
 using TxBurstPtr = std::shared_ptr<const TxBurst>;
 

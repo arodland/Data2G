@@ -11,6 +11,7 @@ at the time, with names that may since have moved.
 | [bulk.md](bulk.md) | Experiment | data2g-bulk: one-way text transfer with RV 1 copies and timed bursts, and its studies. Not finished, no native port; may be reworked or dropped. |
 | [broadcast.md](broadcast.md) | Spec | Broadcast over KISS: named groups, group keys, rate-shifting reports. |
 | [analog-slots.md](analog-slots.md) | Draft (shelved) | Client-defined analog latents (SSTVAE pictures, RADE voice) over Data2G: the API, the burst, hybrid ARQ, open questions. Shelved: Part 97 rules out mixing data and image/phone in one session. |
+| [sounding.md](sounding.md) | Tool | Over-the-air sounding: every mode in one WAV, and an offline report on a recording of it (decodes, genie channel, waveform integrity, the thresholds' predictions). |
 | [outcome-training-data.md](outcome-training-data.md) | Provenance | Every dataset in the outcome model's training mix and how to rebuild it. |
 | [native-port-plan.md](native-port-plan.md) | Plan (history) | The C++ / Qt port, phase by phase. Its threads, frozen-data and conventions sections still hold. |
 | [modem73-ideas-plan.md](modem73-ideas-plan.md) | Plan (history) | Ideas taken from modem73 and aicodix/modem: the blanker, KISS channel access, studies. |

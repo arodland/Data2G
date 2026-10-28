@@ -53,6 +53,7 @@ test_kiss.py).
 | Script | What |
 |---|---|
 | `replay.py` | Replay a session recorded at both ends (`data2g-host --record-dir`) with exact knowledge of what was on air. |
+| `sounding.py` | Every mode in one WAV to transmit (`make`), and a report on a recording of it (`decode`): decodes, genie channel, waveform checks, thresholds' predictions ([docs/sounding.md](../docs/sounding.md)). |
 | `cpu_profile/` | End-to-end runs of two hosts: `run.sh` (profiling over a PipeWire loopback, Pat or raw transfers), `speedtest.py` and `speedtrials.py` (one-way bulk speed, off the clock; `tests/test_speedtest.py` runs it), the VARA comparison (`vara_ref.sh`, `varatrials.py`, `vara_sweep.sh`), `tnc_proxy.py` (log an app talking to a TNC), and their helpers. |
 
 ## Studies

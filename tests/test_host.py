@@ -237,3 +237,19 @@ def test_txpower_gets_and_sets_the_output_volume():
     h.command("TXPOWER")
     assert h.out_cmd == ["WRONG", "OK", "TXPOWER 0.0", "OK", "TXPOWER -1.2"] + ["WRONG"] * 5 + ["TXPOWER -1.2"]
     assert h.output_volume == -1.2
+
+
+def test_cwid_sets_the_cw_id_with_data2g_on():
+    """CWID OFF|ON|ONLY [wpm] (docs/arq.md §7b): a VARA client's CWID is
+    accepted and ignored (the operator's --cw-id stands); DATA2G ON sets it."""
+    from data2g.arq.engine import Engine
+
+    e = Engine("W1AW", seed=1)
+    h = host.Host(e)
+    h.command("CWID ON")
+    assert h.out_cmd == ["OK"] and e.cw_id == "off"
+    h.command("DATA2G ON")
+    for line in ("CWID ONLY 25", "CWID ON 60", "CWID ON x", "CWID MAYBE", "CWID ON"):
+        h.command(line)
+    assert h.out_cmd[2:] == ["OK", "WRONG", "WRONG", "WRONG", "OK"]
+    assert (e.cw_id, e.cw_wpm) == ("add", 25.0)
