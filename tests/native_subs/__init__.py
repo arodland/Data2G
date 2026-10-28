@@ -36,7 +36,7 @@ from . import arq, audio, base, codes, cpm, engine, gear, host, modem, phy, rece
 
 MODULE_DIR = Path(__file__).resolve().parents[2] / "native" / "build" / "python"
 # native/bindings/module.cpp's __abi__: bumped with the Python-facing signatures
-ABI = 5
+ABI = 6
 
 PROVIDERS = {m.__name__.rpartition(".")[2]: m.substitutions
              for m in (base, waveform, cpm, codes, gear, audio, arq, modem, tnc, receiver, phy, engine, host)}
