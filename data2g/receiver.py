@@ -342,39 +342,66 @@ class Receiver:
         # CPM fronts whose first header copy fell short (cpm.find's candidates,
         # stream indices): read again with both copies once the second is in
         self.cpm_wait: list = []
-        self.expected = None  # expect()'s window, until it is looked at
+        self.expected = None  # expect()'s (grids, lo, hi, cfo, words tried per grid), until all are looked at
+        self.expect_until = None
         for d in getattr(self, "detectors", {}).values():
             d.reset()
 
-    def expect(self, grids, lo: int, hi: int, cfo: float):
+    def expect(self, grids, lo: int, hi: int, cfo: float, until: tuple | None = None):
         """The expected slot (docs/arq.md §3a): a burst of one of these CPM
         grids should start between stream indices lo and hi, its CFO near
-        cfo. One grid per search hop, in order (the caller's likeliest
-        first), once the audio holds every second header copy of a start
-        there and nothing has locked: cpm.prime_lock looks there, once (42-62
-        ms a grid on a Pi 4: all of them in one feed overran the hop). The
-        window's audio is kept until the last is looked at. A lock found any
-        other way, or reset(), drops them."""
-        self.expected = (tuple(grids), lo, hi, cfo) if grids else None
+        cfo. cpm.prime_lock looks there once a grid's next words are in (a
+        word's rows: through its second header copy, for a start at hi) and
+        nothing has locked: one try a search hop (42-62 ms a grid on a Pi 4:
+        all of them in one feed overran the hop), the first grid in the
+        caller's order (its likeliest first) with words not tried yet. The
+        window's audio is kept until every word is tried. A lock found any
+        other way, or reset(), drops them. `until`: (grid, samples) the
+        caller's reply deadline must wait for (expect_waits)."""
+        if not grids:
+            self.expected = None
+            return
+        self.expected = (tuple(grids), lo, hi, cfo, (0,) * len(grids))
+        self.expect_until = until
 
     @property
     def n_expected(self) -> int:
         """Grids expect() still has queued."""
         return len(self.expected[0]) if self.expected is not None else 0
 
-    def _primed(self) -> dict | None:
-        """expect()'s lock in its next grid, buffer indices, once the window
-        is complete for it."""
+    @property
+    def expect_waits(self) -> bool:
+        """expect()'s `until` grid is queued and its words no longer than
+        `until` (the reply asked for, or a shorter one) are not all tried."""
         from . import cpm
 
-        grids, lo, hi, cfo = self.expected
-        g = cpm.GRIDS[grids[0]]
-        if self.off + len(self.buf) < hi + cpm.hdr_span(g.name, 2) + g.T:
+        if self.expected is None or self.expect_until is None:
+            return False
+        grids, *_, tried = self.expected
+        g, n = self.expect_until
+        return g in grids and tried[grids.index(g)] < cpm.prime_need(g, n)
+
+    def _primed(self) -> dict | None:
+        """expect()'s lock in the first grid with words newly in, buffer indices."""
+        from . import cpm
+
+        grids, lo, hi, cfo, tried = self.expected
+        avail = self.off + len(self.buf) - hi
+        for i, name in enumerate(grids):
+            n = cpm.prime_ready(name, avail)
+            if n > tried[i]:
+                break
+        else:
             return None
-        self.expected = (grids[1:], lo, hi, cfo) if len(grids) > 1 else None
+        if n < len(cpm.valid_words(name)):
+            self.expected = (grids, lo, hi, cfo, tried[:i] + (n,) + tried[i + 1:])
+        elif len(grids) > 1:
+            self.expected = (grids[:i] + grids[i + 1:], lo, hi, cfo, tried[:i] + tried[i + 1:])
+        else:
+            self.expected = None
         if hi < self.off:
             return None  # trimmed away (an expect() later than its window)
-        lock = cpm.prime_lock(g, self.buf, max(0, lo - self.off), hi - self.off, cfo)
+        lock = cpm.prime_lock(cpm.GRIDS[name], self.buf, max(0, lo - self.off), hi - self.off, cfo)
         if lock is None:
             return None
         log.info("expected slot: %s locked (score %.1f) where no blind path did", lock["spec"].name, lock["score"])

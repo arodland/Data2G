@@ -780,12 +780,20 @@ PRIME_CFO = (-1 / 16, 0.0, 1 / 16)
 
 def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     """A burst of grid g starting in [lo, hi] (x's samples), its CFO near
-    `cfo`, any valid word: find's lock dict, or None under PRIME_LLR. x must
-    hold the second header copy of a start at hi."""
+    `cfo`, a valid word whose rows x holds for a start at hi (prime_ready):
+    find's lock dict, or None under PRIME_LLR. While some words' second
+    header copies are still arriving, a lock must also beat each of those
+    words' front and first copy (a lower bound on its score: a long burst
+    is not taken for a short one before its own rows are in)."""
     words = valid_words(g.name)
     rows = header_rows(g.name, HDR_COPIES)
+    spans = word_spans(g.name)
+    ready = spans <= (len(x) - hi - g.T) // g.T
+    if not ready.any():
+        return None
     f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
-    n = max(r[-1] for r in rows) + 1
+    n = int(spans[ready].max())
+    first = len(f) + np.arange(H)  # every word's first copy
     # a start a whole symbol later reads the same symbols one row on: per
     # phase (a fraction of T) and CFO, one run of tone_llr over the window
     # and the rows after it (its scale from all of them), sliced per start
@@ -793,6 +801,7 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     n_pos = (hi - lo) // g.T + 1
     LL = {(p, df): tone_llr(g, _energies(g, x, lo + p, n + n_pos, cfo + df * g.rate)) for p in phases for df in PRIME_CFO}
     best = (-np.inf, 0, 0.0, 0)  # score, start, cfo, word
+    floor = -np.inf  # the waiting words' best lower bound
     for s0, p, m in ((lo + m * g.T + p, p, m) for m in range(n_pos) for p in phases):
         if s0 > hi:
             continue
@@ -800,14 +809,37 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
             L = LL[(p, df)][m:m + n]
             front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
             for k, ((*_, t), r, b1) in enumerate(zip(words, rows, mid_rows(g.name))):
+                if not ready[k]:
+                    floor = max(floor, front + max(float(L[first, t].sum()), 0.0))
+                    continue
                 sc = front + max(float(L[b1 + np.arange(len(mb)), mb].sum()), 0.0) + _segments(L, r, t, H)
                 if sc > best[0]:
                     best = (sc, s0, cfo + df * g.rate, k)
     sc, s0, c, k = best
-    if sc < PRIME_LLR:
+    if sc < PRIME_LLR or sc <= floor:
         return None
     spec, nd, d, _ = words[k]
     return dict(_lock(g, s0, c, sc, (spec, nd, d, sc, sc), HDR_COPIES), primed=True)
+
+
+@lru_cache(maxsize=None)
+def word_spans(grid: str) -> np.ndarray:
+    """Per valid word, symbols from a burst's start to the end of its second
+    header copy."""
+    return np.array([int(r[-1]) + 1 for r in header_rows(grid, HDR_COPIES)])
+
+
+def prime_ready(grid: str, avail: int) -> int:
+    """Valid words prime_lock scores with `avail` samples past the window's
+    latest start (their rows all in)."""
+    g = GRIDS[grid]
+    return int(np.sum(word_spans(grid) <= (avail - g.T) // g.T))
+
+
+def prime_need(grid: str, samples: int) -> int:
+    """Valid words whose rows end within `samples` of a burst's start: a
+    burst that long or a shorter one (each word's rows end within its burst)."""
+    return int(np.sum(word_spans(grid) * GRIDS[grid].T <= samples))
 
 
 @lru_cache(maxsize=None)

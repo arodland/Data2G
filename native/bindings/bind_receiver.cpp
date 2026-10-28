@@ -145,8 +145,13 @@ void bind_receiver(py::module_& m) {
         })
         .def("reset", &receiver::Receiver::reset)
         .def("expect", [](receiver::Receiver& r, const std::vector<std::string>& grids, std::int64_t lo, std::int64_t hi,
-                          double cfo) { r.expect(grid_views(grids), lo, hi, cfo); })
+                          double cfo, std::optional<std::pair<std::string, std::int64_t>> until) {
+            std::optional<std::pair<std::string_view, std::int64_t>> u;
+            if (until) u = std::make_pair(std::string_view(until->first), until->second);
+            r.expect(grid_views(grids), lo, hi, cfo, u);
+        }, py::arg("grids"), py::arg("lo"), py::arg("hi"), py::arg("cfo"), py::arg("until") = py::none())
         .def_property_readonly("n_expected", &receiver::Receiver::n_expected)
+        .def_property_readonly("expect_waits", &receiver::Receiver::expect_waits)
         .def("drop", &receiver::Receiver::drop)
         .def_property_readonly("busy", &receiver::Receiver::busy)
         .def_property_readonly("channel_busy", &receiver::Receiver::channel_busy)
