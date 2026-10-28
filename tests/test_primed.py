@@ -437,6 +437,35 @@ def test_receiver_expected_slot():
     assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"
 
 
+def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
+    """Three grids expected, one prime_lock a search hop (the Pi's hop
+    budget): the burst's grid tried last is still found in its window, and
+    the queue is gone once it is. Noise alone: each grid tried once, then
+    nothing queued."""
+    from data2g.arq.engine import receive_accept
+    from data2g.receiver import Receiver
+    y, _, p0, cfo = _faded_cpm(0)
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * 8000)])
+    calls, prime = [], cpm.prime_lock
+    monkeypatch.setattr(cpm, "prime_lock", lambda g, *a: calls.append(g.name) or prime(g, *a))
+    w = (p0 - 1200, p0 + 1200, cfo)
+    rcv = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
+    rcv.expect(["c8r50", "c32r62", "c16r25"], *w)
+    ev, per_feed = [], []
+    for i in range(0, len(y), 800):
+        n = len(calls)
+        ev += rcv.feed(y[i:i + 800])
+        per_feed.append(len(calls) - n)
+    assert [k for k, _ in ev] == ["header", "burst"] and ev[0][1]["start"] == p0
+    assert ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3" and rcv.n_expected == 0
+    if not hasattr(rcv, "_n") or rcv._n is None:  # the Python receiver: counted
+        assert calls == ["c8r50", "c32r62", "c16r25"] and max(per_feed) == 1
+    noise = np.random.default_rng(2).normal(0, np.std(y[:p0]), len(y))
+    rcv = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
+    rcv.expect(["c8r50", "c32r62", "c16r25"], *w)
+    assert not _stream(rcv, noise) and rcv.n_expected == 0
+
+
 def test_policy_hears_primed_controls_as_lost():
     """The outcome model learned blind control losses: a control only a primed
     retry read is reported to the policy as unusable (as the blind decode saw

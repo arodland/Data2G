@@ -107,9 +107,11 @@ public:
     std::vector<Item> feed_deferred(std::span<const double> x);
     void reset();
     // The expected slot (receiver.Receiver.expect, docs/arq.md §3a): a burst of one of these CPM grids should
-    // start between stream indices lo and hi, its CFO near cfo; looked at once (cpm::prime_lock) when the
-    // audio holds every second header copy of a start there and nothing has locked.
+    // start between stream indices lo and hi, its CFO near cfo; one grid per search hop, in order, looked at
+    // once (cpm::prime_lock) when the audio holds every second header copy of a start there and nothing has
+    // locked. The window's audio is kept until the last is looked at.
     void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo);
+    std::size_t n_expected() const { return expected_ ? expected_->grids.size() : 0; }  // grids still queued
 
     bool busy() const { return pending_.has_value(); }
     bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }
@@ -142,7 +144,7 @@ private:
     bool supersede(std::vector<Item>& out, bool whole = false);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
-    std::optional<cpm::Lock> primed();  // expect()'s lock, buffer indices, once the window is complete
+    std::optional<cpm::Lock> primed();  // expect()'s lock in its next grid, buffer indices, once its window is complete
     std::int64_t decided(std::string_view key) const;
     std::int64_t decided_mid(const cpm::Grid& g) const;
     std::int64_t len() const { return static_cast<std::int64_t>(buf_.size()); }

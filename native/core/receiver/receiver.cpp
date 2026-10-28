@@ -173,17 +173,15 @@ void Receiver::expect(std::vector<std::string_view> grids, std::int64_t lo, std:
 }
 
 std::optional<cpm::Lock> Receiver::primed() {
-    const Expected e = *expected_;
-    std::int64_t need = 0;
-    for (const auto* g : e.grids) need = std::max(need, e.hi + cpm::hdr_span(*g, 2) + g->T);
-    if (off_ + len() < need) return std::nullopt;
-    expected_.reset();
-    for (const auto* g : e.grids) {
-        if (e.hi < off_) break;  // trimmed away
-        if (auto lock = cpm::prime_lock(*g, buf_, std::max<std::int64_t>(0, e.lo - off_), e.hi - off_, e.cfo))
-            return lock;  // (receiver.py logs it; the native receiver has no log)
-    }
-    return std::nullopt;
+    Expected& e = *expected_;
+    const cpm::Grid& g = *e.grids.front();
+    if (off_ + len() < e.hi + cpm::hdr_span(g, 2) + g.T) return std::nullopt;
+    const std::int64_t lo = e.lo, hi = e.hi;
+    const double cfo = e.cfo;
+    e.grids.erase(e.grids.begin());
+    if (e.grids.empty()) expected_.reset();
+    if (hi < off_) return std::nullopt;  // trimmed away (an expect() later than its window)
+    return cpm::prime_lock(g, buf_, std::max<std::int64_t>(0, lo - off_), hi - off_, cfo);  // (receiver.py logs it)
 }
 
 void ReplySlot::heard(std::optional<double> gap_s, std::optional<double> c) {
@@ -476,7 +474,8 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (!p && expected_)
                 if (auto c = primed()) p = Pending{*c};
             if (!p) {
-                trim(hold_);  // (a waiting candidate's start is within it)
+                // (a waiting candidate's start is within it; and the expected window, while queued)
+                trim(expected_ ? std::max(hold_, off_ + len() - expected_->lo) : hold_);
                 break;
             }
             expected_.reset();

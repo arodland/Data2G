@@ -61,6 +61,7 @@ def substitutions(native):
 
         busy = property(lambda s: PyReceiver.busy.fget(s) if s._n is None else s._n.busy)
         channel_busy = property(lambda s: PyReceiver.channel_busy.fget(s) if s._n is None else s._n.channel_busy)
+        n_expected = property(lambda s: PyReceiver.n_expected.fget(s) if s._n is None else s._n.n_expected)
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
     def receive_any(y, lead=0, cpm_grids=None):

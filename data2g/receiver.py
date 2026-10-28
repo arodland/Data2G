@@ -349,28 +349,36 @@ class Receiver:
     def expect(self, grids, lo: int, hi: int, cfo: float):
         """The expected slot (docs/arq.md §3a): a burst of one of these CPM
         grids should start between stream indices lo and hi, its CFO near
-        cfo. Once the audio holds every second header copy of a start there
-        and nothing has locked, cpm.prime_lock looks there, once. A lock
-        found any other way, or reset(), drops it."""
+        cfo. One grid per search hop, in order (the caller's likeliest
+        first), once the audio holds every second header copy of a start
+        there and nothing has locked: cpm.prime_lock looks there, once (42-62
+        ms a grid on a Pi 4: all of them in one feed overran the hop). The
+        window's audio is kept until the last is looked at. A lock found any
+        other way, or reset(), drops them."""
         self.expected = (tuple(grids), lo, hi, cfo) if grids else None
 
+    @property
+    def n_expected(self) -> int:
+        """Grids expect() still has queued."""
+        return len(self.expected[0]) if self.expected is not None else 0
+
     def _primed(self) -> dict | None:
-        """expect()'s lock, buffer indices, once the window is complete."""
+        """expect()'s lock in its next grid, buffer indices, once the window
+        is complete for it."""
         from . import cpm
 
         grids, lo, hi, cfo = self.expected
-        gs = [cpm.GRIDS[g] for g in grids]
-        if self.off + len(self.buf) < hi + max(cpm.hdr_span(g.name, 2) + g.T for g in gs):
+        g = cpm.GRIDS[grids[0]]
+        if self.off + len(self.buf) < hi + cpm.hdr_span(g.name, 2) + g.T:
             return None
-        self.expected = None
-        for g in gs:
-            if hi < self.off:
-                break  # trimmed away
-            lock = cpm.prime_lock(g, self.buf, max(0, lo - self.off), hi - self.off, cfo)
-            if lock is not None:
-                log.info("expected slot: %s locked (score %.1f) where no blind path did", lock["spec"].name, lock["score"])
-                return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
-        return None
+        self.expected = (grids[1:], lo, hi, cfo) if len(grids) > 1 else None
+        if hi < self.off:
+            return None  # trimmed away (an expect() later than its window)
+        lock = cpm.prime_lock(g, self.buf, max(0, lo - self.off), hi - self.off, cfo)
+        if lock is None:
+            return None
+        log.info("expected slot: %s locked (score %.1f) where no blind path did", lock["spec"].name, lock["score"])
+        return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
 
     @property
     def busy(self) -> bool:
@@ -625,7 +633,9 @@ class Receiver:
                 if p is None and self.expected is not None:
                     p = self._primed()
                 if p is None:
-                    self._trim(self.hold)  # (a waiting candidate's start is within it)
+                    # (a waiting candidate's start is within it; and the expected window, while queued)
+                    self._trim(self.hold if self.expected is None else
+                               max(self.hold, self.off + len(self.buf) - self.expected[1]))
                     break
                 self.expected = None
                 if p["start"] + self.off <= self.last_start:
