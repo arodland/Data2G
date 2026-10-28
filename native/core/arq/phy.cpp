@@ -357,7 +357,9 @@ std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteVie
     } else {
         d = codes::decode_raw_pinned(s, row_f(slot_soft(slot)), known, slot);
     }
-    auto got = codes::check(s, d.cands.data, d.usable.data, m);
+    auto usable = d.usable.data;
+    for (std::size_t l = PRIMED_PATHS; l < usable.size(); ++l) usable[l] = 0;
+    auto got = codes::check(s, d.cands.data, usable, m);
     if (!got) return std::nullopt;
     // a pair's RV 1 is the same codeword: one more reception, at its own slot's scrambling
     double sc = codes::score(s, slot_soft(slot), *got, m, slot);

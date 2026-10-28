@@ -60,7 +60,11 @@ EST = 0  # an offset no cut gives: the estimated prior (codes.pad_prior) in plac
 # random bits (codes.score): noise passes with probability under e^-10 on
 # top of the CRC.
 PRIMED_SCORE = 10.0
-PRIMED_PATHS = 8  # the list paths a primed decode CRC-checks (codes.POLAR_LIST: all)
+# A primed decode CRC-checks only the first PRIMED_PATHS paths of the polar
+# list: PRIME_TRIES (6) x 4 = 24 checks, as many as the blind decode's (plain
+# and two cuts, 8 paths each), so a failed control's false-accept chance stays
+# 24 x 2^-24. Its cost at code level: 0.03-0.24 dB (all 8: scripts/primed_study.py).
+PRIMED_PATHS = 4
 
 
 def _with_prior(spec, buf: np.ndarray) -> np.ndarray:

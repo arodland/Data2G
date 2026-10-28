@@ -3,10 +3,10 @@
     python -m scripts.primed_fa --trials 200000 --out runs/primed_fa.csv
 
 A primed decode freezes what the hypothesis knows and takes the first of
-the polar list's 8 paths whose 24-bit masked CRC checks, then holds it to
-phy.PRIMED_SCORE. Per source and hypothesis, every trial decodes once
+the polar list's first phy.PRIMED_PATHS (4) paths whose 24-bit masked CRC
+checks, then holds it to phy.PRIMED_SCORE. Per source and hypothesis, every trial decodes once
 (native codes when built) and counts the paths passing the CRC truncated
-to its low w bits (w = 8, 12, 16: the rate scales as 8 x 2^-w, so the
+to its low w bits (w = 8, 12, 16: the rate scales as PRIMED_PATHS x 2^-w, so the
 24-bit rate is read off them), whether the full CRC passed, and the score
 of the first path passing w = 8. Sources, CPM c16r25 control codewords
 (cpm.llrs of tone energies), the hypothesis an ACK's (8 B) with its
@@ -16,6 +16,8 @@ cumulative ACK unknown (7 bits) or wholly known:
            hypothesis in its pinned bits (another reply of the peer's, a
            stale or repeated burst, another station's under my mask)
   wrongkey the hypothesis' own control under another session's mask
+  true     the hypothesis' own control at -1 dB per tone (the right
+           decodes' scores, against PRIMED_SCORE)
 """
 
 from data2g import threads  # noqa: E402
@@ -94,7 +96,7 @@ def trial(args):
     nb = codes.payload_bytes(SPEC)
     out = {f"w{w}": 0 for w in WIDTHS}
     out.update(full=0, score8=np.nan, true_score=np.nan)
-    for c in cands[0]:
+    for c in cands[0][:PHY.PRIMED_PATHS]:
         data = np.packbits(c[:8 * nb + 24]).tobytes()
         want = (codes.crc24(data[:nb]) ^ MASK) & 0xFFFFFF
         got = int.from_bytes(data[nb:nb + 3], "big")
@@ -141,7 +143,7 @@ def main():
     print("per decode: paths passing the CRC's low w bits (expected 8 x 2^-w on noise), full 24-bit passes,")
     print("and of the w=8 passes, the share scoring >= PRIMED_SCORE")
     for (src, hyp), t in sorted(tot.items()):
-        rates = "  ".join(f"w{x} {t[f'w{x}'] / t['n']:.2e} (x{t[f'w{x}'] / t['n'] / (8 * 2.0 ** -x):.2f})" for x in WIDTHS)
+        rates = "  ".join(f"w{x} {t[f'w{x}'] / t['n']:.2e} (x{t[f'w{x}'] / t['n'] / (PHY.PRIMED_PATHS * 2.0 ** -x):.2f})" for x in WIDTHS)
         s = np.array(t["s"])
         print(f"  {src:8s} {hyp:4s} n={t['n']}: {rates}  full {t['full']}  "
               f"score>={PHY.PRIMED_SCORE:.0f}: {np.mean(s >= PHY.PRIMED_SCORE) if len(s) else float('nan'):.4f} of {len(s)}"

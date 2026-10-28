@@ -48,6 +48,8 @@ inline constexpr int PIN_CUTS[] = {16, 32};
 inline constexpr int POLAR_PIN_CUTS[] = {12, 16};
 // A primed control (docs/arq.md §3a) must also score this many nats over random bits (codes::score).
 inline constexpr double PRIMED_SCORE = 10.0;
+// ... and passes the CRC on one of the polar list's first PRIMED_PATHS paths (phy.PRIMED_PATHS).
+inline constexpr int PRIMED_PATHS = 4;
 
 // A slot's CRC mask from its identity (burst.hpp): zlib.crc32 of key,
 // direction, seq; key 0: mask 0, but a compact CONNECT's.
