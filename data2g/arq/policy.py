@@ -45,6 +45,16 @@ TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost
 # and escalation's long gaps sent 12 s 64-ary bursts that all failed
 PREV_MAX_S = 30.0
 BIAS_STEP = 1.0  # online correction: logit step per unit of surprise (its bound: BIAS_MAX, below)
+# The step's scale: |sum| / sum of |.| over the mode's last BIAS_CONSIST
+# surprises (this one included), 1 when they agree in sign (the model is off:
+# MPP 0's overrated w48-qpsk-r1/3, BIAS_FIX), near 0 when they alternate (fades
+# the model already prices: a full step chases them). A global step below 1 won
+# MPG/MPD +1..6% but lost MPP 0 (runs/policy_search, branch policy-search).
+# N=4 against off, 29 cells x 12 seeds (runs/bias_consist): +0.7% mean on
+# seeds 0-11 (MPG 0 +7.3%, MPD 0 +4.8%; MPP 0 -3.4%), +1.2% on 144-155 (MPP
+# -6 +8.0%, MPD slow +7.4%, MPP 0 +1.9%; no cell below 2 SE); N=8 alike.
+# 0: a full step always. DATA2G_BIAS_CONSIST: N (both shifters read it, so it stays native).
+BIAS_CONSIST = int(os.environ.get("DATA2G_BIAS_CONSIST") or 4)
 DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
@@ -161,6 +171,16 @@ def allowed(cap: int) -> list:
     return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
 
 
+def bias_step(hist: dict, submode: str, surprise: float) -> float:
+    """The online correction's logit step for `surprise` (outcome minus
+    prediction), BIAS_CONSIST-scaled; records it in `hist` (submode -> list)."""
+    if not BIAS_CONSIST:
+        return BIAS_STEP * surprise
+    h = hist[submode] = (hist.get(submode, []) + [float(surprise)])[-BIAS_CONSIST:]
+    tot = sum(map(abs, h))
+    return BIAS_STEP * surprise * (abs(sum(h)) / tot if tot else 1.0)
+
+
 CTL_BYTES = 12  # a data burst's typical control: core 4, new 3, rv 3, a flag or two
 
 
@@ -249,6 +269,8 @@ class GearShifter(L.Policy):
     prev: tuple | None = None  # (measured, band, time) of the peer burst before the last
     bias: dict = field(default_factory=dict)  # online correction: logit shift per submode (codewords)
     bias_burst: dict = field(default_factory=dict)  # ... and of P(burst usable), outcome model only
+    surprises: dict = field(default_factory=dict)  # submode -> its last BIAS_CONSIST codeword surprises
+    surprises_burst: dict = field(default_factory=dict)  # ... and burst ones
     turns: list = field(default_factory=list)  # the last LINK_HIST expected peer bursts: "ok" | "lost" | "miss"
     timeouts_seen: int = 0  # station.stats["timeouts"] already counted as misses
     link_now: list | None = None  # link_features() at the last recommendation
@@ -422,13 +444,15 @@ class GearShifter(L.Policy):
         if usable is None:
             usable = decoded > 0
         pb, p = p
-        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0) + BIAS_STEP * (usable - pb),
+        self.bias_burst[submode] = float(np.clip(self.bias_burst.get(submode, 0.0)
+                                                 + bias_step(self.surprises_burst, submode, usable - pb),
                                                  -BIAS_MAX, BIAS_MAX))
         if not usable or sent == 0:
             return
         # per mode: a family-wide bias let qpsk-r1/5's steady successes lift
         # qpsk-r1/3 over the eligibility floor, where it decoded 6%
-        self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + BIAS_STEP * (decoded / sent - p), -BIAS_MAX, BIAS_MAX))
+        self.bias[submode] = float(np.clip(self.bias.get(submode, 0.0) + bias_step(self.surprises, submode, decoded / sent - p),
+                                           -BIAS_MAX, BIAS_MAX))
 
     def observe_energy(self, snr_db: float, now: float):
         """A peer burst's in-band SNR from its power alone (heard or not)."""

@@ -26,6 +26,7 @@ inline constexpr double TURN_S = 1.3;
 inline constexpr double TIMEOUT_S = 1.0 + 1.0 + 1.5;
 inline constexpr double PREV_MAX_S = 30.0;
 inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
+int bias_consist();  // policy.py BIAS_CONSIST: DATA2G_BIAS_CONSIST, read once (default 4; 0: a full step)
 inline constexpr double DUP_BELOW = 0.9;
 inline constexpr double CPM_SIZE_SCALE = 4.0;
 inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
@@ -104,6 +105,8 @@ public:
     bool ladder_left = false;  // just climbed off the ladder: one data burst lost puts it back
     std::optional<Heard> prev;  // the peer burst before the last
     Map bias, bias_burst;
+    // submode -> its last bias_consist() surprises, codeword and burst (policy.py BIAS_CONSIST)
+    std::map<std::string, std::vector<double>, std::less<>> surprises, surprises_burst;
     bool want_dup = false;
     std::map<std::string, std::pair<double, double>, std::less<>> predicted;
     bool peer_had_data = true;
