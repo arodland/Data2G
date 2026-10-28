@@ -186,6 +186,19 @@ void txpower() {
     check::equal(h.output_volume, -1.2, "volume");
 }
 
+void cwid_command() {
+    check::current_step = "CWID";
+    Engine e("W1AW", seeded(6));
+    host::Host h(e);
+    h.command("CWID ON");  // a VARA client's: ignored
+    check::is_true(e.cw_id == "off", "ignored without DATA2G ON");
+    h.command("DATA2G ON");
+    for (const char* line : {"CWID ONLY 25", "CWID ON 60", "CWID ON x", "CWID MAYBE", "CWID ON"}) h.command(line);
+    const std::vector<std::string> want = {"OK", "OK", "OK", "WRONG", "WRONG", "WRONG", "OK"};
+    check::is_true(h.out_cmd == want, "replies (host.py's)");
+    check::is_true(e.cw_id == "add" && e.cw_wpm == 25.0, "set");
+}
+
 }  // namespace
 
 int main() {
@@ -196,5 +209,6 @@ int main() {
     accept();
     operator_abort();
     txpower();
+    cwid_command();
     return check::report("test_host");
 }

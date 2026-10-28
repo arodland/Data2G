@@ -464,18 +464,57 @@ void Engine::id_check(double t) {
     }
 }
 
+// Session s's ID as cw_id has it: an ID frame, a CW ID, or both (ahead of a turn: the CW first).
+std::vector<TxBurstPtr> Engine::ids(const Session& s, bool ahead) const {
+    std::vector<TxBurstPtr> out;
+    if (cw_id != "only") out.push_back(id_frame(s));
+    if (cw_id != "off") out.insert(ahead ? out.begin() : out.end(), cw_burst(s.call));
+    return out;
+}
+
+TxBurstPtr Engine::cw_burst(const std::string& call) const {
+    log_write(LOG, INFO, format("TX CW ID %s", call.c_str()));
+    auto b = std::make_shared<TxBurst>();
+    b->submode = "cw";
+    b->cw_text = cwid::id_text(call);
+    b->cw_wpm = cw_wpm;
+    return b;
+}
+
 // A session's burst -> the bursts to send back to back: an ID first when one
 // is due, or the pending last ID after a closed session's final burst (its DISC_ACK).
 std::vector<TxBurstPtr> Engine::with_id(const TxBurstPtr& burst, double t) {
     if (session_->state == SessionState::CLOSED && id_pending_) {
         id_pending_.reset();
-        return {burst, id_frame(*session_)};
+        auto out = ids(*session_, false);
+        out.insert(out.begin(), burst);
+        return out;
     }
     if (session_ == id_for_ && id_due_ && t >= *id_due_) {
         id_due_ = t + id_interval_s;
-        return {id_frame(*session_), burst};
+        auto out = ids(*session_, true);
+        out.push_back(burst);
+        return out;
     }
     return {burst};
+}
+
+// Outside a session: a CW ID ahead of `bursts` once id_interval_s has passed since the first transmission none covered.
+std::vector<TxBurstPtr> Engine::cw_ahead(std::vector<TxBurstPtr> bursts, double t) const {
+    if (cw_id != "off" && cw_owed_ && t >= *cw_owed_ + id_interval_s) bursts.insert(bursts.begin(), cw_burst(call_));
+    return bursts;
+}
+
+bool Engine::cw_due(double t) const {
+    return cw_id != "off" && cw_owed_ && tx_end_ && t >= *tx_end_ + CW_QUIET_S && idle() && !id_pending_ &&
+           extra_.empty() && !(cfg_.kiss && !cfg_.kiss->queue.empty());
+}
+
+void Engine::cw_hold(double t) {
+    if (!cw_heard_) log_write(LOG, INFO, "CW ID heard: holding");
+    session_->on_cw(t);
+    cw_until_ = t + ID_GUARD_S;
+    if (id_pending_) id_pending_t_ = std::max(id_pending_t_, cw_until_);
 }
 
 void Engine::post(std::function<void()> f) {
@@ -499,6 +538,7 @@ void Engine::run_posted() {
 
 void Engine::apply_reset() {
     receiver_reset();
+    cw_.reset();
     gen_ = want_gen_;
     busy_now_ = receiver_busy();
     channel_busy_now_ = receiver_channel_busy();
@@ -528,6 +568,7 @@ Engine::Out Engine::step(std::span<const double> x) {
     b.x.assign(x.begin(), x.end());
     b.gen = gen_;
     b.seq = seq_++;
+    b.cw = !transmitting_ && cw_.feed(x);
     if (!transmitting_ && preview_on_ && on_preview_) {
         // a burst can end and decode inside one block (Receiver::MARGIN is under one): the
         // preview reads up to its end first, so it holds every data symbol
@@ -545,9 +586,15 @@ Engine::Out Engine::step(std::span<const double> x) {
     } else if (!transmitting_) {
         b.items = receiver_feed(x);  // our own transmission is not heard
     }
+    // a suspect OFDM lock with a CW ID keyed through it: dropped (engine.py _cw_false_lock)
+    if (const auto& p = receiver_.pending(); p && !p->is_cpm() &&
+        p->score() < receiver::Receiver::SUSPECT_SCORE && p->start() <= cw_.hits_from()) {
+        log_write(LOG, INFO, format("RX %s header (score %.2f) under a CW ID: dropped", spec_name(*p).c_str(), p->score()));
+        receiver_.drop();
+    }
     b.busy = receiver_busy();
     busy_now_ = b.busy;
-    channel_busy_now_ = receiver_channel_busy();
+    channel_busy_now_ = receiver_channel_busy() || b.cw;
     if (!cfg_.worker) {
         run_posted();
         Done d = process_safe(b);
@@ -637,11 +684,15 @@ Engine::Done Engine::process(Block& b) {
         noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         if (fresh) hear(b.items, t);
+        const bool cw = fresh && b.cw;
+        if (cw) cw_hold(t);
+        cw_heard_ = cw;
         id_check(t);
-        const bool busy = fresh && b.busy;
+        const bool busy = (fresh && b.busy) || cw;
         std::vector<TxBurstPtr> bursts;
         TxBurstPtr main;
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
+        const bool free = t >= hold_ && t >= cw_until_;  // for anything outside a session
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
             carrier_hold(t);
             auto burst = session_->poll(t);
@@ -651,15 +702,21 @@ Engine::Done Engine::process(Block& b) {
                 bursts = with_id(burst, t);
                 main = burst;
             } else if (id_pending_ && t >= id_pending_t_) {
-                bursts = {id_frame(*id_pending_)};
+                bursts = ids(*id_pending_, false);
                 id_pending_.reset();
-            } else if (!extra_.empty() && t >= hold_) {
-                bursts = {extra_.front()};
+            } else if (!extra_.empty() && free) {
+                main = extra_.front();
                 extra_.pop_front();
+                bursts = cw_ahead({main}, t);
+            } else if (free && cw_due(t)) {
+                bursts = {cw_burst(call_)};
             }
         }
-        if (bursts.empty() && cfg_.kiss && t >= hold_ && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
-            if (auto kb = kiss_burst(k, busy)) bursts = {kb};
+        if (bursts.empty() && cfg_.kiss && free && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
+            if (auto kb = kiss_burst(k, busy)) {
+                bursts = cw_ahead({kb}, t);
+                main = kb;
+            }
             tx_kiss_ = !bursts.empty();
         } else kiss_busy_ = 0;
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
@@ -976,6 +1033,12 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
     Tx tx{main, std::vector<double>(static_cast<std::size_t>(ptt_delay_), 0.0), 0};
     std::vector<std::size_t> lens;
     for (const auto& b : bursts) {
+        if (b->submode == "cw") {  // built at the bursts' peak; not the tx_audio seam's (a Python phy.tx_audio)
+            const auto x = cwid::audio(b->cw_text, b->cw_wpm);
+            tx.audio.insert(tx.audio.end(), x.begin(), x.end());
+            lens.push_back(x.size());
+            continue;
+        }
         const auto x = tx_audio(*b);
         // envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound
         // card clips at 1; the envelope, not the samples: w48's crests fall up to 1.8 dB
@@ -986,6 +1049,8 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
         lens.push_back(x.size());
         if (on_send_) on_send_(b);
     }
+    if (bursts.back()->submode == "cw") cw_owed_.reset();  // a CW ID last covers all before it
+    else if (!cw_owed_ || bursts.front()->submode == "cw") cw_owed_ = t;
     if (rec_) {
         // one event per burst, at its own start: the first's seconds include
         // the PTT delay, as a lone burst's always did (scripts/replay.py)

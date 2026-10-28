@@ -21,7 +21,7 @@
 
 namespace data2g::arq {
 
-inline constexpr int VERSION = 4;  // session.py VERSION: 4 added T_INLINE
+inline constexpr int VERSION = 5;  // session.py VERSION: 4 added T_INLINE, 5 the CW ID ahead of a turn
 inline constexpr int CONNECT_TRIES = 5;
 inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;
@@ -153,6 +153,8 @@ public:
     }
     void on_tx_end(const TxBurstPtr& burst, double now);
     void on_header(const std::string& submode, int n_cw, double now);
+    // a CW ID on air (cwid::CwSense): a reply deadline waits reply_start_s past it, a wake counts silence from it
+    void on_cw(double now);
     void on_rx(RxBurst& rx, double now);
 
     bool master() const;  // the caller: the station that retries

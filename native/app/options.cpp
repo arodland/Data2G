@@ -41,7 +41,7 @@ const char* USAGE =
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
     "                   [--realtime | --no-realtime]\n"
     "                   [--live-constellation | --no-live-constellation]\n"
-    "                   [--dd-budget S] [--decoder-effort N]\n"
+    "                   [--dd-budget S] [--decoder-effort N] [--cw-id {off,add,only}] [--cw-wpm WPM]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
     "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
     "                   [--rig-parity {default,none,odd,even}] [--rig-handshake {default,none,xonxoff,hardware}]\n"
@@ -206,6 +206,8 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--threads", [&](auto& o, auto& v) { pool::set_threads(i_(o, v)); }},
         {"--dd-budget", [&](auto& o, auto& v) { a.dd_budget = d_(o, v); }},
         {"--decoder-effort", [&](auto& o, auto& v) { a.decoder_effort = i_(o, v); }},
+        {"--cw-id", [&](auto&, auto& v) { a.cw_id = v; }},
+        {"--cw-wpm", [&](auto& o, auto& v) { a.cw_wpm = d_(o, v); }},
         {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
         {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
         {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
@@ -354,6 +356,9 @@ std::optional<std::string> check(const Args& a) {
     if (!(a.noise_rule >= 0)) return "--noise-rule: must be 0 (off) or more";
     if (!(a.dd_budget >= 0)) return "--dd-budget: must be 0 (no DD) or more";
     if (a.decoder_effort < 1) return "--decoder-effort: must be 1 or more";
+    if (a.cw_id != "off" && a.cw_id != "add" && a.cw_id != "only")
+        return "--cw-id: invalid choice: '" + a.cw_id + "' (choose from off, add, only)";
+    if (!(a.cw_wpm >= 15 && a.cw_wpm <= 40)) return "--cw-wpm: 15-40";
 #ifdef DATA2G_HAVE_RIG
     if (a.rig && !rig::model_info(a.rig_model))
         return "--rig-model " + std::to_string(a.rig_model) + ": not a model this Hamlib knows (see --list-rigs)";

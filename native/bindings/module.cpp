@@ -16,6 +16,7 @@ void bind_cpm(py::module_&);
 void bind_polar(py::module_&);
 void bind_equalizer(py::module_&);
 void bind_dsp(py::module_&);
+void bind_cwid(py::module_&);
 void bind_waveform(py::module_&);
 void bind_ldpc(py::module_&);
 void bind_timing(py::module_&);
@@ -35,7 +36,7 @@ PYBIND11_MODULE(data2g_native, m) {
     // Bumped when the module's Python-facing signatures change, so
     // tests/native_subs (its ABI) refuses a stale build instead of failing
     // confusingly.
-    m.attr("__abi__") = 5;
+    m.attr("__abi__") = 6;
     data2g::bind::bind_codes(m);
     data2g::bind::bind_config(m);
     data2g::bind::bind_constellation(m);
@@ -43,6 +44,7 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_polar(m);
     data2g::bind::bind_equalizer(m);
     data2g::bind::bind_dsp(m);
+    data2g::bind::bind_cwid(m);
     data2g::bind::bind_waveform(m);
     data2g::bind::bind_ldpc(m);
     data2g::bind::bind_timing(m);

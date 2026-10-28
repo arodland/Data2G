@@ -106,6 +106,12 @@ public:
     using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest>;
     std::vector<Item> feed_deferred(std::span<const double> x);
     void reset();
+    // Forget the pending burst: its header was no burst's (a CW ID keyed over its preamble, arq::Engine)
+    void drop() {
+        last_start_ = pending_->start();
+        pending_.reset();
+        pilots_ok_ = confirmed_ = false;
+    }
 
     bool busy() const { return pending_.has_value(); }
     bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }
