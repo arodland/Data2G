@@ -22,13 +22,15 @@ soft bits. The application owns erasure coding, feedback and policy.
   (help every station) with IR increments of held units (help stations below the mode's knee).
 - Wire: broadcast header version 4 for bursts that carry units. Frame-only bursts stay version 3.
   No PHY (`config.PROTOCOL_VERSION`) or ARQ session `VERSION` change.
-- Host: new KISS commands (0x0D units, 0x0E soft records) both ways, plus `BCAST UNITS` and
-  `BCAST SOFT` commands, in the Python and native hosts alike. `MODE` and `HEARD` lines stay
+- Host: KISS SETHARDWARE (0x06) subcommands for units and soft records both ways (no new command
+  nibble), plus `BCAST UNITS` and `BCAST SOFT` commands, in the Python and native hosts alike. `MODE` and `HEARD` lines stay
   exactly as they are, because Ragtime's parser counts their words.
 - Order: studies first (E1, E2). Each wire step goes ahead only if the study before it shows at
   least 1 dB at the weakest receiver's completion point.
 - Future, out of scope: the same code families could let the ARQ change modes within a family
-  without abandoning outstanding codewords (§10).
+  without abandoning outstanding codewords (§11). Consolidating modes into fewer, larger families
+  could gain at most the 2-4% of codewords that mode changes discard today (9-24% in floor fading
+  cells). One linksim oracle study would decide it (§12).
 
 ## 1. The problem, and what exists today
 
@@ -140,12 +142,12 @@ A unit is one codeword's payload, named by the application.
 - What fits on CPM: the control is one 20 B polar codeword (`docs/arq.md` §4).
   - Header 1 + group 10 + `T_UNITS` with one unbound run 9 = 20 B, exactly full.
   - group+from (18 B) and bound units (2 B more) don't fit, so a CPM unit burst sends the plain
-    group, unbound (open question 2).
+    group, unbound (Q2, §10).
   - A burst whose control can't hold its runs is cut to the runs that fit; the rest wait for the
     next burst.
 - Control lost: the units are not found. There is no `find_data` probe: their masks need the name,
   and probing names multiplies false accepts. They count as lost units, and the app's repair covers
-  them. DUP control is the cheap protection and is recommended on unit ports (open question 8).
+  them. DUP control is the cheap protection and is recommended on unit ports (Q8, §10).
 - Alignment is exact by construction: one unit, one codeword, one erasure. Frames keep v3's
   alignment rules for whatever stays a frame (chat, announces, requests).
 
@@ -186,7 +188,7 @@ The receiving host keeps a failed unit's soft bits, and the name is the handle.
     P(decode after one more RV | mi) per mode before any app leans on it.
 - Lifetime and caps: per port, `KEEP` seconds since the last reception (default 2 h, matching
   Ragtime's 2 h listener state), and a host-wide cap in MB (default 32: about 2% of the Pi 4's
-  1.7 GB). Both defaults are TBD (open question 4).
+  1.7 GB). Both defaults are TBD (Q4, §10).
   - Over the cap, the least recently heard entry goes.
   - Every removal that isn't a decode is reported (`GONE`), so the app never believes in a buffer
     that isn't there.
@@ -356,11 +358,11 @@ A 300 KB file in qpsk-r1/2, half of it held at RV 0, is 2.5 MB of records.
 
 Commands and flow:
 
-- Export, on change: `BCAST UNITS n ON EXPORT`. The host sends a record on KISS 0x0E whenever an
+- Export, on change: `BCAST UNITS n ON EXPORT`. The host sends a SOFT_RECORD (KISS 0x06, sub 0x03) whenever an
   entry of port n is created or updated. The app keeps the latest record per name.
-- Export, on demand: `BCAST SOFT n GET stream [from to]`. The host sends the records on 0x0E, then
+- Export, on demand: `BCAST SOFT n GET stream [from to]`. The host sends them as SOFT_RECORDs, then
   `BCAST SOFT n GOT k` on the command port.
-- Import: the app sends a record on 0x0E for port n. For each record the host answers with a 0x0D
+- Import: the app sends a SOFT_RECORD on port n. For each record the host answers with a UNIT_IN
   status frame: held (re-armed) or refused, with a reason.
 
 Import semantics:
@@ -462,7 +464,7 @@ The same in `data2g/host.py` + `data2g/kisslink.py` + `data2g/tnc.py` and in
 | `BCAST UNITS n OFF` | OK | no units delivered; its entries dropped |
 | `BCAST SOFT n FORGET stream [from to]` | OK | drop entries of that stream (indices from..to-1) |
 | `BCAST SOFT n KEEP stream s` | OK | that stream's entries kept s seconds from now |
-| `BCAST SOFT n GET stream [from to]` | records on KISS 0x0E, then `BCAST SOFT n GOT k` | export on demand |
+| `BCAST SOFT n GET stream [from to]` | SOFT_RECORDs on KISS, then `BCAST SOFT n GOT k` | export on demand |
 | `BCAST SOFT STATS` | `SOFT entries bytes cap` | the store's size, for a status line |
 | `UNITMODES` | one `UNITMODE name code payload-bytes rvs max-units family` line per mode, then OK | mode code (`modes.encode`), unit payload, distinct RVs (1 or 4), most units a burst carries with a one-codeword control, and a family id shared by modes that combine |
 
@@ -472,29 +474,76 @@ fourth word as the call.
 
 ### 3.2 KISS (data, both ways)
 
-Command 0x0D (low nibble; the port is in the high one) carries unit frames.
+KISS has 4 bits of command, and most values are taken. So the new features share one: SETHARDWARE
+(0x06), with a subcommand byte first in the payload. No new command nibble is used.
 
-- App to host: [ack tag 2][mode code 1][stream 3][index 2][rv 1][payload, up to payload bytes].
-  - Tag 0 asks for no ack. Otherwise the host sends the ACKMODE ack (0x0C, the tag) once the burst
-    carrying the unit has gone, as for frames.
-  - A unit is dropped with `BCAST n DROPPED 1` if its mode is outside the cap or an `ack-*` mode, its
-    payload is too long, or its rv isn't 0 on polar.
-- Host to app: [stream 3][index 2][status 1][reason 1][mi 1][payload if decoded].
-  - Status 0: decoded, payload follows.
-  - Status 1: held (failed and kept, or re-armed by an import).
-  - Status 2: lost (failed, not kept: units off, the store full of newer entries, or unbound on a
-    BOUND port).
-  - Status 3: gone (an entry dropped by lifetime or cap).
-  - Status 4: import refused; reason 1-6 as in §2e.
-  - mi: the MI estimate x 128, 0-255.
+What the KISS layers use today:
 
-Command 0x0E carries soft records (§2e) both ways: one record a frame, at most 13 KB, well under
-`tnc.KISS_MAX_FRAME`.
+- Data2G, client to host (`tnc._KissHandler`, `KissLink.command`; native `app/tcp_servers.cpp`,
+  `core/kisslink`):
+  - 0x00 data and 0x0C ACKMODE are frames;
+  - 0x02 P and 0x03 SLOTTIME are honoured;
+  - every other command (0x01 TXDELAY, 0x04 TXTAIL, 0x05 FULLDUPLEX, 0x06 SETHARDWARE) is logged and
+    ignored.
+- Data2G, host to client: 0x00 data and the 0x0C ack only. No SETHARDWARE subcommand is defined
+  anywhere. `docs/broadcast.md` §6 names SETHARDWARE as the way to ports beyond 15, so that use
+  gets a reserved subcommand below.
+- Ragtime sends 0x00, 0x0C and 0x02 (`Data2GLink.h`: `KISS_DATA`, `KISS_ACKMODE`, `KISS_PERSIST`).
+  Its `KissDecoder::feed` keeps only 0x00 and 0x0C frames from the host and drops the rest
+  (`Data2GLink.cpp`). A 0x06 frame from the host is invisible to it until it adds a branch.
+- Other clients, from their documentation as we know it (to be confirmed against their sources
+  before phase 2):
+  - The KISS spec makes 0x06 TNC-specific.
+  - Dire Wolf answers SETHARDWARE with ASCII text subcommands (`TNC:`, `TXBUF:` style).
+  - Other TNCs use a binary subcommand byte.
+  - Most APRS and packet clients never send 0x06, and handle only data frames from the TNC.
 
-- Both are sent only to ports with units on.
-- Current clients are safe. `tnc._KissHandler` passes unknown commands to `KissLink.command`, which
-  ignores all but 2 and 3 now. Ragtime's `KissDecoder` keeps only data and ACKMODE frames
-  (`Data2GLink.cpp`, `feed`).
+Why SETHARDWARE rather than one spare nibble with a subcommand byte:
+
+- It is the spec's slot for TNC-specific commands, so it takes no nibble at all.
+- The nibbles still free (0x07-0x0B, 0x0D, 0x0E) are kept for whatever later becomes common
+  practice, as ACKMODE did.
+- The cost is sharing 0x06 with clients that speak another TNC's dialect. The subcommand ranges
+  below keep Dire Wolf-style text out of our space.
+
+Subcommand space (first payload byte; the port is in the command byte's high nibble as usual):
+
+| sub | direction | contents |
+|---|---|---|
+| 0x01 UNIT_OUT | app to host | [ack tag 2][mode code 1][stream 3][index 2][rv 1][payload, up to payload bytes] |
+| 0x02 UNIT_IN | host to app | [stream 3][index 2][status 1][reason 1][mi 1][payload if decoded] |
+| 0x03 SOFT_RECORD | both | one soft record (§2e), at most 13 KB, well under `tnc.KISS_MAX_FRAME` |
+| 0x04-0x0F | | reserved for units and soft growth (`SOFT RETRY` with known bytes, diversity import) |
+| 0x10 | | reserved: ports beyond 15 (`docs/broadcast.md` §6) |
+| 0x11-0x1F | | reserved for later features |
+| 0x20-0x7E | | never assigned: printable ASCII, so a text query in another TNC's dialect is recognised, logged and ignored |
+| 0x7F-0xFE | | reserved |
+| 0xFF | | escape: a second byte gives the subcommand, if the space above ever runs out |
+
+UNIT_OUT:
+
+- Tag 0 asks for no ack. Otherwise the host sends the plain ACKMODE ack (0x0C, the tag) once the burst
+  carrying the unit has gone, as for frames. Clients already handle that.
+- A unit is dropped with `BCAST n DROPPED 1` if its mode is outside the cap or an `ack-*` mode, its
+  payload is too long, or its rv isn't 0 on polar.
+
+UNIT_IN status values (the held and status reports):
+
+- 0: decoded, payload follows.
+- 1: held (failed and kept, or re-armed by an import).
+- 2: lost (failed, not kept: units off, the store full of newer entries, or unbound on a BOUND port).
+- 3: gone (an entry dropped by lifetime or cap).
+- 4: import refused, with reason 1-6 as in §2e.
+- mi: the MI estimate x 128, 0-255.
+
+Compatibility:
+
+- The host sends 0x06 frames only on ports with units on (`BCAST UNITS n ON`). That command is also
+  the feature test: an old host answers WRONG.
+- An old host given a 0x06 frame logs and drops it (`KissLink.command` ignores 6), so nothing goes on
+  air by accident.
+- A new host given a subcommand it doesn't know logs and drops it.
+- A client in another TNC's 0x06 dialect gets nothing back and changes nothing.
 - A burst with units still gets `BCAST n HEARD`. `LOST k` keeps counting frames only.
 
 ### 3.3 Versioning and compatibility
@@ -506,7 +555,7 @@ Command 0x0E carries soft records (§2e) both ways: one record a frame, at most 
 | broadcast control header | version 4 on bursts carrying units; frame-only bursts stay 3 | `kisslink.VERSION` gains 4 alongside 3; release notes say v3-only hosts skip unit bursts whole, frames in them included |
 | `T_UNITS` = 4, the bound flag | new TLV, only in v4 | with the above |
 | unit CRC mask | new identity function | with the above |
-| host commands, KISS 0x0D and 0x0E | additive; old hosts answer WRONG or ignore | host only |
+| host commands, KISS SETHARDWARE subcommands 0x01-0x03 | additive; old hosts answer WRONG, or log and drop 0x06 | host only |
 | soft record format | new interface | its own format version byte; code changes show in the family fingerprint |
 
 Each wire step is its own GitHub release with the version bump, as the version rule asks.
@@ -517,6 +566,7 @@ What changes on Ragtime's side (Ragtime's protocol is its own, version 0 today; 
 to its team, not code here):
 
 - Feature test: `BCAST UNITS n ON EXPORT` after `BCAST OPEN D2G FROM call`. On WRONG, stay on frames.
+- `KissDecoder::feed` keeps 0x06 frames too, and dispatches on their subcommand byte (§3.2).
 - `UNITMODES` beside `MODES`, for unit payload sizes and families.
 - File pieces become units.
   - Stream = 24 bits of a hash over the file digest and the piece size.
@@ -524,14 +574,14 @@ to its team, not code here):
   - `FileAnnounce` gains the stream and the mode the pieces went in.
   - Announces, chat, seals and requests stay frames.
   - The "every record names its sender" rule holds through the burst's FROM and the announce. On
-    CPM unit bursts, which can't carry FROM, it holds through the announce only (open question 2).
+    CPM unit bursts, which can't carry FROM, it holds through the announce only (Q2, §10).
 - First pass: units at RV 0. Optionally copies (RV 1 a burst later) on a file the operator marks for
   weak paths.
 - Listener:
   - A unit frame with status 0 is a piece. Status 1 records (index, mi) per file.
   - Its `RepairRequest` adds, per file, a bitmap of held pieces with mi over the threshold.
   - On a whole-file rebuild it sends `BCAST SOFT n FORGET stream` and drops its records.
-- Persistence: records from 0x0E go into the database beside `broadcast-parts`, the latest per name.
+- Persistence: SOFT_RECORDs go into the database beside `broadcast-parts`, the latest per name.
   - After a restart, Ragtime imports the records of files still being received before it asks
     under any seal.
   - Refused records are deleted, and their pieces count as not held.
@@ -577,8 +627,8 @@ to its team, not code here):
     this station opened.
 - Control loss now costs a unit burst's units (2a). DUP control is recommended on unit ports.
 - Interop: v3 hosts skip unit bursts entirely, frames in them included. An app that mixes frames
-  and units must accept that old hosts lose those frames, or send them in a frame-only burst (open
-  question 3).
+  and units must accept that old hosts lose those frames, or send them in a frame-only burst (Q3,
+  §10).
 
 ## 6. What not to do
 
@@ -662,7 +712,7 @@ Each step stands alone and is useful without the next.
      S0-S5; the gates decided.
 2. Units on air, RV 0 only, no retention.
    - Code, Python: `kisslink` (v4 build in `next_burst`, `T_UNITS` with the bound flag,
-     `unit_mask`, receive in `on_burst`), `tnc` (0x0D), `host` (`BCAST UNITS`, `UNITMODES`).
+     `unit_mask`, receive in `on_burst`), `tnc` and `KissLink.command` (0x06 with UNIT_OUT, UNIT_IN), `host` (`BCAST UNITS`, `UNITMODES`).
    - Code, native: the same in `core/kisslink`, `core/host` and `app/tcp_servers`, and
      `core/monitor` shows unit bursts.
    - Accept:
@@ -688,7 +738,7 @@ Each step stands alone and is useful without the next.
      - the ARQ's tests unchanged;
      - E2's S2 and S4 reproduced through the host path within noise.
 4. Soft export and import.
-   - Code: the record (`kisslink` pack and parse, native the same), KISS 0x0E, `EXPORT`,
+   - Code: the record (`kisslink` pack and parse, native the same), SOFT_RECORD, `EXPORT`,
      `SOFT GET`, import with the checks of §2e, status 4.
    - Accept:
      - a record round-trips byte for byte;
@@ -704,26 +754,27 @@ Each step stands alone and is useful without the next.
 
 ## 9. Decisions taken (2026-10-28)
 
-- Sender in the store key: no, by default, so relays' sends combine. The cost and risks are in
+- Q1, sender in the store key: no, by default, so relays' sends combine. The cost and risks are in
   §2d. Bound units are the per-port way to require a sender if that cost turns out real.
-- Soft export: wanted (tentatively, by Ragtime) to keep held soft data in its own database across
+- Q5, soft export: wanted (tentatively, by Ragtime) to keep held soft data in its own database across
   host restarts. Promoted to phase 4 (§2e).
-- `data2g-bulk`: an illustrative experiment, to be replaced by what gets built in Ragtime. Prior art
+- Q6, `data2g-bulk`: an illustrative experiment, to be replaced by what gets built in Ragtime. Prior art
   only; no phase moves it onto units.
-- Cross-mode combining within a code family: in, since it costs little once the store is in
-  positions (§2f). It also lays the groundwork for the ARQ (§10).
+- Q7, cross-mode combining within a code family: in, since it costs little once the store is in
+  positions (§2f). It also lays the groundwork for the ARQ (§11) and for consolidating families (§12).
 
 ## 10. Open questions (TBD: pending collaborators' feedback and the user's further thought)
 
-2. CPM unit bursts can't carry group+from (or bound units) in the 20 B control. Send the plain group
-   (the app names the sender in its own records), or refuse units on CPM ports opened with FROM?
-   (TBD)
-3. Frames and units in one v4 burst (v3 hosts lose those frames), or units-only bursts? (TBD)
-4. Store defaults: 32 MB host-wide, 2 h per port. Right for the Pi 4? (TBD)
-8. Control-lost unit bursts: accept them as erasures (DUP recommended), or design a back-reference
-   (the next burst names the previous burst's units) later? (TBD)
+Each keeps the number it had in the first draft. Q1, Q5, Q6 and Q7 are decided in §9.
 
-(Numbers kept from the first draft; 1, 5, 6 and 7 are decided in §9.)
+- Q2 (CPM control room): CPM unit bursts can't carry group+from (or bound units) in the 20 B
+  control. Send the plain group (the app names the sender in its own records), or refuse units on
+  CPM ports opened with FROM? TBD.
+- Q3 (mixed bursts): frames and units in one v4 burst (v3 hosts lose those frames), or units-only
+  bursts? TBD.
+- Q4 (store defaults): 32 MB host-wide, 2 h per port. Right for the Pi 4? TBD.
+- Q8 (control-lost unit bursts): accept them as erasures (DUP recommended), or design a
+  back-reference (the next burst names the previous burst's units) later? TBD.
 
 ## 11. Future, out of scope: ARQ mode changes within a family
 
@@ -760,3 +811,117 @@ it.
   The new behaviour is used only when both ends' CONNECT says they support it.
 - Cost: the shifter's in-family rule and the abandon change in `link.py`, about 50 lines and their
   fuzz tests. Its own plan, after phase 3 lands.
+
+## 12. Future, out of scope: fewer, larger code families
+
+Not part of this plan, and no decision is asked for here. The question is whether changing some
+modes' codes, so that more modes share one family, would let more mode changes and repeats combine
+by IR. In short: the most it could gain is the airtime of codewords discarded at mode changes. That
+is a few percent overall and 9-24% in the floor fading cells. One cheap oracle study can tell
+whether that is worth 1 dB before anything else is considered.
+
+### 12.1 Why families are few today
+
+- A family is (base graph, Z, k) (§2f).
+- Within a band, ladder rungs of one constellation share n (frames per codeword) and differ in k:
+  qpsk-r1/5, r1/3 and r1/2 all have 1920 coded bits and carry 46, 76 and 116 B.
+- So families arise only where k happens to coincide: the same rate in w and w48, a few
+  constellation pairs, and n4-qpsk-r2/3 with qpsk-r1/3.
+
+### 12.2 How often the shifter throws held soft bits away
+
+The measurement:
+
+- 288 linksim runs: `scripts/linksim.py` with the gear shifter on both ends (`shift` policy).
+- Workloads: bulk (300 s) and winlink (up to 1800 s).
+- Channels mpg, mpp and AWGN; 8 seeds at each of -5, 0, 5, 10, 15 and 20 dB.
+- A 50-line harness around linksim (not committed) wraps `Station._data_allowed` and records each
+  abandon for a mode change. For each one it records the codewords outstanding, and how many of them
+  the peer had heard (`Codeword.heard > 0`), meaning it held their soft bits.
+
+| workload | codewords made | mode-change abandons | outstanding discarded | held soft bits discarded | of those, already in one family |
+|---|---|---|---|---|---|
+| bulk | 59 187 | 180 | 3356 | 1450 (2.4% of codewords) | 63 |
+| winlink | 25 273 | 202 | 2435 | 1050 (4.2%) | 71 |
+
+Where it concentrates (held discarded / codewords made):
+
+- bulk: mpg -5 dB 24%, AWGN -5 18%, mpg 0 9%, mpg 20 7%, mpg 5-15 4-5%;
+- winlink: AWGN -5 12%, mpg 0 10%, mpg 5-15 3-6%;
+- AWGN and mpp from 0 to 20 dB: 0-3%.
+
+The pairs that discard most are downshifts within a band:
+
+- w48-qpsk-r1/3 to w48-qpsk-r1/5: 43 abandons, 445 held codewords;
+- w48-qpsk-r1/2 to w48-qpsk-r1/3: 160;
+- qpsk-r1/2 to qpsk-r1/5: 128;
+- 16qam and 64l steps down: 76-122 each.
+
+One band change, w48-qpsk-r1/5 to qpsk-r1/3, discards 170. Today's families cover only 134 of the
+2500 (5%), so §11's ARQ change alone, with today's codes, would recover about 0.1-0.2% of codewords.
+
+Caveats:
+
+- The link abstraction models OFDM only. 36 runs (31 of them at -5 dB) stopped when the shifter
+  picked a CPM mode, so the floor cells are partly sampled.
+- 8 seeds a cell.
+
+### 12.3 What those codewords would have gained
+
+- Each discarded held codeword failed once in the higher-rate mode. Resent in a lower-rate member
+  of its family, it would cover fresh mother positions (IR) and overlap the old ones (Chase).
+- The 50% point of one transmission against two with IR (`runs/ir_study.csv`, `scripts/ir_study.py`):
+
+| mode | AWGN | mpp |
+|---|---|---|
+| qpsk-r1/5 | 2.3 dB | 2.8 dB |
+| n10-qpsk-r1/2 | 3.3 dB | |
+| w48-qpsk-r1/2 | 4.0 dB | |
+| w48-16qam-r2/3 | 6.1 dB | |
+| w48-64l-r1/2 | 6.0 dB | |
+
+- So nearly every such codeword would decode on its first resend. The upper bound on the saving is
+  the airtime they took: the shares in §12.2.
+
+### 12.4 What consolidation would take
+
+- One k per family, with the rate set by n. Lower rungs become longer codewords (more frames each).
+  A family's lowest rate is its mother's:
+  - base graph 2 here is 0.17-0.2 (k / L: 384/2304, 640/3520, 960/4800);
+  - base graph 1 is about 0.31 (1440/4608).
+- So a family spanning r1/2 to r1/5 must be base graph 2 at one k.
+- The r3/4 rungs stay out. `ldpc.layout` uses base graph 1 above rate 0.67, and base graph 2 is the
+  weaker code at high rates.
+- Threshold risk:
+  - Holding k at the higher rung's value makes the low rungs longer codes: a slightly better
+    threshold, but coarser granularity. Short writes waste more, though §5a inlining helps.
+  - Holding it at the lower rung's value makes the high rungs shorter codes, which lose waterfall
+    steepness.
+- Payload sizes change on most rungs. Goodput per rung moves, and so does everything fitted to the
+  ladder:
+  - the thresholds (`runs/ladder_final.csv`, `codes_data/mode_thresholds.json`);
+  - the link abstraction's curves;
+  - the outcome model, a full retrain with new mode descriptors.
+- Formats: the frozen formats (`data2g/format/*.npz`) and interleavers regenerate, and
+  `config.PROTOCOL_VERSION` bumps. The native tables regenerate too (`tools/gen_native_tables.py`).
+- A new (k, Z) may need a new shift table, generated and screened for error floors
+  (`scripts/own_shifts.py`).
+- On OFDM the control codeword is the data spec (`modes.ctl_spec`). The control's size changes with
+  the rung, so the padding-prior results (`docs/arq.md` §3) need re-measuring.
+- Then §11's ARQ change and its session `VERSION` bump.
+
+### 12.5 Verdict and what to measure first
+
+- The bound is small overall (2.4-4.2% of codewords) but concentrated where it matters (9-24% in the
+  floor fading cells).
+- That is worth one oracle study, not a code change.
+- The oracle, in linksim, about 40 lines:
+  - at each mode-change abandon, the re-sliced codewords inherit the discarded held codewords' stored
+    MI in `SimRx`'s store, weighted by byte overlap, as if every band were one family;
+  - run paired against master on the floor cells (mpg 0, mpg and AWGN -5, mpp 0), bulk and winlink;
+  - then real-modem sessions with CPM enabled (`scripts/phy_session.py`) for the cells linksim can't
+    model.
+- Gate: at least 1 dB at the 10% point (or the goodput curve's dB shift) in two floor cells. Less
+  than that, and consolidation stops here.
+- If it passes: design one band's consolidated ladder and measure its thresholds at code level
+  against today's rungs, before any format, retrain or protocol work.
