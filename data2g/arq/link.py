@@ -502,6 +502,7 @@ class Station:
     _asked_dup: bool = False  # my latest burst carried T_DUPCTL
     _asked: tuple = (None, None)  # my latest build's recommendations: the peer's data mode, its reply mode
     _last_stream: bytes = b""  # the control stream _read_control read last
+    _primed_ctl: bool = False  # ... and only a primed retry read it
     _answered: bool = False  # answered() since the last burst handled: a repeat of it means my reply was lost
 
     @property
@@ -923,6 +924,7 @@ class Station:
                 log.info("RX primed control contradicts my state (%s): dropped", why)
                 return None
             self.stats["rx_primed"] += 1
+        self._primed_ctl = primed
         return ctl, dup
 
     def _primed(self, rx: RxBurst, slot: int, i: int, hyps: list) -> tuple[bytes | None, bool]:
@@ -1208,7 +1210,11 @@ class Station:
                 progress |= self.rx.accept(seq, p, z)
             else:
                 log.info("RX inline seq %d: check failed, dropped", seq)
-        self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
+        # first transmissions only (resends gain from IR). A control only a primed
+        # retry read is told to the policy as the blind decode saw it (§3a): its
+        # outcome model and ladder learned blind control losses, and a mode whose
+        # data fails while primed controls pass would otherwise never be left
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=not self._primed_ctl)
         return slots, n_dec, n_old, progress
 
     def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):

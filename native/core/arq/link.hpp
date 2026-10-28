@@ -263,6 +263,7 @@ public:
     // The modes the peer's next burst likely comes in (link.Station.expected_modes).
     std::vector<std::string> expected_modes() const;
     Bytes last_stream_;  // the control stream read_control read last
+    bool primed_ctl_ = false;  // ... and only a primed retry read it
 
     // What I know of the control of `rx`, a burst from my peer (link.Station.expect, §3a): hypotheses,
     // likeliest first, at most prime_tries().

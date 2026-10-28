@@ -763,6 +763,7 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
         }
         stats["rx_primed"] += 1;
     }
+    primed_ctl_ = was_primed;
     return std::make_pair(std::move(ctl), dup);
 }
 
@@ -1128,7 +1129,8 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
             log_write(LOG, INFO, format("RX inline seq %lld: check failed, dropped", static_cast<long long>(seq)));
         }
     }
-    if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, true);
+    // a control only a primed retry read is told to the policy as the blind decode saw it (link.py, §3a)
+    if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, !primed_ctl_);
     return out;
 }
 
