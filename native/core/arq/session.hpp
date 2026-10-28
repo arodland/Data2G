@@ -111,6 +111,9 @@ public:
     std::int64_t nonce = 0;
     TxBurstPtr out;
     TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
+    std::string tx_mode;  // the mode of my last burst sent (expecting)
+    // The modes my peer's next burst likely comes in while one is due (session.py's expecting, §3a).
+    std::vector<std::string> expecting() const;
     std::optional<double> due, deadline, build_at;
     std::optional<double> coalesce_until;  // write(): an idle poll or wake held for more data
     std::optional<std::string> answer_mode;

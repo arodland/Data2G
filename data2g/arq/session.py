@@ -113,6 +113,7 @@ class Session:
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
+    _tx_mode: str = ""  # the mode of my last burst sent (expecting)
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
@@ -254,6 +255,7 @@ class Session:
         if burst is self._nak:
             self._nak = None
             return
+        self._tx_mode = burst.submode
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
             if (self.state == CONNECTED and self.station is not None
@@ -265,6 +267,16 @@ class Session:
             self._quiet_from = now
             self._wake_wait = (self.t_turn + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
+
+    def expecting(self) -> list[str]:
+        """The modes my peer's next burst likely comes in, while one is due
+        (docs/arq.md §3a: the receiver's expected slot): my link's
+        (link.Station.expected_modes), or a CONNECT_ACK in my CONNECT's."""
+        if self.state == CONNECTING and self.station is None:
+            return [self._tx_mode] if self._tx_mode else []
+        if self.station is not None and self.state in (CONNECTED, DISCONNECTING):
+            return self.station.expected_modes()
+        return []
 
     def on_header(self, submode: str, n_cw: int, now: float):
         """A burst started arriving: wait for its end instead of timing out

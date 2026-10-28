@@ -353,3 +353,63 @@ def test_cpp_sessions_prime_connect_identically(native, pure):
         assert handshake(native.arq.Session, **kw) == handshake(S.Session, **kw)
     for seed in range(20):
         assert handshake(native.arq.Session, forge=random.Random(seed)) == handshake(S.Session, forge=random.Random(seed))
+
+
+# --- the expected slot (cpm.prime_lock, receiver.ReplySlot) ----------------------------------
+
+def _faded_cpm(seed):
+    """A control-only fsk16r25 burst through MPP at -17 dB (phy_session's
+    channel, numpy's generator: the same on every platform)."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import phy_session as PS
+
+    from data2g.receiver import receive_any
+    rng = np.random.default_rng(seed)
+    b = TxBurst("fsk16r25-r1/3", [Slot(ctl_mask(1, 0, 7), 0, bytes(rng.integers(0, 256, 20, dtype=np.uint8)))], 0, 2)
+    y = PS.ContinuousChannel("mpp", -17.0, seed, 60.0).apply(PHY.tx_audio(b), 10.0)
+    return y, receive_any(y, lead=int(PS.PAD_S * PS.FS) + PS.FS // 2), int(PS.PAD_S * PS.FS), PS.CFO_HZ
+
+
+def test_prime_lock_finds_what_blind_acquisition_lost():
+    """Seed 0: no blind path locks (the front faded); in a +-0.15 s window at
+    the known CFO the expected slot finds it, start and word right."""
+    y, r, p0, cfo = _faded_cpm(0)
+    assert r is None
+    lock = cpm.prime_lock(cpm.GRIDS["c16r25"], y, p0 - 1200, p0 + 1200, cfo)
+    assert lock is not None and lock["start"] == p0 and lock["spec"].name == "fsk16r25-r1/3" and lock["n_data"] == 0
+    assert lock["score"] >= cpm.PRIME_LLR
+
+
+def test_prime_lock_on_noise():
+    rng = np.random.default_rng(3)
+    for g in cpm.GRIDS.values():
+        for _ in range(5):
+            assert cpm.prime_lock(g, rng.normal(0, 1.0, 6 * 8000), 1200, 3600, 4.5) is None
+
+
+def test_reply_slot():
+    from data2g.receiver import ReplySlot
+    s = ReplySlot()
+    assert s.window(10.0) is None
+    s.heard(0.35, None)
+    assert s.window(10.0) is None  # no CFO yet
+    for g in (0.3, 0.4, 5.0, None):  # 5 s: not a reply
+        s.heard(g, 4.5)
+    lo, hi = s.window(10.0)
+    assert (lo, hi) == pytest.approx((10.35 - s.TOL_S, 10.35 + s.TOL_S)) and s.cfo == 4.5
+
+
+def test_cpp_prime_lock_matches(native, pure):
+    for seed in range(6):
+        y, _, p0, cfo = _faded_cpm(seed)
+        for g in cpm.GRIDS.values():
+            want = cpm.prime_lock(g, y, p0 - 1200, p0 + 1200, cfo)
+            got = native.cpm.prime_lock(g.name, y, p0 - 1200, p0 + 1200, cfo)
+            assert (got is None) == (want is None)
+            if want is not None:
+                assert got["start"] == want["start"] and got["spec"] == want["spec"].name
+                assert got["n_data"] == want["n_data"] and got["cfo"] == pytest.approx(want["cfo"])
+                assert got["score"] == pytest.approx(want["score"], rel=1e-9)

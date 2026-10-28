@@ -32,7 +32,7 @@ from data2g import hfchannel, modem
 from data2g import interference as INTF
 from data2g.arq import phy as PHY
 from data2g.config import BANDS, FS, LEADIN_SAMPLES, SNR_REF_BW_HZ, SUBMODES
-from data2g.receiver import NoiseProfile, receive_any
+from data2g.receiver import NoiseProfile, ReplySlot, receive_any
 
 sys.path.insert(0, str(Path(__file__).parent))
 import linksim as L  # noqa: E402
@@ -258,6 +258,11 @@ class RealPhy:
     def __init__(self, ch: ContinuousChannel):
         self.ch, self.decode_s = ch, []
         self.noise = StationNoise(ch)
+        # the expected slot (docs/arq.md §3a): each station's session (linksim.run
+        # sets them), its last burst's end and what it learned of its peer's replies
+        self.sessions = {}
+        self.tx_end = {}
+        self.slots = {0: ReplySlot(), 1: ReplySlot()}
 
     def listen(self, burst, t0: float, end: float) -> int:
         """-> the station that hears `burst` (direction 0 is station 0's: 1
@@ -265,6 +270,7 @@ class RealPhy:
         sender = burst.slots[0].mask_id[1] & 1
         self.noise.sent(sender, t0, end)
         self.noise.feed(1 - sender, t0)
+        self.tx_end[sender] = end
         return 1 - sender
 
     def heard_noise(self, rx: int, r, t0: float, end: float) -> dict | None:
@@ -278,9 +284,37 @@ class RealPhy:
         self.last_y = y = self.ch.apply(x, t0, rx)
         self.last_rx = rx
         try:
-            return receive_any(y, lead=int(PAD_S * FS) + FS // 2)
+            r = receive_any(y, lead=int(PAD_S * FS) + FS // 2)
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
+            r = None
+        if r is None and rx is not None:
+            r = self.primed(y, t0, rx)
+        if rx is not None:
+            if r is not None:
+                end = self.tx_end.get(rx)
+                self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo") if r.get("family") == "cpm" else None)
+        return r
+
+    def primed(self, y, t0, rx):
+        """The engine's expected slot (receiver.Receiver.expect): where station
+        rx's session expects its peer's reply, the CPM grids it may come in,
+        the peer's CFO; cpm.prime_lock there, as the engine's receiver does
+        once its window has passed with no lock."""
+        from data2g import cpm
+        from data2g.arq import link as LK
+        from data2g.arq.modes import MODES, is_cpm
+
+        s = self.sessions.get(rx)
+        w = self.slots[rx].window(self.tx_end[rx]) if rx in self.tx_end else None
+        if not LK.PRIME or s is None or w is None:
             return None
+        grids = dict.fromkeys(MODES[m].grid for m in s.expecting() if m in MODES and is_cpm(MODES[m]))
+        lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
+        for g in grids:
+            lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)
+            if lock is not None:
+                return cpm.receive(y, lock)
+        return None
 
     def burst_energy_db(self, burst, floor_db: float | None = None) -> float | None:
         """The last burst heard, as the engine measures it (data2g.arq.engine

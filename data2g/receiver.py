@@ -112,6 +112,37 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
     return r
 
 
+class ReplySlot:
+    """Where my peer's next burst should start and its CFO (docs/arq.md §3a,
+    the expected slot): the start past my burst's end as the median of the
+    last GAPS heard (PTT, sound card and decode latencies need only be
+    stable, not known; Ion's calibration), the CFO of its last burst.
+    Native: receiver::ReplySlot."""
+    TOL_S = 0.15  # the window either side of the expected start
+    GAPS = 8
+    MAX_GAP_S = 3.0  # a later start was not a reply (an idle start, a wake)
+
+    def __init__(self):
+        self.gaps: deque = deque(maxlen=self.GAPS)
+        self.cfo: float | None = None
+
+    def heard(self, gap_s: float | None, cfo: float | None):
+        """A burst from the peer started gap_s after my burst ended (None:
+        not a reply to one), its CFO."""
+        if gap_s is not None and 0.0 <= gap_s < self.MAX_GAP_S:
+            self.gaps.append(gap_s)
+        if cfo is not None:
+            self.cfo = cfo
+
+    def window(self, tx_end: float) -> tuple[float, float] | None:
+        """(earliest, latest) start of the peer's reply to my burst that ended
+        at tx_end, or None before anything was learned."""
+        if not self.gaps or self.cfo is None:
+            return None
+        g = float(np.median(self.gaps))
+        return tx_end + g - self.TOL_S, tx_end + g + self.TOL_S
+
+
 class NoiseProfile:
     """Noise across the passband from the audio heard between bursts: per
     sub-band (BANDS_HZ, split at the modes' band edges), the median 0.1 s

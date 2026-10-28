@@ -633,6 +633,44 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
     return make_lock(g, best_s, d.cfo, d.score, best, copies);
 }
 
+std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo) {
+    const WordRows& W = word_rows(g);
+    const int copies = tables::CPM.hdr_copies;
+    const auto& rows = W.rows[copies - 1];
+    double best = -INFINITY, best_cfo = 0.0;
+    std::int64_t best_s = 0;
+    std::size_t best_k = 0;
+    std::vector<double> vm(g.mid_block.size());
+    const std::int64_t step = std::max<std::int64_t>(1, g.T / PRIME_STEP);
+    for (std::int64_t s0 = lo; s0 <= hi; s0 += step)
+        for (double df : PRIME_CFO) {
+            const double c = cfo + df * g.rate;
+            const Mat<double> L = tone_llr(g, energies(g, x, s0, W.span[copies - 1], c));
+            const double front = std::max(front_llr(g, L), 0.0);
+            std::size_t k = 0;
+            for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
+                if (s.grid != g.name) continue;
+                for (bool dup : {false, true})
+                    for (int n = 0; n <= tables::CPM.max_data; ++n, ++k) {
+                        const int b1 = W.mid[k];
+                        for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[static_cast<std::size_t>(b1) + i][g.mid_block[i]];
+                        const auto t = header_symbols(g, header_value(s.index, n, dup));
+                        const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
+                        if (sc > best) best = sc, best_s = s0, best_cfo = c, best_k = k;
+                    }
+            }
+        }
+    if (best < PRIME_LLR) return std::nullopt;
+    std::size_t k = 0;
+    for (const auto& s : tables::CPM_SPECS) {
+        if (s.grid != g.name) continue;
+        for (bool dup : {false, true})
+            for (int n = 0; n <= tables::CPM.max_data; ++n, ++k)
+                if (k == best_k) return make_lock(g, best_s, best_cfo, best, Header{&s, n, dup, best, best, 0.0}, copies);
+    }
+    return std::nullopt;
+}
+
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
     const Header h = read_header(g, x, cand.start, cand.cfo, tables::CPM.hdr_copies);
     if (h.score < g.lock_llr2 || h.score - h.runner_up < tables::CPM.hdr_margin2) return std::nullopt;

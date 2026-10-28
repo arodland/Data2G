@@ -174,6 +174,9 @@ void bind_cpm(py::module_& m) {
     c.def("find_mid", [lock_dict](const std::string& g, const In<double>& x, long lo, std::optional<long> hi) {
         return lock_dict(cpm::find_mid(grid(g), view(x), lo, hi));
     }, py::arg("grid"), py::arg("x"), py::arg("lo") = 0, py::arg("hi") = py::none());
+    c.def("prime_lock", [lock_dict](const std::string& g, const In<double>& x, long lo, long hi, double cfo) {
+        return lock_dict(cpm::prime_lock(grid(g), view(x), lo, hi, cfo));
+    });
     c.def("hdr_span",[](const std::string& g, int copies) { return cpm::hdr_span(grid(g), copies); });
     c.def("measure", [](const std::string& g, const In<double>& E, int n_sym) {
         const auto r = cpm::measure(grid(g), mat(E), n_sym);

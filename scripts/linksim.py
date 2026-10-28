@@ -507,6 +507,8 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
     b.listen()
     a.connect("K2XYZ", cap, 0.0)
     stores = {id(a): {}, id(b): {}}
+    if hasattr(phy, "sessions"):  # the expected slot (scripts/phy_session.RealPhy.primed)
+        phy.sessions = {0: a, 1: b}
     stats = {"mismatch": 0, "bursts": 0, "modes": {}, "airtime": 0.0, "time": {}, "lost_sync": 0, "timeouts": 0,
              "collisions": 0}
     last_sent = {}

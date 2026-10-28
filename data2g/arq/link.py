@@ -500,6 +500,7 @@ class Station:
     _peer_next: int | None = None
     _repeated: bool = False
     _asked_dup: bool = False  # my latest burst carried T_DUPCTL
+    _asked: tuple = (None, None)  # my latest build's recommendations: the peer's data mode, its reply mode
     _last_stream: bytes = b""  # the control stream _read_control read last
     _answered: bool = False  # answered() since the last burst handled: a repeat of it means my reply was lost
 
@@ -543,6 +544,7 @@ class Station:
         if not self._data_allowed(fresh, submode):
             max_cw = 0  # control only
         rec, hint, reply = self.policy.recommend(self)  # what the peer should send me next (§8)
+        self._asked = (rec, reply)
         ext = self._control_tlvs(bn, reply)
         core = F.Core(ftype=F.ARQ if fresh else F.PROBE, burst_seq=bn % F.BURST_MOD, acted_on=self._acted_on,
                       cum=self.rx.cum % SEQ_MOD, reply_lost=self.reply_lost, recommend=rec, size_hint=hint)
@@ -948,6 +950,13 @@ class Station:
                 and unwrap(ext[F.T_ABANDON][0], self.rx.cum) != self.rx.cum:
             return "abandon point"
         return None
+
+    def expected_modes(self) -> list[str]:
+        """The modes the peer's next burst likely comes in (§3a's expected
+        slot): my latest burst's, and the two I recommended for its reply."""
+        out = [self.last_sent.submode] if self.last_sent is not None else []
+        out += [self.policy.mode_name(r) for r in self._asked if r is not None]
+        return list(dict.fromkeys(out))
 
     def expect(self, rx: RxBurst) -> list[tuple[bytes, bytes, bool]]:
         """What I know of the control of `rx`, a burst from my peer (§3a):

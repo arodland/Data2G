@@ -358,6 +358,7 @@ TxBurstPtr Station::build(bool fresh) {
     const auto r = policy->recommend(*this);
     const int rec = r ? r->rec : 0, hint = r ? r->hint : 1;
     const std::optional<int> reply = r ? r->reply : std::nullopt;
+    asked_ = {rec, reply};
     Ext ext = control_tlvs(bn, reply);
     Core core;
     core.ftype = fresh ? ARQ : PROBE;
@@ -797,6 +798,17 @@ namespace {
 enum CoreField { F_FTYPE, F_NCTL, F_SEQ, F_ACTED, F_CUM, F_LOST, F_K, F_REC, F_HINT };
 constexpr int CORE_BITS[9] = {2, 2, 3, 3, 7, 1, 6, 6, 2};
 }  // namespace
+
+std::vector<std::string> Station::expected_modes() const {
+    std::vector<std::string> out;
+    const auto add = [&](std::string m) {
+        if (std::find(out.begin(), out.end(), m) == out.end()) out.push_back(std::move(m));
+    };
+    if (last_sent) add(last_sent->submode);
+    for (const auto& r : {asked_.first, asked_.second})
+        if (r) add(policy->mode_name(*r));
+    return out;
+}
 
 std::vector<Station::Hypothesis> Station::expect(const RxBurst& rxb) const {
     const int cpb = policy->ctl_payload_bytes(rxb.submode());

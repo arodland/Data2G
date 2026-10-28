@@ -187,11 +187,18 @@ std::optional<double> Session::next_event() {
     return best;
 }
 
+std::vector<std::string> Session::expecting() const {
+    if (state == SessionState::CONNECTING && !station) return tx_mode.empty() ? std::vector<std::string>{} : std::vector<std::string>{tx_mode};
+    if (station && (state == SessionState::CONNECTED || state == SessionState::DISCONNECTING)) return station->expected_modes();
+    return {};
+}
+
 void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     if (burst && burst == nak) {
         nak = nullptr;
         return;
     }
+    if (burst) tx_mode = burst->submode;
     const bool m = master();
     // only the caller retries (§6), and a callee's DISC
     if ((m && (state == SessionState::CONNECTING || state == SessionState::CONNECTED)) || state == SessionState::DISCONNECTING) {
