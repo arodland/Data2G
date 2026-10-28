@@ -1,5 +1,8 @@
 """scripts/sounding.py: a short sequence through hfchannel, decoded back."""
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy import signal
@@ -8,7 +11,9 @@ from scipy.io import wavfile
 from data2g import cwid, hfchannel
 from data2g.config import FS
 from data2g.waveform import dsp
-from scripts import sounding as S
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))  # as the other tests reach scripts/
+import sounding as S  # noqa: E402
 
 MODES = ["qpsk-r1/2", "n10-qpsk-r1/2", "w48-qpsk-r1/3", "n4-ack-2f", "fsk32r62-r1/2"]
 
