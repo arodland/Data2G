@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-from data2g import codes
+from data2g import codes, cpm
 from data2g.arq import frames as F
 from data2g.arq import phy as PHY
 from data2g.arq.burst import Slot, TxBurst, ctl_mask, data_mask
@@ -86,6 +86,43 @@ def masks(ctl: F.Control, stream: bytes, arm: str) -> bytes:
     return bytes(m)
 
 
+PRIME_TOL_S = 0.1  # the expected start's uncertainty, either way
+P_LLR, P_MARGIN = 12.0, 4.0  # study: the primed lock's floor and margin over every unexpected word
+
+
+def prime_lock(g, x, lo: int, hi: int, cfo: float, expected: set, step: int = 0, floor: float = P_LLR):
+    """An expected-slot lock (§3a, study): a burst of grid g starting in
+    [lo, hi], CFO near `cfo`, its header word one of `expected` (indices of
+    cpm.valid_words). Every known row counts (front, mid block, both header
+    copies), each block floored at 0. -> (lock or None, best score, margin)."""
+    words = cpm.valid_words(g.name)
+    rows = cpm.header_rows(g.name, cpm.HDR_COPIES)
+    f, mb, H = cpm.preamble_pattern(g), cpm.mid_block(g), cpm.hdr_len(g)
+    mrows = cpm.mid_rows(g.name)
+    n = max(max(r[-1] for r in rows), max(mrows) + len(mb)) + 1
+    exp = np.array([k in expected for k in range(len(words))])
+    if exp.all():
+        exp = exp.copy()  # no unexpected word: no margin
+    best = (-np.inf, -np.inf, None)
+    for s0 in range(lo, hi + 1, step or g.T // 4):
+        for df in (-g.rate / 16, 0.0, g.rate / 16):
+            L = cpm.tone_llr(g, cpm._energies(g, x, s0, n, cfo + df))
+            front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
+            sc = np.array([front + max(float(L[b1 + np.arange(len(mb)), mb].sum()), 0.0) + cpm._segments(L, r, t, H)
+                           for (*_, t), r, b1 in zip(words, rows, mrows)])
+            e, o = sc[exp].max(), (sc[~exp].max() if (~exp).any() else -np.inf)
+            if e > best[0]:
+                best = (e, e - o, (s0, cfo + df, int(np.flatnonzero(exp)[np.argmax(sc[exp])])))
+    score, margin, at = best
+    if score < floor or margin < P_MARGIN:
+        return None, score, margin
+    s0, c, k = at
+    spec, nd, d, _ = words[k]
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, nd, d))
+    return dict(spec=spec, n_data=nd, dup=d, start=s0, cfo=c, band=g.name, end=s0 + lay.n * g.T,
+                family="cpm"), score, margin
+
+
 def trial(args):
     mode, chan, snr, seed, data, arms = args
     spec = MODES[mode]
@@ -106,21 +143,43 @@ def trial(args):
     except Exception:
         r = None
     hdr = r is not None and r["spec"].name == mode and r["n_cw"] == len(slots)
+    rg = None
+    if any(a.startswith("g_") for a in arms) and is_cpm(spec):
+        # the genie lock: start, CFO and header known (cpm.receive refines them as it would a real lock's)
+        rg = cpm.receive(y, dict(spec=spec, n_data=len(slots) - 1, dup=False, start=int(PS.PAD_S * PS.FS),
+                                 cfo=PS.CFO_HZ, band=spec.grid))
+    rp, psc = None, -np.inf
+    if any(a.startswith("p") and "_" in a for a in arms) and is_cpm(spec):
+        if hdr:
+            rp, psc = r, np.inf
+        else:  # blind acquisition failed: the expected slot, any word of the expected grid
+            g = cpm.GRIDS[spec.grid]
+            p0, tol = int(PS.PAD_S * PS.FS), int(PRIME_TOL_S * PS.FS)
+            lock, psc, _ = prime_lock(g, y, p0 - tol, p0 + tol, PS.CFO_HZ, set(range(len(cpm.valid_words(g.name)))),
+                                      floor=-np.inf)
+            rp = cpm.receive(y, lock) if lock is not None else None
+            if rp is not None and not (rp["spec"].name == mode and rp["n_cw"] == len(slots)):
+                rp = None  # locked on the wrong word: the control's CRC would fail
     out = {}
     for arm in arms:
         ok = False
-        if hdr:
-            rx = PHY.ModemRx(dict(r), {})
+        primed = arm[0] == "p" and "_" in arm  # p<T>_<arm>: a primed lock scoring at least T
+        genie = arm.startswith("g_") or primed
+        base = arm.split("_", 1)[1] if genie else arm
+        rr = rg if arm.startswith("g_") else (rp if psc >= float(arm[1:].split("_")[0]) else None) if primed else r
+        h = rr is not None if genie else hdr
+        if h:
+            rx = PHY.ModemRx(dict(rr), {})
             ok = True
             for i, s in enumerate(slots[:len(payloads)]):
                 got = rx.decode(i, s.mask_id, 0, None)
-                if got is None and arm != "blind":
-                    m = masks(ctl, stream, arm)
+                if got is None and base != "blind":
+                    m = masks(ctl, stream, base)
                     got = rx.decode_known(i, s.mask_id, stream[i * cpb:(i + 1) * cpb], m[i * cpb:(i + 1) * cpb])
                 if got != s.payload:
                     ok = False
                     break
-        out[arm] = (int(hdr), int(ok))
+        out[arm] = (int(h), int(ok))
     return mode, chan, snr, seed, out
 
 
@@ -150,7 +209,9 @@ def summarize(path):
         rows[(r["mode"], r["channel"], r["arm"])].append((float(r["snr"]), int(r["hdr"]), int(r["ok"])))
     print("SNR (cell dB) at 10% / 1% control failure: all bursts | given the header read; arm - blind in brackets")
     for mode, chan in sorted({(m, c) for m, c, _ in rows}):
-        arms = [a for a in (*ARMS, "shipped") if (mode, chan, a) in rows]
+        arms = [a for a in (*ARMS, "shipped", *("g_" + x for x in ARMS)) if (mode, chan, a) in rows]
+        arms += sorted({a for m, c, a in rows if (m, c) == (mode, chan) and a[0] == "p" and "_" in a},
+                       key=lambda a: float(a[1:].split("_")[0]))
         pts = {}
         for a in arms:
             v = rows[(mode, chan, a)]

@@ -745,7 +745,7 @@ def add_prior(spec: CodeSpec, soft: np.ndarray, prior: np.ndarray, index: int) -
     sign = 1.0 - 2.0 * scrambler(spec.k, scramble_seed(index))[sel]
     pr = np.asarray(prior, float)[sel]
     out = np.array(soft, dtype=np.float32)
-    out[pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP * sign * np.sign(pr), out[pos[sel]] + pr * sign)
+    out[pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP * sign, out[pos[sel]] + pr * sign)
     return out
 
 
@@ -755,7 +755,7 @@ def add_prior_buffer(spec: CodeSpec, buf: np.ndarray, prior: np.ndarray) -> np.n
     sel = (np.asarray(prior) != 0) & (pos >= 0)
     pr = np.asarray(prior, float)[sel]
     out = np.array(buf, dtype=float)
-    out[:, pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP * np.sign(pr), out[:, pos[sel]] + pr)
+    out[:, pos[sel]] = np.where(np.isinf(pr), ldpc.CH_CLAMP, out[:, pos[sel]] + pr)
     return out
 
 

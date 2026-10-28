@@ -343,46 +343,25 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
 std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) {
     if (slot >= n_cw_ || (pair && !pair_ok(slot))) return std::nullopt;
     const auto& s = spec(slot);
-    if (s.gf || (n_ctl_slots_ && slot >= n_ctl_slots_)) return std::nullopt;
+    // polar only (phy.ModemRx.decode_known)
+    if (!s.polar || (n_ctl_slots_ && slot >= n_ctl_slots_)) return std::nullopt;
     const std::uint32_t m = mask_value(mask);
     const auto known = codes::known_bits(s, tmpl, tmask);
-    // LDPC: the padding estimate (codes::pad_prior) with the known bits pinned on top (+-inf)
-    const auto known_prior = [&](std::vector<double> llr) {
-        auto prior = codes::pad_prior(s, llr);
-        for (std::size_t i = 0; i < known.size() && i < prior.size(); ++i)
-            if (known[i] >= 0) prior[i] = known[i] ? -INFINITY : INFINITY;
-        return prior;
-    };
     codes::Raw d;
     if (pair) {
         auto b0 = combined_buffer(s, slot, 0, slot_soft(slot), nullptr);
         auto b1 = combined_buffer(s, slot + 1, 1, slot_soft(slot + 1), &b0);
         Mat<double> buf(1, b1.size());
-        if (s.polar) {
-            buf.data = std::move(b1);
-            d = codes::decode_buffer_raw(s, buf, 1, known);
-        } else {
-            buf.data = codes::add_prior_buffer(s, b1, known_prior(codes::info_llrs_buffer(s, b1)));
-            d = codes::decode_buffer_raw(s, buf, 1);
-        }
+        buf.data = std::move(b1);
+        d = codes::decode_buffer_raw(s, buf, 1, known);
     } else {
-        const auto& sb = slot_soft(slot);
-        if (s.polar) {
-            d = codes::decode_raw_pinned(s, row_f(sb), known, slot);
-        } else {
-            const auto v = codes::add_prior(s, sb, known_prior(codes::info_llrs(s, sb, slot)), slot);
-            Mat<float> mm(1, v.size());
-            mm.data = v;
-            const int idx[1] = {slot};
-            d = codes::decode_raw(s, mm, idx);
-        }
+        d = codes::decode_raw_pinned(s, row_f(slot_soft(slot)), known, slot);
     }
     auto got = codes::check(s, d.cands.data, d.usable.data, m);
     if (!got) return std::nullopt;
-    // a pair's RV 1 is a polar codeword's repeat (scored as one more reception, at its own slot's scrambling);
-    // LDPC's RV 1 is other parity: its RV 0 slot alone is scored
+    // a pair's RV 1 is the same codeword: one more reception, at its own slot's scrambling
     double sc = codes::score(s, slot_soft(slot), *got, m, slot);
-    if (pair && s.polar) sc += codes::score(s, slot_soft(slot + 1), *got, m, slot + 1);
+    if (pair) sc += codes::score(s, slot_soft(slot + 1), *got, m, slot + 1);
     if (sc < PRIMED_SCORE) {
         log_write("data2g.arq.phy", 20,
                   "primed control in slot " + std::to_string(slot) + ": CRC passed, score " + std::to_string(sc) +
