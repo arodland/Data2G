@@ -145,6 +145,8 @@ def main():
     ap.add_argument("--redescribe", metavar="NPZ", help="rewrite NPZ's descriptors (no training) into --out")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--teacher-cpm", default="", help="the CPM modes' targets from this model instead")
+    ap.add_argument("--teacher-polar", action="store_true",
+                    help="--teacher-cpm also for the OFDM polar and ACK modes (polar controls are primed: docs/arq.md §3a)")
     ap.add_argument("--cpm-below", type=float, default=None,
                     help="--teacher-cpm only on rows whose snr_est is under this (ramped over 2 dB below it)")
     ap.add_argument("--init",default="", help="start from this CNP's weights (distillation only)")
@@ -176,7 +178,7 @@ def main():
         tc = P.outcome_model(a.teacher_cpm)
         assert tuple(tc.modes) == T.MODES
         zc = np.concatenate([tc(x[i:i + 4096]) for i in range(0, len(x), 4096)])
-        cols = [k for k, m in enumerate(T.MODES) if m not in SUBMODES]
+        cols = [k for k, m in enumerate(T.MODES) if m not in SUBMODES or (a.teacher_polar and ("ack" in m or "polar" in m))]
         cols += [n + k for k in cols]
         if a.cpm_below is not None:  # only where the row's snr_est is under it (a 2 dB ramp up to it)
             snr_est = np.array([float(r["snr_est"]) for r in rows])

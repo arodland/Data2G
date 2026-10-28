@@ -61,6 +61,12 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_cor_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 13300000` (same) | high AWGN | same | 12d1235 | |
 | `session_data_cor_fastlow.csv` | `--fastlow --sessions 1200 --first 13400000` (same) | fastlow | same | 12d1235 | |
 | `session_data_cor_floor.csv` | `--floor --sessions 1500 --first 13500000` (same) | sustained -19..-4 dB, every kind, 600 s; while the CPM floor holds, exploration picks CPM modes only | same | 8bc4f5d (12d1235 + `--floor`) | the CPM floor cells (-18..-9 dB), which the other kinds reach 0.5% of the time |
+| `session_data_pri.csv` | `--sessions 2900 --first 14000000` (`runs/pri_round.sh`), `DATA2G_SPREAD_CARRY=1` | regular | the installed CNP (cordf), offsets as shipped, Python shifter | 96bcf2c (#135: primed control retries, primed connect frames, CPM expected-slot lock) | outcomes under primed reception |
+| `session_data_pri_slow.csv` | `--slow --sessions 800 --first 14100000` (same) | slow | same | 96bcf2c | |
+| `session_data_pri_high.csv` | `--high --sessions 1200 --first 14200000` (same) | high | same | 96bcf2c | |
+| `session_data_pri_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 14300000` (same) | high AWGN | same | 96bcf2c | |
+| `session_data_pri_fastlow.csv` | `--fastlow --sessions 1200 --first 14400000` (same) | fastlow | same | 96bcf2c | |
+| `session_data_pri_floor.csv` | `--floor --sessions 3000 --first 14500000` (same) | floor (doubled: priming acts there) | same | 96bcf2c | the floor with primed reception |
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
@@ -77,6 +83,7 @@ sent at the same moment; one row per candidate.
 | `outcome_data_general_gt.csv` | `with_native outcome_data --samples 40000 --first 7500000` (`runs/gt_round.sh`) | none | 8340bbf | the general set on the noise-gated receiver, new seeds |
 | `outcome_data_n10top_gt.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 7600000` (same) | none | 8340bbf | the two top n10 modes, likewise |
 | `outcome_data_general_cor.csv` | `with_native outcome_data --samples 40000 --first 13600000` (`runs/cor_round.sh`) | none | 12d1235 | the general set on the #126 CPM receiver, new seeds |
+| `outcome_data_general_pri.csv` | `with_native outcome_data --samples 40000 --first 14600000` (`runs/pri_round.sh`) | none | 96bcf2c | the general set on the #135 tree (no session, so nothing primed; the cor set's seeds no longer reproduce: snr_est and some labels moved since 12d1235) |
 
 ## Mixes
 
@@ -124,3 +131,17 @@ sent at the same moment; one row per candidate.
   +69%/+187%, MPD -15/-13 +36%/+28%, MPP -14 +20%, AWGN -14 +15%; OFDM cells within 1%; MPP -6 -2.3%
   (+-0.9, 80 seeds). cord, the same without the -4 dB edge (ensemble CPM targets everywhere), lost MPP -6
   -3.6% on two seed sets.
+- **pri (not shipped; cordf stays installed):** primed reception (#135, `runs/pri_round.sh`, `runs/pri_train.sh`,
+  `runs/pri_judge.sh`; drivers and results in the main checkout's `runs/pri/`). Labels are as before:
+  `burst_ok` is the blind control decode of a burst the receiver heard (the expected-slot lock included), the
+  same thing a primed-only control reports to the live shifter (lost). prile12: twelve CNPs on the outcomes
+  (`--labels`, seeds 1-12) of the pri sets, `outcome_data_general_pri.csv` and `outcome_data_n10top_gt.csv`.
+  On held-out sessions cordf over-predicts P(usable) under snr_est -10 dB (c16r25 -16..-14 0.67 vs 0.50 observed,
+  c8r50 -14..-12 0.43 vs 0.25, OFDM polar/ACK -14..-10 0.68 vs 0.64) and is within 0.03 above -8 dB; LDPC as
+  before. Students from cordf (`--init`, cordf's targets elsewhere): prc8 (CPM below -10 ramped to -8), prp8 (the
+  same plus the polar/ACK modes, `--teacher-polar`), prm8 (prc8 from the ensemble mean, LCB 0), prc12 (CPM below
+  -14 ramped to -12). Against cordf on this tree (seeds 600-647, 24 floor and edge cells; 500-515 all cells): every
+  student traded floor cells (awgn -18 +5-6% SE 1.4, mpp -14 -3..-12% SE 2-3, mpg -10 -1..-6%) and moved the 10, 25
+  and 50 bps points by -0.10..+0.27 dB; chat at the floor cells level (prc12) or mixed (prc8). The more cautious
+  floor predictions pick slower modes (c16r25 2-codeword bursts at mpp -14 for c8r50 5). The ACK-mode replies at
+  mpd -9/-11 are unchanged in every arm.
