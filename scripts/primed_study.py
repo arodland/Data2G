@@ -86,41 +86,7 @@ def masks(ctl: F.Control, stream: bytes, arm: str) -> bytes:
     return bytes(m)
 
 
-PRIME_TOL_S = 0.1  # the expected start's uncertainty, either way
-P_LLR, P_MARGIN = 12.0, 4.0  # study: the primed lock's floor and margin over every unexpected word
-
-
-def prime_lock(g, x, lo: int, hi: int, cfo: float, expected: set, step: int = 0, floor: float = P_LLR):
-    """An expected-slot lock (§3a, study): a burst of grid g starting in
-    [lo, hi], CFO near `cfo`, its header word one of `expected` (indices of
-    cpm.valid_words). Every known row counts (front, mid block, both header
-    copies), each block floored at 0. -> (lock or None, best score, margin)."""
-    words = cpm.valid_words(g.name)
-    rows = cpm.header_rows(g.name, cpm.HDR_COPIES)
-    f, mb, H = cpm.preamble_pattern(g), cpm.mid_block(g), cpm.hdr_len(g)
-    mrows = cpm.mid_rows(g.name)
-    n = max(max(r[-1] for r in rows), max(mrows) + len(mb)) + 1
-    exp = np.array([k in expected for k in range(len(words))])
-    if exp.all():
-        exp = exp.copy()  # no unexpected word: no margin
-    best = (-np.inf, -np.inf, None)
-    for s0 in range(lo, hi + 1, step or g.T // 4):
-        for df in (-g.rate / 16, 0.0, g.rate / 16):
-            L = cpm.tone_llr(g, cpm._energies(g, x, s0, n, cfo + df))
-            front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
-            sc = np.array([front + max(float(L[b1 + np.arange(len(mb)), mb].sum()), 0.0) + cpm._segments(L, r, t, H)
-                           for (*_, t), r, b1 in zip(words, rows, mrows)])
-            e, o = sc[exp].max(), (sc[~exp].max() if (~exp).any() else -np.inf)
-            if e > best[0]:
-                best = (e, e - o, (s0, cfo + df, int(np.flatnonzero(exp)[np.argmax(sc[exp])])))
-    score, margin, at = best
-    if score < floor or margin < P_MARGIN:
-        return None, score, margin
-    s0, c, k = at
-    spec, nd, d, _ = words[k]
-    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, nd, d))
-    return dict(spec=spec, n_data=nd, dup=d, start=s0, cfo=c, band=g.name, end=s0 + lay.n * g.T,
-                family="cpm"), score, margin
+PRIME_TOL_S = 0.15  # the expected start's uncertainty, either way (receiver.ReplySlot.TOL_S)
 
 
 def trial(args):
@@ -155,8 +121,10 @@ def trial(args):
         else:  # blind acquisition failed: the expected slot, any word of the expected grid
             g = cpm.GRIDS[spec.grid]
             p0, tol = int(PS.PAD_S * PS.FS), int(PRIME_TOL_S * PS.FS)
-            lock, psc, _ = prime_lock(g, y, p0 - tol, p0 + tol, PS.CFO_HZ, set(range(len(cpm.valid_words(g.name)))),
-                                      floor=-np.inf)
+            floor, cpm.PRIME_LLR = cpm.PRIME_LLR, -np.inf  # every arm's floor from the one search
+            lock = cpm.prime_lock(g, y, p0 - tol, p0 + tol, PS.CFO_HZ)
+            cpm.PRIME_LLR = floor
+            psc = lock["score"]
             rp = cpm.receive(y, lock) if lock is not None else None
             if rp is not None and not (rp["spec"].name == mode and rp["n_cw"] == len(slots)):
                 rp = None  # locked on the wrong word: the control's CRC would fail
