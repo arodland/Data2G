@@ -49,9 +49,11 @@ DUP_BELOW = 0.9  # predicted P(burst usable) under which control is duplicated
 CPM_SIZE_SCALE = 4.0  # SIZE_S for a CPM burst: 4-48 s (fsk8r50: 1-6 data codewords)
 # ... but at most this long: a missed header loses the whole burst and no soft
 # bits (MPP -8: two 30 s fsk32r62 bursts missed outright; a 48 s one then
-# helped run out the 90 s link-lost clock). 25, not 24: a 3-slot fsk16r25 burst
-# is 24.18 s, so at 24 its floor data bursts carried one data codeword
-CPM_MAX_S = 25.0
+# helped run out the 90 s link-lost clock). 30, not 24 (runs/primed-deadline,
+# loss study PEP 5, 48 + 48 fresh seeds): fsk16r25 x3 (24.18 s), fsk8r50 x5
+# (29.22) and fsk32r62 x9; the 10 bps point 0.27-0.55 dB lower, no cell worse.
+# 25 (fsk16r25 x3 alone) took it from fsk8r50 one step up: 4-15% lost there
+CPM_MAX_S = 30.0
 # a lost data burst spends the session's link-lost clock (LINK_LOST_S);
 # recovering takes polls of about T_RECOVER_S each, and a session that runs
 # out costs LOST_LINK_COST_S of expected turn time (reconnect, redo)
