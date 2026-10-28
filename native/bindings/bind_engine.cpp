@@ -58,7 +58,8 @@ protected:
         receiver.attr("expect")(g, lo, hi, cfo, u);
     }
     bool receiver_expect_waits() override {
-        return receiver.is_none() ? Engine::receiver_expect_waits() : receiver.attr("expect_waits").cast<bool>();
+        return receiver.is_none() ? Engine::receiver_expect_waits()
+                                  : py::getattr(receiver, "expect_waits", py::bool_(false)).cast<bool>();  // (a test stub may lack it)
     }
     std::vector<double> tx_audio(const TxBurst& b) override {
         if (tx_audio_fn.is_none()) return Engine::tx_audio(b);
