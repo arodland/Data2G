@@ -272,6 +272,12 @@ void listen(double seconds, bool cpm_only, int expect) {
         ts.push_back(now() - t);
         fed += n;
     }
+    // the feeds where an expected slot's prime_lock runs (~5.1 s after it is set: hi + both header copies), and
+    // the rest (the same feeds without --expect: the baseline)
+    double win_max = 0, rest_max = 0;
+    for (std::size_t k = 250; k < ts.size(); ++k)
+        (k % 400 >= 330 && k % 400 <= 390 ? win_max : rest_max) = std::max(k % 400 >= 330 && k % 400 <= 390 ? win_max : rest_max, ts[k]);
+    std::printf("  max feed: in the window feeds %.0f us, elsewhere %.0f us\n", 1e6 * win_max, 1e6 * rest_max);
     ts.erase(ts.begin(), ts.begin() + std::min<std::size_t>(ts.size(), 250));  // the first 5 s
     double sum = 0;
     for (double v : ts) sum += v;
