@@ -56,7 +56,7 @@ from test_arq import (FakeRx, RandomPolicy, Script, clean, clean_not_settled_by_
 from test_arq_session import DECODE_S, HEADER_S, PTT_S
 from test_arq_session import Policy as SessionPolicy
 from test_engine import BLOCK
-from test_native_arq_link import _burst, pure  # noqa: F401 (fixture)
+from test_native_arq_link import _burst
 
 WATCHDOG = L.NO_PROGRESS_TURNS * (L.RESYNCS_BEFORE_FAIL + 1)  # handled bursts without progress, then FAILED
 # turns between progress: each counted handle can be separated by at most

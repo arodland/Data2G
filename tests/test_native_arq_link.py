@@ -32,13 +32,6 @@ def logged(caplog, fn, *args, **kw):
     return out, [(r.name, r.levelno, r.getMessage()) for r in caplog.records if r.name.startswith("data2g.")]
 
 
-@pytest.fixture
-def pure(monkeypatch):
-    """The Python modules as written, whether or not --native substituted them."""
-    for (module, attr), fn in native_subs.originals.items():
-        monkeypatch.setattr(module, attr, fn)
-
-
 # --- codecs ---------------------------------------------------------------------------
 
 def test_core_and_control(native, pure):

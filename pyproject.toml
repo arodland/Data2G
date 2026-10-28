@@ -14,7 +14,7 @@ train = [
     "onnxruntime>=1.24.3",
 ]
 tnc = ["pyaudio>=0.2.13"]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-xdist>=3.6"]
 
 [project.scripts]
 data2g-host = "data2g.host:main"
@@ -32,4 +32,4 @@ include = ["data2g*"]
 
 [tool.pytest.ini_options]
 markers = ["slow: long-running Monte Carlo checks"]
-addopts = "-m 'not slow'"
+addopts = "-m 'not slow' -n auto --dist loadgroup"

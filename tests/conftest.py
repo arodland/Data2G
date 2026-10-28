@@ -19,10 +19,41 @@ Fixtures: `native` (the data2g_native module, with or without --native)
 and `reference` (reference(module, "name"): the Python one, substituted or
 not). Tests that need every substitution undone monkeypatch
 native_subs.originals back.
+
+Parallel: pyproject's addopts run the suite on pytest-xdist workers
+(`-n auto --dist loadgroup`), min(8, cores / 2) of them (the machine is
+shared; DATA2G_TEST_WORKERS sets the count, `-n 0` runs in one process),
+one BLAS thread each. LONG_FIRST's tests are handed out first, each to
+its own worker, so the longest don't start last.
 """
 
-import native_subs
-import pytest
+import os
+
+# before anything imports numpy: one BLAS thread per worker, as CI runs
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+# and on xdist workers, the C++ pool at 1 (results are the same for any
+# size): 8 workers' default pools of 4 starved the real-time host test,
+# 71 s against its 56 s alone. Inherited by the hosts it starts, unchanged.
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    os.environ.setdefault("DATA2G_THREADS", "1")
+
+import native_subs  # noqa: E402
+import pytest  # noqa: E402
+
+# Tests that take tens of seconds each (real time over named pipes, 70 s):
+# first in the collection, so loadgroup's per-test scheduling starts each
+# on its own worker at once.
+LONG_FIRST = ("tests/test_native_host_e2e.py::",)
+
+
+def pytest_xdist_auto_num_workers(config):
+    n = os.environ.get("DATA2G_TEST_WORKERS")
+    return int(n) if n else min(8, max(1, (os.cpu_count() or 2) // 2))
+
+
+def pytest_collection_modifyitems(config, items):
+    items.sort(key=lambda it: not it.nodeid.startswith(LONG_FIRST))  # stable: the rest keep their order
 
 
 def pytest_addoption(parser):
@@ -59,6 +90,33 @@ def native():
 def reference():
     """reference(module, "name"): the Python function, substituted or not."""
     return native_subs.reference
+
+
+def _clear_caches():
+    """Every functools cache in data2g's loaded modules: they hold objects of
+    whichever implementation built them (a Python QCLDPC handed to the C++
+    decoder fails)."""
+    import sys
+
+    for name, mod in list(sys.modules.items()):
+        if name == "data2g" or name.startswith("data2g."):
+            for v in list(vars(mod).values()):
+                if callable(getattr(v, "cache_clear", None)):
+                    v.cache_clear()
+
+
+@pytest.fixture
+def pure(monkeypatch):
+    """Every --native substitution undone for the test: the reference is all
+    Python (its callees included), the native side called directly. The
+    caches are cleared on the way in and out, so neither implementation's
+    objects outlive the swap (tests run in any order on xdist workers)."""
+    _clear_caches()
+    for (module, attr), fn in native_subs.originals.items():
+        monkeypatch.setattr(module, attr, fn)
+    yield
+    monkeypatch.undo()
+    _clear_caches()
 
 
 @pytest.fixture
