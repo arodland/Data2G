@@ -44,6 +44,7 @@
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
 #include "arq/session.hpp"
+#include "cwid/cwid.hpp"
 #include "kisslink/kisslink.hpp"
 #include "receiver/noise_profile.hpp"
 #include "receiver/receiver.hpp"
@@ -67,6 +68,9 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 // after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 inline constexpr double ID_INTERVAL_S = 600.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
+// CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
+// each), "only" (a CW ID in their place); outside a session, a CW ID once quiet CW_QUIET_S after transmitting
+inline constexpr double CW_QUIET_S = 30.0;
 
 // engine.Recorder (--record-dir), in the same formats: events.jsonl (one
 // JSON object per line, as json.dumps writes it), rx_NNNNN.npz per burst
@@ -256,6 +260,8 @@ public:
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
+    std::string cw_id = "off";  // "off", "add", "only" (CW_QUIET_S)
+    double cw_wpm = cwid::WPM;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -286,6 +292,7 @@ private:
         std::vector<double> x;
         std::vector<receiver::Receiver::Item> items;
         bool busy = false;
+        bool cw = false;  // a CW ID heard (cwid::CwSense) with no burst locked
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
     };
@@ -304,6 +311,11 @@ private:
     TxBurstPtr id_frame(const Session& s) const;
     void id_check(double t);
     std::vector<TxBurstPtr> with_id(const TxBurstPtr& burst, double t);
+    std::vector<TxBurstPtr> ids(const Session& s, bool ahead) const;  // its ID as cw_id has it
+    TxBurstPtr cw_burst(const std::string& call) const;
+    std::vector<TxBurstPtr> cw_ahead(std::vector<TxBurstPtr> bursts, double t) const;  // outside a session
+    bool cw_due(double t) const;  // the CW ID after transmissions outside a session
+    void cw_hold(double t);       // a CW ID heard: what follows it on the same PTT is the peer's
     // Bursts back to back on one PTT; `main` is the one the session is told has gone.
     void start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxBurstPtr& main);
     void request_reset();
@@ -340,6 +352,10 @@ private:
     std::shared_ptr<Session> id_pending_;  // its last ID, after it closed, from id_pending_t_
     double id_pending_t_ = 0.0;
     double hold_ = 0.0;  // nothing new goes before this (the peer's last ID may follow its DISC_ACK)
+    cwid::CwSense cw_;  // the receiver stage's
+    bool cw_heard_ = false;  // the last block's (logged once per ID)
+    double cw_until_ = 0.0;  // nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
+    std::optional<double> cw_owed_;  // the first transmission no CW ID has covered yet
     // the energy inputs (engine.py _energy, _missed_energy)
     struct Span {
         double start, end;

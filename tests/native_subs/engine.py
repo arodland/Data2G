@@ -43,6 +43,8 @@ def substitutions(native):
 
         n = property(lambda s: s._n.n, lambda s, v: setattr(s._n, "n", v))
         id_interval_s = property(lambda s: s._n.id_interval_s, lambda s, v: setattr(s._n, "id_interval_s", v))
+        cw_id = property(lambda s: s._n.cw_id, lambda s, v: setattr(s._n, "cw_id", v))
+        cw_wpm = property(lambda s: s._n.cw_wpm, lambda s, v: setattr(s._n, "cw_wpm", v))
 
         @property
         def kiss_rx(self):

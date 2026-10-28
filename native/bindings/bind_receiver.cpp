@@ -144,6 +144,7 @@ void bind_receiver(py::module_& m) {
             return events(evs);
         })
         .def("reset", &receiver::Receiver::reset)
+        .def("drop", &receiver::Receiver::drop)
         .def_property_readonly("busy", &receiver::Receiver::busy)
         .def_property_readonly("channel_busy", &receiver::Receiver::channel_busy)
         .def_property_readonly("on_air", &receiver::Receiver::on_air)

@@ -66,6 +66,7 @@ Binding: `bindings/bind_<x>.cpp`, registering `data2g_native.<x>`. Parity:
 | `audio.py` | `audio/` (`filters`, `fifo`, `audio`) | `bind_audio` | `test_native_audio` | `audio` |
 | `receiver.py` | `receiver/` | `bind_receiver` | `test_native_receiver` | `receiver` |
 | `tnc.py` | `tnc/` (KISS codec; its server and PTT are `app/tcp_servers`, `rig/`) | `bind_tnc` | `test_native_tnc` | `tnc` |
+| `cwid.py` | `cwid/` | `bind_cwid` | `test_native_cwid` | `cwid` |
 | `kisslink.py` | `kisslink/` | `bind_kisslink` | `test_native_arq_phy` | `arq_phy`, `monitor` |
 | `arq/{frames,burst,link,session}.py` | `arq/` | `bind_arq_link` (`arq`) | `test_native_arq_link`, `test_native_fuzz` | `arq_link` |
 | `arq/{modes,predictor,policy}.py` | `arq/` | `bind_arq` (`arq`) | `test_native_arq` | `arq` |
