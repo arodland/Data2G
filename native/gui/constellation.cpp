@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <utility>
 
 namespace data2g::gui {
@@ -49,31 +48,24 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
     p.setClipRect(square);
     p.fillRect(square, Qt::black);
     const QPointF mid = QRectF(square).center();
-    std::function<QPointF(std::complex<float>)> at;
 
+    // the outermost point (a tone: the unit circle) at 2/3 of the half-width: room for the spread around it
+    double reach = 0.0;
+    for (const auto& q : c_.points) reach = std::max({reach, double(std::abs(q.real())), double(std::abs(q.imag()))});
+    const double scale = side / 2.0 / (reach > 0 ? 1.5 * reach : 1.5);
+    const auto at = [=](std::complex<float> z) { return mid + QPointF(z.real() * scale, -z.imag() * scale); };
     p.setPen(QColor(60, 60, 60));
-    if (c_.tones) {
-        // 0..1 on both axes, a small margin so the ideal (1, 1) stays clear of the edges
-        const double margin = side * 0.08, span = side - 2 * margin;
-        const QPointF origin = mid + QPointF(-side / 2 + margin, side / 2 - margin);
-        at = [=](std::complex<float> z) { return origin + QPointF(z.real() * span, -z.imag() * span); };
-        p.drawLine(at({0, 0}), at({1, 0}));
-        p.drawLine(at({0, 0}), at({0, 1}));
-        p.drawLine(at({0, 0}), at({1, 1}));  // top + runner-up == 1: no noise in the other tones
-        p.setPen(QPen(QColor(90, 90, 90), 1, Qt::DashLine));
-        p.drawLine(at({0.5f, 0.5f}), at({1, 0}));  // top == runner-up: the tone was a tie
-    } else {
-        // the constellation's outermost point at 2/3 of the half-width: room for the spread around it
-        double reach = 0.0;
-        for (const auto& q : c_.points) reach = std::max({reach, double(std::abs(q.real())), double(std::abs(q.imag()))});
-        const double scale = side / 2.0 / (reach > 0 ? 1.5 * reach : 1.5);
-        at = [=](std::complex<float> z) { return mid + QPointF(z.real() * scale, -z.imag() * scale); };
-        p.drawLine(QPointF(mid.x(), 0), QPointF(mid.x(), side));
-        p.drawLine(QPointF(0, mid.y()), QPointF(side, mid.y()));
-    }
+    p.drawLine(QPointF(mid.x(), 0), QPointF(mid.x(), side));
+    p.drawLine(QPointF(0, mid.y()), QPointF(side, mid.y()));
+    if (c_.tones) p.drawEllipse(mid, scale, scale);  // a tone's share, all of it
 
-    p.setPen(QColor(0, 255, 120, 140));
-    for (const auto& z : c_.symbols) p.drawPoint(at(z));
+    // tones: early blue to late green, so drift and fades show by when
+    const std::size_t n = c_.symbols.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        const double t = c_.tones && n > 1 ? double(i) / double(n - 1) : 1.0;
+        p.setPen(QColor(0, static_cast<int>(120 + 135 * t), static_cast<int>(255 - 135 * t), 140));
+        p.drawPoint(at(c_.symbols[i]));
+    }
 
     p.setPen(QColor(255, 80, 80));
     for (const auto& q : c_.points) {

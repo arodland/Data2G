@@ -20,8 +20,10 @@ struct BurstPreview;
 namespace data2g::app {
 
 // The newest burst's data symbols, for a constellation plot. OFDM: equalized
-// IQ. CPM (tones): each symbol's 1 - the runner-up tone's share + i * the
-// strongest's, so a clean one is 1 + 1i and a weaker one falls below the diagonal.
+// IQ. CPM (tones): a tone wheel, tone k at exp(2 pi i k / M) and each symbol
+// its shares' centroid there, so a clean one sits on its tone and noise pulls
+// it to the centre (the median tone, the noise floor, taken off first), a frequency offset turns it toward the next tone, a carrier
+// drags every symbol toward its own.
 // live: the burst is still arriving (--live-constellation), OFDM frames
 // equalized one at a time (modem::preview_frame); lost: it ended undecoded,
 // the live view all there is.
@@ -29,7 +31,7 @@ struct RxConstellation {
     std::string mode;
     bool tones = false, live = false, lost = false;
     std::vector<std::complex<float>> symbols;  // at most MAX_SYMBOLS, spread over the burst
-    std::vector<std::complex<float>> points;   // the ideal: the mode's constellation, or 1 + 0i
+    std::vector<std::complex<float>> points;   // the ideal: the mode's constellation, or the M tones
     static constexpr std::size_t MAX_SYMBOLS = 4000;
 };
 // A heard burst's plot; nullopt when it was lost.

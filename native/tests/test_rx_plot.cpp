@@ -2,6 +2,7 @@
 // CPM burst on the tone view, and which plots are worth showing.
 
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -39,12 +40,14 @@ void test_cpm() {
     const auto plot = app::rx_constellation(heard);
     check::is_true(plot && plot->tones && !plot->symbols.empty(), "a tone plot");
     if (!plot) return;
-    std::size_t clean = 0;
-    for (const auto& z : plot->symbols) clean += z.real() > 0.9f && z.imag() > 0.8f;
-    check::is_true(clean > plot->symbols.size() * 9 / 10, "symbols near the ideal (1, 1)");
-    std::size_t wedge = 0;  // shares sum to 1: under the diagonal, over the tie line
-    for (const auto& z : plot->symbols) wedge += z.imag() <= z.real() + 1e-6f && z.imag() >= 1 - z.real() - 1e-6f;
-    check::equal(wedge, plot->symbols.size(), "every symbol between the diagonal and the tie line");
+    check::equal(plot->points.size(), std::size_t{8}, "a wheel of the grid's 8 tones");
+    std::size_t clean = 0;  // within a tenth of a tone
+    for (const auto& z : plot->symbols)
+        for (const auto& q : plot->points) clean += std::abs(z - q) < 0.1f;
+    check::is_true(clean > plot->symbols.size() * 9 / 10, "symbols on their tones");
+    std::size_t inside = 0;  // shares sum to 1: their centroid inside the wheel
+    for (const auto& z : plot->symbols) inside += std::abs(z) <= 1 + 1e-6f;
+    check::equal(inside, plot->symbols.size(), "every symbol inside the unit circle");
 }
 
 void test_visible() {
