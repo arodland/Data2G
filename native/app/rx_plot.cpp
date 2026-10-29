@@ -27,6 +27,11 @@ RxConstellation iq_plot(const std::string& mode, std::span<const std::complex<do
     return plot;
 }
 
+// Above 1, the strongest tone's excess counts for more: 32 tones' clusters
+// part at +3 dB, and still blur at -3 (runs/tone-wheel/compare-p.png; 1.5 and
+// up pull a poor signal onto the rim).
+constexpr double EXCESS_POWER = 1.25;
+
 RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
     RxConstellation plot;
     plot.mode = mode;
@@ -46,7 +51,7 @@ RxConstellation tone_plot(const std::string& mode, const Mat<double>& shares) {
         std::complex<double> z = 0;
         double total = 0;
         for (std::size_t k = 0; k < shares.cols; ++k) {
-            const double e = std::max(shares[i][k] - floor, 0.0);
+            const double e = std::pow(std::max(shares[i][k] - floor, 0.0), EXCESS_POWER);
             z += e * wheel[k];
             total += e;
         }

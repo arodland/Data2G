@@ -68,10 +68,14 @@ void ConstellationPlot::paintEvent(QPaintEvent*) {
     }
 
     p.setPen(QColor(255, 80, 80));
-    for (const auto& q : c_.points) {
-        const QPointF c = at(q);
-        p.drawLine(c - QPointF(3, 0), c + QPointF(3, 0));
-        p.drawLine(c - QPointF(0, 3), c + QPointF(0, 3));
+    if (c_.tones) {  // a tick outside the rim: a perfect symbol, on its tone, stays in sight
+        for (const auto& q : c_.points) p.drawLine(at(q * 1.06f), at(q * 1.16f));
+    } else {
+        for (const auto& q : c_.points) {
+            const QPointF c = at(q);
+            p.drawLine(c - QPointF(3, 0), c + QPointF(3, 0));
+            p.drawLine(c - QPointF(0, 3), c + QPointF(0, 3));
+        }
     }
 
     p.setPen(Qt::gray);
