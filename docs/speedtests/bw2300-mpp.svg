@@ -75,17 +75,17 @@
 <circle cx="584.0" cy="92.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="660.0" cy="87.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="736.0" cy="82.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M52.0,265.9L128.0,219.7L204.0,174.0L280.0,132.3L356.0,101.1L432.0,81.9L508.0,66.9L584.0,62.6L660.0,54.2L736.0,53.4" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="52.0" cy="265.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="128.0" cy="219.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M52.0,258.4L128.0,219.9L204.0,174.0L280.0,132.4L356.0,101.1L432.0,82.7L508.0,66.9L584.0,62.6L660.0,54.2L736.0,53.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="52.0" cy="258.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="128.0" cy="219.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="204.0" cy="174.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="280.0" cy="132.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="280.0" cy="132.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="356.0" cy="101.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="432.0" cy="81.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="432.0" cy="82.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="508.0" cy="66.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="584.0" cy="62.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="660.0" cy="54.2" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="736.0" cy="53.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="736.0" cy="53.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
 <line x1="176.2" x2="204.2" y1="436" y2="436" stroke="#1baf7a" stroke-width="2" stroke-linecap="round" stroke-dasharray="5 4"/>
 <circle cx="190.2" cy="436" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
 <text x="210.2" y="440" font-size="11" font-weight="600" fill="#52514e">PACTOR 4</text>
