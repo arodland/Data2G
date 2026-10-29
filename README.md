@@ -79,3 +79,5 @@ Oh yes, lots. I'm a professional programmer with decades of experience, and an e
 ## License
 
 [Artistic License 2.0](LICENSE).
+
+Data2G incorporates features from [Ion](https://github.com/jesseforkum/ion-hf) by N0JLF. Ion is distributed under the terms of the [Apache License, v2.0](LICENSE_ion).
