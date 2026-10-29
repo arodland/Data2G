@@ -111,6 +111,9 @@ public:
     std::int64_t nonce = 0;
     TxBurstPtr out;
     TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
+    std::string tx_mode;  // the mode of my last burst sent (expecting)
+    // The modes my peer's next burst likely comes in while one is due (session.py's expecting, §3a).
+    std::vector<std::string> expecting() const;
     std::optional<double> due, deadline, build_at;
     std::optional<double> coalesce_until;  // write(): an idle poll or wake held for more data
     std::optional<std::string> answer_mode;
@@ -187,6 +190,8 @@ private:
     void refuse(const Connect& c, const std::string& mode, int reason, double now);
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
+    std::optional<Frame> primed_frame(RxBurst& rx);  // a connect frame that failed blind (session.py's, §3a)
+    std::optional<Frame> primed_body(Bytes body, RxBurst& rx);
     void on_session_frame(const Frame& f, double now);
     void flush_writes();
 };

@@ -57,6 +57,9 @@ def substitutions(native):
         def converged(self, slot, pair=False):
             return self._n.converged(slot, pair)
 
+        def decode_known(self, slot, mask_id, template, tmask, pair=False):
+            return self._n.decode_known(slot, mask_id, template, tmask, pair)
+
         def forget(self, key):
             return self._n.forget(key)
 

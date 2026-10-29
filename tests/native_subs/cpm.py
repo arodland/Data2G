@@ -11,7 +11,8 @@ def substitutions(native):
     from data2g import config, cpm, modem
 
     py = {k: getattr(cpm, k) for k in ("header_symbols", "layout", "burst_seconds", "modulate", "detect",
-                                       "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine")}
+                                       "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine",
+                                       "prime_lock")}
 
     def own_grid(g):
         return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
@@ -82,6 +83,12 @@ def substitutions(native):
             return py["find_mid"](g, x, lo, hi)
         return lock(g, n.find_mid(g.name, x, lo, hi))
 
+    def prime_lock(g, x, lo, hi, cfo):
+        if not own_grid(g):
+            return py["prime_lock"](g, x, lo, hi, cfo)
+        d = lock(g, n.prime_lock(g.name, x, lo, hi, cfo))
+        return None if d is None else dict(d, primed=True)
+
     def measure(g, E, n_sym):
         if not own_grid(g):
             return py["measure"](g, E, n_sym)
@@ -114,6 +121,7 @@ def substitutions(native):
         (cpm, "find"): find,
         (cpm, "late_lock"): late_lock,
         (cpm, "find_mid"): find_mid,
+        (cpm, "prime_lock"): prime_lock,
         (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies),
         (cpm, "measure"): measure,
     }

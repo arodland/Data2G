@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -32,6 +33,10 @@ inline constexpr int REPEATS_BEFORE_SHRINK = 1;
 inline constexpr int MAX_ESCALATION = 4;
 inline constexpr int FLOOR_DECAY_TURNS = 4;  // clean turns (no escalation) that lower the escalation floor by one
 inline constexpr int LINK_LOST_MISSES = 12;
+// Primed retries of a failed control codeword at most (link.PRIME_TRIES; DATA2G_PRIME_TRIES, read once).
+int prime_tries();
+// link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
+bool prime_default();
 
 // Python's logging, by logger name ("data2g.link", "data2g.session") and
 // level (20 info, 30 warning). Unset: silent. Set once, before any use.
@@ -243,6 +248,31 @@ public:
     int abandon_epoch = 0, peer_epoch = 0;
     bool answered_ = false;
     bool stale_ = false;  // the last burst handled repeated one already answered: its ACK may be stale
+    // link.PRIME (DATA2G_PRIME=0 turns it off at construction): a peer control that fails blind is retried
+    // primed (docs/arq.md §3a)
+    bool prime;
+    // primed reception: the peer's last control stream per kind (true: with data), its last one with its
+    // header (submode, n_cw), the seq its next new codeword takes, whether my latest burst went again
+    // identical, whether it carried T_DUPCTL
+    std::map<bool, Bytes> peer_ctl_;
+    std::optional<std::pair<Bytes, std::pair<std::string, int>>> peer_last_;
+    std::optional<std::int64_t> peer_next_;
+    bool repeated_ = false;
+    bool asked_dup_ = false;
+    std::pair<std::optional<int>, std::optional<int>> asked_;  // my latest build's recommendations: data, reply
+    // The modes the peer's next burst likely comes in (link.Station.expected_modes).
+    std::vector<std::string> expected_modes() const;
+    Bytes last_stream_;  // the control stream read_control read last
+    bool primed_ctl_ = false;  // ... and only a primed retry read it
+
+    // What I know of the control of `rx`, a burst from my peer (link.Station.expect, §3a): hypotheses,
+    // likeliest first, at most prime_tries().
+    struct Hypothesis {
+        Bytes tmpl, mask;  // control stream template, and the bits of it known
+        bool pair = false;  // decode as an ARQ_DUP pair
+        bool operator==(const Hypothesis&) const = default;
+    };
+    std::vector<Hypothesis> expect(const RxBurst& rx) const;
 
     int peer() const { return 1 - direction; }
     void write(ByteView data) { tx.write(data); }
@@ -301,6 +331,23 @@ private:
     };
     bool handle_inner(RxBurst& rx);
     std::optional<std::pair<Control, int>> read_control(RxBurst& rx, bool outcome);
+    // primed reception (§3a), as link.py's
+    struct Field {
+        int value = 0, mask = 0;
+    };
+    struct Tlv {
+        int type;
+        Bytes value, mask;
+        bool operator==(const Tlv&) const = default;
+    };
+    struct Way {
+        std::array<Field, 9> core;  // frames Core's fields in wire order (CORE_BITS)
+        std::vector<Tlv> ext;
+    };
+    std::vector<Way> variants(bool data, int n_cw, int ctl_slots, bool pair) const;
+    static std::optional<Hypothesis> pack_hypothesis(const Way& w, int cpb, int max_ctl, bool pair, int n_ctl);
+    std::pair<std::optional<Bytes>, bool> primed(RxBurst& rx, int slot, int i, const std::vector<Hypothesis>& hyps);
+    std::optional<std::string> implausible(const Core& core, const Ext& ext) const;
     std::pair<PeerAsk, bool> note_peer(const Core& core, const Ext& ext);
     std::pair<std::int64_t, bool> take_ack(const Core& core, const Ext& ext);
     bool take_abandon(RxBurst& rx, const Ext& ext);

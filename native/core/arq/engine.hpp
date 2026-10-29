@@ -284,6 +284,9 @@ protected:
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
     virtual void receiver_reset() { receiver_.reset(); }
+    virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) {
+        receiver_.expect(grids, lo, hi, cfo);
+    }
     virtual std::vector<double> tx_audio(const TxBurst& b) { return arq::tx_audio(b); }
     virtual void hear_burst(receiver::BurstEvent& ev, double t);
 
@@ -365,6 +368,17 @@ private:
     std::optional<Span> heard_span_;  // ... being decoded: its energy once measured (hear_burst)
     std::optional<double> session_snr_;
     std::optional<double> tx_end_;  // when my last burst ended
+    // the receiver's expected slot (engine.py's slot, _expect_reply; docs/arq.md §3a): the session stage
+    // learns it, and leaves the window for the receiver stage to set with the reset it asks for
+    receiver::ReplySlot slot_;
+    struct Expect {
+        std::uint64_t gen;
+        std::vector<std::string_view> grids;
+        std::int64_t lo, hi;
+        double cfo;
+    };
+    std::optional<Expect> expect_next_;  // under mu_
+    void expect_reply();
     std::int64_t timeouts_ = 0;  // the station's timeouts already reported
     void energy(double start, double end, const std::string& mode, double t, std::optional<double> min_db = std::nullopt,
                 std::optional<double> floor_db = std::nullopt);

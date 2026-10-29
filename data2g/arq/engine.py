@@ -27,10 +27,11 @@ import numpy as np
 
 from .. import codes, cpm, cwid, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
-from ..receiver import NoiseProfile, Receiver
+from ..receiver import NoiseProfile, Receiver, ReplySlot
 from ..waveform import dsp
 from . import burst as B
 from . import frames as F
+from . import link as LK
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -180,6 +181,7 @@ class Engine:
         self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
         self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
+        self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -436,11 +438,23 @@ class Engine:
                 self._tx_end = self.now + n / FS
                 if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
                     self.session.on_tx_end(burst, self.now + n / FS)
+                    self._expect_reply()
                 self._tx_kiss = False
                 if self.kiss is not None:
                     self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
         self.n += k
         return out, self.tx is not None
+
+    def _expect_reply(self):
+        """The receiver's expected slot for the peer's reply (docs/arq.md §3a):
+        the CPM grids my session expects it in, where its replies have
+        started (stream indices from the reset at my burst's end), its CFO."""
+        from .modes import is_cpm
+
+        w = self.slot.window(0.0)
+        grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
+        if w is not None and grids and LK.PRIME:
+            self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
 
     def next_event(self) -> float | None:
         return self.session.next_event()
@@ -478,6 +492,9 @@ class Engine:
             ours = self.session.claims(rx)
             if ours:
                 self.session_snr = meas["snr_est"]
+                # its start from my burst's end (the receiver was reset there): the expected slot learns
+                if r.get("family") == "cpm":
+                    self.slot.heard(h["start"] / FS, r["cfo"])
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

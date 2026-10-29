@@ -340,6 +340,39 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
     return std::nullopt;
 }
 
+std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) {
+    if (slot >= n_cw_ || (pair && !pair_ok(slot))) return std::nullopt;
+    const auto& s = spec(slot);
+    // polar only (phy.ModemRx.decode_known)
+    if (!s.polar || (n_ctl_slots_ && slot >= n_ctl_slots_)) return std::nullopt;
+    const std::uint32_t m = mask_value(mask);
+    const auto known = codes::known_bits(s, tmpl, tmask);
+    codes::Raw d;
+    if (pair) {
+        auto b0 = combined_buffer(s, slot, 0, slot_soft(slot), nullptr);
+        auto b1 = combined_buffer(s, slot + 1, 1, slot_soft(slot + 1), &b0);
+        Mat<double> buf(1, b1.size());
+        buf.data = std::move(b1);
+        d = codes::decode_buffer_raw(s, buf, 1, known);
+    } else {
+        d = codes::decode_raw_pinned(s, row_f(slot_soft(slot)), known, slot);
+    }
+    auto usable = d.usable.data;
+    for (std::size_t l = PRIMED_PATHS; l < usable.size(); ++l) usable[l] = 0;
+    auto got = codes::check(s, d.cands.data, usable, m);
+    if (!got) return std::nullopt;
+    // a pair's RV 1 is the same codeword: one more reception, at its own slot's scrambling
+    double sc = codes::score(s, slot_soft(slot), *got, m, slot);
+    if (pair) sc += codes::score(s, slot_soft(slot + 1), *got, m, slot + 1);
+    if (sc < PRIMED_SCORE) {
+        log_write("data2g.arq.phy", 20,
+                  "primed control in slot " + std::to_string(slot) + ": CRC passed, score " + std::to_string(sc) +
+                      " under " + std::to_string(PRIMED_SCORE) + " nats, dropped");
+        return std::nullopt;
+    }
+    return got;
+}
+
 // Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.
 std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
     std::vector<int> out;

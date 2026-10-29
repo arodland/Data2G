@@ -47,6 +47,9 @@ RESYNCS_BEFORE_FAIL = 3
 REPEATS_BEFORE_SHRINK = 1
 MAX_ESCALATION = 4
 FLOOR_DECAY_TURNS = 4  # clean turns (no escalation) that lower the escalation floor by one
+# primed retries of a failed control codeword at most (§3a), each one decode;
+# DATA2G_PRIME_TRIES for studies
+PRIME_TRIES = int(os.environ.get("DATA2G_PRIME_TRIES", "6"))
 # extensions a short control codeword (CPM) sheds first when it can't hold
 # everything, least useful first; none of them is state the peer must agree on
 OPTIONAL_TLVS = (F.T_BUFFER, F.T_CHAT, F.T_REPLY, F.T_DUPCTL)
@@ -55,6 +58,10 @@ LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s b
 COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 # DATA2G_INLINE=0: never send a codeword in the control's padding (T_INLINE; for A/B runs); still received
 INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
+# DATA2G_PRIME=0: no primed retry of a peer control that failed blind (docs/arq.md §3a; for A/B runs)
+PRIME = os.environ.get("DATA2G_PRIME", "1") != "0"
+# core word fields, most significant first (frames.Core.pack): widths
+CORE_BITS = (2, 2, 3, 3, 7, 1, 6, 6, 2)
 
 ACTIVE, FAILED = "active", "failed"
 
@@ -484,6 +491,18 @@ class Station:
     _abandon_epoch: int = 0
     _peer_epoch: int = 0  # the last peer abandon epoch applied
     _stale: bool = False  # the last burst handled repeated one already answered: its ACK may be stale
+    # primed reception (§3a): the peer's last control stream per kind (False:
+    # control only, True: with data) and its header (submode, n_cw), the seq
+    # its next new codeword takes, and whether my latest burst went again
+    # identical (a repeat: the peer may set reply_lost)
+    _peer_ctl: dict = field(default_factory=dict)
+    _peer_last: tuple | None = None  # (its last control stream, its header)
+    _peer_next: int | None = None
+    _repeated: bool = False
+    _asked_dup: bool = False  # my latest burst carried T_DUPCTL
+    _asked: tuple = (None, None)  # my latest build's recommendations: the peer's data mode, its reply mode
+    _last_stream: bytes = b""  # the control stream _read_control read last
+    _primed_ctl: bool = False  # ... and only a primed retry read it
     _answered: bool = False  # answered() since the last burst handled: a repeat of it means my reply was lost
 
     @property
@@ -518,6 +537,7 @@ class Station:
             # one in the peer's 3-bit acted-on. Repeat the latest instead.
             log.info("TX b%d repeat: 7 bursts unconfirmed", self._latest % F.BURST_MOD)
             self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
+            self._repeated = True
             return self.last_sent
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
         escalation = self._sent_esc = self._escalation()
@@ -525,6 +545,7 @@ class Station:
         if not self._data_allowed(fresh, submode):
             max_cw = 0  # control only
         rec, hint, reply = self.policy.recommend(self)  # what the peer should send me next (§8)
+        self._asked = (rec, reply)
         ext = self._control_tlvs(bn, reply)
         core = F.Core(ftype=F.ARQ if fresh else F.PROBE, burst_seq=bn % F.BURST_MOD, acted_on=self._acted_on,
                       cum=self.rx.cum % SEQ_MOD, reply_lost=self.reply_lost, recommend=rec, size_hint=hint)
@@ -579,6 +600,7 @@ class Station:
             ext[F.T_DRAINED] = b""
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
+        self._asked_dup = F.T_DUPCTL in ext
 
         burst = TxBurst(submode, self._slots(ctl, dup, resend, rvs, new), self.bursts_sent, self.cap)
         self._record(bn, burst, conveyed, resend, new + [inline] * bool(inline))
@@ -717,6 +739,7 @@ class Station:
         self._snapshots[bn] = (self.rx.cum, conveyed)
         self._sent_seqs[bn] = resend + [c.seq for c in new]
         self._latest = bn
+        self._repeated = False
         for old in [b for b in self._snapshots if b < self._confirmed]:
             self._snapshots.pop(old, None)
             self._sent_seqs.pop(old, None)
@@ -807,6 +830,7 @@ class Station:
         if allow_repeat and not self.esc_floor and self.misses <= REPEATS_BEFORE_SHRINK and self.last_sent is not None:
             log.info("TX b%d repeat: timeout %d", self._latest % F.BURST_MOD, self.misses)
             self.stats["cw_resend"] += len(self._sent_seqs.get(self._latest, []))
+            self._repeated = True
             return self.last_sent  # identical, same burst seq (§6 step 1)
         return self.build(fresh=False)
 
@@ -841,19 +865,28 @@ class Station:
         self.reply_lost = repeat
         self._stale = repeat
         self.peer_burst = core.burst_seq
+        self._peer_ctl[bool(slots)] = self._last_stream
+        self._peer_last = (self._last_stream, (rx.submode, rx.n_cw))
         self._answered = False
         self._watchdog(progress or delivered)
         return True
 
     def _read_control(self, rx: RxBurst) -> tuple[F.Control, int] | None:
-        """The burst's control and its dup factor; falsy if lost or malformed."""
+        """The burst's control and its dup factor; falsy if lost or malformed.
+        A control codeword that fails blind (alone, then as an ARQ_DUP pair)
+        is retried primed with what I expect of it (§3a)."""
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
-        paired = False
+        paired = primed = False
         if first is None and rx.n_cw >= 2:
             # an ARQ_DUP burst's control pair, combined (a wrong guess just
             # fails the masked CRC)
             first = self._ctl_pair(rx, 0, 0)
             paired = first is not None
+        hyps = None
+        if first is None and PRIME and hasattr(rx, "decode_known"):
+            hyps = self.expect(rx)
+            first, pair = self._primed(rx, 0, 0, hyps)
+            paired, primed = pair, first is not None
         if first is None:
             self.policy.outcome(rx.submode, 0, 0, usable=False)
             return None
@@ -869,15 +902,197 @@ class Station:
                 p = rx.decode(dup * i, ctl_mask(self.peer, i, self.key), 0, None)
                 if p is None and dup == 2:
                     p = self._ctl_pair(rx, 2 * i, i)
+                if p is None and PRIME and hasattr(rx, "decode_known"):
+                    if hyps is None:
+                        hyps = self.expect(rx)
+                    # only hypotheses with this burst's layout and core
+                    hs = [h for h in hyps if h[2] == (dup == 2) and h[0][:4] == bytes(
+                        a & m | b & ~m & 255 for a, b, m in zip(first, h[0], h[1]))]
+                    p, _ = self._primed(rx, dup * i, i, hs)
+                    primed |= p is not None
                 if p is None:
                     return None
                 payloads.append(p)
             ctl = F.Control.unpack(payloads)
+            self._last_stream = b"".join(payloads)
         except ValueError as e:
             return self._malformed(str(e))
         if why := self._check(ctl.core, ctl.ext, rx.n_cw - dup * ctl.core.n_ctl, self.policy.payload_bytes(rx.submode)):
             return self._malformed(why)
+        if primed:
+            if why := self._implausible(ctl.core, ctl.ext):
+                log.info("RX primed control contradicts my state (%s): dropped", why)
+                return None
+            self.stats["rx_primed"] += 1
+        self._primed_ctl = primed
         return ctl, dup
+
+    def _primed(self, rx: RxBurst, slot: int, i: int, hyps: list) -> tuple[bytes | None, bool]:
+        """Control codeword i (from `slot`) under each hypothesis in turn:
+        -> (payload, decoded as a pair) or (None, False)."""
+        cpb = self.policy.ctl_payload_bytes(rx.submode)
+        for t, m, pair in hyps:
+            if len(t) <= i * cpb:
+                continue
+            p = rx.decode_known(slot, ctl_mask(self.peer, i, self.key), t[i * cpb:(i + 1) * cpb],
+                                m[i * cpb:(i + 1) * cpb], pair)
+            if p is not None:
+                return p, pair
+        return None, False
+
+    def _implausible(self, core, ext) -> str | None:
+        """What a primed control (§3a) says that my state can't explain, or
+        None. Checked before any state changes: a blind control saying so
+        fails the session (ProtocolError), a primed one is only dropped."""
+        if len([k for k in range(self._confirmed, self._latest + 1) if k % F.BURST_MOD == core.acted_on]) != 1:
+            return f"acted-on {core.acted_on}"
+        if not self.tx.base <= unwrap(core.cum, self.tx.base) <= self.tx.next:
+            return f"cumulative {core.cum}"
+        if F.T_ABANDON in ext and ext[F.T_ABANDON][1] >> 1 != self._peer_epoch \
+                and unwrap(ext[F.T_ABANDON][0], self.rx.cum) != self.rx.cum:
+            return "abandon point"
+        return None
+
+    def expected_modes(self) -> list[str]:
+        """The modes the peer's next burst likely comes in (§3a's expected
+        slot): my latest burst's, and the two I recommended for its reply."""
+        out = [self.last_sent.submode] if self.last_sent is not None else []
+        out += [self.policy.mode_name(r) for r in self._asked if r is not None]
+        return list(dict.fromkeys(out))
+
+    def expect(self, rx: RxBurst) -> list[tuple[bytes, bytes, bool]]:
+        """What I know of the control of `rx`, a burst from my peer (§3a):
+        hypotheses (control stream template, mask of the bits known, decode
+        as an ARQ_DUP pair), likeliest first, at most PRIME_TRIES. Each is a
+        retry after the blind decode failed, and must pass the CRC: a wrong
+        one only fails. A hypothesis pays only when nearly every bit is
+        known (a CPM control's 10% point: 2-5 dB with 7 bits unknown, under
+        1 dB with 50), so each is a whole control: my state, the header's
+        layout, the peer's last control of that kind, and the few ways the
+        reply can differ (what arrived of my data, what it resends)."""
+        cpb = self.policy.ctl_payload_bytes(rx.submode)
+        max_ctl = self.policy.max_ctl(rx.submode)
+        ctl_slots = getattr(rx, "n_ctl_slots", 0)  # CPM: its header says how many (2: duplicated)
+        out = []
+        repeat = None
+        if not self.master and self._peer_last is not None and self._peer_last[1] == (rx.submode, rx.n_cw):
+            # the caller repeated the burst I answered: my reply was lost (§6). Second
+            # (after the likeliest fresh one): a header like the last is mostly a fixed mode
+            t = self._peer_last[0]
+            repeat = (t, b"\xff" * len(t), F.Core.unpack(t).ftype == F.ARQ_DUP)
+        if ctl_slots:
+            kinds = [(rx.n_cw > ctl_slots, ctl_slots == 2)]
+        else:
+            kinds = [(False, False)] * (rx.n_cw <= max_ctl) + [(True, self._asked_dup)] * (rx.n_cw >= 2)
+            kinds.sort(key=lambda k: k[0] != self.last_rx_data)  # the kind the peer sent last first
+        for data, pair in kinds:
+            ways = list(self._variants(data, rx.n_cw, ctl_slots, pair))
+            # then the same with T_DUPCTL the other way (the peer's outcome model
+            # asks for it, or stops), and with T_REPLY's recommendation unknown
+            dupctl = (F.T_DUPCTL, b"", b"")
+            ways += ([(c, [t for t in e if t[0] != F.T_DUPCTL] if dupctl in e else e + [dupctl]) for c, e in ways]
+                     + [(c, [(t, v, b"\xc0") if t == F.T_REPLY else (t, v, m) for t, v, m in e]) for c, e in ways
+                        if any(t == F.T_REPLY for t, *_ in e)])
+            for core, ext in ways:
+                # an OFDM control-only burst is its control: n_cw codewords, the
+                # last ones maybe all padding (build reserves room for data it may not send)
+                h = self._pack_hypothesis(core, ext, cpb, max_ctl, pair, rx.n_cw if not (ctl_slots or data) else 0)
+                if h is None or h in out:
+                    continue
+                n_ctl = len(h[0]) // cpb
+                dup = 2 if pair else 1
+                if ctl_slots or (n_ctl == rx.n_cw if not data else dup * n_ctl < rx.n_cw):
+                    out.append(h)
+        if repeat is not None and repeat not in out:
+            out.insert(min(1, len(out)), repeat)
+        return out[:PRIME_TRIES]
+
+    def _variants(self, data: bool, n_cw: int, ctl_slots: int, pair: bool):
+        """(core fields {name: (value, mask)}, TLVs [(type, value, value mask)])
+        for each way I expect the peer's control of this kind to be, likeliest first."""
+        base = self._peer_ctl.get(data) or self._peer_ctl.get(not data)
+        pe = F.Control.unpack([base]).ext if base else {}
+        # the peer's cumulative lies in [base, next]: the bits all of those agree on
+        diff = 0
+        for x in range(self.tx.base, self.tx.next + 1):
+            diff |= (x ^ self.tx.next) % SEQ_MOD
+        core = dict(
+            # a caller's control-only burst may be a poll (PROBE: 2), a callee's never is
+            ftype=(F.ARQ_DUP if pair else F.ARQ, 3 if (data or self.master) else 1),
+            # one past the last I decoded, unless I missed some: a caller's
+            # control-only burst may be a poll after its bursts I missed, and
+            # the callee answers my timeout's repeat with a new reply
+            burst_seq=(0 if self.peer_burst is None else (self.peer_burst + 1) % F.BURST_MOD,
+                       0 if (self.misses or not (data or self.master)) else 7),
+            # my latest burst, or (a caller's poll: my reply to it was lost) the one before
+            acted_on=(self._latest % F.BURST_MOD,
+                      7 if (data or self.master) else 7 & ~(self._latest ^ (self._latest - 1))),
+            cum=(self.tx.next % SEQ_MOD, 127),
+            reply_lost=(0, 0 if self._repeated else 1),
+            k=(0, 63),
+            # the peer's recommendation for my next burst moves with every
+            # measurement (and between OFDM and CPM near their crossover):
+            # unknown, 6 bits (at code level 0.0-0.2 dB on a CPM control)
+            recommend=(0, 0),
+            size_hint=(self.peer_size_hint, 3 if base else 0))
+        common = [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_CHAT, F.T_DUPCTL) if t in pe]
+        # T_REPLY, a recommendation: as last time (80% of them at the floor; its
+        # bits sit on weak polar positions, where 6 unknown cost 1-2 dB)
+        common += [(t, pe[t], b"\xff") for t in (F.T_REPLY,) if len(pe.get(t, b"")) == 1]
+        common += [(t, pe[t], bytes(len(pe[t]))) for t in (F.T_BUFFER,) if t in pe]
+        if not base:  # its first ARQ burst: the gear shifter's (T_REPLY, T_DUPCTL)
+            common = [(F.T_REPLY, b"\0", b"\xc0"), (F.T_DUPCTL, b"", b"")]
+        if not data:
+            if self.tx.base == self.tx.next:
+                yield core, common
+                return
+            gap = dict(core, cum=(self.tx.next % SEQ_MOD, 127 & ~diff))
+            bitmap = (F.T_BITMAP, b"\0", b"\0")
+            ways = [(core, common), (gap, common + [bitmap]), (gap, common)]
+            if F.T_BITMAP in pe:
+                ways.insert(0, ways.pop(1))
+            yield from ways
+            return
+        # data: the peer resends what my latest burst's ACK reported missing
+        nxt = max(self._peer_next or 0, self.rx.cum, max(self.rx.buf, default=-1) + 1)
+        snap = self._snapshots.get(self._latest)
+        missing = 0 if snap is None else len([s for s in range(snap[0], nxt) if s not in snap[1]])
+        n_data = n_cw - (ctl_slots or (2 if pair else 1))
+        extra = [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_DRAINED,) if t in pe]
+        seen = set()
+        for k in (min(missing, n_data), min(missing + 1, n_data), 0):
+            if k in seen:
+                continue
+            seen.add(k)
+            ext = list(common) + extra
+            if k:
+                ext.append((F.T_RV, bytes(-(-2 * k // 8)), bytes(-(-2 * k // 8))))
+            if n_data > k:
+                ext.append((F.T_NEW, bytes([nxt % SEQ_MOD]), b"\xff" if self._peer_next is not None else b"\0"))
+            yield dict(core, k=(k, 63)), ext
+
+    @staticmethod
+    def _pack_hypothesis(core: dict, ext: list, cpb: int, max_ctl: int, pair: bool, n_ctl: int = 0):
+        """(stream template, known mask, pair), or None if it can't be a
+        control (of `n_ctl` codewords if given)."""
+        body, bmask = b"", b""
+        for t, v, m in sorted(ext):
+            body += bytes([t, len(v)]) + v
+            bmask += b"\xff\xff" + m
+        need = max(1, -(-(4 + len(body)) // cpb))
+        n_ctl = n_ctl or need
+        if not need <= n_ctl <= max_ctl:
+            return None
+        fields = dict(core, n_ctl=(n_ctl - 1, 3))
+        v = m = 0
+        for name, bits in zip(("ftype", "n_ctl", "burst_seq", "acted_on", "cum", "reply_lost", "k", "recommend",
+                               "size_hint"), CORE_BITS):
+            val, msk = fields[name]
+            v, m = (v << bits) | (val & msk), (m << bits) | msk
+        n = n_ctl * cpb
+        t = (v.to_bytes(4, "big") + body).ljust(n, b"\0")
+        mask = (m.to_bytes(4, "big") + bmask).ljust(n, b"\xff")  # the padding: known zero
+        return t, mask, pair
 
     def _note_peer(self, core, ext) -> tuple[tuple, bool]:
         """Take the peer's requests and flags, and move my escalation.
@@ -981,7 +1196,11 @@ class Station:
                 n_dec += 1
                 rx.forget(key)
                 progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
+        news = [seq for seq, _ in slots[core.k:] if seq is not None]
+        if news:
+            self._peer_next = news[-1] + 1
         if (b := ext.get(F.T_INLINE)) is not None:
+            self._peer_next = max(self._peer_next or 0, unwrap(b[0] & 0x7F, self.rx.cum) + 1)
             self.last_rx_data = True
             seq, z = unwrap(b[0] & 0x7F, self.rx.cum), bool(b[0] >> 7)
             p = b[1:-2].ljust(self.policy.payload_bytes(rx.submode), b"\0")
@@ -991,7 +1210,11 @@ class Station:
                 progress |= self.rx.accept(seq, p, z)
             else:
                 log.info("RX inline seq %d: check failed, dropped", seq)
-        self.policy.outcome(rx.submode, n_ok, n_new, usable=True)  # first transmissions only (resends gain from IR)
+        # first transmissions only (resends gain from IR). A control only a primed
+        # retry read is told to the policy as the blind decode saw it (§3a): its
+        # outcome model and ladder learned blind control losses, and a mode whose
+        # data fails while primed controls pass would otherwise never be left
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=not self._primed_ctl)
         return slots, n_dec, n_old, progress
 
     def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):

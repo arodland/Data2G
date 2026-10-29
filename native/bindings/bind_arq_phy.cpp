@@ -189,6 +189,17 @@ public:
         py::gil_scoped_release nogil;
         return rx_->converged(slot, pair);
     }
+    py::object decode_known(int slot, const py::handle& mask, const py::object& tmpl, const py::object& tmask, bool pair) {
+        const MaskId m = mask_of(mask);
+        const Bytes t = bytes_of(tmpl), k = bytes_of(tmask);
+        std::optional<Bytes> out;
+        {
+            py::gil_scoped_release nogil;
+            out = rx_->decode_known(slot, m, t, k, pair);
+        }
+        return out ? py::object(pyb(*out)) : py::none();
+    }
+    int n_ctl_slots() const { return rx_->n_ctl_slots(); }
     void forget(const py::object& key) { store_.attr("pop")(key, py::none()); }
     const std::string& submode() const { return rx_->submode(); }
     int n_cw() const { return rx_->n_cw(); }
@@ -228,6 +239,9 @@ void bind_arq_phy(py::module_& m) {
         .def("raw_pair", &PyModemRx::raw_pair)
         .def("decode_pair", &PyModemRx::decode_pair)
         .def("converged", &PyModemRx::converged, py::arg("slot"), py::arg("pair") = false)
+        .def("decode_known", &PyModemRx::decode_known, py::arg("slot"), py::arg("mask_id"), py::arg("template"),
+             py::arg("tmask"), py::arg("pair") = false)
+        .def_property_readonly("n_ctl_slots", &PyModemRx::n_ctl_slots)
         .def("forget", &PyModemRx::forget)
         .def_property_readonly("submode", &PyModemRx::submode)
         .def_property_readonly("n_cw", &PyModemRx::n_cw);

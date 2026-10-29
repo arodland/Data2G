@@ -653,6 +653,29 @@ def zero_tail(spec: CodeSpec, nbytes: int) -> np.ndarray:
     return known
 
 
+def known_bits(spec: CodeSpec, template: bytes, mask: bytes) -> np.ndarray:
+    """(k,) int8 known info bits, -1 unknown: the payload bits `mask` sets
+    are `template`'s (both payload_bytes long, MSB first), and the zero
+    fill past the CRC. The CRC is never known: a primed decode still has
+    to pass it (docs/arq.md §3a)."""
+    pb = payload_bytes(spec)
+    t = np.unpackbits(np.frombuffer(bytes(template[:pb]).ljust(pb, b"\0"), np.uint8))
+    m = np.unpackbits(np.frombuffer(bytes(mask[:pb]).ljust(pb, b"\0"), np.uint8)).astype(bool)
+    known = np.full(spec.k, -1, dtype=np.int8)
+    known[: 8 * pb][m] = t[m]
+    known[8 * pb + crc_bits(spec):] = 0
+    return known
+
+
+def score(spec: CodeSpec, soft: np.ndarray, payload: bytes, crc_mask: int, index: int) -> float:
+    """Log-likelihood ratio (nats) of `payload`'s RV 0 codeword, sent at
+    burst position `index`, against uniformly random bits, from its soft
+    bits (mapping order). On noise, or anything that is not this codeword,
+    P(score >= T) <= e^-T for calibrated LLRs (Markov: E[e^score] = 1)."""
+    c = 1.0 - 2.0 * encode(spec, payload, 0, crc_mask, index)
+    return float(np.sum(np.log(2.0) - np.logaddexp(0.0, -c * np.asarray(soft, float))))
+
+
 def pin(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> np.ndarray:
     """(coded_bits,) soft bits of an RV 0 codeword sent at burst position
     `index`, with every sent info bit that `known` gives ((k,) 0/1, -1

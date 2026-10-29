@@ -88,6 +88,16 @@ public:
     // The decode()s the caller is about to make, in this order, offered up front so an implementation can run
     // their independent parts at once (a slow machine's idle cores). Optional, and the answers are the same.
     virtual void prepare(std::span<const DecodeRequest>) {}
+    // A primed retry (docs/arq.md §3a): control slot `slot` (`pair`: with slot + 1 at RV 1, combined) decoded
+    // again with the payload bits `tmask` sets known to be `tmpl`'s; its CRC and score still decide. A burst
+    // that can't (can_prime() false) is never asked.
+    virtual bool can_prime() const { return false; }
+    virtual std::optional<Bytes> decode_known(int /*slot*/, const MaskId& /*mask*/, ByteView /*tmpl*/,
+                                              ByteView /*tmask*/, bool /*pair*/) {
+        return std::nullopt;
+    }
+    // CPM: slots its header says are control (2: duplicated); OFDM: 0.
+    virtual int n_ctl_slots() const { return 0; }
 };
 
 }  // namespace data2g::arq

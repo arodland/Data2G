@@ -112,6 +112,37 @@ def receive_any(y: np.ndarray, lead: int = 0, cpm_grids=None) -> dict | None:
     return r
 
 
+class ReplySlot:
+    """Where my peer's next burst should start and its CFO (docs/arq.md §3a,
+    the expected slot): the start past my burst's end as the median of the
+    last GAPS heard (PTT, sound card and decode latencies need only be
+    stable, not known; Ion's calibration), the CFO of its last burst.
+    Native: receiver::ReplySlot."""
+    TOL_S = 0.15  # the window either side of the expected start
+    GAPS = 8
+    MAX_GAP_S = 3.0  # a later start was not a reply (an idle start, a wake)
+
+    def __init__(self):
+        self.gaps: deque = deque(maxlen=self.GAPS)
+        self.cfo: float | None = None
+
+    def heard(self, gap_s: float | None, cfo: float | None):
+        """A burst from the peer started gap_s after my burst ended (None:
+        not a reply to one), its CFO."""
+        if gap_s is not None and 0.0 <= gap_s < self.MAX_GAP_S:
+            self.gaps.append(gap_s)
+        if cfo is not None:
+            self.cfo = cfo
+
+    def window(self, tx_end: float) -> tuple[float, float] | None:
+        """(earliest, latest) start of the peer's reply to my burst that ended
+        at tx_end, or None before anything was learned."""
+        if not self.gaps or self.cfo is None:
+            return None
+        g = float(np.median(self.gaps))
+        return tx_end + g - self.TOL_S, tx_end + g + self.TOL_S
+
+
 class NoiseProfile:
     """Noise across the passband from the audio heard between bursts: per
     sub-band (BANDS_HZ, split at the modes' band edges), the median 0.1 s
@@ -311,8 +342,43 @@ class Receiver:
         # CPM fronts whose first header copy fell short (cpm.find's candidates,
         # stream indices): read again with both copies once the second is in
         self.cpm_wait: list = []
+        self.expected = None  # expect()'s window, until it is looked at
         for d in getattr(self, "detectors", {}).values():
             d.reset()
+
+    def expect(self, grids, lo: int, hi: int, cfo: float):
+        """The expected slot (docs/arq.md §3a): a burst of one of these CPM
+        grids should start between stream indices lo and hi, its CFO near
+        cfo. One grid per search hop, in order (the caller's likeliest
+        first), once the audio holds every second header copy of a start
+        there and nothing has locked: cpm.prime_lock looks there, once (42-62
+        ms a grid on a Pi 4: all of them in one feed overran the hop). The
+        window's audio is kept until the last is looked at. A lock found any
+        other way, or reset(), drops them."""
+        self.expected = (tuple(grids), lo, hi, cfo) if grids else None
+
+    @property
+    def n_expected(self) -> int:
+        """Grids expect() still has queued."""
+        return len(self.expected[0]) if self.expected is not None else 0
+
+    def _primed(self) -> dict | None:
+        """expect()'s lock in its next grid, buffer indices, once the window
+        is complete for it."""
+        from . import cpm
+
+        grids, lo, hi, cfo = self.expected
+        g = cpm.GRIDS[grids[0]]
+        if self.off + len(self.buf) < hi + cpm.hdr_span(g.name, 2) + g.T:
+            return None
+        self.expected = (grids[1:], lo, hi, cfo) if len(grids) > 1 else None
+        if hi < self.off:
+            return None  # trimmed away (an expect() later than its window)
+        lock = cpm.prime_lock(g, self.buf, max(0, lo - self.off), hi - self.off, cfo)
+        if lock is None:
+            return None
+        log.info("expected slot: %s locked (score %.1f) where no blind path did", lock["spec"].name, lock["score"])
+        return dict(lock, n_cw=1 + lock["dup"] + lock["n_data"])
 
     def drop(self):
         """Forget the pending burst: its header was no burst's (arq.engine:
@@ -571,9 +637,14 @@ class Receiver:
                     self._searched()
                 if p is None:
                     p = self._find_copy()  # the preamble faded: the frame pilots and header copy
+                if p is None and self.expected is not None:
+                    p = self._primed()
                 if p is None:
-                    self._trim(self.hold)  # (a waiting candidate's start is within it)
+                    # (a waiting candidate's start is within it; and the expected window, while queued)
+                    self._trim(self.hold if self.expected is None else
+                               max(self.hold, self.off + len(self.buf) - self.expected[1]))
                     break
+                self.expected = None
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window
                 self.pending = _shift(p, self.off)

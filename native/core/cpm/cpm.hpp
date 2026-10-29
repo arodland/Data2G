@@ -124,6 +124,13 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
 // Samples from a burst's start to the end of its first `copies` header copies,
 // the latest any word puts them.
 std::int64_t hdr_span(const Grid& g, int copies);
+// cpm.prime_lock (docs/arq.md §3a): a burst of grid g starting in [lo, hi], its CFO near `cfo`, any valid
+// word, scored over every row the word fixes; nullopt under PRIME_LLR. x must hold the second header copy
+// of a start at hi.
+inline constexpr double PRIME_LLR = 16.0;
+inline constexpr int PRIME_STEP = 4;
+inline constexpr double PRIME_CFO[] = {-1.0 / 16, 0.0, 1.0 / 16};
+std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo);
 
 // cpm.measure: arq/phy's measure makes the effective-MI features (arq/predictor's)
 // of `snr`, per symbol.

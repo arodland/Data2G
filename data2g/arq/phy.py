@@ -56,6 +56,17 @@ PIN_EST = os.environ.get("DATA2G_PIN_EST", "1") == "1"
 EST = 0  # an offset no cut gives: the estimated prior (codes.pad_prior) in place of a cut
 
 
+# A primed control (docs/arq.md §3a) must also score this many nats over
+# random bits (codes.score): noise passes with probability under e^-10 on
+# top of the CRC.
+PRIMED_SCORE = 10.0
+# A primed decode CRC-checks only the first PRIMED_PATHS paths of the polar
+# list: PRIME_TRIES (6) x 4 = 24 checks, as many as the blind decode's (plain
+# and two cuts, 8 paths each), so a failed control's false-accept chance stays
+# 24 x 2^-24. Its cost at code level: 0.03-0.24 dB (all 8: scripts/primed_study.py).
+PRIMED_PATHS = 4
+
+
 def _with_prior(spec, buf: np.ndarray) -> np.ndarray:
     """A control's combined buffer (1, L) leaning toward its estimated padding (codes.pad_prior)."""
     return codes.add_prior_buffer(spec, buf, codes.pad_prior(spec, codes.info_llrs_buffer(spec, buf[0])))
@@ -346,6 +357,41 @@ class ModemRx:
             if got is not None:
                 return got
         return None
+
+    def decode_known(self, slot: int, mask_id: tuple, template: bytes, tmask: bytes, pair: bool = False) -> bytes | None:
+        """A primed retry (docs/arq.md §3a): control slot `slot` (with
+        `pair`: slots slot, slot + 1 at RV 0 and 1, combined) decoded again
+        with the payload bits `tmask` sets known to be `template`'s
+        (codes.known_bits) frozen. Polar codewords only (CPM's control, the
+        polar and ACK modes): an LDPC control gained 0-0.3 dB at code level
+        over its padding estimate, under a 16-bit CRC. The payload if it
+        passes its masked CRC and its codeword scores at least PRIMED_SCORE
+        nats over random bits, else None."""
+        if slot >= self.n_cw or (pair and not self._pair_ok(slot)):
+            return None
+        spec, m = self._spec(slot), mask_value(mask_id)
+        if spec.code != "polar" or (self.n_ctl_slots and slot >= self.n_ctl_slots):
+            return None
+        known = codes.known_bits(spec, template, tmask)
+        if pair:
+            buf = codes.combine(spec, None, codes.plain(spec, self._soft(slot), slot, 0), 0)
+            buf = codes.combine(spec, buf, codes.plain(spec, self._soft(slot + 1), slot + 1, 1), 1)
+            cands, usable = codes.decode_buffer_raw(spec, buf, 1, known)
+        else:
+            cands, usable = codes.decode_raw_pinned(spec, np.asarray(self._soft(slot))[None], known, slot)
+        usable = np.asarray(usable[0]).copy()
+        usable[PRIMED_PATHS:] = False
+        got = codes.check(spec, cands[0], usable, m)
+        if got is None:
+            return None
+        # a pair's RV 1 is the same codeword: one more reception, at its own slot's scrambling
+        sc = codes.score(spec, self._soft(slot), got, m, slot)
+        if pair:
+            sc += codes.score(spec, self._soft(slot + 1), got, m, slot + 1)
+        if sc < PRIMED_SCORE:
+            log.info("primed control in slot %d: CRC passed, score %.1f under %.0f nats, dropped", slot, sc, PRIMED_SCORE)
+            return None
+        return got
 
     def _pair_ok(self, slot: int) -> bool:
         if slot + 1 >= self.n_cw:

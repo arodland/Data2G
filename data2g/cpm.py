@@ -765,6 +765,51 @@ def read_mid(g: Grid, x: np.ndarray, p: int, cfo: float):
     return spec, nd, d, float(scores[order[0]]), float(scores[order[1]]), p - mid_rows(g.name)[order[0]] * T
 
 
+# Expected-slot lock (docs/arq.md §3a): a station waiting for its peer's reply
+# knows when it should start and what CFO the peer's rig has, so a burst
+# that no blind path locked is looked for at those starts only (PRIME_STEP)
+# and CFOs (PRIME_CFO, fractions of the tone spacing), with every row the
+# header word fixes (front, mid block, both copies; each block floored at 0,
+# as _segments). Scored on noise, OFDM bursts and the other grids' bursts in
+# a +-0.1 s window, 27000 windows: largest 15.1 (scripts/primed_study.py,
+# runs/primed-rx/plock_fa.csv); real bursts the blind paths lost read 20-60.
+PRIME_LLR = 16.0
+PRIME_STEP = 4  # starts every T / PRIME_STEP
+PRIME_CFO = (-1 / 16, 0.0, 1 / 16)
+
+
+def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
+    """A burst of grid g starting in [lo, hi] (x's samples), its CFO near
+    `cfo`, any valid word: find's lock dict, or None under PRIME_LLR. x must
+    hold the second header copy of a start at hi."""
+    words = valid_words(g.name)
+    rows = header_rows(g.name, HDR_COPIES)
+    f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
+    n = max(r[-1] for r in rows) + 1
+    # a start a whole symbol later reads the same symbols one row on: per
+    # phase (a fraction of T) and CFO, one run of tone_llr over the window
+    # and the rows after it (its scale from all of them), sliced per start
+    phases = range(0, g.T, max(1, g.T // PRIME_STEP))
+    n_pos = (hi - lo) // g.T + 1
+    LL = {(p, df): tone_llr(g, _energies(g, x, lo + p, n + n_pos, cfo + df * g.rate)) for p in phases for df in PRIME_CFO}
+    best = (-np.inf, 0, 0.0, 0)  # score, start, cfo, word
+    for s0, p, m in ((lo + m * g.T + p, p, m) for m in range(n_pos) for p in phases):
+        if s0 > hi:
+            continue
+        for df in PRIME_CFO:
+            L = LL[(p, df)][m:m + n]
+            front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
+            for k, ((*_, t), r, b1) in enumerate(zip(words, rows, mid_rows(g.name))):
+                sc = front + max(float(L[b1 + np.arange(len(mb)), mb].sum()), 0.0) + _segments(L, r, t, H)
+                if sc > best[0]:
+                    best = (sc, s0, cfo + df * g.rate, k)
+    sc, s0, c, k = best
+    if sc < PRIME_LLR:
+        return None
+    spec, nd, d, _ = words[k]
+    return dict(_lock(g, s0, c, sc, (spec, nd, d, sc, sc), HDR_COPIES), primed=True)
+
+
 @lru_cache(maxsize=None)
 def mid_rows(grid: str) -> tuple:
     """Per valid word, the row its mid block starts at."""

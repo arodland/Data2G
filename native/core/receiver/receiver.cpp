@@ -160,7 +160,45 @@ void Receiver::reset() {
     decided_.clear();
     decided_mid_.clear();
     cpm_wait_.clear();
+    expected_.reset();
     for (auto& d : detectors_) d.d.reset();
+}
+
+void Receiver::expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo) {
+    expected_.reset();
+    if (grids.empty()) return;
+    Expected e{{}, lo, hi, cfo};
+    for (auto g : grids) e.grids.push_back(cpm::grid(g));
+    expected_ = std::move(e);
+}
+
+std::optional<cpm::Lock> Receiver::primed() {
+    Expected& e = *expected_;
+    const cpm::Grid& g = *e.grids.front();
+    if (off_ + len() < e.hi + cpm::hdr_span(g, 2) + g.T) return std::nullopt;
+    const std::int64_t lo = e.lo, hi = e.hi;
+    const double cfo = e.cfo;
+    e.grids.erase(e.grids.begin());
+    if (e.grids.empty()) expected_.reset();
+    if (hi < off_) return std::nullopt;  // trimmed away (an expect() later than its window)
+    return cpm::prime_lock(g, buf_, std::max<std::int64_t>(0, lo - off_), hi - off_, cfo);  // (receiver.py logs it)
+}
+
+void ReplySlot::heard(std::optional<double> gap_s, std::optional<double> c) {
+    if (gap_s && *gap_s >= 0.0 && *gap_s < MAX_GAP_S) {
+        gaps_.push_back(*gap_s);
+        if (gaps_.size() > GAPS) gaps_.pop_front();
+    }
+    if (c) cfo = c;
+}
+
+std::optional<std::pair<double, double>> ReplySlot::window(double tx_end) const {
+    if (gaps_.empty() || !cfo) return std::nullopt;
+    std::vector<double> v(gaps_.begin(), gaps_.end());
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double g = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;  // np.median
+    return std::make_pair(tx_end + g - TOL_S, tx_end + g + TOL_S);
 }
 
 bool Receiver::on_air() const {
@@ -433,10 +471,14 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             searched();
             if (!p)
                 if (auto c = find_copy()) p = Pending{*c};  // the preamble faded: the frame pilots and header copy
+            if (!p && expected_)
+                if (auto c = primed()) p = Pending{*c};
             if (!p) {
-                trim(hold_);  // (a waiting candidate's start is within it)
+                // (a waiting candidate's start is within it; and the expected window, while queued)
+                trim(expected_ ? std::max(hold_, off_ + len() - expected_->lo) : hold_);
                 break;
             }
+            expected_.reset();
             if (p->start() + off_ <= last_start_) break;  // the suspect burst just handled, still in the kept window
             p->shift(off_);
             pending_ = p;

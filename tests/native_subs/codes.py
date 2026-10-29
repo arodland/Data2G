@@ -22,7 +22,7 @@ def substitutions(native):
         "decode_raw", "descramble", "check", "crc_ok", "interleaver", "ir_extent", "decode_posterior",
         "systematic_positions", "zero_tail", "pin", "pin_buffer", "polar_order", "decode_raw_pinned",
         "decode_buffer_pinned", "decode_buffer_raw", "plain", "info_llrs", "info_llrs_buffer", "pad_prior", "add_prior",
-        "add_prior_buffer")}
+        "add_prior_buffer", "known_bits", "score")}
 
     @functools.lru_cache(maxsize=None)
     def own(spec):
@@ -125,6 +125,16 @@ def substitutions(native):
             return py["pad_prior"](spec, llr)
         return n.pad_prior(spec.name, np.asarray(llr, np.float64))
 
+    def known_bits(spec, template, mask):
+        if not own(spec):
+            return py["known_bits"](spec, template, mask)
+        return n.known_bits(spec.name, bytes(template), bytes(mask))
+
+    def score(spec, soft, payload, crc_mask, index):
+        if not own(spec):
+            return py["score"](spec, soft, payload, crc_mask, index)
+        return n.score(spec.name, np.asarray(soft, np.float64).reshape(-1), bytes(payload), int(crc_mask), int(index))
+
     def add_prior(spec, soft, prior, index):
         if not own(spec):
             return py["add_prior"](spec, soft, prior, index)
@@ -179,6 +189,8 @@ def substitutions(native):
         (codes, "info_llrs_buffer"): info_llrs_buffer,
         (codes, "pad_prior"): pad_prior,
         (codes, "add_prior"): add_prior,
+        (codes, "known_bits"): known_bits,
+        (codes, "score"): score,
         (codes, "add_prior_buffer"): add_prior_buffer,
         (codes, "polar_order"): polar_order,
         (codes, "decode_raw_pinned"): decode_raw_pinned,

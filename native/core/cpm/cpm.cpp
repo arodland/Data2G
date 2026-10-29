@@ -633,6 +633,61 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
     return make_lock(g, best_s, d.cfo, d.score, best, copies);
 }
 
+std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo) {
+    const WordRows& W = word_rows(g);
+    const int copies = tables::CPM.hdr_copies;
+    const auto& rows = W.rows[copies - 1];
+    // a start a whole symbol later reads the same symbols one row on: per phase and CFO, one tone_llr over
+    // the window and the rows after it (its scale from all of them), sliced per start (cpm.prime_lock)
+    const std::int64_t step = std::max<std::int64_t>(1, g.T / PRIME_STEP);
+    const std::size_t n_rows = static_cast<std::size_t>(W.span[copies - 1]);
+    const std::int64_t n_pos = (hi - lo) / g.T + 1;
+    std::vector<std::int64_t> phases;
+    for (std::int64_t p = 0; p < g.T; p += step) phases.push_back(p);
+    constexpr std::size_t NC = std::size(PRIME_CFO);
+    std::vector<Mat<double>> LL;
+    for (auto p : phases)
+        for (double df : PRIME_CFO)
+            LL.push_back(tone_llr(g, energies(g, x, lo + p, static_cast<int>(n_rows + n_pos), cfo + df * g.rate)));
+    double best = -INFINITY, best_cfo = 0.0;
+    std::int64_t best_s = 0;
+    std::size_t best_k = 0;
+    std::vector<double> vm(g.mid_block.size());
+    for (std::int64_t m = 0; m < n_pos; ++m) {
+        for (std::size_t pi = 0; pi < phases.size(); ++pi) {
+            const std::int64_t s0 = lo + m * g.T + phases[pi];
+            if (s0 > hi) continue;
+            for (std::size_t ci = 0; ci < NC; ++ci) {
+                const Mat<double>& all = LL[pi * NC + ci];
+                Mat<double> L(n_rows, all.cols);
+                std::copy(all[static_cast<std::size_t>(m)], all[static_cast<std::size_t>(m)] + n_rows * all.cols, L.data.begin());
+                const double front = std::max(front_llr(g, L), 0.0);
+                std::size_t k = 0;
+                for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
+                    if (s.grid != g.name) continue;
+                    for (bool dup : {false, true})
+                        for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k) {
+                            const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
+                            for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
+                            const auto t = header_symbols(g, header_value(s.index, nd, dup));
+                            const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
+                            if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
+                        }
+                }
+            }
+        }
+    }
+    if (best < PRIME_LLR) return std::nullopt;
+    std::size_t k = 0;
+    for (const auto& s : tables::CPM_SPECS) {
+        if (s.grid != g.name) continue;
+        for (bool dup : {false, true})
+            for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k)
+                if (k == best_k) return make_lock(g, best_s, best_cfo, best, Header{&s, nd, dup, best, best, 0.0}, copies);
+    }
+    return std::nullopt;
+}
+
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
     const Header h = read_header(g, x, cand.start, cand.cfo, tables::CPM.hdr_copies);
     if (h.score < g.lock_llr2 || h.score - h.runner_up < tables::CPM.hdr_margin2) return std::nullopt;

@@ -29,6 +29,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
+| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -119,6 +120,119 @@ is the "ACK burst".
 core word is exactly 32 bits, and extensions use more codewords only when needed. On
 large-codeword modes (46-396 B) the control codeword's spare bytes carry the
 extensions, so C = 1. They can also carry the last data codeword of a write (§5a).
+
+## 3a. Primed reception (receive only, 2026-10)
+
+A station waiting for its peer's burst knows much of it: when it should start, what its
+control will say, which modes it may come in. At the bottom of the ladder the CPM control
+codeword and the CPM lock fail before the data does (forced fsk16r25-r1/3 sessions died on
+them at awgn -19, mpp/mpd -17), so the receiver uses what it knows there. Nothing on air
+changes; `DATA2G_PRIME=0` (`link.PRIME`) turns all of it off for A/B runs. Adapted from
+ion-hf's primed reception (docs/net.md "Primed reception"; its author relicensed the code
+for Data2G).
+
+- **Primed controls** (`Station.expect`, `ModemRx.decode_known`). A control codeword that
+  fails blind, as an `ARQ_DUP` pair and pinned on its padding (§3), is decoded again under
+  each of up to `PRIME_TRIES` (6) hypotheses, likeliest first: a whole expected control
+  stream and the bits of it known. Polar codewords only (CPM's control, the ACK and polar
+  modes): their known bits are frozen (`codes.decode_raw_pinned`). An LDPC control gained
+  0.0-0.3 dB at code level over its padding estimate, under a 16-bit CRC: not primed.
+  - A hypothesis pays only when nearly every bit is known (a CPM control's 10% point moves
+    2-5 dB with 7 bits unknown, under 1 dB with 50), and bits sitting late in the payload
+    (weak polar positions) cost most: 13 unknown core bits cost 0.2 dB, the 6 of `T_REPLY`'s
+    value 1.1-1.8 dB. So each is a whole control, built from my state and the peer's last
+    control of the same kind (data or control only):
+    - core: frame type (a caller's control-only burst may be a poll), `C-1` (CPM: 1; an
+      OFDM control-only burst: its codeword count), burst seq (the peer's last + 1; unknown
+      after my timeout or for a caller's poll), acted-on (my latest burst; a poll may act on
+      the one before), `cum` (my `next` if nothing of mine is outstanding, else the bits all
+      of `[base, next]` agree on), reply-lost (0 unless my latest went again), K (data: from
+      what my latest ACK reported missing), recommend unknown, size hint as last time.
+    - TLVs: the last control's `T_CHAT`, `T_DUPCTL`, `T_BUFFER` (value unknown) and
+      `T_REPLY` (value as last time: 80% of them at the floor); data: `T_NEW` at the
+      peer's next seq, `T_RV` sized for K (values unknown), `T_DRAINED` as last time.
+      Before any: the gear shifter's (`T_REPLY`, `T_DUPCTL`).
+    - The ways it may differ, in order: what arrived of my data (everything; a gap with a
+      1-byte bitmap; a gap without), K and K+1 and 0 resends, then each with `T_DUPCTL` the
+      other way, then with `T_REPLY` unknown. A callee whose header matches the caller's
+      last burst tries that burst's control second (the caller repeated: my reply was lost).
+  - Hit rates at the floor cells (shift+cpm sessions, the hypothesis' known bits all right):
+    80-94% of controls within 9 tries, 76-81% within 6.
+  - Accepted only if the masked CRC passes on one of the polar list's first
+    `PRIMED_PATHS` (4) paths, its codeword scores at least `PRIMED_SCORE` (10) nats over
+    random bits (`codes.score`), it is well-formed (`_check`), and it agrees with my state
+    (`_implausible`: acted-on resolves, `cum` in `[base, next]`, an abandon at my
+    cumulative). A blind control saying otherwise fails the session (§10); a primed one is
+    only dropped. Then `rx_primed` counts it.
+- **Connect frames** (`Session._primed_frame`). A caller waiting for its CONNECT_ACK knows
+  all of it but the callee's cap and t_turn: tried with those as mine, then unknown. A
+  listener knows a third of a compact CONNECT (the version, its own call), then a cap and
+  t_turn like its own: two tries. A forged CONNECT also has to unpack its caller's 10
+  characters from a 40-of-64 alphabet (about 7 bits more). At the forced floor most
+  sessions never connected.
+- **The expected slot** (`Receiver.expect`, `cpm.prime_lock`, `ReplySlot`). After my burst
+  ends the engine tells the receiver where the peer's reply should start: the median of
+  its last 8 starts past my burst's end (`ReplySlot`, `TOL_S` 0.15 either side; learned
+  online, so PTT, sound card and decode latencies need only be stable), the CPM grids my
+  session expects it in (`Session.expecting`: my latest burst's mode and the two I
+  recommended), and the peer's CFO from its last burst. Once the audio holds every second
+  header copy of a start in the window and nothing locked, `prime_lock` looks there once:
+  every start at T/4, CFO +-R/16, any valid word, scored by `tone_llr` over every row the
+  word fixes (front, mid block, both header copies, each floored at 0). `PRIME_LLR` 16:
+  27000 windows of noise, OFDM bursts and the other grids' bursts scored at most 15.1
+  (runs/primed-rx/plock_fa2.txt); bursts the blind paths lost read 20-60. A lock it makes is
+  a header like any other (the session's wait extends to the burst's end).
+- **Measured, code level** (`scripts/primed_study.py`, 200 bursts a point through the real
+  receiver, PEP-referenced cell SNR; runs/primed-rx/ctl_code_level.txt,
+  plock_code_level.txt). 10% failure point of an ACK's control, all bursts sent, blind ->
+  primed with the cumulative ACK unknown -> and the expected slot too:
+  - fsk16r25-r1/3: awgn -17.95 -> -20.15 -> -20.53, mpp -14.72 -> -17.22 -> -19.03,
+    mpd -15.00 -> -16.83 -> -19.04, mpg -10.38 -> -14.43 -> -15.14.
+  - fsk8r50-r1/3: awgn -15.38 -> -18.29 -> -18.61, mpp -12.19 -> -15.39 -> -16.53,
+    mpd -12.37 -> -15.38 -> -16.84, mpg -7.75 -> -11.40 -> -11.80.
+  - fsk32r62-r1/3: awgn -12.91 -> -15.43, mpp -8.74 -> -13.04, mpd -8.62 -> -13.58, mpg
+    -7.42 -> -10.64 (its lock was never the limit).
+  - Given the header, primed controls gain 2.5-3.2 dB on AWGN and 3.2-8.2 dB on fading
+    (mpg's long fades most); the expected slot then takes the narrow grids to within
+    0.0-0.9 dB of a known start and word. ACK modes: ack-1f and n4-ack-2f were control-limited and gain 2-3 dB; the
+    4f/8f ACKs and the LDPC modes are header-limited (0.0-0.6 dB).
+- **Measured, sessions** (loss studies, 48 paired seeds, DATA2G_PEP_REF_DB=5, shift+cpm,
+  runs/primed-rx/loss5_paired.txt): the cell SNR where 10 bps is delivered moves -0.34 dB
+  (SE 0.08) awgn, -0.96 (0.16) mpp, -0.84 (0.13) mpd, -0.84 (0.14) mpg; 40 bps -0.12 to
+  -0.48. Floor cells +10-30% (mpp -13 +25.9% SE 5.6, mpd -13 +27.8% SE 4.4), mid cells
+  unchanged (awgn -4, +10 identical; mpp 0 -0.2% SE 1.0, mpg 0 +0.7% SE 0.6). Forced
+  fsk16r25-r1/3 (forced5_paired.txt): 5 bps reached 0.53 dB (SE 0.04) lower on AWGN,
+  1.73 (0.13) mpp, 1.44 (0.12) mpd, 2.21 (0.19) mpg; at AWGN -19, where no session
+  delivered, 21 of 48 now do. Chat (`chat_probe.py`, 24 seeds, chat5_paired.txt): mean
+  latency of the messages both runs delivered -2.1 to -4.9 s on mpp -12..-10, mpd -11..-9,
+  mpg -8 (SE 0.9-1.9), -0.5 to +0.5 s on AWGN (within SE); sessions lost to link loss 7
+  and 9 of 72 at mpd -11, 2 and 3 at awgn -12 (chatm5_paired.txt): the three inspected ended on the
+  ACK modes recommended for replies at mpd -9..-11, whose OFDM headers are not heard there.
+- **False accepts.** Each primed decode is a 24-bit CRC check on at most 4 paths: 2^-22.
+  A failed control's 6 tries are 24 checks, as many as its blind decode's (plain and two
+  cuts, 8 paths each): its false-accept chance stays 24 x 2^-24 (2^-19.4). Measured
+  (`scripts/primed_fa.py`, 200000 decodes a source and hypothesis, c16r25 controls): paths
+  passing the CRC's low 8, 12, 16 bits at 0.57-1.4 x 4 x 2^-w on noise, on a real control
+  that contradicts a pinned bit, and on my control under another session's key; no
+  24-bit pass in 1.2 M. The score test drops 79-91% of the noise passes and 35-65% of the
+  others on top. A primed lock on noise: 0 in 27000 windows at 16.
+- **Adversarial tests** (tests/test_primed.py, Python and C++ alike): stations whose
+  primed retries return forged controls (the hypothesis, random where it knew nothing) a
+  third of the time never deliver a wrong byte and end delivered or in a bounded
+  disconnect; forged connect frames mostly fail to unpack.
+- **CPU** (x86, native): a primed control decode 0.12 ms (a blind CPM control decode with
+  its cuts: 0.31); `prime_lock` per window 8 ms (c16r25, c8r50), 12 ms (c32r62); the Pi 4
+  runs this DSP about 12x slower: about 0.1-0.15 s once per expected reply, under the
+  receiver's 0.25 s search hop.
+- **Not primed:** LDPC controls; OFDM acquisition and headers (the 4f/8f ACK modes are
+  header-limited there); a reply that starts outside the window.
+- The outcome model learned the old control failure rate (the ACK modes' and CPM's at the
+  floor), and the shifter leaves a failing mode on control losses. So a control only a
+  primed retry read is reported to the policy as the blind decode saw it (lost): with it
+  reported as read, chat at awgn -12 stayed in OFDM ACK and polar modes whose data failed
+  (mean latency +2.6 s, SE 1.2, 72 seeds) where the blind run had moved to CPM. Until the
+  outcome data is regenerated with priming on and the model retrained, the shifter picks
+  modes as before and the session gains above are without it.
 
 ## 4. Core control word (32 bits)
 
@@ -212,7 +326,7 @@ Where the rest comes from:
     (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
-- **If any control codeword fails, the burst is discarded** and not answered. Without
+- **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
 - **A malformed control is a failed one.** A control that passes its CRC but can't be
