@@ -1,6 +1,6 @@
 [project]
 name = "data2g"
-version = "0.3.0"
+version = "0.4.0"
 description = "HF data modem on the SSTVAE OFDM waveform, with ML-optimized submodes"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
