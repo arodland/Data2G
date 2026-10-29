@@ -116,6 +116,7 @@ app::Args load_settings(QSettings& s, app::Args a) {
     if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
     if (s.contains("input_device")) a.input_device = opt(s.value("input_device").toString());
     if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
+    a.tci = s.value("tci", qs(a.tci)).toString().toStdString();
     a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
     a.output_volume = s.value("output_volume", a.output_volume).toDouble();
     a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
@@ -154,6 +155,7 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("mycall", qs(a.mycall));
     s.setValue("input_device", qs(a.input_device));
     s.setValue("output_device", qs(a.output_device));
+    s.setValue("tci", qs(a.tci));
     s.setValue("sample_rate", a.sample_rate);
     s.setValue("output_volume", a.output_volume);
     s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);
@@ -283,6 +285,13 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     link->addRow(tr("Noise rule"), noise_row);
 
     auto* audio = group(tr("Audio"));
+    tci_ = new QLineEdit(qs(a.tci));
+    tci_->setObjectName(QStringLiteral("tci"));
+    tci_->setPlaceholderText(tr("off: the sound card and Hamlib"));
+    tci_->setToolTip(tr("A TCI server (ExpertSDR, Thetis, AetherSDR...), host or host:port (port 40001 by default): "
+                        "the radio's audio, PTT and dial over the network. The devices below and the Rig tab are then "
+                        "unused, except its Mode on connect (USB or DIGU). Sample rate 8000, 24000 or 48000."));
+    audio->addRow(tr("TCI server"), tci_);
     input_ = new QComboBox;
     fill_devices(input_, inputs, a.input_device);
     audio->addRow(tr("Input"), input_);
@@ -301,6 +310,12 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     volume_->setValue(a.output_volume);
     volume_->setToolTip(tr("0 dB puts a burst's peak at full scale"));
     audio->addRow(tr("Output volume"), volume_);
+    const auto sync_tci = [this](const QString& t) {
+        input_->setEnabled(t.trimmed().isEmpty());
+        output_->setEnabled(t.trimmed().isEmpty());
+    };
+    sync_tci(tci_->text());
+    connect(tci_, &QLineEdit::textChanged, this, sync_tci);
     if (!a.audio_io.empty())
         audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
 
@@ -535,6 +550,7 @@ void SettingsDialog::test_rig(bool key_ptt) {
 
 void SettingsDialog::apply_to(app::Args& a) const {
     a.mycall = opt(mycall_->text());
+    a.tci = tci_->text().trimmed().toStdString();
     a.input_device = opt(input_->currentData().toString());
     a.output_device = opt(output_->currentData().toString());
     a.sample_rate = rate_->currentData().toInt();

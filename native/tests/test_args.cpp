@@ -43,6 +43,20 @@ void test_listen() {
     check::equal(parse({"--listen", "0.0.0.0"}).listen, std::string("0.0.0.0"), "--listen");
 }
 
+void test_tci() {
+    check::current_step = "tci";
+    check::is_true(app::tci_address("sdr.lan") == std::pair<std::string, int>{"sdr.lan", 40001}, "HOST: port 40001");
+    check::is_true(app::tci_address("10.0.0.5:50001") == std::pair<std::string, int>{"10.0.0.5", 50001}, "HOST:PORT");
+    for (const char* bad : {":40001", "sdr:", "sdr:0", "sdr:65536", "sdr:4x"})
+        check::is_true(!app::tci_address(bad), std::string("not an address: ") + bad);
+    const auto t = parse({"--tci", "sdr.lan"});
+    check::equal(t.tci, std::string("sdr.lan"), "--tci");
+    check::is_true(!app::check(t), "--tci at 48 kHz: fine");
+    check::is_true(app::check(parse({"--tci", "sdr.lan", "--sample-rate", "16000"})).has_value(), "--tci at 16 kHz: not a TCI rate");
+    check::is_true(app::check(parse({"--tci", "sdr.lan", "--audio-io", "pipe:a,b"})).has_value(), "--tci with --audio-io");
+    check::is_true(app::check(parse({"--tci", "sdr:x"})).has_value(), "--tci with a bad port");
+}
+
 void test_record() {
     check::current_step = "record";
     const app::Args d = parse({});
@@ -148,6 +162,7 @@ void test_cw_id() {
 int main() {
     test_rig_flags();
     test_listen();
+    test_tci();
     test_record();
     test_every_flag();
     test_check();

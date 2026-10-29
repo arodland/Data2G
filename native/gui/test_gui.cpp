@@ -91,6 +91,7 @@ app::Args persisted() {
     a.mycall = "W1AW";
     a.input_device = "USB Audio";
     a.output_device = "Gone Card";  // not in the dialog's list: kept, marked
+    a.tci = "sdr.lan:50001";
     a.sample_rate = 96000;
     a.output_volume = -6.5;
     a.ptt_on_delay_ms = 150;

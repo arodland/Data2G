@@ -19,7 +19,7 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 | `core/{dsp,util}/` | Native only: numpy/scipy primitives (`dsp/`, *not* `data2g/waveform/dsp.py`, which is `core/waveform/dsp`), `Mat`, the shared worker pool, cancellation, linear algebra, SIMD clones. |
 | `core/{rig,monitor}/` | Native only: rig control and PTT (`rig/hamlib/` is the libhamlib backend, `data2g_rig`); the promiscuous receiver behind `data2g-monitor`. |
 | `core/audio/{qt,miniaudio}/` | Sound card backends (`data2g_audio`), outside `data2g_core`. |
-| `app/` | `data2g_station`: the runtime both front ends share (`host.py`'s `serve()`), Qt Core + Network only. `app/station.hpp` lists its threads. |
+| `app/` | `data2g_station`: the runtime both front ends share (`host.py`'s `serve()`), Qt Core + Network only. `app/station.hpp` lists its threads. `app/tci.*` (`--tci`, with Qt WebSockets): the radio's audio, PTT and dial over TCI instead of a sound card and Hamlib. |
 | `apps/` | The command-line programs' `main()`s. |
 | `gui/` | `data2g-gui`: the only place Qt Widgets may appear. |
 | `bindings/` | `data2g_native`, the pybind11 module that `pytest --native` substitutes into the Python suite (`tests/native_subs/`). |
@@ -89,9 +89,9 @@ Python names the binding stands in for, and when it falls back to Python.
 - **An ARQ or gear-shifter change**: `core/arq/` mirrors `data2g/arq/`
   module for module; `docs/arq.md` has the section-to-file map.
 - **The station, threads, sound cards, PTT**: `app/station.hpp`,
-  `app/transmitter.hpp`, `core/audio/`, `core/rig/`. These have no Python
-  twin beyond `host.py`'s `serve()`; their ctests run on pipe audio and
-  Hamlib's dummy rig.
+  `app/transmitter.hpp`, `app/tci.hpp`, `core/audio/`, `core/rig/`. These
+  have no Python twin beyond `host.py`'s `serve()`; their ctests run on pipe
+  audio, Hamlib's dummy rig and a fake TCI server.
 - **The GUI**: `gui/`; `test_gui` renders it offscreen.
 
 Performance notes live where the code is (`core/util/simd.hpp`,

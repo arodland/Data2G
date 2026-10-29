@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "rig/config.hpp"
@@ -56,6 +57,7 @@ struct Args {
     bool realtime = true;  // real-time scheduling for the audio and transmit threads, where available
     bool live_constellation = true;  // fill the constellation plot in as a burst arrives, once a front end polls it
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
+    std::string tci;       // a TCI server, HOST[:PORT]: the radio's audio, PTT and dial; empty: sound card and Hamlib
 
     bool operator==(const Args&) const = default;
 };
@@ -67,6 +69,8 @@ Args parse(int argc, char** argv, Args a = {}, const char* prog = "data2g-host")
 // What main() checks once parsed; the message, or nullopt when fine.
 std::optional<std::string> check(const Args& a);
 int kiss_cap(int hz);
+// --tci's HOST[:PORT] (port 40001, ExpertSDR's default); nullopt: not one.
+std::optional<std::pair<std::string, int>> tci_address(const std::string& s);
 // The rig settings' allowed values, by Args field name ("rig_parity", ...).
 const std::vector<std::string>& rig_choices(std::string_view field);
 // Where a run that starts now records: record_dir/YYYYmmdd-HHMMSS, with

@@ -28,7 +28,7 @@ class QSpinBox;
 
 namespace data2g::gui {
 
-// The persisted subset of `base`'s fields: callsign, devices, sample rate,
+// The persisted subset of `base`'s fields: callsign, TCI, devices, sample rate,
 // volume, PTT and rig, ports, recording, decode worker, live constellation.
 app::Args load_settings(QSettings& s, app::Args base = {});
 void save_settings(QSettings& s, const app::Args& a);
@@ -50,6 +50,7 @@ private:
     app::Args base_;  // what apply_to keeps for fields the dialog doesn't show
     QWidget *serial_row_, *serial_row2_, *lines_row_;
     QLineEdit* mycall_;
+    QLineEdit* tci_;
     QComboBox *input_, *output_, *rate_;
     QDoubleSpinBox* volume_;
     QSpinBox *ptt_on_, *ptt_off_;

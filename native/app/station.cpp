@@ -37,6 +37,13 @@
 #ifdef DATA2G_HAVE_RIG
 #include "rig/hamlib/hamlib.hpp"
 #endif
+#ifdef DATA2G_HAVE_TCI
+#include "app/tci.hpp"
+#else
+namespace data2g::app {
+class Tci {};  // never made: start() refuses --tci
+}  // namespace data2g::app
+#endif
 
 namespace data2g::app {
 
@@ -392,7 +399,12 @@ void Station::announce_ptt(bool on) {
 
 bool Station::ptt() const { return tx_ && tx_->ptt(); }
 
-std::optional<double> Station::rig_frequency() const { return rig_ ? rig_->frequency_hz() : std::nullopt; }
+std::optional<double> Station::rig_frequency() const {
+#ifdef DATA2G_HAVE_TCI
+    if (tci_) return tci_->frequency_hz();
+#endif
+    return rig_ ? rig_->frequency_hz() : std::nullopt;
+}
 
 void Station::start() {
     if (running_) return;
@@ -507,7 +519,7 @@ void Station::start() {
         // PTT
         rig::Keyer::Ptt ptt;
         rig::Keyer::MustRelease must_release;
-        if (a_.rig) {
+        if (a_.rig && a_.tci.empty()) {
 #ifdef DATA2G_HAVE_RIG
             if (a_.rig_debug) rig::set_debug_sink([](const std::string& line) { log_line(INFO, "hamlib: " + line); });
             const bool polling = a_.rig_poll_interval > 0;
@@ -543,7 +555,24 @@ void Station::start() {
         const double lead_s = a_.tx_lead_ms / 1000.0;
         cap_ = std::make_unique<audio::CaptureFifo>(config::FS);
         const auto report = [](const std::string& s) { log_line(ERROR, s); };
-        if (!a_.audio_io.empty()) {
+        if (!a_.tci.empty()) {
+#ifdef DATA2G_HAVE_TCI
+            rate_ = a_.sample_rate;
+            play_ = std::make_unique<audio::PlaybackFifo>(rate_, lead_s);
+            const auto [host, port] = tci_address(a_.tci).value();
+            const std::string mod = a_.rig_mode == "usb" ? "usb" : a_.rig_mode == "pkt_usb" ? "digu" : "";
+            tci_ = std::make_unique<Tci>(host, port, rate_, mod, *cap_, *play_);
+            Tci* t = tci_.get();
+            ptt = [t](bool on) {
+                logf(DEBUG, "PTT %s", on ? "on" : "off");
+                t->set_ptt(on);
+            };
+            must_release = [t] { return t->keyed(); };
+            logf(INFO, "audio and PTT: TCI at %s:%d, %d Hz (Hamlib settings unused)", host.c_str(), port, rate_);
+#else
+            throw UsageError("--tci: built without TCI (Qt WebSockets)");
+#endif
+        } else if (!a_.audio_io.empty()) {
             const auto comma = a_.audio_io.find(',');
             if (!a_.audio_io.starts_with("pipe:") || comma == std::string::npos) throw UsageError("--audio-io: want pipe:IN,OUT");
             play_ = std::make_unique<audio::PlaybackFifo>(config::FS, lead_s);
@@ -605,6 +634,7 @@ void Station::stop() {
     }
     if (kiss_) kiss_->close_clients();
     if (pipe_) pipe_->stop();
+    tci_.reset();
 #ifdef DATA2G_HAVE_AUDIO
     if (card_) {
         if (card_->cap) card_->cap->stop();
