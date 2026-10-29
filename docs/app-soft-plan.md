@@ -1,8 +1,9 @@
 # Application soft combining and repair: plan
 
 Status: proposed 2026-10-28, for review. Revised 2026-10-29 after Ragtime's review. No code yet.
-Nothing here changes `docs/arq.md` or the PHY. The future ARQ and ladder work that code families
-could open up is in `docs/code-families-future.md`.
+Nothing here changes `docs/arq.md` or the PHY. The code-family investigation (cross-mode
+combining, ARQ mode changes within a family, fewer and larger families) is recorded in
+`docs/code-families-future.md`; it found a minimal payoff and is not planned.
 
 TLDR: Data2G provides the mechanism, and the app (Ragtime or any other) sets the policy. An app may
 use none of the new tools, or only some, and nothing it doesn't use gets in its way.
@@ -115,8 +116,7 @@ Control size and loss. Every unit depends on its burst's control:
 
 ### 2b. Soft store
 
-- Key: (group key, stream, index, code), where code means the submode, or the code family when
-  phase 3 includes families (§2e).
+- Key: (group key, stream, index, submode). Soft bits combine only within one submode (§2e).
 - Lifetime: entries are kept per group, not per port.
   - Today `host.client_gone` calls `kiss.reset()`, which closes every port. Entries outlive that:
     each lives `KEEP` seconds after its last reception (default 2 h), whether its port is open or not.
@@ -201,19 +201,12 @@ Bad receptions (collisions, QRM):
   - The hash is public, so they stop accidents, not attacks.
   - No one has asked for them. They come back only if E2 or real use shows a collision cost.
 
-### 2e. Code families (only if E1 and E2 S4 show a gain)
+### 2e. Code families: not planned
 
-- Two LDPC modes are one family when they share base graph, Z and k (`ldpc.layout`, `ldpc.qc_code`).
-  `QCLDPC.mother()` is then the same buffer, so their soft bits add position by position.
-  Constellation, band, interleaver and n may differ.
-- Families today:
-  - qpsk-r1/3, 16qam-r1/3, n4-16qam-r1/3, w48-qpsk-r1/3 and n4-qpsk-r2/3;
-  - 16qam-r1/2, w48-16qam-r1/2 and w48-64l-r2/3;
-  - w48-qpsk-r2/3 and w48-16qam-r1/3;
-  - the w/w48 pairs of qpsk-r1/5, qpsk-r1/2 and qpsk-r3/4.
-- Cost: `codes.family`, decode by position extent in place of a top RV, and three tests: about
-  130 lines a host. One of the tests checks that every member's encode is a prefix of the mother's.
-- Without a measured gain, the store keys by submode, and nothing else changes.
+Modes that share base graph, Z and k could combine across constellation and band. The
+investigation found a minimal payoff (`docs/code-families-future.md`), so the store keys by
+submode and nothing here depends on families. A unit's name carries no mode, so a family key
+could still be added later without a wire change.
 
 ## 3. Using it: policy is the app's
 
@@ -272,7 +265,7 @@ stations least able to send.
 | `BCAST SOFT n FORGET stream [from to]` | OK | drop those entries (the app rebuilt the block or gave up) |
 | `BCAST SOFT n KEEP stream s` | OK | extend a stream's lifetime |
 | `BCAST SOFT STATS` | `SOFT entries bytes cap` | |
-| `UNITMODES` | `UNITMODE name code payload-bytes rvs max-units family` lines, then OK | mode code is `modes.encode` |
+| `UNITMODES` | `UNITMODE name code payload-bytes rvs max-units` lines, then OK | mode code is `modes.encode` |
 
 `MODE` and `HEARD` lines stay unchanged. Ragtime parses a `MODE` line only when it has exactly 7
 words, and reads `HEARD`'s fourth word as the call (`Data2GLink.cpp`).
@@ -373,7 +366,6 @@ E1, code level (extend `scripts/ir_study.py`, about 200 lines):
 - Calibrate both MI forms (binary and GF(M)) to give d per mode and channel.
 - Receptions-to-decode for weak stations, to size the restart guard.
 - The quality gate's margin.
-- The family prefix test.
 
 E2, broadcast repair (`scripts/app_repair_study.py`, about 600 lines):
 
@@ -391,7 +383,6 @@ E2, broadcast repair (`scripts/app_repair_study.py`, about 600 lines):
   - S2p: S1 + retention, with the next RV of the same parity units.
   - S2: S2p + per-unit feedback and §3.3's policy.
   - S3: proactive copies.
-  - S4: families.
 - Conditions:
   - requests charged at their real size and airtime in each asker's gear, with loss and collisions
     among the askers;
@@ -406,7 +397,7 @@ Gates: at least 1 dB at the weakest receiver's 10% point on two fading channels.
 |---|---|---|
 | 1 | nothing | E1 and E2 tables in this doc |
 | 2 | S1 beats S1' | units, RV 0, no retention: `T_UNITS`, `unit_mask`, units-only v4 bursts, 0x06 UNIT_OUT/UNIT_IN, `BCAST UNITS`, `UNITMODES`, `core/monitor` display |
-| 3 | S2p beats S1 | the soft store (§2b), RVs, `BCAST SOFT`; families only if S4 beats S2p; §3.3 feedback only if S2 beats S2p (app side) |
+| 3 | S2p beats S1 | the soft store (§2b), RVs, `BCAST SOFT`; §3.3 feedback only if S2 beats S2p (app side) |
 | 4 | user and Jeff decide (Q5) | export/import |
 | 5 | | Ragtime adoption, in its repo |
 
@@ -432,7 +423,7 @@ Acceptance tests per step:
 Export/import (Q5, two positions):
 
 - For: Ragtime said it tentatively wanted it, so soft data survives a host restart. Design if built:
-  - one SOFT_RECORD per entry: magic, format version, family descriptor, a fingerprint of the code
+  - one SOFT_RECORD per entry: magic, format version, code descriptor, a fingerprint of the code
     tables, the name, quantisation, receptions and times, R, extents, the int8 values, CRC-32;
   - 46 B plus 4 B an extent plus the values, so about 1-12 KB a unit;
   - import re-arms an entry only if none is held (never adds into one), and is refused on any check
@@ -451,7 +442,8 @@ Export/import (Q5, two positions):
 - Q4, store defaults (32 MB, 2 h): open, for the user.
 - Q5, export/import: open, for the user and Jeff (§7).
 - Q6, data2g-bulk: prior art only.
-- Q7, cross-mode combining in families: kept as cheap mechanism, gated on E1 and E2 S4 (§2e). The
-  ARQ groundwork and family consolidation are in `docs/code-families-future.md`.
+- Q7, cross-mode combining in families: not planned. The payoff measured was minimal; the
+  investigation, with the ARQ and consolidation sketches, is recorded in
+  `docs/code-families-future.md` (§2e).
 - Q8, control-lost unit bursts: erasures. No back-reference, since nothing measured asks for one.
   DUP and contiguous runs are the levers (§2a).

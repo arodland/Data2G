@@ -1,9 +1,9 @@
 # Code families: future ARQ and ladder work
 
-Status: future, out of scope. Split out of `docs/app-soft-plan.md` (PR #133) on 2026-10-29, so that
-plan's review stays on broadcast units. Nothing here is proposed for building yet. It records why
-the unit store is keyed by code family (`docs/app-soft-plan.md` §2e) and what that could later
-open up.
+Status: a record of an investigation, not a plan. Split out of `docs/app-soft-plan.md` (PR #133) on
+2026-10-29. The payoff measured was minimal (§2 below: today's families would recover 0.1-0.2% of
+ARQ codewords), so nothing here is planned, and the unit store keys by submode
+(`docs/app-soft-plan.md` §2e).
 
 ## 1. ARQ mode changes within a family
 
