@@ -28,7 +28,6 @@ from data2g import modem
 from data2g.arq import phy as PHY
 from data2g.arq.modes import MODES, is_cpm
 from data2g.config import FS, LEADIN_SAMPLES
-from data2g.receiver import receive_any
 from data2g.waveform.dsp import freq_correct, to_baseband
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -41,35 +40,19 @@ CELLS = [("mpg", -4.0), ("mpp", -4.0), ("mpd", 0.0), ("mpg", 0.0), ("mpp", 0.0),
 
 def genie_receive(y: np.ndarray, spec, n_cw: int) -> dict | None:
     """receive() with acquisition and header replaced by the truth."""
-    start = int(G.PAD_S * FS) + LEADIN_SAMPLES
-    z = freq_correct(to_baseband(y), G.CFO_HZ)
-    hd = modem._read_header(z, start, spec.sync_band)
-    v = (spec.index << 6) | (n_cw - 1)
-    hd.update(hdr=(spec, n_cw), word=(v << 6) | modem.crc6(v))
-    acq = SimpleNamespace(freq_offset=G.CFO_HZ, preamble_start=start)
-    real = modem._best_header
-    modem._best_header = lambda *a, **k: (hd, acq, z)
+    known = dict(spec=spec, n_cw=n_cw, cfo=G.CFO_HZ, start=int(G.PAD_S * FS) + LEADIN_SAMPLES)
     try:
-        return modem.receive(y)
+        return modem.receive(y, known=known)
     except modem.SyncError:
         return None
-    finally:
-        modem._best_header = real
 
 
 class GeniePhy(LS.AuditPhy):
-    def hear(self, x, t0):
-        self.y = self.ch.apply(x, t0)
-        try:
-            return receive_any(self.y, lead=int(G.PAD_S * FS) + FS // 2)
-        except modem.SyncError:
-            return None
-
     def send(self, burst, t0):
         out = super().send(burst, t0)
         row, spec = self.rows[-1], MODES[burst.submode]
         if not is_cpm(spec):
-            g = genie_receive(self.y, spec, len(burst.slots))
+            g = genie_receive(self.last_y, spec, len(burst.slots))
             row["genie_ctl"] = int(g is not None and LS.ctl_decoded(g, burst.slots))
             rx = PHY.ModemRx(g, {}) if g is not None else None
             row["genie_data_ok"] = sum(1 for i, s in enumerate(burst.slots)
