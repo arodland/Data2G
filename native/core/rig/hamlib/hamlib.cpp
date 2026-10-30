@@ -180,14 +180,14 @@ public:
         require_open();
         // RIG_PTT_ON, not ON_MIC: on a MICDATA rig they differ (TX vs TX0).
         const ptt_t key = config_.ptt_audio == PttAudio::Data && config_.ptt_method == PttMethod::Cat ? RIG_PTT_ON_DATA : RIG_PTT_ON;
-        const int rc = rig_set_ptt(rig_, RIG_VFO_CURR, on ? key : RIG_PTT_OFF);
+        const int rc = reconnecting([&] { return rig_set_ptt(rig_, RIG_VFO_CURR, on ? key : RIG_PTT_OFF); });
         if (rc != RIG_OK) throw RigError(hamlib_error(on ? "PTT on failed" : "PTT off failed", rc));
     }
 
     double frequency_hz() override {
         require_open();
         freq_t freq = 0;
-        const int rc = rig_get_freq(rig_, RIG_VFO_CURR, &freq);
+        const int rc = reconnecting([&] { return rig_get_freq(rig_, RIG_VFO_CURR, &freq); });
         if (rc != RIG_OK) throw RigError(hamlib_error("could not read frequency", rc));
         return static_cast<double>(freq);
     }
@@ -204,6 +204,19 @@ public:
     }
 
 private:
+    // A rigctld can drop the connection between overs (seen with
+    // kappanhang, polling off), and the next command finds the dead
+    // socket: EOF on read, then EPIPE, both RIG_EIO. Reconnect and retry
+    // once; a failed reopen throws its own "could not open the rig".
+    template <class Call>
+    int reconnecting(Call call) {
+        const int rc = call();
+        if (rc != -RIG_EIO) return rc;
+        close();
+        open();
+        return call();
+    }
+
     void require_open() const {
         if (rig_ == nullptr || !open_) throw RigError("the rig is not open");
     }

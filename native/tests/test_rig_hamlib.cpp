@@ -208,15 +208,19 @@ void test_net_rigctl() {
     const std::string port = std::to_string(free_port());
     const char* argv[] = {rigctld.c_str(), "-m", "1", "-T", "127.0.0.1", "-t", port.c_str(), nullptr};
     pid_t pid = 0;
-    if (posix_spawn(&pid, rigctld.c_str(), nullptr, nullptr, const_cast<char**>(argv), environ) != 0) {
-        check::fail("rigctld", "could not start " + rigctld);
-        return;
-    }
-    for (int i = 0; i < 250 && !listening(std::stoi(port)); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    // Let rigctld finish with the probe's connection: a client connecting
-    // microseconds after the probe closed failed rig_open 5 runs in 6 (short
-    // read in dump_state); never when slowed down (strace, or rigctl's startup).
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    auto spawn = [&] {
+        if (posix_spawn(&pid, rigctld.c_str(), nullptr, nullptr, const_cast<char**>(argv), environ) != 0) {
+            check::fail("rigctld", "could not start " + rigctld);
+            return false;
+        }
+        for (int i = 0; i < 250 && !listening(std::stoi(port)); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        // Let rigctld finish with the probe's connection: a client connecting
+        // microseconds after the probe closed failed rig_open 5 runs in 6 (short
+        // read in dump_state); never when slowed down (strace, or rigctl's startup).
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        return true;
+    };
+    if (!spawn()) return;
 
     rig::HamlibConfig cfg;  // the defaults are the host's: model 2
     cfg.device = "127.0.0.1:" + port;
@@ -252,6 +256,18 @@ void test_net_rigctl() {
     }
     check::is_true(ok, "model 2 keys through rigctld");
     check::is_true(controller.keyed_since_open(), "rigctld: keyed: exit sends PTT off");  // (c)
+    // A rigctld that dropped us between overs (kappanhang did): the next
+    // PTT finds a dead socket, reconnects, and still keys. SIGKILL: SIGTERM
+    // left rigctld running (waitpid hung) with our client connected.
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    if (!spawn()) return;
+    try {
+        controller.set_ptt(true);
+        controller.set_ptt(false);
+    } catch (const std::exception& e) {
+        check::fail("rigctld: PTT after a dropped connection", e.what());
+    }
     controller.stop();
     check::is_true(controller.wait_for_shutdown(5.0), "rigctld: worker closed the rig");
     {
