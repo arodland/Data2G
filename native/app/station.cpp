@@ -519,7 +519,7 @@ void Station::start() {
         // PTT
         rig::Keyer::Ptt ptt;
         rig::Keyer::MustRelease must_release;
-        if (a_.rig && a_.tci.empty()) {
+        if (a_.rig && !a_.tci) {
 #ifdef DATA2G_HAVE_RIG
             if (a_.rig_debug) rig::set_debug_sink([](const std::string& line) { log_line(INFO, "hamlib: " + line); });
             const bool polling = a_.rig_poll_interval > 0;
@@ -555,11 +555,11 @@ void Station::start() {
         const double lead_s = a_.tx_lead_ms / 1000.0;
         cap_ = std::make_unique<audio::CaptureFifo>(config::FS);
         const auto report = [](const std::string& s) { log_line(ERROR, s); };
-        if (!a_.tci.empty()) {
+        if (a_.tci) {
 #ifdef DATA2G_HAVE_TCI
             rate_ = a_.sample_rate;
             play_ = std::make_unique<audio::PlaybackFifo>(rate_, lead_s);
-            const auto [host, port] = tci_address(a_.tci).value();
+            const auto [host, port] = tci_address(a_.tci_host).value();
             const std::string mod = a_.rig_mode == "usb" ? "usb" : a_.rig_mode == "pkt_usb" ? "digu" : "";
             tci_ = std::make_unique<Tci>(host, port, rate_, mod, *cap_, *play_);
             Tci* t = tci_.get();

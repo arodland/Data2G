@@ -149,7 +149,8 @@ void run(bool chrono) {
     server.chrono = chrono;
     app::Args a;
     a.mycall = "N0TX";
-    a.tci = "127.0.0.1:" + std::to_string(server.port());
+    a.tci = true;
+    a.tci_host = "127.0.0.1:" + std::to_string(server.port());
     a.rig_mode = "pkt_usb";
     a.command_port = free_port_triple();
     a.kiss_port = a.command_port + 2;

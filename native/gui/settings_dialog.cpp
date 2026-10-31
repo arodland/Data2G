@@ -116,7 +116,8 @@ app::Args load_settings(QSettings& s, app::Args a) {
     if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
     if (s.contains("input_device")) a.input_device = opt(s.value("input_device").toString());
     if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
-    a.tci = s.value("tci", qs(a.tci)).toString().toStdString();
+    a.tci = s.value("tci", a.tci).toBool();
+    a.tci_host = str("tci_host", a.tci_host);
     a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
     a.output_volume = s.value("output_volume", a.output_volume).toDouble();
     a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
@@ -155,7 +156,8 @@ void save_settings(QSettings& s, const app::Args& a) {
     s.setValue("mycall", qs(a.mycall));
     s.setValue("input_device", qs(a.input_device));
     s.setValue("output_device", qs(a.output_device));
-    s.setValue("tci", qs(a.tci));
+    s.setValue("tci", a.tci);
+    s.setValue("tci_host", qs(a.tci_host));
     s.setValue("sample_rate", a.sample_rate);
     s.setValue("output_volume", a.output_volume);
     s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);
@@ -191,7 +193,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     auto* general = new QWidget;
     auto* top = new QVBoxLayout(general);
     tabs->addTab(general, tr("Station"));
-    tabs->addTab(rig_tab(a), tr("Rig"));
+    tabs->addTab(rig_tab(a, inputs, outputs), tr("Rig"));
     const auto group = [&](const QString& title) {
         auto* g = new QGroupBox(title);
         auto* f = new QFormLayout(g);
@@ -284,41 +286,6 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     noise_row->addWidget(noise_label);
     link->addRow(tr("Noise rule"), noise_row);
 
-    auto* audio = group(tr("Audio"));
-    tci_ = new QLineEdit(qs(a.tci));
-    tci_->setObjectName(QStringLiteral("tci"));
-    tci_->setPlaceholderText(tr("off: the sound card and Hamlib"));
-    tci_->setToolTip(tr("A TCI server (ExpertSDR, Thetis, AetherSDR...), host or host:port (port 40001 by default): "
-                        "the radio's audio, PTT and dial over the network. The devices below and the Rig tab are then "
-                        "unused, except its Mode on connect (USB or DIGU). Sample rate 8000, 24000 or 48000."));
-    audio->addRow(tr("TCI server"), tci_);
-    input_ = new QComboBox;
-    fill_devices(input_, inputs, a.input_device);
-    audio->addRow(tr("Input"), input_);
-    output_ = new QComboBox;
-    fill_devices(output_, outputs, a.output_device);
-    audio->addRow(tr("Output"), output_);
-    rate_ = new QComboBox;
-    for (int r : {8000, 16000, 24000, 32000, 48000, 96000}) rate_->addItem(QString::number(r), r);
-    if (rate_->findData(a.sample_rate) < 0) rate_->addItem(QString::number(a.sample_rate), a.sample_rate);
-    rate_->setCurrentIndex(rate_->findData(a.sample_rate));
-    audio->addRow(tr("Sample rate (Hz)"), rate_);
-    volume_ = new QDoubleSpinBox;
-    volume_->setRange(-60.0, 20.0);
-    volume_->setDecimals(1);
-    volume_->setSuffix(tr(" dB"));
-    volume_->setValue(a.output_volume);
-    volume_->setToolTip(tr("0 dB puts a burst's peak at full scale"));
-    audio->addRow(tr("Output volume"), volume_);
-    const auto sync_tci = [this](const QString& t) {
-        input_->setEnabled(t.trimmed().isEmpty());
-        output_->setEnabled(t.trimmed().isEmpty());
-    };
-    sync_tci(tci_->text());
-    connect(tci_, &QLineEdit::textChanged, this, sync_tci);
-    if (!a.audio_io.empty())
-        audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
-
     auto* net = group(tr("Ports"));
     listen_ = new QLineEdit(qs(a.listen));
     listen_->setToolTip(tr("The address the VARA and KISS ports listen on: 127.0.0.1 for this machine only, "
@@ -368,10 +335,60 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
 }
 
 // SSTVAE's Rig tab (gui/settings_dialog.cpp rig_tab), in a plain form.
-QWidget* SettingsDialog::rig_tab(const app::Args& a) {
+QWidget* SettingsDialog::rig_tab(const app::Args& a, const QStringList& inputs, const QStringList& outputs) {
     auto* page = new QWidget;
-    auto* form = rig_form_ = new QFormLayout(page);
+    auto* top = new QVBoxLayout(page);
+    const auto box = [top](const QString& title) {
+        auto* g = new QGroupBox(title);
+        top->addWidget(g);
+        return g;
+    };
 
+    auto* choose = new QFormLayout;
+    top->addLayout(choose);
+    interface_ = new QComboBox;
+    interface_->setObjectName(QStringLiteral("interface"));
+    interface_->addItem(tr("Sound card + Hamlib"), false);
+    interface_->addItem(tr("TCI"), true);
+    interface_->setCurrentIndex(a.tci ? 1 : 0);
+    choose->addRow(tr("Radio interface"), interface_);
+
+    tci_box_ = box(tr("TCI"));
+    tci_box_->setObjectName(QStringLiteral("tci"));
+    auto* tci = new QFormLayout(tci_box_);
+    tci_host_ = new QLineEdit(qs(a.tci_host));
+    tci_host_->setObjectName(QStringLiteral("tci_host"));
+    tci_host_->setPlaceholderText(qs(app::Args{}.tci_host));
+    tci_host_->setToolTip(tr("host:port of the SDR program's TCI server"));
+    tci->addRow(tr("Server"), tci_host_);
+
+    auto* audio_box = box(tr("Audio"));
+    auto* audio = audio_form_ = new QFormLayout(audio_box);
+    input_ = new QComboBox;
+    fill_devices(input_, inputs, a.input_device);
+    audio->addRow(tr("Input"), input_);
+    output_ = new QComboBox;
+    fill_devices(output_, outputs, a.output_device);
+    audio->addRow(tr("Output"), output_);
+    rate_ = new QComboBox;
+    for (int r : {8000, 16000, 24000, 32000, 48000, 96000}) rate_->addItem(QString::number(r), r);
+    if (rate_->findData(a.sample_rate) < 0) rate_->addItem(QString::number(a.sample_rate), a.sample_rate);
+    rate_->setCurrentIndex(rate_->findData(a.sample_rate));
+    rate_->setToolTip(tr("TCI: 8000, 24000 or 48000"));
+    audio->addRow(tr("Sample rate (Hz)"), rate_);
+    volume_ = new QDoubleSpinBox;
+    volume_->setRange(-60.0, 20.0);
+    volume_->setDecimals(1);
+    volume_->setSuffix(tr(" dB"));
+    volume_->setValue(a.output_volume);
+    volume_->setToolTip(tr("0 dB puts a burst's peak at full scale"));
+    audio->addRow(tr("Output volume"), volume_);
+    if (!a.audio_io.empty())
+        audio->addRow(new QLabel(tr("Audio is --audio-io %1 for this run.").arg(qs(a.audio_io))));
+
+    hamlib_box_ = box(tr("Hamlib"));
+    hamlib_box_->setObjectName(QStringLiteral("hamlib"));
+    auto* form = rig_form_ = new QFormLayout(hamlib_box_);
     rig_on_ = new QCheckBox(tr("Use rig control (PTT through Hamlib)"));
     rig_on_->setChecked(a.rig);
     form->addRow(rig_on_);
@@ -425,12 +442,6 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a) {
                                "Transmit audio: the input CAT keying selects, on rigs with two."));
     note->setWordWrap(true);
     form->addRow(note);
-    rig_mode_ = choice("rig_mode", a.rig_mode, {tr("None"), tr("USB"), tr("Data/Pkt")});
-    form->addRow(tr("Mode on connect"), rig_mode_);
-
-    ptt_on_ = spin(0, 2000, a.ptt_on_delay_ms, tr(" ms"));
-    ptt_off_ = spin(0, 2000, a.ptt_off_delay_ms, tr(" ms"));
-    form->addRow(tr("PTT delays"), row({new QLabel(tr("On")), ptt_on_, new QLabel(tr("Off")), ptt_off_}));
     timeout_ = spin(1, 60000, a.rig_timeout_ms, tr(" ms"));
     retries_ = spin(0, 10, a.rig_retries);
     form->addRow(tr("Hamlib"), row({new QLabel(tr("Timeout")), timeout_, new QLabel(tr("Retries")), retries_}));
@@ -461,6 +472,17 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a) {
     form->addRow(tests);
 #endif
 
+    // both interfaces
+    auto* tx = new QFormLayout(box(tr("Transmit")));
+    rig_mode_ = choice("rig_mode", a.rig_mode, {tr("None"), tr("USB"), tr("Data/Pkt")});
+    tx->addRow(tr("Mode on connect"), rig_mode_);
+    ptt_on_ = spin(0, 2000, a.ptt_on_delay_ms, tr(" ms"));
+    ptt_off_ = spin(0, 2000, a.ptt_off_delay_ms, tr(" ms"));
+    tx->addRow(tr("PTT delays"), row({new QLabel(tr("On")), ptt_on_, new QLabel(tr("Off")), ptt_off_}));
+    top->addStretch();
+
+    connect(interface_, &QComboBox::currentIndexChanged, this, [this] { sync_interface(); });
+    sync_interface();
     connect(rig_model_, &QComboBox::currentTextChanged, this, [this] { sync_rig(); });
     connect(ptt_method_, &QComboBox::currentIndexChanged, this, [this] { sync_rig(); });
     sync_rig();
@@ -478,6 +500,14 @@ int SettingsDialog::rig_model() const {
     if (open >= 0 && close > open)
         if (const int n = text.mid(open + 1, close - open - 1).toInt(&ok); ok) return n;
     return base_.rig_model;
+}
+
+void SettingsDialog::sync_interface() {
+    const bool tci = interface_->currentData().toBool();
+    tci_box_->setVisible(tci);
+    hamlib_box_->setVisible(!tci);
+    set_row_visible(audio_form_, input_, !tci);
+    set_row_visible(audio_form_, output_, !tci);
 }
 
 void SettingsDialog::sync_rig() {
@@ -550,7 +580,8 @@ void SettingsDialog::test_rig(bool key_ptt) {
 
 void SettingsDialog::apply_to(app::Args& a) const {
     a.mycall = opt(mycall_->text());
-    a.tci = tci_->text().trimmed().toStdString();
+    a.tci = interface_->currentData().toBool();
+    a.tci_host = tci_host_->text().trimmed().isEmpty() ? app::Args{}.tci_host : tci_host_->text().trimmed().toStdString();
     a.input_device = opt(input_->currentData().toString());
     a.output_device = opt(output_->currentData().toString());
     a.sample_rate = rate_->currentData().toInt();
