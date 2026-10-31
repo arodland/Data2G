@@ -14,7 +14,8 @@
 #   DATA2G_AUDIO_BACKEND   qt (Qt Multimedia) or miniaudio (vendored in
 #                          third_party/; needs no Qt Multimedia)
 #   DATA2G_BUILD_HOST      AUTO/ON/OFF: data2g-host (Qt Core + Network; sound
-#                          cards when Qt Multimedia is there, PTT with RIG)
+#                          cards when Qt Multimedia is there, PTT with RIG,
+#                          TCI when Qt WebSockets is there)
 #   DATA2G_BUILD_GUI       AUTO/ON/OFF: data2g-gui (Qt Widgets, Network,
 #                          Multimedia); ON fails naming what is missing
 #   DATA2G_BUILD_RIG       data2g_rig (libhamlib, pinned: cmake/hamlib.cmake;
@@ -190,6 +191,16 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
       else()
         message(STATUS "Qt6 DBus not found: real-time audio threads only by direct permission, not RealtimeKit")
       endif()
+    endif()
+    # TCI (app/tci.*): the radio's audio, PTT and dial over a WebSocket, in place of a sound card and Hamlib
+    find_package(Qt6 6.2 COMPONENTS WebSockets QUIET)
+    if(Qt6WebSockets_FOUND)
+      target_sources(data2g_station PRIVATE app/tci.cpp)
+      target_link_libraries(data2g_station PUBLIC Qt6::WebSockets)
+      target_compile_definitions(data2g_station PUBLIC DATA2G_HAVE_TCI)
+      message(STATUS "TCI (Qt WebSockets)")
+    else()
+      message(STATUS "Qt6 WebSockets not found: no --tci")
     endif()
     if(TARGET data2g_audio)
       target_link_libraries(data2g_station PUBLIC data2g_audio)

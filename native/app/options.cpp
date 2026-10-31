@@ -38,8 +38,8 @@ const char* USAGE =
     "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
     "                   [--record | --no-record] [--record-dir RECORD_DIR] [--log-level LOG_LEVEL]\n"
     "                   [--stats-interval S] [--list-modes] [--noise-rule W]\n"
-    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT] [--threads N]\n"
-    "                   [--realtime | --no-realtime]\n"
+    "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT]\n"
+    "                   [--tci | --no-tci] [--tci-host HOST[:PORT]] [--threads N] [--realtime | --no-realtime]\n"
     "                   [--live-constellation | --no-live-constellation]\n"
     "                   [--dd-budget S] [--decoder-effort N] [--cw-id {off,add,only}] [--cw-wpm WPM]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
@@ -93,6 +93,10 @@ const char* HELP =
     "  --audio-io pipe:IN,OUT  no sound card: raw float32 8 kHz mono read from IN and written to OUT (files\n"
     "                        or named pipes), both at real time, silence while not keyed. Two hosts cross-\n"
     "                        connect through two mkfifo pipes. --sample-rate and the devices are then unused.\n"
+    "  --tci, --no-tci       the radio over TCI (ExpertSDR, Thetis, AetherSDR...): audio, PTT and the dial,\n"
+    "                        in place of the sound card and Hamlib. --sample-rate 8000, 24000 or 48000;\n"
+    "                        --rig-mode usb or pkt_usb sets USB or DIGU on connect (default: off)\n"
+    "  --tci-host HOST[:PORT]  the TCI server (default localhost:50001)\n"
     "  --threads N           threads for decode and sync, the calling one included (default: min(4, cores / 2))\n"
     "  --realtime, --no-realtime\n"
     "                        real-time scheduling for the transmit and sound card threads (Linux: directly\n"
@@ -172,6 +176,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--realtime", {&a.realtime, true}},   {"--no-realtime", {&a.realtime, false}},
         {"--live-constellation", {&a.live_constellation, true}},
         {"--no-live-constellation", {&a.live_constellation, false}},
+        {"--tci", {&a.tci, true}},     {"--no-tci", {&a.tci, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
         {"--record", {&a.record, true}}, {"--no-record", {&a.record, false}},
         {"--rig-debug", {&a.rig_debug, true}}, {"--no-rig-debug", {&a.rig_debug, false}}};
@@ -203,6 +208,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--stats-interval", [&](auto& o, auto& v) { a.stats_interval = d_(o, v); }},
         {"--noise-rule", [&](auto& o, auto& v) { a.noise_rule = d_(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
+        {"--tci-host", [&](auto&, auto& v) { a.tci_host = v; }},
         {"--threads", [&](auto& o, auto& v) { pool::set_threads(i_(o, v)); }},
         {"--dd-budget", [&](auto& o, auto& v) { a.dd_budget = d_(o, v); }},
         {"--decoder-effort", [&](auto& o, auto& v) { a.decoder_effort = i_(o, v); }},
@@ -271,6 +277,18 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
 }
 
 int kiss_cap(int hz) { return hz == 500 ? 0 : 2; }
+
+std::optional<std::pair<std::string, int>> tci_address(const std::string& s) {
+    const auto colon = s.rfind(':');
+    const std::string host = s.substr(0, colon);
+    if (host.empty()) return std::nullopt;
+    if (colon == std::string::npos) return std::pair{host, 50001};
+    const std::string port = s.substr(colon + 1);
+    if (port.empty() || port.size() > 5 || port.find_first_not_of("0123456789") != std::string::npos) return std::nullopt;
+    const int p = std::stoi(port);
+    if (p < 1 || p > 65535) return std::nullopt;
+    return std::pair{host, p};
+}
 
 namespace {
 
@@ -356,6 +374,12 @@ std::optional<std::string> check(const Args& a) {
     if (!(a.noise_rule >= 0)) return "--noise-rule: must be 0 (off) or more";
     if (!(a.dd_budget >= 0)) return "--dd-budget: must be 0 (no DD) or more";
     if (a.decoder_effort < 1) return "--decoder-effort: must be 1 or more";
+    if (!tci_address(a.tci_host)) return "--tci-host " + a.tci_host + ": want HOST or HOST:PORT";
+    if (a.tci) {
+        if (!a.audio_io.empty()) return "--tci and --audio-io: one or the other";
+        if (a.sample_rate != 8000 && a.sample_rate != 24000 && a.sample_rate != 48000)
+            return "--tci: --sample-rate must be 8000, 24000 or 48000 (TCI's rates that are multiples of 8000)";
+    }
     if (a.cw_id != "off" && a.cw_id != "add" && a.cw_id != "only")
         return "--cw-id: invalid choice: '" + a.cw_id + "' (choose from off, add, only)";
     if (!(a.cw_wpm >= 15 && a.cw_wpm <= 40)) return "--cw-wpm: 15-40";

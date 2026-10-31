@@ -6,9 +6,11 @@
 // Devices are stored by name, which select_device() matches as a
 // substring: indices renumber when a USB card comes or goes.
 //
-// The Rig tab is SSTVAE's (WSJT-X's Radio tab): a Hamlib model picker with
-// search, the device and serial fields only where the model's port type
-// uses them, PTT method, and Test CAT / Test PTT on a worker thread.
+// The Rig tab picks the radio interface first: a sound card and Hamlib, or
+// TCI; only that interface's settings show. Its Hamlib part is SSTVAE's
+// (WSJT-X's Radio tab): a model picker with search, the device and serial
+// fields only where the model's port type uses them, PTT method, and Test
+// CAT / Test PTT on a worker thread.
 #pragma once
 
 #include <QDialog>
@@ -20,6 +22,7 @@ class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
+class QGroupBox;
 class QLineEdit;
 class QPushButton;
 class QSettings;
@@ -28,7 +31,7 @@ class QSpinBox;
 
 namespace data2g::gui {
 
-// The persisted subset of `base`'s fields: callsign, devices, sample rate,
+// The persisted subset of `base`'s fields: callsign, interface (TCI), devices, sample rate,
 // volume, PTT and rig, ports, recording, decode worker, live constellation.
 app::Args load_settings(QSettings& s, app::Args base = {});
 void save_settings(QSettings& s, const app::Args& a);
@@ -42,14 +45,19 @@ public:
     void apply_to(app::Args& a) const;
 
 private:
-    QWidget* rig_tab(const app::Args& a);
+    QWidget* rig_tab(const app::Args& a, const QStringList& inputs, const QStringList& outputs);
     int rig_model() const;
     void sync_rig();  // which rig fields show (model's port type) and are enabled (PTT method)
+    void sync_interface();  // TCI or sound card + Hamlib: which boxes and audio rows show
     void test_rig(bool key_ptt);
 
     app::Args base_;  // what apply_to keeps for fields the dialog doesn't show
     QWidget *serial_row_, *serial_row2_, *lines_row_;
     QLineEdit* mycall_;
+    QComboBox* interface_;  // sound card + Hamlib (false) or TCI (true)
+    QLineEdit* tci_host_;
+    QGroupBox *tci_box_, *hamlib_box_;
+    QFormLayout* audio_form_;
     QComboBox *input_, *output_, *rate_;
     QDoubleSpinBox* volume_;
     QSpinBox *ptt_on_, *ptt_off_;

@@ -118,12 +118,12 @@ jobs:
       - uses: lukka/get-cmake@v4.4.0
       # One Qt on every platform, pinned like Hamlib and zlib. 6.11.1 is
       # SSTVAE's (6.8 LTS drew its waterfall wrong; the GUI here is the same
-      # stack). qtmultimedia is the only extra module.
+      # stack). The extra modules: qtmultimedia (sound cards), qtwebsockets (TCI).
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.11.1"
-          modules: qtmultimedia
+          modules: qtmultimedia qtwebsockets
           cache: true
           # The action fills `arch` for Windows and Android only; ARM Linux
           # must name Qt's arm64 desktop package itself.

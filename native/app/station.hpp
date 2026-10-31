@@ -18,7 +18,7 @@
 // The transmit, capture and playback threads ask for real-time scheduling
 // (--realtime, app/realtime.hpp): they do a little work and block. The
 // engine and decode threads compute for long stretches and are left alone.
-// - the rig controller's worker (Hamlib).
+// - the rig controller's worker (Hamlib), or the TCI client's (app/tci.hpp).
 // The Host (VARA semantics) lives on the session stage: the owner reaches it
 // with Engine::post(); what it says comes back as queued calls.
 //
@@ -82,6 +82,7 @@ namespace data2g::app {
 class Port;
 class KissServer;
 class Transmitter;
+class Tci;
 
 // Bad options found only at start() (argparse would have exited with 2).
 struct UsageError : std::runtime_error {
@@ -190,6 +191,7 @@ private:
     std::unique_ptr<audio::PlaybackFifo> play_;
     std::unique_ptr<audio::PipeIo> pipe_;
     std::unique_ptr<SoundCard> card_;
+    std::unique_ptr<Tci> tci_;  // --tci: the radio's audio, PTT and dial, in place of card_ and rig_
     std::unique_ptr<rig::RigController> rig_;
     std::unique_ptr<MonitorThread> monitor_;  // made in start(), before the engine runs
     std::atomic<bool> monitor_on_{false};
