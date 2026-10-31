@@ -127,7 +127,6 @@ ColumnLayout {
             Label { text: "Host" }
             TextField {
                 Layout.fillWidth: true
-                placeholderText: "192.168.1.10:4532"
                 text: pane.rig.host
                 inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
                 // Per keystroke: Back hides the keyboard without editingFinished.
@@ -136,7 +135,7 @@ ColumnLayout {
             Hint {
                 text: "With the radio set to \"Hamlib NET rigctl\" this is a computer running "
                       + "rigctld. With a real radio chosen instead, it is a serial-over-network "
-                      + "server such as ser2net. The port defaults to 4532."
+                      + "server such as ser2net. For example 192.168.1.10:4532; the port defaults to 4532."
             }
         }
 

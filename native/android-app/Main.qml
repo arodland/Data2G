@@ -163,7 +163,6 @@ ApplicationWindow {
                 TextField {
                     Layout.fillWidth: true
                     text: tnc.callsign
-                    placeholderText: "N0CALL"
                     inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
                     onTextEdited: tnc.callsign = text
                 }
