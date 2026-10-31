@@ -418,6 +418,14 @@ void test_the_control_lines_open_the_way_a_desktop_leaves_them() {
     config.rts = rig::LineState::High;
     p = rig::resolve_serial_params(config, defaults);
     check::is_true(p.dtr && p.rts, "resolve: as is an explicit high");
+
+    // An interface that keys on DTR high with RTS low (the "all-in-one cable"):
+    // both start low, and only DTR moves.
+    config.ptt_method = rig::PttMethod::Dtr;
+    config.dtr = rig::LineState::Default;
+    config.rts = rig::LineState::Low;
+    p = rig::resolve_serial_params(config, defaults);
+    check::is_true(!p.dtr && !p.rts, "resolve: DTR keying with RTS held low opens with both low");
 }
 
 void test_control_line_conflicts_are_refused() {

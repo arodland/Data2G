@@ -34,6 +34,10 @@ class RigSettings : public QObject {
     Q_PROPERTY(QStringList pttMethods READ pttMethods NOTIFY changed)
     Q_PROPERTY(QString pttAudio READ pttAudio WRITE setPttAudio NOTIFY changed)  // mic, data
     Q_PROPERTY(bool pttAudioSupported READ pttAudioSupported NOTIFY changed)
+    // Keying by one control line, the level the other is held at: default, high, low
+    // (rig_rts for DTR keying, rig_dtr for RTS keying). An interface that keys on
+    // DTR high and RTS low together needs "low" here.
+    Q_PROPERTY(QString otherLine READ otherLine WRITE setOtherLine NOTIFY changed)
     Q_PROPERTY(QString error READ error NOTIFY changed)
 
 public:
@@ -62,6 +66,8 @@ public:
     QString pttAudio() const;
     void setPttAudio(const QString& a);
     bool pttAudioSupported() const;
+    QString otherLine() const;
+    void setOtherLine(const QString& state);
     QString error() const { return error_; }
 
     // Rows {number, label} matching `query`, capped (Hamlib knows hundreds).

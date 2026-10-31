@@ -135,7 +135,12 @@ void RigSettings::setBaud(int b) {
 
 QString RigSettings::pttMethod() const { return QString::fromStdString(load_args().ptt_method); }
 void RigSettings::setPttMethod(const QString& m) {
-    edit([&](auto& a) { a.ptt_method = m.toStdString(); });
+    edit([&](auto& a) {
+        if (a.ptt_method == m.toStdString()) return;
+        a.ptt_method = m.toStdString();
+        // A level held for the old keying line could be the new keying line's.
+        a.rig_dtr = a.rig_rts = "default";
+    });
     Q_EMIT changed();
 }
 // RFCOMM has no control lines: DTR and RTS aren't offered over Bluetooth.
@@ -156,6 +161,15 @@ bool RigSettings::pttAudioSupported() const {
 #else
     return false;
 #endif
+}
+
+QString RigSettings::otherLine() const {
+    const auto a = load_args();
+    return QString::fromStdString(a.ptt_method == "rts" ? a.rig_dtr : a.rig_rts);
+}
+void RigSettings::setOtherLine(const QString& state) {
+    edit([&](auto& a) { (a.ptt_method == "rts" ? a.rig_dtr : a.rig_rts) = state.toStdString(); });
+    Q_EMIT changed();
 }
 
 QVariantList RigSettings::findModels(const QString& query) const {

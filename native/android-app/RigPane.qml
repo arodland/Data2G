@@ -177,6 +177,26 @@ ColumnLayout {
             Component.onCompleted: currentIndex = Math.max(0, model.indexOf(pane.rig.pttAudio))
             onActivated: pane.rig.pttAudio = currentValue
         }
+        ComboBox {
+            id: otherLineBox
+            Layout.fillWidth: true
+            visible: pane.rig.pttMethod === "dtr" || pane.rig.pttMethod === "rts"
+            readonly property string line: pane.rig.pttMethod === "dtr" ? "RTS" : "DTR"
+            model: ["default", "high", "low"]
+            displayText: line + " while connected: " + (currentValue === "high" ? "held high"
+                         : currentValue === "low" ? "held low" : "default (high)")
+            delegate: ItemDelegate {
+                required property var modelData
+                required property int index
+                width: otherLineBox.width
+                text: modelData === "default" ? "Default (high)" : "Held " + modelData
+                highlighted: otherLineBox.highlightedIndex === index
+            }
+            function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.otherLine)) }
+            Component.onCompleted: sync()
+            onVisibleChanged: sync()
+            onActivated: pane.rig.otherLine = currentValue
+        }
 
         Hint {
             text: pane.rig.error
