@@ -45,8 +45,10 @@ class QTcpSocket;
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <cstddef>
+#include <functional>
 #include <span>
 
 #include "app/log.hpp"
@@ -73,7 +75,9 @@ namespace monitor {
 struct Dump;
 }
 namespace rig {
+class RigBackend;
 class RigController;
+struct HamlibConfig;
 }  // namespace rig
 }  // namespace data2g
 
@@ -118,6 +122,11 @@ public:
     ~Station();  // stop()s
     Station(const Station&) = delete;
     Station& operator=(const Station&) = delete;
+
+    // What start() opens the rig with; empty: Hamlib (rig::make_hamlib_backend).
+    // The Android app's reaches USB and Bluetooth radios (rig/bridged.hpp).
+    using RigFactory = std::function<std::unique_ptr<rig::RigBackend>(const rig::HamlibConfig&)>;
+    void set_rig_factory(RigFactory f) { rig_factory_ = std::move(f); }
 
     // Listens, opens audio and the rig, starts the threads. Throws
     // UsageError, std::invalid_argument (no such audio device) or
@@ -176,6 +185,7 @@ private:
     void tap(std::span<const double> x, bool tx);
 
     Args a_;
+    RigFactory rig_factory_;
     QObject ctx_;  // queued calls from other threads land here, on the owner's thread
     std::unique_ptr<kisslink::KissLink> link_;
     std::unique_ptr<arq::Engine> engine_;

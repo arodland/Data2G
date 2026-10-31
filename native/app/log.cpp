@@ -17,6 +17,7 @@ std::atomic<int> g_level{INFO};
 namespace {
 
 std::mutex g_log_mu;
+std::function<void(int, const std::string&)> g_sink;  // g_log_mu
 
 const char* level_name(int level) {
     switch (level) {
@@ -50,8 +51,16 @@ void log_line(int level, const std::string& msg) {
     const std::tm tm = local_tm(t);
     char stamp[32];
     std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm);
+    char head[64];
+    std::snprintf(head, sizeof head, "%s,%03d %s ", stamp, static_cast<int>(ms), level_name(level));
     std::lock_guard lock(g_log_mu);
-    std::fprintf(stderr, "%s,%03d %s %s\n", stamp, static_cast<int>(ms), level_name(level), msg.c_str());
+    std::fprintf(stderr, "%s%s\n", head, msg.c_str());
+    if (g_sink) g_sink(level, msg);
+}
+
+void set_log_sink(std::function<void(int, const std::string&)> sink) {
+    std::lock_guard lock(g_log_mu);
+    g_sink = std::move(sink);
 }
 
 void logf(int level, const char* fmt, ...) {

@@ -4,9 +4,6 @@
 // (NET rigctl) is a rigctld client: device "host:port", empty for
 // localhost:4532.
 //
-// Not lifted: serial_defaults() (only SSTVAE's Android bridge needs it; it
-// reads struct rig_caps the same way model_info() does here).
-//
 // The settings themselves (HamlibConfig, its enums, RigModel) are
 // rig/config.hpp, in data2g_core: only the functions here need libhamlib.
 #pragma once
@@ -19,6 +16,7 @@
 
 #include "rig/backend.hpp"
 #include "rig/config.hpp"
+#include "rig/transport.hpp"
 
 namespace data2g::rig {
 
@@ -30,6 +28,12 @@ std::vector<RigModel> list_models();
 std::optional<RigModel> model_info(int model);
 
 std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config);
+
+// What the model's backend would configure a serial port with (struct
+// rig_caps; baud is serial_rate_max, as rig_init takes it), for the bridged
+// path (rig/bridged.hpp), where Hamlib never opens the port. 9600 8-N-1 for
+// a model Hamlib does not know.
+SerialDefaults serial_defaults(int model);
 
 // Whether HamlibConfig::ptt_audio means anything to this model.
 bool supports_ptt_audio_source(int model);

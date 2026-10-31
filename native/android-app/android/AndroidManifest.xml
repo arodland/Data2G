@@ -1,0 +1,81 @@
+<?xml version="1.0"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.qtproject.example"
+    android:installLocation="auto"
+    android:versionCode="-- %%INSERT_VERSION_CODE%% --"
+    android:versionName="-- %%INSERT_VERSION_NAME%% --">
+    <!-- %%INSERT_PERMISSIONS -->
+    <!-- %%INSERT_FEATURES -->
+
+    <!-- Optional, so Play doesn't hide the app from phones without them: a
+         radio on VOX needs neither USB host nor Bluetooth. (No double
+         hyphens in comments here: XML forbids them, and aapt's error points
+         at a generated copy.) -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:smallScreens="true" />
+    <application
+        android:name="org.qtproject.qt.android.bindings.QtApplication"
+        android:hardwareAccelerated="true"
+        android:label="-- %%INSERT_APP_NAME%% --"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:enableOnBackInvokedCallback="false"
+        android:allowBackup="true"
+        android:fullBackupOnly="false">
+        <activity
+            android:name="org.cleverdomain.data2g.TncActivity"
+            android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
+            android:label="-- %%INSERT_APP_NAME%% --"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="-- %%INSERT_APP_LIB_NAME%% --" />
+            <meta-data
+                android:name="android.app.arguments"
+                android:value="-- %%INSERT_APP_ARGUMENTS%% --" />
+            <!-- Qt suspends its event loop in the background by default,
+                 and that loop serves the KISS and VARA ports and runs the
+                 service's start and stop. -->
+            <meta-data
+                android:name="android.app.background_running"
+                android:value="true" />
+        </activity>
+
+        <!-- The modem lives here, not in the activity. stopWithTask="false":
+             a swipe from Recents is handled by TncActivity, which stops the
+             modem cleanly before Qt exits the process. Microphone to receive,
+             mediaPlayback to transmit; a microphone service may only be
+             started from the foreground, so only the Start button starts it. -->
+        <service
+            android:name="org.cleverdomain.data2g.TncService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- Collects a lasting USB permission and disappears (UsbAttach.java). -->
+        <activity
+            android:name="org.cleverdomain.data2g.UsbAttach"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+    </application>
+</manifest>

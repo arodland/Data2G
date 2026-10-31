@@ -8,6 +8,9 @@ endfunction()
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
 list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot)\\.cpp$")
+if(WIN32)  # the rig bridge is POSIX only (core/rig/bridge.cpp)
+  list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_rig_bridged?\\.cpp$")
+endif()
 foreach(src ${DATA2G_TESTS})
   get_filename_component(stem ${src} NAME_WE)
   string(REGEX REPLACE "^test_" "" name ${stem})
@@ -16,6 +19,9 @@ endforeach()
 
 # Threads that must never hang: a wedge is a Timeout, not a stuck run.
 set_tests_properties(audio rig PROPERTIES TIMEOUT 120)
+if(NOT WIN32)
+  set_tests_properties(rig_bridge rig_bridged PROPERTIES TIMEOUT 180)
+endif()
 
 # The libhamlib backend against Hamlib's dummy rig, directly and through a
 # rigctld (model 2, the host's default path).

@@ -518,7 +518,7 @@ void Station::start() {
             const rig::HamlibConfig hc = hamlib_config(a_);
             rig::RigConfig rc;
             rc.poll_interval_s = a_.rig_poll_interval;  // 0: key only, as tnc.Rigctld
-            rig_->start(rig::make_hamlib_backend(hc), rc);
+            rig_->start(rig_factory_ ? rig_factory_(hc) : rig::make_hamlib_backend(hc), rc);
             rig::RigController* r = rig_.get();
             if (hc.ptt_method != rig::PttMethod::Vox) {
                 ptt = [set = r->ptt_function()](bool on) {  // no polls while keyed

@@ -1,4 +1,4 @@
-// The settings dialog, and the QSettings store behind it. The values are
+// The settings dialog over the QSettings store (app/settings.hpp). The values are
 // data2g-host's options (app::Args): what is saved is overridden by the
 // same flags on data2g-gui's command line. The dialog edits a copy and
 // writes back only through apply_to (on OK), so Cancel cancels.
@@ -15,6 +15,7 @@
 #include <QStringList>
 
 #include "app/options.hpp"
+#include "app/settings.hpp"
 
 class QCheckBox;
 class QComboBox;
@@ -27,11 +28,6 @@ class QSlider;
 class QSpinBox;
 
 namespace data2g::gui {
-
-// The persisted subset of `base`'s fields: callsign, devices, sample rate,
-// volume, PTT and rig, ports, recording, decode worker, live constellation.
-app::Args load_settings(QSettings& s, app::Args base = {});
-void save_settings(QSettings& s, const app::Args& a);
 
 class SettingsDialog : public QDialog {
     Q_OBJECT

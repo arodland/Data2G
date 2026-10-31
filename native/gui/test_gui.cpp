@@ -184,15 +184,15 @@ void test_settings(const QTemporaryDir& dir) {
     const app::Args a = persisted();
     {
         QSettings s(ini, QSettings::IniFormat);
-        gui::save_settings(s, a);
+        app::save_settings(s, a);
     }
     QSettings s(ini, QSettings::IniFormat);
-    const app::Args b = gui::load_settings(s);
+    const app::Args b = app::load_settings(s);
     check::is_true(b == a, "settings round trip through QSettings");
     // unset optionals come back unset
     const app::Args none;
-    gui::save_settings(s, none);
-    const app::Args c = gui::load_settings(s, a);
+    app::save_settings(s, none);
+    const app::Args c = app::load_settings(s, a);
     check::is_true(c == none, "cleared callsign and devices round trip");
 
     gui::SettingsDialog d(a, {QStringLiteral("Built-in"), QStringLiteral("USB Audio")}, {QStringLiteral("Built-in")});
@@ -215,11 +215,11 @@ void test_settings(const QTemporaryDir& dir) {
     legacy.setValue("rigctld_host", QStringLiteral("old.lan"));
     legacy.setValue("rigctld_port", 4534);
     legacy.setValue("host", QStringLiteral("0.0.0.0"));
-    const app::Args l = gui::load_settings(legacy);
+    const app::Args l = app::load_settings(legacy);
     check::is_true(l.rig && l.rig_device == "old.lan:4534" && l.listen == "0.0.0.0", "older settings: rigctld's address, host");
     legacy.setValue("rigctld_port", 0);
-    check::is_true(!gui::load_settings(legacy).rig, "older settings: rigctld port 0 is no rig");
-    gui::save_settings(legacy, l);
+    check::is_true(!app::load_settings(legacy).rig, "older settings: rigctld port 0 is no rig");
+    app::save_settings(legacy, l);
     check::is_true(!legacy.contains("rigctld_port") && !legacy.contains("host"), "...and saving drops the old keys");
 }
 

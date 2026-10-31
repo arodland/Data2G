@@ -12,7 +12,8 @@
 #   DATA2G_BUILD_QTAUDIO   AUTO/ON/OFF: data2g_audio (sound cards) and
 #                          data2g-audio-check
 #   DATA2G_AUDIO_BACKEND   qt (Qt Multimedia) or miniaudio (vendored in
-#                          third_party/; needs no Qt Multimedia)
+#                          third_party/; needs no Qt Multimedia). Android
+#                          always gets its own (core/audio/android/)
 #   DATA2G_BUILD_HOST      AUTO/ON/OFF: data2g-host (Qt Core + Network; sound
 #                          cards when Qt Multimedia is there, PTT with RIG)
 #   DATA2G_BUILD_GUI       AUTO/ON/OFF: data2g-gui (Qt Widgets, Network,
@@ -75,6 +76,11 @@ endif()
 # excluded.
 file(GLOB_RECURSE DATA2G_CORE_SOURCES CONFIGURE_DEPENDS core/*.cpp)
 list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android|hamlib|miniaudio)/")
+# The rig bridge (core/rig/bridge.hpp) is POSIX sockets, and only Android needs
+# it (Windows has COM ports); see bridge.cpp for why Winsock is not a header swap.
+if(WIN32)
+  list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/rig/bridged?\\.cpp$")
+endif()
 add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
 target_include_directories(data2g_core PUBLIC core)
 # The release version (tools/bump_version.sh): the host's VERSION reply and the About box,
@@ -100,7 +106,25 @@ set_source_files_properties(core/polar/polar.cpp core/arq/predictor.cpp core/gfl
 # --- device backends -----------------------------------------------------------
 # data2g_audio: audio/card.hpp's backend. The apps start a QCoreApplication
 # either way (Qt Multimedia needs one), so Qt Core comes with it.
-if(DATA2G_BUILD_QTAUDIO STREQUAL "OFF")
+if(ANDROID)
+  # AudioRecord/AudioTrack through JNI (core/audio/android/): the UNPROCESSED
+  # source (no AGC) and USB device routing, neither of which Qt Multimedia
+  # offers there. The Java half is staged into the app by android-app/.
+  find_package(Qt6 6.8 COMPONENTS Core REQUIRED)
+  add_library(data2g_audio STATIC core/audio/android/androidaudio.cpp)
+  set_target_properties(data2g_audio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_definitions(data2g_audio PUBLIC DATA2G_AUDIO_ANDROID)
+  target_link_libraries(data2g_audio PUBLIC data2g_core Qt6::Core PRIVATE android log)
+  set(DATA2G_ANDROID_AUDIO_JAVA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/core/audio/android/java" CACHE INTERNAL "")
+  # USB and Bluetooth serial for the rig (core/rig/android/), over the bridge in data2g_core.
+  add_library(data2g_rig_android STATIC core/rig/android/androidrig.cpp)
+  set_target_properties(data2g_rig_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(data2g_rig_android PUBLIC data2g_core PRIVATE android log)
+  set(DATA2G_ANDROID_RIG_JAVA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/core/rig/android/java" CACHE INTERNAL "")
+  set(DATA2G_ANDROID_USBSERIAL_JAVA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/java" CACHE INTERNAL "")
+  set(DATA2G_ANDROID_USBSERIAL_SHIM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/shim" CACHE INTERNAL "")
+  message(STATUS "Android audio and serial: ${ANDROID_ABI}")
+elseif(DATA2G_BUILD_QTAUDIO STREQUAL "OFF")
 elseif(DATA2G_AUDIO_BACKEND STREQUAL "miniaudio")
   find_package(Qt6 6.2 COMPONENTS Core REQUIRED)
   add_library(data2g_audio STATIC core/audio/miniaudio/maaudio.cpp)
@@ -176,7 +200,7 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
     add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
-                                      app/realtime.cpp)
+                                      app/realtime.cpp app/settings.cpp app/spectrum.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
     target_compile_definitions(data2g_station PUBLIC QT_NO_KEYWORDS)  # the core has members named slots
