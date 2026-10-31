@@ -11,15 +11,15 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-BUILD_DIR=${BUILD_DIR:-$ROOT/native/build-android}
 INSTALL=0
 ALL_ABIS=ON
+ABI=all
 EXTRA=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --install) INSTALL=1; shift ;;
-        --abi) ALL_ABIS=OFF; EXTRA+=("-DANDROID_ABI=$2"); shift 2 ;;
+        --abi) ALL_ABIS=OFF; ABI=$2; EXTRA+=("-DANDROID_ABI=$2"); shift 2 ;;
         --version-code) EXTRA+=("-DDATA2G_ANDROID_VERSION_CODE=$2"); shift 2 ;;
         --) shift; EXTRA+=("$@"); break ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -28,6 +28,10 @@ done
 
 : "${QT_ANDROID:?set QT_ANDROID to e.g. \$HOME/Qt/6.11.1/android_arm64_v8a}"
 : "${QT_HOST:?set QT_HOST to e.g. \$HOME/Qt/6.11.1/gcc_64}"
+# One build directory per ABI choice: CMake keeps the first configure's
+# toolchain file (and with it QT_ANDROID's Qt), so reusing an x86_64 tree for
+# arm64 silently builds against the wrong Qt.
+BUILD_DIR=${BUILD_DIR:-$ROOT/native/build-android-$ABI}
 SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
 NDK=${ANDROID_NDK_ROOT:-$(ls -d "$SDK"/ndk/* | sort -V | tail -1)}
 

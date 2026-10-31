@@ -5,10 +5,10 @@
 # Qt for Android is a CMake build; androiddeployqt writes the Gradle project.
 # tools/build_android.sh does this:
 #
-#   cmake -S native/android-app -B native/build-android -G Ninja \
+#   cmake -S native/android-app -B native/build-android-<abi> -G Ninja \
 #     -DCMAKE_TOOLCHAIN_FILE=$QT_ANDROID/lib/cmake/Qt6/qt.toolchain.cmake \
 #     -DQT_HOST_PATH=$QT_HOST -DANDROID_SDK_ROOT=... -DANDROID_NDK_ROOT=...
-#   cmake --build native/build-android --target apk
+#   cmake --build native/build-android-<abi> --target apk
 
 cmake_minimum_required(VERSION 3.24)
 
