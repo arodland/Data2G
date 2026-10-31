@@ -214,9 +214,24 @@ ApplicationWindow {
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
-                    text: "On this phone: KISS on 127.0.0.1:" + tnc.kissPort
-                          + ", VARA HF-style commands on 127.0.0.1:" + tnc.varaPort
-                          + " (data on " + (tnc.varaPort + 1) + ")."
+                    text: "KISS on port " + tnc.kissPort + ", VARA HF-style commands on port "
+                          + tnc.varaPort + " (data on " + (tnc.varaPort + 1) + "), at 127.0.0.1 from this phone"
+                          + (tnc.listenAll && tnc.addresses.length > 0
+                             ? ", or " + tnc.addresses.join(" or ") + " from the network." : ".")
+                }
+                Switch {
+                    text: "Accept connections from the network"
+                    checked: tnc.listenAll
+                    onToggled: tnc.listenAll = checked
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 11
+                    opacity: 0.7
+                    text: "Listens on every interface (0.0.0.0) instead of this phone only. Anyone "
+                          + "who can reach the phone can then use the TNC, and transmit with your "
+                          + "callsign: use it only on a network you trust."
                 }
                 Label {
                     Layout.fillWidth: true

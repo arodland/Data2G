@@ -36,6 +36,10 @@ class Tnc : public QObject {
     Q_PROPERTY(double txLevelDb READ txLevelDb WRITE setTxLevelDb NOTIFY settingsChanged)  // -30..0
     Q_PROPERTY(int kissPort READ kissPort CONSTANT)
     Q_PROPERTY(int varaPort READ varaPort CONSTANT)
+    // The KISS and VARA ports on 0.0.0.0 (every interface) rather than 127.0.0.1. Off by default.
+    Q_PROPERTY(bool listenAll READ listenAll WRITE setListenAll NOTIFY settingsChanged)
+    // This phone's IPv4 addresses, for a client elsewhere on the network.
+    Q_PROPERTY(QStringList addresses READ addresses NOTIFY settingsChanged)
 
     Q_PROPERTY(QStringList log READ log NOTIFY logChanged)
 
@@ -62,6 +66,9 @@ public:
     void setTxLevelDb(double db);
     int kissPort() const;
     int varaPort() const;
+    bool listenAll() const;
+    void setListenAll(bool on);
+    QStringList addresses() const;
 
     QStringList log() const { return log_; }
 

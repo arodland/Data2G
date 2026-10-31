@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <QNetworkInterface>
 #include <QPermissions>
 #include <QSettings>
 #include <QtCore/qcoreapplication_platform.h>
@@ -122,6 +123,19 @@ void Tnc::setTxLevelDb(double db) {
 
 int Tnc::kissPort() const { return data2g::androidapp::load_args().kiss_port; }
 int Tnc::varaPort() const { return data2g::androidapp::load_args().command_port; }
+
+bool Tnc::listenAll() const { return data2g::androidapp::load_args().listen == "0.0.0.0"; }
+void Tnc::setListenAll(bool on) {
+    edit([&](auto& a) { a.listen = on ? "0.0.0.0" : "127.0.0.1"; });
+    Q_EMIT settingsChanged();
+}
+
+QStringList Tnc::addresses() const {
+    QStringList out;
+    for (const QHostAddress& a : QNetworkInterface::allAddresses())
+        if (a.protocol() == QAbstractSocket::IPv4Protocol && !a.isLoopback()) out << a.toString();
+    return out;
+}
 
 void Tnc::refreshDevices() {
     try {
