@@ -58,9 +58,11 @@ Tnc::Tnc(QObject* parent) : QObject(parent) {
         const auto lines = Modem::instance().log_after(log_seen_, &newest);
         log_seen_ = newest;
         if (!lines.empty()) {
-            for (const auto& l : lines) log_ << qs(l);
+            QStringList added;
+            for (const auto& l : lines) added << qs(l);
+            log_ << added;
             if (log_.size() > MAX_LOG_LINES) log_.remove(0, log_.size() - MAX_LOG_LINES);
-            Q_EMIT logChanged();
+            Q_EMIT logAppended(added);
         }
         Q_EMIT changed();
     });
@@ -150,7 +152,7 @@ void Tnc::refreshDevices() {
 void Tnc::clearLog() {
     Modem::instance().clear_log();
     log_.clear();
-    Q_EMIT logChanged();
+    Q_EMIT logCleared();
 }
 
 // --- start and stop

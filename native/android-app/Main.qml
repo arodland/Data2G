@@ -122,20 +122,40 @@ ApplicationWindow {
                 Layout.leftMargin: 12
                 Layout.rightMargin: 12
                 clip: true
-                model: tnc.log
+                // Appended to, never replaced: a new model would reset the scroll position.
+                model: ListModel { id: logModel }
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Label {
-                    required property string modelData
+                    required property string line
                     width: log.width
-                    text: modelData
+                    text: line
                     font.family: "monospace"
                     font.pixelSize: 11
                     wrapMode: Text.WrapAnywhere
-                    color: modelData.indexOf(" ERROR: ") >= 0 ? "#c62828"
-                         : modelData.indexOf(" WARNING: ") >= 0 ? "#ef6c00" : palette.text
+                    color: line.indexOf(" ERROR: ") >= 0 ? "#c62828"
+                         : line.indexOf(" WARNING: ") >= 0 ? "#ef6c00" : palette.text
                 }
-                // Follow the newest line while scrolled to the end.
-                onCountChanged: if (atYEnd || contentHeight <= height) Qt.callLater(positionViewAtEnd)
+
+                // Follow new lines while at the bottom. Decided by where the user left
+                // the view, not by atYEnd when a line lands: the line has already
+                // grown the content by then, so the view no longer reads as at the end.
+                property bool follow: true
+                onMovementEnded: follow = atYEnd
+
+                function add(lines) {
+                    for (const l of lines) logModel.append({ line: l })
+                    if (logModel.count > 500) logModel.remove(0, logModel.count - 500)
+                    if (follow) Qt.callLater(positionViewAtEnd)
+                }
+                Component.onCompleted: add(tnc.logLines())
+                Connections {
+                    target: tnc
+                    function onLogAppended(lines) { log.add(lines) }
+                    function onLogCleared() {
+                        logModel.clear()
+                        log.follow = true
+                    }
+                }
             }
         }
 

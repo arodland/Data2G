@@ -41,8 +41,6 @@ class Tnc : public QObject {
     // This phone's IPv4 addresses, for a client elsewhere on the network.
     Q_PROPERTY(QStringList addresses READ addresses NOTIFY settingsChanged)
 
-    Q_PROPERTY(QStringList log READ log NOTIFY logChanged)
-
 public:
     explicit Tnc(QObject* parent = nullptr);
 
@@ -70,7 +68,9 @@ public:
     void setListenAll(bool on);
     QStringList addresses() const;
 
-    QStringList log() const { return log_; }
+    // The activity log so far, newest last. Lines added after this arrive by
+    // logAppended, so a view can append rather than rebuild (which would reset its scroll).
+    Q_INVOKABLE QStringList logLines() const { return log_; }
 
     // Asks for the microphone (and notifications), then TncService.
     Q_INVOKABLE void start();
@@ -85,7 +85,8 @@ Q_SIGNALS:
     void changed();
     void settingsChanged();
     void devicesChanged();
-    void logChanged();
+    void logAppended(const QStringList& lines);
+    void logCleared();
     void error(const QString& message);
 
 private:
