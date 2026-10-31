@@ -20,24 +20,74 @@ ColumnLayout {
         wrapMode: Text.Wrap
     }
 
-    Switch {
-        text: "Control the radio"
-        checked: pane.rig.enabled
-        onToggled: pane.rig.enabled = checked
+    // Keying first, since it decides what else is needed: VOX nothing, a control
+    // line only the USB serial device (Hamlib's dummy stands in for the radio,
+    // shown as None), CAT a connection and a radio model.
+    readonly property bool cat: rig.keying === "cat"
+    readonly property bool line: rig.keying === "dtr" || rig.keying === "rts"
+
+    Label { text: "Transmit keying" }
+    ComboBox {
+        id: keyingBox
+        Layout.fillWidth: true
+        model: ["vox", "cat", "dtr", "rts"]
+        function label(v) {
+            switch (v) {
+            case "vox": return "VOX (the radio keys on the audio)"
+            case "cat": return "CAT command"
+            case "dtr": return "DTR line (USB serial)"
+            case "rts": return "RTS line (USB serial)"
+            }
+            return v
+        }
+        displayText: label(currentValue !== undefined ? currentValue : pane.rig.keying)
+        delegate: ItemDelegate {
+            required property var modelData
+            required property int index
+            width: keyingBox.width
+            text: keyingBox.label(modelData)
+            highlighted: keyingBox.highlightedIndex === index
+        }
+        Component.onCompleted: currentIndex = Math.max(0, model.indexOf(pane.rig.keying))
+        onActivated: pane.rig.keying = currentValue
     }
     Hint {
-        text: "Keys the transmitter over a USB serial adapter, a Bluetooth radio, or a "
-              + "station computer on the network. Leave it off to let the radio's VOX key it."
+        text: pane.cat ? "A command keys the radio, over USB serial, Bluetooth or the network."
+            : pane.line ? "A serial control line keys the radio, as most interface cables do. Only the "
+                          + "cable's USB serial device is needed; choose a radio as well only for CAT."
+            : "No rig control: the radio's VOX keys it on the transmit audio."
     }
+    ComboBox {
+        id: otherLineBox
+        Layout.fillWidth: true
+        visible: pane.line
+        readonly property string line: pane.rig.keying === "dtr" ? "RTS" : "DTR"
+        model: ["default", "high", "low"]
+        displayText: line + " while connected: " + (currentValue === "high" ? "held high"
+                     : currentValue === "low" ? "held low" : "default (high)")
+        delegate: ItemDelegate {
+            required property var modelData
+            required property int index
+            width: otherLineBox.width
+            text: modelData === "default" ? "Default (high)" : "Held " + modelData
+            highlighted: otherLineBox.highlightedIndex === index
+        }
+        function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.otherLine)) }
+        Component.onCompleted: sync()
+        onVisibleChanged: sync()
+        onActivated: pane.rig.otherLine = currentValue
+    }
+
 
     ColumnLayout {
         Layout.fillWidth: true
         spacing: 8
-        visible: pane.rig.enabled
+        visible: pane.rig.keying !== "vox"
 
-        Label { text: "Connection" }
+        Label { text: "Connection"; visible: pane.cat }
         ComboBox {
             Layout.fillWidth: true
+            visible: pane.cat
             textRole: "text"
             valueRole: "value"
             model: [
@@ -45,15 +95,10 @@ ColumnLayout {
                 { text: "Bluetooth", value: "bluetooth" },
                 { text: "Network (rigctld or ser2net)", value: "network" }
             ]
-            Component.onCompleted: currentIndex = indexOfValue(pane.rig.connection)
+            function sync() { currentIndex = indexOfValue(pane.rig.connection) }
+            Component.onCompleted: sync()
+            onVisibleChanged: sync()  // line keying switches it to USB
             onActivated: pane.rig.connection = currentValue
-        }
-
-        Label { text: "Radio" }
-        Button {
-            Layout.fillWidth: true
-            text: pane.rig.modelLabel
-            onClicked: modelDialog.open()
         }
 
         // ---- a USB or Bluetooth device
@@ -108,10 +153,11 @@ ColumnLayout {
                 visible: text !== ""
             }
 
-            Label { text: "Speed"; visible: pane.rig.connection === "usb" }
+            // The serial speed is CAT's: line keying with no radio chosen doesn't care.
+            Label { text: "Speed"; visible: pane.rig.connection === "usb" && (pane.cat || pane.rig.model !== 1) }
             ComboBox {
                 Layout.fillWidth: true
-                visible: pane.rig.connection === "usb"
+                visible: pane.rig.connection === "usb" && (pane.cat || pane.rig.model !== 1)
                 model: ["Default", "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
                 Component.onCompleted: currentIndex = pane.rig.baud === 0 ? 0 : Math.max(0, model.indexOf(String(pane.rig.baud)))
                 onActivated: pane.rig.baud = currentIndex === 0 ? 0 : parseInt(currentText)
@@ -139,62 +185,20 @@ ColumnLayout {
             }
         }
 
-        // ---- keying
-        Label { text: "Transmit keying" }
-        ComboBox {
-            id: pttBox
+        Label { text: pane.cat ? "Radio" : "Radio (optional, for CAT)" }
+        Button {
             Layout.fillWidth: true
-            model: pane.rig.pttMethods
-            function label(v) {
-                switch (v) {
-                case "vox": return "VOX (the audio keys the radio)"
-                case "cat": return "CAT command"
-                case "dtr": return "DTR line"
-                case "rts": return "RTS line"
-                }
-                return v
-            }
-            displayText: label(currentValue !== undefined ? currentValue : pane.rig.pttMethod)
-            delegate: ItemDelegate {
-                required property var modelData
-                required property int index
-                width: pttBox.width
-                text: pttBox.label(modelData)
-                highlighted: pttBox.highlightedIndex === index
-            }
-            function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.pttMethod)) }
-            Component.onCompleted: sync()
-            onModelChanged: sync()  // Bluetooth narrows the list
-            onActivated: pane.rig.pttMethod = currentValue
+            text: pane.rig.modelLabel
+            onClicked: modelDialog.open()
         }
         ComboBox {
             id: pttAudioBox
             Layout.fillWidth: true
-            visible: pane.rig.pttAudioSupported && pane.rig.pttMethod === "cat"
+            visible: pane.rig.pttAudioSupported && pane.cat
             model: ["mic", "data"]
             displayText: currentValue === "data" ? "Transmit audio: data / rear input" : "Transmit audio: mic / front input"
             Component.onCompleted: currentIndex = Math.max(0, model.indexOf(pane.rig.pttAudio))
             onActivated: pane.rig.pttAudio = currentValue
-        }
-        ComboBox {
-            id: otherLineBox
-            Layout.fillWidth: true
-            visible: pane.rig.pttMethod === "dtr" || pane.rig.pttMethod === "rts"
-            readonly property string line: pane.rig.pttMethod === "dtr" ? "RTS" : "DTR"
-            model: ["default", "high", "low"]
-            displayText: line + " while connected: " + (currentValue === "high" ? "held high"
-                         : currentValue === "low" ? "held low" : "default (high)")
-            delegate: ItemDelegate {
-                required property var modelData
-                required property int index
-                width: otherLineBox.width
-                text: modelData === "default" ? "Default (high)" : "Held " + modelData
-                highlighted: otherLineBox.highlightedIndex === index
-            }
-            function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.otherLine)) }
-            Component.onCompleted: sync()
-            onVisibleChanged: sync()
-            onActivated: pane.rig.otherLine = currentValue
         }
 
         Hint {
@@ -204,7 +208,6 @@ ColumnLayout {
             opacity: 1
         }
     }
-
     // ---- the radio picker: a search box over Hamlib's several hundred rigs
     Dialog {
         id: modelDialog

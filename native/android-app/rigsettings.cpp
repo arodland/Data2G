@@ -42,7 +42,8 @@ const std::vector<rig::RigModel>& all_models() {
 }
 
 QVariantMap model_row(const rig::RigModel& m) {
-    return {{QStringLiteral("number"), m.model}, {QStringLiteral("label"), QString::fromStdString(m.label())}};
+    const QString label = m.model == rig::MODEL_DUMMY ? QObject::tr("None (keying only, no CAT)") : QString::fromStdString(m.label());
+    return {{QStringLiteral("number"), m.model}, {QStringLiteral("label"), label}};
 }
 
 }  // namespace
@@ -63,9 +64,24 @@ RigSettings::RigSettings(QObject* parent) : QObject(parent) {
 
 RigSettings::~RigSettings() { rig::android::set_permission_callback({}); }
 
-bool RigSettings::enabled() const { return load_args().rig; }
-void RigSettings::setEnabled(bool on) {
-    edit([&](auto& a) { a.rig = on; });
+QString RigSettings::keying() const {
+    const auto a = load_args();
+    return !a.rig || a.ptt_method == "vox" ? QStringLiteral("vox") : QString::fromStdString(a.ptt_method);
+}
+void RigSettings::setKeying(const QString& k) {
+    const bool line = k == QLatin1String("dtr") || k == QLatin1String("rts");
+    if (line && connection() != QLatin1String("usb")) setConnection(QStringLiteral("usb"));  // control lines are USB serial's
+    edit([&](auto& a) {
+        a.rig = k != QLatin1String("vox");
+        if (!a.rig) return;
+        if (a.ptt_method != k.toStdString()) {
+            a.ptt_method = k.toStdString();
+            a.rig_dtr = a.rig_rts = "default";  // a level held for the old keying line could be the new one's
+        }
+        // Line keying needs no CAT: Hamlib's dummy, shown as "None". NET rigctl (the
+        // desktop's default) means nothing over USB.
+        if (line && a.rig_model == rig::MODEL_NET_RIGCTL) a.rig_model = rig::MODEL_DUMMY;
+    });
     Q_EMIT changed();
 }
 
@@ -74,10 +90,7 @@ void RigSettings::setConnection(const QString& kind) {
     if (kind == connection()) return;
     QSettings().setValue(QLatin1String(data2g::androidapp::RIG_CONNECTION_KEY), kind);
     // A device belongs to its kind: a Bluetooth address means nothing to the USB opener.
-    edit([&](auto& a) {
-        a.rig_device.clear();
-        if (kind == QLatin1String("bluetooth") && (a.ptt_method == "dtr" || a.ptt_method == "rts")) a.ptt_method = "cat";
-    });
+    edit([&](auto& a) { a.rig_device.clear(); });
     error_.clear();
     refreshDevices();
     Q_EMIT changed();
@@ -90,6 +103,7 @@ void RigSettings::setModel(int m) {
 }
 QString RigSettings::modelLabel() const {
     const int m = model();
+    if (m == rig::MODEL_DUMMY) return keying() == QLatin1String("cat") ? tr("Choose a radio") : tr("None (keying only)");
     for (const auto& r : all_models())
         if (r.model == m) return QString::fromStdString(r.label());
     return tr("model %1").arg(m);
@@ -133,23 +147,6 @@ void RigSettings::setBaud(int b) {
     Q_EMIT changed();
 }
 
-QString RigSettings::pttMethod() const { return QString::fromStdString(load_args().ptt_method); }
-void RigSettings::setPttMethod(const QString& m) {
-    edit([&](auto& a) {
-        if (a.ptt_method == m.toStdString()) return;
-        a.ptt_method = m.toStdString();
-        // A level held for the old keying line could be the new keying line's.
-        a.rig_dtr = a.rig_rts = "default";
-    });
-    Q_EMIT changed();
-}
-// RFCOMM has no control lines: DTR and RTS aren't offered over Bluetooth.
-QStringList RigSettings::pttMethods() const {
-    QStringList out{QStringLiteral("vox"), QStringLiteral("cat")};
-    if (connection() != QLatin1String("bluetooth")) out << QStringLiteral("dtr") << QStringLiteral("rts");
-    return out;
-}
-
 QString RigSettings::pttAudio() const { return QString::fromStdString(load_args().ptt_audio); }
 void RigSettings::setPttAudio(const QString& a) {
     edit([&](auto& args) { args.ptt_audio = a.toStdString(); });
@@ -175,7 +172,7 @@ void RigSettings::setOtherLine(const QString& state) {
 QVariantList RigSettings::findModels(const QString& query) const {
     const QString needle = query.trimmed();
     QVariantList out;
-    // Empty: the dummy and NET rigctl first (no radio needed; share the station PC's), then the rest.
+    // Empty: None (the dummy) and NET rigctl first (no radio needed; share the station PC's), then the rest.
     if (needle.isEmpty()) {
         for (const auto& m : all_models())
             if (m.model == rig::MODEL_DUMMY || m.model == rig::MODEL_NET_RIGCTL) out.append(model_row(m));

@@ -16,6 +16,7 @@
 #include "app/settings.hpp"
 #include "arq/modes.hpp"
 #include "arq/session.hpp"
+#include "rig/config.hpp"
 #ifdef DATA2G_HAVE_RIG
 #include "rig/android/androidrig.hpp"
 #include "rig/bridged.hpp"
@@ -137,6 +138,9 @@ void Modem::start() {
     const app::Args a = load_args();
     if (!a.mycall) return fail("set your callsign in Settings first");
     if (const auto bad = app::check(a)) return fail(*bad);
+    // Hamlib's dummy accepts a PTT command and keys nothing.
+    if (a.rig && a.ptt_method == "cat" && a.rig_model == rig::MODEL_DUMMY)
+        return fail("CAT keying needs a radio: choose one in Settings");
     station_ = std::make_unique<app::Station>(a);
 #ifdef DATA2G_HAVE_RIG
     // USB and Bluetooth radios through the loopback bridge (rig/bridged.hpp);

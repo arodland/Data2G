@@ -20,7 +20,10 @@ class RigSettings : public QObject {
     Q_OBJECT
     QML_ELEMENT
 
-    Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY changed)
+    // How the transmitter is keyed, which decides what else is needed: vox (nothing:
+    // no rig opened), cat (a connection and a radio model), dtr or rts (a USB serial
+    // device; the radio model is optional, None by default).
+    Q_PROPERTY(QString keying READ keying WRITE setKeying NOTIFY changed)
     Q_PROPERTY(QString connection READ connection WRITE setConnection NOTIFY changed)
     Q_PROPERTY(int model READ model WRITE setModel NOTIFY changed)
     Q_PROPERTY(QString modelLabel READ modelLabel NOTIFY changed)
@@ -30,8 +33,6 @@ class RigSettings : public QObject {
     Q_PROPERTY(bool bluetoothReady READ bluetoothReady NOTIFY devicesChanged)
     Q_PROPERTY(QString host READ host WRITE setHost NOTIFY changed)  // host[:port]; Hamlib's default port 4532
     Q_PROPERTY(int baud READ baud WRITE setBaud NOTIFY changed)      // 0: the model's own
-    Q_PROPERTY(QString pttMethod READ pttMethod WRITE setPttMethod NOTIFY changed)  // vox, cat, dtr, rts
-    Q_PROPERTY(QStringList pttMethods READ pttMethods NOTIFY changed)
     Q_PROPERTY(QString pttAudio READ pttAudio WRITE setPttAudio NOTIFY changed)  // mic, data
     Q_PROPERTY(bool pttAudioSupported READ pttAudioSupported NOTIFY changed)
     // Keying by one control line, the level the other is held at: default, high, low
@@ -44,8 +45,8 @@ public:
     explicit RigSettings(QObject* parent = nullptr);
     ~RigSettings() override;
 
-    bool enabled() const;
-    void setEnabled(bool on);
+    QString keying() const;
+    void setKeying(const QString& k);
     QString connection() const;
     void setConnection(const QString& kind);
     int model() const;
@@ -60,9 +61,6 @@ public:
     void setHost(const QString& h);
     int baud() const;
     void setBaud(int b);
-    QString pttMethod() const;
-    void setPttMethod(const QString& m);
-    QStringList pttMethods() const;
     QString pttAudio() const;
     void setPttAudio(const QString& a);
     bool pttAudioSupported() const;
