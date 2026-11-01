@@ -348,10 +348,18 @@ RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int
     return r;
 }
 
+// sync._level: the lowest bin's level, but not under the NOISE_REF_HZ
+// bins' (last) geometric mean (noise that isn't white: FM audio)
+static double level_of(std::span<const double> q) {
+    const std::size_t n = q.size();
+    return std::max(*std::min_element(q.begin(), q.end()),
+                    std::sqrt(q[n - 1] * q[n - 2]) * std::pow(10.0, -LEVEL_FLOOR_DB / 10));
+}
+
 std::pair<Mat<double>, std::vector<double>> detection_stat(std::span<const cdouble> z, const Band& band, double reach,
                                                            int repeats) {
     RawStat r = raw_stat(z, band, reach, repeats);
-    const double q = *std::min_element(r.q.begin(), r.q.end());
+    const double q = level_of(r.q);
     for (double& v : r.S.data) v /= q;
     return {std::move(r.S), std::move(r.freqs)};
 }
@@ -565,15 +573,14 @@ void StreamDetector::trim(std::int64_t start) {
 
 std::optional<double> StreamDetector::level() const {
     if (levels.empty()) return std::nullopt;
-    double best = INFINITY;
-    std::vector<double> v(levels.size());
+    std::vector<double> v(levels.size()), med(levels[0].size());
     for (std::size_t b = 0; b < levels[0].size(); ++b) {
         for (std::size_t k = 0; k < levels.size(); ++k) v[k] = levels[k][b];
         std::sort(v.begin(), v.end());
         const std::size_t h = v.size() / 2;
-        best = std::min(best, v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2);
+        med[b] = v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2;
     }
-    return best;
+    return level_of(med);
 }
 
 Mat<double> StreamDetector::stat(std::int64_t lo, std::int64_t hi) const {

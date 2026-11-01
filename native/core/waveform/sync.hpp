@@ -23,6 +23,7 @@ namespace data2g::waveform {
 inline constexpr double STEP_HZ = 12.5;
 inline constexpr double NOISE_QUANTILE = 0.2;
 inline constexpr std::array<double, 2> NOISE_REF_HZ = {-625.0, 625.0};
+inline constexpr double LEVEL_FLOOR_DB = 1.0;  // sync.LEVEL_FLOOR_DB
 inline constexpr int ALTERNATIVES = 3;
 inline constexpr int TIME_ALTERNATIVES = 4;
 
