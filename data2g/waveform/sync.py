@@ -79,6 +79,16 @@ class Acquisition:
 
 
 NOISE_REF_HZ = (-625.0, 625.0)  # far bins for the noise level only (not searched)
+# w48 nearly fills the audio passband, so at +-625 Hz its reference bins
+# reach under 0 Hz and over 3 kHz and read low: on FM noise its searched
+# bins stayed 3.2 dB over the level (2.2e-3 of starts over the threshold;
+# +-250 Hz: 1.6 dB, 1.3e-5; white noise unchanged either way)
+NOISE_REF_BY_BAND = {"w48": (-250.0, 250.0)}
+
+
+def noise_ref_hz(band) -> tuple:
+    """The band's NOISE_REF_HZ bins (Hz)."""
+    return NOISE_REF_BY_BAND.get(band.spec.name, NOISE_REF_HZ)
 LEVEL_FLOOR_DB = 1.0  # the noise level's floor under NOISE_REF_HZ bins' geometric mean (_level)
 
 
@@ -174,8 +184,9 @@ def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: i
     freqs = cfo_grid(reach)
     n_out = len(z) - PREAMBLE_CP - repeats * M + 1
     S = np.empty((len(freqs), n_out))
-    q = np.empty(len(freqs) + len(NOISE_REF_HZ))
-    for i, c in enumerate(repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
+    refs = noise_ref_hz(band)
+    q = np.empty(len(freqs) + len(refs))
+    for i, c in enumerate(repeat_corrs(z, t, list(freqs) + list(refs))):
         p = np.abs(c) ** 2
         if levels_from is None:
             q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
