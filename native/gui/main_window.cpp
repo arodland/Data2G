@@ -415,7 +415,7 @@ void MainWindow::open_settings() {
     if (d.exec() != QDialog::Accepted) return;
     app::Args a = station_->args();
     d.apply_to(a);
-    save_settings(store_, a);
+    app::save_settings(store_, a);
     if (a != station_->args() || !station_->running()) restart(a);
 }
 

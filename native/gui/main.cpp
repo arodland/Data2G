@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     icon.addFile(QStringLiteral(":/data2g-256.png"));
     QApplication::setWindowIcon(icon);
     QSettings store;
-    const app::Args a = app::parse(argc, argv, gui::load_settings(store), "data2g-gui");
+    const app::Args a = app::parse(argc, argv, app::load_settings(store), "data2g-gui");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
         app::usage_error("--list-modes, --list-audio-devices and --list-rigs are data2g-host's", "data2g-gui");
     const auto level = app::parse_level(a.log_level);
