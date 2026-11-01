@@ -79,6 +79,17 @@ class Acquisition:
 
 
 NOISE_REF_HZ = (-625.0, 625.0)  # far bins for the noise level only (not searched)
+# w48 nearly fills the audio passband, so at +-625 Hz its reference bins
+# reach under 0 Hz and over 3 kHz and read low: on FM noise its searched
+# bins stayed 3.2 dB over the level (2.2e-3 of starts over the threshold;
+# +-250 Hz: 1.6 dB, 1.3e-5; white noise unchanged either way)
+NOISE_REF_BY_BAND = {"w48": (-250.0, 250.0)}
+
+
+def noise_ref_hz(band) -> tuple:
+    """The band's NOISE_REF_HZ bins (Hz)."""
+    return NOISE_REF_BY_BAND.get(band.spec.name, NOISE_REF_HZ)
+LEVEL_FLOOR_DB = 1.0  # the noise level's floor under NOISE_REF_HZ bins' geometric mean (_level)
 
 
 def cfo_grid(reach: float = ACQUIRE_REACH_HZ) -> np.ndarray:
@@ -143,7 +154,22 @@ def detection_stat(z: np.ndarray, band=None, reach: float = ACQUIRE_REACH_HZ,
     # the true CFO's among them, and n10 locked 400 Hz off at 30 dB.
     # NOISE_REF_HZ bins are for this level only: at +-150 Hz every searched
     # bin overlaps a narrow burst, noise read high, and n10 mpd lost ~0.4%.
-    return S / q.min(), freqs
+    return S / _level(q), freqs
+
+
+def _level(q: np.ndarray) -> float:
+    """One noise level from per-bin levels q (NOISE_REF_HZ bins last): the
+    lowest bin's, but not under the reference bins' geometric mean. Noise
+    that isn't white sets the lowest bin far from the searched ones: FM
+    audio's falls ~23 dB across the band, its +625 Hz bin read 5.5 dB under
+    the searched bins, and S passed the threshold at 15-24% of noise starts
+    (0 on white noise); false headers held BUSY every ~40 s
+    (recordings/20261031-213335). The two reference bins bracket the band,
+    so on a tilt their geometric mean is near the searched bins' level.
+    LEVEL_FLOOR_DB under it: on white noise the lowest of all bins reads
+    0.2-0.4 dB under that mean (p90 0.3-0.6, max 0.9), and the floor would
+    have raised the detection threshold there."""
+    return max(float(q.min()), float(np.sqrt(q[-1] * q[-2])) * 10 ** (-LEVEL_FLOOR_DB / 10))
 
 
 def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: int | None = None, outs: list | None = None):
@@ -158,8 +184,9 @@ def _raw_stat(z, band=None, reach=ACQUIRE_REACH_HZ, repeats=None, levels_from: i
     freqs = cfo_grid(reach)
     n_out = len(z) - PREAMBLE_CP - repeats * M + 1
     S = np.empty((len(freqs), n_out))
-    q = np.empty(len(freqs) + len(NOISE_REF_HZ))
-    for i, c in enumerate(repeat_corrs(z, t, list(freqs) + list(NOISE_REF_HZ))):
+    refs = noise_ref_hz(band)
+    q = np.empty(len(freqs) + len(refs))
+    for i, c in enumerate(repeat_corrs(z, t, list(freqs) + list(refs))):
         p = np.abs(c) ** 2
         if levels_from is None:
             q[i] = np.quantile(p, NOISE_QUANTILE) / -np.log(1 - NOISE_QUANTILE)
@@ -253,7 +280,7 @@ class StreamDetector:
 
     def level(self) -> float | None:
         """The noise level stat() normalizes by (None before any)."""
-        return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
+        return _level(np.median(np.array(self.levels), axis=0)) if self.levels else None
 
     def stat(self, lo: int, hi: int) -> np.ndarray:
         """Normalized S for stream starts [lo, hi) (-1 where not computed)."""

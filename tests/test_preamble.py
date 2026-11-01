@@ -83,3 +83,18 @@ def test_stream_detector_matches_the_whole_signal():
         d.feed(z[a:a + 1777])
     assert d.s0 == 0 and d.S.shape == S_all.shape
     np.testing.assert_allclose(d.S, S_all, rtol=1e-9, atol=1e-9 * S_all.max())
+
+
+def test_tilted_noise_does_not_read_as_a_preamble():
+    """FM audio's noise falls across the band, inside a voice passband;
+    normalized by the quietest bin alone, the searched bins read high and
+    noise passed the threshold (here w 34.7, n10 25.5, w48 40.7, against
+    24.1; sync._level, NOISE_REF_BY_BAND)."""
+    from scipy.signal import butter, lfilter, sosfilt
+
+    x = lfilter([1.0], [1.0, -0.8], np.random.default_rng(1).standard_normal(FS * 4))
+    x = sosfilt(butter(6, [300, 3000], "bandpass", fs=FS, output="sos"), x)
+    for name, margin in (("w", 5.0), ("n10", 5.0), ("w48", 0.0)):
+        b = ofdm.band(name)
+        S, _ = sync.detection_stat(to_baseband(x), b)
+        assert S.max() < b.spec.preamble_threshold - margin, name
