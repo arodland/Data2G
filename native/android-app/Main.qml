@@ -223,6 +223,26 @@ ApplicationWindow {
                           + "without ALC action. The receive level is good anywhere in the green."
                 }
 
+                Label { text: "Broadcast"; font.bold: true; Layout.topMargin: 12 }
+                Label { text: "Broadcast mode" }
+                ComboBox {
+                    id: broadcastBox
+                    Layout.fillWidth: true
+                    textRole: "text"
+                    valueRole: "value"
+                    model: tnc.broadcastModes
+                    Component.onCompleted: currentIndex = Math.max(0, indexOfValue(tnc.broadcastMode))
+                    onActivated: tnc.broadcastMode = currentValue
+                }
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 11
+                    opacity: 0.7
+                    text: "The mode KISS frames go out in, until a client picks one with BCAST MODE. "
+                          + "A slower, narrower mode reaches further; a faster one takes less air time."
+                }
+
                 Label { text: "Rig control"; font.bold: true; Layout.topMargin: 12 }
                 RigPane {
                     Layout.fillWidth: true

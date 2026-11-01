@@ -11,6 +11,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QVariantList>
 #include <QtQml/qqmlregistration.h>
 
 #include <cstdint>
@@ -38,6 +39,11 @@ class Tnc : public QObject {
     Q_PROPERTY(int varaPort READ varaPort CONSTANT)
     // The KISS and VARA ports on 0.0.0.0 (every interface) rather than 127.0.0.1. Off by default.
     Q_PROPERTY(bool listenAll READ listenAll WRITE setListenAll NOTIFY settingsChanged)
+    // The mode KISS frames go out in until a client sets one (BCAST MODE): a
+    // mode name, or "" for the host's own. broadcastModes: {text, value} rows,
+    // "" first, then the data modes within the KISS bandwidth, narrowest first.
+    Q_PROPERTY(QString broadcastMode READ broadcastMode WRITE setBroadcastMode NOTIFY settingsChanged)
+    Q_PROPERTY(QVariantList broadcastModes READ broadcastModes CONSTANT)
     // This phone's IPv4 addresses, for a client elsewhere on the network.
     Q_PROPERTY(QStringList addresses READ addresses NOTIFY settingsChanged)
 
@@ -66,6 +72,9 @@ public:
     int varaPort() const;
     bool listenAll() const;
     void setListenAll(bool on);
+    QString broadcastMode() const;
+    void setBroadcastMode(const QString& mode);
+    QVariantList broadcastModes() const;
     QStringList addresses() const;
 
     // The activity log so far, newest last. Lines added after this arrive by

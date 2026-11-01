@@ -38,6 +38,7 @@ Args load_settings(QSettings& s, Args a) {
     if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
     if (s.contains("input_device")) a.input_device = opt(s.value("input_device").toString());
     if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
+    if (s.contains("broadcast_mode")) a.broadcast_mode = opt(s.value("broadcast_mode").toString());
     a.tci = s.value("tci", a.tci).toBool();
     a.tci_host = str("tci_host", a.tci_host);
     a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
@@ -78,6 +79,7 @@ void save_settings(QSettings& s, const Args& a) {
     s.setValue("mycall", qs(a.mycall));
     s.setValue("input_device", qs(a.input_device));
     s.setValue("output_device", qs(a.output_device));
+    s.setValue("broadcast_mode", qs(a.broadcast_mode));
     s.setValue("tci", a.tci);
     s.setValue("tci_host", qs(a.tci_host));
     s.setValue("sample_rate", a.sample_rate);

@@ -9,7 +9,7 @@ class QSettings;
 
 namespace data2g::app {
 
-// The persisted subset of `base`'s fields: callsign, interface (TCI), devices, sample rate,
+// The persisted subset of `base`'s fields: callsign, interface (TCI), devices, broadcast mode, sample rate,
 // volume, PTT and rig, ports, recording, decode worker, live constellation.
 Args load_settings(QSettings& s, Args base = {});
 void save_settings(QSettings& s, const Args& a);

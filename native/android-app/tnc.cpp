@@ -6,12 +6,16 @@
 #include <QNetworkInterface>
 #include <QPermissions>
 #include <QSettings>
+#include <QVariantMap>
 #include <QtCore/qcoreapplication_platform.h>
 
 #include <algorithm>
 #include <cmath>
 
+#include "app/options.hpp"
 #include "app/settings.hpp"
+#include "arq/modes.hpp"
+#include "kisslink/kisslink.hpp"
 #include "audio/card.hpp"
 #include "modem.hpp"
 
@@ -130,6 +134,30 @@ bool Tnc::listenAll() const { return data2g::androidapp::load_args().listen == "
 void Tnc::setListenAll(bool on) {
     edit([&](auto& a) { a.listen = on ? "0.0.0.0" : "127.0.0.1"; });
     Q_EMIT settingsChanged();
+}
+
+QString Tnc::broadcastMode() const { return qs(data2g::androidapp::load_args().broadcast_mode.value_or("")); }
+void Tnc::setBroadcastMode(const QString& mode) {
+    edit([&](auto& a) { a.broadcast_mode = mode.isEmpty() ? std::nullopt : std::optional(mode.toStdString()); });
+    Q_EMIT settingsChanged();
+}
+
+QVariantList Tnc::broadcastModes() const {
+    const int cap = data2g::app::kiss_cap(data2g::androidapp::load_args().kiss_bw);
+    QVariantList out{QVariantMap{{QStringLiteral("text"), tr("Default (%1)").arg(qs(std::string(data2g::kisslink::broadcast_mode(cap))))},
+                                 {QStringLiteral("value"), QString()}}};
+    // Narrowest first, as the host's MODES list has them.
+    auto modes = data2g::arq::allowed(cap);
+    std::stable_sort(modes.begin(), modes.end(),
+                     [](const auto* x, const auto* y) { return data2g::arq::width_hz(*x) < data2g::arq::width_hz(*y); });
+    for (const data2g::arq::Mode* m : modes) {
+        // ACK modes carry a session's acknowledgements, not data.
+        if (m->name.find("ack-") != std::string_view::npos) continue;
+        const QString name = qs(std::string(m->name));
+        out << QVariantMap{{QStringLiteral("text"), tr("%1 · %2 Hz").arg(name).arg(data2g::arq::width_hz(*m), 0, 'f', 0)},
+                           {QStringLiteral("value"), name}};
+    }
+    return out;
 }
 
 QStringList Tnc::addresses() const {
