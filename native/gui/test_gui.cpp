@@ -11,6 +11,7 @@
 #include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QSettings>
@@ -91,6 +92,7 @@ app::Args persisted() {
     a.mycall = "W1AW";
     a.input_device = "USB Audio";
     a.output_device = "Gone Card";  // not in the dialog's list: kept, marked
+    a.tci_host = "sdr.lan:50002";
     a.sample_rate = 96000;
     a.output_volume = -6.5;
     a.ptt_on_delay_ms = 150;
@@ -199,6 +201,30 @@ void test_settings(const QTemporaryDir& dir) {
     app::Args e;
     d.apply_to(e);
     check::is_true(e == a, "settings round trip through the dialog");
+
+    // the interface picks what shows: TCI's server, or the devices and Hamlib
+    {
+        app::Args t = a;
+        t.tci = true;
+        gui::SettingsDialog td(t, {QStringLiteral("USB Audio")}, {});
+        app::Args f;
+        td.apply_to(f);
+        check::is_true(f == t, "TCI round trips through the dialog");
+        auto* iface = td.findChild<QComboBox*>(QStringLiteral("interface"));
+        auto* host = td.findChild<QLineEdit*>(QStringLiteral("tci_host"));
+        auto* hamlib = td.findChild<QWidget*>(QStringLiteral("hamlib"));
+        auto* tci_box = td.findChild<QWidget*>(QStringLiteral("tci"));
+        check::is_true(iface && host && hamlib && tci_box, "interface, TCI server and the two boxes found");
+        if (iface && host && hamlib && tci_box) {
+            check::is_true(!tci_box->isHidden() && hamlib->isHidden(), "TCI: the server shows, Hamlib does not");
+            iface->setCurrentIndex(0);
+            check::is_true(tci_box->isHidden() && !hamlib->isHidden(), "sound card: Hamlib shows, the server does not");
+            host->clear();
+            iface->setCurrentIndex(1);
+            td.apply_to(f);
+            check::is_true(f.tci && f.tci_host == "localhost:50001", "an empty server is the default");
+        }
+    }
 
     // model 2 with no device (rigctld on localhost) stays that, and a saved
     // 'no rig' stays off; neither opens anything

@@ -147,7 +147,7 @@ def test_matched_filter_and_statistic(native, py, name):
     t = b.preamble_template()[config.PREAMBLE_CP:config.PREAMBLE_CP + config.M]
     t = t / np.linalg.norm(t)
     close(W.unit_template(name), t, PHASOR_TOL)
-    freqs = list(sync.cfo_grid()) + list(sync.NOISE_REF_HZ)
+    freqs = list(sync.cfo_grid()) + list(sync.noise_ref_hz(b))
     np.testing.assert_array_equal(W.cfo_grid(), sync.cfo_grid())
     np.testing.assert_array_equal(W.cfo_grid(50.0), sync.cfo_grid(50.0))
     C = py.repeat_corrs(z, t, freqs)

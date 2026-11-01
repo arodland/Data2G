@@ -7,7 +7,7 @@ endfunction()
 
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
-list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot)\\.cpp$")
+list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot|tci)\\.cpp$")
 if(WIN32)  # the rig bridge is POSIX only (core/rig/bridge.cpp)
   list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_rig_bridged?\\.cpp$")
 endif()
@@ -52,6 +52,13 @@ if(TARGET data2g_station)
   target_link_libraries(test_station_tx PRIVATE data2g_station)
   data2g_rig_rpath(test_station_tx)
   set_tests_properties(station_tx PROPERTIES TIMEOUT 300)
+  # the station over TCI against a fake server (app/tci.*)
+  if(TARGET Qt6::WebSockets)
+    data2g_test(tci)
+    target_link_libraries(test_tci PRIVATE data2g_station)
+    data2g_rig_rpath(test_tci)
+    set_tests_properties(tci PROPERTIES TIMEOUT 240)
+  endif()
 endif()
 
 # data2g-gui's window, offscreen, over pipe audio (no device, no display).

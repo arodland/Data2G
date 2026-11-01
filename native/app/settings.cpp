@@ -38,6 +38,8 @@ Args load_settings(QSettings& s, Args a) {
     if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
     if (s.contains("input_device")) a.input_device = opt(s.value("input_device").toString());
     if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
+    a.tci = s.value("tci", a.tci).toBool();
+    a.tci_host = str("tci_host", a.tci_host);
     a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
     a.output_volume = s.value("output_volume", a.output_volume).toDouble();
     a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
@@ -76,6 +78,8 @@ void save_settings(QSettings& s, const Args& a) {
     s.setValue("mycall", qs(a.mycall));
     s.setValue("input_device", qs(a.input_device));
     s.setValue("output_device", qs(a.output_device));
+    s.setValue("tci", a.tci);
+    s.setValue("tci_host", qs(a.tci_host));
     s.setValue("sample_rate", a.sample_rate);
     s.setValue("output_volume", a.output_volume);
     s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);

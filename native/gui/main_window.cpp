@@ -350,7 +350,7 @@ void MainWindow::poll() {
     } else {
         mode_->setText(qs(l.mode));
     }
-    const bool polled = s.running() && a.rig_poll_interval > 0;
+    const bool polled = s.running() && (a.rig_poll_interval > 0 || a.tci);  // TCI reports the dial unasked
     dial_label_->setVisible(polled);
     dial_->setVisible(polled);
     if (polled) {
