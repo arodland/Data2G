@@ -152,6 +152,20 @@ def test_kiss_commands_set_channel_access():
     assert k.slot_s == 2.0
 
 
+def test_kiss_sethardware_sets_port_mode():
+    k = KissLink()
+    k.command(6, b"MODE dup auto qpsk-r1/2\r")
+    p = k.ports[0]
+    assert (p.mode, p.auto, p.dup) == ("qpsk-r1/2", True, True)
+    for bad in (b"MODE no-such-mode", b"MODE", b"SPEED 9", b"MODE DUP DUP qpsk-r1/2", b"\xff"):
+        k.command(6, bad)  # ignored, logged
+    k.command(6, b"MODE qpsk-r1/2", port=3)  # not open
+    assert (p.mode, p.auto, p.dup) == ("qpsk-r1/2", True, True) and 3 not in k.ports
+    k.command(6, b"mode qpsk-r1/3")
+    p = k.ports[0]  # native: a copy
+    assert (p.mode, p.auto, p.dup) == ("qpsk-r1/3", False, False)
+
+
 def test_groups_go_to_their_ports_only():
     a, b, c = KissLink(), KissLink(), KissLink()
     na, nb = a.open("APRS"), b.open("aprs")

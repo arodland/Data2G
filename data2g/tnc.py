@@ -110,7 +110,7 @@ class KissServer(socketserver.ThreadingTCPServer):
     def __init__(self, addr, on_packet, on_command=None):
         """`on_packet(port, frame, ack)`: a data frame, or an ACKMODE one
         (`ack` (client, tag) for send_ack, else None). `on_command(cmd,
-        payload)`: KISS commands other than those."""
+        payload, port)`: KISS commands other than those."""
         self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
         super().__init__(addr, _KissHandler)
 
@@ -158,7 +158,7 @@ class _KissHandler(socketserver.BaseRequestHandler):
                     elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
                         srv.on_packet(cmd >> 4, payload[2:], (self.request, payload[:2]))
                     elif srv.on_command is not None:
-                        srv.on_command(cmd & 0x0F, payload)
+                        srv.on_command(cmd & 0x0F, payload, cmd >> 4)
         except OSError:
             pass
         finally:

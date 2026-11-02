@@ -514,7 +514,7 @@ void Station::start() {
             [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack) {
                 post([this, port, ack, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack); });
             },
-            [this, post](int cmd, tnc::Bytes p) { post([this, cmd, p = std::move(p)] { link_->command(cmd, p); }); });
+            [this, post](int cmd, tnc::Bytes p, int port) { post([this, cmd, port, p = std::move(p)] { link_->command(cmd, p, port); }); });
 
         // PTT
         rig::Keyer::Ptt ptt;

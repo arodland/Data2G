@@ -186,6 +186,9 @@ def read_control(tlvs: dict) -> tuple[str, str | None, bytes | None]:
     return group, call, rep
 
 
+SETHARDWARE = 6  # KISS command
+
+
 def check_mode(mode: str, cap: int):
     """ValueError unless `mode` is a mode within bandwidth cap `cap`."""
     s = MODES.get(mode)
@@ -351,11 +354,25 @@ class KissLink:
         check_mode(self.broadcast, self.cap)
         self.ports.setdefault(0, Port(PORT0_GROUP, self.broadcast))
 
-    def command(self, cmd: int, payload: bytes):
+    def command(self, cmd: int, payload: bytes, port: int = 0):
         """A KISS command from a client. P is kept. SLOTTIME (10 ms units)
         can lengthen the slot, not shorten it: clients' defaults (100 ms)
-        suit VHF carrier detect, not ours. TXDELAY (--ptt-on-delay-ms is
-        ours), TXTAIL and the rest are ignored."""
+        suit VHF carrier detect, not ours. SETHARDWARE (6) with ASCII
+        "MODE [AUTO] [DUP] mode" is BCAST MODE for `port`. TXDELAY
+        (--ptt-on-delay-ms is ours), TXTAIL and the rest are ignored."""
+        if cmd == SETHARDWARE:
+            words = payload.decode("ascii", "replace").strip("\0\r\n ").split()
+            kw = [w.upper() for w in words]
+            flags = kw[1:-1]
+            try:
+                if len(words) < 2 or kw[0] != "MODE" or not set(flags) <= {"AUTO", "DUP"} or len(set(flags)) < len(flags):
+                    raise ValueError("not MODE [AUTO] [DUP] mode")
+                self.set_mode(port, words[-1].lower(), "AUTO" in flags, "DUP" in flags)
+            except ValueError as e:
+                log.warning("KISS SETHARDWARE %r on port %d: %s", payload, port, e)
+            else:
+                log.info("KISS SETHARDWARE port %d: %s", port, " ".join(words))
+            return
         if not payload or cmd not in (2, 3):
             log.debug("KISS command %d ignored", cmd)
             return
