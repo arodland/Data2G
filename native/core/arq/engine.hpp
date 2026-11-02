@@ -69,8 +69,12 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 inline constexpr double ID_INTERVAL_S = 600.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
 // CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
-// each), "only" (a CW ID in their place); outside a session, a CW ID once quiet CW_QUIET_S after transmitting
-inline constexpr double CW_QUIET_S = 30.0;
+// each), "only" (a CW ID in their place); a transmission no CW ID covers plans one CW_PLAN_S after it, or after
+// the last CW ID when that came under CW_GAP_S before it; it goes at the next chance, held by BUSY until
+// CW_FORCE_S past the plan's start
+inline constexpr double CW_PLAN_S = 540.0;
+inline constexpr double CW_GAP_S = 300.0;
+inline constexpr double CW_FORCE_S = 600.0;
 
 // engine.Recorder (--record-dir), in the same formats: events.jsonl (one
 // JSON object per line, as json.dumps writes it), rx_NNNNN.npz per burst
@@ -260,7 +264,7 @@ public:
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
-    std::string cw_id = "off";  // "off", "add", "only" (CW_QUIET_S)
+    std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
@@ -317,7 +321,9 @@ private:
     std::vector<TxBurstPtr> ids(const Session& s, bool ahead) const;  // its ID as cw_id has it
     TxBurstPtr cw_burst(const std::string& call) const;
     std::vector<TxBurstPtr> cw_ahead(std::vector<TxBurstPtr> bursts, double t) const;  // outside a session
-    bool cw_due(double t) const;  // the CW ID after transmissions outside a session
+    bool cw_ready(double t) const;  // the planned CW ID is due
+    bool cw_due(double t, bool ok) const;  // ...alone, outside a session: `ok` (free, no BUSY), or CW_FORCE_S
+    void cw_plan(const std::vector<TxBurstPtr>& bursts, const std::vector<std::size_t>& lens, double t);
     void cw_hold(double t);       // a CW ID heard: what follows it on the same PTT is the peer's
     // Bursts back to back on one PTT; `main` is the one the session is told has gone.
     void start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxBurstPtr& main);
@@ -358,7 +364,8 @@ private:
     cwid::CwSense cw_;  // the receiver stage's
     bool cw_heard_ = false;  // the last block's (logged once per ID)
     double cw_until_ = 0.0;  // nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
-    std::optional<double> cw_owed_;  // the first transmission no CW ID has covered yet
+    std::optional<double> cw_at_;  // the planned CW ID (CW_PLAN_S)
+    std::optional<double> cw_last_;  // my last CW ID's start
     // the energy inputs (engine.py _energy, _missed_energy)
     struct Span {
         double start, end;

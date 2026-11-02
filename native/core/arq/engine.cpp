@@ -499,15 +499,33 @@ std::vector<TxBurstPtr> Engine::with_id(const TxBurstPtr& burst, double t) {
     return {burst};
 }
 
-// Outside a session: a CW ID ahead of `bursts` once id_interval_s has passed since the first transmission none covered.
+bool Engine::cw_ready(double t) const { return cw_id != "off" && cw_at_ && t >= *cw_at_; }
+
+// Outside a session: the planned CW ID ahead of `bursts` once due.
 std::vector<TxBurstPtr> Engine::cw_ahead(std::vector<TxBurstPtr> bursts, double t) const {
-    if (cw_id != "off" && cw_owed_ && t >= *cw_owed_ + id_interval_s) bursts.insert(bursts.begin(), cw_burst(call_));
+    if (cw_ready(t)) bursts.insert(bursts.begin(), cw_burst(call_));
     return bursts;
 }
 
-bool Engine::cw_due(double t) const {
-    return cw_id != "off" && cw_owed_ && tx_end_ && t >= *tx_end_ + CW_QUIET_S && idle() && !id_pending_ &&
-           extra_.empty() && !(cfg_.kiss && !cfg_.kiss->queue.empty());
+bool Engine::cw_due(double t, bool ok) const {
+    return cw_ready(t) && idle() && !id_pending_ && (ok || t >= *cw_at_ - CW_PLAN_S + CW_FORCE_S);
+}
+
+// CW_PLAN_S: a CW ID covers all before it, and plans the next one when bursts follow it; else the first burst no
+// ID covers plans one.
+void Engine::cw_plan(const std::vector<TxBurstPtr>& bursts, const std::vector<std::size_t>& lens, double t) {
+    if (cw_id == "off") return;
+    double start = t + static_cast<double>(ptt_delay_) / config::FS;
+    for (std::size_t j = 0; j < bursts.size(); ++j) {
+        if (bursts[j]->submode == "cw") {
+            cw_last_ = start;
+            cw_at_.reset();
+        } else if (!cw_at_) {
+            const bool fresh = !cw_last_ || start - *cw_last_ >= CW_GAP_S;
+            cw_at_ = (fresh ? start : *cw_last_) + CW_PLAN_S;
+        }
+        start += static_cast<double>(lens[j]) / config::FS;
+    }
 }
 
 void Engine::cw_hold(double t) {
@@ -732,8 +750,6 @@ Engine::Done Engine::process(Block& b) {
                 main = extra_.front();
                 extra_.pop_front();
                 bursts = cw_ahead({main}, t);
-            } else if (free && cw_due(t)) {
-                bursts = {cw_burst(call_)};
             }
         }
         if (bursts.empty() && cfg_.kiss && free && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
@@ -743,6 +759,7 @@ Engine::Done Engine::process(Block& b) {
             }
             tx_kiss_ = !bursts.empty();
         } else kiss_busy_ = 0;
+        if (bursts.empty() && cw_due(t, free && !busy && !held)) bursts = {cw_burst(call_)};
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
     }
     if (tx_) {
@@ -1080,8 +1097,7 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
         lens.push_back(x.size());
         if (on_send_) on_send_(b);
     }
-    if (bursts.back()->submode == "cw") cw_owed_.reset();  // a CW ID last covers all before it
-    else if (!cw_owed_ || bursts.front()->submode == "cw") cw_owed_ = t;
+    cw_plan(bursts, lens, t);
     if (rec_) {
         // one event per burst, at its own start: the first's seconds include
         // the PTT delay, as a lone burst's always did (scripts/replay.py)

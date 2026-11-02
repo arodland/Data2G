@@ -93,14 +93,32 @@ def test_cw_id_during_and_after_a_session(tmp_path, mode):
 
 
 def test_cw_id_after_a_cq_frame():
-    """Outside a session: a CW ID once the station has been quiet CW_QUIET_S."""
+    """Outside a session: the CW ID CW_PLAN_S after the first transmission,
+    held by BUSY (another station's CW) until CW_FORCE_S; the next one
+    CW_PLAN_S after it when a transmission follows it within CW_GAP_S."""
     a = E.Engine("W1AW", seed=1)
     a.cw_id = "only"
+    qrm = cwid.audio("DE K2XYZ " * 40, 20)  # ~4 minutes keyed
+    sent = []
+
+    def run(until, busy_from=None):
+        while a.now < until:
+            x = np.zeros(BLOCK)
+            if busy_from is not None and a.now >= busy_from:
+                i = int((a.now - busy_from) * FS) % len(qrm)
+                x = 0.3 * qrm.take(np.arange(i, i + BLOCK), mode="wrap")
+            _, ptt = a.step(x)
+            if ptt and (not sent or sent[-1][1] != a.tx_submode or a.now - sent[-1][0] > 30):
+                sent.append((a.now, a.tx_submode))
+
     a.send_cq("W1AW", 2)
-    sent, t = [], 0.0
-    for _ in range(int((E.CW_QUIET_S + 10) * FS / BLOCK)):
-        _, ptt = a.step(np.zeros(BLOCK))
-        if ptt and (not sent or sent[-1][1] != a.tx_submode):
-            sent.append((a.now, a.tx_submode))
-    assert [m for _, m in sent][-1] == "cw" and len(sent) == 2
-    assert sent[1][0] - sent[0][0] > E.CW_QUIET_S
+    run(1.0)
+    cq = sent[0][0]
+    run(cq + E.CW_FORCE_S + 20, busy_from=cq + E.CW_PLAN_S - 10)
+    assert [m for _, m in sent] == [sent[0][1], "cw"]
+    assert cq + E.CW_FORCE_S - 1 < sent[1][0] < cq + E.CW_FORCE_S + 2
+    run(sent[1][0] + 60)
+    a.send_cq("W1AW", 2)  # within CW_GAP_S of the ID: the next one CW_PLAN_S after the ID
+    run(sent[1][0] + E.CW_PLAN_S + 20)
+    assert [m for _, m in sent][2:] == [sent[0][1], "cw"]
+    assert E.CW_PLAN_S - 1 < sent[3][0] - sent[1][0] < E.CW_PLAN_S + 2
