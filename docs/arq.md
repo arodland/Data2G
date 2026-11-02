@@ -613,10 +613,12 @@ data2g/arq/engine.py). Off by default.
     CW ID, then ID frame (`add`), then the turn's burst;
   - after a session: after the DISC_ACK (ID frame, then CW ID), or
     `ID_GUARD_S` after the close;
-  - outside a session (KISS, CQ frames, a refused or unanswered call): one
-    once the station has been quiet `CW_QUIET_S` (30 s) with nothing queued,
-    and one ahead of such a transmission `ID_INTERVAL_S` after the first one
-    no ID covered.
+  - outside a session (KISS, CQ frames, a refused or unanswered call): a
+    transmission no CW ID covers plans one `CW_PLAN_S` (9 min) after it, or
+    after the last CW ID when that came under `CW_GAP_S` (5 min) before it,
+    so these never come closer than 9 min. It goes at the next chance: ahead
+    of the next burst, or alone with the session idle, held by BUSY until
+    `CW_FORCE_S` (10 min) past the plan's start, then sent regardless.
 - **Hearing one (CwSense, every station, whatever its own setting):** per 20 ms,
   25 Hz bins 1200-1800 Hz (Hann) against a tracked noise floor. A window is a
   hit (one tone within +-50 Hz of 1500 over 10 dB above the floor, nothing

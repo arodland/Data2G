@@ -73,12 +73,16 @@ ID_INTERVAL_S = 600.0
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
-# frame, CW); "only", a CW ID in their place. With it on, a station that has
-# transmitted outside a session (KISS, a CQ frame, a refused or unanswered
-# call) sends a CW ID once it has been quiet CW_QUIET_S, and one ahead of
-# such a transmission ID_INTERVAL_S after the first that none covered.
+# frame, CW); "only", a CW ID in their place. With it on, a transmission no
+# CW ID covers (KISS, a CQ frame, a refused or unanswered call) plans one
+# CW_PLAN_S after it, or after the last CW ID when that came under CW_GAP_S
+# before it: never two within CW_PLAN_S. The planned ID goes at the next
+# chance (ahead of a burst, or alone outside a session), held by BUSY until
+# CW_FORCE_S past the plan's start.
 CW_ID_MODES = ("off", "add", "only")
-CW_QUIET_S = 30.0
+CW_PLAN_S = 540.0
+CW_GAP_S = 300.0
+CW_FORCE_S = 600.0
 
 
 class Recorder:
@@ -177,7 +181,8 @@ class Engine:
         self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
         self._cw_heard = False  # the last block's (logged once per ID)
         self._cw_until = 0.0  # nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
-        self._cw_owed: float | None = None  # the first transmission no CW ID has covered yet
+        self._cw_at: float | None = None  # the planned CW ID (CW_PLAN_S)
+        self._cw_last: float | None = None  # my last CW ID's start
         self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
         self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
@@ -342,18 +347,32 @@ class Engine:
             return [*self._ids(s, True), burst]
         return [burst]
 
-    def _cw_ahead(self, bursts: list, t: float) -> list:
-        """Outside a session: a CW ID ahead of `bursts` once id_interval_s
-        has passed since the first transmission none covered."""
-        if self.cw_id != "off" and self._cw_owed is not None and t >= self._cw_owed + self.id_interval_s:
-            return [self._cw_burst(self.call), *bursts]
-        return bursts
+    def _cw_ready(self, t: float) -> bool:
+        return self.cw_id != "off" and self._cw_at is not None and t >= self._cw_at
 
-    def _cw_due(self, t: float) -> bool:
-        """The CW ID after transmissions outside a session: quiet CW_QUIET_S, nothing queued."""
-        return (self.cw_id != "off" and self._cw_owed is not None and self._tx_end is not None
-                and t >= self._tx_end + CW_QUIET_S and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)
-                and self._id_pending is None and not self._extra and not (self.kiss is not None and self.kiss.queue))
+    def _cw_ahead(self, bursts: list, t: float) -> list:
+        """Outside a session: the planned CW ID ahead of `bursts` once due."""
+        return [self._cw_burst(self.call), *bursts] if self._cw_ready(t) else bursts
+
+    def _cw_due(self, t: float, ok: bool) -> bool:
+        """The planned CW ID alone, outside a session: when `ok` (free, no
+        BUSY), or regardless once CW_FORCE_S past the plan's start."""
+        return (self._cw_ready(t) and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)
+                and self._id_pending is None and (ok or t >= self._cw_at - CW_PLAN_S + CW_FORCE_S))
+
+    def _cw_plan(self, bursts: list, lens: list[int], t: float):
+        """CW_PLAN_S: a CW ID covers all before it, and plans the next one
+        when bursts follow it; else the first burst no ID covers plans one."""
+        if self.cw_id == "off":
+            return
+        start = t + self.ptt_delay / FS
+        for b, n in zip(bursts, lens):
+            if isinstance(b, cwid.CwBurst):
+                self._cw_last, self._cw_at = start, None
+            elif self._cw_at is None:
+                fresh = self._cw_last is None or start - self._cw_last >= CW_GAP_S
+                self._cw_at = (start if fresh else self._cw_last) + CW_PLAN_S
+            start += n / FS
 
     def _cw_false_lock(self):
         """A suspect OFDM lock (Receiver.SUSPECT_SCORE: a header, or a header
@@ -414,8 +433,6 @@ class Engine:
                 elif self._extra and free:
                     main = self._extra.pop(0)
                     bursts = self._cw_ahead([main], t)
-                elif free and self._cw_due(t):
-                    bursts = [self._cw_burst(self.call)]
             if (bursts is None and self.kiss is not None and free
                     and (self.session.state in (S.IDLE, S.LISTEN, S.CLOSED) or self.session.idle())):
                 burst = self._kiss_burst(k, busy)  # KISS between ARQ sessions, or while one is idle
@@ -423,6 +440,8 @@ class Engine:
                 self._tx_kiss = burst is not None
             else:
                 self._kiss_busy = 0
+            if bursts is None and self._cw_due(t, free and not busy and not held):
+                bursts = [self._cw_burst(self.call)]
             if bursts is not None:
                 self._start_tx(bursts, t, main or bursts[0])
         if self.tx is not None:
@@ -649,10 +668,7 @@ class Engine:
         xs = [cwid.audio(b.text, b.wpm) if isinstance(b, cwid.CwBurst) else PHY.tx_audio(b) for b in bursts]
         audio = np.concatenate([np.zeros(self.ptt_delay)] + [
             x if isinstance(b, cwid.CwBurst) else x / np.max(dsp.envelope(x)) for b, x in zip(bursts, xs)])
-        if isinstance(bursts[-1], cwid.CwBurst):
-            self._cw_owed = None  # a CW ID last covers all before it
-        elif self._cw_owed is None or isinstance(bursts[0], cwid.CwBurst):
-            self._cw_owed = t
+        self._cw_plan(bursts, [len(x) for x in xs], t)
         self.tx = [main, audio, 0]
         if self.rec:
             # one event per burst, at its own start: the first's seconds include
