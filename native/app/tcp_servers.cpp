@@ -85,7 +85,7 @@ void Port::read(QTcpSocket* c) {
 
 KissServer::KissServer(const QHostAddress& addr, quint16 port,
                        std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
-                       std::function<void(int, tnc::Bytes)> on_command)
+                       std::function<void(int, tnc::Bytes, int)> on_command)
     : on_packet_(std::move(on_packet)), on_command_(std::move(on_command)) {
     if (!srv_.listen(addr, port))
         throw std::runtime_error("can't listen on " + addr.toString().toStdString() + ":" + std::to_string(port) + ": " +
@@ -108,7 +108,7 @@ KissServer::KissServer(const QHostAddress& addr, quint16 port,
                         acks_[id] = {c, tnc::Bytes(payload.begin(), payload.begin() + 2)};
                         on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id);
                     } else {
-                        on_command_(cmd & 0x0F, std::move(payload));
+                        on_command_(cmd & 0x0F, std::move(payload), cmd >> 4);
                     }
                 }
             });

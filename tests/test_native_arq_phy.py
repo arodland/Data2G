@@ -238,6 +238,9 @@ def test_kiss_links_match(native, pure):
     k.command(2, bytes([127]))
     k.command(3, bytes([200]))
     assert (k.persist, k.slot_s) == (127, 2.0)
+    k.command(6, b"MODE DUP qpsk-r1/2")
+    k.command(6, b"MODE no-such-mode")  # ignored
+    assert (k.ports[0].mode, k.ports[0].dup) == ("qpsk-r1/2", True)
 
 
 def test_kiss_dup_links_match(native, pure):

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <set>
 #include <stdexcept>
 
 #include "arq/frames.hpp"
@@ -182,7 +183,38 @@ void check_mode(const std::string& mode, int cap) {
         throw std::invalid_argument("mode '" + mode + "': not a mode within the bandwidth cap");
 }
 
-void KissLink::command(int cmd, ByteView payload) {
+void KissLink::command(int cmd, ByteView payload, int port) {
+    if (cmd == SETHARDWARE) {  // "MODE [AUTO] [DUP] mode": BCAST MODE for this port
+        std::vector<std::string> kw;
+        std::string w;
+        for (std::size_t i = 0; i <= payload.size(); ++i) {
+            const unsigned char c = i < payload.size() ? payload[i] : ' ';
+            if (std::isspace(c) || c == 0) {
+                if (!w.empty()) kw.push_back(std::move(w));
+                w.clear();
+            } else {
+                w += static_cast<char>(std::toupper(c));
+            }
+        }
+        std::string text(payload.begin(), payload.end());  // for the log: printable ASCII only
+        for (auto& c : text) if (c < 0x20 || c > 0x7E) c = '?';
+        try {
+            if (kw.size() < 2 || kw[0] != "MODE") throw std::invalid_argument("not MODE [AUTO] [DUP] mode");
+            const std::set<std::string> flags(kw.begin() + 1, kw.end() - 1);
+            const bool known = std::all_of(flags.begin(), flags.end(), [](const auto& f) { return f == "AUTO" || f == "DUP"; });
+            if (!known || flags.size() != kw.size() - 2)
+                throw std::invalid_argument("not MODE [AUTO] [DUP] mode");
+            std::string mode = kw.back();
+            for (auto& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            set_mode(port, mode, flags.count("AUTO") > 0, flags.count("DUP") > 0);
+            if (arq::log_enabled(LOG, 20))
+                arq::log_write(LOG, 20, arq::format("KISS SETHARDWARE port %d: %s", port, text.c_str()));
+        } catch (const std::invalid_argument& e) {
+            if (arq::log_enabled(LOG, 30))
+                arq::log_write(LOG, 30, arq::format("KISS SETHARDWARE '%s' on port %d: %s", text.c_str(), port, e.what()));
+        }
+        return;
+    }
     if (payload.empty() || (cmd != 2 && cmd != 3)) {
         if (arq::log_enabled(LOG, 10)) arq::log_write(LOG, 10, arq::format("KISS command %d ignored", cmd));
         return;

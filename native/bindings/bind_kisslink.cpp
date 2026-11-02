@@ -126,7 +126,8 @@ void bind_kisslink(py::module_& m) {
         .def_readwrite("persist", &KissLink::persist)
         .def_readwrite("slot_s", &KissLink::slot_s)
         .def_readwrite("busy_limit_s", &KissLink::busy_limit_s)
-        .def("command", [](KissLink& l, int cmd, const py::bytes& payload) { l.command(cmd, bytes_view(payload)); })
+        .def("command", [](KissLink& l, int cmd, const py::bytes& payload, int port) { l.command(cmd, bytes_view(payload), port); },
+             py::arg("cmd"), py::arg("payload"), py::arg("port") = 0)
         .def("open", &KissLink::open, py::arg("group"), py::arg("from_call") = std::nullopt)
         .def("close", &KissLink::close)
         .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false,

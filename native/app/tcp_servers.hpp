@@ -59,7 +59,7 @@ class KissServer : public QObject {
 public:
     // Throws std::runtime_error if it can't listen.
     KissServer(const QHostAddress& addr, quint16 port, std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
-               std::function<void(int, tnc::Bytes)> on_command);
+               std::function<void(int, tnc::Bytes, int)> on_command);  // (cmd, payload, port)
     ~KissServer() override;
 
     void broadcast(const tnc::Bytes& data, int port);
@@ -73,7 +73,7 @@ private:
     std::map<std::int64_t, std::pair<QTcpSocket*, tnc::Bytes>> acks_;  // ACKMODE id -> (client, tag)
     std::int64_t n_acks_ = 0;
     std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet_;
-    std::function<void(int, tnc::Bytes)> on_command_;
+    std::function<void(int, tnc::Bytes, int)> on_command_;
 };
 
 }  // namespace data2g::app

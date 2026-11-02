@@ -208,6 +208,13 @@ fits but on the ACK modes (§3).
   start). Receiver AGC can pull it low under strong signals. Only outside an ARQ session: during one, a lost burst is
   most likely the peer's.
 
+A KISS client can set its port's mode itself, e.g. as a TNC init command: KISS
+SetHardware (command `0x06`, the port in the high nibble) with the ASCII text `MODE
+[AUTO] [DUP] mode`, as `BCAST MODE n` takes it (case-insensitive, trailing CR/LF/NUL
+ignored). Port 0 is always open; others must be opened first. KISS has no reply: a bad
+one is logged and changes nothing. Port 0 goes back to its defaults when a command
+client disconnects, as above. Port 0 as hex: `C0 06 4D 4F 44 45 20 <mode> C0`.
+
 Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
 and QtSoundModem):
 
@@ -227,8 +234,6 @@ and QtSoundModem):
 
 - **Ports beyond 15** (KISS SetHardware): 15 groups open at once is plenty until an
   app needs more.
-- **Setting a port's mode by KISS command:** the command port does it. Add it when a
-  KISS-only client needs it.
 - **Incremental redundancy across broadcast bursts:** later. An app would mark a frame,
   by a KISS extension, as a resend at a given redundancy version; it runs its own
   resends outside our ARQ, and we keep its soft bits for a while to combine. The

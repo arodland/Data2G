@@ -122,7 +122,10 @@ public:
     std::vector<std::string> events;                 // statuses for the host, oldest first
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ack) of frames that went out
 
-    void command(int cmd, ByteView payload);  // KISS P and SLOTTIME; the rest ignored
+    // KISS P, SLOTTIME, and SETHARDWARE "MODE [AUTO] [DUP] mode" (set_mode on
+    // `port`; bad ones logged); the rest ignored.
+    void command(int cmd, ByteView payload, int port = 0);
+    static constexpr int SETHARDWARE = 6;
     // Ports (the host's BCAST commands); each throws std::invalid_argument.
     int open(const std::string& group, const std::optional<std::string>& from_call = std::nullopt);
     void close(int n);  // frames queued for it are dropped (DROPPED)
