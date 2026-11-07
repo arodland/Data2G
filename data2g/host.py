@@ -33,13 +33,18 @@ off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
 accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
-seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
-REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED
-(DATA2G ON: DISCONNECTED reason [detail], docs/arq.md §9),
-PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
+seconds-at-1 seconds-at-max lines); show of hands (Data2G, docs/arq.md §9):
+HAND SEND ref tag d channel hex16 (send a Hand d seconds after the end of
+heard burst ref, shifted by its cfo) and HAND LISTEN d tag channel [...]
+(decode the window after my next burst ends). Replies OK / WRONG (MYCALL's
+OK followed by REGISTERED call for each call). Notifications: CONNECTED src
+dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
+§9), PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
-BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has sent a
-BCAST command, so VARA clients never see them.
+BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has
+sent a BCAST command; hand lines (REF id end offset snr per decoded burst,
+HAND SENT/DROPPED c, HAND c hex16 snr dt, HAND END) once it has sent a HAND
+command or DATA2G ON, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
 
@@ -120,6 +125,7 @@ class Host:
         engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
+        self._hand = False  # the client has sent HAND: REF/HAND lines go to it (as with DATA2G ON)
         self.data2g = False  # DATA2G ON
         self.output_volume = 0.0  # dB, TXPOWER: serve() applies it
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
@@ -174,6 +180,18 @@ class Host:
             try:
                 e.send_cq(args[0], BW["BW" + args[1]])
             except (RuntimeError, ValueError):  # a session under way; a callsign that won't pack
+                ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "SEND" and len(args) == 6:
+            self._hand = True
+            try:  # HAND SEND ref tag d channel hex16 (docs/arq.md §9)
+                e.hand_send(int(args[1]), int(args[2]), float(args[3]), int(args[4]), int(args[5], 16))
+            except (ValueError, OverflowError):
+                ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "LISTEN" and len(args) >= 4:
+            self._hand = True
+            try:  # HAND LISTEN d tag channel [channel...]
+                e.hand_listen(float(args[1]), int(args[2]), [int(a) for a in args[3:]])
+            except (ValueError, OverflowError):
                 ok = False
         elif cmd in BW:
             self.cap = BW[cmd]
@@ -294,7 +312,7 @@ class Host:
             e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening, self.accept_addr, self.data2g = False, None, False
+        self.listening, self.accept_addr, self.data2g, self._hand = False, None, False, False
         e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
@@ -351,6 +369,9 @@ class Host:
             events = e.kiss.take_events()
             if self._bcast:
                 self.out_cmd += events
+        refs = e.take_hand_events()  # always drained; gated like the BCAST statuses:
+        if self._hand or self.data2g:  # VARA clients never see REF/HAND lines
+            self.out_cmd += refs
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")

@@ -20,12 +20,13 @@ on its own thread).
 import json
 import logging
 import random
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 
-from .. import codes, cpm, cwid, modem
+from .. import codes, cpm, cwid, hand, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
 from ..receiver import NoiseProfile, Receiver, ReplySlot
 from ..waveform import dsp
@@ -83,6 +84,10 @@ CW_ID_MODES = ("off", "add", "only")
 CW_PLAN_S = 540.0
 CW_GAP_S = 300.0
 CW_FORCE_S = 600.0
+# Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
+# how long an armed HAND LISTEN waits for the burst that anchors its window.
+HAND_REFS_KEPT = 64
+HAND_ARM_EXPIRE_S = 30.0
 
 
 class Recorder:
@@ -185,6 +190,13 @@ class Engine:
         self._cw_last: float | None = None  # my last CW ID's start
         self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
         self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
+        self.hand_refs: dict[int, tuple[float, float, float]] = {}  # heard burst id -> (end s, cfo Hz, snr dB)
+        self._hand_ref_n = 0
+        self._hand_tx = None  # a scheduled Hand (docs/arq.md §9): [first audio sample, audio, channel]
+        self._hand_listen = None  # an armed or open Hand window: dict(d, tag, channels, armed, open, ...)
+        self._hand_hold = 0.0  # no CQ/broadcast/CW starts before this (an open Hand window)
+        self._hand_out: list[str] = []  # REF/HAND lines for the host; the decoder thread appends (lock)
+        self._hand_lock = threading.Lock()
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._new_session()
@@ -281,6 +293,89 @@ class Engine:
     @property
     def idle_close_s(self) -> float:
         return S.IDLE_CLOSE_S if self._idle_close_s is None else self._idle_close_s
+
+    # -- Hand bursts (the D2G net's show of hands: data2g/hand.py, docs/arq.md §9) ----
+
+    def hand_send(self, ref: int, tag: int, d_s: float, channel: int, payload: int):
+        """Schedule a Hand: `payload`'s 63 bits in channel `channel`
+        (hand.N_CHANNELS of them, hand.PITCH apart around 1500 Hz), on air
+        `d_s` seconds after the end of heard burst `ref`, shifted by that
+        burst's cfo so it lands in net control's channel map. ValueError:
+        unknown ref, bad numbers, or one already waiting."""
+        if ref not in self.hand_refs:
+            raise ValueError(f"no ref {ref}")
+        if self._hand_tx is not None:
+            raise ValueError("a Hand is already waiting")
+        if not 0 <= channel < hand.N_CHANNELS or not 0 <= tag <= 255:
+            raise ValueError("bad channel or tag")
+        if not 0 <= payload < 2 ** hand.PAYLOAD or not 0 < d_s < HAND_ARM_EXPIRE_S:
+            raise ValueError("bad payload or delay")
+        end, cfo, _ = self.hand_refs[ref]
+        target = int(round((end + d_s) * FS)) - self.ptt_delay
+        if target < self.n:
+            raise ValueError("the slot has passed")
+        audio = np.concatenate([np.zeros(self.ptt_delay), hand.tx_audio(tag, payload, channel, cfo)])
+        self._hand_tx = [target, audio, channel]
+
+    def hand_listen(self, d_s: float, tag: int, channels: list[int]):
+        """Arm a Hand window opening d_s seconds after the end of my next
+        burst: capture it +-hand.SEARCH_S, decode `channels` with the CRC
+        seeded by `tag`, and report through take_hand_events. While a window
+        is open no CQ, broadcast or CW ID of mine starts."""
+        if not 0 < d_s < HAND_ARM_EXPIRE_S or not 0 <= tag <= 255:
+            raise ValueError("bad delay or tag")
+        if not channels or any(not 0 <= c < hand.N_CHANNELS for c in channels):
+            raise ValueError("bad channels")
+        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, channels=list(channels),
+                                 armed=self.n, open=False, buf=[], first=0, lo=0, hi=0, anchor=0)
+
+    def take_hand_events(self) -> list[str]:
+        """REF and HAND lines since the last call (docs/arq.md §9): one REF
+        per decoded burst, and a round's HAND lines (made on the decoder
+        thread, hence the lock)."""
+        with self._hand_lock:
+            out, self._hand_out = self._hand_out, []
+        return out
+
+    def _hand_event(self, line: str):
+        with self._hand_lock:
+            if len(self._hand_out) > 1000:  # a bare Engine with no host to drain it: don't grow
+                self._hand_out.clear()
+            self._hand_out.append(line)
+
+    def _hand_collect(self, x: np.ndarray, k: int):
+        """An open Hand window's audio, and an armed listen's expiry."""
+        hl = self._hand_listen
+        if hl is None:
+            return
+        if not hl["open"]:
+            if self.n - hl["armed"] > HAND_ARM_EXPIRE_S * FS:
+                self._hand_listen = None
+                self._hand_event("HAND END")
+            return
+        if self.n + k > hl["lo"]:
+            if not hl["buf"]:
+                hl["first"] = self.n
+            hl["buf"].append(x)
+        if self.n + k >= hl["hi"] and hl["buf"]:
+            self._hand_listen = None
+            nominal = hl["anchor"] + hl["d"] - hl["first"]
+            threading.Thread(target=self._hand_decode,
+                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal),
+                             name="hand-decode", daemon=True).start()
+
+    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int):
+        """The round's decodes off the audio thread (~1-2 s of CPU for 40
+        channels): a line per Hand decoded, then HAND END. A decoder
+        exception costs the round, not the station."""
+        try:
+            res = hand.decode_window(y, tag, channels, nominal)
+            lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
+        except Exception:
+            log.exception("hand decode failed")
+            lines = []
+        for line in lines + ["HAND END"]:
+            self._hand_event(line)
 
     def events(self) -> list[str]:
         """Host notifications since the last call, oldest first, one line of
@@ -412,6 +507,7 @@ class Engine:
             self.noise.feed(x, self.now)
             cw = self.cw.feed(x)
             self._hear(x, t)
+            self._hand_collect(x, k)
             self._cw_false_lock()
             if cw:
                 self._cw_hold(t)
@@ -419,7 +515,7 @@ class Engine:
             self._id_check(t)
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
-            free = t >= self._hold and t >= self._cw_until  # for anything outside a session
+            free = t >= self._hold and t >= self._cw_until and t >= self._hand_hold  # for anything outside a session
             busy = self.receiver.busy or cw
             if not busy and not held:  # a burst still arriving holds any reply (half duplex)
                 self._carrier_hold(t)
@@ -444,6 +540,24 @@ class Engine:
                 bursts = [self._cw_burst(self.call)]
             if bursts is not None:
                 self._start_tx(bursts, t, main or bursts[0])
+            if self._hand_tx is not None and self.tx is None and self.n >= self._hand_tx[0]:
+                # a scheduled Hand (docs/arq.md §9): its slot is due and the radio is
+                # idle. The audio starts at the first block boundary past the slot:
+                # <= 0.1 s late before the host's own PTT/output latencies, which
+                # net control's +-0.6 s search and the reported dt cover.
+                ht = self._hand_tx
+                if self.n <= ht[0] + int(hand.LATE_S * FS):
+                    self._hand_tx = None
+                    log.info("TX hand %d", ht[2])
+                    self.tx = [hand.HandBurst(), ht[1], 0]
+                    self._tx_kiss = True  # nobody's session: no reply timer
+                    self._hand_event(f"HAND SENT {ht[2]}")
+                    if self.rec:
+                        self.rec.event("hand_tx", t=self.now, channel=ht[2], seconds=len(ht[1]) / FS)
+                else:
+                    self._hand_tx = None
+                    log.info("hand %d not sent: busy past the slot", ht[2])
+                    self._hand_event(f"HAND DROPPED {ht[2]}")
         if self.tx is not None:
             burst, audio, pos = self.tx  # burst: the session's, when an ID rides with it
             n = min(k, len(audio) - pos)
@@ -455,6 +569,13 @@ class Engine:
                 self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
                 self._tx_end = self.now + n / FS
+                hl = self._hand_listen
+                if hl is not None and not hl["open"]:  # my burst ended: its window opens
+                    a = self.n + n  # its end sample (self.n advances at the step's end)
+                    hl.update(open=True, buf=[], anchor=a,
+                              lo=a + hl["d"] - hand.SEARCH_SAMPLES,
+                              hi=a + hl["d"] + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES)
+                    self._hand_hold = hl["hi"] / FS
                 if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
                     self.session.on_tx_end(burst, self.now + n / FS)
                     self._expect_reply()
@@ -492,6 +613,14 @@ class Engine:
             span, self._span = self._span, None
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
+            if r is not None:  # every decoded burst is a Hand reference (docs/arq.md §9)
+                self._hand_ref_n += 1
+                end = span[1] if span else t
+                cfo = r.get("cfo", 0.0)
+                self.hand_refs[self._hand_ref_n] = (end, cfo, meas["snr_est"])
+                if len(self.hand_refs) > HAND_REFS_KEPT:
+                    self.hand_refs.pop(min(self.hand_refs))
+                self._hand_event(f"REF {self._hand_ref_n} {end:.2f} {cfo:.1f} {meas['snr_est']:.1f}")
             if span is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING):
                 # heard (decoded or not): the peer's, most likely
                 self._energy(*span, t, floor_db=meas["snr_est"] if meas else None)

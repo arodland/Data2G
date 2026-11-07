@@ -718,6 +718,34 @@ As built (data2g/arq/policy.py):
     way.
   - Any station that hears one, listening or not, notifies its host with
     `CQFRAME call bw`.
+  - **HAND** (Data2G: the D2G net's show of hands; waveform in data2g/hand.py,
+    design in ~/d2g-hand-burst-response.md, measured on the hand-burst-sim
+    branch). Like the BCAST statuses, the hand lines go only to a client that
+    has sent DATA2G ON or a HAND command.
+    - Every burst this station decodes becomes a Hand reference, notified
+      `REF id end offset snr`: id counts up from 1 (the last 64 stay usable),
+      end is the burst's end in host seconds (the sound card's clock), offset
+      its measured cfo (Hz, 0 for modes that don't measure one), snr its
+      snr_est (dB). A burst's REF line reaches the command port before that
+      burst's KISS frames reach the KISS port.
+    - **HAND SEND ref tag d channel hex16**: send a Hand (63 payload bits as
+      16 hex digits, the top one ignored) in `channel` (0-39: 40 channels,
+      6.25 Hz 8-FSK, 60 Hz apart, centred on 1500 Hz), on air d seconds after
+      the end of heard burst `ref`, shifted by that burst's offset. `tag`
+      (0-255) seeds the Hand's CRC, so it can't answer another net's request.
+      WRONG for a gone ref, bad numbers, or a Hand already waiting. OK: then
+      `HAND SENT c` when it keys, or `HAND DROPPED c` if the radio was busy
+      more than 0.5 s past the slot.
+    - **HAND LISTEN d tag channel [channel...]**: open the window d seconds
+      after the end of the next burst this host sends, lasting the Hand length
+      (10.56 s) plus 0.6 s either side, and decode the listed channels
+      (usually all 40; the CRC seeded with `tag`). While a window is open this
+      host starts no CQ, broadcast or CW ID of its own. Each Hand decoded:
+      `HAND c hex16 snr dt` (snr dB; dt: its start minus the slot, ms, which
+      is the answerer's latency for net control to report back). Then
+      `HAND END`; an armed listen whose burst never went out gives up after
+      30 s with `HAND END`. Send the command before queuing the burst that
+      anchors the window: the KISS port may defer its start.
   - BW500 caps at 500 Hz. This one matters: it keeps a session inside a 500 Hz
     band-plan segment.
   - BW2300 and BW2750 set no cap (2400 Hz, the widest band).
