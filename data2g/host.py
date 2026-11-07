@@ -131,6 +131,7 @@ class Host:
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
+        self.out_kiss_refs: list[str] = []  # REF lines for the KISS port (serve: tnc.KissServer.send_ref)
         self._ptt = self._busy = False
         self._buffer = 0
         self._buffer_t = 0.0  # engine time of the last BUFFER line
@@ -372,6 +373,8 @@ class Host:
         refs = e.take_hand_events()  # always drained; gated like the BCAST statuses:
         if self._hand or self.data2g:  # VARA clients never see REF/HAND lines
             self.out_cmd += refs
+        # ... and the REF lines again for the KISS port (its REFS ON clients), ahead of the burst's frames
+        self.out_kiss_refs += [r for r in refs if r.startswith("REF ")]
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")
@@ -658,6 +661,9 @@ def serve(a, pa, stop: threading.Event | None = None):
             else:
                 data.send(bytes(host.out_data))
             host.out_data.clear()
+            for line in host.out_kiss_refs:  # same socket, ahead of the frames: no race with the command port
+                kiss.send_ref(line)
+            host.out_kiss_refs.clear()
             for port, f in engine.take_kiss_rx():
                 kiss.broadcast(f, port)
             for port, ack in link.take_acks():

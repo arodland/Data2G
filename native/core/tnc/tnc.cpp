@@ -1,6 +1,21 @@
 #include "tnc/tnc.hpp"
 
+#include <cctype>
+#include <sstream>
+#include <string>
+
 namespace data2g::tnc {
+
+std::optional<bool> refs_command(std::span<const std::uint8_t> payload) {
+    std::string t(payload.begin(), payload.end());  // whitespace splits, so only NUL/CR/LF need trimming
+    for (auto& ch : t) ch = (ch == '\0' || ch == '\r' || ch == '\n') ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    std::istringstream in(t);
+    std::string a, b, rest;
+    if (!(in >> a >> b) || (in >> rest) || a != "REFS") return std::nullopt;
+    if (b == "ON") return true;
+    if (b == "OFF") return false;
+    return std::nullopt;
+}
 
 Bytes kiss_encode(std::span<const std::uint8_t> data, int port, int cmd) {
     Bytes out{FEND};

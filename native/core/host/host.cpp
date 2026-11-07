@@ -412,6 +412,8 @@ void Host::after_step(bool ptt) {
     }
     {
         auto hand = e.take_hand_events();  // REF and HAND lines (docs/arq.md §9): Data2G-aware clients only
+        for (const auto& l : hand)  // ... and the REF lines again for the KISS port (Station::flush)
+            if (l.starts_with("REF ")) out_kiss_refs.push_back(l);
         if (hand_ || data2g) out_cmd.insert(out_cmd.end(), std::make_move_iterator(hand.begin()), std::make_move_iterator(hand.end()));
     }
     if (ptt != ptt_) {

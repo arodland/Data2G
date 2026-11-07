@@ -68,6 +68,7 @@ void bind_host(py::module_& m) {
             s.out_cmd.clear();
             return out;
         })
+        .def("take_kiss_refs", [](PyHost& s) { return std::exchange(s.out_kiss_refs, {}); })
         .def("take_data", [](PyHost& s) {
             auto b = pyb(s.out_data);
             s.out_data.clear();

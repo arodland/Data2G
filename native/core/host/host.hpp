@@ -86,6 +86,7 @@ public:
     bool data2g = false;               // DATA2G ON
     double output_volume = 0.0;        // dB, TXPOWER: the owner applies it
     std::vector<std::string> out_cmd;  // lines for the command port, without CR
+    std::vector<std::string> out_kiss_refs;  // REF lines for the KISS port's REFS ON clients, ahead of the burst's frames
     arq::Bytes out_data;               // bytes for the data port
 
 protected:

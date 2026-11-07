@@ -125,6 +125,7 @@ struct Station::MonitorThread {
 struct Station::Outbox {
     std::vector<std::pair<std::string, std::uint64_t>> cmd;  // (line, client it is for; 0: all)
     arq::Bytes data;
+    std::vector<std::string> refs;  // REF lines for KISS REFS ON clients, ahead of kiss
     std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
     unsigned dial = 0;     // data goes to ACCEPT's connection of this dial generation (0: the data port)
@@ -156,13 +157,14 @@ void Station::flush(std::uint64_t asker) {
     }
     host_->out_cmd.clear();
     o.data.swap(host_->out_data);
+    o.refs.swap(host_->out_kiss_refs);
     o.kiss = engine_->take_kiss_rx();
     o.acks = link_->take_acks();
     o.dial = dial_live_;
     if (const auto st = engine_->session().state;
         dial_live_ && st != arq::SessionState::CONNECTED && st != arq::SessionState::DISCONNECTING)
         o.hang_up = std::exchange(dial_live_, 0u);
-    if (o.cmd.empty() && o.data.empty() && o.kiss.empty() && o.acks.empty() && !o.hang_up) return;
+    if (o.cmd.empty() && o.data.empty() && o.refs.empty() && o.kiss.empty() && o.acks.empty() && !o.hang_up) return;
     QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
 
@@ -194,6 +196,7 @@ void Station::deliver(const Outbox& o) {
     }
     if (o.hang_up && dialed_gen_ == o.hang_up) hang_up();
     if (kiss_) {
+        for (const auto& line : o.refs) kiss_->send_ref(line);  // same socket, ahead of the frames
         for (const auto& [port, f] : o.kiss) kiss_->broadcast(f, port);
         for (const auto& [port, id] : o.acks) kiss_->send_ack(id, port);
     }

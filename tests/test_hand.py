@@ -94,3 +94,43 @@ def test_hand_commands_reply():
         h.command(line)  # a listen already armed; no burst heard yet: no refs, bad channel, bad hex
         assert h.out_cmd == ["WRONG"], line
         h.out_cmd.clear()
+
+
+def test_kiss_refs():
+    """REF lines also go to the KISS port, but only to a client that sent
+    SETHARDWARE "REFS ON", as REF frames (command 0x0D) ahead of the burst's
+    frames; the host keeps them for it in out_kiss_refs."""
+    import socket
+
+    from data2g import tnc
+
+    for p, want in ((b"REFS ON\r", True), (b"refs off\0", False), (b"MODE qpsk-r1/2", None), (b"REFS ON X", None)):
+        assert tnc.refs_command(p) is want, p
+    srv = tnc.KissServer(("127.0.0.1", 0), lambda *a: None)
+    import threading
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        a, b = (socket.create_connection(srv.server_address, timeout=5) for _ in range(2))
+        a.sendall(tnc.kiss_encode(b"REFS ON", 0, tnc.SETHARDWARE))
+        end = time.monotonic() + 5
+        while len(srv.refs) < 1 or len(srv.clients) < 2:
+            assert time.monotonic() < end
+            time.sleep(0.01)
+        srv.send_ref("REF 1 3.62 -0.0 13.8")
+        srv.broadcast(b"frame")
+        dec = tnc.KissDecoder()
+        got = []
+        while len(got) < 2:
+            got += dec.feed(a.recv(4096))
+        assert got == [(tnc.REF, b"REF 1 3.62 -0.0 13.8"), (0, b"frame")]
+        assert tnc.KissDecoder().feed(b.recv(4096)) == [(0, b"frame")]  # no REF for b
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    e = Engine("W1AW", seed=1)
+    h, other = Host(e), Engine("K2XYZ", seed=2)
+    other.send_cq("K2XYZ", 2)
+    link(other, e, 12, 20, lambda: (h.after_step(False), bool(h.out_kiss_refs))[1])
+    assert h.out_kiss_refs[0].startswith("REF 1 ")
+    assert not any(x.startswith("REF") for x in h.out_cmd)  # a plain VARA client: no REF on the command port

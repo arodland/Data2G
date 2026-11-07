@@ -726,8 +726,11 @@ As built (data2g/arq/policy.py):
       `REF id end offset snr`: id counts up from 1 (the last 64 stay usable),
       end is the burst's end in host seconds (the sound card's clock), offset
       its measured cfo (Hz, 0 for modes that don't measure one), snr its
-      snr_est (dB). A burst's REF line reaches the command port before that
-      burst's KISS frames reach the KISS port.
+      snr_est (dB). The command port is a separate socket, so a client can't
+      tell which KISS frames a REF line belongs to. A KISS client that needs
+      the pairing asks for the same line on the KISS port instead
+      (SETHARDWARE `REFS ON`, docs/broadcast.md §5): it arrives there as a
+      REF frame ahead of that burst's frames.
     - **HAND SEND ref tag d channel hex16**: send a Hand (63 payload bits as
       16 hex digits, the top one ignored) in `channel` (0-39: 40 channels,
       6.25 Hz 8-FSK, 60 Hz apart, centred on 1500 Hz), on air d seconds after
