@@ -1,19 +1,26 @@
 #include "tnc/tnc.hpp"
 
 #include <cctype>
-#include <sstream>
 #include <string>
+#include <vector>
 
 namespace data2g::tnc {
 
 std::optional<bool> refs_command(std::span<const std::uint8_t> payload) {
-    std::string t(payload.begin(), payload.end());  // whitespace splits, so only NUL/CR/LF need trimming
-    for (auto& ch : t) ch = (ch == '\0' || ch == '\r' || ch == '\n') ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-    std::istringstream in(t);
-    std::string a, b, rest;
-    if (!(in >> a >> b) || (in >> rest) || a != "REFS") return std::nullopt;
-    if (b == "ON") return true;
-    if (b == "OFF") return false;
+    // the payload splits on NUL/HT/LF/CR/space only, so the 0x1c-0x1f file separators poison a token instead of separating it
+    std::vector<std::string> words;
+    std::string w;
+    for (const std::uint8_t b : payload) {
+        if (b == 0x00 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x20) {
+            if (!w.empty()) words.push_back(w), w.clear();
+        } else {
+            w += static_cast<char>(std::toupper(b));
+        }
+    }
+    if (!w.empty()) words.push_back(w);
+    if (words.size() != 2 || words[0] != "REFS") return std::nullopt;
+    if (words[1] == "ON") return true;
+    if (words[1] == "OFF") return false;
     return std::nullopt;
 }
 

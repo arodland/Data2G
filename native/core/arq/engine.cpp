@@ -776,12 +776,14 @@ Engine::Done Engine::process(Block& b) {
             if (n_ <= ht.first + static_cast<std::int64_t>(hand::LATE_S * config::FS)) {
                 static const TxBurstPtr marker = std::make_shared<const TxBurst>(TxBurst{.submode = "hand"});
                 log_write(LOG, INFO, format("TX hand %d", ht.channel));
-                const double seconds = static_cast<double>(ht.audio.size()) / config::FS;
+                const std::size_t len = ht.audio.size();
                 tx_ = Tx{marker, std::move(ht.audio), 0};
                 tx_kiss_ = true;  // nobody's session: no reply timer
+                cw_plan({marker}, {len - static_cast<std::size_t>(ptt_delay_)}, t);  // a Hand is covered by CW planning like any other transmission; start_tx's length convention: the PTT delay prefix apart
+                if (on_send_) on_send_(marker);  // the monitor's TX feed, as start_tx reports each burst
                 hand_event("HAND SENT " + std::to_string(ht.channel));
                 if (rec_)
-                    rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(seconds)}});
+                    rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
             } else {
                 log_write(LOG, INFO, format("hand %d not sent: busy past the slot", ht.channel));
                 hand_event("HAND DROPPED " + std::to_string(ht.channel));
@@ -798,7 +800,8 @@ Engine::Done Engine::process(Block& b) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + receiver::NoiseProfile::RECOVER_S);
-            tx_end_ = now() + static_cast<double>(n) / config::FS;
+            if (sent->submode != "hand")  // a Hand is not the session's last burst: tx_end_ feeds the reply/missed-burst accounting
+                tx_end_ = now() + static_cast<double>(n) / config::FS;
             if (hand_listen_ && !hand_listen_->open) {  // my burst ended: its Hand window opens
                 auto& hl = *hand_listen_;
                 const std::int64_t a = n_ + static_cast<std::int64_t>(n);
@@ -964,7 +967,7 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
     if (it == hand_refs_.end()) throw std::invalid_argument("no ref " + std::to_string(ref));
     if (hand_tx_) throw std::invalid_argument("a Hand is already waiting");
     if (channel < 0 || channel >= hand::N_CHANNELS || tag < 0 || tag > 255) throw std::invalid_argument("bad channel or tag");
-    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
+    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad payload or delay");
     payload &= (std::uint64_t{1} << hand::PAYLOAD) - 1;  // 16 hex digits, the top bit ignored (docs/arq.md §9)
     const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s) * config::FS)) - ptt_delay_;
     if (first < n_) throw std::invalid_argument("the slot has passed");
@@ -975,11 +978,24 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
 }
 
 void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) {
-    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S) || tag < 0 || tag > 255) throw std::invalid_argument("bad delay or tag");
+    if (tag < 0 || tag > 255) throw std::invalid_argument("bad tag");
+    if (!(d_s >= HAND_MIN_D_S && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
     if (channels.empty() || std::any_of(channels.begin(), channels.end(), [](int c) { return c < 0 || c >= hand::N_CHANNELS; }))
         throw std::invalid_argument("bad channels");
+    std::vector<int> uniq;  // listed twice: decoded once
+    for (const int c : channels)
+        if (std::find(uniq.begin(), uniq.end(), c) == uniq.end()) uniq.push_back(c);
     if (hand_listen_) throw std::invalid_argument("a Hand window is already waiting");  // its round still owes a HAND END
-    hand_listen_ = HandListen{static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), tag, channels, n_};
+    hand_listen_ = HandListen{static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), tag, std::move(uniq), n_};
+}
+
+void Engine::hand_cancel() {
+    hand_tx_.reset();
+    if (hand_listen_) {  // armed or open: its round owes a HAND END
+        hand_listen_.reset();
+        hand_event("HAND END");
+    }
+    hand_hold_ = 0.0;
 }
 
 std::vector<std::string> Engine::take_hand_events() {
@@ -1006,8 +1022,11 @@ void Engine::hand_collect(std::span<const double> x) {
     }
     if (n_ + k > hl.lo) {
         if (hl.buf.empty()) hl.first = hl.next = n_;
-        // blocks I spent transmitting, or dropped (Block::gap): silence, so sample times stay true
-        if (n_ > hl.next) hl.buf.resize(hl.buf.size() + static_cast<std::size_t>(n_ - hl.next), 0.0);
+        // blocks I spent transmitting, or dropped (Block::gap): silence, so sample times stay true.
+        // Clamped to the window's end: a worker backlog's gap can run far past hl.hi, and the
+        // decode thread would inherit tens of seconds of zeros it never looks at
+        const auto pad = std::min<std::int64_t>(n_ - hl.next, hl.hi - hl.next);
+        if (pad > 0) hl.buf.resize(hl.buf.size() + static_cast<std::size_t>(pad), 0.0);
         hl.buf.insert(hl.buf.end(), x.begin(), x.end());
         hl.next = n_ + k;
     }
@@ -1015,16 +1034,19 @@ void Engine::hand_collect(std::span<const double> x) {
         HandListen done = std::move(hl);
         hand_listen_.reset();
         if (hand_thread_.joinable()) hand_thread_.join();  // the last round's: long done (a round is 10 s+)
-        // off the session stage: ~1-2 s of CPU for 40 channels. A decoder throw costs the round, not the station.
+        // off the session stage: ~3 s of CPU for 40 channels on a desktop. A decoder throw costs the round, not the station.
         hand_thread_ = std::thread([this, w = std::move(done)] {
             std::vector<std::string> lines;
-            try {
-                for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first))
-                    lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms));
-            } catch (const std::exception& e) {
-                log_write(LOG, 40, format("hand decode failed: %s", e.what()));
-                lines.clear();
-            }
+            if (w.anchor + w.d - w.first >= hand::SEARCH_SAMPLES)  // the burst lands before the capture: no decodes
+                try {
+                    for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first))
+                        lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms));
+                } catch (const std::exception& e) {
+                    log_write(LOG, 40, format("hand decode failed: %s", e.what()));
+                    lines.clear();
+                }
+            if (w.first > w.lo)  // the window's head went uncaptured (my own burst ran into it): report how much
+                lines.push_back("HAND SHORT " + std::to_string(static_cast<std::int64_t>(std::nearbyint(static_cast<double>(w.first - w.lo) * 1000.0 / config::FS))));
             lines.emplace_back("HAND END");
             for (auto& l : lines) hand_event(std::move(l));
         });

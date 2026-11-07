@@ -222,25 +222,42 @@ void Host::command(std::string_view line, std::string_view peer) {
         } catch (const std::invalid_argument&) {  // a callsign that won't pack
             ok = false;
         }
-    } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6 : upper(args[0]) == "LISTEN" && args.size() >= 4)) {
+    } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6
+               : upper(args[0]) == "LISTEN" ? args.size() >= 4 : upper(args[0]) == "CANCEL" && args.size() == 1)) {
         hand_ = true;
-        auto num = [](const std::string& s) {  // int(): an optional sign, digits, nothing else
+        // HAND args are strict (engine.py's _hand_arg): ints [0-9]+, a delay [0-9.]+,
+        // a payload [0-9a-fA-F]{1,16}; anything else is WRONG without asking the Engine
+        auto digits = [](const std::string& s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        auto delay = [](const std::string& s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
+        };
+        auto hex16 = [](const std::string& s) {
+            return !s.empty() && s.size() <= 16 && std::all_of(s.begin(), s.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); });
+        };
+        auto num = [&](const std::string& s) {  // digits(), no sign, nothing after (int())
+            if (!digits(s)) throw std::invalid_argument("not a number: " + s);
             std::size_t used = 0;
             const int n = std::stoi(s, &used);
             if (used != s.size()) throw std::invalid_argument("not a number: " + s);
             return n;
         };
+        auto whole = [&](const std::string& s) {  // delay() characters, then float(): stod parses a
+            // [0-9.]+ whole or throws; out_of_range (a huge d) is WRONG, as inf fails the Engine's bounds
+            if (!delay(s)) throw std::invalid_argument("not a number: " + s);
+            return std::stod(s);
+        };
         try {
             if (upper(args[0]) == "SEND") {  // HAND SEND ref tag d channel hex16 (docs/arq.md §9)
-                std::size_t used = 0;
-                const auto payload = std::stoull(args[5], &used, 16);
-                if (used != args[5].size() || args[5].starts_with('-')) throw std::invalid_argument("bad payload");
-                e.hand_send(num(args[1]), num(args[2]), parse_double(args[3]), num(args[4]), payload);
-            } else {  // HAND LISTEN d tag channel [channel...]
+                if (!hex16(args[5])) throw std::invalid_argument("bad payload: " + args[5]);
+                e.hand_send(num(args[1]), num(args[2]), whole(args[3]), num(args[4]), std::stoull(args[5], nullptr, 16));
+            } else if (upper(args[0]) == "LISTEN") {  // HAND LISTEN d tag channel [channel...]
                 std::vector<int> channels;
                 for (std::size_t i = 3; i < args.size(); ++i) channels.push_back(num(args[i]));
-                e.hand_listen(parse_double(args[1]), num(args[2]), channels);
-            }
+                e.hand_listen(whole(args[1]), num(args[2]), channels);
+            } else e.hand_cancel();  // HAND CANCEL: always OK (docs/arq.md §9)
         } catch (const std::invalid_argument&) {
             ok = false;
         } catch (const std::out_of_range&) {
@@ -337,6 +354,7 @@ void Host::client_gone() {
         link->reset();
         bcast_ = false;
     }
+    e.hand_cancel();  // its waiting Hand and window must not hold the radio (docs/arq.md §9)
 }
 
 bool Host::abort_session() {

@@ -19,8 +19,9 @@
 // WRONG (MYCALL's OK followed by REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED, PTT ON|OFF, BUSY
 // ON|OFF, BUFFER n, IAMALIVE, MODE; broadcast statuses (BCAST ...) once the
 // client has sent a BCAST command. Hand bursts (docs/arq.md §9): HAND SEND ref
-// tag d channel hex16, HAND LISTEN d tag channel...; REF / HAND lines go to a
-// client that has sent DATA2G ON or a HAND command.
+// tag d channel hex16, HAND LISTEN d tag channel..., HAND CANCEL; REF / HAND
+// lines (REF, HAND SENT/DROPPED, HAND c hex16 snr dt, HAND SHORT ms, HAND END)
+// go to a client that has sent DATA2G ON or a HAND command.
 #pragma once
 
 #include <cstdint>

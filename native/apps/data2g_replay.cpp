@@ -124,6 +124,7 @@ int main(int argc, char** argv) {
                 host->after_step(ptt);
                 host->out_cmd.clear();
                 host->out_data.clear();
+                host->out_kiss_refs.clear();
             });
         }
         std::vector<double> step_ms;

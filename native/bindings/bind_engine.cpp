@@ -137,6 +137,7 @@ void bind_engine(py::module_& m) {
         .def("send_cq", &PyEngine::send_cq)
         .def("hand_send", &PyEngine::hand_send)
         .def("hand_listen", &PyEngine::hand_listen)
+        .def("hand_cancel", &PyEngine::hand_cancel)
         .def("take_hand_events", &PyEngine::take_hand_events)
         .def_property_readonly("now", &PyEngine::now)
         .def_property("n", &PyEngine::n, &PyEngine::set_n)

@@ -26,8 +26,11 @@ SUB_REF = 0x11
 
 def refs_command(payload: bytes) -> bool | None:
     """SETHARDWARE "REFS ON" / "REFS OFF" (per connection: this client gets
-    REF frames) -> True / False; None for anything else."""
-    words = payload.decode("ascii", "replace").strip("\0\r\n ").upper().split()
+    REF frames) -> True / False; None for anything else. The payload splits
+    on NUL/HT/LF/CR/space only, so the 0x1c-0x1f file separators poison a
+    token instead of separating it; tokens are upper-cased; exactly two,
+    "REFS ON" or "REFS OFF", count."""
+    words = [w.upper() for w in payload.translate(bytes.maketrans(b"\0\t\n\r ", b"     ")).decode("ascii", "replace").split(" ") if w]
     return {("REFS", "ON"): True, ("REFS", "OFF"): False}.get(tuple(words))
 
 

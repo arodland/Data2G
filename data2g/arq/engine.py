@@ -88,6 +88,8 @@ CW_FORCE_S = 600.0
 # how long an armed HAND LISTEN waits for the burst that anchors its window.
 HAND_REFS_KEPT = 64
 HAND_ARM_EXPIRE_S = 30.0
+HAND_MIN_D_S = 1.0  # the smallest HAND LISTEN d: the window's head is uncollectable
+# below hand.SEARCH_S, since rx is off until the anchor burst ends
 
 
 class Recorder:
@@ -324,14 +326,27 @@ class Engine:
         burst: capture it +-hand.SEARCH_S, decode `channels` with the CRC
         seeded by `tag`, and report through take_hand_events. While a window
         is open no CQ, broadcast or CW ID of mine starts."""
-        if not 0 < d_s < HAND_ARM_EXPIRE_S or not 0 <= tag <= 255:
-            raise ValueError("bad delay or tag")
+        if not 0 <= tag <= 255:
+            raise ValueError("bad tag")
+        if not HAND_MIN_D_S <= d_s < HAND_ARM_EXPIRE_S:
+            raise ValueError("bad delay")
         if not channels or any(not 0 <= c < hand.N_CHANNELS for c in channels):
             raise ValueError("bad channels")
+        channels = list(dict.fromkeys(channels))  # listed twice: decoded once
         if self._hand_listen is not None:  # its round still owes a HAND END
             raise ValueError("a Hand window is already waiting")
-        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, channels=list(channels),
+        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, channels=channels,
                                  armed=self.n, open=False, buf=[], first=0, next=0, lo=0, hi=0, anchor=0)
+
+    def hand_cancel(self):
+        """Stop a waiting Hand and an armed or open window (docs/arq.md §9):
+        a client that went must not leave its Hand and window holding the
+        radio. A window that existed ends with HAND END. Idempotent."""
+        self._hand_tx = None
+        if self._hand_listen is not None:
+            self._hand_listen = None
+            self._hand_event("HAND END")
+        self._hand_hold = 0.0
 
     def take_hand_events(self) -> list[str]:
         """REF and HAND lines since the last call (docs/arq.md §9): one REF
@@ -367,21 +382,27 @@ class Engine:
         if self.n + k >= hl["hi"] and hl["buf"]:
             self._hand_listen = None
             nominal = hl["anchor"] + hl["d"] - hl["first"]
+            # first past lo: the window's head went uncaptured (my own burst
+            # ran into it) - the round reports how much
+            short = f"HAND SHORT {int(round((hl['first'] - hl['lo']) * 1000 / FS))}" if hl["first"] > hl["lo"] else None
             threading.Thread(target=self._hand_decode,
-                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal),
+                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal, short),
                              name="hand-decode", daemon=True).start()
 
-    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int):
-        """The round's decodes off the audio thread (~1-2 s of CPU for 40
-        channels): a line per Hand decoded, then HAND END. A decoder
-        exception costs the round, not the station."""
-        try:
-            res = hand.decode_window(y, tag, channels, nominal)
-            lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
-        except Exception:
-            log.exception("hand decode failed")
-            lines = []
-        for line in lines + ["HAND END"]:
+    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int, short: str | None):
+        """The round's decodes off the audio thread (~3 s of CPU for 40
+        channels on a desktop): a line per Hand decoded, then HAND SHORT if
+        the window's head was missed, then HAND END. A nominal under
+        hand.SEARCH_SAMPLES: the burst lands before the capture, so no
+        decodes. A decoder exception costs the round, not the station."""
+        lines = []
+        if nominal >= hand.SEARCH_SAMPLES:
+            try:
+                res = hand.decode_window(y, tag, channels, nominal)
+                lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
+            except Exception:
+                log.exception("hand decode failed")
+        for line in lines + ([short] if short is not None else []) + ["HAND END"]:
             self._hand_event(line)
 
     def events(self) -> list[str]:
@@ -559,8 +580,12 @@ class Engine:
                 if self.n <= ht[0] + int(hand.LATE_S * FS):
                     self._hand_tx = None
                     log.info("TX hand %d", ht[2])
-                    self.tx = [hand.HandBurst(), ht[1], 0]
+                    hb = hand.HandBurst()
+                    self.tx = [hb, ht[1], 0]
                     self._tx_kiss = True  # nobody's session: no reply timer
+                    # a Hand is covered by CW planning like any other transmission; _cw_plan's
+                    # length convention is per-burst audio, the PTT delay prefix apart (_start_tx)
+                    self._cw_plan([hb], [len(ht[1]) - self.ptt_delay], t)
                     self._hand_event(f"HAND SENT {ht[2]}")
                     if self.rec:
                         self.rec.event("hand_tx", t=self.now, channel=ht[2], seconds=len(ht[1]) / FS)
@@ -578,7 +603,8 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
-                self._tx_end = self.now + n / FS
+                if burst.submode != "hand":  # a Hand is not the session's last burst: _tx_end feeds the expected-reply/missed-burst accounting
+                    self._tx_end = self.now + n / FS
                 hl = self._hand_listen
                 if hl is not None and not hl["open"]:  # my burst ended: its window opens
                     a = self.n + n  # its end sample (self.n advances at the step's end)

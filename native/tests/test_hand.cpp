@@ -11,6 +11,7 @@
 using namespace data2g;
 
 int main() {
+    check::report_crashes_instead_of_prompting();
     check::equal(hand::channel_freq(0), 330.0, "channel 0");
     check::equal(hand::channel_freq(39), 2670.0, "channel 39");
     const std::uint64_t p = 0x5A5A123456789ABCull & ((1ull << hand::PAYLOAD) - 1);
@@ -30,12 +31,14 @@ int main() {
     const std::vector<int> channels{20, 21, 22};
     const auto got = hand::decode_window(y, tag, channels, hand::SEARCH_SAMPLES);
     check::equal(got.size(), std::size_t{2}, "two Hands decoded");
+    if (got.size() != 2) return check::report("hand");
     check::equal(got[0].c, 20, "first channel");
     check::equal(got[0].payload, p, "first payload");
+    check::equal(got[1].c, 22, "second channel");
     check::equal(got[1].payload, std::uint64_t{42}, "second payload");
     check::is_true(got[0].snr > 0, "snr");
     check::is_true(std::abs(got[0].dt_ms - 1000.0 * late / 8000) < 30, "dt");
     // another net's tag: nothing passes the CRC
     check::equal(hand::decode_window(y, 0x5B, channels, hand::SEARCH_SAMPLES).size(), std::size_t{0}, "wrong tag");
-    return 0;
+    return check::report("hand");
 }

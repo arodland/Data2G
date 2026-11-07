@@ -73,6 +73,9 @@ inline constexpr double ID_GUARD_S = REPLY_START_S;
 // how long an armed HAND LISTEN waits for the burst that anchors its window.
 inline constexpr std::size_t HAND_REFS_KEPT = 64;
 inline constexpr double HAND_ARM_EXPIRE_S = 30.0;
+// the smallest HAND LISTEN d: the window's head is uncollectable below hand::SEARCH_S,
+// since rx is off until the anchor burst ends
+inline constexpr double HAND_MIN_D_S = 1.0;
 // CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
 // each), "only" (a CW ID in their place); a transmission no CW ID covers plans one CW_PLAN_S after it, or after
 // the last CW ID when that came under CW_GAP_S before it; it goes at the next chance, held by BUSY until
@@ -286,6 +289,9 @@ public:
     // d_s after my next burst ends. Both throw std::invalid_argument on bad input (engine.py's ValueError).
     void hand_send(int ref, int tag, double d_s, int channel, std::uint64_t payload);
     void hand_listen(double d_s, int tag, const std::vector<int>& channels);
+    // Stop a waiting Hand and an armed or open window (a gone client's must not hold the radio):
+    // a window that existed ends with HAND END. Never throws (engine.py's hand_cancel).
+    void hand_cancel();
     // REF and HAND lines since the last call (any thread: a round's lines come from its decoder thread).
     std::vector<std::string> take_hand_events();
     const modem::Accept& accept() const { return accept_; }

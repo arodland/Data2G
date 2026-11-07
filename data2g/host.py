@@ -35,16 +35,17 @@ BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines); show of hands (Data2G, docs/arq.md §9):
 HAND SEND ref tag d channel hex16 (send a Hand d seconds after the end of
-heard burst ref, shifted by its cfo) and HAND LISTEN d tag channel [...]
-(decode the window after my next burst ends). Replies OK / WRONG (MYCALL's
+heard burst ref, shifted by its cfo), HAND LISTEN d tag channel [...] (decode
+the window after my next burst ends) and HAND CANCEL (stop a waiting Hand and
+any window). Replies OK / WRONG (MYCALL's
 OK followed by REGISTERED call for each call). Notifications: CONNECTED src
 dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
 §9), PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
 BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has
 sent a BCAST command; hand lines (REF id end offset snr per decoded burst,
-HAND SENT/DROPPED c, HAND c hex16 snr dt, HAND END) once it has sent a HAND
-command or DATA2G ON, so VARA clients never see them.
+HAND SENT/DROPPED c, HAND c hex16 snr dt, HAND SHORT ms, HAND END) once it has
+sent a HAND command or DATA2G ON, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
 
@@ -61,6 +62,7 @@ import argparse  # noqa: E402
 import itertools  # noqa: E402
 import logging  # noqa: E402
 import queue  # noqa: E402
+import re  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
 import threading  # noqa: E402
@@ -184,16 +186,20 @@ class Host:
                 ok = False
         elif cmd == "HAND" and args and args[0].upper() == "SEND" and len(args) == 6:
             self._hand = True
-            try:  # HAND SEND ref tag d channel hex16 (docs/arq.md §9)
-                e.hand_send(int(args[1]), int(args[2]), float(args[3]), int(args[4]), int(args[5], 16))
+            try:  # HAND SEND ref tag d channel hex16 (docs/arq.md §9); args strict, see _hand_arg
+                e.hand_send(int(_hand_arg(args[1], "[0-9]+")), int(_hand_arg(args[2], "[0-9]+")), float(_hand_arg(args[3], "[0-9.]+")),
+                            int(_hand_arg(args[4], "[0-9]+")), int(_hand_arg(args[5], "[0-9a-fA-F]{1,16}"), 16))
             except (ValueError, OverflowError):
                 ok = False
         elif cmd == "HAND" and args and args[0].upper() == "LISTEN" and len(args) >= 4:
             self._hand = True
-            try:  # HAND LISTEN d tag channel [channel...]
-                e.hand_listen(float(args[1]), int(args[2]), [int(a) for a in args[3:]])
+            try:  # HAND LISTEN d tag channel [channel...] (docs/arq.md §9); args strict, see _hand_arg
+                e.hand_listen(float(_hand_arg(args[1], "[0-9.]+")), int(_hand_arg(args[2], "[0-9]+")), [int(_hand_arg(a, "[0-9]+")) for a in args[3:]])
             except (ValueError, OverflowError):
                 ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "CANCEL" and len(args) == 1:
+            self._hand = True
+            e.hand_cancel()  # a waiting Hand and any window stop (docs/arq.md §9): always OK
         elif cmd in BW:
             self.cap = BW[cmd]
         elif cmd == "CHAT" and args and args[0].upper() in ("ON", "OFF"):
@@ -320,6 +326,7 @@ class Host:
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
             e.kiss.reset()
             self._bcast = False
+        e.hand_cancel()  # its waiting Hand and window must not hold the radio (docs/arq.md §9)
 
     def _accept_connect(self, caller: str, callee: str) -> bool:
         if self.accept_addr is None:
@@ -418,6 +425,15 @@ def _addr(s: str, default_host: str) -> tuple[str, int] | None:
     if not sep or not port.isdigit() or not 0 < int(port) < 65536:
         return None
     return host.strip("[]") or default_host, int(port)
+
+
+def _hand_arg(s: str, rx: str) -> str:
+    """A HAND numeric argument, `rx` exactly: int/float quietly accept "1_0"
+    and int() a leading "-", so "1_0", "-0" and "zz" raise ValueError (WRONG)
+    instead of parsing. Same character classes as native/core/host."""
+    if not re.fullmatch(rx, s):
+        raise ValueError(s)
+    return s
 
 
 # --- sockets ------------------------------------------------------------------------

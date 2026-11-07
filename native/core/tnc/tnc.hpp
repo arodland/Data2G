@@ -23,6 +23,7 @@ inline constexpr int KISS_SETHARDWARE = 0x06;
 // 0x20-0x7E is the text range, MODE and REFS): REF, host to app, a heard burst's reference.
 inline constexpr std::uint8_t KISS_SUB_REF = 0x11;
 // tnc.refs_command: SETHARDWARE "REFS ON" / "REFS OFF" -> true / false; nullopt for anything else.
+// The payload splits on NUL/HT/LF/CR/space only; tokens upper-cased; exactly two count.
 std::optional<bool> refs_command(std::span<const std::uint8_t> payload);
 // A KISS frame: a data frame (command 0) for `data` on `port` by default.
 Bytes kiss_encode(std::span<const std::uint8_t> data, int port = 0, int cmd = KISS_DATA);

@@ -255,7 +255,8 @@ FILES["polar_ga.cpp"] = polar_ga_cpp
 def hand_cpp() -> str:
     """Hand burst frozen random bits (data2g/hand.py): the interleaver
     (rng seed 0) and the Costas order-6 sync order (the native core has no
-    costas(); Python picks it by first-permutation search)."""
+    costas(); cpm.costas(8) takes its Welch branch, p=7, giving
+    {0, 2, 1, 5, 3, 4})."""
     from data2g import hand
 
     return (HEADER.format(src="data2g/hand.py") + '#include "tables/hand.hpp"\n\nnamespace data2g::tables {\nnamespace {\n\n'
