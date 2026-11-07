@@ -47,7 +47,9 @@ def test_hand_decode_roundtrip():
 
 def test_hand_round_between_two_stations():
     """A (net control) arms a listen, sends the anchor burst (CQ as ANY
-    TRAFFIC's stand-in), and gets B's Hand back on its channel."""
+    TRAFFIC's stand-in), and gets B's Hand back on its channel. B's own CQ,
+    queued behind the Hand, waits for it (the Hand isn't dropped), and the
+    payload's 64th bit is ignored."""
     a, b = Engine("W1AW", seed=1), Engine("K2XYZ", seed=2)
     tag, payload, d = 0x5A, 0x1234567890ABC, 1.0
     a.hand_listen(d, tag, [20])
@@ -60,7 +62,8 @@ def test_hand_round_between_two_stations():
 
     assert link(a, b, 12, 20, b_heard)  # B hears the CQ: a REF line
     ref = int(next(ev for ev in b_ev if ev.startswith("REF")).split()[1])
-    b.hand_send(ref, tag, d, 20, payload)
+    b.hand_send(ref, tag, d, 20, payload | 1 << 63)
+    b.send_cq("K2XYZ", 2)
     a_ev = []
 
     def a_heard():
@@ -78,7 +81,7 @@ def test_hand_round_between_two_stations():
     assert int(hex16, 16) == payload
     assert float(snr) > 0
     assert abs(float(dt)) < 600  # shared clock: block quantization and measurement error only
-    assert any(ev.startswith("HAND SENT 20") for ev in b_ev)
+    assert any(ev.startswith("HAND SENT 20") for ev in b_ev), b_ev
 
 
 def test_hand_commands_reply():
@@ -86,8 +89,8 @@ def test_hand_commands_reply():
     h.command("HAND LISTEN 3.0 90 20 21")
     assert h.out_cmd == ["OK"]
     h.out_cmd.clear()
-    for line in ("HAND LISTEN 3.0 90", "HAND LISTEN 3.0 90 20 40",
+    for line in ("HAND LISTEN 3.0 91 22", "HAND LISTEN 3.0 90", "HAND LISTEN 3.0 90 20 40",
                  "HAND SEND 1 90 3.0 20 1", "HAND SEND 1 90 3.0 20 zz"):
-        h.command(line)  # no burst heard yet: no refs, bad channel, bad hex
+        h.command(line)  # a listen already armed; no burst heard yet: no refs, bad channel, bad hex
         assert h.out_cmd == ["WRONG"], line
         h.out_cmd.clear()

@@ -719,7 +719,7 @@ As built (data2g/arq/policy.py):
   - Any station that hears one, listening or not, notifies its host with
     `CQFRAME call bw`.
   - **HAND** (Data2G: the D2G net's show of hands; waveform in data2g/hand.py,
-    design in ~/d2g-hand-burst-response.md, measured on the hand-burst-sim
+    design in docs/hand-burst.md, measured on the hand-burst-sim
     branch). Like the BCAST statuses, the hand lines go only to a client that
     has sent DATA2G ON or a HAND command.
     - Every burst this station decodes becomes a Hand reference, notified
@@ -733,14 +733,17 @@ As built (data2g/arq/policy.py):
       6.25 Hz 8-FSK, 60 Hz apart, centred on 1500 Hz), on air d seconds after
       the end of heard burst `ref`, shifted by that burst's offset. `tag`
       (0-255) seeds the Hand's CRC, so it can't answer another net's request.
-      WRONG for a gone ref, bad numbers, or a Hand already waiting. OK: then
+      WRONG for a gone ref, bad numbers, or a Hand already waiting. While one
+      waits, this host starts no CQ, broadcast or ID of its own. OK: then
       `HAND SENT c` when it keys, or `HAND DROPPED c` if the radio was busy
       more than 0.5 s past the slot.
     - **HAND LISTEN d tag channel [channel...]**: open the window d seconds
       after the end of the next burst this host sends, lasting the Hand length
       (10.56 s) plus 0.6 s either side, and decode the listed channels
       (usually all 40; the CRC seeded with `tag`). While a window is open this
-      host starts no CQ, broadcast or CW ID of its own. Each Hand decoded:
+      host starts no CQ, broadcast or ID of its own (session bursts still go;
+      the window counts their time as silence). WRONG while another listen is
+      armed or open. Each Hand decoded:
       `HAND c hex16 snr dt` (snr dB; dt: its start minus the slot, ms, which
       is the answerer's latency for net control to report back). Then
       `HAND END`; an armed listen whose burst never went out gives up after

@@ -270,6 +270,7 @@ class Engine:
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""
         self.tx = None
+        self._tx_kiss = False  # a Hand or KISS burst cut short: the next burst's end is the session's
         self.receiver.reset()
         self.cw.reset()
         self._new_session()
@@ -308,8 +309,9 @@ class Engine:
             raise ValueError("a Hand is already waiting")
         if not 0 <= channel < hand.N_CHANNELS or not 0 <= tag <= 255:
             raise ValueError("bad channel or tag")
-        if not 0 <= payload < 2 ** hand.PAYLOAD or not 0 < d_s < HAND_ARM_EXPIRE_S:
+        if not 0 <= payload < 2 ** 64 or not 0 < d_s < HAND_ARM_EXPIRE_S:
             raise ValueError("bad payload or delay")
+        payload &= (1 << hand.PAYLOAD) - 1  # 16 hex digits, the top bit ignored (docs/arq.md §9)
         end, cfo, _ = self.hand_refs[ref]
         target = int(round((end + d_s) * FS)) - self.ptt_delay
         if target < self.n:
@@ -326,8 +328,10 @@ class Engine:
             raise ValueError("bad delay or tag")
         if not channels or any(not 0 <= c < hand.N_CHANNELS for c in channels):
             raise ValueError("bad channels")
+        if self._hand_listen is not None:  # its round still owes a HAND END
+            raise ValueError("a Hand window is already waiting")
         self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, channels=list(channels),
-                                 armed=self.n, open=False, buf=[], first=0, lo=0, hi=0, anchor=0)
+                                 armed=self.n, open=False, buf=[], first=0, next=0, lo=0, hi=0, anchor=0)
 
     def take_hand_events(self) -> list[str]:
         """REF and HAND lines since the last call (docs/arq.md §9): one REF
@@ -355,8 +359,11 @@ class Engine:
             return
         if self.n + k > hl["lo"]:
             if not hl["buf"]:
-                hl["first"] = self.n
+                hl["first"] = hl["next"] = self.n
+            if self.n > hl["next"]:  # blocks I spent transmitting: silence, so sample times stay true
+                hl["buf"].append(np.zeros(self.n - hl["next"]))
             hl["buf"].append(x)
+            hl["next"] = self.n + k
         if self.n + k >= hl["hi"] and hl["buf"]:
             self._hand_listen = None
             nominal = hl["anchor"] + hl["d"] - hl["first"]
@@ -515,7 +522,10 @@ class Engine:
             self._id_check(t)
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
-            free = t >= self._hold and t >= self._cw_until and t >= self._hand_hold  # for anything outside a session
+            # for anything outside a session; a waiting Hand holds them all, so none runs into its slot
+            # (ponytail: up to HAND_ARM_EXPIRE_S of hold; from the slot minus the longest burst if that bites)
+            hand_free = t >= self._hand_hold and self._hand_tx is None
+            free = t >= self._hold and t >= self._cw_until and hand_free
             busy = self.receiver.busy or cw
             if not busy and not held:  # a burst still arriving holds any reply (half duplex)
                 self._carrier_hold(t)
@@ -524,7 +534,7 @@ class Engine:
                 self._id_check(t)
                 if burst is not None:
                     bursts, main = self._with_id(burst, t), burst
-                elif self._id_pending is not None and t >= self._id_pending[1]:
+                elif self._id_pending is not None and t >= self._id_pending[1] and hand_free:
                     bursts, self._id_pending = self._ids(self._id_pending[0], False), None
                 elif self._extra and free:
                     main = self._extra.pop(0)

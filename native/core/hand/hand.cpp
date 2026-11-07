@@ -182,7 +182,6 @@ std::vector<double> tx_audio(int tag, std::uint64_t payload, int channel, double
 }
 
 std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal) {
-    // energies() zero-pads past the end, so hand.py's explicit padding isn't needed
     const auto& dec = decoder();
     const unsigned init = static_cast<unsigned>(tag) << 8;
     std::vector<Decoded> out;

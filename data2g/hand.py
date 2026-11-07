@@ -1,4 +1,4 @@
-"""Hand burst: the D2G net's show of hands (~/d2g-hand-burst-response.md).
+"""Hand burst: the D2G net's show of hands (docs/hand-burst.md).
 
 One 8-FSK continuous-phase burst per station, tone spacing 6.25 Hz
 (Hand-50: if your rig works for FT8, it works for this), constant
@@ -188,7 +188,6 @@ def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int) ->
 
     ponytail: a full grid search per channel, ~1-2 s of CPU for 40; share
     one spectrogram across channels if the Pi says no."""
-    y = np.concatenate([y, np.zeros(int(3 * FS / RATE))])  # the last candidate's energies run off the end
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for c in channels:

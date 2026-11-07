@@ -401,6 +401,7 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
 void Engine::abort() {
     abort_pending_ = true;
     tx_.reset();
+    tx_kiss_ = false;  // a Hand or KISS burst cut short: the next burst's end is the session's
     transmitting_ = false;
     request_reset();
     new_session();
@@ -737,7 +738,10 @@ Engine::Done Engine::process(Block& b) {
         std::vector<TxBurstPtr> bursts;
         TxBurstPtr main;
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
-        const bool free = t >= hold_ && t >= cw_until_ && t >= hand_hold_;  // for anything outside a session
+        // for anything outside a session; a waiting Hand holds them all, so none runs into its slot
+        // (ponytail: up to HAND_ARM_EXPIRE_S of hold; from the slot minus the longest burst if that bites)
+        const bool hand_free = t >= hand_hold_ && !hand_tx_;
+        const bool free = t >= hold_ && t >= cw_until_ && hand_free;
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
             carrier_hold(t);
             auto burst = session_->poll(t);
@@ -746,7 +750,7 @@ Engine::Done Engine::process(Block& b) {
             if (burst) {
                 bursts = with_id(burst, t);
                 main = burst;
-            } else if (id_pending_ && t >= id_pending_t_) {
+            } else if (id_pending_ && t >= id_pending_t_ && hand_free) {
                 bursts = ids(*id_pending_, false);
                 id_pending_.reset();
             } else if (!extra_.empty() && free) {
@@ -960,8 +964,8 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
     if (it == hand_refs_.end()) throw std::invalid_argument("no ref " + std::to_string(ref));
     if (hand_tx_) throw std::invalid_argument("a Hand is already waiting");
     if (channel < 0 || channel >= hand::N_CHANNELS || tag < 0 || tag > 255) throw std::invalid_argument("bad channel or tag");
-    if (payload >= (std::uint64_t{1} << hand::PAYLOAD) || !(d_s > 0 && d_s < HAND_ARM_EXPIRE_S))
-        throw std::invalid_argument("bad payload or delay");
+    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
+    payload &= (std::uint64_t{1} << hand::PAYLOAD) - 1;  // 16 hex digits, the top bit ignored (docs/arq.md §9)
     const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s) * config::FS)) - ptt_delay_;
     if (first < n_) throw std::invalid_argument("the slot has passed");
     std::vector<double> audio(static_cast<std::size_t>(ptt_delay_), 0.0);
@@ -974,6 +978,7 @@ void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) 
     if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S) || tag < 0 || tag > 255) throw std::invalid_argument("bad delay or tag");
     if (channels.empty() || std::any_of(channels.begin(), channels.end(), [](int c) { return c < 0 || c >= hand::N_CHANNELS; }))
         throw std::invalid_argument("bad channels");
+    if (hand_listen_) throw std::invalid_argument("a Hand window is already waiting");  // its round still owes a HAND END
     hand_listen_ = HandListen{static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), tag, channels, n_};
 }
 
@@ -1000,8 +1005,11 @@ void Engine::hand_collect(std::span<const double> x) {
         return;
     }
     if (n_ + k > hl.lo) {
-        if (hl.buf.empty()) hl.first = n_;
+        if (hl.buf.empty()) hl.first = hl.next = n_;
+        // blocks I spent transmitting, or dropped (Block::gap): silence, so sample times stay true
+        if (n_ > hl.next) hl.buf.resize(hl.buf.size() + static_cast<std::size_t>(n_ - hl.next), 0.0);
         hl.buf.insert(hl.buf.end(), x.begin(), x.end());
+        hl.next = n_ + k;
     }
     if (n_ + k >= hl.hi && !hl.buf.empty()) {
         HandListen done = std::move(hl);

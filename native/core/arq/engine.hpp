@@ -458,7 +458,7 @@ private:
         std::int64_t armed;
         bool open = false;
         std::vector<double> buf;
-        std::int64_t first = 0, lo = 0, hi = 0, anchor = 0;
+        std::int64_t first = 0, next = 0, lo = 0, hi = 0, anchor = 0;  // next: the sample after buf's last
     };
     std::optional<HandListen> hand_listen_;
     double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)
