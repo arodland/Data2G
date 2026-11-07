@@ -274,6 +274,7 @@ public:
     double id_interval_s = ID_INTERVAL_S;
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
+    std::string hand_round = "full";  // "cheap": --hand-round cheap's grids (hand::ROUND_CHEAP)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -292,6 +293,16 @@ public:
     // Stop a waiting Hand and an armed or open window (a gone client's must not hold the radio):
     // a window that existed ends with HAND END. Never throws (engine.py's hand_cancel).
     void hand_cancel();
+    // engine.py's tests poke the Python engine's own state -- hand_refs (a Host
+    // that answers a REF it made up), a bare burst on air to anchor a window,
+    // and _tx_kiss. The --native run of those tests reaches the same state here
+    // (tests/native_subs/engine.py maps the attributes onto these).
+    std::vector<std::tuple<int, double, double, double>> hand_refs() const;  // id, end s, cfo Hz, snr dB
+    void hand_ref_set(int id, double end_s, double cfo, double snr);
+    void test_tx(const std::string& submode, std::vector<double> audio);
+    std::optional<std::pair<std::int64_t, int>> hand_tx() const;  // a waiting Hand: (first sample, channel)
+    bool tx_kiss() const { return tx_kiss_; }
+    void set_tx_kiss(bool k) { tx_kiss_ = k; }
     // REF and HAND lines since the last call (any thread: a round's lines come from its decoder thread).
     std::vector<std::string> take_hand_events();
     const modem::Accept& accept() const { return accept_; }

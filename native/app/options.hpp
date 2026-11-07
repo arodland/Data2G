@@ -51,6 +51,7 @@ struct Args {
     int decoder_effort = 25;  // the LDPC decoder's iteration cap (codes::set_ldpc_iters), >= 1
     std::string cw_id = "off";  // arq::Engine::cw_id: off, add, only
     double cw_wpm = 20.0;
+    std::string hand_round = "full";  // "full" or "cheap": net control's Hand round grids
     // additions
     bool decode_worker = true;
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)

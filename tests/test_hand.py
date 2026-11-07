@@ -108,12 +108,31 @@ def test_hand_decode_roundtrip():
     assert abs(got["dt_ms"] - 1000.0 * jitter / FS) < 30
 
 
-def test_hand_round_between_two_stations():
+@pytest.mark.parametrize("hand_round", ["full", "cheap"])
+def test_hand_decode_at_the_sensitivity_floor(hand_round):
+    """The shipped threshold: -18 dB, 3 Hz off, landing in the search's
+    middle. Both grids bring the payload back, so what --hand-round cheap
+    costs (~0.2-0.3 dB, docs/hand-burst.md) stays inside the margin."""
+    rng = np.random.default_rng(4)
+    tag, c, payload = 0x9C, 12, 0x1234ABCDEF012
+    jitter = int(rng.integers(hand.SEARCH_SAMPLES // 3, 2 * hand.SEARCH_SAMPLES // 3))
+    y = np.concatenate([np.zeros(hand.SEARCH_SAMPLES + jitter),
+                        hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c)),
+                        np.zeros(hand.SEARCH_SAMPLES)])
+    y = hfchannel.awgn(hfchannel.freq_shift(y, -3.0), -18.0, seed=104)
+    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES, hand.ROUNDS[hand_round])
+    assert got["payload"] == payload
+
+
+@pytest.mark.parametrize("hand_round", ["full", "cheap"])
+def test_hand_round_between_two_stations(hand_round):
     """A (net control) arms a listen, sends the anchor burst (CQ as ANY
     TRAFFIC's stand-in), and gets B's Hand back on its channel. B's own CQ,
     queued behind the Hand, waits for it (the Hand isn't dropped), and the
-    payload's 64th bit is ignored."""
+    payload's 64th bit is ignored. Both --hand-round settings on net control:
+    the cheap grids find the Hand as well as the shipped ones."""
     a, b = Engine("W1AW", seed=1), Engine("K2XYZ", seed=2)
+    a.hand_round = hand_round
     tag, payload, d = 0x5A, 0x1234567890ABC, 1.0
     a.hand_listen(d, tag, [20])
     a.send_cq("W1AW", 2)

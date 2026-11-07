@@ -40,5 +40,9 @@ int main() {
     check::is_true(std::abs(got[0].dt_ms - 1000.0 * late / 8000) < 30, "dt");
     // another net's tag: nothing passes the CRC
     check::equal(hand::decode_window(y, 0x5B, channels, hand::SEARCH_SAMPLES).size(), std::size_t{0}, "wrong tag");
+    // --hand-round cheap's grids find the same two Hands
+    const auto cheap = hand::decode_window(y, tag, channels, hand::SEARCH_SAMPLES, hand::ROUND_CHEAP);
+    check::equal(cheap.size(), std::size_t{2}, "the cheap round finds them too");
+    if (cheap.size() == 2) check::equal(cheap[0].payload, p, "the cheap round's payload");
     return check::report("hand");
 }

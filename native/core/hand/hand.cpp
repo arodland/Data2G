@@ -137,26 +137,28 @@ void block_energies(Scratch& s, std::int64_t base, int na, int nb, int stride, i
 
 // hand.search: top (start, cfo) candidates by the sync blocks' tone shares --
 // a share, so a strong stretch of data can't outscore a sync block in a fade.
-// Each cfo's 61 starts go through the two Costas blocks as one strided block
-// transform apiece; the score is the same sum of shares, block by block and
-// tone by tone, that Python's sync_shares built.
-std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double> y, std::int64_t nominal) {
+// Each cfo's starts (61 with ROUND_FULL's T/8 step, 31 with ROUND_CHEAP's T/4)
+// go through the two Costas blocks as one strided block transform apiece; the
+// score is the same sum of shares, block by block and tone by tone, that
+// Python's sync_shares built.
+std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double> y, std::int64_t nominal, const Round& round) {
     const int T = g.T;
+    const int step = T / round.step_div;
     std::vector<std::tuple<double, std::int64_t, double>> cands;
-    const double step = g.rate / 4;
+    const double cstep = g.rate / 4;
     const std::int64_t first = nominal - SEARCH_SAMPLES;
-    const int nstarts = static_cast<int>(2 * SEARCH_SAMPLES / (T / 8) + 1);  // Python's range() count
+    const int nstarts = static_cast<int>(2 * SEARCH_SAMPLES / step + 1);  // Python's range() count
     Mat<double> En;
     for (int i = 0;; ++i) {
-        const double cfo = -SEARCH_HZ + i * step;  // np.arange's start + i * step
+        const double cfo = -SEARCH_HZ + i * cstep;  // np.arange's start + i * step
         if (cfo >= SEARCH_HZ + 1e-9) break;
         mix(s, g, y, cfo);
         std::vector<double> score(static_cast<std::size_t>(nstarts), 0.0);
         for (int r0 : SYNC_AT)
             for (int a0 = 0; a0 < nstarts; a0 += SEARCH_CHUNK) {
                 const int na = std::min(SEARCH_CHUNK, nstarts - a0);
-                block_energies(s, first + static_cast<std::int64_t>(a0) * (T / 8) + static_cast<std::int64_t>(r0) * T,
-                               na, N_SYNC, T / 8, T, g.m, En);
+                block_energies(s, first + static_cast<std::int64_t>(a0) * step + static_cast<std::int64_t>(r0) * T,
+                               na, N_SYNC, step, T, g.m, En);
                 const auto Sh = cpm::shares(En);
                 for (int a = 0; a < na; ++a) {
                     double part = 0.0;
@@ -165,7 +167,7 @@ std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double>
                     score[static_cast<std::size_t>(a0 + a)] += part;
                 }
             }
-        for (int a = 0; a < nstarts; ++a) cands.emplace_back(score[static_cast<std::size_t>(a)], first + a * (T / 8), cfo);
+        for (int a = 0; a < nstarts; ++a) cands.emplace_back(score[static_cast<std::size_t>(a)], first + a * step, cfo);
     }
     std::sort(cands.begin(), cands.end(), std::greater<>());  // Python's sort(reverse=True) on the tuples
     std::vector<Cand> out;
@@ -174,7 +176,7 @@ std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double>
             return std::abs(start - o.start) > T / 2 || std::abs(cfo - o.cfo) > g.rate / 4 + 1e-9;
         });
         if (distinct) out.push_back({start, cfo});
-        if (static_cast<int>(out.size()) == TOP) break;
+        if (static_cast<int>(out.size()) == round.top) break;
     }
     return out;
 }
@@ -188,14 +190,18 @@ std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double>
 // loop order reaches first.  Only the 54 data rows are transformed (the sync
 // rows are thrown away by both passes here), as two strided blocks of 27.
 std::tuple<std::int64_t, double, Mat<double>> nail(const cpm::Grid& g, Scratch& s, std::span<const double> y,
-                                                   std::int64_t start, double cfo) {
+                                                   std::int64_t start, double cfo, const Round& round) {
     const int T = g.T;
     const int ndt = T / (T / 16) + 1;  // -T/2 .. +T/2 step T/16
     const int half = N_DATA / 2;
+    // the CFO steps: cheap nails on the search's own CFO grid
+    const std::array<double, 3> all_dfs{-g.rate / 16, 0.0, g.rate / 16};
+    const std::span<const double> dfs =
+        round.nail_cfo ? std::span<const double>(all_dfs) : std::span<const double>(all_dfs.data() + 1, 1);
     std::int64_t best_start = start;
     double best_cfo = cfo, best_v = -std::numeric_limits<double>::infinity();
     Mat<double> best_En, EA, EB;
-    for (double df : {-g.rate / 16, 0.0, g.rate / 16}) {
+    for (double df : dfs) {
         mix(s, g, y, cfo + df);
         for (int d0 = 0; d0 < ndt; d0 += NAIL_CHUNK) {
             const int nd = std::min(NAIL_CHUNK, ndt - d0);
@@ -291,7 +297,8 @@ std::vector<double> tx_audio(int tag, std::uint64_t payload, int channel, double
     return x;
 }
 
-std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal) {
+std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal,
+                                   Round round) {
     const auto& dec = decoder();
     const unsigned init = static_cast<unsigned>(tag) << 8;
     std::vector<Decoded> out;
@@ -300,13 +307,13 @@ std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span
     prepare(s, y, nominal, grid(channels.front()).T);  // every channel's symbol is the same length
     for (int c : channels) {
         const auto& g = grid(c);
-        const auto cands = search(g, s, y, nominal);
+        const auto cands = search(g, s, y, nominal, round);
         // hand.receive, one candidate at a time instead of all three and then a
         // batched decode: nailing is 2/3 of the work per channel and a burst on
         // the first candidate makes the other two nails dead weight. Same LLRs
         // either way (the decoder's rows are independent).
         for (const auto& cd : cands) {
-            const auto [start, cfo, En] = nail(g, s, y, cd.start, cd.cfo);
+            const auto [start, cfo, En] = nail(g, s, y, cd.start, cd.cfo, round);
             const auto l = cpm::llrs(g, En);
             Mat<float> llr(1, E);
             for (int j = 0; j < E; ++j)

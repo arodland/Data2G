@@ -53,6 +53,15 @@ LEN_S = N_SYM / RATE  # 10.56 s
 
 N_CHANNELS, PITCH, CENTER = 40, 60.0, 1500.0  # channel c -> CENTER + (c - 19.5) * PITCH
 SEARCH_S, SEARCH_HZ, TOP = 0.6, 5.0, 3
+# A round's grids. ROUND_FULL ships. ROUND_CHEAP is what --hand-round cheap
+# picks on a station that needs the round for about half the CPU: one fewer
+# candidate (the third is a near-duplicate of the first two), a T/4 search
+# step the nailing recovers, and no CFO refinement. Measured, the preset costs
+# 0.2-0.4 dB: the two grids are free, the CFO refinement is what you pay for
+# (docs/hand-burst.md).
+ROUND_FULL = dict(top=TOP, step_div=8, nail_cfo=True)
+ROUND_CHEAP = dict(top=2, step_div=4, nail_cfo=False)
+ROUNDS = {"full": ROUND_FULL, "cheap": ROUND_CHEAP}
 LATE_S = 0.5  # a scheduled Hand this late past its slot still goes; later is dropped (busy)
 
 SEARCH_SAMPLES = int(round(SEARCH_S * FS))
@@ -155,25 +164,25 @@ def sync_shares(z: np.ndarray, start: int, T: int, m: int) -> float:
     return s
 
 
-def search(g: cpm.Grid, y: np.ndarray, nominal: int) -> list:
+def search(g: cpm.Grid, y: np.ndarray, nominal: int, rnd: dict = ROUND_FULL) -> list:
     """Top (start, cfo) candidates by the sync blocks' tone shares."""
     T = g.T
     cands = []
     for cfo in np.arange(-SEARCH_HZ, SEARCH_HZ + 1e-9, g.rate / 4):
         z = mix(g, y, cfo)
-        for start in range(nominal - SEARCH_SAMPLES, nominal + SEARCH_SAMPLES + 1, T // 8):
+        for start in range(nominal - SEARCH_SAMPLES, nominal + SEARCH_SAMPLES + 1, T // rnd["step_div"]):
             cands.append((sync_shares(z, start, T, g.m), start, cfo))
     cands.sort(reverse=True)
     out = []
     for s, start, cfo in cands:  # distinct peaks: half a symbol or a quarter tone apart
         if all(abs(start - a) > T // 2 or abs(cfo - b) > g.rate / 4 + 1e-9 for a, b in out):
             out.append((start, cfo))
-        if len(out) == TOP:
+        if len(out) == rnd["top"]:
             break
     return out
 
 
-def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
+def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float, rnd: dict = ROUND_FULL):
     """A candidate -> (start, cfo, data-row energies) nailed in on T/16 x
     rate/16 steps: the search's T/8 step can land a quarter symbol off, and
     that leaks every symbol's energy across two bins -- ~4 dB of the SNR
@@ -181,10 +190,12 @@ def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
     before the decode rather than after the CRC. Metric: the data rows'
     winning shares; the sync blocks' would do at 6 dB but picks the wrong
     quarter symbol at the -20 dB threshold (measured: 47% -> 48% decoded,
-    where the data rows' give 58%)."""
+    where the data rows' give 58%). ROUND_CHEAP skips the rate/16 steps and
+    nails on the search's own CFO grid."""
     T = g.T
     best = (start, cfo, bins(mix(g, y, cfo), start, T, g.m, N_SYM)[DATA_ROWS], -np.inf)
-    for df in (-g.rate / 16, 0.0, g.rate / 16):
+    dfs = (-g.rate / 16, 0.0, g.rate / 16) if rnd["nail_cfo"] else (0.0,)
+    for df in dfs:
         z = mix(g, y, cfo + df)
         for dt in range(-(T // 2), T // 2 + 1, T // 16):
             En = bins(z, start + dt, T, g.m, N_SYM)[DATA_ROWS]
@@ -194,18 +205,18 @@ def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
     return best[0], best[1], best[2]
 
 
-def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDecoder):
+def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDecoder, rnd: dict = ROUND_FULL):
     """The first candidate and list path whose CRC passes -> (payload bits,
     snr_est dB, start sample), or None. Every candidate is nailed first, and
     its data-row energies serve twice: the soft bits, and the SNR
     (cpm.measure's scale: average power in 2500 Hz)."""
-    cands = search(g, y, nominal)
+    cands = search(g, y, nominal, rnd)
     if not cands:
         return None
     llr = np.empty((len(cands), E))
     ens = []
     for i, (start, cfo) in enumerate(cands):
-        start, cfo, En = nail(g, y, start, cfo)
+        start, cfo, En = nail(g, y, start, cfo, rnd)
         llr[i, interleaver()] = cpm.llrs(g, En)
         ens.append((start, En))
     bits, _ = dec.decode(llr)
@@ -217,7 +228,7 @@ def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDe
     return None
 
 
-def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int) -> list:
+def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int, rnd: dict = ROUND_FULL) -> list:
     """Net control's round: decode every channel in the captured window.
     `nominal`: a Hand's expected start sample in y (its slot, as this host
     sent it); the search covers +-SEARCH_S of it. -> dicts with c, payload
@@ -231,7 +242,7 @@ def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int) ->
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for c in channels:
-        got = receive(grid(channel_freq(c)), y, nominal, tag, dec)
+        got = receive(grid(channel_freq(c)), y, nominal, tag, dec, rnd)
         if got is not None:
             bits, snr, start = got
             out.append(dict(c=c, payload=payload_int(bits), snr=float(snr),

@@ -39,8 +39,22 @@ struct Decoded {
     std::uint64_t payload;
     double snr, dt_ms;
 };
+// A round's search and nail grids. ROUND_FULL is what ships. ROUND_CHEAP is
+// the setting a station picks when a round has to cost about half as much
+// (--hand-round cheap): one fewer candidate (the third is a near-duplicate of
+// the first two), a coarser search step the nailing recovers, and no CFO
+// refinement. Measured, that whole preset costs 0.2-0.4 dB (the two grids are
+// free; the CFO refinement is what you pay for): docs/hand-burst.md.
+struct Round {
+    int top;        // candidates kept per channel
+    int step_div;   // the search steps T/step_div
+    bool nail_cfo;  // the nail searches +-rate/16 as well as +-T/16
+};
+inline constexpr Round ROUND_FULL{TOP, 8, true}, ROUND_CHEAP{2, 4, false};
+
 // Net control's round: every channel of the captured window y; `nominal`: a
 // Hand's expected start sample in y. Thread-safe.
-std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal);
+std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal,
+                                   Round round = ROUND_FULL);
 
 }  // namespace data2g::hand

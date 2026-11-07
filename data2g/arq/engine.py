@@ -185,6 +185,7 @@ class Engine:
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
         self.cw_id = "off"  # CW_ID_MODES
         self.cw_wpm = cwid.WPM
+        self.hand_round = "full"  # "cheap": --hand-round cheap's grids (hand.ROUND_CHEAP)
         self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
         self._cw_heard = False  # the last block's (logged once per ID)
         self._cw_until = 0.0  # nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
@@ -398,7 +399,7 @@ class Engine:
         lines = []
         if nominal >= hand.SEARCH_SAMPLES:
             try:
-                res = hand.decode_window(y, tag, channels, nominal)
+                res = hand.decode_window(y, tag, channels, nominal, hand.ROUNDS[self.hand_round])
                 lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
             except Exception:
                 log.exception("hand decode failed")

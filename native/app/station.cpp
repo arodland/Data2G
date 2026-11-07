@@ -431,6 +431,7 @@ void Station::start() {
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         engine_->cw_id = a_.cw_id;
         engine_->cw_wpm = a_.cw_wpm;
+        engine_->hand_round = a_.hand_round;
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig

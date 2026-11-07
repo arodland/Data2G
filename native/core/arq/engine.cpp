@@ -986,7 +986,8 @@ void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) 
     for (const int c : channels)
         if (std::find(uniq.begin(), uniq.end(), c) == uniq.end()) uniq.push_back(c);
     if (hand_listen_) throw std::invalid_argument("a Hand window is already waiting");  // its round still owes a HAND END
-    hand_listen_ = HandListen{static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), tag, std::move(uniq), n_};
+    hand_listen_ = HandListen{.d = static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), .tag = tag,
+                              .channels = std::move(uniq), .armed = n_};
 }
 
 void Engine::hand_cancel() {
@@ -996,6 +997,25 @@ void Engine::hand_cancel() {
         hand_event("HAND END");
     }
     hand_hold_ = 0.0;
+}
+
+std::vector<std::tuple<int, double, double, double>> Engine::hand_refs() const {
+    std::vector<std::tuple<int, double, double, double>> out;
+    for (const auto& [id, r] : hand_refs_) out.emplace_back(id, r.end, r.cfo, r.snr);
+    return out;
+}
+
+void Engine::hand_ref_set(int id, double end_s, double cfo, double snr) { hand_refs_[id] = HandRef{end_s, cfo, snr}; }
+
+void Engine::test_tx(const std::string& submode, std::vector<double> audio) {
+    auto b = std::make_shared<TxBurst>();
+    b->submode = submode;
+    tx_ = Tx{std::move(b), std::move(audio), 0};
+}
+
+std::optional<std::pair<std::int64_t, int>> Engine::hand_tx() const {
+    if (!hand_tx_) return std::nullopt;
+    return std::make_pair(hand_tx_->first, hand_tx_->channel);
 }
 
 std::vector<std::string> Engine::take_hand_events() {
@@ -1034,12 +1054,14 @@ void Engine::hand_collect(std::span<const double> x) {
         HandListen done = std::move(hl);
         hand_listen_.reset();
         if (hand_thread_.joinable()) hand_thread_.join();  // the last round's: long done (a round is 10 s+)
-        // off the session stage: ~3 s of CPU for 40 channels on a desktop. A decoder throw costs the round, not the station.
+        // off the session stage: ~1 s of CPU for 40 channels on a desktop, half that
+        // with ROUND_CHEAP. A decoder throw costs the round, not the station.
         hand_thread_ = std::thread([this, w = std::move(done)] {
             std::vector<std::string> lines;
             if (w.anchor + w.d - w.first >= hand::SEARCH_SAMPLES)  // the burst lands before the capture: no decodes
                 try {
-                    for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first))
+                    const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;
+                    for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first, round))
                         lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms));
                 } catch (const std::exception& e) {
                     log_write(LOG, 40, format("hand decode failed: %s", e.what()));
