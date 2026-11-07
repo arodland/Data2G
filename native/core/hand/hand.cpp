@@ -108,12 +108,18 @@ void prepare(Scratch& s, std::span<const double> y, std::int64_t nominal, int T)
 // absolute sample times, into the scratch's middle. The silence margins are
 // already zero and stay that way, so this is one pass over y per cfo (7 plus
 // 3x3 a channel), not one per (start, cfo) as cpm._energies would do.
+// The oscillator is a phasor recurrence, set exactly every RESYNC samples, so
+// one sincos per RESYNC rather than per sample. The drift over a stretch is
+// ~1e-14, far inside the 1e-6 Python agreement.
 void mix(Scratch& s, const cpm::Grid& g, std::span<const double> y, double cfo) {
+    constexpr std::int64_t RESYNC = 256;
     const double w = (-2 * PI) * (g.f0 + cfo);
-    for (std::int64_t i = 0; i < s.n; ++i) {
-        const double arg = w * (static_cast<double>(i) / FS);
-        const double v = y[static_cast<std::size_t>(i)];
-        s.z[static_cast<std::size_t>(s.left + i)] = {v * std::cos(arg), v * std::sin(arg)};
+    const cdouble step = std::polar(1.0, w / FS);
+    for (std::int64_t i0 = 0; i0 < s.n; i0 += RESYNC) {
+        cdouble p = std::polar(1.0, w * (static_cast<double>(i0) / FS));
+        const std::int64_t end = std::min(s.n, i0 + RESYNC);
+        for (std::int64_t i = i0; i < end; ++i, p *= step)
+            s.z[static_cast<std::size_t>(s.left + i)] = y[static_cast<std::size_t>(i)] * p;
     }
 }
 

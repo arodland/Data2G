@@ -404,7 +404,7 @@ class Engine:
                              name="hand-decode", daemon=True).start()
 
     def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int, short: str | None, rnd: dict):
-        """The round's decodes off the audio thread (~3 s of CPU for 40
+        """The round's decodes off the audio thread (~2.4 s of CPU for 40
         channels on a desktop): a line per Hand decoded, then HAND SHORT if
         the window's head was missed, then HAND END. A negative nominal: the
         slot lies before the capture, so no decodes (a search reaching past

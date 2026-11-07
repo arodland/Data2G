@@ -149,12 +149,13 @@ Fading was re-checked with the shipped decoder, same 24 seeds per cell, one chan
 
 It helps where the design leans on long Hands riding through fades (mpg, mps), and is a wash on the disturbed channel (one trial either way at n=24).
 
-Cost of a round: the Python reference (mixing the window once per CFO with `hand.mix`/`hand.bins`, bit-identical to `cpm._energies`, rather than per candidate, plus the nailing) takes about 3 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 1.9 s single-threaded, ~1 s of wall with a batch's rows split across pocketfft's threads (about two cores). Four changes got it there from the ported form's 2.6 s, none of them a sensitivity change. A 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical before and after, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
+Cost of a round: the Python reference (mixing the window once per CFO with `hand.mix`/`hand.bins`, bit-identical to `cpm._energies`, rather than per candidate, plus the nailing) takes about 2.4 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 0.37 s of wall for the round (0.16 s with `--hand-round cheap`), a batch's rows split across pocketfft's threads. Five changes got it there from the ported form's 2.6 s, none of them a sensitivity change. A 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical across the first four, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
 
 - the mixed window carries a margin of silence on both sides, so a symbol window that runs off either end of the capture reads zeros where it lies instead of being gathered into a zero-padded copy (1.35 MB copied per offset, ~6200 offsets a round);
 - a whole row of search starts, and a whole row of nail offsets, goes through one strided block transform (`dsp::fft_block_into`) instead of one pocketfft call per symbol window, which is what lets its threads have anything to divide;
 - nailing transforms only the 54 data rows: the 12 sync rows are thrown away by both the nail's metric and the decode, so a round is 10.8k symbol windows per channel where it was 15.2k;
-- candidates are nailed and decoded one at a time, so a burst found on the first candidate never pays for the other two nails.
+- candidates are nailed and decoded one at a time, so a burst found on the first candidate never pays for the other two nails (the Python reference does the same since, 2.96 s to 2.41 s);
+- the mixer's oscillator is a phasor recurrence, set exactly every 256 samples, instead of a cos and a sin per sample: 0.86 s to 0.37 s for the round (0.47 s to 0.16 s cheap), the same payloads, `snr` and `dt` to 6 digits.
 
 The decode still runs on its own thread after the capture, so it never holds the round; a Pi 4 remains the untested case.
 

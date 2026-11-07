@@ -193,7 +193,7 @@ def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float, rnd: dict = ROUND_F
     where the data rows' give 58%). ROUND_CHEAP skips the rate/16 steps and
     nails on the search's own CFO grid."""
     T = g.T
-    best = (start, cfo, bins(mix(g, y, cfo), start, T, g.m, N_SYM)[DATA_ROWS], -np.inf)
+    best = (start, cfo, None, -np.inf)
     dfs = (-g.rate / 16, 0.0, g.rate / 16) if rnd["nail_cfo"] else (0.0,)
     for df in dfs:
         z = mix(g, y, cfo + df)
@@ -207,23 +207,17 @@ def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float, rnd: dict = ROUND_F
 
 def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDecoder, rnd: dict = ROUND_FULL):
     """The first candidate and list path whose CRC passes -> (payload bits,
-    snr_est dB, start sample), or None. Every candidate is nailed first, and
-    its data-row energies serve twice: the soft bits, and the SNR
-    (cpm.measure's scale: average power in 2500 Hz)."""
-    cands = search(g, y, nominal, rnd)
-    if not cands:
-        return None
-    llr = np.empty((len(cands), E))
-    ens = []
-    for i, (start, cfo) in enumerate(cands):
+    snr_est dB, start sample), or None. Candidates are nailed and decoded
+    one at a time, as native/core/hand does: a Hand on the first candidate
+    costs no further nails. The data-row energies serve twice: the soft bits,
+    and the SNR (cpm.measure's scale: average power in 2500 Hz)."""
+    llr = np.empty((1, E))
+    for start, cfo in search(g, y, nominal, rnd):
         start, cfo, En = nail(g, y, start, cfo, rnd)
-        llr[i, interleaver()] = cpm.llrs(g, En)
-        ens.append((start, En))
-    bits, _ = dec.decode(llr)
-    for i, paths in enumerate(bits):
-        for u in paths:
+        llr[0, interleaver()] = cpm.llrs(g, En)
+        bits, _ = dec.decode(llr)
+        for u in bits[0]:
             if np.array_equal(crc16(u[:PAYLOAD], tag << 8), u[PAYLOAD:]):
-                start, En = ens[i]
                 return u[:PAYLOAD], cpm.measure(g, En, N_DATA)["snr_est"], start
     return None
 
@@ -234,11 +228,11 @@ def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int, rn
     sent it); the search covers +-SEARCH_S of it. -> dicts with c, payload
     (63-bit int), snr (dB), dt_ms (start minus nominal).
 
-    ponytail: a full grid search per channel, ~3 s of CPU for 40 measured on
+    ponytail: a full grid search per channel, ~2.4 s of CPU for 40 measured on
     a desktop (the window is mixed once per cfo, not once per candidate:
     cpm._energies re-mixes, mix()/bins() here don't). This is the reference
     the tests and studies run; a station runs native/core/hand, whose round
-    is ~1 s on the same machine (docs/hand-burst.md, "As shipped")."""
+    is ~0.4 s on the same machine (docs/hand-burst.md, "As shipped")."""
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for c in channels:

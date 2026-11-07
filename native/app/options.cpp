@@ -116,7 +116,7 @@ const char* HELP =
     "                        that fails. Lower it on a slow machine (default 25)\n"
     "  --hand-round {full,cheap}\n"
     "                        net control's Hand round. cheap: one fewer candidate, a T/4 search step and no\n"
-    "                        CFO refinement: about half the CPU of a 40-channel round (1.0 s to 0.5 s on a\n"
+    "                        CFO refinement: under half the CPU of a 40-channel round (0.37 s to 0.16 s on a\n"
     "                        desktop) for 0.2-0.4 dB (docs/hand-burst.md). Only a station running a HAND\n"
     "                        LISTEN round pays it (default full)\n"
     "\nrig control (Hamlib, linked in):\n"

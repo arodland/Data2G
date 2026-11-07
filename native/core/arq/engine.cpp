@@ -1054,7 +1054,7 @@ void Engine::hand_collect(std::span<const double> x) {
         HandListen done = std::move(hl);
         hand_listen_.reset();
         if (hand_thread_.joinable()) hand_thread_.join();  // the last round's: long done (a round is 10 s+)
-        // off the session stage: ~1 s of CPU for 40 channels on a desktop, half that
+        // off the session stage: ~0.4 s of CPU for 40 channels on a desktop, under half that
         // with ROUND_CHEAP. A decoder throw costs the round, not the station.
         const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;  // fixed at the window's close
         hand_thread_ = std::thread([this, w = std::move(done), round] {
