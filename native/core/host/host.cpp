@@ -222,6 +222,48 @@ void Host::command(std::string_view line, std::string_view peer) {
         } catch (const std::invalid_argument&) {  // a callsign that won't pack
             ok = false;
         }
+    } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6
+               : upper(args[0]) == "LISTEN" ? args.size() >= 4 : upper(args[0]) == "CANCEL" && args.size() == 1)) {
+        hand_ = true;
+        // HAND args are strict (engine.py's _hand_arg): ints [0-9]+, a delay [0-9.]+,
+        // a payload [0-9a-fA-F]{1,16}; anything else is WRONG without asking the Engine
+        auto digits = [](const std::string& s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+        };
+        auto delay = [](const std::string& s) {
+            return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
+        };
+        auto hex16 = [](const std::string& s) {
+            return !s.empty() && s.size() <= 16 && std::all_of(s.begin(), s.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); });
+        };
+        auto num = [&](const std::string& s) {  // digits(), no sign, nothing after (int())
+            if (!digits(s)) throw std::invalid_argument("not a number: " + s);
+            std::size_t used = 0;
+            const int n = std::stoi(s, &used);
+            if (used != s.size()) throw std::invalid_argument("not a number: " + s);
+            return n;
+        };
+        auto whole = [&](const std::string& s) {  // delay() characters, then float(): the whole
+            // string in the classic locale (1.2.3 is WRONG); a huge d is inf, which fails the Engine's bounds
+            const double v = delay(s) ? parse_double(s) : NAN;
+            if (std::isnan(v)) throw std::invalid_argument("not a number: " + s);
+            return v;
+        };
+        try {
+            if (upper(args[0]) == "SEND") {  // HAND SEND ref tag d channel hex16 (docs/arq.md §9)
+                if (!hex16(args[5])) throw std::invalid_argument("bad payload: " + args[5]);
+                e.hand_send(num(args[1]), num(args[2]), whole(args[3]), num(args[4]), std::stoull(args[5], nullptr, 16));
+            } else if (upper(args[0]) == "LISTEN") {  // HAND LISTEN d tag channel [channel...]
+                std::vector<int> channels;
+                for (std::size_t i = 3; i < args.size(); ++i) channels.push_back(num(args[i]));
+                e.hand_listen(whole(args[1]), num(args[2]), channels);
+            } else e.hand_cancel();  // HAND CANCEL: always OK (docs/arq.md §9)
+        } catch (const std::invalid_argument&) {
+            ok = false;
+        } catch (const std::out_of_range&) {
+            ok = false;
+        }
     } else if (auto c = bw_cap(cmd)) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
@@ -304,7 +346,7 @@ void Host::client_gone() {
     const auto s = e.session().state;
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
-    listening = data2g = false;
+    listening = data2g = hand_ = false;
     e.set_idle_close(std::nullopt);
     accept_addr.reset();
     const auto now = e.session().state;
@@ -313,6 +355,7 @@ void Host::client_gone() {
         link->reset();
         bcast_ = false;
     }
+    e.hand_cancel();  // its waiting Hand and window must not hold the radio (docs/arq.md §9)
 }
 
 bool Host::abort_session() {
@@ -385,6 +428,12 @@ void Host::after_step(bool ptt) {
     if (auto* link = e.kiss()) {
         auto events = link->take_events();
         if (bcast_) out_cmd.insert(out_cmd.end(), std::make_move_iterator(events.begin()), std::make_move_iterator(events.end()));
+    }
+    {
+        auto hand = e.take_hand_events();  // REF and HAND lines (docs/arq.md §9): Data2G-aware clients only
+        for (const auto& l : hand)  // ... and the REF lines again for the KISS port (Station::flush)
+            if (l.starts_with("REF ")) out_kiss_refs.push_back(l);
+        if (hand_ || data2g) out_cmd.insert(out_cmd.end(), std::make_move_iterator(hand.begin()), std::make_move_iterator(hand.end()));
     }
     if (ptt != ptt_) {
         ptt_ = ptt;

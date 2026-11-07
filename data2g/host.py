@@ -33,13 +33,19 @@ off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
 accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
-seconds-at-1 seconds-at-max lines). Replies OK / WRONG (MYCALL's OK followed by
-REGISTERED call for each call). Notifications: CONNECTED src dst bw, DISCONNECTED
-(DATA2G ON: DISCONNECTED reason [detail], docs/arq.md §9),
-PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
+seconds-at-1 seconds-at-max lines); show of hands (Data2G, docs/arq.md §9):
+HAND SEND ref tag d channel hex16 (send a Hand d seconds after the end of
+heard burst ref, shifted by its cfo), HAND LISTEN d tag channel [...] (decode
+the window after my next burst ends) and HAND CANCEL (stop a waiting Hand and
+any window). Replies OK / WRONG (MYCALL's
+OK followed by REGISTERED call for each call). Notifications: CONNECTED src
+dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
+§9), PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
-BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has sent a
-BCAST command, so VARA clients never see them.
+BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has
+sent a BCAST command; hand lines (REF id end offset snr per decoded burst,
+HAND SENT/DROPPED c, HAND c hex16 snr dt, HAND SHORT ms, HAND END) once it has
+sent a HAND command or DATA2G ON, so VARA clients never see them.
 
     data2g-host --mycall W1AW --input-device USB --output-device USB --rigctld-port 4532
 
@@ -56,6 +62,7 @@ import argparse  # noqa: E402
 import itertools  # noqa: E402
 import logging  # noqa: E402
 import queue  # noqa: E402
+import re  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
 import threading  # noqa: E402
@@ -120,11 +127,13 @@ class Host:
         engine.set_accept_connect(self._accept_connect)
         self.buffer_credit = buffer_credit
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
+        self._hand = False  # the client has sent HAND: REF/HAND lines go to it (as with DATA2G ON)
         self.data2g = False  # DATA2G ON
         self.output_volume = 0.0  # dB, TXPOWER: serve() applies it
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
         self.out_data = bytearray()
+        self.out_kiss_refs: list[str] = []  # REF lines for the KISS port (serve: tnc.KissServer.send_ref)
         self._ptt = self._busy = False
         self._buffer = 0
         self._buffer_t = 0.0  # engine time of the last BUFFER line
@@ -175,6 +184,22 @@ class Host:
                 e.send_cq(args[0], BW["BW" + args[1]])
             except (RuntimeError, ValueError):  # a session under way; a callsign that won't pack
                 ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "SEND" and len(args) == 6:
+            self._hand = True
+            try:  # HAND SEND ref tag d channel hex16 (docs/arq.md §9); args strict, see _hand_arg
+                e.hand_send(int(_hand_arg(args[1], "[0-9]+")), int(_hand_arg(args[2], "[0-9]+")), float(_hand_arg(args[3], "[0-9.]+")),
+                            int(_hand_arg(args[4], "[0-9]+")), int(_hand_arg(args[5], "[0-9a-fA-F]{1,16}"), 16))
+            except (ValueError, OverflowError):
+                ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "LISTEN" and len(args) >= 4:
+            self._hand = True
+            try:  # HAND LISTEN d tag channel [channel...] (docs/arq.md §9); args strict, see _hand_arg
+                e.hand_listen(float(_hand_arg(args[1], "[0-9.]+")), int(_hand_arg(args[2], "[0-9]+")), [int(_hand_arg(a, "[0-9]+")) for a in args[3:]])
+            except (ValueError, OverflowError):
+                ok = False
+        elif cmd == "HAND" and args and args[0].upper() == "CANCEL" and len(args) == 1:
+            self._hand = True
+            e.hand_cancel()  # a waiting Hand and any window stop (docs/arq.md §9): always OK
         elif cmd in BW:
             self.cap = BW[cmd]
         elif cmd == "CHAT" and args and args[0].upper() in ("ON", "OFF"):
@@ -294,13 +319,14 @@ class Host:
             e.disconnect()
         elif e.session.state == S.CONNECTING:
             e.abort()
-        self.listening, self.accept_addr, self.data2g = False, None, False
+        self.listening, self.accept_addr, self.data2g, self._hand = False, None, False, False
         e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
         if e.kiss is not None:  # its ports go, and port 0 back to its defaults
             e.kiss.reset()
             self._bcast = False
+        e.hand_cancel()  # its waiting Hand and window must not hold the radio (docs/arq.md §9)
 
     def _accept_connect(self, caller: str, callee: str) -> bool:
         if self.accept_addr is None:
@@ -351,6 +377,11 @@ class Host:
             events = e.kiss.take_events()
             if self._bcast:
                 self.out_cmd += events
+        refs = e.take_hand_events()  # always drained; gated like the BCAST statuses:
+        if self._hand or self.data2g:  # VARA clients never see REF/HAND lines
+            self.out_cmd += refs
+        # ... and the REF lines again for the KISS port (its REFS ON clients), ahead of the burst's frames
+        self.out_kiss_refs += [r for r in refs if r.startswith("REF ")]
         if ptt != self._ptt:
             self._ptt = ptt
             self.out_cmd.append("PTT ON" if ptt else "PTT OFF")
@@ -394,6 +425,15 @@ def _addr(s: str, default_host: str) -> tuple[str, int] | None:
     if not sep or not port.isdigit() or not 0 < int(port) < 65536:
         return None
     return host.strip("[]") or default_host, int(port)
+
+
+def _hand_arg(s: str, rx: str) -> str:
+    """A HAND numeric argument, `rx` exactly: int/float quietly accept "1_0"
+    and int() a leading "-", so "1_0", "-0" and "zz" raise ValueError (WRONG)
+    instead of parsing. Same character classes as native/core/host."""
+    if not re.fullmatch(rx, s):
+        raise ValueError(s)
+    return s
 
 
 # --- sockets ------------------------------------------------------------------------
@@ -550,6 +590,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
+    engine.hand_round = getattr(a, "hand_round", "full")
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -637,6 +678,9 @@ def serve(a, pa, stop: threading.Event | None = None):
             else:
                 data.send(bytes(host.out_data))
             host.out_data.clear()
+            for line in host.out_kiss_refs:  # same socket, ahead of the frames: no race with the command port
+                kiss.send_ref(line)
+            host.out_kiss_refs.clear()
             for port, f in engine.take_kiss_rx():
                 kiss.broadcast(f, port)
             for port, ack in link.take_acks():
@@ -692,6 +736,9 @@ def main():
     ap.add_argument("--cw-id", choices=("off", "add", "only"), default="off",
                     help="CW ID (docs/arq.md §7b): off (ID frames only), add (with them), only (in their place)")
     ap.add_argument("--cw-wpm", type=float, default=20.0, help="CW ID speed, 15-40 wpm")
+    ap.add_argument("--hand-round", choices=("full", "cheap"), default="full",
+                    help="net control's Hand round: cheap, one fewer candidate and coarser grids, half the CPU"
+                         " of a 40-channel round for 0.2-0.4 dB (docs/hand-burst.md)")
     a = ap.parse_args()
     if a.list_modes:
         print("\n".join(mode_lines(KISS_BW_CAP[a.kiss_bw])))

@@ -13,6 +13,7 @@
 
 #include "codes/codes.hpp"
 #include "dsp/dsp.hpp"
+#include "hand/hand.hpp"
 
 namespace data2g::arq {
 
@@ -346,6 +347,7 @@ void Engine::stop() {
     wake_.notify_all();
     done_cv_.notify_all();
     if (worker_.joinable()) worker_.join();
+    if (hand_thread_.joinable()) hand_thread_.join();
 }
 
 bool Engine::idle() const {
@@ -399,6 +401,7 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
 void Engine::abort() {
     abort_pending_ = true;
     tx_.reset();
+    tx_kiss_ = false;  // a Hand or KISS burst cut short: the next burst's end is the session's
     transmitting_ = false;
     request_reset();
     new_session();
@@ -726,6 +729,7 @@ Engine::Done Engine::process(Block& b) {
         noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         if (fresh) hear(b.items, t);
+        hand_collect(b.x);
         const bool cw = fresh && b.cw;
         if (cw) cw_hold(t);
         cw_heard_ = cw;
@@ -734,7 +738,10 @@ Engine::Done Engine::process(Block& b) {
         std::vector<TxBurstPtr> bursts;
         TxBurstPtr main;
         const bool held = t < hold_ && session_->state != SessionState::CLOSED;  // a closed session's DISC_ACK goes
-        const bool free = t >= hold_ && t >= cw_until_;  // for anything outside a session
+        // for anything outside a session; a waiting Hand holds them all, so none runs into its slot
+        // (ponytail: up to HAND_ARM_EXPIRE_S of hold; from the slot minus the longest burst if that bites)
+        const bool hand_free = t >= hand_hold_ && !hand_tx_;
+        const bool free = t >= hold_ && t >= cw_until_ && hand_free;
         if (!busy && !held) {  // a burst still arriving holds any reply (half duplex)
             carrier_hold(t);
             auto burst = session_->poll(t);
@@ -743,7 +750,7 @@ Engine::Done Engine::process(Block& b) {
             if (burst) {
                 bursts = with_id(burst, t);
                 main = burst;
-            } else if (id_pending_ && t >= id_pending_t_) {
+            } else if (id_pending_ && t >= id_pending_t_ && hand_free) {
                 bursts = ids(*id_pending_, false);
                 id_pending_.reset();
             } else if (!extra_.empty() && free) {
@@ -761,6 +768,26 @@ Engine::Done Engine::process(Block& b) {
         } else kiss_busy_ = 0;
         if (bursts.empty() && cw_due(t, free && !busy && !held)) bursts = {cw_burst(call_)};
         if (!bursts.empty()) start_tx(bursts, t, main ? main : bursts.front());
+        if (hand_tx_ && !tx_ && n_ >= hand_tx_->first) {
+            // a scheduled Hand (docs/arq.md §9): its slot is due and the radio is idle. The audio
+            // starts at the first block boundary past the slot (engine.py's reasoning).
+            HandTx ht = std::move(*hand_tx_);
+            hand_tx_.reset();
+            if (n_ <= ht.first + static_cast<std::int64_t>(hand::LATE_S * config::FS)) {
+                static const TxBurstPtr marker = std::make_shared<const TxBurst>(TxBurst{.submode = "hand"});
+                log_write(LOG, INFO, format("TX hand %d", ht.channel));
+                const std::size_t len = ht.audio.size();
+                tx_ = Tx{marker, std::move(ht.audio), 0};
+                tx_kiss_ = true;  // nobody's session: no reply timer
+                cw_plan({marker}, {len - static_cast<std::size_t>(ptt_delay_)}, t);  // a Hand is covered by CW planning like any other transmission; start_tx's length convention: the PTT delay prefix apart
+                hand_event("HAND SENT " + std::to_string(ht.channel));
+                if (rec_)
+                    rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
+            } else {
+                log_write(LOG, INFO, format("hand %d not sent: busy past the slot", ht.channel));
+                hand_event("HAND DROPPED " + std::to_string(ht.channel));
+            }
+        }
     }
     if (tx_) {
         if (tx_->pos == 0) d.out.tx_burst = std::make_shared<const std::vector<double>>(tx_->audio);
@@ -772,9 +799,19 @@ Engine::Done Engine::process(Block& b) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + receiver::NoiseProfile::RECOVER_S);
-            tx_end_ = now() + static_cast<double>(n) / config::FS;
-            if (!tx_kiss_) {
-                session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);  // a broadcast burst is not the session's: no reply timer
+            if (hand_listen_ && !hand_listen_->open) {  // my burst ended: its Hand window opens
+                auto& hl = *hand_listen_;
+                const std::int64_t a = n_ + static_cast<std::int64_t>(n);
+                hl.open = true;
+                hl.buf.clear();
+                hl.anchor = a;
+                hl.lo = a + hl.d - hand::SEARCH_SAMPLES;
+                hl.hi = a + hl.d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES;
+                hand_hold_ = static_cast<double>(hl.hi) / config::FS;
+            }
+            if (!tx_kiss_) {  // a Hand or broadcast burst is not the session's: no reply timer, no tx_end_
+                tx_end_ = now() + static_cast<double>(n) / config::FS;  // the reply/missed-burst accounting's
+                session_->on_tx_end(sent, tx_end_.value());
                 expect_reply();  // with the reset below
             }
             request_reset();  // our own transmission was not heard
@@ -921,6 +958,122 @@ void Engine::missed_energy() {
     energy(start, start + exp->second, exp->first, now(), MISSED_MIN_DB);
 }
 
+// -- Hand bursts (engine.py's hand_send, hand_listen, _hand_collect, _hand_decode) --------
+
+void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t payload) {
+    const auto it = hand_refs_.find(ref);
+    if (it == hand_refs_.end()) throw std::invalid_argument("no ref " + std::to_string(ref));
+    if (hand_tx_) throw std::invalid_argument("a Hand is already waiting");
+    if (channel < 0 || channel >= hand::N_CHANNELS || tag < 0 || tag > 255) throw std::invalid_argument("bad channel or tag");
+    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
+    payload &= (std::uint64_t{1} << hand::PAYLOAD) - 1;  // 16 hex digits, the top bit ignored (docs/arq.md §9)
+    const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s) * config::FS)) - ptt_delay_;
+    if (first < n_) throw std::invalid_argument("the slot has passed");
+    std::vector<double> audio(static_cast<std::size_t>(ptt_delay_), 0.0);
+    const auto x = hand::tx_audio(tag, payload, channel, it->second.cfo);
+    audio.insert(audio.end(), x.begin(), x.end());
+    hand_tx_ = HandTx{first, std::move(audio), channel};
+}
+
+void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) {
+    if (tag < 0 || tag > 255) throw std::invalid_argument("bad tag");
+    if (!(d_s >= HAND_MIN_D_S && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
+    if (channels.empty() || std::any_of(channels.begin(), channels.end(), [](int c) { return c < 0 || c >= hand::N_CHANNELS; }))
+        throw std::invalid_argument("bad channels");
+    std::vector<int> uniq;  // listed twice: decoded once
+    for (const int c : channels)
+        if (std::find(uniq.begin(), uniq.end(), c) == uniq.end()) uniq.push_back(c);
+    if (hand_listen_) throw std::invalid_argument("a Hand window is already waiting");  // its round still owes a HAND END
+    hand_listen_ = HandListen{.d = static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), .tag = tag,
+                              .channels = std::move(uniq), .armed = n_};
+}
+
+void Engine::hand_cancel() {
+    hand_tx_.reset();
+    if (hand_listen_) {  // armed or open: its round owes a HAND END
+        hand_listen_.reset();
+        hand_event("HAND END");
+    }
+    hand_hold_ = 0.0;
+}
+
+std::vector<std::tuple<int, double, double, double>> Engine::hand_refs() const {
+    std::vector<std::tuple<int, double, double, double>> out;
+    for (const auto& [id, r] : hand_refs_) out.emplace_back(id, r.end, r.cfo, r.snr);
+    return out;
+}
+
+void Engine::hand_ref_set(int id, double end_s, double cfo, double snr) { hand_refs_[id] = HandRef{end_s, cfo, snr}; }
+
+void Engine::test_tx(const std::string& submode, std::vector<double> audio) {
+    auto b = std::make_shared<TxBurst>();
+    b->submode = submode;
+    tx_ = Tx{std::move(b), std::move(audio), 0};
+}
+
+std::optional<std::pair<std::int64_t, int>> Engine::hand_tx() const {
+    if (!hand_tx_) return std::nullopt;
+    return std::make_pair(hand_tx_->first, hand_tx_->channel);
+}
+
+std::vector<std::string> Engine::take_hand_events() {
+    std::lock_guard lock(hand_mu_);
+    return std::exchange(hand_out_, {});
+}
+
+void Engine::hand_event(std::string line) {
+    std::lock_guard lock(hand_mu_);
+    if (hand_out_.size() > 1000) hand_out_.clear();  // a bare Engine with no host to drain it: don't grow
+    hand_out_.push_back(std::move(line));
+}
+
+void Engine::hand_collect(std::span<const double> x) {
+    if (!hand_listen_) return;
+    auto& hl = *hand_listen_;
+    const auto k = static_cast<std::int64_t>(x.size());
+    if (!hl.open) {
+        if (static_cast<double>(n_ - hl.armed) > HAND_ARM_EXPIRE_S * config::FS) {
+            hand_listen_.reset();
+            hand_event("HAND END");
+        }
+        return;
+    }
+    if (n_ + k > hl.lo) {
+        if (hl.buf.empty()) hl.first = hl.next = n_;
+        // blocks I spent transmitting, or dropped (Block::gap): silence, so sample times stay true.
+        // Clamped to the window's end: a worker backlog's gap can run far past hl.hi, and the
+        // decode thread would inherit tens of seconds of zeros it never looks at. A block that
+        // starts past the end is not the window's: appended at hi, its sample times would lie
+        const auto pad = std::min<std::int64_t>(n_ - hl.next, hl.hi - hl.next);
+        if (pad > 0) hl.buf.resize(hl.buf.size() + static_cast<std::size_t>(pad), 0.0);
+        if (n_ <= hl.hi) hl.buf.insert(hl.buf.end(), x.begin(), x.end());
+        hl.next = n_ + k;
+    }
+    if (n_ + k >= hl.hi && !hl.buf.empty()) {
+        HandListen done = std::move(hl);
+        hand_listen_.reset();
+        if (hand_thread_.joinable()) hand_thread_.join();  // the last round's: long done (a round is 10 s+)
+        // off the session stage: ~0.4 s of CPU for 40 channels on a desktop, under half that
+        // with ROUND_CHEAP. A decoder throw costs the round, not the station.
+        const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;  // fixed at the window's close
+        hand_thread_ = std::thread([this, w = std::move(done), round] {
+            std::vector<std::string> lines;
+            if (w.anchor + w.d - w.first >= 0)  // the slot lies before the capture: no decodes (a search past the head reads zeros)
+                try {
+                    for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first, round))
+                        lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms));
+                } catch (const std::exception& e) {
+                    log_write(LOG, 40, format("hand decode failed: %s", e.what()));
+                    lines.clear();
+                }
+            if (w.first > w.lo)  // the window's head went uncaptured (my own burst ran into it): report how much
+                lines.push_back("HAND SHORT " + std::to_string(static_cast<std::int64_t>(std::nearbyint(static_cast<double>(w.first - w.lo) * 1000.0 / config::FS))));
+            lines.emplace_back("HAND END");
+            for (auto& l : lines) hand_event(std::move(l));
+        });
+    }
+}
+
 void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     // DEBUG: what this burst cost to decode, stage by stage, from the first look at it to the session having
     // read it (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
@@ -979,6 +1132,13 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
         if (cfg_.kiss && idle())  // maybe an open port's
             cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw(), span ? span_snr(*span) : std::nullopt);
         return;
+    }
+    {  // every decoded burst is a Hand reference (docs/arq.md §9)
+        const double end = span ? span->end : t;
+        const double cfo = r->cpm ? r->cpm->cfo : r->ofdm ? r->ofdm->cfo : 0.0;
+        hand_refs_[++hand_ref_n_] = {end, cfo, meas->snr_est};
+        if (hand_refs_.size() > HAND_REFS_KEPT) hand_refs_.erase(hand_refs_.begin());
+        hand_event(format("REF %d %.2f %.1f %.1f", hand_ref_n_, end, cfo, meas->snr_est));
     }
     ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
     timing.rx = &rx;

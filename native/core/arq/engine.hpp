@@ -32,6 +32,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,6 +69,13 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 // after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 inline constexpr double ID_INTERVAL_S = 600.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
+// Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
+// how long an armed HAND LISTEN waits for the burst that anchors its window.
+inline constexpr std::size_t HAND_REFS_KEPT = 64;
+inline constexpr double HAND_ARM_EXPIRE_S = 30.0;
+// the smallest HAND LISTEN d: the window's head is uncollectable below hand::SEARCH_S,
+// since rx is off until the anchor burst ends
+inline constexpr double HAND_MIN_D_S = 1.0;
 // CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
 // each), "only" (a CW ID in their place); a transmission no CW ID covers plans one CW_PLAN_S after it, or after
 // the last CW ID when that came under CW_GAP_S before it; it goes at the next chance, held by BUSY until
@@ -266,6 +274,7 @@ public:
     double id_interval_s = ID_INTERVAL_S;
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
+    std::string hand_round = "full";  // "cheap": --hand-round cheap's grids (hand::ROUND_CHEAP)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -275,6 +284,27 @@ public:
     // (port, frame)s heard for KISS clients since the last call
     std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
+
+    // -- Hand bursts (the D2G net's show of hands: hand/hand.hpp, docs/arq.md §9), session stage.
+    // hand_send: a Hand `d_s` after heard burst `ref` ends, shifted by its cfo. hand_listen: a window
+    // d_s after my next burst ends. Both throw std::invalid_argument on bad input (engine.py's ValueError).
+    void hand_send(int ref, int tag, double d_s, int channel, std::uint64_t payload);
+    void hand_listen(double d_s, int tag, const std::vector<int>& channels);
+    // Stop a waiting Hand and an armed or open window (a gone client's must not hold the radio):
+    // a window that existed ends with HAND END. Never throws (engine.py's hand_cancel).
+    void hand_cancel();
+    // engine.py's tests poke the Python engine's own state -- hand_refs (a Host
+    // that answers a REF it made up), a bare burst on air to anchor a window,
+    // and _tx_kiss. The --native run of those tests reaches the same state here
+    // (tests/native_subs/engine.py maps the attributes onto these).
+    std::vector<std::tuple<int, double, double, double>> hand_refs() const;  // id, end s, cfo Hz, snr dB
+    void hand_ref_set(int id, double end_s, double cfo, double snr);
+    void test_tx(const std::string& submode, std::vector<double> audio);
+    std::optional<std::pair<std::int64_t, int>> hand_tx() const;  // a waiting Hand: (first sample, channel)
+    bool tx_kiss() const { return tx_kiss_; }
+    void set_tx_kiss(bool k) { tx_kiss_ = k; }
+    // REF and HAND lines since the last call (any thread: a round's lines come from its decoder thread).
+    std::vector<std::string> take_hand_events();
     const modem::Accept& accept() const { return accept_; }
     SoftStore& store() { return store_; }
     const EngineConfig& config() const { return cfg_; }
@@ -425,6 +455,35 @@ private:
     int slow_ = 0;  // blocks with a burst queued or in the session stage
     bool stop_ = false;
     std::thread worker_;
+
+    // Hand bursts (engine.py's _hand_*)
+    struct HandRef {
+        double end, cfo, snr;
+    };
+    std::map<int, HandRef> hand_refs_;  // the last HAND_REFS_KEPT heard bursts, by id
+    int hand_ref_n_ = 0;
+    struct HandTx {
+        std::int64_t first;  // its first sample (the PTT delay's included)
+        std::vector<double> audio;
+        int channel;
+    };
+    std::optional<HandTx> hand_tx_;
+    struct HandListen {
+        std::int64_t d;
+        int tag;
+        std::vector<int> channels;
+        std::int64_t armed;
+        bool open = false;
+        std::vector<double> buf;
+        std::int64_t first = 0, next = 0, lo = 0, hi = 0, anchor = 0;  // next: the sample after buf's last
+    };
+    std::optional<HandListen> hand_listen_;
+    double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)
+    std::mutex hand_mu_;
+    std::vector<std::string> hand_out_;  // under hand_mu_
+    std::thread hand_thread_;            // the last round's decoder; joined before the next and in stop()
+    void hand_event(std::string line);
+    void hand_collect(std::span<const double> x);
 };
 
 }  // namespace data2g::arq

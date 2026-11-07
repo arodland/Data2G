@@ -18,6 +18,20 @@ log = logging.getLogger("data2g.tnc")
 
 FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
 DATA, ACKMODE = 0x00, 0x0C  # KISS commands (low nibble; the port is the high one)
+SETHARDWARE = 0x06
+# Data2G's extensions ride SETHARDWARE with a subcommand byte first (docs/app-soft-plan.md §4;
+# 0x20-0x7E is the text range, MODE and REFS): REF, host to app, a heard burst's reference.
+SUB_REF = 0x11
+
+
+def refs_command(payload: bytes) -> bool | None:
+    """SETHARDWARE "REFS ON" / "REFS OFF" (per connection: this client gets
+    REF frames) -> True / False; None for anything else. The payload splits
+    on NUL/HT/LF/CR/space only, so the 0x1c-0x1f file separators poison a
+    token instead of separating it; tokens are upper-cased; exactly two,
+    "REFS ON" or "REFS OFF", count."""
+    words = [w.upper() for w in payload.translate(bytes.maketrans(b"\0\t\n\r ", b"     ")).decode("ascii", "replace").split(" ") if w]
+    return {("REFS", "ON"): True, ("REFS", "OFF"): False}.get(tuple(words))
 
 
 def kiss_encode(data: bytes, port: int = 0, cmd: int = DATA) -> bytes:
@@ -112,6 +126,7 @@ class KissServer(socketserver.ThreadingTCPServer):
         (`ack` (client, tag) for send_ack, else None). `on_command(cmd,
         payload, port)`: KISS commands other than those."""
         self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
+        self.refs = set()  # clients that sent REFS ON
         super().__init__(addr, _KissHandler)
 
     def broadcast(self, data: bytes, port: int = 0):
@@ -119,6 +134,17 @@ class KissServer(socketserver.ThreadingTCPServer):
         frame = kiss_encode(data, port)
         with self.lock:
             for c in list(self.clients):
+                try:
+                    c.sendall(frame)
+                except OSError:
+                    self.clients.discard(c)
+
+    def send_ref(self, line: str):
+        """A heard burst's REF line (docs/arq.md §9), to the clients that asked,
+        ahead of that burst's frames (call it before their broadcast())."""
+        frame = kiss_encode(bytes([SUB_REF]) + line.encode("ascii"), 0, SETHARDWARE)
+        with self.lock:
+            for c in list(self.refs & self.clients):
                 try:
                     c.sendall(frame)
                 except OSError:
@@ -157,6 +183,10 @@ class _KissHandler(socketserver.BaseRequestHandler):
                         srv.on_packet(cmd >> 4, payload, None)
                     elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
                         srv.on_packet(cmd >> 4, payload[2:], (self.request, payload[:2]))
+                    elif cmd & 0x0F == SETHARDWARE and (on := refs_command(payload)) is not None:
+                        with srv.lock:
+                            (srv.refs.add if on else srv.refs.discard)(self.request)
+                        log.info("KISS client %s: REFS %s", peer, "ON" if on else "OFF")
                     elif srv.on_command is not None:
                         srv.on_command(cmd & 0x0F, payload, cmd >> 4)
         except OSError:
@@ -164,5 +194,6 @@ class _KissHandler(socketserver.BaseRequestHandler):
         finally:
             with srv.lock:
                 srv.clients.discard(self.request)
+                srv.refs.discard(self.request)
             log.info("KISS client %s disconnected", peer)
 

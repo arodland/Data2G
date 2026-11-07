@@ -225,8 +225,9 @@ FILES["cpm.cpp"] = cpm_cpp
 def polar_ga_cpp() -> str:
     """Polar info sets the live path designs at run time (GA density
     evolution at codes.POLAR_DESIGN_SNR_DB) because no frozen file holds
-    one: the CPM control codewords. Keyed by (k, e)."""
-    from data2g import cpm
+    one: the CPM control codewords and the Hand burst's K=79 polar. Keyed
+    by (k, e); hand.py builds its code the same live way."""
+    from data2g import cpm, hand, polar
 
     out = [HEADER.format(src="data2g/polar.py (codes.polar_code of cpm.CTL)"), '#include "tables/polar_ga.hpp"\n\n',
            f"// Design SNR {cxx(float(codes.POLAR_DESIGN_SNR_DB))} dB.\n",
@@ -240,12 +241,34 @@ def polar_ga_cpp() -> str:
         seen.add((s.k, s.coded_bits))
         out.append(f"constexpr std::uint16_t ga_{len(rows)}[] = {{{ints(code.info_pos)}}};\n")
         rows.append(f"    {{{s.k}, {s.coded_bits}, ga_{len(rows)}}},\n")
+    hc = polar.PolarCode(hand.K, hand.E, design_snr_db=codes.POLAR_DESIGN_SNR_DB)
+    out.append(f"constexpr std::uint16_t ga_{len(rows)}[] = {{{ints(hc.info_pos)}}};\n")
+    rows.append(f"    {{{hand.K}, {hand.E}, ga_{len(rows)}}},\n")
     out.append(f"\nconstexpr PolarDesign designs[] = {{\n{''.join(rows)}}};\n\n}}  // namespace\n\n"
                "const std::span<const PolarDesign> POLAR_GA = designs;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 
 
 FILES["polar_ga.cpp"] = polar_ga_cpp
+
+
+def hand_cpp() -> str:
+    """Hand burst frozen random bits (data2g/hand.py): the interleaver
+    (rng seed 0) and the Costas order-6 sync order (the native core has no
+    costas(); cpm.costas(8) takes its Welch branch, p=7, giving
+    {0, 2, 1, 5, 3, 4})."""
+    from data2g import hand
+
+    return (HEADER.format(src="data2g/hand.py") + '#include "tables/hand.hpp"\n\nnamespace data2g::tables {\nnamespace {\n\n'
+            f"constexpr std::uint8_t interleaver[] = {{{ints(hand.interleaver())}}};\n"
+            f"constexpr std::uint8_t sync[] = {{{ints(hand.SYNC)}}};\n"
+            "\n}  // namespace\n\n"
+            "const std::span<const std::uint8_t> HAND_INTERLEAVER = interleaver;\n"
+            "const std::span<const std::uint8_t> HAND_SYNC = sync;\n\n"
+            "}  // namespace data2g::tables\n")
+
+
+FILES["hand.cpp"] = hand_cpp
 # equalizer.per_carrier_noise's `samples`: a burst's pilot count (at most
 # MAX_CODEWORDS * the longest codeword + a header-copy frame + the closing
 # pilot) or 7 (preamble repeats). Tabulated past that; C++ throws outside.
