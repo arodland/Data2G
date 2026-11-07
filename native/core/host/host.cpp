@@ -244,10 +244,11 @@ void Host::command(std::string_view line, std::string_view peer) {
             if (used != s.size()) throw std::invalid_argument("not a number: " + s);
             return n;
         };
-        auto whole = [&](const std::string& s) {  // delay() characters, then float(): stod parses a
-            // [0-9.]+ whole or throws; out_of_range (a huge d) is WRONG, as inf fails the Engine's bounds
-            if (!delay(s)) throw std::invalid_argument("not a number: " + s);
-            return std::stod(s);
+        auto whole = [&](const std::string& s) {  // delay() characters, then float(): the whole
+            // string in the classic locale (1.2.3 is WRONG); a huge d is inf, which fails the Engine's bounds
+            const double v = delay(s) ? parse_double(s) : NAN;
+            if (std::isnan(v)) throw std::invalid_argument("not a number: " + s);
+            return v;
         };
         try {
             if (upper(args[0]) == "SEND") {  // HAND SEND ref tag d channel hex16 (docs/arq.md §9)

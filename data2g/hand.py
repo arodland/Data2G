@@ -185,7 +185,7 @@ def search(g: cpm.Grid, y: np.ndarray, nominal: int, rnd: dict = ROUND_FULL) -> 
 def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float, rnd: dict = ROUND_FULL):
     """A candidate -> (start, cfo, data-row energies) nailed in on T/16 x
     rate/16 steps: the search's T/8 step can land a quarter symbol off, and
-    that leaks every symbol's energy across two bins -- ~4 dB of the SNR
+    that leaks every symbol's energy across two bins: ~4 dB of the SNR
     reading, and the same leak in the soft bits, which is why nailing comes
     before the decode rather than after the CRC. Metric: the data rows'
     winning shares; the sync blocks' would do at 6 dB but picks the wrong

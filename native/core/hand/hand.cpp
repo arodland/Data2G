@@ -29,7 +29,7 @@ constexpr int SYNC_AT[2] = {0, N_SYNC + N_DATA / 2};  // the two Costas blocks' 
 // pocketfft's per-call setup is noise next to the arithmetic (one call per
 // block instead of one per window) and that its own threads (dsp::fft_thread_count,
 // which splits a batch's rows, never a single row) have something to divide;
-// small enough that a block's transforms stay in the better caches -- taking
+// small enough that a block's transforms stay in the better caches. Taking
 // the whole block at once measures no faster and costs 9 MB.
 constexpr int SEARCH_CHUNK = 32;
 constexpr int NAIL_CHUNK = 8;
@@ -83,7 +83,7 @@ struct Cand {
 //
 // The margin is what lets the transforms read the mixed window in place: every
 // symbol window the search and the nailing ask for lies inside z, and one that
-// runs off the end of the capture reads zeros -- exactly what hand.bins pads a
+// runs off the end of the capture reads zeros, exactly what hand.bins pads a
 // short segment with. Without it each window would need its own gather and
 // zero-fill (a previous form copied 1.35 MB per offset, 6200 times a round).
 struct Scratch {
@@ -106,8 +106,8 @@ void prepare(Scratch& s, std::span<const double> y, std::int64_t nominal, int T)
 
 // hand.mix: the window mixed down for a cfo, at cpm._energies' own factor and
 // absolute sample times, into the scratch's middle. The silence margins are
-// already zero and stay that way, so this is one pass over y per cfo -- 7 plus
-// 3x3 a channel, not one per (start, cfo) as cpm._energies would do.
+// already zero and stay that way, so this is one pass over y per cfo (7 plus
+// 3x3 a channel), not one per (start, cfo) as cpm._energies would do.
 void mix(Scratch& s, const cpm::Grid& g, std::span<const double> y, double cfo) {
     const double w = (-2 * PI) * (g.f0 + cfo);
     for (std::int64_t i = 0; i < s.n; ++i) {
@@ -183,7 +183,7 @@ std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double>
 
 // hand.nail: a candidate -> (start, cfo, data-row energies) nailed in on T/16
 // x rate/16 steps.  The search's T/8 step can land a quarter symbol off, and
-// that leaks every symbol's energy across two bins -- ~4 dB of the SNR
+// that leaks every symbol's energy across two bins: ~4 dB of the SNR
 // reading, and the same leak in the soft bits, which is why nailing comes
 // before the decode rather than after the CRC.  Metric: the data rows'
 // winning shares.  df outer, dt inner: a tie goes to the same cell Python's

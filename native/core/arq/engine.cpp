@@ -780,7 +780,6 @@ Engine::Done Engine::process(Block& b) {
                 tx_ = Tx{marker, std::move(ht.audio), 0};
                 tx_kiss_ = true;  // nobody's session: no reply timer
                 cw_plan({marker}, {len - static_cast<std::size_t>(ptt_delay_)}, t);  // a Hand is covered by CW planning like any other transmission; start_tx's length convention: the PTT delay prefix apart
-                if (on_send_) on_send_(marker);  // the monitor's TX feed, as start_tx reports each burst
                 hand_event("HAND SENT " + std::to_string(ht.channel));
                 if (rec_)
                     rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
@@ -967,7 +966,7 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
     if (it == hand_refs_.end()) throw std::invalid_argument("no ref " + std::to_string(ref));
     if (hand_tx_) throw std::invalid_argument("a Hand is already waiting");
     if (channel < 0 || channel >= hand::N_CHANNELS || tag < 0 || tag > 255) throw std::invalid_argument("bad channel or tag");
-    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad payload or delay");
+    if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
     payload &= (std::uint64_t{1} << hand::PAYLOAD) - 1;  // 16 hex digits, the top bit ignored (docs/arq.md §9)
     const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s) * config::FS)) - ptt_delay_;
     if (first < n_) throw std::invalid_argument("the slot has passed");
@@ -1044,10 +1043,11 @@ void Engine::hand_collect(std::span<const double> x) {
         if (hl.buf.empty()) hl.first = hl.next = n_;
         // blocks I spent transmitting, or dropped (Block::gap): silence, so sample times stay true.
         // Clamped to the window's end: a worker backlog's gap can run far past hl.hi, and the
-        // decode thread would inherit tens of seconds of zeros it never looks at
+        // decode thread would inherit tens of seconds of zeros it never looks at. A block that
+        // starts past the end is not the window's: appended at hi, its sample times would lie
         const auto pad = std::min<std::int64_t>(n_ - hl.next, hl.hi - hl.next);
         if (pad > 0) hl.buf.resize(hl.buf.size() + static_cast<std::size_t>(pad), 0.0);
-        hl.buf.insert(hl.buf.end(), x.begin(), x.end());
+        if (n_ <= hl.hi) hl.buf.insert(hl.buf.end(), x.begin(), x.end());
         hl.next = n_ + k;
     }
     if (n_ + k >= hl.hi && !hl.buf.empty()) {
@@ -1056,11 +1056,11 @@ void Engine::hand_collect(std::span<const double> x) {
         if (hand_thread_.joinable()) hand_thread_.join();  // the last round's: long done (a round is 10 s+)
         // off the session stage: ~1 s of CPU for 40 channels on a desktop, half that
         // with ROUND_CHEAP. A decoder throw costs the round, not the station.
-        hand_thread_ = std::thread([this, w = std::move(done)] {
+        const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;  // fixed at the window's close
+        hand_thread_ = std::thread([this, w = std::move(done), round] {
             std::vector<std::string> lines;
-            if (w.anchor + w.d - w.first >= hand::SEARCH_SAMPLES)  // the burst lands before the capture: no decodes
+            if (w.anchor + w.d - w.first >= 0)  // the slot lies before the capture: no decodes (a search past the head reads zeros)
                 try {
-                    const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;
                     for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first, round))
                         lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms));
                 } catch (const std::exception& e) {

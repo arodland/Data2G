@@ -108,6 +108,20 @@ def test_hand_decode_roundtrip():
     assert abs(got["dt_ms"] - 1000.0 * jitter / FS) < 30
 
 
+def test_hand_decode_with_the_window_head_lost():
+    """The capture starts 100 ms late (my own burst ran into the window), so
+    nominal is under SEARCH_SAMPLES: a Hand landing on its slot still decodes."""
+    rng = np.random.default_rng(8)
+    tag, c, payload = 0x5A, 20, int(rng.integers(0, 2 ** hand.PAYLOAD))
+    lost = FS // 10
+    y = np.concatenate([np.zeros(hand.SEARCH_SAMPLES - lost),
+                        hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c)),
+                        np.zeros(hand.SEARCH_SAMPLES)])
+    y = hfchannel.awgn(y, 6.0, seed=4)
+    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES - lost)
+    assert got["payload"] == payload
+
+
 @pytest.mark.parametrize("hand_round", ["full", "cheap"])
 def test_hand_decode_at_the_sensitivity_floor(hand_round):
     """The shipped threshold: -18 dB, 3 Hz off, landing in the search's

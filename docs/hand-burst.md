@@ -130,7 +130,7 @@ The simulation is `scripts/hand_study.py` on the hand-burst-sim branch. Each tri
 
 ## As shipped: nailing and round cost
 
-The tables above come from the study script. The shipped decoder adds one step the script didn't: each of the 3 candidates is nailed in on a T/16 × rate/16 grid (±half a symbol, ±rate/16, maximizing the data rows' winning shares) *before* its soft bits are built. The search's T/8 step lands a quarter symbol off, which leaks every symbol's energy across two bins — that costs the SNR reading and the decoder alike. Measured with `data2g.hand.decode_window` itself, one channel, AWGN, ±31 ms landing jitter, 60 trials per SNR, same seeds both arms, SNR in 2500 Hz:
+The tables above come from the study script. The shipped decoder adds one step the script didn't: each of the 3 candidates is nailed in on a T/16 × rate/16 grid (±half a symbol, ±rate/16, maximizing the data rows' winning shares) *before* its soft bits are built. The search's T/8 step lands a quarter symbol off, which leaks every symbol's energy across two bins. That costs the SNR reading and the decoder alike. Measured with `data2g.hand.decode_window` itself, one channel, AWGN, ±31 ms landing jitter, 60 trials per SNR, same seeds both arms, SNR in 2500 Hz:
 
 | SNR | candidates used as searched | nailed first |
 | --- | --- | --- |
@@ -147,9 +147,9 @@ Fading was re-checked with the shipped decoder, same 24 seeds per cell, one chan
 | mps (measured slow, selective) | −19.0 dB | 11/24 | 15/24 |
 | mpd (disturbed, 2 Hz spread) | −19.0 dB | 4/24 | 3/24 |
 
-It helps where the design leans on long Hands riding through fades (mpg, mps), and is a wash on the disturbed channel — one trial either way at n=24.
+It helps where the design leans on long Hands riding through fades (mpg, mps), and is a wash on the disturbed channel (one trial either way at n=24).
 
-Cost of a round: the Python reference — mixing the window once per CFO (`hand.mix`/`hand.bins`, bit-identical to `cpm._energies`) rather than per candidate, plus the nailing — takes about 3 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 1.9 s single-threaded, ~1 s of wall with a batch's rows split across pocketfft's threads (about two cores). Four changes got it there from the ported form's 2.6 s, none of them a sensitivity change — a 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical before and after, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
+Cost of a round: the Python reference (mixing the window once per CFO with `hand.mix`/`hand.bins`, bit-identical to `cpm._energies`, rather than per candidate, plus the nailing) takes about 3 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 1.9 s single-threaded, ~1 s of wall with a batch's rows split across pocketfft's threads (about two cores). Four changes got it there from the ported form's 2.6 s, none of them a sensitivity change. A 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical before and after, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
 
 - the mixed window carries a margin of silence on both sides, so a symbol window that runs off either end of the capture reads zeros where it lies instead of being gathered into a zero-padded copy (1.35 MB copied per offset, ~6200 offsets a round);
 - a whole row of search starts, and a whole row of nail offsets, goes through one strided block transform (`dsp::fft_block_into`) instead of one pocketfft call per symbol window, which is what lets its threads have anything to divide;
@@ -176,7 +176,7 @@ Two candidates and a T/4 search step are free: the third candidate is a near-dup
 
 Three cuts combine into a preset a station can pick: 2 candidates, a T/4 search step, and the nail on the search's own CFO grid. `hand.ROUND_CHEAP` / `hand::ROUND_CHEAP` hold it, `hand.decode_window` / `hand::decode_window` take it as their last argument (the default is the shipped `ROUND_FULL`), the Engine holds the name in `hand_round`, and either host sets it with `--hand-round cheap`. Measured on this machine with a full 40-channel window: 1.03 s for the shipped grids, 0.48 s for the cheap ones.
 
-What the combination costs, paired seeds — the same Hand, the same noise, both arms — one channel, ±0.2 s landing and ±3 Hz, SNR in 2500 Hz. Hands decoded out of n:
+What the combination costs, paired seeds (the same Hand, the same noise, both arms), one channel, ±0.2 s landing and ±3 Hz, SNR in 2500 Hz. Hands decoded out of n:
 
 | AWGN, 100 trials | −21 | −20 | −19 | −18 | 50% |
 | --- | --- | --- | --- | --- | --- |
@@ -189,4 +189,4 @@ What the combination costs, paired seeds — the same Hand, the same noise, both
 | mps shipped / cheap | 6 / 5 | 15 / 11 | 20 / 19 | 22 / 21 | −19.3 / −18.9 |
 | mpd shipped / cheap | 2 / 0 | 8 / 7 | 15 / 16 | 22 / 21 | −18.4 / −18.4 |
 
-(−16 dB was 24/24 for both arms on all three profiles.) 0.2 dB at AWGN's 50% point, 0.3 dB at the shipped decoder's 74/100 point, and 0.0-0.4 dB on the Watterson profiles — which is what 24 trials resolve, so read that spread as "under half a dB". Half the CPU for a third of a dB: the option is there for a station that runs a round every net period on a busy machine, and `full` stays the default. `tests/test_hand.py::test_hand_round_between_two_stations` runs the whole round at both settings, `test_hand_decode_at_the_sensitivity_floor` decodes a −18 dB Hand with the cheap grids, and `tests/test_native_hand.py` keeps C++ and Python agreeing on both to 1e-6.
+(−16 dB was 24/24 for both arms on all three profiles.) 0.2 dB at AWGN's 50% point, 0.3 dB at the shipped decoder's 74/100 point, and 0.0-0.4 dB on the Watterson profiles, which is what 24 trials resolve, so read that spread as "under half a dB". Half the CPU for a third of a dB: the option is there for a station that runs a round every net period on a busy machine, and `full` stays the default. `tests/test_hand.py::test_hand_round_between_two_stations` runs the whole round at both settings, `test_hand_decode_at_the_sensitivity_floor` decodes a −18 dB Hand with the cheap grids, and `tests/test_native_hand.py` keeps C++ and Python agreeing on both to 1e-6.

@@ -185,7 +185,7 @@ class Engine:
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
         self.cw_id = "off"  # CW_ID_MODES
         self.cw_wpm = cwid.WPM
-        self.hand_round = "full"  # "cheap": --hand-round cheap's grids (hand.ROUND_CHEAP)
+        self._hand_round = "full"  # hand_round's
         self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
         self._cw_heard = False  # the last block's (logged once per ID)
         self._cw_until = 0.0  # nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
@@ -298,6 +298,17 @@ class Engine:
     def idle_close_s(self) -> float:
         return S.IDLE_CLOSE_S if self._idle_close_s is None else self._idle_close_s
 
+    @property
+    def hand_round(self) -> str:
+        """hand.ROUNDS' key: "full", or "cheap" (--hand-round cheap's grids)."""
+        return self._hand_round
+
+    @hand_round.setter
+    def hand_round(self, v: str):
+        if v not in hand.ROUNDS:
+            raise ValueError(f"hand_round: {v!r} not in {sorted(hand.ROUNDS)}")
+        self._hand_round = v
+
     # -- Hand bursts (the D2G net's show of hands: data2g/hand.py, docs/arq.md §9) ----
 
     def hand_send(self, ref: int, tag: int, d_s: float, channel: int, payload: int):
@@ -377,8 +388,9 @@ class Engine:
             if not hl["buf"]:
                 hl["first"] = hl["next"] = self.n
             if self.n > hl["next"]:  # blocks I spent transmitting: silence, so sample times stay true
-                hl["buf"].append(np.zeros(self.n - hl["next"]))
-            hl["buf"].append(x)
+                hl["buf"].append(np.zeros(min(self.n, hl["hi"]) - hl["next"]))
+            if self.n <= hl["hi"]:  # a block past the window's end (a long gap) is not the window's
+                hl["buf"].append(x)
             hl["next"] = self.n + k
         if self.n + k >= hl["hi"] and hl["buf"]:
             self._hand_listen = None
@@ -387,19 +399,20 @@ class Engine:
             # ran into it) - the round reports how much
             short = f"HAND SHORT {int(round((hl['first'] - hl['lo']) * 1000 / FS))}" if hl["first"] > hl["lo"] else None
             threading.Thread(target=self._hand_decode,
-                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal, short),
+                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal, short,
+                                   hand.ROUNDS[self.hand_round]),
                              name="hand-decode", daemon=True).start()
 
-    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int, short: str | None):
+    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int, short: str | None, rnd: dict):
         """The round's decodes off the audio thread (~3 s of CPU for 40
         channels on a desktop): a line per Hand decoded, then HAND SHORT if
-        the window's head was missed, then HAND END. A nominal under
-        hand.SEARCH_SAMPLES: the burst lands before the capture, so no
-        decodes. A decoder exception costs the round, not the station."""
+        the window's head was missed, then HAND END. A negative nominal: the
+        slot lies before the capture, so no decodes (a search reaching past
+        the capture's head reads zeros, as hand.bins pads). A decoder exception costs the round, not the station."""
         lines = []
-        if nominal >= hand.SEARCH_SAMPLES:
+        if nominal >= 0:
             try:
-                res = hand.decode_window(y, tag, channels, nominal, hand.ROUNDS[self.hand_round])
+                res = hand.decode_window(y, tag, channels, nominal, rnd)
                 lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
             except Exception:
                 log.exception("hand decode failed")
