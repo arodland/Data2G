@@ -138,7 +138,9 @@ void KissServer::broadcast(const tnc::Bytes& data, int port) {
 }
 
 void KissServer::send_ref(const std::string& line) {
-    const auto f = tnc::kiss_encode({reinterpret_cast<const std::uint8_t*>(line.data()), line.size()}, 0, tnc::KISS_REF);
+    tnc::Bytes body{tnc::KISS_SUB_REF};
+    body.insert(body.end(), line.begin(), line.end());
+    const auto f = tnc::kiss_encode(body, 0, tnc::KISS_SETHARDWARE);
     const QByteArray b(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size()));
     for (auto* c : refs_) c->write(b);
 }

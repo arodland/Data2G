@@ -217,9 +217,10 @@ client disconnects, as above. Port 0 as hex: `C0 06 4D 4F 44 45 20 <mode> C0`.
 
 A KISS client can get each heard burst's Hand reference (`arq.md` §9) on the KISS
 port itself, in order with the frames: SetHardware `REFS ON` (any port; `REFS OFF`
-stops it), per connection. Each decoded burst then sends that client a REF frame,
-command `0x0D` on port 0, with the ASCII text `REF id end offset snr` as the command
-port's REF line has it. It comes ahead of the burst's own data frames, so the frames
+stops it), per connection. Each decoded burst then sends that client a REF frame:
+SetHardware (`0x06`) on port 0, subcommand byte `0x11`, then the ASCII text `REF id
+end offset snr` as the command port's REF line has it (subcommands:
+`docs/app-soft-plan.md` §4; a first byte in `0x20-0x7E` is text, as `MODE` and `REFS`). It comes ahead of the burst's own data frames, so the frames
 that follow it until the next REF are that burst's. Bursts with no frames for KISS
 (ARQ, CQ) get a REF frame too. Clients that never send `REFS ON` see nothing new.
 As hex: `C0 06 52 45 46 53 20 4F 4E C0`.

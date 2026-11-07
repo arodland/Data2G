@@ -98,7 +98,7 @@ def test_hand_commands_reply():
 
 def test_kiss_refs():
     """REF lines also go to the KISS port, but only to a client that sent
-    SETHARDWARE "REFS ON", as REF frames (command 0x0D) ahead of the burst's
+    SETHARDWARE "REFS ON", as SETHARDWARE REF frames (subcommand 0x11) ahead of the burst's
     frames; the host keeps them for it in out_kiss_refs."""
     import socket
 
@@ -122,7 +122,7 @@ def test_kiss_refs():
         got = []
         while len(got) < 2:
             got += dec.feed(a.recv(4096))
-        assert got == [(tnc.REF, b"REF 1 3.62 -0.0 13.8"), (0, b"frame")]
+        assert got == [(tnc.SETHARDWARE, bytes([tnc.SUB_REF]) + b"REF 1 3.62 -0.0 13.8"), (0, b"frame")]
         assert tnc.KissDecoder().feed(b.recv(4096)) == [(0, b"frame")]  # no REF for b
     finally:
         srv.shutdown()

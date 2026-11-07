@@ -18,8 +18,10 @@ inline constexpr std::uint8_t FEND = 0xC0, FESC = 0xDB, TFEND = 0xDC, TFESC = 0x
 inline constexpr std::size_t KISS_MAX_FRAME = 1u << 16;  // a longer frame is junk (a client that never sends FEND)
 
 inline constexpr int KISS_DATA = 0x00, KISS_ACKMODE = 0x0C;  // KISS commands (low nibble; the port is the high one)
-// SETHARDWARE; REF: a Data2G extension, a heard burst's reference (docs/broadcast.md §5)
-inline constexpr int KISS_SETHARDWARE = 0x06, KISS_REF = 0x0D;
+inline constexpr int KISS_SETHARDWARE = 0x06;
+// Data2G's extensions ride SETHARDWARE with a subcommand byte first (docs/app-soft-plan.md §4;
+// 0x20-0x7E is the text range, MODE and REFS): REF, host to app, a heard burst's reference.
+inline constexpr std::uint8_t KISS_SUB_REF = 0x11;
 // tnc.refs_command: SETHARDWARE "REFS ON" / "REFS OFF" -> true / false; nullopt for anything else.
 std::optional<bool> refs_command(std::span<const std::uint8_t> payload);
 // A KISS frame: a data frame (command 0) for `data` on `port` by default.

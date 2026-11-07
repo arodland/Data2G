@@ -18,7 +18,10 @@ log = logging.getLogger("data2g.tnc")
 
 FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
 DATA, ACKMODE = 0x00, 0x0C  # KISS commands (low nibble; the port is the high one)
-SETHARDWARE, REF = 0x06, 0x0D  # REF: a Data2G extension, a heard burst's reference (docs/broadcast.md §5)
+SETHARDWARE = 0x06
+# Data2G's extensions ride SETHARDWARE with a subcommand byte first (docs/app-soft-plan.md §4;
+# 0x20-0x7E is the text range, MODE and REFS): REF, host to app, a heard burst's reference.
+SUB_REF = 0x11
 
 
 def refs_command(payload: bytes) -> bool | None:
@@ -136,7 +139,7 @@ class KissServer(socketserver.ThreadingTCPServer):
     def send_ref(self, line: str):
         """A heard burst's REF line (docs/arq.md §9), to the clients that asked,
         ahead of that burst's frames (call it before their broadcast())."""
-        frame = kiss_encode(line.encode("ascii"), 0, REF)
+        frame = kiss_encode(bytes([SUB_REF]) + line.encode("ascii"), 0, SETHARDWARE)
         with self.lock:
             for c in list(self.refs & self.clients):
                 try:
