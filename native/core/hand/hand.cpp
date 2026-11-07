@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <limits>
 #include <numbers>
 #include <tuple>
@@ -10,13 +11,28 @@
 #include "codes/codes.hpp"
 #include "cpm/cpm.hpp"
 #include "dsp/dsp.hpp"
+#include "dsp/fft.hpp"
 #include "polar/polar.hpp"
 #include "tables/hand.hpp"
 
 namespace data2g::hand {
 namespace {
 
+using cdouble = std::complex<double>;
+constexpr double FS = config::FS;
+constexpr double PI = std::numbers::pi;
+
 constexpr int SYNC_AT[2] = {0, N_SYNC + N_DATA / 2};  // the two Costas blocks' first rows
+
+// Symbol windows per strided block transform: 32 search starts (192 windows)
+// or 8 nail offsets (216 windows), ~4 MB of transforms each.  Big enough that
+// pocketfft's per-call setup is noise next to the arithmetic (one call per
+// block instead of one per window) and that its own threads (dsp::fft_thread_count,
+// which splits a batch's rows, never a single row) have something to divide;
+// small enough that a block's transforms stay in the better caches -- taking
+// the whole block at once measures no faster and costs 9 MB.
+constexpr int SEARCH_CHUNK = 32;
+constexpr int NAIL_CHUNK = 8;
 
 bool is_sync_row(int r) { return (r >= SYNC_AT[0] && r < SYNC_AT[0] + N_SYNC) || (r >= SYNC_AT[1] && r < SYNC_AT[1] + N_SYNC); }
 
@@ -56,40 +72,104 @@ const polar::SCLDecoder& decoder() {
     return dec;
 }
 
-Mat<double> rows_of(const Mat<double>& En, const std::vector<int>& rows) {
-    Mat<double> out(rows.size(), En.cols);
-    for (std::size_t i = 0; i < rows.size(); ++i)
-        std::copy_n(En[static_cast<std::size_t>(rows[i])], En.cols, out[i]);
-    return out;
-}
-
 struct Cand {
     std::int64_t start;
     double cfo;
 };
 
-// Top (start, cfo) candidates by the sync blocks' tone shares.
-std::vector<Cand> search(const cpm::Grid& g, std::span<const double> y, std::int64_t nominal) {
+// A window's decode scratch, reused across its channels, cfos and candidates:
+// the mixed window plus a margin of silence on either side, and one batch's
+// worth of transforms and energies.
+//
+// The margin is what lets the transforms read the mixed window in place: every
+// symbol window the search and the nailing ask for lies inside z, and one that
+// runs off the end of the capture reads zeros -- exactly what hand.bins pads a
+// short segment with. Without it each window would need its own gather and
+// zero-fill (a previous form copied 1.35 MB per offset, 6200 times a round).
+struct Scratch {
+    std::int64_t left = 0;  // z's samples before y[0]
+    std::int64_t n = 0;     // y's samples
+    std::vector<cdouble> z;
+    std::vector<cdouble> Z;  // one block's transforms
+};
+
+// The margins for one window: the lowest and highest symbol window either pass
+// reaches. `nominal` is the slot; the search walks +-SEARCH_SAMPLES of it, the
+// nailing another half symbol out from any candidate it found.
+void prepare(Scratch& s, std::span<const double> y, std::int64_t nominal, int T) {
+    s.n = static_cast<std::int64_t>(y.size());
+    const std::int64_t lo = nominal - SEARCH_SAMPLES - T / 2;
+    const std::int64_t hi = nominal + SEARCH_SAMPLES + T / 2 + static_cast<std::int64_t>(N_SYM) * T;
+    s.left = std::max<std::int64_t>(0, -lo);
+    s.z.assign(static_cast<std::size_t>(s.left + s.n + std::max<std::int64_t>(0, hi - s.n)), cdouble{0, 0});
+}
+
+// hand.mix: the window mixed down for a cfo, at cpm._energies' own factor and
+// absolute sample times, into the scratch's middle. The silence margins are
+// already zero and stay that way, so this is one pass over y per cfo -- 7 plus
+// 3x3 a channel, not one per (start, cfo) as cpm._energies would do.
+void mix(Scratch& s, const cpm::Grid& g, std::span<const double> y, double cfo) {
+    const double w = (-2 * PI) * (g.f0 + cfo);
+    for (std::int64_t i = 0; i < s.n; ++i) {
+        const double arg = w * (static_cast<double>(i) / FS);
+        const double v = y[static_cast<std::size_t>(i)];
+        s.z[static_cast<std::size_t>(s.left + i)] = {v * std::cos(arg), v * std::sin(arg)};
+    }
+}
+
+// Energies of a rectangle of symbol windows out of the mixed window: windows
+// at base + a*stride + b*T for a < na, b < nb, in the same row order the
+// Python reference walks them. One strided block transform (dsp::fft.hpp) over
+// z, then the m bins cpm::measure and cpm::llrs read. `En` is the caller's, so
+// two blocks can be scored against each other.
+void block_energies(Scratch& s, std::int64_t base, int na, int nb, int stride, int T, int m, Mat<double>& En) {
+    const std::size_t rows = static_cast<std::size_t>(na) * static_cast<std::size_t>(nb);
+    if (s.Z.size() < rows * static_cast<std::size_t>(T)) s.Z.resize(rows * static_cast<std::size_t>(T));
+    dsp::fft_block_into(s.z.data() + s.left + base, s.Z.data(), static_cast<std::size_t>(na), static_cast<std::size_t>(nb),
+                        static_cast<std::size_t>(T), stride, T, true, dsp::fft_thread_count());
+    if (En.rows != rows || En.cols != static_cast<std::size_t>(m)) En = Mat<double>(rows, static_cast<std::size_t>(m));
+    for (std::size_t r = 0; r < rows; ++r)
+        for (int k = 0; k < m; ++k) {
+            const cdouble& c = s.Z[r * static_cast<std::size_t>(T) + static_cast<std::size_t>(k)];
+            En[r][k] = c.real() * c.real() + c.imag() * c.imag();
+        }
+}
+
+// hand.search: top (start, cfo) candidates by the sync blocks' tone shares --
+// a share, so a strong stretch of data can't outscore a sync block in a fade.
+// Each cfo's 61 starts go through the two Costas blocks as one strided block
+// transform apiece; the score is the same sum of shares, block by block and
+// tone by tone, that Python's sync_shares built.
+std::vector<Cand> search(const cpm::Grid& g, Scratch& s, std::span<const double> y, std::int64_t nominal) {
     const int T = g.T;
     std::vector<std::tuple<double, std::int64_t, double>> cands;
     const double step = g.rate / 4;
+    const std::int64_t first = nominal - SEARCH_SAMPLES;
+    const int nstarts = static_cast<int>(2 * SEARCH_SAMPLES / (T / 8) + 1);  // Python's range() count
+    Mat<double> En;
     for (int i = 0;; ++i) {
         const double cfo = -SEARCH_HZ + i * step;  // np.arange's start + i * step
         if (cfo >= SEARCH_HZ + 1e-9) break;
-        for (std::int64_t start = nominal - SEARCH_SAMPLES; start < nominal + SEARCH_SAMPLES + 1; start += T / 8) {
-            double s = 0.0;
-            for (int r0 : SYNC_AT) {
-                const auto Sh = cpm::shares(cpm::energies(g, y, start + static_cast<std::int64_t>(r0) * T, N_SYNC, cfo));
-                double part = 0.0;
-                for (int j = 0; j < N_SYNC; ++j) part += Sh[static_cast<std::size_t>(j)][tables::HAND_SYNC[static_cast<std::size_t>(j)]];
-                s += part;
+        mix(s, g, y, cfo);
+        std::vector<double> score(static_cast<std::size_t>(nstarts), 0.0);
+        for (int r0 : SYNC_AT)
+            for (int a0 = 0; a0 < nstarts; a0 += SEARCH_CHUNK) {
+                const int na = std::min(SEARCH_CHUNK, nstarts - a0);
+                block_energies(s, first + static_cast<std::int64_t>(a0) * (T / 8) + static_cast<std::int64_t>(r0) * T,
+                               na, N_SYNC, T / 8, T, g.m, En);
+                const auto Sh = cpm::shares(En);
+                for (int a = 0; a < na; ++a) {
+                    double part = 0.0;
+                    for (int j = 0; j < N_SYNC; ++j)
+                        part += Sh[static_cast<std::size_t>(a * N_SYNC + j)][tables::HAND_SYNC[static_cast<std::size_t>(j)]];
+                    score[static_cast<std::size_t>(a0 + a)] += part;
+                }
             }
-            cands.emplace_back(s, start, cfo);
-        }
+        for (int a = 0; a < nstarts; ++a) cands.emplace_back(score[static_cast<std::size_t>(a)], first + a * (T / 8), cfo);
     }
     std::sort(cands.begin(), cands.end(), std::greater<>());  // Python's sort(reverse=True) on the tuples
     std::vector<Cand> out;
-    for (const auto& [s, start, cfo] : cands) {  // distinct peaks: half a symbol or a quarter tone apart
+    for (const auto& [share, start, cfo] : cands) {  // distinct peaks: half a symbol or a quarter tone apart
         const bool distinct = std::all_of(out.begin(), out.end(), [&](const Cand& o) {
             return std::abs(start - o.start) > T / 2 || std::abs(cfo - o.cfo) > g.rate / 4 + 1e-9;
         });
@@ -99,24 +179,54 @@ std::vector<Cand> search(const cpm::Grid& g, std::span<const double> y, std::int
     return out;
 }
 
-// A candidate nailed in on T/16 x rate/16 steps -> (start, data-row energies).
-std::pair<std::int64_t, Mat<double>> refine(const cpm::Grid& g, std::span<const double> y, std::int64_t start, double cfo) {
+// hand.nail: a candidate -> (start, cfo, data-row energies) nailed in on T/16
+// x rate/16 steps.  The search's T/8 step can land a quarter symbol off, and
+// that leaks every symbol's energy across two bins -- ~4 dB of the SNR
+// reading, and the same leak in the soft bits, which is why nailing comes
+// before the decode rather than after the CRC.  Metric: the data rows'
+// winning shares.  df outer, dt inner: a tie goes to the same cell Python's
+// loop order reaches first.  Only the 54 data rows are transformed (the sync
+// rows are thrown away by both passes here), as two strided blocks of 27.
+std::tuple<std::int64_t, double, Mat<double>> nail(const cpm::Grid& g, Scratch& s, std::span<const double> y,
+                                                   std::int64_t start, double cfo) {
     const int T = g.T;
-    std::pair<std::int64_t, Mat<double>> best{start, {}};
-    double best_v = -std::numeric_limits<double>::infinity();
-    for (int dt = -(T / 2); dt <= T / 2; dt += T / 16)
-        for (double df : {-g.rate / 16, 0.0, g.rate / 16}) {
-            auto En = rows_of(cpm::energies(g, y, start + dt, N_SYM, cfo + df), data_rows());
-            const auto Sh = cpm::shares(En);
-            std::vector<double> top(Sh.rows);
-            for (std::size_t r = 0; r < Sh.rows; ++r) top[r] = *std::max_element(Sh[r], Sh[r] + Sh.cols);
-            const double v = dsp::pairwise_sum(top);
-            if (v > best_v) {
-                best_v = v;
-                best = {start + dt, std::move(En)};
+    const int ndt = T / (T / 16) + 1;  // -T/2 .. +T/2 step T/16
+    const int half = N_DATA / 2;
+    std::int64_t best_start = start;
+    double best_cfo = cfo, best_v = -std::numeric_limits<double>::infinity();
+    Mat<double> best_En, EA, EB;
+    for (double df : {-g.rate / 16, 0.0, g.rate / 16}) {
+        mix(s, g, y, cfo + df);
+        for (int d0 = 0; d0 < ndt; d0 += NAIL_CHUNK) {
+            const int nd = std::min(NAIL_CHUNK, ndt - d0);
+            const std::int64_t base = start - T / 2 + static_cast<std::int64_t>(d0) * (T / 16);
+            block_energies(s, base + static_cast<std::int64_t>(N_SYNC) * T, nd, half, T / 16, T, g.m, EA);
+            block_energies(s, base + static_cast<std::int64_t>(SYNC_AT[1] + N_SYNC) * T, nd, half, T / 16, T, g.m, EB);
+            const auto SA = cpm::shares(EA), SB = cpm::shares(EB);
+            for (int d = 0; d < nd; ++d) {
+                std::vector<double> top(static_cast<std::size_t>(N_DATA));
+                for (int k = 0; k < half; ++k) {
+                    const double* ra = SA[static_cast<std::size_t>(d * half + k)];
+                    const double* rb = SB[static_cast<std::size_t>(d * half + k)];
+                    top[static_cast<std::size_t>(k)] = *std::max_element(ra, ra + g.m);
+                    top[static_cast<std::size_t>(half + k)] = *std::max_element(rb, rb + g.m);
+                }
+                const double v = dsp::pairwise_sum(top);
+                if (v > best_v) {
+                    best_v = v;
+                    best_start = start - T / 2 + static_cast<std::int64_t>(d0 + d) * (T / 16);
+                    best_cfo = cfo + df;
+                    best_En = Mat<double>(static_cast<std::size_t>(N_DATA), static_cast<std::size_t>(g.m));
+                    for (int k = 0; k < half; ++k) {
+                        std::copy_n(EA[static_cast<std::size_t>(d * half + k)], g.m, best_En[static_cast<std::size_t>(k)]);
+                        std::copy_n(EB[static_cast<std::size_t>(d * half + k)], g.m,
+                                    best_En[static_cast<std::size_t>(half + k)]);
+                    }
+                }
             }
         }
-    return best;
+    }
+    return {best_start, best_cfo, std::move(best_En)};
 }
 
 }  // namespace
@@ -185,29 +295,34 @@ std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span
     const auto& dec = decoder();
     const unsigned init = static_cast<unsigned>(tag) << 8;
     std::vector<Decoded> out;
+    if (channels.empty() || y.empty()) return out;
+    Scratch s;
+    prepare(s, y, nominal, grid(channels.front()).T);  // every channel's symbol is the same length
     for (int c : channels) {
         const auto& g = grid(c);
-        const auto cands = search(g, y, nominal);
-        if (cands.empty()) continue;
-        Mat<float> llr(cands.size(), E);
-        for (std::size_t i = 0; i < cands.size(); ++i) {
-            const auto En = rows_of(cpm::energies(g, y, cands[i].start, N_SYM, cands[i].cfo), data_rows());
+        const auto cands = search(g, s, y, nominal);
+        // hand.receive, one candidate at a time instead of all three and then a
+        // batched decode: nailing is 2/3 of the work per channel and a burst on
+        // the first candidate makes the other two nails dead weight. Same LLRs
+        // either way (the decoder's rows are independent).
+        for (const auto& cd : cands) {
+            const auto [start, cfo, En] = nail(g, s, y, cd.start, cd.cfo);
             const auto l = cpm::llrs(g, En);
+            Mat<float> llr(1, E);
             for (int j = 0; j < E; ++j)
-                llr[i][tables::HAND_INTERLEAVER[static_cast<std::size_t>(j)]] = static_cast<float>(l[static_cast<std::size_t>(j)]);
-        }
-        const auto res = dec.decode(llr);
-        bool done = false;
-        for (std::size_t i = 0; i < cands.size() && !done; ++i)
-            for (int l = 0; l < dec.list_size() && !done; ++l) {
-                const std::span<const std::uint8_t> u(res.paths[i] + static_cast<std::size_t>(l) * K, K);
+                llr[0][tables::HAND_INTERLEAVER[static_cast<std::size_t>(j)]] = static_cast<float>(l[static_cast<std::size_t>(j)]);
+            const auto res = dec.decode(llr);
+            bool done = false;
+            for (int li = 0; li < dec.list_size() && !done; ++li) {
+                const std::span<const std::uint8_t> u(res.paths[0] + static_cast<std::size_t>(li) * K, K);
                 const auto crc = crc16(u.first(PAYLOAD), init);
                 if (!std::equal(crc.begin(), crc.end(), u.begin() + PAYLOAD)) continue;
-                const auto [start, En] = refine(g, y, cands[i].start, cands[i].cfo);
                 out.push_back({c, payload_int(u), cpm::measure(g, En, N_DATA).snr_est,
                                1000.0 * static_cast<double>(start - nominal) / config::FS});
                 done = true;
             }
+            if (done) break;  // one Hand per channel: the other candidates are the same burst
+        }
     }
     return out;
 }

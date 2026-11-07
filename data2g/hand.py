@@ -11,9 +11,11 @@ a Hand can't answer another net's call), CRC-aided polar K=79 of E=162
 
 Net control knows each Hand's slot and channel, so the decoder skips the
 blind search: the sync blocks' tone shares over nominal +-0.6 s x +-5 Hz
-(the response's timing margins: host latencies), polar list decoding of
-the top 3 candidates, first CRC pass wins (false decodes ~2.6e-4 per
-attempt measured, about 1% of 40-channel rounds).
+(the response's timing margins: host latencies), the top 3 candidates each
+nailed in on a T/16 x rate/16 grid before its soft bits (a quarter symbol
+off costs ~0.7-1 dB at the threshold), polar list decoding, first CRC pass
+wins (false decodes ~2.6e-4 per attempt measured, about 1% of 40-channel
+rounds).
 
 Channels: 40 at 60 Hz pitch centred on 1500 Hz (channel 0 at 330 Hz). An
 answerer shifts its Hand by the cfo of net control's ref burst (HAND
@@ -123,17 +125,44 @@ def tx_audio(tag: int, payload: int, channel: int, cfo: float) -> np.ndarray:
     return x / np.max(dsp.envelope(x))
 
 
+def mix(g: cpm.Grid, y: np.ndarray, cfo: float) -> np.ndarray:
+    """The window mixed down once for a cfo: cpm._energies' own factor at
+    absolute sample times, so its symbol bins are bit for bit what a slice of
+    this gives (cpm._energies re-mixes the audio per candidate: 427 times a
+    channel here, where 7 suffice)."""
+    return y * np.exp(-2j * np.pi * (g.f0 + cfo) * (np.arange(len(y)) / FS))
+
+
+def bins(z: np.ndarray, start: int, T: int, m: int, n_sym: int) -> np.ndarray:
+    """(n_sym, m) tone energies of the symbols from `start`, out of a mixed
+    window: cpm._energies' segment, zero-padded the same way past its ends."""
+    seg = z[max(0, start):start + n_sym * T]
+    if start < 0:
+        seg = np.concatenate([np.zeros(-start, complex), seg])
+    if len(seg) < n_sym * T:
+        seg = np.pad(seg, (0, n_sym * T - len(seg)))
+    return np.abs(np.fft.fft(seg.reshape(n_sym, T), axis=1)[:, :m]) ** 2
+
+
+def sync_shares(z: np.ndarray, start: int, T: int, m: int) -> float:
+    """Both sync blocks' share of their own energy at `start`: the search's
+    and the nailing's metric (a share, so a strong stretch of data can't
+    outscore a sync block in a fade)."""
+    s = 0.0
+    for r0 in (0, len(SYNC) + N_DATA // 2):
+        E_ = cpm._shares(bins(z, start + r0 * T, T, m, len(SYNC)))
+        s += E_[np.arange(len(SYNC)), SYNC].sum()
+    return s
+
+
 def search(g: cpm.Grid, y: np.ndarray, nominal: int) -> list:
     """Top (start, cfo) candidates by the sync blocks' tone shares."""
     T = g.T
     cands = []
     for cfo in np.arange(-SEARCH_HZ, SEARCH_HZ + 1e-9, g.rate / 4):
+        z = mix(g, y, cfo)
         for start in range(nominal - SEARCH_SAMPLES, nominal + SEARCH_SAMPLES + 1, T // 8):
-            s = 0.0
-            for r0 in (0, len(SYNC) + N_DATA // 2):
-                E_ = cpm._shares(cpm._energies(g, y, start + r0 * T, len(SYNC), cfo))
-                s += E_[np.arange(len(SYNC)), SYNC].sum()
-            cands.append((s, start, cfo))
+            cands.append((sync_shares(z, start, T, g.m), start, cfo))
     cands.sort(reverse=True)
     out = []
     for s, start, cfo in cands:  # distinct peaks: half a symbol or a quarter tone apart
@@ -144,16 +173,21 @@ def search(g: cpm.Grid, y: np.ndarray, nominal: int) -> list:
     return out
 
 
-def refine(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
+def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
     """A candidate -> (start, cfo, data-row energies) nailed in on T/16 x
     rate/16 steps: the search's T/8 step can land a quarter symbol off, and
-    that leaks every symbol's energy across two bins (~4 dB of the SNR
-    reading away). Metric: the data rows' winning shares."""
+    that leaks every symbol's energy across two bins -- ~4 dB of the SNR
+    reading, and the same leak in the soft bits, which is why nailing comes
+    before the decode rather than after the CRC. Metric: the data rows'
+    winning shares; the sync blocks' would do at 6 dB but picks the wrong
+    quarter symbol at the -20 dB threshold (measured: 47% -> 48% decoded,
+    where the data rows' give 58%)."""
     T = g.T
-    best = (start, cfo, cpm._energies(g, y, start, N_SYM, cfo)[DATA_ROWS], -np.inf)
-    for dt in range(-(T // 2), T // 2 + 1, T // 16):
-        for df in (-g.rate / 16, 0.0, g.rate / 16):
-            En = cpm._energies(g, y, start + dt, N_SYM, cfo + df)[DATA_ROWS]
+    best = (start, cfo, bins(mix(g, y, cfo), start, T, g.m, N_SYM)[DATA_ROWS], -np.inf)
+    for df in (-g.rate / 16, 0.0, g.rate / 16):
+        z = mix(g, y, cfo + df)
+        for dt in range(-(T // 2), T // 2 + 1, T // 16):
+            En = bins(z, start + dt, T, g.m, N_SYM)[DATA_ROWS]
             v = float(cpm._shares(En).max(axis=1).sum())
             if v > best[3]:
                 best = (start + dt, cfo + df, En, v)
@@ -162,21 +196,24 @@ def refine(g: cpm.Grid, y: np.ndarray, start: int, cfo: float):
 
 def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDecoder):
     """The first candidate and list path whose CRC passes -> (payload bits,
-    snr_est dB, start sample), or None. The refined candidate's data-row
-    energies give the SNR (cpm.measure's scale: average power in 2500 Hz)."""
+    snr_est dB, start sample), or None. Every candidate is nailed first, and
+    its data-row energies serve twice: the soft bits, and the SNR
+    (cpm.measure's scale: average power in 2500 Hz)."""
     cands = search(g, y, nominal)
     if not cands:
         return None
     llr = np.empty((len(cands), E))
+    ens = []
     for i, (start, cfo) in enumerate(cands):
-        llr[i, interleaver()] = cpm.llrs(g, cpm._energies(g, y, start, N_SYM, cfo)[DATA_ROWS])
+        start, cfo, En = nail(g, y, start, cfo)
+        llr[i, interleaver()] = cpm.llrs(g, En)
+        ens.append((start, En))
     bits, _ = dec.decode(llr)
     for i, paths in enumerate(bits):
         for u in paths:
             if np.array_equal(crc16(u[:PAYLOAD], tag << 8), u[PAYLOAD:]):
-                start, _, En = refine(g, y, cands[i][0], cands[i][1])
-                snr = cpm.measure(g, En, N_DATA)["snr_est"]
-                return u[:PAYLOAD], snr, start
+                start, En = ens[i]
+                return u[:PAYLOAD], cpm.measure(g, En, N_DATA)["snr_est"], start
     return None
 
 
@@ -186,8 +223,11 @@ def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int) ->
     sent it); the search covers +-SEARCH_S of it. -> dicts with c, payload
     (63-bit int), snr (dB), dt_ms (start minus nominal).
 
-    ponytail: a full grid search per channel, ~1-2 s of CPU for 40; share
-    one spectrogram across channels if the Pi says no."""
+    ponytail: a full grid search per channel, ~3 s of CPU for 40 measured on
+    a desktop (the window is mixed once per cfo, not once per candidate:
+    cpm._energies re-mixes, mix()/bins() here don't). This is the reference
+    the tests and studies run; a station runs native/core/hand, whose round
+    is ~1 s on the same machine (docs/hand-burst.md, "As shipped")."""
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for c in channels:

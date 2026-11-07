@@ -127,3 +127,47 @@ Roughly:
 ## How these were measured
 
 The simulation is `scripts/hand_study.py` on the hand-burst-sim branch. Each trial puts the Hand within ±0.2 s and ±3 Hz of nominal, and the receiver searches ±0.25 s and ±5 Hz (the timing test: ±0.5 s and ±0.6 s). Fading is a two-path Watterson model (CCIR good, poor and disturbed), plus a slow, selective profile measured on a real 4000 km path. LDPC(174,91) itself wasn't simulated, so the polar code's gain over it is the literature's figure (roughly 0.5-1 dB), not measured.
+
+## As shipped: nailing and round cost
+
+The tables above come from the study script. The shipped decoder adds one step the script didn't: each of the 3 candidates is nailed in on a T/16 × rate/16 grid (±half a symbol, ±rate/16, maximizing the data rows' winning shares) *before* its soft bits are built. The search's T/8 step lands a quarter symbol off, which leaks every symbol's energy across two bins — that costs the SNR reading and the decoder alike. Measured with `data2g.hand.decode_window` itself, one channel, AWGN, ±31 ms landing jitter, 60 trials per SNR, same seeds both arms, SNR in 2500 Hz:
+
+| SNR | candidates used as searched | nailed first |
+| --- | --- | --- |
+| −19.5 dB | 49/60 | 55/60 |
+| −20.5 dB | 28/60 | 35/60 |
+
+So the shipped decoder sits about 0.7-1 dB below the noise-only 10% point of −19.2 dB in that table, at the same code and rate. Nailing on the sync blocks' shares instead of the data rows' wins by a hair at −19.5 dB (56/60) but not at the threshold (29/60): 12 known symbols are too few to pick a quarter symbol there. Both metrics cost the same once the window is mixed once per CFO rather than once per candidate; the data rows' metric is what's used.
+
+Fading was re-checked with the shipped decoder, same 24 seeds per cell, one channel, ±31 ms landing jitter, two-path Watterson through `hfchannel.fading` then AWGN at the stated SNR (the absolute points sit ~1-1.5 dB below this section's because the study searched ±0.2 s of landing spread against ±31 ms here):
+
+| Channel | SNR | candidates used as searched | nailed first |
+| --- | --- | --- | --- |
+| mpg | −18.0 dB | 18/24 | 21/24 |
+| mps (measured slow, selective) | −19.0 dB | 11/24 | 15/24 |
+| mpd (disturbed, 2 Hz spread) | −19.0 dB | 4/24 | 3/24 |
+
+It helps where the design leans on long Hands riding through fades (mpg, mps), and is a wash on the disturbed channel — one trial either way at n=24.
+
+Cost of a round: the Python reference — mixing the window once per CFO (`hand.mix`/`hand.bins`, bit-identical to `cpm._energies`) rather than per candidate, plus the nailing — takes about 3 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 1.9 s single-threaded, ~1 s of wall with a batch's rows split across pocketfft's threads (about two cores). Four changes got it there from the ported form's 2.6 s, none of them a sensitivity change — a 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical before and after, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
+
+- the mixed window carries a margin of silence on both sides, so a symbol window that runs off either end of the capture reads zeros where it lies instead of being gathered into a zero-padded copy (1.35 MB copied per offset, ~6200 offsets a round);
+- a whole row of search starts, and a whole row of nail offsets, goes through one strided block transform (`dsp::fft_block_into`) instead of one pocketfft call per symbol window, which is what lets its threads have anything to divide;
+- nailing transforms only the 54 data rows: the 12 sync rows are thrown away by both the nail's metric and the decode, so a round is 10.8k symbol windows per channel where it was 15.2k;
+- candidates are nailed and decoded one at a time, so a burst found on the first candidate never pays for the other two nails.
+
+The decode still runs on its own thread after the capture, so it never holds the round; a Pi 4 remains the untested case.
+
+What the search and nail grids would cost to cut, measured the same way (AWGN, one Hand, ±0.2 s landing and ±3 Hz, 100 trials per SNR, SNR in 2500 Hz; a round is the 40-channel wall time of the native decoder):
+
+| Setting | −21 dB | −20 dB | −19 dB | round |
+| --- | --- | --- | --- | --- |
+| as shipped (3 candidates, T/8 search, T/2 × rate/16 nail grid) | 20/100 | 74/100 | 100/100 | 0.97 s |
+| 2 candidates | 20 | 74 | 100 | 0.79 s |
+| nail on CFO only (drop the ±rate/16 steps) | 19 | 66 | 98 | 0.60 s |
+| nail ±T/4 rather than ±T/2 | 17 | 67 | 97 | 0.81 s |
+| no nailing at all (the search's T/8 cell) | 17 | 61 | 93 | 0.54 s |
+| search every T/4 | 19 | 73 | 100 | 0.90 s |
+| search CFO to ±4 Hz | 21 | 74 | 99 | 0.91 s |
+
+Two candidates and a T/4 search step are free: the third candidate is a near-duplicate of the first two (the distinctness rule already keeps them half a symbol apart), and the nailing recovers alignment that the coarser search left loose. Nailing is the only one that buys real margin (~0.5 dB, and the reported `dt` stays within a symbol either way: mean error 5 ms nailed, 8 ms not), and the CFO grid beyond ±4 Hz is margin against a spec that says Hands land within ±3 Hz. Nothing here changes what the shipped decoder does.
