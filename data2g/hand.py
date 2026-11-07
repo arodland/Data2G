@@ -53,7 +53,7 @@ LEN_S = N_SYM / RATE  # 10.56 s
 
 N_CHANNELS, PITCH, CENTER = 40, 60.0, 1500.0  # channel c -> CENTER + (c - 19.5) * PITCH
 SEARCH_S, SEARCH_HZ, TOP = 0.6, 5.0, 3
-# A round's grids. ROUND_FULL ships. ROUND_CHEAP is what --hand-round cheap
+# A round's grids. ROUND_FULL ships. ROUND_CHEAP is what --hand-decoder cheap
 # picks on a station that needs the round for about half the CPU: one fewer
 # candidate (the third is a near-duplicate of the first two), a T/4 search
 # step the nailing recovers, and no CFO refinement. Measured, the preset costs

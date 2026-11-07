@@ -274,7 +274,7 @@ public:
     double id_interval_s = ID_INTERVAL_S;
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
-    std::string hand_round = "full";  // "cheap": --hand-round cheap's grids (hand::ROUND_CHEAP)
+    std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.

@@ -125,7 +125,7 @@ def test_hand_decode_with_the_window_head_lost():
 @pytest.mark.parametrize("hand_round", ["full", "cheap"])
 def test_hand_decode_at_the_sensitivity_floor(hand_round):
     """The shipped threshold: -18 dB, 3 Hz off, landing in the search's
-    middle. Both grids bring the payload back, so what --hand-round cheap
+    middle. Both grids bring the payload back, so what --hand-decoder cheap
     costs (~0.2-0.3 dB, docs/hand-burst.md) stays inside the margin."""
     rng = np.random.default_rng(4)
     tag, c, payload = 0x9C, 12, 0x1234ABCDEF012
@@ -143,7 +143,7 @@ def test_hand_round_between_two_stations(hand_round):
     """A (net control) arms a listen, sends the anchor burst (CQ as ANY
     TRAFFIC's stand-in), and gets B's Hand back on its channel. B's own CQ,
     queued behind the Hand, waits for it (the Hand isn't dropped), and the
-    payload's 64th bit is ignored. Both --hand-round settings on net control:
+    payload's 64th bit is ignored. Both --hand-decoder settings on net control:
     the cheap grids find the Hand as well as the shipped ones."""
     a, b = Engine("W1AW", seed=1), Engine("K2XYZ", seed=2)
     a.hand_round = hand_round

@@ -749,7 +749,7 @@ As built (data2g/arq/policy.py):
       (10.56 s) plus 0.6 s either side, and decode the listed channels
       (usually all 40; the CRC seeded with `tag`; a channel listed twice is
       decoded once). A 40-channel round costs a desktop about 0.4 s of CPU;
-      `--hand-round cheap` on either host takes under half that for
+      `--hand-decoder cheap` on either host takes under half that for
       0.2-0.4 dB (docs/hand-burst.md). While a window is open this
       host starts no CQ, broadcast, ID or KISS burst of its own (session bursts still go;
       the window counts their time as silence). WRONG while another listen is

@@ -41,7 +41,7 @@ struct Decoded {
 };
 // A round's search and nail grids. ROUND_FULL is what ships. ROUND_CHEAP is
 // the setting a station picks when a round has to cost about half as much
-// (--hand-round cheap): one fewer candidate (the third is a near-duplicate of
+// (--hand-decoder cheap): one fewer candidate (the third is a near-duplicate of
 // the first two), a coarser search step the nailing recovers, and no CFO
 // refinement. Measured, that whole preset costs 0.2-0.4 dB (the two grids are
 // free; the CFO refinement is what you pay for): docs/hand-burst.md.

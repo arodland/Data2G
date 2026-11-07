@@ -1,6 +1,6 @@
 """native/core/hand against data2g/hand.py: the frozen tables, Hand audio
 (including a payload with every bit set), and a two-channel window's decodes
-(payloads, SNR, landing time, both --hand-round grids, and a round under the
+(payloads, SNR, landing time, both --hand-decoder grids, and a round under the
 wrong tag)."""
 
 import numpy as np
@@ -26,7 +26,7 @@ def test_decode_window(native):
         x = hand.modulate(tag, hand.payload_bits(p), hand.channel_freq(c))
         y[hand.SEARCH_SAMPLES + late:hand.SEARCH_SAMPLES + late + len(x)] += x
     y = hfchannel.awgn(hfchannel.freq_shift(y, -1.5), 4.0, seed=5)
-    # both --hand-round grids, in both languages: the same two Hands, the same SNR
+    # both --hand-decoder grids, in both languages: the same two Hands, the same SNR
     # and the same landing time to within 1e-6 s. cheap searches every T/4 and
     # nails on the search's own CFO grid; the T/16 nail still lands on one nailed
     # sample, so a cheap round and a shipped one differ by a step, never a symbol.

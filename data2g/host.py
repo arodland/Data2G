@@ -590,7 +590,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     engine = Engine(a.mycall or "NOCALL", ptt_delay_s=a.ptt_on_delay_ms / 1000, record_dir=a.record_dir,
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
-    engine.hand_round = getattr(a, "hand_round", "full")
+    engine.hand_round = getattr(a, "hand_decoder", "full")
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -736,7 +736,7 @@ def main():
     ap.add_argument("--cw-id", choices=("off", "add", "only"), default="off",
                     help="CW ID (docs/arq.md §7b): off (ID frames only), add (with them), only (in their place)")
     ap.add_argument("--cw-wpm", type=float, default=20.0, help="CW ID speed, 15-40 wpm")
-    ap.add_argument("--hand-round", choices=("full", "cheap"), default="full",
+    ap.add_argument("--hand-decoder", choices=("full", "cheap"), default="full",
                     help="net control's Hand round: cheap, one fewer candidate and coarser grids, half the CPU"
                          " of a 40-channel round for 0.2-0.4 dB (docs/hand-burst.md)")
     a = ap.parse_args()

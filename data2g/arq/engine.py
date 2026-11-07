@@ -300,7 +300,7 @@ class Engine:
 
     @property
     def hand_round(self) -> str:
-        """hand.ROUNDS' key: "full", or "cheap" (--hand-round cheap's grids)."""
+        """hand.ROUNDS' key: "full", or "cheap" (--hand-decoder cheap's grids)."""
         return self._hand_round
 
     @hand_round.setter

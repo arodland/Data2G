@@ -149,7 +149,7 @@ Fading was re-checked with the shipped decoder, same 24 seeds per cell, one chan
 
 It helps where the design leans on long Hands riding through fades (mpg, mps), and is a wash on the disturbed channel (one trial either way at n=24).
 
-Cost of a round: the Python reference (mixing the window once per CFO with `hand.mix`/`hand.bins`, bit-identical to `cpm._energies`, rather than per candidate, plus the nailing) takes about 2.4 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 0.37 s of wall for the round (0.16 s with `--hand-round cheap`), a batch's rows split across pocketfft's threads. Five changes got it there from the ported form's 2.6 s, none of them a sensitivity change. A 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical across the first four, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
+Cost of a round: the Python reference (mixing the window once per CFO with `hand.mix`/`hand.bins`, bit-identical to `cpm._energies`, rather than per candidate, plus the nailing) takes about 2.4 s for a 40-channel window on a desktop, where the branch's original form took 4.6 s. What net control runs is the native decoder (`native/core/hand`): 0.37 s of wall for the round (0.16 s with `--hand-decoder cheap`), a batch's rows split across pocketfft's threads. Five changes got it there from the ported form's 2.6 s, none of them a sensitivity change. A 40-round corpus of payloads, `snr` to 12 digits and `dt` is byte-identical across the first four, and `tests/test_native_hand.py` keeps Python and C++ agreeing:
 
 - the mixed window carries a margin of silence on both sides, so a symbol window that runs off either end of the capture reads zeros where it lies instead of being gathered into a zero-padded copy (1.35 MB copied per offset, ~6200 offsets a round);
 - a whole row of search starts, and a whole row of nail offsets, goes through one strided block transform (`dsp::fft_block_into`) instead of one pocketfft call per symbol window, which is what lets its threads have anything to divide;
@@ -173,9 +173,9 @@ What the search and nail grids would cost to cut, measured the same way (AWGN, o
 
 Two candidates and a T/4 search step are free: the third candidate is a near-duplicate of the first two (the distinctness rule already keeps them half a symbol apart), and the nailing recovers alignment that the coarser search left loose. Nailing is the only one that buys real margin (~0.5 dB, and the reported `dt` stays within a symbol either way: mean error 5 ms nailed, 8 ms not), and the CFO grid beyond ±4 Hz is margin against a spec that says Hands land within ±3 Hz. Nothing here changes what the shipped decoder does.
 
-### --hand-round cheap
+### --hand-decoder cheap
 
-Three cuts combine into a preset a station can pick: 2 candidates, a T/4 search step, and the nail on the search's own CFO grid. `hand.ROUND_CHEAP` / `hand::ROUND_CHEAP` hold it, `hand.decode_window` / `hand::decode_window` take it as their last argument (the default is the shipped `ROUND_FULL`), the Engine holds the name in `hand_round`, and either host sets it with `--hand-round cheap`. Measured on this machine with a full 40-channel window: 1.03 s for the shipped grids, 0.48 s for the cheap ones.
+Three cuts combine into a preset a station can pick: 2 candidates, a T/4 search step, and the nail on the search's own CFO grid. `hand.ROUND_CHEAP` / `hand::ROUND_CHEAP` hold it, `hand.decode_window` / `hand::decode_window` take it as their last argument (the default is the shipped `ROUND_FULL`), the Engine holds the name in `hand_round`, and either host sets it with `--hand-decoder cheap`. Measured on this machine with a full 40-channel window: 1.03 s for the shipped grids, 0.48 s for the cheap ones.
 
 What the combination costs, paired seeds (the same Hand, the same noise, both arms), one channel, ±0.2 s landing and ±3 Hz, SNR in 2500 Hz. Hands decoded out of n:
 
