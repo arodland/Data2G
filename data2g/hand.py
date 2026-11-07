@@ -25,7 +25,8 @@ The host primitive over this: docs/arq.md §9 (HAND SEND, HAND LISTEN, the
 REF and HAND lines), driven from arq.engine.Engine. Prototyped and
 measured in scripts/hand_study.py (branch hand-burst-sim).
 
-Native: not ported yet; whatever native/core/hand becomes must match this.
+Native: native/core/hand (tests/test_native_hand.py checks parity; the
+interleaver and Costas order are frozen by tools/gen_native_tables.py).
 """
 
 from functools import lru_cache

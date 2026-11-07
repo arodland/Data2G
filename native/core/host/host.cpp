@@ -222,6 +222,30 @@ void Host::command(std::string_view line, std::string_view peer) {
         } catch (const std::invalid_argument&) {  // a callsign that won't pack
             ok = false;
         }
+    } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6 : upper(args[0]) == "LISTEN" && args.size() >= 4)) {
+        hand_ = true;
+        auto num = [](const std::string& s) {  // int(): an optional sign, digits, nothing else
+            std::size_t used = 0;
+            const int n = std::stoi(s, &used);
+            if (used != s.size()) throw std::invalid_argument("not a number: " + s);
+            return n;
+        };
+        try {
+            if (upper(args[0]) == "SEND") {  // HAND SEND ref tag d channel hex16 (docs/arq.md §9)
+                std::size_t used = 0;
+                const auto payload = std::stoull(args[5], &used, 16);
+                if (used != args[5].size() || args[5].starts_with('-')) throw std::invalid_argument("bad payload");
+                e.hand_send(num(args[1]), num(args[2]), parse_double(args[3]), num(args[4]), payload);
+            } else {  // HAND LISTEN d tag channel [channel...]
+                std::vector<int> channels;
+                for (std::size_t i = 3; i < args.size(); ++i) channels.push_back(num(args[i]));
+                e.hand_listen(parse_double(args[1]), num(args[2]), channels);
+            }
+        } catch (const std::invalid_argument&) {
+            ok = false;
+        } catch (const std::out_of_range&) {
+            ok = false;
+        }
     } else if (auto c = bw_cap(cmd)) {
         cap = *c;
     } else if (cmd == "CHAT" && (a0 == "ON" || a0 == "OFF")) {
@@ -304,7 +328,7 @@ void Host::client_gone() {
     const auto s = e.session().state;
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
-    listening = data2g = false;
+    listening = data2g = hand_ = false;
     e.set_idle_close(std::nullopt);
     accept_addr.reset();
     const auto now = e.session().state;
@@ -385,6 +409,10 @@ void Host::after_step(bool ptt) {
     if (auto* link = e.kiss()) {
         auto events = link->take_events();
         if (bcast_) out_cmd.insert(out_cmd.end(), std::make_move_iterator(events.begin()), std::make_move_iterator(events.end()));
+    }
+    {
+        auto hand = e.take_hand_events();  // REF and HAND lines (docs/arq.md §9): Data2G-aware clients only
+        if (hand_ || data2g) out_cmd.insert(out_cmd.end(), std::make_move_iterator(hand.begin()), std::make_move_iterator(hand.end()));
     }
     if (ptt != ptt_) {
         ptt_ = ptt;

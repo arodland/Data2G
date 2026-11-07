@@ -30,13 +30,14 @@ void bind_arq_phy(py::module_&);
 void bind_kisslink(py::module_&);
 void bind_engine(py::module_&);
 void bind_host(py::module_&);
+void bind_hand(py::module_&);
 }
 
 PYBIND11_MODULE(data2g_native, m) {
     // Bumped when the module's Python-facing signatures change, so
     // tests/native_subs (its ABI) refuses a stale build instead of failing
     // confusingly.
-    m.attr("__abi__") = 6;
+    m.attr("__abi__") = 7;
     data2g::bind::bind_codes(m);
     data2g::bind::bind_config(m);
     data2g::bind::bind_constellation(m);
@@ -58,6 +59,7 @@ PYBIND11_MODULE(data2g_native, m) {
     data2g::bind::bind_kisslink(m);
     data2g::bind::bind_engine(m);
     data2g::bind::bind_host(m);
+    data2g::bind::bind_hand(m);
     m.def("set_threads", &data2g::pool::set_threads, pybind11::arg("n"), "Shared pool size, caller included; < 1: default.");
     m.def("threads", &data2g::pool::threads);
 }
