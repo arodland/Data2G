@@ -799,8 +799,6 @@ Engine::Done Engine::process(Block& b) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + receiver::NoiseProfile::RECOVER_S);
-            if (sent->submode != "hand")  // a Hand is not the session's last burst: tx_end_ feeds the reply/missed-burst accounting
-                tx_end_ = now() + static_cast<double>(n) / config::FS;
             if (hand_listen_ && !hand_listen_->open) {  // my burst ended: its Hand window opens
                 auto& hl = *hand_listen_;
                 const std::int64_t a = n_ + static_cast<std::int64_t>(n);
@@ -811,8 +809,9 @@ Engine::Done Engine::process(Block& b) {
                 hl.hi = a + hl.d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES;
                 hand_hold_ = static_cast<double>(hl.hi) / config::FS;
             }
-            if (!tx_kiss_) {
-                session_->on_tx_end(sent, now() + static_cast<double>(n) / config::FS);  // a broadcast burst is not the session's: no reply timer
+            if (!tx_kiss_) {  // a Hand or broadcast burst is not the session's: no reply timer, no tx_end_
+                tx_end_ = now() + static_cast<double>(n) / config::FS;  // the reply/missed-burst accounting's
+                session_->on_tx_end(sent, tx_end_.value());
                 expect_reply();  // with the reset below
             }
             request_reset();  // our own transmission was not heard

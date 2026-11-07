@@ -617,8 +617,6 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
-                if burst.submode != "hand":  # a Hand is not the session's last burst: _tx_end feeds the expected-reply/missed-burst accounting
-                    self._tx_end = self.now + n / FS
                 hl = self._hand_listen
                 if hl is not None and not hl["open"]:  # my burst ended: its window opens
                     a = self.n + n  # its end sample (self.n advances at the step's end)
@@ -626,7 +624,8 @@ class Engine:
                               lo=a + hl["d"] - hand.SEARCH_SAMPLES,
                               hi=a + hl["d"] + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES)
                     self._hand_hold = hl["hi"] / FS
-                if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
+                if not self._tx_kiss:  # a Hand or broadcast burst is not the session's: no reply timer, no _tx_end
+                    self._tx_end = self.now + n / FS  # the expected-reply/missed-burst accounting's
                     self.session.on_tx_end(burst, self.now + n / FS)
                     self._expect_reply()
                 self._tx_kiss = False
