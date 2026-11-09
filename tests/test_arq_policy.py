@@ -179,9 +179,10 @@ def test_control_is_not_a_decoded_data_codeword():
 def test_cpm_cap_reply_hold_and_link_lost_price():
     from data2g.arq.modes import burst_seconds
 
-    for m in ("fsk32r62-r1/2", "fsk8r50-r1/2"):
+    for m in ("fsk32r62-r1/2", "fsk8r50-r1/2", "fsk16r25-r1/3"):
         s = G.MODES[m]
         assert burst_seconds(s, G.slots_for(s, G.SIZE_S[-1])) <= G.CPM_MAX_S
+    assert [G.slots_for(G.MODES[m], G.SIZE_S[-1]) for m in ("fsk16r25-r1/3", "fsk8r50-r1/3")] == [3, 5]
     g = G.GearShifter()
     g.log = [("w48-qpsk-r1/2", 2, "ack-1f")]
     quiet = g.reply_hold(SimpleNamespace(cap=2, misses=0, esc_floor=0), SimpleNamespace(submode="w48-qpsk-r1/2"))

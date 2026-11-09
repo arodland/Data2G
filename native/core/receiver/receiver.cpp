@@ -164,22 +164,45 @@ void Receiver::reset() {
     for (auto& d : detectors_) d.d.reset();
 }
 
-void Receiver::expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo) {
+void Receiver::expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo,
+                      std::optional<std::pair<std::string_view, std::int64_t>> until) {
     expected_.reset();
     if (grids.empty()) return;
-    Expected e{{}, lo, hi, cfo};
+    Expected e{{}, {}, lo, hi, cfo, std::nullopt};
     for (auto g : grids) e.grids.push_back(cpm::grid(g));
+    e.tried.assign(e.grids.size(), 0);
+    if (until) e.until = std::make_pair(cpm::grid(until->first), until->second);
     expected_ = std::move(e);
 }
 
+bool Receiver::expect_waits() const {
+    if (!expected_ || !expected_->until) return false;
+    const Expected& e = *expected_;
+    const auto [g, n] = *e.until;
+    for (std::size_t i = 0; i < e.grids.size(); ++i)
+        if (e.grids[i] == g) return e.tried[i] < cpm::prime_need(*g, n);
+    return false;
+}
+
 std::optional<cpm::Lock> Receiver::primed() {
+    // the first grid (the caller's order) with words newly in: one try (receiver.py _primed)
     Expected& e = *expected_;
-    const cpm::Grid& g = *e.grids.front();
-    if (off_ + len() < e.hi + cpm::hdr_span(g, 2) + g.T) return std::nullopt;
+    const std::int64_t avail = off_ + len() - e.hi;
+    std::size_t i = 0;
+    int n = 0;
+    for (; i < e.grids.size(); ++i)
+        if ((n = cpm::prime_ready(*e.grids[i], avail)) > e.tried[i]) break;
+    if (i == e.grids.size()) return std::nullopt;
+    const cpm::Grid& g = *e.grids[i];
     const std::int64_t lo = e.lo, hi = e.hi;
     const double cfo = e.cfo;
-    e.grids.erase(e.grids.begin());
-    if (e.grids.empty()) expected_.reset();
+    if (n < cpm::n_words(g)) {
+        e.tried[i] = n;
+    } else {
+        e.grids.erase(e.grids.begin() + static_cast<std::ptrdiff_t>(i));
+        e.tried.erase(e.tried.begin() + static_cast<std::ptrdiff_t>(i));
+        if (e.grids.empty()) expected_.reset();
+    }
     if (hi < off_) return std::nullopt;  // trimmed away (an expect() later than its window)
     return cpm::prime_lock(g, buf_, std::max<std::int64_t>(0, lo - off_), hi - off_, cfo);  // (receiver.py logs it)
 }

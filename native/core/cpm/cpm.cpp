@@ -637,10 +637,17 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
     const WordRows& W = word_rows(g);
     const int copies = tables::CPM.hdr_copies;
     const auto& rows = W.rows[copies - 1];
+    // the words whose rows x holds for a start at hi; the others' front and first copy bound a lock from below
+    const std::int64_t avail = (static_cast<std::int64_t>(x.size()) - hi - g.T) / g.T;
+    std::vector<char> ready(rows.size());
+    std::size_t n_rows = 0;
+    for (std::size_t k = 0; k < rows.size(); ++k)
+        if ((ready[k] = rows[k].back() + 1 <= avail)) n_rows = std::max<std::size_t>(n_rows, rows[k].back() + 1);
+    if (!n_rows) return std::nullopt;
+    const std::vector<int> first(rows[0].begin(), rows[0].begin() + g.hdr_len);  // every word's first copy
     // a start a whole symbol later reads the same symbols one row on: per phase and CFO, one tone_llr over
     // the window and the rows after it (its scale from all of them), sliced per start (cpm.prime_lock)
     const std::int64_t step = std::max<std::int64_t>(1, g.T / PRIME_STEP);
-    const std::size_t n_rows = static_cast<std::size_t>(W.span[copies - 1]);
     const std::int64_t n_pos = (hi - lo) / g.T + 1;
     std::vector<std::int64_t> phases;
     for (std::int64_t p = 0; p < g.T; p += step) phases.push_back(p);
@@ -649,7 +656,7 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
     for (auto p : phases)
         for (double df : PRIME_CFO)
             LL.push_back(tone_llr(g, energies(g, x, lo + p, static_cast<int>(n_rows + n_pos), cfo + df * g.rate)));
-    double best = -INFINITY, best_cfo = 0.0;
+    double best = -INFINITY, best_cfo = 0.0, floor = -INFINITY;
     std::int64_t best_s = 0;
     std::size_t best_k = 0;
     std::vector<double> vm(g.mid_block.size());
@@ -667,9 +674,13 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
                     if (s.grid != g.name) continue;
                     for (bool dup : {false, true})
                         for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k) {
+                            const auto t = header_symbols(g, header_value(s.index, nd, dup));
+                            if (!ready[k]) {
+                                floor = std::max(floor, front + segments(g, L, first, t));
+                                continue;
+                            }
                             const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
                             for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
-                            const auto t = header_symbols(g, header_value(s.index, nd, dup));
                             const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
                             if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
                         }
@@ -677,7 +688,7 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
             }
         }
     }
-    if (best < PRIME_LLR) return std::nullopt;
+    if (best < PRIME_LLR || best <= floor) return std::nullopt;
     std::size_t k = 0;
     for (const auto& s : tables::CPM_SPECS) {
         if (s.grid != g.name) continue;
@@ -687,6 +698,22 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
     }
     return std::nullopt;
 }
+
+int prime_ready(const Grid& g, std::int64_t avail) {
+    int n = 0;
+    for (const auto& r : word_rows(g).rows[tables::CPM.hdr_copies - 1])
+        n += r.back() + 1 <= (avail - g.T) / g.T;
+    return n;
+}
+
+int prime_need(const Grid& g, std::int64_t samples) {
+    int n = 0;
+    for (const auto& r : word_rows(g).rows[tables::CPM.hdr_copies - 1])
+        n += static_cast<std::int64_t>(r.back() + 1) * g.T <= samples;
+    return n;
+}
+
+int n_words(const Grid& g) { return static_cast<int>(word_rows(g).mid.size()); }
 
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {
     const Header h = read_header(g, x, cand.start, cand.cfo, tables::CPM.hdr_copies);

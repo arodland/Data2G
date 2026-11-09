@@ -439,9 +439,10 @@ def test_receiver_expected_slot():
 
 def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     """Three grids expected, one prime_lock a search hop (the Pi's hop
-    budget): the burst's grid tried last is still found in its window, and
-    the queue is gone once it is. Noise alone: each grid tried once, then
-    nothing queued."""
+    budget), each grid as its words come in (c32r62's control-only words
+    1.3 s before the rest): the burst's grid tried last is still found in
+    its window, and the queue is gone once it is. Noise alone: every word
+    tried, then nothing queued."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
     y, _, p0, cfo = _faded_cpm(0)
@@ -459,7 +460,7 @@ def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     assert [k for k, _ in ev] == ["header", "burst"] and ev[0][1]["start"] == p0
     assert ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3" and rcv.n_expected == 0
     if not hasattr(rcv, "_n") or rcv._n is None:  # the Python receiver: counted
-        assert calls == ["c8r50", "c32r62", "c16r25"] and max(per_feed) == 1
+        assert calls == ["c32r62", "c8r50", "c32r62", "c16r25"] and max(per_feed) == 1
     noise = np.random.default_rng(2).normal(0, np.std(y[:p0]), len(y))
     rcv = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
     rcv.expect(["c8r50", "c32r62", "c16r25"], *w)
@@ -492,3 +493,135 @@ def test_policy_hears_primed_controls_as_lost():
         b.answered()
         a.answered()
     assert b.policy.seen == [True, False, True, False, True, False] and b.stats["rx_primed"] == 3
+
+
+def _cpm_burst(n_data, snr_db, seed):
+    """A fsk32r62-r1/2 burst with n_data data codewords, AWGN at snr_db
+    (phy_session's channel): (audio, its start, CFO)."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import phy_session as PS
+
+    rng = np.random.default_rng(seed)
+    pb = codes.payload_bytes(PHY.MODES["fsk32r62-r1/2"])
+    slots = [Slot(ctl_mask(1, 0, 7), 0, bytes(rng.integers(0, 256, 20, dtype=np.uint8)))]
+    slots += [Slot((7, 0, i), 0, bytes(rng.integers(0, 256, pb, dtype=np.uint8))) for i in range(n_data)]
+    y = PS.ContinuousChannel("awgn", snr_db, seed, 60.0).apply(PHY.tx_audio(TxBurst("fsk32r62-r1/2", slots, 0, 2)), 10.0)
+    return y, int(PS.PAD_S * PS.FS), PS.CFO_HZ
+
+
+def test_prime_lock_word_by_word():
+    """c32r62's control-only words end 1.3 s before the rest: prime_lock
+    takes a control-only burst once its own rows are in, but not a data
+    burst then (its first copy outscores every control-only reading), which
+    it takes once all rows are."""
+    g = cpm.GRIDS["c32r62"]
+    short = cpm.prime_need("c32r62", int(2.5 * 8000))
+    assert 0 < short < len(cpm.valid_words("c32r62"))
+    for n_data in (0, 2):
+        y, p0, cfo = _cpm_burst(n_data, -6.0, 5)
+        lo, hi = p0 - 1200, p0 + 1200
+        early = y[:hi + int(cpm.word_spans("c32r62").min()) * g.T + g.T]
+        assert cpm.prime_ready("c32r62", len(early) - hi) == short
+        lock = cpm.prime_lock(g, early, lo, hi, cfo)
+        if n_data == 0:
+            assert lock is not None and abs(lock["start"] - p0) <= g.T // 4 and lock["n_data"] == 0
+        else:
+            assert lock is None
+        lock = cpm.prime_lock(g, y, lo, hi, cfo)
+        assert lock is not None and abs(lock["start"] - p0) <= g.T // 4 and lock["n_data"] == n_data
+
+
+def test_engine_reply_deadline_waits_for_the_expected_slot(reference):
+    """Two engines, the caller asking for fsk32r62 control-only replies
+    (deadline t_turn + 2.92 s past its burst). Once the caller's receiver
+    has no blind path (no CPM grids, no OFDM header passes), its peer's
+    replies are found only in the expected slot: their try (2.4 s of
+    header) must run before the deadline, or the caller times out and polls
+    over replies it would have read (3-4 timeouts before the fix). The
+    Python Engine (with --native, over the C++ Receiver); the C++ Engine is
+    native/tests/test_primed.cpp's."""
+    from data2g import modem
+    from data2g.arq import engine as E
+    from data2g.arq import policy as G
+    from data2g.arq import session as S
+    from data2g.receiver import Receiver
+    from test_engine import link
+
+    m = "fsk32r62-r1/2"
+
+    class C32(G.GearShifter):
+        def choose(self, station, escalation):
+            if escalation:
+                return super().choose(station, escalation)
+            return m, 3 if station.tx.pending() else 1
+
+        def recommend(self, station):
+            _, hint, _ = super().recommend(station)
+            self.log[-1] = (m, hint, m)
+            return G.encode(m), hint, G.encode(m)
+
+    Engine = reference(E, "Engine")
+    a, b = Engine("W1AW", policy=C32, seed=41), Engine("K2XYZ", policy=C32, seed=42)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    up = np.random.default_rng(43).bytes(700)
+    a.session.write(up)
+    got = bytearray()
+    assert link(a, b, 10, 60, lambda: got.extend(b.session.read()) or len(got) >= 100, seed=44)
+    assert a.slot.window(0.0) is not None
+    assert link(a, b, 10, 30, lambda: a.tx is not None, seed=46)  # (its expect() comes as this burst ends)
+    a.receiver = Receiver(modem.Accept(a.accept.max_cw, 0.99), cpm_grids=())  # blind: nothing
+    st = a.session.station
+    t0, r0 = st.stats.get("timeouts", 0), st.stats.get("rx_ok", 0)
+    assert link(a, b, 10, 120, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=45)
+    assert bytes(got) == up
+    timeouts, heard = st.stats.get("timeouts", 0) - t0, st.stats.get("rx_ok", 0) - r0
+    assert heard >= 3 and timeouts == 0, (heard, timeouts)
+
+
+def test_cpp_prime_lock_word_by_word_matches(native, pure):
+    """C++ prime_lock, prime_ready and prime_need as Python's while words
+    come in: a control-only and a data burst cut every 0.1 s."""
+    for g in cpm.GRIDS:
+        for n in range(0, 40000, 357):
+            assert native.cpm.prime_ready(g, n) == cpm.prime_ready(g, n)
+            assert native.cpm.prime_need(g, n) == cpm.prime_need(g, n)
+    g = cpm.GRIDS["c32r62"]
+    for n_data, snr in ((0, -6.0), (2, -6.0), (0, -14.0)):
+        y, p0, cfo = _cpm_burst(n_data, snr, 7)
+        lo, hi = p0 - 1200, p0 + 1200
+        for cut in range(hi + 18000, len(y) + 800, 800):
+            want = cpm.prime_lock(g, y[:cut], lo, hi, cfo)
+            got = native.cpm.prime_lock("c32r62", y[:cut], lo, hi, cfo)
+            assert (got is None) == (want is None), (n_data, snr, cut)
+            if want is not None:
+                assert got["start"] == want["start"] and got["n_data"] == want["n_data"]
+                assert got["score"] == pytest.approx(want["score"], rel=1e-9)
+
+
+def test_cpp_receiver_expect_waits_matches(native, pure):
+    """The C++ Receiver's expected slot as Python's, feed by feed: grids
+    queued and expect_waits for a fsk32r62 control-only reply (2.42 s),
+    through seed 0's burst and through noise."""
+    from data2g.arq.engine import receive_accept
+    from data2g.receiver import Receiver
+    y, _, p0, cfo = _faded_cpm(0)
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * 8000)])
+    noise = np.random.default_rng(2).normal(0, np.std(y[:p0]), len(y))
+    until = ("c32r62", int(2.42 * 8000))
+    for x in (y, noise):
+        trace = []
+        for rcv in (Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)),
+                    native.receiver.Receiver(receive_accept(), list(cpm.GRIDS), True)):
+            rcv.expect(["c8r50", "c32r62", "c16r25"], p0 - 1200, p0 + 1200, cfo, until)
+            t = []
+            for i in range(0, len(x), 800):
+                ev = rcv.feed(x[i:i + 800])
+                t.append((len(ev), rcv.n_expected, rcv.expect_waits))
+            trace.append(t)
+        assert trace[0] == trace[1]
+        assert trace[0][0][2] and not trace[0][-1][2]

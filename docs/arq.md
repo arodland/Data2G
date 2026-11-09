@@ -29,7 +29,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
-| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
+| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`, `expect_waits`), `engine.py` (`_expect_reply`, `_expect_hold`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -175,10 +175,18 @@ for Data2G).
   its last 8 starts past my burst's end (`ReplySlot`, `TOL_S` 0.15 either side; learned
   online, so PTT, sound card and decode latencies need only be stable), the CPM grids my
   session expects it in (`Session.expecting`: my latest burst's mode and the two I
-  recommended), and the peer's CFO from its last burst. Once the audio holds every second
-  header copy of a start in the window and nothing locked, `prime_lock` looks there once:
-  every start at T/4, CFO +-R/16, any valid word, scored by `tone_llr` over every row the
-  word fixes (front, mid block, both header copies, each floored at 0). `PRIME_LLR` 16:
+  recommended), and the peer's CFO from its last burst. Once the audio holds a word's
+  second header copy for every start in the window and nothing locked, `prime_lock` looks
+  there: every start at T/4, CFO +-R/16, the valid words whose rows are in, scored by
+  `tone_llr` over every row the word fixes (front, mid block, both header copies, each
+  floored at 0). One try a search hop, the first grid with words newly in; c32r62's
+  control-only words end at 2.40 s, the rest at 3.55-3.74 s (c8r50 3.6-3.7, c16r25 3.84).
+  An early lock must also beat the waiting words' front and first copy (a lower bound on
+  their score), so a data burst is not taken for a control-only one. The reply deadline
+  (`Session._deadline`: t_turn + the asked mode's control-only burst + 0.5, 3.92 s for
+  fsk32r62) is held while the try for the reply asked for, or a shorter word of its grid,
+  waits for its audio (`Receiver.expect_waits`, `engine._expect_hold`); before this the
+  fsk32r62 try ran about 4.4 s past my burst and the caller polled first. `PRIME_LLR` 16:
   27000 windows of noise, OFDM bursts and the other grids' bursts scored at most 15.1
   (runs/primed-rx/plock_fa2.txt); bursts the blind paths lost read 20-60. A lock it makes is
   a header like any other (the session's wait extends to the burst's end).

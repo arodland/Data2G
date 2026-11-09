@@ -28,7 +28,7 @@ inline constexpr double PREV_MAX_S = 30.0;
 inline constexpr double BIAS_STEP = 1.0, BIAS_MAX = 6.0;
 inline constexpr double DUP_BELOW = 0.9;
 inline constexpr double CPM_SIZE_SCALE = 4.0;
-inline constexpr double CPM_MAX_S = 24.0;  // ... but at most this long
+inline constexpr double CPM_MAX_S = 30.0;  // ... but at most this long (policy.py)
 inline constexpr double T_RECOVER_S = TIMEOUT_S + 2 * 5.0;  // a timeout, a robust poll and its reply
 inline constexpr double LOST_LINK_COST_S = 300.0;
 inline constexpr double REPLY_HOLD_MARGIN_S = 0.5;

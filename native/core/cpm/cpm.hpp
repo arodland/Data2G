@@ -124,13 +124,18 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
 // Samples from a burst's start to the end of its first `copies` header copies,
 // the latest any word puts them.
 std::int64_t hdr_span(const Grid& g, int copies);
-// cpm.prime_lock (docs/arq.md §3a): a burst of grid g starting in [lo, hi], its CFO near `cfo`, any valid
-// word, scored over every row the word fixes; nullopt under PRIME_LLR. x must hold the second header copy
-// of a start at hi.
+// cpm.prime_lock (docs/arq.md §3a): a burst of grid g starting in [lo, hi], its CFO near `cfo`, a valid
+// word whose rows x holds for a start at hi (prime_ready), scored over every row the word fixes; nullopt
+// under PRIME_LLR, or not over every waiting word's front and first copy.
 inline constexpr double PRIME_LLR = 16.0;
 inline constexpr int PRIME_STEP = 4;
 inline constexpr double PRIME_CFO[] = {-1.0 / 16, 0.0, 1.0 / 16};
 std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo);
+// cpm.prime_ready: valid words prime_lock scores with `avail` samples past the window's latest start.
+int prime_ready(const Grid& g, std::int64_t avail);
+// cpm.prime_need: valid words whose rows end within `samples` of a burst's start.
+int prime_need(const Grid& g, std::int64_t samples);
+int n_words(const Grid& g);  // len(cpm.valid_words)
 
 // cpm.measure: arq/phy's measure makes the effective-MI features (arq/predictor's)
 // of `snr`, per symbol.
