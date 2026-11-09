@@ -26,7 +26,17 @@
 
 #ifdef _WIN32
 #include <io.h>
-#include <windows.h>
+// The three console calls, declared by hand rather than by including
+// <windows.h> (as tests/check.hpp's SetErrorMode): its ERROR macro breaks
+// app/log.hpp's level of that name, and its others <complex>. The
+// signatures are consoleapi.h's and processenv.h's exactly -- HANDLE is
+// void*, DWORD unsigned long, BOOL int -- so a translation unit that sees
+// both still sees one declaration each.
+extern "C" {
+__declspec(dllimport) void* __stdcall GetStdHandle(unsigned long std_handle);
+__declspec(dllimport) int __stdcall GetConsoleMode(void* console, unsigned long* mode);
+__declspec(dllimport) int __stdcall SetConsoleMode(void* console, unsigned long mode);
+}
 #else
 #include <termios.h>
 #include <unistd.h>
@@ -64,11 +74,13 @@ std::optional<std::string> read_secret(const char* prompt) {
     std::fflush(stderr);
     const bool tty = on_terminal();
 #ifdef _WIN32
-    const HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
+    // STD_INPUT_HANDLE and ENABLE_ECHO_INPUT, spelled out: <windows.h>'s macros, and ABI.
+    constexpr unsigned long std_input_handle = static_cast<unsigned long>(-10), enable_echo_input = 0x0004;
+    void* const in = GetStdHandle(std_input_handle);
+    unsigned long mode = 0;
     if (tty) {
         GetConsoleMode(in, &mode);
-        SetConsoleMode(in, mode & ~DWORD(ENABLE_ECHO_INPUT));
+        SetConsoleMode(in, mode & ~enable_echo_input);
     }
 #else
     if (tty) {
