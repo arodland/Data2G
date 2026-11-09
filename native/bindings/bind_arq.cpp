@@ -214,6 +214,8 @@ void bind_arq(py::module_& m) {
                       [](Shifter& s, const py::dict& d) { s.bias = dict_to_map(d); })
         .def_property("bias_burst", [](const Shifter& s) { return map_to_dict(s.bias_burst); },
                       [](Shifter& s, const py::dict& d) { s.bias_burst = dict_to_map(d); })
+        .def_readwrite("surprises", &Shifter::surprises)
+        .def_readwrite("surprises_burst", &Shifter::surprises_burst)
         .def_property("predicted",
             [](const Shifter& s) {
                 py::dict d;
