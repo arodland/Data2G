@@ -3,6 +3,7 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRandomGenerator>
 #include <QSettings>
 #include <QTcpSocket>
 #include <QTimer>
@@ -11,10 +12,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
 #include "app/settings.hpp"
+#include "app/web_password.hpp"
 #include "arq/modes.hpp"
 #include "arq/session.hpp"
 #include "generated/config.hpp"
@@ -43,14 +46,26 @@ const char* reason(int code) {
     switch (code) {
         case 200: return "OK";
         case 400: return "Bad Request";
+        case 401: return "Unauthorized";
         case 404: return "Not Found";
         case 403: return "Forbidden";
         case 405: return "Method Not Allowed";
         case 413: return "Payload Too Large";
         case 415: return "Unsupported Media Type";
+        case 429: return "Too Many Requests";
         case 500: return "Internal Server Error";
+        case 503: return "Service Unavailable";
         default: return "Error";
     }
+}
+
+constexpr const char* COOKIE = "data2g_session";
+constexpr std::size_t MAX_SESSIONS = 64;  // ponytail: past this, all are dropped; an LRU if anyone ever has that many browsers
+
+WebUi::Reply page(int code, const char* name) {
+    QFile f(QStringLiteral(":/web/") + QLatin1String(name));
+    if (!f.open(QIODevice::ReadOnly)) return error(500, QStringLiteral("the page is missing from the build"));
+    return {code, "text/html; charset=utf-8", f.readAll()};
 }
 
 QJsonArray points(const std::vector<std::complex<float>>& zs) {
@@ -86,6 +101,7 @@ WebUi::WebUi(app::Args args, QSettings& store) : store_(store) {
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &WebUi::poll);
     timer->start(100);
+    refresh_password();
     restart(args);
 }
 
@@ -122,7 +138,28 @@ void WebUi::restart(const app::Args& args) {
     poll();
 }
 
+bool WebUi::refresh_password() {
+    store_.sync();  // set by data2g-gui or --set-password: in the file, not yet in our QSettings
+    const QString hash = app::web_password_hash(store_);
+    if (hash != password_hash_) {
+        if (!password_hash_.isEmpty()) app::log_line(app::INFO, "web UI: the password changed; every session ended");
+        password_hash_ = hash;
+        sessions_.clear();
+        for (Client& c : clients_) c.socket->close(QWebSocketProtocol::CloseCodePolicyViolated, QStringLiteral("the password changed"));
+    }
+    return !password_hash_.isEmpty();
+}
+
+bool WebUi::logged_in(const QByteArray& cookie) const {
+    for (const QByteArray& part : cookie.split(';')) {
+        const QByteArray kv = part.trimmed();
+        if (kv.startsWith(QByteArray(COOKIE) + '=') && sessions_.count(kv.mid(qsizetype(std::strlen(COOKIE)) + 1))) return true;
+    }
+    return false;
+}
+
 void WebUi::poll() {
+    if (++ticks_ % 20 == 0) refresh_password();  // every 2 s: a WebSocket makes no requests to notice it by
     auto& s = *station_;
     if (s.failed() && s.running()) {
         s.stop();
@@ -300,15 +337,18 @@ QJsonObject WebUi::settings() const {
     return o;
 }
 
-WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, const QByteArray& content_type, const QByteArray& body) {
+WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, const QByteArray& content_type, const QByteArray& cookie,
+                           const QByteArray& body) {
     const qsizetype qmark = target.indexOf('?');
-    const QByteArray path = qmark < 0 ? target : target.left(qmark), query = qmark < 0 ? QByteArray() : target.mid(qmark + 1);
+    const QByteArray path = qmark < 0 ? target : target.left(qmark);
+    const bool api = path.startsWith("/api/");
+    if (!refresh_password())
+        return api ? error(503, QStringLiteral("no web password set: data2g-web --set-password")) : page(503, "setup.html");
+    const bool authed = logged_in(cookie);
     if (method == "GET") {
-        if (path == "/" || path == "/index.html") {
-            QFile page(QStringLiteral(":/web/index.html"));
-            if (!page.open(QIODevice::ReadOnly)) return error(500, QStringLiteral("the page is missing from the build"));
-            return {200, "text/html; charset=utf-8", page.readAll()};
-        }
+        if (path == "/" || path == "/index.html") return authed ? page(200, "index.html") : page(200, "login.html");
+        if (!authed) return error(401, QStringLiteral("log in"));
+        if (path == "/api/session") return {200, "application/json", json({{"ok", true}})};
         if (path == "/api/settings") return {200, "application/json", json(settings())};
         return error(404, QStringLiteral("no such page"));
     }
@@ -318,6 +358,29 @@ WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, c
     const QJsonDocument doc = QJsonDocument::fromJson(body, &bad);
     if (!body.isEmpty() && !doc.isObject()) return error(400, bad.error ? bad.errorString() : QStringLiteral("expected a JSON object"));
     const QJsonObject in = doc.object();
+    if (path == "/api/login") {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_login_) return error(429, QStringLiteral("wait a second"));
+        if (!app::check_web_password(store_, in.value(QStringLiteral("password")).toString())) {
+            next_login_ = now + std::chrono::seconds(1);
+            app::log_line(app::WARNING, "web UI: a wrong password");
+            return error(401, QStringLiteral("wrong password"));
+        }
+        QByteArray token(32, '\0');
+        QRandomGenerator::system()->fillRange(reinterpret_cast<quint32*>(token.data()), token.size() / 4);
+        token = token.toHex();
+        if (sessions_.size() >= MAX_SESSIONS) sessions_.clear();
+        sessions_.insert(token);
+        return {200, "application/json", json({{"ok", true}}),
+                QByteArray("Set-Cookie: ") + COOKIE + '=' + token + "; Path=/; HttpOnly; SameSite=Strict\r\n"};
+    }
+    if (!authed) return error(401, QStringLiteral("log in"));
+    if (path == "/api/logout") {
+        for (const QByteArray& part : cookie.split(';'))
+            if (part.trimmed().startsWith(QByteArray(COOKIE) + '=')) sessions_.erase(part.trimmed().mid(qsizetype(std::strlen(COOKIE)) + 1));
+        return {200, "application/json", json({{"ok", true}}),
+                QByteArray("Set-Cookie: ") + COOKIE + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0\r\n"};
+    }
     if (path == "/api/settings") {
         // Only the keys sent change: a command line's value stays unless edited.
         // Each must be a setting, of its type: from_settings would read "x" as port 0.
@@ -346,7 +409,7 @@ void WebUi::read(QTcpSocket* s) {
     const auto respond = [s](const Reply& r) {
         s->write(QByteArray("HTTP/1.1 ") + QByteArray::number(r.code) + ' ' + reason(r.code) + "\r\nContent-Type: " + r.type +
                  "\r\nContent-Length: " + QByteArray::number(r.body.size()) +
-                 "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + r.body);
+                 "\r\nCache-Control: no-store\r\nConnection: close\r\n" + r.headers + "\r\n" + r.body);
         s->disconnectFromHost();
     };
     if (s->property("answered").toBool()) return;  // anything after a request: ignored until the close
@@ -362,7 +425,7 @@ void WebUi::read(QTcpSocket* s) {
     const QList<QByteArray> request = lines.first().trimmed().split(' ');
     if (request.size() != 3) return answer(error(400, QStringLiteral("bad request line")));
     qsizetype length = 0;
-    QByteArray type, host, origin, upgrade;
+    QByteArray type, host, origin, upgrade, cookie;
     for (qsizetype i = 1; i < lines.size(); ++i) {
         const qsizetype colon = lines[i].indexOf(':');
         if (colon < 0) continue;
@@ -372,12 +435,15 @@ void WebUi::read(QTcpSocket* s) {
         if (name == "host") host = value;
         if (name == "origin") origin = value;
         if (name == "upgrade") upgrade = value.toLower();
+        if (name == "cookie") cookie += (cookie.isEmpty() ? "" : "; ") + value;
     }
     if (upgrade == "websocket") {
         if (request[1] != "/ws") return answer(error(404, QStringLiteral("no such WebSocket")));
         // No CORS for WebSockets: any page the browser has open could connect, unless it must be ours.
         if (!origin.isEmpty() && QUrl(QString::fromLatin1(origin)).authority() != QString::fromLatin1(host))
             return answer(error(403, QStringLiteral("not from this page")));
+        if (!refresh_password()) return answer(error(503, QStringLiteral("no web password set")));
+        if (!logged_in(cookie)) return answer(error(401, QStringLiteral("log in")));
         QObject::disconnect(s, nullptr, this, nullptr);
         QObject::disconnect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
         ws_.handleConnection(s);  // the QWebSocket it makes owns s from here
@@ -386,7 +452,7 @@ void WebUi::read(QTcpSocket* s) {
     if (length < 0 || length > MAX_REQUEST) return answer(error(413, QStringLiteral("too large")));
     if (buf.size() < end + 4 + length) return;
     s->read(end + 4 + length);
-    answer(handle(request[0], request[1], type, buf.mid(end + 4, length)));
+    answer(handle(request[0], request[1], type, cookie, buf.mid(end + 4, length)));
 }
 
 }  // namespace data2g::web

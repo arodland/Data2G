@@ -2,9 +2,12 @@
 // windows as a web page (web/web_ui.hpp).
 //
 //   data2g-web [--web-listen ADDR] [--web-port N] [data2g-host's options]
+//   data2g-web --set-password      the web UI's password (app/web_password.hpp), then exit
 //
-// --web-listen defaults to 127.0.0.1: the page can change the rig and the
-// ports and has no login, so 0.0.0.0 is for a network you trust.
+// --web-listen defaults to 127.0.0.1. The page has a password, but no TLS:
+// on 0.0.0.0 it crosses the network in the clear, so use a network you trust.
+// Started with no password set: on a terminal, it asks for one first;
+// otherwise (launched from a desktop, a service) the page says how to set one.
 // Settings come from QSettings (data2g-web's own, as data2g-gui's), then
 // data2g-host's flags on the command line override them for this run.
 
@@ -14,14 +17,108 @@
 #include <QTimer>
 
 #include <cstdio>
+#include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+
+#include <csignal>
+#endif
+
 #include "app/settings.hpp"
-#include "app/station.hpp"
+#include "app/web_password.hpp"
 #include "web_ui.hpp"
 
 using namespace data2g;
+
+namespace {
+
+bool on_terminal() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin));
+#else
+    return isatty(fileno(stdin));
+#endif
+}
+
+#ifndef _WIN32
+termios g_saved;  // the terminal as it was, for a ^C while echo is off
+extern "C" void restore_and_exit(int) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+    _exit(130);
+}
+#endif
+
+// A line from stdin, typed without echo when it is a terminal; nullopt at EOF.
+std::optional<std::string> read_secret(const char* prompt) {
+    std::fprintf(stderr, "%s", prompt);
+    std::fflush(stderr);
+    const bool tty = on_terminal();
+#ifdef _WIN32
+    const HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (tty) {
+        GetConsoleMode(in, &mode);
+        SetConsoleMode(in, mode & ~DWORD(ENABLE_ECHO_INPUT));
+    }
+#else
+    if (tty) {
+        tcgetattr(STDIN_FILENO, &g_saved);
+        termios quiet = g_saved;
+        quiet.c_lflag &= ~tcflag_t(ECHO);
+        std::signal(SIGINT, restore_and_exit);
+        tcsetattr(STDIN_FILENO, TCSANOW, &quiet);
+    }
+#endif
+    std::string line;
+    const bool got = bool(std::getline(std::cin, line));
+#ifdef _WIN32
+    if (tty) SetConsoleMode(in, mode);
+#else
+    if (tty) {
+        tcsetattr(STDIN_FILENO, TCSANOW, &g_saved);
+        std::signal(SIGINT, SIG_DFL);
+    }
+#endif
+    if (tty) std::fprintf(stderr, "\n");  // the Enter that wasn't echoed
+    if (!got) return std::nullopt;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    return line;
+}
+
+// Asks for a new password and saves it. On a terminal: typed twice, until
+// it is not empty and the two match. Piped: one line, as it is. False at EOF.
+bool ask_password(QSettings& store) {
+    for (;;) {
+        const auto pw = read_secret("New web UI password: ");
+        if (!pw) return false;
+        if (pw->empty()) {
+            std::fprintf(stderr, "data2g-web: the password can't be empty\n");
+            if (!on_terminal()) return false;
+            continue;
+        }
+        if (on_terminal()) {
+            const auto again = read_secret("Again: ");
+            if (!again) return false;
+            if (*again != *pw) {
+                std::fprintf(stderr, "data2g-web: they don't match; once more\n");
+                continue;
+            }
+        }
+        app::set_web_password(store, QString::fromStdString(*pw));
+        std::fprintf(stderr, "data2g-web: password saved\n");
+        return true;
+    }
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication qapp(argc, argv);
@@ -32,9 +129,14 @@ int main(int argc, char** argv) {
     // Our two flags out of argv; the rest is data2g-host's.
     QString web_listen = QStringLiteral("127.0.0.1");
     int web_port = 8400;
+    bool set_password = false;
     std::vector<char*> rest{argv[0]};
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
+        if (arg == "--set-password") {
+            set_password = true;
+            continue;
+        }
         bool ours = false;
         for (const char* flag : {"--web-listen", "--web-port"}) {
             const std::string f = flag;
@@ -62,7 +164,8 @@ int main(int argc, char** argv) {
         }
         if (!ours) rest.push_back(argv[i]);
     }
-    QSettings store;
+    QSettings store;  // the same file as app::web_password_store()
+    if (set_password) return ask_password(store) ? 0 : 1;
     const app::Args a = app::parse(int(rest.size()), rest.data(), app::load_settings(store), "data2g-web");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
         app::usage_error("--list-modes, --list-audio-devices and --list-rigs are data2g-host's", "data2g-web");
@@ -73,6 +176,16 @@ int main(int argc, char** argv) {
     }
     app::g_level = *level;
     app::install_arq_log();
+
+    if (!app::has_web_password(store)) {
+        if (on_terminal()) {
+            std::fprintf(stderr, "data2g-web: the web UI has no password yet. Choose one now; it is saved\n"
+                                 "(change it later with data2g-web --set-password, or in data2g-gui's settings).\n");
+            if (!ask_password(store)) std::fprintf(stderr, "\n");
+        }
+        if (!app::has_web_password(store))
+            app::log_line(app::WARNING, "web UI: no password set: the page is locked until one is (data2g-web --set-password)");
+    }
     app::quit_on_signals();
 
     QHostAddress address;

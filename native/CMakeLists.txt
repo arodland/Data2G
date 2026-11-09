@@ -176,7 +176,7 @@ target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/settings.cpp app/tcp_servers.cpp app/rx_plot.cpp
+    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/settings.cpp app/web_password.cpp app/tcp_servers.cpp app/rx_plot.cpp
                                       app/realtime.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
@@ -245,7 +245,7 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station AND NOT Qt6Web
 elseif(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station)
   add_library(data2g_web STATIC web/web_ui.cpp)
   # qt_add_resources on the target: kept by the linker, though a static library's
-  qt_add_resources(data2g_web web_page PREFIX /web BASE web FILES web/index.html)
+  qt_add_resources(data2g_web web_page PREFIX /web BASE web FILES web/index.html web/login.html web/setup.html)
   target_include_directories(data2g_web PUBLIC web)
   target_link_libraries(data2g_web PUBLIC data2g_station Qt6::WebSockets)
   add_executable(data2g-web web/main.cpp)

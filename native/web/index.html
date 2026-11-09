@@ -86,6 +86,7 @@ input[type=range] { flex: 1; min-width: 120px; }
   </nav>
   <span id="station">-</span>
   <span id="conn"></span>
+  <button class="act" id="logout">Log out</button>
 </header>
 
 <main>
@@ -395,8 +396,11 @@ function connect() {
     $("conn").textContent = ""; $("conn").className = "";
   };
   ws.onmessage = e => show(JSON.parse(e.data));
-  ws.onclose = () => {
+  ws.onclose = async () => {
     $("conn").textContent = "no connection to data2g-web"; $("conn").className = "down";
+    try {  // logged out, or the password changed: the login page
+      if ([401, 503].includes((await fetch("/api/session")).status)) { location.reload(); return; }
+    } catch (e) {}
     setTimeout(connect, 1000);
   };
 }
@@ -460,7 +464,9 @@ function sync() {  // what shows, as the dialog's sync_interface and sync_rig
 }
 
 async function loadSettings() {
-  cfg = await (await fetch("/api/settings")).json();
+  const r = await fetch("/api/settings");
+  if (r.status === 401 || r.status === 503) { location.reload(); return; }
+  cfg = await r.json();
   const v = cfg.values;
   models = new Map(cfg.rig_models.map(m => [m[0], m]));
   $("rig-models").replaceChildren(...cfg.rig_models.map(m => new Option(`${m[1]} (${m[0]})`)));
@@ -504,6 +510,8 @@ $("settings").onsubmit = async e => {
     $("save").disabled = false;
   }
 };
+
+$("logout").onclick = async () => { await post("/api/logout", {}); location.reload(); };
 
 // ---- start
 try { const t = localStorage.getItem("data2g-tab"); if (t) document.querySelector(`nav [data-tab=${t}]`)?.click(); } catch (e) {}

@@ -26,6 +26,8 @@
 #include <memory>
 #include <utility>
 
+#include "app/web_password.hpp"
+
 #ifdef DATA2G_HAVE_RIG
 #include "rig/hamlib/hamlib.hpp"
 #endif
@@ -237,10 +239,31 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     };
     sync_record(a.record);
     connect(record_, &QCheckBox::toggled, this, sync_record);
+
+    // data2g-web's password, in its store (app/web_password.hpp): not an Arg,
+    // so saved here on OK, and only when typed. Nothing shows the old one.
+    auto* web = group(tr("Web UI password (data2g-web)"));
+    web_pw_ = new QLineEdit;
+    web_pw_->setObjectName(QStringLiteral("web_password"));
+    web_pw_->setEchoMode(QLineEdit::Password);
+    web_pw_->setPlaceholderText(app::has_web_password(*app::web_password_store()) ? tr("(set; type to change)") : tr("(not set)"));
+    web_pw_->setToolTip(tr("The password data2g-web's page asks for. Setting a new one logs every browser out."));
+    web->addRow(tr("New password"), web_pw_);
+    web_pw2_ = new QLineEdit;
+    web_pw2_->setObjectName(QStringLiteral("web_password_again"));
+    web_pw2_->setEchoMode(QLineEdit::Password);
+    web->addRow(tr("Again"), web_pw2_);
     top->addStretch();
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        if (web_pw_->text() != web_pw2_->text()) {
+            QMessageBox::warning(this, tr("Web UI password"), tr("The two passwords don't match."));
+            return;
+        }
+        if (!web_pw_->text().isEmpty()) app::set_web_password(*app::web_password_store(), web_pw_->text());
+        accept();
+    });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     outer->addWidget(buttons);
 }

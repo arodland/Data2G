@@ -18,6 +18,14 @@
 //                       {"cmd": "fmt", "fmt"} (every dump kept, again, in that format),
 //                       {"cmd": "abort"}, {"cmd": "monitor", "on": bool}.
 //
+// One password (app/web_password.hpp), no user name. With none set, every
+// page is setup.html (how to set one) and every API call a 503; once one is,
+// login.html until it is given: POST /api/login {"password"} sets an
+// HttpOnly, SameSite=Strict session cookie, which every other request and the
+// WebSocket upgrade must carry (POST /api/logout ends it; GET /api/session
+// says whether it still holds). Setting a new password, from anywhere, ends
+// every session and closes every WebSocket.
+//
 // POSTs must be application/json: a page on another site can't send that
 // without a CORS preflight, which is never answered. WebSockets have no CORS,
 // so the upgrade must come from our own page: an Origin, if sent, naming the
@@ -35,6 +43,7 @@
 #include <deque>
 #include <list>
 #include <memory>
+#include <set>
 
 #include "app/station.hpp"
 #include "monitor/monitor.hpp"
@@ -61,9 +70,11 @@ public:
     struct Reply {
         int code = 200;
         QByteArray type = "application/json", body;
+        QByteArray headers = {};  // more header lines, each ending "\r\n"
     };
     // One request, as the socket handler sees it; public for the test.
-    Reply handle(const QByteArray& method, const QByteArray& target, const QByteArray& content_type, const QByteArray& body);
+    Reply handle(const QByteArray& method, const QByteArray& target, const QByteArray& content_type, const QByteArray& cookie,
+                 const QByteArray& body);
 
 private:
     struct Seqs {  // the last burst, dump, constellation and waterfall row a client has
@@ -76,6 +87,10 @@ private:
         bool hello = false;  // nothing is sent before its hello
     };
     void read(QTcpSocket* s);
+    // The stored password, re-read (another process may have set it); a new
+    // one ends every session. False when none is set.
+    bool refresh_password();
+    bool logged_in(const QByteArray& cookie) const;
     void command(Client& c, const QString& message);
     // The state, and what came after `seq` (advanced to the newest).
     QJsonObject status(Seqs& seq, bool hex) const;
@@ -96,6 +111,10 @@ private:
     QTcpServer server_;
     QWebSocketServer ws_{QStringLiteral("data2g-web"), QWebSocketServer::NonSecureMode};
     std::list<Client> clients_;
+    QString password_hash_;          // as last read; empty: none set
+    std::set<QByteArray> sessions_;  // session cookies' tokens
+    std::chrono::steady_clock::time_point next_login_{};  // a failed login holds off the next for a second
+    int ticks_ = 0;
     std::unique_ptr<app::Station> station_;
     QString error_;
     bool monitoring_;
