@@ -22,6 +22,7 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 | `app/` | `data2g_station`: the runtime both front ends share (`host.py`'s `serve()`), Qt Core + Network only. `app/station.hpp` lists its threads. `app/tci.*` (`--tci`, with Qt WebSockets): the radio's audio, PTT and dial over TCI instead of a sound card and Hamlib. |
 | `apps/` | The command-line programs' `main()`s. |
 | `gui/` | `data2g-gui`: the only place Qt Widgets may appear. |
+| `web/` | `data2g-web`: the station headless, the GUI as a web page (`--web-listen`, `--web-port`, default 127.0.0.1:8400). Core + Network only. |
 | `bindings/` | `data2g_native`, the pybind11 module that `pytest --native` substitutes into the Python suite (`tests/native_subs/`). |
 | `tests/` | One ctest per area (`test_<area>.cpp`), Python-free. |
 | `cmake/`, `packaging/`, `third_party/` | Pinned dependencies (Hamlib, zlib), icons and installers, vendored pocketfft and miniaudio. |

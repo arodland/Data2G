@@ -17,6 +17,7 @@
 #include <QStringList>
 
 #include "app/options.hpp"
+#include "app/settings.hpp"
 
 class QCheckBox;
 class QComboBox;
@@ -31,10 +32,9 @@ class QSpinBox;
 
 namespace data2g::gui {
 
-// The persisted subset of `base`'s fields: callsign, interface (TCI), devices, sample rate,
-// volume, PTT and rig, ports, recording, decode worker, live constellation.
-app::Args load_settings(QSettings& s, app::Args base = {});
-void save_settings(QSettings& s, const app::Args& a);
+// app/settings.hpp's, under the GUI's names too.
+using app::load_settings;
+using app::save_settings;
 
 class SettingsDialog : public QDialog {
     Q_OBJECT

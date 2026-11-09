@@ -176,7 +176,7 @@ target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
+    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/settings.cpp app/tcp_servers.cpp app/rx_plot.cpp
                                       app/realtime.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
@@ -237,6 +237,19 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
   endif()
 endif()
 
+# data2g-web: the station headless, with the GUI's windows as a web page
+# (web/). Qt Core + Network only, like data2g-host.
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station)
+  add_library(data2g_web STATIC web/web_ui.cpp)
+  # qt_add_resources on the target: kept by the linker, though a static library's
+  qt_add_resources(data2g_web web_page PREFIX /web BASE web FILES web/index.html)
+  target_include_directories(data2g_web PUBLIC web)
+  target_link_libraries(data2g_web PUBLIC data2g_station)
+  add_executable(data2g-web web/main.cpp)
+  target_link_libraries(data2g-web PRIVATE data2g_web)
+  data2g_rig_rpath(data2g-web)
+endif()
+
 # data2g-gui: a status window and a settings dialog over the same station.
 # Qt Widgets only here (tools/check_layering.py); sound cards required.
 if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
@@ -283,7 +296,7 @@ endif()
 # Last, so it sees the apps however they were added. The GUI target is
 # expected to be called data2g-gui.
 set(DATA2G_PACKAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging")
-foreach(app data2g-host data2g-gui data2g-monitor)
+foreach(app data2g-host data2g-gui data2g-web data2g-monitor)
   if(NOT TARGET ${app})
     continue()
   endif()

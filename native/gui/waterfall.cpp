@@ -9,14 +9,14 @@
 #include <cmath>
 #include <numbers>
 
-#include "dsp/fft.hpp"
+#include "app/rx_plot.hpp"
 #include "generated/config.hpp"
 
 namespace data2g::gui {
 
 namespace {
 
-constexpr int NFFT = 1024;
+constexpr int NFFT = static_cast<int>(app::SPECTRUM_N);
 constexpr int BINS = NFFT / 2;  // 0 .. FS/2
 constexpr double DISPLAY_HZ = config::FS / 2.0;
 constexpr std::size_t METER_SAMPLES = config::FS / 10;  // one engine block
@@ -61,21 +61,6 @@ const std::array<Rgb, 256>& tx_colormap() {
     static const auto lut =
         ramp({{{0.00, {0, 0, 0}}, {0.25, {70, 0, 90}}, {0.50, {200, 30, 140}}, {0.75, {255, 140, 200}}, {1.00, {255, 255, 255}}}});
     return lut;
-}
-
-// Hann-windowed magnitude spectrum in dB, scaled by 1/NFFT (SSTVAE's dsp::spectrum_db).
-std::vector<double> spectrum_db(const std::vector<double>& block) {
-    static const std::vector<double> window = [] {
-        std::vector<double> w(NFFT);
-        for (int i = 0; i < NFFT; ++i) w[i] = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * i / (NFFT - 1));
-        return w;
-    }();
-    std::vector<dsp::cdouble> buf(NFFT);
-    for (int i = 0; i < NFFT; ++i) buf[i] = block[i] * window[i];
-    const auto spec = dsp::fft(buf, true);
-    std::vector<double> out(BINS);
-    for (int i = 0; i < BINS; ++i) out[i] = 20.0 * std::log10(std::abs(spec[i]) / NFFT + 1e-12);
-    return out;
 }
 
 // Onto exactly `width` columns: interpolate when widening, peak-hold when
@@ -149,7 +134,7 @@ void Waterfall::tick() {
     }
 
     ensure_image();
-    const std::vector<double> row = reduce_to_width(spectrum_db(block), image_.width());
+    const std::vector<double> row = reduce_to_width(app::spectrum_db(block), image_.width());
     if (row.empty()) return;
     // one row = one pixel: scroll down by one, bottom-up in place
     const auto stride = static_cast<std::size_t>(image_.bytesPerLine());
