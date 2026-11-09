@@ -8,8 +8,10 @@
 // on 0.0.0.0 it crosses the network in the clear, so use a network you trust.
 // Started with no password set: on a terminal, it asks for one first;
 // otherwise (launched from a desktop, a service) the page says how to set one.
-// Settings come from QSettings (data2g-web's own, as data2g-gui's), then
-// data2g-host's flags on the command line override them for this run.
+// Settings come from the store data2g-gui saves to (app::settings_store()),
+// then data2g-host's flags on the command line override them for this run.
+// Either front end's settings changes are the other's next start: running
+// both at once, they want the same ports and sound card, so one fails.
 
 #include <QCoreApplication>
 #include <QHostAddress>
@@ -164,7 +166,8 @@ int main(int argc, char** argv) {
         }
         if (!ours) rest.push_back(argv[i]);
     }
-    QSettings store;  // the same file as app::web_password_store()
+    const auto shared = app::settings_store();  // data2g-gui's too
+    QSettings& store = *shared;
     if (set_password) return ask_password(store) ? 0 : 1;
     const app::Args a = app::parse(int(rest.size()), rest.data(), app::load_settings(store), "data2g-web");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)

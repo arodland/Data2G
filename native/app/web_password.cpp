@@ -24,10 +24,6 @@ QByteArray derive(const QString& pw, const QByteArray& salt, int iterations) {
 
 }  // namespace
 
-std::unique_ptr<QSettings> web_password_store() {
-    return std::make_unique<QSettings>(QStringLiteral("Data2G"), QStringLiteral("data2g-web"));
-}
-
 QString web_password_hash(QSettings& s) { return s.value(KEY).toString(); }
 
 bool has_web_password(QSettings& s) { return !web_password_hash(s).isEmpty(); }

@@ -246,7 +246,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     web_pw_ = new QLineEdit;
     web_pw_->setObjectName(QStringLiteral("web_password"));
     web_pw_->setEchoMode(QLineEdit::Password);
-    web_pw_->setPlaceholderText(app::has_web_password(*app::web_password_store()) ? tr("(set; type to change)") : tr("(not set)"));
+    web_pw_->setPlaceholderText(app::has_web_password(*app::settings_store()) ? tr("(set; type to change)") : tr("(not set)"));
     web_pw_->setToolTip(tr("The password data2g-web's page asks for. Setting a new one logs every browser out."));
     web->addRow(tr("New password"), web_pw_);
     web_pw2_ = new QLineEdit;
@@ -261,7 +261,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
             QMessageBox::warning(this, tr("Web UI password"), tr("The two passwords don't match."));
             return;
         }
-        if (!web_pw_->text().isEmpty()) app::set_web_password(*app::web_password_store(), web_pw_->text());
+        if (!web_pw_->text().isEmpty()) app::set_web_password(*app::settings_store(), web_pw_->text());
         accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);

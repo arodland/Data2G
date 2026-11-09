@@ -37,6 +37,10 @@ const char* const OLD_KEYS[] = {"host", "kiss_address", "rigctld_host", "rigctld
 
 }  // namespace
 
+std::unique_ptr<QSettings> settings_store() {
+    return std::make_unique<QSettings>(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+}
+
 QVariantMap settings_map(const Args& a) {
     QVariantMap m;
     m["mycall"] = qs(a.mycall);
