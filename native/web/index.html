@@ -72,6 +72,11 @@ input[type=number] { width: 7em; }
 input[type=range] { flex: 1; min-width: 120px; }
 .row .grow { flex: 1; width: 100%; }
 [hidden] { display: none !important; }
+.menu { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 0; min-width: 140px; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+.menu .title { color: var(--dim); font-size: 12px; padding: 4px 12px; }
+.menu button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text); font: inherit; padding: 4px 12px 4px 28px; cursor: pointer; position: relative; }
+.menu button:hover, .menu button:focus { background: var(--line); outline: none; }
+.menu button[aria-checked=true]::before { content: "\2713"; position: absolute; left: 10px; }
 .dirty { outline: 1px solid var(--busy); }
 .savebar { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: center; padding: 10px 0; background: var(--bg); }
 #save-msg.err { color: var(--bad); }
@@ -93,7 +98,7 @@ input[type=range] { flex: 1; min-width: 120px; }
 <section id="tab-monitor">
   <div class="panel">
     <div class="scope">
-      <div class="wf" title="Click CLIP to clear it"><canvas id="wf" width="512" height="240"></canvas><canvas id="wf-over"></canvas></div>
+      <div class="wf" title="Right-click: waterfall speed. Click CLIP to clear it"><canvas id="wf" width="512" height="240"></canvas><canvas id="wf-over"></canvas></div>
       <canvas id="cons"></canvas>
     </div>
     <div class="grid" style="margin-top:10px">
@@ -125,6 +130,14 @@ input[type=range] { flex: 1; min-width: 120px; }
     </div>
   </div>
 </section>
+
+<div class="menu" id="fps-menu" role="menu" aria-label="Waterfall speed" hidden>
+  <div class="title">Waterfall speed</div>
+  <button role="menuitemradio" data-fps="1">1 fps</button>
+  <button role="menuitemradio" data-fps="2">2 fps</button>
+  <button role="menuitemradio" data-fps="5">5 fps</button>
+  <button role="menuitemradio" data-fps="10">10 fps</button>
+</div>
 
 <section id="tab-settings" hidden>
   <form id="settings" autocomplete="off">
@@ -292,6 +305,32 @@ function drawOverlay() {
     ox.fillStyle = "#f03c3c"; ox.textAlign = "right"; ox.fillText("CLIP", x0 - 4, 14); ox.textAlign = "left";
   }
 }
+// Waterfall speed, as the GUI's right-click menu (1, 2, 5, 10 fps): the
+// server sends this browser the newest row once a period. Kept per browser:
+// a phone on a slow link may want less than the desk.
+let fps = 10;
+try { fps = Number(localStorage.getItem("data2g-fps")) || 10; } catch (e) {}
+const fpsMenu = $("fps-menu");
+function closeFpsMenu() { fpsMenu.hidden = true; }
+over.oncontextmenu = e => {
+  e.preventDefault();
+  for (const b of fpsMenu.querySelectorAll("button")) b.setAttribute("aria-checked", Number(b.dataset.fps) === fps);
+  fpsMenu.hidden = false;
+  fpsMenu.style.left = Math.min(e.clientX, innerWidth - fpsMenu.offsetWidth - 4) + "px";
+  fpsMenu.style.top = Math.min(e.clientY, innerHeight - fpsMenu.offsetHeight - 4) + "px";
+  fpsMenu.querySelector("[aria-checked=true]")?.focus();
+};
+fpsMenu.onclick = e => {
+  const f = Number(e.target.dataset?.fps);
+  if (!f) return;
+  fps = f;
+  try { localStorage.setItem("data2g-fps", f); } catch (err) {}
+  send({cmd: "fps", fps: f});
+  closeFpsMenu();
+};
+addEventListener("mousedown", e => { if (!fpsMenu.contains(e.target)) closeFpsMenu(); });
+addEventListener("keydown", e => { if (e.key === "Escape") closeFpsMenu(); });
+addEventListener("blur", closeFpsMenu);
 over.onclick = e => { if (clipLatched && e.offsetX >= over.clientWidth - 30) { clipLatched = false; drawOverlay(); } };
 
 // ---- constellation (gui/constellation.cpp)
@@ -392,7 +431,7 @@ function show(s) {
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.onopen = () => {
-    send({cmd: "hello", ...seq, fmt: $("fmt").value});
+    send({cmd: "hello", ...seq, fmt: $("fmt").value, fps});
     $("conn").textContent = ""; $("conn").className = "";
   };
   ws.onmessage = e => show(JSON.parse(e.data));

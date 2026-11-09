@@ -14,8 +14,10 @@
 //                       bursts, dumps, constellation and waterfall rows that client
 //                       has not had yet (each kept here with a sequence number, so
 //                       a reconnect resumes). The client sends
-//                       {"cmd": "hello", "b", "d", "c", "w": its last seqs, "fmt": "text"|"hex"},
+//                       {"cmd": "hello", "b", "d", "c", "w": its last seqs, "fmt": "text"|"hex", "fps"},
 //                       {"cmd": "fmt", "fmt"} (every dump kept, again, in that format),
+//                       {"cmd": "fps", "fps": 1|2|5|10} (the waterfall's speed, as the GUI's
+//                       right-click menu: below 10, the newest row once a period, the rest skipped),
 //                       {"cmd": "abort"}, {"cmd": "monitor", "on": bool}.
 //
 // One password (app/web_password.hpp), no user name. With none set, every
@@ -85,6 +87,8 @@ private:
         Seqs seq;
         bool hex = false;    // dumps as hex dumps
         bool hello = false;  // nothing is sent before its hello
+        int fps = 10;        // waterfall rows a second, at most (10: every row; the engine reads 0.1 s blocks)
+        std::chrono::steady_clock::time_point next_row{};
     };
     void read(QTcpSocket* s);
     // The stored password, re-read (another process may have set it); a new

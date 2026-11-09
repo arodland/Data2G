@@ -211,8 +211,18 @@ void WebUi::poll() {
 
     // ponytail: every client every tick, however slow its link; drop one
     // whose bytesToWrite() keeps growing if that ever backs up
-    for (Client& c : clients_)
-        if (c.hello) c.socket->sendTextMessage(QString::fromUtf8(json(status(c.seq, c.hex))));
+    for (Client& c : clients_) {
+        if (!c.hello) continue;
+        if (c.fps < 10 && c.seq.w < rows_.last) {  // as the GUI's frame timer: the newest row, once a period
+            if (now < c.next_row) {
+                c.seq.w = rows_.last;  // skipped
+            } else {
+                c.seq.w = rows_.last - 1;
+                c.next_row = now + std::chrono::milliseconds(1000 / c.fps);
+            }
+        }
+        c.socket->sendTextMessage(QString::fromUtf8(json(status(c.seq, c.hex))));
+    }
 }
 
 void WebUi::command(Client& c, const QString& message) {
@@ -220,10 +230,19 @@ void WebUi::command(Client& c, const QString& message) {
     const QString cmd = in.value(QStringLiteral("cmd")).toString();
     const auto seq = [&](const char* k) { return std::uint64_t(std::max(0.0, in.value(QLatin1String(k)).toDouble())); };
     const bool hex = in.value(QStringLiteral("fmt")).toString() == QLatin1String("hex");
+    // the GUI's choices (gui/main_window.cpp); anything else: every row
+    const auto fps = [&] {
+        const int f = in.value(QStringLiteral("fps")).toInt(10);
+        return f == 1 || f == 2 || f == 5 ? f : 10;
+    };
     if (cmd == QLatin1String("hello")) {
         c.seq = {seq("b"), seq("d"), seq("c"), seq("w")};
         c.hex = hex;
+        c.fps = fps();
         c.hello = true;
+    } else if (cmd == QLatin1String("fps")) {
+        c.fps = fps();
+        c.next_row = {};
     } else if (cmd == QLatin1String("fmt")) {
         c.hex = hex;
         c.seq.d = 0;  // every dump kept, again
