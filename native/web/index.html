@@ -329,13 +329,15 @@ function drawCons() {
 function resizeScope() { drawOverlay(); drawCons(); }
 addEventListener("resize", resizeScope);
 
-// ---- polling /api/status
+// ---- the WebSocket (/ws): the server pushes the state every 100 ms, with
+// what we have not had yet; seq is where to resume after a reconnect
 const seq = {b: 0, d: 0, c: 0, w: 0};
-let fmt = "text";
-$("fmt").onchange = () => { fmt = $("fmt").value; seq.d = 0; $("dumps").textContent = ""; };
+let ws = null;
+const send = m => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
+$("fmt").onchange = () => send({cmd: "fmt", fmt: $("fmt").value});
 $("clear-dumps").onclick = () => { $("dumps").textContent = ""; };
-$("monitoring").onchange = e => post("/api/monitor", {on: e.target.checked});
-$("abort").onclick = () => post("/api/abort", {});
+$("monitoring").onchange = e => send({cmd: "monitor", on: e.target.checked});
+$("abort").onclick = () => send({cmd: "abort"});
 
 function addBursts(list) {
   const body = $("bursts");
@@ -378,22 +380,25 @@ function show(s) {
   $("abort").disabled = !s.abortable;
   if (document.activeElement !== $("monitoring")) $("monitoring").checked = s.monitoring;
   addBursts(s.bursts);
+  if (s.reset_dumps) $("dumps").textContent = "";
   addDumps(s.dumps);
   for (const r of s.rows) addRow(r);
   if (s.rows.length) drawOverlay();
   if (s.constellation) { plot = s.constellation; drawCons(); }
-  Object.assign(seq, {b: s.b, d: s.d, c: s.c, w: s.w});
+  Object.assign(seq, s.seq);
 }
 
-async function poll() {
-  try {
-    const r = await fetch(`/api/status?b=${seq.b}&d=${seq.d}&c=${seq.c}&w=${seq.w}&fmt=${fmt}`);
-    show(await r.json());
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => {
+    send({cmd: "hello", ...seq, fmt: $("fmt").value});
     $("conn").textContent = ""; $("conn").className = "";
-  } catch (e) {
+  };
+  ws.onmessage = e => show(JSON.parse(e.data));
+  ws.onclose = () => {
     $("conn").textContent = "no connection to data2g-web"; $("conn").className = "down";
-  }
-  setTimeout(poll, document.hidden ? 1000 : 200);
+    setTimeout(connect, 1000);
+  };
 }
 
 // ---- settings (gui/settings_dialog.cpp's fields; app/settings.hpp's keys)
@@ -503,7 +508,7 @@ $("settings").onsubmit = async e => {
 // ---- start
 try { const t = localStorage.getItem("data2g-tab"); if (t) document.querySelector(`nav [data-tab=${t}]`)?.click(); } catch (e) {}
 resizeScope();
-poll();
+connect();
 </script>
 </body>
 </html>

@@ -238,13 +238,16 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
 endif()
 
 # data2g-web: the station headless, with the GUI's windows as a web page
-# (web/). Qt Core + Network only, like data2g-host.
-if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station)
+# (web/): Qt Core, Network and WebSockets (the Monitor tab's live feed; TCI's
+# too). Built with data2g-host.
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station AND NOT Qt6WebSockets_FOUND)
+  message(STATUS "Qt6 WebSockets not found; building without data2g-web")
+elseif(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station)
   add_library(data2g_web STATIC web/web_ui.cpp)
   # qt_add_resources on the target: kept by the linker, though a static library's
   qt_add_resources(data2g_web web_page PREFIX /web BASE web FILES web/index.html)
   target_include_directories(data2g_web PUBLIC web)
-  target_link_libraries(data2g_web PUBLIC data2g_station)
+  target_link_libraries(data2g_web PUBLIC data2g_station Qt6::WebSockets)
   add_executable(data2g-web web/main.cpp)
   target_link_libraries(data2g-web PRIVATE data2g_web)
   data2g_rig_rpath(data2g-web)

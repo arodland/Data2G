@@ -3,30 +3,37 @@
 // (waterfall, constellation, link, lamps, burst log, packet dumps) and
 // Settings (the settings dialog's fields, app/settings.hpp's map).
 //
-// A plain HTTP/1.1 server on QTcpServer, one request per connection. The
-// page (web/index.html, a Qt resource) polls GET /api/status; everything it
-// shows is kept here with sequence numbers, so any number of browsers can
-// watch and each asks only for what it has not seen.
+// A plain HTTP/1.1 server on QTcpServer, one request per connection, for the
+// page (web/index.html, a Qt resource) and the settings; the Monitor tab is a
+// WebSocket on the same port, handed to QWebSocketServer at its upgrade.
 //
-//   GET  /                  the page
-//   GET  /api/status?b=&d=&c=&w=&fmt=   state, plus bursts, dumps, constellation, waterfall rows after those seqs
-//   GET  /api/settings      the saved settings, their choices, devices, rig models
-//   POST /api/settings      {key: value, ...} over the running settings; saved, station restarted if changed
-//   POST /api/abort         the Abort button
-//   POST /api/monitor       {"on": bool}
+//   GET  /              the page
+//   GET  /api/settings  the saved settings, their choices, devices, rig models
+//   POST /api/settings  {key: value, ...} over the running settings; saved, station restarted if changed
+//   GET  /ws            WebSocket. Every 100 ms the server sends the state, and the
+//                       bursts, dumps, constellation and waterfall rows that client
+//                       has not had yet (each kept here with a sequence number, so
+//                       a reconnect resumes). The client sends
+//                       {"cmd": "hello", "b", "d", "c", "w": its last seqs, "fmt": "text"|"hex"},
+//                       {"cmd": "fmt", "fmt"} (every dump kept, again, in that format),
+//                       {"cmd": "abort"}, {"cmd": "monitor", "on": bool}.
 //
 // POSTs must be application/json: a page on another site can't send that
-// without a CORS preflight, which is never answered.
+// without a CORS preflight, which is never answered. WebSockets have no CORS,
+// so the upgrade must come from our own page: an Origin, if sent, naming the
+// Host it was sent to.
 #pragma once
 
 #include <QHostAddress>
 #include <QJsonObject>
 #include <QObject>
 #include <QTcpServer>
+#include <QWebSocketServer>
 
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <list>
 #include <memory>
 
 #include "app/station.hpp"
@@ -34,6 +41,7 @@
 
 class QSettings;
 class QTcpSocket;
+class QWebSocket;
 
 namespace data2g::web {
 
@@ -58,8 +66,19 @@ public:
     Reply handle(const QByteArray& method, const QByteArray& target, const QByteArray& content_type, const QByteArray& body);
 
 private:
+    struct Seqs {  // the last burst, dump, constellation and waterfall row a client has
+        std::uint64_t b = 0, d = 0, c = 0, w = 0;
+    };
+    struct Client {
+        QWebSocket* socket;
+        Seqs seq;
+        bool hex = false;    // dumps as hex dumps
+        bool hello = false;  // nothing is sent before its hello
+    };
     void read(QTcpSocket* s);
-    QJsonObject status(const QByteArray& query) const;
+    void command(Client& c, const QString& message);
+    // The state, and what came after `seq` (advanced to the newest).
+    QJsonObject status(Seqs& seq, bool hex) const;
     QJsonObject settings() const;
 
     template <typename T>
@@ -75,6 +94,8 @@ private:
 
     QSettings& store_;
     QTcpServer server_;
+    QWebSocketServer ws_{QStringLiteral("data2g-web"), QWebSocketServer::NonSecureMode};
+    std::list<Client> clients_;
     std::unique_ptr<app::Station> station_;
     QString error_;
     bool monitoring_;

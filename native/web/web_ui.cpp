@@ -6,11 +6,13 @@
 #include <QSettings>
 #include <QTcpSocket>
 #include <QTimer>
-#include <QUrlQuery>
+#include <QUrl>
+#include <QWebSocket>
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include "app/settings.hpp"
 #include "arq/modes.hpp"
@@ -42,6 +44,7 @@ const char* reason(int code) {
         case 200: return "OK";
         case 400: return "Bad Request";
         case 404: return "Not Found";
+        case 403: return "Forbidden";
         case 405: return "Method Not Allowed";
         case 413: return "Payload Too Large";
         case 415: return "Unsupported Media Type";
@@ -69,13 +72,30 @@ WebUi::WebUi(app::Args args, QSettings& store) : store_(store) {
             connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
         }
     });
+    connect(&ws_, &QWebSocketServer::newConnection, this, [this] {
+        while (QWebSocket* s = ws_.nextPendingConnection()) {
+            s->setParent(this);
+            Client& c = clients_.emplace_back(Client{s, {}});
+            connect(s, &QWebSocket::textMessageReceived, this, [this, &c](const QString& m) { command(c, m); });
+            connect(s, &QWebSocket::disconnected, this, [this, s] {
+                clients_.remove_if([s](const Client& c) { return c.socket == s; });
+                s->deleteLater();
+            });
+        }
+    });
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &WebUi::poll);
     timer->start(100);
     restart(args);
 }
 
-WebUi::~WebUi() = default;
+WebUi::~WebUi() {
+    // before clients_ goes: a socket deleted later would report its disconnect into it
+    for (Client& c : std::exchange(clients_, {})) {
+        QObject::disconnect(c.socket, nullptr, this, nullptr);
+        delete c.socket;
+    }
+}
 
 quint16 WebUi::listen(const QHostAddress& address, quint16 port) {
     if (!server_.listen(address, port))
@@ -151,11 +171,35 @@ void WebUi::poll() {
     samples_.push_back({now, l.rx_bytes, l.tx_bytes});
     const double window = s.args().stats_interval > 0 ? s.args().stats_interval : 60.0;
     while (samples_.size() > 2 && std::chrono::duration<double>(now - samples_[1].t).count() >= window) samples_.pop_front();
+
+    // ponytail: every client every tick, however slow its link; drop one
+    // whose bytesToWrite() keeps growing if that ever backs up
+    for (Client& c : clients_)
+        if (c.hello) c.socket->sendTextMessage(QString::fromUtf8(json(status(c.seq, c.hex))));
 }
 
-QJsonObject WebUi::status(const QByteArray& query) const {
-    const QUrlQuery q(QString::fromLatin1(query));
-    const auto after = [&](const char* key) { return q.queryItemValue(QLatin1String(key)).toULongLong(); };
+void WebUi::command(Client& c, const QString& message) {
+    const QJsonObject in = QJsonDocument::fromJson(message.toUtf8()).object();
+    const QString cmd = in.value(QStringLiteral("cmd")).toString();
+    const auto seq = [&](const char* k) { return std::uint64_t(std::max(0.0, in.value(QLatin1String(k)).toDouble())); };
+    const bool hex = in.value(QStringLiteral("fmt")).toString() == QLatin1String("hex");
+    if (cmd == QLatin1String("hello")) {
+        c.seq = {seq("b"), seq("d"), seq("c"), seq("w")};
+        c.hex = hex;
+        c.hello = true;
+    } else if (cmd == QLatin1String("fmt")) {
+        c.hex = hex;
+        c.seq.d = 0;  // every dump kept, again
+    } else if (cmd == QLatin1String("abort")) {
+        station_->abort_session();
+    } else if (cmd == QLatin1String("monitor")) {
+        monitoring_ = in.value(QStringLiteral("on")).toBool();
+        store_.setValue(QStringLiteral("web/monitoring"), monitoring_);
+        station_->set_monitor(monitoring_);
+    }
+}
+
+QJsonObject WebUi::status(Seqs& seq, bool hex) const {
     // Everything after `seq`; all of it when `seq` is from before a restart of ours.
     const auto since = [](const auto& log, std::uint64_t seq, auto&& fn) {
         if (seq > log.last) seq = 0;
@@ -212,19 +256,19 @@ QJsonObject WebUi::status(const QByteArray& query) const {
     o["monitoring"] = monitoring_;
 
     const auto same = [](const QJsonObject& x) { return x; };
-    o["bursts"] = since(bursts_, after("b"), same);
-    o["b"] = double(bursts_.last);
-    const auto fmt = q.queryItemValue(QStringLiteral("fmt")) == QLatin1String("hex") ? monitor::Format::HEX : monitor::Format::TEXT;
-    o["dumps"] = since(dumps_, after("d"), [&](const monitor::Dump& d) {
+    o["bursts"] = since(bursts_, seq.b, same);
+    const auto fmt = hex ? monitor::Format::HEX : monitor::Format::TEXT;
+    // every dump kept (a new client, a format change, a restart of ours): the client starts its view over
+    if (seq.d == 0 || seq.d > dumps_.last) o["reset_dumps"] = true;
+    o["dumps"] = since(dumps_, seq.d, [&](const monitor::Dump& d) {
         return QJsonObject{{"tx", d.tx}, {"text", qs(monitor::render(d, fmt))}};
     });
-    o["d"] = double(dumps_.last);
-    if (!constellation_.items.empty() && after("c") != constellation_.last) o["constellation"] = constellation_.items.back().second;
-    o["c"] = double(constellation_.last);
-    QJsonArray rows = since(rows_, after("w"), same);
-    while (rows.size() > 100) rows.removeFirst();  // a tab back from the background: the newest 10 s
+    if (!constellation_.items.empty() && seq.c != constellation_.last) o["constellation"] = constellation_.items.back().second;
+    QJsonArray rows = since(rows_, seq.w, same);
+    while (rows.size() > 100) rows.removeFirst();  // a reconnect: the newest 10 s
     o["rows"] = rows;
-    o["w"] = double(rows_.last);
+    seq = {bursts_.last, dumps_.last, constellation_.last, rows_.last};
+    o["seq"] = QJsonObject{{"b", double(seq.b)}, {"d", double(seq.d)}, {"c", double(seq.c)}, {"w", double(seq.w)}};  // for a reconnect's hello
     return o;
 }
 
@@ -265,7 +309,6 @@ WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, c
             if (!page.open(QIODevice::ReadOnly)) return error(500, QStringLiteral("the page is missing from the build"));
             return {200, "text/html; charset=utf-8", page.readAll()};
         }
-        if (path == "/api/status") return {200, "application/json", json(status(query))};
         if (path == "/api/settings") return {200, "application/json", json(settings())};
         return error(404, QStringLiteral("no such page"));
     }
@@ -275,16 +318,6 @@ WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, c
     const QJsonDocument doc = QJsonDocument::fromJson(body, &bad);
     if (!body.isEmpty() && !doc.isObject()) return error(400, bad.error ? bad.errorString() : QStringLiteral("expected a JSON object"));
     const QJsonObject in = doc.object();
-    if (path == "/api/abort") {
-        station_->abort_session();
-        return {200, "application/json", json({{"ok", true}})};
-    }
-    if (path == "/api/monitor") {
-        monitoring_ = in.value(QStringLiteral("on")).toBool();
-        store_.setValue(QStringLiteral("web/monitoring"), monitoring_);
-        station_->set_monitor(monitoring_);
-        return {200, "application/json", json({{"ok", true}})};
-    }
     if (path == "/api/settings") {
         // Only the keys sent change: a command line's value stays unless edited.
         // Each must be a setting, of its type: from_settings would read "x" as port 0.
@@ -304,41 +337,56 @@ WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, c
     return error(404, QStringLiteral("no such endpoint"));
 }
 
-// ponytail: one request per connection (Connection: close) and no
-// keep-alive; at 5 polls a second on a LAN that is fine.
+// ponytail: one request per connection (Connection: close), no keep-alive:
+// the page loads once and then lives on its WebSocket.
+//
+// The request is peeked at, not read, until it is whole: a WebSocket upgrade
+// goes to QWebSocketServer with its handshake still unread.
 void WebUi::read(QTcpSocket* s) {
-    QByteArray buf = s->property("req").toByteArray() + s->readAll();
     const auto respond = [s](const Reply& r) {
         s->write(QByteArray("HTTP/1.1 ") + QByteArray::number(r.code) + ' ' + reason(r.code) + "\r\nContent-Type: " + r.type +
                  "\r\nContent-Length: " + QByteArray::number(r.body.size()) +
                  "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n" + r.body);
         s->disconnectFromHost();
     };
-    if (buf.size() > MAX_REQUEST) return respond(error(413, QStringLiteral("too large")));
+    if (s->property("answered").toBool()) return;  // anything after a request: ignored until the close
+    const QByteArray buf = s->peek(s->bytesAvailable());
+    const auto answer = [&](const Reply& r) {
+        s->setProperty("answered", true);
+        respond(r);
+    };
+    if (buf.size() > MAX_REQUEST) return answer(error(413, QStringLiteral("too large")));
     const qsizetype end = buf.indexOf("\r\n\r\n");
-    if (end < 0) {
-        s->setProperty("req", buf);
-        return;
-    }
+    if (end < 0) return;
     const QList<QByteArray> lines = buf.left(end).split('\n');
     const QList<QByteArray> request = lines.first().trimmed().split(' ');
-    if (request.size() != 3) return respond(error(400, QStringLiteral("bad request line")));
+    if (request.size() != 3) return answer(error(400, QStringLiteral("bad request line")));
     qsizetype length = 0;
-    QByteArray type;
+    QByteArray type, host, origin, upgrade;
     for (qsizetype i = 1; i < lines.size(); ++i) {
         const qsizetype colon = lines[i].indexOf(':');
         if (colon < 0) continue;
         const QByteArray name = lines[i].left(colon).trimmed().toLower(), value = lines[i].mid(colon + 1).trimmed();
         if (name == "content-length") length = value.toLongLong();
         if (name == "content-type") type = value;
+        if (name == "host") host = value;
+        if (name == "origin") origin = value;
+        if (name == "upgrade") upgrade = value.toLower();
     }
-    if (length < 0 || length > MAX_REQUEST) return respond(error(413, QStringLiteral("too large")));
-    if (buf.size() < end + 4 + length) {
-        s->setProperty("req", buf);
+    if (upgrade == "websocket") {
+        if (request[1] != "/ws") return answer(error(404, QStringLiteral("no such WebSocket")));
+        // No CORS for WebSockets: any page the browser has open could connect, unless it must be ours.
+        if (!origin.isEmpty() && QUrl(QString::fromLatin1(origin)).authority() != QString::fromLatin1(host))
+            return answer(error(403, QStringLiteral("not from this page")));
+        QObject::disconnect(s, nullptr, this, nullptr);
+        QObject::disconnect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+        ws_.handleConnection(s);  // the QWebSocket it makes owns s from here
         return;
     }
-    s->setProperty("req", QVariant());
-    respond(handle(request[0], request[1], type, buf.mid(end + 4, length)));
+    if (length < 0 || length > MAX_REQUEST) return answer(error(413, QStringLiteral("too large")));
+    if (buf.size() < end + 4 + length) return;
+    s->read(end + 4 + length);
+    answer(handle(request[0], request[1], type, buf.mid(end + 4, length)));
 }
 
 }  // namespace data2g::web
