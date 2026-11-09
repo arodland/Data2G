@@ -18,6 +18,8 @@
 #include <cstddef>
 #include <utility>
 
+class QTimer;
+
 namespace data2g::gui {
 
 class Waterfall : public QWidget {
@@ -35,6 +37,7 @@ public:
     double peak() const { return peak_; }
     bool clip_latched() const { return clip_latched_; }
     void clear_clip();
+    void set_fps(int fps);  // the frame timer's rate; rows still come only with new audio
 
 public Q_SLOTS:
     void tick();  // a slot so a test can drive a frame directly
@@ -49,6 +52,7 @@ private:
     void draw_grid(QPainter& painter);
     void draw_level_meter(QPainter& painter);
 
+    QTimer* timer_;
     Source source_;
     std::uint64_t seen_ = 0;
     QImage image_;
