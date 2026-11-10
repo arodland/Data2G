@@ -79,6 +79,15 @@ public:
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
+    // the engine's energy readings and the reply it waits for (carrier hold, missed energy): without these a
+    // C++ Engine driving a Python policy (tools/with_native.py) never fed the shifter's energy inputs
+    void observe_energy(double snr_db, double now) override {
+        if (overrides("observe_energy")) obj.attr("observe_energy")(snr_db, now);
+    }
+    std::optional<std::pair<std::string, double>> expected_reply() const override {
+        if (!overrides("expected_reply")) return std::nullopt;
+        return obj.attr("expected_reply")().cast<std::optional<std::pair<std::string, double>>>();
+    }
     std::optional<int> next_capacity(const Station& st) const override {
         if (!overrides("next_capacity")) return std::nullopt;
         return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference))
