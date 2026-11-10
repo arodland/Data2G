@@ -926,8 +926,10 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     }
     std::stable_sort(found.begin(), found.end(), [](const Lock& a, const Lock& c) { return -a.score < -c.score; });
     for (const auto& l : found) {
-        const auto c = pilot_coherence(x, l, 10000);
-        if (c.size() >= 2 && dsp::pairwise_sum(std::span<const double>(c)) / static_cast<double>(c.size()) >= COPY_COHERENCE)
+        double pat = 0.0;
+        const auto c = pilot_coherence(x, l, 10000, false, &pat);
+        if (c.size() >= 2 && dsp::pairwise_sum(std::span<const double>(c)) / static_cast<double>(c.size()) >= COPY_COHERENCE &&
+            pat >= COPY_PATTERN)
             return l;
     }
     return std::nullopt;

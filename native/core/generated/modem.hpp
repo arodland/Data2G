@@ -22,6 +22,7 @@ inline constexpr int PILOT_PAIRS = 4;
 inline constexpr int COPY_PAIRS = 3;
 inline constexpr int COPY_GRIDS = 4;
 inline constexpr double COPY_COHERENCE = 0.35;
+inline constexpr double COPY_PATTERN = 0.6;
 inline constexpr double COPY_DETECT = 14.0;
 inline constexpr std::array<int, 3> COPY_EARLIER = {0, 16, 32};
 inline constexpr std::array<std::string_view, 3> SYNC_BANDS = {"w", "n10", "w48"};
