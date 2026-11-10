@@ -221,3 +221,16 @@ def test_header_copy_rescues_a_lost_first_copy(sub, n_cw):
 def test_valid_signs_are_the_valid_rows_of_the_full_table():
     for band in modem.SYNC_BANDS:
         assert np.array_equal(modem._valid_signs(band), modem._header_signs(band)[modem._valid_words(band)])
+
+
+def test_a_narrower_bands_burst_is_no_copy_lock():
+    """find_copy asked only that a lock's frame pilots be coherent. An n10
+    burst's pilots are (same frame grid, a tenth of the carriers), and its
+    data read as a wide-band header copy over the floor: a 16qam-r1/3 x63
+    lock holding BUSY for a minute. The pilot's pattern is not there
+    (COPY_PATTERN)."""
+    s = SUBMODES["n10-qpsk-r1/2"]
+    rng = np.random.default_rng(4)
+    x = modem.modulate([rng.bytes(codes.payload_bytes(s)) for _ in range(6)], s)
+    y = hfchannel.awgn(np.pad(x, (FS // 2, FS)), 10, seed=4, s_power=hfchannel.active_power(x))
+    assert modem.find_copy(y, "w") is None

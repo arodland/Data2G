@@ -850,6 +850,13 @@ COPY_EARLIER = (0, NCP // 2, NCP)  # read the copy this much before a peak (its 
 # mean frame-pilot coherence a copy lock needs over its burst: on noise
 # locks read 0.11-0.23 (47 in 2 h), true locks that decoded 0.41-0.73 (58)
 COPY_COHERENCE = 0.35
+# ... and their pattern (pilot_coherence's, over the whole burst): a CW ID's
+# key-downs and an n10 burst's pilots are coherent too, and their "copy" read
+# a word over the header floor (scripts/copy_pattern_study.py: 10 s of each at
+# 0-20 dB, band w, 6 and 20 locks of 90, pattern 0.03-0.51). Right copy locks
+# (head wiped, -8..8 dB, AWGN/MPP/MPD) read 0.65 and up on w (662), 0.53 and
+# up on w48 (543; 2 under 0.6, neither decoded).
+COPY_PATTERN = 0.6
 # find_copy's normalized pilot peak worth reading headers at: noise-only
 # 1.9 s buffers (the stream's) reach 11.9 (2400 of them, w and w48); bursts
 # the copy lock went on to decode, 16.6-91 (16, MPP/MPD low end). Without it
@@ -878,7 +885,9 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     3. The copy read at every frame of the grid; a word counts if its own
        length puts its copy frame there and it clears the header floor.
     4. The best-scoring word whose burst's frame pilots are coherent
-       (COPY_COHERENCE; the live BUSY floors pass noise)."""
+       (COPY_COHERENCE; the live BUSY floors pass noise) and keep the
+       pilot's pattern (COPY_PATTERN: a CW ID or a narrower band's burst
+       is coherent too)."""
     if C is not None and level is None:
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
@@ -929,8 +938,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
                                           end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
                                           copy=dict(word=word, pc=pc)))
     for lock in sorted(found, key=lambda k: -k["score"]):
-        c = pilot_coherence(x, lock, n_max=10**4)
-        if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE:
+        c, pat = pilot_coherence(x, lock, n_max=10**4, pattern=True)
+        if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE and pat >= COPY_PATTERN:
             return lock
     return None
 
