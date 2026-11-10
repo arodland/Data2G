@@ -305,6 +305,11 @@ Station::Station(int direction_, std::shared_ptr<Policy> policy_, bool master_, 
     : direction(direction_), policy(std::move(policy_)), master(master_), key(key_), max_misses(max_misses_), cap(cap_),
       chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")), prime(env_on("DATA2G_PRIME")) {}
 
+bool repeat_default() {
+    static const bool on = env_on("DATA2G_REPEAT");
+    return on;
+}
+
 bool prime_default() {
     static const bool on = env_on("DATA2G_PRIME");
     return on;
@@ -693,10 +698,12 @@ bool Station::handle_inner(RxBurst& rxb) {
 }
 
 // The burst's control and its dup factor; nullopt if lost or malformed. A control codeword that fails blind
-// (alone, then as an ARQ_DUP pair) is retried primed with what I expect of it (§3a).
+// (alone, then as an ARQ_DUP pair) is retried primed with what I expect of it (§3a), then (the first one)
+// combined with the failed ones of the bursts before it: a repeat's is the same codeword.
 std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool outcome) {
     std::optional<Bytes> first = rxb.decode(0, ctl_mask(peer(), 0, key), 0, nullptr);
-    bool paired = false, was_primed = false;
+    bool paired = false, was_primed = false, combined = false;
+    const bool repeat = repeat_default() && rxb.can_repeat();
     if (!first && rxb.n_cw() >= 2) {
         // an ARQ_DUP burst's control pair, combined
         first = ctl_pair(rxb, 0, 0);
@@ -709,6 +716,16 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
         first = std::move(p);
         paired = pair;
         was_primed = first.has_value();
+    }
+    if (first) {
+        if (repeat) rxb.forget(REPEAT_KEY);  // what failed before this burst is not its repeat
+    } else if (repeat) {
+        // codeword 0 only (link.py)
+        first = rxb.decode_repeat(0, ctl_mask(peer(), 0, key), REPEAT_KEY);
+        if (first) {
+            rxb.forget(REPEAT_KEY);
+            was_primed = combined = true;  // as a primed one: checked against my state, not scored as usable
+        }
     }
     if (!first) {
         if (outcome) policy->outcome(rxb.submode(), 0, 0, false);
@@ -761,7 +778,7 @@ std::optional<std::pair<Control, int>> Station::read_control(RxBurst& rxb, bool 
             log_write(LOG, INFO, "RX primed control contradicts my state (" + *why + "): dropped");
             return std::nullopt;
         }
-        stats["rx_primed"] += 1;
+        stats[combined ? "rx_repeat" : "rx_primed"] += 1;
     }
     primed_ctl_ = was_primed;
     return std::make_pair(std::move(ctl), dup);

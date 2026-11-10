@@ -60,6 +60,9 @@ def substitutions(native):
         def decode_known(self, slot, mask_id, template, tmask, pair=False):
             return self._n.decode_known(slot, mask_id, template, tmask, pair)
 
+        def decode_repeat(self, slot, mask_id, key):
+            return self._n.decode_repeat(slot, mask_id, key)
+
         def forget(self, key):
             return self._n.forget(key)
 
