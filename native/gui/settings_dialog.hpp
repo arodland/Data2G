@@ -6,6 +6,9 @@
 // Devices are stored by name, which select_device() matches as a
 // substring: indices renumber when a USB card comes or goes.
 //
+// The Station tab also sets data2g-web's password (app/web_password.hpp),
+// saved on OK when one is typed.
+//
 // The Rig tab picks the radio interface first: a sound card and Hamlib, or
 // TCI; only that interface's settings show. Its Hamlib part is SSTVAE's
 // (WSJT-X's Radio tab): a model picker with search, the device and serial
@@ -17,6 +20,7 @@
 #include <QStringList>
 
 #include "app/options.hpp"
+#include "app/settings.hpp"
 
 class QCheckBox;
 class QComboBox;
@@ -31,10 +35,9 @@ class QSpinBox;
 
 namespace data2g::gui {
 
-// The persisted subset of `base`'s fields: callsign, interface (TCI), devices, sample rate,
-// volume, PTT and rig, ports, recording, decode worker, live constellation.
-app::Args load_settings(QSettings& s, app::Args base = {});
-void save_settings(QSettings& s, const app::Args& a);
+// app/settings.hpp's, under the GUI's names too.
+using app::load_settings;
+using app::save_settings;
 
 class SettingsDialog : public QDialog {
     Q_OBJECT
@@ -70,6 +73,7 @@ private:
     QDoubleSpinBox* poll_;
     QPushButton *test_cat_ = nullptr, *test_ptt_ = nullptr;
     QLineEdit* listen_;
+    QLineEdit *web_pw_, *web_pw2_;  // data2g-web's password: saved on OK when typed
     QSpinBox *cmd_port_, *kiss_port_;
     QCheckBox* record_;
     QLineEdit* record_dir_;

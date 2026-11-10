@@ -26,8 +26,8 @@ int main(int argc, char** argv) {
     icon.addFile(QStringLiteral(":/data2g-48.png"));
     icon.addFile(QStringLiteral(":/data2g-256.png"));
     QApplication::setWindowIcon(icon);
-    QSettings store;
-    const app::Args a = app::parse(argc, argv, gui::load_settings(store), "data2g-gui");
+    const auto store = app::settings_store();  // shared with data2g-web
+    const app::Args a = app::parse(argc, argv, gui::load_settings(*store), "data2g-gui");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
         app::usage_error("--list-modes, --list-audio-devices and --list-rigs are data2g-host's", "data2g-gui");
     const auto level = app::parse_level(a.log_level);
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     app::g_level = *level;
     app::install_arq_log();
     app::quit_on_signals();
-    gui::MainWindow w(a, store);
+    gui::MainWindow w(a, *store);
     w.show();
     QTimer quit_check;  // a signal quits like closing the window: the station stops, PTT off
     QObject::connect(&quit_check, &QTimer::timeout, [] {

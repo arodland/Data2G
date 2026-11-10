@@ -9,6 +9,7 @@
 #include <complex>
 #include <cstddef>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -41,5 +42,11 @@ RxConstellation rx_constellation(const arq::BurstPreview& p);  // live
 // every one far outside (recordings/20261013-234857 burst 0: a 10.7 ms
 // gap mid-burst, |eq| ~3e7), a NaN nowhere: then the live view stays.
 bool plot_visible(const RxConstellation& c);
+
+// The waterfall's spectrum: the newest SPECTRUM_N samples (8 kHz input),
+// Hann-windowed, as SPECTRUM_N / 2 bins (0 .. FS/2) in dB, scaled by
+// 1/SPECTRUM_N (SSTVAE's dsp::spectrum_db).
+inline constexpr std::size_t SPECTRUM_N = 1024;
+std::vector<double> spectrum_db(std::span<const double> block);
 
 }  // namespace data2g::app
