@@ -278,10 +278,10 @@ def card_svg():
   </g>
 
   <!-- header -->
-  {logo(78, 62, 92)}
-  <text x="{cx - 40}" y="112" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-size="52" letter-spacing="6" fill="{NAVY}">DATA2G</text>
-  <rect x="{cx - 245}" y="124" width="410" height="26" rx="3" fill="url(#banner)"/>
-  <text x="{cx - 40}" y="142.5" text-anchor="middle" font-family="{SERIF}" font-size="14.5" letter-spacing="4.5" fill="#ffffff">OFFICIAL USER IDENTIFICATION</text>
+  {logo(150 - 46, 128 - 46, 92)}
+  <text x="{cx}" y="112" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-size="52" letter-spacing="6" fill="{NAVY}">DATA2G</text>
+  <rect x="{cx - 205}" y="124" width="410" height="26" rx="3" fill="url(#banner)"/>
+  <text x="{cx}" y="142.5" text-anchor="middle" font-family="{SERIF}" font-size="14.5" letter-spacing="4.5" fill="#ffffff">OFFICIAL USER IDENTIFICATION</text>
   {seal(W - 150, 128)}
   <text x="{W - 150}" y="226" text-anchor="middle" font-family="{SERIF}" font-size="11" letter-spacing="2" fill="{BLUE}">EXPIRATION</text>
   <text x="{W - 150}" y="250" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-style="italic" font-size="22" fill="{NAVY}">Never</text>

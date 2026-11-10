@@ -64,7 +64,7 @@
 
   <!-- header -->
   
-  <g transform="translate(78 62) scale(0.36)">
+  <g transform="translate(104 82) scale(0.36)">
     <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#logobg)"/>
     <path d="M24 92 Q128 20 232 92" fill="none" stroke="#8ecae6" stroke-width="16" stroke-linecap="round"/>
     <path d="M0 214 Q128 166 256 214 V256 H0 Z" fill="#2a9d8f" clip-path="url(#logotile)"/>
@@ -72,9 +72,9 @@
     <circle cx="56" cy="192" r="15" fill="#e8f1f8"/>
     <circle cx="200" cy="192" r="15" fill="#e8f1f8"/>
   </g>
-  <text x="466.0" y="112" text-anchor="middle" font-family="Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif" font-weight="bold" font-size="52" letter-spacing="6" fill="#0b2545">DATA2G</text>
-  <rect x="261.0" y="124" width="410" height="26" rx="3" fill="url(#banner)"/>
-  <text x="466.0" y="142.5" text-anchor="middle" font-family="Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif" font-size="14.5" letter-spacing="4.5" fill="#ffffff">OFFICIAL USER IDENTIFICATION</text>
+  <text x="506.0" y="112" text-anchor="middle" font-family="Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif" font-weight="bold" font-size="52" letter-spacing="6" fill="#0b2545">DATA2G</text>
+  <rect x="301.0" y="124" width="410" height="26" rx="3" fill="url(#banner)"/>
+  <text x="506.0" y="142.5" text-anchor="middle" font-family="Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif" font-size="14.5" letter-spacing="4.5" fill="#ffffff">OFFICIAL USER IDENTIFICATION</text>
   
   <g id="seal">
     <path d="M862 58L867.4 66.24L874.16 59.06L878.05 68.11L885.94 62.22L888.2 71.81L897 67.38L897.56 77.21L907 74.38L905.84 84.16L915.62 83L912.79 92.44L922.62 93L918.19 101.8L927.78 104.06L921.89 111.95L930.94 115.84L923.76 122.6L932 128L923.76 133.4L930.94 140.16L921.89 144.05L927.78 151.94L918.19 154.2L922.62 163L912.79 163.56L915.62 173L905.84 171.84L907 181.62L897.56 178.79L897 188.62L888.2 184.19L885.94 193.78L878.05 187.89L874.16 196.94L867.4 189.76L862 198L856.6 189.76L849.84 196.94L845.95 187.89L838.06 193.78L835.8 184.19L827 188.62L826.44 178.79L817 181.62L818.16 171.84L808.38 173L811.21 163.56L801.38 163L805.81 154.2L796.22 151.94L802.11 144.05L793.06 140.16L800.24 133.4L792 128L800.24 122.6L793.06 115.84L802.11 111.95L796.22 104.06L805.81 101.8L801.38 93L811.21 92.44L808.38 83L818.16 84.16L817 74.38L826.44 77.21L827 67.38L835.8 71.81L838.06 62.22L845.95 68.11L849.84 59.06L856.6 66.24Z" fill="#f4a259"/>
