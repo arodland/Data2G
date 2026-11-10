@@ -31,6 +31,16 @@ ORANGE = "#f4a259"
 PAPER = "#fbf6e9"
 PAPER2 = "#f1e7cc"
 
+# Header emblems: logo on the left, seal mirrored on the right, both centred
+# on the same horizontal line. A square reads larger than a circle of the same
+# width, so the seal is drawn ~1.13x wider (equal area) to look the same size.
+EMBLEM_X = 150            # distance of each emblem's centre from its card edge
+EMBLEM_Y = 128            # common vertical centre
+LOGO_TILE = 112           # visible width of the logo's rounded square
+SEAL_D = 126              # diameter of the seal's starburst
+LOGO_SIZE = LOGO_TILE * 256 / 240  # icon tile is 240 of its 256-unit viewBox
+SEAL_SCALE = SEAL_D / 140          # seal starburst is 140 units across
+
 SERIF = "Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif"
 
 LINES = [
@@ -148,13 +158,13 @@ def logo(x, y, size):
   </g>"""
 
 
-def seal(cx, cy):
+def seal(cx, cy, scale=1.0):
     rings = "".join(
         f'<path d="{rose_ring(cx, cy, 54 - i * 3, 3.2, 24, i * 0.9)}" fill="none" '
         f'stroke="{TEAL}" stroke-width="0.9" opacity="0.85"/>'
         for i in range(4))
     return f"""
-  <g id="seal">
+  <g id="seal" transform="translate({f(cx)} {f(cy)}) scale({f(scale)}) translate({f(-cx)} {f(-cy)})">
     <path d="{starburst(cx, cy, 62, 70, 36)}" fill="{ORANGE}"/>
     <circle cx="{cx}" cy="{cy}" r="60" fill="{PAPER}" stroke="{NAVY}" stroke-width="2"/>
     {rings}
@@ -278,13 +288,13 @@ def card_svg():
   </g>
 
   <!-- header -->
-  {logo(150 - 46, 128 - 46, 92)}
+  {logo(EMBLEM_X - LOGO_SIZE / 2, EMBLEM_Y - LOGO_SIZE / 2, LOGO_SIZE)}
   <text x="{cx}" y="112" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-size="52" letter-spacing="6" fill="{NAVY}">DATA2G</text>
   <rect x="{cx - 205}" y="124" width="410" height="26" rx="3" fill="url(#banner)"/>
   <text x="{cx}" y="142.5" text-anchor="middle" font-family="{SERIF}" font-size="14.5" letter-spacing="4.5" fill="#ffffff">OFFICIAL USER IDENTIFICATION</text>
-  {seal(W - 150, 128)}
-  <text x="{W - 150}" y="226" text-anchor="middle" font-family="{SERIF}" font-size="11" letter-spacing="2" fill="{BLUE}">EXPIRATION</text>
-  <text x="{W - 150}" y="250" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-style="italic" font-size="22" fill="{NAVY}">Never</text>
+  {seal(W - EMBLEM_X, EMBLEM_Y, SEAL_SCALE)}
+  <text x="{W - EMBLEM_X}" y="{EMBLEM_Y + SEAL_D / 2 + 26}" text-anchor="middle" font-family="{SERIF}" font-size="11" letter-spacing="2" fill="{BLUE}">EXPIRATION</text>
+  <text x="{W - EMBLEM_X}" y="{EMBLEM_Y + SEAL_D / 2 + 50}" text-anchor="middle" font-family="{SERIF}" font-weight="bold" font-style="italic" font-size="22" fill="{NAVY}">Never</text>
 {body}
   {flourish(cx, 492, 300)}
   <text x="{cx}" y="{H - 94}" text-anchor="middle" font-family="{SERIF}" font-size="14" fill="{NAVY}" opacity="0.85">{FINE_PRINT}</text>
