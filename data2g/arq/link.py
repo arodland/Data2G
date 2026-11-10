@@ -1134,12 +1134,16 @@ class Station:
         self._confirmed = acted
         if self._abandon is not None and acted in self._abandon_bursts:
             self._abandon = None  # the peer has applied it
-        for x in self._sent_seqs.pop(acted, []):
-            if c := self.tx.cws.get(x):
-                # the peer decoded that burst: it holds soft bits (none for one sent inline)
-                c.heard += not (c.inlined and c.first_bn == acted)
-                # and mapped its new slots by T_NEW: it holds their T_COMP bits
-                c.comp_known |= c.first_bn == acted
+        cum = unwrap(core.cum, self.tx.base)
+        received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
+        received = frozenset(unwrap(x, cum) for x in received)
+        for bn in self._decoded_bursts(acted, cum, received):
+            for x in self._sent_seqs.pop(bn, []):
+                if c := self.tx.cws.get(x):
+                    # the peer decoded that burst: it holds soft bits (none for one sent inline)
+                    c.heard += not (c.inlined and c.first_bn == bn)
+                    # and mapped its new slots by T_NEW: it holds their T_COMP bits
+                    c.comp_known |= c.first_bn == bn
         # (settle_limbo can start one before any burst carries it: every ACK is from before it)
         if (self._abandon is not None and acted < min(self._abandon_bursts, default=self._latest + 1)
                 and unwrap(core.cum, self.tx.base) > self.tx.base):
@@ -1147,12 +1151,24 @@ class Station:
             # old slicing: past the abandon point it can't be mapped (a late
             # burst delivered old codewords there). Never guess (§4).
             raise ProtocolError(f"ACK of pre-abandon burst {acted % F.BURST_MOD} past the abandon at {self.tx.base}")
-        cum = unwrap(core.cum, self.tx.base)
-        received = F.unpack_bitmap(ext[F.T_BITMAP], core.cum) if F.T_BITMAP in ext else set()
-        received = frozenset(unwrap(x, cum) for x in received)
         progress = self.tx.on_ack(cum, received)
         self._acted_on = core.burst_seq
         return acted, progress
+
+    def _decoded_bursts(self, acted: int, cum: int, received: frozenset) -> list[int]:
+        """My bursts this ACK shows the peer decoded: the one it acted on, and
+        any before it whose reply was lost (the peer then acts on my poll)
+        that the ACK itself vouches for: a seq it newly reports received that
+        no other burst up to `acted` carried. The peer mapped that burst's
+        slots, so it holds soft bits for the ones that failed; uncounted,
+        their resends went at RV 0 again (Chase where IR was to be had). A
+        burst the ACK says nothing new of stays uncounted: RV 0 is always
+        decodable alone."""
+        had_cum, had = self.tx.ack or (self.tx.base, frozenset())
+        fresh = lambda x: (x < cum or x in received) and not (x < had_cum or x in had)  # noqa: E731
+        sent = {b: s for b, s in self._sent_seqs.items() if b <= acted}
+        times = Counter(x for s in sent.values() for x in s)
+        return [b for b, s in sent.items() if b == acted or any(times[x] == 1 and fresh(x) for x in s)]
 
     def _take_abandon(self, rx: RxBurst, ext) -> bool:
         """Apply the peer's abandon if it is a new one. -> whether it was. Raises ProtocolError."""

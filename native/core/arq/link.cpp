@@ -1027,12 +1027,17 @@ std::pair<std::int64_t, bool> Station::take_ack(const Core& core, const Ext& ext
     const std::int64_t acted = acted_list[0];
     confirmed = acted;
     if (abandon_tlv && abandon_bursts.count(acted)) abandon_tlv.reset();  // the peer has applied it
-    if (auto it = sent_seqs.find(acted); it != sent_seqs.end()) {
+    const std::int64_t cum = unwrap(core.cum, tx.base);
+    std::set<std::int64_t> received;
+    if (auto b = ext.find(T_BITMAP); b != ext.end())
+        for (int x : unpack_bitmap(b->second, core.cum)) received.insert(unwrap(x, cum));
+    for (auto bn : decoded_bursts(acted, cum, received)) {
+        auto it = sent_seqs.find(bn);
         for (auto x : it->second) {
             if (auto c = tx.cws.find(x); c != tx.cws.end()) {
                 // the peer decoded that burst: it holds soft bits (none for one sent inline)
-                c->second.heard += !(c->second.inlined && c->second.first_bn == acted);
-                c->second.comp_known = c->second.comp_known || c->second.first_bn == acted;
+                c->second.heard += !(c->second.inlined && c->second.first_bn == bn);
+                c->second.comp_known = c->second.comp_known || c->second.first_bn == bn;
             }
         }
         sent_seqs.erase(it);
@@ -1044,13 +1049,35 @@ std::pair<std::int64_t, bool> Station::take_ack(const Core& core, const Ext& ext
         throw ProtocolError(format("ACK of pre-abandon burst %d past the abandon at %lld", static_cast<int>(pmod(acted, BURST_MOD)),
                                    static_cast<long long>(tx.base)));
     }
-    const std::int64_t cum = unwrap(core.cum, tx.base);
-    std::set<std::int64_t> received;
-    if (auto b = ext.find(T_BITMAP); b != ext.end())
-        for (int x : unpack_bitmap(b->second, core.cum)) received.insert(unwrap(x, cum));
     const bool progress = tx.on_ack(cum, received);
     acted_on_ = core.burst_seq;
     return {acted, progress};
+}
+
+// My bursts this ACK shows the peer decoded: the one it acted on, and any
+// before it whose reply was lost that the ACK vouches for (a seq it newly
+// reports received that no other burst up to `acted` carried). link.py's
+// _decoded_bursts.
+std::vector<std::int64_t> Station::decoded_bursts(std::int64_t acted, std::int64_t cum,
+                                                  const std::set<std::int64_t>& received) const {
+    const std::int64_t had_cum = tx.ack ? tx.ack->first : tx.base;
+    static const std::set<std::int64_t> none;
+    const auto& had = tx.ack ? tx.ack->second : none;
+    auto fresh = [&](std::int64_t x) {
+        return (x < cum || received.count(x)) && !(x < had_cum || had.count(x));
+    };
+    std::map<std::int64_t, int> times;
+    for (const auto& [b, seqs] : sent_seqs)
+        if (b <= acted)
+            for (auto x : seqs) ++times[x];
+    std::vector<std::int64_t> out;
+    for (const auto& [b, seqs] : sent_seqs) {
+        if (b > acted) continue;
+        bool vouched = b == acted;
+        for (auto x : seqs) vouched = vouched || (times[x] == 1 && fresh(x));
+        if (vouched) out.push_back(b);
+    }
+    return out;
 }
 
 // Apply the peer's abandon if it is a new one. -> whether it was. Throws ProtocolError.
