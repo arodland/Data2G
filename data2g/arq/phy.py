@@ -393,6 +393,25 @@ class ModemRx:
             return None
         return got
 
+    def decode_repeat(self, slot: int, mask_id: tuple, key: tuple) -> bytes | None:
+        """Control slot `slot`, combined with the same slot of the bursts
+        before it kept under `key` (their decodes failed; a failure here
+        keeps this one too): bit-identical repeats (a CONNECT's tries, a
+        repeat after a timeout, robust polls; docs/arq.md §3a). The payload
+        must also score PRIMED_SCORE nats on this burst's own soft bits: the
+        sum may decode to an earlier, different burst's codeword. What was
+        kept in another mode is dropped: not this burst's repeat."""
+        if key in self.store and self.store[key][2] != self.submode:
+            del self.store[key]
+        got = self.decode(slot, mask_id, 0, key)
+        if got is None:
+            return None
+        sc = codes.score(self._spec(slot), self._soft(slot), got, mask_value(mask_id), slot)
+        if sc < PRIMED_SCORE:
+            log.info("repeated control in slot %d: CRC passed, score %.1f under %.0f nats, dropped", slot, sc, PRIMED_SCORE)
+            return None
+        return got
+
     def _pair_ok(self, slot: int) -> bool:
         if slot + 1 >= self.n_cw:
             return False

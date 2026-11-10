@@ -52,6 +52,7 @@ from test_arq import (FakeRx, RandomPolicy, Script, clean, clean_not_settled_by_
                       clean_settles_limbo, clean_then_session_end, clean_upto,
                       clean_with_everything_acked, finish, tx_queued_host_bytes, late_burst_from_before_an_abandon,
                       late_burst_with_a_stale_ack, inline_capped_at_a_tlv, inline_lost_then_resent_in_a_slot, payload,
+                      resend_rv_after_a_lost_reply,
                       short_writes)
 from test_arq_session import DECODE_S, HEADER_S, PTT_S
 from test_arq_session import Policy as SessionPolicy
@@ -466,6 +467,11 @@ def test_late_burst_from_before_an_abandon(native, pure, which):
 @pytest.mark.parametrize("which", ["py", "cpp"])
 def test_late_burst_with_a_stale_ack(native, pure, which):
     late_burst_with_a_stale_ack(impl(native, which)[0])
+
+
+@pytest.mark.parametrize("which", ["py", "cpp"])
+def test_resend_rv_after_a_lost_reply(native, pure, which):
+    resend_rv_after_a_lost_reply(impl(native, which)[0])
 
 
 @pytest.mark.parametrize("which", ["py", "cpp"])

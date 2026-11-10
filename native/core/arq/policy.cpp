@@ -364,6 +364,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     }
     const std::string_view reply_name = reply ? reply->name : fallback(st.cap);
     log.push_back({std::string(best_name), best_hint, std::string(reply_name)});
+    peer_had_data = st.last_rx_data;
     return {encode(best_name), best_hint, encode(reply_name)};
 }
 
@@ -380,6 +381,7 @@ StationView view(const Station& st) {
     v.held = static_cast<std::int64_t>(st.rx.buf.size());
     v.misses = st.misses;
     v.esc_floor = st.esc_floor;
+    v.last_rx_data = st.last_rx_data;
     return v;
 }
 

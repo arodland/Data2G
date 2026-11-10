@@ -373,6 +373,26 @@ std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteVie
     return got;
 }
 
+std::optional<Bytes> ModemRx::decode_repeat(int slot, const MaskId& mask, const SoftKey& key) {
+    if (store_) {  // what was kept in another mode is not this burst's repeat
+        auto it = store_->find(key);
+        if (it != store_->end() && it->second.submode != submode_) store_->erase(it);
+    }
+    auto got = decode(slot, mask, 0, &key);
+    if (!got || !own_score(slot, mask, *got)) return std::nullopt;
+    return got;
+}
+
+// The sum may decode to an earlier, different burst's codeword: it must score on this burst alone.
+bool ModemRx::own_score(int slot, const MaskId& mask, ByteView payload) {
+    const double sc = codes::score(spec(slot), slot_soft(slot), payload, mask_value(mask), slot);
+    if (sc >= PRIMED_SCORE) return true;
+    log_write("data2g.arq.phy", 20,
+              "repeated control in slot " + std::to_string(slot) + ": CRC passed, score " + std::to_string(sc) +
+                  " under " + std::to_string(PRIMED_SCORE) + " nats, dropped");
+    return false;
+}
+
 // Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.
 std::vector<int> ModemRx::offsets(const codes::Spec& s, int i) const {
     std::vector<int> out;

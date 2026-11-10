@@ -433,7 +433,7 @@ def modem_hpp() -> str:
            "#include <utility>\n\nnamespace data2g::modem {\n\n"]
     for name in ("REF_REPEATS", "HEADER_BACKOFF", "STREAM_COMMIT_SCORE", "COPY_COMMIT_SCORE", "ALT_PENALTY",
                  "SLIP_MIN", "SLIP_MAX", "SLIP_TRIGGER", "SLIP_ACCEPT", "PILOT_PAIRS", "COPY_PAIRS", "COPY_GRIDS",
-                 "COPY_COHERENCE", "COPY_DETECT"):
+                 "COPY_COHERENCE", "COPY_PATTERN", "COPY_DETECT"):
         v = getattr(modem, name)
         out.append(f"inline constexpr {'double' if isinstance(v, float) else 'int'} {name} = {cxx(v)};\n")
     out.append(array("COPY_EARLIER", modem.COPY_EARLIER, "int"))

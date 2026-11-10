@@ -314,3 +314,19 @@ def test_cnp_outcome_model_takes_one_input_or_many(tmp_path):
     batch = m(x)
     assert batch.shape == (4, 2 * n_modes)
     np.testing.assert_allclose(m(x[1]), batch[1], rtol=1e-6)
+
+
+def test_expected_reply_follows_what_the_peer_sent_last():
+    """The reply I expect (the engine's carrier hold and missed-reply energy)
+    is a data burst in the data mode I recommended only if the peer's last
+    burst carried data; an idle peer (the IRS of a one-way transfer) answers
+    control-only in the reply mode. peer_had_data was never set: always data."""
+    g = G.GearShifter()
+    g.observe(measured(10.0, 0.5), "qpsk-r1/2", 0.0)
+    data, hint, reply = g.recommend(G.StationView(cap=2, last_rx_data=True))
+    mode, secs = g.expected_reply()
+    assert mode == G.decode(data) and secs == G.burst_seconds(G.MODES[mode], G.slots_for(G.MODES[mode], G.SIZE_S[hint]))
+    data, hint, reply = g.recommend(G.StationView(cap=2, last_rx_data=False))
+    mode, secs = g.expected_reply()
+    assert mode == G.decode(reply) and secs == G.burst_seconds(G.MODES[mode], G.ctl_slots(G.MODES[mode]))
+    assert secs < G.burst_seconds(G.MODES[G.decode(data)], G.slots_for(G.MODES[G.decode(data)], G.SIZE_S[hint]))

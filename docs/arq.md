@@ -282,6 +282,14 @@ Where the rest comes from:
     transmissions with IR move the 50% point 2-6 dB below one transmission's,
     more at higher code rates. Chase gets 1-3.5 dB less than IR at rate 1/2 and
     above. At rate 1/5, where RV1 is mostly repeats, they are the same.
+- **Which RV a resend takes:** the number of bursts carrying the codeword that
+  the peer is known to have decoded (it holds their soft bits). That is the
+  burst a reply acts on, and any burst before it whose own reply was lost
+  (the peer then acts on a poll) that the ACK vouches for: a seq it newly
+  reports received that no other burst up to the acted-on one carried
+  (`Station._decoded_bursts`). Until 2026-11-10 only the acted-on burst
+  counted, so after a lost reply and a poll the resends went at RV 0 again.
+  A burst the ACK says nothing new of stays uncounted: RV 0 decodes alone.
 - **Slot-to-seq mapping:** it follows from the acted-on ACK's missing list (the K
   resends) and `next_seq` (the new codewords). Every slot is then checked by its
   seq-masked CRC (§2), so a wrong mapping costs a failed decode, never wrong data.
@@ -326,9 +334,30 @@ Where the rest comes from:
     (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
+- **A failed control is kept for its repeat.** A burst's first control codeword that
+  fails blind, pinned and primed is combined with the same codeword of the bursts before
+  it whose control also failed, in the same mode (`RxBurst.decode_repeat`). A repeat
+  after a timeout, the robust polls and a CONNECT's robust tries (one nonce, one compact
+  codeword) and their CONNECT_ACKs are bit-identical, so their soft bits add.
+  - The payload must pass its CRC and score 10 nats on this burst's own soft bits: the
+    sum can decode to an earlier, different burst's codeword, and that is not this one's.
+  - A link control read this way is treated as a primed one: checked against the
+    station's state, and not scored as a usable burst.
+  - Kept until a control decodes or the mode changes. Connect frames: until one decodes
+    or 30 s pass (`REPEAT_GAP_S`).
+  - Only codeword 0, and not DISC. `DATA2G_REPEAT=0` turns it off.
+  - A compact CONNECT's four robust tries (fsk16r25-r1/2, 150 a cell), heard by try 4
+    alone -> combined: AWGN -15 dB 0% -> 97%, -14 dB 33% -> 100%; MPP -14 dB 5% -> 61%,
+    -12 dB 61% -> 98%; MPD -12 dB 50% -> 100%. No wrong frame in 1650 runs.
 - **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
+- **Another station's burst is not the peer's loss.** A burst whose first codeword
+  converges (LDPC: a whole codeword, so what was on air) under neither the session key
+  nor a session frame's is someone else's: the engine drops it before the gear shifter
+  sees its measurements or scores it as lost control (`Session.foreign`). CPM control
+  (polar) never says it converged, and a control that only converges as a pair is not
+  told apart: those are scored as before.
 - **A malformed control is a failed one.** A control that passes its CRC but can't be
   read is dropped the same way, with a warning in the log naming the fault, before
   any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,
@@ -378,10 +407,10 @@ Where the rest comes from:
 | type | contents | when |
 |---|---|---|
 | new | start seq (7 bits) of this burst's new codewords | any new codewords |
-| abandon | seq A, and a reset flag (drop all stored soft bits) | mode change, resync |
+| abandon | seq A, a reset flag (deprecated, see below) and the abandon epoch (7 bits) | mode change, resync |
 | rv | 2 bits per resend, slot order | K > 0 |
 | bitmap | 64-bit received map above the cumulative point | any gap |
-| resync | marks a resync burst (§10) | §10 |
+| resync | marks a resync burst (§10). Deprecated, see below | §10 |
 | report | SNR (0.5 dB), Doppler class, delay class, effective MI per constellation (4 x 4 bits) | every burst after a change, else every 4th turn |
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
@@ -662,6 +691,19 @@ data2g/arq/engine.py). Off by default.
     tone, CW key-down or Hand read as pilots. With it, at 3 s: Hand-like
     hold 15 -> 3 s, missed-preamble data 46 -> 38, CW 19 -> 18; true bursts
     received 4482 -> 4511, lost ones that decode offline 5 -> 1.
+- **Unconfirmed CPM early locks:** a CPM lock taken on the front block and
+  first header copy is looked at again once its mid block and second header
+  copy are in (`cpm.confirm`: their tone LLRs at the locked word's rows and
+  tones). Under `cpm.CONFIRM_LLR` (-2) the burst is not there: it is reported
+  lost and let go. A CPM lock was never checked again, and held replies to
+  the end its word claimed (c16r25: up to 82 s). Locks read from both copies
+  (late, mid block, expected slot) have had their look. A burst that fades
+  through its second copy reads about 0 and is kept.
+  scripts/cpm_confirm_study.py (2026-11-10, 3000 bursts a grid, AWGN/MPP/MPD
+  from the floor to 12 dB over it): of 7530 true early locks 18 read under
+  -2, none of which decoded whole (5548 did); bursts that stop after their
+  first copy are let go 89% (c16r25), 97% (c8r50), 99.9% (c32r62) of the time,
+  locks on a burst's data 98.5-100%.
 - **Limits:** a waiting peer holds through an ID 93% of the time or more down
   to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
   about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an
@@ -871,6 +913,13 @@ forever without progress, because they disagree about protocol state.
     the receiver's cumulative ACK, which both sides know.
   - It re-slices from there at RV0.
   - The receiver drops every stored soft bit for that direction.
+  - **Deprecated on the wire: the reset flag and the resync TLV.** They are still sent
+    and never read. Every new abandon (a new epoch) makes the receiver drop all its soft
+    bits for the direction, reset flag or not: the epoch is in each data codeword's CRC
+    mask, so nothing kept from before could combine anyway. A receiver has no use for
+    either; they label the sender's log line ("resync" rather than "abandon"). Not an
+    unused tool to wire up. Drop both at the next wire change that touches the abandon
+    TLV.
 - **Burst seqs can't alias.**
   - Each station numbers its bursts absolutely; the wire carries the number mod 8.
   - It never has more than 7 bursts the peer hasn't acted on. At that limit its turn is
