@@ -149,6 +149,9 @@ public:
     // codeword decodes under the session key (the station's own decode of it
     // is then a memo hit)
     bool claims(RxBurst& rx) const;
+    // rx, whose first codeword converged (the caller checks), is another station's: connected, and it is
+    // neither my peer's burst nor a session frame
+    bool foreign(RxBurst& rx);
     // connected with nothing in flight or queued, either way: free air for a broadcast burst
     bool idle_connected() const {
         return state == SessionState::CONNECTED && station && !out && !deadline && !want_disc

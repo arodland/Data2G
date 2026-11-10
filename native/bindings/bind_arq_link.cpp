@@ -593,6 +593,10 @@ void bind_arq_link(py::module_& m) {
             PyRx r(std::move(rx));
             return s.claims(r);
         })
+        .def("foreign", [](Session& s, py::object rx) {
+            PyRx r(std::move(rx));
+            return s.foreign(r);
+        })
         .def("on_tx_end", [](Session& s, const py::object& burst, double now) { s.on_tx_end(burst_cpp(burst), now); })
         .def("on_header", &Session::on_header)
         .def("on_cw", &Session::on_cw)

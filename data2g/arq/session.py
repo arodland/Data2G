@@ -236,6 +236,14 @@ class Session:
         return (st is not None and self.state in (CONNECTED, DISCONNECTING)
                 and rx.decode(0, B.ctl_mask(st.peer, 0, st.key), 0, None) is not None)
 
+    def foreign(self, rx: B.RxBurst) -> bool:
+        """`rx`, whose first codeword converged (the caller checks: it is
+        what was on air), is another station's: I am connected, and it is
+        neither my peer's burst nor a session frame (a CONNECT to refuse).
+        Not to be scored as my peer's lost control (docs/arq.md §8)."""
+        return (self.station is not None and self.state in (CONNECTED, DISCONNECTING) and not self.claims(rx)
+                and self._session_frame(rx) is None)
+
     def idle(self) -> bool:
         """Connected with nothing in flight or queued, either way: the air is
         free for a broadcast burst (the engine's KISS link)."""

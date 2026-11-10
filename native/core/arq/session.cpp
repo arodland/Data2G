@@ -291,6 +291,8 @@ bool Session::claims(RxBurst& rx) const {
     return station && live(state) && rx.decode(0, ctl_mask(station->peer(), 0, station->key), 0, nullptr).has_value();
 }
 
+bool Session::foreign(RxBurst& rx) { return station && live(state) && !claims(rx) && !session_frame(rx); }
+
 Session::Queued Session::queued_bytes(bool vara) const {
     const auto n = static_cast<std::int64_t>(pending_write.size());
     if (!station) return {n, n};
