@@ -655,6 +655,8 @@ class Station:
             self._start_abandon(0)
 
     def _start_abandon(self, reset: int):
+        """`reset` (the TLV's low bit, and T_RESYNC with it): deprecated, sent
+        and never read; the peer drops its soft bits on any new epoch (docs/arq.md §10)."""
         a = self.tx.abandon()
         self._abandon_epoch = (self._abandon_epoch + 1) % 128
         self._abandon = bytes([a % SEQ_MOD, reset | self._abandon_epoch << 1])
