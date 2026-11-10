@@ -98,6 +98,10 @@ public:
     static constexpr int CPM_TAIL = config::FS / 20;  // kept before a CPM burst's end (receiver.Receiver.CPM_TAIL)
     static constexpr double SUPERSEDE_MARGIN = 0.05;
     static constexpr double SUSPECT_SCORE = 0.36;
+    // receiver.Receiver.RELEASE_S: a suspect OFDM lock (a header copy under COPY_COMMIT_SCORE) whose pilots have been measurably absent this long in
+    // a row (pilot checks, one a HOP) is let go: reported lost, the search goes on past it.
+    // 0: never. A member so a study can set it (scripts/false_lock_study.py).
+    double release_s = 3.0;
 
     explicit Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids = {}, bool blank = true);
 
@@ -117,6 +121,7 @@ public:
         last_start_ = pending_->start();
         pending_.reset();
         pilots_ok_ = confirmed_ = false;
+        dark_ = 0;
     }
 
     bool busy() const { return pending_.has_value(); }
@@ -148,6 +153,7 @@ private:
     Stats stats(std::int64_t w0 = 0);
     void searched();
     bool supersede(std::vector<Item>& out, bool whole = false);
+    bool release(std::vector<Item>& out);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
     std::optional<cpm::Lock> primed();  // expect()'s lock in its next grid, buffer indices, once its window is complete
@@ -166,6 +172,7 @@ private:
     std::int64_t off_ = 0;  // stream index of buf_[0]
     std::optional<Pending> pending_;
     bool pilots_ok_ = false, confirmed_ = false;
+    int dark_ = 0;  // the pending lock's latest pilot checks in a row with its pilots measurably absent
     std::deque<double> powers_;  // in-band power of 0.1 s blocks
     double ps_ = 0.0;
     int pn_ = 0;

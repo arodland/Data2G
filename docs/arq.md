@@ -641,6 +641,22 @@ data2g/arq/engine.py). Off by default.
   while active is dropped (`Receiver.drop`), and the search goes on past it.
   A clear header is never dropped: CwSense reads n4 near its floor as CW now
   and then.
+- **Unconfirmed suspect locks:** a suspect OFDM lock (score under
+  `SUSPECT_SCORE`, or a header copy under `COPY_COMMIT_SCORE`) whose frame
+  pilots have measurably not been there for `Receiver.RELEASE_S` in a row
+  (3 s of pilot checks) is reported lost and let go; the search goes on past
+  it. Before, it held this station's replies for the whole length its header
+  claimed. In a row, not "never there": a false lock on another burst's data
+  sees that burst's pilots on its own frame grid until the data ends.
+  scripts/false_lock_study.py (2026-11-10), every arm on the same audio,
+  RELEASE_S 0 / 1 / 2 / 3 s:
+  - Seconds busy with nothing on air, 120 sources each: data whose preamble
+    was missed 152 / 14 / 29 / 46; CW IDs 80 / 7 / 13 / 19; Hand-like tones
+    near 1500 Hz 65 / 4 / 9 / 15.
+  - 6336 real bursts (every OFDM submode, AWGN/MPP/MPD/MPG, -12..+4 dB),
+    true bursts received 4551 / 4230 / 4390 / 4482; of those lost, the ones
+    that decode any codeword offline: 26 / 12 / 5 (3 s: ACKs at -10 to -12
+    dB). 3 s keeps the floor.
 - **Limits:** a waiting peer holds through an ID 93% of the time or more down
   to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
   about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an

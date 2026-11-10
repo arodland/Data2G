@@ -152,6 +152,7 @@ void Receiver::reset() {
     off_ = 0;
     pending_.reset();
     pilots_ok_ = confirmed_ = false;
+    dark_ = 0;
     powers_.clear();
     ps_ = 0.0;
     pn_ = 0;
@@ -221,6 +222,7 @@ void Receiver::check_pilots() {
     const auto c = modem::pilot_coherence(buf_, l, modem::PILOT_PAIRS, true);
     if (static_cast<int>(c.size()) >= modem::PILOT_PAIRS) {
         const bool ok = mean(c) > modem::pilot_noise(l.spec->band);
+        dark_ = ok ? 0 : dark_ + 1;
         // a copy lock is one header copy: confirmed (no further search) at
         // the single-copy commit score
         confirmed_ = ok && p.score() >= (p.copy() ? modem::COPY_COMMIT_SCORE : SUSPECT_SCORE);
@@ -400,7 +402,23 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     pending_ = q;
     pilots_ok_ = q->is_cpm() || q->copy() || q->score() >= SUSPECT_SCORE;
     confirmed_ = false;
+    dark_ = 0;
     out.push_back(HeaderEvent{*pending_, off_ + len()});
+    return true;
+}
+
+bool Receiver::release(std::vector<Item>& out) {
+    const Pending& p = *pending_;
+    if (release_s <= 0 || p.is_cpm() || p.score() >= (p.copy() ? modem::COPY_COMMIT_SCORE : SUSPECT_SCORE) ||
+        static_cast<double>(dark_) * HOP < release_s * config::FS)
+        return false;
+    const auto a = static_cast<std::size_t>(std::clamp<int64_t>(p.start() - off_, 0, len()));
+    out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.end())});
+    drop();
+    // as a suspect burst's end: keep the last search window and every CPM front waiting
+    int64_t keep = keep_;
+    for (const auto& w : cpm_wait_) keep = std::max(keep, len() - (w.first - off_));
+    trim(keep);
     return true;
 }
 
@@ -486,6 +504,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             // passed already); a suspect one waits for its pilots
             pilots_ok_ = p->is_cpm() || p->copy() || p->score() >= SUSPECT_SCORE;
             confirmed_ = false;
+            dark_ = 0;
             out.push_back(HeaderEvent{*p, off_ + len()});
         }
         const Pending p = *pending_;
@@ -495,6 +514,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 // the later-header search is for false locks: a confirmed burst skips it
                 if (confirmed_) fresh_ %= HOP;
                 else if (supersede(out)) continue;
+                else if (release(out)) continue;
             }
             break;
         }

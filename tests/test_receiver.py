@@ -119,9 +119,12 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     """A burst whose preamble was missed reads as false headers claiming up
     to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
     host reports) follows the pilots and the in-band energy, so it ends with
-    the signal; the internal hold (Receiver.busy) may run on. (The w header
-    floor, 0.33, now rejects these false headers; at 0.25 they got through,
-    which this reproduces to test BUSY on its own.)"""
+    the signal. The internal hold (Receiver.busy, what holds this station's
+    replies) ran on for the claim; now a suspect lock whose pilots never came
+    is let go after Receiver.RELEASE_S of them measurably absent, and the hold
+    ends too (RELEASE_S = 0: the old run-on). (The w header floor, 0.33, now
+    rejects these false headers; at 0.25 they got through, which this
+    reproduces to test BUSY on its own.)"""
     import sys
     from pathlib import Path
 
@@ -143,15 +146,24 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     cut = x[BANDS["w"].preamble_samples + modem.header_samples("w") + 800 + int(rng.integers(0, 3000)):]
     y = np.concatenate([np.zeros(FS * 20), cut, np.zeros(FS * 12)])
     y = hfchannel.awgn(y, 20.0, seed=1, s_power=hfchannel.active_power(x))
-    r = Receiver(Engine("W1AW", seed=1).accept)
     end = FS * 20 + len(cut)
-    busy_after = held_after = 0.0
-    for i in range(0, len(y), FS // 50):
-        r.feed(y[i:i + FS // 50])
-        if i >= end:
-            busy_after += r.channel_busy / 50
-            held_after += r.busy / 50
-    assert busy_after <= 1.0 < held_after, (busy_after, held_after)
+    release_s = Receiver.RELEASE_S  # the shipped value, before after() patches it
+
+    def after(release_s):
+        monkeypatch.setattr(Receiver, "RELEASE_S", release_s)
+        r = Receiver(Engine("W1AW", seed=1).accept)
+        busy_after = held_after = 0.0
+        for i in range(0, len(y), FS // 50):
+            r.feed(y[i:i + FS // 50])
+            if i >= end:
+                busy_after += r.channel_busy / 50
+                held_after += r.busy / 50
+        return busy_after, held_after
+
+    busy_after, held_after = after(0.0)
+    assert busy_after <= 1.0 and held_after > 4.0, (busy_after, held_after)  # 5.5 s
+    busy_after, held_after = after(release_s)  # RELEASE_S dark in a row
+    assert busy_after <= 1.0 and held_after <= release_s + 1.0, (busy_after, held_after)
 
 
 def _false_lock_clip(starts):
