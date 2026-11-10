@@ -54,7 +54,7 @@ std::string group_name(const std::string& group);  // as it reads back from the 
 int group_key(const std::string& group);           // nonzero 16-bit FNV-1a of the packed name
 Bytes pack_pair(const std::string& group, const std::string& call);  // T_GROUP_FROM, 15 bytes
 std::pair<std::string, std::string> unpack_pair(ByteView b);
-std::map<int, Bytes> parse_tlvs(ByteView b);  // up to a zero type (padding)
+std::map<int, Bytes> parse_tlvs(ByteView b, bool partial = false);  // up to a zero type (padding); partial: the whole ones before a truncated one
 struct ControlRead {
     std::string group;
     std::optional<std::string> call;   // T_GROUP_FROM's sender
