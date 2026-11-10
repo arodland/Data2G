@@ -68,6 +68,10 @@ uv run pytest tests -q                # the Python reference
 tools/build_native.sh --test          # build native/, then ctest and pytest --native
 ```
 
+## Registration
+
+Print out one of [these](docs/id-card/data2g-id-card.png), fill in your name, and keep it in your wallet. Or not — you'll still have access to all features and Data2G will report `REGISTERED` to clients even if you don't.
+
 ## Discuss
 
 Join the [Digital Oddballs Radio Club Discord](https://discord.gg/JJgNszRMce).
