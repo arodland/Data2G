@@ -659,6 +659,13 @@ data2g/arq/engine.py). Off by default.
     60 s: +30 s median (the IDs' own airtime), timeouts 42 vs 32 (10 in 470 IDs).
   - Airtime: one ID, about 4.5 s at 20 wpm, per station per 10 minutes
     (0.75%), and one more each at the end.
+  - Keyed-run rule (2026-11-10): the hits in CwSense's 1 s must form at
+    least 2 runs, none over 320 ms (a dash at 15 wpm is 240 ms), since a
+    steady carrier's start or end is one long run. Hand-like 8-FSK (6.25 Hz,
+    4 bursts a cell) at 1470/1530 Hz was active 5.1 s at 20 dB, now 0.3 s;
+    3.9 (AWGN) and 7.0 (MPG) s at 5 dB, now 1.4-2.4 and 3.7; about 10 s at
+    -5 dB, now about 7: noise splits the tone into short runs, which the rule
+    can't tell from keying. ID holding and every mode's burst cells unchanged.
 
 ## 8. Gear-shift loop (summary; details in data2g/arq/policy.py)
 
