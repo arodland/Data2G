@@ -50,11 +50,13 @@ def key(e: Engine, audio: np.ndarray, acks=()):
 
 
 def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), gaps=(),
-               at_open=None, arm=True, decoys=()):
+               at_open=None, arm=True, decoys=(), noise=0.0):
     """One listen round on a bare engine (docs/arq.md §9): arm the window (unless
     the caller armed it already), key a 0.3 s burst carrying ACK to anchor it,
     then run the window to its end. `decoys`: the acks of 0.3 s bursts keyed
-    first (None: a burst with no frame acked), which must not open it. `hands` is (channel, payload, seconds after the anchor) of
+    first (None: a burst with no frame acked), which must not open it. `noise`:
+    the input's noise sigma (0.1: a unit-RMS Hand at about 20 dB in 2500 Hz;
+    a noiseless input lets the receiver lock a false header on the Hand). `hands` is (channel, payload, seconds after the anchor) of
     Hand audio on the input; `gaps` is (start s, length s) of my own keying inside
     the window; `at_open` runs once the window has opened.
 
@@ -74,6 +76,8 @@ def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), g
         x = hand.modulate(tag, hand.payload_bits(payload), c)
         i = int(round(start * FS))
         y[i:i + len(x)] += x
+    if noise:
+        y += np.random.default_rng(0).normal(0, noise, len(y))
     if at_open:
         at_open()
     keyed = []
@@ -480,6 +484,20 @@ def test_hand_holds_my_own_bursts():
     # the Hand landed 300 ms late; had the keyed gap not been kept as silence in the
     # buffer, it would read 600 ms earlier (a -300 ms dt).
     assert abs(float(got[0].split()[4]) - 300) < 30, lines
+
+
+def test_hands_are_not_read_as_a_cw_id():
+    """A Hand in channel 1 (1530 Hz, CwSense's centre band) reads as a CW ID at
+    its end, which held this station's own bursts ID_GUARD_S (2.5 s) past the
+    window. CwSense is ignored while a window is open and HAND_CW_TAIL_S after
+    it: no CW hold is set (engine._cw_until stays 0)."""
+    e = Engine("W1AW", seed=1)
+    lines, _, _ = hand_round(e, 1.0, 0x5A, [1], [(1, 0x2468, 1.0)], noise=0.1)
+    assert any(l.startswith("HAND 1 ") for l in lines), lines
+    rng = np.random.default_rng(1)
+    for _ in range(10):  # through the tail
+        e.step(rng.normal(0, 0.1, BLOCK))
+    assert e._cw_until == 0.0
 
 
 def test_hand_refs_count_up_and_lose_the_oldest():

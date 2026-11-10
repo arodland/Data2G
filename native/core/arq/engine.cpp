@@ -730,7 +730,7 @@ Engine::Done Engine::process(Block& b) {
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         if (fresh) hear(b.items, t);
         hand_collect(b.x);
-        const bool cw = fresh && b.cw;
+        const bool cw = fresh && b.cw && !(hand_hold_ > 0.0 && t < hand_hold_ + HAND_CW_TAIL_S);  // Hands, not an ID
         if (cw) cw_hold(t);
         cw_heard_ = cw;
         id_check(t);

@@ -759,7 +759,9 @@ As built (data2g/arq/policy.py):
       `--hand-decoder cheap` on either host takes under half that for
       0.2-0.4 dB (docs/hand-burst.md). While a window is open this
       host starts no CQ, broadcast, ID or KISS burst of its own (session bursts still go;
-      the window counts their time as silence). WRONG while another listen is
+      the window counts their time as silence). CW ID sensing (§7b) is off
+      while the window is open and 1 s after: a Hand near 1500 Hz can read as
+      a CW ID at its start or end. WRONG while another listen is
       armed or open. Each Hand decoded:
       `HAND c hex16 snr dt` (snr dB; dt: its start minus the slot, ms, which
       is the answerer's latency for net control to report back). If the

@@ -76,6 +76,9 @@ inline constexpr double HAND_ARM_EXPIRE_S = 30.0;
 // the smallest HAND LISTEN d: the window's head is uncollectable below hand::SEARCH_S,
 // since rx is off until the anchor burst ends
 inline constexpr double HAND_MIN_D_S = 1.0;
+// CwSense is ignored while a Hand window is open and this long after: a Hand's steady tone near
+// 1500 Hz can read as a CW ID at its edges (CwSense's 1 s history)
+inline constexpr double HAND_CW_TAIL_S = 1.0;
 // A KISS ACKMODE ack's tag (engine.py's ack_tag): the app's ids carry it in their low 16 bits,
 // big-endian. HAND LISTEN names its anchor burst by it.
 inline int ack_tag(std::int64_t ack) { return static_cast<int>(ack & 0xFFFF); }
@@ -307,6 +310,7 @@ public:
     void test_tx(const std::string& submode, std::vector<double> audio);
     std::optional<std::pair<std::int64_t, int>> hand_tx() const;  // a waiting Hand: (first sample, channel)
     bool tx_kiss() const { return tx_kiss_; }
+    double cw_until() const { return cw_until_; }  // engine.py's _cw_until
     void set_tx_kiss(bool k) { tx_kiss_ = k; }
     // REF and HAND lines since the last call (any thread: a round's lines come from its decoder thread).
     std::vector<std::string> take_hand_events();

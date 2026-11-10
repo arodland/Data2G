@@ -142,6 +142,7 @@ void bind_engine(py::module_& m) {
         .def("hand_ref_set", &PyEngine::hand_ref_set)
         .def("test_tx", &PyEngine::test_tx)
         .def_readwrite("test_acks", &PyEngine::test_acks)
+        .def_property_readonly("cw_until", &PyEngine::cw_until)
         .def("hand_tx", &PyEngine::hand_tx)
         .def_property("tx_kiss", &PyEngine::tx_kiss, &PyEngine::set_tx_kiss)
         .def("take_hand_events", &PyEngine::take_hand_events)

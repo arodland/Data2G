@@ -90,6 +90,8 @@ HAND_REFS_KEPT = 64
 HAND_ARM_EXPIRE_S = 30.0
 HAND_MIN_D_S = 1.0  # the smallest HAND LISTEN d: the window's head is uncollectable
 # below hand.SEARCH_S, since rx is off until the anchor burst ends
+HAND_CW_TAIL_S = 1.0  # CwSense is ignored while a Hand window is open and this long after:
+# a Hand's steady tone near 1500 Hz can read as a CW ID at its edges (CwSense's 1 s history)
 
 
 def ack_tag(ack: int) -> int:
@@ -562,6 +564,7 @@ class Engine:
             self._hear(x, t)
             self._hand_collect(x, k)
             self._cw_false_lock()
+            cw = cw and not (self._hand_hold and t < self._hand_hold + HAND_CW_TAIL_S)  # Hands, not an ID
             if cw:
                 self._cw_hold(t)
             self._cw_heard = cw
