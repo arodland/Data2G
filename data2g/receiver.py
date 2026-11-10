@@ -424,9 +424,11 @@ class Receiver:
         if p.get("family") == "cpm" or "p0" not in p:
             return
         # only p0 (the pilots' grid) is read: the native port shifts just it too
-        c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
+        c, pat = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True,
+                                       pattern=True)
         if len(c) >= modem.PILOT_PAIRS:
-            ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
+            band = p["spec"].band
+            ok = float(np.mean(c)) > modem.PILOT_NOISE[band] and pat > modem.PILOT_PATTERN[band]
             self._dark = 0 if ok else self._dark + 1
             # a copy lock is one header copy: confirmed (no further search) at
             # the single-copy commit score

@@ -657,6 +657,11 @@ data2g/arq/engine.py). Off by default.
     true bursts received 4551 / 4230 / 4390 / 4482; of those lost, the ones
     that decode any codeword offline: 26 / 12 / 5 (3 s: ACKs at -10 to -12
     dB). 3 s keeps the floor.
+  - Frame pilots are there only when they also match the pilot's pattern
+    (`modem.PILOT_PATTERN`): repeating from frame to frame alone, any steady
+    tone, CW key-down or Hand read as pilots. With it, at 3 s: Hand-like
+    hold 15 -> 3 s, missed-preamble data 46 -> 38, CW 19 -> 18; true bursts
+    received 4482 -> 4511, lost ones that decode offline 5 -> 1.
 - **Limits:** a waiting peer holds through an ID 93% of the time or more down
   to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
   about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an

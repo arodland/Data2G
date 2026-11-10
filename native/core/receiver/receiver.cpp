@@ -219,9 +219,10 @@ void Receiver::check_pilots() {
     if (p.is_cpm()) return;
     modem::Lock l = p.ofdm();
     l.p0 -= off_;  // only p0, as Python's dict(p, p0=...)
-    const auto c = modem::pilot_coherence(buf_, l, modem::PILOT_PAIRS, true);
+    double pat = 0.0;
+    const auto c = modem::pilot_coherence(buf_, l, modem::PILOT_PAIRS, true, &pat);
     if (static_cast<int>(c.size()) >= modem::PILOT_PAIRS) {
-        const bool ok = mean(c) > modem::pilot_noise(l.spec->band);
+        const bool ok = mean(c) > modem::pilot_noise(l.spec->band) && pat > modem::pilot_pattern(l.spec->band);
         dark_ = ok ? 0 : dark_ + 1;
         // a copy lock is one header copy: confirmed (no further search) at
         // the single-copy commit score
