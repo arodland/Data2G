@@ -7,6 +7,7 @@
 #include <QSettings>
 #include <QTimer>
 
+#include <clocale>
 #include <cstdio>
 
 #include "app/station.hpp"
@@ -17,6 +18,7 @@ using namespace data2g;
 
 int main(int argc, char** argv) {
     QApplication qapp(argc, argv);  // takes Qt's own flags out of argv first
+    std::setlocale(LC_NUMERIC, "C");  // Qt set it from the environment; the protocol's numbers use "." (#164)
     QCoreApplication::setOrganizationName(QStringLiteral("Data2G"));
     QCoreApplication::setApplicationName(QStringLiteral("data2g-gui"));
     QCoreApplication::setApplicationVersion(QStringLiteral(DATA2G_VERSION));  // read back by the About box
