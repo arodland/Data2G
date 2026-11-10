@@ -45,6 +45,7 @@ def substitutions(native):
             if cls._stats is PyReceiver._stats and cls._searched is PyReceiver._searched and same_config():
                 self.accept, self.bands = accept, accept.bands
                 self._n = T.Receiver(accept, list(cpm_grids), blank)
+                self._n.release_s = self.RELEASE_S  # a test's patched class value too
             else:
                 super().__init__(accept, cpm_grids, blank)
 

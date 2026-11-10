@@ -199,6 +199,12 @@ double pilot_noise(std::string_view band) {
     throw std::out_of_range("no PILOT_NOISE for band " + std::string(band));
 }
 
+double pilot_pattern(std::string_view band) {
+    for (const auto& [b, v] : PILOT_PATTERN)
+        if (b == band) return v;
+    throw std::out_of_range("no PILOT_PATTERN for band " + std::string(band));
+}
+
 Accept Accept::of(std::span<const std::string_view> names, std::optional<double> max_secs, double min_score) {
     Accept a;
     a.min_score = min_score;
@@ -769,7 +775,7 @@ Lock find_burst(std::span<const double> x, std::span<const std::string_view> ban
     return l;
 }
 
-std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max, bool latest) {
+std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max, bool latest, double* pattern) {
     const Spec& spec = *lock.spec;
     const auto& b = waveform::band(spec.band);
     const auto len = static_cast<int64_t>(x.size());
@@ -778,6 +784,7 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
     for (int f = 0; f < total; ++f) avail += lock.p0 + static_cast<int64_t>(f) * FRAME_SAMPLES + NCP + M <= len;
     const int f1 = latest ? avail : std::min(avail, n_max + 1);
     const int f0 = std::max(0, f1 - n_max - 1);
+    if (pattern) *pattern = 0.0;
     if (f1 - f0 < 2) return {};
     const int64_t lo = std::max<int64_t>(0, lock.p0 + static_cast<int64_t>(f0) * FRAME_SAMPLES - 2 * NSYM);
     const int64_t hi = lock.p0 + static_cast<int64_t>(f1 - 1) * FRAME_SAMPLES + 3 * NSYM;
@@ -788,6 +795,16 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
     std::vector<double> out;
     for (size_t f = 1; f < y.size(); ++f)
         out.push_back(std::abs(dot_conj(y[f], y[f - 1])) / (std::sqrt(energy(y[f]) * energy(y[f - 1])) + 1e-30));
+    if (pattern) {  // adjacent carriers' products, pilot divided out, summed over the frames; unit weight each
+        const std::size_t nc = b.pilot.size();
+        std::vector<cd> a(nc - 1, cd{0, 0});
+        for (const auto& v : y)
+            for (std::size_t k = 0; k + 1 < nc; ++k)
+                a[k] += (v[k + 1] * std::conj(b.pilot[k + 1])) * std::conj(v[k] * std::conj(b.pilot[k]));
+        cd s{0, 0};
+        for (const cd& t : a) s += t / (std::abs(t) + 1e-30);
+        *pattern = std::abs(s) / static_cast<double>(a.size());
+    }
     return out;
 }
 

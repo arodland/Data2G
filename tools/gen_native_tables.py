@@ -446,6 +446,7 @@ def modem_hpp() -> str:
 
     out.append(per_band("HEADER_MIN_SCORE", modem.HEADER_MIN_SCORE))
     out.append(per_band("PILOT_NOISE", modem.PILOT_NOISE))
+    out.append(per_band("PILOT_PATTERN", modem.PILOT_PATTERN))
 
     out.append("\n// Header codes per sync band, as column masks.\n")
     rows = []
