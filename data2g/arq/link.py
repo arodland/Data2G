@@ -60,6 +60,10 @@ COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
 # DATA2G_PRIME=0: no primed retry of a peer control that failed blind (docs/arq.md §3a; for A/B runs)
 PRIME = os.environ.get("DATA2G_PRIME", "1") != "0"
+# DATA2G_REPEAT=0: a failed control is not combined with the failed ones before it (docs/arq.md §3a; for A/B runs)
+REPEAT = os.environ.get("DATA2G_REPEAT", "1") != "0"
+# soft-bit store keys of controls kept for that (RxBurst.decode_repeat): the link's, the session's connect frames
+REPEAT_KEY, REPEAT_SESSION_KEY = ("rep", 1, 0), ("rep", 2, 0)
 # core word fields, most significant first (frames.Core.pack): widths
 CORE_BITS = (2, 2, 3, 3, 7, 1, 6, 6, 2)
 
@@ -876,9 +880,12 @@ class Station:
     def _read_control(self, rx: RxBurst) -> tuple[F.Control, int] | None:
         """The burst's control and its dup factor; falsy if lost or malformed.
         A control codeword that fails blind (alone, then as an ARQ_DUP pair)
-        is retried primed with what I expect of it (§3a)."""
+        is retried primed with what I expect of it (§3a), then (the first
+        one) combined with the failed ones of the bursts before it: a
+        repeat's is the same codeword."""
         first = rx.decode(0, ctl_mask(self.peer, 0, self.key), 0, None)
-        paired = primed = False
+        paired = primed = combined = False
+        repeat = REPEAT and hasattr(rx, "decode_repeat")
         if first is None and rx.n_cw >= 2:
             # an ARQ_DUP burst's control pair, combined (a wrong guess just
             # fails the masked CRC)
@@ -889,6 +896,15 @@ class Station:
             hyps = self.expect(rx)
             first, pair = self._primed(rx, 0, 0, hyps)
             paired, primed = pair, first is not None
+        if first is not None:
+            if repeat:
+                rx.forget(REPEAT_KEY)  # what failed before this burst is not its repeat
+        elif repeat:
+            # ponytail: codeword 0 only; a repeat's later control codewords would need their own keys
+            first = rx.decode_repeat(0, ctl_mask(self.peer, 0, self.key), REPEAT_KEY)
+            if first is not None:
+                rx.forget(REPEAT_KEY)
+                primed = combined = True  # as a primed one: checked against my state, not scored as usable
         if first is None:
             self.policy.outcome(rx.submode, 0, 0, usable=False)
             return None
@@ -925,7 +941,7 @@ class Station:
             if why := self._implausible(ctl.core, ctl.ext):
                 log.info("RX primed control contradicts my state (%s): dropped", why)
                 return None
-            self.stats["rx_primed"] += 1
+            self.stats["rx_repeat" if combined else "rx_primed"] += 1
         self._primed_ctl = primed
         return ctl, dup
 

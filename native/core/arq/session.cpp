@@ -230,7 +230,9 @@ void Session::on_cw(double now) {
 }
 
 void Session::on_rx(RxBurst& rx, double now) {
-    if (auto f = session_frame(rx)) {
+    auto f = session_frame(rx);
+    if (!f) f = repeated_frame(rx, now);
+    if (f) {
         on_session_frame(*f, now);
         return;
     }
@@ -577,13 +579,33 @@ std::optional<Session::Frame> Session::primed_frame(RxBurst& rx) {
     return std::nullopt;
 }
 
-std::optional<Session::Frame> Session::primed_body(Bytes body, RxBurst& rx) {
+// session.py _repeated_frame: a CONNECT's robust tries are the same compact codeword, and so are their CONNECT_ACKs.
+std::optional<Session::Frame> Session::repeated_frame(RxBurst& rx, double now) {
+    if (!repeat_default() || !rx.can_repeat() || rx.n_cw() != 1 || station) return std::nullopt;
+    const bool ack = state == SessionState::CONNECTING;
+    if (!ack && !(state == SessionState::LISTEN && compact(rx.submode()))) return std::nullopt;
+    if (now - repeat_at > REPEAT_GAP_S) rx.forget(REPEAT_SESSION_KEY);
+    repeat_at = now;
+    auto p = rx.decode_repeat(0, ack ? ctl_mask(1, 0, 0) : COMPACT_CONNECT, REPEAT_SESSION_KEY);
+    if (!p) return std::nullopt;
+    rx.forget(REPEAT_SESSION_KEY);
+    if (!ack) return primed_body(unpack_connect(ByteView(*p).first(COMPACT_BYTES)), rx, "repeated");
+    Bytes body;
+    try {
+        const auto ext = Control::unpack({*p}).ext;
+        if (auto it = ext.find(T_SESS); it != ext.end()) body = it->second;
+    } catch (const std::invalid_argument&) {
+    }
+    return primed_body(std::move(body), rx, "repeated");
+}
+
+std::optional<Session::Frame> Session::primed_body(Bytes body, RxBurst& rx, const char* how) {
     std::optional<std::string> why;
     if (body.empty() || (why = check_frame(body))) {
-        log_write(LOG, INFO, "RX primed session frame malformed (" + (body.empty() ? std::string("empty") : *why) + "): dropped");
+        log_write(LOG, INFO, std::string("RX ") + how + " session frame malformed (" + (body.empty() ? std::string("empty") : *why) + "): dropped");
         return std::nullopt;
     }
-    log_write(LOG, INFO, "RX primed " + frame_desc(body));
+    log_write(LOG, INFO, std::string("RX ") + how + " " + frame_desc(body));
     return Frame{0, std::move(body), rx.submode()};
 }
 

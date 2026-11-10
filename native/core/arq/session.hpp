@@ -26,6 +26,7 @@ inline constexpr int CONNECT_TRIES = 5;
 inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;
 inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
+inline constexpr double REPEAT_GAP_S = 30.0;  // failed connect frames further apart are not one CONNECT's tries
 inline constexpr double IDLE_CLOSE_S = 300.0;
 inline constexpr double KEEPALIVE_LO_S = 15.0, KEEPALIVE_HI_S = 30.0;
 inline constexpr double CHAT_KEEPALIVE_LO_S = KEEPALIVE_LO_S, CHAT_KEEPALIVE_HI_S = KEEPALIVE_HI_S;
@@ -194,7 +195,9 @@ private:
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
     std::optional<Frame> session_frame(RxBurst& rx);
     std::optional<Frame> primed_frame(RxBurst& rx);  // a connect frame that failed blind (session.py's, §3a)
-    std::optional<Frame> primed_body(Bytes body, RxBurst& rx);
+    std::optional<Frame> primed_body(Bytes body, RxBurst& rx, const char* how = "primed");
+    std::optional<Frame> repeated_frame(RxBurst& rx, double now);  // one that failed, combined with the failed ones before it
+    double repeat_at = -1e300;  // the last failed connect frame kept for combining
     void on_session_frame(const Frame& f, double now);
     void flush_writes();
 };

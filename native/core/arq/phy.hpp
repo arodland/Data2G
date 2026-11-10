@@ -162,6 +162,10 @@ public:
     bool can_prime() const override { return true; }
     std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override;
     bool converged(int slot, bool pair) override;
+    // phy.ModemRx.decode_repeat (RxBurst's). own_score: its check, `payload` against this burst's own soft bits.
+    bool can_repeat() const override { return true; }
+    std::optional<Bytes> decode_repeat(int slot, const MaskId& mask, const SoftKey& key) override;
+    bool own_score(int slot, const MaskId& mask, ByteView payload);
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 

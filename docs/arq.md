@@ -334,6 +334,21 @@ Where the rest comes from:
     (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
+- **A failed control is kept for its repeat.** A burst's first control codeword that
+  fails blind, pinned and primed is combined with the same codeword of the bursts before
+  it whose control also failed, in the same mode (`RxBurst.decode_repeat`). A repeat
+  after a timeout, the robust polls and a CONNECT's robust tries (one nonce, one compact
+  codeword) and their CONNECT_ACKs are bit-identical, so their soft bits add.
+  - The payload must pass its CRC and score 10 nats on this burst's own soft bits: the
+    sum can decode to an earlier, different burst's codeword, and that is not this one's.
+  - A link control read this way is treated as a primed one: checked against the
+    station's state, and not scored as a usable burst.
+  - Kept until a control decodes or the mode changes. Connect frames: until one decodes
+    or 30 s pass (`REPEAT_GAP_S`).
+  - Only codeword 0, and not DISC. `DATA2G_REPEAT=0` turns it off.
+  - A compact CONNECT's four robust tries (fsk16r25-r1/2, 150 a cell), heard by try 4
+    alone -> combined: AWGN -15 dB 0% -> 97%, -14 dB 33% -> 100%; MPP -14 dB 5% -> 61%,
+    -12 dB 61% -> 98%; MPD -12 dB 50% -> 100%. No wrong frame in 1650 runs.
 - **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.

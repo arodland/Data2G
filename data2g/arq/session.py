@@ -33,6 +33,8 @@ VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: 
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
+# failed connect frames further apart are not one CONNECT's tries (a robust try and its wait: under 15 s)
+REPEAT_GAP_S = 30.0
 # past t_turn: a reply's header must have been heard by then: the peer's
 # decode and PTT (~0.7 s), audio latency both ways, the reply's lead-in,
 # preamble and header (0.4-0.6 s) and the receiver's search step (0.25 s)
@@ -102,6 +104,7 @@ class Session:
     _deadline: float | None = None  # master: reply must be heard by then
     _answer_mode: str | None = None  # callee: the mode the CONNECT came in (its ACK goes in it)
     _tries: int = 0
+    _repeat_at: float = float("-inf")  # the last failed connect frame kept for combining
     _last_heard: float = 0.0
     _last_data: float = 0.0
     _idle_wait: float = 0.0
@@ -309,7 +312,7 @@ class Session:
             self._quiet_from = max(self._quiet_from, now)
 
     def on_rx(self, rx: B.RxBurst, now: float):
-        ctl = self._session_frame(rx)
+        ctl = self._session_frame(rx) or self._repeated_frame(rx, now)
         if ctl is not None:
             self._on_session_frame(ctl, now)
             return
@@ -590,11 +593,40 @@ class Session:
                     return self._primed_body(F.unpack_connect(p[:F.COMPACT_BYTES]), 0, rx)
         return None
 
-    def _primed_body(self, body: bytes, key: int, rx) -> dict | None:
-        if not body or (why := _check_frame(body)):
-            log.info("RX primed session frame malformed (%s): dropped", why if body else "empty")
+    def _repeated_frame(self, rx, now: float) -> dict | None:
+        """A one-codeword connect frame that failed blind and primed, combined
+        with the failed ones before it (RxBurst.decode_repeat, docs/arq.md
+        §3a): a CONNECT's robust tries are the same compact codeword (one
+        nonce), and so are the CONNECT_ACKs that answer them. Ones more than
+        REPEAT_GAP_S apart are not one CONNECT's."""
+        if not (L.REPEAT and hasattr(rx, "decode_repeat")) or rx.n_cw != 1 or self.station is not None:
             return None
-        log.info("RX primed %s", _frame_desc(body))
+        if self.state == CONNECTING:
+            mask = B.ctl_mask(1, 0, 0)
+        elif self.state == LISTEN and self._compact(rx.submode):
+            mask = B.COMPACT_CONNECT
+        else:
+            return None
+        if now - self._repeat_at > REPEAT_GAP_S:
+            rx.forget(L.REPEAT_SESSION_KEY)
+        self._repeat_at = now
+        p = rx.decode_repeat(0, mask, L.REPEAT_SESSION_KEY)
+        if p is None:
+            return None
+        rx.forget(L.REPEAT_SESSION_KEY)
+        if mask == B.COMPACT_CONNECT:
+            return self._primed_body(F.unpack_connect(p[:F.COMPACT_BYTES]), 0, rx, "repeated")
+        try:
+            body = F.Control.unpack([p]).ext.get(F.T_SESS, b"")
+        except ValueError:
+            body = b""
+        return self._primed_body(body, 0, rx, "repeated")
+
+    def _primed_body(self, body: bytes, key: int, rx, how: str = "primed") -> dict | None:
+        if not body or (why := _check_frame(body)):
+            log.info("RX %s session frame malformed (%s): dropped", how, why if body else "empty")
+            return None
+        log.info("RX %s %s", how, _frame_desc(body))
         return {"key": key, "body": body, "mode": rx.submode}
 
     def _on_session_frame(self, f: dict, now: float):

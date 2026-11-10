@@ -103,6 +103,7 @@ public:
     int n_cw() const override { return n; }
     py::object key(const SoftKey* k) const {
         if (!k) return py::none();
+        if (k->ctl && k->peer) return py::make_tuple("rep", k->peer, 0);  // REPEAT_KEY, REPEAT_SESSION_KEY
         if (k->ctl) return py::make_tuple("ctl", py::module_::import("builtins").attr("id")(obj), k->index);
         return py::make_tuple(k->peer, k->seq);
     }
@@ -117,6 +118,12 @@ public:
     std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override {
         auto r = obj.attr("decode_known")(slot, mask_tuple(mask), pyb(Bytes(tmpl.begin(), tmpl.end())),
                                           pyb(Bytes(tmask.begin(), tmask.end())), pair);
+        if (r.is_none()) return std::nullopt;
+        return bytes_of(r);
+    }
+    bool can_repeat() const override { return py::hasattr(obj, "decode_repeat"); }
+    std::optional<Bytes> decode_repeat(int slot, const MaskId& mask, const SoftKey& k) override {
+        auto r = obj.attr("decode_repeat")(slot, mask_tuple(mask), key(&k));
         if (r.is_none()) return std::nullopt;
         return bytes_of(r);
     }

@@ -37,6 +37,8 @@ inline constexpr int LINK_LOST_MISSES = 12;
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
 bool prime_default();
+// link.REPEAT: DATA2G_REPEAT=0 turns the combining of repeated controls off (read once).
+bool repeat_default();
 
 // Python's logging, by logger name ("data2g.link", "data2g.session") and
 // level (20 info, 30 warning). Unset: silent. Set once, before any use.
