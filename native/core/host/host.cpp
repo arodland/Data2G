@@ -13,6 +13,7 @@
 
 #include "arq/modes.hpp"
 #include "cwid/cwid.hpp"
+#include "hand/hand.hpp"
 #include "tables/cpm.hpp"
 
 namespace data2g::host {
@@ -223,7 +224,7 @@ void Host::command(std::string_view line, std::string_view peer) {
             ok = false;
         }
     } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6
-               : upper(args[0]) == "LISTEN" ? args.size() >= 4 : upper(args[0]) == "CANCEL" && args.size() == 1)) {
+               : upper(args[0]) == "LISTEN" ? args.size() >= 5 : upper(args[0]) == "CANCEL" && args.size() == 1)) {
         hand_ = true;
         // HAND args are strict (engine.py's _hand_arg): ints [0-9]+, a delay [0-9.]+,
         // a payload [0-9a-fA-F]{1,16}; anything else is WRONG without asking the Engine
@@ -244,6 +245,16 @@ void Host::command(std::string_view line, std::string_view peer) {
             if (used != s.size()) throw std::invalid_argument("not a number: " + s);
             return n;
         };
+        auto channel = [&](const std::string& s) {  // host.py's _hand_channel: within this host's width,
+            // the narrower of the BW command's and --kiss-bw
+            const int c = num(s), w = arq::cap_hz(e.kiss() ? std::min(cap, e.kiss()->cap) : cap);
+            if (c >= hand::channels_within(w)) throw std::invalid_argument("channel outside the width: " + s);
+            return c;
+        };
+        auto ack = [&](const std::string& s) {  // the ACKMODE tag: exactly 4 hex digits
+            if (s.size() != 4 || !hex16(s)) throw std::invalid_argument("bad ack: " + s);
+            return static_cast<int>(std::stoul(s, nullptr, 16));
+        };
         auto whole = [&](const std::string& s) {  // delay() characters, then float(): the whole
             // string in the classic locale (1.2.3 is WRONG); a huge d is inf, which fails the Engine's bounds
             const double v = delay(s) ? parse_double(s) : NAN;
@@ -253,11 +264,11 @@ void Host::command(std::string_view line, std::string_view peer) {
         try {
             if (upper(args[0]) == "SEND") {  // HAND SEND ref tag d channel hex16 (docs/arq.md §9)
                 if (!hex16(args[5])) throw std::invalid_argument("bad payload: " + args[5]);
-                e.hand_send(num(args[1]), num(args[2]), whole(args[3]), num(args[4]), std::stoull(args[5], nullptr, 16));
-            } else if (upper(args[0]) == "LISTEN") {  // HAND LISTEN d tag channel [channel...]
+                e.hand_send(num(args[1]), num(args[2]), whole(args[3]), channel(args[4]), std::stoull(args[5], nullptr, 16));
+            } else if (upper(args[0]) == "LISTEN") {  // HAND LISTEN d tag ack channel [channel...]
                 std::vector<int> channels;
-                for (std::size_t i = 3; i < args.size(); ++i) channels.push_back(num(args[i]));
-                e.hand_listen(whole(args[1]), num(args[2]), channels);
+                for (std::size_t i = 4; i < args.size(); ++i) channels.push_back(channel(args[i]));
+                e.hand_listen(whole(args[1]), num(args[2]), ack(args[3]), channels);
             } else e.hand_cancel();  // HAND CANCEL: always OK (docs/arq.md §9)
         } catch (const std::invalid_argument&) {
             ok = false;

@@ -733,22 +733,29 @@ As built (data2g/arq/policy.py):
       (SETHARDWARE `REFS ON`, docs/broadcast.md §5): it arrives there as a
       REF frame ahead of that burst's frames.
     - **HAND SEND ref tag d channel hex16**: send a Hand (63 payload bits as
-      16 hex digits, the top one ignored) in `channel` (0-39: 40 channels,
-      6.25 Hz 8-FSK, 60 Hz apart, centred on 1500 Hz), on air d seconds after
-      the end of heard burst `ref`, shifted by that burst's offset. `tag`
-      (0-255) seeds the Hand's CRC, so it can't answer another net's request.
-      WRONG for a gone ref, bad numbers, the slot already past, or a Hand
-      already waiting. While one waits, this host starts no CQ, broadcast, ID
+      16 hex digits, the top one ignored) in `channel` (40 channels, 6.25 Hz
+      8-FSK, 60 Hz apart around 1500 Hz, numbered from the centre out: 0 at
+      1470 Hz, 1 at 1530, 2 at 1410, ...), on air d seconds after the end of
+      heard burst `ref`, shifted by that burst's offset. `tag` (0-255) and the
+      channel seed the Hand's CRC, so it can't answer another net's request,
+      and a Hand sent in the wrong channel fails instead of being credited to
+      that channel's owner. Channels must fit this host's width, the narrower
+      of the BW command's and --kiss-bw: 0-7 at 500 Hz, 0-19 at 1200, all 40
+      at 2300/2750. WRONG for a gone ref, bad numbers, a channel outside the
+      width, the slot already past, or a Hand already waiting. While one waits, this host starts no CQ, broadcast, ID
       or KISS burst of its own. OK: then
       `HAND SENT c` when it keys, or `HAND DROPPED c` if the radio was busy
       more than 0.5 s past the slot.
-    - **HAND LISTEN d tag channel [channel...]**: open the window d seconds
-      after the end of the next burst this host sends (d at least 1: the
+    - **HAND LISTEN d tag ack channel [channel...]**: open the window d
+      seconds after the end of the burst carrying the KISS frame sent with
+      ACKMODE tag `ack` (its 2 bytes as 4 hex digits): the frame with the
+      net's call. Naming the burst keeps a CQ, ID, session burst or another
+      client's frame sent first from moving the window (d at least 1: the
       window's head is uncollectable below hand.SEARCH_S, since rx is off
       until the anchor burst ends), lasting the Hand length
       (10.56 s) plus 0.6 s either side, and decode the listed channels
-      (usually all 40; the CRC seeded with `tag`; a channel listed twice is
-      decoded once). A 40-channel round costs a desktop about 0.4 s of CPU;
+      (the CRC seeded with `tag` and each channel; a channel listed twice is
+      decoded once; WRONG for one outside the width, as HAND SEND). A 40-channel round costs a desktop about 0.4 s of CPU;
       `--hand-decoder cheap` on either host takes under half that for
       0.2-0.4 dB (docs/hand-burst.md). While a window is open this
       host starts no CQ, broadcast, ID or KISS burst of its own (session bursts still go;
@@ -759,8 +766,8 @@ As built (data2g/arq/policy.py):
       window's head could not be captured (my own burst ran into it):
       `HAND SHORT ms`, ms of it missed, before
       `HAND END`; an armed listen whose burst never went out gives up after
-      30 s with `HAND END`. Send the command before queuing the burst that
-      anchors the window: the KISS port may defer its start.
+      30 s with `HAND END`. Send the command before queuing the frame that
+      anchors the window: the KISS port may send it at once.
     - **HAND CANCEL**: stops a Hand waiting to go and an armed or open
       listen; the window ends with `HAND END`. Always OK.
   - BW500 caps at 500 Hz. This one matters: it keeps a session inside a 500 Hz

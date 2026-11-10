@@ -76,6 +76,9 @@ inline constexpr double HAND_ARM_EXPIRE_S = 30.0;
 // the smallest HAND LISTEN d: the window's head is uncollectable below hand::SEARCH_S,
 // since rx is off until the anchor burst ends
 inline constexpr double HAND_MIN_D_S = 1.0;
+// A KISS ACKMODE ack's tag (engine.py's ack_tag): the app's ids carry it in their low 16 bits,
+// big-endian. HAND LISTEN names its anchor burst by it.
+inline int ack_tag(std::int64_t ack) { return static_cast<int>(ack & 0xFFFF); }
 // CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
 // each), "only" (a CW ID in their place); a transmission no CW ID covers plans one CW_PLAN_S after it, or after
 // the last CW ID when that came under CW_GAP_S before it; it goes at the next chance, held by BUSY until
@@ -287,9 +290,10 @@ public:
 
     // -- Hand bursts (the D2G net's show of hands: hand/hand.hpp, docs/arq.md §9), session stage.
     // hand_send: a Hand `d_s` after heard burst `ref` ends, shifted by its cfo. hand_listen: a window
-    // d_s after my next burst ends. Both throw std::invalid_argument on bad input (engine.py's ValueError).
+    // d_s after the burst carrying the KISS frame acked with ACKMODE tag `ack` ends (ack_tag). Both
+    // throw std::invalid_argument on bad input (engine.py's ValueError).
     void hand_send(int ref, int tag, double d_s, int channel, std::uint64_t payload);
-    void hand_listen(double d_s, int tag, const std::vector<int>& channels);
+    void hand_listen(double d_s, int tag, int ack, const std::vector<int>& channels);
     // Stop a waiting Hand and an armed or open window (a gone client's must not hold the radio):
     // a window that existed ends with HAND END. Never throws (engine.py's hand_cancel).
     void hand_cancel();
@@ -298,6 +302,7 @@ public:
     // and _tx_kiss. The --native run of those tests reaches the same state here
     // (tests/native_subs/engine.py maps the attributes onto these).
     std::vector<std::tuple<int, double, double, double>> hand_refs() const;  // id, end s, cfo Hz, snr dB
+    std::vector<std::pair<int, std::int64_t>> test_acks;  // (port, ack) the burst on air carries (engine.py's _test_acks)
     void hand_ref_set(int id, double end_s, double cfo, double snr);
     void test_tx(const std::string& submode, std::vector<double> audio);
     std::optional<std::pair<std::int64_t, int>> hand_tx() const;  // a waiting Hand: (first sample, channel)
@@ -470,7 +475,7 @@ private:
     std::optional<HandTx> hand_tx_;
     struct HandListen {
         std::int64_t d;
-        int tag;
+        int tag, ack;
         std::vector<int> channels;
         std::int64_t armed;
         bool open = false;

@@ -47,7 +47,7 @@ Data2G has a punctured polar code with a list decoder, in Python and C++.
 
 Payload changes (77 → 63 bits):
 
-- Drop the 8-bit request tag. Seed the CRC with it instead. A Hand still can't answer another net, and the 8 bits go to the code.
+- Drop the 8-bit request tag. Seed the CRC with it instead, in the register's high byte, and the channel number in its low byte. A Hand still can't answer another net, and the 8 bits go to the code. A Hand that lands in a neighbouring channel (a wrong offset shift, or a client with another channel table) fails there instead of being credited to that channel's owner. That costs no bits and no sensitivity. It can't catch a stale map, where the station sends and seeds with the same old channel. The callsign below does.
 - Cut version and spare from 9 bits to 3.
 - Use CRC-16, not 14. Simulated false decodes are 2.6e-4 per attempt with net control trying 3 sync candidates × a list of 8. That is about 1% of rounds with one false hand among 40 channels. CRC-14 would be 4 times as many.
 
@@ -104,11 +104,23 @@ What it shows:
 - 10 dB costs 1-4 dB. 15 dB or more is fatal on fading paths at the 60 Hz pitch.
 - One empty channel between two Hands (120 Hz pitch) holds a 20 dB stronger neighbour to a 1-4 dB loss. A 75 Hz pitch isn't enough: at +20 dB it recovers the noise-only case (-16.3 dB) but not the fading ones.
 
+Channels are numbered from the centre out: 0 at 1470 Hz, 1 at 1530, 2 at 1410, 3 at 1590, and so on. A host's width keeps a prefix of them, with every tone inside ±width/2 of 1500 Hz: channels 0-7 at 500 Hz, 0-19 at 1200 and all 40 at 2300 or 2750. The width is the narrower of the client's BW command and `--kiss-bw`, and HAND SEND and HAND LISTEN answer WRONG past it. A 500 Hz net stays inside its segment that way, even where the rig's filter would pass more.
+
 So the channel map should:
 
+- Fill from channel 0 up, so a small net fits the narrowest filter, and many rigs' data filters roll off below 300 Hz and above 2700 Hz anyway.
 - Order expected stations by the latest SNR heard, and leave an empty channel wherever the list jumps by more than 5 dB.
-- Keep strangers away from expected stations. Their level is unknown, so put them in channels at the far band edge with an empty channel before them, or in their own short round.
+- Keep strangers away from expected stations. Their level is unknown, so keep a few channels for them at the top of the map (the edge of the width), with an empty channel before them, or give them their own short round.
 - Fill a 500 Hz net (8 channels) the same way. Expect fewer than 8 hands per round when levels spread widely, and run a second round for the rest.
+
+### Recommended: a callsign in the payload
+
+We recommend every client put the station's callsign in the payload, as Ragtime does (decided 8 Nov). A packed callsign takes about 28 of the 63 bits. It buys four things:
+
+- Identification. A station that only answers roll calls, with `--cw-id off`, otherwise sends nothing that carries its call.
+- A check on phantom Hands. CRC-16 alone passes one false Hand in about 1% of 40-channel rounds (2.6e-4 an attempt). Net control drops a Hand whose call isn't the one its map put in that channel.
+- A station in the wrong channel, from a stale map, shows up as the wrong call rather than as the channel's owner.
+- Newcomers can check in by Hand, in the channels kept for strangers, since the call says who they are.
 
 Later receiver upgrade: decode the strongest Hands first, rebuild and subtract them, then decode the rest, as WSJT-X does for FT8. It would relax the 5 dB rule. It isn't needed for the first version.
 
@@ -121,8 +133,10 @@ On slow fading the 1% failure point sits 4-6 dB above the 10% point (mpg: -8.5 v
 Roughly:
 
 - `HAND SEND ref channel payload`: transmit at the end of burst `ref` + D, shifted by that burst's offset.
-- `HAND LISTEN D channels`: decode the window after the next burst this host sends. It reports `HAND channel payload snr offset` for each one decoded, then `HAND END`.
+- `HAND LISTEN D ack channels`: decode the window after the burst that carries the KISS frame sent with ACKMODE tag `ack`, the one with `ANY TRAFFIC`. Naming it keeps a CQ, an ID or a session burst that goes first from moving the window. It reports `HAND channel payload snr offset` for each one decoded, then `HAND END`.
 - While a window is open the host holds its own CQ and broadcast transmissions.
+
+The exact commands are in docs/arq.md §9.
 
 ## How these were measured
 

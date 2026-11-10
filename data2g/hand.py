@@ -2,8 +2,10 @@
 
 One 8-FSK continuous-phase burst per station, tone spacing 6.25 Hz
 (Hand-50: if your rig works for FT8, it works for this), constant
-envelope. 63 payload bits + CRC-16 seeded with the 8-bit request tag (so
-a Hand can't answer another net's call), CRC-aided polar K=79 of E=162
+envelope. 63 payload bits + CRC-16 seeded with the 8-bit request tag and
+the channel (so a Hand can't answer another net's call, and a Hand sent in
+the wrong channel fails rather than being credited to that channel's
+owner), CRC-aided polar K=79 of E=162
 (data2g.polar, as the ACK submode), a fixed interleaver (seed 0) over the
 54 three-bit data symbols between two Welch Costas blocks:
 
@@ -17,8 +19,10 @@ off costs ~0.7-1 dB at the threshold), polar list decoding, first CRC pass
 wins (false decodes ~2.6e-4 per attempt measured, about 1% of 40-channel
 rounds).
 
-Channels: 40 at 60 Hz pitch centred on 1500 Hz (channel 0 at 330 Hz). An
-answerer shifts its Hand by the cfo of net control's ref burst (HAND
+Channels: 40 at 60 Hz pitch centred on 1500 Hz, numbered from the centre
+out (0 at 1470 Hz, 1 at 1530, 2 at 1410, ...), so a host's width keeps a
+prefix of them (channels_within: 8 in 500 Hz) and a small net filled from 0
+fits the narrowest filter. An answerer shifts its Hand by the cfo of net control's ref burst (HAND
 SEND), which lands it in its channel as net control hears it; the +-5 Hz
 search covers the rest. Ordering the channel map by SNR and leaving gaps
 at jumps over 5 dB (the near-far rule) is the client's job.
@@ -51,7 +55,7 @@ DATA_ROWS = np.setdiff1d(np.arange(2 * len(SYNC) + N_DATA), SYNC_ROWS)
 N_SYM = 2 * len(SYNC) + N_DATA  # 66
 LEN_S = N_SYM / RATE  # 10.56 s
 
-N_CHANNELS, PITCH, CENTER = 40, 60.0, 1500.0  # channel c -> CENTER + (c - 19.5) * PITCH
+N_CHANNELS, PITCH, CENTER = 40, 60.0, 1500.0  # channel c -> CENTER -+ (30 + c // 2 * 60), even below
 SEARCH_S, SEARCH_HZ, TOP = 0.6, 5.0, 3
 # A round's grids. ROUND_FULL ships. ROUND_CHEAP is what --hand-decoder cheap
 # picks on a station that needs the round for about half the CPU: one fewer
@@ -70,7 +74,21 @@ WINDOW_SAMPLES = 2 * SEARCH_SAMPLES + LEN_SAMPLES  # net control's capture, +-0.
 
 
 def channel_freq(c: int) -> float:
-    return CENTER + (c - (N_CHANNELS - 1) / 2) * PITCH
+    """Channel c's centre, from the centre out: even below 1500 Hz, odd above."""
+    off = PITCH / 2 + (c // 2) * PITCH
+    return CENTER + (off if c % 2 else -off)
+
+
+def channels_within(width_hz: float) -> int:
+    """How many channels (a prefix, 0 up) lie wholly within +-width_hz/2 of
+    the centre: the Hand's 8 tones, M * RATE wide, included."""
+    return sum(abs(channel_freq(c) - CENTER) + M * RATE / 2 <= width_hz / 2 for c in range(N_CHANNELS))
+
+
+def crc_init(tag: int, c: int) -> int:
+    """The CRC register's seed: the request tag in the high byte, the channel
+    in the low one. A Hand authenticates its net and its channel without bits."""
+    return (tag << 8) | c
 
 
 def payload_bits(p: int) -> np.ndarray:
@@ -85,7 +103,7 @@ def payload_int(bits: np.ndarray) -> int:
 
 def crc16(bits: np.ndarray, init: int) -> np.ndarray:
     """CRC-16/CCITT (0x1021) of a bit vector, register seeded with `init`
-    (the request tag in its high byte: the tag authenticates without bits)."""
+    (crc_init's)."""
     c = init
     for b in bits:
         fb = ((c >> 15) & 1) ^ int(b)
@@ -115,10 +133,10 @@ class HandBurst:
     submode = "hand"
 
 
-def modulate(tag: int, payload: np.ndarray, freq: float) -> np.ndarray:
-    """63 payload bits -> unit-RMS Hand audio at `freq` (Hz, tone centre)."""
-    g = grid(freq)
-    coded = code().encode(np.concatenate([payload, crc16(payload, tag << 8)]))[0]
+def modulate(tag: int, payload: np.ndarray, c: int) -> np.ndarray:
+    """63 payload bits -> unit-RMS Hand audio in channel c."""
+    g = grid(channel_freq(c))
+    coded = code().encode(np.concatenate([payload, crc16(payload, crc_init(tag, c))]))[0]
     sym = np.empty(N_SYM, int)
     sym[SYNC_ROWS] = np.tile(SYNC, 2)
     sym[DATA_ROWS] = cpm.to_tones(g, coded[interleaver()])
@@ -128,7 +146,7 @@ def modulate(tag: int, payload: np.ndarray, freq: float) -> np.ndarray:
 def tx_audio(tag: int, payload: int, channel: int, cfo: float) -> np.ndarray:
     """A Hand as it goes out: channel `channel`, shifted by the ref burst's
     cfo, envelope-normalised for the sound card (arq.engine._start_tx's rule)."""
-    x = modulate(tag, payload_bits(payload), channel_freq(channel))
+    x = modulate(tag, payload_bits(payload), channel)
     if cfo:
         x = hfchannel.freq_shift(x, cfo)
     return x / np.max(dsp.envelope(x))
@@ -205,9 +223,10 @@ def nail(g: cpm.Grid, y: np.ndarray, start: int, cfo: float, rnd: dict = ROUND_F
     return best[0], best[1], best[2]
 
 
-def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDecoder, rnd: dict = ROUND_FULL):
+def receive(g: cpm.Grid, y: np.ndarray, nominal: int, init: int, dec: polar.SCLDecoder, rnd: dict = ROUND_FULL):
     """The first candidate and list path whose CRC passes -> (payload bits,
-    snr_est dB, start sample), or None. Candidates are nailed and decoded
+    snr_est dB, start sample), or None. `init`: the CRC seed (crc_init's).
+    Candidates are nailed and decoded
     one at a time, as native/core/hand does: a Hand on the first candidate
     costs no further nails. The data-row energies serve twice: the soft bits,
     and the SNR (cpm.measure's scale: average power in 2500 Hz)."""
@@ -217,7 +236,7 @@ def receive(g: cpm.Grid, y: np.ndarray, nominal: int, tag: int, dec: polar.SCLDe
         llr[0, interleaver()] = cpm.llrs(g, En)
         bits, _ = dec.decode(llr)
         for u in bits[0]:
-            if np.array_equal(crc16(u[:PAYLOAD], tag << 8), u[PAYLOAD:]):
+            if np.array_equal(crc16(u[:PAYLOAD], init), u[PAYLOAD:]):
                 return u[:PAYLOAD], cpm.measure(g, En, N_DATA)["snr_est"], start
     return None
 
@@ -236,7 +255,7 @@ def decode_window(y: np.ndarray, tag: int, channels: list[int], nominal: int, rn
     dec = polar.SCLDecoder(code(), POLAR_LIST)
     out = []
     for c in channels:
-        got = receive(grid(channel_freq(c)), y, nominal, tag, dec, rnd)
+        got = receive(grid(channel_freq(c)), y, nominal, crc_init(tag, c), dec, rnd)
         if got is not None:
             bits, snr, start = got
             out.append(dict(c=c, payload=payload_int(bits), snr=float(snr),

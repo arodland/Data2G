@@ -308,12 +308,11 @@ std::vector<std::string> KissLink::take_events() { return std::exchange(events, 
 
 std::vector<std::pair<int, std::int64_t>> KissLink::take_acks() { return std::exchange(acks, {}); }
 
-void KissLink::on_sent(const arq::TxBurstPtr& burst) {
-    if (inflight_ && burst && (burst == inflight_ || same_burst(*burst, *inflight_))) {
-        acks.insert(acks.end(), inflight_acks_.begin(), inflight_acks_.end());
-        inflight_.reset();
-        inflight_acks_.clear();
-    }
+std::vector<std::pair<int, std::int64_t>> KissLink::on_sent(const arq::TxBurstPtr& burst) {
+    if (!inflight_ || !burst || (burst != inflight_ && !same_burst(*burst, *inflight_))) return {};
+    acks.insert(acks.end(), inflight_acks_.begin(), inflight_acks_.end());
+    inflight_.reset();
+    return std::exchange(inflight_acks_, {});
 }
 
 void KissLink::missed(const std::string& submode, int n_cw, std::optional<double> snr) {

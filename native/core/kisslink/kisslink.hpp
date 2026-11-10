@@ -137,7 +137,9 @@ public:
     void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt);
     std::vector<std::string> take_events();                  // the statuses since the last call
     std::vector<std::pair<int, std::int64_t>> take_acks();   // (port, ack) gone out since the last call
-    void on_sent(const arq::TxBurstPtr& burst);  // a burst finished transmitting: its acks are due
+    // A burst finished transmitting: its acks are due. -> those (port, ack), which the engine also
+    // reads (a HAND LISTEN's anchor).
+    std::vector<std::pair<int, std::int64_t>> on_sent(const arq::TxBurstPtr& burst);
     // BCAST * MISSED; snr: its in-band energy reading (snr_est's scale), if one was made
     void missed(const std::string& submode, int n_cw, std::optional<double> snr = std::nullopt);
     // The first queued frame's port and mode, with every queued frame of that

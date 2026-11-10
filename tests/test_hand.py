@@ -20,6 +20,7 @@ from data2g.host import Host
 from data2g.kisslink import KissLink
 
 BLOCK = FS // 10
+ACK = 0x1234  # the KISS ACKMODE tag of the frame that anchors a window (HAND LISTEN's ack)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_kiss import frame  # noqa: E402  # an AX.25 UI frame, as the KISS port takes it
@@ -40,11 +41,20 @@ def link(a: Engine, b: Engine, snr_db: float, seconds: float, until, seed=0):
     return False
 
 
+def key(e: Engine, audio: np.ndarray, acks=()):
+    """My burst on air, carrying KISS frames acked with `acks` (engine._test_acks:
+    a burst's acks are what names a window's anchor), and nobody's session."""
+    e.tx = [hand.HandBurst(), audio, 0]
+    e._tx_kiss = True  # nobody's session: no reply timer
+    e._test_acks = [(0, a) for a in acks]
+
+
 def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), gaps=(),
-               at_open=None, arm=True):
+               at_open=None, arm=True, decoys=()):
     """One listen round on a bare engine (docs/arq.md §9): arm the window (unless
-    the caller armed it already), key a 0.3 s burst to anchor it, then run the
-    window to its end. `hands` is (channel, payload, seconds after the anchor) of
+    the caller armed it already), key a 0.3 s burst carrying ACK to anchor it,
+    then run the window to its end. `decoys`: the acks of 0.3 s bursts keyed
+    first (None: a burst with no frame acked), which must not open it. `hands` is (channel, payload, seconds after the anchor) of
     Hand audio on the input; `gaps` is (start s, length s) of my own keying inside
     the window; `at_open` runs once the window has opened.
 
@@ -52,17 +62,16 @@ def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), g
     at which the radio was keyed after the window opened, and the anchor burst's
     end sample (the window's zero point)."""
     if arm:
-        e.hand_listen(d_s, tag, channels)
-    anchor_audio = np.zeros(3 * BLOCK)  # my burst: the window opens at its end
-    e.tx = [hand.HandBurst(), anchor_audio, 0]
-    e._tx_kiss = True  # nobody's session: no reply timer
-    for _ in range(len(anchor_audio) // BLOCK):
-        e.step(np.zeros(BLOCK))
+        e.hand_listen(d_s, tag, ACK, channels)
+    for acks in [() if a is None else (a,) for a in decoys] + [(ACK,)]:  # the window opens at the last's end
+        key(e, np.zeros(3 * BLOCK), acks)
+        for _ in range(3):
+            e.step(np.zeros(BLOCK))
     anchor = e.n  # its end sample: an exact whole number of blocks
     hi = anchor + int(round(d_s * FS)) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
     y = np.zeros(hi - anchor + 3 * BLOCK)
     for c, payload, start in hands:
-        x = hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c))
+        x = hand.modulate(tag, hand.payload_bits(payload), c)
         i = int(round(start * FS))
         y[i:i + len(x)] += x
     if at_open:
@@ -71,8 +80,7 @@ def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), g
     while e.n < hi:
         for g0, gl in gaps:  # a session burst keys inside the window
             if e.tx is None and e.n == anchor + int(round(g0 * FS)):
-                e.tx = [hand.HandBurst(), np.zeros(int(round(gl * FS))), 0]
-                e._tx_kiss = True
+                key(e, np.zeros(int(round(gl * FS))))
         i = e.n - anchor
         _, ptt = e.step(y[i:i + BLOCK])
         if ptt:
@@ -99,7 +107,7 @@ def test_hand_decode_roundtrip():
     tag, c, payload = 0x5A, 20, int(rng.integers(0, 2 ** hand.PAYLOAD))
     jitter = int(rng.integers(0, hand.SEARCH_SAMPLES))  # lands this late
     y = np.concatenate([np.zeros(hand.SEARCH_SAMPLES + jitter),
-                        hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c)),
+                        hand.modulate(tag, hand.payload_bits(payload), c),
                         np.zeros(hand.SEARCH_SAMPLES)])
     y = hfchannel.awgn(hfchannel.freq_shift(y, 2.0), 6.0, seed=3)
     got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES)
@@ -115,7 +123,7 @@ def test_hand_decode_with_the_window_head_lost():
     tag, c, payload = 0x5A, 20, int(rng.integers(0, 2 ** hand.PAYLOAD))
     lost = FS // 10
     y = np.concatenate([np.zeros(hand.SEARCH_SAMPLES - lost),
-                        hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c)),
+                        hand.modulate(tag, hand.payload_bits(payload), c),
                         np.zeros(hand.SEARCH_SAMPLES)])
     y = hfchannel.awgn(y, 6.0, seed=4)
     got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES - lost)
@@ -131,7 +139,7 @@ def test_hand_decode_at_the_sensitivity_floor(hand_round):
     tag, c, payload = 0x9C, 12, 0x1234ABCDEF012
     jitter = int(rng.integers(hand.SEARCH_SAMPLES // 3, 2 * hand.SEARCH_SAMPLES // 3))
     y = np.concatenate([np.zeros(hand.SEARCH_SAMPLES + jitter),
-                        hand.modulate(tag, hand.payload_bits(payload), hand.channel_freq(c)),
+                        hand.modulate(tag, hand.payload_bits(payload), c),
                         np.zeros(hand.SEARCH_SAMPLES)])
     y = hfchannel.awgn(hfchannel.freq_shift(y, -3.0), -18.0, seed=104)
     got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES, hand.ROUNDS[hand_round])
@@ -140,24 +148,27 @@ def test_hand_decode_at_the_sensitivity_floor(hand_round):
 
 @pytest.mark.parametrize("hand_round", ["full", "cheap"])
 def test_hand_round_between_two_stations(hand_round):
-    """A (net control) arms a listen, sends the anchor burst (CQ as ANY
-    TRAFFIC's stand-in), and gets B's Hand back on its channel. B's own CQ,
-    queued behind the Hand, waits for it (the Hand isn't dropped), and the
-    payload's 64th bit is ignored. Both --hand-decoder settings on net control:
-    the cheap grids find the Hand as well as the shipped ones."""
-    a, b = Engine("W1AW", seed=1), Engine("K2XYZ", seed=2)
+    """A (net control) arms a listen named by ACK, sends a CQ and then the
+    KISS frame (ANY TRAFFIC's stand-in) acked with ACK, and gets B's Hand back
+    on its channel: the window hangs on the frame's burst, not the CQ that went
+    first. B's own CQ, queued behind the Hand, waits for it (the Hand isn't
+    dropped), and the payload's 64th bit is ignored. Both --hand-decoder
+    settings on net control: the cheap grids find the Hand as well as the
+    shipped ones."""
+    a, b = Engine("W1AW", seed=1, kiss=KissLink()), Engine("K2XYZ", seed=2)
     a.hand_round = hand_round
     tag, payload, d = 0x5A, 0x1234567890ABC, 1.0
-    a.hand_listen(d, tag, [20])
+    a.hand_listen(d, tag, ACK, [20])
     a.send_cq("W1AW", 2)
+    a.kiss.enqueue(frame("QST", "W1AW", 0x03, b"ANY TRAFFIC"), 0, 7 << 16 | ACK)  # an id, its tag low
     b_ev = []
 
     def b_heard():
         b_ev.extend(b.take_hand_events())
-        return any(ev.startswith("REF") for ev in b_ev)
+        return sum(ev.startswith("REF") for ev in b_ev) >= 2
 
-    assert link(a, b, 12, 20, b_heard)  # B hears the CQ: a REF line
-    ref = int(next(ev for ev in b_ev if ev.startswith("REF")).split()[1])
+    assert link(a, b, 12, 40, b_heard)  # B hears the CQ, then the call: two REF lines
+    ref = int([ev for ev in b_ev if ev.startswith("REF")][1].split()[1])  # the call's
     b.hand_send(ref, tag, d, 20, payload | 1 << 63)
     b.send_cq("K2XYZ", 2)
     a_ev = []
@@ -186,23 +197,72 @@ def test_hand_round_between_two_stations(hand_round):
     assert any(ev.startswith("HAND SENT 20") for ev in b_ev), b_ev
 
 
+def test_hand_window_hangs_on_its_named_burst():
+    """Bursts that don't carry the listen's ack (none at all, or another tag,
+    even one sharing its low byte) don't open the window: the Hand, placed for
+    the named burst's end, decodes on time (docs/arq.md §9)."""
+    e = Engine("W1AW", seed=1)
+    lines, _, _ = hand_round(e, 1.0, 0x5A, [20], [(20, 0x4321, 1.0)], decoys=[None, 0x9934, 1 << 16 | 0x4312])
+    got = [l for l in lines if l.startswith("HAND 20 ")]
+    assert len(got) == 1 and int(got[0].split()[2], 16) == 0x4321, lines
+    assert abs(float(got[0].split()[4])) < 30, lines
+
+
+def test_hand_crc_binds_the_channel():
+    """The CRC is seeded with the channel too (hand.crc_init): a Hand that
+    lands a channel over (here 60 Hz low: channel 5 at 1650 Hz lands on 3's
+    1590) fails there instead of being credited to channel 3, while one sent
+    for channel 3 decodes."""
+    tag, pad = 0x5A, np.zeros(hand.SEARCH_SAMPLES)
+    for c, shift, want in ((5, -60.0, []), (3, 0.0, [0x777])):
+        x = hfchannel.freq_shift(hand.modulate(tag, hand.payload_bits(0x777), c), shift)
+        y = hfchannel.awgn(np.concatenate([pad, x, pad]), 10.0, seed=5)
+        assert [r["payload"] for r in hand.decode_window(y, tag, [3], hand.SEARCH_SAMPLES)] == want, c
+
+
+def test_hand_channels_fit_the_width():
+    """Channels count from the centre out (1470, 1530, 1410 Hz, ...), and the
+    host's width keeps a prefix: 8 at 500 Hz, 20 at 1200, all 40 at 2400,
+    every tone inside +-width/2 of 1500 Hz. HAND SEND and HAND LISTEN refuse a
+    channel past it, the narrower of the BW command's and --kiss-bw."""
+    assert [hand.channel_freq(c) for c in range(4)] == [1470.0, 1530.0, 1410.0, 1590.0]
+    for cap, n in ((500, 8), (1200, 20), (2400, 40)):
+        assert hand.channels_within(cap) == n
+        assert all(abs(hand.channel_freq(c) - 1500) + hand.M * hand.RATE / 2 <= cap / 2 for c in range(n))
+    for bw, kiss_cap, ok, wrong in (("BW500", None, 7, 8), ("BW1200", None, 19, 20), ("BW2300", 0, 7, 8)):
+        e = Engine("W1AW", seed=1, kiss=KissLink(cap=kiss_cap) if kiss_cap is not None else None)
+        h = Host(ref_at(e, 5.0))
+        h.command(bw)
+        for c, want in ((wrong, "WRONG"), (ok, "OK")):
+            h.out_cmd.clear()
+            h.command(f"HAND LISTEN 3.0 90 1234 {c}")
+            assert h.out_cmd == [want], (bw, kiss_cap, c)
+        h.out_cmd.clear()
+        h.command(f"HAND SEND 1 90 3.0 {wrong} 1")
+        h.command(f"HAND SEND 1 90 3.0 {ok} 1")
+        assert h.out_cmd == ["WRONG", "OK"], (bw, kiss_cap)
+        e.hand_cancel()
+
+
 def test_hand_commands_reply():
     """The §9 commands' replies, each case guarding the check it names: a bad
     channel on a Host with nothing armed, and bad hex once a ref exists - otherwise
     the already-armed window or the missing ref answers WRONG first and the case
     proves nothing."""
     h = Host(Engine("W1AW", seed=1))
-    h.command("HAND LISTEN 3.0 90 20 21")
+    h.command("HAND LISTEN 3.0 90 1234 20 21")
     assert h.out_cmd == ["OK"]
     h.out_cmd.clear()
-    for line in ("HAND LISTEN 3.0 91 22", "HAND LISTEN 3.0 90", "HAND SEND 1 90 3.0 20 1"):
+    for line in ("HAND LISTEN 3.0 91 1234 22", "HAND LISTEN 3.0 90 1234", "HAND SEND 1 90 3.0 20 1"):
         h.command(line)  # the window above is still armed; no burst heard: no refs
         assert h.out_cmd == ["WRONG"], line
         h.out_cmd.clear()
 
-    fresh = Host(Engine("W1AW", seed=1))  # nothing armed: the channel list is what refuses
-    fresh.command("HAND LISTEN 3.0 90 20 40")
-    assert fresh.out_cmd == ["WRONG"]  # channel 40: there are 0-39
+    for line in ("HAND LISTEN 3.0 90 1234 20 40",  # channel 40: there are 0-39
+                 "HAND LISTEN 3.0 90 123 20", "HAND LISTEN 3.0 90 12345 20", "HAND LISTEN 3.0 90 zzzz 20"):  # ack: 4 hex
+        fresh = Host(Engine("W1AW", seed=1))  # nothing armed: the argument is what refuses
+        fresh.command(line)
+        assert fresh.out_cmd == ["WRONG"], line
 
     ref_at(h.engine, 5.0)  # a ref, so the payload is what the reply is about
     h.command("HAND SEND 1 90 3.0 20 zz")
@@ -239,7 +299,7 @@ def test_hand_args_are_strict():
     underscores and a leading minus, so the Host checks the text itself (with a ref
     in place, so the argument is what the reply is about)."""
     h = Host(ref_at(Engine("W1AW", seed=1), 5.0))
-    for line in ("HAND LISTEN 1_0 90 20", "HAND SEND 1 90 3.0 20 -0",
+    for line in ("HAND LISTEN 1_0 90 1234 20", "HAND SEND 1 90 3.0 20 -0",
                  "HAND SEND 1 90 3.0 20 zz", "HAND SEND 1 90 3.0 20 f_f"):
         h.command(line)
         assert h.out_cmd == ["WRONG"], line
@@ -261,7 +321,7 @@ def test_hand_listen_expiry_and_cancel():
     e.hand_cancel()  # and at the Engine level: idempotent, never raises
     e.hand_cancel()
 
-    e.hand_listen(3.0, 0x5A, [20])
+    e.hand_listen(3.0, 0x5A, ACK, [20])
     keyed = []
     for i in range(int(31 * FS / BLOCK)):
         keyed.append(e.step(np.zeros(BLOCK))[1])
@@ -270,16 +330,16 @@ def test_hand_listen_expiry_and_cancel():
     assert not any(keyed)  # and it keys nothing while it waits
     assert e.take_hand_events() == ["HAND END"]  # one line, once
     assert e.take_hand_events() == []  # and nothing after it: the listen is gone
-    e.hand_listen(3.0, 0x5A, [20])  # armed again, and the reply is about that one
+    e.hand_listen(3.0, 0x5A, ACK, [20])  # armed again, and the reply is about that one
     h.out_cmd.clear()
-    h.command("HAND LISTEN 3.0 90 20")
+    h.command("HAND LISTEN 3.0 90 1234 20")
     assert h.out_cmd == ["WRONG"]  # a window is still armed
     h.command("HAND CANCEL")
     assert h.out_cmd == ["WRONG", "OK"] and e.take_hand_events() == ["HAND END"]
     h.command("HAND CANCEL")  # twice: OK again, no second HAND END
     assert h.out_cmd == ["WRONG", "OK", "OK"] and e.take_hand_events() == []
     h.out_cmd.clear()
-    h.command("HAND LISTEN 3.0 90 20")  # and a fresh listen is accepted
+    h.command("HAND LISTEN 3.0 90 1234 20")  # and a fresh listen is accepted
     assert h.out_cmd == ["OK"]
 
 
@@ -301,9 +361,8 @@ def test_hand_cancel_clears_a_waiting_hand_and_an_open_window():
     assert e.take_hand_events() == []  # neither sent nor dropped
 
     e = Engine("K2XYZ", seed=2)
-    e.hand_listen(1.0, 0x5A, [20])
-    e.tx = [hand.HandBurst(), np.zeros(3 * BLOCK), 0]  # the burst that anchors it
-    e._tx_kiss = True
+    e.hand_listen(1.0, 0x5A, ACK, [20])
+    key(e, np.zeros(3 * BLOCK), [ACK])  # the burst that anchors it
     for _ in range(3 + 5):  # and 0.5 s into the window it opened
         e.step(np.zeros(BLOCK))
     e.hand_cancel()
@@ -325,12 +384,11 @@ def test_hand_dropped_past_the_slot():
         e = Engine("W1AW", seed=1)
         ref_at(e, 2.05)
         e.hand_send(1, 0x5A, 1.0, 20, 0x123)
-        key = e._hand_tx[0]  # the key-up sample the engine scheduled
-        e.tx = [hand.HandBurst(), np.zeros(key + int(round(late_s * FS)) - e.n), 0]
-        e._tx_kiss = True
+        up = e._hand_tx[0]  # the key-up sample the engine scheduled
+        key(e, np.zeros(up + int(round(late_s * FS)) - e.n))
         while e.tx is not None:
             e.step(np.zeros(BLOCK))
-        assert e.n - key == int(round(late_s * FS)) and e.take_hand_events() == []
+        assert e.n - up == int(round(late_s * FS)) and e.take_hand_events() == []
         _, ptt = e.step(np.zeros(BLOCK))  # the first idle block decides
         return e, ptt, e.take_hand_events()
 
@@ -355,9 +413,9 @@ def test_hand_listen_holds_its_head():
     (docs/arq.md §9)."""
     e = Engine("W1AW", seed=1)
     with pytest.raises(ValueError):
-        e.hand_listen(0.5, 0x5A, [20])  # below the 1.0 s floor
+        e.hand_listen(0.5, 0x5A, ACK, [20])  # below the 1.0 s floor
     h = Host(e)
-    h.command("HAND LISTEN 0.5 90 20")
+    h.command("HAND LISTEN 0.5 90 1234 20")
     assert h.out_cmd == ["WRONG"]
 
     # my own burst keys from the window's opening until 1.2 s in: the first 0.8 s
@@ -367,11 +425,11 @@ def test_hand_listen_holds_its_head():
 
 
 def test_hand_listen_decodes_a_channel_once():
-    """The channel list may repeat: HAND LISTEN 1.0 90 20 20 21 decodes channel 20
+    """The channel list may repeat: HAND LISTEN 1.0 90 1234 20 20 21 decodes channel 20
     once, and reports it once (docs/arq.md §9)."""
     e = Engine("W1AW", seed=1)
     h = Host(e)
-    h.command("HAND LISTEN 1.0 90 20 20 21")
+    h.command("HAND LISTEN 1.0 90 1234 20 20 21")
     assert h.out_cmd == ["OK"]
     lines, _, _ = hand_round(e, 1.0, 90, [20, 20, 21], [(20, 0x111, 0.9), (21, 0x222, 1.0)], arm=False)
     for c, payload in ((20, 0x111), (21, 0x222)):
@@ -390,14 +448,14 @@ def test_hand_holds_my_own_bursts():
     e.send_cq("W1AW", 2)
     e.kiss.enqueue(frame("APRS", "W1AW", 0x03, b"!beacon"))
     e.hand_send(1, 0x5A, 1.0, 20, 0x1)  # slot 2 s from now
-    key = e._hand_tx[0]
+    up = e._hand_tx[0]
     for _ in range(19):  # up to the slot: the radio never keys
         _, ptt = e.step(np.zeros(BLOCK))
         assert not ptt
     assert e._extra and e.kiss.queue  # the CQ frame and the beacon are both still queued
     while e.tx is None:
         e.step(np.zeros(BLOCK))
-    assert e.n > key and e.take_hand_events() == ["HAND SENT 20"]  # it keyed the Hand, not mine
+    assert e.n > up and e.take_hand_events() == ["HAND SENT 20"]  # it keyed the Hand, not mine
     assert e._extra and e.kiss.queue
 
     # and with the window open: a session burst keys (a Hand 1.3 s into a window
@@ -411,8 +469,11 @@ def test_hand_holds_my_own_bursts():
     lines, keyed, anchor = hand_round(e2, 1.0, 0x5A, [20], [(20, 0x1234567890ABC, 1.3)],
                                       gaps=[(0.5, 0.6)], at_open=queue_mine)
     g0, g1 = anchor + int(0.5 * FS), anchor + int(1.1 * FS)
-    assert [s for s in keyed if not g0 <= anchor + s < g1] == [], keyed  # only the session burst
-    assert e2._extra and e2.kiss.queue  # still queued when the window closed
+    hi = anchor + int(1.0 * FS) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
+    # only the session burst, up to the block that straddles the window's end: its
+    # input completes the capture, and what it plays goes out after
+    assert [s for s in keyed if not g0 <= anchor + s < g1 and anchor + s + BLOCK <= hi] == [], keyed
+    assert e2.kiss.queue  # the CQ goes in the block that completes the capture, the beacon after
     got = [l for l in lines if l.startswith("HAND 20 ")]
     assert len(got) == 1, lines
     assert int(got[0].split()[2], 16) == 0x1234567890ABC, lines
@@ -456,7 +517,7 @@ def test_client_gone_cancels_the_hand():
     h = Host(e)
     ref_at(e, 1.0)
     h.command("HAND SEND 1 90 1.0 20 1")  # slot 2 s from now
-    h.command("HAND LISTEN 3.0 90 20")
+    h.command("HAND LISTEN 3.0 90 1234 20")
     assert h.out_cmd == ["OK", "OK"]
     h.out_cmd.clear()
     h.client_gone()
@@ -466,7 +527,7 @@ def test_client_gone_cancels_the_hand():
     h.after_step(False)  # the audio loop keeps running, ungated now
     assert not [l for l in h.out_cmd if l.startswith("HAND")], h.out_cmd
     h.out_cmd.clear()
-    h.command("HAND LISTEN 3.0 90 20")  # the next client arms its own
+    h.command("HAND LISTEN 3.0 90 1234 20")  # the next client arms its own
     assert h.out_cmd == ["OK"]
     h.after_step(False)
     assert not [l for l in h.out_cmd if l == "HAND END"], h.out_cmd  # no stray end
@@ -494,7 +555,7 @@ def test_hand_lines_are_gated_to_the_client_that_asked():
         refs = [l for l in h.out_cmd if l.startswith("REF ")]
         h.out_cmd.clear()
         if arm_listen:
-            e.hand_listen(3.0, 90, [20])  # the Engine's own round, not the client's
+            e.hand_listen(3.0, 90, ACK, [20])  # the Engine's own round, not the client's
         h.out_cmd.clear()
         for _ in range(int(31 * FS // BLOCK)):  # its burst never goes out
             _, ptt = e.step(np.zeros(BLOCK))
@@ -505,7 +566,7 @@ def test_hand_lines_are_gated_to_the_client_that_asked():
     refs, hands = gated("DATA2G ON")
     assert refs and refs[0].startswith("REF 1 "), refs  # same station, known client
     assert hands == ["HAND END"], hands
-    refs, hands = gated("HAND LISTEN 3.0 91 21", arm_listen=False)  # the command alone gates
+    refs, hands = gated("HAND LISTEN 3.0 91 1234 21", arm_listen=False)  # the command alone gates
     assert refs and refs[0].startswith("REF 1 "), refs
     assert hands == ["HAND END"], hands
 

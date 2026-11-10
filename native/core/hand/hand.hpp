@@ -1,6 +1,7 @@
 // data2g/hand.py: the Hand burst (the D2G net's show of hands, docs/arq.md
 // §9). 8-FSK at 6.25 Hz, 63 payload bits + CRC-16 seeded with the request
-// tag, CA-SCL polar K=79/E=162, two Costas blocks; 40 channels at 60 Hz.
+// tag and the channel, CA-SCL polar K=79/E=162, two Costas blocks; 40
+// channels at 60 Hz, numbered from the centre out.
 // Python is normative; tests/test_native_hand.py checks parity.
 #pragma once
 
@@ -24,13 +25,15 @@ inline constexpr std::int64_t LEN_SAMPLES = 84480;    // round(LEN_S * FS)
 inline constexpr std::int64_t WINDOW_SAMPLES = 2 * SEARCH_SAMPLES + LEN_SAMPLES;
 static_assert(config::FS == 8000, "SEARCH_SAMPLES / LEN_SAMPLES assume 8 kHz");
 
-double channel_freq(int c);
+double channel_freq(int c);  // from the centre out: even below 1500 Hz, odd above
+int channels_within(double width_hz);  // how many (a prefix) lie wholly within +-width_hz/2
+inline unsigned crc_init(int tag, int c) { return (static_cast<unsigned>(tag) << 8) | static_cast<unsigned>(c); }
 std::vector<std::uint8_t> payload_bits(std::uint64_t p);  // 63 bits, MSB first
 std::uint64_t payload_int(std::span<const std::uint8_t> bits);
 std::vector<std::uint8_t> crc16(std::span<const std::uint8_t> bits, unsigned init);
 
-// 63 payload bits -> unit-RMS Hand audio at `freq` (tone centre).
-std::vector<double> modulate(int tag, std::span<const std::uint8_t> payload, double freq);
+// 63 payload bits -> unit-RMS Hand audio in channel c.
+std::vector<double> modulate(int tag, std::span<const std::uint8_t> payload, int c);
 // A Hand as it goes out: channel c, shifted by the ref's cfo, envelope peak 1.
 std::vector<double> tx_audio(int tag, std::uint64_t payload, int channel, double cfo);
 

@@ -13,8 +13,11 @@ using namespace data2g;
 
 int main() {
     check::report_crashes_instead_of_prompting();
-    check::equal(hand::channel_freq(0), 330.0, "channel 0");
+    check::equal(hand::channel_freq(0), 1470.0, "channel 0: from the centre out, even below");
+    check::equal(hand::channel_freq(1), 1530.0, "channel 1");
     check::equal(hand::channel_freq(39), 2670.0, "channel 39");
+    check::equal(hand::channels_within(500.0), 8, "500 Hz: 8 channels");
+    check::equal(hand::channels_within(2400.0), 40, "2400 Hz: all 40");
     const std::uint64_t p = 0x5A5A123456789ABCull & ((1ull << hand::PAYLOAD) - 1);
     check::equal(hand::payload_int(hand::payload_bits(p)), p, "payload bits round trip");
 
@@ -23,7 +26,7 @@ int main() {
     const std::int64_t late = 1234;
     std::vector<double> y(static_cast<std::size_t>(hand::WINDOW_SAMPLES), 0.0);
     for (auto [c, payload] : {std::pair{20, p}, std::pair{22, std::uint64_t{42}}}) {
-        const auto x = hand::modulate(tag, hand::payload_bits(payload), hand::channel_freq(c));
+        const auto x = hand::modulate(tag, hand::payload_bits(payload), c);
         for (std::size_t i = 0; i < x.size(); ++i) y[static_cast<std::size_t>(hand::SEARCH_SAMPLES + late) + i] += x[i];
     }
     std::mt19937 rng(3);

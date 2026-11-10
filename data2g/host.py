@@ -35,8 +35,9 @@ BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
 seconds-at-1 seconds-at-max lines); show of hands (Data2G, docs/arq.md §9):
 HAND SEND ref tag d channel hex16 (send a Hand d seconds after the end of
-heard burst ref, shifted by its cfo), HAND LISTEN d tag channel [...] (decode
-the window after my next burst ends) and HAND CANCEL (stop a waiting Hand and
+heard burst ref, shifted by its cfo), HAND LISTEN d tag ack channel [...]
+(decode the window after the burst carrying KISS ACKMODE tag ack ends) and
+HAND CANCEL (stop a waiting Hand and
 any window). Replies OK / WRONG (MYCALL's
 OK followed by REGISTERED call for each call). Notifications: CONNECTED src
 dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
@@ -71,7 +72,7 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from . import audio, cwid  # noqa: E402
+from . import audio, cwid, hand  # noqa: E402
 from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
@@ -188,13 +189,14 @@ class Host:
             self._hand = True
             try:  # HAND SEND ref tag d channel hex16 (docs/arq.md §9); args strict, see _hand_arg
                 e.hand_send(int(_hand_arg(args[1], "[0-9]+")), int(_hand_arg(args[2], "[0-9]+")), float(_hand_arg(args[3], "[0-9.]+")),
-                            int(_hand_arg(args[4], "[0-9]+")), int(_hand_arg(args[5], "[0-9a-fA-F]{1,16}"), 16))
+                            self._hand_channel(args[4]), int(_hand_arg(args[5], "[0-9a-fA-F]{1,16}"), 16))
             except (ValueError, OverflowError):
                 ok = False
-        elif cmd == "HAND" and args and args[0].upper() == "LISTEN" and len(args) >= 4:
+        elif cmd == "HAND" and args and args[0].upper() == "LISTEN" and len(args) >= 5:
             self._hand = True
-            try:  # HAND LISTEN d tag channel [channel...] (docs/arq.md §9); args strict, see _hand_arg
-                e.hand_listen(float(_hand_arg(args[1], "[0-9.]+")), int(_hand_arg(args[2], "[0-9]+")), [int(_hand_arg(a, "[0-9]+")) for a in args[3:]])
+            try:  # HAND LISTEN d tag ack channel [channel...] (docs/arq.md §9); args strict, see _hand_arg
+                e.hand_listen(float(_hand_arg(args[1], "[0-9.]+")), int(_hand_arg(args[2], "[0-9]+")),
+                              int(_hand_arg(args[3], "[0-9a-fA-F]{4}"), 16), [self._hand_channel(a) for a in args[4:]])
             except (ValueError, OverflowError):
                 ok = False
         elif cmd == "HAND" and args and args[0].upper() == "CANCEL" and len(args) == 1:
@@ -262,6 +264,17 @@ class Host:
         else:
             ok = False
         self.out_cmd.append("OK" if ok else "WRONG")
+
+    def _hand_channel(self, a: str) -> int:
+        """A HAND channel argument: ValueError (WRONG) past the channels that fit
+        this host's width, the narrower of the BW command's and --kiss-bw
+        (hand.channels_within: 8 at 500 Hz, 20 at 1200, all 40 at 2400)."""
+        e = self.engine
+        cap = min(self.cap, e.kiss.cap) if e.kiss is not None else self.cap
+        c = int(_hand_arg(a, "[0-9]+"))
+        if c >= hand.channels_within(modes.CAP_HZ[cap]):
+            raise ValueError(f"channel {c} outside {modes.CAP_HZ[cap]} Hz")
+        return c
 
     def _bcast_command(self, args: list[str]) -> str | None:
         """BCAST OPEN group [FROM call] | CLOSE n | MODE n [AUTO] [DUP] mode ->

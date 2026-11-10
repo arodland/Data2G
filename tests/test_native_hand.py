@@ -1,7 +1,7 @@
 """native/core/hand against data2g/hand.py: the frozen tables, Hand audio
 (including a payload with every bit set), and a two-channel window's decodes
 (payloads, SNR, landing time, both --hand-decoder grids, and a round under the
-wrong tag)."""
+wrong tag), and the channel layout and widths."""
 
 import numpy as np
 
@@ -9,11 +9,14 @@ from data2g import hand, hfchannel
 
 
 def test_channels_and_audio(native):
-    for c in (0, 2, 19, 39):  # 2: f0 rounds half to even
+    for c in range(hand.N_CHANNELS):
         assert native.hand.channel_freq(c) == hand.channel_freq(c)
+        assert native.hand.crc_init(0x5A, c) == hand.crc_init(0x5A, c)
+    for w in (500, 1200, 2400, 100, 3000):
+        assert native.hand.channels_within(w) == hand.channels_within(w)
     for p in (0x1234567890ABC, 2 ** 63 - 1, 2 ** 62):  # bit 62 set: all 63 payload bits
-        np.testing.assert_allclose(native.hand.modulate(0x5A, p, hand.channel_freq(2)),
-                                   hand.modulate(0x5A, hand.payload_bits(p), hand.channel_freq(2)), atol=1e-9)
+        np.testing.assert_allclose(native.hand.modulate(0x5A, p, 2),
+                                   hand.modulate(0x5A, hand.payload_bits(p), 2), atol=1e-9)
         np.testing.assert_allclose(native.hand.tx_audio(0x5A, p, 20, 3.7), hand.tx_audio(0x5A, p, 20, 3.7), atol=1e-9)
 
 
@@ -23,7 +26,7 @@ def test_decode_window(native):
     y = np.zeros(hand.WINDOW_SAMPLES)
     sent = {5: int(rng.integers(0, 2 ** hand.PAYLOAD)), 7: int(rng.integers(0, 2 ** hand.PAYLOAD))}
     for c, p in sent.items():
-        x = hand.modulate(tag, hand.payload_bits(p), hand.channel_freq(c))
+        x = hand.modulate(tag, hand.payload_bits(p), c)
         y[hand.SEARCH_SAMPLES + late:hand.SEARCH_SAMPLES + late + len(x)] += x
     y = hfchannel.awgn(hfchannel.freq_shift(y, -1.5), 4.0, seed=5)
     # both --hand-decoder grids, in both languages: the same two Hands, the same SNR

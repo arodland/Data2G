@@ -92,6 +92,13 @@ HAND_MIN_D_S = 1.0  # the smallest HAND LISTEN d: the window's head is uncollect
 # below hand.SEARCH_S, since rx is off until the anchor burst ends
 
 
+def ack_tag(ack: int) -> int:
+    """A KISS ACKMODE ack's tag: the ids tnc.KissServer (and native's) hand
+    the link carry it in their low 16 bits, big-endian. HAND LISTEN names its
+    anchor burst by it."""
+    return ack & 0xFFFF
+
+
 class Recorder:
     """events.jsonl (one JSON object per line), rx_NNNNN.npz per burst
     heard, and audio_in.f16: everything the receiver was fed, float16 at
@@ -198,6 +205,7 @@ class Engine:
         self._hand_tx = None  # a scheduled Hand (docs/arq.md §9): [first audio sample, audio, channel]
         self._hand_listen = None  # an armed or open Hand window: dict(d, tag, channels, armed, open, ...)
         self._hand_hold = 0.0  # no CQ/broadcast/CW starts before this (an open Hand window)
+        self._test_acks = []  # tests: (port, ack) the burst on air carries, as KissLink.on_sent's (native: test_tx's)
         self._hand_out: list[str] = []  # REF/HAND lines for the host; the decoder thread appends (lock)
         self._hand_lock = threading.Lock()
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
@@ -333,12 +341,15 @@ class Engine:
         audio = np.concatenate([np.zeros(self.ptt_delay), hand.tx_audio(tag, payload, channel, cfo)])
         self._hand_tx = [target, audio, channel]
 
-    def hand_listen(self, d_s: float, tag: int, channels: list[int]):
-        """Arm a Hand window opening d_s seconds after the end of my next
-        burst: capture it +-hand.SEARCH_S, decode `channels` with the CRC
-        seeded by `tag`, and report through take_hand_events. While a window
-        is open no CQ, broadcast or CW ID of mine starts."""
-        if not 0 <= tag <= 255:
+    def hand_listen(self, d_s: float, tag: int, ack: int, channels: list[int]):
+        """Arm a Hand window opening d_s seconds after the end of the burst
+        carrying the KISS frame whose ACKMODE tag is `ack` (16 bits, the tag's
+        two bytes big-endian): the client names the burst its call goes in,
+        so a CQ, ID or session burst sent first can't move the window. Capture
+        it +-hand.SEARCH_S, decode `channels` with the CRC seeded by `tag`, and
+        report through take_hand_events. While a window is open no CQ,
+        broadcast or CW ID of mine starts."""
+        if not 0 <= tag <= 255 or not 0 <= ack <= 0xFFFF:
             raise ValueError("bad tag")
         if not HAND_MIN_D_S <= d_s < HAND_ARM_EXPIRE_S:
             raise ValueError("bad delay")
@@ -347,7 +358,7 @@ class Engine:
         channels = list(dict.fromkeys(channels))  # listed twice: decoded once
         if self._hand_listen is not None:  # its round still owes a HAND END
             raise ValueError("a Hand window is already waiting")
-        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, channels=channels,
+        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, ack=ack, channels=channels,
                                  armed=self.n, open=False, buf=[], first=0, next=0, lo=0, hi=0, anchor=0)
 
     def hand_cancel(self):
@@ -617,8 +628,11 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
+                sent = (self.kiss.on_sent(burst) if self.kiss is not None else []) + self._test_acks  # a broadcast burst's frames are acked
+                self._test_acks = []
                 hl = self._hand_listen
-                if hl is not None and not hl["open"]:  # my burst ended: its window opens
+                if hl is not None and not hl["open"] and any(a is not None and ack_tag(a) == hl["ack"] for _, a in sent):
+                    # the burst carrying the listen's named frame ended: its window opens
                     a = self.n + n  # its end sample (self.n advances at the step's end)
                     hl.update(open=True, buf=[], anchor=a,
                               lo=a + hl["d"] - hand.SEARCH_SAMPLES,
@@ -629,8 +643,6 @@ class Engine:
                     self.session.on_tx_end(burst, self.now + n / FS)
                     self._expect_reply()
                 self._tx_kiss = False
-                if self.kiss is not None:
-                    self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
         self.n += k
         return out, self.tx is not None
 

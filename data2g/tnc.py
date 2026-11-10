@@ -123,10 +123,12 @@ class KissServer(socketserver.ThreadingTCPServer):
 
     def __init__(self, addr, on_packet, on_command=None):
         """`on_packet(port, frame, ack)`: a data frame, or an ACKMODE one
-        (`ack` (client, tag) for send_ack, else None). `on_command(cmd,
-        payload, port)`: KISS commands other than those."""
+        (`ack` an id for send_ack, its low 16 bits the tag big-endian, as
+        native's: engine.ack_tag; else None). `on_command(cmd, payload,
+        port)`: KISS commands other than those."""
         self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
         self.refs = set()  # clients that sent REFS ON
+        self.acks, self._n_acks = {}, 0  # ACKMODE id -> (client, tag)
         super().__init__(addr, _KissHandler)
 
     def broadcast(self, data: bytes, port: int = 0):
@@ -150,10 +152,10 @@ class KissServer(socketserver.ThreadingTCPServer):
                 except OSError:
                     self.clients.discard(c)
 
-    def send_ack(self, ack, port: int):
+    def send_ack(self, ack: int, port: int):
         """An ACKMODE frame went out: its tag back to the client that sent it."""
-        client, tag = ack
         with self.lock:
+            client, tag = self.acks.pop(ack, (None, None))
             if client in self.clients:
                 try:
                     client.sendall(kiss_encode(tag, port, ACKMODE))
@@ -182,7 +184,11 @@ class _KissHandler(socketserver.BaseRequestHandler):
                     if cmd & 0x0F == DATA:
                         srv.on_packet(cmd >> 4, payload, None)
                     elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
-                        srv.on_packet(cmd >> 4, payload[2:], (self.request, payload[:2]))
+                        with srv.lock:
+                            srv._n_acks += 1
+                            ack = srv._n_acks << 16 | int.from_bytes(payload[:2], "big")
+                            srv.acks[ack] = (self.request, payload[:2])
+                        srv.on_packet(cmd >> 4, payload[2:], ack)
                     elif cmd & 0x0F == SETHARDWARE and (on := refs_command(payload)) is not None:
                         with srv.lock:
                             (srv.refs.add if on else srv.refs.discard)(self.request)
@@ -195,5 +201,6 @@ class _KissHandler(socketserver.BaseRequestHandler):
             with srv.lock:
                 srv.clients.discard(self.request)
                 srv.refs.discard(self.request)
+                srv.acks = {k: v for k, v in srv.acks.items() if v[0] is not self.request}
             log.info("KISS client %s disconnected", peer)
 

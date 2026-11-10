@@ -243,7 +243,16 @@ std::tuple<std::int64_t, double, Mat<double>> nail(const cpm::Grid& g, Scratch& 
 
 }  // namespace
 
-double channel_freq(int c) { return CENTER + (c - (N_CHANNELS - 1) / 2.0) * PITCH; }
+double channel_freq(int c) {
+    const double off = PITCH / 2 + (c / 2) * PITCH;
+    return CENTER + (c % 2 ? off : -off);
+}
+
+int channels_within(double width_hz) {
+    int n = 0;
+    for (int c = 0; c < N_CHANNELS; ++c) n += std::abs(channel_freq(c) - CENTER) + M * RATE / 2 <= width_hz / 2;
+    return n;
+}
 
 std::vector<std::uint8_t> payload_bits(std::uint64_t p) {
     std::vector<std::uint8_t> b(PAYLOAD);
@@ -268,13 +277,11 @@ std::vector<std::uint8_t> crc16(std::span<const std::uint8_t> bits, unsigned ini
     return out;
 }
 
-std::vector<double> modulate(int tag, std::span<const std::uint8_t> payload, double freq) {
-    cpm::Grid g = grid(0);
-    g.center = freq;
-    g.f0 = std::nearbyint((freq - (M - 1) * RATE / 2) / RATE) * RATE;
+std::vector<double> modulate(int tag, std::span<const std::uint8_t> payload, int c) {
+    const cpm::Grid& g = grid(c);
     Mat<std::uint8_t> u(1, K);
     std::copy(payload.begin(), payload.end(), u[0]);
-    const auto crc = crc16(payload, static_cast<unsigned>(tag) << 8);
+    const auto crc = crc16(payload, crc_init(tag, c));
     std::copy(crc.begin(), crc.end(), u[0] + PAYLOAD);
     const auto coded = decoder().code().encode(u);
     std::vector<std::uint8_t> sent(E);
@@ -289,7 +296,7 @@ std::vector<double> modulate(int tag, std::span<const std::uint8_t> payload, dou
 }
 
 std::vector<double> tx_audio(int tag, std::uint64_t payload, int channel, double cfo) {
-    auto x = modulate(tag, payload_bits(payload), channel_freq(channel));
+    auto x = modulate(tag, payload_bits(payload), channel);
     if (cfo != 0.0) {  // hfchannel.freq_shift, the phase wrapped to one turn first
         const auto z = dsp::hilbert(x);
         for (std::size_t n = 0; n < x.size(); ++n) {
@@ -306,7 +313,6 @@ std::vector<double> tx_audio(int tag, std::uint64_t payload, int channel, double
 std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span<const int> channels, std::int64_t nominal,
                                    Round round) {
     const auto& dec = decoder();
-    const unsigned init = static_cast<unsigned>(tag) << 8;
     std::vector<Decoded> out;
     if (channels.empty() || y.empty()) return out;
     Scratch s;
@@ -328,7 +334,7 @@ std::vector<Decoded> decode_window(std::span<const double> y, int tag, std::span
             bool done = false;
             for (int li = 0; li < dec.list_size() && !done; ++li) {
                 const std::span<const std::uint8_t> u(res.paths[0] + static_cast<std::size_t>(li) * K, K);
-                const auto crc = crc16(u.first(PAYLOAD), init);
+                const auto crc = crc16(u.first(PAYLOAD), crc_init(tag, c));
                 if (!std::equal(crc.begin(), crc.end(), u.begin() + PAYLOAD)) continue;
                 out.push_back({c, payload_int(u), cpm::measure(g, En, N_DATA).snr_est,
                                1000.0 * static_cast<double>(start - nominal) / config::FS});

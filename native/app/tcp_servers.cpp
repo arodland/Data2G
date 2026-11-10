@@ -104,7 +104,8 @@ KissServer::KissServer(const QHostAddress& addr, quint16 port,
                     if ((cmd & 0x0F) == tnc::KISS_DATA) {
                         on_packet_(cmd >> 4, std::move(payload), std::nullopt);
                     } else if ((cmd & 0x0F) == tnc::KISS_ACKMODE && payload.size() >= 2) {  // [tag, 2][frame]
-                        const std::int64_t id = ++n_acks_;
+                        // tnc.py's: an id with the tag in its low 16 bits, big-endian (arq::ack_tag)
+                        const std::int64_t id = (++n_acks_ << 16) | (payload[0] << 8 | payload[1]);
                         acks_[id] = {c, tnc::Bytes(payload.begin(), payload.begin() + 2)};
                         on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id);
                     } else if (const auto on = (cmd & 0x0F) == tnc::KISS_SETHARDWARE ? tnc::refs_command(payload) : std::nullopt) {

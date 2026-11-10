@@ -457,11 +457,14 @@ class KissLink:
         out, self.acks = self.acks, []
         return out
 
-    def on_sent(self, burst: TxBurst):
-        """A burst finished transmitting: its frames' acks are due."""
+    def on_sent(self, burst: TxBurst) -> list:
+        """A burst finished transmitting: its frames' acks are due. -> those
+        (port, ack), which the engine also reads (a HAND LISTEN's anchor)."""
         if self._inflight is not None and burst == self._inflight[0]:
-            self.acks += self._inflight[1]
-            self._inflight = None
+            sent, self._inflight = self._inflight[1], None
+            self.acks += sent
+            return sent
+        return []
 
     def missed(self, submode: str, n_cw: int, snr: float | None = None):
         """A burst heard whose header decoded but nothing else: it can't be

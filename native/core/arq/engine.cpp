@@ -799,7 +799,12 @@ Engine::Done Engine::process(Block& b) {
             const TxBurstPtr sent = tx_->burst;
             tx_.reset();
             noise_.mark(now(), now() + static_cast<double>(n) / config::FS + receiver::NoiseProfile::RECOVER_S);
-            if (hand_listen_ && !hand_listen_->open) {  // my burst ended: its Hand window opens
+            auto acked = cfg_.kiss ? cfg_.kiss->on_sent(sent) : std::vector<std::pair<int, std::int64_t>>{};  // a broadcast burst's frames are acked
+            acked.insert(acked.end(), test_acks.begin(), test_acks.end());
+            test_acks.clear();
+            if (hand_listen_ && !hand_listen_->open && std::any_of(acked.begin(), acked.end(), [&](const auto& pa) {
+                    return ack_tag(pa.second) == hand_listen_->ack; })) {
+                // the burst carrying the listen's named frame ended: its Hand window opens
                 auto& hl = *hand_listen_;
                 const std::int64_t a = n_ + static_cast<std::int64_t>(n);
                 hl.open = true;
@@ -816,7 +821,6 @@ Engine::Done Engine::process(Block& b) {
             }
             request_reset();  // our own transmission was not heard
             tx_kiss_ = false;
-            if (cfg_.kiss) cfg_.kiss->on_sent(sent);  // a broadcast burst's frames are acked
         }
     }
     n_ += k;
@@ -975,8 +979,8 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
     hand_tx_ = HandTx{first, std::move(audio), channel};
 }
 
-void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) {
-    if (tag < 0 || tag > 255) throw std::invalid_argument("bad tag");
+void Engine::hand_listen(double d_s, int tag, int ack, const std::vector<int>& channels) {
+    if (tag < 0 || tag > 255 || ack < 0 || ack > 0xFFFF) throw std::invalid_argument("bad tag");
     if (!(d_s >= HAND_MIN_D_S && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
     if (channels.empty() || std::any_of(channels.begin(), channels.end(), [](int c) { return c < 0 || c >= hand::N_CHANNELS; }))
         throw std::invalid_argument("bad channels");
@@ -984,7 +988,7 @@ void Engine::hand_listen(double d_s, int tag, const std::vector<int>& channels) 
     for (const int c : channels)
         if (std::find(uniq.begin(), uniq.end(), c) == uniq.end()) uniq.push_back(c);
     if (hand_listen_) throw std::invalid_argument("a Hand window is already waiting");  // its round still owes a HAND END
-    hand_listen_ = HandListen{.d = static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), .tag = tag,
+    hand_listen_ = HandListen{.d = static_cast<std::int64_t>(std::nearbyint(d_s * config::FS)), .tag = tag, .ack = ack,
                               .channels = std::move(uniq), .armed = n_};
 }
 
