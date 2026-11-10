@@ -153,6 +153,7 @@ void Receiver::reset() {
     pending_.reset();
     pilots_ok_ = confirmed_ = false;
     dark_ = 0;
+    looked_ = false;
     powers_.clear();
     ps_ = 0.0;
     pn_ = 0;
@@ -404,6 +405,7 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     pilots_ok_ = q->is_cpm() || q->copy() || q->score() >= SUSPECT_SCORE;
     confirmed_ = false;
     dark_ = 0;
+    looked_ = false;
     out.push_back(HeaderEvent{*pending_, off_ + len()});
     return true;
 }
@@ -417,6 +419,32 @@ bool Receiver::release(std::vector<Item>& out) {
     out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.end())});
     drop();
     // as a suspect burst's end: keep the last search window and every CPM front waiting
+    int64_t keep = keep_;
+    for (const auto& w : cpm_wait_) keep = std::max(keep, len() - (w.first - off_));
+    trim(keep);
+    return true;
+}
+
+// A CPM early lock (front + header copy 1), once its mid block and second
+// header copy are in: under cpm::CONFIRM_LLR there the burst is not there,
+// and it is let go as release lets an OFDM one (receiver.Receiver._unconfirmed).
+bool Receiver::unconfirmed(std::vector<Item>& out) {
+    const Pending& p = *pending_;
+    if (!p.is_cpm() || looked_) return false;
+    const cpm::Lock& l = p.cpm();
+    const cpm::Grid& g = *cpm::grid(l.spec->grid);
+    if (l.copies >= tables::CPM.hdr_copies) {  // (a late, mid or primed lock)
+        looked_ = true;
+        return false;
+    }
+    if (off_ + len() < cpm::confirm_end(g, l) + g.T) return false;
+    looked_ = true;
+    cpm::Lock here = l;
+    here.start -= off_;
+    if (cpm::confirm(g, buf_, here) >= cpm::CONFIRM_LLR) return false;
+    const auto a = static_cast<std::size_t>(std::clamp<int64_t>(p.start() - off_, 0, len()));
+    out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.end())});
+    drop();
     int64_t keep = keep_;
     for (const auto& w : cpm_wait_) keep = std::max(keep, len() - (w.first - off_));
     trim(keep);
@@ -506,6 +534,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             pilots_ok_ = p->is_cpm() || p->copy() || p->score() >= SUSPECT_SCORE;
             confirmed_ = false;
             dark_ = 0;
+            looked_ = false;
             out.push_back(HeaderEvent{*p, off_ + len()});
         }
         const Pending p = *pending_;
@@ -515,7 +544,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 // the later-header search is for false locks: a confirmed burst skips it
                 if (confirmed_) fresh_ %= HOP;
                 else if (supersede(out)) continue;
-                else if (release(out)) continue;
+                else if (release(out) || unconfirmed(out)) continue;
             }
             break;
         }

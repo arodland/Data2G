@@ -328,6 +328,7 @@ class Receiver:
         self.pilots_ok = False
         self.confirmed = False  # the pending burst's header is clear and its pilots are there
         self._dark = 0  # the pending lock's latest pilot checks in a row with its pilots measurably absent (RELEASE_S)
+        self._looked = False  # the pending CPM lock's second look is done (_unconfirmed)
         self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
         self._ps, self._pn = 0.0, 0  # the block being summed
         # samples fed since the last preamble search (search at once), less
@@ -388,6 +389,7 @@ class Receiver:
         self.pending = None
         self.pilots_ok = self.confirmed = False
         self._dark = 0
+        self._looked = False
 
     @property
     def busy(self) -> bool:
@@ -512,6 +514,33 @@ class Receiver:
         self._trim(max([self.keep] + [len(self.buf) - (c["first"] - self.off) for c in self.cpm_wait]))
         return True
 
+    def _unconfirmed(self, out: list) -> bool:
+        """A CPM early lock (front + header copy 1), once its mid block and
+        second header copy are in: under cpm.CONFIRM_LLR there they say the
+        burst is not there (it stopped, or the lock is on someone's data),
+        and it is let go as _release lets an OFDM one. Once per lock; a lock
+        read from both copies already has had its look."""
+        from . import cpm
+
+        p = self.pending
+        if p.get("family") != "cpm" or self._looked or cpm.CONFIRM_LLR is None:
+            return False
+        if p.get("copies", cpm.HDR_COPIES) >= cpm.HDR_COPIES:  # (a late, mid or primed lock)
+            self._looked = True
+            return False
+        g = cpm.GRIDS[p["band"]]
+        if self.off + len(self.buf) < cpm.confirm_end(p) + g.T:
+            return False
+        self._looked = True
+        c = cpm.confirm(g, self.buf, dict(p, start=p["start"] - self.off))
+        if c >= cpm.CONFIRM_LLR:
+            return False
+        log.info("%s lock: its mid block and second header copy read %.1f, let go", p["spec"].name, c)
+        out.append(("burst", {"header": p, "rx": None, "audio": self.buf[max(0, p["start"] - self.off):]}))
+        self.drop()
+        self._trim(max([self.keep] + [len(self.buf) - (w["first"] - self.off) for w in self.cpm_wait]))
+        return True
+
     def _supersede(self, out: list, whole: bool = False) -> bool:
         """While committed to a burst, keep looking in the newer audio: a
         header past the pending one's, scoring clearly better, replaces it.
@@ -563,6 +592,7 @@ class Receiver:
         self.pilots_ok = q.get("family") == "cpm" or "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
         self._dark = 0
+        self._looked = False
         out.append(("header", dict(q, stream_end=self.off + len(self.buf))))
         return True
 
@@ -683,6 +713,7 @@ class Receiver:
                 self.pilots_ok = p.get("family") == "cpm" or "copy" in p or p["score"] >= self.SUSPECT_SCORE
                 self.confirmed = False
                 self._dark = 0
+                self._looked = False
                 log.debug("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS,
                          "sync" if p.get("family") == "cpm" else "header copy" if "copy" in p else "header", p["score"])
@@ -698,7 +729,7 @@ class Receiver:
                         self.fresh %= self.HOP
                     elif self._supersede(out):
                         continue
-                    elif self._release(out):
+                    elif self._release(out) or self._unconfirmed(out):
                         continue
                 break
             if p.get("family") == "cpm":

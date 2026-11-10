@@ -662,6 +662,19 @@ data2g/arq/engine.py). Off by default.
     tone, CW key-down or Hand read as pilots. With it, at 3 s: Hand-like
     hold 15 -> 3 s, missed-preamble data 46 -> 38, CW 19 -> 18; true bursts
     received 4482 -> 4511, lost ones that decode offline 5 -> 1.
+- **Unconfirmed CPM early locks:** a CPM lock taken on the front block and
+  first header copy is looked at again once its mid block and second header
+  copy are in (`cpm.confirm`: their tone LLRs at the locked word's rows and
+  tones). Under `cpm.CONFIRM_LLR` (-2) the burst is not there: it is reported
+  lost and let go. A CPM lock was never checked again, and held replies to
+  the end its word claimed (c16r25: up to 82 s). Locks read from both copies
+  (late, mid block, expected slot) have had their look. A burst that fades
+  through its second copy reads about 0 and is kept.
+  scripts/cpm_confirm_study.py (2026-11-10, 3000 bursts a grid, AWGN/MPP/MPD
+  from the floor to 12 dB over it): of 7530 true early locks 18 read under
+  -2, none of which decoded whole (5548 did); bursts that stop after their
+  first copy are let go 89% (c16r25), 97% (c8r50), 99.9% (c32r62) of the time,
+  locks on a burst's data 98.5-100%.
 - **Limits:** a waiting peer holds through an ID 93% of the time or more down
   to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
   about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an

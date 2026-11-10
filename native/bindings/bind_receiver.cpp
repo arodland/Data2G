@@ -45,6 +45,7 @@ py::dict cpm_lock_dict(const cpm::Lock& l) {
     d["header_margin"] = l.header_margin;
     d["end"] = l.end;
     d["header_end"] = l.header_end;
+    d["copies"] = l.copies;
     d["band"] = std::string(l.spec->grid);
     d["family"] = "cpm";
     d["n_cw"] = 1 + l.dup + l.n_data;
