@@ -337,6 +337,12 @@ Where the rest comes from:
 - **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
+- **Another station's burst is not the peer's loss.** A burst whose first codeword
+  converges (LDPC: a whole codeword, so what was on air) under neither the session key
+  nor a session frame's is someone else's: the engine drops it before the gear shifter
+  sees its measurements or scores it as lost control (`Session.foreign`). CPM control
+  (polar) never says it converged, and a control that only converges as a pair is not
+  told apart: those are scored as before.
 - **A malformed control is a failed one.** A control that passes its CRC but can't be
   read is dropped the same way, with a warning in the log naming the fault, before
   any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,

@@ -1005,6 +1005,11 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
         }
     }
     if (cq(rx)) return;
+    // a whole codeword under another key: its measurements and its loss are not my peer's
+    if (!ours && rx.converged(0, false) && session_->foreign(rx)) {
+        log_write(LOG, INFO, format("RX %s x%d: another station's", rx.submode().c_str(), rx.n_cw()));
+        return;
+    }
     timing.mark("probe");
     // the noise profile too (the gear shifter's noise rule reads it)
     Measured m = *meas;
