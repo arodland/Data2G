@@ -350,6 +350,7 @@ private:
     std::optional<std::string> implausible(const Core& core, const Ext& ext) const;
     std::pair<PeerAsk, bool> note_peer(const Core& core, const Ext& ext);
     std::pair<std::int64_t, bool> take_ack(const Core& core, const Ext& ext);
+    std::vector<std::int64_t> decoded_bursts(std::int64_t acted, std::int64_t cum, const std::set<std::int64_t>& received) const;
     bool take_abandon(RxBurst& rx, const Ext& ext);
     DataTaken take_data(RxBurst& rx, const Core& core, const Ext& ext, int dup, std::int64_t acted, bool outcome);
     void log_rx(RxBurst& rx, const Core& core, int dup, const DataTaken& data, std::int64_t base0, std::int64_t next0,

@@ -282,6 +282,14 @@ Where the rest comes from:
     transmissions with IR move the 50% point 2-6 dB below one transmission's,
     more at higher code rates. Chase gets 1-3.5 dB less than IR at rate 1/2 and
     above. At rate 1/5, where RV1 is mostly repeats, they are the same.
+- **Which RV a resend takes:** the number of bursts carrying the codeword that
+  the peer is known to have decoded (it holds their soft bits). That is the
+  burst a reply acts on, and any burst before it whose own reply was lost
+  (the peer then acts on a poll) that the ACK vouches for: a seq it newly
+  reports received that no other burst up to the acted-on one carried
+  (`Station._decoded_bursts`). Until 2026-11-10 only the acted-on burst
+  counted, so after a lost reply and a poll the resends went at RV 0 again.
+  A burst the ACK says nothing new of stays uncounted: RV 0 decodes alone.
 - **Slot-to-seq mapping:** it follows from the acted-on ACK's missing list (the K
   resends) and `next_seq` (the new codewords). Every slot is then checked by its
   seq-masked CRC (§2), so a wrong mapping costs a failed decode, never wrong data.
