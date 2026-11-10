@@ -378,10 +378,10 @@ Where the rest comes from:
 | type | contents | when |
 |---|---|---|
 | new | start seq (7 bits) of this burst's new codewords | any new codewords |
-| abandon | seq A, and a reset flag (drop all stored soft bits) | mode change, resync |
+| abandon | seq A, a reset flag (deprecated, see below) and the abandon epoch (7 bits) | mode change, resync |
 | rv | 2 bits per resend, slot order | K > 0 |
 | bitmap | 64-bit received map above the cumulative point | any gap |
-| resync | marks a resync burst (§10) | §10 |
+| resync | marks a resync burst (§10). Deprecated, see below | §10 |
 | report | SNR (0.5 dB), Doppler class, delay class, effective MI per constellation (4 x 4 bits) | every burst after a change, else every 4th turn |
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
@@ -871,6 +871,13 @@ forever without progress, because they disagree about protocol state.
     the receiver's cumulative ACK, which both sides know.
   - It re-slices from there at RV0.
   - The receiver drops every stored soft bit for that direction.
+  - **Deprecated on the wire: the reset flag and the resync TLV.** They are still sent
+    and never read. Every new abandon (a new epoch) makes the receiver drop all its soft
+    bits for the direction, reset flag or not: the epoch is in each data codeword's CRC
+    mask, so nothing kept from before could combine anyway. A receiver has no use for
+    either; they label the sender's log line ("resync" rather than "abandon"). Not an
+    unused tool to wire up. Drop both at the next wire change that touches the abandon
+    TLV.
 - **Burst seqs can't alias.**
   - Each station numbers its bursts absolutely; the wire carries the number mod 8.
   - It never has more than 7 bursts the peer hasn't acted on. At that limit its turn is

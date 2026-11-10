@@ -491,6 +491,7 @@ bool Station::data_allowed(bool fresh, const std::string& submode) {
     return true;
 }
 
+// `reset` (the TLV's low bit, and T_RESYNC with it): deprecated, sent and never read (docs/arq.md §10)
 void Station::start_abandon(int reset) {
     const std::int64_t a = tx.abandon();
     abandon_epoch = (abandon_epoch + 1) % 128;
