@@ -327,6 +327,7 @@ class Receiver:
         self.pending = None
         self.pilots_ok = False
         self.confirmed = False  # the pending burst's header is clear and its pilots are there
+        self._dark = 0  # the pending lock's latest pilot checks in a row with its pilots measurably absent (RELEASE_S)
         self.powers = deque(maxlen=self.FLOOR_BLOCKS)  # in-band power of 0.1 s blocks (on_air)
         self._ps, self._pn = 0.0, 0  # the block being summed
         # samples fed since the last preamble search (search at once), less
@@ -386,6 +387,7 @@ class Receiver:
         self.last_start = self.pending["start"]
         self.pending = None
         self.pilots_ok = self.confirmed = False
+        self._dark = 0
 
     @property
     def busy(self) -> bool:
@@ -422,9 +424,12 @@ class Receiver:
         if p.get("family") == "cpm" or "p0" not in p:
             return
         # only p0 (the pilots' grid) is read: the native port shifts just it too
-        c = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True)
+        c, pat = modem.pilot_coherence(self.buf, dict(p, p0=p["p0"] - self.off), modem.PILOT_PAIRS, latest=True,
+                                       pattern=True)
         if len(c) >= modem.PILOT_PAIRS:
-            ok = float(np.mean(c)) > modem.PILOT_NOISE[p["spec"].band]
+            band = p["spec"].band
+            ok = float(np.mean(c)) > modem.PILOT_NOISE[band] and pat > modem.PILOT_PATTERN[band]
+            self._dark = 0 if ok else self._dark + 1
             # a copy lock is one header copy: confirmed (no further search) at
             # the single-copy commit score
             self.confirmed = ok and p["score"] >= (modem.COPY_COMMIT_SCORE if "copy" in p else self.SUSPECT_SCORE)
@@ -482,6 +487,30 @@ class Receiver:
     CPM_TAIL = FS // 20  # kept before a CPM burst's end (Receiver.feed): 440 ppm over a 90 s burst
     SUPERSEDE_MARGIN = 0.05  # header score a later header needs over the pending one
     SUSPECT_SCORE = 0.36  # below it a header may be a false lock (false ones score 0.19-0.34)
+    # A suspect OFDM lock (a header copy under COPY_COMMIT_SCORE, the
+    # confirmed rule's) whose frame pilots have measurably not been there
+    # for this long in a row (pilot checks, one a HOP) is let go: reported
+    # lost, and the search goes on past it. In a row, not "never": a false
+    # lock on another burst's data sees that burst's pilots on its frame grid
+    # until the data ends. A false lock held this
+    # station's replies for the length its header claimed (an n4 one 52 s).
+    # 0: never (scripts/false_lock_study.py, docs/arq.md §7b).
+    RELEASE_S = 3.0
+
+    def _release(self, out: list) -> bool:
+        p = self.pending
+        if (not self.RELEASE_S or p.get("family") == "cpm"
+                or p["score"] >= (modem.COPY_COMMIT_SCORE if "copy" in p else self.SUSPECT_SCORE)
+                or self._dark * self.HOP < self.RELEASE_S * FS):
+            return False
+        log.info("%s header (score %.2f): no pilots in %.1f s, let go", p["spec"].name, p["score"],
+                 self._dark * self.HOP / FS)
+        out.append(("burst", {"header": p, "rx": None, "audio": self.buf[max(0, p["start"] - self.off):]}))
+        self.drop()
+        # as a suspect burst's end: keep the last search window (a real
+        # preamble inside the false one's span) and every CPM front waiting
+        self._trim(max([self.keep] + [len(self.buf) - (c["first"] - self.off) for c in self.cpm_wait]))
+        return True
 
     def _supersede(self, out: list, whole: bool = False) -> bool:
         """While committed to a burst, keep looking in the newer audio: a
@@ -533,6 +562,7 @@ class Receiver:
         self.pending = q
         self.pilots_ok = q.get("family") == "cpm" or "copy" in q or q["score"] >= self.SUSPECT_SCORE
         self.confirmed = False
+        self._dark = 0
         out.append(("header", dict(q, stream_end=self.off + len(self.buf))))
         return True
 
@@ -652,6 +682,7 @@ class Receiver:
                 # passed already); a suspect one waits for its pilots
                 self.pilots_ok = p.get("family") == "cpm" or "copy" in p or p["score"] >= self.SUSPECT_SCORE
                 self.confirmed = False
+                self._dark = 0
                 log.debug("receiving %s burst: %d codeword(s), %.1f s, %s score %.2f", p["spec"].name,
                          p["n_cw"], (p["end"] - p["start"]) / FS,
                          "sync" if p.get("family") == "cpm" else "header copy" if "copy" in p else "header", p["score"])
@@ -666,6 +697,8 @@ class Receiver:
                     if self.confirmed:
                         self.fresh %= self.HOP
                     elif self._supersede(out):
+                        continue
+                    elif self._release(out):
                         continue
                 break
             if p.get("family") == "cpm":

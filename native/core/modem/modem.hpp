@@ -32,6 +32,7 @@ using Spec = config::Submode;
 
 double header_min_score(std::string_view band);  // HEADER_MIN_SCORE[band]; throws std::out_of_range
 double pilot_noise(std::string_view band);       // PILOT_NOISE[band]
+double pilot_pattern(std::string_view band);     // PILOT_PATTERN[band]
 
 // Which headers a receiver takes beyond validity (modem.Accept). nullptr
 // where a function takes `const Accept*` is Python's None.
@@ -145,7 +146,9 @@ struct Lock {
 };
 Lock find_burst(std::span<const double> x, std::span<const std::string_view> bands = {},
                 const Accept* accept = nullptr, std::span<const BandStat> stats = {});
-std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max = 8, bool latest = false);
+// `pattern`: also the pilot pattern over those frames (modem.pilot_coherence's pattern=True)
+std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max = 8, bool latest = false,
+                                    double* pattern = nullptr);
 // C and level both given (StreamDetector.C rows for x's starts, its level) or
 // neither. peak: the normalized pilot peak, if one was computed (find_copy.peak).
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept = nullptr,

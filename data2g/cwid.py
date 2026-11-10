@@ -14,6 +14,7 @@ be the same tone.
 Native: cwid/cwid.hpp.
 """
 
+import itertools
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -107,8 +108,10 @@ class CwSense:
       times the floor (a key-down);
     - else quiet (a key-up gap).
     `active` over the last WIN_N windows: at least MIN_HITS hits, MIN_QUIET
-    quiet ones and at most MAX_ELSEWHERE elsewhere. A steady carrier on the
-    centre never goes quiet. A strong steady carrier 100-300 Hz off the
+    quiet ones and at most MAX_ELSEWHERE elsewhere, the hits keyed: at least
+    MIN_RUNS separate runs, none longer than MAX_RUN. A steady carrier on the
+    centre never goes quiet, and its start or end is one long run (a Hand
+    near 1500 Hz read as an ID at both). A strong steady carrier 100-300 Hz off the
     centre hides an ID (every window reads elsewhere): then the peer's turn
     may cost a timeout. Inside a burst it may read a CW ID now and then
     (narrow ones near their floor); holding then is harmless, the burst
@@ -128,6 +131,9 @@ class CwSense:
     FLOOR_DOWN, FLOOR_UP = 0.1, 0.004  # an up step's time constant ~5 s: a 16 s burst still reads elsewhere at its end
     WIN_N = 50  # 1 s: past a word gap at 15 wpm. 25 windows (6, 2, 3) heard IDs 2 dB lower, but read n4 at 0 dB as CW
     MIN_HITS, MIN_QUIET, MAX_ELSEWHERE = 12, 4, 6
+    # keyed: an ID at MIN_WPM-MAX_WPM puts several elements in WIN_N windows; its
+    # longest, a dash at MIN_WPM, is 12 windows (Hann edges add one or two)
+    MIN_RUNS, MAX_RUN = 2, 16
     HITS_FROM = 3  # hits_from: the HITS_FROM-th latest hit
 
     def __init__(self, center: float = FREQ_HZ):
@@ -180,8 +186,10 @@ class CwSense:
             # one tone: all hits but one within a step of each other (n4's
             # carriers and c16r25's tones near the centre take turns)
             steady = max(sum(abs(v - u) <= 1 for v in hits) for u in range(1, 2 * self.TONE_K + 2))
+            runs = [len(list(g)) for on, g in itertools.groupby(h, lambda v: v > 0) if on]
             self.active = (len(hits) >= self.MIN_HITS and steady >= len(hits) - 1
-                           and h.count(0) >= self.MIN_QUIET and h.count(-1) <= self.MAX_ELSEWHERE)
+                           and h.count(0) >= self.MIN_QUIET and h.count(-1) <= self.MAX_ELSEWHERE
+                           and len(runs) >= self.MIN_RUNS and max(runs) <= self.MAX_RUN)
             if c > 0 and self.active:
                 self._hits = (self._hits + [self.n])[-self.HITS_FROM:]
                 self.hits_from = self._hits[0] if len(self._hits) == self.HITS_FROM else -1

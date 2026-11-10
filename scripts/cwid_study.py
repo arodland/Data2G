@@ -3,7 +3,8 @@
   sense     CwSense: whether a waiting peer holds through an ID (its reply
             deadline, 2.2 s left when the ID starts, never lapses before the
             next header could be found), per key-down SNR (PEP, 2500 Hz) and
-            channel; never-active on noise and on every mode's bursts
+            channel; never-active on noise, on every mode's bursts, and on
+            Hand-like 8-FSK (6.25 Hz, 10.56 s, steady envelope) near 1500 Hz
   locks     the live receiver's headers on CW IDs in noise, through an Engine
             (its false-lock drop) and through the Receiver alone (none)
   sessions  paired whole sessions (scripts/cpu_profile/speedtest.py: both
@@ -90,11 +91,32 @@ def burst_cell(name):
     return name, out
 
 
+def hand_like(freq: float, seed: int) -> np.ndarray:
+    """A Hand's audio, uncoded (data2g/hand.py on its branch): 66 random 8-FSK
+    symbols at 6.25 Hz, continuous phase, centred on `freq`."""
+    g = cpm.Grid(f"hand{freq:g}", 8, 6.25, center=freq)
+    return cpm.tones(g, np.random.default_rng(seed).integers(0, 8, 66))
+
+
+def hand_cell(args):
+    """Seconds CwSense is active over 4 Hand-like bursts at `freq` per (SNR, channel)."""
+    freq, out = args, {}
+    for snr in (20, 5, -5):
+        for fading in (None, "mpg"):
+            on = 0
+            for seed in range(4):
+                y = np.concatenate([np.zeros(FS), hand_like(freq, seed), np.zeros(FS)])
+                on += active(H.apply_channel(y, snr, fading_preset=fading, seed=seed)).sum() * B / FS
+            out[f"{fading or 'awgn'} {snr}"] = on
+    return freq, out
+
+
 def sense(a):
     cells = [(f, s, a.n) for f in (None, "mpp", "mpd") for s in (-14, -12, -10, -8, -6, -4, 0, 10, 30)]
     with Pool(a.workers) as p:
         rows = p.map(sense_cell, cells)
         bursts = p.map(burst_cell, list(MODES))
+        hands = p.map(hand_cell, (1470.0, 1530.0, 1410.0, 1590.0, 1350.0))  # Hand channels 0-4
     noise = active(np.random.default_rng(9).normal(size=1200 * FS)).sum() * B / FS
     print("held through the ID (fraction), key-down SNR dB in 2500 Hz (PEP):")
     for ch in ("awgn", "mpp", "mpd"):
@@ -104,7 +126,11 @@ def sense(a):
     print(f"bursts (4 per cell, every mode, AWGN/MPP/MPD at 30/10/0/-5 dB): active in {len(bad)} modes")
     for n, d in bad.items():
         print(f"  {n}: " + ", ".join(f"{k} {v:.2f} s" for k, v in d.items()))
-    json.dump(dict(held=rows, noise_s=noise, bursts=dict(bursts)), open(a.out / "cwid_sense.json", "w"), indent=1)
+    print("Hand-like 8-FSK (4 per cell), seconds active:")
+    for f, d in hands:
+        print(f"  {f:.0f} Hz: " + ", ".join(f"{k} {v:.2f}" for k, v in d.items()))
+    json.dump(dict(held=rows, noise_s=noise, bursts=dict(bursts), hands={f"{f:.0f}": d for f, d in hands}),
+              open(a.out / "cwid_sense.json", "w"), indent=1)
 
 
 def lock_cell(args):
