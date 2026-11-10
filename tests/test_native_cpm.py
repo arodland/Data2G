@@ -197,6 +197,30 @@ def test_late_lock(native, reference, name, n_data):
                 assert a[k] == pytest.approx(b[k], rel=RTOL, abs=1e-12), k
 
 
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+                                         for n in (0, 3)])
+def test_confirm(native, reference, name, n_data):
+    """An early lock's second look (the mid block and second header copy at
+    its word): on the burst, and on one that stops after its first copy."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(n_data)
+    assert native.cpm.CONFIRM_LLR == cpm.CONFIRM_LLR
+    x = ref(reference, "modulate")(spec, _burst(spec, n_data, False, rng), False).copy()
+    rows = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, False)).hdr_rows[0]
+    for stops in (False, True):
+        if stops:
+            x[(rows[-1] + 1) * g.T:] = 0
+        y = _channel(x, rng, lead=1777, sigma=0.3)
+        lock = ref(reference, "find")(g, y[:1777 + cpm.hdr_span(g.name, 1) + FS // 2])
+        assert lock is not None and lock["copies"] == 1
+        assert native.cpm.find(g.name, y[:1777 + cpm.hdr_span(g.name, 1) + FS // 2])["copies"] == 1
+        b = ref(reference, "confirm")(g, y, lock)
+        a = native.cpm.confirm(g.name, y, lock["spec"].name, lock["n_data"], lock["dup"], lock["start"], lock["cfo"])
+        assert a == pytest.approx(b, rel=RTOL, abs=1e-9)
+        assert (b < cpm.CONFIRM_LLR) == stops, (stops, b)
+
+
 def test_llrs_zero_padded(native, reference):
     """A codeword past the audio's end (all-zero energies) reads as erasures in both."""
     g = cpm.GRIDS["c8r50"]

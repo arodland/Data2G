@@ -280,6 +280,48 @@ def test_a_cpm_burst_whose_first_header_copy_faded_locks_on_both():
         assert ok, (name, [ev["header"]["spec"].name for ev in got])
 
 
+def test_a_cpm_early_lock_is_let_go_when_its_second_header_copy_is_not_there():
+    """An early lock (front + header copy 1) held BUSY to the end its word
+    claimed whatever followed. Its mid block and second header copy are known
+    tones at known rows: when the burst stops after its first copy they say
+    so (cpm.confirm under CONFIRM_LLR), the lock is reported lost and BUSY
+    ends within about a second of the second copy's end, not at the claimed
+    end; the whole burst is received as before."""
+    import sys
+    from pathlib import Path
+
+    from data2g import cpm
+    from data2g.arq import phy as PHY
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import outcome_data as O
+
+    acc = modem.Accept.of(None, 16.0)
+    for name, n in (("fsk16r25-r1/2", 4), ("fsk8r50-r1/2", 4), ("fsk32r62-r1/2", 4)):
+        g = cpm.GRIDS[cpm.SPECS[name].grid]
+        b = O.burst(name, n, np.random.default_rng(3))
+        lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n - 1, False))
+        lead = 2 * FS
+        for stops in (False, True):
+            x = PHY.tx_audio(b).copy()
+            if stops:
+                x[(lay.hdr_rows[0][-1] + 1) * g.T:] = 0
+            x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
+            y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
+            rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
+            got, busy_until = [], 0
+            for i in range(0, len(y), FS // 10):
+                got += [ev for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
+                busy_until = i + FS // 10 if rx.busy else busy_until
+            assert len(got) == 1 and got[0]["header"]["spec"].name == name, (name, stops, got)
+            copy2_end, end = lead + (lay.hdr_rows[1][-1] + 1) * g.T, lead + lay.n * g.T
+            if stops:
+                assert got[0]["rx"] is None and busy_until <= copy2_end + FS < end, (name, busy_until, copy2_end, end)
+            else:
+                assert all(PHY.ModemRx(got[0]["rx"], {}).decode(i, s.mask_id, 0, None) == s.payload
+                           for i, s in enumerate(b.slots)), name
+
+
 def test_a_cpm_burst_whose_front_faded_locks_on_its_mid_block():
     """Front sync block and first header copy lost (a fade): cpm.find
     misses, find_mid locks from the mid block and both header copies (a

@@ -108,6 +108,7 @@ struct Lock {
     // start (the detected one), cfo, score and header_end (where x must reach
     // for late_lock) are set; spec is nullptr.
     bool wait = false;
+    int copies = 0;  // header copies the lock was read from (an early lock: 1)
 };
 // threshold: nullopt = SYNC_THRESHOLD plus the lock floors (lock_llr, hdr_margin). hi: nullopt = len(x).
 // wait: a candidate instead of nullopt while the second header copy is still arriving.
@@ -121,6 +122,13 @@ std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lo
 // (cpm.find_mid): the mid block's start in [lo, hi). hi: nullopt = len(x).
 std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int64_t lo = 0,
                              std::optional<std::int64_t> hi = std::nullopt);
+// cpm.confirm: a lock's second look, tone_llr over its mid block and second
+// header copy at the locked word, unfloored; under CONFIRM_LLR the burst is
+// not there (receiver::Receiver lets an early lock go). confirm_end: one past
+// its second header copy's last sample.
+inline constexpr double CONFIRM_LLR = -2.0;
+double confirm(const Grid& g, std::span<const double> x, const Lock& lock);
+std::int64_t confirm_end(const Grid& g, const Lock& lock);
 // Samples from a burst's start to the end of its first `copies` header copies,
 // the latest any word puts them.
 std::int64_t hdr_span(const Grid& g, int copies);
