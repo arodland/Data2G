@@ -24,7 +24,8 @@ namespace {
 void test_cpm() {
     check::current_step = "constellation: CPM";
     const auto& m = arq::mode_at("fsk8r50-r1/2");
-    arq::TxBurst b{std::string(m.name), {}, 0};
+    arq::TxBurst b;
+    b.submode = m.name;
     b.slots.push_back({{7, 0, 0}, 0, arq::Bytes(static_cast<std::size_t>(arq::payload_bytes(m)), 0x55)});
     b.slots.push_back({{7, 0, 1}, 0, arq::Bytes(static_cast<std::size_t>(arq::payload_bytes(m)), 0xa3)});
     std::vector<double> y(config::FS / 2, 0.0);
