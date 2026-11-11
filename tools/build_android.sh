@@ -4,7 +4,7 @@
 #
 #   QT_ANDROID=~/Qt/6.11.1/android_arm64_v8a QT_HOST=~/Qt/6.11.1/gcc_64 tools/build_android.sh
 #   ... tools/build_android.sh --abi x86_64 --install    # one ABI (an emulator), then adb install
-#   ... tools/build_android.sh --unsigned --aab           # CI: no debug key; also the Play bundle (unsigned)
+#   ... tools/build_android.sh --aab                      # also the Play bundle (unsigned)
 #
 # QT_ANDROID names any one ABI's Qt; all ABIs Qt has installed are built
 # unless --abi picks one. ANDROID_HOME (default ~/Android/Sdk) and
@@ -13,7 +13,6 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 INSTALL=0
-UNSIGNED_ONLY=0
 AAB=0
 ALL_ABIS=ON
 ABI=all
@@ -22,7 +21,6 @@ EXTRA=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --install) INSTALL=1; shift ;;
-        --unsigned) UNSIGNED_ONLY=1; shift ;;
         --aab) AAB=1; shift ;;
         --abi) ALL_ABIS=OFF; ABI=$2; EXTRA+=("-DANDROID_ABI=$2"); shift 2 ;;
         --version-code) EXTRA+=("-DDATA2G_ANDROID_VERSION_CODE=$2"); shift 2 ;;
@@ -59,11 +57,6 @@ fi
 OUT="$BUILD_DIR/data2g-tnc.apk"
 UNSIGNED=$(echo "$BUILD_DIR"/android-build/build/outputs/apk/release/*-unsigned.apk)
 BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
-if [[ $UNSIGNED_ONLY == 1 ]]; then
-    "$BT/zipalign" -f 4 "$UNSIGNED" "$BUILD_DIR/data2g-tnc-unsigned.apk"
-    echo "built: $BUILD_DIR/data2g-tnc-unsigned.apk"
-    exit 0
-fi
 KS=${ANDROID_DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}
 if [[ ! -f $KS ]]; then
     echo "no debug keystore at $KS: run any Gradle debug build once, or set ANDROID_DEBUG_KEYSTORE" >&2

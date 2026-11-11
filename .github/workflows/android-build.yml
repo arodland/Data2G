@@ -1,4 +1,4 @@
-# The Android TNC (native/android-app/): an unsigned APK on every run; with
+# The Android TNC (native/android-app/): a debug-signed APK on every run; with
 # `release`, also the Play bundle, signed with the upload key and sent to
 # Google Play. Called by ci.yml (no inputs) and release.yml (all of them),
 # like native-build.yml, so a release runs the job CI runs.
@@ -93,6 +93,10 @@ jobs:
           key: deps-android-${{ hashFiles('native/cmake/*.cmake') }}
       # Play rejects a version code it has seen, so a release derives one
       # that increases with the version: X.Y.Z -> X*1000000 + Y*1000 + Z.
+      # The APK is signed with a debug key committed in the repo (password
+      # "android"), so it installs, and each CI build installs over the last
+      # one. It is public on purpose: it marks a test build. Play builds are
+      # signed with the upload key below, so the two never update each other.
       - name: Build
         shell: bash
         env:
@@ -107,14 +111,15 @@ jobs:
           QT_ANDROID="$RUNNER_TEMP/Qt/$QT_VERSION/android_arm64_v8a" \
           QT_HOST="$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64" \
           BUILD_DIR="$PWD/native/build-android" JOBS="$(nproc)" \
-            tools/build_android.sh --unsigned ${{ inputs.release && '--aab' || '' }} "${extra[@]}" \
+          ANDROID_DEBUG_KEYSTORE=native/android-app/ci-debug.keystore \
+            tools/build_android.sh ${{ inputs.release && '--aab' || '' }} "${extra[@]}" \
             -- -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
           echo "pkg=data2g-tnc${VERSION:+-$VERSION}" >> "$GITHUB_ENV"
       - name: Name the APK
-        run: mv native/build-android/data2g-tnc-unsigned.apk "${{ env.pkg }}-unsigned.apk"
+        run: mv native/build-android/data2g-tnc.apk "${{ env.pkg }}-debug.apk"
       - uses: actions/upload-artifact@v7
         with:
-          path: ${{ env.pkg }}-unsigned.apk
+          path: ${{ env.pkg }}-debug.apk
           archive: false
           if-no-files-found: error
       # --- release: sign the bundle, upload to Play ---------------------------
