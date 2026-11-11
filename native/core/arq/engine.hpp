@@ -226,6 +226,10 @@ public:
     // Every burst we transmit (ARQ, ID, KISS), on the session stage as it is keyed, in the order sent:
     // a monitor's view of our own side. Set it before the first step().
     void set_on_send(std::function<void(const TxBurstPtr&)> f) { on_send_ = std::move(f); }
+    // Every burst heard, once its session stage is done with it: its decoder, handed over (ModemRx::for_reader:
+    // what was read stays read) for a monitor to read on its own thread; nullptr if lost. `b` is on_burst's
+    // without the burst itself (heard, soft): the decoder holds those. Set it before the first step().
+    void set_on_read(std::function<void(const BurstHeard& b, std::shared_ptr<ModemRx> rx)> f) { on_read_ = std::move(f); }
     // After a heard (not lost) burst's on_burst, once it has been read: its slots decoded, and tried but not.
     void set_on_decoded(std::function<void(int decoded, int failed)> f) { on_decoded_ = std::move(f); }
     // Called on the receiving thread (step's) as a burst arrives, while set_preview(true): a few
@@ -397,6 +401,7 @@ private:
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
     std::function<void(const TxBurstPtr&)> on_send_;
+    std::function<void(const BurstHeard&, std::shared_ptr<ModemRx>)> on_read_;
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
     std::atomic<bool> preview_on_{false};

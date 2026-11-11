@@ -47,6 +47,7 @@ double g_snr_db = 12.0;
 bool g_deaf = false;
 bool g_hear_a = true;  // false: the monitor is A's own, hearing B alone (A's bursts come from Monitor::sent)
 bool g_monitor_on = true;  // false: the monitor hears nothing (monitoring off)
+bool g_feed = true;        // false: the monitor's own receiver is not fed (it reads what A's session read: on_read)
 
 bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, double seconds,
          const std::function<bool()>& until, unsigned seed) {
@@ -55,12 +56,13 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK), y(BLOCK);
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
         for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : 2.2 * ((g_hear_a ? ao[j] : 0.0) + bo[j])) + noise(rng);
-        for (auto& dump : m.feed(y, [](double t) {
-                 char s[16];
-                 std::snprintf(s, sizeof s, "%.1f", t);
-                 return std::string(s);
-             }))
-            if (g_monitor_on) dumps.push_back(std::move(dump));
+        if (g_feed && g_monitor_on)
+            for (auto& dump : m.feed(y, [](double t) {
+                     char s[16];
+                     std::snprintf(s, sizeof s, "%.1f", t);
+                     return std::string(s);
+                 }))
+                dumps.push_back(std::move(dump));
         for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
         ao = a.step(x).audio;
         for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
@@ -159,18 +161,25 @@ void broadcast() {
     if (check::failures) std::fputs(out.c_str(), stderr);
 }
 
-// A station monitoring itself: B heard, A's own bursts shown as it sends
-// them. Both sides of the session are followed, A's included.
+// A station monitoring itself, as app::Station does: A's own bursts shown
+// as it sends them, B's as A's session read them (on_read), nothing it read
+// decoded again. Both sides of the session are followed, A's included.
 void own_side() {
     check::current_step = "own side";
-    g_hear_a = false;
+    g_feed = false;
     EngineConfig ca, cb;
     ca.seed = 71;
     cb.seed = 72;
     Engine a("W1AW", ca), b("K2XYZ", cb);
     monitor::Monitor m;
     std::vector<Dump> dumps;
+    int redone = 0;  // bursts the monitor's read ran a decode in (the session's reads not reused)
     a.set_on_send([&](const TxBurstPtr& t) { dumps.push_back(m.sent(*t, "tx")); });
+    a.set_on_read([&](const BurstHeard& h, std::shared_ptr<ModemRx> rx) {
+        const int n = rx ? rx->reads_run() : 0;
+        dumps.push_back(m.burst(h, rx.get(), "rx"));
+        redone += rx && rx->reads_run() != n;
+    });
     b.listen();
     a.connect("K2XYZ", 2);
     auto both = [&](SessionState s) { return a.session().state == s && b.session().state == s; };
@@ -189,7 +198,7 @@ void own_side() {
     a.session().disconnect();
     check::is_true(run(a, b, m, dumps, 60, [&] { return both(SessionState::CLOSED); }, 9), "closed");
     run(a, b, m, dumps, 3, [] { return false; }, 10);
-    g_hear_a = true;
+    g_feed = true;
 
     const std::string out = all(dumps);
     const auto tx = std::count_if(dumps.begin(), dumps.end(), [](const Dump& d) { return d.tx; });
@@ -203,6 +212,7 @@ void own_side() {
     check::is_true(out.find("unidentified") == std::string::npos, "no burst unidentified");
     check::is_true(stream(dumps, "W1AW>K2XYZ stream") == text(up), "our stream as sent");
     check::is_true(stream(dumps, "K2XYZ>W1AW stream") == text(down), "theirs as sent");
+    check::equal(redone, 0, "the session's reads reused, nothing decoded again");
     if (check::failures || std::getenv("SHOW")) std::fputs(out.c_str(), stderr);
 }
 

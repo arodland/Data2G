@@ -169,6 +169,13 @@ public:
 
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
 
+    // Done with by its session, handed to a reader (a monitor) on another thread: no store, and a slot already
+    // read answers from that read, under its mask (another mask: no), without decoding again. A read made
+    // primed, combined with stored bits, or as a repeat is so seen by the reader too.
+    void for_reader();
+    // Reads run (plain, stored, primed), not answered from an earlier one: for_reader's saving, measured.
+    int reads_run() const { return reads_run_; }
+
 private:
     struct Raw {
         std::vector<std::uint8_t> cands, usable;
@@ -179,6 +186,12 @@ private:
         Est est;
         SoftCache soft;
     };
+
+    std::optional<Bytes> plain_read(int slot, const MaskId& mask);
+    std::optional<Bytes> stored_read(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored);
+    std::optional<Bytes> known_read(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair);
+    std::optional<std::optional<Bytes>> reused(int slot, std::uint32_t m) const;  // for_reader: a slot's read
+    std::optional<Bytes> note(int slot, std::uint32_t m, std::optional<Bytes> p);  // p, kept in reads_ if a read
 
     const codes::Spec& spec(int slot) const;
     const std::vector<double>& slot_soft(int slot);
@@ -211,6 +224,9 @@ private:
     std::map<std::pair<int, int>, Raw> pinned_;  // (slot, offset): decoded with the payload past offset bytes known zero
     std::map<std::pair<int, int>, Raw> pairs_;   // (slot, offset or -1): slots slot, slot + 1 combined (RV 0, 1)
     std::set<int> tried_, ok_;  // ok_ within tried_
+    std::map<int, std::pair<std::uint32_t, Bytes>> reads_;  // slot -> (mask, payload): the first read of it that held
+    bool reader_ = false;
+    int reads_run_ = 0;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
     bool blind_ = false;
     int refines_ = 0;
