@@ -195,6 +195,10 @@ void run(bool chrono) {
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     check::Watchdog dog(240, "test_tci");
+    // A process's first QWebSocket initialises the TLS backend (QSslConfiguration::defaultConfiguration(), even
+    // for ws://). On Windows, Schannel loads the ROOT store then, which took 12-15 s on CI runners and blocked the
+    // station's TCI thread past the 5 s waits below. Take it here, untimed.
+    { QWebSocket warm; }
     run(true);
     run(false);
     return check::report("test_tci");
