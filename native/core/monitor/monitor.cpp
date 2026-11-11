@@ -170,6 +170,12 @@ void Monitor::learn(int key, const std::string& caller, const std::string& calle
 }
 
 Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
+    if (b.lost) return burst(b, nullptr, when);
+    ModemRx rx(b.heard, nullptr, DD_BUDGET_S, b.soft);
+    return burst(b, &rx, when);
+}
+
+Dump Monitor::burst(const BurstHeard& b, ModemRx* rx, const std::string& when) {
     Dump d;
     char line[200];
     std::snprintf(line, sizeof line, "%s  %s x%d", when.c_str(), b.submode.c_str(), b.n_cw);
@@ -179,12 +185,11 @@ Dump Monitor::burst(const BurstHeard& b, const std::string& when) {
         d.head += line;
     }
     d.head += "\n";
-    if (b.lost) {
+    if (b.lost || !rx) {
         d.head += "  header only: burst lost\n";
         return d;
     }
-    ModemRx rx(b.heard, nullptr, dd_budget_s, b.soft);
-    read(rx, d);
+    read(*rx, d);
     return d;
 }
 

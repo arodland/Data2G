@@ -76,7 +76,8 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 // The monitor's decoder: bursts heard and sent, from the session stage, in
 // order, dumped on a thread of its own so its decodes never delay the session's.
 struct Station::MonitorThread {
-    using Burst = std::variant<arq::BurstHeard, arq::TxBurstPtr>;
+    using Heard = std::pair<arq::BurstHeard, std::shared_ptr<arq::ModemRx>>;  // as the session read it
+    using Burst = std::variant<Heard, arq::TxBurstPtr>;
     monitor::Monitor m;
     std::mutex mu;
     std::condition_variable cv;
@@ -112,8 +113,12 @@ struct Station::MonitorThread {
             auto [b, when] = std::move(in.front());
             in.pop_front();
             lock.unlock();
-            monitor::Dump d = std::holds_alternative<arq::TxBurstPtr>(b) ? m.sent(*std::get<arq::TxBurstPtr>(b), when)
-                                                                          : m.burst(std::get<arq::BurstHeard>(b), when);
+            monitor::Dump d;
+            if (auto* t = std::get_if<arq::TxBurstPtr>(&b)) d = m.sent(**t, when);
+            else {
+                auto& [h, rx] = std::get<Heard>(b);
+                d = m.burst(h, rx.get(), when);
+            }
             lock.lock();
             out.push_back(std::move(d));
             if (out.size() > MAX_BURSTS) out.pop_front();
@@ -414,7 +419,6 @@ void Station::start() {
         link_ = std::make_unique<kisslink::KissLink>(kiss_cap(a_.kiss_bw), a_.broadcast_mode.value_or(""));
         link_->busy_limit_s = a_.kiss_busy_limit;
         monitor_ = std::make_unique<MonitorThread>();
-        monitor_->m.dd_budget_s = a_.dd_budget;  // before any burst: the thread reads it only once one is pushed
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = record_path(a_);
@@ -471,7 +475,10 @@ void Station::start() {
             live_.reset();
             reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};
             if (b.lost) log_burst();  // else once read (on_decoded)
-            if (monitor_on_) monitor_->push(b);
+        });
+        // the monitor reads what the session read, on its own thread: monitoring off, the decoder is dropped
+        engine_->set_on_read([this](const arq::BurstHeard& b, std::shared_ptr<arq::ModemRx> rx) {
+            if (monitor_on_) monitor_->push(std::pair(b, std::move(rx)));
         });
         engine_->set_on_send([this](const arq::TxBurstPtr& b) {
             if (monitor_on_) monitor_->push(b);
