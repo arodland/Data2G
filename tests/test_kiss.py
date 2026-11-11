@@ -205,6 +205,34 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     assert got == [(nb, b"z")] and heard_snr(b.events, nb)
 
 
+def test_a_lost_later_control_codeword_keeps_the_bursts_frames():
+    """A shifting port's reports spill into a second control codeword. With
+    that one lost, codeword 0 still passed under the group's key, names the
+    sender and says where the data starts: the frames arrive, less the
+    reports. (The burst was dropped whole: codeword 0 had decoded, so its
+    data was never looked for either.)"""
+    from data2g import kisslink as K
+    from data2g.arq.burst import Slot, TxBurst, ctl_mask
+
+    a, b = KissLink(), KissLink()
+    na, nb = a.open("CHAT", from_call="W1AW"), b.open("CHAT")
+    a.set_mode(na, "n10-qpsk-r1/5")
+    a.enqueue(b"x" * 20, na)
+    one = a.next_burst()  # one control codeword: header, group+from
+    # the same burst as a shifting port sends it with two stations' reports
+    c0, key = one.slots[0].payload, group_key("CHAT")
+    stream = bytes([K.VERSION << 4 | 1]) + c0[1:18] + K._tlv(K.T_REPORTS, bytes(2 + 3 * 2))
+    assert len(c0) < len(stream) <= 2 * len(c0)
+    stream += bytes(2 * len(c0) - len(stream))
+    burst = TxBurst(one.submode, [Slot(ctl_mask(0, i, key), 0, stream[i * len(c0):(i + 1) * len(c0)]) for i in range(2)]
+                    + [Slot(K.data_start_mask(i, 2, key), 0, s.payload) for i, s in enumerate(one.slots[1:], start=2)],
+                    one.burst_seq)
+    r, rx = soft_rx(burst, {})
+    assert b.on_burst(r, rx) == [(nb, b"x" * 20)] and heard_snr(b.take_events(), nb, "W1AW")
+    r, rx = soft_rx(burst, {1: None})  # the second control codeword lost
+    assert b.on_burst(r, rx) == [(nb, b"x" * 20)] and heard_snr(b.take_events(), nb, "W1AW")
+
+
 def test_a_decoded_slot_0_that_is_no_control_is_another_burst():
     """OFDM: a slot 0 that decodes but isn't a broadcast control (here one
     under another key: an ARQ burst's, say) means another kind of burst,

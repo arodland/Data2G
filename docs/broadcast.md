@@ -58,6 +58,11 @@ and reads any codeword. A mask only decides whose CRC check passes.
   group is an open port. Promiscuous listening keeps every group's.
 - **Data:** checked under the group read from the control. Data from a burst whose
   control was lost never lands on the wrong port.
+  - A later control codeword lost (a shifting port's reports spill past
+    codeword 0): codeword 0 passed under the group's key, and its header says
+    where the data starts, so the burst is that group's and its frames are
+    delivered, less the reports (and less the sender's call, unless
+    group+from lies whole in codeword 0).
   - Control lost: looked for only when slot 0 didn't decode at all (OFDM: no LDPC
     codeword, alone or paired with slot 1). A slot 0 that decoded but isn't a
     broadcast control is another kind of burst (an overheard ARQ exchange, a CQ),
