@@ -84,7 +84,7 @@ void run(bool abort_midway) {
     const std::string out = dir.filePath(QStringLiteral("out.f32")).toStdString();
     std::ofstream(in, std::ios::binary).close();  // no input: silence at real time
 
-    app::Args a;
+    app::Args a{};
     a.mycall = "N0TX";
     a.audio_io = "pipe:" + in + "," + out;
     a.rig = false;

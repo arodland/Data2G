@@ -101,7 +101,8 @@ int main() {
     std::vector<Bytes> pl;
     for (unsigned i = 0; i < 3; ++i) pl.push_back(payload(spec.payload_bytes, i));
     auto burst = [&](int rv) {
-        TxBurst b{name, {}, 0};
+        TxBurst b;
+        b.submode = name;
         for (int i = 0; i < 3; ++i) b.slots.push_back({{7, 0, i}, rv, pl[static_cast<std::size_t>(i)]});
         return b;
     };
