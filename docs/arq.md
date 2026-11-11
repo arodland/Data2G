@@ -739,9 +739,9 @@ As built (data2g/arq/policy.py):
       heard burst `ref`, shifted by that burst's offset. `tag` (0-255) and the
       channel seed the Hand's CRC, so it can't answer another net's request,
       and a Hand sent in the wrong channel fails instead of being credited to
-      that channel's owner. Channels must fit this host's width, the narrower
-      of the BW command's and --kiss-bw: 0-7 at 500 Hz, 0-19 at 1200, all 40
-      at 2300/2750. WRONG for a gone ref, bad numbers, a channel outside the
+      that channel's owner. Channels must fit the BW command's width
+      (--kiss-bw doesn't apply): 0-7 at 500 Hz, 0-19 at 1200, all 40 at
+      2300/2750. WRONG for a gone ref, bad numbers, a channel outside the
       width, the slot already past, or a Hand already waiting. While one waits, this host starts no CQ, broadcast, ID
       or KISS burst of its own. OK: then
       `HAND SENT c` when it keys, or `HAND DROPPED c` if the radio was busy

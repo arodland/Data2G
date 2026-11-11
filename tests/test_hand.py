@@ -228,12 +228,12 @@ def test_hand_channels_fit_the_width():
     """Channels count from the centre out (1470, 1530, 1410 Hz, ...), and the
     host's width keeps a prefix: 8 at 500 Hz, 20 at 1200, all 40 at 2400,
     every tone inside +-width/2 of 1500 Hz. HAND SEND and HAND LISTEN refuse a
-    channel past it, the narrower of the BW command's and --kiss-bw."""
+    channel past it. --kiss-bw (the KISS link's cap) doesn't narrow it."""
     assert [hand.channel_freq(c) for c in range(4)] == [1470.0, 1530.0, 1410.0, 1590.0]
     for cap, n in ((500, 8), (1200, 20), (2400, 40)):
         assert hand.channels_within(cap) == n
         assert all(abs(hand.channel_freq(c) - 1500) + hand.M * hand.RATE / 2 <= cap / 2 for c in range(n))
-    for bw, kiss_cap, ok, wrong in (("BW500", None, 7, 8), ("BW1200", None, 19, 20), ("BW2300", 0, 7, 8)):
+    for bw, kiss_cap, ok, wrong in (("BW500", None, 7, 8), ("BW1200", None, 19, 20), ("BW2300", 0, 39, 40)):
         e = Engine("W1AW", seed=1, kiss=KissLink(cap=kiss_cap) if kiss_cap is not None else None)
         h = Host(ref_at(e, 5.0))
         h.command(bw)

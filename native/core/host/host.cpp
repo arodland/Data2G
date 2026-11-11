@@ -245,9 +245,9 @@ void Host::command(std::string_view line, std::string_view peer) {
             if (used != s.size()) throw std::invalid_argument("not a number: " + s);
             return n;
         };
-        auto channel = [&](const std::string& s) {  // host.py's _hand_channel: within this host's width,
-            // the narrower of the BW command's and --kiss-bw
-            const int c = num(s), w = arq::cap_hz(e.kiss() ? std::min(cap, e.kiss()->cap) : cap);
+        auto channel = [&](const std::string& s) {  // host.py's _hand_channel: within the BW command's
+            // width; --kiss-bw is for Port 0 clients and doesn't apply
+            const int c = num(s), w = arq::cap_hz(cap);
             if (c >= hand::channels_within(w)) throw std::invalid_argument("channel outside the width: " + s);
             return c;
         };

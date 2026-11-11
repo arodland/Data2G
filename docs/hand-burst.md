@@ -104,7 +104,7 @@ What it shows:
 - 10 dB costs 1-4 dB. 15 dB or more is fatal on fading paths at the 60 Hz pitch.
 - One empty channel between two Hands (120 Hz pitch) holds a 20 dB stronger neighbour to a 1-4 dB loss. A 75 Hz pitch isn't enough: at +20 dB it recovers the noise-only case (-16.3 dB) but not the fading ones.
 
-Channels are numbered from the centre out: 0 at 1470 Hz, 1 at 1530, 2 at 1410, 3 at 1590, and so on. A host's width keeps a prefix of them, with every tone inside ±width/2 of 1500 Hz: channels 0-7 at 500 Hz, 0-19 at 1200 and all 40 at 2300 or 2750. The width is the narrower of the client's BW command and `--kiss-bw`, and HAND SEND and HAND LISTEN answer WRONG past it. A 500 Hz net stays inside its segment that way, even where the rig's filter would pass more.
+Channels are numbered from the centre out: 0 at 1470 Hz, 1 at 1530, 2 at 1410, 3 at 1590, and so on. A host's width keeps a prefix of them, with every tone inside ±width/2 of 1500 Hz: channels 0-7 at 500 Hz, 0-19 at 1200 and all 40 at 2300 or 2750. The width is the client's BW command (`--kiss-bw` is for Port 0 clients and doesn't apply), and HAND SEND and HAND LISTEN answer WRONG past it. A 500 Hz net stays inside its segment that way, even where the rig's filter would pass more.
 
 So the channel map should:
 

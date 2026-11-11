@@ -267,13 +267,11 @@ class Host:
 
     def _hand_channel(self, a: str) -> int:
         """A HAND channel argument: ValueError (WRONG) past the channels that fit
-        this host's width, the narrower of the BW command's and --kiss-bw
-        (hand.channels_within: 8 at 500 Hz, 20 at 1200, all 40 at 2400)."""
-        e = self.engine
-        cap = min(self.cap, e.kiss.cap) if e.kiss is not None else self.cap
+        the BW command's width (hand.channels_within: 8 at 500 Hz, 20 at 1200,
+        all 40 at 2400). --kiss-bw is for Port 0 clients and doesn't apply."""
         c = int(_hand_arg(a, "[0-9]+"))
-        if c >= hand.channels_within(modes.CAP_HZ[cap]):
-            raise ValueError(f"channel {c} outside {modes.CAP_HZ[cap]} Hz")
+        if c >= hand.channels_within(modes.CAP_HZ[self.cap]):
+            raise ValueError(f"channel {c} outside {modes.CAP_HZ[self.cap]} Hz")
         return c
 
     def _bcast_command(self, args: list[str]) -> str | None:
