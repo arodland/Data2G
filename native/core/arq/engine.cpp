@@ -922,6 +922,21 @@ void Engine::missed_energy() {
 }
 
 void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
+    // on_read: the burst's decoder handed over last, on every return (after Tally and Timing below are done with it)
+    struct Handoff {
+        const std::function<void(const BurstHeard&, std::shared_ptr<ModemRx>)>& f;
+        BurstHeard b{};
+        std::shared_ptr<ModemRx> rx{};
+        ~Handoff() {
+            if (!f || b.submode.empty()) return;  // empty: thrown before the burst was described
+            try {
+                if (rx) rx->for_reader();
+                f(b, std::move(rx));
+            } catch (const std::exception& e) {
+                log_write(LOG, WARNING, std::string("on_read: ") + e.what());
+            }
+        }
+    } handoff{on_read_};
     // DEBUG: what this burst cost to decode, stage by stage, from the first look at it to the session having
     // read it (soft bits, DD, LDPC, and the session's own work), for finding what is slow on a slow machine.
     using Clock = std::chrono::steady_clock;
@@ -968,9 +983,9 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     timing.mark("soft bits");
     if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
     timing.mark("recorder");
-    if (on_burst_)
-        on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, meas ? std::optional(meas->snr_est) : std::nullopt,
-                   r ? *r : Heard{}, soft});
+    const std::optional<double> snr = meas ? std::optional(meas->snr_est) : std::nullopt;
+    if (on_burst_) on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, snr, r ? *r : Heard{}, soft});
+    if (on_read_) handoff.b = {t, spec_name(ev.header), ev.header.n_cw(), !r, snr, Heard{}, nullptr};
     timing.mark("hook");
     if (!r) {
         if (log_enabled(LOG, INFO))
@@ -980,7 +995,9 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
             cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw(), span ? span_snr(*span) : std::nullopt);
         return;
     }
-    ModemRx rx(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    const auto rxp = std::make_shared<ModemRx>(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    ModemRx& rx = *rxp;
+    if (on_read_) handoff.rx = rxp;
     timing.rx = &rx;
     struct Tally {  // whichever return below: what decoded, for on_decoded
         const ModemRx& rx;
