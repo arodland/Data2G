@@ -58,6 +58,10 @@ std::string render(const Dump& d, Format f);
 
 class Monitor {
 public:
+    // seconds a burst's decode may spend re-estimating the channel (the
+    // station's --dd-budget, so the monitor reads what its session can)
+    double dd_budget_s = arq::DD_BUDGET_S;
+
     // A burst the engine heard (BurstHeard::heard set unless lost). `when`
     // starts the first line: the caller's clock.
     Dump burst(const arq::BurstHeard& b, const std::string& when);

@@ -414,6 +414,7 @@ void Station::start() {
         link_ = std::make_unique<kisslink::KissLink>(kiss_cap(a_.kiss_bw), a_.broadcast_mode.value_or(""));
         link_->busy_limit_s = a_.kiss_busy_limit;
         monitor_ = std::make_unique<MonitorThread>();
+        monitor_->m.dd_budget_s = a_.dd_budget;  // before any burst: the thread reads it only once one is pushed
         arq::EngineConfig cfg;
         cfg.ptt_delay_s = a_.ptt_on_delay_ms / 1000.0;
         cfg.record_dir = record_path(a_);

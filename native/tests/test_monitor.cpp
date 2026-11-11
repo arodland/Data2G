@@ -46,6 +46,7 @@ void units() {
 double g_snr_db = 12.0;
 bool g_deaf = false;
 bool g_hear_a = true;  // false: the monitor is A's own, hearing B alone (A's bursts come from Monitor::sent)
+bool g_monitor_on = true;  // false: the monitor hears nothing (monitoring off)
 
 bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, double seconds,
          const std::function<bool()>& until, unsigned seed) {
@@ -59,7 +60,7 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
                  std::snprintf(s, sizeof s, "%.1f", t);
                  return std::string(s);
              }))
-            dumps.push_back(std::move(dump));
+            if (g_monitor_on) dumps.push_back(std::move(dump));
         for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
         ao = a.step(x).audio;
         for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
@@ -205,6 +206,51 @@ void own_side() {
     if (check::failures || std::getenv("SHOW")) std::fputs(out.c_str(), stderr);
 }
 
+// Monitoring turned on mid-session, as the station's Monitor window does:
+// the CONNECT was never read here, so the session's key comes from our own
+// bursts as sent. Both streams are shown, joined late (framing lost: the
+// records' length bytes inline).
+void late_start() {
+    check::current_step = "late start";
+    g_hear_a = false;
+    g_monitor_on = false;
+    EngineConfig ca, cb;
+    ca.seed = 81;
+    cb.seed = 82;
+    Engine a("W1AW", ca), b("K2XYZ", cb);
+    monitor::Monitor m;
+    std::vector<Dump> dumps;
+    a.set_on_send([&](const TxBurstPtr& t) {
+        if (g_monitor_on) dumps.push_back(m.sent(*t, "tx"));
+    });
+    b.listen();
+    a.connect("K2XYZ", 2);
+    check::is_true(run(a, b, m, dumps, 60, [&] { return a.session().state == SessionState::CONNECTED; }, 14), "connected");
+    run(a, b, m, dumps, 5, [] { return false; }, 15);  // the CONNECT_ACK's ACK, and any idle polls
+    g_monitor_on = true;
+    const std::string up = "Sent after the monitor came on.\n", down = "73 de K2XYZ, heard by a late monitor\n";
+    a.session().write(text(up));
+    b.session().write(text(down));
+    std::size_t got_b = 0, got_a = 0;
+    check::is_true(run(a, b, m, dumps, 120, [&] {
+        got_b += b.session().read().size();
+        got_a += a.session().read().size();
+        return got_b >= up.size() && got_a >= down.size();
+    }, 16), "data both ways");
+    run(a, b, m, dumps, 3, [] { return false; }, 17);
+    g_hear_a = true;
+
+    const std::string out = all(dumps);
+    const auto has = [&](const std::string& label, const std::string& s) {
+        const Bytes v = stream(dumps, label);
+        return std::search(v.begin(), v.end(), s.begin(), s.end() - 1) != v.end();  // the record's text, its \n aside
+    };
+    check::is_true(out.find("unidentified") == std::string::npos, "no burst unidentified");
+    check::is_true(has("?>? stream", up), "our stream shown");
+    check::is_true(has("?>? stream", down), "theirs shown");
+    if (check::failures || std::getenv("SHOW")) std::fputs(out.c_str(), stderr);
+}
+
 }  // namespace
 
 // Random bytes (no compression, many codewords) on a link losing some:
@@ -322,6 +368,7 @@ int main() {
     session();
     broadcast();
     own_side();
+    late_start();
     compressed_gap();
     for (double snr : {2.0, 0.0, -2.0}) lossy(snr, static_cast<unsigned>(50 + snr));
     return check::report("test_monitor");
