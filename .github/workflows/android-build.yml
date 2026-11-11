@@ -1,0 +1,166 @@
+# The Android TNC (native/android-app/): an unsigned APK on every run; with
+# `release`, also the Play bundle, signed with the upload key and sent to
+# Google Play. Called by ci.yml (no inputs) and release.yml (all of them),
+# like native-build.yml, so a release runs the job CI runs.
+#
+# Secrets for a release (a missing one fails the release, never skips it):
+#   ANDROID_KEYSTORE_BASE64    upload keystore (.jks), base64 -w0
+#   ANDROID_KEYSTORE_PASSWORD  its store password
+#   ANDROID_KEY_ALIAS          the upload key's alias in it
+#   ANDROID_KEY_PASSWORD       that key's password
+#   PLAY_SERVICE_ACCOUNT_JSON  service-account JSON key with release rights on the app
+# Repository variables: PLAY_TRACK (default internal), PLAY_STATUS (default
+# completed; `draft` while the Play app itself is still a draft).
+
+name: Android build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version for file names and the version code, no leading "v". Empty for CI builds.
+        type: string
+        default: ""
+      ref:
+        description: Commit to build. Empty means whatever triggered the workflow.
+        type: string
+        default: ""
+      release:
+        description: Sign the bundle and upload it to Google Play.
+        type: boolean
+        default: false
+
+env:
+  QT_VERSION: "6.11.1"
+  # What the app was first built and tested with locally.
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      # Qt 6.11's Gradle plugin wants 17; the runner's default may move.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: lukka/get-cmake@v4.4.0
+      # Pinned, not "whatever the image has": the image's newest NDK moves.
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # Three installs into one tree: QT_ANDROID_BUILD_ALL_ABIS finds the
+      # ABIs as siblings of QT_ANDROID, and the host Qt runs the build tools.
+      # Same aqtinstall pin as native-build.yml, for the same reason.
+      - name: Install Qt (host)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      - name: Install Qt (Android arm64-v8a)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          target: android
+          arch: android_arm64_v8a
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      # x86_64: emulators and Chromebooks.
+      - name: Install Qt (Android x86_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          target: android
+          arch: android_x86_64
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      # Hamlib is cross-built per ABI from source; key as native-build.yml does.
+      - name: Cache native dependencies
+        uses: actions/cache@v6
+        with:
+          path: native/.deps
+          key: deps-android-${{ hashFiles('native/cmake/*.cmake') }}
+      # Play rejects a version code it has seen, so a release derives one
+      # that increases with the version: X.Y.Z -> X*1000000 + Y*1000 + Z.
+      - name: Build
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "$VERSION" ]; then
+            IFS=. read -r X Y Z <<< "$VERSION"
+            extra+=(--version-code $((X * 1000000 + Y * 1000 + Z)))
+          fi
+          QT_ANDROID="$RUNNER_TEMP/Qt/$QT_VERSION/android_arm64_v8a" \
+          QT_HOST="$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64" \
+          BUILD_DIR="$PWD/native/build-android" JOBS="$(nproc)" \
+            tools/build_android.sh --unsigned ${{ inputs.release && '--aab' || '' }} "${extra[@]}" \
+            -- -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
+          echo "pkg=data2g-tnc${VERSION:+-$VERSION}" >> "$GITHUB_ENV"
+      - name: Name the APK
+        run: mv native/build-android/data2g-tnc-unsigned.apk "${{ env.pkg }}-unsigned.apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.pkg }}-unsigned.apk
+          archive: false
+          if-no-files-found: error
+      # --- release: sign the bundle, upload to Play ---------------------------
+      - name: Sign the bundle
+        if: inputs.release
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for v in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            [ -n "${!v}" ] || { echo "::error::secret $v is not set"; exit 1; }
+          done
+          ks="$RUNNER_TEMP/upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$ks"
+          aab="${{ env.pkg }}.aab"
+          cp native/build-android/data2g-tnc-unsigned.aab "$aab"
+          # jarsigner, not apksigner: a bundle is signed as a JAR. The
+          # passwords go through the environment, never the command line.
+          jarsigner -keystore "$ks" -storepass:env ANDROID_KEYSTORE_PASSWORD \
+            -keypass:env ANDROID_KEY_PASSWORD -sigalg SHA256withRSA -digestalg SHA-256 \
+            "$aab" "$ANDROID_KEY_ALIAS"
+          jarsigner -verify "$aab"
+          rm -f "$ks"
+      - uses: actions/upload-artifact@v7
+        if: inputs.release
+        with:
+          path: ${{ env.pkg }}.aab
+          archive: false
+          if-no-files-found: error
+      - name: Play service account is set
+        if: inputs.release
+        shell: bash
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: '[ -n "$PLAY_SERVICE_ACCOUNT_JSON" ] || { echo "::error::secret PLAY_SERVICE_ACCOUNT_JSON is not set"; exit 1; }'
+      - name: Upload to Google Play
+        if: inputs.release
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: org.cleverdomain.data2g
+          releaseFiles: ${{ env.pkg }}.aab
+          releaseName: ${{ inputs.version }}
+          track: ${{ vars.PLAY_TRACK || 'internal' }}
+          status: ${{ vars.PLAY_STATUS || 'completed' }}
