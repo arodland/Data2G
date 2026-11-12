@@ -42,6 +42,9 @@ Heard heard_of(const py::dict& r) {
         c->dup = r["dup"].cast<bool>();
         for (auto s : r["soft"]) c->soft.push_back(vec(s.cast<In<double>>()));
         c->E = mat(r["E"].cast<In<double>>());
+        c->n_cw = static_cast<int>(c->soft.size());
+        c->n_ctl_slots = 1 + c->dup;
+        if (r.contains("Z")) c->Z = mat(r["Z"].cast<In<cd>>());  // coherent DD (cpm.receive's bins)
         h.cpm = std::move(c);
         return h;
     }

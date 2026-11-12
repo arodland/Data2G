@@ -35,6 +35,11 @@ namespace data2g::arq {
 // DD_ITERS times.
 bool dd_default();
 inline constexpr int DD_ITERS = 2;
+// CPM data slots (GF(M)): DD makes the metric coherent (cpm::dd_metric, a
+// channel per row from the decoder's soft decisions), up to CPM_DD_ITERS
+// re-decodes. DATA2G_CPM_DD (default 1), read once, turns it off alone.
+bool cpm_dd_default();
+inline constexpr int CPM_DD_ITERS = 4;
 // A live receiver's DD starts no refines this long after the burst's decode began.
 inline constexpr double DD_BUDGET_S = 1.0;
 // A control slot that fails is decoded again with the control stream past
@@ -185,6 +190,9 @@ private:
     struct DdState {
         Est est;
         SoftCache soft;
+        // CPM: the posteriors each slot's coherent metric reads (cpm::dd_metric; nullptr: the burst's own soft)
+        std::shared_ptr<const cpm::Posts> posts;
+        bool refined() const { return est || posts; }
     };
 
     std::optional<Bytes> plain_read(int slot, const MaskId& mask);
@@ -202,6 +210,7 @@ private:
     const Raw& paired(int slot, const codes::Spec& s, int off);  // off -1: nothing pinned
     std::optional<Bytes> check_pinned(int slot, const codes::Spec& s, std::uint32_t m, int i);
     bool dd(const codes::Spec& s) const;
+    int iters() const { return n_ctl_slots_ ? CPM_DD_ITERS : DD_ITERS; }
     bool late() const;
     void learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m);
     bool refine(int slot, const codes::Spec& s, std::vector<double> post);  // false: the budget ran out inside it
