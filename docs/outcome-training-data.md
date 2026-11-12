@@ -67,6 +67,12 @@ followed; exploration is `session_data.EXPLORE` (0.2) unless noted.
 | `session_data_pri_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 14300000` (same) | high AWGN | same | 96bcf2c | |
 | `session_data_pri_fastlow.csv` | `--fastlow --sessions 1200 --first 14400000` (same) | fastlow | same | 96bcf2c | |
 | `session_data_pri_floor.csv` | `--floor --sessions 3000 --first 14500000` (same) | floor (doubled: priming acts there) | same | 96bcf2c | the floor with primed reception |
+| `session_data_cohm.csv` | `--sessions 2900 --first 15000000` (`runs/cohm/cohm_round.sh`), `DATA2G_SPREAD_CARRY=1` | regular | the installed CNP (cordf), offsets as shipped, Python shifter | 6b4ac87 (#172: coherent CPM detection, coherent lock on every grid, slot-order DD passes) | outcomes on the coherent CPM receiver |
+| `session_data_cohm_slow.csv` | `--slow --sessions 800 --first 15100000` (same) | slow | same | 6b4ac87 | |
+| `session_data_cohm_high.csv` | `--high --sessions 1200 --first 15200000` (same) | high | same | 6b4ac87 | |
+| `session_data_cohm_awgnhigh.csv` | `--high --kinds awgn --sessions 400 --first 15300000` (same) | high AWGN | same | 6b4ac87 | |
+| `session_data_cohm_fastlow.csv` | `--fastlow --sessions 1200 --first 15400000` (same) | fastlow | same | 6b4ac87 | |
+| `session_data_cohm_floor.csv` | `--floor --sessions 3000 --first 15500000` (same) | floor | same | 6b4ac87 | the floor on the coherent receiver |
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
@@ -84,6 +90,7 @@ sent at the same moment; one row per candidate.
 | `outcome_data_n10top_gt.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 7600000` (same) | none | 8340bbf | the two top n10 modes, likewise |
 | `outcome_data_general_cor.csv` | `with_native outcome_data --samples 40000 --first 13600000` (`runs/cor_round.sh`) | none | 12d1235 | the general set on the #126 CPM receiver, new seeds |
 | `outcome_data_general_pri.csv` | `with_native outcome_data --samples 40000 --first 14600000` (`runs/pri_round.sh`) | none | 96bcf2c | the general set on the #135 tree (no session, so nothing primed; the cor set's seeds no longer reproduce: snr_est and some labels moved since 12d1235) |
+| `outcome_data_general_cohm.csv` | `with_native outcome_data --samples 40000 --first 15600000` (`runs/cohm/cohm_round.sh`) | none | 6b4ac87 | the general set on the coherent CPM receiver |
 
 ## Mixes
 
@@ -145,3 +152,15 @@ sent at the same moment; one row per candidate.
   and 50 bps points by -0.10..+0.27 dB; chat at the floor cells level (prc12) or mixed (prc8). The more cautious
   floor predictions pick slower modes (c16r25 2-codeword bursts at mpp -14 for c8r50 5). The ACK-mode replies at
   mpd -9/-11 are unchanged in every arm.
+- **cohm (cohc4 recommended; cordf installed):** the coherent CPM receiver (#172; `runs/cohm/cohm_round.sh`,
+  `cohm_train.sh`, `cohm_judge.sh`; data, models and results in the main checkout's `runs/cohm/`). cohle12: twelve
+  CNPs on the outcomes (`--labels`, seeds 1-12) of the cohm sets, `outcome_data_general_cohm.csv` and
+  `outcome_data_n10top_gt.csv`. On these sessions cordf under-predicts c32r62 and c8r50 by 4-12 points of
+  P(usable) from snr_est -12 to -2 dB (c8r50 -12..-10: 0.61 for 0.73 observed) and over-predicts c16r25 at
+  -16..-12. Students from cordf (`--init`, cordf's targets for OFDM, within 0.0012), CPM targets cohle12 at LCB
+  0.5: cohc4 under snr_est -6 ramped at -4 (cordf's recipe), cohc0 under -2 ramped at 0, cohca everywhere.
+  Against cordf (`cohm_judge.sh`; seeds 500-515 all 49 cells, 600-647 28 floor and edge cells): every student
+  awgn -18 +94% / +107% (45/0 seeds: fsk8r50-r1/2 4-5 codeword bursts where cordf sent fsk16r25 1-2), mpp -12 /
+  -14 +4..+10%, mpd -13 +3%; OFDM and high cells within 0.7%. cohc0 and cohca lost mpp -6 -9% (SE 3.7) on the
+  first set (the cord trap: CPM targets above -4 dB); cohc4 +3% / +0.9% there. Open: mpd -17 -22% (SE 11.5) /
+  -8% (SE 7.8), mpp -16 +8% / -5%: noise-level at 7-14 bps.
