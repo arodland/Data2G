@@ -6,7 +6,7 @@ import json
 import numpy as np
 import pytest
 
-from data2g import codes, cwid
+from data2g import codes, cpm, cwid
 from data2g import hfchannel as H
 from data2g.arq import engine as E
 from data2g.arq import phy as PHY
@@ -51,6 +51,20 @@ def test_cwsense_hears_an_id_not_noise_or_narrow_bursts():
         slots = [Slot(ctl_mask(0, 0, 5), 0, r(ctl_spec(spec)))] + [Slot(data_mask(0, i, 5), 0, r(spec)) for i in (1, 2)]
         b = PHY.tx_audio(TxBurst(name, slots, 0, 0 if "r25" in name or "r50" in name else 2))
         assert not _active(H.awgn(np.concatenate([np.zeros(800), b, np.zeros(800)]), 30, seed=4)).any(), name
+
+
+def test_cwsense_ignores_a_steady_tone_starting_and_ending():
+    """A steady carrier's start and end are one long key-down run, not an ID:
+    a Hand-like 8-FSK burst (6.25 Hz, 66 symbols, steady envelope) on the
+    centre's channels, and a plain 3 s tone, never read as CW. Before the
+    keyed-run rule (CwSense.MIN_RUNS, MAX_RUN) every Hand at 1470 or 1530 Hz did."""
+    rng = np.random.default_rng(5)
+    pad = np.zeros(FS)
+    for freq in (1470.0, 1530.0, 1590.0):
+        x = cpm.tones(cpm.Grid(f"hand{freq:g}", 8, 6.25, center=freq), rng.integers(0, 8, 66))
+        assert not _active(H.awgn(np.concatenate([pad, x, pad]), 20, seed=6)).any(), freq
+    tone = np.sin(2 * np.pi * 1500 * np.arange(3 * FS) / FS)
+    assert not _active(H.awgn(np.concatenate([pad, tone, pad]), 20, seed=7)).any()
 
 
 def _cw_tx(path):

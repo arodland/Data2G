@@ -31,7 +31,8 @@ std::vector<double> audio(std::string_view text, double wpm = WPM, double freq =
 double seconds(std::string_view text, double wpm = WPM);
 
 // cwid.CwSense: per 20 ms window hit (key-down), quiet (key-up) or elsewhere (a burst); active when the last
-// WIN_N windows hold MIN_HITS hits, MIN_QUIET quiet ones and at most MAX_ELSEWHERE elsewhere.
+// WIN_N windows hold MIN_HITS hits, MIN_QUIET quiet ones and at most MAX_ELSEWHERE elsewhere, the hits
+// keyed: at least MIN_RUNS separate runs, none longer than MAX_RUN (a steady carrier's edge is one run).
 class CwSense {
 public:
     static constexpr int WIN = config::FS / 50;
@@ -40,6 +41,7 @@ public:
     static constexpr double RATIO = 10.0, LEAK = 0.031622776601683794;  // 10^-1.5
     static constexpr double FLOOR_DOWN = 0.1, FLOOR_UP = 0.004;
     static constexpr int WIN_N = 50, MIN_HITS = 12, MIN_QUIET = 4, MAX_ELSEWHERE = 6;
+    static constexpr int MIN_RUNS = 2, MAX_RUN = 16;  // a dash at MIN_WPM is 12 windows
     static constexpr int HITS_FROM = 3;
 
     explicit CwSense(double center = FREQ_HZ);

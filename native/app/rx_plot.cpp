@@ -9,6 +9,7 @@
 
 #include "arq/engine.hpp"
 #include "constellation/constellation.hpp"
+#include "dsp/fft.hpp"
 #include "cpm/cpm.hpp"
 #include "modem/modem.hpp"
 #include "util/mat.hpp"
@@ -81,6 +82,22 @@ RxConstellation rx_constellation(const arq::BurstPreview& p) {
     auto plot = p.ofdm ? iq_plot(p.submode, p.iq, *p.ofdm) : tone_plot(p.submode, p.shares);
     plot.live = true;
     return plot;
+}
+
+std::vector<double> spectrum_db(std::span<const double> block) {
+    constexpr std::size_t N = SPECTRUM_N;
+    static const std::vector<double> window = [] {
+        std::vector<double> w(N);
+        for (std::size_t i = 0; i < N; ++i) w[i] = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * double(i) / double(N - 1));
+        return w;
+    }();
+    block = block.last(N);
+    std::vector<dsp::cdouble> buf(N);
+    for (std::size_t i = 0; i < N; ++i) buf[i] = block[i] * window[i];
+    const auto spec = dsp::fft(buf, true);
+    std::vector<double> out(N / 2);
+    for (std::size_t i = 0; i < N / 2; ++i) out[i] = 20.0 * std::log10(std::abs(spec[i]) / double(N) + 1e-12);
+    return out;
 }
 
 }  // namespace data2g::app

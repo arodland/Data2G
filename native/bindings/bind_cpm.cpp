@@ -154,6 +154,7 @@ void bind_cpm(py::module_& m) {
         d["header_margin"] = l->header_margin;
         d["end"] = l->end;
         d["header_end"] = l->header_end;
+        d["copies"] = l->copies;
         return d;
     };
     c.def("find", [lock_dict](const std::string& g, const In<double>& x, std::optional<double> threshold,
@@ -178,6 +179,17 @@ void bind_cpm(py::module_& m) {
         return lock_dict(cpm::prime_lock(grid(g), view(x), lo, hi, cfo));
     });
     c.def("hdr_span",[](const std::string& g, int copies) { return cpm::hdr_span(grid(g), copies); });
+    c.def("confirm", [](const std::string& g, const In<double>& x, const std::string& spec, int n_data, bool dup,
+                        long start, double cfo) {
+        cpm::Lock l{};
+        l.spec = cpm::spec(spec);
+        l.n_data = n_data;
+        l.dup = dup;
+        l.start = start;
+        l.cfo = cfo;
+        return cpm::confirm(grid(g), view(x), l);
+    });
+    c.attr("CONFIRM_LLR") = cpm::CONFIRM_LLR;
     c.def("measure", [](const std::string& g, const In<double>& E, int n_sym) {
         const auto r = cpm::measure(grid(g), mat(E), n_sym);
         py::dict d;

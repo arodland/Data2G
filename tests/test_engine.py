@@ -888,3 +888,20 @@ def test_timeout_sets_the_idle_close():
     a.command("DATA2G ON")
     a.command("TIMEOUT")
     assert a.out_cmd[-1] == "TIMEOUT 300.0"  # the default again: the setting was the client's
+
+
+def test_the_shifter_hears_each_peer_bursts_energy():
+    """The engine reads each peer burst's in-band energy (predictor.N_ENERGY)
+    and hands it to its session's shifter. Under --native the C++ Engine
+    calls the Python-side shifter through the bindings' policy bridge, which
+    once forwarded observe but not observe_energy or expected_reply: native
+    speed sweeps then ran without energy inputs and picked slower modes
+    (2300 MPP 15 dB: 13459 B/min against Python's 17508)."""
+    a, b = Engine("W1AW", seed=21), Engine("K2XYZ", seed=22)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 20, 60, lambda: a.session.state == S.CONNECTED == b.session.state)
+    a.session.write(np.random.default_rng(23).bytes(3000))
+    link(a, b, 20, 40, lambda: False, seed=24)
+    assert a.session.policy.energy_features() is not None
+    assert b.session.policy.energy_features() is not None

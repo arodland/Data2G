@@ -460,8 +460,10 @@ const WordRows& word_rows(const Grid& g) {
 
 Lock make_lock(const Grid& g, std::int64_t s0, double cfo, double score, const Header& h, int copies) {
     const Layout L = layout(g, stream_symbols(g, h.n_data, h.dup));
-    return Lock{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
-                s0 + L.n * g.T, s0 + static_cast<std::int64_t>(L.hdr_rows[copies - 1].back() + 1) * g.T};
+    Lock l{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
+           s0 + L.n * g.T, s0 + static_cast<std::int64_t>(L.hdr_rows[copies - 1].back() + 1) * g.T};
+    l.copies = copies;
+    return l;
 }
 
 }  // namespace
@@ -686,6 +688,22 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
                 if (k == best_k) return make_lock(g, best_s, best_cfo, best, Header{&s, nd, dup, best, best, 0.0}, copies);
     }
     return std::nullopt;
+}
+
+std::int64_t confirm_end(const Grid& g, const Lock& l) {
+    const Layout lay = layout(g, stream_symbols(g, l.n_data, l.dup));
+    return l.start + static_cast<std::int64_t>(lay.hdr_rows[1].back() + 1) * g.T;
+}
+
+double confirm(const Grid& g, std::span<const double> x, const Lock& l) {
+    const Layout lay = layout(g, stream_symbols(g, l.n_data, l.dup));
+    const Mat<double> L = tone_llr(g, energies(g, x, l.start, lay.hdr_rows[1].back() + 1, l.cfo));
+    const auto t = header_symbols(g, header_value(l.spec->index, l.n_data, l.dup));
+    const int b1 = lay.sync_rows[lay.front];
+    std::vector<double> vm(g.mid_block.size()), vh(lay.hdr_rows[1].size());
+    for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
+    for (std::size_t i = 0; i < vh.size(); ++i) vh[i] = L[lay.hdr_rows[1][i]][t[i]];
+    return np_sum(vm) + np_sum(vh);
 }
 
 std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lock& cand) {

@@ -209,6 +209,21 @@ MID_LLR = {"c16r25": 24.0, "c8r50": 24.0, "c32r62": 24.0}
 HDR_MARGIN = (8.0, 4.0)  # the read word's LLR over the runner-up's: one copy, both
 LLR_EPS = 0.02  # tone_llr's outlier share: a row whose tone the model rejects costs at most -ln(EPS)
 WAIT_LLR = {"c16r25": 0.0, "c8r50": 0.0, "c32r62": 0.0}  # a front waits for its second copy from this LLR
+# An early lock (front + header copy 1) is looked at again once its mid block
+# and second header copy are in: confirm() under this, the burst is not
+# there (the streaming Receiver lets it go). The lock was never checked
+# again, and held BUSY and this station's replies for the length its word
+# claimed (c16r25: up to 82 s) on a burst that stopped or a lock on another
+# station's data. scripts/cpm_confirm_study.py (3000 bursts a grid, AWGN /
+# MPP / MPD from the floor to 12 dB over it; early locks under the floor, and
+# how many of those decoded whole, of 1734 / 1956 / 1858 that did):
+#   floor   c16r25           c8r50            c32r62         cut     on data
+#     0     7, 0 decoded    13, 3 decoded    13, 0        97-100%   99-100%
+#    -2     5, 0             4, 0             9, 0        89-100%   98.5-100%
+#    -4     3, 0             2, 0             7, 0        75-99%    96-100%
+# cut: the burst stops after its first header copy; on data: the lock's word
+# at a start inside a burst's data. None: never.
+CONFIRM_LLR = -2.0
 
 
 def grid_specs(grid: str) -> list:
@@ -810,6 +825,43 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     return dict(_lock(g, s0, c, sc, (spec, nd, d, sc, sc), HDR_COPIES), primed=True)
 
 
+def confirm(g: Grid, x: np.ndarray, lock: dict) -> float:
+    """A lock's second look, once x holds its second header copy: tone_llr
+    summed over the mid block and header copy 2 at the locked word's rows and
+    tones, unfloored. ~0 where they faded or the burst stopped, positive on
+    the burst, strongly negative where other tones are strong (a lock on
+    someone's data)."""
+    lay = layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"]))
+    L = tone_llr(g, _energies(g, x, lock["start"], int(lay.hdr_rows[1][-1]) + 1, lock["cfo"]))
+    mb = mid_block(g)
+    t = header_symbols(g.name, header_word(lock["spec"].index, lock["n_data"], lock["dup"]))
+    return float(L[int(lay.sync_rows[lay.front]) + np.arange(len(mb)), mb].sum() + L[lay.hdr_rows[1], t].sum())
+
+
+def confirm_end(lock: dict) -> int:
+    """One past the last sample of the lock's second header copy (confirm's
+    span), in its start's samples."""
+    g = GRIDS[lock["band"]]
+    lay = layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"]))
+    return lock["start"] + (int(lay.hdr_rows[1][-1]) + 1) * g.T
+
+
+def reread(g: Grid, x: np.ndarray, lock: dict) -> tuple:
+    """A lock's header read again at its start with every known row in x ->
+    (spec, n_data, dup, score, runner-up): ML over the valid words of tone_llr
+    over the front (floored at 0), each word's mid block and both header
+    copies (read_mid's sum, at a known start)."""
+    words, rows = valid_words(g.name), header_rows(g.name, HDR_COPIES)
+    L = tone_llr(g, _energies(g, x, lock["start"], max(int(r[-1]) for r in rows) + 1, lock["cfo"]))
+    f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
+    front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
+    scores = np.array([front + float(L[b1 + np.arange(len(mb)), mb].sum()) + _segments(L, r, t, H)
+                       for (*_, t), r, b1 in zip(words, rows, mid_rows(g.name))])
+    order = np.argsort(scores)[::-1]
+    spec, n, d, _ = words[order[0]]
+    return spec, n, d, float(scores[order[0]]), float(scores[order[1]])
+
+
 @lru_cache(maxsize=None)
 def mid_rows(grid: str) -> tuple:
     """Per valid word, the row its mid block starts at."""
@@ -830,7 +882,7 @@ def _lock(g: Grid, s0: int, cfo: float, score: float, h: tuple, copies: int) -> 
     lay = layout(g.name, stream_symbols(g.name, n, d))
     return dict(spec=spec, n_data=n, dup=d, start=s0, cfo=cfo, score=score, header_score=hs, header_margin=hs - h2,
                 end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[copies - 1][-1] + 1) * g.T, band=g.name,
-                family="cpm")
+                family="cpm", copies=copies)
 
 
 def receive(x: np.ndarray, lock: dict) -> dict:

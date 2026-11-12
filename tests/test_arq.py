@@ -830,6 +830,32 @@ def inline_lost_then_resent_in_a_slot(cls):
     assert b.handle(clean(s)) and b.read() == b"73 de W1AW"
 
 
+def resend_rv_after_a_lost_reply(cls):
+    """a's data burst is decoded by b, two of its codewords failing; b's
+    reply is lost and a polls. The poll's reply acts on the poll, not on the
+    data burst, but its ACK reports codewords only that burst carried: b
+    holds the failed ones' soft bits, so they go again at RV 1. (They went at
+    RV 0: only the acted-on burst counted.) When the ACK says nothing new of
+    the data burst (b lost it whole), RV 0 again."""
+    for lost, rvs in (((1, 3), [(0, 1), (2, 1)]), (range(4), [(0, 0), (1, 0), (2, 0)])):
+        a, b = cls(0, Script([("m46", 4)]), master=True), cls(1, Script([("m46", 4)]))
+        a.write(bytes(range(256)) * 4)
+        d = a.build()
+        a.answered()
+        assert [(x.mask_id[2], x.rv) for x in d.slots[1:]] == [(0, 0), (1, 0), (2, 0)]
+        if b.handle(clean(d, lost=lost)):
+            b.build()  # the reply, lost
+            b.answered()
+        q = a.on_timeout(allow_repeat=False)  # a poll
+        assert len(q.slots) == 1 and b.handle(clean(q))
+        r = b.build()
+        b.answered()
+        assert a.handle(clean(r))
+        s = a.build()
+        k = F.Control.unpack([s.slots[0].payload]).core.k
+        assert [(x.mask_id[2], x.rv) for x in s.slots[1:1 + k]] == rvs
+
+
 def inline_capped_at_a_tlv(cls):
     """A TLV holds 255 B: a tail past that goes in a slot, one under it inline."""
     for n, inline in ((300, False), (200, True)):
@@ -841,6 +867,10 @@ def inline_capped_at_a_tlv(cls):
         a.answered()
         assert len(p.slots) == (1 if inline else 2)
         assert b.handle(clean(p)) and b.read() == data
+
+
+def test_resend_rv_after_a_lost_reply():
+    resend_rv_after_a_lost_reply(L.Station)
 
 
 def test_inline_lost_then_resent_in_a_slot():

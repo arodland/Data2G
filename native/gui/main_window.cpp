@@ -9,6 +9,7 @@
 #include <QHeaderView>
 #include <QKeySequence>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
@@ -151,6 +152,24 @@ MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMai
     waterfall_ = new Waterfall;
     waterfall_->set_source([this](std::size_t n, std::uint64_t* total, bool* tx) {
         return station_ ? station_->input_tail(n, total, tx) : std::vector<double>{};
+    });
+    // Audio arrives in 0.1 s engine blocks, so 10 fps is the most rows there are.
+    waterfall_->set_fps(store_.value(QStringLiteral("gui/waterfall_fps"), 10).toInt());
+    waterfall_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(waterfall_, &QWidget::customContextMenuRequested, this, [this](const QPoint& at) {
+        QMenu menu;
+        menu.addSection(tr("Waterfall speed"));
+        const int now = store_.value(QStringLiteral("gui/waterfall_fps"), 10).toInt();
+        for (int fps : {1, 2, 5, 10}) {
+            QAction* a = menu.addAction(tr("%n fps", nullptr, fps));
+            a->setCheckable(true);
+            a->setChecked(fps == now);
+            connect(a, &QAction::triggered, this, [this, fps] {
+                store_.setValue(QStringLiteral("gui/waterfall_fps"), fps);
+                waterfall_->set_fps(fps);
+            });
+        }
+        menu.exec(waterfall_->mapToGlobal(at));
     });
     constellation_ = new ConstellationPlot;
     constellation_->setObjectName(QStringLiteral("constellation"));

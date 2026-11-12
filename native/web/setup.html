@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data2G: set a password</title>
+<!-- data2g-web with no password set (web/web_ui.hpp): how to set one. It
+     reloads itself once one is. -->
+<style>
+:root { --bg: #16181c; --panel: #1f2228; --line: #343841; --text: #e4e6ea; --dim: #9aa0aa; --code: #2a2e35; color-scheme: dark; }
+@media (prefers-color-scheme: light) { :root { --bg: #f3f4f6; --panel: #fff; --line: #d5d8de; --text: #1c1f24; --dim: #5d636e; --code: #eceef1; color-scheme: light; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; padding: 16px; }
+main { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px 24px; max-width: 560px; }
+h1 { font-size: 18px; margin: 0 0 8px; }
+code { background: var(--code); border-radius: 3px; padding: 1px 5px; font: 13px ui-monospace, monospace; }
+.dim { color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Set a password for the Data2G web UI</h1>
+  <p>The web UI stays locked until it has a password. The station is already running.</p>
+  <p>Set the password in one of these ways, on the computer running data2g-web:</p>
+  <ul>
+    <li>In a terminal, run <code>data2g-web --set-password</code>. This works while data2g-web is running.</li>
+    <li>In data2g-gui, open Settings, then the Station tab, and fill in Web UI password.</li>
+  </ul>
+  <p class="dim">This page reloads by itself once a password is set.</p>
+</main>
+<script>
+"use strict";
+setInterval(async () => {
+  try { if ((await fetch("/api/session")).status !== 503) location.reload(); } catch (e) {}
+}, 3000);
+</script>
+</body>
+</html>

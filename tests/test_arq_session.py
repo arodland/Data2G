@@ -478,3 +478,32 @@ def test_abandon_is_answered_at_once(monkeypatch):
     reply, t = send(b, a, t)
     assert len(reply.slots) == 1 and a.station.peer_abandon and not a.station.peer_reply_lost
     assert a.next_event() < t + 1  # answered now, not at a keepalive
+
+
+def test_another_stations_burst_is_foreign_but_my_peers_and_a_connect_are_not():
+    """A burst under another session's key, heard while I am connected (its
+    first codeword converged: the engine asks only then), is foreign: not
+    my peer's loss to score. My peer's burst and a third station's CONNECT
+    (to be refused) are not."""
+    def heard(burst):
+        return FakeRx(burst, random.Random(0), 0.0, {}, {"mismatch": 0})
+
+    def connected(caller, callee, seed):
+        a = S.Session(caller, Policy(random.Random(seed), change=0), rng=random.Random(seed + 1))
+        b = S.Session(callee, Policy(random.Random(seed + 2), change=0), rng=random.Random(seed + 3))
+        b.listen()
+        a.connect(callee, 2, 0.0)
+        b.on_rx(heard(a.poll(0.0)), 1.0)
+        a.on_rx(heard(b.poll(1.0)), 2.0)
+        assert a.state == S.CONNECTED == b.state
+        a.write(b"data")
+        return a, b, a.poll(30.0)  # the caller's first burst
+
+    _, b, mine = connected("W1AW", "K2XYZ", 1)
+    _, _, other = connected("N0CALL", "K2ABC", 11)
+    assert b.foreign(heard(other))
+    assert not b.foreign(heard(mine))
+    e = S.Session("N1NEW", Policy(random.Random(21)), rng=random.Random(22))
+    e.connect("K2XYZ", 2, 0.0)
+    assert not b.foreign(heard(e.poll(0.0)))
+    assert not S.Session("K2XYZ", Policy(random.Random(31)), rng=random.Random(32)).foreign(heard(other))

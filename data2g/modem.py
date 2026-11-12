@@ -787,21 +787,38 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: d
                 end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)
 
 
-# a burst's frame pilots, n_pairs consecutive pairs: pilot_coherence's mean
-# over them at or under this is noise (each band's 99th percentile on noise:
-# 1/sqrt(carriers) scaled). Real bursts: 0-2% under it at 0 dB, 10-16% at
-# -4 dB; locks on noise: 99% under within 4 pairs (0.6 s).
+# A burst's frame pilots, PILOT_PAIRS consecutive pairs, are there when both
+# (scripts/pilot_metric_study.py, 2026-11-10):
+# - pilot_coherence's mean is over PILOT_NOISE: they repeat from frame to
+#   frame. Any steady narrowband signal does too (a tone's leakage turns by
+#   the same phase in every carrier), and alone this read a tone, a CW
+#   key-down or a Hand as pilots 88-100% of the time;
+# - the pattern (pilot_coherence's `pattern`) is over PILOT_PATTERN: with the
+#   known pilot divided out, adjacent carriers agree (a smooth channel). A
+#   tone's leakage, noise or someone's data leave the pilot's pseudo-random
+#   pattern. PILOT_PATTERN is noise's 90th percentile; PILOT_NOISE then
+#   noise's 99th of the coherence where the pattern passes (1% of noise
+#   windows pass both, as the coherence alone was set).
+# Against the coherence alone, windows read as pilots: real bursts at -6 dB
+# MPD w 0.66 -> 0.83, n4 0.41 -> 0.61 (every band and channel up or level);
+# tones and Hands at +20 dB 0.88-1.00 -> 0.00-0.03, at 0 dB -> 0.06-0.11.
 PILOT_PAIRS = 4
-PILOT_NOISE = {"w": 0.30, "n10": 0.44, "n4": 0.68, "w48": 0.20}
+PILOT_NOISE = {"w": 0.24, "n10": 0.38, "n4": 0.59, "w48": 0.18}
+PILOT_PATTERN = {"w": 0.318, "n10": 0.504, "n4": 0.876, "w48": 0.226}
 
 
-def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = False) -> list[float]:
+def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = False, pattern: bool = False):
     """For a streaming lock (find_burst's dict, same sample origin as x):
     per consecutive pair of the frame pilots already in x (the first n_max
     pairs, or with `latest` the newest), |sum over carriers of y_f
     conj(y_f-1)| / sqrt(energies). A real burst's pilots repeat through a
     slowly varying channel; a false lock's 'pilots' are noise or someone
-    else's data, near 1/sqrt(carriers)."""
+    else's data, near 1/sqrt(carriers). With `pattern`: -> (that list, the
+    pattern), the pattern being, with the known pilot divided out, the
+    adjacent carriers' products summed over those frames (their phase is
+    the CFO's in every frame), each carrier pair at unit weight, |sum| / pairs:
+    near 1 for a smooth channel, near 1/sqrt(pairs) for anything else,
+    however strong one carrier is (PILOT_PATTERN)."""
     spec = lock["spec"]
     b = ofdm.band(spec.band)
     total = frames_on_air(spec, lock["n_cw"]) + 1  # frame pilots and the closing one
@@ -809,14 +826,19 @@ def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = Fa
     f1 = avail if latest else min(avail, n_max + 1)
     f0 = max(0, f1 - n_max - 1)
     if f1 - f0 < 2:
-        return []
+        return ([], 0.0) if pattern else []
     lo = max(0, lock["p0"] + f0 * FRAME_SAMPLES - 2 * NSYM)
     hi = lock["p0"] + (f1 - 1) * FRAME_SAMPLES + 3 * NSYM
     z = dsp.freq_correct(dsp.to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
     y = [b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + NCP, DEMOD_BACKOFF) for f in range(f0, f1)]
-    return [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
-                  / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
-            for f in range(1, len(y))]
+    c = [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
+               / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
+         for f in range(1, len(y))]
+    if not pattern:
+        return c
+    zs = [v * np.conj(b.pilot) for v in y]
+    a = sum(z[1:] * np.conj(z[:-1]) for z in zs)
+    return c, float(np.abs(np.sum(a / (np.abs(a) + 1e-30))) / len(a))
 
 
 # Mid-burst acquisition from the header copy (w, w48; scripts/copy_acq_study.py),
@@ -828,6 +850,13 @@ COPY_EARLIER = (0, NCP // 2, NCP)  # read the copy this much before a peak (its 
 # mean frame-pilot coherence a copy lock needs over its burst: on noise
 # locks read 0.11-0.23 (47 in 2 h), true locks that decoded 0.41-0.73 (58)
 COPY_COHERENCE = 0.35
+# ... and their pattern (pilot_coherence's, over the whole burst): a CW ID's
+# key-downs and an n10 burst's pilots are coherent too, and their "copy" read
+# a word over the header floor (scripts/copy_pattern_study.py: 10 s of each at
+# 0-20 dB, band w, 6 and 20 locks of 90, pattern 0.03-0.51). Right copy locks
+# (head wiped, -8..8 dB, AWGN/MPP/MPD) read 0.65 and up on w (662), 0.53 and
+# up on w48 (543; 2 under 0.6, neither decoded).
+COPY_PATTERN = 0.6
 # find_copy's normalized pilot peak worth reading headers at: noise-only
 # 1.9 s buffers (the stream's) reach 11.9 (2400 of them, w and w48); bursts
 # the copy lock went on to decode, 16.6-91 (16, MPP/MPD low end). Without it
@@ -856,7 +885,9 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     3. The copy read at every frame of the grid; a word counts if its own
        length puts its copy frame there and it clears the header floor.
     4. The best-scoring word whose burst's frame pilots are coherent
-       (COPY_COHERENCE; the live BUSY floors pass noise)."""
+       (COPY_COHERENCE; the live BUSY floors pass noise) and keep the
+       pilot's pattern (COPY_PATTERN: a CW ID or a narrower band's burst
+       is coherent too)."""
     if C is not None and level is None:
         raise ValueError("find_copy: C needs its noise level")
     b = ofdm.band(band)
@@ -907,8 +938,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
                                           end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
                                           copy=dict(word=word, pc=pc)))
     for lock in sorted(found, key=lambda k: -k["score"]):
-        c = pilot_coherence(x, lock, n_max=10**4)
-        if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE:
+        c, pat = pilot_coherence(x, lock, n_max=10**4, pattern=True)
+        if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE and pat >= COPY_PATTERN:
             return lock
     return None
 

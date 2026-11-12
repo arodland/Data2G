@@ -9,14 +9,14 @@
 #include <cmath>
 #include <numbers>
 
-#include "dsp/fft.hpp"
+#include "app/rx_plot.hpp"
 #include "generated/config.hpp"
 
 namespace data2g::gui {
 
 namespace {
 
-constexpr int NFFT = 1024;
+constexpr int NFFT = static_cast<int>(app::SPECTRUM_N);
 constexpr int BINS = NFFT / 2;  // 0 .. FS/2
 constexpr double DISPLAY_HZ = config::FS / 2.0;
 constexpr std::size_t METER_SAMPLES = config::FS / 10;  // one engine block
@@ -63,21 +63,6 @@ const std::array<Rgb, 256>& tx_colormap() {
     return lut;
 }
 
-// Hann-windowed magnitude spectrum in dB, scaled by 1/NFFT (SSTVAE's dsp::spectrum_db).
-std::vector<double> spectrum_db(const std::vector<double>& block) {
-    static const std::vector<double> window = [] {
-        std::vector<double> w(NFFT);
-        for (int i = 0; i < NFFT; ++i) w[i] = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * i / (NFFT - 1));
-        return w;
-    }();
-    std::vector<dsp::cdouble> buf(NFFT);
-    for (int i = 0; i < NFFT; ++i) buf[i] = block[i] * window[i];
-    const auto spec = dsp::fft(buf, true);
-    std::vector<double> out(BINS);
-    for (int i = 0; i < BINS; ++i) out[i] = 20.0 * std::log10(std::abs(spec[i]) / NFFT + 1e-12);
-    return out;
-}
-
 // Onto exactly `width` columns: interpolate when widening, peak-hold when
 // shrinking so a narrow carrier can't be sampled away (SSTVAE's dsp::reduce_to_width).
 std::vector<double> reduce_to_width(const std::vector<double>& v, int width) {
@@ -108,10 +93,12 @@ const QColor OK(60, 180, 75), CAUTION(230, 160, 30), DANGER(240, 60, 60);
 Waterfall::Waterfall(QWidget* parent, int fps) : QWidget(parent) {
     setMinimumSize(160, 90);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    auto* timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &Waterfall::tick);
-    timer->start(std::max(1, 1000 / std::max(1, fps)));
+    timer_ = new QTimer(this);
+    connect(timer_, &QTimer::timeout, this, &Waterfall::tick);
+    set_fps(fps);
 }
+
+void Waterfall::set_fps(int fps) { timer_->start(std::max(1, 1000 / std::max(1, fps))); }
 
 void Waterfall::ensure_image() {
     const qreal dpr = devicePixelRatioF();
@@ -149,7 +136,7 @@ void Waterfall::tick() {
     }
 
     ensure_image();
-    const std::vector<double> row = reduce_to_width(spectrum_db(block), image_.width());
+    const std::vector<double> row = reduce_to_width(app::spectrum_db(block), image_.width());
     if (row.empty()) return;
     // one row = one pixel: scroll down by one, bottom-up in place
     const auto stride = static_cast<std::size_t>(image_.bytesPerLine());

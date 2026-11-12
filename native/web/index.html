@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data2G</title>
+<!-- data2g-web's page (web/web_ui.hpp): data2g-gui's main window, monitor
+     window and settings dialog as two tabs. Self-contained: no CDN, so it
+     works on a shack network with no internet. -->
+<style>
+:root {
+  --bg: #16181c; --panel: #1f2228; --line: #343841; --text: #e4e6ea; --dim: #9aa0aa;
+  --accent: #4a9eff; --busy: #e6a01e; --ptt: #f03c3c; --bad: #e05050; --ok: #3cb44b; --tx: #f0a040;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f3f4f6; --panel: #ffffff; --line: #d5d8de; --text: #1c1f24; --dim: #5d636e; --accent: #1a6ed8; --bad: #c03030; --tx: #b86400; color-scheme: light; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim); padding: 6px 12px; font: inherit; cursor: pointer; }
+nav button[aria-selected=true] { color: var(--text); border-bottom-color: var(--accent); }
+#station { color: var(--dim); flex: 1; min-width: 200px; }
+#conn { font-size: 12px; padding: 2px 8px; border-radius: 3px; }
+#conn.down { background: var(--bad); color: #fff; }
+main { padding: 12px 16px; max-width: 1400px; margin: 0 auto; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+.scope { display: flex; gap: 12px; height: 240px; }
+.wf { position: relative; flex: 1; min-width: 0; background: #000; border-radius: 4px; overflow: hidden; }
+.wf canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#wf { image-rendering: auto; }
+#cons { height: 100%; aspect-ratio: 1; max-width: 30%; background: #000; border-radius: 4px; }
+.grid { display: grid; grid-template-columns: max-content 1fr max-content 1fr; gap: 4px 12px; }
+.grid .k { color: var(--dim); }
+.grid .wide { grid-column: 2 / 5; }
+.bad { color: var(--bad); }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.lamp { min-width: 60px; text-align: center; border: 1px solid var(--dim); color: var(--dim); border-radius: 3px; padding: 2px 6px; font-weight: 600; }
+.lamp.busy.lit { background: var(--busy); border-color: var(--busy); color: #000; }
+.lamp.ptt.lit { background: var(--ptt); border-color: var(--ptt); color: #000; }
+button.act, .act { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 4px 12px; font: inherit; cursor: pointer; }
+button.act:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.spacer { flex: 1; }
+.cols { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; }
+@media (max-width: 900px) { .cols { grid-template-columns: 1fr; } .scope { height: 180px; } }
+.log { max-height: 420px; overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 2px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); color: var(--dim); font-weight: 500; }
+td.res-lost, td.res-undecoded { color: var(--dim); }
+td.res-incomplete { color: var(--busy); }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+h2 .spacer { flex: 1; }
+#dumps { background: #000; color: #d8d8d8; font: 12px/1.35 ui-monospace, monospace; height: 420px; overflow: auto; margin: 0; padding: 6px 8px; border-radius: 4px; white-space: pre; }
+#dumps .tx { color: #f0a040; }
+/* settings */
+.groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; align-items: start; }
+@media (max-width: 480px) { .groups { grid-template-columns: 1fr; } }
+fieldset { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); margin: 0; padding: 8px 12px 12px; }
+legend { color: var(--dim); font-size: 13px; text-transform: uppercase; letter-spacing: .05em; padding: 0 4px; }
+.row { display: grid; grid-template-columns: 140px 1fr; gap: 8px; align-items: center; margin-top: 8px; }
+.row > label:first-child { color: var(--dim); }
+.row .inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.check { margin-top: 8px; display: flex; gap: 6px; align-items: center; }
+.note { color: var(--dim); font-size: 12px; margin-top: 6px; }
+input[type=text], input[type=number], input:not([type]), select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; font: inherit; min-width: 0; }
+input[type=number] { width: 7em; }
+input[type=range] { flex: 1; min-width: 120px; }
+.row .grow { flex: 1; width: 100%; }
+[hidden] { display: none !important; }
+.menu { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 0; min-width: 140px; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+.menu .title { color: var(--dim); font-size: 12px; padding: 4px 12px; }
+.menu button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text); font: inherit; padding: 4px 12px 4px 28px; cursor: pointer; position: relative; }
+.menu button:hover, .menu button:focus { background: var(--line); outline: none; }
+.menu button[aria-checked=true]::before { content: "\2713"; position: absolute; left: 10px; }
+.dirty { outline: 1px solid var(--busy); }
+.savebar { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: center; padding: 10px 0; background: var(--bg); }
+#save-msg.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Data2G</h1>
+  <nav role="tablist">
+    <button role="tab" aria-selected="true" data-tab="monitor">Monitor</button>
+    <button role="tab" aria-selected="false" data-tab="settings">Settings</button>
+  </nav>
+  <span id="station">-</span>
+  <span id="conn"></span>
+  <button class="act" id="logout">Log out</button>
+</header>
+
+<main>
+<section id="tab-monitor">
+  <div class="panel">
+    <div class="scope">
+      <div class="wf" title="Right-click: waterfall speed. Click CLIP to clear it"><canvas id="wf" width="512" height="240"></canvas><canvas id="wf-over"></canvas></div>
+      <canvas id="cons"></canvas>
+    </div>
+    <div class="grid" style="margin-top:10px">
+      <span class="k">Link</span><span id="link">-</span>
+      <span class="k">Received</span><span id="rx">-</span>
+      <span class="k">Mode</span><span id="mode">-</span>
+      <span class="k">Sent</span><span id="tx">-</span>
+      <span class="k">Audio</span><span id="counters" class="wide">-</span>
+      <span class="k" id="dial-k" hidden>Dial</span><span id="dial" class="wide" hidden>-</span>
+    </div>
+    <div class="controls">
+      <span class="lamp busy" id="busy">BUSY</span>
+      <span class="lamp ptt" id="ptt">PTT</span>
+      <span class="spacer"></span>
+      <button class="act" id="abort" disabled title="Drop the session at once, without a disconnect handshake; the client is told DISCONNECTED">Abort</button>
+      <label class="check" style="margin:0" title="Decode every burst heard and sent, whoever it is for, into the packet log"><input type="checkbox" id="monitoring"> Monitor packets</label>
+    </div>
+  </div>
+  <div class="cols">
+    <div class="panel">
+      <h2>Bursts</h2>
+      <div class="log"><table><thead><tr><th>Time</th><th>Mode</th><th>SNR (dB)</th><th>Result</th></tr></thead><tbody id="bursts"></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h2>Packets <span class="spacer"></span>
+        <label>Payloads <select id="fmt"><option value="text">Text</option><option value="hex">Hex dump</option></select></label>
+        <button class="act" id="clear-dumps">Clear</button></h2>
+      <pre id="dumps"></pre>
+    </div>
+  </div>
+</section>
+
+<div class="menu" id="fps-menu" role="menu" aria-label="Waterfall speed" hidden>
+  <div class="title">Waterfall speed</div>
+  <button role="menuitemradio" data-fps="1">1 fps</button>
+  <button role="menuitemradio" data-fps="2">2 fps</button>
+  <button role="menuitemradio" data-fps="5">5 fps</button>
+  <button role="menuitemradio" data-fps="10">10 fps</button>
+</div>
+
+<section id="tab-settings" hidden>
+  <form id="settings" autocomplete="off">
+  <div class="groups">
+    <fieldset><legend>Station</legend>
+      <div class="row"><label for="mycall">Callsign</label><input id="mycall" data-kind="str" placeholder="NOCALL"></div>
+      <div class="check"><input type="checkbox" id="decode_worker" data-kind="bool"><label for="decode_worker" title="Keeps preamble search and BUSY running during a burst's decode">Decode on a worker thread</label></div>
+      <div class="check"><input type="checkbox" id="live_constellation" data-kind="bool"><label for="live_constellation" title="Fills the constellation plot in as a burst arrives. Costs a little CPU on the receive thread">Live constellation</label></div>
+      <div class="row"><label for="decoder_effort">Decoder effort</label><span class="inline"><input type="range" id="decoder_effort" data-kind="num" min="15" max="40" step="5" title="The LDPC decoder's iteration cap. More decodes a little further into a fade and spends longer on a burst that fails; lower it on a slow machine."><span id="decoder_effort-v"></span></span></div>
+      <div class="row"><label for="cw_id">CW ID</label><span class="inline">
+        <select id="cw_id" data-kind="str" title="A CW (Morse) ID on 1500 Hz: ahead of the station's turn every 10 minutes in a session and once after it, and after KISS or CQ transmissions. Peers need session version 5 to wait it out.">
+          <option value="off">Off (ID frames only)</option><option value="add">With the ID frames</option><option value="only">In place of the ID frames</option></select>
+        <input type="number" id="cw_wpm" data-kind="num" min="15" max="40"> wpm</span></div>
+    </fieldset>
+
+    <fieldset><legend>Link</legend>
+      <div class="row"><label for="noise_rule">Noise rule</label><span class="inline"><input type="range" id="noise_rule" data-kind="num" min="0" max="1.5" step="0.01" title="A mode whose band is noisier in the receiver's noise profile than the band last measured is predicted at a lower SNR. The weight is how much its often-loud moments count. 0: off; 1.00: the default."><span id="noise_rule-v"></span></span></div>
+    </fieldset>
+
+    <fieldset><legend>Ports</legend>
+      <div class="row"><label for="listen">Listen address</label><input id="listen" data-kind="str" title="The address the VARA and KISS ports listen on: 127.0.0.1 for this machine only, 0.0.0.0 for any"></div>
+      <div class="row"><label for="command_port">VARA command port</label><span class="inline"><input type="number" id="command_port" data-kind="num" min="1" max="65534"><span id="data-port" class="note" style="margin:0"></span></span></div>
+      <div class="row"><label for="kiss_port">KISS port</label><input type="number" id="kiss_port" data-kind="num" min="1" max="65535"></div>
+    </fieldset>
+
+    <fieldset><legend>Recording</legend>
+      <div class="check"><input type="checkbox" id="record" data-kind="bool"><label for="record" title="For replaying a session offline; each run in a timestamped folder of its own">Record every burst heard and sent</label></div>
+      <div class="row"><label for="record_dir">Folder</label><input id="record_dir" data-kind="str" class="grow" title="On the machine running data2g-web"></div>
+    </fieldset>
+
+    <fieldset><legend>Radio interface</legend>
+      <div class="row"><label for="tci">Interface</label><select id="tci" data-kind="bool"><option value="false">Sound card + Hamlib</option><option value="true">TCI</option></select></div>
+      <div class="row" data-show="tci"><label for="tci_host">TCI server</label><input id="tci_host" data-kind="str" title="host:port of the SDR program's TCI server"></div>
+      <div class="row" data-show="card"><label for="input_device">Input</label><select id="input_device" data-kind="str" class="grow"></select></div>
+      <div class="row" data-show="card"><label for="output_device">Output</label><select id="output_device" data-kind="str" class="grow"></select></div>
+      <div class="row"><label for="sample_rate">Sample rate (Hz)</label><select id="sample_rate" data-kind="num" title="TCI: 8000, 24000 or 48000"></select></div>
+      <div class="row"><label for="output_volume">Output volume</label><span class="inline"><input type="number" id="output_volume" data-kind="num" min="-60" max="20" step="0.1" title="0 dB puts a burst's peak at full scale"> dB</span></div>
+      <div class="note" id="audio-io" hidden></div>
+    </fieldset>
+
+    <fieldset data-show="card"><legend>Hamlib</legend>
+      <div class="check"><input type="checkbox" id="rig" data-kind="bool"><label for="rig">Use rig control (PTT through Hamlib)</label></div>
+      <div class="row"><label for="rig_model">Rig</label><input id="rig_model" data-kind="model" list="rig-models" class="grow" placeholder="model number, or search"></div>
+      <datalist id="rig-models"></datalist>
+      <div class="row" data-port="device"><label for="rig_device">Device</label><input id="rig_device" data-kind="str" class="grow"></div>
+      <div class="row" data-port="serial"><label>Serial</label><span class="inline">Baud <select id="rig_baud" data-kind="num"></select> Data <select id="rig_data_bits" data-kind="str"></select> Stop <select id="rig_stop_bits" data-kind="str"></select></span></div>
+      <div class="row" data-port="serial"><label></label><span class="inline">Parity <select id="rig_parity" data-kind="str"></select> Handshake <select id="rig_handshake" data-kind="str"></select></span></div>
+      <div class="row" data-port="serial" title="Held for the whole session: how an interface powered from the control lines stays fed"><label>Control lines</label><span class="inline">DTR <select id="rig_dtr" data-kind="str"></select> RTS <select id="rig_rts" data-kind="str"></select></span></div>
+      <div class="row"><label for="ptt_method">PTT</label><span class="inline"><select id="ptt_method" data-kind="str"></select> Port <input id="ptt_device" data-kind="str" placeholder="(the device above)"></span></div>
+      <div class="row"><label for="ptt_audio">Transmit audio</label><select id="ptt_audio" data-kind="str"></select></div>
+      <div class="note">VOX: never key (the rig keys on the audio). DTR and RTS may use another port. Transmit audio: the input CAT keying selects, on rigs with two.</div>
+      <div class="row"><label>Hamlib</label><span class="inline">Timeout <input type="number" id="rig_timeout_ms" data-kind="num" min="1" max="60000"> ms Retries <input type="number" id="rig_retries" data-kind="num" min="0" max="10"></span></div>
+      <div class="row"><label for="rig_poll_interval">Frequency poll</label><span class="inline"><input type="number" id="rig_poll_interval" data-kind="num" min="0" max="3600" step="0.1" title="Read the dial frequency this often, for the monitor tab; 0: off (key only)"> s</span></div>
+      <div class="check"><input type="checkbox" id="rig_debug" data-kind="bool"><label for="rig_debug">Hamlib's trace in the log</label></div>
+    </fieldset>
+
+    <fieldset><legend>Transmit</legend>
+      <div class="row"><label for="rig_mode">Mode on connect</label><select id="rig_mode" data-kind="str"></select></div>
+      <div class="row"><label>PTT delays</label><span class="inline">On <input type="number" id="ptt_on_delay_ms" data-kind="num" min="0" max="2000"> ms Off <input type="number" id="ptt_off_delay_ms" data-kind="num" min="0" max="2000"> ms</span></div>
+    </fieldset>
+  </div>
+  <div class="savebar">
+    <button type="submit" class="act primary" id="save" disabled>Save and restart</button>
+    <button type="button" class="act" id="revert" disabled>Revert</button>
+    <span id="save-msg"></span>
+  </div>
+  </form>
+</section>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+// ---- tabs
+for (const b of document.querySelectorAll("nav button")) {
+  b.onclick = () => {
+    for (const o of document.querySelectorAll("nav button")) {
+      const on = o === b;
+      o.setAttribute("aria-selected", on);
+      $("tab-" + o.dataset.tab).hidden = !on;
+    }
+    if (b.dataset.tab === "settings" && !dirty.size) loadSettings();
+    if (b.dataset.tab === "monitor") resizeScope();
+    try { localStorage.setItem("data2g-tab", b.dataset.tab); } catch (e) {}
+  };
+}
+
+async function post(path, body) {
+  const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  return [r.ok, await r.json()];
+}
+
+// ---- monitor: formatting as gui/main_window.cpp
+function linkText(l) {
+  switch (l.state) {
+    case "LISTEN": case "listen": return "listening";
+    case "CONNECTING": case "connecting": return "connecting to " + l.peer;
+    case "CONNECTED": case "connected": return `connected to ${l.peer} (BW${l.bw})`;
+    case "DISCONNECTING": case "disconnecting": return "disconnecting from " + l.peer;
+    default: return l.state;
+  }
+}
+const bytes = n => n < 10000 ? n + " B" : (n / 1000).toFixed(1) + " kB";
+
+// ---- waterfall (gui/waterfall.cpp): rows of 512 bins, 0-4 kHz, as bytes over the display range
+function ramp(stops) {
+  const out = [];
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255;
+    let k = 0;
+    while (k + 2 < stops.length && x > stops[k + 1][0]) k++;
+    const [a, lo] = stops[k], [b, hi] = stops[k + 1], t = (x - a) / (b - a);
+    out.push(lo.map((c, j) => Math.round(c + t * (hi[j] - c))));
+  }
+  return out;
+}
+const RX_MAP = ramp([[0, [0, 0, 0]], [.25, [0, 0, 140]], [.5, [0, 170, 90]], [.75, [245, 235, 40]], [1, [255, 255, 255]]]);
+const TX_MAP = ramp([[0, [0, 0, 0]], [.25, [70, 0, 90]], [.5, [200, 30, 140]], [.75, [255, 140, 200]], [1, [255, 255, 255]]]);
+const wf = $("wf"), wfx = wf.getContext("2d"), over = $("wf-over"), ox = over.getContext("2d");
+wfx.fillRect(0, 0, wf.width, wf.height);
+let peak = 0, clipping = false, clipLatched = false;
+
+function addRow(r) {
+  const bins = atob(r.bins), map = r.tx ? TX_MAP : RX_MAP;
+  wfx.drawImage(wf, 0, 0, wf.width, wf.height - 1, 0, 1, wf.width, wf.height - 1);
+  const img = wfx.createImageData(bins.length, 1);
+  for (let i = 0; i < bins.length; i++) {
+    const c = map[bins.charCodeAt(i)];
+    img.data.set([c[0], c[1], c[2], 255], i * 4);
+  }
+  wfx.putImageData(img, 0, 0);
+  if (!r.tx && r.peak !== undefined) {
+    peak = r.peak;
+    clipping = peak >= 0.99;
+    if (clipping) clipLatched = true;
+  }
+}
+
+function drawOverlay() {
+  const dpr = devicePixelRatio || 1, w = over.clientWidth, h = over.clientHeight;
+  if (over.width !== Math.round(w * dpr) || over.height !== Math.round(h * dpr)) {
+    over.width = Math.round(w * dpr);
+    over.height = Math.round(h * dpr);
+  }
+  ox.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ox.clearRect(0, 0, w, h);
+  ox.font = "11px system-ui, sans-serif";
+  for (let hz = 500; hz < 4000; hz += 500) {  // a 500 Hz grid, labelled every kHz
+    const x = Math.round(hz * w / 4000) + .5, len = hz % 1000 ? 4 : 8;
+    ox.strokeStyle = "rgba(255,255,255,.75)";
+    ox.beginPath(); ox.moveTo(x, h - len); ox.lineTo(x, h); ox.stroke();
+    if (hz % 1000 === 0) {
+      ox.fillStyle = "rgba(0,0,0,.6)"; ox.fillText(hz / 1000 + "k", x + 4, h - 3);
+      ox.fillStyle = "rgba(255,255,255,.75)"; ox.fillText(hz / 1000 + "k", x + 3, h - 4);
+    }
+  }
+  // dBFS bar down the right edge: enough to set the sound card's gain
+  const x0 = w - 10, db = 20 * Math.log10(Math.max(peak, 1e-6)), frac = Math.min(1, Math.max(0, (db + 60) / 60));
+  ox.fillStyle = "rgba(0,0,0,.55)"; ox.fillRect(x0, 2, 8, h - 4);
+  const filled = (h - 4) * frac;
+  ox.fillStyle = clipping ? "#f03c3c" : frac > .85 ? "#e6a01e" : "#3cb44b";
+  ox.fillRect(x0, h - 2 - filled, 8, filled);
+  if (clipLatched) {
+    ox.fillStyle = "#f03c3c"; ox.textAlign = "right"; ox.fillText("CLIP", x0 - 4, 14); ox.textAlign = "left";
+  }
+}
+// Waterfall speed, as the GUI's right-click menu (1, 2, 5, 10 fps): the
+// server sends this browser the newest row once a period. Kept per browser:
+// a phone on a slow link may want less than the desk.
+let fps = 10;
+try { fps = Number(localStorage.getItem("data2g-fps")) || 10; } catch (e) {}
+const fpsMenu = $("fps-menu");
+function closeFpsMenu() { fpsMenu.hidden = true; }
+over.oncontextmenu = e => {
+  e.preventDefault();
+  for (const b of fpsMenu.querySelectorAll("button")) b.setAttribute("aria-checked", Number(b.dataset.fps) === fps);
+  fpsMenu.hidden = false;
+  fpsMenu.style.left = Math.min(e.clientX, innerWidth - fpsMenu.offsetWidth - 4) + "px";
+  fpsMenu.style.top = Math.min(e.clientY, innerHeight - fpsMenu.offsetHeight - 4) + "px";
+  fpsMenu.querySelector("[aria-checked=true]")?.focus();
+};
+fpsMenu.onclick = e => {
+  const f = Number(e.target.dataset?.fps);
+  if (!f) return;
+  fps = f;
+  try { localStorage.setItem("data2g-fps", f); } catch (err) {}
+  send({cmd: "fps", fps: f});
+  closeFpsMenu();
+};
+addEventListener("mousedown", e => { if (!fpsMenu.contains(e.target)) closeFpsMenu(); });
+addEventListener("keydown", e => { if (e.key === "Escape") closeFpsMenu(); });
+addEventListener("blur", closeFpsMenu);
+over.onclick = e => { if (clipLatched && e.offsetX >= over.clientWidth - 30) { clipLatched = false; drawOverlay(); } };
+
+// ---- constellation (gui/constellation.cpp)
+const cons = $("cons"), cx = cons.getContext("2d");
+let plot = null;
+function drawCons() {
+  const dpr = devicePixelRatio || 1, side = cons.clientHeight;
+  cons.width = cons.height = Math.max(1, Math.round(side * dpr));
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.fillStyle = "#000"; cx.fillRect(0, 0, side, side);
+  if (!plot) return;
+  const mid = side / 2, P = plot.points, S = plot.symbols;
+  let reach = 0;
+  for (let i = 0; i < P.length; i++) reach = Math.max(reach, Math.abs(P[i]));
+  const scale = side / 2 / (reach > 0 ? 1.5 * reach : 1.5);
+  const X = re => mid + re * scale, Y = im => mid - im * scale;
+  cx.strokeStyle = "#3c3c3c"; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(mid, 0); cx.lineTo(mid, side); cx.moveTo(0, mid); cx.lineTo(side, mid); cx.stroke();
+  if (plot.tones) { cx.beginPath(); cx.arc(mid, mid, scale, 0, 2 * Math.PI); cx.stroke(); }
+  const n = S.length / 2, dot = 1.5;
+  for (let i = 0; i < n; i++) {  // tones: early blue to late green, so drift and fades show by when
+    const t = plot.tones && n > 1 ? i / (n - 1) : 1;
+    cx.fillStyle = `rgba(0,${Math.round(120 + 135 * t)},${Math.round(255 - 135 * t)},.55)`;
+    cx.fillRect(X(S[2 * i]) - dot / 2, Y(S[2 * i + 1]) - dot / 2, dot, dot);
+  }
+  cx.strokeStyle = "#ff5050"; cx.beginPath();
+  for (let i = 0; i < P.length; i += 2) {
+    const re = P[i], im = P[i + 1];
+    if (plot.tones) { cx.moveTo(X(re * 1.06), Y(im * 1.06)); cx.lineTo(X(re * 1.16), Y(im * 1.16)); }
+    else { const x = X(re), y = Y(im); cx.moveTo(x - 3, y); cx.lineTo(x + 3, y); cx.moveTo(x, y - 3); cx.lineTo(x, y + 3); }
+  }
+  cx.stroke();
+  cx.fillStyle = "#888"; cx.font = "11px system-ui, sans-serif";
+  cx.fillText(plot.mode + (plot.live ? " (live)" : plot.lost ? " (lost)" : ""), 4, 13);
+}
+function resizeScope() { drawOverlay(); drawCons(); }
+addEventListener("resize", resizeScope);
+
+// ---- the WebSocket (/ws): the server pushes the state every 100 ms, with
+// what we have not had yet; seq is where to resume after a reconnect
+const seq = {b: 0, d: 0, c: 0, w: 0};
+let ws = null;
+const send = m => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
+$("fmt").onchange = () => send({cmd: "fmt", fmt: $("fmt").value});
+$("clear-dumps").onclick = () => { $("dumps").textContent = ""; };
+$("monitoring").onchange = e => send({cmd: "monitor", on: e.target.checked});
+$("abort").onclick = () => send({cmd: "abort"});
+
+function addBursts(list) {
+  const body = $("bursts");
+  for (const b of list) {
+    const tr = body.insertRow(0);  // newest first
+    const time = new Date(b.t).toTimeString().slice(0, 8);
+    for (const v of [time, b.mode, b.snr === null ? "-" : b.snr.toFixed(1), b.result]) tr.insertCell().textContent = v;
+    tr.cells[3].className = "res-" + b.result.split(" ")[0];
+  }
+  while (body.rows.length > 500) body.deleteRow(-1);
+}
+
+function addDumps(list) {
+  const pre = $("dumps"), atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+  for (const d of list) {
+    const span = document.createElement("span");
+    if (d.tx) span.className = "tx";
+    span.textContent = (pre.childNodes.length ? "\n" : "") + d.text.replace(/\n$/, "");
+    pre.appendChild(span);
+  }
+  while (pre.childNodes.length > 1000) pre.removeChild(pre.firstChild);
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+}
+
+function show(s) {
+  $("station").textContent = s.station;
+  const l = s.link;
+  $("link").textContent = linkText(l);
+  $("mode").textContent = !l.mode ? "-" : l.mode_hz !== undefined ? `${l.mode}, ${l.mode_hz} Hz` : l.mode;
+  $("rx").textContent = `${bytes(l.rx_bytes)}, ${l.rx_bps ?? 0} bps`;
+  $("tx").textContent = `${bytes(l.tx_bytes)}, ${l.tx_bps ?? 0} bps`;
+  const c = s.counters;
+  $("counters").textContent = `overflows ${c.overflows}, dropped ${c.dropped}, backlog ${c.backlog_s.toFixed(1)} s (late ${c.late}), underruns ${c.underruns}, decode dropped ${c.decode_dropped}`;
+  $("counters").classList.toggle("bad", !!(c.overflows || c.dropped || c.late || c.underruns || c.decode_dropped));
+  const polled = "dial" in s;
+  $("dial-k").hidden = $("dial").hidden = !polled;
+  if (polled) $("dial").textContent = s.dial === null ? "-" : (s.dial / 1e6).toFixed(4) + " MHz";
+  $("busy").classList.toggle("lit", s.busy);
+  $("ptt").classList.toggle("lit", s.ptt);
+  $("abort").disabled = !s.abortable;
+  if (document.activeElement !== $("monitoring")) $("monitoring").checked = s.monitoring;
+  addBursts(s.bursts);
+  if (s.reset_dumps) $("dumps").textContent = "";
+  addDumps(s.dumps);
+  for (const r of s.rows) addRow(r);
+  if (s.rows.length) drawOverlay();
+  if (s.constellation) { plot = s.constellation; drawCons(); }
+  Object.assign(seq, s.seq);
+}
+
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => {
+    send({cmd: "hello", ...seq, fmt: $("fmt").value, fps});
+    $("conn").textContent = ""; $("conn").className = "";
+  };
+  ws.onmessage = e => show(JSON.parse(e.data));
+  ws.onclose = async () => {
+    $("conn").textContent = "no connection to data2g-web"; $("conn").className = "down";
+    try {  // logged out, or the password changed: the login page
+      if ([401, 503].includes((await fetch("/api/session")).status)) { location.reload(); return; }
+    } catch (e) {}
+    setTimeout(connect, 1000);
+  };
+}
+
+// ---- settings (gui/settings_dialog.cpp's fields; app/settings.hpp's keys)
+const LABELS = {  // in app::rig_choices' order, as the dialog's
+  rig_data_bits: ["Default"], rig_stop_bits: ["Default"], rig_parity: ["Default", "None", "Odd", "Even"],
+  rig_handshake: ["Default", "None", "XON/XOFF", "Hardware"], rig_dtr: ["Default", "High", "Low"], rig_rts: ["Default", "High", "Low"],
+  ptt_method: ["VOX", "CAT", "DTR", "RTS"], ptt_audio: ["Mic / front", "Data / rear"], rig_mode: ["None", "USB", "Data/Pkt"],
+};
+const PORT = {NONE: 0, SERIAL: 1, NETWORK: 2, OTHER: 3};
+let cfg = null, models = new Map();  // number -> [number, label, port, micdata]
+const dirty = new Set();
+const fields = () => document.querySelectorAll("#settings [data-kind]");
+
+function options(sel, list, current) {  // [[value, label]...]; a current value not in the list is kept, marked
+  sel.replaceChildren();
+  for (const [v, l] of list) sel.add(new Option(l, v));
+  if (![...sel.options].some(o => o.value === String(current))) sel.add(new Option(`${current} (not found)`, current));
+}
+
+function modelText(n) { const m = models.get(n); return m ? `${m[1]} (${m[0]})` : String(n); }
+function modelNumber(text) {  // a label ending "(N)", or a bare number
+  text = text.trim();
+  const m = text.match(/\((\d+)\)\s*$/) || text.match(/^(\d+)$/);
+  return m ? Number(m[1]) : cfg.values.rig_model;
+}
+
+function read(el) {
+  switch (el.dataset.kind) {
+    case "bool": return el.type === "checkbox" ? el.checked : el.value === "true";
+    case "num": return Number(el.value);
+    case "model": return modelNumber(el.value);
+    default: return el.value.trim();
+  }
+}
+function write(el, v) {
+  if (el.type === "checkbox") el.checked = v;
+  else if (el.dataset.kind === "model") el.value = modelText(v);
+  else el.value = String(v);
+}
+
+function sync() {  // what shows, as the dialog's sync_interface and sync_rig
+  const tci = $("tci").value === "true";
+  for (const el of document.querySelectorAll("[data-show]")) el.hidden = (el.dataset.show === "tci") !== tci;
+  const n = modelNumber($("rig_model").value), m = models.get(n);
+  const port = m ? m[2] : n === 2 ? PORT.NETWORK : PORT.SERIAL;  // without Hamlib to ask: 2 is rigctld
+  for (const el of document.querySelectorAll("[data-port=serial]")) el.hidden = port !== PORT.SERIAL;
+  document.querySelector("[data-port=device]").hidden = port === PORT.NONE;
+  $("rig_device").placeholder = port === PORT.SERIAL ? "/dev/ttyUSB0 or COM5" : n === 2 ? "localhost:4532" : port === PORT.NETWORK ? "host:port" : "(Hamlib's default)";
+  const method = $("ptt_method").value;
+  $("ptt_device").disabled = !(method === "dtr" || method === "rts");
+  $("ptt_audio").disabled = !(method === "cat" && m && m[3]);
+  $("record_dir").disabled = !$("record").checked;
+  $("data-port").textContent = "data on " + (Number($("command_port").value) + 1);
+  const e = Number($("decoder_effort").value);
+  $("decoder_effort-v").textContent = e === 25 ? "25 (default)" : e;
+  const nr = Number($("noise_rule").value);
+  $("noise_rule-v").textContent = nr === 0 ? "off" : nr === 1 ? "1.00 (default)" : nr.toFixed(2);
+  $("save").disabled = $("revert").disabled = !dirty.size;
+}
+
+async function loadSettings() {
+  const r = await fetch("/api/settings");
+  if (r.status === 401 || r.status === 503) { location.reload(); return; }
+  cfg = await r.json();
+  const v = cfg.values;
+  models = new Map(cfg.rig_models.map(m => [m[0], m]));
+  $("rig-models").replaceChildren(...cfg.rig_models.map(m => new Option(`${m[1]} (${m[0]})`)));
+  const dev = list => [["", "(system default)"], ...list.map(n => [n, n])];
+  options($("input_device"), dev(cfg.inputs), v.input_device);
+  options($("output_device"), dev(cfg.outputs), v.output_device);
+  options($("sample_rate"), [8000, 16000, 24000, 32000, 48000, 96000].map(r => [r, r]), v.sample_rate);
+  options($("rig_baud"), [[0, "Default"], ...[1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200].map(b => [b, b])], v.rig_baud);
+  for (const [f, values] of Object.entries(cfg.choices)) options($(f), values.map((x, i) => [x, LABELS[f][i] ?? x]), v[f]);
+  $("tci_host").placeholder = cfg.defaults.tci_host;
+  $("audio-io").hidden = !cfg.audio_io;
+  $("audio-io").textContent = `Audio is --audio-io ${cfg.audio_io} for this run.`;
+  dirty.clear();
+  for (const el of fields()) { el.classList.remove("dirty"); write(el, v[el.id]); }
+  sync();
+}
+
+for (const el of fields()) {
+  el.addEventListener(el.type === "range" || el.type === "text" || !el.type || el.type === "number" ? "input" : "change", () => {
+    dirty.add(el.id);
+    el.classList.add("dirty");
+    $("save-msg").textContent = "";
+    sync();
+  });
+}
+$("revert").onclick = () => { $("save-msg").textContent = ""; loadSettings(); };
+$("settings").onsubmit = async e => {
+  e.preventDefault();
+  const changes = {};  // only what was edited: a command line's value stays unless changed here
+  for (const id of dirty) changes[id] = read($(id));
+  $("save").disabled = true;
+  $("save-msg").className = ""; $("save-msg").textContent = "Saving...";
+  try {
+    const [ok, r] = await post("/api/settings", changes);
+    if (!ok) { $("save-msg").className = "err"; $("save-msg").textContent = r.error; $("save").disabled = false; return; }
+    await loadSettings();
+    $("save-msg").className = r.running ? "" : "err";
+    $("save-msg").textContent = r.running ? "Saved; station running." : "Saved, but the station is stopped: " + r.error;
+  } catch (err) {
+    $("save-msg").className = "err"; $("save-msg").textContent = "No connection to data2g-web.";
+    $("save").disabled = false;
+  }
+};
+
+$("logout").onclick = async () => { await post("/api/logout", {}); location.reload(); };
+
+// ---- start
+try { const t = localStorage.getItem("data2g-tab"); if (t) document.querySelector(`nav [data-tab=${t}]`)?.click(); } catch (e) {}
+resizeScope();
+connect();
+</script>
+</body>
+</html>

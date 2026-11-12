@@ -714,6 +714,11 @@ class Engine:
                     continue
             if self._cq(rx):
                 continue
+            if not ours and rx.converged(0) and self.session.foreign(rx):
+                # a whole codeword under another key: its measurements and
+                # its loss are not my peer's (the shifter stepped down on them)
+                log.info("RX %s x%d: another station's", rx.submode, rx.n_cw)
+                continue
             # the noise profile too (a model with its inputs reads it; recorded apart, with the rx event)
             self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
             self.session.on_rx(rx, t)

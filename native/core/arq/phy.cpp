@@ -191,6 +191,42 @@ Measured measure(const Heard& r) {
 
 // --- ModemRx -------------------------------------------------------------------
 
+std::optional<std::optional<Bytes>> ModemRx::reused(int slot, std::uint32_t m) const {
+    if (!reader_) return std::nullopt;
+    const auto it = reads_.find(slot);
+    if (it == reads_.end()) return std::nullopt;
+    return it->second.first == m ? std::optional<Bytes>(it->second.second) : std::nullopt;
+}
+
+std::optional<Bytes> ModemRx::note(int slot, std::uint32_t m, std::optional<Bytes> p) {
+    if (p) reads_.try_emplace(slot, m, *p);
+    return p;
+}
+
+void ModemRx::for_reader() {
+    store_ = nullptr;
+    reader_ = true;
+}
+
+std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
+    if (auto r = reused(slot, mask_value(mask))) return *r;
+    ++reads_run_;
+    return note(slot, mask_value(mask), plain_read(slot, mask));
+}
+
+std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) {
+    if (auto r = reused(slot, mask_value(mask))) return *r;
+    ++reads_run_;
+    return note(slot, mask_value(mask), stored_read(slot, mask, rv, stored));
+}
+
+std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) {
+    const int at = pair ? slot + 1 : slot;  // a pair's codeword, where a blind pair read (RV 1's slot) finds it
+    if (auto r = reused(at, mask_value(mask))) return *r;
+    ++reads_run_;
+    return note(at, mask_value(mask), known_read(slot, mask, tmpl, tmask, pair));
+}
+
 ModemRx::ModemRx(Heard r, SoftStore* store, std::optional<double> dd_budget, std::shared_ptr<const SlotSoft> soft,
                  bool dd, Clock clock)
     : r_(std::move(r)), store_(store), soft_(soft ? std::move(soft) : soft_bits(r_)), dd_(dd), clock_(std::move(clock)) {
@@ -237,7 +273,7 @@ void ModemRx::forget(const SoftKey& key) {
     if (store_) store_->erase(key);
 }
 
-std::optional<Bytes> ModemRx::decode_plain(int slot, const MaskId& mask) {
+std::optional<Bytes> ModemRx::plain_read(int slot, const MaskId& mask) {
     if (slot >= n_cw_) return std::nullopt;
     // CPM: its header says which slots are control (their own short
     // codeword); a blind ARQ_DUP pair probe on a data slot is a miss
@@ -340,7 +376,7 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
     return std::nullopt;
 }
 
-std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) {
+std::optional<Bytes> ModemRx::known_read(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) {
     if (slot >= n_cw_ || (pair && !pair_ok(slot))) return std::nullopt;
     const auto& s = spec(slot);
     // polar only (phy.ModemRx.decode_known)
@@ -371,6 +407,29 @@ std::optional<Bytes> ModemRx::decode_known(int slot, const MaskId& mask, ByteVie
         return std::nullopt;
     }
     return got;
+}
+
+std::optional<Bytes> ModemRx::decode_repeat(int slot, const MaskId& mask, const SoftKey& key) {
+    if (store_) {  // what was kept in another mode is not this burst's repeat
+        auto it = store_->find(key);
+        if (it != store_->end() && it->second.submode != submode_) store_->erase(it);
+    }
+    auto got = decode(slot, mask, 0, &key);
+    if (got && !own_score(slot, mask, *got)) {
+        reads_.erase(slot);  // not this burst's after all
+        return std::nullopt;
+    }
+    return got;
+}
+
+// The sum may decode to an earlier, different burst's codeword: it must score on this burst alone.
+bool ModemRx::own_score(int slot, const MaskId& mask, ByteView payload) {
+    const double sc = codes::score(spec(slot), slot_soft(slot), payload, mask_value(mask), slot);
+    if (sc >= PRIMED_SCORE) return true;
+    log_write("data2g.arq.phy", 20,
+              "repeated control in slot " + std::to_string(slot) + ": CRC passed, score " + std::to_string(sc) +
+                  " under " + std::to_string(PRIMED_SCORE) + " nats, dropped");
+    return false;
 }
 
 // Control codeword i's payload offsets past which a cut (bytes of the control stream) knows it zero.
@@ -447,7 +506,7 @@ const ModemRx::Raw& ModemRx::decoded(int slot, const codes::Spec& s) {
     return raw_[slot] = std::move(out);
 }
 
-std::optional<Bytes> ModemRx::decode_stored(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) {
+std::optional<Bytes> ModemRx::stored_read(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored) {
     if (slot >= n_cw_) return std::nullopt;
     if (n_ctl_slots_ && (mask.seq >= SEQ_MOD) != (slot < n_ctl_slots_)) return std::nullopt;
     const std::uint32_t m = mask_value(mask);
