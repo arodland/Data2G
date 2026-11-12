@@ -502,7 +502,57 @@ std::optional<Bytes> ModemRx::check_pinned(int slot, const codes::Spec& s, std::
 // The slot decoded alone, mask left open, with DD while it fails to
 // converge. A converged codeword is what was on air, whoever it was for: DD
 // learns from it.
+cpm::Pass cpm_pass(const cpm::Received& r, const codes::Spec& s, std::span<const double> soft,
+                   const cpm::Posts& earlier, int slot, const std::function<bool()>& late) {
+    cpm::Posts posts;
+    for (const auto& [k, v] : earlier)
+        if (k < slot) posts.emplace(k, v);
+    std::vector<double> cur(soft.begin(), soft.end());
+    codes::Posterior p;
+    for (int i = 0; i <= CPM_DD_ITERS; ++i) {
+        p = codes::decode_posterior(s, cur);
+        if (p.ok || i == CPM_DD_ITERS || (late && late())) break;
+        posts[slot] = std::move(p.post);
+        cur = cpm::dd_soft(r, cpm::dd_metric(r, posts, slot), slot);
+    }
+    cpm::Pass out{codes::descramble(s, p.bits, slot), {static_cast<std::uint8_t>(p.ok)}, {}};
+    if (p.ok) {
+        Mat<std::uint8_t> b(1, p.bits.size());
+        b.data = p.bits;
+        out.post = known(s, codes::encode_info(s, b, 0).data);
+    }
+    return out;
+}
+
+cpm::PassFn cpm_pass_fn() {
+    return [](const cpm::Received& r, int slot, const cpm::Posts& earlier) {
+        return cpm_pass(r, codes::spec(*r.spec), r.soft[static_cast<std::size_t>(slot)], earlier, slot);
+    };
+}
+
+// ModemRx._cpm_passes: every data slot's pass through `upto`, in slot order,
+// each seeing only earlier passes' posteriors: the receiver's (made while the
+// burst arrived, r.passes) where it has them.
+void ModemRx::cpm_passes(int upto) {
+    const auto& s = *data_spec_;
+    for (int k = n_ctl_slots_; k <= upto; ++k) {
+        if (passed_.count(k)) continue;
+        const auto made = r_.cpm->passes.find(k);
+        cpm::Pass p = made != r_.cpm->passes.end()
+                          ? made->second
+                          : cpm_pass(*r_.cpm, s, (*soft_)[static_cast<std::size_t>(k)], pass_post_, k,
+                                     [this] { return late(); });
+        passed_.insert(k);
+        if (!p.post.empty()) {
+            pass_post_[k] = p.post;
+            post_.emplace(k, std::move(p.post));
+        }
+        raw_.emplace(k, Raw{std::move(p.cands), std::move(p.usable)});
+    }
+}
+
 const ModemRx::Raw& ModemRx::decoded(int slot, const codes::Spec& s) {
+    if (!raw_.count(slot) && n_ctl_slots_ && dd(s)) cpm_passes(slot);
     auto it = raw_.find(slot);
     if (it != raw_.end()) return it->second;
     const DdState saved = cur_;
@@ -656,6 +706,12 @@ void ModemRx::remake_estimate(const codes::Spec& s) {
         // split: one decode per slot on the pool, each stopping when it converges. Python decodes them as one
         // batch, which stops together: a burst's failing slots kept every converged one iterating to the limit.
         blind_ = true;
+        if (n_ctl_slots_) {  // CPM: every slot's pass (a streaming receiver has made them)
+            cpm_passes(n_cw_ - 1);
+            auto cache = std::make_shared<std::map<int, std::vector<double>>>();
+            cur_ = DdState{nullptr, cache, std::make_shared<const cpm::Posts>(post_)};
+            return;
+        }
         std::vector<int> todo;
         for (int i = n_ctl_slots_; i < n_cw_; ++i)
             if (!post_.count(i)) todo.push_back(i);

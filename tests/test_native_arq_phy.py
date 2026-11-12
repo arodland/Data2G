@@ -190,6 +190,10 @@ def test_cpm_coherent_dd_match(native, pure, sigma, seed):
             py, nat = rx_pair(native, r, dd)
             got = [nat.decode(i, m, 0, None) for i, m in enumerate(masks)]
             assert got == [py.decode(i, m, 0, None) for i, m in enumerate(masks)]
+            # the last slot asked first: the passes are made in slot order all the same (phy.cpm_pass)
+            py, nat = rx_pair(native, r, dd)
+            rev = [nat.decode(i, masks[i], 0, None) for i in (2, 1, 0)]
+            assert rev == [py.decode(i, masks[i], 0, None) for i in (2, 1, 0)] == got[::-1]
             sp, sn = {}, {}
             py, nat = PHY.ModemRx(dict(r), sp), native.phy.ModemRx(dict(r), sn, None, dd)
             keyed = [nat.decode(i, m, 0, ("p", i)) for i, m in enumerate(masks)]

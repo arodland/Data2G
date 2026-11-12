@@ -40,6 +40,15 @@ inline constexpr int DD_ITERS = 2;
 // re-decodes. DATA2G_CPM_DD (default 1), read once, turns it off alone.
 bool cpm_dd_default();
 inline constexpr int CPM_DD_ITERS = 4;
+// phy.cpm_pass: a CPM data slot's mask-free decode, the same whenever it is
+// made: the square law (`soft`, the slot's), then while it fails up to
+// CPM_DD_ITERS re-decodes on cpm::dd_metric from `earlier` (converged
+// posteriors of earlier slots' passes) and its own last posterior. `late`:
+// stop DD (the budget); empty: never.
+cpm::Pass cpm_pass(const cpm::Received& r, const codes::Spec& s, std::span<const double> soft,
+                   const cpm::Posts& earlier, int slot, const std::function<bool()>& late = {});
+// cpm_pass as a receiver's cpm::Stream makes it (no budget: the burst is still arriving).
+cpm::PassFn cpm_pass_fn();
 // A live receiver's DD starts no refines this long after the burst's decode began.
 inline constexpr double DD_BUDGET_S = 1.0;
 // A control slot that fails is decoded again with the control stream past
@@ -237,6 +246,10 @@ private:
     bool reader_ = false;
     int reads_run_ = 0;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
+    // CPM: data slots whose pass is made (ModemRx._cpm_passes), and the converged ones' posteriors
+    std::set<int> passed_;
+    cpm::Posts pass_post_;
+    void cpm_passes(int upto);
     bool blind_ = false;
     int refines_ = 0;
     struct Prepared {
