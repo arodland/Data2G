@@ -193,7 +193,10 @@ void bind_cpm(py::module_& m) {
     // --- coherent detection ---
     c.attr("COH_W") = cpm::COH_W;
     c.attr("COH_HDR_W") = cpm::COH_HDR_W;
-    c.def("coh_lock", [](const std::string& g) { return cpm::coh_lock(grid(g)); });
+    c.def("coh_lock", [](const std::string& g) -> py::object {  // cpm.COH_LOCK's tuple, or None
+        const auto v = cpm::coh_lock(grid(g));
+        return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
+    });
     c.def("coh_ctl", &cpm::coh_ctl);
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));

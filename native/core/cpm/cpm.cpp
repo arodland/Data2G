@@ -558,8 +558,7 @@ std::pair<Header, bool> lock_header(const Grid& g, std::span<const double> x, st
     const bool one = copies == 1;
     if (const auto gates = coh_lock(g)) {
         const Header c = coh_read_header(g, x, s0, cfo, copies);
-        if (c.score >= (one ? gates->first : gates->second) &&
-            c.score - c.runner_up >= (one ? tables::CPM.hdr_margin1 : tables::CPM.hdr_margin2))
+        if (c.score >= (*gates)[one ? 0 : 1] && c.score - c.runner_up >= (*gates)[one ? 2 : 3])
             return {c, true};
     }
     const Header h = read_header(g, x, s0, cfo, copies);
@@ -864,13 +863,61 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
 
 Received receive(std::span<const double> x, const Lock& lock) {
     const Grid& g = grid_of(*lock.spec);
-    const auto [s0, cfo] = refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup);
+    return receive_refined(x, lock, refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup));
+}
+
+Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<std::int64_t, double> at) {
+    const Grid& g = grid_of(*lock.spec);
+    const auto [s0, cfo] = at;
     Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
     Received r{lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
                lock.header_end, bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo)};
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
         for (int k = 0; k < r.n_ctl_slots; ++k) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
+    return r;
+}
+
+Stream::Stream(std::vector<double> x, const Lock& lock, PassFn pass)
+    : x_(std::move(x)), lock_(lock), pass_(std::move(pass)) {
+    const Grid& g = grid_of(*lock.spec);
+    const Layout L = layout(g, stream_symbols(g, lock.n_data, lock.dup));
+    const std::int64_t N = static_cast<std::int64_t>(std::min(L.n, tables::CPM.refine_symbols)) * g.T;
+    // refine reads up to two steps of each stage past its window (its two grids)
+    refine_need_ = lock.start + N + 2 * std::max(1, g.T / 16) + 2 * std::max(1, g.T / 64) + 1;
+    advance();
+}
+
+void Stream::feed(std::span<const double> more) {
+    x_.insert(x_.end(), more.begin(), more.end());
+    advance();
+}
+
+void Stream::advance() {
+    const Grid& g = grid_of(*lock_.spec);
+    const auto len = static_cast<std::int64_t>(x_.size());
+    if (!at_ && len >= refine_need_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    if (!at_ || !pass_) return;
+    const int n_ctl = 1 + lock_.dup;
+    const auto rows = slot_rows(g, lock_.n_data, lock_.dup);
+    const int n = layout(g, stream_symbols(g, lock_.n_data, lock_.dup)).n;
+    std::optional<Received> r;
+    for (int k = n_ctl; k < n_ctl + lock_.n_data; ++k) {
+        if (passes_.count(k)) continue;
+        const std::int64_t b = std::min(n, rows[k].back() + 1 + COH_W);
+        if (len < at_->first + b * g.T) break;  // its rows and its metric's window are not all in yet
+        if (!r) r = receive_refined(x_, lock_, *at_);  // rows past the audio read as zeros; this slot's don't
+        Pass p = pass_(*r, k, earlier_);
+        if (!p.post.empty()) earlier_[k] = p.post;
+        passes_[k] = std::move(p);
+    }
+}
+
+Received Stream::finish() {
+    const Grid& g = grid_of(*lock_.spec);
+    if (!at_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    Received r = receive_refined(x_, lock_, *at_);
+    r.passes = std::move(passes_);
     return r;
 }
 
@@ -918,12 +965,14 @@ std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<
 
 }  // namespace
 
-std::optional<std::pair<double, double>> coh_lock(const Grid& g) {
+std::optional<std::array<double, 4>> coh_lock(const Grid& g) {
     static const bool on = env_on("DATA2G_CPM_COH_LOCK");
     if (!on) return std::nullopt;
-    if (g.name == "c16r25") return std::pair{34.0, 38.0};
-    if (g.name == "c8r50") return std::pair{36.0, 40.0};
-    if (g.name == "c32r62") return std::pair{36.0, 42.0};
+    const double m1 = tables::CPM.hdr_margin1, m2 = tables::CPM.hdr_margin2;
+    if (g.name == "c16r25") return std::array{34.0, 38.0, m1, m2};
+    // c8r50's one-copy margin: early locks read another word where two of its bursts overlap (cpm.COH_LOCK)
+    if (g.name == "c8r50") return std::array{36.0, 40.0, 14.0, m2};
+    if (g.name == "c32r62") return std::array{36.0, 42.0, m1, m2};
     return std::nullopt;
 }
 
