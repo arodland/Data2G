@@ -254,7 +254,7 @@ class ModemRx:
         if self._est is None:
             return self.soft[slot]
         if slot not in self._soft_dd:
-            self._soft_dd[slot] = (cpm.dd_soft(self.r, self._est, slot) if self.n_ctl_slots
+            self._soft_dd[slot] = (cpm.dd_soft(self.r, cpm.dd_metric(self.r, self._est, slot), slot) if self.n_ctl_slots
                                    else modem.slot_soft(self.r, self._est, slot))
         return self._soft_dd[slot]
 
@@ -545,7 +545,8 @@ class ModemRx:
                 for s, i, o in zip(todo, info, ok):
                     if o:
                         self._post[s] = _sure(spec, codes.encode_info(spec, i[None], 0)[0])
-        est = cpm.dd_metric(self.r, self._post) if self.n_ctl_slots else _dd_estimate(self.r, self._post)
+        # CPM: the estimate is the posteriors themselves; each slot's metric is local (cpm.dd_metric), made as asked
+        est = dict(self._post) if self.n_ctl_slots else _dd_estimate(self.r, self._post)
         self._est, self._soft_dd = est, {}
 
     def _undo(self, slot: int, soft0) -> None:

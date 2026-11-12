@@ -17,7 +17,7 @@ mkdir -p runs/judge
 for arm in ${ARMS:-cohctl coh off}; do
   out=runs/judge/loss_${arm}_s$S0.csv
   case $arm in
-    cohctl) export DATA2G_CPM_DD=1 DATA2G_CPM_COH_LOCK=1 DATA2G_CPM_COH_CTL=1 ;;
+    cohctl|local) export DATA2G_CPM_DD=1 DATA2G_CPM_COH_LOCK=1 DATA2G_CPM_COH_CTL=1 ;;
     coh) export DATA2G_CPM_DD=1 DATA2G_CPM_COH_LOCK=1 DATA2G_CPM_COH_CTL=0 ;;
     off) export DATA2G_CPM_DD=0 DATA2G_CPM_COH_LOCK=0 DATA2G_CPM_COH_CTL=0 ;;
   esac

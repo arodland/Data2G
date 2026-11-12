@@ -904,9 +904,8 @@ def receive(x: np.ndarray, lock: dict) -> dict:
              dup=lock["dup"], soft=soft_, E=E, Z=Z, cfo=lock["cfo"], preamble_start=lock["start"],
              header_end=lock.get("header_end"))
     if COH_CTL:  # the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
-        M = dd_metric(r, {})
         for s in range(r["n_ctl_slots"]):
-            soft_[s] = dd_soft(r, M, s)
+            soft_[s] = dd_soft(r, dd_metric(r, {}, s), s)
     return r
 
 
@@ -1036,38 +1035,47 @@ def slot_rows(g: Grid, n_data: int, dup: bool) -> tuple:
     return tuple(lay.data_rows[a:b] for a, b in zip(edges[:-1], edges[1:]))
 
 
-def dd_metric(r: dict, post: dict) -> np.ndarray:
-    """cpm.receive's result and `post` {data slot: decode_posterior's GF
-    log-probabilities, as sent} -> (rows, m) coh_metric over the whole burst:
-    sync and header rows known, those slots' rows their posteriors, every
-    other row its square-law probabilities."""
+def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
+    """cpm.receive's result, `post` {data slot: decode_posterior's GF
+    log-probabilities, as sent} and a slot -> (its rows, m) coh_metric over
+    the burst rows from its first less COH_W to its last plus COH_W (timing
+    ramp and CFO fitted there): sync and header rows known, those slots'
+    rows their posteriors, every other row its square-law probabilities.
+    Local to the slot, so a receiver can run it once the slot and COH_W
+    rows more are in, while the burst's later codewords arrive."""
     g, spec = GRIDS[r["band"]], r["spec"]
     n_data, dup = r["n_cw"] - r["n_ctl_slots"], r["dup"]
     lay = layout(g.name, stream_symbols(g.name, n_data, dup))
-    Z = r["Z"]
+    rows = slot_rows(g, n_data, dup)
+    a, b = max(0, rows[slot][0] - COH_W), min(lay.n, rows[slot][-1] + 1 + COH_W)
+    Z = r["Z"][a:b]
     E = np.abs(Z) ** 2
     G = tone_metric(g, E)
     P = np.exp(G - G.max(axis=1, keepdims=True))
     P /= P.sum(axis=1, keepdims=True)
-    known = np.concatenate([lay.sync_rows] + list(lay.hdr_rows))
     h = header_symbols(g.name, header_word(spec.index, n_data, dup))
-    P[known] = 0.0
-    P[known, np.concatenate([lay.sync_tones] + [h] * len(lay.hdr_rows))] = 1.0
-    rows = slot_rows(g, n_data, dup)
+    known = np.concatenate([lay.sync_rows] + list(lay.hdr_rows))
+    kt = np.concatenate([lay.sync_tones] + [h] * len(lay.hdr_rows))
+    keep = (known >= a) & (known < b)
+    P[known[keep] - a] = 0.0
+    P[known[keep] - a, kt[keep]] = 1.0
     gray = _gray(g.m)
     for s, v in post.items():
-        lp = np.asarray(v).reshape(-1, g.m)
+        rr = rows[s]
+        keep = (rr >= a) & (rr < b)
+        if not keep.any():
+            continue
+        lp = np.asarray(v).reshape(-1, g.m)[keep]
         q = np.exp(lp - lp.max(axis=1, keepdims=True))
         q /= q.sum(axis=1, keepdims=True)
-        P[rows[s][:, None], gray[None]] = q  # value v on tone gray(v)
-    return coh_metric(Z, P, COH_W, _n0(E))
+        P[rr[keep][:, None] - a, gray[None]] = q  # value v on tone gray(v)
+    return coh_metric(Z, P, COH_W, _n0(E))[rows[slot] - a]
 
 
 def dd_soft(r: dict, metric: np.ndarray, slot: int) -> np.ndarray:
-    """Slot `slot`'s soft values from dd_metric's (control: bit LLRs, data: symbol log-likelihoods)."""
+    """Slot `slot`'s soft values from its dd_metric (control: bit LLRs, data: symbol log-likelihoods)."""
     g = GRIDS[r["band"]]
-    rows = slot_rows(g, r["n_cw"] - r["n_ctl_slots"], r["dup"])[slot]
-    L = metric[rows]
+    L = metric
     if slot < r["n_ctl_slots"]:
         return np.clip(bit_llrs(g, L), -30, 30)
     L = np.clip(L - L.max(axis=1, keepdims=True), -60, 0)
