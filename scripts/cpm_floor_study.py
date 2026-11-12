@@ -496,6 +496,80 @@ def soft_coh_ll(Z, P, W, n0):
 
 
 DD_PASSES = 4
+COH_HDR_W = 4  # coh_read_header's channel window, rows
+COH_LOCK = (34.0, 38.0)  # its LOCK_LLR (one copy, both): 6000 noise windows' maxima (26.2, 33.3), fsk16r25; (32, 36) 1 false lock in 8 h on noise and on own-grid traffic
+
+
+def coh_seg_llr(g, Z, t, n0):
+    """Per-row tone_llr of tones t on coh_ll's coherent metric (a contiguous run of known rows)."""
+    L = coh_ll(Z, t, COH_HDR_W, n0)
+    L = L - np.logaddexp.reduce(L, axis=1, keepdims=True) + np.log(g.m)
+    L = np.logaddexp(np.log1p(-cpm.LLR_EPS) + L, np.log(cpm.LLR_EPS))
+    return L[np.arange(len(t)), t]
+
+
+def coh_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
+    """cpm.read_header on the coherent metric: per word, the front + its
+    first copy as one run, the block before its second copy + that copy as
+    another, each run's sum floored at 0. Same return tuple (front: the
+    front block's rows of run 1, unfloored)."""
+    words, rows = cpm.valid_words(g.name), cpm.header_rows(g.name, copies)
+    n = max(r[-1] for r in rows) + 1
+    Z = bins(g, x, s0, cfo, n)
+    E = np.abs(Z) ** 2
+    n0 = max(float(np.median(np.sort(E, axis=1)[:, :-1])) / np.log(2), 1e-30)
+    f, mb, H = cpm.preamble_pattern(g), cpm.mid_block(g), cpm.hdr_len(g)
+    F = len(f)
+    scores, front = [], 0.0
+    for (_, _, _, t), r in zip(words, rows):
+        la = coh_seg_llr(g, Z[np.concatenate([np.arange(F), r[:H]])], np.concatenate([f, t]), n0)
+        front = max(front, float(la[:F].sum()))
+        sc = max(float(la.sum()), 0.0)
+        if copies > 1:
+            r2 = r[H:]
+            rb = np.concatenate([np.arange(r2[0] - len(mb), r2[0]), r2])
+            sc += max(float(coh_seg_llr(g, Z[rb], np.concatenate([mb, t]), n0).sum()), 0.0)
+        scores.append(sc)
+    s = np.array(scores)
+    o = np.argsort(s)[::-1]
+    spec, nd, d, _ = words[o[0]]
+    return spec, nd, d, float(s[o[0]]), float(s[o[1]]), front
+
+
+_NC_READ = cpm.read_header
+
+
+def either_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
+    """A lock if either reading passes its own gates (COH_LOCK, or the
+    shipped LOCK_LLR): the coherent reading when it passes, else the
+    noncoherent one with its score scaled onto COH_LOCK's scale and its
+    margin kept (so find's gate on it is exactly the shipped one)."""
+    c = coh_read_header(g, x, s0, cfo, copies)
+    i = 0 if copies == 1 else 1
+    if c[3] >= COH_LOCK[i] and c[3] - c[4] >= cpm.HDR_MARGIN[i]:
+        return c
+    n = _NC_READ(g, x, s0, cfo, copies)
+    k = COH_LOCK[i] / _NC_LOCK[g.name][i]
+    return (*n[:3], n[3] * k, n[3] * k - (n[3] - n[4]), max(n[5], c[5]))
+
+
+_NC_LOCK = dict(cpm.LOCK_LLR)
+
+
+class coherent_lock:
+    """with coherent_lock(grid): cpm.find / late_lock read headers coherently
+    (either=True: either_read_header), gates COH_LOCK."""
+
+    def __init__(self, grid, either=False):
+        self.grid, self.either = grid, either
+
+    def __enter__(self):
+        self.saved = cpm.read_header, cpm.LOCK_LLR[self.grid]
+        cpm.read_header = either_read_header if self.either else coh_read_header
+        cpm.LOCK_LLR[self.grid] = COH_LOCK
+
+    def __exit__(self, *exc):
+        cpm.read_header, cpm.LOCK_LLR[self.grid] = self.saved
 
 
 def dd_arm(g, y, spec, s0, cfo, W, passes=DD_PASSES):
@@ -524,15 +598,22 @@ def dd_arm(g, y, spec, s0, cfo, W, passes=DD_PASSES):
     P[kr] = 0.0
     P[kr, known[kr]] = 1.0
     L = base_ll(g, E[drows])
+    Lall = None
     for _ in range(passes):
         ok, post = gf_posterior(spec, L)
         if ok:
+            P[drows] = np.exp(post - post.max(axis=1, keepdims=True))
+            P[drows] /= P[drows].sum(axis=1, keepdims=True)
             break
         q = np.exp(post - post.max(axis=1, keepdims=True))
         P[drows] = q / q.sum(axis=1, keepdims=True)
-        L = soft_coh_ll(Z, P, W, n0)[drows]
+        Lall = soft_coh_ll(Z, P, W, n0)
+        L = Lall[drows]
+    if Lall is None or ok:  # the control's coherent read, from the last decisions
+        Lall = soft_coh_ll(Z, P, W, n0)
     L = L - L.max(axis=1, keepdims=True)
-    return np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1)
+    ctl = np.clip(bit_llrs(g, Lall[crows]), -30, 30)
+    return np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1), ctl
 
 
 def coh_arms(g, y, spec, b, arms):
@@ -586,6 +667,13 @@ def e2e_trial(args):
             r["soft"] = [r["soft"][0], soft1]
         return int(PHY.ModemRx(r, {}).decode(1, b.slots[1].mask_id, 0, None) == want)
 
+    def dec_ctl(r, soft0=None):  # the control slot, plain + pinned padding (no priming)
+        r = dict(r)
+        r.pop("_soft", None)
+        if soft0 is not None:
+            r["soft"] = [soft0, r["soft"][1]]
+        return int(PHY.ModemRx(r, {}).decode(0, b.slots[0].mask_id, 0, None) == b.slots[0].payload)
+
     out = {}
     r = receive_traced(y, mode)
     good = r is not None and r["spec"].name == mode and r["n_cw"] == 2
@@ -593,15 +681,36 @@ def e2e_trial(args):
     if good:
         lock = dict(spec=r["spec"], n_data=1, dup=r["dup"], start=r["preamble_start"], cfo=r["cfo"])
     st = stages(g, y, spec, r, lock) if any(a in STAGE_ARMS for a in arms) else None
+    for p in "ko":  # coherent header lock (k), either gate (o): <p>base noncoherent decode, <p><W> dd<W>
+        if not any(a.startswith(p) for a in arms):
+            continue
+        with coherent_lock(g.name, either=p == "o"):
+            rk = receive_traced(y, mode)
+        okk = rk is not None and rk["spec"].name == mode and rk["n_cw"] == 2
+        out[p + "lockcat"] = 2 if okk else (0 if rk is None else 1)
+        for arm in [a for a in arms if a.startswith(p)]:
+            if not okk:
+                out[arm] = out[arm + "c"] = 0
+            elif arm == p + "base":
+                out[arm], out[arm + "c"] = dec(rk), dec_ctl(rk)
+            else:
+                d1, c0 = dd_arm(g, y, spec, rk["preamble_start"], rk["cfo"], int(arm[1:]))
+                out[arm], out[arm + "c"] = dec(rk, d1), dec_ctl(rk, c0)
     for arm in [a for a in arms if a.startswith("dd") or a.startswith("gdd")]:
         Wd = int(arm.lstrip("gd"))
         if arm.startswith("g"):
             gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
-            out[arm] = dec(cpm.receive(y, gl), dd_arm(g, y, spec, gl["start"], gl["cfo"], Wd))
+            rr, (d1, c0) = cpm.receive(y, gl), dd_arm(g, y, spec, gl["start"], gl["cfo"], Wd)
+            out[arm], out[arm + "c"], out["geniec"] = dec(rr, d1), dec_ctl(rr, c0), dec_ctl(rr)
         elif not good:
-            out[arm] = 0
+            out[arm] = out[arm + "c"] = out["basec"] = 0
         else:
-            out[arm] = dec(r, dd_arm(g, y, spec, r["preamble_start"], r["cfo"], Wd))
+            d1, c0 = dd_arm(g, y, spec, r["preamble_start"], r["cfo"], Wd)
+            out[arm], out[arm + "c"], out["basec"] = dec(r, d1), dec_ctl(r, c0), dec_ctl(r)
+    # lock diagnosis: 0 no lock, 1 a lock with the wrong word, 2 right word (start error in samples: lockerr)
+    out["lockcat"] = 2 if good else (0 if r is None else 1)
+    if good:
+        out["lockerr"] = int(r["preamble_start"]) - int(PS.PAD_S * FS)
     arms = [a for a in arms if a not in out]
     gc = [a for a in arms if a.startswith("gc")]
     coh = coh_arms(g, y, spec, b, gc) if gc else {}
