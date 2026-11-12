@@ -920,7 +920,10 @@ std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<
 
 std::optional<std::pair<double, double>> coh_lock(const Grid& g) {
     static const bool on = env_on("DATA2G_CPM_COH_LOCK");
-    if (on && g.name == "c16r25") return std::pair{34.0, 38.0};
+    if (!on) return std::nullopt;
+    if (g.name == "c16r25") return std::pair{34.0, 38.0};
+    if (g.name == "c8r50") return std::pair{36.0, 40.0};
+    if (g.name == "c32r62") return std::pair{36.0, 42.0};
     return std::nullopt;
 }
 

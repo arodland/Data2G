@@ -927,7 +927,12 @@ COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
 # (scripts/cpm_false_locks.py --coherent either). The noncoherent gates
 # (LOCK_LLR) still lock alone: either reading passing locks.
 # DATA2G_CPM_COH_LOCK=0: the noncoherent gates alone.
-COH_LOCK = {"c16r25": (34.0, 38.0)} if os.environ.get("DATA2G_CPM_COH_LOCK", "1") == "1" else {}
+# c8r50: noise maxima (26.3, 32.0), but (34, 38) gave 2 false locks in 16 h
+# of own-grid traffic (0 without), so (36, 40); c32r62: (32.4, 38.7), so
+# (36, 42): 9 own-grid, 1 noise, 1 OFDM in 16 / 16 / 8 h, as many as
+# without (scripts/coh_lock_cal.py, 6000 windows a grid; runs/cohcal).
+COH_LOCK = ({"c16r25": (34.0, 38.0), "c8r50": (36.0, 40.0), "c32r62": (36.0, 42.0)}
+            if os.environ.get("DATA2G_CPM_COH_LOCK", "1") == "1" else {})
 # The control codeword's soft bits on dd_metric with no decoded data (known
 # rows, square-law decisions elsewhere), from the start: 10% points, genie
 # lock, unprimed and single, vs the square law: awgn fsk16r25 -1.19,

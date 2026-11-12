@@ -206,6 +206,26 @@ def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     return out
 
 
+def cpm_pass(r: dict, soft: list, post: dict, slot: int, late=lambda: False) -> tuple:
+    """A CPM data slot's mask-free decode, as a streaming receiver makes it
+    once the slot and cpm.COH_W rows more are in: the square law first, then
+    while it fails up to CPM_DD_ITERS re-decodes on cpm.dd_metric, from the
+    posteriors `post` of earlier slots that decoded and its own last one.
+    The same whenever it runs, so ModemRx makes these in slot order and a
+    receiver may make them as the burst arrives. -> (cands, usable, the
+    decoded codeword's certain posterior or None); `late`: DD_BUDGET_S's."""
+    spec = r["spec"]
+    known = {s: v for s, v in post.items() if s < slot and v is not None}
+    s_ = soft[slot]
+    for it in range(CPM_DD_ITERS + 1):
+        bits, conv, p = codes.decode_posterior(spec, s_)
+        if conv or it == CPM_DD_ITERS or late():
+            break
+        s_ = cpm.dd_soft(r, cpm.dd_metric(r, {**known, slot: p}, slot), slot)
+    cands, usable = codes.descramble(spec, bits, slot)[None], np.array([conv])
+    return cands, usable, _sure(spec, codes.encode_info(spec, bits[None], 0)[0]) if conv else None
+
+
 def _sure(spec, coded: np.ndarray) -> np.ndarray:
     """A decoded codeword's coded bits (mapping order, as sent) as DD's
     certain posterior: LLRs +-30, or GF(M) log-probabilities 0 / -30 per symbol."""
@@ -245,6 +265,7 @@ class ModemRx:
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
         self.r = r
         self._post, self._blind = {}, False  # DD: slot -> LLRs of its coded bits
+        self._pass_post = {}  # CPM: data slot -> its cpm_pass's posterior (None: it failed)
         # DD: the refined estimate in use (None: r["est"]) and the soft bits
         # made from it, per slot as asked: remaking the whole burst's on each
         # refine cost 0.53 s of a 12 s 256l burst's 0.73 s
@@ -490,6 +511,8 @@ class ModemRx:
         """`slot` decoded alone, mask left open (codes.decode_raw's row), with
         DD while it fails to converge. A converged codeword is what was on
         air, whoever it was for: DD learns from it."""
+        if slot not in self._raw and self.n_ctl_slots and self._dd(spec):
+            self._cpm_passes(slot)
         if slot not in self._raw:
             soft0 = (self._est, self._soft_dd)
             for it in range(self._iters() + 1):
@@ -509,6 +532,18 @@ class ModemRx:
                 self._undo(slot, soft0)
             self._raw[slot] = cands, usable
         return self._raw[slot]
+
+    def _cpm_passes(self, upto: int) -> None:
+        """cpm_pass for every data slot through `upto` not yet made, in slot
+        order, each seeing only earlier passes' posteriors (not what keyed
+        decodes learned since), so they are what a streaming receiver makes."""
+        for s in range(self.n_ctl_slots, upto + 1):
+            if s not in self._pass_post:
+                cands, usable, p = cpm_pass(self.r, self.soft, self._pass_post, s, self._late)
+                self._pass_post[s] = p
+                self._raw.setdefault(s, (cands, usable))
+                if p is not None:
+                    self._post.setdefault(s, p)
 
     def _dd(self, spec) -> bool:
         if self.n_ctl_slots:  # CPM: data slots (GF(M)), on the burst's complex bins
@@ -535,11 +570,8 @@ class ModemRx:
             # alone say they decoded (a resend at another RV simply fails)
             self._blind = True
             todo = [s for s in range(self.n_ctl_slots, self.n_cw) if s not in self._post]
-            if todo and self.n_ctl_slots:  # CPM: GF(M) one by one
-                for s in todo:
-                    bits, ok, _ = codes.decode_posterior(spec, self.soft[s])
-                    if ok:
-                        self._post[s] = _sure(spec, codes.encode_info(spec, bits[None], 0)[0])
+            if self.n_ctl_slots:  # CPM: every slot's pass (a streaming receiver has made them)
+                self._cpm_passes(self.n_cw - 1)
             elif todo:
                 info, ok = codes.decode_llrs(spec, np.asarray(self.soft)[todo])
                 for s, i, o in zip(todo, info, ok):
