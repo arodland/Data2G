@@ -104,8 +104,16 @@ def job(args):
                 continue
             h = e[1]
             # a lock on a real burst (its start within 2 symbols, its word) is no false lock
-            hits += not any(abs(h["start"] - s) <= 2 * T and h["spec"] == sp and h["n_data"] == nd and not h["dup"]
+            false = not any(abs(h["start"] - s) <= 2 * T and h["spec"] == sp and h["n_data"] == nd and not h["dup"]
                             for s, sp, nd in real)
+            hits += false
+            if false:  # what it was: the nearest real burst's offset (symbols) and word, the lock's
+                near = min(real, key=lambda q: abs(h["start"] - q[0]), default=None)
+                print(f"false lock {grid} {source} seed {seed}: start {h['start']} {h['spec'].name} n {h['n_data']} "
+                      f"dup {h['dup']} copies {h.get('copies')} score {h.get('header_score', 0):.1f} margin "
+                      f"{h.get('header_margin', 0):.1f}" + ("" if near is None else
+                      f"; nearest real {(h['start'] - near[0]) / T:+.1f} sym, {near[1].name} n {near[2]}"),
+                      flush=True)
     return grid, source, hits, time.process_time() - t
 
 
