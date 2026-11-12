@@ -68,6 +68,7 @@ py::dict rx_dict(const receiver::Rx& rx) {
     for (const auto& s : r.soft) soft.append(np(s));
     d["soft"] = soft;
     d["E"] = np(r.E);
+    d["Z"] = np(r.Z);
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;

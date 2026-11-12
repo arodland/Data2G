@@ -99,6 +99,31 @@ def substitutions(native):
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)
 
+    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows")})
+
+    def coh_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
+        if not own_grid(g):
+            return py["coh_read_header"](g, x, s0, cfo, copies)
+        name, nd, d, score, h2, front = n.coh_read_header(g.name, x, s0, cfo, copies)
+        return cpm.SPECS[name], nd, d, score, h2, front
+
+    def dd_metric(r, post, slot):
+        g = cpm.GRIDS[r["band"]]
+        if not own_grid(g) or not own_spec(r["spec"]):
+            return py["dd_metric"](r, post, slot)
+        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], r["Z"], {int(k): v for k, v in post.items()}, slot)
+
+    def dd_soft(r, metric, slot):
+        g = cpm.GRIDS[r["band"]]
+        if not own_grid(g) or not own_spec(r["spec"]):
+            return py["dd_soft"](r, metric, slot)
+        return n.dd_soft(r["spec"].name, r["dup"], r["n_cw"], metric, slot)
+
+    def slot_rows(g, n_data, dup):
+        if not own_grid(g):
+            return py["slot_rows"](g, n_data, dup)
+        return tuple(n.slot_rows(g.name, n_data, dup))
+
     return {
         (cpm, "header_symbols"): header_symbols,
         (cpm, "layout"): layout,
@@ -124,4 +149,12 @@ def substitutions(native):
         (cpm, "prime_lock"): prime_lock,
         (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies),
         (cpm, "measure"): measure,
+        (cpm, "bins"): by_grid(n.bins, cpm.bins),
+        (cpm, "coh_metric"): n.coh_metric,
+        (cpm, "_n0"): n.noise_n0,
+        (cpm, "bit_llrs"): by_grid(n.bit_llrs, cpm.bit_llrs),
+        (cpm, "coh_read_header"): coh_read_header,
+        (cpm, "slot_rows"): slot_rows,
+        (cpm, "dd_metric"): dd_metric,
+        (cpm, "dd_soft"): dd_soft,
     }

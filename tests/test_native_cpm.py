@@ -266,3 +266,53 @@ def test_find_mid(native, reference, name, n_data):
                 assert a[k] == c[k], (kw, k)
             for k in ("score", "header_score", "header_margin"):
                 assert a[k] == pytest.approx(c[k], rel=RTOL, abs=1e-12), (kw, k)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+def test_coherent(native, reference, case):
+    """Coherent detection (cpm.py's section): bins, coh_metric, the coherent
+    header, the per-slot DD metric and its soft values, alike in both."""
+    name, n_data, dup, cfo, sigma = case
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(20 + CASES.index(case))
+    coded = _burst(spec, n_data, dup, rng)
+    y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
+    assert (native.cpm.COH_W, native.cpm.COH_HDR_W) == (cpm.COH_W, cpm.COH_HDR_W)
+    assert native.cpm.coh_lock(g.name) == cpm.COH_LOCK.get(g.name)
+    assert native.cpm.coh_ctl() == cpm.COH_CTL
+
+    s0, f = ref(reference, "detect")(g, y)[1:]
+    for start, n in ((s0, 40), (-50, 10)):
+        np.testing.assert_allclose(native.cpm.bins(g.name, y, start, n, f), ref(reference, "bins")(g, y, start, n, f),
+                                   rtol=RTOL, atol=1e-9)
+    for copies in (1, 2):
+        a = native.cpm.coh_read_header(g.name, y, s0, f, copies)
+        b = ref(reference, "coh_read_header")(g, y, s0, f, copies)
+        assert a[:3] == (b[0].name, *b[1:3])
+        assert a[3:] == pytest.approx(b[3:], rel=1e-9, abs=1e-9)
+
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
+    Z = ref(reference, "bins")(g, y, s0, lay.n, f)
+    E = np.abs(Z) ** 2
+    n0 = ref(reference, "_n0")(E)
+    assert native.cpm.noise_n0(E) == pytest.approx(n0, rel=1e-15)
+    P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
+    np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
+                               rtol=1e-9, atol=1e-9)
+    L = rng.normal(size=(30, g.m))
+    np.testing.assert_allclose(native.cpm.bit_llrs(g.name, L), ref(reference, "bit_llrs")(g, L), rtol=RTOL, atol=1e-12)
+
+    for a, b in zip(native.cpm.slot_rows(g.name, n_data, dup), ref(reference, "slot_rows")(g, n_data, dup)):
+        np.testing.assert_array_equal(a, b)
+    n_cw = 1 + dup + n_data
+    r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
+    post = {}
+    if n_data:  # a data slot's posterior: noisy log-probabilities of its values
+        post[1 + dup] = np.log(rng.dirichlet(np.ones(g.m), cpm.DATA_N // g.bits)).reshape(-1)
+    for slot in range(n_cw):
+        for p in ({}, post):
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, p, slot)
+            np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
+            np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot), ref(reference, "dd_soft")(r, M, slot),
+                                       rtol=1e-12, atol=1e-12)
