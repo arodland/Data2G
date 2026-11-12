@@ -31,6 +31,11 @@ log = logging.getLogger(__name__)
 # to DD_ITERS times.
 DD = os.environ.get("DATA2G_DD", "1") == "1"
 DD_ITERS = 2
+# CPM data slots (GF(M)): DD makes the metric coherent (cpm.dd_metric: a
+# channel estimate per row from the decoder's soft decisions), up to
+# CPM_DD_ITERS re-decodes. DATA2G_CPM_DD=0 turns it off alone.
+CPM_DD = os.environ.get("DATA2G_CPM_DD", "1") == "1"
+CPM_DD_ITERS = 4
 # a live receiver's DD stops starting refines this long after the burst's
 # decode began: the reply must start within REPLY_START_S of the sender's
 # turn, and a 12 s 256l burst with every slot failing took 54 s of DD
@@ -201,6 +206,18 @@ def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     return out
 
 
+def _sure(spec, coded: np.ndarray) -> np.ndarray:
+    """A decoded codeword's coded bits (mapping order, as sent) as DD's
+    certain posterior: LLRs +-30, or GF(M) log-probabilities 0 / -30 per symbol."""
+    if spec.code != "gf":
+        return 30.0 * (1 - 2.0 * coded)
+    p = spec.bits_per_cu
+    v = np.asarray(coded).reshape(-1, p) @ (1 << np.arange(p)[::-1])
+    out = np.full((len(v), 1 << p), -30.0)
+    out[np.arange(len(v)), v] = 0.0
+    return out.reshape(-1)
+
+
 class ModemRx:
     """link.RxBurst over a received burst. `store`: this station's soft
     bits per codeword key, {key: (buffer, highest RV, submode, where)}, kept
@@ -237,7 +254,8 @@ class ModemRx:
         if self._est is None:
             return self.soft[slot]
         if slot not in self._soft_dd:
-            self._soft_dd[slot] = modem.slot_soft(self.r, self._est, slot)
+            self._soft_dd[slot] = (cpm.dd_soft(self.r, self._est, slot) if self.n_ctl_slots
+                                   else modem.slot_soft(self.r, self._est, slot))
         return self._soft_dd[slot]
 
     def _spec(self, slot: int):
@@ -268,7 +286,7 @@ class ModemRx:
         soft0 = (self._est, self._soft_dd)
         # the buffer holds unscrambled soft bits: each slot's flipped by its
         # own scrambling, so a resend in any slot combines
-        for it in range(DD_ITERS + 1):
+        for it in range(self._iters() + 1):
             plain = codes.plain(spec, self._soft(slot), slot, rv)
             buf = codes.combine(spec, None if buf0 is None else buf0.copy(), plain, rv)
             if not self._dd(spec):
@@ -281,9 +299,9 @@ class ModemRx:
             if ok:
                 self._learn(slot, spec, payload, rv, m)
                 return payload
-            if it == DD_ITERS or self._late():
+            if it == self._iters() or self._late():
                 break
-            self._refine(slot, spec, codes.flip(spec, slot, rv) * post)  # back to the bits as sent (LDPC: DD)
+            self._refine(slot, spec, codes.plain(spec, post, slot, rv))  # back to the codeword as sent
         if self._est is not soft0[0]:
             self._undo(slot, soft0)
             plain = codes.plain(spec, self._soft(slot), slot, rv)
@@ -474,7 +492,7 @@ class ModemRx:
         air, whoever it was for: DD learns from it."""
         if slot not in self._raw:
             soft0 = (self._est, self._soft_dd)
-            for it in range(DD_ITERS + 1):
+            for it in range(self._iters() + 1):
                 if not self._dd(spec):
                     cands, usable = codes.decode_raw(spec, np.asarray(self._soft(slot))[None], index=slot)
                     cands, usable = cands[0], usable[0]
@@ -482,9 +500,9 @@ class ModemRx:
                 bits, conv, post = codes.decode_posterior(spec, self._soft(slot))
                 cands, usable = codes.descramble(spec, bits, slot)[None], np.array([conv])
                 if conv:
-                    self._post[slot] = 30.0 * (1 - 2.0 * codes.encode_info(spec, bits[None], 0)[0])
+                    self._post[slot] = _sure(spec, codes.encode_info(spec, bits[None], 0)[0])
                     break
-                if it == DD_ITERS or self._late():
+                if it == self._iters() or self._late():
                     break
                 self._refine(slot, spec, post)
             if not usable.any():
@@ -493,14 +511,19 @@ class ModemRx:
         return self._raw[slot]
 
     def _dd(self, spec) -> bool:
-        return DD and "hp" in self.r and spec.code == "ldpc" and not self.n_ctl_slots
+        if self.n_ctl_slots:  # CPM: data slots (GF(M)), on the burst's complex bins
+            return DD and CPM_DD and "Z" in self.r and spec.code == "gf"
+        return DD and "hp" in self.r and spec.code == "ldpc"
+
+    def _iters(self) -> int:
+        return CPM_DD_ITERS if self.n_ctl_slots else DD_ITERS
 
     def _late(self) -> bool:
         return self.dd_until is not None and time.monotonic() >= self.dd_until
 
     def _learn(self, slot: int, spec, payload: bytes, rv: int, m: int) -> None:
         if self._dd(spec):
-            self._post[slot] = 30.0 * (1 - 2.0 * codes.encode(spec, payload, rv, m, index=slot))
+            self._post[slot] = _sure(spec, codes.encode(spec, payload, rv, m, index=slot))
 
     def _refine(self, slot: int, spec, post: np.ndarray) -> None:
         """DD after a failed decode of `slot`: its decoder's a-posteriori
@@ -511,13 +534,19 @@ class ModemRx:
             # RV 0 slots the link has not asked about yet: parity checks
             # alone say they decoded (a resend at another RV simply fails)
             self._blind = True
-            todo = [s for s in range(self.n_cw) if s not in self._post]
-            if todo:
+            todo = [s for s in range(self.n_ctl_slots, self.n_cw) if s not in self._post]
+            if todo and self.n_ctl_slots:  # CPM: GF(M) one by one
+                for s in todo:
+                    bits, ok, _ = codes.decode_posterior(spec, self.soft[s])
+                    if ok:
+                        self._post[s] = _sure(spec, codes.encode_info(spec, bits[None], 0)[0])
+            elif todo:
                 info, ok = codes.decode_llrs(spec, np.asarray(self.soft)[todo])
                 for s, i, o in zip(todo, info, ok):
                     if o:
-                        self._post[s] = 30.0 * (1 - 2.0 * codes.encode_info(spec, i[None], 0)[0])
-        self._est, self._soft_dd = _dd_estimate(self.r, self._post), {}
+                        self._post[s] = _sure(spec, codes.encode_info(spec, i[None], 0)[0])
+        est = cpm.dd_metric(self.r, self._post) if self.n_ctl_slots else _dd_estimate(self.r, self._post)
+        self._est, self._soft_dd = est, {}
 
     def _undo(self, slot: int, soft0) -> None:
         """DD did not rescue `slot`: a failed decode's posterior can be

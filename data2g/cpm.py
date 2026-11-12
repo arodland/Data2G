@@ -38,6 +38,7 @@ tests/native_subs/cpm.py substitutes by name, private _energies, _shares
 and _peak_ratio included.
 """
 
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import permutations
@@ -522,9 +523,13 @@ def llrs(g: Grid, E: np.ndarray) -> np.ndarray:
     """(n_sym, m) tone energies of one codeword -> (n_sym * bits,) coded-bit
     LLRs (positive: 0) in mapping order (data2g.codes.combine / decode_many's),
     marginals of tone_metric: the control codeword's."""
-    metric = tone_metric(g, E)
+    return bit_llrs(g, tone_metric(g, E))
+
+
+def bit_llrs(g: Grid, metric: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone log-likelihoods -> llrs's coded-bit LLRs (their marginals)."""
     label = np.argsort(_gray(g.m))  # tone -> the bit group it carries
-    out = np.empty((len(E), g.bits))
+    out = np.empty((len(metric), g.bits))
     for b in range(g.bits):
         bit = (label >> (g.bits - 1 - b)) & 1
         out[:, b] = np.logaddexp.reduce(metric[:, bit == 0], axis=1) - np.logaddexp.reduce(metric[:, bit == 1], axis=1)
@@ -711,8 +716,10 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
         return None  # its header copy is still arriving
     if s0 < 0:
         return None  # fine timing moved a lock at x's first sample before it: its front is cut off
-    h = read_header(g, x, s0, cfo, copies=1)
-    if threshold is not None or (h[3] >= LOCK_LLR[g.name][0] and h[3] - h[4] >= HDR_MARGIN[0]):
+    if threshold is not None:
+        return _lock(g, s0, cfo, score, read_header(g, x, s0, cfo, copies=1), 1)
+    h, ok = _lock_header(g, x, s0, cfo, 1)
+    if ok:
         return _lock(g, s0, cfo, score, h, 1)
     if h[5] < WAIT_LLR[g.name]:
         return None  # noise, or a burst's data or a later sync block, its front missed
@@ -727,8 +734,8 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
 def late_lock(g: Grid, x: np.ndarray, cand: dict):
     """find's candidate (x holding its header_end) -> its lock from the front
     and both header copies (LOCK_LLR), or None."""
-    h = read_header(g, x, cand["start"], cand["cfo"], copies=HDR_COPIES)
-    if h[3] < LOCK_LLR[g.name][1] or h[3] - h[4] < HDR_MARGIN[1]:
+    h, ok = _lock_header(g, x, cand["start"], cand["cfo"], HDR_COPIES)
+    if not ok:
         return None
     return _lock(g, cand["start"], cand["cfo"], cand["score"], h, HDR_COPIES)
 
@@ -892,6 +899,164 @@ def receive(x: np.ndarray, lock: dict) -> dict:
     g = GRIDS[lock["band"]]
     s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"])
     soft_, E = soft(g, lock["spec"], x, s0, cfo, lock["n_data"], lock["dup"])
+    Z = bins(g, x, s0, layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"])).n, cfo)
     return dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
-                dup=lock["dup"], soft=soft_, E=E, cfo=lock["cfo"], preamble_start=lock["start"],
+                dup=lock["dup"], soft=soft_, E=E, Z=Z, cfo=lock["cfo"], preamble_start=lock["start"],
                 header_end=lock.get("header_end"))
+
+
+# --- coherent detection --------------------------------------------------------------
+# h = 1 with continuous phase: every symbol starts at the same carrier phase,
+# which the square law throws away. A channel estimate per row from its
+# neighbours' (known or decided) tones turns the metric coherent, and a poor
+# estimate falls back to the square law by itself (coh_metric's model).
+# scripts/cpm_floor_study.py (2026-11-11, branch cpm-coherent, 200 trials,
+# 10% points vs the shipped receiver): coherent DD decoding fsk32r62 -0.7 to
+# -1.8 dB, fsk8r50 -0.5 to -1.8; fsk16r25 with the either-gate lock below
+# awgn -1.24 mpg -1.57 mpp -0.73 mpd -0.47 (noncoherent lock: -0.2 to -0.45).
+
+COH_W = 8  # coh_metric's channel window for data (+- rows, the row left out): best of 1-64 on fading
+COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
+# Lock gates on coh_read_header's scale (one copy, both), grids calibrated:
+# 6000 noise windows' maxima (26.2, 33.3); (32, 36) gave 1 false lock in 8 h
+# on noise and on own-grid traffic, (34, 38) none in 16 h of either
+# (scripts/cpm_false_locks.py --coherent either). The noncoherent gates
+# (LOCK_LLR) still lock alone: either reading passing locks.
+# DATA2G_CPM_COH_LOCK=0: the noncoherent gates alone.
+COH_LOCK = {"c16r25": (34.0, 38.0)} if os.environ.get("DATA2G_CPM_COH_LOCK", "1") == "1" else {}
+
+
+def bins(g: Grid, x: np.ndarray, start: int, n_sym: int, cfo: float) -> np.ndarray:
+    """(n_sym, m) complex tone bins from `start`, CFO removed: _energies before the square."""
+    T = g.T
+    idx = start + np.arange(n_sym * T)
+    seg = np.where((idx >= 0) & (idx < len(x)), x[np.clip(idx, 0, len(x) - 1)], 0.0)
+    z = seg * np.exp(-2j * np.pi * (g.f0 + cfo) * idx / FS)
+    return np.fft.fft(z.reshape(n_sym, T), axis=1)[:, :g.m]
+
+
+def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float) -> np.ndarray:
+    """(n, m) complex bins of consecutive rows and P (n, m) the probability
+    of each tone sent (one-hot where known) -> (n, m) tone log-likelihoods,
+    coherent: Z_k = h_i + CN(0, N0 + s2) on the sent tone, noise alone
+    elsewhere, h_i = sum over rows j != i within +-W of sum_k P_j(k) Z_j[k],
+    s2 its error (the residual's mean less N0). The residual timing's
+    per-tone phase ramp and the residual CFO come out first, from the
+    decided tones' consecutive pairs weighted by their probabilities."""
+    n, m = Z.shape
+    r = np.arange(n)
+    t = P.argmax(axis=1)
+    c = P[r, t]
+    a = Z[r, t]
+    d = np.diff(t)
+    p = a[1:] * np.conj(a[:-1]) * c[1:] * c[:-1]  # ~ exp(i (nu - 2 pi d delta))
+    grid = np.linspace(-0.5, 0.5, 401)
+    delta = grid[np.argmax(np.abs(np.exp(2j * np.pi * np.outer(grid, d)) @ p))]
+    nu = np.angle(np.sum(p * np.exp(2j * np.pi * delta * d)))
+    Z = Z * np.exp(2j * np.pi * delta * np.arange(m))[None] * np.exp(-1j * nu * r)[:, None]
+    a = (P * Z).sum(axis=1)
+    k = np.ones(2 * W + 1)
+    k[W] = 0.0
+    h = np.convolve(a, k, "same") / np.maximum(np.convolve(np.ones(n), k, "same"), 1)
+    v = max(float(np.mean((P * np.abs(Z - h[:, None]) ** 2).sum(axis=1))), n0 * (1 + 1e-3))
+    return np.abs(Z) ** 2 / n0 - np.abs(Z - h[:, None]) ** 2 / v
+
+
+def _n0(E: np.ndarray) -> float:
+    """tone_metric's noise level: all but each row's strongest tone, exponential."""
+    return max(float(np.median(np.sort(E, axis=1)[:, :-1])) / np.log(2), 1e-30)
+
+
+def _coh_run_llr(g: Grid, Z: np.ndarray, t: np.ndarray, n0: float) -> np.ndarray:
+    """Per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric."""
+    P = np.zeros(Z.shape)
+    P[np.arange(len(t)), t] = 1.0
+    L = coh_metric(Z, P, COH_HDR_W, n0)
+    L = L - np.logaddexp.reduce(L, axis=1, keepdims=True) + np.log(g.m)
+    L = np.logaddexp(np.log1p(-LLR_EPS) + L, np.log(LLR_EPS))
+    return L[np.arange(len(t)), t]
+
+
+def coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
+    """read_header on coh_metric: per word, the front and its first copy as
+    one run, the block before its second copy and that copy as another,
+    each run's sum floored at 0. Same tuple (front: run 1's front rows)."""
+    words, rows = valid_words(g.name), header_rows(g.name, copies)
+    n = max(r[-1] for r in rows) + 1
+    Z = bins(g, x, s0, n, cfo)
+    n0 = _n0(np.abs(Z) ** 2)
+    f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
+    F = len(f)
+    scores, front = [], 0.0
+    for (_, _, _, t), r in zip(words, rows):
+        la = _coh_run_llr(g, Z[np.concatenate([np.arange(F), r[:H]])], np.concatenate([f, t]), n0)
+        front = max(front, float(la[:F].sum()))
+        sc = max(float(la.sum()), 0.0)
+        if copies > 1:
+            r2 = r[H:]
+            rb = np.concatenate([np.arange(r2[0] - len(mb), r2[0]), r2])
+            sc += max(float(_coh_run_llr(g, Z[rb], np.concatenate([mb, t]), n0).sum()), 0.0)
+        scores.append(sc)
+    s = np.array(scores)
+    o = np.argsort(s)[::-1]
+    spec, nd, d, _ = words[o[0]]
+    return spec, nd, d, float(s[o[0]]), float(s[o[1]]), front
+
+
+def _lock_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int) -> tuple:
+    """-> (read_header's tuple, passed): the coherent reading if the grid has
+    COH_LOCK and it passes them, else the noncoherent one and LOCK_LLR's
+    verdict (copies 1: [0] gates, else [1])."""
+    i = 0 if copies == 1 else 1
+    if g.name in COH_LOCK:
+        c = coh_read_header(g, x, s0, cfo, copies)
+        if c[3] >= COH_LOCK[g.name][i] and c[3] - c[4] >= HDR_MARGIN[i]:
+            return c, True
+    h = read_header(g, x, s0, cfo, copies)
+    return h, h[3] >= LOCK_LLR[g.name][i] and h[3] - h[4] >= HDR_MARGIN[i]
+
+
+def slot_rows(g: Grid, n_data: int, dup: bool) -> tuple:
+    """Per slot (control first), its rows in the burst."""
+    lay = layout(g.name, stream_symbols(g.name, n_data, dup))
+    sizes = [CTL[g.name].n_sym] * (1 + dup) + [DATA_N // g.bits] * n_data
+    edges = np.cumsum([0] + sizes)
+    return tuple(lay.data_rows[a:b] for a, b in zip(edges[:-1], edges[1:]))
+
+
+def dd_metric(r: dict, post: dict) -> np.ndarray:
+    """cpm.receive's result and `post` {data slot: decode_posterior's GF
+    log-probabilities, as sent} -> (rows, m) coh_metric over the whole burst:
+    sync and header rows known, those slots' rows their posteriors, every
+    other row its square-law probabilities."""
+    g, spec = GRIDS[r["band"]], r["spec"]
+    n_data, dup = r["n_cw"] - r["n_ctl_slots"], r["dup"]
+    lay = layout(g.name, stream_symbols(g.name, n_data, dup))
+    Z = r["Z"]
+    E = np.abs(Z) ** 2
+    G = tone_metric(g, E)
+    P = np.exp(G - G.max(axis=1, keepdims=True))
+    P /= P.sum(axis=1, keepdims=True)
+    known = np.concatenate([lay.sync_rows] + list(lay.hdr_rows))
+    h = header_symbols(g.name, header_word(spec.index, n_data, dup))
+    P[known] = 0.0
+    P[known, np.concatenate([lay.sync_tones] + [h] * len(lay.hdr_rows))] = 1.0
+    rows = slot_rows(g, n_data, dup)
+    gray = _gray(g.m)
+    for s, v in post.items():
+        lp = np.asarray(v).reshape(-1, g.m)
+        q = np.exp(lp - lp.max(axis=1, keepdims=True))
+        q /= q.sum(axis=1, keepdims=True)
+        P[rows[s][:, None], gray[None]] = q  # value v on tone gray(v)
+    return coh_metric(Z, P, COH_W, _n0(E))
+
+
+def dd_soft(r: dict, metric: np.ndarray, slot: int) -> np.ndarray:
+    """Slot `slot`'s soft values from dd_metric's (control: bit LLRs, data: symbol log-likelihoods)."""
+    g = GRIDS[r["band"]]
+    rows = slot_rows(g, r["n_cw"] - r["n_ctl_slots"], r["dup"])[slot]
+    L = metric[rows]
+    if slot < r["n_ctl_slots"]:
+        return np.clip(bit_llrs(g, L), -30, 30)
+    L = np.clip(L - L.max(axis=1, keepdims=True), -60, 0)
+    return L[:, _gray(g.m)].reshape(-1)

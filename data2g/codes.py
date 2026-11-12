@@ -476,19 +476,26 @@ def decode_posterior(spec: CodeSpec, soft=None, buf=None, max_rv: int = 0, rv: i
     still scrambled unless from `buf`; converged; a-posteriori LLRs of the
     slot's coded bits in mapping order). Decision-directed re-estimation
     (arq/phy.py, DD) needs the posterior of every failed decode, so it
-    comes from the same pass. Native: codes::decode_posterior. LDPC only
-    (DD runs on OFDM)."""
-    if spec.code != "ldpc":
-        raise ValueError(f"decode_posterior: {spec.name} is not LDPC")
-    perm = interleaver(spec)
+    comes from the same pass. Native: codes::decode_posterior (LDPC).
+    GF(M) (CPM's coherent DD, data2g.cpm.dd_metric): the posteriors are
+    per symbol log-probabilities of its q values, (n_sym * q,) as soft_len's
+    layout, max 0 per symbol."""
+    if spec.code not in ("ldpc", "gf"):
+        raise ValueError(f"decode_posterior: {spec.name} is not LDPC or GF(M)")
     if buf is None:
         dec, llr = _decoder(spec), _deinterleave(spec, np.atleast_2d(soft), float)
     else:
         extent = ir_extent(spec, max_rv)
         dec, llr = _ext_decoder(spec, extent), buf[:, :extent]
+    if spec.code == "gf":
+        q = 1 << spec.bits_per_cu
+        hard, ok, post = dec.decode(np.asarray(llr).reshape(len(llr), -1, q), GF_ITERS)
+        out = gfldpc.unpack(hard[:, dec.code.info], spec.bits_per_cu)[:, :spec.k]
+        code = post[0].reshape(-1)
+        return out[0], bool(ok[0]), (code if buf is None else code[rv_positions(spec, rv)])[_soft_perm(spec)]
     out, ok, post = dec.decode(llr, iters=LDPC_ITERS, posterior=True)
     code = post[0]
-    return _numpy(out)[0], bool(_numpy(ok)[0]), (code if buf is None else code[rv_positions(spec, rv)])[perm]
+    return _numpy(out)[0], bool(_numpy(ok)[0]), (code if buf is None else code[rv_positions(spec, rv)])[interleaver(spec)]
 
 
 @lru_cache(maxsize=None)
