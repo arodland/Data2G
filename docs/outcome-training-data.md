@@ -152,7 +152,7 @@ sent at the same moment; one row per candidate.
   and 50 bps points by -0.10..+0.27 dB; chat at the floor cells level (prc12) or mixed (prc8). The more cautious
   floor predictions pick slower modes (c16r25 2-codeword bursts at mpp -14 for c8r50 5). The ACK-mode replies at
   mpd -9/-11 are unchanged in every arm.
-- **cohm (cohc4 recommended; cordf installed):** the coherent CPM receiver (#172; `runs/cohm/cohm_round.sh`,
+- **cohm / cohc4 (installed; CNP):** the coherent CPM receiver (#172; `runs/cohm/cohm_round.sh`,
   `cohm_train.sh`, `cohm_judge.sh`; data, models and results in the main checkout's `runs/cohm/`). cohle12: twelve
   CNPs on the outcomes (`--labels`, seeds 1-12) of the cohm sets, `outcome_data_general_cohm.csv` and
   `outcome_data_n10top_gt.csv`. On these sessions cordf under-predicts c32r62 and c8r50 by 4-12 points of
