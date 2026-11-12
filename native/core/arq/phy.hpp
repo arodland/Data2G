@@ -255,7 +255,7 @@ private:
         std::vector<std::uint8_t> valid;
     };
     mutable SymCache sym_cache_;
-    DdState cur_{nullptr, std::make_shared<std::map<int, std::vector<double>>>()};
+    DdState cur_{nullptr, std::make_shared<std::map<int, std::vector<double>>>(), nullptr};
 };
 
 }  // namespace data2g::arq
