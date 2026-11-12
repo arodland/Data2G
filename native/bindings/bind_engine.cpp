@@ -135,11 +135,26 @@ void bind_engine(py::module_& m) {
         .def("set_accept_connect", &PyEngine::set_accept_connect)
         .def("events", &PyEngine::events)
         .def("send_cq", &PyEngine::send_cq)
+        .def("hand_send", &PyEngine::hand_send)
+        .def("hand_listen", &PyEngine::hand_listen)
+        .def("hand_cancel", &PyEngine::hand_cancel)
+        .def("hand_refs", &PyEngine::hand_refs)
+        .def("hand_ref_set", &PyEngine::hand_ref_set)
+        .def("test_tx", &PyEngine::test_tx)
+        .def_readwrite("test_acks", &PyEngine::test_acks)
+        .def_property_readonly("cw_until", &PyEngine::cw_until)
+        .def("hand_tx", &PyEngine::hand_tx)
+        .def_property("tx_kiss", &PyEngine::tx_kiss, &PyEngine::set_tx_kiss)
+        .def("take_hand_events", &PyEngine::take_hand_events)
         .def_property_readonly("now", &PyEngine::now)
         .def_property("n", &PyEngine::n, &PyEngine::set_n)
         .def_readwrite("id_interval_s", &PyEngine::id_interval_s)
         .def_readwrite("cw_id", &PyEngine::cw_id)
         .def_readwrite("cw_wpm", &PyEngine::cw_wpm)
+        .def_property("hand_round", [](const PyEngine& s) { return s.hand_round; }, [](PyEngine& s, const std::string& v) {
+            if (v != "full" && v != "cheap") throw py::value_error("hand_round: '" + v + "' not in ['cheap', 'full']");
+            s.hand_round = v;  // engine.py's setter
+        })
         .def_property_readonly("call", &PyEngine::call)
         .def_property_readonly("aliases", [](const PyEngine& s) { return py::tuple(py::cast(s.aliases())); })
         .def_property_readonly("session", [](PyEngine& self) {

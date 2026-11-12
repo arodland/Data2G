@@ -9,4 +9,5 @@ def substitutions(native):
     return {
         (tnc, "kiss_encode"): lambda data, port=0, cmd=0: T.kiss_encode(bytes(data), int(port), int(cmd)),
         (tnc, "KissDecoder"): T.KissDecoder,
+        (tnc, "refs_command"): lambda payload: T.refs_command(bytes(payload)),
     }
