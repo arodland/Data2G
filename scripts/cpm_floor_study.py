@@ -4,6 +4,7 @@ ideal channels, and the real receiver end to end.
     python -m scripts.cpm_floor_study bound
     python -m scripts.cpm_floor_study ideal [--modes ...] [--n 200]
     python -m scripts.cpm_floor_study e2e --modes fsk32r62-r1/3 --chans awgn mpp --arms base genie [--trials 100]
+    python -m scripts.cpm_floor_study e2e --modes fsk16r25-r1/3 --arms base genie gc8 gdd8 dd8 --below 2
 
 `bound`: Es/N0 (per tone) where noncoherent orthogonal M-FSK reaches each
 CPM mode's info rate per tone, coded modulation (symbol-wise, what a GF(M)
@@ -72,6 +73,32 @@ mode and channel; fsk16r25-r1/3 awgn -0.99, mpp -0.44, mpd -0.83, mpg
 dB on fsk16r25-r1/3 fading, ~0 on fsk32r62. Two receptions (ir, 200
 trials): irg gains ~1 dB over the binary code's IR everywhere, ir
 (receiver locks) only on fsk32r62 / fsk8r50 (acquisition caps fsk16r25).
+
+Coherent detection (branch worktree-cpm-coherent, 2026-11-11; runs in main
+runs/coh/{coh1,coh,coh2}). h = 1 with continuous phase: every symbol
+starts at the same carrier phase, which the square law throws away. Arms:
+  gc<W>   genie lock, every tone known (the noiseless burst's), channel
+          estimate over +-W rows leaving the row out (coh_ll: residual
+          timing ramp and CFO removed, metric Z = h + CN(0, N0 + s2), s2
+          the estimate's LOO error, so a poor estimate falls back to the
+          square law)
+  gdd<W>  genie lock, no data genie: noncoherent decode, then up to
+          DD_PASSES coherent re-decodes on soft decisions from the GF
+          decoder's posteriors (dd_arm); dd<W> the same on the base lock
+Found, 10% points, 200 trials, seeds 50000+ (dB vs the noncoherent genie,
+same lock), best W:
+  gc   fsk16r25 awgn -2.9 mpg -2.5 mpp -0.7 mpd -0.7 (W 8-16)
+       fsk8r50  awgn -3.1 mpg -2.8 mpp -1.0 mpd -1.1
+       fsk32r62 awgn -2.7 mpg -1.5 mpp -0.7 mpd -0.7
+  gdd8 fsk16r25 awgn -2.0 mpg -2.0 mpp -0.5 mpd -0.2 (gdd4: -0.4)
+       fsk8r50  awgn -2.8 mpg -2.3 mpp -1.0 mpd -0.8
+       fsk32r62 awgn -1.8 mpg -1.0 mpp -0.7 mpd -0.6
+  dd8 vs base, the real receiver: fsk32r62 awgn -1.8 mpg -1.0 mpp -0.7
+       mpd -0.8 (as gdd); fsk8r50 awgn -1.5 mpg -1.8 mpp -0.5 mpd -0.6;
+       fsk16r25 awgn -0.35 mpg -1.4 mpp -0.45 mpd -0.2 (dd4 -0.5): the lock caps it
+       (gdd8 - dd8 = 1.6 dB awgn, 0.7 mpp; the 1% points don't move).
+  Without the CFO derotation (coh1) the best W was 1-2 on AWGN: refine's
+  R/64 residual turns the phase too fast for longer windows.
 """
 
 from data2g import threads  # noqa: E402
@@ -372,6 +399,164 @@ def id_decode(g, spec, L, mask, index, passes):
         soft = np.clip(fsk_demap(g, L, ext.reshape(-1, g.bits)).reshape(-1), -30, 30)
 
 
+COH_W = (1, 2, 4, 8, 16, 32, 64)  # gc<W>: genie coherent arms, channel estimate over +-W symbols
+
+
+def bins(g, y, s0, cfo, n):
+    """(n, m) complex tone bins from s0 (as cpm._energies, before the square)."""
+    T = g.T
+    idx = s0 + np.arange(n * T)
+    seg = np.where((idx >= 0) & (idx < len(y)), y[np.clip(idx, 0, len(y) - 1)], 0.0)
+    z = seg * np.exp(-2j * np.pi * (g.f0 + cfo) * idx / FS)
+    return np.fft.fft(z.reshape(n, T), axis=1)[:, :g.m]
+
+
+def coh_ll(Z, t, W, n0=None):
+    """(n, m) tone log-likelihoods, a channel estimate h_i per row from the
+    rows' known tones t (+-W rows, row i left out), the residual timing's
+    per-tone phase ramp and the residual CFO (mean rotation per row) removed
+    first. The model: Z_k = h + e on the sent
+    tone, e ~ CN(0, N0 + s2), s2 the estimate's error (LOO residual less
+    N0); noise alone elsewhere. s2 -> Es turns it into the square law."""
+    n, m = Z.shape
+    r = np.arange(n)
+    if n0 is None:
+        off = np.ones_like(Z, bool)
+        off[r, t] = False
+        n0 = float(np.mean(np.abs(Z[off]) ** 2))
+    # residual timing: S_d = sum Z_i[t_i] conj(Z_{i-1}[t_{i-1}]) ~ exp(-2 pi i d delta)
+    a = Z[r, t]
+    d = np.diff(t)
+    p = a[1:] * np.conj(a[:-1])
+    grid = np.linspace(-0.5, 0.5, 401)
+    delta = grid[np.argmax(np.abs(np.exp(2j * np.pi * np.outer(grid, d)) @ p))]
+    Z = Z * np.exp(2j * np.pi * delta * np.arange(m))
+    # residual CFO: the pair products' mean rotation per row, removed
+    nu = np.angle(np.sum(p * np.exp(2j * np.pi * delta * d)))
+    Z = Z * np.exp(-1j * nu * r)[:, None]
+    a = Z[r, t]
+    k = np.ones(2 * W + 1)
+    k[W] = 0.0
+    h = np.convolve(a, k, "same") / np.maximum(np.convolve(np.ones(n), k, "same"), 1)
+    v = max(float(np.mean(np.abs(a - h) ** 2)), n0 * (1 + 1e-3))  # N0 + s2
+    return np.abs(Z) ** 2 / n0 - np.abs(Z - h[:, None]) ** 2 / v
+
+
+def gf_posterior(spec, L, index=1):
+    """(n, m) tone log-likelihoods of a GF(M) slot sent at burst position
+    `index`, RV 0 -> (converged, (n, m) tone log-posteriors after a decode)."""
+    m = 1 << spec.bits_per_cu
+    gray = cpm._gray(m)
+    soft = L[:, gray].reshape(-1)
+    pl = codes.plain(spec, soft, index, 0)
+    deint = codes._deinterleave(spec, pl[None])
+    dec = _gf_dec(spec)
+    hard, ok, post = dec.decode(deint.reshape(1, -1, m), codes.GF_ITERS)
+    pm = post[0][codes.interleaver(spec)]  # mapping order, plain
+    s = codes._gf_flip(spec, index, 0)
+    pv = pm[np.arange(len(pm))[:, None], np.arange(m)[None] ^ s[:, None]]  # sent values
+    out = np.empty_like(pv)
+    out[:, gray] = pv  # value v on tone gray(v)
+    return bool(ok[0]), out
+
+
+_DEC = {}
+
+
+def _gf_dec(spec):
+    if spec.name not in _DEC:
+        from data2g import gfldpc
+        _DEC[spec.name] = gfldpc.Decoder(gfldpc.cut(codes.gf_code(spec), codes.n_sym(spec)))
+    return _DEC[spec.name]
+
+
+def soft_coh_ll(Z, P, W, n0):
+    """coh_ll with soft decisions: P (n, m) tone probabilities per row
+    (one-hot where known). Timing ramp and CFO from the hard decisions'
+    pairs weighted by confidence; h_i = sum_j!=i sum_k P_j(k) Z_j[k]."""
+    n, m = Z.shape
+    r = np.arange(n)
+    t = P.argmax(axis=1)
+    c = P[r, t]
+    a = Z[r, t]
+    d = np.diff(t)
+    p = a[1:] * np.conj(a[:-1]) * c[1:] * c[:-1]
+    grid = np.linspace(-0.5, 0.5, 401)
+    delta = grid[np.argmax(np.abs(np.exp(2j * np.pi * np.outer(grid, d)) @ p))]
+    Z = Z * np.exp(2j * np.pi * delta * np.arange(m))
+    nu = np.angle(np.sum(p * np.exp(2j * np.pi * delta * d)))
+    Z = Z * np.exp(-1j * nu * r)[:, None]
+    a = (P * Z).sum(axis=1)
+    k = np.ones(2 * W + 1)
+    k[W] = 0.0
+    h = np.convolve(a, k, "same") / np.maximum(np.convolve(np.ones(n), k, "same"), 1)
+    v = float(np.mean((P * np.abs(Z - h[:, None]) ** 2).sum(axis=1)))
+    v = max(v, n0 * (1 + 1e-3))
+    return np.abs(Z) ** 2 / n0 - np.abs(Z - h[:, None]) ** 2 / v
+
+
+DD_PASSES = 4
+
+
+def dd_arm(g, y, spec, s0, cfo, W, passes=DD_PASSES):
+    """Decision-directed coherent receiver, no genie data: the slot's
+    noncoherent decode, then up to `passes` re-decodes on soft_coh_ll from
+    the last decode's posteriors (known rows one-hot; control rows their
+    channel-only posteriors). -> slot 1's symbol LLs from the last pass."""
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, 1, False))
+    s0, cfo = cpm.refine(g, y, s0, cfo, spec, 1, False)
+    Z = bins(g, y, s0, cfo, lay.n)
+    E = np.abs(Z) ** 2
+    m, n = g.m, lay.n
+    a = cpm.CTL[g.name].n_sym
+    drows = lay.data_rows[a:a + cpm.DATA_N // g.bits]
+    crows = lay.data_rows[:a]
+    h = cpm.header_symbols(g.name, cpm.header_word(spec.index, 1, False))
+    known = np.full(n, -1)
+    known[lay.sync_rows] = lay.sync_tones
+    for rr in lay.hdr_rows:
+        known[rr] = h
+    n0 = max(float(np.median(np.sort(E, axis=1)[:, :-1])) / np.log(2), 1e-30)
+    G = base_ll(g, E)
+    P = np.exp(G - G.max(axis=1, keepdims=True))
+    P /= P.sum(axis=1, keepdims=True)
+    kr = np.flatnonzero(known >= 0)
+    P[kr] = 0.0
+    P[kr, known[kr]] = 1.0
+    L = base_ll(g, E[drows])
+    for _ in range(passes):
+        ok, post = gf_posterior(spec, L)
+        if ok:
+            break
+        q = np.exp(post - post.max(axis=1, keepdims=True))
+        P[drows] = q / q.sum(axis=1, keepdims=True)
+        L = soft_coh_ll(Z, P, W, n0)[drows]
+    L = L - L.max(axis=1, keepdims=True)
+    return np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1)
+
+
+def coh_arms(g, y, spec, b, arms):
+    """gc<W> arms: genie lock (refined as cpm.receive does), known tones
+    (the noiseless burst's), coherent coh_ll -> slot 1's symbol LLs."""
+    import phy_session as PS
+    from data2g.arq import phy as PHY
+
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, 1, False))
+    s0, cfo = int(PS.PAD_S * FS), PS.CFO_HZ
+    tx = PHY.tx_audio(b)
+    t = cpm._energies(g, tx, 0, lay.n, 0.0).argmax(axis=1)
+    s0, cfo = cpm.refine(g, y, s0, cfo, spec, 1, False)
+    Z = bins(g, y, s0, cfo, lay.n)
+    a = cpm.CTL[g.name].n_sym
+    rows = lay.data_rows[a:a + cpm.DATA_N // g.bits]
+    out = {}
+    for arm in arms:
+        L = coh_ll(Z, t, int(arm[2:]))[rows]
+        L = L - L.max(axis=1, keepdims=True)
+        out[arm] = np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1)
+    return out
+
+
 ARM_ARGS = {"nbr": (2, None, (1.0,)), "loc": (0, LOC_W, (1.0,)), "nbrloc": (2, LOC_W, (1.0,)),
             "win": (2, None, WINDOWS), "winloc": (2, LOC_W, WINDOWS)}
 
@@ -408,8 +593,25 @@ def e2e_trial(args):
     if good:
         lock = dict(spec=r["spec"], n_data=1, dup=r["dup"], start=r["preamble_start"], cfo=r["cfo"])
     st = stages(g, y, spec, r, lock) if any(a in STAGE_ARMS for a in arms) else None
+    for arm in [a for a in arms if a.startswith("dd") or a.startswith("gdd")]:
+        Wd = int(arm.lstrip("gd"))
+        if arm.startswith("g"):
+            gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
+            out[arm] = dec(cpm.receive(y, gl), dd_arm(g, y, spec, gl["start"], gl["cfo"], Wd))
+        elif not good:
+            out[arm] = 0
+        else:
+            out[arm] = dec(r, dd_arm(g, y, spec, r["preamble_start"], r["cfo"], Wd))
+    arms = [a for a in arms if a not in out]
+    gc = [a for a in arms if a.startswith("gc")]
+    coh = coh_arms(g, y, spec, b, gc) if gc else {}
+    if gc:
+        gr = cpm.receive(y, dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ,
+                                 band=g.name))
     for arm in arms:
-        if arm in STAGE_ARMS:
+        if arm in coh:
+            out[arm] = dec(gr, coh[arm])
+        elif arm in STAGE_ARMS:
             out[arm] = st[arm](dec) if callable(st[arm]) else st[arm]
         elif arm == "genie":
             gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
