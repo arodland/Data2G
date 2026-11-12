@@ -33,6 +33,7 @@ import csv  # noqa: E402
 import glob  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import replace  # noqa: E402
+from fractions import Fraction  # noqa: E402
 from multiprocessing import Pool  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -56,6 +57,20 @@ SNRS = {"awgn": np.arange(-26, -13, 1.0), "mpg": np.arange(-22, -5, 2.0), "mpp":
         "mpd": np.arange(-24, -11, 1.0)}
 
 
+CFOS = (-1 / 16, 0.0, 1 / 16)  # CFO search points, fractions of R
+TOPK = 4  # round 2: hypotheses rescored coherently
+
+
+def configure(m: int, cfos: str, round2: bool):
+    """Module settings from the command line (pool workers fork after it)."""
+    global M, CFOS, STATS, BLOCKS
+    M = m
+    CFOS = tuple(float(Fraction(c)) for c in cfos.split(","))  # e.g. "0" or "-1/16,0,1/16"
+    if round2:
+        BLOCKS = ()
+        STATS = ("sq", "coh")
+
+
 def family(key: int, L: int) -> np.ndarray:
     """(M, L) the keyed family's tone sequences."""
     return np.random.default_rng([0x5161, key, L]).integers(0, G.m, (M, L))
@@ -67,30 +82,43 @@ def waveform(seq: np.ndarray, cap: int = 2) -> np.ndarray:
 
 
 def search(x: np.ndarray, fam: np.ndarray, lo: int, hi: int, cfo: float) -> dict:
-    """Starts in [lo, hi] (T/4 steps), CFO +-R/16: per statistic, (M,) each
-    hypothesis' best score."""
+    """Starts in [lo, hi] (T/4 steps), CFO at CFOS x R: per statistic, (M,)
+    each hypothesis' best score. Round 1: sq and the block-coherent sums over
+    the whole search. Round 2 (TOPK): coh, the K best by sq rescored on
+    cpm's coherent metric with every tone known (cpm._coh_run_llr: channel
+    from +-COH_HDR_W rows, the row left out; timing ramp and CFO fitted), at
+    the start and CFO sq found for it; the rest -inf."""
     L = fam.shape[1]
     phases = range(0, G.T, G.T // 4)
     n_pos = (hi - lo) // G.T + 1
-    best = {s: np.full(M, -np.inf) for s in STATS}
+    best = {s: np.full(len(fam), -np.inf) for s in STATS}
+    where = np.zeros((len(fam), 2))  # sq's best start and CFO per hypothesis
+    n0s = {}
     idx = np.arange(L)
     for p in phases:
-        for df in (-1 / 16, 0.0, 1 / 16):
+        for df in CFOS:
             Z = cpm.bins(G, x, lo + p, n_pos + L, cfo + df * G.rate)
             E = np.abs(Z) ** 2
             T_ = cpm.tone_llr(G, E)
-            n0 = cpm._n0(E)
+            n0 = n0s[(p, df)] = cpm._n0(E)
             for m in range(n_pos):
                 if lo + p + m * G.T > hi:
                     continue
                 rows = m + idx
                 sq = T_[rows[None, :], fam].sum(axis=1)
-                best["sq"] = np.maximum(best["sq"], sq)
+                up = sq > best["sq"]
+                best["sq"] = np.where(up, sq, best["sq"])
+                where[up] = (lo + p + m * G.T, cfo + df * G.rate)
                 z = Z[rows[None, :], fam]  # (M, L)
                 for b in BLOCKS:
                     nb = L // b
-                    s = np.abs(z[:, :nb * b].reshape(M, nb, b).sum(axis=2)) ** 2 / (b * n0)
+                    s = np.abs(z[:, :nb * b].reshape(len(fam), nb, b).sum(axis=2)) ** 2 / (b * n0)
                     best[f"coh{b}"] = np.maximum(best[f"coh{b}"], s.sum(axis=1))
+    if "coh" in STATS:
+        for k in np.argsort(best["sq"])[::-1][:TOPK]:
+            s0, f = int(where[k][0]), float(where[k][1])
+            Z = cpm.bins(G, x, s0, L, f)
+            best["coh"][k] = float(cpm._coh_run_llr(G, Z, fam[k], cpm._n0(np.abs(Z) ** 2)).sum())
     return best
 
 
@@ -190,7 +218,14 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--dir", default="runs/sig")
     ap.add_argument("--fa", type=float, default=1e-6, help="report: false accepts per slot")
+    ap.add_argument("--m", type=int, default=128, help="sequences in a family")
+    ap.add_argument("--cfos", default="-1/16,0,1/16", help="CFO search points, fractions of R")
+    ap.add_argument("--round2", action="store_true", help="statistics sq and coh (coherent rescoring of the top 4)")
+    ap.add_argument("--chans", nargs="+", help="incumbent: these channels only")
+    ap.add_argument("--snrs", nargs="+", type=float, help="incumbent: these SNRs (appended to --out)")
+    ap.add_argument("--hit", type=float, default=0.85, help="report: P(the primed tries hold the right hypothesis)")
     a = ap.parse_args()
+    configure(a.m, a.cfos, a.round2)
     if a.cmd == "probe":
         import time
         t = time.time()
@@ -209,10 +244,13 @@ def main():
         rows = [r for out in run(noise_trial, jobs, a.jobs) for r in out]
         np.save(a.out, np.array(rows, dtype=object), allow_pickle=True)
     elif a.cmd == "incumbent":
-        jobs = [(c, float(s), 90000 + i) for c in CHANS for s in SNRS[c] if s >= -20 for i in range(a.trials)]
-        with open(a.out, "w", newline="") as f:
+        snrs = {c: (np.array(a.snrs, float) if a.snrs else SNRS[c][SNRS[c] >= -20]) for c in (a.chans or CHANS)}
+        jobs = [(c, float(s), 90000 + i) for c, ss in snrs.items() for s in ss for i in range(a.trials)]
+        new = not Path(a.out).exists()
+        with open(a.out, "a", newline="") as f:  # appends: more SNRs for an earlier run
             w = csv.writer(f)
-            w.writerow(["channel", "snr", "seed", "kind", "blind", "pair", "primed", "seconds"])
+            if new:
+                w.writerow(["channel", "snr", "seed", "kind", "blind", "pair", "primed", "seconds"])
             for c, s, seed, out in run(incumbent_trial, jobs, a.jobs):
                 for k, v in out.items():
                     w.writerow([c, s, seed, k, *v])
@@ -263,12 +301,22 @@ def report(a):
                     ok.append(np.mean([r[5] >= thr[(L, s)] and r[6] < thr[(L, s)] for r in rs]))
                 cells.append(f"L{L} {s} {x10(snrs, ok):6.2f}")
         isn = sorted({float(r["snr"]) for r in inc if r["channel"] == c})
+
+        def ok_of(r, col):
+            if col != "real":
+                return int(r[col])
+            # realistic primed: a primed decode counts only if the tries held the right hypothesis (P = hit)
+            hit = np.random.default_rng([int(r["seed"]), int(float(r["snr"]) * 10) & 0xFFFF]).random() < a.hit
+            base = int(r["pair"]) if r["kind"] == "dup" else int(r["blind"])
+            return int(base or (hit and int(r["primed"])))
+
         def ip(kind, col):
-            return x10(isn, [np.mean([int(r[col]) for r in inc if r["channel"] == c and float(r["snr"]) == s
+            return x10(isn, [np.mean([ok_of(r, col) for r in inc if r["channel"] == c and float(r["snr"]) == s
                                       and r["kind"] == kind]) for s in isn])
         print(f"  {c:5s} " + "  ".join(cells))
-        print(f"        incumbent single {ip('single', 'blind'):6.2f} / {ip('single', 'primed'):6.2f}, "
-              f"dup {ip('dup', 'pair'):6.2f} / {ip('dup', 'primed'):6.2f}")
+        print(f"        incumbent single {ip('single', 'blind'):6.2f} / primed {ip('single', 'primed'):6.2f} / "
+              f"realistic {ip('single', 'real'):6.2f}, dup {ip('dup', 'pair'):6.2f} / {ip('dup', 'primed'):6.2f} / "
+              f"{ip('dup', 'real'):6.2f}")
     secs = {k: float(next(r["seconds"] for r in inc if r["kind"] == k)) for k in ("single", "dup")}
     print("airtime: " + ", ".join(f"signature L{L} {L / G.rate + 2 * cpm.RAMP_S:.2f} s" for L in LS)
           + f"; incumbent single {secs['single']:.2f} s, dup {secs['dup']:.2f} s")
