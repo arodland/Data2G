@@ -32,7 +32,7 @@ def main():
     for m, c in cells:
         snrs = sorted({k[2] for k in trials if k[:2] == (m, c)})
         rows = {s: [v for k, v in trials.items() if k[:3] == (m, c, s)] for s in snrs}
-        cols = [x for x in ["base", "genie", *a.arms, "basec", "geniec", *[y + "c" for y in a.arms]]
+        cols = [x for x in ["base", "genie", *a.arms, "basec", "geniec", *[y + "c" for y in a.arms], *[y + "c0" for y in a.arms]]
                 if x in rows[snrs[0]][0]]
         mean = lambda s, fn: float(np.mean([fn(t) for t in rows[s]]))  # noqa: E731
         print(m, c, "10%:", {x: x10(snrs, np.array([mean(s, lambda t: t[x]) for s in snrs])) for x in cols})

@@ -598,6 +598,7 @@ def dd_arm(g, y, spec, s0, cfo, W, passes=DD_PASSES):
     P[kr] = 0.0
     P[kr, known[kr]] = 1.0
     L = base_ll(g, E[drows])
+    ctl0 = np.clip(bit_llrs(g, soft_coh_ll(Z, P, W, n0)[crows]), -30, 30)  # known rows + square-law decisions only
     Lall = None
     for _ in range(passes):
         ok, post = gf_posterior(spec, L)
@@ -613,7 +614,7 @@ def dd_arm(g, y, spec, s0, cfo, W, passes=DD_PASSES):
         Lall = soft_coh_ll(Z, P, W, n0)
     L = L - L.max(axis=1, keepdims=True)
     ctl = np.clip(bit_llrs(g, Lall[crows]), -30, 30)
-    return np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1), ctl
+    return np.clip(L, -60, 0)[:, cpm._gray(g.m)].reshape(-1), ctl, ctl0
 
 
 def coh_arms(g, y, spec, b, arms):
@@ -694,19 +695,21 @@ def e2e_trial(args):
             elif arm == p + "base":
                 out[arm], out[arm + "c"] = dec(rk), dec_ctl(rk)
             else:
-                d1, c0 = dd_arm(g, y, spec, rk["preamble_start"], rk["cfo"], int(arm[1:]))
-                out[arm], out[arm + "c"] = dec(rk, d1), dec_ctl(rk, c0)
+                d1, c0, k0 = dd_arm(g, y, spec, rk["preamble_start"], rk["cfo"], int(arm[1:]))
+                out[arm], out[arm + "c"], out[arm + "c0"] = dec(rk, d1), dec_ctl(rk, c0), dec_ctl(rk, k0)
     for arm in [a for a in arms if a.startswith("dd") or a.startswith("gdd")]:
         Wd = int(arm.lstrip("gd"))
         if arm.startswith("g"):
             gl = dict(spec=spec, n_data=1, dup=False, start=int(PS.PAD_S * FS), cfo=PS.CFO_HZ, band=g.name)
-            rr, (d1, c0) = cpm.receive(y, gl), dd_arm(g, y, spec, gl["start"], gl["cfo"], Wd)
+            rr, (d1, c0, k0) = cpm.receive(y, gl), dd_arm(g, y, spec, gl["start"], gl["cfo"], Wd)
             out[arm], out[arm + "c"], out["geniec"] = dec(rr, d1), dec_ctl(rr, c0), dec_ctl(rr)
+            out[arm + "c0"] = dec_ctl(rr, k0)
         elif not good:
-            out[arm] = out[arm + "c"] = out["basec"] = 0
+            out[arm] = out[arm + "c"] = out[arm + "c0"] = out["basec"] = 0
         else:
-            d1, c0 = dd_arm(g, y, spec, r["preamble_start"], r["cfo"], Wd)
+            d1, c0, k0 = dd_arm(g, y, spec, r["preamble_start"], r["cfo"], Wd)
             out[arm], out[arm + "c"], out["basec"] = dec(r, d1), dec_ctl(r, c0), dec_ctl(r)
+            out[arm + "c0"] = dec_ctl(r, k0)
     # lock diagnosis: 0 no lock, 1 a lock with the wrong word, 2 right word (start error in samples: lockerr)
     out["lockcat"] = 2 if good else (0 if r is None else 1)
     if good:

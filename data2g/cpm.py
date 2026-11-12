@@ -900,9 +900,14 @@ def receive(x: np.ndarray, lock: dict) -> dict:
     s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"])
     soft_, E = soft(g, lock["spec"], x, s0, cfo, lock["n_data"], lock["dup"])
     Z = bins(g, x, s0, layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"])).n, cfo)
-    return dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
-                dup=lock["dup"], soft=soft_, E=E, Z=Z, cfo=lock["cfo"], preamble_start=lock["start"],
-                header_end=lock.get("header_end"))
+    r = dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
+             dup=lock["dup"], soft=soft_, E=E, Z=Z, cfo=lock["cfo"], preamble_start=lock["start"],
+             header_end=lock.get("header_end"))
+    if COH_CTL:  # the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
+        M = dd_metric(r, {})
+        for s in range(r["n_ctl_slots"]):
+            soft_[s] = dd_soft(r, M, s)
+    return r
 
 
 # --- coherent detection --------------------------------------------------------------
@@ -924,6 +929,13 @@ COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
 # (LOCK_LLR) still lock alone: either reading passing locks.
 # DATA2G_CPM_COH_LOCK=0: the noncoherent gates alone.
 COH_LOCK = {"c16r25": (34.0, 38.0)} if os.environ.get("DATA2G_CPM_COH_LOCK", "1") == "1" else {}
+# The control codeword's soft bits on dd_metric with no decoded data (known
+# rows, square-law decisions elsewhere), from the start: 10% points, genie
+# lock, unprimed and single, vs the square law: awgn fsk16r25 -1.19,
+# fsk8r50 -1.46, fsk32r62 -1.03 dB; fading -0.2 to -1.0; flutter / hilat
+# within +-0.12 (after the data's DD, as ModemRx's soft then gives it:
+# awgn -1.70, -1.89, -1.13). DATA2G_CPM_COH_CTL=0: the square law.
+COH_CTL = os.environ.get("DATA2G_CPM_COH_CTL", "1") == "1"
 
 
 def bins(g: Grid, x: np.ndarray, start: int, n_sym: int, cfo: float) -> np.ndarray:
