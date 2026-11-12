@@ -4,6 +4,7 @@
 #
 #   QT_ANDROID=~/Qt/6.11.1/android_arm64_v8a QT_HOST=~/Qt/6.11.1/gcc_64 tools/build_android.sh
 #   ... tools/build_android.sh --abi x86_64 --install    # one ABI (an emulator), then adb install
+#   ... tools/build_android.sh --aab                      # also the Play bundle (unsigned)
 #
 # QT_ANDROID names any one ABI's Qt; all ABIs Qt has installed are built
 # unless --abi picks one. ANDROID_HOME (default ~/Android/Sdk) and
@@ -12,6 +13,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 INSTALL=0
+AAB=0
 ALL_ABIS=ON
 ABI=all
 EXTRA=()
@@ -19,6 +21,7 @@ EXTRA=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --install) INSTALL=1; shift ;;
+        --aab) AAB=1; shift ;;
         --abi) ALL_ABIS=OFF; ABI=$2; EXTRA+=("-DANDROID_ABI=$2"); shift 2 ;;
         --version-code) EXTRA+=("-DDATA2G_ANDROID_VERSION_CODE=$2"); shift 2 ;;
         --) shift; EXTRA+=("$@"); break ;;
@@ -44,6 +47,11 @@ cmake -S "$ROOT/native/android-app" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     "${EXTRA[@]}"
 cmake --build "$BUILD_DIR" --target apk --parallel "${JOBS:-8}"  # shared machine: cap it
+if [[ $AAB == 1 ]]; then
+    cmake --build "$BUILD_DIR" --target aab --parallel "${JOBS:-8}"
+    cp "$(echo "$BUILD_DIR"/android-build/build/outputs/bundle/release/*.aab)" "$BUILD_DIR/data2g-tnc-unsigned.aab"
+    echo "built: $BUILD_DIR/data2g-tnc-unsigned.aab"
+fi
 
 # The release APK is unsigned; sign it with the debug key so it installs.
 OUT="$BUILD_DIR/data2g-tnc.apk"
