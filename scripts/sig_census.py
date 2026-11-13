@@ -43,13 +43,19 @@ STATIONS = []
 ROWS = []
 TAG = {}
 
-_init, _build = LK.Station.__init__, LK.Station.build
+_init, _build, _handle = LK.Station.__init__, LK.Station.build, LK.Station.handle
 
 
 def _init_hook(self, *a, **k):
     _init(self, *a, **k)
     STATIONS.append(self)
     self._census_last = None  # (rec, size_hint, ext) of my last control
+    self._census_rx = ""  # the submode of the last peer burst I handled
+
+
+def _handle_hook(self, rx):
+    self._census_rx = getattr(rx, "submode", "")
+    return _handle(self, rx)
 
 
 def _band_index(rec: int) -> tuple[int, int]:
@@ -89,27 +95,69 @@ def _build_hook(self, fresh: bool = True):
                      outstanding=(nxt - base), all_acked=int(core.cum % F.SEQ_MOD == nxt % F.SEQ_MOD),
                      bitmap=len(bitmap), reply_lost=int(core.reply_lost), rec_step=rec_step, hint_same=hint_same,
                      t_reply=reply, t_dupctl=dupctl, dupctl_on=int(F.T_DUPCTL in ext), others="+".join(others),
-                     ctl_bytes=sum(2 + len(v) for v in ext.values()) + 4))
+                     ctl_bytes=sum(2 + len(v) for v in ext.values()) + 4, rec_code=core.recommend,
+                     last_rec_code="" if last is None else last[0], acked_mode=self._census_rx, cap=self.cap))
     return burst
 
 
-LK.Station.__init__, LK.Station.build = _init_hook, _build_hook
+LK.Station.__init__, LK.Station.build, LK.Station.handle = _init_hook, _build_hook, _handle_hook
 
 
 def one(args):
-    chan, snr, seed, workload = args
+    chan, snr, seed, workload, cap = args
     STATIONS.clear()
     ROWS.clear()
     TAG.clear()
     TAG.update(channel=chan, snr=snr, seed=seed, workload=workload)
     ch = G.ContinuousChannel(chan, snr, seed, 600.0)
     L.run(L.make_policy("shift+cpm"), L.make_policy("shift+cpm"), None,
-          L.WORKLOADS[workload](random.Random(seed + 7)), seed=seed, horizon=600.0, phy=G.RealPhy(ch), cap=2)
+          L.WORKLOADS[workload](random.Random(seed + 7)), seed=seed, horizon=600.0, phy=G.RealPhy(ch), cap=cap)
     return list(ROWS)
 
 
 FIELDS = ["channel", "snr", "seed", "workload", "station", "submode", "kind", "cum_rel", "outstanding", "all_acked",
-          "bitmap", "reply_lost", "rec_step", "hint_same", "t_reply", "t_dupctl", "dupctl_on", "others", "ctl_bytes"]
+          "bitmap", "reply_lost", "rec_step", "hint_same", "t_reply", "t_dupctl", "dupctl_on", "others", "ctl_bytes",
+          "rec_code", "last_rec_code", "acked_mode", "cap"]
+
+
+def ladders(key: str) -> dict:
+    """Per cap code, the allowed modes in a robustness order: key 'mean' (mean
+    of policy.MODE_THRESHOLDS over its channels) or 'awgn' (its first)."""
+    from data2g.arq import modes as MD
+    from data2g.arq import policy as PO
+
+    f = (lambda m: sum(PO.MODE_THRESHOLDS[m]) / len(PO.MODE_THRESHOLDS[m])) if key == "mean" else \
+        (lambda m: PO.MODE_THRESHOLDS[m][0])
+    return {cap: sorted((s.name for s in MD.allowed(cap) if s.name in PO.MODE_THRESHOLDS), key=f) for cap in MD.CAP_HZ}
+
+
+def steps(path):
+    """|step| <= 2 coverage of the recommendation, per ordering and reference."""
+    from data2g.arq import modes as MD
+
+    rows = [r for r in csv.DictReader(open(path)) if r["kind"] in ("reply", "poll") and r["others"] == ""
+            and r["last_rec_code"] != "" and r["acked_mode"]]
+    lads = {k: ladders(k) for k in ("mean", "awgn")}
+    for wl, cap in sorted({(r["workload"], r["cap"]) for r in rows}):
+        rs = [r for r in rows if r["workload"] == wl and r["cap"] == cap]
+        print(f"== {wl} cap {cap}: {len(rs)} bursts (reply/poll, no abandon/inline, not a first control)")
+        for ref in ("acked", "last"):
+            out = []
+            for order in ("code", "mean", "awgn"):
+                hist = Counter()
+                for r in rs:
+                    rec = MD.decode(int(r["rec_code"]))
+                    base = r["acked_mode"] if ref == "acked" else MD.decode(int(r["last_rec_code"]))
+                    if order == "code":
+                        a, b = int(r["rec_code"]), MD.encode(base) if base in MD.MODES else -999
+                        st = (a & 15) - (b & 15) if a >> 4 == b >> 4 else 99
+                    else:
+                        lad = lads[order][int(r["cap"])]
+                        st = lad.index(rec) - lad.index(base) if rec in lad and base in lad else 99
+                    hist[st] += 1
+                cov = {k: sum(v for s, v in hist.items() if abs(s) <= k) / len(rs) for k in (0, 1, 2)}
+                out.append(f"{order}: 0 {cov[0]:.1%} <=1 {cov[1]:.1%} <=2 {cov[2]:.1%}")
+            print(f"  vs {ref:5s} " + " | ".join(out))
 
 
 def report(path):
@@ -138,14 +186,18 @@ def report(path):
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "report":
         return report(sys.argv[2])
+    if len(sys.argv) > 2 and sys.argv[1] == "steps":
+        return steps(sys.argv[2])
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="runs/sigc/census.csv")
     ap.add_argument("--seeds", type=int, default=8)
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--caps", nargs="+", type=int, default=[2], help="bandwidth cap codes")
     a = ap.parse_args()
     if G.PEP_REF_DB is None:
         ap.error("set DATA2G_PEP_REF_DB=5")
-    jobs = [(c, float(s), seed, wl) for c, s in CELLS for seed in range(a.seeds) for wl in ("bulk", "chat")]
+    jobs = [(c, float(s), seed, wl, cap) for c, s in CELLS for seed in range(a.seeds) for wl in ("bulk", "chat")
+            for cap in a.caps]
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     with Pool(a.jobs) as p, open(a.out, "w", newline="") as f:
         w = csv.DictWriter(f, FIELDS)
