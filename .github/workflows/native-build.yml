@@ -248,12 +248,16 @@ jobs:
         shell: bash
         run: |
           case "$(uname -s)" in
-            Darwin) dir=dist/Data2G.app/Contents/MacOS; host="$dir/data2g-host"; gui="$dir/data2g-gui" ;;
-            MINGW*|MSYS*) dir=dist/data2g; host="$dir/data2g-host.exe"; gui="$dir/data2g-gui.exe" ;;
-            *) dir=dist/data2g; host="$dir/data2g host"; gui="$dir/data2g" ;;
+            Darwin) dir=dist/Data2G.app/Contents/MacOS; host="$dir/data2g-host"; web="$dir/data2g-web"; gui="$dir/data2g-gui" ;;
+            MINGW*|MSYS*) dir=dist/data2g; host="$dir/data2g-host.exe"; web="$dir/data2g-web.exe"; gui="$dir/data2g-gui.exe" ;;
+            *) dir=dist/data2g; host="$dir/data2g host"; web="$dir/data2g web"; gui="$dir/data2g" ;;
           esac
           $host --help > /dev/null
           echo "data2g-host starts"
+          # Built with data2g-host (the workflow installs qtwebsockets), so it
+          # must be packaged too: package_app.sh once left it out of every installer.
+          $web --help > /dev/null
+          echo "data2g-web starts"
           # Configured with DATA2G_BUILD_GUI=ON, so the GUI must be packaged, and on macOS be
           # what the bundle launches. This check was optional, and v0.1.0's macOS bundle shipped the host.
           if ! { [ -e "$dir/data2g-gui" ] || [ -e "$dir/data2g-gui.exe" ] || [ -e "$dir/bin/data2g-gui" ]; }; then
