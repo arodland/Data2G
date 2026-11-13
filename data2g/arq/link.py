@@ -810,8 +810,8 @@ class Station:
             kind, steps = "reply", nodmod.REPLY_STEPS
         else:
             r_cum, r_rec, r_acted, _, r_nod = self._sent_ctl[self._latest]
-            if r_nod:  # the peer may not have heard it (nor so the poll's anchors): poll in full
-                return None
+            if r_nod or not self._peer_ctl_core:  # the peer may not have heard it (nor so the poll's
+                return None  # anchors), or never heard me yet (a session's first turn): poll in full
             ack = "same" if (self.rx.cum == r_cum and core.acted_on == r_acted) else None
             kind, steps = "poll", nodmod.POLL_STEPS
         if ack is None or core.recommend >> 4 != r_rec >> 4:
