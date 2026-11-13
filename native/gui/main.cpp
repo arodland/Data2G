@@ -1,6 +1,6 @@
 // data2g-gui: the station of data2g-host with a status window and a
-// settings dialog. Settings come from QSettings, then data2g-host's flags on
-// the command line override them for this run.
+// settings dialog. Settings come from the config file (app::open_config),
+// then data2g-host's flags on the command line override them for this run.
 
 #include <QApplication>
 #include <QIcon>
@@ -28,7 +28,7 @@ int main(int argc, char** argv) {
     icon.addFile(QStringLiteral(":/data2g-48.png"));
     icon.addFile(QStringLiteral(":/data2g-256.png"));
     QApplication::setWindowIcon(icon);
-    const auto store = app::settings_store();  // shared with data2g-web
+    const auto store = app::open_config(argc, argv);  // shared with data2g-web and data2g-host
     const app::Args a = app::parse(argc, argv, gui::load_settings(*store), "data2g-gui");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
         app::usage_error("--list-modes, --list-audio-devices and --list-rigs are data2g-host's", "data2g-gui");

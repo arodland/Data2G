@@ -28,7 +28,9 @@ byte offsets, data written before CONNECTED is dropped; off again when the
 client goes), TXPOWER [dB] (DATA2G ON: -> TXPOWER db, the output volume;
 with dB, -60 to 20, sets it -> OK), TIMEOUT [s] (DATA2G ON: -> TIMEOUT s, the
 link idle timeout; with s > 0 sets it -> OK; back to the default when the
-client goes), CWID OFF|ON|ONLY [wpm] (DATA2G ON: the CW ID, docs/arq.md §7b:
+client goes), RETRIES [n] (-> RETRIES n, the CONNECT retries after the first
+try; with n, 0 to MAX_RETRIES, sets them for this client's connects -> OK;
+back to the default when the client goes), CWID OFF|ON|ONLY [wpm] (DATA2G ON: the CW ID, docs/arq.md §7b:
 off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
 accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
@@ -41,7 +43,7 @@ HAND CANCEL (stop a waiting Hand and
 any window). Replies OK / WRONG (MYCALL's
 OK followed by REGISTERED call for each call). Notifications: CONNECTED src
 dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
-§9), PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
+§9), PTT ON|OFF, BUSY ON|OFF, PENDING and CANCELPENDING (--pending), BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
 BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has
 sent a BCAST command; hand lines (REF id end offset snr per decoded burst,
@@ -88,6 +90,7 @@ KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
 VOLUME_DB = (-60.0, 20.0)  # TXPOWER's range: the native GUI's output volume setting
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
+MAX_RETRIES = 20  # RETRIES' most: fsk16r25 retries go ~13 s apart, so ~4.5 minutes of calling
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
@@ -130,6 +133,7 @@ class Host:
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self._hand = False  # the client has sent HAND: REF/HAND lines go to it (as with DATA2G ON)
         self.data2g = False  # DATA2G ON
+        self.retries: int | None = None  # RETRIES (None: session.CONNECT_TRIES - 1)
         self.output_volume = 0.0  # dB, TXPOWER: serve() applies it
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
@@ -168,7 +172,7 @@ class Host:
         elif cmd == "CONNECT" and len(args) == 2:
             try:
                 e.set_call(args[0], *e.aliases)
-                e.connect(args[1], self.cap)
+                e.connect(args[1], self.cap, None if self.retries is None else self.retries + 1)
             except (RuntimeError, ValueError):
                 ok = False
         elif cmd == "DISCONNECT":
@@ -219,6 +223,13 @@ class Host:
             ok = VOLUME_DB[0] <= v <= VOLUME_DB[1]
             if ok:
                 self.output_volume = v
+        elif cmd == "RETRIES" and not args:
+            self.out_cmd.append(f"RETRIES {S.CONNECT_TRIES - 1 if self.retries is None else self.retries}")
+            return
+        elif cmd == "RETRIES" and len(args) == 1:
+            ok = args[0].isascii() and args[0].isdigit() and int(args[0]) <= MAX_RETRIES  # digits only, as native
+            if ok:
+                self.retries = int(args[0])
         elif cmd == "TIMEOUT" and self.data2g and not args:
             self.out_cmd.append(f"TIMEOUT {e.idle_close_s:.1f}")
             return
@@ -331,6 +342,7 @@ class Host:
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr, self.data2g, self._hand = False, None, False, False
+        self.retries = None
         e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)
@@ -373,6 +385,8 @@ class Host:
                 src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
                 self._up = True
+            elif ev in ("PENDING", "CANCELPENDING"):
+                self.out_cmd.append(ev)
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
                 self.out_cmd.append(f"CQFRAME {call} {BW_NAME[int(cap)]}")
@@ -602,6 +616,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
     engine.hand_round = getattr(a, "hand_decoder", "full")
+    engine.pending = getattr(a, "pending", "fsk")
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -734,6 +749,9 @@ def main():
     ap.add_argument("--tx-lead-ms", type=int, default=100,
                     help="TX audio queued ahead of the sound card: slack for a late audio step")
     ap.add_argument("--min-header-score", type=float, default=0.0)
+    ap.add_argument("--pending", choices=("off", "fsk", "ofdm", "all"), default="fsk",
+                    help="PENDING (CANCELPENDING after) on a header that may be a CONNECT while listening: "
+                         "fsk, the robust connect mode only; ofdm, the first-try connect modes; all, both")
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
                          "that throttle on it (Pat) keep a whole burst queued; -1: the next burst's full "

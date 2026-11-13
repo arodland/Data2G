@@ -430,12 +430,21 @@ void MainWindow::open_monitor() {
 }
 
 void MainWindow::open_settings() {
-    SettingsDialog d(station_->args(), names(audio::card::input_devices()), names(audio::card::output_devices()), this);
+    SettingsDialog d(station_->args(), names(audio::card::input_devices()), names(audio::card::output_devices()), station_->running(),
+                     this);
     if (d.exec() != QDialog::Accepted) return;
     app::Args a = station_->args();
     d.apply_to(a);
     save_settings(store_, a);
-    if (a != station_->args() || !station_->running()) restart(a);
+    apply_settings(a);
+}
+
+void MainWindow::apply_settings(const app::Args& a) {
+    if (station_->update(a)) {  // live: sessions and clients kept
+        poll();
+        return;
+    }
+    restart(a);
 }
 
 }  // namespace data2g::gui

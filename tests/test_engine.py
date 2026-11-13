@@ -890,6 +890,25 @@ def test_timeout_sets_the_idle_close():
     assert a.out_cmd[-1] == "TIMEOUT 300.0"  # the default again: the setting was the client's
 
 
+def test_retries_sets_this_clients_connect_retries():
+    from data2g.host import Host
+
+    a, b = Host(Engine("W1AW", seed=75)), Host(Engine("K2XYZ", seed=76))  # b: not listening, never answers
+    for line in ("RETRIES", "RETRIES -1", "RETRIES 21", "RETRIES x", "RETRIES 1.0", "RETRIES 001", "RETRIES"):
+        a.command(line)
+    assert a.out_cmd == ["RETRIES 4"] + ["WRONG"] * 4 + ["OK", "RETRIES 1"]
+    a.command("CONNECT W1AW N0CALL")
+
+    def gave_up():
+        a.after_step(bool(a.engine.tx))
+        return a.engine.session.state == S.CLOSED
+    assert link(a.engine, b.engine, 20, 60, gave_up)
+    assert a.engine.session.close_reason == "NO_ANSWER" and a.engine.session._tries == 2  # the first and one retry
+    a.client_gone()
+    a.command("RETRIES")
+    assert a.out_cmd[-1] == "RETRIES 4"  # the default again: the setting was the client's
+
+
 def test_the_shifter_hears_each_peer_bursts_energy():
     """The engine reads each peer burst's in-band energy (predictor.N_ENERGY)
     and hands it to its session's shifter. Under --native the C++ Engine
@@ -934,3 +953,29 @@ def test_nods_on_audio(monkeypatch):
     assert bytes(got) == up
     sent, heard = b.session.station.stats["tx_nod"], a.session.station.stats["rx_nod"]
     assert sent >= 2 and heard >= sent - 1, (sent, heard)
+
+
+def test_pending_on_a_connect_header_then_connected_or_cancelled():
+    """PENDING: raised on a header that may be a CONNECT while
+    listening, before its callee is known; CONNECTED follows if it was mine,
+    CANCELPENDING otherwise. Default "fsk": the robust connect mode only,
+    so the first try (OFDM) raises nothing and the retries do."""
+    a, b = Engine("W1AW", seed=71), Engine("K2XYZ", seed=72)
+    b.listen()
+    seen = []
+
+    def drain():
+        seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING") or e.startswith("CONNECTED"))
+        return len(seen) >= 4
+    a.connect("N0CALL", 2)  # nobody: K2XYZ hears its tries, OFDM then FSK
+    assert link(a, b, 20, 5, drain, seed=73) is False and seen == []  # try 1, qpsk-r1/5: none
+    assert link(a, b, 20, 120, drain, seed=73)
+    assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
+    a.abort()
+    b.events()
+
+    b.pending, seen[:] = "all", []
+    a.connect("K2XYZ", 2)  # mine, first try (OFDM): PENDING, then CONNECTED and no cancel
+    assert link(a, b, 20, 60, lambda: drain() or b.session.state == S.CONNECTED, seed=74)
+    drain()
+    assert seen == ["PENDING", "CONNECTED W1AW"], seen

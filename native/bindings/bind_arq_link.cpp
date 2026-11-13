@@ -634,6 +634,8 @@ void bind_arq_link(py::module_& m) {
         .def_property_readonly("_pending_write", [](const Session& s) { return pyb(s.pending_write); })
         .def_readonly("_nonce", &Session::nonce)
         .def_readonly("_tries", &Session::tries)
+        .def_property("connect_tries", [](const Session& s) { return s.tune.connect_tries; },  // None: CONNECT_TRIES
+                      [](Session& s, std::optional<int> n) { s.tune.connect_tries = n ? *n : py_tuning().connect_tries; })
         .def_readonly("_wakes", &Session::wakes)
         .def("_on_timeout", [](Session& s, double now) { s.Session::on_timeout(now); })
         .def("set_chat", &Session::set_chat)

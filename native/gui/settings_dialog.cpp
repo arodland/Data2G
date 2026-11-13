@@ -8,10 +8,14 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -86,6 +90,18 @@ QWidget* row(std::initializer_list<QWidget*> ws) {
     return w;
 }
 
+// A tab page that scrolls, so the dialog fits a short screen (768 pixels, #170).
+// QScrollArea's own hint is capped well short of the page; this one asks for all of it.
+class Scroll : public QScrollArea {
+public:
+    explicit Scroll(QWidget* page) {
+        setWidget(page);
+        setWidgetResizable(true);
+        setFrameShape(QFrame::NoFrame);
+    }
+    QSize sizeHint() const override { return widget()->sizeHint() + QSize(verticalScrollBar()->sizeHint().width(), 0); }
+};
+
 void set_row_visible(QFormLayout* form, QWidget* field, bool visible) {
     field->setVisible(visible);
     if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
@@ -97,7 +113,7 @@ void set_row_visible(QFormLayout* form, QWidget* field, bool visible) {
 constexpr int NOISE_RULE_MAX = 150, NOISE_RULE_DEFAULT = 100, NOISE_RULE_DETENT = 5;
 constexpr int EFFORT_MIN = 15, EFFORT_MAX = 40, EFFORT_DEFAULT = 25;  // decoder effort's slider, in iterations
 
-SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent)
+SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, bool running, QWidget* parent)
     : QDialog(parent), base_(a) {
     setWindowTitle(tr("Data2G settings"));
     auto* outer = new QVBoxLayout(this);
@@ -105,8 +121,8 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     outer->addWidget(tabs);
     auto* general = new QWidget;
     auto* top = new QVBoxLayout(general);
-    tabs->addTab(general, tr("Station"));
-    tabs->addTab(rig_tab(a, inputs, outputs), tr("Rig"));
+    tabs->addTab(new Scroll(general), tr("Station"));
+    tabs->addTab(new Scroll(rig_tab(a, inputs, outputs)), tr("Rig"));
     const auto group = [&](const QString& title) {
         auto* g = new QGroupBox(title);
         auto* f = new QFormLayout(g);
@@ -214,6 +230,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     port_row->addWidget(data_port);
     net->addRow(tr("VARA command port"), port_row);
     kiss_port_ = spin(1, 65535, a.kiss_port);
+    kiss_port_->setObjectName(QStringLiteral("kiss_port"));
     net->addRow(tr("KISS port"), kiss_port_);
 
     auto* rec = group(tr("Recording"));
@@ -265,7 +282,28 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
         accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    outer->addWidget(buttons);
+    restart_note_ = new QLabel(tr("These changes restart the modem: sessions will be dropped and clients disconnected."));
+    restart_note_->setObjectName(QStringLiteral("restart_warning"));
+    restart_note_->setStyleSheet(QStringLiteral("color: #d03030"));
+    restart_note_->setWordWrap(true);
+    auto* bar = new QHBoxLayout;
+    bar->addWidget(restart_note_, 1);
+    bar->addWidget(buttons);
+    outer->addLayout(bar);
+    const auto note = [this, running] {
+        app::Args b = base_;
+        apply_to(b);
+        restart_note_->setVisible(running && app::needs_restart(base_, b));
+    };
+    // every editor's change; a few (the password boxes, the Test buttons) can't move it, which is harmless
+    for (auto* w : findChildren<QLineEdit*>()) connect(w, &QLineEdit::textChanged, this, note);
+    for (auto* w : findChildren<QComboBox*>()) connect(w, &QComboBox::currentIndexChanged, this, note);
+    for (auto* w : findChildren<QCheckBox*>()) connect(w, &QCheckBox::toggled, this, note);
+    for (auto* w : findChildren<QSpinBox*>()) connect(w, &QSpinBox::valueChanged, this, note);
+    for (auto* w : findChildren<QDoubleSpinBox*>()) connect(w, &QDoubleSpinBox::valueChanged, this, note);
+    for (auto* w : findChildren<QSlider*>()) connect(w, &QSlider::valueChanged, this, note);
+    note();
+    if (const QScreen* s = screen()) resize(sizeHint().boundedTo(s->availableGeometry().size() * 0.9));
 }
 
 // SSTVAE's Rig tab (gui/settings_dialog.cpp rig_tab), in a plain form.
@@ -311,6 +349,7 @@ QWidget* SettingsDialog::rig_tab(const app::Args& a, const QStringList& inputs, 
     rate_->setToolTip(tr("TCI: 8000, 24000 or 48000"));
     audio->addRow(tr("Sample rate (Hz)"), rate_);
     volume_ = new QDoubleSpinBox;
+    volume_->setObjectName(QStringLiteral("output_volume"));
     volume_->setRange(-60.0, 20.0);
     volume_->setDecimals(1);
     volume_->setSuffix(tr(" dB"));

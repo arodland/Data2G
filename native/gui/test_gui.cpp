@@ -6,6 +6,8 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QSlider>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -20,6 +22,8 @@
 #include <QTcpSocket>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QThread>
 
@@ -37,6 +41,8 @@
 #include "constellation.hpp"
 #include "waterfall.hpp"
 #include "settings_dialog.hpp"
+#include "app/settings.hpp"
+#include "app/station.hpp"
 
 using namespace data2g;
 namespace check = data2g::check;
@@ -156,6 +162,13 @@ void test_noise_rule_slider() {
     check::is_true(e.noise_rule == 2.0, "a weight past the slider's top kept when untouched");
 }
 
+// The pages scroll, so the dialog shrinks to fit a 768-pixel screen (#170).
+void test_settings_fit_small_screen() {
+    check::current_step = "settings fit a small screen";
+    gui::SettingsDialog d(app::Args{}, {}, {});
+    check::is_true(d.minimumSizeHint().height() < 600, "minimum height under 600 px");
+}
+
 // Decoder effort's slider: 15-40 in steps of 5, 25 by default; a command line's cap off a step (or past the
 // ends) is kept when it isn't touched.
 void test_decoder_effort() {
@@ -180,21 +193,57 @@ void test_decoder_effort() {
     }
 }
 
+// LIVE_SETTINGS change without a restart; anything else restarts, and the dialog says so while the station runs.
+void test_restart_warning() {
+    check::current_step = "restart warning";
+    const app::Args a;
+    app::Args b = a;
+    b.mycall = "N0LIVE";
+    b.output_volume = -3.0;
+    b.noise_rule = 0.5;
+    b.decoder_effort = 30;
+    b.cw_id = "add";
+    b.ptt_on_delay_ms = 200;
+    check::is_true(!app::needs_restart(a, b), "live settings: no restart");
+    b.record = true;
+    b.record_dir = "elsewhere";
+    check::is_true(!app::needs_restart(a, b), "recording: no restart");
+    for (auto set : {+[](app::Args& x) { x.kiss_port = 9000; }, +[](app::Args& x) { x.decode_worker = false; },
+                     +[](app::Args& x) { x.tci = true; }, +[](app::Args& x) { x.kiss_bw = 500; }}) {
+        app::Args c = b;
+        set(c);
+        check::is_true(app::needs_restart(a, c), "anything else: a restart");
+    }
+    gui::SettingsDialog d(a, {}, {}, true);
+    auto* note = d.findChild<QLabel*>(QStringLiteral("restart_warning"));
+    check::is_true(note && note->isHidden(), "no warning at first");
+    d.findChild<QDoubleSpinBox*>(QStringLiteral("output_volume"))->setValue(-6.0);
+    check::is_true(note->isHidden(), "volume: no warning");
+    auto* kiss = d.findChild<QSpinBox*>(QStringLiteral("kiss_port"));
+    kiss->setValue(9000);
+    check::is_true(!note->isHidden(), "KISS port: the warning");
+    kiss->setValue(a.kiss_port);
+    check::is_true(note->isHidden(), "changed back: no warning");
+    gui::SettingsDialog stopped(a, {}, {}, false);
+    stopped.findChild<QSpinBox*>(QStringLiteral("kiss_port"))->setValue(9000);
+    check::is_true(stopped.findChild<QLabel*>(QStringLiteral("restart_warning"))->isHidden(), "a stopped station: no warning");
+}
+
 void test_settings(const QTemporaryDir& dir) {
     check::current_step = "settings";
     const QString ini = dir.filePath(QStringLiteral("settings.ini"));
     const app::Args a = persisted();
     {
         QSettings s(ini, QSettings::IniFormat);
-        gui::save_settings(s, a);
+        app::save_settings(s, a);
     }
     QSettings s(ini, QSettings::IniFormat);
-    const app::Args b = gui::load_settings(s);
+    const app::Args b = app::load_settings(s);
     check::is_true(b == a, "settings round trip through QSettings");
     // unset optionals come back unset
     const app::Args none;
-    gui::save_settings(s, none);
-    const app::Args c = gui::load_settings(s, a);
+    app::save_settings(s, none);
+    const app::Args c = app::load_settings(s, a);
     check::is_true(c == none, "cleared callsign and devices round trip");
 
     gui::SettingsDialog d(a, {QStringLiteral("Built-in"), QStringLiteral("USB Audio")}, {QStringLiteral("Built-in")});
@@ -241,12 +290,42 @@ void test_settings(const QTemporaryDir& dir) {
     legacy.setValue("rigctld_host", QStringLiteral("old.lan"));
     legacy.setValue("rigctld_port", 4534);
     legacy.setValue("host", QStringLiteral("0.0.0.0"));
-    const app::Args l = gui::load_settings(legacy);
+    const app::Args l = app::load_settings(legacy);
     check::is_true(l.rig && l.rig_device == "old.lan:4534" && l.listen == "0.0.0.0", "older settings: rigctld's address, host");
     legacy.setValue("rigctld_port", 0);
-    check::is_true(!gui::load_settings(legacy).rig, "older settings: rigctld port 0 is no rig");
-    gui::save_settings(legacy, l);
+    check::is_true(!app::load_settings(legacy).rig, "older settings: rigctld port 0 is no rig");
+    app::save_settings(legacy, l);
     check::is_true(!legacy.contains("rigctld_port") && !legacy.contains("host"), "...and saving drops the old keys");
+}
+
+// open_config: data2g.conf in the config dir, the old store moved to it once;
+// --config's file instead, with nothing moved.
+void test_config_file(const QTemporaryDir& dir) {
+#ifdef Q_OS_LINUX  // the old store an ini file renamed; XDG_CONFIG_HOME the config dir
+    check::current_step = "config file";
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, dir.filePath(QStringLiteral("old")));
+    qputenv("XDG_CONFIG_HOME", dir.filePath(QStringLiteral("new")).toUtf8());
+    QString old_file;
+    {
+        QSettings old(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+        old.setValue("mycall", QStringLiteral("OLD1"));
+        old_file = old.fileName();
+    }
+    const QString conf = dir.filePath(QStringLiteral("new/Data2G/data2g.conf"));
+    char prog[] = "data2g-gui";
+    char* bare[] = {prog};
+    const QString other = dir.filePath(QStringLiteral("other.conf"));
+    QByteArray other_arg = ("--config=" + other).toLocal8Bit();
+    char* with[] = {prog, other_arg.data()};
+    check::is_true(app::open_config(2, with)->fileName() == other && QFile::exists(old_file) && !QFile::exists(conf),
+                   "--config: its file, nothing moved");
+    const auto s = app::open_config(1, bare);
+    check::is_true(s->fileName() == conf && s->value("mycall").toString() == "OLD1" && !QFile::exists(old_file),
+                   "data2g-gui.conf moved to data2g.conf");
+    check::is_true(app::settings_store()->fileName() == conf, "settings_store() opens the same file");
+#else
+    (void)dir;
+#endif
 }
 
 void test_window(const QTemporaryDir& dir) {
@@ -419,6 +498,35 @@ void test_window(const QTemporaryDir& dir) {
     QTcpSocket again;
     again.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(a.command_port));
     check::is_true(again.waitForConnected(5000), "command port open after the restart");
+
+    // live settings: the client stays; anything else is the caller's restart
+    check::current_step = "window: live update";
+    app::Args live = w.station().args();
+    live.output_volume -= 3.0;
+    live.mycall = "N2GUI";
+    w.apply_settings(live);
+    check::is_true(w.station().args() == live, "the station's args are the new ones");
+    wait_for([] { return false; }, 300);  // a dropped client would show by now
+    check::is_true(again.state() == QAbstractSocket::ConnectedState, "the command client kept");
+    // recording on: a run folder of its own, started where the engine is (its start event)
+    live.record = true;
+    live.record_dir = dir.filePath(QStringLiteral("live-rec")).toStdString();
+    w.apply_settings(live);
+    const auto runs = [&] {
+        const QDir d(QString::fromStdString(live.record_dir));
+        const auto l = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        return l.isEmpty() ? QString() : d.filePath(l.first());
+    };
+    check::is_true(wait_for([&] { return QFile::exists(runs() + QStringLiteral("/events.jsonl")); }, 5000),
+                   "recording started live");
+    check::is_true(again.state() == QAbstractSocket::ConnectedState, "the command client kept through it");
+    live.record = false;
+    w.apply_settings(live);
+    live.kiss_port += 1;
+    w.apply_settings(live);
+    check::is_true(wait_for([&] { return again.state() != QAbstractSocket::ConnectedState; }, 5000),
+                   "a port change restarts: the client dropped");
+    check::is_true(w.station().running() && w.station().args() == live, "running on the new port");
     check::current_step = "window: close";
 }
 
@@ -484,8 +592,11 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QTemporaryDir dir;
     test_settings(dir);
+    test_config_file(dir);
     test_noise_rule_slider();
     test_decoder_effort();
+    test_settings_fit_small_screen();
+    test_restart_warning();
     test_waterfall_tx();
     test_constellation_plot();
     test_window(dir);

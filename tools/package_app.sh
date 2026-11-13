@@ -8,8 +8,8 @@
 # that would mean teaching install() rules to deploy Qt, for containers that
 # are three lines of hdiutil, appimagetool and makensis.
 #
-# Stages data2g-host (required), and data2g-gui, data2g-monitor and
-# data2g-audio-check when they were built. Layout:
+# Stages data2g-host (required), and data2g-gui, data2g-web, data2g-monitor
+# and data2g-audio-check when they were built. Layout:
 #   Windows  dist/data2g/*.exe, flat, windeployqt beside them
 #   macOS    dist/Data2G.app: the GUI bundle, or a bundle made here around
 #            data2g-host when there is no GUI; other tools in Contents/MacOS
@@ -36,7 +36,7 @@ exe_suffix=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; esac
 built() { [ -f "$BUILD_DIR/$1$exe_suffix" ] || [ -d "$BUILD_DIR/$1.app" ]; }
 apps=()
-for a in data2g-host data2g-gui data2g-monitor data2g-audio-check; do
+for a in data2g-host data2g-gui data2g-web data2g-monitor data2g-audio-check; do
     built "$a" && apps+=("$a")
 done
 if [ ! -f "$BUILD_DIR/data2g-host$exe_suffix" ]; then
@@ -220,8 +220,9 @@ Darwin)
     [ "$fatal" -eq 0 ] || exit 1
 
     # The launcher: points the loader and Qt at the bundled copies. Runs the
-    # GUI when there is one, the host otherwise; `data2g host ARGS` always
-    # runs the host (the AppImage's way in for headless use).
+    # GUI when there is one, the host otherwise; `data2g host ARGS` and
+    # `data2g web ARGS` always run the host or the web station (the
+    # AppImage's ways in for headless use).
     cat > "$app/data2g" <<'LAUNCH'
 #!/bin/sh
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -230,6 +231,14 @@ export QT_PLUGIN_PATH="$here/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 if [ "${1:-}" = host ]; then
     shift
     exec "$here/bin/data2g-host" "$@"
+fi
+if [ "${1:-}" = web ]; then
+    shift
+    if [ ! -x "$here/bin/data2g-web" ]; then
+        echo "data2g: this build has no data2g-web" >&2
+        exit 1
+    fi
+    exec "$here/bin/data2g-web" "$@"
 fi
 if [ -x "$here/bin/data2g-gui" ]; then
     # Native dialogs through the portal, when the caller has not chosen.

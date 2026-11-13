@@ -45,8 +45,10 @@ class QTcpSocket;
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <cstddef>
+#include <functional>
 #include <span>
 
 #include "app/log.hpp"
@@ -73,7 +75,9 @@ namespace monitor {
 struct Dump;
 }
 namespace rig {
+class RigBackend;
 class RigController;
+struct HamlibConfig;
 }  // namespace rig
 }  // namespace data2g
 
@@ -120,6 +124,11 @@ public:
     Station(const Station&) = delete;
     Station& operator=(const Station&) = delete;
 
+    // What start() opens the rig with; empty: Hamlib (rig::make_hamlib_backend).
+    // The Android app's reaches USB and Bluetooth radios (rig/bridged.hpp).
+    using RigFactory = std::function<std::unique_ptr<rig::RigBackend>(const rig::HamlibConfig&)>;
+    void set_rig_factory(RigFactory f) { rig_factory_ = std::move(f); }
+
     // Listens, opens audio and the rig, starts the threads. Throws
     // UsageError, std::invalid_argument (no such audio device) or
     // std::runtime_error (a port taken, a device that won't open); what it
@@ -155,6 +164,12 @@ public:
     // command clients told DISCONNECTED (host::Host::abort_session).
     void abort_session();
     std::vector<monitor::Dump> take_dumps();  // since the last call (the newest 256 kept)
+    // New settings without a restart, sessions and clients kept: true when
+    // running and only LIVE_SETTINGS differ (app/settings.hpp); false: the
+    // caller restarts. Volume, PTT delays, effort and CW ID from the next
+    // burst; the noise rule from the next session; the callsign as MYCALL's;
+    // recording into a new run folder (record_path) from the next block.
+    bool update(const Args& b);
 
 private:
     struct Outbox;
@@ -177,6 +192,7 @@ private:
     void tap(std::span<const double> x, bool tx);
 
     Args a_;
+    RigFactory rig_factory_;
     QObject ctx_;  // queued calls from other threads land here, on the owner's thread
     std::unique_ptr<kisslink::KissLink> link_;
     std::unique_ptr<arq::Engine> engine_;

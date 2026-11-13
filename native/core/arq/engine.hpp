@@ -69,6 +69,9 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 // the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
 // after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 inline constexpr double ID_INTERVAL_S = 600.0;
+// PENDING / CANCELPENDING (engine.py PENDING_MODES): Engine::pending "off", "fsk" (ROBUST_CONNECT),
+// "ofdm" (the caps' first-try connect modes), "all"; a raised PENDING's burst read, or this past its end: resolved
+inline constexpr double PENDING_SLACK_S = 3.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
 // Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
 // how long an armed HAND LISTEN waits for the burst that anchors its window.
@@ -100,7 +103,10 @@ inline constexpr double CW_FORCE_S = 600.0;
 // engine; flush() waits until everything handed over is on disk. Without it each call writes before it returns.
 class Recorder {
 public:
-    Recorder(const std::string& dir, const std::string& call, bool async = false);  // throws std::runtime_error
+    // `t0`: the engine time its audio starts at (a recording turned on mid-run); its events' times are from there,
+    // so a time is still its audio's offset. Throws std::runtime_error.
+    Recorder(const std::string& dir, const std::string& call, bool async = false, double t0 = 0.0);
+    double t(double engine_t) const { return engine_t - t0_; }  // an event's time
     ~Recorder();
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
@@ -116,6 +122,7 @@ private:
     void loop();
 
     std::string dir_;
+    double t0_;
     std::ofstream log_, audio_;
     int n_ = 0;
     bool async_;
@@ -217,6 +224,9 @@ public:
     // subclass overriding a seam calls it from its own destructor, before
     // its part is gone.
     void stop();
+    // Session stage: record to `dir` from the next block on (a new Recorder, the old one closed); empty: stop.
+    // Throws std::runtime_error (can't record there), recording then off.
+    void set_record_dir(const std::string& dir);
     void flush_recorder() {
         if (rec_) rec_->flush();
     }
@@ -273,14 +283,16 @@ public:
     void set_call(const std::string& call, const std::vector<std::string>& aliases = {});
     void disconnect() { session_->disconnect(); }  // gracefully: the peer is told, what's queued still goes
     void abort();
-    void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
+    // throws std::runtime_error while a session is under way. `tries`: CONNECTs sent before giving up
+    // (nullopt: the session's tune, CONNECT_TRIES)
+    void connect(const std::string& peer, int cap, std::optional<int> tries = std::nullopt);
     void set_chat(bool on);
     // engine.py's: a connected session with no data this long disconnects; this session and the next.
     // nullopt: the session's own tuning (IDLE_CLOSE_S).
     void set_idle_close(std::optional<double> s);
     double idle_close_s() const { return session_->tune.idle_close_s; }
     // Host notifications since the last call, as engine.py's events() words them: "CONNECTED peer",
-    // "DISCONNECTED why", "CQFRAME call cap", "ID call key".
+    // "DISCONNECTED why", "CQFRAME call cap", "ID call key", "PENDING", "CANCELPENDING".
     std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
@@ -289,11 +301,16 @@ public:
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
     std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
+    std::string pending = "fsk";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
     const std::string* tx_submode() const { return tx_ ? &tx_->burst->submode : nullptr; }
     std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
+    // Session stage, from the next burst keyed: EngineConfig's ptt_delay_s.
+    void set_ptt_delay(double s) { ptt_delay_ = static_cast<std::int64_t>(s * config::FS); }
+    // Session stage, from the next session on: EngineConfig's noise_rule.
+    void set_noise_rule(double w) { cfg_.noise_rule = w; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
     // (port, frame)s heard for KISS clients since the last call
     std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
@@ -388,7 +405,7 @@ private:
     modem::Accept accept_;
     receiver::Receiver receiver_;
     receiver::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
-    std::int64_t ptt_delay_;
+    std::atomic<std::int64_t> ptt_delay_;  // set_ptt_delay on the session stage; read on both
     std::optional<Recorder> rec_;
     std::int64_t n_ = 0;
     std::optional<Tx> tx_;
@@ -398,6 +415,12 @@ private:
     std::optional<double> idle_close_;  // set_idle_close
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
     std::vector<std::string> events_;  // host notifications from outside the session
+    struct Pend {
+        double deadline;
+        bool heard;  // its burst has been read
+    };
+    std::optional<Pend> pend_;  // PENDING raised
+    void pending_resolve();
     std::vector<std::pair<int, Bytes>> kiss_rx_;
     bool tx_kiss_ = false;  // the burst on air is a KISS one
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited

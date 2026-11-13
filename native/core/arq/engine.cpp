@@ -204,7 +204,7 @@ std::vector<std::uint8_t> npz_f32(const std::string& name, std::span<const float
     return out;
 }
 
-Recorder::Recorder(const std::string& dir, const std::string& call, bool async) : dir_(dir), async_(async) {
+Recorder::Recorder(const std::string& dir, const std::string& call, bool async, double t0) : dir_(dir), t0_(t0), async_(async) {
     std::filesystem::create_directories(dir_);
     log_.open(dir_ + "/events.jsonl", std::ios::app);
     audio_.open(dir_ + "/audio_in.f16", std::ios::app | std::ios::binary);
@@ -299,7 +299,7 @@ std::string Recorder::rx(double t, std::span<const double> audio, const receiver
                                                         static_cast<std::streamsize>(npz.size()));
         },
         bytes);
-    event("rx", {{"t", json_num(t)},
+    event("rx", {{"t", json_num(this->t(t))},
                  {"file", json_str(name)},
                  {"submode", json_str(spec_name(header))},
                  {"n_cw", std::to_string(header.n_cw())},
@@ -403,6 +403,14 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
     if (idle()) listen(session_->state == SessionState::LISTEN);
 }
 
+void Engine::set_record_dir(const std::string& dir) {
+    rec_.reset();  // its writer drains first
+    cfg_.record_dir.clear();
+    if (dir.empty()) return;
+    rec_.emplace(dir, call_, cfg_.record_async, now());  // now(): the next block's start, its audio's first sample
+    cfg_.record_dir = dir;
+}
+
 void Engine::abort() {
     abort_pending_ = true;
     tx_.reset();
@@ -412,10 +420,11 @@ void Engine::abort() {
     new_session();
 }
 
-void Engine::connect(const std::string& peer, int cap) {
+void Engine::connect(const std::string& peer, int cap, std::optional<int> tries) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     pack_call(peer);  // invalid_argument before any state changes
     new_session();
+    if (tries) session_->tune.connect_tries = *tries;
     session_->connect(peer, cap, now());
 }
 
@@ -429,7 +438,15 @@ void Engine::set_chat(bool on) {
     session_->set_chat(on);
 }
 
+void Engine::pending_resolve() {
+    // CANCELPENDING unless it connected (CONNECTED says so)
+    if (!pend_ || !(pend_->heard || now() > pend_->deadline)) return;
+    pend_.reset();
+    if (session_->state != SessionState::CONNECTED) events_.emplace_back("CANCELPENDING");
+}
+
 std::vector<std::string> Engine::events() {
+    pending_resolve();
     std::vector<std::string> ev = std::move(events_);
     events_.clear();
     ev.insert(ev.end(), session_->events.begin(), session_->events.end());
@@ -788,7 +805,7 @@ Engine::Done Engine::process(Block& b) {
                 cw_plan({marker}, {len - static_cast<std::size_t>(ptt_delay_)}, t);  // a Hand is covered by CW planning like any other transmission; start_tx's length convention: the PTT delay prefix apart
                 hand_event("HAND SENT " + std::to_string(ht.channel));
                 if (rec_)
-                    rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
+                    rec_->event("hand_tx", {{"t", json_num(rec_->t(now()))}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
             } else {
                 log_write(LOG, INFO, format("hand %d not sent: busy past the slot", ht.channel));
                 hand_event("HAND DROPPED " + std::to_string(ht.channel));
@@ -907,8 +924,19 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             noise_.mark(start, start + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
+            pending_resolve();  // a superseded header's
+            if (m && !pend_ && h->header.n_cw() == 1 && session_->state == SessionState::LISTEN && pending != "off") {
+                const std::string_view n = m->name;
+                bool hit = pending != "ofdm" && n == ROBUST_CONNECT;
+                for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
+                if (hit) {
+                    pend_ = Pend{start + burst_seconds(*m, 1) + PENDING_SLACK_S, false};
+                    events_.emplace_back("PENDING");
+                }
+            }
             continue;
         }
+        if (pend_) pend_->heard = true;  // resolved once the session has read it (events)
         heard_span_ = std::move(span_);
         span_.reset();
         receiver::BurstEvent ev = std::holds_alternative<receiver::DecodeRequest>(it)
@@ -1356,7 +1384,7 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
             }
             const double seconds =
                 static_cast<double>(lens[j] + (j == 0 ? static_cast<std::size_t>(ptt_delay_) : 0)) / config::FS;
-            rec_->event("tx", {{"t", json_num(t)},
+            rec_->event("tx", {{"t", json_num(rec_->t(t))},
                                {"submode", json_str(burst->submode)},
                                {"burst_seq", std::to_string(burst->burst_seq)},
                                {"slots", slots + "]"},

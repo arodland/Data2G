@@ -1,6 +1,12 @@
 #include "app/settings.hpp"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
+#include <QStandardPaths>
+
+#include <string_view>
 
 #include <utility>
 
@@ -35,10 +41,43 @@ const RigString RIG_STRINGS[] = {
 // Keys older versions saved: read once, dropped on save.
 const char* const OLD_KEYS[] = {"host", "kiss_address", "rigctld_host", "rigctld_port"};
 
+QString default_config() {
+    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QStringLiteral("/Data2G/data2g.conf");
+}
+QString g_config;  // open_config's choice
+
+// The old store (QSettings' native one for Data2G/data2g-gui) to `to`: on
+// Linux an ini file of the same format, renamed; elsewhere (the Windows
+// registry, a macOS plist) copied key by key, the old one left in place.
+void migrate_old(const QString& to) {
+    QSettings old(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+    old.setFallbacksEnabled(false);  // not /etc/xdg or Data2G.conf: only its own file
+    if (old.allKeys().isEmpty()) return;
+    QDir().mkpath(QFileInfo(to).absolutePath());
+    if (old.fileName().endsWith(QStringLiteral(".conf")) && QFile::rename(old.fileName(), to)) return;
+    QSettings neu(to, QSettings::IniFormat);
+    for (const QString& k : old.allKeys()) neu.setValue(k, old.value(k));
+}
+
 }  // namespace
 
+std::unique_ptr<QSettings> open_config(int argc, char** argv) {
+    QString path;
+    for (int i = 1; i < argc; ++i) {  // parse() takes the flag too; a missing value is its error
+        const std::string_view arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) path = QString::fromLocal8Bit(argv[++i]);
+        else if (arg.starts_with("--config=")) path = QString::fromLocal8Bit(argv[i] + 9);
+    }
+    if (path.isEmpty()) {
+        path = default_config();
+        if (!QFile::exists(path)) migrate_old(path);
+    }
+    g_config = path;
+    return settings_store();
+}
+
 std::unique_ptr<QSettings> settings_store() {
-    return std::make_unique<QSettings>(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+    return std::make_unique<QSettings>(g_config.isEmpty() ? default_config() : g_config, QSettings::IniFormat);
 }
 
 QVariantMap settings_map(const Args& a) {
@@ -46,6 +85,7 @@ QVariantMap settings_map(const Args& a) {
     m["mycall"] = qs(a.mycall);
     m["input_device"] = qs(a.input_device);
     m["output_device"] = qs(a.output_device);
+    m["broadcast_mode"] = qs(a.broadcast_mode);
     m["tci"] = a.tci;
     m["tci_host"] = qs(a.tci_host);
     m["sample_rate"] = a.sample_rate;
@@ -79,6 +119,7 @@ Args from_settings(const QVariantMap& m, Args a) {
     if (m.contains("mycall")) a.mycall = opt(m.value("mycall").toString());
     if (m.contains("input_device")) a.input_device = opt(m.value("input_device").toString());
     if (m.contains("output_device")) a.output_device = opt(m.value("output_device").toString());
+    if (m.contains("broadcast_mode")) a.broadcast_mode = opt(m.value("broadcast_mode").toString());
     a.tci = m.value("tci", a.tci).toBool();
     a.tci_host = str("tci_host", a.tci_host);
     a.sample_rate = m.value("sample_rate", a.sample_rate).toInt();
@@ -119,6 +160,16 @@ Args load_settings(QSettings& s, Args base) {
     QVariantMap m;
     for (const QString& k : s.allKeys()) m[k] = s.value(k);
     return from_settings(m, std::move(base));
+}
+
+const QStringList LIVE_SETTINGS = {"mycall",          "output_volume",  "ptt_on_delay_ms", "ptt_off_delay_ms", "live_constellation",
+                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm",           "record",
+                                   "record_dir"};
+
+bool needs_restart(const Args& from, const Args& to) {
+    QVariantMap live = settings_map(from);
+    for (auto it = live.begin(); it != live.end();) it = LIVE_SETTINGS.contains(it.key()) ? std::next(it) : live.erase(it);
+    return from_settings(live, to) != from;  // `to` with from's live values: anything left differs
 }
 
 void save_settings(QSettings& s, const Args& a) {

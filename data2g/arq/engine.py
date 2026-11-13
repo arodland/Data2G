@@ -37,7 +37,7 @@ from . import nod as N
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
-from .policy import GearShifter
+from .policy import CONNECT, ROBUST_CONNECT, GearShifter
 
 log = logging.getLogger("data2g.engine")
 
@@ -72,6 +72,16 @@ ENERGY_FLOOR_DB = 3.0
 # the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
 # after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 ID_INTERVAL_S = 600.0
+# PENDING / CANCELPENDING (host --pending): a header that may be a
+# CONNECT (one codeword in a connect mode) while listening raises PENDING,
+# before the body, and so the callee, is known. Its burst then not
+# connecting, or PENDING_SLACK_S past its end with no result, cancels it.
+# Scanners hold a frequency on PENDING. The header carries no frame type,
+# so ID, CQ and other stations' connects in those modes raise it too
+# (docs/pending-header.md: a protocol change that would not).
+PENDING_MODES = {"off": frozenset(), "fsk": frozenset({ROBUST_CONNECT}), "ofdm": frozenset(CONNECT.values()),
+                 "all": frozenset({ROBUST_CONNECT, *CONNECT.values()})}
+PENDING_SLACK_S = 3.0
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
@@ -194,6 +204,8 @@ class Engine:
         self._id_pending: list | None = None  # [session, earliest time]: its last ID, after it closed
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
         self.cw_id = "off"  # CW_ID_MODES
+        self.pending = "fsk"  # PENDING_MODES' key
+        self._pend: list | None = None  # PENDING raised: [deadline, its burst heard]
         self.cw_wpm = cwid.WPM
         self._hand_round = "full"  # hand_round's
         self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
@@ -290,11 +302,13 @@ class Engine:
         self.cw.reset()
         self._new_session()
 
-    def connect(self, peer: str, cap: int):
+    def connect(self, peer: str, cap: int, tries: int | None = None):
+        """`tries`: CONNECTs sent before giving up (None: session.CONNECT_TRIES)."""
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
         F.pack_call(peer)  # ValueError before any state changes
         self._new_session()
+        self.session.connect_tries = tries
         self.session.connect(peer, cap, self.now)
 
     def set_chat(self, on: bool):
@@ -434,12 +448,22 @@ class Engine:
         for line in lines + ([short] if short is not None else []) + ["HAND END"]:
             self._hand_event(line)
 
+    def _pending_resolve(self):
+        """A PENDING whose burst has been read, or is overdue: CANCELPENDING
+        unless it connected (CONNECTED says so)."""
+        p = self._pend
+        if p is not None and (p[1] or self.now > p[0]):
+            self._pend = None
+            if self.session.state != S.CONNECTED:
+                self._events.append("CANCELPENDING")
+
     def events(self) -> list[str]:
         """Host notifications since the last call, oldest first, one line of
         space-separated words each (the host splits them; native Engine::events
         gives the same lines): "CONNECTED peer", "DISCONNECTED why" (why may
         be several words), "CQFRAME call cap" (cap: policy.CAP_HZ's key),
         "ID call key" (key: the session key, decimal)."""
+        self._pending_resolve()
         ev, self.session.events[:] = self._events + list(self.session.events), []
         self._events = []
         return ev
@@ -705,7 +729,14 @@ class Engine:
                 start = t - (ev["stream_end"] - ev["start"] + LEADIN_SAMPLES) / FS
                 self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 self._span = (start, start + burst_seconds(spec, ev["n_cw"]), spec.name) if spec else None
+                self._pending_resolve()  # a superseded header's
+                if (self._pend is None and ev["n_cw"] == 1 and self.session.state == S.LISTEN
+                        and ev["spec"].name in PENDING_MODES[self.pending]):
+                    self._pend = [start + burst_seconds(spec, 1) + PENDING_SLACK_S, False]
+                    self._events.append("PENDING")
                 continue
+            if self._pend is not None:
+                self._pend[1] = True  # resolved once the session has read it (events)
             span, self._span = self._span, None
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None

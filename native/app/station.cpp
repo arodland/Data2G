@@ -17,6 +17,7 @@
 #include <pthread.h>
 #endif
 #include "app/realtime.hpp"
+#include "app/settings.hpp"
 #include "app/tcp_servers.hpp"
 #include "app/transmitter.hpp"
 #include "audio/audio.hpp"
@@ -306,6 +307,43 @@ void Station::abort_session() {
     });
 }
 
+bool Station::update(const Args& b) {
+    if (!running_ || needs_restart(a_, b)) return false;
+    const Args a = std::exchange(a_, b);
+    tx_->set_gain(std::pow(10.0, b.output_volume / 20));
+    tx_->set_off_delay(b.ptt_off_delay_ms / 1000.0);
+    codes::set_ldpc_iters(b.decoder_effort);
+    if (b.live_constellation != a.live_constellation) {
+        live_asked_ = false;  // on: the next take_constellation asks
+        if (!b.live_constellation) engine_->set_preview(false);
+    }
+    const bool rec = b.record != a.record || (b.record && b.record_dir != a.record_dir);
+    engine_->post([this, a, b, dir = rec ? std::optional(record_path(b)) : std::nullopt] {
+        auto& e = *engine_;
+        host_->output_volume = b.output_volume;
+        e.set_ptt_delay(b.ptt_on_delay_ms / 1000.0);
+        e.set_noise_rule(b.noise_rule);
+        e.cw_id = b.cw_id;
+        e.cw_wpm = b.cw_wpm;
+        if (b.mycall != a.mycall) {
+            try {
+                e.set_call(b.mycall.value_or("NOCALL"), e.aliases());
+            } catch (const std::invalid_argument&) {
+                log_line(WARNING, "mycall " + b.mycall.value_or("") + ": not a callsign; kept " + e.call());
+            }
+        }
+        if (dir) {
+            try {
+                e.set_record_dir(*dir);
+                logf(INFO, "recording to %s", dir->empty() ? "(off)" : dir->c_str());
+            } catch (const std::exception& ex) {
+                log_line(ERROR, std::string("recording off: ") + ex.what());
+            }
+        }
+    });
+    return true;
+}
+
 std::vector<monitor::Dump> Station::take_dumps() {
     if (!monitor_) return {};
     std::lock_guard lock(monitor_->mu);
@@ -441,6 +479,7 @@ void Station::start() {
         engine_->cw_id = a_.cw_id;
         engine_->cw_wpm = a_.cw_wpm;
         engine_->hand_round = a_.hand_decoder;
+        engine_->pending = a_.pending;
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig
@@ -549,7 +588,7 @@ void Station::start() {
             const rig::HamlibConfig hc = hamlib_config(a_);
             rig::RigConfig rc;
             rc.poll_interval_s = a_.rig_poll_interval;  // 0: key only, as tnc.Rigctld
-            rig_->start(rig::make_hamlib_backend(hc), rc);
+            rig_->start(rig_factory_ ? rig_factory_(hc) : rig::make_hamlib_backend(hc), rc);
             rig::RigController* r = rig_.get();
             if (hc.ptt_method != rig::PttMethod::Vox) {
                 ptt = [set = r->ptt_function()](bool on) {  // no polls while keyed

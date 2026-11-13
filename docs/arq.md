@@ -930,6 +930,11 @@ As built (data2g/arq/policy.py):
     as the monitor shows it) of the last burst decoded from the session's peer.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
+  - **RETRIES** answers `RETRIES n`: the CONNECT retries after the first try
+    (default 4, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
+    only, 0-20: OK, else WRONG. They apply to this command client's later
+    CONNECTs, not one under way, and go back to the default when it leaves.
+    Retries after the first go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart.
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).
@@ -990,8 +995,15 @@ As built (data2g/arq/policy.py):
         records acked whole. From it: on air unacked, the peer may have it.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED [reason],
   BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
-  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, and a
-  Data2G-specific `MODE name`.
+  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, PENDING /
+  CANCELPENDING, and a Data2G-specific `MODE name`.
+- **PENDING:** while listening, a header that may be a CONNECT (one codeword
+  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT only, the default;
+  `ofdm` the caps' first-try modes; `all`; `off`) raises PENDING before the
+  body is read. CONNECTED follows if the burst connects. Otherwise
+  CANCELPENDING follows once it is read, or 3 s past its end. The header has
+  no frame type, so ID, CQ and other stations' connects raise it too;
+  docs/pending-header.md parks a protocol change that would not.
 
 ## 9a. Stream framing
 

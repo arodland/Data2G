@@ -126,7 +126,7 @@ void bind_engine(py::module_& m) {
             self.set_call(call, aliases.cast<std::vector<std::string>>());
         })
         .def("abort", &PyEngine::abort)
-        .def("connect", &PyEngine::connect)
+        .def("connect", &PyEngine::connect, py::arg("peer"), py::arg("cap"), py::arg("tries") = py::none())
         .def("set_chat", &PyEngine::set_chat)
         .def("set_idle_close", &PyEngine::set_idle_close)
         .def_property_readonly("idle_close_s", &PyEngine::idle_close_s)
@@ -150,6 +150,7 @@ void bind_engine(py::module_& m) {
         .def_property("n", &PyEngine::n, &PyEngine::set_n)
         .def_readwrite("id_interval_s", &PyEngine::id_interval_s)
         .def_readwrite("cw_id", &PyEngine::cw_id)
+        .def_readwrite("pending", &PyEngine::pending)
         .def_readwrite("cw_wpm", &PyEngine::cw_wpm)
         .def_property("hand_round", [](const PyEngine& s) { return s.hand_round; }, [](PyEngine& s, const std::string& v) {
             if (v != "full" && v != "cheap") throw py::value_error("hand_round: '" + v + "' not in ['cheap', 'full']");

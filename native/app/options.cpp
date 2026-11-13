@@ -30,12 +30,13 @@ namespace {
 
 // After "usage: PROG ", PROG padded to data2g-host's width so the columns line up.
 const char* USAGE =
-    "[-h] [--mycall MYCALL] [--listen ADDRESS] [--command-port COMMAND_PORT] [--kiss-port KISS_PORT]\n"
-    "                   [--kiss-busy-limit S] [--kiss-bw {2400,500}] [--broadcast-mode MODE]\n"
+    "[-h] [--config FILE] [--mycall MYCALL] [--listen ADDRESS] [--command-port COMMAND_PORT]\n"
+    "                   [--kiss-port KISS_PORT] [--kiss-busy-limit S] [--kiss-bw {2400,500}] [--broadcast-mode MODE]\n"
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
     "                   [--sample-rate SAMPLE_RATE] [--output-volume OUTPUT_VOLUME] [--ptt-on-delay-ms PTT_ON_DELAY_MS]\n"
     "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
-    "                   [--min-header-score MIN_HEADER_SCORE] [--buffer-credit BUFFER_CREDIT]\n"
+    "                   [--min-header-score MIN_HEADER_SCORE] [--pending {off,fsk,ofdm,all}]\n"
+    "                   [--buffer-credit BUFFER_CREDIT]\n"
     "                   [--record | --no-record] [--record-dir RECORD_DIR] [--log-level LOG_LEVEL]\n"
     "                   [--stats-interval S] [--list-modes] [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT]\n"
@@ -55,6 +56,8 @@ const char* HELP =
     "\nData2G server: VARA-style ARQ sessions and KISS broadcast on one radio\n\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
+    "  --config FILE         settings saved by data2g-gui/data2g-web, under these flags\n"
+    "                        (default: the config dir's Data2G/data2g.conf)\n"
     "  --mycall MYCALL\n"
     "  --listen ADDRESS      the VARA and KISS ports' address (default 127.0.0.1)\n"
     "  --command-port COMMAND_PORT  data is on the next port (default 8300)\n"
@@ -73,6 +76,9 @@ const char* HELP =
     "  --tx-lead-ms TX_LEAD_MS       TX audio queued ahead of the sound card: slack for a late audio step\n"
     "                                (default 100)\n"
     "  --min-header-score MIN_HEADER_SCORE (default 0.0)\n"
+    "  --pending {off,fsk,ofdm,all}  PENDING (CANCELPENDING after) on a header that may be a CONNECT while\n"
+    "                                listening: fsk, the robust connect mode only; ofdm, the first-try connect\n"
+    "                                modes; all, both (default fsk)\n"
     "  --buffer-credit BUFFER_CREDIT bytes queued for the next burst that BUFFER leaves out, at most, so VARA\n"
     "                                clients that throttle on it (Pat) keep a whole burst queued; -1: the next\n"
     "                                burst's full capacity, 0: report every unacked byte (plain VARA) (default -1)\n"
@@ -211,6 +217,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--buffer-credit", [&](auto& o, auto& v) { a.buffer_credit = i_(o, v); }},
         {"--record-dir", [&](auto&, auto& v) { a.record_dir = v; }},
         {"--log-level", [&](auto&, auto& v) { a.log_level = v; }},
+        {"--config", [](auto&, auto&) {}},  // read before parse(): app::open_config
         {"--stats-interval", [&](auto& o, auto& v) { a.stats_interval = d_(o, v); }},
         {"--noise-rule", [&](auto& o, auto& v) { a.noise_rule = d_(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
@@ -221,6 +228,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--cw-id", [&](auto&, auto& v) { a.cw_id = v; }},
         {"--cw-wpm", [&](auto& o, auto& v) { a.cw_wpm = d_(o, v); }},
         {"--hand-decoder", [&](auto&, auto& v) { a.hand_decoder = v; }},
+        {"--pending", [&](auto&, auto& v) { a.pending = v; }},
         {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
         {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
         {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
@@ -389,6 +397,8 @@ std::optional<std::string> check(const Args& a) {
     }
     if (a.cw_id != "off" && a.cw_id != "add" && a.cw_id != "only")
         return "--cw-id: invalid choice: '" + a.cw_id + "' (choose from off, add, only)";
+    if (a.pending != "off" && a.pending != "fsk" && a.pending != "ofdm" && a.pending != "all")
+        return "--pending: invalid choice: '" + a.pending + "' (choose from off, fsk, ofdm, all)";
     if (a.hand_decoder != "full" && a.hand_decoder != "cheap")
         return "--hand-decoder: invalid choice: '" + a.hand_decoder + "' (choose from full, cheap)";
     if (!(a.cw_wpm >= 15 && a.cw_wpm <= 40)) return "--cw-wpm: 15-40";

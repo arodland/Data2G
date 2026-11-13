@@ -54,6 +54,7 @@ public:
     bool ptt() const { return ptt_; }
     // Linear, as the constructor's; from the next block on.
     void set_gain(double gain) { gain_ = gain; }
+    void set_off_delay(double s) { keyer_.set_off_delay(s); }  // the Keyer's, from the next unkey
 
 private:
     void run();
