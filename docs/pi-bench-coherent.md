@@ -1,6 +1,19 @@
 # Pi 4 bench: #172 (coherent CPM) vs its base (2026-11-13)
 
-TLDR: live end-of-burst latency is fine (streaming: 39-110 ms). The streaming listener's CPU doubles, and its worst all-bands feed (270 ms) passes the 250 ms search hop: gate the coherent header read before merge.
+TLDR: live end-of-burst latency is fine (streaming: 39-110 ms). At 79c5289 the listener's CPU doubled and its worst all-bands feed (270 ms) passed the 250 ms search hop; f6a3832's pre-gate (`COH_PREGATE`) fixes it: CPM only 6.8% of a core (base 5.8%), all bands 21.2% (18.7%), worst feed 149 ms (99 ms).
+
+## After the pre-gate (f6a3832; same Pi session for both trees, `run2.sh`, raw `run2.txt`)
+
+| listening on noise, 120 s | base | #172 f6a3832 | #172 79c5289 |
+|---|---|---|---|
+| CPM only, mean | 1.16 ms (5.8%) | 1.36 ms (6.8%) | 3.07 ms (15.3%) |
+| CPM only, p99 / max feed | 16 / 31 ms | 26 / 81 ms | 62 / 139 ms |
+| all bands, mean | 3.73 ms (18.7%) | 4.23 ms (21.2%) | 6.38 ms (31.9%) |
+| all bands, p99 / max feed | 49 / 99 ms | 63 / 149 ms | 112 / 270 ms |
+
+Bursts unchanged by the gate (fsk16r25-r1/2 x9 at -15 dB 8/9 in 376 ms, fsk32r62-r1/2 x9 at -11 dB 8/9 in 815 ms).
+
+The rest of this page is the 79c5289 run.
 
 - Listening on noise: CPM only 5.7% -> 15.3% of a core, all bands 19.0% -> 31.9%; max feed CPM only 29 -> 139 ms, all bands 104 -> 270 ms. The cost is `coh_read_header` in `find` / `late_lock` at every detect placement.
 - Batch end to payload (the file-burst path, no streaming): converging bursts +5 to +40 ms; failing bursts run DD to the 1 s budget (fsk16r25 x9 at -18 dB: 137 -> 1135 ms). Live, the engine streams: those passes run while the burst arrives.
@@ -60,6 +73,5 @@ base (cordf): median 14.7 ms, p90 17.3, max 18.1. #172 (cohc4): median 9.9, p90 
 
 ## Before merge
 
-- Gate `coh_read_header` in `cpm._lock_header`: run it only where the noncoherent reading is close to passing (its score over a floor between noise's p99 and the coherent gate's useful range, calibrated on runs/cohcal), so noise windows skip it. Then re-measure listening.
+- Done in f6a3832: `coh_read_header` only where the noncoherent score reaches `COH_PREGATE`, and the `Received::passes` initializer warning.
 - Optional: on a burst the receiver will not decode at all (every pass fails), the remaining passes could stop early; streaming already hides most of this.
-- `cpm.cpp:875` warns of a missing `Received::passes` initializer (#172's streaming commit).
