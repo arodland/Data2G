@@ -156,6 +156,13 @@ void test_noise_rule_slider() {
     check::is_true(e.noise_rule == 2.0, "a weight past the slider's top kept when untouched");
 }
 
+// The pages scroll, so the dialog shrinks to fit a 768-pixel screen (#170).
+void test_settings_fit_small_screen() {
+    check::current_step = "settings fit a small screen";
+    gui::SettingsDialog d(app::Args{}, {}, {});
+    check::is_true(d.minimumSizeHint().height() < 600, "minimum height under 600 px");
+}
+
 // Decoder effort's slider: 15-40 in steps of 5, 25 by default; a command line's cap off a step (or past the
 // ends) is kept when it isn't touched.
 void test_decoder_effort() {
@@ -486,6 +493,7 @@ int main(int argc, char** argv) {
     test_settings(dir);
     test_noise_rule_slider();
     test_decoder_effort();
+    test_settings_fit_small_screen();
     test_waterfall_tx();
     test_constellation_plot();
     test_window(dir);
