@@ -30,6 +30,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
 | §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
+| §3b nods | `nod.py` (family, `detect`, `CODEBOOK`, `NodRx`); `link.py` (`Station._nod_of`, `nod_families`, `nod_payload`); `session.py` (`NOD_POLL_S`); `engine.py` (`_watch_nods`, `_nod_feed`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -233,6 +234,52 @@ for Data2G).
   (mean latency +2.6 s, SE 1.2, 72 seeds) where the blind run had moved to CPM. Until the
   outcome data is regenerated with priming on and the model retrained, the shifter picks
   modes as before and the session gains above are without it.
+
+## 3b. Nods (session version 6, `DATA2G_NOD=1`, 2026-11)
+
+At the floor a control-only reply costs a whole CPM burst (c16r25: 5.0 s) to say what its
+listener mostly knows already. A nod says it without words: one of M keyed c16r25 tone
+sequences, L = 64 tones (2.56 s), detected where the listener expects the reply, not
+decoded. Off by default until the native port has it: with it on, the session version
+is 6 and a v5 peer refuses the CONNECT (`NAK_VERSION`), since it would hear nothing
+where a nod replied.
+
+- **Family.** M = 32 sequences, seeded by (session key, sender's direction, the nod's
+  burst number mod 8, the peer burst it acts on mod 8): a nod matches only the one turn
+  it answers. Which of the M carries the meaning; 26 are used, 6 reserved (a detection
+  of one is no nod).
+- **Codebook** (`nod.CODEBOOK`). Reply: ack {all, unchanged} x recommend step {0, +1, -1,
+  +2, -2} x T_DUPCTL {absent, present} = 20. Poll: {same} x step {0, +2, -2} x T_DUPCTL = 6.
+  Anchors: A is the peer burst I act on, R my burst A acted on. A reply nods only if R
+  is my previous burst (so the peer knows which burst I answer). "all": cum is one past
+  the highest new codeword A carried (A carried new data); "unchanged": cum is R's.
+  The step is a code index within R's recommendation's band. A poll restates my previous
+  burst's cum and acted-on, its step from that burst's recommendation. A control the
+  codebook does not cover (a partial ACK, a band change, resends, any other TLV) goes
+  in full.
+- **Deferred fields.** `size_hint`, `T_REPLY` and `T_CHAT` are not carried: the listener
+  keeps the peer's last values. `T_DUPCTL` is carried as an absolute bit.
+- **Where.** A reply nods only as the session's direct reply (the peer's expected slot,
+  §3a `ReplySlot`, ±0.15 s). A poll nods only at the nod poll slot: the master sends it
+  `NOD_POLL_S` (8.0 s) after its previous burst ended, and the callee searches
+  `NOD_POLL_S + POLL_LAG_S` (0.1 s, PTT) past the end of the caller's burst it heard,
+  ±`POLL_TOL_S` (0.25 s). Polls nod at most every other try (the peer may have missed
+  the burst the poll restates), and a nod is never repeated on a timeout (its listener
+  looks in its reply slot only): the master polls instead.
+- **Detection** (`nod.detect`). The square-law tone metric over the window in T/4 steps
+  at the slot's CFO, then the best 4 sequences rescored coherently
+  (`cpm._coh_run_llr`). Accepted: the best score at least `THR` = 37.0 and the runner-up
+  under it. THR is the exponential tail fitted over the 90% point of 100,000 noise
+  slots' best (max seen 31.2) at 1e-6 false accepts per slot: 36.85.
+- **Received.** A detected nod is handed to the link as the control-only burst it
+  stands for (`NodRx`, the control `Station.nod_payload` synthesizes), with no
+  receiver measurements; its outcome goes to the policy with `usable` None.
+- **Census** (`scripts/sig_census.py`, CPM control-only bursts at the floor): all-acked
+  73% of replies in bulk, 86% in chat; polls 14-19% of control-only bursts; partial ACKs
+  too diverse to enumerate; T_REPLY changes in 22-26%, T_DUPCTL in 19-22%.
+- **Study** (`scripts/sig_study.py`, round 2): 10% failure points awgn -19.2, mpg -11.4,
+  mpp -16.2, mpd -16.3 dB (mean power in 2500 Hz) against today's primed control-only
+  reply at -14.7, -10.0, -11.7, -11.8, in 2.6 s of air instead of 5.0.
 
 ## 4. Core control word (32 bits)
 
