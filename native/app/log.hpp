@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <ctime>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -16,6 +17,10 @@ enum Level { DEBUG = 10, INFO = 20, WARNING = 30, ERROR = 40, CRITICAL = 50 };
 extern std::atomic<int> g_level;
 void log_line(int level, const std::string& msg);
 [[gnu::format(printf, 2, 3)]] void logf(int level, const char* fmt, ...);
+// Also hands every message logged (without the stderr line's time and level) to `sink`,
+// under the log's lock: it must not block or log. Empty: stderr only. A front
+// end with no terminal (Android) shows the log this way.
+void set_log_sink(std::function<void(int level, const std::string& msg)> sink);
 // --log-level's value -> a level; nullopt: not one.
 std::optional<int> parse_level(const std::string& s);
 // Routes the arq log (sessions, engine) through log_line at g_level.

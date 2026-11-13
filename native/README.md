@@ -17,11 +17,12 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 | `core/generated/` | Constants and frozen tables written by `tools/gen_native_tables.py` from `data2g/`. Never edited. |
 | `core/tables/` | The declarations for `generated/*.cpp`, one header per area. |
 | `core/{dsp,util}/` | Native only: numpy/scipy primitives (`dsp/`, *not* `data2g/waveform/dsp.py`, which is `core/waveform/dsp`), `Mat`, the shared worker pool, cancellation, linear algebra, SIMD clones. |
-| `core/{rig,monitor}/` | Native only: rig control and PTT (`rig/hamlib/` is the libhamlib backend, `data2g_rig`); the promiscuous receiver behind `data2g-monitor`. |
-| `core/audio/{qt,miniaudio}/` | Sound card backends (`data2g_audio`), outside `data2g_core`. |
+| `core/{rig,monitor}/` | Native only: rig control and PTT (`rig/hamlib/` is the libhamlib backend, `data2g_rig`; `rig/bridge*` hands Hamlib a USB or Bluetooth link as a loopback socket, `rig/android/` is that link, `data2g_rig_android`); the promiscuous receiver behind `data2g-monitor`. |
+| `core/audio/{qt,miniaudio,android}/` | Sound card backends (`data2g_audio`), outside `data2g_core`; Android always gets `android/` (Java `AudioRecord`/`AudioTrack`). |
 | `app/` | `data2g_station`: the runtime both front ends share (`host.py`'s `serve()`), Qt Core + Network only. `app/station.hpp` lists its threads. `app/tci.*` (`--tci`, with Qt WebSockets): the radio's audio, PTT and dial over TCI instead of a sound card and Hamlib. |
 | `apps/` | The command-line programs' `main()`s. |
 | `gui/` | `data2g-gui`: the only place Qt Widgets may appear. |
+| `android-app/` | The Android TNC: a Qt Quick front end and a foreground service over `data2g_station`. Its own CMake project (`tools/build_android.sh`). |
 | `web/` | `data2g-web`: the station headless, the GUI as a web page (`--web-listen`, `--web-port`, default 127.0.0.1:8400). Core, Network and WebSockets (the Monitor tab is a WebSocket). One password: `data2g-web --set-password` or data2g-gui's settings (`app/web_password.*`). Settings shared with data2g-gui (`app::settings_store()`). |
 | `bindings/` | `data2g_native`, the pybind11 module that `pytest --native` substitutes into the Python suite (`tests/native_subs/`). |
 | `tests/` | One ctest per area (`test_<area>.cpp`), Python-free. |

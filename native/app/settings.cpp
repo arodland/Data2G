@@ -46,6 +46,7 @@ QVariantMap settings_map(const Args& a) {
     m["mycall"] = qs(a.mycall);
     m["input_device"] = qs(a.input_device);
     m["output_device"] = qs(a.output_device);
+    m["broadcast_mode"] = qs(a.broadcast_mode);
     m["tci"] = a.tci;
     m["tci_host"] = qs(a.tci_host);
     m["sample_rate"] = a.sample_rate;
@@ -79,6 +80,7 @@ Args from_settings(const QVariantMap& m, Args a) {
     if (m.contains("mycall")) a.mycall = opt(m.value("mycall").toString());
     if (m.contains("input_device")) a.input_device = opt(m.value("input_device").toString());
     if (m.contains("output_device")) a.output_device = opt(m.value("output_device").toString());
+    if (m.contains("broadcast_mode")) a.broadcast_mode = opt(m.value("broadcast_mode").toString());
     a.tci = m.value("tci", a.tci).toBool();
     a.tci_host = str("tci_host", a.tci_host);
     a.sample_rate = m.value("sample_rate", a.sample_rate).toInt();

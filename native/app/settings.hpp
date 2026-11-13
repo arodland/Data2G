@@ -1,5 +1,5 @@
 // The saved settings: the persisted subset of app::Args (callsign, interface
-// (TCI), devices, sample rate, volume, PTT and rig, ports, recording, decode
+// (TCI), devices, broadcast mode, sample rate, volume, PTT and rig, ports, recording, decode
 // worker, live constellation), keyed by the Args field's name. What is saved
 // is overridden by the same flags on a front end's command line.
 // data2g-gui and data2g-web share one QSettings store (settings_store());
