@@ -298,6 +298,36 @@ void test_settings(const QTemporaryDir& dir) {
     check::is_true(!legacy.contains("rigctld_port") && !legacy.contains("host"), "...and saving drops the old keys");
 }
 
+// open_config: data2g.conf in the config dir, the old store moved to it once;
+// --config's file instead, with nothing moved.
+void test_config_file(const QTemporaryDir& dir) {
+#ifdef Q_OS_LINUX  // the old store an ini file renamed; XDG_CONFIG_HOME the config dir
+    check::current_step = "config file";
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, dir.filePath(QStringLiteral("old")));
+    qputenv("XDG_CONFIG_HOME", dir.filePath(QStringLiteral("new")).toUtf8());
+    QString old_file;
+    {
+        QSettings old(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+        old.setValue("mycall", QStringLiteral("OLD1"));
+        old_file = old.fileName();
+    }
+    const QString conf = dir.filePath(QStringLiteral("new/Data2G/data2g.conf"));
+    char prog[] = "data2g-gui";
+    char* bare[] = {prog};
+    const QString other = dir.filePath(QStringLiteral("other.conf"));
+    QByteArray other_arg = ("--config=" + other).toLocal8Bit();
+    char* with[] = {prog, other_arg.data()};
+    check::is_true(app::open_config(2, with)->fileName() == other && QFile::exists(old_file) && !QFile::exists(conf),
+                   "--config: its file, nothing moved");
+    const auto s = app::open_config(1, bare);
+    check::is_true(s->fileName() == conf && s->value("mycall").toString() == "OLD1" && !QFile::exists(old_file),
+                   "data2g-gui.conf moved to data2g.conf");
+    check::is_true(app::settings_store()->fileName() == conf, "settings_store() opens the same file");
+#else
+    (void)dir;
+#endif
+}
+
 void test_window(const QTemporaryDir& dir) {
     check::current_step = "window: synthesize a CQ";
     std::string cq_mode;
@@ -562,6 +592,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QTemporaryDir dir;
     test_settings(dir);
+    test_config_file(dir);
     test_noise_rule_slider();
     test_decoder_effort();
     test_settings_fit_small_screen();

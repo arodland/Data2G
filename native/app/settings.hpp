@@ -2,7 +2,7 @@
 // (TCI), devices, broadcast mode, sample rate, volume, PTT and rig, ports, recording, decode
 // worker, live constellation), keyed by the Args field's name. What is saved
 // is overridden by the same flags on a front end's command line.
-// data2g-gui and data2g-web share one QSettings store (settings_store());
+// data2g-gui, data2g-web and data2g-host read one config file (open_config());
 // data2g-web also sends the map as JSON to its settings tab. QtCore only.
 #pragma once
 
@@ -17,8 +17,12 @@ class QSettings;
 
 namespace data2g::app {
 
-// The one store both front ends use: organization Data2G, application
-// data2g-gui (its name from before data2g-web, kept so saved settings stay).
+// The config file, an ini: --config's on this command line, else (config
+// dir)/Data2G/data2g.conf. Sets the file settings_store() opens from then on.
+// Without --config and with no data2g.conf yet, the store older versions
+// saved (Data2G/data2g-gui) moves to it.
+std::unique_ptr<QSettings> open_config(int argc, char** argv);
+// The file open_config() chose (the default one before it runs).
 // Each front end's own keys live under a group: gui/, web/.
 std::unique_ptr<QSettings> settings_store();
 

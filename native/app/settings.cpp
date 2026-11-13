@@ -1,6 +1,12 @@
 #include "app/settings.hpp"
 
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
+#include <QStandardPaths>
+
+#include <string_view>
 
 #include <utility>
 
@@ -35,10 +41,43 @@ const RigString RIG_STRINGS[] = {
 // Keys older versions saved: read once, dropped on save.
 const char* const OLD_KEYS[] = {"host", "kiss_address", "rigctld_host", "rigctld_port"};
 
+QString default_config() {
+    return QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QStringLiteral("/Data2G/data2g.conf");
+}
+QString g_config;  // open_config's choice
+
+// The old store (QSettings' native one for Data2G/data2g-gui) to `to`: on
+// Linux an ini file of the same format, renamed; elsewhere (the Windows
+// registry, a macOS plist) copied key by key, the old one left in place.
+void migrate_old(const QString& to) {
+    QSettings old(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+    old.setFallbacksEnabled(false);  // not /etc/xdg or Data2G.conf: only its own file
+    if (old.allKeys().isEmpty()) return;
+    QDir().mkpath(QFileInfo(to).absolutePath());
+    if (old.fileName().endsWith(QStringLiteral(".conf")) && QFile::rename(old.fileName(), to)) return;
+    QSettings neu(to, QSettings::IniFormat);
+    for (const QString& k : old.allKeys()) neu.setValue(k, old.value(k));
+}
+
 }  // namespace
 
+std::unique_ptr<QSettings> open_config(int argc, char** argv) {
+    QString path;
+    for (int i = 1; i < argc; ++i) {  // parse() takes the flag too; a missing value is its error
+        const std::string_view arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) path = QString::fromLocal8Bit(argv[++i]);
+        else if (arg.starts_with("--config=")) path = QString::fromLocal8Bit(argv[i] + 9);
+    }
+    if (path.isEmpty()) {
+        path = default_config();
+        if (!QFile::exists(path)) migrate_old(path);
+    }
+    g_config = path;
+    return settings_store();
+}
+
 std::unique_ptr<QSettings> settings_store() {
-    return std::make_unique<QSettings>(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+    return std::make_unique<QSettings>(g_config.isEmpty() ? default_config() : g_config, QSettings::IniFormat);
 }
 
 QVariantMap settings_map(const Args& a) {

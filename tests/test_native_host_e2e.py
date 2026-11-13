@@ -171,7 +171,8 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         base = ports[name]
         logs[name] = tmp_path / f"{name}.log"
         procs[name] = subprocess.Popen(
-            [str(BINARY), "--mycall", name, "--command-port", str(base), "--kiss-port", str(base + 2),
+            [str(BINARY), "--config", str(tmp_path / "data2g.conf"), "--mycall", name,
+             "--command-port", str(base), "--kiss-port", str(base + 2),
              "--audio-io", f"pipe:{inp},{out}", "--no-rig", "--record-dir", str(tmp_path / f"rec{name}"),
              "--stats-interval", "0", worker],
             stdout=subprocess.DEVNULL, stderr=open(logs[name], "w"), env=env)
@@ -321,7 +322,7 @@ def test_cli_has_every_host_py_flag(request):
     assert out == ref
 
 
-def test_cli_rig_flags(request):
+def test_cli_rig_flags(request, tmp_path):
     """The Hamlib flags: --list-rigs, and conflicting combinations as usage errors
     (exit 2 before anything opens; values are tested in native/tests/test_args.cpp)."""
     if not BINARY.exists():
@@ -330,7 +331,8 @@ def test_cli_rig_flags(request):
         pytest.skip(f"{BINARY} not built")
 
     def run(*args):
-        return subprocess.run([str(BINARY), *args], capture_output=True, text=True, timeout=60)
+        return subprocess.run([str(BINARY), "--config", str(tmp_path / "data2g.conf"), *args], capture_output=True, text=True,
+                              timeout=60)
 
     rigs = run("--list-rigs")
     if rigs.returncode == 1 and "without Hamlib" in rigs.stderr:
@@ -366,7 +368,8 @@ def test_signal_while_keyed_unkeys(tmp_path, request, app, sig):
     port = free_ports(3)
     log = tmp_path / "log"
     env = dict(os.environ, OMP_NUM_THREADS="1", QT_QPA_PLATFORM="offscreen", XDG_CONFIG_HOME=str(tmp_path))
-    p = subprocess.Popen([str(binary), "--mycall", "A", "--command-port", str(port), "--kiss-port", str(port + 2),
+    p = subprocess.Popen([str(binary), "--config", str(tmp_path / "data2g.conf"), "--mycall", "A",
+                          "--command-port", str(port), "--kiss-port", str(port + 2),
                           "--audio-io", "pipe:/dev/zero,/dev/null", "--rig-model", "1", "--log-level", "DEBUG",
                           "--stats-interval", "0"], stdout=subprocess.DEVNULL, stderr=open(log, "w"), env=env)
     try:

@@ -30,8 +30,8 @@ namespace {
 
 // After "usage: PROG ", PROG padded to data2g-host's width so the columns line up.
 const char* USAGE =
-    "[-h] [--mycall MYCALL] [--listen ADDRESS] [--command-port COMMAND_PORT] [--kiss-port KISS_PORT]\n"
-    "                   [--kiss-busy-limit S] [--kiss-bw {2400,500}] [--broadcast-mode MODE]\n"
+    "[-h] [--config FILE] [--mycall MYCALL] [--listen ADDRESS] [--command-port COMMAND_PORT]\n"
+    "                   [--kiss-port KISS_PORT] [--kiss-busy-limit S] [--kiss-bw {2400,500}] [--broadcast-mode MODE]\n"
     "                   [--list-audio-devices] [--input-device INPUT_DEVICE] [--output-device OUTPUT_DEVICE]\n"
     "                   [--sample-rate SAMPLE_RATE] [--output-volume OUTPUT_VOLUME] [--ptt-on-delay-ms PTT_ON_DELAY_MS]\n"
     "                   [--ptt-off-delay-ms PTT_OFF_DELAY_MS] [--tx-lead-ms TX_LEAD_MS]\n"
@@ -56,6 +56,8 @@ const char* HELP =
     "\nData2G server: VARA-style ARQ sessions and KISS broadcast on one radio\n\n"
     "options:\n"
     "  -h, --help            show this help message and exit\n"
+    "  --config FILE         settings saved by data2g-gui/data2g-web, under these flags\n"
+    "                        (default: the config dir's Data2G/data2g.conf)\n"
     "  --mycall MYCALL\n"
     "  --listen ADDRESS      the VARA and KISS ports' address (default 127.0.0.1)\n"
     "  --command-port COMMAND_PORT  data is on the next port (default 8300)\n"
@@ -215,6 +217,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--buffer-credit", [&](auto& o, auto& v) { a.buffer_credit = i_(o, v); }},
         {"--record-dir", [&](auto&, auto& v) { a.record_dir = v; }},
         {"--log-level", [&](auto&, auto& v) { a.log_level = v; }},
+        {"--config", [](auto&, auto&) {}},  // read before parse(): app::open_config
         {"--stats-interval", [&](auto& o, auto& v) { a.stats_interval = d_(o, v); }},
         {"--noise-rule", [&](auto& o, auto& v) { a.noise_rule = d_(o, v); }},
         {"--audio-io", [&](auto&, auto& v) { a.audio_io = v; }},
