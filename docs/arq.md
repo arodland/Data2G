@@ -850,6 +850,11 @@ As built (data2g/arq/policy.py):
     as the monitor shows it) of the last burst decoded from the session's peer.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
+  - **RETRIES** answers `RETRIES n`: the CONNECT retries after the first try
+    (default 4, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
+    only, 0-20: OK, else WRONG. They apply to this command client's later
+    CONNECTs, not one under way, and go back to the default when it leaves.
+    Retries after the first go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart.
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).

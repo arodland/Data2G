@@ -420,10 +420,11 @@ void Engine::abort() {
     new_session();
 }
 
-void Engine::connect(const std::string& peer, int cap) {
+void Engine::connect(const std::string& peer, int cap, std::optional<int> tries) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     pack_call(peer);  // invalid_argument before any state changes
     new_session();
+    if (tries) session_->tune.connect_tries = *tries;
     session_->connect(peer, cap, now());
 }
 

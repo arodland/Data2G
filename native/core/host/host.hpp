@@ -40,6 +40,7 @@ inline constexpr double ALIVE_S = 60.0;          // IAMALIVE on the command port
 inline constexpr double BUFFER_REPEAT_S = 30.0;  // a nonzero BUFFER is repeated this often
 inline constexpr double VOLUME_MIN_DB = -60.0, VOLUME_MAX_DB = 20.0;  // TXPOWER's range: the GUI's output volume
 inline constexpr double DIAL_TIMEOUT_S = 1.0;    // ACCEPT's connection must be up by then (the caller waits ~3.5 s)
+inline constexpr int MAX_RETRIES = 20;  // RETRIES' most (host.py)
 
 struct Addr {
     std::string host;
@@ -111,6 +112,7 @@ private:
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it
     bool hand_ = false;   // ... a HAND command: REF / HAND lines go to it
+    std::optional<int> retries_;  // RETRIES (nullopt: arq::CONNECT_TRIES - 1)
     bool up_ = false;     // CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
     bool ptt_ = false, busy_ = false;
     std::optional<std::int64_t> buffer_ = 0;  // nullopt: answer the next step whatever it is
