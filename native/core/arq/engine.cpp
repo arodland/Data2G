@@ -381,10 +381,16 @@ void Engine::new_session() {
                               : std::make_shared<Session>(call_, std::move(policy), 1.0, std::move(rng), aliases_,
                                                           cfg_.stats_interval_s);
     session_->set_chat(chat_);
+    session_->nods = nods_;
     if (idle_close_) session_->tune.idle_close_s = *idle_close_;
     session_->accept_connect = accept_connect;
     store_.clear();
     session_snr_.reset();
+}
+
+void Engine::set_nods(bool on) {
+    nods_ = on;
+    if (!session_->station) session_->nods = on;  // no station yet: this session's too
 }
 
 void Engine::listen(bool on) {

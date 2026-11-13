@@ -154,6 +154,7 @@ input[type=range] { flex: 1; min-width: 120px; }
     </fieldset>
 
     <fieldset><legend>Link</legend>
+      <div class="check"><input type="checkbox" id="nods" data-kind="bool"><label for="nods" title="Short keyed replies at the bottom of the ladder, to a peer that hears them. They are searched for in a slot after each burst, so turn them off if they go unheard: unsteady audio timing at either station. From the next session.">Nods</label></div>
       <div class="row"><label for="noise_rule">Noise rule</label><span class="inline"><input type="range" id="noise_rule" data-kind="num" min="0" max="1.5" step="0.01" title="A mode whose band is noisier in the receiver's noise profile than the band last measured is predicted at a lower SNR. The weight is how much its often-loud moments count. 0: off; 1.00: the default."><span id="noise_rule-v"></span></span></div>
     </fieldset>
 

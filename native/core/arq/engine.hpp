@@ -302,6 +302,9 @@ public:
     double cw_wpm = cwid::WPM;
     std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
     std::string pending = "fsk";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
+    // Nods (docs/arq.md §3b) from the next session (one in progress keeps what it told its peer).
+    void set_nods(bool on);
+    bool nods() const { return nods_; }
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -529,6 +532,7 @@ private:
         std::vector<double> buf;
     };
     std::optional<NodWatch> nod_watch_;
+    bool nods_ = true;
     void watch_nods(std::int64_t end);
     void nod_collect(std::span<const double> x, double t);
     double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)

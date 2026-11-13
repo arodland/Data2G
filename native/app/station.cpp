@@ -325,6 +325,7 @@ bool Station::update(const Args& b) {
         e.set_noise_rule(b.noise_rule);
         e.cw_id = b.cw_id;
         e.cw_wpm = b.cw_wpm;
+        e.set_nods(b.nods);
         if (b.mycall != a.mycall) {
             try {
                 e.set_call(b.mycall.value_or("NOCALL"), e.aliases());
@@ -480,6 +481,7 @@ void Station::start() {
         engine_->cw_wpm = a_.cw_wpm;
         engine_->hand_round = a_.hand_decoder;
         engine_->pending = a_.pending;
+        engine_->set_nods(a_.nods);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig

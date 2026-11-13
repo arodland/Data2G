@@ -210,10 +210,17 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
         if (v != NOISE_RULE_DEFAULT && std::abs(v - NOISE_RULE_DEFAULT) <= NOISE_RULE_DETENT)
             noise_rule_->setValue(NOISE_RULE_DEFAULT);  // the detent: dragging only, so the arrow keys still step through
     });
+    nods_ = new QCheckBox(tr("Nods"));
+    nods_->setObjectName(QStringLiteral("nods"));
+    nods_->setChecked(a.nods);
+    nods_->setToolTip(tr("Short keyed replies at the bottom of the ladder, to a peer that hears them. They are "
+                         "searched for in a slot after each burst, so turn them off if they go unheard: unsteady "
+                         "audio timing at either station. From the next session."));
     auto* noise_row = new QHBoxLayout;
     noise_row->addWidget(noise_rule_, 1);
     noise_row->addWidget(noise_label);
     link->addRow(tr("Noise rule"), noise_row);
+    link->addRow(nods_);
 
     auto* net = group(tr("Ports"));
     listen_ = new QLineEdit(qs(a.listen));
@@ -586,6 +593,7 @@ void SettingsDialog::apply_to(app::Args& a) const {
     a.record_dir = record_dir_->text().trimmed().toStdString();
     a.decode_worker = worker_->isChecked();
     a.live_constellation = live_->isChecked();
+    a.nods = nods_->isChecked();
     // left where it opened: the cap it came with (a command line's need not be on a step)
     const int effort_shown = std::clamp(static_cast<int>(std::lround(base_.decoder_effort / 5.0)), EFFORT_MIN / 5, EFFORT_MAX / 5);
     a.decoder_effort = effort_->value() == effort_shown ? base_.decoder_effort : 5 * effort_->value();

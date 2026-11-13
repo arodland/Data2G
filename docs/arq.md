@@ -240,7 +240,11 @@ for Data2G).
 At the floor a control-only reply costs a whole CPM burst (c16r25: 5.0 s) to say what its
 listener mostly knows already. A nod says it without words: one of M keyed c16r25 tone
 sequences, L = 64 tones (2.56 s), detected where the listener expects the reply, not
-decoded. `DATA2G_NOD=0` turns them off (both directions) for A/B runs.
+decoded. The native host's "Nods" setting (`--no-nods`; default on, from the next session:
+`Engine::set_nods`) turns them off for a station, both directions: it neither sends
+`T_NODS` nor listens, so its peer sends it none. For a link whose reply timing is too
+unsteady for the slot (K2CR's TX playout lag on air, 2026-11-13). `DATA2G_NOD=0` turns them off
+everywhere (Python too) for A/B runs.
 
 - **Who nods to whom** (no session version bump). A station that hears nods says so with
   `T_NODS` (empty), in its control's padding only, until the peer acts on a burst that

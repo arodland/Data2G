@@ -246,6 +246,22 @@ void noise_rule_config() {
     check::is_true(!rule(0.0), "0: off");
 }
 
+// The host's nods setting (--no-nods): the next session's stations, never one in progress.
+void nods_setting() {
+    check::current_step = "nods setting";
+    Engine e("W1AW"), b("K2XYZ");
+    check::is_true(e.nods() && e.session().nods, "default on");
+    e.set_nods(false);
+    check::is_true(!e.session().nods, "off: the idle session too");
+    b.listen();
+    e.connect("K2XYZ", 2);
+    check::is_true(link(e, b, 12, 60, [&] { return both(e, b, SessionState::CONNECTED); }, 0), "connected");
+    check::is_true(e.session().station && !e.session().station->nod && b.session().station->nod,
+                   "its station sends and hears none; the peer's does");
+    e.set_nods(true);
+    check::is_true(!e.session().station->nod && !e.session().nods, "on mid-session: from the next one");
+}
+
 void units() {
     check::current_step = "units";
     check::equal(static_cast<int>(to_half(1.0)), 0x3C00, "half 1");
@@ -540,6 +556,7 @@ int main() {
     recorder_async(dir / "rec");
     tx_burst_and_abort();
     noise_rule_config();
+    nods_setting();
     sync_session(dir);
     sync_kiss();
     worker_latency();
