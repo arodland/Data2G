@@ -9,7 +9,7 @@
 //
 //   GET  /              the page
 //   GET  /api/settings  the saved settings, their choices, devices, rig models
-//   POST /api/settings  {key: value, ...} over the running settings; saved, station restarted if changed
+//   POST /api/settings  {key: value, ...} over the running settings; saved, applied live (app::LIVE_SETTINGS) or by a restart
 //   GET  /ws            WebSocket. Every 100 ms the server sends the state, and the
 //                       bursts, dumps, constellation and waterfall rows that client
 //                       has not had yet (each kept here with a sequence number, so

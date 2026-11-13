@@ -290,6 +290,10 @@ public:
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
     const std::string* tx_submode() const { return tx_ ? &tx_->burst->submode : nullptr; }
     std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
+    // Session stage, from the next burst keyed: EngineConfig's ptt_delay_s.
+    void set_ptt_delay(double s) { ptt_delay_ = static_cast<std::int64_t>(s * config::FS); }
+    // Session stage, from the next session on: EngineConfig's noise_rule.
+    void set_noise_rule(double w) { cfg_.noise_rule = w; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
     // (port, frame)s heard for KISS clients since the last call
     std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
@@ -384,7 +388,7 @@ private:
     modem::Accept accept_;
     receiver::Receiver receiver_;
     receiver::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
-    std::int64_t ptt_delay_;
+    std::atomic<std::int64_t> ptt_delay_;  // set_ptt_delay on the session stage; read on both
     std::optional<Recorder> rec_;
     std::int64_t n_ = 0;
     std::optional<Tx> tx_;

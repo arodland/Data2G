@@ -6,6 +6,8 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
 #include <QSlider>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -37,6 +39,8 @@
 #include "constellation.hpp"
 #include "waterfall.hpp"
 #include "settings_dialog.hpp"
+#include "app/settings.hpp"
+#include "app/station.hpp"
 
 using namespace data2g;
 namespace check = data2g::check;
@@ -178,6 +182,39 @@ void test_decoder_effort() {
         keep.apply_to(e);
         check::is_true(e.decoder_effort == off, "a cap off the slider's steps kept when untouched");
     }
+}
+
+// LIVE_SETTINGS change without a restart; anything else restarts, and the dialog says so while the station runs.
+void test_restart_warning() {
+    check::current_step = "restart warning";
+    const app::Args a;
+    app::Args b = a;
+    b.mycall = "N0LIVE";
+    b.output_volume = -3.0;
+    b.noise_rule = 0.5;
+    b.decoder_effort = 30;
+    b.cw_id = "add";
+    b.ptt_on_delay_ms = 200;
+    check::is_true(!app::needs_restart(a, b), "live settings: no restart");
+    for (auto set : {+[](app::Args& x) { x.kiss_port = 9000; }, +[](app::Args& x) { x.record = true; },
+                     +[](app::Args& x) { x.tci = true; }, +[](app::Args& x) { x.kiss_bw = 500; }}) {
+        app::Args c = b;
+        set(c);
+        check::is_true(app::needs_restart(a, c), "anything else: a restart");
+    }
+    gui::SettingsDialog d(a, {}, {}, true);
+    auto* note = d.findChild<QLabel*>(QStringLiteral("restart_warning"));
+    check::is_true(note && note->isHidden(), "no warning at first");
+    d.findChild<QDoubleSpinBox*>(QStringLiteral("output_volume"))->setValue(-6.0);
+    check::is_true(note->isHidden(), "volume: no warning");
+    auto* kiss = d.findChild<QSpinBox*>(QStringLiteral("kiss_port"));
+    kiss->setValue(9000);
+    check::is_true(!note->isHidden(), "KISS port: the warning");
+    kiss->setValue(a.kiss_port);
+    check::is_true(note->isHidden(), "changed back: no warning");
+    gui::SettingsDialog stopped(a, {}, {}, false);
+    stopped.findChild<QSpinBox*>(QStringLiteral("kiss_port"))->setValue(9000);
+    check::is_true(stopped.findChild<QLabel*>(QStringLiteral("restart_warning"))->isHidden(), "a stopped station: no warning");
 }
 
 void test_settings(const QTemporaryDir& dir) {
@@ -419,6 +456,21 @@ void test_window(const QTemporaryDir& dir) {
     QTcpSocket again;
     again.connectToHost(QHostAddress::LocalHost, static_cast<quint16>(a.command_port));
     check::is_true(again.waitForConnected(5000), "command port open after the restart");
+
+    // live settings: the client stays; anything else is the caller's restart
+    check::current_step = "window: live update";
+    app::Args live = w.station().args();
+    live.output_volume -= 3.0;
+    live.mycall = "N2GUI";
+    w.apply_settings(live);
+    check::is_true(w.station().args() == live, "the station's args are the new ones");
+    wait_for([] { return false; }, 300);  // a dropped client would show by now
+    check::is_true(again.state() == QAbstractSocket::ConnectedState, "the command client kept");
+    live.kiss_port += 1;
+    w.apply_settings(live);
+    check::is_true(wait_for([&] { return again.state() != QAbstractSocket::ConnectedState; }, 5000),
+                   "a port change restarts: the client dropped");
+    check::is_true(w.station().running() && w.station().args() == live, "running on the new port");
     check::current_step = "window: close";
 }
 
@@ -486,6 +538,7 @@ int main(int argc, char** argv) {
     test_settings(dir);
     test_noise_rule_slider();
     test_decoder_effort();
+    test_restart_warning();
     test_waterfall_tx();
     test_constellation_plot();
     test_window(dir);
