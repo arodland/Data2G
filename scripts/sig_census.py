@@ -1,5 +1,6 @@
 """What CPM control-only bursts say at the floor, relative to what their
-receiver already knows: the census behind the reply-signature codebook.
+receiver already knows: the census behind the reply-signature (nod)
+codebook (docs/arq.md §3b).
 
 Real-modem sessions (phy_session, as loss_study), shift+cpm, PEP-referenced.
 Every control-only burst a station builds in a CPM mode is recorded with

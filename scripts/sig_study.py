@@ -1,6 +1,6 @@
-"""Keyed reply signatures (floor idea 2): a c16r25 control-only reply
-replaced by one of M keyed tone sequences, detected in the expected slot.
-Study only: no protocol change. docs: memory reply-signatures.
+"""Keyed reply signatures (floor idea 2, shipped as nods: docs/arq.md §3b,
+data2g/arq/nod.py): a c16r25 control-only reply replaced by one of M keyed
+tone sequences, detected in the expected slot. The study behind them.
 
     python -m scripts.sig_study detect --out runs/sig/detect.npz [--trials 200]
     python -m scripts.sig_study noise --out runs/sig/noise_1.npz --n 20000 --seed 1
