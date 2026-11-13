@@ -172,6 +172,38 @@ def test_cpm_decodes_match(native, pure):
     assert [nat.decode(*p) for p in probes] == [py.decode(*p) for p in probes]
 
 
+# fsk16r25 at the floor: (noise sigma, seed) where the square law fails both data slots (one at 7.5) and coherent
+# DD (cpm.dd_metric) rescues them
+@pytest.mark.parametrize("sigma,seed", [(8.0, 0), (8.0, 3), (7.5, 2)])
+def test_cpm_coherent_dd_match(native, pure, sigma, seed):
+    """CPM's coherent DD: plain decodes, keyed decodes (the store), and with DD off, alike in both."""
+    spec = cpm.SPECS["fsk16r25-r1/3"]
+    pl = [bytes(codes.payload_bytes(cpm.CTL[spec.grid]))] + [bytes([i]) * codes.payload_bytes(spec) for i in (1, 2)]
+    b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 3), 0, pl[0])] + [Slot(data_mask(0, i, 3), 0, pl[i]) for i in (1, 2)], 0)
+    y = np.concatenate([np.zeros(2000), PHY.tx_audio(b), np.zeros(2000)])
+    y += np.random.default_rng(seed).normal(0, sigma, len(y))
+    r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
+    masks = [ctl_mask(0, 0, 3), data_mask(0, 1, 3), data_mask(0, 2, 3)]
+    for dd in (False, True):
+        PHY.CPM_DD = dd
+        try:
+            py, nat = rx_pair(native, r, dd)
+            got = [nat.decode(i, m, 0, None) for i, m in enumerate(masks)]
+            assert got == [py.decode(i, m, 0, None) for i, m in enumerate(masks)]
+            # the last slot asked first: the passes are made in slot order all the same (phy.cpm_pass)
+            py, nat = rx_pair(native, r, dd)
+            rev = [nat.decode(i, masks[i], 0, None) for i in (2, 1, 0)]
+            assert rev == [py.decode(i, masks[i], 0, None) for i in (2, 1, 0)] == got[::-1]
+            sp, sn = {}, {}
+            py, nat = PHY.ModemRx(dict(r), sp), native.phy.ModemRx(dict(r), sn, None, dd)
+            keyed = [nat.decode(i, m, 0, ("p", i)) for i, m in enumerate(masks)]
+            assert keyed == [py.decode(i, m, 0, ("p", i)) for i, m in enumerate(masks)]
+            assert sp.keys() == sn.keys()
+        finally:
+            PHY.CPM_DD = True
+        assert got[1:] == ([pl[1], pl[2]] if dd else [None, None]) or sigma < 8
+
+
 # --- kisslink -------------------------------------------------------------------------
 
 def _frames():

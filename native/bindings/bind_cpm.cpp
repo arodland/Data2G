@@ -190,6 +190,53 @@ void bind_cpm(py::module_& m) {
         return cpm::confirm(grid(g), view(x), l);
     });
     c.attr("CONFIRM_LLR") = cpm::CONFIRM_LLR;
+    // --- coherent detection ---
+    c.attr("COH_W") = cpm::COH_W;
+    c.attr("COH_HDR_W") = cpm::COH_HDR_W;
+    c.attr("COH_PREGATE") = py::make_tuple(cpm::COH_PREGATE[0], cpm::COH_PREGATE[1]);
+    c.def("coh_lock", [](const std::string& g) -> py::object {  // cpm.COH_LOCK's tuple, or None
+        const auto v = cpm::coh_lock(grid(g));
+        return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
+    });
+    c.def("coh_ctl", &cpm::coh_ctl);
+    c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
+        return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
+    });
+    c.def("coh_metric", [](const In<std::complex<double>>& Z, const In<double>& P, int W, double n0) {
+        return np(cpm::coh_metric(mat(Z), mat(P), W, n0));
+    });
+    c.def("noise_n0", [](const In<double>& E) { return cpm::noise_n0(mat(E)); });
+    c.def("bit_llrs", [](const std::string& g, const In<double>& L) { return np(cpm::bit_llrs(grid(g), mat(L))); });
+    c.def("coh_read_header", [](const std::string& g, const In<double>& x, long s0, double cfo, int copies) {
+        const auto h = cpm::coh_read_header(grid(g), view(x), s0, cfo, copies);
+        return py::make_tuple(std::string(h.spec->name), h.n_data, h.dup, h.score, h.runner_up, h.front);
+    }, py::arg("grid"), py::arg("x"), py::arg("s0"), py::arg("cfo"), py::arg("copies") = 2);
+    c.def("slot_rows", [](const std::string& g, int n_data, bool dup) {
+        py::list out;
+        for (const auto& r : cpm::slot_rows(grid(g), n_data, dup)) out.append(ints(r));
+        return out;
+    });
+    // dd_metric / dd_soft on a burst given by its spec, dup, slots (control included) and bins
+    const auto burst = [](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z) {
+        cpm::Received r{};
+        r.spec = &cspec(spec);
+        r.dup = dup;
+        r.n_cw = n_cw;
+        r.n_ctl_slots = 1 + dup;
+        r.soft.resize(n_cw);
+        r.Z = mat(Z);
+        return r;
+    };
+    c.def("dd_metric", [burst](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z,
+                               const std::map<int, In<double>>& post, int slot) {
+        cpm::Posts p;
+        for (const auto& [s, v] : post) p[s] = vec(v);
+        return np(cpm::dd_metric(burst(spec, dup, n_cw, Z), p, slot));
+    });
+    c.def("dd_soft", [burst](const std::string& spec, bool dup, int n_cw, const In<double>& metric, int slot) {
+        In<std::complex<double>> none(std::vector<py::ssize_t>{0, 1});
+        return np(cpm::dd_soft(burst(spec, dup, n_cw, none), mat(metric), slot));
+    });
     c.def("measure", [](const std::string& g, const In<double>& E, int n_sym) {
         const auto r = cpm::measure(grid(g), mat(E), n_sym);
         py::dict d;

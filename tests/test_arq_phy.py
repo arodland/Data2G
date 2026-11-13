@@ -222,13 +222,16 @@ def test_a_repeated_control_combines_but_never_reads_as_the_burst_before():
     assert PHY.ModemRx(other, dict(kept)).decode_repeat(0, (7, 0, 0), key) is None
 
 
-def test_a_listener_connects_on_two_weak_tries_of_one_connect():
+def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     """A CONNECT's robust tries are one compact codeword (same nonce). Two
     at -14.5 dB, neither decoding alone or primed, connect a listener once
-    the second is combined with the first (Session._repeated_frame)."""
+    the second is combined with the first (Session._repeated_frame).
+    Square-law control soft bits (cpm.COH_CTL off): coherent ones decode a try alone."""
     import random
 
     from data2g import cpm
+
+    monkeypatch.setattr(cpm, "COH_CTL", False)
     from data2g.arq import burst as B
     from data2g.arq import frames as F
     from data2g.arq import session as S

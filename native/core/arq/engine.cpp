@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -333,6 +334,10 @@ Engine::Engine(std::string call, EngineConfig cfg, EngineHooks hooks)
       receiver_(accept_, all_grids()),
       ptt_delay_(static_cast<std::int64_t>(cfg_.ptt_delay_s * config::FS)) {
     if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_, cfg_.record_async);
+    // CPM bursts decode as they arrive (cpm::Stream): refine, then each data slot's pass. The same results as
+    // after the burst; DATA2G_CPM_STREAM=0 (read here) turns it off.
+    if (const char* v = std::getenv("DATA2G_CPM_STREAM"); !v || std::string_view(v) == "1")
+        receiver_.stream_cpm(cfg_.dd && cpm_dd_default() ? cpm_pass_fn() : cpm::PassFn{});
     new_session();
     if (cfg_.worker) worker_ = std::thread(&Engine::work, this);
 }
@@ -886,6 +891,10 @@ void Engine::preview() {
 
 void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
     for (auto& it : items) {
+        if (auto* f = std::get_if<receiver::StreamFeed>(&it)) {  // a CPM burst's decode work, while it arrives
+            receiver::run(*f);
+            continue;
+        }
         if (auto* h = std::get_if<receiver::HeaderEvent>(&it)) {
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
             // the burst's span: its lead-in (the header's start, stream_end
