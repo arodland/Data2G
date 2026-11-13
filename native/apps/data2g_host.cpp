@@ -1,4 +1,5 @@
-// data2g-host: data2g/host.py's server in C++, headless. Options: app/options.*.
+// data2g-host: data2g/host.py's server in C++, headless. Options: app/options.*,
+// over the settings in the config file data2g-gui saves (app/settings.hpp).
 //
 //   data2g-host --mycall W1AW --input-device USB --output-device USB --rig-model 3073 --rig-device /dev/ttyUSB0
 //
@@ -6,12 +7,14 @@
 // app/station.{hpp,cpp}, shared with data2g-gui.
 
 #include <QCoreApplication>
+#include <QSettings>
 #include <QTimer>
 
 #include <clocale>
 #include <cstdio>
 #include <utility>
 
+#include "app/settings.hpp"
 #include "app/station.hpp"
 #include "generated/config.hpp"
 
@@ -24,7 +27,7 @@ using namespace data2g;
 using namespace data2g::app;
 
 int main(int argc, char** argv) {
-    const Args a = parse(argc, argv);
+    const Args a = parse(argc, argv, load_settings(*open_config(argc, argv, false)));
     if (a.list_modes) {
         list_modes(a.kiss_bw);
         return 0;
