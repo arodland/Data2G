@@ -122,7 +122,8 @@ Args load_settings(QSettings& s, Args base) {
 }
 
 const QStringList LIVE_SETTINGS = {"mycall",          "output_volume",  "ptt_on_delay_ms", "ptt_off_delay_ms", "live_constellation",
-                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm"};
+                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm",           "record",
+                                   "record_dir"};
 
 bool needs_restart(const Args& from, const Args& to) {
     QVariantMap live = settings_map(from);

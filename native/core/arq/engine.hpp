@@ -99,7 +99,10 @@ inline constexpr double CW_FORCE_S = 600.0;
 // engine; flush() waits until everything handed over is on disk. Without it each call writes before it returns.
 class Recorder {
 public:
-    Recorder(const std::string& dir, const std::string& call, bool async = false);  // throws std::runtime_error
+    // `t0`: the engine time its audio starts at (a recording turned on mid-run); its events' times are from there,
+    // so a time is still its audio's offset. Throws std::runtime_error.
+    Recorder(const std::string& dir, const std::string& call, bool async = false, double t0 = 0.0);
+    double t(double engine_t) const { return engine_t - t0_; }  // an event's time
     ~Recorder();
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
@@ -115,6 +118,7 @@ private:
     void loop();
 
     std::string dir_;
+    double t0_;
     std::ofstream log_, audio_;
     int n_ = 0;
     bool async_;
@@ -216,6 +220,9 @@ public:
     // subclass overriding a seam calls it from its own destructor, before
     // its part is gone.
     void stop();
+    // Session stage: record to `dir` from the next block on (a new Recorder, the old one closed); empty: stop.
+    // Throws std::runtime_error (can't record there), recording then off.
+    void set_record_dir(const std::string& dir);
     void flush_recorder() {
         if (rec_) rec_->flush();
     }

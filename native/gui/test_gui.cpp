@@ -22,6 +22,8 @@
 #include <QTcpSocket>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QDir>
+#include <QFile>
 #include <QTemporaryDir>
 #include <QThread>
 
@@ -196,7 +198,10 @@ void test_restart_warning() {
     b.cw_id = "add";
     b.ptt_on_delay_ms = 200;
     check::is_true(!app::needs_restart(a, b), "live settings: no restart");
-    for (auto set : {+[](app::Args& x) { x.kiss_port = 9000; }, +[](app::Args& x) { x.record = true; },
+    b.record = true;
+    b.record_dir = "elsewhere";
+    check::is_true(!app::needs_restart(a, b), "recording: no restart");
+    for (auto set : {+[](app::Args& x) { x.kiss_port = 9000; }, +[](app::Args& x) { x.decode_worker = false; },
                      +[](app::Args& x) { x.tci = true; }, +[](app::Args& x) { x.kiss_bw = 500; }}) {
         app::Args c = b;
         set(c);
@@ -466,6 +471,20 @@ void test_window(const QTemporaryDir& dir) {
     check::is_true(w.station().args() == live, "the station's args are the new ones");
     wait_for([] { return false; }, 300);  // a dropped client would show by now
     check::is_true(again.state() == QAbstractSocket::ConnectedState, "the command client kept");
+    // recording on: a run folder of its own, started where the engine is (its start event)
+    live.record = true;
+    live.record_dir = dir.filePath(QStringLiteral("live-rec")).toStdString();
+    w.apply_settings(live);
+    const auto runs = [&] {
+        const QDir d(QString::fromStdString(live.record_dir));
+        const auto l = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        return l.isEmpty() ? QString() : d.filePath(l.first());
+    };
+    check::is_true(wait_for([&] { return QFile::exists(runs() + QStringLiteral("/events.jsonl")); }, 5000),
+                   "recording started live");
+    check::is_true(again.state() == QAbstractSocket::ConnectedState, "the command client kept through it");
+    live.record = false;
+    w.apply_settings(live);
     live.kiss_port += 1;
     w.apply_settings(live);
     check::is_true(wait_for([&] { return again.state() != QAbstractSocket::ConnectedState; }, 5000),
