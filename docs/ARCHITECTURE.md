@@ -9,7 +9,7 @@ page is the map. `docs/README.md` lists the other docs.
 | Path | What |
 |---|---|
 | `data2g/` | The Python package: the **normative reference** for the on-air format, the receiver and the protocols, and a working station (`data2g-host`). |
-| `native/` | The C++20 / Qt 6 port of the live path: `data2g-host`, `data2g-gui`, `data2g-monitor`. Checked against `data2g/`. See `native/README.md`. |
+| `native/` | The C++20 / Qt 6 port of the live path: `data2g-host`, `data2g-gui`, `data2g-web`, `data2g-monitor`. Checked against `data2g/`. See `native/README.md`. |
 | `tests/` | The Python suite. Under `pytest --native` the same suite runs on the C++ core. |
 | `tools/` | Generators (`gen_native_tables.py`, `freeze_format.py`), layering checks, build and packaging scripts, `with_native.py`. See `tools/README.md`. |
 | `scripts/` | Studies and the data generators behind every tuned number and committed table. See `scripts/README.md`. |
