@@ -43,6 +43,9 @@ class TxBurst:
     slots: list[Slot]
     burst_seq: int  # absolute count of this station's bursts
     cap: int = 0  # bandwidth cap code the TX filter is for (cpm.TX_FILTERS; modes.CAP_HZ)
+    # sent as a nod (docs/arq.md §3b): (meaning, family key (session key,
+    # direction, burst seq, acted-on)); the slots hold the control it stands for
+    nod: tuple | None = None
 
 
 def dup_ctl(burst) -> bool:

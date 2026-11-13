@@ -340,6 +340,41 @@ class RealPhy:
             e = max(e, floor_db - ENERGY_FLOOR_DB)
         return e
 
+    def nod(self, rx: int, t0: float):
+        """A nod in the audio just heard where station rx's link looks for
+        one (docs/arq.md §3b): its peer's reply in the expected slot. -> its
+        meaning, or None."""
+        from data2g.arq import nod as N
+        from data2g.arq import session as SS
+
+        s = self.sessions.get(rx)
+        st = getattr(s, "station", None)
+        cfo = self.slots[rx].cfo
+        if st is None or cfo is None or s.state not in (SS.CONNECTED, SS.DISCONNECTING) or rx not in self.tx_end:
+            return None
+        key, w = st.nod_family(), self.slots[rx].window(self.tx_end[rx])
+        if key is None or w is None:
+            return None
+        y = self.last_y
+        lo, hi = (int(round((t - t0) * FS)) + int(PAD_S * FS) for t in w)
+        if hi < 0 or lo > len(y):
+            return None
+        got = N.detect(y, max(0, lo), hi, cfo, N.family(*key))
+        return None if got is None else got[0]
+
+    def nod_heard(self, rx, t0: float, end: float):
+        """send()'s result for a nod station rx finds in the audio just heard
+        (looked for whatever the blind receiver made of it, as the engine
+        does), or None."""
+        got = self.nod(rx, t0) if rx is not None else None
+        if got is None:
+            return None
+        from data2g.arq import link as LK
+
+        st = self.sessions[rx].station
+        # no header to hear: known at its end; no receiver measurements (meas None)
+        return end, (end, LK.NOD_MODE, 1), lambda store, stats, rng: st.nod_rx(got), None
+
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
         x = PHY.tx_audio(burst)
@@ -348,6 +383,9 @@ class RealPhy:
         rx = self.listen(burst, t0, end)
         r = self.hear(x, t0, rx)
         noise = self.heard_noise(rx, r, t0, end)
+        got = self.nod_heard(rx, t0, end)
+        if got is not None:
+            return got
         if r is None:
             return end, None, None, None
         spec = r["spec"]

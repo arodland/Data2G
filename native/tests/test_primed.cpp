@@ -177,6 +177,13 @@ int main() {
         const auto w = s.window(10.0);
         check::is_true(w && std::abs(w->first - (10.35 - s.TOL_S)) < 1e-12 && std::abs(w->second - (10.35 + s.TOL_S)) < 1e-12,
                        "the median gap, either side");
+        auto n = s.nod_window(10.0);
+        check::is_true(n && std::abs(n->first - (10.3 - s.TOL_S)) < 1e-9 && std::abs(n->second - (10.4 + s.TOL_S)) < 1e-9,
+                       "nod window: the gaps' spread");
+        s.heard(2.0, std::nullopt);  // median 0.4: capped
+        n = s.nod_window(10.0);
+        check::is_true(n && std::abs(n->first - (10.3 - s.TOL_S)) < 1e-9 && std::abs(n->second - (10.4 + s.NOD_HALF_S)) < 1e-9,
+                       "nod window: capped");
     }
 
     return check::report("test_primed");

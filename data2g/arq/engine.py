@@ -33,6 +33,7 @@ from ..waveform import dsp
 from . import burst as B
 from . import frames as F
 from . import link as LK
+from . import nod as N
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -224,6 +225,7 @@ class Engine:
         self._hand_lock = threading.Lock()
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
+        self._nod = None  # the nod search after my burst (_watch_nods): [(key, lo, hi), cfo, audio chunks, samples]
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -669,6 +671,7 @@ class Engine:
                     self._tx_end = self.now + n / FS  # the expected-reply/missed-burst accounting's
                     self.session.on_tx_end(burst, self.now + n / FS)
                     self._expect_reply()
+                    self._watch_nods()
                 self._tx_kiss = False
         self.n += k
         return out, self.tx is not None
@@ -684,10 +687,39 @@ class Engine:
         if w is not None and grids and LK.PRIME:
             self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
 
+    def _watch_nods(self):
+        """Where the peer may nod after my burst (docs/arq.md §3b): its reply
+        in the expected slot, stream indices from my burst's end."""
+        self._nod = None
+        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.nod_window(0.0)
+        if st is None or cfo is None or w is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
+            return
+        key = st.nod_family()
+        if key is not None:
+            self._nod = [(key, max(0, int(round(w[0] * FS))), int(round(w[1] * FS))), cfo, [], 0]
+
+    def _nod_feed(self, x: np.ndarray, t: float):
+        """Audio since my burst's end: once it holds the window, a nod there is the burst it stands for."""
+        (key, lo, hi), cfo, chunks, n = self._nod
+        chunks.append(x)
+        self._nod[3] = n = n + len(x)
+        if n < hi + N.span() + N.GRID.T:
+            return
+        self._nod = None
+        st = getattr(self.session, "station", None)
+        if st is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
+            return
+        got = N.detect(np.concatenate(chunks), lo, hi, cfo, N.family(*key))
+        if got is not None:
+            log.info("RX nod %d: %s (score %.1f)", got[0], N.CODEBOOK[got[0]], got[2])
+            self.session.on_rx(st.nod_rx(got[0]), t)
+
     def next_event(self) -> float | None:
         return self.session.next_event()
 
     def _hear(self, x: np.ndarray, t: float):
+        if self._nod is not None:
+            self._nod_feed(x, t)
         for kind, ev in self.receiver.feed(x):
             if kind == "header":
                 self.session.on_header(ev["spec"].name, ev["n_cw"], t)

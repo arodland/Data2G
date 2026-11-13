@@ -11,6 +11,7 @@
 #include "util/cancel.hpp"
 #include "util/pool.hpp"
 #include "cpm/cpm.hpp"
+#include "arq/nod.hpp"
 #include "equalizer/equalizer.hpp"
 
 namespace data2g::arq {
@@ -144,6 +145,10 @@ std::uint32_t mask_value(const MaskId& m) {
 }
 
 std::vector<double> tx_audio(const TxBurst& burst) {
+    if (burst.nod) {  // a nod (docs/arq.md §3b): its keyed sequence
+        const auto& [meaning, key] = *burst.nod;
+        return nod::waveform(nod::family(key).at(static_cast<std::size_t>(meaning)), burst.cap);
+    }
     const Mode& md = mode_at(burst.submode);
     const std::size_t n = burst.slots.size();
     if (md.is_cpm()) {

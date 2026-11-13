@@ -78,7 +78,10 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 // order, dumped on a thread of its own so its decodes never delay the session's.
 struct Station::MonitorThread {
     using Heard = std::pair<arq::BurstHeard, std::shared_ptr<arq::ModemRx>>;  // as the session read it
-    using Burst = std::variant<Heard, arq::TxBurstPtr>;
+    struct NodHeard {
+        arq::TxBurstPtr standing;  // the control-only burst a nod heard stands for (Engine::set_on_nod)
+    };
+    using Burst = std::variant<Heard, arq::TxBurstPtr, NodHeard>;
     monitor::Monitor m;
     std::mutex mu;
     std::condition_variable cv;
@@ -116,6 +119,7 @@ struct Station::MonitorThread {
             lock.unlock();
             monitor::Dump d;
             if (auto* t = std::get_if<arq::TxBurstPtr>(&b)) d = m.sent(**t, when);
+            else if (auto* nh = std::get_if<NodHeard>(&b)) d = m.nod_heard(*nh->standing, when);
             else {
                 auto& [h, rx] = std::get<Heard>(b);
                 d = m.burst(h, rx.get(), when);
@@ -321,6 +325,7 @@ bool Station::update(const Args& b) {
         e.set_noise_rule(b.noise_rule);
         e.cw_id = b.cw_id;
         e.cw_wpm = b.cw_wpm;
+        e.set_nods(b.nods);
         if (b.mycall != a.mycall) {
             try {
                 e.set_call(b.mycall.value_or("NOCALL"), e.aliases());
@@ -476,6 +481,7 @@ void Station::start() {
         engine_->cw_wpm = a_.cw_wpm;
         engine_->hand_round = a_.hand_decoder;
         engine_->pending = a_.pending;
+        engine_->set_nods(a_.nods);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig
@@ -525,6 +531,9 @@ void Station::start() {
         });
         engine_->set_on_send([this](const arq::TxBurstPtr& b) {
             if (monitor_on_) monitor_->push(b);
+        });
+        engine_->set_on_nod([this](const arq::TxBurstPtr& b) {
+            if (monitor_on_) monitor_->push(MonitorThread::NodHeard{b});
         });
         engine_->set_on_decoded([this](int decoded, int failed) {
             reading_.decoded = decoded;

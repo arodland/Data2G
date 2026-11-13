@@ -951,6 +951,8 @@ Mat<cdouble> take_crows(const Mat<cdouble>& Z, std::span<const int> rows) {
     return out;
 }
 
+}  // namespace
+
 // cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric.
 std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0) {
     Mat<double> P(Z.rows, Z.cols, 0.0);
@@ -966,8 +968,6 @@ std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<
     }
     return out;
 }
-
-}  // namespace
 
 std::optional<std::array<double, 4>> coh_lock(const Grid& g) {
     static const bool on = env_on("DATA2G_CPM_COH_LOCK");

@@ -8,6 +8,7 @@
 // - logging goes to Python's "data2g.link" / "data2g.session" loggers.
 
 #include <pybind11/functional.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -54,7 +55,7 @@ public:
     bool want_dup() override { return py::bool_(py::getattr(obj, "want_dup", py::bool_(false))); }
     int rv_cycle(const std::string& m) override { return obj.attr("rv_cycle")(m).cast<int>(); }
     bool has_outcome() override { return overrides("outcome"); }
-    void outcome(const std::string& m, int decoded, int sent, bool usable) override {
+    void outcome(const std::string& m, int decoded, int sent, std::optional<bool> usable) override {
         obj.attr("outcome")(m, decoded, sent, py::arg("usable") = usable);
     }
     std::string mode_name(int rec) override {
@@ -137,6 +138,8 @@ public:
         return bytes_of(r);
     }
     int n_ctl_slots() const override { return py::getattr(obj, "n_ctl_slots", py::int_(0)).cast<int>(); }
+    // link.py asks getattr(rx, "nod", False)
+    bool is_nod() const override { return py::getattr(obj, "nod", py::bool_(false)).cast<bool>(); }
 };
 
 class PyRng : public Rng {
@@ -159,17 +162,20 @@ void sync_compress(Station& s) {
 class PyStation : public Station {
 public:
     using Station::Station;
-    TxBurstPtr build(bool fresh) override {
+    TxBurstPtr build(bool fresh, bool nod) override {
         py::handle self = py::detail::get_object_handle(static_cast<Station*>(this), py::detail::get_type_info(typeid(Station)));
         if (self) {
             py::dict d = py::getattr(self, "__dict__");
             if (d.contains("build")) {
                 py::object f = d["build"];
-                return burst_cpp(fresh ? f() : f(py::arg("fresh") = false));
+                py::dict kw;
+                if (!fresh) kw["fresh"] = false;
+                if (nod) kw["nod"] = true;
+                return burst_cpp(f(**kw));
             }
         }
         sync_compress(*this);
-        return Station::build(fresh);
+        return Station::build(fresh, nod);
     }
 };
 
@@ -238,7 +244,9 @@ public:
 
 protected:
     std::shared_ptr<Station> make_station(int direction, bool master_, int key) override {
-        return std::make_shared<PyStation>(direction, policy, master_, key, std::nullopt, cap, chat);
+        auto st = std::make_shared<PyStation>(direction, policy, master_, key, std::nullopt, cap, chat);
+        st->nod = true;  // as Session::make_station
+        return st;
     }
 };
 
@@ -342,6 +350,25 @@ void bind_arq_link(py::module_& m) {
             return PyControl{std::make_shared<Core>(c.core), dict_of(c.ext, pyb)};
         });
 
+    a.def("nod_family", [](int key, int direction, int bn8, int acted8) {
+        const auto f = nod::family({key, direction, bn8, acted8});
+        py::array_t<std::int64_t> out({nod::M, nod::L});
+        auto o = out.mutable_unchecked<2>();
+        for (int k = 0; k < nod::M; ++k)
+            for (int l = 0; l < nod::L; ++l) o(k, l) = f[static_cast<std::size_t>(k)][static_cast<std::size_t>(l)];
+        return out;
+    });
+    a.def("nod_detect", [](const py::array_t<double, py::array::c_style | py::array::forcecast>& x, std::int64_t lo,
+                           std::int64_t hi, double cfo, const py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>& fam)
+              -> py::object {
+        nod::Family f(nod::M);
+        auto fr = fam.unchecked<2>();
+        for (int k = 0; k < nod::M; ++k)
+            for (int l = 0; l < nod::L; ++l) f[static_cast<std::size_t>(k)][static_cast<std::size_t>(l)] = static_cast<int>(fr(k, l));
+        const auto d = nod::detect({x.data(), static_cast<std::size_t>(x.size())}, lo, hi, cfo, f);
+        if (!d) return py::none();
+        return py::make_tuple(d->meaning, d->start, d->score);
+    });
     a.def("pack_bitmap", [](const py::iterable& received, int cum) {
         std::set<int> r;
         for (auto x : received) r.insert(x.cast<int>());
@@ -447,12 +474,31 @@ void bind_arq_link(py::module_& m) {
         .def_property_readonly("comp_seqs", [](const RxSide& r) { return set_of(r.comp_seqs); });
 
     py::class_<Station, std::shared_ptr<Station>>(a, "Station", py::dynamic_attr())
-        .def(py::init([](int direction, py::object policy, bool master, int key, std::optional<int> max_misses, int cap, bool chat) {
-                 return std::shared_ptr<Station>(
-                     std::make_shared<PyStation>(direction, policy_of(std::move(policy)), master, key, max_misses, cap, chat));
+        .def(py::init([](int direction, py::object policy, bool master, int key, std::optional<int> max_misses, int cap, bool chat,
+                         bool nod) {
+                 auto s = std::make_shared<PyStation>(direction, policy_of(std::move(policy)), master, key, max_misses, cap, chat);
+                 s->nod = nod;
+                 return std::shared_ptr<Station>(s);
              }),
              py::arg("direction"), py::arg("policy"), py::arg("master") = false, py::arg("key") = 0,
-             py::arg("max_misses") = LINK_LOST_MISSES, py::arg("cap") = 2, py::arg("chat") = false)
+             py::arg("max_misses") = LINK_LOST_MISSES, py::arg("cap") = 2, py::arg("chat") = false, py::arg("nod") = false)
+        .def_readwrite("nod", &Station::nod)
+        .def_readwrite("nod_peer", &Station::nod_peer)
+        .def_readonly("_nods_told", &Station::nods_told_)
+        .def("nod_family", [](const Station& s) -> py::object {
+            const auto k = s.nod_family();
+            if (!k) return py::none();
+            return py::make_tuple((*k)[0], (*k)[1], (*k)[2], (*k)[3]);
+        })
+        .def("nod_payload", [](const Station& s, int meaning) -> py::object {
+            const auto p = s.nod_payload(meaning);
+            return p ? py::object(pyb(*p)) : py::none();
+        })
+        .def("nod_rx", [](const Station& s, int meaning) {
+            const auto p = s.nod_payload(meaning);
+            return py::module_::import("data2g.arq.nod").attr("NodRx")(
+                NOD_MODE, mask_tuple(ctl_mask(s.peer(), 0, s.key)), p ? py::object(pyb(*p)) : py::none());
+        })
         .def_readonly("direction", &Station::direction)
         .def_property_readonly("policy", [](const Station& s) { return policy_py(s.policy); })
         .def_readonly("master", &Station::master)
@@ -493,10 +539,10 @@ void bind_arq_link(py::module_& m) {
         .def_property_readonly("peer", &Station::peer)
         .def("write", [](Station& s, const py::object& b) { s.write(bytes_of(b)); })
         .def("read", [](Station& s) { return pyb(s.read()); })
-        .def("build", [](Station& s, bool fresh) {
+        .def("build", [](Station& s, bool fresh, bool nod) {
             sync_compress(s);
-            return burst_py(s.Station::build(fresh));
-        }, py::arg("fresh") = true)
+            return burst_py(s.Station::build(fresh, nod));
+        }, py::arg("fresh") = true, py::arg("nod") = false)
         .def("on_timeout", [](Station& s, bool allow_repeat) { return burst_py(s.on_timeout(allow_repeat)); },
              py::arg("allow_repeat") = true)
         .def("handle", [](Station& s, py::object rx) {

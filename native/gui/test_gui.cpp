@@ -127,6 +127,7 @@ app::Args persisted() {
     a.record_dir = "/srv/rec";
     a.decode_worker = false;
     a.live_constellation = false;
+    a.nods = false;
     a.noise_rule = 0.5;
     a.decoder_effort = 35;
     return a;
@@ -203,6 +204,7 @@ void test_restart_warning() {
     b.noise_rule = 0.5;
     b.decoder_effort = 30;
     b.cw_id = "add";
+    b.nods = false;
     b.ptt_on_delay_ms = 200;
     check::is_true(!app::needs_restart(a, b), "live settings: no restart");
     b.record = true;

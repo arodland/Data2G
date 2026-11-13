@@ -50,6 +50,14 @@ class AuditPhy(G.RealPhy):
         rx_station = self.listen(burst, t0, end)
         r = self.hear(x, t0, rx_station)
         noise = self.heard_noise(rx_station, r, t0, end)
+        got = self.nod_heard(rx_station, t0, end)
+        if burst.nod is not None:  # docs/arq.md §3b: detected, or missed
+            row.update(submode="nod", kind="ctl", outcome="ok" if got else "missed", data_sent=0, data_ok=0)
+            self.rows.append(row)
+        if got is not None:
+            return got
+        if burst.nod is not None:
+            return end, None, None, None
         if r is None:
             row.update(outcome="missed", data_sent=0, data_ok=0)
             self.rows.append(row)

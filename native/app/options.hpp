@@ -53,6 +53,7 @@ struct Args {
     double cw_wpm = 20.0;
     std::string hand_decoder = "full";  // "full" or "cheap": net control's Hand round grids
     std::string pending = "fsk";  // arq::Engine::pending: off, fsk, ofdm, all
+    bool nods = true;             // arq::Engine::set_nods: short keyed CPM replies (docs/arq.md §3b)
     // additions
     bool decode_worker = true;
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)

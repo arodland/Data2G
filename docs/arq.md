@@ -30,6 +30,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
 | §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
+| §3b nods | `nod.py` (`family`, `detect`, `CODEBOOK`, `NodRx`); `frames.py` (`T_NODS`); `link.py` (`Station._nod_of`, `nod_family`, `nod_payload`, `nod_peer`); `session.py` (direct replies `build(nod=True)`); `engine.py` (`_watch_nods`, `_nod_feed`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -233,6 +234,89 @@ for Data2G).
   (mean latency +2.6 s, SE 1.2, 72 seeds) where the blind run had moved to CPM. Until the
   outcome data is regenerated with priming on and the model retrained, the shifter picks
   modes as before and the session gains above are without it.
+
+## 3b. Nods (`T_NODS`, 2026-11)
+
+At the floor a control-only reply costs a whole CPM burst (c16r25: 5.0 s) to say what its
+listener mostly knows already. A nod says it without words: one of M keyed c16r25 tone
+sequences, L = 64 tones (2.56 s), detected where the listener expects the reply, not
+decoded. The native host's "Nods" setting (`--no-nods`; default on, from the next session:
+`Engine::set_nods`) turns them off for a station, both directions: it neither sends
+`T_NODS` nor listens, so its peer sends it none. For a link whose reply timing is too
+unsteady for the slot (K2CR's TX playout lag on air, 2026-11-13). `DATA2G_NOD=0` turns them off
+everywhere (Python too) for A/B runs.
+
+- **Who nods to whom** (no session version bump). A station that hears nods says so with
+  `T_NODS` (empty), in its control's padding only, until the peer acts on a burst that
+  carried it. A station sends nods only to a peer whose `T_NODS` it has heard (latched
+  for the session); it listens for nods always and takes any that is valid. A peer
+  without nods ignores the TLV and never gets a nod. Drop `T_NODS` at the next session
+  version bump: from then on every peer hears nods.
+- **Family.** M = 32 sequences of L tones, splitmix64 seeded with (0x5167, session key,
+  sender's direction, the nod's burst number mod 8, the peer burst it acts on mod 8),
+  16 tones per output (Python `nod.family` and C++ `nod::family` agree, pinned in
+  tests/test_nod.py): a nod matches only the one turn it answers. Which of the M
+  carries the meaning; 20 are used, 12 reserved (a detection of one is no nod).
+- **Codebook** (`nod.CODEBOOK`): a fresh control-only reply, ack {all, unchanged} x
+  recommend step {0, +1, -1, +2, -2} x T_DUPCTL {absent, present}. Anchors: A is the
+  peer burst I act on, R my burst A acted on. A reply nods only if R is my previous
+  burst (so the peer knows which burst I answer). "all": cum is one past the highest new
+  codeword A carried (A carried new data); "unchanged": cum is R's. The step is a code
+  index within R's recommendation's band. A control the codebook does not cover (a
+  partial ACK, a band change, resends, any other TLV) goes in full.
+- **Kept fields.** `size_hint`, `T_REPLY` and `T_CHAT` are not carried: the listener
+  keeps the peer's last values, so a control nods only if they equal my previous
+  burst's (all three are absolute: a nod leaving an old size hint in force shrank every
+  data burst at awgn -18 to one codeword). `T_DUPCTL` is carried as an absolute bit.
+- **Where.** Only as the session's direct reply, in the peer's expected slot (§3a
+  `ReplySlot.nod_window`: the last 8 gaps' spread ±0.15 s, at most ±0.6 s about their
+  median); the listener searches there after each of its bursts. On air (2026-11-12,
+  KC2G -> K2CR) one station's TX playout lag varied 0.2-1.3 s, its peer's reply gaps
+  1.35-2.22 s: 11 of 21 nods fell outside the median ±0.15 s and 6 or more were missed,
+  though every one scored 89-176. The primed lock keeps ±0.15 s (a missed slot falls
+  back to the blind lock, and its CPU grows with the width). A nod is
+  never repeated on a timeout (its listener looks in its reply slot only): the master
+  polls instead, in full.
+- **Why not polls.** A poll restates a burst its peer may not have heard, and then the
+  peer cannot expand it (nor looks for it): at mpg -12, 35 of 66 poll nods went where
+  the callee had missed that burst (each a further timeout), 30 were heard, 1 scored
+  under THR; mpg -12 lost 5.3% with them (+2.1% without). Replies were all detected
+  (305 of 305, 8 cells). Their 6 meanings were dropped from the codebook.
+- **Detection** (`nod.detect`). The square-law tone metric over the window in T/4 steps
+  at the slot's CFO, then the best 4 sequences rescored coherently
+  (`cpm._coh_run_llr`). Accepted: the best score at least `nod.thr` and the runner-up
+  under it. `THR` = 37.0 for the ±0.15 s slot (8 starts): the exponential tail fitted
+  over the 90% point of 100,000 noise slots' best (max seen 31.2, scale 2.08) at 1e-6
+  false accepts per slot, 36.85. A wider window adds 2.08 per e-fold of starts, holding
+  1e-6: 39.8 at ±0.6 s (31 starts), costing 0.1 dB awgn, 0.25-0.5 dB fading at 10%.
+- **CPU** (`data2g-bench-rx --nod 50`: one search of the ±0.15 s slot, after each of my
+  bursts, on the session stage): x86 desktop 4 ms (C++), 6-13 ms (Python); Raspberry
+  Pi 4 10.6-11 ms (17.6 ms with the governor still ramping), whether a nod is there or
+  not. Under 0.3% of a core at one burst every 5 s; the receiver's own listening on the
+  Pi is ~3.2 ms per 20 ms feed (docs/pi-bench-cpm.md). The full ±0.6 s window costs
+  +9% (x86 C++ 4.28 -> 4.68 ms; `DATA2G_NOD_BENCH_W` sets the bench's half-width): the
+  per-start search is small next to the bins and the coherent rescoring. The slot's
+  audio is held until searched: ~0.18 MB (~0.25 MB at ±0.6 s).
+- **Monitor.** A nod sent or heard shows as the control-only burst it stands for, its
+  head marked `(nod N: meaning)` (`Monitor::sent`, `Monitor::nod_heard` via
+  `Engine::set_on_nod`).
+- **Received.** A detected nod is handed to the link as the control-only burst it
+  stands for (`NodRx`, the control `Station.nod_payload` synthesizes), with no
+  receiver measurements; its outcome goes to the policy with `usable` None.
+- **Census** (`scripts/sig_census.py`, CPM control-only bursts at the floor): all-acked
+  73% of replies in bulk, 86% in chat; polls 14-19% of control-only bursts; partial ACKs
+  too diverse to enumerate; T_REPLY changes in 22-26%, T_DUPCTL in 19-22%.
+- **Sessions** (loss_study, PEP 5, shift+cpm, 16 seeds x 600 s, paired against nods
+  off; delivered bps): awgn -18 +8.0% (SE 0.5), awgn -16 +12.1% (1.6), mpd -15 +4.9%
+  (5.4), mpd -13 +3.4% (2.5), mpg -12 +2.1% (6.6), mpg -10 +1.6% (1.0), mpp -16 +11.1%
+  (3.8), mpp -14 +4.9% (2.3). 1184 nods, all detected: 39% of control-only CPM bursts
+  (mpg 5-6%: its control-only bursts are mostly polls and OFDM ACKs; awgn -16 71%).
+  With poll nods: mpg -12 -5.3% (7.8), 95 of 1360 nods missed, all polls. (Measured
+  with poll nods possible and session version 6, before T_NODS; the reply rules are
+  the same.)
+- **Study** (`scripts/sig_study.py`, round 2): 10% failure points awgn -19.2, mpg -11.4,
+  mpp -16.2, mpd -16.3 dB (mean power in 2500 Hz) against today's primed control-only
+  reply at -14.7, -10.0, -11.7, -11.8, in 2.6 s of air instead of 5.0.
 
 ## 4. Core control word (32 bits)
 

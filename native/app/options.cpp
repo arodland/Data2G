@@ -41,7 +41,7 @@ const char* USAGE =
     "                   [--stats-interval S] [--list-modes] [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT]\n"
     "                   [--tci | --no-tci] [--tci-host HOST[:PORT]] [--threads N] [--realtime | --no-realtime]\n"
-    "                   [--live-constellation | --no-live-constellation]\n"
+    "                   [--live-constellation | --no-live-constellation] [--nods | --no-nods]\n"
     "                   [--dd-budget S] [--decoder-effort N] [--cw-id {off,add,only}] [--cw-wpm WPM]\n"
     "                   [--hand-decoder {full,cheap}]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
@@ -114,6 +114,10 @@ const char* HELP =
     "                        data2g-gui's constellation plot fills in as a burst arrives (a frame's FFTs\n"
     "                        per block on the receive thread), not only once it is decoded. Unused by\n"
     "                        data2g-host. (default: on)\n"
+    "  --nods, --no-nods     nods: short replies used in the slowest modes (docs/arq.md §3b). Turn off if\n"
+    "                        they keep going unheard. Unsteady audio timing at either station can cause\n"
+    "                        that. Takes effect at the next session.\n"
+    "                        (default: on)\n"
     "  --dd-budget S         seconds a burst's decode may spend re-estimating the channel from its own\n"
     "                        decoded codewords (DD), counted from its soft bits; the pass in progress is\n"
     "                        abandoned when it runs out. 0: none. Lower it on a slow machine (default 1)\n"
@@ -188,6 +192,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--realtime", {&a.realtime, true}},   {"--no-realtime", {&a.realtime, false}},
         {"--live-constellation", {&a.live_constellation, true}},
         {"--no-live-constellation", {&a.live_constellation, false}},
+        {"--nods", {&a.nods, true}}, {"--no-nods", {&a.nods, false}},
         {"--tci", {&a.tci, true}},     {"--no-tci", {&a.tci, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},
         {"--record", {&a.record, true}}, {"--no-record", {&a.record, false}},

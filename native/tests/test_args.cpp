@@ -161,6 +161,12 @@ void test_cw_id() {
     check::equal(app::check(parse({"--cw-wpm", "50"})).value_or(""), std::string("--cw-wpm: 15-40"), "too fast");
 }
 
+void test_nods() {
+    check::current_step = "nods";
+    check::is_true(parse({}).nods && !parse({"--no-nods"}).nods && parse({"--no-nods", "--nods"}).nods,
+                   "default on, --no-nods, the last wins");
+}
+
 }  // namespace
 
 int main() {
@@ -174,6 +180,7 @@ int main() {
     test_decoder_effort();
     test_dd_budget();
     test_cw_id();
+    test_nods();
     test_realtime_switch();
     return check::report("args");
 }

@@ -49,6 +49,10 @@ T_DRAINED = 17  # empty: this burst's new codewords end the sender's queued data
 # payload with trailing zeros cut (zero padded back to the data mode's payload), then inline_check.
 # Only the last new codeword of a burst, and only where it fits the padding.
 T_INLINE = 18
+# empty: the sender hears nods (docs/arq.md §3b). In control padding only, until
+# the peer acts on a burst that carried it; nods go only to a peer that sent it.
+# Drop it (everyone hears nods) at the next session version bump.
+T_NODS = 19
 
 
 def inline_check(mask_id: tuple, payload: bytes) -> bytes:

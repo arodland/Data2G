@@ -121,7 +121,12 @@ def tx_audio(burst) -> np.ndarray:
     """A link.TxBurst -> unit-RMS audio (a CPM burst filtered for its cap:
     cpm.TX_FILTERS). Codewords scramble by burst position alone
     (codes.scramble_seed: no key on air); a resend in another slot still
-    combines (codes.flip)."""
+    combines (codes.flip). A nod (burst.nod): its keyed sequence."""
+    if getattr(burst, "nod", None) is not None:
+        from . import nod
+
+        meaning, fam = burst.nod
+        return nod.waveform(nod.family(*fam)[meaning], burst.cap)
     spec = MODES[burst.submode]
     if is_cpm(spec):
         # control slots (masks >= 128) in the grid's short codeword; two of

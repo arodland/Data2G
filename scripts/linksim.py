@@ -613,7 +613,8 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
                 whom.on_header(extra[1], extra[2], when)
             else:
                 make_rx, meas, submode = extra
-                whom.policy.observe(meas, submode, when)
+                if meas is not None:  # a nod (docs/arq.md §3b) brings no receiver measurements
+                    whom.policy.observe(meas, submode, when)
                 whom.on_rx(make_rx(stores[id(whom)], stats, rng), when)
                 hold[id(whom)].pop(id(burst), None)
     lat = [d - w for w, d in zip(t_write, t_done) if w is not None and d is not None]

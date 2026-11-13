@@ -203,6 +203,8 @@ Mat<std::complex<double>> bins(const Grid& g, std::span<const double> x, std::in
 Mat<double> coh_metric(const Mat<std::complex<double>>& Z, const Mat<double>& P, int W, double n0);
 // cpm._n0: the noise level of energies E (all but each row's strongest, exponential).
 double noise_n0(const Mat<double>& E);
+// cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows (coh_metric, n0).
+std::vector<double> coh_run_llr(const Grid& g, const Mat<std::complex<double>>& Z, std::span<const int> t, double n0);
 // read_header on coh_metric (cpm.coh_read_header).
 Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 // Per slot (control first), its rows in the burst.

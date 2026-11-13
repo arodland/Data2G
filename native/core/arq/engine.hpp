@@ -44,6 +44,7 @@
 
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
+#include "arq/nod.hpp"
 #include "arq/session.hpp"
 #include "cwid/cwid.hpp"
 #include "kisslink/kisslink.hpp"
@@ -250,6 +251,9 @@ public:
     // Every burst we transmit (ARQ, ID, KISS), on the session stage as it is keyed, in the order sent:
     // a monitor's view of our own side. Set it before the first step().
     void set_on_send(std::function<void(const TxBurstPtr&)> f) { on_send_ = std::move(f); }
+    // A nod heard and taken (docs/arq.md §3b), on the session stage: the control-only burst it stands for (the
+    // control the session synthesized, under the peer's mask; `nod` set), for a monitor. Set it before the first step().
+    void set_on_nod(std::function<void(const TxBurstPtr&)> f) { on_nod_ = std::move(f); }
     // Every burst heard, once its session stage is done with it: its decoder, handed over (ModemRx::for_reader:
     // what was read stays read) for a monitor to read on its own thread; nullptr if lost. `b` is on_burst's
     // without the burst itself (heard, soft): the decoder holds those. Set it before the first step().
@@ -298,6 +302,9 @@ public:
     double cw_wpm = cwid::WPM;
     std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
     std::string pending = "fsk";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
+    // Nods (docs/arq.md §3b) from the next session (one in progress keeps what it told its peer).
+    void set_nods(bool on);
+    bool nods() const { return nods_; }
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -463,6 +470,7 @@ private:
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
     std::function<void(const TxBurstPtr&)> on_send_;
+    std::function<void(const TxBurstPtr&)> on_nod_;
     std::function<void(const BurstHeard&, std::shared_ptr<ModemRx>)> on_read_;
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
@@ -515,6 +523,18 @@ private:
         std::int64_t first = 0, next = 0, lo = 0, hi = 0, anchor = 0;  // next: the sample after buf's last
     };
     std::optional<HandListen> hand_listen_;
+    // the nod search after my burst (engine.py _watch_nods, docs/arq.md §3b): the peer's reply family, the
+    // window [lo, hi] in samples from my burst's end (`anchor`, an n_ value), the slot's CFO, the audio since
+    struct NodWatch {
+        nod::FamilyKey key;
+        std::int64_t anchor, lo, hi;
+        double cfo;
+        std::vector<double> buf;
+    };
+    std::optional<NodWatch> nod_watch_;
+    bool nods_ = true;
+    void watch_nods(std::int64_t end);
+    void nod_collect(std::span<const double> x, double t);
     double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)
     std::mutex hand_mu_;
     std::vector<std::string> hand_out_;  // under hand_mu_

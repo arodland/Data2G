@@ -153,3 +153,30 @@ def test_worker_mode_steps_and_stops_without_the_gil(native):
     del e
     with pytest.raises(ValueError):
         native.engine.Engine("W1AW", policy=lambda: None, worker=True)
+
+
+@pytest.mark.parametrize("cpp_calls", [True, False], ids=["python-nods-to-cpp", "cpp-nods-to-python"])
+def test_nods_between_cpp_and_python_engines(native, reference, cpp_calls, tmp_path):
+    """A CPM session between the two engines: the callee's control-only
+    replies go as nods (docs/arq.md §3b) and the caller's engine finds them,
+    whichever implementation is on each side."""
+    from data2g.arq import policy as G
+
+    class CpmOnly(G.GearShifter):
+        def choose(self, station, escalation):
+            if escalation:
+                return super().choose(station, escalation)
+            m = "fsk16r25-r1/2"
+            return m, G.slots_for(G.MODES[m], 12.0, station.tx.pending(), station.peer_wants_dup)
+
+    a, b = _pair(native, reference, cpp_calls, tmp_path, cpp=dict(policy=CpmOnly), py=dict(policy=CpmOnly))
+    b.listen()
+    a.connect(b.call, 2)
+    assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    up = np.random.default_rng(13).bytes(300)
+    a.session.write(up)
+    got = bytearray()
+    assert link(a, b, 10, 400, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=14)
+    assert bytes(got) == up
+    sent, heard = b.session.station.stats["tx_nod"], a.session.station.stats["rx_nod"]
+    assert sent >= 2 and heard >= sent - 1, (sent, heard)

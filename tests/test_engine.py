@@ -926,6 +926,35 @@ def test_the_shifter_hears_each_peer_bursts_energy():
     assert b.session.policy.energy_features() is not None
 
 
+def test_nods_on_audio(monkeypatch):
+    """A CPM session's control-only replies go as nods (docs/arq.md §3b)
+    once the expected slot is learned, and the caller's engine finds them
+    in that slot: the data still arrives whole."""
+    from data2g.arq import link as LK
+    from data2g.arq import policy as G
+
+    monkeypatch.setattr(LK, "NOD", True)
+
+    class CpmOnly(G.GearShifter):
+        def choose(self, station, escalation):
+            if escalation:
+                return super().choose(station, escalation)
+            m = "fsk16r25-r1/2"
+            return m, G.slots_for(G.MODES[m], 12.0, station.tx.pending(), station.peer_wants_dup)
+
+    a, b = Engine("W1AW", policy=CpmOnly, seed=11), Engine("K2XYZ", policy=CpmOnly, seed=12)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 10, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    up = np.random.default_rng(13).bytes(300)
+    a.session.write(up)
+    got = bytearray()
+    assert link(a, b, 10, 400, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=14)
+    assert bytes(got) == up
+    sent, heard = b.session.station.stats["tx_nod"], a.session.station.stats["rx_nod"]
+    assert sent >= 2 and heard >= sent - 1, (sent, heard)
+
+
 def test_pending_on_a_connect_header_then_connected_or_cancelled():
     """PENDING: raised on a header that may be a CONNECT while
     listening, before its callee is known; CONNECTED follows if it was mine,
