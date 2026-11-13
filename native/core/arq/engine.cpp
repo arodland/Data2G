@@ -437,7 +437,15 @@ void Engine::set_chat(bool on) {
     session_->set_chat(on);
 }
 
+void Engine::pending_resolve() {
+    // CANCELPENDING unless it connected (CONNECTED says so)
+    if (!pend_ || !(pend_->heard || now() > pend_->deadline)) return;
+    pend_.reset();
+    if (session_->state != SessionState::CONNECTED) events_.emplace_back("CANCELPENDING");
+}
+
 std::vector<std::string> Engine::events() {
+    pending_resolve();
     std::vector<std::string> ev = std::move(events_);
     events_.clear();
     ev.insert(ev.end(), session_->events.begin(), session_->events.end());
@@ -913,8 +921,19 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             noise_.mark(start, start + (m ? burst_seconds(*m, h->header.n_cw()) : MAX_BURST_S));
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
+            pending_resolve();  // a superseded header's
+            if (m && !pend_ && h->header.n_cw() == 1 && session_->state == SessionState::LISTEN && pending != "off") {
+                const std::string_view n = m->name;
+                bool hit = pending != "ofdm" && n == ROBUST_CONNECT;
+                for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
+                if (hit) {
+                    pend_ = Pend{start + burst_seconds(*m, 1) + PENDING_SLACK_S, false};
+                    events_.emplace_back("PENDING");
+                }
+            }
             continue;
         }
+        if (pend_) pend_->heard = true;  // resolved once the session has read it (events)
         heard_span_ = std::move(span_);
         span_.reset();
         receiver::BurstEvent ev = std::holds_alternative<receiver::DecodeRequest>(it)

@@ -52,6 +52,7 @@ struct Args {
     std::string cw_id = "off";  // arq::Engine::cw_id: off, add, only
     double cw_wpm = 20.0;
     std::string hand_decoder = "full";  // "full" or "cheap": net control's Hand round grids
+    std::string pending = "fsk";  // arq::Engine::pending: off, fsk, ofdm, all
     // additions
     bool decode_worker = true;
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)

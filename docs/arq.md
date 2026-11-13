@@ -910,8 +910,15 @@ As built (data2g/arq/policy.py):
         records acked whole. From it: on air unacked, the peer may have it.
 - **Replies and events:** OK, WRONG, CONNECTED from to bw, DISCONNECTED [reason],
   BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
-  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, and a
-  Data2G-specific `MODE name`.
+  next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, PENDING /
+  CANCELPENDING, and a Data2G-specific `MODE name`.
+- **PENDING:** while listening, a header that may be a CONNECT (one codeword
+  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT only, the default;
+  `ofdm` the caps' first-try modes; `all`; `off`) raises PENDING before the
+  body is read. CONNECTED follows if the burst connects. Otherwise
+  CANCELPENDING follows once it is read, or 3 s past its end. The header has
+  no frame type, so ID, CQ and other stations' connects raise it too;
+  docs/pending-header.md parks a protocol change that would not.
 
 ## 9a. Stream framing
 

@@ -68,6 +68,9 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 // the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
 // after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 inline constexpr double ID_INTERVAL_S = 600.0;
+// PENDING / CANCELPENDING (engine.py PENDING_MODES): Engine::pending "off", "fsk" (ROBUST_CONNECT),
+// "ofdm" (the caps' first-try connect modes), "all"; a raised PENDING's burst read, or this past its end: resolved
+inline constexpr double PENDING_SLACK_S = 3.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
 // Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
 // how long an armed HAND LISTEN waits for the burst that anchors its window.
@@ -283,7 +286,7 @@ public:
     void set_idle_close(std::optional<double> s);
     double idle_close_s() const { return session_->tune.idle_close_s; }
     // Host notifications since the last call, as engine.py's events() words them: "CONNECTED peer",
-    // "DISCONNECTED why", "CQFRAME call cap", "ID call key".
+    // "DISCONNECTED why", "CQFRAME call cap", "ID call key", "PENDING", "CANCELPENDING".
     std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
@@ -292,6 +295,7 @@ public:
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
     std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
+    std::string pending = "fsk";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
@@ -405,6 +409,12 @@ private:
     std::optional<double> idle_close_;  // set_idle_close
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
     std::vector<std::string> events_;  // host notifications from outside the session
+    struct Pend {
+        double deadline;
+        bool heard;  // its burst has been read
+    };
+    std::optional<Pend> pend_;  // PENDING raised
+    void pending_resolve();
     std::vector<std::pair<int, Bytes>> kiss_rx_;
     bool tx_kiss_ = false;  // the burst on air is a KISS one
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited

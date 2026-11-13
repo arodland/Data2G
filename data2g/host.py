@@ -41,7 +41,7 @@ HAND CANCEL (stop a waiting Hand and
 any window). Replies OK / WRONG (MYCALL's
 OK followed by REGISTERED call for each call). Notifications: CONNECTED src
 dst bw, DISCONNECTED (DATA2G ON: DISCONNECTED reason [detail], docs/arq.md
-§9), PTT ON|OFF, BUSY ON|OFF, BUFFER n, IAMALIVE (every 60 s), and (Data2G)
+§9), PTT ON|OFF, BUSY ON|OFF, PENDING and CANCELPENDING (--pending), BUFFER n, IAMALIVE (every 60 s), and (Data2G)
 MODE submode; broadcast statuses (BCAST n HEARD [call] snr, BCAST n LOST k,
 BCAST * MISSED submode n_cw [snr], BCAST n DROPPED k) once the client has
 sent a BCAST command; hand lines (REF id end offset snr per decoded burst,
@@ -373,6 +373,8 @@ class Host:
                 src, dst = (me, peer) if e.session.master else (peer, me)
                 self.out_cmd.append(f"CONNECTED {src} {dst} {BW_NAME[e.session.cap]}")
                 self._up = True
+            elif ev in ("PENDING", "CANCELPENDING"):
+                self.out_cmd.append(ev)
             elif ev.startswith("CQFRAME"):
                 _, call, cap = ev.split()
                 self.out_cmd.append(f"CQFRAME {call} {BW_NAME[int(cap)]}")
@@ -602,6 +604,7 @@ def serve(a, pa, stop: threading.Event | None = None):
                     min_header_score=a.min_header_score, kiss=link, stats_interval_s=a.stats_interval)
     engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
     engine.hand_round = getattr(a, "hand_decoder", "full")
+    engine.pending = getattr(a, "pending", "fsk")
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -734,6 +737,9 @@ def main():
     ap.add_argument("--tx-lead-ms", type=int, default=100,
                     help="TX audio queued ahead of the sound card: slack for a late audio step")
     ap.add_argument("--min-header-score", type=float, default=0.0)
+    ap.add_argument("--pending", choices=("off", "fsk", "ofdm", "all"), default="fsk",
+                    help="PENDING (CANCELPENDING after) on a header that may be a CONNECT while listening: "
+                         "fsk, the robust connect mode only; ofdm, the first-try connect modes; all, both")
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
                          "that throttle on it (Pat) keep a whole burst queued; -1: the next burst's full "

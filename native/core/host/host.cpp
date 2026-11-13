@@ -424,6 +424,8 @@ void Host::after_step(bool ptt) {
             const bool master = e.session().master();
             out_cmd.push_back("CONNECTED " + (master ? me : peer) + " " + (master ? peer : me) + " " + bw_name(e.session().cap));
             up_ = true;
+        } else if (ev == "PENDING" || ev == "CANCELPENDING") {
+            out_cmd.push_back(ev);
         } else if (ev.starts_with("CQFRAME")) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));
         } else if (ev.starts_with("DISCONNECTED")) {
