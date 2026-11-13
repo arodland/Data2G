@@ -7,7 +7,7 @@ def substitutions(native):
     classes behind Python-compatible wrappers (native/bindings/bind_arq.cpp):
     the policy, the received burst and the session's random.Random stay the
     Python objects, called in the same order as the Python does."""
-    from data2g.arq import burst, frames, link, session
+    from data2g.arq import burst, frames, link, nod, session
 
     a = native.arq
     out = {(frames, f): getattr(a, f) for f in ("Core", "Control", "pack_bitmap", "unpack_bitmap", "pack_rv", "unpack_rv",
@@ -17,4 +17,6 @@ def substitutions(native):
     out.update({(link, f): getattr(a, f) for f in ("unwrap", "ctl_mask", "data_mask", "Station")})
     out.update({(burst, f): getattr(a, f) for f in ("ctl_mask", "data_mask")})
     out.update({(session, f): getattr(a, f) for f in ("session_key", "Session", "_frame_desc")})
+    out[(nod, "family")] = a.nod_family
+    out[(nod, "detect")] = a.nod_detect
     return out

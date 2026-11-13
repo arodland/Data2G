@@ -1,4 +1,4 @@
-"""Nods (docs/arq.md §3b): a CPM control-only reply or poll whose content is
+"""Nods (docs/arq.md §3b): a CPM control-only reply whose content is
 one of a few likely states, sent as one of M keyed c16r25 tone sequences and
 detected, not decoded, where its listener expects it: it says its meaning
 without words.
@@ -24,21 +24,35 @@ from .. import cpm
 GRID = cpm.GRIDS["c16r25"]
 L = 64  # tones
 M = 32  # sequences in a family; meanings past N_MEANINGS are reserved (never sent: a detection of one is none)
-N_MEANINGS = 26
+N_MEANINGS = 20
 TOPK = 4  # the square law's best, rescored coherently
 # Acceptance (one slot, +-ReplySlot.TOL_S): the best meaning's coherent score
 # at least THR and the runner-up under it. THR: the exponential tail over the
 # 90% point of 100000 noise slots' best (runs/sig2/noise_*.npy, max 31.2),
 # at 1e-6 false accepts per slot: 36.85.
 THR = 37.0
-POLL_TOL_S = 0.25  # a poll's window either side (its start is the master's clock and PTT, not a learned gap)
-POLL_LAG_S = 0.1  # ... centred this long past session.NOD_POLL_S (the engine's PTT delay)
+MASK64 = (1 << 64) - 1
+
+
+def _splitmix64(state: int) -> tuple[int, int]:
+    """-> (next state, output): splitmix64, as native nod::family."""
+    state = (state + 0x9E3779B97F4A7C15) & MASK64
+    z = state
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & MASK64
+    return state, z ^ (z >> 31)
 
 
 @lru_cache(maxsize=256)
 def family(key: int, direction: int, bn8: int, acted8: int) -> np.ndarray:
-    """(M, L) the keyed family's tone sequences."""
-    return np.random.default_rng([0x5167, key & 0xFFFFFFFF, direction, bn8, acted8]).integers(0, GRID.m, (M, L))
+    """(M, L) the keyed family's tone sequences: splitmix64 seeded with
+    the key and the turn, 16 tones (4 bits each, low first) per output."""
+    state = 0x5167 << 48 | (key & 0xFFFFFFFF) << 16 | (direction & 1) << 8 | (bn8 & 7) << 4 | (acted8 & 7)
+    out = np.empty(M * L, dtype=np.int64)
+    for i in range(0, M * L, 16):
+        state, z = _splitmix64(state)
+        out[i:i + 16] = [(z >> (4 * j)) & 15 for j in range(16)]
+    return out.reshape(M, L)
 
 
 def waveform(seq: np.ndarray, cap: int = 2) -> np.ndarray:
@@ -87,13 +101,10 @@ def detect(x: np.ndarray, lo: int, hi: int, cfo: float, fam: np.ndarray) -> tupl
 
 
 # --- the codebook (docs/arq.md §3b) ---------------------------------------------------------
-# reply (a fresh control-only burst): ack all / unchanged x recommend step x T_DUPCTL;
-# poll (PROBE, the master's after a timeout): its previous burst's state x step x T_DUPCTL.
+# a fresh control-only reply: ack all / unchanged x recommend step x T_DUPCTL
 REPLY_STEPS = (0, 1, -1, 2, -2)
-POLL_STEPS = (0, 2, -2)
-CODEBOOK = ([("reply", ack, step, dup) for ack in ("all", "unchanged") for step in REPLY_STEPS for dup in (0, 1)]
-            + [("poll", "same", step, dup) for step in POLL_STEPS for dup in (0, 1)])
-assert len(CODEBOOK) == N_MEANINGS
+CODEBOOK = [(ack, step, dup) for ack in ("all", "unchanged") for step in REPLY_STEPS for dup in (0, 1)]
+assert len(CODEBOOK) == N_MEANINGS and GRID.m == 16
 INDEX = {m: i for i, m in enumerate(CODEBOOK)}
 
 

@@ -213,8 +213,7 @@ class Engine:
         self._hand_lock = threading.Lock()
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
-        self._nod = None  # the nod search after my burst (_watch_nods): [windows, cfo, audio chunks, samples]
-        self._peer_end = None  # when the peer's last burst heard ended (a callee's nod poll slot)
+        self._nod = None  # the nod search after my burst (_watch_nods): [(key, lo, hi), cfo, audio chunks, samples]
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -665,47 +664,31 @@ class Engine:
             self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
 
     def _watch_nods(self):
-        """Where the peer may nod after my burst (docs/arq.md §3b), stream
-        indices from its end: its reply in the expected slot; to a callee,
-        also the caller's poll NOD_POLL_S past the caller's burst I heard."""
+        """Where the peer may nod after my burst (docs/arq.md §3b): its reply
+        in the expected slot, stream indices from my burst's end."""
         self._nod = None
-        st, cfo = getattr(self.session, "station", None), self.slot.cfo
-        if st is None or cfo is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
+        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.window(0.0)
+        if st is None or cfo is None or w is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
             return
-        ws = []
-        for kind, key in st.nod_families():
-            if kind == "reply":
-                w = self.slot.window(0.0)
-            elif self._peer_end is not None:
-                c = self._peer_end + S.NOD_POLL_S + N.POLL_LAG_S - self._tx_end
-                w = (c - N.POLL_TOL_S, c + N.POLL_TOL_S)
-            else:
-                w = None
-            if w is not None and w[1] > 0:
-                ws.append((kind, key, max(0, int(round(w[0] * FS))), int(round(w[1] * FS))))
-        if ws:
-            self._nod = [ws, cfo, [], 0]
-        # ponytail: a callee that heard the caller's burst but sent nothing does not look for its nod poll
+        key = st.nod_family()
+        if key is not None:
+            self._nod = [(key, max(0, int(round(w[0] * FS))), int(round(w[1] * FS))), cfo, [], 0]
 
     def _nod_feed(self, x: np.ndarray, t: float):
-        """Audio since my burst's end: once it holds every window, a nod in one is the burst it stands for."""
-        ws, cfo, chunks, n = self._nod
+        """Audio since my burst's end: once it holds the window, a nod there is the burst it stands for."""
+        (key, lo, hi), cfo, chunks, n = self._nod
         chunks.append(x)
         self._nod[3] = n = n + len(x)
-        if n < max(w[3] for w in ws) + N.span() + N.GRID.T:
+        if n < hi + N.span() + N.GRID.T:
             return
         self._nod = None
         st = getattr(self.session, "station", None)
         if st is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
             return
-        y = np.concatenate(chunks)
-        for kind, key, lo, hi in ws:
-            got = N.detect(y, lo, hi, cfo, N.family(*key))
-            if got is not None:
-                log.info("RX nod %d: %s (score %.1f)", got[0], N.CODEBOOK[got[0]], got[2])
-                self._peer_end = t - (n - got[1] - N.span()) / FS
-                self.session.on_rx(st.nod_rx(kind, got[0]), t)
-                return
+        got = N.detect(np.concatenate(chunks), lo, hi, cfo, N.family(*key))
+        if got is not None:
+            log.info("RX nod %d: %s (score %.1f)", got[0], N.CODEBOOK[got[0]], got[2])
+            self.session.on_rx(st.nod_rx(got[0]), t)
 
     def next_event(self) -> float | None:
         return self.session.next_event()
@@ -756,7 +739,6 @@ class Engine:
                 # its start from my burst's end (the receiver was reset there): the expected slot learns
                 if r.get("family") == "cpm":
                     self.slot.heard(h["start"] / FS, r["cfo"])
-                self._peer_end = span[1] if span is not None else t
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

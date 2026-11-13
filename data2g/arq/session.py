@@ -27,10 +27,10 @@ from . import frames as F
 from . import link as L
 
 T_SESS = F.T_SESS  # the extension carrying a session frame
-VERSION = 6 if L.NOD else 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
+VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
 # 4: T_INLINE (a v3 peer ignores it: each inline codeword waits for its resend in a slot);
-# 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply;
-# 6: nods (docs/arq.md §3b, DATA2G_NOD=1): a v5 peer would hear nothing where a nod replied
+# 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply
+# (nods, docs/arq.md §3b, need no bump: each side says it knows them, T_NODS)
 CONNECT_TRIES = 5
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
@@ -68,10 +68,6 @@ COALESCE_S = 0.1  # CHAT OFF: a short write to an idle link waits this long for 
 # client, told SETTLED, writes what goes next (after the rest of a record
 # begun on air, if any).
 REPLY_HOLD_S = 0.25
-# a nod poll (docs/arq.md §3b) goes this long after the end of the burst it
-# follows up: past every reply deadline (t_turn + the longest control-only
-# reply: ~6.5 s for c16r25), so the callee knows where to look
-NOD_POLL_S = 8.0
 
 log = logging.getLogger("data2g.session")
 
@@ -123,7 +119,6 @@ class Session:
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
-    _tx_end_at: float | None = None  # when my last burst ended (on_tx_end): a nod poll goes NOD_POLL_S after it
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
@@ -274,7 +269,6 @@ class Session:
             self._nak = None
             return
         self._tx_mode = burst.submode
-        self._tx_end_at = now
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
             if (self.state == CONNECTED and self.station is not None
@@ -471,13 +465,11 @@ class Session:
             # bursts took 30% of the time on mpg)
             last = self.station.last_sent
             short = last is None or self.policy.airtime(last.submode, len(last.slots), B.dup_ctl(last)) <= REPEAT_MAX_S
-            # a poll may nod if it can go at the nod poll slot (its peer looks there)
-            slot = None if self._tx_end_at is None else self._tx_end_at + NOD_POLL_S
-            b = self.station.on_timeout(allow_repeat=short, nod=slot is not None and now <= slot)
+            b = self.station.on_timeout(allow_repeat=short)
             if b is None:
                 self._close(f"LINK_FAILED {self.station.fail_reason}")
             else:
-                self._queue(b, max(now, slot) if b.nod is not None else now)
+                self._queue(b, now)
 
     # session frames: control-only bursts with a T_SESS extension. Connect
     # frames use key 0 (no session yet); DISC / DISC_ACK the session key.

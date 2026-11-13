@@ -915,7 +915,6 @@ def test_nods_on_audio(monkeypatch):
     from data2g.arq import policy as G
 
     monkeypatch.setattr(LK, "NOD", True)
-    monkeypatch.setattr(LK, "NOD_POLLS", True)
 
     class CpmOnly(G.GearShifter):
         def choose(self, station, escalation):

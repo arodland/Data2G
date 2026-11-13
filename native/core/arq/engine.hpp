@@ -44,6 +44,7 @@
 
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
+#include "arq/nod.hpp"
 #include "arq/session.hpp"
 #include "cwid/cwid.hpp"
 #include "kisslink/kisslink.hpp"
@@ -492,6 +493,17 @@ private:
         std::int64_t first = 0, next = 0, lo = 0, hi = 0, anchor = 0;  // next: the sample after buf's last
     };
     std::optional<HandListen> hand_listen_;
+    // the nod search after my burst (engine.py _watch_nods, docs/arq.md §3b): the peer's reply family, the
+    // window [lo, hi] in samples from my burst's end (`anchor`, an n_ value), the slot's CFO, the audio since
+    struct NodWatch {
+        nod::FamilyKey key;
+        std::int64_t anchor, lo, hi;
+        double cfo;
+        std::vector<double> buf;
+    };
+    std::optional<NodWatch> nod_watch_;
+    void watch_nods(std::int64_t end);
+    void nod_collect(std::span<const double> x, double t);
     double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)
     std::mutex hand_mu_;
     std::vector<std::string> hand_out_;  // under hand_mu_

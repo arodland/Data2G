@@ -47,11 +47,10 @@ class AuditPhy(G.RealPhy):
         row = dict(self.tag, submode=spec.name, band=spec.band, n_cw=len(burst.slots),
                    ctl_slots=sum(1 for s in burst.slots if s.mask_id[2] >= 128))
         row["kind"] = "data" if row["n_cw"] > row["ctl_slots"] else "ctl"
-        prev = self.tx_end.get(burst.slots[0].mask_id[1] & 1)  # the sender's burst before this one
         rx_station = self.listen(burst, t0, end)
         r = self.hear(x, t0, rx_station)
         noise = self.heard_noise(rx_station, r, t0, end)
-        got = self.nod_heard(rx_station, t0, prev, end)
+        got = self.nod_heard(rx_station, t0, end)
         if burst.nod is not None:  # docs/arq.md §3b: detected, or missed
             row.update(submode="nod", kind="ctl", outcome="ok" if got else "missed", data_sent=0, data_ok=0)
             self.rows.append(row)

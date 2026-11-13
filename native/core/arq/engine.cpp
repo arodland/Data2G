@@ -733,6 +733,7 @@ Engine::Done Engine::process(Block& b) {
     if (!tx_) {
         noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
+        nod_collect(b.x, t);
         if (fresh) hear(b.items, t);
         hand_collect(b.x);
         const bool cw = fresh && b.cw && !(hand_hold_ > 0.0 && t < hand_hold_ + HAND_CW_TAIL_S);  // Hands, not an ID
@@ -823,6 +824,7 @@ Engine::Done Engine::process(Block& b) {
                 tx_end_ = now() + static_cast<double>(n) / config::FS;  // the reply/missed-burst accounting's
                 session_->on_tx_end(sent, tx_end_.value());
                 expect_reply();  // with the reset below
+                watch_nods(n_ + static_cast<std::int64_t>(n));
             }
             request_reset();  // our own transmission was not heard
             tx_kiss_ = false;
@@ -1085,6 +1087,43 @@ void Engine::hand_collect(std::span<const double> x) {
             for (auto& l : lines) hand_event(std::move(l));
         });
     }
+}
+
+// Where the peer may nod after my burst that ended at sample `end` (engine.py _watch_nods): its reply in the
+// expected slot.
+void Engine::watch_nods(std::int64_t end) {
+    nod_watch_.reset();
+    const auto& st = session_->station;
+    const auto w = slot_.window(0.0);
+    if (!st || !slot_.cfo || !w ||
+        !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
+        return;
+    if (const auto key = st->nod_family())
+        nod_watch_ = NodWatch{*key, end, std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
+                              static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo, {}};
+}
+
+// Audio since my burst's end (engine.py _nod_feed): once it holds the window, a nod there is the burst it
+// stands for. Blocks dropped behind a lagging worker are silence, so sample times stay true.
+void Engine::nod_collect(std::span<const double> x, double t) {
+    if (!nod_watch_) return;
+    auto& w = *nod_watch_;
+    const std::int64_t need = w.hi + nod::span() + nod::grid().T;
+    const std::int64_t at = n_ - w.anchor;  // this block's first sample, from my burst's end
+    if (at < 0) return;
+    if (at > static_cast<std::int64_t>(w.buf.size()))
+        w.buf.resize(static_cast<std::size_t>(std::min(at, need)), 0.0);
+    if (static_cast<std::int64_t>(w.buf.size()) == at) w.buf.insert(w.buf.end(), x.begin(), x.end());
+    if (static_cast<std::int64_t>(w.buf.size()) < need) return;
+    const NodWatch done = std::move(w);
+    nod_watch_.reset();
+    const auto& st = session_->station;
+    if (!st || !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING)) return;
+    const auto got = nod::detect(done.buf, done.lo, done.hi, done.cfo, nod::family(done.key));
+    if (!got) return;
+    log_write(LOG, INFO, format("RX nod %d: %s (score %.1f)", got->meaning, nod::describe(got->meaning).c_str(), got->score));
+    nod::NodRx rx = st->nod_rx(got->meaning);
+    session_->on_rx(rx, t);
 }
 
 void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
