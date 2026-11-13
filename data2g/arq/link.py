@@ -67,7 +67,10 @@ REPEAT = os.environ.get("DATA2G_REPEAT", "1") != "0"
 # DATA2G_NOD=1: a CPM control-only reply or poll whose content is in the
 # codebook goes as a nod (docs/arq.md §3b). Off by default until the native
 # port has them (session.VERSION is 6 with them on: a peer without refuses)
-NOD = os.environ.get("DATA2G_NOD", "0") == "1"
+# Replies only: DATA2G_NOD=polls nods polls too, which lost at mpg -12 (a poll
+# nod is lost whenever the peer missed the burst it restates: docs/arq.md §3b)
+NOD = os.environ.get("DATA2G_NOD", "0") in ("1", "polls")
+NOD_POLLS = os.environ.get("DATA2G_NOD", "0") == "polls"
 NOD_MODE = "fsk16r25-r1/3"  # the mode a nod's control is packed and named in (its grid's control codeword)
 # soft-bit store keys of controls kept for that (RxBurst.decode_repeat): the link's, the session's connect frames
 REPEAT_KEY, REPEAT_SESSION_KEY = ("rep", 1, 0), ("rep", 2, 0)
@@ -520,7 +523,7 @@ class Station:
     # seq, the end of its new data); per peer burst seq, the same as decoded
     # and which burst of mine it acted on
     nod: bool = False
-    _sent_ctl: dict = field(default_factory=dict)  # my bn -> (cum, recommend, acted-on seq, new end | None, sent as a nod)
+    _sent_ctl: dict = field(default_factory=dict)  # my bn -> (cum, recommend, acted-on seq, new end | None, sent as a nod, _kept)
     _peer_ctl_core: dict = field(default_factory=dict)  # seq -> (cum 7-bit, recommend, my bn acted on, new end | None, acted-on seq)
     _rx_new_end: int | None = None  # the last peer burst's new data end (1 + its highest new seq)
 
@@ -629,7 +632,7 @@ class Station:
         if nod and not (resend or news) and dup == 1 and len(ctl) == 1:
             burst.nod = self._nod_of(bn, submode, core, ext, fresh)
         self._sent_ctl[bn] = (self.rx.cum, core.recommend, core.acted_on, max(news) + 1 if news else None,
-                              burst.nod is not None)
+                              burst.nod is not None, self._kept(core, ext))
         self._record(bn, burst, conveyed, resend, new + [inline] * bool(inline))
         if burst.nod is not None:
             self.stats["tx_nod"] += 1
@@ -809,17 +812,26 @@ class Station:
                    "unchanged" if self.rx.cum == r_cum else None)
             kind, steps = "reply", nodmod.REPLY_STEPS
         else:
-            r_cum, r_rec, r_acted, _, r_nod = self._sent_ctl[self._latest]
+            if not NOD_POLLS:
+                return None
+            r_cum, r_rec, r_acted, _, r_nod, _ = self._sent_ctl[self._latest]
             if r_nod or not self._peer_ctl_core:  # the peer may not have heard it (nor so the poll's
                 return None  # anchors), or never heard me yet (a session's first turn): poll in full
             ack = "same" if (self.rx.cum == r_cum and core.acted_on == r_acted) else None
             kind, steps = "poll", nodmod.POLL_STEPS
-        if ack is None or core.recommend >> 4 != r_rec >> 4:
+        if (ack is None or core.recommend >> 4 != r_rec >> 4
+                or self._kept(core, ext) != self._sent_ctl[self._latest][5]):  # the peer keeps R's
             return None
         step = (core.recommend & 15) - (r_rec & 15)
         if step not in steps:
             return None
         return nodmod.INDEX[(kind, ack, step, dup)], (self.key, self.direction, bn % F.BURST_MOD, core.acted_on)
+
+    @staticmethod
+    def _kept(core, ext) -> tuple:
+        """What a nod leaves as the peer has it from my last control (its
+        size_hint, T_REPLY, T_CHAT: absolute, so a nod may only repeat them)."""
+        return core.size_hint, ext[F.T_REPLY][0] if ext.get(F.T_REPLY) else None, F.T_CHAT in ext
 
     def nod_families(self) -> list[tuple[str, tuple]]:
         """The peer's nods I may hear next, (kind, family key): a reply to my

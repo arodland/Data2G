@@ -257,15 +257,21 @@ where a nod replied.
   burst's cum and acted-on, its step from that burst's recommendation. A control the
   codebook does not cover (a partial ACK, a band change, resends, any other TLV) goes
   in full.
-- **Deferred fields.** `size_hint`, `T_REPLY` and `T_CHAT` are not carried: the listener
-  keeps the peer's last values. `T_DUPCTL` is carried as an absolute bit.
+- **Kept fields.** `size_hint`, `T_REPLY` and `T_CHAT` are not carried: the listener
+  keeps the peer's last values, so a control nods only if they equal my previous
+  burst's (all three are absolute: a nod leaving an old size hint in force shrank every
+  data burst at awgn -18 to one codeword). `T_DUPCTL` is carried as an absolute bit.
 - **Where.** A reply nods only as the session's direct reply (the peer's expected slot,
   §3a `ReplySlot`, ±0.15 s). A poll nods only at the nod poll slot: the master sends it
   `NOD_POLL_S` (8.0 s) after its previous burst ended, and the callee searches
   `NOD_POLL_S + POLL_LAG_S` (0.1 s, PTT) past the end of the caller's burst it heard,
-  ±`POLL_TOL_S` (0.25 s). Polls nod at most every other try (the peer may have missed
-  the burst the poll restates), and a nod is never repeated on a timeout (its listener
-  looks in its reply slot only): the master polls instead.
+  ±`POLL_TOL_S` (0.25 s). Polls nod only with `DATA2G_NOD=polls`, at most every other
+  try and not before the peer was heard. A nod is never repeated on a timeout (its
+  listener looks in its reply slot only): the master polls instead.
+- **Why replies only.** A poll restates a burst its peer may not have heard, and then
+  the peer cannot expand it (nor looks for it): at mpg -12, 35 of 66 poll nods went
+  where the callee had missed that burst (each a further timeout), 30 were heard, 1
+  scored under THR. Replies were all detected (305 of 305, 8 cells).
 - **Detection** (`nod.detect`). The square-law tone metric over the window in T/4 steps
   at the slot's CFO, then the best 4 sequences rescored coherently
   (`cpm._coh_run_llr`). Accepted: the best score at least `THR` = 37.0 and the runner-up
@@ -277,6 +283,12 @@ where a nod replied.
 - **Census** (`scripts/sig_census.py`, CPM control-only bursts at the floor): all-acked
   73% of replies in bulk, 86% in chat; polls 14-19% of control-only bursts; partial ACKs
   too diverse to enumerate; T_REPLY changes in 22-26%, T_DUPCTL in 19-22%.
+- **Sessions** (loss_study, PEP 5, shift+cpm, 16 seeds x 600 s, paired against nods
+  off; delivered bps): awgn -18 +8.0% (SE 0.5), awgn -16 +12.1% (1.6), mpd -15 +4.9%
+  (5.4), mpd -13 +3.4% (2.5), mpg -12 +2.1% (6.6), mpg -10 +1.6% (1.0), mpp -16 +11.1%
+  (3.8), mpp -14 +4.9% (2.3). 1184 nods, all detected: 39% of control-only CPM bursts
+  (mpg 5-6%: its control-only bursts are mostly polls and OFDM ACKs; awgn -16 71%).
+  With poll nods: mpg -12 -5.3% (7.8), 95 of 1360 nods missed, all polls.
 - **Study** (`scripts/sig_study.py`, round 2): 10% failure points awgn -19.2, mpg -11.4,
   mpp -16.2, mpd -16.3 dB (mean power in 2500 Hz) against today's primed control-only
   reply at -14.7, -10.0, -11.7, -11.8, in 2.6 s of air instead of 5.0.

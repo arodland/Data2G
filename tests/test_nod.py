@@ -54,9 +54,33 @@ class FullRx:
 @pytest.fixture
 def nodding(monkeypatch):
     monkeypatch.setattr(L, "NOD", True)
+    monkeypatch.setattr(L, "NOD_POLLS", True)
     monkeypatch.setattr(L, "NOD_MODE", "c40")
     monkeypatch.setattr(L, "MODES", {m: m in CPM_LIKE for m in MODES})
     monkeypatch.setattr(L, "is_cpm", bool)
+
+
+class AskingPolicy(RandomPolicy):
+    """RandomPolicy whose recommendation moves: a step or two in band 0,
+    now and then a size hint or reply mode that differs."""
+
+    def __init__(self, rng, *a, p_kept=0.1):
+        super().__init__(rng, *a)
+        self.idx, self.hint, self.reply, self.p_kept = 5, 1, None, p_kept
+
+    def recommend(self, station):
+        r = self.rng.random()
+        if r < 0.3:
+            self.idx = min(15, max(0, self.idx + self.rng.choice((-2, -1, 1, 2))))
+        if self.rng.random() < self.p_kept:
+            self.hint = self.rng.randrange(4)
+        if self.rng.random() < self.p_kept:
+            self.reply = self.rng.choice((None, 3, 7))
+        return self.idx, self.hint, self.reply
+
+
+def _reply(ext):
+    return ext[F.T_REPLY][0] if ext.get(F.T_REPLY) else None
 
 
 @pytest.mark.parametrize("seed", range(6))
@@ -64,8 +88,8 @@ def test_nods_stand_for_their_controls(nodding, seed):
     rng = random.Random(seed)
     data_a, data_b = payload(rng, 1500, "mixed"), payload(rng, 100, "mixed")
     modes = ("c40", "c60", "m22")
-    a = L.Station(0, RandomPolicy(random.Random(seed + 1), 0.2, modes, 6), master=True, nod=True)
-    b = L.Station(1, RandomPolicy(random.Random(seed + 2), 0.2, modes, 6), nod=True)
+    a = L.Station(0, AskingPolicy(random.Random(seed + 1), 0.2, modes, 6), master=True, nod=True)
+    b = L.Station(1, AskingPolicy(random.Random(seed + 2), 0.2, modes, 6), nod=True)
     a.write(data_a)
     b.write(data_b)
     got_a, got_b, nods = bytearray(), bytearray(), [0, 0]
@@ -83,9 +107,10 @@ def test_nods_stand_for_their_controls(nodding, seed):
                     assert p is not None
                     want, have = F.Control.unpack([burst.slots[0].payload]), F.Control.unpack([p])
                     w, h = want.core, have.core
-                    w.size_hint = h.size_hint  # deferred: as the peer's last control said
                     assert w == h, (w, h)
-                    assert (F.T_DUPCTL in want.ext) == (F.T_DUPCTL in have.ext)
+                    for t in (F.T_DUPCTL, F.T_CHAT):
+                        assert (t in want.ext) == (t in have.ext)
+                    assert _reply(want.ext) == _reply(have.ext)
                     nods[0] += 1
                     ok = receiver.handle(receiver.nod_rx(kind, meaning))
                     nods[1] += ok
@@ -106,3 +131,30 @@ def test_nods_stand_for_their_controls(nodding, seed):
     else:
         raise AssertionError("stuck")
     assert nods[1] >= 3 and nods[1] == nods[0], nods
+
+
+def test_a_kept_field_change_goes_in_full(nodding):
+    """A control-only reply whose size_hint (or T_REPLY) differs from my
+    previous burst's goes in full: a nod would leave the peer's old one."""
+    modes = ("c40",)
+    a = L.Station(0, AskingPolicy(random.Random(1), 0.0, modes, 6, p_kept=0.0), master=True, nod=True)
+    b = L.Station(1, AskingPolicy(random.Random(2), 0.0, modes, 6, p_kept=0.0), nod=True)
+    a.write(payload(random.Random(3), 2000, "mixed"))
+    for _ in range(3):  # a's data, b's control-only reply: nods once anchored
+        assert b.handle(FullRx(a.build(nod=True)))
+        r = b.build(nod=True)
+        assert a.handle(FullRx(r))
+    assert r.nod is not None
+    for field, value in (("hint", 3), ("reply", 7)):
+        assert b.handle(FullRx(a.build(nod=True)))
+        setattr(b.policy, field, value)
+        r = b.build(nod=True)
+        assert r.nod is None
+        assert a.handle(FullRx(r))
+        assert (a.peer_size_hint, a.peer_reply_recommend) == (b.policy.hint, b.policy.reply)
+        assert b.handle(FullRx(a.build(nod=True)))  # unchanged again: nods
+        r = b.build(nod=True)
+        assert r.nod is not None
+        p = a.nod_payload(N.CODEBOOK[r.nod[0]][0], r.nod[0])
+        assert F.Control.unpack([p]).core.size_hint == b.policy.hint
+        assert a.handle(a.nod_rx(N.CODEBOOK[r.nod[0]][0], r.nod[0]))
