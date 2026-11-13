@@ -77,7 +77,10 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 // order, dumped on a thread of its own so its decodes never delay the session's.
 struct Station::MonitorThread {
     using Heard = std::pair<arq::BurstHeard, std::shared_ptr<arq::ModemRx>>;  // as the session read it
-    using Burst = std::variant<Heard, arq::TxBurstPtr>;
+    struct NodHeard {
+        arq::TxBurstPtr standing;  // the control-only burst a nod heard stands for (Engine::set_on_nod)
+    };
+    using Burst = std::variant<Heard, arq::TxBurstPtr, NodHeard>;
     monitor::Monitor m;
     std::mutex mu;
     std::condition_variable cv;
@@ -115,6 +118,7 @@ struct Station::MonitorThread {
             lock.unlock();
             monitor::Dump d;
             if (auto* t = std::get_if<arq::TxBurstPtr>(&b)) d = m.sent(**t, when);
+            else if (auto* nh = std::get_if<NodHeard>(&b)) d = m.nod_heard(*nh->standing, when);
             else {
                 auto& [h, rx] = std::get<Heard>(b);
                 d = m.burst(h, rx.get(), when);
@@ -486,6 +490,9 @@ void Station::start() {
         });
         engine_->set_on_send([this](const arq::TxBurstPtr& b) {
             if (monitor_on_) monitor_->push(b);
+        });
+        engine_->set_on_nod([this](const arq::TxBurstPtr& b) {
+            if (monitor_on_) monitor_->push(MonitorThread::NodHeard{b});
         });
         engine_->set_on_decoded([this](int decoded, int failed) {
             reading_.decoded = decoded;

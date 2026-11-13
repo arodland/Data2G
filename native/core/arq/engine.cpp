@@ -1123,6 +1123,14 @@ void Engine::nod_collect(std::span<const double> x, double t) {
     if (!got) return;
     log_write(LOG, INFO, format("RX nod %d: %s (score %.1f)", got->meaning, nod::describe(got->meaning).c_str(), got->score));
     nod::NodRx rx = st->nod_rx(got->meaning);
+    if (on_nod_)
+        if (const auto p = st->nod_payload(got->meaning)) {
+            auto b = std::make_shared<TxBurst>();
+            b->submode = NOD_MODE;
+            b->slots.push_back({ctl_mask(st->peer(), 0, st->key), 0, *p});
+            b->nod = std::make_pair(got->meaning, done.key);
+            on_nod_(b);
+        }
     session_->on_rx(rx, t);
 }
 

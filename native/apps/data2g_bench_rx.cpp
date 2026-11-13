@@ -8,6 +8,8 @@
 //   data2g-bench-rx --primed BURST.d2gb ...         (+ cpm::prime_lock on the true start's window and PRIME_TRIES
 //                                                    decode_known on slot 0, the last one right: #135)
 //   data2g-bench-rx --cwid                          (cwid::audio of a long ID: #134)
+//   data2g-bench-rx --nod N                         (nod::detect over a reply slot, N runs per case: the CPU a
+//                                                    station spends listening for a nod after each of its bursts)
 //
 // Per burst, the best of R runs: receive (head-limited, as receiver::Receiver), soft bits, the link's prepare
 // (every slot's first pass on the pool) and the slot-by-slot decodes with their DD, then the payloads right.
@@ -38,6 +40,7 @@
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
 #include "cpm/cpm.hpp"
+#include "arq/nod.hpp"
 #include "receiver/receiver.hpp"
 #include "modem/modem.hpp"
 #include "receiver/receiver.hpp"
@@ -401,11 +404,43 @@ void cwid_audio() {  // a long call at the slowest and default speeds, best of 5
 }
 #endif
 
+// --nod: nod::detect as the engine runs it after each of my bursts (ReplySlot's +-0.15 s window plus the nod
+// and a symbol), on noise alone and on a nod at a few SNRs; median and worst ms of n runs per case.
+void nod_bench(int n) {
+    const auto fam = arq::nod::family({0x1234, 1, 3, 5});
+    const std::int64_t T = arq::nod::grid().T, lo = static_cast<std::int64_t>(0.05 * config::FS),
+                       hi = lo + static_cast<std::int64_t>(0.30 * config::FS);
+    const std::size_t len = static_cast<std::size_t>(hi + arq::nod::span() + T);
+    std::mt19937_64 rng(7);
+    std::normal_distribution<double> gauss;
+    for (double sigma : {0.0, 0.5, 2.0, 4.0}) {  // 0: noise alone (unit), else a nod at unit RMS under sigma
+        std::vector<double> ms;
+        int hits = 0;
+        for (int k = 0; k < n; ++k) {
+            std::vector<double> x(len, 0.0);
+            if (sigma > 0) {
+                const auto w = arq::nod::waveform(fam[static_cast<std::size_t>(k % arq::nod::N_MEANINGS)]);
+                const std::size_t at = static_cast<std::size_t>(lo + (hi - lo) / 2);
+                for (std::size_t i = 0; i < w.size() && at + i < len; ++i) x[at + i] = w[i];
+            }
+            const double s = sigma > 0 ? sigma : 1.0;
+            for (auto& v : x) v += s * gauss(rng);
+            const double t = now();
+            hits += arq::nod::detect(x, lo, hi, 2.0, fam).has_value();
+            ms.push_back(1e3 * (now() - t));
+        }
+        std::sort(ms.begin(), ms.end());
+        std::printf("nod detect %s: median %.2f ms, max %.2f ms, detected %d/%d\n",
+                    sigma > 0 ? ("sigma " + std::to_string(sigma).substr(0, 3)).c_str() : "noise   ", ms[ms.size() / 2],
+                    ms.back(), hits, n);
+    }
+}
+
 int main(int argc, char** argv) {
     int threads = 4, reps = 3, shifter_n = 0;
     double listen_s = 0;
     bool cpm_only = false, cw = false;
-    int expect = 0;
+    int expect = 0, nod_n = 0;
     std::optional<double> dd_budget = arq::DD_BUDGET_S;
     std::vector<const char*> files;
     std::vector<std::tuple<std::string, int, double>> cpms;
@@ -424,6 +459,7 @@ int main(int argc, char** argv) {
         else if (a == "--expect" && more) expect = std::atoi(argv[++i]);
         else if (a == "--primed") primed_on = true;
         else if (a == "--cwid") cw = true;
+        else if (a == "--nod" && more) nod_n = std::max(1, std::atoi(argv[++i]));
         else if (a == "--no-cwsense") cwsense_on = false;
         else if (a == "--shifter" && more) shifter_n = std::atoi(argv[++i]);
         else if (a == "--dd-budget" && more) {
@@ -436,7 +472,8 @@ int main(int argc, char** argv) {
 #if BENCH_CWID
     if (cw) cwid_audio();
 #endif
-    if (cw && listen_s <= 0 && shifter_n <= 0 && files.empty() && cpms.empty()) return 0;
+    if (nod_n > 0) nod_bench(nod_n);
+    if ((cw || nod_n > 0) && listen_s <= 0 && shifter_n <= 0 && files.empty() && cpms.empty()) return 0;
     if (listen_s > 0) listen(listen_s, cpm_only, expect);
     if (shifter_n > 0) shifter(shifter_n);
     if (listen_s > 0 || shifter_n > 0) return 0;

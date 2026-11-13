@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "arq/modes.hpp"
+#include "arq/nod.hpp"
 #include "kisslink/kisslink.hpp"
 #include "tables/zdict.hpp"
 
@@ -193,14 +194,28 @@ Dump Monitor::burst(const BurstHeard& b, ModemRx* rx, const std::string& when) {
     return d;
 }
 
+namespace {
+std::string nod_note(const TxBurst& b) {
+    return b.nod ? " (nod " + std::to_string(b.nod->first) + ": " + arq::nod::describe(b.nod->first) + ")" : "";
+}
+}  // namespace
+
 Dump Monitor::sent(const TxBurst& b, const std::string& when) {
     Dump d;
     d.tx = true;
-    d.head = when + "  TX " + b.submode + " x" + std::to_string(b.slots.size()) + "\n";
+    d.head = when + "  TX " + b.submode + " x" + std::to_string(b.slots.size()) + nod_note(b) + "\n";
     // our own session's key, from what we send: known even if its CONNECT
     // was never read here (monitoring turned on mid-session, or a CONNECT
     // only the session's primed or combined decode read)
     if (!b.slots.empty() && b.slots[0].mask_id.key) learn(b.slots[0].mask_id.key);
+    SentRx rx(b);
+    read(rx, d);
+    return d;
+}
+
+Dump Monitor::nod_heard(const TxBurst& b, const std::string& when) {
+    Dump d;
+    d.head = when + "  RX " + b.submode + " x" + std::to_string(b.slots.size()) + nod_note(b) + "\n";
     SentRx rx(b);
     read(rx, d);
     return d;

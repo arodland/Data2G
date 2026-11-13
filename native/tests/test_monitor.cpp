@@ -41,6 +41,31 @@ void units() {
                  "hex_dump: unknown bytes");
 }
 
+// A nod (docs/arq.md §3b), sent or heard: shown as the control-only burst it stands for, marked as a nod.
+void nods() {
+    check::current_step = "nods";
+    monitor::Monitor m;
+    const int key = 0x2B5C;
+    Core core;
+    core.ftype = ARQ;
+    core.burst_seq = 3;
+    core.acted_on = 2;
+    core.cum = 5;
+    core.recommend = 0x15;
+    core.size_hint = 1;
+    const auto p = Control{core, {}}.pack(20);
+    TxBurst b;
+    b.submode = NOD_MODE;
+    b.slots.push_back({ctl_mask(1, 0, key), 0, p[0]});
+    b.nod = std::make_pair(nod::index(true, 0, false).value(), nod::FamilyKey{key, 1, 3, 2});
+    const Dump s = m.sent(b, "12:00:00");
+    check::is_true(s.tx && s.head.find("TX fsk16r25-r1/3 x1 (nod 0: ('all', 0, 0))\n") != std::string::npos, "sent: " + s.head);
+    check::is_true(s.head.find("unidentified") == std::string::npos, "sent: read as its control: " + s.head);
+    const Dump h = m.nod_heard(b, "12:00:05");
+    check::is_true(!h.tx && h.head.find("RX fsk16r25-r1/3 x1 (nod 0: ('all', 0, 0))\n") != std::string::npos, "heard: " + h.head);
+    check::is_true(h.head.find("unidentified") == std::string::npos, "heard: read as its control: " + h.head);
+}
+
 // Both engines step, each hearing the other, the monitor hearing both
 // (noise only while g_deaf), until until() or `seconds` pass.
 double g_snr_db = 12.0;
@@ -375,6 +400,7 @@ int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog dog(900, "test_monitor");
     units();
+    nods();
     session();
     broadcast();
     own_side();

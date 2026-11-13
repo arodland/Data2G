@@ -241,6 +241,9 @@ public:
     // Every burst we transmit (ARQ, ID, KISS), on the session stage as it is keyed, in the order sent:
     // a monitor's view of our own side. Set it before the first step().
     void set_on_send(std::function<void(const TxBurstPtr&)> f) { on_send_ = std::move(f); }
+    // A nod heard and taken (docs/arq.md §3b), on the session stage: the control-only burst it stands for (the
+    // control the session synthesized, under the peer's mask; `nod` set), for a monitor. Set it before the first step().
+    void set_on_nod(std::function<void(const TxBurstPtr&)> f) { on_nod_ = std::move(f); }
     // Every burst heard, once its session stage is done with it: its decoder, handed over (ModemRx::for_reader:
     // what was read stays read) for a monitor to read on its own thread; nullptr if lost. `b` is on_burst's
     // without the burst itself (heard, soft): the decoder holds those. Set it before the first step().
@@ -441,6 +444,7 @@ private:
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
     std::function<void(const TxBurstPtr&)> on_send_;
+    std::function<void(const TxBurstPtr&)> on_nod_;
     std::function<void(const BurstHeard&, std::shared_ptr<ModemRx>)> on_read_;
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;

@@ -278,6 +278,15 @@ decoded. `DATA2G_NOD=0` turns them off (both directions) for A/B runs.
   (`cpm._coh_run_llr`). Accepted: the best score at least `THR` = 37.0 and the runner-up
   under it. THR is the exponential tail fitted over the 90% point of 100,000 noise
   slots' best (max seen 31.2) at 1e-6 false accepts per slot: 36.85.
+- **CPU** (`data2g-bench-rx --nod 50`: one search of the ±0.15 s slot, after each of my
+  bursts, on the session stage): x86 desktop 4 ms (C++), 6-13 ms (Python); Raspberry
+  Pi 4 10.6-11 ms (17.6 ms with the governor still ramping), whether a nod is there or
+  not. Under 0.3% of a core at one burst every 5 s; the receiver's own listening on the
+  Pi is ~3.2 ms per 20 ms feed (docs/pi-bench-cpm.md). The slot's audio is held until
+  searched: ~0.18 MB.
+- **Monitor.** A nod sent or heard shows as the control-only burst it stands for, its
+  head marked `(nod N: meaning)` (`Monitor::sent`, `Monitor::nod_heard` via
+  `Engine::set_on_nod`).
 - **Received.** A detected nod is handed to the link as the control-only burst it
   stands for (`NodRx`, the control `Station.nod_payload` synthesizes), with no
   receiver measurements; its outcome goes to the policy with `usable` None.
