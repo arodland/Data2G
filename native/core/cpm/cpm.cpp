@@ -552,18 +552,22 @@ Soft soft(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
 
 namespace {
 
-// cpm._lock_header: (the coherent reading if the grid has coh_lock gates and
-// it passes them, else the noncoherent one; passed). copies 1: the first gates.
+// cpm._lock_header: (the noncoherent reading if it passes; else, the grid having
+// coh_lock gates and the noncoherent score reaching COH_PREGATE, the coherent
+// reading if it passes them; else the noncoherent one; passed). copies 1: the
+// first gates.
 std::pair<Header, bool> lock_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies) {
     const bool one = copies == 1;
-    if (const auto gates = coh_lock(g)) {
+    const Header h = read_header(g, x, s0, cfo, copies);
+    if (h.score >= (one ? g.lock_llr1 : g.lock_llr2) &&
+        h.score - h.runner_up >= (one ? tables::CPM.hdr_margin1 : tables::CPM.hdr_margin2))
+        return {h, true};
+    if (const auto gates = coh_lock(g); gates && h.score >= COH_PREGATE[one ? 0 : 1]) {
         const Header c = coh_read_header(g, x, s0, cfo, copies);
         if (c.score >= (*gates)[one ? 0 : 1] && c.score - c.runner_up >= (*gates)[one ? 2 : 3])
             return {c, true};
     }
-    const Header h = read_header(g, x, s0, cfo, copies);
-    return {h, h.score >= (one ? g.lock_llr1 : g.lock_llr2) &&
-                   h.score - h.runner_up >= (one ? tables::CPM.hdr_margin1 : tables::CPM.hdr_margin2)};
+    return {h, false};
 }
 
 }  // namespace
@@ -872,7 +876,7 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
     Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
     Received r{lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
-               lock.header_end, bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo)};
+               lock.header_end, bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo), {}};
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
         for (int k = 0; k < r.n_ctl_slots; ++k) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
     return r;

@@ -280,6 +280,7 @@ def test_coherent(native, reference, case):
     y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
     assert (native.cpm.COH_W, native.cpm.COH_HDR_W) == (cpm.COH_W, cpm.COH_HDR_W)
     assert native.cpm.coh_lock(g.name) == cpm.COH_LOCK.get(g.name)
+    assert native.cpm.COH_PREGATE == cpm.COH_PREGATE
     assert native.cpm.coh_ctl() == cpm.COH_CTL
 
     s0, f = ref(reference, "detect")(g, y)[1:]
