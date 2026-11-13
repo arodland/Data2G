@@ -13,6 +13,9 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
@@ -87,6 +90,18 @@ QWidget* row(std::initializer_list<QWidget*> ws) {
     return w;
 }
 
+// A tab page that scrolls, so the dialog fits a short screen (768 pixels, #170).
+// QScrollArea's own hint is capped well short of the page; this one asks for all of it.
+class Scroll : public QScrollArea {
+public:
+    explicit Scroll(QWidget* page) {
+        setWidget(page);
+        setWidgetResizable(true);
+        setFrameShape(QFrame::NoFrame);
+    }
+    QSize sizeHint() const override { return widget()->sizeHint() + QSize(verticalScrollBar()->sizeHint().width(), 0); }
+};
+
 void set_row_visible(QFormLayout* form, QWidget* field, bool visible) {
     field->setVisible(visible);
     if (QWidget* label = form->labelForField(field)) label->setVisible(visible);
@@ -106,8 +121,8 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     outer->addWidget(tabs);
     auto* general = new QWidget;
     auto* top = new QVBoxLayout(general);
-    tabs->addTab(general, tr("Station"));
-    tabs->addTab(rig_tab(a, inputs, outputs), tr("Rig"));
+    tabs->addTab(new Scroll(general), tr("Station"));
+    tabs->addTab(new Scroll(rig_tab(a, inputs, outputs)), tr("Rig"));
     const auto group = [&](const QString& title) {
         auto* g = new QGroupBox(title);
         auto* f = new QFormLayout(g);
@@ -288,6 +303,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     for (auto* w : findChildren<QDoubleSpinBox*>()) connect(w, &QDoubleSpinBox::valueChanged, this, note);
     for (auto* w : findChildren<QSlider*>()) connect(w, &QSlider::valueChanged, this, note);
     note();
+    if (const QScreen* s = screen()) resize(sizeHint().boundedTo(s->availableGeometry().size() * 0.9));
 }
 
 // SSTVAE's Rig tab (gui/settings_dialog.cpp rig_tab), in a plain form.
