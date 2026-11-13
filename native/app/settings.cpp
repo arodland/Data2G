@@ -121,6 +121,16 @@ Args load_settings(QSettings& s, Args base) {
     return from_settings(m, std::move(base));
 }
 
+const QStringList LIVE_SETTINGS = {"mycall",          "output_volume",  "ptt_on_delay_ms", "ptt_off_delay_ms", "live_constellation",
+                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm",           "record",
+                                   "record_dir"};
+
+bool needs_restart(const Args& from, const Args& to) {
+    QVariantMap live = settings_map(from);
+    for (auto it = live.begin(); it != live.end();) it = LIVE_SETTINGS.contains(it.key()) ? std::next(it) : live.erase(it);
+    return from_settings(live, to) != from;  // `to` with from's live values: anything left differs
+}
+
 void save_settings(QSettings& s, const Args& a) {
     const QVariantMap m = settings_map(a);
     for (auto it = m.begin(); it != m.end(); ++it) s.setValue(it.key(), it.value());

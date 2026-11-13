@@ -6,6 +6,7 @@
 // data2g-web also sends the map as JSON to its settings tab. QtCore only.
 #pragma once
 
+#include <QStringList>
 #include <QVariantMap>
 
 #include <memory>
@@ -26,5 +27,10 @@ QVariantMap settings_map(const Args& a);
 Args from_settings(const QVariantMap& m, Args base = {});
 Args load_settings(QSettings& s, Args base = {});
 void save_settings(QSettings& s, const Args& a);
+
+// The settings a running Station takes without a restart (Station::update).
+extern const QStringList LIVE_SETTINGS;
+// Going from `from` to `to` restarts the station: something other than LIVE_SETTINGS differs.
+bool needs_restart(const Args& from, const Args& to);
 
 }  // namespace data2g::app

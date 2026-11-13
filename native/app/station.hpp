@@ -155,6 +155,12 @@ public:
     // command clients told DISCONNECTED (host::Host::abort_session).
     void abort_session();
     std::vector<monitor::Dump> take_dumps();  // since the last call (the newest 256 kept)
+    // New settings without a restart, sessions and clients kept: true when
+    // running and only LIVE_SETTINGS differ (app/settings.hpp); false: the
+    // caller restarts. Volume, PTT delays, effort and CW ID from the next
+    // burst; the noise rule from the next session; the callsign as MYCALL's;
+    // recording into a new run folder (record_path) from the next block.
+    bool update(const Args& b);
 
 private:
     struct Outbox;

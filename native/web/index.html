@@ -79,7 +79,7 @@ input[type=range] { flex: 1; min-width: 120px; }
 .menu button[aria-checked=true]::before { content: "\2713"; position: absolute; left: 10px; }
 .dirty { outline: 1px solid var(--busy); }
 .savebar { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: center; padding: 10px 0; background: var(--bg); }
-#save-msg.err { color: var(--bad); }
+#save-msg.err, #restart-warn { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -200,8 +200,9 @@ input[type=range] { flex: 1; min-width: 120px; }
     </fieldset>
   </div>
   <div class="savebar">
-    <button type="submit" class="act primary" id="save" disabled>Save and restart</button>
+    <button type="submit" class="act primary" id="save" disabled>Save</button>
     <button type="button" class="act" id="revert" disabled>Revert</button>
+    <span id="restart-warn" class="err" hidden>These changes restart the modem: sessions will be dropped and clients disconnected.</span>
     <span id="save-msg"></span>
   </div>
   </form>
@@ -500,6 +501,10 @@ function sync() {  // what shows, as the dialog's sync_interface and sync_rig
   const nr = Number($("noise_rule").value);
   $("noise_rule-v").textContent = nr === 0 ? "off" : nr === 1 ? "1.00 (default)" : nr.toFixed(2);
   $("save").disabled = $("revert").disabled = !dirty.size;
+  // a change the running station can't take live (app::needs_restart): say what OK costs
+  const restart = cfg.running && [...dirty].some(id => !cfg.live.includes(id) && read($(id)) !== cfg.values[id]);
+  $("restart-warn").hidden = !restart;
+  $("save").textContent = restart ? "Save and restart" : "Save";
 }
 
 async function loadSettings() {
