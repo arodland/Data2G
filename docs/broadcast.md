@@ -220,6 +220,18 @@ ignored). Port 0 is always open; others must be opened first. KISS has no reply:
 one is logged and changes nothing. Port 0 goes back to its defaults when a command
 client disconnects, as above. Port 0 as hex: `C0 06 4D 4F 44 45 20 <mode> C0`.
 
+A KISS client can get each heard burst's Hand reference (`arq.md` §9) on the KISS
+port itself, in order with the frames: SetHardware `REFS ON` (any port; `REFS OFF`
+stops it), per connection. The payload splits on NUL, HT, LF, CR and space only, is
+upper-cased, and must be exactly two words: `REFS ON` or `REFS OFF`; extra words and
+a 0x1c-0x1f inside a word match nothing. Each decoded burst then sends that client a REF frame:
+SetHardware (`0x06`) on port 0, subcommand byte `0x11`, then the ASCII text `REF id
+end offset snr` as the command port's REF line has it (subcommands:
+`docs/app-soft-plan.md` §4; a first byte in `0x20-0x7E` is text, as `MODE` and `REFS`). It comes ahead of the burst's own data frames, so the frames
+that follow it until the next REF are that burst's. Bursts with no frames for KISS
+(ARQ, CQ) get a REF frame too. Clients that never send `REFS ON` see nothing new.
+As hex: `C0 06 52 45 46 53 20 4F 4E C0`.
+
 Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
 and QtSoundModem):
 

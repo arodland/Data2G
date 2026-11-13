@@ -42,6 +42,7 @@ const char* USAGE =
     "                   [--tci | --no-tci] [--tci-host HOST[:PORT]] [--threads N] [--realtime | --no-realtime]\n"
     "                   [--live-constellation | --no-live-constellation]\n"
     "                   [--dd-budget S] [--decoder-effort N] [--cw-id {off,add,only}] [--cw-wpm WPM]\n"
+    "                   [--hand-decoder {full,cheap}]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
     "                   [--rig-data-bits {default,7,8}] [--rig-stop-bits {default,1,2}]\n"
     "                   [--rig-parity {default,none,odd,even}] [--rig-handshake {default,none,xonxoff,hardware}]\n"
@@ -113,6 +114,11 @@ const char* HELP =
     "  --decoder-effort N    the LDPC decoder's iteration cap (data2g-gui offers 15-40). More decodes a little\n"
     "                        further into a fade (about 0.1 dB from 20 to 25) and spends longer on a burst\n"
     "                        that fails. Lower it on a slow machine (default 25)\n"
+    "  --hand-decoder {full,cheap}\n"
+    "                        net control's Hand round. cheap: one fewer candidate, a T/4 search step and no\n"
+    "                        CFO refinement: under half the CPU of a 40-channel round (0.37 s to 0.16 s on a\n"
+    "                        desktop) for 0.2-0.4 dB (docs/hand-burst.md). Only a station running a HAND\n"
+    "                        LISTEN round pays it (default full)\n"
     "\nrig control (Hamlib, linked in):\n"
     "  --rig, --no-rig       rig control at all; --no-rig: no PTT (default: on)\n"
     "  --list-rigs           Hamlib's rig models: number, manufacturer, model, status\n"
@@ -214,6 +220,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
         {"--decoder-effort", [&](auto& o, auto& v) { a.decoder_effort = i_(o, v); }},
         {"--cw-id", [&](auto&, auto& v) { a.cw_id = v; }},
         {"--cw-wpm", [&](auto& o, auto& v) { a.cw_wpm = d_(o, v); }},
+        {"--hand-decoder", [&](auto&, auto& v) { a.hand_decoder = v; }},
         {"--rig-model", [&](auto& o, auto& v) { a.rig_model = i_(o, v); }},
         {"--rig-device", [&](auto&, auto& v) { a.rig_device = v; }},
         {"--rig-baud", [&](auto& o, auto& v) { a.rig_baud = i_(o, v); }},
@@ -382,6 +389,8 @@ std::optional<std::string> check(const Args& a) {
     }
     if (a.cw_id != "off" && a.cw_id != "add" && a.cw_id != "only")
         return "--cw-id: invalid choice: '" + a.cw_id + "' (choose from off, add, only)";
+    if (a.hand_decoder != "full" && a.hand_decoder != "cheap")
+        return "--hand-decoder: invalid choice: '" + a.hand_decoder + "' (choose from full, cheap)";
     if (!(a.cw_wpm >= 15 && a.cw_wpm <= 40)) return "--cw-wpm: 15-40";
 #ifdef DATA2G_HAVE_RIG
     if (a.rig && !rig::model_info(a.rig_model))
