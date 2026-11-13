@@ -29,8 +29,13 @@ TOPK = 4  # the square law's best, rescored coherently
 # Acceptance (one slot, +-ReplySlot.TOL_S): the best meaning's coherent score
 # at least THR and the runner-up under it. THR: the exponential tail over the
 # 90% point of 100000 noise slots' best (runs/sig2/noise_*.npy, max 31.2),
-# at 1e-6 false accepts per slot: 36.85.
+# at 1e-6 false accepts per slot: 36.85. A wider window (ReplySlot.nod_window)
+# searches more starts: thr() adds the tail's scale per e-fold of them over
+# THR_POS (+-0.15 s), holding 1e-6 per slot (+-0.6 s: 39.8; 10% points
+# +0.1 awgn, +0.25-0.5 dB fading, runs/sig2).
 THR = 37.0
+THR_POS = 8
+TAIL = 2.08  # the noise tail's scale (nats)
 MASK64 = (1 << 64) - 1
 
 
@@ -69,10 +74,15 @@ def span() -> int:
     return L * GRID.T
 
 
+def thr(n_pos: int) -> float:
+    """The acceptance threshold for a search over n_pos starts (each at 4 phases)."""
+    return THR + TAIL * np.log(max(1.0, n_pos / THR_POS))
+
+
 def detect(x: np.ndarray, lo: int, hi: int, cfo: float, fam: np.ndarray) -> tuple[int, int, float] | None:
     """A nod of `fam` starting in [lo, hi] (x's samples; x must hold
     hi + span()) at CFO cfo -> (meaning, start, score), or None: none over
-    THR, a runner-up over it too, or a reserved meaning."""
+    thr(), a runner-up over it too, or a reserved meaning."""
     phases = range(0, GRID.T, GRID.T // 4)
     n_pos = max(0, (hi - lo) // GRID.T) + 1
     best = np.full(M, -np.inf)
@@ -95,7 +105,8 @@ def detect(x: np.ndarray, lo: int, hi: int, cfo: float, fam: np.ndarray) -> tupl
         coh[k] = float(cpm._coh_run_llr(GRID, Z, fam[k], cpm._n0(np.abs(Z) ** 2)).sum())
     order = np.argsort(coh)[::-1]
     b, r = coh[order[0]], coh[order[1]]
-    if b < THR or r >= THR or order[0] >= N_MEANINGS:
+    t = thr(n_pos)
+    if b < t or r >= t or order[0] >= N_MEANINGS:
         return None
     return int(order[0]), int(where[order[0]]), float(b)
 

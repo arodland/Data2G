@@ -226,9 +226,13 @@ public:
     static constexpr double TOL_S = 0.15;
     static constexpr std::size_t GAPS = 8;
     static constexpr double MAX_GAP_S = 3.0;
+    static constexpr double NOD_HALF_S = 0.6;  // nod_window's cap either side of the median
     void heard(std::optional<double> gap_s, std::optional<double> cfo);
     // (earliest, latest) start of the reply to my burst that ended at tx_end; nullopt before anything was learned
     std::optional<std::pair<double, double>> window(double tx_end) const;
+    // window() for a nod (receiver.ReplySlot.nod_window): the gaps' spread +-TOL_S, at most NOD_HALF_S either
+    // side of the median (a peer's TX playout lag can vary by a second; a nod has no blind fallback)
+    std::optional<std::pair<double, double>> nod_window(double tx_end) const;
     std::optional<double> cfo;
 
 private:

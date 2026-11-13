@@ -208,6 +208,14 @@ std::optional<std::pair<double, double>> ReplySlot::window(double tx_end) const 
     return std::make_pair(tx_end + g - TOL_S, tx_end + g + TOL_S);
 }
 
+std::optional<std::pair<double, double>> ReplySlot::nod_window(double tx_end) const {
+    const auto w = window(tx_end);
+    if (!w) return std::nullopt;
+    const double g = w->first + TOL_S - tx_end;
+    const auto [mn, mx] = std::minmax_element(gaps_.begin(), gaps_.end());
+    return std::make_pair(tx_end + std::max(*mn - TOL_S, g - NOD_HALF_S), tx_end + std::min(*mx + TOL_S, g + NOD_HALF_S));
+}
+
 bool Receiver::on_air() const {
     if (powers_.size() < 50) return false;
     const double floor = dsp::quantile(std::vector<double>(powers_.begin(), powers_.end()), 0.05);

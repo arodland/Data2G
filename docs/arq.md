@@ -265,7 +265,12 @@ decoded. `DATA2G_NOD=0` turns them off (both directions) for A/B runs.
   burst's (all three are absolute: a nod leaving an old size hint in force shrank every
   data burst at awgn -18 to one codeword). `T_DUPCTL` is carried as an absolute bit.
 - **Where.** Only as the session's direct reply, in the peer's expected slot (§3a
-  `ReplySlot`, ±0.15 s); the listener searches there after each of its bursts. A nod is
+  `ReplySlot.nod_window`: the last 8 gaps' spread ±0.15 s, at most ±0.6 s about their
+  median); the listener searches there after each of its bursts. On air (2026-11-12,
+  KC2G -> K2CR) one station's TX playout lag varied 0.2-1.3 s, its peer's reply gaps
+  1.35-2.22 s: 11 of 21 nods fell outside the median ±0.15 s and 6 or more were missed,
+  though every one scored 89-176. The primed lock keeps ±0.15 s (a missed slot falls
+  back to the blind lock, and its CPU grows with the width). A nod is
   never repeated on a timeout (its listener looks in its reply slot only): the master
   polls instead, in full.
 - **Why not polls.** A poll restates a burst its peer may not have heard, and then the
@@ -275,15 +280,19 @@ decoded. `DATA2G_NOD=0` turns them off (both directions) for A/B runs.
   (305 of 305, 8 cells). Their 6 meanings were dropped from the codebook.
 - **Detection** (`nod.detect`). The square-law tone metric over the window in T/4 steps
   at the slot's CFO, then the best 4 sequences rescored coherently
-  (`cpm._coh_run_llr`). Accepted: the best score at least `THR` = 37.0 and the runner-up
-  under it. THR is the exponential tail fitted over the 90% point of 100,000 noise
-  slots' best (max seen 31.2) at 1e-6 false accepts per slot: 36.85.
+  (`cpm._coh_run_llr`). Accepted: the best score at least `nod.thr` and the runner-up
+  under it. `THR` = 37.0 for the ±0.15 s slot (8 starts): the exponential tail fitted
+  over the 90% point of 100,000 noise slots' best (max seen 31.2, scale 2.08) at 1e-6
+  false accepts per slot, 36.85. A wider window adds 2.08 per e-fold of starts, holding
+  1e-6: 39.8 at ±0.6 s (31 starts), costing 0.1 dB awgn, 0.25-0.5 dB fading at 10%.
 - **CPU** (`data2g-bench-rx --nod 50`: one search of the ±0.15 s slot, after each of my
   bursts, on the session stage): x86 desktop 4 ms (C++), 6-13 ms (Python); Raspberry
   Pi 4 10.6-11 ms (17.6 ms with the governor still ramping), whether a nod is there or
   not. Under 0.3% of a core at one burst every 5 s; the receiver's own listening on the
-  Pi is ~3.2 ms per 20 ms feed (docs/pi-bench-cpm.md). The slot's audio is held until
-  searched: ~0.18 MB.
+  Pi is ~3.2 ms per 20 ms feed (docs/pi-bench-cpm.md). The full ±0.6 s window costs
+  +9% (x86 C++ 4.28 -> 4.68 ms; `DATA2G_NOD_BENCH_W` sets the bench's half-width): the
+  per-start search is small next to the bins and the coherent rescoring. The slot's
+  audio is held until searched: ~0.18 MB (~0.25 MB at ±0.6 s).
 - **Monitor.** A nod sent or heard shows as the control-only burst it stands for, its
   head marked `(nod N: meaning)` (`Monitor::sent`, `Monitor::nod_heard` via
   `Engine::set_on_nod`).

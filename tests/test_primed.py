@@ -400,6 +400,9 @@ def test_reply_slot():
         s.heard(g, 4.5)
     lo, hi = s.window(10.0)
     assert (lo, hi) == pytest.approx((10.35 - s.TOL_S, 10.35 + s.TOL_S)) and s.cfo == 4.5
+    assert s.nod_window(10.0) == pytest.approx((10.3 - s.TOL_S, 10.4 + s.TOL_S))  # the gaps' spread
+    s.heard(2.0, None)  # median 0.375: capped
+    assert s.nod_window(10.0) == pytest.approx((10.3 - s.TOL_S, 10.375 + s.NOD_HALF_S))
 
 
 def test_cpp_prime_lock_matches(native, pure):

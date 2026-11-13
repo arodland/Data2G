@@ -37,6 +37,8 @@ std::vector<double> waveform(std::span<const int, L> seq, int cap) {
     return cpm::bandpass(g, cpm::tones(g, seq, cpm::tx_filter(g, cap).glide), cap);
 }
 
+double thr(std::int64_t n_pos) { return THR + TAIL * std::log(std::max(1.0, static_cast<double>(n_pos) / THR_POS)); }
+
 std::optional<Detection> detect(std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo,
                                 const Family& fam) {
     const cpm::Grid& g = grid();
@@ -75,7 +77,8 @@ std::optional<Detection> detect(std::span<const double> x, std::int64_t lo, std:
     std::iota(order.begin(), order.end(), 0);
     std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return coh[a] > coh[b]; });
     const double b = coh[order[0]], r = coh[order[1]];
-    if (b < THR || r >= THR || order[0] >= N_MEANINGS) return std::nullopt;
+    const double t = thr(n_pos);
+    if (b < t || r >= t || order[0] >= N_MEANINGS) return std::nullopt;
     return Detection{order[0], where[order[0]], b};
 }
 

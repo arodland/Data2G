@@ -667,7 +667,7 @@ class Engine:
         """Where the peer may nod after my burst (docs/arq.md §3b): its reply
         in the expected slot, stream indices from my burst's end."""
         self._nod = None
-        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.window(0.0)
+        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.nod_window(0.0)
         if st is None or cfo is None or w is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
             return
         key = st.nod_family()

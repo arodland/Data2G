@@ -1094,7 +1094,7 @@ void Engine::hand_collect(std::span<const double> x) {
 void Engine::watch_nods(std::int64_t end) {
     nod_watch_.reset();
     const auto& st = session_->station;
-    const auto w = slot_.window(0.0);
+    const auto w = slot_.nod_window(0.0);
     if (!st || !slot_.cfo || !w ||
         !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
         return;

@@ -19,7 +19,9 @@ inline constexpr int L = 64;           // tones
 inline constexpr int M = 32;           // sequences in a family; meanings past N_MEANINGS are reserved
 inline constexpr int N_MEANINGS = 20;  // CODEBOOK
 inline constexpr int TOPK = 4;         // the square law's best, rescored coherently
-inline constexpr double THR = 37.0;    // acceptance: the best at least THR, the runner-up under it
+inline constexpr double THR = 37.0;    // acceptance: the best at least thr(), the runner-up under it
+inline constexpr int THR_POS = 8;      // THR's starts (+-0.15 s); more raise it by TAIL per e-fold (nod.thr)
+inline constexpr double TAIL = 2.08;   // the noise tail's scale (nats)
 inline constexpr std::array<int, 5> REPLY_STEPS = {0, 1, -1, 2, -2};
 
 const cpm::Grid& grid();  // c16r25
@@ -40,7 +42,9 @@ struct Detection {
     double score;
 };
 // A nod of `fam` starting in [lo, hi] (x's samples; x holds hi + span()) at CFO cfo, or nullopt: none
-// over THR, a runner-up over it too, or a reserved meaning.
+// over thr(), a runner-up over it too, or a reserved meaning.
+// The acceptance threshold for a search over n_pos starts (nod.thr): 1e-6 false accepts per slot.
+double thr(std::int64_t n_pos);
 std::optional<Detection> detect(std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo,
                                 const Family& fam);
 

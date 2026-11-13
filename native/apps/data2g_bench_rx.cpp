@@ -408,8 +408,11 @@ void cwid_audio() {  // a long call at the slowest and default speeds, best of 5
 // and a symbol), on noise alone and on a nod at a few SNRs; median and worst ms of n runs per case.
 void nod_bench(int n) {
     const auto fam = arq::nod::family({0x1234, 1, 3, 5});
+    // DATA2G_NOD_BENCH_W: the window's half-width (s), ReplySlot.TOL_S by default
+    const char* w_env = std::getenv("DATA2G_NOD_BENCH_W");
+    const double half = w_env ? std::atof(w_env) : 0.15;
     const std::int64_t T = arq::nod::grid().T, lo = static_cast<std::int64_t>(0.05 * config::FS),
-                       hi = lo + static_cast<std::int64_t>(0.30 * config::FS);
+                       hi = lo + static_cast<std::int64_t>(2 * half * config::FS);
     const std::size_t len = static_cast<std::size_t>(hi + arq::nod::span() + T);
     std::mt19937_64 rng(7);
     std::normal_distribution<double> gauss;

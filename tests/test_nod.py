@@ -22,6 +22,8 @@ def test_codebook_and_family():
     assert a.shape == (N.M, N.L) and (a == N.family(1, 0, 2, 3)).all() and not (a == b).all()
     # splitmix64, as native nod::family (pinned: a change is a wire change)
     assert N.family(0x1234ABCD, 1, 5, 2)[0, :8].tolist() == FAMILY_PIN
+    # the threshold holds 1e-6 false accepts per slot over a wider window: THR at +-0.15 s, more beyond
+    assert N.thr(1) == N.thr(N.THR_POS) == N.THR and N.thr(31) == pytest.approx(39.82, abs=0.01)
 
 
 FAMILY_PIN = [11, 12, 1, 8, 2, 11, 7, 3]
@@ -230,13 +232,14 @@ def test_cpp_detects_as_python(native, reference):
         assert (np.asarray(native.arq.nod_family(*key)) == family(*key)).all()
     fam = family(77, 1, 4, 6)
     rng = np.random.default_rng(9)
-    pad = np.zeros(3000)
+    pad = np.zeros(6000)
     hits = 0
     for trial in range(24):
         m = trial % N.M  # reserved meanings too
         x = np.concatenate([pad, N.waveform(fam[m]) if trial % 6 else np.zeros(N.span()), pad])
         x = x + rng.normal(0, [0.3, 1.5, 2.5][trial % 3], len(x))
-        want, got = detect(x, 2700, 3300, 1.5, fam), native.arq.nod_detect(x, 2700, 3300, 1.5, fam)
+        lo, hi = (5700, 6300) if trial % 2 else (1200, 10800)  # +-0.6 s: nod.thr raised
+        want, got = detect(x, lo, hi, 1.5, fam), native.arq.nod_detect(x, lo, hi, 1.5, fam)
         assert (want is None) == (got is None), (trial, want, got)
         if want is not None:
             hits += 1
