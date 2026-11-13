@@ -905,3 +905,29 @@ def test_the_shifter_hears_each_peer_bursts_energy():
     link(a, b, 20, 40, lambda: False, seed=24)
     assert a.session.policy.energy_features() is not None
     assert b.session.policy.energy_features() is not None
+
+
+def test_pending_on_a_connect_header_then_connected_or_cancelled():
+    """PENDING: raised on a header that may be a CONNECT while
+    listening, before its callee is known; CONNECTED follows if it was mine,
+    CANCELPENDING otherwise. Default "fsk": the robust connect mode only,
+    so the first try (OFDM) raises nothing and the retries do."""
+    a, b = Engine("W1AW", seed=71), Engine("K2XYZ", seed=72)
+    b.listen()
+    seen = []
+
+    def drain():
+        seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING") or e.startswith("CONNECTED"))
+        return len(seen) >= 4
+    a.connect("N0CALL", 2)  # nobody: K2XYZ hears its tries, OFDM then FSK
+    assert link(a, b, 20, 5, drain, seed=73) is False and seen == []  # try 1, qpsk-r1/5: none
+    assert link(a, b, 20, 120, drain, seed=73)
+    assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
+    a.abort()
+    b.events()
+
+    b.pending, seen[:] = "all", []
+    a.connect("K2XYZ", 2)  # mine, first try (OFDM): PENDING, then CONNECTED and no cancel
+    assert link(a, b, 20, 60, lambda: drain() or b.session.state == S.CONNECTED, seed=74)
+    drain()
+    assert seen == ["PENDING", "CONNECTED W1AW"], seen

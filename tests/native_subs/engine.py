@@ -87,6 +87,7 @@ def substitutions(native):
 
         id_interval_s = property(lambda s: s._n.id_interval_s, lambda s, v: setattr(s._n, "id_interval_s", v))
         cw_id = property(lambda s: s._n.cw_id, lambda s, v: setattr(s._n, "cw_id", v))
+        pending = property(lambda s: s._n.pending, lambda s, v: setattr(s._n, "pending", v))
         hand_round = property(lambda s: s._n.hand_round, lambda s, v: setattr(s._n, "hand_round", v))
         cw_wpm = property(lambda s: s._n.cw_wpm, lambda s, v: setattr(s._n, "cw_wpm", v))
 
