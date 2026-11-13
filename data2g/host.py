@@ -28,7 +28,9 @@ byte offsets, data written before CONNECTED is dropped; off again when the
 client goes), TXPOWER [dB] (DATA2G ON: -> TXPOWER db, the output volume;
 with dB, -60 to 20, sets it -> OK), TIMEOUT [s] (DATA2G ON: -> TIMEOUT s, the
 link idle timeout; with s > 0 sets it -> OK; back to the default when the
-client goes), CWID OFF|ON|ONLY [wpm] (DATA2G ON: the CW ID, docs/arq.md §7b:
+client goes), RETRIES [n] (-> RETRIES n, the CONNECT retries after the first
+try; with n, 0 to MAX_RETRIES, sets them for this client's connects -> OK;
+back to the default when the client goes), CWID OFF|ON|ONLY [wpm] (DATA2G ON: the CW ID, docs/arq.md §7b:
 off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
 accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
@@ -88,6 +90,7 @@ KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
 VOLUME_DB = (-60.0, 20.0)  # TXPOWER's range: the native GUI's output volume setting
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
+MAX_RETRIES = 20  # RETRIES' most: fsk16r25 retries go ~13 s apart, so ~4.5 minutes of calling
 ALIVE_S = 60.0  # IAMALIVE on the command port this often, as VARA does
 BUFFER_REPEAT_S = 30.0  # a nonzero BUFFER is repeated this often
 # VARA settings a client may send that have no Data2G meaning (yet): OK, logged.
@@ -130,6 +133,7 @@ class Host:
         self._bcast = False  # the client has sent BCAST: broadcast statuses go to it
         self._hand = False  # the client has sent HAND: REF/HAND lines go to it (as with DATA2G ON)
         self.data2g = False  # DATA2G ON
+        self.retries: int | None = None  # RETRIES (None: session.CONNECT_TRIES - 1)
         self.output_volume = 0.0  # dB, TXPOWER: serve() applies it
         self._up = False  # CONNECTED sent, DISCONNECTED not yet (DATA2G ON: data before it is dropped)
         self.out_cmd: list[str] = []
@@ -168,7 +172,7 @@ class Host:
         elif cmd == "CONNECT" and len(args) == 2:
             try:
                 e.set_call(args[0], *e.aliases)
-                e.connect(args[1], self.cap)
+                e.connect(args[1], self.cap, None if self.retries is None else self.retries + 1)
             except (RuntimeError, ValueError):
                 ok = False
         elif cmd == "DISCONNECT":
@@ -219,6 +223,13 @@ class Host:
             ok = VOLUME_DB[0] <= v <= VOLUME_DB[1]
             if ok:
                 self.output_volume = v
+        elif cmd == "RETRIES" and not args:
+            self.out_cmd.append(f"RETRIES {S.CONNECT_TRIES - 1 if self.retries is None else self.retries}")
+            return
+        elif cmd == "RETRIES" and len(args) == 1:
+            ok = args[0].isascii() and args[0].isdigit() and int(args[0]) <= MAX_RETRIES  # digits only, as native
+            if ok:
+                self.retries = int(args[0])
         elif cmd == "TIMEOUT" and self.data2g and not args:
             self.out_cmd.append(f"TIMEOUT {e.idle_close_s:.1f}")
             return
@@ -331,6 +342,7 @@ class Host:
         elif e.session.state == S.CONNECTING:
             e.abort()
         self.listening, self.accept_addr, self.data2g, self._hand = False, None, False, False
+        self.retries = None
         e.set_idle_close(None)
         if e.session.state in (S.LISTEN, S.CLOSED):
             e.listen(False)

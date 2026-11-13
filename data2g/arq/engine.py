@@ -288,11 +288,13 @@ class Engine:
         self.cw.reset()
         self._new_session()
 
-    def connect(self, peer: str, cap: int):
+    def connect(self, peer: str, cap: int, tries: int | None = None):
+        """`tries`: CONNECTs sent before giving up (None: session.CONNECT_TRIES)."""
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
         F.pack_call(peer)  # ValueError before any state changes
         self._new_session()
+        self.session.connect_tries = tries
         self.session.connect(peer, cap, self.now)
 
     def set_chat(self, on: bool):

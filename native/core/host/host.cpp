@@ -201,7 +201,7 @@ void Host::command(std::string_view line, std::string_view peer) {
         try {
             const auto aliases = e.aliases();
             e.set_call(args[0], aliases);
-            e.connect(args[1], cap);
+            e.connect(args[1], cap, retries_ ? std::optional(*retries_ + 1) : std::nullopt);
         } catch (const std::runtime_error&) {
             ok = false;
         } catch (const std::invalid_argument&) {
@@ -288,6 +288,16 @@ void Host::command(std::string_view line, std::string_view peer) {
         const double v = parse_double(args[0]);
         ok = v >= VOLUME_MIN_DB && v <= VOLUME_MAX_DB;
         if (ok) output_volume = v;
+    } else if (cmd == "RETRIES" && args.empty()) {
+        out_cmd.push_back("RETRIES " + std::to_string(retries_.value_or(arq::CONNECT_TRIES - 1)));
+        return;
+    } else if (cmd == "RETRIES" && args.size() == 1) {
+        const std::string& a = args[0];  // digits only (host.py)
+        const auto nz = a.find_first_not_of('0');
+        const std::string d = nz == std::string::npos ? "0" : a.substr(nz);  // no stoi overflow below
+        ok = !a.empty() && std::all_of(a.begin(), a.end(), [](unsigned char c) { return c >= '0' && c <= '9'; }) &&
+             d.size() <= 2 && std::stoi(d) <= MAX_RETRIES;
+        if (ok) retries_ = std::stoi(d);
     } else if (cmd == "TIMEOUT" && data2g && args.empty()) {
         out_cmd.push_back(arq::format("TIMEOUT %.1f", e.idle_close_s()));
         return;
@@ -358,6 +368,7 @@ void Host::client_gone() {
     if (s == SessionState::CONNECTED || s == SessionState::DISCONNECTING) e.disconnect();
     else if (s == SessionState::CONNECTING) e.abort();
     listening = data2g = hand_ = false;
+    retries_.reset();
     e.set_idle_close(std::nullopt);
     accept_addr.reset();
     const auto now = e.session().state;

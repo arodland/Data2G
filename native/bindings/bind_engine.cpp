@@ -126,7 +126,7 @@ void bind_engine(py::module_& m) {
             self.set_call(call, aliases.cast<std::vector<std::string>>());
         })
         .def("abort", &PyEngine::abort)
-        .def("connect", &PyEngine::connect)
+        .def("connect", &PyEngine::connect, py::arg("peer"), py::arg("cap"), py::arg("tries") = py::none())
         .def("set_chat", &PyEngine::set_chat)
         .def("set_idle_close", &PyEngine::set_idle_close)
         .def_property_readonly("idle_close_s", &PyEngine::idle_close_s)

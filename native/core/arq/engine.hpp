@@ -276,7 +276,9 @@ public:
     void set_call(const std::string& call, const std::vector<std::string>& aliases = {});
     void disconnect() { session_->disconnect(); }  // gracefully: the peer is told, what's queued still goes
     void abort();
-    void connect(const std::string& peer, int cap);  // throws std::runtime_error while a session is under way
+    // throws std::runtime_error while a session is under way. `tries`: CONNECTs sent before giving up
+    // (nullopt: the session's tune, CONNECT_TRIES)
+    void connect(const std::string& peer, int cap, std::optional<int> tries = std::nullopt);
     void set_chat(bool on);
     // engine.py's: a connected session with no data this long disconnects; this session and the next.
     // nullopt: the session's own tuning (IDLE_CLOSE_S).
