@@ -938,6 +938,13 @@ COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
 COH_LOCK = ({"c16r25": (34.0, 38.0, HDR_MARGIN[0], HDR_MARGIN[1]), "c8r50": (36.0, 40.0, 14.0, HDR_MARGIN[1]),
              "c32r62": (36.0, 42.0, HDR_MARGIN[0], HDR_MARGIN[1])}
             if os.environ.get("DATA2G_CPM_COH_LOCK", "1") == "1" else {})
+# The coherent reading runs only where the noncoherent score reaches this (one
+# copy, both): run at every detect placement it doubled listening CPU on the
+# Pi 4 (CPM 5.7 -> 15.3% of a core on noise; docs/pi-bench-coherent.md). Of
+# the calibration's coherent locks the noncoherent gate missed, the lowest
+# noncoherent score was 14 (one copy) / 8 (both); at (12, 10) none / under
+# 0.2% are lost, and the read runs at 2-10% / 10-42% of noise placements.
+COH_PREGATE = (12.0, 10.0)
 # The control codeword's soft bits on dd_metric with no decoded data (known
 # rows, square-law decisions elsewhere), from the start: 10% points, genie
 # lock, unprimed and single, vs the square law: awgn fsk16r25 -1.19,
@@ -1025,16 +1032,19 @@ def coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = H
 
 
 def _lock_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int) -> tuple:
-    """-> (read_header's tuple, passed): the coherent reading if the grid has
-    COH_LOCK and it passes them, else the noncoherent one and LOCK_LLR's
-    verdict (copies 1: [0] gates, else [1])."""
+    """-> (read_header's tuple, passed): the noncoherent reading if it passes
+    LOCK_LLR (copies 1: [0] gates, else [1]); else, if the grid has COH_LOCK
+    and the noncoherent score reaches COH_PREGATE, the coherent reading if it
+    passes COH_LOCK; else the noncoherent one, not passed."""
     i = 0 if copies == 1 else 1
-    if g.name in COH_LOCK:
+    h = read_header(g, x, s0, cfo, copies)
+    if h[3] >= LOCK_LLR[g.name][i] and h[3] - h[4] >= HDR_MARGIN[i]:
+        return h, True
+    if g.name in COH_LOCK and h[3] >= COH_PREGATE[i]:
         c = coh_read_header(g, x, s0, cfo, copies)
         if c[3] >= COH_LOCK[g.name][i] and c[3] - c[4] >= COH_LOCK[g.name][2 + i]:
             return c, True
-    h = read_header(g, x, s0, cfo, copies)
-    return h, h[3] >= LOCK_LLR[g.name][i] and h[3] - h[4] >= HDR_MARGIN[i]
+    return h, False
 
 
 def slot_rows(g: Grid, n_data: int, dup: bool) -> tuple:

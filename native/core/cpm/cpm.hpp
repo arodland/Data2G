@@ -192,6 +192,8 @@ inline constexpr int COH_HDR_W = 4;  // the header's
 // cpm.COH_LOCK: the grid's coherent lock gates (score one copy, both; margin
 // one copy, both), nullopt for an uncalibrated grid or DATA2G_CPM_COH_LOCK != 1 (read once).
 std::optional<std::array<double, 4>> coh_lock(const Grid& g);
+// cpm.COH_PREGATE: the coherent reading runs only where the noncoherent score reaches this (one copy, both).
+inline constexpr double COH_PREGATE[] = {12.0, 10.0};
 // cpm.COH_CTL (DATA2G_CPM_COH_CTL, read once).
 bool coh_ctl();
 
