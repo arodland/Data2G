@@ -19,9 +19,9 @@ namespace data2g::app {
 
 // The config file, an ini: --config's on this command line, else (config
 // dir)/Data2G/data2g.conf. Sets the file settings_store() opens from then on.
-// `migrate` (the front ends, never with --config): with no data2g.conf yet,
-// the store older versions saved (Data2G/data2g-gui) moves to it.
-std::unique_ptr<QSettings> open_config(int argc, char** argv, bool migrate);
+// Without --config and with no data2g.conf yet, the store older versions
+// saved (Data2G/data2g-gui) moves to it.
+std::unique_ptr<QSettings> open_config(int argc, char** argv);
 // The file open_config() chose (the default one before it runs).
 // Each front end's own keys live under a group: gui/, web/.
 std::unique_ptr<QSettings> settings_store();

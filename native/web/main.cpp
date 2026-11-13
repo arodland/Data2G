@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
         }
         if (!ours) rest.push_back(argv[i]);
     }
-    const auto shared = app::open_config(argc, argv, true);  // data2g-gui's too
+    const auto shared = app::open_config(argc, argv);  // data2g-gui's too
     QSettings& store = *shared;
     if (set_password) return ask_password(store) ? 0 : 1;
     const app::Args a = app::parse(int(rest.size()), rest.data(), app::load_settings(store), "data2g-web");

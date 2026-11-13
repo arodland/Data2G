@@ -317,11 +317,9 @@ void test_config_file(const QTemporaryDir& dir) {
     const QString other = dir.filePath(QStringLiteral("other.conf"));
     QByteArray other_arg = ("--config=" + other).toLocal8Bit();
     char* with[] = {prog, other_arg.data()};
-    check::is_true(app::open_config(2, with, true)->fileName() == other && QFile::exists(old_file) && !QFile::exists(conf),
+    check::is_true(app::open_config(2, with)->fileName() == other && QFile::exists(old_file) && !QFile::exists(conf),
                    "--config: its file, nothing moved");
-    check::is_true(app::open_config(1, bare, false)->fileName() == conf && QFile::exists(old_file),
-                   "data2g-host: data2g.conf, nothing moved");
-    const auto s = app::open_config(1, bare, true);
+    const auto s = app::open_config(1, bare);
     check::is_true(s->fileName() == conf && s->value("mycall").toString() == "OLD1" && !QFile::exists(old_file),
                    "data2g-gui.conf moved to data2g.conf");
     check::is_true(app::settings_store()->fileName() == conf, "settings_store() opens the same file");

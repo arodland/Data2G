@@ -61,7 +61,7 @@ void migrate_old(const QString& to) {
 
 }  // namespace
 
-std::unique_ptr<QSettings> open_config(int argc, char** argv, bool migrate) {
+std::unique_ptr<QSettings> open_config(int argc, char** argv) {
     QString path;
     for (int i = 1; i < argc; ++i) {  // parse() takes the flag too; a missing value is its error
         const std::string_view arg = argv[i];
@@ -70,7 +70,7 @@ std::unique_ptr<QSettings> open_config(int argc, char** argv, bool migrate) {
     }
     if (path.isEmpty()) {
         path = default_config();
-        if (migrate && !QFile::exists(path)) migrate_old(path);
+        if (!QFile::exists(path)) migrate_old(path);
     }
     g_config = path;
     return settings_store();

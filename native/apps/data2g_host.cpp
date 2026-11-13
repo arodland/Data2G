@@ -27,7 +27,7 @@ using namespace data2g;
 using namespace data2g::app;
 
 int main(int argc, char** argv) {
-    const Args a = parse(argc, argv, load_settings(*open_config(argc, argv, false)));
+    const Args a = parse(argc, argv, load_settings(*open_config(argc, argv)));
     if (a.list_modes) {
         list_modes(a.kiss_bw);
         return 0;
