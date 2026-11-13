@@ -213,9 +213,9 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     nods_ = new QCheckBox(tr("Nods"));
     nods_->setObjectName(QStringLiteral("nods"));
     nods_->setChecked(a.nods);
-    nods_->setToolTip(tr("Short keyed replies at the bottom of the ladder, to a peer that hears them. They are "
-                         "searched for in a slot after each burst, so turn them off if they go unheard: unsteady "
-                         "audio timing at either station. From the next session."));
+    nods_->setToolTip(tr("Short replies used in the slowest modes. Turn off if they keep going unheard. "
+                         "Unsteady audio timing at either station can cause that. Takes effect at the next "
+                         "session."));
     auto* noise_row = new QHBoxLayout;
     noise_row->addWidget(noise_rule_, 1);
     noise_row->addWidget(noise_label);
