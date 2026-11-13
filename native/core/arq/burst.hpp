@@ -67,6 +67,9 @@ struct SoftKey {
     int index = 0;
     auto operator<=>(const SoftKey&) const = default;
 };
+// Failed controls kept across bursts for decode_repeat (Python's ("rep", 1, 0) and ("rep", 2, 0)): the link's,
+// the session's connect frames. The burst's own pair key is {true, 0, 0, i}.
+inline constexpr SoftKey REPEAT_KEY{true, 1, 0, 0}, REPEAT_SESSION_KEY{true, 2, 0, 0};
 
 // One decode() the caller is about to ask for.
 struct DecodeRequest {
@@ -94,6 +97,13 @@ public:
     virtual bool can_prime() const { return false; }
     virtual std::optional<Bytes> decode_known(int /*slot*/, const MaskId& /*mask*/, ByteView /*tmpl*/,
                                               ByteView /*tmask*/, bool /*pair*/) {
+        return std::nullopt;
+    }
+    // Control slot `slot` combined with the same slot of the bursts before it kept under `key` (their decodes
+    // failed; a failure here keeps this one too): bit-identical repeats. Its payload must also score on this
+    // burst's own soft bits. A burst that can't (can_repeat() false) is never asked.
+    virtual bool can_repeat() const { return false; }
+    virtual std::optional<Bytes> decode_repeat(int /*slot*/, const MaskId& /*mask*/, const SoftKey& /*key*/) {
         return std::nullopt;
     }
     // CPM: slots its header says are control (2: duplicated); OFDM: 0.

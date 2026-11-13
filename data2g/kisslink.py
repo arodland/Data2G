@@ -155,13 +155,15 @@ def unpack_pair(b: bytes) -> tuple[str, str]:
     return F.unpack_call((v >> 60).to_bytes(8, "big")), F.unpack_call((v & ((1 << 60) - 1)).to_bytes(8, "big"))
 
 
-def parse_tlvs(b: bytes) -> dict:
+def parse_tlvs(b: bytes, partial: bool = False) -> dict:
     """[type][length][value]... up to a zero type (padding) -> {type: value};
-    ValueError if one runs past the end."""
+    ValueError if one runs past the end (`partial`: the whole ones before it)."""
     out, i = {}, 0
     while i + 2 <= len(b) and b[i]:
         t, n = b[i], b[i + 1]
         if i + 2 + n > len(b):
+            if partial:
+                break
             raise ValueError("truncated TLV")
         out[t] = b[i + 2:i + 2 + n]
         i += 2 + n
@@ -184,6 +186,9 @@ def read_control(tlvs: dict) -> tuple[str, str | None, bytes | None]:
     if rep is not None and (len(rep) < 2 or (len(rep) - 2) % 3):
         raise ValueError("T_REPORTS length")
     return group, call, rep
+
+
+SETHARDWARE = 6  # KISS command
 
 
 def check_mode(mode: str, cap: int):
@@ -351,11 +356,25 @@ class KissLink:
         check_mode(self.broadcast, self.cap)
         self.ports.setdefault(0, Port(PORT0_GROUP, self.broadcast))
 
-    def command(self, cmd: int, payload: bytes):
+    def command(self, cmd: int, payload: bytes, port: int = 0):
         """A KISS command from a client. P is kept. SLOTTIME (10 ms units)
         can lengthen the slot, not shorten it: clients' defaults (100 ms)
-        suit VHF carrier detect, not ours. TXDELAY (--ptt-on-delay-ms is
-        ours), TXTAIL and the rest are ignored."""
+        suit VHF carrier detect, not ours. SETHARDWARE (6) with ASCII
+        "MODE [AUTO] [DUP] mode" is BCAST MODE for `port`. TXDELAY
+        (--ptt-on-delay-ms is ours), TXTAIL and the rest are ignored."""
+        if cmd == SETHARDWARE:
+            words = payload.decode("ascii", "replace").strip("\0\r\n ").split()
+            kw = [w.upper() for w in words]
+            flags = kw[1:-1]
+            try:
+                if len(words) < 2 or kw[0] != "MODE" or not set(flags) <= {"AUTO", "DUP"} or len(set(flags)) < len(flags):
+                    raise ValueError("not MODE [AUTO] [DUP] mode")
+                self.set_mode(port, words[-1].lower(), "AUTO" in flags, "DUP" in flags)
+            except ValueError as e:
+                log.warning("KISS SETHARDWARE %r on port %d: %s", payload, port, e)
+            else:
+                log.info("KISS SETHARDWARE port %d: %s", port, " ".join(words))
+            return
         if not payload or cmd not in (2, 3):
             log.debug("KISS command %d ignored", cmd)
             return
@@ -440,11 +459,14 @@ class KissLink:
         out, self.acks = self.acks, []
         return out
 
-    def on_sent(self, burst: TxBurst):
-        """A burst finished transmitting: its frames' acks are due."""
+    def on_sent(self, burst: TxBurst) -> list:
+        """A burst finished transmitting: its frames' acks are due. -> those
+        (port, ack), which the engine also reads (a HAND LISTEN's anchor)."""
         if self._inflight is not None and burst == self._inflight[0]:
-            self.acks += self._inflight[1]
-            self._inflight = None
+            sent, self._inflight = self._inflight[1], None
+            self.acks += sent
+            return sent
+        return []
 
     def missed(self, submode: str, n_cw: int, snr: float | None = None):
         """A burst heard whose header decoded but nothing else: it can't be
@@ -576,8 +598,20 @@ class KissLink:
                 if p is None and f == 2:
                     p = rx.decode_pair(f * i, ctl_mask(0, i, key))
                 ctl.append(p)
-            if None in ctl or ctl[0] != c0:
+            if ctl[0] != c0:
                 continue
+            if None in ctl:
+                # a later control codeword lost. Codeword 0 passed under the
+                # group's key and its header says where the data starts: the
+                # burst is that group's, less what the lost codeword held (the
+                # reports' tail; the sender's call unless it lies whole in
+                # codeword 0). Dropped whole before, and as slot 0 had decoded
+                # on_burst never looked for its data either.
+                try:
+                    whole = read_control(parse_tlvs(c0[1:], partial=True))
+                except ValueError:
+                    whole = (None, None, None)
+                return group, whole[1] if whole[0] == group else None, None, f * n_ctl
             try:
                 return (*read_control(parse_tlvs(b"".join(ctl)[1:])), f * n_ctl)
             except ValueError as e:

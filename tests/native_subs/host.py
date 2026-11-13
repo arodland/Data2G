@@ -23,10 +23,11 @@ def substitutions(native):
 
         def __init__(self, engine, buffer_credit=None):
             self.engine, self._n = engine, N.Host(engine._n, buffer_credit)
-            self.out_cmd, self.out_data = [], bytearray()
+            self.out_cmd, self.out_data, self.out_kiss_refs = [], bytearray(), []
 
         def _take(self, result=None):
             self.out_cmd += self._n.take_cmd()
+            self.out_kiss_refs += self._n.take_kiss_refs()
             self.out_data += self._n.take_data()
             return result
 

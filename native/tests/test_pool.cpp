@@ -166,7 +166,8 @@ int main() {
     check::current_step = "bitwise across pool sizes";
     const std::string name = "w48-qpsk-r1/2";
     const auto& spec = *config::submode(name);
-    arq::TxBurst burst{name, {}, 0};
+    arq::TxBurst burst;
+    burst.submode = name;
     for (int i = 0; i < 16; ++i) {
         arq::Bytes p(static_cast<std::size_t>(spec.payload_bytes));
         for (std::size_t j = 0; j < p.size(); ++j) p[j] = static_cast<std::uint8_t>(i * 31 + j);

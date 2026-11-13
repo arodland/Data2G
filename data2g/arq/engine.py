@@ -20,12 +20,13 @@ on its own thread).
 import json
 import logging
 import random
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 
-from .. import codes, cpm, cwid, modem
+from .. import codes, cpm, cwid, hand, modem
 from ..config import FS, LEADIN_SAMPLES, max_codewords
 from ..receiver import NoiseProfile, Receiver, ReplySlot
 from ..waveform import dsp
@@ -73,12 +74,31 @@ ID_INTERVAL_S = 600.0
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
-# frame, CW); "only", a CW ID in their place. With it on, a station that has
-# transmitted outside a session (KISS, a CQ frame, a refused or unanswered
-# call) sends a CW ID once it has been quiet CW_QUIET_S, and one ahead of
-# such a transmission ID_INTERVAL_S after the first that none covered.
+# frame, CW); "only", a CW ID in their place. With it on, a transmission no
+# CW ID covers (KISS, a CQ frame, a refused or unanswered call) plans one
+# CW_PLAN_S after it, or after the last CW ID when that came under CW_GAP_S
+# before it: never two within CW_PLAN_S. The planned ID goes at the next
+# chance (ahead of a burst, or alone outside a session), held by BUSY until
+# CW_FORCE_S past the plan's start.
 CW_ID_MODES = ("off", "add", "only")
-CW_QUIET_S = 30.0
+CW_PLAN_S = 540.0
+CW_GAP_S = 300.0
+CW_FORCE_S = 600.0
+# Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
+# how long an armed HAND LISTEN waits for the burst that anchors its window.
+HAND_REFS_KEPT = 64
+HAND_ARM_EXPIRE_S = 30.0
+HAND_MIN_D_S = 1.0  # the smallest HAND LISTEN d: the window's head is uncollectable
+# below hand.SEARCH_S, since rx is off until the anchor burst ends
+HAND_CW_TAIL_S = 1.0  # CwSense is ignored while a Hand window is open and this long after:
+# a Hand's steady tone near 1500 Hz can read as a CW ID at its edges (CwSense's 1 s history)
+
+
+def ack_tag(ack: int) -> int:
+    """A KISS ACKMODE ack's tag: the ids tnc.KissServer (and native's) hand
+    the link carry it in their low 16 bits, big-endian. HAND LISTEN names its
+    anchor burst by it."""
+    return ack & 0xFFFF
 
 
 class Recorder:
@@ -174,12 +194,22 @@ class Engine:
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
         self.cw_id = "off"  # CW_ID_MODES
         self.cw_wpm = cwid.WPM
+        self._hand_round = "full"  # hand_round's
         self.cw = cwid.CwSense()  # a CW ID heard holds what would key over it (_cw_hold)
         self._cw_heard = False  # the last block's (logged once per ID)
         self._cw_until = 0.0  # nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
-        self._cw_owed: float | None = None  # the first transmission no CW ID has covered yet
+        self._cw_at: float | None = None  # the planned CW ID (CW_PLAN_S)
+        self._cw_last: float | None = None  # my last CW ID's start
         self._span = None  # the burst being heard: (start, end) engine time, its mode (energy inputs)
         self._tx_end = None  # when my last burst ended (a timeout's expected reply follows it)
+        self.hand_refs: dict[int, tuple[float, float, float]] = {}  # heard burst id -> (end s, cfo Hz, snr dB)
+        self._hand_ref_n = 0
+        self._hand_tx = None  # a scheduled Hand (docs/arq.md §9): [first audio sample, audio, channel]
+        self._hand_listen = None  # an armed or open Hand window: dict(d, tag, channels, armed, open, ...)
+        self._hand_hold = 0.0  # no CQ/broadcast/CW starts before this (an open Hand window)
+        self._test_acks = []  # tests: (port, ack) the burst on air carries, as KissLink.on_sent's (native: test_tx's)
+        self._hand_out: list[str] = []  # REF/HAND lines for the host; the decoder thread appends (lock)
+        self._hand_lock = threading.Lock()
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._new_session()
@@ -253,6 +283,7 @@ class Engine:
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""
         self.tx = None
+        self._tx_kiss = False  # a Hand or KISS burst cut short: the next burst's end is the session's
         self.receiver.reset()
         self.cw.reset()
         self._new_session()
@@ -276,6 +307,130 @@ class Engine:
     @property
     def idle_close_s(self) -> float:
         return S.IDLE_CLOSE_S if self._idle_close_s is None else self._idle_close_s
+
+    @property
+    def hand_round(self) -> str:
+        """hand.ROUNDS' key: "full", or "cheap" (--hand-decoder cheap's grids)."""
+        return self._hand_round
+
+    @hand_round.setter
+    def hand_round(self, v: str):
+        if v not in hand.ROUNDS:
+            raise ValueError(f"hand_round: {v!r} not in {sorted(hand.ROUNDS)}")
+        self._hand_round = v
+
+    # -- Hand bursts (the D2G net's show of hands: data2g/hand.py, docs/arq.md §9) ----
+
+    def hand_send(self, ref: int, tag: int, d_s: float, channel: int, payload: int):
+        """Schedule a Hand: `payload`'s 63 bits in channel `channel`
+        (hand.N_CHANNELS of them, hand.PITCH apart around 1500 Hz), on air
+        `d_s` seconds after the end of heard burst `ref`, shifted by that
+        burst's cfo so it lands in net control's channel map. ValueError:
+        unknown ref, bad numbers, or one already waiting."""
+        if ref not in self.hand_refs:
+            raise ValueError(f"no ref {ref}")
+        if self._hand_tx is not None:
+            raise ValueError("a Hand is already waiting")
+        if not 0 <= channel < hand.N_CHANNELS or not 0 <= tag <= 255:
+            raise ValueError("bad channel or tag")
+        if not 0 <= payload < 2 ** 64 or not 0 < d_s < HAND_ARM_EXPIRE_S:
+            raise ValueError("bad payload or delay")
+        payload &= (1 << hand.PAYLOAD) - 1  # 16 hex digits, the top bit ignored (docs/arq.md §9)
+        end, cfo, _ = self.hand_refs[ref]
+        target = int(round((end + d_s) * FS)) - self.ptt_delay
+        if target < self.n:
+            raise ValueError("the slot has passed")
+        audio = np.concatenate([np.zeros(self.ptt_delay), hand.tx_audio(tag, payload, channel, cfo)])
+        self._hand_tx = [target, audio, channel]
+
+    def hand_listen(self, d_s: float, tag: int, ack: int, channels: list[int]):
+        """Arm a Hand window opening d_s seconds after the end of the burst
+        carrying the KISS frame whose ACKMODE tag is `ack` (16 bits, the tag's
+        two bytes big-endian): the client names the burst its call goes in,
+        so a CQ, ID or session burst sent first can't move the window. Capture
+        it +-hand.SEARCH_S, decode `channels` with the CRC seeded by `tag`, and
+        report through take_hand_events. While a window is open no CQ,
+        broadcast or CW ID of mine starts."""
+        if not 0 <= tag <= 255 or not 0 <= ack <= 0xFFFF:
+            raise ValueError("bad tag")
+        if not HAND_MIN_D_S <= d_s < HAND_ARM_EXPIRE_S:
+            raise ValueError("bad delay")
+        if not channels or any(not 0 <= c < hand.N_CHANNELS for c in channels):
+            raise ValueError("bad channels")
+        channels = list(dict.fromkeys(channels))  # listed twice: decoded once
+        if self._hand_listen is not None:  # its round still owes a HAND END
+            raise ValueError("a Hand window is already waiting")
+        self._hand_listen = dict(d=int(round(d_s * FS)), tag=tag, ack=ack, channels=channels,
+                                 armed=self.n, open=False, buf=[], first=0, next=0, lo=0, hi=0, anchor=0)
+
+    def hand_cancel(self):
+        """Stop a waiting Hand and an armed or open window (docs/arq.md §9):
+        a client that went must not leave its Hand and window holding the
+        radio. A window that existed ends with HAND END. Idempotent."""
+        self._hand_tx = None
+        if self._hand_listen is not None:
+            self._hand_listen = None
+            self._hand_event("HAND END")
+        self._hand_hold = 0.0
+
+    def take_hand_events(self) -> list[str]:
+        """REF and HAND lines since the last call (docs/arq.md §9): one REF
+        per decoded burst, and a round's HAND lines (made on the decoder
+        thread, hence the lock)."""
+        with self._hand_lock:
+            out, self._hand_out = self._hand_out, []
+        return out
+
+    def _hand_event(self, line: str):
+        with self._hand_lock:
+            if len(self._hand_out) > 1000:  # a bare Engine with no host to drain it: don't grow
+                self._hand_out.clear()
+            self._hand_out.append(line)
+
+    def _hand_collect(self, x: np.ndarray, k: int):
+        """An open Hand window's audio, and an armed listen's expiry."""
+        hl = self._hand_listen
+        if hl is None:
+            return
+        if not hl["open"]:
+            if self.n - hl["armed"] > HAND_ARM_EXPIRE_S * FS:
+                self._hand_listen = None
+                self._hand_event("HAND END")
+            return
+        if self.n + k > hl["lo"]:
+            if not hl["buf"]:
+                hl["first"] = hl["next"] = self.n
+            if self.n > hl["next"]:  # blocks I spent transmitting: silence, so sample times stay true
+                hl["buf"].append(np.zeros(min(self.n, hl["hi"]) - hl["next"]))
+            if self.n <= hl["hi"]:  # a block past the window's end (a long gap) is not the window's
+                hl["buf"].append(x)
+            hl["next"] = self.n + k
+        if self.n + k >= hl["hi"] and hl["buf"]:
+            self._hand_listen = None
+            nominal = hl["anchor"] + hl["d"] - hl["first"]
+            # first past lo: the window's head went uncaptured (my own burst
+            # ran into it) - the round reports how much
+            short = f"HAND SHORT {int(round((hl['first'] - hl['lo']) * 1000 / FS))}" if hl["first"] > hl["lo"] else None
+            threading.Thread(target=self._hand_decode,
+                             args=(np.concatenate(hl["buf"]), hl["tag"], hl["channels"], nominal, short,
+                                   hand.ROUNDS[self.hand_round]),
+                             name="hand-decode", daemon=True).start()
+
+    def _hand_decode(self, y: np.ndarray, tag: int, channels: list[int], nominal: int, short: str | None, rnd: dict):
+        """The round's decodes off the audio thread (~2.4 s of CPU for 40
+        channels on a desktop): a line per Hand decoded, then HAND SHORT if
+        the window's head was missed, then HAND END. A negative nominal: the
+        slot lies before the capture, so no decodes (a search reaching past
+        the capture's head reads zeros, as hand.bins pads). A decoder exception costs the round, not the station."""
+        lines = []
+        if nominal >= 0:
+            try:
+                res = hand.decode_window(y, tag, channels, nominal, rnd)
+                lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}" for r in res]
+            except Exception:
+                log.exception("hand decode failed")
+        for line in lines + ([short] if short is not None else []) + ["HAND END"]:
+            self._hand_event(line)
 
     def events(self) -> list[str]:
         """Host notifications since the last call, oldest first, one line of
@@ -342,18 +497,32 @@ class Engine:
             return [*self._ids(s, True), burst]
         return [burst]
 
-    def _cw_ahead(self, bursts: list, t: float) -> list:
-        """Outside a session: a CW ID ahead of `bursts` once id_interval_s
-        has passed since the first transmission none covered."""
-        if self.cw_id != "off" and self._cw_owed is not None and t >= self._cw_owed + self.id_interval_s:
-            return [self._cw_burst(self.call), *bursts]
-        return bursts
+    def _cw_ready(self, t: float) -> bool:
+        return self.cw_id != "off" and self._cw_at is not None and t >= self._cw_at
 
-    def _cw_due(self, t: float) -> bool:
-        """The CW ID after transmissions outside a session: quiet CW_QUIET_S, nothing queued."""
-        return (self.cw_id != "off" and self._cw_owed is not None and self._tx_end is not None
-                and t >= self._tx_end + CW_QUIET_S and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)
-                and self._id_pending is None and not self._extra and not (self.kiss is not None and self.kiss.queue))
+    def _cw_ahead(self, bursts: list, t: float) -> list:
+        """Outside a session: the planned CW ID ahead of `bursts` once due."""
+        return [self._cw_burst(self.call), *bursts] if self._cw_ready(t) else bursts
+
+    def _cw_due(self, t: float, ok: bool) -> bool:
+        """The planned CW ID alone, outside a session: when `ok` (free, no
+        BUSY), or regardless once CW_FORCE_S past the plan's start."""
+        return (self._cw_ready(t) and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED)
+                and self._id_pending is None and (ok or t >= self._cw_at - CW_PLAN_S + CW_FORCE_S))
+
+    def _cw_plan(self, bursts: list, lens: list[int], t: float):
+        """CW_PLAN_S: a CW ID covers all before it, and plans the next one
+        when bursts follow it; else the first burst no ID covers plans one."""
+        if self.cw_id == "off":
+            return
+        start = t + self.ptt_delay / FS
+        for b, n in zip(bursts, lens):
+            if isinstance(b, cwid.CwBurst):
+                self._cw_last, self._cw_at = start, None
+            elif self._cw_at is None:
+                fresh = self._cw_last is None or start - self._cw_last >= CW_GAP_S
+                self._cw_at = (start if fresh else self._cw_last) + CW_PLAN_S
+            start += n / FS
 
     def _cw_false_lock(self):
         """A suspect OFDM lock (Receiver.SUSPECT_SCORE: a header, or a header
@@ -393,14 +562,19 @@ class Engine:
             self.noise.feed(x, self.now)
             cw = self.cw.feed(x)
             self._hear(x, t)
+            self._hand_collect(x, k)
             self._cw_false_lock()
+            cw = cw and not (self._hand_hold and t < self._hand_hold + HAND_CW_TAIL_S)  # Hands, not an ID
             if cw:
                 self._cw_hold(t)
             self._cw_heard = cw
             self._id_check(t)
             bursts = main = None
             held = t < self._hold and self.session.state != S.CLOSED  # a closed session's DISC_ACK goes
-            free = t >= self._hold and t >= self._cw_until  # for anything outside a session
+            # for anything outside a session; a waiting Hand holds them all, so none runs into its slot
+            # (ponytail: up to HAND_ARM_EXPIRE_S of hold; from the slot minus the longest burst if that bites)
+            hand_free = t >= self._hand_hold and self._hand_tx is None
+            free = t >= self._hold and t >= self._cw_until and hand_free
             busy = self.receiver.busy or cw
             if not busy and not held:  # a burst still arriving holds any reply (half duplex)
                 self._carrier_hold(t)
@@ -409,13 +583,11 @@ class Engine:
                 self._id_check(t)
                 if burst is not None:
                     bursts, main = self._with_id(burst, t), burst
-                elif self._id_pending is not None and t >= self._id_pending[1]:
+                elif self._id_pending is not None and t >= self._id_pending[1] and hand_free:
                     bursts, self._id_pending = self._ids(self._id_pending[0], False), None
                 elif self._extra and free:
                     main = self._extra.pop(0)
                     bursts = self._cw_ahead([main], t)
-                elif free and self._cw_due(t):
-                    bursts = [self._cw_burst(self.call)]
             if (bursts is None and self.kiss is not None and free
                     and (self.session.state in (S.IDLE, S.LISTEN, S.CLOSED) or self.session.idle())):
                 burst = self._kiss_burst(k, busy)  # KISS between ARQ sessions, or while one is idle
@@ -423,8 +595,32 @@ class Engine:
                 self._tx_kiss = burst is not None
             else:
                 self._kiss_busy = 0
+            if bursts is None and self._cw_due(t, free and not busy and not held):
+                bursts = [self._cw_burst(self.call)]
             if bursts is not None:
                 self._start_tx(bursts, t, main or bursts[0])
+            if self._hand_tx is not None and self.tx is None and self.n >= self._hand_tx[0]:
+                # a scheduled Hand (docs/arq.md §9): its slot is due and the radio is
+                # idle. The audio starts at the first block boundary past the slot:
+                # <= 0.1 s late before the host's own PTT/output latencies, which
+                # net control's +-0.6 s search and the reported dt cover.
+                ht = self._hand_tx
+                if self.n <= ht[0] + int(hand.LATE_S * FS):
+                    self._hand_tx = None
+                    log.info("TX hand %d", ht[2])
+                    hb = hand.HandBurst()
+                    self.tx = [hb, ht[1], 0]
+                    self._tx_kiss = True  # nobody's session: no reply timer
+                    # a Hand is covered by CW planning like any other transmission; _cw_plan's
+                    # length convention is per-burst audio, the PTT delay prefix apart (_start_tx)
+                    self._cw_plan([hb], [len(ht[1]) - self.ptt_delay], t)
+                    self._hand_event(f"HAND SENT {ht[2]}")
+                    if self.rec:
+                        self.rec.event("hand_tx", t=self.now, channel=ht[2], seconds=len(ht[1]) / FS)
+                else:
+                    self._hand_tx = None
+                    log.info("hand %d not sent: busy past the slot", ht[2])
+                    self._hand_event(f"HAND DROPPED {ht[2]}")
         if self.tx is not None:
             burst, audio, pos = self.tx  # burst: the session's, when an ID rides with it
             n = min(k, len(audio) - pos)
@@ -435,13 +631,21 @@ class Engine:
                 self.receiver.reset()  # our own transmission was not heard
                 self.cw.reset()
                 self.noise.mark(self.now, self.now + n / FS + NoiseProfile.RECOVER_S)
-                self._tx_end = self.now + n / FS
-                if not self._tx_kiss:  # a broadcast burst is not the session's: no reply timer
+                sent = (self.kiss.on_sent(burst) if self.kiss is not None else []) + self._test_acks  # a broadcast burst's frames are acked
+                self._test_acks = []
+                hl = self._hand_listen
+                if hl is not None and not hl["open"] and any(a is not None and ack_tag(a) == hl["ack"] for _, a in sent):
+                    # the burst carrying the listen's named frame ended: its window opens
+                    a = self.n + n  # its end sample (self.n advances at the step's end)
+                    hl.update(open=True, buf=[], anchor=a,
+                              lo=a + hl["d"] - hand.SEARCH_SAMPLES,
+                              hi=a + hl["d"] + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES)
+                    self._hand_hold = hl["hi"] / FS
+                if not self._tx_kiss:  # a Hand or broadcast burst is not the session's: no reply timer, no _tx_end
+                    self._tx_end = self.now + n / FS  # the expected-reply/missed-burst accounting's
                     self.session.on_tx_end(burst, self.now + n / FS)
                     self._expect_reply()
                 self._tx_kiss = False
-                if self.kiss is not None:
-                    self.kiss.on_sent(burst)  # a broadcast burst's frames are acked
         self.n += k
         return out, self.tx is not None
 
@@ -473,6 +677,14 @@ class Engine:
             span, self._span = self._span, None
             r, h = ev["rx"], ev["header"]
             meas = PHY.measure(r) if r is not None else None
+            if r is not None:  # every decoded burst is a Hand reference (docs/arq.md §9)
+                self._hand_ref_n += 1
+                end = span[1] if span else t
+                cfo = r.get("cfo", 0.0)
+                self.hand_refs[self._hand_ref_n] = (end, cfo, meas["snr_est"])
+                if len(self.hand_refs) > HAND_REFS_KEPT:
+                    self.hand_refs.pop(min(self.hand_refs))
+                self._hand_event(f"REF {self._hand_ref_n} {end:.2f} {cfo:.1f} {meas['snr_est']:.1f}")
             if span is not None and self.session.state in (S.CONNECTED, S.DISCONNECTING):
                 # heard (decoded or not): the peer's, most likely
                 self._energy(*span, t, floor_db=meas["snr_est"] if meas else None)
@@ -501,6 +713,11 @@ class Engine:
                     self.kiss_rx += frames
                     continue
             if self._cq(rx):
+                continue
+            if not ours and rx.converged(0) and self.session.foreign(rx):
+                # a whole codeword under another key: its measurements and
+                # its loss are not my peer's (the shifter stepped down on them)
+                log.info("RX %s x%d: another station's", rx.submode, rx.n_cw)
                 continue
             # the noise profile too (a model with its inputs reads it; recorded apart, with the rx event)
             self.session.policy.observe(dict(meas, noise=self.noise.snapshot()), r["spec"].name, t)
@@ -649,10 +866,7 @@ class Engine:
         xs = [cwid.audio(b.text, b.wpm) if isinstance(b, cwid.CwBurst) else PHY.tx_audio(b) for b in bursts]
         audio = np.concatenate([np.zeros(self.ptt_delay)] + [
             x if isinstance(b, cwid.CwBurst) else x / np.max(dsp.envelope(x)) for b, x in zip(bursts, xs)])
-        if isinstance(bursts[-1], cwid.CwBurst):
-            self._cw_owed = None  # a CW ID last covers all before it
-        elif self._cw_owed is None or isinstance(bursts[0], cwid.CwBurst):
-            self._cw_owed = t
+        self._cw_plan(bursts, [len(x) for x in xs], t)
         self.tx = [main, audio, 0]
         if self.rec:
             # one event per burst, at its own start: the first's seconds include

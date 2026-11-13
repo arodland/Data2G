@@ -126,7 +126,8 @@ void bind_kisslink(py::module_& m) {
         .def_readwrite("persist", &KissLink::persist)
         .def_readwrite("slot_s", &KissLink::slot_s)
         .def_readwrite("busy_limit_s", &KissLink::busy_limit_s)
-        .def("command", [](KissLink& l, int cmd, const py::bytes& payload) { l.command(cmd, bytes_view(payload)); })
+        .def("command", [](KissLink& l, int cmd, const py::bytes& payload, int port) { l.command(cmd, bytes_view(payload), port); },
+             py::arg("cmd"), py::arg("payload"), py::arg("port") = 0)
         .def("open", &KissLink::open, py::arg("group"), py::arg("from_call") = std::nullopt)
         .def("close", &KissLink::close)
         .def("set_mode", &KissLink::set_mode, py::arg("n"), py::arg("mode"), py::arg("auto") = false,
@@ -139,13 +140,16 @@ void bind_kisslink(py::module_& m) {
                      py::dict d = ack_objs(self);
                      const std::int64_t next = py::hasattr(self, "_ack_next") ? self.attr("_ack_next").cast<std::int64_t>() + 1 : 1;
                      self.attr("_ack_next") = py::int_(next);
-                     d[py::int_(next)] = ack;
-                     id = next;
+                     // an int ack keeps its low 16 bits (the ACKMODE tag: arq::ack_tag) in the id
+                     id = next << 16 | (py::isinstance<py::int_>(ack) ? (ack.cast<std::int64_t>() & 0xFFFF) : 0);
+                     d[py::int_(*id)] = ack;
                  }
                  self.cast<KissLink&>().enqueue(bytes_of(f), port, id);
              },
              py::arg("frame"), py::arg("port") = 0, py::arg("ack") = py::none())
-        .def("on_sent", [](KissLink& l, const py::handle& burst) { l.on_sent(burst_cpp(burst)); })
+        .def("on_sent", [acks_py](const py::object& self, const py::handle& burst) {
+            return acks_py(self, self.cast<KissLink&>().on_sent(burst_cpp(burst)), false);  // take_acks still has them
+        })
         .def("missed", &KissLink::missed, py::arg("submode"), py::arg("n_cw"), py::arg("snr") = py::none())
         .def("next_burst", [](KissLink& l) { return burst_py(l.next_burst()); })
         .def("on_burst", [](KissLink& l, py::dict r, const py::object&) -> py::object {

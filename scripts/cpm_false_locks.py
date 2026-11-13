@@ -10,6 +10,7 @@ for the length it claims.
 
 `--master`: a reference cpm.py (git show origin/master:data2g/cpm.py >
 data2g/_cpm_master.py, not committed) in place of this branch's, for the A/B.
+`--coherent`: cpm_floor_study.coherent_lock (coherent header read, COH_LOCK).
 
 Found (2026-10-26, 8 h a source and grid, branch / master): noise 0 / 0,
 OFDM 0 / 0, other grids 0 / 2, own grid 4 / 25.
@@ -37,7 +38,11 @@ FEED = FS // 10
 
 
 def job(args):
-    grid, source, seed, master = args
+    grid, source, seed, master, coherent = args
+    if coherent:  # cpm_floor_study's coherent header lock (its COH_LOCK gates)
+        from cpm_floor_study import coherent_lock
+
+        coherent_lock(grid, either=coherent == "either").__enter__()
     if master:
         import data2g
         import data2g._cpm_master as old
@@ -99,8 +104,16 @@ def job(args):
                 continue
             h = e[1]
             # a lock on a real burst (its start within 2 symbols, its word) is no false lock
-            hits += not any(abs(h["start"] - s) <= 2 * T and h["spec"] == sp and h["n_data"] == nd and not h["dup"]
+            false = not any(abs(h["start"] - s) <= 2 * T and h["spec"] == sp and h["n_data"] == nd and not h["dup"]
                             for s, sp, nd in real)
+            hits += false
+            if false:  # what it was: the nearest real burst's offset (symbols) and word, the lock's
+                near = min(real, key=lambda q: abs(h["start"] - q[0]), default=None)
+                print(f"false lock {grid} {source} seed {seed}: start {h['start']} {h['spec'].name} n {h['n_data']} "
+                      f"dup {h['dup']} copies {h.get('copies')} score {h.get('header_score', 0):.1f} margin "
+                      f"{h.get('header_margin', 0):.1f}" + ("" if near is None else
+                      f"; nearest real {(h['start'] - near[0]) / T:+.1f} sym, {near[1].name} n {near[2]}"),
+                      flush=True)
     return grid, source, hits, time.process_time() - t
 
 
@@ -111,9 +124,11 @@ def main():
     ap.add_argument("--grids", nargs="+", default=["c16r25", "c8r50", "c32r62"])
     ap.add_argument("--master", action="store_true")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--coherent", nargs="?", const="coherent", choices=["coherent", "either"],
+                    help="cpm_floor_study.coherent_lock's header read and gates (either: either gate)")
     a = ap.parse_args()
     k = int(round(a.hours * 3600 / CHUNK_S))
-    jobs = [(g, a.source, i, a.master) for g in a.grids for i in range(k)]
+    jobs = [(g, a.source, i, a.master, a.coherent) for g in a.grids for i in range(k)]
     out = {}
     with Pool(a.jobs) as p:
         for g, s, h, cpu in p.imap_unordered(job, jobs):
@@ -121,7 +136,7 @@ def main():
             o[0] += h
             o[1] += cpu
     for g, (h, cpu) in out.items():
-        print(f"{'master' if a.master else 'branch'} {g} {a.source}: {h} false locks in {a.hours:.2f} h, "
+        print(f"{'master' if a.master else a.coherent or 'branch'} {g} {a.source}: {h} false locks in {a.hours:.2f} h, "
               f"{h / a.hours:.2f}/h; CPU {100 * cpu / (a.hours * 3600):.2f}% of a core")
 
 

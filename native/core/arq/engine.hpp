@@ -32,6 +32,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,9 +69,26 @@ inline constexpr double ENERGY_FLOOR_DB = 3.0;  // a measured burst's energy: at
 // after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 inline constexpr double ID_INTERVAL_S = 600.0;
 inline constexpr double ID_GUARD_S = REPLY_START_S;
+// Hand refs and rounds (docs/arq.md §9): heard bursts kept addressable, and
+// how long an armed HAND LISTEN waits for the burst that anchors its window.
+inline constexpr std::size_t HAND_REFS_KEPT = 64;
+inline constexpr double HAND_ARM_EXPIRE_S = 30.0;
+// the smallest HAND LISTEN d: the window's head is uncollectable below hand::SEARCH_S,
+// since rx is off until the anchor burst ends
+inline constexpr double HAND_MIN_D_S = 1.0;
+// CwSense is ignored while a Hand window is open and this long after: a Hand's steady tone near
+// 1500 Hz can read as a CW ID at its edges (CwSense's 1 s history)
+inline constexpr double HAND_CW_TAIL_S = 1.0;
+// A KISS ACKMODE ack's tag (engine.py's ack_tag): the app's ids carry it in their low 16 bits,
+// big-endian. HAND LISTEN names its anchor burst by it.
+inline int ack_tag(std::int64_t ack) { return static_cast<int>(ack & 0xFFFF); }
 // CW ID (docs/arq.md §7b; engine.py CW_ID_MODES): Engine::cw_id "off" (ID frames only), "add" (a CW ID with
-// each), "only" (a CW ID in their place); outside a session, a CW ID once quiet CW_QUIET_S after transmitting
-inline constexpr double CW_QUIET_S = 30.0;
+// each), "only" (a CW ID in their place); a transmission no CW ID covers plans one CW_PLAN_S after it, or after
+// the last CW ID when that came under CW_GAP_S before it; it goes at the next chance, held by BUSY until
+// CW_FORCE_S past the plan's start
+inline constexpr double CW_PLAN_S = 540.0;
+inline constexpr double CW_GAP_S = 300.0;
+inline constexpr double CW_FORCE_S = 600.0;
 
 // engine.Recorder (--record-dir), in the same formats: events.jsonl (one
 // JSON object per line, as json.dumps writes it), rx_NNNNN.npz per burst
@@ -81,7 +99,10 @@ inline constexpr double CW_QUIET_S = 30.0;
 // engine; flush() waits until everything handed over is on disk. Without it each call writes before it returns.
 class Recorder {
 public:
-    Recorder(const std::string& dir, const std::string& call, bool async = false);  // throws std::runtime_error
+    // `t0`: the engine time its audio starts at (a recording turned on mid-run); its events' times are from there,
+    // so a time is still its audio's offset. Throws std::runtime_error.
+    Recorder(const std::string& dir, const std::string& call, bool async = false, double t0 = 0.0);
+    double t(double engine_t) const { return engine_t - t0_; }  // an event's time
     ~Recorder();
     Recorder(const Recorder&) = delete;
     Recorder& operator=(const Recorder&) = delete;
@@ -97,6 +118,7 @@ private:
     void loop();
 
     std::string dir_;
+    double t0_;
     std::ofstream log_, audio_;
     int n_ = 0;
     bool async_;
@@ -198,6 +220,9 @@ public:
     // subclass overriding a seam calls it from its own destructor, before
     // its part is gone.
     void stop();
+    // Session stage: record to `dir` from the next block on (a new Recorder, the old one closed); empty: stop.
+    // Throws std::runtime_error (can't record there), recording then off.
+    void set_record_dir(const std::string& dir);
     void flush_recorder() {
         if (rec_) rec_->flush();
     }
@@ -222,6 +247,10 @@ public:
     // Every burst we transmit (ARQ, ID, KISS), on the session stage as it is keyed, in the order sent:
     // a monitor's view of our own side. Set it before the first step().
     void set_on_send(std::function<void(const TxBurstPtr&)> f) { on_send_ = std::move(f); }
+    // Every burst heard, once its session stage is done with it: its decoder, handed over (ModemRx::for_reader:
+    // what was read stays read) for a monitor to read on its own thread; nullptr if lost. `b` is on_burst's
+    // without the burst itself (heard, soft): the decoder holds those. Set it before the first step().
+    void set_on_read(std::function<void(const BurstHeard& b, std::shared_ptr<ModemRx> rx)> f) { on_read_ = std::move(f); }
     // After a heard (not lost) burst's on_burst, once it has been read: its slots decoded, and tried but not.
     void set_on_decoded(std::function<void(int decoded, int failed)> f) { on_decoded_ = std::move(f); }
     // Called on the receiving thread (step's) as a burst arrives, while set_preview(true): a few
@@ -260,17 +289,46 @@ public:
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
-    std::string cw_id = "off";  // "off", "add", "only" (CW_QUIET_S)
+    std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
+    std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
     std::optional<double> next_event() { return session_->next_event(); }
     const std::optional<Tx>& tx() const { return tx_; }
     // The burst on air's submode (the session's, when an ID rides with it); nullptr: nothing on air.
     const std::string* tx_submode() const { return tx_ ? &tx_->burst->submode : nullptr; }
     std::int64_t ptt_delay() const { return ptt_delay_; }  // samples of silence before each burst's audio
+    // Session stage, from the next burst keyed: EngineConfig's ptt_delay_s.
+    void set_ptt_delay(double s) { ptt_delay_ = static_cast<std::int64_t>(s * config::FS); }
+    // Session stage, from the next session on: EngineConfig's noise_rule.
+    void set_noise_rule(double w) { cfg_.noise_rule = w; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
     // (port, frame)s heard for KISS clients since the last call
     std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
+
+    // -- Hand bursts (the D2G net's show of hands: hand/hand.hpp, docs/arq.md §9), session stage.
+    // hand_send: a Hand `d_s` after heard burst `ref` ends, shifted by its cfo. hand_listen: a window
+    // d_s after the burst carrying the KISS frame acked with ACKMODE tag `ack` ends (ack_tag). Both
+    // throw std::invalid_argument on bad input (engine.py's ValueError).
+    void hand_send(int ref, int tag, double d_s, int channel, std::uint64_t payload);
+    void hand_listen(double d_s, int tag, int ack, const std::vector<int>& channels);
+    // Stop a waiting Hand and an armed or open window (a gone client's must not hold the radio):
+    // a window that existed ends with HAND END. Never throws (engine.py's hand_cancel).
+    void hand_cancel();
+    // engine.py's tests poke the Python engine's own state -- hand_refs (a Host
+    // that answers a REF it made up), a bare burst on air to anchor a window,
+    // and _tx_kiss. The --native run of those tests reaches the same state here
+    // (tests/native_subs/engine.py maps the attributes onto these).
+    std::vector<std::tuple<int, double, double, double>> hand_refs() const;  // id, end s, cfo Hz, snr dB
+    std::vector<std::pair<int, std::int64_t>> test_acks;  // (port, ack) the burst on air carries (engine.py's _test_acks)
+    void hand_ref_set(int id, double end_s, double cfo, double snr);
+    void test_tx(const std::string& submode, std::vector<double> audio);
+    std::optional<std::pair<std::int64_t, int>> hand_tx() const;  // a waiting Hand: (first sample, channel)
+    bool tx_kiss() const { return tx_kiss_; }
+    double cw_until() const { return cw_until_; }  // engine.py's _cw_until
+    void set_tx_kiss(bool k) { tx_kiss_ = k; }
+    // REF and HAND lines since the last call (any thread: a round's lines come from its decoder thread).
+    std::vector<std::string> take_hand_events();
     const modem::Accept& accept() const { return accept_; }
     SoftStore& store() { return store_; }
     const EngineConfig& config() const { return cfg_; }
@@ -317,7 +375,9 @@ private:
     std::vector<TxBurstPtr> ids(const Session& s, bool ahead) const;  // its ID as cw_id has it
     TxBurstPtr cw_burst(const std::string& call) const;
     std::vector<TxBurstPtr> cw_ahead(std::vector<TxBurstPtr> bursts, double t) const;  // outside a session
-    bool cw_due(double t) const;  // the CW ID after transmissions outside a session
+    bool cw_ready(double t) const;  // the planned CW ID is due
+    bool cw_due(double t, bool ok) const;  // ...alone, outside a session: `ok` (free, no BUSY), or CW_FORCE_S
+    void cw_plan(const std::vector<TxBurstPtr>& bursts, const std::vector<std::size_t>& lens, double t);
     void cw_hold(double t);       // a CW ID heard: what follows it on the same PTT is the peer's
     // Bursts back to back on one PTT; `main` is the one the session is told has gone.
     void start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxBurstPtr& main);
@@ -335,7 +395,7 @@ private:
     modem::Accept accept_;
     receiver::Receiver receiver_;
     receiver::NoiseProfile noise_;  // the passband's noise between bursts (recorded with each burst heard)
-    std::int64_t ptt_delay_;
+    std::atomic<std::int64_t> ptt_delay_;  // set_ptt_delay on the session stage; read on both
     std::optional<Recorder> rec_;
     std::int64_t n_ = 0;
     std::optional<Tx> tx_;
@@ -358,7 +418,8 @@ private:
     cwid::CwSense cw_;  // the receiver stage's
     bool cw_heard_ = false;  // the last block's (logged once per ID)
     double cw_until_ = 0.0;  // nothing outside a session goes before this: ID_GUARD_S past a CW ID heard
-    std::optional<double> cw_owed_;  // the first transmission no CW ID has covered yet
+    std::optional<double> cw_at_;  // the planned CW ID (CW_PLAN_S)
+    std::optional<double> cw_last_;  // my last CW ID's start
     // the energy inputs (engine.py _energy, _missed_energy)
     struct Span {
         double start, end;
@@ -390,6 +451,7 @@ private:
     std::function<void(bool)> after_block_;
     std::function<void(const BurstHeard&)> on_burst_;
     std::function<void(const TxBurstPtr&)> on_send_;
+    std::function<void(const BurstHeard&, std::shared_ptr<ModemRx>)> on_read_;
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
     std::atomic<bool> preview_on_{false};
@@ -418,6 +480,35 @@ private:
     int slow_ = 0;  // blocks with a burst queued or in the session stage
     bool stop_ = false;
     std::thread worker_;
+
+    // Hand bursts (engine.py's _hand_*)
+    struct HandRef {
+        double end, cfo, snr;
+    };
+    std::map<int, HandRef> hand_refs_;  // the last HAND_REFS_KEPT heard bursts, by id
+    int hand_ref_n_ = 0;
+    struct HandTx {
+        std::int64_t first;  // its first sample (the PTT delay's included)
+        std::vector<double> audio;
+        int channel;
+    };
+    std::optional<HandTx> hand_tx_;
+    struct HandListen {
+        std::int64_t d;
+        int tag, ack;
+        std::vector<int> channels;
+        std::int64_t armed;
+        bool open = false;
+        std::vector<double> buf;
+        std::int64_t first = 0, next = 0, lo = 0, hi = 0, anchor = 0;  // next: the sample after buf's last
+    };
+    std::optional<HandListen> hand_listen_;
+    double hand_hold_ = 0.0;  // no CQ/broadcast/CW starts before this (an open window)
+    std::mutex hand_mu_;
+    std::vector<std::string> hand_out_;  // under hand_mu_
+    std::thread hand_thread_;            // the last round's decoder; joined before the next and in stop()
+    void hand_event(std::string line);
+    void hand_collect(std::span<const double> x);
 };
 
 }  // namespace data2g::arq

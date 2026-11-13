@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <random>
+#include <string>
+#include <tuple>
 
 #include "arq/phy.hpp"
 #include "check.hpp"
@@ -101,7 +103,8 @@ int main() {
     std::vector<Bytes> pl;
     for (unsigned i = 0; i < 3; ++i) pl.push_back(payload(spec.payload_bytes, i));
     auto burst = [&](int rv) {
-        TxBurst b{name, {}, 0};
+        TxBurst b;
+        b.submode = name;
         for (int i = 0; i < 3; ++i) b.slots.push_back({{7, 0, i}, rv, pl[static_cast<std::size_t>(i)]});
         return b;
     };
@@ -213,6 +216,53 @@ int main() {
         check::is_true(a.queue.empty() && a.n_sent == 2, "queue drained");
         a.command(3, Bytes{200});
         check::is_true(a.slot_s == 2.0, "SLOTTIME");
+    }
+
+    // A CPM burst streamed (cpm::Stream: the receiver's buffer at the lock, then uneven chunks) is bitwise the
+    // burst received whole, its passes those ModemRx makes in slot order, and its decodes the same.
+    for (auto [name, n_data, sigma] : {std::tuple{"fsk16r25-r1/3", 2, 7.5}, std::tuple{"fsk32r62-r1/3", 7, 3.3}}) {
+        check::current_step = name;  // the CPM stream test's mode
+        const cpm::Spec& cs = *cpm::spec(name);
+        const cpm::Grid& g = cpm::grid_of(cs);
+        TxBurst b;
+        b.submode = name;
+        b.slots.push_back({ctl_mask(0, 0, 3), 0, payload(codes::spec(cpm::ctl(g)).payload_bytes, 9)});
+        for (int i = 1; i <= n_data; ++i)
+            b.slots.push_back({data_mask(0, i, 3), 0, payload(codes::spec(cs).payload_bytes, static_cast<unsigned>(i))});
+        const auto y = on_air(tx_audio(b), sigma, 4);
+        const auto lock = cpm::find(g, y);
+        check::is_true(lock && lock->n_data == n_data, "locked");
+        if (!lock) continue;
+        const cpm::Received whole = cpm::receive(y, *lock);
+        const std::size_t at = static_cast<std::size_t>(lock->start) + 3 * g.T;
+        cpm::Stream st(std::vector<double>(y.begin(), y.begin() + static_cast<std::ptrdiff_t>(at)), *lock, cpm_pass_fn());
+        std::size_t i = at, k = 0;
+        const std::size_t steps[] = {777, 3001, 50, 1600, 12345};
+        while (i < y.size()) {
+            const std::size_t n = std::min(steps[k++ % 5], y.size() - i);
+            st.feed(std::span<const double>(y).subspan(i, n));
+            i += n;
+        }
+        const int early = st.passes_made();
+        const cpm::Received got = st.finish();
+        check::is_true(early >= n_data - 1, "passes made before the end: " + std::to_string(early));
+        check::is_true(got.soft == whole.soft && got.E.data == whole.E.data && got.Z.data == whole.Z.data, "bitwise");
+        cpm::Posts earlier;
+        for (const auto& [slot, p] : got.passes) {
+            const cpm::Pass want = cpm_pass(whole, codes::spec(cs), whole.soft[static_cast<std::size_t>(slot)], earlier, slot);
+            check::is_true(p.cands == want.cands && p.usable == want.usable && p.post == want.post,
+                           "pass " + std::to_string(slot));
+            if (!want.post.empty()) earlier[slot] = want.post;
+        }
+        ModemRx a(Heard{nullptr, std::make_shared<const cpm::Received>(whole)});
+        ModemRx s(Heard{nullptr, std::make_shared<const cpm::Received>(got)});
+        int ok = 0;
+        for (int j = 1; j <= n_data; ++j) {
+            const auto da = a.decode_plain(j, data_mask(0, j, 3)), ds = s.decode_plain(j, data_mask(0, j, 3));
+            check::is_true(da == ds, "slot " + std::to_string(j) + " decodes alike");
+            ok += da.has_value();
+        }
+        check::is_true(ok > 0, "some data decoded: " + std::to_string(ok));
     }
 
     return check::report("test_arq_phy");

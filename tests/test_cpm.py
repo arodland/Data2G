@@ -138,11 +138,13 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
     assert cpm.find(g, x) is None
 
 
-def test_cpm_control_padding_is_known_when_it_fails():
+def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
     """CPM's control is a polar codeword: its payload enters the code
     reversed (codes.polar_order), so a short control's padding sits on the
     weakest positions. At -11 dB these draws fail plain and decode with the
-    padding known (phy.POLAR_PIN_CUTS)."""
+    padding known (phy.POLAR_PIN_CUTS). Square-law control soft bits
+    (cpm.COH_CTL off): the coherent ones decode these draws plain."""
+    monkeypatch.setattr(cpm, "COH_CTL", False)
     from data2g import hfchannel
     from data2g.arq import frames as F
     from data2g.arq import phy as PHY

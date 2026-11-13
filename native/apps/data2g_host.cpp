@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QTimer>
 
+#include <clocale>
 #include <cstdio>
 #include <utility>
 
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
     install_arq_log();
 
     QCoreApplication app(argc, argv);
+    std::setlocale(LC_NUMERIC, "C");  // Qt set it from the environment; the protocol's numbers use "." (#164)
     if (a.list_audio_devices) {
 #ifdef DATA2G_HAVE_AUDIO
         for (const auto& [what, devs] : {std::pair{"input", audio::card::input_devices()}, {"output", audio::card::output_devices()}}) {

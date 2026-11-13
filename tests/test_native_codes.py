@@ -140,12 +140,14 @@ def test_decode(native, py, spec):
               py.decode_buffer(spec, pbuf, top, masks, index=codes.PLAIN))
 
 
-LDPC = [s for s in SPECS if s.code == "ldpc"]
+LDPC = [s for s in SPECS if s.code in ("ldpc", "gf")]
 
 
 @pytest.mark.parametrize("spec", LDPC, ids=[s.name for s in LDPC])
 def test_decode_posterior(native, py, spec):
-    """DD's decode (arq/phy.py): a slot alone, and a combined buffer."""
+    """DD's decode (arq/phy.py): a slot alone, and a combined buffer. GF(M)
+    (CPM's coherent DD): per symbol log-probabilities, max 0, compared by
+    their decisions (native floors them at log 1e-20, numpy doesn't)."""
     n = native.codes
     rng = np.random.default_rng(spec.k + 5)
     for top in range(5):
@@ -153,18 +155,25 @@ def test_decode_posterior(native, py, spec):
     pls = _payloads(spec, rng, 2)
     soft = _noisy(spec, np.stack([py.encode(spec, p, 0, 0, i) for i, p in enumerate(pls)]), rng, [0.6, 1.4])
     soft1 = _noisy(spec, np.stack([py.encode(spec, p, 1, 0, i) for i, p in enumerate(pls)]), rng, [0.6, 1.4])
+    gf = spec.code == "gf"
 
     def same(got, want):
         assert got[1] == want[1]
-        assert got[2].shape == want[2].shape == (spec.coded_bits,)
+        assert got[2].shape == want[2].shape == (codes.soft_len(spec),)
         if want[1]:
             np.testing.assert_array_equal(got[0], want[0])
-            np.testing.assert_array_equal(np.sign(got[2]), np.sign(want[2]))
+            if gf:
+                q = 1 << spec.bits_per_cu
+                g, w = got[2].reshape(-1, q), want[2].reshape(-1, q)
+                np.testing.assert_array_equal(g.argmax(1), w.argmax(1))
+                np.testing.assert_allclose(g.max(1), 0.0, atol=1e-6)
+            else:
+                np.testing.assert_array_equal(np.sign(got[2]), np.sign(want[2]))
 
     for b in range(2):
         same(n.decode_posterior(spec.name, soft[b]), py.decode_posterior(spec, soft[b]))
-        buf = py.combine(spec, None, py.flip(spec, b, 0) * soft[b], 0)
-        buf = py.combine(spec, buf, py.flip(spec, b, 1) * soft1[b], 1)
+        buf = py.combine(spec, None, py.plain(spec, soft[b], b, 0), 0)
+        buf = py.combine(spec, buf, py.plain(spec, soft1[b], b, 1), 1)
         same(n.decode_posterior(spec.name, buf=buf, max_rv=1, rv=1), py.decode_posterior(spec, buf=buf, max_rv=1, rv=1))
 
 

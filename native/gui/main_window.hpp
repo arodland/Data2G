@@ -9,8 +9,8 @@
 // Monitor (a check box) decodes every burst heard and sent as a packet dump,
 // into the monitor window's log whether it is open or not; Monitor... opens
 // that window (and turns monitoring on).
-// Settings... opens the dialog; OK saves to QSettings and, when anything
-// changed, restarts the station.
+// Settings... opens the dialog; OK saves to QSettings and applies them:
+// live where the station can (app::LIVE_SETTINGS), else by a restart.
 // Menus: File > Settings... (the same dialog) and Exit, Help > About.
 #pragma once
 
@@ -45,6 +45,7 @@ public:
 
     // Stops the station and starts one with `a`; a failure is shown, not thrown.
     void restart(const app::Args& a);
+    void apply_settings(const app::Args& a);  // Station::update, or restart() when it can't
     const app::Station& station() const { return *station_; }
 
 public Q_SLOTS:

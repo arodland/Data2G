@@ -150,8 +150,15 @@ bool CwSense::feed(std::span<const double> x) {
             for (int v : hist_) s += v > 0 && std::abs(v - u) <= 1;
             steady = std::max(steady, s);
         }
+        int runs = 0, run = 0, longest = 0;  // keyed: runs of hits
+        for (int v : hist_) {
+            run = v > 0 ? run + 1 : 0;
+            runs += run == 1;
+            longest = std::max(longest, run);
+        }
         const auto n = [&](int v) { return std::count(hist_.begin(), hist_.end(), v); };
-        active_ = hits >= MIN_HITS && steady >= hits - 1 && n(0) >= MIN_QUIET && n(-1) <= MAX_ELSEWHERE;
+        active_ = hits >= MIN_HITS && steady >= hits - 1 && n(0) >= MIN_QUIET && n(-1) <= MAX_ELSEWHERE &&
+                  runs >= MIN_RUNS && longest <= MAX_RUN;
         if (c > 0 && active_) {
             hits_.push_back(n_);
             if (hits_.size() > HITS_FROM) hits_.pop_front();

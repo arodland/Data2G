@@ -2,9 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 
-#include "dsp/fft.hpp"
+#include "app/rx_plot.hpp"
 
 namespace data2g::app::spectrum {
 
@@ -53,20 +52,6 @@ const std::array<Rgb, 256>& tx_colormap() {
 
 }  // namespace
 
-std::vector<double> spectrum_db(const std::vector<double>& block) {
-    static const std::vector<double> window = [] {
-        std::vector<double> w(NFFT);
-        for (int i = 0; i < NFFT; ++i) w[i] = 0.5 - 0.5 * std::cos(2.0 * std::numbers::pi * i / (NFFT - 1));
-        return w;
-    }();
-    std::vector<dsp::cdouble> buf(NFFT);
-    for (int i = 0; i < NFFT; ++i) buf[i] = block[i] * window[i];
-    const auto spec = dsp::fft(buf, true);
-    std::vector<double> out(BINS);
-    for (int i = 0; i < BINS; ++i) out[i] = 20.0 * std::log10(std::abs(spec[i]) / NFFT + 1e-12);
-    return out;
-}
-
 std::vector<double> reduce_to_width(const std::vector<double>& v, int width) {
     const int n = static_cast<int>(v.size());
     if (width <= 0 || n == 0) return {};
@@ -91,7 +76,7 @@ std::vector<double> reduce_to_width(const std::vector<double>& v, int width) {
 std::vector<Rgb> rgb_row(const std::vector<double>& block, bool tx, int width) {
     if (block.size() < static_cast<std::size_t>(NFFT)) return {};
     const std::vector<double> newest(block.end() - NFFT, block.end());
-    const std::vector<double> db = reduce_to_width(spectrum_db(newest), width);
+    const std::vector<double> db = reduce_to_width(app::spectrum_db(newest), width);
     const auto& lut = tx ? tx_colormap() : colormap();
     const double floor = tx ? TX_DB_FLOOR : DB_FLOOR, ceil = tx ? TX_DB_CEIL : DB_CEIL;
     std::vector<Rgb> out(db.size());

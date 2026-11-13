@@ -23,7 +23,7 @@ MAX_CTL = 4  # control codewords a burst may have: the core's 2-bit n_ctl
 # RV 1 (the receiver combines the pair if the first fails); the peer asks
 # for it with T_DUPCTL when it predicts this burst's control is at risk
 ARQ, SESSION, PROBE, ARQ_DUP = 0, 1, 2, 3
-# extension types
+# extension types (T_RESYNC: deprecated, sent with a resync's abandon and never read; docs/arq.md §10)
 T_PAD, T_NEW, T_ABANDON, T_RV, T_BITMAP, T_RESYNC, T_REPORT, T_SURVEY, T_SOUND, T_BUFFER = range(10)
 T_SESS = 10  # a session frame's body (data2g.arq.session)
 T_REPLY = 11  # recommended submode for the peer's control-only bursts

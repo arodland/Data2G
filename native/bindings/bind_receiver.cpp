@@ -45,6 +45,7 @@ py::dict cpm_lock_dict(const cpm::Lock& l) {
     d["header_margin"] = l.header_margin;
     d["end"] = l.end;
     d["header_end"] = l.header_end;
+    d["copies"] = l.copies;
     d["band"] = std::string(l.spec->grid);
     d["family"] = "cpm";
     d["n_cw"] = 1 + l.dup + l.n_data;
@@ -67,6 +68,7 @@ py::dict rx_dict(const receiver::Rx& rx) {
     for (const auto& s : r.soft) soft.append(np(s));
     d["soft"] = soft;
     d["E"] = np(r.E);
+    d["Z"] = np(r.Z);
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;
@@ -148,6 +150,7 @@ void bind_receiver(py::module_& m) {
                           double cfo) { r.expect(grid_views(grids), lo, hi, cfo); })
         .def_property_readonly("n_expected", &receiver::Receiver::n_expected)
         .def("drop", &receiver::Receiver::drop)
+        .def_readwrite("release_s", &receiver::Receiver::release_s)
         .def_property_readonly("busy", &receiver::Receiver::busy)
         .def_property_readonly("channel_busy", &receiver::Receiver::channel_busy)
         .def_property_readonly("on_air", &receiver::Receiver::on_air)

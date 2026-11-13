@@ -54,7 +54,7 @@ std::string group_name(const std::string& group);  // as it reads back from the 
 int group_key(const std::string& group);           // nonzero 16-bit FNV-1a of the packed name
 Bytes pack_pair(const std::string& group, const std::string& call);  // T_GROUP_FROM, 15 bytes
 std::pair<std::string, std::string> unpack_pair(ByteView b);
-std::map<int, Bytes> parse_tlvs(ByteView b);  // up to a zero type (padding)
+std::map<int, Bytes> parse_tlvs(ByteView b, bool partial = false);  // up to a zero type (padding); partial: the whole ones before a truncated one
 struct ControlRead {
     std::string group;
     std::optional<std::string> call;   // T_GROUP_FROM's sender
@@ -122,7 +122,10 @@ public:
     std::vector<std::string> events;                 // statuses for the host, oldest first
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ack) of frames that went out
 
-    void command(int cmd, ByteView payload);  // KISS P and SLOTTIME; the rest ignored
+    // KISS P, SLOTTIME, and SETHARDWARE "MODE [AUTO] [DUP] mode" (set_mode on
+    // `port`; bad ones logged); the rest ignored.
+    void command(int cmd, ByteView payload, int port = 0);
+    static constexpr int SETHARDWARE = 6;
     // Ports (the host's BCAST commands); each throws std::invalid_argument.
     int open(const std::string& group, const std::optional<std::string>& from_call = std::nullopt);
     void close(int n);  // frames queued for it are dropped (DROPPED)
@@ -134,7 +137,9 @@ public:
     void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt);
     std::vector<std::string> take_events();                  // the statuses since the last call
     std::vector<std::pair<int, std::int64_t>> take_acks();   // (port, ack) gone out since the last call
-    void on_sent(const arq::TxBurstPtr& burst);  // a burst finished transmitting: its acks are due
+    // A burst finished transmitting: its acks are due. -> those (port, ack), which the engine also
+    // reads (a HAND LISTEN's anchor).
+    std::vector<std::pair<int, std::int64_t>> on_sent(const arq::TxBurstPtr& burst);
     // BCAST * MISSED; snr: its in-band energy reading (snr_est's scale), if one was made
     void missed(const std::string& submode, int n_cw, std::optional<double> snr = std::nullopt);
     // The first queued frame's port and mode, with every queued frame of that

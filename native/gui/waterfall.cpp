@@ -26,10 +26,12 @@ const QColor OK(60, 180, 75), CAUTION(230, 160, 30), DANGER(240, 60, 60);
 Waterfall::Waterfall(QWidget* parent, int fps) : QWidget(parent) {
     setMinimumSize(160, 90);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    auto* timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &Waterfall::tick);
-    timer->start(std::max(1, 1000 / std::max(1, fps)));
+    timer_ = new QTimer(this);
+    connect(timer_, &QTimer::timeout, this, &Waterfall::tick);
+    set_fps(fps);
 }
+
+void Waterfall::set_fps(int fps) { timer_->start(std::max(1, 1000 / std::max(1, fps))); }
 
 void Waterfall::ensure_image() {
     const qreal dpr = devicePixelRatioF();

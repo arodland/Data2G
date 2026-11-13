@@ -1,7 +1,8 @@
-#include "settings.hpp"
+#include "app/settings.hpp"
 
 #include <QSettings>
-#include <QString>
+
+#include <utility>
 
 #include "rig/config.hpp"
 
@@ -15,7 +16,7 @@ std::optional<std::string> opt(const QString& s) {
 QString qs(const std::optional<std::string>& s) { return QString::fromStdString(s.value_or("")); }
 QString qs(const std::string& s) { return QString::fromStdString(s); }
 
-// The string-valued rig options; the QSettings key is the Args field's name.
+// The string-valued rig options; the key is the Args field's name.
 // (A named member-pointer type: MSVC can't parse one spelled inside pair<>.)
 using StringField = std::string Args::*;
 struct RigString {
@@ -31,81 +32,111 @@ const RigString RIG_STRINGS[] = {
     {"rig_mode", &Args::rig_mode},
 };
 
+// Keys older versions saved: read once, dropped on save.
+const char* const OLD_KEYS[] = {"host", "kiss_address", "rigctld_host", "rigctld_port"};
+
 }  // namespace
 
-Args load_settings(QSettings& s, Args a) {
-    const auto str = [&](const char* k, const std::string& d) { return s.value(k, qs(d)).toString().toStdString(); };
-    if (s.contains("mycall")) a.mycall = opt(s.value("mycall").toString());
-    if (s.contains("input_device")) a.input_device = opt(s.value("input_device").toString());
-    if (s.contains("output_device")) a.output_device = opt(s.value("output_device").toString());
-    if (s.contains("broadcast_mode")) a.broadcast_mode = opt(s.value("broadcast_mode").toString());
-    a.tci = s.value("tci", a.tci).toBool();
+std::unique_ptr<QSettings> settings_store() {
+    return std::make_unique<QSettings>(QStringLiteral("Data2G"), QStringLiteral("data2g-gui"));
+}
+
+QVariantMap settings_map(const Args& a) {
+    QVariantMap m;
+    m["mycall"] = qs(a.mycall);
+    m["input_device"] = qs(a.input_device);
+    m["output_device"] = qs(a.output_device);
+    m["broadcast_mode"] = qs(a.broadcast_mode);
+    m["tci"] = a.tci;
+    m["tci_host"] = qs(a.tci_host);
+    m["sample_rate"] = a.sample_rate;
+    m["output_volume"] = a.output_volume;
+    m["ptt_on_delay_ms"] = a.ptt_on_delay_ms;
+    m["ptt_off_delay_ms"] = a.ptt_off_delay_ms;
+    m["rig"] = a.rig;
+    m["rig_model"] = a.rig_model;
+    m["rig_baud"] = a.rig_baud;
+    for (const auto& [key, field] : RIG_STRINGS) m[key] = qs(a.*field);
+    m["rig_timeout_ms"] = a.rig_timeout_ms;
+    m["rig_retries"] = a.rig_retries;
+    m["rig_poll_interval"] = a.rig_poll_interval;
+    m["rig_debug"] = a.rig_debug;
+    m["listen"] = qs(a.listen);
+    m["command_port"] = a.command_port;
+    m["kiss_port"] = a.kiss_port;
+    m["record"] = a.record;
+    m["record_dir"] = qs(a.record_dir);
+    m["decode_worker"] = a.decode_worker;
+    m["live_constellation"] = a.live_constellation;
+    m["noise_rule"] = a.noise_rule;
+    m["decoder_effort"] = a.decoder_effort;
+    m["cw_id"] = qs(a.cw_id);
+    m["cw_wpm"] = a.cw_wpm;
+    return m;
+}
+
+Args from_settings(const QVariantMap& m, Args a) {
+    const auto str = [&](const char* k, const std::string& d) { return m.value(k, qs(d)).toString().toStdString(); };
+    if (m.contains("mycall")) a.mycall = opt(m.value("mycall").toString());
+    if (m.contains("input_device")) a.input_device = opt(m.value("input_device").toString());
+    if (m.contains("output_device")) a.output_device = opt(m.value("output_device").toString());
+    if (m.contains("broadcast_mode")) a.broadcast_mode = opt(m.value("broadcast_mode").toString());
+    a.tci = m.value("tci", a.tci).toBool();
     a.tci_host = str("tci_host", a.tci_host);
-    a.sample_rate = s.value("sample_rate", a.sample_rate).toInt();
-    a.output_volume = s.value("output_volume", a.output_volume).toDouble();
-    a.ptt_on_delay_ms = s.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
-    a.ptt_off_delay_ms = s.value("ptt_off_delay_ms", a.ptt_off_delay_ms).toInt();
-    a.rig = s.value("rig", a.rig).toBool();
-    a.rig_model = s.value("rig_model", a.rig_model).toInt();
-    a.rig_baud = s.value("rig_baud", a.rig_baud).toInt();
+    a.sample_rate = m.value("sample_rate", a.sample_rate).toInt();
+    a.output_volume = m.value("output_volume", a.output_volume).toDouble();
+    a.ptt_on_delay_ms = m.value("ptt_on_delay_ms", a.ptt_on_delay_ms).toInt();
+    a.ptt_off_delay_ms = m.value("ptt_off_delay_ms", a.ptt_off_delay_ms).toInt();
+    a.rig = m.value("rig", a.rig).toBool();
+    a.rig_model = m.value("rig_model", a.rig_model).toInt();
+    a.rig_baud = m.value("rig_baud", a.rig_baud).toInt();
     for (const auto& [key, field] : RIG_STRINGS) a.*field = str(key, a.*field);
-    a.rig_timeout_ms = s.value("rig_timeout_ms", a.rig_timeout_ms).toInt();
-    a.rig_retries = s.value("rig_retries", a.rig_retries).toInt();
-    a.rig_poll_interval = s.value("rig_poll_interval", a.rig_poll_interval).toDouble();
-    a.rig_debug = s.value("rig_debug", a.rig_debug).toBool();
+    a.rig_timeout_ms = m.value("rig_timeout_ms", a.rig_timeout_ms).toInt();
+    a.rig_retries = m.value("rig_retries", a.rig_retries).toInt();
+    a.rig_poll_interval = m.value("rig_poll_interval", a.rig_poll_interval).toDouble();
+    a.rig_debug = m.value("rig_debug", a.rig_debug).toBool();
     // Before --listen and model 2's empty device: "host", and rigctld's
     // address apart (port 0: no rig). Read once; save_settings drops them.
-    if (a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty() && s.contains("rigctld_port")) {
-        const int port = s.value("rigctld_port").toInt();
+    if (a.rig_model == rig::MODEL_NET_RIGCTL && a.rig_device.empty() && m.contains("rigctld_port")) {
+        const int port = m.value("rigctld_port").toInt();
         const std::string host = str("rigctld_host", "localhost");
         if (port == 0) a.rig = false;
         else if (host != "localhost" || port != 4532) a.rig_device = host + ":" + std::to_string(port);
     }
     a.listen = str("listen", str("host", a.listen));
-    a.command_port = s.value("command_port", a.command_port).toInt();
-    a.kiss_port = s.value("kiss_port", a.kiss_port).toInt();
-    a.record = s.value("record", a.record).toBool();
+    a.command_port = m.value("command_port", a.command_port).toInt();
+    a.kiss_port = m.value("kiss_port", a.kiss_port).toInt();
+    a.record = m.value("record", a.record).toBool();
     a.record_dir = str("record_dir", a.record_dir);
-    a.decode_worker = s.value("decode_worker", a.decode_worker).toBool();
-    a.live_constellation = s.value("live_constellation", a.live_constellation).toBool();
-    a.noise_rule = s.value("noise_rule", a.noise_rule).toDouble();
-    a.decoder_effort = s.value("decoder_effort", a.decoder_effort).toInt();
+    a.decode_worker = m.value("decode_worker", a.decode_worker).toBool();
+    a.live_constellation = m.value("live_constellation", a.live_constellation).toBool();
+    a.noise_rule = m.value("noise_rule", a.noise_rule).toDouble();
+    a.decoder_effort = m.value("decoder_effort", a.decoder_effort).toInt();
     a.cw_id = str("cw_id", a.cw_id);
-    a.cw_wpm = s.value("cw_wpm", a.cw_wpm).toDouble();
+    a.cw_wpm = m.value("cw_wpm", a.cw_wpm).toDouble();
     return a;
 }
 
+Args load_settings(QSettings& s, Args base) {
+    QVariantMap m;
+    for (const QString& k : s.allKeys()) m[k] = s.value(k);
+    return from_settings(m, std::move(base));
+}
+
+const QStringList LIVE_SETTINGS = {"mycall",          "output_volume",  "ptt_on_delay_ms", "ptt_off_delay_ms", "live_constellation",
+                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm",           "record",
+                                   "record_dir"};
+
+bool needs_restart(const Args& from, const Args& to) {
+    QVariantMap live = settings_map(from);
+    for (auto it = live.begin(); it != live.end();) it = LIVE_SETTINGS.contains(it.key()) ? std::next(it) : live.erase(it);
+    return from_settings(live, to) != from;  // `to` with from's live values: anything left differs
+}
+
 void save_settings(QSettings& s, const Args& a) {
-    s.setValue("mycall", qs(a.mycall));
-    s.setValue("input_device", qs(a.input_device));
-    s.setValue("output_device", qs(a.output_device));
-    s.setValue("broadcast_mode", qs(a.broadcast_mode));
-    s.setValue("tci", a.tci);
-    s.setValue("tci_host", qs(a.tci_host));
-    s.setValue("sample_rate", a.sample_rate);
-    s.setValue("output_volume", a.output_volume);
-    s.setValue("ptt_on_delay_ms", a.ptt_on_delay_ms);
-    s.setValue("ptt_off_delay_ms", a.ptt_off_delay_ms);
-    s.setValue("rig", a.rig);
-    s.setValue("rig_model", a.rig_model);
-    s.setValue("rig_baud", a.rig_baud);
-    for (const auto& [key, field] : RIG_STRINGS) s.setValue(key, qs(a.*field));
-    s.setValue("rig_timeout_ms", a.rig_timeout_ms);
-    s.setValue("rig_retries", a.rig_retries);
-    s.setValue("rig_poll_interval", a.rig_poll_interval);
-    s.setValue("rig_debug", a.rig_debug);
-    s.setValue("listen", qs(a.listen));
-    s.setValue("command_port", a.command_port);
-    s.setValue("kiss_port", a.kiss_port);
-    s.setValue("record", a.record);
-    s.setValue("record_dir", qs(a.record_dir));
-    for (const char* old : {"host", "kiss_address", "rigctld_host", "rigctld_port"}) s.remove(old);
-    s.setValue("decode_worker", a.decode_worker);
-    s.setValue("live_constellation", a.live_constellation);
-    s.setValue("noise_rule", a.noise_rule);
-    s.setValue("decoder_effort", a.decoder_effort);
-    s.setValue("cw_id", qs(a.cw_id));
-    s.setValue("cw_wpm", a.cw_wpm);
+    const QVariantMap m = settings_map(a);
+    for (auto it = m.begin(); it != m.end(); ++it) s.setValue(it.key(), it.value());
+    for (const char* old : OLD_KEYS) s.remove(old);
 }
 
 }  // namespace data2g::app

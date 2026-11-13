@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from data2g import codes, hfchannel, modem
-from data2g.config import BANDS, SUBMODES
+from data2g.config import BANDS, FS, SUBMODES
 
 
 def _payloads(spec, n, seed):
@@ -172,6 +172,34 @@ def test_no_burst_from_a_tone():
                 modem.demodulate(y)
 
 
+@pytest.mark.parametrize("band", ["w", "w48", "n10", "n4"])
+def test_a_steady_tone_does_not_read_as_pilots(band):
+    """A steady narrowband signal repeats from frame to frame, so the
+    coherence alone read it as a burst's frame pilots (a tone's leakage turns
+    by one phase in every carrier). The pattern (the pilot divided out,
+    adjacent carriers agree) is what a tone lacks: on a real burst's frame
+    grid, the burst's own pilots pass both checks and a strong tone or
+    Hand-like 8-FSK at 1530 Hz doesn't (scripts/pilot_metric_study.py)."""
+    from data2g import cpm
+    from data2g.arq.policy import slots_for
+
+    s = SUBMODES[{"w": "qpsk-r1/2", "w48": "w48-qpsk-r1/2", "n10": "n10-qpsk-r1/2", "n4": "n4-qpsk-r1/3"}[band]]
+    rng = np.random.default_rng(3)
+    x = modem.modulate([rng.bytes(codes.payload_bytes(s)) for _ in range(slots_for(s, 6.0))], s)
+    y = np.concatenate([np.zeros(FS), x, np.zeros(FS)])
+    lock = modem.find_burst(y, [s.sync_band])
+
+    def passes(sig):
+        c, pat = modem.pilot_coherence(sig, lock, modem.PILOT_PAIRS, latest=True, pattern=True)
+        return np.mean(c) > modem.PILOT_NOISE[band] and pat > modem.PILOT_PATTERN[band]
+
+    assert passes(hfchannel.awgn(y, 10, seed=1))
+    t = np.arange(len(y)) / FS
+    hand = cpm.tones(cpm.Grid("hand1530", 8, 6.25, center=1530.0), rng.integers(0, 8, 66))
+    for sig in (np.sin(2 * np.pi * 1530.0 * t), np.pad(hand, (0, len(y)))[:len(y)]):
+        assert not passes(hfchannel.awgn(sig, 20, seed=2, s_power=hfchannel.active_power(sig)))
+
+
 @pytest.mark.parametrize("sub,n_cw", [("ack-1f", 1), ("qpsk-r1/5", 1), ("w48-qpsk-r1/5", 2)])
 def test_header_copy_rescues_a_lost_first_copy(sub, n_cw):
     """The 4-symbol headers (w, w48) carry a second copy in a frame of its
@@ -193,3 +221,16 @@ def test_header_copy_rescues_a_lost_first_copy(sub, n_cw):
 def test_valid_signs_are_the_valid_rows_of_the_full_table():
     for band in modem.SYNC_BANDS:
         assert np.array_equal(modem._valid_signs(band), modem._header_signs(band)[modem._valid_words(band)])
+
+
+def test_a_narrower_bands_burst_is_no_copy_lock():
+    """find_copy asked only that a lock's frame pilots be coherent. An n10
+    burst's pilots are (same frame grid, a tenth of the carriers), and its
+    data read as a wide-band header copy over the floor: a 16qam-r1/3 x63
+    lock holding BUSY for a minute. The pilot's pattern is not there
+    (COPY_PATTERN)."""
+    s = SUBMODES["n10-qpsk-r1/2"]
+    rng = np.random.default_rng(4)
+    x = modem.modulate([rng.bytes(codes.payload_bytes(s)) for _ in range(6)], s)
+    y = hfchannel.awgn(np.pad(x, (FS // 2, FS)), 10, seed=4, s_power=hfchannel.active_power(x))
+    assert modem.find_copy(y, "w") is None

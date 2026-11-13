@@ -141,8 +141,8 @@ def substitutions(native):
         return specs(N.find_burst(f64(x), bands_arg(bands), accept, stats))
 
     @guarded("pilot_coherence", lambda x, lock, *a, **k: lock_ok(lock))
-    def pilot_coherence(x, lock, n_max=8, latest=False):
-        return N.pilot_coherence(f64(x), lock, int(n_max), bool(latest))
+    def pilot_coherence(x, lock, n_max=8, latest=False, pattern=False):
+        return N.pilot_coherence(f64(x), lock, int(n_max), bool(latest), bool(pattern))
 
     @guarded("find_copy")
     def find_copy(x, band, accept=None, C=None, level=None):

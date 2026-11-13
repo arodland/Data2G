@@ -202,6 +202,7 @@ class StationView(NamedTuple):
     misses: int = 0
     esc_floor: int = 0
     timeouts: int = 0  # stats["timeouts"] (link_features: Python only)
+    last_rx_data: bool = True  # the peer's last burst carried data (expected_reply)
 
 
 def view(station) -> StationView:
@@ -214,7 +215,7 @@ def view(station) -> StationView:
         return StationView(station.cap, station.tx.pending(), station.peer_recommend, station.peer_reply_recommend,
                            station.peer_size_hint, station.peer_wants_dup, bool(station.chat or station.peer_chat),
                            station.peer_queued, len(station.rx.buf), station.misses, station.esc_floor,
-                           station.stats.get("timeouts", 0))
+                           station.stats.get("timeouts", 0), station.last_rx_data)
     except AttributeError:
         pass
 
@@ -227,7 +228,7 @@ def view(station) -> StationView:
                        peer_size_hint=g("peer_size_hint", 1), peer_wants_dup=g("peer_wants_dup", False),
                        chat=bool(g("chat", False) or g("peer_chat", False)), peer_queued=g("peer_queued", 0),
                        held=len(rx.buf) if rx is not None else 0, misses=g("misses", 0), esc_floor=g("esc_floor", 0),
-                       timeouts=g("stats", {}).get("timeouts", 0))
+                       timeouts=g("stats", {}).get("timeouts", 0), last_rx_data=g("last_rx_data", True))
 
 
 @dataclass
@@ -259,6 +260,10 @@ class GearShifter(L.Policy):
     snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
     predicted: dict = field(default_factory=dict)  # submode -> the P I last predicted for it
+    # whether the peer's next burst should carry data (expected_reply): as its
+    # last one did, set at each recommendation. It was never set, so a peer
+    # with nothing to send (the IRS of a one-way transfer) was expected to
+    # answer with a data burst in the data mode's band
     peer_had_data: bool = True
     log: list = field(default_factory=list)
 
@@ -620,4 +625,5 @@ class GearShifter(L.Policy):
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
         reply = reply or FALLBACK[st.cap]
         self.log.append((best[0], best[1], reply))
+        self.peer_had_data = st.last_rx_data
         return encode(best[0]), best[1], encode(reply)

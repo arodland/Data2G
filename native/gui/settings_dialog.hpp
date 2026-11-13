@@ -1,10 +1,13 @@
-// The settings dialog over the QSettings store (app/settings.hpp). The values are
+// The settings dialog, and the QSettings store behind it. The values are
 // data2g-host's options (app::Args): what is saved is overridden by the
 // same flags on data2g-gui's command line. The dialog edits a copy and
 // writes back only through apply_to (on OK), so Cancel cancels.
 //
 // Devices are stored by name, which select_device() matches as a
 // substring: indices renumber when a USB card comes or goes.
+//
+// The Station tab also sets data2g-web's password (app/web_password.hpp),
+// saved on OK when one is typed.
 //
 // The Rig tab picks the radio interface first: a sound card and Hamlib, or
 // TCI; only that interface's settings show. Its Hamlib part is SSTVAE's
@@ -24,6 +27,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
 class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSettings;
@@ -32,12 +36,19 @@ class QSpinBox;
 
 namespace data2g::gui {
 
+// app/settings.hpp's, under the GUI's names too.
+using app::load_settings;
+using app::save_settings;
+
 class SettingsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    // Device lists from the audio backend (empty without one).
-    SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent = nullptr);
+    // Device lists from the audio backend (empty without one). `running`: the
+    // station is, so OK on a change it can't take live (app::needs_restart)
+    // drops its sessions and clients; a note by the buttons says so.
+    SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, bool running = false,
+                   QWidget* parent = nullptr);
     void apply_to(app::Args& a) const;
 
 private:
@@ -66,6 +77,7 @@ private:
     QDoubleSpinBox* poll_;
     QPushButton *test_cat_ = nullptr, *test_ptt_ = nullptr;
     QLineEdit* listen_;
+    QLineEdit *web_pw_, *web_pw2_;  // data2g-web's password: saved on OK when typed
     QSpinBox *cmd_port_, *kiss_port_;
     QCheckBox* record_;
     QLineEdit* record_dir_;
@@ -75,6 +87,7 @@ private:
     QSlider* effort_;      // decoder effort, the LDPC iteration cap / 5 (EFFORT_MIN-EFFORT_MAX steps)
     QComboBox* cw_id_;     // off, add, only (its item data)
     QSpinBox* cw_wpm_;
+    QLabel* restart_note_;  // shown while OK would restart a running station
 };
 
 }  // namespace data2g::gui

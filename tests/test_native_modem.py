@@ -246,6 +246,9 @@ def test_find_burst_and_noise(native, py):
     close([a["score"], a["cfo"]], [b["score"], b["cfo"]], CORR_TOL)
     lock = dict(b, spec=b["spec"].name)
     close(native.modem.pilot_coherence(y, lock, 8, True), py.pilot_coherence(y, b, 8, True))
+    (cn, pn), (cp, pp) = native.modem.pilot_coherence(y, lock, 4, True, True), py.pilot_coherence(y, b, 4, True, True)
+    close(cn, cp)
+    close([pn], [pp])
     rng = np.random.default_rng(11)
     for band in modem.SYNC_BANDS:
         noise = rng.normal(size=16000)

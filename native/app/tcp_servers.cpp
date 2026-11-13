@@ -85,7 +85,7 @@ void Port::read(QTcpSocket* c) {
 
 KissServer::KissServer(const QHostAddress& addr, quint16 port,
                        std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
-                       std::function<void(int, tnc::Bytes)> on_command)
+                       std::function<void(int, tnc::Bytes, int)> on_command)
     : on_packet_(std::move(on_packet)), on_command_(std::move(on_command)) {
     if (!srv_.listen(addr, port))
         throw std::runtime_error("can't listen on " + addr.toString().toStdString() + ":" + std::to_string(port) + ": " +
@@ -104,16 +104,22 @@ KissServer::KissServer(const QHostAddress& addr, quint16 port,
                     if ((cmd & 0x0F) == tnc::KISS_DATA) {
                         on_packet_(cmd >> 4, std::move(payload), std::nullopt);
                     } else if ((cmd & 0x0F) == tnc::KISS_ACKMODE && payload.size() >= 2) {  // [tag, 2][frame]
-                        const std::int64_t id = ++n_acks_;
+                        // tnc.py's: an id with the tag in its low 16 bits, big-endian (arq::ack_tag)
+                        const std::int64_t id = (++n_acks_ << 16) | (payload[0] << 8 | payload[1]);
                         acks_[id] = {c, tnc::Bytes(payload.begin(), payload.begin() + 2)};
                         on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id);
+                    } else if (const auto on = (cmd & 0x0F) == tnc::KISS_SETHARDWARE ? tnc::refs_command(payload) : std::nullopt) {
+                        if (*on) refs_.insert(c);
+                        else refs_.erase(c);
+                        logf(INFO, "KISS client: REFS %s", *on ? "ON" : "OFF");
                     } else {
-                        on_command_(cmd & 0x0F, std::move(payload));
+                        on_command_(cmd & 0x0F, std::move(payload), cmd >> 4);
                     }
                 }
             });
             connect(c, &QTcpSocket::disconnected, this, [this, c, peer] {
                 clients_.erase(c);
+                refs_.erase(c);
                 std::erase_if(acks_, [c](const auto& kv) { return kv.second.first == c; });
                 c->deleteLater();
                 logf(INFO, "KISS client %s disconnected", peer.c_str());
@@ -130,6 +136,14 @@ void KissServer::broadcast(const tnc::Bytes& data, int port) {
     const auto f = tnc::kiss_encode(data, port);
     const QByteArray b(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size()));
     for (auto& [c, _] : clients_) c->write(b);
+}
+
+void KissServer::send_ref(const std::string& line) {
+    tnc::Bytes body{tnc::KISS_SUB_REF};
+    body.insert(body.end(), line.begin(), line.end());
+    const auto f = tnc::kiss_encode(body, 0, tnc::KISS_SETHARDWARE);
+    const QByteArray b(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size()));
+    for (auto* c : refs_) c->write(b);
 }
 
 void KissServer::send_ack(std::int64_t id, int port) {

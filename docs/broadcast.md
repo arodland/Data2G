@@ -58,6 +58,11 @@ and reads any codeword. A mask only decides whose CRC check passes.
   group is an open port. Promiscuous listening keeps every group's.
 - **Data:** checked under the group read from the control. Data from a burst whose
   control was lost never lands on the wrong port.
+  - A later control codeword lost (a shifting port's reports spill past
+    codeword 0): codeword 0 passed under the group's key, and its header says
+    where the data starts, so the burst is that group's and its frames are
+    delivered, less the reports (and less the sender's call, unless
+    group+from lies whole in codeword 0).
   - Control lost: looked for only when slot 0 didn't decode at all (OFDM: no LDPC
     codeword, alone or paired with slot 1). A slot 0 that decoded but isn't a
     broadcast control is another kind of burst (an overheard ARQ exchange, a CQ),
@@ -208,6 +213,25 @@ fits but on the ACK modes (§3).
   start). Receiver AGC can pull it low under strong signals. Only outside an ARQ session: during one, a lost burst is
   most likely the peer's.
 
+A KISS client can set its port's mode itself, e.g. as a TNC init command: KISS
+SetHardware (command `0x06`, the port in the high nibble) with the ASCII text `MODE
+[AUTO] [DUP] mode`, as `BCAST MODE n` takes it (case-insensitive, trailing CR/LF/NUL
+ignored). Port 0 is always open; others must be opened first. KISS has no reply: a bad
+one is logged and changes nothing. Port 0 goes back to its defaults when a command
+client disconnects, as above. Port 0 as hex: `C0 06 4D 4F 44 45 20 <mode> C0`.
+
+A KISS client can get each heard burst's Hand reference (`arq.md` §9) on the KISS
+port itself, in order with the frames: SetHardware `REFS ON` (any port; `REFS OFF`
+stops it), per connection. The payload splits on NUL, HT, LF, CR and space only, is
+upper-cased, and must be exactly two words: `REFS ON` or `REFS OFF`; extra words and
+a 0x1c-0x1f inside a word match nothing. Each decoded burst then sends that client a REF frame:
+SetHardware (`0x06`) on port 0, subcommand byte `0x11`, then the ASCII text `REF id
+end offset snr` as the command port's REF line has it (subcommands:
+`docs/app-soft-plan.md` §4; a first byte in `0x20-0x7E` is text, as `MODE` and `REFS`). It comes ahead of the burst's own data frames, so the frames
+that follow it until the next REF are that burst's. Bursts with no frames for KISS
+(ARQ, CQ) get a REF frame too. Clients that never send `REFS ON` see nothing new.
+As hex: `C0 06 52 45 46 53 20 4F 4E C0`.
+
 Apps learn when their frames went out through KISS ACKMODE (command `0x0C`, as in BPQ32
 and QtSoundModem):
 
@@ -227,8 +251,6 @@ and QtSoundModem):
 
 - **Ports beyond 15** (KISS SetHardware): 15 groups open at once is plenty until an
   app needs more.
-- **Setting a port's mode by KISS command:** the command port does it. Add it when a
-  KISS-only client needs it.
 - **Incremental redundancy across broadcast bursts:** later. An app would mark a frame,
   by a KISS extension, as a resend at a given redundancy version; it runs its own
   resends outside our ARQ, and we keep its soft bits for a while to combine. The

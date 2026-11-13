@@ -199,3 +199,58 @@ def test_duplicated_control_pair_is_pinned_once_combined():
         rx = PHY.ModemRx(r, {})
         assert rx.decode(0, L.ctl_mask(0, 0, 7), 0, None) is None  # alone, pinned, fails
         assert st._ctl_pair(rx, 0, 0) == ctl
+
+
+def test_a_repeated_control_combines_but_never_reads_as_the_burst_before():
+    """decode_repeat (docs/arq.md §3a): a codeword that fails in two bursts
+    decodes from their sum. A different burst, summed with a strong earlier
+    one, decodes to the earlier one's payload under a plain keyed decode;
+    decode_repeat scores it on this burst alone and drops it."""
+    rng = np.random.default_rng(5)
+    pa, pb = (bytes(rng.integers(0, 256, codes.payload_bytes(SPEC), dtype=np.uint8)) for _ in range(2))
+    key = ("rep", 1, 0)
+    store = {}
+    first, again = (PHY.ModemRx(hear(burst([pa]), -1, seed), store) for seed in (1, 51))
+    assert first.decode(0, (7, 0, 0), 0, None) is None and again.decode(0, (7, 0, 0), 0, None) is None
+    assert first.decode_repeat(0, (7, 0, 0), key) is None
+    assert again.decode_repeat(0, (7, 0, 0), key) == pa
+
+    kept = {}
+    assert PHY.ModemRx(hear(burst([pa])), kept).decode(0, (9, 0, 0), 0, key) is None  # kept: clean, under another mask
+    other = hear(burst([pb]), -1, 0)
+    assert PHY.ModemRx(other, dict(kept)).decode(0, (7, 0, 0), 0, key) == pa  # the hazard
+    assert PHY.ModemRx(other, dict(kept)).decode_repeat(0, (7, 0, 0), key) is None
+
+
+def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
+    """A CONNECT's robust tries are one compact codeword (same nonce). Two
+    at -14.5 dB, neither decoding alone or primed, connect a listener once
+    the second is combined with the first (Session._repeated_frame).
+    Square-law control soft bits (cpm.COH_CTL off): coherent ones decode a try alone."""
+    import random
+
+    from data2g import cpm
+
+    monkeypatch.setattr(cpm, "COH_CTL", False)
+    from data2g.arq import burst as B
+    from data2g.arq import frames as F
+    from data2g.arq import session as S
+    from data2g.arq.policy import GearShifter
+    from data2g.config import FS
+
+    mode = "fsk16r25-r1/2"  # the robust tries' mode: a CONNECT goes compact in it
+    body = F.pack_connect(F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10).pack())
+    x = PHY.tx_audio(B.TxBurst(mode, [B.Slot(B.COMPACT_CONNECT, 0, body + bytes(GearShifter().ctl_payload_bytes(mode) - len(body)))], 0))
+    heard = []
+    for seed in (1, 2):
+        y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -14.5, seed=seed,
+                           s_power=hfchannel.active_power(x))
+        heard.append(cpm.receive(y, cpm.find(cpm.GRIDS["c16r25"], y)))
+    assert all(PHY.ModemRx(r, {}).decode(0, B.COMPACT_CONNECT, 0, None) is None for r in heard)
+    b = S.Session("K2XYZ", GearShifter(), rng=random.Random(2))
+    b.listen()
+    store = {}
+    b.on_rx(PHY.ModemRx(heard[0], store), 0.0)
+    assert b.state == S.LISTEN
+    b.on_rx(PHY.ModemRx(heard[1], store), 10.0)
+    assert b.state == S.CONNECTED and b.peer == "W1AW"

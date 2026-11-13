@@ -70,6 +70,7 @@ struct StationView {
     std::int64_t held = 0;         // codewords held beyond the cumulative ACK: len(rx.buf)
     int misses = 0;
     int esc_floor = 0;
+    bool last_rx_data = true;  // the peer's last burst carried data (expected_reply)
 };
 
 struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)

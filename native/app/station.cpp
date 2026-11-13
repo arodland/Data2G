@@ -17,6 +17,7 @@
 #include <pthread.h>
 #endif
 #include "app/realtime.hpp"
+#include "app/settings.hpp"
 #include "app/tcp_servers.hpp"
 #include "app/transmitter.hpp"
 #include "audio/audio.hpp"
@@ -76,7 +77,8 @@ constexpr std::size_t TAP_SAMPLES = 4096;
 // The monitor's decoder: bursts heard and sent, from the session stage, in
 // order, dumped on a thread of its own so its decodes never delay the session's.
 struct Station::MonitorThread {
-    using Burst = std::variant<arq::BurstHeard, arq::TxBurstPtr>;
+    using Heard = std::pair<arq::BurstHeard, std::shared_ptr<arq::ModemRx>>;  // as the session read it
+    using Burst = std::variant<Heard, arq::TxBurstPtr>;
     monitor::Monitor m;
     std::mutex mu;
     std::condition_variable cv;
@@ -112,8 +114,12 @@ struct Station::MonitorThread {
             auto [b, when] = std::move(in.front());
             in.pop_front();
             lock.unlock();
-            monitor::Dump d = std::holds_alternative<arq::TxBurstPtr>(b) ? m.sent(*std::get<arq::TxBurstPtr>(b), when)
-                                                                          : m.burst(std::get<arq::BurstHeard>(b), when);
+            monitor::Dump d;
+            if (auto* t = std::get_if<arq::TxBurstPtr>(&b)) d = m.sent(**t, when);
+            else {
+                auto& [h, rx] = std::get<Heard>(b);
+                d = m.burst(h, rx.get(), when);
+            }
             lock.lock();
             out.push_back(std::move(d));
             if (out.size() > MAX_BURSTS) out.pop_front();
@@ -125,6 +131,7 @@ struct Station::MonitorThread {
 struct Station::Outbox {
     std::vector<std::pair<std::string, std::uint64_t>> cmd;  // (line, client it is for; 0: all)
     arq::Bytes data;
+    std::vector<std::string> refs;  // REF lines for KISS REFS ON clients, ahead of kiss
     std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
     unsigned dial = 0;     // data goes to ACCEPT's connection of this dial generation (0: the data port)
@@ -156,13 +163,14 @@ void Station::flush(std::uint64_t asker) {
     }
     host_->out_cmd.clear();
     o.data.swap(host_->out_data);
+    o.refs.swap(host_->out_kiss_refs);
     o.kiss = engine_->take_kiss_rx();
     o.acks = link_->take_acks();
     o.dial = dial_live_;
     if (const auto st = engine_->session().state;
         dial_live_ && st != arq::SessionState::CONNECTED && st != arq::SessionState::DISCONNECTING)
         o.hang_up = std::exchange(dial_live_, 0u);
-    if (o.cmd.empty() && o.data.empty() && o.kiss.empty() && o.acks.empty() && !o.hang_up) return;
+    if (o.cmd.empty() && o.data.empty() && o.refs.empty() && o.kiss.empty() && o.acks.empty() && !o.hang_up) return;
     QMetaObject::invokeMethod(&ctx_, [this, o = std::move(o)] { deliver(o); }, Qt::QueuedConnection);
 }
 
@@ -194,6 +202,7 @@ void Station::deliver(const Outbox& o) {
     }
     if (o.hang_up && dialed_gen_ == o.hang_up) hang_up();
     if (kiss_) {
+        for (const auto& line : o.refs) kiss_->send_ref(line);  // same socket, ahead of the frames
         for (const auto& [port, f] : o.kiss) kiss_->broadcast(f, port);
         for (const auto& [port, id] : o.acks) kiss_->send_ack(id, port);
     }
@@ -292,6 +301,43 @@ void Station::abort_session() {
     engine_->post([this] {
         if (host_->abort_session()) flush();
     });
+}
+
+bool Station::update(const Args& b) {
+    if (!running_ || needs_restart(a_, b)) return false;
+    const Args a = std::exchange(a_, b);
+    tx_->set_gain(std::pow(10.0, b.output_volume / 20));
+    tx_->set_off_delay(b.ptt_off_delay_ms / 1000.0);
+    codes::set_ldpc_iters(b.decoder_effort);
+    if (b.live_constellation != a.live_constellation) {
+        live_asked_ = false;  // on: the next take_constellation asks
+        if (!b.live_constellation) engine_->set_preview(false);
+    }
+    const bool rec = b.record != a.record || (b.record && b.record_dir != a.record_dir);
+    engine_->post([this, a, b, dir = rec ? std::optional(record_path(b)) : std::nullopt] {
+        auto& e = *engine_;
+        host_->output_volume = b.output_volume;
+        e.set_ptt_delay(b.ptt_on_delay_ms / 1000.0);
+        e.set_noise_rule(b.noise_rule);
+        e.cw_id = b.cw_id;
+        e.cw_wpm = b.cw_wpm;
+        if (b.mycall != a.mycall) {
+            try {
+                e.set_call(b.mycall.value_or("NOCALL"), e.aliases());
+            } catch (const std::invalid_argument&) {
+                log_line(WARNING, "mycall " + b.mycall.value_or("") + ": not a callsign; kept " + e.call());
+            }
+        }
+        if (dir) {
+            try {
+                e.set_record_dir(*dir);
+                logf(INFO, "recording to %s", dir->empty() ? "(off)" : dir->c_str());
+            } catch (const std::exception& ex) {
+                log_line(ERROR, std::string("recording off: ") + ex.what());
+            }
+        }
+    });
+    return true;
 }
 
 std::vector<monitor::Dump> Station::take_dumps() {
@@ -428,6 +474,7 @@ void Station::start() {
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         engine_->cw_id = a_.cw_id;
         engine_->cw_wpm = a_.cw_wpm;
+        engine_->hand_round = a_.hand_decoder;
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig
@@ -470,7 +517,10 @@ void Station::start() {
             live_.reset();
             reading_ = {std::chrono::system_clock::now(), b.submode, b.n_cw, b.lost, b.snr_db};
             if (b.lost) log_burst();  // else once read (on_decoded)
-            if (monitor_on_) monitor_->push(b);
+        });
+        // the monitor reads what the session read, on its own thread: monitoring off, the decoder is dropped
+        engine_->set_on_read([this](const arq::BurstHeard& b, std::shared_ptr<arq::ModemRx> rx) {
+            if (monitor_on_) monitor_->push(std::pair(b, std::move(rx)));
         });
         engine_->set_on_send([this](const arq::TxBurstPtr& b) {
             if (monitor_on_) monitor_->push(b);
@@ -514,7 +564,7 @@ void Station::start() {
             [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack) {
                 post([this, port, ack, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack); });
             },
-            [this, post](int cmd, tnc::Bytes p) { post([this, cmd, p = std::move(p)] { link_->command(cmd, p); }); });
+            [this, post](int cmd, tnc::Bytes p, int port) { post([this, cmd, port, p = std::move(p)] { link_->command(cmd, p, port); }); });
 
         // PTT
         rig::Keyer::Ptt ptt;

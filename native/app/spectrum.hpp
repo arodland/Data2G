@@ -9,19 +9,18 @@
 #include <cstdint>
 #include <vector>
 
+#include "app/rx_plot.hpp"
 #include "generated/config.hpp"
 
 namespace data2g::app::spectrum {
 
-constexpr int NFFT = 1024;           // samples per row
+constexpr int NFFT = static_cast<int>(SPECTRUM_N);  // samples per row (rx_plot's)
 constexpr int BINS = NFFT / 2;       // 0 .. FS/2
 constexpr double DISPLAY_HZ = config::FS / 2.0;
 constexpr double CLIP = 0.99;        // a peak at or above it is clipping
 
 using Rgb = std::array<std::uint8_t, 3>;
 
-// Hann-windowed magnitude spectrum of NFFT samples in dB, scaled by 1/NFFT.
-std::vector<double> spectrum_db(const std::vector<double>& block);
 // Onto exactly `width` columns: interpolate when widening, peak-hold when
 // shrinking so a narrow carrier can't be sampled away.
 std::vector<double> reduce_to_width(const std::vector<double>& v, int width);

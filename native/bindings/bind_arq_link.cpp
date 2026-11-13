@@ -79,6 +79,15 @@ public:
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
+    // the engine's energy readings and the reply it waits for (carrier hold, missed energy): without these a
+    // C++ Engine driving a Python policy (tools/with_native.py) never fed the shifter's energy inputs
+    void observe_energy(double snr_db, double now) override {
+        if (overrides("observe_energy")) obj.attr("observe_energy")(snr_db, now);
+    }
+    std::optional<std::pair<std::string, double>> expected_reply() const override {
+        if (!overrides("expected_reply")) return std::nullopt;
+        return obj.attr("expected_reply")().cast<std::optional<std::pair<std::string, double>>>();
+    }
     std::optional<int> next_capacity(const Station& st) const override {
         if (!overrides("next_capacity")) return std::nullopt;
         return obj.attr("next_capacity")(py::cast(const_cast<Station*>(&st), py::return_value_policy::reference))
@@ -103,6 +112,7 @@ public:
     int n_cw() const override { return n; }
     py::object key(const SoftKey* k) const {
         if (!k) return py::none();
+        if (k->ctl && k->peer) return py::make_tuple("rep", k->peer, 0);  // REPEAT_KEY, REPEAT_SESSION_KEY
         if (k->ctl) return py::make_tuple("ctl", py::module_::import("builtins").attr("id")(obj), k->index);
         return py::make_tuple(k->peer, k->seq);
     }
@@ -117,6 +127,12 @@ public:
     std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override {
         auto r = obj.attr("decode_known")(slot, mask_tuple(mask), pyb(Bytes(tmpl.begin(), tmpl.end())),
                                           pyb(Bytes(tmask.begin(), tmask.end())), pair);
+        if (r.is_none()) return std::nullopt;
+        return bytes_of(r);
+    }
+    bool can_repeat() const override { return py::hasattr(obj, "decode_repeat"); }
+    std::optional<Bytes> decode_repeat(int slot, const MaskId& mask, const SoftKey& k) override {
+        auto r = obj.attr("decode_repeat")(slot, mask_tuple(mask), key(&k));
         if (r.is_none()) return std::nullopt;
         return bytes_of(r);
     }
@@ -592,6 +608,10 @@ void bind_arq_link(py::module_& m) {
         .def("claims", [](const Session& s, py::object rx) {
             PyRx r(std::move(rx));
             return s.claims(r);
+        })
+        .def("foreign", [](Session& s, py::object rx) {
+            PyRx r(std::move(rx));
+            return s.foreign(r);
         })
         .def("on_tx_end", [](Session& s, const py::object& burst, double now) { s.on_tx_end(burst_cpp(burst), now); })
         .def("on_header", &Session::on_header)

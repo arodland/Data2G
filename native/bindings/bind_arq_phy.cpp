@@ -42,6 +42,9 @@ Heard heard_of(const py::dict& r) {
         c->dup = r["dup"].cast<bool>();
         for (auto s : r["soft"]) c->soft.push_back(vec(s.cast<In<double>>()));
         c->E = mat(r["E"].cast<In<double>>());
+        c->n_cw = static_cast<int>(c->soft.size());
+        c->n_ctl_slots = 1 + c->dup;
+        if (r.contains("Z")) c->Z = mat(r["Z"].cast<In<cd>>());  // coherent DD (cpm.receive's bins)
         h.cpm = std::move(c);
         return h;
     }
@@ -189,6 +192,14 @@ public:
         py::gil_scoped_release nogil;
         return rx_->converged(slot, pair);
     }
+    // phy.ModemRx.decode_repeat over the Python store
+    py::object decode_repeat(int slot, const py::handle& mask, const py::object& key) {
+        py::object held = store_.attr("get")(key);
+        if (!held.is_none() && held.cast<py::tuple>()[2].cast<std::string>() != rx_->submode()) store_.attr("pop")(key);
+        py::object got = decode(slot, mask, 0, key);
+        if (got.is_none() || !rx_->own_score(slot, mask_of(mask), bytes_of(got))) return py::none();
+        return got;
+    }
     py::object decode_known(int slot, const py::handle& mask, const py::object& tmpl, const py::object& tmask, bool pair) {
         const MaskId m = mask_of(mask);
         const Bytes t = bytes_of(tmpl), k = bytes_of(tmask);
@@ -239,6 +250,7 @@ void bind_arq_phy(py::module_& m) {
         .def("raw_pair", &PyModemRx::raw_pair)
         .def("decode_pair", &PyModemRx::decode_pair)
         .def("converged", &PyModemRx::converged, py::arg("slot"), py::arg("pair") = false)
+        .def("decode_repeat", &PyModemRx::decode_repeat, py::arg("slot"), py::arg("mask_id"), py::arg("key"))
         .def("decode_known", &PyModemRx::decode_known, py::arg("slot"), py::arg("mask_id"), py::arg("template"),
              py::arg("tmask"), py::arg("pair") = false)
         .def_property_readonly("n_ctl_slots", &PyModemRx::n_ctl_slots)

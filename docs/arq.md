@@ -282,6 +282,14 @@ Where the rest comes from:
     transmissions with IR move the 50% point 2-6 dB below one transmission's,
     more at higher code rates. Chase gets 1-3.5 dB less than IR at rate 1/2 and
     above. At rate 1/5, where RV1 is mostly repeats, they are the same.
+- **Which RV a resend takes:** the number of bursts carrying the codeword that
+  the peer is known to have decoded (it holds their soft bits). That is the
+  burst a reply acts on, and any burst before it whose own reply was lost
+  (the peer then acts on a poll) that the ACK vouches for: a seq it newly
+  reports received that no other burst up to the acted-on one carried
+  (`Station._decoded_bursts`). Until 2026-11-10 only the acted-on burst
+  counted, so after a lost reply and a poll the resends went at RV 0 again.
+  A burst the ACK says nothing new of stays uncounted: RV 0 decodes alone.
 - **Slot-to-seq mapping:** it follows from the acted-on ACK's missing list (the K
   resends) and `next_seq` (the new codewords). Every slot is then checked by its
   seq-masked CRC (§2), so a wrong mapping costs a failed decode, never wrong data.
@@ -326,9 +334,30 @@ Where the rest comes from:
     (13-14 B: about 0.3 dB) and past 16 B.
   - The outcome model and the link abstraction still assume the old control failure rate,
     so the gear shifter picks modes as before until they are retrained.
+- **A failed control is kept for its repeat.** A burst's first control codeword that
+  fails blind, pinned and primed is combined with the same codeword of the bursts before
+  it whose control also failed, in the same mode (`RxBurst.decode_repeat`). A repeat
+  after a timeout, the robust polls and a CONNECT's robust tries (one nonce, one compact
+  codeword) and their CONNECT_ACKs are bit-identical, so their soft bits add.
+  - The payload must pass its CRC and score 10 nats on this burst's own soft bits: the
+    sum can decode to an earlier, different burst's codeword, and that is not this one's.
+  - A link control read this way is treated as a primed one: checked against the
+    station's state, and not scored as a usable burst.
+  - Kept until a control decodes or the mode changes. Connect frames: until one decodes
+    or 30 s pass (`REPEAT_GAP_S`).
+  - Only codeword 0, and not DISC. `DATA2G_REPEAT=0` turns it off.
+  - A compact CONNECT's four robust tries (fsk16r25-r1/2, 150 a cell), heard by try 4
+    alone -> combined: AWGN -15 dB 0% -> 97%, -14 dB 33% -> 100%; MPP -14 dB 5% -> 61%,
+    -12 dB 61% -> 98%; MPD -12 dB 50% -> 100%. No wrong frame in 1650 runs.
 - **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
   the control word the receiver can't tell our burst from another station's, and
   guessing the mapping is a divergence risk. The sender times out and repeats.
+- **Another station's burst is not the peer's loss.** A burst whose first codeword
+  converges (LDPC: a whole codeword, so what was on air) under neither the session key
+  nor a session frame's is someone else's: the engine drops it before the gear shifter
+  sees its measurements or scores it as lost control (`Session.foreign`). CPM control
+  (polar) never says it converged, and a control that only converges as a pair is not
+  told apart: those are scored as before.
 - **A malformed control is a failed one.** A control that passes its CRC but can't be
   read is dropped the same way, with a warning in the log naming the fault, before
   any state changes. Examples: `T_RV` shorter than K resends, an empty `T_NEW`,
@@ -378,10 +407,10 @@ Where the rest comes from:
 | type | contents | when |
 |---|---|---|
 | new | start seq (7 bits) of this burst's new codewords | any new codewords |
-| abandon | seq A, and a reset flag (drop all stored soft bits) | mode change, resync |
+| abandon | seq A, a reset flag (deprecated, see below) and the abandon epoch (7 bits) | mode change, resync |
 | rv | 2 bits per resend, slot order | K > 0 |
 | bitmap | 64-bit received map above the cumulative point | any gap |
-| resync | marks a resync burst (§10) | §10 |
+| resync | marks a resync burst (§10). Deprecated, see below | §10 |
 | report | SNR (0.5 dB), Doppler class, delay class, effective MI per constellation (4 x 4 bits) | every burst after a change, else every 4th turn |
 | survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
 | sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
@@ -613,10 +642,12 @@ data2g/arq/engine.py). Off by default.
     CW ID, then ID frame (`add`), then the turn's burst;
   - after a session: after the DISC_ACK (ID frame, then CW ID), or
     `ID_GUARD_S` after the close;
-  - outside a session (KISS, CQ frames, a refused or unanswered call): one
-    once the station has been quiet `CW_QUIET_S` (30 s) with nothing queued,
-    and one ahead of such a transmission `ID_INTERVAL_S` after the first one
-    no ID covered.
+  - outside a session (KISS, CQ frames, a refused or unanswered call): a
+    transmission no CW ID covers plans one `CW_PLAN_S` (9 min) after it, or
+    after the last CW ID when that came under `CW_GAP_S` (5 min) before it,
+    so these never come closer than 9 min. It goes at the next chance: ahead
+    of the next burst, or alone with the session idle, held by BUSY until
+    `CW_FORCE_S` (10 min) past the plan's start, then sent regardless.
 - **Hearing one (CwSense, every station, whatever its own setting):** per 20 ms,
   25 Hz bins 1200-1800 Hz (Hann) against a tracked noise floor. A window is a
   hit (one tone within +-50 Hz of 1500 over 10 dB above the floor, nothing
@@ -639,6 +670,40 @@ data2g/arq/engine.py). Off by default.
   while active is dropped (`Receiver.drop`), and the search goes on past it.
   A clear header is never dropped: CwSense reads n4 near its floor as CW now
   and then.
+- **Unconfirmed suspect locks:** a suspect OFDM lock (score under
+  `SUSPECT_SCORE`, or a header copy under `COPY_COMMIT_SCORE`) whose frame
+  pilots have measurably not been there for `Receiver.RELEASE_S` in a row
+  (3 s of pilot checks) is reported lost and let go; the search goes on past
+  it. Before, it held this station's replies for the whole length its header
+  claimed. In a row, not "never there": a false lock on another burst's data
+  sees that burst's pilots on its own frame grid until the data ends.
+  scripts/false_lock_study.py (2026-11-10), every arm on the same audio,
+  RELEASE_S 0 / 1 / 2 / 3 s:
+  - Seconds busy with nothing on air, 120 sources each: data whose preamble
+    was missed 152 / 14 / 29 / 46; CW IDs 80 / 7 / 13 / 19; Hand-like tones
+    near 1500 Hz 65 / 4 / 9 / 15.
+  - 6336 real bursts (every OFDM submode, AWGN/MPP/MPD/MPG, -12..+4 dB),
+    true bursts received 4551 / 4230 / 4390 / 4482; of those lost, the ones
+    that decode any codeword offline: 26 / 12 / 5 (3 s: ACKs at -10 to -12
+    dB). 3 s keeps the floor.
+  - Frame pilots are there only when they also match the pilot's pattern
+    (`modem.PILOT_PATTERN`): repeating from frame to frame alone, any steady
+    tone, CW key-down or Hand read as pilots. With it, at 3 s: Hand-like
+    hold 15 -> 3 s, missed-preamble data 46 -> 38, CW 19 -> 18; true bursts
+    received 4482 -> 4511, lost ones that decode offline 5 -> 1.
+- **Unconfirmed CPM early locks:** a CPM lock taken on the front block and
+  first header copy is looked at again once its mid block and second header
+  copy are in (`cpm.confirm`: their tone LLRs at the locked word's rows and
+  tones). Under `cpm.CONFIRM_LLR` (-2) the burst is not there: it is reported
+  lost and let go. A CPM lock was never checked again, and held replies to
+  the end its word claimed (c16r25: up to 82 s). Locks read from both copies
+  (late, mid block, expected slot) have had their look. A burst that fades
+  through its second copy reads about 0 and is kept.
+  scripts/cpm_confirm_study.py (2026-11-10, 3000 bursts a grid, AWGN/MPP/MPD
+  from the floor to 12 dB over it): of 7530 true early locks 18 read under
+  -2, none of which decoded whole (5548 did); bursts that stop after their
+  first copy are let go 89% (c16r25), 97% (c8r50), 99.9% (c32r62) of the time,
+  locks on a burst's data 98.5-100%.
 - **Limits:** a waiting peer holds through an ID 93% of the time or more down
   to -8 dB key-down SNR (PEP, 2500 Hz) on AWGN and -6 dB on MPP/MPD (half at
   about -10 dB); below that the peer's turn may cost a timeout and a retry. A strong steady carrier 100-300 Hz off 1500 Hz hides an
@@ -657,6 +722,13 @@ data2g/arq/engine.py). Off by default.
     60 s: +30 s median (the IDs' own airtime), timeouts 42 vs 32 (10 in 470 IDs).
   - Airtime: one ID, about 4.5 s at 20 wpm, per station per 10 minutes
     (0.75%), and one more each at the end.
+  - Keyed-run rule (2026-11-10): the hits in CwSense's 1 s must form at
+    least 2 runs, none over 320 ms (a dash at 15 wpm is 240 ms), since a
+    steady carrier's start or end is one long run. Hand-like 8-FSK (6.25 Hz,
+    4 bursts a cell) at 1470/1530 Hz was active 5.1 s at 20 dB, now 0.3 s;
+    3.9 (AWGN) and 7.0 (MPG) s at 5 dB, now 1.4-2.4 and 3.7; about 10 s at
+    -5 dB, now about 7: noise splits the tone into short runs, which the rule
+    can't tell from keying. ID holding and every mode's burst cells unchanged.
 
 ## 8. Gear-shift loop (summary; details in data2g/arq/policy.py)
 
@@ -716,6 +788,60 @@ As built (data2g/arq/policy.py):
     way.
   - Any station that hears one, listening or not, notifies its host with
     `CQFRAME call bw`.
+  - **HAND** (Data2G: the D2G net's show of hands; waveform in data2g/hand.py,
+    design in docs/hand-burst.md, measured on the hand-burst-sim
+    branch). Like the BCAST statuses, the hand lines go only to a client that
+    has sent DATA2G ON or a HAND command. A command client that leaves
+    cancels its waiting Hand and its window.
+    - Every burst this station decodes becomes a Hand reference, notified
+      `REF id end offset snr`: id counts up from 1 (the last 64 stay usable),
+      end is the burst's end in host seconds (the sound card's clock), offset
+      its measured cfo (Hz, 0 for modes that don't measure one), snr its
+      snr_est (dB). The command port is a separate socket, so a client can't
+      tell which KISS frames a REF line belongs to. A KISS client that needs
+      the pairing asks for the same line on the KISS port instead
+      (SETHARDWARE `REFS ON`, docs/broadcast.md §5): it arrives there as a
+      REF frame ahead of that burst's frames.
+    - **HAND SEND ref tag d channel hex16**: send a Hand (63 payload bits as
+      16 hex digits, the top one ignored) in `channel` (40 channels, 6.25 Hz
+      8-FSK, 60 Hz apart around 1500 Hz, numbered from the centre out: 0 at
+      1470 Hz, 1 at 1530, 2 at 1410, ...), on air d seconds after the end of
+      heard burst `ref`, shifted by that burst's offset. `tag` (0-255) and the
+      channel seed the Hand's CRC, so it can't answer another net's request,
+      and a Hand sent in the wrong channel fails instead of being credited to
+      that channel's owner. Channels must fit the BW command's width
+      (--kiss-bw doesn't apply): 0-7 at 500 Hz, 0-19 at 1200, all 40 at
+      2300/2750. WRONG for a gone ref, bad numbers, a channel outside the
+      width, the slot already past, or a Hand already waiting. While one waits, this host starts no CQ, broadcast, ID
+      or KISS burst of its own. OK: then
+      `HAND SENT c` when it keys, or `HAND DROPPED c` if the radio was busy
+      more than 0.5 s past the slot.
+    - **HAND LISTEN d tag ack channel [channel...]**: open the window d
+      seconds after the end of the burst carrying the KISS frame sent with
+      ACKMODE tag `ack` (its 2 bytes as 4 hex digits): the frame with the
+      net's call. Naming the burst keeps a CQ, ID, session burst or another
+      client's frame sent first from moving the window (d at least 1: the
+      window's head is uncollectable below hand.SEARCH_S, since rx is off
+      until the anchor burst ends), lasting the Hand length
+      (10.56 s) plus 0.6 s either side, and decode the listed channels
+      (the CRC seeded with `tag` and each channel; a channel listed twice is
+      decoded once; WRONG for one outside the width, as HAND SEND). A 40-channel round costs a desktop about 0.4 s of CPU;
+      `--hand-decoder cheap` on either host takes under half that for
+      0.2-0.4 dB (docs/hand-burst.md). While a window is open this
+      host starts no CQ, broadcast, ID or KISS burst of its own (session bursts still go;
+      the window counts their time as silence). CW ID sensing (§7b) is off
+      while the window is open and 1 s after: a Hand near 1500 Hz can read as
+      a CW ID at its start or end. WRONG while another listen is
+      armed or open. Each Hand decoded:
+      `HAND c hex16 snr dt` (snr dB; dt: its start minus the slot, ms, which
+      is the answerer's latency for net control to report back). If the
+      window's head could not be captured (my own burst ran into it):
+      `HAND SHORT ms`, ms of it missed, before
+      `HAND END`; an armed listen whose burst never went out gives up after
+      30 s with `HAND END`. Send the command before queuing the frame that
+      anchors the window: the KISS port may send it at once.
+    - **HAND CANCEL**: stops a Hand waiting to go and an armed or open
+      listen; the window ends with `HAND END`. Always OK.
   - BW500 caps at 500 Hz. This one matters: it keeps a session inside a 500 Hz
     band-plan segment.
   - BW2300 and BW2750 set no cap (2400 Hz, the widest band).
@@ -841,6 +967,13 @@ forever without progress, because they disagree about protocol state.
     the receiver's cumulative ACK, which both sides know.
   - It re-slices from there at RV0.
   - The receiver drops every stored soft bit for that direction.
+  - **Deprecated on the wire: the reset flag and the resync TLV.** They are still sent
+    and never read. Every new abandon (a new epoch) makes the receiver drop all its soft
+    bits for the direction, reset flag or not: the epoch is in each data codeword's CRC
+    mask, so nothing kept from before could combine anyway. A receiver has no use for
+    either; they label the sender's log line ("resync" rather than "abandon"). Not an
+    unused tool to wire up. Drop both at the next wire change that touches the abandon
+    TLV.
 - **Burst seqs can't alias.**
   - Each station numbers its bursts absolutely; the wire carries the number mod 8.
   - It never has more than 7 bursts the peer hasn't acted on. At that limit its turn is

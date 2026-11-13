@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -80,8 +81,18 @@ struct DecodeRequest {
     std::int64_t at = 0;         // seg[0]'s stream index
     std::int64_t head = 0;       // OFDM, no copy: the preamble and header lie in seg[:head]
     std::int64_t audio_lo = 0, audio_hi = 0;  // the event's audio: seg[audio_lo:audio_hi]
+    std::shared_ptr<cpm::Stream> stream;      // CPM, streamed: its receive is stream->finish()
 };
 BurstEvent decode(DecodeRequest req, const modem::Accept& accept);
+
+// A pending CPM lock's audio since the last, for its stream (cpm::Stream): the
+// work a decode step does while the burst arrives, in order before the
+// burst's DecodeRequest. Empty audio: the stream was just made.
+struct StreamFeed {
+    std::shared_ptr<cpm::Stream> stream;
+    std::vector<double> audio;
+};
+void run(StreamFeed& f);
 
 // The streaming receiver: feed() audio at FS as it arrives, get events
 // back, in order: a HeaderEvent as a burst starts, then its BurstEvent.
@@ -98,13 +109,23 @@ public:
     static constexpr int CPM_TAIL = config::FS / 20;  // kept before a CPM burst's end (receiver.Receiver.CPM_TAIL)
     static constexpr double SUPERSEDE_MARGIN = 0.05;
     static constexpr double SUSPECT_SCORE = 0.36;
+    // receiver.Receiver.RELEASE_S: a suspect OFDM lock (a header copy under COPY_COMMIT_SCORE) whose pilots have been measurably absent this long in
+    // a row (pilot checks, one a HOP) is let go: reported lost, the search goes on past it.
+    // 0: never. A member so a study can set it (scripts/false_lock_study.py).
+    double release_s = 3.0;
 
     explicit Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids = {}, bool blank = true);
 
     std::vector<Event> feed(std::span<const double> x);
     // feed() with each burst to decode left as its DecodeRequest, in order.
-    using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest>;
+    using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest, StreamFeed>;
     std::vector<Item> feed_deferred(std::span<const double> x);
+    // Stream CPM locks (cpm::Stream: refine and data slots' passes while the burst arrives); `pass`
+    // (arq::cpm_pass's, the engine's) may be empty: refine alone. Off by default (as Python's receiver).
+    void stream_cpm(cpm::PassFn pass) {
+        stream_on_ = true;
+        stream_pass_ = std::move(pass);
+    }
     void reset();
     // The expected slot (receiver.Receiver.expect, docs/arq.md §3a): a burst of one of these CPM grids should
     // start between stream indices lo and hi, its CFO near cfo; one grid per search hop, in order, looked at
@@ -116,7 +137,10 @@ public:
     void drop() {
         last_start_ = pending_->start();
         pending_.reset();
+        stream_.reset();
         pilots_ok_ = confirmed_ = false;
+        dark_ = 0;
+        looked_ = false;
     }
 
     bool busy() const { return pending_.has_value(); }
@@ -148,6 +172,8 @@ private:
     Stats stats(std::int64_t w0 = 0);
     void searched();
     bool supersede(std::vector<Item>& out, bool whole = false);
+    bool release(std::vector<Item>& out);
+    bool unconfirmed(std::vector<Item>& out);
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
     std::optional<cpm::Lock> primed();  // expect()'s lock in its next grid, buffer indices, once its window is complete
@@ -165,7 +191,12 @@ private:
     std::vector<double> buf_;
     std::int64_t off_ = 0;  // stream index of buf_[0]
     std::optional<Pending> pending_;
+    bool stream_on_ = false;
+    cpm::PassFn stream_pass_;
+    std::shared_ptr<cpm::Stream> stream_;  // the pending CPM lock's
     bool pilots_ok_ = false, confirmed_ = false;
+    int dark_ = 0;  // the pending lock's latest pilot checks in a row with its pilots measurably absent
+    bool looked_ = false;  // the pending CPM lock's second look is done (unconfirmed)
     std::deque<double> powers_;  // in-band power of 0.1 s blocks
     double ps_ = 0.0;
     int pn_ = 0;

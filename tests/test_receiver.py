@@ -119,9 +119,12 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     """A burst whose preamble was missed reads as false headers claiming up
     to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
     host reports) follows the pilots and the in-band energy, so it ends with
-    the signal; the internal hold (Receiver.busy) may run on. (The w header
-    floor, 0.33, now rejects these false headers; at 0.25 they got through,
-    which this reproduces to test BUSY on its own.)"""
+    the signal. The internal hold (Receiver.busy, what holds this station's
+    replies) ran on for the claim; now a suspect lock whose pilots never came
+    is let go after Receiver.RELEASE_S of them measurably absent, and the hold
+    ends too (RELEASE_S = 0: the old run-on). (The w header floor, 0.33, now
+    rejects these false headers; at 0.25 they got through, which this
+    reproduces to test BUSY on its own.)"""
     import sys
     from pathlib import Path
 
@@ -143,15 +146,24 @@ def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     cut = x[BANDS["w"].preamble_samples + modem.header_samples("w") + 800 + int(rng.integers(0, 3000)):]
     y = np.concatenate([np.zeros(FS * 20), cut, np.zeros(FS * 12)])
     y = hfchannel.awgn(y, 20.0, seed=1, s_power=hfchannel.active_power(x))
-    r = Receiver(Engine("W1AW", seed=1).accept)
     end = FS * 20 + len(cut)
-    busy_after = held_after = 0.0
-    for i in range(0, len(y), FS // 50):
-        r.feed(y[i:i + FS // 50])
-        if i >= end:
-            busy_after += r.channel_busy / 50
-            held_after += r.busy / 50
-    assert busy_after <= 1.0 < held_after, (busy_after, held_after)
+    release_s = Receiver.RELEASE_S  # the shipped value, before after() patches it
+
+    def after(release_s):
+        monkeypatch.setattr(Receiver, "RELEASE_S", release_s)
+        r = Receiver(Engine("W1AW", seed=1).accept)
+        busy_after = held_after = 0.0
+        for i in range(0, len(y), FS // 50):
+            r.feed(y[i:i + FS // 50])
+            if i >= end:
+                busy_after += r.channel_busy / 50
+                held_after += r.busy / 50
+        return busy_after, held_after
+
+    busy_after, held_after = after(0.0)
+    assert busy_after <= 1.0 and held_after > 4.0, (busy_after, held_after)  # 5.5 s
+    busy_after, held_after = after(release_s)  # RELEASE_S dark in a row
+    assert busy_after <= 1.0 and held_after <= release_s + 1.0, (busy_after, held_after)
 
 
 def _false_lock_clip(starts):
@@ -266,6 +278,48 @@ def test_a_cpm_burst_whose_first_header_copy_faded_locks_on_both():
               and all(PHY.ModemRx(ev["rx"], {}).decode(i, s.mask_id, 0, None) == s.payload
                       for i, s in enumerate(b.slots))]
         assert ok, (name, [ev["header"]["spec"].name for ev in got])
+
+
+def test_a_cpm_early_lock_is_let_go_when_its_second_header_copy_is_not_there():
+    """An early lock (front + header copy 1) held BUSY to the end its word
+    claimed whatever followed. Its mid block and second header copy are known
+    tones at known rows: when the burst stops after its first copy they say
+    so (cpm.confirm under CONFIRM_LLR), the lock is reported lost and BUSY
+    ends within about a second of the second copy's end, not at the claimed
+    end; the whole burst is received as before."""
+    import sys
+    from pathlib import Path
+
+    from data2g import cpm
+    from data2g.arq import phy as PHY
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import outcome_data as O
+
+    acc = modem.Accept.of(None, 16.0)
+    for name, n in (("fsk16r25-r1/2", 4), ("fsk8r50-r1/2", 4), ("fsk32r62-r1/2", 4)):
+        g = cpm.GRIDS[cpm.SPECS[name].grid]
+        b = O.burst(name, n, np.random.default_rng(3))
+        lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n - 1, False))
+        lead = 2 * FS
+        for stops in (False, True):
+            x = PHY.tx_audio(b).copy()
+            if stops:
+                x[(lay.hdr_rows[0][-1] + 1) * g.T:] = 0
+            x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
+            y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
+            rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
+            got, busy_until = [], 0
+            for i in range(0, len(y), FS // 10):
+                got += [ev for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
+                busy_until = i + FS // 10 if rx.busy else busy_until
+            assert len(got) == 1 and got[0]["header"]["spec"].name == name, (name, stops, got)
+            copy2_end, end = lead + (lay.hdr_rows[1][-1] + 1) * g.T, lead + lay.n * g.T
+            if stops:
+                assert got[0]["rx"] is None and busy_until <= copy2_end + FS < end, (name, busy_until, copy2_end, end)
+            else:
+                assert all(PHY.ModemRx(got[0]["rx"], {}).decode(i, s.mask_id, 0, None) == s.payload
+                           for i, s in enumerate(b.slots)), name
 
 
 def test_a_cpm_burst_whose_front_faded_locks_on_its_mid_block():

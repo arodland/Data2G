@@ -336,9 +336,12 @@ void bind_modem(py::module_& m) {
         }
         return lock_dict(l);
     }, py::arg("x"), py::arg("bands") = py::none(), py::arg("accept") = py::none(), py::arg("stats") = py::none());
-    d.def("pilot_coherence", [](const In<double>& x, const py::dict& lock, int n_max, bool latest) {
-        return mo::pilot_coherence(view(x), lock_of(lock), n_max, latest);
-    }, py::arg("x"), py::arg("lock"), py::arg("n_max") = 8, py::arg("latest") = false);
+    d.def("pilot_coherence", [](const In<double>& x, const py::dict& lock, int n_max, bool latest, bool pattern) -> py::object {
+        double pat = 0.0;
+        auto c = mo::pilot_coherence(view(x), lock_of(lock), n_max, latest, pattern ? &pat : nullptr);
+        if (pattern) return py::make_tuple(c, pat);
+        return py::cast(c);
+    }, py::arg("x"), py::arg("lock"), py::arg("n_max") = 8, py::arg("latest") = false, py::arg("pattern") = false);
     d.def("find_copy", [](const In<double>& x, const std::string& band, const py::object& accept,
                           const std::optional<In<cd>>& C, std::optional<double> level) {
         const auto a = accept_of(accept);

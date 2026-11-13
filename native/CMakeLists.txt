@@ -24,7 +24,7 @@
 #                          still builds the rig controller and PTT keyer.
 
 cmake_minimum_required(VERSION 3.24)
-project(data2g_native VERSION 0.4.1 LANGUAGES CXX)
+project(data2g_native VERSION 0.4.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -200,8 +200,8 @@ target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
 if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" OR NOT DATA2G_BUILD_GUI STREQUAL "OFF")
   find_package(Qt6 6.2 COMPONENTS Core Network QUIET)
   if(Qt6Network_FOUND)
-    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/tcp_servers.cpp app/rx_plot.cpp
-                                      app/realtime.cpp app/settings.cpp app/spectrum.cpp)
+    add_library(data2g_station STATIC app/station.cpp app/transmitter.cpp app/options.cpp app/settings.cpp app/web_password.cpp app/tcp_servers.cpp app/rx_plot.cpp
+                                      app/realtime.cpp app/spectrum.cpp)
     target_include_directories(data2g_station PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(data2g_station PUBLIC data2g_core data2g_applog Qt6::Core Qt6::Network)
     target_compile_definitions(data2g_station PUBLIC QT_NO_KEYWORDS)  # the core has members named slots
@@ -261,6 +261,22 @@ if(NOT DATA2G_BUILD_HOST STREQUAL "OFF")
   endif()
 endif()
 
+# data2g-web: the station headless, with the GUI's windows as a web page
+# (web/): Qt Core, Network and WebSockets (the Monitor tab's live feed; TCI's
+# too). Built with data2g-host.
+if(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station AND NOT Qt6WebSockets_FOUND)
+  message(STATUS "Qt6 WebSockets not found; building without data2g-web")
+elseif(NOT DATA2G_BUILD_HOST STREQUAL "OFF" AND TARGET data2g_station)
+  add_library(data2g_web STATIC web/web_ui.cpp)
+  # qt_add_resources on the target: kept by the linker, though a static library's
+  qt_add_resources(data2g_web web_page PREFIX /web BASE web FILES web/index.html web/login.html web/setup.html)
+  target_include_directories(data2g_web PUBLIC web)
+  target_link_libraries(data2g_web PUBLIC data2g_station Qt6::WebSockets)
+  add_executable(data2g-web web/main.cpp)
+  target_link_libraries(data2g-web PRIVATE data2g_web)
+  data2g_rig_rpath(data2g-web)
+endif()
+
 # data2g-gui: a status window and a settings dialog over the same station.
 # Qt Widgets only here (tools/check_layering.py); sound cards required.
 if(NOT DATA2G_BUILD_GUI STREQUAL "OFF")
@@ -307,7 +323,7 @@ endif()
 # Last, so it sees the apps however they were added. The GUI target is
 # expected to be called data2g-gui.
 set(DATA2G_PACKAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging")
-foreach(app data2g-host data2g-gui data2g-monitor)
+foreach(app data2g-host data2g-gui data2g-web data2g-monitor)
   if(NOT TARGET ${app})
     continue()
   endif()

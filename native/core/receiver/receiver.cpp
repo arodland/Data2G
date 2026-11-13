@@ -111,7 +111,7 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
     p.shift(-req.at);
     const auto t0 = std::chrono::steady_clock::now();
     if (p.is_cpm()) {
-        ev.rx = cpm::receive(req.seg, p.cpm());
+        ev.rx = req.stream ? req.stream->finish() : cpm::receive(req.seg, p.cpm());
     } else {
         try {
             if (p.copy()) {
@@ -128,6 +128,10 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
     if (req.audio_lo == 0 && req.audio_hi == static_cast<int64_t>(req.seg.size())) ev.audio = std::move(req.seg);
     else ev.audio.assign(req.seg.begin() + req.audio_lo, req.seg.begin() + req.audio_hi);
     return ev;
+}
+
+void run(StreamFeed& f) {
+    if (f.stream) f.stream->feed(f.audio);
 }
 
 Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids, bool blank)
@@ -151,7 +155,10 @@ void Receiver::reset() {
     buf_.clear();
     off_ = 0;
     pending_.reset();
+    stream_.reset();
     pilots_ok_ = confirmed_ = false;
+    dark_ = 0;
+    looked_ = false;
     powers_.clear();
     ps_ = 0.0;
     pn_ = 0;
@@ -218,9 +225,11 @@ void Receiver::check_pilots() {
     if (p.is_cpm()) return;
     modem::Lock l = p.ofdm();
     l.p0 -= off_;  // only p0, as Python's dict(p, p0=...)
-    const auto c = modem::pilot_coherence(buf_, l, modem::PILOT_PAIRS, true);
+    double pat = 0.0;
+    const auto c = modem::pilot_coherence(buf_, l, modem::PILOT_PAIRS, true, &pat);
     if (static_cast<int>(c.size()) >= modem::PILOT_PAIRS) {
-        const bool ok = mean(c) > modem::pilot_noise(l.spec->band);
+        const bool ok = mean(c) > modem::pilot_noise(l.spec->band) && pat > modem::pilot_pattern(l.spec->band);
+        dark_ = ok ? 0 : dark_ + 1;
         // a copy lock is one header copy: confirmed (no further search) at
         // the single-copy commit score
         confirmed_ = ok && p.score() >= (p.copy() ? modem::COPY_COMMIT_SCORE : SUSPECT_SCORE);
@@ -400,7 +409,50 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
     pending_ = q;
     pilots_ok_ = q->is_cpm() || q->copy() || q->score() >= SUSPECT_SCORE;
     confirmed_ = false;
+    dark_ = 0;
+    looked_ = false;
     out.push_back(HeaderEvent{*pending_, off_ + len()});
+    return true;
+}
+
+bool Receiver::release(std::vector<Item>& out) {
+    const Pending& p = *pending_;
+    if (release_s <= 0 || p.is_cpm() || p.score() >= (p.copy() ? modem::COPY_COMMIT_SCORE : SUSPECT_SCORE) ||
+        static_cast<double>(dark_) * HOP < release_s * config::FS)
+        return false;
+    const auto a = static_cast<std::size_t>(std::clamp<int64_t>(p.start() - off_, 0, len()));
+    out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.end())});
+    drop();
+    // as a suspect burst's end: keep the last search window and every CPM front waiting
+    int64_t keep = keep_;
+    for (const auto& w : cpm_wait_) keep = std::max(keep, len() - (w.first - off_));
+    trim(keep);
+    return true;
+}
+
+// A CPM early lock (front + header copy 1), once its mid block and second
+// header copy are in: under cpm::CONFIRM_LLR there the burst is not there,
+// and it is let go as release lets an OFDM one (receiver.Receiver._unconfirmed).
+bool Receiver::unconfirmed(std::vector<Item>& out) {
+    const Pending& p = *pending_;
+    if (!p.is_cpm() || looked_) return false;
+    const cpm::Lock& l = p.cpm();
+    const cpm::Grid& g = *cpm::grid(l.spec->grid);
+    if (l.copies >= tables::CPM.hdr_copies) {  // (a late, mid or primed lock)
+        looked_ = true;
+        return false;
+    }
+    if (off_ + len() < cpm::confirm_end(g, l) + g.T) return false;
+    looked_ = true;
+    cpm::Lock here = l;
+    here.start -= off_;
+    if (cpm::confirm(g, buf_, here) >= cpm::CONFIRM_LLR) return false;
+    const auto a = static_cast<std::size_t>(std::clamp<int64_t>(p.start() - off_, 0, len()));
+    out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.end())});
+    drop();
+    int64_t keep = keep_;
+    for (const auto& w : cpm_wait_) keep = std::max(keep, len() - (w.first - off_));
+    trim(keep);
     return true;
 }
 
@@ -409,6 +461,7 @@ std::vector<Event> Receiver::feed(std::span<const double> x) {
     for (auto& it : feed_deferred(x)) {
         if (auto* r = std::get_if<DecodeRequest>(&it)) out.emplace_back(decode(std::move(*r), accept_));
         else if (auto* h = std::get_if<HeaderEvent>(&it)) out.emplace_back(std::move(*h));
+        else if (auto* f = std::get_if<StreamFeed>(&it)) run(*f);
         else out.emplace_back(std::move(std::get<BurstEvent>(it)));
     }
     return out;
@@ -442,6 +495,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
     buf_.insert(buf_.end(), x.begin(), x.end());
     fresh_ += static_cast<int64_t>(x.size());
     std::vector<Item> out;
+    if (stream_) out.push_back(StreamFeed{stream_, std::vector<double>(x.begin(), x.end())});
     while (true) {
         if (!pending_) {
             // a burst's end is checked on every call; new preambles only every HOP samples
@@ -486,7 +540,15 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             // passed already); a suspect one waits for its pilots
             pilots_ok_ = p->is_cpm() || p->copy() || p->score() >= SUSPECT_SCORE;
             confirmed_ = false;
+            dark_ = 0;
+            looked_ = false;
             out.push_back(HeaderEvent{*p, off_ + len()});
+            if (stream_on_ && p->is_cpm()) {  // the buffer as decode() will read it (origin off_, untrimmed till then)
+                Pending q = *p;
+                q.shift(-off_);
+                stream_ = std::make_shared<cpm::Stream>(buf_, q.cpm(), stream_pass_);
+                out.push_back(StreamFeed{stream_, {}});
+            }
         }
         const Pending p = *pending_;
         if (off_ + len() < p.end() + MARGIN) {
@@ -495,6 +557,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 // the later-header search is for false locks: a confirmed burst skips it
                 if (confirmed_) fresh_ %= HOP;
                 else if (supersede(out)) continue;
+                else if (release(out) || unconfirmed(out)) continue;
             }
             break;
         }
@@ -505,6 +568,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             req.at = off_;
             req.audio_lo = std::max<int64_t>(0, p.start() - off_);
             req.audio_hi = std::max(req.audio_lo, std::min(p.end() - off_, len()));
+            req.stream = std::move(stream_);
             out.push_back(std::move(req));
             last_start_ = p.start();
             // a CPM burst has no lead-out silence: with the sender's clock fast,

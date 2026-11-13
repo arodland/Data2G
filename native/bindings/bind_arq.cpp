@@ -51,6 +51,7 @@ arq::StationView station(const py::object& s) {
         v.held = s.attr("held").cast<std::int64_t>();
         v.misses = s.attr("misses").cast<int>();
         v.esc_floor = s.attr("esc_floor").cast<int>();
+        v.last_rx_data = s.attr("last_rx_data").cast<bool>();
         return v;
     }
     v.cap = s.attr("cap").cast<int>();
@@ -65,6 +66,7 @@ arq::StationView station(const py::object& s) {
     if (py::hasattr(s, "rx")) v.held = static_cast<long>(py::len(s.attr("rx").attr("buf")));
     v.misses = attr(s, "misses", 0);
     v.esc_floor = attr(s, "esc_floor", 0);
+    v.last_rx_data = py::bool_(attr<py::object>(s, "last_rx_data", py::bool_(true)));
     return v;
 }
 
