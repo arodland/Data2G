@@ -331,7 +331,9 @@ QJsonObject WebUi::status(Seqs& seq, bool hex) const {
 QJsonObject WebUi::settings() const {
     QJsonObject o{{"values", QJsonObject::fromVariantMap(app::settings_map(station_->args()))},
                   {"defaults", QJsonObject::fromVariantMap(app::settings_map(app::Args{}))},
-                  {"audio_io", qs(station_->args().audio_io)}};
+                  {"audio_io", qs(station_->args().audio_io)},
+                  {"live", QJsonArray::fromStringList(app::LIVE_SETTINGS)},  // taken without a restart (Station::update)
+                  {"running", station_->running()}};
     QJsonObject choices;
     for (const char* f : {"rig_data_bits", "rig_stop_bits", "rig_parity", "rig_handshake", "rig_dtr", "rig_rts", "ptt_method",
                           "ptt_audio", "rig_mode"}) {
@@ -413,7 +415,7 @@ WebUi::Reply WebUi::handle(const QByteArray& method, const QByteArray& target, c
         const app::Args a = app::from_settings(in.toVariantMap(), station_->args());
         if (const auto why = app::check(a)) return error(400, qs(*why));
         app::save_settings(store_, a);
-        if (a != station_->args() || !station_->running()) restart(a);
+        if (!station_->update(a)) restart(a);  // live where it can be: sessions and clients kept
         return {200, "application/json", json({{"ok", true}, {"running", station_->running()}, {"error", error_}})};
     }
     return error(404, QStringLiteral("no such endpoint"));

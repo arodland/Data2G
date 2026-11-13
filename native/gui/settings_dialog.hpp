@@ -27,6 +27,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QFormLayout;
 class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSettings;
@@ -43,8 +44,11 @@ class SettingsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    // Device lists from the audio backend (empty without one).
-    SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, QWidget* parent = nullptr);
+    // Device lists from the audio backend (empty without one). `running`: the
+    // station is, so OK on a change it can't take live (app::needs_restart)
+    // drops its sessions and clients; a note by the buttons says so.
+    SettingsDialog(const app::Args& a, const QStringList& inputs, const QStringList& outputs, bool running = false,
+                   QWidget* parent = nullptr);
     void apply_to(app::Args& a) const;
 
 private:
@@ -83,6 +87,7 @@ private:
     QSlider* effort_;      // decoder effort, the LDPC iteration cap / 5 (EFFORT_MIN-EFFORT_MAX steps)
     QComboBox* cw_id_;     // off, add, only (its item data)
     QSpinBox* cw_wpm_;
+    QLabel* restart_note_;  // shown while OK would restart a running station
 };
 
 }  // namespace data2g::gui

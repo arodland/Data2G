@@ -204,7 +204,7 @@ std::vector<std::uint8_t> npz_f32(const std::string& name, std::span<const float
     return out;
 }
 
-Recorder::Recorder(const std::string& dir, const std::string& call, bool async) : dir_(dir), async_(async) {
+Recorder::Recorder(const std::string& dir, const std::string& call, bool async, double t0) : dir_(dir), t0_(t0), async_(async) {
     std::filesystem::create_directories(dir_);
     log_.open(dir_ + "/events.jsonl", std::ios::app);
     audio_.open(dir_ + "/audio_in.f16", std::ios::app | std::ios::binary);
@@ -299,7 +299,7 @@ std::string Recorder::rx(double t, std::span<const double> audio, const receiver
                                                         static_cast<std::streamsize>(npz.size()));
         },
         bytes);
-    event("rx", {{"t", json_num(t)},
+    event("rx", {{"t", json_num(this->t(t))},
                  {"file", json_str(name)},
                  {"submode", json_str(spec_name(header))},
                  {"n_cw", std::to_string(header.n_cw())},
@@ -401,6 +401,14 @@ void Engine::set_call(const std::string& call, const std::vector<std::string>& a
     aliases_.clear();
     for (const auto& a : aliases) aliases_.push_back(upper(a));
     if (idle()) listen(session_->state == SessionState::LISTEN);
+}
+
+void Engine::set_record_dir(const std::string& dir) {
+    rec_.reset();  // its writer drains first
+    cfg_.record_dir.clear();
+    if (dir.empty()) return;
+    rec_.emplace(dir, call_, cfg_.record_async, now());  // now(): the next block's start, its audio's first sample
+    cfg_.record_dir = dir;
 }
 
 void Engine::abort() {
@@ -787,7 +795,7 @@ Engine::Done Engine::process(Block& b) {
                 cw_plan({marker}, {len - static_cast<std::size_t>(ptt_delay_)}, t);  // a Hand is covered by CW planning like any other transmission; start_tx's length convention: the PTT delay prefix apart
                 hand_event("HAND SENT " + std::to_string(ht.channel));
                 if (rec_)
-                    rec_->event("hand_tx", {{"t", json_num(now())}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
+                    rec_->event("hand_tx", {{"t", json_num(rec_->t(now()))}, {"channel", std::to_string(ht.channel)}, {"seconds", json_num(static_cast<double>(len) / config::FS)}});
             } else {
                 log_write(LOG, INFO, format("hand %d not sent: busy past the slot", ht.channel));
                 hand_event("HAND DROPPED " + std::to_string(ht.channel));
@@ -1309,7 +1317,7 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
             }
             const double seconds =
                 static_cast<double>(lens[j] + (j == 0 ? static_cast<std::size_t>(ptt_delay_) : 0)) / config::FS;
-            rec_->event("tx", {{"t", json_num(t)},
+            rec_->event("tx", {{"t", json_num(rec_->t(t))},
                                {"submode", json_str(burst->submode)},
                                {"burst_seq", std::to_string(burst->burst_seq)},
                                {"slots", slots + "]"},
