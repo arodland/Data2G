@@ -93,9 +93,14 @@ Darwin)
 *)
     out="$OUT_BASE.AppImage"
     ait_version=1.9.1
-    case "$(uname -m)" in
+    # The userland's word size, not just uname: a 32-bit Raspberry Pi OS (and
+    # the CI container) runs on a 64-bit kernel, where uname says aarch64.
+    machine="$(uname -m)"
+    [ "$machine" = aarch64 ] && [ "$(getconf LONG_BIT)" = 32 ] && machine=armv8l
+    case "$machine" in
         x86_64)        arch=x86_64;  ait_sha=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 ;;
         aarch64|arm64) arch=aarch64; ait_sha=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
+        armv7l|armv8l) arch=armhf;   ait_sha=42b61cba5495d8aaf418a5c9a015a49b85ad92efabcbd3c341f1540440e4e23d ;;
         *) echo "make_installer: no appimagetool pinned for $(uname -m)" >&2; exit 1 ;;
     esac
     ait="$DEPS_DIR/appimagetool-$ait_version-$arch"
