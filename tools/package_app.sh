@@ -62,6 +62,18 @@ MINGW*|MSYS*|CYGWIN*)
     for a in "${apps[@]}"; do deploy+=("$app/$a.exe"); done
     windeployqt --release --no-translations --no-system-d3d-compiler \
         --no-opengl-sw "${deploy[@]}"
+    # The MSVC runtime beside the exes (app-local), so neither the installer
+    # nor the portable zip depends on the system's vc_redist. v0.4.3 loaded
+    # System32's MSVCP140 14.32 and crashed in std::mutex::lock: binaries from
+    # MSVC 14.40+ need a runtime at least that new. VCToolsRedistDir comes
+    # from the MSVC environment (vcvars, ilammy/msvc-dev-cmd in CI).
+    if grep -aqi 'msvcp140\.dll' "$app/data2g-host.exe"; then
+        [ -n "${VCToolsRedistDir:-}" ] || { echo "package_app: VCToolsRedistDir unset; run from an MSVC developer environment" >&2; exit 1; }
+        crt=("$(cygpath -u "$VCToolsRedistDir")"/x64/Microsoft.VC*.CRT)
+        [ -d "${crt[0]}" ] || { echo "package_app: no MSVC runtime under $VCToolsRedistDir/x64" >&2; exit 1; }
+        cp "${crt[0]}"/*.dll "$app/"
+        echo "package_app: MSVC runtime from ${crt[0]}"
+    fi
     ;;
 
 # ------------------------------------------------------------------ macOS
