@@ -687,9 +687,17 @@ def test_bcast_commands_and_statuses():
     from data2g.arq.engine import receive_accept  # max codewords: what a receiver takes, not the header's 64
 
     rx = dict(receive_accept().max_cw)
-    lines = {ln.split()[1]: int(ln.split()[4]) for ln in h.out_cmd[:-1]}
+    lines = {ln.split()[1]: int(ln.split()[4]) for ln in h.out_cmd[:-1] if ln.startswith("MODE ")}
     # qpsk-r1/5 (46 B): a 256-byte frame (259 B framed) and 4 control codewords sent twice
     assert all(lines[n] == rx[n] for n in lines if n in rx) and lines["qpsk-r1/5"] == 8 + 6
+    # then CHANNELS and a THRESHOLD per mode, same order, as mode_thresholds.json has them (99: "-")
+    from data2g.arq.policy import MODE_THRESHOLDS
+
+    assert h.out_cmd[len(lines)] == "CHANNELS awgn mpg mpp mpd" and len(h.out_cmd) == 2 * len(lines) + 2
+    thr = [ln.split() for ln in h.out_cmd[len(lines) + 1:-1]]
+    assert [t[:2] for t in thr] == [["THRESHOLD", n] for n in lines]
+    assert all(tuple(99.0 if v == "-" else float(v) for v in t[2:]) == MODE_THRESHOLDS[t[1]] for t in thr)
+    assert "-" in {v for t in thr for v in t[2:]}  # the 99 mapping is exercised
     h.client_gone()
     assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto, link.ports[0].dup) == (BROADCAST[2],
                                                                                                        False, False)

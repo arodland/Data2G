@@ -15,6 +15,7 @@
 #include "cwid/cwid.hpp"
 #include "hand/hand.hpp"
 #include "tables/cpm.hpp"
+#include "tables/predictor.hpp"
 
 namespace data2g::host {
 
@@ -97,6 +98,18 @@ std::vector<std::string> mode_lines(int cap) {
         std::snprintf(buf, sizeof buf, "MODE %s %.0f %d %d %.2f %.2f", std::string(m->name).c_str(), arq::width_hz(*m),
                       arq::payload_bytes(*m), n, arq::burst_seconds(*m, 1, false), arq::burst_seconds(*m, n, false));
         out.emplace_back(buf);
+    }
+    std::string ch = "CHANNELS";
+    for (const auto c : tables::MODE_CHANNELS) (ch += ' ') += c;
+    out.push_back(std::move(ch));
+    for (const auto* m : ms) {  // 99 in the file: never reached in the study
+        std::string t = "THRESHOLD " + std::string(m->name);
+        for (const double db : arq::mode_thresholds(m->name)) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, " %g", db);
+            t += db >= 99 ? " -" : buf;
+        }
+        out.push_back(std::move(t));
     }
     return out;
 }

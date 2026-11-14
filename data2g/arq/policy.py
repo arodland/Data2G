@@ -90,7 +90,9 @@ LADDER_STEP_DB = 3.0
 LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
-MODE_THRESHOLDS = {m: tuple(v) for m, v in json.load(open(P.DATA / "mode_thresholds.json"))["modes"].items()}
+_THRESHOLDS = json.load(open(P.DATA / "mode_thresholds.json"))
+MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items()}
+MODE_CHANNELS = tuple(_THRESHOLDS["channels"])  # native: tables::MODE_CHANNELS
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
 # vs ack-4f's 79%): the loss study got worse in every cell (MPP 0 dB 248 ->
 # 187 bps), likely because polls are what the receiver measures, and a 500 Hz

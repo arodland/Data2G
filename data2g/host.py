@@ -35,7 +35,8 @@ off, with the ID frames, or in their place; without DATA2G ON, VARA's CWID is
 accepted and ignored: the operator's --cw-id stands); broadcast:
 BCAST OPEN group [FROM call] (-> BCAST PORT n), BCAST CLOSE n, BCAST MODE n
 [AUTO] [DUP] mode, MODES (MODE name bandwidth bytes-per-codeword max-codewords
-seconds-at-1 seconds-at-max lines); show of hands (Data2G, docs/arq.md §9):
+seconds-at-1 seconds-at-max lines, then CHANNELS c... and THRESHOLD name dB...
+lines: mode_lines); show of hands (Data2G, docs/arq.md §9):
 HAND SEND ref tag d channel hex16 (send a Hand d seconds after the end of
 heard burst ref, shifted by its cfo), HAND LISTEN d tag ack channel [...]
 (decode the window after the burst carrying KISS ACKMODE tag ack ends) and
@@ -102,18 +103,25 @@ IGNORED = {"COMPRESSION", "PUBLIC", "P2P", "WINLINK", "REGISTERED", "ENCRYPTION"
 def mode_lines(cap: int) -> list[str]:
     """MODES: one line per mode within the cap, narrowest first: name,
     bandwidth (Hz), bytes per codeword, max codewords (what a receiver
-    takes: engine.receive_accept), and airtime (s) at 1 and at max codewords."""
+    takes: engine.receive_accept), and airtime (s) at 1 and at max codewords.
+    Then CHANNELS (the threshold columns) and, per mode in the same order,
+    THRESHOLD name dB...: its 10% codeword failure SNR per channel, as in
+    codes_data/mode_thresholds.json, "-" where the study never reached it."""
     from . import codes, cpm
     from .arq import policy as G
     from .arq.engine import receive_accept
     from .arq.modes import burst_seconds, is_cpm
 
     rx = dict(receive_accept().max_cw)
+    ms = sorted(G.allowed(cap), key=lambda s: (G.width_hz(s), s.name))
     out = []
-    for s in sorted(G.allowed(cap), key=lambda s: (G.width_hz(s), s.name)):
+    for s in ms:
         n = 1 + cpm.MAX_DATA if is_cpm(s) else rx[s.name]
         out.append(f"MODE {s.name} {G.width_hz(s):.0f} {codes.payload_bytes(s)} {n} "
                    f"{burst_seconds(s, 1):.2f} {burst_seconds(s, n):.2f}")
+    out.append("CHANNELS " + " ".join(G.MODE_CHANNELS))
+    for s in ms:  # 99 in the file: never reached in the study
+        out.append(f"THRESHOLD {s.name} " + " ".join("-" if t >= 99 else f"{t:g}" for t in G.MODE_THRESHOLDS[s.name]))
     return out
 
 

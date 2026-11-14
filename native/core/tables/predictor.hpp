@@ -60,6 +60,8 @@ struct ModeThreshold {
     std::array<double, 4> db;
 };
 extern const std::span<const ModeThreshold> MODE_THRESHOLDS;
+// Their channel names (mode_thresholds.json "channels", policy.MODE_CHANNELS).
+inline constexpr std::array<std::string_view, 4> MODE_CHANNELS = {"awgn", "mpg", "mpp", "mpd"};
 // AWGN BICM capacity (bits per coded bit) over CAPACITY_GRID (dB), per
 // constellation family (predictor.CONSTS order).
 struct CapacityTable {
