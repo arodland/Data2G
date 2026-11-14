@@ -67,8 +67,9 @@ struct Args {
 };
 
 // The command line over `a` (defaults, or what a front end saved). Exits as
-// argparse does on -h and on a bad flag. `prog` names the binary in errors.
-Args parse(int argc, char** argv, Args a = {}, const char* prog = "data2g-host");
+// argparse does on -h and on a bad flag. `prog` names the binary in errors;
+// `extra_help` (the front end's own flags) follows the shared help text.
+Args parse(int argc, char** argv, Args a = {}, const char* prog = "data2g-host", const char* extra_help = "");
 [[noreturn]] void usage_error(const std::string& msg, const char* prog = "data2g-host");
 // What main() checks once parsed; the message, or nullopt when fine.
 std::optional<std::string> check(const Args& a);
