@@ -1,0 +1,20 @@
+/* Print style for docs/user-guide-pdf.sh */
+@page { size: letter; margin: 22mm 20mm; }
+html { font: 10.5pt/1.45 "Source Serif 4", "Noto Serif", Georgia, serif; color: #1a1a1a; }
+body { max-width: none; margin: 0; padding: 0; }
+h1, h2, h3, th { font-family: "Inter", "Noto Sans", "Helvetica Neue", Arial, sans-serif; }
+h1.title { font-size: 26pt; margin: 30mm 0 2mm; }
+h1 { font-size: 16pt; margin-top: 0; padding-bottom: 2pt; border-bottom: 1px solid #999; break-before: page; }
+h1.title, h1#contents { break-before: auto; }
+h2 { font-size: 12pt; margin: 14pt 0 4pt; }
+h1, h2 { break-after: avoid; }
+a { color: #1a4f9c; text-decoration: none; }
+code { font: 0.86em "DejaVu Sans Mono", "Noto Sans Mono", Menlo, Consolas, monospace; background: #f1f2f4; padding: 0 2px; border-radius: 2px; white-space: nowrap; }
+pre { background: #f1f2f4; padding: 6pt 8pt; border-radius: 3px; break-inside: avoid; overflow: hidden; }
+pre code { background: none; padding: 0; white-space: pre-wrap; }
+table { border-collapse: collapse; margin: 8pt 0; width: 100%; break-inside: avoid; }
+th, td { border-bottom: 1px solid #ccc; padding: 3pt 6pt; text-align: left; vertical-align: top; }
+th { font-size: 9pt; border-bottom: 1.5px solid #555; }
+li { margin: 2pt 0; }
+img { max-width: 100%; max-height: 105mm; display: block; margin: 8pt auto; break-inside: avoid; }
+h1#glossary ~ table td:first-child, td:first-child { white-space: nowrap; }

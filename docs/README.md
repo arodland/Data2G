@@ -6,6 +6,7 @@ at the time, with names that may since have moved.
 
 | Doc | Kind | What |
 |---|---|---|
+| [user-guide.md](user-guide.md) | Guide | For operators: installing, radio setup, connecting apps, the modem in plain terms, the screen, troubleshooting. `user-guide-pdf.sh` makes the PDF; the release workflow attaches it to each release. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Map | Pipelines, layers, Python and native, the parity contract, where to start. |
 | [arq.md](arq.md) | Spec | The connected ARQ protocol: burst layout, control word, sessions, the gear shifter, state agreement. |
 | [bulk.md](bulk.md) | Experiment | data2g-bulk: one-way text transfer with RV 1 copies and timed bursts, and its studies. Not finished, no native port; may be reworked or dropped. |
