@@ -52,6 +52,8 @@ Honorable mention:
 
 ## Installing and Running
 
+The User's Guide covers installing, radio setup, connecting applications, and what everything on the screen means. Read it [online](docs/user-guide.md) or as a [PDF](https://github.com/arodland/Data2G/releases/latest/download/data2g-user-guide.pdf).
+
 Go to the [Releases page](https://github.com/arodland/Data2G/releases/latest) and find the download for your platform. Windows, macOS, and Linux are supported. Data2G-GUI is the GUI app with a live waterfall and settings dialog, while Data2G-Host provides all of the same features headless, with command-line flags.
 
 Most 64-bit Intel and all Apple Silicon machines should have plenty of horsepower to run Data2G.
