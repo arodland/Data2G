@@ -8,7 +8,9 @@ Status: draft for discussion, 2026-11-13. Nothing here is built.
 - "Narrow" is a retune of the existing 8 kHz OFDM (w48 already sits at 350..2700 Hz). "Wide" is the same modem clocked at 16 kHz, then widened. Neither needs a new waveform family.
 - The structural cost is making `config.FS` and the mode tables a per-profile choice (HF or FM) in Python and native. Decide how before any FM mode is frozen (question Q1).
 - Rate targets are VARA FM 4.0's: 12750 bps narrow, 25210 bps wide. Both are reachable with 55 carriers and a 256-point r5/6 top rung.
-- Four decisions are the user's: Q1 (profile mechanism), Q2 (how low the floor goes), Q3 (digipeating), Q4 (VARA FM host dialect). The rest are measurements.
+- The transmitted signal must measure 15 kHz occupied or less. That makes deviation a design output of the simulator, and on wide it trades audio bandwidth against deviation.
+- Decided: digipeating and repeaters are after the first release, the host only has to work with Pat and Winlink Express at the TNC layer, I/Q receive is an investigation (M10).
+- Still the user's: Q1 (profile mechanism), Q2 (how low the floor goes), Q15 (which bandwidth definition). The rest are measurements.
 
 ## What the others do
 
@@ -87,7 +89,18 @@ Targets this sets (rates only; the SNR each needs is still M0's job):
 6. Fixed stations see a static channel. Mobile stations see Rayleigh flutter at 10..50 Hz, which the discriminator turns into click bursts and millisecond dropouts, not into smooth audio fading. The answer is erasure of hit symbols and interleaving, not Doppler tracking.
 7. Radios key in 20..300 ms and are quiet in milliseconds. HF's `TURN_S = 1.3` and long bursts are the wrong trade: FM wants short overs.
 8. Squelch, tone squelch and key-up transients (PLL settle, a DC step through the AC coupling) eat the start of a burst.
-9. Repeaters add a second pre/de-emphasis pair, clipping, audio delay, hang time and time-out timers.
+9. Repeaters add a second pre/de-emphasis pair, clipping, audio delay, hang time and time-out timers. Not a goal for the first release.
+
+## Constraint: 15 kHz occupied
+
+The RF signal's measured occupied bandwidth is at most 15 kHz, standard amateur FM practice. Measured, not Carson's estimate.
+
+- Carson's rule is written for peaks: 2 x (3 kHz + 5.7 kHz) says 17.4 kHz for a VARA-like wide mode. The measured width of an OFDM-modulated carrier is set mostly by rms deviation and the top audio frequency, and OFDM's rms sits 6..9 dB under its peak, so the real figure is lower. How much lower is the first thing M1 has to report.
+- First-order sidebands reach the top audio frequency each side (11.4 kHz total at 5.7 kHz). Second-order sidebands reach twice that and grow with the square of the modulation index. They are what the limit actually bounds.
+- So each mode gets a deviation target from the simulator: the largest rms deviation whose spectrum still fits. Robust modes may get more (VardeFM already drives its low levels harder).
+- On wide this couples band edge to SNR. A higher top carrier leaves less room for deviation, and audio SNR goes with deviation squared while discriminator noise rises with frequency squared. The band's top edge, the TX tilt and the deviation are one optimisation, not three (M5).
+- On a flat port with no limiter the binding limit is then occupied bandwidth (an rms quantity), not peak deviation. Peaks still matter to the receiver's IF filter and to any radio that does limit. Clip headroom per mode gets re-picked under both.
+- The tune procedure (M7) has to land users on the target deviation, or the limit is only true on paper.
 
 ## Milestones
 
@@ -103,7 +116,9 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
 ### M1. FM channel simulator (`data2g/fmchannel.py`, about 300 lines)
 
 - Audio in, audio out, at any FS. Inside: optional pre-emphasis, limiter and splatter filter (mic path) or flat (9600 path), FM modulator at complex baseband, IF filter (12.5 or 25 kHz channel), flat Rayleigh/Rician fading at a Doppler, AWGN at a CNR, RF offset, limiter-discriminator, optional de-emphasis and 300 Hz high-pass, sample-clock offset.
-- Knobs for the ugly parts: key-up transient, receive audio settling after the station's own transmission (VARA FM added equalisation for it), squelch gate with an opening delay, squelch-tail burst, CTCSS leak, mic-input AGC/compressor, weak low-frequency response, a repeater (two hops with a clipper between).
+- Knobs for the ugly parts: key-up transient, receive audio settling after the station's own transmission (VARA FM added equalisation for it), squelch gate with an opening delay, squelch-tail burst, CTCSS leak, mic-input AGC/compressor, weak low-frequency response. A repeater model (two hops with a clipper between) waits until repeaters are in scope.
+- Reports the RF signal's occupied bandwidth (99% power, and the -26 dB width) for any audio and drive, and solves for the drive that meets 15 kHz. Every mode's deviation target comes from this.
+- Exposes the complex baseband after the IF filter, so M10 can try other demodulators on the same trials.
 - Same call shape as `hfchannel.apply_channel` so `with_native.py`, the loss study and the session study take it as another channel name.
 - Calibrate against recordings of real radios (M0). Unlike HF paths, a radio's audio response is repeatable, so here recordings are good evidence (my reading, check it holds).
 - Depends: nothing. Everything else depends on it.
@@ -135,6 +150,7 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
   - Bottom rungs: VARA's are fewer carriers, not lower rates. The existing w (1200 Hz) and n10 (500 Hz) QPSK modes play the same part and already go lower (128 bps against 549).
   - Clip headroom per mode, re-picked under a peak-deviation limit with pre-emphasis and the radio's limiter in the loop.
   - TX tilt, so the pre-emphasised signal uses the deviation budget evenly.
+  - Deviation target per mode under the 15 kHz limit. With audio to 3.15 kHz the radio's own limiter (5 kHz peak) probably binds first; confirm on M1.
 - Drop the n4 and CPM families from the FM profile unless Q2 says otherwise. Keep w and n10 QPSK rungs as the floor and for ACKs.
 - Depends: M1, M3 (the erasure changes which rungs survive flutter), M0 for targets, M2 to freeze.
 
@@ -144,7 +160,8 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
 - Step 2: a wider band on the same grid, about 300..5700 Hz (55 carriers, the count M4's narrow band uses, so its pilot and header layout are shared). Arithmetic: about 19 kbit/s with today's top code, 25.5 kbit/s with 256-point r5/6, 30.6 with M4's prefix and pilot savings. VARA FM's top is 25210.
 - A narrower wide band (about 4.6 kHz, as VARA's 98 carriers) for ports that roll off early: on this grid it is just fewer carriers.
 - Step 3: fit the f-squared noise. A fixed TX tilt first (VardeFM uses +3 dB/octave). Per-carrier bit loading only if the fixed tilt leaves several dB on the table.
-- Check real 9600 ports: many roll off before 6 kHz, and deviation 3 kHz plus 6 kHz audio is 18 kHz by Carson's rule, wider than some IF filters. The band edge is a measurement (Q7).
+- Top edge, tilt and deviation chosen together under the 15 kHz limit (see the constraint section). Expect the answer to sit below VARA's 5.7 kHz for the weaker rungs: the narrower wide band above is also the one that affords more deviation.
+- Check real 9600 ports: many roll off before 6 kHz (Q7).
 - OFDM starts at 300 Hz, so ordinary AC-coupled sound cards work. A single-carrier FSK floor mode would need response to a few Hz. Not planned.
 - Depends: M1 (flat path), M2 (FS per profile, which is most of M2's cost), M3 (coloured noise).
 
@@ -160,6 +177,7 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
 - Deviation tune: a tone and a modem-like test burst, level meters, and a report of the far end's reading. VARA FM's Autotune steps the drive level against a remote station and gives a verdict with S/N and VU; users will expect the same. `sounding.py` is the starting point.
 - Ping: S/N and input level at both ends without opening a session, through digipeaters if M8 has them.
 - TX delay per station, with guidance for handhelds (squelch-tail elimination off).
+- A station receiving I/Q (M10) can measure the far end's deviation and occupied bandwidth in Hz, which turns Autotune from "sounds right" into a check of the 15 kHz limit.
 - Overdrive diagnostic: the signature seen on 2026-10-31 (OFDM SNR pinned near the PAPR while FSK reads 25 dB or more) as a plain warning to the operator.
 - Radio path setting: mic or flat, which picks narrow or wide and the TX tilt.
 - PTT: `native/core/rig` has no CM108/CM119 GPIO keying that I could find. Most FM sound-card interfaces (AIOC, DigiRig Lite, DRA, Masters Communications) use it or serial RTS. Confirm and add.
@@ -167,8 +185,8 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
 
 ### M8. Host and network features
 
-- VARA FM host dialect so Winlink Express and Pat treat the modem as VARA FM (Q4). Known differences to check: `CONNECTED` carries NARROW or WIDE, no BW commands.
-- Digipeating (Q3). VARA FM's shape: one or two hops named in the connect, a digipeater callsign separate from the gateway's, a freestanding relay with a retries setting. A link-layer feature with ARQ consequences (who acknowledges, timing across hops). Its own design doc if wanted.
+- TNC-layer compatibility with Pat's and Winlink Express's "VARA FM" session types. Both have the user pick VARA HF or VARA FM first, so the version reply need not imitate VARA. The work is a test against each client and accepting whatever they send in FM mode that `host.py` does not know (candidates: no BW commands, NARROW or WIDE on `CONNECTED`, `via` on `CONNECT`).
+- Digipeating: in scope, after the first release. VARA FM's shape: one or two hops named in the connect, a digipeater callsign separate from the gateway's, a freestanding relay with a retries setting. Its own design doc when it starts. For now only two cheap things: `CONNECT ... via` gets a clean refusal, and the FM session's connect frame is checked for room to carry via calls before its version is frozen (M6).
 - S/N reports to the host, and a log of stations heard.
 - KISS and broadcast should work unchanged over the FM profile. Verify, do not redesign.
 - Depends: M6.
@@ -177,18 +195,39 @@ Dependencies are named by ID. Sizes are rough new or changed lines of Python, na
 
 - Native port of M3..M6, generated tables per profile, `native/build-test` ctest.
 - Pi 4 bench: wide at 20 kbit/s is about 2.5x the LDPC work per second of today's top mode, against a turnaround four times shorter. Decode must stream during the burst (as CPM now does) or the turnaround target moves.
-- On-air trials on at least: two mobiles/handhelds on mic, two 9600-port radios, one mixed pair, one repeater.
+- On-air trials on at least: two mobiles/handhelds on mic, two 9600-port radios, one mixed pair. Simplex only. Measure occupied bandwidth of each on a spectrum display.
 - User guide chapter, speed sweep per `docs/speedtests/README.md`.
 - Depends: all of the above.
+
+### M10. Investigation: I/Q receive with ordinary FM transmit
+
+Few stations can transmit from I/Q, but a fair number can receive it (a separate SDR receiver, an IC-9700, a FlexRadio) while transmitting through a normal FM radio. This is receiver-only: no protocol change, and the far end need not know.
+
+What it could buy, in the order I would test it:
+
+- Our own discriminator. No radio audio filters, no de-emphasis, no squelch, no 9600-port roll-off, a known flat response to any band edge. This alone may make "wide" receivable by a station whose radio has no flat output.
+- Erasures from the RF envelope. Below threshold, clicks happen when the carrier envelope dips, and with I/Q the dip is visible. That replaces guessing click positions from audio (M3) with knowing them, under noise and under mobile flutter.
+- A real CNR. Audio SNR saturates above threshold and says nothing about margin to the cliff. CNR from I/Q gives the gear shifter that margin directly (M6).
+- Threshold extension: a tracking (PLL or feedback) demodulator in place of the limiter-discriminator. Textbook gain is a few dB of CNR at the cliff.
+- Decision-directed demodulation: re-modulate the decoded burst and correlate at RF. Research, only if the steps above leave a visible gap.
+- Measuring the far end's deviation and occupied bandwidth (M7).
+
+What it costs: an I/Q input path (stereo I/Q on a sound device first; network SDR sources only if that proves the case), tuning offset removal, muting and recovery around our own transmission, and whatever latency the SDR adds to the turnaround.
+
+Method: simulator only at first. M1 already has the complex baseband, so the same trials run through the radio audio path, a software discriminator, discriminator plus envelope erasures, and a tracking demodulator. Judge by the dB of CNR where each rate is reached, AWGN and flutter. Build the input path only if that is worth more than about 2 dB or enables wide on radios that cannot otherwise receive it.
+
+Depends: M1, M3. Independent of M2 and the ladders.
 
 ## Dependency summary
 
 ```
 M1 sim ──┬─> M0 baseline ──> targets for M4, M5
          ├─> M3 receiver ──┬─> M4 narrow ──┐
-         │                 └─> M5 wide ────┼─> M6 ARQ + shifter ──> M8 host/digi ──> M9
+         │                 └─> M5 wide ────┼─> M6 ARQ + shifter ──> M8 host ──> M9
 Q1 ──> M2 profiles ────────────> (freeze M4, M5, M6)
 M7 tools: independent, needs M2 only for UI
+M10 I/Q receive study: needs M1, M3; feeds M3 (erasures), M6 (CNR), M7 (deviation)
+digipeating, repeaters: after the first release
 ```
 
 First three pieces of work, in order: M1, the on-air half of M0, M3. None needs a decision.
@@ -199,10 +238,15 @@ Decisions for the user:
 
 - Q1. Profile mechanism. One codebase with a profile fixed at start (recommended), a runtime switch inside one binary, or a fork? A runtime switch means templating or namespacing every constexpr in native.
 - Q2. How low does the FM floor go? VARA FM stops at 549 bps (4PSK on 14 carriers). The CPM floor reaches SNRs FM audio never delivers with a usable carrier, and squelch hides them anyway. Recommendation: keep the w and n10 QPSK rungs (down to 128 bps), no CPM, no n4.
-- Q3. Digipeating: in scope, and how many hops? VARA FM does two and sells it as the disaster fallback for gateways. VardeFM does not have it.
-- Q4. Should the FM host present as VARA FM (so existing Winlink clients work untouched) or only as Data2G?
-- Q5. Is over-repeater operation a goal for the first release, or simplex only?
-- Q6. Direct SDR operation (modem does its own FM modulation and discrimination from IQ) is the natural end of "direct taps". M1 contains the code for it. In scope later, or never?
+- Q15. Which bandwidth definition does "15 kHz occupied" mean: 99% power (ITU) or the -26 dB width (US Part 97)? M1 reports both. Until told otherwise the target is the stricter of the two per mode.
+- Q16. Are 12.5 kHz channels (2.5 kHz deviation, about 11 kHz occupied) a case to support, or is 15 kHz the only target?
+
+Decided (2026-11-13):
+
+- Q3. Digipeating is in scope, not needed for the first release.
+- Q4. No imitation of VARA's version reply. Compatible enough at the TNC layer for Pat and Winlink Express in their VARA FM session types.
+- Q5. Repeaters are not needed for the first release.
+- Q6. I/Q transmit is rare and not planned. I/Q receive with FM transmit is investigated (M10).
 
 Measurements that decide design:
 
@@ -212,7 +256,8 @@ Measurements that decide design:
 - Q10. Does symbol erasure plus the existing interleaver hold a mobile link at 20..50 Hz flutter, or do the codewords need to be longer in time?
 - Q11. Wide at FS 16000 or 24000? 16000 keeps every sample count and reaches 6 kHz with a 2 kHz transition band. 24000 only matters if radios pass more than 6 kHz, which Q7 answers.
 - Q12. Pi 4 decode budget at 20 kbit/s with a 0.3 s turnaround.
-- Q13. Regulatory check on occupied bandwidth and symbol-rate limits for the wide mode on 2 m and 70 cm (US Part 97 at least). Not verified here.
+- Q13. Regulatory check beyond the 15 kHz target: symbol-rate or other limits for the wide mode on 2 m and 70 cm (US Part 97 at least). Not verified here.
+- Q17. How much deviation does 15 kHz allow at each candidate top edge (3.15, 4.6, 5.7 kHz), and does VARA FM wide at its recommended drive actually fit? Sets whether matching 25210 bps is possible inside the limit at all.
 - Q14. VARA FM's thresholds per level on the same simulator, for a like-for-like target. Its rates are in the chart above.
 
 ## Not planned
