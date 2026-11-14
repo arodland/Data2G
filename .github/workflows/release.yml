@@ -134,8 +134,12 @@ jobs:
   # After the native build, so a native failure never leaves a Play upload
   # behind. Play refuses a version code twice: retry a release that failed
   # after this job with "Re-run failed jobs", which leaves it alone.
+  #
+  # Disabled: the Android build has problems to solve first. To re-enable,
+  # drop the `if` and put `android` back in publish's `needs`.
   android:
     name: Android
+    if: false
     needs: [resolve, build]
     uses: ./.github/workflows/android-build.yml
     with:
@@ -146,7 +150,7 @@ jobs:
 
   publish:
     name: Write the download table and publish
-    needs: [resolve, build, android]
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     steps:
       # The commit that was built, so its own release_notes.py writes the table.
