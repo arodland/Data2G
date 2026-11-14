@@ -184,7 +184,7 @@ std::string record_path(const Args& a) {
     return p.string();
 }
 
-Args parse(int argc, char** argv, Args a, const char* prog) {
+Args parse(int argc, char** argv, Args a, const char* prog, const char* extra_help) {
     std::map<std::string, bool*> flags = {
         {"--list-audio-devices", &a.list_audio_devices}, {"--list-modes", &a.list_modes}, {"--list-rigs", &a.list_rigs}};
     std::map<std::string, std::pair<bool*, bool>> switches = {
@@ -258,7 +258,7 @@ Args parse(int argc, char** argv, Args a, const char* prog) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "-h" || arg == "--help") {
-            std::printf("usage: %-11s %s%s", prog, USAGE, HELP);
+            std::printf("usage: %-11s %s%s%s", prog, USAGE, HELP, extra_help);
             std::exit(0);
         }
         std::optional<std::string> inline_value;

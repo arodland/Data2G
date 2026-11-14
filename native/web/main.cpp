@@ -181,7 +181,12 @@ int main(int argc, char** argv) {
     const auto shared = app::open_config(argc, argv);  // data2g-gui's too
     QSettings& store = *shared;
     if (set_password) return ask_password(store) ? 0 : 1;
-    const app::Args a = app::parse(int(rest.size()), rest.data(), app::load_settings(store), "data2g-web");
+    const app::Args a = app::parse(int(rest.size()), rest.data(), app::load_settings(store), "data2g-web",
+                                   "\ndata2g-web's own options:\n"
+                                   "  --web-listen ADDR     the web UI's address (default 127.0.0.1; no TLS, so 0.0.0.0\n"
+                                   "                        only on a network you trust)\n"
+                                   "  --web-port N          the web UI's port (default 8400; 0 picks a free one)\n"
+                                   "  --set-password        set the web UI's password, then exit\n");
     if (a.list_modes || a.list_audio_devices || a.list_rigs)
         app::usage_error("--list-modes, --list-audio-devices and --list-rigs are data2g-host's", "data2g-web");
     const auto level = app::parse_level(a.log_level);
