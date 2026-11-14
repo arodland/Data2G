@@ -52,6 +52,7 @@ PLATFORMS = [
     ("macos-x86_64", "macOS (Intel)"),
     ("linux-x86_64", "Linux (x86-64)"),
     ("linux-aarch64", "Linux (arm64)"),
+    ("linux-armhf", "Linux (32-bit ARM)"),
 ]
 
 # Which of a platform's two downloads is which. An installer registers

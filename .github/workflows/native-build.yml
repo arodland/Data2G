@@ -30,6 +30,73 @@ on:
         default: false
 
 jobs:
+  # 32-bit Raspberry Pi OS (armhf): saves memory on the small boards. GitHub
+  # has no 32-bit ARM runner, so this runs a linux/arm/v7 container on the
+  # arm64 one. Inside one `docker run`, because JavaScript actions (checkout,
+  # cache, upload) cannot run in a 32-bit container: they stay on the host.
+  #
+  # Differs from the main matrix, deliberately:
+  # - Debian trixie's Qt (6.8), not aqt's 6.11: aqt has no armhf Qt. Trixie
+  #   is Raspberry Pi OS's base, and its glibc is the floor (Pi OS 13+).
+  #   Code is armv7, so Pi 2 and later; a Pi 1 / Zero (armv6) cannot run it.
+  # - C++ tests only: no torch or pybind module for armhf here.
+  armhf:
+    name: Native (linux-armhf)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Cache native dependencies
+        uses: actions/cache@v6
+        with:
+          path: native/.deps
+          key: deps-linux-armhf-${{ hashFiles('native/cmake/*.cmake', 'tools/make_installer.sh') }}
+      - name: Name the package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: echo "pkg=data2g${VERSION:+-$VERSION}-linux-armhf" >> "$GITHUB_ENV"
+      - name: Build, test, package (armhf container)
+        run: |
+          docker run --rm --platform linux/arm/v7 -v "$PWD:/src" -w /src \
+            -e pkg debian:trixie bash -euo pipefail -c '
+            uname -m
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+              build-essential cmake ninja-build pkg-config ca-certificates curl file \
+              zlib1g-dev qt6-base-dev qt6-multimedia-dev qt6-websockets-dev \
+              qt6-qpa-plugins qt6-wayland desktop-file-utils appstream > /dev/null
+            cmake -S native -B native/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDATA2G_BUILD_PYMODULE=OFF \
+              -DDATA2G_BUILD_HOST=ON -DDATA2G_BUILD_QTAUDIO=ON -DDATA2G_BUILD_RIG=ON \
+              -DDATA2G_AUDIO_BACKEND=miniaudio -DDATA2G_BUILD_GUI=ON \
+              -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
+            cmake --build native/build --parallel
+            ctest --test-dir native/build --output-on-failure --timeout 600
+            tools/package_app.sh native/build dist
+            dist/data2g/data2g host --help > /dev/null
+            dist/data2g/data2g web --help > /dev/null
+            QT_QPA_PLATFORM=offscreen timeout 8 dist/data2g/data2g || [ $? -eq 124 ]
+            tar czf "$pkg.tar.gz" -C dist .
+            tools/make_installer.sh dist "$pkg"
+          '
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.pkg }}.tar.gz
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.pkg }}.AppImage
+          archive: false
+          if-no-files-found: error
+      - name: Attach to the release
+        if: inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+        run: gh release upload "$TAG" "$pkg.AppImage" "$pkg.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+
   native:
     name: Native (${{ matrix.label }})
     runs-on: ${{ matrix.os }}

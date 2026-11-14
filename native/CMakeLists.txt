@@ -95,6 +95,15 @@ if(NOT ZLIB_FOUND)  # Windows, Android: no system zlib
   include(zlib)
 endif()
 target_link_libraries(data2g_core PUBLIC Threads::Threads ZLIB::ZLIB)
+# 32-bit ARM (armhf): GCC turns 64-bit std::atomic ops into libatomic calls.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("#include <atomic>
+#include <cstdint>
+std::atomic<std::uint64_t> x{0};
+int main() { return static_cast<int>(x.fetch_add(1)); }" DATA2G_ATOMIC64_BUILTIN)
+if(NOT DATA2G_ATOMIC64_BUILTIN)
+  target_link_libraries(data2g_core PUBLIC atomic)
+endif()
 set_target_properties(data2g_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # GCC's -O2 cost model leaves polar's f/g loops scalar (1.7x on a decode)
 # and the outcome model's layer loops too (2x on a Pi 4 shifter decision),

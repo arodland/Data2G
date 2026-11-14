@@ -96,6 +96,8 @@ Darwin)
     case "$(uname -m)" in
         x86_64)        arch=x86_64;  ait_sha=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0 ;;
         aarch64|arm64) arch=aarch64; ait_sha=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158 ;;
+        # armv8l: a 32-bit userland on a 64-bit kernel (the CI container).
+        armv7l|armv8l) arch=armhf;   ait_sha=42b61cba5495d8aaf418a5c9a015a49b85ad92efabcbd3c341f1540440e4e23d ;;
         *) echo "make_installer: no appimagetool pinned for $(uname -m)" >&2; exit 1 ;;
     esac
     ait="$DEPS_DIR/appimagetool-$ait_version-$arch"
