@@ -79,6 +79,10 @@ jobs:
             QT_QPA_PLATFORM=offscreen timeout 8 dist/data2g/data2g || [ $? -eq 124 ]
             tar czf "$pkg.tar.gz" -C dist .
             tools/make_installer.sh dist "$pkg"
+            # uname says aarch64 in here; check what was actually built.
+            for f in "$pkg.AppImage" dist/data2g/bin/data2g-host; do
+              file -L "$f" | tee /dev/stderr | grep -q "ELF 32-bit LSB.*ARM"
+            done
           '
       - uses: actions/upload-artifact@v7
         with:
