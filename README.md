@@ -10,7 +10,7 @@ A 2400Hz channel is required for full speed but Data2G can be configured for a m
 
 ## Status
 
-This is beta-quality software. It's been tested on air, and I've successfully sent emails using it. I encourage people to try it out, but I don't guarantee that it's bug-free, I don't guarantee that the protocol won't still change, and I especially don't guarantee it for any life-safety purposes. This is an experiment for fun.
+This is beta-quality software. It's been tested on air, it has a growing community, and the protocol is mostly stabilized. However, bugs may exist and incompatible changes may occur. The authors don't warrant Data2G for life-safety purposes. Experiment and have fun!
 
 ## Versatile
 
