@@ -263,6 +263,10 @@ jobs:
           if ! { [ -e "$dir/data2g-gui" ] || [ -e "$dir/data2g-gui.exe" ] || [ -e "$dir/bin/data2g-gui" ]; }; then
             echo "data2g-gui was built but not packaged" >&2; exit 1
           fi
+          # The MSVC runtime goes app-local: v0.4.3 crashed on an old system vc_redist.
+          case "$(uname -s)" in MINGW*|MSYS*)
+            [ -f "$dir/msvcp140.dll" ] || { echo "the MSVC runtime was not packaged" >&2; exit 1; } ;;
+          esac
           if [ "$(uname -s)" = Darwin ]; then
             exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' dist/Data2G.app/Contents/Info.plist)"
             [ "$exe" = data2g-gui ] || { echo "Data2G.app launches $exe, not data2g-gui" >&2; exit 1; }
