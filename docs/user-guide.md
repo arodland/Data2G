@@ -1,6 +1,6 @@
 # Data2G User's Guide
 
-For Data2G 0.5.0.
+For Data2G 0.5.1.
 
 Data2G is a data modem for HF amateur radio. It turns the audio going in and out of your SSB transceiver into a reliable data link, so that other programs can chat, send email, or move files over the air. It is free, open source, and has no speed restrictions.
 
@@ -61,15 +61,15 @@ Downloads are on the [Releases page](https://github.com/arodland/Data2G/releases
 ### What you need
 
 - A 64-bit computer. Most Intel or AMD PCs and every Apple Silicon Mac have plenty of power.
-- A Raspberry Pi 5 runs Data2G comfortably. A Raspberry Pi 4 works if it isn't doing much else, with a small loss of sensitivity and slightly slower replies at the highest speeds. The Pi must run a 64-bit OS.
+- A Raspberry Pi 5 runs Data2G comfortably. A Raspberry Pi 4 works if it isn't doing much else, with a small loss of sensitivity and slightly slower replies at the highest speeds. Use a 64-bit OS on the Pi if you can. A 32-bit build exists for older Pis and 32-bit installs (section 10).
 - An SSB transceiver, a sound interface between it and the computer (built into many modern radios), and a way to key it: CAT control, a serial control line, or VOX.
 
 ### Windows
 
 Download one of:
 
-- `data2g-0.5.0-windows-x64-setup.exe`: the installer. It installs to `C:\Program Files\Data2G`, adds a Start Menu entry, and can add a desktop shortcut. It needs administrator rights.
-- `data2g-0.5.0-windows-x64-portable.zip`: no installation. Unzip it anywhere and run `data2g-gui.exe`.
+- `data2g-0.5.1-windows-x64-setup.exe`: the installer. It installs to `C:\Program Files\Data2G`, adds a Start Menu entry, and can add a desktop shortcut. It needs administrator rights.
+- `data2g-0.5.1-windows-x64-portable.zip`: no installation. Unzip it anywhere and run `data2g-gui.exe`.
 
 The Start Menu entry opens the GUI. The other programs (`data2g-host.exe`, `data2g-web.exe`) are in the same folder and are run from a Command Prompt or PowerShell window.
 
@@ -77,8 +77,8 @@ The Start Menu entry opens the GUI. The other programs (`data2g-host.exe`, `data
 
 Download the `.dmg` for your Mac:
 
-- `data2g-0.5.0-macos-arm64.dmg` for Apple Silicon (M1 and later).
-- `data2g-0.5.0-macos-x86_64.dmg` for Intel Macs.
+- `data2g-0.5.1-macos-arm64.dmg` for Apple Silicon (M1 and later).
+- `data2g-0.5.1-macos-x86_64.dmg` for Intel Macs.
 
 Open it and drag Data2G to Applications. The first time Data2G opens the sound card, macOS asks for permission to use the microphone. Say yes: that is how Data2G hears your radio.
 
@@ -93,28 +93,29 @@ The command-line programs live inside the app bundle:
 
 Download the AppImage for your machine:
 
-- `data2g-0.5.0-linux-x86_64.AppImage` for Intel and AMD PCs.
-- `data2g-0.5.0-linux-aarch64.AppImage` for 64-bit ARM, including the Raspberry Pi 4 and 5.
+- `data2g-0.5.1-linux-x86_64.AppImage` for Intel and AMD PCs.
+- `data2g-0.5.1-linux-aarch64.AppImage` for 64-bit ARM, including the Raspberry Pi 4 and 5.
+- `data2g-0.5.1-linux-armhf.AppImage` for 32-bit ARM: a Raspberry Pi running a 32-bit OS (section 10).
 
 Make it executable and run it:
 
 ```
-chmod +x data2g-0.5.0-linux-x86_64.AppImage
-./data2g-0.5.0-linux-x86_64.AppImage
+chmod +x data2g-0.5.1-linux-x86_64.AppImage
+./data2g-0.5.1-linux-x86_64.AppImage
 ```
 
 With no arguments the AppImage opens the GUI. Put `host` or `web` first to run one of the other front ends:
 
 ```
-./data2g-0.5.0-linux-x86_64.AppImage host --help
-./data2g-0.5.0-linux-x86_64.AppImage web
+./data2g-0.5.1-linux-x86_64.AppImage host --help
+./data2g-0.5.1-linux-x86_64.AppImage web
 ```
 
 There is also a `.tar.gz` for each architecture. Unpack it and run the `data2g` launcher inside, which takes the same `host` and `web` arguments.
 
 Notes for Linux:
 
-- The builds need glibc 2.39 or newer. That means Ubuntu 24.04, Debian 13, Fedora 40, or anything later.
+- The builds need glibc 2.39 or newer. That means Ubuntu 24.04, Debian 13, Fedora 40, or anything later. The 32-bit ARM build needs Debian 13 (Raspberry Pi OS 13) or later.
 - If the AppImage complains about FUSE, use the `.tar.gz`, or add `--appimage-extract-and-run` after the AppImage's name.
 - To use a serial port for CAT or PTT, your user must be allowed to open it. On most distributions that means being in the `dialout` group (`uucp` on Arch): `sudo usermod -aG dialout $USER`, then log out and back in.
 
@@ -162,7 +163,7 @@ To reach the page from another computer or a phone, tell it to listen on the net
 data2g-web --web-listen 0.0.0.0
 ```
 
-and browse to `http://<the radio computer's address>:8400/`. `--web-port` changes the port.
+and browse to `http://<the radio computer's address>:8400/`. `--web-port` changes the port. `data2g-web --help` lists these flags along with all of the host's.
 
 About the password:
 
@@ -644,14 +645,16 @@ Listening is not the problem. On a Pi 4, searching for signals takes about half 
 
 ### Installing
 
-- Use a 64-bit Raspberry Pi OS based on Debian 13 ("Trixie") or newer. `uname -m` should print `aarch64`.
-- Download the `linux-aarch64` AppImage (section 2).
+- Use Raspberry Pi OS based on Debian 13 ("Trixie") or newer.
+- Download the AppImage that matches the OS, not the board. `getconf LONG_BIT` prints `64` or `32`:
+  - `64`: the `linux-aarch64` AppImage (section 2). This is the one to use if you have the choice.
+  - `32`: the `linux-armhf` AppImage. It runs on a Pi 2 or later, not a Pi 1 or Pi Zero. It is newer and less tested than the 64-bit build.
 - Add your user to the `dialout` group if you use a serial port.
 
 For a Pi with no screen, run the web UI and do everything else from a browser:
 
 ```
-./data2g-0.5.0-linux-aarch64.AppImage web --web-listen 0.0.0.0
+./data2g-0.5.1-linux-aarch64.AppImage web --web-listen 0.0.0.0
 ```
 
 The first run asks for a password. Then open `http://<the Pi's address>:8400/` from another computer and set up the radio on the Settings tab. Once it is configured you can keep using the web UI, or switch to `host` for the lowest overhead.
