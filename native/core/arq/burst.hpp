@@ -48,15 +48,15 @@ struct Slot {
 
 struct TxBurst {
     std::string submode;
-    std::vector<Slot> slots;
+    std::vector<Slot> slots{};
     std::int64_t burst_seq = 0;  // absolute count of this station's bursts
     int cap = 0;                 // bandwidth cap code the TX filter is for (cpm::tx_filter; modes cap_hz)
     // submode "cw": a CW ID (cwid::audio(cw_text, cw_wpm)), no slots (engine.py's cwid.CwBurst)
-    std::string cw_text;
+    std::string cw_text{};
     double cw_wpm = 0.0;
     // sent as a nod (docs/arq.md §3b): its meaning and family key (session key, direction, burst seq mod 8,
     // acted-on); the slots hold the control it stands for
-    std::optional<std::pair<int, std::array<int, 4>>> nod;
+    std::optional<std::pair<int, std::array<int, 4>>> nod{};
 };
 using TxBurstPtr = std::shared_ptr<const TxBurst>;
 
