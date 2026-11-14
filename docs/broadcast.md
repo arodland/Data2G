@@ -179,7 +179,7 @@ One integrated server: the command, data and KISS ports always run (the `--vara`
 | `BCAST MODE n mode` | OK / WRONG | that port's transmit mode for later frames, within the KISS cap; any time between frames, never filters decoding. Rate shifting off (the default) |
 | `BCAST MODE n AUTO mode` | OK / WRONG | rate shifting on for that port, `mode` the fallback (§4) |
 | `BCAST MODE n [AUTO] DUP mode` | OK / WRONG | as above, with each control codeword sent twice (§3). Flags in either order, each once; a `BCAST MODE` without DUP turns it off |
-| `MODES` | one `MODE ...` line per mode, then OK | name, bandwidth Hz, bytes per codeword, max codewords a receiver takes, airtime at 1 and at max codewords |
+| `MODES` | one `MODE ...` line per mode, then `CHANNELS c...` and one `THRESHOLD name dB...` per mode (same order), then OK | MODE: name, bandwidth Hz, bytes per codeword, max codewords a receiver takes, airtime at 1 and at max codewords. CHANNELS: the threshold columns (awgn mpg mpp mpd). THRESHOLD: 10% codeword failure SNR per channel, as in `codes_data/mode_thresholds.json`, `-` where never reached |
 
 Statuses go to the command client once it has sent a BCAST command, port 0's and
 MISSED included, so a VARA client that never does (Pat) never sees one. When the

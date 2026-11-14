@@ -55,7 +55,8 @@ bool ignored(std::string_view cmd);
 std::optional<int> bw_cap(std::string_view cmd);
 // MODES (and --list-modes): one line per mode within the cap, narrowest
 // first: MODE name bandwidth-Hz bytes-per-codeword max-codewords
-// seconds-at-1 seconds-at-max.
+// seconds-at-1 seconds-at-max. Then CHANNELS c... and, same order,
+// THRESHOLD name dB... (mode_thresholds.json, 99 as "-"): host.py mode_lines.
 std::vector<std::string> mode_lines(int cap);
 
 class Host {
