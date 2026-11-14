@@ -1,5 +1,7 @@
 # Turn a draft release into a published one. Lifted from SSTVAE.
 #
+#   0. Do the chores in docs/releasing.md first (the user's guide every
+#      release); this workflow builds the guide PDF from the target branch.
 #   1. Create a draft release on GitHub for tag vX.Y.Z (the tag need not
 #      exist yet; GitHub creates it on publish) and write the notes.
 #   2. Run this workflow by hand with that tag. If the declared versions
