@@ -131,7 +131,8 @@ SYMBOL_NOISE = bool(int(os.environ.get("DATA2G_SYMBOL_NOISE", int(PROFILE == "fm
 # fmchannel condition): 8-frame windows, spread and estimate, at most +0.12 dB
 # anywhere, better on mobile paths (0.3-0.4 dB) and slow fading (0.45-1.24 dB),
 # most likely from the per-window noise level; 4 frames cost up to +0.35 dB.
-# HF: 0 and 0 (issue #212). DATA2G_SPREAD_WINDOW, DATA2G_EST_WINDOW: studies only.
+# HF: 0 and 0 (issue #212, docs/hf-window-study.md): spread windows of 2.3-6.9 s cost 0.3-2.3 dB on
+# fading (n4 up to 4.5), and a Pi 4 gains at most ~50 ms. DATA2G_SPREAD_WINDOW, DATA2G_EST_WINDOW: studies only.
 SPREAD_WINDOW = int(os.environ.get("DATA2G_SPREAD_WINDOW", {"hf": 0, "fm": 8}[PROFILE]))
 EST_WINDOW = int(os.environ.get("DATA2G_EST_WINDOW", {"hf": 0, "fm": 8}[PROFILE]))
 # Decoding while the burst arrives (receiver.Receiver "partial" events, ModemRx.advance):
