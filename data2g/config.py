@@ -51,13 +51,20 @@ def data_path(name: str):
 FS = {"hf": 8000, "fm": 16000}[PROFILE]  # audio sample rate, Hz
 
 # --- OFDM waveform (identical to SSTVAE) ------------------------------------
-RS = 50  # carrier spacing == symbol rate of one carrier, Hz
+# DATA2G_RS, DATA2G_NCP and DATA2G_CARRIER0 are for studies only (the FM
+# plan's carrier spacing, Q19: scripts/fm_spacing_study.py); like
+# DATA2G_PREAMBLE_REPEATS they need the matching receiver on the far end, and
+# tools/gen_native_tables.py refuses them.
+RS = int(os.environ.get("DATA2G_RS", 50))  # carrier spacing == symbol rate of one carrier, Hz
 NC = 24  # carriers, all of them data
 M = FS // RS  # useful symbol length, samples (160)
-NCP = 32  # cyclic prefix, samples (4 ms)
+NCP = int(os.environ.get("DATA2G_NCP", 32))  # cyclic prefix, samples (4 ms)
 NSYM = M + NCP  # 192 samples, 24 ms
-CARRIER0 = 950  # Hz; occupied ~925..2125 Hz
+CARRIER0 = int(os.environ.get("DATA2G_CARRIER0", 950))  # Hz; occupied ~925..2125 Hz
 FCENTER = 1500  # Hz; baseband conversion frequency
+# The demodulator's M-sample correlation nulls the heterodyne image at
+# -(f + FCENTER) only if that lands on the grid (waveform.dsp.to_baseband).
+assert (CARRIER0 + FCENTER) % RS == 0, "CARRIER0 + FCENTER must be a multiple of RS"
 
 SYMS_PER_FRAME = 6  # 1 pilot + 5 data
 DATA_SYMS_PER_FRAME = SYMS_PER_FRAME - 1
@@ -150,7 +157,9 @@ LEADOUT_SAMPLES = FS // 50
 # --- TX conditioning (SSTVAE values; plan step 8 revisits per submode) ------
 CLIP_HEADROOM_DB = 1.0
 CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
-TX_BANDPASS = (850.0, 2200.0)
+# SSTVAE's wide-band filter, two carrier spacings past the band each side:
+# (850, 2200) on HF; it moves with the grid (DATA2G_RS, DATA2G_CARRIER0).
+TX_BANDPASS = (float(CARRIER0 - 2 * RS), float(CARRIER0 + RS * (NC + 1)))
 # The post-clip band-pass FIR (waveform.dsp.tx_condition): 25 ms of taps, 201 at
 # 8 kHz. In taps it would widen with FS (twice the transition at 16 kHz cost the
 # edge carriers ~3 dB), so it scales; LEADIN_SAMPLES, in time, covers its tails.
