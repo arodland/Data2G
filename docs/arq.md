@@ -861,6 +861,11 @@ As built (data2g/arq/policy.py):
     slowest mode that fit a line.
 - **Commands:** MYCALL, LISTEN ON/OFF, CONNECT from to, DISCONNECT, ABORT,
   BW500 / BW2300 / BW2750, and CQFRAME call bw.
+  - **DISCONNECT while a CONNECT is still unanswered** drops the call at once, as
+    ABORT does: no more tries, the one on air is cut, and DISCONNECTED (CLIENT)
+    comes before the OK. A host that gives up on a call (BPQ32 sends DISCONNECT,
+    then ABORT 30 s later) gets the modem back for its next one. A callee that
+    heard a whole CONNECT and answered is left to its link-lost timer, as with ABORT.
   - **ACCEPT [host]:port** (Data2G) is LISTEN ON with the session's data on a
     connection Data2G makes to host:port (default: the address the command client connected from) when it answers a call,
     instead of the data port. One session at a time, as with LISTEN.

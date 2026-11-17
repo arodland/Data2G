@@ -78,6 +78,18 @@ void commands() {
     h.command("ABORT");
     check::is_true(h.out_cmd == std::vector<std::string>{"DISCONNECTED", "OK"}, "ABORT");
     check::is_true(e.session().state == arq::SessionState::LISTEN, "ABORT keeps listening");
+    h.out_cmd.clear();
+    h.command("CONNECT K2XYZ W1AW");
+    for (int i = 0; i < 10; ++i) e.step(std::vector<double>(BLOCK, 0.0));
+    check::is_true(e.session().state == arq::SessionState::CONNECTING, "dialing");
+    h.out_cmd.clear();
+    h.command("DISCONNECT");
+    check::is_true(h.out_cmd == std::vector<std::string>{"DISCONNECTED", "OK"}, "DISCONNECT while dialing");
+    check::is_true(e.session().state == arq::SessionState::LISTEN, "DISCONNECT while dialing keeps listening");
+    h.command("CONNECT K2XYZ W1AW");
+    check::equal(h.out_cmd.back(), std::string("OK"), "the next call is taken at once");
+    h.command("ABORT");
+    h.out_cmd.clear();
     h.client_gone();
     check::is_true(!h.listening && e.session().state != arq::SessionState::LISTEN, "client gone: no longer listening");
 

@@ -517,6 +517,34 @@ def test_iamalive_every_60_seconds():
     assert h.out_cmd.count("IAMALIVE") == 2
 
 
+@pytest.mark.parametrize("data2g", [False, True])
+def test_disconnect_while_dialing_drops_the_call(data2g):
+    """A host that gives up on a call sends DISCONNECT (BPQ32; its ABORT comes
+    30 s later): no more CONNECT tries, the one on air cut, DISCONNECTED at
+    once, and the next CONNECT taken."""
+    from data2g.host import Host
+
+    a, b = Host(Engine("W1AW", seed=77)), Host(Engine("K2XYZ", seed=78))  # b: not listening, never answers
+    a.command("LISTEN ON")
+    if data2g:
+        a.command("DATA2G ON")
+    a.command("CONNECT W1AW N0CALL")
+    assert link(a.engine, b.engine, 20, 10, lambda: a.engine.tx is not None)
+    a.out_cmd.clear()
+    a.command("DISCONNECT")
+    assert a.out_cmd == ["DISCONNECTED CLIENT" if data2g else "DISCONNECTED", "OK"]
+    assert a.engine.tx is None and a.engine.session.state == S.LISTEN
+    a.out_cmd.clear()
+
+    def keyed():
+        a.after_step(bool(a.engine.tx))
+        return a.engine.tx is not None
+    assert not link(a.engine, b.engine, 20, 40, keyed)
+    assert not any(line.startswith("DISCONNECTED") for line in a.out_cmd)  # the one above was the only one
+    a.command("CONNECT W1AW N0CALL")
+    assert a.out_cmd[-1] == "OK" and a.engine.session.state == S.CONNECTING
+
+
 def test_losing_the_command_client_ends_its_session():
     """The command client owns the session: when its TCP connection drops,
     the session is disconnected gracefully (the peer hears DISC) and the
