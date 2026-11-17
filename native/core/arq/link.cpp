@@ -1,5 +1,6 @@
 #include "arq/link.hpp"
 #include "arq/modes.hpp"
+#include "arq/onod.hpp"
 
 #include <algorithm>
 #include <cstdarg>
@@ -311,6 +312,22 @@ bool repeat_default() {
     return on;
 }
 
+bool prime_ofdm_default() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_PRIME_OFDM");
+        return !(v && std::string_view(v) == "0");
+    }();
+    return on;
+}
+
+bool onod_default() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_ONOD");
+        return !(v && std::string_view(v) == "0");
+    }();
+    return on;
+}
+
 bool nod_default() {
     static const bool on = env_on("DATA2G_NOD");
     return on;
@@ -445,6 +462,9 @@ TxBurstPtr Station::build(bool fresh, bool nod_ok) {
     }
     if (nod_default() && nod && !nods_told_ && ctl_bytes(ext, 0, false, 0) + 2 <= static_cast<std::int64_t>(n_ctl) * cpb)
         ext[T_NODS] = Bytes{};  // I hear nods: in the padding, until the peer acted on it
+    if (nod_default() && onod_default() && nod && !onods_told_ &&
+        ctl_bytes(ext, 0, false, 0) + 2 <= static_cast<std::int64_t>(n_ctl) * cpb)
+        ext[T_ONODS] = Bytes{};  // and OFDM ones: likewise
     Control control{core, ext};
     const auto ctl = control.pack(cpb);
     core.n_ctl = control.core.n_ctl;
@@ -460,8 +480,11 @@ TxBurstPtr Station::build(bool fresh, bool nod_ok) {
     if (inl) carried.push_back(inl);
     std::optional<std::int64_t> new_end;
     for (const auto* c : carried) new_end = std::max(new_end.value_or(c->seq + 1), c->seq + 1);
-    if (nod_ok && fresh && resend.empty() && !new_end && dup == 1 && ctl.size() == 1) burst->nod = nod_of(bn, submode, core, ext);
+    // (an OFDM nod stands for its whole control, whatever codewords that takes in its mode)
+    if (nod_ok && fresh && resend.empty() && !new_end && dup == 1 && (ctl.size() == 1 || !onod::band_of(submode).empty()))
+        burst->nod = nod_of(bn, submode, core, ext);
     if (!burst->nod && ext.count(T_NODS)) nods_in_.insert(bn);
+    if (!burst->nod && ext.count(T_ONODS)) onods_in_.insert(bn);
     sent_ctl_[bn] = {rx.cum, core.recommend, core.acted_on, new_end, kept(core, ext)};
     record(bn, burst, std::move(conveyed), resend, carried);
     if (burst->nod) {
@@ -673,10 +696,21 @@ Station::Kept Station::kept(const Core& core, const Ext& ext) {
 std::optional<std::pair<int, nod::FamilyKey>> Station::nod_of(std::int64_t bn, const std::string& submode,
                                                               const Core& core, const Ext& ext) const {
     const Mode* md = arq::mode(submode);
-    if (!(nod_default() && nod && nod_peer && md && md->is_cpm() && !core.reply_lost && core.k == 0 && latest >= 0))
-        return std::nullopt;
+    if (!(nod_default() && nod && md && !core.reply_lost && core.k == 0 && latest >= 0)) return std::nullopt;
     for (const auto& [t, v] : ext)
-        if (t != T_REPLY && t != T_CHAT && t != T_DUPCTL && t != T_NODS) return std::nullopt;
+        if (t != T_REPLY && t != T_CHAT && t != T_DUPCTL && t != T_NODS && t != T_ONODS) return std::nullopt;
+    if (md->is_cpm()) {
+        if (!nod_peer) return std::nullopt;
+    } else {
+        // an OFDM nod (§3c): on an ACK mode's sync band, where the policy takes one to be heard, and only a
+        // control the listener can rebuild: one codeword of NOD_MODE's without the flags a nod drops
+        if (!(onod_default() && onod_peer && !onod::band_of(submode).empty() && policy->ofdm_nod_ok())) return std::nullopt;
+        Ext kept = ext;
+        kept.erase(T_NODS);
+        kept.erase(T_ONODS);
+        Control c{core, kept};
+        if (c.pack(policy->ctl_payload_bytes(NOD_MODE)).size() != 1) return std::nullopt;
+    }
     const auto pa = peer_ctl_core_.find(core.acted_on);
     if (pa == peer_ctl_core_.end() || pa->second.acted != latest) return std::nullopt;
     const SentCtl& r = sent_ctl_.at(latest);
@@ -784,6 +818,8 @@ bool Station::handle_inner(RxBurst& rxb) {
     peer_ctl_core_[core.burst_seq] = {core.cum, core.recommend, acted, rx_new_end_};
     if (ext.count(T_NODS)) nod_peer = true;  // latched for the session
     if (nods_in_.count(acted)) nods_told_ = true, nods_in_.clear();
+    if (ext.count(T_ONODS)) onod_peer = true;  // latched for the session
+    if (onods_in_.count(acted)) onods_told_ = true, onods_in_.clear();
     peer_ctl_[!data.slots.empty()] = last_stream_;
     peer_last_ = std::make_pair(last_stream_, std::make_pair(rxb.submode(), rxb.n_cw()));
     answered_ = false;
@@ -1015,7 +1051,7 @@ std::vector<Station::Way> Station::variants(bool data, int n_cw, int ctl_slots, 
     c[F_HINT] = {peer_size_hint, base ? 3 : 0};
     std::vector<Tlv> common;
     // (T_NODS: sent until I acted on it, so mostly as last time)
-    for (int t : {T_CHAT, T_DUPCTL, T_NODS})
+    for (int t : {T_CHAT, T_DUPCTL, T_NODS, T_ONODS})
         if (auto e = pe.find(t); e != pe.end()) common.push_back({t, e->second, Bytes(e->second.size(), 0xFF)});
     // T_REPLY, a recommendation: as last time
     if (auto e = pe.find(T_REPLY); e != pe.end() && e->second.size() == 1) common.push_back({T_REPLY, e->second, Bytes{0xFF}});
@@ -1275,7 +1311,10 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
     }
     // a control only a primed retry read is told to the policy as the blind decode saw it (link.py, §3a)
     // a nod is neither a blind decode nor a loss of one: no turn for the policy
-    if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, rxb.is_nod() ? std::nullopt : std::optional<bool>(!primed_ctl_));
+    // so is a burst only the expected slot's OFDM lock found (modem.prime_ofdm)
+    if (outcome)
+        policy->outcome(rxb.submode(), n_ok, n_new,
+                        rxb.is_nod() ? std::nullopt : std::optional<bool>(!(primed_ctl_ || rxb.primed_header())));
     return out;
 }
 

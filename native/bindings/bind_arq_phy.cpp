@@ -51,6 +51,7 @@ Heard heard_of(const py::dict& r) {
     auto o = std::make_shared<modem::Received>();
     o->spec = &spec(name_of(r["spec"]));
     o->n_cw = r["n_cw"].cast<int>();
+    o->primed = r.contains("primed_ofdm") && r["primed_ofdm"].cast<bool>();
     o->raw = rows<cd>(r["raw"]);
     const auto e = r["est"].cast<py::dict>();
     o->est.h = rows<cd>(e["h"]);
@@ -211,6 +212,7 @@ public:
         return out ? py::object(pyb(*out)) : py::none();
     }
     int n_ctl_slots() const { return rx_->n_ctl_slots(); }
+    bool primed_header() const { return rx_->primed_header(); }
     void forget(const py::object& key) { store_.attr("pop")(key, py::none()); }
     const std::string& submode() const { return rx_->submode(); }
     int n_cw() const { return rx_->n_cw(); }
@@ -254,6 +256,7 @@ void bind_arq_phy(py::module_& m) {
         .def("decode_known", &PyModemRx::decode_known, py::arg("slot"), py::arg("mask_id"), py::arg("template"),
              py::arg("tmask"), py::arg("pair") = false)
         .def_property_readonly("n_ctl_slots", &PyModemRx::n_ctl_slots)
+        .def_property_readonly("primed_header", &PyModemRx::primed_header)
         .def("forget", &PyModemRx::forget)
         .def_property_readonly("submode", &PyModemRx::submode)
         .def_property_readonly("n_cw", &PyModemRx::n_cw);

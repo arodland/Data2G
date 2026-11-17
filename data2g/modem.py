@@ -164,6 +164,7 @@ class Lock(TypedDict):
     p0: int  # the first frame's first sample
     cfo: float  # Hz
     copy: NotRequired[CopyRef]  # set by find_copy only
+    primed: NotRequired[bool]  # set by prime_ofdm only
 
 
 class HeaderRead(TypedDict):
@@ -785,6 +786,70 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: d
     spec, n_cw = hd["hdr"]
     return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
                 end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)
+
+
+# The expected slot for OFDM replies (docs/arq.md §3a): the ACK modes are
+# header-limited near their floor, and of the bursts the blind receiver lost
+# at the header while the true start's header read (scripts/expect_acq_diag.py,
+# n4-ack-8f mpd -8 dB) acquisition had locked thousands of samples off, or a
+# whole 50 Hz CFO alias off, far more often than the word was the limit.
+PRIME_PEAKS = 3  # detections read in the window, strongest first
+PRIME_REACH_HZ = _sync.STEP_HZ  # CFO bins either side of the expected one
+# header score a primed lock needs (Accept.min_score raises it): 1e-3 false
+# locks per window on white noise, 12-word sets, +-ReplySlot.TOL_S
+# (scripts/expect_prime_study.py --noise, 12000 windows). A band without one
+# is not primed.
+PRIME_FLOOR = {"w": 0.311, "n10": 0.300}
+
+
+def prime_ofdm(x: np.ndarray, lo: int, hi: int, cfo: float, accept: Accept) -> Lock | None:
+    """A burst of one of `accept`'s submodes whose preamble starts in
+    [lo, hi] (x's samples), its CFO near `cfo`: find_burst's lock, or
+    None. Each band's strongest PRIME_PEAKS detections in the window are
+    read as _best_header reads them (+-1, +-2 repeats), over accept's
+    words only, and the best header over PRIME_FLOOR wins. x must hold
+    the header of a start at hi (prime_span past it). Native: modem::prime_ofdm."""
+    z0 = dsp.freq_correct(dsp.to_baseband(np.asarray(x, dtype=np.float64)), cfo)
+    best = None
+    for name in accept.bands:
+        if name not in PRIME_FLOOR:
+            continue
+        b = ofdm.band(name)
+        hdr_end = prime_span(name)
+        S, freqs = _sync.detection_stat(z0, b, PRIME_REACH_HZ)
+        a, e = max(0, lo), min(S.shape[1], hi + 1)
+        if e <= a:
+            continue
+        D = S[:, a:e].max(axis=0)
+        floor = max(PRIME_FLOOR[name], accept.min_score)
+        for _ in range(PRIME_PEAKS):
+            n = int(np.argmax(D))
+            if D[n] <= 0:
+                break
+            D[max(0, n - M):n + M] = -1.0
+            n += a
+            start, f = _sync._refine(z0, b, n, float(freqs[int(np.argmax(S[:, n]))]))
+            zb = dsp.freq_correct(z0, f)
+            for k in (0, -1, 1, -2, 2):
+                st = start + k * M
+                if not 0 <= st <= len(z0) - hdr_end:
+                    continue
+                r = _read_header(zb, st, name, accept)
+                if r["score"] >= floor and (best is None or r["score"] > best[0]["score"]):
+                    sub, n_cw = _split(r["word"] >> 6, name)
+                    r["hdr"] = (BY_INDEX[(name, sub)], n_cw)
+                    best = (r, cfo + f)
+    if best is None:
+        return None
+    hd, c = best
+    spec, n_cw = hd["hdr"]
+    return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
+                end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=c, primed=True)
+
+
+def prime_span(band: str) -> int:
+    """Samples from a burst's start prime_ofdm reads: its preamble, header and the pilot after."""
+    return BANDS[band].preamble_samples + header_samples(band) + NSYM
 
 
 # A burst's frame pilots, PILOT_PAIRS consecutive pairs, are there when both

@@ -85,6 +85,10 @@ REPLY_HOLD_MARGIN_S = 0.5  # the reply's start past my burst's end (0.4-0.6 s me
 # -10/-8 20% at 500 Hz; snr:-6/-8 no better than off.
 CPM_FLOOR_DEFAULT = ("snr", -4.0, 1.0)
 CPM_FLOOR_HIST = 3
+# OFDM nods (docs/arq.md §3c) only where they are heard: not on a link whose median spread_est is at least
+# this many Hz while its median snr_est is under this many dB (scripts/onod_study.py; a rule of thumb from
+# session runs, checked on held-out seeds: ungated, mpd -6 lost 4% and mpp -6 9% to timeouts)
+ONOD_GATE = (0.5, -1.0)
 LADDER_AFTER = 2
 LADDER_STEP_DB = 3.0
 LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
@@ -370,6 +374,16 @@ class GearShifter(L.Policy):
         self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
         self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
         self.snrs_long = (self.snrs_long + [float(measured["snr_est"])])[-P.GATE_HIST:]
+
+    def ofdm_nod_ok(self) -> bool:
+        """link.Policy.ofdm_nod_ok: an OFDM nod has no time diversity (one
+        fade loses it whole, and a lost nod costs a timeout), so on a
+        spreading path it goes only above ONOD_GATE's SNR (docs/arq.md §3c;
+        medians of what I measured of the peer's last bursts)."""
+        if not self.spreads or not self.snrs:
+            return False
+        spread, snr = ONOD_GATE
+        return not (sorted(self.spreads)[len(self.spreads) // 2] >= spread and sorted(self.snrs)[len(self.snrs) // 2] < snr)
 
     def cpm_floor(self) -> bool:
         """CPM_FLOOR holds: data in CPM modes only."""

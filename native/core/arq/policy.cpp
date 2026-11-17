@@ -137,6 +137,14 @@ std::optional<std::pair<std::string, double>> GearShifter::expected_reply() cons
     return std::pair{e.reply, burst_seconds(m, ctl_slots(m))};
 }
 
+bool GearShifter::ofdm_nod_ok() const {
+    if (spreads.empty() || snrs.empty()) return false;
+    auto a = spreads, b = snrs;
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    return !(a[a.size() / 2] >= ONOD_GATE_SPREAD_HZ && b[b.size() / 2] < ONOD_GATE_SNR_DB);
+}
+
 bool GearShifter::cpm_floor() const {
     if (!cpm_floor_on || snrs.empty() || spreads.empty()) return false;
     const auto median = [](std::vector<double> v) {  // np.median

@@ -134,6 +134,10 @@ public:
     // locked. The window's audio is kept until the last is looked at.
     void expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo);
     std::size_t n_expected() const { return expected_ ? expected_->grids.size() : 0; }  // grids still queued
+    // expect() for an OFDM reply (receiver.Receiver.expect_ofdm): a burst of one of accept's submodes should
+    // start between stream indices lo and hi, its CFO near cfo. Looked at once (modem::prime_ofdm), after
+    // expect()'s grids, when the audio holds the header of a start at hi and nothing has locked.
+    void expect_ofdm(modem::Accept accept, std::int64_t lo, std::int64_t hi, double cfo);
     // Forget the pending burst: its header was no burst's (a CW ID keyed over its preamble, arq::Engine)
     void drop() {
         last_start_ = pending_->start();
@@ -178,6 +182,7 @@ private:
     std::optional<modem::Lock> find_copy() const;
     std::optional<cpm::Lock> find_cpm();
     std::optional<cpm::Lock> primed();  // expect()'s lock in its next grid, buffer indices, once its window is complete
+    std::optional<modem::Lock> primed_ofdm();  // expect_ofdm()'s, likewise
     std::int64_t decided(std::string_view key) const;
     std::int64_t decided_mid(const cpm::Grid& g) const;
     std::int64_t len() const { return static_cast<std::int64_t>(buf_.size()); }
@@ -218,6 +223,12 @@ private:
         double cfo;
     };
     std::optional<Expected> expected_;
+    struct ExpectedOfdm {
+        modem::Accept accept;
+        std::int64_t lo, hi;
+        double cfo;
+    };
+    std::optional<ExpectedOfdm> expected_ofdm_;
 };
 
 // receiver.ReplySlot: where my peer's next burst should start (past my burst's end: the median of the last
@@ -235,9 +246,13 @@ public:
     // station's TX lag can vary by a second; a nod has no blind fallback)
     std::optional<std::pair<double, double>> nod_window(double tx_end) const;
     std::optional<double> cfo;
+    // the same of its OFDM bursts (their own lead-in and CFO): heard(), window() for modem::prime_ofdm
+    void heard_ofdm(std::optional<double> gap_s, std::optional<double> cfo);
+    std::optional<std::pair<double, double>> ofdm_window(double tx_end) const;
+    std::optional<double> ofdm_cfo;
 
 private:
-    std::deque<double> gaps_;
+    std::deque<double> gaps_, ofdm_gaps_;
 };
 
 

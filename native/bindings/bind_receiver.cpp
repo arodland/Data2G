@@ -148,6 +148,10 @@ void bind_receiver(py::module_& m) {
         .def("reset", &receiver::Receiver::reset)
         .def("expect", [](receiver::Receiver& r, const std::vector<std::string>& grids, std::int64_t lo, std::int64_t hi,
                           double cfo) { r.expect(grid_views(grids), lo, hi, cfo); })
+        .def("expect_ofdm", [](receiver::Receiver& r, const py::object& accept, std::int64_t lo, std::int64_t hi, double cfo) {
+            const auto a = modem_accept_of(accept);
+            r.expect_ofdm(a ? *a : modem::Accept{}, lo, hi, cfo);
+        })
         .def_property_readonly("n_expected", &receiver::Receiver::n_expected)
         .def("drop", &receiver::Receiver::drop)
         .def_readwrite("release_s", &receiver::Receiver::release_s)

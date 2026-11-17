@@ -17,7 +17,7 @@ def substitutions(native):
     N, W = native.modem, native.waveform
     names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
-             "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
+             "_copy_llr", "_best_header", "find_burst", "prime_ofdm", "pilot_coherence", "find_copy", "_cfo_aliases",
              "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft",
              "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received")
     py = {k: getattr(modem, k) for k in names}
@@ -140,6 +140,12 @@ def substitutions(native):
     def find_burst(x, bands=None, accept=None, stats=None):
         return specs(N.find_burst(f64(x), bands_arg(bands), accept, stats))
 
+    floors = dict(modem.PRIME_FLOOR)
+
+    @guarded("prime_ofdm", lambda *a, **k: modem.PRIME_FLOOR == floors)
+    def prime_ofdm(x, lo, hi, cfo, accept):
+        return specs(N.prime_ofdm(f64(x), int(lo), int(hi), float(cfo), accept))
+
     @guarded("pilot_coherence", lambda x, lock, *a, **k: lock_ok(lock))
     def pilot_coherence(x, lock, n_max=8, latest=False, pattern=False):
         return N.pilot_coherence(f64(x), lock, int(n_max), bool(latest), bool(pattern))
@@ -219,7 +225,7 @@ def substitutions(native):
             "_valid_signs": _valid_signs, "decode_header": decode_header, "modulate": modulate,
             "modulate_bits": modulate_bits, "burst_waveform": burst_waveform, "ace_cells": ace_cells,
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,
-            "_best_header": _best_header, "find_burst": find_burst, "pilot_coherence": pilot_coherence,
+            "_best_header": _best_header, "find_burst": find_burst, "prime_ofdm": prime_ofdm, "pilot_coherence": pilot_coherence,
             "find_copy": find_copy, "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
             "noise_var": noise_var, "soft_bits": soft_bits, "burst_soft": burst_soft, "slot_soft": slot_soft,
             "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received,

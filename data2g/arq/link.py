@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 
 from . import frames as F
 from . import nod as nodmod
+from . import onod
 # the PHY abstraction; named here too, for link's callers
 from .burst import COMPACT_CONNECT, EPOCH_MOD, RxBurst, Slot, TxBurst, ctl_mask, data_mask, dup_ctl  # noqa: F401
 from .frames import SEQ_MOD, WINDOW
@@ -60,6 +61,8 @@ LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s b
 COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 # DATA2G_INLINE=0: never send a codeword in the control's padding (T_INLINE; for A/B runs); still received
 INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
+# DATA2G_PRIME_OFDM=0: no expected-slot lock for OFDM ACK replies (modem.prime_ofdm, docs/arq.md §3a; for A/B runs)
+PRIME_OFDM = os.environ.get("DATA2G_PRIME_OFDM", "1") != "0"
 # DATA2G_PRIME=0: no primed retry of a peer control that failed blind (docs/arq.md §3a; for A/B runs)
 PRIME = os.environ.get("DATA2G_PRIME", "1") != "0"
 # DATA2G_REPEAT=0: a failed control is not combined with the failed ones before it (docs/arq.md §3a; for A/B runs)
@@ -68,6 +71,8 @@ REPEAT = os.environ.get("DATA2G_REPEAT", "1") != "0"
 # whose content is in the codebook goes as a nod to a peer that said it hears
 # them (T_NODS); nods are listened for always (docs/arq.md §3b)
 NOD = os.environ.get("DATA2G_NOD", "1") != "0"
+# DATA2G_ONOD=0: no OFDM nods (docs/arq.md §3c; for A/B runs): never sent, T_ONODS never said; still listened for
+ONOD = os.environ.get("DATA2G_ONOD", "1") != "0"
 NOD_MODE = "fsk16r25-r1/3"  # the mode a nod's control is packed and named in (its grid's control codeword)
 # soft-bit store keys of controls kept for that (RxBurst.decode_repeat): the link's, the session's connect frames
 REPEAT_KEY, REPEAT_SESSION_KEY = ("rep", 1, 0), ("rep", 2, 0)
@@ -129,6 +134,11 @@ class Policy:
         """After each received burst: its first-transmission codewords
         decoded of those sent, `usable`: its control decoded (the gear
         shifter's online correction)."""
+
+    def ofdm_nod_ok(self) -> bool:
+        """A control-only OFDM reply may go as an OFDM nod (docs/arq.md §3c):
+        the gear shifter's gate on what it measures of the peer's bursts."""
+        return True
 
     # for the log
     measured: dict | None = None  # the peer's last burst, as measured
@@ -523,6 +533,9 @@ class Station:
     nod_peer: bool = False  # the peer hears nods (its T_NODS): mine may go to it
     _nods_told: bool = False  # the peer acted on a burst of mine carrying T_NODS: no more of it
     _nods_in: set = field(default_factory=set)  # my bns that carried T_NODS
+    onod_peer: bool = False  # the peer hears OFDM nods (its T_ONODS), and the same two for my T_ONODS
+    _onods_told: bool = False
+    _onods_in: set = field(default_factory=set)
     _sent_ctl: dict = field(default_factory=dict)  # my bn -> (cum, recommend, acted-on seq, new end | None, _kept)
     _peer_ctl_core: dict = field(default_factory=dict)  # seq -> (cum 7-bit, recommend, my bn acted on, new end | None)
     _rx_new_end: int | None = None  # the last peer burst's new data end (1 + its highest new seq)
@@ -625,16 +638,22 @@ class Station:
             ext[F.T_DRAINED] = b""
         if NOD and self.nod and not self._nods_told and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb:
             ext[F.T_NODS] = b""  # I hear nods: in the padding, until the peer acted on it
+        if (NOD and ONOD and self.nod and not self._onods_told
+                and self._ctl_bytes(ext, 0, False, 0) + 2 <= n_ctl * cpb):
+            ext[F.T_ONODS] = b""  # and OFDM ones: likewise
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
         self._asked_dup = F.T_DUPCTL in ext
 
         burst = TxBurst(submode, self._slots(ctl, dup, resend, rvs, new), self.bursts_sent, self.cap)
         news = [c.seq for c in new] + ([inline.seq] if inline else [])
-        if nod and fresh and not (resend or news) and dup == 1 and len(ctl) == 1:
+        # (an OFDM nod stands for its whole control, whatever codewords that takes in its mode)
+        if nod and fresh and not (resend or news) and dup == 1 and (len(ctl) == 1 or onod.band_of(submode)):
             burst.nod = self._nod_of(bn, submode, core, ext)
         if burst.nod is None and F.T_NODS in ext:
             self._nods_in.add(bn)
+        if burst.nod is None and F.T_ONODS in ext:
+            self._onods_in.add(bn)
         self._sent_ctl[bn] = (self.rx.cum, core.recommend, core.acted_on, max(news) + 1 if news else None,
                               self._kept(core, ext))
         self._record(bn, burst, conveyed, resend, new + [inline] * bool(inline))
@@ -800,7 +819,8 @@ class Station:
 
     # -- nods (docs/arq.md §3b) ------------------------------------------------------
 
-    NOD_EXT = frozenset((F.T_REPLY, F.T_CHAT, F.T_DUPCTL, F.T_NODS))  # kept, carried (T_DUPCTL), or dropped (T_NODS)
+    # kept, carried (T_DUPCTL), or dropped (T_NODS, T_ONODS)
+    NOD_EXT = frozenset((F.T_REPLY, F.T_CHAT, F.T_DUPCTL, F.T_NODS, F.T_ONODS))
 
     def _nod_of(self, bn: int, submode: str, core, ext: dict) -> tuple | None:
         """Control-only reply bn as a nod: (meaning, family key), or None
@@ -810,9 +830,20 @@ class Station:
         R + 1 is the peer's to expect); its cum is A's new data's end ("all",
         A carried new data) or R's ("unchanged"); its recommendation a step
         from R's; its kept fields R's."""
-        if not (NOD and self.nod and self.nod_peer and submode in MODES and is_cpm(MODES[submode])
-                and set(ext) <= self.NOD_EXT and not core.reply_lost and core.k == 0 and self._latest >= 0):
+        if not (NOD and self.nod and submode in MODES and set(ext) <= self.NOD_EXT and not core.reply_lost
+                and core.k == 0 and self._latest >= 0):
             return None
+        if is_cpm(MODES[submode]):
+            if not self.nod_peer:
+                return None
+        else:
+            # an OFDM nod (§3c): on an ACK mode's sync band, where the policy takes one to be heard, and
+            # only a control the listener can rebuild: one codeword of NOD_MODE's without the flags a nod drops
+            if not (ONOD and self.onod_peer and onod.band_of(submode) and self.policy.ofdm_nod_ok()):
+                return None
+            kept = {t: v for t, v in ext.items() if t not in (F.T_NODS, F.T_ONODS)}
+            if len(F.Control(core, kept).pack(self.policy.ctl_payload_bytes(NOD_MODE))) != 1:
+                return None
         pa = self._peer_ctl_core.get(core.acted_on)
         if pa is None or pa[2] != self._latest:
             return None
@@ -995,6 +1026,10 @@ class Station:
             self.nod_peer = True  # latched for the session
         if acted in self._nods_in:
             self._nods_told, self._nods_in = True, set()
+        if F.T_ONODS in ext:
+            self.onod_peer = True  # latched for the session
+        if acted in self._onods_in:
+            self._onods_told, self._onods_in = True, set()
         self._peer_ctl[bool(slots)] = self._last_stream
         self._peer_last = (self._last_stream, (rx.submode, rx.n_cw))
         self._answered = False
@@ -1179,7 +1214,7 @@ class Station:
             recommend=(0, 0),
             size_hint=(self.peer_size_hint, 3 if base else 0))
         # (T_NODS: sent until I acted on it, so mostly as last time)
-        common = [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_CHAT, F.T_DUPCTL, F.T_NODS) if t in pe]
+        common = [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_CHAT, F.T_DUPCTL, F.T_NODS, F.T_ONODS) if t in pe]
         # T_REPLY, a recommendation: as last time (80% of them at the floor; its
         # bits sit on weak polar positions, where 6 unknown cost 1-2 dB)
         common += [(t, pe[t], b"\xff") for t in (F.T_REPLY,) if len(pe.get(t, b"")) == 1]
@@ -1377,7 +1412,9 @@ class Station:
         # outcome model and ladder learned blind control losses, and a mode whose
         # data fails while primed controls pass would otherwise never be left
         # a nod is neither a blind decode nor a loss of one: no turn for the policy
-        self.policy.outcome(rx.submode, n_ok, n_new, usable=None if getattr(rx, "nod", False) else not self._primed_ctl)
+        # so is a burst only the expected slot's OFDM lock found (modem.prime_ofdm)
+        usable = not (self._primed_ctl or getattr(rx, "primed_header", False))
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=None if getattr(rx, "nod", False) else usable)
         return slots, n_dec, n_old, progress
 
     def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):

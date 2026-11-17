@@ -54,6 +54,12 @@ protected:
         for (auto x : grids) g.append(std::string(x));
         receiver.attr("expect")(g, lo, hi, cfo);
     }
+    void receiver_expect_ofdm(const modem::Accept& accept, std::int64_t lo, std::int64_t hi, double cfo) override {
+        if (receiver.is_none()) return Engine::receiver_expect_ofdm(accept, lo, hi, cfo);
+        py::list cw;
+        for (const auto& [s, n] : accept.max_cw) cw.append(py::make_tuple(std::string(s->name), n));
+        receiver.attr("expect_ofdm")(py::module_::import("data2g.modem").attr("Accept")(py::tuple(cw), accept.min_score), lo, hi, cfo);
+    }
     std::vector<double> tx_audio(const TxBurst& b) override {
         if (tx_audio_fn.is_none()) return Engine::tx_audio(b);
         return vec(tx_audio_fn(burst_py(std::make_shared<TxBurst>(b))).cast<In<double>>());

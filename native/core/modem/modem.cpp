@@ -187,6 +187,12 @@ std::span<const T> pyslice(std::span<const T> x, int64_t lo, int64_t hi) {
 
 }  // namespace
 
+std::optional<double> prime_floor(std::string_view band) {
+    for (const auto& [b, v] : PRIME_FLOOR)
+        if (b == band) return v;
+    return std::nullopt;
+}
+
 double header_min_score(std::string_view band) {
     for (const auto& [b, v] : HEADER_MIN_SCORE)
         if (b == band) return v;
@@ -775,6 +781,134 @@ Lock find_burst(std::span<const double> x, std::span<const std::string_view> ban
     return l;
 }
 
+std::vector<double> keyed_waveform(std::string_view name, std::span<const std::uint8_t> layout,
+                                   std::span<const std::uint8_t> bits) {
+    const auto& b = waveform::band(name);
+    const size_t nc = static_cast<size_t>(b.nc());
+    const auto data = constellation::modulate(bits, qpsk());
+    Mat<cd> syms(layout.size(), nc);
+    for (size_t r = 0, d = 0; r < layout.size(); ++r) {
+        if (layout[r]) {
+            std::copy(b.pilot.begin(), b.pilot.end(), syms[r]);
+        } else {
+            std::copy(data.begin() + static_cast<std::ptrdiff_t>(d * nc), data.begin() + static_cast<std::ptrdiff_t>((d + 1) * nc), syms[r]);
+            ++d;
+        }
+    }
+    std::vector<double> x(LEADIN_SAMPLES, 0.0);
+    const auto pre = b.preamble_waveform();
+    const auto w = b.modulate_symbols(syms);
+    x.insert(x.end(), pre.begin(), pre.end());
+    x.insert(x.end(), w.begin(), w.end());
+    x.insert(x.end(), LEADOUT_SAMPLES, 0.0);
+    return waveform::tx_condition(x, 0.0, b.spec->clip_overshoot, LEADIN_SAMPLES, x.size() - LEADOUT_SAMPLES, b.tx_bandpass());
+}
+
+std::vector<double> keyed_read(std::span<const cd> z, int64_t start, std::string_view name, std::span<const std::uint8_t> layout) {
+    const auto& b = waveform::band(name);
+    const size_t nc = static_cast<size_t>(b.nc());
+    const int R = b.spec->preamble_repeats, ref = std::min(R, REF_REPEATS);
+    std::vector<cd> h_pre(nc, 0.0);
+    for (int r = R - ref; r < R; ++r) {
+        const auto w = b.demod_window(z, start + PREAMBLE_CP + static_cast<int64_t>(r) * M, HB);
+        for (size_t k = 0; k < nc; ++k) h_pre[k] += w[k];
+    }
+    for (auto& v : h_pre) v /= static_cast<double>(ref);
+    h_pre = over_pilot(std::move(h_pre), b);
+    const int64_t h0 = start + b.preamble_samples();
+    const size_t L = layout.size();
+    std::vector<double> t_sym(L);
+    Mat<cd> y_all(L, nc);
+    for (size_t i = 0; i < L; ++i) {
+        const int64_t s = h0 + static_cast<int64_t>(i) * NSYM + NCP;
+        t_sym[i] = static_cast<double>(s) + M / 2.0;
+        const auto w = b.demod_window(z, s, HB);
+        std::copy(w.begin(), w.end(), y_all[i]);
+    }
+    const int64_t u0 = start + PREAMBLE_CP + static_cast<int64_t>(R - ref) * M;
+    std::vector<double> t_p{static_cast<double>(u0) + ref * M / 2.0};
+    std::vector<std::vector<cd>> hp_rows{h_pre};
+    std::vector<size_t> data_rows;
+    for (size_t i = 0; i < L; ++i) {
+        if (layout[i]) {
+            t_p.push_back(t_sym[i]);
+            hp_rows.push_back(over_pilot({y_all[i], y_all[i] + nc}, b));
+        } else {
+            data_rows.push_back(i);
+        }
+    }
+    const auto h_p = equalizer::freq_smooth(rows_of(hp_rows), {HB, HB + NCP}, bb_of(name)).hs;
+    const int64_t np_ = static_cast<int64_t>(t_p.size());
+    Mat<cd> ys(data_rows.size(), nc), hs(data_rows.size(), nc);
+    for (size_t d = 0; d < data_rows.size(); ++d) {
+        const double t = t_sym[data_rows[d]];
+        const int64_t ss = std::lower_bound(t_p.begin(), t_p.end(), t) - t_p.begin();  // searchsorted, left
+        const auto j = static_cast<size_t>(std::clamp<int64_t>(ss - 1, 0, np_ - 2));
+        const double a = (t - t_p[j]) / (t_p[j + 1] - t_p[j]);
+        std::copy(y_all[data_rows[d]], y_all[data_rows[d]] + nc, ys[d]);
+        const auto h = lerp(h_p.row(j), h_p.row(j + 1), a);
+        std::copy(h.begin(), h.end(), hs[d]);
+    }
+    return qpsk_llr(ys, hs);
+}
+
+int64_t prime_span(std::string_view name) { return preamble_samples(band(name)) + header_samples(name) + NSYM; }
+
+std::optional<Lock> prime_ofdm(std::span<const double> x, int64_t lo, int64_t hi, double cfo, const Accept& accept) {
+    const auto z0 = waveform::freq_correct(waveform::to_baseband(x), cfo);
+    const auto len = static_cast<int64_t>(z0.size());
+    std::optional<HeaderRead> best;
+    double best_cfo = 0.0;
+    for (const auto name : accept.bands()) {
+        const auto band_floor = prime_floor(name);
+        if (!band_floor) continue;
+        const auto& b = waveform::band(name);
+        const int64_t hdr_end = prime_span(name);
+        const auto [S, freqs] = waveform::detection_stat(z0, b, PRIME_REACH_HZ);
+        const int64_t a = std::max<int64_t>(0, lo), e = std::min<int64_t>(static_cast<int64_t>(S.cols), hi + 1);
+        if (e <= a) continue;
+        std::vector<double> D(static_cast<size_t>(e - a));
+        for (size_t i = 0; i < D.size(); ++i) {
+            double m = S[0][static_cast<size_t>(a) + i];
+            for (size_t r = 1; r < S.rows; ++r) m = std::max(m, S[r][static_cast<size_t>(a) + i]);
+            D[i] = m;
+        }
+        const double floor = std::max(*band_floor, accept.min_score);
+        for (int peak = 0; peak < PRIME_PEAKS; ++peak) {
+            int64_t n = std::max_element(D.begin(), D.end()) - D.begin();  // np.argmax: the first maximum
+            if (D[static_cast<size_t>(n)] <= 0) break;
+            std::fill(D.begin() + std::max<int64_t>(0, n - M), D.begin() + std::min<int64_t>(static_cast<int64_t>(D.size()), n + M), -1.0);
+            n += a;
+            size_t fi = 0;
+            for (size_t r = 1; r < S.rows; ++r)
+                if (S[r][static_cast<size_t>(n)] > S[fi][static_cast<size_t>(n)]) fi = r;
+            const auto [start, f] = waveform::refine(z0, b, n, freqs[fi]);
+            const auto zb = waveform::freq_correct(z0, f);
+            for (int k : {0, -1, 1, -2, 2}) {
+                const int64_t st = start + static_cast<int64_t>(k) * M;
+                if (!(0 <= st && st <= len - hdr_end)) continue;
+                auto r = read_header(zb, st, name, &accept);
+                if (r.hdr.score >= floor && (!best || r.hdr.score > best->hdr.score)) {
+                    best = std::move(r);
+                    best_cfo = cfo + f;
+                }
+            }
+        }
+    }
+    if (!best) return std::nullopt;
+    Lock l;
+    l.spec = best->hdr.spec;
+    l.n_cw = best->hdr.n_cw;
+    l.start = best->start;
+    l.score = best->hdr.score;
+    l.band = best->band;
+    l.end = burst_end(best->p0, *l.spec, l.n_cw);
+    l.p0 = best->p0;
+    l.cfo = best_cfo;
+    l.primed = true;
+    return l;
+}
+
 std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max, bool latest, double* pattern) {
     const Spec& spec = *lock.spec;
     const auto& b = waveform::band(spec.band);
@@ -975,13 +1109,24 @@ double resolve_alias(double fine, double coarse) {
 }
 
 Received receive(std::span<const double> x, std::span<const std::string_view> bands, const Accept* accept,
-                 std::optional<int64_t> head, const Lock* copy) {
+                 std::optional<int64_t> head, const Lock* copy, const Lock* known) {
     const auto z0 = waveform::to_baseband(x);
     const auto len = static_cast<int64_t>(z0.size());
     HeaderRead hd;
     waveform::Acquisition acq;
     std::vector<cd> z;
-    if (copy) {
+    if (known) {
+        const std::string_view sb = known->spec->sync_band;
+        z = waveform::freq_correct(z0, known->cfo);
+        hd = read_header(z, known->start, sb);
+        const int v = (known->spec->index << cw_bits(sb)) | (known->n_cw - 1);
+        hd.hdr.spec = known->spec;
+        hd.hdr.n_cw = known->n_cw;
+        hd.hdr.word = v << 6 | crc6(v);
+        hd.valid = true;
+        acq = {known->start, known->cfo, 0.0, {}};
+        if (burst_end(hd.p0, *known->spec, known->n_cw) > len) throw SyncError("burst runs past the buffer");
+    } else if (copy) {
         if (copy->end > len) throw SyncError("burst runs past the buffer");
         z = waveform::freq_correct(z0, copy->cfo);
         hd = copy_header(z, *copy);

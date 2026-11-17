@@ -123,9 +123,12 @@ def tx_audio(burst) -> np.ndarray:
     (codes.scramble_seed: no key on air); a resend in another slot still
     combines (codes.flip). A nod (burst.nod): its keyed sequence."""
     if getattr(burst, "nod", None) is not None:
-        from . import nod
+        from . import nod, onod
 
         meaning, fam = burst.nod
+        band = onod.band_of(burst.submode)
+        if band is not None:  # an OFDM nod (docs/arq.md §3c), on its mode's sync band
+            return onod.waveform(band, onod.K[band], onod.family(band, onod.K[band], *fam)[meaning])
         return nod.waveform(nod.family(*fam)[meaning], burst.cap)
     spec = MODES[burst.submode]
     if is_cpm(spec):
@@ -268,6 +271,7 @@ class ModemRx:
         self._pin = {}  # (slot, cut) -> its decode with the payload past cut bytes pinned to zero
         self._pairs = {}  # (slot, cut or None) -> slots slot, slot + 1 combined (RV 0, 1), decoded mask open
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
+        self.primed_header = bool(r.get("primed_ofdm"))  # OFDM: only the expected slot's lock read its header
         self.r = r
         self._post, self._blind = {}, False  # DD: slot -> LLRs of its coded bits
         self._pass_post = {}  # CPM: data slot -> its cpm_pass's posterior (None: it failed)

@@ -39,6 +39,7 @@ def substitutions(native):
             self._n = P.ModemRx(r, store, dd_budget, bool(PHY.DD))
             self.spec, self.n_cw, self.submode = r["spec"], r["n_cw"], r["spec"].name
             self.n_ctl_slots, self.store, self.r = r.get("n_ctl_slots", 0), store, r
+            self.primed_header = bool(r.get("primed_ofdm"))
 
         _spec = py_rx._spec
 

@@ -143,9 +143,26 @@ struct Lock {
     std::string_view band;
     double cfo = 0.0;
     std::optional<CopyRef> copy;  // set by find_copy
+    bool primed = false;          // set by prime_ofdm
 };
 Lock find_burst(std::span<const double> x, std::span<const std::string_view> bands = {},
                 const Accept* accept = nullptr, std::span<const BandStat> stats = {});
+// The expected slot for OFDM replies (modem.prime_ofdm, docs/arq.md §3a): a burst of one of accept's
+// submodes whose preamble starts in [lo, hi], its CFO near cfo. x must hold prime_span past a start at hi.
+inline constexpr int PRIME_PEAKS = 3;
+inline constexpr double PRIME_REACH_HZ = waveform::STEP_HZ;
+std::optional<double> prime_floor(std::string_view band);  // PRIME_FLOOR[band]; nullopt: the band is not primed
+std::int64_t prime_span(std::string_view band);            // its preamble, header and the pilot after
+std::optional<Lock> prime_ofdm(std::span<const double> x, std::int64_t lo, std::int64_t hi, double cfo,
+                               const Accept& accept);
+// A band's preamble, then one symbol per layout entry (1: a pilot; 0: the next nc QPSK cells of `bits`,
+// two bits a cell) and nothing more, conditioned as an ACK mode's burst (arq/onod.hpp: onod.waveform).
+std::vector<double> keyed_waveform(std::string_view band, std::span<const std::uint8_t> layout,
+                                   std::span<const std::uint8_t> bits);
+// Soft bits of the symbols after a preamble at `start` that layout marks 0 (1: a pilot), read as
+// read_header reads a header's (onod.read). z: baseband, frequency-corrected.
+std::vector<double> keyed_read(std::span<const cd> z, std::int64_t start, std::string_view band,
+                               std::span<const std::uint8_t> layout);
 // `pattern`: also the pilot pattern over those frames (modem.pilot_coherence's pattern=True)
 std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock, int n_max = 8, bool latest = false,
                                     double* pattern = nullptr);
@@ -204,10 +221,13 @@ struct Received {
     equalizer::Support seen_support;  // ungated: the window shift's, the reported delay's
     std::int64_t preamble_start = 0;
     double score = 0.0;
+    bool primed = false;  // only the expected slot's lock found it (receiver: prime_ofdm; Python's "primed_ofdm")
 };
-// head: the preamble and header lie in x[:head]. copy: find_copy's lock. Throws SyncError.
+// head: the preamble and header lie in x[:head]. copy: find_copy's lock. known: {start, cfo, spec, n_cw}
+// of a burst whose timing is known (modem.receive's `known`): no search, the header not needed. Throws SyncError.
 Received receive(std::span<const double> x, std::span<const std::string_view> bands = {},
-                 const Accept* accept = nullptr, std::optional<std::int64_t> head = {}, const Lock* copy = nullptr);
+                 const Accept* accept = nullptr, std::optional<std::int64_t> head = {}, const Lock* copy = nullptr,
+                 const Lock* known = nullptr);
 double resolve_alias(double fine, double coarse);
 
 // var (rows, nc): n0_k (n0 if empty) per carrier + clip_ratio |h|^2.

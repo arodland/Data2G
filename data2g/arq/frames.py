@@ -53,6 +53,10 @@ T_INLINE = 18
 # the peer acts on a burst that carried it; nods go only to a peer that sent it.
 # Drop it (everyone hears nods) at the next session version bump.
 T_NODS = 19
+# empty: the sender hears OFDM nods (docs/arq.md §3c), as T_NODS for the keyed CPM ones:
+# in control padding only, until the peer acts on a burst that carried it; OFDM nods go
+# only to a peer that sent it. (20 is left to T_KEEP, proposed apart.)
+T_ONODS = 21
 
 
 def inline_check(mask_id: tuple, payload: bytes) -> bytes:

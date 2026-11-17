@@ -987,6 +987,29 @@ def test_nods_on_audio(monkeypatch):
     assert sent >= 2 and heard >= sent - 1, (sent, heard)
 
 
+def test_ofdm_nods_on_audio(monkeypatch):
+    """An OFDM session's control-only replies go as OFDM nods (docs/arq.md
+    §3c) once both said T_ONODS and the slot is learned, and the sender's
+    engine finds them there: the data still arrives whole. (The shifter
+    hears a nod's energy as any burst's:
+    test_the_shifter_hears_each_peer_bursts_energy, whose replies nod.)"""
+    from data2g.arq import link as LK
+
+    monkeypatch.setattr(LK, "NOD", True)
+    monkeypatch.setattr(LK, "ONOD", True)
+    a, b = Engine("W1AW", seed=31), Engine("K2XYZ", seed=32)
+    b.listen()
+    a.connect("K2XYZ", 2)
+    assert link(a, b, 20, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
+    up = np.random.default_rng(33).bytes(45000)
+    a.session.write(up)
+    got = bytearray()
+    assert link(a, b, 20, 200, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=34)
+    assert bytes(got) == up
+    sent, heard = b.session.station.stats["tx_nod"], a.session.station.stats["rx_nod"]
+    assert sent >= 2 and heard >= sent - 1, (sent, heard)
+
+
 def test_pending_on_a_connect_header_then_connected_or_cancelled():
     """PENDING: raised on a header that may be a CONNECT while
     listening, before its callee is known; CONNECTED follows if it was mine,

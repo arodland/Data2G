@@ -38,10 +38,14 @@ inline constexpr int LINK_LOST_MISSES = 12;
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
 bool prime_default();
+// link.PRIME_OFDM: DATA2G_PRIME_OFDM=0 turns the expected-slot lock for OFDM ACK replies off (read once).
+bool prime_ofdm_default();
 // link.REPEAT: DATA2G_REPEAT=0 turns the combining of repeated controls off (read once).
 bool repeat_default();
 // link.NOD: DATA2G_NOD=0 turns nods off (docs/arq.md §3b; read once).
 bool nod_default();
+// link.ONOD: DATA2G_ONOD=0 sends no OFDM nods (docs/arq.md §3c; read once); they are still listened for.
+bool onod_default();
 inline constexpr const char* NOD_MODE = "fsk16r25-r1/3";  // the mode a nod's control is packed and named in
 
 // Python's logging, by logger name ("data2g.link", "data2g.session") and
@@ -81,6 +85,8 @@ public:
     virtual int max_ctl(const std::string&) { return MAX_CTL; }
     virtual std::optional<Recommendation> recommend(Station&) { return std::nullopt; }  // nullopt: none (0, 1, -)
     virtual bool want_dup() { return false; }
+    // A control-only OFDM reply may go as an OFDM nod (link.Policy.ofdm_nod_ok, docs/arq.md §3c).
+    virtual bool ofdm_nod_ok() { return true; }
     virtual int rv_cycle(const std::string& submode) = 0;
     virtual bool has_outcome() { return false; }
     // usable: nullopt for a nod (neither a blind decode nor a loss of one)
@@ -281,6 +287,10 @@ public:
     bool nod_peer = false;
     bool nods_told_ = false;
     std::set<std::int64_t> nods_in_;
+    // the same three for OFDM nods (docs/arq.md §3c, T_ONODS)
+    bool onod_peer = false;
+    bool onods_told_ = false;
+    std::set<std::int64_t> onods_in_;
     using Kept = std::tuple<int, std::optional<int>, bool>;  // size_hint, T_REPLY, T_CHAT
     struct SentCtl {
         std::int64_t cum;

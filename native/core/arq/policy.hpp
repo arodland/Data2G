@@ -44,6 +44,10 @@ inline constexpr std::size_t ENERGY_HIST = 4;  // the energy inputs' window: the
 inline constexpr std::size_t CPM_FLOOR_HIST = 3;
 inline constexpr double CPM_FLOOR_SNR_DB = -4.0;
 inline constexpr double CPM_FLOOR_SPREAD_HZ = 1.0;
+// OFDM nods (policy.py ONOD_GATE, docs/arq.md §3c) only where they are heard: not on a link whose median
+// spread_est is at least ONOD_GATE_SPREAD_HZ while its median snr_est is under ONOD_GATE_SNR_DB.
+inline constexpr double ONOD_GATE_SPREAD_HZ = 0.5;
+inline constexpr double ONOD_GATE_SNR_DB = -1.0;
 inline constexpr double UNMEASURED_SPREAD_HZ = 2.0;  // equalizer::DEFAULT_SPREAD_HZ (policy.py)
 // per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd; throws for an unknown mode
 const std::array<double, 4>& mode_thresholds(std::string_view submode);
@@ -128,6 +132,7 @@ public:
     int gate() const;
     // the CPM floor holds (policy.py GearShifter.cpm_floor)
     bool cpm_floor() const;
+    bool ofdm_nod_ok() const;  // policy.py GearShifter.ofdm_nod_ok
     void observe_energy(double snr_db, double now);
     // the energy inputs (mean dB in power, fill, 1); nullopt before any
     std::optional<std::array<double, 3>> energy_features() const;
@@ -151,6 +156,7 @@ public:
     int max_ctl(const std::string& submode) override;
     std::optional<Recommendation> recommend(Station& st) override;
     bool want_dup() override { return shifter.want_dup; }
+    bool ofdm_nod_ok() override { return shifter.ofdm_nod_ok(); }
     int rv_cycle(const std::string& submode) override;
     bool has_outcome() override { return true; }
     void outcome(const std::string& submode, int decoded, int sent, std::optional<bool> usable) override {

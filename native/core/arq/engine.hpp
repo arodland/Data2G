@@ -45,6 +45,7 @@
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
 #include "arq/nod.hpp"
+#include "arq/onod.hpp"
 #include "arq/session.hpp"
 #include "cwid/cwid.hpp"
 #include "kisslink/kisslink.hpp"
@@ -369,6 +370,9 @@ protected:
     virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) {
         receiver_.expect(grids, lo, hi, cfo);
     }
+    virtual void receiver_expect_ofdm(const modem::Accept& accept, std::int64_t lo, std::int64_t hi, double cfo) {
+        receiver_.expect_ofdm(accept, lo, hi, cfo);
+    }
     virtual std::vector<double> tx_audio(const TxBurst& b) { return arq::tx_audio(b); }
     virtual void hear_burst(receiver::BurstEvent& ev, double t);
 
@@ -468,6 +472,9 @@ private:
         std::vector<std::string_view> grids;
         std::int64_t lo, hi;
         double cfo;
+        modem::Accept ofdm;  // the OFDM ACK modes (empty: none), their window and CFO
+        std::int64_t ofdm_lo, ofdm_hi;
+        double ofdm_cfo;
     };
     std::optional<Expect> expect_next_;  // under mu_
     void expect_reply();
@@ -544,6 +551,17 @@ private:
         std::vector<double> buf;
     };
     std::optional<NodWatch> nod_watch_;
+    // the OFDM nod search (engine.py _onod / _onod_feed, docs/arq.md §3c): in the OFDM replies' slot, on each
+    // sync band an ACK mode I expect nods on (with the first such mode, for its energy reading)
+    struct OnodWatch {
+        nod::FamilyKey key;
+        std::int64_t anchor, lo, hi;
+        double cfo;
+        std::vector<std::pair<std::string_view, std::string>> bands;
+        std::vector<double> buf;
+    };
+    std::optional<OnodWatch> onod_watch_;
+    void onod_collect(std::span<const double> x, double t);
     bool nods_ = true;
     void watch_nods(std::int64_t end);
     void nod_collect(std::span<const double> x, double t);

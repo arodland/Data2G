@@ -468,6 +468,7 @@ def modem_hpp() -> str:
                 f"{{{{{rows}}}}};\n")
 
     out.append(per_band("HEADER_MIN_SCORE", modem.HEADER_MIN_SCORE))
+    out.append(per_band("PRIME_FLOOR", modem.PRIME_FLOOR))
     out.append(per_band("PILOT_NOISE", modem.PILOT_NOISE))
     out.append(per_band("PILOT_PATTERN", modem.PILOT_PATTERN))
 

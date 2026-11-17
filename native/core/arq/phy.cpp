@@ -12,6 +12,7 @@
 #include "util/pool.hpp"
 #include "cpm/cpm.hpp"
 #include "arq/nod.hpp"
+#include "arq/onod.hpp"
 #include "equalizer/equalizer.hpp"
 
 namespace data2g::arq {
@@ -147,6 +148,10 @@ std::uint32_t mask_value(const MaskId& m) {
 std::vector<double> tx_audio(const TxBurst& burst) {
     if (burst.nod) {  // a nod (docs/arq.md §3b): its keyed sequence
         const auto& [meaning, key] = *burst.nod;
+        if (const auto band = onod::band_of(burst.submode); !band.empty()) {  // an OFDM nod (§3c), on its mode's sync band
+            const int k = onod::k_of(band);
+            return onod::waveform(band, k, onod::family(band, k, key).row(static_cast<std::size_t>(meaning)));
+        }
         return nod::waveform(nod::family(key).at(static_cast<std::size_t>(meaning)), burst.cap);
     }
     const Mode& md = mode_at(burst.submode);

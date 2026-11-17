@@ -29,8 +29,9 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
-| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
+| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `modem.py` (`prime_ofdm`), `receiver.py` (`ReplySlot`, `Receiver.expect`, `Receiver.expect_ofdm`), `engine.py` (`_expect_reply`) |
 | §3b nods | `nod.py` (`family`, `detect`, `CODEBOOK`, `NodRx`); `frames.py` (`T_NODS`); `link.py` (`Station._nod_of`, `nod_family`, `nod_payload`, `nod_peer`); `session.py` (direct replies `build(nod=True)`); `engine.py` (`_watch_nods`, `_nod_feed`) |
+| §3c OFDM nods | `onod.py` (`family`, `waveform`, `detect`, `K`, `THR`); `frames.py` (`T_ONODS`); `link.py` (`Station._nod_of`, `onod_peer`, `Policy.ofdm_nod_ok`); `policy.py` (`ONOD_GATE`); `phy.py` (`tx_audio`); `engine.py` (`_watch_nods`, `_onod_feed`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -183,6 +184,37 @@ for Data2G).
   27000 windows of noise, OFDM bursts and the other grids' bursts scored at most 15.1
   (runs/primed-rx/plock_fa2.txt); bursts the blind paths lost read 20-60. A lock it makes is
   a header like any other (the session's wait extends to the burst's end).
+- **The expected slot, OFDM** (`Receiver.expect_ofdm`, `modem.prime_ofdm`,
+  `ReplySlot.ofdm_window`). The same for an OFDM ACK mode's reply: where the peer's OFDM
+  bursts have started and their CFO (kept apart from the CPM ones': another lead-in,
+  another estimator), the ACK modes my session expects, a control's codewords (1-4). The
+  ACK modes are header-limited near their floor, and of the bursts the blind receiver
+  lost at the header while the true start's header read, acquisition had mostly locked
+  thousands of samples off or a whole 50 Hz CFO alias off (`scripts/expect_acq_diag.py`).
+  Once the audio holds the header of a start at the window's end and nothing locked,
+  `prime_ofdm` reads each band's 3 strongest detections in the window within one CFO bin
+  of the expected one, as the blind search reads them (+-1, +-2 repeats), over those
+  words only (12 for three modes). `PRIME_FLOOR` (w 0.311, n10 0.300): 1e-3 false locks
+  a window on white noise (5 and 7 of 12000). Its lock is received at its start and CFO
+  with no second search (`modem.receive`'s `known`), and its burst is reported to the
+  policy as lost, as a primed control is. Measured (`scripts/expect_prime_study.py`,
+  control-only x2 bursts, 300 a point, the window's centre up to 0.1 s off, the CFO
+  known to +-1 Hz), header found blind -> with the slot:
+  - ack-4f: awgn -12 0.15 -> 0.25, -10 0.61 -> 0.70; mpp -8 0.67 -> 0.76, -6 0.83 ->
+    0.87; mpd -8 0.56 -> 0.68, -6 0.80 -> 0.87.
+  - n10-ack-4f: awgn -12 0.58 -> 0.77, -10 0.98 -> 0.99; mpp -8 0.72 -> 0.82, -6 0.86 ->
+    0.92; mpd -8 0.64 -> 0.73, -6 0.79 -> 0.87.
+  - n4-ack-8f: awgn -12 0.55 -> 0.76, -10 0.97 -> 0.99; mpp -8 0.76 -> 0.83, -6 0.89 ->
+    0.93; mpd -8 0.60 -> 0.74, -6 0.77 -> 0.86.
+  - No wrong header in 5400 bursts. A lock's control then decodes for n4-ack-8f (152
+    of 172) and half the time for the 4f modes (ack-4f 82 of 156, n10-ack-4f 83 of
+    156: there the control is the next limit).
+  - Sessions (`scripts/loss_study.py`, shift+cpm, DATA2G_PEP_REF_DB=5, 16 seeds x 300 s,
+    paired against `DATA2G_PRIME_OFDM=0`; delivered bps): it seldom matters to a bulk
+    transfer. 150 of 160 sessions ran identically; mpp -6 +4.5% (SE 2.6, 4 seeds
+    better, 0 worse), mpd -8 +1.4% (1.0, 2/0), mpp -3 +1.2% (1.0, 2/0), mpd -3 +0.2%
+    (1/0), mpp 0 -0.3% (0/1); awgn -10, -6, -4, mpd -6 and mpd 0 unchanged. Chat, where
+    lost ACKs cost most, is not measured.
 - **Measured, code level** (`scripts/primed_study.py`, 200 bursts a point through the real
   receiver, PEP-referenced cell SNR; runs/primed-rx/ctl_code_level.txt,
   plock_code_level.txt). 10% failure point of an ACK's control, all bursts sent, blind ->
@@ -225,8 +257,8 @@ for Data2G).
   its cuts: 0.31); `prime_lock` per window 8 ms (c16r25, c8r50), 12 ms (c32r62); the Pi 4
   runs this DSP about 12x slower: about 0.1-0.15 s once per expected reply, under the
   receiver's 0.25 s search hop.
-- **Not primed:** LDPC controls; OFDM acquisition and headers (the 4f/8f ACK modes are
-  header-limited there); a reply that starts outside the window.
+- **Not primed:** LDPC controls; OFDM acquisition and headers but an ACK mode's in the
+  expected slot; a reply that starts outside the window.
 - The outcome model learned the old control failure rate (the ACK modes' and CPM's at the
   floor), and the shifter leaves a failing mode on control losses. So a control only a
   primed retry read is reported to the policy as the blind decode saw it (lost): with it
@@ -320,6 +352,76 @@ everywhere (Python too) for A/B runs.
 - **Study** (`scripts/sig_study.py`, round 2): 10% failure points awgn -19.2, mpg -11.4,
   mpp -16.2, mpd -16.3 dB (mean power in 2500 Hz) against today's primed control-only
   reply at -14.7, -10.0, -11.7, -11.8, in 2.6 s of air instead of 5.0.
+
+## 3c. OFDM nods (`T_ONODS`, 2026-11, a study)
+
+A nod (§3b) is 2.56 s: it pays only where OFDM is gone. Above that a control-only reply
+is an ACK mode's burst, 0.76-1.62 s to say what its listener mostly knows. An OFDM nod
+says it in 0.47 s: the reply's sync band's preamble, then K keyed QPSK symbols where the
+header would be (a pilot after every 5, a closing pilot) and nothing more, one of M = 32
+keyed sequences, detected where the listener expects the reply, not decoded. Same
+codebook, anchors and kept fields as §3b. `DATA2G_ONOD=0` sends none (A/B runs).
+
+- **Who nods to whom**: as §3b, with `T_ONODS` (21, empty) for "I hear OFDM nods". The
+  flags ride only in a control with two spare bytes: a data burst's or a CPM one's, not
+  an OFDM ACK mode's own.
+- **Which reply**: a fresh control-only reply in an OFDM ACK mode whose sync band has a
+  K (`onod.K`: w 9 symbols, 0.472 s; n10 10 symbols, 0.496 s), whose content is in
+  the codebook, and whose control (less the flags a nod drops) fits one `NOD_MODE`
+  codeword, as the listener rebuilds it. It stands for the whole control, whatever
+  codewords that takes in its mode.
+- **Family** (`onod.family`, C++ `onod::family`, pinned in tests/test_onod.py):
+  splitmix64 seeded with (0x0F0D, session key, direction, the nod's burst number mod 8,
+  the burst it acts on mod 8), 64 bits an output, bit 0 first. Each sequence is redrawn
+  until no valid header word of the band matches its head (a header's coded bits) over 0.25 (`SCREEN`),
+  so a receiver reading a header at the nod's start finds none.
+- **Detection** (`onod.detect`): `modem.prime_ofdm`'s search of the OFDM replies' slot
+  (`ReplySlot.ofdm_window`, +-0.15 s; their CFO), each read correlated with the family;
+  accepted when the best normalized correlation is at least `THR` and the runner-up
+  under it. `THR` (w 0.29, n10 0.42): 1e-6 false accepts a slot, the exponential tail
+  over the top 1% of 600,000 noise slots (`scripts/onod_study.py --noise`; on this
+  tree 100,000 slots: maxima 0.274 and 0.357, tails 0.290 and 0.409).
+- **Heard** (`--detect`, 300 a point, mean power in 2500 Hz), against the ACK it
+  replaces (blind or primed):
+
+  | | awgn -8 | -6 | -4 | mpp -4 | 0 | +3 | mpd -4 | 0 | +3 |
+  |---|---|---|---|---|---|---|---|---|---|
+  | nod, w (0.47 s) | 0.91 | 1.00 | 1.00 | 0.84 | 0.97 | 0.99 | 0.76 | 0.93 | 0.99 |
+  | nod, n10 (0.50 s) | 0.99 | 1.00 | 1.00 | 0.89 | 0.98 | 1.00 | 0.81 | 0.94 | 0.97 |
+  | ack-1f x2 (0.76 s) | 0.00 | 0.19 | 0.91 | 0.40 | 0.83 | 0.96 | 0.28 | 0.74 | 0.93 |
+  | ack-4f x2 (1.62 s) | 1.00 | 1.00 | 1.00 | 0.96 | 1.00 | 1.00 | 0.96 | 1.00 | 1.00 |
+
+  No wrong meaning in 16,200 nods. Shorter and sturdier than ack-1f; on fading it
+  loses to ack-4f, which has four frames of time diversity where a nod has none.
+  A 4-symbol nod (0.33 s, a header's length) needs about 3 dB more.
+- **Not a nod** (`--false`, 20,000 a kind and band): the peer's real ACK, a data burst,
+  a nod of the turn next to it, another session's nod, in the slot: none accepted
+  (best scores 0.262 on w, 0.365 on n10).
+- **The gate** (`policy.ONOD_GATE`, `GearShifter.ofdm_nod_ok`). A lost nod costs a
+  timeout, and one fade loses a nod whole. Ungated (v0.5.0 runs), mpd -6 lost 4% and
+  mpp -6 9% to timeouts. So: no OFDM nod while the median `spread_est` of the peer's
+  bursts is at least 0.5 Hz and their median `snr_est` under -1 dB, and none before a
+  measurement. A rule of thumb from session runs, checked on held-out seeds; the
+  outcome model pricing a nod as a reply mode would be the proper form.
+- **Sessions** (shift+cpm, DATA2G_PEP_REF_DB=5, paired by seed against `DATA2G_ONOD=0`;
+  both arms with §3a's OFDM slot). Bulk (loss_study, 16 seeds x 300 s, delivered bps):
+  awgn -10 0.0% (no nods), awgn -6 +9.4% (SE 0.4; 16 seeds better, 0 worse), awgn -4
+  +9.0% (1.2; 15/1), awgn 5 +4.5% (16/0); mpp -6 +6.8% (3.7; 5/1), mpp -3 +5.9% (3.5;
+  8/6), mpp 0 +9.5% (2.1; 14/2); mpd -6 -0.4% (0.4; 0/1), mpd -3 +4.6% (2.2; 11/4),
+  mpd 0 -0.8% (3.7; 8/8). linksim winlink (chat_probe, 24 seeds x 900 s, per-seed mean
+  latency of every message): awgn 10 -0.16 s (SE 0.07; 18/5), awgn -4 -4.28 s (0.76;
+  23/1), mpp 0 -0.70 s (0.48; 13/11), mpd -3 -2.37 s (0.79; 17/5).
+- **What it costs a third party.** A stock receiver's search also reads headers a repeat
+  or two off the nod's start and at later detections, where nothing is screened. Of
+  2000 nods each (`--false`'s "stock" rows), `find_burst` (the streaming receiver's
+  first look) locked on 20 at awgn 0 dB and 43 at mpp 0 dB on w, 0 and 8 on n10, none
+  at +20 dB, claiming bursts of 21-31 s (median; up to 108 s): BUSY for that long at a
+  station overhearing, about the rate of a data burst that lost its preamble. The
+  whole-burst receive (`receive_any`) locked on 2 of 12,000.
+- **Open**: the slot is +-0.15 s, and replies on air have spread more (§3b: +-0.6 s
+  there, at a higher threshold); screening the reads a repeat off; the shifter's reply
+  recommendation still prices the ACK mode, not the nod; a nod carries no receiver
+  measurement (its energy reading does reach the shifter).
 
 ## 4. Core control word (32 bits)
 

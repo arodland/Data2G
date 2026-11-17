@@ -35,6 +35,7 @@ from . import burst as B
 from . import frames as F
 from . import link as LK
 from . import nod as N
+from . import onod as O
 from . import phy as PHY
 from . import session as S
 from .modes import MODES, burst_seconds
@@ -236,6 +237,7 @@ class Engine:
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._nod = None  # the nod search after my burst (_watch_nods): [(key, lo, hi), cfo, audio chunks, samples]
+        self._onod = None  # the OFDM nod search, likewise: [(key, lo, hi), cfo, sync bands, audio chunks, samples]
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -744,17 +746,57 @@ class Engine:
         grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
         if w is not None and grids and LK.PRIME:
             self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
+        # and the OFDM ACK modes, a control's codewords: where its OFDM replies have started, their CFO
+        w = self.slot.ofdm_window(0.0)
+        acks = [m for m in dict.fromkeys(self.session.expecting()) if m in MODES and not is_cpm(MODES[m]) and "ack" in m]
+        if w is not None and acks and LK.PRIME and LK.PRIME_OFDM:
+            self.receiver.expect_ofdm(modem.Accept(tuple((m, F.MAX_CTL) for m in acks)),
+                                      max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.ofdm_cfo)
 
     def _watch_nods(self):
         """Where the peer may nod after my burst (docs/arq.md §3b): its reply
         in the expected slot, stream indices from my burst's end."""
-        self._nod = None
+        self._nod = self._onod = None
         st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.nod_window(0.0)
-        if st is None or cfo is None or w is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
+        if st is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
             return
         key = st.nod_family()
-        if key is not None:
+        if key is None:
+            return
+        if cfo is not None and w is not None:
             self._nod = [(key, max(0, int(round(w[0] * FS))), int(round(w[1] * FS))), cfo, [], 0]
+        # an OFDM nod (§3c): where its OFDM replies have started, on each sync band an ACK mode I expect nods on
+        w = self.slot.ofdm_window(0.0)
+        bands = {}  # sync band -> the first mode expected on it
+        for m in self.session.expecting():
+            if O.band_of(m):
+                bands.setdefault(O.band_of(m), m)
+        if w is not None and bands:
+            self._onod = [(key, max(0, int(round(w[0] * FS))), int(round(w[1] * FS))), self.slot.ofdm_cfo, bands, [], 0]
+
+    def _onod_feed(self, x: np.ndarray, t: float):
+        """_nod_feed for an OFDM nod: once the audio holds the window on every band."""
+        (key, lo, hi), cfo, bands, chunks, n = self._onod
+        chunks.append(x)
+        self._onod[4] = n = n + len(x)
+        if n < hi + max(O.samples(b, O.K[b]) for b in bands):
+            return
+        self._onod = None
+        st = getattr(self.session, "station", None)
+        if st is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
+            return
+        y = np.concatenate(chunks)
+        for b in bands:
+            got = O.detect(y, lo, hi, cfo, b, O.K[b], O.family(b, O.K[b], *key))
+            if got is not None:
+                log.info("RX OFDM nod %d: %s (score %.2f)", got[0], N.CODEBOOK[got[0]], got[2])
+                self.slot.heard_ofdm(got[1] / FS, got[3])  # its start from my burst's end, its CFO
+                # a peer burst as any other to the noise profile and the shifter's energy inputs
+                start = t - (n - got[1] + LEADIN_SAMPLES) / FS
+                self.noise.mark(start, start + O.seconds(b, O.K[b]))
+                self._energy(start, start + O.seconds(b, O.K[b]), bands[b], t)
+                self.session.on_rx(st.nod_rx(got[0]), t)
+                return
 
     def _nod_feed(self, x: np.ndarray, t: float):
         """Audio since my burst's end: once it holds the window, a nod there is the burst it stands for."""
@@ -778,6 +820,8 @@ class Engine:
     def _hear(self, x: np.ndarray, t: float):
         if self._nod is not None:
             self._nod_feed(x, t)
+        if self._onod is not None:
+            self._onod_feed(x, t)
         for kind, ev in self.receiver.feed(x):
             if kind == "header":
                 self.session.on_header(ev["spec"].name, ev["n_cw"], t)
@@ -831,6 +875,8 @@ class Engine:
                 # its start from my burst's end (the receiver was reset there): the expected slot learns
                 if r.get("family") == "cpm":
                     self.slot.heard(h["start"] / FS, r["cfo"])
+                else:
+                    self.slot.heard_ofdm(h["start"] / FS, r["cfo"])
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

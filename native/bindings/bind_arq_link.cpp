@@ -53,6 +53,7 @@ public:
         return Recommendation{r[0].cast<int>(), r[1].cast<int>(), r[2].is_none() ? std::nullopt : std::optional<int>(r[2].cast<int>())};
     }
     bool want_dup() override { return py::bool_(py::getattr(obj, "want_dup", py::bool_(false))); }
+    bool ofdm_nod_ok() override { return overrides("ofdm_nod_ok") ? obj.attr("ofdm_nod_ok")().cast<bool>() : true; }
     int rv_cycle(const std::string& m) override { return obj.attr("rv_cycle")(m).cast<int>(); }
     bool has_outcome() override { return overrides("outcome"); }
     void outcome(const std::string& m, int decoded, int sent, std::optional<bool> usable) override {
@@ -140,6 +141,7 @@ public:
     int n_ctl_slots() const override { return py::getattr(obj, "n_ctl_slots", py::int_(0)).cast<int>(); }
     // link.py asks getattr(rx, "nod", False)
     bool is_nod() const override { return py::getattr(obj, "nod", py::bool_(false)).cast<bool>(); }
+    bool primed_header() const override { return py::getattr(obj, "primed_header", py::bool_(false)).cast<bool>(); }
 };
 
 class PyRng : public Rng {
@@ -369,6 +371,43 @@ void bind_arq_link(py::module_& m) {
         if (!d) return py::none();
         return py::make_tuple(d->meaning, d->start, d->score);
     });
+    using FloatArr = py::array_t<float, py::array::c_style | py::array::forcecast>;
+    a.def("onod_family", [](const std::string& band, int k, int key, int direction, int bn8, int acted8) {
+        const auto f = onod::family(config::band(band).name, k, {key, direction, bn8, acted8});
+        py::array_t<float> out({static_cast<py::ssize_t>(f.rows), static_cast<py::ssize_t>(f.cols)});
+        std::copy(f.data.begin(), f.data.end(), out.mutable_data());
+        return out;
+    });
+    a.def("onod_waveform", [](const std::string& band, int k, const FloatArr& seq) {
+        const auto x = onod::waveform(config::band(band).name, k, {seq.data(), static_cast<std::size_t>(seq.size())});
+        py::array_t<double> out(static_cast<py::ssize_t>(x.size()));
+        std::copy(x.begin(), x.end(), out.mutable_data());
+        return out;
+    });
+    const auto fam_of = [](const FloatArr& fam) {
+        onod::Family f(static_cast<std::size_t>(fam.shape(0)), static_cast<std::size_t>(fam.shape(1)));
+        std::copy(fam.data(), fam.data() + fam.size(), f.data.begin());
+        return f;
+    };
+    a.def("onod_scores", [fam_of](const py::array_t<double, py::array::c_style | py::array::forcecast>& x, std::int64_t lo,
+                                  std::int64_t hi, double cfo, const std::string& band, int k, const FloatArr& fam) -> py::object {
+        const auto s = onod::scores({x.data(), static_cast<std::size_t>(x.size())}, lo, hi, cfo, config::band(band).name, k, fam_of(fam));
+        if (!s) return py::none();
+        py::array_t<double> sc(onod::M), f(onod::M);
+        py::array_t<std::int64_t> st(onod::M);
+        std::copy(s->score.begin(), s->score.end(), sc.mutable_data());
+        std::copy(s->start.begin(), s->start.end(), st.mutable_data());
+        std::copy(s->cfo.begin(), s->cfo.end(), f.mutable_data());
+        return py::make_tuple(sc, st, f);
+    });
+    a.def("onod_detect", [fam_of](const py::array_t<double, py::array::c_style | py::array::forcecast>& x, std::int64_t lo,
+                                  std::int64_t hi, double cfo, const std::string& band, int k, const FloatArr& fam,
+                                  std::optional<double> thr) -> py::object {
+        const auto d = onod::detect({x.data(), static_cast<std::size_t>(x.size())}, lo, hi, cfo, config::band(band).name, k, fam_of(fam), thr);
+        if (!d) return py::none();
+        return py::make_tuple(d->meaning, d->start, d->score, d->cfo);
+    }, py::arg("x"), py::arg("lo"), py::arg("hi"), py::arg("cfo"), py::arg("band"), py::arg("k"), py::arg("fam"),
+       py::arg("thr") = py::none());
     a.def("pack_bitmap", [](const py::iterable& received, int cum) {
         std::set<int> r;
         for (auto x : received) r.insert(x.cast<int>());
@@ -485,6 +524,8 @@ void bind_arq_link(py::module_& m) {
         .def_readwrite("nod", &Station::nod)
         .def_readwrite("nod_peer", &Station::nod_peer)
         .def_readonly("_nods_told", &Station::nods_told_)
+        .def_readwrite("onod_peer", &Station::onod_peer)
+        .def_readonly("_onods_told", &Station::onods_told_)
         .def("nod_family", [](const Station& s) -> py::object {
             const auto k = s.nod_family();
             if (!k) return py::none();

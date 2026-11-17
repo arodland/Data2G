@@ -602,7 +602,10 @@ void Engine::apply_reset() {
         std::lock_guard lock(mu_);
         e = std::exchange(expect_next_, std::nullopt);
     }
-    if (e && e->gen == gen_) receiver_expect(e->grids, e->lo, e->hi, e->cfo);
+    if (e && e->gen == gen_) {
+        if (!e->grids.empty()) receiver_expect(e->grids, e->lo, e->hi, e->cfo);
+        if (!e->ofdm.max_cw.empty()) receiver_expect_ofdm(e->ofdm, e->ofdm_lo, e->ofdm_hi, e->ofdm_cfo);
+    }
     busy_now_ = receiver_busy();
     channel_busy_now_ = receiver_channel_busy();
 }
@@ -618,11 +621,25 @@ void Engine::expect_reply() {
         const std::string_view g = cpm::grid_of(*md->cpm).name;
         if (std::find(grids.begin(), grids.end(), g) == grids.end()) grids.push_back(g);
     }
-    if (!w || grids.empty() || !prime_default()) return;
+    // and the OFDM ACK modes, a control's codewords: where its OFDM replies have started, their CFO
+    const auto ow = slot_.ofdm_window(0.0);
+    modem::Accept acks;
+    for (const auto& m : session_->expecting()) {
+        const Mode* md = mode(m);
+        if (!md || md->is_cpm() || m.find("ack") == std::string::npos) continue;
+        if (std::none_of(acks.max_cw.begin(), acks.max_cw.end(), [&](const auto& x) { return x.first == md->ofdm; }))
+            acks.max_cw.emplace_back(md->ofdm, MAX_CTL);
+    }
+    if (!w || !prime_default()) grids.clear();
+    if (!ow || !prime_default() || !prime_ofdm_default()) acks.max_cw.clear();
+    if (grids.empty() && acks.max_cw.empty()) return;
+    const auto idx = [](double t) { return static_cast<std::int64_t>(std::nearbyint(t * config::FS)); };
+    Expect e{want_gen_ + 1, std::move(grids), 0, 0, 0.0, std::move(acks), 0, 0, 0.0};
+    if (!e.grids.empty()) e.lo = std::max<std::int64_t>(0, idx(w->first)), e.hi = idx(w->second), e.cfo = *slot_.cfo;
+    if (!e.ofdm.max_cw.empty())
+        e.ofdm_lo = std::max<std::int64_t>(0, idx(ow->first)), e.ofdm_hi = idx(ow->second), e.ofdm_cfo = *slot_.ofdm_cfo;
     std::lock_guard lock(mu_);
-    expect_next_ = Expect{want_gen_ + 1, std::move(grids),
-                          std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
-                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo};
+    expect_next_ = std::move(e);
 }
 
 void Engine::request_reset() {
@@ -768,6 +785,7 @@ Engine::Done Engine::process(Block& b) {
         noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         nod_collect(b.x, t);
+        onod_collect(b.x, t);
         if (fresh) hear(b.items, t);
         hand_collect(b.x);
         const bool cw = fresh && b.cw && !(hand_hold_ > 0.0 && t < hand_hold_ + HAND_CW_TAIL_S);  // Hands, not an ID
@@ -1188,14 +1206,64 @@ void Engine::hand_close() {
 // expected slot.
 void Engine::watch_nods(std::int64_t end) {
     nod_watch_.reset();
+    onod_watch_.reset();
     const auto& st = session_->station;
     const auto w = slot_.nod_window(0.0);
-    if (!st || !slot_.cfo || !w ||
-        !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
+    if (!st || !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING)) return;
+    const auto key = st->nod_family();
+    if (!key) return;
+    const auto idx = [](double t) { return static_cast<std::int64_t>(std::nearbyint(t * config::FS)); };
+    if (slot_.cfo && w) nod_watch_ = NodWatch{*key, end, std::max<std::int64_t>(0, idx(w->first)), idx(w->second), *slot_.cfo, {}};
+    // an OFDM nod (§3c): where its OFDM replies have started, on each sync band an ACK mode I expect nods on
+    const auto ow = slot_.ofdm_window(0.0);
+    std::vector<std::pair<std::string_view, std::string>> bands;
+    for (const auto& m : session_->expecting()) {
+        const auto b = onod::band_of(m);
+        if (!b.empty() && std::none_of(bands.begin(), bands.end(), [&](const auto& x) { return x.first == b; }))
+            bands.emplace_back(b, m);
+    }
+    if (ow && !bands.empty())
+        onod_watch_ = OnodWatch{*key, end, std::max<std::int64_t>(0, idx(ow->first)), idx(ow->second), *slot_.ofdm_cfo,
+                                std::move(bands), {}};
+}
+
+// nod_collect for an OFDM nod (engine.py _onod_feed): once the audio holds the window on every band.
+void Engine::onod_collect(std::span<const double> x, double t) {
+    if (!onod_watch_) return;
+    auto& w = *onod_watch_;
+    std::int64_t need = 0;
+    for (const auto& [b, m] : w.bands) need = std::max(need, w.hi + onod::samples(b, onod::k_of(b)));
+    const std::int64_t at = n_ - w.anchor;  // this block's first sample, from my burst's end
+    if (at < 0) return;
+    if (at > static_cast<std::int64_t>(w.buf.size())) w.buf.resize(static_cast<std::size_t>(std::min(at, need)), 0.0);
+    if (static_cast<std::int64_t>(w.buf.size()) == at) w.buf.insert(w.buf.end(), x.begin(), x.end());
+    if (static_cast<std::int64_t>(w.buf.size()) < need) return;
+    const OnodWatch done = std::move(w);
+    onod_watch_.reset();
+    const auto& st = session_->station;
+    if (!st || !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING)) return;
+    for (const auto& [b, m] : done.bands) {
+        const int k = onod::k_of(b);
+        const auto got = onod::detect(done.buf, done.lo, done.hi, done.cfo, b, k, onod::family(b, k, done.key));
+        if (!got) continue;
+        log_write(LOG, INFO, format("RX OFDM nod %d: %s (score %.2f)", got->meaning, nod::describe(got->meaning).c_str(), got->score));
+        slot_.heard_ofdm(static_cast<double>(got->start) / config::FS, got->cfo);  // its start from my burst's end, its CFO
+        // a peer burst as any other to the noise profile and the shifter's energy inputs
+        const double start = t - static_cast<double>(static_cast<std::int64_t>(done.buf.size()) - got->start + config::LEADIN_SAMPLES) / config::FS;
+        noise_.mark(start, start + onod::seconds(b, k));
+        energy(start, start + onod::seconds(b, k), m, t, std::nullopt, std::nullopt);
+        nod::NodRx rx = st->nod_rx(got->meaning);
+        if (on_nod_)
+            if (const auto p = st->nod_payload(got->meaning)) {
+                auto tb = std::make_shared<TxBurst>();
+                tb->submode = NOD_MODE;
+                tb->slots.push_back({ctl_mask(st->peer(), 0, st->key), 0, *p});
+                tb->nod = std::make_pair(got->meaning, done.key);
+                on_nod_(tb);
+            }
+        session_->on_rx(rx, t);
         return;
-    if (const auto key = st->nod_family())
-        nod_watch_ = NodWatch{*key, end, std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
-                              static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo, {}};
+    }
 }
 
 // Audio since my burst's end (engine.py _nod_feed): once it holds the window, a nod there is the burst it
@@ -1331,6 +1399,7 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
         session_snr_ = meas->snr_est;
         // its start from my burst's end (the receiver was reset there): the expected slot learns
         if (r->cpm) slot_.heard(static_cast<double>(ev.header.start()) / config::FS, r->cpm->cfo);
+        else if (r->ofdm) slot_.heard_ofdm(static_cast<double>(ev.header.start()) / config::FS, r->ofdm->cfo);
     }
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's

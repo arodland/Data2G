@@ -14,7 +14,7 @@ import random
 import numpy as np
 import pytest
 
-from data2g import codes, cpm
+from data2g import codes, cpm, modem
 from data2g.arq import frames as F
 from data2g.arq import link as L
 from data2g.arq import phy as PHY
@@ -493,3 +493,102 @@ def test_policy_hears_primed_controls_as_lost():
         b.answered()
         a.answered()
     assert b.policy.seen == [True, False, True, False, True, False] and b.stats["rx_primed"] == 3
+
+
+# --- the expected slot for OFDM replies (modem.prime_ofdm) -----------------------------------
+
+ACKS = (("ack-4f", F.MAX_CTL), ("ack-1f", F.MAX_CTL), ("n10-ack-4f", F.MAX_CTL))
+
+
+def _faded_ack(seed, snr=-8.0):
+    """A control-only ack-4f burst (two codewords) through MPD at -8 dB, as _faded_cpm:
+    -> (audio, the blind read, its preamble's start, the link's CFO)."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+    import phy_session as PS
+
+    from data2g.config import LEADIN_SAMPLES
+    from data2g.receiver import receive_any
+    rng = np.random.default_rng(seed)
+    b = TxBurst("ack-4f", [Slot(ctl_mask(1, i, 7), 0, bytes(rng.integers(0, 256, 4, dtype=np.uint8))) for i in range(2)], 0, 2)
+    y = PS.ContinuousChannel("mpd", snr, seed, 60.0).apply(PHY.tx_audio(b), 10.0)
+    try:
+        r = receive_any(y, lead=int(PS.PAD_S * PS.FS) + PS.FS // 2)
+    except modem.SyncError:
+        r = None
+    return y, r, int(PS.PAD_S * PS.FS) + LEADIN_SAMPLES, PS.CFO_HZ, b
+
+
+def test_prime_ofdm_finds_what_blind_acquisition_lost():
+    """Seed 15: no blind path reads the header; in a +-0.15 s window at the
+    known CFO, over the ACK modes' words, the expected slot does, and the
+    burst decodes from its lock."""
+    y, r, p0, cfo, b = _faded_ack(15)
+    assert r is None
+    accept = modem.Accept(ACKS)
+    lock = modem.prime_ofdm(y, p0 - 1200, p0 + 1200, cfo, accept)
+    assert lock is not None and lock["primed"] and lock["start"] == p0
+    assert (lock["spec"].name, lock["n_cw"]) == ("ack-4f", 2) and lock["score"] >= modem.PRIME_FLOOR["w"]
+    rx = PHY.ModemRx(modem.receive(y, known=lock), {})
+    assert [rx.decode(i, s.mask_id, 0, None) for i, s in enumerate(b.slots)] == [s.payload for s in b.slots]
+    # outside the window, or of a submode not expected: no lock
+    assert modem.prime_ofdm(y, p0 + 2400, p0 + 4800, cfo, accept) is None
+    assert modem.prime_ofdm(y, p0 - 1200, p0 + 1200, cfo, modem.Accept((("n10-ack-4f", F.MAX_CTL),))) is None
+
+
+def test_prime_ofdm_on_noise():
+    rng = np.random.default_rng(3)
+    for _ in range(10):
+        assert modem.prime_ofdm(rng.normal(0, 1.0, 3 * 8000), 1200, 3600, 4.5, modem.Accept(ACKS)) is None
+
+
+def test_reply_slot_ofdm():
+    from data2g.receiver import ReplySlot
+    s = ReplySlot()
+    s.heard(0.35, 4.5)
+    assert s.ofdm_window(10.0) is None  # a CPM burst's gap and CFO are not an OFDM one's
+    for g in (0.5, 0.6, 5.0, None):
+        s.heard_ofdm(g, 3.0)
+    assert s.ofdm_window(10.0) == pytest.approx((10.55 - s.TOL_S, 10.55 + s.TOL_S)) and s.ofdm_cfo == 3.0
+    assert s.window(10.0) == pytest.approx((10.35 - s.TOL_S, 10.35 + s.TOL_S)) and s.cfo == 4.5
+
+
+def test_cpp_prime_ofdm_matches(native, pure):
+    for seed in (15, 13, 27, 0):
+        y, _, p0, cfo, _ = _faded_ack(seed)
+        want = modem.prime_ofdm(y, p0 - 1200, p0 + 1200, cfo, modem.Accept(ACKS))
+        got = native.modem.prime_ofdm(y, p0 - 1200, p0 + 1200, cfo, modem.Accept(ACKS))
+        assert (got is None) == (want is None), seed
+        if want is not None:
+            assert (got["spec"], got["n_cw"], got["start"], got["end"], got["p0"], got["band"]) == (
+                want["spec"].name, want["n_cw"], want["start"], want["end"], want["p0"], want["band"])
+            assert got["cfo"] == pytest.approx(want["cfo"]) and got["score"] == pytest.approx(want["score"], rel=1e-6)
+
+
+def test_receiver_expected_ofdm_slot():
+    """The streaming receiver: seed 15's burst, which no blind path locks, is
+    found in the expected slot (and decodes), and not without it."""
+    from data2g.arq.engine import receive_accept
+    from data2g.receiver import Receiver
+    y, _, p0, cfo, b = _faded_ack(15)
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0 - 200]), 2 * 8000)])
+
+    def stream(expect):
+        rcv = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
+        if expect:
+            rcv.expect_ofdm(modem.Accept(ACKS), p0 - 1200, p0 + 1200, cfo)
+        out = []
+        for i in range(0, len(y), 800):
+            out += rcv.feed(y[i:i + 800])
+        return out
+
+    assert not [k for k, _ in stream(False) if k == "burst"]
+    ev = stream(True)
+    assert [k for k, _ in ev] == ["header", "burst"]
+    r = ev[1][1]["rx"]
+    assert ev[0][1]["start"] == p0 and r is not None and r["primed_ofdm"] and r["spec"].name == "ack-4f"
+    rx = PHY.ModemRx(r, {})
+    assert rx.primed_header and rx.decode(0, b.slots[0].mask_id, 0, None) == b.slots[0].payload
+

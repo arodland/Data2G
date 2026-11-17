@@ -263,6 +263,8 @@ class RealPhy:
         self.sessions = {}
         self.tx_end = {}
         self.slots = {0: ReplySlot(), 1: ReplySlot()}
+        self.primed_ofdm_n = 0  # bursts only the OFDM expected slot found
+        self.onod_n = 0  # OFDM nods heard
 
     def listen(self, burst, t0: float, end: float) -> int:
         """-> the station that hears `burst` (direction 0 is station 0's: 1
@@ -292,7 +294,10 @@ class RealPhy:
         if rx is not None:
             if r is not None:
                 end = self.tx_end.get(rx)
-                self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo") if r.get("family") == "cpm" else None)
+                if r.get("family") == "cpm":
+                    self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo"))
+                else:
+                    self.slots[rx].heard_ofdm(None if end is None else t0 - end, r["cfo"])
         return r
 
     def primed(self, y, t0, rx):
@@ -301,20 +306,37 @@ class RealPhy:
         the peer's CFO; cpm.prime_lock there, as the engine's receiver does
         once its window has passed with no lock."""
         from data2g import cpm
+        from data2g.arq import frames as F
         from data2g.arq import link as LK
         from data2g.arq.modes import MODES, is_cpm
 
         s = self.sessions.get(rx)
-        w = self.slots[rx].window(self.tx_end[rx]) if rx in self.tx_end else None
-        if not LK.PRIME or s is None or w is None:
+        if not LK.PRIME or s is None or rx not in self.tx_end:
             return None
+        w = self.slots[rx].window(self.tx_end[rx])
         grids = dict.fromkeys(MODES[m].grid for m in s.expecting() if m in MODES and is_cpm(MODES[m]))
-        lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
-        for g in grids:
-            lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)
-            if lock is not None:
-                return cpm.receive(y, lock)
-        return None
+        if w is not None:
+            lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
+            for g in grids:
+                lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)
+                if lock is not None:
+                    return cpm.receive(y, lock)
+        # the OFDM ACK modes (Receiver.expect_ofdm): its preamble follows the lead-in
+        w = self.slots[rx].ofdm_window(self.tx_end[rx])
+        acks = [m for m in dict.fromkeys(s.expecting()) if m in MODES and not is_cpm(MODES[m]) and "ack" in m]
+        if w is None or not acks or not LK.PRIME_OFDM:
+            return None
+        lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS) + LEADIN_SAMPLES) for t in w)
+        lock = modem.prime_ofdm(y, lo, hi, self.slots[rx].ofdm_cfo, modem.Accept(tuple((m, F.MAX_CTL) for m in acks)))
+        if lock is None:
+            return None
+        try:
+            r = modem.receive(y, known=lock)
+        except modem.SyncError:
+            return None
+        r["primed_ofdm"] = True
+        self.primed_ofdm_n += 1
+        return r
 
     def burst_energy_db(self, burst, floor_db: float | None = None) -> float | None:
         """The last burst heard, as the engine measures it (data2g.arq.engine
@@ -362,18 +384,56 @@ class RealPhy:
         got = N.detect(y, max(0, lo), hi, cfo, N.family(*key))
         return None if got is None else got[0]
 
+    def onod(self, rx: int, t0: float):
+        """An OFDM nod (docs/arq.md §3c) in the audio just heard, in the OFDM
+        replies' slot (ReplySlot.ofdm_window, their CFO), on each sync band an
+        ACK mode station rx expects nods on, as the engine's _onod_feed. -> its
+        meaning, or None. A nod heard teaches the slot as a burst does."""
+        from data2g.arq import onod as O
+        from data2g.arq import session as SS
+
+        s = self.sessions.get(rx)
+        st = getattr(s, "station", None)
+        if st is None or s.state not in (SS.CONNECTED, SS.DISCONNECTING) or rx not in self.tx_end:
+            return None
+        key, w = st.nod_family(), self.slots[rx].ofdm_window(self.tx_end[rx])
+        if key is None or w is None:
+            return None
+        y, pad = self.last_y, int(PAD_S * FS) + LEADIN_SAMPLES
+        lo, hi = (int(round((t - t0) * FS)) + pad for t in w)
+        for band in dict.fromkeys(b for b in map(O.band_of, s.expecting()) if b):
+            k = O.K[band]
+            if hi < 0 or lo > len(y) - O.samples(band, k):
+                continue
+            got = O.detect(y, max(0, lo), min(hi, len(y) - O.samples(band, k)), self.slots[rx].ofdm_cfo, band, k,
+                           O.family(band, k, *key))
+            if got is not None:
+                self.slots[rx].heard_ofdm(t0 + (got[1] - pad) / FS - self.tx_end[rx], got[3])
+                self.onod_n += 1
+                return got[0]
+        return None
+
     def nod_heard(self, rx, t0: float, end: float):
         """send()'s result for a nod station rx finds in the audio just heard
         (looked for whatever the blind receiver made of it, as the engine
         does), or None."""
         got = self.nod(rx, t0) if rx is not None else None
+        ofdm = got is None and rx is not None
+        if ofdm:
+            got = self.onod(rx, t0)
         if got is None:
             return None
+        from data2g.arq import frames as F
         from data2g.arq import link as LK
 
         st = self.sessions[rx].station
-        # no header to hear: known at its end; no receiver measurements (meas None)
-        return end, (end, LK.NOD_MODE, 1), lambda store, stats, rng: st.nod_rx(got), None
+        # no header to hear: known at its end; no receiver measurements (meas None).
+        # Session.on_header adds the named mode's airtime to its deadline and the callee's quiet time
+        # (NOD_MODE's 5 s): an OFDM nod's header event is timed so that lands at the nod's end
+        from data2g.arq.modes import burst_seconds
+
+        t_hdr = end - burst_seconds(PHY.MODES[LK.NOD_MODE], 1) if ofdm else end
+        return end, (t_hdr, LK.NOD_MODE, 1), lambda store, stats, rng: st.nod_rx(got), None
 
     def send(self, burst, t0):
         """linksim.SimPhy.send's contract, on the real modem."""
