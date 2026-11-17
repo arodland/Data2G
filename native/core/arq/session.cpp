@@ -323,6 +323,8 @@ void Session::disconnect() {
     if (state == SessionState::IDLE || state == SessionState::LISTEN || state == SessionState::CLOSED) return;
     want_disc = true;
     disc_why = "CLIENT";
+    if (state == SessionState::CONNECTING && out && !deadline)
+        close("CLIENT unconfirmed");  // no CONNECT on air or awaiting its answer: nobody to tell
     if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
 }
 
@@ -407,7 +409,9 @@ void Session::on_timeout(double now) {
     if (state == SessionState::CONNECTING) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, tune.connect_tries));
-        if (tries >= tune.connect_tries) {
+        if (want_disc) {  // the host gave up on the call: this try was the last
+            close(disc_why + " unconfirmed");
+        } else if (tries >= tune.connect_tries) {
             close("NO_ANSWER");
         } else {
             auto b = connect_burst();

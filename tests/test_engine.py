@@ -517,32 +517,73 @@ def test_iamalive_every_60_seconds():
     assert h.out_cmd.count("IAMALIVE") == 2
 
 
-@pytest.mark.parametrize("data2g", [False, True])
-def test_disconnect_while_dialing_drops_the_call(data2g):
-    """A host that gives up on a call sends DISCONNECT (BPQ32; its ABORT comes
-    30 s later): no more CONNECT tries, the one on air cut, DISCONNECTED at
-    once, and the next CONNECT taken."""
+def _dialing(data2g=False, peer="N0CALL"):  # N0CALL: nobody answers
     from data2g.host import Host
 
-    a, b = Host(Engine("W1AW", seed=77)), Host(Engine("K2XYZ", seed=78))  # b: not listening, never answers
+    a, b = Host(Engine("W1AW", seed=77)), Host(Engine("K2XYZ", seed=78))
     a.command("LISTEN ON")
     if data2g:
         a.command("DATA2G ON")
-    a.command("CONNECT W1AW N0CALL")
-    assert link(a.engine, b.engine, 20, 10, lambda: a.engine.tx is not None)
-    a.out_cmd.clear()
-    a.command("DISCONNECT")
-    assert a.out_cmd == ["DISCONNECTED CLIENT" if data2g else "DISCONNECTED", "OK"]
-    assert a.engine.tx is None and a.engine.session.state == S.LISTEN
+    b.command("LISTEN ON")
+    a.command(f"CONNECT W1AW {peer}")
     a.out_cmd.clear()
 
-    def keyed():
-        a.after_step(bool(a.engine.tx))
-        return a.engine.tx is not None
-    assert not link(a.engine, b.engine, 20, 40, keyed)
-    assert not any(line.startswith("DISCONNECTED") for line in a.out_cmd)  # the one above was the only one
+    def pump(until):
+        def f():
+            a.after_step(bool(a.engine.tx))
+            b.after_step(bool(b.engine.tx))
+            return until()
+        return f
+    return a, b, pump
+
+
+def _ended(h):
+    return [s for s in h.out_cmd if s.startswith(("CONNECTED", "DISCONNECTED"))]
+
+
+@pytest.mark.parametrize("data2g", [False, True])
+def test_disconnect_while_dialing_makes_the_try_on_air_the_last(data2g):
+    """A host that gives up on a call sends DISCONNECT (BPQ32; its ABORT comes
+    30 s later): the CONNECT on air is not cut and its answer is waited for,
+    no more are sent, and DISCONNECTED follows the OK."""
+    a, b, pump = _dialing(data2g)
+    assert link(a.engine, b.engine, 20, 10, pump(lambda: a.engine.tx is not None))
+    a.out_cmd.clear()
+    a.command("DISCONNECT")
+    assert a.out_cmd == ["OK"] and a.engine.tx is not None and a.engine.session.state == S.CONNECTING
+    assert link(a.engine, b.engine, 20, 12, pump(lambda: _ended(a)))
+    assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed" if data2g else "DISCONNECTED"]
+    assert a.engine.session.state == S.LISTEN
+    a.out_cmd.clear()
+    assert not link(a.engine, b.engine, 20, 40, pump(lambda: a.engine.tx is not None))
+    assert not _ended(a)
     a.command("CONNECT W1AW N0CALL")
     assert a.out_cmd[-1] == "OK" and a.engine.session.state == S.CONNECTING
+
+
+def test_disconnect_before_the_connect_is_on_air_ends_the_call_unsent():
+    a, b, pump = _dialing(data2g=True)
+    a.command("DISCONNECT")
+    a.command("CONNECT W1AW N0CALL")  # at once: the DISCONNECTED is not lost with the session it replaces
+    assert a.out_cmd == ["OK", "OK"]
+    a.after_step(False)
+    assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"] and a.engine.session.state == S.CONNECTING
+    a.command("DISCONNECT")
+    a.out_cmd.clear()
+    assert not link(a.engine, b.engine, 20, 20, pump(lambda: a.engine.tx is not None))
+    assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"] and a.engine.session.state == S.LISTEN
+
+
+def test_disconnect_while_dialing_tells_a_callee_that_answered():
+    """The callee is not left connected to a caller that has gone: its
+    CONNECT_ACK is taken and the session closed with a DISC."""
+    a, b, pump = _dialing(data2g=True, peer="K2XYZ")
+    assert link(a.engine, b.engine, 20, 10, pump(lambda: a.engine.tx is not None))
+    a.command("DISCONNECT")
+    assert link(a.engine, b.engine, 20, 60, pump(lambda: len(_ended(a)) == 2 and len(_ended(b)) == 2))
+    assert _ended(a) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED CLIENT"]
+    assert _ended(b) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED"]
+    assert b.engine.session.state == S.LISTEN
 
 
 def test_losing_the_command_client_ends_its_session():

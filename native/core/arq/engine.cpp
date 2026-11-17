@@ -451,6 +451,14 @@ void Engine::pending_resolve() {
     if (session_->state != SessionState::CONNECTED) events_.emplace_back("CANCELPENDING");
 }
 
+void Engine::disconnect() {
+    session_->disconnect();
+    if (session_->state == SessionState::CLOSED) {  // a dial given up: its DISCONNECTED outlives a session replaced before the next step
+        events_.insert(events_.end(), session_->events.begin(), session_->events.end());
+        session_->events.clear();
+    }
+}
+
 std::vector<std::string> Engine::events() {
     pending_resolve();
     std::vector<std::string> ev = std::move(events_);

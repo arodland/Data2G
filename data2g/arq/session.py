@@ -152,6 +152,8 @@ class Session:
         if self.state in (IDLE, LISTEN, CLOSED):
             return  # nothing to close; a flag left set would end the next session at its first burst
         self._want_disc, self._disc_why = True, "CLIENT"
+        if self.state == CONNECTING and self._out is not None and self._deadline is None:
+            self._close("CLIENT unconfirmed")  # no CONNECT on air or awaiting its answer: nobody to tell
         if self._build_at is not None:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
@@ -450,7 +452,9 @@ class Session:
             self._tries += 1
             tries = CONNECT_TRIES if self.connect_tries is None else self.connect_tries
             log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, tries)
-            if self._tries >= tries:
+            if self._want_disc:  # the host gave up on the call: this try was the last
+                self._close(f"{self._disc_why} unconfirmed")
+            elif self._tries >= tries:
                 self._close("NO_ANSWER")
             else:
                 self._queue(self._connect_burst(), now + self.rng.uniform(3.0, 5.0))

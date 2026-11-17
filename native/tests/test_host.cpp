@@ -78,18 +78,6 @@ void commands() {
     h.command("ABORT");
     check::is_true(h.out_cmd == std::vector<std::string>{"DISCONNECTED", "OK"}, "ABORT");
     check::is_true(e.session().state == arq::SessionState::LISTEN, "ABORT keeps listening");
-    h.out_cmd.clear();
-    h.command("CONNECT K2XYZ W1AW");
-    for (int i = 0; i < 10; ++i) e.step(std::vector<double>(BLOCK, 0.0));
-    check::is_true(e.session().state == arq::SessionState::CONNECTING, "dialing");
-    h.out_cmd.clear();
-    h.command("DISCONNECT");
-    check::is_true(h.out_cmd == std::vector<std::string>{"DISCONNECTED", "OK"}, "DISCONNECT while dialing");
-    check::is_true(e.session().state == arq::SessionState::LISTEN, "DISCONNECT while dialing keeps listening");
-    h.command("CONNECT K2XYZ W1AW");
-    check::equal(h.out_cmd.back(), std::string("OK"), "the next call is taken at once");
-    h.command("ABORT");
-    h.out_cmd.clear();
     h.client_gone();
     check::is_true(!h.listening && e.session().state != arq::SessionState::LISTEN, "client gone: no longer listening");
 
@@ -166,6 +154,34 @@ void accept() {
     check::is_true(!p.b.accept_addr, "LISTEN ON ends ACCEPT");
 }
 
+void dial_given_up() {
+    check::current_step = "dial given up";
+    Engine e("NOCALL", seeded(4));
+    host::Host h(e);
+    for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) h.command(line);
+    const std::vector<double> quiet(BLOCK, 0.0);
+    h.out_cmd.clear();
+    h.command("CONNECT K2XYZ W1AW");
+    h.command("DISCONNECT");
+    check::is_true(h.out_cmd == std::vector<std::string>{"OK", "OK"}, "DISCONNECT before the CONNECT is on air: OK first");
+    h.command("CONNECT K2XYZ W1AW");
+    h.after_step(false);
+    check::is_true(has(h.out_cmd, "DISCONNECTED") && !e.tx(), "... the call ends unsent, its DISCONNECTED not lost to the next CONNECT");
+    for (int i = 0; i < 50 && !e.tx(); ++i) h.after_step(e.step(quiet).ptt);
+    check::is_true(e.tx().has_value() && e.session().state == arq::SessionState::CONNECTING, "a CONNECT on air");
+    h.out_cmd.clear();
+    h.command("DISCONNECT");
+    check::is_true(h.out_cmd == std::vector<std::string>{"OK"} && e.tx().has_value(), "DISCONNECT while dialing: OK, the CONNECT not cut");
+    int keyed = 0, blocks = 0;
+    for (bool was = true; blocks < 300; ++blocks) {
+        h.after_step(e.step(quiet).ptt);
+        keyed += e.tx() && !was;
+        was = e.tx().has_value();
+    }
+    check::is_true(has(h.out_cmd, "DISCONNECTED") && keyed == 0, "... its answer waited for, no further try");
+    check::is_true(e.session().state == arq::SessionState::LISTEN, "... listening again");
+}
+
 void operator_abort() {
     check::current_step = "operator abort";
     Pair p(seeded(31), seeded(32));
@@ -219,6 +235,7 @@ int main() {
     commands();
     session();
     accept();
+    dial_given_up();
     operator_abort();
     txpower();
     cwid_command();

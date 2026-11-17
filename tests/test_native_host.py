@@ -82,10 +82,14 @@ def transcript(Engine, Host, credit=None):
     assert link(a.engine, b.engine, 12, 5, pump(lambda: False), seed=6) is False
     a.command("ABORT")
     take("abort")
-    a.command("CONNECT W1AW K2XYZ")  # ... and again, given up with DISCONNECT
-    assert link(a.engine, b.engine, 12, 5, pump(lambda: False), seed=7) is False
+    a.command("CONNECT W1AW N0CALL")  # nobody's call, given up with DISCONNECT while its CONNECT is on air
+    assert link(a.engine, b.engine, 12, 30, pump(lambda: bool(a.engine.tx)), seed=7)
+    assert a.engine.session.state == S.CONNECTING
     a.command("DISCONNECT")
     take("disconnect")
+    n = len(seen["a"])
+    assert link(a.engine, b.engine, 12, 30, pump(lambda: any(s.startswith("DISCONNECTED") for s in seen["a"][n:])),
+                seed=8)
     for _ in range(int(1.2 * host.ALIVE_S * FS / BLOCK)):  # IAMALIVE, BUFFER repeats
         a.engine.step(np.zeros(BLOCK))
         a.after_step(False)

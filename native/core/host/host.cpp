@@ -220,11 +220,6 @@ void Host::command(std::string_view line, std::string_view peer) {
         } catch (const std::invalid_argument&) {
             ok = false;
         }
-    } else if (cmd == "DISCONNECT" && e.session().state == SessionState::CONNECTING) {
-        // a call being placed is dropped, as when the client leaves: no more tries, the one on air cut
-        e.abort();
-        out_cmd.emplace_back(data2g ? "DISCONNECTED CLIENT" : "DISCONNECTED");
-        if (listening) e.listen();
     } else if (cmd == "DISCONNECT") {
         e.disconnect();
     } else if (cmd == "ABORT") {

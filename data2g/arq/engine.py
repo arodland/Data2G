@@ -303,6 +303,9 @@ class Engine:
     def disconnect(self):
         """End the session gracefully: the peer is told, and what's queued still goes."""
         self.session.disconnect()
+        if self.session.state == S.CLOSED:  # a dial given up: its DISCONNECTED outlives a session replaced before the next step
+            self._events += self.session.events
+            self.session.events[:] = []
 
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""

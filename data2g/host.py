@@ -184,12 +184,6 @@ class Host:
                 e.connect(args[1], self.cap, None if self.retries is None else self.retries + 1)
             except (RuntimeError, ValueError):
                 ok = False
-        elif cmd == "DISCONNECT" and e.session.state == S.CONNECTING:
-            # a call being placed is dropped, as when the client leaves: no more tries, the one on air cut
-            e.abort()
-            self.out_cmd.append("DISCONNECTED CLIENT" if self.data2g else "DISCONNECTED")
-            if self.listening:
-                e.listen()
         elif cmd == "DISCONNECT":
             e.disconnect()
         elif cmd == "ABORT":
