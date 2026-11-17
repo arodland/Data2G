@@ -863,10 +863,16 @@ As built (data2g/arq/policy.py):
   BW500 / BW2300 / BW2750, and CQFRAME call bw.
   - **DISCONNECT while a CONNECT is still unanswered** ends the dial: no more
     tries. A CONNECT on air is finished and its answer waited for, so a callee
-    that answers is connected and then sent the DISC; with no answer the
-    session ends as DISCONNECTED CLIENT unconfirmed. With no CONNECT on air or
-    awaiting its answer it ends at once. A host that gives up on a call (BPQ32
-    sends DISCONNECT, then ABORT 30 s later) has the modem back within one try.
+    that answers is connected and then sent the DISC. With no answer, one DISC
+    goes under the key a callee that answered unheard would hold (so it is not
+    left connected until link lost), no DISC_ACK is waited for, and the session
+    ends as DISCONNECTED CLIENT unconfirmed once that DISC is out; between
+    tries the DISC goes at once. Before the first CONNECT is on air the session
+    ends with nothing sent. A host that gives up on a call (BPQ32 sends
+    DISCONNECT, then ABORT 30 s later) has the modem back within one try on a
+    clear channel. A busy one holds the end as it holds any transmission, and
+    a burst in the CONNECT's mode, an ID frame or a CW ID still extends the
+    wait for the answer; bursts in other modes no longer do.
   - **ACCEPT [host]:port** (Data2G) is LISTEN ON with the session's data on a
     connection Data2G makes to host:port (default: the address the command client connected from) when it answers a call,
     instead of the data port. One session at a time, as with LISTEN.
@@ -990,7 +996,7 @@ As built (data2g/arq/policy.py):
       PEER (the peer's DISC), ABORT, LINK_LOST, LINK_FAILED why, NO_ANSWER,
       PEER_RECONNECTED, and a CONNECT_NAK's BUSY, VERSION, NOT_LISTENING or
       REFUSED (unknown NAK: REFUSED reason n). CLIENT and IDLE end in
-      `unconfirmed` when the DISC was never acked, or a dial was given up
+      `unconfirmed` when the DISC was never acked, as for a dial given up
       (DISCONNECT) with no answer to it.
     - Data read from the data port before CONNECTED is dropped, so the queue is
       empty at CONNECTED and offset 0 is the first byte written after it. VARA

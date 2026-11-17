@@ -207,6 +207,32 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
 
 
+def test_a_dial_given_up_waits_only_for_its_answer_then_sends_one_disc():
+    """DISCONNECT with a CONNECT out: other stations' traffic no longer holds
+    the reply window open, what can be the answer does; then one DISC, and
+    DISCONNECTED when it is out."""
+    from data2g.arq import policy as G
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    a.on_tx_end(first, 2.0)
+    a.disconnect()
+    deadline = a.next_event()
+    assert first.submode != G.ROBUST_CONNECT
+    a.on_header(G.ROBUST_CONNECT, 4, 2.5)  # somebody else's burst
+    assert a.next_event() == deadline
+    a.on_header(first.submode, 4, 2.5)  # what can be its CONNECT_ACK
+    t = a.next_event()
+    assert t > deadline
+    disc = a.poll(t)
+    assert disc is not None and a.state == S.CONNECTING and not a.events
+    a.disconnect()  # again, with the DISC on air: nothing more
+    a.on_tx_end(disc, t + 2.0)
+    assert a.state == S.CLOSED and a.events == ["DISCONNECTED CLIENT unconfirmed"]
+    assert a.poll(t + 60.0) is None
+
+
 def test_callee_breaks_idle():
     """Data the callee writes on an idle link goes in its own wake burst, not
     at the caller's next keepalive (KEEPALIVE_S[0] or more away)."""

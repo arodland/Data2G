@@ -118,6 +118,7 @@ class Session:
     _sent_disc_ack: bool = False
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
+    _bye: B.TxBurst | None = None  # the DISC of a dial given up, in _out or on air: the session closes at its end
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
@@ -152,8 +153,12 @@ class Session:
         if self.state in (IDLE, LISTEN, CLOSED):
             return  # nothing to close; a flag left set would end the next session at its first burst
         self._want_disc, self._disc_why = True, "CLIENT"
-        if self.state == CONNECTING and self._out is not None and self._deadline is None:
-            self._close("CLIENT unconfirmed")  # no CONNECT on air or awaiting its answer: nobody to tell
+        if self.state == CONNECTING and self._out is not None and self._deadline is None and self._bye is None:
+            # no CONNECT on air or awaiting its answer
+            if self._tries == 0:
+                self._close("CLIENT unconfirmed")  # none sent: nobody to tell
+            else:
+                self._out, self._due, self._deadline = None, None, self._now  # between tries: given up at the next poll
         if self._build_at is not None:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
@@ -271,6 +276,9 @@ class Session:
         if burst is self._nak:
             self._nak = None
             return
+        if burst is self._bye:
+            self._bye = None
+            return self._close(f"{self._disc_why} unconfirmed", now=now)
         self._tx_mode = burst.submode
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
@@ -302,6 +310,8 @@ class Session:
             # a peer's ID burst (one codeword in the connect mode) runs straight
             # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
             is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
+            if self._want_disc and self.state == CONNECTING and submode != self._tx_mode and not is_id:
+                return  # a dial given up waits only for what can be its CONNECT_ACK, or the ID ahead of it
             self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
         if not self.master:
             self._quiet_from = max(self._quiet_from, end)
@@ -448,13 +458,17 @@ class Session:
                  d.get("rx_ok", 0) + d.get("rx_lost", 0), d.get("rx_lost", 0), d.get("timeouts", 0))
 
     def _on_timeout(self, now: float):
-        if self.state == CONNECTING:
+        if self.state == CONNECTING and self._want_disc:
+            # the host gave up on the call. A callee whose CONNECT_ACK was lost
+            # holds a session: one DISC under its key, no answer waited for
+            log.info("CONNECT %s given up", self.peer)
+            self._bye = self._session_burst(0, session_key(self.call, self.peer, self._nonce), bytes([F.DISC]))
+            self._queue(self._bye, now)
+        elif self.state == CONNECTING:
             self._tries += 1
             tries = CONNECT_TRIES if self.connect_tries is None else self.connect_tries
             log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, tries)
-            if self._want_disc:  # the host gave up on the call: this try was the last
-                self._close(f"{self._disc_why} unconfirmed")
-            elif self._tries >= tries:
+            if self._tries >= tries:
                 self._close("NO_ANSWER")
             else:
                 self._queue(self._connect_burst(), now + self.rng.uniform(3.0, 5.0))

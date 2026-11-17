@@ -285,6 +285,7 @@ class Engine:
     def listen(self, on: bool = True):
         """Answer calls to this station (on), or stop (an idle session)."""
         if self.session.state in (S.CLOSED, S.LISTEN, S.IDLE):
+            self._events += self.session.events  # undrained: they outlive the session
             self._new_session()
             if on:
                 self.session.listen()
@@ -301,11 +302,10 @@ class Engine:
             self.listen(listening)
 
     def disconnect(self):
-        """End the session gracefully: the peer is told, and what's queued still goes."""
+        """End the session: a connected one gracefully (the peer is told, and
+        what's queued still goes); a call being placed is given up
+        (Session.disconnect, docs/arq.md's DISCONNECT)."""
         self.session.disconnect()
-        if self.session.state == S.CLOSED:  # a dial given up: its DISCONNECTED outlives a session replaced before the next step
-            self._events += self.session.events
-            self.session.events[:] = []
 
     def abort(self):
         """Drop the session and anything on air, at once (no DISC)."""
@@ -320,6 +320,7 @@ class Engine:
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
         F.pack_call(peer)  # ValueError before any state changes
+        self._events += self.session.events  # undrained: they outlive the session
         self._new_session()
         self.session.connect_tries = tries
         self.session.connect(peer, cap, self.now)

@@ -200,6 +200,11 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
         nak = nullptr;
         return;
     }
+    if (burst && burst == bye) {
+        bye = nullptr;
+        close(disc_why + " unconfirmed", nullptr, now);
+        return;
+    }
     if (burst) tx_mode = burst->submode;
     const bool m = master();
     // only the caller retries (§6), and a callee's DISC
@@ -221,6 +226,8 @@ void Session::on_header(const std::string& submode, int n_cw, double now) {
         // a peer's ID burst (one codeword in the connect mode) runs straight
         // into its reply, whose header must still be found (engine ID_INTERVAL_S)
         const bool is_id = n_cw == 1 && submode == policy->connect_mode(cap, 0);
+        if (want_disc && state == SessionState::CONNECTING && submode != tx_mode && !is_id)
+            return;  // a dial given up waits only for what can be its CONNECT_ACK, or the ID ahead of it
         deadline = std::max(*deadline, end + t_turn + (is_id ? tune.reply_start_s : 0.0));
     }
     if (!master()) quiet_from = std::max(quiet_from, end);
@@ -323,8 +330,16 @@ void Session::disconnect() {
     if (state == SessionState::IDLE || state == SessionState::LISTEN || state == SessionState::CLOSED) return;
     want_disc = true;
     disc_why = "CLIENT";
-    if (state == SessionState::CONNECTING && out && !deadline)
-        close("CLIENT unconfirmed");  // no CONNECT on air or awaiting its answer: nobody to tell
+    if (state == SessionState::CONNECTING && out && !deadline && !bye) {
+        // no CONNECT on air or awaiting its answer
+        if (tries == 0) {
+            close("CLIENT unconfirmed");  // none sent: nobody to tell
+        } else {
+            out.reset();
+            due.reset();
+            deadline = now_;  // between tries: given up at the next poll
+        }
+    }
     if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
 }
 
@@ -406,12 +421,16 @@ void Session::log_stats(const char* label, double now, double since, const std::
 }
 
 void Session::on_timeout(double now) {
-    if (state == SessionState::CONNECTING) {
+    if (state == SessionState::CONNECTING && want_disc) {
+        // the host gave up on the call. A callee whose CONNECT_ACK was lost
+        // holds a session: one DISC under its key, no answer waited for
+        log_write(LOG, INFO, format("CONNECT %s given up", peer.c_str()));
+        bye = session_burst(0, session_key(call, peer, nonce), Bytes{DISC});
+        queue(bye, now);
+    } else if (state == SessionState::CONNECTING) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, tune.connect_tries));
-        if (want_disc) {  // the host gave up on the call: this try was the last
-            close(disc_why + " unconfirmed");
-        } else if (tries >= tune.connect_tries) {
+        if (tries >= tune.connect_tries) {
             close("NO_ANSWER");
         } else {
             auto b = connect_burst();

@@ -284,7 +284,8 @@ public:
     void set_n(std::int64_t n) { n_ = n; }
     void listen(bool on = true);
     void set_call(const std::string& call, const std::vector<std::string>& aliases = {});
-    void disconnect();  // gracefully: the peer is told, what's queued still goes
+    // A connected session gracefully (the peer is told, what's queued still goes); a call being placed is given up.
+    void disconnect() { session_->disconnect(); }
     void abort();
     // throws std::runtime_error while a session is under way. `tries`: CONNECTs sent before giving up
     // (nullopt: the session's tune, CONNECT_TRIES)

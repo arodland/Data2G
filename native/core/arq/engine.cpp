@@ -395,6 +395,7 @@ void Engine::set_nods(bool on) {
 
 void Engine::listen(bool on) {
     if (idle()) {
+        events_.insert(events_.end(), session_->events.begin(), session_->events.end());  // undrained: they outlive the session
         new_session();
         if (on) session_->listen();
     }
@@ -429,6 +430,7 @@ void Engine::abort() {
 void Engine::connect(const std::string& peer, int cap, std::optional<int> tries) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     pack_call(peer);  // invalid_argument before any state changes
+    events_.insert(events_.end(), session_->events.begin(), session_->events.end());  // undrained: they outlive the session
     new_session();
     if (tries) session_->tune.connect_tries = *tries;
     session_->connect(peer, cap, now());
@@ -449,14 +451,6 @@ void Engine::pending_resolve() {
     if (!pend_ || !(pend_->heard || now() > pend_->deadline)) return;
     pend_.reset();
     if (session_->state != SessionState::CONNECTED) events_.emplace_back("CANCELPENDING");
-}
-
-void Engine::disconnect() {
-    session_->disconnect();
-    if (session_->state == SessionState::CLOSED) {  // a dial given up: its DISCONNECTED outlives a session replaced before the next step
-        events_.insert(events_.end(), session_->events.begin(), session_->events.end());
-        session_->events.clear();
-    }
 }
 
 std::vector<std::string> Engine::events() {

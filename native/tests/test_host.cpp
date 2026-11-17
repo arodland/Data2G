@@ -25,6 +25,7 @@ struct Pair {
     std::vector<std::string> seen_a, seen_b;
     std::mt19937 rng{1};
     std::vector<double> ao = std::vector<double>(BLOCK), bo = std::vector<double>(BLOCK);
+    bool a_deaf = false;  // a hears only the noise
 
     Pair(arq::EngineConfig ca, arq::EngineConfig cb) : ea("NOCALL", ca), eb("NOCALL", cb), a(ea), b(eb) {}
 
@@ -33,7 +34,7 @@ struct Pair {
         std::normal_distribution<double> noise(0.0, std::sqrt((config::FS / 2.0) / config::SNR_REF_BW_HZ / std::pow(10.0, 1.2)));
         std::vector<double> x(BLOCK);
         for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-            for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
+            for (int j = 0; j < BLOCK; ++j) x[j] = (a_deaf ? 0.0 : 2.2 * bo[j]) + noise(rng);
             auto oa = ea.step(x);
             a.after_step(oa.ptt);
             ao = oa.audio;
@@ -173,13 +174,36 @@ void dial_given_up() {
     h.command("DISCONNECT");
     check::is_true(h.out_cmd == std::vector<std::string>{"OK"} && e.tx().has_value(), "DISCONNECT while dialing: OK, the CONNECT not cut");
     int keyed = 0, blocks = 0;
+    bool closed_at_key = true;
     for (bool was = true; blocks < 300; ++blocks) {
         h.after_step(e.step(quiet).ptt);
-        keyed += e.tx() && !was;
+        if (e.tx() && !was) {
+            ++keyed;
+            closed_at_key = has(h.out_cmd, "DISCONNECTED");
+        }
         was = e.tx().has_value();
     }
-    check::is_true(has(h.out_cmd, "DISCONNECTED") && keyed == 0, "... its answer waited for, no further try");
+    check::is_true(keyed == 1 && !closed_at_key && has(h.out_cmd, "DISCONNECTED"),
+                   "... its answer waited for, then one DISC, and DISCONNECTED once it is out");
     check::is_true(e.session().state == arq::SessionState::LISTEN, "... listening again");
+    h.command("CONNECT K2XYZ W1AW");
+    for (int i = 0; i < 300 && e.session().tries == 0; ++i) h.after_step(e.step(quiet).ptt);
+    check::is_true(e.session().tries == 1 && !e.tx(), "between tries");
+    h.out_cmd.clear();
+    h.command("DISCONNECT");
+    for (int i = 0; i < 10 && !e.tx(); ++i) h.after_step(e.step(quiet).ptt);
+    check::is_true(e.tx().has_value() && !has(h.out_cmd, "DISCONNECTED"), "DISCONNECT between tries: the DISC at once");
+    for (int i = 0; i < 60 && !has(h.out_cmd, "DISCONNECTED"); ++i) h.after_step(e.step(quiet).ptt);
+    check::is_true(has(h.out_cmd, "DISCONNECTED") && !e.tx(), "... and DISCONNECTED once it is out");
+
+    Pair p(seeded(41), seeded(42));
+    for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) p.b.command(line);
+    p.a.command("CONNECT W1AW K2XYZ");
+    check::is_true(p.run(10, [&] { return p.ea.tx().has_value(); }), "a CONNECT on air to a listening callee");
+    p.a.command("DISCONNECT");
+    p.a_deaf = true;
+    check::is_true(p.run(30, [&] { return has(p.seen_b, "CONNECTED W1AW K2XYZ 2300") && has(p.seen_b, "DISCONNECTED"); }),
+                   "a callee whose CONNECT_ACK was lost is freed by the DISC");
 }
 
 void operator_abort() {

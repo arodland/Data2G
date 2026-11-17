@@ -13,19 +13,29 @@ from data2g.config import FS, SNR_REF_BW_HZ
 BLOCK = FS // 10
 
 
-def link(a: Engine, b: Engine, snr_db: float, seconds: float, until, seed=0):
+def link(a: Engine, b: Engine, snr_db: float, seconds: float, until, seed=0, a_hears=True):
     """Step both engines, each hearing the other's last block plus noise
-    (SNR against a unit-power burst), until `until()` or `seconds` pass."""
+    (SNR against a unit-power burst), until `until()` or `seconds` pass.
+    `a_hears` False: a hears only the noise."""
     rng = np.random.default_rng(seed)
     sigma = np.sqrt((FS / 2) / SNR_REF_BW_HZ / 10 ** (snr_db / 10))
     a_out = b_out = np.zeros(BLOCK)
     g = 2.2  # an Engine plays bursts at peak 1.0: ~unit RMS again (peak/RMS ~2.2 after the clipper)
     for _ in range(int(seconds * FS / BLOCK)):
-        a_out, _ = a.step(g * b_out + rng.normal(0, sigma, BLOCK))
+        a_out, _ = a.step(g * b_out * a_hears + rng.normal(0, sigma, BLOCK))
         b_out, _ = b.step(g * a_out + rng.normal(0, sigma, BLOCK))
         if until():
             return True
     return False
+
+
+def _pump(a, b, until):
+    """An `until` for link() between two Hosts: each one's after_step, then until()."""
+    def f():
+        a.after_step(bool(a.engine.tx))
+        b.after_step(bool(b.engine.tx))
+        return until()
+    return f
 
 
 def test_connect_exchange_disconnect(tmp_path):
@@ -181,10 +191,7 @@ def test_vara_commands_drive_a_session(tmp_path):
     a.command("CONNECT W1AW K2XYZ")
     assert a.out_cmd == ["WRONG", "OK", "OK"] and b.out_cmd == ["OK", "REGISTERED K2XYZ", "OK", "OK"]
 
-    def pump():
-        a.after_step(bool(a.engine.tx))
-        b.after_step(bool(b.engine.tx))
-        return "CONNECTED W1AW K2XYZ 500" in a.out_cmd and "CONNECTED W1AW K2XYZ 500" in b.out_cmd
+    pump = _pump(a, b, lambda: "CONNECTED W1AW K2XYZ 500" in a.out_cmd and "CONNECTED W1AW K2XYZ 500" in b.out_cmd)
     assert link(a.engine, b.engine, 12, 60, pump, seed=3)
     assert a.engine.session.cap == 0  # BW500: narrow modes only
     a.data_in(b"hello from W1AW")
@@ -308,11 +315,10 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     a.command("CONNECT W1AW K2XYZ")
     got = bytearray()
 
-    def pump():
-        a.after_step(bool(a.engine.tx))
-        b.after_step(bool(b.engine.tx))
+    def take():
         got.extend(b.out_data)
         b.out_data.clear()
+    pump = _pump(a, b, take)
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
     up = np.random.default_rng(2).bytes(20000)
     a.data_in(up)
@@ -358,9 +364,7 @@ def test_cleantxbuffer_then_abort():
     a.command("DATA2G ON")
     a.command("CONNECT W1AW K2XYZ")
 
-    def pump():
-        a.after_step(bool(a.engine.tx))
-        b.after_step(bool(b.engine.tx))
+    pump = _pump(a, b, lambda: None)
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
     a.data_in(np.random.default_rng(2).bytes(20000))
     st = a.engine.session.station
@@ -389,11 +393,10 @@ def test_data2g_drops_data_before_connected(data2g):
     a.data_in(b"early ")
     got = bytearray()
 
-    def pump():
-        a.after_step(bool(a.engine.tx))
-        b.after_step(bool(b.engine.tx))
+    def take():
         got.extend(b.out_data)
         b.out_data.clear()
+    pump = _pump(a, b, take)
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or any(x.startswith("CONNECTED") for x in a.out_cmd),
                 seed=1)
     a.data_in(b"late")
@@ -417,9 +420,7 @@ def test_a_write_after_settled_goes_at_once(cleaner):
     h.command("DATA2G ON")
     got, t = bytearray(), {}
 
-    def pump():
-        a.after_step(bool(a.engine.tx))
-        b.after_step(bool(b.engine.tx))
+    def take():
         got.extend(peer.out_data)
         peer.out_data.clear()
         if "write" in t and "got" not in t and got.endswith(b"urgent"):
@@ -427,6 +428,7 @@ def test_a_write_after_settled_goes_at_once(cleaner):
         if "write" not in t and any(x.startswith("CLEANTXBUFFER SETTLED") for x in h.out_cmd):
             h.data_in(b"urgent")
             t["write"] = h.engine.now
+    pump = _pump(a, b, take)
     assert link(a.engine, b.engine, 12, 60, lambda: pump() or a.engine.session.state == S.CONNECTED, seed=1)
     if cleaner == "callee":  # the caller's connect burst: the callee hears it and answers
         assert link(a.engine, b.engine, 12, 60, lambda: pump() or b.engine.session.state == S.CONNECTED, seed=1)
@@ -527,14 +529,7 @@ def _dialing(data2g=False, peer="N0CALL"):  # N0CALL: nobody answers
     b.command("LISTEN ON")
     a.command(f"CONNECT W1AW {peer}")
     a.out_cmd.clear()
-
-    def pump(until):
-        def f():
-            a.after_step(bool(a.engine.tx))
-            b.after_step(bool(b.engine.tx))
-            return until()
-        return f
-    return a, b, pump
+    return a, b
 
 
 def _ended(h):
@@ -545,24 +540,30 @@ def _ended(h):
 def test_disconnect_while_dialing_makes_the_try_on_air_the_last(data2g):
     """A host that gives up on a call sends DISCONNECT (BPQ32; its ABORT comes
     30 s later): the CONNECT on air is not cut and its answer is waited for,
-    no more are sent, and DISCONNECTED follows the OK."""
-    a, b, pump = _dialing(data2g)
-    assert link(a.engine, b.engine, 20, 10, pump(lambda: a.engine.tx is not None))
+    then one DISC goes and no more CONNECTs, and DISCONNECTED comes when it is out."""
+    a, b = _dialing(data2g)
+    assert link(a.engine, b.engine, 20, 10, _pump(a, b, lambda: a.engine.tx is not None))
     a.out_cmd.clear()
     a.command("DISCONNECT")
     assert a.out_cmd == ["OK"] and a.engine.tx is not None and a.engine.session.state == S.CONNECTING
-    assert link(a.engine, b.engine, 20, 12, pump(lambda: _ended(a)))
+    keyed = []
+
+    def over():
+        keyed.append(a.engine.tx is not None)
+        return _ended(a)
+    assert link(a.engine, b.engine, 20, 14, _pump(a, b, over))
     assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed" if data2g else "DISCONNECTED"]
-    assert a.engine.session.state == S.LISTEN
+    assert sum(y and not x for x, y in zip(keyed, keyed[1:])) == 1  # the CONNECT ends, then the one DISC
+    assert a.engine.session.state == S.LISTEN and a.engine.tx is None  # DISCONNECTED once the DISC is out
     a.out_cmd.clear()
-    assert not link(a.engine, b.engine, 20, 40, pump(lambda: a.engine.tx is not None))
+    assert not link(a.engine, b.engine, 20, 40, _pump(a, b, lambda: a.engine.tx is not None))
     assert not _ended(a)
     a.command("CONNECT W1AW N0CALL")
     assert a.out_cmd[-1] == "OK" and a.engine.session.state == S.CONNECTING
 
 
 def test_disconnect_before_the_connect_is_on_air_ends_the_call_unsent():
-    a, b, pump = _dialing(data2g=True)
+    a, b = _dialing(data2g=True)
     a.command("DISCONNECT")
     a.command("CONNECT W1AW N0CALL")  # at once: the DISCONNECTED is not lost with the session it replaces
     assert a.out_cmd == ["OK", "OK"]
@@ -570,20 +571,43 @@ def test_disconnect_before_the_connect_is_on_air_ends_the_call_unsent():
     assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"] and a.engine.session.state == S.CONNECTING
     a.command("DISCONNECT")
     a.out_cmd.clear()
-    assert not link(a.engine, b.engine, 20, 20, pump(lambda: a.engine.tx is not None))
+    assert not link(a.engine, b.engine, 20, 20, _pump(a, b, lambda: a.engine.tx is not None))
     assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"] and a.engine.session.state == S.LISTEN
+
+
+def test_disconnect_between_tries_ends_the_dial_with_a_disc():
+    a, b = _dialing(data2g=True)
+    assert link(a.engine, b.engine, 20, 20, _pump(a, b, lambda: a.engine.session._tries == 1))
+    assert a.engine.tx is None
+    a.out_cmd.clear()
+    a.command("DISCONNECT")
+    assert link(a.engine, b.engine, 20, 1, _pump(a, b, lambda: a.engine.tx is not None))  # the DISC, at once
+    assert not _ended(a)
+    assert link(a.engine, b.engine, 20, 6, _pump(a, b, lambda: _ended(a)))
+    assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"] and a.engine.tx is None
 
 
 def test_disconnect_while_dialing_tells_a_callee_that_answered():
     """The callee is not left connected to a caller that has gone: its
     CONNECT_ACK is taken and the session closed with a DISC."""
-    a, b, pump = _dialing(data2g=True, peer="K2XYZ")
-    assert link(a.engine, b.engine, 20, 10, pump(lambda: a.engine.tx is not None))
+    a, b = _dialing(data2g=True, peer="K2XYZ")
+    assert link(a.engine, b.engine, 20, 10, _pump(a, b, lambda: a.engine.tx is not None))
     a.command("DISCONNECT")
-    assert link(a.engine, b.engine, 20, 60, pump(lambda: len(_ended(a)) == 2 and len(_ended(b)) == 2))
+    assert link(a.engine, b.engine, 20, 60, _pump(a, b, lambda: len(_ended(a)) == 2 and len(_ended(b)) == 2))
     assert _ended(a) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED CLIENT"]
     assert _ended(b) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED"]
     assert b.engine.session.state == S.LISTEN
+
+
+def test_disconnect_while_dialing_frees_a_callee_whose_ack_was_lost():
+    """The callee answered but the caller never heard it: the caller's one
+    DISC ends the callee's session long before its link-lost timer would."""
+    a, b = _dialing(data2g=True, peer="K2XYZ")
+    assert link(a.engine, b.engine, 20, 10, _pump(a, b, lambda: a.engine.tx is not None))
+    a.command("DISCONNECT")
+    assert link(a.engine, b.engine, 20, 30, _pump(a, b, lambda: len(_ended(b)) == 2), a_hears=False)
+    assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"]
+    assert _ended(b) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED"] and b.engine.session.state == S.LISTEN
 
 
 def test_losing_the_command_client_ends_its_session():
@@ -595,16 +619,9 @@ def test_losing_the_command_client_ends_its_session():
     a, b = Host(Engine("W1AW", seed=51)), Host(Engine("K2XYZ", seed=52))
     b.command("LISTEN ON")
     a.command("CONNECT W1AW K2XYZ")
-
-    def pump(cond):
-        def f():
-            a.after_step(bool(a.engine.tx))
-            b.after_step(bool(b.engine.tx))
-            return cond()
-        return f
-    assert link(a.engine, b.engine, 20, 60, pump(lambda: b.engine.session.state == S.CONNECTED))
+    assert link(a.engine, b.engine, 20, 60, _pump(a, b, lambda: b.engine.session.state == S.CONNECTED))
     b.client_gone()  # the callee's client crashed
-    assert link(a.engine, b.engine, 20, 60, pump(lambda: "DISCONNECTED" in a.out_cmd
+    assert link(a.engine, b.engine, 20, 60, _pump(a, b, lambda: "DISCONNECTED" in a.out_cmd
                                                  and b.engine.session.state in (S.IDLE, S.CLOSED)), seed=53)
     assert not b.listening and b.engine.session.state != S.LISTEN
 
@@ -973,16 +990,9 @@ def test_timeout_sets_the_idle_close():
         a.command(line)
     assert a.out_cmd == ["WRONG", "OK", "TIMEOUT 300.0"] + ["WRONG"] * 4 + ["OK", "TIMEOUT 20.0"]
     a.command("CONNECT W1AW K2XYZ")
-
-    def pump(until):
-        def f():
-            a.after_step(bool(a.engine.tx))
-            b.after_step(bool(b.engine.tx))
-            return until()
-        return f
-    assert link(a.engine, b.engine, 12, 30, pump(lambda: a.engine.session.state == S.CONNECTED), seed=1)
+    assert link(a.engine, b.engine, 12, 30, _pump(a, b, lambda: a.engine.session.state == S.CONNECTED), seed=1)
     t0 = a.engine.now
-    assert link(a.engine, b.engine, 12, 60, pump(lambda: "DISCONNECTED IDLE" in a.out_cmd), seed=2)
+    assert link(a.engine, b.engine, 12, 60, _pump(a, b, lambda: "DISCONNECTED IDLE" in a.out_cmd), seed=2)
     assert a.engine.now - t0 < 40  # 20 s, then the DISC exchange
     assert "DISCONNECTED PEER" in b.out_cmd
     a.client_gone()

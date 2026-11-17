@@ -113,6 +113,7 @@ public:
     std::int64_t nonce = 0;
     TxBurstPtr out;
     TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
+    TxBurstPtr bye;  // the DISC of a dial given up, in out or on air: the session closes at its end
     std::string tx_mode;  // the mode of my last burst sent (expecting)
     // The modes my peer's next burst likely comes in while one is due (session.py's expecting, §3a).
     std::vector<std::string> expecting() const;
