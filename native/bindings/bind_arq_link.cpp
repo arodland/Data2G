@@ -140,6 +140,7 @@ public:
     int n_ctl_slots() const override { return py::getattr(obj, "n_ctl_slots", py::int_(0)).cast<int>(); }
     // link.py asks getattr(rx, "nod", False)
     bool is_nod() const override { return py::getattr(obj, "nod", py::bool_(false)).cast<bool>(); }
+    bool primed_header() const override { return py::getattr(obj, "primed_header", py::bool_(false)).cast<bool>(); }
 };
 
 class PyRng : public Rng {

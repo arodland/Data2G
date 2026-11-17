@@ -268,6 +268,7 @@ class ModemRx:
         self._pin = {}  # (slot, cut) -> its decode with the payload past cut bytes pinned to zero
         self._pairs = {}  # (slot, cut or None) -> slots slot, slot + 1 combined (RV 0, 1), decoded mask open
         self.n_ctl_slots = r.get("n_ctl_slots", 0)  # CPM: slots in the control codeword's spec
+        self.primed_header = bool(r.get("primed_ofdm"))  # OFDM: only the expected slot's lock read its header
         self.r = r
         self._post, self._blind = {}, False  # DD: slot -> LLRs of its coded bits
         self._pass_post = {}  # CPM: data slot -> its cpm_pass's posterior (None: it failed)

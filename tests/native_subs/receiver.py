@@ -55,6 +55,9 @@ def substitutions(native):
         def expect(self, grids, lo, hi, cfo):
             return super().expect(grids, lo, hi, cfo) if self._n is None else self._n.expect(list(grids), lo, hi, cfo)
 
+        def expect_ofdm(self, accept, lo, hi, cfo):
+            return super().expect_ofdm(accept, lo, hi, cfo) if self._n is None else self._n.expect_ofdm(accept, lo, hi, cfo)
+
         def drop(self):
             return super().drop() if self._n is None else self._n.drop()
 

@@ -115,6 +115,8 @@ public:
     virtual int n_ctl_slots() const { return 0; }
     // A nod (docs/arq.md §3b) standing for a control-only burst: checked as a primed control is.
     virtual bool is_nod() const { return false; }
+    // OFDM: only the expected slot's lock read its header (modem.prime_ofdm): not a usable burst to the policy
+    virtual bool primed_header() const { return false; }
 };
 
 }  // namespace data2g::arq

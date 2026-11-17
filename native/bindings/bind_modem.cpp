@@ -106,6 +106,7 @@ py::dict lock_dict(const modem::Lock& l) {
     d["end"] = l.end;
     d["p0"] = l.p0;
     d["cfo"] = l.cfo;
+    if (l.primed) d["primed"] = true;
     if (l.copy) {
         py::dict c;
         c["word"] = l.copy->word;
@@ -130,6 +131,7 @@ modem::Lock lock_of(const py::dict& d) {
     l.score = get<double>(d, "score", 0.0);
     l.band = d.contains("band") ? band_view(d["band"].cast<std::string>()) : l.spec->sync_band;
     l.cfo = d["cfo"].cast<double>();
+    l.primed = d.contains("primed") && d["primed"].cast<bool>();
     if (d.contains("copy")) {
         const auto c = d["copy"].cast<py::dict>();
         l.copy = modem::CopyRef{c["word"].cast<int>(), c["pc"].cast<std::int64_t>()};
@@ -177,6 +179,7 @@ modem::Received received_of(const py::dict& r) {
     if (r.contains("kc") && !r["kc"].is_none()) rx.kc = r["kc"].cast<int>();
     rx.cfo = get<double>(r, "cfo", 0.0);
     rx.preamble_start = get<std::int64_t>(r, "preamble_start", 0);
+    rx.primed = get<bool>(r, "primed_ofdm", false);
     return rx;
 }
 
@@ -184,6 +187,7 @@ py::dict received_dict(const modem::Received& r) {
     py::dict d;
     d["spec"] = std::string(r.spec->name);
     d["n_cw"] = r.n_cw;
+    if (r.primed) d["primed_ofdm"] = true;
     d["raw"] = np3(r.raw, config::SYMS_PER_FRAME);
     d["est"] = est_dict(r.est);
     d["acq"] = acq_tuple(r.acq);
@@ -336,6 +340,16 @@ void bind_modem(py::module_& m) {
         }
         return lock_dict(l);
     }, py::arg("x"), py::arg("bands") = py::none(), py::arg("accept") = py::none(), py::arg("stats") = py::none());
+    d.def("prime_ofdm", [](const In<double>& x, std::int64_t lo, std::int64_t hi, double cfo, const py::object& accept) -> py::object {
+        const auto a = accept_of(accept);
+        if (!a) throw py::value_error("prime_ofdm needs an Accept");
+        std::optional<mo::Lock> l;
+        {
+            py::gil_scoped_release nogil;
+            l = mo::prime_ofdm(view(x), lo, hi, cfo, *a);
+        }
+        return l ? py::object(lock_dict(*l)) : py::object(py::none());
+    });
     d.def("pilot_coherence", [](const In<double>& x, const py::dict& lock, int n_max, bool latest, bool pattern) -> py::object {
         double pat = 0.0;
         auto c = mo::pilot_coherence(view(x), lock_of(lock), n_max, latest, pattern ? &pat : nullptr);

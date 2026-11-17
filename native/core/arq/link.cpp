@@ -311,6 +311,14 @@ bool repeat_default() {
     return on;
 }
 
+bool prime_ofdm_default() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_PRIME_OFDM");
+        return !(v && std::string_view(v) == "0");
+    }();
+    return on;
+}
+
 bool nod_default() {
     static const bool on = env_on("DATA2G_NOD");
     return on;
@@ -1275,7 +1283,10 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
     }
     // a control only a primed retry read is told to the policy as the blind decode saw it (link.py, §3a)
     // a nod is neither a blind decode nor a loss of one: no turn for the policy
-    if (outcome) policy->outcome(rxb.submode(), n_ok, n_new, rxb.is_nod() ? std::nullopt : std::optional<bool>(!primed_ctl_));
+    // so is a burst only the expected slot's OFDM lock found (modem.prime_ofdm)
+    if (outcome)
+        policy->outcome(rxb.submode(), n_ok, n_new,
+                        rxb.is_nod() ? std::nullopt : std::optional<bool>(!(primed_ctl_ || rxb.primed_header())));
     return out;
 }
 

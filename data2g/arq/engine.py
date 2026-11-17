@@ -744,6 +744,12 @@ class Engine:
         grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
         if w is not None and grids and LK.PRIME:
             self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
+        # and the OFDM ACK modes, a control's codewords: where its OFDM replies have started, their CFO
+        w = self.slot.ofdm_window(0.0)
+        acks = [m for m in dict.fromkeys(self.session.expecting()) if m in MODES and not is_cpm(MODES[m]) and "ack" in m]
+        if w is not None and acks and LK.PRIME and LK.PRIME_OFDM:
+            self.receiver.expect_ofdm(modem.Accept(tuple((m, F.MAX_CTL) for m in acks)),
+                                      max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.ofdm_cfo)
 
     def _watch_nods(self):
         """Where the peer may nod after my burst (docs/arq.md §3b): its reply
@@ -831,6 +837,8 @@ class Engine:
                 # its start from my burst's end (the receiver was reset there): the expected slot learns
                 if r.get("family") == "cpm":
                     self.slot.heard(h["start"] / FS, r["cfo"])
+                else:
+                    self.slot.heard_ofdm(h["start"] / FS, r["cfo"])
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

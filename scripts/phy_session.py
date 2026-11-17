@@ -263,6 +263,7 @@ class RealPhy:
         self.sessions = {}
         self.tx_end = {}
         self.slots = {0: ReplySlot(), 1: ReplySlot()}
+        self.primed_ofdm_n = 0  # bursts only the OFDM expected slot found
 
     def listen(self, burst, t0: float, end: float) -> int:
         """-> the station that hears `burst` (direction 0 is station 0's: 1
@@ -292,7 +293,10 @@ class RealPhy:
         if rx is not None:
             if r is not None:
                 end = self.tx_end.get(rx)
-                self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo") if r.get("family") == "cpm" else None)
+                if r.get("family") == "cpm":
+                    self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo"))
+                else:
+                    self.slots[rx].heard_ofdm(None if end is None else t0 - end, r["cfo"])
         return r
 
     def primed(self, y, t0, rx):
@@ -301,20 +305,37 @@ class RealPhy:
         the peer's CFO; cpm.prime_lock there, as the engine's receiver does
         once its window has passed with no lock."""
         from data2g import cpm
+        from data2g.arq import frames as F
         from data2g.arq import link as LK
         from data2g.arq.modes import MODES, is_cpm
 
         s = self.sessions.get(rx)
-        w = self.slots[rx].window(self.tx_end[rx]) if rx in self.tx_end else None
-        if not LK.PRIME or s is None or w is None:
+        if not LK.PRIME or s is None or rx not in self.tx_end:
             return None
+        w = self.slots[rx].window(self.tx_end[rx])
         grids = dict.fromkeys(MODES[m].grid for m in s.expecting() if m in MODES and is_cpm(MODES[m]))
-        lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
-        for g in grids:
-            lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)
-            if lock is not None:
-                return cpm.receive(y, lock)
-        return None
+        if w is not None:
+            lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
+            for g in grids:
+                lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)
+                if lock is not None:
+                    return cpm.receive(y, lock)
+        # the OFDM ACK modes (Receiver.expect_ofdm): its preamble follows the lead-in
+        w = self.slots[rx].ofdm_window(self.tx_end[rx])
+        acks = [m for m in dict.fromkeys(s.expecting()) if m in MODES and not is_cpm(MODES[m]) and "ack" in m]
+        if w is None or not acks or not LK.PRIME_OFDM:
+            return None
+        lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS) + LEADIN_SAMPLES) for t in w)
+        lock = modem.prime_ofdm(y, lo, hi, self.slots[rx].ofdm_cfo, modem.Accept(tuple((m, F.MAX_CTL) for m in acks)))
+        if lock is None:
+            return None
+        try:
+            r = modem.receive(y, known=lock)
+        except modem.SyncError:
+            return None
+        r["primed_ofdm"] = True
+        self.primed_ofdm_n += 1
+        return r
 
     def burst_energy_db(self, burst, floor_db: float | None = None) -> float | None:
         """The last burst heard, as the engine measures it (data2g.arq.engine
@@ -369,6 +390,7 @@ class RealPhy:
         got = self.nod(rx, t0) if rx is not None else None
         if got is None:
             return None
+        from data2g.arq import frames as F
         from data2g.arq import link as LK
 
         st = self.sessions[rx].station

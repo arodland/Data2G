@@ -172,6 +172,7 @@ public:
     // The pair raw_pair reads, CRC-checked under `mask` (its padding pinned if it fails plain).
     std::optional<Bytes> decode_pair(int slot, const MaskId& mask) override;
     int n_ctl_slots() const override { return n_ctl_slots_; }
+    bool primed_header() const override { return r_.ofdm && r_.ofdm->primed; }
     // phy.ModemRx.decode_known (RxBurst's).
     bool can_prime() const override { return true; }
     std::optional<Bytes> decode_known(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair) override;

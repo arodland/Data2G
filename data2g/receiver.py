@@ -126,6 +126,8 @@ class ReplySlot:
     def __init__(self):
         self.gaps: deque = deque(maxlen=self.GAPS)
         self.cfo: float | None = None
+        self.ofdm_gaps: deque = deque(maxlen=self.GAPS)  # the same of its OFDM bursts (their own lead-in and CFO)
+        self.ofdm_cfo: float | None = None
 
     def heard(self, gap_s: float | None, cfo: float | None):
         """A burst from the peer started gap_s after my burst ended (None:
@@ -134,6 +136,20 @@ class ReplySlot:
             self.gaps.append(gap_s)
         if cfo is not None:
             self.cfo = cfo
+
+    def heard_ofdm(self, gap_s: float | None, cfo: float | None):
+        """heard() for an OFDM burst from the peer."""
+        if gap_s is not None and 0.0 <= gap_s < self.MAX_GAP_S:
+            self.ofdm_gaps.append(gap_s)
+        if cfo is not None:
+            self.ofdm_cfo = cfo
+
+    def ofdm_window(self, tx_end: float) -> tuple[float, float] | None:
+        """window() for an OFDM reply (modem.prime_ofdm)."""
+        if not self.ofdm_gaps or self.ofdm_cfo is None:
+            return None
+        g = float(np.median(self.ofdm_gaps))
+        return tx_end + g - self.TOL_S, tx_end + g + self.TOL_S
 
     def window(self, tx_end: float) -> tuple[float, float] | None:
         """(earliest, latest) start of the peer's reply to my burst that ended
@@ -360,6 +376,7 @@ class Receiver:
         # stream indices): read again with both copies once the second is in
         self.cpm_wait: list = []
         self.expected = None  # expect()'s window, until it is looked at
+        self.expected_ofdm = None  # expect_ofdm()'s, likewise
         for d in getattr(self, "detectors", {}).values():
             d.reset()
 
@@ -373,6 +390,28 @@ class Receiver:
         window's audio is kept until the last is looked at. A lock found any
         other way, or reset(), drops them."""
         self.expected = (tuple(grids), lo, hi, cfo) if grids else None
+
+    def expect_ofdm(self, accept, lo: int, hi: int, cfo: float):
+        """expect() for an OFDM reply: a burst of one of `accept`'s submodes
+        (a modem.Accept: the ACK modes, a control's codewords) should start
+        between stream indices lo and hi, its CFO near cfo. Looked at once
+        (modem.prime_ofdm), after expect()'s grids, when the audio holds the
+        header of a start at hi and nothing has locked."""
+        self.expected_ofdm = (accept, lo, hi, cfo) if accept is not None and accept.max_cw else None
+
+    def _primed_ofdm(self) -> dict | None:
+        """expect_ofdm()'s lock, buffer indices, once its window is complete."""
+        accept, lo, hi, cfo = self.expected_ofdm
+        if self.off + len(self.buf) < hi + max(modem.prime_span(b) for b in accept.bands):
+            return None
+        self.expected_ofdm = None
+        if hi < self.off:
+            return None  # trimmed away
+        lock = modem.prime_ofdm(self.buf, max(0, lo - self.off), hi - self.off, cfo, accept)
+        if lock is not None:
+            log.info("expected slot: %s x%d locked (score %.2f) where no blind path did", lock["spec"].name,
+                     lock["n_cw"], lock["score"])
+        return lock
 
     @property
     def n_expected(self) -> int:
@@ -714,12 +753,14 @@ class Receiver:
                     p = self._find_copy()  # the preamble faded: the frame pilots and header copy
                 if p is None and self.expected is not None:
                     p = self._primed()
+                if p is None and self.expected is None and self.expected_ofdm is not None:
+                    p = self._primed_ofdm()
                 if p is None:
-                    # (a waiting candidate's start is within it; and the expected window, while queued)
-                    self._trim(self.hold if self.expected is None else
-                               max(self.hold, self.off + len(self.buf) - self.expected[1]))
+                    # (a waiting candidate's start is within it; and the expected windows, while queued)
+                    los = [e[1] for e in (self.expected, self.expected_ofdm) if e is not None]
+                    self._trim(max([self.hold] + [self.off + len(self.buf) - lo for lo in los]))
                     break
-                self.expected = None
+                self.expected = self.expected_ofdm = None
                 if p["start"] + self.off <= self.last_start:
                     break  # the suspect burst just handled, still in the kept window
                 self.pending = _shift(p, self.off)
@@ -765,7 +806,11 @@ class Receiver:
             seg = self.buf[s0 : p["end"] + self.MARGIN - self.off]
             head = p["start"] - self.off - s0 + modem.receive_head(p["band"])
             try:
-                if "copy" in p:
+                if p.get("primed"):  # no search: the lock's start and CFO (a blind one failed there)
+                    r = modem.receive(seg, known=dict(start=p["start"] - self.off - s0, cfo=p["cfo"], spec=p["spec"],
+                                                      n_cw=p["n_cw"]))
+                    r["primed_ofdm"] = True
+                elif "copy" in p:
                     at = self.off + s0  # seg's stream index
                     r = modem.receive(seg, accept=self.accept, copy=_shift(p, -at))
                 else:

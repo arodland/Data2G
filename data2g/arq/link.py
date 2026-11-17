@@ -60,6 +60,8 @@ LINK_LOST_MISSES = 12  # consecutive timeouts; the session layer adds its 90 s b
 COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 # DATA2G_INLINE=0: never send a codeword in the control's padding (T_INLINE; for A/B runs); still received
 INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
+# DATA2G_PRIME_OFDM=0: no expected-slot lock for OFDM ACK replies (modem.prime_ofdm, docs/arq.md §3a; for A/B runs)
+PRIME_OFDM = os.environ.get("DATA2G_PRIME_OFDM", "1") != "0"
 # DATA2G_PRIME=0: no primed retry of a peer control that failed blind (docs/arq.md §3a; for A/B runs)
 PRIME = os.environ.get("DATA2G_PRIME", "1") != "0"
 # DATA2G_REPEAT=0: a failed control is not combined with the failed ones before it (docs/arq.md §3a; for A/B runs)
@@ -1377,7 +1379,9 @@ class Station:
         # outcome model and ladder learned blind control losses, and a mode whose
         # data fails while primed controls pass would otherwise never be left
         # a nod is neither a blind decode nor a loss of one: no turn for the policy
-        self.policy.outcome(rx.submode, n_ok, n_new, usable=None if getattr(rx, "nod", False) else not self._primed_ctl)
+        # so is a burst only the expected slot's OFDM lock found (modem.prime_ofdm)
+        usable = not (self._primed_ctl or getattr(rx, "primed_header", False))
+        self.policy.outcome(rx.submode, n_ok, n_new, usable=None if getattr(rx, "nod", False) else usable)
         return slots, n_dec, n_old, progress
 
     def _log_rx(self, rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned):

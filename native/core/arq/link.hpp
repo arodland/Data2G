@@ -38,6 +38,8 @@ inline constexpr int LINK_LOST_MISSES = 12;
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
 bool prime_default();
+// link.PRIME_OFDM: DATA2G_PRIME_OFDM=0 turns the expected-slot lock for OFDM ACK replies off (read once).
+bool prime_ofdm_default();
 // link.REPEAT: DATA2G_REPEAT=0 turns the combining of repeated controls off (read once).
 bool repeat_default();
 // link.NOD: DATA2G_NOD=0 turns nods off (docs/arq.md §3b; read once).

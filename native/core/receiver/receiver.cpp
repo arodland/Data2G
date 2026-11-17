@@ -115,7 +115,11 @@ BurstEvent decode(DecodeRequest req, const modem::Accept& accept) {
         ev.rx = req.stream ? req.stream->finish() : cpm::receive(req.seg, p.cpm());
     } else {
         try {
-            if (p.copy()) {
+            if (p.ofdm().primed) {  // no search: the lock's start and CFO (a blind one failed there)
+                auto r = modem::receive(req.seg, {}, nullptr, std::nullopt, nullptr, &p.ofdm());
+                r.primed = true;
+                ev.rx = std::move(r);
+            } else if (p.copy()) {
                 ev.rx = modem::receive(req.seg, {}, &accept, std::nullopt, &p.ofdm());
             } else {
                 const std::string_view band[] = {p.ofdm().band};
@@ -169,7 +173,24 @@ void Receiver::reset() {
     decided_mid_.clear();
     cpm_wait_.clear();
     expected_.reset();
+    expected_ofdm_.reset();
     for (auto& d : detectors_) d.d.reset();
+}
+
+void Receiver::expect_ofdm(modem::Accept accept, std::int64_t lo, std::int64_t hi, double cfo) {
+    expected_ofdm_.reset();
+    if (!accept.max_cw.empty()) expected_ofdm_ = ExpectedOfdm{std::move(accept), lo, hi, cfo};
+}
+
+std::optional<modem::Lock> Receiver::primed_ofdm() {
+    const ExpectedOfdm& e = *expected_ofdm_;
+    std::int64_t span = 0;
+    for (const auto b : e.accept.bands()) span = std::max(span, modem::prime_span(b));
+    if (off_ + len() < e.hi + span) return std::nullopt;
+    const ExpectedOfdm x = std::move(*expected_ofdm_);
+    expected_ofdm_.reset();
+    if (x.hi < off_) return std::nullopt;  // trimmed away
+    return modem::prime_ofdm(buf_, std::max<std::int64_t>(0, x.lo - off_), x.hi - off_, x.cfo, x.accept);
 }
 
 void Receiver::expect(std::vector<std::string_view> grids, std::int64_t lo, std::int64_t hi, double cfo) {
@@ -203,6 +224,23 @@ void ReplySlot::heard(std::optional<double> gap_s, std::optional<double> c) {
 std::optional<std::pair<double, double>> ReplySlot::window(double tx_end) const {
     if (gaps_.empty() || !cfo) return std::nullopt;
     std::vector<double> v(gaps_.begin(), gaps_.end());
+    std::sort(v.begin(), v.end());
+    const std::size_t n = v.size();
+    const double g = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;  // np.median
+    return std::make_pair(tx_end + g - TOL_S, tx_end + g + TOL_S);
+}
+
+void ReplySlot::heard_ofdm(std::optional<double> gap_s, std::optional<double> c) {
+    if (gap_s && *gap_s >= 0.0 && *gap_s < MAX_GAP_S) {
+        ofdm_gaps_.push_back(*gap_s);
+        if (ofdm_gaps_.size() > GAPS) ofdm_gaps_.pop_front();
+    }
+    if (c) ofdm_cfo = c;
+}
+
+std::optional<std::pair<double, double>> ReplySlot::ofdm_window(double tx_end) const {
+    if (ofdm_gaps_.empty() || !ofdm_cfo) return std::nullopt;
+    std::vector<double> v(ofdm_gaps_.begin(), ofdm_gaps_.end());
     std::sort(v.begin(), v.end());
     const std::size_t n = v.size();
     const double g = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;  // np.median
@@ -535,12 +573,18 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 if (auto c = find_copy()) p = Pending{*c};  // the preamble faded: the frame pilots and header copy
             if (!p && expected_)
                 if (auto c = primed()) p = Pending{*c};
+            if (!p && !expected_ && expected_ofdm_)
+                if (auto c = primed_ofdm()) p = Pending{*c};
             if (!p) {
-                // (a waiting candidate's start is within it; and the expected window, while queued)
-                trim(expected_ ? std::max(hold_, off_ + len() - expected_->lo) : hold_);
+                // (a waiting candidate's start is within it; and the expected windows, while queued)
+                std::int64_t keep = hold_;
+                if (expected_) keep = std::max(keep, off_ + len() - expected_->lo);
+                if (expected_ofdm_) keep = std::max(keep, off_ + len() - expected_ofdm_->lo);
+                trim(keep);
                 break;
             }
             expected_.reset();
+            expected_ofdm_.reset();
             if (p->start() + off_ <= last_start_) break;  // the suspect burst just handled, still in the kept window
             p->shift(off_);
             pending_ = p;

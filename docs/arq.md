@@ -29,7 +29,7 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
-| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
+| §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `modem.py` (`prime_ofdm`), `receiver.py` (`ReplySlot`, `Receiver.expect`, `Receiver.expect_ofdm`), `engine.py` (`_expect_reply`) |
 | §3b nods | `nod.py` (`family`, `detect`, `CODEBOOK`, `NodRx`); `frames.py` (`T_NODS`); `link.py` (`Station._nod_of`, `nod_family`, `nod_payload`, `nod_peer`); `session.py` (direct replies `build(nod=True)`); `engine.py` (`_watch_nods`, `_nod_feed`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
@@ -183,6 +183,37 @@ for Data2G).
   27000 windows of noise, OFDM bursts and the other grids' bursts scored at most 15.1
   (runs/primed-rx/plock_fa2.txt); bursts the blind paths lost read 20-60. A lock it makes is
   a header like any other (the session's wait extends to the burst's end).
+- **The expected slot, OFDM** (`Receiver.expect_ofdm`, `modem.prime_ofdm`,
+  `ReplySlot.ofdm_window`). The same for an OFDM ACK mode's reply: where the peer's OFDM
+  bursts have started and their CFO (kept apart from the CPM ones': another lead-in,
+  another estimator), the ACK modes my session expects, a control's codewords (1-4). The
+  ACK modes are header-limited near their floor, and of the bursts the blind receiver
+  lost at the header while the true start's header read, acquisition had mostly locked
+  thousands of samples off or a whole 50 Hz CFO alias off (`scripts/expect_acq_diag.py`).
+  Once the audio holds the header of a start at the window's end and nothing locked,
+  `prime_ofdm` reads each band's 3 strongest detections in the window within one CFO bin
+  of the expected one, as the blind search reads them (+-1, +-2 repeats), over those
+  words only (12 for three modes). `PRIME_FLOOR` (w 0.311, n10 0.300): 1e-3 false locks
+  a window on white noise (5 and 7 of 12000). Its lock is received at its start and CFO
+  with no second search (`modem.receive`'s `known`), and its burst is reported to the
+  policy as lost, as a primed control is. Measured (`scripts/expect_prime_study.py`,
+  control-only x2 bursts, 300 a point, the window's centre up to 0.1 s off, the CFO
+  known to +-1 Hz), header found blind -> with the slot:
+  - ack-4f: awgn -12 0.15 -> 0.25, -10 0.61 -> 0.70; mpp -8 0.67 -> 0.76, -6 0.83 ->
+    0.87; mpd -8 0.56 -> 0.68, -6 0.80 -> 0.87.
+  - n10-ack-4f: awgn -12 0.58 -> 0.77, -10 0.98 -> 0.99; mpp -8 0.72 -> 0.82, -6 0.86 ->
+    0.92; mpd -8 0.64 -> 0.73, -6 0.79 -> 0.87.
+  - n4-ack-8f: awgn -12 0.55 -> 0.76, -10 0.97 -> 0.99; mpp -8 0.76 -> 0.83, -6 0.89 ->
+    0.93; mpd -8 0.60 -> 0.74, -6 0.77 -> 0.86.
+  - No wrong header in 5400 bursts. A lock's control then decodes for n4-ack-8f (152
+    of 172) and half the time for the 4f modes (ack-4f 82 of 156, n10-ack-4f 83 of
+    156: there the control is the next limit).
+  - Sessions (`scripts/loss_study.py`, shift+cpm, DATA2G_PEP_REF_DB=5, 16 seeds x 300 s,
+    paired against `DATA2G_PRIME_OFDM=0`; delivered bps): it seldom matters to a bulk
+    transfer. 150 of 160 sessions ran identically; mpp -6 +4.5% (SE 2.6, 4 seeds
+    better, 0 worse), mpd -8 +1.4% (1.0, 2/0), mpp -3 +1.2% (1.0, 2/0), mpd -3 +0.2%
+    (1/0), mpp 0 -0.3% (0/1); awgn -10, -6, -4, mpd -6 and mpd 0 unchanged. Chat, where
+    lost ACKs cost most, is not measured.
 - **Measured, code level** (`scripts/primed_study.py`, 200 bursts a point through the real
   receiver, PEP-referenced cell SNR; runs/primed-rx/ctl_code_level.txt,
   plock_code_level.txt). 10% failure point of an ACK's control, all bursts sent, blind ->
@@ -225,8 +256,8 @@ for Data2G).
   its cuts: 0.31); `prime_lock` per window 8 ms (c16r25, c8r50), 12 ms (c32r62); the Pi 4
   runs this DSP about 12x slower: about 0.1-0.15 s once per expected reply, under the
   receiver's 0.25 s search hop.
-- **Not primed:** LDPC controls; OFDM acquisition and headers (the 4f/8f ACK modes are
-  header-limited there); a reply that starts outside the window.
+- **Not primed:** LDPC controls; OFDM acquisition and headers but an ACK mode's in the
+  expected slot; a reply that starts outside the window.
 - The outcome model learned the old control failure rate (the ACK modes' and CPM's at the
   floor), and the shifter leaves a failing mode on control losses. So a control only a
   primed retry read is reported to the policy as the blind decode saw it (lost): with it
