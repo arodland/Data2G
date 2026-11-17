@@ -638,8 +638,20 @@ without). So the last codeword of a write rides in the control's padding when it
     bursts don't carry `drained`, so they are answered at once. linksim winlink
     (40 paired seeds): sessions 11% shorter on awgn 10 and mpp 10, 4% on mpg 5; 0.5 s
     gained nothing over 0.25 s.
-  - The caller answers a burst that arrives while its idle poll waits at once, data
-    or not. It stays the only station that retries on a timeout, except for DISC.
+  - The caller holds its reply the same way: a burst that brought its host data and
+    carried `drained`, with nothing to send, is answered 250 ms later, and a host write
+    ends the hold. Without it the caller acks at once, and its host's answer waits for the
+    callee's control-only reply and another turn. Not in a recovery (the peer's reply
+    lost, an abandon, a poll: answered at once, as above). linksim winlink (shift+cpm,
+    16 paired seeds, 900 s): a caller's answer to a callee's message arrives 2.0 s
+    sooner (median) on awgn 10 and mpp 0, 3.75 s on awgn -4, awgn -10, mpp -3 and
+    mpd -3; a hold no write ends costs its 250 ms. Per-seed mean latency of every
+    message: awgn 10 -0.53 +-0.14 s (15 seeds better, 1 worse), awgn -4 -0.78 +-0.18
+    (13/2), awgn -10 -1.70 +-0.71 (12/3); mpp 0 +0.89 +-1.22, mpp -3 +2.15 +-3.04,
+    mpd -3 -0.31 +-0.71 (within noise: once timing differs a fading session diverges).
+  - Otherwise the caller answers a burst that arrives while its idle poll waits at
+    once, data or not. It stays the only station that retries on a timeout, except
+    for DISC.
   - The caller also answers at once a burst carrying `reply lost` or an abandon. The
     callee holds data either way, and an escalated answer can be control only: idling
     would leave it to a wake about 5 s later.

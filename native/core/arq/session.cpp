@@ -272,7 +272,10 @@ void Session::on_rx(RxBurst& rx, double now) {
     // (escalated) burst: idling would leave it to wake me ~5 s later. The same in a recovery (link.Station.recovering)
     const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost
                       || st->peer_abandon || st->recovering();
-    if (busy && settled) {
+    // its host's answer to what this burst brought rides the reply (REPLY_HOLD_S), as the callee's
+    const bool answer_due = st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty()
+                            && !(st->peer_reply_lost || st->peer_abandon || st->recovering());
+    if (busy && (settled || answer_due)) {
         idle_wait = 0.0;
         build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
     } else if (busy) {

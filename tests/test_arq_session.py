@@ -345,6 +345,50 @@ def test_callee_holds_reply_for_host_answer(answer):
     assert a.read() == (b"prompt>" if answer else b"")
 
 
+@pytest.mark.parametrize("answer", [False, True])
+def test_caller_holds_reply_for_host_answer(answer):
+    """The caller holds as the callee does: a burst that brings its host data
+    and ends the callee's (the wake of an idle link here), with nothing to
+    send, is answered REPLY_HOLD_S later, and its host's answer rides that
+    reply instead of the turn after the callee's control-only one."""
+    from data2g.arq import policy as G
+
+    class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
+        def recommend(self, station):
+            return G.encode("qpsk-r1/2"), 1, G.encode("qpsk-r1/2")
+
+    a = S.Session("W1AW", Good(), rng=random.Random(1))
+    b = S.Session("K2XYZ", Good(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    t, src, dst = 0.0, a, b
+
+    def step(src, dst, t):
+        burst = src.poll(t)
+        while burst is None:
+            assert t < 60
+            t = max(t + 0.01, src.next_event() or t)
+            burst = src.poll(t)
+        src.on_tx_end(burst, t + 1.0)
+        t += 1.5
+        dst.on_rx(FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0}), t)
+        return t
+
+    while a._build_at is None:  # CONNECT, accept, then empty bursts until the caller idles
+        assert t < 30
+        t = step(src, dst, t)
+        src, dst = dst, src
+    b.write(b"LIST")
+    t = step(b, a, t)  # the callee's wake
+    assert a._out is None and a._build_at == t + S.REPLY_HOLD_S
+    assert a.read() == b"LIST"
+    if answer:
+        a.write(b"prompt>")
+    t2 = step(a, b, t)
+    assert t2 - 1.5 <= t + (S.COALESCE_S if answer else S.REPLY_HOLD_S) + 0.02
+    assert b.read() == (b"prompt>" if answer else b"")
+
+
 def _frame(body, direction):
     """A CRC-valid session frame (key 0) carrying `body`."""
     ctl = F.Control(F.Core(ftype=F.SESSION), {S.T_SESS: body}).pack(46)

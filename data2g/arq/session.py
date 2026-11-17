@@ -64,7 +64,9 @@ COALESCE_S = 0.1  # CHAT OFF: a short write to an idle link waits this long for 
 # the callee, with nothing to send, holds its reply this long to a burst
 # that brought its host data and ended the caller's (T_DRAINED): an
 # interactive host's answer (a BBS prompt) then rides it instead of
-# waiting ~5 s for a wake. A write ends the hold. Either station holds its
+# waiting ~5 s for a wake. A write ends the hold. The caller holds its reply
+# the same way (not in a recovery): its host's answer otherwise waits for the
+# callee's control-only reply and another turn. Either station holds its
 # next burst as long when CLEANTXBUFFER's limbo has just settled: the host's
 # client, told SETTLED, writes what goes next (after the rest of a record
 # begun on air, if any).
@@ -356,7 +358,10 @@ class Session:
         # The same in a recovery (link.Station.recovering)
         busy = (st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
                 or st.peer_abandon or st.recovering)
-        if busy and settled:
+        # its host's answer to what this burst brought rides the reply (REPLY_HOLD_S), as the callee's
+        answer_due = (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
+                      and not self._pending_write and not (st.peer_reply_lost or st.peer_abandon or st.recovering))
+        if busy and (settled or answer_due):
             self._idle_wait = 0.0
             self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
         elif busy:
