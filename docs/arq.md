@@ -647,8 +647,13 @@ without). So the last codeword of a write rides in the control's padding when it
     sooner (median) on awgn 10 and mpp 0, 3.75 s on awgn -4, awgn -10, mpp -3 and
     mpd -3; a hold no write ends costs its 250 ms. Per-seed mean latency of every
     message: awgn 10 -0.53 +-0.14 s (15 seeds better, 1 worse), awgn -4 -0.78 +-0.18
-    (13/2), awgn -10 -1.70 +-0.71 (12/3); mpp 0 +0.89 +-1.22, mpp -3 +2.15 +-3.04,
+    (13/2), awgn -10 -1.52 +-0.73 (11/4); mpp 0 +0.89 +-1.22, mpp -3 +2.15 +-3.04,
     mpd -3 -0.31 +-0.71 (within noise: once timing differs a fading session diverges).
+  - A held reply, either station's: the air is not free meanwhile (`Session.idle`, so no
+    broadcast burst is keyed ahead of it); with no answer from the host it is built as
+    a direct reply is (`nod=True`: 250 ms late is inside the nod window, §3b); and after
+    a burst that said `drained` the sender's expected slot (§3a) reaches 250 ms further
+    and does not learn from that reply's start, which may be a held one.
   - Otherwise the caller answers a burst that arrives while its idle poll waits at
     once, data or not. It stays the only station that retries on a timeout, except
     for DISC.
