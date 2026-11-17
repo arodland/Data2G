@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "arq_convert.hpp"
+#include "arq/ping.hpp"
 
 namespace data2g::bind {
 
@@ -72,6 +73,7 @@ Heard heard_of(const py::dict& r) {
     o->support = {sup[0].cast<int>(), sup[1].cast<int>()};
     const auto seen = (r.contains("seen_support") ? r["seen_support"] : r["support"]).cast<py::sequence>();
     o->seen_support = {seen[0].cast<int>(), seen[1].cast<int>()};
+    o->frames_in = r.contains("frames_in") ? r["frames_in"].cast<int>() : o->n_cw * o->spec->frames_per_cw;
     h.ofdm = std::move(o);
     return h;
 }
@@ -124,8 +126,14 @@ public:
     PyModemRx(py::dict r, py::object store, std::optional<double> dd_budget, bool dd, const py::object& clock)
         : store_(std::move(store)) {
         auto h = heard_of(r);
-        auto soft = cached_soft(r, h);
+        auto soft = h.ofdm && h.ofdm->partial() ? nullptr : cached_soft(r, h);  // a partial burst's: per slot
         rx_ = std::make_unique<ModemRx>(std::move(h), nullptr, dd_budget, std::move(soft), dd, clock_of(clock));
+    }
+
+    std::vector<int> advance(const py::dict& r, std::optional<double> budget_s) {
+        auto h = heard_of(r);
+        py::gil_scoped_release nogil;
+        return rx_->advance(std::move(h), budget_s);
     }
 
     py::object decode(int slot, const py::handle& mask, int rv, const py::object& key) {
@@ -222,21 +230,100 @@ private:
 
 }  // namespace
 
+namespace {
+
+arq::ping::Report report_of(const py::dict& d) {
+    arq::ping::Report m;
+    m.snr_db = d.contains("snr_db") ? d["snr_db"].cast<double>() : 0.0;
+    m.rms_dbfs = d["rms_dbfs"].cast<double>();
+    m.peak_dbfs = d["peak_dbfs"].cast<double>();
+    m.clip_permille = d["clip_permille"].cast<int>();
+    if (d.contains("thirds_db")) {
+        auto t = d["thirds_db"].cast<std::vector<double>>();
+        for (int i = 0; i < 3; ++i) m.thirds_db[i] = t.at(i);
+    }
+    m.dist_db = d.contains("dist_db") ? d["dist_db"].cast<double>() : 0.0;
+    m.noise_tilt_db = d.contains("noise_tilt_db") ? d["noise_tilt_db"].cast<double>() : 0.0;
+    return m;
+}
+
+py::dict report_py(const arq::ping::Report& m) {
+    py::dict d;
+    d["snr_db"] = m.snr_db;
+    d["rms_dbfs"] = m.rms_dbfs;
+    d["peak_dbfs"] = m.peak_dbfs;
+    d["clip_permille"] = m.clip_permille;
+    d["thirds_db"] = py::make_tuple(m.thirds_db[0], m.thirds_db[1], m.thirds_db[2]);
+    d["dist_db"] = m.dist_db;
+    d["noise_tilt_db"] = m.noise_tilt_db;
+    return d;
+}
+
+}  // namespace
+
+void bind_arq_ping(py::module_& m) {
+    namespace pg = arq::ping;
+    auto g = m.def_submodule("ping", "data2g.arq.ping");
+    g.def("tx_level", [](const std::string& path) { return pg::tx_level(path); });
+    g.def("ping_body", [](const std::string& frm, const std::string& to, const py::object& report, int pb) {
+        return pyb(pg::ping_body(frm, to, report.is_none() ? std::nullopt : std::optional<Bytes>(bytes_of(report)), pb));
+    });
+    g.def("unpack_ping", [](const py::bytes& body) {
+        const Bytes b = bytes_of(body);
+        try {
+            auto [frm, to, rep] = pg::unpack_ping(b);
+            return py::make_tuple(frm, to, rep ? py::object(pyb(*rep)) : py::object(py::none()));
+        } catch (const std::invalid_argument& e) {
+            throw py::value_error(e.what());
+        }
+    });
+    g.def("pack_report", [](const py::dict& d) { return pyb(pg::pack_report(report_of(d))); });
+    g.def("unpack_report", [](const py::bytes& b) { return report_py(pg::unpack_report(bytes_of(b))); });
+    g.def("level", [](const In<double>& x) {
+        const auto v = vec(x);
+        const auto m = pg::level(v);
+        py::dict d;
+        d["rms_dbfs"] = m.rms_dbfs;
+        d["peak_dbfs"] = m.peak_dbfs;
+        d["clip_permille"] = m.clip_permille;
+        return d;
+    });
+    g.def("measure", [](const py::dict& r, const py::list& payloads, const py::dict& lvl) {
+        const auto h = heard_of(r);
+        std::vector<Bytes> pl;
+        for (auto p : payloads) pl.push_back(bytes_of(p));
+        const auto l = report_of(lvl);  // with the GIL: it reads a Python dict
+        arq::ping::Report m;
+        {
+            py::gil_scoped_release nogil;
+            m = pg::measure(*h.ofdm, pl, l);
+        }
+        return report_py(m);
+    });
+    g.def("verdict", [](const py::dict& far, const std::string& path, const std::string& band) {
+        return pg::verdict(report_of(far), path, band);
+    }, py::arg("far"), py::arg("tx_path"), py::arg("band") = "f55");
+    g.def("fmt", [](const py::dict& d) { return pg::fmt(report_of(d)); });
+}
+
 void bind_arq_phy(py::module_& m) {
+    bind_arq_ping(m);
     auto p = m.def_submodule("phy", "data2g.arq.phy");
     p.attr("DD_ITERS") = DD_ITERS;
     p.attr("DD_BUDGET_S") = DD_BUDGET_S;
     p.def("dd_default", &dd_default);
     p.def("mask_value", [](const py::handle& t) { return mask_value(mask_of(t)); });
-    p.def("tx_audio", [](const py::handle& burst) {
+    p.def("tx_audio", [](const py::handle& burst, const py::object& tx_path, const py::object& level) {
         const auto b = burst_cpp(burst);
+        const std::string path = tx_path.is_none() ? std::string() : tx_path.cast<std::string>();
+        const std::optional<double> g = level.is_none() ? std::nullopt : std::optional<double>(level.cast<double>());
         std::vector<double> x;
         {
             py::gil_scoped_release nogil;
-            x = tx_audio(*b);
+            x = tx_audio(*b, path, g);
         }
         return np(x);
-    });
+    }, py::arg("burst"), py::arg("tx_path") = py::none(), py::arg("level") = py::none());
     p.def("soft_bits", [](const py::dict& r) {
         const auto h = heard_of(r);
         return soft_py(h, *soft_bits(h));
@@ -246,6 +333,7 @@ void bind_arq_phy(py::module_& m) {
         .def(py::init<py::dict, py::object, std::optional<double>, bool, py::object>(), py::arg("r"), py::arg("store"),
              py::arg("dd_budget") = py::none(), py::arg("dd") = dd_default(), py::arg("clock") = py::none())
         .def("decode", &PyModemRx::decode)
+        .def("advance", &PyModemRx::advance, py::arg("r"), py::arg("budget_s") = py::none())
         .def("raw", &PyModemRx::raw)
         .def("raw_pair", &PyModemRx::raw_pair)
         .def("decode_pair", &PyModemRx::decode_pair)

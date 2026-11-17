@@ -18,6 +18,7 @@ import pytest
 import native_subs
 
 from data2g import host, tnc
+from data2g.arq.modes import BW_NAME
 
 BINARY = native_subs.MODULE_DIR.parent / ("data2g-host.exe" if os.name == "nt" else "data2g-host")  # this profile's build
 BAD = re.compile(r"overflow|underrun|behind the card|dropped|CRITICAL|Traceback")
@@ -190,7 +191,8 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         assert b.lines[:3] == ["OK", "REGISTERED B", "OK"]
         t0 = time.monotonic()
         a.send("CONNECT A B")
-        t_conn = wait([a, b], lambda: "CONNECTED A B 2300" in a.lines and "CONNECTED A B 2300" in b.lines, 60,
+        want = f"CONNECTED A B {BW_NAME[2]}"  # HF 2300, FM WIDE
+        t_conn = wait([a, b], lambda: want in a.lines and want in b.lines, 60,
                       "CONNECTED") - t0
         rng = np.random.default_rng(1)
         up, down = rng.bytes(2048), rng.bytes(2048)
@@ -214,7 +216,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         b.got.clear()
         b.send(f"ACCEPT :{srv.getsockname()[1]}")
         a.send("CONNECT A B")
-        wait([a, b], lambda: "CONNECTED A B 2300" in a.lines, 60, "CONNECTED (ACCEPT)")
+        wait([a, b], lambda: f"CONNECTED A B {BW_NAME[2]}" in a.lines, 60, "CONNECTED (ACCEPT)")
         conn, _ = srv.accept()
         conn.settimeout(0.05)
         a.data.sendall(b"to the server")

@@ -1,0 +1,59 @@
+calibration f55-qpsk-r1/5 mic: knee 1.5 dB, BMI/bit 0.302, rate 0.218, gap +0.084
+calibration f55-qpsk-r1/5 flat: knee 0.5 dB, BMI/bit 0.285, rate 0.218, gap +0.067
+calibration f55-qpsk-r1/2 mic: knee 3.25 dB, BMI/bit 0.545, rate 0.473, gap +0.072
+calibration f55-qpsk-r1/2 flat: knee 2.5 dB, BMI/bit 0.565, rate 0.473, gap +0.093
+calibration f55-16qam-r1/2 mic: knee 5.75 dB, BMI/bit 0.561, rate 0.473, gap +0.088
+calibration f55-16qam-r1/2 flat: knee 4.75 dB, BMI/bit 0.539, rate 0.473, gap +0.067
+calibration f55-16qam-r3/4 mic: knee 7.5 dB, BMI/bit 0.811, rate 0.720, gap +0.092
+calibration f55-16qam-r3/4 flat: knee 6.5 dB, BMI/bit 0.812, rate 0.720, gap +0.092
+calibration f55-64l-r2/3 mic: skipped, BMI falls 0.80 bit past its peak
+calibration f55-64l-r2/3 flat: knee 7.75 dB, BMI/bit 0.761, rate 0.693, gap +0.068
+calibration f55-256l-r5/8 flat: knee 10.0 dB, BMI/bit 0.690, rate 0.625, gap +0.064
+calibration f108-qpsk-r1/5 flat: knee 2.5 dB, BMI/bit 0.294, rate 0.222, gap +0.072
+calibration f108-qpsk-r1/2 flat: knee 4.5 dB, BMI/bit 0.545, rate 0.481, gap +0.063
+calibration f108-16qam-r1/2 flat: knee 8.0 dB, BMI/bit 0.562, rate 0.481, gap +0.081
+calibration f108-16qam-r3/4 flat: knee 11.5 dB, BMI/bit 0.790, rate 0.733, gap +0.056
+calibration f108-64l-r2/3 flat: knee 14.25 dB, BMI/bit 0.756, rate 0.706, gap +0.050
+calibration f108-256l-r3/5 flat: knee 16.75 dB, BMI/bit 0.655, rate 0.593, gap +0.063
+gap per family (BMI per bit above rate at the 10% knee): {'gray-qam4': 0.075, 'gray-qam16': 0.079, 'c64': 0.059, 'c256': 0.064}
+
+## f55 on mic: proposed ladder (8 rungs of 21 on the frontier)
+| candidate | rate | bps | cw/burst | static | flutter@440 | mobile-rural |
+|---|---|---|---|---|---|---|
+| f55:gray-qam4:4:456:2 | 0.207 | 730 | 6 | 1.2 | 1.4 | 2.4 |
+| f55:gray-qam4:4:888:2 | 0.404 | 1421 | 6 | 2.6 | 3.0 | 6.3 |
+| f55:gray-qam4:4:1320:2 | 0.600 | 2138 | 6 | 3.9 | 4.4 | 10.3 |
+| f55:gray-qam16:2:1040:3 | 0.473 | 3379 | 13 | 5.4 | 6.0 | 12.0 |
+| f55:gray-qam16:2:1480:3 | 0.673 | 4854 | 13 | 6.9 | 7.7 | 17.5 |
+| f55:c256-w48-r12:1:888:3 | 0.404 | 5739 | 26 | 8.6 | 9.5 | 22.0 |
+| f55:c256-w48-r12:1:1040:3 | 0.473 | 6758 | 26 | 15.2 | 15.7 | 32.0 |
+| f55:c64-w48-r12:2:2216:3 | 0.672 | 7321 | 13 | 18.1 | 19.6 | 36.0 |
+
+## f55 on flat: proposed ladder (9 rungs of 23 on the frontier)
+| candidate | rate | bps | cw/burst | static | flutter@440 | mobile-rural |
+|---|---|---|---|---|---|---|
+| f55:gray-qam4:4:456:2 | 0.207 | 730 | 6 | 0.3 | 0.3 | 1.4 |
+| f55:gray-qam4:4:888:2 | 0.404 | 1421 | 6 | 1.8 | 1.9 | 4.9 |
+| f55:gray-qam4:4:1320:2 | 0.600 | 2138 | 6 | 2.9 | 3.2 | 8.9 |
+| f55:gray-qam16:2:888:3 | 0.404 | 2870 | 13 | 4.0 | 4.4 | 8.8 |
+| f55:c64-w48-r712:2:1320:6 | 0.400 | 4318 | 13 | 5.3 | 5.7 | 11.4 |
+| f55:c64-w48-r712:2:1920:6 | 0.582 | 6329 | 13 | 6.6 | 7.3 | 15.5 |
+| f55:c256-w48-r12:1:1320:6 | 0.600 | 8635 | 26 | 9.3 | 9.8 | 20.6 |
+| f55:c256-w48-r12:1:1480:6 | 0.673 | 9708 | 26 | 11.3 | 11.6 | 23.5 |
+| f55:c256-w48-r12:1:1584:6 | 0.720 | 10405 | 26 | 13.2 | 13.4 | 26.2 |
+
+## f108 on flat: proposed ladder (12 rungs of 22 on the frontier)
+| candidate | rate | bps | cw/burst | static | flutter@440 | mobile-rural |
+|---|---|---|---|---|---|---|
+| f108:gray-qam4:2:456:2 | 0.211 | 1475 | 13 | 2.3 | 2.5 | 4.0 |
+| f108:gray-qam4:2:888:2 | 0.411 | 2870 | 13 | 3.9 | 4.2 | 8.0 |
+| f108:gray-qam4:2:1296:2 | 0.600 | 4237 | 13 | 5.2 | 5.7 | 11.8 |
+| f108:c64-w48-r34:1:888:6 | 0.274 | 5739 | 26 | 6.4 | 6.9 | 11.4 |
+| f108:c64-w48-r34:1:1296:6 | 0.400 | 8474 | 26 | 7.9 | 8.5 | 14.7 |
+| f108:c256-w48-r12:1:1440:6 | 0.333 | 9440 | 26 | 9.2 | 9.7 | 16.4 |
+| f108:c256-w48-r12:1:1728:6 | 0.400 | 11371 | 26 | 10.8 | 11.2 | 18.4 |
+| f108:c64-w48-r712:1:2176:6 | 0.672 | 14374 | 26 | 13.5 | 13.8 | 22.2 |
+| f108:c256-w48-r12:1:2560:6 | 0.593 | 16949 | 26 | 16.6 | 16.9 | 25.7 |
+| f108:c256-w48-r12:1:2896:6 | 0.670 | 19202 | 26 | 19.5 | 19.9 | 29.9 |
+| f108:c256-w48-r12:1:3240:6 | 0.750 | 21508 | 26 | 24.1 | 24.6 | 35.8 |
+| f108:c256-w48-r12:1:3456:6 | 0.800 | 22956 | 26 | 31.6 | 33.2 | nan |

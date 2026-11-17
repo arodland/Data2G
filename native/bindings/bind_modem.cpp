@@ -143,7 +143,12 @@ py::dict est_dict(const modem::DataEstimate& e) {
     d["h"] = np3(e.h, S);
     d["mse"] = np3(e.mse, S);
     d["n0"] = e.n0;
-    d["n0_k"] = np(e.n0_k);
+    // per frame (EST_WINDOW) as Python keeps it, (F, 1, nc); else (nc,)
+    if (e.h.cols && e.n0_k.size() > e.h.cols)
+        d["n0_k"] = np(e.n0_k).reshape(std::vector<py::ssize_t>{
+            static_cast<py::ssize_t>(e.n0_k.size() / e.h.cols), 1, static_cast<py::ssize_t>(e.h.cols)});
+    else
+        d["n0_k"] = np(e.n0_k);
     d["p_sig"] = e.p_sig;
     d["spread_hz"] = e.spread_hz;
     d["filter_spread_hz"] = e.filter_spread_hz;
@@ -161,6 +166,8 @@ modem::DataEstimate est_of(const py::dict& d) {
     e.mse = mat2(d["mse"].cast<In<double>>());
     e.n0 = d["n0"].cast<double>();
     if (d.contains("n0_k")) e.n0_k = vec(d["n0_k"].cast<In<double>>());
+    e.nc = static_cast<int>(e.h.cols);  // n0_at reads n0_k per carrier or per frame by these
+    e.n_f = static_cast<int>(e.h.rows / config::DATA_SYMS_PER_FRAME);
     e.p_sig = get<double>(d, "p_sig", 0.0);
     e.clip_ratio = d["clip_ratio"].cast<double>();
     return e;
@@ -177,6 +184,7 @@ modem::Received received_of(const py::dict& r) {
     if (r.contains("kc") && !r["kc"].is_none()) rx.kc = r["kc"].cast<int>();
     rx.cfo = get<double>(r, "cfo", 0.0);
     rx.preamble_start = get<std::int64_t>(r, "preamble_start", 0);
+    rx.frames_in = get<int>(r, "frames_in", rx.n_cw * rx.spec->frames_per_cw);
     return rx;
 }
 
@@ -190,6 +198,7 @@ py::dict received_dict(const modem::Received& r) {
     d["band"] = std::string(r.band);
     d["hp"] = np(r.hp);
     d["kc"] = r.kc ? py::object(py::int_(*r.kc)) : py::object(py::none());
+    d["frames_in"] = r.partial() ? r.frames_in : r.n_frames();
     d["cfo"] = r.cfo;
     d["p0"] = r.p0;
     d["shift"] = r.shift;
@@ -271,17 +280,21 @@ void bind_modem(py::module_& m) {
         return header_tuple(mo::decode_header(view(soft), band, a ? &*a : nullptr));
     }, py::arg("soft"), py::arg("band") = "w", py::arg("accept") = py::none());
 
-    d.def("modulate", [](const std::vector<py::bytes>& payloads, const py::object& s, const std::vector<int>& rvs) {
+    // tx_path "": the native setting (set_tx_path)
+    d.def("modulate", [](const std::vector<py::bytes>& payloads, const py::object& s, const std::vector<int>& rvs,
+                         const std::string& tx_path) {
         std::vector<std::vector<std::uint8_t>> p;
         for (const auto& b : payloads) {
             const auto v = bytes_view(b);
             p.emplace_back(v.begin(), v.end());
         }
-        return np(mo::modulate(p, spec_of(s), rvs));
-    }, py::arg("payloads"), py::arg("submode"), py::arg("rvs") = std::vector<int>{});
-    d.def("modulate_bits", [](const In<std::uint8_t>& bits, const py::object& s) {
-        return np(mo::modulate_bits(view(bits), spec_of(s)));
-    });
+        return np(mo::modulate(p, spec_of(s), rvs, tx_path));
+    }, py::arg("payloads"), py::arg("submode"), py::arg("rvs") = std::vector<int>{}, py::arg("tx_path") = "");
+    d.def("modulate_bits", [](const In<std::uint8_t>& bits, const py::object& s, const std::string& tx_path) {
+        return np(mo::modulate_bits(view(bits), spec_of(s), tx_path));
+    }, py::arg("bits"), py::arg("spec"), py::arg("tx_path") = "");
+    d.def("tx_path", [] { return std::string(mo::tx_path()); });
+    d.def("set_tx_path", [](const std::string& p) { mo::set_tx_path(p); });
     d.def("burst_waveform", [](const In<cd>& data, const py::object& s) {
         return np(mo::burst_waveform(mat2(data), spec_of(s)));
     });
@@ -362,7 +375,7 @@ void bind_modem(py::module_& m) {
         return header_dict(mo::copy_header(view(z), lock_of(lock)));
     });
     d.def("receive", [](const In<double>& x, const OptBands& bands, const py::object& accept,
-                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy) {
+                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy, bool partial) {
         const auto a = accept_of(accept);
         const auto bs = bands_of(bands);
         std::optional<mo::Lock> c;
@@ -370,11 +383,11 @@ void bind_modem(py::module_& m) {
         mo::Received r;
         {
             py::gil_scoped_release nogil;
-            r = mo::receive(view(x), bs, a ? &*a : nullptr, head, c ? &*c : nullptr);
+            r = mo::receive(view(x), bs, a ? &*a : nullptr, head, c ? &*c : nullptr, partial);
         }
         return received_dict(r);
     }, py::arg("x"), py::arg("bands") = py::none(), py::arg("accept") = py::none(), py::arg("head") = py::none(),
-       py::arg("copy") = py::none());
+       py::arg("copy") = py::none(), py::arg("partial") = false);
     d.def("resolve_alias", &mo::resolve_alias);
     d.def("data_channel", [](const In<cd>& h_pilot, equalizer::Support support, const std::string& band, double n0_pre,
                              const std::optional<py::tuple>& clip, const std::optional<In<double>>& n0_pre_k,
@@ -395,7 +408,9 @@ void bind_modem(py::module_& m) {
         mo::DataEstimate e;
         e.n0_k = vec(n0_k);
         e.clip_ratio = clip_ratio;
-        const auto v = mo::noise_var(mat2(h), e);
+        const auto hm = mat2(h);
+        e.nc = static_cast<int>(hm.cols);  // n0_k per carrier, or per frame (F, 1, nc) flattened
+        const auto v = mo::noise_var(hm, e);
         return np(v).reshape(std::vector<py::ssize_t>(h.shape(), h.shape() + h.ndim()));
     });
     d.def("soft_bits", [](const In<cd>& raw, const In<cd>& h, const In<double>& var, const py::object& s) {
@@ -409,6 +424,9 @@ void bind_modem(py::module_& m) {
     d.def("slot_soft", [](const py::dict& r, const py::dict& est, int slot) {
         return np(mo::slot_soft(received_of(r), est_of(est), slot));
     });
+    d.def("slot_cells", [](const py::dict& r, int slot) { return np(mo::slot_cells(received_of(r), slot)); });
+    d.def("ready_slots", [](const py::dict& r, int margin) { return mo::ready_slots(received_of(r), margin); },
+          py::arg("r"), py::arg("margin") = 1);
     d.def("snr_db", [](const py::dict& est, const std::string& band) { return mo::snr_db(est_of(est), band); });
     d.def("symbol_times", [](const py::dict& r) {
         const auto t = mo::symbol_times(received_of(r));

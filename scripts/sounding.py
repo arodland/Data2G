@@ -33,18 +33,18 @@ from data2g import codes, cpm, cwid, modem
 from data2g.arq import burst as B
 from data2g.arq import phy as PHY
 from data2g.arq.engine import receive_accept
-from data2g.arq.modes import MODES, ctl_spec, is_cpm
-from data2g.arq.policy import MODE_THRESHOLDS
-from data2g.config import FS, LEADIN_SAMPLES, NSYM, RS, SNR_REF_BW_HZ, SYMS_PER_FRAME, max_codewords
+from data2g.arq.modes import CAP_HZ, MODES, SELECTABLE, ctl_spec, is_cpm, width_hz
+from data2g.arq.policy import MODE_CHANNELS, MODE_THRESHOLDS
+from data2g.config import FS, LEADIN_SAMPLES, NSYM, PROFILE, RS, SNR_REF_BW_HZ, SYMS_PER_FRAME, max_codewords
 from data2g.receiver import Receiver
-from data2g.waveform import dsp
 
 SOUND_KEY = 0x50DA  # every slot's CRC mask key: no live session (key 0 for CQ/ID) accepts these
 MAGIC = 0xD2  # a payload's first byte; then the burst number (2 bytes) and the slot
 GAP_S = 1.0  # silence between bursts (a receiver hands one burst over before the next starts)
 PTT_S = 0.1  # engine.Engine's default ptt_delay_s, ahead of each burst
 DATA_S = 2.0  # data airtime per burst, about: whole codewords, at least one
-CHANNELS = ("awgn", "mpg", "mpp", "mpd")  # mode_thresholds.json's columns
+CHANNELS = MODE_CHANNELS  # mode_thresholds.json's columns (HF awgn/mpg/mpp/mpd; FM static/flutter/mobile/worst)
+FM = PROFILE == "fm"
 FADE_DB = 6.0  # a burst this far under the median path SNR counts as faded
 BLOCK = FS // 10  # receiver feed size
 
@@ -57,7 +57,7 @@ def cap_of(spec) -> int:
     """The narrowest bandwidth cap the mode fits (its TX filter, for CPM)."""
     if is_cpm(spec):
         return 2 if spec.grid == "c32r62" else 0
-    return {"n4": 0, "n10": 0, "w": 1, "w48": 2}[spec.band]
+    return min(c for c in CAP_HZ if width_hz(spec) <= CAP_HZ[c])  # FM: 500 / NARROW / WIDE
 
 
 def n_codewords(spec) -> int:
@@ -72,11 +72,13 @@ def order(modes=None) -> list[str]:
     """One round: each family's modes floor first (mode_thresholds' AWGN
     column), families interleaved by their modes' fractional position, so
     each family is spread over the round and one fade takes one of each."""
-    names = [n for n in MODES if modes is None or n in modes]
+    # the modes the ARQ may name (FM: no w48 or CPM, and only its thresholds' modes)
+    names = [n for n in MODES if n in MODE_THRESHOLDS and (modes is None or n in modes)
+             and (not FM or n in SELECTABLE)]
     fams = {}
     for n in sorted(names, key=lambda n: MODE_THRESHOLDS[n][0]):
         fams.setdefault(family(MODES[n]), []).append(n)
-    fam_rank = {f: i for i, f in enumerate(("n10", "w", "cpm", "w48", "n4"))}
+    fam_rank = {f: i for i, f in enumerate(("n10", "w", "cpm", "w48", "n4", "f55", "f108"))}
     key = [((i + 0.5) / len(v), fam_rank[f], n) for f, v in fams.items() for i, n in enumerate(v)]
     return [n for *_, n in sorted(key)]
 
@@ -124,7 +126,7 @@ def sequence(call: str, seed: int = 0, reps: int = 2, modes=None) -> tuple[np.nd
                                # where the receiver puts the burst's start: OFDM's preamble, past its lead-in
                                sync_s=(start + (0 if is_cpm(spec) else LEADIN_SAMPLES)) / FS,
                                tx=b, audio=x))
-            parts += [np.zeros(lead), x / np.max(dsp.envelope(x)), np.zeros(int(GAP_S * FS))]
+            parts += [np.zeros(lead), PHY.full_scale(x), np.zeros(int(GAP_S * FS))]  # as the engine sends it
             t += lead + len(x) + int(GAP_S * FS)
     parts.append(cwid.audio(cwid.id_text(call) + " SK"))
     return np.concatenate(parts), bursts
@@ -137,13 +139,14 @@ def public(b: dict) -> dict:
 # --- make ----------------------------------------------------------------------------
 
 def make(a):
+    modem.TX_PATH = a.tx_path  # the sender's settings shape every burst (FM; HF ignores it)
     audio, bursts = sequence(a.call, a.seed, a.reps, a.modes)
     if a.rate != FS:
         audio = signal.resample_poly(audio, a.rate // FS, 1)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     wavfile.write(out, a.rate, (np.clip(audio, -1, 1) * 32767).astype(np.int16))
-    meta = dict(call=a.call, seed=a.seed, reps=a.reps, modes=a.modes, rate=a.rate, key=SOUND_KEY,
+    meta = dict(call=a.call, seed=a.seed, reps=a.reps, modes=a.modes, rate=a.rate, key=SOUND_KEY, tx_path=a.tx_path,
                 seconds=len(audio) / a.rate, bursts=[public(b) for b in bursts])
     out.with_suffix(".json").write_text(json.dumps(meta, indent=1))
     print(f"{out}: {len(bursts)} bursts ({len(bursts) // a.reps} modes x {a.reps}), "
@@ -172,7 +175,7 @@ def to_fs(x: np.ndarray, fs: int) -> np.ndarray:
 def listen(y: np.ndarray) -> list[dict]:
     """The live receiver over the whole recording -> heard bursts: stream
     start (preamble or CPM front), header, rx (None if lost)."""
-    rx = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
+    rx = Receiver(receive_accept(), cpm_grids=() if FM else tuple(cpm.GRIDS))  # as engine.Engine listens
     out = []
     for i in range(0, len(y), BLOCK):
         for kind, ev in rx.feed(y[i:i + BLOCK]):
@@ -424,6 +427,18 @@ def analyse(x0: np.ndarray, fs0: int, call: str, seed: int, reps: int, modes=Non
                     delay_ms=_stat([r_["genie"].get("delay_ms") for r_ in g if r_["family"] in ("w", "w48")]),
                     cfo_hz=_stat([r_.get("cfo_hz") for r_ in rows]))
         path["channel"] = channel_class(path["doppler_hz"], path["delay_ms"])
+        if FM:  # Doppler means nothing on FM: the policy's regime input (phy.n0_spread_db)
+            from data2g.arq import predictor
+
+            got = [r_ for r_ in rows if "meas" in r_]
+            ref_band = max({MODES[r_["submode"]].band for r_ in got}, key=lambda b: sum(MODES[r_["submode"]].band == b for r_ in got))
+            path.update(ref_band=ref_band,
+                        snr_est_db=_stat([r_["meas"]["snr_est"] for r_ in got if MODES[r_["submode"]].band == ref_band]),
+                        n0_spread_db=_stat([r_["meas"].get("n0_spread_db") for r_ in got]))
+            fading = path["n0_spread_db"] >= predictor.FM_FADING_SPREAD_DB
+            path["channel"] = "mobile" if fading else "static"
+            path["fm_outcome"] = {n: predictor.fm_outcome(path["snr_est_db"], n, ref_band, path["n0_spread_db"])
+                                  for n in order(modes)}
         # band response: per carrier (tone) SNR over the burst's median, averaged per band
         path["band_db"] = {}
         for fam in sorted({r_["family"] for r_ in g}):
@@ -450,6 +465,9 @@ def analyse(x0: np.ndarray, fs0: int, call: str, seed: int, reps: int, modes=Non
             pred = path["snr_pep_median_db"] - PHY.peak_db(name, rs[0]["cap"])
             m.update(predicted_snr_db=round(pred, 2), margin_db=round(pred - thr, 2) if thr < 90 else None,
                      predicted_pass=bool(thr < 90 and pred >= thr), passed=bool(sent and ok >= 0.9 * sent))
+            if FM:  # thresholds are snr_est at P 0.9: the band-mapped snr_est is the prediction
+                m.update(predicted_snr_db=path["snr_est_db"], margin_db=None,
+                         p_usable=round(path["fm_outcome"][name], 3), predicted_pass=bool(path["fm_outcome"][name] >= 0.9))
         per_mode.append(m)
     return dict(call=call, seed=seed, reps=reps, modes=modes, rate=fs0, seconds=len(x0) / fs0,
                 offset_s=None if off is None else round(off, 3), path=path, per_mode=per_mode, bursts=rows, extra=extra)
@@ -506,6 +524,7 @@ def report_text(rep: dict) -> str:
 
 
 def decode(a):
+    modem.TX_PATH = a.tx_path  # the burst audio the genie compares against is the sender's
     x0, fs0 = read_wav(a.rec)
     rep = analyse(x0, fs0, a.call, a.seed, a.reps, a.modes)
     out = Path(a.out) if a.out else Path(a.rec).with_suffix("")
@@ -527,9 +546,14 @@ def main():
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--reps", type=int, default=2)
         p.add_argument("--modes", nargs="+", choices=list(MODES), help="a subset (decode: the same as make's)")
-    sub.choices["make"].add_argument("--rate", type=int, choices=(8000, 48000), default=8000)
+        p.add_argument("--bands", nargs="+", help="the modes of these bands only (e.g. f55 f108 w n10); with --modes, both")
+        p.add_argument("--tx-path", choices=("mic", "flat"), default="mic",
+                       help="FM: the sender's TX path (decode: the same as make's)")
+    sub.choices["make"].add_argument("--rate", type=int, choices=(FS, 48000), default=FS)
     sub.choices["decode"].add_argument("--out", help="report path prefix (default: the recording's, less .wav)")
     a = ap.parse_args()
+    if a.bands:
+        a.modes = [n for n in (a.modes or MODES) if MODES[n].band in a.bands]  # a CPM spec's band is its grid
     make(a) if a.cmd == "make" else decode(a)
 
 

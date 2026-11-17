@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 HF_OUT = ROOT / "native" / "core" / "generated"
 MODEL = None  # --model: a measurement build's outcome model, no regions
 
-for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL", "DATA2G_RS", "DATA2G_NCP", "DATA2G_ACQUIRE_REACH_HZ", "DATA2G_SYMBOL_NOISE",
+for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL", "DATA2G_RS", "DATA2G_NCP", "DATA2G_ACQUIRE_REACH_HZ", "DATA2G_SYMBOL_NOISE", "DATA2G_SPREAD_WINDOW", "DATA2G_EST_WINDOW", "DATA2G_DECODE_EARLY", "DATA2G_FCENTER", "DATA2G_SYMS_PER_FRAME", "DATA2G_DEFAULT_SPREAD_HZ",
             "DATA2G_CARRIER0"):  # DATA2G_PROFILE: main() sets it
     if var in os.environ:
         sys.exit(f"{var} is set: the generated tables must hold the on-air defaults")
@@ -518,6 +518,13 @@ def modem_hpp() -> str:
     bands = [clip(config.CLIP[b]) for b in config.BANDS]
     out.append(f"// config.CLIP, per config::BANDS row\ninline constexpr std::array<Clip, {len(bands)}> CLIP_BAND = "
                f"{{{{{', '.join(bands)}}}}};\n")
+    # the flat path's TX tilt per sync band (modem.tx_tilt_fir; FM only: HF has no TX path)
+    tilt = [b for b in modem.SYNC_BANDS if config.PROFILE == "fm"]
+    for b in tilt:
+        out.append(array(f"TX_TILT_{b}", [float(v) for v in modem.tx_tilt_fir(b)], "double"))
+    rows = ", ".join(f'{{"{b}", TX_TILT_{b}}}' for b in tilt)
+    out.append(f"inline constexpr std::array<std::pair<std::string_view, std::span<const double>>, {len(tilt)}> "
+               f"TX_TILT = {{{{{rows}}}}};\n")
     out.append("\n}  // namespace data2g::modem\n")
     return "".join(out)
 

@@ -8,7 +8,10 @@ from data2g.arq import frames as F
 from data2g.arq import phy as PHY
 from data2g.arq import session as S
 from data2g.arq.engine import Engine
-from data2g.config import FS, SNR_REF_BW_HZ
+from data2g.arq.modes import BW_NAME
+from data2g.config import FM_TX_PEAK, FS, PROFILE, SNR_REF_BW_HZ
+
+NARROW_BCAST = "n10-qpsk-r1/3" if PROFILE == "fm" else "n4-qpsk-r1/3"  # a 500 Hz broadcast mode (FM has no n4)
 
 BLOCK = FS // 10
 
@@ -19,7 +22,9 @@ def link(a: Engine, b: Engine, snr_db: float, seconds: float, until, seed=0):
     rng = np.random.default_rng(seed)
     sigma = np.sqrt((FS / 2) / SNR_REF_BW_HZ / 10 ** (snr_db / 10))
     a_out = b_out = np.zeros(BLOCK)
-    g = 2.2  # an Engine plays bursts at peak 1.0: ~unit RMS again (peak/RMS ~2.2 after the clipper)
+    # HF: an Engine plays bursts at peak 1.0, ~unit RMS again (peak/RMS ~2.2 after the clipper);
+    # FM: at one fixed scale, unit RMS over config.FM_TX_PEAK (phy.full_scale)
+    g = 2.2 if PROFILE == "hf" else FM_TX_PEAK
     for _ in range(int(seconds * FS / BLOCK)):
         a_out, _ = a.step(g * b_out + rng.normal(0, sigma, BLOCK))
         b_out, _ = b.step(g * a_out + rng.normal(0, sigma, BLOCK))
@@ -283,8 +288,13 @@ def test_buffer_credit_caps_or_disables_the_next_burst_allowance():
         assert f"BUFFER {expect}" in h.out_cmd
 
 
+# "arrives" on FM: 16 dB. FM's predictor moves a reading across bands by
+# offsets measured on the FM channel (discriminator noise: an n10 burst reads
+# 3.9 dB under f55's, predictor.FM_BAND_OFFSET_DB); on this flat AWGN audio
+# they read alike, so the first f55 burst after an n10 connect is 3.9 dB
+# optimistic and did not arrive at 12. tests/test_fm_session.py runs the FM channel.
 @pytest.mark.parametrize("data2g", [False, True])
-@pytest.mark.parametrize("snr", [12, 6])
+@pytest.mark.parametrize("snr", [12 if PROFILE == "hf" else 16, 6])
 def test_cleantxbuffer_mid_burst(data2g, snr):
     """CLEANTXBUFFER while the first data burst is on air: it arrives (12
     dB) or doesn't (6). VARA's replies and BUFFER 0 at once for a VARA
@@ -335,14 +345,14 @@ def test_cleantxbuffer_mid_burst(data2g, snr):
     pump()
     assert a.engine.session.state == S.CONNECTED
     if not data2g:
-        assert bytes(got) == up[:len(got)] and bool(got) == (snr == 12)
+        assert bytes(got) == up[:len(got)] and bool(got) == (snr > 6)
     settled = [x.split() for x in a.out_cmd if x.startswith("CLEANTXBUFFER SETTLED")]
     if data2g:
         drop_from, drop_to, lf, lt = map(int, reply[2:])
         assert drop_to == 19000 and lf < lt == drop_from
         assert len(settled) == 1 and len(settled[0]) == 5
         f, split, t = map(int, settled[0][2:])
-        assert (f, t) == (lf, lt) and split == (lt if snr == 12 else lf) and bytes(got) == up[:split] + up[19000:]
+        assert (f, t) == (lf, lt) and split == (lt if snr > 6 else lf) and bytes(got) == up[:split] + up[19000:]
     else:
         assert not settled
 
@@ -503,7 +513,8 @@ def test_mycall_with_several_calls_answers_each():
     def up():
         a.after_step(bool(a.engine.tx))
         b.after_step(bool(b.engine.tx))
-        return "CONNECTED W1AW KC2G-T 2300" in b.out_cmd and "CONNECTED W1AW KC2G-T 2300" in a.out_cmd
+        want = f"CONNECTED W1AW KC2G-T {BW_NAME[2]}"  # HF 2300, FM WIDE
+        return want in b.out_cmd and want in a.out_cmd
     assert link(a.engine, b.engine, 20, 60, up, seed=33)
 
 
@@ -540,6 +551,7 @@ def test_losing_the_command_client_ends_its_session():
     assert not b.listening and b.engine.session.state != S.LISTEN
 
 
+@pytest.mark.hf_only("CPM modes: FM has none (plan Q2)")
 def test_a_session_in_cpm_modes():
     """Both directions forced onto a CPM mode (control in its short
     codeword, data up to 8 codewords, duplicated control when asked): the
@@ -686,14 +698,14 @@ def test_bcast_commands_and_statuses():
     assert not any(c.startswith("BCAST") for c in h.out_cmd)  # not asked for: not sent
     h.out_cmd.clear()
     for line, want in (("BCAST OPEN APRS", "BCAST PORT 1"), ("BCAST OPEN my chat FROM w1aw", "BCAST PORT 2"),
-                       ("BCAST MODE 1 n4-qpsk-r1/3", "OK"), ("BCAST MODE 2 AUTO qpsk-r1/5", "OK"),
+                       (f"BCAST MODE 1 {NARROW_BCAST}", "OK"), ("BCAST MODE 2 AUTO qpsk-r1/5", "OK"),
                        ("BCAST MODE 1 no-such-mode", "WRONG"), ("BCAST MODE 9 qpsk-r1/5", "WRONG"),
                        ("BCAST MODE 1 FAST qpsk-r1/5", "WRONG"), ("BCAST MODE 0 DUP AUTO qpsk-r1/5", "OK"),
                        ("BCAST MODE 0 DUP DUP qpsk-r1/5", "WRONG"), ("BCAST CLOSE 0", "WRONG"),
                        ("BCAST OPEN bad_name", "WRONG"), ("BCAST", "WRONG")):
         h.command(line)
         assert h.out_cmd.pop() == want, line
-    assert (link.ports[1].group, link.ports[1].mode, link.ports[1].auto) == ("APRS", "n4-qpsk-r1/3", False)
+    assert (link.ports[1].group, link.ports[1].mode, link.ports[1].auto) == ("APRS", NARROW_BCAST, False)
     assert (link.ports[2].group, link.ports[2].from_call, link.ports[2].auto) == ("MY CHAT", "W1AW", True)
     assert (link.ports[0].auto, link.ports[0].dup, link.ports[1].dup, link.ports[2].dup) == (True, True, False, False)
     link.enqueue(b"queued", 1)
@@ -715,13 +727,14 @@ def test_bcast_commands_and_statuses():
     # qpsk-r1/5 (46 B): a 256-byte frame (259 B framed) and 4 control codewords sent twice
     assert all(lines[n] == rx[n] for n in lines if n in rx) and lines["qpsk-r1/5"] == 8 + 6
     # then CHANNELS and a THRESHOLD per mode, same order, as mode_thresholds.json has them (99: "-")
-    from data2g.arq.policy import MODE_THRESHOLDS
+    from data2g.arq.policy import MODE_CHANNELS, MODE_THRESHOLDS
 
-    assert h.out_cmd[len(lines)] == "CHANNELS awgn mpg mpp mpd" and len(h.out_cmd) == 2 * len(lines) + 2
+    assert h.out_cmd[len(lines)] == "CHANNELS " + " ".join(MODE_CHANNELS) and len(h.out_cmd) == 2 * len(lines) + 2
     thr = [ln.split() for ln in h.out_cmd[len(lines) + 1:-1]]
     assert [t[:2] for t in thr] == [["THRESHOLD", n] for n in lines]
     assert all(tuple(99.0 if v == "-" else float(v) for v in t[2:]) == MODE_THRESHOLDS[t[1]] for t in thr)
-    assert "-" in {v for t in thr for v in t[2:]}  # the 99 mapping is exercised
+    if any(99.0 in MODE_THRESHOLDS[t[1]] for t in thr):  # the 99 mapping is exercised (FM's fitted table has none)
+        assert "-" in {v for t in thr for v in t[2:]}
     h.client_gone()
     assert list(link.ports) == [0] and (link.ports[0].mode, link.ports[0].auto, link.ports[0].dup) == (BROADCAST[2],
                                                                                                        False, False)
@@ -800,7 +813,7 @@ def test_accept_puts_a_session_on_its_own_connection():
             b_step()
             return cond()
         return f
-    assert link(a.engine, b.engine, 20, 60, pump(lambda: "CONNECTED W1AW K2XYZ 2300" in a.out_cmd))
+    assert link(a.engine, b.engine, 20, 60, pump(lambda: f"CONNECTED W1AW K2XYZ {BW_NAME[2]}" in a.out_cmd))
     conn, _ = srv.accept()  # made when the CONNECT was answered
     conn.settimeout(0.01)
     a.data_in(b"to the server")
@@ -958,6 +971,7 @@ def test_the_shifter_hears_each_peer_bursts_energy():
     assert b.session.policy.energy_features() is not None
 
 
+@pytest.mark.hf_only("nods answer on CPM grids FM does not listen on (no CPM, plan Q2)")
 def test_nods_on_audio(monkeypatch):
     """A CPM session's control-only replies go as nods (docs/arq.md §3b)
     once the expected slot is learned, and the caller's engine finds them

@@ -46,6 +46,8 @@ def test_cwsense_hears_an_id_not_noise_or_narrow_bursts():
     assert not _active(np.random.default_rng(2).normal(size=60 * FS)).any()
     rng = np.random.default_rng(3)
     for name in ("n4-qpsk-r1/3", "n10-qpsk-r1/2", "fsk16r25-r1/3", "fsk8r50-r1/2", "w48-qpsk-r1/2"):
+        if name not in MODES:  # FM has no n4
+            continue
         spec = MODES[name]
         r = lambda sp: bytes(rng.integers(0, 256, codes.payload_bytes(sp), dtype=np.uint8))  # noqa: E731
         slots = [Slot(ctl_mask(0, 0, 5), 0, r(ctl_spec(spec)))] + [Slot(data_mask(0, i, 5), 0, r(spec)) for i in (1, 2)]

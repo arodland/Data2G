@@ -63,6 +63,12 @@ def pytest_collection_modifyitems(config, items):
         for it in items:
             if m := it.get_closest_marker("hf_only"):
                 it.add_marker(pytest.mark.skip(reason=f"HF calibration: {m.args[0] if m.args else ''}"))
+    # @pytest.mark.python_only("why"): a Python feature native has not got yet;
+    # skipped under --native (the C++ stands in for the module it tests)
+    if config.getoption("--native"):
+        for it in items:
+            if m := it.get_closest_marker("python_only"):
+                it.add_marker(pytest.mark.skip(reason=f"not in native yet: {m.args[0] if m.args else ''}"))
 
 
 def pytest_addoption(parser):

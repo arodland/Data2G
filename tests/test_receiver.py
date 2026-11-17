@@ -14,6 +14,40 @@ CFO_HZ = min(37.0, 0.8 * ACQUIRE_REACH_HZ)
 from data2g.kisslink import pack_frames, unpack_frames
 
 
+def test_a_burst_decodes_while_it_arrives(monkeypatch, request):
+    """config.SPREAD_WINDOW: the receiver reports codeword groups as they
+    complete ("partial"), a ModemRx decodes them before the burst ends, and
+    the "burst" event finishes it: every slot as the whole-burst decode."""
+    from data2g import config
+    from data2g.arq import phy as PHY
+
+    if request.config.getoption("--native") and not (config.DECODE_EARLY and config.SPREAD_WINDOW):
+        pytest.skip("native's windows are compiled in: FM's (config.SPREAD_WINDOW)")
+
+    for mod in (config, receiver):
+        monkeypatch.setattr(mod, "SPREAD_WINDOW", 8)
+    monkeypatch.setattr(config, "EST_WINDOW", 8)
+    monkeypatch.setattr(receiver, "DECODE_EARLY", True)
+    spec = SUBMODES["w48-16qam-r1/2"]
+    rng = np.random.default_rng(6)
+    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(7)]  # 28 frames
+    x = np.concatenate([np.zeros(FS), modem.modulate(sent, spec), np.zeros(FS)])
+    y = hfchannel.apply_channel(x, snr_db=22, seed=2)
+    rx, inc, early = receiver.Receiver(modem.Accept.of([spec.name])), None, []
+    done = None
+    for i in range(0, len(y), FS // 4):
+        for kind, ev in rx.feed(y[i:i + FS // 4]):
+            if kind == "partial":
+                inc = inc or PHY.ModemRx(ev["rx"], {}, None)
+                early += inc.advance(ev["rx"])
+            elif kind == "burst":
+                inc.advance(ev["rx"])
+                done = inc
+    assert len(early) >= 4 and done is not None
+    got = [done.decode(s, (0, 0, 0), 0, None) for s in range(7)]
+    assert got == sent
+
+
 def test_burst_through_the_audio_path_and_streaming_receiver():
     spec = SUBMODES["qpsk-r1/5"]
     packets = [b"CQ CQ de TEST" * 3, bytes(range(200))[:90]]

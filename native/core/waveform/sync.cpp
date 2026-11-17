@@ -310,7 +310,9 @@ RawStat raw_stat(std::span<const cdouble> z, const Band& band, double reach, int
     if (n_out_s < 1) throw std::invalid_argument("raw_stat: signal shorter than a preamble");
     const auto n_out = static_cast<std::size_t>(n_out_s);
     std::vector<double> all(r.freqs);
-    const auto& refs = band.spec->name == "w48" ? NOISE_REF_HZ_W48 : NOISE_REF_HZ;  // sync.noise_ref_hz
+    // sync.NOISE_REF_BY_BAND: bands near the audio passband's edges use the near bins
+    const auto nm = band.spec->name;
+    const auto& refs = nm == "w48" || nm == "f55" || nm == "f108" ? NOISE_REF_HZ_W48 : NOISE_REF_HZ;
     all.insert(all.end(), refs.begin(), refs.end());
     const std::size_t nf = r.freqs.size(), nc = z.size() - t.size() + 1;
     r.S = Mat<double>(nf, n_out);

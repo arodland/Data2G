@@ -150,6 +150,41 @@ class ContinuousChannel:
         return y
 
 
+class FmSessionChannel(ContinuousChannel):
+    """An FM link for whole sessions (FM profile): every burst through
+    data2g.fmchannel (both radios `radio`, condition `condition`, CNR fixed),
+    PAD_S of the receiver's open-squelch hiss either side. The station's audio
+    level is fixed: FmChannel scales each burst to its drive, so the drive is
+    scaled by the burst's rms against the session's first burst's (a connect
+    mode: QPSK, full level), which keeps modem.TX_PATH's per-mode gain (the
+    mic path's 0.70 / 0.55); that first burst sets the drive for 15 kHz
+    occupied (fmchannel.drive_for_bandwidth). Between bursts the floor is
+    ContinuousChannel's (the receiver's noise profile)."""
+
+    def __init__(self, condition: str, radio: str, cnr_db, seed: int, horizon: float, carrier_mhz: float = 146.0):
+        """`cnr_db`: dB, or a function of the burst's start time (s) for a CNR ramp."""
+        super().__init__("awgn", 30.0, seed, horizon)
+        self.condition, self.radio, self.cnr_db = condition, radio, cnr_db
+        self.carrier_mhz = carrier_mhz
+        self.drive_hz = self.ref_rms = None
+        self.n_bursts = 0
+
+    def apply(self, x: np.ndarray, t0: float, rx: int | None = None) -> np.ndarray:
+        from data2g import fmchannel
+
+        pad = np.zeros(int(PAD_S * FS))
+        y = np.concatenate([pad, x, pad])
+        rms = np.sqrt(np.mean(x[np.abs(x) > 0] ** 2))
+        if self.drive_hz is None:
+            self.ref_rms = rms
+            self.drive_hz = fmchannel.drive_for_bandwidth(x[np.abs(x) > 0], self.radio)[0]
+        cnr = self.cnr_db(t0) if callable(self.cnr_db) else self.cnr_db
+        ch = fmchannel.FmChannel(self.condition, self.radio, cnr, seed=self.seed, carrier_mhz=self.carrier_mhz,
+                                 duration_s=t0 + PRE_S + len(y) / FS + 1, drive_dev_hz=self.drive_hz * rms / self.ref_rms)
+        self.n_bursts += 1
+        return ch.apply(y, t0 + PRE_S - PAD_S, burst=self.n_bursts)
+
+
 class RecordedNoise:
     """Noise recorded on air (noise-only stretches of radio recordings,
     each scaled to a unit median floor), standing in for the Gaussian floor

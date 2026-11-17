@@ -51,6 +51,7 @@ struct Args {
     double dd_budget = 1.0;   // seconds of decision-directed decoding per burst (arq::DD_BUDGET_S); 0: none
     int decoder_effort = 25;  // the LDPC decoder's iteration cap (codes::set_ldpc_iters), >= 1
     std::string cw_id = "off";  // arq::Engine::cw_id: off, add, only
+    std::string tx_path = "mic";  // modem::set_tx_path: the radio's TX audio path on FM (mic, flat)
     double cw_wpm = 20.0;
     std::string hand_decoder = "full";  // "full" or "cheap": net control's Hand round grids
     std::string pending = "fsk";  // arq::Engine::pending: off, fsk, ofdm, all

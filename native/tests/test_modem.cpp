@@ -65,10 +65,16 @@ int main() {
     const auto acc = modem::Accept::of({}, 4.0);
     check::equal(acc.max_cw[0].second, 6, "Accept.of(None, 4): ack-4f cap");
     check::equal(acc.max_cw[1].second, 3, "Accept.of(None, 4): polar-k96-f8 cap");
-    check::is_true(acc.bands() == std::vector<std::string_view>{"n10", "w", "w48"}, "Accept bands sorted");
+    // every submode's sync band, sorted (HF: n10, w, w48; FM adds f108, f55)
+    std::vector<std::string_view> sync_bands;
+    for (const auto& s : config::SUBMODES) sync_bands.push_back(s.sync_band);
+    std::sort(sync_bands.begin(), sync_bands.end());
+    sync_bands.erase(std::unique(sync_bands.begin(), sync_bands.end()), sync_bands.end());
+    check::is_true(acc.bands() == sync_bands, "Accept bands sorted");
 
     check::current_step = "loopback";
     for (const char* name : {"ack-1f", "qpsk-r1/2", "n4-ack-2f", "n10-qpsk-r1/3", "w48-16qam-r1/2", "w48-64l-r1/2"}) {
+        if (!config::submode(name)) continue;  // FM has no n4
         const auto& s = *config::submode(name);
         const auto sent = payloads(s, 2, 7);
         const auto y = on_air(modem::modulate(sent, s), 3000, 0.05, 3);

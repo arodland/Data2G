@@ -43,7 +43,7 @@ from collections import deque  # noqa: E402
 import numpy as np  # noqa: E402
 
 from . import audio, modem  # noqa: E402
-from .config import BANDS, FS, SNR_REF_BW_HZ  # noqa: E402
+from .config import BANDS, DECODE_EARLY, FRAME_SAMPLES, FS, SNR_REF_BW_HZ, SPREAD_WINDOW  # noqa: E402
 from .waveform import dsp  # noqa: E402
 
 log = logging.getLogger("data2g.receiver")
@@ -340,6 +340,7 @@ class Receiver:
         self.buf = np.zeros(0)
         self.off = 0  # stream sample index of buf[0]
         self.pending = None
+        self._inc = None  # (pending start, audio fed at the last partial receive, slots ready then): _partial
         self.pilots_ok = False
         self.confirmed = False  # the pending burst's header is clear and its pilots are there
         self._dark = 0  # the pending lock's latest pilot checks in a row with its pilots measurably absent (RELEASE_S)
@@ -433,6 +434,34 @@ class Receiver:
             return False
         floor = np.percentile(self.powers, 5)
         return float(np.mean(list(self.powers)[-3:])) > floor * 10 ** (self.ON_AIR_DB / 10)
+
+    def _partial(self, out: list, p: dict) -> None:
+        """Decoding while the burst arrives (config.SPREAD_WINDOW): with a
+        window's frames more of a pending OFDM burst in since the last
+        look, receive what is in (modem.receive(partial=True)) and, if
+        codeword groups have completed, report it: ("partial", {header,
+        rx}), the same burst's "burst" event following at its end. Copy
+        locks (preamble lost) wait for the end as before."""
+        if not (DECODE_EARLY and SPREAD_WINDOW) or p.get("family") == "cpm" or "copy" in p:
+            return
+        now = self.off + len(self.buf)
+        if self._inc is None or self._inc[0] != p["start"]:
+            self._inc = (p["start"], now, 0)
+            return
+        if now - self._inc[1] < SPREAD_WINDOW * FRAME_SAMPLES:
+            return
+        s0 = max(0, p["start"] - self.MARGIN - self.off)
+        seg = self.buf[s0:]
+        head = p["start"] - self.off - s0 + modem.receive_head(p["band"])
+        try:
+            r = modem.receive(seg, [p["band"]], self.accept, head=min(head, len(seg)), partial=True)
+        except modem.SyncError:
+            self._inc = (p["start"], now, self._inc[2])
+            return
+        ready, before = len(modem.ready_slots(r)), self._inc[2]
+        self._inc = (p["start"], now, max(ready, before))
+        if ready > before:  # codeword groups newly complete
+            out.append(("partial", {"header": p, "rx": r}))
 
     def _check_pilots(self):
         """pilots_ok from the newest PILOT_PAIRS frame pilot pairs: under the
@@ -736,6 +765,7 @@ class Receiver:
                 out.append(("header", dict(self.pending, stream_end=self.off + len(self.buf))))
             p = self.pending
             if self.off + len(self.buf) < p["end"] + self.MARGIN:
+                self._partial(out, p)
                 if self.fresh >= self.HOP:
                     self._check_pilots()
                     # the later-header search is for false locks: a confirmed

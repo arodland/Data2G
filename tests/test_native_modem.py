@@ -86,7 +86,8 @@ def test_header_tables(native, py):
             if b == band:
                 for n in (1, 7, modem.max_codewords(band)):
                     np.testing.assert_array_equal(N.header_bits(sub, n, band), py.header_bits(sub, n, band))
-    acc = modem.Accept.of(["qpsk-r1/2", "ack-1f", "w48-qpsk-r1/2", "n10-256l-r3/4", "n4-ack-2f"], max_secs=2.5,
+    acc = modem.Accept.of([n for n in ("qpsk-r1/2", "ack-1f", "w48-qpsk-r1/2", "n10-256l-r3/4", "n4-ack-2f")
+                           if n in SUBMODES], max_secs=2.5,  # FM has no n4
                           min_score=0.2)
     for band in modem.SYNC_BANDS:
         np.testing.assert_array_equal(N.valid_words(band, acc), py._valid_words(band, acc))
@@ -129,9 +130,34 @@ def test_modulate_matches(native, py, name):
     np.testing.assert_array_equal(native.modem.ace_cells(name, n_f), full)
 
 
+@pytest.mark.parametrize("tx_path", ["mic", "flat"])
+def test_modulate_tx_path_matches(native, py, tx_path):
+    """modem.TX_PATH: the FM transmit per radio path (flat: the tilt and no
+    clipping from 16-QAM up; mic: the top modes' gain), every mode family;
+    on HF both paths send the same."""
+    for name, spec in SUBMODES.items():
+        if spec.code != "ldpc" or spec.index % 3:  # every family, a third of the modes
+            continue
+        pl = _payloads(spec, 1, spec.index + 7)
+        close(native.modem.modulate(pl, name, [0], tx_path), py.modulate(pl, spec, [0], tx_path), 1e-9)
+    old = native.modem.tx_path()
+    try:
+        native.modem.set_tx_path(tx_path)
+        assert native.modem.tx_path() == tx_path
+        spec = next(s for s in SUBMODES.values() if s.code == "ldpc")
+        pl = _payloads(spec, 1, 3)
+        close(native.modem.modulate(pl, spec.name), py.modulate(pl, spec, None, tx_path), 1e-9)
+        with pytest.raises(ValueError):
+            native.modem.set_tx_path("loud")
+    finally:
+        native.modem.set_tx_path(old)
+
+
 def test_burst_waveform_matches(native, py):
     rng = np.random.default_rng(2)
     for name in ("ack-1f", "qpsk-r1/2", "n4-ack-2f", "n10-qpsk-r1/5", "w48-16qam-r1/2"):
+        if name not in SUBMODES:  # FM has no n4
+            continue
         spec = SUBMODES[name]
         nc = BANDS[spec.band].nc
         data = np.exp(2j * np.pi * rng.random((3 * spec.frames_per_cw, 5, nc)))
@@ -143,6 +169,10 @@ def test_burst_waveform_matches(native, py):
 RX_CASES = [("ack-1f", 1, 10.0, None), ("qpsk-r1/2", 2, 6.0, "mpp"), ("n4-ack-2f", 2, 0.0, None),
             ("n10-qpsk-r1/3", 1, 4.0, "mpp"), ("w48-16qam-r1/2", 3, 14.0, None), ("w48-64l-r1/2", 2, 20.0, "mpd"),
             ("polar-k96-f4", 3, -3.0, "mpd")]
+RX_CASES = [c for c in RX_CASES if c[0] in SUBMODES]  # FM has no n4
+if "f55" in BANDS:  # FM's own bands (FM profile)
+    RX_CASES += [("f55-16qam-r47", 3, 16.0, None), ("f55-qpsk-r40", 2, 4.0, "mpp"), ("f108-64l-r67", 2, 22.0, None),
+                 ("f108-qpsk-r21", 3, 0.0, "mpd")]
 
 
 def same_received(n, r):
@@ -162,6 +192,22 @@ def same_received(n, r):
     for k in ("h", "mse", "n0", "n0_k", "p_sig", "spread_hz", "filter_spread_hz", "clip_ratio", "gain"):
         close(n["est"][k], r["est"][k], 1e-8)
     assert n["est"]["band"] == r["est"]["band"]
+
+
+@pytest.mark.skipif(config.EST_WINDOW == 0, reason="per-window channel estimates are FM's (config.EST_WINDOW)")
+def test_windowed_data_channel_matches(native, py):
+    """config.EST_WINDOW: each window of frames from its own pilots and one
+    either side, stitched, the noise per frame; native as Python, on a
+    pilot grid longer than several windows (the last one short)."""
+    rng = np.random.default_rng(6)
+    n_air, nc = 3 * config.EST_WINDOW + 3, BANDS["w48"].nc
+    hp = (rng.normal(size=(n_air + 1, nc)) + 1j * rng.normal(size=(n_air + 1, nc))) * 0.05 + np.exp(
+        2j * np.pi * rng.uniform(size=nc))
+    est = py.data_channel(hp, (-3, 20), "w48", 0.1, None, None, n_air)
+    nest = native.modem.data_channel(hp, (-3, 20), "w48", 0.1, None, None, n_air)
+    assert est["n0_k"].shape == (n_air, 1, nc) and nest["n0_k"].shape == est["n0_k"].shape
+    for k in ("h", "mse", "n0_k", "n0", "gain", "clip_ratio"):
+        close(nest[k], est[k], 1e-8)
 
 
 @pytest.mark.parametrize("name,n_cw,snr,preset", RX_CASES)

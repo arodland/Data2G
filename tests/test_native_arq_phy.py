@@ -65,6 +65,8 @@ def test_mask_value(native, pure):
 
 def test_tx_audio(native, pure):
     for name, n in (("qpsk-r1/2", 3), ("w48-16qam-r1/2", 5), ("n4-qpsk-r1/3", 2), ("ack-4f", 1)):
+        if name not in SUBMODES:  # FM has no n4
+            continue
         b, _ = ofdm_burst(name, n, rv=1)
         close(native.phy.tx_audio(b), PHY.tx_audio(b))
     for name in ("fsk8r50-r1/2", "fsk32r62-r1/3"):
@@ -283,7 +285,7 @@ def test_kiss_dup_links_match(native, pure):
     fails alone: Python and native send and hear the same."""
     from data2g.receiver import receive_any
 
-    for mode, snrs in (("qpsk-r1/5", (-6.0, -8.0, -9.0)), ("fsk8r50-r1/2", (-6.0, -8.0))):
+    for mode, snrs in (("qpsk-r1/5", (-6.0, -8.0, -9.0)), ("fsk8r50-r1/2", (-6.0, -8.0)))[:1 if config.PROFILE == "fm" else 2]:  # FM: no CPM
         links = []
         for make in (KL.KissLink, native.kisslink.KissLink):
             a, b = make(), make()
@@ -323,3 +325,57 @@ def test_dd_budget_expiring_inside_a_pass_ends_it(native, pure):
     assert 30 <= calls[0] < 100  # it ran out inside the work; the whole DD run takes 106 looks
     free = native.phy.ModemRx(dict(r), {}, None, True)
     assert [free.decode(i, m, 0, None) for i, m in enumerate(mids)] == pays
+
+
+@pytest.mark.skipif(config.SPREAD_WINDOW == 0, reason="interleaving windows are FM's (config.SPREAD_WINDOW)")
+@pytest.mark.parametrize("snr,fading", [(18.0, None), (11.0, "mpp")])
+def test_partial_receive_and_advance_match(native, pure, snr, fading):
+    """Decoding while the burst arrives: modem.receive(partial=True) at cut
+    points (frames_in, the equalizer's output), ready_slots and slot_cells,
+    then ModemRx.advance over each cut and the whole: native as Python, the
+    same slots decoded each time, ending on the whole burst's payloads."""
+    from data2g.config import LEADIN_SAMPLES
+
+    name, n = "w48-16qam-r1/2", 7  # 28 frames: three 8-frame windows and a short one
+    b, pl = ofdm_burst(name, n, seed=3)
+    x = np.concatenate([np.zeros(2400), PHY.tx_audio(b), np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=snr, seed=4, fading_preset=fading)
+    band = SUBMODES[name].sync_band
+    head = 2400 + LEADIN_SAMPLES + modem.receive_head(band)
+    whole = modem.receive(y, [band], None, head)
+    p0 = whole["p0"]
+    py = nat = None
+    seen = []
+    for f in (0, 1, 5, 9, 10, 17, 26, 28):
+        cut = p0 + f * config.FRAME_SAMPLES + config.NSYM + 2 * config.NCP
+        try:
+            r = modem.receive(y[:cut], [band], None, head, partial=True)
+        except modem.SyncError:
+            with pytest.raises(Exception):  # SyncError, the same cut
+                native.modem.receive(y[:cut], [band], None, head, None, True)
+            continue
+        nr = native.modem.receive(y[:cut], [band], None, head, None, True)
+        assert nr["frames_in"] == r["frames_in"]
+        assert nr["kc"] == r["kc"]
+        close(nr["raw"], r["raw"])
+        close(nr["est"]["h"], r["est"]["h"], 1e-8)
+        ready = modem.ready_slots(r)
+        assert native.modem.ready_slots(r) == ready
+        for s in ready[-1:]:
+            np.testing.assert_array_equal(native.modem.slot_cells(r, s), modem.slot_cells(r, s))
+            close(native.modem.slot_soft(r, r["est"], s), modem.slot_soft(r, r["est"], s), 1e-8)
+        if py is None:
+            py, nat = PHY.ModemRx(r, {}, None), native.phy.ModemRx(r, {}, None, True)
+        got = nat.advance(r)
+        assert got == py.advance(r)
+        seen += got
+    assert len(seen) >= 4
+    left = py.advance(whole)
+    assert nat.advance(whole) == left
+    out = [nat.decode(i, (7, 0, i), 0, None) for i in range(n)]
+    assert out == [py.decode(i, (7, 0, i), 0, None) for i in range(n)]
+    # the session's keyed reads: the early decodes, CRC-checked (a failed slot decoded, and stored, as ever)
+    keyed = [py.decode(i, (7, 0, i), 0, ("p", i)) for i in range(n)]
+    assert [nat.decode(i, (7, 0, i), 0, ("p", i)) for i in range(n)] == keyed
+    if fading is None:
+        assert out == keyed == pl

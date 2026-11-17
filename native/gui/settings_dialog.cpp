@@ -183,6 +183,13 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     cw_row->addWidget(cw_id_, 1);
     cw_row->addWidget(cw_wpm_);
     station->addRow(tr("CW ID"), cw_row);
+    tx_path_ = new QComboBox;
+    tx_path_->setObjectName(QStringLiteral("tx_path"));
+    tx_path_->addItem(tr("Mic input"), QStringLiteral("mic"));
+    tx_path_->addItem(tr("Flat (9600 port)"), QStringLiteral("flat"));
+    tx_path_->setCurrentIndex(std::max(0, tx_path_->findData(qs(a.tx_path))));
+    tx_path_->setToolTip(tr("The radio's TX audio path, on the FM profile. Mic: the mic input (pre-emphasis and the radio's limiter); the top modes go out quieter. Flat: a 9600 data port; a fixed tilt and no clipping. Mic is safe on either; flat on a mic input overdrives the limiter."));
+    station->addRow(tr("TX audio path"), tx_path_);
 
     // The noise rule's weight, 0.00-1.50 in 0.01 steps: a detent at the
     // default (1.00) while dragging; 0 is off.
@@ -618,6 +625,7 @@ void SettingsDialog::apply_to(app::Args& a) const {
     const int effort_shown = std::clamp(static_cast<int>(std::lround(base_.decoder_effort / 5.0)), EFFORT_MIN / 5, EFFORT_MAX / 5);
     a.decoder_effort = effort_->value() == effort_shown ? base_.decoder_effort : 5 * effort_->value();
     a.cw_id = cw_id_->currentData().toString().toStdString();
+    a.tx_path = tx_path_->currentData().toString().toStdString();
     if (cw_wpm_->value() != static_cast<int>(std::lround(base_.cw_wpm))) a.cw_wpm = cw_wpm_->value();
     // left where it opened: the value it came with (a command line may set more than the slider's top)
     const int shown = static_cast<int>(std::lround(std::min(base_.noise_rule, NOISE_RULE_MAX / 100.0) * 100));

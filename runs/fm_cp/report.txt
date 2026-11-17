@@ -1,0 +1,41 @@
+cp32: RS 50 NCP 32 M 320; burst seconds {'qpsk-r1/2': np.float64(2.03), '16qam-r1/2': np.float64(2.03), '64l-r3/4': np.float64(1.238)}; drives qpsk-r1/2/mic 1459, qpsk-r1/2/flat 2340, 16qam-r1/2/mic 1463, 16qam-r1/2/flat 2340, 64l-r3/4/mic 1482, 64l-r3/4/flat 2278
+burst lost: no preamble found
+burst lost: no preamble found
+cp32f: RS 50 NCP 32 M 320; burst seconds {'qpsk-r1/2': np.float64(2.03), '16qam-r1/2': np.float64(2.03), '64l-r3/4': np.float64(1.238)}; drives qpsk-r1/2/mic 1459, qpsk-r1/2/flat 2340, 16qam-r1/2/mic 1463, 16qam-r1/2/flat 2340, 64l-r3/4/mic 1482, 64l-r3/4/flat 2278
+burst lost: no preamble found
+burst lost: no preamble found
+cp24: RS 50 NCP 24 M 320; burst seconds {'qpsk-r1/2': np.float64(1.987), '16qam-r1/2': np.float64(1.987), '64l-r3/4': np.float64(1.213)}; drives qpsk-r1/2/mic 1455, qpsk-r1/2/flat 2348, 16qam-r1/2/mic 1455, 16qam-r1/2/flat 2340, 64l-r3/4/mic 1475, 64l-r3/4/flat 2278
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+cp16: RS 50 NCP 16 M 320; burst seconds {'qpsk-r1/2': np.float64(1.945), '16qam-r1/2': np.float64(1.945), '64l-r3/4': np.float64(1.189)}; drives qpsk-r1/2/mic 1451, qpsk-r1/2/flat 2344, 16qam-r1/2/mic 1455, 16qam-r1/2/flat 2333, 64l-r3/4/mic 1479, 64l-r3/4/flat 2263
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+cp8: RS 50 NCP 8 M 320; burst seconds {'qpsk-r1/2': np.float64(1.902), '16qam-r1/2': np.float64(1.902), '64l-r3/4': np.float64(1.164)}; drives qpsk-r1/2/mic 1447, qpsk-r1/2/flat 2336, 16qam-r1/2/mic 1451, 16qam-r1/2/flat 2336, 64l-r3/4/mic 1471, 64l-r3/4/flat 2282
+burst lost: header decode failed
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+burst lost: no preamble found
+false alarms per trial (1.8 s of open-squelch hiss each, streamed only): cp32 0.0000, cp32f 0.0000, cp24 0.0000, cp16 0.0000, cp8 0.0000
+dB of CNR against cp32 (positive: worse): total [90% interval] / acquisition part
+      mode      family                       cp32f                        cp24                        cp16                         cp8
+16qam-r1/2       fixed  +0.00 [+0.00,+0.00] / +0.00  +0.04 [-0.12,+0.21] / -0.01  +0.04 [-0.15,+0.24] / -0.01  -0.12 [-0.34,+0.06] / -0.01
+16qam-r1/2     flutter  +0.00 [+0.00,+0.00] / +0.00  -0.01 [-0.11,+0.10] / +0.00  -0.01 [-0.16,+0.13] / +0.00  -0.08 [-0.16,+0.00] / +0.00
+16qam-r1/2 flutter 440  +0.00 [+0.00,+0.00] / +0.00  -0.12 [-0.20,-0.04] / +0.00  -0.06 [-0.16,+0.04] / +0.00  -0.04 [-0.14,+0.06] / +0.00
+16qam-r1/2      mobile  +0.00 [+0.00,+0.00] / +0.00  +0.66 [-0.35,+1.66] / +0.16  +0.05 [-0.86,+0.93] / -0.08  -0.83 [-1.81,+0.15] / -0.34
+16qam-r1/2        slow  +0.00 [+0.00,+0.00] / +0.00  -0.04 [-2.10,+1.85] / +0.10  -0.31 [-2.37,+1.72] / -0.17  -1.42 [-3.58,+0.72] / +0.07
+  64l-r3/4       fixed  +0.00 [+0.00,+0.00] / +0.00  +0.04 [-0.23,+0.31] / +0.01  +0.12 [-0.06,+0.30] / -0.01  +0.38 [+0.14,+0.61] / +0.01
+  64l-r3/4     flutter  +0.00 [+0.00,+0.00] / +0.00  +0.07 [-0.11,+0.27] / +0.00  +0.18 [+0.02,+0.34] / +0.00  +0.23 [+0.01,+0.44] / +0.00
+  64l-r3/4 flutter 440  +0.00 [+0.00,+0.00] / +0.00  -0.13 [-0.36,+0.11] / +0.00  +0.11 [-0.12,+0.32] / +0.00  +0.26 [+0.04,+0.51] / +0.00
+  64l-r3/4      mobile  +0.00 [+0.00,+0.00] / +0.00  +0.86 [-0.20,+1.90] / +0.06  +1.13 [+0.02,+2.16] / +0.05  +1.01 [-0.21,+2.27] / -0.07
+  64l-r3/4        slow  +0.00 [+0.00,+0.00] / +0.00  +0.31 [-2.24,+2.77] / +0.38  -1.21 [-3.20,+0.72] / -0.35  +0.14 [-1.62,+1.72] / -0.29
+ qpsk-r1/2       fixed  +0.00 [+0.00,+0.00] / +0.00  -0.04 [-0.17,+0.07] / -0.01  -0.01 [-0.15,+0.11] / -0.01  -0.11 [-0.25,+0.01] / -0.01
+ qpsk-r1/2     flutter  +0.00 [+0.00,+0.00] / +0.00  +0.00 [+0.00,+0.00] / +0.00  +0.00 [+0.00,+0.00] / +0.00  +0.01 [+0.00,+0.02] / +0.00
+ qpsk-r1/2 flutter 440  +0.00 [+0.00,+0.00] / +0.00  +0.00 [+0.00,+0.00] / +0.00  +0.00 [+0.00,+0.00] / +0.00  +0.00 [+0.00,+0.00] / +0.00
+ qpsk-r1/2      mobile  +0.00 [+0.00,+0.00] / +0.00  +0.46 [-0.42,+1.39] / +0.17  -0.07 [-0.83,+0.70] / -0.12  -0.76 [-1.60,+0.04] / -0.38
+ qpsk-r1/2        slow  +0.00 [+0.00,+0.00] / +0.00  -0.11 [-1.71,+1.44] / -0.04  -0.33 [-1.93,+1.24] / -0.26  -1.09 [-2.73,+0.48] / -0.06

@@ -107,6 +107,14 @@ void GearShifter::observe(const Measured& m_in, std::string_view submode, double
     measured_at = now;
     heard = std::string(submode);
     spreads.push_back(m.spread_est);
+    // FM's regime input (predictor fm_outcome): the median over the peer's last bursts (policy.py)
+    n0_spreads.push_back(m.n0_spread_db);
+    if (n0_spreads.size() > static_cast<std::size_t>(tables::OUTCOME_GATE_HIST))
+        n0_spreads.erase(n0_spreads.begin(), n0_spreads.end() - tables::OUTCOME_GATE_HIST);
+    std::vector<double> v = n0_spreads;  // np.median: the middle one, or the mean of the middle two
+    std::sort(v.begin(), v.end());
+    const std::size_t h = v.size() / 2;
+    measured->n0_spread_db = v.size() % 2 ? v[h] : 0.5 * (v[h - 1] + v[h]);
     snrs.push_back(m.snr_est);
     if (snrs.size() > CPM_FLOOR_HIST) snrs.erase(snrs.begin(), snrs.end() - CPM_FLOOR_HIST);
     if (spreads.size() > static_cast<std::size_t>(tables::OUTCOME_GATE_HIST))

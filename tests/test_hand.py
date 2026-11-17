@@ -15,7 +15,7 @@ import pytest
 
 from data2g import hand, hfchannel
 from data2g.arq.engine import Engine
-from data2g.config import FS, SNR_REF_BW_HZ
+from data2g.config import FM_TX_PEAK, FS, PROFILE, SNR_REF_BW_HZ
 from data2g.host import Host
 from data2g.kisslink import KissLink
 
@@ -224,6 +224,7 @@ def test_hand_crc_binds_the_channel():
         assert [r["payload"] for r in hand.decode_window(y, tag, [3], hand.SEARCH_SAMPLES)] == want, c
 
 
+@pytest.mark.hf_only("channel counts for HF's caps (FM's are 2700 and 5350 Hz)")
 def test_hand_channels_fit_the_width():
     """Channels count from the centre out (1470, 1530, 1410 Hz, ...), and the
     host's width keeps a prefix: 8 at 500 Hz, 20 at 1200, all 40 at 2400,
@@ -790,6 +791,7 @@ def test_hand_overhear_yields_and_refuses():
         assert h.out_cmd.pop() == want, line
 
 
+@pytest.mark.hf_only("its 0.3 s cut leaves HF's header just under receiver.SUSPECT_SCORE (0.343), the release path that marks it LOST; FM's header reads 0.46 there (a clear lock, received at its end), and 0.22 s hears no header at all")
 def test_lost_burst_is_a_ref():
     """A burst whose header was heard but whose receive failed (behind BUSY and
     BCAST * MISSED) is a Hand reference too, marked LOST: the case where a
@@ -801,7 +803,7 @@ def test_lost_burst_is_a_ref():
         o, ptt = b.step(np.zeros(BLOCK))
         if ptt:
             out.append(o)
-    x = 2.2 * np.concatenate(out)
+    x = (2.2 if PROFILE == "hf" else FM_TX_PEAK) * np.concatenate(out)  # back to ~unit RMS (test_engine.run_pair)
     rng = np.random.default_rng(0)
     y = np.concatenate([np.zeros(FS), x, np.zeros(2 * FS)])
     y[FS + int(0.3 * FS):FS + len(x)] = 0.0  # gone after its header

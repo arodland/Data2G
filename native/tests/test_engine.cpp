@@ -15,6 +15,7 @@
 #include <fstream>
 #include <random>
 #include <cstdlib>
+#include <vector>
 
 #include "arq/engine.hpp"
 #include "constellation/constellation.hpp"
@@ -27,6 +28,10 @@ using namespace data2g::arq;
 using clk = std::chrono::steady_clock;
 
 namespace {
+
+// the engine's TX scale (arq/phy full_scale): HF, peak 1.0 (~unit RMS again x 2.2 after the clipper);
+// FM, unit RMS over config::FM_TX_PEAK
+constexpr double LINK_G = config::PROFILE == "hf" ? 2.2 : config::FM_TX_PEAK;
 
 constexpr int BLOCK = config::FS / 10;
 // Sanitizers slow everything several-fold: wall-clock latency bounds are off.
@@ -45,9 +50,9 @@ bool link(Engine& a, Engine& b, double snr_db, double seconds, const std::functi
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK);
     const auto t0 = clk::now();
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * bo[j] + noise(rng);
         ao = a.step(x).audio;
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * ao[j] + noise(rng);
         bo = b.step(x).audio;
         if (until()) return true;
         if (paced) std::this_thread::sleep_until(t0 + std::chrono::milliseconds(100 * (i + 1)));
@@ -475,7 +480,10 @@ void worker_session() {
 // them by its end. OFDM: each frame equalized on its own, close to the points on a clean channel;
 // CPM: the same tone shares the decode reads. Off: no previews.
 void live_preview() {
-    for (const char* name : {"qpsk-r1/5", "fsk8r50-r1/2"}) {
+    // FM's engine listens for no CPM grid (no CPM modes, plan Q2)
+    const std::vector<const char*> names =
+        config::PROFILE == "fm" ? std::vector<const char*>{"qpsk-r1/5"} : std::vector<const char*>{"qpsk-r1/5", "fsk8r50-r1/2"};
+    for (const char* name : names) {
         check::current_step = "live preview";
         TxBurst burst;
         burst.submode = name;

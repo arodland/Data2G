@@ -8,7 +8,13 @@ from data2g import hfchannel
 from data2g.arq import phy as PHY
 from data2g.arq import policy as G
 from data2g.arq.modes import MODES
-from data2g.config import FS
+from data2g.config import FS, PROFILE
+
+# FM has no n4 and no CPM (plan Q2): its 500 Hz n10 rungs stand in
+FM = PROFILE == "fm"
+NARROW = "n10-qpsk-r1/3" if FM else "n4-qpsk-r1/3"
+NARROW_ACK = "n10-ack-4f" if FM else "n4-ack-2f"  # 4-byte codewords both
+DUP_MODES = ("qpsk-r1/5",) if FM else ("qpsk-r1/5", "fsk8r50-r1/2")
 from data2g.kisslink import BROADCAST, REPORT_MAX_S, KissLink, group_key, parse_ax25
 from data2g.receiver import receive_any
 
@@ -131,11 +137,11 @@ def test_first_transmission_success_is_the_target():
 def test_broadcast_mode_option():
     import pytest
 
-    a, b = KissLink(broadcast="n4-qpsk-r1/3"), KissLink()
+    a, b = KissLink(broadcast=NARROW), KissLink()
     f = frame("APRS", "W1AW", 0x03, b"!beacon")
     a.enqueue(f)
     burst, got = over_air(a, b, seed=8)
-    assert burst.submode == "n4-qpsk-r1/3" and got == [(0, f)]
+    assert burst.submode == NARROW and got == [(0, f)]
     with pytest.raises(ValueError):
         KissLink(cap=0, broadcast="w48-qpsk-r1/5")  # 2400 Hz under a 500 Hz cap
     with pytest.raises(ValueError):
@@ -343,7 +349,7 @@ def test_dup_control_decodes_from_its_pair():
     import data2g.kisslink as KL
     from data2g.arq.burst import ctl_mask
 
-    for mode in ("qpsk-r1/5", "fsk8r50-r1/2"):
+    for mode in DUP_MODES:
         a, b = KissLink(), KissLink()
         na, nb = a.open("APRS"), b.open("APRS")
         a.set_mode(na, mode, dup=True)
@@ -372,7 +378,7 @@ def test_control_lost_finds_where_the_data_starts():
     a, b = KissLink(), KissLink()
     na, nb = a.open("APRS"), b.open("APRS")
     # 4-byte codewords: a 3-codeword control, sent twice: data starts at slot 6
-    a.set_mode(na, "n4-ack-2f", dup=True)
+    a.set_mode(na, NARROW_ACK, dup=True)
     a.enqueue(b"h", na)
     burst = a.next_burst()
     assert len(burst.slots) == 7  # "h" framed: 4 bytes (a zero, COBS's 2, the ending zero), one codeword
@@ -399,7 +405,7 @@ def test_control_lost_finds_where_the_data_starts():
 
 
 def test_dup_port_over_air():
-    for mode in ("qpsk-r1/5", "fsk8r50-r1/2"):
+    for mode in DUP_MODES:
         a, b = KissLink(), KissLink()
         na, nb = a.open("CHAT", from_call="W1AW"), b.open("CHAT")
         a.set_mode(na, mode, dup=True)

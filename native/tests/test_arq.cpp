@@ -35,11 +35,14 @@ int main() {
     check::equal(modem::header_samples("n10"), 12 * config::NSYM, "n10 header: 10 symbols, a pilot, the closing pilot");
 
     check::current_step = "modes";
-    check::equal(static_cast<int>(arq::modes().size()), 50, "modes");
-    check::equal(arq::encode("n10-256l-r3/4"), 3 << 4 | 9, "encode n10-256l-r3/4 (CPM code, past N10_HIGH)");
+    if (config::PROFILE == "hf") check::equal(static_cast<int>(arq::modes().size()), 50, "modes");
+    if (check::hf_only("CPM's band code: FM has no CPM"))
+        check::equal(arq::encode("n10-256l-r3/4"), 3 << 4 | 9, "encode n10-256l-r3/4 (CPM code, past N10_HIGH)");
     check::equal(arq::encode("qpsk-r1/2"), 7, "encode qpsk-r1/2");
-    check::equal(arq::encode("fsk8r50-r1/2"), 51, "encode fsk8r50-r1/2");
-    for (const auto& m : arq::modes()) check::is_true(arq::decode(arq::encode(m.name)) == &m, std::string(m.name) + " roundtrip");
+    if (check::hf_only("CPM's band code: FM has no CPM")) check::equal(arq::encode("fsk8r50-r1/2"), 51, "encode fsk8r50-r1/2");
+    if (config::PROFILE == "fm") check::equal(arq::encode("f108-qpsk-r21"), 3 << 4, "encode f108-qpsk-r21 (FM's band code 3)");
+    for (const auto& m : arq::modes())  // what the ARQ may name on air (every mode on HF)
+        if (arq::selectable(m)) check::is_true(arq::decode(arq::encode(m.name)) == &m, std::string(m.name) + " roundtrip");
     check::is_true(arq::decode(0x3F) == nullptr, "no such cpm mode");
     if (check::hf_only("burst timing golden at 8 kHz"))
         check::equal(arq::slots_for(arq::mode_at("w48-16qam-r1/2"), 6.0), 9, "w48-16qam-r1/2 slots in 6 s");
@@ -52,7 +55,7 @@ int main() {
     check::equal(arq::capacity(100.0, "c64-w48-r12"), 1.0, "capacity clamps");
     const auto lo = arq::predict_outcome(clean(-2, 24), "w", 2.5, 6.0);
     const auto hi = arq::predict_outcome(clean(12, 24), "w", 2.5, 6.0);
-    for (const char* name : {"qpsk-r1/2", "16qam-r1/2", "w48-16qam-r2/3"}) {
+    for (const char* name : {"qpsk-r1/2", "16qam-r1/2", config::PROFILE == "fm" ? "f55-64l-r50" : "w48-16qam-r2/3"}) {
         const int i = arq::outcome_index(name);
         check::is_true(hi[i].burst * hi[i].cw > lo[i].burst * lo[i].cw, std::string(name) + " monotone in SNR");
     }

@@ -450,7 +450,7 @@ void test_window(const QTemporaryDir& dir) {
     QByteArray said;
     check::is_true(wait_for([&] {
                        said += client.readAll();
-                       return said.contains("CQFRAME N0CQ 2300");
+                       return said.contains(QByteArray::fromStdString("CQFRAME N0CQ " + arq::bw_name(2)));
                    }, 5000),
                    "the client heard CQFRAME");
     const app::AudioCounters c = w.station().counters();

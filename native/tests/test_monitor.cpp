@@ -21,6 +21,10 @@ using data2g::monitor::Dump;
 
 namespace {
 
+// the engine's TX scale (arq/phy full_scale): HF, peak 1.0 (~unit RMS again x 2.2 after the clipper);
+// FM, unit RMS over config::FM_TX_PEAK
+constexpr double LINK_G = config::PROFILE == "hf" ? 2.2 : config::FM_TX_PEAK;
+
 constexpr int BLOCK = config::FS / 10;
 
 Bytes text(const std::string& s) { return Bytes(s.begin(), s.end()); }
@@ -80,7 +84,7 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
     std::normal_distribution<double> noise(0.0, std::sqrt((config::FS / 2.0) / config::SNR_REF_BW_HZ / std::pow(10.0, g_snr_db / 10)));
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK), y(BLOCK);
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-        for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : 2.2 * ((g_hear_a ? ao[j] : 0.0) + bo[j])) + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) y[j] = (g_deaf ? 0.0 : LINK_G * ((g_hear_a ? ao[j] : 0.0) + bo[j])) + noise(rng);
         if (g_feed && g_monitor_on)
             for (auto& dump : m.feed(y, [](double t) {
                      char s[16];
@@ -88,9 +92,9 @@ bool run(Engine& a, Engine& b, monitor::Monitor& m, std::vector<Dump>& dumps, do
                      return std::string(s);
                  }))
                 dumps.push_back(std::move(dump));
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * bo[j] + noise(rng);
         ao = a.step(x).audio;
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * ao[j] + noise(rng);
         bo = b.step(x).audio;
         if (until()) return true;
     }

@@ -135,6 +135,32 @@ void run(StreamFeed& f) {
     if (f.stream) f.stream->feed(f.audio);
 }
 
+std::optional<modem::Received> receive_partial(const PartialRequest& req, const modem::Accept& accept) {
+    const std::string_view band[] = {req.header.ofdm().band};
+    try {
+        return modem::receive(req.seg, band, &accept, std::min<int64_t>(req.head, static_cast<int64_t>(req.seg.size())),
+                              nullptr, true);
+    } catch (const modem::SyncError&) {
+        return std::nullopt;
+    }
+}
+
+// receiver.Receiver._partial: with a window's frames more of a pending OFDM burst in since the last look, its
+// audio so far. Copy locks (preamble lost) wait for the end.
+void Receiver::partial(std::vector<Item>& out, const Pending& p) {
+    if (!decode_early || !config::SPREAD_WINDOW || p.is_cpm() || p.copy()) return;
+    const int64_t now = off_ + len();
+    if (!inc_ || inc_->start != p.start()) {
+        inc_ = Inc{p.start(), now, 0};
+        return;
+    }
+    if (now - inc_->fed < int64_t{config::SPREAD_WINDOW} * config::FRAME_SAMPLES) return;
+    inc_->fed = now;
+    const int64_t s0 = std::max<int64_t>(0, p.start() - MARGIN - off_);
+    out.push_back(PartialRequest{p, std::vector<double>(buf_.begin() + s0, buf_.end()), off_ + s0,
+                                 p.start() - off_ - s0 + modem::receive_head(p.ofdm().band), inc_->ready});
+}
+
 Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids, bool blank)
     : accept_(std::move(accept)), bands_(accept_.bands()) {
     for (const auto g : cpm_grids) grids_.push_back(&grid_named(g));
@@ -157,6 +183,7 @@ void Receiver::reset() {
     off_ = 0;
     pending_.reset();
     stream_.reset();
+    inc_.reset();
     pilots_ok_ = confirmed_ = false;
     dark_ = 0;
     looked_ = false;
@@ -470,7 +497,13 @@ std::vector<Event> Receiver::feed(std::span<const double> x) {
         if (auto* r = std::get_if<DecodeRequest>(&it)) out.emplace_back(decode(std::move(*r), accept_));
         else if (auto* h = std::get_if<HeaderEvent>(&it)) out.emplace_back(std::move(*h));
         else if (auto* f = std::get_if<StreamFeed>(&it)) run(*f);
-        else out.emplace_back(std::move(std::get<BurstEvent>(it)));
+        else if (auto* q = std::get_if<PartialRequest>(&it)) {
+            auto r = receive_partial(*q, accept_);
+            if (!r) continue;
+            const int ready = static_cast<int>(modem::ready_slots(*r).size());
+            if (inc_ && inc_->start == q->header.start()) inc_->ready = std::max(inc_->ready, ready);
+            if (ready > q->ready_before) out.emplace_back(PartialEvent{q->header, std::move(*r)});  // groups newly complete
+        } else out.emplace_back(std::move(std::get<BurstEvent>(it)));
     }
     return out;
 }
@@ -560,6 +593,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         }
         const Pending p = *pending_;
         if (off_ + len() < p.end() + MARGIN) {
+            partial(out, p);
             if (fresh_ >= HOP) {
                 check_pilots();
                 // the later-header search is for false locks: a confirmed burst skips it

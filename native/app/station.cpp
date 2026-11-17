@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "arq/engine.hpp"
+#include "modem/modem.hpp"
 #ifdef __linux__
 #include <pthread.h>
 #endif
@@ -325,6 +326,7 @@ bool Station::update(const Args& b) {
         e.set_noise_rule(b.noise_rule);
         e.cw_id = b.cw_id;
         e.cw_wpm = b.cw_wpm;
+        modem::set_tx_path(b.tx_path);  // process-wide, read at each burst's modulation
         e.set_nods(b.nods);
         if (b.mycall != a.mycall) {
             try {
@@ -480,6 +482,7 @@ void Station::start() {
         engine_ = std::make_unique<arq::Engine>(a_.mycall.value_or("NOCALL"), cfg);
         engine_->cw_id = a_.cw_id;
         engine_->cw_wpm = a_.cw_wpm;
+        modem::set_tx_path(a_.tx_path);  // process-wide: every burst this station modulates
         engine_->hand_round = a_.hand_decoder;
         engine_->pending = a_.pending;
         engine_->set_nods(a_.nods);

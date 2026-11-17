@@ -298,6 +298,8 @@ public:
     // "DISCONNECTED why", "CQFRAME call cap", "ID call key", "PENDING", "CANCELPENDING".
     std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
+    // FM: a ping to `to` (arq/ping), cap 1 NARROW or 2 WIDE; PINGACK / PINGVERDICT events. Throws as send_cq.
+    void send_ping(const std::string& to, int cap = 1);
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
@@ -392,7 +394,9 @@ private:
     Done process_safe(Block& b);  // process(); a throw drops the session and plays silence
     void hear(std::vector<receiver::Receiver::Item>& items, double t);
     TxBurstPtr kiss_burst(std::int64_t k, bool busy);
-    bool cq(ModemRx& rx);
+    bool cq(ModemRx& rx, const receiver::BurstEvent* ev = nullptr, double t = 0.0);
+    TxBurstPtr ping_burst(const std::string& to, int cap, const std::optional<Bytes>& report) const;
+    void on_ping(ModemRx& rx, const std::vector<Bytes>& payloads, ByteView body, const receiver::BurstEvent* ev, double t);
     TxBurstPtr id_frame(const Session& s) const;
     void id_check(double t);
     std::pair<std::vector<TxBurstPtr>, TxBurstPtr> with_id(TxBurstPtr burst, double t);
@@ -429,6 +433,7 @@ private:
     bool chat_ = false;
     std::optional<double> idle_close_;  // set_idle_close
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
+    std::map<std::string, double> ping_replied_;  // caller -> time of our last ping reply (ping::REPLY_HOLDOFF_S)
     std::vector<std::string> events_;  // host notifications from outside the session
     struct Pend {
         double deadline;
@@ -457,6 +462,12 @@ private:
         std::string mode;
     };
     std::optional<Span> span_;  // the burst being heard
+    struct Inc {  // the burst being decoded as it arrives (receiver::PartialRequest): its header's start, its decoder
+        std::int64_t start;
+        std::shared_ptr<ModemRx> rx;
+    };
+    std::optional<Inc> inc_;
+    void hear_partial(const receiver::PartialRequest& q);
     std::optional<Span> heard_span_;  // ... being decoded: its energy once measured (hear_burst)
     std::optional<double> session_snr_;
     std::optional<double> tx_end_;  // when my last burst ended

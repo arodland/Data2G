@@ -10,6 +10,7 @@
 // (bindings/bind_codes.cpp).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -123,11 +124,20 @@ std::vector<double> flip(const Spec& s, int index, int rv = 0);
 // symbol's likelihoods permuted (codes.plain).
 std::vector<double> plain(const Spec& s, std::span<const double> soft, int index, int rv = 0);
 
-// (n_cw, n) row-major -> burst order, every codeword's m-bit symbols dealt round-robin.
+// (n_cw, n) row-major -> burst order, every codeword's m-bit symbols dealt round-robin. `group` > 0
+// (codes.spread's): codewords dealt in consecutive groups of that many, each over its own stretch of the burst.
 template <typename T>
-std::vector<T> spread(std::span<const T> coded, int n_cw, int m) {
+std::vector<T> spread(std::span<const T> coded, int n_cw, int m, int group = 0) {
     const std::size_t n = coded.size() / n_cw, syms = n / m;
     std::vector<T> out(coded.size());
+    if (group > 0 && group < n_cw) {
+        for (int a = 0; a < n_cw; a += group) {
+            const int g = std::min(group, n_cw - a);
+            const auto part = spread<T>(coded.subspan(a * n, g * n), g, m);
+            std::copy(part.begin(), part.end(), out.begin() + static_cast<std::ptrdiff_t>(a * n));
+        }
+        return out;
+    }
     for (int c = 0; c < n_cw; ++c)
         for (std::size_t j = 0; j < syms; ++j)
             for (int b = 0; b < m; ++b) out[(j * n_cw + c) * m + b] = coded[c * n + j * m + b];
@@ -135,9 +145,17 @@ std::vector<T> spread(std::span<const T> coded, int n_cw, int m) {
 }
 
 template <typename T>
-std::vector<T> despread(std::span<const T> x, int n_cw, int m) {
+std::vector<T> despread(std::span<const T> x, int n_cw, int m, int group = 0) {
     const std::size_t n = x.size() / n_cw, syms = n / m;
     std::vector<T> out(x.size());
+    if (group > 0 && group < n_cw) {
+        for (int a = 0; a < n_cw; a += group) {
+            const int g = std::min(group, n_cw - a);
+            const auto part = despread<T>(x.subspan(a * n, g * n), g, m);
+            std::copy(part.begin(), part.end(), out.begin() + static_cast<std::ptrdiff_t>(a * n));
+        }
+        return out;
+    }
     for (int c = 0; c < n_cw; ++c)
         for (std::size_t j = 0; j < syms; ++j)
             for (int b = 0; b < m; ++b) out[c * n + j * m + b] = x[(j * n_cw + c) * m + b];

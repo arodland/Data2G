@@ -24,6 +24,7 @@ acquired at all. Writes runs/fm_spacing/<variant>.csv.
 
 import argparse
 import csv
+import functools
 import os
 import subprocess
 import sys
@@ -59,10 +60,18 @@ ROUNDS = {
 }
 CNRS = (4, 6, 8, 10, 13, 16, 20, 25, 30, 36)
 MODES = ("qpsk-r1/2", "16qam-r1/2", "64l-r3/4")
-RADIOS = ("mic", "flat")
+RADIOS = tuple(os.environ.get("FM_RADIOS", "mic,flat").split(","))
+# FM_MIC_RADIO: the fmchannel radio the "mic" rows use (scripts/fm_narrow_study.py: "mic-narrow",
+# a 12.5 kHz channel radio), labelled "mic" so report_db pairs it; FM_OBW_HZ: the drive's bandwidth target
+OBW_HZ = float(os.environ.get("FM_OBW_HZ", 15_000.0))
+
+
+def radio_of(r):
+    return os.environ.get("FM_MIC_RADIO", "mic") if r == "mic" else r
 N_CW = 3
 
 
+@functools.cache  # once per process: it registers (and, for DATA2G_SYMS_PER_FRAME, rescales) the modes in place
 def specs():
     """The three modes in this process's numerology, registered so headers resolve."""
     from data2g import config
@@ -76,6 +85,11 @@ def specs():
         out = {"qpsk-r1/2": SUBMODES["qpsk-r1/2"],
                "16qam-r1/2": replace(SUBMODES["16qam-r1/2"], clip_headroom_db=1),
                "64l-r3/4": SubmodeSpec(11, "w-64l-r3/4", "ldpc", "c64-w48-r34", 4, 2160, band="w", clip_headroom_db=5)}
+    if config.DATA_SYMS_PER_FRAME != 5:  # DATA2G_SYMS_PER_FRAME (fm_pilot_study): the same codewords in fewer, longer frames
+        for k, s in out.items():
+            f = s.frames_per_cw * 5
+            assert f % config.DATA_SYMS_PER_FRAME == 0, (s.name, config.DATA_SYMS_PER_FRAME)
+            out[k] = replace(s, frames_per_cw=f // config.DATA_SYMS_PER_FRAME)
     for s in out.values():
         config.SUBMODES[s.name] = s
         config.BY_INDEX[(s.sync_band, s.index)] = s
@@ -102,7 +116,8 @@ def burst(spec, seed):
     from data2g.config import FS
 
     rng = np.random.default_rng(seed)
-    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(N_CW)]
+    n = int(os.environ.get("FM_BURST_FRAMES", 0)) // spec.frames_per_cw or N_CW  # codewords: N_CW, or a burst length
+    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(n)]
     return sent, np.concatenate([np.zeros(FS // 2), modem.modulate(sent, spec), np.zeros(FS // 2)])
 
 
@@ -136,7 +151,7 @@ def stream_receive(spec, sent, x, ch, keyup_late_s: float = -0.2) -> tuple[int, 
             except Exception:
                 continue
             best = max(best, sum(p == s and k for p, s, k in zip(b.payloads, sent, b.crc_ok)))
-    return N_CW - best, int(not found), false
+    return len(sent) - best, int(not found), false
 
 
 def job(args):
@@ -150,11 +165,11 @@ def job(args):
     rows = []
     for cnr in CNRS:
         stream = bool(os.environ.get("FM_RX_STREAM"))  # its audio is 2 s longer (the processes depend on the span)
-        ch = F.FmChannel(c, radio, cnr, seed=trial, duration_s=len(x) / FS + (4 if stream else 2), carrier_mhz=mhz,
+        ch = F.FmChannel(c, radio_of(radio), cnr, seed=trial, duration_s=len(x) / FS + (4 if stream else 2), carrier_mhz=mhz,
                          drive_dev_hz=drive, ppm=ppm)
         if stream:
             lost, nosync, false = stream_receive(spec, sent, x, ch)
-            rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, false))
+            rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, false, len(sent)))
             continue
         try:
             y = ch.apply(x)
@@ -163,10 +178,10 @@ def job(args):
 
                 y = audio.Blanker()(y)
             b = modem.demodulate(y)
-            lost, nosync = N_CW - sum(p == s and k for p, s, k in zip(b.payloads, sent, b.crc_ok)), 0
+            lost, nosync = len(sent) - sum(p == s and k for p, s, k in zip(b.payloads, sent, b.crc_ok)), 0
         except Exception:  # SyncError and kin: the burst was not acquired
-            lost, nosync = N_CW, 1
-        rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, 0))
+            lost, nosync = len(sent), 1
+        rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, 0, len(sent)))
     return rows
 
 
@@ -179,7 +194,10 @@ def run_variant(out: Path, variant, trials, workers):
     for m in MODES:
         _, x = burst(sp[m], 0)
         for r in RADIOS:
-            drives[(m, r)] = F.drive_for_bandwidth(x[np.abs(x) > 0], r, 15_000.0)[0]
+            # FM_DRIVE_RADIO / FM_DRIVE_SCALE: the drive another radio's bandwidth target gives, scaled
+            # (a 12.5 kHz radio's 2.5 kHz limiter holds it under 12.5 kHz at any drive)
+            dr = os.environ.get("FM_DRIVE_RADIO", radio_of(r))
+            drives[(m, r)] = F.drive_for_bandwidth(x[np.abs(x) > 0], dr, OBW_HZ)[0] * float(os.environ.get("FM_DRIVE_SCALE", 1))
     secs = {m: np.round(len(burst(sp[m], 0)[1]) / config.FS - 1.0, 3) for m in MODES}
     print(f"{variant}: RS {config.RS} NCP {config.NCP} M {config.M}; burst seconds {secs}; drives "
           + ", ".join(f"{k[0]}/{k[1]} {v:.0f}" for k, v in drives.items()), flush=True)
@@ -188,7 +206,7 @@ def run_variant(out: Path, variant, trials, workers):
     out.mkdir(parents=True, exist_ok=True)
     with (out / f"{variant}.csv").open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["mode", "radio", "condition", "mhz", "ppm", "trial", "cnr", "lost", "nosync", "false"])
+        w.writerow(["mode", "radio", "condition", "mhz", "ppm", "trial", "cnr", "lost", "nosync", "false", "n"])
         with ProcessPoolExecutor(workers) as ex:
             for rows in ex.map(job, jobs, chunksize=2):
                 w.writerows(rows)
@@ -233,7 +251,7 @@ def report_db(out: Path, variants):
         with (out / f"{v}.csv").open() as f:
             for r in csv.DictReader(f):
                 k = (r["mode"], r["radio"], r["condition"], r["mhz"], r["ppm"])
-                fail[v][k][(int(r["trial"]), col[int(r["cnr"])])] = int(r["lost"]) / N_CW
+                fail[v][k][(int(r["trial"]), col[int(r["cnr"])])] = int(r["lost"]) / int(r.get("n") or N_CW)
                 nos[v][k][(int(r["trial"]), col[int(r["cnr"])])] = int(r["nosync"])
                 false[v][0] += int(r.get("false") or 0)
                 false[v][1] += 1

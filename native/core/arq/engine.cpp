@@ -12,8 +12,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "arq/ping.hpp"
 #include "codes/codes.hpp"
-#include "dsp/dsp.hpp"
 #include "hand/hand.hpp"
 
 namespace data2g::arq {
@@ -43,6 +43,7 @@ Heard heard_of(receiver::Rx&& rx) {
 
 std::vector<std::string_view> all_grids() {
     std::vector<std::string_view> out;
+    if (config::PROFILE == "fm") return out;  // FM has no CPM modes (plan Q2): no CPM lock search either
     for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
     return out;
 }
@@ -313,7 +314,13 @@ std::string Recorder::rx(double t, std::span<const double> audio, const receiver
 // --- engine ----------------------------------------------------------------------------
 
 modem::Accept receive_accept(double min_header_score) {
-    auto a = modem::Accept::of({}, MAX_BURST_S, min_header_score);
+    // FM: only the sync bands its ARQ uses (frames BANDS_CODE): no detector runs for w48
+    std::vector<std::string_view> names;
+    if (config::PROFILE == "fm")
+        for (const auto& s : config::SUBMODES)
+            if (std::any_of(modes().begin(), modes().end(), [&](const Mode& m) { return m.ofdm && selectable(m) && m.ofdm->sync_band == s.sync_band; }))
+                names.push_back(s.name);
+    auto a = modem::Accept::of(names, MAX_BURST_S, min_header_score);
     for (auto& [s, cw] : a.max_cw) {
         if (s->name.find("ack") != std::string_view::npos) continue;
         // a full control, each codeword twice (DUP), and the frame framed as a burst's first (a zero before it)
@@ -463,6 +470,59 @@ std::vector<std::string> Engine::events() {
 void Engine::send_cq(const std::string& call, int cap) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     extra_.push_back(open_frame(cap, T_CQ, pack_cq(call, cap)));
+}
+
+void Engine::send_ping(const std::string& to, int cap) {
+    if (config::PROFILE != "fm" || !ping::PING_MODES.contains(cap))
+        throw std::invalid_argument("ping: FM only, cap 1 (NARROW) or 2 (WIDE)");
+    const auto st = session_->state;
+    if (st != SessionState::IDLE && st != SessionState::LISTEN && st != SessionState::CLOSED)
+        throw std::runtime_error("session under way");
+    pack_call(to);  // throws now, not at send
+    extra_.push_back(ping_burst(to, cap, std::nullopt));
+}
+
+// A ping (or, with report, a reply): MAX_CTL control codewords of the band's ping mode, mask 0, at the top modes' level.
+TxBurstPtr Engine::ping_burst(const std::string& to, int cap, const std::optional<Bytes>& report) const {
+    const std::string& mode = ping::PING_MODES.at(cap);
+    const int pb = session_->policy->payload_bytes(mode);
+    Control ctl{Core{.ftype = SESSION}, {{T_PING, ping::ping_body(call_, to, report, pb)}}};
+    const auto payloads = ctl.pack(pb);
+    auto b = std::make_shared<TxBurst>();
+    b->submode = mode;
+    b->cap = cap;
+    b->level = ping::tx_level(modem::tx_path());
+    for (std::size_t i = 0; i < payloads.size(); ++i) b->slots.push_back({ctl_mask(0, static_cast<int>(i), 0), 0, payloads[i]});
+    return b;
+}
+
+// engine.py _ping: measure the sender's transmitter; ours: PING, and a reply when free (once per caller per
+// REPLY_HOLDOFF_S); a reply to ours: PINGACK and PINGVERDICT lines.
+void Engine::on_ping(ModemRx& rx, const std::vector<Bytes>& payloads, ByteView body, const receiver::BurstEvent* ev, double t) {
+    auto [frm, to, report] = ping::unpack_ping(body);
+    if (to != call_ && std::find(aliases_.begin(), aliases_.end(), to) == aliases_.end()) return;
+    const auto& r = *rx.heard().ofdm;
+    std::span<const double> audio;
+    if (ev) audio = std::span<const double>(ev->audio).first(
+        std::min<std::size_t>(ev->audio.size(), static_cast<std::size_t>(std::max<std::int64_t>(0, ev->header.end() - ev->header.start()))));
+    const auto m = ping::measure(r, payloads, ping::level(audio));
+    const int cap = r.spec->band == "f108" ? 2 : 1;
+    if (!report) {
+        log_write(LOG, INFO, format("RX PING from %s: %s", frm.c_str(), ping::fmt(m).c_str()));
+        events_.push_back("PING " + frm + " " + to + " " + ping::fmt(m));
+        const auto st = session_->state;
+        const auto last = ping_replied_.find(frm);
+        if ((st == SessionState::IDLE || st == SessionState::LISTEN || st == SessionState::CLOSED)
+            && (last == ping_replied_.end() || t - last->second >= ping::REPLY_HOLDOFF_S)) {
+            ping_replied_[frm] = t;
+            extra_.push_back(ping_burst(frm, cap, ping::pack_report(m)));
+        }
+        return;
+    }
+    const auto far = ping::unpack_report(*report);
+    log_write(LOG, INFO, format("RX PINGACK from %s: far %s, near %s", frm.c_str(), ping::fmt(far).c_str(), ping::fmt(m).c_str()));
+    events_.push_back("PINGACK " + frm + " far " + ping::fmt(far) + " near " + ping::fmt(m));
+    for (const auto& v : ping::verdict(far, modem::tx_path(), std::string(r.spec->band))) events_.push_back("PINGVERDICT " + frm + " " + v);
 }
 
 TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
@@ -930,6 +990,10 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             receiver::run(*f);
             continue;
         }
+        if (auto* q = std::get_if<receiver::PartialRequest>(&it)) {  // an OFDM burst's, while it arrives
+            hear_partial(*q);
+            continue;
+        }
         if (auto* h = std::get_if<receiver::HeaderEvent>(&it)) {
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
             // the burst's span: its lead-in (the header's start, stream_end
@@ -941,12 +1005,12 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            if (m && !pend_ && h->header.n_cw() == 1 && session_->state == SessionState::LISTEN && pending != "off") {
+            if (m && !pend_ && h->header.n_cw() <= (m->name == ROBUST_CONNECT ? max_ctl(mode_at(ROBUST_CONNECT)) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
                 const std::string_view n = m->name;
                 bool hit = pending != "ofdm" && n == ROBUST_CONNECT;
                 for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
                 if (hit) {
-                    pend_ = Pend{start + burst_seconds(*m, 1) + PENDING_SLACK_S, false};
+                    pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
                     events_.emplace_back("PENDING");
                 }
             }
@@ -1229,6 +1293,19 @@ void Engine::nod_collect(std::span<const double> x, double t) {
     session_->on_rx(rx, t);
 }
 
+// Decoding while the burst arrives (config::SPREAD_WINDOW, engine.py's "partial"): the codeword groups complete
+// so far, DD on this window's share of the burst's budget; hear_burst finishes the same ModemRx.
+void Engine::hear_partial(const receiver::PartialRequest& q) {
+    auto r = receiver::receive_partial(q, accept_);
+    if (!r) return;
+    const double share = std::min(1.0, static_cast<double>(config::SPREAD_WINDOW) / r->n_frames());
+    Heard h;
+    h.ofdm = std::make_shared<const modem::Received>(std::move(*r));
+    if (!inc_ || inc_->start != q.header.start())
+        inc_ = Inc{q.header.start(), std::make_shared<ModemRx>(h, &store_, cfg_.dd_budget_s, nullptr, cfg_.dd)};
+    inc_->rx->advance(std::move(h), cfg_.dd_budget_s ? std::optional(*cfg_.dd_budget_s * share) : std::nullopt);
+}
+
 void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     // on_read: the burst's decoder handed over last, on every return (after Tally and Timing below are done with it)
     struct Handoff {
@@ -1278,10 +1355,14 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     std::optional<Heard> r;
     std::optional<Measured> meas;
     std::shared_ptr<const SlotSoft> soft;
+    std::shared_ptr<ModemRx> inc;  // this burst's decoder, decoding since its first groups arrived
+    if (inc_ && inc_->start == ev.header.start() && ev.rx && std::holds_alternative<modem::Received>(*ev.rx))
+        inc = std::move(inc_->rx);
+    inc_.reset();
     if (ev.rx) {
         r = heard_of(std::move(*ev.rx));
         meas = measure(*r);
-        soft = soft_bits(*r);
+        if (!inc) soft = soft_bits(*r);  // advance() makes the slots' still undecoded as asked
     }
     const std::optional<Span> span = std::move(heard_span_);
     heard_span_.reset();
@@ -1312,7 +1393,8 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
             cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw(), span ? span_snr(*span) : std::nullopt);
         return;
     }
-    const auto rxp = std::make_shared<ModemRx>(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    const auto rxp = inc ? inc : std::make_shared<ModemRx>(*r, &store_, cfg_.dd_budget_s, soft, cfg_.dd);
+    if (inc) inc->advance(*r);  // the rest: the last groups, and DD on what the burst's budget has left
     ModemRx& rx = *rxp;
     if (on_read_) handoff.rx = rxp;
     timing.rx = &rx;
@@ -1338,7 +1420,7 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
             return;
         }
     }
-    if (cq(rx)) return;
+    if (cq(rx, &ev, t)) return;
     // a whole codeword under another key: its measurements and its loss are not my peer's
     if (!ours && rx.converged(0, false) && session_->foreign(rx)) {
         log_write(LOG, INFO, format("RX %s x%d: another station's", rx.submode().c_str(), rx.n_cw()));
@@ -1386,7 +1468,7 @@ TxBurstPtr Engine::kiss_burst(std::int64_t k, bool busy) {
 // A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)? Then
 // nothing else to do. A malformed one (docs/arq.md §4) is dropped as if it
 // had not decoded.
-bool Engine::cq(ModemRx& rx) {
+bool Engine::cq(ModemRx& rx, const receiver::BurstEvent* ev, double t) {
     const auto first = rx.decode(0, ctl_mask(0, 0, 0), 0, nullptr);
     if (!first) return false;
     const Core core = Core::unpack(*first);
@@ -1399,6 +1481,10 @@ bool Engine::cq(ModemRx& rx) {
     }
     try {
         const auto ext = Control::unpack(payloads).ext;
+        if (const auto it = ext.find(T_PING); config::PROFILE == "fm" && it != ext.end()) {
+            on_ping(rx, payloads, it->second, ev, t);
+            return true;
+        }
         if (const auto it = ext.find(T_ID); it != ext.end()) {
             const auto [call, key] = unpack_id(it->second);
             if (log_enabled(LOG, INFO)) log_write(LOG, INFO, format("RX ID %s (session %04x)", call.c_str(), key));
@@ -1426,13 +1512,8 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
             lens.push_back(x.size());
             continue;
         }
-        const auto x = tx_audio(*b);
-        // envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound
-        // card clips at 1; the envelope, not the samples: w48's crests fall up to 1.8 dB
-        // between samples (engine.py)
-        double peak = 0.0;
-        for (const dsp::cdouble& z : dsp::hilbert(x)) peak = std::max(peak, std::abs(z));
-        for (double v : x) tx.audio.push_back(v / peak);
+        const auto x = full_scale(tx_audio(*b));  // phy.py full_scale: HF envelope peak, FM one fixed scale
+        tx.audio.insert(tx.audio.end(), x.begin(), x.end());
         lens.push_back(x.size());
         if (on_send_) on_send_(b);
     }

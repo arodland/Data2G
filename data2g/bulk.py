@@ -43,7 +43,7 @@ from .arq import frames as F  # noqa: E402
 from .arq import phy as PHY  # noqa: E402
 from .arq.burst import Slot, TxBurst  # noqa: E402
 from .arq.modes import MODES, ctl_payload_bytes, ctl_spec, is_cpm  # noqa: E402
-from .config import FS, MAX_CODEWORDS, max_codewords  # noqa: E402
+from .config import FS, MAX_CODEWORDS, PROFILE, max_codewords  # noqa: E402
 from .receiver import Receiver  # noqa: E402
 from .waveform import dsp  # noqa: E402
 
@@ -400,6 +400,10 @@ def listener(mode: str | None = None) -> Receiver:
     for OFDM too, a fsk32r62 burst read as an n10 header at 10 dB on mpp and
     the false lock hid the next burst (4 of 7 missed; timing recovered them)."""
     if mode is None:
+        if PROFILE == "fm":  # FM has no CPM and listens for its ARQ bands only, as the engine (receive_accept)
+            from .arq.frames import BANDS_CODE
+
+            return Receiver(modem.Accept.of([n for n, s in modem.SUBMODES.items() if s.sync_band in BANDS_CODE]))
         return Receiver(modem.Accept.of(None), cpm_grids=tuple(cpm.GRIDS))
     if is_cpm(MODES[mode]):
         return Receiver(modem.Accept(()), cpm_grids=(MODES[mode].grid,))
@@ -541,6 +545,8 @@ def main(argv=None):
                    f"CPM 1-{CPM_MAX_H} (default {CPM_MAX_H})")
     s.add_argument("--passes", type=int, default=1, help="times the whole text is sent, RVs rotating (default 1)")
     s.add_argument("--lead-ms", type=float, default=500, help="silence before the first burst, for PTT/VOX")
+    s.add_argument("--tx-path", choices=modem.TX_PATHS, default="mic",
+                   help="FM profile: the radio's TX audio path, mic or flat (a 9600 port); see data2g-host")
     r = sub.add_parser("recv", help="WAV (or raw float32 at 8 kHz on stdin) -> text")
     r.add_argument("audio", help="WAV file, or '-' for raw float32 mono at 8 kHz on stdin")
     r.add_argument("-o", "--output", required=True, help="text file to write (several streams: .<id> appended)")
@@ -560,6 +566,7 @@ def main(argv=None):
         ap.error(f"mode {a.mode!r}: one of {', '.join(sorted(MODES))}")
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(message)s")
     if a.cmd == "send":
+        modem.TX_PATH = a.tx_path
         h = a.blocks_per_burst or min(15, max_h(MODES[a.mode]))
         check_mode(a.mode, h)
         text = sys.stdin.buffer.read() if a.text == "-" else open(a.text, "rb").read()

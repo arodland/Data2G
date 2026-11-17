@@ -14,13 +14,18 @@ from data2g.config import SUBMODES
 
 
 def test_recommend_roundtrip_every_submode():
-    for name in MODES:
+    from data2g.arq.modes import SELECTABLE
+
+    for name in SELECTABLE:  # what the ARQ may name on air (every mode on HF)
         assert G.decode(G.encode(name)) == name
 
 
 def test_500hz_cap_only_narrow_modes():
     assert all(G.width_hz(s) <= 500 for s in G.allowed(0))
-    assert {s.band for s in G.allowed(0)} == {"n10", "n4", "c16r25", "c8r50"}
+    from data2g import config
+
+    # FM: n10 alone (no n4, no CPM: plan Q2)
+    assert {s.band for s in G.allowed(0)} == ({"n10"} if config.PROFILE == "fm" else {"n10", "n4", "c16r25", "c8r50"})
     assert G.FALLBACK[0] in {s.name for s in G.allowed(0)} and G.CONNECT[0] in {s.name for s in G.allowed(0)}
 
 
@@ -39,6 +44,7 @@ def joint(measured_, band, seconds=6.0):
     return {k: pb * pc for k, (pb, pc) in P.predict_outcome(measured_, band, 2.5, seconds).items()}
 
 
+@pytest.mark.hf_only("HF's outcome model (FM predicts from thresholds, M6)")
 def test_predictor_monotone_in_snr_and_rate():
     lo, hi = joint(measured(-2, 0.05), "w"), joint(measured(12, 0.05), "w")
     for name in ("qpsk-r1/2", "16qam-r1/2", "w48-16qam-r2/3"):
@@ -192,6 +198,7 @@ def test_cpm_cap_reply_hold_and_link_lost_price():
     assert robust >= burst_seconds(G.MODES[G.ROBUST_CONNECT], 1)  # its 5 s answer is not polled over
 
 
+@pytest.mark.hf_only("names HF's n4 and CPM modes (FM has neither, plan Q2)")
 def test_robust_floor_sends_control_only_bursts_robust():
     g = G.GearShifter()
     st = station(2)
@@ -205,6 +212,7 @@ def test_robust_floor_sends_control_only_bursts_robust():
     assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation
 
 
+@pytest.mark.hf_only("HF's ladder thresholds (FM's are provisional, M6)")
 def test_lost_data_steps_down_the_ladder():
     """LADDER_AFTER data bursts lost in a row in the mode I recommended: data
     goes only in modes LADDER_STEP_DB more robust on every channel; a further

@@ -46,7 +46,7 @@ from typing import NotRequired, TypedDict
 
 import numpy as np
 
-from . import codes, constellation, equalizer
+from . import codes, config, constellation, equalizer
 from .config import (
     BANDS,
     BY_INDEX,
@@ -120,6 +120,7 @@ COPY_COMMIT_SCORE = 0.45
 # top out at 0.248 (3000 measured), its reads off w bursts at 0.243 (-8..+30
 # dB); true w48 headers score 0.35 median at -6 dB (0.30 had cut ~20% there).
 HEADER_MIN_SCORE = {"w": 0.33, "n10": 0.30, "w48": 0.26}
+# FM's f55 and f108 (FM profile): set below with the pilot constants
 # Handicap on the header score of every hypothesis but acquisition's own
 # (its runner-ups, and the +-1, +-2 repeat alignments): near -8 dB wide a
 # true header scores ~0.26 and noise read at some other hypothesis beat
@@ -430,18 +431,42 @@ def decode_header(soft: np.ndarray, band: str = "w",
 
 # --- transmit ---------------------------------------------------------------
 
-def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None) -> np.ndarray:
+# The station's radio path on the FM profile (config.FM_*): "mic" (the default:
+# its quieter top modes are safe on a flat radio, where flat's settings would
+# overdrive a mic radio's limiter) or "flat" (a 9600 port). Set by the station
+# (data2g-host --tx-path); what the transmitter sends, never what it receives.
+TX_PATHS = ("mic", "flat")
+TX_PATH = "mic"
+
+
+@lru_cache(maxsize=None)
+def tx_tilt_fir(band: str) -> np.ndarray:
+    """The flat path's TX tilt (config.FM_TX_TILT_DB_OCT): linear-phase FIR,
+    amplitude (f / fc)^(dB per octave / 6.02) over the band (fc its geometric
+    centre), held flat outside it (scripts/fm_tilt_study.py's, measured with it)."""
+    from scipy import signal
+
+    b = BANDS[band]
+    lo = config.CARRIER0 + RS * b.k0
+    hi = lo + RS * (b.nc - 1)
+    f = np.linspace(0, FS / 2, 513)
+    g = (np.clip(f, lo, hi) / np.sqrt(lo * hi)) ** (config.FM_TX_TILT_DB_OCT / (20 * np.log10(2)))
+    return signal.firwin2(255, f, g, fs=FS)
+
+
+def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None, tx_path: str | None = None) -> np.ndarray:
     """Codeword payloads (each exactly codes.payload_bytes long) -> unit-RMS
-    audio. `rvs`: each codeword's redundancy version (codes.rv_positions),
-    all 0 by default."""
+    audio (FM, mic path: the top modes quieter, config.FM_MIC_GAIN). `rvs`:
+    each codeword's redundancy version (codes.rv_positions), all 0 by
+    default. `tx_path`: FM's radio path (default TX_PATH)."""
     spec = SUBMODES[submode] if isinstance(submode, str) else submode
     if not 1 <= len(payloads) <= max_codewords(spec.sync_band):
         raise ValueError(f"1..{max_codewords(spec.sync_band)} codewords per burst, got {len(payloads)}")
     bits = np.stack([codes.encode(spec, p, rv, index=i) for i, (p, rv) in enumerate(zip(payloads, rvs or [0] * len(payloads)))])
-    return modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
+    return modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path)
 
 
-def modulate_bits(bits: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
+def modulate_bits(bits: np.ndarray, spec: SubmodeSpec, tx_path: str | None = None) -> np.ndarray:
     """Coded bits in burst order (whole codewords, after `codes.spread`)
     -> unit-RMS audio. The codec-free half of `modulate`, for
     measurements that send raw bits."""
@@ -454,12 +479,26 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
         m = constellation.bits_per_symbol(pts)
         idx = (bits.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))).reshape(data.shape)
         project = ace_projector(spec, data, constellation.ace_dirs(spec.constellation)[idx])
+    path = TX_PATH if tx_path is None else tx_path
+    if path not in TX_PATHS:
+        raise ValueError(f"tx_path: {path!r}, not one of {TX_PATHS}")
+    fm = config.PROFILE == "fm"
+    m = constellation.bits_per_symbol(pts)
+    # FM flat path: sent unclipped from 16-QAM up (a headroom no burst reaches)
+    headroom = 40.0 if fm and path == "flat" and m >= config.FM_FLAT_NOCLIP_BITS else spec.headroom
     # the sync band's filter: it contains the data band (BandSpec.sync)
-    return dsp.tx_condition(
-        x, spec.headroom, b.spec.clip_overshoot,
+    y = dsp.tx_condition(
+        x, headroom, b.spec.clip_overshoot,
         active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES), bandpass=BANDS[spec.sync_band].tx_bandpass,
         project=project, closing=spec.ace,
     )
+    if not fm:
+        return y
+    if path == "mic":
+        return y * config.FM_MIC_GAIN[m]
+    act = slice(LEADIN_SAMPLES, len(y) - LEADOUT_SAMPLES)
+    t = np.convolve(y, tx_tilt_fir(spec.sync_band), "same")
+    return t * np.sqrt(np.mean(y[act] ** 2) / np.mean(t[act] ** 2))  # rms kept (the tilt studies')
 
 
 def ace_cells(spec: SubmodeSpec, n_f: int) -> tuple[np.ndarray, np.ndarray]:
@@ -504,7 +543,7 @@ def burst_waveform(data: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     kc = copy_frame(spec.sync_band, n_f)
     if kc is not None:  # the header copy: a frame of its own (data band = sync band here)
         h = hdr.reshape(sb.spec.header_syms, sb.nc)
-        row = np.concatenate([h, h[:DATA_SYMS_PER_FRAME - len(h)]])
+        row = np.resize(h, (DATA_SYMS_PER_FRAME, sb.nc))  # the header, repeated to fill the frame
         data = np.insert(data, kc, row, axis=0)
         n_f += 1
     syms = np.empty((n_f * SYMS_PER_FRAME + 1, b.nc), dtype=np.complex128)
@@ -709,7 +748,7 @@ def _copy_llr(z: np.ndarray, p: int, band: str, n_hdr: int) -> np.ndarray | None
     llr = constellation.llr(ys, hs, np.ones(ys.shape), QPSK).reshape(DATA_SYMS_PER_FRAME, -1)
     out = llr[:n_hdr].copy()
     for i in range(n_hdr, DATA_SYMS_PER_FRAME):
-        out[i - n_hdr] += llr[i]
+        out[i % n_hdr] += llr[i]  # row i repeats header symbol i mod n_hdr (burst_waveform's np.resize)
     return out.reshape(-1)
 
 
@@ -809,6 +848,23 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: d
 PILOT_PAIRS = 4
 PILOT_NOISE = {"w": 0.24, "n10": 0.38, "n4": 0.59, "w48": 0.18}
 PILOT_PATTERN = {"w": 0.318, "n10": 0.504, "n4": 0.876, "w48": 0.226}
+# FM's bands, measured as the others were (scripts/band_consts.py, 3000 reads each,
+# 2026-11-17): pilot pattern 90% / coherence 99% on white noise f55 0.208 / 0.191,
+# f108 0.148 / 0.142; header reads on noise top out at 0.222 (f55) and 0.153 (f108),
+# off other bands' bursts 0.218 and 0.153 (the longer codes read lower).
+# Header floors re-measured on what an FM receiver hands the modem
+# (scripts/fm_header_floor.py, 2026-11-17, blanked: 12000 reads per band over
+# mic and flat hiss and idle carriers at 8 dB, plus 12348 off other bands'
+# bursts): FM audio reads higher than white noise, max f55 0.276 (flat, idle
+# carrier), f108 0.175, so white noise's 0.23 / 0.16 let noise through. The
+# floors sit just over those maxima, as w48's does. True headers (lowest rung,
+# 60 trials, genie start): none lost at +2 dB static on either path; f55 mic
+# static at 0 dB loses 43% (0.23: 5%), under that rung's 1.25 dB 10% knee;
+# near the mobile knees (8 dB up) no change.
+if "f55" in BANDS:
+    HEADER_MIN_SCORE.update({"f55": 0.28, "f108": 0.18})
+    PILOT_NOISE.update({"f55": 0.19, "f108": 0.14})
+    PILOT_PATTERN.update({"f55": 0.208, "f108": 0.148})
 
 
 def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = False, pattern: bool = False):
@@ -972,7 +1028,7 @@ def _copy_header(z: np.ndarray, lock: Lock) -> HeaderRead:
 
 
 def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int | None = None,
-            copy: Lock | None = None, known: dict | None = None) -> Received:
+            copy: Lock | None = None, known: dict | None = None, partial: bool = False) -> Received:
     """Everything up to soft bits for the first burst in `x`: the
     synchronisation state (so an analysis script can replay it on
     another signal) and the equalizer output. `bands`: the sync bands to
@@ -983,7 +1039,10 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     origin as x): no preamble search, the header its copy read. `known`:
     {start, cfo, spec, n_cw} of a burst whose timing the receiver knows
     already (data2g.bulk): no search, the header neither read nor needed,
-    its known word the coarse CFO's reference."""
+    its known word the coarse CFO's reference. `partial`: `x` holds the
+    burst only so far (a streaming receiver decoding as it arrives): the
+    air frames whose closing pilot is in, `frames_in` data frames of them
+    (receive_partial's caller decodes the slots ready_slots names)."""
     z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     if known is not None:
         ks, kn = known["spec"], known["n_cw"]
@@ -1006,7 +1065,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         hd, acq, _ = _best_header(z0[:head], bands, complete=False, accept=accept, final=True)
         z = dsp.freq_correct(z0, acq.freq_offset)
         spec, n_cw = hd["hdr"]
-        if burst_end(hd["p0"], spec, n_cw) > len(z0):
+        if not partial and burst_end(hd["p0"], spec, n_cw) > len(z0):
             raise SyncError("burst runs past the buffer")
     band = hd["band"]  # the sync band; frames are on spec.band's carriers
     b = ofdm.band(band)
@@ -1017,6 +1076,13 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     n_f = n_cw * spec.frames_per_cw
     kc = copy_frame(band, n_f)
     n_air = n_f + (kc is not None)  # the header copy's frame among the data frames
+    if partial:  # the frames in so far, each with its closing pilot (and room for the window's shift)
+        n_air = min(n_air, max(0, (len(z0) - p0 - NSYM - 2 * NCP) // FRAME_SAMPLES))
+        if n_air < 1:
+            raise SyncError("no whole frame yet")
+        if kc is not None and kc >= n_air:
+            kc = None  # its copy not in yet
+    n_in = n_air - (kc is not None)  # data frames in
     phi_ref = _bin_phase_step(h_pre)
 
     # Residual CFO. The pilots measure it finely but only modulo the
@@ -1041,7 +1107,7 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         pc = p0 + kc * FRAME_SAMPLES
         ys = [b.demod_window(z, pc + s * NSYM + NCP, HEADER_BACKOFF) for s in range(SYMS_PER_FRAME + 1)]
         h = ref_syms[~layout]
-        ref2 = [b.pilot, *np.concatenate([h, h[:DATA_SYMS_PER_FRAME - len(h)]]), b.pilot]
+        ref2 = [b.pilot, *np.resize(h, (DATA_SYMS_PER_FRAME, b.nc)), b.pilot]
         runs.append([y * np.conj(r) for y, r in zip(ys, ref2)])
     d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
     coarse = float(np.angle(d) / (2 * np.pi * NSYM / FS))
@@ -1068,8 +1134,10 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     if kc is not None:
         raw = np.delete(raw, kc, axis=0)
         est["h"], est["mse"] = np.delete(est["h"], kc, axis=0), np.delete(est["mse"], kc, axis=0)
+        if np.ndim(est.get("n0_k")) == 3:  # per frame (config.EST_WINDOW)
+            est["n0_k"] = np.delete(est["n0_k"], kc, axis=0)
     return dict(
-        spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc,
+        spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc, frames_in=n_in,
         cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support, seen_support=seen,
         preamble_start=hd["start"], score=hd["score"],
     )
@@ -1081,10 +1149,32 @@ def resolve_alias(fine: float, coarse: float) -> float:
 
 
 def data_channel(h_pilot: np.ndarray, support: tuple[int, int], band: str = "w",
-                 n0_pre: float = np.inf, clip: ClipConsts | None = None, n0_pre_k=None, n_frames: int | None = None) -> DataEstimate:
+                 n0_pre: float = np.inf, clip: ClipConsts | None = None, n0_pre_k=None, n_frames: int | None = None,
+                 _whole: bool = False) -> DataEstimate:
     """equalizer.estimate, rescaled from the pilots' channel to the one
     the data see. `clip` overrides config.CLIP[band] (clipper studies).
     `n_frames`: data frames, when the pilots include a header copy's."""
+    from .config import EST_WINDOW
+
+    n_air = len(h_pilot) - 1
+    if EST_WINDOW and not _whole and n_air > EST_WINDOW:
+        # studies (FM plan, decoding while a burst arrives): each window of
+        # frames from its own pilots and one either side, as a receiver that
+        # estimates as frames arrive would see them
+        parts = []
+        for a in range(0, n_air, EST_WINDOW):
+            lo, hi = max(0, a - 1), min(n_air, a + EST_WINDOW + 1)
+            e = data_channel(h_pilot[lo:hi + 1], support, band, n0_pre, clip, n0_pre_k, n_frames or n_air, _whole=True)
+            w = slice(a - lo, a - lo + min(EST_WINDOW, n_air - a))
+            nk = np.broadcast_to(np.asarray(e.get("n0_k", e["n0"]), dtype=float), (e["h"].shape[2],))
+            parts.append((e, e["h"][w], e["mse"][w], np.broadcast_to(nk, (len(e["h"][w]), 1, len(nk)))))
+        est = dict(parts[0][0])
+        est["h"] = np.concatenate([p[1] for p in parts])
+        est["mse"] = np.concatenate([p[2] for p in parts])
+        est["n0_k"] = np.concatenate([p[3] for p in parts])
+        for k in ("n0", "p_sig", "spread_hz"):
+            est[k] = float(np.mean([p[0][k] for p in parts]))
+        return est
     est = equalizer.estimate(h_pilot, support, bb=ofdm.band(band).bb, n0_pre=n0_pre, n0_pre_k=n0_pre_k)
     c = ClipConsts(*(clip or CLIP[band]))
     est["clip_ratio"] = c.ratio
@@ -1136,7 +1226,8 @@ def burst_soft(r: Received, est: DataEstimate | None = None) -> np.ndarray:
     arq/phy's DD re-estimate): thermal, clip and estimation noise."""
     spec, est = r["spec"], est or r["est"]
     var = _data_var(r, est)
-    return np.asarray(codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
+    return np.asarray(codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu,
+                                     codes.spread_group(spec)))
 
 
 def _data_var(r: Received, est: DataEstimate) -> np.ndarray:
@@ -1149,12 +1240,33 @@ def _data_var(r: Received, est: DataEstimate) -> np.ndarray:
     return var
 
 
+def slot_cells(r: Received, slot: int) -> np.ndarray:
+    """The data cells (flat index over the whole burst's (frames, 5, nc))
+    holding `slot`'s symbols, in its order: codes.spread's layout, round-robin
+    over the burst or over the slot's window (config.SPREAD_WINDOW)."""
+    spec, n = r["spec"], r["n_cw"]
+    syms = n * spec.coded_bits // spec.bits_per_cu
+    return codes.despread(np.arange(syms), n, 1, codes.spread_group(spec))[slot]
+
+
+def ready_slots(r: Received, margin: int = 1) -> list[int]:
+    """The slots whose every symbol is in the frames received so far
+    (r["frames_in"]), `margin` frames short of the last, so each has a
+    pilot after it for the channel estimate; a complete burst's are all."""
+    spec, n = r["spec"], r["n_cw"]
+    n_f = n * spec.frames_per_cw
+    frames = r.get("frames_in", n_f)
+    have = (frames if frames >= n_f else frames - margin) * DATA_SYMS_PER_FRAME * BANDS[spec.band].nc
+    return [s for s in range(n) if slot_cells(r, s).max() < have]
+
+
 def slot_soft(r: Received, est: DataEstimate, slot: int) -> np.ndarray:
     """burst_soft(r, est)[slot] alone: codes.spread deals codeword symbols
-    round-robin, so the slot's are every n_cw-th of the burst's."""
-    n = r["n_cw"]
+    round-robin, so the slot's are every n_cw-th of the burst's (of its
+    window's: config.SPREAD_WINDOW). On a partial burst, a ready_slots one."""
     var = _data_var(r, est)
-    pick = lambda a: a.reshape(-1)[slot::n]  # noqa: E731
+    cells = slot_cells(r, slot)  # the slot's, in its order (within what is in, on a partial burst)
+    pick = lambda a: a.reshape(-1)[cells]  # noqa: E731
     return constellation.llr(pick(data_symbols(r["raw"])), pick(est["h"]), pick(var),
                              constellation.load(r["spec"].constellation))
 

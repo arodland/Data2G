@@ -1,0 +1,14 @@
+00:14:46 from: OK
+00:14:46 from: MODE f55-qpsk-r21
+00:14:46 from: PTT ON
+00:14:47 to: BUSY ON
+00:14:49 from: PTT OFF
+00:14:49 to: PING KC2G-1 KC2G-2 snr=21.0 rms=-38.9 peak=-27.8 clip=0 thirds=24.9/25.4/20.8 dist=0.0 noise_tilt=-7.4
+00:14:49 to: MODE f55-qpsk-r21
+00:14:49 to: BUSY OFF
+00:14:49 to: PTT ON
+00:14:50 from: BUSY ON
+00:14:52 to: PTT OFF
+00:14:52 from: PINGACK KC2G-2 far snr=21.0 rms=-39.0 peak=-28.0 clip=0 thirds=25.0/25.5/21.0 dist=0.0 noise_tilt=-7.5 near snr=14.8 rms=-42.9 peak=-32.5 clip=0 thirds=17.5/17.6/16.1 dist=0.4 noise_tilt=-6.5
+00:14:52 from: PINGVERDICT KC2G-2 level OK
+00:14:52 from: BUSY OFF
