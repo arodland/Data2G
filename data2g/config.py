@@ -93,12 +93,34 @@ PREAMBLE_CP = 2 * NCP
 # were measured at 31.0 and 38.5 under an older noise estimate and are not
 # used.) The lag-M thresholds this replaced are in runs/config_lagm_backup.py.
 PREAMBLE_THRESHOLDS = {8: 24.1}
+# FM (plan M3, scripts/fm_rx_study.py, 2026-11-15): 1.1 x the largest 1200 s
+# noise peak over what an idle FM receiver hands the modem, at FM's +-12.5 Hz
+# search, blanked: mic-path hiss with no carrier (open squelch) 26.1, idle
+# carrier at 8 dB CNR 22.5 (mic) / 24.5 (flat), white 21.2. HF's 24.1 at
+# +-150 Hz would have passed FM's mic hiss (33.8 there) every ~20 s. Loss is
+# the same at any of these thresholds (FM's cliff: the preamble is found far
+# below where data fails), so the threshold buys idle CPU, not range.
+if PROFILE == "fm":
+    PREAMBLE_THRESHOLDS = {8: 28.7}
 # Frequency-offset search, +-Hz. SSTVAE searched +-625 Hz because it cost
 # nothing there; here it cost ~5x the detector's CPU against +-150 Hz, and
 # noise-only peaks ran 5-10% higher (2026-09-24). A mode up to 2400 Hz
 # wide can't use the room anyway: +-150 Hz already pushes w48's edge
 # carriers into the SSB filter's skirts.
-ACQUIRE_REACH_HZ = 150.0
+# FM: +-12.5 Hz. FM audio has no frequency offset (an RF one comes out of
+# the discriminator as DC); the sound cards' clocks move 1500 Hz by under
+# 0.3 Hz. A physical bound, not a narrowing by expected modes: every band
+# is still searched. Measured (scripts/fm_rx_study.py): the same loss as
+# +-150 Hz within 0.05 dB everywhere, the detector's CPU 6.7x less.
+# DATA2G_ACQUIRE_REACH_HZ: studies only, refused by the table generator.
+ACQUIRE_REACH_HZ = float(os.environ.get("DATA2G_ACQUIRE_REACH_HZ", {"hf": 150.0, "fm": 12.5}[PROFILE]))
+# Per-symbol noise in the demapper (modem.symbol_noise_scale): an FM click,
+# or the gap the Blanker leaves of one, hits a whole OFDM symbol. Measured on
+# FM (scripts/fm_rx_study.py, 30 paired trials): mobile paths 0.9 (QPSK),
+# 1.8 (16-QAM), 2.25 dB (64-point) better, flutter 0.1-0.5, slow fading
+# 0.2-0.35, never worse. Not tried on HF yet. DATA2G_SYMBOL_NOISE (0/1):
+# studies only.
+SYMBOL_NOISE = bool(int(os.environ.get("DATA2G_SYMBOL_NOISE", int(PROFILE == "fm"))))
 FIRST_PATH_SEARCH = NCP
 FIRST_PATH_FRAC = 0.5
 

@@ -135,6 +135,7 @@ int main() {
     for (const char* name : {"w", "n10", "w48"}) {  // n4 bursts sync on n10
         const auto& b = waveform::band(name);
         for (double f : {0.0, 6.0, -37.5, 143.0}) {
+            if (std::abs(f) > config::ACQUIRE_REACH_HZ) continue;  // FM searches +-12.5 Hz: its audio has no offset
             auto z = preamble_at(b, 3000, f, 9000);
             const auto n = noise(rng, z.size(), 0.01);
             for (std::size_t i = 0; i < z.size(); ++i) z[i] += n[i];

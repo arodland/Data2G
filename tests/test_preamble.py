@@ -44,6 +44,10 @@ def test_acquire_finds_a_noisy_preamble_exactly(band, offset_hz):
     """Timing to the sample (a few on the narrow bands, whose correlation
     main lobe is FS / bandwidth wide) and CFO to a fraction of a Hz, on
     every band, off the CFO grid and several bins out."""
+    from data2g.config import ACQUIRE_REACH_HZ
+
+    if abs(offset_hz) > ACQUIRE_REACH_HZ:
+        pytest.skip(f"outside this profile's +-{ACQUIRE_REACH_HZ:g} Hz search (FM audio has no offset)")
     b = ofdm.band(band)
     lead = 3000
     x = np.concatenate([np.zeros(lead), b.preamble_waveform(), np.zeros(3000)])
@@ -63,12 +67,14 @@ def test_noise_alone_is_not_a_preamble():
         sync.acquire(z)
 
 
-def test_search_reaches_150_hz_and_no_further():
-    from data2g.config import ACQUIRE_REACH_HZ
+def test_search_reaches_the_profiles_reach_and_no_further():
+    """HF +-150 Hz; FM +-12.5 Hz (config.ACQUIRE_REACH_HZ)."""
+    from data2g.config import ACQUIRE_REACH_HZ, PROFILE
     from data2g.waveform import sync
 
+    reach = {"hf": 150.0, "fm": 12.5}[PROFILE]
     g = sync.cfo_grid()
-    assert ACQUIRE_REACH_HZ == 150 and g.min() == -150 and g.max() == 150
+    assert ACQUIRE_REACH_HZ == reach and g.min() == -reach and g.max() == reach
 
 
 def test_stream_detector_matches_the_whole_signal():

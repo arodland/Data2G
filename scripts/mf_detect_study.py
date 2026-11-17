@@ -22,15 +22,36 @@ from data2g.waveform.dsp import to_baseband
 BURST = {"w": "ack-1f", "n10": "n10-ack-4f", "n4": "n4-ack-2f", "w48": "w48-qpsk-r1/2"}
 
 
-def detect_stat(z, band, repeats=None):
-    S, freqs = sync.detection_stat(z, ofdm.band(band), repeats=repeats)
+def detect_stat(z, band, repeats=None, reach=None):
+    kw = {} if reach is None else {"reach": reach}
+    S, freqs = sync.detection_stat(z, ofdm.band(band), repeats=repeats, **kw)
     return S.max(axis=0), freqs[np.argmax(S, axis=0)]
 
 
+def noise_audio(source: str, seed: int, secs: float) -> np.ndarray:
+    """`white`, or what an idle FM receiver hands the modem (fmchannel):
+    `fm-<radio>` discriminator noise with no carrier (open squelch), or
+    `fm-<radio>-idle<cnr>` an unmodulated carrier at that CNR (clicks)."""
+    if source == "white":
+        return np.random.default_rng(seed).normal(size=int(secs * FS))
+    from data2g import fmchannel
+
+    _, radio, *idle = source.split("-")
+    cnr = float(idle[0].removeprefix("idle")) if idle else 0.0
+    ch = fmchannel.FmChannel("static", radio, cnr, seed=seed, duration_s=secs + 2,
+                             keyup_s=0.0 if idle else secs + 1)  # keyed up for the whole span, or never
+    return ch.apply(np.zeros(int(secs * FS)))  # silence in: an unmodulated carrier when keyed
+
+
 def noise_peak(args):
-    band, seed, secs, repeats = args
-    z = to_baseband(np.random.default_rng(seed).normal(size=int(secs * FS)))
-    return float(detect_stat(z, band, repeats)[0].max())
+    band, seed, secs, repeats, source, reach, blank = args
+    x = noise_audio(source, seed, secs)
+    if blank:  # as the live receiver: audio.Blanker ahead of detection
+        from data2g import audio
+
+        x = audio.Blanker()(x)
+    z = to_baseband(x)
+    return float(detect_stat(z, band, repeats, reach)[0].max())
 
 
 def sig_trial(args):
@@ -61,13 +82,17 @@ def main():
     ap.add_argument("--trials", type=int, default=400)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--repeats", type=int, help="noise mode: preamble repeats (default: config)")
+    ap.add_argument("--reach", type=float, help="noise mode: CFO search, +-Hz (default: config.ACQUIRE_REACH_HZ)")
+    ap.add_argument("--source", default="white", help="noise mode: white, fm-<radio>, fm-<radio>-idle<cnr>")
+    ap.add_argument("--blank", action="store_true", help="noise mode: audio.Blanker first, as a live receiver")
     a = ap.parse_args()
     with Pool(a.jobs) as pool:
         if a.mode == "noise":
             chunk = 20
-            peaks = pool.map(noise_peak, [(a.band, s, chunk, a.repeats) for s in range(int(a.seconds // chunk))])
+            peaks = pool.map(noise_peak, [(a.band, s, chunk, a.repeats, a.source, a.reach, a.blank)
+                                          for s in range(int(a.seconds // chunk))])
             p = np.sort(peaks)
-            print(f"{a.band}: noise peak over {a.seconds:g} s: {p[-1]:.1f}; per-{chunk}s-chunk peaks "
+            print(f"{a.band} {a.source}{' blanked' if a.blank else ''} reach {a.reach}: noise peak over {a.seconds:g} s: {p[-1]:.1f}; per-{chunk}s-chunk peaks "
                   f"median {np.median(p):.1f}, 90% {np.quantile(p, 0.9):.1f}", flush=True)
             return
         for snr in a.snr:

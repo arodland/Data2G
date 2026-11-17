@@ -71,6 +71,7 @@ from .config import (
     RS,
     SNR_REF_BW_HZ,
     SUBMODES,
+    SYMBOL_NOISE,
     SYMS_PER_FRAME,
     SubmodeSpec,
 )
@@ -1107,6 +1108,19 @@ def noise_var(h: np.ndarray, est: DataEstimate) -> np.ndarray:
     return est.get("n0_k", est["n0"]) + est["clip_ratio"] * np.abs(h) ** 2
 
 
+def symbol_noise_scale(y: np.ndarray, h: np.ndarray, var: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """(n_f, 5, 1) factors >= 1 for the data symbols' noise variance: each
+    symbol's mean over carriers of |y - h x|^2 / var to its nearest point x,
+    against the burst's median symbol. On Gaussian noise every symbol sits
+    near the median (decision errors pull all of them down alike); a
+    symbol a click hit stands far above it. ponytail: hard decisions, one
+    figure per symbol; a click inside a symbol's CP is caught too (it is in
+    no window and moves nothing)."""
+    d = np.abs(y[..., None] - h[..., None] * points).min(axis=-1)  # (n_f, 5, nc)
+    r = np.mean(d**2 / var, axis=-1, keepdims=True)
+    return np.maximum(1.0, r / max(float(np.median(r)), 1e-12))
+
+
 def soft_bits(raw: np.ndarray, h: np.ndarray, var: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     """LLRs from data symbols `raw`, channel `h` and per-cu noise `var`."""
     return constellation.llr(data_symbols(raw), h, var, constellation.load(spec.constellation))
@@ -1121,15 +1135,25 @@ def burst_soft(r: Received, est: DataEstimate | None = None) -> np.ndarray:
     """(n_cw, coded_bits) soft bits in mapping order on `est` (r["est"], or
     arq/phy's DD re-estimate): thermal, clip and estimation noise."""
     spec, est = r["spec"], est or r["est"]
-    var = noise_var(est["h"], est) + est["mse"]
+    var = _data_var(r, est)
     return np.asarray(codes.despread(soft_bits(r["raw"], est["h"], var, spec), r["n_cw"], spec.bits_per_cu))
+
+
+def _data_var(r: Received, est: DataEstimate) -> np.ndarray:
+    """Each data cell's noise variance: thermal, clip and estimation, and
+    per symbol (SYMBOL_NOISE) what clicks added."""
+    var = np.broadcast_to(noise_var(est["h"], est) + est["mse"], est["h"].shape)
+    if SYMBOL_NOISE:
+        pts = constellation.load(r["spec"].constellation)
+        var = var * symbol_noise_scale(data_symbols(r["raw"]), est["h"], var, pts)
+    return var
 
 
 def slot_soft(r: Received, est: DataEstimate, slot: int) -> np.ndarray:
     """burst_soft(r, est)[slot] alone: codes.spread deals codeword symbols
     round-robin, so the slot's are every n_cw-th of the burst's."""
     n = r["n_cw"]
-    var = noise_var(est["h"], est) + est["mse"]
+    var = _data_var(r, est)
     pick = lambda a: a.reshape(-1)[slot::n]  # noqa: E731
     return constellation.llr(pick(data_symbols(r["raw"])), pick(est["h"]), pick(var),
                              constellation.load(r["spec"].constellation))

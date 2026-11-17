@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 HF_OUT = ROOT / "native" / "core" / "generated"
 MODEL = None  # --model: a measurement build's outcome model, no regions
 
-for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL", "DATA2G_RS", "DATA2G_NCP",
+for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL", "DATA2G_RS", "DATA2G_NCP", "DATA2G_ACQUIRE_REACH_HZ", "DATA2G_SYMBOL_NOISE",
             "DATA2G_CARRIER0"):  # DATA2G_PROFILE: main() sets it
     if var in os.environ:
         sys.exit(f"{var} is set: the generated tables must hold the on-air defaults")
@@ -69,7 +69,9 @@ def config_hpp() -> str:
     for name, v in vars(config).items():
         if not name.isupper() or name.startswith("_") or name in SKIP:
             continue
-        if isinstance(v, str):
+        if isinstance(v, bool):
+            out.append(f"inline constexpr bool {name} = {cxx(v)};\n")
+        elif isinstance(v, str):
             out.append(f"inline constexpr std::string_view {name} = {cxx(v)};\n")
         elif isinstance(v, (int, float)) and not isinstance(v, bool):
             out.append(f"inline constexpr {'double' if isinstance(v, float) else 'int'} {name} = {cxx(v)};\n")

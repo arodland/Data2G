@@ -212,6 +212,10 @@ double resolve_alias(double fine, double coarse);
 
 // var (rows, nc): n0_k (n0 if empty) per carrier + clip_ratio |h|^2.
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est);
+// Per data symbol (h's rows), factors >= 1 for var: data2g.modem.symbol_noise_scale (config::SYMBOL_NOISE).
+std::vector<double> symbol_noise_scale(const Received& r, const Mat<cd>& h, const Mat<double>& var);
+// noise_var plus the estimate's MSE, times symbol_noise_scale when config::SYMBOL_NOISE (Python's _data_var).
+Mat<double> data_var(const Received& r, const DataEstimate& est);
 // LLRs of raw's data symbols (rows f * 6 + 1..5) given h, var (n_f * 5, nc).
 std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<double>& var, const Spec& spec);
 // raw's symbols for est.h's row `row` (frame * 5 + data symbol): past each frame's pilot.

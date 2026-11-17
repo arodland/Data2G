@@ -106,6 +106,39 @@ def burst(spec, seed):
     return sent, np.concatenate([np.zeros(FS // 2), modem.modulate(sent, spec), np.zeros(FS // 2)])
 
 
+def stream_receive(spec, sent, x, ch, keyup_late_s: float = -0.2) -> tuple[int, int, int]:
+    """The live receiver (FM_RX_STREAM): receiver.Receiver fed 0.25 s at a
+    time, its Blanker (unless FM_RX_NO_BLANK) and StreamDetector at the
+    band's threshold, accepting every mode of the burst's sync band. The
+    audio before the burst is open-squelch hiss, the carrier keying up
+    0.2 s (the sender's TX delay) before the burst. -> (lost, not acquired:
+    no burst event within 0.1 s of the true start, burst events elsewhere:
+    false alarms on the hiss)."""
+    from data2g import modem, receiver
+    from data2g.config import FS, SUBMODES
+
+    lead = 2 * FS
+    ch.keyup_s = lead / FS + keyup_late_s  # the carrier arrives this long after the burst starts (-0.2: TX delay)
+    y = ch.apply(np.concatenate([np.zeros(lead), x[FS // 2:], np.zeros(FS // 2)]))
+    names = [n for n, s in SUBMODES.items() if s.sync_band == spec.sync_band]
+    rx = receiver.Receiver(modem.Accept.of(names), blank=not os.environ.get("FM_RX_NO_BLANK"))
+    best, found, false = 0, False, 0
+    for i in range(0, len(y), FS // 4):
+        for kind, ev in rx.feed(y[i:i + FS // 4]):
+            if kind != "burst":
+                continue
+            if abs(ev["header"]["start"] - lead) > FS // 10:
+                false += 1
+                continue
+            found = ev["rx"] is not None or found
+            try:
+                b = modem.decode_received(ev["rx"])
+            except Exception:
+                continue
+            best = max(best, sum(p == s and k for p, s, k in zip(b.payloads, sent, b.crc_ok)))
+    return N_CW - best, int(not found), false
+
+
 def job(args):
     from data2g import fmchannel as F, modem
     from data2g.config import FS
@@ -116,18 +149,28 @@ def job(args):
     sent, x = burst(spec, 1000 + trial)
     rows = []
     for cnr in CNRS:
-        ch = F.FmChannel(c, radio, cnr, seed=trial, duration_s=len(x) / FS + 2, carrier_mhz=mhz,
+        stream = bool(os.environ.get("FM_RX_STREAM"))  # its audio is 2 s longer (the processes depend on the span)
+        ch = F.FmChannel(c, radio, cnr, seed=trial, duration_s=len(x) / FS + (4 if stream else 2), carrier_mhz=mhz,
                          drive_dev_hz=drive, ppm=ppm)
+        if stream:
+            lost, nosync, false = stream_receive(spec, sent, x, ch)
+            rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, false))
+            continue
         try:
-            b = modem.demodulate(ch.apply(x))
+            y = ch.apply(x)
+            if os.environ.get("FM_RX_BLANK"):  # as the live receiver (receiver.Receiver): impulse-blanked first
+                from data2g import audio
+
+                y = audio.Blanker()(y)
+            b = modem.demodulate(y)
             lost, nosync = N_CW - sum(p == s and k for p, s, k in zip(b.payloads, sent, b.crc_ok)), 0
         except Exception:  # SyncError and kin: the burst was not acquired
             lost, nosync = N_CW, 1
-        rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync))
+        rows.append((mode, radio, cond, mhz, ppm, trial, cnr, lost, nosync, 0))
     return rows
 
 
-def run_variant(rnd, variant, trials, workers):
+def run_variant(out: Path, variant, trials, workers):
     from data2g import config, fmchannel as F
 
     assert config.PROFILE == "fm", "run under DATA2G_PROFILE=fm"
@@ -142,10 +185,10 @@ def run_variant(rnd, variant, trials, workers):
           + ", ".join(f"{k[0]}/{k[1]} {v:.0f}" for k, v in drives.items()), flush=True)
     jobs = [(m, r, c, mhz, ppm, t, drives[(m, r)]) for m in MODES for r in RADIOS
             for c, mhz, ppm in conditions() for t in range(trials)]
-    out_dir(rnd).mkdir(parents=True, exist_ok=True)
-    with (out_dir(rnd) / f"{variant}.csv").open("w", newline="") as f:
+    out.mkdir(parents=True, exist_ok=True)
+    with (out / f"{variant}.csv").open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["mode", "radio", "condition", "mhz", "ppm", "trial", "cnr", "lost", "nosync"])
+        w.writerow(["mode", "radio", "condition", "mhz", "ppm", "trial", "cnr", "lost", "nosync", "false"])
         with ProcessPoolExecutor(workers) as ex:
             for rows in ex.map(job, jobs, chunksize=2):
                 w.writerows(rows)
@@ -168,7 +211,7 @@ FAMILY = {"static": "fixed", "fixed": "fixed", "fixed-fringe": "slow", "knife-ed
           "mobile-hilly": "mobile", "mobile-rural@130": "mobile"}
 
 
-def report_db(rnd):
+def report_db(out: Path, variants):
     """Each variant against the round's first, in dB of CNR: codeword failure
     integrated over the CNR grid (two shifted copies differ by the shift),
     per condition family (flutter at 440 MHz apart), with a 90% bootstrap
@@ -181,16 +224,21 @@ def report_db(rnd):
     acquisition; flutter at 440 MHz costs B2's 8-repeat preamble 0.6-2.6 dB."""
     from collections import defaultdict
 
-    vs = [v for v in ROUNDS[rnd] if (out_dir(rnd) / f"{v}.csv").exists()]
+    vs = [v for v in variants if (out / f"{v}.csv").exists()]
     col = {c: i for i, c in enumerate(CNRS)}
     fail = {v: defaultdict(dict) for v in vs}
     nos = {v: defaultdict(dict) for v in vs}
+    false = {v: [0, 0] for v in vs}  # false alarms (streamed: burst events on the hiss before), trials
     for v in vs:
-        with (out_dir(rnd) / f"{v}.csv").open() as f:
+        with (out / f"{v}.csv").open() as f:
             for r in csv.DictReader(f):
                 k = (r["mode"], r["radio"], r["condition"], r["mhz"], r["ppm"])
                 fail[v][k][(int(r["trial"]), col[int(r["cnr"])])] = int(r["lost"]) / N_CW
                 nos[v][k][(int(r["trial"]), col[int(r["cnr"])])] = int(r["nosync"])
+                false[v][0] += int(r.get("false") or 0)
+                false[v][1] += 1
+    print("false alarms per trial (1.8 s of open-squelch hiss each, streamed only): "
+          + ", ".join(f"{v} {a / max(n, 1):.4f}" for v, (a, n) in false.items()))
 
     def grid(d):  # {(trial, cnr index): x} -> (trials, cnrs)
         a = np.zeros((1 + max(t for t, _ in d), len(CNRS)))
@@ -262,15 +310,15 @@ def main():
         os.environ.setdefault(v, "1")
     if a.what == "report":
         report(a.round)
-        return report_db(a.round)
+        return report_db(out_dir(a.round), list(ROUNDS[a.round]))
     if a.what == "variant":
-        return run_variant(a.round, a.variant, a.trials, a.workers)
+        return run_variant(out_dir(a.round), a.variant, a.trials, a.workers)
     for v, env in ROUNDS[a.round].items():  # one process each: config reads the numerology at import
         subprocess.run([sys.executable, __file__, "variant", "--round", a.round, "--variant", v,
                         "--trials", str(a.trials), "--workers", str(a.workers)],
                        env={**os.environ, **env, "DATA2G_PROFILE": "fm"}, check=True)
     report(a.round)
-    report_db(a.round)
+    report_db(out_dir(a.round), list(ROUNDS[a.round]))
 
 
 if __name__ == "__main__":

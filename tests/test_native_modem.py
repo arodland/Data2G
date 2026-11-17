@@ -15,7 +15,10 @@ import numpy as np
 import pytest
 
 from data2g import codes, config, hfchannel, modem
-from data2g.config import BANDS, FS, SUBMODES
+from data2g.config import ACQUIRE_REACH_HZ, BANDS, FS, SUBMODES
+
+# 41 Hz on HF; inside FM's +-12.5 Hz search there (FM audio has no offset)
+CFO_HZ = min(41.0, 0.8 * ACQUIRE_REACH_HZ)
 from data2g.waveform import dsp
 
 CORR_TOL = 1e-6
@@ -271,7 +274,7 @@ def test_find_copy_matches(native, py, reference, name, n_cw):
     x = modem.modulate(_payloads(spec, n_cw, 3), spec)
     h0 = config.LEADIN_SAMPLES
     x[h0:h0 + BANDS[spec.sync_band].preamble_samples + modem.header_samples(spec.sync_band)] = 0
-    y = hfchannel.apply_channel(np.concatenate([np.zeros(2000), x, np.zeros(3000)]), snr_db=10, freq_offset_hz=-41.0,
+    y = hfchannel.apply_channel(np.concatenate([np.zeros(2000), x, np.zeros(3000)]), snr_db=10, freq_offset_hz=-CFO_HZ,
                                 seed=2)
     lock = py.find_copy(y, spec.sync_band)
     nlock, peak = native.modem.find_copy(y, spec.sync_band)

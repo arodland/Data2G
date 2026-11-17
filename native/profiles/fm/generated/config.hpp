@@ -23,7 +23,8 @@ inline constexpr int DATA_SYMS_PER_FRAME = 5;
 inline constexpr int FRAME_SAMPLES = 2112;
 inline constexpr int PREAMBLE_REPEATS = 8;
 inline constexpr int PREAMBLE_CP = 64;
-inline constexpr double ACQUIRE_REACH_HZ = 150.0;
+inline constexpr double ACQUIRE_REACH_HZ = 12.5;
+inline constexpr bool SYMBOL_NOISE = true;
 inline constexpr int FIRST_PATH_SEARCH = 32;
 inline constexpr double FIRST_PATH_FRAC = 0.5;
 inline constexpr int PROFILE_TAG = 32;
@@ -44,7 +45,7 @@ inline constexpr std::array<int, 24> PILOT_PHASE_NUM = {725, 497, 359, 322, 193,
 inline constexpr std::array<int, 4> PILOT_N4 = {518, 821, 829, 542};
 inline constexpr std::array<int, 10> PILOT_N10 = {480, 471, 862, 780, 503, 490, 593, 127, 601, 62};
 inline constexpr std::array<int, 48> PILOT_W48 = {1021, 910, 952, 927, 968, 883, 915, 730, 618, 666, 431, 53, 996, 1022, 815, 278, 77, 519, 263, 311, 918, 546, 399, 690, 927, 609, 100, 34, 390, 663, 873, 422, 1004, 904, 229, 366, 529, 880, 1012, 422, 611, 98, 709, 78, 423, 772, 293, 849};
-inline constexpr double PREAMBLE_THRESHOLD = 24.1;
+inline constexpr double PREAMBLE_THRESHOLD = 28.7;
 inline constexpr int cw_bits(std::string_view sync_band) { return sync_band == "n10" ? 5 : 6; }
 inline constexpr int max_codewords(std::string_view sync_band) { return 1 << cw_bits(sync_band); }
 

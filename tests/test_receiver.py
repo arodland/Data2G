@@ -7,7 +7,10 @@ import pytest
 from scipy import signal as sps
 
 from data2g import audio, codes, hfchannel, modem, receiver
-from data2g.config import FS, SUBMODES
+from data2g.config import ACQUIRE_REACH_HZ, FS, SUBMODES
+
+# 37 Hz on HF; inside FM's +-12.5 Hz search there (FM audio has no offset)
+CFO_HZ = min(37.0, 0.8 * ACQUIRE_REACH_HZ)
 from data2g.kisslink import pack_frames, unpack_frames
 
 
@@ -235,7 +238,7 @@ def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
         sb = MODES[name].sync_band
         head = LEADIN_SAMPLES + BANDS[sb].preamble_samples + modem.header_samples(sb)
         x = np.concatenate([np.zeros(2 * FS), np.zeros(head), x[head:], np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
         got = [ev for i in range(0, len(y), FS // 10) for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
         ok = [ev for ev in got if ev["rx"] is not None and ev["rx"]["spec"].name == name
@@ -271,7 +274,7 @@ def test_a_cpm_burst_whose_first_header_copy_faded_locks_on_both():
         x[rows[0] * g.T:(rows[-1] + 1) * g.T] = 0  # copy 1 faded out
         lead = 2 * FS
         x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         cand = cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS], wait=True)
         assert cand is not None and cand.get("wait"), (name, cand)
         assert cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS]) is None, name
@@ -314,7 +317,7 @@ def test_a_cpm_early_lock_is_let_go_when_its_second_header_copy_is_not_there():
             if stops:
                 x[(lay.hdr_rows[0][-1] + 1) * g.T:] = 0
             x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-            y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
+            y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
             rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
             got, busy_until = [], 0
             for i in range(0, len(y), FS // 10):
@@ -352,7 +355,7 @@ def test_a_cpm_burst_whose_front_faded_locks_on_its_mid_block():
         x[:(lay.hdr_rows[0][-1] + 1) * g.T] = 0  # front and copy 1 faded out
         lead = 2 * FS
         x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         assert cpm.find(g, y) is None, name
         lock = cpm.find_mid(g, y)
         assert lock is not None and lock["spec"].name == name and lock["n_data"] == n - 1, (name, lock)

@@ -5,7 +5,11 @@ import numpy as np
 import pytest
 
 from data2g import codes, hfchannel, modem
-from data2g.config import BANDS, FS, SUBMODES
+from data2g.config import ACQUIRE_REACH_HZ, BANDS, FS, SUBMODES
+
+# A sound card's offset: 37 Hz on HF; FM audio has none (an RF one comes out
+# as DC), and its search reaches +-12.5 Hz, so less there.
+CFO_HZ = min(37.0, 0.8 * ACQUIRE_REACH_HZ)
 
 
 def _payloads(spec, n, seed):
@@ -27,7 +31,7 @@ def test_burst_loopback(sub, channel, snr):
     x = modem.modulate(sent, sub)
     x = np.concatenate([np.zeros(3000), x, np.zeros(3000)])
     y = hfchannel.apply_channel(
-        x, snr_db=snr, freq_offset_hz=37.0, ppm=10,
+        x, snr_db=snr, freq_offset_hz=CFO_HZ, ppm=10,
         fading_preset=None if channel == "awgn" else channel, seed=3,
     )
     b = modem.demodulate(y)
@@ -139,7 +143,7 @@ def test_timing_slip_recovered(slip):
     x = np.concatenate([np.zeros(3000), modem.modulate(sent, spec), np.zeros(3000)])
     at = len(x) // 2
     x = np.concatenate([x[:at], np.zeros(slip), x[at:]]) if slip > 0 else np.concatenate([x[:at], x[at - slip:]])
-    r = modem.receive(hfchannel.apply_channel(x, snr_db=10, freq_offset_hz=37.0, ppm=10, seed=4))
+    r = modem.receive(hfchannel.apply_channel(x, snr_db=10, freq_offset_hz=CFO_HZ, ppm=10, seed=4))
     found = r["slips"][r["slips"] != 0]
     assert len(found) == 1 and abs(found[0] - slip) <= 3
     b = modem.decode_received(r)
@@ -153,7 +157,7 @@ def test_no_slip_from_fading(channel):
     spec = SUBMODES["qpsk-r1/5"]
     for seed in range(4):
         x = np.concatenate([np.zeros(3000), modem.modulate(_payloads(spec, 3, seed), spec), np.zeros(3000)])
-        r = modem.receive(hfchannel.apply_channel(x, snr_db=5, freq_offset_hz=37.0, ppm=10, fading_preset=channel, seed=seed))
+        r = modem.receive(hfchannel.apply_channel(x, snr_db=5, freq_offset_hz=CFO_HZ, ppm=10, fading_preset=channel, seed=seed))
         assert not r["slips"].any()
 
 
@@ -234,6 +238,23 @@ def test_a_narrower_bands_burst_is_no_copy_lock():
     x = modem.modulate([rng.bytes(codes.payload_bytes(s)) for _ in range(6)], s)
     y = hfchannel.awgn(np.pad(x, (FS // 2, FS)), 10, seed=4, s_power=hfchannel.active_power(x))
     assert modem.find_copy(y, "w") is None
+
+
+def test_symbol_noise_scale_flags_a_click_hit_symbol():
+    """Gaussian noise: every symbol's factor near 1. One symbol with 20x
+    the noise (a click across all its carriers): that one raised, by about
+    its excess, and the rest left alone."""
+    from data2g import constellation
+
+    pts = constellation.load("gray-qam16")
+    rng = np.random.default_rng(7)
+    n_rows, nc, var = 50, 48, 0.01
+    h = np.exp(2j * np.pi * rng.uniform(size=(n_rows, nc)))
+    x = pts[rng.integers(0, len(pts), size=(n_rows, nc))]
+    noise = np.sqrt(var / 2) * (rng.normal(size=(n_rows, nc)) + 1j * rng.normal(size=(n_rows, nc)))
+    noise[17] *= np.sqrt(20)
+    s = modem.symbol_noise_scale((h * x + noise)[None], h[None], np.full((1, n_rows, nc), var), pts)[0, :, 0]
+    assert s[17] > 8 and np.delete(s, 17).max() < 1.5
 
 
 def test_a_preamble_cfo_off_by_a_pilot_alias_is_put_right(monkeypatch):

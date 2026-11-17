@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <numeric>
@@ -1118,9 +1119,40 @@ std::vector<double> soft_bits(const Mat<cd>& raw, const Mat<cd>& h, const Mat<do
     return constellation::llr(y, h.data, var.data, points_of(spec));
 }
 
-Mat<double> burst_soft(const Received& r, const DataEstimate& est) {
+std::vector<double> symbol_noise_scale(const Received& r, const Mat<cd>& h, const Mat<double>& var) {
+    const auto& pts = points_of(*r.spec).points;
+    std::vector<double> ratio(h.rows);
+    for (size_t row = 0; row < h.rows; ++row) {
+        const cd* y = data_row(r.raw, row);
+        double s = 0;
+        for (size_t k = 0; k < h.cols; ++k) {
+            double d = std::numeric_limits<double>::infinity();
+            for (const cd& p : pts) d = std::min(d, std::abs(y[k] - h[row][k] * p));
+            s += d * d / var[row][k];
+        }
+        ratio[row] = s / static_cast<double>(h.cols);
+    }
+    std::vector<double> sorted = ratio;  // numpy's median: the mean of the middle two for an even count
+    std::sort(sorted.begin(), sorted.end());
+    const size_t m = sorted.size() / 2;
+    const double med = sorted.empty() ? 1.0 : sorted.size() % 2 ? sorted[m] : 0.5 * (sorted[m - 1] + sorted[m]);
+    for (auto& x : ratio) x = std::max(1.0, x / std::max(med, 1e-12));
+    return ratio;
+}
+
+Mat<double> data_var(const Received& r, const DataEstimate& est) {
     auto var = noise_var(est.h, est);
     for (size_t i = 0; i < var.data.size(); ++i) var.data[i] += est.mse.data[i];
+    if constexpr (config::SYMBOL_NOISE) {
+        const auto scale = symbol_noise_scale(r, est.h, var);
+        for (size_t row = 0; row < var.rows; ++row)
+            for (size_t k = 0; k < var.cols; ++k) var[row][k] *= scale[row];
+    }
+    return var;
+}
+
+Mat<double> burst_soft(const Received& r, const DataEstimate& est) {
+    const auto var = data_var(r, est);
     Mat<double> out;
     out.data = codes::despread<double>(soft_bits(r.raw, est.h, var, *r.spec), r.n_cw, r.spec->bits_per_cu);
     out.rows = static_cast<size_t>(r.n_cw);
@@ -1132,12 +1164,21 @@ std::vector<double> slot_soft(const Received& r, const DataEstimate& est, int sl
     const size_t nc = r.raw.cols, total = est.h.data.size(), n = static_cast<size_t>(r.n_cw);
     std::vector<cd> y, h;
     std::vector<double> var;
+    // ponytail: SYMBOL_NOISE's per-symbol factors are recomputed per slot (every row's, a slot's cells span them all);
+    // cache them with the estimate if FM's slot-at-a-time decoding shows on the Pi.
+    std::vector<double> scale;
+    if constexpr (config::SYMBOL_NOISE) {
+        auto full = noise_var(est.h, est);
+        for (size_t i = 0; i < full.data.size(); ++i) full.data[i] += est.mse.data[i];
+        scale = symbol_noise_scale(r, est.h, full);
+    }
     for (size_t j = static_cast<size_t>(slot); j < total; j += n) {
         const size_t row = j / nc, c = j % nc;
         const cd hj = est.h.data[j];
         y.push_back(data_row(r.raw, row)[c]);
         h.push_back(hj);
-        var.push_back((est.n0_k.empty() ? est.n0 : est.n0_k[c]) + est.clip_ratio * std::norm(hj) + est.mse.data[j]);
+        const double v = (est.n0_k.empty() ? est.n0 : est.n0_k[c]) + est.clip_ratio * std::norm(hj) + est.mse.data[j];
+        var.push_back(scale.empty() ? v : v * scale[row]);
     }
     return constellation::llr(y, h, var, points_of(*r.spec));
 }
