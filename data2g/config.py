@@ -20,7 +20,35 @@ import os
 from dataclasses import dataclass
 from typing import NamedTuple
 
-FS = 8000  # audio sample rate, Hz
+# --- profile ------------------------------------------------------------------
+# Which radio service this process speaks: "hf" (SSB, the default) or "fm"
+# (VHF/UHF FM; draft, nothing on it is frozen yet). Fixed at process start:
+# every constant below may depend on it, and the native core is built once
+# per profile (cmake -DDATA2G_PROFILE=fm; tools/gen_native_tables.py writes
+# each profile's tables). HF and FM stations do not interoperate, so a
+# mode index or a protocol version means different things on each.
+PROFILE = os.environ.get("DATA2G_PROFILE", "hf")
+PROFILES = ("hf", "fm")
+if PROFILE not in PROFILES:
+    raise ValueError(f"DATA2G_PROFILE={PROFILE!r}: one of {', '.join(PROFILES)}")
+# Frozen data measured under this profile, where it differs from HF's
+# (codes_data/<profile>/, else codes_data/).
+DATA_DIR = "" if PROFILE == "hf" else PROFILE
+
+
+def data_path(name: str):
+    """codes_data/<profile>/name if this profile has its own, else codes_data/name."""
+    from pathlib import Path
+
+    base = Path(__file__).parent / "codes_data"
+    own = base / DATA_DIR / name
+    return own if DATA_DIR and own.exists() else base / name
+
+
+# FM: 16 kHz, to carry a wide band to about 6 kHz over a 9600 port; carriers
+# stay on HF's 50 Hz grid (M doubles), so narrow and wide are bands of one
+# grid, as HF's 500 and 2300 Hz are. Provisional (FM plan, M4 and M5).
+FS = {"hf": 8000, "fm": 16000}[PROFILE]  # audio sample rate, Hz
 
 # --- OFDM waveform (identical to SSTVAE) ------------------------------------
 RS = 50  # carrier spacing == symbol rate of one carrier, Hz
@@ -76,10 +104,14 @@ FIRST_PATH_FRAC = 0.5
 # that header was the binding failure on every channel (-6 dB AWGN: 175
 # of 200 lost there), and repeating it more made mpd worse (a longer
 # span to interpolate the channel over).
-# The CRC is seeded with PROTOCOL_VERSION, so a receiver of another
-# version (or SSTVAE) accepts a header only by 1-in-64 chance.
+# The CRC is seeded with PROTOCOL_VERSION XOR PROFILE_TAG, so a receiver of
+# another version, another profile (or SSTVAE) accepts a header only by
+# 1-in-64 chance. FM needs the tag: its preamble on the same 50 Hz grid is
+# the same analog waveform as HF's. Distinct seeds while HF's version < 32.
 # Header symbols per band: BandSpec.header_syms.
-PROTOCOL_VERSION = 15  # 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
+PROFILE_TAG = {"hf": 0, "fm": 0x20}[PROFILE]
+# FM counts its own versions from 1 (no FM format is frozen yet).
+PROTOCOL_VERSION = {"hf": 15, "fm": 1}[PROFILE]  # HF: 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
 # 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
 # in place: development, one operator); 13: a non-periodic c8r50 front (2026-10-24: the tiled
 # Costas array matched one period off, sync 0.76, and its header read as another word); 14: the CPM
@@ -112,13 +144,17 @@ def max_codewords(sync_band: str) -> int:
 # -34 dB past 80). 100 ms each until protocol 15, SSTVAE's file padding;
 # the radio's key-up time is the engine's PTT delay (--ptt-on-delay-ms)
 # and its key-down the PTT off delay, so neither belongs in every burst.
-LEADIN_SAMPLES = 160
-LEADOUT_SAMPLES = 160
+LEADIN_SAMPLES = FS // 50  # 20 ms
+LEADOUT_SAMPLES = FS // 50
 
 # --- TX conditioning (SSTVAE values; plan step 8 revisits per submode) ------
 CLIP_HEADROOM_DB = 1.0
 CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
 TX_BANDPASS = (850.0, 2200.0)
+# The post-clip band-pass FIR (waveform.dsp.tx_condition): 25 ms of taps, 201 at
+# 8 kHz. In taps it would widen with FS (twice the transition at 16 kHz cost the
+# edge carriers ~3 dB), so it scales; LEADIN_SAMPLES, in time, covers its tails.
+TX_FILTER_TAPS = FS // 40 + 1
 # (what the clipper does to the data, as a receiver sees it: CLIP, below BANDS)
 
 # --- receiver -----------------------------------------------------------------
@@ -291,9 +327,8 @@ BANDS = {
 # Gaussian, less clipping), w48 12.3.
 def _load_clip_table():
     import json
-    from pathlib import Path
 
-    d = json.loads((Path(__file__).parent / "codes_data" / "clip_constants.json").read_text())
+    d = json.loads(data_path("clip_constants.json").read_text())
     return tuple(d["overshoot"]), d["entries"]
 
 

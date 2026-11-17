@@ -41,7 +41,7 @@ int main() {
     check::equal(got[1].c, 22, "second channel");
     check::equal(got[1].payload, std::uint64_t{42}, "second payload");
     check::is_true(got[0].snr > 0, "snr");
-    check::is_true(std::abs(got[0].dt_ms - 1000.0 * late / 8000) < 30, "dt");
+    check::is_true(std::abs(got[0].dt_ms - 1000.0 * late / config::FS) < 30, "dt");
     // another net's tag: nothing passes the CRC
     check::equal(hand::decode_window(y, 0x5B, channels, hand::SEARCH_SAMPLES).size(), std::size_t{0}, "wrong tag");
     // --hand-decoder cheap's grids find the same two Hands

@@ -20,10 +20,12 @@ inline constexpr int N_CHANNELS = 40;
 inline constexpr double PITCH = 60.0, CENTER = 1500.0;
 inline constexpr double SEARCH_S = 0.6, SEARCH_HZ = 5.0, LATE_S = 0.5;
 inline constexpr int TOP = 3;
-inline constexpr std::int64_t SEARCH_SAMPLES = 4800;  // round(SEARCH_S * FS)
-inline constexpr std::int64_t LEN_SAMPLES = 84480;    // round(LEN_S * FS)
+// round(SEARCH_S * FS), round(LEN_S * FS): both exact at FS a multiple of 400
+static_assert(config::FS % 400 == 0, "SEARCH_SAMPLES / LEN_SAMPLES need FS a multiple of 400");
+inline constexpr std::int64_t SEARCH_SAMPLES = config::FS * 3 / 5;
+inline constexpr std::int64_t LEN_SAMPLES = config::FS * N_SYM * 4 / 25;
 inline constexpr std::int64_t WINDOW_SAMPLES = 2 * SEARCH_SAMPLES + LEN_SAMPLES;
-static_assert(config::FS == 8000, "SEARCH_SAMPLES / LEN_SAMPLES assume 8 kHz");
+static_assert(config::FS != 8000 || (SEARCH_SAMPLES == 4800 && LEN_SAMPLES == 84480));
 
 double channel_freq(int c);  // from the centre out: even below 1500 Hz, odd above
 int channels_within(double width_hz);  // how many (a prefix) lie wholly within +-width_hz/2

@@ -96,7 +96,7 @@ class BurstChannel:
         sb = config.BANDS[spec.sync_band]  # preamble and header (BandSpec.sync)
         self.frames0 = LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(spec.sync_band)
         self.taps = torch.tensor(
-            firwin(201, sb.tx_bandpass, fs=FS, pass_zero=False), dtype=dtype, device=device
+            firwin(config.TX_FILTER_TAPS, sb.tx_bandpass, fs=FS, pass_zero=False), dtype=dtype, device=device
         )
         n = torch.arange(len(self.base), device=device)
         self.het = torch.exp(-2j * torch.pi * ((FCENTER * n) % FS).to(dtype) / FS).to(cdtype)

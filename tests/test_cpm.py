@@ -2,6 +2,7 @@
 passes for a front (c8r50's once repeated the front's Costas array)."""
 
 import numpy as np
+import pytest
 
 from data2g import codes, cpm
 
@@ -138,6 +139,7 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
     assert cpm.find(g, x) is None
 
 
+@pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
     """CPM's control is a polar codeword: its payload enters the code
     reversed (codes.polar_order), so a short control's padding sits on the

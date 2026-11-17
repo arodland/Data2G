@@ -129,7 +129,7 @@ def test_zero_payloads_decode_like_random_ones():
         assert b.payloads == pl and all(b.crc_ok)
 
 
-@pytest.mark.parametrize("slip", [85, -64])
+@pytest.mark.parametrize("slip", [85 * FS // 8000, -64 * FS // 8000])  # sound-card buffers, in time
 def test_timing_slip_recovered(slip):
     """Samples inserted (a sender's playback underrun: recordings/20261013-234857
     had 85 of silence, a 512-frame period at 48 kHz) or dropped mid-burst: the

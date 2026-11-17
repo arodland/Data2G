@@ -85,6 +85,8 @@ def test_stream_detector_matches_the_whole_signal():
     np.testing.assert_allclose(d.S, S_all, rtol=1e-9, atol=1e-9 * S_all.max())
 
 
+@pytest.mark.hf_only("preamble threshold and tilt margins (sync NOISE_REF_BY_BAND, LEVEL_FLOOR_DB) at FM's M; "
+                     "tilted noise reads w48 24.9 against 24.1 at 16 kHz")
 def test_tilted_noise_does_not_read_as_a_preamble():
     """FM audio's noise falls across the band, inside a voice passband;
     normalized by the quietest bin alone, the searched bins read high and

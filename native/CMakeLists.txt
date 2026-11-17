@@ -82,7 +82,28 @@ list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/[^/]+/(qt|android|hamlib|mi
 if(WIN32)
   list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/rig/bridged?\\.cpp$")
 endif()
+# The radio service this build speaks (data2g/config.py PROFILE): hf, or fm (draft).
+# Another profile's tables (profiles/<p>/generated/, the files that differ from
+# HF's) replace core/generated/'s same-named sources, and its headers are found
+# first. Python picks the same with DATA2G_PROFILE.
+set(DATA2G_PROFILE "hf" CACHE STRING "Radio service profile (hf/fm)")
+set_property(CACHE DATA2G_PROFILE PROPERTY STRINGS hf fm)
+if(NOT DATA2G_PROFILE STREQUAL "hf")
+  set(_profile_dir "${CMAKE_CURRENT_SOURCE_DIR}/profiles/${DATA2G_PROFILE}")
+  if(NOT EXISTS "${_profile_dir}/generated/config.hpp")
+    message(FATAL_ERROR "DATA2G_PROFILE=${DATA2G_PROFILE}: no ${_profile_dir}/generated (tools/gen_native_tables.py)")
+  endif()
+  file(GLOB _profile_sources CONFIGURE_DEPENDS "${_profile_dir}/generated/*.cpp")
+  foreach(_src ${_profile_sources})
+    get_filename_component(_name "${_src}" NAME)
+    list(FILTER DATA2G_CORE_SOURCES EXCLUDE REGEX "/core/generated/${_name}$")
+  endforeach()
+  list(APPEND DATA2G_CORE_SOURCES ${_profile_sources})
+endif()
 add_library(data2g_core STATIC ${DATA2G_CORE_SOURCES})
+if(NOT DATA2G_PROFILE STREQUAL "hf")
+  target_include_directories(data2g_core BEFORE PUBLIC "${_profile_dir}")
+endif()
 target_include_directories(data2g_core PUBLIC core)
 # The release version (tools/bump_version.sh): the host's VERSION reply and the About box,
 # the same number as the .exe's version block and the macOS bundle's.

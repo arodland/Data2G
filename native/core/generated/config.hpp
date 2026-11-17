@@ -7,6 +7,9 @@
 
 namespace data2g::config {
 
+inline constexpr std::string_view PROFILE = "hf";
+inline constexpr std::array<std::string_view, 2> PROFILES = {"hf", "fm"};
+inline constexpr std::string_view DATA_DIR = "";
 inline constexpr int FS = 8000;
 inline constexpr int RS = 50;
 inline constexpr int NC = 24;
@@ -23,6 +26,7 @@ inline constexpr int PREAMBLE_CP = 64;
 inline constexpr double ACQUIRE_REACH_HZ = 150.0;
 inline constexpr int FIRST_PATH_SEARCH = 32;
 inline constexpr double FIRST_PATH_FRAC = 0.5;
+inline constexpr int PROFILE_TAG = 0;
 inline constexpr int PROTOCOL_VERSION = 15;
 inline constexpr std::array<std::string_view, 2> HEADER_COPY_BANDS = {"w", "w48"};
 inline constexpr int HEADER_COPY_AFTER = 2;
@@ -32,6 +36,7 @@ inline constexpr int LEADOUT_SAMPLES = 160;
 inline constexpr double CLIP_HEADROOM_DB = 1.0;
 inline constexpr std::array<double, 3> CLIP_OVERSHOOT = {1.0, 1.5, 2.0};
 inline constexpr std::array<double, 2> TX_BANDPASS = {850.0, 2200.0};
+inline constexpr int TX_FILTER_TAPS = 201;
 inline constexpr int DEMOD_BACKOFF = 6;
 inline constexpr double SNR_REF_BW_HZ = 2500.0;
 inline constexpr int PILOT_PHASE_DEN = 1024;

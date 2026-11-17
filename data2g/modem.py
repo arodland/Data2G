@@ -66,6 +66,7 @@ from .config import (
     NCP,
     NSYM,
     PREAMBLE_CP,
+    PROFILE_TAG,
     PROTOCOL_VERSION,
     RS,
     SNR_REF_BW_HZ,
@@ -308,10 +309,11 @@ def header_code(band: str) -> np.ndarray:
 
 
 def crc6(v: int) -> int:
-    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version.
+    """CRC-6 (x^6 + x + 1) over 10 bits, register seeded with the version
+    and the profile (config.PROFILE_TAG).
     On air in every header word, v << 6 | crc6(v): the OFDM header's and
     the CPM header's (cpm.header_word)."""
-    reg = PROTOCOL_VERSION & 0x3F
+    reg = (PROTOCOL_VERSION ^ PROFILE_TAG) & 0x3F
     for i in range(9, -1, -1):
         fb = ((reg >> 5) & 1) ^ ((v >> i) & 1)
         reg = ((reg << 1) & 0x3F) ^ (0x3 if fb else 0)
@@ -526,8 +528,9 @@ def _bin_phase_step(h: np.ndarray) -> float:
     return float(np.angle(np.sum(h[1:] * np.conj(h[:-1]))))
 
 
-SLIP_MIN = 40  # samples: under it, a path fading in or out (CCIR mpd's 4 ms is 32) looks like one
-SLIP_MAX = 240  # samples: a 1024-frame buffer at 48 kHz is 171
+# in samples, set in time (40 and 240 at 8 kHz): a slip is a sound-card buffer, whatever the rate
+SLIP_MIN = FS // 200  # 5 ms: under it, a path fading in or out (CCIR mpd's 4 ms) looks like one
+SLIP_MAX = 3 * FS // 100  # 30 ms: a 1024-frame buffer at 48 kHz is 21 ms
 SLIP_TRIGGER = 0.5  # a pilot this unlike the last one's prompts a search
 SLIP_ACCEPT = 0.45  # each pilot after a slip, this like the last one at the new offset (and twice as like as before)
 

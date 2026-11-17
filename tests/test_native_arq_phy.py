@@ -11,7 +11,7 @@ passes than numpy within DD_BUDGET_S, so results may legitimately differ.
 import numpy as np
 import pytest
 
-from data2g import codes, cpm, hfchannel, modem
+from data2g import codes, config, cpm, hfchannel, modem
 from data2g import kisslink as KL
 from data2g.arq import phy as PHY
 from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
@@ -106,6 +106,7 @@ def _cpm_received(seed=1, noise=0.05):
     return cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
 
 
+@pytest.mark.hf_only("built on test_dd's burst: a seed picked on HF mpd (a 4 ms echo, past FM's CP)")
 def test_dd_rescue_decisions_match(native, pure):
     """test_dd's burst: codeword 1 fails on the pilot estimate, DD rescues it."""
     from test_dd import _burst
@@ -148,6 +149,7 @@ def test_keyed_decodes_and_store_match(native, pure, name, n, snr, seed):
                 == [py.decode(j, (7, 0, i), 1, ("p", i)) for j, i in enumerate(keys)])
 
 
+@pytest.mark.hf_only("built on test_dd's burst: a seed picked on HF mpd (a 4 ms echo, past FM's CP)")
 def test_budget_spent_and_store_mismatch(native, pure):
     from test_dd import _burst
 
@@ -201,7 +203,8 @@ def test_cpm_coherent_dd_match(native, pure, sigma, seed):
             assert sp.keys() == sn.keys()
         finally:
             PHY.CPM_DD = True
-        assert got[1:] == ([pl[1], pl[2]] if dd else [None, None]) or sigma < 8
+        # the premise (sigma per sample, set at 8 kHz: half the in-band noise at 16) is HF's
+        assert got[1:] == ([pl[1], pl[2]] if dd else [None, None]) or sigma < 8 or config.PROFILE != "hf"
 
 
 # --- kisslink -------------------------------------------------------------------------
@@ -301,6 +304,7 @@ def test_kiss_dup_links_match(native, pure):
             assert out[1] == out[0], (mode, snr)
 
 
+@pytest.mark.hf_only("built on test_dd's burst: a seed picked on HF mpd (a 4 ms echo, past FM's CP)")
 def test_dd_budget_expiring_inside_a_pass_ends_it(native, pure):
     """A clock that runs out partway through the first re-estimate: the pass is abandoned (the budget holds
     inside the work, not just between passes) and the decode is the budget-spent one. Without a limit the same

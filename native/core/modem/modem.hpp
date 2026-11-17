@@ -48,7 +48,7 @@ struct Accept {
 
 // --- header ---------------------------------------------------------------
 
-int crc6(int v);  // CRC-6 over 10 bits, seeded with PROTOCOL_VERSION
+int crc6(int v);  // CRC-6 over 10 bits, seeded with PROTOCOL_VERSION ^ PROFILE_TAG
 std::span<const std::uint16_t> header_cols(std::string_view band);  // the code's column masks
 std::vector<std::uint8_t> codeword(int word, std::string_view band);  // 16-bit word -> coded header bits
 // Throws std::invalid_argument unless 1 <= n_cw <= config::max_codewords(band) and the index fits.

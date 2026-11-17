@@ -28,7 +28,7 @@ using config::PREAMBLE_CP;
 constexpr double TWO_PI = 2.0 * std::numbers::pi;
 // FS / STEP_HZ: every grid frequency is a whole number of bins of an FFT
 // whose length is a multiple of this.
-constexpr std::int64_t PER = 640;
+constexpr std::int64_t PER = static_cast<std::int64_t>(FS / STEP_HZ);  // 640 at 8 kHz
 static_assert(PER * STEP_HZ == FS);
 
 // fn(bin) for each CFO grid point, on the pool for signals of at least

@@ -238,7 +238,7 @@ std::vector<std::string_view> Accept::bands() const {
 // --- header -----------------------------------------------------------------
 
 int crc6(int v) {
-    int reg = PROTOCOL_VERSION & 0x3F;
+    int reg = (PROTOCOL_VERSION ^ PROFILE_TAG) & 0x3F;
     for (int i = 9; i >= 0; --i) {
         const int fb = ((reg >> 5) & 1) ^ ((v >> i) & 1);
         reg = ((reg << 1) & 0x3F) ^ (fb ? 0x3 : 0);

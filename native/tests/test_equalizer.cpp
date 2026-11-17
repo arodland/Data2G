@@ -89,7 +89,8 @@ int main() {
         std::normal_distribution<double> g(0.0, std::sqrt(0.01 / 2));
         for (auto& x : noisy.data) x += cd{g(rng), g(rng)};
         const auto sup = equalizer::delay_support(noisy, w);
-        check::is_true(std::abs(sup.first - 3) <= 1 && std::abs(sup.second - 27) <= 1, "two-path support");
+        const bool hf = check::hf_only("two paths 24 samples apart: 3 ms on HF, a 1.5 ms echo under 2 profile bins at 16 kHz (FM's CP is M4's)");
+        if (hf) check::is_true(std::abs(sup.first - 3) <= 1 && std::abs(sup.second - 27) <= 1, "two-path support");
         check::equal(equalizer::window_shift({0, 33}), 0, "window_shift rounds half to even (0.5 -> 0)");
         check::equal(equalizer::window_shift({0, 35}), 2, "window_shift rounds half to even (1.5 -> 2)");
         const auto est = equalizer::estimate(noisy, sup, w);
@@ -122,24 +123,25 @@ int main() {
         double e2 = 0;
         for (std::size_t r = 0; r < h.rows; ++r)
             for (std::size_t k = 0; k < w.size(); ++k) e2 += std::norm(h[r][k] - clean[0][k]);
-        check::is_true(e2 / static_cast<double>(h.data.size()) < 1e-4, "refine on known cells");
+        if (hf) check::is_true(e2 / static_cast<double>(h.data.size()) < 1e-4, "refine on known cells");
     }
 
     // Narrow band: the residual has no room, so the preamble's noise is used.
     {
         const auto n4 = equalizer::bb(config::BANDS[2]);
-        const auto h = two_path(n4, 9, 0, 10, 0.01, rng);
-        const auto sm = equalizer::freq_smooth(h, {0, 10}, n4);
+        const int d = 10 * config::FS / 8000;  // 1.25 ms: wide enough to take the band's rank
+        const auto h = two_path(n4, 9, 0, d, 0.01, rng);
+        const auto sm = equalizer::freq_smooth(h, {0, d}, n4);
         check::is_true(std::isinf(sm.n0) && sm.r == 2, "n4: rank capped at nc - 2, no residual noise");
         bool threw = false;
         try {
-            equalizer::estimate(h, {0, 10}, n4);
+            equalizer::estimate(h, {0, d}, n4);
         } catch (const std::invalid_argument&) {
             threw = true;
         }
         check::is_true(threw, "n4 without n0_pre throws");
         const std::vector<double> pre = {0.01, 0.01, 0.01, 0.01};
-        check::equal(equalizer::estimate(h, {0, 10}, n4, 0.02, pre).n0, 0.02, "n4 takes n0_pre");
+        check::equal(equalizer::estimate(h, {0, d}, n4, 0.02, pre).n0, 0.02, "n4 takes n0_pre");
     }
 
     // support_slack: n10 can't resolve a path 3 ms late, so at 30 dB the

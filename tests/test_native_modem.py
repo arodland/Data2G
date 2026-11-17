@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from data2g import codes, config, hfchannel, modem
-from data2g.config import BANDS, SUBMODES
+from data2g.config import BANDS, FS, SUBMODES
 from data2g.waveform import dsp
 
 CORR_TOL = 1e-6
@@ -240,7 +240,8 @@ def test_search_parts_match(native, py):
 
 def test_find_burst_and_noise(native, py):
     y = _burst("n10-qpsk-r1/5", 1, 3.0, None, seed=4)
-    a, b = native.modem.find_burst(y[:9000]), py.find_burst(y[:9000])
+    n = 9000 * FS // 8000  # 1.125 s
+    a, b = native.modem.find_burst(y[:n]), py.find_burst(y[:n])
     assert {k: v for k, v in a.items() if k not in ("score", "cfo")} == \
         {k: (v.name if k == "spec" else v) for k, v in b.items() if k not in ("score", "cfo")}
     close([a["score"], a["cfo"]], [b["score"], b["cfo"]], CORR_TOL)

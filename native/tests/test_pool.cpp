@@ -185,8 +185,9 @@ int main() {
     }
     // the DD part must have had something to do: some slots fail, some decode
     const auto flags = want.back().substr(0, 16), none = want[want.size() - 3].substr(0, 16);
-    check::is_true(flags.find('0') != std::string::npos && flags.find('1') != std::string::npos,
-                   "mixed burst: some slots decode, DD runs on the rest (" + flags + ")");
+    if (check::hf_only("its noise level is picked so an HF burst mixes decodes and failures"))
+        check::is_true(flags.find('0') != std::string::npos && flags.find('1') != std::string::npos,
+                       "mixed burst: some slots decode, DD runs on the rest (" + flags + ")");
     check::equal(none, std::string(16, '0'), "failing burst: every slot fails");
     return check::report("test_pool");
 }

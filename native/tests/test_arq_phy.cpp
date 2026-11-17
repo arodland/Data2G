@@ -151,7 +151,8 @@ int main() {
                 same = same && it != prepared.end() && it->second.buf == v.buf && it->second.top == v.top;
             }
             check::is_true(same, "prepared: the same stored soft bits, " + what);
-            check::is_true(!plain.empty(), "prepared: some slot failed, so the comparison covers a store, " + what);
+            if (check::hf_only("its noise level is picked so an HF burst fails a slot"))
+                check::is_true(!plain.empty(), "prepared: some slot failed, so the comparison covers a store, " + what);
         }
         pool::set_threads(0);
     }
@@ -173,8 +174,10 @@ int main() {
         }
         const auto n_failed = std::count(failed.begin(), failed.end(), true);
         check::equal(static_cast<long>(store.size()), static_cast<long>(n_failed), "a failed decode stores its soft bits");
-        check::is_true(n_failed >= 1, "some slot fails alone");
-        check::is_true(calls > 1, "DD looked at the clock");
+        if (check::hf_only("its noise level is picked so an HF burst fails a slot, for DD to run")) {
+            check::is_true(n_failed >= 1, "some slot fails alone");
+            check::is_true(calls > 1, "DD looked at the clock");
+        }
         ModemRx again(hear(on_air(tx_audio(burst(1)), 1.2, 4)), &store);
         int got = 0;
         for (int i = 0; i < 3; ++i) {

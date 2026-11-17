@@ -17,7 +17,7 @@ def test_burst_through_the_audio_path_and_streaming_receiver():
     x = modem.modulate(pack_frames(packets, codes.payload_bytes(spec)), spec)
     x = np.concatenate([np.zeros(FS), x, np.zeros(FS)])
     y = hfchannel.apply_channel(x, snr_db=15, freq_offset_hz=20.0, ppm=5, seed=1)
-    card = sps.resample_poly(y, 6, 1)  # as the TNC's 48 kHz device would carry it
+    card = sps.resample_poly(y, 48000 // FS, 1)  # as the TNC's 48 kHz device would carry it
     dec, rx, got = audio.Decimator(48000), receiver.Receiver(modem.Accept.of(["qpsk-r1/5"], min_score=0.35)), []
     for i in range(0, len(card), 24000):  # half-second chunks
         for kind, ev in rx.feed(dec(card[i : i + 24000])):
@@ -35,8 +35,11 @@ def test_digital_silence_is_not_searched():
 def test_accept_caps_codewords_by_burst_length():
     a = modem.Accept.of(["qpsk-r1/5", "w48-qpsk-r1/2"], max_secs=10)
     lim = dict(a.max_cw)
-    # qpsk-r1/5: 8 frames (1.15 s) a codeword after ~0.4 s of preamble and header
-    assert lim["qpsk-r1/5"] == 8 and a.bands == ["w", "w48"]
+    # qpsk-r1/5: 8 frames (1.15 s at HF's numerology) a codeword after ~0.4 s
+    # of preamble and header: the most whose burst fits 10 s (8 on HF)
+    spec = SUBMODES["qpsk-r1/5"]
+    fits = max(n for n in range(1, 64) if modem.burst_seconds(spec, n) <= 10)
+    assert lim["qpsk-r1/5"] == fits and (FS != 8000 or fits == 8) and a.bands == ["w", "w48"]
     assert "qpsk-r1/5" not in dict(modem.Accept.of(["qpsk-r1/5"], max_secs=1).max_cw)
 
 
@@ -115,6 +118,8 @@ def test_a_half_arrived_header_is_waited_for_not_misread():
             seed, [(h["spec"].name, round(h["score"], 2)) for h in heads])
 
 
+@pytest.mark.hf_only("its false headers are a seed-picked chance under HF's CRC seed and 8 kHz samples; "
+                     "FM's seed meets none, so the run-on it guards never starts")
 def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     """A burst whose preamble was missed reads as false headers claiming up
     to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
@@ -189,6 +194,7 @@ def _false_lock_clip(starts):
     return false_locks
 
 
+@pytest.mark.hf_only("an 8 kHz HF recording, HF protocol headers")
 def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span(protocol):
     """A CPM lock replaces a suspect header while it is pending, and a CPM
     front waiting for its second header copy survives the suspect burst's
@@ -201,6 +207,7 @@ def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span(protocol):
 
 
 @pytest.mark.slow
+@pytest.mark.hf_only("an 8 kHz HF recording, HF protocol headers")
 def test_a_cpm_burst_survives_a_suspect_header_at_every_search_phase(protocol):
     protocol(12)
     assert _false_lock_clip(range(0, 13 * 160, 160))

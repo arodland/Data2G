@@ -11,14 +11,15 @@ import signal
 import socket
 import subprocess
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
 
+import native_subs
+
 from data2g import host, tnc
 
-BINARY = Path(__file__).resolve().parent.parent / "native" / "build" / ("data2g-host.exe" if os.name == "nt" else "data2g-host")
+BINARY = native_subs.MODULE_DIR.parent / ("data2g-host.exe" if os.name == "nt" else "data2g-host")  # this profile's build
 BAD = re.compile(r"overflow|underrun|behind the card|dropped|CRITICAL|Traceback")
 
 

@@ -5,6 +5,7 @@ scripts/linksim.py sweep, not these)."""
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from data2g.arq import policy as G
 from data2g.arq import predictor as P
@@ -64,6 +65,7 @@ def test_chat_trades_rate_for_latency():
     assert p[out[True][0]] >= p[out[False][0]] - 0.02
 
 
+@pytest.mark.hf_only("the HF outcome model and gear shifter on an HF recording's measurements; FM's are M6's")
 def test_chat_bulk_queue_goes_for_goodput():
     """CHAT ON with more queued than one burst carries (a file): codewords a
     burst loses are resent, so not every one need decode. At the 20 dB a

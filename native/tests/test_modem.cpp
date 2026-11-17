@@ -42,12 +42,15 @@ int main() {
 
     check::current_step = "header";
     // PROTOCOL_VERSION 15's seed (Python's modem.crc6 and header_bits)
-    check::equal(modem::crc6(0), 28, "crc6(0)");
-    check::equal(modem::crc6(100), 54, "crc6(100)");
-    check::equal(modem::crc6(1023), 45, "crc6(1023)");
+    if (check::hf_only("crc6 goldens seeded with HF's version")) {
+        check::equal(modem::crc6(0), 28, "crc6(0)");
+        check::equal(modem::crc6(100), 54, "crc6(100)");
+        check::equal(modem::crc6(1023), 45, "crc6(1023)");
+    }
     const std::vector<std::uint8_t> want{1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1};
     const auto hb = modem::header_bits(7, 3, "w");
-    check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
+    if (check::hf_only("header_bits golden: its CRC-6 is seeded with HF's version"))
+        check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
     for (auto band : modem::SYNC_BANDS) {
         for (const auto& s : config::SUBMODES) {
             if (s.sync_band != band) continue;

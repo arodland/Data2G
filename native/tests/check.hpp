@@ -21,6 +21,8 @@
 #include <thread>
 #include <vector>
 
+#include "config/config.hpp"
+
 #ifdef _WIN32
 // SetErrorMode is declared by hand rather than by including <windows.h>.
 //
@@ -52,6 +54,17 @@ inline void fail(const std::string& what, const std::string& detail) {
 inline void is_true(bool ok, const std::string& what) {
     ++checks;
     if (!ok) fail(what, "expected true");
+}
+
+// `if (check::hf_only("why")) ...`: a check of an HF golden or calibration
+// (8 kHz, HF's protocol version, a seed picked on HF channels) runs in the HF
+// build only; another profile's build says what it skipped (tests/conftest.py's
+// hf_only marker, for pytest).
+inline bool hf_only(const std::string& why) {
+    if (config::PROFILE == "hf") return true;
+    std::fprintf(stderr, "SKIP (HF calibration, %.*s build): %s\n", static_cast<int>(config::PROFILE.size()),
+                 config::PROFILE.data(), why.c_str());
+    return false;
 }
 
 // Values are rendered through this rather than std::to_string directly,
