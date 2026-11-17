@@ -619,11 +619,15 @@ void Engine::expect_reply() {
         const std::string_view g = cpm::grid_of(*md->cpm).name;
         if (std::find(grids.begin(), grids.end(), g) == grids.end()) grids.push_back(g);
     }
+    // my burst said `drained`: the peer may hold its reply REPLY_HOLD_S for its host (session). The window
+    // reaches that far, and that reply's start is not one the slot learns from (hear_burst)
+    may_hold_ = session_->station && session_->station->sent_drained;
     if (!w || grids.empty() || !prime_default()) return;
     std::lock_guard lock(mu_);
     expect_next_ = Expect{want_gen_ + 1, std::move(grids),
                           std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
-                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo};
+                          static_cast<std::int64_t>(std::nearbyint((w->second + (may_hold_ ? REPLY_HOLD_S : 0.0)) * config::FS)),
+                          *slot_.cfo};
 }
 
 void Engine::request_reset() {
@@ -1335,7 +1339,9 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     if (ours) {
         session_snr_ = meas->snr_est;
         // its start from my burst's end (the receiver was reset there): the expected slot learns
-        if (r->cpm) slot_.heard(static_cast<double>(ev.header.start()) / config::FS, r->cpm->cfo);
+        if (r->cpm)
+            slot_.heard(may_hold_ ? std::nullopt : std::optional<double>(static_cast<double>(ev.header.start()) / config::FS),
+                        r->cpm->cfo);
     }
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's

@@ -112,7 +112,8 @@ class Session:
     _last_heard: float = 0.0
     _last_data: float = 0.0
     _idle_wait: float = 0.0
-    _build_at: float | None = None  # the caller's idle poll, or the callee's held reply: built when it goes
+    _build_at: float | None = None  # the caller's idle poll, or a held reply: built when it goes
+    _hold: bool = False  # ... a held reply (REPLY_HOLD_S): the air is not free, and it goes where the peer looks for a nod
     _quiet_from: float = 0.0  # callee: the end of its last burst, or the last burst heard since
     _wake_wait: float = 0.0  # callee: silence after _quiet_from before a wake
     _wakes: int = 0  # callee: wake bursts sent since the caller was last heard
@@ -215,8 +216,11 @@ class Session:
             self._on_timeout(now)
         if self._build_at is not None and now >= self._build_at and self.state == CONNECTED:
             self._build_at = None
+            held, self._hold = self._hold, False
             if not self._disc(now):
-                self._queue(self.station.build(), now)
+                # a held reply is still a direct reply: REPLY_HOLD_S late is inside the peer's nod
+                # window (receiver.ReplySlot.NOD_HALF_S), and with no answer from the host it nods
+                self._queue(self.station.build(nod=held), now)
                 self.station.answered()
         if (w := self._wake_time()) is not None and now >= w:
             self._wakes += 1
@@ -257,7 +261,7 @@ class Session:
         free for a broadcast burst (the engine's KISS link)."""
         return (self.state == CONNECTED and self.station is not None and self._out is None
                 and self._deadline is None and not self._want_disc and not self._pending_write
-                and not self.station.tx.pending())
+                and not self._hold and not self.station.tx.pending())
 
     def next_event(self) -> float | None:
         """The earliest time poll() may do something (for an event loop)."""
@@ -337,10 +341,14 @@ class Session:
             self._last_data = now  # data moving either way; a sender that hears no data is not idle
         if self._disc(now):
             return
+        # the reply hold, either station's (REPLY_HOLD_S): this burst brought my host data and
+        # ended the peer's, and I have nothing to send, so my host's answer may ride the reply
+        answer_due = (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
+                      and not self._pending_write)
+        self._hold = False
         if not self.master:
-            if settled or (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
-                           and not self._pending_write):
-                self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
+            if settled or answer_due:
+                self._build_at, self._hold = now + REPLY_HOLD_S, True  # poll() builds it; write() brings it forward
             else:
                 self._build_at = None
                 self._queue(st.build(nod=True), now)  # a direct reply: where the peer looks for a nod
@@ -358,12 +366,10 @@ class Session:
         # The same in a recovery (link.Station.recovering)
         busy = (st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
                 or st.peer_abandon or st.recovering)
-        # its host's answer to what this burst brought rides the reply (REPLY_HOLD_S), as the callee's
-        answer_due = (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
-                      and not self._pending_write and not (st.peer_reply_lost or st.peer_abandon or st.recovering))
-        if busy and (settled or answer_due):
+        # the hold as the callee's, but not in a recovery (answered at once, above)
+        if (busy and settled) or (answer_due and not (st.peer_reply_lost or st.peer_abandon or st.recovering)):
             self._idle_wait = 0.0
-            self._build_at = now + REPLY_HOLD_S  # poll() builds it; write() brings it forward
+            self._build_at, self._hold = now + REPLY_HOLD_S, True  # poll() builds it; write() brings it forward
         elif busy:
             self._idle_wait = 0.0
             self._queue(st.build(nod=True), now)  # a direct reply: where the peer looks for a nod
@@ -417,7 +423,7 @@ class Session:
 
     def _close(self, why: str, final: B.TxBurst | None = None, now: float = 0.0):
         """-> None. `final`: one last burst to send (a DISC_ACK)."""
-        self._build_at = None
+        self._build_at, self._hold = None, False
         if self.state != CLOSED:
             self.events.append(f"DISCONNECTED {why}")
             if self.station is not None:

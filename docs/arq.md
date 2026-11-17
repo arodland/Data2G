@@ -642,7 +642,7 @@ without). So the last codeword of a write rides in the control's padding when it
     carried `drained`, with nothing to send, is answered 250 ms later, and a host write
     ends the hold. Without it the caller acks at once, and its host's answer waits for the
     callee's control-only reply and another turn. Not in a recovery (the peer's reply
-    lost, an abandon, a poll: answered at once, as above). linksim winlink (shift+cpm,
+    lost, an abandon, a poll: answered at once, as below). linksim winlink (shift+cpm,
     16 paired seeds, 900 s): a caller's answer to a callee's message arrives 2.0 s
     sooner (median) on awgn 10 and mpp 0, 3.75 s on awgn -4, awgn -10, mpp -3 and
     mpd -3; a hold no write ends costs its 250 ms. Per-seed mean latency of every

@@ -477,6 +477,7 @@ TxBurstPtr Station::build(bool fresh, bool nod_ok) {
     }
     if (peer_said_keep_) keep_seen_.mark(bn);   // it acts on a peer burst that carried T_KEEP
     if (peer_acked_keep_) keep_sure_.mark(bn);  // ... on one that acted on a T_KEEP of mine
+    sent_drained = ext.count(T_DRAINED) > 0;
     Control control{core, ext};
     const auto ctl = control.pack(cpb);
     core.n_ctl = control.core.n_ctl;

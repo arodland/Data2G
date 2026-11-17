@@ -237,6 +237,7 @@ class Engine:
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._nod = None  # the nod search after my burst (_watch_nods): [(key, lo, hi), cfo, audio chunks, samples]
+        self._may_hold = False  # my latest burst said `drained`: its reply may come REPLY_HOLD_S late (_expect_reply)
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -748,8 +749,12 @@ class Engine:
 
         w = self.slot.window(0.0)
         grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
+        # my burst said `drained`: the peer may hold its reply REPLY_HOLD_S for its host (session.py).
+        # The window reaches that far, and that reply's start is not one the slot learns from (_hear)
+        self._may_hold = bool(getattr(getattr(self.session, "station", None), "sent_drained", False))
         if w is not None and grids and LK.PRIME:
-            self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
+            self.receiver.expect(grids, max(0, int(round(w[0] * FS))),
+                                 int(round((w[1] + (S.REPLY_HOLD_S if self._may_hold else 0.0)) * FS)), self.slot.cfo)
 
     def _watch_nods(self):
         """Where the peer may nod after my burst (docs/arq.md §3b): its reply
@@ -836,7 +841,7 @@ class Engine:
                 self.session_snr = meas["snr_est"]
                 # its start from my burst's end (the receiver was reset there): the expected slot learns
                 if r.get("family") == "cpm":
-                    self.slot.heard(h["start"] / FS, r["cfo"])
+                    self.slot.heard(None if self._may_hold else h["start"] / FS, r["cfo"])
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

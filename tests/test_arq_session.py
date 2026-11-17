@@ -302,11 +302,9 @@ def test_short_write_coalesces(chat):
     assert a._build_at == float("-inf")
 
 
-@pytest.mark.parametrize("answer", [False, True])
-def test_callee_holds_reply_for_host_answer(answer):
-    """A burst that brings the callee's host data, with nothing to send,
-    holds the reply REPLY_HOLD_S: the host's answer (a BBS prompt) rides
-    it instead of waiting for a wake. No answer: a plain ACK at the end."""
+def _idle_link():
+    """A connected pair, the caller idling: -> (caller, callee, now, step). step(src, dst, t)
+    sends src's next burst (1 s on air, heard 0.5 s after) and returns the time dst heard it."""
     from data2g.arq import policy as G
 
     class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
@@ -317,7 +315,6 @@ def test_callee_holds_reply_for_host_answer(answer):
     b = S.Session("K2XYZ", Good(), rng=random.Random(2))
     b.listen()
     a.connect("K2XYZ", 2, 0.0)
-    t, src, dst = 0.0, a, b
 
     def step(src, dst, t):
         burst = src.poll(t)
@@ -330,63 +327,51 @@ def test_callee_holds_reply_for_host_answer(answer):
         dst.on_rx(FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0}), t)
         return t
 
+    t, src, dst = 0.0, a, b
     while a._build_at is None:  # CONNECT, accept, then empty bursts until the caller idles
         assert t < 30
         t = step(src, dst, t)
         src, dst = dst, src
-    a.write(b"LIST")
-    t = step(a, b, t)
-    assert b._out is None and b._build_at == t + S.REPLY_HOLD_S
-    assert b.read() == b"LIST"
+    return a, b, t, step
+
+
+@pytest.mark.parametrize("who", ["callee", "caller"])
+@pytest.mark.parametrize("answer", [False, True])
+def test_reply_is_held_for_the_hosts_answer(who, answer):
+    """A burst that brings a station's host data and ends the peer's, with
+    nothing to send, holds the reply REPLY_HOLD_S: the host's answer (a BBS
+    prompt) rides it instead of waiting for a wake (the callee) or another
+    turn (the caller, woken from idle here). No answer: a plain ACK at the
+    hold's end. Meanwhile the air is not free for a broadcast burst."""
+    a, b, t, step = _idle_link()
+    asks, holds = (a, b) if who == "callee" else (b, a)
+    asks.write(b"LIST")
+    t = step(asks, holds, t)
+    assert holds._out is None and holds._build_at == t + S.REPLY_HOLD_S and not holds.idle()
+    assert holds.read() == b"LIST"
+    wait = S.REPLY_HOLD_S
     if answer:
-        b.write(b"prompt>")
-    t2 = step(b, a, t)
-    assert t2 - 1.5 <= t + (S.COALESCE_S if answer else S.REPLY_HOLD_S) + 0.02
-    assert a.read() == (b"prompt>" if answer else b"")
+        holds.poll(t)  # the session's clock, as its host's write finds it
+        holds.write(b"prompt>")
+        wait = S.COALESCE_S  # a short write to a quiet link waits for more: the hold's end is brought forward to it
+    t2 = step(holds, asks, t)
+    assert t + wait - 0.001 <= t2 - 1.5 <= t + wait + 0.011  # step polls every 10 ms
+    assert asks.read() == (b"prompt>" if answer else b"")
+    if answer and who == "callee":
+        # mid-exchange (no idle poll was waiting): the caller holds for its host's answer to the prompt
+        assert a._out is None and a._build_at == t2 + S.REPLY_HOLD_S and not a.idle()
 
 
-@pytest.mark.parametrize("answer", [False, True])
-def test_caller_holds_reply_for_host_answer(answer):
-    """The caller holds as the callee does: a burst that brings its host data
-    and ends the callee's (the wake of an idle link here), with nothing to
-    send, is answered REPLY_HOLD_S later, and its host's answer rides that
-    reply instead of the turn after the callee's control-only one."""
-    from data2g.arq import policy as G
-
-    class Good(G.GearShifter):  # recommends a real data mode, not the fallback's 4 B
-        def recommend(self, station):
-            return G.encode("qpsk-r1/2"), 1, G.encode("qpsk-r1/2")
-
-    a = S.Session("W1AW", Good(), rng=random.Random(1))
-    b = S.Session("K2XYZ", Good(), rng=random.Random(2))
-    b.listen()
-    a.connect("K2XYZ", 2, 0.0)
-    t, src, dst = 0.0, a, b
-
-    def step(src, dst, t):
-        burst = src.poll(t)
-        while burst is None:
-            assert t < 60
-            t = max(t + 0.01, src.next_event() or t)
-            burst = src.poll(t)
-        src.on_tx_end(burst, t + 1.0)
-        t += 1.5
-        dst.on_rx(FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0}), t)
-        return t
-
-    while a._build_at is None:  # CONNECT, accept, then empty bursts until the caller idles
-        assert t < 30
-        t = step(src, dst, t)
-        src, dst = dst, src
+def test_caller_in_a_recovery_answers_at_once():
+    """The hold is not for a recovery: a burst that says the callee's reply
+    was lost is answered at once though it brings data and ends the callee's."""
+    a, b, t, step = _idle_link()
     b.write(b"LIST")
-    t = step(b, a, t)  # the callee's wake
-    assert a._out is None and a._build_at == t + S.REPLY_HOLD_S
-    assert a.read() == b"LIST"
-    if answer:
-        a.write(b"prompt>")
-    t2 = step(a, b, t)
-    assert t2 - 1.5 <= t + (S.COALESCE_S if answer else S.REPLY_HOLD_S) + 0.02
-    assert b.read() == (b"prompt>" if answer else b"")
+    b.poll(t)
+    b.station.reply_lost = True  # as after the caller's repeat: its next burst says so
+    t = step(b, a, t)
+    assert a.station.peer_reply_lost and a.read() == b"LIST"
+    assert a._out is not None and a._build_at is None and not a.idle()
 
 
 def _frame(body, direction):

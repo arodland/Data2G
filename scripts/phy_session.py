@@ -292,7 +292,9 @@ class RealPhy:
         if rx is not None:
             if r is not None:
                 end = self.tx_end.get(rx)
-                self.slots[rx].heard(None if end is None else t0 - end, r.get("cfo") if r.get("family") == "cpm" else None)
+                # (not a reply the peer may have held for its host: the engine's _may_hold)
+                held = getattr(getattr(self.sessions.get(rx), "station", None), "sent_drained", False)
+                self.slots[rx].heard(None if end is None or held else t0 - end, r.get("cfo") if r.get("family") == "cpm" else None)
         return r
 
     def primed(self, y, t0, rx):
@@ -309,6 +311,9 @@ class RealPhy:
         if not LK.PRIME or s is None or w is None:
             return None
         grids = dict.fromkeys(MODES[m].grid for m in s.expecting() if m in MODES and is_cpm(MODES[m]))
+        from data2g.arq.session import REPLY_HOLD_S
+
+        w = (w[0], w[1] + (REPLY_HOLD_S if getattr(s.station, "sent_drained", False) else 0.0))
         lo, hi = (max(0, int(round((t - t0) * FS)) + int(PAD_S * FS)) for t in w)
         for g in grids:
             lock = cpm.prime_lock(cpm.GRIDS[g], y, lo, hi, self.slots[rx].cfo)

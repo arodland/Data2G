@@ -466,6 +466,7 @@ private:
     // the receiver's expected slot (engine.py's slot, _expect_reply; docs/arq.md §3a): the session stage
     // learns it, and leaves the window for the receiver stage to set with the reset it asks for
     receiver::ReplySlot slot_;
+    bool may_hold_ = false;  // my latest burst said `drained`: its reply may come REPLY_HOLD_S late (expect_reply)
     struct Expect {
         std::uint64_t gen;
         std::vector<std::string_view> grids;
