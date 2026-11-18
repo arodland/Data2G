@@ -26,6 +26,7 @@ struct Pair {
     std::mt19937 rng{1};
     std::vector<double> ao = std::vector<double>(BLOCK), bo = std::vector<double>(BLOCK);
     bool a_deaf = false;  // a hears only the noise
+    bool a_unserved = false;  // a's after_step is not called: its events stay undrained
 
     Pair(arq::EngineConfig ca, arq::EngineConfig cb) : ea("NOCALL", ca), eb("NOCALL", cb), a(ea), b(eb) {}
 
@@ -36,7 +37,7 @@ struct Pair {
         for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
             for (int j = 0; j < BLOCK; ++j) x[j] = (a_deaf ? 0.0 : 2.2 * bo[j]) + noise(rng);
             auto oa = ea.step(x);
-            a.after_step(oa.ptt);
+            if (!a_unserved) a.after_step(oa.ptt);
             ao = oa.audio;
             for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
             auto ob = eb.step(x);
@@ -195,6 +196,61 @@ void dial_given_up() {
     check::is_true(e.tx().has_value() && !has(h.out_cmd, "DISCONNECTED"), "DISCONNECT between tries: the DISC at once");
     for (int i = 0; i < 60 && !has(h.out_cmd, "DISCONNECTED"); ++i) h.after_step(e.step(quiet).ptt);
     check::is_true(has(h.out_cmd, "DISCONNECTED") && !e.tx(), "... and DISCONNECTED once it is out");
+
+    h.command("CONNECT K2XYZ W1AW");
+    for (int i = 0; i < 50 && !e.tx(); ++i) h.after_step(e.step(quiet).ptt);
+    for (int i = 0; i < 50 && e.tx(); ++i) h.after_step(e.step(quiet).ptt);
+    {
+        auto& s = e.session();
+        const std::string narrow = s.policy->connect_mode(0, 0);
+        check::is_true(s.deadline.has_value() && narrow != s.policy->connect_mode(2, 0), "awaiting the answer");
+        s.on_header(narrow, 1, e.now());
+        check::is_true(*s.deadline == e.now() + s.policy->airtime(narrow, 1, false) + s.t_turn + s.tune.reply_start_s,
+                       "an ID in a narrower cap's connect mode holds the reply window as one in mine");
+    }
+    for (int i = 0; i < 300 && e.session().tries == 0; ++i) h.after_step(e.step(quiet).ptt);
+    {
+        auto& s = e.session();
+        const std::string mode = s.policy->connect_mode(2, 0);
+        const double air = s.policy->airtime(mode, 4, false);
+        check::is_true(s.tries == 1 && !e.tx(), "between tries again");
+        s.on_header(mode, 4, e.now());
+        const double clear = e.now() + air + s.t_turn;
+        h.command("DISCONNECT");
+        check::is_true(s.bye && s.out == s.bye && !s.deadline && *s.due == clear,
+                       "DISCONNECT between tries queues the DISC, clear of a burst heard before it");
+        s.on_header(mode, 4, e.now() + 1.0);
+        check::is_true(*s.due == e.now() + 1.0 + air + s.t_turn, "... and of one heard while it is queued");
+    }
+    h.command("ABORT");
+
+    Pair q(seeded(43), seeded(44));
+    for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) q.b.command(line);
+    q.a.command("CONNECT W1AW K2XYZ");
+    check::is_true(q.run(10, [&] { return q.ea.tx().has_value(); }), "a CONNECT on air to a listening callee");
+    q.a.command("DISCONNECT");
+    int ups = 0;
+    bool up = true;
+    check::is_true(q.run(60, [&] {
+        ups += q.ea.tx().has_value() && !up;
+        up = q.ea.tx().has_value();
+        return has(q.seen_a, "DISCONNECTED") && has(q.seen_b, "DISCONNECTED");
+    }) && ups == 1 && has(q.seen_a, "CONNECTED W1AW K2XYZ 2300"), "a callee that answers a dial given up gets the DISC, no data burst ahead of it");
+
+    Pair r(seeded(45), seeded(46));
+    for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) r.b.command(line);
+    r.a.command("CONNECT W1AW K2XYZ");
+    r.a_unserved = true;
+    check::is_true(r.run(20, [&] { return r.ea.session().state == arq::SessionState::CONNECTED; }), "answered, CONNECTED not yet told");
+    r.a.out_cmd.clear();
+    r.a.command("ABORT");
+    r.a.after_step(false);
+    {
+        const auto& o = r.a.out_cmd;
+        const auto c = std::find(o.begin(), o.end(), "CONNECTED W1AW K2XYZ 2300"), d = std::find(o.begin(), o.end(), "DISCONNECTED");
+        check::is_true(c != o.end() && c < d && std::count(o.begin(), o.end(), "DISCONNECTED") == 1,
+                       "ABORT tells the CONNECTED it overtook, then one DISCONNECTED");
+    }
 
     Pair p(seeded(41), seeded(42));
     for (const char* line : {"MYCALL K2XYZ", "LISTEN ON"}) p.b.command(line);

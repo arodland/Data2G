@@ -862,17 +862,19 @@ As built (data2g/arq/policy.py):
 - **Commands:** MYCALL, LISTEN ON/OFF, CONNECT from to, DISCONNECT, ABORT,
   BW500 / BW2300 / BW2750, and CQFRAME call bw.
   - **DISCONNECT while a CONNECT is still unanswered** ends the dial: no more
-    tries. A CONNECT on air is finished and its answer waited for, so a callee
-    that answers is connected and then sent the DISC. With no answer, one DISC
-    goes under the key a callee that answered unheard would hold (so it is not
-    left connected until link lost), no DISC_ACK is waited for, and the session
-    ends as DISCONNECTED CLIENT unconfirmed once that DISC is out; between
-    tries the DISC goes at once. Before the first CONNECT is on air the session
-    ends with nothing sent. A host that gives up on a call (BPQ32 sends
-    DISCONNECT, then ABORT 30 s later) has the modem back within one try on a
-    clear channel. A busy one holds the end as it holds any transmission, and
-    a burst in the CONNECT's mode, an ID frame or a CW ID still extends the
-    wait for the answer; bursts in other modes no longer do.
+    tries. A CONNECT on air is finished and its answer waited for; a callee
+    that answers is sent the DISC next, behind only data the host wrote
+    before it. With no answer, one DISC goes under the key a callee that
+    answered unheard would hold (so it is not left connected until link lost),
+    no DISC_ACK is waited for, and the session ends as DISCONNECTED CLIENT
+    unconfirmed once that DISC is out. Between tries the DISC is queued at
+    once. It keys no sooner than t_turn after the end of the last burst heard,
+    so not into another pair's turnaround. Before the first CONNECT is on air
+    the session ends with nothing sent. A host that gives up on a call (BPQ32
+    sends DISCONNECT, then ABORT 30 s later) has the modem back within one try
+    and the DISC on a clear channel. A busy one sets no bound: it holds the
+    DISC as it holds any transmission, and every burst heard extends the wait.
+    ABORT ends it at once.
   - **ACCEPT [host]:port** (Data2G) is LISTEN ON with the session's data on a
     connection Data2G makes to host:port (default: the address the command client connected from) when it answers a call,
     instead of the data port. One session at a time, as with LISTEN.

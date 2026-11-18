@@ -187,6 +187,8 @@ class Host:
         elif cmd == "DISCONNECT":
             e.disconnect()
         elif cmd == "ABORT":
+            # what the session did since the last step is told first (a CONNECTED); its own end is this one
+            self._report(ev for ev in e.events() if not ev.startswith("DISCONNECTED"))
             self._session_over()
             e.abort()
             self._up = False
@@ -384,17 +386,9 @@ class Host:
         # 7x its next write (it waited forever on a 6-byte B2F line)
         self._buffer = None
 
-    def after_step(self, ptt: bool):
+    def _report(self, events):
         e = self.engine
-        if e.now - self._alive >= ALIVE_S:  # some VARA clients count on it
-            self._alive = e.now
-            self.out_cmd.append("IAMALIVE")
-        st = e.session.station
-        if st is not None and (c := st.tx.cleaned) is not None:  # before a DISCONNECTED below replaces the session
-            if self.data2g:
-                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]} {c[2]}")
-            st.tx.cleaned = None
-        for ev in e.events():
+        for ev in events:
             if ev.startswith("CONNECTED"):
                 peer = ev.split()[1]
                 me = e.session.call  # the call dialed, when MYCALL gave several
@@ -411,6 +405,18 @@ class Host:
                 self._session_over()
                 self._up = False
                 self.out_cmd.append(ev if self.data2g else "DISCONNECTED")
+
+    def after_step(self, ptt: bool):
+        e = self.engine
+        if e.now - self._alive >= ALIVE_S:  # some VARA clients count on it
+            self._alive = e.now
+            self.out_cmd.append("IAMALIVE")
+        st = e.session.station
+        if st is not None and (c := st.tx.cleaned) is not None:  # before a DISCONNECTED below replaces the session
+            if self.data2g:
+                self.out_cmd.append(f"CLEANTXBUFFER SETTLED {c[0]} {c[1]} {c[2]}")
+            st.tx.cleaned = None
+        self._report(e.events())
         if e.session.state == S.CLOSED and self.listening:
             e.listen()
         self.out_data += e.session.read()

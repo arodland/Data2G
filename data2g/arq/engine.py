@@ -274,6 +274,8 @@ class Engine:
         return len(self.tx[1]) if self.tx else 0
 
     def _new_session(self):
+        if (old := getattr(self, "session", None)) is not None:
+            self._events += old.events  # undrained: they outlive the session
         self.session = S.Session(self.call, self.policy_factory(), rng=random.Random(self.rng.random()),
                                  aliases=self.aliases, stats_interval_s=self.stats_interval_s,
                                  accept_connect=self.accept_connect)
@@ -285,7 +287,6 @@ class Engine:
     def listen(self, on: bool = True):
         """Answer calls to this station (on), or stop (an idle session)."""
         if self.session.state in (S.CLOSED, S.LISTEN, S.IDLE):
-            self._events += self.session.events  # undrained: they outlive the session
             self._new_session()
             if on:
                 self.session.listen()
@@ -308,7 +309,9 @@ class Engine:
         self.session.disconnect()
 
     def abort(self):
-        """Drop the session and anything on air, at once (no DISC)."""
+        """Drop the session and anything on air, at once (no DISC), and what
+        it had to report with it (events() first, for a host that tells)."""
+        self.session.events.clear()
         self.tx = None
         self._tx_kiss = False  # a Hand or KISS burst cut short: the next burst's end is the session's
         self.receiver.reset()
@@ -320,7 +323,6 @@ class Engine:
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
         F.pack_call(peer)  # ValueError before any state changes
-        self._events += self.session.events  # undrained: they outlive the session
         self._new_session()
         self.session.connect_tries = tries
         self.session.connect(peer, cap, self.now)

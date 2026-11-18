@@ -109,6 +109,7 @@ private:
     std::optional<std::string> bcast_command(const std::vector<std::string>& args);
     bool accept_connect(const std::string& caller, const std::string& callee);
     std::string clean(std::optional<std::int64_t> upto);  // CLEANTXBUFFER [n] -> the reply
+    void report(const std::vector<std::string>& events, bool ending = false);  // `ending`: by ABORT, the session's own DISCONNECTED is its
     void session_over();  // the session is ending: an unsettled limbo goes as SETTLED from split to UNKNOWN
 
     bool bcast_ = false;  // the client has sent BCAST: broadcast statuses go to it

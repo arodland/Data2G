@@ -223,6 +223,7 @@ void Host::command(std::string_view line, std::string_view peer) {
     } else if (cmd == "DISCONNECT") {
         e.disconnect();
     } else if (cmd == "ABORT") {
+        report(e.events(), true);
         session_over();
         e.abort();
         up_ = false;
@@ -403,6 +404,7 @@ bool Host::abort_session() {
     const auto s = e.session().state;
     if (s != SessionState::CONNECTING && s != SessionState::CONNECTED && s != SessionState::DISCONNECTING) return false;
     arq::log_write(LOG, INFO, "session with " + e.session().peer + " aborted by the operator");
+    report(e.events(), true);
     session_over();
     e.abort();
     up_ = false;
@@ -435,17 +437,9 @@ std::optional<std::int64_t> Host::next_capacity() {
     return g->next_capacity(*s.station);
 }
 
-void Host::after_step(bool ptt) {
+void Host::report(const std::vector<std::string>& events, bool ending) {
     auto& e = engine;
-    if (e.now() - alive_ >= ALIVE_S) {  // some VARA clients count on it
-        alive_ = e.now();
-        out_cmd.emplace_back("IAMALIVE");
-    }
-    if (auto& st = e.session().station; st && st->tx.cleaned) {  // before a DISCONNECTED below replaces the session
-        if (data2g) out_cmd.push_back(settled(*st->tx.cleaned));
-        st->tx.cleaned.reset();
-    }
-    for (const auto& ev : e.events()) {
+    for (const auto& ev : events) {
         const auto w = split(ev);
         if (ev.starts_with("CONNECTED")) {
             const std::string& peer = w.at(1);
@@ -457,13 +451,26 @@ void Host::after_step(bool ptt) {
             out_cmd.push_back(ev);
         } else if (ev.starts_with("CQFRAME")) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));
-        } else if (ev.starts_with("DISCONNECTED")) {
+        } else if (ev.starts_with("DISCONNECTED") && !ending) {
             arq::log_write(LOG, INFO, ev);
             session_over();
             up_ = false;
             out_cmd.push_back(data2g ? ev : "DISCONNECTED");
         }
     }
+}
+
+void Host::after_step(bool ptt) {
+    auto& e = engine;
+    if (e.now() - alive_ >= ALIVE_S) {  // some VARA clients count on it
+        alive_ = e.now();
+        out_cmd.emplace_back("IAMALIVE");
+    }
+    if (auto& st = e.session().station; st && st->tx.cleaned) {  // before a DISCONNECTED below replaces the session
+        if (data2g) out_cmd.push_back(settled(*st->tx.cleaned));
+        st->tx.cleaned.reset();
+    }
+    report(e.events());
     if (e.session().state == SessionState::CLOSED && listening) e.listen();
     const auto got = e.session().read();
     out_data.insert(out_data.end(), got.begin(), got.end());

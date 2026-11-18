@@ -119,6 +119,7 @@ class Session:
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     _bye: B.TxBurst | None = None  # the DISC of a dial given up, in _out or on air: the session closes at its end
+    _clear_at: float = 0.0  # the last burst heard has ended and had its reply's turn: a bye may go
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
@@ -158,7 +159,7 @@ class Session:
             if self._tries == 0:
                 self._close("CLIENT unconfirmed")  # none sent: nobody to tell
             else:
-                self._out, self._due, self._deadline = None, None, self._now  # between tries: given up at the next poll
+                self._give_up(self._now)  # between tries
         if self._build_at is not None:
             self._build_at = float("-inf")  # the caller's idle poll: a DISC now instead
 
@@ -306,12 +307,12 @@ class Session:
         """A burst started arriving: wait for its end instead of timing out
         (caller), or hold a wake past it (callee)."""
         end = now + self.policy.airtime(submode, n_cw)
+        self._hold(end + self.t_turn)
         if self._deadline is not None:
-            # a peer's ID burst (one codeword in the connect mode) runs straight
-            # into its reply, whose header must still be found (engine.ID_INTERVAL_S)
-            is_id = n_cw == 1 and submode == self.policy.connect_mode(self.cap)
-            if self._want_disc and self.state == CONNECTING and submode != self._tx_mode and not is_id:
-                return  # a dial given up waits only for what can be its CONNECT_ACK, or the ID ahead of it
+            # a peer's ID burst (one codeword in a connect mode: its own cap's,
+            # before it has mine) runs straight into its reply, whose header
+            # must still be found (engine.ID_INTERVAL_S)
+            is_id = n_cw == 1 and any(submode == self.policy.connect_mode(c) for c in range(3))
             self._deadline = max(self._deadline, end + self.t_turn + (REPLY_START_S if is_id else 0.0))
         if not self.master:
             self._quiet_from = max(self._quiet_from, end)
@@ -320,6 +321,7 @@ class Session:
         """A CW ID on air (data2g.cwid.CwSense): the peer's turn follows it on
         the same PTT, so a reply deadline waits REPLY_START_S past it (as for
         an ID frame, on_header), and a wake counts silence from it."""
+        self._hold(now + REPLY_START_S)
         if self._deadline is not None:
             self._deadline = max(self._deadline, now + REPLY_START_S)
         if not self.master:
@@ -392,6 +394,20 @@ class Session:
     def _queue(self, burst: B.TxBurst, when: float):
         self._out, self._due = burst, when
 
+    def _hold(self, until: float):
+        """A burst heard is over at `until`, its reply's turn included: a bye
+        keyed sooner would land in another pair's turnaround."""
+        self._clear_at = max(self._clear_at, until)
+        if self._bye is not None and self._out is self._bye:
+            self._due = max(self._due, until)
+
+    def _give_up(self, now: float):
+        """The host gave up on the call. A callee whose CONNECT_ACK was lost
+        holds a session: one DISC under its key, no answer waited for."""
+        log.info("CONNECT %s given up", self.peer)
+        self._bye = self._disc_burst()
+        self._queue(self._bye, max(now, self._clear_at))
+
     def _heard(self, now: float):
         self._last_heard = now
         self._deadline = None
@@ -459,11 +475,7 @@ class Session:
 
     def _on_timeout(self, now: float):
         if self.state == CONNECTING and self._want_disc:
-            # the host gave up on the call. A callee whose CONNECT_ACK was lost
-            # holds a session: one DISC under its key, no answer waited for
-            log.info("CONNECT %s given up", self.peer)
-            self._bye = self._session_burst(0, session_key(self.call, self.peer, self._nonce), bytes([F.DISC]))
-            self._queue(self._bye, now)
+            self._give_up(now)
         elif self.state == CONNECTING:
             self._tries += 1
             tries = CONNECT_TRIES if self.connect_tries is None else self.connect_tries
@@ -522,6 +534,8 @@ class Session:
 
     def _disc_burst(self) -> B.TxBurst:
         st = self.station
+        if st is None:  # a dial given up: the key its callee would hold
+            return self._session_burst(0, session_key(self.call, self.peer, self._nonce), bytes([F.DISC]))
         return self._session_burst(st.direction, st.key, bytes([F.DISC]))
 
     def _session_frame(self, rx) -> dict | None:
@@ -698,7 +712,9 @@ class Session:
             self._flush_writes()
             self._connected(now)
             self.events.append(f"CONNECTED {self.peer}")
-            self._queue(self.station.build(), now)
+            self._bye = None  # a dial given up, answered after all: the session's DISC instead
+            if not self._disc(now):
+                self._queue(self.station.build(), now)
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
             n = F.ConnectNak.unpack(body)
             if n.nonce == self._nonce:

@@ -593,7 +593,13 @@ def test_disconnect_while_dialing_tells_a_callee_that_answered():
     a, b = _dialing(data2g=True, peer="K2XYZ")
     assert link(a.engine, b.engine, 20, 10, _pump(a, b, lambda: a.engine.tx is not None))
     a.command("DISCONNECT")
-    assert link(a.engine, b.engine, 20, 60, _pump(a, b, lambda: len(_ended(a)) == 2 and len(_ended(b)) == 2))
+    keyed = []
+
+    def over():
+        keyed.append(a.engine.tx is not None)
+        return len(_ended(a)) == 2 and len(_ended(b)) == 2
+    assert link(a.engine, b.engine, 20, 60, _pump(a, b, over))
+    assert sum(y and not x for x, y in zip(keyed, keyed[1:])) == 1  # the DISC alone: no data burst ahead of it
     assert _ended(a) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED CLIENT"]
     assert _ended(b) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED"]
     assert b.engine.session.state == S.LISTEN
@@ -608,6 +614,20 @@ def test_disconnect_while_dialing_frees_a_callee_whose_ack_was_lost():
     assert link(a.engine, b.engine, 20, 30, _pump(a, b, lambda: len(_ended(b)) == 2), a_hears=False)
     assert _ended(a) == ["DISCONNECTED CLIENT unconfirmed"]
     assert _ended(b) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED"] and b.engine.session.state == S.LISTEN
+
+
+def test_abort_reports_the_connect_it_overtook():
+    """ABORT in the instant the call is answered: CONNECTED is not lost with
+    the session, and comes ahead of the one DISCONNECTED."""
+    a, b = _dialing(data2g=True, peer="K2XYZ")
+
+    def answered():
+        b.after_step(bool(b.engine.tx))
+        return a.engine.session.state == S.CONNECTED
+    assert link(a.engine, b.engine, 20, 20, answered)
+    a.command("ABORT")
+    a.after_step(False)
+    assert _ended(a) == ["CONNECTED W1AW K2XYZ 2300", "DISCONNECTED ABORT"]
 
 
 def test_losing_the_command_client_ends_its_session():

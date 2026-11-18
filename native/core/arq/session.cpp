@@ -222,18 +222,20 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
 
 void Session::on_header(const std::string& submode, int n_cw, double now) {
     const double end = now + policy->airtime(submode, n_cw, false);
+    hold(end + t_turn);
     if (deadline) {
-        // a peer's ID burst (one codeword in the connect mode) runs straight
-        // into its reply, whose header must still be found (engine ID_INTERVAL_S)
-        const bool is_id = n_cw == 1 && submode == policy->connect_mode(cap, 0);
-        if (want_disc && state == SessionState::CONNECTING && submode != tx_mode && !is_id)
-            return;  // a dial given up waits only for what can be its CONNECT_ACK, or the ID ahead of it
+        // a peer's ID burst (one codeword in a connect mode: its own cap's,
+        // before it has mine) runs straight into its reply, whose header
+        // must still be found (engine ID_INTERVAL_S)
+        bool is_id = false;
+        for (int c = 0; c <= 2; ++c) is_id = is_id || (n_cw == 1 && submode == policy->connect_mode(c, 0));
         deadline = std::max(*deadline, end + t_turn + (is_id ? tune.reply_start_s : 0.0));
     }
     if (!master()) quiet_from = std::max(quiet_from, end);
 }
 
 void Session::on_cw(double now) {
+    hold(now + tune.reply_start_s);
     if (deadline) deadline = std::max(*deadline, now + tune.reply_start_s);
     if (!master()) quiet_from = std::max(quiet_from, now);
 }
@@ -318,6 +320,19 @@ void Session::queue(TxBurstPtr burst, double when) {
     due = when;
 }
 
+// A bye keyed sooner would land in another pair's turnaround.
+void Session::hold(double until) {
+    clear_at = std::max(clear_at, until);
+    if (bye && out == bye) due = std::max(*due, until);
+}
+
+// A callee whose CONNECT_ACK was lost holds a session: no answer is waited for.
+void Session::give_up(double now) {
+    log_write(LOG, INFO, format("CONNECT %s given up", peer.c_str()));
+    bye = disc_burst();
+    queue(bye, std::max(now, clear_at));
+}
+
 void Session::heard(double now) {
     last_heard = now;
     deadline.reset();
@@ -335,9 +350,7 @@ void Session::disconnect() {
         if (tries == 0) {
             close("CLIENT unconfirmed");  // none sent: nobody to tell
         } else {
-            out.reset();
-            due.reset();
-            deadline = now_;  // between tries: given up at the next poll
+            give_up(now_);  // between tries
         }
     }
     if (build_at) build_at = -INF;  // the caller's idle poll: a DISC now instead
@@ -422,11 +435,7 @@ void Session::log_stats(const char* label, double now, double since, const std::
 
 void Session::on_timeout(double now) {
     if (state == SessionState::CONNECTING && want_disc) {
-        // the host gave up on the call. A callee whose CONNECT_ACK was lost
-        // holds a session: one DISC under its key, no answer waited for
-        log_write(LOG, INFO, format("CONNECT %s given up", peer.c_str()));
-        bye = session_burst(0, session_key(call, peer, nonce), Bytes{DISC});
-        queue(bye, now);
+        give_up(now);
     } else if (state == SessionState::CONNECTING) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to CONNECT %s, try %d of %d", peer.c_str(), tries, tune.connect_tries));
@@ -491,7 +500,10 @@ TxBurstPtr Session::connect_burst() {
     return session_burst(0, 0, Connect{VERSION, call, peer, nonce, cap, tenths(t_turn)}.pack());
 }
 
-TxBurstPtr Session::disc_burst() { return session_burst(station->direction, station->key, Bytes{DISC}); }
+TxBurstPtr Session::disc_burst() {
+    if (!station) return session_burst(0, session_key(call, peer, nonce), Bytes{DISC});  // a dial given up: the key its callee would hold
+    return session_burst(station->direction, station->key, Bytes{DISC});
+}
 
 TxBurstPtr Session::accept_burst() {
     return session_burst(1, 0, ConnectAck{nonce, cap, tenths(t_turn)}.pack(), answer_mode);
@@ -682,7 +694,8 @@ void Session::on_session_frame(const Frame& f, double now) {
         flush_writes();
         connected(now);
         events.push_back("CONNECTED " + peer);
-        queue(station->build(), now);
+        bye = nullptr;  // a dial given up, answered after all: the session's DISC instead
+        if (!disc(now)) queue(station->build(), now);
     } else if (sub == CONNECT_NAK && state == SessionState::CONNECTING && f.key == 0) {
         if (const ConnectNak k = ConnectNak::unpack(body); k.nonce == nonce) {
             const char* why = nak_name(k.reason);

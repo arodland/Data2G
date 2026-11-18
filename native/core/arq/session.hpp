@@ -114,6 +114,7 @@ public:
     TxBurstPtr out;
     TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
     TxBurstPtr bye;  // the DISC of a dial given up, in out or on air: the session closes at its end
+    double clear_at = 0;  // the last burst heard has ended and had its reply's turn: a bye may go
     std::string tx_mode;  // the mode of my last burst sent (expecting)
     // The modes my peer's next burst likely comes in while one is due (session.py's expecting, §3a).
     std::vector<std::string> expecting() const;
@@ -185,6 +186,8 @@ private:
         std::string mode;
     };
     void queue(TxBurstPtr burst, double when);
+    void hold(double until);  // a burst heard is over at `until`, its reply's turn included: a bye waits for it
+    void give_up(double now);  // the host gave up on the call: one DISC under the key its callee would hold
     void heard(double now);
     void close(const std::string& why, TxBurstPtr final_burst = nullptr, double now = 0.0);
     void connected(double now);

@@ -207,10 +207,9 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
 
 
-def test_a_dial_given_up_waits_only_for_its_answer_then_sends_one_disc():
-    """DISCONNECT with a CONNECT out: other stations' traffic no longer holds
-    the reply window open, what can be the answer does; then one DISC, and
-    DISCONNECTED when it is out."""
+def test_a_dial_given_up_sends_one_disc_after_its_answer_is_due():
+    """DISCONNECT with a CONNECT out: a burst heard still holds the reply
+    window open; then one DISC, and DISCONNECTED when it is out."""
     from data2g.arq import policy as G
 
     a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
@@ -219,18 +218,54 @@ def test_a_dial_given_up_waits_only_for_its_answer_then_sends_one_disc():
     a.on_tx_end(first, 2.0)
     a.disconnect()
     deadline = a.next_event()
-    assert first.submode != G.ROBUST_CONNECT
-    a.on_header(G.ROBUST_CONNECT, 4, 2.5)  # somebody else's burst
-    assert a.next_event() == deadline
-    a.on_header(first.submode, 4, 2.5)  # what can be its CONNECT_ACK
+    a.on_header(G.ROBUST_CONNECT, 4, 2.5)  # somebody else's burst: no DISC into its reply's turn
     t = a.next_event()
-    assert t > deadline
+    assert t == 2.5 + a.policy.airtime(G.ROBUST_CONNECT, 4) + a.t_turn > deadline
     disc = a.poll(t)
     assert disc is not None and a.state == S.CONNECTING and not a.events
     a.disconnect()  # again, with the DISC on air: nothing more
     a.on_tx_end(disc, t + 2.0)
     assert a.state == S.CLOSED and a.events == ["DISCONNECTED CLIENT unconfirmed"]
     assert a.poll(t + 60.0) is None
+
+
+def test_a_dial_given_up_between_tries_queues_its_disc_clear_of_bursts_heard():
+    """No DISC into another pair's turnaround: it waits out a burst heard
+    before DISCONNECT, and one heard while it is queued."""
+    from data2g.arq import policy as G
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    a.on_tx_end(first, 2.0)
+    t = a.next_event()
+    assert a.poll(t) is None and a._tries == 1  # no answer: the next try is queued
+    air = a.policy.airtime(first.submode, 4)
+    a.on_header(first.submode, 4, t + 0.5)
+    a.poll(t + 1.0)
+    a.disconnect()
+    assert a._out is a._bye is not None and a._deadline is None
+    assert a.next_event() == t + 0.5 + air + a.t_turn
+    a.on_header(first.submode, 4, t + 2.0)
+    due = t + 2.0 + air + a.t_turn
+    assert a.next_event() == due and a.poll(due - 0.01) is None
+    disc = a.poll(due)
+    assert disc is a._bye and disc.submode == G.ROBUST_CONNECT
+    a.on_tx_end(disc, due + 2.0)
+    assert a.state == S.CLOSED and a.events == ["DISCONNECTED CLIENT unconfirmed"]
+
+
+def test_an_id_in_any_caps_connect_mode_holds_the_reply_window():
+    """A narrower callee's ID frame comes in its own cap's connect mode: the
+    reply behind it is waited for as behind one in mine."""
+    from data2g.arq import policy as G
+
+    assert G.CONNECT[0] != G.CONNECT[2]
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    a.on_tx_end(a.poll(0.0), 2.0)
+    a.on_header(G.CONNECT[0], 1, 2.5)
+    assert a.next_event() == 2.5 + a.policy.airtime(G.CONNECT[0], 1) + a.t_turn + S.REPLY_START_S
 
 
 def test_callee_breaks_idle():

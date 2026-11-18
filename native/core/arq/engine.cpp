@@ -361,6 +361,7 @@ bool Engine::idle() const {
 }
 
 void Engine::new_session() {
+    if (session_) events_.insert(events_.end(), session_->events.begin(), session_->events.end());  // undrained: they outlive the session
     std::shared_ptr<Policy> policy;
     if (hooks_.policy) {
         policy = hooks_.policy();
@@ -395,7 +396,6 @@ void Engine::set_nods(bool on) {
 
 void Engine::listen(bool on) {
     if (idle()) {
-        events_.insert(events_.end(), session_->events.begin(), session_->events.end());  // undrained: they outlive the session
         new_session();
         if (on) session_->listen();
     }
@@ -419,6 +419,7 @@ void Engine::set_record_dir(const std::string& dir) {
 }
 
 void Engine::abort() {
+    session_->events.clear();  // dropped with the session (events() first, for a host that tells)
     abort_pending_ = true;
     tx_.reset();
     tx_kiss_ = false;  // a Hand or KISS burst cut short: the next burst's end is the session's
@@ -430,7 +431,6 @@ void Engine::abort() {
 void Engine::connect(const std::string& peer, int cap, std::optional<int> tries) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     pack_call(peer);  // invalid_argument before any state changes
-    events_.insert(events_.end(), session_->events.begin(), session_->events.end());  // undrained: they outlive the session
     new_session();
     if (tries) session_->tune.connect_tries = *tries;
     session_->connect(peer, cap, now());
