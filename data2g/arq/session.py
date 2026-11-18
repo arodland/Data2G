@@ -176,7 +176,8 @@ class Session:
         else:
             self._coalesce_until = None
         if self._build_at is not None:  # an idle poll due: send it now (or at the hold's end), with the data
-            self._build_at = self._coalesce_until if self._coalesce_until is not None else float("-inf")
+            at = self._coalesce_until if self._coalesce_until is not None else float("-inf")
+            self._build_at = min(at, self._build_at) if self._hold else at  # a held reply: never later than it was due
             self._idle_wait = 0.0
 
     def read(self) -> bytes:
@@ -218,8 +219,8 @@ class Session:
             self._build_at = None
             held, self._hold = self._hold, False
             if not self._disc(now):
-                # a held reply is still a direct reply: REPLY_HOLD_S late is inside the peer's nod
-                # window (receiver.ReplySlot.NOD_HALF_S), and with no answer from the host it nods
+                # a held reply is still a direct reply: the peer's nod search reaches REPLY_HOLD_S
+                # further for it (engine._watch_nods), and with no answer from the host it nods
                 self._queue(self.station.build(nod=held), now)
                 self.station.answered()
         if (w := self._wake_time()) is not None and now >= w:
@@ -345,6 +346,7 @@ class Session:
         # ended the peer's, and I have nothing to send, so my host's answer may ride the reply
         answer_due = (len(st.rx.out) > undrained and st.peer_drained and not st.tx.pending()
                       and not self._pending_write)
+        held_until = self._build_at if self._hold else None
         self._hold = False
         if not self.master:
             if settled or answer_due:
@@ -367,9 +369,12 @@ class Session:
         busy = (st.tx.pending() or st.last_rx_data or bool(self._pending_write) or woke or st.peer_reply_lost
                 or st.peer_abandon or st.recovering)
         # the hold as the callee's, but not in a recovery (answered at once, above)
-        if (busy and settled) or (answer_due and not (st.peer_reply_lost or st.peer_abandon or st.recovering)):
+        recovery = st.peer_reply_lost or st.peer_abandon or st.recovering
+        if (busy and settled) or (answer_due and not recovery):
             self._idle_wait = 0.0
             self._build_at, self._hold = now + REPLY_HOLD_S, True  # poll() builds it; write() brings it forward
+        elif held_until is not None and not recovery:
+            self._build_at, self._hold = held_until, True  # another burst while I hold a reply: the hold stands
         elif busy:
             self._idle_wait = 0.0
             self._queue(st.build(nod=True), now)  # a direct reply: where the peer looks for a nod

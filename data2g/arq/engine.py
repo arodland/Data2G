@@ -237,7 +237,7 @@ class Engine:
         self._timeouts = 0  # the station's timeouts already reported as missed bursts
         self.slot = ReplySlot()  # where and how the peer's replies arrive (the receiver's expected slot, §3a)
         self._nod = None  # the nod search after my burst (_watch_nods): [(key, lo, hi), cfo, audio chunks, samples]
-        self._may_hold = False  # my latest burst said `drained`: its reply may come REPLY_HOLD_S late (_expect_reply)
+        self._late = 0.0  # my latest burst said `drained`: its reply may come REPLY_HOLD_S late (_expect_reply)
         self._new_session()
 
     # -- host side ---------------------------------------------------------------------
@@ -747,20 +747,21 @@ class Engine:
         started (stream indices from the reset at my burst's end), its CFO."""
         from .modes import is_cpm
 
-        w = self.slot.window(0.0)
         grids = list(dict.fromkeys(MODES[m].grid for m in self.session.expecting() if m in MODES and is_cpm(MODES[m])))
         # my burst said `drained`: the peer may hold its reply REPLY_HOLD_S for its host (session.py).
-        # The window reaches that far, and that reply's start is not one the slot learns from (_hear)
-        self._may_hold = bool(getattr(getattr(self.session, "station", None), "sent_drained", False))
+        # The window reaches that far, the nod search too (_watch_nods), and the slot learns a start
+        # that late less the hold (_hear). Not a DISC's reply: `sent_drained` is my last link burst's
+        st = getattr(self.session, "station", None)
+        self._late = S.REPLY_HOLD_S if st is not None and self.session.state == S.CONNECTED and st.sent_drained else 0.0
+        w = self.slot.window(0.0, self._late)
         if w is not None and grids and LK.PRIME:
-            self.receiver.expect(grids, max(0, int(round(w[0] * FS))),
-                                 int(round((w[1] + (S.REPLY_HOLD_S if self._may_hold else 0.0)) * FS)), self.slot.cfo)
+            self.receiver.expect(grids, max(0, int(round(w[0] * FS))), int(round(w[1] * FS)), self.slot.cfo)
 
     def _watch_nods(self):
         """Where the peer may nod after my burst (docs/arq.md §3b): its reply
         in the expected slot, stream indices from my burst's end."""
         self._nod = None
-        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.nod_window(0.0)
+        st, cfo, w = getattr(self.session, "station", None), self.slot.cfo, self.slot.nod_window(0.0, self._late)
         if st is None or cfo is None or w is None or self.session.state not in (S.CONNECTED, S.DISCONNECTING):
             return
         key = st.nod_family()
@@ -841,7 +842,7 @@ class Engine:
                 self.session_snr = meas["snr_est"]
                 # its start from my burst's end (the receiver was reset there): the expected slot learns
                 if r.get("family") == "cpm":
-                    self.slot.heard(None if self._may_hold else h["start"] / FS, r["cfo"])
+                    self.slot.heard(h["start"] / FS, r["cfo"], self._late)
             if self.kiss is not None and not ours:
                 frames = self.kiss.on_burst(r, rx)
                 if frames is not None:  # a broadcast burst: not the session's

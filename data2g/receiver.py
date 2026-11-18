@@ -127,23 +127,28 @@ class ReplySlot:
         self.gaps: deque = deque(maxlen=self.GAPS)
         self.cfo: float | None = None
 
-    def heard(self, gap_s: float | None, cfo: float | None):
+    def heard(self, gap_s: float | None, cfo: float | None, late: float = 0.0):
         """A burst from the peer started gap_s after my burst ended (None:
-        not a reply to one), its CFO."""
+        not a reply to one), its CFO. `late`: the peer may have held that
+        reply this long by design (the session's reply hold): a start nearer
+        the median plus `late` than the median is learned less it."""
         if gap_s is not None and 0.0 <= gap_s < self.MAX_GAP_S:
+            if late and self.gaps and gap_s - float(np.median(self.gaps)) > late / 2:
+                gap_s -= late
             self.gaps.append(gap_s)
         if cfo is not None:
             self.cfo = cfo
 
-    def window(self, tx_end: float) -> tuple[float, float] | None:
+    def window(self, tx_end: float, late: float = 0.0) -> tuple[float, float] | None:
         """(earliest, latest) start of the peer's reply to my burst that ended
-        at tx_end, or None before anything was learned."""
+        at tx_end, or None before anything was learned. `late`: as heard()'s,
+        the latest start that much later."""
         if not self.gaps or self.cfo is None:
             return None
         g = float(np.median(self.gaps))
-        return tx_end + g - self.TOL_S, tx_end + g + self.TOL_S
+        return tx_end + g - self.TOL_S, tx_end + g + self.TOL_S + late
 
-    def nod_window(self, tx_end: float) -> tuple[float, float] | None:
+    def nod_window(self, tx_end: float, late: float = 0.0) -> tuple[float, float] | None:
         """window() for a nod (docs/arq.md §3b): NOD_HALF_S either side of
         the median. On air a station's TX lag (its burst's end to its rig back
         on receive) varied 0.3-1.35 s: its peer's reply gaps spread ~1 s.
@@ -155,7 +160,7 @@ class ReplySlot:
         if not self.gaps or self.cfo is None:
             return None
         g = float(np.median(self.gaps))
-        return tx_end + g - self.NOD_HALF_S, tx_end + g + self.NOD_HALF_S
+        return tx_end + g - self.NOD_HALF_S, tx_end + g + self.NOD_HALF_S + late
 
 
 class NoiseProfile:

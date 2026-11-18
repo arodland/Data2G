@@ -550,7 +550,7 @@ void bind_arq_link(py::module_& m) {
         .def_readonly("bursts_sent", &Station::bursts_sent)
         .def_property_readonly("last_sent", [](const Station& s) { return burst_py(s.last_sent); })
         .def_readonly("peer_burst", &Station::peer_burst)
-        .def_readwrite("reply_lost", &Station::reply_lost)
+        .def_readonly("reply_lost", &Station::reply_lost)
         .def_readonly("misses", &Station::misses)
         .def_readonly("reply_escalation", &Station::reply_escalation)
         .def_property_readonly("recovering", &Station::recovering)

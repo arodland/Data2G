@@ -643,17 +643,21 @@ without). So the last codeword of a write rides in the control's padding when it
     ends the hold. Without it the caller acks at once, and its host's answer waits for the
     callee's control-only reply and another turn. Not in a recovery (the peer's reply
     lost, an abandon, a poll: answered at once, as below). linksim winlink (shift+cpm,
-    16 paired seeds, 900 s): a caller's answer to a callee's message arrives 2.0 s
-    sooner (median) on awgn 10 and mpp 0, 3.75 s on awgn -4, awgn -10, mpp -3 and
-    mpd -3; a hold no write ends costs its 250 ms. Per-seed mean latency of every
-    message: awgn 10 -0.53 +-0.14 s (15 seeds better, 1 worse), awgn -4 -0.78 +-0.18
-    (13/2), awgn -10 -1.52 +-0.73 (11/4); mpp 0 +0.89 +-1.22, mpp -3 +2.15 +-3.04,
-    mpd -3 -0.31 +-0.71 (within noise: once timing differs a fading session diverges).
+    16 paired seeds, 900 s, with T_KEEP): a caller's answer to a callee's message
+    arrives 1.7 s sooner (median) on awgn 10 and mpp 0, 2.6 s on awgn -4, mpp -3 and
+    mpd -3, 4.1 s on awgn -10; a hold no write ends costs its 250 ms. Per-seed mean
+    latency of every message: awgn 10 -0.52 +-0.11 s (14 seeds better, 1 worse),
+    awgn -4 -0.86 +-0.29 (14/2), awgn -10 -1.90 +-0.70 (12/3); mpp 0 -0.83 +-0.74
+    (10/6), mpp -3 -0.66 +-1.88 (7/8), mpd -3 -0.28 +-0.91 (7/8) (the last two within
+    noise: once timing differs a fading session diverges).
   - A held reply, either station's: the air is not free meanwhile (`Session.idle`, so no
     broadcast burst is keyed ahead of it); with no answer from the host it is built as
-    a direct reply is (`nod=True`: 250 ms late is inside the nod window, §3b); and after
-    a burst that said `drained` the sender's expected slot (§3a) reaches 250 ms further
-    and does not learn from that reply's start, which may be a held one.
+    a direct reply is (`nod=True`); a host write brings it forward and never puts it
+    off (the coalesce ends with the hold); and another burst heard while the caller
+    holds leaves the hold standing. After a link burst that said `drained` its sender
+    looks 250 ms further for the reply, in the expected slot (§3a) and in the nod
+    search (§3b), and the slot learns a start nearer the median plus 250 ms than the
+    median less those 250 ms (`ReplySlot.heard`).
   - Otherwise the caller answers a burst that arrives while its idle poll waits at
     once, data or not. It stays the only station that retries on a timeout, except
     for DISC.
