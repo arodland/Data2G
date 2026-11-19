@@ -223,6 +223,10 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     // only the caller retries (§6), and a callee's DISC
     if ((m && (state == SessionState::CONNECTING || state == SessionState::CONNECTED)) || state == SessionState::DISCONNECTING) {
         double wait = tune.reply_start_s;
+        // DISC_ACK uses this DISC's mode and slot count. Even if its header is
+        // lost, leave time for the whole reply after it starts.
+        if (state == SessionState::DISCONNECTING && burst)
+            wait += policy->airtime(burst->submode, static_cast<int>(burst->slots.size()), false);
         // a reply whose header I miss is still on air: don't poll over it
         if (state == SessionState::CONNECTED && station && burst)
             if (auto hold = policy->reply_hold(*station, *burst)) wait = std::max(wait, *hold);

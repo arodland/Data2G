@@ -283,6 +283,10 @@ class Session:
         self._tx_mode = burst.submode
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
+            if self.state == DISCONNECTING:
+                # DISC_ACK uses this DISC's mode and slot count. Even if its
+                # header is lost, leave time for the whole reply after it starts.
+                wait += self.policy.airtime(burst.submode, len(burst.slots)) or 0.0
             if (self.state == CONNECTED and self.station is not None
                     and (hold := self.policy.reply_hold(self.station, burst)) is not None):
                 # a reply whose header I miss is still on air: don't poll over it

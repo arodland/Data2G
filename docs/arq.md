@@ -662,6 +662,7 @@ without). So the last codeword of a write rides in the control's padding when it
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
   before retrying.
+- **DISC reply timer:** DISC_ACK uses the received DISC's mode and control-codeword count, so the disconnecting station adds that reply airtime to its reply-start window. This keeps a retry from starting over an ACK whose header was missed, including a slow FSK ACK. A heard ACK still closes the session immediately; a missing ACK takes longer to retry, with the same three-attempt limit.
 - **Link lost:** 90 s after the last decodable burst from the peer, on either side:
   60 s of retries past the keepalive's longest gap (30 s).
   The link core's consecutive-timeout count (12) applies only in the lockstep tests,

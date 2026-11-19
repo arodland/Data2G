@@ -5,8 +5,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
+#include <utility>
 
 #include "arq/session.hpp"
 #include "check.hpp"
@@ -174,6 +176,37 @@ void sessions(unsigned seed, double p_burst) {
     check::equal(b.events.front(), std::string("CONNECTED W1AW"), "callee's CONNECTED");
 }
 
+void disc_reply_timer() {
+    class SlowReply final : public TestPolicy {
+    public:
+        explicit SlowReply(std::string m) : TestPolicy(0), fixed(std::move(m)) {}
+        std::string fixed;
+        std::string connect_mode(int, int) override { return fixed; }
+        double airtime(const std::string&, int n, bool) override { return 3.0 * n; }
+    };
+    for (bool master : {false, true}) for (const char* mode : {"m46", "m4"}) {
+        auto p = std::make_shared<SlowReply>(mode);
+        Session s("W1AW", p);
+        s.station = std::make_shared<Station>(master ? 0 : 1, p, master, 7);
+        s.state = SessionState::CONNECTED;
+        s.disconnect();
+        check::is_true(s.disc(0), "DISC queues on either side");
+        auto burst = s.poll(0);
+        check::is_true(burst != nullptr, "DISC ready");
+        if (!burst) continue;
+        const auto n = static_cast<int>(burst->slots.size());
+        check::equal(n, std::string(mode) == "m4" ? 2 : 1, "session control slot count");
+        s.on_tx_end(burst, 10);
+        const double ack_end = 10 + s.t_turn + p->airtime(mode, n, false);
+        check::is_true(!s.poll(ack_end - .001), "unheard DISC_ACK finishes before retry");
+        if (!s.deadline) continue;  // baseline failure consumed the premature retry
+        check::is_true(*s.deadline >= ack_end && *s.deadline <= ack_end + s.tune.reply_start_s,
+                       "blind DISC reply wait is sufficient and bounded");
+        const auto retry = s.poll(*s.deadline);
+        check::is_true(retry != nullptr, "missing ACK still retries");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -209,5 +242,6 @@ int main() {
 
     for (unsigned seed = 0; seed < 12; ++seed) stations(seed, (seed % 3) * 0.1, (seed / 3 % 3) * 0.1);
     for (unsigned seed = 0; seed < 6; ++seed) sessions(seed, (seed % 3) * 0.05);
+    disc_reply_timer();
     return check::report("arq");
 }
