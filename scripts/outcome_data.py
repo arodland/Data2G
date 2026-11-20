@@ -35,6 +35,7 @@ from pathlib import Path
 import numpy as np
 
 from data2g import codes, cpm, modem
+from data2g import interference as INTF
 from data2g.arq import phy as PHY
 from data2g.arq import policy as G
 from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
@@ -57,6 +58,7 @@ SUSTAINED = False
 # --cands: every candidate one of these modes (a supplement for modes added
 # to an installed model: train_outcome.py --extend), SNR across their range
 ONLY: tuple = ()
+PASSBAND = True  # the receiver's passband drawn per sample (interference.draw_passband); --no-passband: none
 KINDS = (("awgn", 0.15), ("mpg", 0.2), ("mpp", 0.2), ("mpd", 0.15), ("random", 0.3))
 THRESHOLDS = I.thresholds()
 # CPM modes' 1% end-to-end points (the CPM prototype's study, 1% v2), for
@@ -143,11 +145,12 @@ def sample(seed):
     cap = 0 if rng.random() < 0.25 else 2
     allowed = [s.name for s in G.allowed(cap)]
     ch = PS.ContinuousChannel(fam, snr0, seed, 120.0, doppler=doppler, delay_ms=delay)
+    pb = INTF.draw_passband(np.random.default_rng(np.random.SeedSequence([seed, 6]))) if PASSBAND else None
 
     def hear(b: TxBurst, t0: float):
         ch.snr_db = snr0 + drift * t0 / 30
         try:
-            return receive(ch.apply(PHY.tx_audio(b), t0), b.submode)
+            return receive(INTF.passband(ch.apply(PHY.tx_audio(b), t0), pb), b.submode)
         except modem.SyncError:  # ponytail: an OFDM header read past the audio
             return None
 
@@ -199,6 +202,7 @@ def sample(seed):
         cands = [str(rng.choice(ONLY)) for _ in range(CANDIDATES)]
     base = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2),
                 snr_next=round(snr0 + drift * t_next / 30, 2), cap=cap, band=MODES[cur_name].band, gap=round(gap, 2),
+                passband=(pb or "flat") if PASSBAND else "",
                 **{k: v for k, v in cur.items()})
     if prev is not None:
         base.update(prev_band=MODES[prev_name].band, prev_age=round(t_cur_end - t_prev_end, 2),
@@ -228,18 +232,21 @@ def main():
     ap.add_argument("--sustained", action="store_true", help="the sustained-low-SNR supplement (see SUSTAINED)")
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
+    ap.add_argument("--no-passband", action="store_true",
+                    help="no receive passband (sets made before #260; default: drawn, interference.PASSBAND_SHARES)")
     ap.add_argument("--cands", default="", help="comma-separated: every candidate one of these (see ONLY)")
     a = ap.parse_args()
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SUSTAINED, ONLY
+    global SUSTAINED, ONLY, PASSBAND
     SUSTAINED = a.sustained
+    PASSBAND = not a.no_passband
     ONLY = tuple(filter(None, a.cands.split(",")))
     meas = ["snr_est", "spread_est", "delay_est_ms", "headroom", "frames"] + [f"mi_{c}" for c in PHY.P.CONSTS]
     fields = (["seed", "kind", "doppler", "delay_ms", "snr", "snr_next", "cap", "band", "gap"] + meas
               + ["prev_band", "prev_age"] + [f"prev_{k}" for k in meas]
-              + ["cand", "cand_n", "cand_seconds", "burst_ok", "data_sent", "data_ok"])
+              + ["cand", "cand_n", "cand_seconds", "burst_ok", "data_sent", "data_ok", "passband"])
     new = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
     start = 0 if new else len({r["seed"] for r in csv.DictReader(open(a.out))})
     done = 0

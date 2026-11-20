@@ -61,9 +61,12 @@ class ContinuousChannel:
 
     def __init__(self, chan: str, snr_db: float, seed: int, horizon: float, doppler=None, delay_ms=None,
                  interference=None, recorded=None, wander_db: float = 0.0, wander_tau: float = WANDER_TAU_S,
-                 wander_shared: bool = False):
+                 wander_shared: bool = False, passband=(None, None)):
         """`chan`: a preset name, unless `doppler` (Hz) and `delay_ms` are given.
         `interference`: (station 0's, station 1's) interference.Spec; None: clean.
+        `passband`: (station 0's, station 1's) receive passband (interference.PASSBANDS
+        name; None flat), on all it hears: signal, floor and interference (a radio's
+        IF filter, ahead of anything after it, as its AGC).
         `recorded`: a RecordedNoise in place of the Gaussian floor.
         `wander_db`: each station's floor wanders by this (standard deviation, dB;
         `wander_tau`, s) about the cell's level; its interference doesn't.
@@ -84,7 +87,7 @@ class ContinuousChannel:
                     w[k] = a * w[k - 1] + np.sqrt(1 - a * a) * wander_db * e[k]
                 self.wander.append(w)
         self.snr_db, self.rng = snr_db, np.random.default_rng(seed)
-        self.seed, self.horizon = seed, horizon
+        self.seed, self.horizon, self.passband = seed, horizon, tuple(passband)
         specs = interference or (INTF.Spec(), INTF.Spec())
         # each timeline from -PRE_S: the stations listened before the session
         self.intf = [INTF.Interference(sp, seed * 2 + i, PRE_S + horizon + 60) for i, sp in enumerate(specs)]
@@ -152,7 +155,7 @@ class ContinuousChannel:
             y = noisy if self.wander is None else y + (noisy - y) * self.floor_gain(rx, t0 - PAD_S, len(y))
         if rx is not None and not self.intf[rx].spec.clean:
             y += self.interference(rx, t0 - PAD_S, len(y), self.sigma(s_power))
-        return y
+        return y if rx is None else INTF.passband(y, self.passband[rx])
 
 
 class RecordedNoise:
@@ -254,7 +257,7 @@ class StationNoise:
                      else self.rng.normal(0, sigma, n) * self.ch.floor_gain(station, ts, n))
                 if not clean:
                     y += self.ch.interference(station, ts, n, sigma)
-                p.feed(y, ts)
+                p.feed(INTF.passband(y, self.ch.passband[station]), ts)
                 ts += n / FS
         self.fed[station] = t
 

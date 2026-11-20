@@ -23,7 +23,7 @@ done
 
 date
 for set in clean intf; do
-  flag=""; [ $set = intf ] && flag="--interference"
+  flag=""; [ $set = intf ] && flag="--interference v1"
   # the installed model drives the sessions, as in the earlier rounds (with its one offset)
   DATA2G_LOGIT_OFFSETS=w48-16qam-r1/2:-1.0 $T1 $SD $flag --sessions 2900 --first 3000000 \
     --out runs/session_data_ir_$set.csv > runs/session_data_ir_$set.log 2>&1

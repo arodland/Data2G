@@ -24,6 +24,7 @@ def test_clean_is_silent():
     I.Spec(I.Impulses(30.0)),
     I.Spec(qrm=(I.Qrm("fsk", 1200, 300, 15, 2.0, 0.5), I.Qrm("noise", 2300, 400, 10, 1.0, 0.3),
                 I.Qrm("carrier", 700, 50, 20, 3.0, 0.6))),
+    I.Spec(qrm=(I.Qrm("noise", 1500, 300, 10, 3.0, 0.7, span_hz=2000, sweep_s=6.0),)),
 ])
 def test_any_span_renders_the_same(spec):
     """Random access: a span rendered alone is that span of a longer render."""
@@ -42,6 +43,23 @@ def test_inr_is_over_the_floor_in_its_band(kind, bw):
     floor = SIGMA**2 / (FS / 2) * (I.CARRIER_REF_HZ if kind == "carrier" else bw)
     got = 10 * np.log10(band_power(y, 1500 - bw, 1500 + bw) / floor)
     assert got == pytest.approx(12.0, abs=0.7)
+
+
+def test_swept_noise_is_narrow_and_moves():
+    """A swept noise source: about inr_db over the floor in its own (instantaneous) band,
+    centred where the sine puts it, and it covers its span over a period."""
+    q = I.Qrm("noise", 1500, 200, 12.0, 1.0, 1.0, span_hz=2000, sweep_s=8.0)
+    it = I.Interference(I.Spec(qrm=(q,)), 3, 40)
+    cents, pw = [], []
+    for k in range(32):  # quarter-second looks over one period
+        y = it.render(2.0 + k * 0.25, FS // 4, SIGMA)
+        Y = np.abs(np.fft.rfft(y)) ** 2
+        f = np.fft.rfftfreq(len(y), 1 / FS)
+        cents.append(np.sum(f * Y) / np.sum(Y))
+        pw.append(np.mean(y**2))
+    assert min(cents) < 700 and max(cents) > 2300  # 1500 -+ (2000 - 200) / 2
+    floor = SIGMA**2 / (FS / 2) * q.bw_hz
+    assert 10 * np.log10(np.mean(pw) / floor) == pytest.approx(12.0, abs=0.7)
 
 
 def test_duty_and_episodes():
@@ -79,8 +97,81 @@ def test_draw_is_in_range(draws):
     for s in specs:
         assert len(s.qrm) <= r.qrm_max
         for q in s.qrm:
-            assert I.PASSBAND_HZ[0] <= q.f_hz - q.bw_hz / 2 and q.f_hz + q.bw_hz / 2 <= I.PASSBAND_HZ[1]
-            assert r.inr_db[0] <= q.inr_db <= r.inr_db[1] and r.duty[0] <= q.duty <= r.duty[1]
+            k = (r.qrm or {}).get(q.kind, {})
+            inr, duty, on = k.get("inr_db", r.inr_db), k.get("duty", r.duty), k.get("on_s", r.on_s)
+            width = max(q.bw_hz, q.span_hz)
+            assert I.PASSBAND_HZ[0] <= q.f_hz - width / 2 and q.f_hz + width / 2 <= I.PASSBAND_HZ[1] + 1e-9
+            assert inr[0] <= q.inr_db <= inr[1] and duty[0] <= q.duty <= duty[1] and on[0] <= q.on_s <= on[1]
+            if q.span_hz > q.bw_hz:
+                assert k["inst_bw_hz"][0] <= q.bw_hz <= k["inst_bw_hz"][1] and q.span_hz >= 1.5 * q.bw_hz
+            elif "bw_hz" in k:
+                assert k["bw_hz"][0] <= q.bw_hz <= k["bw_hz"][1]
+
+
+def test_old_draws_reproduce():
+    """v1 and mild draw what they drew before onair was added (earlier studies' data reproduces)."""
+    import hashlib
+
+    def key(s):
+        im = s.impulses
+        return repr(((im.trains_per_min, im.per_train, im.gap_ms, im.height_db, im.height_sd_db, im.length_ms)
+                     if im else None, [(q.kind, q.f_hz, q.bw_hz, q.inr_db, q.on_s, q.duty) for q in s.qrm]))
+
+    for draws, digest in (("v1", "f17b414daa66df17"), ("mild", "8036fd0b0e05481f")):
+        rng = np.random.default_rng(123)
+        specs = [I.draw(rng, draws) for _ in range(500)]
+        assert hashlib.sha256("".join(map(key, specs)).encode()).hexdigest()[:16] == digest
+        assert I.DRAWS[draws].wander_db == 0 and not any(q.span_hz for s in specs for q in s.qrm)
+
+
+def test_onair_draw_shape():
+    """onair: impulses mostly alone, a few loud draws; FSK hoppers the main QRM kind, carriers ~10%;
+    noise mostly narrow and swept; passbands in their shares (ssb 0.85, narrow 0.05, flat the rest)."""
+    rng = np.random.default_rng(9)
+    specs = [I.draw(rng, "onair") for _ in range(2000)]
+    imps = [s.impulses for s in specs if s.impulses]
+    assert all(1.0 <= im.per_train <= 1.5 and im.height_sd_db == 2.0 for im in imps)
+    loud = np.mean([im.height_db > 17 for im in imps])
+    assert 0.005 < loud < 0.05
+    kinds = [q.kind for s in specs for q in s.qrm]
+    share = {k: kinds.count(k) / len(kinds) for k in I.KINDS}
+    assert share["fsk"] > 0.5 and 0.05 < share["carrier"] < 0.12
+    noise = [q for s in specs for q in s.qrm if q.kind == "noise"]
+    assert np.mean([q.span_hz > q.bw_hz for q in noise]) == pytest.approx(0.7, abs=0.06)
+    pbs = [I.draw_passband(rng) for _ in range(4000)]
+    assert sum(str(p).startswith("ssb:") for p in pbs) / 4000 == pytest.approx(0.85, abs=0.02)
+    assert pbs.count("narrow") / 4000 == pytest.approx(0.05, abs=0.015)
+    assert pbs.count(None) / 4000 == pytest.approx(0.10, abs=0.015)
+    assert len({p for p in pbs if p}) > 3000  # each station its own filter
+
+
+def test_ssb_passband_draw():
+    """draw_ssb: -6 dB edges at 150-300 Hz and 2.7-3.1 kHz apart; w48 (325-2725 Hz) above -6 dB, and from
+    450 Hz up within the tilt (+-0.75 dB); -40 dB within 300 Hz of the top edge."""
+    rng = np.random.default_rng(4)
+    for _ in range(500):
+        t = np.array(I.passband_table(I.draw_ssb(rng)), dtype=float)
+        assert np.all(np.diff(t[:, 0]) >= 0)
+        f = np.linspace(100, 3900, 3801)
+        g = np.interp(f, t[:, 0], t[:, 1])
+        lo, hi = f[np.argmax(g >= -6)], f[len(g) - 1 - np.argmax(g[::-1] >= -6)]
+        assert 150 <= lo <= 301 and 2700 <= hi - lo <= 3101
+        assert g[(f >= 325) & (f <= 2725)].min() > -6
+        w48 = g[(f >= 450) & (f <= 2725)]
+        assert w48.min() > -0.76 and w48.max() < 0.76
+        assert np.interp(hi + 300, t[:, 0], t[:, 1]) <= -40 + 1e-9
+
+
+@pytest.mark.parametrize("name", sorted(I.PASSBANDS) + ["ssb:220:3050:100:200:1.2"])
+def test_passband_shape(name):
+    """White noise through a passband: its gain per band is the table's (linear in dB between points)."""
+    x = np.random.default_rng(2).normal(size=60 * FS)
+    y = I.passband(x, name)
+    table = np.array(I.passband_table(name), dtype=float)
+    for f in (300, 1000, 2000, 2400, 2700):
+        got = 10 * np.log10(band_power(y, f - 20, f + 20) / band_power(x, f - 20, f + 20))
+        assert got == pytest.approx(np.interp(f, table[:, 0], table[:, 1]), abs=0.6)
+    assert I.passband(x, None) is x
 
 
 def _phy_session():
@@ -100,6 +191,26 @@ def test_clean_channel_hears_as_before():
     x = np.random.default_rng(1).normal(0, 0.1, 4000)
     a, b = PS.ContinuousChannel("mpg", 3.0, 9, 60), PS.ContinuousChannel("mpg", 3.0, 9, 60)
     np.testing.assert_array_equal(a.apply(x, 5.0), b.apply(x, 5.0, rx=1))
+
+
+def test_passband_is_per_station_on_signal_and_noise():
+    """Station 1's narrow passband takes a 2700 Hz tone and the floor there down
+    alike (in-band SNR unchanged); station 0 (flat) hears what a channel without
+    passbands gives; the passband reaches the station's noise profile too."""
+    PS = _phy_session()
+    x = np.cos(2 * np.pi * 2700 * np.arange(2 * FS) / FS) * 0.1
+    flat = PS.ContinuousChannel("awgn", 20.0, 5, 60)
+    ch = PS.ContinuousChannel("awgn", 20.0, 5, 60, passband=(None, "narrow"))
+    np.testing.assert_array_equal(ch.apply(x, 5.0, rx=0), flat.apply(x, 5.0, rx=0))
+    ch = PS.ContinuousChannel("awgn", 20.0, 5, 60, passband=(None, "narrow"))
+    a, b = flat.apply(x, 5.0, rx=1), ch.apply(x, 5.0, rx=1)
+    assert 10 * np.log10(band_power(b, 2690, 2710) / band_power(a, 2690, 2710)) == pytest.approx(-40, abs=1)
+    assert 10 * np.log10(band_power(b, 2600, 2650) / band_power(a, 2600, 2650)) == pytest.approx(-34, abs=2)
+    sn = PS.StationNoise(ch)
+    sn.feed(0, 30.0)
+    sn.feed(1, 30.0)
+    top = [sn.profile[i].snapshot()["noise_db"][4] - sn.profile[i].snapshot()["noise_db"][1] for i in (0, 1)]
+    assert top[0] == pytest.approx(0, abs=1) and top[1] < -6
 
 
 def test_each_station_hears_its_own_interference():

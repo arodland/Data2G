@@ -92,9 +92,11 @@ NOISE_COLS = ([f"noise_db{i}" for i in range(1, 6)] + [f"noise_tail{i}" for i in
 LINK_COLS = ["link_lost", "link_miss", "link_n"]
 ENERGY_COLS = ["energy_db", "energy_n"]  # GearShifter.energy_features at the recommendation
 HIST_COLS = ["hist_spread", "hist_snr", "hist_n"]  # GearShifter.hist_features at the recommendation
-FIELDS = FIELDS + NOISE_COLS + ["intf"] + LINK_COLS + ENERGY_COLS + HIST_COLS
+# passband: the receiving station's receive passband (interference.PASSBANDS name, "flat", or "" with --no-passband)
+FIELDS = FIELDS + NOISE_COLS + ["intf", "passband"] + LINK_COLS + ENERGY_COLS + HIST_COLS
 # --interference [DRAWS]: each station's interference drawn from data2g.interference.draw()
 INTERFERENCE = None
+PASSBAND = True  # each station's receive passband drawn (interference.session_passbands); --no-passband: none
 WANDER_DB = 0.0  # --wander: each station's floor wanders (phy_session.ContinuousChannel)
 
 
@@ -173,7 +175,9 @@ class DataPhy(LS.AuditPhy):
                 row.update(zip(ENERGY_COLS, (round(v, 3) for v in snap["energy"][:2])))
             if snap.get("hist"):
                 row.update(zip(HIST_COLS, (round(v, 4) for v in snap["hist"][:3])))
-            row["intf"] = INTF.describe(self.ch.intf[1 - (burst.slots[0].mask_id[1] & 1)].spec)
+            rx = 1 - (burst.slots[0].mask_id[1] & 1)
+            row["intf"] = INTF.describe(self.ch.intf[rx].spec)
+            row["passband"] = (self.ch.passband[rx] or "flat") if PASSBAND else ""
             self.out.append(row)
         return res
 
@@ -227,12 +231,10 @@ def session(seed):
         drift = float(rng.normal(0, 1.0))  # dB per 30 s
     cap = 0 if rng.random() < 0.25 else 2
     horizon = 600.0 if SLOW or FASTLOW or FLOOR else 300.0
-    intf = None
-    if INTERFERENCE:
-        irng = np.random.default_rng(np.random.SeedSequence([seed, 5]))
-        intf = (INTF.draw(irng, INTERFERENCE), INTF.draw(irng, INTERFERENCE))
+    intf = INTF.draw_session(seed, INTERFERENCE) if INTERFERENCE else None
+    pbs = INTF.session_passbands(seed) if PASSBAND else (None, None)
     ch = PS.ContinuousChannel(O.family(doppler), snr0, seed, horizon + 60, doppler=doppler, delay_ms=delay,
-                              interference=intf, wander_db=WANDER_DB)
+                              interference=intf, wander_db=WANDER_DB, passband=pbs)
     pols = [Explorer(random.Random(seed * 2 + i)) for i in range(2)]
     out = []
     tag = dict(seed=seed, kind=kind, doppler=round(doppler, 3), delay_ms=round(delay, 2), snr=round(snr0, 2), cap=cap)
@@ -257,9 +259,14 @@ def main():
     ap.add_argument("--severe", action="store_true", help="ITU severe profiles and 2-30 Hz Doppler (SEVERE)")
     ap.add_argument("--high", action="store_true", help="high SNR on fading channels (HIGH)")
     ap.add_argument("--kinds", default="", help="comma-separated channel kinds only (KINDS_ONLY), e.g. awgn")
-    ap.add_argument("--interference", nargs="?", const="v1", default=None, choices=sorted(INTF.DRAWS),
-                    help="each station's interference drawn from interference.DRAWS[this] (default v1)")
-    ap.add_argument("--wander", type=float, default=0.0, help="each station's floor wanders by this (dB)")
+    ap.add_argument("--interference", nargs="?", const=INTF.DEFAULT_DRAWS, default=None, choices=sorted(INTF.DRAWS),
+                    help="each station's interference drawn from interference.DRAWS[this] "
+                         f"(default {INTF.DEFAULT_DRAWS}; v1 and mild reproduce the 2026-10 rounds)")
+    ap.add_argument("--wander", type=float, default=None,
+                    help="each station's floor wanders by this (dB; default the --interference set's, else 0)")
+    ap.add_argument("--no-passband", action="store_true",
+                    help="no receive passband (sets made before #260; default: each station's drawn, "
+                         "interference.PASSBAND_SHARES)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--average-snr", action="store_true",
                     help="allow SNR against each burst's average power (without DATA2G_PEP_REF_DB)")
@@ -267,9 +274,10 @@ def main():
     if PS.PEP_REF_DB is None and not a.average_snr:
         ap.error("DATA2G_PEP_REF_DB is unset: set it (5: noise against each burst's peak, as data2g-host "
                  "transmits) or pass --average-snr")
-    global SLOW, HIGH, INTERFERENCE, WANDER_DB, KINDS_ONLY, FASTLOW, EXPLORE_FASTER, FLOOR, SEVERE
+    global SLOW, HIGH, INTERFERENCE, WANDER_DB, PASSBAND, KINDS_ONLY, FASTLOW, EXPLORE_FASTER, FLOOR, SEVERE
     # set before the pool forks: the workers inherit them
-    SLOW, HIGH, INTERFERENCE, WANDER_DB = a.slow, a.high, a.interference, a.wander
+    SLOW, HIGH, INTERFERENCE, PASSBAND = a.slow, a.high, a.interference, not a.no_passband
+    WANDER_DB = a.wander if a.wander is not None else INTF.DRAWS[a.interference].wander_db if a.interference else 0.0
     KINDS_ONLY = tuple(filter(None, a.kinds.split(",")))
     FASTLOW, EXPLORE_FASTER, FLOOR = a.fastlow, a.explore_faster, a.floor
     SEVERE = a.severe
