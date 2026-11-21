@@ -181,6 +181,19 @@ int main() {
         check::is_true(n && std::abs(n->first - (10.35 - s.NOD_HALF_S)) < 1e-9 &&
                            std::abs(n->second - (10.35 + s.NOD_HALF_S)) < 1e-9,
                        "nod window: the median, NOD_HALF_S either side");
+        const auto wl = s.window(10.0, 0.25);
+        const auto nl = s.nod_window(10.0, 0.25);
+        check::is_true(wl && std::abs(wl->first - w->first) < 1e-12 && std::abs(wl->second - (w->second + 0.25)) < 1e-12 &&
+                           nl && std::abs(nl->first - n->first) < 1e-12 && std::abs(nl->second - (n->second + 0.25)) < 1e-12,
+                       "a reply that may be held: looked for that much later");
+        s.heard(0.62, std::nullopt, 0.25);  // held: 0.37
+        s.heard(0.33, std::nullopt, 0.25);  // sent at once
+        const auto w2 = s.window(10.0);
+        check::is_true(w2 && std::abs(w2->first - (10.35 - s.TOL_S)) < 1e-12, "a held start is learned less the hold");
+        receiver::ReplySlot first;
+        first.heard(0.6, 4.5, 0.25);  // nothing to tell a held start by yet
+        const auto w3 = first.window(0.0);
+        check::is_true(w3 && std::abs(w3->first - (0.6 - s.TOL_S)) < 1e-12, "the first start is learned as it is");
     }
 
     return check::report("test_primed");

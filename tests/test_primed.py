@@ -401,6 +401,15 @@ def test_reply_slot():
     lo, hi = s.window(10.0)
     assert (lo, hi) == pytest.approx((10.35 - s.TOL_S, 10.35 + s.TOL_S)) and s.cfo == 4.5
     assert s.nod_window(10.0) == pytest.approx((10.35 - s.NOD_HALF_S, 10.35 + s.NOD_HALF_S))  # the median
+    # a reply the peer may have held 0.25 s: looked for that much later, and a start that late learned less it
+    assert s.window(10.0, 0.25) == pytest.approx((10.35 - s.TOL_S, 10.35 + s.TOL_S + 0.25))
+    assert s.nod_window(10.0, 0.25) == pytest.approx((10.35 - s.NOD_HALF_S, 10.35 + s.NOD_HALF_S + 0.25))
+    s.heard(0.62, None, 0.25)  # held: 0.37
+    s.heard(0.33, None, 0.25)  # sent at once
+    assert list(s.gaps)[-2:] == pytest.approx([0.37, 0.33]) and s.window(10.0)[0] == pytest.approx(10.35 - s.TOL_S)
+    first = ReplySlot()
+    first.heard(0.6, 4.5, 0.25)  # nothing to tell a held start by yet
+    assert list(first.gaps) == [0.6]
 
 
 def test_cpp_prime_lock_matches(native, pure):

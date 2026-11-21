@@ -115,7 +115,8 @@ void Session::write(ByteView data) {
         coalesce_until.reset();
     }
     if (build_at) {
-        build_at = coalesce_until ? *coalesce_until : -INF;  // an idle poll due: send it now (or at the hold's end), with the data
+        const double at = coalesce_until ? *coalesce_until : -INF;  // an idle poll due: send it now (or at the hold's end), with the data
+        build_at = hold ? std::min(at, *build_at) : at;  // a held reply: never later than it was due
         idle_wait = 0.0;
     }
 }
@@ -148,8 +149,11 @@ TxBurstPtr Session::poll(double now) {
     }
     if (build_at && now >= *build_at && state == SessionState::CONNECTED) {
         build_at.reset();
+        const bool held = std::exchange(hold, false);
         if (!disc(now)) {
-            queue(station->build(), now);
+            // a held reply is still a direct reply: the peer's nod search reaches REPLY_HOLD_S further for
+            // it (Engine::watch_nods), and with no answer from the host it nods
+            queue(station->build(true, held), now);
             station->answered();
         }
     }
@@ -254,9 +258,15 @@ void Session::on_rx(RxBurst& rx, double now) {
     const bool settled = limbo && !st->tx.limbo;
     if (!st->rx.out.empty() || st->last_rx_data || st->tx.pending()) last_data = now;
     if (disc(now)) return;
+    // the reply hold, either station's (REPLY_HOLD_S): this burst brought my host data and ended the peer's,
+    // and I have nothing to send, so my host's answer may ride the reply
+    const bool answer_due = st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty();
+    const std::optional<double> held_until = hold ? build_at : std::nullopt;
+    hold = false;
     if (!master()) {
-        if (settled || (st->rx.out.size() > undrained && st->peer_drained && !st->tx.pending() && pending_write.empty())) {
+        if (settled || answer_due) {
             build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
+            hold = true;
         } else {
             build_at.reset();
             queue(st->build(true, true), now);  // a direct reply: where the peer looks for a nod
@@ -272,9 +282,15 @@ void Session::on_rx(RxBurst& rx, double now) {
     // (escalated) burst: idling would leave it to wake me ~5 s later. The same in a recovery (link.Station.recovering)
     const bool busy = st->tx.pending() || st->last_rx_data || !pending_write.empty() || woke || st->peer_reply_lost
                       || st->peer_abandon || st->recovering();
-    if (busy && settled) {
+    // the hold as the callee's, but not in a recovery (answered at once, above)
+    const bool recovery = st->peer_reply_lost || st->peer_abandon || st->recovering();
+    if ((busy && settled) || (answer_due && !recovery)) {
         idle_wait = 0.0;
         build_at = now + REPLY_HOLD_S;  // poll() builds it; write() brings it forward
+        hold = true;
+    } else if (held_until && !recovery) {
+        build_at = held_until;  // another burst while I hold a reply: the hold stands
+        hold = true;
     } else if (busy) {
         idle_wait = 0.0;
         queue(st->build(true, true), now);  // a direct reply: where the peer looks for a nod
@@ -353,6 +369,7 @@ std::optional<double> Session::wake_time() {
 
 void Session::close(const std::string& why, TxBurstPtr final_burst, double now) {
     build_at.reset();
+    hold = false;
     if (state != SessionState::CLOSED) {
         events.push_back("DISCONNECTED " + why);
         if (station) log_stats("session", std::max(now, now_), connected_at, {});
