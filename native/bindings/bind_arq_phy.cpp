@@ -59,6 +59,7 @@ Heard heard_of(const py::dict& r) {
     o->est.nc = static_cast<int>(o->est.h.cols);
     o->est.n0 = e["n0"].cast<double>();
     if (e.contains("n0_k")) o->est.n0_k = vec(e["n0_k"].cast<In<double>>());
+    o->est.n0_snr = e.contains("n0_snr") ? e["n0_snr"].cast<double>() : o->est.n0;
     o->est.p_sig = e["p_sig"].cast<double>();
     o->est.spread_hz = e.contains("spread_hz") ? e["spread_hz"].cast<double>() : 0.0;
     o->est.filter_spread_hz = e.contains("filter_spread_hz") ? e["filter_spread_hz"].cast<double>() : o->est.spread_hz;

@@ -40,6 +40,8 @@ inline constexpr double SUPPORT_NOISE_Z = 3.09;  // delay_support's noise gate, 
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
 inline constexpr int PADDED_SLACK = 20;  // support_slack's padded order
 inline constexpr double PADDED_GAIN = 2.0;
+inline constexpr int SNR_SLACK = config::NCP;  // snr_noise's wider projection
+inline constexpr int SNR_MIN_DIMS = 3;  // the residual dimensions it needs
 inline constexpr double INF = std::numeric_limits<double>::infinity();
 
 // CARRIER0 + RS * (k0 + k) - FCENTER.
@@ -70,6 +72,9 @@ struct Smoothed {
     std::vector<double> keep;
 };
 Smoothed freq_smooth(const Mat<cd>& h_pilot, Support support, std::span<const double> bb, int slack = SUPPORT_SLACK);
+// snr_est's noise (equalizer.py snr_noise): n0, r are freq_smooth's for hs.
+double snr_noise(const Mat<cd>& h_pilot, const Mat<cd>& hs, double n0, int r, Support support,
+                 std::span<const double> bb);
 // The burst's projection order: SUPPORT_SLACK or PADDED_SLACK (equalizer.py).
 int support_slack(const Mat<cd>& h_pilot, Support support, std::span<const double> bb, double n0_pre = INF);
 
@@ -86,6 +91,7 @@ struct Estimate {
     Mat<cd> h;        // (n_f * 5, nc): frame f, data symbol s at row f * 5 + s
     Mat<double> mse;  // the same shape
     double n0 = 0, p_sig = 0, spread_hz = 0;
+    double n0_snr = 0;  // snr_est's noise (snr_noise; modem::snr_db)
     double filter_spread_hz = 0;  // the time filters' (refine's too); spread_hz is the reported one
     int slack = SUPPORT_SLACK;  // the support's padding (support_slack; refine's too)
     std::vector<double> n0_k;

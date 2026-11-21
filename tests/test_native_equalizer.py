@@ -85,6 +85,7 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
         assert a[2] == b[2]
         assert a[1] == pytest.approx(b[1], rel=RTOL)  # inf == inf on narrow bands
         close(a[3], b[3], "keep")
+        assert ne.snr_noise(h, b[0], b[1], b[2], sup, bb) == pytest.approx(py.snr_noise(h, b[0], b[1], b[2], sup, bb), rel=RTOL)
     assert ne.preamble_noise(reps) == pytest.approx(py.preamble_noise(reps), rel=RTOL)
     close(ne.preamble_noise_k(reps), py.preamble_noise_k(reps))
     kw = {"bb": bb, "n0_pre": py.preamble_noise(reps), "n0_pre_k": py.preamble_noise_k(reps)}
@@ -92,7 +93,7 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     assert set(got) == set(want)
     for k in ("h", "mse", "n0_k"):
         close(got[k], want[k], k)
-    for k in ("n0", "p_sig", "spread_hz", "filter_spread_hz"):
+    for k in ("n0", "n0_snr", "p_sig", "spread_hz", "filter_spread_hz"):
         assert got[k] == pytest.approx(want[k], rel=RTOL), k
     assert got["slack"] == want["slack"]
     steps = np.arange(n_p) * 0.37 - 3

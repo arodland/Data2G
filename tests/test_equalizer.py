@@ -165,3 +165,22 @@ def test_dd_time_pass_low_rank_matches_the_exact_solve(monkeypatch):
         m0 = np.maximum(m0, 1e-12 * a[6]["p_sig"])
         assert np.max(np.abs(h1 - h0) ** 2 / m0) < 1e-6
         assert np.max(np.abs(m1 - m0) / m0) < 1e-3
+
+
+def test_snr_noise_ignores_what_repeats_in_every_pilot():
+    """A fixed weak echo past the support (a radio passband's tail) and a
+    fixed per-carrier pattern (n4) read as noise in n0, not in n0_snr."""
+    from data2g import equalizer
+    from data2g.config import FS
+    from data2g.waveform import ofdm
+
+    rng = np.random.default_rng(5)
+    for band, extra in (("w", lambda bb: 0.1 * np.exp(-2j * np.pi * bb * 26 / FS)),  # -20 dB at 26 samples
+                        ("n4", lambda bb: 0.1 * np.exp(2j * np.pi * rng.uniform(size=len(bb))))):
+        bb = ofdm.band(band).bb.astype(float)
+        n_p, n0 = 40, 1e-3  # 30 dB
+        h = np.ones((n_p, len(bb)), complex) + extra(bb)
+        h += np.sqrt(n0 / 2) * (rng.standard_normal(h.shape) + 1j * rng.standard_normal(h.shape))
+        est = equalizer.estimate(h, (0, 0), bb, n0_pre=n0)
+        assert est["n0"] > 3 * n0, band
+        assert abs(10 * np.log10(est["n0_snr"] / n0)) < 1.0, band

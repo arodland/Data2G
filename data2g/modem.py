@@ -1191,7 +1191,7 @@ def slot_soft(r: Received, est: DataEstimate, slot: int) -> np.ndarray:
 
 def snr_db(est: equalizer.ChannelEstimate, band: str) -> float:
     """Pilot SNR (dB) on `band`'s carriers, in the SNR_REF_BW_HZ convention."""
-    return 10 * np.log10(est["p_sig"] / est["n0"] * BANDS[band].nc * RS / SNR_REF_BW_HZ)
+    return 10 * np.log10(est["p_sig"] / est.get("n0_snr", est["n0"]) * BANDS[band].nc * RS / SNR_REF_BW_HZ)
 
 
 def symbol_times(r: Received) -> tuple[np.ndarray, np.ndarray]:

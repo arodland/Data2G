@@ -1177,7 +1177,7 @@ std::vector<double> slot_soft(const Received& r, const DataEstimate& est, int sl
 }
 
 double snr_db(const equalizer::Estimate& est, std::string_view b) {
-    return 10 * std::log10(est.p_sig / est.n0 * band(b).nc * RS / SNR_REF_BW_HZ);
+    return 10 * std::log10(est.p_sig / est.n0_snr * band(b).nc * RS / SNR_REF_BW_HZ);
 }
 
 SymbolTimes symbol_times(const Received& r) {

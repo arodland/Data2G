@@ -144,6 +144,7 @@ py::dict est_dict(const modem::DataEstimate& e) {
     d["mse"] = np3(e.mse, S);
     d["n0"] = e.n0;
     d["n0_k"] = np(e.n0_k);
+    d["n0_snr"] = e.n0_snr;
     d["p_sig"] = e.p_sig;
     d["spread_hz"] = e.spread_hz;
     d["filter_spread_hz"] = e.filter_spread_hz;
@@ -161,6 +162,7 @@ modem::DataEstimate est_of(const py::dict& d) {
     e.mse = mat2(d["mse"].cast<In<double>>());
     e.n0 = d["n0"].cast<double>();
     if (d.contains("n0_k")) e.n0_k = vec(d["n0_k"].cast<In<double>>());
+    e.n0_snr = get<double>(d, "n0_snr", e.n0);
     e.p_sig = get<double>(d, "p_sig", 0.0);
     e.clip_ratio = d["clip_ratio"].cast<double>();
     return e;

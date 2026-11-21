@@ -318,10 +318,46 @@ class ChannelEstimate(TypedDict):
     mse: np.ndarray  # (F, 5, nc) its estimation error variance
     n0: float  # thermal noise variance per carrier
     n0_k: np.ndarray  # (nc,) the same per carrier
+    n0_snr: float  # snr_est's: n0 without what repeats in every pilot (modem.snr_db)
     p_sig: float  # mean pilot power per carrier, noise removed
     spread_hz: float  # measured Doppler spread (reported)
     filter_spread_hz: float  # the one the time filters used (refine's too)
     slack: int  # the delay support's padding the projection used (support_slack; refine's too)
+
+
+# snr_est's noise (snr_noise): the residual of a projection SNR_SLACK taps
+# wider than the support, when that leaves SNR_MIN_DIMS residual dimensions.
+SNR_SLACK = NCP
+SNR_MIN_DIMS = 3
+
+
+def snr_noise(h_pilot: np.ndarray, hs: np.ndarray, n0: float, r: int, support: tuple[int, int],
+              bb: np.ndarray = BB_FREQS) -> float:
+    """snr_est's noise (modem.snr_db; the demapper keeps n0). On air (two
+    volunteer nodes, 1,508 genie-known bursts) the pilot residual held a part
+    fixed over the burst, ~23 dB under the signal (sims ~33): it read
+    snr_est 1-1.5 dB low above 10 dB, n4 2.5-4. Part of it is the radios'
+    passband, delays the support misses: a projection a cyclic prefix
+    (SNR_SLACK) wider either side drops it, when it leaves SNR_MIN_DIMS
+    residual dimensions (with 2, nvis-d's wide supports read the noise ~1 dB
+    high; the threshold is from sims). A band with no such room and 4
+    carriers (n4) takes the residual's change over the burst instead (its
+    per-carrier mean out: every pilot symbol is the same, so what repeats in
+    all of them is not noise); that also drops the pilot symbol's own
+    distortion, which the data see as noise (it over-read 0.6-0.9 dB above
+    15 dB where the wide projection ran). Otherwise n0. `n0` and `r` are
+    freq_smooth's for `hs`; n0 inf (no residual) returns inf."""
+    if not np.isfinite(n0):
+        return n0
+    nc = len(bb)
+    U, rw, rw_full = _support_basis(np.asarray(bb, dtype=np.float64).tobytes(), int(support[0]), int(support[1]), SNR_SLACK)
+    if nc - rw_full >= SNR_MIN_DIMS:
+        return float(np.mean(np.abs(h_pilot - (h_pilot @ np.conj(U)) @ U.T) ** 2) * nc / (nc - rw))
+    if nc <= 4:
+        n_p = len(h_pilot)
+        dev = (h_pilot - hs) - np.mean(h_pilot - hs, axis=0)
+        return float(np.mean(np.abs(dev) ** 2) * nc / (nc - r) * n_p / (n_p - 1))
+    return n0
 
 
 def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,
@@ -352,8 +388,9 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
         n0_k = per_carrier_noise(np.mean(np.abs(h_pilot - hs) ** 2, axis=0) / np.maximum(keep, 1e-3), n_p)
     elif n0_pre_k is not None and len(n0_pre_k) == nc:
         n0_k = per_carrier_noise(n0_pre_k, PREAMBLE_DIFFS)
+    n0_snr = snr_noise(h_pilot, hs, n0, r, support, bb)
     if not np.isfinite(n0):
-        n0 = n0_pre
+        n0 = n0_snr = n0_pre
     if not np.isfinite(n0):
         raise ValueError("no noise estimate: pass n0_pre on a band this narrow")
     n0_s = n0 * r / nc  # noise left on a smoothed pilot
@@ -376,7 +413,7 @@ def estimate(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_
         mse[f] = np.maximum(p_sig - np.real(np.sum(W * np.conj(Rdp), axis=1)), 0)[:, None]
     if n0_k is None or not PER_CARRIER_NOISE:
         n0_k = np.full(nc, n0)
-    return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "p_sig": p_sig, "spread_hz": spread,
+    return {"h": h, "mse": mse, "n0": n0, "n0_k": n0_k, "n0_snr": n0_snr, "p_sig": p_sig, "spread_hz": spread,
             "filter_spread_hz": fspread, "slack": slack}
 
 

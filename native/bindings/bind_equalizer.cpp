@@ -55,6 +55,10 @@ void bind_equalizer(py::module_& m) {
         auto r = eq::freq_smooth(mat(h), s, bb_of(bb), slack);
         return py::make_tuple(np(r.hs), r.n0, r.r, np(r.keep));
     }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("slack") = eq::SUPPORT_SLACK);
+    e.def("snr_noise", [](const In<cd>& h, const In<cd>& hs, double n0, int r, eq::Support s,
+                          const std::optional<In<double>>& bb) {
+        return eq::snr_noise(mat(h), mat(hs), n0, r, s, bb_of(bb));
+    }, py::arg("h_pilot"), py::arg("hs"), py::arg("n0"), py::arg("r"), py::arg("support"), no_bb);
     e.def("support_slack", [](const In<cd>& h, eq::Support s, const std::optional<In<double>>& bb, double n0_pre) {
         return eq::support_slack(mat(h), s, bb_of(bb), n0_pre);
     }, py::arg("h_pilot"), py::arg("support"), no_bb, py::arg("n0_pre") = eq::INF);
@@ -79,6 +83,7 @@ void bind_equalizer(py::module_& m) {
         d["mse"] = np3(r.mse, static_cast<std::size_t>(r.n_f), S);
         d["n0"] = r.n0;
         d["n0_k"] = np(r.n0_k);
+        d["n0_snr"] = r.n0_snr;
         d["p_sig"] = r.p_sig;
         d["spread_hz"] = r.spread_hz;
         d["filter_spread_hz"] = r.filter_spread_hz;

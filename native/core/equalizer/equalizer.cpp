@@ -219,6 +219,26 @@ Smoothed freq_smooth(const Mat<cd>& h, Support support, std::span<const double> 
     return out;
 }
 
+double snr_noise(const Mat<cd>& h, const Mat<cd>& hs, double n0, int r, Support support, std::span<const double> bb) {
+    if (!std::isfinite(n0)) return n0;
+    const int nc = static_cast<int>(bb.size());
+    const auto w = support_basis(bb, support.first, support.second, SNR_SLACK);
+    if (nc - w->r_full >= SNR_MIN_DIMS) return mean_sq_diff(h, project(h, *w)) * nc / (nc - w->r);
+    if (nc <= 4) {  // n4: the residual's change over the burst, its per-carrier mean out
+        const size_t n_p = h.rows, NC = h.cols;
+        std::vector<cd> mean(NC, 0.0);
+        for (size_t p = 0; p < n_p; ++p)
+            for (size_t c = 0; c < NC; ++c) mean[c] += h[p][c] - hs[p][c];
+        for (cd& m : mean) m /= static_cast<double>(n_p);
+        double s = 0.0;
+        for (size_t p = 0; p < n_p; ++p)
+            for (size_t c = 0; c < NC; ++c) s += sq_abs(h[p][c] - hs[p][c] - mean[c]);
+        const double np = static_cast<double>(n_p);
+        return s / (np * nc) * nc / (nc - r) * np / (np - 1);
+    }
+    return n0;
+}
+
 int support_slack(const Mat<cd>& h, Support support, std::span<const double> bb, double n0_pre) {
     const auto t = support_basis(bb, support.first, support.second, SUPPORT_SLACK);
     const auto p = support_basis(bb, support.first, support.second, PADDED_SLACK);
@@ -357,7 +377,8 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
     } else if (static_cast<int>(n0_pre_k.size()) == nc) {
         e.n0_k = per_carrier_noise(n0_pre_k, PREAMBLE_DIFFS);
     }
-    if (!std::isfinite(n0)) n0 = n0_pre;
+    double n0_snr = snr_noise(h_pilot, hs, n0, sm.r, support, bb);
+    if (!std::isfinite(n0)) n0 = n0_snr = n0_pre;
     if (!std::isfinite(n0)) throw std::invalid_argument("no noise estimate: pass n0_pre on a band this narrow");
     const double n0_s = n0 * sm.r / nc;
     const double spread = measure_spread(hs, n0_s);  // reported (a predictor input)
@@ -402,6 +423,7 @@ Estimate estimate(const Mat<cd>& h_pilot, Support support, std::span<const doubl
     }
     if (e.n0_k.empty() || !PER_CARRIER_NOISE) e.n0_k.assign(static_cast<size_t>(nc), n0);
     e.n0 = n0;
+    e.n0_snr = n0_snr;
     e.p_sig = p_sig;
     e.spread_hz = spread;
     e.filter_spread_hz = fspread;
