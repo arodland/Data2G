@@ -154,3 +154,49 @@ def test_recordings_carry_it(tmp_path):
     assert rx and all("noise" in e for e in rx)
     got = [e["noise"] for e in rx if e["noise"]]
     assert all(len(g["noise_db"]) == len(g["noise_tail_db"]) == len(NoiseProfile.BANDS_HZ) for g in got)
+
+
+def agc_stream(agc: bool):
+    """40 s of white noise with a 5 s burst (1300-1750 Hz noise, 15 dB over
+    the floor in SNR_REF_BW_HZ) from 30 s, through a receiver AGC or not."""
+    from data2g import agc as AGC
+
+    rng = np.random.default_rng(7)
+    n, sigma = 40 * FS, 0.1
+    x = rng.normal(0, sigma, n)
+    b = np.fft.rfft(rng.normal(size=5 * FS))
+    f = np.fft.rfftfreq(5 * FS, 1 / FS)
+    b[(f < 1300) | (f >= 1750)] = 0
+    s = np.fft.irfft(b, 5 * FS)
+    s *= np.sqrt(sigma ** 2 * 2500 / (FS / 2) * 10 ** 1.5 / np.mean(s ** 2))
+    x[30 * FS:35 * FS] += s
+    return AGC.apply(AGC.Spec(0.0, 30.0, 0.005, 0.5) if agc else None, x, sigma ** 2)
+
+
+def test_span_snr_gauges_agc():
+    """Receiver AGC drops the gain under a strong burst (issue #257): the
+    out-of-band gauge reads the burst's SNR as without it; the floor alone
+    reads it ~10 dB low."""
+    got = {}
+    for agc in (False, True):
+        p = NoiseProfile()
+        p.mark(30.0, 35.0)
+        feed(p, agc_stream(agc))
+        got[agc] = p.span_snr_db(p.span_spectra(30.0, 35.0), 1300, 1750)
+        if agc:
+            p.GAUGE_HZ = (0.0, 0.0)
+            got["ungauged"] = p.span_snr_db(p.span_spectra(30.0, 35.0), 1300, 1750)
+    assert abs(got[True] - got[False]) < 1.0, got
+    assert got["ungauged"] < got[False] - 8, got
+
+
+def test_span_snr_native_matches(native):
+    """The C++ span_snr_db (the AGC gauge with it) on the same audio and marks."""
+    for agc in (False, True):
+        ps = [NoiseProfile(), native.receiver.NoiseProfile()]
+        for p in ps:
+            p.mark(30.0, 35.0)
+            feed(p, agc_stream(agc))
+        for start, end, lo, hi in ((30.0, 35.0, 1300, 1750), (30.0, 35.0, 325, 2725), (10.0, 14.0, 950, 2100)):
+            py = ps[0].span_snr_db(ps[0].span_spectra(start, end), lo, hi)
+            assert ps[1].span_snr_db(start, end, lo, hi) == pytest.approx(py, rel=1e-9, abs=1e-9)

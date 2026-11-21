@@ -112,6 +112,21 @@ toward the recordings.
 Older sets carry no link-history or energy columns: their rows read as "no
 history" (the inputs' flag 0).
 
+### Available, not yet in a set
+
+- `--agc` (issue #257): each station's receiver AGC drawn from
+  `data2g.agc.draw()` (none 1/4 of the time, else threshold 0-6 dB over the
+  floor, depth 10-30 dB, attack 5-50 ms, release 0.1-3 s), applied to every
+  burst it hears with its noise (`phy_session.ContinuousChannel(agc=)`). The
+  range runs from none to a bit more than two volunteer nodes showed on air:
+  the gain under a burst fell about as far as its `snr_est` within 0.1 s and
+  came back over 1-3 s. Rows get an `agc` column (the receiving station's,
+  empty for none). Off by default: without the flag nothing changes.
+- The energy reading (`NoiseProfile.span_snr_db`) scales its floor by the
+  out-of-band level's fall under the burst (#257). Without AGC it changes the
+  sims' readings by little (see the PR); sets made before it carry the
+  ungauged reading.
+
 ## Offline sets
 
 `outcome_data.py`: one sample is a measured history plus 4 candidate bursts

@@ -137,15 +137,27 @@ std::optional<double> NoiseProfile::span_snr_db(const std::vector<Spectrum>& spe
                                                 const std::vector<Spectrum>* floor_spectra) const {
     const std::size_t n_ref = floor_spectra ? floor_spectra->size() : kept_spec_.size();
     if ((!floor_spectra && n_ref < MIN_BLOCKS) || n_ref == 0 || spectra.empty()) return std::nullopt;
-    const auto band = band_bins(lo, hi);
-    std::vector<double> ref, pw;
-    if (floor_spectra)
-        for (const auto& s : *floor_spectra) ref.push_back(band_mean(s, band));
-    else
-        for (const auto& s : kept_spec_) ref.push_back(band_mean(s, band));
-    for (const auto& s : spectra) pw.push_back(band_mean(s, band));
-    const double floor = dsp::quantile(ref, 0.5);
-    const double power = dsp::pairwise_sum(pw) / static_cast<double>(pw.size());
+    // over a set of bins: (the floor's median block power, the span's mean)
+    const auto level = [&](const std::vector<std::size_t>& bins) {
+        std::vector<double> ref, pw;
+        if (floor_spectra)
+            for (const auto& s : *floor_spectra) ref.push_back(band_mean(s, bins));
+        else
+            for (const auto& s : kept_spec_) ref.push_back(band_mean(s, bins));
+        for (const auto& s : spectra) pw.push_back(band_mean(s, bins));
+        return std::pair{dsp::quantile(ref, 0.5), dsp::pairwise_sum(pw) / static_cast<double>(pw.size())};
+    };
+    auto [floor, power] = level(band_bins(lo, hi));
+    // the AGC gauge: GAUGE_LO_HZ..GAUGE_HI_HZ outside lo..hi and its guard
+    std::vector<std::size_t> gauge;
+    for (const auto k : band_bins(GAUGE_LO_HZ, GAUGE_HI_HZ)) {
+        const double f = static_cast<double>(k) * config::FS / BLOCK;
+        if (f < lo - GAUGE_GUARD_HZ || f >= hi + GAUGE_GUARD_HZ) gauge.push_back(k);
+    }
+    if (!gauge.empty()) {
+        const auto [g_floor, g_power] = level(gauge);
+        if (g_floor > 0) floor *= std::min(1.0, std::max(g_power / g_floor, GAUGE_MIN));
+    }
     if (floor <= 0) return std::nullopt;
     return 10 * std::log10(std::max(power / floor - 1, 1e-3) * (hi - lo) / config::SNR_REF_BW_HZ);
 }

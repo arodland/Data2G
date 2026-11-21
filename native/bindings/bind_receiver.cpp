@@ -122,6 +122,9 @@ void bind_receiver(py::module_& m) {
         .def("span_z", [](const receiver::NoiseProfile& p, double start, double end, double lo, double hi) {
             return p.span_z(p.span_spectra(start, end), lo, hi);  // engine.py's span_z(span_spectra(start, end), lo, hi)
         })
+        .def("span_snr_db", [](const receiver::NoiseProfile& p, double start, double end, double lo, double hi) {
+            return p.span_snr_db(p.span_spectra(start, end), lo, hi);  // engine.py's _span_snr
+        })
         .def("snapshot", [](const receiver::NoiseProfile& p) -> py::object {
             const auto s = p.snapshot();
             if (!s) return py::none();

@@ -194,8 +194,18 @@ class NoiseProfile:
     PIECE = FS // 100  # impulse detection: 10 ms pieces
     IMPULSE_X = 10.0  # 20 dB
     RECENT = 400  # blocks (40 s) of spectra kept for span energy (span_snr_db)
+
+    # span_snr_db's AGC gauge: the passband outside the burst's band (less a
+    # guard), whose level change from the floor is the receiver's AGC gain
+    # change under the burst (issue #257: on air it falls about as much as
+    # the burst's SNR, 5-20 dB, with a <0.1 s attack)
+    GAUGE_HZ = (150.0, 3100.0)
+    GAUGE_GUARD_HZ = 50.0
+    GAUGE_MIN = 1e-3  # the most it scales the floor down (30 dB)
+
     MUTE_X = 0.01  # 20 dB under the kept median: a mute (0 turns it off)
     MUTE_PAD_S = 1.0
+
 
     def __init__(self):
         f = np.fft.rfftfreq(self.BLOCK, 1 / FS)
@@ -264,13 +274,22 @@ class NoiseProfile:
         None without a floor or blocks. `spectra`: the burst's block power
         spectra (spectrum(); span_spectra() for audio already fed).
         `floor_spectra`: the noise to measure against instead of the kept
-        blocks (the sim's noise is set per burst, against its peak)."""
+        blocks (the sim's noise is set per burst, against its peak).
+        Receiver AGC: the floor is scaled by the out-of-band level's fall
+        under the burst (GAUGE_HZ outside lo..hi; a rise is not used), so
+        the noise it measures against is the burst's own."""
         ref = self.kept_spec if floor_spectra is None else floor_spectra
         if (floor_spectra is None and len(ref) < self.MIN_BLOCKS) or not len(ref) or not len(spectra):
             return None
         band = self._in_band(lo, hi)
         floor = float(np.median([s[band].mean() for s in ref]))
         power = float(np.mean([s[band].mean() for s in spectra]))
+        gauge = self._in_band(*self.GAUGE_HZ) & ~self._in_band(lo - self.GAUGE_GUARD_HZ, hi + self.GAUGE_GUARD_HZ)
+        if gauge.any():
+            g_floor = float(np.median([s[gauge].mean() for s in ref]))
+            if g_floor > 0:
+                g = float(np.mean([s[gauge].mean() for s in spectra])) / g_floor
+                floor *= min(1.0, max(g, self.GAUGE_MIN))
         if floor <= 0:
             return None
         return float(10 * np.log10(max(power / floor - 1, 1e-3) * (hi - lo) / SNR_REF_BW_HZ))

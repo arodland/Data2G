@@ -860,7 +860,8 @@ class Engine:
         reading is at least that less ENERGY_FLOOR_DB. Receiver AGC lifts the
         gaps' noise under a strong signal: on air (recordings/20261021-161109,
         20 dB snr_est) the gaps read 23 dB louder out of band than the bursts,
-        the energy ~0 dB, and the shifter held w48-qpsk-r1/2."""
+        the energy ~0 dB, and the shifter held w48-qpsk-r1/2. span_snr_db now
+        scales its floor by the out-of-band fall under the burst (issue #257)."""
         snr = self._span_snr(start, end, mode)
         e = None if snr is None else snr + PHY.peak_db(mode, self._rx_cap())
         if e is not None and floor_db is not None:  # a reading floored, never one made up
