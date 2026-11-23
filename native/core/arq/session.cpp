@@ -72,6 +72,13 @@ Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_tu
       rng(rng_ ? std::move(rng_) : std::make_shared<DefaultRng>()), aliases(std::move(aliases_)),
       stats_interval_s(stats_interval_s_) {}
 
+// session._robust_start: the connect frame came in the retries' mode, so the cap's connect mode did not get
+// through: the station starts at the top of the escalation floor (it decays as any does).
+void Session::robust_start(const std::string& mode) {
+    const std::string retry = policy->connect_mode(cap, 1);
+    if (mode == retry && mode != policy->connect_mode(cap, 0)) station->esc_floor = MAX_ESCALATION;
+}
+
 std::shared_ptr<Station> Session::make_station(int direction, bool master_, int key) {
     auto st = std::make_shared<Station>(direction, policy, master_, key, std::nullopt, cap, chat);
     st->nod = nods;  // nods (docs/arq.md §3b): a session's station, unless the host turned them off
@@ -666,6 +673,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         cap = std::min(c.cap, cap);
         peer_t_turn = c.t_turn10 / 10.0;
         station = make_station(1, false, session_key(caller, call, n));
+        robust_start(f.mode);
         flush_writes();
         connected(now);
         events.push_back("CONNECTED " + caller);
@@ -677,6 +685,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         cap = std::min(a.cap, cap);
         peer_t_turn = a.t_turn10 / 10.0;
         station = make_station(0, true, session_key(call, peer, nonce));
+        robust_start(f.mode);
         flush_writes();
         connected(now);
         events.push_back("CONNECTED " + peer);

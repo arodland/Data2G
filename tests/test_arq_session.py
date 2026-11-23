@@ -211,6 +211,46 @@ def _rx(burst):
     return FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0})
 
 
+@pytest.mark.parametrize("first_try_heard", [True, False])
+def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first_try_heard):
+    """The cap's connect mode did not get through and the retry's did: both
+    stations start at the top of the escalation floor, and the caller's first
+    burst is a robust control-only one, not the OFDM fallback (which took two
+    timeouts, ~15 s, to give way to the robust mode). A session made by the
+    first try starts as before."""
+    from data2g.arq import link as L, policy as G
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    burst, t = a.poll(0.0), 2.0
+    assert burst.submode == G.CONNECT[2]
+    a.on_tx_end(burst, t)
+    if not first_try_heard:  # lost: the retry goes in the robust mode
+        burst = None
+        while burst is None and t < 60:
+            t = max(t + 0.1, a.next_event() or t)
+            burst = a.poll(t)
+        assert burst.submode == G.ROBUST_CONNECT
+        t += 5.0
+        a.on_tx_end(burst, t)
+    b.on_rx(_rx(burst), t + 0.3)
+    ack = b.poll(t + 0.3)
+    assert b.state == S.CONNECTED and ack.submode == burst.submode
+    b.on_tx_end(ack, t + 5.3)
+    a.on_rx(_rx(ack), t + 5.6)
+    assert a.state == S.CONNECTED
+    floor = 0 if first_try_heard else L.MAX_ESCALATION
+    assert (a.station.esc_floor, b.station.esc_floor) == (floor, floor)
+    mine = a.poll(t + 5.6)
+    if first_try_heard:
+        assert mine.submode == G.FALLBACK[2]
+    else:
+        assert mine.submode == G.ROBUST_CONNECT and len(mine.slots) == 1
+
+
 @pytest.mark.parametrize("when", ["before", "between"])
 def test_disconnect_drops_a_connect_not_yet_on_air(when):
     """DISCONNECT with no CONNECT on air ends the dial at the next poll, with

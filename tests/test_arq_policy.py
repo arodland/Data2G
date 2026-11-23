@@ -201,6 +201,10 @@ def test_robust_floor_sends_control_only_bursts_robust():
     st.tx = SimpleNamespace(pending=lambda: True, base=0)
     st.peer_recommend = G.encode("fsk32r62-r1/2")
     assert g.choose(st, 0)[0] == "fsk32r62-r1/2"  # data still follows the recommendation
+    st.peer_recommend = None  # ... once there is one: until then control only, in the robust mode
+    assert g.choose(st, 0) == (G.ROBUST_CONNECT, 1)
+    st.esc_floor = 0
+    assert g.choose(st, 0) == (G.FALLBACK[2], 2)
 
 
 def test_lost_data_steps_down_the_ladder():

@@ -81,7 +81,12 @@ std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int 
         const Mode* r = st.peer_reply_recommend ? decode(*st.peer_reply_recommend) : nullptr;
         return {r && std::find(ok.begin(), ok.end(), r) != ok.end() ? r->name : fallback(st.cap), 2};
     }
-    if (!rec) return {fallback(st.cap), 2};
+    if (!rec) {
+        // nothing recommended yet and my floor is the robust mode (session._robust_start): control only, in it
+        if (st.esc_floor >= ROBUST_ESCALATION)
+            return {last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ ? ROBUST_FAST : ROBUST_CONNECT, 1};
+        return {fallback(st.cap), 2};
+    }
     const Mode* m = decode(*rec);
     if (!m || std::find(ok.begin(), ok.end(), m) == ok.end()) return {fallback(st.cap), 2};
     return {m->name, slots_for(*m, SIZE_S.at(st.peer_size_hint), st.pending, st.peer_wants_dup)};

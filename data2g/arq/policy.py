@@ -349,6 +349,10 @@ class GearShifter(L.Policy):
             reply = decode(st.peer_reply_recommend) if st.peer_reply_recommend is not None else None
             return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
         if rec is None:
+            if st.esc_floor >= ROBUST_ESCALATION:
+                # nothing recommended yet and my floor is the robust mode (a session
+                # that connected in it, session._robust_start): control only, in it
+                return self.robust_mode(), 1
             return FALLBACK[cap], 2
         mode = decode(rec)
         if mode is None or MODES[mode] not in allowed(cap):

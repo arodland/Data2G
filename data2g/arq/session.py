@@ -579,6 +579,24 @@ class Session:
             return {"key": key, "body": body, "mode": rx.submode} if body else None
         return self._primed_frame(rx)
 
+    def _robust_start(self, mode: str):
+        """The connect frame that made this session came in the retries' mode
+        (policy.connect_mode's robust one), so the cap's connect mode did not
+        get through: the station starts at the top of the escalation floor,
+        its control-only bursts in the robust mode from the first turn, and
+        the floor decays as any does (link.FLOOR_DECAY_TURNS). Starting at
+        the bottom, the caller's first bursts went in the OFDM fallback and
+        reached the robust mode two timeouts (~15 s) later: 335 unread OFDM
+        bursts and 13% of the time of 160 sessions at -8 dB and under.
+        Sessions, 40 seeds a point, 64 B each way in 180 s, as it was -> so:
+        completed AWGN -14 dB 39 -> 40, NVIS -10 30 -> 35, MPP-like (1 Hz,
+        2 ms) -12 22 -> 30, -10 37 -> 40; mean time AWGN -12 90 -> 72 s,
+        2 ms -10 128 -> 96 s; AWGN -8 51 -> 53 s (the OFDM ACK modes would
+        have worked there); from -2 dB up no session takes this path."""
+        retry = self.policy.connect_mode(self.cap, 1)
+        if mode == retry and mode != self.policy.connect_mode(self.cap, 0):
+            self.station.esc_floor = L.MAX_ESCALATION
+
     def _primed_frame(self, rx) -> dict | None:
         """A connect frame that failed blind, retried primed (docs/arq.md §3a):
         the caller knows nearly all of its CONNECT_ACK (the nonce it sent, its
@@ -690,6 +708,7 @@ class Session:
             self.peer_t_turn = c.t_turn10 / 10
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)
             self.events.append(f"CONNECTED {caller}")
@@ -703,6 +722,7 @@ class Session:
             self.peer_t_turn = a.t_turn10 / 10
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)
             self.events.append(f"CONNECTED {self.peer}")
