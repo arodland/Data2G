@@ -207,6 +207,30 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
 
 
+def test_connect_retries_end_in_the_fast_fading_robust_mode():
+    """Nothing is measured before a session: the retries go in
+    ROBUST_CONNECT (four, their soft bits adding), then one in ROBUST_FAST,
+    whose wider tones survive fast fading (30 Hz / 7 ms, 0 dB: 2 of 8
+    sessions connected with every retry in ROBUST_CONNECT, 8 of 8 with the
+    last in ROBUST_FAST). One mode on FM."""
+    from data2g.arq import policy as G
+
+    g = G.GearShifter()
+    want = [G.CONNECT[2]] + [G.ROBUST_CONNECT] * G.ROBUST_CONNECT_TRIES + [G.ROBUST_FAST]
+    assert len(want) == S.CONNECT_TRIES and [g.connect_mode(2, k) for k in range(S.CONNECT_TRIES)] == want
+    assert g.connect_mode(2, 12) == G.ROBUST_FAST  # a host's RETRIES past the default
+    a = S.Session("W1AW", g, rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    t, sent = 0.0, []
+    while a.state == S.CONNECTING and t < 300:
+        burst = a.poll(t)
+        if burst is not None:
+            sent.append(burst.submode)
+            a.on_tx_end(burst, t + 4.2)  # lost: nobody hears it
+        t = max(t + 0.1, a.next_event() or t)
+    assert sent == want and a.state == S.CLOSED
+
+
 def _rx(burst):
     return FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0})
 

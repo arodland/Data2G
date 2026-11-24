@@ -687,7 +687,7 @@ characters plus SSID, space padded at the end (a space inside a name is kept).
 | CONNECT_NAK | nonce echo, reason: 1 version, 2 not listening, 3 busy (a session or a call of its own under way), 4 refused by the host (ACCEPT couldn't connect) |
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
-CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+CONNECT retries: 6 tries, 3-5 s apart with jitter, then fail to the host.
 A CONNECT_NAK ends them at once: the caller closes with `refused: <reason>`.
 
 A CONNECT addressed to a station is decoded in every state, so it is always
@@ -1042,10 +1042,12 @@ off (Python and native) for A/B runs.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
   - **RETRIES** answers `RETRIES n`: the CONNECT retries after the first try
-    (default 4, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
+    (default 5, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
     only, 0-20: OK, else WRONG. They apply to this command client's later
     CONNECTs, not one under way, and go back to the default when it leaves.
-    Retries after the first go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart.
+    The first four retries go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart,
+    and any after them in ROBUST_FAST (fsk8r50-r1/3), for fast fading:
+    nothing is measured before a session.
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).

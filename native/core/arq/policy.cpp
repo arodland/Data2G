@@ -49,7 +49,7 @@ std::string_view fallback(int cap) {
 
 std::string_view connect_mode(int cap, int tries) {
     cap_hz(cap);
-    if (tries) return ROBUST_CONNECT;
+    if (tries) return tries <= ROBUST_CONNECT_TRIES ? ROBUST_CONNECT : ROBUST_FAST;  // policy.py connect_mode
     return cap == 0 ? "n10-qpsk-r1/3" : "qpsk-r1/5";
 }
 

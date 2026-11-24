@@ -1015,7 +1015,7 @@ def test_retries_sets_this_clients_connect_retries():
     a, b = Host(Engine("W1AW", seed=75)), Host(Engine("K2XYZ", seed=76))  # b: not listening, never answers
     for line in ("RETRIES", "RETRIES -1", "RETRIES 21", "RETRIES x", "RETRIES 1.0", "RETRIES 001", "RETRIES"):
         a.command(line)
-    assert a.out_cmd == ["RETRIES 4"] + ["WRONG"] * 4 + ["OK", "RETRIES 1"]
+    assert a.out_cmd == ["RETRIES 5"] + ["WRONG"] * 4 + ["OK", "RETRIES 1"]
     a.command("CONNECT W1AW N0CALL")
 
     def gave_up():
@@ -1025,7 +1025,7 @@ def test_retries_sets_this_clients_connect_retries():
     assert a.engine.session.close_reason == "NO_ANSWER" and a.engine.session._tries == 2  # the first and one retry
     a.client_gone()
     a.command("RETRIES")
-    assert a.out_cmd[-1] == "RETRIES 4"  # the default again: the setting was the client's
+    assert a.out_cmd[-1] == "RETRIES 5"  # the default again: the setting was the client's
 
 
 def test_the_shifter_hears_each_peer_bursts_energy():

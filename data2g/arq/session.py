@@ -32,7 +32,7 @@ VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: 
 # 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply
 # (nods, docs/arq.md §3b, need no bump: each side says it knows them, T_NODS; nor T_REPLY only on change,
 # §8a: T_KEEP)
-CONNECT_TRIES = 5
+CONNECT_TRIES = 6  # the cap's connect mode, policy.ROBUST_CONNECT_TRIES in ROBUST_CONNECT, one in ROBUST_FAST
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
 # failed connect frames further apart are not one CONNECT's tries (a robust try and its wait: under 15 s)
