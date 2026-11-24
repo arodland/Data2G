@@ -70,7 +70,7 @@ def import_native():
 # the C++ tables do not have: everything but the OFDM and audio providers stays
 # Python (the shifter too: gear.GEAR_STUDY_ENV lists it).
 CPM_SOFT_ENV = ("DATA2G_CPM_LEAK", "DATA2G_CPM_LEAK_K", "DATA2G_CPM_CTL_SQ", "DATA2G_CPM_SPILL")
-CPM_SOFT_PY = {"cpm", "receiver", "phy", "engine", "host"}
+CPM_SOFT_PY = {"cpm", "receiver", "phy", "engine", "host", "arq"}  # (arq: the C++ Station and Session)
 CPM_MODE_ENV = ("DATA2G_CPM_R23",)
 CPM_MODE_NATIVE = {"base", "waveform", "modem", "audio"}
 

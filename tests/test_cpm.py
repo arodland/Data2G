@@ -284,6 +284,7 @@ def r23_offered(monkeypatch):
         c.cache_clear()
 
 
+@pytest.mark.python_only("fsk32r62-r2/3 is not in native")
 def test_r23_announced_at_index_4_and_older_words_unchanged(r23_offered):
     """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
     the two older modes' words are what they were, the recommendation codes
