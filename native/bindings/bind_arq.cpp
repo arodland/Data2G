@@ -160,8 +160,8 @@ void bind_arq(py::module_& m) {
     a.def("shifted", [](const py::dict& m, double shift) { return to_dict(arq::shifted(measured(m), shift)); });
     a.def("cap_hz", &arq::cap_hz);
     a.def("fallback", [](int cap) { return std::string(arq::fallback(cap)); });
-    a.def("connect_mode", [](int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); },
-          py::arg("cap"), py::arg("tries") = 0);
+    a.def("connect_mode", [](int cap, int tries, bool last) { return std::string(arq::connect_mode(cap, tries, last)); },
+          py::arg("cap"), py::arg("tries") = 0, py::arg("last") = false);
     a.def("width_hz", [](const std::string& n) { return arq::width_hz(amode(n)); });
     a.def("allowed", [](int cap) {
         std::vector<std::string> out;

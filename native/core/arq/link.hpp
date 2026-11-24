@@ -111,7 +111,7 @@ public:
     virtual std::string measured_extra() { return {}; }  // after snr_est: spread, delay, MI
     // session
     virtual double airtime(const std::string&, int /*n_cw*/, bool /*dup*/) { return 0.0; }
-    virtual std::string connect_mode(int /*cap*/, int /*tries*/) { return {}; }
+    virtual std::string connect_mode(int /*cap*/, int /*tries*/, bool /*last*/) { return {}; }  // last: a CONNECT's last try
     // seconds past t_turn to wait for a reply to `burst` (nullopt: none, REPLY_START_S alone)
     virtual std::optional<double> reply_hold(Station&, const TxBurst&) { return std::nullopt; }
     // engine: the receiver's measurements of a peer burst
