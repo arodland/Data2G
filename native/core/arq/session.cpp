@@ -72,11 +72,18 @@ Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_tu
       rng(rng_ ? std::move(rng_) : std::make_shared<DefaultRng>()), aliases(std::move(aliases_)),
       stats_interval_s(stats_interval_s_) {}
 
-// session._robust_start: the connect frame came in the retries' mode, so the cap's connect mode did not get
-// through: the station starts at the top of the escalation floor (it decays as any does).
+// session._robust_start: the connect frame came in the retries' mode, so the cap's connect mode was not
+// answered. One decision, the caller's: if its reading of the CONNECT_ACK says the path is why
+// (Policy::weak_path), it starts at the top of the escalation floor (it decays as any does); the callee
+// follows the mode of the caller's first burst (on_rx).
 void Session::robust_start(const std::string& mode) {
-    const std::string retry = policy->connect_mode(cap, 1);
-    if (mode == retry && mode != policy->connect_mode(cap, 0)) station->esc_floor = MAX_ESCALATION;
+    if (mode != policy->connect_mode(cap, 1) || mode == policy->connect_mode(cap, 0)) return;
+    if (!station->master) {
+        follow_start = true;
+    } else if (policy->weak_path()) {
+        log_write(LOG, INFO, format("connected in %s on a weak path: starting at the robust floor", mode.c_str()));
+        station->esc_floor = MAX_ESCALATION;
+    }
 }
 
 std::shared_ptr<Station> Session::make_station(int direction, bool master_, int key) {
@@ -253,6 +260,10 @@ void Session::on_rx(RxBurst& rx, double now) {
     const size_t undrained = st->rx.out.size();
     const bool limbo = st->tx.limbo.has_value();
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
+    if (follow_start) {  // the callee, connected in the robust mode: as the caller started (robust_start)
+        follow_start = false;
+        if (policy->robust(rx.submode())) st->esc_floor = MAX_ESCALATION;
+    }
     heard(now);
     if (st->state == LinkState::FAILED) {
         close("LINK_FAILED " + st->fail_reason);
@@ -673,6 +684,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         cap = std::min(c.cap, cap);
         peer_t_turn = c.t_turn10 / 10.0;
         station = make_station(1, false, session_key(caller, call, n));
+        follow_start = false;
         robust_start(f.mode);
         flush_writes();
         connected(now);
@@ -685,6 +697,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         cap = std::min(a.cap, cap);
         peer_t_turn = a.t_turn10 / 10.0;
         station = make_station(0, true, session_key(call, peer, nonce));
+        follow_start = false;
         robust_start(f.mode);
         flush_writes();
         connected(now);

@@ -690,11 +690,15 @@ characters plus SSID, space padded at the end (a space inside a name is kept).
 CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
 A CONNECT_NAK ends them at once: the caller closes with `refused: <reason>`.
 
-A session whose connect frame came in the retries' mode (the callee's CONNECT, the
-caller's CONNECT_ACK) starts at the top of the escalation floor (§6): the cap's connect
-mode did not get through, so control-only bursts go in the robust mode from the first
-turn, and the caller's first burst is one of them. The floor decays as any does. A
-session made by the first try starts at the bottom, as before (`Session._robust_start`).
+A session whose connect frame came in the retries' mode was not answered in the cap's
+connect mode. If the path is why, it starts at the top of the escalation floor (§6):
+control-only bursts go in the robust mode from the first turn, the caller's first burst
+is one of them, and the floor decays as any does. The caller decides, from its reading
+of the CONNECT_ACK (`policy.weak_path`): `snr_est` under −6 dB or `spread_est` at least
+6 Hz. A first CONNECT lost to QRM, or to a callee that was scanning, leaves a good
+reading, and the session starts at the bottom like one made by the first try. The callee
+does not decide: it takes the floor when the caller's first burst arrives in a robust
+mode. Nothing on the wire says so (`Session._robust_start`).
 
 A CONNECT addressed to a station is decoded in every state, so it is always
 answered: CONNECT_ACK while listening, CONNECT_NAK otherwise. The NAK is not the

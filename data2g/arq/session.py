@@ -110,6 +110,7 @@ class Session:
     _answer_mode: str | None = None  # callee: the mode the CONNECT came in (its ACK goes in it)
     _tries: int = 0
     _repeat_at: float = float("-inf")  # the last failed connect frame kept for combining
+    _follow_start: bool = False  # the callee: take the robust floor if the caller's first burst is robust (_robust_start)
     _last_heard: float = 0.0
     _last_data: float = 0.0
     _idle_wait: float = 0.0
@@ -336,6 +337,10 @@ class Session:
         undrained, limbo = len(st.rx.out), st.tx.limbo is not None
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
+        if self._follow_start:  # the callee, connected in the robust mode: as the caller started (_robust_start)
+            self._follow_start = False
+            if self.policy.robust(rx.submode):
+                st.esc_floor = L.MAX_ESCALATION
         self._heard(now)
         if st.state == L.FAILED:
             self._close(f"LINK_FAILED {st.fail_reason}")
@@ -581,20 +586,28 @@ class Session:
 
     def _robust_start(self, mode: str):
         """The connect frame that made this session came in the retries' mode
-        (policy.connect_mode's robust one), so the cap's connect mode did not
-        get through: the station starts at the top of the escalation floor,
-        its control-only bursts in the robust mode from the first turn, and
-        the floor decays as any does (link.FLOOR_DECAY_TURNS). Starting at
-        the bottom, the caller's first bursts went in the OFDM fallback and
-        reached the robust mode two timeouts (~15 s) later: 335 unread OFDM
-        bursts and 13% of the time of 160 sessions at -8 dB and under.
-        Sessions, 40 seeds a point, 64 B each way in 180 s, as it was -> so:
-        completed AWGN -14 dB 39 -> 40, NVIS -10 30 -> 35, MPP-like (1 Hz,
-        2 ms) -12 22 -> 30, -10 37 -> 40; mean time AWGN -12 90 -> 72 s,
-        2 ms -10 128 -> 96 s; AWGN -8 51 -> 53 s (the OFDM ACK modes would
-        have worked there); from -2 dB up no session takes this path."""
-        retry = self.policy.connect_mode(self.cap, 1)
-        if mode == retry and mode != self.policy.connect_mode(self.cap, 0):
+        (policy.connect_mode's robust one), so the cap's connect mode was not
+        answered. If the path is why, the station starts at the top of the
+        escalation floor: its control-only bursts in the robust mode from the
+        first turn, the floor decaying as any does (link.FLOOR_DECAY_TURNS).
+        Starting at the bottom, the caller's first bursts went in the OFDM
+        fallback and reached the robust mode two timeouts (~15 s) later: 335
+        unread OFDM bursts and 13% of the time of 160 sessions at -8 dB and
+        under.
+
+        One decision for the session, the caller's: from its reading of the
+        CONNECT_ACK (policy.weak_path(): a first CONNECT lost to QRM or a
+        scanning callee, on a good path, starts as any session does). The
+        callee does not decide: it follows the mode of the caller's first
+        burst (on_rx). Each side deciding from the frame it received, the two
+        disagreed in 31 of about 450 retry-made sessions, four slower than
+        either way and one failed. Nothing on the wire changes."""
+        if mode != self.policy.connect_mode(self.cap, 1) or mode == self.policy.connect_mode(self.cap, 0):
+            return
+        if not self.station.master:
+            self._follow_start = True
+        elif self.policy.weak_path():
+            log.info("connected in %s on a weak path: starting at the robust floor", mode)
             self.station.esc_floor = L.MAX_ESCALATION
 
     def _primed_frame(self, rx) -> dict | None:
@@ -708,6 +721,7 @@ class Session:
             self.peer_t_turn = c.t_turn10 / 10
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._follow_start = False
             self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)
@@ -722,6 +736,7 @@ class Session:
             self.peer_t_turn = a.t_turn10 / 10
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._follow_start = False
             self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)

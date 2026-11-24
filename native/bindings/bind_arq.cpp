@@ -257,6 +257,7 @@ void bind_arq(py::module_& m) {
             s.outcome(submode, decoded, sent, usable);
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())
         .def("gate", &Shifter::gate)
+        .def("weak_path", &Shifter::weak_path)
         .def("gap", [](const Shifter& s, const py::object& st) { return s.gap(station(st)); })
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));

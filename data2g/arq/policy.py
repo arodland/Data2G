@@ -123,6 +123,19 @@ ROBUST_CONNECT = "n10-qpsk-r1/5" if PROFILE == "fm" else "fsk16r25-r1/2"  # sess
 ROBUST_FAST = ROBUST_CONNECT if PROFILE == "fm" else "fsk8r50-r1/3"
 ROBUST_FAST_SPREAD_HZ = 6.0
 ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
+# A session whose connect was made by a retry in the robust mode starts at the
+# robust floor (session._robust_start) only if the caller's reading of the
+# CONNECT_ACK says the path is the reason (weak_path()): snr_est under
+# ROBUST_START_SNR_DB or spread_est at least ROBUST_START_SPREAD_HZ. A first
+# CONNECT can also be lost to QRM or a callee that was scanning, on a path the
+# OFDM modes work on: started robust there, a session took 7-16 s longer (first
+# CONNECT blanked, AWGN -4 to +20 dB and 2 ms / 1 Hz -2 and +2 dB, 16 seeds:
+# +7.0 to +16.0 s; gated 0.0 to +1.8 s). On weak and fast paths the gate reads
+# weak and the gain is kept (2 ms / 1 Hz -10 dB -42 s, 7 ms / 30 Hz 0 dB -17 s,
+# both arms). Around -6 to -8 dB it starts robust where the OFDM ACK modes
+# would have worked (AWGN -8 dB: +5.7 s).
+ROBUST_START_SNR_DB = -6.0
+ROBUST_START_SPREAD_HZ = 6.0
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -311,6 +324,20 @@ class GearShifter(L.Policy):
         (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
         loss-study sessions there never connected in qpsk-r1/5)."""
         return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
+
+    def weak_path(self) -> bool:
+        """The peer's last burst (the caller's CONNECT_ACK, in a retry's
+        robust mode) read under ROBUST_START_SNR_DB, or its spread at least
+        ROBUST_START_SPREAD_HZ, or not measured at all: the cap's connect
+        mode would not have got through, and the session starts at the
+        robust floor (session._robust_start). Else the first CONNECT was
+        lost to something else and it starts as any does."""
+        m = self.measured
+        return not (m is not None and m["snr_est"] >= ROBUST_START_SNR_DB
+                    and m.get("spread_est", 0.0) < ROBUST_START_SPREAD_HZ)
+
+    def robust(self, submode: str) -> bool:
+        return submode in ROBUST_MODES
 
     def robust_mode(self) -> str:
         """In a session, the robust control mode: ROBUST_FAST if the peer's

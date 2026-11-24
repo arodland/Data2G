@@ -180,6 +180,7 @@ protected:
     // A binding makes its own Station subclass here.
     virtual std::shared_ptr<Station> make_station(int direction, bool master, int key);
     void robust_start(const std::string& mode);  // session._robust_start
+    bool follow_start = false;  // the callee: take the robust floor if the caller's first burst is robust
 
 private:
     struct Frame {

@@ -57,6 +57,10 @@ inline constexpr std::string_view ROBUST_CONNECT = config::PROFILE == "fm" ? "n1
 // policy.py: in a session on fast fading; FM has no CPM modes, so its robust mode stays ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_FAST = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8r50-r1/3";
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
+// policy.py: a session connected by a robust retry starts at the robust floor only if the caller's
+// CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
+inline constexpr double ROBUST_START_SNR_DB = -6.0;
+inline constexpr double ROBUST_START_SPREAD_HZ = 6.0;
 
 std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0);
@@ -141,6 +145,10 @@ public:
     int gate() const;
     // the CPM floor holds (policy.py GearShifter.cpm_floor)
     bool cpm_floor() const;
+    // the peer's last burst read as a weak or fast path, or none measured (policy.py GearShifter.weak_path)
+    bool weak_path() const {
+        return !(measured && measured->snr_est >= ROBUST_START_SNR_DB && measured->spread_est < ROBUST_START_SPREAD_HZ);
+    }
     void observe_energy(double snr_db, double now);
     // the energy inputs (mean dB in power, fill, 1); nullopt before any
     std::optional<std::array<double, 3>> energy_features() const;
@@ -175,6 +183,8 @@ public:
     std::string measured_extra() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
     std::string connect_mode(int cap, int tries) override;
+    bool weak_path() override { return shifter.weak_path(); }
+    bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);
     }

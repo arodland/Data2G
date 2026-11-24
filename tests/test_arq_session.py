@@ -211,14 +211,20 @@ def _rx(burst):
     return FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0})
 
 
-@pytest.mark.parametrize("first_try_heard", [True, False])
-def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first_try_heard):
-    """The cap's connect mode did not get through and the retry's did: both
-    stations start at the top of the escalation floor, and the caller's first
-    burst is a robust control-only one, not the OFDM fallback (which took two
-    timeouts, ~15 s, to give way to the robust mode). A session made by the
-    first try starts as before."""
+@pytest.mark.parametrize("first_try_heard,ack", [(True, None), (False, None), (False, (-9.0, 1.0)), (False, (3.0, 12.0)),
+                                                 (False, (3.0, 1.0)), (False, (-6.0, 2.0))])
+def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first_try_heard, ack):
+    """The cap's connect mode was not answered and the retry's was. If the
+    caller reads its CONNECT_ACK as a weak or fast path (`ack`: its snr_est
+    and spread_est; None: not measured), it starts at the top of the
+    escalation floor and its first burst is a robust control-only one, not
+    the OFDM fallback (which took two timeouts, ~15 s, to give way to the
+    robust mode); the callee takes the floor when that burst arrives. Read
+    as a good path (the first CONNECT lost to QRM, or to a callee that was
+    scanning), both start at the bottom, as a session made by the first try
+    does."""
     from data2g.arq import link as L, policy as G
+    from test_arq_policy import measured
 
     a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
     b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
@@ -236,19 +242,28 @@ def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first
         assert burst.submode == G.ROBUST_CONNECT
         t += 5.0
         a.on_tx_end(burst, t)
+    b.policy.observe(measured(-9.0, 12.0), burst.submode, t + 0.3)  # the callee's own reading decides nothing
     b.on_rx(_rx(burst), t + 0.3)
-    ack = b.poll(t + 0.3)
-    assert b.state == S.CONNECTED and ack.submode == burst.submode
-    b.on_tx_end(ack, t + 5.3)
-    a.on_rx(_rx(ack), t + 5.6)
+    reply = b.poll(t + 0.3)
+    assert b.state == S.CONNECTED and reply.submode == burst.submode
+    b.on_tx_end(reply, t + 5.3)
+    if ack is not None:
+        a.policy.observe(measured(*ack), reply.submode, t + 5.6)
+    a.on_rx(_rx(reply), t + 5.6)
     assert a.state == S.CONNECTED
-    floor = 0 if first_try_heard else L.MAX_ESCALATION
-    assert (a.station.esc_floor, b.station.esc_floor) == (floor, floor)
+    robust = not first_try_heard and (ack is None or ack[0] < G.ROBUST_START_SNR_DB or ack[1] >= G.ROBUST_START_SPREAD_HZ)
+    assert robust == (not first_try_heard and ack not in ((3.0, 1.0), (-6.0, 2.0)))
+    floor = L.MAX_ESCALATION if robust else 0
+    assert (a.station.esc_floor, b.station.esc_floor) == (floor, 0)  # the callee: not yet
     mine = a.poll(t + 5.6)
-    if first_try_heard:
-        assert mine.submode == G.FALLBACK[2]
+    if robust:
+        assert mine.submode == (G.ROBUST_FAST if ack and ack[1] >= G.ROBUST_FAST_SPREAD_HZ else G.ROBUST_CONNECT)
+        assert len(mine.slots) == 1
     else:
-        assert mine.submode == G.ROBUST_CONNECT and len(mine.slots) == 1
+        assert mine.submode == G.FALLBACK[2]
+    a.on_tx_end(mine, t + 8.0)
+    b.on_rx(_rx(mine), t + 8.3)
+    assert b.station.esc_floor == floor  # as the caller started
 
 
 @pytest.mark.parametrize("when", ["before", "between"])
