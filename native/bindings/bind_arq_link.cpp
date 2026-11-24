@@ -75,6 +75,8 @@ public:
     std::string connect_mode(int cap, int tries, bool last) override {
         return (last ? obj.attr("connect_mode")(cap, tries, true) : obj.attr("connect_mode")(cap, tries)).cast<std::string>();
     }
+    bool weak_path() override { return overrides("weak_path") && obj.attr("weak_path")().cast<bool>(); }
+    bool robust(const std::string& m) override { return overrides("robust") && obj.attr("robust")(m).cast<bool>(); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         if (!overrides("reply_hold")) return std::nullopt;
         return obj.attr("reply_hold")(py::cast(&st, py::return_value_policy::reference),

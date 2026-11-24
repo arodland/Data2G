@@ -130,6 +130,19 @@ ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
 # Alternating from the first retry connected 30 Hz 36 s sooner, but at -16 dB 2 of 8 against 6
 # (two ROBUST_CONNECT tries to combine, not four).
 ROBUST_CONNECT_TRIES = 4
+# A session whose connect was made by a retry in the robust mode starts at the
+# robust floor (session._robust_start) only if the caller's reading of the
+# CONNECT_ACK says the path is the reason (weak_path()): snr_est under
+# ROBUST_START_SNR_DB or spread_est at least ROBUST_START_SPREAD_HZ. A first
+# CONNECT can also be lost to QRM or a callee that was scanning, on a path the
+# OFDM modes work on: started robust there, a session took 7-16 s longer (first
+# CONNECT blanked, AWGN -4 to +20 dB and 2 ms / 1 Hz -2 and +2 dB, 16 seeds:
+# +7.0 to +16.0 s; gated 0.0 to +1.8 s). On weak and fast paths the gate reads
+# weak and the gain is kept (2 ms / 1 Hz -10 dB -42 s, 7 ms / 30 Hz 0 dB -17 s,
+# both arms). Around -6 to -8 dB it starts robust where the OFDM ACK modes
+# would have worked (AWGN -8 dB: +5.7 s).
+ROBUST_START_SNR_DB = -6.0
+ROBUST_START_SPREAD_HZ = 6.0
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -288,6 +301,7 @@ class GearShifter(L.Policy):
     n0_spreads: list = field(default_factory=list)  # the peer's last bursts' n0_spread_db (FM's regime input)
     floor_spreads: list = field(default_factory=list)  # as spreads, a CPM burst's FLOOR_CPM_SPREAD_HZ (cpm_floor)
     last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
+    heard_spread: float | None = None  # the last burst's own spread_est; None: it reported unmeasured (weak_path)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
@@ -325,6 +339,26 @@ class GearShifter(L.Policy):
         if tries == 0:
             return CONNECT[cap]
         return ROBUST_FAST if tries > ROBUST_CONNECT_TRIES or (last and tries >= 2) else ROBUST_CONNECT
+
+    def weak_path(self) -> bool:
+        """The peer's last burst (the caller's CONNECT_ACK, in a retry's
+        robust mode) read under ROBUST_START_SNR_DB, or its spread at least
+        ROBUST_START_SPREAD_HZ, or not measured at all: the cap's connect
+        mode would not have got through, and the session starts at the
+        robust floor (session._robust_start). Else the first CONNECT was
+        lost to something else and it starts as any does.
+
+        The spread is that burst's own reading (heard_spread), not the one
+        observe() carries into `measured` when a burst reports unmeasured
+        (SPREAD_CARRY): the carried one is an earlier burst's, and while
+        dialing that can be QRM (9 Hz carried into a +5 dB ACK started a
+        good path robust). Unmeasured is not fast: the SNR decides."""
+        m = self.measured
+        fast = self.heard_spread is not None and self.heard_spread >= ROBUST_START_SPREAD_HZ
+        return not (m is not None and m["snr_est"] >= ROBUST_START_SNR_DB and not fast)
+
+    def robust(self, submode: str) -> bool:
+        return submode in ROBUST_MODES
 
     def robust_mode(self) -> str:
         """In a session, the robust control mode: ROBUST_FAST if the peer's
@@ -367,6 +401,10 @@ class GearShifter(L.Policy):
             reply = decode(st.peer_reply_recommend) if st.peer_reply_recommend is not None else None
             return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
         if rec is None:
+            if st.esc_floor >= ROBUST_ESCALATION:
+                # nothing recommended yet and my floor is the robust mode (a session
+                # that connected in it, session._robust_start): control only, in it
+                return self.robust_mode(), 1
             return FALLBACK[cap], 2
         mode = decode(rec)
         if mode is None or MODES[mode] not in allowed(cap):
@@ -404,6 +442,7 @@ class GearShifter(L.Policy):
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
         s = measured.get("spread_est")
+        self.heard_spread = float(s) if s is not None and s != UNMEASURED_SPREAD_HZ else None
         if s is not None and s != UNMEASURED_SPREAD_HZ:
             self.last_spread = float(s)
         elif SPREAD_CARRY and s is not None and self.last_spread is not None:

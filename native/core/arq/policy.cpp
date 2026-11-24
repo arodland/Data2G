@@ -82,7 +82,12 @@ std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int 
         const Mode* r = st.peer_reply_recommend ? decode(*st.peer_reply_recommend) : nullptr;
         return {r && std::find(ok.begin(), ok.end(), r) != ok.end() ? r->name : fallback(st.cap), 2};
     }
-    if (!rec) return {fallback(st.cap), 2};
+    if (!rec) {
+        // nothing recommended yet and my floor is the robust mode (session._robust_start): control only, in it
+        if (st.esc_floor >= ROBUST_ESCALATION)
+            return {last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ ? ROBUST_FAST : ROBUST_CONNECT, 1};
+        return {fallback(st.cap), 2};
+    }
     const Mode* m = decode(*rec);
     if (!m || std::find(ok.begin(), ok.end(), m) == ok.end()) return {fallback(st.cap), 2};
     return {m->name, slots_for(*m, SIZE_S.at(st.peer_size_hint), st.pending, st.peer_wants_dup)};
@@ -100,6 +105,7 @@ void GearShifter::observe(const Measured& m_in, std::string_view submode, double
     // a burst too short or weak for a Doppler estimate reports the 2.0 Hz
     // default (what MPD measures): it takes the peer's last measured spread
     Measured m = m_in;
+    heard_spread = m.spread_est != UNMEASURED_SPREAD_HZ ? std::optional<double>(m.spread_est) : std::nullopt;
     if (m.spread_est != UNMEASURED_SPREAD_HZ)
         last_spread = m.spread_est;
     else if (last_spread)
