@@ -910,9 +910,11 @@ std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lo
 // data2g.cpm.spread: Doppler spread from the winning tone's energy, a
 // least-squares fit of log c(k) = a - b k^2 over the lags 1.. whose
 // autocovariance holds up; with none, too fast or no fading by the excess
-// variance (constants: cpm.py's SPREAD_*).
-static double spread(const Grid& g, const std::vector<double>& top, double n0) {
-    constexpr int LAGS = 8;
+// variance, unless the symbols on the same or adjacent winning tones (`tones`)
+// are correlated: slow selective fading, unmeasured (constants: cpm.py's SPREAD_*).
+static double spread(const Grid& g, const std::vector<double>& top, double n0, const std::vector<int>& tones) {
+    constexpr int LAGS = 8, NEAR_LAGS = 3;
+    constexpr double NEAR_Z = 2.0;
     constexpr std::size_t MIN_SYMS = 16;
     constexpr double KEEP = 0.05, MAX_HZ = 12.0, UNMEASURED_HZ = 2.0, EXCESS_MIN = 0.2, SIG = 2.5, EXCESS_FIT = 0.05;
     const std::size_t n = top.size();
@@ -934,7 +936,21 @@ static double spread(const Grid& g, const std::vector<double>& top, double n0) {
     while (excess >= EXCESS_FIT && c[0] > SIG / std::sqrt(static_cast<double>(n)) * v && m < LAGS &&
            c[m] > KEEP * c[0])
         ++m;
-    if (m < 2) return excess >= EXCESS_MIN ? MAX_HZ : 0.0;
+    if (m < 2) {
+        if (excess < EXCESS_MIN) return 0.0;
+        // cpm._slow_by_near_tones
+        double num = 0.0;
+        std::size_t pairs = 0;
+        for (std::size_t lag = 1; lag <= NEAR_LAGS; ++lag) {
+            std::vector<double> p;
+            for (std::size_t i = 0; i + lag < n; ++i)
+                if (std::abs(tones[i + lag] - tones[i]) <= 1) p.push_back(t[i + lag] * t[i]);
+            num += np_sum(p);
+            pairs += p.size();
+        }
+        const double np_ = static_cast<double>(pairs);
+        return pairs > 0 && v > 0 && num / np_ / v * std::sqrt(np_) > NEAR_Z ? UNMEASURED_HZ : MAX_HZ;
+    }
     std::vector<double> x(m), y(m);
     for (int i = 0; i < m; ++i) {
         x[i] = static_cast<double>((i + 1) * (i + 1));
@@ -978,7 +994,14 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
         const double n0w = std::max(median_rest(Ew) / std::numbers::ln2, 1e-300);
         es_n0 = std::max((np_mean(row_max(Ew)) - n0w) / np_mean(sc), 1e-12) / n0w;
     }
-    out.spread_est = spread(g, top, n0);
+    std::vector<int> tones(E.rows);  // np.argmax: the first of equals
+    for (std::size_t r = 0; r < E.rows; ++r) {
+        std::size_t k = 0;
+        for (std::size_t j = 1; j < E.cols; ++j)
+            if (E[r][j] > E[r][k]) k = j;
+        tones[r] = static_cast<int>(k);
+    }
+    out.spread_est = spread(g, top, n0, tones);
     out.snr_est = 10 * std::log10(es_n0 * g.rate / config::SNR_REF_BW_HZ);
     out.frames = std::max(1.0, static_cast<double>(n_sym * g.T) / config::FRAME_SAMPLES);
     return out;

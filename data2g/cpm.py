@@ -805,14 +805,35 @@ SPREAD_SIG = 2.5  # the fit needs lag 1's correlation over SPREAD_SIG / sqrt(n):
 # variance is so small that the burst's own energy pattern passed SPREAD_SIG
 # (c8r50 +20 dB read 2.6 Hz)
 SPREAD_EXCESS_FIT = 0.05
+# With multipath every tone has its own gain and the data changes tone each
+# symbol, so on slow selective fading the energies look white too: no fit, and
+# the excess variance read SPREAD_MAX_HZ (control-only fsk16r25, 200 seeds:
+# 2 ms / 0.1 Hz 152, 2 ms / 1 Hz 29; flat 1 Hz none). So before that reading,
+# the correlation over the pairs 1..SPREAD_NEAR_LAGS symbols apart whose
+# winning tones are at most one apart (about 45 in that burst): over
+# SPREAD_NEAR_Z / sqrt(pairs), the fading is slow and the spread unmeasured
+# (152 -> 4 and 29 -> 6; of 7 ms / 10 and 30 Hz's right readings, 188 -> 163
+# and 198 -> 191).
+SPREAD_NEAR_LAGS = 3
+SPREAD_NEAR_Z = 2.0
 
 
-def spread(g: Grid, top: np.ndarray, n0: float) -> float:
+def _slow_by_near_tones(t: np.ndarray, v: float, tones: np.ndarray) -> bool:
+    num, n = 0.0, 0
+    for lag in range(1, SPREAD_NEAR_LAGS + 1):
+        ok = np.abs(tones[lag:] - tones[:-lag]) <= 1
+        num += float(np.sum(t[lag:][ok] * t[:-lag][ok]))
+        n += int(ok.sum())
+    return n > 0 and v > 0 and num / n / v * np.sqrt(n) > SPREAD_NEAR_Z
+
+
+def spread(g: Grid, top: np.ndarray, n0: float, tones: np.ndarray | None = None) -> float:
     """Doppler spread (2 sigma, Hz) from per-symbol energies (noise n0 per
     bin): a least-squares fit of log c(k) = a - b k^2 (Gaussian Doppler:
     c(k) = A exp(-(2 pi sigma k T)^2)) over the lags 1.. whose
     autocovariance c(k) holds up; with none, too fast or no fading, by the
-    excess variance."""
+    excess variance, unless the symbols on the same or adjacent tones
+    (`tones`: each symbol's winning tone) say slow: then unmeasured."""
     n = len(top)
     if n < SPREAD_MIN_SYMS:
         return UNMEASURED_SPREAD_HZ
@@ -827,7 +848,9 @@ def spread(g: Grid, top: np.ndarray, n0: float) -> float:
            and c[m] > SPREAD_KEEP * c[0]):
         m += 1
     if m < 2:
-        return SPREAD_MAX_HZ if excess >= SPREAD_EXCESS_MIN else 0.0
+        if excess < SPREAD_EXCESS_MIN:
+            return 0.0
+        return UNMEASURED_SPREAD_HZ if tones is not None and _slow_by_near_tones(t, v, tones) else SPREAD_MAX_HZ
     x = np.arange(1, m + 1, dtype=np.float64) ** 2
     y = np.log(c[:m])
     mx, my = np.mean(x), np.mean(y)
@@ -864,8 +887,8 @@ def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
         Ew = E * r
         n0w = max(np.median(np.sort(Ew, axis=1)[:, :-1]) / np.log(2), 1e-300)
         es_n0 = max(float(np.mean(Ew.max(axis=1)) - n0w) / float(np.mean(r)), 1e-12) / n0w
-    return dict(snr_est=10 * np.log10(es_n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread(g, top, n0), delay_est_ms=0.0,
-                headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
+    return dict(snr_est=10 * np.log10(es_n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread(g, top, n0, E.argmax(axis=1)),
+                delay_est_ms=0.0, headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
 
 
 def _peak_ratio(g: Grid, x: np.ndarray, s0: int, cfo: float, mid: bool = False) -> float:
