@@ -23,11 +23,12 @@ def test_channels_and_audio(native):
 def test_decode_window(native):
     rng = np.random.default_rng(11)
     tag, late = 0x5A, 777  # 777: a start a fraction of a symbol off, so the nailing decides
-    y = np.zeros(hand.WINDOW_SAMPLES)
+    y = np.zeros(hand.WINDOW_SAMPLES + hand.slot_offset(7))
     sent = {5: int(rng.integers(0, 2 ** hand.PAYLOAD)), 7: int(rng.integers(0, 2 ** hand.PAYLOAD))}
     for c, p in sent.items():
         x = hand.modulate(tag, hand.payload_bits(p), c)
-        y[hand.SEARCH_SAMPLES + late:hand.SEARCH_SAMPLES + late + len(x)] += x
+        i = hand.SEARCH_SAMPLES + late + hand.slot_offset(c)  # FM: channel c's time slot
+        y[i:i + len(x)] += x
     y = hfchannel.awgn(hfchannel.freq_shift(y, -1.5), 4.0, seed=5)
     # both --hand-decoder grids, in both languages: the same two Hands, the same SNR
     # and the same landing time to within 1e-6 s. cheap searches every T/4 and

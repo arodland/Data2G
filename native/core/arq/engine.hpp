@@ -122,7 +122,8 @@ public:
     // fields: (key, JSON value) pairs after "kind"
     void event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields);
     std::string rx(double t, std::span<const double> audio, const receiver::Pending& header, bool lost,
-                   const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise = std::nullopt);
+                   const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise = std::nullopt,
+                   const std::string& lock = {});  // lock: rx's "lock" JSON (empty: its kind alone)
 
 private:
     void post(std::function<void()> job, std::size_t bytes);

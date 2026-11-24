@@ -1390,7 +1390,11 @@ std::vector<cd> equalized(const Received& r) {
 }
 
 std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f) {
-    const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, {}, spec.band);
+    // Fixed timing (no steps): x is exactly one frame and its closing pilot, so a timing step
+    // would run past its end. Tracking free with no phase reference stepped 2 samples on FM
+    // (FS / 2 pi RS is large) and threw "burst truncated" out of the engine thread.
+    static constexpr double no_steps[2] = {0.0, 0.0};
+    const auto fr = demod_frames(waveform::freq_correct(waveform::to_baseband(x), cfo), 0, 1, 0, 0.0, no_steps, spec.band);
     const double g = clip_consts(spec).gain_for(n_f);
     const size_t nc = fr.raw.cols;
     std::vector<cd> out;

@@ -130,5 +130,28 @@ int main() {
         check::is_true(!modem::find_copy(y, "w48").has_value(), "noise: no copy lock");
     }
 
+    // The live preview's frame (preview_frame): exactly one frame and its closing pilot, so it must
+    // read at fixed timing. Free-running, its timing tracker stepped 2 samples on FM's audio past
+    // the end, and the throw killed the engine thread ("burst truncated").
+    check::current_step = "preview frame";
+    {
+        std::mt19937 rng(7);
+        std::normal_distribution<double> g;
+        int threw = 0, n = 0;
+        for (const auto& s : config::SUBMODES) {
+            for (int i = 0; i < 40; ++i, ++n) {
+                std::vector<double> x(modem::PREVIEW_SAMPLES);
+                for (auto& v : x) v = g(rng);
+                try {
+                    const auto y = modem::preview_frame(x, 0.0, s, 1);
+                    check::is_true(!y.empty(), "a preview frame has cells");
+                } catch (const modem::SyncError&) {
+                    ++threw;
+                }
+            }
+        }
+        check::equal(threw, 0, "preview_frame never throws on a whole frame (" + std::to_string(n) + " tried)");
+    }
+
     return check::report("test_modem");
 }

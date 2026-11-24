@@ -27,6 +27,14 @@ SEND), which lands it in its channel as net control hears it; the +-5 Hz
 search covers the rest. Ordering the channel map by SNR and leaving gaps
 at jumps over 5 dB (the near-far rule) is the client's job.
 
+FM (DATA2G_PROFILE=fm): stations that key together don't add on FM, the
+receiver captures one of them, so there a channel is a time slot. Every
+Hand is the same 8-FSK at 100 Bd (0.66 s, 1200-1900 Hz), channel c
+starting c * SLOT_S after channel 0's slot; the CRC still binds the channel,
+so a Hand that strays into a neighbour's slot fails there. slot() gives a
+station's channel from its call and the round's tag, and clean_tags() the
+tags under which a roster shares no slot (docs/hand-burst.md, "FM").
+
 The host primitive over this: docs/arq.md §9 (HAND SEND, HAND LISTEN, the
 REF and HAND lines), driven from arq.engine.Engine. Prototyped and
 measured in scripts/hand_study.py (branch hand-burst-sim).
@@ -35,16 +43,18 @@ Native: native/core/hand (tests/test_native_hand.py checks parity; the
 interleaver and Costas order are frozen by tools/gen_native_tables.py).
 """
 
+import os
 from functools import lru_cache
 
 import numpy as np
 
 from . import cpm, hfchannel, polar
 from .codes import POLAR_DESIGN_SNR_DB, POLAR_LIST
-from .config import FS
+from .config import FS, PROFILE
 from .waveform import dsp
 
-M, RATE = 8, 6.25
+FM = PROFILE == "fm"
+M, RATE = 8, 100.0 if FM else 6.25
 PAYLOAD = 63  # payload bits
 K = PAYLOAD + 16  # + CRC-16 (0x1021, register seeded with the request tag)
 E = 162  # coded bits: rate 0.49, 54 symbols of 3 bits
@@ -53,10 +63,19 @@ SYNC = np.array(cpm.costas(M))  # Welch, order 6
 SYNC_ROWS = np.r_[0:len(SYNC), len(SYNC) + N_DATA // 2:2 * len(SYNC) + N_DATA // 2]
 DATA_ROWS = np.setdiff1d(np.arange(2 * len(SYNC) + N_DATA), SYNC_ROWS)
 N_SYM = 2 * len(SYNC) + N_DATA  # 66
-LEN_S = N_SYM / RATE  # 10.56 s
+LEN_S = N_SYM / RATE  # 10.56 s (FM: 0.66 s)
 
-N_CHANNELS, PITCH, CENTER = 40, 60.0, 1500.0  # channel c -> CENTER -+ (30 + c // 2 * 60), even below
-SEARCH_S, SEARCH_HZ, TOP = 0.6, 5.0, 3
+N_CHANNELS, PITCH, CENTER = (64, 0.0, 1550.0) if FM else (40, 60.0, 1500.0)  # HF: channel c -> CENTER -+ (30 + c // 2 * 60), even below
+SEARCH_S, SEARCH_HZ, TOP = (0.25, 0.0, 3) if FM else (0.6, 5.0, 3)
+# FM's slot. SLOT_FIXED_MS of it is spoken for: the Hand, both neighbours SEARCH_S
+# off, 40 ms of carrier after the audio. The rest is the next station's carrier
+# coming up before its Hand (PTT_MAX_S). DATA2G_HAND_SLOT_MS lengthens the slot for
+# slow radios; every station of a round must run the same. Unmeasured on air.
+SLOT_FIXED_MS, SLOT_MS_MAX = 1200, 5000
+SLOT_MS = int(os.environ.get("DATA2G_HAND_SLOT_MS", 1500)) if FM else 0
+if FM and not SLOT_FIXED_MS <= SLOT_MS <= SLOT_MS_MAX:
+    raise ValueError(f"DATA2G_HAND_SLOT_MS={SLOT_MS}: {SLOT_FIXED_MS} to {SLOT_MS_MAX}")
+SLOT_S, PTT_MAX_S = (SLOT_MS / 1000, (SLOT_MS - SLOT_FIXED_MS) / 1000) if FM else (0.0, 0.0)
 # A round's grids. ROUND_FULL ships. ROUND_CHEAP is what --hand-decoder cheap
 # picks on a station that needs the round for about half the CPU: one fewer
 # candidate (the third is a near-duplicate of the first two), a T/4 search
@@ -66,22 +85,55 @@ SEARCH_S, SEARCH_HZ, TOP = 0.6, 5.0, 3
 ROUND_FULL = dict(top=TOP, step_div=8, nail_cfo=True)
 ROUND_CHEAP = dict(top=2, step_div=4, nail_cfo=False)
 ROUNDS = {"full": ROUND_FULL, "cheap": ROUND_CHEAP}
-LATE_S = 0.5  # a scheduled Hand this late past its slot still goes; later is dropped (busy)
+LATE_S = 0.2 if FM else 0.5  # a scheduled Hand this late past its slot still goes; later is dropped (busy)
 
 SEARCH_SAMPLES = int(round(SEARCH_S * FS))
 LEN_SAMPLES = int(round(LEN_S * FS))
 WINDOW_SAMPLES = 2 * SEARCH_SAMPLES + LEN_SAMPLES  # net control's capture, +-0.6 s around the slot
+SLOT_SAMPLES = FS * SLOT_MS // 1000
+PTT_MAX_SAMPLES = FS * (SLOT_MS - SLOT_FIXED_MS) // 1000 if FM else 0
+assert not FM or SLOT_FIXED_MS >= 1000 * (LEN_S + 2 * SEARCH_S)
+
+
+def slot_offset(c: int) -> int:
+    """Channel c's start after channel 0's, samples: its time slot on FM, 0 on HF."""
+    return c * SLOT_SAMPLES
+
+
+def slot(call: str, tag: int, m: int) -> int:
+    """A station's channel in a round of m: FNV-1a of the tag byte and the
+    call (as sent, SSID included, upper case), through murmur3's finalizer,
+    mod m. Not a CRC: one is linear in the tag, so a pair that shared a slot
+    under one tag would share it under all of them."""
+    h = 0x811C9DC5
+    for b in bytes([tag]) + call.strip().upper().encode("ascii"):
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    h ^= h >> 16
+    h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+    return (h ^ (h >> 16)) % m
+
+
+def clean_tags(calls: list[str], m: int) -> list[int]:
+    """The tags under which no two of `calls` share a slot in a round of m."""
+    return [t for t in range(256) if len({slot(c, t, m) for c in calls}) == len(calls)]
 
 
 def channel_freq(c: int) -> float:
-    """Channel c's centre, from the centre out: even below 1500 Hz, odd above."""
+    """Channel c's centre, from the centre out: even below 1500 Hz, odd above.
+    FM: every channel's, its slots being in time."""
+    if FM:
+        return CENTER
     off = PITCH / 2 + (c // 2) * PITCH
     return CENTER + (off if c % 2 else -off)
 
 
 def channels_within(width_hz: float) -> int:
     """How many channels (a prefix, 0 up) lie wholly within +-width_hz/2 of
-    the centre: the Hand's 8 tones, M * RATE wide, included."""
+    the centre: the Hand's 8 tones, M * RATE wide, included. FM: all of them."""
+    if FM:
+        return N_CHANNELS
     return sum(abs(channel_freq(c) - CENTER) + M * RATE / 2 <= width_hz / 2 for c in range(N_CHANNELS))
 
 
@@ -158,7 +210,7 @@ def tx_audio(tag: int, payload: int, channel: int, cfo: float) -> np.ndarray:
     """A Hand as it goes out: channel `channel`, shifted by the ref burst's
     cfo, envelope-normalised for the sound card (arq.engine._start_tx's rule)."""
     x = modulate(tag, payload_bits(payload), channel)
-    if cfo:
+    if cfo and not FM:
         x = hfchannel.freq_shift(x, cfo)
     return x / np.max(dsp.envelope(x))
 
@@ -174,9 +226,9 @@ def mix(g: cpm.Grid, y: np.ndarray, cfo: float) -> np.ndarray:
 def bins(z: np.ndarray, start: int, T: int, m: int, n_sym: int) -> np.ndarray:
     """(n_sym, m) tone energies of the symbols from `start`, out of a mixed
     window: cpm._energies' segment, zero-padded the same way past its ends."""
-    seg = z[max(0, start):start + n_sym * T]
+    seg = z[max(0, start):max(0, start + n_sym * T)]
     if start < 0:
-        seg = np.concatenate([np.zeros(-start, complex), seg])
+        seg = np.concatenate([np.zeros(min(-start, n_sym * T), complex), seg])
     if len(seg) < n_sym * T:
         seg = np.pad(seg, (0, n_sym * T - len(seg)))
     return np.abs(np.fft.fft(seg.reshape(n_sym, T), axis=1)[:, :m]) ** 2
@@ -271,9 +323,15 @@ def decode_window(y: np.ndarray, tag: int | None, channels: list[int], nominal: 
     out = []
     for c in channels:
         terms = seed_terms(c) if tag is None else {k: t for k, t in seed_terms(c).items() if t == tag}
-        got = receive(grid(channel_freq(c)), y, nominal, terms, dec, rnd)
+        yc, at = y, nominal + slot_offset(c)
+        if SLOT_SAMPLES:  # a slot's own stretch of the round's capture
+            lo, hi = np.clip([at - SLOT_SAMPLES, at + 2 * SLOT_SAMPLES], 0, len(y))
+            if hi <= lo:
+                continue
+            yc, at = y[lo:hi], at - lo
+        got = receive(grid(channel_freq(c)), yc, at, terms, dec, rnd)
         if got is not None:
             bits, snr, start, t = got
             out.append(dict(c=c, payload=payload_int(bits), snr=float(snr),
-                            dt_ms=1000.0 * (start - nominal) / FS, tag=t))
+                            dt_ms=1000.0 * (start - at) / FS, tag=t))
     return out

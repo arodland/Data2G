@@ -70,11 +70,12 @@ def hand_round(e: Engine, d_s: float, tag: int, channels: list[int], hands=(), g
         for _ in range(3):
             e.step(np.zeros(BLOCK))
     anchor = e.n  # the engine's end of it: an exact whole number of blocks
-    hi = anchor + int(round((d_s + e.tx_latency_s) * FS)) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
+    hi = (anchor + int(round((d_s + e.tx_latency_s) * FS)) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
+          + hand.slot_offset(max(channels)))
     y = np.zeros(hi - anchor + 3 * BLOCK)
     for c, payload, start in hands:
         x = hand.modulate(tag, hand.payload_bits(payload), c)
-        i = int(round(start * FS))
+        i = int(round(start * FS)) + hand.slot_offset(c)  # FM: channel c's time slot
         y[i:i + len(x)] += x
     if noise:
         y += np.random.default_rng(0).normal(0, noise, len(y))
@@ -114,7 +115,7 @@ def test_hand_decode_roundtrip():
                         hand.modulate(tag, hand.payload_bits(payload), c),
                         np.zeros(hand.SEARCH_SAMPLES)])
     y = hfchannel.awgn(hfchannel.freq_shift(y, 2.0), 6.0, seed=3)
-    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES)
+    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES - hand.slot_offset(c))
     assert got["payload"] == payload
     assert got["snr"] > 0
     assert abs(got["dt_ms"] - 1000.0 * jitter / FS) < 30
@@ -130,10 +131,11 @@ def test_hand_decode_with_the_window_head_lost():
                         hand.modulate(tag, hand.payload_bits(payload), c),
                         np.zeros(hand.SEARCH_SAMPLES)])
     y = hfchannel.awgn(y, 6.0, seed=4)
-    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES - lost)
+    got, = hand.decode_window(y, tag, [c], hand.SEARCH_SAMPLES - lost - hand.slot_offset(c))
     assert got["payload"] == payload
 
 
+@pytest.mark.hf_only("HF's 6.25 Bd threshold; FM's Hand is 100 Bd, for a link above the FM threshold")
 @pytest.mark.parametrize("hand_round", ["full", "cheap"])
 def test_hand_decode_at_the_sensitivity_floor(hand_round):
     """The shipped threshold: -18 dB, 3 Hz off, landing in the search's
@@ -182,7 +184,7 @@ def test_hand_round_between_two_stations(hand_round):
         b_ev.extend(b.take_hand_events())
         return any(x.startswith("HAND END") for x in a_ev)
 
-    link(a, b, 12, 40, a_heard)  # the round runs on the engine clock
+    link(a, b, 12, 40 + hand.slot_offset(20) / FS, a_heard)  # the round runs on the engine clock
     end = time.monotonic() + 20  # the decode happens on its own thread, in real time
     while not a_heard() and time.monotonic() < end:
         time.sleep(0.05)
@@ -212,6 +214,7 @@ def test_hand_window_hangs_on_its_named_burst():
     assert abs(float(got[0].split()[4])) < 30, lines
 
 
+@pytest.mark.hf_only("a channel is 60 Hz over on HF; FM's is a slot over (test_hand_fm.py)")
 def test_hand_crc_binds_the_channel():
     """The CRC is seeded with the channel too (hand.crc_init): a Hand that
     lands a channel over (here 60 Hz low: channel 5 at 1650 Hz lands on 3's
@@ -263,7 +266,7 @@ def test_hand_commands_reply():
         assert h.out_cmd == ["WRONG"], line
         h.out_cmd.clear()
 
-    for line in ("HAND LISTEN 3.0 90 1234 20 40",  # channel 40: there are 0-39
+    for line in (f"HAND LISTEN 3.0 90 1234 20 {hand.N_CHANNELS}",  # channel 40: there are 0-39
                  "HAND LISTEN 3.0 90 123 20", "HAND LISTEN 3.0 90 12345 20", "HAND LISTEN 3.0 90 zzzz 20"):  # ack: 4 hex
         fresh = Host(Engine("W1AW", seed=1))  # nothing armed: the argument is what refuses
         fresh.command(line)
@@ -279,7 +282,7 @@ def test_hand_send_rejections():
     ref, bad numbers, or a Hand already waiting), with a ref in place so the number
     is what's refused. A fresh Host per case: while one Hand waits, every later
     command is refused for that reason first."""
-    for line, why in (("HAND SEND 1 90 3.0 40 1", "channel 40: there are 0-39"),
+    for line, why in ((f"HAND SEND 1 90 3.0 {hand.N_CHANNELS} 1", "channel 40: there are 0-39"),
                       ("HAND SEND 1 256 3.0 20 1", "tag 256: 0-255"),
                       ("HAND SEND 1 90 0 20 1", "d = 0"),
                       ("HAND SEND 1 90 30 20 1", "d = the 30 s arm expiry: a Hand waits no longer"),
@@ -289,7 +292,7 @@ def test_hand_send_rejections():
         assert h.out_cmd == ["WRONG"], (line, why)
 
     h = Host(ref_at(Engine("W1AW", seed=1), -4.0))  # the ref's end is 4 s behind us
-    h.command("HAND SEND 1 90 3.0 20 1")
+    h.command("HAND SEND 1 90 3.0 0 1")
     assert h.out_cmd == ["WRONG"]  # its slot, 3 s after that, has passed
 
     h = Host(ref_at(Engine("W1AW", seed=1), 5.0))
@@ -397,9 +400,9 @@ def test_hand_dropped_past_the_slot():
         _, ptt = e.step(np.zeros(BLOCK))  # the first idle block decides
         return e, ptt, e.take_hand_events()
 
-    e, ptt, ev = keyed_until(0.45)  # still inside LATE_S of its slot: it goes
+    e, ptt, ev = keyed_until(hand.LATE_S - 0.05)  # still inside LATE_S of its slot: it goes
     assert ptt and ev == ["HAND SENT 20"], ev
-    e, ptt, ev = keyed_until(0.55)  # LATE_S plus 0.05 s ...
+    e, ptt, ev = keyed_until(hand.LATE_S + 0.05)  # LATE_S plus 0.05 s ...
     assert not ptt and ev == ["HAND DROPPED 20"], ev
     # ... which, measured from where the audio would start (the key-up sample plus
     # the host's PTT delay), would only be 0.45 s late: late by the key-up reading
@@ -445,8 +448,8 @@ def test_hand_listen_holds_its_head():
 
     # my own burst keys from the window's opening until 1.2 s in: the first 0.8 s
     # of it is gone, and with it the slot (0.4 s past the anchor).
-    lines, _, _ = hand_round(e, 1.0, 0x5A, [20], [(20, 0x1234567, 1.0)], gaps=[(0.0, 1.2)])
-    assert lines == ["HAND SHORT 800", "HAND END"], lines
+    lines, _, _ = hand_round(e, 1.0, 0x5A, [0], [(0, 0x1234567, 1.0)], gaps=[(0.0, 1.2)])
+    assert lines == [f"HAND SHORT {round(1000 * (1.2 - (1.0 - hand.SEARCH_S)))}", "HAND END"], lines
 
 
 def test_hand_listen_decodes_a_channel_once():
@@ -491,10 +494,11 @@ def test_hand_holds_my_own_bursts():
         e2.send_cq("K2XYZ", 2)
         e2.kiss.enqueue(frame("APRS", "K2XYZ", 0x03, b"!beacon"))
 
-    lines, keyed, anchor = hand_round(e2, 1.0, 0x5A, [20], [(20, 0x1234567890ABC, 1.3)],
+    late = hand.SEARCH_S / 2  # 300 ms on HF
+    lines, keyed, anchor = hand_round(e2, 1.0, 0x5A, [20], [(20, 0x1234567890ABC, 1.0 + late)],
                                       gaps=[(0.5, 0.6)], at_open=queue_mine)
     g0, g1 = anchor + int(0.5 * FS), anchor + int(1.1 * FS)
-    hi = anchor + int(1.0 * FS) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
+    hi = anchor + int(1.0 * FS) + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES + hand.slot_offset(20)
     # only the session burst, up to the block that straddles the window's end: its
     # input completes the capture, and what it plays goes out after
     assert [s for s in keyed if not g0 <= anchor + s < g1 and anchor + s + BLOCK <= hi] == [], keyed
@@ -504,7 +508,7 @@ def test_hand_holds_my_own_bursts():
     assert int(got[0].split()[2], 16) == 0x1234567890ABC, lines
     # the Hand landed 300 ms late; had the keyed gap not been kept as silence in the
     # buffer, it would read 600 ms earlier (a -300 ms dt).
-    assert abs(float(got[0].split()[4]) - 300) < 30, lines
+    assert abs(float(got[0].split()[4]) - 1000 * late) < 30, lines
 
 
 def test_hands_are_not_read_as_a_cw_id():
@@ -694,10 +698,11 @@ def test_hand_decode_any_tag():
     different tags each come back with the tag their CRC passed under, and a
     round seeded with one tag still finds only its own."""
     sent = {5: (0x5A, 0x1111111111111), 7: (0xC3, 0x2222222222222)}
-    y = np.zeros(hand.WINDOW_SAMPLES)
+    y = np.zeros(hand.WINDOW_SAMPLES + hand.slot_offset(7))
     for c, (tag, p) in sent.items():
         x = hand.modulate(tag, hand.payload_bits(p), c)
-        y[hand.SEARCH_SAMPLES:hand.SEARCH_SAMPLES + len(x)] += x
+        i = hand.SEARCH_SAMPLES + hand.slot_offset(c)
+        y[i:i + len(x)] += x
     y = hfchannel.awgn(y, 6.0, seed=6)
     got = hand.decode_window(y, None, [5, 6, 7], hand.SEARCH_SAMPLES)
     assert [(r["c"], r["payload"], r["tag"]) for r in got] == [(c, p, t) for c, (t, p) in sent.items()]
@@ -712,11 +717,12 @@ def overhear(e: Engine, d_s: float, channels: list[int], hands=(), before=None, 
     the window is armed. -> (lines, keyed: any block keyed meanwhile)."""
     ref_at(e, 0.0)
     anchor, d = e.n, int(round(d_s * FS))
-    hi = anchor + d + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES
+    hi = anchor + d + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES + hand.slot_offset(max(channels))
     y = np.random.default_rng(0).normal(0, 0.1, hi - anchor + int(late_s * FS) + 3 * BLOCK)
     for c, tag, p in hands:
         x = hand.modulate(tag, hand.payload_bits(p), c)
-        y[d:d + len(x)] += x
+        i = d + hand.slot_offset(c)
+        y[i:i + len(x)] += x
     keyed = False
 
     def run(until):
@@ -785,7 +791,7 @@ def test_hand_overhear_yields_and_refuses():
     with pytest.raises(ValueError):
         e.hand_overhear(1, 3.0, [20])  # its slot is older than the 30 s ring
     h = Host(ref_at(Engine("W1AW", seed=1), 0.0))
-    for line, want in (("HAND OVERHEAR 1 3.0", "WRONG"), ("HAND OVERHEAR 1 3.0 40", "WRONG"),
+    for line, want in (("HAND OVERHEAR 1 3.0", "WRONG"), (f"HAND OVERHEAR 1 3.0 {hand.N_CHANNELS}", "WRONG"),
                        ("HAND OVERHEAR 1 -3 20", "WRONG"), ("HAND OVERHEAR 1 3.0 20 21", "OK")):
         h.command(line)
         assert h.out_cmd.pop() == want, line

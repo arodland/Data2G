@@ -13,21 +13,31 @@ using namespace data2g;
 
 int main() {
     check::report_crashes_instead_of_prompting();
-    check::equal(hand::channel_freq(0), 1470.0, "channel 0: from the centre out, even below");
-    check::equal(hand::channel_freq(1), 1530.0, "channel 1");
-    check::equal(hand::channel_freq(39), 2670.0, "channel 39");
-    check::equal(hand::channels_within(500.0), 8, "500 Hz: 8 channels");
-    check::equal(hand::channels_within(2400.0), 40, "2400 Hz: all 40");
+    if (hand::FM) {  // channels are time slots
+        check::equal(hand::channel_freq(0), 1550.0, "channel 0");
+        check::equal(hand::channel_freq(63), 1550.0, "channel 63");
+        check::equal(hand::channels_within(500.0), 64, "every slot at any width");
+        check::equal(hand::slot_offset(3), std::int64_t{3} * config::FS * hand::slot_ms() / 1000, "slot 3");
+        check::is_true(hand::slot_ms() >= hand::SLOT_FIXED_MS && hand::ptt_max_samples() >= 0, "the slot holds its fixed part");
+    } else {
+        check::equal(hand::channel_freq(0), 1470.0, "channel 0: from the centre out, even below");
+        check::equal(hand::channel_freq(1), 1530.0, "channel 1");
+        check::equal(hand::channel_freq(39), 2670.0, "channel 39");
+        check::equal(hand::channels_within(500.0), 8, "500 Hz: 8 channels");
+        check::equal(hand::channels_within(2400.0), 40, "2400 Hz: all 40");
+        check::equal(hand::slot_offset(3), std::int64_t{0}, "no slots");
+    }
     const std::uint64_t p = 0x5A5A123456789ABCull & ((1ull << hand::PAYLOAD) - 1);
     check::equal(hand::payload_int(hand::payload_bits(p)), p, "payload bits round trip");
 
     // two Hands 2 channels apart, landing late, at 6 dB; a third channel empty
     const int tag = 0x5A;
     const std::int64_t late = 1234;
-    std::vector<double> y(static_cast<std::size_t>(hand::WINDOW_SAMPLES), 0.0);
+    std::vector<double> y(static_cast<std::size_t>(hand::WINDOW_SAMPLES + hand::slot_offset(22)), 0.0);
     for (auto [c, payload] : {std::pair{20, p}, std::pair{22, std::uint64_t{42}}}) {
         const auto x = hand::modulate(tag, hand::payload_bits(payload), c);
-        for (std::size_t i = 0; i < x.size(); ++i) y[static_cast<std::size_t>(hand::SEARCH_SAMPLES + late) + i] += x[i];
+        const auto at = static_cast<std::size_t>(hand::SEARCH_SAMPLES + late + hand::slot_offset(c));
+        for (std::size_t i = 0; i < x.size(); ++i) y[at + i] += x[i];
     }
     std::mt19937 rng(3);
     std::normal_distribution<double> noise(0.0, std::sqrt(4000.0 / 2500.0 / std::pow(10.0, 0.6)));
