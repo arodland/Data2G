@@ -211,19 +211,32 @@ def test_spread_on_slow_selective_fading():
     """With multipath each tone has its own gain, so on slow fading the
     winning tone's energy varies with the data, not with time: no lag
     correlation, and the excess variance read SPREAD_MAX_HZ (fsk16r25, 2 ms
-    / 0.1 Hz, these 40 seeds: 35; 2 ms / 1 Hz: 10), which is ROBUST_FAST's
-    fast fading. The symbols on the same or adjacent tones are correlated
-    there (SPREAD_NEAR_*): unmeasured. Really fast fading still reads it."""
-    def maxed(doppler, delay_ms, snr):
+    / 0.1 Hz, these 40 seeds: 35; 2 ms / 1 Hz: 10; fsk8r50: 25 and 2), which
+    is ROBUST_FAST's fast fading. The symbols on the same or adjacent tones
+    80-160 ms apart are correlated there (SPREAD_NEAR_*): unmeasured.
+    Really fast fading still reads it, 10 Hz too: its energies are
+    correlated over a symbol or two, not over 80 ms (pairs from the next
+    symbol on read 10 Hz as slow in about 1 burst in 10 of fsk16r25's and 1
+    in 3 of fsk8r50's)."""
+    def count(name, doppler, delay_ms, snr):
         est = []
         for seed in range(40):
-            g, E = _faded_control_energies("fsk16r25-r1/2", doppler, delay_ms, snr, seed)
+            g, E = _faded_control_energies(name, doppler, delay_ms, snr, seed)
             est.append(cpm.measure(g, E, len(E))["spread_est"])
-        return sum(e == cpm.SPREAD_MAX_HZ for e in est)
+        return sum(e == cpm.SPREAD_MAX_HZ for e in est), sum(e == cpm.UNMEASURED_SPREAD_HZ for e in est)
 
-    assert maxed(0.1, 2.0, 2) <= 5  # 3
-    assert maxed(1.0, 2.0, 2) <= 5  # 2
-    assert maxed(30.0, 7.0, 0) >= 34  # 40
+    # (maxed, unmeasured) of 40; in the comments: as measured
+    assert count("fsk16r25-r1/2", 0.1, 2.0, 2)[0] <= 5  # 3
+    assert count("fsk16r25-r1/2", 1.0, 2.0, 2)[0] <= 5  # 2
+    assert count("fsk8r50-r1/3", 0.1, 2.0, 2)[0] <= 3  # 1
+    for name, doppler, delay_ms, least, most_unmeasured in (
+            ("fsk16r25-r1/2", 10.0, 7.0, 37, 1),  # 38, 0 (38 without the check)
+            ("fsk16r25-r1/2", 10.0, 2.0, 38, 1),  # 39, 0 (39)
+            ("fsk16r25-r1/2", 30.0, 7.0, 39, 1),  # 40, 0 (40)
+            ("fsk8r50-r1/3", 10.0, 7.0, 19, 1),  # 20, 0 (20; the rest are fits)
+            ("fsk8r50-r1/3", 30.0, 7.0, 35, 4)):  # 37, 3 (40)
+        maxed, unmeasured = count(name, doppler, delay_ms, 0)
+        assert maxed >= least and unmeasured <= most_unmeasured, (name, doppler, delay_ms, maxed, unmeasured)
 
 
 @pytest.mark.hf_only("CPM: FM has none")

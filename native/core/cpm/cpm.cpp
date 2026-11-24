@@ -913,8 +913,8 @@ std::optional<Lock> late_lock(const Grid& g, std::span<const double> x, const Lo
 // variance, unless the symbols on the same or adjacent winning tones (`tones`)
 // are correlated: slow selective fading, unmeasured (constants: cpm.py's SPREAD_*).
 static double spread(const Grid& g, const std::vector<double>& top, double n0, const std::vector<int>& tones) {
-    constexpr int LAGS = 8, NEAR_LAGS = 3;
-    constexpr double NEAR_Z = 2.0;
+    constexpr int LAGS = 8;
+    constexpr double NEAR_Z = 2.0, NEAR_S0 = 0.08, NEAR_S1 = 0.16;  // cpm.SPREAD_NEAR_S
     constexpr std::size_t MIN_SYMS = 16;
     constexpr double KEEP = 0.05, MAX_HZ = 12.0, UNMEASURED_HZ = 2.0, EXCESS_MIN = 0.2, SIG = 2.5, EXCESS_FIT = 0.05;
     const std::size_t n = top.size();
@@ -941,7 +941,10 @@ static double spread(const Grid& g, const std::vector<double>& top, double n0, c
         // cpm._slow_by_near_tones
         double num = 0.0;
         std::size_t pairs = 0;
-        for (std::size_t lag = 1; lag <= NEAR_LAGS; ++lag) {
+        // cpm._near_lags: the pairs NEAR_S0..NEAR_S1 apart in time
+        const auto lag0 = static_cast<std::size_t>(std::ceil(NEAR_S0 * g.rate - 1e-9));
+        const auto lag1 = static_cast<std::size_t>(std::floor(NEAR_S1 * g.rate + 1e-9));
+        for (std::size_t lag = lag0; lag <= lag1 && lag < n; ++lag) {
             std::vector<double> p;
             for (std::size_t i = 0; i + lag < n; ++i)
                 if (std::abs(tones[i + lag] - tones[i]) <= 1) p.push_back(t[i + lag] * t[i]);

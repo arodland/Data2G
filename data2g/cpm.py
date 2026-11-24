@@ -809,18 +809,34 @@ SPREAD_EXCESS_FIT = 0.05
 # symbol, so on slow selective fading the energies look white too: no fit, and
 # the excess variance read SPREAD_MAX_HZ (control-only fsk16r25, 200 seeds:
 # 2 ms / 0.1 Hz 152, 2 ms / 1 Hz 29; flat 1 Hz none). So before that reading,
-# the correlation over the pairs 1..SPREAD_NEAR_LAGS symbols apart whose
-# winning tones are at most one apart (about 45 in that burst): over
-# SPREAD_NEAR_Z / sqrt(pairs), the fading is slow and the spread unmeasured
-# (152 -> 4 and 29 -> 6; of 7 ms / 10 and 30 Hz's right readings, 188 -> 163
-# and 198 -> 191).
-SPREAD_NEAR_LAGS = 3
+# the correlation over the pairs whose winning tones are at most one apart
+# and that are SPREAD_NEAR_S apart in time: over SPREAD_NEAR_Z / sqrt(pairs),
+# the fading is slow and the spread unmeasured. The pairs start 80 ms apart,
+# not at the next symbol: 10 Hz fading is still correlated over a symbol or
+# two (lags 1-3 read 25 of fsk16r25's 188 right readings at 7 ms / 10 Hz as
+# slow, and 30 of fsk8r50's 88), and by 80 ms it is not, where 1 Hz fading
+# holds to 160 ms and past. Of 200, fsk16r25 / fsk8r50, SPREAD_MAX_HZ
+# readings before -> after: 2 ms / 0.1 Hz 152 -> 4 / 105 -> 0; 2 ms / 1 Hz
+# +2 dB 29 -> 8 / 4 -> 0; 7 ms / 1 Hz -8 dB 68 -> 32 / 41 -> 28; and the
+# right ones, 7 ms / 10 Hz 188 -> 180 / 88 -> 88; 2 ms / 10 Hz 182 -> 179 /
+# 65 -> 62; 7 ms / 30 Hz 198 -> 198 / 194 -> 188 (the test's own chance
+# level at SPREAD_NEAR_Z: about 2%). The near pairs against the far ones at
+# the same lags did worse both ways (7 ms / 1 Hz 68 -> 60, 30 Hz 198 -> 182):
+# with multipath the far tones fade apart whatever the rate.
+SPREAD_NEAR_S = (0.08, 0.16)
 SPREAD_NEAR_Z = 2.0
 
 
-def _slow_by_near_tones(t: np.ndarray, v: float, tones: np.ndarray) -> bool:
+def _near_lags(g: Grid) -> range:
+    """SPREAD_NEAR_S in symbols (c16r25: 2-4, c8r50: 4-8, c32r62: 5-10)."""
+    return range(int(np.ceil(SPREAD_NEAR_S[0] * g.rate - 1e-9)), int(np.floor(SPREAD_NEAR_S[1] * g.rate + 1e-9)) + 1)
+
+
+def _slow_by_near_tones(g: Grid, t: np.ndarray, v: float, tones: np.ndarray) -> bool:
     num, n = 0.0, 0
-    for lag in range(1, SPREAD_NEAR_LAGS + 1):
+    for lag in _near_lags(g):
+        if lag >= len(t):
+            break
         ok = np.abs(tones[lag:] - tones[:-lag]) <= 1
         num += float(np.sum(t[lag:][ok] * t[:-lag][ok]))
         n += int(ok.sum())
@@ -850,7 +866,7 @@ def spread(g: Grid, top: np.ndarray, n0: float, tones: np.ndarray | None = None)
     if m < 2:
         if excess < SPREAD_EXCESS_MIN:
             return 0.0
-        return UNMEASURED_SPREAD_HZ if tones is not None and _slow_by_near_tones(t, v, tones) else SPREAD_MAX_HZ
+        return UNMEASURED_SPREAD_HZ if tones is not None and _slow_by_near_tones(g, t, v, tones) else SPREAD_MAX_HZ
     x = np.arange(1, m + 1, dtype=np.float64) ** 2
     y = np.log(c[:m])
     mx, my = np.mean(x), np.mean(y)
