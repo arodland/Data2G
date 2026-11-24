@@ -291,7 +291,7 @@ def compute_interleaver(spec: CodeSpec) -> np.ndarray:
 
 # --- burst order, scrambling, encode -------------------------------------------------
 
-def spread(coded, m: int):
+def spread(coded, m: int, group: int = 0):
     """(..., n_cw, N) coded bits -> (..., n_cw * N) in burst order: every
     codeword's constellation symbols (m bits each, kept together) dealt
     round-robin over the whole burst, so each codeword gets the burst's
@@ -299,16 +299,35 @@ def spread(coded, m: int):
     on mpp/mpd PER 3.2e-2 -> 0, 8-frame mpd 4.2e-2 -> 3.9e-3; neutral on
     mpg/mps. Must be symbol-, not bit-wise: dealing bits puts codeword j
     on label bit j mod m of every symbol (weak bits for half of them).
-    Works on numpy arrays and torch tensors alike."""
+    Works on numpy arrays and torch tensors alike.
+
+    `group` > 0 (FM plan, decoding while a burst arrives; studies only:
+    config.SPREAD_WINDOW): codewords dealt in consecutive groups of that
+    many, each group round-robin over its own stretch of the burst only, so
+    a group is complete once its frames are in."""
     *lead, n_cw, n = coded.shape
-    return coded.reshape(*lead, n_cw, n // m, m).swapaxes(-3, -2).reshape(*lead, n_cw * n)
+    if group <= 0 or group >= n_cw:
+        return coded.reshape(*lead, n_cw, n // m, m).swapaxes(-3, -2).reshape(*lead, n_cw * n)
+    return np.concatenate([spread(coded[..., a:a + group, :], m) for a in range(0, n_cw, group)], axis=-1)
 
 
-def despread(x, n_cw: int, m: int):
+def despread(x, n_cw: int, m: int, group: int = 0):
     """Inverse of `spread`: (..., n_cw * N) -> (..., n_cw, N)."""
     *lead, total = x.shape
     n = total // n_cw
-    return x.reshape(*lead, n // m, n_cw, m).swapaxes(-3, -2).reshape(*lead, n_cw, n)
+    if group <= 0 or group >= n_cw:
+        return x.reshape(*lead, n // m, n_cw, m).swapaxes(-3, -2).reshape(*lead, n_cw, n)
+    return np.concatenate([despread(x[..., a * n:min(a + group, n_cw) * n], min(group, n_cw - a), m)
+                           for a in range(0, n_cw, group)], axis=-2)
+
+
+def spread_group(spec) -> int:
+    """Codewords per interleaving window for `spec` (config.SPREAD_WINDOW
+    frames; 0: the whole burst, and always for families without frames)."""
+    from .config import SPREAD_WINDOW
+
+    f = getattr(spec, "frames_per_cw", 0)
+    return max(1, SPREAD_WINDOW // f) if SPREAD_WINDOW and f else 0
 
 
 PLAIN = -1  # burst position meaning "not scrambled" (soft bits already flipped: flip())

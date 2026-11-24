@@ -1,6 +1,7 @@
 """data2g.arq.phy: masked CRCs and resend combining on the real modem."""
 
 import numpy as np
+import pytest
 
 from data2g import codes, hfchannel, modem
 from data2g.arq import phy as PHY
@@ -135,6 +136,7 @@ def test_control_padding_is_pinned_when_a_control_fails():
         assert rx.decode(0, ctl_mask(0, 0, 8), 0, None) is None  # another session's key still fails
 
 
+@pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_long_control_is_pinned_where_its_padding_starts():
     """A control carrying an inline codeword (T_INLINE) ends past the fixed
     cuts: at 0 dB a 44 B one fails plain and with PIN_CUTS, and decodes
@@ -201,6 +203,7 @@ def test_duplicated_control_pair_is_pinned_once_combined():
         assert st._ctl_pair(rx, 0, 0) == ctl
 
 
+@pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_a_repeated_control_combines_but_never_reads_as_the_burst_before():
     """decode_repeat (docs/arq.md §3a): a codeword that fails in two bursts
     decodes from their sum. A different burst, summed with a strong earlier

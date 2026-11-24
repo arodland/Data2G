@@ -3,11 +3,15 @@ codeword fails on the pilot estimate decodes once the first's bits and
 its own decoder posterior join the pilots."""
 
 import numpy as np
+import pytest
 
 from data2g import codes, hfchannel, modem
 from data2g.arq import phy
 from data2g.config import SUBMODES
 from data2g.hfchannel import FadingPreset
+
+# HF's mpd (a 4 ms echo, past FM's 2 ms CP) and a seed picked there: FM needs its own DD case on fmchannel
+pytestmark = pytest.mark.hf_only("DD rescue on a seed picked on HF mpd")
 
 
 def _burst():

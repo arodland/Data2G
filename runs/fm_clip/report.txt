@@ -1,0 +1,161 @@
+
+## f108 on flat, TX tilt +3 dB/oct, static
+gray-qam16 (baseline env3): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      408/ 420/ 422   +0.00/ +0.00/ +0.00  drive  2697  clean 14.1/15.0/14.2
+  env6      429/ 432/ 432    >+16/  >+10/   >+4  drive  2674  clean 19.9/22.4/18.4
+  env9      430/ 432/ 432    >+16/  >+10/   >+4  drive  2666  clean 22.2/27.1/19.1
+  env12     430/ 432/ 432    >+16/  >+10/   >+4  drive  2666  clean 19.8/26.0/19.0
+  none      430/ 432/ 432    >+16/  >+10/   >+4  drive  2666  clean 19.8/26.0/19.0
+  real6     406/ 404/ 387   -0.28/ -6.53/-14.90  drive  2686  clean  8.3/16.0/16.8
+  real8     429/ 431/ 432    >+16/  >+10/   >+4  drive  2666  clean 14.6/21.7/18.0
+  real10    430/ 432/ 432    >+16/  >+10/   >+4  drive  2666  clean 19.0/25.9/18.1
+  real12    430/ 432/ 432    >+16/  >+10/   >+4  drive  2666  clean 20.4/27.1/18.1
+  soft6     289/ 264/ 241     <-3/   <-9/  <-15  drive  2655  clean  4.6/11.3/13.0
+  soft8     357/ 348/ 337     <-3/   <-9/  <-15  drive  2678  clean  6.5/13.3/14.4
+  soft10    401/ 404/ 399   -0.94/ -6.51/-13.21  drive  2697  clean  8.7/15.4/15.7
+  soft12    421/ 426/ 426   +7.81/  >+10/   >+4  drive  2697  clean 11.2/17.7/16.8
+c64-w48-r23 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      467/ 506/ 517     <-3/ -8.51/-14.06  drive  2682  clean 15.4/15.1/14.1
+  env6      565/ 627/ 638   +0.00/ +0.00/ +0.00  drive  2666  clean 20.9/22.6/18.9
+  env9      584/ 641/ 647   +1.35/  >+10/   >+4  drive  2659  clean 22.8/27.2/19.9
+  env12     584/ 641/ 647   +1.39/  >+10/   >+4  drive  2662  clean 22.8/27.3/20.0
+  none      584/ 641/ 647   +1.39/  >+10/   >+4  drive  2662  clean 22.8/27.3/20.0
+  real6     425/ 399/ 332     <-3/   <-9/  <-15  drive  2682  clean  9.4/15.9/17.3
+  real8     558/ 619/ 628   -0.29/ -1.23/ -5.81  drive  2670  clean 15.1/21.4/18.4
+  real10    580/ 638/ 645   +1.13/ +5.89/   >+4  drive  2659  clean 19.8/25.8/18.7
+  real12    583/ 640/ 646   +1.32/  >+10/   >+4  drive  2659  clean 20.8/27.1/18.7
+  soft6     270/ 221/ 181     <-3/   <-9/  <-15  drive  2682  clean  5.1/11.2/13.7
+  soft8     348/ 317/ 289     <-3/   <-9/  <-15  drive  2705  clean  7.1/13.2/15.3
+  soft10    431/ 438/ 420     <-3/   <-9/  <-15  drive  2701  clean  9.3/15.3/16.6
+  soft12    499/ 543/ 545   -2.82/ -6.92/-12.85  drive  2690  clean 11.8/17.6/17.6
+c256-w48-r58 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      453/ 497/ 509     <-3/ -8.79/-14.36  drive  2713  clean 14.2/15.0/14.4
+  env6      579/ 699/ 744   +0.00/ +0.00/ +0.00  drive  2709  clean 20.5/22.5/18.5
+  env9      608/ 758/ 813   +1.23/  >+10/   >+4  drive  2705  clean 22.7/27.1/18.9
+  env12     608/ 759/ 814   +1.24/  >+10/   >+4  drive  2705  clean 22.7/27.2/18.9
+  none      608/ 759/ 814   +1.24/  >+10/   >+4  drive  2705  clean 22.7/27.2/18.9
+  real6     408/ 338/ 224     <-3/   <-9/  <-15  drive  2717  clean  8.6/16.0/16.7
+  real8     574/ 684/ 718   -0.19/ -0.86/ -4.05  drive  2709  clean 14.7/21.6/17.7
+  real10    610/ 751/ 804   +1.31/ +8.61/   >+4  drive  2701  clean 19.7/26.1/17.8
+  real12    610/ 757/ 812   +1.35/  >+10/   >+4  drive  2705  clean 20.9/27.1/17.8
+  soft6     269/ 231/ 199     <-3/   <-9/  <-15  drive  2694  clean  4.5/11.2/13.4
+  soft8     341/ 311/ 283     <-3/   <-9/  <-15  drive  2701  clean  6.3/13.2/14.8
+  soft10    417/ 416/ 391     <-3/   <-9/  <-15  drive  2709  clean  8.5/15.3/15.9
+  soft12    488/ 530/ 528     <-3/ -7.66/-13.74  drive  2717  clean 10.9/17.6/16.8
+
+## f55 on flat, TX tilt +3 dB/oct, static
+gray-qam16 (baseline env3): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      216/ 217/ 217   +0.00/ +0.00/ +0.00  drive  2379  clean 15.3/15.7/16.0
+  env6      220/ 220/ 220    >+16/  >+10/   >+4  drive  2387  clean 21.9/24.2/21.1
+  env9      220/ 220/ 220    >+16/  >+10/   >+4  drive  2375  clean 25.3/29.0/23.2
+  env12     220/ 220/ 220    >+16/  >+10/   >+4  drive  2375  clean 25.5/29.2/23.3
+  none      220/ 220/ 220    >+16/  >+10/   >+4  drive  2375  clean 25.5/29.2/23.3
+  real6     212/ 210/ 209     <-3/   <-9/  <-15  drive  2391  clean 12.2/16.4/16.1
+  real8     220/ 220/ 220    >+16/  >+10/   >+4  drive  2395  clean 17.6/22.7/19.4
+  real10    220/ 220/ 220    >+16/  >+10/   >+4  drive  2379  clean 21.7/27.6/20.9
+  real12    220/ 220/ 220    >+16/  >+10/   >+4  drive  2375  clean 23.0/28.9/21.1
+  soft6     103/  72/  60     <-3/   <-9/  <-15  drive  2468  clean  7.9/12.6/14.7
+  soft8     182/ 171/ 166     <-3/   <-9/  <-15  drive  2437  clean  9.8/14.7/16.1
+  soft10    214/ 212/ 211     <-3/   <-9/  <-15  drive  2422  clean 12.0/17.0/17.3
+  soft12    220/ 220/ 220    >+16/  >+10/   >+4  drive  2414  clean 14.4/19.5/18.5
+c64-w48-r23 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      267/ 272/ 273     <-3/   <-9/  <-15  drive  2371  clean 15.1/15.6/15.9
+  env6      324/ 327/ 327   +0.00/ +0.00/ +0.00  drive  2379  clean 21.5/23.7/20.8
+  env9      329/ 330/ 330    >+16/  >+10/   >+4  drive  2371  clean 24.9/28.8/22.7
+  env12     328/ 330/ 330    >+16/  >+10/   >+4  drive  2371  clean 25.0/29.0/22.8
+  none      328/ 330/ 330    >+16/  >+10/   >+4  drive  2371  clean 25.0/29.0/22.8
+  real6     209/ 176/ 158     <-3/   <-9/  <-15  drive  2383  clean 12.1/16.3/16.0
+  real8     321/ 324/ 324   -1.55/ -6.12/-11.85  drive  2371  clean 17.3/22.5/19.2
+  real10    328/ 329/ 329    >+16/  >+10/   >+4  drive  2371  clean 21.5/27.4/20.4
+  real12    328/ 330/ 330    >+16/  >+10/   >+4  drive  2371  clean 22.4/28.7/20.5
+  soft6     -10/ -90/-118     <-3/   <-9/  <-15  drive  2488  clean  7.9/12.5/14.9
+  soft8     118/  61/  33     <-3/   <-9/  <-15  drive  2441  clean  9.8/14.6/16.3
+  soft10    232/ 206/ 194     <-3/   <-9/  <-15  drive  2414  clean 12.0/16.8/17.6
+  soft12    297/ 296/ 294     <-3/   <-9/  <-15  drive  2399  clean 14.3/19.3/18.5
+c256-w48-r58 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB
+  env3      266/ 273/ 275     <-3/   <-9/  <-15  drive  2367  clean 15.6/15.7/16.5
+  env6      380/ 402/ 407   +0.00/ +0.00/ +0.00  drive  2356  clean 22.2/23.9/21.4
+  env9      402/ 426/ 431   +6.58/  >+10/   >+4  drive  2352  clean 25.4/29.2/23.8
+  env12     402/ 426/ 431   +6.65/  >+10/   >+4  drive  2352  clean 25.5/29.2/23.8
+  none      402/ 426/ 431   +6.65/  >+10/   >+4  drive  2352  clean 25.5/29.2/23.8
+  real6     176/ 115/  82     <-3/   <-9/  <-15  drive  2379  clean 12.3/16.4/16.6
+  real8     368/ 387/ 391   -1.28/ -4.42/ -9.60  drive  2352  clean 17.8/22.8/20.1
+  real10    399/ 422/ 426   +4.76/  >+10/   >+4  drive  2356  clean 22.1/28.1/21.6
+  real12    401/ 425/ 430   +5.71/  >+10/   >+4  drive  2352  clean 22.9/28.9/21.9
+  soft6      25/ -50/ -72     <-3/   <-9/  <-15  drive  2461  clean  7.9/12.6/14.7
+  soft8     114/  50/  21     <-3/   <-9/  <-15  drive  2426  clean  9.8/14.6/16.4
+  soft10    219/ 179/ 159     <-3/   <-9/  <-15  drive  2395  clean 12.0/16.9/17.9
+  soft12    303/ 298/ 292     <-3/   <-9/  <-15  drive  2375  clean 14.3/19.4/19.2
+
+## f55 on mic, static
+gray-qam16 (baseline env3): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB; radio limiter %
+  env3      210/ 211/ 212   +0.00/ +0.00/ +0.00  drive  1455  clean 12.0/14.2/14.3  8.51%
+  env6      208/ 207/ 207     <-3/   <-9/  <-15  drive  1494  clean 11.1/16.4/18.0  9.10%
+  env9      206/ 205/ 204     <-3/   <-9/  <-15  drive  1506  clean 10.7/16.8/18.7  9.21%
+  env12     206/ 205/ 204     <-3/   <-9/  <-15  drive  1506  clean 10.7/16.8/18.7  9.21%
+  none      206/ 205/ 204     <-3/   <-9/  <-15  drive  1506  clean 10.7/16.8/18.7  9.21%
+  real6     196/ 195/ 195     <-3/   <-9/  <-15  drive  1467  clean 11.0/14.6/15.1  8.94%
+  real8     206/ 206/ 205     <-3/   <-9/  <-15  drive  1490  clean 10.8/16.3/17.0  9.25%
+  real10    206/ 205/ 205     <-3/   <-9/  <-15  drive  1502  clean 10.5/16.8/17.9  9.27%
+  real12    206/ 205/ 205     <-3/   <-9/  <-15  drive  1506  clean 10.5/16.8/18.0  9.30%
+  soft6     146/ 142/ 141     <-3/   <-9/  <-15  drive  1428  clean 11.2/12.4/13.0  7.27%
+  soft8     181/ 179/ 179     <-3/   <-9/  <-15  drive  1444  clean 11.6/13.6/14.3  7.96%
+  soft10    199/ 199/ 199     <-3/   <-9/  <-15  drive  1455  clean 11.6/14.7/15.4  8.45%
+  soft12    205/ 205/ 205     <-3/   <-9/  <-15  drive  1467  clean 11.5/15.4/16.3  8.78%
+  pre3     -245/-272/-280     <-3/   <-9/  <-15  drive  1517  clean  3.1/ 9.2/12.9  1.11%
+  pre4      -88/-112/-120     <-3/   <-9/  <-15  drive  1459  clean  4.2/10.9/14.2  2.40%
+  pre5       47/  30/  25     <-3/   <-9/  <-15  drive  1444  clean  5.5/12.5/15.2  8.03%
+  pre6      105/  88/  85     <-3/   <-9/  <-15  drive  1451  clean  6.9/13.8/16.2  8.66%
+  pre8      186/ 181/ 180     <-3/   <-9/  <-15  drive  1486  clean  9.3/15.9/17.5  9.09%
+  ds50      220/ 220/ 220    >+16/  >+10/   >+4  drive   753  clean 23.1/32.0/24.0  0.05%
+  ds70      220/ 220/ 220    >+16/  >+10/   >+4  drive  1054  clean 18.4/25.4/23.1  1.12%
+  ds85      219/ 219/ 219    >+16/  >+10/   >+4  drive  1280  clean 14.0/20.2/20.7  4.08%
+c64-w48-r23 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB; radio limiter %
+  env3      239/ 243/ 244    >+16/  >+10/   >+4  drive  1459  clean 11.6/14.0/14.1  8.88%
+  env6      193/ 177/ 172     <-3/   <-9/  <-15  drive  1498  clean 11.1/16.2/17.8  9.47%
+  env9      199/ 183/ 179     <-3/   <-9/  <-15  drive  1510  clean 10.9/16.6/18.7  9.46%
+  env12     197/ 181/ 177     <-3/   <-9/  <-15  drive  1513  clean 10.8/16.6/18.7  9.59%
+  none      197/ 181/ 177     <-3/   <-9/  <-15  drive  1513  clean 10.8/16.6/18.7  9.59%
+  real6     109/  76/  65     <-3/   <-9/  <-15  drive  1467  clean 10.8/14.4/15.1  8.98%
+  real8     188/ 171/ 165     <-3/   <-9/  <-15  drive  1494  clean 10.9/16.0/17.1  9.46%
+  real10    199/ 183/ 179     <-3/   <-9/  <-15  drive  1510  clean 10.7/16.5/17.9  9.65%
+  real12    200/ 185/ 180     <-3/   <-9/  <-15  drive  1510  clean 10.6/16.6/18.1  9.50%
+  soft6      44/  10/   3     <-3/   <-9/  <-15  drive  1432  clean 11.0/12.3/12.5  7.43%
+  soft8      95/  66/  56     <-3/   <-9/  <-15  drive  1444  clean 11.4/13.5/13.9  8.08%
+  soft10    136/ 115/ 109     <-3/   <-9/  <-15  drive  1459  clean 11.5/14.5/15.1  8.59%
+  soft12    167/ 149/ 144     <-3/   <-9/  <-15  drive  1471  clean 11.5/15.2/16.2  8.84%
+  pre3     -215/-246/-254     <-3/   <-9/  <-15  drive  1517  clean  3.8/ 9.1/13.0  0.99%
+  pre4     -134/-174/-185     <-3/   <-9/  <-15  drive  1463  clean  4.9/10.8/14.1  2.58%
+  pre5      -35/ -72/ -84     <-3/   <-9/  <-15  drive  1451  clean  5.9/12.4/15.2  8.53%
+  pre6        3/ -45/ -59     <-3/   <-9/  <-15  drive  1463  clean  6.9/13.7/16.2  9.15%
+  pre8      141/ 109/ 100     <-3/   <-9/  <-15  drive  1490  clean  9.1/15.7/17.7  9.38%
+  ds50      316/ 329/ 330    >+16/  >+10/   >+4  drive   757  clean 22.8/31.6/24.0  0.08%
+  ds70      319/ 326/ 327    >+16/  >+10/   >+4  drive  1059  clean 17.5/25.0/23.4  1.34%
+  ds85      290/ 293/ 294    >+16/  >+10/   >+4  drive  1286  clean 13.6/19.8/20.8  4.37%
+c256-w48-r58 (baseline env6): total BMI (bits per OFDM symbol) at CNR 16 / 22 / 28; dB of CNR saved at equal throughput (+ better; '>' past the baseline's grid top, '<' below its bottom); drive Hz rms; clean SNR bottom/mean/top dB; radio limiter %
+  env3      236/ 241/ 243    >+16/  >+10/   >+4  drive  1467  clean 12.1/14.1/14.6  8.65%
+  env6      184/ 159/ 149     <-3/   <-9/  <-15  drive  1494  clean 11.3/16.4/18.5  8.95%
+  env9      192/ 167/ 158     <-3/   <-9/  <-15  drive  1502  clean 10.7/16.8/19.4  8.96%
+  env12     192/ 166/ 157     <-3/   <-9/  <-15  drive  1502  clean 10.7/16.8/19.4  8.96%
+  none      192/ 166/ 157     <-3/   <-9/  <-15  drive  1502  clean 10.7/16.8/19.4  8.96%
+  real6     101/  59/  44     <-3/   <-9/  <-15  drive  1471  clean 11.0/14.5/15.7  8.69%
+  real8     179/ 152/ 142     <-3/   <-9/  <-15  drive  1486  clean 11.0/16.2/17.7  8.77%
+  real10    193/ 169/ 160     <-3/   <-9/  <-15  drive  1498  clean 10.5/16.8/18.6  9.02%
+  real12    195/ 170/ 161     <-3/   <-9/  <-15  drive  1498  clean 10.5/16.8/18.9  8.90%
+  soft6      60/  31/  21     <-3/   <-9/  <-15  drive  1436  clean 10.9/12.4/12.7  7.18%
+  soft8      97/  66/  55     <-3/   <-9/  <-15  drive  1447  clean 11.5/13.6/14.2  7.63%
+  soft10    130/ 101/  92     <-3/   <-9/  <-15  drive  1459  clean 11.7/14.6/15.5  8.10%
+  soft12    156/ 127/ 117     <-3/   <-9/  <-15  drive  1471  clean 11.5/15.4/16.6  8.45%
+  pre3     -102/-124/-129     <-3/   <-9/  <-15  drive  1521  clean  3.3/ 9.2/13.2  1.04%
+  pre4      -48/ -78/ -86     <-3/   <-9/  <-15  drive  1467  clean  4.6/10.9/14.7  2.48%
+  pre5       17/ -16/ -27     <-3/   <-9/  <-15  drive  1451  clean  5.8/12.5/15.8  7.96%
+  pre6       37/  -9/ -23     <-3/   <-9/  <-15  drive  1463  clean  7.0/13.8/16.7  8.86%
+  pre8      133/  94/  80     <-3/   <-9/  <-15  drive  1486  clean  9.0/15.8/18.3  8.93%
+  ds50      349/ 412/ 430    >+16/  >+10/   >+4  drive   751  clean 22.9/32.2/24.9  0.05%
+  ds70      364/ 399/ 409    >+16/  >+10/   >+4  drive  1051  clean 17.8/25.5/24.4  1.12%
+  ds85      301/ 308/ 309    >+16/  >+10/   >+4  drive  1277  clean 13.8/20.1/21.7  3.89%
+
+## f108 flat flutter 440: total BMI at CNR 19 / 25
+  gray-qam16: env3 415/421  none 430/430  real10 430/431  env12 430/430
+  c64-w48-r23: env6 600/631  none 619/642  real10 615/640  env12 619/642
+  c256-w48-r58: env6 636/719  none 686/788  real10 679/779  env12 686/788

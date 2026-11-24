@@ -50,17 +50,17 @@ def substitutions(native):
     def native_array(x, ndim):
         return isinstance(x, np.ndarray) and x.ndim >= ndim and x.dtype in (np.uint8, np.float64)
 
-    def spread(coded, m):
+    def spread(coded, m, group=0):
         if not native_array(coded, 2):
-            return py["spread"](coded, m)
+            return py["spread"](coded, m, group)
         *lead, n_cw, N = coded.shape
-        return n.spread(coded.reshape(-1, n_cw * N), n_cw, m).reshape(*lead, n_cw * N)
+        return n.spread(coded.reshape(-1, n_cw * N), n_cw, m, group).reshape(*lead, n_cw * N)
 
-    def despread(x, n_cw, m):
+    def despread(x, n_cw, m, group=0):
         if not native_array(x, 1):
-            return py["despread"](x, n_cw, m)
+            return py["despread"](x, n_cw, m, group)
         *lead, total = x.shape
-        return n.despread(x.reshape(-1, total), n_cw, m).reshape(*lead, n_cw, total // n_cw)
+        return n.despread(x.reshape(-1, total), n_cw, m, group).reshape(*lead, n_cw, total // n_cw)
 
     def info_bits(spec, payload, crc_mask=0, index=0):
         if not own(spec):

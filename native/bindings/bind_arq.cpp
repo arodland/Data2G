@@ -141,7 +141,9 @@ void bind_arq(py::module_& m) {
         const auto out = arq::predict_outcome(measured(md), band, gap, seconds, pv ? &*pv : nullptr, model);
         py::dict d;
         for (std::size_t i = 0; i < out.size(); ++i)
-            d[py::str(std::string(tables::OUTCOME_MODES[i]))] = py::make_tuple(out[i].burst, out[i].cw);
+            // FM: the provisional threshold predictor's rows are MODE_THRESHOLDS' (predictor.cpp)
+            d[py::str(std::string(config::PROFILE == "fm" ? tables::MODE_THRESHOLDS[i].name : tables::OUTCOME_MODES[i]))] =
+                py::make_tuple(out[i].burst, out[i].cw);
         return d;
     }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none(),
        py::arg("model") = 0);
@@ -192,6 +194,7 @@ void bind_arq(py::module_& m) {
         .def_readwrite("data_lost", &Shifter::data_lost)
         .def_readwrite("ladder_left", &Shifter::ladder_left)
         .def_readwrite("spreads", &Shifter::spreads)
+        .def_readwrite("n0_spreads", &Shifter::n0_spreads)
         .def_readwrite("floor_spreads", &Shifter::floor_spreads)
         .def_readwrite("last_spread", &Shifter::last_spread)
         .def_readwrite("energies", &Shifter::energies)

@@ -73,10 +73,21 @@ jobs:
               -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
             cmake --build native/build --parallel
             ctest --test-dir native/build --output-on-failure --timeout 600
-            tools/package_app.sh native/build dist
+            # the FM profile, packaged beside the HF one (no apostrophes: this script is single-quoted)
+            cmake -S native -B native/build-fm -G Ninja \
+              -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDATA2G_BUILD_PYMODULE=OFF -DDATA2G_PROFILE=fm \
+              -DDATA2G_BUILD_HOST=ON -DDATA2G_BUILD_QTAUDIO=ON -DDATA2G_BUILD_RIG=ON \
+              -DDATA2G_AUDIO_BACKEND=miniaudio -DDATA2G_BUILD_GUI=ON \
+              -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
+            cmake --build native/build-fm --parallel
+            ctest --test-dir native/build-fm --output-on-failure --timeout 600
+            tools/package_app.sh native/build dist native/build-fm
             dist/data2g/data2g host --help > /dev/null
             dist/data2g/data2g web --help > /dev/null
             QT_QPA_PLATFORM=offscreen timeout 8 dist/data2g/data2g || [ $? -eq 124 ]
+            dist/data2g/data2g fm host --help > /dev/null
+            dist/data2g/data2g-fm web --help > /dev/null
+            QT_QPA_PLATFORM=offscreen timeout 8 dist/data2g/data2g-fm || [ $? -eq 124 ]
             tar czf "$pkg.tar.gz" -C dist .
             tools/make_installer.sh dist "$pkg"
             # uname says aarch64 in here; check what was actually built.
@@ -284,10 +295,42 @@ jobs:
       - name: Python suite against the C++ core
         if: matrix.osx_arch == ''
         run: pytest tests -q --native -rs
+      # --- the FM profile (VHF/UHF) ------------------------------------------
+      # Its own tree (native/build-fm, where tests/native_subs looks for it), same
+      # options; packaged beside HF's below (tools/package_app.sh's third argument).
+      - name: Configure (FM)
+        shell: bash
+        env:
+          OSX_ARCH: ${{ matrix.osx_arch }}
+        run: |
+          cmake -S native -B native/build-fm -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDATA2G_PROFILE=fm \
+            ${OSX_ARCH:+-DCMAKE_OSX_ARCHITECTURES=$OSX_ARCH} \
+            ${OSX_ARCH:+-DDATA2G_BUILD_PYMODULE=OFF} \
+            -DDATA2G_BUILD_HOST=ON -DDATA2G_BUILD_QTAUDIO=ON -DDATA2G_BUILD_RIG=ON \
+            -DDATA2G_AUDIO_BACKEND=miniaudio \
+            -DDATA2G_BUILD_GUI=ON \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
+            -DPython3_EXECUTABLE="$DATA2G_PYTHON" \
+            -Dpybind11_DIR="$("$DATA2G_PYTHON" -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+      - name: Build (FM)
+        run: cmake --build native/build-fm --parallel
+      - name: The FM host starts
+        shell: bash
+        run: |
+          exe=native/build-fm/data2g-host-fm; [ -f "$exe.exe" ] && exe="$exe.exe"
+          "$exe" --help > /dev/null && echo "FM data2g-host starts"
+      - name: C++ tests (FM)
+        run: ctest --test-dir native/build-fm --output-on-failure --timeout 600
+      - name: Python suite against the C++ core (FM)
+        if: matrix.osx_arch == ''
+        env:
+          DATA2G_PROFILE: fm
+        run: pytest tests -q --native -rs
       # --- packaging -------------------------------------------------------
       - name: Stage a runnable app
         shell: bash
-        run: tools/package_app.sh native/build dist
+        run: tools/package_app.sh native/build dist native/build-fm
       # Before the run check: the hardened runtime that signing turns on can
       # stop an app that ran unsigned, so check what operators get.
       - name: Sign the app
@@ -347,6 +390,22 @@ jobs:
           sleep 8
           if kill -0 "$pid" 2>/dev/null; then kill "$pid" || true; echo "data2g-gui started and stayed up"
           else wait "$pid"; echo "the packaged GUI exited on its own" >&2; exit 1; fi
+          # The FM profile, packaged beside HF's: its host, web station and GUI start too.
+          case "$(uname -s)" in
+            Darwin) fdir="dist/Data2G FM.app/Contents/MacOS"; fhost=("$fdir/data2g-host-fm"); fweb=("$fdir/data2g-web-fm"); fgui=("$fdir/data2g-gui-fm") ;;
+            MINGW*|MSYS*) fhost=("$dir/data2g-host-fm.exe"); fweb=("$dir/data2g-web-fm.exe"); fgui=("$dir/data2g-gui-fm.exe") ;;
+            *) fhost=("$dir/data2g" fm host); fweb=("$dir/data2g" fm web); fgui=("$dir/data2g-fm") ;;
+          esac
+          "${fhost[@]}" --help > /dev/null && echo "data2g-host-fm starts"
+          "${fweb[@]}" --help > /dev/null && echo "data2g-web-fm starts"
+          if [ "$(uname -s)" = Darwin ]; then
+            exe="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "dist/Data2G FM.app/Contents/Info.plist")"
+            [ "$exe" = data2g-gui-fm ] || { echo "Data2G FM.app launches $exe, not data2g-gui-fm" >&2; exit 1; }
+          fi
+          QT_QPA_PLATFORM=offscreen "${fgui[@]}" & pid=$!
+          sleep 8
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid" || true; echo "data2g-gui-fm started and stayed up"
+          else wait "$pid"; echo "the packaged FM GUI exited on its own" >&2; exit 1; fi
       # Named after what they run on, not the runner image; versioned only
       # for a release (a CI run is identified by its run).
       - name: Name the package

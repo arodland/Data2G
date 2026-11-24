@@ -64,6 +64,7 @@ def test_llr_matches_numpy():
     np.testing.assert_allclose(got, constellation.llr(y, h, var, p), rtol=1e-9)
 
 
+@pytest.mark.hf_only("HF fading (mpp) through the estimator; FM assumes a 0.2 Hz spread for short windows (config.DEFAULT_SPREAD_HZ)")
 def test_bmi_agrees_with_the_full_modem():
     """QPSK at mpp 10 dB: the numpy modem (scripts/eq_floor.py) measured
     0.90-0.92 BMI over 5-10 bursts. The torch path skips acquisition but

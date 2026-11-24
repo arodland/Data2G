@@ -31,5 +31,7 @@ include = ["data2g*"]
 "data2g" = ["codes_data/*", "constellations/*.npy", "format/*.npz", "arq/zdict.bin"]
 
 [tool.pytest.ini_options]
-markers = ["slow: long-running Monte Carlo checks"]
+markers = ["slow: long-running Monte Carlo checks",
+           "hf_only(reason): an HF calibration; skipped under another DATA2G_PROFILE (tests/conftest.py)",
+           "python_only(reason): a Python feature native has not got yet; skipped under --native (tests/conftest.py)"]
 addopts = "-m 'not slow' -n auto --dist loadgroup"

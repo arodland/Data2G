@@ -6,6 +6,7 @@
 #   tools/build_native.sh              # build (no ctests)
 #   tools/build_native.sh --test       # build with ctests, then ctest and pytest --native
 #   tools/build_native.sh --sanitize   # ASan + UBSan
+#   DATA2G_PROFILE=fm tools/build_native.sh   # the FM profile, in native/build-fm
 #
 # The module must be built for the Python that runs pytest, or the import
 # fails and --native refuses to run. PYTHON overrides the choice.
@@ -13,7 +14,10 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-build="$root/native/build"
+# The radio service (data2g/config.py PROFILE): native/build for HF, native/build-<profile>
+# for another, so both can be built side by side; pytest picks by DATA2G_PROFILE too.
+profile="${DATA2G_PROFILE:-hf}"
+build="$root/native/build$([[ $profile == hf ]] || echo "-$profile")"
 
 # A worktree has no .venv of its own: use the main checkout's.
 main="$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
@@ -22,7 +26,7 @@ for py in "${PYTHON:-}" "$root/.venv/bin/python" "$main/.venv/bin/python" "$(com
 done
 echo "python: $py" >&2
 
-cmake_args=(-S "$root/native" -B "$build" -G Ninja "-DPython3_EXECUTABLE=$py")
+cmake_args=(-S "$root/native" -B "$build" -G Ninja "-DPython3_EXECUTABLE=$py" "-DDATA2G_PROFILE=$profile")
 
 # pybind11 is usually a system package while the interpreter is the venv's
 # (never `uv add` it: a sync replaces the venv's ROCm torch).

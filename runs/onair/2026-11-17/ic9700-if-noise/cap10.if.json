@@ -1,0 +1,10 @@
+{
+ "fs": 48000,
+ "centre_hz": 12000.0,
+ "centre_found_hz": 17444.7,
+ "noise_dbhz": -58.4,
+ "filter_db3_hz": 17109,
+ "filter_db26_hz": 19922,
+ "tx_path": "mic",
+ "segments": []
+}

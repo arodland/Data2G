@@ -527,6 +527,7 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
     t_done = [None] * len(steps)
     events, air = [], []
     hold = {id(a): {}, id(b): {}}  # receiver -> {id(burst): hold from}: its polls wait for that burst
+    tx_end = {id(a): float("-inf"), id(b): float("-inf")}
     t = 0.0
     while t < horizon:
         # the application: write every step whose prerequisite is delivered
@@ -540,13 +541,17 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
                 written[w] += n
                 t_write[i] = t
         for me, other in ((a, b), (b, a)):
-            if any(f <= t for f in hold[id(me)].values()):
+            if t < tx_end[id(me)] or any(f <= t for f in hold[id(me)].values()):
                 continue
             burst = me.poll(t)
             if burst is None:
                 continue
             start = t + PTT_S
             end, hdr, make_rx, meas = phy.send(burst, start)
+            # As Engine.step, never poll a station while its transmitter is
+            # active. A host write can make the callee's old wake timer due
+            # before on_tx_end replaces it, otherwise starting a second TX.
+            tx_end[id(me)] = end
             # only a policy that reads the energy inputs (the gear shifter) is told
             if hasattr(phy, "burst_energy_db") and type(other.policy).observe_energy is not L.Policy.observe_energy:
                 other.policy.observe_energy(phy.burst_energy_db(burst, meas["snr_est"] if hdr and meas else None), end)
@@ -594,7 +599,8 @@ def run(pol_a, pol_b, ch: Channel, steps, seed=0, horizon=1800.0, phy=None, cap=
             break
         # a held station's timers wait for the burst event that releases it
         nxt = [e[0] for e in events] + [x for x in (s_.next_event() for s_ in (a, b)
-                                                    if not any(f <= t for f in hold[id(s_)].values())) if x is not None]
+                                                    if t >= tx_end[id(s_)]
+                                                    and not any(f <= t for f in hold[id(s_)].values())) if x is not None]
         pend = [t_done[after] + think for (_, _, after, think), tw in zip(steps, t_write)
                 if tw is None and after is not None and t_done[after] is not None]
         nxt += [p for p in pend if p > t] + ([t + 0.05] if any(p <= t for p in pend) else [])

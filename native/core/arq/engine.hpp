@@ -44,6 +44,9 @@
 #include <vector>
 
 #include "arq/phy.hpp"
+#include <set>
+#include "arq/ping.hpp"
+#include "arq/probe.hpp"
 #include "arq/policy.hpp"
 #include "arq/nod.hpp"
 #include "arq/session.hpp"
@@ -119,7 +122,8 @@ public:
     // fields: (key, JSON value) pairs after "kind"
     void event(std::string_view kind, const std::vector<std::pair<std::string, std::string>>& fields);
     std::string rx(double t, std::span<const double> audio, const receiver::Pending& header, bool lost,
-                   const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise = std::nullopt);
+                   const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise = std::nullopt,
+                   const std::string& lock = {});  // lock: rx's "lock" JSON (empty: its kind alone)
 
 private:
     void post(std::function<void()> job, std::size_t bytes);
@@ -302,6 +306,8 @@ public:
     // "DISCONNECTED why", "CQFRAME call cap", "ID call key", "PENDING", "CANCELPENDING".
     std::vector<std::string> events();
     void send_cq(const std::string& call, int cap);  // throws std::runtime_error, std::invalid_argument (call)
+    // FM: a ping to `to` (arq/ping), cap 1 NARROW or 2 WIDE; PINGACK / PINGVERDICT events. Throws as send_cq.
+    void send_ping(const std::string& to, int cap = 1);
     // A control-only burst anyone can read (frame type SESSION, mask 0), in the cap's connect mode.
     TxBurstPtr open_frame(int cap, int ext, const Bytes& body) const;
     double id_interval_s = ID_INTERVAL_S;
@@ -387,6 +393,7 @@ private:
         bool cw = false;  // a CW ID heard (cwid::CwSense) with no burst locked
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
+        std::int64_t rx_end = 0;  // the receiver's stream index past this block's last sample fed
         std::chrono::steady_clock::time_point arrived{};  // when step() took it: DD's turnaround clock
     };
     struct Done {
@@ -400,7 +407,10 @@ private:
     Done process_safe(Block& b);  // process(); a throw drops the session and plays silence
     void hear(std::vector<receiver::Receiver::Item>& items, double t);
     std::vector<TxBurstPtr> kiss_burst(std::int64_t k, bool busy);
-    bool cq(ModemRx& rx);
+    bool cq(ModemRx& rx, const receiver::BurstEvent* ev = nullptr, double t = 0.0);
+    TxBurstPtr ping_burst(const std::string& to, const std::optional<Bytes>& report) const;
+    void on_ping(ByteView body, const receiver::BurstEvent* ev);
+    void probe_check(double t);
     TxBurstPtr id_frame(const Session& s) const;
     void id_check(double t);
     std::pair<std::vector<TxBurstPtr>, TxBurstPtr> with_id(TxBurstPtr burst, double t);
@@ -438,6 +448,16 @@ private:
     bool chat_ = false;
     std::optional<double> idle_close_;  // set_idle_close
     std::deque<TxBurstPtr> extra_;  // bursts outside any session (CQ frames)
+    std::map<std::string, double> ping_replied_;  // caller -> time of our last ping reply (ping::REPLY_HOLDOFF_S)
+    std::set<std::string> ping_sent_;              // stations we pinged, until their reply
+    struct PendingProbe {
+        std::string frm, to;
+        std::optional<Bytes> report;
+        std::int64_t first;  // the probe's first sample, an n_ value
+    };
+    std::vector<PendingProbe> probes_;  // pings heard whose probe is still arriving
+    std::int64_t fed_ = 0;              // stream samples heard, this block's included (n_'s basis)
+    std::int64_t rx_to_n_ = 0;          // n_ minus the receiver's stream index, as of this block
     std::vector<std::string> events_;  // host notifications from outside the session
     struct Pend {
         double deadline;
@@ -466,6 +486,12 @@ private:
         std::string mode;
     };
     std::optional<Span> span_;  // the burst being heard
+    struct Inc {  // the burst being decoded as it arrives (receiver::PartialRequest): its header's start, its decoder
+        std::int64_t start;
+        std::shared_ptr<ModemRx> rx;
+    };
+    std::optional<Inc> inc_;
+    void hear_partial(const receiver::PartialRequest& q);
     std::optional<Span> heard_span_;  // ... being decoded: its energy once measured (hear_burst)
     std::optional<double> session_snr_;
     std::optional<double> tx_end_;  // when my last burst ended

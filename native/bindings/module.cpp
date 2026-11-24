@@ -8,6 +8,10 @@
 #include "convert.hpp"
 #include "util/pool.hpp"
 
+#include <string>
+
+#include "config/config.hpp"
+
 namespace data2g::bind {
 void bind_codes(py::module_&);
 void bind_config(py::module_&);
@@ -38,6 +42,9 @@ PYBIND11_MODULE(data2g_native, m) {
     // tests/native_subs (its ABI) refuses a stale build instead of failing
     // confusingly.
     m.attr("__abi__") = 9;
+    // The radio service it was built for (cmake -DDATA2G_PROFILE): tests/native_subs
+    // refuses a build of another profile than DATA2G_PROFILE.
+    m.attr("__profile__") = std::string(data2g::config::PROFILE);
     data2g::bind::bind_codes(m);
     data2g::bind::bind_config(m);
     data2g::bind::bind_constellation(m);

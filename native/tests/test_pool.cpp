@@ -117,6 +117,7 @@ std::vector<std::string> run(const std::vector<double>& y_fail, const std::vecto
         for (std::size_t i = 0; i < y->size(); i += config::FS / 50) {
             const auto n = std::min<std::size_t>(config::FS / 50, y->size() - i);
             for (const auto& e : rx.feed(std::span(*y).subspan(i, n))) {
+                if (std::holds_alternative<receiver::PartialEvent>(e)) continue;  // decoding while it arrives: no new lock
                 const auto& p = std::holds_alternative<receiver::HeaderEvent>(e) ? std::get<0>(e).header : std::get<1>(e).header;
                 const double v[] = {static_cast<double>(p.start()), p.score(), p.cfo(), static_cast<double>(e.index())};
                 ev += bits(std::vector<double>(v, v + 4));
@@ -204,8 +205,9 @@ int main() {
     // the DD part must have had something to do: some slots fail, some decode
     const auto flags = want[want.size() - 3].substr(0, 16), none = want[want.size() - 5].substr(0, 16);
     check::is_true(!want.back().empty(), "the stream search locked the mixed burst");
-    check::is_true(flags.find('0') != std::string::npos && flags.find('1') != std::string::npos,
-                   "mixed burst: some slots decode, DD runs on the rest (" + flags + ")");
+    if (check::hf_only("its noise level is picked so an HF burst mixes decodes and failures"))
+        check::is_true(flags.find('0') != std::string::npos && flags.find('1') != std::string::npos,
+                       "mixed burst: some slots decode, DD runs on the rest (" + flags + ")");
     check::equal(none, std::string(16, '0'), "failing burst: every slot fails");
     return check::report("test_pool");
 }

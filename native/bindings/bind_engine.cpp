@@ -135,6 +135,7 @@ void bind_engine(py::module_& m) {
         .def("set_accept_connect", &PyEngine::set_accept_connect)
         .def("events", &PyEngine::events)
         .def("send_cq", &PyEngine::send_cq)
+        .def("send_ping", &PyEngine::send_ping, py::arg("to"), py::arg("cap") = 1)
         .def("hand_send", &PyEngine::hand_send)
         .def("hand_listen", &PyEngine::hand_listen)
         .def("hand_overhear", &PyEngine::hand_overhear)

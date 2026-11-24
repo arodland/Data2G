@@ -1,0 +1,13 @@
+mode,radio,condition,drive,k0.1,k0.01,evals
+f55-16qam-r47,flat,static,2348,4.5,4.75,10
+f55-16qam-r47,flat,flutter@440,2348,5.0,5.25,11
+f55-64l-r83,flat,static,2383,9.5,9.75,15
+f55-64l-r83,flat,flutter@440,2383,10.0,10.75,11
+f55-256l-r88,flat,static,2375,16.75,17.75,11
+f55-256l-r88,flat,flutter@440,2375,16.75,17.5,10
+f108-16qam-r41,flat,static,2344,6.5,7.0,13
+f108-16qam-r41,flat,flutter@440,2344,7.25,7.5,9
+f108-64l-r80,flat,static,2321,16.25,16.5,8
+f108-64l-r80,flat,flutter@440,2321,16.5,17.0,11
+f108-256l-r87,flat,static,2344,25.25,26.25,12
+f108-256l-r87,flat,flutter@440,2344,26.25,28.25,14

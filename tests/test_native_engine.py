@@ -156,6 +156,7 @@ def test_worker_mode_steps_and_stops_without_the_gil(native):
 
 
 @pytest.mark.parametrize("cpp_calls", [True, False], ids=["python-nods-to-cpp", "cpp-nods-to-python"])
+@pytest.mark.hf_only("nods are CPM, which FM does not listen for (plan Q2)")
 def test_nods_between_cpp_and_python_engines(native, reference, cpp_calls, tmp_path):
     """A CPM session between the two engines: the callee's control-only
     replies go as nods (docs/arq.md §3b) and the caller's engine finds them,

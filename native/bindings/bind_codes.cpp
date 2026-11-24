@@ -35,12 +35,12 @@ py::array_t<bool> flags(const std::vector<std::uint8_t>& v) { return np<bool>(st
 
 // spread / despread on (rows, n_cw * N) uint8 or float64, dtype kept.
 template <bool Spread>
-py::array shuffle(const py::array& x, int n_cw, int m) {
+py::array shuffle(const py::array& x, int n_cw, int m, int group) {
     auto go = [&]<typename T>(T) -> py::array {
         const auto a = mat(In<T>(x));
         Mat<T> out(a.rows, a.cols);
         for (std::size_t r = 0; r < a.rows; ++r) {
-            const auto v = Spread ? codes::spread(a.row(r), n_cw, m) : codes::despread(a.row(r), n_cw, m);
+            const auto v = Spread ? codes::spread(a.row(r), n_cw, m, group) : codes::despread(a.row(r), n_cw, m, group);
             std::copy(v.begin(), v.end(), out[r]);
         }
         return np(out);
@@ -76,8 +76,8 @@ void bind_codec(py::module_& c) {
         return np(codes::plain(cspec(name), vec(soft), index, rv));
     }, py::arg("spec"), py::arg("soft"), py::arg("index"), py::arg("rv") = 0);
     c.def("soft_len", by_name([](const Spec& s) { return codes::soft_len(s); }));
-    c.def("spread", &shuffle<true>);
-    c.def("despread", &shuffle<false>);
+    c.def("spread", &shuffle<true>, py::arg("x"), py::arg("n_cw"), py::arg("m"), py::arg("group") = 0);
+    c.def("despread", &shuffle<false>, py::arg("x"), py::arg("n_cw"), py::arg("m"), py::arg("group") = 0);
 
     // codes.combine; a float64 C-contiguous writable buf is added to in place, as np.add.at does.
     c.def("combine", [](const std::string& name, py::object buf, const In<double>& soft, py::object rvs) {

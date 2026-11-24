@@ -1,7 +1,8 @@
 // data2g/hand.py: the Hand burst (the D2G net's show of hands, docs/arq.md
 // §9). 8-FSK at 6.25 Hz, 63 payload bits + CRC-16 seeded with the request
 // tag and the channel, CA-SCL polar K=79/E=162, two Costas blocks; 40
-// channels at 60 Hz, numbered from the centre out.
+// channels at 60 Hz, numbered from the centre out. FM: 100 Bd, and a channel
+// is a time slot (SLOT_S), not a frequency.
 // Python is normative; tests/test_native_hand.py checks parity.
 #pragma once
 
@@ -15,18 +16,31 @@ namespace data2g::hand {
 
 inline constexpr int M = 8, PAYLOAD = 63, K = PAYLOAD + 16, E = 162, N_DATA = E / 3, N_SYNC = 6;
 inline constexpr int N_SYM = 2 * N_SYNC + N_DATA;  // 66
-inline constexpr double RATE = 6.25, LEN_S = N_SYM / RATE;
-inline constexpr int N_CHANNELS = 40;
-inline constexpr double PITCH = 60.0, CENTER = 1500.0;
-inline constexpr double SEARCH_S = 0.6, SEARCH_HZ = 5.0, LATE_S = 0.5;
+inline constexpr bool FM = config::PROFILE == "fm";
+inline constexpr double RATE = FM ? 100.0 : 6.25, LEN_S = N_SYM / RATE;
+inline constexpr int N_CHANNELS = FM ? 64 : 40;
+inline constexpr double PITCH = FM ? 0.0 : 60.0, CENTER = FM ? 1550.0 : 1500.0;
+inline constexpr double SEARCH_S = FM ? 0.25 : 0.6, SEARCH_HZ = FM ? 0.0 : 5.0, LATE_S = FM ? 0.2 : 0.5;
+// FM's slot, ms. SLOT_FIXED_MS is spoken for: the Hand, both neighbours SEARCH_S off, 40 ms of carrier after
+// the audio. The rest is the next station's carrier coming up before its Hand.
+inline constexpr int SLOT_FIXED_MS = 1200, SLOT_MS_MAX = 5000;
+static_assert(!FM || SLOT_FIXED_MS >= 1000 * (LEN_S + 2 * SEARCH_S));
 inline constexpr int TOP = 3;
-inline constexpr std::int64_t SEARCH_SAMPLES = 4800;  // round(SEARCH_S * FS)
-inline constexpr std::int64_t LEN_SAMPLES = 84480;    // round(LEN_S * FS)
+// round(SEARCH_S * FS), round(LEN_S * FS): both exact at FS a multiple of 400
+static_assert(config::FS % 400 == 0, "SEARCH_SAMPLES / LEN_SAMPLES need FS a multiple of 400");
+inline constexpr std::int64_t SEARCH_SAMPLES = FM ? config::FS / 4 : config::FS * 3 / 5;
+inline constexpr std::int64_t LEN_SAMPLES = FM ? config::FS * N_SYM / 100 : config::FS * N_SYM * 4 / 25;
 inline constexpr std::int64_t WINDOW_SAMPLES = 2 * SEARCH_SAMPLES + LEN_SAMPLES;
-static_assert(config::FS == 8000, "SEARCH_SAMPLES / LEN_SAMPLES assume 8 kHz");
+static_assert(config::FS != 8000 || (SEARCH_SAMPLES == 4800 && LEN_SAMPLES == 84480));
 
-double channel_freq(int c);  // from the centre out: even below 1500 Hz, odd above
-int channels_within(double width_hz);  // how many (a prefix) lie wholly within +-width_hz/2
+double channel_freq(int c);  // from the centre out: even below 1500 Hz, odd above; FM: every channel's
+int channels_within(double width_hz);  // how many (a prefix) lie wholly within +-width_hz/2; FM: all
+// FM: 1500, or DATA2G_HAND_SLOT_MS (read once; every station of a round must run the same). HF: 0.
+// Throws std::invalid_argument outside SLOT_FIXED_MS..SLOT_MS_MAX.
+int slot_ms();
+inline std::int64_t slot_samples() { return config::FS * slot_ms() / 1000; }
+inline std::int64_t ptt_max_samples() { return FM ? config::FS * (slot_ms() - SLOT_FIXED_MS) / 1000 : 0; }  // the longest PTT delay a Hand goes with
+inline std::int64_t slot_offset(int c) { return c * slot_samples(); }  // channel c's start after channel 0's
 inline unsigned crc_init(int tag, int c) { return (static_cast<unsigned>(tag) << 8) | static_cast<unsigned>(c); }
 std::vector<std::uint8_t> payload_bits(std::uint64_t p);  // 63 bits, MSB first
 std::uint64_t payload_int(std::span<const std::uint8_t> bits);

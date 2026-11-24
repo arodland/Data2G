@@ -16,7 +16,7 @@ from typing import Sequence
 import numpy as np
 from scipy import signal
 
-from ..config import CLIP_OVERSHOOT, FS, FCENTER, TX_BANDPASS
+from ..config import CLIP_OVERSHOOT, FS, FCENTER, TX_BANDPASS, TX_FILTER_TAPS
 
 # The heterodyne is exactly periodic: FCENTER/FS reduces to 3/16, so
 # there are only 16 distinct phasors, and `n` never has to reach exp()
@@ -109,7 +109,7 @@ def tx_condition(
         return x
     # mean envelope power is 2x mean real power
     thresh = np.sqrt(2 * power) * 10 ** (clip_headroom_db / 20)
-    taps = signal.firwin(201, bandpass, fs=FS, pass_zero=False)
+    taps = signal.firwin(TX_FILTER_TAPS, bandpass, fs=FS, pass_zero=False)
     for i, k in enumerate(list(overshoot) + list(closing) if project else overshoot):
         z = signal.hilbert(x)
         mag = np.abs(z)

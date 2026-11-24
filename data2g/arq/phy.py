@@ -17,6 +17,7 @@ from functools import lru_cache
 import numpy as np
 
 from .. import codes, constellation, cpm, equalizer, modem
+from ..config import FM_TX_PEAK, PROFILE
 from ..waveform import dsp, ofdm
 from . import predictor as P
 from .burst import COMPACT_CONNECT
@@ -120,11 +121,30 @@ def _peak_db(submode: str, cap: int) -> float:
     return round(float(10 * np.log10(np.max(dsp.envelope(x) ** 2) / 2 / dsp.active_power(x))), 3)
 
 
-def tx_audio(burst) -> np.ndarray:
+def full_scale(x: np.ndarray) -> np.ndarray:
+    """A burst's unit-RMS audio for the sound card. HF: its envelope peak at
+    full scale (PEP limited; arq.engine._start_tx's reasons). FM: one fixed
+    scale for every burst, so modes keep their levels (config.FM_TX_PEAK)."""
+    if PROFILE == "fm":
+        return np.clip(x / FM_TX_PEAK, -1.0, 1.0)
+    return x / np.max(dsp.envelope(x))
+
+
+def tone_scale(x: np.ndarray) -> np.ndarray:
+    """A constant-envelope signal built at peak 1.0 (a CW ID, a Hand) for the
+    sound card. HF: as built, the bursts' peak. FM: a burst's RMS
+    (full_scale), 11 dB under that: the level a ping set the radio's
+    deviation by."""
+    return x * (2 ** 0.5 / FM_TX_PEAK) if PROFILE == "fm" else x
+
+
+def tx_audio(burst, tx_path: str | None = None, level: float | None = None) -> np.ndarray:
     """A link.TxBurst -> unit-RMS audio (a CPM burst filtered for its cap:
-    cpm.TX_FILTERS). Codewords scramble by burst position alone
+    cpm.TX_FILTERS), times burst.level (an FM ping: its top modes' level,
+    arq.ping) or `level`, then the sounding probe if burst.probe (arq.probe). Codewords scramble by burst position alone
     (codes.scramble_seed: no key on air); a resend in another slot still
-    combines (codes.flip). A nod (burst.nod): its keyed sequence."""
+    combines (codes.flip). A nod (burst.nod): its keyed sequence. `tx_path`:
+    FM's (modem.modulate's; default modem.TX_PATH)."""
     if getattr(burst, "nod", None) is not None:
         from . import nod
 
@@ -139,7 +159,14 @@ def tx_audio(burst) -> np.ndarray:
                  for i, s in enumerate(burst.slots)]
         return cpm.modulate(spec, coded, dup=n_ctl == 2, cap=burst.cap)
     bits = np.stack([codes.encode(spec, s.payload, s.rv, mask_value(s.mask_id), i) for i, s in enumerate(burst.slots)])
-    return modem.modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
+    x = modem.modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path)
+    g = getattr(burst, "level", 1.0) if level is None else level
+    x = x if g == 1.0 else x * g
+    if getattr(burst, "probe", False):
+        from . import probe
+
+        x = np.concatenate([x, probe.waveform(tx_path, g)])
+    return x
 
 
 def measure(r: dict) -> dict:
@@ -164,10 +191,24 @@ def _measure_ofdm(r: modem.Received) -> dict:
     d0, d1 = r.get("seen_support", r["support"])
     out = dict(snr_est=modem.snr_db(est, r["band"]),
                spread_est=est["spread_hz"], delay_est_ms=(d1 - d0) / modem.FS * 1000,
-               headroom=r["spec"].headroom, frames=r["n_cw"] * r["spec"].frames_per_cw)
+               headroom=r["spec"].headroom, frames=r["n_cw"] * r["spec"].frames_per_cw,
+               n0_spread_db=n0_spread_db(est))
     for c in P.CONSTS:
         out[f"mi_{c}"] = P.effective_mi(h, var, c)
     return out
+
+
+def n0_spread_db(est) -> float:
+    """Standard deviation over frames of each frame's noise level, dB, from
+    the per-window estimate (config.EST_WINDOW; 0 without one: HF). FM's
+    regime input: a fading or shadowed path moves the noise between windows
+    (median over the study's bursts: static 0.35 dB, flutter 0.27, slow fading
+    1.04, mobile 1.77; scripts/fm_regime_study.py), where HF's Doppler spread
+    reads about zero on FM audio."""
+    n0 = np.asarray(est.get("n0_k", est["n0"]), float)
+    if n0.ndim != 3 or len(n0) < 2:
+        return 0.0
+    return float(np.std(10 * np.log10(np.mean(n0, axis=(1, 2)))))
 
 
 def soft_bits(r: dict):
@@ -190,7 +231,8 @@ def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     for s, v in post.items():
         llr[s], have[s] = v, 1
     shape = y.shape
-    L = np.clip(codes.spread(llr, m).reshape(-1, m), -30, 30)
+    n_in = y.size  # burst order is time order: a partial burst's symbols are the first so many
+    L = np.clip(codes.spread(llr, m, codes.spread_group(spec)).reshape(-1, m)[:n_in], -30, 30)
     labels = (np.arange(len(pts))[:, None] >> np.arange(m - 1, -1, -1)) & 1  # (M, m), modulate's order
     # log P(label) as matmuls: the (symbols, M, m) select-and-sum was 70% of a 256l refine
     lp = -np.logaddexp(0, L) @ labels.T - np.logaddexp(0, -L) @ (1 - labels).T
@@ -198,7 +240,7 @@ def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
     prob /= prob.sum(axis=1, keepdims=True)
     x = (prob @ pts).reshape(shape)
     v = (prob @ np.abs(pts) ** 2).reshape(shape) - np.abs(x) ** 2
-    k = codes.spread(have, m)[::m].reshape(shape).astype(bool) & (np.abs(x) > 1e-3)
+    k = codes.spread(have, m, codes.spread_group(spec))[::m][:n_in].reshape(shape).astype(bool) & (np.abs(x) > 1e-3)
     g, nc = est["gain"], shape[2]
     p = est["p_sig"]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -246,6 +288,19 @@ def _sure(spec, coded: np.ndarray) -> np.ndarray:
     return out.reshape(-1)
 
 
+class _SlotSoft:
+    """A partial burst's soft bits, a ready slot's at a time (modem.slot_soft
+    on r's estimate), made when first asked."""
+
+    def __init__(self, r: dict):
+        self.r, self._made = r, {}
+
+    def __getitem__(self, slot: int) -> np.ndarray:
+        if slot not in self._made:
+            self._made[slot] = modem.slot_soft(self.r, self.r["est"], slot)
+        return self._made[slot]
+
+
 class ModemRx:
     """link.RxBurst over a received burst. `store`: this station's soft
     bits per codeword key, {key: (buffer, highest RV, submode, where)}, kept
@@ -260,9 +315,8 @@ class ModemRx:
         self.dd_until = None if dd_budget is None else time.monotonic() + dd_budget
         self.spec, self.n_cw, self.submode = r["spec"], r["n_cw"], r["spec"].name
         # computed once per burst, shared by whoever decodes it (KISS, then ARQ)
-        if "_soft" not in r:
-            r["_soft"] = soft_bits(r)
-        self.soft, self.store = r["_soft"], store
+        self.store = store
+        self._adopt(r)
         self._memo = {}  # (slot, mask) -> a one-off decode's result: asked again, free
         # slot -> its one-off decode (codes.decode_raw): the scrambler is
         # unkeyed, so each slot decodes once and every mask asked is a CRC
@@ -278,6 +332,54 @@ class ModemRx:
         # made from it, per slot as asked: remaking the whole burst's on each
         # refine cost 0.53 s of a 12 s 256l burst's 0.73 s
         self._est, self._soft_dd = None, {}
+        self.dd_total = dd_budget  # advance(): the whole burst's DD budget, shared out per window
+        self._dd_spent = 0.0
+        self._early = set()  # slots advance() decoded: a keyed read at RV 0 checks that decode first
+
+    def _adopt(self, r: dict) -> None:
+        """r's soft bits: the whole burst's at once, or a partial burst's per
+        ready slot as asked (modem.receive(partial=True))."""
+        self.r = r
+        n_f = 0 if r.get("family") == "cpm" else r["n_cw"] * r["spec"].frames_per_cw
+        partial = r.get("frames_in", n_f) < n_f
+        if partial:
+            self.soft = _SlotSoft(r)
+        else:
+            if "_soft" not in r:
+                r["_soft"] = soft_bits(r)
+            self.soft = r["_soft"]
+
+    def advance(self, r: dict, budget_s: float | None = None) -> list[int]:
+        """Decoding while the burst arrives: adopt `r`, the same burst with
+        more of it in (modem.receive(partial=True), or the whole), keeping
+        every decode that was usable and the sure posteriors DD learned from
+        them, and decode the slots newly ready (modem.ready_slots), DD
+        refining at most `budget_s` seconds from now (None: the rest of the
+        burst's budget). A failed slot is tried again on the next advance,
+        with more of the burst's pilots. -> the slots decoded this time."""
+        self._adopt(r)
+        # the slots decoded already need no soft bits: the rest's as asked, a
+        # whole burst's included (its burst-wide soft_bits was ~95 ms of a Pi's
+        # end-of-burst on a 256l x39 burst, docs/pi-bench-fm.md)
+        self.soft = _SlotSoft(r)
+        self._memo, self._pin, self._pairs = {}, {}, {}
+        self._raw = {s: v for s, v in self._raw.items() if v[1].any()}
+        self._est, self._soft_dd = None, {}
+        if self.dd_total is not None:
+            left = max(0.0, self.dd_total - self._dd_spent)
+            budget_s = left if budget_s is None else min(budget_s, left)
+        t0 = time.monotonic()
+        self.dd_until = None if budget_s is None else t0 + budget_s
+        # a slot that failed mid-burst waits for the whole burst: its window's estimate
+        # barely changes as later windows arrive, and retrying on each one was 110-128
+        # LDPC tries for 39 slots of a failing 256l burst on a Pi (runs/pi-fmstream)
+        whole = r.get("frames_in", -1) < 0 or r["frames_in"] >= r["n_cw"] * r["spec"].frames_per_cw
+        new = [s for s in modem.ready_slots(r) if s not in self._raw and (whole or s not in self._early)]
+        for s in new:
+            self._decoded(s, self._spec(s))
+        self._early.update(new)
+        self._dd_spent += time.monotonic() - t0
+        return new
 
     def _soft(self, slot: int):
         if self._est is None:
@@ -306,6 +408,12 @@ class ModemRx:
                     got = self._check_pinned(slot, spec, m, _ctl_index(mask_id))
                 self._memo[(slot, m)] = got
             return self._memo[(slot, m)]
+        if rv == 0 and slot in self._early and slot in self._raw:
+            # decoded while the burst arrived (advance): its CRC under this mask, before decoding it again
+            got = codes.check(spec, *self._raw[slot], m)
+            if got is not None:
+                self._learn(slot, spec, got, rv, m)
+                return got
         buf0, top, name, where = self.store.get(key, (None, 0, self.submode, None))
         if name != self.submode:  # a resend in another mode: what was kept can't combine, so start over
             log.warning("soft bits of %s stored in %s (%s), resent in %s slot %d rv %d: dropped", key, name, where,
@@ -581,7 +689,9 @@ class ModemRx:
             if self.n_ctl_slots:  # CPM: every slot's pass (a streaming receiver has made them)
                 self._cpm_passes(self.n_cw - 1)
             elif todo:
-                info, ok = codes.decode_llrs(spec, np.asarray(self.soft)[todo])
+                if isinstance(self.soft, _SlotSoft):  # a partial burst: the slots in so far
+                    todo = [s for s in todo if s in set(modem.ready_slots(self.r))]
+                info, ok = codes.decode_llrs(spec, np.stack([self.soft[s] for s in todo])) if todo else ([], [])
                 for s, i, o in zip(todo, info, ok):
                     if o:
                         self._post[s] = _sure(spec, codes.encode_info(spec, i[None], 0)[0])

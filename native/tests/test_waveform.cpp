@@ -56,7 +56,7 @@ int main() {
         double sym = 0, gain = 0;
         for (std::size_t i = 0; i < h.size(); ++i) {
             sym = std::max(sym, std::abs(h[i] - h[h.size() - 1 - i]));
-            gain += h[i] * std::cos(PI * (static_cast<double>(i) - 100) * (1525.0 / 4000));
+            gain += h[i] * std::cos(PI * (static_cast<double>(i) - 100) * (1525.0 / (config::FS / 2.0)));
         }
         check::is_true(sym < 1e-15, "firwin symmetric (to rounding: linspace is not)");
         check::is_true(std::abs(gain - 1) < 1e-12, "firwin unit gain at the band centre");
@@ -72,11 +72,12 @@ int main() {
     }
 
     check::current_step = "ofdm";
-    check::close(std::vector{waveform::phasor(2000)}, std::vector{cdouble{0, 1}}, 1e-15, "phasor quarter turn");
+    check::close(std::vector{waveform::phasor(config::FS / 4)}, std::vector{cdouble{0, 1}}, 1e-15, "phasor quarter turn");
     check::close(std::vector{waveform::phasor(-8001)}, std::vector{waveform::phasor(7999)}, 0.0, "phasor reduces exactly");
     check::equal(waveform::band("w").freqs.front(), std::int64_t{950}, "w first carrier");
     check::equal(waveform::band("w48").nc(), 48, "w48 carriers");
-    check::equal(waveform::band("n4").preamble_samples(), 1344, "preamble samples");
+    check::equal(waveform::band("n4").preamble_samples(), config::PREAMBLE_CP + config::PREAMBLE_REPEATS * config::M,
+                 "preamble samples (1344 at 8 kHz)");
     for (const auto& spec : config::BANDS) {
         const auto& b = waveform::band(spec.name);
         const std::string name(spec.name);
@@ -134,6 +135,7 @@ int main() {
     for (const char* name : {"w", "n10", "w48"}) {  // n4 bursts sync on n10
         const auto& b = waveform::band(name);
         for (double f : {0.0, 6.0, -37.5, 143.0}) {
+            if (std::abs(f) > config::ACQUIRE_REACH_HZ) continue;  // FM searches +-12.5 Hz: its audio has no offset
             auto z = preamble_at(b, 3000, f, 9000);
             const auto n = noise(rng, z.size(), 0.01);
             for (std::size_t i = 0; i < z.size(); ++i) z[i] += n[i];

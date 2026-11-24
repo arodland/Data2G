@@ -27,7 +27,7 @@ from .config import FS
 PASSBAND_HZ = (300.0, 2800.0)
 CARRIER_REF_HZ = 50.0  # a carrier's INR is against the floor in this bandwidth
 CHUNK = FS // 2  # band-limited noise is generated in chunks this long
-_PASS = sps.firwin(49, PASSBAND_HZ, pass_zero=False, fs=FS)  # the impulses' ringing
+_PASS = sps.firwin(6 * FS // 1000 + 1, PASSBAND_HZ, pass_zero=False, fs=FS)  # the impulses' ringing (6 ms: 49 taps at 8 kHz)
 
 
 @dataclass(frozen=True)

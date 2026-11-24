@@ -79,6 +79,11 @@ void test_tci() {
     const auto t = parse({"--tci", "--tci-host", "sdr.lan"});
     check::is_true(t.tci && t.tci_host == "sdr.lan", "--tci, --tci-host");
     check::is_true(!parse({"--no-tci"}, t).tci, "--no-tci over a saved 'on'");
+    for (const auto& [f, v] : std::vector<std::pair<std::string, std::string>>{
+             {"--input-device", "x"}, {"--output-device", "x"}, {"--rig-model", "1"}, {"--rig-device", "x"}, {"--ptt-method", "cat"}})
+        check::is_true(!parse({f, v}, t).tci, f + " turns a saved TCI off");
+    check::is_true(!parse({"--audio-io", "pipe:a,b"}, t).tci, "--audio-io turns a saved TCI off");
+    check::is_true(parse({"--tci-host", "sdr.lan"}, t).tci, "...a TCI flag keeps it");
     check::is_true(!app::check(t), "--tci at 48 kHz: fine");
     check::is_true(app::check(parse({"--tci", "--sample-rate", "16000"})).has_value(), "--tci at 16 kHz: not a TCI rate");
     check::is_true(!app::check(parse({"--sample-rate", "16000"})), "16 kHz without --tci: fine");

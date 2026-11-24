@@ -493,6 +493,7 @@ def test_malformed_session_frame_is_dropped(bad):
         assert a.state == S.CONNECTING and a.station is None
 
 
+@pytest.mark.hf_only("ROBUST_CONNECT is CPM on HF only (FM's is n10-qpsk-r1/5, whose payload holds a full Connect)")
 def test_compact_connect_over_the_cpm_modem():
     """ROBUST_CONNECT is CPM: its one 20 B control codeword can't hold a
     CONNECT's Control (28 B), so the retry goes compact under its own mask,

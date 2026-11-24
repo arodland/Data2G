@@ -209,18 +209,21 @@ codesign_it() {  # $1 = path, rest = extra flags
 }
 
 if [ "$MODE" = app ]; then
-    # Either the bundle or the staging directory holding it. Tested for
-    # by *name*, not by `[ -d ]`: a staging directory is a directory too,
-    # so the obvious "is it already the bundle?" check accepts `dist`
-    # itself and then signs a folder with no Contents in it -- which
-    # codesign does without complaint, producing a package whose app is
-    # untouched and whose staging directory carries a stray signature.
+    # Either one bundle or the staging directory holding them (Data2G.app, and
+    # Data2G FM.app with the FM profile). Tested for by *name*, not by `[ -d ]`:
+    # a staging directory is a directory too, so the obvious "is it already the
+    # bundle?" check accepts `dist` itself and then signs a folder with no
+    # Contents in it -- which codesign does without complaint, producing a
+    # package whose app is untouched and whose staging directory carries a
+    # stray signature.
     case "$TARGET" in
-        *.app|*.app/) app="${TARGET%/}" ;;
-        *)            app="${TARGET%/}/Data2G.app" ;;
+        *.app|*.app/) bundles=("${TARGET%/}") ;;
+        *)            bundles=("${TARGET%/}"/*.app) ;;
     esac
-    [ -d "$app/Contents" ] || { echo "sign: no app bundle at $app" >&2; exit 1; }
+    [ -d "${bundles[0]}/Contents" ] || { echo "sign: no app bundle at ${bundles[0]}" >&2; exit 1; }
 
+sign_bundle() {  # $1 = the bundle
+    local app="$1" lib fw helper main
     # Inside-out, by hand. `codesign --deep` would do this in one call
     # and is deprecated; more to the point it signs nested code with the
     # *outer* target's flags, so a framework would get the app's
@@ -267,7 +270,7 @@ if [ "$MODE" = app ]; then
     done
 
     # 4. The bundle itself, last, which seals everything above.
-    echo "sign:   Data2G.app"
+    echo "sign:   $(basename "$app")"
     codesign_it "$app" --entitlements "$ENTITLEMENTS"
 
     # --deep is deprecated for *signing* and is exactly right for
@@ -279,10 +282,12 @@ if [ "$MODE" = app ]; then
     # ten minutes later, with an error naming a nested binary rather than
     # the missing flag.
     if ! codesign --display --verbose=2 "$app" 2>&1 | grep -q 'flags=.*runtime'; then
-        echo "sign: Data2G.app is signed without the hardened runtime" >&2
+        echo "sign: $(basename "$app") is signed without the hardened runtime" >&2
         exit 1
     fi
     echo "sign: signed $app"
+}
+    for app in "${bundles[@]}"; do sign_bundle "$app"; done
 
 else
     # --- the .dmg: sign, notarize, staple ----------------------------
@@ -406,7 +411,8 @@ if [ "$MODE" = app ]; then
     # would look inside, and SmartScreen's reputation attaches to the
     # executable the user launches -- which is this list.
     found=""
-    for exe in data2g-host.exe data2g-gui.exe data2g-web.exe data2g-monitor.exe data2g-audio-check.exe; do
+    for exe in data2g-host.exe data2g-gui.exe data2g-web.exe data2g-monitor.exe data2g-audio-check.exe \
+               data2g-host-fm.exe data2g-gui-fm.exe data2g-web-fm.exe; do
         [ -f "$dir/$exe" ] && found="$found $exe"
     done
     [ -n "$found" ] || { echo "sign: no executables found in $dir" >&2; exit 1; }

@@ -236,6 +236,14 @@ void Host::command(std::string_view line, std::string_view peer) {
         } catch (const std::invalid_argument&) {  // a callsign that won't pack
             ok = false;
         }
+    } else if (cmd == "PING" && !args.empty() && args.size() <= 2) {  // FM: host.py's PING call [NARROW|WIDE]
+        try {
+            e.send_ping(args[0], args.size() == 2 && upper(args[1]) == "WIDE" ? 2 : 1);
+        } catch (const std::runtime_error&) {  // a session under way
+            ok = false;
+        } catch (const std::invalid_argument&) {  // HF, or a callsign that won't pack
+            ok = false;
+        }
     } else if (cmd == "HAND" && !args.empty() && (upper(args[0]) == "SEND" ? args.size() == 6
                : upper(args[0]) == "LISTEN" ? args.size() >= 5 : upper(args[0]) == "OVERHEAR" ? args.size() >= 4
                : upper(args[0]) == "CANCEL" && args.size() == 1)) {
@@ -454,6 +462,8 @@ void Host::after_step(bool ptt) {
             out_cmd.push_back("CONNECTED " + (master ? me : peer) + " " + (master ? peer : me) + " " + bw_name(e.session().cap));
             up_ = true;
         } else if (ev == "PENDING" || ev == "CANCELPENDING") {
+            out_cmd.push_back(ev);
+        } else if (ev.starts_with("PING ") || ev.starts_with("PINGACK ") || ev.starts_with("PINGVERDICT ")) {
             out_cmd.push_back(ev);
         } else if (ev.starts_with("CQFRAME")) {
             out_cmd.push_back("CQFRAME " + w.at(1) + " " + bw_name(std::stoi(w.at(2))));

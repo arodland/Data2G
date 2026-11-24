@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage a runnable copy of the native apps, Qt and all.
 #
-#   tools/package_app.sh [build-dir] [staging-dir]
+#   tools/package_app.sh [build-dir] [staging-dir] [fm-build-dir]
 #
 # Lifted from SSTVAE. Staging is separate from tools/make_installer.sh so a
 # developer can stage and run with no installer tooling present. Not CPack:
@@ -14,11 +14,18 @@
 #   macOS    dist/Data2G.app: the GUI bundle, or a bundle made here around
 #            data2g-host when there is no GUI; other tools in Contents/MacOS
 #   Linux    dist/data2g/{bin,lib,plugins,share} and a `data2g` launcher
+#
+# With fm-build-dir (a -DDATA2G_PROFILE=fm build), the FM profile's programs
+# too, beside HF's: data2g-host-fm, data2g-gui-fm, data2g-web-fm. Windows: in
+# the same folder; macOS: a second bundle, "Data2G FM.app"; Linux: in the same
+# bin/, run as `data2g fm [host|web] ...` or the `data2g-fm` launcher, with a
+# "Data2G FM" desktop entry.
 
 set -euo pipefail
 
 BUILD_DIR="${1:-native/build}"
 STAGE_DIR="${2:-dist}"
+FM_DIR="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PKG="$ROOT/native/packaging"
 
@@ -46,6 +53,19 @@ fi
 main=data2g-host
 built data2g-gui && main=data2g-gui
 echo "package_app: staging ${apps[*]} (main: $main)"
+# The FM profile's: host, GUI and web, all required (one package holds both profiles).
+fm_apps=()
+if [ -n "$FM_DIR" ]; then
+    for a in data2g-host-fm data2g-gui-fm data2g-web-fm; do
+        if [ -f "$FM_DIR/$a$exe_suffix" ] || [ -d "$FM_DIR/$a.app" ]; then
+            fm_apps+=("$a")
+        else
+            echo "package_app: $FM_DIR/$a$exe_suffix was not built" >&2
+            exit 1
+        fi
+    done
+    echo "package_app: staging FM ${fm_apps[*]}"
+fi
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
@@ -56,10 +76,11 @@ MINGW*|MSYS*|CYGWIN*)
     app="$STAGE_DIR/data2g"
     mkdir -p "$app"
     for a in "${apps[@]}"; do cp "$BUILD_DIR/$a.exe" "$app/"; done
+    for a in ${fm_apps[@]+"${fm_apps[@]}"}; do cp "$FM_DIR/$a.exe" "$app/"; done
     # Ours first, so windeployqt sees complete executables.
     if [ -n "$HAMLIB_RUNTIME_DIR" ]; then cp "$HAMLIB_RUNTIME_DIR"/*.dll "$app/"; fi
     deploy=()
-    for a in "${apps[@]}"; do deploy+=("$app/$a.exe"); done
+    for a in "${apps[@]}" ${fm_apps[@]+"${fm_apps[@]}"}; do deploy+=("$app/$a.exe"); done
     windeployqt --release --no-translations --no-system-d3d-compiler \
         --no-opengl-sw "${deploy[@]}"
     # The MSVC runtime beside the exes (app-local), so neither the installer
@@ -115,6 +136,21 @@ Darwin)
     # here so a layout mistake fails the step; sign.sh re-signs with --force.
     codesign --force --deep --sign - "$app"
     codesign --verify --deep --strict "$app"
+    if [ -n "$FM_DIR" ]; then
+        # The FM profile: its own bundle (its own name, identifier and settings), Qt deployed into it too.
+        fm_app="$STAGE_DIR/Data2G FM.app"
+        cp -R "$FM_DIR/data2g-gui-fm.app" "$fm_app"
+        cp "$FM_DIR/data2g-host-fm" "$FM_DIR/data2g-web-fm" "$fm_app/Contents/MacOS/"
+        mkdir -p "$fm_app/Contents/Frameworks"
+        if [ -n "$HAMLIB_RUNTIME_DIR" ]; then
+            cp "$HAMLIB_RUNTIME_DIR"/libhamlib*.dylib "$fm_app/Contents/Frameworks/" 2>/dev/null || true
+        fi
+        macdeployqt "$fm_app" -verbose=1 -executable="$fm_app/Contents/MacOS/data2g-host-fm" \
+            -executable="$fm_app/Contents/MacOS/data2g-web-fm" \
+            ${HAMLIB_RUNTIME_DIR:+-libpath="$HAMLIB_RUNTIME_DIR"}
+        codesign --force --deep --sign - "$fm_app"
+        codesign --verify --deep --strict "$fm_app"
+    fi
     ;;
 
 # ------------------------------------------------------------------ Linux
@@ -132,6 +168,17 @@ Darwin)
     cp "$PKG/data2g.svg" "$app/share/icons/hicolor/scalable/apps/org.cleverdomain.data2g.svg"
 
     for a in "${apps[@]}"; do cp "$BUILD_DIR/$a" "$app/bin/"; done
+    for a in ${fm_apps[@]+"${fm_apps[@]}"}; do cp "$FM_DIR/$a" "$app/bin/"; done
+    if [ -n "$FM_DIR" ]; then
+        # "Data2G FM": its own desktop entry, through the data2g-fm launcher below.
+        sed -e 's/^Name=Data2G$/Name=Data2G FM/' \
+            -e 's|^GenericName=.*|GenericName=VHF/UHF FM Data Modem|' \
+            -e 's|^Comment=.*|Comment=Data modem for VHF/UHF FM radios (VARA-compatible host ports, KISS)|' \
+            -e 's/^Exec=data2g$/Exec=data2g-fm/' \
+            -e 's/^StartupWMClass=data2g-gui$/StartupWMClass=data2g-gui-fm/' \
+            -e 's/^Keywords=.*/Keywords=modem;ham;amateur;radio;FM;VHF;UHF;VARA;KISS;Winlink;/' \
+            "$PKG/org.cleverdomain.data2g.desktop" > "$app/share/applications/org.cleverdomain.data2g.fm.desktop"
+    fi
     if [ -n "$HAMLIB_RUNTIME_DIR" ]; then cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"; fi
 
     # Qt: seeded from what the executables link, completed by following
@@ -234,35 +281,52 @@ Darwin)
     # The launcher: points the loader and Qt at the bundled copies. Runs the
     # GUI when there is one, the host otherwise; `data2g host ARGS` and
     # `data2g web ARGS` always run the host or the web station (the
-    # AppImage's ways in for headless use).
+    # AppImage's ways in for headless use). `data2g fm ...` the same for the
+    # FM profile's programs (data2g-*-fm), also as the `data2g-fm` launcher.
     cat > "$app/data2g" <<'LAUNCH'
 #!/bin/sh
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$here/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+sfx=""
+if [ "${1:-}" = fm ]; then
+    shift
+    sfx=-fm
+    if [ ! -x "$here/bin/data2g-host-fm" ]; then
+        echo "data2g: this build has no FM profile" >&2
+        exit 1
+    fi
+fi
 if [ "${1:-}" = host ]; then
     shift
-    exec "$here/bin/data2g-host" "$@"
+    exec "$here/bin/data2g-host$sfx" "$@"
 fi
 if [ "${1:-}" = web ]; then
     shift
-    if [ ! -x "$here/bin/data2g-web" ]; then
-        echo "data2g: this build has no data2g-web" >&2
+    if [ ! -x "$here/bin/data2g-web$sfx" ]; then
+        echo "data2g: this build has no data2g-web$sfx" >&2
         exit 1
     fi
-    exec "$here/bin/data2g-web" "$@"
+    exec "$here/bin/data2g-web$sfx" "$@"
 fi
-if [ -x "$here/bin/data2g-gui" ]; then
+if [ -x "$here/bin/data2g-gui$sfx" ]; then
     # Native dialogs through the portal, when the caller has not chosen.
     if [ -z "${QT_QPA_PLATFORMTHEME:-}" ] \
        && [ -e "$here/plugins/platformthemes/libqxdgdesktopportal.so" ]; then
         export QT_QPA_PLATFORMTHEME=xdgdesktopportal
     fi
-    exec "$here/bin/data2g-gui" "$@"
+    exec "$here/bin/data2g-gui$sfx" "$@"
 fi
-exec "$here/bin/data2g-host" "$@"
+exec "$here/bin/data2g-host$sfx" "$@"
 LAUNCH
     chmod +x "$app/data2g"
+    if [ -n "$FM_DIR" ]; then
+        cat > "$app/data2g-fm" <<'LAUNCH'
+#!/bin/sh
+exec "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/data2g" fm "$@"
+LAUNCH
+        chmod +x "$app/data2g-fm"
+    fi
     ;;
 esac
 

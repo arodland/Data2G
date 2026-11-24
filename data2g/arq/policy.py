@@ -26,12 +26,13 @@ import numpy as np
 
 from .. import codes, modem
 from .. import cpm
-from ..config import max_codewords
+from ..config import DEFAULT_SPREAD_HZ, PROFILE, data_path, max_codewords
 # the bandwidth and recommendation-code helpers are modes'; named here too,
 # where the shifter and its callers (and tests/native_subs/gear.py) find them
-from .modes import (CAP_HZ, MODES, burst_seconds, ctl_payload_bytes, decode, encode, is_cpm, max_ctl, min_cw,
+from .modes import (CAP_HZ, MODES, burst_seconds, ctl_payload_bytes, decode, encode, is_cpm, max_ctl, min_cw,  # noqa: F401 (CAP_HZ, width_hz: re-exported as policy.CAP_HZ / policy.width_hz)
                     width_hz)
 from . import frames as F
+from . import modes as MD
 from . import link as L
 from . import predictor as P
 from .session import LINK_LOST_S
@@ -96,7 +97,7 @@ LADDER_STEP_DB = 3.0
 LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_LINK)
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
-_THRESHOLDS = json.load(open(P.DATA / "mode_thresholds.json"))
+_THRESHOLDS = json.load(open(data_path("mode_thresholds.json")))  # FM: its own, provisional (scripts/fm_threshold_table.py)
 MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items()}
 MODE_CHANNELS = tuple(_THRESHOLDS["channels"])  # native: tables::MODE_CHANNELS
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
@@ -107,9 +108,10 @@ FALLBACK = {0: "n10-ack-4f", 1: "ack-4f", 2: "ack-4f"}
 CONNECT = {0: "n10-qpsk-r1/3", 1: "qpsk-r1/5", 2: "qpsk-r1/5"}  # >= 28 B payload, one control codeword
 # escalation 2's mode: better than ack-4f on awgn and mpg, worse on mpp
 # and mpd, so it alternates with the reply mode (1, 3)
-ALT_POLL = "n4-ack-8f"
+# FM has no n4 and no CPM (plan Q2): its 500 Hz rungs stand in
+ALT_POLL = "n10-ack-4f" if PROFILE == "fm" else "n4-ack-8f"
 ROBUST_ESCALATION = 4  # from here on ROBUST_CONNECT (link caps escalation at 4)
-ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
+ROBUST_CONNECT = "n10-qpsk-r1/5" if PROFILE == "fm" else "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every cap; CONNECT goes compact (20 B)
 # In a session, the robust mode on fast fading (robust_mode()): the peer's last
 # measured spread_est at least ROBUST_FAST_SPREAD_HZ. On 30 Hz / 7 ms fading
 # fsk16r25 decodes nothing even at a genie lock (25 Hz tones), and its lock
@@ -117,9 +119,10 @@ ROBUST_CONNECT = "fsk16r25-r1/2"  # session-frame retries: 500 Hz, within every 
 # stronger the signal; fsk8r50-r1/3 (400 Hz, within every cap too) locked and
 # decoded 100% there from -5 to +20 dB. Connect retries keep ROBUST_CONNECT:
 # before a session nothing is measured.
-ROBUST_FAST = "fsk8r50-r1/3"
+# FM has no CPM modes: its robust mode stays ROBUST_CONNECT whatever the spread.
+ROBUST_FAST = ROBUST_CONNECT if PROFILE == "fm" else "fsk8r50-r1/3"
 ROBUST_FAST_SPREAD_HZ = 6.0
-ROBUST_MODES = (ROBUST_CONNECT, ROBUST_FAST)
+ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -131,7 +134,7 @@ ROBUST_MODES = (ROBUST_CONNECT, ROBUST_FAST)
 # On since v12; DATA2G_BIAS_FIX=0 is the old bound.
 BIAS_FIX = os.environ.get("DATA2G_BIAS_FIX", "1") == "1"
 # A burst too short or weak for a Doppler estimate reports
-# equalizer.DEFAULT_SPREAD_HZ (2.0, what MPD measures), so on AWGN 20-50% of
+# config.DEFAULT_SPREAD_HZ (HF 2.0, what MPD measures), so on AWGN 20-50% of
 # w-band readings looked like fast fading and every outcome model blended the
 # two (P(usable) low on AWGN, high on fading). Such a reading takes the peer's
 # last measured spread instead (none yet: as is); the installed model is
@@ -143,7 +146,7 @@ SPREAD_CARRY = os.environ.get("DATA2G_SPREAD_CARRY", "1") == "1"
 # e.g. QPSK overrated at the CPM floor's edge on fast fading).
 COND_OFFSETS = [(float(a), float(b), m, float(o)) for a, b, m, o in
                 (e.split(":") for e in os.environ.get("DATA2G_COND_OFFSETS", "").split(";") if e)]
-UNMEASURED_SPREAD_HZ = 2.0  # equalizer.DEFAULT_SPREAD_HZ (arq doesn't import the modem)
+UNMEASURED_SPREAD_HZ = DEFAULT_SPREAD_HZ  # what the equalizer reports unmeasured (config, per profile)
 BIAS_MAX = 6.0 if BIAS_FIX else 3.0
 # The noise rule (recommend(): candidates whose band is noisier in the
 # receiver's profile than the measured one predicted at a lower SNR), its
@@ -176,7 +179,7 @@ assert DROP <= set(MODES), f"DATA2G_DROP_MODES: unknown {sorted(DROP - set(MODES
 
 def allowed(cap: int) -> list:
     """The modes the shifter may pick within cap `cap` (modes.allowed less DROP)."""
-    return [s for s in MODES.values() if width_hz(s) <= CAP_HZ[cap] and s.name not in DROP]
+    return [s for s in MD.allowed(cap) if s.name not in DROP]
 
 
 CTL_BYTES = 12  # a data burst's typical control: core 4, new 3, rv 3, a flag or two
@@ -275,6 +278,7 @@ class GearShifter(L.Policy):
     link_now: list | None = None  # link_features() at the last recommendation
     energies: list = field(default_factory=list)  # the peer's last ENERGY_HIST bursts' energy SNR, dB
     spreads: list = field(default_factory=list)  # the peer's last bursts' spread_est (predictor.GATE)
+    n0_spreads: list = field(default_factory=list)  # the peer's last bursts' n0_spread_db (FM's regime input)
     floor_spreads: list = field(default_factory=list)  # as spreads, a CPM burst's FLOOR_CPM_SPREAD_HZ (cpm_floor)
     last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
@@ -399,6 +403,11 @@ class GearShifter(L.Policy):
         self.measured, self.measured_band, self.measured_at = measured, MODES[submode].band, now
         self.heard = submode
         self.spreads = (self.spreads + [float(measured.get("spread_est", 0.0))])[-P.GATE_HIST:]
+        # FM's regime input (predictor.fm_outcome): the median over the peer's
+        # last bursts, as one steady burst on a fading path (or the reverse)
+        # reads like the other regime (static p90 1.15 dB against the 0.7 split)
+        self.n0_spreads = (self.n0_spreads + [float(measured.get("n0_spread_db", 0.0))])[-P.GATE_HIST:]
+        self.measured = dict(self.measured, n0_spread_db=float(np.median(self.n0_spreads)))
         fs = FLOOR_CPM_SPREAD_HZ if is_cpm(MODES[submode]) else self.spreads[-1]
         self.floor_spreads = (self.floor_spreads + [fs])[-CPM_FLOOR_HIST:]
         self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]

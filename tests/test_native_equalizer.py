@@ -177,9 +177,9 @@ def _capture(monkeypatch, name):
     return calls
 
 
-@pytest.mark.parametrize("submode,n_cw,snr", [("qpsk-r1/2", 3, 6.0), ("w48-qpsk-r1/2", 16, 10.0),
+@pytest.mark.parametrize("submode,n_cw,snr", [c for c in [("qpsk-r1/2", 3, 6.0), ("w48-qpsk-r1/2", 16, 10.0),
                                              ("n10-qpsk-r1/2", 2, 8.0), ("n4-qpsk-r1/2", 1, 10.0),
-                                             ("w48-16qam-r1/2", 5, 30.0)])
+                                             ("w48-16qam-r1/2", 5, 30.0)] if c[0] in SUBMODES])  # FM has no n4
 def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n_cw, snr):
     # Python's receive, so its equalizer calls can be captured (--native
     # substitutes the whole of modem.receive)

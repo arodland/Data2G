@@ -7,8 +7,45 @@ import pytest
 from scipy import signal as sps
 
 from data2g import audio, codes, hfchannel, modem, receiver
-from data2g.config import FS, SUBMODES
+from data2g.config import ACQUIRE_REACH_HZ, FS, SUBMODES
+
+# 37 Hz on HF; inside FM's +-12.5 Hz search there (FM audio has no offset)
+CFO_HZ = min(37.0, 0.8 * ACQUIRE_REACH_HZ)
 from data2g.kisslink import pack_frames, unpack_frames
+
+
+def test_a_burst_decodes_while_it_arrives(monkeypatch, request):
+    """config.SPREAD_WINDOW: the receiver reports codeword groups as they
+    complete ("partial"), a ModemRx decodes them before the burst ends, and
+    the "burst" event finishes it: every slot as the whole-burst decode."""
+    from data2g import config
+    from data2g.arq import phy as PHY
+
+    if request.config.getoption("--native") and not (config.DECODE_EARLY and config.SPREAD_WINDOW):
+        pytest.skip("native's windows are compiled in: FM's (config.SPREAD_WINDOW)")
+
+    for mod in (config, receiver):
+        monkeypatch.setattr(mod, "SPREAD_WINDOW", 8)
+    monkeypatch.setattr(config, "EST_WINDOW", 8)
+    monkeypatch.setattr(receiver, "DECODE_EARLY", True)
+    spec = SUBMODES["w48-16qam-r1/2"]
+    rng = np.random.default_rng(6)
+    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(7)]  # 28 frames
+    x = np.concatenate([np.zeros(FS), modem.modulate(sent, spec), np.zeros(FS)])
+    y = hfchannel.apply_channel(x, snr_db=22, seed=2)
+    rx, inc, early = receiver.Receiver(modem.Accept.of([spec.name])), None, []
+    done = None
+    for i in range(0, len(y), FS // 4):
+        for kind, ev in rx.feed(y[i:i + FS // 4]):
+            if kind == "partial":
+                inc = inc or PHY.ModemRx(ev["rx"], {}, None)
+                early += inc.advance(ev["rx"])
+            elif kind == "burst":
+                inc.advance(ev["rx"])
+                done = inc
+    assert len(early) >= 4 and done is not None
+    got = [done.decode(s, (0, 0, 0), 0, None) for s in range(7)]
+    assert got == sent
 
 
 def test_burst_through_the_audio_path_and_streaming_receiver():
@@ -17,7 +54,7 @@ def test_burst_through_the_audio_path_and_streaming_receiver():
     x = modem.modulate(pack_frames(packets, codes.payload_bytes(spec)), spec)
     x = np.concatenate([np.zeros(FS), x, np.zeros(FS)])
     y = hfchannel.apply_channel(x, snr_db=15, freq_offset_hz=20.0, ppm=5, seed=1)
-    card = sps.resample_poly(y, 6, 1)  # as the TNC's 48 kHz device would carry it
+    card = sps.resample_poly(y, 48000 // FS, 1)  # as the TNC's 48 kHz device would carry it
     dec, rx, got = audio.Decimator(48000), receiver.Receiver(modem.Accept.of(["qpsk-r1/5"], min_score=0.35)), []
     for i in range(0, len(card), 24000):  # half-second chunks
         for kind, ev in rx.feed(dec(card[i : i + 24000])):
@@ -35,8 +72,11 @@ def test_digital_silence_is_not_searched():
 def test_accept_caps_codewords_by_burst_length():
     a = modem.Accept.of(["qpsk-r1/5", "w48-qpsk-r1/2"], max_secs=10)
     lim = dict(a.max_cw)
-    # qpsk-r1/5: 8 frames (1.15 s) a codeword after ~0.4 s of preamble and header
-    assert lim["qpsk-r1/5"] == 8 and a.bands == ["w", "w48"]
+    # qpsk-r1/5: 8 frames (1.15 s at HF's numerology) a codeword after ~0.4 s
+    # of preamble and header: the most whose burst fits 10 s (8 on HF)
+    spec = SUBMODES["qpsk-r1/5"]
+    fits = max(n for n in range(1, 64) if modem.burst_seconds(spec, n) <= 10)
+    assert lim["qpsk-r1/5"] == fits and (FS != 8000 or fits == 8) and a.bands == ["w", "w48"]
     assert "qpsk-r1/5" not in dict(modem.Accept.of(["qpsk-r1/5"], max_secs=1).max_cw)
 
 
@@ -115,6 +155,8 @@ def test_a_half_arrived_header_is_waited_for_not_misread():
             seed, [(h["spec"].name, round(h["score"], 2)) for h in heads])
 
 
+@pytest.mark.hf_only("its false headers are a seed-picked chance under HF's CRC seed and 8 kHz samples; "
+                     "FM's seed meets none, so the run-on it guards never starts")
 def test_busy_ends_with_the_signal_not_a_false_headers_claim(monkeypatch):
     """A burst whose preamble was missed reads as false headers claiming up
     to 15 s past where the audio ends. BUSY (Receiver.channel_busy, what the
@@ -189,6 +231,7 @@ def _false_lock_clip(starts):
     return false_locks
 
 
+@pytest.mark.hf_only("an 8 kHz HF recording, HF protocol headers")
 def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span(protocol):
     """A CPM lock replaces a suspect header while it is pending, and a CPM
     front waiting for its second header copy survives the suspect burst's
@@ -201,6 +244,7 @@ def test_a_cpm_burst_replaces_a_suspect_header_claiming_its_span(protocol):
 
 
 @pytest.mark.slow
+@pytest.mark.hf_only("an 8 kHz HF recording, HF protocol headers")
 def test_a_cpm_burst_survives_a_suspect_header_at_every_search_phase(protocol):
     protocol(12)
     assert _false_lock_clip(range(0, 13 * 160, 160))
@@ -228,7 +272,7 @@ def test_a_burst_whose_head_faded_is_found_from_its_header_copy():
         sb = MODES[name].sync_band
         head = LEADIN_SAMPLES + BANDS[sb].preamble_samples + modem.header_samples(sb)
         x = np.concatenate([np.zeros(2 * FS), np.zeros(head), x[head:], np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
         got = [ev for i in range(0, len(y), FS // 10) for k, ev in rx.feed(y[i:i + FS // 10]) if k == "burst"]
         ok = [ev for ev in got if ev["rx"] is not None and ev["rx"]["spec"].name == name
@@ -264,7 +308,7 @@ def test_a_cpm_burst_whose_first_header_copy_faded_locks_on_both():
         x[rows[0] * g.T:(rows[-1] + 1) * g.T] = 0  # copy 1 faded out
         lead = 2 * FS
         x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         cand = cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS], wait=True)
         assert cand is not None and cand.get("wait"), (name, cand)
         assert cpm.find(g, y[:lead + cpm.hdr_span(g.name, 1) + FS]) is None, name
@@ -307,7 +351,7 @@ def test_a_cpm_early_lock_is_let_go_when_its_second_header_copy_is_not_there():
             if stops:
                 x[(lay.hdr_rows[0][-1] + 1) * g.T:] = 0
             x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-            y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
+            y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(PHY.tx_audio(b)))
             rx = receiver.Receiver(acc, cpm_grids=tuple(cpm.GRIDS))
             got, busy_until = [], 0
             for i in range(0, len(y), FS // 10):
@@ -345,7 +389,7 @@ def test_a_cpm_burst_whose_front_faded_locks_on_its_mid_block():
         x[:(lay.hdr_rows[0][-1] + 1) * g.T] = 0  # front and copy 1 faded out
         lead = 2 * FS
         x = np.concatenate([np.zeros(lead), x, np.zeros(2 * FS)])
-        y = hfchannel.awgn(hfchannel.freq_shift(x, 37.0), 10, seed=2, s_power=hfchannel.active_power(x))
+        y = hfchannel.awgn(hfchannel.freq_shift(x, CFO_HZ), 10, seed=2, s_power=hfchannel.active_power(x))
         assert cpm.find(g, y) is None, name
         lock = cpm.find_mid(g, y)
         assert lock is not None and lock["spec"].name == name and lock["n_data"] == n - 1, (name, lock)
