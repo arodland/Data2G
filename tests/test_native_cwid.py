@@ -38,6 +38,22 @@ def test_sense_matches(native, snr, fading):
     assert py.hits_from > 0 or snr is not None  # (a weak or faded one may never go active)
 
 
+@pytest.mark.parametrize("freq,inr", [(1500.0, 8), (1500.0, 12), (1573.4, 10), (1573.4, 12), (1530.0, 6)])
+def test_sense_matches_under_a_steady_carrier(native, freq, inr):
+    """Window by window under a weak steady carrier (CwSense.QUIET_MAX): the
+    quiet-median rule decides here, where it never does on a clean ID."""
+    n = 20 * FS
+    a = np.sqrt(2 * 50 / (FS / 2) * 10 ** (inr / 10))
+    y = np.random.default_rng(9).normal(size=n) + a * np.sin(2 * np.pi * freq * np.arange(n) / FS)
+    py, cc = cwid.CwSense(), native.cwid.CwSense()
+    on = 0
+    for i in range(0, len(y), 80):
+        a_, b_ = py.feed(y[i:i + 80]), cc.feed(y[i:i + 80])
+        assert a_ == b_ and py.hits_from == cc.hits_from, i
+        on += a_
+    assert on < 0.03 * len(y) / 80
+
+
 def _cw_tx(path):
     return [e for e in map(json.loads, open(path / "events.jsonl")) if e["kind"] == "tx" and e["submode"] == "cw"]
 
