@@ -14,20 +14,26 @@ def substitutions(native):
                                        "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine",
                                        "prime_lock", "CoarseTrack")}
 
-    def own_grid(g):
-        return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+    def own_grid(g):  # (a wide grid, L > 1, is Python only: not compiled in, on air or not)
+        return cpm.GRIDS.get(g.name) == g and g.L == 1 and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+
+    def own_name(grid):
+        g = cpm.GRIDS.get(grid)
+        return g is not None and own_grid(g)
 
     def own_spec(s):
         return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
 
     def header_symbols(grid, word):
         # the native one recomputes the CRC-6 from word >> 6, with its own seed
-        if word < 1 << 16 and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION:
+        if word < 1 << 16 and own_name(grid):
             return n.header_symbols(grid, word >> 6)
         return py["header_symbols"](grid, word)
 
     @functools.lru_cache(maxsize=None)
     def layout(grid, n_sym):
+        if not own_name(grid):
+            return py["layout"](grid, n_sym)
         d = n.layout(grid, n_sym)
         return cpm.Layout(d["n"], d["sync_rows"], d["sync_tones"], d["hdr_rows"], d["data_rows"], d["front"])
 
@@ -39,8 +45,11 @@ def substitutions(native):
             return py["modulate"](spec, coded, dup, cap)
         return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
 
-    def CoarseTrack(g, reach_hz=150.0):  # a compiled-in grid's: native, for native detect to read
-        return n.CoarseTrack(g.name, reach_hz) if own_grid(g) else py["CoarseTrack"](g, reach_hz)
+    def CoarseTrack(g, reach_hz=150.0, source=None):  # a compiled-in grid's: native, for native detect to read
+        # (a wide grid's sums of another track's rows (`source`): Python, from a Python track only)
+        if own_grid(g) and source is None:
+            return n.CoarseTrack(g.name, reach_hz)
+        return py["CoarseTrack"](g, reach_hz, source)
 
     def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0, mid=False, track=None, x0=0):
         if not own_grid(g):
@@ -102,7 +111,8 @@ def substitutions(native):
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)
 
-    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows")})
+    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows", "coh_metric", "_n0", "stream_symbols",
+                                            "hdr_span")})
 
     def coh_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
         if not own_grid(g):
@@ -130,7 +140,8 @@ def substitutions(native):
     return {
         (cpm, "header_symbols"): header_symbols,
         (cpm, "layout"): layout,
-        (cpm, "stream_symbols"): n.stream_symbols,
+        (cpm, "stream_symbols"): lambda grid, n_data, dup: (n.stream_symbols(grid, n_data, dup) if own_name(grid)
+                                                           else py["stream_symbols"](grid, n_data, dup)),
         (cpm, "burst_seconds"): burst_seconds,
         (cpm, "to_tones"): by_grid(n.to_tones, cpm.to_tones),
         (cpm, "tones"): by_grid(n.tones, cpm.tones),
@@ -151,11 +162,13 @@ def substitutions(native):
         (cpm, "late_lock"): late_lock,
         (cpm, "find_mid"): find_mid,
         (cpm, "prime_lock"): prime_lock,
-        (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies),
+        (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies) if own_name(grid) else py["hdr_span"](grid, copies),
         (cpm, "measure"): measure,
         (cpm, "bins"): by_grid(n.bins, cpm.bins),
-        (cpm, "coh_metric"): n.coh_metric,
-        (cpm, "_n0"): n.noise_n0,
+        # (a wide grid's sub-window rows, L > 1, and its k-sub-window sums: Python)
+        (cpm, "coh_metric"): lambda Z, P, W, n0, L=1: (n.coh_metric(Z, P, W, n0) if L == 1
+                                                      else py["coh_metric"](Z, P, W, n0, L)),
+        (cpm, "_n0"): lambda E, k=1: n.noise_n0(E) if k == 1 else py["_n0"](E, k),
         (cpm, "bit_llrs"): by_grid(n.bit_llrs, cpm.bit_llrs),
         (cpm, "coh_read_header"): coh_read_header,
         (cpm, "slot_rows"): slot_rows,

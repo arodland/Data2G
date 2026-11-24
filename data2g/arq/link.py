@@ -149,9 +149,23 @@ class Policy:
 
     # -- session.Session
 
-    def connect_mode(self, cap: int, tries: int = 0) -> str:
-        """The mode of session frames at bandwidth cap `cap`, `tries` retries in."""
+    def connect_mode(self, cap: int, tries: int = 0, last: bool = False) -> str:
+        """The mode of session frames at bandwidth cap `cap`, `tries` retries
+        in; `last`, a CONNECT's last try."""
         raise NotImplementedError
+
+    def weak_path(self) -> bool:
+        """Session._robust_start, the caller's: whether the peer's last burst
+        as measured (a CONNECT_ACK in a retry's robust mode) says the path is
+        why the cap's connect mode was not answered. No opinion: it was not
+        (as robust()'s: neither side of such a policy's session starts at
+        the floor; True here with robust() False started the caller alone)."""
+        return False
+
+    def robust(self, submode: str) -> bool:
+        """Whether `submode` is a robust control mode (the callee follows a
+        caller whose first burst comes in one)."""
+        return False
 
     def reply_hold(self, station: "Station", burst: "TxBurst") -> float | None:
         """Seconds past t_turn to wait for a reply to `burst` (None:

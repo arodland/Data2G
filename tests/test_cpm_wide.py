@@ -10,14 +10,21 @@ from data2g import codes, cpm
 
 
 def test_toolbox_is_not_on_air():
-    assert set(cpm.GRIDS) == {"c16r25", "c8r50", "c32r62"} and len(cpm.SPECS) == 6 and len(cpm.CTL) == 3
-    for name, g in cpm.WIDE_GRIDS.items():
-        assert name not in cpm.GRIDS and cpm.GRIDS[name] is g and g.L > 1
-        assert g.T == g.L * g.nsub and g.baud * g.T == pytest.approx(8000)
-        assert cpm.coherent(g) and not cpm.coherent(replace(g, guard=1))
+    """The wide grids are on air only as DATA2G_CPM_ONAIR names them (none
+    unset), and never in the shifter's choices (policy.allowed)."""
+    from data2g.arq import policy
     from data2g.arq.modes import MODES
 
-    assert not any(n in MODES for n in cpm.WIDE_SPECS)
+    on = set(cpm.ON_AIR_WIDE)
+    assert set(cpm.GRIDS) == {"c16r25", "c8r50", "c32r62"} | on and len(cpm.CTL) == 3 + len(on)
+    assert len(cpm.SPECS) == 6 + 2 * len(on)
+    for name, g in cpm.WIDE_GRIDS.items():
+        assert (name in cpm.GRIDS) == (name in on) and cpm.GRIDS[name] is g and g.L > 1
+        assert g.T == g.L * g.nsub and g.baud * g.T == pytest.approx(8000)
+        assert cpm.coherent(g) and not cpm.coherent(replace(g, guard=1))
+    assert {n for n in cpm.WIDE_SPECS if n in MODES} == {n for n, s in cpm.WIDE_SPECS.items()
+                                                         if cpm.WIDE_ON or s.grid in on}
+    assert not any(s.name in cpm.WIDE_SPECS for cap in (0, 1, 2) for s in policy.allowed(cap))
 
 
 @pytest.mark.parametrize("name", list(cpm.WIDE_SPECS))
@@ -96,7 +103,7 @@ def test_streaming_receiver_given_the_grids():
             assert codes.decode_many(spec, np.asarray(r["soft"][1])[None], index=[1])[0] == (pay[1], True)
 
 
-def test_shared_coarse_rows_are_the_grids_own():
+def test_shared_coarse_rows_are_the_grids_own(pure):
     """c8w50's search rows summed from c8r50's symbols' energies equal its own transforms."""
     g, h = cpm.WIDE_GRIDS["c8w50"], cpm.GRIDS["c8r50"]
     assert cpm.shares_rows(g, h) and not cpm.shares_rows(cpm.WIDE_GRIDS["c16w125"], cpm.GRIDS["c32r62"])

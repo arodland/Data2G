@@ -16,6 +16,10 @@ def substitutions(native):
     T = native.receiver
     PyReceiver = receiver.Receiver
     py_receive_any = receiver.receive_any
+    py_search_span = receiver.search_span
+
+    def wide(cpm_grids):
+        return cpm_grids is not None and any(g in cpm.WIDE_GRIDS for g in cpm_grids)
     min_score = dict(modem.HEADER_MIN_SCORE)
 
     def same_config():
@@ -42,7 +46,9 @@ def substitutions(native):
         def __init__(self, accept, cpm_grids=(), blank=True):
             cls = type(self)
             self._n = None
-            if cls._stats is PyReceiver._stats and cls._searched is PyReceiver._searched and same_config():
+            # (a wide CPM grid, cpm.WIDE_GRIDS, is Python only: so is a Receiver listening for one)
+            if (cls._stats is PyReceiver._stats and cls._searched is PyReceiver._searched and same_config()
+                    and not wide(cpm_grids)):
                 self.accept, self.bands = accept, accept.bands
                 self._n = T.Receiver(accept, list(cpm_grids), blank)
                 self._n.release_s = self.RELEASE_S  # a test's patched class value too
@@ -80,13 +86,14 @@ def substitutions(native):
         on_air = property(lambda s: PyReceiver.on_air.fget(s) if s._n is None else s._n.on_air)
 
     def receive_any(y, lead=0, cpm_grids=None):
-        if not same_config():
+        if not same_config() or wide(cpm_grids):
             return py_receive_any(y, lead, cpm_grids)
         return rx(T.receive_any(np.asarray(y, dtype=np.float64), int(lead),
                                 None if cpm_grids is None else list(cpm_grids)))
 
     return {
-        (receiver, "search_span"): lambda bands, cpm_grids=(): T.search_span(list(bands), list(cpm_grids)),
+        (receiver, "search_span"): lambda bands, cpm_grids=(): (py_search_span(bands, cpm_grids) if wide(cpm_grids)
+                                                                else T.search_span(list(bands), list(cpm_grids))),
         (receiver, "receive_any"): receive_any,
         (receiver, "Receiver"): Receiver,
         (engine, "Receiver"): Receiver,

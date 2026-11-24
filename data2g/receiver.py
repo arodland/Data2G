@@ -403,7 +403,8 @@ class Receiver:
         from . import cpm
         self.coarse = {}  # each grid's search rows (_find_cpm); a wide grid's from the on-air grid of its tones
         for g in self.grids:
-            src = next((t for t in self.coarse.values() if SHARE_ROWS and cpm.shares_rows(g, t.g)), None)
+            src = next((t for t in self.coarse.values()  # (a Python track: a compiled one keeps its rows to itself)
+                        if SHARE_ROWS and hasattr(t, "_sourced") and cpm.shares_rows(g, t.g)), None)
             self.coarse[g.name] = cpm.CoarseTrack(g, source=src)
         # CPM fronts whose first header copy fell short (cpm.find's candidates,
         # stream indices): read again with both copies once the second is in

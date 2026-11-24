@@ -687,8 +687,18 @@ characters plus SSID, space padded at the end (a space inside a name is kept).
 | CONNECT_NAK | nonce echo, reason: 1 version, 2 not listening, 3 busy (a session or a call of its own under way), 4 refused by the host (ACCEPT couldn't connect) |
 | DISC / DISC_ACK | graceful close; DISC is retried 3 times |
 
-CONNECT retries: 5 tries, 3-5 s apart with jitter, then fail to the host.
+CONNECT retries: 6 tries, 3-5 s apart with jitter, then fail to the host.
 A CONNECT_NAK ends them at once: the caller closes with `refused: <reason>`.
+
+A session whose connect frame came in the retries' mode was not answered in the cap's
+connect mode. If the path is why, it starts at the top of the escalation floor (§6):
+control-only bursts go in the robust mode from the first turn, the caller's first burst
+is one of them, and the floor decays as any does. The caller decides, from its reading
+of the CONNECT_ACK (`policy.weak_path`): `snr_est` under −6 dB or `spread_est` at least
+6 Hz. A first CONNECT lost to QRM, or to a callee that was scanning, leaves a good
+reading, and the session starts at the bottom like one made by the first try. The callee
+does not decide: it takes the floor when the caller's first burst arrives in a robust
+mode. Nothing on the wire says so (`Session._robust_start`).
 
 A CONNECT addressed to a station is decoded in every state, so it is always
 answered: CONNECT_ACK while listening, CONNECT_NAK otherwise. The NAK is not the
@@ -1046,10 +1056,13 @@ off (Python and native) for A/B runs.
     Only bursts that decode under the session's key count. WRONG before the
     first one, and again once a new session starts. No OK follows.
   - **RETRIES** answers `RETRIES n`: the CONNECT retries after the first try
-    (default 4, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
+    (default 5, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
     only, 0-20: OK, else WRONG. They apply to this command client's later
     CONNECTs, not one under way, and go back to the default when it leaves.
-    Retries after the first go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart.
+    The first four retries go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart,
+    and any after them in ROBUST_FAST (fsk8r50-r1/3), for fast fading:
+    nothing is measured before a session. With fewer retries the last goes in
+    ROBUST_FAST, unless it is the only one (RETRIES 1: ROBUST_CONNECT).
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).
@@ -1113,7 +1126,7 @@ off (Python and native) for A/B runs.
   next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, PENDING /
   CANCELPENDING, and a Data2G-specific `MODE name`.
 - **PENDING:** while listening, a header that may be a CONNECT (one codeword
-  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT only, the default;
+  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT and ROBUST_FAST, the default;
   `ofdm` the caps' first-try modes; `all`; `off`) raises PENDING before the
   body is read. CONNECTED follows if the burst connects. Otherwise
   CANCELPENDING follows once it is read, or 3 s past its end. The header has

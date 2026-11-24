@@ -98,6 +98,10 @@ def native():
     module, why = native_subs.import_native()
     if module is None:
         pytest.skip(f"data2g_native not built: {why}")
+    from data2g import cpm
+
+    if cpm.ON_AIR_WIDE or cpm.WIDE_ON:  # the parity tests walk cpm.GRIDS / SPECS, which then hold grids C++ lacks
+        pytest.skip("DATA2G_CPM_ONAIR / DATA2G_CPM_WIDE: the wide grids are Python only")
     return module
 
 
