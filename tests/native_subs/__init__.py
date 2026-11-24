@@ -62,10 +62,27 @@ def import_native():
     return data2g_native, None
 
 
+# DATA2G_PILOTS (a study flag, Python only): C++ has today's pilot rows only, so
+# while it is set every provider that builds, receives or decodes an OFDM frame
+# stays Python (the modem, the receiver, phy's ModemRx and the engine, host and
+# TNC that run them), and so do the burst timing and the shifter (gear, arq: a
+# flagged burst's header pilot makes it 24 ms longer); codes, CPM and audio stay native.
+PILOTS_ENV = "DATA2G_PILOTS"
+PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}  # (gear, arq: a flagged burst is 24 ms longer)
+
+
+def study_skip() -> set:
+    """Providers the study flags in the environment keep in Python."""
+    import os
+
+    return set(PROVIDERS) - PILOTS_NATIVE if os.environ.get(PILOTS_ENV, "off") not in ("", "off") else set()
+
+
 def build(native, skip=()):
     unknown = set(skip) - PROVIDERS.keys()
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
+    skip = set(skip) | study_skip()
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:

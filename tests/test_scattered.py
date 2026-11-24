@@ -14,6 +14,7 @@ LAYOUTS = {"k3d2": ("w", "w48"), "gold": ("w", "w48", "n10", "n4"), "mix": ("w",
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 @pytest.mark.parametrize("name,n_cw", [("qpsk-r1/2", 1), ("16qam-r1/2", 3), ("w48-16qam-r1/2", 4), ("n10-qpsk-r1/2", 2),
                                        ("n4-qpsk-r1/2", 1), ("n10-16qam-r1/2", 3), ("ack-1f", 1)])
+@pytest.mark.python_only("scattered pilots (DATA2G_PILOTS) are not in native")
 def test_round_trip(monkeypatch, layout, name, n_cw):
     monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS[layout])
     monkeypatch.setattr(modem, "SC_LAYOUT", layout)
