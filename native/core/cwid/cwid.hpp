@@ -32,7 +32,9 @@ double seconds(std::string_view text, double wpm = WPM);
 
 // cwid.CwSense: per 20 ms window hit (key-down), quiet (key-up) or elsewhere (a burst); active when the last
 // WIN_N windows hold MIN_HITS hits, MIN_QUIET quiet ones and at most MAX_ELSEWHERE elsewhere, the hits
-// keyed: at least MIN_RUNS separate runs, none longer than MAX_RUN (a steady carrier's edge is one run).
+// keyed: at least MIN_RUNS separate runs, none longer than MAX_RUN (a steady carrier's edge is one run),
+// and the quiet windows' median power in the hits' bin at most QUIET_MAX times the floor (a weak steady
+// carrier flickers about RATIO, but its quiet windows still hold the tone).
 class CwSense {
 public:
     static constexpr int WIN = config::FS / 50;
@@ -42,6 +44,7 @@ public:
     static constexpr double FLOOR_DOWN = 0.1, FLOOR_UP = 0.004;
     static constexpr int WIN_N = 50, MIN_HITS = 12, MIN_QUIET = 4, MAX_ELSEWHERE = 6;
     static constexpr int MIN_RUNS = 2, MAX_RUN = 16;  // a dash at MIN_WPM is 12 windows
+    static constexpr double QUIET_MAX = 3.0;  // key-up gaps at the floor (cwid.py)
     static constexpr int HITS_FROM = 3;
 
     explicit CwSense(double center = FREQ_HZ);
@@ -56,6 +59,7 @@ private:
     std::vector<std::complex<double>> basis_;  // (2K+1) x WIN, Hann-windowed DFT rows
     std::vector<double> buf_;
     std::deque<int> hist_;
+    std::deque<std::array<double, 2 * TONE_K + 1>> near_;  // per window: the +-TONE_K bins' powers over the floor
     double floor_ = 0.0;
     bool active_ = false;
     std::int64_t n_ = 0;

@@ -69,6 +69,20 @@ def test_cwsense_ignores_a_steady_tone_starting_and_ending():
     assert not _active(H.awgn(np.concatenate([pad, tone, pad]), 20, seed=7)).any()
 
 
+def test_cwsense_ignores_a_weak_steady_carrier():
+    """A steady carrier near RATIO times the floor flickers over and under it
+    with the noise: keyed by the run rule, but its quiet windows still hold
+    the tone (CwSense.QUIET_MAX). At 8-12 dB over the noise in 50 Hz, on the
+    centre and 73 Hz off it, one read as a CW ID 70-85% of the time, and a
+    session under it held every timeout (on_cw) and delivered nothing."""
+    n = 30 * FS
+    for freq in (1500.0, 1573.4):
+        for inr in (8, 10, 12):
+            a = np.sqrt(2 * 50 / (FS / 2) * 10 ** (inr / 10))  # over unit-variance noise's power in 50 Hz
+            y = np.random.default_rng(8).normal(size=n) + a * np.sin(2 * np.pi * freq * np.arange(n) / FS)
+            assert _active(y).mean() < 0.02, (freq, inr)
+
+
 def _cw_tx(path):
     return [e for e in map(json.loads, open(path / "events.jsonl")) if e["kind"] == "tx" and e["submode"] == "cw"]
 

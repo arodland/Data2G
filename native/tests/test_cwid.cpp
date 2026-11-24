@@ -59,6 +59,20 @@ void sense() {
     std::vector<double> y(noise.begin(), noise.begin() + static_cast<std::ptrdiff_t>(x.size() + 2 * config::FS));
     for (std::size_t i = 0; i < x.size(); ++i) y[i + config::FS] += a * x[i];
     check::is_true(heard(y), "an ID at 0 dB: heard");
+    // a weak steady carrier flickers about RATIO with the noise: keyed by the run rule, not by QUIET_MAX
+    // (tests/test_cwid.py test_cwsense_ignores_a_weak_steady_carrier: 70-85% of the time before it)
+    for (double freq : {1500.0, 1573.4}) {
+        const double c = std::sqrt(2 * 50.0 / (config::FS / 2.0) * 10.0);  // 10 dB over the noise in 50 Hz
+        cwid::CwSense s;
+        std::size_t on = 0, blocks = 0;
+        std::vector<double> blk(80);
+        for (std::size_t i = 0; i + 80 <= 30 * static_cast<std::size_t>(config::FS); i += 80, ++blocks) {
+            for (std::size_t j = 0; j < 80; ++j)
+                blk[j] = noise[i + j] + c * std::sin(2 * std::numbers::pi * freq * static_cast<double>(i + j) / config::FS);
+            on += s.feed(blk);
+        }
+        check::is_true(on * 50 < blocks, "a weak steady carrier: under 2% of the time");
+    }
 }
 
 }  // namespace
