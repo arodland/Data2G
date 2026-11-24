@@ -69,6 +69,23 @@ def test_cwsense_ignores_a_steady_tone_starting_and_ending():
     assert not _active(H.awgn(np.concatenate([pad, tone, pad]), 20, seed=7)).any()
 
 
+@pytest.mark.xfail(strict=True, reason="CwSense reads a weak or fading carrier near the centre as a CW ID (#302)")
+@pytest.mark.parametrize("preset", ["mpp", "mpd"])
+def test_cwsense_under_a_fading_carrier(preset):
+    """A steady, unkeyed carrier 73 Hz off the centre that fades (1 and 2 Hz
+    Doppler), at a mean 10-18 dB over the noise in 50 Hz: it goes through
+    the level where it flickers about RATIO, and reads as a CW ID 20-57% of
+    the time. Each reading holds transmission and moves a reply deadline on
+    (Session.on_cw). Bound: 15%, since a deep fade is a real gap at the
+    floor and some readings will remain."""
+    n = 30 * FS
+    f = H.fading(np.sin(2 * np.pi * 1573.4 * np.arange(n) / FS), preset, seed=11)
+    for inr in (10, 14, 18):
+        a = np.sqrt(2 * 50 / (FS / 2) * 10 ** (inr / 10)) / np.sqrt(2 * np.mean(f ** 2))  # the mean, over unit-variance noise
+        y = np.random.default_rng(12).normal(size=n) + a * f
+        assert _active(y).mean() < 0.15, inr
+
+
 def _cw_tx(path):
     return [e for e in map(json.loads, open(path / "events.jsonl")) if e["kind"] == "tx" and e["submode"] == "cw"]
 
