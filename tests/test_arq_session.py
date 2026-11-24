@@ -33,7 +33,7 @@ class Policy(L.Policy):
     def rv_cycle(self, m):
         return MODES[m][1]
 
-    def connect_mode(self, cap, tries=0):
+    def connect_mode(self, cap, tries=0, last=False):
         return "m46"  # a connect frame (28 B) in one control codeword
 
     def airtime(self, m, n_cw, dup=False):
@@ -205,6 +205,35 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     b.on_rx(FakeRx(retry, random.Random(3), 0.0, {}, {"mismatch": 0}), t + 4.5)
     ack = b.poll(t + 4.5)
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
+
+
+def test_connect_retries_end_in_the_fast_fading_robust_mode():
+    """Nothing is measured before a session: the retries go in
+    ROBUST_CONNECT (four, their soft bits adding), then one in ROBUST_FAST,
+    whose wider tones survive fast fading (30 Hz / 7 ms, 0 dB: 2 of 8
+    sessions connected with every retry in ROBUST_CONNECT, 8 of 8 with the
+    last in ROBUST_FAST). One mode on FM."""
+    from data2g.arq import policy as G
+
+    g = G.GearShifter()
+    want = [G.CONNECT[2]] + [G.ROBUST_CONNECT] * G.ROBUST_CONNECT_TRIES + [G.ROBUST_FAST]
+    assert len(want) == S.CONNECT_TRIES and [g.connect_mode(2, k) for k in range(S.CONNECT_TRIES)] == want
+    assert g.connect_mode(2, 12) == G.ROBUST_FAST  # a host's RETRIES past the default
+    # a host's RETRIES under the default: the last try in ROBUST_FAST, unless it is the only retry
+    for n in range(2, S.CONNECT_TRIES + 1):
+        got = [g.connect_mode(2, k, last=k == n - 1) for k in range(n)]
+        assert got[1:] == ([G.ROBUST_CONNECT] if n == 2 else [G.ROBUST_CONNECT] * (n - 2) + [G.ROBUST_FAST])
+    assert g.connect_mode(2, 1) == g.connect_mode(2, 1, last=False) == G.ROBUST_CONNECT
+    a = S.Session("W1AW", g, rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    t, sent = 0.0, []
+    while a.state == S.CONNECTING and t < 300:
+        burst = a.poll(t)
+        if burst is not None:
+            sent.append(burst.submode)
+            a.on_tx_end(burst, t + 4.2)  # lost: nobody hears it
+        t = max(t + 0.1, a.next_event() or t)
+    assert sent == want and a.state == S.CLOSED
 
 
 def _rx(burst):

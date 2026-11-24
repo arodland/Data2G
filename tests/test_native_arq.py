@@ -143,7 +143,9 @@ def test_policy_helpers(A, pure):
     for cap in G.CAP_HZ:
         assert A.allowed(cap) == [s.name for s in G.allowed(cap)]
         assert (A.cap_hz(cap), A.fallback(cap)) == (G.CAP_HZ[cap], G.FALLBACK[cap])
-        assert [A.connect_mode(cap, t) for t in (0, 1, 2)] == [G.GearShifter().connect_mode(cap, t) for t in (0, 1, 2)]
+        for last in (False, True):
+            assert [A.connect_mode(cap, t, last) for t in range(8)] == [
+                G.GearShifter().connect_mode(cap, t, last=last) for t in range(8)]
     for rec in range(64):
         assert A.decode(rec) == G.decode(rec)
     for name, s in modes.MODES.items():

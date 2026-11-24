@@ -47,9 +47,10 @@ std::string_view fallback(int cap) {
     return cap == 0 ? "n10-ack-4f" : "ack-4f";
 }
 
-std::string_view connect_mode(int cap, int tries) {
+std::string_view connect_mode(int cap, int tries, bool last) {
     cap_hz(cap);
-    if (tries) return ROBUST_CONNECT;
+    // policy.py connect_mode: `last`, the host's last try, in ROBUST_FAST once a ROBUST_CONNECT retry went ahead
+    if (tries) return tries > ROBUST_CONNECT_TRIES || (last && tries >= 2) ? ROBUST_FAST : ROBUST_CONNECT;
     return cap == 0 ? "n10-qpsk-r1/3" : "qpsk-r1/5";
 }
 
@@ -441,6 +442,6 @@ std::string GearPolicy::measured_extra() {
     return out;
 }
 double GearPolicy::airtime(const std::string& m, int n_cw, bool dup) { return burst_seconds(mode_at(m), n_cw, dup); }
-std::string GearPolicy::connect_mode(int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); }
+std::string GearPolicy::connect_mode(int cap, int tries, bool last) { return std::string(arq::connect_mode(cap, tries, last)); }
 
 }  // namespace data2g::arq

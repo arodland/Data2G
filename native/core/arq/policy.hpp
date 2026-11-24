@@ -56,6 +56,7 @@ inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = config::PROFILE == "fm" ? "n10-qpsk-r1/5" : "fsk16r25-r1/2";
 // policy.py: in a session on fast fading; FM has no CPM modes, so its robust mode stays ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_FAST = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8r50-r1/3";
+inline constexpr int ROBUST_CONNECT_TRIES = 4;  // connect retries in ROBUST_CONNECT; the ones past them in ROBUST_FAST
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
 // policy.py: a session connected by a robust retry starts at the robust floor only if the caller's
 // CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
@@ -63,7 +64,7 @@ inline constexpr double ROBUST_START_SNR_DB = -6.0;
 inline constexpr double ROBUST_START_SPREAD_HZ = 6.0;
 
 std::string_view fallback(int cap);
-std::string_view connect_mode(int cap, int tries = 0);
+std::string_view connect_mode(int cap, int tries = 0, bool last = false);
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 
@@ -184,7 +185,7 @@ public:
     std::optional<double> snr_est() override;
     std::string measured_extra() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
-    std::string connect_mode(int cap, int tries) override;
+    std::string connect_mode(int cap, int tries, bool last) override;
     bool weak_path() override { return shifter.weak_path(); }
     bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {

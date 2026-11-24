@@ -79,7 +79,7 @@ Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_tu
 void Session::robust_start(const std::string& mode) {
     // any retry's mode: a robust one (Policy::robust) that is not the cap's connect mode. A policy may change
     // mode among its retries, and by more than the try's number, which the callee does not know
-    if (mode == policy->connect_mode(cap, 0) || !policy->robust(mode)) return;
+    if (mode == policy->connect_mode(cap, 0, false) || !policy->robust(mode)) return;
     if (!station->master) {
         follow_start = true;
     } else if (policy->weak_path()) {
@@ -238,7 +238,7 @@ void Session::on_header(const std::string& submode, int n_cw, double now) {
     if (deadline) {
         // a peer's ID burst (one codeword in the connect mode) runs straight
         // into its reply, whose header must still be found (engine ID_INTERVAL_S)
-        const bool is_id = n_cw == 1 && submode == policy->connect_mode(cap, 0);
+        const bool is_id = n_cw == 1 && submode == policy->connect_mode(cap, 0, false);
         deadline = std::max(*deadline, end + peer_turn() + (is_id ? tune.reply_start_s : 0.0));
     }
     if (!master()) quiet_from = std::max(quiet_from, end);
@@ -475,7 +475,7 @@ void Session::on_timeout(double now) {
 // frames use key 0 (no session yet); DISC / DISC_ACK the session key.
 
 TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode) {
-    const std::string m = (mode && !mode->empty()) ? *mode : policy->connect_mode(cap, tries);
+    const std::string m = (mode && !mode->empty()) ? *mode : policy->connect_mode(cap, tries, body[0] == CONNECT && tries == tune.connect_tries - 1);
     const int cpb = policy->ctl_payload_bytes(m);
     auto b = std::make_shared<TxBurst>();
     b->submode = m;

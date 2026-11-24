@@ -117,12 +117,19 @@ ROBUST_CONNECT = "n10-qpsk-r1/5" if PROFILE == "fm" else "fsk16r25-r1/2"  # sess
 # fsk16r25 decodes nothing even at a genie lock (25 Hz tones), and its lock
 # gets worse with SNR (#244), so polls in it stalled sessions longer the
 # stronger the signal; fsk8r50-r1/3 (400 Hz, within every cap too) locked and
-# decoded 100% there from -5 to +20 dB. Connect retries keep ROBUST_CONNECT:
-# before a session nothing is measured.
+# decoded 100% there from -5 to +20 dB. Before a session nothing is measured:
+# connect retries go in ROBUST_CONNECT first (ROBUST_CONNECT_TRIES of them,
+# their soft bits adding), then in ROBUST_FAST (connect_mode).
 # FM has no CPM modes: its robust mode stays ROBUST_CONNECT whatever the spread.
 ROBUST_FAST = ROBUST_CONNECT if PROFILE == "fm" else "fsk8r50-r1/3"
 ROBUST_FAST_SPREAD_HZ = 6.0
 ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
+# Connect retries in ROBUST_CONNECT before the ones in ROBUST_FAST. Live sessions, 8 seeds a cell
+# (scripts/stream_session), every retry in ROBUST_CONNECT -> these four and then one in ROBUST_FAST:
+# 30 Hz / 7 ms at 0 dB 2 -> 8 connected and done; AWGN -14, -15 and -16 dB the same events in all 24.
+# Alternating from the first retry connected 30 Hz 36 s sooner, but at -16 dB 2 of 8 against 6
+# (two ROBUST_CONNECT tries to combine, not four).
+ROBUST_CONNECT_TRIES = 4
 # A session whose connect was made by a retry in the robust mode starts at the
 # robust floor (session._robust_start) only if the caller's reading of the
 # CONNECT_ACK says the path is the reason (weak_path()): snr_est under
@@ -320,11 +327,18 @@ class GearShifter(L.Policy):
     def rv_cycle(self, m):
         return codes.rv_cycle(MODES[m])
 
-    def connect_mode(self, cap, tries: int = 0):
+    def connect_mode(self, cap, tries: int = 0, last: bool = False):
         """Session frames: the cap's connect mode first, then ROBUST_CONNECT
         (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
-        loss-study sessions there never connected in qpsk-r1/5)."""
-        return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
+        loss-study sessions there never connected in qpsk-r1/5) for
+        ROBUST_CONNECT_TRIES retries, then ROBUST_FAST: on fast fading
+        ROBUST_CONNECT's 25 Hz tones decode nothing, and nothing is measured
+        yet to say so. `last`, the host's last try (RETRIES under the
+        default): ROBUST_FAST too, once one ROBUST_CONNECT retry went ahead
+        of it (RETRIES 1 keeps its one retry in ROBUST_CONNECT)."""
+        if tries == 0:
+            return CONNECT[cap]
+        return ROBUST_FAST if tries > ROBUST_CONNECT_TRIES or (last and tries >= 2) else ROBUST_CONNECT
 
     def weak_path(self) -> bool:
         """The peer's last burst (the caller's CONNECT_ACK, in a retry's

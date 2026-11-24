@@ -166,6 +166,23 @@ def test_receive_chain(native, reference, case):
     np.testing.assert_allclose(m["snr"], m_ref["snr"], rtol=RTOL, atol=1e-12)
 
 
+@pytest.mark.parametrize("name", ["fsk16r25-r1/2", "fsk8r50-r1/3"])
+def test_spread_on_selective_fading_matches(native, reference, name):
+    """cpm.spread's no-fit branch (SPREAD_NEAR_*): slow selective fading
+    reads unmeasured, fast SPREAD_MAX_HZ, alike in both, and each of these
+    outcomes is taken."""
+    from test_cpm import _faded_control_energies
+
+    seen = set()
+    for doppler, delay_ms, snr in ((0.1, 2.0, 2), (1.0, 2.0, -6), (10.0, 7.0, 0), (30.0, 7.0, 0)):
+        for seed in range(12):
+            g, E = _faded_control_energies(name, doppler, delay_ms, snr, seed)
+            m, m_ref = native.cpm.measure(g.name, E, len(E)), ref(reference, "measure")(g, E, len(E))
+            assert m["spread_est"] == pytest.approx(m_ref["spread_est"], rel=1e-9, abs=1e-12), (doppler, seed)
+            seen.add(m_ref["spread_est"] if m_ref["spread_est"] in (cpm.UNMEASURED_SPREAD_HZ, cpm.SPREAD_MAX_HZ) else "fit")
+    assert seen == {cpm.UNMEASURED_SPREAD_HZ, cpm.SPREAD_MAX_HZ, "fit"}
+
+
 @pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
                                          for n in (0, 3)])
 def test_late_lock(native, reference, name, n_data):
