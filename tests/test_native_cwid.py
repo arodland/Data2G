@@ -54,6 +54,19 @@ def test_sense_matches_under_a_steady_carrier(native, freq, inr):
     assert on < 0.03 * len(y) / 80
 
 
+@pytest.mark.parametrize("preset,inr", [("mpp", 10), ("mpp", 14), ("mpd", 10), ("mpd", 18)])
+def test_sense_matches_under_a_fading_carrier(native, preset, inr):
+    """Window by window under a fading steady carrier, where the detector
+    is at its margin (tests/test_cwid.py)."""
+    n = 20 * FS
+    f = H.fading(np.sin(2 * np.pi * 1573.4 * np.arange(n) / FS), preset, seed=11)
+    a = np.sqrt(2 * 50 / (FS / 2) * 10 ** (inr / 10)) / np.sqrt(2 * np.mean(f ** 2))
+    y = np.random.default_rng(12).normal(size=n) + a * f
+    py, cc = cwid.CwSense(), native.cwid.CwSense()
+    for i in range(0, len(y), 80):
+        assert py.feed(y[i:i + 80]) == cc.feed(y[i:i + 80]) and py.hits_from == cc.hits_from, i
+
+
 def _cw_tx(path):
     return [e for e in map(json.loads, open(path / "events.jsonl")) if e["kind"] == "tx" and e["submode"] == "cw"]
 

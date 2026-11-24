@@ -83,6 +83,49 @@ def test_cwsense_ignores_a_weak_steady_carrier():
             assert _active(y).mean() < 0.02, (freq, inr)
 
 
+@pytest.mark.parametrize("preset", ["mpp", "mpd"])
+def test_cwsense_under_a_fading_carrier(preset):
+    """A steady, unkeyed carrier 73 Hz off the centre that fades (1 and 2 Hz
+    Doppler), at a mean 10-18 dB over the noise in 50 Hz: it goes through
+    the level where it flickers about RATIO, and read as a CW ID 20-57% of
+    the time before QUIET_MAX. Each reading holds transmission and moves a
+    reply deadline on (Session.on_cw). Bound: 15%, since a deep fade is a
+    real gap at the floor and some readings remain."""
+    n = 30 * FS
+    f = H.fading(np.sin(2 * np.pi * 1573.4 * np.arange(n) / FS), preset, seed=11)
+    for inr in (10, 14, 18):
+        a = np.sqrt(2 * 50 / (FS / 2) * 10 ** (inr / 10)) / np.sqrt(2 * np.mean(f ** 2))  # the mean, over unit-variance noise
+        y = np.random.default_rng(12).normal(size=n) + a * f
+        assert _active(y).mean() < 0.15, inr
+
+
+@pytest.mark.parametrize("fading", [None, "mpp", "mpd"])
+def test_a_carrier_does_not_hold_the_connect_retry(fading):
+    """A caller nobody answers, under an unkeyed 1573.4 Hz carrier 12 dB
+    over the noise in 50 Hz (interference.Qrm), steady or fading: its first
+    retry goes out within 16 s (a quiet channel: 8.3-10 s; a fading carrier
+    still reads as a CW ID now and then, and each reading may hold it 2.5 s).
+    Each false CW ID reading holds transmission and moves the reply deadline
+    on (Session.on_cw): steady or fading, six seeds each, no retry was keyed
+    in 30 s (in a session: none for 88 s, and nothing delivered)."""
+    from data2g import interference as I
+
+    seconds, block = 20.0, 80
+    n = int(seconds * FS)
+    sigma = np.sqrt((FS / 2) / 2500.0)  # the floor of a 0 dB signal
+    carrier = I.Interference(I.Spec(qrm=(I.Qrm("carrier", 1573.4, 50.0, 12.0, seconds, 1.0),)), 1, seconds).render(0.0, n, sigma)
+    x = np.random.default_rng(1).normal(0, sigma, n) + (H.fading(carrier, fading, seed=1) if fading else carrier)
+    a = E.Engine("W1AW", seed=1)
+    a.connect("K2XYZ", 2)
+    keyed, was = [], False
+    for i in range(0, n, block):
+        _, ptt = a.step(x[i:i + block])
+        if ptt and not was:
+            keyed.append(i / FS)
+        was = ptt
+    assert len(keyed) >= 2 and keyed[1] < 16.0, keyed
+
+
 def _cw_tx(path):
     return [e for e in map(json.loads, open(path / "events.jsonl")) if e["kind"] == "tx" and e["submode"] == "cw"]
 
