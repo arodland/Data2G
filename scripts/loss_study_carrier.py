@@ -7,6 +7,13 @@ steady carrier at 1573.4 Hz (inside every CPM grid; tests/test_cpm.py's),
 
 from scripts import loss_study as L  # first: it sets the thread caps before numpy loads
 
+import os  # noqa: E402
+
+if os.environ.get("DATA2G_STUDY_ROBUST"):  # GearShifter.robust_mode() always this mode (scripts/connect_session_study.py's)
+    from data2g.arq import policy as _G
+
+    _G.GearShifter.robust_mode = lambda self, _m=os.environ["DATA2G_STUDY_ROBUST"]: _m
+
 L.INTF.PRESETS["carrier12"] = L.INTF.Spec(qrm=(L.INTF.Qrm("carrier", 1573.4, 50, 12.0, 600.0, 1.0),))
 
 if __name__ == "__main__":

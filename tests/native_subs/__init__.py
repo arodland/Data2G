@@ -62,10 +62,33 @@ def import_native():
     return data2g_native, None
 
 
+# CPM study toggles (data2g.cpm; Python only, native has the defaults). The
+# soft-value ones (the leak metric, the spill weights) keep in Python every
+# provider that makes CPM soft values or decodes them with DD: cpm, the
+# receiver, phy's ModemRx, and the engine and host that run them. fsk32r62-r2/3
+# offered (DATA2G_CPM_R23) is a mode, header words and a recommendation code
+# the C++ tables do not have: everything but the OFDM and audio providers stays
+# Python (the shifter too: gear.GEAR_STUDY_ENV lists it).
+CPM_SOFT_ENV = ("DATA2G_CPM_LEAK", "DATA2G_CPM_LEAK_K", "DATA2G_CPM_CTL_SQ", "DATA2G_CPM_SPILL")
+CPM_SOFT_PY = {"cpm", "receiver", "phy", "engine", "host"}
+CPM_MODE_ENV = ("DATA2G_CPM_R23",)
+CPM_MODE_NATIVE = {"base", "waveform", "modem", "audio"}
+
+
+def study_skip() -> set:
+    """Providers the CPM study toggles in the environment keep in Python."""
+    import os
+
+    if any(os.environ.get(v, "0") not in ("", "0", "off") for v in CPM_MODE_ENV):
+        return set(PROVIDERS) - CPM_MODE_NATIVE
+    return set(CPM_SOFT_PY) if any(v in os.environ for v in CPM_SOFT_ENV) else set()
+
+
 def build(native, skip=()):
     unknown = set(skip) - PROVIDERS.keys()
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
+    skip = set(skip) | study_skip()
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:
