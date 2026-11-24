@@ -584,9 +584,16 @@ class Session:
             return {"key": key, "body": body, "mode": rx.submode} if body else None
         return self._primed_frame(rx)
 
+    def _retry_modes(self) -> int:
+        """The tries whose connect modes count as a retry's (_robust_start):
+        the default's or the host's, whichever is more (the callee does not
+        know the caller's RETRIES)."""
+        return max(CONNECT_TRIES, self.connect_tries or 0)
+
     def _robust_start(self, mode: str):
-        """The connect frame that made this session came in the retries' mode
-        (policy.connect_mode's robust one), so the cap's connect mode was not
+        """The connect frame that made this session came in a retry's mode
+        (any of policy.connect_mode's past the first try: a policy may change
+        mode among its retries), so the cap's connect mode was not
         answered. If the path is why, the station starts at the top of the
         escalation floor: its control-only bursts in the robust mode from the
         first turn, the floor decaying as any does (link.FLOOR_DECAY_TURNS).
@@ -602,7 +609,8 @@ class Session:
         burst (on_rx). Each side deciding from the frame it received, the two
         disagreed in 31 of about 450 retry-made sessions, four slower than
         either way and one failed. Nothing on the wire changes."""
-        if mode != self.policy.connect_mode(self.cap, 1) or mode == self.policy.connect_mode(self.cap, 0):
+        if mode == self.policy.connect_mode(self.cap, 0) or all(
+                mode != self.policy.connect_mode(self.cap, k) for k in range(1, self._retry_modes())):
             return
         if not self.station.master:
             self._follow_start = True

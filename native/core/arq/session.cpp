@@ -72,12 +72,17 @@ Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_tu
       rng(rng_ ? std::move(rng_) : std::make_shared<DefaultRng>()), aliases(std::move(aliases_)),
       stats_interval_s(stats_interval_s_) {}
 
-// session._robust_start: the connect frame came in the retries' mode, so the cap's connect mode was not
+// session._robust_start: the connect frame came in a retry's mode, so the cap's connect mode was not
 // answered. One decision, the caller's: if its reading of the CONNECT_ACK says the path is why
 // (Policy::weak_path), it starts at the top of the escalation floor (it decays as any does); the callee
 // follows the mode of the caller's first burst (on_rx).
 void Session::robust_start(const std::string& mode) {
-    if (mode != policy->connect_mode(cap, 1) || mode == policy->connect_mode(cap, 0)) return;
+    // any retry's mode, not only the first retry's: a policy may change mode among its retries. The tries
+    // counted are the default's or the host's, whichever is more (the callee does not know the caller's RETRIES)
+    if (mode == policy->connect_mode(cap, 0)) return;
+    bool retry = false;
+    for (int k = 1; k < std::max(CONNECT_TRIES, tune.connect_tries) && !retry; ++k) retry = mode == policy->connect_mode(cap, k);
+    if (!retry) return;
     if (!station->master) {
         follow_start = true;
     } else if (policy->weak_path()) {

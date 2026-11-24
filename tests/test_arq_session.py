@@ -266,6 +266,46 @@ def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first
     assert b.station.esc_floor == floor  # as the caller started
 
 
+def test_robust_start_counts_any_retry_mode():
+    """A policy may change mode among its connect retries (a last try in
+    ROBUST_FAST, say). A session made by such a later try starts at the
+    robust floor as one made by the first retry does: its mode is a retry's
+    too, though not the first retry's."""
+    from data2g.arq import link as L, policy as G
+
+    class LastTryFast(G.GearShifter):
+        def connect_mode(self, cap, tries=0):
+            return G.ROBUST_FAST if tries >= 2 else super().connect_mode(cap, tries)
+
+    if G.ROBUST_FAST == G.ROBUST_CONNECT:
+        pytest.skip("one robust mode on this profile")
+    a = S.Session("W1AW", LastTryFast(), rng=random.Random(1))
+    b = S.Session("K2XYZ", LastTryFast(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    t, sent = 0.0, []
+    while len(sent) < 3 and t < 120:  # the first try and the first retry are lost
+        burst = a.poll(t)
+        if burst is not None:
+            sent.append(burst.submode)
+            t += 5.0
+            a.on_tx_end(burst, t)
+        t = max(t + 0.1, a.next_event() or t)
+    assert sent == [G.CONNECT[2], G.ROBUST_CONNECT, G.ROBUST_FAST]
+    b.on_rx(_rx(burst), t)
+    reply = b.poll(t)
+    assert b.state == S.CONNECTED and reply.submode == G.ROBUST_FAST
+    b.on_tx_end(reply, t + 4.0)
+    a.on_rx(_rx(reply), t + 4.3)  # nothing measured: a weak path
+    assert a.state == S.CONNECTED and (a.station.esc_floor, b.station.esc_floor) == (L.MAX_ESCALATION, 0)
+    mine = a.poll(t + 4.3)
+    assert mine.submode in G.ROBUST_MODES and len(mine.slots) == 1
+    a.on_tx_end(mine, t + 8.0)
+    b.on_rx(_rx(mine), t + 8.3)
+    assert b.station.esc_floor == L.MAX_ESCALATION  # as the caller started
+
+
 @pytest.mark.parametrize("when", ["before", "between"])
 def test_disconnect_drops_a_connect_not_yet_on_air(when):
     """DISCONNECT with no CONNECT on air ends the dial at the next poll, with
