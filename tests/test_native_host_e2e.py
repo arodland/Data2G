@@ -11,14 +11,20 @@ import signal
 import socket
 import subprocess
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from data2g import host, tnc
+from data2g import config
 
-BINARY = Path(__file__).resolve().parent.parent / "native" / "build" / ("data2g-host.exe" if os.name == "nt" else "data2g-host")
+import native_subs
+
+from data2g import host, tnc
+from data2g.arq.modes import BW_NAME
+
+# this profile's build; another profile's programs carry its name (data2g-host-fm)
+SUFFIX = "" if config.PROFILE == "hf" else f"-{config.PROFILE}"
+BINARY = native_subs.MODULE_DIR.parent / (f"data2g-host{SUFFIX}" + (".exe" if os.name == "nt" else ""))
 BAD = re.compile(r"overflow|underrun|behind the card|dropped|CRITICAL|Traceback")
 
 
@@ -189,7 +195,8 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         assert b.lines[:3] == ["OK", "REGISTERED B", "OK"]
         t0 = time.monotonic()
         a.send("CONNECT A B")
-        t_conn = wait([a, b], lambda: "CONNECTED A B 2300" in a.lines and "CONNECTED A B 2300" in b.lines, 60,
+        want = f"CONNECTED A B {BW_NAME[2]}"  # HF 2300, FM WIDE
+        t_conn = wait([a, b], lambda: want in a.lines and want in b.lines, 60,
                       "CONNECTED") - t0
         rng = np.random.default_rng(1)
         up, down = rng.bytes(2048), rng.bytes(2048)
@@ -213,7 +220,7 @@ def test_two_hosts_over_named_pipes(tmp_path, request, worker):
         b.got.clear()
         b.send(f"ACCEPT :{srv.getsockname()[1]}")
         a.send("CONNECT A B")
-        wait([a, b], lambda: "CONNECTED A B 2300" in a.lines, 60, "CONNECTED (ACCEPT)")
+        wait([a, b], lambda: f"CONNECTED A B {BW_NAME[2]}" in a.lines, 60, "CONNECTED (ACCEPT)")
         conn, _ = srv.accept()
         conn.settimeout(0.05)
         a.data.sendall(b"to the server")
@@ -361,7 +368,7 @@ def test_cli_rig_flags(request, tmp_path):
 @pytest.mark.parametrize("app,sig", [("data2g-host", "SIGINT"), ("data2g-host", "SIGHUP"), ("data2g-gui", "SIGINT")])
 def test_signal_while_keyed_unkeys(tmp_path, request, app, sig):
     """A signal mid-burst (^C, a closed terminal) still ends with PTT off: Hamlib's dummy rig, keyed by a CONNECT."""
-    binary = BINARY.with_name(app)
+    binary = BINARY.with_name(app + SUFFIX)
     if not binary.exists():
         if app == "data2g-host" and request.config.getoption("--native"):  # the GUI is optional (no Qt Widgets)
             pytest.fail(f"--native: {binary} not built (tools/build_native.sh)")

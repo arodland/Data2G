@@ -8,6 +8,8 @@
 #include <span>
 #include <vector>
 
+#include "config/config.hpp"
+
 namespace data2g::audio {
 
 // scipy.signal.lfilter(b, 1.0, x, zi=zi) for an FIR b, as direct form II
@@ -54,10 +56,10 @@ private:
 // block whose median is over RESYNC x env is a level step and resets env.
 class Blanker {
 public:
-    static constexpr int BLOCK = 80;  // FS / 100
+    static constexpr int BLOCK = config::FS / 100;
     static constexpr double ZERO = 8.0, LIMIT = 6.0, RESYNC = 2.0;
-    static constexpr int TAU = 683;
-    static constexpr int GUARD = 8;
+    static constexpr int TAU = (4096 * config::FS + 24000) / 48000;  // round(4096 FS / 48000): 683 at 8 kHz
+    static constexpr int GUARD = config::FS / 1000;
 
     std::vector<double> operator()(std::span<const double> x);
 

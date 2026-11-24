@@ -139,6 +139,7 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
     assert cpm.find(g, x) is None
 
 
+@pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
     """CPM's control is a polar codeword: its payload enters the code
     reversed (codes.polar_order), so a short control's padding sits on the
@@ -192,6 +193,7 @@ def test_spread_tracks_doppler_through_symbol_jitter():
     assert cpm.spread(g, np.ones(10), n0) == cpm.UNMEASURED_SPREAD_HZ  # too short
 
 
+@pytest.mark.hf_only("CPM: FM has none")
 def test_coarse_track_is_a_fresh_transform_of_the_stream(pure):  # (native's: test_native_cpm's test_coarse_track)
     """A receiver's CoarseTrack, fed 20 ms at a time from a buffer trimmed
     behind it: its rows are coarse_rows of the stream at each phase's
@@ -216,3 +218,72 @@ def test_coarse_track_is_a_fresh_transform_of_the_stream(pure):  # (native's: te
         kw = dict(front_only=True, fine=False)  # (the whole pattern is longer than the second held)
         got, ref = cpm.detect(g, x[a:b], track=track, x0=a, **kw), cpm.detect(g, x[a + ph:b], **kw)
         assert ref[0] > 0 and got[1:] == (ref[1] + ph, ref[2]) and got[0] == pytest.approx(ref[0], rel=1e-12), g.name
+
+
+def _carrier_burst(seed, snr_db=-8.0, carrier_hz=1573.4, inr_db=12.0):
+    """A one-control fsk16r25 burst in white noise (SNR in 2500 Hz) with a
+    steady carrier `inr_db` over the noise in 50 Hz (None: no carrier)."""
+    from data2g.arq import burst as B, phy as PHY
+    from data2g.config import FS
+
+    rng = np.random.default_rng(seed)
+    payload = rng.bytes(codes.payload_bytes(cpm.CTL["c16r25"]))
+    mask = B.ctl_mask(0, 0, 5)
+    x = PHY.tx_audio(B.TxBurst("fsk16r25-r1/2", [B.Slot(mask, 0, payload)], 0, 2))
+    sigma2 = float(np.mean(x * x)) * (FS / 2) / 2500 / 10 ** (snr_db / 10)
+    y = np.concatenate([np.zeros(4000), x, np.zeros(4000)]) + rng.normal(0, np.sqrt(sigma2), len(x) + 8000)
+    if inr_db is not None:
+        amp = np.sqrt(2 * sigma2 * 50 / (FS / 2) * 10 ** (inr_db / 10))
+        y = y + amp * np.cos(2 * np.pi * carrier_hz * np.arange(len(y)) / FS + rng.uniform(0, 2 * np.pi))
+    return y, mask, payload
+
+
+def test_tone_floors_only_where_a_tone_stands_out():
+    rng = np.random.default_rng(1)
+    hits = 0
+    for n in (22, 90, 240):  # a header read, a control codeword, a data codeword
+        for _ in range(1000):
+            E = rng.exponential(1.0, (n, 16))
+            hits += cpm.tone_floors(E, cpm._n0(E)) is not None
+    assert hits <= 3  # noise alone: under 1 in 1000
+    E = rng.exponential(1.0, (90, 16))
+    E[:, 5] += 8.0  # a carrier in tone 5
+    nb = cpm.tone_floors(E, cpm._n0(E))
+    assert nb is not None and nb[5] > 5 * cpm._n0(E)
+    assert np.all(np.delete(nb, 5) == cpm._n0(E))
+
+
+def test_a_steady_carrier_in_the_passband_does_not_stop_the_burst():
+    """One N0 for every tone let a carrier win its tone in every symbol
+    (tone_metric, coh_metric): no fsk16r25 burst decoded at 5 dB over the
+    AWGN floor. With the tone's own floor (tone_floors) they do."""
+    from data2g.arq import phy as PHY
+    from data2g.receiver import receive_any
+
+    for hz in (1330.0, 1573.4, 1690.0):
+        for seed in range(3):
+            y, mask, payload = _carrier_burst(seed, carrier_hz=hz)
+            r = receive_any(y, lead=8000, cpm_grids=("c16r25",))
+            assert r is not None and r["spec"].name == "fsk16r25-r1/2", (hz, seed)
+            assert PHY.ModemRx(r, {}).decode(0, mask, 0, None) == payload, (hz, seed)
+
+
+@pytest.mark.hf_only("CPM: FM has none")
+def test_a_carrier_does_not_read_as_signal_in_snr_est():
+    """measure() took each row's strongest tone as signal: a carrier that
+    wins its tone read 2-8 dB high (12-24 dB in 50 Hz), and the gear
+    shifter climbed. Scaled to the quiet tones' floor, Es scaled back up
+    by the share kept, it reads within about 1 dB (a low read costs
+    sessions too)."""
+    from data2g.arq import phy as PHY
+    from data2g.receiver import receive_any
+
+    def est(seed, **kw):
+        y, *_ = _carrier_burst(seed, **kw)
+        return PHY.measure(receive_any(y, lead=8000, cpm_grids=("c16r25",)))["snr_est"]
+
+    for seed in range(2):
+        clean = est(seed, inr_db=None)
+        for hz, inr, low in ((1573.4, 12.0, -1.0), (1330.0, 18.0, -1.5)):  # before: +2.0..+2.5, +5.4..+6.0
+            d = est(seed, carrier_hz=hz, inr_db=inr) - clean
+            assert low < d < 0.5, (seed, hz, inr, d)

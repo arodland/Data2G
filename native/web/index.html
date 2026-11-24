@@ -151,6 +151,9 @@ input[type=range] { flex: 1; min-width: 120px; }
         <select id="cw_id" data-kind="str" title="A CW (Morse) ID on 1500 Hz: ahead of the station's turn every 10 minutes in a session and once after it, and after KISS or CQ transmissions. Peers need session version 5 to wait it out.">
           <option value="off">Off (ID frames only)</option><option value="add">With the ID frames</option><option value="only">In place of the ID frames</option></select>
         <input type="number" id="cw_wpm" data-kind="num" min="15" max="40"> wpm</span></div>
+      <div class="row"><label for="tx_path">TX audio path</label>
+        <select id="tx_path" data-kind="str" title="The radio's TX audio path, on the FM profile. Mic: the mic input (pre-emphasis and the radio's limiter); the top modes go out quieter. Flat: a 9600 data port; a fixed tilt and no clipping. Mic is safe on either; flat on a mic input overdrives the limiter.">
+          <option value="mic">Mic input</option><option value="flat">Flat (9600 port)</option></select></div>
     </fieldset>
 
     <fieldset><legend>Link</legend>

@@ -1014,6 +1014,10 @@ off (Python and native) for A/B runs.
       `HAND END`; an armed listen whose burst never went out gives up after
       30 s with `HAND END EXPIRED`. Send the command before queuing the frame that
       anchors the window: the KISS port may send it at once.
+    - **On FM a channel is a time slot**, 1.5 s apart, not a frequency:
+      stations that key together on FM are captured, not added. The commands
+      are the same; HAND SEND keys in its channel's slot and the windows run
+      to the last listed channel's end (docs/hand-burst.md, "FM").
     - **HAND OVERHEAR ref d channel [channel...]** (issue #210): a
       bystander's window, for a station that sat out a roll call or couldn't
       copy it. It opens d seconds after heard burst `ref` ends (LOST refs

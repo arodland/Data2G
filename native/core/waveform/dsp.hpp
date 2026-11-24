@@ -28,7 +28,7 @@ using Projector = std::function<std::vector<double>(std::span<const double>)>;
 
 // Envelope clip-and-filter for PEP control (dsp.tx_condition): one pass
 // per `overshoot` factor, each a clip of the analytic signal's magnitude
-// (scale ** k) and the firwin(201, bandpass) filter; with `project`, it
+// (scale ** k) and the firwin(TX_FILTER_TAPS, bandpass) filter; with `project`, it
 // runs after each of those passes, then the `closing` passes. Power, and
 // the final unit-RMS level, over x[active_lo, active_hi) only.
 std::vector<double> tx_condition(std::span<const double> x, double clip_headroom_db,

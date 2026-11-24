@@ -74,8 +74,8 @@ class Blanker:
 
     BLOCK = FS // 100
     ZERO, LIMIT, RESYNC = 8.0, 6.0, 2.0
-    TAU = 683  # samples (modem73: 4096 at 48 kHz)
-    GUARD = 8  # samples zeroed each side of a zeroed one (1 ms: beat 0 and 16, scripts/blanker_study.py)
+    TAU = round(4096 * FS / 48000)  # samples, 85 ms (modem73: 4096 at 48 kHz; 683 at 8 kHz)
+    GUARD = FS // 1000  # samples zeroed each side of a zeroed one (1 ms: beat 0 and 16, scripts/blanker_study.py)
 
     def __init__(self):
         self.env = 0.0

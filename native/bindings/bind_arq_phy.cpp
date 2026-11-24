@@ -7,6 +7,8 @@
 #include <cmath>
 
 #include "arq_convert.hpp"
+#include "arq/ping.hpp"
+#include "arq/probe.hpp"
 
 namespace data2g::bind {
 
@@ -73,6 +75,7 @@ Heard heard_of(const py::dict& r) {
     o->support = {sup[0].cast<int>(), sup[1].cast<int>()};
     const auto seen = (r.contains("seen_support") ? r["seen_support"] : r["support"]).cast<py::sequence>();
     o->seen_support = {seen[0].cast<int>(), seen[1].cast<int>()};
+    o->frames_in = r.contains("frames_in") ? r["frames_in"].cast<int>() : o->n_cw * o->spec->frames_per_cw;
     h.ofdm = std::move(o);
     return h;
 }
@@ -125,8 +128,14 @@ public:
     PyModemRx(py::dict r, py::object store, std::optional<double> dd_budget, bool dd, const py::object& clock)
         : store_(std::move(store)) {
         auto h = heard_of(r);
-        auto soft = cached_soft(r, h);
+        auto soft = h.ofdm && h.ofdm->partial() ? nullptr : cached_soft(r, h);  // a partial burst's: per slot
         rx_ = std::make_unique<ModemRx>(std::move(h), nullptr, dd_budget, std::move(soft), dd, clock_of(clock));
+    }
+
+    std::vector<int> advance(const py::dict& r, std::optional<double> budget_s) {
+        auto h = heard_of(r);
+        py::gil_scoped_release nogil;
+        return rx_->advance(std::move(h), budget_s);
     }
 
     py::object decode(int slot, const py::handle& mask, int rv, const py::object& key) {
@@ -223,21 +232,117 @@ private:
 
 }  // namespace
 
+namespace {
+
+arq::probe::Report report_of(const py::dict& d) {
+    arq::probe::Report m;
+    m.lo_hz = d["lo_hz"].cast<double>();
+    m.hi_hz = d["hi_hz"].cast<double>();
+    m.snr_nb = d["snr_nb"].cast<double>();
+    m.snr_top = d["snr_top"].cast<double>();
+    m.snr_tilt = d["snr_tilt"].cast<double>();
+    m.noise_tilt = d["noise_tilt"].cast<double>();
+    const auto snr = d["snr"].cast<std::vector<double>>(), sinad = d["sinad"].cast<std::vector<double>>();
+    for (std::size_t i = 0; i < m.snr.size(); ++i) m.snr[i] = snr.at(i), m.sinad[i] = sinad.at(i);
+    m.rms_dbfs = d["rms_dbfs"].cast<double>();
+    m.peak_dbfs = d["peak_dbfs"].cast<double>();
+    m.clip_permille = d["clip_permille"].cast<int>();
+    return m;
+}
+
+py::dict report_py(const arq::probe::Report& m) {
+    py::dict d;
+    d["lo_hz"] = m.lo_hz;
+    d["hi_hz"] = m.hi_hz;
+    d["snr_nb"] = m.snr_nb;
+    d["snr_top"] = m.snr_top;
+    d["snr_tilt"] = m.snr_tilt;
+    d["noise_tilt"] = m.noise_tilt;
+    d["snr"] = std::vector<double>(m.snr.begin(), m.snr.end());
+    d["sinad"] = std::vector<double>(m.sinad.begin(), m.sinad.end());
+    d["rms_dbfs"] = m.rms_dbfs;
+    d["peak_dbfs"] = m.peak_dbfs;
+    d["clip_permille"] = m.clip_permille;
+    return d;
+}
+
+arq::ping::Level level_of(const py::dict& d) {
+    return {d["rms_dbfs"].cast<double>(), d["peak_dbfs"].cast<double>(), d["clip_permille"].cast<int>()};
+}
+
+}  // namespace
+
+void bind_arq_ping(py::module_& m) {
+    namespace pg = arq::ping;
+    namespace pr = arq::probe;
+    auto g = m.def_submodule("ping", "data2g.arq.ping");
+    g.def("tx_level", [](const std::string& path) { return pg::tx_level(path); });
+    g.def("ping_body", [](const std::string& frm, const std::string& to, const py::object& report) {
+        return pyb(pg::ping_body(frm, to, report.is_none() ? std::nullopt : std::optional<Bytes>(bytes_of(report))));
+    });
+    g.def("unpack_ping", [](const py::bytes& body) {
+        const Bytes b = bytes_of(body);
+        try {
+            auto [frm, to, rep] = pg::unpack_ping(b);
+            return py::make_tuple(frm, to, rep ? py::object(pyb(*rep)) : py::object(py::none()));
+        } catch (const std::invalid_argument& e) {
+            throw py::value_error(e.what());
+        }
+    });
+    g.def("level", [](const In<double>& x) {
+        const auto l = pg::level(vec(x));
+        py::dict d;
+        d["rms_dbfs"] = l.rms_dbfs;
+        d["peak_dbfs"] = l.peak_dbfs;
+        d["clip_permille"] = l.clip_permille;
+        return d;
+    });
+    auto q = m.def_submodule("probe", "data2g.arq.probe");
+    q.def("n_samples", [] { return pr::n_samples(); });
+    q.def("tones", [] { return pr::tones(); });
+    q.def("holes", [] { return pr::holes(); });
+    q.def("waveform", [](const std::string& path, double level) { return pr::waveform(path, level); });
+    q.def("measure", [](const In<double>& y, const py::dict& lvl) {
+        const auto v = vec(y);
+        const auto l = level_of(lvl);
+        pr::Report m;
+        {
+            py::gil_scoped_release nogil;
+            m = pr::measure(v, l);
+        }
+        return report_py(m);
+    });
+    q.def("pack_report", [](const py::dict& d) { return pyb(pr::pack_report(report_of(d))); });
+    q.def("unpack_report", [](const py::bytes& b) {
+        try {
+            return report_py(pr::unpack_report(bytes_of(b)));
+        } catch (const std::invalid_argument& e) {
+            throw py::value_error(e.what());
+        }
+    });
+    q.def("fmt", [](const py::dict& d) { return pr::fmt(report_of(d)); });
+    q.def("best_step", [](const py::dict& d) { return pr::best_step(report_of(d)); });
+    q.def("verdict", [](const py::dict& d, const std::string& path) { return pr::verdict(report_of(d), path); });
+}
+
 void bind_arq_phy(py::module_& m) {
+    bind_arq_ping(m);
     auto p = m.def_submodule("phy", "data2g.arq.phy");
     p.attr("DD_ITERS") = DD_ITERS;
     p.attr("DD_BUDGET_S") = DD_BUDGET_S;
     p.def("dd_default", &dd_default);
     p.def("mask_value", [](const py::handle& t) { return mask_value(mask_of(t)); });
-    p.def("tx_audio", [](const py::handle& burst) {
+    p.def("tx_audio", [](const py::handle& burst, const py::object& tx_path, const py::object& level) {
         const auto b = burst_cpp(burst);
+        const std::string path = tx_path.is_none() ? std::string() : tx_path.cast<std::string>();
+        const std::optional<double> g = level.is_none() ? std::nullopt : std::optional<double>(level.cast<double>());
         std::vector<double> x;
         {
             py::gil_scoped_release nogil;
-            x = tx_audio(*b);
+            x = tx_audio(*b, path, g);
         }
         return np(x);
-    });
+    }, py::arg("burst"), py::arg("tx_path") = py::none(), py::arg("level") = py::none());
     p.def("soft_bits", [](const py::dict& r) {
         const auto h = heard_of(r);
         return soft_py(h, *soft_bits(h));
@@ -247,6 +352,7 @@ void bind_arq_phy(py::module_& m) {
         .def(py::init<py::dict, py::object, std::optional<double>, bool, py::object>(), py::arg("r"), py::arg("store"),
              py::arg("dd_budget") = py::none(), py::arg("dd") = dd_default(), py::arg("clock") = py::none())
         .def("decode", &PyModemRx::decode)
+        .def("advance", &PyModemRx::advance, py::arg("r"), py::arg("budget_s") = py::none())
         .def("raw", &PyModemRx::raw)
         .def("raw_pair", &PyModemRx::raw_pair)
         .def("decode_pair", &PyModemRx::decode_pair)

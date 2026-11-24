@@ -45,6 +45,7 @@ def test_inputs_grow_only_for_a_noise_model(reference):
     assert len(ext) == len(base) + P.N_NOISE and np.array_equal(ext[:len(base)], base)
 
 
+@pytest.mark.hf_only("HF's outcome model's noise inputs")
 def test_a_noise_model_predicts_with_and_without_a_profile(tmp_path, monkeypatch, reference):
     """A model file flagged noise_inputs takes the extended inputs; a burst
     with no profile yet reads as 'no profile', not an error. (Python's: the

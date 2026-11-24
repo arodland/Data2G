@@ -42,12 +42,15 @@ int main() {
 
     check::current_step = "header";
     // PROTOCOL_VERSION 15's seed (Python's modem.crc6 and header_bits)
-    check::equal(modem::crc6(0), 28, "crc6(0)");
-    check::equal(modem::crc6(100), 54, "crc6(100)");
-    check::equal(modem::crc6(1023), 45, "crc6(1023)");
+    if (check::hf_only("crc6 goldens seeded with HF's version")) {
+        check::equal(modem::crc6(0), 28, "crc6(0)");
+        check::equal(modem::crc6(100), 54, "crc6(100)");
+        check::equal(modem::crc6(1023), 45, "crc6(1023)");
+    }
     const std::vector<std::uint8_t> want{1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1};
     const auto hb = modem::header_bits(7, 3, "w");
-    check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
+    if (check::hf_only("header_bits golden: its CRC-6 is seeded with HF's version"))
+        check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
     for (auto band : modem::SYNC_BANDS) {
         for (const auto& s : config::SUBMODES) {
             if (s.sync_band != band) continue;
@@ -62,10 +65,16 @@ int main() {
     const auto acc = modem::Accept::of({}, 4.0);
     check::equal(acc.max_cw[0].second, 6, "Accept.of(None, 4): ack-4f cap");
     check::equal(acc.max_cw[1].second, 3, "Accept.of(None, 4): polar-k96-f8 cap");
-    check::is_true(acc.bands() == std::vector<std::string_view>{"n10", "w", "w48"}, "Accept bands sorted");
+    // every submode's sync band, sorted (HF: n10, w, w48; FM adds f108, f55)
+    std::vector<std::string_view> sync_bands;
+    for (const auto& s : config::SUBMODES) sync_bands.push_back(s.sync_band);
+    std::sort(sync_bands.begin(), sync_bands.end());
+    sync_bands.erase(std::unique(sync_bands.begin(), sync_bands.end()), sync_bands.end());
+    check::is_true(acc.bands() == sync_bands, "Accept bands sorted");
 
     check::current_step = "loopback";
     for (const char* name : {"ack-1f", "qpsk-r1/2", "n4-ack-2f", "n10-qpsk-r1/3", "w48-16qam-r1/2", "w48-64l-r1/2"}) {
+        if (!config::submode(name)) continue;  // FM has no n4
         const auto& s = *config::submode(name);
         const auto sent = payloads(s, 2, 7);
         const auto y = on_air(modem::modulate(sent, s), 3000, 0.05, 3);
@@ -119,6 +128,29 @@ int main() {
         }
         check::is_true(threw, "noise: no burst");
         check::is_true(!modem::find_copy(y, "w48").has_value(), "noise: no copy lock");
+    }
+
+    // The live preview's frame (preview_frame): exactly one frame and its closing pilot, so it must
+    // read at fixed timing. Free-running, its timing tracker stepped 2 samples on FM's audio past
+    // the end, and the throw killed the engine thread ("burst truncated").
+    check::current_step = "preview frame";
+    {
+        std::mt19937 rng(7);
+        std::normal_distribution<double> g;
+        int threw = 0, n = 0;
+        for (const auto& s : config::SUBMODES) {
+            for (int i = 0; i < 40; ++i, ++n) {
+                std::vector<double> x(modem::PREVIEW_SAMPLES);
+                for (auto& v : x) v = g(rng);
+                try {
+                    const auto y = modem::preview_frame(x, 0.0, s, 1);
+                    check::is_true(!y.empty(), "a preview frame has cells");
+                } catch (const modem::SyncError&) {
+                    ++threw;
+                }
+            }
+        }
+        check::equal(threw, 0, "preview_frame never throws on a whole frame (" + std::to_string(n) + " tried)");
     }
 
     return check::report("test_modem");

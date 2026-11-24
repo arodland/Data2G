@@ -1,0 +1,94 @@
+    0.0 caller: OK
+    0.0 callee: OK
+    0.0 callee: OK
+    0.0 caller: OK
+    0.1 caller: PTT ON
+    1.0 callee: BUSY ON
+    2.0 caller: PTT OFF
+    2.1 callee: CONNECTED KC2G-2 KC2G-1 NARROW
+    2.1 callee: BUSY OFF
+    2.2 callee: PTT ON
+    3.0 caller: BUSY ON
+    4.1 caller: CONNECTED KC2G-2 KC2G-1 NARROW
+    4.1 caller: MODE ack-4f
+    4.1 caller: BUSY OFF
+    4.1 callee: PTT OFF
+    4.1 caller: BUFFER 29996
+    4.2 caller: PTT ON
+    5.0 callee: BUSY ON
+    6.0 caller: PTT OFF
+    6.1 callee: MODE ack-1f
+    6.1 callee: BUSY OFF
+    6.2 callee: PTT ON
+    7.0 caller: BUSY ON
+    7.3 callee: PTT OFF
+    7.4 caller: MODE 16qam-r1/2
+    7.4 caller: BUSY OFF
+    7.4 caller: BUFFER 25761
+    7.5 caller: PTT ON
+    8.4 callee: BUSY ON
+   18.9 caller: PTT OFF
+   18.9 callee: BUSY OFF
+   19.0 callee: PTT ON
+   19.8 caller: BUSY ON
+   20.2 callee: PTT OFF
+   20.4 caller: MODE f55-64l-r50
+   20.4 caller: BUSY OFF
+   20.4 caller: BUFFER 11151
+   20.5 caller: PTT ON
+   21.3 callee: BUSY ON
+   28.8 callee: IAMALIVE
+   30.7 caller: IAMALIVE
+   32.6 caller: PTT OFF
+   32.8 callee: BUSY OFF
+   32.9 callee: PTT ON
+   33.9 caller: BUSY ON
+   34.0 callee: PTT OFF
+   34.1 caller: MODE f55-64l-r67
+   34.1 caller: BUSY OFF
+   34.1 caller: BUFFER 1
+   34.3 caller: PTT ON
+   35.3 callee: BUSY ON
+   46.5 caller: PTT OFF
+   46.9 callee: BUSY OFF
+   47.0 callee: PTT ON
+   48.2 caller: BUSY ON
+   48.2 callee: PTT OFF
+   48.3 caller: BUSY OFF
+   48.4 caller: PTT ON
+   49.2 callee: BUSY ON
+   58.4 caller: PTT OFF
+   59.0 callee: BUSY OFF
+   59.1 callee: PTT ON
+   60.3 caller: BUSY ON
+   60.3 callee: PTT OFF
+   60.4 caller: BUSY OFF
+   60.5 caller: PTT ON
+   61.5 callee: BUSY ON
+   62.4 caller: PTT OFF
+   62.4 callee: BUSY OFF
+DONE 30000 bytes in 58.3 s after CONNECTED = 4115 bps, intact True
+   62.4 caller: OK
+   62.5 callee: PTT ON
+   63.3 caller: BUSY ON
+   63.6 callee: PTT OFF
+   63.7 caller: MODE qpsk-r1/5
+   63.7 caller: BUSY OFF
+   63.7 caller: BUFFER 0
+   63.8 caller: PTT ON
+   64.7 callee: BUSY ON
+   65.7 caller: PTT OFF
+   65.7 callee: DISCONNECTED
+   65.7 callee: MODE qpsk-r1/5
+   65.7 callee: BUSY OFF
+   65.8 callee: PTT ON
+   66.6 caller: BUSY ON
+   67.7 caller: DISCONNECTED
+   67.7 caller: BUSY OFF
+   68.3 caller: BUSY ON
+   69.2 callee: PTT OFF
+   69.2 caller: BUSY OFF
+   70.3 caller: PTT ON
+   71.1 callee: BUSY ON
+   72.2 caller: PTT OFF
+   72.2 callee: BUSY OFF

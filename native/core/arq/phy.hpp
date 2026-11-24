@@ -70,7 +70,15 @@ inline constexpr int PRIMED_PATHS = 4;
 std::uint32_t mask_value(const MaskId& m);
 
 // A TxBurst -> unit-RMS audio. Throws std::out_of_range for an unknown mode.
-std::vector<double> tx_audio(const TxBurst& burst);
+// times burst.level (or `level`), then the sounding probe if burst.probe (arq/probe); tx_path: FM's
+// (modem::modulate's; default modem's)
+std::vector<double> tx_audio(const TxBurst& burst, std::string_view tx_path = {}, std::optional<double> level = {});
+// A burst's unit-RMS audio for the sound card (phy.py full_scale): HF, its envelope peak at
+// full scale (PEP limited); FM, one fixed scale (config::FM_TX_PEAK) so modes keep their levels.
+std::vector<double> full_scale(std::vector<double> x);
+// A constant-envelope signal built at peak 1.0 (a CW ID, a Hand) for the sound card
+// (phy.py tone_scale): HF as built; FM, a burst's RMS.
+std::vector<double> tone_scale(std::vector<double> x);
 
 // A received burst: modem::receive's (OFDM) or cpm.receive's.
 struct Heard {
@@ -141,6 +149,7 @@ public:
 
     const std::string& submode() const override { return submode_; }
     int n_cw() const override { return n_cw_; }
+    const Heard& heard() const { return r_; }  // the burst (a ping's measurement reads it: arq/ping)
     std::optional<Bytes> decode(int slot, const MaskId& mask, int rv, const SoftKey* key) override;
     void forget(const SoftKey& key) override;
     // Runs the first pass of each request's slot at once on the pool (only on the burst's own estimate, and
@@ -181,7 +190,15 @@ public:
     std::optional<Bytes> decode_repeat(int slot, const MaskId& mask, const SoftKey& key) override;
     bool own_score(int slot, const MaskId& mask, ByteView payload);
 
+    // nullptr while soft bits are made per slot as asked (a partial burst's, or after advance())
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
+
+    // phy.ModemRx.advance: decoding while the burst arrives. Adopts `r`, the same OFDM burst with more of it in
+    // (modem::receive's partial, or the whole), keeping every decode that was usable and the posteriors DD
+    // learned, and decodes the slots newly ready (modem::ready_slots), DD refining at most budget_s seconds from
+    // now (nullopt: the rest of the burst's budget). A failed slot is tried again on the next advance. -> the
+    // slots decoded this time.
+    std::vector<int> advance(Heard r, std::optional<double> budget_s = std::nullopt);
 
     // Done with by its session, handed to a reader (a monitor) on another thread: no store, and a slot already
     // read answers from that read, under its mask (another mask: no), without decoding again. A read made
@@ -205,6 +222,9 @@ private:
     };
 
     std::optional<Bytes> plain_read(int slot, const MaskId& mask);
+    // A slot advance() decoded, read keyed at RV 0: that decode under mask m, CRC-checked (nullopt: decode it).
+    std::optional<Bytes> early_read(int slot, std::uint32_t m, int rv) const;
+    std::set<int> early_;
     std::optional<Bytes> stored_read(int slot, const MaskId& mask, int rv, std::optional<SoftEntry>& stored);
     std::optional<Bytes> known_read(int slot, const MaskId& mask, ByteView tmpl, ByteView tmask, bool pair);
     std::optional<std::optional<Bytes>> reused(int slot, std::uint32_t m) const;  // for_reader: a slot's read
@@ -212,6 +232,11 @@ private:
 
     const codes::Spec& spec(int slot) const;
     const std::vector<double>& slot_soft(int slot);
+    // The burst's own soft bits for these slots, made now (on the pool) if made per slot; made(): one already made.
+    void make_soft(std::span<const int> slots);
+    const std::vector<double>& made(int slot) const {
+        return soft_ ? (*soft_)[static_cast<std::size_t>(slot)] : own_.at(slot);
+    }
     const Raw& decoded(int slot, const codes::Spec& s);
     std::vector<int> offsets(const codes::Spec& s, int i) const;
     const Raw& pinned(int slot, const codes::Spec& s, int off);
@@ -230,9 +255,14 @@ private:
     Heard r_;
     SoftStore* store_;
     std::shared_ptr<const SlotSoft> soft_;
+    std::map<int, std::vector<double>> own_;  // soft_ null: the slots' soft bits made so far
+    std::vector<double> scale_;                // and modem::soft_scale's factors they share
+    bool scale_made_ = false;
     bool dd_;
     Clock clock_;
     std::optional<double> dd_until_;
+    std::optional<double> dd_total_;  // advance(): the whole burst's DD budget, shared out per window
+    double dd_spent_ = 0.0;
     std::string submode_;
     int n_cw_, n_ctl_slots_;
     const codes::Spec* data_spec_;

@@ -8,6 +8,8 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..config import PROFILE
+
 SEQ_BITS = 7
 SEQ_MOD = 1 << SEQ_BITS
 BITMAP_BITS = 64  # the bitmap extension's width (MAX_CODEWORDS)
@@ -60,6 +62,8 @@ T_NODS = 19
 # §8a's three steps, each a burst acted on, say when a station may do either.
 # Drop it (everyone keeps it) at the next session version bump.
 T_KEEP = 20
+# FM only (arq.ping): a ping or its reply, a measurement burst for the TX path and level check (FM plan M7)
+T_PING = 21
 
 
 def inline_check(mask_id: tuple, payload: bytes) -> bytes:
@@ -73,7 +77,10 @@ def inline_check(mask_id: tuple, payload: bytes) -> bytes:
 # session control subtypes (in a SESSION frame's first extension byte)
 CONNECT, CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK = range(1, 6)
 
-BANDS_CODE = {"w": 0, "n10": 1, "w48": 2}  # sync bands, 2 bits
+# sync bands, 2 bits. FM (plan M6, Q2): w and n10 as the floor and for ACKs,
+# f55 and f108 its own ladders; no w48 (f55 replaces it), n4 or CPM, so
+# every code names a band
+BANDS_CODE = {"w": 0, "n10": 1, "f55": 2, "f108": 3} if PROFILE == "fm" else {"w": 0, "n10": 1, "w48": 2}
 
 
 @dataclass

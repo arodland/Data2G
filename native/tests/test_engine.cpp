@@ -15,6 +15,7 @@
 #include <fstream>
 #include <random>
 #include <cstdlib>
+#include <vector>
 
 #include "arq/engine.hpp"
 #include "constellation/constellation.hpp"
@@ -27,6 +28,10 @@ using namespace data2g::arq;
 using clk = std::chrono::steady_clock;
 
 namespace {
+
+// the engine's TX scale (arq/phy full_scale): HF, peak 1.0 (~unit RMS again x 2.2 after the clipper);
+// FM, unit RMS over config::FM_TX_PEAK
+constexpr double LINK_G = config::PROFILE == "hf" ? 2.2 : config::FM_TX_PEAK;
 
 constexpr int BLOCK = config::FS / 10;
 // Sanitizers slow everything several-fold: wall-clock latency bounds are off.
@@ -45,9 +50,9 @@ bool link(Engine& a, Engine& b, double snr_db, double seconds, const std::functi
     std::vector<double> ao(BLOCK, 0.0), bo(BLOCK, 0.0), x(BLOCK);
     const auto t0 = clk::now();
     for (int i = 0; i < static_cast<int>(seconds * 10); ++i) {
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * bo[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * bo[j] + noise(rng);
         ao = a.step(x).audio;
-        for (int j = 0; j < BLOCK; ++j) x[j] = 2.2 * ao[j] + noise(rng);
+        for (int j = 0; j < BLOCK; ++j) x[j] = LINK_G * ao[j] + noise(rng);
         bo = b.step(x).audio;
         if (until()) return true;
         if (paced) std::this_thread::sleep_until(t0 + std::chrono::milliseconds(100 * (i + 1)));
@@ -459,6 +464,14 @@ void worker_backlog() {
             while (processed < static_cast<int>(i - e.decode_dropped() / BLOCK) && clk::now() - t0 < std::chrono::seconds(60))
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+        if (i > release) {
+            // after it, no faster than the worker keeps up (real audio comes at 1x): fed flat out, a slow
+            // runner's worker (macOS arm64, FM's 16 kHz) fell past the 2 s bound again and lost the 2nd burst
+            const auto t0 = clk::now();
+            const int ahead = config::FS / BLOCK;  // 1 s of blocks, under the bound
+            while (processed + ahead < static_cast<int>(i - e.decode_dropped() / BLOCK) && clk::now() - t0 < std::chrono::seconds(60))
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
         e.step(std::span<const double>(y).subspan(i * BLOCK, BLOCK));
     }
     const double dropped_s = static_cast<double>(e.decode_dropped()) / config::FS;
@@ -513,7 +526,10 @@ void worker_session() {
 // them by its end. OFDM: each frame equalized on its own, close to the points on a clean channel;
 // CPM: the same tone shares the decode reads. Off: no previews.
 void live_preview() {
-    for (const char* name : {"qpsk-r1/5", "fsk8r50-r1/2"}) {
+    // FM's engine listens for no CPM grid (no CPM modes, plan Q2)
+    const std::vector<const char*> names =
+        config::PROFILE == "fm" ? std::vector<const char*>{"qpsk-r1/5"} : std::vector<const char*>{"qpsk-r1/5", "fsk8r50-r1/2"};
+    for (const char* name : names) {
         check::current_step = "live preview";
         TxBurst burst;
         burst.submode = name;

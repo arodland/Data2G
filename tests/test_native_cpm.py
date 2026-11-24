@@ -319,6 +319,64 @@ def test_coherent(native, reference, case):
                                        rtol=1e-12, atol=1e-12)
 
 
+@pytest.mark.parametrize("case", CASES[:2], ids=[c[0] for c in CASES[:2]])
+def test_per_tone_floors(native, reference, case):
+    """A steady carrier in the passband: tone_floors' path through the tone
+    metric, the header reads, refine, the soft values and the coherent
+    metric, alike in both."""
+    name, n_data, dup, cfo, sigma = case
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(40 + CASES.index(case))
+    coded = _burst(spec, n_data, dup, rng)
+    y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
+    hz = g.f0 + 5.4 * g.rate  # between two tones
+    y = y + 2.5 * sigma * np.cos(2 * np.pi * hz * np.arange(len(y)) / FS + 1.0)
+    assert native.cpm.FLOOR_SIGMAS == cpm.FLOOR_SIGMAS
+
+    s0, f = 1777, cfo
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
+    E = ref(reference, "_energies")(g, y, s0, lay.n, f)
+    assert cpm.tone_floors(E[:60], cpm._n0(E[:60])) is not None, "the case must take the per-tone path"
+    for rows in (E[:22], E[:60], E):
+        np.testing.assert_allclose(native.cpm.tone_llr(g.name, rows), ref(reference, "tone_llr")(g, rows), rtol=1e-9,
+                                   atol=1e-9)
+        for fn in ("llrs", "symbol_ll"):
+            np.testing.assert_allclose(getattr(native.cpm, fn)(g.name, rows), ref(reference, fn)(g, rows), rtol=1e-9,
+                                       atol=1e-9)
+        m, m_ref = native.cpm.measure(g.name, rows, len(rows)), ref(reference, "measure")(g, rows, len(rows))
+        for k in ("snr_est", "spread_est", "frames"):
+            assert m[k] == pytest.approx(m_ref[k], rel=1e-9, abs=1e-12), k
+        np.testing.assert_allclose(m["snr"], m_ref["snr"], rtol=RTOL, atol=1e-12)
+    for copies in (1, 2):
+        a, b = native.cpm.read_header(g.name, y, s0, f, copies), ref(reference, "read_header")(g, y, s0, f, copies)
+        assert a[:3] == (b[0].name, *b[1:3])
+        assert a[3:] == pytest.approx(b[3:], rel=1e-9, abs=1e-9)
+        a = native.cpm.coh_read_header(g.name, y, s0, f, copies)
+        b = ref(reference, "coh_read_header")(g, y, s0, f, copies)
+        assert a[:3] == (b[0].name, *b[1:3])
+        assert a[3:] == pytest.approx(b[3:], rel=1e-9, abs=1e-9)
+    for dt, df in ((0, 0.0), (g.T // 5, -3.3)):
+        a = native.cpm.refine(g.name, y, s0 + dt, f + df, name, n_data, dup)
+        b = ref(reference, "refine")(g, y, s0 + dt, f + df, spec, n_data, dup)
+        assert a[0] == b[0] and a[1] == pytest.approx(b[1], rel=RTOL), (dt, df)
+    slots, _ = native.cpm.soft(g.name, y, s0, f, n_data, dup)
+    slots_ref, _ = ref(reference, "soft")(g, spec, y, s0, f, n_data, dup)
+    for a, b in zip(slots, slots_ref):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+
+    Z = ref(reference, "bins")(g, y, s0, lay.n, f)
+    n0 = ref(reference, "_n0")(np.abs(Z) ** 2)
+    P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
+    np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
+                               rtol=1e-9, atol=1e-9)
+    n_cw = 1 + dup + n_data
+    r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
+    for slot in range(n_cw):
+        M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, {}, slot)
+        np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, {}, slot), rtol=1e-9, atol=1e-9)
+
+
 def test_coarse_track(native, reference):
     """C++ CoarseTrack fed as a receiver feeds it (20 ms, buffer trimmed to
     a second): detect and find reading it as Python's do reading cpm.py's."""

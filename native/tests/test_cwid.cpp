@@ -27,7 +27,7 @@ void audio() {
     check::is_true(std::abs(peak - 1.0) < 1e-3 && std::abs(x.front()) < 1e-3 && std::abs(x.back()) < 1e-3,
                    "peak 1, silent ends");
     // PARIS: 50 dots a word
-    check::is_true(std::abs(cwid::seconds("PARIS", 20) - (43 * 0.06 + cwid::RAMP / 8000.0)) < 1e-9, "PARIS timing");
+    check::is_true(std::abs(cwid::seconds("PARIS", 20) - (43 * 0.06 + cwid::RAMP / static_cast<double>(config::FS))) < 1e-9, "PARIS timing");
     bool threw = false;
     try {
         cwid::audio("DE W1AW", 60);

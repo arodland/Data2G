@@ -84,6 +84,13 @@ py::list events(const std::vector<receiver::Event>& evs) {
             out.append(py::make_tuple("header", d));
             continue;
         }
+        if (const auto* q = std::get_if<receiver::PartialEvent>(&e)) {
+            py::dict d;
+            d["header"] = pending_dict(q->header);
+            d["rx"] = rx_dict(receiver::Rx(q->rx));
+            out.append(py::make_tuple("partial", d));
+            continue;
+        }
         const auto& b = std::get<receiver::BurstEvent>(e);
         py::dict d;
         d["header"] = pending_dict(b.header);
@@ -154,6 +161,7 @@ void bind_receiver(py::module_& m) {
         .def_property_readonly("n_expected", &receiver::Receiver::n_expected)
         .def("drop", &receiver::Receiver::drop)
         .def_readwrite("release_s", &receiver::Receiver::release_s)
+        .def_readwrite("decode_early", &receiver::Receiver::decode_early)
         .def_property_readonly("busy", &receiver::Receiver::busy)
         .def_property_readonly("channel_busy", &receiver::Receiver::channel_busy)
         .def_property_readonly("on_air", &receiver::Receiver::on_air)

@@ -18,7 +18,7 @@ def chunks(n, rng):
         i += k
 
 
-@pytest.mark.parametrize("rate", [8000, 16000, 48000, 96000])
+@pytest.mark.parametrize("rate", [r for r in (8000, 16000, 48000, 96000) if r % FS == 0])
 def test_decimator(native, reference, rate):
     rng = np.random.default_rng(rate)
     py, nat = reference(audio, "Decimator")(rate), native.audio.Decimator(rate)
@@ -28,7 +28,7 @@ def test_decimator(native, reference, rate):
         np.testing.assert_allclose(nat(x[s]), py(x[s]), rtol=0, atol=1e-12)
 
 
-@pytest.mark.parametrize("rate", [8000, 48000])
+@pytest.mark.parametrize("rate", [r for r in (8000, 48000) if r % FS == 0])
 def test_interpolator(native, reference, rate):
     rng = np.random.default_rng(rate + 1)
     py, nat = reference(audio, "Interpolator")(rate), native.audio.Interpolator(rate)

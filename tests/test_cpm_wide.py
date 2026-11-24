@@ -115,3 +115,31 @@ def test_shared_coarse_rows_are_the_grids_own():
             assert shared.s[ph] == own.s[ph] and shared.E[ph].shape == own.E[ph].shape
             assert np.allclose(shared.E[ph], own.E[ph], rtol=1e-9, atol=1e-12)
     assert len(own.E[0]) > 10
+
+
+@pytest.mark.parametrize("name", ["fsk8w50-r1/3", "fsk16w125-r1/3"])
+def test_carrier_in_the_grid_gets_its_own_floor(name):
+    """master's per-tone floors (tone_floors) on sub-window sums: a steady
+    carrier on one tone is flagged, the burst still locks and decodes, and
+    snr_est reads the burst, not the carrier."""
+    spec = cpm.SPECS[name]
+    g, ctl = cpm.GRIDS[spec.grid], cpm.CTL[spec.grid]
+    rng = np.random.default_rng(7)
+    pay = [bytes(rng.integers(0, 256, codes.payload_bytes(s), dtype=np.uint8)) for s in (ctl, spec)]
+    x = cpm.modulate(spec, [codes.encode(ctl, pay[0], index=0), codes.encode(spec, pay[1], index=1)], False, cap=2)
+    n = len(x) + 4800
+    y0 = np.concatenate([np.zeros(2400), x, np.zeros(2400)]) + rng.normal(scale=np.sqrt(1.6 * 10 ** 0.4), size=n)  # -4 dB
+    sigma2 = 1.6 * 10 ** 0.4
+    # 18 dB over the noise in 50 Hz, 7 Hz off the tone
+    car = np.sqrt(2 * sigma2 * 50 / 4000 * 10 ** 1.8) * np.cos(2 * np.pi * (g.f0 + 3 * g.rate + 7.0) * np.arange(n) / 8000)
+    got = {}
+    for tag, y in (("clean", y0), ("carrier", y0 + car)):
+        lock = cpm.find(g, y[:2400 + 4000 + cpm.hdr_span(g.name, 2) + g.T])
+        assert lock is not None and lock["spec"] == spec, tag
+        r = cpm.receive(y, lock)
+        E = r["E"][:ctl.n_sym]
+        got[tag] = (cpm.tone_floors(E, cpm._n0(E, g.k), g.k), cpm.measure(g, r["E"], len(r["E"]))["snr_est"])
+        assert codes.decode_many(ctl, np.asarray(r["soft"][0])[None], index=[0])[0] == (pay[0], True), tag
+        assert codes.decode_many(spec, np.asarray(r["soft"][1])[None], index=[1])[0] == (pay[1], True), tag
+    assert got["clean"][0] is None and got["carrier"][0] is not None and int(np.argmax(got["carrier"][0])) == 3
+    assert abs(got["carrier"][1] - got["clean"][1]) < 3.0

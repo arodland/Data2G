@@ -704,22 +704,78 @@ def detect(g: Grid, x: np.ndarray, reach_hz: float = 150.0, fine=True, front_onl
     return score, s0, cfo
 
 
-def tone_metric(g: Grid, E: np.ndarray) -> np.ndarray:
-    """(n_sym, m) tone energies of one codeword -> (n_sym, m) log P(E | tone
-    sent) up to a per-symbol constant. Noncoherent square-law metric, exact
-    for Rayleigh fading: E_m g, g = Es / (N0 (N0 + Es)), Es and N0 the
-    codeword's, N0 plus the Doppler spill (spill()). A wide grid's energies
-    sum g.k sub-windows: Es and N0 are a sub-window's (the same linear metric,
-    exact where the fading is independent from one sub-window to the next)."""
+# One N0 for every tone lets a steady carrier in the passband (QRM: a
+# broadcast carrier, a birdie, another mode's idle tone) win its tone in
+# every symbol: the square law reads it as signal, and coh_metric, which
+# looks for a constant phasor, more so. A tone carries signal in ~1/m of a
+# codeword's rows, so its median energy over the rows is its own floor.
+# tone_floors() gives it to tone_metric and coh_metric once it stands
+# FLOOR_SIGMAS standard errors (a median of n exponentials: 1.44 / sqrt(n),
+# relative) over the tones' median floor; with no such tone both are as
+# before. On noise alone a tone passes in under 1 of 1000 calls at 6 (8, 16
+# and 32 tones; 22, 90 and 240 rows: a header read, a control, a data
+# codeword); at 5, up to 6 of 1000.
+FLOOR_SIGMAS = 6.0
+
+
+@lru_cache(maxsize=None)
+def _median_se(k: int) -> float:
+    """sqrt(n) times the relative standard error of the median of n energies:
+    exponential 1.44; k sub-windows summed (gamma(k), a wide grid) 1 / (2 f(m) m),
+    f the density at the median m (0.95 at k = 2)."""
+    if k == 1:
+        return 1.44
+    from scipy.stats import gamma
+
+    m = gamma.median(k)
+    return float(1 / (2 * gamma.pdf(m, k) * m))
+
+
+def tone_floors(E: np.ndarray, n0: float, k: int = 1) -> np.ndarray | None:
+    """(n, m) tone energies and the common N0 -> (m,) per-tone noise floors,
+    or None where no tone's median stands out (FLOOR_SIGMAS): N0, times the
+    tone's median over the tones' median where it does. `k`: the sub-windows
+    an energy sums (a wide grid: their medians vary less, _median_se)."""
+    med = np.median(E, axis=0)
+    ref = np.median(med)
+    out = med > ref * (1 + FLOOR_SIGMAS * _median_se(k) / np.sqrt(len(E)))
+    if not out.any():
+        return None
+    return np.where(out, n0 * (med / ref), n0)
+
+
+def _tone_gain(E: np.ndarray, k: int = 1) -> tuple:
+    """tone_metric's (gain, offset): E * gain - offset. One N0: the square
+    law's Es / (N0 (N0 + Es)) and None; per-tone floors (tone_floors): (m,)
+    gains Es / (N_m (N_m + Es)) and offsets ln(1 + Es / N_m), which are a
+    per-symbol constant only when the floors are equal. `k`: a wide grid's
+    energies sum k sub-windows: Es and N0 are a sub-window's (the same linear
+    metric, exact where the fading is independent from one sub-window to the
+    next), and the offset is once per sub-window."""
     top = E.max(axis=1)
-    k = g.k
     n0 = np.median(np.sort(E, axis=1)[:, :-1]) / _noise_median(k)  # exponential: median = N0 ln 2
     n0 = max(n0, 1e-12 * np.mean(top) + 1e-300)  # noise-free tests
+    nb = tone_floors(E, n0, k)
+    if nb is not None:
+        Ew = E * (n0 / nb)  # whitened, for Es and the spill: the carrier's tone is not the strongest by itself
+        es = max(np.mean(Ew.max(axis=1)) / k - n0, 1e-3 * n0)
+        nb = nb + spill(Ew, k * n0, k * es) * es
+        return es / (nb + es) / nb, k * np.log1p(es / nb)
     es = max(np.mean(top) / k - n0, 1e-3 * n0)
     n0 += spill(E, k * n0, k * es) * es
     # es / (n0 (n0 + es)) without its underflow: a codeword past the audio's
     # end (zero-padded: a header claiming more than arrived) reads as erasures
-    return E * (es / (n0 + es) / n0)
+    return es / (n0 + es) / n0, None
+
+
+def tone_metric(g: Grid, E: np.ndarray) -> np.ndarray:
+    """(n_sym, m) tone energies of one codeword -> (n_sym, m) log P(E | tone
+    sent) up to a per-symbol constant. Noncoherent square-law metric, exact
+    for Rayleigh fading: E_m g, g = Es / (N0 (N0 + Es)), Es and N0 the
+    codeword's, N0 plus the Doppler spill (spill()); a tone whose own floor
+    stands out of N0 (tone_floors: a carrier) is scored against that floor."""
+    gain, off = _tone_gain(E, g.k)
+    return E * gain if off is None else E * gain - off
 
 
 def spill(E: np.ndarray, n0: float, es: float) -> float:
@@ -839,11 +895,13 @@ def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: i
     E0 = _energies(g, x, s0, n, cfo)
     tot = E0.sum()
     # the metric's weight fixed at the lock's placement (each candidate's own: 0.2 dB worse, c8r50 AWGN)
-    w = float(tone_metric(g, E0).sum() / tot) if tot > 0 else 0.0
+    gain, off = _tone_gain(E0, g.k) if tot > 0 else (0.0, None)  # per-tone floors: the tones' own gains and offsets
+    w = float((E0 * gain).sum() / tot) if tot > 0 and off is None else 0.0
     T, N = g.T, n * g.T
 
     def ll(z):  # the likelihood of n symbols of mixed samples, as _energies(...) * w would score them
-        G = _tone_energy(g, z, n, g.m) * w
+        G = _tone_energy(g, z, n, g.m)
+        G = G * w if off is None else G * gain - off
         return G[kr, known[kr]].sum() + np.logaddexp.reduce(G[ur], axis=1).sum()
     best, bv = (s0, cfo), None
     for st, sf in ((max(1, g.T // 16), g.rate / 16), (max(1, g.T // 64), g.rate / 64)):
@@ -933,14 +991,32 @@ def measure(g: Grid, E: np.ndarray, n_sym: int) -> dict:
     OFDM: SNR in the 2500 Hz reference, Doppler spread (spread(), from the
     winning tone's energy over time), and `snr`, per symbol, from the
     winning tone's energy over the noise bins (phy.measure makes the
-    effective-MI features of it). Native cpm::measure."""
+    effective-MI features of it). With a carrier (tone_floors), snr_est
+    reads the tones scaled down to the quietest quarter's floor, Es back up
+    by the share kept: fsk16r25 -8 dB reads +0.1 dB at a carrier 12 dB in
+    50 Hz, -0.5 at 18, -3 at 24, where the carrier read as signal read
+    +2.3, +5.8, +8. Native cpm::measure."""
     from .config import FRAME_SAMPLES, SNR_REF_BW_HZ
 
-    top = E.max(axis=1) / g.k  # a wide grid: per sub-window (spread's noise variance is then approximate)
-    n0 = max(np.median(np.sort(E, axis=1)[:, :-1]) / _noise_median(g.k), 1e-300)
+    k = g.k  # a wide grid: per sub-window (spread's noise variance is then approximate)
+    n0 = max(np.median(np.sort(E, axis=1)[:, :-1]) / _noise_median(k), 1e-300)
+    top = E.max(axis=1) / k
     snr = np.maximum(top / n0 - 1, 1e-6)
-    es = max(float(np.mean(top) - n0), 1e-12)
-    return dict(snr_est=10 * np.log10(es / n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread(g, top, n0), delay_est_ms=0.0,
+    es_n0 = max(float(np.mean(top) - n0), 1e-12) / n0
+    if tone_floors(E, n0, k) is not None:
+        # a carrier: for snr_est only, its tone and the ones it leaks into (under
+        # tone_floors' bar, but they raise the tones' median) each scaled to the
+        # quietest quarter's floor; the signal, ~1/m of every tone's rows, keeps
+        # `kept` of its energy, so Es is scaled back up by that. The per-symbol
+        # snr and the spread stay as read: scaled rows looked like fading and the
+        # gear shifter left c32r62 (-37%, awgn -12, carrier 12 dB)
+        med = np.median(E, axis=0)
+        q = np.quantile(med, 0.25)
+        r = q / np.maximum(med, q)
+        Ew = E * r
+        n0w = max(np.median(np.sort(Ew, axis=1)[:, :-1]) / _noise_median(k), 1e-300)
+        es_n0 = max(float(np.mean(Ew.max(axis=1)) / k - n0w) / float(np.mean(r)), 1e-12) / n0w
+    return dict(snr_est=10 * np.log10(es_n0 * g.rate / SNR_REF_BW_HZ), spread_est=spread(g, top, n0), delay_est_ms=0.0,
                 headroom=0.0, frames=max(1.0, n_sym * g.T / FRAME_SAMPLES), snr=snr)
 
 
@@ -1300,8 +1376,14 @@ def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float, L: int = 1) -> n
     else:
         own = np.repeat(a.reshape(-1, L).sum(axis=1), L)
         h = (np.convolve(a, k, "same") - own) / np.maximum(np.convolve(np.ones(n), k, "same") - L, 1)
-    v = max(float(np.mean((P * _sq(Z - h[:, None])).sum(axis=1))), n0 * (1 + 1e-3))
-    M = _sq(Z) / n0 - _sq(Z - h[:, None]) / v
+    res = _sq(Z - h[:, None])
+    nb = tone_floors(_sq(Z), n0)  # (a wide grid's rows are sub-windows: one exponential each)
+    if nb is not None:  # per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
+        s2 = max(float(np.mean((P * (res - nb[None])).sum(axis=1))), n0 * 1e-3)
+        M = _sq(Z) / nb - res / (nb + s2) - np.log1p(s2 / nb)
+    else:
+        v = max(float(np.mean((P * res).sum(axis=1))), n0 * (1 + 1e-3))
+        M = _sq(Z) / n0 - res / v
     return M if L == 1 else M.reshape(-1, L, m).sum(axis=1)
 
 

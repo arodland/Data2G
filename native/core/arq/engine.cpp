@@ -9,11 +9,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <stdexcept>
 #include <utility>
 
+#include "arq/ping.hpp"
 #include "codes/codes.hpp"
-#include "dsp/dsp.hpp"
 #include "hand/hand.hpp"
 
 namespace data2g::arq {
@@ -21,7 +22,7 @@ namespace data2g::arq {
 namespace {
 
 constexpr const char* LOG = "data2g.engine";
-constexpr int INFO = 20, WARNING = 30;
+constexpr int DEBUG = 10, INFO = 20, WARNING = 30;
 
 std::string upper(std::string s) {
     for (auto& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -43,6 +44,7 @@ Heard heard_of(receiver::Rx&& rx) {
 
 std::vector<std::string_view> all_grids() {
     std::vector<std::string_view> out;
+    if (config::PROFILE == "fm") return out;  // FM has no CPM modes (plan Q2): no CPM lock search either
     for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
     return out;
 }
@@ -285,8 +287,13 @@ void Recorder::event(std::string_view kind, const std::vector<std::pair<std::str
     post([this, line = std::move(line)] { log_ << line << std::flush; }, bytes);  // line-buffered, as Python opens it
 }
 
+// How a lock was made (preamble search, the header copy mid-burst, or CPM's), for the log and the recording:
+// a burst received from the wrong lock reads as noise (2026-11-23, FM: two 256l bursts locked ~5 ms early).
+static const char* lock_kind(const receiver::Pending& h) { return h.is_cpm() ? "cpm" : h.copy() ? "copy" : "preamble"; }
+
 std::string Recorder::rx(double t, std::span<const double> audio, const receiver::Pending& header, bool lost,
-                         const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise) {
+                         const std::optional<Measured>& meas, const std::optional<receiver::NoiseSnapshot>& noise,
+                         const std::string& lock) {
     char name[32];
     std::snprintf(name, sizeof name, "rx_%05d.npz", n_++);
     std::vector<float> a(audio.begin(), audio.end());
@@ -304,6 +311,7 @@ std::string Recorder::rx(double t, std::span<const double> audio, const receiver
                  {"submode", json_str(spec_name(header))},
                  {"n_cw", std::to_string(header.n_cw())},
                  {"score", json_num(header.score())},
+                 {"lock", lock.empty() ? json_str(lock_kind(header)) : lock},
                  {"lost", lost ? "true" : "false"},
                  {"meas", meas ? json_measured(*meas) : "null"},
                  {"noise", noise ? json_noise(*noise) : "null"}});
@@ -313,7 +321,13 @@ std::string Recorder::rx(double t, std::span<const double> audio, const receiver
 // --- engine ----------------------------------------------------------------------------
 
 modem::Accept receive_accept(double min_header_score) {
-    auto a = modem::Accept::of({}, MAX_BURST_S, min_header_score);
+    // FM: only the sync bands its ARQ uses (frames BANDS_CODE): no detector runs for w48
+    std::vector<std::string_view> names;
+    if (config::PROFILE == "fm")
+        for (const auto& s : config::SUBMODES)
+            if (std::any_of(modes().begin(), modes().end(), [&](const Mode& m) { return m.ofdm && selectable(m) && m.ofdm->sync_band == s.sync_band; }))
+                names.push_back(s.name);
+    auto a = modem::Accept::of(names, MAX_BURST_S, min_header_score);
     for (auto& [s, cw] : a.max_cw) {
         if (s->name.find("ack") != std::string_view::npos) continue;
         // a full control, each codeword twice (DUP), and the frame framed as a burst's first (a zero before it)
@@ -334,6 +348,7 @@ Engine::Engine(std::string call, EngineConfig cfg, EngineHooks hooks)
       receiver_(accept_, all_grids()),
       ptt_delay_(static_cast<std::int64_t>(cfg_.ptt_delay_s * config::FS)) {
     if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_, cfg_.record_async);
+    hand::slot_ms();  // a bad DATA2G_HAND_SLOT_MS throws here, not in a round
     // CPM bursts decode as they arrive (cpm::Stream): refine, then each data slot's pass. The same results as
     // after the burst; DATA2G_CPM_STREAM=0 (read here) turns it off.
     if (const char* v = std::getenv("DATA2G_CPM_STREAM"); !v || std::string_view(v) == "1")
@@ -463,6 +478,78 @@ std::vector<std::string> Engine::events() {
 void Engine::send_cq(const std::string& call, int cap) {
     if (!idle()) throw std::runtime_error(std::string("session ") + state_name(session_->state));
     extra_.push_back(open_frame(cap, T_CQ, pack_cq(call, cap)));
+}
+
+void Engine::send_ping(const std::string& to, int cap) {
+    if (config::PROFILE != "fm" || (cap != 1 && cap != 2)) throw std::invalid_argument("ping: FM only, cap 1 (NARROW) or 2 (WIDE)");
+    const auto st = session_->state;
+    if (st != SessionState::IDLE && st != SessionState::LISTEN && st != SessionState::CLOSED)
+        throw std::runtime_error("session under way");
+    pack_call(to);  // throws now, not at send
+    ping_sent_.insert(to);
+    extra_.push_back(ping_burst(to, std::nullopt));
+}
+
+// A ping (or, with report, a reply): its identity burst at the top modes' level, the probe behind it.
+TxBurstPtr Engine::ping_burst(const std::string& to, const std::optional<Bytes>& report) const {
+    const int pb = session_->policy->payload_bytes(ping::PING_MODE);
+    Control ctl{Core{.ftype = SESSION}, {{T_PING, ping::ping_body(call_, to, report)}}};
+    const auto payloads = ctl.pack(pb);
+    auto b = std::make_shared<TxBurst>();
+    b->submode = ping::PING_MODE;
+    b->cap = 1;
+    b->level = ping::tx_level(modem::tx_path());
+    b->probe = true;
+    for (std::size_t i = 0; i < payloads.size(); ++i) b->slots.push_back({ctl_mask(0, static_cast<int>(i), 0), 0, payloads[i]});
+    return b;
+}
+
+// engine.py _ping (the arithmetic differs: Python decodes as it feeds): a ping's identity burst heard; if it
+// is to us, its probe follows from the burst's end: keep
+// its place in the stream (probe_check reads it from the history ring once it is all in).
+void Engine::on_ping(ByteView body, const receiver::BurstEvent* ev) {
+    auto [frm, to, report] = ping::unpack_ping(body);
+    if (to != call_ && std::find(aliases_.begin(), aliases_.end(), to) == aliases_.end()) return;
+    if (!ev || ev->header.end() <= ev->header.start()) return;
+    // the burst's end in n_'s basis: its BurstEvent can come blocks after its audio (the decode worker), so
+    // not from how much audio the event holds
+    probes_.push_back({frm, to, report, ev->header.end() + rx_to_n_});
+}
+
+// engine.py _probe_check: probes now wholly heard: measure them; a ping: PING, and a reply when free (once per
+// caller per REPLY_HOLDOFF_S); a reply to ours: PINGACK and PINGVERDICT lines (probe::verdict).
+void Engine::probe_check(double t) {
+    const auto n = static_cast<std::int64_t>(probe::n_samples());
+    const auto H = static_cast<std::int64_t>(hist_.size());
+    for (auto it = probes_.begin(); it != probes_.end();) {
+        if (fed_ < it->first + n) {
+            ++it;
+            continue;
+        }
+        const PendingProbe p = *it;
+        it = probes_.erase(it);
+        if (p.first < fed_ - H) continue;
+        std::vector<double> y(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i) y[static_cast<std::size_t>(i)] = hist_[static_cast<std::size_t>((p.first + i) % H)];
+        const auto m = probe::measure(y, ping::level(y));
+        if (!p.report) {
+            log_write(LOG, INFO, format("RX PING from %s: %s", p.frm.c_str(), probe::fmt(m).c_str()));
+            events_.push_back("PING " + p.frm + " " + p.to + " " + probe::fmt(m));
+            const auto st = session_->state;
+            const auto last = ping_replied_.find(p.frm);
+            if ((st == SessionState::IDLE || st == SessionState::LISTEN || st == SessionState::CLOSED)
+                && (last == ping_replied_.end() || t - last->second >= ping::REPLY_HOLDOFF_S)) {
+                ping_replied_[p.frm] = t;
+                extra_.push_back(ping_burst(p.frm, probe::pack_report(m)));
+            }
+            continue;
+        }
+        const auto far = probe::unpack_report(*p.report);
+        log_write(LOG, INFO, format("RX PINGACK from %s: far %s, near %s", p.frm.c_str(), probe::fmt(far).c_str(), probe::fmt(m).c_str()));
+        events_.push_back("PINGACK " + p.frm + " far " + probe::fmt(far) + " near " + probe::fmt(m));
+        if (ping_sent_.erase(p.frm))
+            for (const auto& v : probe::verdict(far, modem::tx_path())) events_.push_back("PINGVERDICT " + p.frm + " " + v);
+    }
 }
 
 TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
@@ -676,6 +763,7 @@ Engine::Out Engine::step(std::span<const double> x) {
         preview_dropped();
         receiver_.drop();
     }
+    b.rx_end = receiver_.stream_end();
     b.busy = receiver_busy();
     busy_now_ = b.busy;
     channel_busy_now_ = receiver_channel_busy() || b.cw;
@@ -768,11 +856,14 @@ Engine::Done Engine::process(Block& b) {
     if (rec_) rec_->audio(tx_ ? d.out.audio : b.x);
     if (tx_) hist_zero(n_, k);
     else hist_put(n_, b.x);
+    fed_ = n_ + k;
+    if (!tx_) rx_to_n_ = fed_ - b.rx_end;
     if (!tx_) {
         noise_.feed(b.x, now());
         const bool fresh = b.gen == want_gen_;  // else fed before a reset this stage asked for
         nod_collect(b.x, t);
         if (fresh) hear(b.items, t);
+        if (!probes_.empty()) probe_check(t);
         hand_collect(b.x);
         const bool cw = fresh && b.cw && !(hand_hold_ > 0.0 && t < hand_hold_ + HAND_CW_TAIL_S);  // Hands, not an ID
         if (cw) cw_hold(t);
@@ -857,7 +948,8 @@ Engine::Done Engine::process(Block& b) {
                 hl.buf.clear();
                 hl.anchor = a;
                 hl.lo = a + hl.d - hand::SEARCH_SAMPLES;
-                hl.hi = a + hl.d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES;
+                hl.hi = a + hl.d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES
+                        + hand::slot_offset(*std::max_element(hl.channels.begin(), hl.channels.end()));
                 hand_hold_ = static_cast<double>(hl.hi) / config::FS;
             }
             if (!tx_kiss_) {  // a Hand or broadcast burst is not the session's: no reply timer, no tx_end_
@@ -914,7 +1006,12 @@ void Engine::preview() {
             if (preview_.done == kc) continue;  // the header's copy, not data
             const auto x = receiver_.audio(at, modem::PREVIEW_SAMPLES);
             if (x.empty()) continue;
-            const auto y = modem::preview_frame(x, l.cfo, *l.spec, n_f);
+            std::vector<modem::cd> y;
+            try {
+                y = modem::preview_frame(x, l.cfo, *l.spec, n_f);
+            } catch (const modem::SyncError&) {  // a frame the preview cannot read: skipped, never the engine thread
+                continue;
+            }
             out.iq.insert(out.iq.end(), y.begin(), y.end());
             added = true;
         }
@@ -949,7 +1046,15 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             receiver::run(*f);
             continue;
         }
+        if (auto* q = std::get_if<receiver::PartialRequest>(&it)) {  // an OFDM burst's, while it arrives
+            hear_partial(*q);
+            continue;
+        }
         if (auto* h = std::get_if<receiver::HeaderEvent>(&it)) {
+            if (log_enabled(LOG, DEBUG))
+                log_write(LOG, DEBUG, format("RX header %s x%d: %s lock, score %.2f, start %lld, cfo %.2f",
+                                            spec_name(h->header).c_str(), h->header.n_cw(), lock_kind(h->header),
+                                            h->header.score(), static_cast<long long>(h->header.start()), h->header.cfo()));
             session_->on_header(spec_name(h->header), h->header.n_cw(), t);
             // the burst's span: its lead-in (the header's start, stream_end
             // samples ago being now, t) to its end (engine.py)
@@ -960,12 +1065,12 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            if (m && !pend_ && h->header.n_cw() == 1 && session_->state == SessionState::LISTEN && pending != "off") {
+            if (m && !pend_ && h->header.n_cw() <= (m->name == ROBUST_CONNECT ? max_ctl(mode_at(ROBUST_CONNECT)) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
                 const std::string_view n = m->name;
                 bool hit = pending != "ofdm" && n == ROBUST_CONNECT;
                 for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
                 if (hit) {
-                    pend_ = Pend{start + burst_seconds(*m, 1) + PENDING_SLACK_S, false};
+                    pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
                     events_.emplace_back("PENDING");
                 }
             }
@@ -1045,11 +1150,14 @@ void Engine::hand_send(int ref, int tag, double d_s, int channel, std::uint64_t 
     overhear_end();  // my own Hand takes precedence over a bystander's window
     if (channel < 0 || channel >= hand::N_CHANNELS || tag < 0 || tag > 255) throw std::invalid_argument("bad channel or tag");
     if (!(d_s > 0 && d_s < HAND_ARM_EXPIRE_S)) throw std::invalid_argument("bad delay");
+    if (hand::FM && ptt_delay_ > hand::ptt_max_samples())
+        throw std::invalid_argument("PTT delay over the slot's budget");  // my carrier would cover the slot before
     payload &= (std::uint64_t{1} << hand::PAYLOAD) - 1;  // 16 hex digits, the top bit ignored (docs/arq.md §9)
-    const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s - tx_latency_) * config::FS)) - ptt_delay_;
+    const auto first = static_cast<std::int64_t>(std::nearbyint((it->second.end + d_s - tx_latency_) * config::FS)) - ptt_delay_
+                       + hand::slot_offset(channel);
     if (first < n_) throw std::invalid_argument("the slot has passed");
     std::vector<double> audio(static_cast<std::size_t>(ptt_delay_), 0.0);
-    const auto x = hand::tx_audio(tag, payload, channel, it->second.cfo);
+    const auto x = tone_scale(hand::tx_audio(tag, payload, channel, it->second.cfo));
     audio.insert(audio.end(), x.begin(), x.end());
     hand_tx_ = HandTx{first, std::move(audio), channel};
 }
@@ -1083,8 +1191,9 @@ void Engine::hand_overhear(int ref, double d_s, const std::vector<int>& channels
     std::vector<int> uniq;
     for (const int c : channels)
         if (std::find(uniq.begin(), uniq.end(), c) == uniq.end()) uniq.push_back(c);
+    const std::int64_t span = hand::slot_offset(*std::max_element(uniq.begin(), uniq.end()));
     hand_listen_ = HandListen{.d = d, .tag = -1, .ack = -1, .channels = std::move(uniq), .armed = n_, .open = true, .passive = true,
-                              .lo = a + d - hand::SEARCH_SAMPLES, .hi = a + d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES,
+                              .lo = a + d - hand::SEARCH_SAMPLES, .hi = a + d + hand::SEARCH_SAMPLES + hand::LEN_SAMPLES + span,
                               .anchor = a};
     auto& hl = *hand_listen_;
     const std::int64_t first = std::max(hl.lo, old), last = std::min(n_, hl.hi);
@@ -1187,9 +1296,13 @@ void Engine::hand_close() {
     const hand::Round round = hand_round == "cheap" ? hand::ROUND_CHEAP : hand::ROUND_FULL;  // fixed at the window's close
     hand_thread_ = std::thread([this, w = std::move(done), round] {
         std::vector<std::string> lines;
-        if (w.anchor + w.d - w.first >= 0)  // the slot lies before the capture: no decodes (a search past the head reads zeros)
+        const std::int64_t nominal = w.anchor + w.d - w.first;
+        std::vector<int> channels;  // a slot that lies before the capture: no decode (a search past the head reads zeros)
+        std::copy_if(w.channels.begin(), w.channels.end(), std::back_inserter(channels),
+                     [&](int c) { return nominal + hand::slot_offset(c) >= 0; });
+        if (!channels.empty())
             try {
-                for (const auto& r : hand::decode_window(w.buf, w.tag, w.channels, w.anchor + w.d - w.first, round))
+                for (const auto& r : hand::decode_window(w.buf, w.tag, channels, nominal, round))
                     lines.push_back(format("HAND %d %016llx %.1f %.0f", r.c, static_cast<unsigned long long>(r.payload), r.snr, r.dt_ms)
                                     + (w.tag < 0 ? " " + std::to_string(r.tag) : ""));
             } catch (const std::exception& e) {
@@ -1246,6 +1359,19 @@ void Engine::nod_collect(std::span<const double> x, double t) {
             on_nod_(b);
         }
     session_->on_rx(rx, t);
+}
+
+// Decoding while the burst arrives (config::SPREAD_WINDOW, engine.py's "partial"): the codeword groups complete
+// so far, DD on this window's share of the burst's budget; hear_burst finishes the same ModemRx.
+void Engine::hear_partial(const receiver::PartialRequest& q) {
+    auto r = receiver::receive_partial(q, accept_);
+    if (!r) return;
+    const double share = std::min(1.0, static_cast<double>(config::SPREAD_WINDOW) / r->n_frames());
+    Heard h;
+    h.ofdm = std::make_shared<const modem::Received>(std::move(*r));
+    if (!inc_ || inc_->start != q.header.start())
+        inc_ = Inc{q.header.start(), std::make_shared<ModemRx>(h, &store_, cfg_.dd_budget_s, nullptr, cfg_.dd)};
+    inc_->rx->advance(std::move(h), cfg_.dd_budget_s ? std::optional(*cfg_.dd_budget_s * share) : std::nullopt);
 }
 
 double Engine::since_block() const {
@@ -1314,10 +1440,14 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     std::optional<Heard> r;
     std::optional<Measured> meas;
     std::shared_ptr<const SlotSoft> soft;
+    std::shared_ptr<ModemRx> inc;  // this burst's decoder, decoding since its first groups arrived
+    if (inc_ && inc_->start == ev.header.start() && ev.rx && std::holds_alternative<modem::Received>(*ev.rx))
+        inc = std::move(inc_->rx);
+    inc_.reset();
     if (ev.rx) {
         r = heard_of(std::move(*ev.rx));
         meas = measure(*r);
-        soft = soft_bits(*r);
+        if (!inc) soft = soft_bits(*r);  // advance() makes the slots' still undecoded as asked
     }
     const std::optional<Span> span = std::move(heard_span_);
     heard_span_.reset();
@@ -1325,7 +1455,31 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     if (span && (session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
         energy(span->start, span->end, span->mode, t, std::nullopt, meas ? std::optional(meas->snr_est) : std::nullopt);
     timing.mark("soft bits");
-    if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot());
+    std::string lock_json;
+    if (log_enabled(LOG, DEBUG) || rec_) {
+        const auto& h = ev.header;
+        std::string got;
+        if (r && r->ofdm) {
+            const auto& o = *r->ofdm;
+            std::int64_t slips = 0;
+            for (auto s : o.slips) slips += s;
+            got = format(", received: score %.2f, preamble %lld, p0 %lld, shift %d, steps %+.0f, slips %+lld, cfo %.2f",
+                         o.score, static_cast<long long>(o.preamble_start), static_cast<long long>(o.p0), o.shift,
+                         o.steps.empty() ? 0.0 : o.steps.back(), static_cast<long long>(slips), o.cfo);
+            lock_json = format("{\"kind\": \"%s\", \"score\": %.4f, \"start\": %lld, \"cfo\": %.3f, \"early\": %s, "
+                               "\"rx_score\": %.4f, \"preamble\": %lld, \"p0\": %lld, \"shift\": %d, \"steps\": %.0f, "
+                               "\"slips\": %lld, \"rx_cfo\": %.3f}",
+                               lock_kind(h), h.score(), static_cast<long long>(h.start()), h.cfo(), inc ? "true" : "false",
+                               o.score, static_cast<long long>(o.preamble_start), static_cast<long long>(o.p0), o.shift,
+                               o.steps.empty() ? 0.0 : o.steps.back(), static_cast<long long>(slips), o.cfo);
+        }
+        if (log_enabled(LOG, DEBUG))
+            log_write(LOG, DEBUG, format("RX lock %s x%d: %s lock, score %.2f, start %lld, cfo %.2f%s%s%s",
+                                        spec_name(h).c_str(), h.n_cw(), lock_kind(h), h.score(),
+                                        static_cast<long long>(h.start()), h.cfo(), inc ? ", decoded early" : "",
+                                        got.c_str(), meas ? format(", snr %.1f", meas->snr_est).c_str() : ""));
+    }
+    if (rec_) rec_->rx(t, ev.audio, ev.header, !r, meas, noise_.snapshot(), lock_json);
     timing.mark("recorder");
     const std::optional<double> snr = meas ? std::optional(meas->snr_est) : std::nullopt;
     if (on_burst_) on_burst_({t, spec_name(ev.header), ev.header.n_cw(), !r, snr, r ? *r : Heard{}, soft});
@@ -1348,7 +1502,9 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
             cfg_.kiss->missed(spec_name(ev.header), ev.header.n_cw(), span ? span_snr(*span) : std::nullopt);
         return;
     }
-    const auto rxp = std::make_shared<ModemRx>(*r, &store_, dd_budget(span ? span->end : t, t), soft, cfg_.dd);
+    const auto budget = dd_budget(span ? span->end : t, t);
+    const auto rxp = inc ? inc : std::make_shared<ModemRx>(*r, &store_, budget, soft, cfg_.dd);
+    if (inc) inc->advance(*r, budget);  // the rest: the last groups, DD within the turn's budget
     ModemRx& rx = *rxp;
     if (on_read_) handoff.rx = rxp;
     timing.rx = &rx;
@@ -1374,7 +1530,7 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
             return;
         }
     }
-    if (cq(rx)) return;
+    if (cq(rx, &ev, t)) return;
     // a whole codeword under another key: its measurements and its loss are not my peer's
     if (!ours && rx.converged(0, false) && session_->foreign(rx)) {
         log_write(LOG, INFO, format("RX %s x%d: another station's", rx.submode().c_str(), rx.n_cw()));
@@ -1427,7 +1583,7 @@ std::vector<TxBurstPtr> Engine::kiss_burst(std::int64_t k, bool busy) {
 // A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)? Then
 // nothing else to do. A malformed one (docs/arq.md §4) is dropped as if it
 // had not decoded.
-bool Engine::cq(ModemRx& rx) {
+bool Engine::cq(ModemRx& rx, const receiver::BurstEvent* ev, double t) {
     const auto first = rx.decode(0, ctl_mask(0, 0, 0), 0, nullptr);
     if (!first) return false;
     const Core core = Core::unpack(*first);
@@ -1440,6 +1596,10 @@ bool Engine::cq(ModemRx& rx) {
     }
     try {
         const auto ext = Control::unpack(payloads).ext;
+        if (const auto it = ext.find(T_PING); config::PROFILE == "fm" && it != ext.end()) {
+            on_ping(it->second, ev);
+            return true;
+        }
         if (const auto it = ext.find(T_ID); it != ext.end()) {
             const auto [call, key] = unpack_id(it->second);
             if (log_enabled(LOG, INFO)) log_write(LOG, INFO, format("RX ID %s (session %04x)", call.c_str(), key));
@@ -1462,18 +1622,13 @@ void Engine::start_tx(const std::vector<TxBurstPtr>& bursts, double t, const TxB
     std::vector<std::size_t> lens;
     for (const auto& b : bursts) {
         if (b->submode == "cw") {  // built at the bursts' peak; not the tx_audio seam's (a Python phy.tx_audio)
-            const auto x = cwid::audio(b->cw_text, b->cw_wpm);
+            const auto x = tone_scale(cwid::audio(b->cw_text, b->cw_wpm));
             tx.audio.insert(tx.audio.end(), x.begin(), x.end());
             lens.push_back(x.size());
             continue;
         }
-        const auto x = tx_audio(*b);
-        // envelope peak at full scale: the modem's unit-RMS audio peaks at 2-3, and a sound
-        // card clips at 1; the envelope, not the samples: w48's crests fall up to 1.8 dB
-        // between samples (engine.py)
-        double peak = 0.0;
-        for (const dsp::cdouble& z : dsp::hilbert(x)) peak = std::max(peak, std::abs(z));
-        for (double v : x) tx.audio.push_back(v / peak);
+        const auto x = full_scale(tx_audio(*b));  // phy.py full_scale: HF envelope peak, FM one fixed scale
+        tx.audio.insert(tx.audio.end(), x.begin(), x.end());
         lens.push_back(x.size());
         if (on_send_) on_send_(b);
     }

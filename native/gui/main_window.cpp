@@ -27,6 +27,7 @@
 #include <algorithm>
 
 #include "arq/modes.hpp"
+#include "generated/config.hpp"
 #include "arq/session.hpp"
 #include "audio/card.hpp"
 #include "monitor/monitor.hpp"
@@ -145,7 +146,7 @@ private:
 };
 
 MainWindow::MainWindow(app::Args args, QSettings& store, QWidget* parent) : QMainWindow(parent), store_(store) {
-    setWindowTitle(tr("Data2G"));
+    setWindowTitle(config::PROFILE == "hf" ? tr("Data2G") : tr("Data2G FM"));
     build_menu();
     auto* central = new QWidget;
     auto* top = new QVBoxLayout(central);

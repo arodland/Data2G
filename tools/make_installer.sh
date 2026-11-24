@@ -74,7 +74,7 @@ Darwin)
     out="$OUT_BASE.dmg"
     dmg_root="$(mktemp -d)"
     trap 'rm -rf "$dmg_root"' EXIT
-    cp -R "$STAGE_DIR/Data2G.app" "$dmg_root/"
+    cp -R "$STAGE_DIR"/*.app "$dmg_root/"  # Data2G.app, and Data2G FM.app with the FM profile
     ln -s /Applications "$dmg_root/Applications"
     rm -f "$out"
     # Retried: hdiutil fails with "Resource busy" now and then while

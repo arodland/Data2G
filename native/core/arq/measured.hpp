@@ -26,6 +26,9 @@ struct Measured {
     double snr_est = 0.0, spread_est = 0.0, delay_est_ms = 0.0;
     std::array<double, CONSTS.size()> mi{};
     double headroom = 0.0, frames = 16.0;
+    // std over frames of each frame's noise, dB (phy.py n0_spread_db: FM's regime input; 0 on HF).
+    // GearShifter::observe replaces it with the median over the peer's last bursts.
+    double n0_spread_db = 0.0;
     std::optional<NoiseLevels> noise;  // the receiver's, with it (the gear shifter's noise rule)
     // the energy inputs (GearShifter::energy_features: mean dB, fill, 1); nullopt: none yet
     std::optional<std::array<double, 3>> energy;

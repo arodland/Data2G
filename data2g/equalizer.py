@@ -28,7 +28,7 @@ from typing import TypedDict
 
 import numpy as np
 
-from .config import FRAME_SAMPLES, FS, NCP, SYMS_PER_FRAME
+from .config import DEFAULT_SPREAD_HZ, FRAME_SAMPLES, FS, NCP, SYMS_PER_FRAME
 from .waveform import ofdm
 
 FRAME_S = FRAME_SAMPLES / FS
@@ -48,7 +48,6 @@ DD_TAPS = 2
 # own mse (scripts/refine_lowrank_study.py) and costs ~a third
 DD_LOWRANK_TOL = 1e-4
 # Doppler spread assumed when the burst is too short to measure one.
-DEFAULT_SPREAD_HZ = 2.0
 # The Wiener filters' spread, picked per burst by leave-one-out pilot
 # prediction (filter_spread): measure_spread's lag-1 estimate scatters low
 # in 6-16 frame bursts (mpp, 6 frames: p10 0.34 Hz of 1), which over-

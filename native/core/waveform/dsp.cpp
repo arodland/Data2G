@@ -16,7 +16,7 @@ using config::FS;
 
 constexpr double TWO_PI = 2.0 * std::numbers::pi;
 constexpr int HET_G = std::gcd(config::FCENTER, FS);
-constexpr int HET_PERIOD = FS / HET_G;  // 16
+constexpr int HET_PERIOD = FS / HET_G;  // 16 at 8 kHz, 32 at 16
 constexpr int HET_STEP = config::FCENTER / HET_G;  // 3
 
 // k / period is exact for a power-of-two period: as accurate as exp() can be
@@ -70,7 +70,7 @@ std::vector<double> tx_condition(std::span<const double> x, double clip_headroom
     if (!(power > 0)) return out;  // silence, or (NaN) an empty active range
     // mean envelope power is 2x mean real power
     const double thresh = std::sqrt(2 * power) * std::pow(10.0, clip_headroom_db / 20);
-    const std::vector<double> taps = dsp::firwin_bandpass(201, bandpass.first, bandpass.second, FS);
+    const std::vector<double> taps = dsp::firwin_bandpass(config::TX_FILTER_TAPS, bandpass.first, bandpass.second, FS);
     std::vector<double> ks(overshoot.begin(), overshoot.end());
     if (project) ks.insert(ks.end(), closing.begin(), closing.end());
     for (std::size_t i = 0; i < ks.size(); ++i) {

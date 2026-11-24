@@ -147,6 +147,8 @@ def test_policy_helpers(A, pure):
     for rec in range(64):
         assert A.decode(rec) == G.decode(rec)
     for name, s in modes.MODES.items():
+        if name not in modes.SELECTABLE:  # FM: compiled, never named on air (no code)
+            continue
         assert (A.encode(name), A.width_hz(name), A.ctl_slots(name)) == (G.encode(name), G.width_hz(s), G.ctl_slots(s))
         for sec in (*G.SIZE_S, 0.1, 2.0, 30.0, 100.0):
             for data in (False, True):
@@ -227,11 +229,12 @@ def test_shifter_decisions_match(A, pure, seed):
 
 def test_native_shifter_state_roundtrips(A):
     g = A.GearShifter()
-    m = dict(snr_est=3.0, spread_est=0.5, delay_est_ms=1.0, headroom=0.0, frames=8.0,
+    m = dict(snr_est=3.0, spread_est=0.5, delay_est_ms=1.0, headroom=0.0, frames=8.0, n0_spread_db=0.0,
              **{f"mi_{c}": 0.5 for c in P.CONSTS})
     g.observe(m, "qpsk-r1/2", 1.0)
-    g.observe(m, "n4-qpsk-r1/3", 2.0)
-    assert g.measured == m and g.measured_band == "n4" and g.prev == (m, "w", 1.0)
+    narrow = "n10-qpsk-r1/3" if config.PROFILE == "fm" else "n4-qpsk-r1/3"  # FM has no n4
+    g.observe(m, narrow, 2.0)
+    assert g.measured == m and g.measured_band == narrow.split("-")[0] and g.prev == (m, "w", 1.0)
     g.predicted = {"ack-4f": (0.25, 0.5)}
     assert g.predicted == {"ack-4f": (0.25, 0.5)}
     g.log = [("ack-4f", 1, "ack-4f")]
