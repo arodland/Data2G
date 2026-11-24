@@ -266,6 +266,57 @@ def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first
     assert b.station.esc_floor == floor  # as the caller started
 
 
+def test_callee_follows_when_its_first_connect_ack_was_lost():
+    """The callee answered the first CONNECT (the cap's mode) and that ACK
+    was lost; the caller retries in the robust mode and starts on the
+    robust ACK it then hears. The callee, connected since the first try,
+    follows the caller's first burst all the same: left at the bottom it
+    answered in the OFDM fallback, which a caller at the robust floor on
+    such a path does not read."""
+    from data2g.arq import link as L, policy as G
+    from test_arq_policy import measured
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    a.on_tx_end(first, 2.0)
+    b.on_rx(_rx(first), 2.3)
+    lost = b.poll(2.3)  # the callee's ACK in the cap's mode: not heard
+    assert b.state == S.CONNECTED and lost.submode == G.CONNECT[2]
+    b.on_tx_end(lost, 4.5)
+    burst, t = None, 4.5
+    while burst is None and t < 60:
+        t = max(t + 0.1, a.next_event() or t)
+        burst = a.poll(t)
+    assert burst.submode == G.ROBUST_CONNECT
+    a.on_tx_end(burst, t + 5.0)
+    b.on_rx(_rx(burst), t + 5.3)
+    again = b.poll(t + 5.3)
+    assert again.submode == G.ROBUST_CONNECT
+    b.on_tx_end(again, t + 10.3)
+    a.policy.observe(measured(-9.0, 1.0), again.submode, t + 10.6)
+    a.on_rx(_rx(again), t + 10.6)
+    assert a.state == S.CONNECTED and (a.station.esc_floor, b.station.esc_floor) == (L.MAX_ESCALATION, 0)
+    mine = a.poll(t + 10.6)
+    assert mine.submode == G.ROBUST_CONNECT
+    a.on_tx_end(mine, t + 15.6)
+    b.on_rx(_rx(mine), t + 15.9)
+    assert b.station.esc_floor == L.MAX_ESCALATION  # as the caller started
+
+
+def test_a_policy_with_no_opinion_starts_neither_side_robust():
+    """link.Policy's defaults agree: weak_path() False and robust() False,
+    so a policy that overrides neither starts both stations at the bottom
+    (weak_path() True with robust() False started the caller alone)."""
+    from data2g.arq import link as L
+
+    p = Policy(random.Random(1))
+    assert p.weak_path() is False and p.robust(p.connect_mode(2, 1)) is False
+
+
 def test_robust_start_counts_any_retry_mode():
     """A policy may change mode among its connect retries (a last try in
     ROBUST_FAST, say). A session made by such a later try starts at the

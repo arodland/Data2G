@@ -707,6 +707,10 @@ class Session:
                 return
             if self.station is not None and not self.master and nonce == self._nonce:
                 self._answer_mode = f["mode"]
+                if self.station.peer_burst is None:
+                    # no burst of the session heard yet: the caller starts on this ACK, in a retry's mode
+                    # though mine answered the first try (it was lost), and I follow its first burst
+                    self._robust_start(f["mode"])
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
             if (self.station is not None and not self.master and caller == self.peer

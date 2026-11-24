@@ -197,6 +197,7 @@ void bind_arq(py::module_& m) {
         .def_readwrite("n0_spreads", &Shifter::n0_spreads)
         .def_readwrite("floor_spreads", &Shifter::floor_spreads)
         .def_readwrite("last_spread", &Shifter::last_spread)
+        .def_readwrite("heard_spread", &Shifter::heard_spread)
         .def_readwrite("energies", &Shifter::energies)
         .def_readwrite("snrs", &Shifter::snrs)
         .def("cpm_floor", &Shifter::cpm_floor)

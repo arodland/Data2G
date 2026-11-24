@@ -104,6 +104,7 @@ void GearShifter::observe(const Measured& m_in, std::string_view submode, double
     // a burst too short or weak for a Doppler estimate reports the 2.0 Hz
     // default (what MPD measures): it takes the peer's last measured spread
     Measured m = m_in;
+    heard_spread = m.spread_est != UNMEASURED_SPREAD_HZ ? std::optional<double>(m.spread_est) : std::nullopt;
     if (m.spread_est != UNMEASURED_SPREAD_HZ)
         last_spread = m.spread_est;
     else if (last_spread)

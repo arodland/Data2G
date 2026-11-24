@@ -294,6 +294,7 @@ class GearShifter(L.Policy):
     n0_spreads: list = field(default_factory=list)  # the peer's last bursts' n0_spread_db (FM's regime input)
     floor_spreads: list = field(default_factory=list)  # as spreads, a CPM burst's FLOOR_CPM_SPREAD_HZ (cpm_floor)
     last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
+    heard_spread: float | None = None  # the last burst's own spread_est; None: it reported unmeasured (weak_path)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
@@ -331,10 +332,16 @@ class GearShifter(L.Policy):
         ROBUST_START_SPREAD_HZ, or not measured at all: the cap's connect
         mode would not have got through, and the session starts at the
         robust floor (session._robust_start). Else the first CONNECT was
-        lost to something else and it starts as any does."""
+        lost to something else and it starts as any does.
+
+        The spread is that burst's own reading (heard_spread), not the one
+        observe() carries into `measured` when a burst reports unmeasured
+        (SPREAD_CARRY): the carried one is an earlier burst's, and while
+        dialing that can be QRM (9 Hz carried into a +5 dB ACK started a
+        good path robust). Unmeasured is not fast: the SNR decides."""
         m = self.measured
-        return not (m is not None and m["snr_est"] >= ROBUST_START_SNR_DB
-                    and m.get("spread_est", 0.0) < ROBUST_START_SPREAD_HZ)
+        fast = self.heard_spread is not None and self.heard_spread >= ROBUST_START_SPREAD_HZ
+        return not (m is not None and m["snr_est"] >= ROBUST_START_SNR_DB and not fast)
 
     def robust(self, submode: str) -> bool:
         return submode in ROBUST_MODES
@@ -421,6 +428,7 @@ class GearShifter(L.Policy):
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
         s = measured.get("spread_est")
+        self.heard_spread = float(s) if s is not None and s != UNMEASURED_SPREAD_HZ else None
         if s is not None and s != UNMEASURED_SPREAD_HZ:
             self.last_spread = float(s)
         elif SPREAD_CARRY and s is not None and self.last_spread is not None:

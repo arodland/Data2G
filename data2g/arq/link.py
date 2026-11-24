@@ -156,8 +156,10 @@ class Policy:
     def weak_path(self) -> bool:
         """Session._robust_start, the caller's: whether the peer's last burst
         as measured (a CONNECT_ACK in a retry's robust mode) says the path is
-        why the cap's connect mode was not answered. No opinion: it was."""
-        return True
+        why the cap's connect mode was not answered. No opinion: it was not
+        (as robust()'s: neither side of such a policy's session starts at
+        the floor; True here with robust() False started the caller alone)."""
+        return False
 
     def robust(self, submode: str) -> bool:
         """Whether `submode` is a robust control mode (the callee follows a

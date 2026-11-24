@@ -126,6 +126,7 @@ public:
     // the peer's last measured (not defaulted) spread_est: a defaulted reading
     // takes it instead (policy.py SPREAD_CARRY)
     std::optional<double> last_spread;
+    std::optional<double> heard_spread;  // the last burst's own spread_est; nullopt: unmeasured (weak_path)
     std::vector<double> energies;  // the peer's last ENERGY_HIST bursts' energy SNR, dB (policy.py)
     std::vector<double> snrs;  // the peer's last CPM_FLOOR_HIST bursts' snr_est (the CPM floor)
     bool cpm_floor_on = true;  // DATA2G_CPM_FLOOR='' (Python, studies) turns it off
@@ -147,7 +148,8 @@ public:
     bool cpm_floor() const;
     // the peer's last burst read as a weak or fast path, or none measured (policy.py GearShifter.weak_path)
     bool weak_path() const {
-        return !(measured && measured->snr_est >= ROBUST_START_SNR_DB && measured->spread_est < ROBUST_START_SPREAD_HZ);
+        const bool fast = heard_spread && *heard_spread >= ROBUST_START_SPREAD_HZ;  // its own, not the carried one
+        return !(measured && measured->snr_est >= ROBUST_START_SNR_DB && !fast);
     }
     void observe_energy(double snr_db, double now);
     // the energy inputs (mean dB in power, fill, 1); nullopt before any

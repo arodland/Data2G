@@ -667,6 +667,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         if (callee != me && std::find(aliases.begin(), aliases.end(), callee) == aliases.end()) return;
         if (station && !master() && n == nonce) {
             answer_mode = f.mode;
+            if (!station->peer_burst) robust_start(f.mode);  // no burst heard yet: I follow the caller's first (session.py)
             queue(accept_burst(), now);  // our ACK was lost: say it again
             return;
         }

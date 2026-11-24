@@ -198,6 +198,27 @@ def test_cpm_cap_reply_hold_and_link_lost_price():
     assert robust >= burst_seconds(G.MODES[G.ROBUST_CONNECT], 1)  # its 5 s answer is not polled over
 
 
+def test_weak_path_reads_the_burst_s_own_spread():
+    """weak_path() takes the last burst's own spread reading, not the one
+    observe() carries in from an earlier burst when it reports unmeasured:
+    while dialing the earlier one can be QRM, and its 9 Hz carried into a
+    good CONNECT_ACK started a good path at the robust floor. Unmeasured
+    is not fast (the SNR decides); a fast reading of its own is."""
+    g = G.GearShifter()
+    assert g.weak_path()  # nothing measured
+    g.observe(measured(-2.0, 9.0), G.ROBUST_CONNECT, 1.0)  # QRM heard while dialing
+    assert g.weak_path()
+    g.observe(measured(5.0, G.UNMEASURED_SPREAD_HZ), G.ROBUST_CONNECT, 6.0)  # the ACK: good, spread unmeasured
+    assert g.measured["spread_est"] == 9.0 and g.heard_spread is None  # carried for the predictor, not for this
+    assert not g.weak_path()
+    g.observe(measured(-9.0, G.UNMEASURED_SPREAD_HZ), G.ROBUST_CONNECT, 11.0)
+    assert g.weak_path()  # weak by its SNR
+    g.observe(measured(5.0, 12.0), G.ROBUST_CONNECT, 16.0)
+    assert g.heard_spread == 12.0 and g.weak_path()  # fast, by its own reading
+    g.observe(measured(5.0, 1.0), G.ROBUST_CONNECT, 21.0)
+    assert not g.weak_path()
+
+
 @pytest.mark.hf_only("names HF's n4 and CPM modes (FM has neither, plan Q2)")
 def test_robust_floor_sends_control_only_bursts_robust():
     g = G.GearShifter()
