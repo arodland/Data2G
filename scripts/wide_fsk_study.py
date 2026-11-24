@@ -35,6 +35,19 @@ from data2g.config import FS  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+# A steady carrier inside every CPM grid (c8w50 / c8r50's fifth tone + 7 Hz), 18 dB over the floor in 50 Hz: a
+# channel named "<chan>/incar" has it (master's per-tone floors, #295).
+from data2g import interference as INTF  # noqa: E402
+
+INTF.PRESETS["incar"] = INTF.Spec(qrm=(INTF.Qrm("carrier", 1507.0, 50.0, 18.0, 1e6, 1.0),))
+
+
+def channel(PS, chan: str, snr: float, seed: int, horizon: float):
+    """phy_session.ContinuousChannel for a CHANS name, "/<interference preset>" after it."""
+    name, _, intf = chan.partition("/")
+    kw = dict(interference=(INTF.PRESETS[intf],) * 2) if intf else {}
+    return PS.ContinuousChannel("awgn", snr, seed, horizon, *(CHANS[name] or (None, None)), **kw)
+
 
 # --- front ---------------------------------------------------------------------------
 
@@ -133,8 +146,8 @@ def trial(args):
     g = cpm.GRIDS[spec.grid]
     rng = np.random.default_rng(seed)
     b = replace(O.burst(mode, 2, rng), cap=2)
-    ch = PS.ContinuousChannel("awgn", snr, seed, 120.0, *(CHANS[chan] or (None, None)))
-    y = ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100)))
+    ch = channel(PS, chan, snr, seed, 120.0)
+    y = ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100)), 0)  # (station 0: a channel's interference is per receiver)
 
     def dec(r, slot):
         if r is None or r["spec"].name != mode or r["n_cw"] != 2:
@@ -228,7 +241,7 @@ def connect_trial(args):
         return orig(self, now)
     S.Session._connected = connected
     try:
-        ch = G.ContinuousChannel("awgn", snr, seed, horizon + 60, *(CHANS[chan] or (None, None)))
+        ch = channel(G, chan, snr, seed, horizon + 60)
         res = L.run(L.make_policy("shift+cpm"), L.make_policy("shift+cpm"), None, [("a", 64, None, 0.0)], seed=seed,
                     horizon=horizon, phy=G.RealPhy(ch), cap=2)
     finally:
@@ -240,10 +253,10 @@ def connect_trial(args):
 def connect(a):
     import os
 
-    rule = os.environ.get("DATA2G_ROBUST_RULE", "") or ("today" if not cpm.ON_AIR_WIDE else "today+grid")
-    cells = [ln.split() for ln in open(a.plan) if ln.strip()]
-    jobs = [(c, float(s), 70000 + i, a.horizon) for c, lo, hi, step in cells
-            for s in np.arange(float(lo), float(hi) + 0.01, float(step)) for i in range(a.trials)]
+    rule = os.environ.get("ARM") or os.environ.get("DATA2G_ROBUST_RULE", "") or ("today" if not cpm.ON_AIR_WIDE else "today+grid")
+    cells = [ln.split() for ln in open(a.plan) if ln.strip()]  # chan lo hi step [attempts]
+    jobs = [(c, float(s), 70000 + i, a.horizon) for c, lo, hi, step, *n in cells
+            for s in np.arange(float(lo), float(hi) + 0.01, float(step)) for i in range(int(n[0]) if n else a.trials)]
     with Pool(a.jobs) as p, open(a.out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["rule", "channel", "snr", "seed", "connected", "t", "bursts"])
@@ -303,8 +316,8 @@ def acq_one(args):
     g = cpm.GRIDS[spec.grid]
     rng = np.random.default_rng(seed)
     b = replace(O.burst(mode, 2, rng), cap=2)
-    ch = PS.ContinuousChannel("awgn", snr, seed, 120.0, *(CHANS[chan] or (None, None)))
-    y = ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100)))
+    ch = channel(PS, chan, snr, seed, 120.0)
+    y = ch.apply(PHY.tx_audio(b), float(rng.uniform(5, 100)), 0)  # (station 0: a channel's interference is per receiver)
     s0, cfo = int(PS.PAD_S * FS), PS.CFO_HZ
     head = y[:s0 + FS // 2 + search_span((), (g.name,))]
     sc, sd, cd = cpm.detect(g, head, front_only=True)
