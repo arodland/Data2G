@@ -320,13 +320,13 @@ def test_a_policy_with_no_opinion_starts_neither_side_robust():
 def test_robust_start_counts_any_retry_mode():
     """A policy may change mode among its connect retries (a last try in
     ROBUST_FAST, say). A session made by such a later try starts at the
-    robust floor as one made by the first retry does: its mode is a retry's
-    too, though not the first retry's."""
+    robust floor as one made by the first retry does: its mode is a robust
+    one and not the cap's connect mode, whichever try sent it."""
     from data2g.arq import link as L, policy as G
 
     class LastTryFast(G.GearShifter):
-        def connect_mode(self, cap, tries=0):
-            return G.ROBUST_FAST if tries >= 2 else super().connect_mode(cap, tries)
+        def connect_mode(self, cap, tries=0, *a, **kw):  # whatever more the interface passes (a last-try flag)
+            return G.ROBUST_FAST if tries >= 2 else super().connect_mode(cap, tries, *a, **kw)
 
     if G.ROBUST_FAST == G.ROBUST_CONNECT:
         pytest.skip("one robust mode on this profile")

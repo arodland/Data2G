@@ -77,12 +77,9 @@ Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_tu
 // (Policy::weak_path), it starts at the top of the escalation floor (it decays as any does); the callee
 // follows the mode of the caller's first burst (on_rx).
 void Session::robust_start(const std::string& mode) {
-    // any retry's mode, not only the first retry's: a policy may change mode among its retries. The tries
-    // counted are the default's or the host's, whichever is more (the callee does not know the caller's RETRIES)
-    if (mode == policy->connect_mode(cap, 0)) return;
-    bool retry = false;
-    for (int k = 1; k < std::max(CONNECT_TRIES, tune.connect_tries) && !retry; ++k) retry = mode == policy->connect_mode(cap, k);
-    if (!retry) return;
+    // any retry's mode: a robust one (Policy::robust) that is not the cap's connect mode. A policy may change
+    // mode among its retries, and by more than the try's number, which the callee does not know
+    if (mode == policy->connect_mode(cap, 0) || !policy->robust(mode)) return;
     if (!station->master) {
         follow_start = true;
     } else if (policy->weak_path()) {
