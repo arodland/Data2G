@@ -56,10 +56,15 @@ inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = config::PROFILE == "fm" ? "n10-qpsk-r1/5" : "fsk16r25-r1/2";
 // policy.py: in a session on fast fading; FM has no CPM modes, so its robust mode stays ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_FAST = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8r50-r1/3";
+inline constexpr int ROBUST_CONNECT_TRIES = 4;  // connect retries in ROBUST_CONNECT; the ones past them in ROBUST_FAST
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
+// policy.py: a session connected by a robust retry starts at the robust floor only if the caller's
+// CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
+inline constexpr double ROBUST_START_SNR_DB = -6.0;
+inline constexpr double ROBUST_START_SPREAD_HZ = 6.0;
 
 std::string_view fallback(int cap);
-std::string_view connect_mode(int cap, int tries = 0);
+std::string_view connect_mode(int cap, int tries = 0, bool last = false);
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 
@@ -122,6 +127,7 @@ public:
     // the peer's last measured (not defaulted) spread_est: a defaulted reading
     // takes it instead (policy.py SPREAD_CARRY)
     std::optional<double> last_spread;
+    std::optional<double> heard_spread;  // the last burst's own spread_est; nullopt: unmeasured (weak_path)
     std::vector<double> energies;  // the peer's last ENERGY_HIST bursts' energy SNR, dB (policy.py)
     std::vector<double> snrs;  // the peer's last CPM_FLOOR_HIST bursts' snr_est (the CPM floor)
     bool cpm_floor_on = true;  // DATA2G_CPM_FLOOR='' (Python, studies) turns it off
@@ -141,6 +147,11 @@ public:
     int gate() const;
     // the CPM floor holds (policy.py GearShifter.cpm_floor)
     bool cpm_floor() const;
+    // the peer's last burst read as a weak or fast path, or none measured (policy.py GearShifter.weak_path)
+    bool weak_path() const {
+        const bool fast = heard_spread && *heard_spread >= ROBUST_START_SPREAD_HZ;  // its own, not the carried one
+        return !(measured && measured->snr_est >= ROBUST_START_SNR_DB && !fast);
+    }
     void observe_energy(double snr_db, double now);
     // the energy inputs (mean dB in power, fill, 1); nullopt before any
     std::optional<std::array<double, 3>> energy_features() const;
@@ -174,7 +185,9 @@ public:
     std::optional<double> snr_est() override;
     std::string measured_extra() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
-    std::string connect_mode(int cap, int tries) override;
+    std::string connect_mode(int cap, int tries, bool last) override;
+    bool weak_path() override { return shifter.weak_path(); }
+    bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);
     }

@@ -51,7 +51,7 @@ public:
     std::pair<std::string, int> choose(Station&, int) override { return {"m22", 6}; }
     int payload_bytes(const std::string&) override { return 22; }
     int rv_cycle(const std::string&) override { return 4; }
-    std::string connect_mode(int, int) override { return "m22"; }
+    std::string connect_mode(int, int, bool) override { return "m22"; }
 };
 
 // Control slots fail blind on demand; a primed retry passes when the hypothesis agrees with what was sent.

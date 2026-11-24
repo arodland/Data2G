@@ -143,7 +143,9 @@ def test_policy_helpers(A, pure):
     for cap in G.CAP_HZ:
         assert A.allowed(cap) == [s.name for s in G.allowed(cap)]
         assert (A.cap_hz(cap), A.fallback(cap)) == (G.CAP_HZ[cap], G.FALLBACK[cap])
-        assert [A.connect_mode(cap, t) for t in (0, 1, 2)] == [G.GearShifter().connect_mode(cap, t) for t in (0, 1, 2)]
+        for last in (False, True):
+            assert [A.connect_mode(cap, t, last) for t in range(8)] == [
+                G.GearShifter().connect_mode(cap, t, last=last) for t in range(8)]
     for rec in range(64):
         assert A.decode(rec) == G.decode(rec)
     for name, s in modes.MODES.items():
@@ -180,6 +182,7 @@ def test_shifter_decisions_match(A, pure, seed):
     nat.gap_s, nat.use_cpm, nat.min_success = kw["gap_s"], kw["use_cpm"], kw["min_success"]
     cap, now, rec = seed % 3, 0.0, None
     assert nat.choose(station(rng, cap), 0) == ref.choose(station(rng, cap), 0)
+    assert nat.weak_path() and ref.weak_path()  # nothing measured
     for step in range(60):
         if rng.random() < 0.05:
             cap = rng.choice(list(G.CAP_HZ))
@@ -196,6 +199,7 @@ def test_shifter_decisions_match(A, pure, seed):
         now += rng.choice([1.0, 5.0, 12.0, 35.0])
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
+        assert nat.weak_path() == ref.weak_path()
         e = float(nrng.uniform(-12, 30))
         ref.observe_energy(e, now)
         nat.observe_energy(e, now)

@@ -309,7 +309,7 @@ class FixedPolicy(L.Policy):
     def rv_cycle(self, m):
         return codes.rv_cycle(MODES[m])
 
-    def connect_mode(self, cap, tries=0):
+    def connect_mode(self, cap, tries=0, last=False):
         return self.connect
 
     def airtime(self, m, n_cw, dup=False):
