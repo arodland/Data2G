@@ -829,7 +829,7 @@ SPREAD_NEAR_Z = 2.0
 
 def _near_lags(g: Grid) -> range:
     """SPREAD_NEAR_S in symbols (c16r25: 2-4, c8r50: 4-8, c32r62: 5-10)."""
-    return range(int(np.ceil(SPREAD_NEAR_S[0] * g.rate - 1e-9)), int(np.floor(SPREAD_NEAR_S[1] * g.rate + 1e-9)) + 1)
+    return range(max(1, int(np.ceil(SPREAD_NEAR_S[0] * g.rate - 1e-9))), int(np.floor(SPREAD_NEAR_S[1] * g.rate + 1e-9)) + 1)
 
 
 def _slow_by_near_tones(g: Grid, t: np.ndarray, v: float, tones: np.ndarray) -> bool:

@@ -942,7 +942,7 @@ static double spread(const Grid& g, const std::vector<double>& top, double n0, c
         double num = 0.0;
         std::size_t pairs = 0;
         // cpm._near_lags: the pairs NEAR_S0..NEAR_S1 apart in time
-        const auto lag0 = static_cast<std::size_t>(std::ceil(NEAR_S0 * g.rate - 1e-9));
+        const auto lag0 = std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(NEAR_S0 * g.rate - 1e-9)));
         const auto lag1 = static_cast<std::size_t>(std::floor(NEAR_S1 * g.rate + 1e-9));
         for (std::size_t lag = lag0; lag <= lag1 && lag < n; ++lag) {
             std::vector<double> p;
