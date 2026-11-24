@@ -115,6 +115,8 @@ public:
     // Session::robust_start, the caller's: the peer's last burst as measured says the path is why the cap's
     // connect mode was not answered (no opinion: it was not, as robust()); and whether a submode is a robust control mode
     virtual bool weak_path() { return false; }
+    // Session::robust_start, the caller's: the session starts at the robust floor
+    virtual void robust_started() {}
     virtual bool robust(const std::string& /*submode*/) { return false; }
     // seconds past t_turn to wait for a reply to `burst` (nullopt: none, REPLY_START_S alone)
     virtual std::optional<double> reply_hold(Station&, const TxBurst&) { return std::nullopt; }
