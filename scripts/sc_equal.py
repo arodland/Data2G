@@ -20,6 +20,9 @@ if len(sys.argv) > 2 and sys.argv[1] == "--compare":
     bad = [k for k in a.files if k not in b.files or a[k].shape != b[k].shape or not np.array_equal(a[k], b[k])]
     print(f"{len(a.files)} arrays, {len(bad)} differ", bad[:10])
     sys.exit(bool(bad))
+import data2g  # noqa: E402
+
+print("data2g from", data2g.__file__)
 out = {}
 for name, n_cw in MODES:
     spec = SUBMODES[name]
