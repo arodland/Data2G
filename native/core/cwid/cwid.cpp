@@ -99,6 +99,7 @@ CwSense::CwSense(double center) {
 void CwSense::reset() {
     buf_.clear();
     hist_.clear();
+    near_.clear();
     floor_ = 0.0;
     active_ = false;
     n_ = 0;
@@ -124,6 +125,10 @@ int CwSense::classify(std::span<const double> x) {
     m = std::max(m / nm, 1e-30);
     if (floor_ == 0.0) floor_ = m;
     const double thr = RATIO * floor_;
+    std::array<double, 2 * TONE_K + 1> near{};
+    for (int k = -TONE_K; k <= TONE_K; ++k) near[static_cast<std::size_t>(k + TONE_K)] = p[k + K] / floor_;
+    near_.push_back(near);
+    if (near_.size() > WIN_N) near_.pop_front();
     floor_ *= std::pow(m / floor_, m < floor_ ? FLOOR_DOWN : FLOOR_UP);
     double apart = 0.0;
     for (int k = -K; k <= K; ++k)
@@ -143,12 +148,12 @@ bool CwSense::feed(std::span<const double> x) {
         hist_.push_back(c);
         if (hist_.size() > WIN_N) hist_.pop_front();
         // one tone: all hits but one within a step of each other
-        int hits = 0, steady = 0;
+        int hits = 0, steady = 0, at_u = 1;
         for (int v : hist_) hits += v > 0;
         for (int u = 1; u <= 2 * TONE_K + 1; ++u) {
             int s = 0;
             for (int v : hist_) s += v > 0 && std::abs(v - u) <= 1;
-            steady = std::max(steady, s);
+            if (s >= steady) steady = s, at_u = u;  // the highest of a tie (cwid.py's max over (count, u))
         }
         int runs = 0, run = 0, longest = 0;  // keyed: runs of hits
         for (int v : hist_) {
@@ -159,6 +164,21 @@ bool CwSense::feed(std::span<const double> x) {
         const auto n = [&](int v) { return std::count(hist_.begin(), hist_.end(), v); };
         active_ = hits >= MIN_HITS && steady >= hits - 1 && n(0) >= MIN_QUIET && n(-1) <= MAX_ELSEWHERE &&
                   runs >= MIN_RUNS && longest <= MAX_RUN;
+        if (active_) {  // key-up gaps at the floor, not a steady tone flickering about RATIO
+            int b = at_u - 1, most = -1;  // the hits' bin among the near ones: the lowest of a tie
+            for (int v = at_u - 1; v <= at_u + 1; ++v) {
+                const int cnt = static_cast<int>(n(v));
+                if (v >= 1 && cnt > most) most = cnt, b = v;
+            }
+            std::vector<double> quiet;
+            auto q = near_.begin();
+            for (auto v = hist_.begin(); v != hist_.end(); ++v, ++q)
+                if (*v == 0) quiet.push_back((*q)[static_cast<std::size_t>(b - 1)]);
+            std::sort(quiet.begin(), quiet.end());
+            const std::size_t mid = quiet.size() / 2;
+            const double median = quiet.size() % 2 ? quiet[mid] : 0.5 * (quiet[mid - 1] + quiet[mid]);
+            active_ = median <= QUIET_MAX;
+        }
         if (c > 0 && active_) {
             hits_.push_back(n_);
             if (hits_.size() > HITS_FROM) hits_.pop_front();

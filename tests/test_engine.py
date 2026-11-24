@@ -1015,7 +1015,7 @@ def test_retries_sets_this_clients_connect_retries():
     a, b = Host(Engine("W1AW", seed=75)), Host(Engine("K2XYZ", seed=76))  # b: not listening, never answers
     for line in ("RETRIES", "RETRIES -1", "RETRIES 21", "RETRIES x", "RETRIES 1.0", "RETRIES 001", "RETRIES"):
         a.command(line)
-    assert a.out_cmd == ["RETRIES 4"] + ["WRONG"] * 4 + ["OK", "RETRIES 1"]
+    assert a.out_cmd == ["RETRIES 5"] + ["WRONG"] * 4 + ["OK", "RETRIES 1"]
     a.command("CONNECT W1AW N0CALL")
 
     def gave_up():
@@ -1025,7 +1025,7 @@ def test_retries_sets_this_clients_connect_retries():
     assert a.engine.session.close_reason == "NO_ANSWER" and a.engine.session._tries == 2  # the first and one retry
     a.client_gone()
     a.command("RETRIES")
-    assert a.out_cmd[-1] == "RETRIES 4"  # the default again: the setting was the client's
+    assert a.out_cmd[-1] == "RETRIES 5"  # the default again: the setting was the client's
 
 
 def test_the_shifter_hears_each_peer_bursts_energy():
@@ -1073,6 +1073,24 @@ def test_nods_on_audio(monkeypatch):
     assert bytes(got) == up
     sent, heard = b.session.station.stats["tx_nod"], a.session.station.stats["rx_nod"]
     assert sent >= 2 and heard >= sent - 1, (sent, heard)
+
+
+@pytest.mark.hf_only("FM's ROBUST_FAST is its ROBUST_CONNECT")
+def test_pending_on_a_robust_fast_connect_retry():
+    """A CONNECT's last retry goes in ROBUST_FAST (policy.connect_mode): the
+    default "fsk" PENDING raises on it as on ROBUST_CONNECT's. Three tries:
+    the cap's mode (OFDM, none), ROBUST_CONNECT, then ROBUST_FAST, so the
+    second PENDING is ROBUST_FAST's."""
+    a, b = Engine("W1AW", seed=81), Engine("K2XYZ", seed=82)
+    b.listen()
+    seen = []
+
+    def drain():
+        seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING"))
+        return len(seen) >= 4
+    a.connect("N0CALL", 2, tries=3)
+    assert link(a, b, 20, 120, drain, seed=83)
+    assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
 
 
 def test_pending_on_a_connect_header_then_connected_or_cancelled():

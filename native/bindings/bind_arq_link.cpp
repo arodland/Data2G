@@ -71,7 +71,12 @@ public:
     double airtime(const std::string& m, int n_cw, bool dup) override {
         return (dup ? obj.attr("airtime")(m, n_cw, true) : obj.attr("airtime")(m, n_cw)).cast<double>();
     }
-    std::string connect_mode(int cap, int tries) override { return obj.attr("connect_mode")(cap, tries).cast<std::string>(); }
+    // last only when set: a Python policy written before it takes (cap, tries)
+    std::string connect_mode(int cap, int tries, bool last) override {
+        return (last ? obj.attr("connect_mode")(cap, tries, true) : obj.attr("connect_mode")(cap, tries)).cast<std::string>();
+    }
+    bool weak_path() override { return overrides("weak_path") && obj.attr("weak_path")().cast<bool>(); }
+    bool robust(const std::string& m) override { return overrides("robust") && obj.attr("robust")(m).cast<bool>(); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         if (!overrides("reply_hold")) return std::nullopt;
         return obj.attr("reply_hold")(py::cast(&st, py::return_value_policy::reference),

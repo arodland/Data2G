@@ -33,7 +33,7 @@ class Policy(L.Policy):
     def rv_cycle(self, m):
         return MODES[m][1]
 
-    def connect_mode(self, cap, tries=0):
+    def connect_mode(self, cap, tries=0, last=False):
         return "m46"  # a connect frame (28 B) in one control codeword
 
     def airtime(self, m, n_cw, dup=False):
@@ -207,8 +207,183 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
     assert b.state == S.CONNECTED and ack.submode == G.ROBUST_CONNECT
 
 
+def test_connect_retries_end_in_the_fast_fading_robust_mode():
+    """Nothing is measured before a session: the retries go in
+    ROBUST_CONNECT (four, their soft bits adding), then one in ROBUST_FAST,
+    whose wider tones survive fast fading (30 Hz / 7 ms, 0 dB: 2 of 8
+    sessions connected with every retry in ROBUST_CONNECT, 8 of 8 with the
+    last in ROBUST_FAST). One mode on FM."""
+    from data2g.arq import policy as G
+
+    g = G.GearShifter()
+    want = [G.CONNECT[2]] + [G.ROBUST_CONNECT] * G.ROBUST_CONNECT_TRIES + [G.ROBUST_FAST]
+    assert len(want) == S.CONNECT_TRIES and [g.connect_mode(2, k) for k in range(S.CONNECT_TRIES)] == want
+    assert g.connect_mode(2, 12) == G.ROBUST_FAST  # a host's RETRIES past the default
+    # a host's RETRIES under the default: the last try in ROBUST_FAST, unless it is the only retry
+    for n in range(2, S.CONNECT_TRIES + 1):
+        got = [g.connect_mode(2, k, last=k == n - 1) for k in range(n)]
+        assert got[1:] == ([G.ROBUST_CONNECT] if n == 2 else [G.ROBUST_CONNECT] * (n - 2) + [G.ROBUST_FAST])
+    assert g.connect_mode(2, 1) == g.connect_mode(2, 1, last=False) == G.ROBUST_CONNECT
+    a = S.Session("W1AW", g, rng=random.Random(1))
+    a.connect("K2XYZ", 2, 0.0)
+    t, sent = 0.0, []
+    while a.state == S.CONNECTING and t < 300:
+        burst = a.poll(t)
+        if burst is not None:
+            sent.append(burst.submode)
+            a.on_tx_end(burst, t + 4.2)  # lost: nobody hears it
+        t = max(t + 0.1, a.next_event() or t)
+    assert sent == want and a.state == S.CLOSED
+
+
 def _rx(burst):
     return FakeRx(burst, random.Random(3), 0.0, {}, {"mismatch": 0})
+
+
+@pytest.mark.parametrize("first_try_heard,ack", [(True, None), (False, None), (False, (-9.0, 1.0)), (False, (3.0, 12.0)),
+                                                 (False, (3.0, 1.0)), (False, (-6.0, 2.0))])
+def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first_try_heard, ack):
+    """The cap's connect mode was not answered and the retry's was. If the
+    caller reads its CONNECT_ACK as a weak or fast path (`ack`: its snr_est
+    and spread_est; None: not measured), it starts at the top of the
+    escalation floor and its first burst is a robust control-only one, not
+    the OFDM fallback (which took two timeouts, ~15 s, to give way to the
+    robust mode); the callee takes the floor when that burst arrives. Read
+    as a good path (the first CONNECT lost to QRM, or to a callee that was
+    scanning), both start at the bottom, as a session made by the first try
+    does."""
+    from data2g.arq import link as L, policy as G
+    from test_arq_policy import measured
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    burst, t = a.poll(0.0), 2.0
+    assert burst.submode == G.CONNECT[2]
+    a.on_tx_end(burst, t)
+    if not first_try_heard:  # lost: the retry goes in the robust mode
+        burst = None
+        while burst is None and t < 60:
+            t = max(t + 0.1, a.next_event() or t)
+            burst = a.poll(t)
+        assert burst.submode == G.ROBUST_CONNECT
+        t += 5.0
+        a.on_tx_end(burst, t)
+    b.policy.observe(measured(-9.0, 12.0), burst.submode, t + 0.3)  # the callee's own reading decides nothing
+    b.on_rx(_rx(burst), t + 0.3)
+    reply = b.poll(t + 0.3)
+    assert b.state == S.CONNECTED and reply.submode == burst.submode
+    b.on_tx_end(reply, t + 5.3)
+    if ack is not None:
+        a.policy.observe(measured(*ack), reply.submode, t + 5.6)
+    a.on_rx(_rx(reply), t + 5.6)
+    assert a.state == S.CONNECTED
+    robust = not first_try_heard and (ack is None or ack[0] < G.ROBUST_START_SNR_DB or ack[1] >= G.ROBUST_START_SPREAD_HZ)
+    assert robust == (not first_try_heard and ack not in ((3.0, 1.0), (-6.0, 2.0)))
+    floor = L.MAX_ESCALATION if robust else 0
+    assert (a.station.esc_floor, b.station.esc_floor) == (floor, 0)  # the callee: not yet
+    mine = a.poll(t + 5.6)
+    if robust:
+        assert mine.submode == (G.ROBUST_FAST if ack and ack[1] >= G.ROBUST_FAST_SPREAD_HZ else G.ROBUST_CONNECT)
+        assert len(mine.slots) == 1
+    else:
+        assert mine.submode == G.FALLBACK[2]
+    a.on_tx_end(mine, t + 8.0)
+    b.on_rx(_rx(mine), t + 8.3)
+    assert b.station.esc_floor == floor  # as the caller started
+
+
+def test_callee_follows_when_its_first_connect_ack_was_lost():
+    """The callee answered the first CONNECT (the cap's mode) and that ACK
+    was lost; the caller retries in the robust mode and starts on the
+    robust ACK it then hears. The callee, connected since the first try,
+    follows the caller's first burst all the same: left at the bottom it
+    answered in the OFDM fallback, which a caller at the robust floor on
+    such a path does not read."""
+    from data2g.arq import link as L, policy as G
+    from test_arq_policy import measured
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    a.on_tx_end(first, 2.0)
+    b.on_rx(_rx(first), 2.3)
+    lost = b.poll(2.3)  # the callee's ACK in the cap's mode: not heard
+    assert b.state == S.CONNECTED and lost.submode == G.CONNECT[2]
+    b.on_tx_end(lost, 4.5)
+    burst, t = None, 4.5
+    while burst is None and t < 60:
+        t = max(t + 0.1, a.next_event() or t)
+        burst = a.poll(t)
+    assert burst.submode == G.ROBUST_CONNECT
+    a.on_tx_end(burst, t + 5.0)
+    b.on_rx(_rx(burst), t + 5.3)
+    again = b.poll(t + 5.3)
+    assert again.submode == G.ROBUST_CONNECT
+    b.on_tx_end(again, t + 10.3)
+    a.policy.observe(measured(-9.0, 1.0), again.submode, t + 10.6)
+    a.on_rx(_rx(again), t + 10.6)
+    assert a.state == S.CONNECTED and (a.station.esc_floor, b.station.esc_floor) == (L.MAX_ESCALATION, 0)
+    mine = a.poll(t + 10.6)
+    assert mine.submode == G.ROBUST_CONNECT
+    a.on_tx_end(mine, t + 15.6)
+    b.on_rx(_rx(mine), t + 15.9)
+    assert b.station.esc_floor == L.MAX_ESCALATION  # as the caller started
+
+
+def test_a_policy_with_no_opinion_starts_neither_side_robust():
+    """link.Policy's defaults agree: weak_path() False and robust() False,
+    so a policy that overrides neither starts both stations at the bottom
+    (weak_path() True with robust() False started the caller alone)."""
+    from data2g.arq import link as L
+
+    p = Policy(random.Random(1))
+    assert p.weak_path() is False and p.robust(p.connect_mode(2, 1)) is False
+
+
+def test_robust_start_counts_any_retry_mode():
+    """A policy may change mode among its connect retries (a last try in
+    ROBUST_FAST, say). A session made by such a later try starts at the
+    robust floor as one made by the first retry does: its mode is a robust
+    one and not the cap's connect mode, whichever try sent it."""
+    from data2g.arq import link as L, policy as G
+
+    class LastTryFast(G.GearShifter):
+        def connect_mode(self, cap, tries=0, *a, **kw):  # whatever more the interface passes (a last-try flag)
+            return G.ROBUST_FAST if tries >= 2 else super().connect_mode(cap, tries, *a, **kw)
+
+    if G.ROBUST_FAST == G.ROBUST_CONNECT:
+        pytest.skip("one robust mode on this profile")
+    a = S.Session("W1AW", LastTryFast(), rng=random.Random(1))
+    b = S.Session("K2XYZ", LastTryFast(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 64)
+    a.connect("K2XYZ", 2, 0.0)
+    t, sent = 0.0, []
+    while len(sent) < 3 and t < 120:  # the first try and the first retry are lost
+        burst = a.poll(t)
+        if burst is not None:
+            sent.append(burst.submode)
+            t += 5.0
+            a.on_tx_end(burst, t)
+        t = max(t + 0.1, a.next_event() or t)
+    assert sent == [G.CONNECT[2], G.ROBUST_CONNECT, G.ROBUST_FAST]
+    b.on_rx(_rx(burst), t)
+    reply = b.poll(t)
+    assert b.state == S.CONNECTED and reply.submode == G.ROBUST_FAST
+    b.on_tx_end(reply, t + 4.0)
+    a.on_rx(_rx(reply), t + 4.3)  # nothing measured: a weak path
+    assert a.state == S.CONNECTED and (a.station.esc_floor, b.station.esc_floor) == (L.MAX_ESCALATION, 0)
+    mine = a.poll(t + 4.3)
+    assert mine.submode in G.ROBUST_MODES and len(mine.slots) == 1
+    a.on_tx_end(mine, t + 8.0)
+    b.on_rx(_rx(mine), t + 8.3)
+    assert b.station.esc_floor == L.MAX_ESCALATION  # as the caller started
 
 
 @pytest.mark.parametrize("when", ["before", "between"])

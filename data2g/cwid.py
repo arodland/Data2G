@@ -111,7 +111,11 @@ class CwSense:
     quiet ones and at most MAX_ELSEWHERE elsewhere, the hits keyed: at least
     MIN_RUNS separate runs, none longer than MAX_RUN. A steady carrier on the
     centre never goes quiet, and its start or end is one long run (a Hand
-    near 1500 Hz read as an ID at both). A strong steady carrier 100-300 Hz off the
+    near 1500 Hz read as an ID at both). A weaker one, near RATIO times the
+    floor, flickers over and under it with the noise and reads as keyed: but
+    its quiet windows still hold the tone, where a key-up gap is at the floor.
+    So the quiet windows' median power in the hits' bin is at most QUIET_MAX
+    times the floor. A strong steady carrier 100-300 Hz off the
     centre hides an ID (every window reads elsewhere): then the peer's turn
     may cost a timeout. Inside a burst it may read a CW ID now and then
     (narrow ones near their floor); holding then is harmless, the burst
@@ -134,6 +138,10 @@ class CwSense:
     # keyed: an ID at MIN_WPM-MAX_WPM puts several elements in WIN_N windows; its
     # longest, a dash at MIN_WPM, is 12 windows (Hann edges add one or two)
     MIN_RUNS, MAX_RUN = 2, 16
+    # key-up gaps at the floor: the quiet windows' median power in the hits' bin over the
+    # floor. IDs at 15-40 wpm, -6 to +20 dB, AWGN and faded: medians 1.2-1.8, none over 4.3;
+    # a steady tone within 75 Hz of the centre that reads as keyed (6-14 dB INR in 50 Hz): 4-8.5
+    QUIET_MAX = 3.0
     HITS_FROM = 3  # hits_from: the HITS_FROM-th latest hit
 
     def __init__(self, center: float = FREQ_HZ):
@@ -148,6 +156,7 @@ class CwSense:
     def reset(self):
         self._buf = np.zeros(0)
         self._hist: list[int] = []  # per window: 1 + the tone's step + TONE_K for a hit, 0 quiet, -1 elsewhere
+        self._near: list[np.ndarray] = []  # per window: the +-TONE_K bins' powers over the floor
         self._floor = 0.0  # 0: none yet
         self._tones: list[float] = []  # the latest WIN_N windows' tone powers
         self.active = False
@@ -165,6 +174,7 @@ class CwSense:
         if not self._floor:
             self._floor = m
         thr = self.RATIO * self._floor
+        self._near = (self._near + [p[near] / self._floor])[-self.WIN_N:]
         a = self.FLOOR_DOWN if m < self._floor else self.FLOOR_UP
         self._floor *= (m / self._floor) ** a
         # LEAK against the key-down level (the strongest tone of WIN_N windows):
@@ -185,11 +195,16 @@ class CwSense:
             hits = [v for v in h if v > 0]
             # one tone: all hits but one within a step of each other (n4's
             # carriers and c16r25's tones near the centre take turns)
-            steady = max(sum(abs(v - u) <= 1 for v in hits) for u in range(1, 2 * self.TONE_K + 2))
+            steady, u = max((sum(abs(v - u) <= 1 for v in hits), u) for u in range(1, 2 * self.TONE_K + 2))
             runs = [len(list(g)) for on, g in itertools.groupby(h, lambda v: v > 0) if on]
             self.active = (len(hits) >= self.MIN_HITS and steady >= len(hits) - 1
                            and h.count(0) >= self.MIN_QUIET and h.count(-1) <= self.MAX_ELSEWHERE
                            and len(runs) >= self.MIN_RUNS and max(runs) <= self.MAX_RUN)
+            if self.active:  # key-up gaps at the floor, not a steady tone flickering about RATIO
+                hit = [v for v in hits if abs(v - u) <= 1]
+                b = max(range(u - 1, u + 2), key=hit.count) - 1  # the hits' bin among the near ones (the lowest of a tie)
+                quiet = [q[b] for v, q in zip(h, self._near) if v == 0]
+                self.active = float(np.median(quiet)) <= self.QUIET_MAX
             if c > 0 and self.active:
                 self._hits = (self._hits + [self.n])[-self.HITS_FROM:]
                 self.hits_from = self._hits[0] if len(self._hits) == self.HITS_FROM else -1

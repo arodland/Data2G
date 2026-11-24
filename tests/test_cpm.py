@@ -193,6 +193,52 @@ def test_spread_tracks_doppler_through_symbol_jitter():
     assert cpm.spread(g, np.ones(10), n0) == cpm.UNMEASURED_SPREAD_HZ  # too short
 
 
+def _faded_control_energies(name, doppler, delay_ms, snr, seed):
+    """A control-only burst (a robust CONNECT's shape) through two-path
+    fading, at genie timing: its tone energies."""
+    from data2g import hfchannel as H
+
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    ctl = codes.encode(cpm.CTL[g.name], bytes(range(codes.payload_bytes(cpm.CTL[g.name]))), 0, 0)
+    x = cpm.modulate(spec, [ctl], dup=False)
+    y = H.awgn(H.fading(x, H.FadingPreset("p", doppler, delay_ms), seed=seed), snr, seed=seed + 1, s_power=H.active_power(x))
+    return g, cpm.soft(g, spec, y, 0, 0.0, 0, False)[1]
+
+
+@pytest.mark.hf_only("CPM: FM has none")
+def test_spread_on_slow_selective_fading():
+    """With multipath each tone has its own gain, so on slow fading the
+    winning tone's energy varies with the data, not with time: no lag
+    correlation, and the excess variance read SPREAD_MAX_HZ (fsk16r25, 2 ms
+    / 0.1 Hz, these 40 seeds: 35; 2 ms / 1 Hz: 10; fsk8r50: 25 and 2), which
+    is ROBUST_FAST's fast fading. The symbols on the same or adjacent tones
+    80-160 ms apart are correlated there (SPREAD_NEAR_*): unmeasured.
+    Really fast fading still reads it, 10 Hz too: its energies are
+    correlated over a symbol or two, not over 80 ms (pairs from the next
+    symbol on read 10 Hz as slow in about 1 burst in 10 of fsk16r25's and 1
+    in 3 of fsk8r50's)."""
+    def count(name, doppler, delay_ms, snr):
+        est = []
+        for seed in range(40):
+            g, E = _faded_control_energies(name, doppler, delay_ms, snr, seed)
+            est.append(cpm.measure(g, E, len(E))["spread_est"])
+        return sum(e == cpm.SPREAD_MAX_HZ for e in est), sum(e == cpm.UNMEASURED_SPREAD_HZ for e in est)
+
+    # (maxed, unmeasured) of 40; in the comments: as measured
+    assert count("fsk16r25-r1/2", 0.1, 2.0, 2)[0] <= 5  # 3
+    assert count("fsk16r25-r1/2", 1.0, 2.0, 2)[0] <= 5  # 2
+    assert count("fsk8r50-r1/3", 0.1, 2.0, 2)[0] <= 3  # 1
+    for name, doppler, delay_ms, least, most_unmeasured in (
+            ("fsk16r25-r1/2", 10.0, 7.0, 37, 1),  # 38, 0 (38 without the check)
+            ("fsk16r25-r1/2", 10.0, 2.0, 38, 1),  # 39, 0 (39)
+            ("fsk16r25-r1/2", 30.0, 7.0, 39, 1),  # 40, 0 (40)
+            ("fsk8r50-r1/3", 10.0, 7.0, 19, 1),  # 20, 0 (20; the rest are fits)
+            ("fsk8r50-r1/3", 30.0, 7.0, 35, 4)):  # 37, 3 (40)
+        maxed, unmeasured = count(name, doppler, delay_ms, 0)
+        assert maxed >= least and unmeasured <= most_unmeasured, (name, doppler, delay_ms, maxed, unmeasured)
+
+
 @pytest.mark.hf_only("CPM: FM has none")
 def test_coarse_track_is_a_fresh_transform_of_the_stream(pure):  # (native's: test_native_cpm's test_coarse_track)
     """A receiver's CoarseTrack, fed 20 ms at a time from a buffer trimmed
