@@ -208,6 +208,7 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
 // h = 1, continuous phase: every symbol starts at the same carrier phase. A
 // channel estimate per row from its neighbours' known or decided tones makes
 // the metric coherent; a poor estimate falls back to the square law.
+inline constexpr double FLOOR_SIGMAS = 6.0;  // cpm.FLOOR_SIGMAS: tone_floors' bar over the common N0
 inline constexpr int COH_W = 8;      // coh_metric's window for slots (+- rows, the row left out)
 inline constexpr int COH_HDR_W = 4;  // the header's
 // cpm.COH_LOCK: the grid's coherent lock gates (score one copy, both; margin

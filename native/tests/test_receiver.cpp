@@ -18,7 +18,8 @@ std::vector<receiver::Event> feed_all(receiver::Receiver& rx, const std::vector<
     std::vector<receiver::Event> out;
     for (std::size_t i = 0; i < y.size(); i += chunk) {
         auto ev = rx.feed(std::span(y).subspan(i, std::min(chunk, y.size() - i)));
-        out.insert(out.end(), std::make_move_iterator(ev.begin()), std::make_move_iterator(ev.end()));
+        for (auto& e : ev)  // not PartialEvents (FM's decoding while the burst arrives: tests/test_native_receiver.py)
+            if (!std::holds_alternative<receiver::PartialEvent>(e)) out.push_back(std::move(e));
     }
     return out;
 }

@@ -4,6 +4,7 @@ so a weak header is not refused as "still arriving"."""
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from data2g import modem
 from data2g.arq import link as L
@@ -12,6 +13,7 @@ from data2g.arq.engine import MAX_BURST_S
 from data2g.config import LEADIN_SAMPLES
 
 
+@pytest.mark.hf_only("an 8 kHz HF recording, HF protocol headers")
 def test_weak_header_at_the_burst_end_is_received(protocol):
     """AG7EW's ack-4f x3 on air (recordings/20261002-232711, t 387.6), the
     segment the streaming receiver passed: header score 0.48, under

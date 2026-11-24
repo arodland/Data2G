@@ -83,7 +83,7 @@ def job(args):
         from data2g.arq.modes import MODES, is_cpm
 
         pool = ([s for s in MODES.values() if not is_cpm(s)] if source == "ofdm"
-                else [s for s in cpm.SPECS.values() if s.grid != grid])
+                else [s for s in MODES.values() if is_cpm(s) and s.grid != grid])  # (MODES: an on-air wide grid's modes too)
         parts, k = [], 0
         while k < n:
             gap = np.zeros(int(rng.uniform(0.5, 3) * FS))

@@ -96,7 +96,7 @@ class BurstChannel:
         sb = config.BANDS[spec.sync_band]  # preamble and header (BandSpec.sync)
         self.frames0 = LEADIN_SAMPLES + sb.preamble_samples + modem.header_samples(spec.sync_band)
         self.taps = torch.tensor(
-            firwin(201, sb.tx_bandpass, fs=FS, pass_zero=False), dtype=dtype, device=device
+            firwin(config.TX_FILTER_TAPS, sb.tx_bandpass, fs=FS, pass_zero=False), dtype=dtype, device=device
         )
         n = torch.arange(len(self.base), device=device)
         self.het = torch.exp(-2j * torch.pi * ((FCENTER * n) % FS).to(dtype) / FS).to(cdtype)
@@ -187,23 +187,67 @@ class BurstChannel:
         return x + torch.randn(x.shape, generator=g, device=self.device, dtype=self.dtype) * sigma2.sqrt()
 
     # --- RX -------------------------------------------------------------
-    def receive(self, y: torch.Tensor, ch: Channel) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def receive(self, y: torch.Tensor, ch: Channel, measure: bool = False,
+                points: np.ndarray | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """-> raw data symbols (B, n_f, 5, nc), and (no grad) channel
-        estimate and per-cu noise variance of the same shape."""
+        estimate and per-cu noise variance of the same shape.
+
+        `measure` (fmtorch): as modem.receive past acquisition, each burst's
+        delay support from its own pilots (the FM radios' filters delay the
+        audio), the preamble's noise per carrier (FM noise is coloured), and,
+        with `points` and config.SYMBOL_NOISE, the per-symbol noise scale
+        (clicks). Off: the HF path, unchanged."""
         b = y.shape[0]
         z = y.to(self.cdtype) * self.het
         d = int(round(ch.delay_ms * 1e-3 * FS))
-        support = (DEMOD_BACKOFF, d + DEMOD_BACKOFF)  # apparent delays before the shift
-        shift = equalizer.window_shift(support)
-        start = self.frames0 + NCP - DEMOD_BACKOFF + shift
+        support = [(DEMOD_BACKOFF, d + DEMOD_BACKOFF)] * b  # apparent delays before the shift
+        if measure:
+            with torch.no_grad():
+                hp0 = (self._demod(z, [0] * b)[:, ::SYMS_PER_FRAME]
+                       / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)).cpu().numpy()
+            bb = self.band.bb
+            seen = [equalizer.delay_support(h.astype(np.complex128), bb=bb) for h in hp0]
+            support = [equalizer.delay_support(h.astype(np.complex128), bb=bb, n0=n) for h, n in
+                       zip(hp0, self._preamble_noise(z)[0])]
+            shifts = [equalizer.window_shift(s) for s in seen]
+        else:
+            shifts = [equalizer.window_shift(s) for s in support]
+        raw = self._demod(z, shifts)
+        n0s, n0ks = self._preamble_noise(z)
+        pilots = raw[:, ::SYMS_PER_FRAME] / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)
+        frames = [f for f in range(self.n_air) if f != self.kc]
+        data = raw[:, :-1].reshape(b, self.n_air, SYMS_PER_FRAME, self.nc)[:, frames, 1:]
+
+        hp = pilots.detach().cpu().numpy().astype(np.complex128)
+        yd = data.detach().cpu().numpy() if points is not None else None
+        hs, vs = [], []
+        for i in range(b):
+            sup = (support[i][0] - shifts[i], support[i][1] - shifts[i])
+            est = modem.data_channel(hp[i], sup, self.spec.band, n0s[i], clip=self.clip_consts,
+                                     n0_pre_k=n0ks[i] if measure else None, n_frames=self.n_f)
+            h_i = est["h"][frames]
+            v_i = np.broadcast_to(modem.noise_var(est["h"], est) + est["mse"], est["h"].shape)[frames]
+            if measure and points is not None and config.SYMBOL_NOISE:
+                v_i = v_i * modem.symbol_noise_scale(yd[i], h_i, v_i, points)
+            hs.append(h_i)
+            vs.append(v_i)
+        h = torch.tensor(np.stack(hs), dtype=self.cdtype, device=self.device)
+        var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
+        return data, h, var
+
+    def _demod(self, z: torch.Tensor, shifts: list) -> torch.Tensor:
+        """Every symbol of every burst, burst i's window `shifts[i]` later: (B, S, nc)."""
+        start = torch.tensor([self.frames0 + NCP - DEMOD_BACKOFF + s for s in shifts], device=self.device)
         idx = (
-            start
-            + torch.arange(self.n_air * SYMS_PER_FRAME + 1, device=self.device)[:, None] * NSYM
-            + torch.arange(M, device=self.device)[None, :]
+            start[:, None, None]
+            + torch.arange(self.n_air * SYMS_PER_FRAME + 1, device=self.device)[None, :, None] * NSYM
+            + torch.arange(M, device=self.device)[None, None, :]
         )
-        win = z[:, idx]  # (B, S, M)
-        raw = (2.0 / M) * torch.einsum("bsm,cm->bsc", win, self.demod)
-        # preamble repeats, for the noise estimate (equalizer.preamble_noise)
+        win = torch.gather(z, 1, idx.reshape(len(shifts), -1)).reshape(idx.shape)  # (B, S, M)
+        return (2.0 / M) * torch.einsum("bsm,cm->bsc", win, self.demod)
+
+    def _preamble_noise(self, z: torch.Tensor) -> tuple[list, list]:
+        """equalizer.preamble_noise and preamble_noise_k of each burst's repeats."""
         pidx = (
             LEADIN_SAMPLES + PREAMBLE_CP - NCP // 2
             + torch.arange(config.BANDS[self.spec.sync_band].preamble_repeats, device=self.device)[:, None] * M
@@ -211,21 +255,7 @@ class BurstChannel:
         )
         reps = (2.0 / M) * torch.einsum("bsm,cm->bsc", z[:, pidx], self.demod)
         reps = (reps / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)).detach().cpu().numpy()
-        pilots = raw[:, ::SYMS_PER_FRAME] / torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)
-        frames = [f for f in range(self.n_air) if f != self.kc]
-        data = raw[:, :-1].reshape(b, self.n_air, SYMS_PER_FRAME, self.nc)[:, frames, 1:]
-
-        sup = (support[0] - shift, support[1] - shift)
-        hp = pilots.detach().cpu().numpy().astype(np.complex128)
-        hs, vs = [], []
-        for i in range(b):
-            est = modem.data_channel(hp[i], sup, self.spec.band, equalizer.preamble_noise(reps[i]),
-                                     clip=self.clip_consts, n_frames=self.n_f)
-            hs.append(est["h"][frames])
-            vs.append((modem.noise_var(est["h"], est) + est["mse"])[frames])
-        h = torch.tensor(np.stack(hs), dtype=self.cdtype, device=self.device)
-        var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
-        return data, h, var
+        return [equalizer.preamble_noise(r) for r in reps], [equalizer.preamble_noise_k(r) for r in reps]
 
 
 def llr(y: torch.Tensor, h: torch.Tensor, var: torch.Tensor, points: torch.Tensor) -> torch.Tensor:

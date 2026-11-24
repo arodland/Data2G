@@ -46,6 +46,8 @@ class TxBurst:
     # sent as a nod (docs/arq.md §3b): (meaning, family key (session key,
     # direction, burst seq, acted-on)); the slots hold the control it stands for
     nod: tuple | None = None
+    level: float = 1.0  # audio level against the mode's own (an FM ping goes at its top modes': arq.ping)
+    probe: bool = False  # FM: the sounding probe follows on the same PTT (arq.probe; a ping)
 
 
 def dup_ctl(burst) -> bool:

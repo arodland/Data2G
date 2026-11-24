@@ -1,0 +1,60 @@
+
+## f108 (flat), static
+per-carrier SNR, no tilt (dB): bottom carrier / mean / top carrier / slope top-bottom
+  CNR 10: 18.6 / 12.3 / 4.8 / -13.8
+  CNR 13: 19.1 / 14.8 / 7.0 / -12.1
+  CNR 16: 19.2 / 16.9 / 8.8 / -10.4
+  CNR 19: 21.2 / 18.8 / 11.8 / -9.4
+  CNR 22: 21.3 / 20.1 / 13.8 / -7.5
+  CNR 25: 21.3 / 21.0 / 15.2 / -6.0
+  CNR 28: 21.3 / 21.6 / 16.2 / -5.0
+drive (Hz rms) per tilt: +0.0: 2197, +1.5: 2441, +3.0: 2690, +4.5: 2930, +6.0: 3155
+total BMI, bits per OFDM symbol (sum over carriers): rows tilt dB/oct, columns CNR 10 13 16 19 22 25 28
+  tilt +0.0: qam4   202   211   215   215   216   216   216  qam16   318   363   392   409   417   420   422  snr18   378   456   517   562   589   605   613  snr26   380   468   541   599   637   659   671  best   380   468   541   599   637   659   671
+  tilt +1.5: qam4   209   214   215   216   216   216   216  qam16   335   378   403   414   419   421   422  snr18   403   482   541   579   601   613   618  snr26   400   494   569   621   652   670   679  best   403   494   569   621   652   670   679
+  tilt +3.0: qam4   211   215   215   216   216   216   216  qam16   343   387   408   416   420   422   422  snr18   400   492   551   585   605   615   620  snr26   389   503   579   628   658   673   681  best   400   503   579   628   658   673   681
+  tilt +4.5: qam4   207   214   215   216   216   216   216  qam16   331   383   406   415   420   421   422  snr18   375   483   547   583   602   613   618  snr26   353   495   575   625   654   670   679  best   375   495   575   625   654   670   679
+  tilt +6.0: qam4   195   208   213   215   215   215   216  qam16   303   371   398   410   416   420   421  snr18   332   462   530   566   590   605   613  snr26   317   443   547   604   634   661   671  best   332   462   547   604   634   661   671
+gain as dB of CNR at equal throughput, against no tilt (per family; best single) at CNR 13 / 19 / 25:
+  tilt +1.5: qam4 -2.36/-2.18/-2.58  qam16 -1.61/-2.08/-2.50  snr18 -1.27/-1.89/-2.76  snr26 -1.04/-1.74/-2.52  best -1.04/-1.74/-2.52
+  tilt +3.0: qam4 -2.95/-2.66/-2.66  qam16 -2.45/-2.90/+nan  snr18 -1.78/-2.55/+nan  snr26 -1.44/-2.31/+nan  best -1.44/-2.31/+nan
+  tilt +4.5: qam4 -2.05/-1.09/+0.43  qam16 -2.12/-2.52/-2.90  snr18 -1.33/-2.28/-2.80  snr26 -1.09/-2.05/-2.72  best -1.09/-2.05/-2.72
+  tilt +6.0: qam4 +0.91/+3.06/+5.57  qam16 -0.89/-0.42/+0.31  snr18 -0.28/-0.42/-0.14  snr26 +0.86/-0.39/-0.30  best +0.22/-0.39/-0.30
+best tilt at CNR 19: +3.0
+  per-carrier loading, no tilt: bits   392   477   548   603   638   660   672; dB vs best single at best tilt, CNR 13/19/25: +0.76/+1.57/+2.50
+  per-carrier loading, tilt +3.0: bits   406   511   582   629   658   673   681; dB vs best single at best tilt, CNR 13/19/25: -0.29/-0.08/-0.06
+  3 zones, no tilt: bits   384   471   544   599   637   659   671; dB vs best single at best tilt, CNR 13/19/25: +0.93/+1.79/+2.68
+  3 zones, tilt +3.0: bits   400   507   579   628   658   673   681; dB vs best single at best tilt, CNR 13/19/25: -0.13/+0.00/+0.00
+  2 zones, no tilt: bits   384   472   542   599   637   659   671; dB vs best single at best tilt, CNR 13/19/25: +0.92/+1.79/+2.68
+
+## f55 (flat), static
+per-carrier SNR, no tilt (dB): bottom carrier / mean / top carrier / slope top-bottom
+  CNR 10: 20.4 / 18.2 / 13.6 / -6.8
+  CNR 13: 20.7 / 20.1 / 16.0 / -4.7
+  CNR 16: 20.8 / 21.4 / 17.9 / -3.0
+  CNR 19: 21.0 / 22.4 / 19.2 / -1.8
+  CNR 22: 21.1 / 23.0 / 19.9 / -1.1
+  CNR 25: 21.1 / 23.3 / 20.2 / -0.9
+  CNR 28: 21.1 / 23.5 / 20.5 / -0.6
+drive (Hz rms) per tilt: +0.0: 2270, +1.5: 2305, +3.0: 2375, +4.5: 2449, +6.0: 2515
+total BMI, bits per OFDM symbol (sum over carriers): rows tilt dB/oct, columns CNR 10 13 16 19 22 25 28
+  tilt +0.0: qam4   110   110   110   110   110   110   110  qam16   211   215   216   217   217   217   217  snr18   286   303   312   317   320   321   321  snr26   302   329   344   352   355   357   358  best   302   329   344   352   355   357   358
+  tilt +1.5: qam4   110   110   110   110   110   110   110  qam16   212   215   216   217   217   217   217  snr18   289   306   314   318   320   321   322  snr26   306   333   347   353   356   358   359  best   306   333   347   353   356   358   359
+  tilt +3.0: qam4   110   110   110   110   110   110   110  qam16   212   215   216   217   217   217   217  snr18   290   306   314   318   320   321   322  snr26   308   335   347   353   356   358   359  best   308   335   347   353   356   358   359
+  tilt +4.5: qam4   110   110   110   110   110   110   110  qam16   212   215   216   217   217   217   217  snr18   287   305   313   318   320   321   322  snr26   304   332   346   352   356   358   358  best   304   332   346   352   356   358   358
+  tilt +6.0: qam4   110   110   110   110   110   110   110  qam16   208   214   216   217   217   217   217  snr18   280   301   311   316   319   320   321  snr26   293   327   342   350   354   356   357  best   293   327   342   350   354   356   357
+gain as dB of CNR at equal throughput, against no tilt (per family; best single) at CNR 13 / 19 / 25:
+  tilt +1.5: qam4 -1.26/-2.71/+nan  qam16 -0.84/-1.36/+nan  snr18 -0.81/-1.28/-2.39  snr26 -0.80/-1.35/-2.20  best -0.80/-1.35/-2.20
+  tilt +3.0: qam4 -1.27/-2.98/+nan  qam16 -0.94/-1.32/+nan  snr18 -1.02/-1.60/-2.95  snr26 -1.10/-1.52/-2.56  best -1.10/-1.52/-2.56
+  tilt +4.5: qam4 -0.28/-0.89/+nan  qam16 -0.43/-0.26/-0.61  snr18 -0.61/-0.80/-1.83  snr26 -0.62/-0.71/-1.37  best -0.62/-0.71/-1.37
+  tilt +6.0: qam4 +1.02/+1.71/+nan  qam16 +0.56/+1.13/+2.12  snr18 +0.31/+0.56/+0.95  snr26 +0.29/+0.63/+1.12  best +0.29/+0.63/+1.12
+best tilt at CNR 19: +3.0
+  per-carrier loading, no tilt: bits   304   329   344   352   355   357   358; dB vs best single at best tilt, CNR 13/19/25: +0.60/+0.92/+1.61
+  per-carrier loading, tilt +3.0: bits   308   335   347   353   356   358   359; dB vs best single at best tilt, CNR 13/19/25: +0.00/+0.00/-0.00
+  3 zones, no tilt: bits   303   329   344   352   355   357   358; dB vs best single at best tilt, CNR 13/19/25: +0.60/+0.92/+1.61
+  3 zones, tilt +3.0: bits   308   335   347   353   356   358   359; dB vs best single at best tilt, CNR 13/19/25: +0.00/+0.00/+0.00
+  2 zones, no tilt: bits   302   329   344   352   355   357   358; dB vs best single at best tilt, CNR 13/19/25: +0.60/+0.92/+1.61
+
+## f108 flutter 440 check: total BMI best single, CNR 16 / 22
+  tilt +0.0: 530 / 630
+  tilt +3.0: 567 / 653

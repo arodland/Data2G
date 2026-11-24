@@ -99,16 +99,18 @@ def substitutions(native):
     def decode_header(soft, band="w", accept=None):
         return header(N.decode_header(f64(soft).reshape(-1), band, accept))
 
-    @guarded("modulate", lambda payloads, submode, rvs=None: own(submode))
-    def modulate(payloads, submode, rvs=None):
+    # tx_path None: Python's station setting (modem.TX_PATH), read at each call
+    @guarded("modulate", lambda payloads, submode, rvs=None, tx_path=None: own(submode))
+    def modulate(payloads, submode, rvs=None, tx_path=None):
         top = config.max_codewords((config.SUBMODES[submode] if isinstance(submode, str) else submode).sync_band)
         if not 1 <= len(payloads) <= top:
             raise ValueError(f"1..{top} codewords per burst, got {len(payloads)}")
-        return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)))
+        return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)),
+                          tx_path or modem.TX_PATH)
 
-    @guarded("modulate_bits", lambda bits, spec: own(spec) and isinstance(bits, np.ndarray))
-    def modulate_bits(bits, spec):
-        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec)
+    @guarded("modulate_bits", lambda bits, spec, tx_path=None: own(spec) and isinstance(bits, np.ndarray))
+    def modulate_bits(bits, spec, tx_path=None):
+        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec, tx_path or modem.TX_PATH)
 
     @guarded("burst_waveform", lambda data, spec: own(spec))
     def burst_waveform(data, spec):
@@ -156,20 +158,26 @@ def substitutions(native):
         return hdr_dict(N.copy_header(z, lock))
 
     # `known` (data2g-bulk's receive at a known position) has no native port: Python's
-    @guarded("receive", lambda x, bands=None, accept=None, head=None, copy=None, known=None:
+    @guarded("receive", lambda x, bands=None, accept=None, head=None, copy=None, known=None, partial=False:
              known is None and (copy is None or lock_ok(copy)))
-    def receive(x, bands=None, accept=None, head=None, copy=None):
-        d = N.receive(f64(x), bands_arg(bands), accept, None if head is None else int(head), copy)
+    def receive(x, bands=None, accept=None, head=None, copy=None, partial=False):
+        d = N.receive(f64(x), bands_arg(bands), accept, None if head is None else int(head), copy, bool(partial))
         return dict(d, spec=config.SUBMODES[d["spec"]], acq=acq(d["acq"]))
 
     @guarded("data_channel", lambda h_pilot, support, band="w", *a, **k: band in config.BANDS)
-    def data_channel(h_pilot, support, band="w", n0_pre=np.inf, clip=None, n0_pre_k=None, n_frames=None):
+    def data_channel(h_pilot, support, band="w", n0_pre=np.inf, clip=None, n0_pre_k=None, n_frames=None, _whole=False):
+        if _whole:  # Python's own per-window call (config.EST_WINDOW): native would window the window again
+            return py["data_channel"](h_pilot, support, band, n0_pre, clip, n0_pre_k, n_frames, _whole=True)
         return N.data_channel(h_pilot, tuple(map(int, support)), band, float(n0_pre), clip, n0_pre_k, n_frames)
 
     @guarded("noise_var", lambda h, est: isinstance(h, np.ndarray) and h.ndim >= 1)
     def noise_var(h, est):
-        n0 = np.broadcast_to(f64(est.get("n0_k", est["n0"])), h.shape[-1:])
-        return N.noise_var(h, n0, float(est["clip_ratio"]))
+        n0 = f64(est.get("n0_k", est["n0"]))
+        if np.ndim(n0) == 3:  # per frame (config.EST_WINDOW): native reads it by h's rows, frame = row // 5
+            if h.ndim != 3 or h.shape[0] != n0.shape[0]:
+                return py["noise_var"](h, est)
+            return N.noise_var(h, np.ascontiguousarray(n0).reshape(-1), float(est["clip_ratio"]))
+        return N.noise_var(h, np.broadcast_to(n0, h.shape[-1:]), float(est["clip_ratio"]))
 
     @guarded("soft_bits", lambda raw, h, var, spec: own(spec) and all(isinstance(a, np.ndarray) for a in (raw, h)))
     def soft_bits(raw, h, var, spec):

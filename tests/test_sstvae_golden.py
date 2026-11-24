@@ -7,6 +7,7 @@ import sys
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.hf_only("SSTVAE is the 8 kHz HF waveform; FM shares no samples with it")
 path = os.environ.get("SSTVAE_PATH", os.path.expanduser("~/code/SSTVAE"))
 if not os.path.isdir(os.path.join(path, "sstvae")):
     pytest.skip("no SSTVAE checkout", allow_module_level=True)

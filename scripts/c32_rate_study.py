@@ -10,6 +10,10 @@ bursts are the same length: the same fades).
     python -m scripts.c32_rate_study --out runs/c32_rate.csv
 """
 
+import os
+
+os.environ.setdefault("DATA2G_CPM_R23", "1")  # fsk32r62-r2/3 offered: not a mode by default
+
 from data2g import threads  # noqa: E402
 
 threads.limit(1)

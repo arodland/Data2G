@@ -301,11 +301,16 @@ void test_settings(const QTemporaryDir& dir) {
     check::is_true(!legacy.contains("rigctld_port") && !legacy.contains("host"), "...and saving drops the old keys");
 }
 
+// The profile's settings file name (app/settings.cpp): data2g.conf, FM's data2g-fm.conf.
+QString conf_name() {
+    return config::PROFILE == "hf" ? QStringLiteral("data2g.conf") : QStringLiteral("data2g-fm.conf");
+}
+
 // open_config: a data2g.conf beside the program before the config dir's, and
 // --config's before both.
 void test_config_beside_program(const QTemporaryDir& dir) {
     check::current_step = "config file beside the program";
-    const QString beside = QCoreApplication::applicationDirPath() + QStringLiteral("/data2g.conf");
+    const QString beside = QCoreApplication::applicationDirPath() + QStringLiteral("/") + conf_name();
     if (QFile::exists(beside)) {
         check::is_true(false, "no data2g.conf beside the test before it runs");
         return;
@@ -340,7 +345,7 @@ void test_config_file(const QTemporaryDir& dir) {
         old.setValue("mycall", QStringLiteral("OLD1"));
         old_file = old.fileName();
     }
-    const QString conf = dir.filePath(QStringLiteral("new/Data2G/data2g.conf"));
+    const QString conf = dir.filePath(QStringLiteral("new/Data2G/") + conf_name());
     char prog[] = "data2g-gui";
     char* bare[] = {prog};
     const QString other = dir.filePath(QStringLiteral("other.conf"));
@@ -349,8 +354,12 @@ void test_config_file(const QTemporaryDir& dir) {
     check::is_true(app::open_config(2, with)->fileName() == other && QFile::exists(old_file) && !QFile::exists(conf),
                    "--config: its file, nothing moved");
     const auto s = app::open_config(1, bare);
-    check::is_true(s->fileName() == conf && s->value("mycall").toString() == "OLD1" && !QFile::exists(old_file),
-                   "data2g-gui.conf moved to data2g.conf");
+    if (config::PROFILE == "hf")
+        check::is_true(s->fileName() == conf && s->value("mycall").toString() == "OLD1" && !QFile::exists(old_file),
+                       "data2g-gui.conf moved to data2g.conf");
+    else  // the old store was HF's: FM starts its own file and leaves it be
+        check::is_true(s->fileName() == conf && !s->contains("mycall") && QFile::exists(old_file),
+                       "FM: its own file, the old HF store left alone");
     check::is_true(app::settings_store()->fileName() == conf, "settings_store() opens the same file");
 #else
     (void)dir;
@@ -489,7 +498,7 @@ void test_window(const QTemporaryDir& dir) {
     QByteArray said;
     check::is_true(wait_for([&] {
                        said += client.readAll();
-                       return said.contains("CQFRAME N0CQ 2300");
+                       return said.contains(QByteArray::fromStdString("CQFRAME N0CQ " + arq::bw_name(2)));
                    }, 5000),
                    "the client heard CQFRAME");
     const app::AudioCounters c = w.station().counters();

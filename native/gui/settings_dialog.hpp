@@ -88,6 +88,7 @@ private:
     QSlider* effort_;      // decoder effort, the LDPC iteration cap / 5 (EFFORT_MIN-EFFORT_MAX steps)
     QComboBox* cw_id_;     // off, add, only (its item data)
     QSpinBox* cw_wpm_;
+    QComboBox* tx_path_;  // mic, flat (its item data): modem::set_tx_path
     QLabel* restart_note_;  // shown while OK would restart a running station
 };
 

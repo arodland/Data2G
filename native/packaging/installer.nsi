@@ -31,6 +31,10 @@ Unicode true
 !else
   !define MAINEXE "data2g-host.exe"
 !endif
+; The FM profile's GUI, when the package holds it (tools/package_app.sh): its own shortcut.
+!if /FileExists "${SRCDIR}\data2g-gui-fm.exe"
+  !define FMEXE "data2g-gui-fm.exe"
+!endif
 
 Name "Data2G ${VERSION}"
 OutFile "${OUTFILE}"
@@ -88,6 +92,9 @@ Section "Data2G (required)" SecMain
   CreateDirectory "$SMPROGRAMS\Data2G"
   CreateShortcut "$SMPROGRAMS\Data2G\Data2G.lnk" "$INSTDIR\${MAINEXE}"
   CreateShortcut "$SMPROGRAMS\Data2G\Uninstall Data2G.lnk" "$INSTDIR\uninstall.exe"
+!ifdef FMEXE
+  CreateShortcut "$SMPROGRAMS\Data2G\Data2G FM.lnk" "$INSTDIR\${FMEXE}"
+!endif
 
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "Data2G"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
@@ -107,6 +114,9 @@ SectionEnd
 
 Section /o "Desktop shortcut" SecDesktop
   CreateShortcut "$DESKTOP\Data2G.lnk" "$INSTDIR\${MAINEXE}"
+!ifdef FMEXE
+  CreateShortcut "$DESKTOP\Data2G FM.lnk" "$INSTDIR\${FMEXE}"
+!endif
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
@@ -130,7 +140,9 @@ FunctionEnd
 Section "Uninstall"
   SetRegView 64
   Delete "$DESKTOP\Data2G.lnk"
+  Delete "$DESKTOP\Data2G FM.lnk"
   Delete "$SMPROGRAMS\Data2G\Data2G.lnk"
+  Delete "$SMPROGRAMS\Data2G\Data2G FM.lnk"
   Delete "$SMPROGRAMS\Data2G\Uninstall Data2G.lnk"
   RMDir "$SMPROGRAMS\Data2G"
   ; Guarded: an empty $INSTDIR would make this delete the drive root.

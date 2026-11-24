@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import cpm as _cpm
-from ..config import SUBMODES
+from ..config import PROFILE, SUBMODES, data_path
 
 DATA = Path(__file__).parent.parent / "codes_data"
 BANDS = ("w", "n10", "n4", "w48")
@@ -354,7 +354,71 @@ class OutcomeEnsemble:
         return out
 
 
+# FM (plan M6): no outcome model has seen an FM channel, so the FM gear
+# shifter predicts P(codeword decodes) from snr_est against each mode's row of
+# codes_data/fm/mode_thresholds.json, a per-burst calibration
+# (scripts/fm_regime_study.py calib: 10636 bursts, every mode and path, five
+# conditions, CNRs around its knee; scripts/fm_threshold_table.py fit): the
+# static column is snr_est at P = 0.9 on steady noise, the mobile column on
+# fading noise, FM_SLOPE_* logits per dB either side. The regime is the
+# per-window noise spread (phy.n0_spread_db, the shifter's median over the
+# peer's last bursts; fading from FM_FADING_SPREAD_DB): static 0.35 dB,
+# flutter 0.27, slow fading 1.04, mobile 1.77 (medians, scripts/fm_regime_study.py); HF's Doppler spread
+# reads about zero on FM audio. A reading on another band than the mode's is
+# moved by the bands' snr_est offsets on the same channel
+# (scripts/fm_band_offsets.py, static, median of mic and flat).
+# Studies: DATA2G_FM_PREDICTOR=prov, the first stand-in (static column, 2
+# logits per dB, a flat 6 dB for any other band); DATA2G_FM_REGIME=0, every
+# burst steady; DATA2G_FM_THRESHOLDS, another table.
+FM_THRESHOLD = PROFILE == "fm"
+FM_PROV = os.environ.get("DATA2G_FM_PREDICTOR") == "prov"
+FM_REGIME = os.environ.get("DATA2G_FM_REGIME", "1") == "1"
+FM_SLOPE_STEADY = float(os.environ.get("DATA2G_FM_SLOPE_STEADY", "1.50"))  # env: studies
+FM_SLOPE_FADING = 0.51
+# 1.0 dB, not the 0.7 the regime study split at: flutter bursts reach 0.7 (p90),
+# and at 0.7 the shifter read flutter as fading (sessions at 1.0: flutter -797 -> -257 bps
+# flat at CNR 32, -567 -> +102 mic at 14, against the provisional predictor)
+FM_FADING_SPREAD_DB = float(os.environ.get("DATA2G_FM_FADING_SPREAD_DB", "1.0"))  # env: studies
+FM_BAND_OFFSET_DB = {"w": 0.8, "n10": -3.9, "f55": 0.0, "f108": -3.9}  # snr_est against f55's, same channel
+# DATA2G_FM_BAND_OFFSET="band:dB,..." (studies): these entries instead
+FM_BAND_OFFSET_DB.update({b: float(v) for b, v in (e.split(":") for e in
+                                                    os.environ.get("DATA2G_FM_BAND_OFFSET", "").split(",") if e)})
+# On steady noise only, a reading on another band moves this much more for a mode
+# on these bands. f55 and w readings overstate f108 by 0.5-1.2 dB at CNR 8-12 on
+# flat (static; scripts/fm_band_predict.py), where a full f108 burst then failed
+# once a session; mobile has its own column. Sessions (scripts/fm_session_study.py
+# off1s, 8 paired seeds): flat static CNR 10 +584 bps, flutter +453, ramp +756,
+# CNR 16-32 -53..-85, mic unchanged, flat mobile 32 -835. A short first burst on a
+# new band instead lost 0.6-1.5 kbps at every flat CNR above 10 (one per session).
+# DATA2G_FM_STEADY_OFFSET="band:dB,..." (studies): this table instead.
+FM_STEADY_OFFSET_DB = {"f108": -1.0}
+if os.environ.get("DATA2G_FM_STEADY_OFFSET") is not None:
+    FM_STEADY_OFFSET_DB = {b: float(v) for b, v in (e.split(":") for e in
+                                                    os.environ["DATA2G_FM_STEADY_OFFSET"].split(",") if e)}
+_FM_THR = (json.loads(Path(os.environ.get("DATA2G_FM_THRESHOLDS") or data_path("mode_thresholds.json")).read_text())
+           ["modes"] if FM_THRESHOLD else {})
+
+
+def fm_outcome(snr_est: float, submode: str, measured_band: str | None = None, n0_spread_db: float = 0.0) -> float:
+    band = SUBMODES[submode].band
+    thr = _FM_THR[submode]
+    if FM_PROV:
+        if measured_band is not None and band != measured_band:
+            snr_est -= 6.0
+        z = np.log(9.0) + 2.0 * (snr_est - thr[0])
+    else:
+        fading = FM_REGIME and n0_spread_db >= FM_FADING_SPREAD_DB
+        if measured_band is not None:
+            snr_est += FM_BAND_OFFSET_DB.get(band, 0.0) - FM_BAND_OFFSET_DB.get(measured_band, 0.0)
+            if band != measured_band and not fading:
+                snr_est += FM_STEADY_OFFSET_DB.get(band, 0.0)
+        z = np.log(9.0) + (FM_SLOPE_FADING if fading else FM_SLOPE_STEADY) * (snr_est - thr[2 if fading else 0])
+    return float(1 / (1 + np.exp(-np.clip(z, -40, 40))))
+
+
 def outcome_knows(submode: str) -> bool:
+    if FM_THRESHOLD:
+        return submode in _FM_THR
     m = outcome_model()
     return m is not None and submode in m.modes
 
@@ -428,6 +492,9 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     next burst `seconds` long. `model`: another than the installed one (a gate's).
     `extra`: {mode: logit} added to P(usable) on top of LOGIT_OFFSETS (the
     shifter's conditional offsets, policy.COND_OFFSETS)."""
+    if FM_THRESHOLD:  # the provisional threshold predictor (fm_outcome)
+        return {s.name: (fm_outcome(measured["snr_est"], s.name, band, measured.get("n0_spread_db", 0.0)),) * 2
+                for s in (submodes or SUBMODES.values()) if s.name in _FM_THR}
     model = model or outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,
                              model.energy, model.hist))

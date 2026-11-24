@@ -23,11 +23,11 @@ BEGIN
       // Must match the signing certificate's subject once there is one
       // (and installer.nsi's Publisher). Placeholder until then.
       VALUE "CompanyName",      "Data2G"
-      VALUE "FileDescription",  "Data2G HF data modem"
+      VALUE "FileDescription",  "@DATA2G_DESCRIPTION@"
       VALUE "FileVersion",      "@PROJECT_VERSION@.0"
       VALUE "InternalName",     "@DATA2G_RC_NAME@"
       VALUE "OriginalFilename", "@DATA2G_RC_NAME@.exe"
-      VALUE "ProductName",      "Data2G"
+      VALUE "ProductName",      "@DATA2G_PRODUCT@"
       VALUE "ProductVersion",   "@PROJECT_VERSION@"
     END
   END

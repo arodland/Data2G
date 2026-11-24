@@ -35,6 +35,7 @@ int rv_cycle(const Mode& m);
 int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap
 std::string bw_name(int cap);  // BW_NAME, VARA's name for it (500, 1200, 2300); throws for an unknown cap
 double width_hz(const Mode& m);
+bool selectable(const Mode& m);  // modes.py SELECTABLE: the ARQ may choose it and name it on air
 std::vector<const Mode*> allowed(int cap);  // within the cap, MODES' order
 
 // The recommendation code (the core word's 6-bit recommend): sync band code

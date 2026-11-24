@@ -1,0 +1,13 @@
+00:20:05 from: OK
+00:20:05 from: PTT ON
+00:20:06 to: BUSY ON
+00:20:08 from: PTT OFF
+00:20:08 to: PING KC2G-2 KC2G-1 snr=15.6 rms=-48.6 peak=-43.7 clip=0 thirds=15.0/14.5/12.0 dist=0.0 noise_tilt=-0.3
+00:20:08 to: BUSY OFF
+00:20:08 to: PTT ON
+00:20:09 from: BUSY ON
+00:20:11 to: PTT OFF
+00:20:11 from: PINGACK KC2G-1 far snr=15.8 rms=-48.5 peak=-43.5 clip=0 thirds=15.0/14.5/12.0 dist=0.0 noise_tilt=-0.5 near snr=21.6 rms=-38.9 peak=-27.9 clip=0 thirds=25.4/25.8/21.3 dist=0.0 noise_tilt=-7.1
+00:20:11 from: PINGVERDICT KC2G-1 level OK
+00:20:11 from: BUSY OFF
+00:20:20 to: IAMALIVE

@@ -29,16 +29,17 @@ from pathlib import Path
 import numpy as np
 
 from .. import codes, cpm, cwid, hand, modem
-from ..config import FS, LEADIN_SAMPLES, max_codewords
+from ..config import FS, LEADIN_SAMPLES, PROFILE, SPREAD_WINDOW, max_codewords
 from ..receiver import NoiseProfile, Receiver, ReplySlot
-from ..waveform import dsp
 from . import burst as B
 from . import frames as F
 from . import link as LK
 from . import nod as N
 from . import phy as PHY
+from . import ping as PG
+from . import probe as PR
 from . import session as S
-from .modes import MODES, burst_seconds
+from .modes import MODES, burst_seconds, max_ctl
 from .policy import CONNECT, ROBUST_CONNECT, ROBUST_CONNECTS, GearShifter
 
 log = logging.getLogger("data2g.engine")
@@ -84,6 +85,13 @@ ID_INTERVAL_S = 600.0
 PENDING_MODES = {"off": frozenset(), "fsk": frozenset(ROBUST_CONNECTS), "ofdm": frozenset(CONNECT.values()),
                  "all": frozenset({*ROBUST_CONNECTS, *CONNECT.values()})}
 PENDING_SLACK_S = 3.0
+
+
+def _connect_cw(submode: str) -> int:
+    """Codewords a CONNECT burst in `submode` carries: one, but a robust
+    retry its control's copies (FM's ROBUST_CONNECT is OFDM, control twice;
+    HF's is CPM, once)."""
+    return max_ctl(MODES[ROBUST_CONNECT]) if submode == ROBUST_CONNECT else 1
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
@@ -139,13 +147,31 @@ class Recorder:
         self.log.write(json.dumps(dict(kind=kind, **kw), default=_jsonable) + "\n")
 
     def rx(self, t: float, audio: np.ndarray, header: dict, r: dict | None, meas: dict | None,
-           noise: dict | None = None) -> str:
+           noise: dict | None = None, early: bool = False) -> str:
         name = f"rx_{self.n:05d}.npz"
         self.n += 1
         np.savez_compressed(self.dir / name, audio=audio.astype(np.float32))
         self.event("rx", t=t, file=name, submode=header["spec"].name, n_cw=header["n_cw"],
-                   score=header["score"], lost=r is None, meas=meas, noise=noise)
+                   score=header["score"], lost=r is None, meas=meas, noise=noise, lock=lock_record(header, r, early))
         return name
+
+
+def lock_kind(header: dict) -> str:
+    """How a burst was locked: the preamble search, the header copy mid-burst, or CPM's."""
+    return "cpm" if header.get("family") == "cpm" else "copy" if "copy" in header else "preamble"
+
+
+def lock_record(header: dict, r: dict | None, early: bool) -> str | dict:
+    """The recording's `lock` (native's Recorder): a burst received from the wrong lock reads as
+    noise (2026-11-23, FM: two 256l bursts locked ~5 ms early). A received OFDM burst: the lock
+    and where the receiver put it; otherwise the lock's kind alone."""
+    if r is None or r.get("family") == "cpm" or "p0" not in r:
+        return lock_kind(header)
+    return dict(kind=lock_kind(header), score=float(header["score"]), start=int(header["start"]),
+                cfo=float(header.get("cfo", 0.0)), early=early, rx_score=float(r["score"]),
+                preamble=int(r["preamble_start"]), p0=int(r["p0"]), shift=int(r["shift"]),
+                steps=float(r["steps"][-1]) if len(r["steps"]) else 0.0, slips=int(np.sum(r["slips"])),
+                rx_cfo=float(r["cfo"]))
 
 
 def _jsonable(v):
@@ -161,7 +187,9 @@ def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
     KISS_FRAME_BYTES frame where that is longer."""
     from ..kisslink import framed_len
 
-    a = modem.Accept.of(None, MAX_BURST_S, min_header_score)
+    # FM: only the bands its ARQ uses (frames.BANDS_CODE): no detector runs for w48
+    names = [n for n, s in modem.SUBMODES.items() if s.sync_band in F.BANDS_CODE] if PROFILE == "fm" else None
+    a = modem.Accept.of(names, MAX_BURST_S, min_header_score)
     out = []
     for n, cw in a.max_cw:
         s = modem.SUBMODES[n]
@@ -184,7 +212,8 @@ class Engine:
         self.policy_factory = policy or GearShifter
         self.rng = random.Random(seed)
         self.accept = receive_accept(min_header_score)
-        self.receiver = Receiver(self.accept, cpm_grids=tuple(cpm.GRIDS))
+        # FM has no CPM modes (plan Q2): no CPM lock search either
+        self.receiver = Receiver(self.accept, cpm_grids=() if PROFILE == "fm" else tuple(cpm.GRIDS))
         self.noise = NoiseProfile()  # the passband's noise between bursts (recorded with each burst heard)
         self.ptt_delay = int(ptt_delay_s * FS)
         # seconds from this engine's sample clock to RF for my own audio: keying, the TX lead, the
@@ -197,9 +226,14 @@ class Engine:
         self.tx = None  # [burst, audio, position]
         self.session = None
         self.store = {}  # soft bits per codeword key, across bursts (phy.ModemRx)
+        self._inc_rx = None  # (header start, its ModemRx): the burst being decoded as it arrives
         self.chat = False
         self._idle_close_s = None  # set_idle_close
         self._extra: list = []  # bursts outside any session (CQ frames), sent when the channel is free
+        self._ping_replied: dict = {}  # caller -> time of our last ping reply (PG.REPLY_HOLDOFF_S)
+        self._ping_sent: set = set()  # stations we pinged, until their reply
+        self._probes: list = []  # pings heard whose probe is still arriving: [from, to, report, first sample]
+        self._fed = 0  # stream samples heard, this block's included (self.n's basis)
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
         self.stats_interval_s = stats_interval_s
@@ -364,12 +398,14 @@ class Engine:
             raise ValueError("bad channel or tag")
         if not 0 <= payload < 2 ** 64 or not 0 < d_s < HAND_ARM_EXPIRE_S:
             raise ValueError("bad payload or delay")
+        if hand.FM and self.ptt_delay > hand.PTT_MAX_SAMPLES:
+            raise ValueError("PTT delay over the slot's budget")  # my carrier would cover the slot before
         payload &= (1 << hand.PAYLOAD) - 1  # 16 hex digits, the top bit ignored (docs/arq.md §9)
         end, cfo, _ = self.hand_refs[ref]
-        target = int(round((end + d_s - self.tx_latency_s) * FS)) - self.ptt_delay
+        target = int(round((end + d_s - self.tx_latency_s) * FS)) - self.ptt_delay + hand.slot_offset(channel)
         if target < self.n:
             raise ValueError("the slot has passed")
-        audio = np.concatenate([np.zeros(self.ptt_delay), hand.tx_audio(tag, payload, channel, cfo)])
+        audio = np.concatenate([np.zeros(self.ptt_delay), PHY.tone_scale(hand.tx_audio(tag, payload, channel, cfo))])
         self._hand_tx = [target, audio, channel]
 
     def hand_listen(self, d_s: float, tag: int, ack: int, channels: list[int]):
@@ -414,7 +450,8 @@ class Engine:
             raise ValueError("the slot has passed")
         hl = self._hand_listen = dict(d=d, tag=None, ack=None, channels=list(dict.fromkeys(channels)), armed=self.n,
                                       open=True, passive=True, buf=[], first=0, next=0, anchor=a,
-                                      lo=a + d - hand.SEARCH_SAMPLES, hi=a + d + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES)
+                                      lo=a + d - hand.SEARCH_SAMPLES,
+                                      hi=a + d + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES + hand.slot_offset(max(channels)))
         first, last = max(hl["lo"], old), min(self.n, hl["hi"])
         if first < last:  # late: what the window already holds comes from the ring
             idx = np.arange(first, last) % len(self._hist)
@@ -491,7 +528,8 @@ class Engine:
         slot lies before the capture, so no decodes (a search reaching past
         the capture's head reads zeros, as hand.bins pads). A decoder exception costs the round, not the station."""
         lines = []
-        if nominal >= 0:
+        channels = [c for c in channels if nominal + hand.slot_offset(c) >= 0]
+        if channels:
             try:
                 res = hand.decode_window(y, tag, channels, nominal, rnd)
                 lines = [f"HAND {r['c']} {r['payload']:016x} {r['snr']:.1f} {r['dt_ms']:.0f}"
@@ -527,6 +565,65 @@ class Engine:
         if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
             raise RuntimeError(f"session {self.session.state}")
         self._extra.append(self._open_frame(cap, F.T_CQ, F.pack_cq(call, cap)))
+
+    def send_ping(self, to: str, cap: int = 1):
+        """FM: a ping to `to` (arq.ping): an identity burst and the sounding
+        probe behind it, which measures both bandwidths (`cap` is accepted for
+        the host's PING call [NARROW|WIDE]). Its reply comes back as PINGACK
+        and PINGVERDICT events. Not while a session is under way."""
+        if PROFILE != "fm" or cap not in (1, 2):
+            raise ValueError("ping: FM only, cap 1 (NARROW) or 2 (WIDE)")
+        if self.session.state not in (S.IDLE, S.LISTEN, S.CLOSED):
+            raise RuntimeError(f"session {self.session.state}")
+        F.pack_call(to)  # ValueError now, not at send
+        self._ping_sent.add(to)
+        self._extra.append(self._ping_burst(to, None))
+
+    def _ping_burst(self, to: str, report: bytes | None) -> B.TxBurst:
+        """A ping (or, with `report`, a reply): its identity burst at the top
+        modes' level, the probe behind it."""
+        pb = self.session.policy.payload_bytes(PG.PING_MODE)
+        payloads = F.Control(F.Core(ftype=F.SESSION), {F.T_PING: PG.ping_body(self.call, to, report)}).pack(pb)
+        return B.TxBurst(PG.PING_MODE, [B.Slot(B.ctl_mask(0, i, 0), 0, p) for i, p in enumerate(payloads)], 0, 1,
+                         level=PG.tx_level(modem.TX_PATH), probe=True)
+
+    def _ping(self, body: bytes, ev: dict | None):
+        """A ping's identity burst heard: if it is to us, its probe follows from
+        the burst's end; keep its place in the stream (_probe_check reads it
+        from the history ring once it is all in)."""
+        frm, to, report = PG.unpack_ping(body)
+        if to not in (self.call, *self.aliases) or not ev or "end" not in ev["header"]:
+            return
+        h = ev["header"]
+        after = len(ev["audio"]) - (h["end"] - h["start"])  # heard since the burst's end
+        self._probes.append([frm, to, report, self._fed - after])
+
+    def _probe_check(self, t: float):
+        """Probes now wholly heard: measure them; a ping: PING, and a reply when
+        free (once per caller per REPLY_HOLDOFF_S); a reply to ours: PINGACK (how
+        ours arrived there, and theirs here) and PINGVERDICT lines (probe.verdict)."""
+        n = PR.n_samples()
+        for p in [p for p in self._probes if self._fed >= p[3] + n]:
+            self._probes.remove(p)
+            frm, to, report, first = p
+            if first < self._fed - len(self._hist):
+                continue
+            y = self._hist[np.arange(first, first + n) % len(self._hist)]
+            m = PR.summary(PR.analyse(y), PG.level(y))
+            if report is None:
+                log.info("RX PING from %s: %s", frm, PR.fmt(m))
+                self._events.append(f"PING {frm} {to} {PR.fmt(m)}")
+                last = self._ping_replied.get(frm)
+                if self.session.state in (S.IDLE, S.LISTEN, S.CLOSED) and (last is None or t - last >= PG.REPLY_HOLDOFF_S):
+                    self._ping_replied[frm] = t
+                    self._extra.append(self._ping_burst(frm, PR.pack_report(m)))
+                continue
+            far = PR.unpack_report(report)
+            log.info("RX PINGACK from %s: far %s, near %s", frm, PR.fmt(far), PR.fmt(m))
+            self._events.append(f"PINGACK {frm} far {PR.fmt(far)} near {PR.fmt(m)}")
+            if frm in self._ping_sent:
+                self._ping_sent.discard(frm)
+                self._events += [f"PINGVERDICT {frm} {v}" for v in PR.verdict(far, modem.TX_PATH)]
 
     def _open_frame(self, cap: int, ext: int, body: bytes) -> B.TxBurst:
         """A control-only burst anyone can read (frame type SESSION, mask 0),
@@ -645,10 +742,13 @@ class Engine:
             self.rec.audio(x if self.tx is None else np.zeros(k))
         idx = np.arange(self.n, self.n + k) % len(self._hist)
         self._hist[idx] = x if self.tx is None else 0.0
+        self._fed = self.n + k
         if self.tx is None:
             self.noise.feed(x, self.now)
             cw = self.cw.feed(x)
             self._hear(x, t)
+            if self._probes:
+                self._probe_check(t)
             self._hand_collect(x, k)
             self._cw_false_lock()
             cw = cw and not (self._hand_hold and t < self._hand_hold + HAND_CW_TAIL_S)  # Hands, not an ID
@@ -730,7 +830,7 @@ class Engine:
                     a = self.n + n + int(round(self.tx_latency_s * FS))  # its end on air (self.n advances at the step's end)
                     hl.update(open=True, buf=[], anchor=a,
                               lo=a + hl["d"] - hand.SEARCH_SAMPLES,
-                              hi=a + hl["d"] + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES)
+                              hi=a + hl["d"] + hand.SEARCH_SAMPLES + hand.LEN_SAMPLES + hand.slot_offset(max(hl["channels"])))
                     self._hand_hold = hl["hi"] / FS
                 if not self._tx_kiss:  # a Hand or broadcast burst is not the session's: no reply timer, no _tx_end
                     self._tx_end = self.now + n / FS  # the expected-reply/missed-burst accounting's
@@ -782,6 +882,12 @@ class Engine:
     def next_event(self) -> float | None:
         return self.session.next_event()
 
+    @property
+    def tx_path(self) -> str:
+        """The station's FM radio path (modem.TX_PATH): what its bursts are
+        shaped for, for a level / ping report (FM plan M7)."""
+        return modem.TX_PATH
+
     def _dd_budget(self, end: float, t: float) -> float | None:
         """DD's seconds for a burst that ended at `end` (stream time; `t`: the
         block's end): DD_BUDGET_S, and in a session no further than my reply's
@@ -809,10 +915,20 @@ class Engine:
                 self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 self._span = (start, start + burst_seconds(spec, ev["n_cw"]), spec.name) if spec else None
                 self._pending_resolve()  # a superseded header's
-                if (self._pend is None and ev["n_cw"] == 1 and self.session.state == S.LISTEN
+                if (self._pend is None and ev["n_cw"] <= _connect_cw(ev["spec"].name) and self.session.state == S.LISTEN
                         and ev["spec"].name in PENDING_MODES[self.pending]):
-                    self._pend = [start + burst_seconds(spec, 1) + PENDING_SLACK_S, False]
+                    self._pend = [start + burst_seconds(spec, ev["n_cw"]) + PENDING_SLACK_S, False]
                     self._events.append("PENDING")
+                continue
+            if kind == "partial":
+                # decoding while the burst arrives (config.SPREAD_WINDOW): the
+                # codeword groups complete so far, DD on this window's share of
+                # the burst's budget; the "burst" event finishes the same ModemRx
+                h = ev["header"]
+                if self._inc_rx is None or self._inc_rx[0] != h["start"]:
+                    self._inc_rx = (h["start"], PHY.ModemRx(ev["rx"], self.store, PHY.DD_BUDGET_S))
+                n_f = h["n_cw"] * h["spec"].frames_per_cw
+                self._inc_rx[1].advance(ev["rx"], PHY.DD_BUDGET_S * min(1.0, SPREAD_WINDOW / n_f))
                 continue
             if self._pend is not None:
                 self._pend[1] = True  # resolved once the session has read it (events)
@@ -834,14 +950,20 @@ class Engine:
                 # heard (decoded or not): the peer's, most likely
                 self._energy(*span, t, floor_db=meas["snr_est"] if meas else None)
             if self.rec:
-                self.rec.rx(t, ev["audio"], h, r, meas, self.noise.snapshot())
+                early = self._inc_rx is not None and self._inc_rx[0] == h["start"]
+                self.rec.rx(t, ev["audio"], h, r, meas, self.noise.snapshot(), early)
             if r is None:
                 log.info("RX %s x%d: header heard (score %.2f), burst lost", h["spec"].name, h["n_cw"], h["score"])
                 if self.kiss is not None and self.session.state in (S.IDLE, S.LISTEN, S.CLOSED):
                     # maybe an open port's: BCAST * MISSED
                     self.kiss.missed(h["spec"].name, h["n_cw"], self._span_snr(*span) if span else None)
                 continue
-            rx = PHY.ModemRx(r, self.store, self._dd_budget(end, t))
+            inc, self._inc_rx = self._inc_rx, None
+            if inc is not None and inc[0] == h["start"]:
+                rx = inc[1]
+                rx.advance(r, self._dd_budget(end, t))  # the rest: the last groups, DD within the turn's budget
+            else:
+                rx = PHY.ModemRx(r, self.store, self._dd_budget(end, t))
             # in a session, its peer's bursts are the likely ones: the session
             # claims the burst before KISS tries its keys on it (two failed
             # decodes per ARQ burst: ~10% of a Pat exchange's CPU). Asked
@@ -857,7 +979,7 @@ class Engine:
                 if frames is not None:  # a broadcast burst: not the session's
                     self.kiss_rx += frames
                     continue
-            if self._cq(rx):
+            if self._cq(rx, ev, t):
                 continue
             if not ours and rx.converged(0) and self.session.foreign(rx):
                 # a whole codeword under another key: its measurements and
@@ -977,9 +1099,9 @@ class Engine:
             return [b] if b is not None else None
         return link.next_bursts()
 
-    def _cq(self, rx) -> bool:
-        """A CQ frame (notified: CQFRAME call cap) or an ID frame (ID call key)?
-        Then nothing else to do."""
+    def _cq(self, rx, ev: dict | None = None, t: float = 0.0) -> bool:
+        """A CQ frame (notified: CQFRAME call cap), an ID frame (ID call key)
+        or, on FM, a ping (_ping)? Then nothing else to do."""
         first = rx.decode(0, B.ctl_mask(0, 0, 0), 0, None)
         if first is None:
             return False
@@ -992,6 +1114,9 @@ class Engine:
         # a malformed one (docs/arq.md §4) is dropped as if it had not decoded
         try:
             ext = F.Control.unpack(payloads).ext
+            if PROFILE == "fm" and F.T_PING in ext:
+                self._ping(ext[F.T_PING], ev)
+                return True
             if F.T_ID in ext:
                 call, key = F.unpack_id(ext[F.T_ID])
                 log.info("RX ID %s (session %04x)", call, key)
@@ -1017,7 +1142,7 @@ class Engine:
         # A CW ID is built at that peak.
         xs = [cwid.audio(b.text, b.wpm) if isinstance(b, cwid.CwBurst) else PHY.tx_audio(b) for b in bursts]
         audio = np.concatenate([np.zeros(self.ptt_delay)] + [
-            x if isinstance(b, cwid.CwBurst) else x / np.max(dsp.envelope(x)) for b, x in zip(bursts, xs)])
+            PHY.tone_scale(x) if isinstance(b, cwid.CwBurst) else PHY.full_scale(x) for b, x in zip(bursts, xs)])
         self._cw_plan(bursts, [len(x) for x in xs], t)
         self.tx = [main, audio, 0]
         if self.rec:

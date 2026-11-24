@@ -216,7 +216,7 @@ PICKS = {
 def write(a):
     out = {}
     for name, (heavy, seed, d) in PICKS.items():
-        spec = MODES[name]
+        spec = MODES.get(name, cpm.R23_SPEC)  # fsk32r62-r2/3: its code is frozen whether it is offered or not
         p = cpm.GRIDS[spec.grid].bits
         n, k = spec.coded_bits // p, -(-spec.k // p)
         c = gfldpc.design(p, n, k, heavy, seed)

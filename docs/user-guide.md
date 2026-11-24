@@ -255,6 +255,8 @@ data2g-host --mycall W1AW --input-device "USB Audio" --output-device "USB Audio"
 
 Software-defined radios driven by ExpertSDR, Thetis, AetherSDR and similar programs can offer a TCI server. TCI carries audio, PTT and the dial frequency over one network connection, so no sound card or CAT setup is needed. Choose **TCI** as the radio interface and enter the server's address (the default is `localhost:50001`). The sample rate must be 8000, 24000 or 48000.
 
+On the headless host, a sound card or radio flag on the command line (`--input-device`, `--output-device`, `--audio-io`, `--rig-model`, `--rig-device`, `--ptt-method`, `--ptt-device`) turns TCI off even when the saved settings have it on.
+
 ### Setting up the radio itself
 
 - Use upper sideband, or your radio's USB data mode.
@@ -264,6 +266,20 @@ Software-defined radios driven by ExpertSDR, Thetis, AetherSDR and similar progr
 - Set the transmit level so that the radio reaches the power you want with little or no ALC action. Overdriving makes your signal wider and harder to decode, not stronger.
 - Set the receive level using the meter on the right edge of the waterfall (section 7). Band noise should sit well up the bar in the green, and **CLIP** should never appear.
 - Data2G transmissions can be long and close to full power for their whole length. Respect your radio's duty cycle rating. Many 100 W radios are happier at 30 to 50 W on data.
+
+### FM radios (VHF/UHF)
+
+These notes apply to the FM build of Data2G.
+
+- **Where it is.** The same download holds both. Start **Data2G FM** from its own shortcut (Windows), app (macOS) or desktop entry (Linux; from the AppImage, `Data2G.AppImage fm`). Its programs are `data2g-fm`, `data2g-host-fm` and `data2g-web-fm`. It keeps its own settings, in `Data2G/data2g-fm.conf` beside the HF profile's `data2g.conf`. Both use the same default ports, which client applications expect, so to run HF and FM at once, change the ports of one of them (and in the client that uses it).
+
+- **TX path.** Set **TX path** to **flat** for a radio's 9600 or data port (no pre-emphasis), and to **mic** for a microphone or speaker-mic input. A ping says when this looks wrong.
+- **Ping.** Ping another station before a session (`PING call` on the host's command port). One exchange measures both directions, and reports how much audio band the path carries (NARROW or WIDE) and whether your transmit level suits your radio. Follow its advice on the level.
+- **Bandwidth.** Many radios' audio paths stop near 3.4 kHz. WIDE needs a flat path at both ends, such as 9600 ports or a receiver's IF output. If a ping says "NARROW only", use NARROW.
+- **Radios tested so far:**
+  - **IC-9700**: DATA MOD USB, USB MOD level about 10% (at 40% its limiter distorts the signal and throughput drops by about a quarter). Its USB AF output carries NARROW only; for WIDE use "USB Output IF".
+  - **TH-D75** through an AIOC: mic level high, PTT on the AIOC's serial port with DTR high and RTS low. Its receive audio limits S/N to about 15 dB, which caps the speed of anything sent to it.
+  - **FT-8800R** through a DigiRig: data port set to 9600, TX path flat. Turn off the DigiRig sound chip's **Auto Gain Control** (in `alsamixer` or your mixer): left on, it overloads the input from a 9600 port even at the lowest gain.
 
 ### Your callsign
 

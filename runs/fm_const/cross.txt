@@ -1,0 +1,58 @@
+(null): No such file or directory
+
+c16 f55m: rows = set, columns = rung knee (bits/cell, static)
+set                         r47
+gray-qam16               2.1526
+gray-qam16               2.1526
+c16-f55m-r47             2.1399
+
+c64 f55m: rows = set, columns = rung knee (bits/cell, static)
+set                         r50      r67      r86
+gray-qam64               3.3547   4.4974   5.3831
+c64-w48-r12              3.4986   4.6183   5.4084
+c64-w48-r34              3.4123   4.5371   5.4270
+c64-f55m-r50             3.4681   4.5631   5.3505
+c64-f55m-r67             3.4725   4.6236   5.4146
+c64-f55m-r86             3.4356   4.5099   5.4300
+
+c256 f55m: rows = set, columns = rung knee (bits/cell, static)
+set                         r67      r72
+gray-qam256              5.5834   5.9479
+c256-w48-r12             5.7951   6.1354
+c256-f55m-r67            5.8208   6.1562
+c256-f55m-r72            5.7985   6.1499
+
+c16 f55f: rows = set, columns = rung knee (bits/cell, static)
+set                         r67
+gray-qam16               2.8896
+gray-qam16               2.8896
+c16-f55f-r67             2.9121
+
+c256 f55f: rows = set, columns = rung knee (bits/cell, static)
+set                         r47      r60      r67      r72
+gray-qam256              4.1515   5.2046   5.6561   6.0302
+c256-w48-r12             4.3856   5.3394   5.8198   6.1943
+c256-f55f-r47            4.3850   5.3761   5.7705   6.1178
+c256-f55f-r60            4.3964   5.4049   5.8419   6.1786
+c256-f55f-r67            4.3530   5.3527   5.8246   6.1694
+c256-f55f-r72            4.2858   5.3633   5.8429   6.1646
+
+c64 f108f: rows = set, columns = rung knee (bits/cell, static)
+set                         r40      r50      r59      r67
+gray-qam64               2.9650   3.5976   4.1441   4.5864
+c64-w48-r12              3.0644   3.7259   4.2426   4.7000
+c64-w48-r23              3.0020   3.7292   4.2189   4.6770
+c64-f108f-r40            3.1122   3.7026   4.1664   4.4845
+c64-f108f-r50            3.0863   3.7363   4.2376   4.6640
+c64-f108f-r59            3.0525   3.7265   4.2459   4.6877
+c64-f108f-r67            2.9833   3.7325   4.2348   4.6821
+
+c256 f108f: rows = set, columns = rung knee (bits/cell, static)
+set                         r59      r67      r75      r80
+gray-qam256              5.3875   5.9609   6.5133   6.8432
+c256-w48-r12             5.6204   6.1710   6.6644   6.9227
+c256-w48-r58             5.5513   6.1173   6.6718   6.9504
+c256-f108f-r59           5.6404   6.1686   6.6109   6.8276
+c256-f108f-r67           5.6297   6.1994   6.7005   6.9583
+c256-f108f-r75           5.5738   6.1476   6.7069   6.9850
+c256-f108f-r80           5.5582   6.1368   6.7053   6.9890

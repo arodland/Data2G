@@ -54,6 +54,21 @@ def pytest_xdist_auto_num_workers(config):
 
 def pytest_collection_modifyitems(config, items):
     items.sort(key=lambda it: not it.nodeid.startswith(LONG_FIRST))  # stable: the rest keep their order
+    # @pytest.mark.hf_only("what another profile must re-measure"): a test of an
+    # HF calibration (measured at 8 kHz, on HF channels or recordings) skips
+    # under another DATA2G_PROFILE until that profile has its own.
+    from data2g import config as data2g_config
+
+    if data2g_config.PROFILE != "hf":
+        for it in items:
+            if m := it.get_closest_marker("hf_only"):
+                it.add_marker(pytest.mark.skip(reason=f"HF calibration: {m.args[0] if m.args else ''}"))
+    # @pytest.mark.python_only("why"): a Python feature native has not got yet;
+    # skipped under --native (the C++ stands in for the module it tests)
+    if config.getoption("--native"):
+        for it in items:
+            if m := it.get_closest_marker("python_only"):
+                it.add_marker(pytest.mark.skip(reason=f"not in native yet: {m.args[0] if m.args else ''}"))
 
 
 def pytest_addoption(parser):

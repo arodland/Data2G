@@ -83,7 +83,8 @@ NOISE_REF_HZ = (-625.0, 625.0)  # far bins for the noise level only (not searche
 # reach under 0 Hz and over 3 kHz and read low: on FM noise its searched
 # bins stayed 3.2 dB over the level (2.2e-3 of starts over the threshold;
 # +-250 Hz: 1.6 dB, 1.3e-5; white noise unchanged either way)
-NOISE_REF_BY_BAND = {"w48": (-250.0, 250.0)}
+# FM's f55 (450..3150 Hz) and f108 (300..5650 Hz) the same: at -625 Hz both reach under 0 Hz
+NOISE_REF_BY_BAND = {"w48": (-250.0, 250.0), "f55": (-250.0, 250.0), "f108": (-250.0, 250.0)}
 
 
 def noise_ref_hz(band) -> tuple:

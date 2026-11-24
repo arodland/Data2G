@@ -5,7 +5,7 @@ import pytest
 
 from data2g import codes, cpm, gfldpc
 
-SPECS = list(cpm.SPECS.values())
+SPECS = list(cpm.SPECS.values()) + ([] if cpm.R23 else [cpm.R23_SPEC])  # its code is tested offered or not
 
 
 def energies(g, tones, rng, esn0_db=30.0):

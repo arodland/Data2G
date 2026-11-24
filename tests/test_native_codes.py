@@ -68,6 +68,11 @@ def test_spread(native, py):
             np.testing.assert_array_equal(s, py.spread(x, m).reshape(2, -1))
             assert s.dtype == dtype
             np.testing.assert_array_equal(native.codes.despread(s, n_cw, m), py.despread(s, n_cw, m).reshape(2, -1))
+            for group in (1, 2, 3):  # windowed interleaving (config.SPREAD_WINDOW): groups of codewords
+                s = native.codes.spread(x.reshape(2, -1), n_cw, m, group)
+                np.testing.assert_array_equal(s, py.spread(x, m, group).reshape(2, -1))
+                np.testing.assert_array_equal(native.codes.despread(s, n_cw, m, group),
+                                              py.despread(s, n_cw, m, group).reshape(2, -1))
 
 
 def _noisy(spec, coded, rng, sigmas):
@@ -108,7 +113,7 @@ def test_decode(native, py, spec):
     _same(n.decode_many(spec.name, soft, masks, index), py.decode_many(spec, soft, masks, index))
     _same(n.decode_many(spec.name, soft), py.decode_many(spec, soft))
     bits, ok = n.decode_llrs(spec.name, soft, 40, masks, index)
-    pbits, pok = py.decode_llrs(spec, soft, crc_mask=masks, index=index)
+    pbits, pok = py.decode_llrs(spec, soft, 40, crc_mask=masks, index=index)  # the same cap as native's
     np.testing.assert_array_equal(ok, pok)
     np.testing.assert_array_equal(bits[ok], pbits[pok])
     np.testing.assert_array_equal(n.crc_ok(spec.name, pbits, masks, index), py.crc_ok(spec, pbits, masks, index))

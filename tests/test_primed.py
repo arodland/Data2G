@@ -15,11 +15,13 @@ import numpy as np
 import pytest
 
 from data2g import codes, cpm
+from data2g.config import FS
 from data2g.arq import frames as F
 from data2g.arq import link as L
 from data2g.arq import phy as PHY
 from data2g.arq import modes as M
 from data2g.arq.burst import Slot, TxBurst, ctl_mask
+from data2g.arq.policy import ROBUST_CONNECT
 
 from test_arq import FakeRx, RandomPolicy, payload
 from test_native_arq_link import _burst, logged
@@ -78,7 +80,7 @@ class BootstrapPolicy(L.Policy):
         return codes.rv_cycle(M.MODES[mode])
 
     def recommend(self, station):
-        rec = M.encode("fsk16r25-r1/2")
+        rec = M.encode(ROBUST_CONNECT)
         return rec, 1, rec
 
 
@@ -97,7 +99,7 @@ def bootstrap_control(cls, mode, dup, announcements, direction):
     return _burst(burst), hypotheses
 
 
-@pytest.mark.parametrize("mode", ["ack-4f", "fsk16r25-r1/2"])
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
 @pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
@@ -106,7 +108,7 @@ def test_first_control_can_be_primed(mode, dup, announcements, direction):
     bootstrap_control(L.Station, mode, dup, announcements, direction)
 
 
-@pytest.mark.parametrize("mode", ["ack-4f", "fsk16r25-r1/2"])
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
 @pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
@@ -140,11 +142,13 @@ def reply_to_data(cls, dup):
     return _burst(reply), hypotheses
 
 
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
 @pytest.mark.parametrize("dup", [False, True])
 def test_reply_to_data_can_be_primed(dup):
     reply_to_data(L.Station, dup)
 
 
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
 @pytest.mark.parametrize("dup", [False, True])
 def test_cpp_reply_to_data_primes_identically(native, pure, dup):
     assert reply_to_data(native.arq.Station, dup) == reply_to_data(L.Station, dup)
@@ -487,6 +491,9 @@ def test_cpp_sessions_prime_connect_identically(native, pure):
 
 # --- the expected slot (cpm.prime_lock, receiver.ReplySlot) ----------------------------------
 
+WIN = int(0.15 * FS)  # the expected slot's half-width: 1200 samples at 8 kHz
+
+
 def _faded_cpm(seed):
     """A control-only fsk16r25 burst through MPP at -17 dB (phy_session's
     channel, numpy's generator: the same on every platform)."""
@@ -503,12 +510,13 @@ def _faded_cpm(seed):
     return y, receive_any(y, lead=int(PS.PAD_S * PS.FS) + PS.FS // 2), int(PS.PAD_S * PS.FS), PS.CFO_HZ
 
 
+@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_prime_lock_finds_what_blind_acquisition_lost():
     """Seed 0: no blind path locks (the front faded); in a +-0.15 s window at
     the known CFO the expected slot finds it, start and word right."""
     y, r, p0, cfo = _faded_cpm(0)
     assert r is None
-    lock = cpm.prime_lock(cpm.GRIDS["c16r25"], y, p0 - 1200, p0 + 1200, cfo)
+    lock = cpm.prime_lock(cpm.GRIDS["c16r25"], y, p0 - WIN, p0 + WIN, cfo)
     assert lock is not None and lock["start"] == p0 and lock["spec"].name == "fsk16r25-r1/3" and lock["n_data"] == 0
     assert lock["score"] >= cpm.PRIME_LLR
 
@@ -517,7 +525,7 @@ def test_prime_lock_on_noise():
     rng = np.random.default_rng(3)
     for g in cpm.GRIDS.values():
         for _ in range(5):
-            assert cpm.prime_lock(g, rng.normal(0, 1.0, 6 * 8000), 1200, 3600, 4.5) is None
+            assert cpm.prime_lock(g, rng.normal(0, 1.0, 6 * FS), WIN, 3 * WIN, 4.5) is None
 
 
 def test_reply_slot():
@@ -537,8 +545,8 @@ def test_cpp_prime_lock_matches(native, pure):
     for seed in range(6):
         y, _, p0, cfo = _faded_cpm(seed)
         for g in cpm.GRIDS.values():
-            want = cpm.prime_lock(g, y, p0 - 1200, p0 + 1200, cfo)
-            got = native.cpm.prime_lock(g.name, y, p0 - 1200, p0 + 1200, cfo)
+            want = cpm.prime_lock(g, y, p0 - WIN, p0 + WIN, cfo)
+            got = native.cpm.prime_lock(g.name, y, p0 - WIN, p0 + WIN, cfo)
             assert (got is None) == (want is None)
             if want is not None:
                 assert got["start"] == want["start"] and got["spec"] == want["spec"].name
@@ -555,19 +563,21 @@ def _stream(rcv, y, expect=None):
     return out
 
 
+@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot():
     """The streaming receiver: seed 0's burst, which no blind path locks,
     is found in the expected slot (and decodes), and not without it."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
     y, _, p0, cfo = _faded_cpm(0)
-    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * 8000)])
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     assert not _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y)
-    ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - 1200, p0 + 1200, cfo))
+    ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - WIN, p0 + WIN, cfo))
     assert [k for k, _ in ev] == ["header", "burst"]
     assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"
 
 
+@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     """Three grids expected, one prime_lock a search hop (the Pi's hop
     budget): the burst's grid tried last is still found in its window, and
@@ -576,10 +586,10 @@ def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
     y, _, p0, cfo = _faded_cpm(0)
-    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * 8000)])
+    y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     calls, prime = [], cpm.prime_lock
     monkeypatch.setattr(cpm, "prime_lock", lambda g, *a: calls.append(g.name) or prime(g, *a))
-    w = (p0 - 1200, p0 + 1200, cfo)
+    w = (p0 - WIN, p0 + WIN, cfo)
     rcv = Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS))
     rcv.expect(["c8r50", "c32r62", "c16r25"], *w)
     ev, per_feed = [], []

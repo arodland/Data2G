@@ -11,6 +11,7 @@ from data2g import hfchannel as H
 from data2g.arq import engine as E
 from data2g.arq import session as S
 from data2g.config import FS
+from test_cwid import _cw_id_peak
 from test_engine import link
 
 
@@ -66,3 +67,8 @@ def test_cw_ids_between_cpp_and_python_engines(native, reference, cpp_calls, tmp
     assert bytes(got_b) == up and bytes(got_a) == down
     assert a.session.station.stats.get("timeouts", 0) == 0
     assert _cw_tx(tmp_path / "cpp") and _cw_tx(tmp_path / "py")
+
+
+def test_cw_id_level_matches(native, reference):
+    assert _cw_id_peak(native.engine.Engine("W1AW", seed=1)) == pytest.approx(
+        _cw_id_peak(reference(E, "Engine")("W1AW", seed=1)), rel=1e-9)

@@ -1,7 +1,9 @@
 #include "arq/modes.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -15,11 +17,19 @@ namespace data2g::arq {
 
 namespace {
 
-// frames.BANDS_CODE: sync bands, 2 bits.
-constexpr std::pair<std::string_view, int> BANDS_CODE[] = {{"w", 0}, {"n10", 1}, {"w48", 2}};
+// frames.BANDS_CODE: sync bands, 2 bits. FM: w and n10 (floor, ACKs), f55 and
+// f108; no w48, n4 or CPM, so every code names a band (plan M6, Q2).
+constexpr bool FM = config::PROFILE == "fm";
+constexpr std::pair<std::string_view, int> HF_BANDS_CODE[] = {{"w", 0}, {"n10", 1}, {"w48", 2}};
+constexpr std::pair<std::string_view, int> FM_BANDS_CODE[] = {{"w", 0}, {"n10", 1}, {"f55", 2}, {"f108", 3}};
+
+std::span<const std::pair<std::string_view, int>> bands_code() {
+    if constexpr (FM) return FM_BANDS_CODE;
+    return HF_BANDS_CODE;
+}
 
 int band_code(std::string_view sync_band) {
-    for (const auto& [b, c] : BANDS_CODE)
+    for (const auto& [b, c] : bands_code())
         if (b == sync_band) return c;
     throw std::out_of_range("no band code for " + std::string(sync_band));
 }
@@ -29,7 +39,11 @@ int band_code(std::string_view sync_band) {
 std::span<const Mode> modes() {
     static const std::vector<Mode> all = [] {
         std::vector<Mode> v;
-        for (const auto& s : config::SUBMODES) v.push_back({s.name, s.band, &s, nullptr});
+        // modes.py MODES: every mode compiled in (HF: on a band with a recommendation code)
+        const auto codes = bands_code();
+        for (const auto& s : config::SUBMODES)
+            if (FM || std::any_of(codes.begin(), codes.end(), [&](const auto& b) { return b.first == s.sync_band; }))
+                v.push_back({s.name, s.band, &s, nullptr});
         for (const auto& s : tables::CPM_SPECS) v.push_back({s.name, s.grid, nullptr, &s});
         return v;
     }();
@@ -65,16 +79,18 @@ int min_cw(const Mode& m, bool data) { return data && m.is_cpm() ? 2 : 1; }
 int rv_cycle(const Mode& m) { return m.is_cpm() ? codes::rv_cycle(*m.cpm) : codes::rv_cycle(*m.ofdm); }
 
 int cap_hz(int cap) {
+    // modes.py CAP_HZ. FM: 500 Hz (the n10 floor), narrow (w, f55), wide (f108)
     switch (cap) {
         case 0: return 500;
-        case 1: return 1200;
-        case 2: return 2400;
+        case 1: return FM ? 2700 : 1200;
+        case 2: return FM ? 5350 : 2400;
     }
     throw std::out_of_range("no cap " + std::to_string(cap));
 }
 
 std::string bw_name(int cap) {
-    static const std::array<const char*, 3> names = {"500", "1200", "2300"};
+    static const std::array<const char*, 3> names =
+        FM ? std::array<const char*, 3>{"500", "NARROW", "WIDE"} : std::array<const char*, 3>{"500", "1200", "2300"};
     return names.at(static_cast<std::size_t>(cap));
 }
 
@@ -87,14 +103,24 @@ double width_hz(const Mode& m) {
     if (m.band == "n10") return 500;
     if (m.band == "w") return 1200;
     if (m.band == "w48") return 2400;
+    if (m.band == "f55") return 2700;
+    if (m.band == "f108") return 5350;
     throw std::out_of_range("no width for band " + std::string(m.band));
+}
+
+bool selectable(const Mode& m) {
+    // modes.py SELECTABLE. FM (plan M6, Q2): its coded bands, indices under 16; no w48, no CPM
+    if (!FM) return true;
+    if (m.is_cpm() || m.ofdm->index >= 16) return false;
+    const auto codes = bands_code();
+    return std::any_of(codes.begin(), codes.end(), [&](const auto& b) { return b.first == m.ofdm->sync_band; });
 }
 
 std::vector<const Mode*> allowed(int cap) {
     const int hz = cap_hz(cap);
     std::vector<const Mode*> out;
     for (const auto& m : modes())
-        if (width_hz(m) <= hz) out.push_back(&m);
+        if (width_hz(m) <= hz && selectable(m)) out.push_back(&m);
     return out;
 }
 
@@ -102,6 +128,10 @@ std::vector<const Mode*> allowed(int cap) {
 
 int encode(std::string_view submode) {
     const Mode& m = mode_at(submode);
+    if (FM) {  // every code a band, every index under 16 (selectable)
+        if (!selectable(m)) throw std::out_of_range(std::string(submode) + ": no recommendation code on FM");
+        return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
+    }
     if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
     if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
         if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
@@ -111,7 +141,7 @@ int encode(std::string_view submode) {
 }
 
 const Mode* decode(int rec) {
-    if (rec >> 4 == CPM_CODE) {
+    if (!FM && rec >> 4 == CPM_CODE) {
         const auto i = static_cast<std::size_t>(rec & 15);
         if (i >= static_cast<std::size_t>(N10_HIGH)) {
             for (const auto& s : config::SUBMODES)
@@ -120,10 +150,13 @@ const Mode* decode(int rec) {
         }
         return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
     }
-    for (const auto& [band, code] : BANDS_CODE)
+    for (const auto& [band, code] : bands_code())
         if (code == rec >> 4) {
             for (const auto& s : config::SUBMODES)
-                if (s.sync_band == band && s.index == (rec & 15)) return mode(s.name);
+                if (s.sync_band == band && s.index == (rec & 15)) {
+                    const Mode* m = mode(s.name);
+                    return m && selectable(*m) ? m : nullptr;
+                }
             return nullptr;
         }
     return nullptr;

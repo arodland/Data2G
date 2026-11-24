@@ -157,14 +157,16 @@ int main() {
         std::mt19937 rng(9);
         double pw = 0;
         for (double v : burst) pw += v * v;
-        const double sigma = std::sqrt(pw / static_cast<double>(burst.size()) * 4.0);  // -6 dB in the audio band
-        std::vector<double> y(2400 + burst.size() + 16000);
-        for (std::size_t i = 0; i < y.size(); ++i) y[i] = sigma * gauss(rng) + (i >= 2400 && i < 2400 + burst.size() ? burst[i - 2400] : 0.0);
-        const auto lock = cpm::prime_lock(g, y, 2400 - 1200, 2400 + 1200, 0.0);
-        check::is_true(lock && lock->start == 2400 && lock->spec == &sp && lock->n_data == 0 && !lock->dup, "prime_lock: the burst");
+        // -6 dB in the audio band at any FS (white noise spreads over FS / 2); the burst 0.3 s in, a +-0.15 s window
+        const double sigma = std::sqrt(pw / static_cast<double>(burst.size()) * 4.0 * config::FS / 8000.0);
+        const std::size_t P = config::FS * 3 / 10, W = config::FS * 3 / 20;
+        std::vector<double> y(P + burst.size() + 2 * config::FS);
+        for (std::size_t i = 0; i < y.size(); ++i) y[i] = sigma * gauss(rng) + (i >= P && i < P + burst.size() ? burst[i - P] : 0.0);
+        const auto lock = cpm::prime_lock(g, y, static_cast<std::int64_t>(P - W), static_cast<std::int64_t>(P + W), 0.0);
+        check::is_true(lock && lock->start == static_cast<std::int64_t>(P) && lock->spec == &sp && lock->n_data == 0 && !lock->dup, "prime_lock: the burst");
         std::vector<double> z(y.size());
         for (double& v : z) v = gauss(rng);
-        check::is_true(!cpm::prime_lock(g, z, 1200, 3600, 0.0), "prime_lock: noise");
+        check::is_true(!cpm::prime_lock(g, z, static_cast<std::int64_t>(W), static_cast<std::int64_t>(3 * W), 0.0), "prime_lock: noise");
     }
 
     check::current_step = "ReplySlot";

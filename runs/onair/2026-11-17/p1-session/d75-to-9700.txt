@@ -1,0 +1,80 @@
+    0.0 caller: OK
+    0.0 callee: OK
+    0.0 callee: OK
+    0.0 caller: OK
+    0.1 caller: MODE qpsk-r1/5
+    0.1 caller: PTT ON
+    0.9 callee: BUSY ON
+    1.2 callee: BUSY OFF
+    1.4 callee: BUSY ON
+    2.1 caller: PTT OFF
+    2.1 callee: CONNECTED KC2G-1 KC2G-2 NARROW
+    2.1 callee: MODE qpsk-r1/5
+    2.1 callee: BUSY OFF
+    2.2 callee: PTT ON
+    3.0 caller: BUSY ON
+    4.1 callee: PTT OFF
+    4.1 caller: CONNECTED KC2G-1 KC2G-2 NARROW
+    4.1 caller: MODE ack-4f
+    4.1 caller: BUSY OFF
+    4.2 caller: BUFFER 29996
+    4.2 caller: PTT ON
+    5.0 callee: BUSY ON
+    6.7 callee: MODE ack-1f
+    6.7 callee: BUSY OFF
+    6.7 caller: PTT OFF
+    6.8 callee: PTT ON
+    7.7 caller: BUSY ON
+    7.9 callee: PTT OFF
+    8.0 caller: MODE f55-256l-r72
+    8.0 caller: BUSY OFF
+    8.0 caller: BUFFER 5604
+    8.0 caller: PTT ON
+    8.8 callee: BUSY ON
+   17.3 caller: PTT OFF
+   17.3 callee: BUSY OFF
+   17.4 callee: PTT ON
+   18.1 caller: BUSY ON
+   18.5 callee: PTT OFF
+   18.6 caller: MODE f55-64l-r80
+   18.6 caller: BUSY OFF
+   18.6 caller: BUFFER 1
+   18.7 caller: PTT ON
+   19.6 callee: BUSY ON
+   30.9 caller: PTT OFF
+   31.0 callee: BUSY OFF
+   31.1 callee: PTT ON
+   32.1 caller: BUSY ON
+   32.2 callee: PTT OFF
+   32.3 caller: BUSY OFF
+   32.4 caller: PTT ON
+   32.9 caller: IAMALIVE
+   33.3 callee: BUSY ON
+   34.9 callee: IAMALIVE
+   37.0 caller: PTT OFF
+   37.0 callee: BUSY OFF
+DONE 30000 bytes in 32.9 s after CONNECTED = 7298 bps, intact True
+   37.0 caller: OK
+   37.3 callee: PTT ON
+   38.3 caller: BUSY ON
+   38.4 caller: MODE qpsk-r1/5
+   38.4 caller: BUSY OFF
+   38.4 caller: BUFFER 0
+   38.4 callee: PTT OFF
+   38.5 caller: PTT ON
+   39.4 callee: BUSY ON
+   40.5 caller: PTT OFF
+   40.5 callee: DISCONNECTED
+   40.5 callee: MODE qpsk-r1/5
+   40.5 callee: BUSY OFF
+   40.6 callee: PTT ON
+   41.5 caller: BUSY ON
+   42.5 caller: DISCONNECTED
+   42.5 caller: BUSY OFF
+   43.2 caller: BUSY ON
+   44.0 callee: PTT OFF
+   44.0 caller: BUSY OFF
+   45.0 caller: PTT ON
+   45.9 callee: BUSY ON
+   47.0 caller: PTT OFF
+   47.0 callee: BUSY OFF

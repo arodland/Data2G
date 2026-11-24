@@ -41,6 +41,8 @@ OUT = Path("runs/own_shifts")
 # The shipped table per (bg, Z): lift(mode, seed) regenerates it.
 PICKS = {
     (1, 36): "g6-27", (1, 72): "g6-29", (1, 104): "g6-23", (1, 144): "g6-22", (1, 160): "g6-7",
+    # FM ladders' high rates (runs/own_shifts/screen_fm.log, 100k blocks at BLER ~1e-3..1e-4, 2026-11-17)
+    (1, 80): "g8-16", (1, 88): "g8-10", (1, 112): "g8-21", (1, 120): "g8-2", (1, 128): "g8-7", (1, 176): "g8-15",
     (2, 26): "g6-17", (2, 32): "g6-26", (2, 40): "g6-8", (2, 44): "g8-21", (2, 48): "g6-11",
     (2, 60): "g6-21", (2, 64): "g6-15", (2, 72): "g6-5", (2, 96): "g6-30", (2, 104): "g6-15",
     (2, 128): "g6-2", (2, 144): "g6-0", (2, 176): "g6-4", (2, 192): "g8-30", (2, 240): "g8-9",
@@ -210,10 +212,16 @@ def cmd_gen(a):
     OUT.mkdir(parents=True, exist_ok=True)
     rows = []
     eight = bool({"g8", "ga"} & set(a.modes))
+    todo = shipped()
+    for e in a.extra:  # sizes no submode uses yet (a ladder being built): bg,z,k,n
+        bg_, z_, k_, n_ = (int(x) for x in e.split(","))
+        todo.setdefault((bg_, z_), []).append(("extra", k_, n_))
+    if a.extra and a.only_extra:
+        todo = {g: v for g, v in todo.items() if any(s == "extra" for s, _, _ in v)}
     for bg in a.bg:
         cyc = Cycles(ldpc.mask(bg), eight=eight)
         Ls = sorted(cyc.c)
-        for (g, z), subs in shipped().items():
+        for (g, z), subs in todo.items():
             if g != bg:
                 continue
             mbs = sorted({code_with(np.zeros(cyc.mask.shape), bg, k, n).mb for _, k, n in subs})
@@ -345,6 +353,8 @@ def main():
     g.add_argument("--modes", nargs="+", default=["g6", "g4", "rand"])
     g.add_argument("--bg", type=int, nargs="+", default=[1, 2])
     g.add_argument("--tag", default="", help="output suffix: cands_bg2_z96<tag>.npz, cycles<tag>.csv")
+    g.add_argument("--extra", nargs="+", default=[], help="bg,z,k,n: also a size no submode uses yet")
+    g.add_argument("--only-extra", action="store_true", help="with --extra: only those sizes")
     c = sub.add_parser("screen")
     c.add_argument("--point", nargs="+", required=True, help="bg,z,k,n,ebn0 ...")
     c.add_argument("--cands", nargs="+", default=[""], help="gen tags")

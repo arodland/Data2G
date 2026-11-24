@@ -32,9 +32,13 @@ originals.
 import sys
 from pathlib import Path
 
+from data2g import config
+
 from . import arq, audio, base, codes, cpm, engine, gear, host, modem, phy, receiver, tnc, waveform
 
-MODULE_DIR = Path(__file__).resolve().parents[2] / "native" / "build" / "python"
+# tools/build_native.sh: native/build for HF, native/build-<profile> for another
+MODULE_DIR = (Path(__file__).resolve().parents[2] / "native"
+              / ("build" if config.PROFILE == "hf" else f"build-{config.PROFILE}") / "python")
 # native/bindings/module.cpp's __abi__: bumped with the Python-facing signatures
 ABI = 9
 
@@ -53,6 +57,8 @@ def import_native():
         return None, f"{e} (looked in {MODULE_DIR})"
     if getattr(data2g_native, "__abi__", None) != ABI:
         return None, f"{data2g_native.__file__} has ABI {getattr(data2g_native, '__abi__', '?')}, want {ABI}"
+    if getattr(data2g_native, "__profile__", "hf") != config.PROFILE:
+        return None, f"{data2g_native.__file__} is the {data2g_native.__profile__} build, want {config.PROFILE}"
     return data2g_native, None
 
 

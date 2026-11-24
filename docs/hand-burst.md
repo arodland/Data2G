@@ -206,3 +206,56 @@ What the combination costs, paired seeds (the same Hand, the same noise, both ar
 | mpd shipped / cheap | 2 / 0 | 8 / 7 | 15 / 16 | 22 / 21 | −18.4 / −18.4 |
 
 (−16 dB was 24/24 for both arms on all three profiles.) 0.2 dB at AWGN's 50% point, 0.3 dB at the shipped decoder's 74/100 point, and 0.0-0.4 dB on the Watterson profiles, which is what 24 trials resolve, so read that spread as "under half a dB". Half the CPU for a third of a dB: the option is there for a station that runs a round every net period on a busy machine, and `full` stays the default. `tests/test_hand.py::test_hand_round_between_two_stations` runs the whole round at both settings, `test_hand_decode_at_the_sensitivity_floor` decodes a −18 dB Hand with the cheap grids, and `tests/test_native_hand.py` keeps C++ and Python agreeing on both to 1e-6.
+
+## FM: a channel is a time slot
+
+**Status: built and tested against the simulator (2026-11-23). Not on air. The rate, slot length and timing budget are first guesses.**
+
+On HF the answerers key together, each in its own 60 Hz, and net control's receiver adds them. On FM the receiver captures one carrier, so stations that key together are lost. Under `DATA2G_PROFILE=fm` a channel is therefore a time slot.
+
+- **The Hand:** the same 63 bits, CRC, polar code and Costas blocks, at 100 Bd: 0.66 s, tones 1200 to 1900 Hz. Every channel uses the same tones. No cfo shift is applied and none is searched.
+- **Slots:** channel c starts c x 1.5 s (`hand.SLOT_S`) after channel 0's slot. There are 64 channels, at any bandwidth.
+- **The slot's budget:** 1.2 s is spoken for: 0.66 s of Hand, 0.25 s of timing error on each side (`SEARCH_S`) and 40 ms of carrier after the audio. The rest, 0.3 s, is the most carrier a station may put before its Hand (`PTT_MAX_S`: the next station keys up inside this slot).
+- **Slow radios:** `DATA2G_HAND_SLOT_MS` in the environment sets the slot, 1200 to 5000 ms (1500 unset). All of the extra goes to the PTT delay: at 2500 a station may run `--ptt-on-delay-ms` up to 1300. It is a test switch. Every station of a round must run the same value, or slot c is off by c times the difference; it is not sent on the air. It does not help a radio whose real key-up is longer than its `--ptt-on-delay-ms`: that still loses the Hand's first symbols.
+- **The CRC still binds the channel:** a Hand that lands in a neighbour's slot fails there.
+
+**Host commands are unchanged** (docs/arq.md §9). What differs on FM:
+
+- **HAND SEND** keys in its channel's slot, and until then this host starts no burst of its own, as before. It is WRONG if `--ptt-on-delay-ms` is over 300: the carrier would cover the slot before. A Hand more than 0.2 s late is dropped (0.5 s on HF).
+- **HAND LISTEN** and **HAND OVERHEAR** keep the window open to the end of the highest channel listed, and LISTEN holds this host's own bursts for all of it. A round of 32 slots is 48 s, one of 64 is 96 s.
+- **A late HAND OVERHEAR** still reaches back 30 s, which is less than a long round.
+
+### Which slot: the call and the round's tag
+
+A station needs no assignment. Its channel in a round of m slots is `hand.slot(call, tag, m)`:
+
+- **Input:** the tag byte, then the call as sent (SSID included), trimmed, upper case, ASCII.
+- **Hash:** 32-bit FNV-1a (offset 0x811C9DC5, prime 0x01000193), then murmur3's 32-bit finalizer, mod m.
+- **Vectors:** `slot("W1AW", t, 32)` for t = 0, 1, 90, 255 is 26, 19, 5, 31. `slot(c, 90, 16)` for W1AW, K2XYZ, N0CALL-7, VE3ABC is 5, 15, 0, 7.
+- **Why not a CRC:** a CRC is linear in its seed, so two calls that share a slot under one tag would share it under every tag.
+
+Net control knows its roster, so it sends a tag under which no two of them share a slot: `hand.clean_tags(calls, m)` lists them. Its call carries the tag and m; that is the client's frame, not Data2G's.
+
+| Roster | m | Round | Clean tags of 256 |
+|---|---|---|---|
+| 8 | 16 | 24 s | about 30 |
+| 8 | 32 | 48 s | about 100 |
+| 20 | 64 | 96 s | about 9 |
+
+Keep m at two to three times the roster. A station not on the roster hashes the same way. It may share a slot, and under the next round's tag it almost certainly does not.
+
+### Measured in the simulator
+
+Through `fmchannel` (the mic radio at both ends, carriers summed before the discriminator), 20 trials a point:
+
+- **One station:** 20 of 20 decoded at every CNR tried, 2 to 14 dB.
+- **Two stations in one slot, equal strength:** 5 Hands of 40 decoded.
+- **Two in one slot, one 3 dB or more down:** the stronger 20 of 20, the weaker 0 of 20.
+- **Two in neighbouring slots:** both.
+
+### Open
+
+- **On air:** nothing here has been keyed. Real key-up times, squelch and host latencies decide whether 1.5 s is right.
+- **Repeaters:** a courtesy tone or a hang timer between slots is not modelled.
+- **After its own Hand, an answerer is free to key.** HAND SEND holds this host's bursts only until the Hand has gone. A CQ, ID or KISS frame queued behind it then keys into the later slots (seen: a Hand in slot 2 at 5.0 s, the queued CQ at 5.8 to 7.3 s, over slot 3). The host does not know how long the round is, so the cure is a round length on HAND SEND or a client that holds its own traffic. Not decided.
+- **Bystanders:** a station outside the round sees a free channel between two Hands and its KISS traffic may key there. HAND OVERHEAR does not hold it.

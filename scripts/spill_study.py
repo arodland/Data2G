@@ -14,6 +14,10 @@ the same lock, fades and noise.
     python -m scripts.spill_study run --out runs/spill_fixed.csv --arms w1 leak2
 """
 
+import os
+
+os.environ.setdefault("DATA2G_CPM_R23", "1")  # fsk32r62-r2/3 offered: not a mode by default
+
 from data2g import threads  # noqa: E402
 
 threads.limit(1)
@@ -40,6 +44,7 @@ import outcome_data as O  # noqa: E402
 PRESETS = {**hfchannel.FADING_PRESETS, **hfchannel.ITU_PRESETS}
 CHANS = ("awgn", "mpg", "mpp", "mpd", "hilat-m", "lowlat-d", "hilat-d", "nvis-d")
 PEP_REF_DB = 5.0
+CARRIER_DB = 12.0
 WORKERS = 4
 
 
@@ -50,9 +55,16 @@ def make(name, chan, snr, seed, n=2):
     x = np.concatenate([np.zeros(lead), PHY.tx_audio(b), np.zeros(FS // 2)])
     s_power = np.max(dsp.envelope(x) ** 2) / 2 / 10 ** (PEP_REF_DB / 10)
     y = hfchannel.freq_shift(hfchannel.sample_clock_offset(x.astype(np.float64), 10), float(rng.uniform(-50, 50)))
+    chan, carrier = chan.removesuffix("+c"), chan.endswith("+c")
     if chan != "awgn":
         y = hfchannel.fading(y, PRESETS[chan], seed=seed)
-    return b, hfchannel.awgn(y, snr, seed=seed + 1, s_power=s_power)
+    y = hfchannel.awgn(y, snr, seed=seed + 1, s_power=s_power)
+    if carrier:  # "+c": a steady carrier in the grid, CARRIER_DB over the noise in 50 Hz (tests/test_cpm.py's, #295's)
+        g = cpm.GRIDS[MODES[name].grid]
+        sigma2 = s_power * (FS / 2) / 2500 / 10 ** (snr / 10)
+        amp = np.sqrt(2 * sigma2 * 50 / (FS / 2) * 10 ** (CARRIER_DB / 10))
+        y = y + amp * np.cos(2 * np.pi * (g.f0 + (g.m // 2 + 0.44) * g.rate) * np.arange(len(y)) / FS + rng.uniform(0, 2 * np.pi))
+    return b, y
 
 
 def sent_tones(b) -> np.ndarray:
@@ -218,9 +230,6 @@ def shipped_leak(uses, ctl_sq=0.15):
 ARMS["L"] = shipped_leak(("ctl", "data", "dd"))
 ARMS["LS"] = shipped_leak(("ctl", "data", "dd", "ctlsq"), 0.15)
 ARMS["LS.1"] = shipped_leak(("ctl", "data", "dd", "ctlsq"), 0.1)
-ARMS["LC"] = shipped_leak(("ctl", "data", "dd", "coh"))  # ... and the coherent metric's noise and neighbours
-ARMS["C"] = shipped_leak(("coh",))
-ARMS["LdC"] = shipped_leak(("data", "coh"))
 ARMS["Lsq"] = (shipped_leak(("ctl", "data", "dd")), N0, DD_SOFT, False)  # the control on the square law (leak), not coherent
 ARMS["w1sq"] = (weighted({}), N0, DD_SOFT, False)
 ARMS["Ld"] = shipped_leak(("data",))
@@ -351,6 +360,10 @@ def grid_cells():
         for c in CHANS:
             mid = round(C32[c][("r1/3", "r1/2", "r2/3").index(rate)] + GRID_DB[g])
             out.append(f"{m}:{c}:" + ",".join(str(float(v)) for v in list(range(mid - 4, mid + 4)) + list(HIGH)))
+        if rate != "r1/3":  # an in-grid carrier: the floor (it sits higher) and up
+            for c in ("awgn", "mpp"):
+                mid = round(C32[c][("r1/3", "r1/2", "r2/3").index(rate)] + GRID_DB[g])
+                out.append(f"{m}:{c}+c:" + ",".join(str(float(v)) for v in list(range(mid - 2, mid + 6)) + [0.0] + list(HIGH)))
     return out
 
 

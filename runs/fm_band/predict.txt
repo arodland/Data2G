@@ -1,0 +1,25 @@
+error of each prediction against the target's own snr_est (dB): median [p10, p90] / rms
+mic  static       w   ->f55  n=36  constant +0.61 [+0.20,+1.04] / 0.84   predicted +1.44 [+1.00,+1.87] / 1.57
+mic  static       n10 ->f55  n=36  constant +0.72 [-0.55,+6.59] / 3.08   predicted         n/a
+mic  flutter      w   ->f55  n=36  constant +0.65 [+0.01,+1.41] / 0.93   predicted +1.48 [+0.82,+2.24] / 1.63
+mic  flutter      n10 ->f55  n=36  constant +1.02 [-0.52,+6.46] / 3.37   predicted         n/a
+mic  mobile-rural w   ->f55  n=33  constant +3.05 [-8.55,+12.69] / 8.05   predicted +3.73 [-7.91,+13.24] / 8.23
+mic  mobile-rural n10 ->f55  n=34  constant +5.97 [-5.80,+11.92] / 7.65   predicted         n/a
+flat static       f55 ->f108 n=36  constant +0.03 [-0.74,+0.96] / 0.79   predicted +5.24 [+4.57,+6.04] / 5.25
+flat static       w   ->f108 n=36  constant -0.98 [-5.00,+0.89] / 2.64   predicted +6.02 [+1.21,+7.90] / 5.93
+flat static       w   ->f55  n=36  constant -0.70 [-4.57,+0.91] / 2.50   predicted +0.73 [-3.35,+2.33] / 2.18
+flat static       n10 ->f55  n=36  constant -0.76 [-6.53,+4.30] / 4.02   predicted         n/a
+flat static       n10 ->f108 n=36  constant -0.07 [-6.90,+3.38] / 3.96   predicted         n/a
+flat static       f108->f55  n=36  constant -0.03 [-0.96,+0.74] / 0.79   predicted         n/a
+flat flutter      f55 ->f108 n=36  constant +0.25 [-1.91,+1.16] / 1.17   predicted +5.41 [+3.97,+6.42] / 5.38
+flat flutter      w   ->f108 n=36  constant -1.27 [-4.34,+0.73] / 2.40   predicted +5.71 [+2.06,+7.65] / 5.73
+flat flutter      w   ->f55  n=36  constant -0.99 [-4.51,+0.71] / 2.38   predicted +0.42 [-3.30,+2.18] / 1.99
+flat flutter      n10 ->f55  n=36  constant -0.53 [-6.15,+4.40] / 3.93   predicted         n/a
+flat flutter      n10 ->f108 n=36  constant +0.37 [-5.90,+3.24] / 3.49   predicted         n/a
+flat flutter      f108->f55  n=36  constant -0.25 [-1.16,+1.91] / 1.17   predicted         n/a
+flat mobile-rural f55 ->f108 n=34  constant -0.41 [-8.83,+9.13] / 6.61   predicted +5.53 [-3.08,+15.03] / 8.38
+flat mobile-rural w   ->f108 n=34  constant -3.41 [-9.41,+11.95] / 8.40   predicted +4.25 [-2.46,+18.81] / 11.11
+flat mobile-rural w   ->f55  n=36  constant +0.90 [-12.91,+11.60] / 8.50   predicted +2.52 [-11.56,+13.09] / 8.73
+flat mobile-rural n10 ->f55  n=36  constant +2.94 [-10.96,+9.92] / 7.42   predicted         n/a
+flat mobile-rural n10 ->f108 n=34  constant +1.35 [-6.04,+5.41] / 4.62   predicted         n/a
+flat mobile-rural f108->f55  n=34  constant +0.41 [-9.13,+8.83] / 6.61   predicted         n/a

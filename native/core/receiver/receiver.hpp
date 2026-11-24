@@ -68,7 +68,25 @@ struct BurstEvent {
     std::vector<double> audio;  // the segment received
     double receive_ms = 0;      // wall time modem::receive took (sync check, header, channel estimate), for the log
 };
-using Event = std::variant<HeaderEvent, BurstEvent>;
+// Decoding while the burst arrives (receiver.Receiver._partial): a pending OFDM burst's frames so far
+// (modem::receive's partial), with codeword groups newly complete (modem::ready_slots). Its BurstEvent follows.
+struct PartialEvent {
+    Pending header;
+    modem::Received rx;
+};
+using Event = std::variant<HeaderEvent, BurstEvent, PartialEvent>;
+
+// A pending OFDM burst's audio so far, a window's frames (config::SPREAD_WINDOW) more of it than the last: what
+// the receiver hands a decode step for a PartialEvent (in line from feed(); feed_deferred() hands it back).
+struct PartialRequest {
+    Pending header;           // stream indices
+    std::vector<double> seg;  // the audio from the burst's start
+    std::int64_t at = 0;      // seg[0]'s stream index
+    std::int64_t head = 0;    // the preamble and header lie in seg[:head]
+    int ready_before = 0;     // slots ready at the last look (feed() reports only a gain)
+};
+// modem::receive's partial on req; nullopt: no whole frame yet, or no sync.
+std::optional<modem::Received> receive_partial(const PartialRequest& req, const modem::Accept& accept);
 
 // A complete burst's audio and how to receive it: what the receiver hands
 // to a decode step (in line from feed(); feed_deferred() hands it back for
@@ -114,12 +132,15 @@ public:
     // a row (pilot checks, one a HOP) is let go: reported lost, the search goes on past it.
     // 0: never. A member so a study can set it (scripts/false_lock_study.py).
     double release_s = 3.0;
+    // PartialRequests (decoding while the burst arrives): config::DECODE_EARLY, with interleaving windows
+    // (config::SPREAD_WINDOW). A member so a bench can compare without them.
+    bool decode_early = config::DECODE_EARLY;
 
     explicit Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids = {}, bool blank = true);
 
     std::vector<Event> feed(std::span<const double> x);
     // feed() with each burst to decode left as its DecodeRequest, in order.
-    using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest, StreamFeed>;
+    using Item = std::variant<HeaderEvent, BurstEvent, DecodeRequest, StreamFeed, PartialRequest>;
     std::vector<Item> feed_deferred(std::span<const double> x);
     // Stream CPM locks (cpm::Stream: refine and data slots' passes while the burst arrives); `pass`
     // (arq::cpm_pass's, the engine's) may be empty: refine alone. Off by default (as Python's receiver).
@@ -170,6 +191,7 @@ private:
     };
 
     void check_pilots();
+    void partial(std::vector<Item>& out, const Pending& p);
     void trim(std::int64_t n);
     Stats stats(std::int64_t w0 = 0);
     void searched();
@@ -196,6 +218,11 @@ private:
     bool stream_on_ = false;
     cpm::PassFn stream_pass_;
     std::shared_ptr<cpm::Stream> stream_;  // the pending CPM lock's
+    struct Inc {  // partial(): the pending burst's start, the stream index fed at its last look, slots ready then
+        std::int64_t start, fed;
+        int ready;
+    };
+    std::optional<Inc> inc_;
     bool pilots_ok_ = false, confirmed_ = false;
     int dark_ = 0;  // the pending lock's latest pilot checks in a row with its pilots measurably absent
     bool looked_ = false;  // the pending CPM lock's second look is done (unconfirmed)

@@ -6,6 +6,8 @@
 #include <span>
 #include <string_view>
 
+#include "generated/config.hpp"
+
 namespace data2g::tables {
 
 // The outcome model: bootstrap members, each an MLP (x - mean) / std ->
@@ -61,7 +63,10 @@ struct ModeThreshold {
 };
 extern const std::span<const ModeThreshold> MODE_THRESHOLDS;
 // Their channel names (mode_thresholds.json "channels", policy.MODE_CHANNELS).
-inline constexpr std::array<std::string_view, 4> MODE_CHANNELS = {"awgn", "mpg", "mpp", "mpd"};
+// FM (provisional, scripts/fm_threshold_table.py): static, flutter, mobile and their worst
+inline constexpr std::array<std::string_view, 4> MODE_CHANNELS =
+    config::PROFILE == "fm" ? std::array<std::string_view, 4>{"static", "flutter", "mobile", "worst"}
+                            : std::array<std::string_view, 4>{"awgn", "mpg", "mpp", "mpd"};
 // AWGN BICM capacity (bits per coded bit) over CAPACITY_GRID (dB), per
 // constellation family (predictor.CONSTS order).
 struct CapacityTable {
