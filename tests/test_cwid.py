@@ -83,15 +83,14 @@ def test_cwsense_ignores_a_weak_steady_carrier():
             assert _active(y).mean() < 0.02, (freq, inr)
 
 
-@pytest.mark.xfail(strict=True, reason="CwSense reads a weak or fading carrier near the centre as a CW ID (#302)")
 @pytest.mark.parametrize("preset", ["mpp", "mpd"])
 def test_cwsense_under_a_fading_carrier(preset):
     """A steady, unkeyed carrier 73 Hz off the centre that fades (1 and 2 Hz
     Doppler), at a mean 10-18 dB over the noise in 50 Hz: it goes through
-    the level where it flickers about RATIO, and reads as a CW ID 20-57% of
-    the time. Each reading holds transmission and moves a reply deadline on
-    (Session.on_cw). Bound: 15%, since a deep fade is a real gap at the
-    floor and some readings will remain."""
+    the level where it flickers about RATIO, and read as a CW ID 20-57% of
+    the time before QUIET_MAX. Each reading holds transmission and moves a
+    reply deadline on (Session.on_cw). Bound: 15%, since a deep fade is a
+    real gap at the floor and some readings remain."""
     n = 30 * FS
     f = H.fading(np.sin(2 * np.pi * 1573.4 * np.arange(n) / FS), preset, seed=11)
     for inr in (10, 14, 18):
@@ -100,8 +99,6 @@ def test_cwsense_under_a_fading_carrier(preset):
         assert _active(y).mean() < 0.15, inr
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="CwSense reads a weak or fading carrier near the centre as a CW ID (#302)")
 @pytest.mark.parametrize("fading", [None, "mpp", "mpd"])
 def test_a_carrier_does_not_hold_the_connect_retry(fading):
     """A caller nobody answers, under an unkeyed 1573.4 Hz carrier 12 dB
