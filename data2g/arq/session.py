@@ -472,7 +472,7 @@ class Session:
             self._close("CLIENT unconfirmed")  # the host gave up on the dial: no more tries
         elif self.state == CONNECTING:
             self._tries += 1
-            tries = CONNECT_TRIES if self.connect_tries is None else self.connect_tries
+            tries = self._connect_limit()
             log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, tries)
             if self._tries >= tries:
                 self._close("NO_ANSWER")
@@ -505,7 +505,8 @@ class Session:
         """`mode`: an answer goes in the mode its frame came in (a caller that
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
-        mode = mode or self.policy.connect_mode(self.cap, self._tries)
+        mode = mode or self.policy.connect_mode(self.cap, self._tries,
+                                                last=body[0] == F.CONNECT and self._tries == self._connect_limit() - 1)
         cpb = self.policy.ctl_payload_bytes(mode)
         if body[0] == F.CONNECT and self._compact(mode):
             slots = [B.Slot(B.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
@@ -515,6 +516,9 @@ class Session:
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
         return B.TxBurst(mode, slots, 0, self.cap)
+
+    def _connect_limit(self) -> int:
+        return CONNECT_TRIES if self.connect_tries is None else self.connect_tries
 
     def _compact(self, mode: str) -> bool:
         """A CONNECT in `mode` goes compact (frames.pack_connect): in its

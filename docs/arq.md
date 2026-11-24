@@ -1047,7 +1047,8 @@ off (Python and native) for A/B runs.
     CONNECTs, not one under way, and go back to the default when it leaves.
     The first four retries go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart,
     and any after them in ROBUST_FAST (fsk8r50-r1/3), for fast fading:
-    nothing is measured before a session.
+    nothing is measured before a session. With fewer retries the last goes in
+    ROBUST_FAST, unless it is the only one (RETRIES 1: ROBUST_CONNECT).
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).
@@ -1111,7 +1112,7 @@ off (Python and native) for A/B runs.
   next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, PENDING /
   CANCELPENDING, and a Data2G-specific `MODE name`.
 - **PENDING:** while listening, a header that may be a CONNECT (one codeword
-  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT only, the default;
+  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT and ROBUST_FAST, the default;
   `ofdm` the caps' first-try modes; `all`; `off`) raises PENDING before the
   body is read. CONNECTED follows if the burst connects. Otherwise
   CANCELPENDING follows once it is read, or 3 s past its end. The header has

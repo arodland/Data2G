@@ -313,16 +313,18 @@ class GearShifter(L.Policy):
     def rv_cycle(self, m):
         return codes.rv_cycle(MODES[m])
 
-    def connect_mode(self, cap, tries: int = 0):
+    def connect_mode(self, cap, tries: int = 0, last: bool = False):
         """Session frames: the cap's connect mode first, then ROBUST_CONNECT
         (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
         loss-study sessions there never connected in qpsk-r1/5) for
         ROBUST_CONNECT_TRIES retries, then ROBUST_FAST: on fast fading
         ROBUST_CONNECT's 25 Hz tones decode nothing, and nothing is measured
-        yet to say so."""
+        yet to say so. `last`, the host's last try (RETRIES under the
+        default): ROBUST_FAST too, once one ROBUST_CONNECT retry went ahead
+        of it (RETRIES 1 keeps its one retry in ROBUST_CONNECT)."""
         if tries == 0:
             return CONNECT[cap]
-        return ROBUST_CONNECT if tries <= ROBUST_CONNECT_TRIES else ROBUST_FAST
+        return ROBUST_FAST if tries > ROBUST_CONNECT_TRIES or (last and tries >= 2) else ROBUST_CONNECT
 
     def robust_mode(self) -> str:
         """In a session, the robust control mode: ROBUST_FAST if the peer's

@@ -1075,6 +1075,24 @@ def test_nods_on_audio(monkeypatch):
     assert sent >= 2 and heard >= sent - 1, (sent, heard)
 
 
+@pytest.mark.hf_only("FM's ROBUST_FAST is its ROBUST_CONNECT")
+def test_pending_on_a_robust_fast_connect_retry():
+    """A CONNECT's last retry goes in ROBUST_FAST (policy.connect_mode): the
+    default "fsk" PENDING raises on it as on ROBUST_CONNECT's. Three tries:
+    the cap's mode (OFDM, none), ROBUST_CONNECT, then ROBUST_FAST, so the
+    second PENDING is ROBUST_FAST's."""
+    a, b = Engine("W1AW", seed=81), Engine("K2XYZ", seed=82)
+    b.listen()
+    seen = []
+
+    def drain():
+        seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING"))
+        return len(seen) >= 4
+    a.connect("N0CALL", 2, tries=3)
+    assert link(a, b, 20, 120, drain, seed=83)
+    assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
+
+
 def test_pending_on_a_connect_header_then_connected_or_cancelled():
     """PENDING: raised on a header that may be a CONNECT while
     listening, before its callee is known; CONNECTED follows if it was mine,

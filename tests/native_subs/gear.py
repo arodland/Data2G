@@ -139,8 +139,8 @@ def substitutions(native):
         def rv_cycle(self, m):
             return A.rv_cycle(m)
 
-        def connect_mode(self, cap, tries=0):
-            return A.connect_mode(cap, tries)
+        def connect_mode(self, cap, tries=0, last=False):
+            return A.connect_mode(cap, tries, last)
 
         def reply_hold(self, station, burst):
             return self._n.reply_hold(station, burst.submode)

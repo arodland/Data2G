@@ -545,7 +545,7 @@ void Engine::probe_check(double t) {
 }
 
 TxBurstPtr Engine::open_frame(int cap, int ext, const Bytes& body) const {
-    const std::string mode = session_->policy->connect_mode(cap, 0);
+    const std::string mode = session_->policy->connect_mode(cap, 0, false);
     Control ctl{Core{.ftype = SESSION}, {{ext, body}}};
     const auto payloads = ctl.pack(session_->policy->payload_bytes(mode));
     auto b = std::make_shared<TxBurst>();
@@ -1047,9 +1047,11 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            if (m && !pend_ && h->header.n_cw() <= (m->name == ROBUST_CONNECT ? max_ctl(mode_at(ROBUST_CONNECT)) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
+            // a connect retry goes in either robust mode (connect_mode): engine.py PENDING_MODES
+            const bool robust = m && (m->name == ROBUST_CONNECT || m->name == ROBUST_FAST);
+            if (m && !pend_ && h->header.n_cw() <= (robust ? max_ctl(*m) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
                 const std::string_view n = m->name;
-                bool hit = pending != "ofdm" && n == ROBUST_CONNECT;
+                bool hit = pending != "ofdm" && robust;
                 for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
                 if (hit) {
                     pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};

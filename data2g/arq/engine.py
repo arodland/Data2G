@@ -40,7 +40,7 @@ from . import ping as PG
 from . import probe as PR
 from . import session as S
 from .modes import MODES, burst_seconds, max_ctl
-from .policy import CONNECT, ROBUST_CONNECT, GearShifter
+from .policy import CONNECT, ROBUST_CONNECT, ROBUST_MODES, GearShifter
 
 log = logging.getLogger("data2g.engine")
 
@@ -82,16 +82,17 @@ ID_INTERVAL_S = 600.0
 # Scanners hold a frequency on PENDING. The header carries no frame type,
 # so ID, CQ and other stations' connects in those modes raise it too
 # (docs/pending-header.md: a protocol change that would not).
-PENDING_MODES = {"off": frozenset(), "fsk": frozenset({ROBUST_CONNECT}), "ofdm": frozenset(CONNECT.values()),
-                 "all": frozenset({ROBUST_CONNECT, *CONNECT.values()})}
+# `fsk`: both robust modes, as connect_mode sends a retry in either.
+PENDING_MODES = {"off": frozenset(), "fsk": frozenset(ROBUST_MODES), "ofdm": frozenset(CONNECT.values()),
+                 "all": frozenset({*ROBUST_MODES, *CONNECT.values()})}
 PENDING_SLACK_S = 3.0
 
 
 def _connect_cw(submode: str) -> int:
     """Codewords a CONNECT burst in `submode` carries: one, but a robust
     retry its control's copies (FM's ROBUST_CONNECT is OFDM, control twice;
-    HF's is CPM, once)."""
-    return max_ctl(MODES[ROBUST_CONNECT]) if submode == ROBUST_CONNECT else 1
+    HF's robust modes are CPM, once)."""
+    return max_ctl(MODES[submode]) if submode in ROBUST_MODES else 1
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID

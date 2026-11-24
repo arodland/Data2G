@@ -60,7 +60,7 @@ inline constexpr int ROBUST_CONNECT_TRIES = 4;  // connect retries in ROBUST_CON
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
 
 std::string_view fallback(int cap);
-std::string_view connect_mode(int cap, int tries = 0);
+std::string_view connect_mode(int cap, int tries = 0, bool last = false);
 int ctl_slots(const Mode& m);
 int slots_for(const Mode& m, double seconds, bool data = true, bool dup = false);
 
@@ -175,7 +175,7 @@ public:
     std::optional<double> snr_est() override;
     std::string measured_extra() override;
     double airtime(const std::string& submode, int n_cw, bool dup) override;
-    std::string connect_mode(int cap, int tries) override;
+    std::string connect_mode(int cap, int tries, bool last) override;
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);
     }
