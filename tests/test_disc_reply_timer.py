@@ -13,7 +13,7 @@ class FixedMode(G.GearShifter):
         super().__init__()
         self.mode = mode
 
-    def connect_mode(self, cap, tries=0):
+    def connect_mode(self, cap, tries=0, last=False):
         return self.mode
 
     def choose(self, station, escalation):
