@@ -417,21 +417,32 @@ class Session:
 
     def _session_mode(self) -> str | None:
         """The robust control mode this session is running in, if it is: the
-        peer's last burst my link took, else my last burst sent, whichever
-        is robust (policy.robust()). None: neither is, and session frames
-        take the policy's connect_mode.
+        mode of the peer's last burst my link took, else of my link's last
+        burst (Station.last_sent: never a session frame), whichever is robust
+        (policy.robust()). Before any link burst either way, the robust floor
+        decides: at it (the caller's weak_path() at connect, or the callee
+        following it), the policy's first connect retry's mode. None:
+        session frames take the policy's connect_mode.
 
         A DISC goes in it, every try: in the cap's connect mode, a first
         DISC from a session at the robust floor went unanswered on weak
         paths and cost a 5.2 s timeout before the robust retry (13 of 28
         DISCs in 20 live sessions on AWGN -15/-16, hilat, poor and
-        qrm-noise, only the last two answering it). The peer's last mode first: it got
-        here, and on fast fading it is ROBUST_FAST, which a retry's
-        connect_mode (ROBUST_CONNECT) would drop. The DISC_ACK answers in
-        the DISC's mode (_session_burst), so it follows."""
-        for mode in (self._rx_mode, self._tx_mode):
+        qrm-noise, only the last two answering it). The peer's last mode
+        first: it got here, and on fast fading it is ROBUST_FAST, which a
+        retry's connect_mode (ROBUST_CONNECT) would drop. The connect frames
+        themselves decide nothing: a robust retry answered on a good path (a
+        first CONNECT a scanning callee missed) starts at the bottom
+        (_robust_start), and its first-turn DISC stays in the connect mode.
+        The DISC_ACK answers in the DISC's mode (_session_burst)."""
+        st = self.station
+        sent = st.last_sent.submode if st.last_sent is not None else ""
+        for mode in (self._rx_mode, sent):
             if mode and self.policy.robust(mode):
                 return mode
+        if not self._rx_mode and not sent and st.esc_floor >= L.MAX_ESCALATION:
+            mode = self.policy.connect_mode(self.cap, 1)
+            return mode if self.policy.robust(mode) else None
         return None
 
     def _wake_time(self) -> float | None:

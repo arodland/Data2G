@@ -367,11 +367,19 @@ bool Session::disc(double now) {
 }
 
 // The robust control mode this session is running in, if it is: the peer's last burst my link took,
-// else my last burst sent, whichever is robust (policy.robust()); none: connect_mode (session.py
-// _session_mode). A DISC goes in it, every try; the DISC_ACK answers in the DISC's mode.
+// else my link's last burst (Station::last_sent, never a session frame), whichever is robust
+// (policy.robust()); before any link burst either way, at the robust floor, the first connect retry's
+// mode; none: connect_mode (session.py _session_mode). The connect frames decide nothing: a robust
+// retry answered on a good path starts at the bottom (robust_start) and its first-turn DISC stays in
+// the connect mode. A DISC goes in it, every try; the DISC_ACK answers in the DISC's mode.
 std::optional<std::string> Session::session_mode() const {
-    for (const std::string* m : {&rx_mode, &tx_mode})
+    const std::string sent = station->last_sent ? station->last_sent->submode : std::string();
+    for (const std::string* m : {&rx_mode, &sent})
         if (!m->empty() && policy->robust(*m)) return *m;
+    if (rx_mode.empty() && sent.empty() && station->esc_floor >= MAX_ESCALATION) {
+        const std::string m = policy->connect_mode(cap, 1, false);
+        if (policy->robust(m)) return m;
+    }
     return std::nullopt;
 }
 

@@ -946,3 +946,58 @@ def test_a_session_on_a_good_path_still_disconnects_in_the_connect_mode():
     log = _exchange(a, b, 4.3, "a", 0, drop_disc=1)
     discs = [m for who, m, st in log if who == "a" and st == S.DISCONNECTING]
     assert discs[:2] == [G.CONNECT[2], G.ROBUST_CONNECT]
+
+
+@pytest.mark.parametrize("ack,robust", [((3.0, 1.0), False), ((-9.0, 1.0), True), (None, True)])
+@pytest.mark.parametrize("who", ["callee", "given_up"])
+def test_a_first_turn_disc_follows_the_robust_start_not_the_connect_frames(ack, robust, who):
+    """A session made by a robust connect retry, disconnected before any
+    link burst has gone its way: the connect frames (the robust retry, the
+    CONNECT_ACK in its mode) decide nothing. On a good path (`ack` read
+    strong: a first CONNECT a scanning callee missed) the session starts at
+    the bottom and the DISC goes in the cap's connect mode; on a weak one
+    (read weak or not measured) at the robust floor, and the DISC is robust.
+    `who`: the callee's host disconnects before its first turn (its DISC
+    replaces its first reply), or the caller's host gave up the dial while
+    the retry was on air (its DISC follows the CONNECT_ACK at once). (A
+    caller's host disconnecting at CONNECTED still sends the link burst
+    queued at connect first.)"""
+    from data2g.arq import policy as G
+    from test_arq_policy import measured
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    a.on_tx_end(a.poll(0.0), 2.0)  # the first try is lost (a scanning callee, or the path)
+    t, retry = 2.0, None
+    while retry is None:
+        t = max(t + 0.1, a.next_event() or t)
+        retry = a.poll(t)
+    assert retry.submode == G.ROBUST_CONNECT
+    if who == "given_up":
+        a.disconnect()  # the retry is on air: its answer is waited for
+    t += 5.0
+    a.on_tx_end(retry, t)
+    b.on_rx(_rx(retry), t + 0.3)
+    reply = b.poll(t + 0.3)
+    b.on_tx_end(reply, t + 5.3)
+    if ack is not None:
+        a.policy.observe(measured(*ack), reply.submode, t + 5.6)
+    a.on_rx(_rx(reply), t + 5.6)
+    t += 5.6
+    if who == "given_up":
+        disc = a.poll(t)
+        assert a.state == S.DISCONNECTING
+    else:
+        first = a.poll(t)  # the caller's first link burst
+        assert first.submode == (G.ROBUST_CONNECT if robust else G.FALLBACK[2])
+        a.on_tx_end(first, t + 5.0)
+        b.disconnect()
+        b.on_rx(_rx(first), t + 5.3)
+        disc, t = None, t + 5.3
+        while disc is None and t < 300:
+            disc = b.poll(t)
+            t = max(t + 0.05, b.next_event() or t)
+        assert b.state == S.DISCONNECTING
+    assert disc.submode == (G.ROBUST_CONNECT if robust else G.CONNECT[2])
