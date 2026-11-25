@@ -53,8 +53,9 @@ double capacity(double snr_db, std::string_view constellation) {
 
 double peak_db(std::string_view mode, int cap) {
     if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
-    for (const auto& p : tables::MODE_PEAK_DB)
-        if (p.mode == mode) return p.db[cap];
+    for (auto table : {tables::MODE_PEAK_DB, tables::MODE_PEAK_DB_WIDE})
+        for (const auto& p : table)
+            if (p.mode == mode) return p.db[cap];
     throw std::out_of_range("no peak for mode " + std::string(mode));
 }
 

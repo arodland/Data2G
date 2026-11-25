@@ -28,6 +28,11 @@ struct CpmGrid {
     int hdr_len;
     std::span<const std::uint8_t> preamble, mid_block, header_tones;
     CpmTxFilter tx[3];
+    // A wide-bin grid (cpm.WIDE_GRIDS): a symbol is L sub-windows of T / L samples, tones still `rate` apart,
+    // a tone's energy the sum of the sub-windows' from the first `guard` on; noise_median and median_se are
+    // that k = L - guard sum's (cpm._noise_median, _median_se). The on-air grids keep these defaults.
+    int L = 1, guard = 0;
+    double noise_median = 0.6931471805599453, median_se = 1.44;  // ln 2: an exponential's median over its mean
 };
 
 // A GF(M) data code's mother code (codes.gf_code, data2g.gfldpc.GFCode): n
@@ -56,6 +61,10 @@ struct CpmParams {
 
 extern const std::span<const CpmGrid> CPM_GRIDS;
 extern const std::span<const CpmSpec> CPM_SPECS, CPM_CTL;
+// The wide-bin toolbox grids, their data specs (GF codes another spec's: CpmSpec.gf holds that code) and control
+// specs, row i's control CPM_WIDE_CTL[i] (generated/cpm_wide.cpp). On air only as DATA2G_CPM_ONAIR names them.
+extern const std::span<const CpmGrid> CPM_WIDE_GRIDS;
+extern const std::span<const CpmSpec> CPM_WIDE_SPECS, CPM_WIDE_CTL;
 extern const CpmParams CPM;
 
 }  // namespace data2g::tables

@@ -34,12 +34,14 @@ soft combining): a CpmSpec quacks like a config.SubmodeSpec there. Burst:
 
 Wide-bin grids (WIDE_GRIDS: Grid.L sub-windows a symbol, tones still
 `rate` apart; the energies are the sub-windows' summed): toolbox entries,
-found by name only, never searched, offered or recommended by default,
-square-law throughout, Python only. `Grid.rate` is the tone spacing
-everywhere; the symbol rate is `Grid.baud` (the same for the on-air grids).
+found by name only, never searched, offered or recommended by default
+(DATA2G_CPM_ONAIR puts them on air, studies). `Grid.rate` is the tone
+spacing everywhere; the symbol rate is `Grid.baud` (the same for the
+on-air grids).
 
 Native: native/core/cpm (grids and specs compiled in, tables::CPM_*; the
-on-air grids only).
+wide grids tables::CPM_WIDE_*, on air as cpm::grids() reads
+DATA2G_CPM_ONAIR).
 Parity: tests/test_native_cpm.py; under `pytest --native`
 tests/native_subs/cpm.py substitutes by name, private _energies, _shares
 and _peak_ratio included.
@@ -128,8 +130,8 @@ class _Toolbox(dict):
 # apart, symbols L / rate long, a tone's energy the sum over its L sub-windows' (a noncoherent sum: the tone may
 # turn or fade within the symbol, and a bin is L times wider than the symbol rate needs). Toolbox grids: receivable
 # by name (find, receive, a Receiver given them in cpm_grids), not searched by default, not in arq.modes.MODES
-# unless DATA2G_CPM_WIDE=1 (studies), never recommended on the wire, the square law only (no coherent paths, no
-# DD), Python only (native has neither the sub-window sum nor these tables).
+# unless DATA2G_CPM_WIDE=1 (studies), recommended on the wire only under DATA2G_CPM_ONAIR; the coherent paths
+# (lock, control, DD) read their sub-windows (coherent()). Native: tables::CPM_WIDE_* (generated/cpm_wide.cpp).
 WIDE_GRIDS = {g.name: g for g in [
     # c32r62's 2000 Hz at its symbol rate with half the tones, each bin twice as wide: mutual information 0.8-0.99
     # of 250 bps on 2 / 4 ms to 30 Hz / 7 ms alike (the sum; dropping the first sub-window gained at 10 dB and up

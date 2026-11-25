@@ -26,9 +26,16 @@ py::array_t<std::int64_t> ints(std::span<const int> v) { return np<std::int64_t>
 
 void bind_cpm(py::module_& m) {
     auto c = m.def_submodule("cpm");
-    c.def("grids", [] {
+    // the on-air grids (cpm.GRIDS' iteration: DATA2G_CPM_ONAIR's too); wide=True: the wide toolbox grids
+    c.def("grids", [](bool wide) {
         py::list out;
-        for (const auto& g : tables::CPM_GRIDS) {
+        std::vector<const cpm::Grid*> gs;
+        if (wide)
+            for (const auto& g : tables::CPM_WIDE_GRIDS) gs.push_back(&g);
+        else
+            gs = cpm::grids();
+        for (const auto* gp : gs) {
+            const auto& g = *gp;
             py::dict d;
             d["name"] = std::string(g.name);
             d["m"] = g.m;
@@ -44,13 +51,20 @@ void bind_cpm(py::module_& m) {
             d["hdr_len"] = g.hdr_len;
             d["preamble"] = np<std::int64_t>(g.preamble);
             d["mid_block"] = np<std::int64_t>(g.mid_block);
+            d["L"] = g.L;
+            d["guard"] = g.guard;
+            d["noise_median"] = g.noise_median;
+            d["median_se"] = g.median_se;
             out.append(d);
         }
         return out;
-    });
-    c.def("specs", [] {
+    }, py::arg("wide") = false);
+    // every compiled-in spec (tables::CPM_SPECS, CPM_CTL); wide=True: CPM_WIDE_SPECS, CPM_WIDE_CTL
+    c.def("specs", [](bool wide) {
         py::list out;
-        for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+        const std::array<std::span<const cpm::Spec>, 2> which =
+            wide ? std::array{tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL} : std::array{tables::CPM_SPECS, tables::CPM_CTL};
+        for (auto table : which)
             for (const auto& s : table) {
                 py::dict d;
                 d["name"] = std::string(s.name);
@@ -62,6 +76,11 @@ void bind_cpm(py::module_& m) {
                 d["n_sym"] = s.n_sym;
                 out.append(d);
             }
+        return out;
+    }, py::arg("wide") = false);
+    c.def("on_air_specs", [] {  // cpm.SPECS' iteration (DATA2G_CPM_ONAIR's too)
+        py::list out;
+        for (const auto* s : cpm::specs()) out.append(std::string(s->name));
         return out;
     });
     c.def("header_symbols", [](const std::string& g, int value) {
@@ -106,8 +125,10 @@ void bind_cpm(py::module_& m) {
     }, py::arg("grid"), py::arg("x"), py::arg("start"), py::arg("n_sym"), py::arg("cfo"), py::arg("extra") = 0);
     c.def("shares", [](const In<double>& E) { return np(cpm::shares(mat(E))); });
     py::class_<cpm::CoarseTrack>(c, "CoarseTrack")
-        .def(py::init([](const std::string& g, double reach_hz) { return cpm::CoarseTrack(grid(g), reach_hz); }),
-             py::arg("grid"), py::arg("reach_hz") = 150.0)
+        .def(py::init([](const std::string& g, double reach_hz, cpm::CoarseTrack* source) {
+                 return cpm::CoarseTrack(grid(g), reach_hz, source);
+             }),
+             py::arg("grid"), py::arg("reach_hz") = 150.0, py::arg("source") = nullptr, py::keep_alive<1, 4>())
         .def("feed", [](cpm::CoarseTrack& t, const In<double>& buf, long off) { t.feed(view(buf), off); })
         .def_readonly("extra", &cpm::CoarseTrack::extra);
     c.def("detect", [](const std::string& g, const In<double>& x, double reach_hz, bool fine, bool front_only, int n_sym,
@@ -213,10 +234,13 @@ void bind_cpm(py::module_& m) {
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
     });
-    c.def("coh_metric", [](const In<std::complex<double>>& Z, const In<double>& P, int W, double n0) {
-        return np(cpm::coh_metric(mat(Z), mat(P), W, n0));
-    });
-    c.def("noise_n0", [](const In<double>& E) { return cpm::noise_n0(mat(E)); });
+    c.def("coh_metric", [](const In<std::complex<double>>& Z, const In<double>& P, int W, double n0, int L) {
+        return np(cpm::coh_metric(mat(Z), mat(P), W, n0, L));
+    }, py::arg("Z"), py::arg("P"), py::arg("W"), py::arg("n0"), py::arg("L") = 1);
+    c.def("noise_n0", [](const In<double>& E, double noise_median) { return cpm::noise_n0(mat(E), noise_median); },
+          py::arg("E"), py::arg("noise_median") = std::numbers::ln2);
+    c.def("coh_w", [](const std::string& g, bool hdr) { return cpm::coh_w(grid(g), hdr); }, py::arg("grid"),
+          py::arg("hdr") = false);
     c.def("bit_llrs", [](const std::string& g, const In<double>& L) { return np(cpm::bit_llrs(grid(g), mat(L))); });
     c.def("coh_read_header", [](const std::string& g, const In<double>& x, long s0, double cfo, int copies) {
         const auto h = cpm::coh_read_header(grid(g), view(x), s0, cfo, copies);
