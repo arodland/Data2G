@@ -47,10 +47,67 @@ std::string_view fallback(int cap) {
     return cap == 0 ? "n10-ack-4f" : "ack-4f";
 }
 
+namespace {
+
+std::string env(const char* name) {
+    const char* v = std::getenv(name);
+    return v ? v : "";
+}
+
+// policy.CONNECT_SEQ: DATA2G_CONNECT_SEQ, else DATA2G_ROBUST_RULE's, else master's (R x ROBUST_CONNECT_TRIES, F).
+std::string connect_seq() {
+    const std::string rule = env("DATA2G_ROBUST_RULE");
+    if (rule != "" && rule != "connect" && rule != "replace" && rule != "alt")
+        throw std::invalid_argument("DATA2G_ROBUST_RULE=" + rule + ": connect, replace or alt");
+    std::string seq = env("DATA2G_CONNECT_SEQ");
+    if (seq.empty()) seq = rule == "connect" ? "WWWWW" : rule == "alt" ? "RWRWR" : std::string(ROBUST_CONNECT_TRIES, 'R') + "F";
+    if (seq.find_first_not_of("RFW") != std::string::npos)
+        throw std::invalid_argument("DATA2G_CONNECT_SEQ=" + seq + ": letters R, F, W");
+    return seq;
+}
+
+}  // namespace
+
+int connect_tries_default() {
+    static const int n = 1 + static_cast<int>(connect_seq().size());
+    return n;
+}
+
+const Robust& robust() {
+    static const Robust r = [] {
+        const std::string rule = env("DATA2G_ROBUST_RULE"), fast = env("DATA2G_ROBUST_FAST"), seq = connect_seq();
+        if (fast != "" && fast != "wide" && fast != "always")
+            throw std::invalid_argument("DATA2G_ROBUST_FAST=" + fast + ": wide or always");
+        if ((!rule.empty() || !fast.empty() || seq.find('W') != std::string::npos) && !mode(ROBUST_WIDE))
+            throw std::invalid_argument("the wide robust rules need DATA2G_CPM_ONAIR=c8w50");
+        Robust out{ROBUST_CONNECT, ROBUST_FAST, {}, {}, fast == "always"};
+        if (rule == "replace") out.connect = ROBUST_WIDE;
+        if (!fast.empty()) out.fast = ROBUST_WIDE;
+        for (char c : seq) out.connects.push_back(c == 'R' ? out.connect : c == 'F' ? out.fast : ROBUST_WIDE);
+        // (connect and fast stay among them whatever the retries: the session's robust polls are in them)
+        for (auto m : {out.connect, out.fast})
+            if (std::find(out.modes.begin(), out.modes.end(), m) == out.modes.end()) out.modes.push_back(m);
+        for (auto m : out.connects)
+            if (std::find(out.modes.begin(), out.modes.end(), m) == out.modes.end()) out.modes.push_back(m);
+        return out;
+    }();
+    return r;
+}
+
+bool is_robust(std::string_view submode) {
+    const auto& m = robust().modes;
+    return std::find(m.begin(), m.end(), submode) != m.end();
+}
+
 std::string_view connect_mode(int cap, int tries, bool last) {
     cap_hz(cap);
-    // policy.py connect_mode: `last`, the host's last try, in ROBUST_FAST once a ROBUST_CONNECT retry went ahead
-    if (tries) return tries > ROBUST_CONNECT_TRIES || (last && tries >= 2) ? ROBUST_FAST : ROBUST_CONNECT;
+    // policy.py connect_mode: the retries in CONNECT_SEQ's modes in turn, its last past its end; `last`, the
+    // host's last try, in its last letter's once one retry went ahead (master's: ROBUST_FAST)
+    if (tries) {
+        const auto& c = robust().connects;
+        if (last && tries >= 2) return c.back();
+        return c[static_cast<std::size_t>(std::min<int>(tries, static_cast<int>(c.size())) - 1)];
+    }
     return cap == 0 ? "n10-qpsk-r1/3" : "qpsk-r1/5";
 }
 
@@ -73,10 +130,9 @@ std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int 
     // the peer's robust poll, or my floor there with no data: control only in
     // ROBUST_CONNECT (policy.py)
     const bool robust_floor = st.esc_floor >= ROBUST_ESCALATION && !st.pending;
-    if (escalation && (heard == ROBUST_CONNECT || heard == ROBUST_FAST))  // the peer's robust poll: in its mode
-        return {heard == ROBUST_FAST ? ROBUST_FAST : ROBUST_CONNECT, 1};
-    if (escalation >= ROBUST_ESCALATION || robust_floor)
-        return {last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ ? ROBUST_FAST : ROBUST_CONNECT, 1};
+    if (escalation && heard && is_robust(*heard))  // the peer's robust poll: answered in its mode
+        return {mode_at(*heard).name, 1};
+    if (escalation >= ROBUST_ESCALATION || robust_floor) return {robust_mode(), 1};
     if (escalation == 2) return {ALT_POLL, 2};
     if (escalation) {
         const Mode* r = st.peer_reply_recommend ? decode(*st.peer_reply_recommend) : nullptr;
@@ -84,8 +140,7 @@ std::pair<std::string_view, int> GearShifter::choose(const StationView& st, int 
     }
     if (!rec) {
         // nothing recommended yet and my floor is the robust mode (session._robust_start): control only, in it
-        if (st.esc_floor >= ROBUST_ESCALATION)
-            return {last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ ? ROBUST_FAST : ROBUST_CONNECT, 1};
+        if (st.esc_floor >= ROBUST_ESCALATION) return {robust_mode(), 1};
         return {fallback(st.cap), 2};
     }
     const Mode* m = decode(*rec);
@@ -188,10 +243,8 @@ int GearShifter::gate() const {
 double GearShifter::reply_hold(const StationView& st, std::string_view submode) const {
     std::vector<std::string_view> ms = {log.empty() ? fallback(st.cap) : std::string_view(log.back().reply)};
     if (st.misses) ms.insert(ms.end(), {fallback(st.cap), ALT_POLL});
-    if (submode == ROBUST_CONNECT || submode == ROBUST_FAST || st.esc_floor >= ROBUST_ESCALATION) {
-        ms.push_back(ROBUST_CONNECT);
-        if (ROBUST_FAST != ROBUST_CONNECT) ms.push_back(ROBUST_FAST);  // the same mode on FM (policy.py ROBUST_MODES)
-    }
+    if (is_robust(submode) || st.esc_floor >= ROBUST_ESCALATION)
+        for (auto m : arq::robust().modes) ms.push_back(m);  // one on FM (policy.py ROBUST_MODES)
     double t = 0.0;
     for (auto m : ms) {
         const Mode& md = mode_at(m);

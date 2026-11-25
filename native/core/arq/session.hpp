@@ -22,7 +22,10 @@
 namespace data2g::arq {
 
 inline constexpr int VERSION = 5;  // session.py VERSION: 4 added T_INLINE, 5 the CW ID ahead of a turn
-inline constexpr int CONNECT_TRIES = 6;  // session.py: the last in ROBUST_FAST
+// session.py: the cap's connect mode, then policy.CONNECT_SEQ's retries (master's six: the last in ROBUST_FAST);
+// 1 + its length (DATA2G_CONNECT_SEQ, arq/policy.cpp), read once
+int connect_tries_default();
+inline const int CONNECT_TRIES = connect_tries_default();
 inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;
 inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
