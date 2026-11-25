@@ -142,6 +142,22 @@ ROBUST_CONNECT_TRIES = 4
 # would have worked (AWGN -8 dB: +5.7 s).
 ROBUST_START_SNR_DB = -6.0
 ROBUST_START_SPREAD_HZ = 6.0
+# The first data such a session's caller asks for (robust_started(), until a
+# data burst of the peer's is usable): only in modes whose steady-channel
+# threshold (MODE_THRESHOLDS' first column) is at most the measured snr_est
+# plus this, and with the burst's control twice. Its one reading is the
+# CONNECT_ACK's, and from it the model asked for fsk32r62-r1/2 (threshold
+# -8 dB) at -13.8 dB. Started at the bottom of the floor that first request
+# went unheard in the OFDM fallback; started robust it is heard, the burst it
+# asks for is lost and so are half the fsk16r25 controls that would recover
+# it. Live sessions (scripts/stream_session, 64 bytes each way, 180 s),
+# completed and mean s (unfinished as 179.5), no robust start -> robust start
+# -> with this: AWGN -15 dB (16 seeds) 14, 138.9 -> 5, 170.4 -> 13, 120.6;
+# -14 dB (8) all, 118.6 -> 114.8 -> 88.4; -12 dB (8) all, 91.0 -> 87.3 ->
+# 64.1. The bound without the second control: -15 dB 12, 140.1. The 2 ms and
+# 7 ms / 1 Hz -8 dB cells and two carrier cells ran the same events; 7 ms /
+# 10 Hz +1.5 s, 30 Hz -5 s by mean. Not tuned: 2 dB is the one value tried.
+ROBUST_START_DATA_MARGIN_DB = 2.0
 # Studies (scripts/wide_fsk_study.py; need DATA2G_CPM_ONAIR=c8w50): the wide-bin grid c8w50 in the connect
 # retries. Its control codeword decodes where fsk16r25's stops (30 Hz / 7 ms: -12.8 dB against never) and within
 # 1 dB of it elsewhere, but loses about 2.7 dB more to an in-grid carrier; a control-only burst is 6.7 s against
@@ -343,6 +359,9 @@ class GearShifter(L.Policy):
     # with nothing to send (the IRS of a one-way transfer) was expected to
     # answer with a data burst in the data mode's band
     peer_had_data: bool = True
+    # the session started at the robust floor and no data burst of the peer's has
+    # been usable yet: ROBUST_START_DATA_MARGIN_DB bounds what I ask for (robust_started)
+    start_bound: bool = False
     log: list = field(default_factory=list)
 
     # -- link.Policy plumbing (native: GearPolicy): forwards to modes and codes -------
@@ -395,6 +414,13 @@ class GearShifter(L.Policy):
 
     def robust(self, submode: str) -> bool:
         return submode in ROBUST_MODES
+
+    def robust_started(self):
+        """Session._robust_start, the caller's: the session starts at the
+        robust floor. Until a data burst of the peer's is usable, recommend()
+        asks for data within ROBUST_START_DATA_MARGIN_DB of the measured
+        snr_est and for its control twice."""
+        self.start_bound = True
 
     def robust_mode(self) -> str:
         """In a session, the robust control mode: ROBUST_FAST if the peer's
@@ -535,6 +561,7 @@ class GearShifter(L.Policy):
         if usable is not None:
             self.turns = (self.turns + ["ok" if usable else "lost"])[-LINK_HIST:]
         if usable and sent:
+            self.start_bound = False
             self.data_lost, self.ladder_left = 0, False
             if self.ceiling is not None:  # climb a step
                 self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
@@ -708,6 +735,12 @@ class GearShifter(L.Policy):
             data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
         if self.cpm_floor():
             data_cands = [s for s in data_cands if is_cpm(s)] or [s for s in cands if is_cpm(s)] or data_cands
+        if self.start_bound and cands:
+            # a robust start's first data: within the margin of the one reading
+            # there is; none that robust: the lowest steady-channel threshold
+            lim = self.measured["snr_est"] + ROBUST_START_DATA_MARGIN_DB
+            data_cands = ([s for s in data_cands if MODE_THRESHOLDS[s.name][0] <= lim]
+                          or [min(cands, key=lambda s: MODE_THRESHOLDS[s.name][0])])
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
@@ -759,7 +792,7 @@ class GearShifter(L.Policy):
             # its control at risk: ask for it twice (one codeword of the burst;
             # at MPP -4 dB 73% of data bursts lost their control while 172 of
             # their data codewords decoded, scripts/loss_study.py)
-            self.want_dup = self.predicted[s.name][0] < DUP_BELOW
+            self.want_dup = self.predicted[s.name][0] < DUP_BELOW or self.start_bound
             if reply:
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
         reply = reply or FALLBACK[st.cap]

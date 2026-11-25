@@ -284,6 +284,7 @@ def test_a_session_connected_in_the_robust_mode_starts_at_the_robust_floor(first
     assert robust == (not first_try_heard and ack not in ((3.0, 1.0), (-6.0, 2.0)))
     floor = L.MAX_ESCALATION if robust else 0
     assert (a.station.esc_floor, b.station.esc_floor) == (floor, 0)  # the callee: not yet
+    assert (a.policy.start_bound, b.policy.start_bound) == (robust, False)  # the caller's first data request is bounded
     mine = a.poll(t + 5.6)
     if robust:
         assert mine.submode == (G.ROBUST_FAST if ack and ack[1] >= G.ROBUST_FAST_SPREAD_HZ else G.ROBUST_CONNECT)
