@@ -94,6 +94,7 @@ inline arq::Measured measured(const py::dict& d) {
     if (d.contains("headroom")) m.headroom = d["headroom"].cast<double>();
     if (d.contains("frames")) m.frames = d["frames"].cast<double>();
     if (d.contains("n0_spread_db")) m.n0_spread_db = d["n0_spread_db"].cast<double>();
+    if (d.contains("mer_db") && !d["mer_db"].is_none()) m.mer_db = d["mer_db"].cast<double>();
     if (d.contains("noise") && !d["noise"].is_none()) {
         const auto n = d["noise"].cast<py::dict>();
         arq::NoiseLevels l;
@@ -119,6 +120,7 @@ inline py::dict to_dict(const arq::Measured& m) {
     d["headroom"] = m.headroom;
     d["frames"] = m.frames;
     d["n0_spread_db"] = m.n0_spread_db;
+    if (m.mer_db) d["mer_db"] = *m.mer_db;
     if (m.noise) {
         py::dict n;
         n["noise_db"] = std::vector<double>(m.noise->db.begin(), m.noise->db.end());

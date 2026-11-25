@@ -488,6 +488,23 @@ class GearShifter(L.Policy):
         self.snrs = (self.snrs + [float(measured["snr_est"])])[-CPM_FLOOR_HIST:]
         self.snrs_long = (self.snrs_long + [float(measured["snr_est"])])[-P.GATE_HIST:]
 
+    def update_measured(self, measured: dict):
+        """Replace the last burst's measurements in place after decoding (e.g.
+        data-aided MER from phy.ModemRx.measure_data), keeping the rolling
+        n0_spread_db median and noise profile already attached to self.measured."""
+        if self.measured is None:
+            return
+        m = dict(self.measured)
+        m.update(measured)
+        m["n0_spread_db"] = self.measured.get("n0_spread_db", m.get("n0_spread_db", 0.0))
+        if "noise" in self.measured and "noise" not in measured:
+            m["noise"] = self.measured["noise"]
+        self.measured = m
+        if self.snrs:
+            self.snrs[-1] = float(m["snr_est"])
+        if self.snrs_long:
+            self.snrs_long[-1] = float(m["snr_est"])
+
     def cpm_floor(self) -> bool:
         """CPM_FLOOR holds: data in CPM modes only."""
         if CPM_FLOOR is None:

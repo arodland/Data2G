@@ -16,7 +16,7 @@ def substitutions(native):
     from . import sc_same
 
     P, K = native.phy, native.kisslink
-    py_rx, py_tx, py_soft, py_measure = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure
+    py_rx, py_tx, py_soft, py_measure, py_data_mer = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure, PHY.data_mer
     watched = ("decode_raw", "decode_buffer", "decode_buffer_raw", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
                "encode", "encode_info", "descramble")
 
@@ -73,6 +73,9 @@ def substitutions(native):
         def forget(self, key):
             return self._n.forget(key)
 
+        def measure_data(self, measured):
+            return self._n.measure_data(measured)
+
     def tx_audio(burst, tx_path=None, level=None):
         # tx_path None: Python's station setting (modem.TX_PATH), as the modulate substitution reads it
         return (P.tx_audio(burst, tx_path or modem.TX_PATH, level) if burst.submode in modes.MODES
@@ -99,6 +102,7 @@ def substitutions(native):
         (PHY, "tx_audio"): tx_audio,
         (PHY, "soft_bits"): soft_bits,
         (PHY, "measure"): measure,
+        (PHY, "data_mer"): lambda r, coded_bits, measured: P.data_mer(r, coded_bits, measured) if own(r["spec"]) else py_data_mer(r, coded_bits, measured),
         (PHY, "ModemRx"): ModemRx,
         (kisslink, "parse_ax25"): parse_ax25,
         (kisslink, "station_hash"): K.station_hash,

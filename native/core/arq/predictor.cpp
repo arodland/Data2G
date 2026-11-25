@@ -6,6 +6,9 @@
 #include <mutex>
 #include <string>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -96,6 +99,33 @@ double measured_peak_db(const Mode& m) {
 }
 }  // namespace
 
+double inv_capacity(double mi, std::string_view constellation) {
+    const auto& t = table(constellation).mi;
+    if (mi >= t.back() - 1e-5) return std::numeric_limits<double>::infinity();
+    return interp(mi, t, tables::CAPACITY_GRID);
+}
+
+double band_bw_db(std::string_view band) {
+    const auto& b = config::band(band);
+    return 10.0 * std::log10(static_cast<double>(b.nc) * config::RS / config::SNR_REF_BW_HZ);
+}
+
+bool data_mer_default() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_DATA_MER");
+        return !v || std::strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+
+double fm_mer_offset_db() {
+    static const double off = [] {
+        const char* v = std::getenv("DATA2G_FM_MER_OFFSET");
+        return v && *v ? std::strtod(v, nullptr) : 2.0;
+    }();
+    return off;
+}
+
 double peak_db(std::string_view mode, int cap) {
     if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
     if (const auto& m = mode_at(mode); !m.is_cpm() && config::sc_band(m.band)) return measured_peak_db(m);
@@ -160,6 +190,35 @@ double effective_mi(std::span<const std::complex<double>> h, std::span<const dou
         mi[i] = interp(snr, tables::CAPACITY_GRID, t.mi);
     }
     return dsp::pairwise_sum(mi) / static_cast<double>(mi.size());
+}
+
+std::array<double, CONSTS.size()> effective_mi_all(std::span<const double> h2, std::span<const double> var) {
+    if (h2.size() != var.size() || h2.empty()) throw std::invalid_argument("effective_mi_all: h2 and var must match");
+    const auto& grid = tables::CAPACITY_GRID;
+    const std::size_t gn = grid.size();
+    const double g0 = grid[0], g1 = grid[gn - 1];
+    const double inv_step = static_cast<double>(gn - 1) / (g1 - g0);
+    std::array<const double*, CONSTS.size()> tbl{};
+    for (std::size_t c = 0; c < CONSTS.size(); ++c) tbl[c] = table(CONSTS[c]).mi.data();
+    std::array<double, CONSTS.size()> sum{};
+    const std::size_t N = h2.size();
+    for (std::size_t i = 0; i < N; ++i) {
+        const double snr = 10.0 * std::log10(std::max(h2[i] / var[i], 1e-6));
+        if (snr <= g0) {
+            for (std::size_t c = 0; c < CONSTS.size(); ++c) sum[c] += tbl[c][0];
+        } else if (snr >= g1) {
+            for (std::size_t c = 0; c < CONSTS.size(); ++c) sum[c] += tbl[c][gn - 1];
+        } else {
+            const double pos = (snr - g0) * inv_step;
+            const auto j = std::min(static_cast<std::size_t>(pos), gn - 2);
+            const double frac = (snr - grid[j]) / (grid[j + 1] - grid[j]);
+            for (std::size_t c = 0; c < CONSTS.size(); ++c) sum[c] += tbl[c][j] + frac * (tbl[c][j + 1] - tbl[c][j]);
+        }
+    }
+    std::array<double, CONSTS.size()> out{};
+    const double inv_n = 1.0 / static_cast<double>(N);
+    for (std::size_t c = 0; c < CONSTS.size(); ++c) out[c] = sum[c] * inv_n;
+    return out;
 }
 
 std::vector<double> outcome_inputs(const Measured& m, std::string_view band, double gap, double seconds,
@@ -321,6 +380,16 @@ Outcome fm_outcome(const Measured& meas, int mode, std::string_view measured_ban
     const Mode* m = arq::mode(row.name);
     double snr = meas.snr_est;
     const bool fading = meas.n0_spread_db >= FM_FADING_SPREAD_DB;
+    if (data_mer_default() && m && !measured_band.empty() && m->band == measured_band && !m->is_cpm()) {
+        const auto cf = const_family(m->ofdm->constellation);
+        for (std::size_t i = 0; i < CONSTS.size(); ++i) {
+            if (CONSTS[i] == cf) {
+                const double eq = inv_capacity(meas.mi[i], cf);
+                if (std::isfinite(eq)) snr = std::min(snr, eq + band_bw_db(m->band) + fm_mer_offset_db());
+                break;
+            }
+        }
+    }
     if (m && !measured_band.empty()) {
         snr += fm_band_offset_db(m->band) - fm_band_offset_db(measured_band);
         if (m->band != measured_band && !fading) snr += fm_steady_offset_db(m->band);
