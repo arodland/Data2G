@@ -3,6 +3,10 @@
 #include "convert.hpp"
 #include "cpm/cpm.hpp"
 
+#include <map>
+#include <set>
+#include <string>
+
 namespace data2g::bind {
 
 namespace {
@@ -210,6 +214,59 @@ void bind_cpm(py::module_& m) {
         return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
     });
     c.def("coh_ctl", &cpm::coh_ctl);
+    // --- the leak model (cpm.py LEAK, LEAK_K, LEAK_Z, CTL_SQ, SPILL as one dict) ---
+    static constexpr const char* uses[] = {"lock", "ctl", "data", "dd"};
+    c.def("study", [] {
+        const auto& s = cpm::study();
+        py::set leak;
+        py::dict spill;
+        for (int i = 0; i < 4; ++i) {
+            if (s.leak[i]) leak.add(uses[i]);
+            spill[uses[i]] = s.spill[i];
+        }
+        if (s.ctlsq) leak.add("ctlsq");
+        py::dict d;
+        d["leak"] = py::frozenset(leak);
+        d["leak_k"] = s.leak_k;
+        d["leak_z"] = s.leak_z;
+        d["ctl_sq"] = s.ctl_sq;
+        d["spill"] = spill;
+        return d;
+    });
+    c.def("set_study", [](const py::dict& d) {  // tests only: study()'s dict
+        cpm::Study s;
+        const auto leak = d["leak"].cast<std::set<std::string>>();
+        const auto spill = d["spill"].cast<std::map<std::string, double>>();
+        for (int i = 0; i < 4; ++i) {
+            s.leak[i] = leak.count(uses[i]) > 0;
+            if (const auto it = spill.find(uses[i]); it != spill.end()) s.spill[i] = it->second;
+        }
+        s.ctlsq = leak.count("ctlsq") > 0;
+        s.leak_k = d["leak_k"].cast<double>();
+        s.leak_z = d["leak_z"].cast<double>();
+        s.ctl_sq = d["ctl_sq"].cast<double>();
+        cpm::set_study(s);
+    });
+    const auto use_of = [](const std::string& u) {
+        for (int i = 0; i < 4; ++i)
+            if (u == uses[i]) return static_cast<cpm::Use>(i);
+        throw py::key_error("no tone_metric consumer " + u);
+    };
+    c.def("tone_metric", [use_of](const In<double>& E, const std::string& use) {
+        return np(cpm::tone_metric(mat(E), use_of(use)));
+    });
+    c.def("leak_metric", [](const In<double>& E, double k) { return np(cpm::leak_metric(mat(E), k)); });
+    c.def("spill_significant", [](const In<double>& E) { return cpm::spill_significant(mat(E)); });
+    c.def("ctl_square", [](const std::string& g, const In<double>& E, int slot) {
+        return cpm::ctl_square(grid(g), mat(E), slot);
+    });
+    // cpm.receive's per-slot soft values for a lock at (start, cfo) (the parity tests)
+    c.def("receive_soft", [](const In<double>& x, const std::string& spec, int n_data, bool dup, long start, double cfo) {
+        cpm::Lock l{&cspec(spec), n_data, dup, start, cfo, 0.0, 0.0, 0.0, 0, 0};
+        py::list out;
+        for (const auto& s : cpm::receive(view(x), l).soft) out.append(np(s));
+        return out;
+    });
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
     });

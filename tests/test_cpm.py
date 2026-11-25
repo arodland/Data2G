@@ -384,18 +384,18 @@ def test_a_carrier_does_not_read_as_signal_in_snr_est():
 
 
 def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
-    """with_native / --native under a CPM study toggle: the soft-value ones keep
-    every provider that makes or decodes CPM soft values in Python (C++ has
-    master's metric), fsk32r62-r2/3 offered keeps all but the OFDM and audio ones."""
+    """with_native / --native under a CPM study toggle: the leak model's run
+    in C++ (it reads them too); fsk32r62-r2/3 offered keeps all but the OFDM
+    and audio providers in Python."""
     import native_subs
 
-    for v in native_subs.CPM_SOFT_ENV + native_subs.CPM_MODE_ENV:
+    for v in ("DATA2G_CPM_LEAK", *native_subs.CPM_MODE_ENV):
         monkeypatch.delenv(v, raising=False)
     assert native_subs.study_skip() == set()
     monkeypatch.setenv("DATA2G_CPM_R23", "0")
     assert native_subs.study_skip() == set()
     monkeypatch.setenv("DATA2G_CPM_LEAK", "ctl,data,dd,ctlsq")
-    assert native_subs.study_skip() == native_subs.CPM_SOFT_PY
+    assert native_subs.study_skip() == set()
     monkeypatch.setenv("DATA2G_CPM_R23", "1")
     assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.CPM_MODE_NATIVE
     assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()

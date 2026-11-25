@@ -412,3 +412,89 @@ def test_coarse_track(native, reference):
             a, b = native.cpm.detect(g.name, buf[37:], track=tn, x0=off + 37, **kw), \
                 ref(reference, "detect")(g, buf[37:], track=tp, x0=off + 37, **kw)
             assert a[1:] == b[1:] and a[0] == pytest.approx(b[0], rel=RTOL), (g.name, kw)
+
+
+@pytest.fixture
+def leak_on(native, monkeypatch):
+    """The leak model on in both (DATA2G_CPM_LEAK=ctl,data,dd,ctlsq), the rest of the study as the environment set it."""
+    old = native.cpm.study()
+    leak = frozenset({"ctl", "data", "dd", "ctlsq"})
+    monkeypatch.setattr(cpm, "LEAK", leak)
+    native.cpm.set_study({**old, "leak": leak})
+    yield
+    native.cpm.set_study(old)
+
+
+def _leak_case(spec, chan, rng, n_data=2, dup=True, sigma=0.08):
+    """A burst of `spec` from sample 1777, CFO 0: on AWGN, with a steady carrier between two tones, or on hilat-d."""
+    from data2g import hfchannel
+
+    g = cpm.GRIDS[spec.grid]
+    x = cpm.modulate(spec, _burst(spec, n_data, dup, rng), dup)
+    if chan == "hilat-d":
+        x = hfchannel.fading(np.concatenate([np.zeros(1777), x, np.zeros(1777)]), hfchannel.ITU_PRESETS["hilat-d"],
+                             seed=int(rng.integers(1 << 30)))
+        y = x + rng.normal(0, sigma, len(x))
+    else:
+        y = _channel(x, rng, lead=1777, sigma=sigma)
+    if chan == "carrier":
+        y = y + 20 * sigma * np.cos(2 * np.pi * (g.f0 + 5.4 * g.rate) * np.arange(len(y)) / FS + 1.0)
+    return y
+
+
+@pytest.mark.parametrize("chan", ["awgn", "carrier", "hilat-d"])
+@pytest.mark.parametrize("name", list(cpm.SPECS))
+def test_leak_model(native, reference, leak_on, name, chan):
+    """The leak model (DATA2G_CPM_LEAK=ctl,data,dd,ctlsq) on every grid and
+    rate, on AWGN, beside an in-grid carrier and on hilat-d: tone_metric per
+    consumer, spill_significant, leak_metric, ctl_square, the soft values,
+    the DD metric and soft values, and receive's (coherent control kept or
+    left on the square law), alike in both."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(list(cpm.SPECS).index(name) * 3 + ["awgn", "carrier", "hilat-d"].index(chan))
+    n_data, dup, s0, f = 2, True, 1777, 0.0
+    y = _leak_case(spec, chan, rng, n_data, dup)
+    slots, E = native.cpm.soft(g.name, y, s0, f, n_data, dup)
+    slots_ref, E_ref = ref(reference, "soft")(g, spec, y, s0, f, n_data, dup)
+    np.testing.assert_allclose(E, E_ref, rtol=RTOL, atol=1e-12)
+    for a, b in zip(slots, slots_ref, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+    n_ctl, n_dat = cpm.CTL[g.name].n_sym, cpm.DATA_N // g.bits
+    cws = [E_ref[:n_ctl], E_ref[n_ctl:2 * n_ctl]] + [E_ref[2 * n_ctl + i * n_dat:2 * n_ctl + (i + 1) * n_dat] for i in range(n_data)]
+    significant = [ref(reference, "spill_significant")(e) for e in cws]
+    assert [native.cpm.spill_significant(e) for e in cws] == significant
+    for e in cws:
+        for use in ("lock", "ctl", "data", "dd"):
+            np.testing.assert_allclose(native.cpm.tone_metric(e, use), ref(reference, "tone_metric")(g, e, use),
+                                       rtol=1e-12, atol=1e-12)
+        for k in (0.0, cpm.LEAK_K):
+            np.testing.assert_allclose(native.cpm.leak_metric(e, k), ref(reference, "leak_metric")(e, k), rtol=1e-12,
+                                       atol=1e-12)
+    square = [ref(reference, "ctl_square")(g, E_ref, s) for s in range(1 + dup)]
+    assert [native.cpm.ctl_square(g.name, E_ref, s) for s in range(1 + dup)] == square
+    if chan == "hilat-d":  # the case must reach the leak model
+        assert all(significant), significant
+
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
+    Z = ref(reference, "bins")(g, y, s0, lay.n, f)
+    n_cw = 1 + dup + n_data
+    r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
+    post = {1 + dup: np.log(rng.dirichlet(np.ones(g.m), n_dat)).reshape(-1)}
+    for slot in range(n_cw):
+        for p in ({}, post):
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, p, slot)
+            np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
+            np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot),
+                                       ref(reference, "dd_soft")(r, M, slot), rtol=1e-9, atol=1e-9)
+
+    # receive: cpm.receive's steps on the Python reference
+    s1, f1 = ref(reference, "refine")(g, y, s0, f, spec, n_data, dup)
+    want, E1 = ref(reference, "soft")(g, spec, y, s1, f1, n_data, dup)
+    r = dict(r, Z=ref(reference, "bins")(g, y, s1, lay.n, f1))
+    if cpm.COH_CTL:
+        for s in range(1 + dup):
+            if not ref(reference, "ctl_square")(g, E1, s):
+                want[s] = ref(reference, "dd_soft")(r, ref(reference, "dd_metric")(r, {}, s), s)
+    for a, b in zip(native.cpm.receive_soft(y, spec.name, n_data, dup, s0, f), want, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)

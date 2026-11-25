@@ -4,7 +4,9 @@
 def substitutions(native):
     """data2g.cpm. Grids and specs go by name; one that isn't the frozen one
     stays in Python, as does every grid while a test patches modem's
-    PROTOCOL_VERSION (the header words' CRC-6 seed, compiled in)."""
+    PROTOCOL_VERSION (the header words' CRC-6 seed, compiled in) or the leak
+    model's switches (LEAK, LEAK_K, LEAK_Z, CTL_SQ, SPILL: C++ reads the
+    environment once, native.cpm.study())."""
     n = native.cpm
     import functools
 
@@ -14,8 +16,15 @@ def substitutions(native):
                                        "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine",
                                        "prime_lock", "CoarseTrack")}
 
+    uses = ("lock", "ctl", "data", "dd")
+
+    def same_study():
+        s = n.study()
+        return (cpm.LEAK & {*uses, "ctlsq"} == s["leak"] and (cpm.LEAK_K, cpm.LEAK_Z, cpm.CTL_SQ) ==
+                (s["leak_k"], s["leak_z"], s["ctl_sq"]) and all(cpm.SPILL.get(u, 1.0) == s["spill"][u] for u in uses))
+
     def own_grid(g):
-        return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+        return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION and same_study()
 
     def own_spec(s):
         return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
@@ -102,7 +111,17 @@ def substitutions(native):
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)
 
-    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows")})
+    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows", "tone_metric",
+                                            "spill_significant", "ctl_square")})
+
+    def tone_metric(g, E, use="lock"):
+        return n.tone_metric(E, use) if own_grid(g) and use in uses else py["tone_metric"](g, E, use)
+
+    def spill_significant(E):
+        return n.spill_significant(E) if same_study() else py["spill_significant"](E)
+
+    def ctl_square(g, E, slot):
+        return n.ctl_square(g.name, E, slot) if own_grid(g) else py["ctl_square"](g, E, slot)
 
     def coh_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
         if not own_grid(g):
@@ -161,4 +180,8 @@ def substitutions(native):
         (cpm, "slot_rows"): slot_rows,
         (cpm, "dd_metric"): dd_metric,
         (cpm, "dd_soft"): dd_soft,
+        (cpm, "tone_metric"): tone_metric,
+        (cpm, "leak_metric"): n.leak_metric,
+        (cpm, "spill_significant"): spill_significant,
+        (cpm, "ctl_square"): ctl_square,
     }
