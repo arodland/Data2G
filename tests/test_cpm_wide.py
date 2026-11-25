@@ -150,3 +150,11 @@ def test_carrier_in_the_grid_gets_its_own_floor(name):
         assert codes.decode_many(spec, np.asarray(r["soft"][1])[None], index=[1])[0] == (pay[1], True), tag
     assert got["clean"][0] is None and got["carrier"][0] is not None and int(np.argmax(got["carrier"][0])) == 3
     assert abs(got["carrier"][1] - got["clean"][1]) < 3.0
+
+
+def test_band_span_of_a_wide_grid():
+    """predictor.band_span_hz knows the wide grids on air or not (DATA2G_CPM_WIDE=1 puts their modes in MODES)."""
+    from data2g.arq import predictor
+
+    for g in cpm.WIDE_GRIDS.values():
+        assert predictor.band_span_hz(g.name) == (g.f0 - g.bp, g.f0 + (g.m - 1) * g.rate + g.bp)
