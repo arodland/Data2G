@@ -1,7 +1,10 @@
 // data2g-bench-rx: a received burst's decode latency by stage, as a session decodes it, for timing on a slow
 // machine with no Python. Each file is one burst (made by a script of numpy's channel simulator):
 //
-//   data2g-bench-rx [--threads N] [--reps R] [--dd-budget S] BURST.d2gb ...
+//   data2g-bench-rx [--threads N] [--reps R] [--dd-budget S] [--cold] BURST.d2gb ...
+//                   (--cold: scattered pilots' joint-estimate weights cleared before every run, after one warm-up run
+//                    that measures the submode's pilot calibration: a session's burst, whose noise ratio rarely
+//                    repeats the last one's)
 //   data2g-bench-rx --listen SECONDS [--cpm-only]   (the streaming Receiver on noise, per 20 ms feed)
 //   data2g-bench-rx --listen S --engine             (... listening as the ARQ engine does: its accept list and
 //                                                    CPM grids; FM's, its own bands and no CPM)
@@ -373,7 +376,8 @@ StreamRun run_stream(const Burst& b, bool early, std::optional<double> dd_budget
                  "  --no-early    with --stream: no decoding while the burst arrives\n"
                  "  --threads     the decode pool's size (default 4)\n"
                  "  --reps        runs per burst, the fastest reported (default 3)\n"
-                 "  --dd-budget   seconds of DD per burst (default 1; 0: none; inf: no limit)\n");
+                 "  --dd-budget   seconds of DD per burst (default 1; 0: none; inf: no limit)\n"
+                 "  --cold        scattered pilots' weights cleared before every run (one warm-up run first)\n");
     std::exit(code);
 }
 
@@ -531,7 +535,7 @@ int main(int argc, char** argv) {
     double listen_s = 0;
     bool cpm_only = false, cw = false;
     int expect = 0, nod_n = 0;
-    bool stream = false, early = true;
+    bool stream = false, early = true, cold = false;
     std::optional<double> dd_budget = arq::DD_BUDGET_S;
     std::vector<const char*> files;
     std::vector<std::tuple<std::string, int, double>> cpms;
@@ -553,6 +557,7 @@ int main(int argc, char** argv) {
         else if (a == "--primed") primed_on = true;
         else if (a == "--cwid") cw = true;
         else if (a == "--stream") stream = true;
+        else if (a == "--cold") cold = true;
         else if (a == "--no-early") early = false;
         else if (a == "--nod" && more) nod_n = std::max(1, std::atoi(argv[++i]));
         else if (a == "--no-cwsense") cwsense_on = false;
@@ -608,7 +613,9 @@ int main(int argc, char** argv) {
     for (const char* path : files) {
         const Burst b = load(path);
         Run best;
+        if (cold) run(b, dd_budget);  // the pilot calibration, once a process
         for (int k = 0; k < reps; ++k) {
+            if (cold) modem::sc_clear_weights();
             const Run r = run(b, dd_budget);
             if (k == 0 || r.total() < best.total()) best = r;
         }
