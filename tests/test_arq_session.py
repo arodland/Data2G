@@ -828,3 +828,117 @@ def test_another_stations_burst_is_foreign_but_my_peers_and_a_connect_are_not():
     e.connect("K2XYZ", 2, 0.0)
     assert not b.foreign(heard(e.poll(0.0)))
     assert not S.Session("K2XYZ", Policy(random.Random(31)), rng=random.Random(32)).foreign(heard(other))
+
+
+def _robust_connected(cap, fast=False):
+    """A caller whose first CONNECT (CONNECT[cap]) is lost and whose robust
+    retry is answered: it starts at the robust floor, nothing measured (a
+    weak path). `fast`: the policy reads fast fading, its session's robust
+    mode ROBUST_FAST (FakeRx measures no spread)."""
+    from data2g.arq import policy as G
+
+    class P(G.GearShifter):
+        def robust_mode(self):
+            return G.ROBUST_FAST if fast else super().robust_mode()
+
+    a = S.Session("W1AW", P(), rng=random.Random(1))
+    b = S.Session("K2XYZ", P(), rng=random.Random(2))
+    b.listen()
+    a.write(b"x" * 16)
+    a.connect("K2XYZ", cap, 0.0)
+    a.on_tx_end(a.poll(0.0), 2.0)  # the first try is lost
+    t = a.next_event()
+    while (retry := a.poll(t)) is None:
+        t = a.next_event()
+    a.on_tx_end(retry, t + 5.0)
+    b.on_rx(_rx(retry), t + 5.3)
+    ack = b.poll(t + 5.3)
+    b.on_tx_end(ack, t + 10.0)
+    a.on_rx(_rx(ack), t + 10.3)
+    assert a.state == S.CONNECTED and b.state == S.CONNECTED
+    return a, b, t + 10.3
+
+
+def _exchange(a, b, t, disc_by, after, drop_disc=0, horizon=900.0):
+    """Every burst delivered but the first `drop_disc` DISCs; `disc_by`'s host
+    disconnects after `after` bursts. -> [(who, mode, state after poll)]."""
+    from data2g.arq import policy as G
+
+    pol, log, dropped, who = G.GearShifter(), [], 0, {"a": a, "b": b}
+    while t < horizon and not (a.state == b.state == S.CLOSED and a._out is None and b._out is None):
+        if len(log) >= after and not who[disc_by]._want_disc:
+            who[disc_by].disconnect()
+        for name, me, other in (("a", a, b), ("b", b, a)):
+            before = me.state
+            burst = me.poll(t)
+            if burst is None:
+                continue
+            end = t + pol.airtime(burst.submode, len(burst.slots))
+            is_disc = before != S.CLOSED and me.state == S.DISCONNECTING
+            log.append((name, burst.submode, me.state))
+            me.on_tx_end(burst, end)
+            if is_disc and dropped < drop_disc:
+                dropped += 1
+            else:
+                other.on_rx(_rx(burst), end + 0.3)
+            t = end + 0.3
+            break
+        else:
+            t = max(t + 0.01, min(x for x in (a.next_event(), b.next_event(), t + 0.5) if x is not None))
+    return log
+
+
+@pytest.mark.parametrize("cap", [0, 1, 2])
+@pytest.mark.parametrize("by,after", [("a", 0), ("a", 3), ("b", 1), ("b", 3)])
+def test_a_session_at_the_robust_floor_disconnects_in_its_robust_mode(cap, by, after):
+    """A session made by a robust retry, its bursts in the robust mode: its
+    first DISC goes in that mode, not the cap's connect mode (which a weak
+    path does not carry: a 5.2 s timeout before the robust retry, E9), and
+    the DISC_ACK answers in it."""
+    from data2g.arq import policy as G
+
+    a, b, t = _robust_connected(cap)
+    log = _exchange(a, b, t, by, after)
+    discs = [m for who, m, st in log if who == by and st == S.DISCONNECTING]
+    answer = [m for who, m, st in log if who != by and st == S.CLOSED]
+    assert discs and discs[0] == G.ROBUST_CONNECT and answer == [G.ROBUST_CONNECT]
+    assert G.CONNECT[cap] not in {m for _, m, _ in log}
+    assert a.events[-1].startswith("DISCONNECTED") and b.events[-1].startswith("DISCONNECTED")
+    assert {a.events[-1], b.events[-1]} == {"DISCONNECTED CLIENT", "DISCONNECTED PEER"}
+
+
+def test_every_try_of_a_robust_disc_keeps_its_mode():
+    """An unanswered DISC is retried in its own mode: ROBUST_FAST, if the
+    session runs in it, is not dropped for the retries' connect_mode
+    (ROBUST_CONNECT, whose 25 Hz tones decode nothing on fast fading)."""
+    from data2g.arq import policy as G
+
+    if G.ROBUST_FAST == G.ROBUST_CONNECT:
+        pytest.skip("one robust mode on this profile")
+    a, b, t = _robust_connected(2, fast=True)
+    log = _exchange(a, b, t, "a", 0, drop_disc=2)
+    assert G.ROBUST_FAST in {m for who, m, st in log if who == "a" and st == S.CONNECTED}
+    discs = [m for who, m, st in log if who == "a" and st == S.DISCONNECTING]
+    assert discs == [G.ROBUST_FAST] * 3
+    assert a.events[-1] == "DISCONNECTED CLIENT"
+
+
+def test_a_session_on_a_good_path_still_disconnects_in_the_connect_mode():
+    """A session made by the first CONNECT, its bursts not robust: the DISC
+    goes in the cap's connect mode as before, the retries robust."""
+    from data2g.arq import policy as G
+
+    a = S.Session("W1AW", G.GearShifter(), rng=random.Random(1))
+    b = S.Session("K2XYZ", G.GearShifter(), rng=random.Random(2))
+    b.listen()
+    a.connect("K2XYZ", 2, 0.0)
+    first = a.poll(0.0)
+    a.on_tx_end(first, 2.0)
+    b.on_rx(_rx(first), 2.3)
+    ack = b.poll(2.3)
+    b.on_tx_end(ack, 4.0)
+    a.on_rx(_rx(ack), 4.3)
+    assert a.state == S.CONNECTED and a.station.esc_floor == 0
+    log = _exchange(a, b, 4.3, "a", 0, drop_disc=1)
+    discs = [m for who, m, st in log if who == "a" and st == S.DISCONNECTING]
+    assert discs[:2] == [G.CONNECT[2], G.ROBUST_CONNECT]
