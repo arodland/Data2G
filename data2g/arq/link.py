@@ -162,6 +162,10 @@ class Policy:
         the floor; True here with robust() False started the caller alone)."""
         return False
 
+    def robust_started(self):
+        """Session._robust_start, the caller's: the session starts at the
+        robust floor (a policy may then ask for its first data cautiously)."""
+
     def robust(self, submode: str) -> bool:
         """Whether `submode` is a robust control mode (the callee follows a
         caller whose first burst comes in one)."""

@@ -20,6 +20,7 @@
 #include <chrono>
 #include <deque>
 #include <memory>
+#include <vector>
 
 #include "app/station.hpp"
 
@@ -40,6 +41,8 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
+    static constexpr int MAX_LOG_ROWS = 500;
+
     // Starts a station with `args`; `store` is where settings are saved.
     MainWindow(app::Args args, QSettings& store, QWidget* parent = nullptr);
     ~MainWindow() override;
@@ -47,6 +50,7 @@ public:
     // Stops the station and starts one with `a`; a failure is shown, not thrown.
     void restart(const app::Args& a);
     void apply_settings(const app::Args& a);  // Station::update, or restart() when it can't
+    void append_bursts(const std::vector<app::BurstLogEntry>& bursts);  // public so a test can drive the burst log
     const app::Station& station() const { return *station_; }
 
 public Q_SLOTS:
