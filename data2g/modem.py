@@ -1329,8 +1329,9 @@ def _copy_header(z: np.ndarray, lock: Lock) -> HeaderRead:
     band = lock["band"]
     b = ofdm.band(band)
     hd = _read_header(z, lock["start"], band)
+    # (a scattered-pilot band's copy frame opens on copy_open, not the pilot)
     hd.update(hdr=(lock["spec"], lock["n_cw"]), word=lock["copy"]["word"], score=lock["score"],
-              h_pre=b.demod_window(z, lock["copy"]["pc"] + NCP, HEADER_BACKOFF) / b.pilot)
+              h_pre=b.demod_window(z, lock["copy"]["pc"] + NCP, HEADER_BACKOFF) / (copy_open(b) if band in SC_BANDS else b.pilot))
     return hd
 
 

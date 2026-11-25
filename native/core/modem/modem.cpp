@@ -1276,7 +1276,9 @@ HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
     auto hd = read_header(z, lock.start, lock.band);
     hd.hdr = Header{lock.copy->word, lock.spec, lock.n_cw, lock.score};
     hd.valid = true;
-    hd.h_pre = over_pilot(b.demod_window(z, lock.copy->pc + NCP, HB), b);
+    hd.h_pre = b.demod_window(z, lock.copy->pc + NCP, HB);
+    const auto ref = sc_band(lock.band) ? copy_open(b) : b.pilot;  // (a scattered-pilot copy frame opens on copy_open)
+    for (size_t k = 0; k < hd.h_pre.size(); ++k) hd.h_pre[k] /= ref[k];
     return hd;
 }
 

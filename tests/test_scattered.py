@@ -74,3 +74,21 @@ def test_find_copy_on_a_band_without_copies(monkeypatch):
     n = 3 * FS
     y = np.sin(2 * np.pi * 1510.0 * np.arange(n) / FS) + np.random.default_rng(7).normal(size=n)
     assert modem.find_copy(y, "n10") is None
+
+
+def test_a_copy_lock_reads_its_phase_reference_off_copy_open(monkeypatch):
+    """receive(copy=...) takes the timing tracker's phase reference from the copy frame's first symbol, which on a
+    scattered-pilot band is copy_open: divided by the pilot instead, the reference was off by the pilots' own phases,
+    and the tracker stepped the window 8 samples over a 3-codeword burst the preamble-locked receive held at 2."""
+    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS["mix"])
+    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    spec = SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(1)
+    x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(3)], spec)
+    y = hfchannel.apply_channel(np.concatenate([np.zeros(2000), x, np.zeros(2000)]), snr_db=15, fading_preset="mpp", seed=3)
+    r0 = modem.receive(y)
+    lock = modem.find_copy(y, "w")
+    assert lock is not None
+    r1 = modem.receive(y, copy=lock)
+    assert abs(np.angle(np.exp(1j * (r1["phi_ref"] - r0["phi_ref"])))) < 0.3
+    assert np.max(np.abs(r1["steps"])) <= np.max(np.abs(r0["steps"])) + 2
