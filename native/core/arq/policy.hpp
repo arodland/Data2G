@@ -62,6 +62,9 @@ inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
 // CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
 inline constexpr double ROBUST_START_SNR_DB = -6.0;
 inline constexpr double ROBUST_START_SPREAD_HZ = 6.0;
+// policy.py: such a session's caller asks for its first data only in modes whose steady-channel threshold
+// is at most the measured snr_est plus this, and for its control twice (GearShifter::start_bound)
+inline constexpr double ROBUST_START_DATA_MARGIN_DB = 2.0;
 
 std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0, bool last = false);
@@ -120,6 +123,8 @@ public:
     bool want_dup = false;
     std::map<std::string, std::pair<double, double>, std::less<>> predicted;
     bool peer_had_data = true;
+    // started at the robust floor and no data burst of the peer's usable yet (policy.py start_bound)
+    bool start_bound = false;
     std::vector<LogEntry> log;
     std::vector<double> spreads;  // the peer's last bursts' spread_est (tables::OUTCOME_GATE_HIST)
     std::vector<double> n0_spreads;  // the peer's last bursts' n0_spread_db (FM's regime input)
@@ -187,6 +192,7 @@ public:
     double airtime(const std::string& submode, int n_cw, bool dup) override;
     std::string connect_mode(int cap, int tries, bool last) override;
     bool weak_path() override { return shifter.weak_path(); }
+    void robust_started() override { shifter.start_bound = true; }
     bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);

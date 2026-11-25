@@ -202,6 +202,7 @@ double GearShifter::reply_hold(const StationView& st, std::string_view submode) 
 
 void GearShifter::outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable) {
     if (usable && *usable && sent) {
+        start_bound = false;
         data_lost = 0;
         ladder_left = false;
         if (ceiling) {  // climb a step; back at the mode whose losses started it, it's off
@@ -304,6 +305,17 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
                 if (s->is_cpm()) c.push_back(s);
         if (!c.empty()) data_cands = std::move(c);
     }
+    if (start_bound && !cands.empty()) {  // a robust start's first data (policy.py ROBUST_START_DATA_MARGIN_DB)
+        const double lim = measured->snr_est + ROBUST_START_DATA_MARGIN_DB;
+        std::vector<const Mode*> c;
+        for (const Mode* s : data_cands)
+            if (mode_thresholds(s->name)[0] <= lim) c.push_back(s);
+        if (c.empty())  // none that robust: the lowest steady-channel threshold (the first of them, as Python's min)
+            c = {*std::min_element(cands.begin(), cands.end(), [](const Mode* a, const Mode* b) {
+                return mode_thresholds(a->name)[0] < mode_thresholds(b->name)[0];
+            })};
+        data_cands = std::move(c);
+    }
     {  // every prediction the loops below ask for, in one batch (the weights read once);
        // predicted_at computes any other lazily (the chat size cut, the final pick)
         std::vector<std::tuple<double, double, int>> keys;
@@ -382,7 +394,7 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         best_name = best->name;
         const int nb = slots_for(*best, SIZE_S[best_hint]);
         predicted = {{std::string(best->name), {q_burst(*best, nb), q_cw(*best, nb)}}};
-        want_dup = predicted.begin()->second.first < DUP_BELOW;
+        want_dup = predicted.begin()->second.first < DUP_BELOW || start_bound;
         if (reply) predicted[std::string(reply->name)] = {q_burst(*reply, 1), q_cw(*reply, 1)};
     }
     const std::string_view reply_name = reply ? reply->name : fallback(st.cap);
