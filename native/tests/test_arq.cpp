@@ -62,10 +62,12 @@ int main() {
 
     check::current_step = "shifter";
     arq::GearShifter g;
+    check::is_true(g.weak_path(), "nothing measured: a weak path");
     arq::StationView st;
     st.cap = 0;
     check::equal(std::string(g.choose(st, 0).first), std::string("n10-ack-4f"), "nothing heard: fallback");
     g.observe(clean(15, 10), "n10-qpsk-r1/2", 0.0);
+    check::is_true(!g.weak_path(), "a good reading: not a weak path");
     const auto r = g.recommend(st);
     const auto* m = arq::decode(r.data);
     check::is_true(m && arq::width_hz(*m) <= 500, "recommendation within the cap");

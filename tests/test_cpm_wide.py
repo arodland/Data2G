@@ -20,7 +20,8 @@ def test_toolbox_is_not_on_air():
         assert cpm.coherent(g) and not cpm.coherent(replace(g, guard=1))
     from data2g.arq.modes import MODES
 
-    assert {n for n in cpm.WIDE_SPECS if n in MODES} == {n for n, s in cpm.WIDE_SPECS.items() if s.grid in on}
+    assert {n for n in cpm.WIDE_SPECS if n in MODES} == {n for n, s in cpm.WIDE_SPECS.items()
+                                                         if cpm.WIDE_ON or s.grid in on}
     from data2g.arq import policy
 
     assert not any(s.name in cpm.WIDE_SPECS for cap in (0, 1, 2) for s in policy.allowed(cap))
@@ -102,7 +103,7 @@ def test_streaming_receiver_given_the_grids():
             assert codes.decode_many(spec, np.asarray(r["soft"][1])[None], index=[1])[0] == (pay[1], True)
 
 
-def test_shared_coarse_rows_are_the_grids_own():
+def test_shared_coarse_rows_are_the_grids_own(pure):
     """c8w50's search rows summed from c8r50's symbols' energies equal its own transforms."""
     g, h = cpm.WIDE_GRIDS["c8w50"], cpm.GRIDS["c8r50"]
     assert cpm.shares_rows(g, h) and not cpm.shares_rows(cpm.WIDE_GRIDS["c16w125"], cpm.GRIDS["c32r62"])

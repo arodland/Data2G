@@ -98,6 +98,10 @@ def native():
     module, why = native_subs.import_native()
     if module is None:
         pytest.skip(f"data2g_native not built: {why}")
+    if native_subs.study_skip():
+        # a study toggle (DATA2G_CPM_ONAIR, DATA2G_CONNECT_SEQ, ...) makes the Python reference differ from what
+        # C++ ports, by design: parity is master's defaults'
+        pytest.skip("a study toggle is set: the Python reference is not what C++ ports")
     return module
 
 

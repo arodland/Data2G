@@ -4,7 +4,9 @@ data2g.arq.modes, .predictor and .policy. See __init__.py."""
 # Study toggles: with any set, the predictor and the shifter stay Python
 # (C++ has the installed model, its LOGIT_OFFSETS, every mode, BIAS_MAX 6).
 GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_FAST", "DATA2G_SPREAD_CARRY", "DATA2G_COND_OFFSETS", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
-                  "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE")
+                  "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE",
+                  # the wide-bin grids (scripts/wide_fsk_study.py): c8w50 on air, its connect rules, every wide mode
+                  "DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST", "DATA2G_CONNECT_SEQ")
 # GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
 # energy) that models with those inputs read in Python only
 PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "snrs_long"}
@@ -35,8 +37,10 @@ def substitutions(native):
     def own(spec):
         return config.SUBMODES.get(spec.name) == spec
 
-    def own_mode(spec):
-        return modes.MODES.get(spec.name) == spec
+    def own_mode(spec):  # (a wide grid's mode is Python only)
+        from data2g import cpm
+
+        return modes.MODES.get(spec.name) == spec and getattr(spec, "grid", None) not in cpm.WIDE_GRIDS
 
     def by_band(name):
         native_fn, py_fn = getattr(T, name.lstrip("_")), py[name]
@@ -139,8 +143,8 @@ def substitutions(native):
         def rv_cycle(self, m):
             return A.rv_cycle(m)
 
-        def connect_mode(self, cap, tries=0):
-            return A.connect_mode(cap, tries)
+        def connect_mode(self, cap, tries=0, last=False):
+            return A.connect_mode(cap, tries, last)
 
         def reply_hold(self, station, burst):
             return self._n.reply_hold(station, burst.submode)

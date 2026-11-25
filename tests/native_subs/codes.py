@@ -25,7 +25,9 @@ def substitutions(native):
         "add_prior_buffer", "known_bits", "score")}
 
     @functools.lru_cache(maxsize=None)
-    def own(spec):
+    def own(spec):  # (a wide grid's spec, on air or not, is Python only: cpm.WIDE_GRIDS)
+        if getattr(spec, "grid", None) in cpm.WIDE_GRIDS:
+            return False
         return (config.SUBMODES.get(spec.name) == spec or cpm.SPECS.get(spec.name) == spec
                 or cpm.CTL.get(getattr(spec, "grid", None)) == spec)
 

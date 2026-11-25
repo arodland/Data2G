@@ -9,7 +9,7 @@ def substitutions(native):
     phy.DD when made, and its store stays the caller's dict."""
     import time
 
-    from data2g import codes, kisslink, modem
+    from data2g import codes, cpm, kisslink, modem
     from data2g.arq import modes
     from data2g.arq import phy as PHY
 
@@ -18,8 +18,8 @@ def substitutions(native):
     watched = ("decode_raw", "decode_buffer", "decode_buffer_raw", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
                "encode", "encode_info", "descramble")
 
-    def own(spec):
-        return modes.MODES.get(spec.name) == spec
+    def own(spec):  # (a wide grid's spec is Python only)
+        return modes.MODES.get(spec.name) == spec and getattr(spec, "grid", None) not in cpm.WIDE_GRIDS
 
     def substituted(f):  # the codes provider's, not a test's patch
         return getattr(f, "__module__", None) == f"{__package__}.codes"
