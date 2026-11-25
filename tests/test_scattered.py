@@ -120,3 +120,25 @@ def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, tone_hz):
     assert nk.shape == r["est"]["h"].shape and nk.max() > 10 * r["est"]["n0"]
     b = modem.decode_received(r)
     assert b.payloads == pl
+
+
+def test_find_copy_reads_past_a_steady_tone(monkeypatch):
+    """Two tones just outside the w band, 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]): a
+    comb's matched filter lets them through, and their frame-apart products, the same at every frame phase, held
+    every grid's place, so the copy of a burst whose preamble was lost was never read in a receiver's 2 s window
+    (PR #308 review, item 8; at -2 dB 0 of 10 seeds found, 10 with each CFO bin's mean over the phases out)."""
+    from data2g.config import BANDS, FS, LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(0)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(3)]
+    x = np.concatenate([np.zeros(8000), modem.modulate(pl, spec), np.zeros(8000)])
+    start = 8000 + LEADIN_SAMPLES
+    x[start:start + BANDS["w"].preamble_samples + modem.header_samples("w")] = 0  # the head lost
+    sigma = np.sqrt(np.mean(x[x != 0] ** 2) / 10 ** -0.2 / (2500 / (FS / 2)))  # -2 dB in 2500 Hz
+    y = x + np.random.default_rng(100).normal(scale=sigma, size=len(x))
+    t = np.arange(len(y)) / FS
+    y += np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * (np.cos(2 * np.pi * 800 * t) + np.cos(2 * np.pi * 2200 * t + 1))
+    lock = modem.find_copy(y[start - 400:start - 400 + 16704], "w")
+    assert lock is not None and lock["spec"] == spec and lock["n_cw"] == 3

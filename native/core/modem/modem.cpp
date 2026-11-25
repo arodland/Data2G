@@ -1202,7 +1202,16 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
     const size_t FR = FRAME_SAMPLES;
     Mat<cd> own;
     if (!fold_in) own = pilot_fold(D_rows, 0, static_cast<size_t>(m));
-    const Mat<cd>& fold = fold_in ? *fold_in : own;
+    if (comb) {  // a steady tone's products are the same at every phase: each CFO bin's mean out (modem.py's reason)
+        if (fold_in) own = *fold_in;
+        for (size_t f = 0; f < own.rows; ++f) {
+            cd mean = 0.0;
+            for (size_t ph = 0; ph < own.cols; ++ph) mean += own[f][ph];
+            mean /= static_cast<double>(own.cols);
+            for (size_t ph = 0; ph < own.cols; ++ph) own[f][ph] -= mean;
+        }
+    }
+    const Mat<cd>& fold = fold_in && !comb ? *fold_in : own;
     std::vector<double> mag(FR, -equalizer::INF);
     for (size_t f = 0; f < F; ++f)
         for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::abs(fold[f][ph]));

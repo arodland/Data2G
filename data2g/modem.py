@@ -1195,6 +1195,12 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         return None
     if fold is None:
         fold = _pilot_fold(D, 0, m)
+    if comb:
+        # a steady tone's products are the same at every frame phase (a comb's filter, a third of the band's
+        # carriers, lets more of a tone outside the band through than the whole pilot's): out with each CFO bin's
+        # mean over the phases, or it holds every grid's place and the burst's phase is never read (PR #308
+        # review, item 8: mpp with tones at 800 and 2200 Hz, qpsk-r1/2's headers 8/17/20 of 24 at -2/0/+2 dB)
+        fold = fold - fold.mean(axis=1, keepdims=True)
     mag = np.abs(fold).max(axis=0)
     # on noise each product's magnitude is about the level, and the m x
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
