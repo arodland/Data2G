@@ -1,37 +1,52 @@
 # fast-fading-integration
 
-TLDR: three study branches merged for outside study, now on master `95c94b1`. Every feature keeps its switch.
-The defaults here are each branch's best measured setting, not today's on-air behaviour. Python only: native is
-not ported, so native builds and `--native` tests do not match this branch with its defaults.
+TLDR: three study branches and PR #317 merged for outside study, on master `1f12161`. Every feature keeps its
+switch, and the defaults are each branch's best measured setting, not today's on-air behaviour. Python only: native
+is not ported, so native builds and `--native` tests do not match this branch with its defaults.
 
-- Base: origin/master `95c94b1` (through each branch's own merge of it). First built on `9894b63`; the old-base
-  numbers are kept below beside the new ones.
-- Merged heads: `fsk-wide-bins` 495797a, `c32r62-r23` 9b34c66, `scattered-pilots` bf7df2f.
-- Only here: the three-way tone likelihood (per-tone floors, sub-window sums, leak model), the acquisition
-  switch, the defaults, this file.
+- Base: origin/master `1f12161`, through each branch's own merge of it. Built before on `9894b63` and `95c94b1`.
+- Merged heads, each as its own merge commit:
+  - `fsk-wide-bins` 00335b3 (#306)
+  - `c32r62-r23` 29279eb (#307)
+  - `scattered-pilots` 898cdcf (#308)
+  - PR #317 36492a6 (open, by finitor; merge commit 3a1d84e)
+- Only here: the three-way tone likelihood (per-tone floors, sub-window sums, leak model), the leak gate on sub-window
+  sums, the defaults, one `native_subs.study_skip()` for all toggles, this file.
 - Not a release candidate. Nothing here has been on air.
 
 ## Switches
 
 | Switch | Default here | Off value | What it does |
 |---|---|---|---|
-| `DATA2G_PILOTS` | `mix` | `off` or empty | OFDM pilots scattered through the frame (same 1/6 of the cells) instead of a pilot row. `k3d2`, `gold`, `mix`. Wire change, both ends. |
-| `DATA2G_CPM_LEAK` | `ctl,data,dd,ctlsq` | `off` or empty | CPM soft values treat the energy beside a tone as that tone's Doppler leak, not as noise (`cpm.leak_metric`), on master's per-tone floors. `ctlsq`: a control codeword whose rows read spill >= 0.15 stays on the square law. Receiver only. |
+| `DATA2G_PILOTS` | `mix` | `off` or empty | OFDM pilots scattered through the frame (same 1/6 of the cells) instead of a pilot row: k3d2's stride on `w` and `w48`, the golden-ratio stride on n10 and n4. `k3d2`, `gold`, `mix`. Wire change, both ends. |
+| `DATA2G_CPM_LEAK` | `ctl,data,dd,ctlsq` | `off` or empty | CPM soft values treat the energy beside a tone as that tone's Doppler leak, not as noise (`cpm.leak_metric`), on master's per-tone floors, only where a codeword's spill is significant. `ctlsq`: a control codeword whose rows read a significant spill >= 0.15 stays on the square law. Receiver only. |
+| `DATA2G_CPM_LEAK_Z` | `2.0` | `0` (no gate) | The gate: the leak model applies to a codeword only where its spill stands this many standard errors over 0; elsewhere the metric is master's exactly. |
 | `DATA2G_CPM_LEAK_K` | `0.5` | | The share of unmodelled leak counted as noise. |
 | `DATA2G_CPM_CTL_SQ` | `0.15` | | `ctlsq`'s threshold. |
 | `DATA2G_CPM_SPILL` | all 1 | | Per-consumer weight of the spill in the square law's noise (studies). |
-| `DATA2G_CPM_R23` | `1` | `0`, `off` or empty | `fsk32r62-r2/3` is a mode: header index 4 on c32r62, recommendation index 6. On its own branch the default is 0. Wire addition. |
-| `DATA2G_OUTCOME_R23` | on | `0` or `off` | The outcome model is `outcome_predictor_r23.npz` (the installed weights with a row for r2/3). Off: the installed model, which never recommends r2/3. Follows `DATA2G_CPM_R23`. |
+| `DATA2G_CPM_R23` | `1` | `0`, `off` or empty | `fsk32r62-r2/3` is a mode: header index 4 on c32r62, recommendation index 6. Its `mode_thresholds.json` row (regenerated: -7.97, -1.17, -1.82, -1.65) loads only while it is offered. Wire addition. |
+| `DATA2G_OUTCOME_R23` | on | `0` or `off` | The outcome model is `outcome_predictor_r23.npz` (the installed weights with a zero-shot row for r2/3). Off: the installed model. Follows `DATA2G_CPM_R23`. |
 | `DATA2G_CPM_ONAIR` | `c8w50` | `off` or empty | The wide-bin grid c8w50 is an on-air grid: every receiver searches it. Its modes are control-only and have no recommendation code. |
-| `DATA2G_ROBUST_RULE` | `connect` (while c8w50 is on air) | `off` or empty | CONNECT retries go in `fsk8w50-r1/2`, not `fsk16r25-r1/2`. In-session robust modes stay as today. Others: `replace`, `alt`. |
+| `DATA2G_CONNECT_SEQ` | `RRWWW` while c8w50 is on air | `RRRRF` (master's) | The CONNECT retries' modes, one letter a try: R `fsk16r25-r1/2`, F `fsk8r50-r1/3`, W `fsk8w50-r1/2`. CONNECT_TRIES is one more than its length; a host's last try is in its last letter. With c8w50 off the air the default is master's `RRRRF`. |
+| `DATA2G_ROBUST_RULE` | off | `off` or empty | Older names: `connect` (WWWWW), `alt` (RWRWR); `replace` makes the robust mode itself c8w50 in sessions too. |
 | `DATA2G_ROBUST_FAST` | off | `off` or empty | `wide`, `always`: c8w50 as the in-session robust mode too (measured worse). |
 | `DATA2G_CPM_ACQ_K` | `1` (off) | `1` or `off` | The coarse stage's best K placements go to the fine stage. Small gain, large CPU: not recommended. With `DATA2G_CPM_ACQ_SCREEN`, `DATA2G_CPM_ACQ_FLOOR`. |
 | `DATA2G_CPM_SHARE` | `1` | `0` | c8w50's search rows are sums of c8r50's (same result either way). |
 | `DATA2G_CPM_WIDE` | off | | Studies: every wide grid's modes (c16w125 too) in `arq.modes.MODES` for fixed bursts. c16w125 is never on air. |
 
-Today's behaviour exactly:
+PR #317 has no switch: it is master-bound code. It bounds a robust start's first data request to modes whose
+steady-channel threshold (`MODE_THRESHOLDS`' first column) is within `snr_est` + 2 dB, with that burst's control
+sent twice, until a data burst of the peer's is usable.
+
+All switches off, which is master `1f12161` + PR #317 (not plain master):
 
     DATA2G_PILOTS=off DATA2G_CPM_LEAK=off DATA2G_CPM_R23=off DATA2G_CPM_ONAIR=off DATA2G_CPM_ACQ_K=off
+
+For plain master `1f12161` as well, revert the #317 merge: `git revert -m 1 3a1d84e` in a scratch checkout.
+
+When #317 lands or changes: merge master (or the PR's new head) into this branch; if it landed, the merge of the
+PR head becomes a no-op. Check that every mode the shifter can offer still has a `MODE_THRESHOLDS` row (r2/3's
+loads only while offered; the wide specs stay outside `policy.allowed()`), and rerun the awgn -15/-19/-20 cells.
 
 The defaults yield where a feature has no path:
 - FM profile (`DATA2G_PROFILE=fm`): pilots are rows, c8w50 is not on air, r2/3 is not a mode. An explicit
@@ -39,146 +54,171 @@ The defaults yield where a feature has no path:
 - Another frame length (`DATA2G_SYMS_PER_FRAME`) or a hand-set FM-path study switch (`DATA2G_SPREAD_WINDOW`,
   `DATA2G_EST_WINDOW`, `DATA2G_DECODE_EARLY`, `DATA2G_SYMBOL_NOISE`): pilots default to rows.
 
+`tests/native_subs.study_skip()` keeps in Python every native provider a toggle in effect changes. It reads the
+modules' settings, not the environment, since most toggles are on here by default. So `--native` and
+`tools/with_native.py` with the defaults run nearly everything in Python; use the off line above for a native
+comparison.
+
 ## The tone likelihood
 
 `cpm.tone_metric` is where the three meet: master's per-tone floors (a carrier), the wide grids' sub-window sums,
 and the leak model. One function, `_spill_level`, gives N0, the floors, Es and the spill, on the energies whitened
 by the floors and at a sub-window's level. The square law (`_tone_gain`) and the leak model (`leak_metric`) both
 start from it. Per tone, the noise is its floor plus the leak share; every log term is counted once per
-sub-window. With the other features absent it reduces to each branch's own result (checked by hash, below).
+sub-window. The leak gate (`spill_significant`) takes the sub-window count too. With the other features absent it
+reduces to each branch's own result (checked by hash, below).
 
 ## Equality checks
 
-- All switches off against origin/master: the CPM grids' bursts, energies, locks, soft values and DD soft values
-  hash equal, with and without an in-grid carrier (`runs/ident.py`, `runs/ident_carrier.py`, `runs/softhash.py`
-  style). OFDM transmit audio, soft values, channel estimates and decodes equal master's
-  (`scripts/sc_equal.py`: 168 arrays, 0 differ).
-- Wide grids, leak off, with and without a carrier: equal to `fsk-wide-bins`.
-- On-air grids, leak on, with and without a carrier: equal to `c32r62-r23`.
+All run from each tree's root, with the import path checked to be that tree's.
+
+- All switches off against master `1f12161` + PR #317 (a scratch merge): the CPM grids' bursts, energies, locks, soft
+  values and DD soft values hash equal, with and without an in-grid carrier (`runs/ident.py`,
+  `runs/ident_carrier.py`, `runs/softhash.py`). OFDM transmit audio, soft values, channel estimates and decodes
+  equal (`scripts/sc_equal.py`: 168 arrays, 0 differ).
+- Wide grids, leak off, with and without a carrier (`runs/wide_hash.py`): equal to `fsk-wide-bins` 00335b3.
+- On-air grids, leak on, with the gate (`runs/softhash.py`): equal to `c32r62-r23` 29279eb.
 
 ## Tests
 
-Run a suite alone (`tests/test_host.py` shares a TCP port).
+With the native module built (`tools/build_native.sh`, with the off line in the environment: the generator checks
+the tables against the settings in effect). Run a suite alone: `tests/test_host.py` shares a TCP port.
 
-All switches off: 877 passed, 0 failed.
+| Switches | Plain | `--native` |
+|---|---|---|
+| All off | 2472 passed, 0 failed | 2446 passed, 0 failed |
+| Defaults | 887 passed, 19 failed | 865 passed, 18 failed |
 
-Defaults: 858 passed, 19 failed. The feature tests of all three branches pass (`tests/test_cpm_wide.py`,
-`tests/test_scattered.py`, the r2/3 and leak tests in `tests/test_cpm.py`). The failures assert today's wire or
-today's receiver on the old pilot layout, and were left as they are. Last build: 17. The two more are tests
-master added since.
+With the defaults most parity tests skip: they compare C++ with a Python reference the toggles change by design.
+The feature tests of all three branches pass. The 19 failures assert today's wire or today's receiver and were left
+as they are:
 
-- Scattered pilots (15; 13 as before):
-  - `test_arq_phy.py::test_long_control_is_pinned_where_its_padding_starts`
-  - `test_channel_torch.py`: `test_transmit_matches_numpy_modulator`, `test_ace_transmit_matches_numpy_and_keeps_points_in_their_regions`, `test_bmi_agrees_with_the_full_modem`
-  - `test_dd.py`: `test_dd_rescues_a_codeword`, `test_dd_budget_spent`
-  - `test_equalizer.py::test_a_tone_on_one_carrier_does_not_sink_the_burst`
-  - `test_modem.py`: `test_timing_slip_recovered[-64]`, `[85]`, `test_a_steady_tone_does_not_read_as_pilots[n4]`
-  - `test_receive_head.py::test_weak_header_at_the_burst_end_is_received`
-  - `test_receiver.py::test_a_false_lock_on_data_does_not_cost_the_next_burst`
-  - `test_sounding.py::test_fading`
-  - New: `test_receiver.py::test_a_burst_decodes_while_it_arrives` (a flagged burst waits for its end),
-    `test_fmtorch.py::test_bmi_agrees_with_the_numpy_receiver`.
-  - The slip, steady-tone, weak-header and false-lock ones are receiver behaviour, not layout: the unjudged
-    `find_copy` gates and slip search under Caveats.
-- c8w50 (3): `test_arq_session.py::test_connect_retries_in_the_robust_mode_and_is_answered_in_it`,
-  `test_compact_connect_over_the_cpm_modem` (they expect fsk16r25 retries);
-  `test_arq_policy.py::test_recommend_roundtrip_every_submode` (the c8w50 modes have no code).
-- Native (1): `test_native_parity.py::test_generated_tables_current`.
+- Scattered pilots (15):
+  - Defects, see Caveats:
+    - `test_modem.py::test_timing_slip_recovered[-64]`, `[85]`
+    - `test_modem.py::test_a_steady_tone_does_not_read_as_pilots[n4]`
+    - `test_equalizer.py::test_a_tone_on_one_carrier_does_not_sink_the_burst`
+    - `test_receiver.py::test_a_false_lock_on_data_does_not_cost_the_next_burst`
+    - `test_sounding.py::test_fading`
+  - Not ported: `test_channel_torch.py` x3, `test_fmtorch.py::test_bmi_agrees_with_the_numpy_receiver`.
+  - As designed: `test_receiver.py::test_a_burst_decodes_while_it_arrives` (a flagged burst waits for its end;
+    python only), `test_receive_head.py::test_weak_header_at_the_burst_end_is_received` (an on-air recording of
+    the old wire), `test_dd.py` x2 and `test_arq_phy.py::test_long_control_is_pinned_where_its_padding_starts`
+    (seeds picked for today's wire).
+- c8w50 (2): `test_arq_session.py::test_connect_retries_end_in_the_fast_fading_robust_mode` (master's RRRRF
+  ladder), `test_arq_policy.py::test_recommend_roundtrip_every_submode` (the c8w50 modes have no code).
+- r2/3 (1): `test_arq_policy.py::test_a_robust_start_bounds_the_first_data_request` (#317's test: its unbounded
+  pick at -13.8 dB is r2/3 here, not r1/2; the bounded picks hold).
+- Native (1): `test_native_parity.py::test_generated_tables_current` (the tables are master's).
 
-FM profile, defaults: 924 passed, 30 failed (master: 920 passed). The 30 are the three branches' HF-only feature
-tests (`test_scattered` 21, `test_cpm_wide` 7, the r2/3 test), which fail the same way on their own branches,
-and the native tables check (it also checks the HF tables, which differ with the defaults).
+The FM profile was not rerun on this build.
 
 ## Smoke loss study
 
-12 seeds x 600 s, `shift+cpm`, PEP 5, Python, all switches off against the defaults, paired. Delivered bit/s,
-mean of the seeds (seeds that delivered nothing in brackets), change ± SE.
+`scripts.loss_study_carrier`, 12 seeds x 600 s, `shift+cpm`, PEP 5, Python, all switches off (master + #317)
+against the defaults, paired. Delivered bit/s, mean of the seeds, change ± SE, seeds up / down. Driver:
+`runs/smoke3/chain.sh`; CSVs and logs beside it.
 
-| Cap | Cell | Old base: off | defaults | change | New base: off | defaults | change |
-|---|---|---|---|---|---|---|---|
-| 2400 | hilat-d 10 | 40 (6) | 107 (0) | +165% ± 31 | 41 (6) | 109 (0) | +164% ± 30 |
-| 2400 | hilat-m 10 | 80 | 278 | +249% ± 49 | 81 | 315 | +288% ± 45 |
-| 2400 | hilat-m 20 | 88 | 330 | +275% ± 59 | 82 | 306 | +272% ± 46 |
-| 2400 | lowlat-d 10 | 85 | 131 | +53% ± 9 | 85 | 125 | +47% ± 6 |
-| 2400 | nvis-d 10 | 631 | 952 | +51% ± 5 | 631 | 952 | +51% ± 5 |
-| 2400 | mpd 0 | 420 | 479 | +14.2% ± 1.9 | 420 | 479 | +14.2% ± 1.9 |
-| 2400 | mpp 0 | 483 | 458 | -5.3% ± 2.0 | 483 | 458 | -5.3% ± 2.0 |
-| 2400 | mpp -8 | 107 | 102 | -4.4% ± 2.9 | 107 | 102 | -4.4% ± 2.9 |
-| 2400 | awgn -12 | 105 | 124 | +17.7% ± 4.6 | 105 | 124 | +17.7% ± 4.6 |
-| 2400 | awgn 6 | 1730 | 1714 | -1.0% ± 0.0 | 1730 | 1714 | -1.0% ± 0.0 |
-| 2400 | awgn -12, in-grid carrier | | | | 98 | 94 | -3.5% ± 6.5 |
-| 500 | mpd 0 | 179 | 251 | +40.5% ± 5.3 | 179 | 251 | +40.5% ± 5.3 |
-| 500 | mpp 0 | 270 | 290 | +7.3% ± 1.5 | 270 | 290 | +7.3% ± 1.5 |
+| Cap | Cell | All off | Defaults | Change | Seeds | Previous build (95c94b1) |
+|---|---|---|---|---|---|---|
+| 2400 | hilat-d 10 | 82 | 111 | +36% ± 3 | 12/0 | +164% (off was 41) |
+| 2400 | hilat-m 10 | 89 | 285 | +220% ± 45 | 12/0 | +288% |
+| 2400 | hilat-m 20 | 89 | 303 | +242% ± 39 | 12/0 | +272% |
+| 2400 | lowlat-d 10 | 92 | 138 | +51% ± 7 | 12/0 | +47% |
+| 2400 | nvis-d 10 | 631 | 952 | +51% ± 5 | 12/0 | +51% |
+| 2400 | mpd 0 | 420 | 479 | +14.2% ± 1.9 | 12/0 | +14.2% |
+| 2400 | mpp 0 | 483 | 458 | -5.3% ± 2.0 | 1/10 | -5.3% |
+| 2400 | mpp -8 | 107 | 103 | -3.6% ± 2.9 | 3/9 | -4.4% |
+| 2400 | awgn -12 | 106 | 107 | +1.3% ± 0.5 | 5/0 | +17.7% |
+| 2400 | awgn -12, in-grid carrier | 106 | 135 | +28.0% ± 0.8 | 12/0 | -3.5% (other carrier cell) |
+| 2400 | awgn -15 | 82 | 76 | -7.6% ± 2.7 | 1/8 | new |
+| 2400 | awgn -19 | 21 | 20 | -1.9% ± 2.7 | 1/2 | new |
+| 2400 | awgn -20 | 11 | 10 | -5.4% ± 27 | 3/5 | new |
+| 2400 | awgn 6 | 1730 | 1714 | -1.0% ± 0.0 | 0/12 | -1.0% |
+| 500 | mpd 0 | 179 | 251 | +40.5% ± 5.3 | 12/0 | +40.5% |
+| 500 | mpp 0 | 270 | 290 | +7.3% ± 1.5 | 11/0 | +7.3% |
 
-The carrier is 18 dB over the floor in 50 Hz at 1507 Hz, inside every CPM grid (`scripts/wide_carrier_loss.py`,
-cell `awgn:-12:incar`).
+- The carrier is `carrier12`: a steady 1573.4 Hz tone 12 dB over the floor in 50 Hz (#295's cell). The previous
+  build's carrier cell was a different one (18 dB at 1507 Hz).
+- hilat-d's gain is smaller because master's #313 and #316 lifted the all-off arm from 41 to 82 bit/s.
+- awgn -12's earlier +17.7% came from r2/3 on its zero-shot row. With r2/3's regenerated threshold row, robust
+  start's bound and the changed replies, the shifter picks it less there.
+- 2 sessions of 12 deliver nothing at awgn -20 in every arm, plain master included.
 
-mpp -8 by switch (the defaults with one switch off, same seeds):
+PR #317 alone in this harness (plain `1f12161` against `1f12161` + #317, every switch off): awgn -20 -6.7% ± 9.5
+(1/2), -19 -1.3% ± 3.6 (2/3), -15 +4.3% ± 3.1 (2/0). In this loss study #317 is neutral. Its gain is in live
+sessions' completion: the c32r62-r23 agent's session study, our scale's -20 dB, 3 to 13 of 16 completed.
 
-| Arm | bit/s | against all off | against the defaults |
-|---|---|---|---|
-| All off | 107 | | |
-| Defaults | 102 | -4.4% ± 2.9 | |
-| Pilots off | 110 | +3.0% ± 2.6 | +7.8% ± 2.9 |
-| r2/3 off | 98 | -8.4% ± 1.9 | -4.2% ± 2.0 |
-| Leak off | 103 | -3.4% ± 2.5 | +1.1% ± 2.0 |
-| c8w50 off | 102 | -4.2% ± 4.0 | +0.2% ± 2.6 |
+awgn -15 by switch (the defaults with one switch off, same seeds):
 
-The scattered pilots cost that cell about 8%. r2/3 gives back about 4%. The leak model and c8w50 do nothing there.
+| Arm | bit/s | Against the defaults |
+|---|---|---|
+| Defaults | 76 | |
+| Pilots off | 81 | +6.0% ± 2.7 (7/1) |
+| r2/3 off | 79 | +3.3% ± 3.3 (1/0) |
+| Leak off | 76 | 0 (0/0) |
+| c8w50 off | 76 | 0 (0/0) |
 
-Against what the parts predicted:
-- hilat-d 10: the leak model alone and c8w50 retries alone each reached about 84 bit/s with no dead sessions.
-  With r2/3 it is 107-109: r2/3 carries the data.
-- hilat-m: the pilots and r2/3 lift both cells threefold, so c8w50's own effect cannot be read from this table.
-- mpp 0 is inside the pilots' known mid-SNR loss. mpp -8 is the pilots too (the split above).
-- awgn 6 is down 1.0% on every seed in the same mode: a fixed cost of the pilot layout.
+The scattered pilots cost that cell about 6% and r2/3 about 3%; the leak (now gated) and c8w50 nothing. The
+previous build's split of mpp -8 put about 8% on the pilots as well.
 
 To rerun (no native):
 
     export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 DATA2G_PEP_REF_DB=5
-    python -m scripts.wide_carrier_loss --policy shift+cpm --seeds 12 --horizon 600 --jobs 6 --cap 2 \
-        --cells hilat-d:10,hilat-m:10,mpp:0,awgn:-12:incar --out runs/loss_defaults.csv
-    # the same with the off line above in the environment, --out runs/loss_off.csv; --cap 0 is 500 Hz
+    python -m scripts.loss_study_carrier --policy shift+cpm --seeds 12 --horizon 600 --jobs 6 --cap 2 \
+        --cells hilat-d:10,mpp:-8,awgn:-15,awgn:-12:carrier12 --out runs/loss_defaults.csv
+    # the same with the off line above in the environment; --cap 0 is 500 Hz
+    python scripts/paired_loss.py runs/loss_off.csv runs/loss_defaults.csv
 
-`DATA2G_PEP_REF_DB=5` sets the noise against each burst's envelope peak. Displayed SNR is the cell + 5.
-`scripts.wide_carrier_loss` is `scripts.loss_study` with the carrier preset added. Do not use
-`tools/with_native.py` on this branch.
+`DATA2G_PEP_REF_DB=5` sets the noise against each burst's envelope peak. Displayed SNR is the cell + 5. Do not use
+`tools/with_native.py` with the defaults (see Switches).
 
 ## Caveats
 
 Scattered pilots (`DATA2G_PILOTS`):
-- Mid-SNR mpp and mpg lose 2-7%; mpp -8 about 8% here.
-- The w48 channel estimate costs more CPU.
-- `find_copy`'s gates and the slip search were not judged with the new layout.
-- A flagged burst is decoded at its end, not while it arrives.
-- HF profile and 6-symbol frames only.
+- Mid-SNR and floor cells lose: mpp 0 -5%, mpp -8 about 4-8%, awgn -15 about 6%. Cause: header and control loss on
+  short OFDM bursts (ack-4f header lost 18% against 12% at mpp -8). Being worked on.
+- A false lock: on one seed the comb `find_copy` locked a burst's header copy 3504 samples early and held the
+  receiver past the real preamble (`test_a_false_lock_on_data_does_not_cost_the_next_burst`). Being worked on.
+- No slip search; no per-carrier noise; the n4 pilot-coherence gate is not recalibrated for gold.
+- The w48 channel estimate costs more CPU (250-290 ms once per new statistics, about 120 ms a burst on a fast
+  channel, Python).
+- A flagged burst is decoded at its end, not while it arrives. HF profile and 6-symbol frames only.
 - The policy is untrained on it.
 
 r2/3:
 - Its predictor row is zero-shot: no data of the mode went into the model.
+- Its threshold row was regenerated from its own measurements (the first one rated it more robust than r1/2 on
+  AWGN, which let #317's bound pass it where r1/2 was barred).
 
 Leak model:
-- It now sits on master's per-tone floors; cells with a carrier read the same with it on.
+- Gated: a codeword's metric is master's unless its spill is significant (390 of 402 low-SNR AWGN/mpp/mpg codewords
+  bit-identical). The gate removed an awgn -15 loss that a spill reading on noise caused.
+- On its own against master: hilat-d +9% to +13%, connects there in 22 s against 46-51 s; 0 elsewhere.
 - The 0.15 control threshold is tight (fsk16r25 control rows read 0.16-0.24 on hilat-d, everything else under 0.145).
 - Nods are untouched: on hilat-d they are missed 46-61% of the time.
-- On c8w50 it changes nothing at 30 Hz and helps at 60 Hz.
 
-c8w50:
-- hilat-m 20 dB loses 7-12% in the paired loss study of the connect rule alone (-12.0% ± 3.8 on the old base,
-  -7.0% ± 2.3 on the new). It is the rule's own cost: rerun with the `ROBUST_MODES` fault fixed, it read the same.
-- In-grid carrier: an 8-tone grid loses about 2.7 dB more to one carrier than 16 tones do. At awgn -16 dB with
-  the carrier, fsk16r25 retries connect 0.82 of the time and c8w50 retries 0.00. At -12 dB both connect.
-- A connect at the first retry takes 3.3 s longer (23.2 s against 19.9 s).
-- A fourth grid in every receiver's search: 5.6% of a core against 3.8% in Python, the fine stage, not the transforms.
+c8w50 (`RRWWW` retries):
+- Connect study on master `1f12161`, leak on, 40-120 attempts a cell: hilat-d -16 dB 0.20 -> 0.93 connected,
+  -14 0.62 -> 1.00; 30 Hz / 12 ms -16 0.07 -> 0.93; 60 Hz / 7 ms -12 0 -> 0.97, -14 0 -> 0.68; hilat-d from -8 dB
+  up in 20 s against master's 54-67 s (the leak's doing).
+- Costs: awgn -16 with an in-grid carrier 0.82 -> 0.48 (an 8-tone grid loses about 2.7 dB more to one carrier);
+  mpp -18 0.93 -> 0.89, mpd -18 0.88 -> 0.86; in-session about 4% on hilat-m 10/20 against the leak alone (sessions
+  connected through c8w50). `RRRWW` halves both the gain and the cost; `RRRRF` is master's.
+- A fourth grid in every receiver's search: 5.6% of a core against 3.8% in Python.
 - False-lock runs were 1-2 h a source, not the 8-16 h the on-air grids passed. `COH_LOCK` is set from noise only.
-- Connects at the mild floors are 6-7 points behind at -18 dB on mpp and mpd.
 - A session version bump would be needed before any release: an older station does not hear c8w50 retries.
 
+PR #317:
+- Merged from its open head; it may change. In this loss study it is neutral; in live sessions it rescues the
+  weakest AWGN cell. Its 2 dB margin is the one value its author tried (0 dB slower at -16 to -14, 4 dB loses the
+  rescue).
+
 Acquisition switch:
-- Five placements decode about 2 points more bursts at the floors for +57% listening CPU, and gave one
-  own-grid false lock an hour on c8r50 and c8w50. Off by default.
+- Five placements decode about 2 points more bursts at the floors for +57% listening CPU, and gave one own-grid
+  false lock an hour on c8r50 and c8w50. Off by default.
 
 General:
-- `test_generated_tables_current` fails with the defaults: the native tables are today's.
+- `test_generated_tables_current` fails with the defaults: the native tables are master's.
 - Wide-grid specs have no recommendation code, so `modes.encode` raises for them. Nothing in the shifter asks.
-- `scripts/cpm_false_locks.py` now draws "other grid" traffic from `arq.modes.MODES`, so c8w50 bursts are in it.
+- `scripts/cpm_false_locks.py` draws "other grid" traffic from `arq.modes.MODES`, so c8w50 bursts are in it.
