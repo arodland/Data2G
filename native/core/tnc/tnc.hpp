@@ -22,6 +22,12 @@ inline constexpr int KISS_SETHARDWARE = 0x06;
 // Data2G's extensions ride SETHARDWARE with a subcommand byte first (docs/app-soft-plan.md §4;
 // 0x20-0x7E is the text range, MODE and REFS): REF, host to app, a heard burst's reference.
 inline constexpr std::uint8_t KISS_SUB_REF = 0x11;
+
+// tnc.py's is_data: command 0, or VARA's 1 and 2 (TXDELAY and P carry one byte; issue #283)
+inline bool kiss_is_data(int cmd, std::size_t payload_size) {
+    return (cmd & 0x0F) == KISS_DATA || (((cmd & 0x0F) == 1 || (cmd & 0x0F) == 2) && payload_size > 1);
+}
+
 // tnc.refs_command: SETHARDWARE "REFS ON" / "REFS OFF" -> true / false; nullopt for anything else.
 // The payload splits on NUL/HT/LF/CR/space only; tokens upper-cased; exactly two count.
 std::optional<bool> refs_command(std::span<const std::uint8_t> payload);
