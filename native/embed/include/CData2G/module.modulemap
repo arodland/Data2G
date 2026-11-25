@@ -1,0 +1,6 @@
+module CData2G {
+  header "data2g.h"
+  link "c++"
+  link "z"
+  export *
+}

@@ -22,6 +22,10 @@ recordings/
 # native/ build products
 native/build*/
 native/build-*/
+# the Apple embedding package: the XCFramework and SwiftPM's build tree
+native/packaging/apple/build/
+native/packaging/apple/.build/
+native/packaging/apple/.swiftpm/
 # pinned downloads (FetchContent, appimagetool, NSIS) and staged packages
 native/.deps/
 /dist/

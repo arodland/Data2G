@@ -7,7 +7,7 @@ endfunction()
 
 file(GLOB DATA2G_TESTS CONFIGURE_DEPENDS test_*.cpp)
 # Needs a device backend library; added below when it is built.
-list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot|tci)\\.cpp$")
+list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_(rig_hamlib|args|realtime|station_tx|rx_plot|tci|embed)\\.cpp$")
 if(WIN32)  # the rig bridge is POSIX only (core/rig/bridge.cpp)
   list(FILTER DATA2G_TESTS EXCLUDE REGEX "/test_rig_bridged?\\.cpp$")
 endif()
@@ -21,6 +21,20 @@ endforeach()
 set_tests_properties(audio rig PROPERTIES TIMEOUT 120)
 if(NOT WIN32)
   set_tests_properties(rig_bridge rig_bridged PROPERTIES TIMEOUT 180)
+endif()
+
+# The embedding library (embed/): two modems back to back through its C ABI, and the header as plain C.
+if(TARGET data2g_embed)
+  add_executable(test_embed test_embed.cpp)
+  target_link_libraries(test_embed PRIVATE data2g_embed)
+  target_include_directories(test_embed PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME embed COMMAND test_embed)
+  set_tests_properties(embed PROPERTIES TIMEOUT 600)
+  enable_language(C)
+  add_executable(test_embed_smoke ${PROJECT_SOURCE_DIR}/embed/tests/smoke.c)
+  set_target_properties(test_embed_smoke PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  target_link_libraries(test_embed_smoke PRIVATE data2g_embed)
+  add_test(NAME embed_smoke COMMAND test_embed_smoke)
 endif()
 
 # The libhamlib backend against Hamlib's dummy rig, directly and through a

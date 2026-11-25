@@ -9,6 +9,7 @@ at the time, with names that may since have moved.
 | [user-guide.md](user-guide.md) | Guide | For operators: installing, radio setup, connecting apps, the modem in plain terms, the screen, troubleshooting. `user-guide-pdf.sh` makes the PDF; the release workflow attaches it to each release. |
 | [releasing.md](releasing.md) | Recipe | Release chores: speed sweep, the user's guide (survey, version, screenshots, text), then the Release workflow. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Map | Pipelines, layers, Python and native, the parity contract, where to start. |
+| [EMBEDDING.md](EMBEDDING.md) | Spec | The modem as a library (`native/embed/`, the C API `d2g_*`, the Apple XCFramework): the contract between it and an application that owns the audio and the PTT. |
 | [arq.md](arq.md) | Spec | The connected ARQ protocol: burst layout, control word, sessions, the gear shifter, state agreement. |
 | [bulk.md](bulk.md) | Experiment | data2g-bulk: one-way text transfer with RV 1 copies and timed bursts, and its studies. Not finished, no native port; may be reworked or dropped. |
 | [broadcast.md](broadcast.md) | Spec | Broadcast over KISS: named groups, group keys, rate-shifting reports. |
