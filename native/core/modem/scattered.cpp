@@ -149,8 +149,8 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
     }
     Mat<cd> Bm(uc, un);
     for (size_t c = 0; c < uc; ++c) {
-        const double cs = static_cast<double>(c / unc);
-        const size_t ck = c % unc;
+        const size_t sym = c / unc, ck = c % unc;  // np.divmod: the cell's symbol (floor), its carrier
+        const double cs = static_cast<double>(sym);
         for (size_t j = 0; j < un; ++j) {
             Bm[c][j] = equalizer::doppler_corr((cs - rel[j]) * TSYM, spread) * Rf[ck * unc + static_cast<size_t>(k[j])];
             X[j * uc + c] = std::conj(Bm[c][j]);
@@ -177,10 +177,10 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
         w->m[c] = std::max(1.0 - s, 0.0);
     }
     for (size_t i = 0; i < unc; ++i) {
-        const int p = cells.P[i];
+        const int p = cells.P[i], p_sym = p / nc;  // Python's c // nc
         size_t at = un;
         for (size_t j = 0; j < un && at == un; ++j)
-            if (kd[j] == 0 && k[j] == cells.PK[i] && rel[j] == static_cast<double>(p / nc)) at = j;
+            if (kd[j] == 0 && k[j] == cells.PK[i] && rel[j] == static_cast<double>(p_sym)) at = j;
         if (at == un) throw std::logic_error("_sc_joint: a frame's pilot outside its own window");
         w->col.push_back(at);
         w->own.push_back(w->W[static_cast<size_t>(p)][at].real());
@@ -610,7 +610,8 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
     Obs o;
     for (size_t f = 0; f < uf; ++f)
         for (size_t i = 0; i < nc; ++i) {
-            o.sym.push_back(static_cast<double>(norm[f] * SYMS_PER_FRAME + cells.P[i] / nci));
+            const int sym = norm[f] * SYMS_PER_FRAME + cells.P[i] / nci;  // Python's P // nc
+            o.sym.push_back(static_cast<double>(sym));
             o.k.push_back(cells.PK[i]);
             o.kind.push_back(0);
             o.val.push_back(ls[f][i] / g);
