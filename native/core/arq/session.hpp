@@ -25,6 +25,8 @@ inline constexpr int VERSION = 5;  // session.py VERSION: 4 added T_INLINE, 5 th
 inline constexpr int CONNECT_TRIES = 6;  // session.py: the last in ROBUST_FAST
 inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
 inline constexpr int DISC_TRIES = 3;
+// DISC tries stop within this of the first one keyed: BPQ32's ABORT comes 30 s after its DISCONNECT (session.py)
+inline constexpr double DISC_BUDGET_S = 29.0;
 inline constexpr double REPLY_START_S = 2.5;  // data2g/arq/session.py
 inline constexpr double REPEAT_GAP_S = 30.0;  // failed connect frames further apart are not one CONNECT's tries
 inline constexpr double IDLE_CLOSE_S = 300.0;
@@ -77,7 +79,7 @@ std::string frame_desc(ByteView body);
 // when it makes a Session (session.py reads them at each use).
 struct SessionTuning {
     int connect_tries = CONNECT_TRIES, disc_tries = DISC_TRIES;
-    double reply_start_s = REPLY_START_S, idle_close_s = IDLE_CLOSE_S;
+    double reply_start_s = REPLY_START_S, idle_close_s = IDLE_CLOSE_S, disc_budget_s = DISC_BUDGET_S;
     double keepalive_lo_s = KEEPALIVE_LO_S, keepalive_hi_s = KEEPALIVE_HI_S;
     double chat_keepalive_lo_s = CHAT_KEEPALIVE_LO_S, chat_keepalive_hi_s = CHAT_KEEPALIVE_HI_S;
     bool keepalive_doubling = KEEPALIVE_DOUBLING;
@@ -127,6 +129,9 @@ public:
     double quiet_from = 0, wake_wait = 0;
     int wakes = 0;
     bool want_disc = false, sent_disc_ack = false;
+    double disc_from = 0;    // when the first try of this DISC was keyed (disc_budget_s)
+    bool disc_last = false;  // the DISC on air is the last try: no retry follows it
+    bool disc_retry_fits(double end, double ack, const TxBurst& burst) const;
     std::string disc_why = "CLIENT";  // who wanted the DISC: CLIENT or IDLE
     Bytes pending_write;
     double now_ = 0, stats_since = 0, connected_at = 0;

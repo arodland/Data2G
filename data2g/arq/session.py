@@ -35,6 +35,11 @@ VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: 
 CONNECT_TRIES = 6  # the cap's connect mode, policy.ROBUST_CONNECT_TRIES in ROBUST_CONNECT, one in ROBUST_FAST
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
+# DISC tries stop within this of the first one keyed, a retry going only if
+# its reply window ends inside it: BPQ32 sends ABORT 30 s after an unanswered
+# DISCONNECT (#215), and the close should reach it first (a second for the
+# DISC to key after the host's DISCONNECT)
+DISC_BUDGET_S = 29.0
 # failed connect frames further apart are not one CONNECT's tries (a robust try and its wait: under 15 s)
 REPEAT_GAP_S = 30.0
 # past t_turn: a reply's header must have been heard by then. t_turn is the
@@ -121,6 +126,8 @@ class Session:
     _want_disc: bool = False
     _disc_why: str = "CLIENT"  # who wanted the DISC: CLIENT or IDLE
     _sent_disc_ack: bool = False
+    _disc_from: float = 0.0  # when the first try of this DISC was keyed (DISC_BUDGET_S)
+    _disc_last: bool = False  # the DISC on air is the last try: no retry follows it
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
@@ -283,6 +290,16 @@ class Session:
         self._tx_mode = burst.submode
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
+            if self.state == DISCONNECTING:
+                ack = self.policy.airtime(burst.submode, len(burst.slots)) or 0.0
+                if self._tries == 0:
+                    self._disc_from = now - ack
+                self._disc_last = not self._disc_retry_fits(now, ack, burst)
+                if not self._disc_last:
+                    # DISC_ACK uses this DISC's mode and slot count. Even if its
+                    # header is lost, a retry must not key over the whole reply.
+                    # Before no retry, a missed header leaves nothing to decode.
+                    wait += ack
             if (self.state == CONNECTED and self.station is not None
                     and (hold := self.policy.reply_hold(self.station, burst)) is not None):
                 # a reply whose header I miss is still on air: don't poll over it
@@ -292,6 +309,19 @@ class Session:
             self._quiet_from = now
             self._wake_wait = (self.peer_turn() + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
+
+    def _disc_retry_fits(self, end: float, ack: float, burst: B.TxBurst) -> bool:
+        """Whether another DISC try follows `burst`, which ended at `end`:
+        tries left, and the retry's reply window ends within DISC_BUDGET_S of
+        the first try (the reply to this one, `ack` s, waited out first). A
+        retry after a robust try stays in its mode; else it takes the
+        policy's connect_mode for its try."""
+        if self._tries + 1 >= DISC_TRIES:
+            return False
+        mode = burst.submode if self.policy.robust(burst.submode) else self.policy.connect_mode(self.cap, self._tries + 1)
+        nxt = self.policy.airtime(mode, len(burst.slots)) or 0.0
+        window = self.peer_turn() + REPLY_START_S
+        return end + window + ack + nxt + window <= self._disc_from + DISC_BUDGET_S
 
     def expecting(self) -> list[str]:
         """The modes my peer's next burst likely comes in, while one is due
@@ -494,7 +524,9 @@ class Session:
         elif self.state == DISCONNECTING:
             self._tries += 1
             log.info("no answer to DISC, try %d of %d", self._tries, DISC_TRIES)
-            if self._tries >= DISC_TRIES:
+            if self._tries >= DISC_TRIES or self._disc_last:
+                if self._tries < DISC_TRIES:
+                    log.info("no DISC retry: it would end past %.0f s from the first", DISC_BUDGET_S)
                 self._close(f"{self._disc_why} unconfirmed")
             else:
                 self._queue(self._disc_burst(), now)
