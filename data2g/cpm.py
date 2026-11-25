@@ -235,6 +235,16 @@ LEAK_K = float(os.environ.get("DATA2G_CPM_LEAK_K") or 0.5)  # leak_metric's k
 # next (fsk16r25 on 30 Hz: control decoded 5-38% coherent, 80-93% on leak_metric; its
 # control rows read 0.16-0.24 there, every other grid and preset under 0.145; scripts/spill_study.py)
 CTL_SQ = float(os.environ.get("DATA2G_CPM_CTL_SQ") or 0.15)
+# The leak model applies only where the codeword's spill stands LEAK_Z
+# standard errors (of its rows' terms) over 0; under it the consumer keeps
+# today's metric exactly (spill_significant). On AWGN and mpp the spill reads
+# 0.000-0.01 and passes 2 in 0-2% of codewords; on hilat-d it stands 6-13
+# standard errors out in every one; hilat-m and lowlat-d near their floors
+# pass about half. Ungated, the leak metric differed from today's by a spill
+# read on noise at AWGN -15 dB and two of 12 loss-study sessions diverged
+# (-5.5%); gated at 2, one (-1.1%), every fixed-burst gain kept
+# (scripts/spill_study.py, 2026-11-25). DATA2G_CPM_LEAK_Z (studies); 0: always.
+LEAK_Z = float(os.environ.get("DATA2G_CPM_LEAK_Z") or 2.0)
 LLR_EPS = 0.02  # tone_llr's outlier share: a row whose tone the model rejects costs at most -ln(EPS)
 WAIT_LLR = {"c16r25": 0.0, "c8r50": 0.0, "c32r62": 0.0}  # a front waits for its second copy from this LLR
 # An early lock (front + header copy 1) is looked at again once its mid block
@@ -652,7 +662,7 @@ def tone_metric(g: Grid, E: np.ndarray, use: str = "lock") -> np.ndarray:
     codeword's, N0 plus the Doppler spill (spill()); a tone whose own floor
     stands out of N0 (tone_floors: a carrier) is scored against that floor.
     `use`: the consumer (SPILL's weight; LEAK's on leak_metric)."""
-    if use in LEAK:
+    if use in LEAK and spill_significant(E):
         return leak_metric(E, LEAK_K)
     gain, off = _tone_gain(E, use)
     return E * gain if off is None else E * gain - off
@@ -668,6 +678,22 @@ def _spill_level(E: np.ndarray) -> tuple:
     Ew = E if nb is None else E * (n0 / nb)
     es = max(np.mean(Ew.max(axis=1)) - n0, 1e-3 * n0)
     return n0, nb, es, spill(Ew, n0, es)
+
+
+def spill_significant(E: np.ndarray) -> bool:
+    """The codeword's spill (_spill_level's) stands LEAK_Z standard errors
+    over 0: the per-row terms whose mean spill() takes, their spread over
+    sqrt(rows)."""
+    n0, nb, es, a = _spill_level(E)
+    if a <= 0:
+        return False
+    if not LEAK_Z:
+        return True
+    Ew = E if nb is None else E * (n0 / nb)
+    am, r = Ew.argmax(axis=1), np.arange(len(Ew))
+    P = np.pad(Ew, ((0, 0), (1, 1)), constant_values=n0)
+    x = (P[r, am] + P[r, am + 2] - 2 * n0) / 2 / es
+    return a >= LEAK_Z * x.std() / np.sqrt(len(x))
 
 
 def leak_metric(E: np.ndarray, k: float) -> np.ndarray:
@@ -686,7 +712,8 @@ def leak_metric(E: np.ndarray, k: float) -> np.ndarray:
     further off, the neighbouring symbols' tones through a delayed path) is
     the signal's own too; with k = 0 the confidence grows with SNR as #244's
     did (fsk32r62-r2/3, hilat-d: 100% decoded at PEP cell 2 dB, 30% at 18).
-    a = 0 (AWGN, slow fading): the square law exactly, _tone_gain's.
+    a = 0 (AWGN, slow fading): the square law exactly, _tone_gain's; tone_metric calls it
+    only where the spill is significant (spill_significant), today's metric otherwise.
 
     The floors are tone_floors' (a carrier): each term is on its own bin's
     floor, so a carrier's tone gains little as the sent tone (as _tone_gain
@@ -1228,7 +1255,8 @@ def ctl_square(g: Grid, E: np.ndarray, slot: int) -> bool:
     if "ctlsq" not in LEAK:
         return False
     n = CTL[g.name].n_sym
-    return _spill_level(E[slot * n:(slot + 1) * n])[3] >= CTL_SQ
+    Es = E[slot * n:(slot + 1) * n]
+    return _spill_level(Es)[3] >= CTL_SQ and spill_significant(Es)
 
 
 # --- coherent detection --------------------------------------------------------------

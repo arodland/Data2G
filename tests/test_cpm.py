@@ -399,3 +399,31 @@ def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
     monkeypatch.setenv("DATA2G_CPM_R23", "1")
     assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.CPM_MODE_NATIVE
     assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()
+
+
+def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):
+    """The leak model (DATA2G_CPM_LEAK) leaves a codeword on today's metric
+    unless its spill stands LEAK_Z standard errors out: AWGN codewords score
+    exactly as without it; a tone leaking a fifth of its energy into each
+    neighbour (c16r25 on 30 Hz) goes on leak_metric."""
+    g = cpm.GRIDS["c16r25"]
+    rng = np.random.default_rng(4)
+
+    def codeword(leak, esn0=8.0, n=240):
+        t = rng.integers(0, g.m, n)
+        h = np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        y = (rng.normal(size=(n, g.m)) + 1j * rng.normal(size=(n, g.m))) / np.sqrt(2)
+        y[np.arange(n), t] += h
+        for d in (-1, 1):
+            k = np.clip(t + d, 0, g.m - 1)
+            y[np.arange(n), k] += np.sqrt(leak) * np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        return np.abs(y) ** 2
+
+    awgn = [codeword(0.0, esn0) for esn0 in (0.5, 2.0, 8.0, 30.0) for _ in range(5)]
+    leaky = codeword(0.2)
+    today = [cpm.tone_metric(g, E, "data") for E in awgn]
+    monkeypatch.setattr(cpm, "LEAK", frozenset({"data"}))
+    assert sum(cpm.spill_significant(E) for E in awgn) <= 1
+    assert sum(np.array_equal(cpm.tone_metric(g, E, "data"), t) for E, t in zip(awgn, today)) >= len(awgn) - 1
+    assert cpm.spill_significant(leaky)
+    assert np.array_equal(cpm.tone_metric(g, leaky, "data"), cpm.leak_metric(leaky, cpm.LEAK_K))
