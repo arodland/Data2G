@@ -175,6 +175,40 @@ modem::DataEstimate est_of(const py::dict& d) {
     return e;
 }
 
+py::dict sc_dict(const modem::ScInfo& i) {
+    constexpr std::size_t S = config::DATA_SYMS_PER_FRAME;
+    const std::size_t nc = i.h.cols, n_air = static_cast<std::size_t>(i.n_air), C = config::SYMS_PER_FRAME * nc;
+    py::dict d;
+    d["z"] = np(Mat<cd>(n_air, C));  // the DD pass's starting cells (Python's): zeros
+    d["w"] = np(Mat<double>(n_air, C));
+    Mat<double> t(n_air, config::SYMS_PER_FRAME);
+    for (std::size_t a = 0; a < n_air; ++a)
+        for (std::size_t s = 0; s < static_cast<std::size_t>(config::SYMS_PER_FRAME); ++s)
+            t[a][s] = static_cast<double>((a * config::SYMS_PER_FRAME + s) * config::NSYM) / config::FS;
+    d["t_rows"] = np(t);
+    d["norm"] = np<std::int64_t>(std::span<const int>(i.norm));
+    d["h"] = np3(i.h, S);
+    d["mse"] = np3(i.mse, S);
+    d["full"] = np(i.full);
+    d["ls"] = np(i.ls);
+    d["n0_y"] = i.n0_y;
+    return d;
+}
+
+std::shared_ptr<const modem::ScInfo> sc_of(const py::dict& r) {
+    if (!r.contains("sc")) return nullptr;
+    const auto d = r["sc"].cast<py::dict>();
+    auto i = std::make_shared<modem::ScInfo>();
+    for (auto v : vec(d["norm"].cast<In<std::int64_t>>())) i->norm.push_back(static_cast<int>(v));
+    i->h = mat2(d["h"].cast<In<cd>>());
+    i->mse = mat2(d["mse"].cast<In<double>>());
+    if (d.contains("full")) i->full = mat2(d["full"].cast<In<cd>>());
+    if (d.contains("ls")) i->ls = mat2(d["ls"].cast<In<cd>>());
+    i->n0_y = d.contains("n0_y") ? d["n0_y"].cast<double>() : 0.0;
+    i->n_air = static_cast<int>(d["t_rows"].cast<In<double>>().shape(0));
+    return i;
+}
+
 // The Received fields the decode helpers read (burst_soft .. decode_received), from receive()'s dict.
 modem::Received received_of(const py::dict& r) {
     modem::Received rx;
@@ -187,6 +221,7 @@ modem::Received received_of(const py::dict& r) {
     rx.cfo = get<double>(r, "cfo", 0.0);
     rx.preamble_start = get<std::int64_t>(r, "preamble_start", 0);
     rx.frames_in = get<int>(r, "frames_in", rx.n_cw * rx.spec->frames_per_cw);
+    rx.sc = sc_of(r);
     return rx;
 }
 
@@ -211,6 +246,7 @@ py::dict received_dict(const modem::Received& r) {
     d["seen_support"] = py::make_tuple(r.seen_support.first, r.seen_support.second);
     d["preamble_start"] = r.preamble_start;
     d["score"] = r.score;
+    if (r.sc) d["sc"] = sc_dict(*r.sc);
     return d;
 }
 
@@ -251,6 +287,7 @@ using OptStats = std::optional<std::map<std::string, std::optional<In<double>>>>
 py::dict modem_lock_dict(const modem::Lock& l) { return lock_dict(l); }
 py::dict modem_received_dict(const modem::Received& r) { return received_dict(r); }
 std::optional<modem::Accept> modem_accept_of(const py::object& a) { return accept_of(a); }
+std::shared_ptr<const modem::ScInfo> modem_sc_of(const py::dict& r) { return sc_of(r); }
 
 void bind_modem(py::module_& m) {
     namespace mo = modem;
@@ -312,13 +349,21 @@ void bind_modem(py::module_& m) {
     d.def("bin_phase_step", [](const In<cd>& h) { return mo::bin_phase_step(view(h)); });
     d.def("demod_frames", [](const In<cd>& z, std::int64_t p, int n_f, int shift, double phi_ref,
                              const std::optional<In<double>>& steps_in, const std::string& band,
-                             const std::optional<In<std::int64_t>>& slips_in) {
+                             const std::optional<In<std::int64_t>>& slips_in, const std::optional<In<std::int64_t>>& pil,
+                             std::optional<int> close_at) {
         const std::vector<double> si = steps_in ? vec(*steps_in) : std::vector<double>();
         const std::vector<std::int64_t> sl = slips_in ? vec(*slips_in) : std::vector<std::int64_t>();
-        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl);
+        Mat<int> pm;
+        if (pil) {
+            const std::size_t nc = pil->shape(pil->ndim() - 1);
+            pm = Mat<int>(static_cast<std::size_t>(pil->size()) / nc, nc);
+            for (std::size_t i = 0; i < pm.data.size(); ++i) pm.data[i] = static_cast<int>(pil->data()[i]);
+        }
+        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl, pil ? &pm : nullptr, close_at);
         return py::make_tuple(np3(f.raw, config::SYMS_PER_FRAME), np(f.hp), np(f.steps), np(f.slips));
     }, py::arg("z"), py::arg("p"), py::arg("n_f"), py::arg("shift"), py::arg("phi_ref"),
-       py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none());
+       py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none(),
+       py::arg("pil") = py::none(), py::arg("close_at") = py::none());
     d.def("read_header", [](const In<cd>& z, std::int64_t start, const std::string& band, const py::object& accept) {
         const auto a = accept_of(accept);
         return header_dict(mo::read_header(view(z), start, band, a ? &*a : nullptr));
@@ -391,21 +436,52 @@ void bind_modem(py::module_& m) {
     d.def("copy_header", [](const In<cd>& z, const py::dict& lock) {
         return header_dict(mo::copy_header(view(z), lock_of(lock)));
     });
+    // known: {start, cfo, spec, n_cw} (receive(known=...); bands, accept, head, copy and partial unused)
     d.def("receive", [](const In<double>& x, const OptBands& bands, const py::object& accept,
-                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy, bool partial) {
+                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy, bool partial,
+                        const std::optional<py::dict>& known) {
         const auto a = accept_of(accept);
         const auto bs = bands_of(bands);
         std::optional<mo::Lock> c;
         if (copy) c = lock_of(*copy);
         mo::Received r;
-        {
+        if (known) {
+            const auto start = (*known)["start"].cast<std::int64_t>();
+            const auto cfo = (*known)["cfo"].cast<double>();
+            const auto& sp = spec_of((*known)["spec"]);
+            const int n_cw = (*known)["n_cw"].cast<int>();
+            py::gil_scoped_release nogil;
+            r = mo::receive_known(view(x), start, cfo, sp, n_cw);
+        } else {
             py::gil_scoped_release nogil;
             r = mo::receive(view(x), bs, a ? &*a : nullptr, head, c ? &*c : nullptr, partial);
         }
         return received_dict(r);
     }, py::arg("x"), py::arg("bands") = py::none(), py::arg("accept") = py::none(), py::arg("head") = py::none(),
-       py::arg("copy") = py::none(), py::arg("partial") = false);
+       py::arg("copy") = py::none(), py::arg("partial") = false, py::arg("known") = py::none());
+    d.def("sc_clear_weights", &mo::sc_clear_weights);
     d.def("resolve_alias", &mo::resolve_alias);
+    d.def("sc_refine", [](const py::dict& r, const In<cd>& z, const In<double>& w) {
+        auto rx = received_of(r);
+        rx.band = band_view(r["band"].cast<std::string>());
+        const auto sup = r["support"].cast<py::sequence>();
+        rx.support = {sup[0].cast<int>(), sup[1].cast<int>()};
+        const auto e = r["est"].cast<py::dict>();
+        rx.est.filter_spread_hz = e["filter_spread_hz"].cast<double>();
+        rx.est.slack = e["slack"].cast<int>();
+        const std::size_t nc = rx.est.h.cols;
+        Mat<cd> zm(static_cast<std::size_t>(z.size()) / nc, nc);
+        std::copy(z.data(), z.data() + z.size(), zm.data.begin());
+        Mat<double> wm(static_cast<std::size_t>(w.size()) / nc, nc);
+        std::copy(w.data(), w.data() + w.size(), wm.data.begin());
+        const auto [h, mse] = mo::sc_refine(rx, zm, wm);
+        return py::make_tuple(np3(h, config::DATA_SYMS_PER_FRAME), np3(mse, config::DATA_SYMS_PER_FRAME));
+    });
+    d.def("sc_cells", [](int nc) {
+        const auto& c = mo::sc_cells(nc);
+        auto a = [](const std::vector<int>& v) { return np<std::int64_t>(std::span<const int>(v)); };
+        return py::make_tuple(a(c.P), a(c.PK), a(c.Dc), a(c.own));
+    });
     d.def("data_channel", [](const In<cd>& h_pilot, equalizer::Support support, const std::string& band, double n0_pre,
                              const std::optional<py::tuple>& clip, const std::optional<In<double>>& n0_pre_k,
                              std::optional<int> n_frames) {

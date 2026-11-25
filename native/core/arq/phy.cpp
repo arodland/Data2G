@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <tuple>
 
 #include "constellation/constellation.hpp"
 #include "util/cancel.hpp"
@@ -949,9 +950,15 @@ ModemRx::Est ModemRx::dd_estimate() const {
         z[row][c] = cache.z[j];
         w[row][c] = cache.w[j];
     }
-    const auto t = modem::symbol_times(R);
-    auto [h, mse] = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
-                                      equalizer::bb(config::band(spec.band)), est.slack);
+    Mat<cd> h;
+    Mat<double> mse;
+    if (R.sc) {  // scattered pilots (modem::ScInfo): the cells at their own symbols
+        std::tie(h, mse) = modem::sc_refine(R, z, w);
+    } else {
+        const auto t = modem::symbol_times(R);
+        std::tie(h, mse) = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz,
+                                             est.n0, equalizer::bb(config::band(spec.band)), est.slack);
+    }
     auto out = std::make_shared<modem::DataEstimate>(est);
     for (std::size_t i = 0; i < h.data.size(); ++i) {
         out->h.data[i] = g * h.data[i];
