@@ -405,6 +405,7 @@ class Receiver:
         for g in self.grids:
             src = next((t for t in self.coarse.values()  # (a Python track: a compiled one keeps its rows to itself)
                         if SHARE_ROWS and hasattr(t, "_sourced") and cpm.shares_rows(g, t.g)), None)
+            # (native: receiver::Receiver shares its own tracks' rows the same way, DATA2G_CPM_SHARE)
             self.coarse[g.name] = cpm.CoarseTrack(g, source=src)
         # CPM fronts whose first header copy fell short (cpm.find's candidates,
         # stream indices): read again with both copies once the second is in

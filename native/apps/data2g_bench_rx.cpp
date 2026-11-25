@@ -385,7 +385,7 @@ std::string listen_bands;  // --bands w,w48: only these OFDM sync bands' modes (
 
 void listen(double seconds, bool cpm_only, int expect) {
     std::vector<std::string_view> grids;
-    for (const auto& g : tables::CPM_GRIDS) grids.push_back(g.name);
+    for (const auto* g : cpm::grids()) grids.push_back(g->name);  // DATA2G_CPM_ONAIR's too
     if (engine_rx) grids = arq::all_grids();
     std::vector<std::string_view> names;
     for (const auto& m : config::SUBMODES)

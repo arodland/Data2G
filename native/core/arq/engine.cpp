@@ -45,7 +45,7 @@ Heard heard_of(receiver::Rx&& rx) {
 std::vector<std::string_view> all_grids() {
     std::vector<std::string_view> out;
     if (config::PROFILE == "fm") return out;  // FM has no CPM modes (plan Q2): no CPM lock search either
-    for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
+    for (const auto* g : cpm::grids()) out.push_back(g->name);  // DATA2G_CPM_ONAIR's wide grids too
     return out;
 }
 
