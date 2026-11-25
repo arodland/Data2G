@@ -95,6 +95,13 @@ std::shared_ptr<const SlotSoft> soft_bits(const Heard& r);
 
 // The gear shifter's inputs (phy.measure).
 Measured measure(const Heard& r);
+// Post-decode data-aided MER (phy.data_mer; issue #290).
+inline constexpr std::size_t MER_MAX_EM_CELLS = 1024;
+inline constexpr std::size_t MER_EM_TOP_K = 12;
+inline constexpr int MER_EM_ITERS = 6;
+inline constexpr double MER_DEADBAND_RATIO = 1.35;
+Measured data_mer(const modem::Received& r, const std::map<int, std::vector<std::uint8_t>>& coded_bits,
+                  const Measured& measured);
 
 // A codeword's stored soft bits: Python's (buffer, highest RV, submode, where).
 struct SoftEntry {
@@ -189,6 +196,10 @@ public:
     bool can_repeat() const override { return true; }
     std::optional<Bytes> decode_repeat(int slot, const MaskId& mask, const SoftKey& key) override;
     bool own_score(int slot, const MaskId& mask, ByteView payload);
+    // Post-decode data-aided MER refinement (phy.ModemRx.measure_data).
+    std::optional<Measured> measure_data(const Measured& m) override;
+    void erase_coded(int slot) { coded_.erase(slot); }
+    bool has_coded(int slot) const { return coded_.count(slot) > 0; }
 
     // nullptr while soft bits are made per slot as asked (a partial burst's, or after advance())
     const std::shared_ptr<const SlotSoft>& soft() const { return soft_; }
@@ -276,6 +287,8 @@ private:
     bool reader_ = false;
     int reads_run_ = 0;
     std::map<int, std::vector<double>> post_;  // DD: slot -> LLRs of its coded bits
+    std::map<int, std::vector<std::uint8_t>> coded_;  // OFDM: slot -> decoded coded bits (mapping order), for data_mer
+    std::optional<std::pair<std::pair<std::size_t, double>, Measured>> mer_cache_;
     // CPM: data slots whose pass is made (ModemRx._cpm_passes), and the converged ones' posteriors
     std::set<int> passed_;
     cpm::Posts pass_post_;

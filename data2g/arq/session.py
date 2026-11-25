@@ -35,6 +35,11 @@ VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: 
 CONNECT_TRIES = 6  # the cap's connect mode, policy.ROBUST_CONNECT_TRIES in ROBUST_CONNECT, one in ROBUST_FAST
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
+# DISC tries stop within this of the first one keyed, a retry going only if
+# its reply window ends inside it: BPQ32 sends ABORT 30 s after an unanswered
+# DISCONNECT (#215), and the close should reach it first (a second for the
+# DISC to key after the host's DISCONNECT)
+DISC_BUDGET_S = 29.0
 # failed connect frames further apart are not one CONNECT's tries (a robust try and its wait: under 15 s)
 REPEAT_GAP_S = 30.0
 # past t_turn: a reply's header must have been heard by then. t_turn is the
@@ -121,9 +126,13 @@ class Session:
     _want_disc: bool = False
     _disc_why: str = "CLIENT"  # who wanted the DISC: CLIENT or IDLE
     _sent_disc_ack: bool = False
+    _disc_from: float = 0.0  # when the first try of this DISC was keyed (DISC_BUDGET_S)
+    _disc_last: bool = False  # the DISC on air is the last try: no retry follows it
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
+    _rx_mode: str = ""  # the mode of the peer's last burst my link took (_session_mode)
+    _disc_mode: str | None = None  # every try of this DISC goes in it; None: the policy's connect_mode
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     connect_tries: int | None = None  # host RETRIES (plus the first); None: CONNECT_TRIES
@@ -283,6 +292,16 @@ class Session:
         self._tx_mode = burst.submode
         if (self.master and self.state in (CONNECTING, CONNECTED)) or self.state == DISCONNECTING:
             wait = REPLY_START_S
+            if self.state == DISCONNECTING:
+                ack = self.policy.airtime(burst.submode, len(burst.slots)) or 0.0
+                if self._tries == 0:
+                    self._disc_from = now - ack
+                self._disc_last = not self._disc_retry_fits(now, ack, burst)
+                if not self._disc_last:
+                    # DISC_ACK uses this DISC's mode and slot count. Even if its
+                    # header is lost, a retry must not key over the whole reply.
+                    # Before no retry, a missed header leaves nothing to decode.
+                    wait += ack
             if (self.state == CONNECTED and self.station is not None
                     and (hold := self.policy.reply_hold(self.station, burst)) is not None):
                 # a reply whose header I miss is still on air: don't poll over it
@@ -292,6 +311,19 @@ class Session:
             self._quiet_from = now
             self._wake_wait = (self.peer_turn() + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
+
+    def _disc_retry_fits(self, end: float, ack: float, burst: B.TxBurst) -> bool:
+        """Whether another DISC try follows `burst`, which ended at `end`:
+        tries left, and the retry's reply window ends within DISC_BUDGET_S of
+        the first try (the reply to this one, `ack` s, waited out first). A
+        retry after a robust try stays in its mode; else it takes the
+        policy's connect_mode for its try."""
+        if self._tries + 1 >= DISC_TRIES:
+            return False
+        mode = burst.submode if self.policy.robust(burst.submode) else self.policy.connect_mode(self.cap, self._tries + 1)
+        nxt = self.policy.airtime(mode, len(burst.slots)) or 0.0
+        window = self.peer_turn() + REPLY_START_S
+        return end + window + ack + nxt + window <= self._disc_from + DISC_BUDGET_S
 
     def expecting(self) -> list[str]:
         """The modes my peer's next burst likely comes in, while one is due
@@ -329,6 +361,7 @@ class Session:
             self.station.now = now
         ctl = self._session_frame(rx) or self._repeated_frame(rx, now)
         if ctl is not None:
+            self._refine_measured(rx)
             self._on_session_frame(ctl, now)
             return
         st = self.station
@@ -337,6 +370,7 @@ class Session:
         undrained, limbo = len(st.rx.out), st.tx.limbo is not None
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
+        self._rx_mode = rx.submode
         if self._follow_start:  # the callee, connected in the robust mode: as the caller started (_robust_start)
             self._follow_start = False
             if self.policy.robust(rx.submode):
@@ -397,6 +431,13 @@ class Session:
     def _queue(self, burst: B.TxBurst, when: float):
         self._out, self._due = burst, when
 
+    def _refine_measured(self, rx: B.RxBurst):
+        """Post-decode data-aided MER update before session-frame decisions (weak_path/build)."""
+        if self.policy.measured is not None and hasattr(rx, "measure_data"):
+            upd = rx.measure_data(self.policy.measured)
+            if upd is not None:
+                self.policy.update_measured(upd)
+
     def _heard(self, now: float):
         self._last_heard = now
         self._deadline = None
@@ -407,9 +448,40 @@ class Session:
         if not self._want_disc or self.station.tx.pending():
             return False
         self._tries = 0
+        self._disc_mode = self._session_mode()
         self._queue(self._disc_burst(), now)
         self.state = DISCONNECTING
         return True
+
+    def _session_mode(self) -> str | None:
+        """The robust control mode this session is running in, if it is: the
+        mode of the peer's last burst my link took, else of my link's last
+        burst (Station.last_sent: never a session frame), whichever is robust
+        (policy.robust()). Before any link burst either way, the robust floor
+        decides: at it (the caller's weak_path() at connect, or the callee
+        following it), the policy's first connect retry's mode. None:
+        session frames take the policy's connect_mode.
+
+        A DISC goes in it, every try: in the cap's connect mode, a first
+        DISC from a session at the robust floor went unanswered on weak
+        paths and cost a 5.2 s timeout before the robust retry (13 of 28
+        DISCs in 20 live sessions on AWGN -15/-16, hilat, poor and
+        qrm-noise, only the last two answering it). The peer's last mode
+        first: it got here, and on fast fading it is ROBUST_FAST, which a
+        retry's connect_mode (ROBUST_CONNECT) would drop. The connect frames
+        themselves decide nothing: a robust retry answered on a good path (a
+        first CONNECT a scanning callee missed) starts at the bottom
+        (_robust_start), and its first-turn DISC stays in the connect mode.
+        The DISC_ACK answers in the DISC's mode (_session_burst)."""
+        st = self.station
+        sent = st.last_sent.submode if st.last_sent is not None else ""
+        for mode in (self._rx_mode, sent):
+            if mode and self.policy.robust(mode):
+                return mode
+        if not self._rx_mode and not sent and st.esc_floor >= L.MAX_ESCALATION:
+            mode = self.policy.connect_mode(self.cap, 1)
+            return mode if self.policy.robust(mode) else None
+        return None
 
     def _wake_time(self) -> float | None:
         """Callee: when to break idle with queued data or a DISC, if it may.
@@ -449,6 +521,7 @@ class Session:
 
     def _connected(self, now: float):
         self.state = CONNECTED
+        self._rx_mode, self._disc_mode = "", None
         self.station.now = now
         self._heard(now)
         self._last_data = self._connected_at = self._stats_since = now
@@ -486,7 +559,9 @@ class Session:
         elif self.state == DISCONNECTING:
             self._tries += 1
             log.info("no answer to DISC, try %d of %d", self._tries, DISC_TRIES)
-            if self._tries >= DISC_TRIES:
+            if self._tries >= DISC_TRIES or self._disc_last:
+                if self._tries < DISC_TRIES:
+                    log.info("no DISC retry: it would end past %.0f s from the first", DISC_BUDGET_S)
                 self._close(f"{self._disc_why} unconfirmed")
             else:
                 self._queue(self._disc_burst(), now)
@@ -537,7 +612,7 @@ class Session:
 
     def _disc_burst(self) -> B.TxBurst:
         st = self.station
-        return self._session_burst(st.direction, st.key, bytes([F.DISC]))
+        return self._session_burst(st.direction, st.key, bytes([F.DISC]), self._disc_mode)
 
     def _session_frame(self, rx) -> dict | None:
         """Decode rx as a session frame addressed to this station, if it is one.

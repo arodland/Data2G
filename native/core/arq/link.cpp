@@ -834,11 +834,19 @@ TxBurstPtr Station::on_timeout(bool allow_repeat) {
     return build(false);
 }
 
+void Station::refine_measured(RxBurst& rxb) {
+    if (const auto m = policy->last_measured())
+        if (const auto upd = rxb.measure_data(*m)) policy->update_measured(*upd);
+}
+
 bool Station::handle(RxBurst& rx_) {
     const bool ok = handle_inner(rx_);
     stats[ok ? "rx_ok" : "rx_lost"] += 1;
-    if (!ok && log_enabled(LOG, INFO))
-        log_write(LOG, INFO, "RX " + burst_desc(rx_.submode(), rx_.n_cw()) + snr() + " | control lost, discarded");
+    if (!ok) {
+        refine_measured(rx_);
+        if (log_enabled(LOG, INFO))
+            log_write(LOG, INFO, "RX " + burst_desc(rx_.submode(), rx_.n_cw()) + snr() + " | control lost, discarded");
+    }
     return ok;
 }
 
@@ -874,6 +882,7 @@ bool Station::handle_inner(RxBurst& rxb) {
         fail(std::string("protocol: ") + e.what());
         return true;
     }
+    refine_measured(rxb);
     if (log_enabled(LOG, INFO)) log_rx(rxb, core, dup, data, base0, next0, cum0, was, repeat, abandoned);
     reply_lost = repeat;
     stale_ = repeat;

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "arq/frames.hpp"
+#include "arq/measured.hpp"
 
 namespace data2g::arq {
 
@@ -117,6 +118,8 @@ public:
     virtual int n_ctl_slots() const { return 0; }
     // A nod (docs/arq.md §3b) standing for a control-only burst: checked as a primed control is.
     virtual bool is_nod() const { return false; }
+    // Post-decode data-aided MER refinement of the burst's measurements (ModemRx::measure_data; nullopt: unsupported).
+    virtual std::optional<Measured> measure_data(const Measured&) { return std::nullopt; }
 };
 
 }  // namespace data2g::arq
