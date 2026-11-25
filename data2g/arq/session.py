@@ -131,6 +131,8 @@ class Session:
     _pending_write: bytearray = field(default_factory=bytearray)
     _nak: B.TxBurst | None = None  # a refusal in _out: not the session's burst (no reply timer, no wake)
     _tx_mode: str = ""  # the mode of my last burst sent (expecting)
+    _rx_mode: str = ""  # the mode of the peer's last burst my link took (_session_mode)
+    _disc_mode: str | None = None  # every try of this DISC goes in it; None: the policy's connect_mode
     chat: bool = False  # CHAT ON: set with set_chat()
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     connect_tries: int | None = None  # host RETRIES (plus the first); None: CONNECT_TRIES
@@ -368,6 +370,7 @@ class Session:
         undrained, limbo = len(st.rx.out), st.tx.limbo is not None
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
+        self._rx_mode = rx.submode
         if self._follow_start:  # the callee, connected in the robust mode: as the caller started (_robust_start)
             self._follow_start = False
             if self.policy.robust(rx.submode):
@@ -445,9 +448,40 @@ class Session:
         if not self._want_disc or self.station.tx.pending():
             return False
         self._tries = 0
+        self._disc_mode = self._session_mode()
         self._queue(self._disc_burst(), now)
         self.state = DISCONNECTING
         return True
+
+    def _session_mode(self) -> str | None:
+        """The robust control mode this session is running in, if it is: the
+        mode of the peer's last burst my link took, else of my link's last
+        burst (Station.last_sent: never a session frame), whichever is robust
+        (policy.robust()). Before any link burst either way, the robust floor
+        decides: at it (the caller's weak_path() at connect, or the callee
+        following it), the policy's first connect retry's mode. None:
+        session frames take the policy's connect_mode.
+
+        A DISC goes in it, every try: in the cap's connect mode, a first
+        DISC from a session at the robust floor went unanswered on weak
+        paths and cost a 5.2 s timeout before the robust retry (13 of 28
+        DISCs in 20 live sessions on AWGN -15/-16, hilat, poor and
+        qrm-noise, only the last two answering it). The peer's last mode
+        first: it got here, and on fast fading it is ROBUST_FAST, which a
+        retry's connect_mode (ROBUST_CONNECT) would drop. The connect frames
+        themselves decide nothing: a robust retry answered on a good path (a
+        first CONNECT a scanning callee missed) starts at the bottom
+        (_robust_start), and its first-turn DISC stays in the connect mode.
+        The DISC_ACK answers in the DISC's mode (_session_burst)."""
+        st = self.station
+        sent = st.last_sent.submode if st.last_sent is not None else ""
+        for mode in (self._rx_mode, sent):
+            if mode and self.policy.robust(mode):
+                return mode
+        if not self._rx_mode and not sent and st.esc_floor >= L.MAX_ESCALATION:
+            mode = self.policy.connect_mode(self.cap, 1)
+            return mode if self.policy.robust(mode) else None
+        return None
 
     def _wake_time(self) -> float | None:
         """Callee: when to break idle with queued data or a DISC, if it may.
@@ -487,6 +521,7 @@ class Session:
 
     def _connected(self, now: float):
         self.state = CONNECTED
+        self._rx_mode, self._disc_mode = "", None
         self.station.now = now
         self._heard(now)
         self._last_data = self._connected_at = self._stats_since = now
@@ -577,7 +612,7 @@ class Session:
 
     def _disc_burst(self) -> B.TxBurst:
         st = self.station
-        return self._session_burst(st.direction, st.key, bytes([F.DISC]))
+        return self._session_burst(st.direction, st.key, bytes([F.DISC]), self._disc_mode)
 
     def _session_frame(self, rx) -> dict | None:
         """Decode rx as a session frame addressed to this station, if it is one.

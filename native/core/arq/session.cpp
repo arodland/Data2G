@@ -289,6 +289,7 @@ void Session::on_rx(RxBurst& rx, double now) {
     const size_t undrained = st->rx.out.size();
     const bool limbo = st->tx.limbo.has_value();
     if (!st->handle(rx)) return;  // not ours, or unreadable: stay silent (§3)
+    rx_mode = rx.submode();
     if (follow_start) {  // the callee, connected in the robust mode: as the caller started (robust_start)
         follow_start = false;
         if (policy->robust(rx.submode())) st->esc_floor = MAX_ESCALATION;
@@ -386,9 +387,27 @@ void Session::disconnect() {
 bool Session::disc(double now) {
     if (!want_disc || station->tx.pending()) return false;
     tries = 0;
+    disc_mode = session_mode();
     queue(disc_burst(), now);
     state = SessionState::DISCONNECTING;
     return true;
+}
+
+// The robust control mode this session is running in, if it is: the peer's last burst my link took,
+// else my link's last burst (Station::last_sent, never a session frame), whichever is robust
+// (policy.robust()); before any link burst either way, at the robust floor, the first connect retry's
+// mode; none: connect_mode (session.py _session_mode). The connect frames decide nothing: a robust
+// retry answered on a good path starts at the bottom (robust_start) and its first-turn DISC stays in
+// the connect mode. A DISC goes in it, every try; the DISC_ACK answers in the DISC's mode.
+std::optional<std::string> Session::session_mode() const {
+    const std::string sent = station->last_sent ? station->last_sent->submode : std::string();
+    for (const std::string* m : {&rx_mode, &sent})
+        if (!m->empty() && policy->robust(*m)) return *m;
+    if (rx_mode.empty() && sent.empty() && station->esc_floor >= MAX_ESCALATION) {
+        const std::string m = policy->connect_mode(cap, 1, false);
+        if (policy->robust(m)) return m;
+    }
+    return std::nullopt;
 }
 
 std::optional<double> Session::wake_time() {
@@ -426,6 +445,8 @@ double Session::peer_turn() const {
 
 void Session::connected(double now) {
     state = SessionState::CONNECTED;
+    rx_mode.clear();
+    disc_mode.reset();
     station->now = now;
     heard(now);
     last_data = connected_at = stats_since = now;
@@ -537,7 +558,7 @@ TxBurstPtr Session::connect_burst() {
     return session_burst(0, 0, Connect{VERSION, call, peer, nonce, cap, tenths(t_turn)}.pack());
 }
 
-TxBurstPtr Session::disc_burst() { return session_burst(station->direction, station->key, Bytes{DISC}); }
+TxBurstPtr Session::disc_burst() { return session_burst(station->direction, station->key, Bytes{DISC}, disc_mode); }
 
 TxBurstPtr Session::accept_burst() {
     return session_burst(1, 0, ConnectAck{nonce, cap, tenths(t_turn)}.pack(), answer_mode);
