@@ -498,3 +498,30 @@ def test_leak_model(native, reference, leak_on, name, chan):
                 want[s] = ref(reference, "dd_soft")(r, ref(reference, "dd_metric")(r, {}, s), s)
     for a, b in zip(native.cpm.receive_soft(y, spec.name, n_data, dup, s0, f), want, strict=True):
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+
+
+def test_r23_offered_in_both(native):
+    """fsk32r62-r2/3 offered (DATA2G_CPM_R23=1, which both read at import:
+    a fresh interpreter): the parity tests that go over every mode, with it
+    among them (the spec and header tables, layout, modulation, the leak
+    model on its codewords, its GF(32) code, recommendation code 54, its
+    peak and threshold rows, the shifter), and its burst through the
+    substituted receive and ModemRx (test_cpm's). The rest of the suite runs
+    with it offered when DATA2G_CPM_R23 is set."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    if cpm.R23:
+        pytest.skip("DATA2G_CPM_R23 is set: the suite runs these with it offered")
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-n", "2", "-p", "no:cacheprovider", "--native",
+                        "tests/test_native_cpm.py", "tests/test_native_codes.py", "tests/test_native_arq.py",
+                        "tests/test_native_arq_phy.py",
+                        "tests/test_cpm.py::test_r23_announced_at_index_4_and_older_words_unchanged",
+                        "-k", "fsk32r62-r2/3 or spec_tables or header_tables or layout or modulate or modes or policy or shifter "
+                        "or tx_audio or cpm_decodes or cpm_coherent or announced"],
+                       cwd=root, env={**os.environ, "DATA2G_CPM_R23": "1"}, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and "skipped" not in r.stdout, r.stdout[-2000:]

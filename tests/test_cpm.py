@@ -271,6 +271,9 @@ def r23_offered(monkeypatch):
     """fsk32r62-r2/3 offered for one test (DATA2G_CPM_R23=1's effect on the mode tables)."""
     from data2g.arq import modes
 
+    if cpm.R23:  # DATA2G_CPM_R23: offered already, in native too
+        yield
+        return
     caches = (cpm.valid_words, cpm.header_rows)
     old = [m for m in cpm.SPECS]
     monkeypatch.setitem(cpm.SPECS, cpm.R23_SPEC.name, cpm.R23_SPEC)
@@ -284,7 +287,8 @@ def r23_offered(monkeypatch):
         c.cache_clear()
 
 
-@pytest.mark.python_only("fsk32r62-r2/3 is not in native")
+# offered by this test alone (DATA2G_CPM_R23 unset): native reads the switch at load
+@(pytest.mark.python_only("fsk32r62-r2/3 offered by a fixture, not DATA2G_CPM_R23") if not cpm.R23 else lambda f: f)
 def test_r23_announced_at_index_4_and_older_words_unchanged(r23_offered):
     """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
     the two older modes' words are what they were, the recommendation codes
@@ -381,24 +385,6 @@ def test_a_carrier_does_not_read_as_signal_in_snr_est():
         for hz, inr, low in ((1573.4, 12.0, -1.0), (1330.0, 18.0, -1.5)):  # before: +2.0..+2.5, +5.4..+6.0
             d = est(seed, carrier_hz=hz, inr_db=inr) - clean
             assert low < d < 0.5, (seed, hz, inr, d)
-
-
-def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
-    """with_native / --native under a CPM study toggle: the leak model's run
-    in C++ (it reads them too); fsk32r62-r2/3 offered keeps all but the OFDM
-    and audio providers in Python."""
-    import native_subs
-
-    for v in ("DATA2G_CPM_LEAK", *native_subs.CPM_MODE_ENV):
-        monkeypatch.delenv(v, raising=False)
-    assert native_subs.study_skip() == set()
-    monkeypatch.setenv("DATA2G_CPM_R23", "0")
-    assert native_subs.study_skip() == set()
-    monkeypatch.setenv("DATA2G_CPM_LEAK", "ctl,data,dd,ctlsq")
-    assert native_subs.study_skip() == set()
-    monkeypatch.setenv("DATA2G_CPM_R23", "1")
-    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.CPM_MODE_NATIVE
-    assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()
 
 
 def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):

@@ -187,9 +187,10 @@ SPECS = {s.name: s for g in GRIDS.values() for s in (
 # + 2 x duplicated, so 2 and 3 are r1/3's and r1/2's duplicated-control words;
 # 4 (6 duplicated) is free, and every older word reads as before. Last in
 # SPECS: arq.modes' recommendation codes go by SPECS' order.
-# DATA2G_CPM_R23=1 (studies): offered. Unset: not a mode (today's six, their
-# header words, and the native tables generated from them); the outcome
-# model has no row for it either way (scripts/cnp_outcome.py --add).
+# DATA2G_CPM_R23=1 (studies): offered. Unset: not a mode (today's six and
+# their header words; native: the generated tables hold its rows last and
+# tables::cpm_r23() leaves them out); the outcome model has no row for it
+# either way (scripts/cnp_outcome.py --add).
 R23_SPEC = CpmSpec("fsk32r62-r2/3", "c32r62", 4, "gf", 640, DATA_N)
 R23 = os.environ.get("DATA2G_CPM_R23", "0") not in ("0", "off", "")
 if R23:
