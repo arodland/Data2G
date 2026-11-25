@@ -42,8 +42,6 @@ namespace data2g::gui {
 
 namespace {
 
-constexpr int MAX_LOG_ROWS = 500;
-
 QString qs(const std::string& s) { return QString::fromStdString(s); }
 
 QString link_text(const app::LinkStatus& l) {
@@ -425,7 +423,19 @@ void MainWindow::poll() {
                                  : QString());
 
     if (auto c = s.take_constellation()) constellation_->set(std::move(*c));
-    for (const auto& b : s.take_bursts()) {
+    append_bursts(s.take_bursts());
+
+    s.set_monitor(monitoring_->isChecked());  // a restarted station's too
+    monitor_->add(s.take_dumps());
+}
+
+void MainWindow::append_bursts(const std::vector<app::BurstLogEntry>& bursts) {
+    if (bursts.empty()) return;
+    QScrollBar* bar = log_->verticalScrollBar();
+    const int old_value = bar->value();
+    const bool at_top = old_value == bar->minimum();
+    int added_px = 0;
+    for (const auto& b : bursts) {
         log_->insertRow(0);  // newest first
         const auto when = QDateTime::fromMSecsSinceEpoch(
             std::chrono::duration_cast<std::chrono::milliseconds>(b.when.time_since_epoch()).count());
@@ -436,11 +446,22 @@ void MainWindow::poll() {
                                    : b.failed         ? tr("incomplete data (%1/%2)").arg(b.n_cw - b.failed).arg(b.n_cw)
                                                       : tr("ok")};
         for (int i = 0; i < cells.size(); ++i) log_->setItem(0, i, new QTableWidgetItem(cells[i]));
+        added_px += log_->rowHeight(0);
     }
+    // Dropping the current row makes QItemSelectionModel move currentIndex to the
+    // last surviving row, which triggers QAbstractItemView's autoScroll and snaps
+    // the view to the oldest rows at the bottom (#294). Clear it before trimming.
+    if (log_->currentRow() >= MAX_LOG_ROWS) log_->setCurrentIndex(QModelIndex());
     while (log_->rowCount() > MAX_LOG_ROWS) log_->removeRow(log_->rowCount() - 1);
-
-    s.set_monitor(monitoring_->isChecked());  // a restarted station's too
-    monitor_->add(s.take_dumps());
+    if (!at_top) {
+        // Keep the rows the user scrolled to stationary in the viewport; doItemsLayout()
+        // updates bar->maximum() synchronously when the table grew.
+        log_->doItemsLayout();
+        const int delta = log_->verticalScrollMode() == QAbstractItemView::ScrollPerPixel
+                              ? added_px
+                              : static_cast<int>(bursts.size());
+        bar->setValue(std::min(old_value + delta, bar->maximum()));
+    }
 }
 
 void MainWindow::open_monitor() {
