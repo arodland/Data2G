@@ -205,6 +205,7 @@ private:
     std::optional<Frame> repeated_frame(RxBurst& rx, double now);  // one that failed, combined with the failed ones before it
     double repeat_at = -1e300;  // the last failed connect frame kept for combining
     void on_session_frame(const Frame& f, double now);
+    void refine_measured(RxBurst& rx);
     void flush_writes();
 };
 

@@ -67,3 +67,43 @@ def test_f108_from_another_band_is_a_db_lower_on_steady_noise_only():
     assert P.fm_outcome(t - shift + 1.0, name, "f55", 0.0) == pytest.approx(0.9)
     assert P.fm_outcome(mobile - shift, name, "f55", 2.0) == pytest.approx(0.9)
     assert P.fm_outcome(t, name, "f108", 0.0) == pytest.approx(0.9)  # its own band's reading: as is
+
+
+def test_fm_data_mer_drops_distorted_and_rolled_off_f108_but_keeps_healthy_flat():
+    """Issue #290: on FM flat f108, healthy CNR 32 still rates f108-256l-r87 >= 0.9,
+    while TX soft-clipping or low-frequency rolloff drops it well below 0.5."""
+    from scipy import signal
+
+    spec = config.SUBMODES["f108-256l-r87"]
+    rng = np.random.default_rng(11)
+    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(8)]
+    x = modem.modulate(sent, spec, tx_path="flat")
+    pad = np.zeros(config.FS // 2)
+
+    def eval_tx(tx_wave):
+        y = np.concatenate([pad, tx_wave, pad])
+        ch = fmchannel.FmChannel("static", "flat", 32.0, seed=5, duration_s=len(y) / config.FS + 1, drive_dev_hz=2000.0)
+        r = modem.receive(ch.apply(y))
+        m0 = PHY.measure(r)
+        rx = PHY.ModemRx(r, {}, dd_budget=0.0)
+        for s in range(r["n_cw"]):
+            rx.converged(s)
+        m1 = rx.measure_data(m0) or m0
+        return m0, m1, P.predict_outcome(m1, "f108", 2.5, 6.0)
+
+    _, _, p_ok = eval_tx(x)
+    assert p_ok["f108-256l-r87"][0] >= 0.9
+
+    # TX peak clipping: low-PAPR pilots (~1.4x RMS) stay >29 dB, data symbols clip
+    rms = float(np.sqrt(np.mean(x[np.abs(x) > 0] ** 2)))
+    m0_c, m1_c, p_clip = eval_tx(np.clip(x, -2.0 * rms, 2.0 * rms))
+    assert m0_c["snr_est"] > 29.0
+    assert m1_c["mer_db"] < m0_c["snr_est"] - 3.0
+    assert p_clip["f108-256l-r87"][0] < 0.4
+
+    # Severe LF rolloff below 1.2 kHz: pilot snr_est stays high, MIESM drops f108-256l-r87
+    sos = signal.butter(4, 1200.0, "highpass", fs=config.FS, output="sos")
+    m0_l, _, p_lfr = eval_tx(signal.sosfilt(sos, x))
+    assert m0_l["snr_est"] > 28.0
+    assert p_lfr["f108-256l-r87"][0] < 0.4
+    assert p_lfr["f108-64l-r75"][0] > 0.8

@@ -88,6 +88,14 @@ public:
     void observe(const Measured& m, const std::string& submode, double now) override {
         obj.attr("observe")(to_dict(m), submode, now);
     }
+    std::optional<Measured> last_measured() const override {
+        auto m = py::getattr(obj, "measured", py::none());
+        if (m.is_none() || !py::isinstance<py::dict>(m) || !m.contains("snr_est")) return std::nullopt;
+        return measured(m.cast<py::dict>());
+    }
+    void update_measured(const Measured& m) override {
+        if (overrides("update_measured")) obj.attr("update_measured")(to_dict(m));
+    }
     // the engine's energy readings and the reply it waits for (carrier hold, missed energy): without these a
     // C++ Engine driving a Python policy (tools/with_native.py) never fed the shifter's energy inputs
     void observe_energy(double snr_db, double now) override {
@@ -148,6 +156,12 @@ public:
     int n_ctl_slots() const override { return py::getattr(obj, "n_ctl_slots", py::int_(0)).cast<int>(); }
     // link.py asks getattr(rx, "nod", False)
     bool is_nod() const override { return py::getattr(obj, "nod", py::bool_(false)).cast<bool>(); }
+    std::optional<Measured> measure_data(const Measured& m) override {
+        if (!py::hasattr(obj, "measure_data")) return std::nullopt;
+        auto r = obj.attr("measure_data")(to_dict(m));
+        if (r.is_none()) return std::nullopt;
+        return measured(r.cast<py::dict>());
+    }
 };
 
 class PyRng : public Rng {

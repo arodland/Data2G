@@ -250,11 +250,17 @@ void Session::on_cw(double now) {
     if (!master()) quiet_from = std::max(quiet_from, now);
 }
 
+void Session::refine_measured(RxBurst& rx) {
+    if (const auto m = policy->last_measured())
+        if (const auto upd = rx.measure_data(*m)) policy->update_measured(*upd);
+}
+
 void Session::on_rx(RxBurst& rx, double now) {
     if (station) station->now = now;
     auto f = session_frame(rx);
     if (!f) f = repeated_frame(rx, now);
     if (f) {
+        refine_measured(rx);
         on_session_frame(*f, now);
         return;
     }

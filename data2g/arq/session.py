@@ -329,6 +329,7 @@ class Session:
             self.station.now = now
         ctl = self._session_frame(rx) or self._repeated_frame(rx, now)
         if ctl is not None:
+            self._refine_measured(rx)
             self._on_session_frame(ctl, now)
             return
         st = self.station
@@ -396,6 +397,13 @@ class Session:
 
     def _queue(self, burst: B.TxBurst, when: float):
         self._out, self._due = burst, when
+
+    def _refine_measured(self, rx: B.RxBurst):
+        """Post-decode data-aided MER update before session-frame decisions (weak_path/build)."""
+        if self.policy.measured is not None and hasattr(rx, "measure_data"):
+            upd = rx.measure_data(self.policy.measured)
+            if upd is not None:
+                self.policy.update_measured(upd)
 
     def _heard(self, now: float):
         self._last_heard = now

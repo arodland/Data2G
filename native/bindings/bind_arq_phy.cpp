@@ -206,9 +206,22 @@ public:
     py::object decode_repeat(int slot, const py::handle& mask, const py::object& key) {
         py::object held = store_.attr("get")(key);
         if (!held.is_none() && held.cast<py::tuple>()[2].cast<std::string>() != rx_->submode()) store_.attr("pop")(key);
+        const bool had = rx_->has_coded(slot);
         py::object got = decode(slot, mask, 0, key);
-        if (got.is_none() || !rx_->own_score(slot, mask_of(mask), bytes_of(got))) return py::none();
+        if (got.is_none() || !rx_->own_score(slot, mask_of(mask), bytes_of(got))) {
+            if (!had) rx_->erase_coded(slot);
+            return py::none();
+        }
         return got;
+    }
+    py::object measure_data(const py::dict& md) {
+        const auto m = measured(md);
+        std::optional<Measured> out;
+        {
+            py::gil_scoped_release nogil;
+            out = rx_->measure_data(m);
+        }
+        return out ? py::object(to_dict(*out)) : py::none();
     }
     py::object decode_known(int slot, const py::handle& mask, const py::object& tmpl, const py::object& tmask, bool pair) {
         const MaskId m = mask_of(mask);
@@ -348,6 +361,22 @@ void bind_arq_phy(py::module_& m) {
         return soft_py(h, *soft_bits(h));
     });
     p.def("measure", [](const py::dict& r) { return to_dict(measure(heard_of(r))); });
+    p.def("data_mer", [](const py::dict& r, const py::dict& coded_bits, const py::dict& md) {
+        const auto h = heard_of(r);
+        if (!h.ofdm) throw py::value_error("data_mer: OFDM burst required");
+        std::map<int, std::vector<std::uint8_t>> cb;
+        for (const auto& [k, v] : coded_bits) {
+            const auto a = v.cast<In<std::uint8_t>>();
+            cb[k.cast<int>()] = std::vector<std::uint8_t>(a.data(), a.data() + a.size());
+        }
+        const auto m = measured(md);
+        Measured out;
+        {
+            py::gil_scoped_release nogil;
+            out = data_mer(*h.ofdm, cb, m);
+        }
+        return to_dict(out);
+    });
     py::class_<PyModemRx>(p, "ModemRx")
         .def(py::init<py::dict, py::object, std::optional<double>, bool, py::object>(), py::arg("r"), py::arg("store"),
              py::arg("dd_budget") = py::none(), py::arg("dd") = dd_default(), py::arg("clock") = py::none())
@@ -360,6 +389,7 @@ void bind_arq_phy(py::module_& m) {
         .def("decode_repeat", &PyModemRx::decode_repeat, py::arg("slot"), py::arg("mask_id"), py::arg("key"))
         .def("decode_known", &PyModemRx::decode_known, py::arg("slot"), py::arg("mask_id"), py::arg("template"),
              py::arg("tmask"), py::arg("pair") = false)
+        .def("measure_data", &PyModemRx::measure_data)
         .def_property_readonly("n_ctl_slots", &PyModemRx::n_ctl_slots)
         .def("forget", &PyModemRx::forget)
         .def_property_readonly("submode", &PyModemRx::submode)
