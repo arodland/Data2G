@@ -294,7 +294,7 @@ class Session:
                 ack = self.policy.airtime(burst.submode, len(burst.slots)) or 0.0
                 if self._tries == 0:
                     self._disc_from = now - ack
-                self._disc_last = not self._disc_retry_fits(now, ack, len(burst.slots))
+                self._disc_last = not self._disc_retry_fits(now, ack, burst)
                 if not self._disc_last:
                     # DISC_ACK uses this DISC's mode and slot count. Even if its
                     # header is lost, a retry must not key over the whole reply.
@@ -310,13 +310,16 @@ class Session:
             self._wake_wait = (self.peer_turn() + REPLY_START_S + WAKE_GUARD_S
                                + self.rng.uniform(0, WAKE_JITTER_S * 2 ** self._wakes))
 
-    def _disc_retry_fits(self, end: float, ack: float, n_cw: int) -> bool:
-        """Whether another DISC try follows the one that ended at `end`: tries
-        left, and its reply window ends within DISC_BUDGET_S of the first try
-        (the reply to this one, `ack` s, waited out first)."""
+    def _disc_retry_fits(self, end: float, ack: float, burst: B.TxBurst) -> bool:
+        """Whether another DISC try follows `burst`, which ended at `end`:
+        tries left, and the retry's reply window ends within DISC_BUDGET_S of
+        the first try (the reply to this one, `ack` s, waited out first). A
+        retry after a robust try stays in its mode; else it takes the
+        policy's connect_mode for its try."""
         if self._tries + 1 >= DISC_TRIES:
             return False
-        nxt = self.policy.airtime(self.policy.connect_mode(self.cap, self._tries + 1), n_cw) or 0.0
+        mode = burst.submode if self.policy.robust(burst.submode) else self.policy.connect_mode(self.cap, self._tries + 1)
+        nxt = self.policy.airtime(mode, len(burst.slots)) or 0.0
         window = self.peer_turn() + REPLY_START_S
         return end + window + ack + nxt + window <= self._disc_from + DISC_BUDGET_S
 

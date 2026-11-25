@@ -131,7 +131,7 @@ public:
     bool want_disc = false, sent_disc_ack = false;
     double disc_from = 0;    // when the first try of this DISC was keyed (disc_budget_s)
     bool disc_last = false;  // the DISC on air is the last try: no retry follows it
-    bool disc_retry_fits(double end, double ack, int n_cw) const;
+    bool disc_retry_fits(double end, double ack, const TxBurst& burst) const;
     std::string disc_why = "CLIENT";  // who wanted the DISC: CLIENT or IDLE
     Bytes pending_write;
     double now_ = 0, stats_since = 0, connected_at = 0;

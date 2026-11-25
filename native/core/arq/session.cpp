@@ -227,7 +227,7 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
             const int n_cw = static_cast<int>(burst->slots.size());
             const double ack = policy->airtime(burst->submode, n_cw, false);
             if (tries == 0) disc_from = now - ack;
-            disc_last = !disc_retry_fits(now, ack, n_cw);
+            disc_last = !disc_retry_fits(now, ack, *burst);
             // DISC_ACK uses this DISC's mode and slot count. Even if its header is lost, a retry must not
             // key over the whole reply; before no retry, a missed header leaves nothing to decode.
             if (!disc_last) wait += ack;
@@ -242,11 +242,13 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     }
 }
 
-// Whether another DISC try follows the one that ended at `end`: tries left, and its reply window ends
-// within disc_budget_s of the first try, the reply to this one (`ack` s) waited out first (session.py).
-bool Session::disc_retry_fits(double end, double ack, int n_cw) const {
+// Whether another DISC try follows `burst`, which ended at `end`: tries left, and the retry's reply window
+// ends within disc_budget_s of the first try, the reply to this one (`ack` s) waited out first. A retry after
+// a robust try stays in its mode; else it takes connect_mode for its try (session.py).
+bool Session::disc_retry_fits(double end, double ack, const TxBurst& burst) const {
     if (tries + 1 >= tune.disc_tries) return false;
-    const double next = policy->airtime(policy->connect_mode(cap, tries + 1, false), n_cw, false);
+    const std::string mode = policy->robust(burst.submode) ? burst.submode : policy->connect_mode(cap, tries + 1, false);
+    const double next = policy->airtime(mode, static_cast<int>(burst.slots.size()), false);
     const double window = peer_turn() + tune.reply_start_s;
     return end + window + ack + next + window <= disc_from + tune.disc_budget_s;
 }
