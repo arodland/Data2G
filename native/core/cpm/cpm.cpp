@@ -329,6 +329,8 @@ CoarseTrack::CoarseTrack(const Grid& g, double reach_hz)
 
 void CoarseTrack::feed(std::span<const double> buf, std::int64_t off) {
     const std::int64_t T = g_->T, end = off + static_cast<std::int64_t>(buf.size());
+    std::erase_if(fine_memo, [&](const FineMemo& m) { return m.s < off + T; });  // (fine reaches T/8 before)
+    std::erase_if(header_memo, [&](const HeaderMemo& m) { return m.s < off; });
     const std::size_t w = 4 * (g_->m + 2 * extra);
     for (int ph = 0; ph < 4; ++ph) {
         auto& s = s_[ph];
@@ -420,6 +422,15 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         }
     }
     if (fine && best.score >= floor) {  // timing to T/32, CFO to R/16
+        // the fine search's samples: [best.start - T/8, best.start + span T + T/8]
+        const bool whole = best.start + floor_div(-T, 8) >= 0 && best.start + T / 8 + span * T <= len;
+        if (track && whole) {
+            const std::int64_t s_abs = x0 + best.start;
+            for (const auto& m : track->fine_memo)
+                if (m.s == s_abs && m.cfo == best.cfo && m.front_only == front_only && m.mid == mid)
+                    return {best.score, m.fine.start - x0, m.fine.cfo};
+        }
+        const Detection coarse = best;
         double top = 0;
         std::int64_t s_best = 0;
         double c_best = 0;
@@ -460,6 +471,8 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         }
         best.start = s_best;
         best.cfo = c_best;
+        if (track && whole)
+            track->fine_memo.push_back({x0 + coarse.start, coarse.cfo, front_only, mid, {best.score, x0 + best.start, best.cfo}});
     }
     return best;
 }
@@ -766,7 +779,15 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     if (d.start + hdr_span(g, 1) > len) return std::nullopt;  // its header copy is still arriving
     if (d.start < 0) return std::nullopt;  // its front is cut off
     if (threshold) return make_lock(g, d.start, d.cfo, d.score, read_header(g, x, d.start, d.cfo, 1), 1);
-    const auto [h, ok] = lock_header(g, x, d.start, d.cfo, 1);
+    std::optional<std::pair<Header, bool>> got;
+    if (track)
+        for (const auto& m : track->header_memo)
+            if (m.s == x0 + d.start && m.cfo == d.cfo) got = {m.h, m.ok};
+    if (!got) {
+        got = lock_header(g, x, d.start, d.cfo, 1);
+        if (track) track->header_memo.push_back({x0 + d.start, d.cfo, got->first, got->second});
+    }
+    const auto [h, ok] = *got;
     if (ok) return make_lock(g, d.start, d.cfo, d.score, h, 1);
     if (h.front < g.wait_llr) return std::nullopt;  // noise, or a burst's data or a later sync block, its front missed
     // a front, its first header copy faded: both copies, once the second is in
