@@ -61,6 +61,7 @@ struct Args {
     int rx_stall_ms = 0;   // testing: the receive loop sleeps this long after every block (a busy machine)
     bool realtime = true;  // real-time scheduling for the audio and transmit threads, where available
     bool live_constellation = true;  // fill the constellation plot in as a burst arrives, once a front end polls it
+    bool busy_sense = true;          // arq::Engine::set_sense: detect ongoing Data2G transmissions without a header
     std::string audio_io;  // "pipe:IN,OUT"; empty: the sound card
     bool tci = false;      // the radio's audio, PTT and dial over TCI (tci_host), in place of the sound card and Hamlib
     std::string tci_host = "localhost:50001";

@@ -637,6 +637,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 if (auto c = primed()) p = Pending{*c};
             if (!p) {
                 if (sense) sense_on_air();
+                else present_ = false;
                 // (a waiting candidate's start is within it; and the expected window, while queued)
                 trim(expected_ ? std::max(hold_, off_ + len() - expected_->lo) : hold_);
                 break;

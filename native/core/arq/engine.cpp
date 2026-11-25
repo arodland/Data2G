@@ -729,6 +729,11 @@ Engine::Out Engine::step(std::span<const double> x) {
         return next_out(x.size());
     }
     if (gen_ != want_gen_) apply_reset();
+    const bool want_sense = sense_on_.load(std::memory_order_relaxed);
+    if (receiver_.sense != want_sense) {
+        receiver_.sense = want_sense;
+        if (!want_sense) receiver_.clear_presence();
+    }
     Block b;
     b.arrived = std::chrono::steady_clock::now();
     if (gap_) {

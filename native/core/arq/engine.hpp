@@ -275,6 +275,9 @@ public:
     // FFTs per block. Set before the engine runs.
     void set_on_preview(std::function<void(const BurstPreview&)> f) { on_preview_ = std::move(f); }
     void set_preview(bool on) { preview_on_ = on; }
+    // Mid-burst Data2G BUSY sensing (Receiver::sense). Callable from any thread; takes effect on the next block.
+    void set_sense(bool on) { sense_on_.store(on, std::memory_order_relaxed); }
+    bool sense() const { return sense_on_.load(std::memory_order_relaxed); }
 
     const std::string& call() const { return call_; }
     const std::vector<std::string>& aliases() const { return aliases_; }
@@ -524,6 +527,7 @@ private:
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
     std::atomic<bool> preview_on_{false};
+    std::atomic<bool> sense_on_{true};
     // the receiving thread's: the burst being previewed, keyed by its lock's start
     struct Preview {
         std::int64_t start = -1;

@@ -861,6 +861,8 @@ class Receiver:
                 if p is None:
                     if self.sense:
                         self._sense()
+                    else:
+                        self._present = False
                     # (a waiting candidate's start is within it; and the expected window, while queued)
                     self._trim(self.hold if self.expected is None else
                                max(self.hold, self.off + len(self.buf) - self.expected[1]))

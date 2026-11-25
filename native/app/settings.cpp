@@ -126,6 +126,7 @@ QVariantMap settings_map(const Args& a) {
     m["record_dir"] = qs(a.record_dir);
     m["decode_worker"] = a.decode_worker;
     m["live_constellation"] = a.live_constellation;
+    m["busy_sense"] = a.busy_sense;
     m["noise_rule"] = a.noise_rule;
     m["decoder_effort"] = a.decoder_effort;
     m["cw_id"] = qs(a.cw_id);
@@ -171,6 +172,7 @@ Args from_settings(const QVariantMap& m, Args a) {
     a.record_dir = str("record_dir", a.record_dir);
     a.decode_worker = m.value("decode_worker", a.decode_worker).toBool();
     a.live_constellation = m.value("live_constellation", a.live_constellation).toBool();
+    a.busy_sense = m.value("busy_sense", a.busy_sense).toBool();
     a.noise_rule = m.value("noise_rule", a.noise_rule).toDouble();
     a.decoder_effort = m.value("decoder_effort", a.decoder_effort).toInt();
     a.cw_id = str("cw_id", a.cw_id);
@@ -187,8 +189,8 @@ Args load_settings(QSettings& s, Args base) {
 }
 
 const QStringList LIVE_SETTINGS = {"mycall",          "output_volume",  "ptt_on_delay_ms", "ptt_off_delay_ms", "live_constellation",
-                                   "noise_rule",      "decoder_effort", "cw_id",           "cw_wpm",           "record",
-                                   "record_dir",      "nods",           "tx_path"};
+                                   "busy_sense",      "noise_rule",     "decoder_effort",  "cw_id",            "cw_wpm",
+                                   "record",          "record_dir",     "nods",            "tx_path"};
 
 bool needs_restart(const Args& from, const Args& to) {
     QVariantMap live = settings_map(from);

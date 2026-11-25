@@ -83,6 +83,7 @@ private:
     QLineEdit* record_dir_;
     QCheckBox* worker_;
     QCheckBox* live_;
+    QCheckBox* busy_sense_;
     QCheckBox* nods_;
     QSlider* noise_rule_;  // the noise rule's weight x 100 (NOISE_RULE_STEPS)
     QSlider* effort_;      // decoder effort, the LDPC iteration cap / 5 (EFFORT_MIN-EFFORT_MAX steps)

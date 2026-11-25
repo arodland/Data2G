@@ -172,6 +172,7 @@ public:
     bool busy() const { return pending_.has_value(); }
     bool channel_busy() const { return pending_ ? (pilots_ok_ || on_air()) : present_; }
     bool data2g_on_air() const { return pending_.has_value() || present_; }
+    void clear_presence() { present_ = false; }
     bool on_air() const;
     const std::optional<Pending>& pending() const { return pending_; }
     // The (blanked) audio fed so far: its end's stream index, and n samples from stream index
