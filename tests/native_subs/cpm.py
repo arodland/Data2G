@@ -21,8 +21,9 @@ def substitutions(native):
         g = cpm.GRIDS.get(grid)
         return g is not None and own_grid(g)
 
-    def own_spec(s):
-        return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+    def own_spec(s):  # (a wide grid's spec is Python only)
+        return (cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and s.grid not in cpm.WIDE_GRIDS
+                and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION)
 
     def header_symbols(grid, word):
         # the native one recomputes the CRC-6 from word >> 6, with its own seed
