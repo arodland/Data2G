@@ -24,6 +24,14 @@ SETHARDWARE = 0x06
 SUB_REF = 0x11
 
 
+def is_data(cmd: int, payload: bytes) -> bool:
+    """A frame to send: command 0, or VARA's 1 (AX.25 with 7-character
+    calls, VarAC's broadcasts) and 2 (unformatted: beacons, pings). Standard
+    KISS's 1 (TXDELAY) and 2 (P) carry exactly one byte, so a longer payload
+    is VARA's (issue #283)."""
+    return cmd & 0x0F == DATA or (cmd & 0x0F in (1, 2) and len(payload) > 1)
+
+
 def refs_command(payload: bytes) -> bool | None:
     """SETHARDWARE "REFS ON" / "REFS OFF" (per connection: this client gets
     REF frames) -> True / False; None for anything else. The payload splits
@@ -181,7 +189,7 @@ class _KissHandler(socketserver.BaseRequestHandler):
         try:
             while data := self.request.recv(4096):
                 for cmd, payload in dec.feed(data):
-                    if cmd & 0x0F == DATA:
+                    if is_data(cmd, payload):
                         srv.on_packet(cmd >> 4, payload, None)
                     elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
                         with srv.lock:
