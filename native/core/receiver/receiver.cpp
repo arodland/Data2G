@@ -173,11 +173,8 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     hold_ = keep_;
     for (const auto* g : grids_) hold_ = std::max(hold_, cpm::hdr_span(*g, 2) + config::FS);
     detectors_.reserve(bands_.size());
-    for (const auto b : bands_) {  // matched filter outputs kept only where find_copy reads them
-        const bool copy = std::find(config::HEADER_COPY_BANDS.begin(), config::HEADER_COPY_BANDS.end(), b) !=
-                          config::HEADER_COPY_BANDS.end();
-        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, copy)});
-    }
+    for (const auto b : bands_)  // matched filter outputs kept for find_copy and data2g_on_air
+        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, true), {}, {}});
     if (blank) blanker_.emplace();
     reset();
 }
@@ -196,6 +193,8 @@ void Receiver::reset() {
     pn_ = 0;
     fresh_ = HOP;  // search at once
     last_start_ = -1;
+    present_ = false;
+    heard_to_ = 0;
     decided_.clear();
     decided_mid_.clear();
     coarse_.clear();
@@ -205,6 +204,7 @@ void Receiver::reset() {
     for (auto& d : detectors_) {
         d.d.reset();
         d.copy_fold.reset();
+        d.presence_fold.reset();
     }
 }
 
@@ -257,6 +257,42 @@ bool Receiver::on_air() const {
     const double floor = dsp::quantile(std::vector<double>(powers_.begin(), powers_.end()), 0.05);
     const double last[] = {powers_[powers_.size() - 3], powers_[powers_.size() - 2], powers_.back()};
     return mean(last) > floor * std::pow(10.0, ON_AIR_DB / 10);
+}
+
+void Receiver::sense_on_air() {
+    const int64_t start = std::max(off_, heard_to_);
+    const int64_t end = off_ + len();
+    constexpr int64_t FR = config::FRAME_SAMPLES;
+    constexpr int64_t PF = static_cast<int64_t>(modem::COPY_PAIRS) * FR;
+    for (auto& det : detectors_) {
+        const auto level = det.d.level();
+        if (!level) continue;
+        const auto c = det.d.products_from(start, FR, modem::COPY_PAIRS);
+        const auto cols = static_cast<std::size_t>(
+            std::max<int64_t>(0, std::min<int64_t>(static_cast<int64_t>(c.cols), end - c.start - config::M + 1 - PF)));
+        const auto [t0, m] = modem::presence_window(cols, static_cast<int64_t>(PRESENCE_S * config::FS));
+        if (m < modem::PRESENCE_MIN_M) continue;
+        const auto k = det.d.kept_products(FR, modem::COPY_PAIRS);
+        const int64_t lo_f = c.start + t0;
+        const auto& fold = det.presence_fold.fold(k.rows, k.cols, k.start, lo_f, lo_f + m * FR);
+        const auto [pk, ct] = modem::fold_presence(fold, *level, m);
+        if (modem::presence_verdict(pk, ct, m) &&
+            modem::fold_verify(std::span<const double>(buf_).subspan(static_cast<std::size_t>(lo_f - off_)), det.band,
+                               fold, static_cast<int>(lo_f % FR))) {
+            present_ = true;
+            return;
+        }
+    }
+    const int64_t lo = std::max(start, end - static_cast<int64_t>(CPM_PRESENCE_S * config::FS));
+    for (const auto* g : grids_) {
+        auto& tr = coarse_.at(g->name);
+        tr.feed(buf_, off_);
+        if (tr.present(lo, end)) {
+            present_ = true;
+            return;
+        }
+    }
+    present_ = false;
 }
 
 int64_t Receiver::decided(std::string_view key) const {
@@ -471,6 +507,7 @@ bool Receiver::supersede(std::vector<Item>& out, bool whole) {
         out.push_back(BurstEvent{p, std::nullopt, std::vector<double>(buf_.begin() + a, buf_.begin() + std::max(a, b))});
     }
     pending_ = q;
+    present_ = false;
     pilots_ok_ = q->is_cpm() || q->copy() || q->score() >= SUSPECT_SCORE;
     confirmed_ = false;
     dark_ = 0;
@@ -578,6 +615,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 std::vector<double> sq(tail.size());
                 for (std::size_t i = 0; i < tail.size(); ++i) sq[i] = tail[i] * tail[i];
                 if (std::sqrt(mean(sq)) < SILENCE_RMS) {
+                    present_ = false;
                     trim(keep_);
                     for (auto& d : detectors_) d.d.restart_at(off_ + len());  // no noise level in silence: skip it
                     break;
@@ -598,6 +636,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (!p && expected_)
                 if (auto c = primed()) p = Pending{*c};
             if (!p) {
+                if (sense) sense_on_air();
                 // (a waiting candidate's start is within it; and the expected window, while queued)
                 trim(expected_ ? std::max(hold_, off_ + len() - expected_->lo) : hold_);
                 break;
@@ -606,6 +645,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             if (p->start() + off_ <= last_start_) break;  // the suspect burst just handled, still in the kept window
             p->shift(off_);
             pending_ = p;
+            present_ = false;
             // BUSY at once on a clear header (or a copy lock: its pilots
             // passed already); a suspect one waits for its pilots
             pilots_ok_ = p->is_cpm() || p->copy() || p->score() >= SUSPECT_SCORE;
@@ -642,6 +682,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
             req.stream = std::move(stream_);
             out.push_back(std::move(req));
             last_start_ = p.start();
+            heard_to_ = p.end();
             // a CPM burst has no lead-out silence: with the sender's clock fast,
             // the next back-to-back burst's front begins before this one's
             // computed end (receiver.Receiver.feed)
@@ -657,6 +698,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
         req.audio_hi = s1 - s0;
         out.push_back(std::move(req));
         last_start_ = p.start();
+        heard_to_ = p.end();
         // a better header inside this burst's span (it was a false lock, and
         // the real one began before it ended) is next, not trimmed away
         if (!confirmed_ && supersede(out, true)) {

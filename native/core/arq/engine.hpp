@@ -375,6 +375,7 @@ protected:
     }
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
+    virtual bool receiver_data2g_on_air() { return receiver_.data2g_on_air(); }
     virtual void receiver_reset() { receiver_.reset(); }
     virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) {
         receiver_.expect(grids, lo, hi, cfo);
@@ -390,6 +391,7 @@ private:
         std::vector<double> x;
         std::vector<receiver::Receiver::Item> items;
         bool busy = false;
+        bool on_air = false;  // receiver_.data2g_on_air() (a locked or headerless Data2G burst on air)
         bool cw = false;  // a CW ID heard (cwid::CwSense) with no burst locked
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block

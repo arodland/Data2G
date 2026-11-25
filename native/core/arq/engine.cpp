@@ -348,6 +348,7 @@ Engine::Engine(std::string call, EngineConfig cfg, EngineHooks hooks)
       receiver_(accept_, all_grids()),
       ptt_delay_(static_cast<std::int64_t>(cfg_.ptt_delay_s * config::FS)) {
     if (!cfg_.record_dir.empty()) rec_.emplace(cfg_.record_dir, call_, cfg_.record_async);
+    receiver_.sense = true;  // data2g_on_air: BUSY (channel_busy) and the KISS hold (kiss_burst)
     hand::slot_ms();  // a bad DATA2G_HAND_SLOT_MS throws here, not in a round
     // CPM bursts decode as they arrive (cpm::Stream): refine, then each data slot's pass. The same results as
     // after the burst; DATA2G_CPM_STREAM=0 (read here) turns it off.
@@ -765,8 +766,9 @@ Engine::Out Engine::step(std::span<const double> x) {
     }
     b.rx_end = receiver_.stream_end();
     b.busy = receiver_busy();
+    b.on_air = receiver_data2g_on_air();
     busy_now_ = b.busy;
-    channel_busy_now_ = receiver_channel_busy() || b.cw;
+    channel_busy_now_ = (!transmitting_ && receiver_channel_busy()) || b.cw;
     if (!cfg_.worker) {
         run_posted();
         Done d = process_safe(b);
@@ -897,7 +899,7 @@ Engine::Done Engine::process(Block& b) {
             }
         }
         if (bursts.empty() && cfg_.kiss && free && (idle() || session_->idle_connected())) {  // KISS between ARQ sessions, or while one is idle
-            if (auto kb = kiss_burst(k, busy); !kb.empty()) {
+            if (auto kb = kiss_burst(k, busy || (fresh && b.on_air)); !kb.empty()) {
                 main = kb.back();
                 bursts = cw_ahead(kb, t);
             }

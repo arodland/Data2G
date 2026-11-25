@@ -375,3 +375,35 @@ def test_fold_track_matches(native):
     a_py, a_n = modem.FoldTrack(), native.modem.FoldTrack()
     for a, lo, hi in steps:
         np.testing.assert_array_equal(a_n.fold(D[:, a:], a, lo, hi), a_py.fold(D[:, a:], a, lo, hi))
+
+
+def test_presence_matches(native, py):
+    """OFDM presence helpers (presence_window, fold_presence, presence_verdict,
+    pilot_presence, fold_verify, pilot_present) match Python across bursts,
+    tones and noise."""
+    from data2g.waveform import ofdm, sync
+
+    n = 3 * config.FS
+    win = int(1.75 * config.FS)
+    rng = np.random.default_rng(19)
+    sigs = [
+        ("w", _burst("qpsk-r1/2", 8, snr=-3.0, preset="mpp")[2 * config.FS:2 * config.FS + n]),
+        ("w", rng.normal(size=n)),
+        ("w", np.sin(2 * np.pi * 1510.0 * np.arange(n) / config.FS) + rng.normal(size=n)),
+        ("n10", _burst("n10-qpsk-r1/2", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]),
+    ]
+    if "n4-qpsk-r1/3" in SUBMODES:
+        sigs.append(("n10", _burst("n4-qpsk-r1/3", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]))
+    for band, y in sigs:
+        C = sync.repeat_corrs(dsp.to_baseband(y), sync.unit_template(ofdm.band(band)), list(sync.cfo_grid()))
+        level = sync.noise_level(C)
+        D = sync.pair_products(C, config.FRAME_SAMPLES, modem.COPY_PAIRS)
+        assert native.modem.presence_window(D.shape[1], win) == py.presence_window(D.shape[1], win)
+        t0, m = py.presence_window(D.shape[1], win)
+        fold = py._pilot_fold(D, t0, m)
+        close(native.modem.fold_presence(fold, level, m), py.fold_presence(fold, level, m), CORR_TOL)
+        close(native.modem.pilot_presence(D, level, win), py.pilot_presence(D, level, win), CORR_TOL)
+        pk, ct = py.fold_presence(fold, level, m)
+        assert native.modem.presence_verdict(pk, ct, m) == py.presence_verdict(pk, ct, m)
+        assert native.modem.fold_verify(y[t0:], band, fold) == py.fold_verify(y[t0:], band, fold)
+        assert native.modem.pilot_present(D, level, win, y, band) == py.pilot_present(D, level, win, y, band)

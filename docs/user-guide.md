@@ -481,7 +481,7 @@ The square plot beside the waterfall shows the last burst as the demodulator saw
 
 ### BUSY and PTT indicators
 
-- **BUSY** lights amber while Data2G hears a signal on the frequency. Data2G holds back new calls and broadcasts while it is lit, so that it doesn't transmit over someone. Connected applications see it too, and many refuse to start a call while the channel is busy.
+- **BUSY** lights amber while Data2G hears a signal on the frequency, including a Data2G transmission whose start it missed. Data2G holds back new calls and broadcasts while it is lit, so that it doesn't transmit over someone. Connected applications see it too, and many refuse to start a call while the channel is busy.
 - **PTT** lights red while Data2G is transmitting.
 
 ### Buttons

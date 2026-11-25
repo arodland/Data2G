@@ -380,6 +380,23 @@ void bind_modem(py::module_& m) {
                               std::isnan(peak) ? py::object(py::none()) : py::object(py::float_(peak)));
     }, py::arg("x"), py::arg("band"), py::arg("accept") = py::none(), py::arg("C") = py::none(),
        py::arg("level") = py::none(), py::arg("D") = py::none(), py::arg("fold") = py::none());
+    d.def("presence_window", [](std::size_t dcols, std::int64_t window) { return mo::presence_window(dcols, window); });
+    d.def("fold_presence", [](const In<cd>& fold, double level, int mm) { return mo::fold_presence(mat(fold), level, mm); });
+    d.def("presence_verdict", &mo::presence_verdict);
+    d.def("pilot_presence", [](const In<cd>& D, double level, std::int64_t window) {
+        const auto dm = mat(D);
+        return mo::pilot_presence(dm.row_ptrs(), dm.cols, level, window);
+    });
+    d.def("fold_verify", [](const In<double>& x, const std::string& band, const In<cd>& fold, int fold_phase0) {
+        return mo::fold_verify(view(x), band_view(band), mat(fold), fold_phase0);
+    }, py::arg("x"), py::arg("band"), py::arg("fold"), py::arg("fold_phase0") = 0);
+    d.def("pilot_present", [](const In<cd>& D, double level, std::int64_t window,
+                              const std::optional<In<double>>& x, const std::optional<std::string>& band) {
+        const auto dm = mat(D);
+        return mo::pilot_present(dm.row_ptrs(), dm.cols, level, window,
+                                 x ? view(*x) : std::span<const double>{},
+                                 band ? band_view(*band) : std::string_view{});
+    }, py::arg("D"), py::arg("level"), py::arg("window"), py::arg("x") = py::none(), py::arg("band") = py::none());
     py::class_<mo::FoldTrack>(d, "FoldTrack")
         .def(py::init<>())
         .def("reset", &mo::FoldTrack::reset)

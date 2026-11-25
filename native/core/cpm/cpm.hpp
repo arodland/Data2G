@@ -71,8 +71,17 @@ struct Detection {
     std::int64_t start;
     double cfo;
 };
+// cpm.presence / present: Receiver.data2g_on_air's CPM reading (no sync or header needed).
+inline constexpr double PRESENCE_MIN_S = 1.0;
+inline constexpr int PRESENCE_PHASES = 4;
+inline constexpr int PRESENCE_FRACS = 2;
+inline constexpr double PRESENCE_C = 20.0;
+double presence(const Grid& g, std::span<const double> x, double reach_hz = 150.0);
+bool present(const Grid& g, std::span<const double> x);
+
 // cpm.CoarseTrack: a streaming receiver's coarse detection rows of grid g as audio arrives, on the stream's
 // T/4 timing grid, so each hop's searches (find, find_mid) read them instead of transforming their windows again.
+// Also keeps raw unnormalized bin powers for q in (0, 2) from the same FFTs for presence() / present().
 class CoarseTrack {
 public:
     explicit CoarseTrack(const Grid& g, double reach_hz = 150.0);
@@ -80,12 +89,16 @@ public:
     void feed(std::span<const double> buf, std::int64_t off);
     // detect's per-phase (first symbol's sample from a, rows n x 4 nb) of the whole symbols in [a, b)
     std::vector<std::pair<std::int64_t, Mat<double>>> rows(std::int64_t a, std::int64_t b) const;
+    // presence() / present() over the whole symbols in stream samples [lo, hi)
+    double presence(std::int64_t lo, std::int64_t hi) const;
+    bool present(std::int64_t lo, std::int64_t hi) const;
     int extra;  // bins searched each side of the grid (detect's reach)
 
 private:
     const Grid* g_;
     std::array<std::optional<std::int64_t>, 4> s_{};  // per phase: the stream sample of its first row
-    std::array<std::vector<double>, 4> E_{};          // per phase: rows of 4 nb, flat
+    std::array<std::vector<double>, 4> E_{};          // per phase: rows of 4 nb, flat (shares)
+    std::array<std::vector<double>, 4> R_{};          // per phase: rows of 2 nb, flat (raw powers for q in 0, 2)
 };
 
 // mid: the mid block alone, its first sample for the start (find_mid). track: its rows for the coarse stage

@@ -455,49 +455,143 @@ def _shares(E: np.ndarray) -> np.ndarray:
     return E / (E.sum(axis=1, keepdims=True) + 1e-30)
 
 
+def _coarse_powers(g: Grid, x: np.ndarray, extra: int) -> tuple[np.ndarray, np.ndarray]:
+    """One rfft per symbol zero-padded to 4T, bins R / 4 apart: a tone at
+    f0 + k R is bin 4 (f0 / R + k) (f0 a whole number of bins), so fraction
+    q / 4 is that bin + q, what mixing by it and a T-point FFT would give
+    (|Z|^2 drops the mix's phase). -> (shares (n, 4, nb), raw powers for
+    q in (0, 2) (n, 2, nb))."""
+    T = g.T
+    nb = g.m + 2 * extra
+    n = len(x) // T
+    if n == 0:
+        return np.zeros((0, 4, nb)), np.zeros((0, 2, nb))
+    F = np.fft.rfft(x[:n * T].reshape(n, T), n=4 * T, axis=1)
+    P = F.real ** 2 + F.imag ** 2
+    bins = 4 * (round(g.f0 / g.rate) - extra + np.arange(nb))
+    raw4 = [P[:, bins + q] for q in range(4)]
+    return np.stack([_shares(r) for r in raw4], axis=1), np.stack([raw4[0], raw4[2]], axis=1)
+
+
 def coarse_rows(g: Grid, x: np.ndarray, extra: int) -> np.ndarray:
     """detect's coarse energies of x's whole symbols: (n, 4, m + 2 extra),
     [k, q] symbol k's tones from extra bins below the grid at CFO fraction
-    q / 4, as shares. One rfft per symbol zero-padded to 4T, bins R / 4
-    apart: a tone at f0 + k R is bin 4 (f0 / R + k) (f0 a whole number of
-    bins), so fraction q / 4 is that bin + q, what mixing by it and a
-    T-point FFT would give (|Z|^2 drops the mix's phase)."""
+    q / 4, as shares."""
+    return _coarse_powers(g, x, extra)[0]
+
+
+# Receiver.data2g_on_air's rule (present, scripts/presence_study.py, 2026-11-25):
+# presence at least a + b / sqrt(n) over n symbols, per grid (4800 noise
+# buffers, 2e-4/hop from PRESENCE_MIN_S to 3.0 s; non-FSK interference.PRESETS,
+# steady/fading/intermittent carriers, CW, Hands and narrow SSB passbands
+# <= 0.1%).
+PRESENCE = {"c16r25": (0.1437, 0.0758), "c8r50": (0.1014, 0.1923), "c32r62": (0.1518, 0.0)}
+PRESENCE_MIN_S = 1.0
+PRESENCE_PHASES = 4  # symbol timings presence tries, T / 4 apart (CoarseTrack's)
+PRESENCE_FRACS = 2  # CFOs within a tone spacing, R / 2 apart (CoarseTrack's q = 0, 2)
+PRESENCE_C = 20.0  # per-symbol active-noise scale compression r / (r + C)
+
+
+def _presence_from_raw(g: Grid, raws: list[np.ndarray], extra: int) -> float:
+    """Carrier- and passband-immune M-FSK presence over per-phase raw power
+    arrays (n, 2, m + 2 extra). Each bin is whitened by its temporal median
+    over the window (steady/fading carriers and static SSB filter shapes
+    flatten; M-FSK tones are active in ~1/M of symbols, so their median stays
+    at the noise floor). Per symbol, the winning bin's energy is compared to
+    the active-noise scale sum(R^2) / (2 sum(R)) of the non-adjacent other
+    bins R (for K <= M active exponential bins, E[top / N_t] = H_K <= H_M, so
+    band-limited noise and mid-window QRM steps read at or below white noise).
+    Transitions where the winning tone changes are summed per tone and the top
+    max(2, m // 8) tones are dropped (intermittent carriers and CW live in 1-2
+    bins)."""
+    m = g.m
+    keep = m - max(2, m // 8)
+    best = 0.0
+    for R in raws:
+        n = len(R)
+        if n < 2:
+            continue
+        rows = np.arange(n)
+        for fr in range(PRESENCE_FRACS):
+            E = R[:, fr]
+            med = np.median(E, axis=0)
+            Ew = E / np.maximum(med, 1e-12 * float(np.max(med)) + 1e-30)
+            for k in range(2 * extra + 1):
+                Ek = Ew[:, k:k + m]
+                a = Ek.argmax(axis=1)
+                top = Ek[rows, a]
+                sum1 = Ek.sum(axis=1) - top
+                sum2 = (Ek * Ek).sum(axis=1) - top * top
+                has_l = a > 0
+                has_r = a < m - 1
+                vl = np.where(has_l, Ek[rows, np.maximum(a - 1, 0)], 0.0)
+                vr = np.where(has_r, Ek[rows, np.minimum(a + 1, m - 1)], 0.0)
+                sum1 = sum1 - vl - vr
+                sum2 = sum2 - vl * vl - vr * vr
+                nt = sum2 / (2.0 * sum1 + 1e-30)
+                r = top / (nt + 1e-30)
+                u = r / (r + PRESENCE_C)
+                w = np.where(a[1:] != a[:-1], np.minimum(u[1:], u[:-1]), 0.0)
+                pt = np.bincount(a[1:], weights=w, minlength=m) + np.bincount(a[:-1], weights=w, minlength=m)
+                v = float(0.5 * np.sort(pt)[:keep].sum() / (n - 1))
+                if v > best:
+                    best = v
+    return best
+
+
+def presence(g: Grid, x: np.ndarray, reach_hz: float = 150.0) -> float:
+    """Is a burst on this grid on the air in x (any part of it: no sync or
+    header needed)? -> _presence_from_raw over PRESENCE_PHASES timings and
+    PRESENCE_FRACS CFO fractions."""
     T = g.T
-    n = len(x) // T
-    if n == 0:
-        return np.zeros((0, 4, g.m + 2 * extra))
-    F = np.fft.rfft(x[:n * T].reshape(n, T), n=4 * T, axis=1)
-    P = F.real ** 2 + F.imag ** 2
-    bins = 4 * (round(g.f0 / g.rate) - extra + np.arange(g.m + 2 * extra))
-    return np.stack([_shares(P[:, bins + q]) for q in range(4)], axis=1)
+    extra = int(np.ceil(reach_hz / g.rate))
+    raws = [_coarse_powers(g, x[ph * T // PRESENCE_PHASES:], extra)[1] for ph in range(PRESENCE_PHASES)]
+    return _presence_from_raw(g, raws, extra)
+
+
+def present(g: Grid, x: np.ndarray) -> bool:
+    """presence's verdict on all of x (at least PRESENCE_MIN_S of it)."""
+    n = len(x) // g.T
+    if n < PRESENCE_MIN_S * g.rate:
+        return False
+    a, b = PRESENCE[g.name]
+    return presence(g, x) >= a + b / np.sqrt(n)
 
 
 class CoarseTrack:
     """A streaming receiver's coarse_rows of grid g as audio arrives, on the
     stream's T/4 timing grid: each hop's searches (find, find_mid) read the
     rows instead of transforming their windows again (each window holds
-    2-4 hops of audio already transformed). Detection as detect's on x,
-    its placements on the stream's grid instead of the window's."""
+    2-4 hops of audio already transformed). Also keeps raw unnormalized bin
+    powers for q in (0, 2) from the same FFTs so presence() / present() reuse
+    them at no extra FFT cost. Detection as detect's on x, its placements on
+    the stream's grid instead of the window's."""
 
     def __init__(self, g: Grid, reach_hz: float = 150.0):
         self.g, self.extra = g, int(np.ceil(reach_hz / g.rate))
+        nb = g.m + 2 * self.extra
         self.s: list[int | None] = [None] * 4  # per phase: the stream sample of its first row
-        self.E = [np.zeros((0, 4, g.m + 2 * self.extra)) for _ in range(4)]
+        self.E = [np.zeros((0, 4, nb)) for _ in range(4)]
+        self.R = [np.zeros((0, 2, nb)) for _ in range(4)]  # raw powers for q in (0, 2) (presence)
 
     def feed(self, buf: np.ndarray, off: int):
         """`buf` holds stream samples off.. (a receiver's buffer): rows for its
         new whole symbols; rows of samples it no longer holds dropped."""
         T, end = self.g.T, off + len(buf)
         for ph in range(4):
-            s, E = self.s[ph], self.E[ph]
+            s, E, R = self.s[ph], self.E[ph], self.R[ph]
             if s is None or s < off:
                 first = off + (ph * T // 4 - off) % T
-                E = E[(first - s) // T:] if s is not None else E  # the rows still in buf
+                if s is not None:
+                    drop = (first - s) // T
+                    E, R = E[drop:], R[drop:]  # the rows still in buf
                 s = first
             nxt = s + len(E) * T
             if end - nxt >= T:
-                E = np.concatenate([E, coarse_rows(self.g, buf[nxt - off:], self.extra)])
-            self.s[ph], self.E[ph] = s, E
+                e_new, r_new = _coarse_powers(self.g, buf[nxt - off:], self.extra)
+                E = np.concatenate([E, e_new])
+                R = np.concatenate([R, r_new])
+            self.s[ph], self.E[ph], self.R[ph] = s, E, R
 
     def rows(self, a: int, b: int) -> list:
         """detect's per-phase (first symbol's sample from a, rows) of the
@@ -511,6 +605,27 @@ class CoarseTrack:
             k1 = min(len(E), (b - s) // T)  # rows ending by b
             out.append((s + k0 * T - a, E[k0:max(k0, k1)]))
         return out
+
+    def presence(self, lo: int, hi: int) -> float:
+        """presence over the whole symbols in stream samples [lo, hi)."""
+        T, raws = self.g.T, []
+        for ph in range(4):
+            s, R = self.s[ph], self.R[ph]
+            if s is None:
+                continue
+            k0 = max(0, -((s - lo) // T))
+            k1 = min(len(R), (hi - s) // T)
+            if k1 - k0 >= 2:
+                raws.append(R[k0:k1])
+        return _presence_from_raw(self.g, raws, self.extra)
+
+    def present(self, lo: int, hi: int) -> bool:
+        """present()'s verdict on stream samples [lo, hi)."""
+        n = max(0, hi - lo) // self.g.T
+        if n < PRESENCE_MIN_S * self.g.rate:
+            return False
+        a, b = PRESENCE[self.g.name]
+        return self.presence(lo, hi) >= a + b / np.sqrt(n)
 
 
 def detect(g: Grid, x: np.ndarray, reach_hz: float = 150.0, fine=True, front_only: bool = False, n_sym: int = 0,
