@@ -910,6 +910,7 @@ def test_a_session_at_the_robust_floor_disconnects_in_its_robust_mode(cap, by, a
     assert {a.events[-1], b.events[-1]} == {"DISCONNECTED CLIENT", "DISCONNECTED PEER"}
 
 
+@pytest.mark.python_only("a Python robust_mode() override does not reach the native policy's choose()")
 def test_every_try_of_a_robust_disc_keeps_its_mode():
     """An unanswered DISC is retried in its own mode: ROBUST_FAST, if the
     session runs in it, is not dropped for the retries' connect_mode
