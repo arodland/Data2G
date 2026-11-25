@@ -121,9 +121,9 @@ def substitutions(native):
         full = N.ace_cells(spec, int(n_f))
         return full[:, config.NCP:], full
 
-    # pil: a scattered-pilot layout (DATA2G_PILOTS), which C++ has not got: Python
-    @guarded("_demod_frames", lambda *a, pil=None, **k: pil is None)
-    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w", slips_in=None, pil=None):
+    # pil, close_at: a scattered-pilot layout (DATA2G_PILOTS) and its copy frame, which C++ has not got: Python
+    @guarded("_demod_frames", lambda *a, pil=None, close_at=None, **k: pil is None and close_at is None)
+    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w", slips_in=None, pil=None, close_at=None):
         return N.demod_frames(z, int(p), int(n_f), int(shift), float(phi_ref), steps_in, band, slips_in)
 
     @guarded("_read_header")
