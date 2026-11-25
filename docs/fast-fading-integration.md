@@ -1,15 +1,16 @@
 # fast-fading-integration
 
-TLDR: three study branches and PR #317 merged for outside study, on master `1f12161`. Every feature keeps its
+TLDR: three study branches merged for outside study, on master `b278852` (which now includes PR #317). Every feature keeps its
 switch, and the defaults are each branch's best measured setting, not today's on-air behaviour. Python only: native
 is not ported, so native builds and `--native` tests do not match this branch with its defaults.
 
-- Base: origin/master `1f12161`, through each branch's own merge of it. Built before on `9894b63` and `95c94b1`.
+- Base: origin/master `b278852`. Built before on `9894b63` and `95c94b1`. The measurements below were taken on
+  master `1f12161` + PR #317 (merged from its head, 36492a6, before it landed; it landed unchanged), so they
+  describe this tree: what master added since is AGENTS.md and a GUI fix (#319, #320).
 - Merged heads, each as its own merge commit:
-  - `fsk-wide-bins` 00335b3 (#306)
-  - `c32r62-r23` 29279eb (#307)
+  - `fsk-wide-bins` 1e7f391 (#306)
+  - `c32r62-r23` e94ab39 (#307)
   - `scattered-pilots` 898cdcf (#308)
-  - PR #317 36492a6 (open, by finitor; merge commit 3a1d84e)
 - Only here: the three-way tone likelihood (per-tone floors, sub-window sums, leak model), the leak gate on sub-window
   sums, the defaults, one `native_subs.study_skip()` for all toggles, this file.
 - Not a release candidate. Nothing here has been on air.
@@ -34,19 +35,13 @@ is not ported, so native builds and `--native` tests do not match this branch wi
 | `DATA2G_CPM_SHARE` | `1` | `0` | c8w50's search rows are sums of c8r50's (same result either way). |
 | `DATA2G_CPM_WIDE` | off | | Studies: every wide grid's modes (c16w125 too) in `arq.modes.MODES` for fixed bursts. c16w125 is never on air. |
 
-PR #317 has no switch: it is master-bound code. It bounds a robust start's first data request to modes whose
+PR #317 (now master's) has no switch. It bounds a robust start's first data request to modes whose
 steady-channel threshold (`MODE_THRESHOLDS`' first column) is within `snr_est` + 2 dB, with that burst's control
 sent twice, until a data burst of the peer's is usable.
 
-All switches off, which is master `1f12161` + PR #317 (not plain master):
+All switches off, which is master:
 
     DATA2G_PILOTS=off DATA2G_CPM_LEAK=off DATA2G_CPM_R23=off DATA2G_CPM_ONAIR=off DATA2G_CPM_ACQ_K=off
-
-For plain master `1f12161` as well, revert the #317 merge: `git revert -m 1 3a1d84e` in a scratch checkout.
-
-When #317 lands or changes: merge master (or the PR's new head) into this branch; if it landed, the merge of the
-PR head becomes a no-op. Check that every mode the shifter can offer still has a `MODE_THRESHOLDS` row (r2/3's
-loads only while offered; the wide specs stay outside `policy.allowed()`), and rerun the awgn -15/-19/-20 cells.
 
 The defaults yield where a feature has no path:
 - FM profile (`DATA2G_PROFILE=fm`): pilots are rows, c8w50 is not on air, r2/3 is not a mode. An explicit
@@ -72,7 +67,7 @@ reduces to each branch's own result (checked by hash, below).
 
 All run from each tree's root, with the import path checked to be that tree's.
 
-- All switches off against master `1f12161` + PR #317 (a scratch merge): the CPM grids' bursts, energies, locks, soft
+- All switches off against master `1f12161` + PR #317 (a scratch merge; master `b278852` adds no code these touch): the CPM grids' bursts, energies, locks, soft
   values and DD soft values hash equal, with and without an in-grid carrier (`runs/ident.py`,
   `runs/ident_carrier.py`, `runs/softhash.py`). OFDM transmit audio, soft values, channel estimates and decodes
   equal (`scripts/sc_equal.py`: 168 arrays, 0 differ).
@@ -209,8 +204,8 @@ c8w50 (`RRWWW` retries):
 - False-lock runs were 1-2 h a source, not the 8-16 h the on-air grids passed. `COH_LOCK` is set from noise only.
 - A session version bump would be needed before any release: an older station does not hear c8w50 retries.
 
-PR #317:
-- Merged from its open head; it may change. In this loss study it is neutral; in live sessions it rescues the
+PR #317 (landed on master after this was measured, unchanged):
+- In this loss study it is neutral; in live sessions it rescues the
   weakest AWGN cell. Its 2 dB margin is the one value its author tried (0 dB slower at -16 to -14, 4 dB loses the
   rescue).
 
