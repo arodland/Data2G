@@ -200,6 +200,10 @@ def test_shifter_decisions_match(A, pure, seed):
         ref.observe(m, heard, now)
         nat.observe(m, heard, now)
         assert nat.weak_path() == ref.weak_path()
+        if step == 0 and seed % 2:  # a session started at the robust floor: its first data request is bounded
+            ref.robust_started()
+            nat.robust_started()
+        assert nat.start_bound == ref.start_bound
         e = float(nrng.uniform(-12, 30))
         ref.observe_energy(e, now)
         nat.observe_energy(e, now)

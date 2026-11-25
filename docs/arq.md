@@ -700,6 +700,11 @@ reading, and the session starts at the bottom like one made by the first try. Th
 does not decide: it takes the floor when the caller's first burst arrives in a robust
 mode. Nothing on the wire says so (`Session._robust_start`).
 
+A caller that starts there has one reading of the path, the CONNECT_ACK's. Until a data
+burst of the callee's is usable, the data mode it asks for stays within 2 dB of that
+reading (`ROBUST_START_DATA_MARGIN_DB` over the mode's steady-channel threshold; none
+that robust: the most robust there is), and it asks for the burst's control twice.
+
 A CONNECT addressed to a station is decoded in every state, so it is always
 answered: CONNECT_ACK while listening, CONNECT_NAK otherwise. The NAK is not the
 session's burst: it starts no reply timer or wake. A station with its own burst
