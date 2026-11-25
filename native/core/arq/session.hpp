@@ -115,6 +115,8 @@ public:
     TxBurstPtr out;
     TxBurstPtr nak;  // a refusal in out: not the session's burst (no reply timer, no wake)
     std::string tx_mode;  // the mode of my last burst sent (expecting)
+    std::string rx_mode;  // the mode of the peer's last burst my link took (session_mode)
+    std::optional<std::string> disc_mode;  // every try of this DISC goes in it; none: the policy's connect_mode
     // The modes my peer's next burst likely comes in while one is due (session.py's expecting, §3a).
     std::vector<std::string> expecting() const;
     // The peer's turnaround my reply timers allow: its advertised t_turn in a session, else mine (session.py).
@@ -196,6 +198,7 @@ private:
     TxBurstPtr session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode = std::nullopt);
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();
+    std::optional<std::string> session_mode() const;
     TxBurstPtr accept_burst();
     void refuse(const Connect& c, const std::string& mode, int reason, double now);
     bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
