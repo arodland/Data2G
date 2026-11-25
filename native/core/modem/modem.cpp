@@ -311,7 +311,8 @@ std::vector<int64_t> ace_cells(const Spec& spec, int n_f) {
     std::vector<int64_t> out;
     for (int f = 0; f < n_f + kc.has_value(); ++f) {
         if (kc && f == *kc) continue;
-        for (int s = 1; s < SYMS_PER_FRAME; ++s) out.push_back(f0 + static_cast<int64_t>(f * SYMS_PER_FRAME + s) * NSYM);
+        for (int s = !sc_spec(spec, n_f); s < SYMS_PER_FRAME; ++s)  // scattered pilots: the pilots among the cells
+            out.push_back(f0 + static_cast<int64_t>(f * SYMS_PER_FRAME + s) * NSYM);
     }
     return out;
 }
@@ -328,30 +329,60 @@ std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec) {
     const auto hdr = constellation::modulate(hbits, qpsk());  // (header_syms * snc)
     const int hs = sb.spec->header_syms;
     const auto kc = copy_frame(spec.sync_band, n_f);
-    Mat<cd> data = data_in;
-    if (kc) {  // the header copy: a frame of its own (data band = sync band here)
-        if (snc != nc) throw std::logic_error("header copy on a band other than its sync band");
-        Mat<cd> d2(data.rows + DATA_SYMS_PER_FRAME, nc);
-        const size_t at = static_cast<size_t>(*kc) * DATA_SYMS_PER_FRAME;
-        std::copy(data.data.begin(), data.data.begin() + static_cast<std::ptrdiff_t>(at * nc), d2.data.begin());
-        for (int s = 0; s < DATA_SYMS_PER_FRAME; ++s) {
-            const size_t src = static_cast<size_t>(s < hs ? s : s - hs);
-            std::copy(hdr.begin() + static_cast<std::ptrdiff_t>(src * snc),
-                      hdr.begin() + static_cast<std::ptrdiff_t>((src + 1) * snc), d2[at + static_cast<size_t>(s)]);
+    if (kc && snc != nc) throw std::logic_error("header copy on a band other than its sync band");
+    const bool scb = sc_band(spec.band);
+    const auto open = copy_open(b);  // (a scattered-pilot band's copy frame opens and closes on it)
+    Mat<cd> syms;
+    if (sc_spec(spec, n_f)) {
+        // each frame's pilots among its cells (sc_cells); the copy's frame: copy_open, the 4 header symbols, copy_close
+        const auto& cells = sc_cells(b.nc());
+        const size_t n_air = static_cast<size_t>(n_f + kc.has_value()), per = DATA_SYMS_PER_FRAME * nc;
+        syms = Mat<cd>(n_air * SYMS_PER_FRAME + 1, nc);
+        for (size_t a = 0, f = 0; a < n_air; ++a) {
+            cd* fr = syms[a * SYMS_PER_FRAME];
+            if (kc && a == static_cast<size_t>(*kc)) {
+                std::copy(open.begin(), open.end(), fr);
+                std::copy(hdr.begin(), hdr.begin() + static_cast<std::ptrdiff_t>(hs * snc), fr + nc);
+                std::copy(open.begin(), open.end(), fr + (SYMS_PER_FRAME - 1) * nc);
+                continue;
+            }
+            for (size_t i = 0; i < nc; ++i) fr[cells.P[i]] = b.pilot[static_cast<size_t>(cells.PK[i])];
+            const cd* d = data_in[f * DATA_SYMS_PER_FRAME];
+            for (size_t j = 0; j < per; ++j) fr[cells.Dc[j]] = d[j];
+            ++f;
         }
-        std::copy(data.data.begin() + static_cast<std::ptrdiff_t>(at * nc), data.data.end(),
-                  d2.data.begin() + static_cast<std::ptrdiff_t>((at + DATA_SYMS_PER_FRAME) * nc));
-        data = std::move(d2);
-        ++n_f;
-    }
-    Mat<cd> syms(static_cast<size_t>(n_f) * SYMS_PER_FRAME + 1, nc);
-    for (size_t r = 0; r < syms.rows; ++r) {
-        if (r % SYMS_PER_FRAME == 0) {
-            std::copy(b.pilot.begin(), b.pilot.end(), syms[r]);
-        } else {
-            const size_t f = r / SYMS_PER_FRAME, s = r % SYMS_PER_FRAME - 1;
-            std::copy(data[f * DATA_SYMS_PER_FRAME + s], data[f * DATA_SYMS_PER_FRAME + s] + nc, syms[r]);
+        std::copy(b.pilot.begin(), b.pilot.end(), syms[syms.rows - 1]);
+    } else {
+        Mat<cd> data = data_in;
+        if (kc) {  // the header copy: a frame of its own (data band = sync band here)
+            Mat<cd> d2(data.rows + DATA_SYMS_PER_FRAME, nc);
+            const size_t at = static_cast<size_t>(*kc) * DATA_SYMS_PER_FRAME;
+            std::copy(data.data.begin(), data.data.begin() + static_cast<std::ptrdiff_t>(at * nc), d2.data.begin());
+            for (int s = 0; s < DATA_SYMS_PER_FRAME; ++s) {
+                // a scattered-pilot band's copy frame ends on copy_close whatever the submode (copy_llr)
+                if (scb && s == hs) {
+                    std::copy(open.begin(), open.end(), d2[at + static_cast<size_t>(s)]);
+                    continue;
+                }
+                const size_t src = static_cast<size_t>(s < hs ? s : s - hs);
+                std::copy(hdr.begin() + static_cast<std::ptrdiff_t>(src * snc),
+                          hdr.begin() + static_cast<std::ptrdiff_t>((src + 1) * snc), d2[at + static_cast<size_t>(s)]);
+            }
+            std::copy(data.data.begin() + static_cast<std::ptrdiff_t>(at * nc), data.data.end(),
+                      d2.data.begin() + static_cast<std::ptrdiff_t>((at + DATA_SYMS_PER_FRAME) * nc));
+            data = std::move(d2);
+            ++n_f;
         }
+        syms = Mat<cd>(static_cast<size_t>(n_f) * SYMS_PER_FRAME + 1, nc);
+        for (size_t r = 0; r < syms.rows; ++r) {
+            if (r % SYMS_PER_FRAME == 0) {
+                std::copy(b.pilot.begin(), b.pilot.end(), syms[r]);
+            } else {
+                const size_t f = r / SYMS_PER_FRAME, s = r % SYMS_PER_FRAME - 1;
+                std::copy(data[f * DATA_SYMS_PER_FRAME + s], data[f * DATA_SYMS_PER_FRAME + s] + nc, syms[r]);
+            }
+        }
+        if (kc && scb) std::copy(open.begin(), open.end(), syms[static_cast<size_t>(*kc) * SYMS_PER_FRAME]);
     }
     const auto layout = header_layout(spec.sync_band);
     Mat<cd> hsyms(layout.size(), snc);
@@ -383,10 +414,34 @@ namespace {
 waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::vector<cd> dirs) {
     const auto& b = waveform::band(spec.band);
     const size_t nc = static_cast<size_t>(b.nc());
-    auto cells = std::make_shared<std::vector<int64_t>>(ace_cells(spec, static_cast<int>(data.rows / DATA_SYMS_PER_FRAME)));
+    const int n_f = static_cast<int>(data.rows / DATA_SYMS_PER_FRAME);
+    auto cells = std::make_shared<std::vector<int64_t>>(ace_cells(spec, n_f));
     auto X = std::make_shared<Mat<cd>>(data);
     auto D = std::make_shared<std::vector<cd>>(std::move(dirs));
-    return [&b, nc, cells, X, D](std::span<const double> x) {
+    auto hold = std::make_shared<std::vector<char>>();  // scattered pilots among the cells: put back on their points
+    if (sc_spec(spec, n_f)) {
+        const auto& sc = sc_cells(b.nc());
+        const size_t per = DATA_SYMS_PER_FRAME * nc, all = SYMS_PER_FRAME * nc;
+        Mat<cd> X6(static_cast<size_t>(n_f) * SYMS_PER_FRAME, nc);
+        std::vector<cd> D6(X6.data.size() * 2, 0.0);
+        hold->assign(X6.data.size(), 0);
+        for (size_t f = 0; f < static_cast<size_t>(n_f); ++f) {
+            for (size_t i = 0; i < nc; ++i) {
+                X6.data[f * all + static_cast<size_t>(sc.P[i])] = b.pilot[static_cast<size_t>(sc.PK[i])];
+                (*hold)[f * all + static_cast<size_t>(sc.P[i])] = 1;
+            }
+            for (size_t j = 0; j < per; ++j) {
+                const size_t c = f * all + static_cast<size_t>(sc.Dc[j]);
+                X6.data[c] = data.data[f * per + j];
+                D6[2 * c] = (*D)[2 * (f * per + j)];
+                D6[2 * c + 1] = (*D)[2 * (f * per + j) + 1];
+            }
+        }
+        *X = std::move(X6);
+        *D = std::move(D6);
+    }
+    const double restore = sc_flags().restore_ace;
+    return [&b, nc, cells, X, D, hold, restore](std::span<const double> x) {
         const size_t n = cells->size();
         Mat<cd> got(n, nc);
         for (size_t i = 0; i < n; ++i) {
@@ -411,7 +466,9 @@ waveform::Projector ace_projector(const Spec& spec, const Mat<cd>& data, std::ve
         std::vector<double> out(x.begin(), x.end());
         std::vector<cd> delta(nc);
         for (size_t i = 0; i < n; ++i) {
-            for (size_t k = 0; k < nc; ++k) delta[k] = proj[i * nc + k] - got[i][k];
+            for (size_t k = 0; k < nc; ++k)
+                delta[k] = !hold->empty() && (*hold)[i * nc + k] ? restore * (want[i][k] - got[i][k])
+                                                                  : proj[i * nc + k] - got[i][k];
             double* o = out.data() + (*cells)[i];
             for (size_t t = 0; t < static_cast<size_t>(NSYM); ++t) {
                 cd acc = 0.0;

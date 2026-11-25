@@ -10,6 +10,7 @@ namespace data2g::modem {
 using namespace config;
 
 bool hosts(std::string_view name) {
+    if (sc_band(name)) return true;  // frames without a pilot symbol (config.SC_BANDS): the header's own pilot
     return std::any_of(BANDS.begin(), BANDS.end(), [&](const Band& b) { return b.name != name && b.sync_band == name; });
 }
 

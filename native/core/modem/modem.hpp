@@ -16,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "equalizer/equalizer.hpp"
@@ -23,6 +24,7 @@
 #include "generated/modem.hpp"
 #include "modem/timing.hpp"
 #include "util/mat.hpp"
+#include "waveform/ofdm.hpp"
 #include "waveform/sync.hpp"
 
 namespace data2g::modem {
@@ -98,6 +100,48 @@ std::vector<std::int64_t> ace_cells(const Spec& spec, int n_f);
 // --- receive --------------------------------------------------------------
 
 double bin_phase_step(std::span<const cd> h);
+
+// --- scattered pilots (config.SC_BANDS: the DATA2G_PILOTS study flag, off by default) ----------------------------
+//
+// On a scattered-pilot band a frame's pilots are nc of its 6 nc cells, one per carrier (sc_cells), not its first
+// symbol; the header closes with a pilot of its own (timing.hpp's hosts) and a header-copy frame opens and closes on
+// conj(pilot) (copy_open). receive() estimates the channel by a joint 2-D LMMSE over the scattered pilots and the
+// whole pilot symbols (scattered.cpp). The study switches Python alone has (DATA2G_SC_BOOST_DB, _RESTORE_PLAIN,
+// _RESTORE_QPSK, _SHORT_FRAMES, _SPREAD_ALL, _COMB, _SUPPORT_PAD, _SPREAD_X, _HDR_PILOT, _MODES) make
+// config::sc_layout() throw; these are read here, with Python's defaults:
+struct ScFlags {
+    bool spread_loo = true;     // DATA2G_SC_SPREAD_LOO (modem.SC_SPREAD_LOO)
+    bool copy_coherent = true;  // DATA2G_SC_COPY_COHERENT
+    bool copy_rows = true;      // DATA2G_SC_COPY_ROWS
+    double restore_ace = 1.0;   // DATA2G_SC_RESTORE_ACE
+};
+const ScFlags& sc_flags();
+// Whether a burst of n_f data frames of `spec` carries scattered pilots (modem.sc_spec).
+bool sc_spec(const Spec& spec, int n_f);
+// A frame's (6, nc) cells, flat (modem.sc_cells): the pilots' (ascending), their carriers, the data cells' in sending
+// order, per carrier its pilot's cell.
+struct ScCells {
+    std::vector<int> P, PK, Dc, own;
+};
+const ScCells& sc_cells(int nc);
+bool sc_combs(int nc);  // the pilots are k3d2's three combs (modem._sc_combs)
+// The symbol opening and closing a scattered-pilot band's header-copy frame (modem.copy_open, copy_close).
+std::vector<cd> copy_open(const waveform::Band& b);
+// Per on-air frame (and the closing pilot) and carrier, the symbol its pilot is in (modem._sc_pil); empty off a
+// scattered-pilot band.
+Mat<int> sc_pil(std::string_view band, int n_air, std::optional<int> kc);
+// n bytes of splitmix64, state its counter (modem._cal_payload): payloads both languages make the same, for
+// _sc_cal's calibration and arq/phy.peak_db's burst on a scattered-pilot band.
+std::vector<std::uint8_t> sc_payload(int n, std::uint64_t& state);
+// What a decision-directed pass needs of a scattered-pilot burst (receive()'s "sc"), in the pilots' units.
+struct ScInfo {
+    std::vector<int> norm;  // the data frames' on-air indices
+    Mat<cd> h;              // (n_f * 5, nc): the joint estimate at the data cells, sending order
+    Mat<double> mse;
+    Mat<cd> full, ls;       // the whole pilot symbols (_sc_full), the scattered pilots' LS (n_f, nc)
+    double n0_y = 0.0;
+    int n_air = 0;
+};
 
 struct Frames {
     Mat<cd> raw;  // (n_f * 6, nc): frame f, symbol s at row f * 6 + s

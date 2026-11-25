@@ -17,4 +17,9 @@ std::size_t row(const Submode& spec);                            // its index in
 const Submode* by_index(std::string_view sync_band, int index);  // the header's index -> submode; nullptr if none
 inline int preamble_samples(const Band& b) { return PREAMBLE_CP + b.preamble_repeats * M; }
 
+// The scattered-pilots study flag (config.PILOTS, SC_LAYOUT, SC_BANDS): DATA2G_PILOTS=k3d2, gold or mix (":1/6"
+// allowed), read once. "" is off. Throws std::invalid_argument on another value, or on a profile other than HF.
+std::string_view sc_layout();
+bool sc_band(std::string_view band);  // band in config.SC_BANDS
+
 }  // namespace data2g::config
