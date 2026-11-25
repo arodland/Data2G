@@ -1151,6 +1151,9 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     if (C is not None or D is not None) and level is None:
         raise ValueError("find_copy: C or D needs its noise level")
     if comb is None and band in SC_BANDS:  # by pilot rows where some submodes keep them, then by the combs
+        if band not in HEADER_COPY_BANDS:  # no copy to find: _copy_llr reads a copy band's frame
+            find_copy.peak = 0.0
+            return None
         lock = find_copy(x, band, accept, C, level, D, fold, comb=False) if SC_MODES != "all" or SC_SHORT_FRAMES else None
         return lock or find_copy(x, band, accept, comb=True)
     b = ofdm.band(band)

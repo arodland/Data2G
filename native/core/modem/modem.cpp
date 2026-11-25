@@ -1086,6 +1086,10 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
 // or their pair products summed. ponytail: a stream's own C, D and fold are not used (Python's too)
 std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view band, const Accept* accept, double* peak) {
     constexpr int SUBBINS = 5;  // modem.SC_COPY_SUBBINS
+    if (!copies(band)) {  // no copy to find: copy_llr reads a copy band's frame
+        if (peak) *peak = 0.0;
+        return std::nullopt;
+    }
     const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     const auto z0 = waveform::to_baseband(x);

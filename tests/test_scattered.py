@@ -62,3 +62,15 @@ def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     assert modem.decode_header(modem._copy_llr(z, p0 + kc * FRAME_SAMPLES, "w", 4), "w")[2] > 0.9  # the copy
     at_header = start + BANDS["w"].preamble_samples - NSYM  # where the header's shape starts
     assert modem.decode_header(modem._copy_llr(z, at_header, "w", 4), "w")[2] < floor
+
+
+def test_find_copy_on_a_band_without_copies(monkeypatch):
+    """A scattered-pilot band whose bursts carry no header copy (n10): find_copy finds none. It read a copy band's
+    frame there and raised on a strong tone (test_native_modem's pair-products signals)."""
+    from data2g.config import FS
+
+    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS["mix"])
+    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    n = 3 * FS
+    y = np.sin(2 * np.pi * 1510.0 * np.arange(n) / FS) + np.random.default_rng(7).normal(size=n)
+    assert modem.find_copy(y, "n10") is None
