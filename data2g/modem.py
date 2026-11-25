@@ -1590,8 +1590,11 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
         # pilots' power under it)
         n0_k = np.sum(np.abs(reps - V @ np.linalg.lstsq(V, reps, rcond=None)[0]) ** 2, axis=0) / (R - 4)
         n0 = float(np.min(equalizer.per_carrier_noise(n0_k, R - 4)))
-    # (a tone's carriers out: equalizer.hot_carriers; +25 dB at 2200 Hz doubled it on w48 at 8 dB)
-    p_y = max(float(np.mean(np.abs(ls[:, ~equalizer.hot_carriers(ls)]) ** 2)) - n0 / SC_BOOST**2, 1e-12) / (1 + ratio / SC_BOOST**2)
+    # a tone's carriers out (mean power over SC_HOT_POWER x the median carrier's): +25 dB at 2200 Hz doubled it on
+    # w48 at 8 dB
+    pk = np.mean(np.abs(ls) ** 2, axis=0)
+    p_y = max(float(np.mean(np.abs(ls[:, pk <= SC_HOT_POWER * float(np.median(pk))]) ** 2)) - n0 / SC_BOOST**2, 1e-12) / (
+        1 + ratio / SC_BOOST**2)
     n0_y = (n0 + ratio * p_y) / SC_BOOST**2  # the scattered pilots': thermal + clip, their boost out
     p_sig = p_y / g**2
     est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0), p_sig=p_sig)
@@ -1701,14 +1704,18 @@ def _sc_slack(nc: int) -> int:
     return equalizer.SUPPORT_SLACK if nc >= 24 else int(round(FS / (nc * RS)))
 
 
+SC_HOT_POWER = 8.0  # _sc_estimate's p_y leaves out carriers this many times the median's power (a tone)
 # _sc_estimate's hot carriers (PR #308 review, items 5 and 6; scripts/sc_tone.py, w48-qpsk-r1/3 at 8 dB, +25 dB
 # tone, 24 bursts): passes of the joint estimate with their pilots weighed by their own noise. 0 passes (their
 # noise to the decoder alone): mpd at 2200 Hz 84/144 codewords, 1 pass 108, 2 passes 108; mpp alike within 2.
 # Excess limited to the hot carriers with no band-wide part (the review's test edit): mpd 2200 Hz told +2.4 dB
 # too little, 82/144. Neighbours of a hot carrier marked too: no change.
 SC_HOT_PASSES = 1
-# a hot carrier's pilots miss by at least this much more noise than the model's (x its noise): 0.5 and 2 the same
-SC_HOT_EXCESS = 1.0
+# a hot carrier's pilots miss by at least this much more noise than the model's (x its noise). At 1 a model's
+# own misses set it off on clean channels (sc_tone's bursts, w48 at 10 dB, 32 each: mpp 11, lowlat-d 20, mpd 16
+# flagged; at 4 none but nvis-d 11 of 36); tones decode alike at 0.5, 1, 2 and 4 (a leak carrier at 825 Hz unflagged
+# at 4: awgn's estimate -23.6 -> -18.6 dB off the tone, all decoded)
+SC_HOT_EXCESS = 4.0
 
 
 def _sc_hot(loo_k, model_k, n_f: int, nn: float) -> tuple:

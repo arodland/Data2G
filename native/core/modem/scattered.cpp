@@ -47,7 +47,8 @@ constexpr double SC_SLOW_RHO = 0.35;
 constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
 constexpr int SC_HOT_PASSES = 1;
-constexpr double SC_HOT_EXCESS = 1.0;
+constexpr double SC_HOT_EXCESS = 4.0;
+constexpr double SC_HOT_POWER = 8.0;
 
 bool env_on(const char* name) {  // Python's os.environ.get(name, "1") == "1"
     const char* v = std::getenv(name);
@@ -703,11 +704,19 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
         const auto nk = equalizer::per_carrier_noise(cubic_residual_noise(reps), R - 4);
         n0 = *std::ranges::min_element(nk);
     }
-    // the pilots' power, a tone's carriers out (equalizer::hot_carriers)
+    // the pilots' power, a tone's carriers out (mean power over SC_HOT_POWER x the median carrier's)
     double ls2 = 0.0;
     size_t n_cool = 0;
     {
-        const auto hot = equalizer::hot_carriers(ls);
+        std::vector<double> pk(nc, 0.0);
+        for (size_t f = 0; f < uf; ++f)
+            for (size_t i = 0; i < nc; ++i) pk[i] += std::norm(ls[f][i]);
+        for (double& v : pk) v /= static_cast<double>(uf);
+        std::vector<double> srt = pk;
+        std::ranges::sort(srt);
+        const double med = nc % 2 ? srt[nc / 2] : (srt[nc / 2 - 1] + srt[nc / 2]) / 2;
+        std::vector<char> hot(nc);
+        for (size_t i = 0; i < nc; ++i) hot[i] = pk[i] > SC_HOT_POWER * med;
         for (size_t f = 0; f < uf; ++f)
             for (size_t i = 0; i < nc; ++i)
                 if (!hot[i]) ls2 += std::norm(ls[f][i]), ++n_cool;
