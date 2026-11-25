@@ -13,6 +13,8 @@ def substitutions(native):
     from data2g.arq import modes
     from data2g.arq import phy as PHY
 
+    from . import sc_same
+
     P, K = native.phy, native.kisslink
     py_rx, py_tx, py_soft, py_measure = PHY.ModemRx, PHY.tx_audio, PHY.soft_bits, PHY.measure
     watched = ("decode_raw", "decode_buffer", "decode_buffer_raw", "decode_posterior", "decode_llrs", "payloads", "check", "combine", "flip",
@@ -31,7 +33,8 @@ def substitutions(native):
         __doc__ = py_rx.__doc__
 
         def __new__(cls, r, store, dd_budget=None):
-            if not own(r["spec"]) or not all(substituted(getattr(codes, f)) for f in watched):
+            if (not own(r["spec"]) or not all(substituted(getattr(codes, f)) for f in watched)
+                    or ("sc" in r and not sc_same())):
                 return py_rx(r, store, dd_budget)
             return super().__new__(cls)
 

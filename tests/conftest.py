@@ -99,9 +99,9 @@ def native():
     if module is None:
         pytest.skip(f"data2g_native not built: {why}")
     if native_subs.study_skip():
-        # a study flag (DATA2G_PILOTS) makes the Python reference differ from what
-        # C++ ports, by design: parity is master's defaults'
-        pytest.skip("a study flag is set: the Python reference is not what C++ ports")
+        # a Python-only study switch (DATA2G_PILOTS's, native_subs.SC_STUDY_ENV) makes the
+        # Python reference differ from what C++ ports, by design
+        pytest.skip("a Python-only study switch is set: the Python reference is not what C++ ports")
     return module
 
 

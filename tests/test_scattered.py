@@ -11,13 +11,18 @@ from data2g.config import SUBMODES
 LAYOUTS = {"k3d2": ("w", "w48"), "gold": ("w", "w48", "n10", "n4"), "mix": ("w", "w48", "n10", "n4")}
 
 
+def _layout(monkeypatch, layout):
+    """The layout, patched in unless DATA2G_PILOTS set it (a patched one keeps --native's calls in Python)."""
+    if modem.SC_LAYOUT != layout:
+        monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS[layout])
+        monkeypatch.setattr(modem, "SC_LAYOUT", layout)
+
+
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 @pytest.mark.parametrize("name,n_cw", [("qpsk-r1/2", 1), ("16qam-r1/2", 3), ("w48-16qam-r1/2", 4), ("n10-qpsk-r1/2", 2),
                                        ("n4-qpsk-r1/2", 1), ("n10-16qam-r1/2", 3), ("ack-1f", 1)])
-@pytest.mark.python_only("scattered pilots (DATA2G_PILOTS) are not in native")
 def test_round_trip(monkeypatch, layout, name, n_cw):
-    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS[layout])
-    monkeypatch.setattr(modem, "SC_LAYOUT", layout)
+    _layout(monkeypatch, layout)
     spec = SUBMODES[name]
     rng = np.random.default_rng(5)
     pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(n_cw)]
@@ -40,7 +45,6 @@ def test_round_trip(monkeypatch, layout, name, n_cw):
         assert est["h"].shape == r["est"]["h"].shape and np.mean(est["mse"]) < np.mean(r["est"]["mse"])
 
 
-@pytest.mark.python_only("scattered pilots")
 def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     """A scattered-pilot copy frame closes on copy_close, not the pilot: closed on the pilot it had the first
     header's own shape (the preamble's last repeat, the header, the header pilot), so a preamble hypothesis two
@@ -49,8 +53,7 @@ def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     from data2g.config import BANDS, FRAME_SAMPLES, LEADIN_SAMPLES, NSYM
     from data2g.waveform import dsp
 
-    monkeypatch.setattr(modem, "SC_BANDS", ("w", "w48", "n10", "n4"))
-    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    _layout(monkeypatch, "mix")
     spec = SUBMODES["qpsk-r1/2"]
     rng = np.random.default_rng(1)
     x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(2)], spec)
@@ -69,8 +72,7 @@ def test_find_copy_on_a_band_without_copies(monkeypatch):
     frame there and raised on a strong tone (test_native_modem's pair-products signals)."""
     from data2g.config import FS
 
-    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS["mix"])
-    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    _layout(monkeypatch, "mix")
     n = 3 * FS
     y = np.sin(2 * np.pi * 1510.0 * np.arange(n) / FS) + np.random.default_rng(7).normal(size=n)
     assert modem.find_copy(y, "n10") is None
@@ -80,8 +82,7 @@ def test_a_copy_lock_reads_its_phase_reference_off_copy_open(monkeypatch):
     """receive(copy=...) takes the timing tracker's phase reference from the copy frame's first symbol, which on a
     scattered-pilot band is copy_open: divided by the pilot instead, the reference was off by the pilots' own phases,
     and the tracker stepped the window 8 samples over a 3-codeword burst the preamble-locked receive held at 2."""
-    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS["mix"])
-    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    _layout(monkeypatch, "mix")
     spec = SUBMODES["qpsk-r1/2"]
     rng = np.random.default_rng(1)
     x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(3)], spec)

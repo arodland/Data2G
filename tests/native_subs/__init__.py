@@ -62,20 +62,43 @@ def import_native():
     return data2g_native, None
 
 
-# DATA2G_PILOTS (a study flag, Python only): C++ has today's pilot rows only, so
-# while it is set every provider that builds, receives or decodes an OFDM frame
-# stays Python (the modem, the receiver, phy's ModemRx and the engine, host and
-# TNC that run them), and so do the burst timing and the shifter (gear, arq: a
-# flagged burst's header pilot makes it 24 ms longer); codes, CPM and audio stay native.
+# DATA2G_PILOTS (the scattered-pilots study flag) is native too (native/core/modem/scattered.cpp), at its defaults.
+# Its study-only switches are not: with any of them in the environment (and the flag on) every provider that
+# builds, receives or decodes an OFDM frame stays Python (the modem, the receiver, phy's ModemRx and the engine,
+# host and TNC that run them), and so do the burst timing and the shifter (gear, arq: DATA2G_SC_HDR_PILOT=0 makes
+# a flagged burst 24 ms shorter); codes, CPM and audio stay native. (Native refuses them: config::sc_layout throws.)
 PILOTS_ENV = "DATA2G_PILOTS"
-PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}  # (gear, arq: a flagged burst is 24 ms longer)
+SC_STUDY_ENV = ("DATA2G_SC_BOOST_DB", "DATA2G_SC_RESTORE_PLAIN", "DATA2G_SC_RESTORE_QPSK", "DATA2G_SC_SHORT_FRAMES",
+                "DATA2G_SC_SPREAD_ALL", "DATA2G_SC_COMB", "DATA2G_SC_SUPPORT_PAD", "DATA2G_SC_SPREAD_X",
+                "DATA2G_SC_HDR_PILOT", "DATA2G_SC_MODES")
+PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}
 
 
 def study_skip() -> set:
     """Providers the study flags in the environment keep in Python."""
     import os
 
-    return set(PROVIDERS) - PILOTS_NATIVE if os.environ.get(PILOTS_ENV, "off") not in ("", "off") else set()
+    on = os.environ.get(PILOTS_ENV, "off") not in ("", "off")
+    return set(PROVIDERS) - PILOTS_NATIVE if on and any(v in os.environ for v in SC_STUDY_ENV) else set()
+
+
+# modem's scattered-pilot globals (and the constants its estimate reads): native has them as the process started.
+# A test or study that patches one (test_scattered's layouts, a study's SC_STRIDE or SC_PILOT_FIX) keeps that call
+# in Python; compared by identity, so a patch with an equal value falls back too.
+SC_NAMES = ("SC_BANDS", "SC_LAYOUT", "SC_STRIDE", "SC_STRIDES", "SC_PILOT_FIX", "SC_SLACK", "SC_HDR_PILOT",
+            "SC_BOOST", "SC_RESTORE_ACE", "SC_RESTORE_PLAIN", "SC_RESTORE_QPSK", "SC_MODES", "SC_SHORT_FRAMES",
+            "SC_SPREAD_ALL", "SC_SPREADS_SLOW", "SC_SPREAD_LOO", "SC_LOO_TOL", "SC_COPY_COHERENT", "SC_COPY_SUBBINS",
+            "SC_COPY_ROWS", "SC_COMB_SPREAD", "SC_FAST_HZ", "SC_SPREADS", "SC_SLOW_RHO", "SC_WIDEN", "SC_FRAMES")
+_sc0 = {}
+
+
+def sc_same() -> bool:
+    """Whether modem's scattered-pilot globals are what native has (see SC_NAMES)."""
+    from data2g import modem
+
+    if not _sc0:
+        _sc0.update({n: getattr(modem, n) for n in SC_NAMES})
+    return all(getattr(modem, n) is v for n, v in _sc0.items())
 
 
 def build(native, skip=()):
@@ -83,6 +106,7 @@ def build(native, skip=()):
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
     skip = set(skip) | study_skip()
+    sc_same()  # the unpatched globals, before any test runs
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:
