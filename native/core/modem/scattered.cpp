@@ -22,6 +22,7 @@
 #include "constellation/constellation.hpp"
 #include "util/linalg.hpp"
 #include "util/pool.hpp"
+#include "util/simd.hpp"
 #include "waveform/dsp.hpp"
 
 namespace data2g::modem {
@@ -104,8 +105,8 @@ struct Obs {
 
 // _sc_joint's cached weights for one pattern of observations about a frame
 struct Weights {
-    Mat<cd> W;               // (6 nc, n): h = W @ values
-    std::vector<double> m;   // (6 nc,): mse / p_sig
+    Mat<cd> W;                // (rows, n): h = W @ values; rows: the frame's 6 nc cells, or (pilots) its nc pilots'
+    std::vector<double> m;    // (6 nc,): mse / p_sig (not kept for pilots alone)
     std::vector<size_t> col;  // (nc,): each scattered pilot's own observation
     std::vector<double> own;  // (nc,): real(W[P, col])
     size_t bytes() const { return W.data.size() * sizeof(cd) + 64 * m.size(); }
@@ -120,61 +121,127 @@ size_t cache_bytes = 0;
 
 int quant(double v, int n) { return static_cast<int>(std::nearbyint(std::log2(std::max(v, 1e-9)) * n)); }
 
-// L^H X = Y in place (L lower, from linalg::cholesky), Y n x nrhs row-major
-void backward_solve_h(const cd* l, int n, cd* y, int nrhs) {
-    for (int k = n - 1; k >= 0; --k) {
-        cd* yk = y + static_cast<size_t>(k) * nrhs;
-        for (int i = k + 1; i < n; ++i) {
-            const cd c = std::conj(l[static_cast<size_t>(i) * n + k]);
-            const cd* yi = y + static_cast<size_t>(i) * nrhs;
-            for (int j = 0; j < nrhs; ++j) yk[j] -= c * yi[j];
+// The solves on split real and imaginary parts (row-major), so the inner loops vectorize: std::complex's
+// multiply checks for NaN and does not. a: Hermitian positive definite n x n -> its lower Cholesky factor in
+// place (the upper triangle untouched); false if not positive definite.
+DATA2G_SIMD_CLONES bool cholesky_split(double* ar, double* ai, size_t n) {
+    std::vector<double> cr(n), ci(n);  // column j of L below the diagonal, contiguous
+    for (size_t j = 0; j < n; ++j) {
+        const double d = ar[j * n + j];
+        if (!(d > 0)) return false;
+        const double ljj = std::sqrt(d), inv = 1.0 / ljj;
+        ar[j * n + j] = ljj;
+        ai[j * n + j] = 0.0;
+        for (size_t i = j + 1; i < n; ++i) {
+            cr[i] = ar[i * n + j] *= inv;
+            ci[i] = ai[i * n + j] *= inv;
         }
-        const cd inv = 1.0 / std::conj(l[static_cast<size_t>(k) * n + k]);
-        for (int j = 0; j < nrhs; ++j) yk[j] *= inv;
+        // the trailing lower triangle, row by row: a[i][k] -= L[i][j] conj(L[k][j]) (axpy form: no reduction)
+        for (size_t i = j + 1; i < n; ++i) {
+            const double xr = cr[i], xi = ci[i];
+            double* rr = ar + i * n;
+            double* ri = ai + i * n;
+            for (size_t k = j + 1; k <= i; ++k) {
+                rr[k] -= xr * cr[k] + xi * ci[k];
+                ri[k] -= xi * cr[k] - xr * ci[k];
+            }
+        }
+    }
+    return true;
+}
+
+// L Y = X, then (with back) L^H Z = Y, in place on X (n x m, split)
+DATA2G_SIMD_CLONES void tri_solves(const double* lr, const double* li, size_t n, double* xr, double* xi, size_t m, bool back) {
+    for (size_t i = 0; i < n; ++i) {
+        double* yr = xr + i * m;
+        double* yi = xi + i * m;
+        for (size_t k = 0; k < i; ++k) {
+            const double cr = lr[i * n + k], ci = li[i * n + k];
+            const double* zr = xr + k * m;
+            const double* zi = xi + k * m;
+            for (size_t c = 0; c < m; ++c) {
+                yr[c] -= cr * zr[c] - ci * zi[c];
+                yi[c] -= cr * zi[c] + ci * zr[c];
+            }
+        }
+        const double inv = 1.0 / lr[i * n + i];
+        for (size_t c = 0; c < m; ++c) yr[c] *= inv, yi[c] *= inv;
+    }
+    if (!back) return;
+    for (size_t k = n; k-- > 0;) {
+        double* yr = xr + k * m;
+        double* yi = xi + k * m;
+        for (size_t i = k + 1; i < n; ++i) {
+            const double cr = lr[i * n + k], ci = -li[i * n + k];  // conj(L[i][k])
+            const double* zr = xr + i * m;
+            const double* zi = xi + i * m;
+            for (size_t c = 0; c < m; ++c) {
+                yr[c] -= cr * zr[c] - ci * zi[c];
+                yi[c] -= cr * zi[c] + ci * zr[c];
+            }
+        }
+        const double inv = 1.0 / lr[k * n + k];
+        for (size_t c = 0; c < m; ++c) yr[c] *= inv, yi[c] *= inv;
     }
 }
 
+// pilots: the weights at the frame's scattered pilots alone (the spread search's leave-one-out needs no more)
 std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::span<const int> k, std::span<const int> kd,
                                             const std::vector<cd>& Rf, int nc, double spread,
-                                            const std::array<double, 3>& nr) {
+                                            const std::array<double, 3>& nr, bool pilots) {
     const auto& cells = sc_cells(nc);
-    const int n = static_cast<int>(rel.size()), C = SYMS_PER_FRAME * nc;
-    const size_t un = static_cast<size_t>(n), uc = static_cast<size_t>(C), unc = static_cast<size_t>(nc);
-    std::vector<cd> A(un * un), X(un * uc);
+    const size_t un = rel.size(), unc = static_cast<size_t>(nc);
+    std::vector<size_t> rows;  // the frame's cells weighed
+    if (pilots) rows.assign(cells.P.begin(), cells.P.end());
+    else for (size_t c = 0; c < static_cast<size_t>(SYMS_PER_FRAME) * unc; ++c) rows.push_back(c);
+    const size_t R = rows.size();
+    std::vector<double> Ar(un * un), Ai(un * un);
     for (size_t i = 0; i < un; ++i) {
-        for (size_t j = 0; j < un; ++j)
-            A[i * un + j] = equalizer::doppler_corr((rel[i] - rel[j]) * TSYM, spread) *
-                            Rf[static_cast<size_t>(k[i]) * unc + static_cast<size_t>(k[j])];
-        A[i * un + i] += nr[static_cast<size_t>(kd[i])];
+        for (size_t j = 0; j <= i; ++j) {  // the lower triangle: all Cholesky reads
+            const cd v = equalizer::doppler_corr((rel[i] - rel[j]) * TSYM, spread) *
+                         Rf[static_cast<size_t>(k[i]) * unc + static_cast<size_t>(k[j])];
+            Ar[i * un + j] = v.real();
+            Ai[i * un + j] = v.imag();
+        }
+        Ar[i * un + i] += nr[static_cast<size_t>(kd[i])];
     }
-    Mat<cd> Bm(uc, un);
-    for (size_t c = 0; c < uc; ++c) {
-        const size_t sym = c / unc, ck = c % unc;  // np.divmod: the cell's symbol (floor), its carrier
-        const double cs = static_cast<double>(sym);
+    // X = Bm^H (n x R): Bm[r][j] = doppler((sym_r - rel_j) Ts) Rf[k_r, k_j]
+    Mat<cd> Bm(R, un);
+    std::vector<double> Xr(un * R), Xi(un * R);
+    for (size_t r = 0; r < R; ++r) {
+        const double cs = static_cast<double>(rows[r] / unc);  // np.divmod: the cell's symbol, its carrier
+        const size_t ck = rows[r] % unc;
         for (size_t j = 0; j < un; ++j) {
-            Bm[c][j] = equalizer::doppler_corr((cs - rel[j]) * TSYM, spread) * Rf[ck * unc + static_cast<size_t>(k[j])];
-            X[j * uc + c] = std::conj(Bm[c][j]);
+            Bm[r][j] = equalizer::doppler_corr((cs - rel[j]) * TSYM, spread) * Rf[ck * unc + static_cast<size_t>(k[j])];
+            Xr[j * R + r] = Bm[r][j].real();
+            Xi[j * R + r] = -Bm[r][j].imag();
         }
     }
     // A is Hermitian positive definite (a Gaussian in time times a delay prior, plus noise): Cholesky, else LU
-    std::vector<cd> L = A;
-    if (linalg::cholesky(L.data(), n)) {
-        linalg::forward_solve(L.data(), n, X.data(), C);
-        backward_solve_h(L.data(), n, X.data(), C);
+    if (cholesky_split(Ar.data(), Ai.data(), un)) {
+        tri_solves(Ar.data(), Ai.data(), un, Xr.data(), Xi.data(), R, true);
     } else {
-        linalg::lu_solve(A.data(), n, X.data(), C);
+        std::vector<cd> A(un * un), X(un * R);
+        for (size_t i = 0; i < un; ++i)
+            for (size_t j = 0; j < un; ++j)
+                A[i * un + j] = equalizer::doppler_corr((rel[i] - rel[j]) * TSYM, spread) *
+                                Rf[static_cast<size_t>(k[i]) * unc + static_cast<size_t>(k[j])];
+        for (size_t i = 0; i < un; ++i) A[i * un + i] += nr[static_cast<size_t>(kd[i])];
+        for (size_t q = 0; q < X.size(); ++q) X[q] = std::conj(Bm.data[q % R * un + q / R]);
+        linalg::lu_solve(A.data(), static_cast<int>(un), X.data(), static_cast<int>(R));
+        for (size_t q = 0; q < X.size(); ++q) Xr[q] = X[q].real(), Xi[q] = X[q].imag();
     }
     auto w = std::make_shared<Weights>();
-    w->W = Mat<cd>(uc, un);
-    w->m.resize(uc);
-    for (size_t c = 0; c < uc; ++c) {
+    w->W = Mat<cd>(R, un);
+    if (!pilots) w->m.resize(R);
+    for (size_t r = 0; r < R; ++r) {
         double s = 0.0;
         for (size_t j = 0; j < un; ++j) {
-            const cd v = std::conj(X[j * uc + c]);
-            w->W[c][j] = v;
-            s += (v * std::conj(Bm[c][j])).real();
+            const cd v(Xr[j * R + r], -Xi[j * R + r]);  // W = X^H
+            w->W[r][j] = v;
+            s += (v * std::conj(Bm[r][j])).real();
         }
-        w->m[c] = std::max(1.0 - s, 0.0);
+        if (!pilots) w->m[r] = std::max(1.0 - s, 0.0);
     }
     for (size_t i = 0; i < unc; ++i) {
         const int p = cells.P[i], p_sym = p / nc;  // Python's c // nc
@@ -183,7 +250,7 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
             if (kd[j] == 0 && k[j] == cells.PK[i] && rel[j] == static_cast<double>(p_sym)) at = j;
         if (at == un) throw std::logic_error("_sc_joint: a frame's pilot outside its own window");
         w->col.push_back(at);
-        w->own.push_back(w->W[static_cast<size_t>(p)][at].real());
+        w->own.push_back(w->W[pilots ? i : static_cast<size_t>(p)][at].real());
     }
     return w;
 }
@@ -195,8 +262,9 @@ struct Joint {
 };
 
 // modem._sc_joint: 2-D LMMSE of the channel at every cell of `frames` (on-air indices) from the observations in reach.
+// pilots: loo and model alone (the spread search), from the weights at the pilots.
 Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, equalizer::Support support, double spread,
-            double nr_sc, double nr_full, double p_sig) {
+            double nr_sc, double nr_full, double p_sig, bool pilots = false) {
     const int nc = config::band(band).nc;
     const size_t unc = static_cast<size_t>(nc), C = static_cast<size_t>(SYMS_PER_FRAME) * unc;
     const int qs = quant(spread, 8), q1 = quant(nr_sc, 6), q2 = quant(nr_full, 6);
@@ -216,7 +284,7 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         auto& rel = rels[i];
         for (size_t j = lo[i]; j < hi[i]; ++j) rel.push_back(o.sym[j] - frames[i] * SYMS_PER_FRAME);
         auto& key = keys[i];
-        const int head[] = {support.first, support.second, slack, qs, q1, q2};
+        const int head[] = {support.first, support.second, slack, qs, q1, q2, pilots};
         key.assign(band);
         key.push_back('\0');
         key.append(reinterpret_cast<const char*>(head), sizeof head);
@@ -241,7 +309,7 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         pool::parallel_for(missing.size(), [&](size_t m) {
             const size_t i = missing[m];
             made[m] = make_weights(rels[i], std::span<const int>(o.k).subspan(lo[i], hi[i] - lo[i]),
-                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr);
+                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, pilots);
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
@@ -257,24 +325,35 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
                     if (keys[missing[m]] == keys[i]) got[i] = made[m];
     }
     Joint out;
-    out.h = Mat<cd>(F * SYMS_PER_FRAME, unc);
-    out.mse = Mat<double>(F * SYMS_PER_FRAME, unc);
+    if (!pilots) {
+        out.h = Mat<cd>(F * SYMS_PER_FRAME, unc);
+        out.mse = Mat<double>(F * SYMS_PER_FRAME, unc);
+    }
+    std::vector<cd> hp(unc);
     for (size_t i = 0; i < F; ++i) {
         const Weights& w = *got[i];
         const size_t n = hi[i] - lo[i];
         const cd* v = o.val.data() + lo[i];
-        cd* h = out.h[i * SYMS_PER_FRAME];  // the frame's 6 rows, contiguous
-        double* m = out.mse[i * SYMS_PER_FRAME];
-        for (size_t c = 0; c < C; ++c) {
+        auto dot = [&](size_t r) {
             cd s = 0.0;
-            const cd* wr = w.W[c];
+            const cd* wr = w.W[r];
             for (size_t j = 0; j < n; ++j) s += wr[j] * v[j];
-            h[c] = s;
-            m[c] = p_sig * w.m[c];
+            return s;
+        };
+        if (pilots) {
+            for (size_t p = 0; p < unc; ++p) hp[p] = dot(p);
+        } else {
+            cd* h = out.h[i * SYMS_PER_FRAME];  // the frame's 6 rows, contiguous
+            double* m = out.mse[i * SYMS_PER_FRAME];
+            for (size_t c = 0; c < C; ++c) {
+                h[c] = dot(c);
+                m[c] = p_sig * w.m[c];
+            }
+            for (size_t p = 0; p < unc; ++p) hp[p] = h[static_cast<size_t>(cells.P[p])];
         }
         for (size_t p = 0; p < unc; ++p) {
             const double own = std::min(w.own[p], 0.99);
-            out.loo += std::norm((v[w.col[p]] - h[static_cast<size_t>(cells.P[p])]) / (1 - own));
+            out.loo += std::norm((v[w.col[p]] - hp[p]) / (1 - own));
             out.model += p_sig * nr[0] / (1 - own);
         }
     }
@@ -645,7 +724,7 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
             if (loo_rule || v >= (pairs ? SC_FAST_HZ : equalizer::DEFAULT_SPREAD_HZ)) cand.push_back(v);
         std::vector<double> loo, model;
         for (double v : cand) {
-            const auto j = joint(o, norm, db, support, v, nr_sc, nr_full, p_sig);
+            const auto j = joint(o, norm, db, support, v, nr_sc, nr_full, p_sig, true);
             loo.push_back(j.loo);
             model.push_back(j.model);
         }
