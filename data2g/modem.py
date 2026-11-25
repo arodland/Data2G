@@ -1726,6 +1726,20 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
 _SC_CAL: dict = {}
 
 
+def _cal_payload(n: int, state: list) -> bytes:
+    """n bytes of splitmix64 (state[0] its counter): _sc_cal's payloads, which native (modem/scattered.cpp) makes
+    the same way; numpy's generator has no port there."""
+    out = b""
+    m = (1 << 64) - 1
+    while len(out) < n:
+        state[0] = (state[0] + 0x9E3779B97F4A7C15) & m
+        z = state[0]
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & m
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & m
+        out += (z ^ (z >> 31)).to_bytes(8, "little")
+    return out[:n]
+
+
 def _sc_cal(spec) -> tuple:
     """A submode's scattered pilots as its transmitter leaves them, measured
     once on clean bursts of its own: (their gain over the data cells', their
@@ -1739,11 +1753,12 @@ def _sc_cal(spec) -> tuple:
         _SC_CAL[key] = (1.0, spec.clip.ratio)  # while measuring
         b = ofdm.band(spec.band)
         P, PK, Dc, _ = sc_cells(b.nc)
-        rng = np.random.default_rng(0)
+        state = [0]
         num_p, den_p, num_d, den_d, parts = 0, 0, 0, 0, []
         for _ in range(2):
             n_cw = min(max(4, SC_SHORT_FRAMES // spec.frames_per_cw + 1), max_codewords(spec.sync_band))  # past the short ones
-            bits = np.stack([codes.encode(spec, rng.bytes(codes.payload_bytes(spec)), 0, index=i) for i in range(n_cw)])
+            bits = np.stack([codes.encode(spec, _cal_payload(codes.payload_bytes(spec), state), 0, index=i)
+                             for i in range(n_cw)])
             x = modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
             r = receive(np.concatenate([np.zeros(800), x, np.zeros(800)]),
                         known=dict(start=800 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=n_cw))

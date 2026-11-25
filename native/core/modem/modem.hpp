@@ -289,6 +289,8 @@ struct Received {
     std::int64_t preamble_start = 0;
     double score = 0.0;
     int frames_in = -1;  // data frames received (receive's partial: fewer than the burst's); -1: all
+    std::shared_ptr<const ScInfo> sc;  // scattered pilots (sc_spec): raw's row 0 is then each frame's own pilots'
+                                       // LS times the pilot, rows 1..5 its data cells in sending order
     int n_frames() const { return n_cw * spec->frames_per_cw; }
     bool partial() const { return frames_in >= 0 && frames_in < n_frames(); }
 };
@@ -299,6 +301,14 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
                  const Accept* accept = nullptr, std::optional<std::int64_t> head = {}, const Lock* copy = nullptr,
                  bool partial = false);
 double resolve_alias(double fine, double coarse);
+// modem.sc_refine: the decision-directed re-estimate of a scattered-pilot burst (r.sc): data cells z with inverse
+// variances w ((n_f * 5, nc) as est.h, the pilots' units) -> h, mse, the pilots' units.
+std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, const Mat<double>& w);
+// Empties the joint estimate's weights cache (modem._SC_WEIGHTS.clear()): benchmarks' cold start.
+void sc_clear_weights();
+// receive(known=...): a burst whose start, CFO, submode and length the receiver knows (data2g.bulk, _sc_cal): no
+// search, the header not read for its word. Throws SyncError past the buffer.
+Received receive_known(std::span<const double> x, std::int64_t start, double cfo, const Spec& spec, int n_cw);
 
 // var (rows, nc): n0_k (n0 if empty) per carrier + clip_ratio |h|^2.
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est);

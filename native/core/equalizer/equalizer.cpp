@@ -61,7 +61,14 @@ std::vector<cd> steering(std::span<const double> bb, int d0, int d1, int slack) 
     return B;
 }
 
-// B B^H
+double mean_sq_diff(const Mat<cd>& a, const Mat<cd>& b) {
+    double s = 0.0;
+    for (size_t i = 0; i < a.data.size(); ++i) s += sq_abs(a.data[i] - b.data[i]);
+    return s / static_cast<double>(a.data.size());
+}
+
+}  // namespace
+
 std::vector<cd> gram(std::span<const double> bb, int d0, int d1, int slack) {
     const size_t nc = bb.size();
     const auto B = steering(bb, d0, d1, slack);
@@ -77,13 +84,6 @@ std::vector<cd> gram(std::span<const double> bb, int d0, int d1, int slack) {
     return g;
 }
 
-double mean_sq_diff(const Mat<cd>& a, const Mat<cd>& b) {
-    double s = 0.0;
-    for (size_t i = 0; i < a.data.size(); ++i) s += sq_abs(a.data[i] - b.data[i]);
-    return s / static_cast<double>(a.data.size());
-}
-
-}  // namespace
 
 std::vector<double> bb(const config::Band& band) {
     std::vector<double> out(static_cast<size_t>(band.nc));

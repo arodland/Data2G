@@ -12,10 +12,12 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 #include "codes/codes.hpp"
 #include "constellation/constellation.hpp"
 #include "dsp/dsp.hpp"
+#include "modem/scattered.hpp"
 #include "waveform/dsp.hpp"
 #include "waveform/ofdm.hpp"
 
@@ -1170,6 +1172,10 @@ double resolve_alias(double fine, double coarse) {
     return fine + std::nearbyint((coarse - fine) * equalizer::FRAME_S) / equalizer::FRAME_S;
 }
 
+namespace {
+Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> z, int64_t len, bool partial, bool known);
+}  // namespace
+
 Received receive(std::span<const double> x, std::span<const std::string_view> bands, const Accept* accept,
                  std::optional<int64_t> head, const Lock* copy, bool partial) {
     const auto z0 = waveform::to_baseband(x);
@@ -1194,6 +1200,28 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
         z = waveform::freq_correct(z0, acq.freq_offset);
         if (!partial && burst_end(hd.p0, *hd.hdr.spec, hd.hdr.n_cw) > len) throw SyncError("burst runs past the buffer");
     }
+    return receive_from(std::move(hd), std::move(acq), std::move(z), len, partial, false);
+}
+
+Received receive_known(std::span<const double> x, int64_t start, double cfo, const Spec& spec, int n_cw) {
+    const auto z0 = waveform::to_baseband(x);
+    const auto len = static_cast<int64_t>(z0.size());
+    auto z = waveform::freq_correct(z0, cfo);
+    auto hd = read_header(z, start, spec.sync_band);
+    const int v = spec.index << cw_bits(spec.sync_band) | (n_cw - 1);
+    hd.hdr.word = v << 6 | crc6(v);
+    hd.hdr.spec = &spec;
+    hd.hdr.n_cw = n_cw;
+    hd.valid = true;
+    if (burst_end(hd.p0, spec, n_cw) > len) throw SyncError("burst runs past the buffer");
+    return receive_from(std::move(hd), {start, cfo, 0.0, {}}, std::move(z), len, false, true);
+}
+
+namespace {
+
+// receive() once the header is read: hd, acq and z (the baseband corrected by acq's CFO). known: the burst's
+// timing was known (receive(known=...)): the residual CFO's alias nearest no change.
+Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> z, int64_t len, bool partial, bool known) {
     const std::string_view sband = hd.band;  // the sync band; frames are on spec.band's carriers
     const auto& b = waveform::band(sband);
     const size_t nc = static_cast<size_t>(b.nc());
@@ -1253,7 +1281,7 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db);
     const double fine = equalizer::residual_cfo(first.hp);
     const auto slips = std::move(first.slips);
-    const double cfo_res = resolve_alias(fine, coarse);
+    const double cfo_res = resolve_alias(fine, known ? 0.0 : coarse);
     z = waveform::freq_correct(z, cfo_res);
     const auto bbd = bb_of(db);
     // the window and the reported delay on the support as before the noise
@@ -1304,6 +1332,8 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
     out.frames_in = n_in;
     return out;
 }
+
+}  // namespace
 
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est) {
     Mat<double> v(h.rows, h.cols);

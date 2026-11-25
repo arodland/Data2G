@@ -65,6 +65,10 @@ struct Basis {
 };
 std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack = SUPPORT_SLACK);
 
+// B B^H, B the support's steering vectors (nc x (d1 - d0 + 2 slack + 1), B[k, j] = exp(-2j pi bb_k d_j / FS)):
+// (nc x nc) row-major. Times p_sig / that width, the LMMSE frequency prior refine uses (modem's joint estimate too).
+std::vector<cd> gram(std::span<const double> bb, int d0, int d1, int slack);
+
 struct Smoothed {
     Mat<cd> hs;
     double n0 = INF;  // inf where the residual has < 2 dimensions
