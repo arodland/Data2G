@@ -864,10 +864,11 @@ def _exchange(a, b, t, disc_by, after, drop_disc=0, horizon=900.0):
     disconnects after `after` bursts. -> [(who, mode, state after poll)]."""
     from data2g.arq import policy as G
 
-    pol, log, dropped, who = G.GearShifter(), [], 0, {"a": a, "b": b}
-    while t < horizon and not (a.state == b.state == S.CLOSED and a._out is None and b._out is None):
-        if len(log) >= after and not who[disc_by]._want_disc:
+    pol, log, dropped, who, asked = G.GearShifter(), [], 0, {"a": a, "b": b}, False
+    while t < horizon:
+        if len(log) >= after and not asked:
             who[disc_by].disconnect()
+            asked = True
         for name, me, other in (("a", a, b), ("b", b, a)):
             before = me.state
             burst = me.poll(t)
@@ -884,6 +885,8 @@ def _exchange(a, b, t, disc_by, after, drop_disc=0, horizon=900.0):
             t = end + 0.3
             break
         else:
+            if a.state == b.state == S.CLOSED:
+                break  # both closed and nothing left to send
             t = max(t + 0.01, min(x for x in (a.next_event(), b.next_event(), t + 0.5) if x is not None))
     return log
 
