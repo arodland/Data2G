@@ -384,21 +384,34 @@ def test_a_carrier_does_not_read_as_signal_in_snr_est():
 
 
 def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
-    """with_native / --native under a CPM study toggle: the soft-value ones keep
-    every provider that makes or decodes CPM soft values in Python (C++ has
-    master's metric), fsk32r62-r2/3 offered keeps all but the OFDM and audio ones."""
+    """with_native / --native under the study toggles in effect (on this branch
+    most are on by default, so native_subs reads the settings, not the
+    environment): the soft-value ones keep every provider that makes or decodes
+    CPM soft values in Python (C++ has master's metric); fsk32r62-r2/3 offered
+    or c8w50 on air keeps all but the OFDM and audio ones; scattered pilots keep
+    all but base, waveform, cpm, codes and audio."""
     import native_subs
 
-    for v in native_subs.CPM_SOFT_ENV + native_subs.CPM_MODE_ENV:
+    from data2g import config
+
+    for v in ("DATA2G_CONNECT_SEQ", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST", "DATA2G_CPM_LEAK_K",
+              "DATA2G_CPM_LEAK_Z", "DATA2G_CPM_CTL_SQ", "DATA2G_CPM_SPILL"):
         monkeypatch.delenv(v, raising=False)
+    for mod, name, off in ((cpm, "ON_AIR_WIDE", ()), (cpm, "WIDE_ON", False), (cpm, "R23", False),
+                           (cpm, "LEAK", frozenset()), (config, "SC_BANDS", ())):
+        monkeypatch.setattr(mod, name, off)
     assert native_subs.study_skip() == set()
-    monkeypatch.setenv("DATA2G_CPM_R23", "0")
-    assert native_subs.study_skip() == set()
-    monkeypatch.setenv("DATA2G_CPM_LEAK", "ctl,data,dd,ctlsq")
+    monkeypatch.setattr(cpm, "LEAK", frozenset({"ctl", "data", "dd", "ctlsq"}))
     assert native_subs.study_skip() == native_subs.CPM_SOFT_PY
-    monkeypatch.setenv("DATA2G_CPM_R23", "1")
-    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.CPM_MODE_NATIVE
+    monkeypatch.setattr(cpm, "R23", True)
+    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.WIDE_NATIVE
+    monkeypatch.setattr(cpm, "R23", False)
+    monkeypatch.setattr(cpm, "ON_AIR_WIDE", ("c8w50",))
     assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()
+    monkeypatch.setattr(cpm, "ON_AIR_WIDE", ())
+    monkeypatch.setattr(cpm, "LEAK", frozenset())
+    monkeypatch.setattr(config, "SC_BANDS", ("w", "w48", "n10", "n4"))
+    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.PILOTS_NATIVE
 
 
 def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):
