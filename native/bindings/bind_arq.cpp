@@ -160,8 +160,8 @@ void bind_arq(py::module_& m) {
     a.def("shifted", [](const py::dict& m, double shift) { return to_dict(arq::shifted(measured(m), shift)); });
     a.def("cap_hz", &arq::cap_hz);
     a.def("fallback", [](int cap) { return std::string(arq::fallback(cap)); });
-    a.def("connect_mode", [](int cap, int tries) { return std::string(arq::connect_mode(cap, tries)); },
-          py::arg("cap"), py::arg("tries") = 0);
+    a.def("connect_mode", [](int cap, int tries, bool last) { return std::string(arq::connect_mode(cap, tries, last)); },
+          py::arg("cap"), py::arg("tries") = 0, py::arg("last") = false);
     a.def("width_hz", [](const std::string& n) { return arq::width_hz(amode(n)); });
     a.def("allowed", [](int cap) {
         std::vector<std::string> out;
@@ -197,6 +197,8 @@ void bind_arq(py::module_& m) {
         .def_readwrite("n0_spreads", &Shifter::n0_spreads)
         .def_readwrite("floor_spreads", &Shifter::floor_spreads)
         .def_readwrite("last_spread", &Shifter::last_spread)
+        .def_readwrite("heard_spread", &Shifter::heard_spread)
+        .def_readwrite("start_bound", &Shifter::start_bound)
         .def_readwrite("energies", &Shifter::energies)
         .def_readwrite("snrs", &Shifter::snrs)
         .def("cpm_floor", &Shifter::cpm_floor)
@@ -257,6 +259,8 @@ void bind_arq(py::module_& m) {
             s.outcome(submode, decoded, sent, usable);
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())
         .def("gate", &Shifter::gate)
+        .def("weak_path", &Shifter::weak_path)
+        .def("robust_started", [](Shifter& s) { s.start_bound = true; })
         .def("gap", [](const Shifter& s, const py::object& st) { return s.gap(station(st)); })
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));

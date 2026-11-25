@@ -117,12 +117,48 @@ ROBUST_CONNECT = "n10-qpsk-r1/5" if PROFILE == "fm" else "fsk16r25-r1/2"  # sess
 # fsk16r25 decodes nothing even at a genie lock (25 Hz tones), and its lock
 # gets worse with SNR (#244), so polls in it stalled sessions longer the
 # stronger the signal; fsk8r50-r1/3 (400 Hz, within every cap too) locked and
-# decoded 100% there from -5 to +20 dB. Connect retries keep ROBUST_CONNECT:
-# before a session nothing is measured.
+# decoded 100% there from -5 to +20 dB. Before a session nothing is measured:
+# connect retries go in ROBUST_CONNECT first (ROBUST_CONNECT_TRIES of them,
+# their soft bits adding), then in ROBUST_FAST (connect_mode).
 # FM has no CPM modes: its robust mode stays ROBUST_CONNECT whatever the spread.
 ROBUST_FAST = ROBUST_CONNECT if PROFILE == "fm" else "fsk8r50-r1/3"
 ROBUST_FAST_SPREAD_HZ = 6.0
 ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
+# Connect retries in ROBUST_CONNECT before the ones in ROBUST_FAST. Live sessions, 8 seeds a cell
+# (scripts/stream_session), every retry in ROBUST_CONNECT -> these four and then one in ROBUST_FAST:
+# 30 Hz / 7 ms at 0 dB 2 -> 8 connected and done; AWGN -14, -15 and -16 dB the same events in all 24.
+# Alternating from the first retry connected 30 Hz 36 s sooner, but at -16 dB 2 of 8 against 6
+# (two ROBUST_CONNECT tries to combine, not four).
+ROBUST_CONNECT_TRIES = 4
+# A session whose connect was made by a retry in the robust mode starts at the
+# robust floor (session._robust_start) only if the caller's reading of the
+# CONNECT_ACK says the path is the reason (weak_path()): snr_est under
+# ROBUST_START_SNR_DB or spread_est at least ROBUST_START_SPREAD_HZ. A first
+# CONNECT can also be lost to QRM or a callee that was scanning, on a path the
+# OFDM modes work on: started robust there, a session took 7-16 s longer (first
+# CONNECT blanked, AWGN -4 to +20 dB and 2 ms / 1 Hz -2 and +2 dB, 16 seeds:
+# +7.0 to +16.0 s; gated 0.0 to +1.8 s). On weak and fast paths the gate reads
+# weak and the gain is kept (2 ms / 1 Hz -10 dB -42 s, 7 ms / 30 Hz 0 dB -17 s,
+# both arms). Around -6 to -8 dB it starts robust where the OFDM ACK modes
+# would have worked (AWGN -8 dB: +5.7 s).
+ROBUST_START_SNR_DB = -6.0
+ROBUST_START_SPREAD_HZ = 6.0
+# The first data such a session's caller asks for (robust_started(), until a
+# data burst of the peer's is usable): only in modes whose steady-channel
+# threshold (MODE_THRESHOLDS' first column) is at most the measured snr_est
+# plus this, and with the burst's control twice. Its one reading is the
+# CONNECT_ACK's, and from it the model asked for fsk32r62-r1/2 (threshold
+# -8 dB) at -13.8 dB. Started at the bottom of the floor that first request
+# went unheard in the OFDM fallback; started robust it is heard, the burst it
+# asks for is lost and so are half the fsk16r25 controls that would recover
+# it. Live sessions (scripts/stream_session, 64 bytes each way, 180 s),
+# completed and mean s (unfinished as 179.5), no robust start -> robust start
+# -> with this: AWGN -15 dB (16 seeds) 14, 138.9 -> 5, 170.4 -> 13, 120.6;
+# -14 dB (8) all, 118.6 -> 114.8 -> 88.4; -12 dB (8) all, 91.0 -> 87.3 ->
+# 64.1. The bound without the second control: -15 dB 12, 140.1. The 2 ms and
+# 7 ms / 1 Hz -8 dB cells and two carrier cells ran the same events; 7 ms /
+# 10 Hz +1.5 s, 30 Hz -5 s by mean. Not tuned: 2 dB is the one value tried.
+ROBUST_START_DATA_MARGIN_DB = 2.0
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -281,6 +317,7 @@ class GearShifter(L.Policy):
     n0_spreads: list = field(default_factory=list)  # the peer's last bursts' n0_spread_db (FM's regime input)
     floor_spreads: list = field(default_factory=list)  # as spreads, a CPM burst's FLOOR_CPM_SPREAD_HZ (cpm_floor)
     last_spread: float | None = None  # the peer's last measured (not defaulted) spread_est (SPREAD_CARRY)
+    heard_spread: float | None = None  # the last burst's own spread_est; None: it reported unmeasured (weak_path)
     snrs: list = field(default_factory=list)  # the peer's last CPM_FLOOR_HIST bursts' snr_est (CPM_FLOOR)
     snrs_long: list = field(default_factory=list)  # the same, the last GATE_HIST (the gate's steadiness)
     want_dup: bool = False  # ask the peer to duplicate its next data burst's control (link: T_DUPCTL)
@@ -290,6 +327,9 @@ class GearShifter(L.Policy):
     # with nothing to send (the IRS of a one-way transfer) was expected to
     # answer with a data burst in the data mode's band
     peer_had_data: bool = True
+    # the session started at the robust floor and no data burst of the peer's has
+    # been usable yet: ROBUST_START_DATA_MARGIN_DB bounds what I ask for (robust_started)
+    start_bound: bool = False
     log: list = field(default_factory=list)
 
     # -- link.Policy plumbing (native: GearPolicy): forwards to modes and codes -------
@@ -306,11 +346,45 @@ class GearShifter(L.Policy):
     def rv_cycle(self, m):
         return codes.rv_cycle(MODES[m])
 
-    def connect_mode(self, cap, tries: int = 0):
+    def connect_mode(self, cap, tries: int = 0, last: bool = False):
         """Session frames: the cap's connect mode first, then ROBUST_CONNECT
         (MPP -4 dB: qpsk-r1/5 bursts 38% usable, n4-qpsk-r1/3 91%; 9 of 12
-        loss-study sessions there never connected in qpsk-r1/5)."""
-        return CONNECT[cap] if tries == 0 else ROBUST_CONNECT
+        loss-study sessions there never connected in qpsk-r1/5) for
+        ROBUST_CONNECT_TRIES retries, then ROBUST_FAST: on fast fading
+        ROBUST_CONNECT's 25 Hz tones decode nothing, and nothing is measured
+        yet to say so. `last`, the host's last try (RETRIES under the
+        default): ROBUST_FAST too, once one ROBUST_CONNECT retry went ahead
+        of it (RETRIES 1 keeps its one retry in ROBUST_CONNECT)."""
+        if tries == 0:
+            return CONNECT[cap]
+        return ROBUST_FAST if tries > ROBUST_CONNECT_TRIES or (last and tries >= 2) else ROBUST_CONNECT
+
+    def weak_path(self) -> bool:
+        """The peer's last burst (the caller's CONNECT_ACK, in a retry's
+        robust mode) read under ROBUST_START_SNR_DB, or its spread at least
+        ROBUST_START_SPREAD_HZ, or not measured at all: the cap's connect
+        mode would not have got through, and the session starts at the
+        robust floor (session._robust_start). Else the first CONNECT was
+        lost to something else and it starts as any does.
+
+        The spread is that burst's own reading (heard_spread), not the one
+        observe() carries into `measured` when a burst reports unmeasured
+        (SPREAD_CARRY): the carried one is an earlier burst's, and while
+        dialing that can be QRM (9 Hz carried into a +5 dB ACK started a
+        good path robust). Unmeasured is not fast: the SNR decides."""
+        m = self.measured
+        fast = self.heard_spread is not None and self.heard_spread >= ROBUST_START_SPREAD_HZ
+        return not (m is not None and m["snr_est"] >= ROBUST_START_SNR_DB and not fast)
+
+    def robust(self, submode: str) -> bool:
+        return submode in ROBUST_MODES
+
+    def robust_started(self):
+        """Session._robust_start, the caller's: the session starts at the
+        robust floor. Until a data burst of the peer's is usable, recommend()
+        asks for data within ROBUST_START_DATA_MARGIN_DB of the measured
+        snr_est and for its control twice."""
+        self.start_bound = True
 
     def robust_mode(self) -> str:
         """In a session, the robust control mode: ROBUST_FAST if the peer's
@@ -353,6 +427,10 @@ class GearShifter(L.Policy):
             reply = decode(st.peer_reply_recommend) if st.peer_reply_recommend is not None else None
             return (reply if reply and MODES[reply] in allowed(cap) else FALLBACK[cap]), 2
         if rec is None:
+            if st.esc_floor >= ROBUST_ESCALATION:
+                # nothing recommended yet and my floor is the robust mode (a session
+                # that connected in it, session._robust_start): control only, in it
+                return self.robust_mode(), 1
             return FALLBACK[cap], 2
         mode = decode(rec)
         if mode is None or MODES[mode] not in allowed(cap):
@@ -390,6 +468,7 @@ class GearShifter(L.Policy):
     def observe(self, measured: dict, submode: str, now: float):
         """The receiver's measurements of a peer burst (predictor inputs)."""
         s = measured.get("spread_est")
+        self.heard_spread = float(s) if s is not None and s != UNMEASURED_SPREAD_HZ else None
         if s is not None and s != UNMEASURED_SPREAD_HZ:
             self.last_spread = float(s)
         elif SPREAD_CARRY and s is not None and self.last_spread is not None:
@@ -446,6 +525,7 @@ class GearShifter(L.Policy):
         if usable is not None:
             self.turns = (self.turns + ["ok" if usable else "lost"])[-LINK_HIST:]
         if usable and sent:
+            self.start_bound = False
             self.data_lost, self.ladder_left = 0, False
             if self.ceiling is not None:  # climb a step
                 self.ceiling = tuple(c + LADDER_STEP_DB for c in self.ceiling)
@@ -619,6 +699,12 @@ class GearShifter(L.Policy):
             data_cands = data_cands or [min(cands, key=lambda s: max(MODE_THRESHOLDS[s.name]))]
         if self.cpm_floor():
             data_cands = [s for s in data_cands if is_cpm(s)] or [s for s in cands if is_cpm(s)] or data_cands
+        if self.start_bound and cands:
+            # a robust start's first data: within the margin of the one reading
+            # there is; none that robust: the lowest steady-channel threshold
+            lim = self.measured["snr_est"] + ROBUST_START_DATA_MARGIN_DB
+            data_cands = ([s for s in data_cands if MODE_THRESHOLDS[s.name][0] <= lim]
+                          or [min(cands, key=lambda s: MODE_THRESHOLDS[s.name][0])])
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
@@ -670,7 +756,7 @@ class GearShifter(L.Policy):
             # its control at risk: ask for it twice (one codeword of the burst;
             # at MPP -4 dB 73% of data bursts lost their control while 172 of
             # their data codewords decoded, scripts/loss_study.py)
-            self.want_dup = self.predicted[s.name][0] < DUP_BELOW
+            self.want_dup = self.predicted[s.name][0] < DUP_BELOW or self.start_bound
             if reply:
                 self.predicted[reply] = (q_burst(MODES[reply], 1), q_cw(MODES[reply], 1))
         reply = reply or FALLBACK[st.cap]

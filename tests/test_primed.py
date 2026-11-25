@@ -380,7 +380,7 @@ class CpmConnect(L.Policy):
     def rv_cycle(self, m):
         return 4
 
-    def connect_mode(self, cap, tries=0):
+    def connect_mode(self, cap, tries=0, last=False):
         return "c60"
 
     def airtime(self, m, n_cw, dup=False):

@@ -13,6 +13,10 @@ int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog watchdog(60, "test_tnc");
 
+    check::current_step = "kiss_is_data";  // VARA's 1 and 2 (issue #283); TXDELAY and P are one byte
+    check::is_true(tnc::kiss_is_data(0x00, 0) && tnc::kiss_is_data(0x01, 2) && tnc::kiss_is_data(0x12, 2), "data");
+    check::is_true(!tnc::kiss_is_data(0x01, 1) && !tnc::kiss_is_data(0x02, 1) && !tnc::kiss_is_data(0x03, 2), "commands");
+
     check::current_step = "kiss";
     std::vector<tnc::Bytes> frames = {{}, {1, 2, 3}, {tnc::FEND, tnc::FESC, tnc::TFEND, tnc::TFESC, 0}};
     tnc::Bytes wire;

@@ -32,7 +32,7 @@ VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: 
 # 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply
 # (nods, docs/arq.md §3b, need no bump: each side says it knows them, T_NODS; nor T_REPLY only on change,
 # §8a: T_KEEP)
-CONNECT_TRIES = 5
+CONNECT_TRIES = 6  # the cap's connect mode, policy.ROBUST_CONNECT_TRIES in ROBUST_CONNECT, one in ROBUST_FAST
 CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
 # failed connect frames further apart are not one CONNECT's tries (a robust try and its wait: under 15 s)
@@ -110,6 +110,7 @@ class Session:
     _answer_mode: str | None = None  # callee: the mode the CONNECT came in (its ACK goes in it)
     _tries: int = 0
     _repeat_at: float = float("-inf")  # the last failed connect frame kept for combining
+    _follow_start: bool = False  # the callee: take the robust floor if the caller's first burst is robust (_robust_start)
     _last_heard: float = 0.0
     _last_data: float = 0.0
     _idle_wait: float = 0.0
@@ -336,6 +337,10 @@ class Session:
         undrained, limbo = len(st.rx.out), st.tx.limbo is not None
         if not st.handle(rx):
             return  # not ours, or unreadable: stay silent (§3)
+        if self._follow_start:  # the callee, connected in the robust mode: as the caller started (_robust_start)
+            self._follow_start = False
+            if self.policy.robust(rx.submode):
+                st.esc_floor = L.MAX_ESCALATION
         self._heard(now)
         if st.state == L.FAILED:
             self._close(f"LINK_FAILED {st.fail_reason}")
@@ -472,7 +477,7 @@ class Session:
             self._close("CLIENT unconfirmed")  # the host gave up on the dial: no more tries
         elif self.state == CONNECTING:
             self._tries += 1
-            tries = CONNECT_TRIES if self.connect_tries is None else self.connect_tries
+            tries = self._connect_limit()
             log.info("no answer to CONNECT %s, try %d of %d", self.peer, self._tries, tries)
             if self._tries >= tries:
                 self._close("NO_ANSWER")
@@ -505,7 +510,8 @@ class Session:
         """`mode`: an answer goes in the mode its frame came in (a caller that
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
-        mode = mode or self.policy.connect_mode(self.cap, self._tries)
+        mode = mode or self.policy.connect_mode(self.cap, self._tries,
+                                                last=body[0] == F.CONNECT and self._tries == self._connect_limit() - 1)
         cpb = self.policy.ctl_payload_bytes(mode)
         if body[0] == F.CONNECT and self._compact(mode):
             slots = [B.Slot(B.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
@@ -515,6 +521,9 @@ class Session:
         retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
         return B.TxBurst(mode, slots, 0, self.cap)
+
+    def _connect_limit(self) -> int:
+        return CONNECT_TRIES if self.connect_tries is None else self.connect_tries
 
     def _compact(self, mode: str) -> bool:
         """A CONNECT in `mode` goes compact (frames.pack_connect): in its
@@ -578,6 +587,35 @@ class Session:
                 return None
             return {"key": key, "body": body, "mode": rx.submode} if body else None
         return self._primed_frame(rx)
+
+    def _robust_start(self, mode: str):
+        """The connect frame that made this session came in a retry's mode
+        (a robust one, policy.robust(), that is not the cap's connect mode: a
+        policy may change mode among its retries, and by more than the try's
+        number, which the callee does not know), so the cap's connect mode
+        was not answered. If the path is why, the station starts at the top of the
+        escalation floor: its control-only bursts in the robust mode from the
+        first turn, the floor decaying as any does (link.FLOOR_DECAY_TURNS).
+        Starting at the bottom, the caller's first bursts went in the OFDM
+        fallback and reached the robust mode two timeouts (~15 s) later: 335
+        unread OFDM bursts and 13% of the time of 160 sessions at -8 dB and
+        under.
+
+        One decision for the session, the caller's: from its reading of the
+        CONNECT_ACK (policy.weak_path(): a first CONNECT lost to QRM or a
+        scanning callee, on a good path, starts as any session does). The
+        callee does not decide: it follows the mode of the caller's first
+        burst (on_rx). Each side deciding from the frame it received, the two
+        disagreed in 31 of about 450 retry-made sessions, four slower than
+        either way and one failed. Nothing on the wire changes."""
+        if mode == self.policy.connect_mode(self.cap, 0) or not self.policy.robust(mode):
+            return
+        if not self.station.master:
+            self._follow_start = True
+        elif self.policy.weak_path():
+            log.info("connected in %s on a weak path: starting at the robust floor", mode)
+            self.station.esc_floor = L.MAX_ESCALATION
+            self.policy.robust_started()
 
     def _primed_frame(self, rx) -> dict | None:
         """A connect frame that failed blind, retried primed (docs/arq.md §3a):
@@ -668,6 +706,10 @@ class Session:
                 return
             if self.station is not None and not self.master and nonce == self._nonce:
                 self._answer_mode = f["mode"]
+                if self.station.peer_burst is None:
+                    # no burst of the session heard yet: the caller starts on this ACK, in a retry's mode
+                    # though mine answered the first try (it was lost), and I follow its first burst
+                    self._robust_start(f["mode"])
                 self._queue(self._accept_burst(), now)  # our ACK was lost: say it again
                 return
             if (self.station is not None and not self.master and caller == self.peer
@@ -690,6 +732,8 @@ class Session:
             self.peer_t_turn = c.t_turn10 / 10
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._follow_start = False
+            self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)
             self.events.append(f"CONNECTED {caller}")
@@ -703,6 +747,8 @@ class Session:
             self.peer_t_turn = a.t_turn10 / 10
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
                                      cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+            self._follow_start = False
+            self._robust_start(f["mode"])
             self._flush_writes()
             self._connected(now)
             self.events.append(f"CONNECTED {self.peer}")
