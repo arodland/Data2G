@@ -62,7 +62,7 @@ std::vector<int> sc_interior(const std::vector<int>& frames, const std::vector<d
     }
     return static_cast<int>(out.size()) >= SC_SEARCH_MIN ? out : frames;
 }
-constexpr double SC_HOT_EXCESS = 4.0;
+constexpr double SC_HOT_EXCESS = 1.0;  // modem.SC_HOT_EXCESS (its reasons there)
 constexpr double SC_HOT_POWER = 8.0;
 
 bool env_on(const char* name) {  // Python's os.environ.get(name, "1") == "1"

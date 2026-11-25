@@ -1726,11 +1726,12 @@ def _sc_interior(frames: np.ndarray, whole: np.ndarray, n_air: int) -> np.ndarra
 # Excess limited to the hot carriers with no band-wide part (the review's test edit): mpd 2200 Hz told +2.4 dB
 # too little, 82/144. Neighbours of a hot carrier marked too: no change.
 SC_HOT_PASSES = 1
-# a hot carrier's pilots miss by at least this much more noise than the model's (x its noise). At 1 a model's
-# own misses set it off on clean channels (sc_tone's bursts, w48 at 10 dB, 32 each: mpp 11, lowlat-d 20, mpd 16
-# flagged; at 4 none but nvis-d 11 of 36); tones decode alike at 0.5, 1, 2 and 4 (a leak carrier at 825 Hz unflagged
-# at 4: awgn's estimate -23.6 -> -18.6 dB off the tone, all decoded)
-SC_HOT_EXCESS = 4.0
+# a hot carrier's pilots miss by at least this much more noise than the model's (x its noise). At 1 the model's
+# own misses set it off on clean channels too (sc_tone's bursts, w48 at 10 dB, 32 each: mpp 11, lowlat-d 20, mpd 16
+# flagged; at 2: 0, 11, 1; at 4: none; nvis-d 17, 16, 11 of 36), decoding no worse (sc_diag, the loss study's clean
+# cells), at the cost of a pass. At 4 the loss study's mpp 10 dB with tones (interference "carriers") lost 8%
+# (2/10 seeds; 2: -4%, 1: level, 12 seeds paired): a leak carrier next to a tone between carriers goes unmarked.
+SC_HOT_EXCESS = 1.0
 
 
 def _sc_hot(loo_k, model_k, n_f: int, nn: float) -> tuple:
