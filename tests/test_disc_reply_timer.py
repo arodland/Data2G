@@ -120,7 +120,8 @@ def test_late_ofdm_ack_finishes_before_retry(session_type, by):
 
 
 def absent_replies(src, now):
-    """No reply to any DISC try. -> (first try keyed, close time, tries sent)."""
+    """No reply to any DISC try. -> (first try keyed, close time, tries sent,
+    the last try's start and end)."""
     src.disconnect()
     start, burst = ready(src, now)
     first, tries = start, 0
@@ -136,19 +137,36 @@ def absent_replies(src, now):
             assert src.state == S.DISCONNECTING
             start = deadline
     assert src.state == S.CLOSED and src.close_reason == "CLIENT unconfirmed"
-    return first, deadline, tries
+    return first, deadline, tries, start, end
 
 
 @pytest.mark.parametrize("mode", (G.ROBUST_CONNECT, G.ROBUST_FAST, "qpsk-r1/5"))
 @pytest.mark.parametrize("by", (0, 1))
 def test_absent_disc_replies_close_within_the_budget(session_type, mode, by):
-    """Unanswered, the DISC tries end within DISC_BUDGET_S of the first:
-    BPQ32 sends ABORT 30 s after its DISCONNECT (#215). At t_turn 1 s, a DISC
-    whose every try is in ROBUST_CONNECT (4.98 s) gets two (a third would end
-    at 35.4 s); in ROBUST_FAST (3.62 s) or qpsk-r1/5 all three."""
+    """Unanswered, the DISC tries end within DISC_BUDGET_S of the first
+    (BPQ32 sends ABORT 30 s after its DISCONNECT, #215), and a try is given
+    up only when it would not fit: after the last reply window, the hold for
+    the ACK, the retry's airtime and its own reply window overrun the budget.
+    The counts depend on the profile's mode lengths (HF: below)."""
     sessions = pair(session_type, mode)
-    first, closed, tries = absent_replies(sessions[by], sessions[2])
+    src = sessions[by]
+    first, closed, tries, last_start, last_end = absent_replies(src, sessions[2])
     assert closed - first <= S.DISC_BUDGET_S
+    if tries < S.DISC_TRIES:
+        window = closed - last_end
+        air = last_end - last_start
+        assert closed + air + air + window > first + S.DISC_BUDGET_S
+
+
+@pytest.mark.hf_only("HF's mode lengths: ROBUST_CONNECT 4.98 s, ROBUST_FAST 3.62 s")
+@pytest.mark.parametrize("mode", (G.ROBUST_CONNECT, G.ROBUST_FAST, "qpsk-r1/5"))
+@pytest.mark.parametrize("by", (0, 1))
+def test_absent_disc_tries_per_mode(session_type, mode, by):
+    """At t_turn 1 s, a DISC whose every try is in ROBUST_CONNECT (4.98 s)
+    gets two (a third would end at 35.4 s); in ROBUST_FAST (3.62 s) or
+    qpsk-r1/5 all three."""
+    sessions = pair(session_type, mode)
+    tries = absent_replies(sessions[by], sessions[2])[2]
     assert tries == (2 if mode == G.ROBUST_CONNECT else S.DISC_TRIES)
 
 
@@ -160,7 +178,7 @@ def test_the_default_disc_ladder_keeps_three_tries_within_the_budget(session_typ
     sessions = pair(session_type, "qpsk-r1/5")
     src = sessions[by]
     src.policy.connect_mode = lambda cap, tries=0, last=False: G.GearShifter.connect_mode(src.policy, cap, tries, last)
-    first, closed, tries = absent_replies(src, sessions[2])
+    first, closed, tries, *_ = absent_replies(src, sessions[2])
     assert tries == S.DISC_TRIES and closed - first <= S.DISC_BUDGET_S
 
 
