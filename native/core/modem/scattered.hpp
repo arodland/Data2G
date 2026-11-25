@@ -32,4 +32,7 @@ struct Estimated {
 Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& raw, const Mat<cd>& hp,
                    std::optional<int> kc, int n_f, int shift, equalizer::Support support, const Spec& spec);
 
+// modem._copy_rows: find_copy's gates from the copy frame's two rows -> (coherences, pattern).
+std::pair<std::vector<double>, double> copy_rows(std::span<const cd> z0, const Lock& lock);
+
 }  // namespace data2g::modem::sc

@@ -150,10 +150,13 @@ struct Frames {
     std::vector<std::int64_t> slips;  // (n_f + 1,): each frame's timing jump (modem._find_slip), samples
 };
 // steps_in / slips_in: replay a previous run's steps / slips (searched for
-// only when neither is given). Throws SyncError past the buffer.
+// only when neither is given). Throws SyncError past the buffer. pil (sc_pil):
+// scattered pilots, each carrier's own read for hp and the drift (no slip
+// search); close_at: a scattered-pilot band's copy frame (opens on copy_open).
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in = {}, std::string_view band = "w",
-                    std::span<const std::int64_t> slips_in = {});
+                    std::span<const std::int64_t> slips_in = {}, const Mat<int>* pil = nullptr,
+                    std::optional<int> close_at = {});
 
 struct HeaderRead {
     Header hdr;

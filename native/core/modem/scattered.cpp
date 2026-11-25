@@ -1,6 +1,6 @@
 // data2g/modem.py's scattered pilots (config.SC_BANDS, the DATA2G_PILOTS study flag): the layout, the joint 2-D LMMSE
-// estimate and its decision-directed pass, the transmitter's pilot calibration. modem.cpp has the
-// rest (transmit, demod_frames, receive, find_copy, pilot_coherence), beside the pilot-row code.
+// estimate and its decision-directed pass, the transmitter's pilot calibration, find_copy's copy-row gates. modem.cpp
+// has the rest (transmit, demod_frames, receive, find_copy, pilot_coherence), beside the pilot-row code.
 #include "modem/scattered.hpp"
 
 #include <algorithm>
@@ -701,6 +701,30 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
     out.est = std::move(est);
     out.info = std::move(info);
     return out;
+}
+
+std::pair<std::vector<double>, double> copy_rows(std::span<const cd> z0, const Lock& lock) {
+    const auto& b = waveform::band(lock.band);
+    const int64_t pc = lock.copy->pc;
+    if (pc + SYMS_PER_FRAME * NSYM > static_cast<int64_t>(z0.size())) return {{}, 0.0};
+    const auto z = waveform::freq_correct(z0, lock.cfo);
+    const auto open = copy_open(b);
+    const auto r0 = over(b.demod_window(z, pc + NCP, DEMOD_BACKOFF), open);
+    const auto r5 = over(b.demod_window(z, pc + (SYMS_PER_FRAME - 1) * NSYM + NCP, DEMOD_BACKOFF), open);
+    cd d = 0.0;
+    double e0 = 0.0, e5 = 0.0;
+    for (size_t k = 0; k < r0.size(); ++k) {
+        d += std::conj(r5[k]) * r0[k];
+        e0 += std::norm(r0[k]);
+        e5 += std::norm(r5[k]);
+    }
+    const double c = std::abs(d) / (std::sqrt(e0) * std::sqrt(e5) + 1e-30);
+    cd s = 0.0;
+    for (size_t k = 0; k + 1 < r0.size(); ++k) {
+        const cd a = r0[k + 1] * std::conj(r0[k]) + r5[k + 1] * std::conj(r5[k]);
+        s += a / (std::abs(a) + 1e-30);
+    }
+    return {{c, c}, std::abs(s) / static_cast<double>(r0.size() - 1)};
 }
 
 }  // namespace sc

@@ -636,7 +636,8 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
 }  // namespace
 
 Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double phi_ref,
-                    std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in) {
+                    std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in,
+                    const Mat<int>* pil, std::optional<int> close_at) {
     const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     phi_ref = phi_ref + 2 * PI * RS * shift / FS;  // the shift's own slope
@@ -646,7 +647,36 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
     Mat<cd> raw(static_cast<size_t>(n_f + 1) * SYMS_PER_FRAME, nc);
     std::vector<double> steps(static_cast<size_t>(n_f + 1), 0.0), powers;
     std::vector<std::int64_t> slips(static_cast<size_t>(n_f + 1), 0);
-    const bool search = steps_in.empty() && slips_in.empty();
+    if (pil && !pil->rows) pil = nullptr;
+    const bool search = steps_in.empty() && slips_in.empty() && !pil;
+    const auto open = copy_open(b);
+    // each frame's pilot per carrier: its own symbol's on scattered pilots; copy_open on a scattered band's copy frame
+    auto frame_pilot = [&](int f) {
+        std::vector<cd> h(nc);
+        const auto& ref = close_at && f == *close_at ? open : b.pilot;
+        for (size_t k = 0; k < nc; ++k)
+            h[k] = raw[static_cast<size_t>(f * SYMS_PER_FRAME + (pil ? (*pil)[static_cast<size_t>(f)][k] : 0))][k] / ref[k];
+        return h;
+    };
+    // a symbol's neighbouring pilots (scattered): the drift's phase slope is read between them
+    std::vector<size_t> k1, k2;
+    if (pil) {
+        size_t r0 = 0;
+        while (r0 < pil->rows && std::all_of((*pil)[r0], (*pil)[r0] + nc, [](int v) { return v == 0; })) ++r0;
+        if (r0 == pil->rows) r0 = 0;
+        const int* row = (*pil)[r0];
+        std::vector<int> syms(row, row + nc);
+        std::sort(syms.begin(), syms.end());
+        syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
+        for (int sy : syms) {
+            size_t last = nc;
+            for (size_t k = 0; k < nc; ++k)
+                if (row[k] == sy) {
+                    if (last != nc) k1.push_back(last), k2.push_back(k);
+                    last = k;
+                }
+        }
+    }
     double tau_ema = 0.0;
     int total = 0;
     for (int f = 0; f <= n_f; ++f) {
@@ -672,10 +702,22 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
             p += FRAME_SAMPLES;
             continue;
         }
-        const auto hf = over_pilot({raw[static_cast<size_t>(f * SYMS_PER_FRAME)], raw[static_cast<size_t>(f * SYMS_PER_FRAME)] + nc}, b);
+        const auto hf = frame_pilot(f);
         powers.push_back(energy(hf) / static_cast<double>(nc));
         if (powers.back() > 0.1 * median(powers)) {
-            const double d = std::arg(std::exp(cd(0.0, bin_phase_step(hf) - phi_ref)));
+            double d;
+            if (pil && std::any_of((*pil)[static_cast<size_t>(f)], (*pil)[static_cast<size_t>(f)] + nc, [](int v) { return v != 0; })) {
+                cd acc = 0.0;
+                double gap = 0.0;
+                for (size_t i = 0; i < k1.size(); ++i) {
+                    const double dk = static_cast<double>(k2[i]) - static_cast<double>(k1[i]);
+                    acc += hf[k2[i]] * std::conj(hf[k1[i]]) * std::exp(cd(0.0, -dk * phi_ref));
+                    gap += dk;
+                }
+                d = k1.empty() ? 0.0 : std::arg(acc) / (gap / static_cast<double>(k1.size()));
+            } else {
+                d = std::arg(std::exp(cd(0.0, bin_phase_step(hf) - phi_ref)));
+            }
             tau_ema += 0.02 * (-d * FS / (2 * PI * RS) - tau_ema);
             if (std::abs(tau_ema) >= 2) {
                 const int step = static_cast<int>(std::clamp(std::nearbyint(tau_ema), -2.0, 2.0));
@@ -690,8 +732,10 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
     for (size_t r = 0; r < raw.rows; ++r)
         for (size_t k = 0; k < nc; ++k) raw[r][k] *= ph[r / SYMS_PER_FRAME][k];
     out.hp = Mat<cd>(static_cast<size_t>(n_f + 1), nc);
-    for (size_t f = 0; f <= static_cast<size_t>(n_f); ++f)
-        for (size_t k = 0; k < nc; ++k) out.hp[f][k] = raw[f * SYMS_PER_FRAME][k] / b.pilot[k];
+    for (int f = 0; f <= n_f; ++f) {
+        const auto h = frame_pilot(f);
+        std::copy(h.begin(), h.end(), out.hp[static_cast<size_t>(f)]);
+    }
     raw.rows = static_cast<size_t>(n_f) * SYMS_PER_FRAME;
     raw.data.resize(raw.rows * nc);
     out.raw = std::move(raw);
@@ -705,6 +749,19 @@ std::optional<std::vector<double>> copy_llr(std::span<const cd> z, int64_t p, st
     if (p + FRAME_SAMPLES + NSYM > static_cast<int64_t>(z.size())) return std::nullopt;
     std::vector<std::vector<cd>> win;
     for (int s = 0; s <= SYMS_PER_FRAME; ++s) win.push_back(b.demod_window(z, p + s * NSYM + NCP, HB));
+    if (sc_band(band)) {  // copy_open, the header's 4 symbols, copy_close: those 4 in order
+        const auto open = copy_open(b);
+        std::vector<cd> h0(win[0]), h1(win[SYMS_PER_FRAME - 1]);
+        for (size_t k = 0; k < h0.size(); ++k) h0[k] /= open[k], h1[k] /= open[k];
+        const size_t n = static_cast<size_t>(SYMS_PER_FRAME - 2), nc = h0.size();
+        Mat<cd> ys(n, nc), hs(n, nc);
+        for (size_t s = 1; s <= n; ++s) {
+            std::copy(win[s].begin(), win[s].end(), ys[s - 1]);
+            const auto h = lerp(h0, h1, static_cast<double>(s) / (SYMS_PER_FRAME - 1));
+            std::copy(h.begin(), h.end(), hs[s - 1]);
+        }
+        return qpsk_llr(ys, hs);
+    }
     const auto h0 = over_pilot(win[0], b), h1 = over_pilot(win[SYMS_PER_FRAME], b);
     const size_t nc = h0.size();
     Mat<cd> ys(DATA_SYMS_PER_FRAME, nc), hs(DATA_SYMS_PER_FRAME, nc);
@@ -916,15 +973,40 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
     std::vector<std::vector<cd>> y;
     for (int f = f0; f < f1; ++f)
         y.push_back(b.demod_window(z, lock.p0 - lo + static_cast<int64_t>(f) * FRAME_SAMPLES + NCP, DEMOD_BACKOFF));
+    const auto kc = copy_frame(spec.sync_band, lock.n_cw * spec.frames_per_cw);
+    const bool sc = sc_spec(spec, lock.n_cw * spec.frames_per_cw);
+    if (sc_band(spec.band) && kc && f0 <= *kc && *kc < f1) {  // its first symbol is copy_close
+        const auto open = copy_open(b);
+        auto& v = y[static_cast<size_t>(*kc - f0)];
+        for (size_t k = 0; k < v.size(); ++k) v[k] = v[k] * b.pilot[k] / open[k];
+    }
+    if (sc) {  // each carrier's own pilot, but the copy's frame and the closing pilot
+        const auto& cells = sc_cells(b.nc());
+        const size_t nc = b.pilot.size();
+        for (int f = f0; f < f1; ++f) {
+            if ((kc && f == *kc) || f == total - 1) continue;
+            auto& v = y[static_cast<size_t>(f - f0)];
+            for (int j = 1; j < SYMS_PER_FRAME; ++j) {
+                bool any = false;
+                for (size_t k = 0; k < nc; ++k) any = any || cells.own[k] / b.nc() == j;
+                if (!any) continue;
+                const auto w = b.demod_window(z, lock.p0 - lo + static_cast<int64_t>(f) * FRAME_SAMPLES + j * NSYM + NCP,
+                                              DEMOD_BACKOFF);
+                for (size_t k = 0; k < nc; ++k)
+                    if (cells.own[k] / b.nc() == j) v[k] = w[k];
+            }
+        }
+    }
     std::vector<double> out;
     for (size_t f = 1; f < y.size(); ++f)
         out.push_back(std::abs(dot_conj(y[f], y[f - 1])) / (std::sqrt(energy(y[f]) * energy(y[f - 1])) + 1e-30));
     if (pattern) {  // adjacent carriers' products, pilot divided out, summed over the frames; unit weight each
         const std::size_t nc = b.pilot.size();
-        std::vector<cd> a(nc - 1, cd{0, 0});
+        const std::size_t lag = sc && sc_combs(b.nc()) ? 3 : 1;  // k3d2: neighbours in one symbol's comb
+        std::vector<cd> a(nc - lag, cd{0, 0});
         for (const auto& v : y)
-            for (std::size_t k = 0; k + 1 < nc; ++k)
-                a[k] += (v[k + 1] * std::conj(b.pilot[k + 1])) * std::conj(v[k] * std::conj(b.pilot[k]));
+            for (std::size_t k = 0; k + lag < nc; ++k)
+                a[k] += (v[k + lag] * std::conj(b.pilot[k + lag])) * std::conj(v[k] * std::conj(b.pilot[k]));
         cd s{0, 0};
         for (const cd& t : a) s += t / (std::abs(t) + 1e-30);
         *pattern = std::abs(s) / static_cast<double>(a.size());
@@ -991,9 +1073,91 @@ std::vector<double> cfo_aliases(cd d, double centre) {
     return out;
 }
 
+namespace {
+
+// find_copy from the pair products D on: steps 1 to 4 (freqs: D's rows' CFOs; comb: a scattered-pilot band's
+// search, gated on its copy frame's rows when sc_flags().copy_rows)
+std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
+                                   const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
+                                   double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb);
+
+// modem.find_copy(comb=True): one matched filter per symbol holding pilots (the template's carriers whose pilot is
+// there), their outputs added coherently within the frame (SC_COPY_COHERENT, at SC_COPY_SUBBINS offsets per CFO bin)
+// or their pair products summed. ponytail: a stream's own C, D and fold are not used (Python's too)
+std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view band, const Accept* accept, double* peak) {
+    constexpr int SUBBINS = 5;  // modem.SC_COPY_SUBBINS
+    const auto& b = waveform::band(band);
+    const size_t nc = static_cast<size_t>(b.nc());
+    const auto z0 = waveform::to_baseband(x);
+    const auto freqs = waveform::cfo_grid();
+    const auto& cells = sc_cells(b.nc());
+    std::vector<int> js;
+    for (size_t k = 0; k < nc; ++k) js.push_back(cells.own[k] / b.nc());
+    std::sort(js.begin(), js.end());
+    js.erase(std::unique(js.begin(), js.end()), js.end());
+    // dem[k][n] = exp(-2j pi bb_k n / FS), n < M
+    Mat<cd> dem(nc, static_cast<size_t>(M));
+    for (size_t k = 0; k < nc; ++k)
+        for (int n = 0; n < M; ++n) dem[k][static_cast<size_t>(n)] = std::polar(1.0, -2 * PI * static_cast<double>(b.bb[k]) * n / FS);
+    std::vector<cd> proj(nc, 0.0);  // dem @ tpl
+    for (size_t k = 0; k < nc; ++k)
+        for (int n = 0; n < M; ++n) proj[k] += dem[k][static_cast<size_t>(n)] * b.preamble_template[static_cast<size_t>(PREAMBLE_CP + n)];
+    double lv = 0.0;
+    std::vector<Mat<cd>> Cs;
+    for (int j : js) {
+        std::vector<cd> t(static_cast<size_t>(M), 0.0);
+        for (size_t k = 0; k < nc; ++k)
+            if (cells.own[k] / b.nc() == j)
+                for (int n = 0; n < M; ++n) t[static_cast<size_t>(n)] += std::conj(dem[k][static_cast<size_t>(n)]) * proj[k];
+        double re = 0, im = 0;
+        for (auto& v : t) {
+            v /= M;
+            re += v.real() * v.real();
+            im += v.imag() * v.imag();
+        }
+        const double nrm = std::sqrt(re + im);
+        for (auto& v : t) v /= nrm;
+        Cs.push_back(waveform::repeat_corrs(z0, t, freqs));
+        const double l = waveform::noise_level(Cs.back());
+        lv += l * l;
+    }
+    if (sc_flags().copy_coherent) {
+        size_t n = SIZE_MAX;
+        for (size_t i = 0; i < js.size(); ++i) n = std::min(n, Cs[i].cols - static_cast<size_t>(js[i] * NSYM));
+        std::vector<double> f2;
+        for (double f : freqs)
+            for (int o = 0; o < SUBBINS; ++o) f2.push_back(f + (o - (SUBBINS - 1) / 2.0) * waveform::STEP_HZ / SUBBINS);
+        Mat<cd> C(f2.size(), n);
+        for (size_t i = 0; i < f2.size(); ++i)
+            for (size_t c = 0; c < js.size(); ++c) {
+                const cd rot = std::exp(cd(0.0, -2 * PI * f2[i] * js[c] * NSYM / FS));
+                const cd* src = Cs[c][i / SUBBINS] + js[c] * NSYM;
+                cd* dst = C[i];
+                for (size_t t = 0; t < n; ++t) dst[t] += src[t] * rot;
+            }
+        const double level = waveform::noise_level(C);
+        const Mat<cd> D = waveform::pair_products(C.row_ptrs(), C.cols, FRAME_SAMPLES, COPY_PAIRS);
+        return find_copy_from(x, z0, band, accept, D.row_ptrs(), D.cols, level, peak, nullptr, f2, true);
+    }
+    std::vector<Mat<cd>> Ds;
+    size_t n = SIZE_MAX;
+    for (size_t c = 0; c < js.size(); ++c) {
+        Ds.push_back(waveform::pair_products(Cs[c].row_ptrs(), Cs[c].cols, FRAME_SAMPLES, COPY_PAIRS));
+        n = std::min(n, Ds.back().cols - std::min(Ds.back().cols, static_cast<size_t>(js[c] * NSYM)));
+    }
+    Mat<cd> D(freqs.size(), n);
+    for (size_t c = 0; c < js.size(); ++c)
+        for (size_t i = 0; i < D.rows; ++i)
+            for (size_t t = 0; t < n; ++t) D[i][t] += Ds[c][i][static_cast<size_t>(js[c] * NSYM) + t];
+    return find_copy_from(x, z0, band, accept, D.row_ptrs(), D.cols, std::sqrt(lv), peak, nullptr, freqs, true);
+}
+
+}  // namespace
+
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               const Mat<cd>* C_in, std::optional<double> level, double* peak) {
     if (!C_in && level) throw std::invalid_argument("find_copy: level without C");
+    if (sc_band(band)) return find_copy_comb(x, band, accept, peak);
     if (!C_in) return find_copy(x, band, accept, std::span<const cd* const>{}, 0, level, peak);
     const Mat<cd> D = waveform::pair_products(C_in->row_ptrs(), C_in->cols, FRAME_SAMPLES, COPY_PAIRS);
     return find_copy(x, band, accept, D.row_ptrs(), D.cols, level, peak);
@@ -1002,6 +1166,8 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               std::span<const cd* const> D_rows, size_t dcols, std::optional<double> level,
                               double* peak, const Mat<cd>* fold_in) {
+    if (!D_rows.empty() && !level) throw std::invalid_argument("find_copy: C without level");
+    if (sc_band(band)) return find_copy_comb(x, band, accept, peak);
     const auto& b = waveform::band(band);
     const auto z0 = waveform::to_baseband(x);
     const auto freqs = waveform::cfo_grid();
@@ -1018,6 +1184,14 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     } else if (!level) {
         throw std::invalid_argument("find_copy: C without level");
     }
+    return find_copy_from(x, z0, band, accept, D_rows, dcols, *level, peak, fold_in, freqs, false);
+}
+
+namespace {
+
+std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
+                                   const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
+                                   double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb) {
     const size_t F = D_rows.size();
     const int64_t m = static_cast<int64_t>(dcols) / FRAME_SAMPLES;
     if (m < 1) return std::nullopt;
@@ -1028,7 +1202,7 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     std::vector<double> mag(FR, -equalizer::INF);
     for (size_t f = 0; f < F; ++f)
         for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::abs(fold[f][ph]));
-    const double pk = *std::max_element(mag.begin(), mag.end()) / (*level * std::sqrt(static_cast<double>(m * COPY_PAIRS)));
+    const double pk = *std::max_element(mag.begin(), mag.end()) / (level * std::sqrt(static_cast<double>(m * COPY_PAIRS)));
     if (peak) *peak = pk;
     if (pk < COPY_DETECT) return std::nullopt;
     std::vector<int> order(FR);
@@ -1081,13 +1255,17 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
     std::stable_sort(found.begin(), found.end(), [](const Lock& a, const Lock& c) { return -a.score < -c.score; });
     for (const auto& l : found) {
         double pat = 0.0;
-        const auto c = pilot_coherence(x, l, 10000, false, &pat);
+        std::vector<double> c;
+        if (comb && sc_flags().copy_rows) std::tie(c, pat) = sc::copy_rows(z0, l);
+        else c = pilot_coherence(x, l, 10000, false, &pat);
         if (c.size() >= 2 && dsp::pairwise_sum(std::span<const double>(c)) / static_cast<double>(c.size()) >= COPY_COHERENCE &&
             pat >= COPY_PATTERN)
             return l;
     }
     return std::nullopt;
 }
+
+}  // namespace
 
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock) {
     const auto& b = waveform::band(lock.band);
@@ -1238,6 +1416,13 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     }
     const int n_in = n_air - kc.has_value();  // data frames in
     const double phi_ref = bin_phase_step(hd.h_pre);
+    const bool sc = sc_spec(spec, n_f), scb = sc_band(db);
+    if (sc && partial)
+        // a burst still arriving has no closing pilot symbol, and the frame after the last one in starts with
+        // scattered cells, not a pilot row (Python's ponytail): decoding while it arrives waits for the end
+        throw SyncError("scattered pilots: the whole burst only");
+    const Mat<int> pil = sc ? sc_pil(db, n_air, kc) : Mat<int>();
+    const std::optional<int> close_at = scb ? kc : std::optional<int>{};
 
     // Residual CFO's alias from the known header symbols (modem.py's notes)
     const auto layout = header_layout(sband);
@@ -1261,16 +1446,23 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     };
     std::vector<std::vector<std::vector<cd>>> runs(1);
     for (size_t r = 0; r < layout.size(); ++r) runs[0].push_back(times_conj(hd.y_all.row(r), ref_syms.row(r)));
-    if (db == sband) runs[0].push_back(hd.h_first);
+    if (db == sband && !sc) runs[0].push_back(hd.h_first);  // (scattered: the first frame opens on data cells)
     if (kc) {
         const int64_t pc = hd.p0 + static_cast<int64_t>(*kc) * FRAME_SAMPLES;
-        std::vector<std::vector<cd>> ref2{b.pilot};
-        for (int s = 0; s < DATA_SYMS_PER_FRAME; ++s)
-            ref2.push_back(hrows[static_cast<size_t>(s) < hrows.size() ? static_cast<size_t>(s) : static_cast<size_t>(s) - hrows.size()]);
-        ref2.push_back(b.pilot);
+        std::vector<std::vector<cd>> ref2;
+        if (scb) {  // copy_open, the header's symbols, copy_close
+            ref2.push_back(copy_open(b));
+            ref2.insert(ref2.end(), hrows.begin(), hrows.end());
+            ref2.push_back(copy_open(b));
+        } else {
+            ref2.push_back(b.pilot);
+            for (int s = 0; s < DATA_SYMS_PER_FRAME; ++s)
+                ref2.push_back(hrows[static_cast<size_t>(s) < hrows.size() ? static_cast<size_t>(s) : static_cast<size_t>(s) - hrows.size()]);
+            ref2.push_back(b.pilot);
+        }
         std::vector<std::vector<cd>> run;
-        for (int s = 0; s <= SYMS_PER_FRAME; ++s)
-            run.push_back(times_conj(b.demod_window(z, pc + s * NSYM + NCP, HB), ref2[static_cast<size_t>(s)]));
+        for (size_t s = 0; s < ref2.size(); ++s)
+            run.push_back(times_conj(b.demod_window(z, pc + static_cast<int64_t>(s) * NSYM + NCP, HB), ref2[s]));
         runs.push_back(std::move(run));
     }
     cd dsum = 0.0;
@@ -1278,7 +1470,8 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
         for (size_t i = 0; i + 1 < run.size(); ++i) dsum += dot_conj(run[i + 1], run[i]);
     const double coarse = std::arg(dsum) / (2 * PI * NSYM / FS);
     // slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
-    auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db);
+    const Mat<int>* pp = sc ? &pil : nullptr;
+    auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, {}, pp, close_at);
     const double fine = equalizer::residual_cfo(first.hp);
     const auto slips = std::move(first.slips);
     const double cfo_res = resolve_alias(fine, known ? 0.0 : coarse);
@@ -1286,18 +1479,37 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     const auto bbd = bb_of(db);
     // the window and the reported delay on the support as before the noise
     // gate (the gear shifter was trained on it); the estimate on the gated one
-    const auto hp0 = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips).hp;
-    auto seen = equalizer::delay_support(hp0, bbd);
+    auto fr0 = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips, pp, close_at);
+    // scattered: the support from whole pilot symbols (a frame's scattered pilots are 96 ms apart), gated (a handful
+    // of pilot symbols: the ungated one picks up noise)
+    const Mat<cd> hp0 = sc ? sc::full(z, hd, fr0.raw, fr0.hp, kc, 0, db).rows : std::move(fr0.hp);
     auto support = equalizer::delay_support(hp0, bbd, -15.0, hd.n0_pre);
-    const int shift = equalizer::window_shift(seen);
-    auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips);
+    auto seen = sc ? support : equalizer::delay_support(hp0, bbd);
+    int shift = equalizer::window_shift(seen);
+    auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips, pp, close_at);
     support = {support.first - shift, support.second - shift};
     seen = {seen.first - shift, seen.second - shift};
     const auto clip = clip_consts(spec);
     Received out;
-    out.est = data_channel(fr.hp, support, db, hd.n0_pre, &clip, db == sband ? std::span<const double>(hd.n0_pre_k)
-                                                                              : std::span<const double>(), n_f);
-    if (kc) {  // the copy frame's pilot stays in hp; its symbols leave the data
+    if (sc) {
+        // once more through the moved window: with a path outside the first one, a pilot symbol's profile has
+        // lobes of its own (mpd, locked on the later path: one 32 samples before the earlier)
+        support = equalizer::delay_support(sc::full(z, hd, fr.raw, fr.hp, kc, shift, db).rows, bbd, -15.0, hd.n0_pre);
+        if (const int more = equalizer::window_shift(support)) {
+            shift += more;
+            fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips, pp, close_at);
+            support = {support.first - more, support.second - more};
+        }
+        auto e = sc::estimate(z, hd, fr.raw, fr.hp, kc, n_f, shift, support, spec);
+        out.raw = std::move(e.raw);
+        out.est = std::move(e.est);
+        out.sc = std::move(e.info);
+        seen = support;
+    } else {
+        out.est = data_channel(fr.hp, support, db, hd.n0_pre, &clip, db == sband ? std::span<const double>(hd.n0_pre_k)
+                                                                                  : std::span<const double>(), n_f);
+    }
+    if (kc && !sc) {  // the copy frame's pilot stays in hp; its symbols leave the data
         auto drop = [](auto& m, size_t from, size_t count) {
             m.data.erase(m.data.begin() + static_cast<std::ptrdiff_t>(from * m.cols),
                          m.data.begin() + static_cast<std::ptrdiff_t>((from + count) * m.cols));
@@ -1314,7 +1526,7 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     }
     out.spec = &spec;
     out.n_cw = n_cw;
-    out.raw = std::move(fr.raw);
+    if (!sc) out.raw = std::move(fr.raw);
     out.acq = std::move(acq);
     out.band = db;
     out.hp = std::move(fr.hp);
