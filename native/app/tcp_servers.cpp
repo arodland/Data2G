@@ -101,7 +101,7 @@ KissServer::KissServer(const QHostAddress& addr, quint16 port,
                 if (it == clients_.end()) return;
                 const auto* p = reinterpret_cast<const std::uint8_t*>(d.constData());
                 for (auto& [cmd, payload] : it->second.feed({p, static_cast<std::size_t>(d.size())})) {
-                    if ((cmd & 0x0F) == tnc::KISS_DATA) {
+                    if (tnc::kiss_is_data(cmd, payload.size())) {
                         on_packet_(cmd >> 4, std::move(payload), std::nullopt);
                     } else if ((cmd & 0x0F) == tnc::KISS_ACKMODE && payload.size() >= 2) {  // [tag, 2][frame]
                         // tnc.py's: an id with the tag in its low 16 bits, big-endian (arq::ack_tag)
