@@ -92,10 +92,66 @@ std::vector<double> bb(const config::Band& band) {
     return out;
 }
 
-double residual_cfo(const Mat<cd>& h) {
+std::vector<char> hot_carriers(const Mat<cd>& h) {
+    std::vector<char> hot(h.cols, 0);
+    if (h.rows == 0 || h.cols == 0) return hot;
+    std::vector<double> pw(h.cols, 0.0);
+    for (size_t p = 0; p < h.rows; ++p)
+        for (size_t c = 0; c < h.cols; ++c) pw[c] += sq_abs(h[p][c]);
+    for (double& v : pw) v /= static_cast<double>(h.rows);
+    std::vector<double> s = pw;
+    std::ranges::sort(s);
+    const size_t n = s.size();
+    const double med = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+    for (size_t c = 0; c < n; ++c) hot[c] = pw[c] > HOT_CARRIER * med;
+    return hot;
+}
+
+std::vector<char> noisy_carriers(std::span<const double> n0_pre_k) {
+    const size_t n = n0_pre_k.size();
+    std::vector<char> noisy(n, 0);
+    if (n == 0) return noisy;
+    std::vector<double> s(n0_pre_k.begin(), n0_pre_k.end());
+    std::ranges::sort(s);
+    const double med = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+    for (size_t c = 0; c < n; ++c) noisy[c] = n0_pre_k[c] > HOT_PREAMBLE_NOISE * med;
+    return noisy;
+}
+
+double residual_cfo(const Mat<cd>& h, std::span<const char> exclude) {
+    std::vector<char> hot = hot_carriers(h);
+    if (exclude.size() == h.cols)
+        for (size_t c = 0; c < h.cols; ++c) hot[c] = hot[c] || exclude[c];
+    if (std::ranges::all_of(hot, [](char x) { return x != 0; })) std::ranges::fill(hot, 0);
     cd d = 0.0;
     for (size_t p = 1; p < h.rows; ++p)
-        for (size_t c = 0; c < h.cols; ++c) d += h[p][c] * std::conj(h[p - 1][c]);
+        for (size_t c = 0; c < h.cols; ++c)
+            if (!hot[c]) d += h[p][c] * std::conj(h[p - 1][c]);
+    if (static_cast<int>(h.rows) >= HOT_INNOV_MIN_PILOTS && std::abs(d) > 0 && h.cols > 0) {
+        const cd ph = d / std::abs(d);
+        std::vector<double> innov(h.cols, 0.0);
+        for (size_t p = 1; p < h.rows; ++p)
+            for (size_t c = 0; c < h.cols; ++c) innov[c] += sq_abs(h[p][c] - ph * h[p - 1][c]);
+        for (double& v : innov) v /= static_cast<double>(h.rows - 1);
+        std::vector<double> s = innov;
+        std::ranges::sort(s);
+        const size_t n = s.size();
+        const double med = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+        std::vector<char> hot2 = hot;
+        bool changed = false;
+        for (size_t c = 0; c < n; ++c) {
+            if (!hot2[c] && innov[c] > HOT_INNOV * med) {
+                hot2[c] = 1;
+                changed = true;
+            }
+        }
+        if (changed && !std::ranges::all_of(hot2, [](char x) { return x != 0; })) {
+            d = 0.0;
+            for (size_t p = 1; p < h.rows; ++p)
+                for (size_t c = 0; c < h.cols; ++c)
+                    if (!hot2[c]) d += h[p][c] * std::conj(h[p - 1][c]);
+        }
+    }
     return std::abs(d) > 0 ? std::arg(d) / (2 * PI * FRAME_S) : 0.0;
 }
 

@@ -158,6 +158,32 @@ int main() {
                      equalizer::SUPPORT_SLACK, "flat in noise: tight");
     }
 
+    // hot_carriers / noisy_carriers / residual_cfo (issue #330).
+    {
+        Mat<cd> h(20, 48, cd(1.0, 0.0));
+        for (std::size_t p = 0; p < 20; ++p)
+            h[p][37] += std::polar(3.0, -2.0 * std::numbers::pi * 0.2 * static_cast<double>(p));
+        const auto hot = equalizer::hot_carriers(h);
+        for (std::size_t k = 0; k < 48; ++k) check::equal(hot[k], static_cast<char>(k == 37), "hot_carriers");
+        check::is_true(std::abs(equalizer::residual_cfo(h)) < 1e-12, "residual_cfo drops hot carrier");
+        std::vector<double> nk(48, 1.0);
+        nk[8] = 16.0;
+        nk[9] = 160.0;
+        const auto noisy = equalizer::noisy_carriers(nk);
+        for (std::size_t k = 0; k < 48; ++k)
+            check::equal(noisy[k], static_cast<char>(k == 8 || k == 9), "noisy_carriers");
+        for (std::size_t p = 0; p < 20; ++p)
+            h[p][8] += std::polar(1.5, -2.0 * std::numbers::pi * 0.2 * static_cast<double>(p));
+        check::is_true(std::abs(equalizer::residual_cfo(h, noisy)) < 1e-12, "residual_cfo drops excluded carrier");
+        // Weaker on-carrier tone (below HOT_CARRIER x median power) caught by innovation check.
+        Mat<cd> hw(20, 48, cd(1.0, 0.0));
+        for (std::size_t p = 0; p < 20; ++p)
+            hw[p][12] += std::polar(2.0, -2.0 * std::numbers::pi * 0.2 * static_cast<double>(p));
+        check::is_true(std::abs(equalizer::residual_cfo(hw)) < 1e-12, "residual_cfo drops innovation outlier");
+        std::vector<char> all(48, 1);
+        check::is_true(std::isfinite(equalizer::residual_cfo(h, all)), "residual_cfo all-excluded fallback");
+    }
+
     // per_carrier_noise: one hot carrier gets its own (shrunk) level.
     {
         std::vector<double> p(24, 1.0);
