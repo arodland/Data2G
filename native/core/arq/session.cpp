@@ -223,10 +223,15 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
     // only the caller retries (§6), and a callee's DISC
     if ((m && (state == SessionState::CONNECTING || state == SessionState::CONNECTED)) || state == SessionState::DISCONNECTING) {
         double wait = tune.reply_start_s;
-        // DISC_ACK uses this DISC's mode and slot count. Even if its header is
-        // lost, leave time for the whole reply after it starts.
-        if (state == SessionState::DISCONNECTING && burst)
-            wait += policy->airtime(burst->submode, static_cast<int>(burst->slots.size()), false);
+        if (state == SessionState::DISCONNECTING && burst) {
+            const int n_cw = static_cast<int>(burst->slots.size());
+            const double ack = policy->airtime(burst->submode, n_cw, false);
+            if (tries == 0) disc_from = now - ack;
+            disc_last = !disc_retry_fits(now, ack, n_cw);
+            // DISC_ACK uses this DISC's mode and slot count. Even if its header is lost, a retry must not
+            // key over the whole reply; before no retry, a missed header leaves nothing to decode.
+            if (!disc_last) wait += ack;
+        }
         // a reply whose header I miss is still on air: don't poll over it
         if (state == SessionState::CONNECTED && station && burst)
             if (auto hold = policy->reply_hold(*station, *burst)) wait = std::max(wait, *hold);
@@ -235,6 +240,15 @@ void Session::on_tx_end(const TxBurstPtr& burst, double now) {
         quiet_from = now;
         wake_wait = peer_turn() + tune.reply_start_s + tune.wake_guard_s + rng->uniform(0, tune.wake_jitter_s * std::pow(2.0, wakes));
     }
+}
+
+// Whether another DISC try follows the one that ended at `end`: tries left, and its reply window ends
+// within disc_budget_s of the first try, the reply to this one (`ack` s) waited out first (session.py).
+bool Session::disc_retry_fits(double end, double ack, int n_cw) const {
+    if (tries + 1 >= tune.disc_tries) return false;
+    const double next = policy->airtime(policy->connect_mode(cap, tries + 1, false), n_cw, false);
+    const double window = peer_turn() + tune.reply_start_s;
+    return end + window + ack + next + window <= disc_from + tune.disc_budget_s;
 }
 
 void Session::on_header(const std::string& submode, int n_cw, double now) {
@@ -459,8 +473,11 @@ void Session::on_timeout(double now) {
     } else if (state == SessionState::DISCONNECTING) {
         tries += 1;
         log_write(LOG, INFO, format("no answer to DISC, try %d of %d", tries, tune.disc_tries));
-        if (tries >= tune.disc_tries)
+        if (tries >= tune.disc_tries || disc_last) {
+            if (tries < tune.disc_tries)
+                log_write(LOG, INFO, format("no DISC retry: it would end past %.0f s from the first", tune.disc_budget_s));
             close(disc_why + " unconfirmed");
+        }
         else
             queue(disc_burst(), now);
     } else if (state == SessionState::CONNECTED) {

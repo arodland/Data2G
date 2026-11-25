@@ -662,7 +662,7 @@ without). So the last codeword of a write rides in the control's padding when it
   burst header. The header gives submode and codeword count, so the wait then extends
   to the reply's known end. The master doesn't sit through a worst-case reply length
   before retrying.
-- **DISC reply timer:** DISC_ACK uses the received DISC's mode and control-codeword count, so the disconnecting station adds that reply airtime to its reply-start window. This keeps a retry from starting over an ACK whose header was missed, including a slow FSK ACK. A heard ACK still closes the session immediately; a missing ACK takes longer to retry, with the same three-attempt limit.
+- **DISC reply timer:** DISC_ACK uses the received DISC's mode and control-codeword count, so before a retry the disconnecting station adds that reply airtime to its reply-start window. This keeps a retry from starting over an ACK whose header was missed, including a slow FSK ACK. After the last try it does not wait: a missed header leaves nothing to decode. A retry goes only if its own reply window ends within `DISC_BUDGET_S` (29 s) of the first try, since BPQ32 sends ABORT 30 s after an unanswered DISCONNECT; otherwise the session closes `unconfirmed` at once. At t_turn 1 s, the default ladder (the cap's connect mode, then ROBUST_CONNECT) keeps its three tries (28.7 s unanswered); a DISC whose every try is in ROBUST_CONNECT gets two. A heard ACK still closes the session immediately.
 - **Link lost:** 90 s after the last decodable burst from the peer, on either side:
   60 s of retries past the keepalive's longest gap (30 s).
   The link core's consecutive-timeout count (12) applies only in the lockstep tests,

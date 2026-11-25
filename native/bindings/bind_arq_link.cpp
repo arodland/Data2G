@@ -194,6 +194,7 @@ SessionTuning py_tuning() {
     t.connect_tries = i("CONNECT_TRIES");
     t.disc_tries = i("DISC_TRIES");
     t.reply_start_s = d("REPLY_START_S");
+    t.disc_budget_s = d("DISC_BUDGET_S");
     t.idle_close_s = d("IDLE_CLOSE_S");
     std::tie(t.keepalive_lo_s, t.keepalive_hi_s) = pair("KEEPALIVE_S");
     std::tie(t.chat_keepalive_lo_s, t.chat_keepalive_hi_s) = pair("CHAT_KEEPALIVE_S");

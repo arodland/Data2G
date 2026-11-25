@@ -181,7 +181,7 @@ void disc_reply_timer() {
     public:
         explicit SlowReply(std::string m) : TestPolicy(0), fixed(std::move(m)) {}
         std::string fixed;
-        std::string connect_mode(int, int) override { return fixed; }
+        std::string connect_mode(int, int, bool) override { return fixed; }
         double airtime(const std::string&, int n, bool) override { return 3.0 * n; }
     };
     for (bool master : {false, true}) for (const char* mode : {"m46", "m4"}) {

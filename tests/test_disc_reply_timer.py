@@ -119,25 +119,49 @@ def test_late_ofdm_ack_finishes_before_retry(session_type, by):
     lost_ack(session_type, "qpsk-r1/5", by, ack_delay=1.0)
 
 
-@pytest.mark.parametrize("mode", (G.ROBUST_CONNECT, G.ROBUST_FAST))
-@pytest.mark.parametrize("by", (0, 1))
-def test_absent_disc_replies_still_exhaust_the_same_retry_budget(session_type, mode, by):
-    sessions = pair(session_type, mode)
-    src, now = sessions[by], sessions[2]
+def absent_replies(src, now):
+    """No reply to any DISC try. -> (first try keyed, close time, tries sent)."""
     src.disconnect()
     start, burst = ready(src, now)
-    for attempt in range(S.DISC_TRIES):
+    first, tries = start, 0
+    while burst is not None:
+        tries += 1
         end = start + src.policy.airtime(burst.submode, len(burst.slots))
         src.on_tx_end(burst, end)
         deadline = src.next_event()
-        assert end < deadline <= end + src.t_turn + S.REPLY_START_S + src.policy.airtime(burst.submode, len(burst.slots))
+        hold = src.policy.airtime(burst.submode, len(burst.slots))
+        assert end < deadline <= end + src.t_turn + S.REPLY_START_S + hold + .001
         burst = src.poll(deadline)
-        if attempt + 1 < S.DISC_TRIES:
-            assert burst is not None and src.state == S.DISCONNECTING
+        if burst is not None:
+            assert src.state == S.DISCONNECTING
             start = deadline
-        else:
-            assert burst is None and src.state == S.CLOSED
-            assert src.close_reason == "CLIENT unconfirmed"
+    assert src.state == S.CLOSED and src.close_reason == "CLIENT unconfirmed"
+    return first, deadline, tries
+
+
+@pytest.mark.parametrize("mode", (G.ROBUST_CONNECT, G.ROBUST_FAST, "qpsk-r1/5"))
+@pytest.mark.parametrize("by", (0, 1))
+def test_absent_disc_replies_close_within_the_budget(session_type, mode, by):
+    """Unanswered, the DISC tries end within DISC_BUDGET_S of the first:
+    BPQ32 sends ABORT 30 s after its DISCONNECT (#215). At t_turn 1 s, a DISC
+    whose every try is in ROBUST_CONNECT (4.98 s) gets two (a third would end
+    at 35.4 s); in ROBUST_FAST (3.62 s) or qpsk-r1/5 all three."""
+    sessions = pair(session_type, mode)
+    first, closed, tries = absent_replies(sessions[by], sessions[2])
+    assert closed - first <= S.DISC_BUDGET_S
+    assert tries == (2 if mode == G.ROBUST_CONNECT else S.DISC_TRIES)
+
+
+@pytest.mark.parametrize("by", (0, 1))
+def test_the_default_disc_ladder_keeps_three_tries_within_the_budget(session_type, by):
+    """GearShifter's ladder (the cap's connect mode, then ROBUST_CONNECT):
+    all DISC_TRIES tries, the ACK waited out before each retry, inside the
+    budget (28.7 s at t_turn 1 s)."""
+    sessions = pair(session_type, "qpsk-r1/5")
+    src = sessions[by]
+    src.policy.connect_mode = lambda cap, tries=0, last=False: G.GearShifter.connect_mode(src.policy, cap, tries, last)
+    first, closed, tries = absent_replies(src, sessions[2])
+    assert tries == S.DISC_TRIES and closed - first <= S.DISC_BUDGET_S
 
 
 @pytest.mark.parametrize("mode", MODES)
