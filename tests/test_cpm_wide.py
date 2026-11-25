@@ -58,7 +58,8 @@ def test_round_trip(name):
     dd = cpm.dd_soft(r, cpm.dd_metric(r, {1: p}, 1), 1)
     assert dd.shape == np.asarray(r["soft"][1]).shape
     assert codes.decode_many(spec, dd[None], index=[1])[0] == (pay[1], True)
-    assert PHY.ModemRx(dict(r), {})._dd(spec)
+    rx = PHY.ModemRx(dict(r), {})  # (under --native the C++ ModemRx, its bins from the sub-window Z)
+    assert not hasattr(rx, "_dd") or rx._dd(spec)  # Python's: DD on for the data slot
     assert codes.decode_many(ctl, np.asarray(r["soft"][0])[None], index=[0])[0] == (pay[0], True)
     assert codes.decode_many(spec, np.asarray(r["soft"][1])[None], index=[1])[0] == (pay[1], True)
     m = cpm.measure(g, r["E"], len(r["E"]))

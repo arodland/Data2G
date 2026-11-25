@@ -46,7 +46,11 @@ Heard heard_of(const py::dict& r) {
         c->E = mat(r["E"].cast<In<double>>());
         c->n_cw = static_cast<int>(c->soft.size());
         c->n_ctl_slots = 1 + c->dup;
-        if (r.contains("Z")) c->Z = mat(r["Z"].cast<In<cd>>());  // coherent DD (cpm.receive's bins)
+        if (r.contains("Z")) {  // coherent DD (cpm.receive's bins; a wide grid's (n, L, m): its sub-window rows)
+            auto z = r["Z"].cast<In<cd>>();
+            if (z.ndim() == 3) z = z.reshape({z.shape(0) * z.shape(1), z.shape(2)});
+            c->Z = mat(z);
+        }
         h.cpm = std::move(c);
         return h;
     }

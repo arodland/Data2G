@@ -62,28 +62,10 @@ def import_native():
     return data2g_native, None
 
 
-# The wide-bin grids' study toggles (data2g.cpm, data2g.arq.policy; Python only): c8w50 on air is a grid, modes
-# and header words the C++ tables do not have, and the connect rules are a retry ladder C++ does not run, so
-# everything but the OFDM and audio providers stays Python (the shifter too: gear.GEAR_STUDY_ENV lists them).
-# (Each provider also routes a wide grid, L > 1, to Python by itself: the toolbox grids without a toggle.)
-WIDE_ENV = ("DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE", "DATA2G_CONNECT_SEQ", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST")
-WIDE_NATIVE = {"base", "waveform", "modem", "audio"}
-
-
-def study_skip() -> set:
-    """Providers the study toggles in the environment keep in Python."""
-    import os
-
-    if any(os.environ.get(v, "") not in ("", "0", "off") for v in WIDE_ENV):
-        return set(PROVIDERS) - WIDE_NATIVE
-    return set()
-
-
 def build(native, skip=()):
     unknown = set(skip) - PROVIDERS.keys()
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
-    skip = set(skip) | study_skip()
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:

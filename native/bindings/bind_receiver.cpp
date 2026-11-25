@@ -68,7 +68,14 @@ py::dict rx_dict(const receiver::Rx& rx) {
     for (const auto& s : r.soft) soft.append(np(s));
     d["soft"] = soft;
     d["E"] = np(r.E);
-    d["Z"] = np(r.Z);
+    if (r.Z.rows) {  // cpm.receive's (n, m) bins, a wide grid's (n, L, m); none where the grid is not coherent
+        const auto& g = cpm::grid_of(*r.spec);
+        py::array z = np(r.Z);
+        if (g.L > 1)
+            z = z.reshape({static_cast<py::ssize_t>(r.Z.rows / g.L), static_cast<py::ssize_t>(g.L),
+                           static_cast<py::ssize_t>(g.m)});
+        d["Z"] = z;
+    }
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;
