@@ -10,7 +10,7 @@ is not ported, so native builds and `--native` tests do not match this branch wi
 - Merged heads, each as its own merge commit:
   - `fsk-wide-bins` 1e7f391 (#306)
   - `c32r62-r23` e94ab39 (#307)
-  - `scattered-pilots` 898cdcf (#308)
+  - `scattered-pilots` bbc0b40 (#308)
 - Only here: the three-way tone likelihood (per-tone floors, sub-window sums, leak model), the leak gate on sub-window
   sums, the defaults, one `native_subs.study_skip()` for all toggles, this file.
 - Not a release candidate. Nothing here has been on air.
@@ -19,7 +19,8 @@ is not ported, so native builds and `--native` tests do not match this branch wi
 
 | Switch | Default here | Off value | What it does |
 |---|---|---|---|
-| `DATA2G_PILOTS` | `mix` | `off` or empty | OFDM pilots scattered through the frame (same 1/6 of the cells) instead of a pilot row: k3d2's stride on `w` and `w48`, the golden-ratio stride on n10 and n4. `k3d2`, `gold`, `mix`. Wire change, both ends. |
+| `DATA2G_PILOTS` | `mix` | `off` or empty | OFDM pilots scattered through the frame (same 1/6 of the cells) instead of a pilot row: k3d2's stride on `w` and `w48`, the golden-ratio stride on n10 and n4. `k3d2`, `gold`, `mix`. The header copy frame opens and closes on conj(pilot). Wire change, both ends. |
+| `DATA2G_SC_SPREAD_LOO`, `DATA2G_SC_COPY_COHERENT`, `DATA2G_SC_COPY_ROWS` | `1` each (with the pilots) | `0` | Short-burst receiver remedies: the spread by the pilots' leave-one-out fit on `w` and `w48`; find_copy adds the combs coherently; copies gated on the copy frame's two rows. Off one at a time, hilat-m 10 dB loses 24%, 37% and 37%. |
 | `DATA2G_CPM_LEAK` | `ctl,data,dd,ctlsq` | `off` or empty | CPM soft values treat the energy beside a tone as that tone's Doppler leak, not as noise (`cpm.leak_metric`), on master's per-tone floors, only where a codeword's spill is significant. `ctlsq`: a control codeword whose rows read a significant spill >= 0.15 stays on the square law. Receiver only. |
 | `DATA2G_CPM_LEAK_Z` | `2.0` | `0` (no gate) | The gate: the leak model applies to a codeword only where its spill stands this many standard errors over 0; elsewhere the metric is master's exactly. |
 | `DATA2G_CPM_LEAK_K` | `0.5` | | The share of unmodelled leak counted as noise. |
@@ -81,8 +82,8 @@ the tables against the settings in effect). Run a suite alone: `tests/test_host.
 
 | Switches | Plain | `--native` |
 |---|---|---|
-| All off | 2472 passed, 0 failed | 2446 passed, 0 failed |
-| Defaults | 887 passed, 19 failed | 865 passed, 18 failed |
+| All off | 2473 passed, 0 failed | 2446 passed, 0 failed |
+| Defaults | 888 passed, 19 failed | 865 passed, 18 failed |
 
 With the defaults most parity tests skip: they compare C++ with a Python reference the toggles change by design.
 The feature tests of all three branches pass. The 19 failures assert today's wire or today's receiver and were left
@@ -93,7 +94,8 @@ as they are:
     - `test_modem.py::test_timing_slip_recovered[-64]`, `[85]`
     - `test_modem.py::test_a_steady_tone_does_not_read_as_pilots[n4]`
     - `test_equalizer.py::test_a_tone_on_one_carrier_does_not_sink_the_burst`
-    - `test_receiver.py::test_a_false_lock_on_data_does_not_cost_the_next_burst`
+    - `test_receiver.py::test_busy_ends_with_the_signal_not_a_false_headers_claim` (one seed holds 4.000000003 s
+      against a 4.0 s bound; the false-lock test that failed before now passes)
     - `test_sounding.py::test_fading`
   - Not ported: `test_channel_torch.py` x3, `test_fmtorch.py::test_bmi_agrees_with_the_numpy_receiver`.
   - As designed: `test_receiver.py::test_a_burst_decodes_while_it_arrives` (a flagged burst waits for its end;
@@ -110,32 +112,37 @@ The FM profile was not rerun on this build.
 
 ## Smoke loss study
 
-`scripts.loss_study_carrier`, 12 seeds x 600 s, `shift+cpm`, PEP 5, Python, all switches off (master + #317)
-against the defaults, paired. Delivered bit/s, mean of the seeds, change ± SE, seeds up / down. Driver:
-`runs/smoke3/chain.sh`; CSVs and logs beside it.
+`scripts.loss_study_carrier`, 12 seeds x 600 s, `shift+cpm`, PEP 5, Python, all switches off (master) against the
+defaults, paired. Delivered bit/s, mean of the seeds, change ± SE, seeds up / down. The all-off arm is
+`runs/smoke3/` (the all-off code is identical to master by hash); the defaults arm with the short-burst remedies is
+`runs/smoke4/`.
 
-| Cap | Cell | All off | Defaults | Change | Seeds | Previous build (95c94b1) |
+| Cap | Cell | All off | Defaults | Change | Seeds | Before the remedies |
 |---|---|---|---|---|---|---|
-| 2400 | hilat-d 10 | 82 | 111 | +36% ± 3 | 12/0 | +164% (off was 41) |
-| 2400 | hilat-m 10 | 89 | 285 | +220% ± 45 | 12/0 | +288% |
-| 2400 | hilat-m 20 | 89 | 303 | +242% ± 39 | 12/0 | +272% |
-| 2400 | lowlat-d 10 | 92 | 138 | +51% ± 7 | 12/0 | +47% |
-| 2400 | nvis-d 10 | 631 | 952 | +51% ± 5 | 12/0 | +51% |
-| 2400 | mpd 0 | 420 | 479 | +14.2% ± 1.9 | 12/0 | +14.2% |
-| 2400 | mpp 0 | 483 | 458 | -5.3% ± 2.0 | 1/10 | -5.3% |
-| 2400 | mpp -8 | 107 | 103 | -3.6% ± 2.9 | 3/9 | -4.4% |
-| 2400 | awgn -12 | 106 | 107 | +1.3% ± 0.5 | 5/0 | +17.7% |
-| 2400 | awgn -12, in-grid carrier | 106 | 135 | +28.0% ± 0.8 | 12/0 | -3.5% (other carrier cell) |
-| 2400 | awgn -15 | 82 | 76 | -7.6% ± 2.7 | 1/8 | new |
-| 2400 | awgn -19 | 21 | 20 | -1.9% ± 2.7 | 1/2 | new |
-| 2400 | awgn -20 | 11 | 10 | -5.4% ± 27 | 3/5 | new |
+| 2400 | hilat-d 10 | 82 | 110 | +35% ± 3 | 12/0 | +36% |
+| 2400 | hilat-m 10 | 89 | 646 | +623% ± 60 | 12/0 | +220% |
+| 2400 | hilat-m 20 | 89 | 555 | +527% ± 78 | 12/0 | +242% |
+| 2400 | lowlat-d 10 | 92 | 131 | +42% ± 7 | 12/0 | +51% |
+| 2400 | nvis-d 10 | 631 | 1052 | +67% ± 3 | 12/0 | +51% |
+| 2400 | mpd 0 | 420 | 455 | +8.4% ± 2.6 | 10/1 | +14.2% |
+| 2400 | mpp 0 | 483 | 485 | +0.3% ± 2.0 | 6/4 | -5.3% |
+| 2400 | mpp -8 | 107 | 111 | +3.6% ± 2.2 | 6/2 | -3.6% |
+| 2400 | awgn -12 | 106 | 107 | +1.3% ± 0.5 | 5/0 | +1.3% |
+| 2400 | awgn -12, in-grid carrier | 106 | 134 | +27% ± 1 | 12/0 | +28% |
+| 2400 | awgn -15 | 82 | 76 | -7.6% ± 2.7 | 1/8 | -7.6% |
+| 2400 | awgn -19 | 21 | 20 | -1.9% ± 2.7 | 1/2 | -1.9% |
+| 2400 | awgn -20 | 11 | 10 | -5.4% ± 27 | 3/5 | -5.4% |
 | 2400 | awgn 6 | 1730 | 1714 | -1.0% ± 0.0 | 0/12 | -1.0% |
 | 500 | mpd 0 | 179 | 251 | +40.5% ± 5.3 | 12/0 | +40.5% |
 | 500 | mpp 0 | 270 | 290 | +7.3% ± 1.5 | 11/0 | +7.3% |
 
-- The carrier is `carrier12`: a steady 1573.4 Hz tone 12 dB over the floor in 50 Hz (#295's cell). The previous
-  build's carrier cell was a different one (18 dB at 1507 Hz).
-- hilat-d's gain is smaller because master's #313 and #316 lifted the all-off arm from 41 to 82 bit/s.
+- The remedies against the defaults before them, paired: hilat-m 10 / 20 +126% / +83%, mpp -8 +7.4% (9/2), mpp 0
+  +5.9% (9/3), nvis-d 10 +10.5% (10/2); mpd 0 -5.1% ± 1.8 (2/10), lowlat-d 10 -5.7% ± 7.1; every other cell 0.
+- mpd 0's loss has no single cause found. Most of it is one seed (479 to 367); the leave-one-out spread accounts
+  for about 2 points of it; the coherent copy search and the row gate for none. Accepted for now.
+- The carrier is `carrier12`: a steady 1573.4 Hz tone 12 dB over the floor in 50 Hz (#295's cell).
+- hilat-d's gain is smaller than on the first builds because master's #313 and #316 lifted the all-off arm from 41
+  to 82 bit/s.
 - awgn -12's earlier +17.7% came from r2/3 on its zero-shot row. With r2/3's regenerated threshold row, robust
   start's bound and the changed replies, the shifter picks it less there.
 - 2 sessions of 12 deliver nothing at awgn -20 in every arm, plain master included.
@@ -171,10 +178,15 @@ To rerun (no native):
 ## Caveats
 
 Scattered pilots (`DATA2G_PILOTS`):
-- Mid-SNR and floor cells lose: mpp 0 -5%, mpp -8 about 4-8%, awgn -15 about 6%. Cause: header and control loss on
-  short OFDM bursts (ack-4f header lost 18% against 12% at mpp -8). Being worked on.
-- A false lock: on one seed the comb `find_copy` locked a burst's header copy 3504 samples early and held the
-  receiver past the real preamble (`test_a_false_lock_on_data_does_not_cost_the_next_burst`). Being worked on.
+- The short-burst remedies took mpp 0 and mpp -8 from -5% and -4% to level; awgn -15 still loses about 6% (the
+  split above) and mpd 0 at 2400 Hz lost 5% to them (see the smoke notes). Header recall with the preamble cut is
+  under half of pilot rows' (0.09 against 0.18 on slow cells).
+- The false lock is fixed: the copy frame (pilot, header, pilot) had the shape of the real header (last preamble
+  repeat, header, header pilot), so a preamble hypothesis two frames early read the header as its copy. The copy
+  frame now opens and closes on conj(pilot). Own-traffic runs, 3 h: busy off air 13.4 s/h against 11.6 with
+  pilot rows (16.8 before the fix); false headers and received bursts unchanged.
+- `test_busy_ends_with_the_signal_not_a_false_headers_claim` fails on one seed by a hold of 4.000000003 s
+  against a 4.0 s bound (over 4 seeds the hold is 10.4 s against 21.6 s before).
 - No slip search; no per-carrier noise; the n4 pilot-coherence gate is not recalibrated for gold.
 - The w48 channel estimate costs more CPU (250-290 ms once per new statistics, about 120 ms a burst on a fast
   channel, Python).
