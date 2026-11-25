@@ -284,6 +284,7 @@ def r23_offered(monkeypatch):
         c.cache_clear()
 
 
+@pytest.mark.python_only("fsk32r62-r2/3 is not in native")
 def test_r23_announced_at_index_4_and_older_words_unchanged(r23_offered):
     """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
     the two older modes' words are what they were, the recommendation codes
@@ -380,3 +381,49 @@ def test_a_carrier_does_not_read_as_signal_in_snr_est():
         for hz, inr, low in ((1573.4, 12.0, -1.0), (1330.0, 18.0, -1.5)):  # before: +2.0..+2.5, +5.4..+6.0
             d = est(seed, carrier_hz=hz, inr_db=inr) - clean
             assert low < d < 0.5, (seed, hz, inr, d)
+
+
+def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
+    """with_native / --native under a CPM study toggle: the soft-value ones keep
+    every provider that makes or decodes CPM soft values in Python (C++ has
+    master's metric), fsk32r62-r2/3 offered keeps all but the OFDM and audio ones."""
+    import native_subs
+
+    for v in native_subs.CPM_SOFT_ENV + native_subs.CPM_MODE_ENV:
+        monkeypatch.delenv(v, raising=False)
+    assert native_subs.study_skip() == set()
+    monkeypatch.setenv("DATA2G_CPM_R23", "0")
+    assert native_subs.study_skip() == set()
+    monkeypatch.setenv("DATA2G_CPM_LEAK", "ctl,data,dd,ctlsq")
+    assert native_subs.study_skip() == native_subs.CPM_SOFT_PY
+    monkeypatch.setenv("DATA2G_CPM_R23", "1")
+    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.CPM_MODE_NATIVE
+    assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()
+
+
+def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):
+    """The leak model (DATA2G_CPM_LEAK) leaves a codeword on today's metric
+    unless its spill stands LEAK_Z standard errors out: AWGN codewords score
+    exactly as without it; a tone leaking a fifth of its energy into each
+    neighbour (c16r25 on 30 Hz) goes on leak_metric."""
+    g = cpm.GRIDS["c16r25"]
+    rng = np.random.default_rng(4)
+
+    def codeword(leak, esn0=8.0, n=240):
+        t = rng.integers(0, g.m, n)
+        h = np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        y = (rng.normal(size=(n, g.m)) + 1j * rng.normal(size=(n, g.m))) / np.sqrt(2)
+        y[np.arange(n), t] += h
+        for d in (-1, 1):
+            k = np.clip(t + d, 0, g.m - 1)
+            y[np.arange(n), k] += np.sqrt(leak) * np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        return np.abs(y) ** 2
+
+    awgn = [codeword(0.0, esn0) for esn0 in (0.5, 2.0, 8.0, 30.0) for _ in range(5)]
+    leaky = codeword(0.2)
+    today = [cpm.tone_metric(g, E, "data") for E in awgn]
+    monkeypatch.setattr(cpm, "LEAK", frozenset({"data"}))
+    assert sum(cpm.spill_significant(E) for E in awgn) <= 1
+    assert sum(np.array_equal(cpm.tone_metric(g, E, "data"), t) for E, t in zip(awgn, today)) >= len(awgn) - 1
+    assert cpm.spill_significant(leaky)
+    assert np.array_equal(cpm.tone_metric(g, leaky, "data"), cpm.leak_metric(leaky, cpm.LEAK_K))

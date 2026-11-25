@@ -62,21 +62,41 @@ def import_native():
     return data2g_native, None
 
 
-# The wide-bin grids' study toggles (data2g.cpm, data2g.arq.policy; Python only): c8w50 on air is a grid, modes
-# and header words the C++ tables do not have, and the connect rules are a retry ladder C++ does not run, so
-# everything but the OFDM and audio providers stays Python (the shifter too: gear.GEAR_STUDY_ENV lists them).
+# The study toggles (Python only; native has master's defaults), merged from the three branches. On
+# fast-fading-integration most are ON by default, so this reads what is in effect (the modules' settings), not
+# the environment:
+# - c8w50 on air, a connect sequence with W, every wide mode (DATA2G_CPM_ONAIR, DATA2G_CONNECT_SEQ,
+#   DATA2G_CPM_WIDE, DATA2G_ROBUST_*), or fsk32r62-r2/3 offered (DATA2G_CPM_R23): a grid, modes, header words,
+#   a recommendation code and a retry ladder the C++ tables and session do not have: everything but the OFDM
+#   and audio providers stays Python (the shifter too).
+# - the leak metric or the spill weights (DATA2G_CPM_LEAK, _LEAK_K, _LEAK_Z, _CTL_SQ, _SPILL): CPM soft values
+#   C++ makes with master's metric: cpm, the receiver, phy's ModemRx, the engine and host, and arq (the C++
+#   Station and Session).
+# - scattered pilots (DATA2G_PILOTS): every provider that builds, receives or decodes an OFDM frame, plus burst
+#   timing and the shifter (a flagged burst is 24 ms longer).
 # (Each provider also routes a wide grid, L > 1, to Python by itself: the toolbox grids without a toggle.)
-WIDE_ENV = ("DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE", "DATA2G_CONNECT_SEQ", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST")
 WIDE_NATIVE = {"base", "waveform", "modem", "audio"}
+CPM_SOFT_PY = {"cpm", "receiver", "phy", "engine", "host", "arq"}
+PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}
 
 
 def study_skip() -> set:
-    """Providers the study toggles in the environment keep in Python."""
+    """Providers the study toggles in effect keep in Python."""
     import os
 
-    if any(os.environ.get(v, "") not in ("", "0", "off") for v in WIDE_ENV):
-        return set(PROVIDERS) - WIDE_NATIVE
-    return set()
+    from data2g import config, cpm
+
+    skip = set()
+    if (cpm.ON_AIR_WIDE or cpm.WIDE_ON or cpm.R23
+            or any(os.environ.get(v, "") not in ("", "0", "off")
+                   for v in ("DATA2G_CONNECT_SEQ", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST"))):
+        skip |= set(PROVIDERS) - WIDE_NATIVE
+    if cpm.LEAK or any(v in os.environ for v in ("DATA2G_CPM_LEAK_K", "DATA2G_CPM_LEAK_Z", "DATA2G_CPM_CTL_SQ",
+                                                    "DATA2G_CPM_SPILL")):
+        skip |= CPM_SOFT_PY
+    if getattr(config, "SC_BANDS", ()):
+        skip |= set(PROVIDERS) - PILOTS_NATIVE
+    return skip
 
 
 def build(native, skip=()):

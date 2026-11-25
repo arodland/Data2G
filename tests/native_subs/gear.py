@@ -6,7 +6,8 @@ data2g.arq.modes, .predictor and .policy. See __init__.py."""
 GEAR_STUDY_ENV = ("DATA2G_OUTCOME_MODEL", "DATA2G_OUTCOME_GATE", "DATA2G_OUTCOME_FAST", "DATA2G_SPREAD_CARRY", "DATA2G_COND_OFFSETS", "DATA2G_CPM_FLOOR", "DATA2G_OUTCOME_LCB", "DATA2G_LOGIT_OFFSETS", "DATA2G_DROP_MODES",
                   "DATA2G_BIAS_FIX", "DATA2G_NOISE_RULE",
                   # the wide-bin grids (scripts/wide_fsk_study.py): c8w50 on air, its connect rules, every wide mode
-                  "DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST", "DATA2G_CONNECT_SEQ")
+                  "DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST", "DATA2G_CONNECT_SEQ",
+                  "DATA2G_CPM_R23")  # a mode C++ has no table row for (also __init__.study_skip: everything CPM)
 # GearShifter fields the C++ shifter doesn't keep: study inputs (link history,
 # energy) that models with those inputs read in Python only
 PY_ONLY_GEAR = {"turns", "timeouts_seen", "link_now", "snrs_long"}

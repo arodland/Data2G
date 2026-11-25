@@ -1,5 +1,5 @@
 {
- "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never; CPM rows rerun 2026-10-27 on cpm-gfm-on-acq (GF(M) data code on the cpm-acq-gap receiver, the same seeded study, native; runs/cpm-combined/ladder_cpm_combined.csv); fsk32r62-r2/3 added 2026-11-23: fsk32r62-r1/2's row plus the paired difference of the two on the same seeded study, Python (runs/ladder_r23.csv on c32r62-r23: r1/2 -8.75 -2.9375 -3.3125 -3.125, r2/3 -8.9375 -1.25 -2.1875 -2.0)",
+ "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never; CPM rows rerun 2026-10-27 on cpm-gfm-on-acq (GF(M) data code on the cpm-acq-gap receiver, the same seeded study, native; runs/cpm-combined/ladder_cpm_combined.csv); fsk32r62-r2/3 (2026-11-25): fsk32r62-r1/2's row plus the paired difference of the two modes' bursts (control and data codeword both decoded, ladder_study's measure), 200 seeded trials a point at 0.5 dB, the same seeds for both (scripts/c32_rate_study.py, runs/row_*.csv on c32r62-r23): +0.03 awgn, +0.83 mpg, +0.93 mpp, +1.10 mpd. The 2026-11-23 row took ladder_study's paired difference, -0.19 on awgn: there both bursts fail on the shared control codeword (10% at -13.5 dB PEP cell for each), so the difference was the search's noise and put r2/3 under r1/2 (data codewords alone: r2/3 1.2, 2.1, 3.1, 3.4 dB worse)",
  "channels": [
   "awgn",
   "mpg",
@@ -308,10 +308,10 @@
    99
   ],
   "fsk32r62-r2/3": [
-   -8.1875,
-   -0.3125,
-   -1.625,
-   -1.625
+   -7.97,
+   -1.17,
+   -1.82,
+   -1.65
   ]
  }
 }
