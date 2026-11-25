@@ -1636,11 +1636,12 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
         cand = [v for v in SC_SPREADS if v >= (SC_FAST_HZ if len(pair) else equalizer.DEFAULT_SPREAD_HZ)]
         if SC_SPREAD_ALL or loo_rule:
             cand = [*SC_SPREADS_SLOW, *SC_SPREADS]
-        fits = [_sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[2:]
+        search = _sc_interior(norm, o_sym[o_kind > 0], n_air)
+        fits = [_sc_joint(o_sym, o_k, o_kind, o_val, search, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[2:]
                 for v in cand]
         # a tone's carriers miss by far more than the rest whatever the spread: scored without them
         i = int(np.argmin([np.sum(f[0]) for f in fits]))
-        hot = _sc_hot(*fits[i], n_f, n0_y / g**2)[0]
+        hot = _sc_hot(*fits[i], len(search), n0_y / g**2)[0]
         loo = np.array([np.sum(f[0][~hot]) for f in fits])
         if loo_rule:
             # equalizer.filter_spread's rule: too narrow costs more than too wide, so the widest whose error past
@@ -1705,6 +1706,20 @@ def _sc_slack(nc: int) -> int:
 
 
 SC_HOT_POWER = 8.0  # _sc_estimate's p_y leaves out carriers this many times the median's power (a tone)
+SC_SEARCH_MIN = int(os.environ.get("DATA2G_SC_SEARCH_MIN", 4))  # 0: every frame
+
+
+def _sc_interior(frames: np.ndarray, whole: np.ndarray, n_air: int) -> np.ndarray:
+    """The spread search's frames: those whose widest reach (SC_FRAMES frames either side) holds every frame's
+    pilots and no whole pilot symbol (whole: their symbols), which all share one pattern of observations, so one
+    solve a candidate spread; every frame when fewer than SC_SEARCH_MIN do."""
+    reach = SYMS_PER_FRAME * SC_FRAMES + 3
+    c = frames * SYMS_PER_FRAME + 2.5
+    inner = (c - reach >= 0) & (c + reach <= n_air * SYMS_PER_FRAME)
+    inner &= ~np.any(np.abs(whole[None, :] - c[:, None]) < reach, axis=1)
+    return frames[inner] if SC_SEARCH_MIN and inner.sum() >= SC_SEARCH_MIN else frames
+
+
 # _sc_estimate's hot carriers (PR #308 review, items 5 and 6; scripts/sc_tone.py, w48-qpsk-r1/3 at 8 dB, +25 dB
 # tone, 24 bursts): passes of the joint estimate with their pilots weighed by their own noise. 0 passes (their
 # noise to the decoder alone): mpd at 2200 Hz 84/144 codewords, 1 pass 108, 2 passes 108; mpp alike within 2.

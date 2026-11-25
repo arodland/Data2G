@@ -47,6 +47,21 @@ constexpr double SC_SLOW_RHO = 0.35;
 constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
 constexpr int SC_HOT_PASSES = 1;
+constexpr int SC_SEARCH_MIN = 4;  // modem.SC_SEARCH_MIN (its DATA2G_SC_SEARCH_MIN study switch is Python's)
+
+// modem._sc_interior: the spread search's frames, those whose widest reach holds every frame's pilots and no whole
+// pilot symbol (whole: their symbols); every frame when fewer than SC_SEARCH_MIN do
+std::vector<int> sc_interior(const std::vector<int>& frames, const std::vector<double>& whole, int n_air) {
+    const double reach = SYMS_PER_FRAME * SC_FRAMES + 3;
+    std::vector<int> out;
+    for (int f : frames) {
+        const double c = f * SYMS_PER_FRAME + 2.5;
+        bool in = c - reach >= 0 && c + reach <= n_air * SYMS_PER_FRAME;
+        for (double w : whole) in = in && !(std::abs(w - c) < reach);
+        if (in) out.push_back(f);
+    }
+    return static_cast<int>(out.size()) >= SC_SEARCH_MIN ? out : frames;
+}
 constexpr double SC_HOT_EXCESS = 4.0;
 constexpr double SC_HOT_POWER = 8.0;
 
@@ -192,7 +207,8 @@ DATA2G_SIMD_CLONES void tri_solves(const double* lr, const double* li, size_t n,
 // pilots: the weights at the frame's scattered pilots alone (the spread search's leave-one-out needs no more)
 std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::span<const int> k, std::span<const int> kd,
                                             const std::vector<cd>& Rf, int nc, double spread,
-                                            const std::array<double, 3>& nr, std::span<const double> nk, bool pilots) {
+                                            const std::array<double, 3>& nr, std::span<const double> nk, bool pilots,
+                                            const Mat<cd>& Bd) {
     const auto& cells = sc_cells(nc);
     const size_t un = rel.size(), unc = static_cast<size_t>(nc);
     std::vector<size_t> rows;  // the frame's cells weighed
@@ -211,30 +227,70 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
     }
     // X = Bm^H (n x R): Bm[r][j] = doppler((sym_r - rel_j) Ts) Rf[k_r, k_j]
     Mat<cd> Bm(R, un);
-    std::vector<double> Xr(un * R), Xi(un * R);
     for (size_t r = 0; r < R; ++r) {
         const double cs = static_cast<double>(rows[r] / unc);  // np.divmod: the cell's symbol, its carrier
         const size_t ck = rows[r] % unc;
-        for (size_t j = 0; j < un; ++j) {
+        for (size_t j = 0; j < un; ++j)
             Bm[r][j] = equalizer::doppler_corr((cs - rel[j]) * TSYM, spread) * Rf[ck * unc + static_cast<size_t>(k[j])];
-            Xr[j * R + r] = Bm[r][j].real();
-            Xi[j * R + r] = -Bm[r][j].imag();
+    }
+    // Factored (the whole frame's cells, a support narrower than the band): Rf = Bd Bd^H / nd, so Bm = E G with
+    // G[(s, d), j] = doppler((s - rel_j) Ts) conj(Bd[k_j, d]) / nd and E's row r Bd[k_r, :] in symbol s_r's block:
+    // the solves take G^H's 6 nd columns, not Bm^H's 6 nc. Exact (the same algebra); 1.6-2x on w48's slow frames.
+    const size_t nd = Bd.cols, S = static_cast<size_t>(SYMS_PER_FRAME);
+    const bool factored = !pilots && S * nd < R;
+    const size_t RHS = factored ? S * nd : R;
+    std::vector<double> Xr(un * RHS), Xi(un * RHS);
+    for (size_t j = 0; j < un; ++j) {
+        if (factored) {
+            const cd* bk = Bd[static_cast<size_t>(k[j])];
+            for (size_t sy = 0; sy < S; ++sy) {
+                const double dp = equalizer::doppler_corr((static_cast<double>(sy) - rel[j]) * TSYM, spread) / static_cast<double>(nd);
+                for (size_t d = 0; d < nd; ++d) {  // conj(G[(s, d), j]) = dp Bd[k_j, d]
+                    Xr[j * RHS + sy * nd + d] = dp * bk[d].real();
+                    Xi[j * RHS + sy * nd + d] = dp * bk[d].imag();
+                }
+            }
+        } else {
+            for (size_t r = 0; r < R; ++r) {
+                Xr[j * RHS + r] = Bm[r][j].real();
+                Xi[j * RHS + r] = -Bm[r][j].imag();
+            }
         }
     }
     // A is Hermitian positive definite (a Gaussian in time times a delay prior, plus noise): Cholesky, else LU
     if (cholesky_split(Ar.data(), Ai.data(), un)) {
-        tri_solves(Ar.data(), Ai.data(), un, Xr.data(), Xi.data(), R, true);
+        tri_solves(Ar.data(), Ai.data(), un, Xr.data(), Xi.data(), RHS, true);
     } else {
-        std::vector<cd> A(un * un), X(un * R);
+        std::vector<cd> A(un * un), X(un * RHS);
         for (size_t i = 0; i < un; ++i)
             for (size_t j = 0; j < un; ++j)
                 A[i * un + j] = equalizer::doppler_corr((rel[i] - rel[j]) * TSYM, spread) *
                                 Rf[static_cast<size_t>(k[i]) * unc + static_cast<size_t>(k[j])];
         for (size_t i = 0; i < un; ++i)
             A[i * un + i] += nr[static_cast<size_t>(kd[i])] * (nk.empty() ? 1.0 : nk[static_cast<size_t>(k[i])]);
-        for (size_t q = 0; q < X.size(); ++q) X[q] = std::conj(Bm.data[q % R * un + q / R]);
-        linalg::lu_solve(A.data(), static_cast<int>(un), X.data(), static_cast<int>(R));
+        for (size_t q = 0; q < X.size(); ++q) X[q] = cd(Xr[q], Xi[q]);
+        linalg::lu_solve(A.data(), static_cast<int>(un), X.data(), static_cast<int>(RHS));
         for (size_t q = 0; q < X.size(); ++q) Xr[q] = X[q].real(), Xi[q] = X[q].imag();
+    }
+    if (factored) {  // W[r][j] = sum_d Bd[k_r, d] conj(X[j][(s_r, d)]), back into the unfactored layout
+        std::vector<double> Wr(un * R), Wi(un * R);
+        for (size_t r = 0; r < R; ++r) {
+            const size_t sy = rows[r] / unc, ck = rows[r] % unc;
+            const cd* bk = Bd[ck];
+            for (size_t j = 0; j < un; ++j) {
+                const double* xr = Xr.data() + j * RHS + sy * nd;
+                const double* xi = Xi.data() + j * RHS + sy * nd;
+                double a = 0.0, b = 0.0;  // sum_d bk[d] conj(x[d])
+                for (size_t d = 0; d < nd; ++d) {
+                    a += bk[d].real() * xr[d] + bk[d].imag() * xi[d];
+                    b += bk[d].imag() * xr[d] - bk[d].real() * xi[d];
+                }
+                Wr[j * R + r] = a;
+                Wi[j * R + r] = -b;  // stored as X = W^H, as the unfactored solve leaves it
+            }
+        }
+        Xr.swap(Wr);
+        Xi.swap(Wi);
     }
     auto w = std::make_shared<Weights>();
     w->W = Mat<cd>(R, un);
@@ -315,14 +371,19 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         }
     }
     if (!missing.empty()) {
-        std::vector<cd> Rf = equalizer::gram(equalizer::bb(config::band(band)), support.first, support.second, slack);
+        const auto bbv = equalizer::bb(config::band(band));
+        std::vector<cd> Rf = equalizer::gram(bbv, support.first, support.second, slack);
         const double width = support.second - support.first + 2 * slack + 1;
         for (auto& v : Rf) v /= width;
+        Mat<cd> Bd(unc, static_cast<size_t>(width));
+        for (size_t c = 0; c < unc; ++c)
+            for (int d = support.first - slack; d <= support.second + slack; ++d)
+                Bd[c][static_cast<size_t>(d - support.first + slack)] = std::polar(1.0, (-2.0 * PI * (bbv[c] * d)) * (1.0 / FS));
         std::vector<std::shared_ptr<const Weights>> made(missing.size());
         pool::parallel_for(missing.size(), [&](size_t m) {
             const size_t i = missing[m];
             made[m] = make_weights(rels[i], std::span<const int>(o.k).subspan(lo[i], hi[i] - lo[i]),
-                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, nk, pilots);
+                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, nk, pilots, Bd);
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
@@ -787,11 +848,15 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
             if (loo_rule || v >= (pairs ? SC_FAST_HZ : equalizer::DEFAULT_SPREAD_HZ)) cand.push_back(v);
         std::vector<Joint> fits;
         std::vector<double> loo;
-        for (double v : cand) fits.push_back(joint(o, norm, db, support, v, nr_sc, nr_full, p_sig, true));
+        std::vector<double> whole;
+        for (size_t j = 0; j < o.sym.size(); ++j)
+            if (o.kind[j] > 0) whole.push_back(o.sym[j]);
+        const auto search = sc_interior(norm, whole, static_cast<int>(n_air));
+        for (double v : cand) fits.push_back(joint(o, search, db, support, v, nr_sc, nr_full, p_sig, true));
         // a tone's carriers miss by far more than the rest whatever the spread: scored without them
         for (const auto& f : fits) loo.push_back(sum(f.loo));
         size_t i = static_cast<size_t>(std::min_element(loo.begin(), loo.end()) - loo.begin());
-        const auto hot0 = sc_hot(fits[i].loo, fits[i].model, n_f, n0_y / (g * g)).first;
+        const auto hot0 = sc_hot(fits[i].loo, fits[i].model, static_cast<int>(search.size()), n0_y / (g * g)).first;
         for (size_t c = 0; c < fits.size(); ++c) loo[c] = sum(fits[c].loo, &hot0);
         i = static_cast<size_t>(std::min_element(loo.begin(), loo.end()) - loo.begin());
         if (loo_rule) {  // the widest within SC_LOO_TOL of the best's error past the noise
