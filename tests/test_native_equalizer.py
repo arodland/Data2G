@@ -182,8 +182,8 @@ def _capture(monkeypatch, name):
                                              ("w48-16qam-r1/2", 5, 30.0)] if c[0] in SUBMODES])  # FM has no n4
 def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n_cw, snr):
     # Python's receive, so its equalizer calls can be captured (--native
-    # substitutes the whole of modem.receive)
-    for name in ("receive", "data_channel"):
+    # substitutes the whole of modem.receive), and sc_refine (DATA2G_PILOTS)
+    for name in ("receive", "data_channel", "sc_refine"):
         monkeypatch.setattr(modem, name, reference(modem, name))
     est_calls, ref_calls = _capture(monkeypatch, "estimate"), _capture(monkeypatch, "refine")
     r, post = _received(submode, n_cw, snr, seed=n_cw)

@@ -138,7 +138,7 @@ def test_delay_support_noise_gate_keeps_a_lone_path_narrow():
     assert max(narrow) <= 8
 
 
-def test_dd_time_pass_low_rank_matches_the_exact_solve(monkeypatch):
+def test_dd_time_pass_low_rank_matches_the_exact_solve(monkeypatch, reference):
     """refine's time pass in its reduced-rank form (DD_LOWRANK_TOL) against the exact solve (a negative
     tolerance: full rank, which the cost rule sends to the exact solve), on a real fading receive with half
     the codewords known and then all: well under the estimate's own error."""
@@ -154,6 +154,8 @@ def test_dd_time_pass_low_rank_matches_the_exact_solve(monkeypatch):
     x = np.concatenate([np.zeros(3000), modem.modulate(sent, spec), np.zeros(3000)])
     y = hfchannel.apply_channel(x, snr_db=10.0, fading_preset=FadingPreset("mpd", 2.0, 2.0), seed=16)
     calls, refine = [], equalizer.refine
+    # (scattered pilots, DATA2G_PILOTS: Python's sc_refine, so its refine call is the one captured under --native)
+    monkeypatch.setattr(modem, "sc_refine", reference(modem, "sc_refine"))
     monkeypatch.setattr(equalizer, "refine", lambda *a, **k: calls.append(copy.deepcopy((a, k))) or refine(*a, **k))
     r = modem.receive(y)
     bits = np.stack([codes.encode(spec, p, index=i) for i, p in enumerate(sent)])
