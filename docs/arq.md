@@ -859,6 +859,25 @@ data2g/arq/engine.py). Off by default.
 
 As built (data2g/arq/policy.py):
 
+- **Post-decode data-aided MER (`phy.data_mer`, issue #290):** repeating low-PAPR
+  pilots absorb transmitter audio-path distortion into the channel estimate `h`,
+  while higher-PAPR data symbols take it as noise. After decoding an OFDM burst,
+  `ModemRx.measure_data` measures the data-cell residual variance `|y - h*x|^2`
+  using exact re-encoded symbols for decoded slots and a strided top-K
+  Gaussian-mixture EM (at most `MER_MAX_EM_CELLS = 1024` cells, `MER_EM_TOP_K = 12`
+  nearest points, `MER_EM_ITERS = 6`) for undecoded slots. It attaches `mer_db`
+  (2500 Hz reference bandwidth) and, when the data-cell variance exceeds the
+  pilot-predicted baseline (`n0_k + mse + clip_ratio * |h|^2`, with `clip_ratio = 0`
+  on FM `f108` ≥ 16-QAM, which transmits unclipped) past `MER_DEADBAND_RATIO = 1.35`
+  (or `1 + 3 / sqrt(N)` on short bursts), adds the excess `delta * |h|^2` into the
+  shifter's `snr_est` and `mi_*` (via `GearShifter.update_measured`). Raw pilot
+  `snr_est` for `SN`, `REF`, `BCAST HEARD`, `_energy` flooring and recordings is
+  unchanged. On FM (`predictor.fm_outcome`), same-band candidates also cap their
+  effective SNR by their constellation's MIESM equivalent SNR from `mi_*` plus
+  `FM_MER_OFFSET_DB` (2.0 dB, matching the 15 kHz IF filter's offset in
+  `mode_thresholds.json`), catching frequency-selective rolloff alongside
+  nonlinear distortion. `DATA2G_DATA_MER=0` disables it (Python and native) for
+  paired studies.
 - The predictor sees the peer's last two bursts, not one. One burst can't tell a steady
   channel from 0.1 Hz fading. Two can: average them, or read the change between them.
 - Online correction: after each peer burst, the receiver compares what decoded with the

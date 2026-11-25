@@ -135,6 +135,9 @@ class Policy:
         decoded of those sent, `usable`: its control decoded (the gear
         shifter's online correction)."""
 
+    def update_measured(self, measured: dict):
+        """Refine the last burst's measurements after decoding (data-aided MER)."""
+
     # for the log
     measured: dict | None = None  # the peer's last burst, as measured
 
@@ -1077,9 +1080,17 @@ class Station:
         if not m or "snr_est" not in m:
             return ""
         mi = "/".join(f"{v:.2f}" for k, v in m.items() if k.startswith("mi_"))  # predictor.CONSTS' order
-        return (f" | snr {m['snr_est']:.1f} dB, spread {m.get('spread_est', 0.0):.2f} Hz,"
+        mer = f", mer {m['mer_db']:.1f} dB" if "mer_db" in m and m["mer_db"] is not None else ""
+        return (f" | snr {m['snr_est']:.1f} dB{mer}, spread {m.get('spread_est', 0.0):.2f} Hz,"
                 f" delay {m.get('delay_est_ms', 0.0):.1f} ms" + (f", mi {mi}" if mi else "")
                 + (f", energy {self.policy.energies[-1]:.1f} dB" if getattr(self.policy, "energies", None) else ""))
+
+    def _refine_measured(self, rx: RxBurst):
+        """Post-decode data-aided MER update (phy.ModemRx.measure_data), if supported."""
+        if self.policy.measured is not None and hasattr(rx, "measure_data"):
+            upd = rx.measure_data(self.policy.measured)
+            if upd is not None:
+                self.policy.update_measured(upd)
 
     def _comp_bit(self, seq: int) -> bool:
         c = self.tx.cws[seq]
@@ -1138,6 +1149,7 @@ class Station:
         this station must answer). Discards the burst otherwise."""
         self.stats["rx_ok" if (ok := self._handle(rx)) else "rx_lost"] += 1
         if not ok:
+            self._refine_measured(rx)
             log.info("RX %s%s | control lost, discarded", self._burst_desc(rx.submode, rx.n_cw), self._snr())
         return ok
 
@@ -1168,6 +1180,7 @@ class Station:
         except ProtocolError as e:
             self._fail(f"protocol: {e}")
             return True
+        self._refine_measured(rx)
         if log.isEnabledFor(logging.INFO):
             self._log_rx(rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned)
         self.reply_lost = repeat

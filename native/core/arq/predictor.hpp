@@ -22,9 +22,18 @@ namespace data2g::arq {
 std::string_view const_family(std::string_view name);
 // np.interp over the family's table (clamped at the ends).
 double capacity(double snr_db, std::string_view constellation);
+// Invert capacity: effective MI -> equivalent per-cell SNR (dB), +inf when saturated.
+double inv_capacity(double mi, std::string_view constellation);
+// 10 log10(occupied bandwidth / SNR_REF_BW_HZ) for an OFDM band.
+double band_bw_db(std::string_view band);
+// Data-aided MER toggle (DATA2G_DATA_MER=0 disables; read once) and FM offset (DATA2G_FM_MER_OFFSET, default 2.0 dB).
+bool data_mer_default();
+double fm_mer_offset_db();
 // Mean capacity at |h|^2 / var over the channel uses (same length).
 double effective_mi(std::span<const std::complex<double>> h, std::span<const double> var,
                     std::string_view constellation);
+// All four CONSTS' effective_mi in a single pass from precomputed |h|^2 and var.
+std::array<double, CONSTS.size()> effective_mi_all(std::span<const double> h2, std::span<const double> var);
 
 // A mode's burst peak-to-average under bandwidth cap code `cap`, dB: the
 // generated-table form (tables::MODE_PEAK_DB) of arq/phy.py's peak_db, which measures it.

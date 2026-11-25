@@ -122,6 +122,9 @@ public:
     virtual std::optional<double> reply_hold(Station&, const TxBurst&) { return std::nullopt; }
     // engine: the receiver's measurements of a peer burst
     virtual void observe(const Measured&, const std::string& /*submode*/, double /*now*/) {}
+    // post-decode data-aided MER update (issue #290)
+    virtual std::optional<Measured> last_measured() const { return std::nullopt; }
+    virtual void update_measured(const Measured&) {}
     // engine: a peer burst's in-band SNR from power alone (the energy inputs)
     virtual void observe_energy(double /*snr_db*/, double /*now*/) {}
     // engine: the burst I asked the peer for last, its mode and seconds on air (nullopt: none)
@@ -471,6 +474,7 @@ private:
     std::string mode(std::optional<int> rec);
     std::string burst_desc(const std::string& submode, int n_cw, bool dup = false);
     std::string snr();
+    void refine_measured(RxBurst& rx);
 };
 
 }  // namespace data2g::arq

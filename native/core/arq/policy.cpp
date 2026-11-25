@@ -133,6 +133,15 @@ void GearShifter::observe(const Measured& m_in, std::string_view submode, double
         spreads.erase(spreads.begin(), spreads.end() - tables::OUTCOME_GATE_HIST);
 }
 
+void GearShifter::update_measured(const Measured& m_in) {
+    if (!measured) return;
+    Measured m = m_in;
+    m.n0_spread_db = measured->n0_spread_db;
+    if (!m.noise && measured->noise) m.noise = measured->noise;
+    measured = m;
+    if (!snrs.empty()) snrs.back() = m.snr_est;
+}
+
 void GearShifter::observe_energy(double snr_db, double) {
     energies.push_back(snr_db);
     if (energies.size() > ENERGY_HIST) energies.erase(energies.begin(), energies.end() - ENERGY_HIST);
@@ -443,10 +452,15 @@ std::optional<double> GearPolicy::snr_est() {
 std::string GearPolicy::measured_extra() {
     if (!shifter.measured) return {};
     const Measured& m = *shifter.measured;
-    char buf[128];
+    char buf[160];
+    std::string out;
+    if (m.mer_db) {
+        std::snprintf(buf, sizeof buf, ", mer %.1f dB", *m.mer_db);
+        out += buf;
+    }
     std::snprintf(buf, sizeof buf, ", spread %.2f Hz, delay %.1f ms, mi %.2f/%.2f/%.2f/%.2f", m.spread_est,
                   m.delay_est_ms, m.mi[0], m.mi[1], m.mi[2], m.mi[3]);
-    std::string out = buf;
+    out += buf;
     if (!shifter.energies.empty()) {
         std::snprintf(buf, sizeof buf, ", energy %.1f dB", shifter.energies.back());
         out += buf;

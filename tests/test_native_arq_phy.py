@@ -379,3 +379,41 @@ def test_partial_receive_and_advance_match(native, pure, snr, fading):
     assert [nat.decode(i, (7, 0, i), 0, ("p", i)) for i in range(n)] == keyed
     if fading is None:
         assert out == keyed == pl
+
+
+def test_data_mer_and_measure_data_match(native, pure):
+    """Issue #290: native data_mer and ModemRx.measure_data match Python across
+    clean (all decoded), distorted (0 decoded -> blind EM), and partial (semi-blind EM)."""
+    from data2g.arq import policy as G
+
+    name = "f108-256l-r87" if config.PROFILE == "fm" else "w48-256l-r5/8"
+    b, pl = ofdm_burst(name, 6, seed=9)
+    x = PHY.tx_audio(b)
+    pad = np.zeros(2400)
+    for clip in (None, 1.5):
+        xw = x if clip is None else np.clip(x, -clip, clip)
+        r = modem.receive(hfchannel.apply_channel(np.concatenate([pad, xw, pad]), snr_db=28.0, seed=4))
+        m_py, m_nat = PHY.measure(r), native.phy.measure(r)
+        spec = r["spec"]
+        full_coded = {i: codes.encode(spec, pl[i], 0, PHY.mask_value((7, 0, i)), index=i) for i in range(6)}
+        for subset in (full_coded, {0: full_coded[0], 3: full_coded[3]}, {}):
+            py_u = PHY.data_mer(r, subset, m_py)
+            nat_u = native.phy.data_mer(r, subset, m_nat)
+            assert set(nat_u) == set(py_u)
+            for k in py_u:
+                assert nat_u[k] == pytest.approx(py_u[k], rel=MEAS_TOL, abs=MEAS_TOL), (clip, len(subset), k)
+        py_rx, nat_rx = rx_pair(native, r, dd=False)
+        for i in range(6):
+            assert nat_rx.decode(i, (7, 0, i), 0, None) == py_rx.decode(i, (7, 0, i), 0, None)
+        u_py, u_nat = py_rx.measure_data(m_py), nat_rx.measure_data(m_nat)
+        for k in u_py:
+            assert u_nat[k] == pytest.approx(u_py[k], rel=MEAS_TOL, abs=MEAS_TOL), (clip, "rx", k)
+        # GearShifter.update_measured parity
+        g_py, g_nat = G.GearShifter(), native.arq.GearShifter()
+        g_py.observe(m_py, name, 1.0)
+        g_nat.observe(m_nat, name, 1.0)
+        g_py.update_measured(u_py)
+        g_nat.update_measured(u_nat)
+        assert g_nat.measured["snr_est"] == pytest.approx(g_py.measured["snr_est"], rel=MEAS_TOL, abs=MEAS_TOL)
+        assert g_nat.measured["mer_db"] == pytest.approx(g_py.measured["mer_db"], rel=MEAS_TOL, abs=MEAS_TOL)
+        assert g_nat.snrs == pytest.approx(g_py.snrs, rel=MEAS_TOL, abs=MEAS_TOL)
