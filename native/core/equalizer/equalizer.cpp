@@ -92,10 +92,27 @@ std::vector<double> bb(const config::Band& band) {
     return out;
 }
 
+std::vector<char> hot_carriers(const Mat<cd>& h) {
+    std::vector<double> pw(h.cols, 0.0);
+    for (size_t p = 0; p < h.rows; ++p)
+        for (size_t c = 0; c < h.cols; ++c) pw[c] += sq_abs(h[p][c]);
+    for (double& v : pw) v /= static_cast<double>(h.rows);
+    std::vector<double> s = pw;
+    std::ranges::sort(s);
+    const size_t n = s.size();
+    std::vector<char> hot(n, 0);
+    if (n == 0) return hot;
+    const double med = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+    for (size_t c = 0; c < n; ++c) hot[c] = pw[c] > HOT_CARRIER * med;
+    return hot;
+}
+
 double residual_cfo(const Mat<cd>& h) {
+    const std::vector<char> hot = hot_carriers(h);
     cd d = 0.0;
     for (size_t p = 1; p < h.rows; ++p)
-        for (size_t c = 0; c < h.cols; ++c) d += h[p][c] * std::conj(h[p - 1][c]);
+        for (size_t c = 0; c < h.cols; ++c)
+            if (!hot[c]) d += h[p][c] * std::conj(h[p - 1][c]);
     return std::abs(d) > 0 ? std::arg(d) / (2 * PI * FRAME_S) : 0.0;
 }
 

@@ -67,6 +67,18 @@ def test_a_tone_on_one_carrier_does_not_sink_the_burst():
         assert b.payloads == sent and all(b.crc_ok)
 
 
+def test_residual_cfo_leaves_a_tones_carrier_out():
+    """A steady tone on one carrier, 9x the signal's power there, turns 0.8 cycle a frame (2200 Hz on w48):
+    summed with the rest it pulls the reading off (sc_tone: -0.5 Hz on w48 at 8 dB, no offset; PR #308 review, item 7)."""
+    from data2g import equalizer
+
+    rng = np.random.default_rng(0)
+    h = np.ones((20, 48), complex) + 0.05 * (rng.standard_normal((20, 48)) + 1j * rng.standard_normal((20, 48)))
+    h[:, 37] += 3 * np.exp(2j * np.pi * 0.8 * np.arange(20))
+    assert abs(equalizer.residual_cfo(h)) < 0.02
+    assert equalizer.hot_carriers(h).tolist() == [k == 37 for k in range(48)]
+
+
 def test_per_carrier_noise_is_the_band_level_on_a_clean_channel():
     rng = np.random.default_rng(0)
     for m in (5, 20, 60):
