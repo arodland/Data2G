@@ -414,13 +414,22 @@ def test_coarse_track(native, reference):
             assert a[1:] == b[1:] and a[0] == pytest.approx(b[0], rel=RTOL), (g.name, kw)
 
 
-@pytest.fixture
-def leak_on(native, monkeypatch):
-    """The leak model on in both (DATA2G_CPM_LEAK=ctl,data,dd,ctlsq), the rest of the study as the environment set it."""
+# every knob off its default: the lock consumer on the leak model too, other k, gate, control threshold, spill weights
+ALL_KNOBS = dict(leak=frozenset({"lock", "ctl", "data", "dd", "ctlsq"}), leak_k=0.3, leak_z=0.0, ctl_sq=0.05,
+                 spill=dict(lock=0.5, ctl=0.7, data=0.0, dd=1.5))
+
+
+@pytest.fixture(params=["leak", "all"])
+def leak_on(native, monkeypatch, request):
+    """The leak model on in both: DATA2G_CPM_LEAK=ctl,data,dd,ctlsq (the rest
+    of the study as the environment set it), or every knob set (ALL_KNOBS)."""
     old = native.cpm.study()
-    leak = frozenset({"ctl", "data", "dd", "ctlsq"})
-    monkeypatch.setattr(cpm, "LEAK", leak)
-    native.cpm.set_study({**old, "leak": leak})
+    new = {**old, "leak": frozenset({"ctl", "data", "dd", "ctlsq"})} if request.param == "leak" else ALL_KNOBS
+    for k, v in (("LEAK", new["leak"]), ("LEAK_K", new["leak_k"]), ("LEAK_Z", new["leak_z"]), ("CTL_SQ", new["ctl_sq"]),
+                 ("SPILL", {**cpm.SPILL, **new["spill"]})):
+        monkeypatch.setattr(cpm, k, v)
+    native.cpm.set_study(new)
+    assert native.cpm.study() == {**new, "spill": {**old["spill"], **new["spill"]}}
     yield
     native.cpm.set_study(old)
 
@@ -465,6 +474,7 @@ def test_leak_model(native, reference, leak_on, name, chan):
     significant = [ref(reference, "spill_significant")(e) for e in cws]
     assert [native.cpm.spill_significant(e) for e in cws] == significant
     for e in cws:
+        np.testing.assert_allclose(native.cpm.tone_llr(g.name, e), ref(reference, "tone_llr")(g, e), rtol=1e-9, atol=1e-9)
         for use in ("lock", "ctl", "data", "dd"):
             np.testing.assert_allclose(native.cpm.tone_metric(e, use), ref(reference, "tone_metric")(g, e, use),
                                        rtol=1e-12, atol=1e-12)
@@ -490,6 +500,8 @@ def test_leak_model(native, reference, leak_on, name, chan):
 
     # receive: cpm.receive's steps on the Python reference
     s1, f1 = ref(reference, "refine")(g, y, s0, f, spec, n_data, dup)
+    a = native.cpm.refine(g.name, y, s0, f, spec.name, n_data, dup)
+    assert a[0] == s1 and a[1] == pytest.approx(f1, rel=RTOL)
     want, E1 = ref(reference, "soft")(g, spec, y, s1, f1, n_data, dup)
     r = dict(r, Z=ref(reference, "bins")(g, y, s1, lay.n, f1))
     if cpm.COH_CTL:
