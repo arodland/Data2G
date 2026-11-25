@@ -70,3 +70,12 @@ def test_exit_unkeys_only_a_radio_we_keyed(caplog):
     time.sleep(0.2)
     assert got[-1] == b"T 0\n"
     srv.close()
+
+
+def test_vara_send_commands_are_data():
+    """VARA's KISS sends frames with command 1 or 2 (issue #283); standard
+    TXDELAY and P carry one byte and stay commands."""
+    assert tnc.is_data(0x00, b"") and tnc.is_data(0x30, b"x")
+    assert tnc.is_data(0x01, b"ab") and tnc.is_data(0x12, b"ab")
+    assert not tnc.is_data(0x01, b"\x32") and not tnc.is_data(0x02, b"\x3f")
+    assert not tnc.is_data(0x03, b"ab") and not tnc.is_data(0x06, b"MODE x")
