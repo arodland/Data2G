@@ -143,8 +143,12 @@ py::dict est_dict(const modem::DataEstimate& e) {
     d["h"] = np3(e.h, S);
     d["mse"] = np3(e.mse, S);
     d["n0"] = e.n0;
-    // per frame (EST_WINDOW) as Python keeps it, (F, 1, nc); else (nc,)
-    if (e.h.cols && e.n0_k.size() > e.h.cols)
+    // per data cell as h (scattered pilots' hot carriers), (F, 5, nc); per frame (EST_WINDOW) as Python keeps it,
+    // (F, 1, nc); else (nc,)
+    if (e.h.cols && e.n0_k.size() == e.h.data.size())
+        d["n0_k"] = np(e.n0_k).reshape(std::vector<py::ssize_t>{static_cast<py::ssize_t>(e.h.rows / S),
+                                                                 static_cast<py::ssize_t>(S), static_cast<py::ssize_t>(e.h.cols)});
+    else if (e.h.cols && e.n0_k.size() > e.h.cols)
         d["n0_k"] = np(e.n0_k).reshape(std::vector<py::ssize_t>{
             static_cast<py::ssize_t>(e.n0_k.size() / e.h.cols), 1, static_cast<py::ssize_t>(e.h.cols)});
     else
@@ -502,7 +506,8 @@ void bind_modem(py::module_& m) {
         e.n0_k = vec(n0_k);
         e.clip_ratio = clip_ratio;
         const auto hm = mat2(h);
-        e.nc = static_cast<int>(hm.cols);  // n0_k per carrier, or per frame (F, 1, nc) flattened
+        e.nc = static_cast<int>(hm.cols);  // n0_k per carrier, per frame (F, 1, nc) or per cell (F, 5, nc) flattened
+        e.n_f = static_cast<int>(hm.rows / config::DATA_SYMS_PER_FRAME);
         const auto v = mo::noise_var(hm, e);
         return np(v).reshape(std::vector<py::ssize_t>(h.shape(), h.shape() + h.ndim()));
     });

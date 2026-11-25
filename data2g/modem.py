@@ -1577,8 +1577,15 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
     R = sb.spec.preamble_repeats
     reps = np.array([sb.demod_window(z, hd["start"] + PREAMBLE_CP + r * M, HEADER_BACKOFF) for r in range(R)])
     V = np.vander(np.arange(R) / R, 4)
-    n0 = float(np.sum(np.abs(reps - V @ np.linalg.lstsq(V, reps, rcond=None)[0]) ** 2) / ((R - 4) * sb.nc)) if R > 4 else hd["n0_pre"]
-    p_y = max(float(np.mean(np.abs(ls) ** 2)) - n0 / SC_BOOST**2, 1e-12) / (1 + ratio / SC_BOOST**2)
+    n0 = hd["n0_pre"]
+    if R > 4:
+        # per carrier, then the clean carriers' mean (equalizer.per_carrier_noise's band level): a tone between two
+        # carriers turns from repeat to repeat and stays in the residual (825 Hz +25 dB on w48: n0 x12, and the
+        # pilots' power under it)
+        n0_k = np.sum(np.abs(reps - V @ np.linalg.lstsq(V, reps, rcond=None)[0]) ** 2, axis=0) / (R - 4)
+        n0 = float(np.min(equalizer.per_carrier_noise(n0_k, R - 4)))
+    # (a tone's carriers out: equalizer.hot_carriers; +25 dB at 2200 Hz doubled it on w48 at 8 dB)
+    p_y = max(float(np.mean(np.abs(ls[:, ~equalizer.hot_carriers(ls)]) ** 2)) - n0 / SC_BOOST**2, 1e-12) / (1 + ratio / SC_BOOST**2)
     n0_y = (n0 + ratio * p_y) / SC_BOOST**2  # the scattered pilots': thermal + clip, their boost out
     p_sig = p_y / g**2
     est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0), p_sig=p_sig)
@@ -1620,25 +1627,46 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
         cand = [v for v in SC_SPREADS if v >= (SC_FAST_HZ if len(pair) else equalizer.DEFAULT_SPREAD_HZ)]
         if SC_SPREAD_ALL or loo_rule:
             cand = [*SC_SPREADS_SLOW, *SC_SPREADS]
-        fits = [_sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[3:]
+        fits = [_sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[2:]
                 for v in cand]
-        loo = np.array([f[0] for f in fits])
+        # a tone's carriers miss by far more than the rest whatever the spread: scored without them
+        i = int(np.argmin([np.sum(f[0]) for f in fits]))
+        hot = _sc_hot(*fits[i], n_f, n0_y / g**2)[0]
+        loo = np.array([np.sum(f[0][~hot]) for f in fits])
         if loo_rule:
             # equalizer.filter_spread's rule: too narrow costs more than too wide, so the widest whose error past
             # the noise is within SC_LOO_TOL of the best's (a short burst's rho read 0.05 Hz on mpp's 1 Hz at -8 dB)
             i = int(np.argmin(loo))
-            spread = max(v for v, e in zip(cand, loo) if e <= loo[i] + SC_LOO_TOL * max(loo[i] - fits[i][1], 0.0))
+            spread = max(v for v, e in zip(cand, loo) if e <= loo[i] + SC_LOO_TOL * max(loo[i] - np.sum(fits[i][1][~hot]), 0.0))
         else:
             spread = cand[int(np.argmin(loo))]
     spread *= float(os.environ.get("DATA2G_SC_SPREAD_X", 1))
     est.update(spread_hz=min(spread, 4.0), filter_spread_hz=spread)
-    h6, mse6, excess, _, _ = _sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)
+
+    def joint(kw=None):
+        return _sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw)
+
+    h6, mse6, loo_k, model_k = joint()
+    # carriers whose pilots miss by far more than the rest (a tone on or near them): their own noise (the decoder's,
+    # n0_k), their pilots weighed by it (SC_HOT_PASSES), and left out of the band-wide excess below
+    hot, extra = _sc_hot(loo_k, model_k, n_f, n0_y / g**2)
+    kw = None
+    for _ in range(SC_HOT_PASSES if hot.any() else 0):
+        kw = 1 + extra / (n0_y / g**2)
+        h6, mse6, loo_k, model_k = joint(kw)
+        extra = np.where(hot, np.maximum(extra + (loo_k - model_k) / n_f, 0.0), 0.0)
+    cool = ~hot if (~hot).any() else np.ones(nc, bool)
+    excess = max(float(np.sum(loo_k[cool] - model_k[cool])), 0.0) / (n_f * int(cool.sum()))
     if excess > 0.25 * n0_y / g**2:
         # the pilots miss their neighbours' prediction by more than the model's noise: what the preamble cannot
         # show (a path past the cyclic prefix, Doppler between carriers) is noise to the data too. Once more with it
         n0, n0_y = n0 + excess * g**2 * SC_BOOST**2, n0_y + excess * g**2
-        est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0))
-        h6, mse6, _, _, _ = _sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)
+        extra = np.maximum(extra - excess, 0.0)
+        h6, mse6, _, _ = joint(None if kw is None else 1 + extra / (n0_y / g**2))
+    est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0))
+    if hot.any():  # per data cell, as h: a frame's cells (n_f, 5, nc) are in sending order, not by carrier
+        nk = (n0 + extra * g**2 * SC_BOOST**2)[Dc % nc].reshape(1, DATA_SYMS_PER_FRAME, nc)
+        est["n0_k"] = np.repeat(nk, n_f, axis=0)
     pick = lambda a_: a_.reshape(n_f, -1)[:, Dc].reshape(n_f, -1, nc)  # noqa: E731
     hj, mj = pick(h6), pick(mse6)
     z6 = np.zeros((n_air, SYMS_PER_FRAME * nc), dtype=np.complex128)
@@ -1667,8 +1695,33 @@ def _sc_slack(nc: int) -> int:
     return equalizer.SUPPORT_SLACK if nc >= 24 else int(round(FS / (nc * RS)))
 
 
+# _sc_estimate's hot carriers (PR #308 review, items 5 and 6; scripts/sc_tone.py, w48-qpsk-r1/3 at 8 dB, +25 dB
+# tone, 24 bursts): passes of the joint estimate with their pilots weighed by their own noise. 0 passes (their
+# noise to the decoder alone): mpd at 2200 Hz 84/144 codewords, 1 pass 108, 2 passes 108; mpp alike within 2.
+# Excess limited to the hot carriers with no band-wide part (the review's test edit): mpd 2200 Hz told +2.4 dB
+# too little, 82/144. Neighbours of a hot carrier marked too: no change.
+SC_HOT_PASSES = 1
+# a hot carrier's pilots miss by at least this much more noise than the model's (x its noise): 0.5 and 2 the same
+SC_HOT_EXCESS = 1.0
+
+
+def _sc_hot(loo_k, model_k, n_f: int, nn: float) -> tuple:
+    """Carriers whose pilots' leave-one-out error (loo_k, model_k: _sc_joint's) is over the 99th percentile of
+    n_f frames' scatter about the median carrier's (equalizer.per_carrier_noise's test), and by at least
+    SC_HOT_EXCESS x the pilots' noise `nn`: -> (hot, their error past the model per pilot (0 elsewhere))."""
+    from scipy.stats import gamma
+
+    t = loo_k / np.maximum(model_k, 1e-30)
+    q = gamma.ppf(0.99, n_f) / n_f
+    extra = np.maximum(loo_k - model_k, 0.0) / n_f
+    hot = (t > float(np.median(t)) * n_f / (n_f - 1 / 3) * q) & (extra >= SC_HOT_EXCESS * nn)
+    if hot.all():
+        hot[:] = False
+    return hot, np.where(hot, extra, 0.0)
+
+
 def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float, nr_full: float,
-              p_sig: float) -> tuple:
+              p_sig: float, kw=None) -> tuple:
     """2-D LMMSE of the channel at every cell of `frames` (on-air frame
     indices) from the observations within reach in time, all carriers: time
     correlation Gaussian in `spread`, frequency correlation a uniform power
@@ -1676,9 +1729,11 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
     (scattered pilots) and nr_full (whole pilot symbols; a quarter on the
     preamble's mean). On a slow channel a frame's three combs act as one row
     (delays to the cyclic prefix and past it); on a fast one each symbol
-    leans on its own comb. -> h, mse (frames, 6, nc), and the scattered
-    pilots' leave-one-out error power past what the model expects of it
-    (0 or more), all in the pilots' units, and that error's sum.
+    leans on its own comb. `kw` (nc,): each carrier's noise over the
+    rest's (a tone's: _sc_hot), for every observation on it. -> h, mse
+    (frames, 6, nc), and per carrier the scattered pilots' leave-one-out
+    error power summed over frames and what the model expects of it, all in
+    the pilots' units.
 
     The weights depend on the observations' places about the frame and the
     statistics only: spread to 1/8 octave, noise ratios to 0.5 dB, cached
@@ -1688,6 +1743,8 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
     q = lambda v, n: round(np.log2(max(v, 1e-9)) * n)  # noqa: E731
     qs, q1, q2 = q(spread, 8), q(nr_sc, 6), q(nr_full, 6)
     spread, nr = 2 ** (qs / 8), np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
+    kq = None if kw is None else np.array([q(v, 2) for v in kw])  # to 1.5 dB
+    nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
     reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1, SC_FRAMES)) + 3
     slack = _sc_slack(nc)
     d = np.arange(support[0] - slack, support[1] + slack + 1)
@@ -1695,7 +1752,7 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
     tsym = NSYM / FS
     cs, ck = np.divmod(np.arange(SYMS_PER_FRAME * nc), nc)
     P, PK, _, _ = sc_cells(nc)
-    loo = model = 0.0
+    loo, model = np.zeros(nc), np.zeros(nc)
     h = np.empty((len(frames), SYMS_PER_FRAME * nc), dtype=np.complex128)
     mse = np.empty(h.shape)
     order = np.argsort(o_sym, kind="stable")
@@ -1703,14 +1760,15 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
     for i, f in enumerate(frames):
         lo, hi = np.searchsorted(o_sym, [f * SYMS_PER_FRAME + 2.5 - reach, f * SYMS_PER_FRAME + 2.5 + reach])
         rel, k, kd = o_sym[lo:hi] - f * SYMS_PER_FRAME, o_k[lo:hi], o_kind[lo:hi]
-        key = (band, int(support[0]), int(support[1]), slack, qs, q1, q2, rel.tobytes(), kd.tobytes())
+        key = (band, int(support[0]), int(support[1]), slack, qs, q1, q2, rel.tobytes(), kd.tobytes(),
+               None if kq is None else kq.tobytes())
         got = _SC_WEIGHTS.get(key)
         if got is None:
             if Rf is None:
                 Bd = np.exp(-2j * np.pi * np.outer(b.bb, d) / FS)
                 Rf = Bd @ Bd.conj().T / len(d)
             A = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread) * Rf[k[:, None], k[None, :]]
-            A[np.diag_indices_from(A)] += nr[kd]
+            A[np.diag_indices_from(A)] += nr[kd] * nk[k]
             Bm = equalizer._doppler_corr((cs[:, None] - rel[None, :]) * tsym, spread) * Rf[ck[:, None], k[None, :]]
             W = np.linalg.solve(A, Bm.conj().T).conj().T
             col = np.array([np.flatnonzero((rel == c // nc) & (k == kk) & (kd == 0))[0] for c, kk in zip(P, PK)])
@@ -1721,10 +1779,9 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
         h[i] = got[0] @ o_val[lo:hi]
         mse[i] = p_sig * got[1]
         own = np.minimum(got[3], 0.99)
-        loo += float(np.sum(np.abs((o_val[lo:hi][got[2]] - h[i][P]) / (1 - own)) ** 2))
-        model += float(np.sum(p_sig * nr[0] / (1 - own)))
-    excess = max(loo - model, 0.0) / (len(frames) * nc)
-    return h.reshape(len(frames), SYMS_PER_FRAME, nc), mse.reshape(len(frames), SYMS_PER_FRAME, nc), excess, loo, model
+        loo[PK] += np.abs((o_val[lo:hi][got[2]] - h[i][P]) / (1 - own)) ** 2
+        model[PK] += p_sig * nr[0] * nk[PK] / (1 - own)
+    return h.reshape(len(frames), SYMS_PER_FRAME, nc), mse.reshape(len(frames), SYMS_PER_FRAME, nc), loo, model
 
 
 _SC_CAL: dict = {}

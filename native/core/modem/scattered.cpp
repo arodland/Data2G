@@ -20,6 +20,7 @@
 #include "codes/codes.hpp"
 #include "config/config.hpp"
 #include "constellation/constellation.hpp"
+#include "tables/gamma_q99.hpp"
 #include "util/linalg.hpp"
 #include "util/pool.hpp"
 #include "util/simd.hpp"
@@ -45,6 +46,8 @@ constexpr double SC_FAST_HZ = 3.0;
 constexpr double SC_SLOW_RHO = 0.35;
 constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
+constexpr int SC_HOT_PASSES = 1;
+constexpr double SC_HOT_EXCESS = 1.0;
 
 bool env_on(const char* name) {  // Python's os.environ.get(name, "1") == "1"
     const char* v = std::getenv(name);
@@ -188,7 +191,7 @@ DATA2G_SIMD_CLONES void tri_solves(const double* lr, const double* li, size_t n,
 // pilots: the weights at the frame's scattered pilots alone (the spread search's leave-one-out needs no more)
 std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::span<const int> k, std::span<const int> kd,
                                             const std::vector<cd>& Rf, int nc, double spread,
-                                            const std::array<double, 3>& nr, bool pilots) {
+                                            const std::array<double, 3>& nr, std::span<const double> nk, bool pilots) {
     const auto& cells = sc_cells(nc);
     const size_t un = rel.size(), unc = static_cast<size_t>(nc);
     std::vector<size_t> rows;  // the frame's cells weighed
@@ -203,7 +206,7 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
             Ar[i * un + j] = v.real();
             Ai[i * un + j] = v.imag();
         }
-        Ar[i * un + i] += nr[static_cast<size_t>(kd[i])];
+        Ar[i * un + i] += nr[static_cast<size_t>(kd[i])] * (nk.empty() ? 1.0 : nk[static_cast<size_t>(k[i])]);
     }
     // X = Bm^H (n x R): Bm[r][j] = doppler((sym_r - rel_j) Ts) Rf[k_r, k_j]
     Mat<cd> Bm(R, un);
@@ -226,7 +229,8 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
             for (size_t j = 0; j < un; ++j)
                 A[i * un + j] = equalizer::doppler_corr((rel[i] - rel[j]) * TSYM, spread) *
                                 Rf[static_cast<size_t>(k[i]) * unc + static_cast<size_t>(k[j])];
-        for (size_t i = 0; i < un; ++i) A[i * un + i] += nr[static_cast<size_t>(kd[i])];
+        for (size_t i = 0; i < un; ++i)
+            A[i * un + i] += nr[static_cast<size_t>(kd[i])] * (nk.empty() ? 1.0 : nk[static_cast<size_t>(k[i])]);
         for (size_t q = 0; q < X.size(); ++q) X[q] = std::conj(Bm.data[q % R * un + q / R]);
         linalg::lu_solve(A.data(), static_cast<int>(un), X.data(), static_cast<int>(R));
         for (size_t q = 0; q < X.size(); ++q) Xr[q] = X[q].real(), Xi[q] = X[q].imag();
@@ -258,19 +262,26 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
 struct Joint {
     Mat<cd> h;  // (frames * 6, nc), the pilots' units
     Mat<double> mse;
-    double excess = 0, loo = 0, model = 0;
+    std::vector<double> loo, model;  // per carrier: the leave-one-out error summed over frames, the model's
 };
 
 // modem._sc_joint: 2-D LMMSE of the channel at every cell of `frames` (on-air indices) from the observations in reach.
-// pilots: loo and model alone (the spread search), from the weights at the pilots.
+// pilots: loo and model alone (the spread search), from the weights at the pilots. kw (nc, or empty): each carrier's
+// noise over the rest's.
 Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, equalizer::Support support, double spread,
-            double nr_sc, double nr_full, double p_sig, bool pilots = false) {
+            double nr_sc, double nr_full, double p_sig, bool pilots = false, std::span<const double> kw = {}) {
     const int nc = config::band(band).nc;
     const size_t unc = static_cast<size_t>(nc), C = static_cast<size_t>(SYMS_PER_FRAME) * unc;
     const int qs = quant(spread, 8), q1 = quant(nr_sc, 6), q2 = quant(nr_full, 6);
     const double sq = std::pow(2.0, qs / 8.0);
     const std::array<double, 3> nr = {std::pow(2.0, q1 / 6.0), std::pow(2.0, q2 / 6.0), std::pow(2.0, q2 / 6.0) / REF_REPEATS};
     const double reach = SYMS_PER_FRAME * std::clamp(std::ceil(0.7 / sq / FRAME_S), 1.0, static_cast<double>(SC_FRAMES)) + 3;
+    std::vector<int> kq;  // to 1.5 dB
+    std::vector<double> nk;
+    for (double v : kw) {
+        kq.push_back(quant(v, 2));
+        nk.push_back(std::pow(2.0, kq.back() / 2.0));
+    }
     const int slack = sc_slack(nc);
     const auto& cells = sc_cells(nc);
     const size_t F = frames.size();
@@ -290,6 +301,7 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         key.append(reinterpret_cast<const char*>(head), sizeof head);
         key.append(reinterpret_cast<const char*>(rel.data()), rel.size() * sizeof(double));
         key.append(reinterpret_cast<const char*>(o.kind.data() + lo[i]), (hi[i] - lo[i]) * sizeof(int));
+        key.append(reinterpret_cast<const char*>(kq.data()), kq.size() * sizeof(int));
     }
     std::vector<std::shared_ptr<const Weights>> got(F);
     std::vector<size_t> missing;  // the first frame of each pattern not cached
@@ -309,7 +321,7 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         pool::parallel_for(missing.size(), [&](size_t m) {
             const size_t i = missing[m];
             made[m] = make_weights(rels[i], std::span<const int>(o.k).subspan(lo[i], hi[i] - lo[i]),
-                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, pilots);
+                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, nk, pilots);
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
@@ -325,6 +337,8 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
                     if (keys[missing[m]] == keys[i]) got[i] = made[m];
     }
     Joint out;
+    out.loo.assign(unc, 0.0);
+    out.model.assign(unc, 0.0);
     if (!pilots) {
         out.h = Mat<cd>(F * SYMS_PER_FRAME, unc);
         out.mse = Mat<double>(F * SYMS_PER_FRAME, unc);
@@ -353,12 +367,42 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         }
         for (size_t p = 0; p < unc; ++p) {
             const double own = std::min(w.own[p], 0.99);
-            out.loo += std::norm((v[w.col[p]] - hp[p]) / (1 - own));
-            out.model += p_sig * nr[0] / (1 - own);
+            const auto k = static_cast<size_t>(cells.PK[p]);
+            out.loo[k] += std::norm((v[w.col[p]] - hp[p]) / (1 - own));
+            out.model[k] += p_sig * nr[0] * (nk.empty() ? 1.0 : nk[k]) / (1 - own);
         }
     }
-    out.excess = std::max(out.loo - out.model, 0.0) / static_cast<double>(F * unc);
     return out;
+}
+
+double sum(std::span<const double> v, const std::vector<char>* skip = nullptr) {
+    double s = 0.0;
+    for (size_t i = 0; i < v.size(); ++i)
+        if (!skip || !(*skip)[i]) s += v[i];
+    return s;
+}
+
+// modem._sc_hot: carriers whose pilots' leave-one-out error is over the 99th percentile of n_f frames' scatter about
+// the median carrier's, and by at least SC_HOT_EXCESS x the pilots' noise nn -> (hot, their error past the model per
+// pilot, 0 elsewhere)
+std::pair<std::vector<char>, std::vector<double>> sc_hot(const std::vector<double>& loo, const std::vector<double>& model,
+                                                         int n_f, double nn) {
+    const size_t n = loo.size();
+    std::vector<double> t(n), extra(n);
+    for (size_t k = 0; k < n; ++k) {
+        t[k] = loo[k] / std::max(model[k], 1e-30);
+        extra[k] = std::max(loo[k] - model[k], 0.0) / n_f;
+    }
+    std::vector<double> s = t;
+    std::ranges::sort(s);
+    const double med = n % 2 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+    const double lim = med * n_f / (n_f - 1.0 / 3) * tables::GAMMA_Q99[static_cast<size_t>(n_f - 1)];
+    std::vector<char> hot(n);
+    for (size_t k = 0; k < n; ++k) hot[k] = t[k] > lim && extra[k] >= SC_HOT_EXCESS * nn;
+    if (std::ranges::all_of(hot, [](char x) { return x != 0; })) std::ranges::fill(hot, 0);
+    for (size_t k = 0; k < n; ++k)
+        if (!hot[k]) extra[k] = 0.0;
+    return {std::move(hot), std::move(extra)};
 }
 
 // modem._sc_cal's second value: the submode's scattered pilots' distortion over their power, as its transmitter leaves
@@ -443,8 +487,8 @@ double sc_cal_ratio(const Spec& spec) {
 }
 
 // The thermal noise from the preamble's repeats about a cubic in time per carrier (modem._sc_estimate's n0):
-// the least-squares residual's power, by an orthonormal basis of the (R, 4) Vandermonde matrix.
-double cubic_residual_noise(const Mat<cd>& reps) {
+// the least-squares residual's power per carrier, by an orthonormal basis of the (R, 4) Vandermonde matrix.
+std::vector<double> cubic_residual_noise(const Mat<cd>& reps) {
     const size_t R = reps.rows, nc = reps.cols;
     std::array<std::vector<double>, 4> Q;
     for (size_t c = 0; c < 4; ++c) {
@@ -461,8 +505,9 @@ double cubic_residual_noise(const Mat<cd>& reps) {
         nrm = std::sqrt(nrm);
         for (double& v : Q[c]) v /= nrm;
     }
-    double s = 0.0;
+    std::vector<double> out(nc);
     for (size_t k = 0; k < nc; ++k) {
+        double s = 0.0;
         std::vector<cd> res(R);
         for (size_t r = 0; r < R; ++r) res[r] = reps[r][k];
         for (size_t c = 0; c < 4; ++c) {
@@ -471,8 +516,9 @@ double cubic_residual_noise(const Mat<cd>& reps) {
             for (size_t r = 0; r < R; ++r) res[r] -= d * Q[c][r];
         }
         for (const cd& v : res) s += std::norm(v);
+        out[k] = s / static_cast<double>(R - 4);
     }
-    return s / (static_cast<double>(R - 4) * static_cast<double>(nc));
+    return out;
 }
 
 }  // namespace
@@ -639,12 +685,8 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
         return raw[static_cast<size_t>(norm[f]) * SYMS_PER_FRAME + static_cast<size_t>(c) / nc][static_cast<size_t>(c) % nc];
     };
     Mat<cd> ls(uf, nc);
-    double ls2 = 0.0;
     for (size_t f = 0; f < uf; ++f)
-        for (size_t i = 0; i < nc; ++i) {
-            ls[f][i] = cell(f, cells.P[i]) / b.pilot[static_cast<size_t>(cells.PK[i])];
-            ls2 += std::norm(ls[f][i]);
-        }
+        for (size_t i = 0; i < nc; ++i) ls[f][i] = cell(f, cells.P[i]) / b.pilot[static_cast<size_t>(cells.PK[i])];
     const double ratio = sc_cal_ratio(spec);
     // thermal noise from the preamble's repeats about a cubic in time per carrier
     const auto& sb = waveform::band(hd.band);
@@ -656,9 +698,21 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
             const auto w = sb.demod_window(z, hd.start + PREAMBLE_CP + static_cast<int64_t>(r) * M, HEADER_BACKOFF);
             std::copy(w.begin(), w.end(), reps[static_cast<size_t>(r)]);
         }
-        n0 = cubic_residual_noise(reps);
+        // the clean carriers' mean (equalizer.per_carrier_noise's band level): a tone between carriers stays in the
+        // residual
+        const auto nk = equalizer::per_carrier_noise(cubic_residual_noise(reps), R - 4);
+        n0 = *std::ranges::min_element(nk);
     }
-    const double p_y = std::max(ls2 / static_cast<double>(uf * nc) - n0, 1e-12) / (1 + ratio);
+    // the pilots' power, a tone's carriers out (equalizer::hot_carriers)
+    double ls2 = 0.0;
+    size_t n_cool = 0;
+    {
+        const auto hot = equalizer::hot_carriers(ls);
+        for (size_t f = 0; f < uf; ++f)
+            for (size_t i = 0; i < nc; ++i)
+                if (!hot[i]) ls2 += std::norm(ls[f][i]), ++n_cool;
+    }
+    const double p_y = std::max(ls2 / static_cast<double>(n_cool) - n0, 1e-12) / (1 + ratio);
     double n0_y = n0 + ratio * p_y;  // the scattered pilots': thermal + clip
     const double p_sig = p_y / (g * g);
     DataEstimate est;
@@ -722,15 +776,17 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
         if (loo_rule) cand.assign(SC_SPREADS_SLOW.begin(), SC_SPREADS_SLOW.end());
         for (double v : SC_SPREADS)
             if (loo_rule || v >= (pairs ? SC_FAST_HZ : equalizer::DEFAULT_SPREAD_HZ)) cand.push_back(v);
-        std::vector<double> loo, model;
-        for (double v : cand) {
-            const auto j = joint(o, norm, db, support, v, nr_sc, nr_full, p_sig, true);
-            loo.push_back(j.loo);
-            model.push_back(j.model);
-        }
-        const size_t i = static_cast<size_t>(std::min_element(loo.begin(), loo.end()) - loo.begin());
+        std::vector<Joint> fits;
+        std::vector<double> loo;
+        for (double v : cand) fits.push_back(joint(o, norm, db, support, v, nr_sc, nr_full, p_sig, true));
+        // a tone's carriers miss by far more than the rest whatever the spread: scored without them
+        for (const auto& f : fits) loo.push_back(sum(f.loo));
+        size_t i = static_cast<size_t>(std::min_element(loo.begin(), loo.end()) - loo.begin());
+        const auto hot0 = sc_hot(fits[i].loo, fits[i].model, n_f, n0_y / (g * g)).first;
+        for (size_t c = 0; c < fits.size(); ++c) loo[c] = sum(fits[c].loo, &hot0);
+        i = static_cast<size_t>(std::min_element(loo.begin(), loo.end()) - loo.begin());
         if (loo_rule) {  // the widest within SC_LOO_TOL of the best's error past the noise
-            const double tol = loo[i] + SC_LOO_TOL * std::max(loo[i] - model[i], 0.0);
+            const double tol = loo[i] + SC_LOO_TOL * std::max(loo[i] - sum(fits[i].model, &hot0), 0.0);
             double best = 0.0;
             for (size_t c = 0; c < cand.size(); ++c)
                 if (loo[c] <= tol) best = std::max(best, cand[c]);
@@ -742,16 +798,45 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
     est.spread_hz = std::min(*spread, 4.0);
     est.filter_spread_hz = *spread;
     auto J = joint(o, norm, db, support, *spread, nr_sc, nr_full, p_sig);
-    if (J.excess > 0.25 * n0_y / (g * g)) {
+    // carriers whose pilots miss by far more than the rest (a tone): their own noise, their pilots weighed by it, and
+    // left out of the band-wide excess
+    auto [hot, extra] = sc_hot(J.loo, J.model, n_f, n0_y / (g * g));
+    const bool any_hot = std::ranges::any_of(hot, [](char x) { return x != 0; });
+    std::vector<double> kw;
+    auto weigh = [&] {
+        kw.resize(nc);
+        for (size_t k = 0; k < nc; ++k) kw[k] = 1 + extra[k] / (n0_y / (g * g));
+    };
+    for (int pass = 0; pass < (any_hot ? SC_HOT_PASSES : 0); ++pass) {
+        weigh();
+        J = joint(o, norm, db, support, *spread, nr_sc, nr_full, p_sig, false, kw);
+        for (size_t k = 0; k < nc; ++k) extra[k] = hot[k] ? std::max(extra[k] + (J.loo[k] - J.model[k]) / n_f, 0.0) : 0.0;
+    }
+    std::vector<char> warm(nc, 0);  // the carriers left out of the band's excess: the hot ones, unless all are
+    if (!std::ranges::all_of(hot, [](char x) { return x != 0; })) warm = hot;
+    double d = 0.0;
+    size_t n_rest = 0;
+    for (size_t k = 0; k < nc; ++k)
+        if (!warm[k]) d += J.loo[k] - J.model[k], ++n_rest;
+    const double excess = std::max(d, 0.0) / static_cast<double>(static_cast<size_t>(n_f) * n_rest);
+    if (excess > 0.25 * n0_y / (g * g)) {
         // the pilots miss their neighbours' prediction by more than the model's noise: noise to the data too
-        n0 += J.excess * g * g;
-        n0_y += J.excess * g * g;
+        n0 += excess * g * g;
+        n0_y += excess * g * g;
         nr_sc = n0_y / (g * g) / p_sig;
         nr_full = n0 / p_sig;
-        J = joint(o, norm, db, support, *spread, nr_sc, nr_full, p_sig);
+        for (double& e : extra) e = std::max(e - excess, 0.0);
+        if (!kw.empty()) weigh();
+        J = joint(o, norm, db, support, *spread, nr_sc, nr_full, p_sig, false, kw);
     }
     est.n0 = est.n0_snr = n0;
     est.n0_k.assign(nc, n0);
+    if (any_hot) {  // per data cell, as h: a frame's cells are in sending order, not by carrier
+        est.n0_k.resize(uf * DATA_SYMS_PER_FRAME * nc);
+        for (size_t f = 0; f < uf; ++f)
+            for (size_t j = 0; j < DATA_SYMS_PER_FRAME * nc; ++j)
+                est.n0_k[f * DATA_SYMS_PER_FRAME * nc + j] = n0 + extra[static_cast<size_t>(cells.Dc[j]) % nc] * g * g;
+    }
     est.p_sig = p_sig;
     const size_t per = DATA_SYMS_PER_FRAME * nc;
     auto info = std::make_shared<ScInfo>();

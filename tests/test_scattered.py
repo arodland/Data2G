@@ -93,3 +93,30 @@ def test_a_copy_lock_reads_its_phase_reference_off_copy_open(monkeypatch):
     r1 = modem.receive(y, copy=lock)
     assert abs(np.angle(np.exp(1j * (r1["phi_ref"] - r0["phi_ref"])))) < 0.3
     assert np.max(np.abs(r1["steps"])) <= np.max(np.abs(r0["steps"])) + 2
+
+
+@pytest.mark.parametrize("tone_hz", [2200.0, 825.0])
+def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, tone_hz):
+    """A steady tone 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]' level), on a carrier (2200 Hz)
+    or between two (825 Hz): the band's noise stays the floor's, the tone's carriers get their own, and the burst
+    decodes. Summed into one excess the tone told the decoder ~7 dB too much noise on every carrier (2200 Hz:
+    sc_tone 0.42 of codewords); in the preamble's noise (825 Hz) it put the pilots' power under it (0.53)."""
+    from data2g.config import FS, LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/3"]
+    rng = np.random.default_rng(3)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(4)]
+    x = np.concatenate([np.zeros(2400), modem.modulate(pl, spec), np.zeros(2400)])
+    sigma = np.sqrt(np.mean(x**2) / 10**0.5 / (2500 / (FS / 2)))  # 5 dB in 2500 Hz
+    y = x + np.random.default_rng(4).normal(scale=sigma, size=len(x))
+    known = dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4)
+    n0_clean = modem.receive(y, known=known)["est"]["n0"]
+    amp = np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10 ** 2.5)
+    y = y + amp * np.cos(2 * np.pi * tone_hz * np.arange(len(y)) / FS + 0.3)
+    r = modem.receive(y, known=known)
+    assert r["est"]["n0"] < 2 * n0_clean
+    nk = np.asarray(r["est"]["n0_k"])
+    assert nk.shape == r["est"]["h"].shape and nk.max() > 10 * r["est"]["n0"]
+    b = modem.decode_received(r)
+    assert b.payloads == pl

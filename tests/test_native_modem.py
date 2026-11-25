@@ -214,7 +214,22 @@ def test_windowed_data_channel_matches(native, py):
 
 @pytest.mark.parametrize("name,n_cw,snr,preset", RX_CASES)
 def test_receive_matches(native, py, name, n_cw, snr, preset):
-    y = _burst(name, n_cw, snr, preset, seed=n_cw + 3)
+    _receive_parity(native, py, _burst(name, n_cw, snr, preset, seed=n_cw + 3), name)
+
+
+@pytest.mark.parametrize("tone_hz,preset", [(2200.0, None), (825.0, "mpp"), (1440.0, "mpp")])
+def test_receive_matches_with_a_tone(native, py, tone_hz, preset):
+    """A steady tone 25 dB over the floor in 50 Hz: the residual CFO's hot carriers, and with scattered pilots
+    (DATA2G_PILOTS) the hot carriers' noise and pilot weights."""
+    from data2g.config import FS
+
+    y = _burst("w48-qpsk-r1/3", 3, 8.0, preset, seed=4)
+    sigma = np.sqrt(np.mean(y[3000:-3000] ** 2) / 10**0.8 / (2500 / (FS / 2)))  # the burst's noise, roughly
+    y = y + np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * np.cos(2 * np.pi * tone_hz * np.arange(len(y)) / FS)
+    _receive_parity(native, py, y, "w48-qpsk-r1/3")
+
+
+def _receive_parity(native, py, y, name):
     r = py.receive(y)
     same_received(native.modem.receive(y), r)
     # the streaming path: head-limited search
