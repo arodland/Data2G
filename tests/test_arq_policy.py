@@ -219,6 +219,38 @@ def test_weak_path_reads_the_burst_s_own_spread():
     assert not g.weak_path()
 
 
+@pytest.mark.hf_only("names HF's CPM modes and their thresholds")
+def test_a_robust_start_bounds_the_first_data_request():
+    """A session started at the robust floor has one reading, the
+    CONNECT_ACK's, and from it at -13.8 dB the model asks for fsk32r62-r1/2
+    (steady-channel threshold -8 dB): the burst was lost and with it 9 of 16
+    sessions at AWGN -15 dB. Until a data burst of the peer's is usable the
+    request stays within ROBUST_START_DATA_MARGIN_DB of the reading and asks
+    for the control twice; a reading the model's pick already fits is left
+    alone. A session not started there asks as before."""
+    def first(snr, started):
+        g = G.GearShifter()
+        g.observe(measured(snr, 0.0), G.ROBUST_CONNECT, 1.0)
+        if started:
+            g.robust_started()
+        return g, G.decode(g.recommend(station(2))[0])
+
+    assert first(-13.8, False)[1] == "fsk32r62-r1/2"
+    g, mode = first(-13.8, True)
+    assert mode.startswith("fsk16r25") and g.want_dup
+    assert G.MODE_THRESHOLDS[mode][0] <= -13.8 + G.ROBUST_START_DATA_MARGIN_DB
+    assert first(-12.0, True)[1].startswith("fsk8r50")  # the margin moves with the reading
+    assert first(-9.0, True)[1] == first(-9.0, False)[1] == "fsk32r62-r1/2"
+    g.outcome(mode, 0, 1, usable=False)  # a data burst lost: still bounded
+    assert g.start_bound and G.decode(g.recommend(station(2))[0]).startswith("fsk16r25")
+    g.outcome(mode, 1, 1, usable=True)  # one usable: the model's own from here
+    assert not g.start_bound
+    g.observe(measured(-22.0, 0.0), G.ROBUST_CONNECT, 9.0)  # under every threshold: the most robust there is
+    g.robust_started()
+    mode = G.decode(g.recommend(station(2))[0])
+    assert G.MODE_THRESHOLDS[mode][0] == min(G.MODE_THRESHOLDS[s.name][0] for s in G.allowed(2) if P.outcome_knows(s.name))
+
+
 @pytest.mark.hf_only("names HF's n4 and CPM modes (FM has neither, plan Q2)")
 def test_robust_floor_sends_control_only_bursts_robust():
     g = G.GearShifter()
