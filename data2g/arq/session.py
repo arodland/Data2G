@@ -615,6 +615,7 @@ class Session:
         elif self.policy.weak_path():
             log.info("connected in %s on a weak path: starting at the robust floor", mode)
             self.station.esc_floor = L.MAX_ESCALATION
+            self.policy.robust_started()
 
     def _primed_frame(self, rx) -> dict | None:
         """A connect frame that failed blind, retried primed (docs/arq.md §3a):

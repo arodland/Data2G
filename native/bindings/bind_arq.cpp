@@ -198,6 +198,7 @@ void bind_arq(py::module_& m) {
         .def_readwrite("floor_spreads", &Shifter::floor_spreads)
         .def_readwrite("last_spread", &Shifter::last_spread)
         .def_readwrite("heard_spread", &Shifter::heard_spread)
+        .def_readwrite("start_bound", &Shifter::start_bound)
         .def_readwrite("energies", &Shifter::energies)
         .def_readwrite("snrs", &Shifter::snrs)
         .def("cpm_floor", &Shifter::cpm_floor)
@@ -259,6 +260,7 @@ void bind_arq(py::module_& m) {
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())
         .def("gate", &Shifter::gate)
         .def("weak_path", &Shifter::weak_path)
+        .def("robust_started", [](Shifter& s) { s.start_bound = true; })
         .def("gap", [](const Shifter& s, const py::object& st) { return s.gap(station(st)); })
         .def("recommend", [](Shifter& s, const py::object& st) {
             const auto r = s.recommend(station(st));

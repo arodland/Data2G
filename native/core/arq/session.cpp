@@ -85,6 +85,7 @@ void Session::robust_start(const std::string& mode) {
     } else if (policy->weak_path()) {
         log_write(LOG, INFO, format("connected in %s on a weak path: starting at the robust floor", mode.c_str()));
         station->esc_floor = MAX_ESCALATION;
+        policy->robust_started();
     }
 }
 
