@@ -44,6 +44,7 @@
 
 #include <cmath>
 #include <random>
+#include <set>
 
 #include "arq/phy.hpp"
 #include "arq/policy.hpp"
@@ -138,6 +139,10 @@ struct Run {
 };
 
 bool primed_on = false;
+// --t-turn S: DD's budget as in a session (arq::Engine::dd_budget): no further than S past the burst's end, less
+// the default PTT delay (EngineConfig::ptt_delay_s), Receiver::MARGIN (the decode starts that far past the end)
+// and the receive and soft bits already spent
+std::optional<double> t_turn_s;
 
 Run run(const Burst& b, std::optional<double> dd_budget) {
     Run out;
@@ -201,6 +206,10 @@ Run run(const Burst& b, std::optional<double> dd_budget) {
     auto soft = arq::soft_bits(h);
     out.soft = now() - t;
     arq::SoftStore store;
+    if (t_turn_s && dd_budget)
+        dd_budget = std::max(0.0, std::min(*dd_budget, *t_turn_s - arq::EngineConfig{}.ptt_delay_s -
+                                                           static_cast<double>(receiver::Receiver::MARGIN) / config::FS -
+                                                           out.receive - out.soft));
     arq::ModemRx rx(h, &store, dd_budget, soft);
     std::vector<arq::DecodeRequest> reqs;
     const bool dup = h.cpm && b.n_ctl == 2;
@@ -391,6 +400,7 @@ StreamRun run_stream(const Burst& b, bool early, std::optional<double> dd_budget
                  "  --cpm         a synthetic CPM burst, batch vs streamed end-of-burst latency (repeatable)\n"
                  "  --stream      OFDM files through the streaming Receiver, decoded as the engine does: end latency\n"
                  "  --no-early    with --stream: no decoding while the burst arrives\n"
+                 "  --t-turn S    DD within a session's turn of S s past the burst's end (Engine::dd_budget)\n"
                  "  --threads     the decode pool's size (default 4)\n"
                  "  --reps        runs per burst, the fastest reported (default 3)\n"
                  "  --dd-budget   seconds of DD per burst (default 1; 0: none; inf: no limit)\n"
@@ -577,6 +587,7 @@ int main(int argc, char** argv) {
         else if (a == "--primed") primed_on = true;
         else if (a == "--cwid") cw = true;
         else if (a == "--stream") stream = true;
+        else if (a == "--t-turn" && more) t_turn_s = std::atof(argv[++i]);
         else if (a == "--cold") cold = true;
         else if (a == "--no-early") early = false;
         else if (a == "--nod" && more) nod_n = std::max(1, std::atoi(argv[++i]));
@@ -635,10 +646,13 @@ int main(int argc, char** argv) {
     }
     std::printf("%-44s %5s %7s %7s %8s %6s %8s %8s %6s %8s %4s %7s %7s\n", "burst", "ok", "acq", "refine", "receive",
                 "soft", "prepare", "decode", "mer", "total", "dd", "plock", "primed");
+    std::set<std::string> calibrated;
     for (const char* path : files) {
         const Burst b = load(path);
         Run best;
-        if (cold) run(b, dd_budget);  // the pilot calibration, once a process
+        // the pilot calibration, once a process per submode (its band and payload size): was once a file
+        if (cold && calibrated.insert(b.band + "/" + std::to_string(b.payloads.empty() ? 0 : b.payloads.back().size())).second)
+            run(b, dd_budget);
         for (int k = 0; k < reps; ++k) {
             if (cold) modem::sc_clear_weights();
             const Run r = run(b, dd_budget);
