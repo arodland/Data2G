@@ -402,3 +402,112 @@ def test_a_cpm_burst_whose_front_faded_locks_on_its_mid_block():
         assert ok, (name, [ev["header"]["spec"].name for ev in got])
     y = np.random.default_rng(4).normal(size=60 * FS)
     assert all(cpm.find_mid(g, y[i:i + 2 * FS]) is None for g in cpm.GRIDS.values() for i in range(0, len(y), 2 * FS))
+
+
+@pytest.mark.parametrize("kind", ["ofdm", "cpm"])
+def test_a_burst_joined_partway_reads_as_data2g_on_air(kind):
+    """A burst heard from its middle (no preamble, header or copy: one that
+    began while we transmitted): with `sense`, data2g_on_air and BUSY
+    hold while it lasts and let go soon after; noise before it never reads.
+    Without `sense`, data2g_on_air is just a lock (busy)."""
+    from data2g import cpm
+    from data2g.arq.policy import slots_for
+    from data2g.config import PROFILE
+
+    if kind == "cpm" and PROFILE == "fm":
+        pytest.skip("FM has no CPM")
+    rng = np.random.default_rng(3)
+    if kind == "ofdm":
+        spec = SUBMODES["qpsk-r1/2"]
+        x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(slots_for(spec, 12.0))], spec)
+    else:
+        g = cpm.GRIDS["c16r25"]
+        x = cpm.bandpass(g, cpm.tones(g, rng.integers(0, g.m, 300)))
+    x = x[3 * FS:9 * FS]
+    y = hfchannel.awgn(hfchannel.freq_shift(np.concatenate([np.zeros(8 * FS), x, np.zeros(5 * FS)]), 31.0), 0,
+                       seed=5, s_power=hfchannel.active_power(x))
+    grids = () if PROFILE == "fm" else tuple(cpm.GRIDS)
+    for sense in (True, False):
+        rx = receiver.Receiver(modem.Accept.of(None, 16.0), cpm_grids=grids)
+        rx.sense = sense
+        on = []
+        for i in range(0, len(y), FS // 10):
+            rx.feed(y[i:i + FS // 10])
+            on.append((i / FS, rx.data2g_on_air, rx.busy, rx.channel_busy))
+        if not sense:
+            assert all(a == b for _, a, b, _ in on)
+            continue
+        assert not any(a or c for t, a, _, c in on if t < 8.0)
+        assert all(a for t, a, _, _ in on if 10.0 <= t < 14.0)
+        assert not any(a or c for t, a, _, c in on if t >= 17.0)
+        # BUSY with it, while nothing is locked (a lock keeps its own pilots-or-energy rule)
+        assert all(c for t, a, b, c in on if 10.0 <= t < 14.0 and not b)
+
+
+@pytest.mark.hf_only("CPM and HF interference presets")
+@pytest.mark.parametrize("kind", ["carriers", "edge", "qrm_wide", "imp_long", "carrier_1500", "ssb_400_2200"])
+def test_interference_does_not_stick_busy(kind):
+    """Regression for PR #234 / #270: steady/dual carriers, band-limited QRM,
+    long impulse trains and narrow SSB passbands must not hold channel_busy or
+    data2g_on_air stuck on (< 1% false-alarm time)."""
+    from scipy import signal as sps
+
+    from data2g import cpm, interference
+
+    dur = 20.0
+    n = int(dur * FS)
+    rng = np.random.default_rng(100)
+    if kind in interference.PRESETS:
+        x = rng.normal(size=n) + interference.Interference(
+            interference.PRESETS[kind], seed=1, horizon=dur).render(0.0, n, 1.0)
+    elif kind == "carrier_1500":
+        t = np.arange(n) / FS
+        p = 10 ** (20.0 / 10) * (1.0 / (FS / 2)) * 50.0
+        x = rng.normal(size=n) + np.sqrt(2 * p) * np.cos(2 * np.pi * 1500.0 * t + 0.7)
+    else:
+        sos = sps.butter(6, [400, 2200], btype="bandpass", fs=FS, output="sos")
+        x = sps.sosfilt(sos, rng.normal(size=n + FS))[FS:]
+
+    rx = receiver.Receiver(modem.Accept.of(None, 16.0), cpm_grids=tuple(cpm.GRIDS))
+    rx.sense = True
+    busy = total = 0
+    for i in range(0, n, FS // 10):
+        rx.feed(x[i:i + FS // 10])
+        if i >= 3 * FS:
+            total += 1
+            busy += int(rx.channel_busy or rx.data2g_on_air)
+    assert busy / total <= 0.01, (kind, busy, total)
+
+
+@pytest.mark.parametrize("patched", [False, True])
+def test_sense_holds_after_a_reset_until_a_full_reading(patched):
+    """After a reset (our own transmission, unheard) data2g_on_air holds
+    until SENSE_BLIND_S of audio is in (a burst that began under it could not
+    read yet), then lets go on noise; BUSY doesn't (the host would see it
+    after every burst of ours); never held without `sense`.
+    `patched`: a test's patched search keeps the Python receiver under
+    --native (its `sense` once shadowed _sense: TypeError on the first hop)."""
+    from data2g import cpm
+    from data2g.config import PROFILE
+
+    class Patched(receiver.Receiver):
+        def _stats(self, *a, **k):
+            return super()._stats(*a, **k)
+
+    grids = () if PROFILE == "fm" else tuple(cpm.GRIDS)
+    y = np.random.default_rng(6).normal(scale=0.05, size=4 * FS)
+    for sense in (True, False):
+        rx = (Patched if patched else receiver.Receiver)(modem.Accept.of(None, 16.0), cpm_grids=grids)
+        rx.sense = sense
+        rx.reset()
+        on = []
+        for i in range(0, len(y), FS // 10):
+            rx.feed(y[i:i + FS // 10])
+            on.append(((i + FS // 10) / FS, rx.data2g_on_air, rx.channel_busy))
+        held = [t for t, a, _ in on if a]
+        assert not any(c for _, _, c in on), on
+        if sense:
+            assert held and held[0] == 0.1 and max(held) <= receiver.Receiver.SENSE_BLIND_S + 0.5, on
+            assert not any(a or c for t, a, c in on if t >= 2.0), on
+        else:
+            assert not held, on

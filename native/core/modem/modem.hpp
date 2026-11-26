@@ -198,6 +198,16 @@ private:
     std::int64_t lo_ = 0, hi_ = 0;
     int n_ = 0;
 };
+// modem.presence_window / fold_presence / presence_verdict / pilot_presence / fold_verify / pilot_present:
+// Receiver.data2g_on_air's OFDM reading (Stage 1 running fold + Stage 2 known-pilot verification).
+std::pair<std::int64_t, int> presence_window(std::size_t dcols, std::int64_t window);
+std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m);
+bool presence_verdict(double peak, double contrast, int m);
+std::pair<double, double> pilot_presence(std::span<const cd* const> D_rows, std::size_t dcols, double level,
+                                         std::int64_t window);
+bool fold_verify(std::span<const double> x, std::string_view band, const Mat<cd>& fold, int fold_phase0 = 0);
+bool pilot_present(std::span<const cd* const> D_rows, std::size_t dcols, double level, std::int64_t window,
+                   std::span<const double> x = {}, std::string_view band = {});
 std::vector<double> cfo_aliases(cd d, double centre);
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock);
 

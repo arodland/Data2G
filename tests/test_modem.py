@@ -375,3 +375,42 @@ def test_fold_track_is_the_fold_of_its_window():
         R = t.fold(D[:, a:], a, lo, hi)
         ref = modem._pilot_fold(D, lo, (hi - lo) // F)
         np.testing.assert_allclose(np.roll(R, -(lo % F), axis=1), ref, rtol=0, atol=1e-12 * np.abs(ref).max())
+
+
+def test_pilot_present_detects_mid_burst_and_rejects_noise_tones_and_impulses():
+    """modem.pilot_present (with Stage 2 fold_verify) detects mid-burst OFDM
+    signals (including n4 on n10's detector) and rejects noise, steady tones
+    and heavy impulse trains (imp_long)."""
+    from data2g import audio, codes, hfchannel, interference
+    from data2g.arq.policy import slots_for
+    from data2g.config import ACQUIRE_REACH_HZ, FRAME_SAMPLES, FS
+    from data2g.waveform import dsp, ofdm, sync
+
+    win = int(1.75 * FS)
+
+    def check(x, band):
+        d = sync.StreamDetector(ofdm.band(band))
+        d.feed(dsp.to_baseband(x, 0))
+        a, C = d.outputs_from(0)
+        xs = x[a:]
+        C = C[:, :max(0, len(xs) - modem.M + 1)]
+        D = sync.pair_products(C, FRAME_SAMPLES, modem.COPY_PAIRS)
+        return modem.pilot_present(D, d.level(), win, xs, band)
+
+    rng = np.random.default_rng(7)
+    cfo = min(27.0, 0.8 * ACQUIRE_REACH_HZ)
+    modes = ["qpsk-r1/2", "n10-qpsk-r1/2"] + (["n4-qpsk-r1/3"] if "n4-qpsk-r1/3" in modem.SUBMODES else [])
+    for name in modes:
+        spec = modem.SUBMODES[name]
+        x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(slots_for(spec, 8.0))], spec)
+        y = hfchannel.apply_channel(x, -3.0, freq_offset_hz=cfo, seed=5)[2 * FS:5 * FS]
+        assert check(y, spec.sync_band), name
+
+    n = 3 * FS
+    assert not check(rng.normal(size=n), "w")
+    t = np.arange(n) / FS
+    assert not check(rng.normal(size=n) + 10.0 * np.cos(2 * np.pi * 1500.0 * t), "w")
+    imp = audio.Blanker()(rng.normal(size=10 * FS) + interference.Interference(
+        interference.PRESETS["imp_long"], seed=1, horizon=10.0).render(0.0, 10 * FS, 1.0))
+    for band in ("w", "n10"):
+        assert not any(check(imp[i:i + n], band) for i in range(0, 7 * FS, FS)), band

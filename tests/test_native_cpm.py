@@ -412,3 +412,26 @@ def test_coarse_track(native, reference):
             a, b = native.cpm.detect(g.name, buf[37:], track=tn, x0=off + 37, **kw), \
                 ref(reference, "detect")(g, buf[37:], track=tp, x0=off + 37, **kw)
             assert a[1:] == b[1:] and a[0] == pytest.approx(b[0], rel=RTOL), (g.name, kw)
+        assert tn.presence(off, off + len(buf)) == pytest.approx(tp.presence(off, off + len(buf)), rel=RTOL, abs=1e-12)
+        assert tn.present(off, off + len(buf)) == tp.present(off, off + len(buf))
+
+
+def test_presence_matches(native, reference):
+    """cpm.presence, cpm.present and CoarseTrack.presence/present match Python
+    across noise, a steady carrier and real CPM bursts."""
+    rng = np.random.default_rng(17)
+    L = 3 * FS
+    t = np.arange(L) / FS
+    noise = rng.normal(size=L)
+    carrier = noise + 5.0 * np.cos(2 * np.pi * 1500.0 * t + 0.3)
+    for g in GRIDS:
+        burst = ref(reference, "bandpass")(g, ref(reference, "tones")(g, rng.integers(0, g.m, int(4 * g.rate))))[:L]
+        burst = burst + 0.4 * rng.normal(size=L)
+        for sig in (noise, carrier, burst):
+            assert native.cpm.presence(g.name, sig) == pytest.approx(ref(reference, "presence")(g, sig), rel=RTOL, abs=1e-12)
+            assert native.cpm.present(g.name, sig) == ref(reference, "present")(g, sig)
+            tn, tp = native.cpm.CoarseTrack(g.name), ref(reference, "CoarseTrack")(g)
+            tn.feed(sig, 123)
+            tp.feed(sig, 123)
+            assert tn.presence(123, 123 + L) == pytest.approx(tp.presence(123, 123 + L), rel=RTOL, abs=1e-12)
+            assert tn.present(123, 123 + L) == tp.present(123, 123 + L)

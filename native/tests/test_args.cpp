@@ -223,6 +223,16 @@ void test_nods() {
                    "default on, --no-nods, the last wins");
 }
 
+void test_busy_sense() {
+    check::current_step = "busy_sense";
+    check::is_true(parse({}).busy_sense == (config::PROFILE != "fm") && !parse({"--no-busy-sense"}).busy_sense &&
+                       parse({"--no-busy-sense", "--busy-sense"}).busy_sense,
+                   "default on (off on FM), --no-busy-sense, the last wins");
+    app::Args saved;
+    saved.busy_sense = false;
+    check::is_true(!app::from_settings(app::settings_map(saved), app::Args{}).busy_sense, "survives settings map");
+}
+
 }  // namespace
 
 int main() {
@@ -239,6 +249,7 @@ int main() {
     test_dd_budget();
     test_cw_id();
     test_nods();
+    test_busy_sense();
     test_realtime_switch();
     return check::report("args");
 }

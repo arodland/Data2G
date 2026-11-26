@@ -138,6 +138,8 @@ def substitutions(native):
         (cpm, "bandpass"): by_grid(n.bandpass, cpm.bandpass),
         (cpm, "_energies"): by_grid(n.energies, cpm._energies),
         (cpm, "_shares"): n.shares,
+        (cpm, "presence"): by_grid(n.presence, cpm.presence),
+        (cpm, "present"): by_grid(n.present, cpm.present),
         (cpm, "detect"): detect,
         (cpm, "CoarseTrack"): CoarseTrack,
         (cpm, "llrs"): by_grid(n.llrs, cpm.llrs),

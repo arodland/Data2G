@@ -42,7 +42,8 @@ const char* USAGE =
     "                   [--stats-interval S] [--list-modes] [--noise-rule W]\n"
     "                   [--decode-worker | --no-decode-worker] [--audio-io pipe:IN,OUT]\n"
     "                   [--tci | --no-tci] [--tci-host HOST[:PORT]] [--threads N] [--realtime | --no-realtime]\n"
-    "                   [--live-constellation | --no-live-constellation] [--nods | --no-nods]\n"
+    "                   [--live-constellation | --no-live-constellation] [--busy-sense | --no-busy-sense]\n"
+    "                   [--nods | --no-nods]\n"
     "                   [--dd-budget S] [--decoder-effort N] [--cw-id {off,add,only}] [--cw-wpm WPM]\n"
     "                   [--hand-decoder {full,cheap}] [--tx-path {mic,flat}]\n"
     "                   [--rig | --no-rig] [--list-rigs] [--rig-model N] [--rig-device DEVICE] [--rig-baud BAUD]\n"
@@ -120,6 +121,9 @@ const char* HELP =
     "                        data2g-gui's constellation plot fills in as a burst arrives (a frame's FFTs\n"
     "                        per block on the receive thread), not only once it is decoded. Unused by\n"
     "                        data2g-host. (default: on)\n"
+    "  --busy-sense, --no-busy-sense\n"
+    "                        detect ongoing Data2G transmissions whose start was missed and light BUSY.\n"
+    "                        Turn off if interference keeps BUSY stuck on. (default: on)\n"
     "  --nods, --no-nods     nods: short replies used in the slowest modes (docs/arq.md §3b). Turn off if\n"
     "                        they keep going unheard. Unsteady audio timing at either station can cause\n"
     "                        that. Takes effect at the next session.\n"
@@ -221,6 +225,8 @@ Args parse(int argc, char** argv, Args a, const char* prog, const char* extra_he
         {"--realtime", {&a.realtime, true}},   {"--no-realtime", {&a.realtime, false}},
         {"--live-constellation", {&a.live_constellation, true}},
         {"--no-live-constellation", {&a.live_constellation, false}},
+        {"--busy-sense", {&a.busy_sense, true}},
+        {"--no-busy-sense", {&a.busy_sense, false}},
         {"--nods", {&a.nods, true}}, {"--no-nods", {&a.nods, false}},
         {"--tci", {&a.tci, true}},     {"--no-tci", {&a.tci, false}},
         {"--rig", {&a.rig, true}},     {"--no-rig", {&a.rig, false}},

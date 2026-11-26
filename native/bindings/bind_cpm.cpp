@@ -105,10 +105,18 @@ void bind_cpm(py::module_& m) {
         return np(cpm::energies(grid(g), view(x), start, n_sym, cfo, extra));
     }, py::arg("grid"), py::arg("x"), py::arg("start"), py::arg("n_sym"), py::arg("cfo"), py::arg("extra") = 0);
     c.def("shares", [](const In<double>& E) { return np(cpm::shares(mat(E))); });
+    c.def("presence", [](const std::string& g, const In<double>& x, double reach_hz) {
+        return cpm::presence(grid(g), view(x), reach_hz);
+    }, py::arg("grid"), py::arg("x"), py::arg("reach_hz") = 150.0);
+    c.def("present", [](const std::string& g, const In<double>& x) {
+        return cpm::present(grid(g), view(x));
+    }, py::arg("grid"), py::arg("x"));
     py::class_<cpm::CoarseTrack>(c, "CoarseTrack")
         .def(py::init([](const std::string& g, double reach_hz) { return cpm::CoarseTrack(grid(g), reach_hz); }),
              py::arg("grid"), py::arg("reach_hz") = 150.0)
         .def("feed", [](cpm::CoarseTrack& t, const In<double>& buf, long off) { t.feed(view(buf), off); })
+        .def("presence", &cpm::CoarseTrack::presence)
+        .def("present", &cpm::CoarseTrack::present)
         .def_readonly("extra", &cpm::CoarseTrack::extra);
     c.def("detect", [](const std::string& g, const In<double>& x, double reach_hz, bool fine, bool front_only, int n_sym,
                        double floor, bool mid, const cpm::CoarseTrack* track, long x0) {

@@ -305,6 +305,57 @@ void nods_setting() {
     check::is_true(!e.session().station->nod && !e.session().nods, "on mid-session: from the next one");
 }
 
+// Mid-burst BUSY sensing (--busy-sense / --no-busy-sense): default on, live toggle clears BUSY on the next block.
+void busy_sense_setting() {
+    check::current_step = "busy_sense setting";
+    TxBurst burst;
+    burst.submode = "qpsk-r1/2";
+    const auto pb = static_cast<std::size_t>(payload_bytes(mode_at(burst.submode)));
+    auto bytes = [](std::size_t n, unsigned seed) {
+        Bytes out(n);
+        for (std::size_t i = 0; i < n; ++i) out[i] = static_cast<std::uint8_t>((seed * 131u + i * 17u) & 0xFFu);
+        return out;
+    };
+    for (int i = 0; i < 8; ++i) burst.slots.push_back({{7, 0, i}, 0, bytes(pb, 40 + static_cast<unsigned>(i))});
+    const auto full = tx_audio(burst);
+    const std::size_t skip = static_cast<std::size_t>(2 * config::FS);
+    std::vector<double> y(static_cast<std::size_t>(3 * config::FS), 0.0);
+    y.insert(y.end(), full.begin() + static_cast<std::ptrdiff_t>(skip), full.end());
+    y.resize(y.size() / BLOCK * BLOCK);
+    std::mt19937 rng(99);
+    std::normal_distribution<double> noise(0.0, 0.15);
+    for (double& v : y) v += noise(rng);
+
+    Engine e("W1AW", {});
+    check::is_true(e.sense(), "default on");
+    bool lit = false;
+    std::size_t lit_at = 0;
+    for (std::size_t i = 0; i + BLOCK <= y.size(); i += BLOCK) {
+        e.step(std::span<const double>(y).subspan(i, BLOCK));
+        if (e.channel_busy() && !e.busy()) {
+            lit = true;
+            lit_at = i + BLOCK;
+            break;
+        }
+    }
+    check::is_true(lit, "on: mid-burst audio lights channel_busy without a header");
+    e.set_sense(false);
+    check::is_true(!e.sense(), "sense() reflects off");
+    if (lit && lit_at + BLOCK <= y.size()) {
+        e.step(std::span<const double>(y).subspan(lit_at, BLOCK));
+        check::is_true(!e.channel_busy(), "toggling off clears channel_busy on the next block");
+    }
+
+    Engine off("W1AW", {});
+    off.set_sense(false);
+    bool ever_lit = false;
+    for (std::size_t i = 0; i + BLOCK <= y.size(); i += BLOCK) {
+        off.step(std::span<const double>(y).subspan(i, BLOCK));
+        if (off.channel_busy() && !off.busy()) ever_lit = true;
+    }
+    check::is_true(!ever_lit, "off from the start: never lights mid-burst channel_busy");
+}
+
 void units() {
     check::current_step = "units";
     check::equal(static_cast<int>(to_half(1.0)), 0x3C00, "half 1");
@@ -622,6 +673,7 @@ int main() {
     tx_burst_and_abort();
     noise_rule_config();
     nods_setting();
+    busy_sense_setting();
     turnaround_budget();
     sync_session(dir);
     sync_kiss();

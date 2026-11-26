@@ -1061,6 +1061,114 @@ class FoldTrack:
         return self.R
 
 
+# Receiver.data2g_on_air's OFDM rule (pilot_present, scripts/presence_study.py):
+# Stage 1 (running FoldTrack): fold contrast at least PRESENCE_CONTRAST[m -
+# PRESENCE_MIN_M] over m frames (noise passes 2e-4/hop on each band), and peak
+# at least PRESENCE_PEAK. Stage 2 (fold_verify, only when Stage 1 passes):
+# known-pilot coherence over PILOT_NOISE and pilot pattern over
+# min(PRESENCE_PATTERN_CAP, PRESENCE_PATTERN_SCALE * PILOT_PATTERN) (~99th
+# percentile of noise: rejects impulse trains and QRM power steps to <0.2%
+# while keeping mid-burst OFDM detection across w, w48, n10 and n4).
+PRESENCE_PEAK = 8.0
+PRESENCE_CONTRAST = (4.9, 4.9, 4.9, 4.75, 4.35, 4.25, 4.05, 3.9)
+PRESENCE_MIN_M = 2
+PRESENCE_PATTERN_SCALE = 1.4
+PRESENCE_PATTERN_CAP = 0.876
+
+
+def presence_window(dcols: int, window: int) -> tuple[int, int]:
+    """(t0, m): the newest `window` outputs' pilot fold, over m whole frames
+    from pair product t0 (`dcols` of them; m < 1: too few)."""
+    P = COPY_PAIRS
+    n = dcols + P * FRAME_SAMPLES  # the outputs the products were made from
+    W = min(n, window)
+    return n - W, (W - P * FRAME_SAMPLES) // FRAME_SAMPLES
+
+
+def fold_presence(fold: np.ndarray, level: float, m: int) -> tuple[float, float]:
+    """(peak, contrast) of an m-frame pilot fold (any rotation of its phases
+    reads the same): find_copy's normalized peak, and the peak over the
+    fold's median over frame phases."""
+    mag = np.abs(fold).max(axis=0)
+    return float(mag.max() / (level * np.sqrt(m * COPY_PAIRS))), float(mag.max() / (np.median(mag) + 1e-300))
+
+
+def presence_verdict(peak: float, contrast: float, m: int) -> bool:
+    """Stage 1 of pilot_present: PRESENCE_PEAK, and PRESENCE_CONTRAST for m frames."""
+    return (m >= PRESENCE_MIN_M and peak >= PRESENCE_PEAK
+            and contrast >= PRESENCE_CONTRAST[min(m - PRESENCE_MIN_M, len(PRESENCE_CONTRAST) - 1)])
+
+
+def pilot_presence(D: np.ndarray, level: float, window: int) -> tuple[float, float]:
+    """Stage 1 (peak, contrast) of the fold over the newest `window` matched
+    filter outputs (`D`: their pair_products; `level`: noise level). Receiver
+    keeps the fold running instead (FoldTrack)."""
+    t0, m = presence_window(D.shape[1], window)
+    if m < 1:
+        return 0.0, 0.0
+    return fold_presence(_pilot_fold(D, t0, m), level, m)
+
+
+def _verify_band(z0: np.ndarray, ph: int, n_frames: int, band: str, cfo: float) -> bool:
+    b = ofdm.band(band)
+    z = dsp.freq_correct(z0, cfo)
+    y = [b.demod_window(z, ph + k * FRAME_SAMPLES, DEMOD_BACKOFF) for k in range(n_frames)]
+    c = [float(np.abs(np.sum(y[k] * np.conj(y[k - 1])))
+               / (np.sqrt(np.sum(np.abs(y[k]) ** 2) * np.sum(np.abs(y[k - 1]) ** 2)) + 1e-30))
+         for k in range(1, len(y))]
+    zs = [v * np.conj(b.pilot) for v in y]
+    a = sum(z_[1:] * np.conj(z_[:-1]) for z_ in zs)
+    pat = float(np.abs(np.sum(a / (np.abs(a) + 1e-30))) / len(a))
+    pat_floor = min(PRESENCE_PATTERN_CAP, PRESENCE_PATTERN_SCALE * PILOT_PATTERN[band])
+    return float(np.mean(c)) > PILOT_NOISE[band] and pat > pat_floor
+
+
+def fold_verify(x: np.ndarray, band: str, fold: np.ndarray, fold_phase0: int = 0) -> bool:
+    """Stage 2 of pilot_present: verify that `fold`'s peak in real audio `x`
+    (`x[0]` at stream phase `fold_phase0`, 0 for a relative fold) carries
+    `band`'s known frame-pilot sequence (on `n10`, also checks `n4` at the two
+    frozen cross-correlation shifts where n4's 4-carrier pilot matches n10's
+    template). Rejects impulse trains and QRM power steps that clear Stage 1."""
+    mag = np.abs(fold).max(axis=0)
+    q = int(np.argmax(mag))
+    fi = int(np.argmax(np.abs(fold[:, q])))
+    ph = (q - fold_phase0) % FRAME_SAMPLES
+    n_frames = (len(x) - ph - M) // FRAME_SAMPLES + 1
+    if n_frames < 2:
+        return False
+    freqs = _sync.cfo_grid()
+    z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
+    d = fold[fi, q]
+    centre = float(freqs[fi])
+    for f in _cfo_aliases(d, centre):
+        if _verify_band(z0, ph, n_frames, band, f):
+            return True
+    if band == "n10" and "n4" in BANDS:
+        # n4's 4-carrier pilot peaks against n10's template at +100 Hz (0.62)
+        # and -137.5 Hz (0.52), so n4's true CFO sits at centre - 100 or + 137.5
+        for df in (-100.0, 137.5):
+            c4 = centre + df
+            if abs(c4) <= _sync.ACQUIRE_REACH_HZ + 25.0:
+                for f in _cfo_aliases(d, c4):
+                    if _verify_band(z0, ph, n_frames, "n4", f):
+                        return True
+    return False
+
+
+def pilot_present(D: np.ndarray, level: float, window: int, x: np.ndarray | None = None,
+                  band: str | None = None) -> bool:
+    """pilot_presence's verdict over the newest `window` outputs (fewer when
+    there are fewer: the threshold rises as the window shrinks). When `x` (same
+    origin as D) and `band` are given, also runs Stage 2 (fold_verify)."""
+    t0, m = presence_window(D.shape[1], window)
+    if m < PRESENCE_MIN_M:
+        return False
+    fold = _pilot_fold(D, t0, m)
+    if not presence_verdict(*fold_presence(fold, level, m), m):
+        return False
+    return True if x is None or band is None else fold_verify(x[t0:], band, fold)
+
+
 def _cfo_aliases(d: complex, centre: float) -> list[float]:
     """CFOs whose turn over one frame is d's phase, within the bin at
     `centre`. A frame-pair product carries the whole CFO modulo 1 / FRAME_S
