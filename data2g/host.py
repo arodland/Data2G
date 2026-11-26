@@ -648,7 +648,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     modem.TX_PATH = getattr(a, "tx_path", modem.TX_PATH)  # the station's radio path (FM's transmit)
     engine.hand_round = getattr(a, "hand_decoder", "full")
     engine.pending = getattr(a, "pending", "fsk")
-    engine.receiver.sense = getattr(a, "busy_sense", True)
+    engine.sense = getattr(a, "busy_sense", True)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,

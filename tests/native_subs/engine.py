@@ -91,6 +91,7 @@ def substitutions(native):
         pending = property(lambda s: s._n.pending, lambda s, v: setattr(s._n, "pending", v))
         hand_round = property(lambda s: s._n.hand_round, lambda s, v: setattr(s._n, "hand_round", v))
         cw_wpm = property(lambda s: s._n.cw_wpm, lambda s, v: setattr(s._n, "cw_wpm", v))
+        sense = property(lambda s: s._n.sense, lambda s, v: setattr(s._n, "sense", bool(v)))
 
         @property
         def kiss_rx(self):

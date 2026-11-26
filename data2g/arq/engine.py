@@ -293,6 +293,17 @@ class Engine:
         return (self.tx is None and self.receiver.channel_busy) or self._cw_heard
 
     @property
+    def sense(self) -> bool:
+        """Mid-burst Data2G BUSY sensing (Receiver.sense)."""
+        return self.receiver.sense
+
+    @sense.setter
+    def sense(self, on: bool):
+        self.receiver.sense = bool(on)
+        if not on:
+            self.receiver._present = False
+
+    @property
     def tx_submode(self) -> str | None:
         """The submode of the burst on air (the session's, when an ID rides with it), None if none."""
         return self.tx[0].submode if self.tx else None

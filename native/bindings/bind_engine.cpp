@@ -200,6 +200,7 @@ void bind_engine(py::module_& m) {
         .def_property_readonly("kiss", [](const PyEngine& self) { return self.kiss_obj; })
         .def_property_readonly("busy", &PyEngine::busy)
         .def_property_readonly("channel_busy", &PyEngine::channel_busy)
+        .def_property("sense", &PyEngine::sense, &PyEngine::set_sense)
         .def_property("receiver", [](const PyEngine& self) { return self.receiver; },
                       [](PyEngine& self, py::object r) {
                           if (self.config().worker) throw py::value_error("worker: no Python receiver");
