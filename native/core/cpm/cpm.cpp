@@ -166,16 +166,17 @@ const Spec& ctl(const Grid& g) {
 
 namespace {
 
-// cpm.ON_AIR_WIDE: the wide grids DATA2G_CPM_ONAIR names (comma-separated; unset or empty: none).
+// cpm.ON_AIR_WIDE: the wide grids DATA2G_CPM_ONAIR names (comma-separated; empty or "off": none). Unset: this
+// branch's default (fast-fading-integration), c8w50 on the HF profile, none on FM.
 std::vector<const Grid*> on_air_wide() {
     std::vector<const Grid*> out;
     const char* v = std::getenv("DATA2G_CPM_ONAIR");
-    std::string_view rest = v ? v : "";
+    std::string_view rest = v ? v : config::PROFILE == "hf" ? "c8w50" : "";
     while (!rest.empty()) {
         const auto c = rest.find(',');
         const std::string_view n = rest.substr(0, c);
         rest = c == std::string_view::npos ? std::string_view{} : rest.substr(c + 1);
-        if (n.empty()) continue;
+        if (n.empty() || n == "off") continue;
         const Grid* g = nullptr;
         for (const auto& w : tables::CPM_WIDE_GRIDS)
             if (w.name == n) g = &w;
@@ -900,7 +901,9 @@ Study study_from_env() {
             v = c == std::string_view::npos ? std::string_view{} : v.substr(c + 1);
         }
     };
-    if (const char* v = std::getenv("DATA2G_CPM_LEAK"))
+    // unset: this branch's default (fast-fading-integration), every consumer and ctlsq; "off" names none
+    const char* leak = std::getenv("DATA2G_CPM_LEAK");
+    if (const char* v = leak ? leak : "ctl,data,dd,ctlsq")
         split(v, [&](std::string_view e) {
             for (std::size_t i = 0; i < USE_NAMES.size(); ++i)
                 if (e == USE_NAMES[i]) s.leak[i] = true;

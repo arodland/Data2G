@@ -34,6 +34,15 @@ int band_code(std::string_view sync_band) {
     throw std::out_of_range("no band code for " + std::string(sync_band));
 }
 
+// cpm.SPECS' iteration (modes.py encode / decode): the on-air grids' specs (r2/3 last, when offered); a wide
+// grid's, on air or not, are control-only and have no recommendation code.
+std::vector<const cpm::Spec*> coded_cpm_specs() {
+    std::vector<const cpm::Spec*> out;
+    for (const auto* s : cpm::specs())
+        if (cpm::grid_of(*s).L == 1) out.push_back(s);
+    return out;
+}
+
 }  // namespace
 
 std::span<const Mode> modes() {
@@ -44,8 +53,8 @@ std::span<const Mode> modes() {
         for (const auto& s : config::SUBMODES)
             if (FM || std::any_of(codes.begin(), codes.end(), [&](const auto& b) { return b.first == s.sync_band; }))
                 v.push_back({s.name, s.band, &s, nullptr});
-        if (cpm::specs().size() > static_cast<std::size_t>(N10_HIGH))
-            throw std::length_error("cpm::specs(): more than N10_HIGH on air (DATA2G_CPM_ONAIR)");
+        if (coded_cpm_specs().size() > static_cast<std::size_t>(N10_HIGH))
+            throw std::length_error("cpm::specs(): more than N10_HIGH with a recommendation code");
         for (const auto* s : cpm::specs()) v.push_back({s->name, s->grid, nullptr, s});  // DATA2G_CPM_ONAIR's too
         if (cpm::wide_on())  // DATA2G_CPM_WIDE=1 (studies): every wide grid's modes, for fixed bursts
             for (const auto& s : tables::CPM_WIDE_SPECS)
@@ -139,10 +148,10 @@ int encode(std::string_view submode) {
         if (!selectable(m)) throw std::out_of_range(std::string(submode) + ": no recommendation code on FM");
         return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
     }
-    if (m.is_cpm()) {  // its index in cpm.SPECS (the on-air ones): a wide grid not on air has no code
-        const auto& on = cpm::specs();
+    if (m.is_cpm()) {  // its index in cpm.SPECS' iteration: a wide grid's specs, on air or not, have no code
+        const auto on = coded_cpm_specs();
         const auto it = std::find(on.begin(), on.end(), m.cpm);
-        if (it == on.end()) throw std::out_of_range(std::string(submode) + ": not on air, no recommendation code");
+        if (it == on.end()) throw std::out_of_range(std::string(submode) + ": no recommendation code");
         return CPM_CODE << 4 | static_cast<int>(it - on.begin());
     }
     if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
@@ -160,7 +169,8 @@ const Mode* decode(int rec) {
                 if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
             return nullptr;
         }
-        return i < cpm::specs().size() ? mode(cpm::specs()[i]->name) : nullptr;
+        const auto on = coded_cpm_specs();
+        return i < on.size() ? mode(on[i]->name) : nullptr;
     }
     for (const auto& [band, code] : bands_code())
         if (code == rec >> 4) {

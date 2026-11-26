@@ -3,10 +3,12 @@
 #pragma once
 
 #include <cstdint>
-#include <limits>
 #include <cstdlib>
+#include <limits>
 #include <span>
 #include <string_view>
+
+#include "generated/config.hpp"
 
 namespace data2g::tables {
 
@@ -68,10 +70,12 @@ struct CpmParams {
 // offered, read once. The generated tables hold its rows last (CPM_SPECS,
 // MODE_PEAK_DB, MODE_THRESHOLDS) and leave them out unless it is, so the
 // default build's tables are the six modes' (tools/gen_native_tables.py study_span).
+// Unset: this branch's default (fast-fading-integration), offered on the HF profile (FM has no CPM).
 inline bool cpm_r23() {
     static const bool on = [] {
         const char* v = std::getenv("DATA2G_CPM_R23");
-        return v && *v && std::string_view(v) != "0" && std::string_view(v) != "off";
+        if (!v) return config::PROFILE == "hf";
+        return *v && std::string_view(v) != "0" && std::string_view(v) != "off";
     }();
     return on;
 }

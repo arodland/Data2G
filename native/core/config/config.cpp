@@ -33,8 +33,14 @@ const Submode* by_index(std::string_view sync_band, int index) {
 
 std::string_view sc_layout() {
     static const std::string layout = [] {
+        // unset: this branch's default (fast-fading-integration), fk3d2, where the scattered pilots have a path
+        // (config.py _SC_DEFAULT: the HF profile, 6-symbol frames, none of the FM-path study switches set by hand);
+        // "off" or empty: the pilot rows
+        const auto set = [](const char* n) { const char* e = std::getenv(n); return e && *e; };
+        const bool path = PROFILE == "hf" && SYMS_PER_FRAME == 6 && !set("DATA2G_SPREAD_WINDOW") &&
+                          !set("DATA2G_EST_WINDOW") && !set("DATA2G_DECODE_EARLY") && !set("DATA2G_SYMBOL_NOISE");
         const char* v = std::getenv("DATA2G_PILOTS");
-        const std::string s = v ? v : "";
+        const std::string s = !v ? (path ? "fk3d2" : "") : std::string_view(v) == "off" ? "" : v;
         const auto colon = s.find(':');
         const std::string name = s.substr(0, colon), density = colon == std::string::npos ? "" : s.substr(colon + 1);
         const bool ok = name.empty() || name == "k3d2" || name == "gold" || name == "mix" || name == "mixs" ||

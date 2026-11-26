@@ -74,6 +74,8 @@ def import_native():
 # - r2/3's zero-shot outcome model (predictor.R23_MODEL: DATA2G_OUTCOME_R23, on with r2/3 here): C++ compiles the
 #   installed model, so the predictor and shifter stay Python (gear's own guard), and so do the C++ Station and
 #   Session that run a shifter of their own (arq), and the engine and host around them.
+# - the acquisition study (DATA2G_CPM_ACQ_K > 1, _ACQ_SCREEN, _ACQ_FLOOR; off by default): cpm.detect's extra
+#   placements; every provider that searches for CPM stays Python.
 PILOTS_ENV = "DATA2G_PILOTS"
 SC_STUDY_ENV = ("DATA2G_SC_BOOST_DB", "DATA2G_SC_RESTORE_PLAIN", "DATA2G_SC_RESTORE_QPSK", "DATA2G_SC_SHORT_FRAMES",
                 "DATA2G_SC_SPREAD_ALL", "DATA2G_SC_COMB", "DATA2G_SC_SUPPORT_PAD", "DATA2G_SC_SPREAD_X",
@@ -81,12 +83,14 @@ SC_STUDY_ENV = ("DATA2G_SC_BOOST_DB", "DATA2G_SC_RESTORE_PLAIN", "DATA2G_SC_REST
                 "DATA2G_SC_SEARCH_MIN", "DATA2G_SC_SLEPIAN")
 PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}
 R23_MODEL_PY = {"gear", "arq", "engine", "host"}
+ACQ_PY = {"cpm", "receiver", "phy", "engine", "host", "arq"}
 
 
 def study_skip() -> set:
     """Providers the study toggles in effect keep in Python."""
     import os
 
+    from data2g import cpm
     from data2g.arq import predictor
 
     skip = set()
@@ -95,6 +99,8 @@ def study_skip() -> set:
         skip |= set(PROVIDERS) - PILOTS_NATIVE
     if predictor.R23_MODEL:
         skip |= R23_MODEL_PY
+    if cpm.ACQ_K > 1 or cpm.ACQ_SCREEN is not None or cpm.ACQ_FLOOR != 1.0:
+        skip |= ACQ_PY
     return skip
 
 

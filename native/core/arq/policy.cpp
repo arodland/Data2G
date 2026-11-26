@@ -54,13 +54,17 @@ std::string env(const char* name) {
     return v ? v : "";
 }
 
-// policy.CONNECT_SEQ: DATA2G_CONNECT_SEQ, else DATA2G_ROBUST_RULE's, else master's (R x ROBUST_CONNECT_TRIES, F).
+// policy.CONNECT_SEQ: DATA2G_CONNECT_SEQ, else DATA2G_ROBUST_RULE's, else RRWWW while c8w50 is on air (this
+// branch's default, fast-fading-integration), else master's (R x ROBUST_CONNECT_TRIES, F).
 std::string connect_seq() {
     const std::string rule = env("DATA2G_ROBUST_RULE");
     if (rule != "" && rule != "connect" && rule != "replace" && rule != "alt")
         throw std::invalid_argument("DATA2G_ROBUST_RULE=" + rule + ": connect, replace or alt");
     std::string seq = env("DATA2G_CONNECT_SEQ");
-    if (seq.empty()) seq = rule == "connect" ? "WWWWW" : rule == "alt" ? "RWRWR" : std::string(ROBUST_CONNECT_TRIES, 'R') + "F";
+    const auto& on = cpm::grids();
+    const bool wide = std::any_of(on.begin(), on.end(), [](const cpm::Grid* g) { return g->name == "c8w50"; });
+    if (seq.empty())
+        seq = rule == "connect" ? "WWWWW" : rule == "alt" ? "RWRWR" : wide ? "RRWWW" : std::string(ROBUST_CONNECT_TRIES, 'R') + "F";
     if (seq.find_first_not_of("RFW") != std::string::npos)
         throw std::invalid_argument("DATA2G_CONNECT_SEQ=" + seq + ": letters R, F, W");
     return seq;

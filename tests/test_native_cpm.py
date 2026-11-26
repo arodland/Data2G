@@ -38,7 +38,8 @@ def test_header_tables_are_the_rng_draws(native, reference):
 def test_grid_and_spec_tables(native):
     rows = native.cpm.grids()
     assert [r["name"] for r in rows] == list(cpm.GRIDS)  # on air: DATA2G_CPM_ONAIR's too
-    assert native.cpm.on_air_specs() == list(cpm.SPECS)
+    # (cpm.SPECS' iteration has the recommendation-coded specs; native's on-air list holds the on-air wide ones too)
+    assert native.cpm.on_air_specs() == list(cpm.SPECS) + [n for n, s in cpm.WIDE_SPECS.items() if s.grid in cpm.ON_AIR_WIDE]
     rows = [r for r in rows if r["name"] not in cpm.WIDE_GRIDS] + native.cpm.grids(wide=True)
     assert [r["name"] for r in rows] == [g.name for g in GRIDS if g.name not in cpm.WIDE_GRIDS] + list(cpm.WIDE_GRIDS)
     for r in rows:
@@ -518,17 +519,21 @@ def _leak_case(spec, chan, rng, n_data=2, dup=True, sigma=0.08):
     return y
 
 
+LEAK_SPECS = list(cpm.SPECS) + [n for n in cpm.WIDE_SPECS if n not in cpm.SPECS]
+
+
 @pytest.mark.parametrize("chan", ["awgn", "carrier", "hilat-d"])
-@pytest.mark.parametrize("name", list(cpm.SPECS))
+@pytest.mark.parametrize("name", LEAK_SPECS)
 def test_leak_model(native, reference, leak_on, name, chan):
     """The leak model (DATA2G_CPM_LEAK=ctl,data,dd,ctlsq) on every grid and
-    rate, on AWGN, beside an in-grid carrier and on hilat-d: tone_metric per
-    consumer, spill_significant, leak_metric, ctl_square, the soft values,
-    the DD metric and soft values, and receive's (coherent control kept or
-    left on the square law), alike in both."""
+    rate, the wide grids' sub-window sums included (the three-way tone
+    likelihood), on AWGN, beside an in-grid carrier and on hilat-d:
+    tone_metric per consumer, spill_significant, leak_metric, ctl_square, the
+    soft values, the DD metric and soft values, and receive's (coherent
+    control kept or left on the square law), alike in both."""
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(list(cpm.SPECS).index(name) * 3 + ["awgn", "carrier", "hilat-d"].index(chan))
+    rng = np.random.default_rng(LEAK_SPECS.index(name) * 3 + ["awgn", "carrier", "hilat-d"].index(chan))
     n_data, dup, s0, f = 2, True, 1777, 0.0
     y = _leak_case(spec, chan, rng, n_data, dup)
     slots, E = native.cpm.soft(g.name, y, s0, f, n_data, dup)
@@ -538,16 +543,17 @@ def test_leak_model(native, reference, leak_on, name, chan):
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
     n_ctl, n_dat = cpm.CTL[g.name].n_sym, cpm.DATA_N // g.bits
     cws = [E_ref[:n_ctl], E_ref[n_ctl:2 * n_ctl]] + [E_ref[2 * n_ctl + i * n_dat:2 * n_ctl + (i + 1) * n_dat] for i in range(n_data)]
-    significant = [ref(reference, "spill_significant")(e) for e in cws]
-    assert [native.cpm.spill_significant(e) for e in cws] == significant
+    gn = g.name if g.L > 1 else ""  # (the native calls' grid: "" an on-air grid's statistics)
+    significant = [ref(reference, "spill_significant")(e, g.k) for e in cws]
+    assert [native.cpm.spill_significant(e, gn) for e in cws] == significant
     for e in cws:
         np.testing.assert_allclose(native.cpm.tone_llr(g.name, e), ref(reference, "tone_llr")(g, e), rtol=1e-9, atol=1e-9)
         for use in ("lock", "ctl", "data", "dd"):
-            np.testing.assert_allclose(native.cpm.tone_metric(e, use), ref(reference, "tone_metric")(g, e, use),
+            np.testing.assert_allclose(native.cpm.tone_metric(e, use, g.name), ref(reference, "tone_metric")(g, e, use),
                                        rtol=1e-12, atol=1e-12)
         for k in (0.0, cpm.LEAK_K):
-            np.testing.assert_allclose(native.cpm.leak_metric(e, k), ref(reference, "leak_metric")(e, k), rtol=1e-12,
-                                       atol=1e-12)
+            np.testing.assert_allclose(native.cpm.leak_metric(e, k, gn), ref(reference, "leak_metric")(e, k, g.k),
+                                       rtol=1e-12, atol=1e-12)
     square = [ref(reference, "ctl_square")(g, E_ref, s) for s in range(1 + dup)]
     assert [native.cpm.ctl_square(g.name, E_ref, s) for s in range(1 + dup)] == square
     if chan == "hilat-d":  # the case must reach the leak model
@@ -560,7 +566,7 @@ def test_leak_model(native, reference, leak_on, name, chan):
     post = {1 + dup: np.log(rng.dirichlet(np.ones(g.m), n_dat)).reshape(-1)}
     for slot in range(n_cw):
         for p in ({}, post):
-            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, p, slot)
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z.reshape(-1, g.m), p, slot)  # (a wide grid: sub-window rows)
             np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
             np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot),
                                        ref(reference, "dd_soft")(r, M, slot), rtol=1e-9, atol=1e-9)

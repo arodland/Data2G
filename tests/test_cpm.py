@@ -389,33 +389,34 @@ def test_a_carrier_does_not_read_as_signal_in_snr_est():
 
 def test_cpm_study_toggles_keep_cpm_in_python(monkeypatch):
     """with_native / --native under the study toggles in effect (on this branch
-    most are on by default, so native_subs reads the settings, not the
-    environment): the soft-value ones keep every provider that makes or decodes
-    CPM soft values in Python (C++ has master's metric); fsk32r62-r2/3 offered
-    or c8w50 on air keeps all but the OFDM and audio ones; scattered pilots keep
-    all but base, waveform, cpm, codes and audio."""
+    most are on by default, so native_subs reads the settings, not only the
+    environment). Native has every feature with this branch's defaults; what
+    it has not stays Python: r2/3's zero-shot outcome model keeps the shifter
+    and what runs one (gear, arq, engine, host); the acquisition study keeps
+    every CPM search; a scattered-pilot study switch keeps all but base,
+    waveform, cpm, codes and audio."""
     import native_subs
 
     from data2g import config
+    from data2g.arq import predictor
 
-    for v in ("DATA2G_CONNECT_SEQ", "DATA2G_ROBUST_RULE", "DATA2G_ROBUST_FAST", "DATA2G_CPM_LEAK_K",
-              "DATA2G_CPM_LEAK_Z", "DATA2G_CPM_CTL_SQ", "DATA2G_CPM_SPILL"):
+    for v in native_subs.SC_STUDY_ENV:
         monkeypatch.delenv(v, raising=False)
-    for mod, name, off in ((cpm, "ON_AIR_WIDE", ()), (cpm, "WIDE_ON", False), (cpm, "R23", False),
-                           (cpm, "LEAK", frozenset()), (config, "SC_BANDS", ())):
-        monkeypatch.setattr(mod, name, off)
-    assert native_subs.study_skip() == set()
-    monkeypatch.setattr(cpm, "LEAK", frozenset({"ctl", "data", "dd", "ctlsq"}))
-    assert native_subs.study_skip() == native_subs.CPM_SOFT_PY
-    monkeypatch.setattr(cpm, "R23", True)
-    assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.WIDE_NATIVE
-    monkeypatch.setattr(cpm, "R23", False)
-    monkeypatch.setattr(cpm, "ON_AIR_WIDE", ("c8w50",))
-    assert {"cpm", "codes", "gear", "arq", "receiver", "phy", "engine"} <= native_subs.study_skip()
-    monkeypatch.setattr(cpm, "ON_AIR_WIDE", ())
-    monkeypatch.setattr(cpm, "LEAK", frozenset())
+    monkeypatch.setattr(predictor, "R23_MODEL", False)
+    for name, off in (("ACQ_K", 1), ("ACQ_SCREEN", None), ("ACQ_FLOOR", 1.0)):
+        monkeypatch.setattr(cpm, name, off)
+    assert native_subs.study_skip() == set()  # the wide grids, the leak model, r2/3 and the pilots: native
+    monkeypatch.setattr(predictor, "R23_MODEL", True)
+    assert native_subs.study_skip() == native_subs.R23_MODEL_PY
+    monkeypatch.setattr(predictor, "R23_MODEL", False)
+    monkeypatch.setattr(cpm, "ACQ_K", 5)
+    assert native_subs.study_skip() == native_subs.ACQ_PY
+    monkeypatch.setattr(cpm, "ACQ_K", 1)
     monkeypatch.setattr(config, "SC_BANDS", ("w", "w48", "n10", "n4"))
+    monkeypatch.setenv("DATA2G_SC_SLEPIAN", "0")
     assert native_subs.study_skip() == set(native_subs.PROVIDERS) - native_subs.PILOTS_NATIVE
+    monkeypatch.setattr(config, "SC_BANDS", ())
+    assert native_subs.study_skip() == set()  # (the pilots' switches only matter with the pilots on)
 
 
 def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):
