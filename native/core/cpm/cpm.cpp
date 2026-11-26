@@ -304,24 +304,145 @@ Mat<double> shares(const Mat<double>& E) {
     return out;
 }
 
-// cpm.coarse_rows: x's whole symbols -> n x (4 nb): symbol k's tones from `extra` bins below the grid at CFO
-// fraction q / 4, as shares, at [k][q nb ..]. One rfft per symbol zero-padded to 4T, bins R / 4 apart: a tone at
-// f0 + k R is bin 4 (f0 / R + k) (f0 a whole number of bins), so fraction q / 4 is that bin + q, what mixing by
-// it and a T-point FFT would give.
-Mat<double> coarse_rows(const Grid& g, std::span<const double> x, int extra) {
+// cpm._coarse_powers: x's whole symbols -> (shares n x 4 nb, raw powers for q in (0, 2) n x 2 nb).
+// One rfft per symbol zero-padded to 4T, bins R / 4 apart: a tone at f0 + k R is bin 4 (f0 / R + k)
+// (f0 a whole number of bins), so fraction q / 4 is that bin + q, what mixing by it and a T-point FFT would give.
+std::pair<Mat<double>, Mat<double>> coarse_powers(const Grid& g, std::span<const double> x, int extra) {
     const std::size_t T = static_cast<std::size_t>(g.T), n = x.size() / T, nb = g.m + 2 * extra;
-    Mat<double> out(n, 4 * nb);
-    if (!n) return out;
+    Mat<double> sh(n, 4 * nb), raw(n, 2 * nb);
+    if (!n) return {std::move(sh), std::move(raw)};
     const Mat<double> P = padded_power(x.data(), n, T);
     const std::int64_t bin0 = 4 * (static_cast<std::int64_t>(std::lround(g.f0 / g.rate)) - extra);
     Mat<double> E(n, nb);
     for (int q = 0; q < 4; ++q) {
         for (std::size_t r = 0; r < n; ++r)
             for (std::size_t b = 0; b < nb; ++b) E[r][b] = P[r][bin0 + q + 4 * static_cast<std::int64_t>(b)];
+        if (q == 0 || q == 2) {
+            const std::size_t fr = q == 0 ? 0 : 1;
+            for (std::size_t r = 0; r < n; ++r) std::copy(E[r], E[r] + nb, raw[r] + fr * nb);
+        }
         const Mat<double> S = shares(E);
-        for (std::size_t r = 0; r < n; ++r) std::copy(S[r], S[r] + nb, out[r] + q * nb);
+        for (std::size_t r = 0; r < n; ++r) std::copy(S[r], S[r] + nb, sh[r] + q * nb);
     }
-    return out;
+    return {std::move(sh), std::move(raw)};
+}
+
+Mat<double> coarse_rows(const Grid& g, std::span<const double> x, int extra) {
+    return coarse_powers(g, x, extra).first;
+}
+
+namespace {
+double median_vec(std::vector<double>& v) {
+    const std::size_t n = v.size(), mid = n / 2;
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+    const double hi = v[mid];
+    if (n % 2) return hi;
+    return 0.5 * (*std::max_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid)) + hi);
+}
+
+// cpm._presence_from_raw: carrier- and passband-immune M-FSK presence over per-phase raw power slices
+// (each a pointer to n rows of 2 * nb doubles, fr=0 at [r*2*nb..], fr=1 at [r*2*nb + nb..]).
+struct RawSlice {
+    const double* data;
+    std::size_t n;
+};
+
+double presence_from_raw(const Grid& g, std::span<const RawSlice> raws, int extra) {
+    const int m = g.m;
+    const std::size_t nb = static_cast<std::size_t>(m + 2 * extra);
+    const int drop = std::max(2, m / 8);
+    const int keep = m - drop;
+    double best = 0.0;
+    std::vector<double> col, med(nb), Ew, u, pt(static_cast<std::size_t>(m));
+    std::vector<int> tone;
+    for (const auto& rs : raws) {
+        const std::size_t n = rs.n;
+        if (n < 2) continue;
+        col.resize(n);
+        Ew.resize(n * nb);
+        u.resize(n);
+        tone.resize(n);
+        for (int fr = 0; fr < PRESENCE_FRACS; ++fr) {
+            double max_med = 0.0;
+            for (std::size_t b = 0; b < nb; ++b) {
+                for (std::size_t r = 0; r < n; ++r) col[r] = rs.data[r * (2 * nb) + static_cast<std::size_t>(fr) * nb + b];
+                med[b] = median_vec(col);
+                if (med[b] > max_med) max_med = med[b];
+            }
+            const double floor = 1e-12 * max_med + 1e-30;
+            for (std::size_t b = 0; b < nb; ++b) med[b] = 1.0 / std::max(med[b], floor);
+            for (std::size_t r = 0; r < n; ++r) {
+                const double* src = rs.data + r * (2 * nb) + static_cast<std::size_t>(fr) * nb;
+                double* dst = Ew.data() + r * nb;
+                for (std::size_t b = 0; b < nb; ++b) dst[b] = src[b] * med[b];
+            }
+            for (int k = 0; k < 2 * extra + 1; ++k) {
+                for (std::size_t r = 0; r < n; ++r) {
+                    const double* row = Ew.data() + r * nb + static_cast<std::size_t>(k);
+                    int a = 0;
+                    double top = row[0], s1 = 0.0, s2 = 0.0;
+                    for (int j = 0; j < m; ++j) {
+                        const double v = row[j];
+                        s1 += v;
+                        s2 += v * v;
+                        if (v > top) {
+                            top = v;
+                            a = j;
+                        }
+                    }
+                    s1 -= top;
+                    s2 -= top * top;
+                    if (a > 0) {
+                        const double vl = row[a - 1];
+                        s1 -= vl;
+                        s2 -= vl * vl;
+                    }
+                    if (a + 1 < m) {
+                        const double vr = row[a + 1];
+                        s1 -= vr;
+                        s2 -= vr * vr;
+                    }
+                    const double nt = s2 / (2.0 * s1 + 1e-30);
+                    const double ratio = top / (nt + 1e-30);
+                    tone[r] = a;
+                    u[r] = ratio / (ratio + PRESENCE_C);
+                }
+                std::fill(pt.begin(), pt.end(), 0.0);
+                for (std::size_t r = 1; r < n; ++r) {
+                    if (tone[r] != tone[r - 1]) {
+                        const double w = std::min(u[r], u[r - 1]);
+                        pt[static_cast<std::size_t>(tone[r])] += w;
+                        pt[static_cast<std::size_t>(tone[r - 1])] += w;
+                    }
+                }
+                std::sort(pt.begin(), pt.end());
+                double sum = 0.0;
+                for (int j = 0; j < keep; ++j) sum += pt[static_cast<std::size_t>(j)];
+                const double v = 0.5 * sum / static_cast<double>(n - 1);
+                if (v > best) best = v;
+            }
+        }
+    }
+    return best;
+}
+}  // namespace
+
+double presence(const Grid& g, std::span<const double> x, double reach_hz) {
+    const int extra = static_cast<int>(std::ceil(reach_hz / g.rate));
+    std::array<Mat<double>, PRESENCE_PHASES> mats;
+    std::array<RawSlice, PRESENCE_PHASES> slices;
+    for (int ph = 0; ph < PRESENCE_PHASES; ++ph) {
+        const std::size_t s = static_cast<std::size_t>(ph * g.T / PRESENCE_PHASES);
+        if (s < x.size()) mats[ph] = coarse_powers(g, x.subspan(s), extra).second;
+        slices[ph] = {mats[ph].data.data(), mats[ph].rows};
+    }
+    return presence_from_raw(g, slices, extra);
+}
+
+bool present(const Grid& g, std::span<const double> x) {
+    const double n = static_cast<double>(x.size() / static_cast<std::size_t>(g.T));
+    if (n < PRESENCE_MIN_S * g.rate) return false;
+    return presence(g, x) >= g.presence_a + g.presence_b / std::sqrt(n);
 }
 
 CoarseTrack::CoarseTrack(const Grid& g, double reach_hz)
@@ -329,22 +450,28 @@ CoarseTrack::CoarseTrack(const Grid& g, double reach_hz)
 
 void CoarseTrack::feed(std::span<const double> buf, std::int64_t off) {
     const std::int64_t T = g_->T, end = off + static_cast<std::int64_t>(buf.size());
-    const std::size_t w = 4 * (g_->m + 2 * extra);
+    std::erase_if(fine_memo, [&](const FineMemo& m) { return m.s < off + T; });  // (fine reaches T/8 before)
+    std::erase_if(header_memo, [&](const HeaderMemo& m) { return m.s < off; });
+    const std::size_t nb = static_cast<std::size_t>(g_->m + 2 * extra);
+    const std::size_t w = 4 * nb, wr = 2 * nb;
     for (int ph = 0; ph < 4; ++ph) {
         auto& s = s_[ph];
         auto& E = E_[ph];
+        auto& R = R_[ph];
         if (!s || *s < off) {
             const std::int64_t first = off + ((ph * T / 4 - off) % T + T) % T;
             if (s) {  // the rows still in buf
                 const auto drop = std::min<std::size_t>(E.size() / w, static_cast<std::size_t>((first - *s) / T));
                 E.erase(E.begin(), E.begin() + static_cast<std::ptrdiff_t>(drop * w));
+                R.erase(R.begin(), R.begin() + static_cast<std::ptrdiff_t>(drop * wr));
             }
             s = first;
         }
         const std::int64_t nxt = *s + static_cast<std::int64_t>(E.size() / w) * T;
         if (end - nxt < T) continue;
-        const Mat<double> R = coarse_rows(*g_, buf.subspan(static_cast<std::size_t>(nxt - off)), extra);
-        E.insert(E.end(), R.data.begin(), R.data.end());
+        auto [e_new, r_new] = coarse_powers(*g_, buf.subspan(static_cast<std::size_t>(nxt - off)), extra);
+        E.insert(E.end(), e_new.data.begin(), e_new.data.end());
+        R.insert(R.end(), r_new.data.begin(), r_new.data.end());
     }
 }
 
@@ -363,6 +490,26 @@ std::vector<std::pair<std::int64_t, Mat<double>>> CoarseTrack::rows(std::int64_t
         out.emplace_back(s + k0 * T - a, std::move(M));
     }
     return out;
+}
+
+double CoarseTrack::presence(std::int64_t lo, std::int64_t hi) const {
+    const std::int64_t T = g_->T;
+    const std::size_t wr = 2 * static_cast<std::size_t>(g_->m + 2 * extra);
+    std::array<RawSlice, 4> slices{};
+    for (int ph = 0; ph < 4; ++ph) {
+        if (!s_[ph]) continue;
+        const std::int64_t s = *s_[ph], have = static_cast<std::int64_t>(R_[ph].size() / wr);
+        const std::int64_t k0 = std::max<std::int64_t>(0, -floor_div(s - lo, T));
+        const std::int64_t k1 = std::max(k0, std::min(have, floor_div(hi - s, T)));
+        if (k1 - k0 >= 2) slices[ph] = {R_[ph].data() + static_cast<std::size_t>(k0) * wr, static_cast<std::size_t>(k1 - k0)};
+    }
+    return presence_from_raw(*g_, slices, extra);
+}
+
+bool CoarseTrack::present(std::int64_t lo, std::int64_t hi) const {
+    const double n = static_cast<double>(std::max<std::int64_t>(0, hi - lo) / g_->T);
+    if (n < PRESENCE_MIN_S * g_->rate) return false;
+    return presence(lo, hi) >= g_->presence_a + g_->presence_b / std::sqrt(n);
 }
 
 Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool fine, bool front_only, int n_sym,
@@ -420,6 +567,15 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         }
     }
     if (fine && best.score >= floor) {  // timing to T/32, CFO to R/16
+        // the fine search's samples: [best.start - T/8, best.start + span T + T/8]
+        const bool whole = best.start + floor_div(-T, 8) >= 0 && best.start + T / 8 + span * T <= len;
+        if (track && whole) {
+            const std::int64_t s_abs = x0 + best.start;
+            for (const auto& m : track->fine_memo)
+                if (m.s == s_abs && m.cfo == best.cfo && m.front_only == front_only && m.mid == mid)
+                    return {best.score, m.fine.start - x0, m.fine.cfo};
+        }
+        const Detection coarse = best;
         double top = 0;
         std::int64_t s_best = 0;
         double c_best = 0;
@@ -460,6 +616,8 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
         }
         best.start = s_best;
         best.cfo = c_best;
+        if (track && whole)
+            track->fine_memo.push_back({x0 + coarse.start, coarse.cfo, front_only, mid, {best.score, x0 + best.start, best.cfo}});
     }
     return best;
 }
@@ -766,7 +924,15 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     if (d.start + hdr_span(g, 1) > len) return std::nullopt;  // its header copy is still arriving
     if (d.start < 0) return std::nullopt;  // its front is cut off
     if (threshold) return make_lock(g, d.start, d.cfo, d.score, read_header(g, x, d.start, d.cfo, 1), 1);
-    const auto [h, ok] = lock_header(g, x, d.start, d.cfo, 1);
+    std::optional<std::pair<Header, bool>> got;
+    if (track)
+        for (const auto& m : track->header_memo)
+            if (m.s == x0 + d.start && m.cfo == d.cfo) got = {m.h, m.ok};
+    if (!got) {
+        got = lock_header(g, x, d.start, d.cfo, 1);
+        if (track) track->header_memo.push_back({x0 + d.start, d.cfo, got->first, got->second});
+    }
+    const auto [h, ok] = *got;
     if (ok) return make_lock(g, d.start, d.cfo, d.score, h, 1);
     if (h.front < g.wait_llr) return std::nullopt;  // noise, or a burst's data or a later sync block, its front missed
     // a front, its first header copy faded: both copies, once the second is in

@@ -140,6 +140,7 @@ public:
     std::pair<std::string_view, int> choose(const StationView& st, int escalation) const;
     int next_capacity(const StationView& st) const;
     void observe(const Measured& m, std::string_view submode, double now);
+    void update_measured(const Measured& m);
     // usable: nullopt (KISS: no control) = any codeword decoded.
     void outcome(std::string_view submode, int decoded, int sent, std::optional<bool> usable = std::nullopt);
     GearRecommendation recommend(const StationView& st);
@@ -198,6 +199,8 @@ public:
         return shifter.reply_hold(view(st), burst.submode);
     }
     void observe(const Measured& m, const std::string& submode, double now) override { shifter.observe(m, submode, now); }
+    std::optional<Measured> last_measured() const override { return shifter.measured; }
+    void update_measured(const Measured& m) override { shifter.update_measured(m); }
     void observe_energy(double snr_db, double now) override { shifter.observe_energy(snr_db, now); }
     std::optional<std::pair<std::string, double>> expected_reply() const override { return shifter.expected_reply(); }
     std::optional<int> next_capacity(const Station& st) const override { return shifter.next_capacity(view(st)); }

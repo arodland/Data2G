@@ -318,6 +318,7 @@ bool Station::update(const Args& b) {
         live_asked_ = false;  // on: the next take_constellation asks
         if (!b.live_constellation) engine_->set_preview(false);
     }
+    engine_->set_sense(b.busy_sense);
     const bool rec = b.record != a.record || (b.record && b.record_dir != a.record_dir);
     engine_->post([this, a, b, dir = rec ? std::optional(record_path(b)) : std::nullopt] {
         auto& e = *engine_;
@@ -486,6 +487,7 @@ void Station::start() {
         engine_->hand_round = a_.hand_decoder;
         engine_->pending = a_.pending;
         engine_->set_nods(a_.nods);
+        engine_->set_sense(a_.busy_sense);
         host_ = std::make_unique<host::Host>(*engine_, a_.buffer_credit < 0 ? std::nullopt : std::optional<int>(a_.buffer_credit));
         host_->output_volume = a_.output_volume;
         host_->announce_ptt = false;  // the Transmitter tells the clients, as it keys and unkeys the rig

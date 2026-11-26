@@ -440,3 +440,50 @@ def test_leak_metric_only_where_the_spill_is_significant(monkeypatch):
     assert sum(np.array_equal(cpm.tone_metric(g, E, "data"), t) for E, t in zip(awgn, today)) >= len(awgn) - 1
     assert cpm.spill_significant(leaky)
     assert np.array_equal(cpm.tone_metric(g, leaky, "data"), cpm.leak_metric(leaky, cpm.LEAK_K))
+
+
+@pytest.mark.hf_only("CPM: FM has none")
+def test_cpm_presence_detects_bursts_and_rejects_carriers_and_colored_noise():
+    """cpm.present() hears a mid-burst CPM signal (even with a +20 dB carrier
+    in-band) and rejects noise, steady/intermittent/dual carriers, CW IDs and
+    narrow SSB-filtered noise; CoarseTrack.presence matches cpm.presence."""
+    from scipy import signal as sps
+
+    from data2g import cwid, hfchannel
+    from data2g.config import FS
+
+    rng = np.random.default_rng(11)
+    L = 3 * FS
+    t = np.arange(L) / FS
+    n0 = 1.0 / (FS / 2)
+    p20 = 10 ** (20.0 / 10) * n0 * 50.0
+
+    # Real mid-burst CPM tones (with random CFO, and with a +20 dB 1500 Hz carrier)
+    for gn, g in ((n, cpm.GRIDS[n]) for n in cpm.PRESENCE):  # (on-air wide grids have no rule)
+        x = cpm.bandpass(g, cpm.tones(g, rng.integers(0, g.m, int(6 * g.rate))))
+        y = hfchannel.apply_channel(x, -6.0, freq_offset_hz=37.0, seed=4)[FS:FS + L]
+        assert cpm.present(g, y), gn
+        # CoarseTrack on the same window (aligned to a multiple of T / 4) matches presence()
+        tr = cpm.CoarseTrack(g)
+        tr.feed(y, 0)
+        assert tr.presence(0, L) == pytest.approx(cpm.presence(g, y), rel=1e-9, abs=1e-12), gn
+        assert tr.present(0, L)
+        sp = hfchannel.active_power(x)
+        sigma = np.sqrt(sp / (10 ** (-6.0 / 10)) / (2500.0 / (FS / 2)))
+        pc = 10 ** (20.0 / 10) * (sigma ** 2 / (FS / 2)) * 50.0
+        assert cpm.present(g, y + np.sqrt(2 * pc) * np.cos(2 * np.pi * 1500.0 * t + 0.5)), f"{gn}+carrier"
+
+    # Non-CPM signals that previously stuck BUSY on in PR #234
+    sos = sps.butter(6, [400, 2200], btype="bandpass", fs=FS, output="sos")
+    negatives = {
+        "noise": rng.normal(size=L),
+        "carrier_1500": rng.normal(size=L) + np.sqrt(2 * p20) * np.cos(2 * np.pi * 1500.0 * t + 0.7),
+        "carrier_1531": rng.normal(size=L) + np.sqrt(2 * p20) * np.cos(2 * np.pi * 1531.25 * t + 0.7),
+        "carrier_30pct": rng.normal(size=L) + (t < 0.9) * np.sqrt(2 * p20) * np.cos(2 * np.pi * 1500.0 * t + 0.7),
+        "two_carriers": rng.normal(size=L) + np.sqrt(2 * p20) * (np.cos(2 * np.pi * 800.0 * t) + np.cos(2 * np.pi * 2200.0 * t)),
+        "cw_20wpm": hfchannel.awgn(np.pad(cwid.audio(cwid.id_text("W1AW"), 20, freq=1500.0), (0, L))[:L], 20.0, seed=9),
+        "ssb_400_2200": sps.sosfilt(sos, rng.normal(size=L + FS))[FS:],
+    }
+    for label, sig in negatives.items():
+        for gn, g in cpm.GRIDS.items():  # (a grid without a rule reads absent)
+            assert not cpm.present(g, sig), (label, gn)

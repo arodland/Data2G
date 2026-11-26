@@ -115,6 +115,7 @@ void bind_arq(py::module_& m) {
         for (py::ssize_t i = 0; i < snr_db.size(); ++i) out.mutable_data()[i] = arq::capacity(snr_db.data()[i], c);
         return out;
     });
+    a.def("inv_capacity", [](double mi, const std::string& c) { return arq::inv_capacity(mi, c); });
     a.def("effective_mi", [](const In<std::complex<double>>& h, const In<double>& var, const std::string& c) {
         return arq::effective_mi({h.data(), static_cast<std::size_t>(h.size())},
                                  {var.data(), static_cast<std::size_t>(var.size())}, c);
@@ -255,6 +256,7 @@ void bind_arq(py::module_& m) {
         .def("observe", [](Shifter& s, const py::dict& md, const std::string& submode, double now) {
             s.observe(measured(md), submode, now);
         })
+        .def("update_measured", [](Shifter& s, const py::dict& md) { s.update_measured(measured(md)); })
         .def("outcome", [](Shifter& s, const std::string& submode, int decoded, int sent, std::optional<bool> usable) {
             s.outcome(submode, decoded, sent, usable);
         }, py::arg("submode"), py::arg("decoded"), py::arg("sent"), py::arg("usable") = py::none())

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
 #include <set>
 
 #include "constellation/constellation.hpp"
@@ -217,6 +218,17 @@ std::shared_ptr<const SlotSoft> soft_bits(const Heard& r) {
     return out;
 }
 
+namespace {
+
+double n0_k_at(const modem::DataEstimate& est, std::size_t row, std::size_t k) {
+    const auto nc = static_cast<std::size_t>(est.nc);
+    if (est.n0_k.empty()) return est.n0;
+    if (est.n0_k.size() == nc) return est.n0_k[k];
+    return est.n0_k[(row / config::DATA_SYMS_PER_FRAME) * nc + k];
+}
+
+}  // namespace
+
 Measured measure(const Heard& r) {
     Measured out;
     if (r.cpm) {
@@ -236,15 +248,26 @@ Measured measure(const Heard& r) {
     const auto& R = *r.ofdm;
     const auto& est = R.est;
     std::vector<double> var(est.mse.data.size());
-    for (std::size_t i = 0; i < var.size(); ++i) var[i] = est.n0 + est.mse.data[i];
+    const bool use_n0k = config::PROFILE == "fm" && data_mer_default();
+    const auto nc = static_cast<std::size_t>(est.nc);
+    if (use_n0k && nc > 0) {
+        for (std::size_t row = 0; row < est.h.rows; ++row)
+            for (std::size_t k = 0; k < nc; ++k) {
+                const std::size_t i = row * nc + k;
+                var[i] = n0_k_at(est, row, k) + est.mse.data[i];
+            }
+    } else {
+        for (std::size_t i = 0; i < var.size(); ++i) var[i] = est.n0 + est.mse.data[i];
+    }
     out.snr_est = modem::snr_db(est, R.band);
     out.spread_est = est.spread_hz;
     out.delay_est_ms = static_cast<double>(R.seen_support.second - R.seen_support.first) / config::FS * 1000;
     out.headroom = R.spec->headroom;
     out.frames = R.n_cw * R.spec->frames_per_cw;
-    for (std::size_t c = 0; c < CONSTS.size(); ++c) out.mi[c] = effective_mi(est.h.data, var, CONSTS[c]);
+    std::vector<double> h2(est.h.data.size());
+    for (std::size_t i = 0; i < h2.size(); ++i) h2[i] = std::norm(est.h.data[i]);
+    out.mi = effective_mi_all(h2, var);
     // n0_spread_db (phy.py): only a per-frame noise estimate (config::EST_WINDOW) has frames to compare
-    const auto nc = static_cast<std::size_t>(est.nc);
     if (nc > 0 && est.n0_k.size() >= 2 * nc && est.n0_k.size() % nc == 0) {
         std::vector<double> db(est.n0_k.size() / nc);
         for (std::size_t f = 0; f < db.size(); ++f) {
@@ -257,6 +280,171 @@ Measured measure(const Heard& r) {
         mean /= static_cast<double>(db.size());
         for (double v : db) ss += (v - mean) * (v - mean);
         out.n0_spread_db = std::sqrt(ss / static_cast<double>(db.size()));  // np.std: population
+    }
+    return out;
+}
+
+Measured data_mer(const modem::Received& r, const std::map<int, std::vector<std::uint8_t>>& coded_bits,
+                  const Measured& measured) {
+    const auto& spec = *r.spec;
+    const auto& est = r.est;
+    const std::size_t n_rows = est.h.rows, nc = est.h.cols, N = n_rows * nc;
+    if (N == 0) return measured;
+    const auto* cst = constellation::find(spec.constellation);
+    if (!cst) return measured;
+    const auto pts = cst->points;
+    const std::size_t M = pts.size();
+    const double bw = 10.0 * std::log10(static_cast<double>(nc) * config::RS / config::SNR_REF_BW_HZ);
+
+    // FM f108 >= 16-QAM is a flat-only band transmitted unclipped (headroom 40).
+    const bool fm_noclip = config::PROFILE == "fm" && spec.band == "f108" && spec.bits_per_cu >= config::FM_FLAT_NOCLIP_BITS;
+    const double clip_r = fm_noclip ? 0.0 : est.clip_ratio;
+
+    std::vector<double> h2(N), base(N);
+    double sig_sum = 0.0, base_sum = 0.0;
+    for (std::size_t row = 0; row < n_rows; ++row) {
+        const std::size_t off = row * nc;
+        for (std::size_t k = 0; k < nc; ++k) {
+            const std::size_t i = off + k;
+            const double p = std::norm(est.h.data[i]);
+            h2[i] = p;
+            const double b = n0_k_at(est, row, k) + est.mse.data[i] + clip_r * p;
+            base[i] = b;
+            sig_sum += p;
+            base_sum += b;
+        }
+    }
+    const double sig_data = sig_sum / static_cast<double>(N);
+    const double base_mean = base_sum / static_cast<double>(N);
+
+    std::vector<std::uint8_t> ex_m(N, 0);
+    double ex_err = 0.0;
+    std::size_t n_ex = 0;
+    if (!coded_bits.empty()) {
+        // Compute all slots' cell layout once (avoiding O(n_cw * N) despread allocations).
+        const std::size_t per_slot = static_cast<std::size_t>(spec.coded_bits / spec.bits_per_cu);
+        const std::size_t syms = static_cast<std::size_t>(r.n_cw) * per_slot;
+        std::vector<std::size_t> seq(syms);
+        std::iota(seq.begin(), seq.end(), std::size_t{0});
+        const auto all_cells = codes::despread<std::size_t>(seq, r.n_cw, 1, modem::spread_group(spec));
+        const int bits_m = cst->m;
+        for (const auto& [s, cbits] : coded_bits) {
+            if (s < 0 || s >= r.n_cw || cbits.size() != static_cast<std::size_t>(spec.coded_bits)) continue;
+            const std::size_t* cells = all_cells.data() + static_cast<std::size_t>(s) * per_slot;
+            bool in_bounds = true;
+            for (std::size_t j = 0; j < per_slot; ++j)
+                if (cells[j] >= N) {
+                    in_bounds = false;
+                    break;
+                }
+            if (!in_bounds) continue;
+            for (std::size_t j = 0; j < per_slot; ++j) {
+                const std::size_t idx = cells[j];
+                if (!ex_m[idx]) {
+                    ex_m[idx] = 1;
+                    ++n_ex;
+                    int sym = 0;
+                    for (int b = 0; b < bits_m; ++b) sym = (sym << 1) | (cbits[j * static_cast<std::size_t>(bits_m) + static_cast<std::size_t>(b)] & 1);
+                    const cd yv = modem::data_row(r.raw, idx / nc)[idx % nc];
+                    ex_err += std::norm(yv - est.h.data[idx] * pts[static_cast<std::size_t>(sym)]);
+                }
+            }
+        }
+    }
+    const std::size_t n_u = N - n_ex;
+    double v_data = 0.0;
+    if (n_u == 0) {
+        v_data = ex_err / static_cast<double>(N);
+    } else {
+        const std::size_t step = std::max<std::size_t>(1, (n_u + MER_MAX_EM_CELLS - 1) / MER_MAX_EM_CELLS);
+        std::vector<std::size_t> sel;
+        sel.reserve(std::min(n_u, MER_MAX_EM_CELLS));
+        std::size_t u_pos = 0;
+        for (std::size_t i = 0; i < N; ++i) {
+            if (!ex_m[i]) {
+                if (u_pos % step == 0) sel.push_back(i);
+                ++u_pos;
+            }
+        }
+        const std::size_t S = sel.size(), K = std::min(M, MER_EM_TOP_K);
+        std::vector<double> d2k(S * K), bu(S), h2u(S);
+        std::vector<double> d2_vec(M);
+        double sum_hard = 0.0;
+        for (std::size_t m = 0; m < S; ++m) {
+            const std::size_t idx = sel[m];
+            bu[m] = base[idx];
+            h2u[m] = h2[idx];
+            const cd yv = modem::data_row(r.raw, idx / nc)[idx % nc];
+            if (h2u[m] > 1e-30) {
+                const cd z = yv / est.h.data[idx];
+                const double zr = z.real(), zi = z.imag(), h2m = h2u[m];
+                for (std::size_t p = 0; p < M; ++p) {
+                    const double dr = zr - pts[p].real(), di = zi - pts[p].imag();
+                    d2_vec[p] = h2m * (dr * dr + di * di);
+                }
+            } else {
+                const double y2 = std::norm(yv);
+                std::fill(d2_vec.begin(), d2_vec.end(), y2);
+            }
+            if (M > K) std::nth_element(d2_vec.begin(), d2_vec.begin() + static_cast<std::ptrdiff_t>(K), d2_vec.end());
+            double* dst = d2k.data() + m * K;
+            double dmin = d2_vec[0];
+            for (std::size_t k = 0; k < K; ++k) {
+                dst[k] = d2_vec[k];
+                if (d2_vec[k] < dmin) dmin = d2_vec[k];
+            }
+            sum_hard += dmin;
+        }
+        const double v_u_hard = sum_hard / static_cast<double>(S);
+        v_data = std::max({(ex_err + v_u_hard * static_cast<double>(n_u)) / static_cast<double>(N) * 2.0,
+                           base_mean, sig_data * 1e-4});
+        double delta_em = std::max(0.0, (v_data - base_mean) / std::max(sig_data, 1e-30));
+        for (int it = 0; it < MER_EM_ITERS; ++it) {
+            double sum_e = 0.0;
+            for (std::size_t m = 0; m < S; ++m) {
+                const double inv_vc = 1.0 / std::max(bu[m] + delta_em * h2u[m], 1e-30);
+                const double* row = d2k.data() + m * K;
+                double dmin = row[0];
+                for (std::size_t k = 1; k < K; ++k)
+                    if (row[k] < dmin) dmin = row[k];
+                double ws = 0.0, wd = 0.0;
+                for (std::size_t k = 0; k < K; ++k) {
+                    const double w = std::exp(-(row[k] - dmin) * inv_vc);
+                    ws += w;
+                    wd += w * row[k];
+                }
+                sum_e += wd / ws;
+            }
+            const double v_u = sum_e / static_cast<double>(S);
+            v_data = (ex_err + v_u * static_cast<double>(n_u)) / static_cast<double>(N);
+            delta_em = std::max(0.0, (v_data - base_mean) / std::max(sig_data, 1e-30));
+        }
+    }
+
+    const double mer_db = 10.0 * std::log10(std::max(sig_data, 1e-30) / std::max(v_data, 1e-30)) + bw;
+    const double db_fac = std::max(MER_DEADBAND_RATIO, 1.0 + 3.0 / std::sqrt(static_cast<double>(N)));
+    const double excess = v_data > db_fac * base_mean ? (v_data - base_mean) : 0.0;
+    const double delta = excess / std::max(sig_data, 1e-30);
+
+    Measured out = measured;
+    out.mer_db = mer_db;
+    if (delta > 0.0) {
+        const double snr_eff = 10.0 * std::log10(1.0 / (est.n0_snr / std::max(est.p_sig, 1e-30) + delta)) + bw;
+        const double off = config::PROFILE == "fm" ? fm_mer_offset_db() : 0.0;
+        out.snr_est = std::min(measured.snr_est, snr_eff + off);
+        std::vector<double> var_d(N);
+        if constexpr (config::PROFILE == "fm") {
+            for (std::size_t row = 0; row < n_rows; ++row) {
+                const std::size_t off_r = row * nc;
+                for (std::size_t k = 0; k < nc; ++k) {
+                    const std::size_t i = off_r + k;
+                    var_d[i] = n0_k_at(est, row, k) + est.mse.data[i] + delta * h2[i];
+                }
+            }
+        } else {
+            for (std::size_t i = 0; i < N; ++i) var_d[i] = est.n0 + est.mse.data[i] + delta * h2[i];
+        }
+        out.mi = effective_mi_all(h2, var_d);
     }
     return out;
 }
@@ -423,7 +611,10 @@ std::optional<Bytes> ModemRx::plain_read(int slot, const MaskId& mask) {
     const auto& s = spec(slot);
     const Raw& d = decoded(slot, s);
     auto got = codes::check(s, d.cands, d.usable, m);
-    if (!got && mask.seq >= SEQ_MOD) got = check_pinned(slot, s, m, ctl_index(mask));  // a control (ctl_mask)
+    if (got)
+        learn(slot, s, *got, 0, m);
+    else if (mask.seq >= SEQ_MOD)
+        got = check_pinned(slot, s, m, ctl_index(mask));  // a control (ctl_mask)
     auto& out = memo_[{slot, m}] = std::move(got);
     tried_.insert(slot);
     if (out) ok_.insert(slot);
@@ -510,7 +701,11 @@ std::optional<Bytes> ModemRx::decode_pair(int slot, const MaskId& mask) {
     for (int off : offsets(s, ctl_index(mask))) offs.push_back(off);
     for (int off : offs) {
         const Raw& d = paired(slot, s, off);
-        if (auto got = codes::check(s, d.cands, d.usable, m)) return got;
+        if (auto got = codes::check(s, d.cands, d.usable, m)) {
+            learn(slot, s, *got, 0, m);
+            learn(slot + 1, s, *got, 1, m);
+            return got;
+        }
     }
     return std::nullopt;
 }
@@ -545,6 +740,8 @@ std::optional<Bytes> ModemRx::known_read(int slot, const MaskId& mask, ByteView 
                       " under " + std::to_string(PRIMED_SCORE) + " nats, dropped");
         return std::nullopt;
     }
+    learn(slot, s, *got, 0, m);
+    if (pair) learn(slot + 1, s, *got, 1, m);
     return got;
 }
 
@@ -553,9 +750,11 @@ std::optional<Bytes> ModemRx::decode_repeat(int slot, const MaskId& mask, const 
         auto it = store_->find(key);
         if (it != store_->end() && it->second.submode != submode_) store_->erase(it);
     }
+    const bool had = coded_.count(slot) > 0;
     auto got = decode(slot, mask, 0, &key);
     if (got && !own_score(slot, mask, *got)) {
         reads_.erase(slot);  // not this burst's after all
+        if (!had) coded_.erase(slot);
         return std::nullopt;
     }
     return got;
@@ -685,7 +884,9 @@ const ModemRx::Raw& ModemRx::decoded(int slot, const codes::Spec& s) {
         if (p.ok) {
             Mat<std::uint8_t> b(1, p.bits.size());
             b.data = p.bits;
-            post_[slot] = known(s, codes::encode_info(s, b, 0).data);
+            auto coded = codes::encode_info(s, b, 0).data;
+            post_[slot] = known(s, coded);
+            if (!n_ctl_slots_ && r_.ofdm) coded_[slot] = std::move(coded);
             break;
         }
         if (i == iters() || late()) break;
@@ -729,6 +930,7 @@ std::optional<Bytes> ModemRx::stored_read(int slot, const MaskId& mask, int rv, 
         buf = std::move(ps.buf);
         if (!dd(s)) {
             if (!ps.ok) break;
+            learn(slot, s, ps.data, rv, m);
             ok_.insert(slot);
             return std::move(ps.data);
         }
@@ -804,7 +1006,21 @@ void ModemRx::prepare(std::span<const DecodeRequest> reqs) {
 }
 
 void ModemRx::learn(int slot, const codes::Spec& s, const Bytes& payload, int rv, std::uint32_t m) {
-    if (dd(s)) post_[slot] = known(s, codes::encode(s, payload, rv, m, slot));
+    const bool is_ofdm = !n_ctl_slots_ && r_.ofdm;
+    if (is_ofdm || dd(s)) {
+        auto coded = codes::encode(s, payload, rv, m, slot);
+        if (dd(s)) post_[slot] = known(s, coded);
+        if (is_ofdm) coded_[slot] = std::move(coded);
+    }
+}
+
+std::optional<Measured> ModemRx::measure_data(const Measured& m) {
+    if (!data_mer_default() || n_ctl_slots_ || !r_.ofdm) return std::nullopt;
+    const std::pair<std::size_t, double> key{coded_.size(), m.snr_est};
+    if (mer_cache_ && mer_cache_->first == key) return mer_cache_->second;
+    Measured out = data_mer(*r_.ofdm, coded_, m);
+    mer_cache_ = {key, out};
+    return out;
 }
 
 // DD after a failed decode of `slot`: its posterior joins the other slots'
@@ -844,15 +1060,22 @@ void ModemRx::remake_estimate(const codes::Spec& s) {
             if (!post_.count(i)) todo.push_back(i);
         make_soft(todo);
         std::vector<std::vector<double>> got(todo.size());
+        std::vector<std::vector<std::uint8_t>> got_coded(todo.size());
         pool::parallel_for(todo.size(), [&](std::size_t t) {
             const auto& v = made(todo[t]);
             Mat<float> llr(1, v.size());
             std::copy(v.begin(), v.end(), llr[0]);
             const auto info = codes::decode_llrs(s, llr);
-            if (info.ok[0]) got[t] = known(s, codes::encode_info(s, info.bits, 0).data);
+            if (info.ok[0]) {
+                auto coded = codes::encode_info(s, info.bits, 0).data;
+                got[t] = known(s, coded);
+                got_coded[t] = std::move(coded);
+            }
         });
-        for (std::size_t t = 0; t < todo.size(); ++t)
+        for (std::size_t t = 0; t < todo.size(); ++t) {
             if (!got[t].empty()) post_[todo[t]] = std::move(got[t]);
+            if (!got_coded[t].empty()) coded_[todo[t]] = std::move(got_coded[t]);
+        }
     }
     auto cache = std::make_shared<std::map<int, std::vector<double>>>();
     // CPM: the estimate is the posteriors themselves; each slot's metric is local (cpm::dd_metric), made as asked

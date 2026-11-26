@@ -17,7 +17,7 @@ from functools import lru_cache
 import numpy as np
 
 from .. import codes, constellation, cpm, equalizer, modem
-from ..config import FM_TX_PEAK, PROFILE
+from ..config import FM_FLAT_NOCLIP_BITS, FM_TX_PEAK, PROFILE, RS, SNR_REF_BW_HZ
 from ..waveform import dsp, ofdm
 from . import predictor as P
 from .burst import COMPACT_CONNECT
@@ -187,7 +187,8 @@ def _measure_ofdm(r: modem.Received) -> dict:
     against thermal noise and estimation error, not the transmitter's clip
     noise (it belongs to the submode sent, not to the channel)."""
     est = r["est"]
-    h, var = est["h"], est["n0"] + est["mse"]
+    n0 = est.get("n0_k", est["n0"]) if PROFILE == "fm" and P.DATA_MER else est["n0"]
+    h, var = est["h"], n0 + est["mse"]
     d0, d1 = r.get("seen_support", r["support"])
     out = dict(snr_est=modem.snr_db(est, r["band"]),
                spread_est=est["spread_hz"], delay_est_ms=(d1 - d0) / modem.FS * 1000,
@@ -195,6 +196,111 @@ def _measure_ofdm(r: modem.Received) -> dict:
                n0_spread_db=n0_spread_db(est))
     for c in P.CONSTS:
         out[f"mi_{c}"] = P.effective_mi(h, var, c)
+    return out
+
+
+# Post-decode data-aided MER (issue #290): repeating low-PAPR pilots absorb TX
+# audio-path nonlinearity into h, while higher-PAPR data symbols take it as
+# noise. Exact re-encoded symbols for decoded slots + strided top-K Gaussian-
+# mixture EM for undecoded slots measure the excess data-cell error variance
+# `delta * |h|^2` above `n0_k + mse + tx_clip * |h|^2`.
+MER_MAX_EM_CELLS = 1024
+MER_EM_TOP_K = 12
+MER_EM_ITERS = 6
+MER_DEADBAND_RATIO = 1.35
+
+
+def data_mer(r: modem.Received, coded_bits: dict[int, np.ndarray], measured: dict) -> dict:
+    """Refine `measured` with data-cell MER from `r` and decoded slots'
+    `coded_bits` ({slot: coded bits in mapping order}). Always attaches
+    `mer_db` (2500 Hz convention); lowers `snr_est` and recomputes `mi_*` when
+    data-cell variance exceeds the pilot-predicted baseline past the deadband."""
+    spec, est = r["spec"], r["est"]
+    y, h = modem.data_symbols(r["raw"]), est["h"]
+    N = y.size
+    if N == 0:
+        return dict(measured)
+    pts = constellation.load(spec.constellation)
+    yf, hf = y.reshape(-1), h.reshape(-1)
+    h2 = np.abs(hf) ** 2
+    sig_data = float(np.mean(h2))
+    nc = h.shape[2]
+    bw = 10.0 * np.log10(nc * RS / SNR_REF_BW_HZ)
+
+    n0_k = np.broadcast_to(np.asarray(est.get("n0_k", est["n0"]), dtype=float), h.shape).reshape(-1)
+    mse = np.asarray(est["mse"], dtype=float).reshape(-1)
+    # FM f108 >= 16-QAM is a flat-only band transmitted unclipped (headroom 40);
+    # subtracting spec.clip.ratio (-24.6 dB) would hide real distortion there.
+    fm_noclip = PROFILE == "fm" and spec.band == "f108" and spec.bits_per_cu >= FM_FLAT_NOCLIP_BITS
+    clip_r = 0.0 if fm_noclip else float(est["clip_ratio"])
+    base = n0_k + mse + clip_r * h2
+    base_mean = float(np.mean(base))
+
+    ex_m = np.zeros(N, dtype=bool)
+    ex_err = 0.0
+    for s, cbits in coded_bits.items():
+        if not 0 <= s < r["n_cw"]:
+            continue
+        cells = modem.slot_cells(r, s)
+        if cells.size == 0 or int(cells.max()) >= N:
+            continue
+        xs = constellation.modulate(cbits, pts)
+        fresh = ~ex_m[cells]
+        if np.any(fresh):
+            cf = cells[fresh]
+            ex_err += float(np.sum(np.abs(yf[cf] - hf[cf] * xs[fresh]) ** 2))
+            ex_m[cf] = True
+    n_ex = int(ex_m.sum())
+    n_u = N - n_ex
+
+    if n_u == 0:
+        v_data = ex_err / N
+    else:
+        u_idx = np.flatnonzero(~ex_m)
+        step = max(1, (n_u + MER_MAX_EM_CELLS - 1) // MER_MAX_EM_CELLS)
+        sel = u_idx[::step]
+        yu, hu, bu, h2u = yf[sel], hf[sel], base[sel], h2[sel]
+        good_h = h2u > 1e-30
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zu = np.where(good_h, yu / hu, 0.0)
+        d2 = h2u[:, None] * ((zu.real[:, None] - pts.real[None, :]) ** 2
+                             + (zu.imag[:, None] - pts.imag[None, :]) ** 2)
+        if not np.all(good_h):
+            d2[~good_h] = (np.abs(yu[~good_h]) ** 2)[:, None]
+        if d2.shape[1] > MER_EM_TOP_K:
+            part = np.argpartition(d2, MER_EM_TOP_K, axis=1)[:, :MER_EM_TOP_K]
+            d2k = np.take_along_axis(d2, part, axis=1)
+        else:
+            d2k = d2
+        v_u_hard = float(np.mean(d2k.min(axis=1)))
+        v_data = max((ex_err + v_u_hard * n_u) / N * 2.0, base_mean, sig_data * 1e-4)
+        delta_em = max(0.0, (v_data - base_mean) / max(sig_data, 1e-30))
+        for _ in range(MER_EM_ITERS):
+            vc = np.maximum(bu + delta_em * h2u, 1e-30)
+            lw = -d2k / vc[:, None]
+            lw -= lw.max(axis=1, keepdims=True)
+            w = np.exp(lw)
+            w /= w.sum(axis=1, keepdims=True)
+            v_u = float(np.mean(np.sum(w * d2k, axis=1)))
+            v_data = (ex_err + v_u * n_u) / N
+            delta_em = max(0.0, (v_data - base_mean) / max(sig_data, 1e-30))
+
+    mer_db = float(10.0 * np.log10(max(sig_data, 1e-30) / max(v_data, 1e-30)) + bw)
+    db_fac = max(MER_DEADBAND_RATIO, 1.0 + 3.0 / np.sqrt(N))
+    excess = (v_data - base_mean) if v_data > db_fac * base_mean else 0.0
+    delta = excess / max(sig_data, 1e-30)
+
+    out = dict(measured, mer_db=mer_db)
+    if delta > 0.0:
+        p_sig = float(est["p_sig"])
+        n0_snr = float(est.get("n0_snr", est["n0"]))
+        snr_eff = float(10.0 * np.log10(1.0 / (n0_snr / max(p_sig, 1e-30) + delta)) + bw)
+        off = P.FM_MER_OFFSET_DB if PROFILE == "fm" else 0.0
+        out["snr_est"] = min(float(measured["snr_est"]), snr_eff + off)
+        n0_mi = est.get("n0_k", est["n0"]) if PROFILE == "fm" else est["n0"]
+        var_d = n0_mi + est["mse"] + delta * (np.abs(h) ** 2)
+        for c in P.CONSTS:
+            out[f"mi_{c}"] = P.effective_mi(h, var_d, c)
     return out
 
 
@@ -338,6 +444,8 @@ class ModemRx:
         self.dd_total = dd_budget  # advance(): the whole burst's DD budget, shared out per window
         self._dd_spent = 0.0
         self._early = set()  # slots advance() decoded: a keyed read at RV 0 checks that decode first
+        self._coded = {}  # OFDM: slot -> decoded coded bits (mapping order), for data_mer
+        self._mer_cache = None
 
     def _adopt(self, r: dict) -> None:
         """r's soft bits: the whole burst's at once, or a partial burst's per
@@ -407,7 +515,9 @@ class ModemRx:
         if key is None:
             if (slot, m) not in self._memo:
                 got = codes.check(spec, *self._decoded(slot, spec), m)
-                if got is None and mask_id[2] >= SEQ_MOD:  # a control (burst.ctl_mask)
+                if got is not None:
+                    self._learn(slot, spec, got, 0, m)
+                elif mask_id[2] >= SEQ_MOD:  # a control (burst.ctl_mask)
                     got = self._check_pinned(slot, spec, m, _ctl_index(mask_id))
                 self._memo[(slot, m)] = got
             return self._memo[(slot, m)]
@@ -432,6 +542,7 @@ class ModemRx:
             if not self._dd(spec):
                 payload, ok = codes.decode_buffer(spec, buf, top, m, index=codes.PLAIN)[0]
                 if ok:
+                    self._learn(slot, spec, payload, rv, m)
                     return payload
                 break
             bits, conv, post = codes.decode_posterior(spec, buf=buf, max_rv=top, rv=rv)
@@ -513,6 +624,8 @@ class ModemRx:
         for off in (None, *self._offsets(spec, _ctl_index(mask_id))):
             got = codes.check(spec, *self._pair(slot, off), m)
             if got is not None:
+                self._learn(slot, spec, got, 0, m)
+                self._learn(slot + 1, spec, got, 1, m)
                 return got
         return None
 
@@ -549,6 +662,9 @@ class ModemRx:
         if sc < PRIMED_SCORE:
             log.info("primed control in slot %d: CRC passed, score %.1f under %.0f nats, dropped", slot, sc, PRIMED_SCORE)
             return None
+        self._learn(slot, spec, got, 0, m)
+        if pair:
+            self._learn(slot + 1, spec, got, 1, m)
         return got
 
     def decode_repeat(self, slot: int, mask_id: tuple, key: tuple) -> bytes | None:
@@ -561,11 +677,14 @@ class ModemRx:
         kept in another mode is dropped: not this burst's repeat."""
         if key in self.store and self.store[key][2] != self.submode:
             del self.store[key]
+        had = slot in self._coded
         got = self.decode(slot, mask_id, 0, key)
         if got is None:
             return None
         sc = codes.score(self._spec(slot), self._soft(slot), got, mask_value(mask_id), slot)
         if sc < PRIMED_SCORE:
+            if not had:
+                self._coded.pop(slot, None)
             log.info("repeated control in slot %d: CRC passed, score %.1f under %.0f nats, dropped", slot, sc, PRIMED_SCORE)
             return None
         return got
@@ -642,7 +761,10 @@ class ModemRx:
                 bits, conv, post = codes.decode_posterior(spec, self._soft(slot))
                 cands, usable = codes.descramble(spec, bits, slot)[None], np.array([conv])
                 if conv:
-                    self._post[slot] = _sure(spec, codes.encode_info(spec, bits[None], 0)[0])
+                    coded = codes.encode_info(spec, bits[None], 0)[0]
+                    self._post[slot] = _sure(spec, coded)
+                    if not self.n_ctl_slots and self.r.get("family") != "cpm":
+                        self._coded[slot] = coded
                     break
                 if it == self._iters() or self._late():
                     break
@@ -676,8 +798,25 @@ class ModemRx:
         return self.dd_until is not None and time.monotonic() >= self.dd_until
 
     def _learn(self, slot: int, spec, payload: bytes, rv: int, m: int) -> None:
-        if self._dd(spec):
-            self._post[slot] = _sure(spec, codes.encode(spec, payload, rv, m, index=slot))
+        is_ofdm = not self.n_ctl_slots and self.r.get("family") != "cpm"
+        if is_ofdm or self._dd(spec):
+            coded = codes.encode(spec, payload, rv, m, index=slot)
+            if is_ofdm:
+                self._coded[slot] = coded
+            if self._dd(spec):
+                self._post[slot] = _sure(spec, coded)
+
+    def measure_data(self, measured: dict) -> dict | None:
+        """Refine `measured` with post-decode data-cell MER (data_mer).
+        Returns None for CPM bursts or when DATA2G_DATA_MER=0."""
+        if not P.DATA_MER or self.n_ctl_slots or self.r.get("family") == "cpm":
+            return None
+        key = (len(self._coded), measured.get("snr_est"))
+        if self._mer_cache is not None and self._mer_cache[0] == key:
+            return self._mer_cache[1]
+        out = data_mer(self.r, self._coded, measured)
+        self._mer_cache = (key, out)
+        return out
 
     def _refine(self, slot: int, spec, post: np.ndarray) -> None:
         """DD after a failed decode of `slot`: its decoder's a-posteriori
@@ -697,7 +836,10 @@ class ModemRx:
                 info, ok = codes.decode_llrs(spec, np.stack([self.soft[s] for s in todo])) if todo else ([], [])
                 for s, i, o in zip(todo, info, ok):
                     if o:
-                        self._post[s] = _sure(spec, codes.encode_info(spec, i[None], 0)[0])
+                        coded = codes.encode_info(spec, i[None], 0)[0]
+                        self._post[s] = _sure(spec, coded)
+                        if not self.n_ctl_slots and self.r.get("family") != "cpm":
+                            self._coded[s] = coded
         # CPM: the estimate is the posteriors themselves; each slot's metric is local (cpm.dd_metric), made as asked
         est = dict(self._post) if self.n_ctl_slots else _dd_estimate(self.r, self._post)
         self._est, self._soft_dd = est, {}

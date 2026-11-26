@@ -481,7 +481,7 @@ The square plot beside the waterfall shows the last burst as the demodulator saw
 
 ### BUSY and PTT indicators
 
-- **BUSY** lights amber while Data2G hears a signal on the frequency. Data2G holds back new calls and broadcasts while it is lit, so that it doesn't transmit over someone. Connected applications see it too, and many refuse to start a call while the channel is busy.
+- **BUSY** lights amber while Data2G hears a signal on the frequency, including a Data2G transmission whose start it missed. Data2G holds back new calls and broadcasts while it is lit, so that it doesn't transmit over someone. Connected applications see it too, and many refuse to start a call while the channel is busy.
 - **PTT** lights red while Data2G is transmitting.
 
 ### Buttons
@@ -533,7 +533,7 @@ The same settings appear in the GUI's settings dialog (tabs **Station** and **Ri
 
 ![The Station tab of the settings dialog](user-guide-img/gui-settings-station.png)
 
-Some changes restart the modem, which drops any session in progress and disconnects applications. A red warning appears beside the OK or Save button when the changes you have made will do that. Callsign, output volume, PTT delays, decoder effort, noise rule, nods, CW ID, live constellation and recording all apply without a restart.
+Some changes restart the modem, which drops any session in progress and disconnects applications. A red warning appears beside the OK or Save button when the changes you have made will do that. Callsign, output volume, PTT delays, decoder effort, noise rule, nods, CW ID, live constellation, mid-burst BUSY and recording all apply without a restart.
 
 The web UI's Settings tab has the same fields on one page:
 
@@ -544,6 +544,7 @@ The web UI's Settings tab has the same fields on one page:
 - **Callsign**: your station's callsign.
 - **Decode on a worker thread**: leave on. It lets Data2G keep listening for new signals while it decodes a long burst.
 - **Live constellation**: fills in the constellation plot while a burst is still arriving, at a small cost in CPU. Turn it off on a slow machine.
+- **Mid-burst BUSY**: detects ongoing Data2G transmissions whose start was missed, lights BUSY and holds KISS broadcasts. Leave on; turn it off if passband interference keeps BUSY stuck on. It is off by default on FM, where it hasn't been tested yet.
 - **Decoder effort**: how hard the error-correction decoder works on each burst before giving up. Higher values recover slightly more in deep fades and take longer on bursts that fail anyway. The default is 25. On a slow machine such as a Raspberry Pi 4, try 15 or 20.
 - **CW ID**: adds a Morse ID (`DE` and your callsign, on 1500 Hz) to the normal ID bursts, or sends it in their place. The box beside it sets the speed, from 15 to 40 words per minute.
 

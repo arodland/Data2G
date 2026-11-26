@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import cpm as _cpm
-from ..config import PROFILE, SUBMODES, data_path
+from ..config import BANDS as CFG_BANDS, PROFILE, RS, SNR_REF_BW_HZ, SUBMODES, data_path
 
 DATA = Path(__file__).parent.parent / "codes_data"
 BANDS = ("w", "n10", "n4", "w48")
@@ -51,6 +51,21 @@ def capacity(snr_db, const: str):
     """AWGN BICM capacity (bits per coded bit) at snr_db, per channel use."""
     grid, tables = _capacity()
     return np.interp(snr_db, grid, tables[const_family(const)])
+
+
+def inv_capacity(mi: float, const: str) -> float:
+    """Invert AWGN BICM capacity: effective MI -> equivalent per-cell SNR (dB).
+    Returns +inf when `mi` sits at the constellation's ceiling (saturated)."""
+    grid, tables = _capacity()
+    t = tables[const_family(const)]
+    if mi >= float(t[-1]) - 1e-5:
+        return float("inf")
+    return float(np.interp(mi, t, grid))
+
+
+def band_bw_db(band: str) -> float:
+    """10 log10(occupied bandwidth / SNR_REF_BW_HZ) for an OFDM band."""
+    return float(10.0 * np.log10(CFG_BANDS[band].nc * RS / SNR_REF_BW_HZ))
 
 
 def const_family(name: str) -> str:
@@ -395,12 +410,21 @@ FM_STEADY_OFFSET_DB = {"f108": -1.0}
 if os.environ.get("DATA2G_FM_STEADY_OFFSET") is not None:
     FM_STEADY_OFFSET_DB = {b: float(v) for b, v in (e.split(":") for e in
                                                     os.environ["DATA2G_FM_STEADY_OFFSET"].split(",") if e)}
+# Data-aided MER (issue #290): DATA2G_DATA_MER=0 disables it (paired studies).
+DATA_MER = os.environ.get("DATA2G_DATA_MER", "1") == "1"
+# FM: mode_thresholds.json is calibrated in pilot snr_est, which sits ~2-2.5 dB
+# above data-cell MER/MIESM at the top of f108 due to the 15 kHz IF filter.
+# Adding this offset before capping snr_est keeps healthy flat/mic links on
+# their calibrated thresholds while dropping distorted or rolled-off paths.
+FM_MER_OFFSET_DB = float(os.environ.get("DATA2G_FM_MER_OFFSET", "2.0"))
 _FM_THR = (json.loads(Path(os.environ.get("DATA2G_FM_THRESHOLDS") or data_path("mode_thresholds.json")).read_text())
            ["modes"] if FM_THRESHOLD else {})
 
 
-def fm_outcome(snr_est: float, submode: str, measured_band: str | None = None, n0_spread_db: float = 0.0) -> float:
-    band = SUBMODES[submode].band
+def fm_outcome(snr_est: float, submode: str, measured_band: str | None = None, n0_spread_db: float = 0.0,
+               measured: dict | None = None) -> float:
+    spec = SUBMODES[submode]
+    band = spec.band
     thr = _FM_THR[submode]
     if FM_PROV:
         if measured_band is not None and band != measured_band:
@@ -408,6 +432,13 @@ def fm_outcome(snr_est: float, submode: str, measured_band: str | None = None, n
         z = np.log(9.0) + 2.0 * (snr_est - thr[0])
     else:
         fading = FM_REGIME and n0_spread_db >= FM_FADING_SPREAD_DB
+        if DATA_MER and measured is not None and measured_band is not None and band == measured_band:
+            cf = const_family(spec.constellation)
+            mi = measured.get(f"mi_{cf}")
+            if mi is not None:
+                eq = inv_capacity(mi, cf)
+                if np.isfinite(eq):
+                    snr_est = min(snr_est, eq + band_bw_db(band) + FM_MER_OFFSET_DB)
         if measured_band is not None:
             snr_est += FM_BAND_OFFSET_DB.get(band, 0.0) - FM_BAND_OFFSET_DB.get(measured_band, 0.0)
             if band != measured_band and not fading:
@@ -493,7 +524,7 @@ def predict_outcome(measured: dict, band: str, gap: float, seconds: float, submo
     `extra`: {mode: logit} added to P(usable) on top of LOGIT_OFFSETS (the
     shifter's conditional offsets, policy.COND_OFFSETS)."""
     if FM_THRESHOLD:  # the provisional threshold predictor (fm_outcome)
-        return {s.name: (fm_outcome(measured["snr_est"], s.name, band, measured.get("n0_spread_db", 0.0)),) * 2
+        return {s.name: (fm_outcome(measured["snr_est"], s.name, band, measured.get("n0_spread_db", 0.0), measured),) * 2
                 for s in (submodes or SUBMODES.values()) if s.name in _FM_THR}
     model = model or outcome_model()
     z = model(outcome_inputs(measured, band, gap, seconds, prev, model.bands, model.noise, model.link,

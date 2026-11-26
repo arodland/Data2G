@@ -178,8 +178,8 @@ private:
     void drop_where(int port, const std::function<bool(const Queued&)>& which);
     std::pair<std::string, int> route(const Port& port, ByteView frame) const;
     std::vector<Bytes> control(const arq::Mode& m, int n, const Port& port, int sender);
-    void learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, const std::vector<bool>& ok,
-               double now);
+    void learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, arq::ModemRx& rx,
+               const std::vector<bool>& ok, double now);
     Peer* peer(int h);
 
     arq::TxBurstPtr inflight_;  // the last burst handed out

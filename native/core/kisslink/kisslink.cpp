@@ -669,7 +669,7 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
         auto [frames, ok, lost] = read_burst_frames(rx, start, group_key(c.group));
         const auto mine = ports_where([&](const Port& p) { return p.group == c.group; });
         if (c.reports && std::any_of(mine.begin(), mine.end(), [&](int i) { return ports.at(i).shift; }))
-            learn(*c.reports, frames, r, ok, now);
+            learn(*c.reports, frames, r, rx, ok, now);
         const std::string snr = mine.empty() ? "" : snr_suffix(r);
         for (int i : mine) {
             events.push_back("BCAST " + std::to_string(i) + " HEARD" + (c.call ? " " + *c.call : "") + snr);
@@ -708,8 +708,8 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
 }
 
 // A shifting port heard `rep` (T_REPORTS): what we know of its sender.
-void KissLink::learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, const std::vector<bool>& ok,
-                     double now) {
+void KissLink::learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, arq::ModemRx& rx,
+                     const std::vector<bool>& ok, double now) {
     int sender = be16(rep.data());
     if (!sender && !frames.empty())
         if (const auto ax = parse_ax25(frames[0])) sender = station_hash(ax->sender);
@@ -726,7 +726,9 @@ void KissLink::learn(const Bytes& rep, const std::vector<Bytes>& frames, const a
     }
     p->heard = now;
     p->shifter.outcome(mode, static_cast<int>(std::count(ok.begin(), ok.end(), true)), static_cast<int>(ok.size()));
-    p->shifter.observe(arq::measure(r), mode, now);
+    auto m = arq::measure(r);
+    if (auto u = rx.measure_data(m)) m = *u;
+    p->shifter.observe(m, mode, now);
     for (std::size_t j = 2; j + 3 <= rep.size(); j += 3)
         if (me.count(be16(&rep[j]))) p->report = {{rep[j + 2], now}};
 }

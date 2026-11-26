@@ -112,6 +112,9 @@ def substitutions(native):
         def observe(self, measured, submode, now):
             self._n.observe(measured, submode, float(now))
 
+        def update_measured(self, measured):
+            self._n.update_measured(measured)
+
         def observe_energy(self, snr_db, now):
             if snr_db is not None:
                 self._n.observe_energy(float(snr_db), float(now))

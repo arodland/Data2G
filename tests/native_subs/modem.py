@@ -17,7 +17,8 @@ def substitutions(native):
     N, W = native.modem, native.waveform
     names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
-             "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "_cfo_aliases",
+             "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "presence_window",
+             "fold_presence", "presence_verdict", "pilot_presence", "fold_verify", "pilot_present", "_cfo_aliases",
              "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft",
              "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received")
     py = {k: getattr(modem, k) for k in names}
@@ -154,6 +155,15 @@ def substitutions(native):
             py["find_copy"].peak = find_copy.peak = peak
         return specs(lock)
 
+    @guarded("fold_verify")
+    def fold_verify(x, band, fold, fold_phase0=0):
+        return N.fold_verify(f64(x), band, np.asarray(fold, dtype=complex), int(fold_phase0))
+
+    @guarded("pilot_present")
+    def pilot_present(D, level, window, x=None, band=None):
+        return N.pilot_present(np.asarray(D, dtype=complex), float(level), int(window),
+                               None if x is None else f64(x), band)
+
     @guarded("_copy_header", lambda z, lock: lock_ok(lock))
     def _copy_header(z, lock):
         return hdr_dict(N.copy_header(z, lock))
@@ -220,6 +230,10 @@ def substitutions(native):
         "_bin_phase_step": lambda h: N.bin_phase_step(np.asarray(h, complex)),
         "_cfo_aliases": lambda d, centre: N.cfo_aliases(complex(d), float(centre)),
         "resolve_alias": lambda fine, coarse: N.resolve_alias(float(fine), float(coarse)),
+        "presence_window": lambda dcols, window: N.presence_window(int(dcols), int(window)),
+        "fold_presence": lambda fold, level, m: N.fold_presence(np.asarray(fold, complex), float(level), int(m)),
+        "presence_verdict": lambda peak, contrast, m: N.presence_verdict(float(peak), float(contrast), int(m)),
+        "pilot_presence": lambda D, level, window: N.pilot_presence(np.asarray(D, complex), float(level), int(window)),
     }
     return {
         **{(modem, k): guarded(k)(fn) for k, fn in small.items()},
@@ -229,7 +243,8 @@ def substitutions(native):
             "modulate_bits": modulate_bits, "burst_waveform": burst_waveform, "ace_cells": ace_cells,
             "_demod_frames": _demod_frames, "_read_header": _read_header, "_copy_llr": _copy_llr,
             "_best_header": _best_header, "find_burst": find_burst, "pilot_coherence": pilot_coherence,
-            "find_copy": find_copy, "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
+            "find_copy": find_copy, "fold_verify": fold_verify, "pilot_present": pilot_present,
+            "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
             "noise_var": noise_var, "soft_bits": soft_bits, "burst_soft": burst_soft, "slot_soft": slot_soft,
             "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received,
             "demodulate": demodulate}.items()},

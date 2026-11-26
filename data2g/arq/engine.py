@@ -237,6 +237,7 @@ class Engine:
         self._fed = 0  # stream samples heard, this block's included (self.n's basis)
         self._events: list[str] = []  # host notifications from outside the session (CQFRAME)
         self.kiss = kiss
+        self.receiver.sense = True  # data2g_on_air: BUSY (channel_busy) and the KISS hold (_kiss_burst)
         self.stats_interval_s = stats_interval_s
         self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
         self._tx_kiss = False  # the burst on air is a KISS one
@@ -287,8 +288,20 @@ class Engine:
 
     @property
     def channel_busy(self) -> bool:
-        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy, or a CW ID heard)."""
-        return self.receiver.channel_busy or self._cw_heard
+        """The host's BUSY ON/OFF (receiver.Receiver.channel_busy, or a CW ID
+        heard). Not the receiver's while we transmit: it hears nothing then."""
+        return (self.tx is None and self.receiver.channel_busy) or self._cw_heard
+
+    @property
+    def sense(self) -> bool:
+        """Mid-burst Data2G BUSY sensing (Receiver.sense)."""
+        return self.receiver.sense
+
+    @sense.setter
+    def sense(self, on: bool):
+        self.receiver.sense = bool(on)
+        if not on:
+            self.receiver._present = self.receiver._blind = False
 
     @property
     def tx_submode(self) -> str | None:
@@ -1073,13 +1086,16 @@ class Engine:
         probability (P + 1) / 256, so stations that queued under the same
         burst don't all key up as it ends. One queued on a free channel (a
         reply) goes at once. BUSY (`busy`: a burst arriving or a CW ID) holds
-        a burst, but not past busy_limit_s of it unbroken (a stuck BUSY).
-        `k`: this block's samples."""
+        a burst, and so does a Data2G burst we hold no lock on
+        (Receiver.data2g_on_air: one that began while we transmitted, or under
+        another; holding only on a lock, two stations that each missed the
+        other's start talked over each other), but not past busy_limit_s of it
+        unbroken (a stuck BUSY). `k`: this block's samples."""
         link = self.kiss
         if not link.queue:
             self._kiss_busy, self._kiss_deferred = 0, False
             return None
-        if busy:
+        if busy or self.receiver.data2g_on_air:
             self._kiss_busy += k
             self._kiss_deferred = True
             if self._kiss_busy < link.busy_limit_s * FS:
