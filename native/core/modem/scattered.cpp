@@ -128,7 +128,16 @@ struct Weights {
     std::vector<double> m;    // (6 nc,): mse / p_sig (not kept for pilots alone)
     std::vector<size_t> col;  // (nc,): each scattered pilot's own observation
     std::vector<double> own;  // (nc,): real(W[P, col])
-    size_t bytes() const { return W.data.size() * sizeof(cd) + 64 * m.size(); }
+    // forward-only (the whole frame's cells, Cholesky): W not formed. h = Y^H (L^-1 values) with Y = L^-1 Bm^H, or
+    // factored (Y = L^-1 G^H, nd > 0) h_r = sum_d Bd[k_r, d] (Y^H L^-1 values)[(s_r, d)]
+    bool fwd = false;
+    size_t n = 0, nd = 0, rhs = 0;
+    std::vector<double> Lr, Li;  // the Cholesky factor (lower, row-major n x n)
+    std::vector<double> Yr, Yi;  // (n x rhs)
+    Mat<cd> Bd;                  // factored: the support's steering vectors (nc x nd)
+    size_t bytes() const {
+        return W.data.size() * sizeof(cd) + 64 * m.size() + 8 * (Lr.size() + Li.size() + Yr.size() + Yi.size());
+    }
 };
 
 // Python keeps 256 patterns; a w48 pattern's W is up to ~3 MB, so the C++ also caps the bytes.
@@ -170,8 +179,9 @@ DATA2G_SIMD_CLONES bool cholesky_split(double* ar, double* ai, size_t n) {
 }
 
 // L Y = X, then (with back) L^H Z = Y, in place on X (n x m, split)
-DATA2G_SIMD_CLONES void tri_solves(const double* lr, const double* li, size_t n, double* xr, double* xi, size_t m, bool back) {
-    for (size_t i = 0; i < n; ++i) {
+DATA2G_SIMD_CLONES void tri_solves(const double* lr, const double* li, size_t n, double* xr, double* xi, size_t m, bool back,
+                                   bool forward = true) {
+    for (size_t i = 0; i < (forward ? n : 0); ++i) {
         double* yr = xr + i * m;
         double* yi = xi + i * m;
         for (size_t k = 0; k < i; ++k) {
@@ -258,7 +268,90 @@ std::shared_ptr<const Weights> make_weights(std::span<const double> rel, std::sp
         }
     }
     // A is Hermitian positive definite (a Gaussian in time times a delay prior, plus noise): Cholesky, else LU
-    if (cholesky_split(Ar.data(), Ai.data(), un)) {
+    const bool chol = cholesky_split(Ar.data(), Ai.data(), un);
+    if (chol && !pilots) {
+        // the whole frame's weights, forward only: Y = L^-1 RHS, kept with L. The back substitution (half the
+        // solves) and W are not needed: each frame's h is Y^H (L^-1 its values), one forward solve a frame,
+        // and mse_r = 1 - |L^-1 Bm^H e_r|^2, own_p = (L^-1 Bm^H e_p)^H (L^-1 e_col)
+        tri_solves(Ar.data(), Ai.data(), un, Xr.data(), Xi.data(), RHS, false);
+        auto w = std::make_shared<Weights>();
+        w->fwd = true;
+        w->n = un;
+        w->rhs = RHS;
+        w->m.resize(R);
+        // z_r = L^-1 Bm^H e_r as a combination of Y's columns: unfactored Y[:, r]; factored sum_d Y[:, (s, d)]
+        // conj(Bd[k_r, d])
+        auto z_of = [&](size_t r, std::vector<cd>& z) {
+            z.assign(un, 0.0);
+            if (!factored) {
+                for (size_t j = 0; j < un; ++j) z[j] = cd(Xr[j * RHS + r], Xi[j * RHS + r]);
+                return;
+            }
+            const size_t sy = rows[r] / unc, ck = rows[r] % unc;
+            const cd* bk = Bd[ck];
+            for (size_t j = 0; j < un; ++j) {
+                cd acc = 0.0;
+                for (size_t d = 0; d < nd; ++d) acc += cd(Xr[j * RHS + sy * nd + d], Xi[j * RHS + sy * nd + d]) * std::conj(bk[d]);
+                z[j] = acc;
+            }
+        };
+        if (factored) {  // M_s = Y_s^H Y_s per symbol (nd x nd), then mse_r = 1 - b_r^T M_s conj(b_r)
+            std::vector<cd> Ms(S * nd * nd, 0.0);
+            for (size_t sy = 0; sy < S; ++sy)
+                for (size_t j = 0; j < un; ++j) {
+                    const double* yr = Xr.data() + j * RHS + sy * nd;
+                    const double* yi = Xi.data() + j * RHS + sy * nd;
+                    for (size_t d = 0; d < nd; ++d) {
+                        const cd a(yr[d], -yi[d]);
+                        cd* row = Ms.data() + (sy * nd + d) * nd;
+                        for (size_t e = 0; e < nd; ++e) row[e] += a * cd(yr[e], yi[e]);
+                    }
+                }
+            for (size_t r = 0; r < R; ++r) {
+                const size_t sy = rows[r] / unc;
+                const cd* b = Bd[rows[r] % unc];
+                cd q = 0.0;
+                for (size_t d = 0; d < nd; ++d) {
+                    cd t = 0.0;
+                    const cd* row = Ms.data() + (sy * nd + d) * nd;
+                    for (size_t e = 0; e < nd; ++e) t += row[e] * std::conj(b[e]);
+                    q += b[d] * t;
+                }
+                w->m[r] = std::max(1.0 - q.real(), 0.0);
+            }
+        } else {
+            for (size_t r = 0; r < R; ++r) {
+                double s2 = 0.0;
+                for (size_t j = 0; j < un; ++j) s2 += Xr[j * RHS + r] * Xr[j * RHS + r] + Xi[j * RHS + r] * Xi[j * RHS + r];
+                w->m[r] = std::max(1.0 - s2, 0.0);
+            }
+        }
+        // own_p = W[P_p, col_p] = (L^-H z_p)[col_p]: the pilots' z as nc columns, one back substitution for all
+        std::vector<cd> z;
+        std::vector<double> Zr(un * unc), Zi(un * unc);
+        for (size_t i = 0; i < unc; ++i) {
+            const int p = cells.P[i], p_sym = p / nc;
+            size_t at = un;
+            for (size_t j = 0; j < un && at == un; ++j)
+                if (kd[j] == 0 && k[j] == cells.PK[i] && rel[j] == static_cast<double>(p_sym)) at = j;
+            if (at == un) throw std::logic_error("_sc_joint: a frame's pilot outside its own window");
+            w->col.push_back(at);
+            z_of(static_cast<size_t>(p), z);
+            for (size_t j = 0; j < un; ++j) Zr[j * unc + i] = z[j].real(), Zi[j * unc + i] = z[j].imag();
+        }
+        tri_solves(Ar.data(), Ai.data(), un, Zr.data(), Zi.data(), unc, true, false);
+        for (size_t i = 0; i < unc; ++i) w->own.push_back(Zr[w->col[i] * unc + i]);
+        w->Lr.swap(Ar);
+        w->Li.swap(Ai);
+        w->Yr.swap(Xr);
+        w->Yi.swap(Xi);
+        if (factored) {
+            w->nd = nd;
+            w->Bd = Bd;
+        }
+        return w;
+    }
+    if (chol) {
         tri_solves(Ar.data(), Ai.data(), un, Xr.data(), Xi.data(), RHS, true);
     } else {
         std::vector<cd> A(un * un), X(un * RHS);
@@ -418,11 +511,42 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         };
         if (pilots) {
             for (size_t p = 0; p < unc; ++p) hp[p] = dot(p);
-        } else {
-            cd* h = out.h[i * SYMS_PER_FRAME];  // the frame's 6 rows, contiguous
+        } else if (w.fwd) {
+            cd* h = out.h[i * SYMS_PER_FRAME];
             double* m = out.mse[i * SYMS_PER_FRAME];
+            // u = L^-1 v (forward), t = Y^H u, h = t (unfactored) or per cell Bd[k] . t[s]
+            std::vector<double> ur(n), ui(n);
+            for (size_t r = 0; r < n; ++r) {
+                double ar = v[r].real(), ai = v[r].imag();
+                const double* lr = w.Lr.data() + r * n;
+                const double* li = w.Li.data() + r * n;
+                for (size_t c = 0; c < r; ++c) {
+                    ar -= lr[c] * ur[c] - li[c] * ui[c];
+                    ai -= lr[c] * ui[c] + li[c] * ur[c];
+                }
+                ur[r] = ar / lr[r];
+                ui[r] = ai / lr[r];
+            }
+            std::vector<double> tr(w.rhs, 0.0), ti(w.rhs, 0.0);
+            for (size_t j = 0; j < n; ++j) {  // t += conj(Y[j, :]) u_j
+                const double* yr = w.Yr.data() + j * w.rhs;
+                const double* yi = w.Yi.data() + j * w.rhs;
+                const double a = ur[j], b = ui[j];
+                for (size_t q = 0; q < w.rhs; ++q) {
+                    tr[q] += yr[q] * a + yi[q] * b;
+                    ti[q] += yr[q] * b - yi[q] * a;
+                }
+            }
             for (size_t c = 0; c < C; ++c) {
-                h[c] = dot(c);
+                if (w.nd) {
+                    const size_t sy = c / unc;
+                    const cd* bk = w.Bd[c % unc];
+                    cd s = 0.0;
+                    for (size_t d = 0; d < w.nd; ++d) s += bk[d] * cd(tr[sy * w.nd + d], ti[sy * w.nd + d]);
+                    h[c] = s;
+                } else {
+                    h[c] = cd(tr[c], ti[c]);
+                }
                 m[c] = p_sig * w.m[c];
             }
             for (size_t p = 0; p < unc; ++p) hp[p] = h[static_cast<size_t>(cells.P[p])];
