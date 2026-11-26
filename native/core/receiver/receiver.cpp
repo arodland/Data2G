@@ -176,8 +176,10 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     for (const auto b : bands_) {  // matched filter outputs kept only where find_copy reads them
         const bool copy = std::find(config::HEADER_COPY_BANDS.begin(), config::HEADER_COPY_BANDS.end(), b) !=
                           config::HEADER_COPY_BANDS.end();
-        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, copy), {}, {}, {}});
-        if (copy && config::sc_band(b) && modem::sc_flags().copy_coherent) detectors_.back().comb.emplace(b);
+        // (a scattered-pilot copy band's copy search reads its combs' outputs, not the detector's)
+        const bool comb = copy && config::sc_band(b) && modem::sc_flags().copy_coherent;
+        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, copy && !comb), {}, {}, {}});
+        if (comb) detectors_.back().comb.emplace(b);
     }
     if (blank) blanker_.emplace();
     reset();

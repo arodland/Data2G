@@ -1383,9 +1383,12 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
         }
     }
     const Mat<cd>& fold = fold_in && !comb ? *fold_in : own;
-    std::vector<double> mag(FR, -equalizer::INF);
+    // |fold| per phase, the max over bins: the max of |.|^2 then one sqrt a phase (a hypot per bin and phase was 6%
+    // of mix's listening; the same order, to an ulp)
+    std::vector<double> mag(FR, 0.0);
     for (size_t f = 0; f < F; ++f)
-        for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::abs(fold[f][ph]));
+        for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::norm(fold[f][ph]));
+    for (auto& v : mag) v = std::sqrt(v);
     const double pk = *std::max_element(mag.begin(), mag.end()) / (level * std::sqrt(static_cast<double>(m * COPY_PAIRS)));
     if (peak) *peak = pk;
     if (pk < COPY_DETECT) return std::nullopt;
