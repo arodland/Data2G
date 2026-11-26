@@ -1822,6 +1822,9 @@ SC_SPREADS = (2.0, 3.0, 4.5, 7.0, 10.0, 15.0)  # Hz: the fast spread's candidate
 SC_SLOW_RHO = 0.35  # frame-apart pilot correlation over this: the spread from it (under ~3.2 Hz)
 SC_WIDEN = 1.25  # that spread, widened: too narrow a filter costs more than too wide (equalizer.filter_spread)
 SC_FRAMES = 4  # the joint estimate's reach, frames either side, at most (0.7 / spread otherwise)
+# ... and at most 2 from SC_JOINT_REACH2_HZ up (w48's 2 Hz mpd took 1.8-2.3 s against TURN_S 1.3 on a CM4 with 3;
+# 1.0 s with 2, 10% points within 0.04 dB, see the commit)
+SC_JOINT_REACH2_HZ = 2.0
 _SC_WEIGHTS: dict = {}  # _sc_joint's, by pattern position and quantized statistics
 
 
@@ -1991,7 +1994,8 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
     spread, nr = 2 ** (qs / 8), np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
     kq = None if kw is None else np.array([q(v, 2) for v in kw])  # to 1.5 dB
     nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
-    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1, SC_FRAMES)) + 3
+    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1,
+                                           2 if spread >= SC_JOINT_REACH2_HZ else SC_FRAMES)) + 3
     slack = _sc_slack(nc)
     d = np.arange(support[0] - slack, support[1] + slack + 1)
     Rf = None

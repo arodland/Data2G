@@ -47,9 +47,10 @@ constexpr double SC_SLOW_RHO = 0.35;
 constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
 constexpr int SC_HOT_PASSES = 1;
-constexpr size_t SC_SOLVE_LANES = 2;
+constexpr size_t SC_SOLVE_LANES = 2;  // joint()'s weight solves at once (its reason there)
 constexpr double SC_SEP_HZ = 1.5;  // modem.SC_SEP_HZ (its DATA2G_SC_SEP_HZ study switch is Python's)
-constexpr double SC_SEP_REPORT_HZ = 1.0;  // modem.SC_SEP_REPORT_HZ  // joint()'s weight solves at once (its reason there)
+constexpr double SC_SEP_REPORT_HZ = 1.0;  // modem.SC_SEP_REPORT_HZ
+constexpr double SC_JOINT_REACH2_HZ = 2.0;  // modem.SC_JOINT_REACH2_HZ: joint()'s reach at most 2 frames from here up
 constexpr int SC_SEARCH_MIN = 4;  // modem.SC_SEARCH_MIN (its DATA2G_SC_SEARCH_MIN study switch is Python's)
 
 // modem._sc_interior: the spread search's frames, those whose widest reach holds every frame's pilots and no whole
@@ -428,7 +429,8 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
     const int qs = quant(spread, 8), q1 = quant(nr_sc, 6), q2 = quant(nr_full, 6);
     const double sq = std::pow(2.0, qs / 8.0);
     const std::array<double, 3> nr = {std::pow(2.0, q1 / 6.0), std::pow(2.0, q2 / 6.0), std::pow(2.0, q2 / 6.0) / REF_REPEATS};
-    const double reach = SYMS_PER_FRAME * std::clamp(std::ceil(0.7 / sq / FRAME_S), 1.0, static_cast<double>(SC_FRAMES)) + 3;
+    const double reach =
+        SYMS_PER_FRAME * std::clamp(std::ceil(0.7 / sq / FRAME_S), 1.0, sq >= SC_JOINT_REACH2_HZ ? 2.0 : SC_FRAMES) + 3;
     std::vector<int> kq;  // to 1.5 dB
     std::vector<double> nk;
     for (double v : kw) {

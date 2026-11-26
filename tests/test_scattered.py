@@ -178,3 +178,24 @@ def test_a_separable_spread_is_reported_as_the_joint_search_read_it(monkeypatch)
     y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpp", seed=6)
     est = modem.receive(y, known=dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4))["est"]
     assert est["filter_spread_hz"] == 1.5 and est["spread_hz"] == modem.SC_SEP_REPORT_HZ
+
+
+@pytest.mark.python_only("reads Python's weight cache; native's reach is held by test_native_modem's w48 mpd case")
+def test_a_2_hz_channel_is_estimated_from_2_frames_either_side(monkeypatch):
+    """From SC_JOINT_REACH2_HZ up the joint estimate reaches 2 frames either side (3 by 0.7 / spread at 2 Hz):
+    w48's mpd burst took 1.8-2.3 s on a CM4 against TURN_S 1.3 with 3. Every weight pattern it solved spans at
+    most 2 frames and 3 symbols either side of its frame's centre."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    x = np.concatenate([np.zeros(2400), modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(4)], spec),
+                        np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpd", seed=3)
+    modem._SC_WEIGHTS.clear()
+    est = modem.receive(y, known=dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4))["est"]
+    assert est["filter_spread_hz"] == 2.0
+    q2 = round(np.log2(2.0) * 8)
+    spans = [np.max(np.abs(np.frombuffer(k[7]) - 2.5)) for k in modem._SC_WEIGHTS if k[4] == q2]
+    assert spans and max(spans) <= 2 * modem.SYMS_PER_FRAME + 3
