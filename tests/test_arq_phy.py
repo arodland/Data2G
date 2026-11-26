@@ -257,3 +257,44 @@ def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     assert b.state == S.LISTEN
     b.on_rx(PHY.ModemRx(heard[1], store), 10.0)
     assert b.state == S.CONNECTED and b.peer == "W1AW"
+
+
+def test_data_mer_catches_tx_distortion_and_leaves_clean_links_unchanged():
+    """Issue #290: repeating low-PAPR pilots absorb mild TX clipping into h
+    while higher-PAPR data symbols take it as noise. data_mer leaves a clean
+    burst's snr_est/mi_* unchanged, and lowers both on a clipped burst whether
+    decoded (exact symbols) or undecoded (EM)."""
+    from data2g.arq import predictor as P
+
+    spec = SUBMODES["w48-256l-r5/8"]
+    rng = np.random.default_rng(7)
+    pl = [bytes(rng.integers(0, 256, codes.payload_bytes(spec), dtype=np.uint8)) for _ in range(8)]
+    b = TxBurst(spec.name, [Slot((7, 0, i), 0, p) for i, p in enumerate(pl)], 0)
+    x = PHY.tx_audio(b)
+    pad = np.zeros(2400)
+
+    # Clean burst at 28 dB: deadband keeps snr_est and mi_* untouched
+    r_clean = modem.receive(hfchannel.apply_channel(np.concatenate([pad, x, pad]), snr_db=28.0, seed=1))
+    m_clean = PHY.measure(r_clean)
+    rx_clean = PHY.ModemRx(r_clean, {}, dd_budget=0.0)
+    assert all(rx_clean.decode(i, (7, 0, i), 0, None) == pl[i] for i in range(8))
+    u_clean = rx_clean.measure_data(m_clean)
+    assert u_clean["snr_est"] == m_clean["snr_est"]
+    assert all(u_clean[f"mi_{c}"] == m_clean[f"mi_{c}"] for c in P.CONSTS)
+    assert u_clean["mer_db"] > 20.0
+
+    # Mildly clipped burst (1.5x RMS): pilots barely clip (~28 dB), data fail 0/8
+    rms = float(np.sqrt(np.mean(x[np.abs(x) > 0] ** 2)))
+    xc = np.clip(x, -1.5 * rms, 1.5 * rms)
+    r_dist = modem.receive(hfchannel.apply_channel(np.concatenate([pad, xc, pad]), snr_db=28.0, seed=1))
+    m_dist = PHY.measure(r_dist)
+    assert m_dist["snr_est"] > 25.0  # pilots fooled
+    rx_dist = PHY.ModemRx(r_dist, {}, dd_budget=0.0)
+    # Blind EM (0 slots decoded) and exact coded bits both catch the distortion
+    u_em = rx_dist.measure_data(m_dist)
+    exact = {i: codes.encode(spec, pl[i], 0, PHY.mask_value((7, 0, i)), index=i) for i in range(8)}
+    u_ex = PHY.data_mer(r_dist, exact, m_dist)
+    assert u_em["snr_est"] < m_dist["snr_est"] - 5.0
+    assert u_ex["snr_est"] < m_dist["snr_est"] - 5.0
+    assert u_em["mer_db"] < m_dist["snr_est"] - 5.0
+    assert u_em["mi_c256-snr26"] < m_dist["mi_c256-snr26"] - 0.06

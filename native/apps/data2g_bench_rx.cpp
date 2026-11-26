@@ -125,12 +125,12 @@ Burst load(const char* path) {
 double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
 struct Run {
-    double receive = 0, soft = 0, prepare = 0, decode = 0;
+    double receive = 0, soft = 0, prepare = 0, decode = 0, mer = 0;
     double acq = 0, refine = 0;  // CPM: the lock search on the head (live, during the burst), refine (in receive)
     double plock = 0, primed = 0;  // --primed: prime_lock on the window, PRIME_TRIES decode_known
     bool genie = false, plocked = false, pok = false;
     int ok = 0, refines = 0;
-    double total() const { return receive + soft + prepare + decode; }
+    double total() const { return receive + soft + prepare + decode + mer; }
 };
 
 bool primed_on = false;
@@ -217,6 +217,12 @@ Run run(const Burst& b, std::optional<double> dd_budget) {
         out.ok += right(got, q.slot) * (dup && q.slot == 0 ? 2 : 1);
     }
     out.decode = now() - t;
+    if (h.ofdm) {
+        const auto meas = arq::measure(h);
+        t = now();
+        (void)rx.measure_data(meas);
+        out.mer = now() - t;
+    }
 #if BENCH_PRIMED
     if (primed_on) {  // a failed control's retries (Station::primed): PRIME_TRIES hypotheses, the last one right
         const auto& want = b.payloads[0];
@@ -299,7 +305,7 @@ CpmRun run_cpm(const std::string& mode, int n_data, double sigma, bool stream, s
 // end latency (from the feed holding the burst's end plus Receiver::MARGIN to every slot read), its receive, CPU
 // spent in the feeds while the burst arrived, slots decoded early, partial looks, slots right.
 struct StreamRun {
-    double end = 0, receive = 0, during = 0, max_feed = 0;
+    double end = 0, receive = 0, mer = 0, during = 0, max_feed = 0;
     int ok = 0, early = 0, partials = 0;
     bool heard = false;
 };
@@ -353,6 +359,10 @@ StreamRun run_stream(const Burst& b, bool early, std::optional<double> dd_budget
                 const auto got = m->decode(q.slot, q.mask, q.rv, &q.key);
                 out.ok += got && *got == b.payloads[static_cast<std::size_t>(q.slot)];
             }
+            const auto meas = arq::measure(h);
+            const double tm = now();
+            (void)m->measure_data(meas);
+            out.mer = now() - tm;
             out.end = now() - t;
             return out;
         }
@@ -587,8 +597,8 @@ int main(int argc, char** argv) {
     }
     if (files.empty()) return 0;
     if (stream) {
-        std::printf("%-44s %5s %8s %8s %8s %8s %6s %6s\n", "burst (streamed, 20 ms feeds)", "ok", "end ms", "receive",
-                    "during", "maxfeed", "tried", "looks");
+        std::printf("%-44s %5s %8s %8s %6s %8s %8s %6s %6s\n", "burst (streamed, 20 ms feeds)", "ok", "end ms", "receive",
+                    "mer", "during", "maxfeed", "tried", "looks");
         for (const char* path : files) {
             const Burst b = load(path);
             if (cpm::grid(b.band)) continue;  // OFDM only (CPM streams by --cpm)
@@ -597,14 +607,14 @@ int main(int argc, char** argv) {
                 const StreamRun r = run_stream(b, early, dd_budget);
                 if (k == 0 || r.end < best.end) best = r;
             }
-            std::printf("%-44s %2d/%-2zu %8.1f %8.1f %8.1f %8.1f %6d %6d%s\n", b.name.c_str(), best.ok, b.payloads.size(),
-                        1e3 * best.end, 1e3 * best.receive, 1e3 * best.during, 1e3 * best.max_feed, best.early,
+            std::printf("%-44s %2d/%-2zu %8.1f %8.1f %6.2f %8.1f %8.1f %6d %6d%s\n", b.name.c_str(), best.ok, b.payloads.size(),
+                        1e3 * best.end, 1e3 * best.receive, 1e3 * best.mer, 1e3 * best.during, 1e3 * best.max_feed, best.early,
                         best.partials, best.heard ? "" : "  (not heard)");
         }
         return 0;
     }
-    std::printf("%-44s %5s %7s %7s %8s %6s %8s %8s %8s %4s %7s %7s\n", "burst", "ok", "acq", "refine", "receive",
-                "soft", "prepare", "decode", "total", "dd", "plock", "primed");
+    std::printf("%-44s %5s %7s %7s %8s %6s %8s %8s %6s %8s %4s %7s %7s\n", "burst", "ok", "acq", "refine", "receive",
+                "soft", "prepare", "decode", "mer", "total", "dd", "plock", "primed");
     for (const char* path : files) {
         const Burst b = load(path);
         Run best;
@@ -612,10 +622,10 @@ int main(int argc, char** argv) {
             const Run r = run(b, dd_budget);
             if (k == 0 || r.total() < best.total()) best = r;
         }
-        std::printf("%-44s %2d/%-2zu %7.1f %7.1f %8.1f %6.1f %8.1f %8.1f %8.1f %4d %7.1f %7.1f%s%s%s\n",
+        std::printf("%-44s %2d/%-2zu %7.1f %7.1f %8.1f %6.1f %8.1f %8.1f %6.2f %8.1f %4d %7.1f %7.1f%s%s%s\n",
                     b.name.c_str(), best.ok, b.payloads.size(), 1e3 * best.acq, 1e3 * best.refine,
-                    1e3 * best.receive, 1e3 * best.soft, 1e3 * best.prepare, 1e3 * best.decode, 1e3 * best.total(),
-                    best.refines, 1e3 * best.plock, 1e3 * best.primed, best.genie ? " genie" : "",
-                    best.plocked ? " plock" : "", best.pok ? " pok" : "");
+                    1e3 * best.receive, 1e3 * best.soft, 1e3 * best.prepare, 1e3 * best.decode, 1e3 * best.mer,
+                    1e3 * best.total(), best.refines, 1e3 * best.plock, 1e3 * best.primed,
+                    best.genie ? " genie" : "", best.plocked ? " plock" : "", best.pok ? " pok" : "");
     }
 }

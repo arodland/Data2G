@@ -684,7 +684,7 @@ class KissLink:
             frames, ok, lost = self.read_burst_frames(rx, start, group_key(group))
             ports = sorted(i for i, p in self.ports.items() if p.group == group)
             if rep is not None and any(self.ports[i].auto for i in ports):
-                self._learn(rep, frames, r, ok, now)
+                self._learn(rep, frames, r, rx, ok, now)
             snr = _snr(r) if ports else ""
             for i in ports:
                 self.events.append(f"BCAST {i} HEARD" + (f" {call}" if call else "") + snr)
@@ -715,7 +715,7 @@ class KissLink:
                 self.events.append(f"BCAST {i} LOST {lost}")
         return [(i, f) for i in ports for f in frames]
 
-    def _learn(self, rep: bytes, frames: list, r: dict, ok: list, now: float):
+    def _learn(self, rep: bytes, frames: list, r: dict, rx, ok: list, now: float):
         """A shifting port heard `rep` (T_REPORTS): what we know of its sender."""
         sender = struct.unpack(">H", rep[:2])[0]
         if not sender and frames and (ax := parse_ax25(frames[0])) is not None:
@@ -726,7 +726,10 @@ class KissLink:
         peer = self.peers.setdefault(sender, Peer(G.GearShifter(use_cpm=True, min_success=MIN_SUCCESS), now))
         peer.heard = now
         peer.shifter.outcome(mode, sum(ok), len(ok))
-        peer.shifter.observe(PHY.measure(r), mode, now)
+        m = PHY.measure(r)
+        if rx is not None and hasattr(rx, "measure_data"):
+            m = rx.measure_data(m) or m
+        peer.shifter.observe(m, mode, now)
         for j in range(2, len(rep), 3):
             h, rec = struct.unpack(">HB", rep[j:j + 3])
             if h in self.me:

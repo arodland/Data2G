@@ -71,6 +71,13 @@ struct Detection {
     std::int64_t start;
     double cfo;
 };
+struct Header {
+    const Spec* spec;
+    int n_data;
+    bool dup;
+    double score, runner_up;
+    double front;  // the front block's part of score
+};
 // cpm.CoarseTrack: a streaming receiver's coarse detection rows of grid g as audio arrives, on the stream's
 // T/4 timing grid, so each hop's searches (find, find_mid) read them instead of transforming their windows again.
 class CoarseTrack {
@@ -81,6 +88,25 @@ public:
     // detect's per-phase (first symbol's sample from a, rows n x 4 nb) of the whole symbols in [a, b)
     std::vector<std::pair<std::int64_t, Mat<double>>> rows(std::int64_t a, std::int64_t b) const;
     int extra;  // bins searched each side of the grid (detect's reach)
+
+    // Native only, results unchanged: a stream re-searches the same candidate hop after hop on the same audio
+    // (60 s of noise: 44% of c16r25's fine searches, 24% of c8r50's), so detect's fine search of a coarse
+    // candidate (stream sample, CFO, which rows) and find's header reading of its result are kept while their
+    // audio is. Only entries whose whole span was in the buffer: zero-filled edges would differ.
+    struct FineMemo {
+        std::int64_t s;
+        double cfo;
+        bool front_only, mid;
+        Detection fine;  // start a stream sample
+    };
+    struct HeaderMemo {
+        std::int64_t s;
+        double cfo;
+        Header h;
+        bool ok;
+    };
+    mutable std::vector<FineMemo> fine_memo;
+    mutable std::vector<HeaderMemo> header_memo;
 
 private:
     const Grid* g_;
@@ -104,13 +130,6 @@ std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E);
 // cpm.tone_llr: per row and tone, that tone's log-likelihood ratio against a random one (floored by llr_eps).
 Mat<double> tone_llr(const Grid& g, const Mat<double>& E);
 
-struct Header {
-    const Spec* spec;
-    int n_data;
-    bool dup;
-    double score, runner_up;
-    double front;  // the front block's part of score
-};
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 
 struct Soft {
