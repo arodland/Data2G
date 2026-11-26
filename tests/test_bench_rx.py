@@ -23,3 +23,11 @@ def test_a_burst_whose_header_cannot_be_read_is_lost(tmp_path):
                        timeout=120)
     assert r.returncode == 0, r.stderr
     assert "0/2" in r.stdout and r.stdout.rstrip().endswith("lost")
+
+
+@pytest.mark.skipif(not BENCH.exists(), reason="data2g-bench-rx not built")
+def test_a_listen_run_no_longer_than_its_warm_up_is_refused():
+    """--listen leaves its first 5 s of feeds out as warm-up: a run of 5 s left none, and its quantiles read
+    before the empty list's start (a segfault, 2026-11-26). The Receiver itself had fed all 250 feeds."""
+    r = subprocess.run([str(BENCH), "--listen", "5"], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "warm-up" in r.stderr

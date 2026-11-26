@@ -404,6 +404,8 @@ bool cwsense_on = BENCH_CWID;  // --no-cwsense: #134's tree without its detector
 
 std::string listen_bands;  // --bands w,w48: only these OFDM sync bands' modes (the CPM grids as ever)
 
+constexpr double LISTEN_WARMUP_S = 5.0;  // listen()'s first 250 feeds, left out of its statistics
+
 void listen(double seconds, bool cpm_only, int expect) {
     std::vector<std::string_view> grids;
     for (const auto& g : tables::CPM_GRIDS) grids.push_back(g.name);
@@ -445,10 +447,11 @@ void listen(double seconds, bool cpm_only, int expect) {
     // the feeds where an expected slot's prime_lock runs (~5.1 s after it is set: hi + both header copies), and
     // the rest (the same feeds without --expect: the baseline)
     double win_max = 0, rest_max = 0;
-    for (std::size_t k = 250; k < ts.size(); ++k)
+    const auto warm = static_cast<std::size_t>(LISTEN_WARMUP_S * 50);
+    for (std::size_t k = warm; k < ts.size(); ++k)
         (k % 400 >= 330 && k % 400 <= 390 ? win_max : rest_max) = std::max(k % 400 >= 330 && k % 400 <= 390 ? win_max : rest_max, ts[k]);
     std::printf("  max feed: in the window feeds %.0f us, elsewhere %.0f us\n", 1e6 * win_max, 1e6 * rest_max);
-    ts.erase(ts.begin(), ts.begin() + std::min<std::size_t>(ts.size(), 250));  // the first 5 s
+    ts.erase(ts.begin(), ts.begin() + std::min(ts.size(), warm));  // the first 5 s
     double sum = 0;
     for (double v : ts) sum += v;
     std::sort(ts.begin(), ts.end());
@@ -591,6 +594,11 @@ int main(int argc, char** argv) {
 #endif
     if (nod_n > 0) nod_bench(nod_n);
     if ((cw || nod_n > 0) && listen_s <= 0 && shifter_n <= 0 && files.empty() && cpms.empty()) return 0;
+    // the first 5 s of feeds are left out as warm-up: a shorter run would leave nothing to report
+    if (listen_s > 0 && listen_s <= LISTEN_WARMUP_S) {
+        std::fprintf(stderr, "--listen needs more than %.0f s (the first %.0f s are warm-up)\n", LISTEN_WARMUP_S, LISTEN_WARMUP_S);
+        return 2;
+    }
     if (listen_s > 0) listen(listen_s, cpm_only, expect);
     if (shifter_n > 0) shifter(shifter_n);
     if (listen_s > 0 || shifter_n > 0) return 0;
