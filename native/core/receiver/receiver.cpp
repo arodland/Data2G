@@ -176,7 +176,8 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     for (const auto b : bands_) {  // matched filter outputs kept only where find_copy reads them
         const bool copy = std::find(config::HEADER_COPY_BANDS.begin(), config::HEADER_COPY_BANDS.end(), b) !=
                           config::HEADER_COPY_BANDS.end();
-        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, copy)});
+        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, copy), {}, {}, {}});
+        if (copy && config::sc_band(b) && modem::sc_flags().copy_coherent) detectors_.back().comb.emplace(b);
     }
     if (blank) blanker_.emplace();
     reset();
@@ -205,6 +206,8 @@ void Receiver::reset() {
     for (auto& d : detectors_) {
         d.d.reset();
         d.copy_fold.reset();
+        if (d.comb) d.comb->reset();
+        d.comb_fold.reset();
     }
 }
 
@@ -289,7 +292,10 @@ void Receiver::trim(int64_t n) {
         const int64_t a = n > 0 ? L - n : n == 0 ? 0 : std::min(-n, L);  // buf[-n:]
         buf_.erase(buf_.begin(), buf_.begin() + a);
     }
-    for (auto& d : detectors_) d.d.trim(off_);
+    for (auto& d : detectors_) {
+        d.d.trim(off_);
+        if (d.comb) d.comb->trim(off_);
+    }
 }
 
 Receiver::Stats Receiver::stats(int64_t w0) {
@@ -312,6 +318,17 @@ Receiver::Stats Receiver::stats(int64_t w0) {
         // no search looks further back than keep_ (the statistic grew with
         // a long burst in the buffer)
         d.trim(off_ + len() - keep_ - d.span);
+        if (det.comb) {  // the same audio through the combs (modem::CombStream), skipped over the same way
+            auto& c = *det.comb;
+            if (c.fed < off_) c.restart_at(off_);
+            auto cf = static_cast<std::size_t>(c.fed - off_);
+            if (cf < want) {
+                c.skip_to(c.fed + static_cast<int64_t>(want - cf));
+                cf = want;
+            }
+            c.feed(waveform::to_baseband(std::span<const double>(buf_).subspan(cf), c.fed));
+            c.trim(off_ + len() - keep_ - d.span);
+        }
         const int64_t n = len() - w0 - d.span + 1;
         if (n <= 0) continue;
         const int64_t lo = off_ + w0;
@@ -349,6 +366,33 @@ std::optional<modem::Lock> Receiver::find_copy() {
     for (const auto band : config::HEADER_COPY_BANDS) {
         const auto it = std::find_if(detectors_.begin(), detectors_.end(), [&](const Detector& d) { return d.band == band; });
         if (it == detectors_.end()) continue;
+        if (it->comb) {  // the coherent combs' products, kept for the stream
+            auto& c = *it->comb;
+            const auto level = c.level();
+            if (!level) continue;
+            const auto p = c.products_from(off_);
+            const int64_t a = p.start;
+            const auto x = std::span<const double>(buf_).subspan(static_cast<std::size_t>(a - off_));
+            const auto cols = static_cast<std::size_t>(std::max<int64_t>(
+                0, std::min(static_cast<int64_t>(p.cols), static_cast<int64_t>(x.size()) - config::M + 1 - c.lag - PF)));
+            const int64_t FR = config::FRAME_SAMPLES, m = static_cast<int64_t>(cols) / FR;
+            Mat<std::complex<double>> fold;
+            if (m >= 1) {
+                const auto k = c.kept_products();
+                const auto& R = it->comb_fold.fold(k.rows, k.cols, k.start, a, a + m * FR);
+                fold = Mat<std::complex<double>>(R.rows, R.cols);
+                const auto s = static_cast<std::size_t>(a % FR);
+                for (std::size_t f = 0; f < R.rows; ++f)
+                    for (std::size_t ph = 0; ph < R.cols; ++ph) fold[f][ph] = R[f][(s + ph) % R.cols];
+            }
+            const auto lock = modem::find_copy_comb_stream(x, band, &accept_, p.rows, cols, *level, nullptr,
+                                                           m >= 1 ? &fold : nullptr);
+            if (lock && (!best || lock->score > best->score)) {
+                best = lock;
+                best_k = a - off_;
+            }
+            continue;
+        }
         auto& d = it->d;
         const auto level = d.level();
         if (!level) continue;
