@@ -1751,24 +1751,36 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
         if SC_SPREAD_ALL or loo_rule:
             cand = [*SC_SPREADS_SLOW, *SC_SPREADS]
         search = _sc_interior(norm, o_sym[o_kind > 0], n_air)
-        fits = [_sc_joint(o_sym, o_k, o_kind, o_val, search, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[2:]
-                for v in cand]
-        # a tone's carriers miss by far more than the rest whatever the spread: scored without them
-        i = int(np.argmin([np.sum(f[0]) for f in fits]))
-        hot = _sc_hot(*fits[i], len(search), n0_y / g**2)[0]
-        loo = np.array([np.sum(f[0][~hot]) for f in fits])
-        if loo_rule:
+
+        def pick(est_fn, cand):
+            fits = [est_fn(o_sym, o_k, o_kind, o_val, search, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig)[2:]
+                    for v in cand]
+            # a tone's carriers miss by far more than the rest whatever the spread: scored without them
+            i = int(np.argmin([np.sum(f[0]) for f in fits]))
+            hot = _sc_hot(*fits[i], len(search), n0_y / g**2)[0]
+            loo = np.array([np.sum(f[0][~hot]) for f in fits])
+            if not loo_rule:
+                return cand[int(np.argmin(loo))]
             # equalizer.filter_spread's rule: too narrow costs more than too wide, so the widest whose error past
             # the noise is within SC_LOO_TOL of the best's (a short burst's rho read 0.05 Hz on mpp's 1 Hz at -8 dB)
             i = int(np.argmin(loo))
-            spread = max(v for v, e in zip(cand, loo) if e <= loo[i] + SC_LOO_TOL * max(loo[i] - np.sum(fits[i][1][~hot]), 0.0))
+            return max(v for v, e in zip(cand, loo) if e <= loo[i] + SC_LOO_TOL * max(loo[i] - np.sum(fits[i][1][~hot]), 0.0))
+
+        if SC_SEP_HZ and loo_rule:
+            # slow or fast by the separable estimate's leave-one-out (its windows are a carrier's own pilots, a
+            # few solves of ~9); a fast channel's spread then by the joint one's, over the fast candidates
+            spread = pick(_sc_separable, cand)
+            if spread > SC_SEP_HZ:
+                spread = pick(_sc_joint, [v for v in cand if v > SC_SEP_HZ])
         else:
-            spread = cand[int(np.argmin(loo))]
+            spread = pick(_sc_separable if SC_SEP_SEARCH else _sc_joint, cand)
     spread *= float(os.environ.get("DATA2G_SC_SPREAD_X", 1))
     est.update(spread_hz=min(spread, 4.0), filter_spread_hz=spread)
 
     def joint(kw=None):
-        return _sc_joint(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw)
+        # (w and w48 only, where the search is the leave-one-out's: n10 and n4's joint windows are small anyway)
+        est_fn = _sc_separable if loo_rule and spread <= SC_SEP_HZ else _sc_joint
+        return est_fn(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw)
 
     h6, mse6, loo_k, model_k = joint()
     # carriers whose pilots miss by far more than the rest (a tone on or near them): their own noise (the decoder's,
@@ -1861,6 +1873,91 @@ def _sc_hot(loo_k, model_k, n_f: int, nn: float) -> tuple:
     if hot.all():
         hot[:] = False
     return hot, np.where(hot, extra, 0.0)
+
+
+# Spreads up to SC_SEP_HZ get the separable estimate (_sc_separable), and the spread search tells slow from fast by
+# its leave-one-out; faster ones the joint estimate and its search over the fast candidates (DATA2G_SC_SEP_HZ=0:
+# the joint one throughout). See the round's commit for the numbers.
+SC_SEP_HZ = float(os.environ.get("DATA2G_SC_SEP_HZ", 1.5))
+SC_SEP_SEARCH = os.environ.get("DATA2G_SC_SEP_SEARCH", "0") == "1"  # (study) the spread search's LOO separable
+_SC_SEP: dict = {}  # _sc_separable's time weights, by pattern and quantized statistics
+
+
+def _sc_separable(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float,
+                  nr_full: float, p_sig: float, kw=None) -> tuple:
+    """_sc_joint's estimate, separably (its arguments and returns): per carrier in time from its own
+    observations (Wiener, Gaussian Doppler correlation, the same reach), then per symbol across carriers
+    through the delay support (LMMSE), the time step's outputs taken as unbiased observations with the noise
+    their posterior variance implies (e / (1 - e), the prior's unit power). Leave-one-out from the two steps'
+    weights: a pilot's own weight is its carrier's frequency weight times its time weight. On a slow channel
+    each carrier's window holds ~9 observations where the joint one held ~480."""
+    b = ofdm.band(band)
+    nc = b.nc
+    q = lambda v, n: round(np.log2(max(v, 1e-9)) * n)  # noqa: E731
+    qs, q1, q2 = q(spread, 8), q(nr_sc, 6), q(nr_full, 6)
+    spread, nr = 2 ** (qs / 8), np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
+    kq = None if kw is None else np.array([q(v, 2) for v in kw])
+    nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
+    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1, SC_FRAMES)) + 3
+    slack = _sc_slack(nc)
+    d = np.arange(support[0] - slack, support[1] + slack + 1)
+    Bd = np.exp(-2j * np.pi * np.outer(b.bb, d) / FS)
+    Rf = Bd @ Bd.conj().T / len(d)
+    tsym = NSYM / FS
+    P, PK, _, _ = sc_cells(nc)
+    S = SYMS_PER_FRAME
+    F = len(frames)
+    xh = np.empty((F, S, nc), dtype=np.complex128)  # the time step's unbiased outputs
+    ev = np.empty((F, S, nc))  # and their noise
+    ownt = np.empty((F, nc))  # each carrier's own pilot's time weight (unbiased), and that pilot's value
+    yp = np.empty((F, nc), dtype=np.complex128)
+    ps = (P // nc)[np.argsort(PK)]  # each carrier's pilot symbol
+    for k in range(nc):
+        m = o_k == k
+        ts, kd, vs = o_sym[m], o_kind[m], o_val[m]
+        order = np.argsort(ts, kind="stable")
+        ts, kd, vs = ts[order], kd[order], vs[order]
+        for i, f in enumerate(frames):
+            lo, hi = np.searchsorted(ts, [f * S + 2.5 - reach, f * S + 2.5 + reach])
+            rel, kk = ts[lo:hi] - f * S, kd[lo:hi]
+            key = (qs, q1, q2, int(kq[k]) if kq is not None else 0, int(ps[k]), rel.tobytes(), kk.tobytes())
+            got = _SC_SEP.get(key)
+            if got is None:
+                A = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread)
+                A[np.diag_indices_from(A)] += nr[kk] * nk[k]
+                Bm = equalizer._doppler_corr((np.arange(S)[:, None] - rel[None, :]) * tsym, spread)
+                W = np.linalg.solve(A, Bm.T).T  # (S, n), real
+                e = np.clip(1 - np.sum(W * Bm, axis=1), 1e-9, 0.999)
+                col = int(np.flatnonzero((rel == ps[k]) & (kk == 0))[0])
+                got = (W / (1 - e)[:, None], e / (1 - e), col)
+                if len(_SC_SEP) >= 4096:
+                    _SC_SEP.clear()  # ponytail: a full cache starts over
+                _SC_SEP[key] = got
+            Wu, nu, col = got
+            xh[i, :, k] = Wu @ vs[lo:hi]
+            ev[i, :, k] = nu
+            ownt[i, k] = Wu[ps[k], col]
+            yp[i, k] = vs[lo:hi][col]
+    h = np.empty((F, S, nc), dtype=np.complex128)
+    mse = np.empty((F, S, nc))
+    loo, model = np.zeros(nc), np.zeros(nc)
+    cache: dict = {}
+    for i in range(F):
+        for s_ in range(S):
+            e = ev[i, s_]
+            ck = e.tobytes()
+            G = cache.get(ck)
+            if G is None:
+                G = np.linalg.solve(Rf + np.diag(e), Rf).conj().T  # Rf (Rf + E)^-1 (Hermitian Rf)
+                cache[ck] = G = (G, np.maximum(np.real(np.diag(Rf) - np.sum(G * Rf.conj(), axis=1)), 0.0))
+            h[i, s_] = G[0] @ xh[i, s_]
+            mse[i, s_] = p_sig * G[1]
+        for k in range(nc):
+            s_ = ps[k]
+            own = min(float(np.real(cache[ev[i, s_].tobytes()][0][k, k])) * ownt[i, k], 0.99)
+            loo[k] += abs((yp[i, k] - h[i, s_, k]) / (1 - own)) ** 2
+            model[k] += p_sig * nr[0] * nk[k] / (1 - own)
+    return h, mse, loo, model
 
 
 def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float, nr_full: float,

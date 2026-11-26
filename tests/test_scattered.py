@@ -142,3 +142,24 @@ def test_find_copy_reads_past_a_steady_tone(monkeypatch):
     y += np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * (np.cos(2 * np.pi * 800 * t) + np.cos(2 * np.pi * 2200 * t + 1))
     lock = modem.find_copy(y[start - 400:start - 400 + 16704], "w")
     assert lock is not None and lock["spec"] == spec and lock["n_cw"] == 3
+
+
+def test_a_slow_channel_is_estimated_separably_and_alike(monkeypatch):
+    """Spreads up to SC_SEP_HZ get the separable estimate (per carrier in time, then across carriers): on a 1 Hz
+    channel it reads the joint estimate's channel and decodes the same; the spread search calls the channel slow."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(4)]
+    x = np.concatenate([np.zeros(2400), modem.modulate(pl, spec), np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpp", seed=3)
+    known = dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4)
+    r = modem.receive(y, known=known)
+    assert r["est"]["filter_spread_hz"] <= modem.SC_SEP_HZ
+    monkeypatch.setattr(modem, "SC_SEP_HZ", 0.0)
+    r0 = modem.receive(y, known=known)
+    h, h0 = r["est"]["h"], r0["est"]["h"]
+    assert np.mean(np.abs(h - h0) ** 2) < 0.02 * np.mean(np.abs(h0) ** 2)
+    assert modem.decode_received(r).payloads == pl == modem.decode_received(r0).payloads
