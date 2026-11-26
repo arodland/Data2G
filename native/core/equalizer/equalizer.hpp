@@ -36,6 +36,10 @@ inline constexpr std::array<double, 12> SPREAD_GRID = {0.02, 0.05, 0.1, 0.2, 0.3
 inline constexpr bool PER_CARRIER_NOISE = true;
 inline constexpr double NOISE_SHAPE_PRIOR = 8.0;
 inline constexpr int PREAMBLE_DIFFS = 7;  // preamble_noise_k's samples: the default 8 repeats' differences
+inline constexpr double HOT_CARRIER = 8.0;  // equalizer.HOT_CARRIER
+inline constexpr double HOT_PREAMBLE_NOISE = 4.0;  // equalizer.HOT_PREAMBLE_NOISE
+inline constexpr double HOT_INNOV = 8.0;  // equalizer.HOT_INNOV
+inline constexpr int HOT_INNOV_MIN_PILOTS = 5;  // equalizer.HOT_INNOV_MIN_PILOTS
 inline constexpr double SUPPORT_NOISE_Z = 3.09;  // delay_support's noise gate, sigmas; 0: off
 inline constexpr int SUPPORT_SLACK = 4;  // _support_basis's
 inline constexpr int PADDED_SLACK = 20;  // support_slack's padded order
@@ -47,7 +51,11 @@ inline constexpr double INF = std::numeric_limits<double>::infinity();
 // CARRIER0 + RS * (k0 + k) - FCENTER.
 std::vector<double> bb(const config::Band& band);
 
-double residual_cfo(const Mat<cd>& h_pilot);
+// Carriers hit by a steady tone (mean pilot power > HOT_CARRIER x median) or
+// its off-carrier sidelobes (preamble_noise_k > HOT_PREAMBLE_NOISE x median).
+std::vector<char> hot_carriers(const Mat<cd>& h_pilot);
+std::vector<char> noisy_carriers(std::span<const double> n0_pre_k);
+double residual_cfo(const Mat<cd>& h_pilot, std::span<const char> exclude = {});
 std::vector<double> delay_profile(const Mat<cd>& h_pilot, std::span<const double> bb);
 // n0: the thermal noise per carrier, for the noise gate (INF: none).
 Support delay_support(const Mat<cd>& h_pilot, std::span<const double> bb, double floor_db = -15.0,

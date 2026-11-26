@@ -377,6 +377,25 @@ def test_demodulate_matches(native, py):
     assert n[0] == b.submode.name and n[1] == b.payloads and n[2] == b.crc_ok and n[4] == b.preamble_start
 
 
+@pytest.mark.hf_only("w48/n4 HF bands and 800/825/1525 Hz tones from issue #330")
+@pytest.mark.parametrize("name,n_cw,tone", [("w48-qpsk-r1/3", 4, 800.0), ("w48-qpsk-r1/3", 4, 825.0),
+                                             ("n4-qpsk-r1/2", 1, 1525.0)])
+def test_receive_with_in_band_tone_matches(native, py, name, n_cw, tone):
+    """Python and native agree on coarse and residual CFO under strong on- and
+    off-carrier tones (including n4 hosted on n10, issue #330)."""
+    from scipy import signal
+
+    spec = SUBMODES[name]
+    pad = 2000
+    x = np.concatenate([np.zeros(pad), modem.modulate(_payloads(spec, n_cw, 3), spec), np.zeros(pad)])
+    peak = float(np.max(np.abs(signal.hilbert(x)) ** 2) / 2)
+    sigma = np.sqrt(peak / 10 ** 0.5 * (FS / 2) / config.SNR_REF_BW_HZ / 10 ** (8.0 / 10))
+    y = x + np.random.default_rng(5).normal(scale=sigma, size=len(x))
+    amp = np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10 ** (25.0 / 10))
+    y = y + amp * np.cos(2 * np.pi * tone * np.arange(len(y)) / FS + 0.7)
+    same_received(native.modem.receive(y), py.receive(y))
+
+
 def test_fold_track_matches(native):
     """The running fold: the same adds and subtractions in the same order,
     so the same sums bit for bit."""
