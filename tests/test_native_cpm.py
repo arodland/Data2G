@@ -607,6 +607,8 @@ def test_r23_offered_in_both(native):
                         "tests/test_cpm.py::test_r23_announced_at_index_4_and_older_words_unchanged",
                         "-k", "fsk32r62-r2/3 or spec_tables or header_tables or layout or modulate or modes or policy or shifter "
                         "or tx_audio or cpm_decodes or cpm_coherent or announced"],
-                       cwd=root, env={**os.environ, "DATA2G_CPM_R23": "1"}, capture_output=True, text=True, timeout=900)
+                       # (the installed outcome model: on this branch r2/3 brings its zero-shot one, which C++ lacks)
+                       cwd=root, env={**os.environ, "DATA2G_CPM_R23": "1", "DATA2G_OUTCOME_R23": "off"},
+                       capture_output=True, text=True, timeout=900)
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
     assert " passed" in r.stdout and "skipped" not in r.stdout, r.stdout[-2000:]
