@@ -1775,11 +1775,14 @@ def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
         else:
             spread = pick(_sc_separable if SC_SEP_SEARCH else _sc_joint, cand)
     spread *= float(os.environ.get("DATA2G_SC_SPREAD_X", 1))
-    est.update(spread_hz=min(spread, 4.0), filter_spread_hz=spread)
+    # (w and w48 only, where the search is the leave-one-out's: n10 and n4's joint windows are small anyway)
+    sep = loo_rule and spread <= SC_SEP_HZ
+    # the separable search reads mpp's 1 Hz as 1.5 where the joint one read 1.0: the outcome model learnt the joint's
+    # reading, so a separable spread is reported at most SC_SEP_REPORT_HZ (the filter keeps its own)
+    est.update(spread_hz=min(spread, SC_SEP_REPORT_HZ if sep else 4.0), filter_spread_hz=spread)
 
     def joint(kw=None):
-        # (w and w48 only, where the search is the leave-one-out's: n10 and n4's joint windows are small anyway)
-        est_fn = _sc_separable if loo_rule and spread <= SC_SEP_HZ else _sc_joint
+        est_fn = _sc_separable if sep else _sc_joint
         return est_fn(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw)
 
     h6, mse6, loo_k, model_k = joint()
@@ -1879,6 +1882,9 @@ def _sc_hot(loo_k, model_k, n_f: int, nn: float) -> tuple:
 # its leave-one-out; faster ones the joint estimate and its search over the fast candidates (DATA2G_SC_SEP_HZ=0:
 # the joint one throughout). See the round's commit for the numbers.
 SC_SEP_HZ = float(os.environ.get("DATA2G_SC_SEP_HZ", 1.5))
+# a separable spread's report (spread_hz) at most this; loss study (12 seeds x 600 s, PEP 5) against reporting 1.5:
+# mpp 0 -4.0% -> -2.9%, mpp -8 -2.2% -> +0.3% (both against the joint estimate)
+SC_SEP_REPORT_HZ = 1.0
 SC_SEP_SEARCH = os.environ.get("DATA2G_SC_SEP_SEARCH", "0") == "1"  # (study) the spread search's LOO separable
 _SC_SEP: dict = {}  # _sc_separable's time weights, by pattern and quantized statistics
 

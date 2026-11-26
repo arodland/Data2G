@@ -163,3 +163,18 @@ def test_a_slow_channel_is_estimated_separably_and_alike(monkeypatch):
     h, h0 = r["est"]["h"], r0["est"]["h"]
     assert np.mean(np.abs(h - h0) ** 2) < 0.02 * np.mean(np.abs(h0) ** 2)
     assert modem.decode_received(r).payloads == pl == modem.decode_received(r0).payloads
+
+
+def test_a_separable_spread_is_reported_as_the_joint_search_read_it(monkeypatch):
+    """The separable search reads mpp's 1 Hz as 1.5 where the joint one read 1.0, and the outcome model learnt the
+    joint's reading: the report (spread_hz) is at most SC_SEP_REPORT_HZ, the filter keeps its own spread."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    x = np.concatenate([np.zeros(2400), modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(4)], spec),
+                        np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpp", seed=6)
+    est = modem.receive(y, known=dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4))["est"]
+    assert est["filter_spread_hz"] == 1.5 and est["spread_hz"] == modem.SC_SEP_REPORT_HZ

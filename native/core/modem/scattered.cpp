@@ -48,7 +48,8 @@ constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
 constexpr int SC_HOT_PASSES = 1;
 constexpr size_t SC_SOLVE_LANES = 2;
-constexpr double SC_SEP_HZ = 1.5;  // modem.SC_SEP_HZ (its DATA2G_SC_SEP_HZ study switch is Python's)  // joint()'s weight solves at once (its reason there)
+constexpr double SC_SEP_HZ = 1.5;  // modem.SC_SEP_HZ (its DATA2G_SC_SEP_HZ study switch is Python's)
+constexpr double SC_SEP_REPORT_HZ = 1.0;  // modem.SC_SEP_REPORT_HZ  // joint()'s weight solves at once (its reason there)
 constexpr int SC_SEARCH_MIN = 4;  // modem.SC_SEARCH_MIN (its DATA2G_SC_SEARCH_MIN study switch is Python's)
 
 // modem._sc_interior: the spread search's frames, those whose widest reach holds every frame's pilots and no whole
@@ -1168,9 +1169,10 @@ Estimated estimate(std::span<const cd> z, const HeaderRead& hd, const Mat<cd>& r
             spread = pick(false, cand);
         }
     }
-    est.spread_hz = std::min(*spread, 4.0);
-    est.filter_spread_hz = *spread;
     const bool sep = loo_rule && *spread <= SC_SEP_HZ;  // the separable estimate on a slow channel (w, w48)
+    // a separable spread is reported at most SC_SEP_REPORT_HZ (the outcome model learnt the joint search's reading)
+    est.spread_hz = std::min(*spread, sep ? SC_SEP_REPORT_HZ : 4.0);
+    est.filter_spread_hz = *spread;
     auto est_fn = [&](std::span<const double> w) {
         return sep ? separable(o, norm, db, support, *spread, nr_sc, nr_full, p_sig, false, w)
                    : joint(o, norm, db, support, *spread, nr_sc, nr_full, p_sig, false, w);
