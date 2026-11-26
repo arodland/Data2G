@@ -21,8 +21,6 @@ using data2g::androidapp::load_args;
 
 namespace {
 
-constexpr int MAX_MODEL_ROWS = 60;
-
 template <typename F>
 void edit(F f) {
     data2g::app::Args a = load_args();
@@ -178,7 +176,6 @@ QVariantList RigSettings::findModels(const QString& query) const {
             if (m.model == rig::MODEL_DUMMY || m.model == rig::MODEL_NET_RIGCTL) out.append(model_row(m));
     }
     for (const auto& m : all_models()) {
-        if (out.size() >= MAX_MODEL_ROWS) break;
         if (needle.isEmpty() ? (m.model == rig::MODEL_DUMMY || m.model == rig::MODEL_NET_RIGCTL)
                              : !QString::fromStdString(m.label()).contains(needle, Qt::CaseInsensitive))
             continue;

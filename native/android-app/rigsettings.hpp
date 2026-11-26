@@ -68,7 +68,8 @@ public:
     void setOtherLine(const QString& state);
     QString error() const { return error_; }
 
-    // Rows {number, label} matching `query`, capped (Hamlib knows hundreds).
+    // Rows {number, label} matching `query`: every match, since the picker scrolls
+    // through all of Hamlib's several hundred rigs when `query` is empty.
     Q_INVOKABLE QVariantList findModels(const QString& query) const;
     Q_INVOKABLE void refreshDevices();
     // The system's permission dialog for the selected device; the answer re-lists.
