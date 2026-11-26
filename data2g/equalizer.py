@@ -68,23 +68,11 @@ NOISE_SHAPE_PRIOR = 8.0
 # default 8 repeats (config.PREAMBLE_REPEATS - 1). Fixed: a repeats
 # override (DATA2G_PREAMBLE_REPEATS) does not reach it.
 PREAMBLE_DIFFS = 7
-# residual_cfo leaves out carriers this many times the median's power (hot_carriers): a steady tone +25 dB over
-# the floor in 50 Hz read -0.5 Hz on w48 at 8 dB, -0.01 with them out (4 and 8 alike; scripts/sc_tone.py). No
-# clean channel (awgn, mpp, mpg, mpd, nvis-d, hilat-m, lowlat-d at 8 dB, 24 bursts each layout) set one off.
-HOT_CARRIER = 8.0
-
-
-def hot_carriers(h_pilot: np.ndarray) -> np.ndarray:
-    """Carriers whose mean pilot power is over HOT_CARRIER times the median carrier's: a steady tone on (or
-    leaking into) them. Their pilots rotate at the tone's offset from the carrier, not the burst's."""
-    p = np.mean(np.abs(h_pilot) ** 2, axis=0)
-    return p > HOT_CARRIER * float(np.median(p))
 
 
 def residual_cfo(h_pilot: np.ndarray) -> float:
-    """Hz. Unambiguous within +-1/(2*FRAME_S) = +-3.47 Hz. Hot carriers (hot_carriers) left out: a tone's
-    carrier outweighs the rest and turns at the tone's own offset (+25 dB over the floor at 2200 Hz: -0.5 Hz)."""
-    d = np.sum((h_pilot[1:] * np.conj(h_pilot[:-1]))[:, ~hot_carriers(h_pilot)])
+    """Hz. Unambiguous within +-1/(2*FRAME_S) = +-3.47 Hz."""
+    d = np.sum(h_pilot[1:] * np.conj(h_pilot[:-1]))
     return float(np.angle(d) / (2 * np.pi * FRAME_S)) if np.abs(d) > 0 else 0.0
 
 

@@ -66,10 +66,6 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     ne = native.equalizer
     h = pilots(bb.astype(float), n_p, kind, seed=n_p * 7 + len(bb), snr_db=snr)
     assert ne.residual_cfo(h) == pytest.approx(py.residual_cfo(h), rel=RTOL, abs=1e-12)
-    if n_p > 2:  # a steady tone on one carrier (hot_carriers)
-        ht = h.copy()
-        ht[:, len(bb) // 2] += 3 * np.exp(2j * np.pi * 0.8 * np.arange(n_p))
-        assert ne.residual_cfo(ht) == pytest.approx(py.residual_cfo(ht), rel=RTOL, abs=1e-12)
     close(ne.delay_profile(h, bb), py.delay_profile(h, bb), "delay_profile")
     sup = py.delay_support(h, bb=bb)
     assert ne.delay_support(h, bb=bb) == sup
