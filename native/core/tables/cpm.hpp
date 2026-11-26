@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <cstdlib>
 #include <span>
 #include <string_view>
 
@@ -62,6 +63,18 @@ struct CpmParams {
     double hdr_margin1, hdr_margin2, llr_eps;  // cpm.HDR_MARGIN (one copy, both), LLR_EPS
     int refine_symbols;
 };
+
+// cpm.R23 (DATA2G_CPM_R23 set, not "0" or "off"; studies): fsk32r62-r2/3
+// offered, read once. The generated tables hold its rows last (CPM_SPECS,
+// MODE_PEAK_DB, MODE_THRESHOLDS) and leave them out unless it is, so the
+// default build's tables are the six modes' (tools/gen_native_tables.py study_span).
+inline bool cpm_r23() {
+    static const bool on = [] {
+        const char* v = std::getenv("DATA2G_CPM_R23");
+        return v && *v && std::string_view(v) != "0" && std::string_view(v) != "off";
+    }();
+    return on;
+}
 
 extern const std::span<const CpmGrid> CPM_GRIDS;
 extern const std::span<const CpmSpec> CPM_SPECS, CPM_CTL;

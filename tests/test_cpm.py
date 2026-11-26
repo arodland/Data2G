@@ -271,6 +271,9 @@ def r23_offered(monkeypatch):
     """fsk32r62-r2/3 offered for one test (DATA2G_CPM_R23=1's effect on the mode tables)."""
     from data2g.arq import modes
 
+    if cpm.R23:  # DATA2G_CPM_R23: offered already, in native too
+        yield
+        return
     caches = (cpm.valid_words, cpm.header_rows)
     old = [m for m in cpm.SPECS]
     monkeypatch.setitem(cpm.SPECS, cpm.R23_SPEC.name, cpm.R23_SPEC)
@@ -284,7 +287,8 @@ def r23_offered(monkeypatch):
         c.cache_clear()
 
 
-@pytest.mark.python_only("fsk32r62-r2/3 is not in native")
+# offered by this test alone (DATA2G_CPM_R23 unset): native reads the switch at load
+@(pytest.mark.python_only("fsk32r62-r2/3 offered by a fixture, not DATA2G_CPM_R23") if not cpm.R23 else lambda f: f)
 def test_r23_announced_at_index_4_and_older_words_unchanged(r23_offered):
     """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
     the two older modes' words are what they were, the recommendation codes

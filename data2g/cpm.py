@@ -259,8 +259,10 @@ SPECS = _Toolbox({s.name: s for g in GRIDS.values() if g.L == 1 for s in (
 # grid's specs are not in SPECS' iteration: control-only so far, they have no
 # recommendation code; arq.modes.MODES holds them.)
 # DATA2G_CPM_R23 (on this branch the default is 1: offered; 0, off or empty:
-# not a mode: today's six, their header words, and the native tables
-# generated from them).
+# not a mode: today's six and their header words; native: the generated
+# tables hold its rows last and tables::cpm_r23() leaves them out); the
+# outcome model has no row for it either way (scripts/cnp_outcome.py --add;
+# DATA2G_OUTCOME_R23 is the one with a zero-shot row).
 R23_SPEC = CpmSpec("fsk32r62-r2/3", "c32r62", 4, "gf", 640, DATA_N)
 R23 = os.environ.get("DATA2G_CPM_R23", "1" if PROFILE == "hf" else "0") not in ("0", "off", "")  # (FM has no CPM)
 if R23:

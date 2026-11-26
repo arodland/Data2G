@@ -25,9 +25,21 @@ HF_OUT = ROOT / "native" / "core" / "generated"
 MODEL = None  # --model: a measurement build's outcome model, no regions
 
 for var in ("DATA2G_PREAMBLE_REPEATS", "DATA2G_OUTCOME_MODEL", "DATA2G_RS", "DATA2G_NCP", "DATA2G_ACQUIRE_REACH_HZ", "DATA2G_SYMBOL_NOISE", "DATA2G_SPREAD_WINDOW", "DATA2G_EST_WINDOW", "DATA2G_DECODE_EARLY", "DATA2G_FCENTER", "DATA2G_SYMS_PER_FRAME", "DATA2G_DEFAULT_SPREAD_HZ",
-            "DATA2G_CARRIER0", "DATA2G_CPM_ONAIR", "DATA2G_CPM_WIDE"):  # DATA2G_PROFILE: main() sets it
+            "DATA2G_CARRIER0", "DATA2G_CPM_WIDE"):  # DATA2G_PROFILE: main() sets it
     if var in os.environ:
         sys.exit(f"{var} is set: the generated tables must hold the on-air defaults")
+# fast-fading-integration: switches on by default here whose tables are master's, pinned off for the generator
+# (native reads them at run time, with this branch's defaults): c8w50 on air (the wide grids are cpm_wide.cpp's
+# either way), r2/3's zero-shot outcome model (native compiles the installed one; the shifter stays Python
+# under it, tests/native_subs) and the scattered pilots (the burst peaks here are pilot rows').
+for var in ("DATA2G_CPM_ONAIR", "DATA2G_OUTCOME_R23", "DATA2G_PILOTS"):
+    if os.environ.get(var, "off") not in ("", "0", "off"):
+        sys.exit(f"{var} is set: the generated tables must hold the on-air defaults")
+    os.environ[var] = "off"
+
+# fsk32r62-r2/3 (cpm.R23_SPEC, a study's mode) offered here, whatever the environment: the tables hold
+# its rows last, and tables::cpm_r23() leaves them out at run time unless DATA2G_CPM_R23 asks (study_span)
+os.environ["DATA2G_CPM_R23"] = "1"
 
 import numpy as np  # noqa: E402
 
@@ -117,6 +129,17 @@ def config_hpp() -> str:
 
 
 FILES["config.hpp"] = config_hpp
+
+
+def study_span(array: str, names) -> str:
+    """The span over `array` (rows named `names`, in order) less its
+    fsk32r62-r2/3 rows unless tables::cpm_r23(): they come last."""
+    from data2g import cpm
+
+    names = list(names)
+    n = sum(m == cpm.R23_SPEC.name for m in names)
+    assert names[len(names) - n:] == [cpm.R23_SPEC.name] * n, f"{array}: fsk32r62-r2/3's rows must come last"
+    return f"std::span({array}).first({len(names) - n} + (cpm_r23() ? {n} : 0))" if n else array
 
 
 def ints(values) -> str:
@@ -244,7 +267,8 @@ def cpm_cpp() -> str:
            "namespace data2g::tables {\nnamespace {\n\n"]
     out += _cpm_tables(list(cpm.GRIDS.values()), list(cpm.SPECS.values()), [cpm.CTL[g] for g in cpm.GRIDS])
     out.append("\n}  // namespace\n\n")
-    out.append("const std::span<const CpmGrid> CPM_GRIDS = grids;\nconst std::span<const CpmSpec> CPM_SPECS = specs;\n"
+    out.append(f"const std::span<const CpmGrid> CPM_GRIDS = grids;\n"
+               f"const std::span<const CpmSpec> CPM_SPECS = {study_span('specs', cpm.SPECS)};\n"
                "const std::span<const CpmSpec> CPM_CTL = ctl;\n")
     c = cpm
     out.append(f"const CpmParams CPM = {{{c.PREAMBLE_S!r}, {c.BLOCK_S!r}, {c.SPACING_S!r}, {c.HDR_S!r}, {c.HDR_COPIES}, "
@@ -401,7 +425,7 @@ def predictor_cpp() -> str:
     cnp = isinstance(model, P.OutcomeCNP)
     members = [] if cnp else model.members if isinstance(model, P.OutcomeEnsemble) else [model]
     out = [HEADER.format(src="data2g/codes_data/{outcome_predictor,outcome_predictor_gate,outcome_predictor_fast,capacity_tables}.npz"),
-           '#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
+           '#include "tables/cpm.hpp"\n#include "tables/predictor.hpp"\n\n', "namespace data2g::tables {\nnamespace {\n\n"]
 
     def emit(tag, ms, order=None):
         """Members as C++ arrays; `order`: output columns reordered to it (the installed model's modes)."""
@@ -484,7 +508,7 @@ def predictor_cpp() -> str:
                "const std::span<const std::string_view> OUTCOME_BANDS = bands;\n"
                "const std::span<const double> CAPACITY_GRID = grid;\n"
                "const std::span<const CapacityTable> CAPACITY = caps;\n"
-               "const std::span<const ModeThreshold> MODE_THRESHOLDS = thresholds;\n"
+               f"const std::span<const ModeThreshold> MODE_THRESHOLDS = {study_span('thresholds', G.MODE_THRESHOLDS)};\n"
                f"const bool OUTCOME_ENERGY = {cxx(bool(model.energy))};\n"
                f"const bool OUTCOME_GATE_ENERGY = {cxx(bool(regions['gate'] and regions['gate'].energy))};\n"
                f"const bool OUTCOME_FAST_ENERGY = {cxx(bool(regions['fast'] and regions['fast'].energy))};\n"
@@ -503,9 +527,11 @@ def mode_peaks_cpp() -> str:
     from data2g.arq.modes import MODES as ALL_MODES
 
     peaks = ",\n".join(f"    {{{cxx(m)}, {{{', '.join(repr(PHY.peak_db(m, c)) for c in range(3))}}}}}" for m in ALL_MODES)
-    return (HEADER.format(src="data2g/arq/phy.py") + '#include "tables/predictor.hpp"\n\nnamespace data2g::tables {\n\n'
+    return (HEADER.format(src="data2g/arq/phy.py") + '#include "tables/cpm.hpp"\n#include "tables/predictor.hpp"\n\n'
+            "namespace data2g::tables {\n\n"
             f"namespace {{\nconstexpr ModePeak peaks[] = {{\n{peaks}}};\n}}  // namespace\n\n"
-            "const std::span<const ModePeak> MODE_PEAK_DB = peaks;\n\n}  // namespace data2g::tables\n")
+            f"const std::span<const ModePeak> MODE_PEAK_DB = {study_span('peaks', ALL_MODES)};\n\n"
+            "}  // namespace data2g::tables\n")
 
 
 FILES["mode_peaks.cpp"] = mode_peaks_cpp

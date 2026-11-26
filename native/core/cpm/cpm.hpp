@@ -168,6 +168,31 @@ std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E);
 // cpm.tone_llr: per row and tone, that tone's log-likelihood ratio against a random one (floored by llr_eps).
 Mat<double> tone_llr(const Grid& g, const Mat<double>& E);
 
+// The leak model's study switches (cpm.py LEAK, LEAK_K, LEAK_Z, CTL_SQ,
+// SPILL), read from DATA2G_CPM_LEAK, _LEAK_K, _LEAK_Z, _CTL_SQ and _SPILL
+// once, with Python's defaults (off). Use: tone_metric's consumer, cpm.py's
+// `use`: lock (tone_llr and refine: lock gates, header scores, nods), ctl
+// (llrs), data (symbol_ll), dd (dd_metric).
+enum class Use { lock, ctl, data, dd };
+struct Study {
+    std::array<bool, 4> leak{};  // by Use: that consumer on leak_metric where spill_significant
+    bool ctlsq = false;          // "ctlsq" in DATA2G_CPM_LEAK: ctl_square
+    double leak_k = 0.5, leak_z = 2.0, ctl_sq = 0.15;
+    std::array<double, 4> spill{1.0, 1.0, 1.0, 1.0};  // by Use: spill()'s weight in the square law's N0
+};
+const Study& study();
+void set_study(const Study& s);  // tests only (the bindings): never while a receive runs
+// g: the grid whose energies E are (a wide grid's sum kept(g) sub-windows: every level is a sub-window's);
+// nullptr: an on-air grid's (one window a symbol).
+// cpm.tone_metric: (n_sym, m) tone energies -> log P(E | tone) up to a row constant, for `use`.
+Mat<double> tone_metric(const Mat<double>& E, Use use, const Grid* g = nullptr);
+// cpm.leak_metric: the Doppler spill as signal beside the sent tone (study().leak).
+Mat<double> leak_metric(const Mat<double>& E, double k, const Grid* g = nullptr);
+// cpm.spill_significant: the codeword's spill stands leak_z standard errors over 0.
+bool spill_significant(const Mat<double>& E, const Grid* g = nullptr);
+// cpm.ctl_square: control slot `slot` of a burst's data-row energies E stays on the square law (study().ctl_sq).
+bool ctl_square(const Grid& g, const Mat<double>& E, int slot);
+
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 
 struct Soft {

@@ -479,3 +479,128 @@ def test_coarse_track_shared(native, reference):
         c = ref(reference, "detect")(g, buf[37:], track=tp, x0=off + 37, **kw)
         assert a == b, kw  # summed rows: bit for bit the grid's own
         assert a[1:] == c[1:] and a[0] == pytest.approx(c[0], rel=RTOL), kw
+
+
+# every knob off its default: the lock consumer on the leak model too, other k, gate, control threshold, spill weights
+ALL_KNOBS = dict(leak=frozenset({"lock", "ctl", "data", "dd", "ctlsq"}), leak_k=0.3, leak_z=0.0, ctl_sq=0.05,
+                 spill=dict(lock=0.5, ctl=0.7, data=0.0, dd=1.5))
+
+
+@pytest.fixture(params=["leak", "all"])
+def leak_on(native, monkeypatch, request):
+    """The leak model on in both: DATA2G_CPM_LEAK=ctl,data,dd,ctlsq (the rest
+    of the study as the environment set it), or every knob set (ALL_KNOBS)."""
+    old = native.cpm.study()
+    new = {**old, "leak": frozenset({"ctl", "data", "dd", "ctlsq"})} if request.param == "leak" else ALL_KNOBS
+    for k, v in (("LEAK", new["leak"]), ("LEAK_K", new["leak_k"]), ("LEAK_Z", new["leak_z"]), ("CTL_SQ", new["ctl_sq"]),
+                 ("SPILL", {**cpm.SPILL, **new["spill"]})):
+        monkeypatch.setattr(cpm, k, v)
+    native.cpm.set_study(new)
+    assert native.cpm.study() == {**new, "spill": {**old["spill"], **new["spill"]}}
+    yield
+    native.cpm.set_study(old)
+
+
+def _leak_case(spec, chan, rng, n_data=2, dup=True, sigma=0.08):
+    """A burst of `spec` from sample 1777, CFO 0: on AWGN, with a steady carrier between two tones, or on hilat-d."""
+    from data2g import hfchannel
+
+    g = cpm.GRIDS[spec.grid]
+    x = cpm.modulate(spec, _burst(spec, n_data, dup, rng), dup)
+    if chan == "hilat-d":
+        x = hfchannel.fading(np.concatenate([np.zeros(1777), x, np.zeros(1777)]), hfchannel.ITU_PRESETS["hilat-d"],
+                             seed=int(rng.integers(1 << 30)))
+        y = x + rng.normal(0, sigma, len(x))
+    else:
+        y = _channel(x, rng, lead=1777, sigma=sigma)
+    if chan == "carrier":
+        y = y + 20 * sigma * np.cos(2 * np.pi * (g.f0 + 5.4 * g.rate) * np.arange(len(y)) / FS + 1.0)
+    return y
+
+
+@pytest.mark.parametrize("chan", ["awgn", "carrier", "hilat-d"])
+@pytest.mark.parametrize("name", list(cpm.SPECS))
+def test_leak_model(native, reference, leak_on, name, chan):
+    """The leak model (DATA2G_CPM_LEAK=ctl,data,dd,ctlsq) on every grid and
+    rate, on AWGN, beside an in-grid carrier and on hilat-d: tone_metric per
+    consumer, spill_significant, leak_metric, ctl_square, the soft values,
+    the DD metric and soft values, and receive's (coherent control kept or
+    left on the square law), alike in both."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(list(cpm.SPECS).index(name) * 3 + ["awgn", "carrier", "hilat-d"].index(chan))
+    n_data, dup, s0, f = 2, True, 1777, 0.0
+    y = _leak_case(spec, chan, rng, n_data, dup)
+    slots, E = native.cpm.soft(g.name, y, s0, f, n_data, dup)
+    slots_ref, E_ref = ref(reference, "soft")(g, spec, y, s0, f, n_data, dup)
+    np.testing.assert_allclose(E, E_ref, rtol=RTOL, atol=1e-12)
+    for a, b in zip(slots, slots_ref, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+    n_ctl, n_dat = cpm.CTL[g.name].n_sym, cpm.DATA_N // g.bits
+    cws = [E_ref[:n_ctl], E_ref[n_ctl:2 * n_ctl]] + [E_ref[2 * n_ctl + i * n_dat:2 * n_ctl + (i + 1) * n_dat] for i in range(n_data)]
+    significant = [ref(reference, "spill_significant")(e) for e in cws]
+    assert [native.cpm.spill_significant(e) for e in cws] == significant
+    for e in cws:
+        np.testing.assert_allclose(native.cpm.tone_llr(g.name, e), ref(reference, "tone_llr")(g, e), rtol=1e-9, atol=1e-9)
+        for use in ("lock", "ctl", "data", "dd"):
+            np.testing.assert_allclose(native.cpm.tone_metric(e, use), ref(reference, "tone_metric")(g, e, use),
+                                       rtol=1e-12, atol=1e-12)
+        for k in (0.0, cpm.LEAK_K):
+            np.testing.assert_allclose(native.cpm.leak_metric(e, k), ref(reference, "leak_metric")(e, k), rtol=1e-12,
+                                       atol=1e-12)
+    square = [ref(reference, "ctl_square")(g, E_ref, s) for s in range(1 + dup)]
+    assert [native.cpm.ctl_square(g.name, E_ref, s) for s in range(1 + dup)] == square
+    if chan == "hilat-d":  # the case must reach the leak model
+        assert all(significant), significant
+
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
+    Z = ref(reference, "bins")(g, y, s0, lay.n, f)
+    n_cw = 1 + dup + n_data
+    r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
+    post = {1 + dup: np.log(rng.dirichlet(np.ones(g.m), n_dat)).reshape(-1)}
+    for slot in range(n_cw):
+        for p in ({}, post):
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, p, slot)
+            np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
+            np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot),
+                                       ref(reference, "dd_soft")(r, M, slot), rtol=1e-9, atol=1e-9)
+
+    # receive: cpm.receive's steps on the Python reference
+    s1, f1 = ref(reference, "refine")(g, y, s0, f, spec, n_data, dup)
+    a = native.cpm.refine(g.name, y, s0, f, spec.name, n_data, dup)
+    assert a[0] == s1 and a[1] == pytest.approx(f1, rel=RTOL)
+    want, E1 = ref(reference, "soft")(g, spec, y, s1, f1, n_data, dup)
+    r = dict(r, Z=ref(reference, "bins")(g, y, s1, lay.n, f1))
+    if cpm.COH_CTL:
+        for s in range(1 + dup):
+            if not ref(reference, "ctl_square")(g, E1, s):
+                want[s] = ref(reference, "dd_soft")(r, ref(reference, "dd_metric")(r, {}, s), s)
+    for a, b in zip(native.cpm.receive_soft(y, spec.name, n_data, dup, s0, f), want, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+
+
+def test_r23_offered_in_both(native):
+    """fsk32r62-r2/3 offered (DATA2G_CPM_R23=1, which both read at import:
+    a fresh interpreter): the parity tests that go over every mode, with it
+    among them (the spec and header tables, layout, modulation, the leak
+    model on its codewords, its GF(32) code, recommendation code 54, its
+    peak and threshold rows, the shifter), and its burst through the
+    substituted receive and ModemRx (test_cpm's). The rest of the suite runs
+    with it offered when DATA2G_CPM_R23 is set."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    if cpm.R23:
+        pytest.skip("DATA2G_CPM_R23 is set: the suite runs these with it offered")
+    root = Path(__file__).resolve().parent.parent
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-n", "2", "-p", "no:cacheprovider", "--native",
+                        "tests/test_native_cpm.py", "tests/test_native_codes.py", "tests/test_native_arq.py",
+                        "tests/test_native_arq_phy.py",
+                        "tests/test_cpm.py::test_r23_announced_at_index_4_and_older_words_unchanged",
+                        "-k", "fsk32r62-r2/3 or spec_tables or header_tables or layout or modulate or modes or policy or shifter "
+                        "or tx_audio or cpm_decodes or cpm_coherent or announced"],
+                       cwd=root, env={**os.environ, "DATA2G_CPM_R23": "1"}, capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    assert " passed" in r.stdout and "skipped" not in r.stdout, r.stdout[-2000:]
