@@ -114,6 +114,11 @@ ColumnLayout {
                 model: pane.rig.devices
                 textRole: "label"
                 valueRole: "id"
+                // Empty, the popup would open as a blank strip of its own padding
+                // over the box: nothing to choose, so it doesn't open. The hint
+                // below says why.
+                enabled: count > 0
+                displayText: count > 0 ? currentText : "None found"
                 // The index of a device isn't stable across a replug.
                 function sync() { currentIndex = indexOfValue(pane.rig.device) }
                 Component.onCompleted: sync()
