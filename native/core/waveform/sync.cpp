@@ -289,6 +289,56 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
     return out;
 }
 
+std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
+                                             std::span<const std::vector<cdouble>> templates,
+                                             std::span<const double> freqs) {
+    std::vector<Mat<cdouble>> outs;
+    if (templates.empty()) return outs;
+    const std::size_t nt = templates.size(), m = templates[0].size(), nb = freqs.size();
+    if (z.size() < m) throw std::invalid_argument("repeat_corrs_multi: signal shorter than the template");
+    const std::size_t n = z.size() + m - 1, n_out = z.size() - m + 1;
+    const std::size_t L = PER * dsp::next_fast_len((n + PER - 1) / PER), bins_per_step = L / PER;
+    outs.reserve(nt);
+    for (std::size_t ti = 0; ti < nt; ++ti) outs.emplace_back(nb, n_out);
+    std::vector<cdouble> zp(L);
+    std::copy(z.begin(), z.end(), zp.begin());
+    const std::vector<cdouble> Z = dsp::fft(zp, true);
+    std::vector<std::shared_ptr<const std::vector<cdouble>>> Gs(nt);
+    for (std::size_t ti = 0; ti < nt; ++ti) Gs[ti] = template_spectrum(templates[ti], L);
+    constexpr std::size_t BATCH = 4, BATCH_MAX_L = 20480;
+    const std::size_t B = L <= BATCH_MAX_L ? BATCH : 1;
+    const std::size_t tasks_per_t = (nb + B - 1) / B;
+    per_bin(z.size(), nt * tasks_per_t, [&](std::size_t task) {
+        Scratch& s = scratch();
+        const std::size_t ti = task / tasks_per_t, t_task = task % tasks_per_t;
+        const std::size_t i0 = t_task * B, rows = std::min(B, nb - i0);
+        const std::vector<cdouble>& G0 = *Gs[ti];
+        s.prod.resize(rows * L);
+        s.c.resize(rows * L);
+        std::int64_t ks[BATCH];
+        for (std::size_t r = 0; r < rows; ++r) {
+            const auto k = static_cast<std::int64_t>(std::llround(freqs[i0 + r] / STEP_HZ));
+            ks[r] = k;
+            const auto shift = static_cast<std::size_t>(
+                ((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L) +
+                 static_cast<std::int64_t>(L)) %
+                static_cast<std::int64_t>(L));
+            cdouble* prod = s.prod.data() + r * L;
+            cmul(Z.data(), G0.data() + (L - shift), prod, shift);
+            cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
+        }
+        dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, L, false);
+        for (std::size_t r = 0; r < rows; ++r) {
+            std::int64_t q = (ks[r] * static_cast<std::int64_t>(m - 1)) % PER;
+            if (q < 0) q += PER;
+            const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
+            cscale(s.c.data() + r * L + (m - 1), ph, outs[ti][i0 + r], n_out);
+        }
+        release_big(s);
+    });
+    return outs;
+}
+
 double noise_level(const Mat<cdouble>& C) {
     double lv = INFINITY;
     for (std::size_t i = 0; i < C.rows; ++i) {

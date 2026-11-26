@@ -54,6 +54,11 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 // t's spectrum rolled by whole bins (sync.repeat_corrs).
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs);
 
+// repeat_corrs for several templates of the same length on the same z: shares one forward FFT of z.
+std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
+                                             std::span<const std::vector<cdouble>> templates,
+                                             std::span<const double> freqs);
+
 // The noise level of matched filter outputs C (bins, starts): per bin
 // NOISE_QUANTILE of |c_f|^2 scaled to an exponential's mean, the lowest
 // bin's (modem::find_copy without a StreamDetector's level).
