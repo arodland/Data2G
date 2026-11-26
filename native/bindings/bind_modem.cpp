@@ -357,13 +357,25 @@ void bind_modem(py::module_& m) {
                              std::optional<int> close_at) {
         const std::vector<double> si = steps_in ? vec(*steps_in) : std::vector<double>();
         const std::vector<std::int64_t> sl = slips_in ? vec(*slips_in) : std::vector<std::int64_t>();
-        Mat<int> pm;
+        Mat<int> pm, pk;
         if (pil) {
-            const std::size_t nc = pil->shape(pil->ndim() - 1);
-            pm = Mat<int>(static_cast<std::size_t>(pil->size()) / nc, nc);
-            for (std::size_t i = 0; i < pm.data.size(); ++i) pm.data[i] = static_cast<int>(pil->data()[i]);
+            if (pil->ndim() == 3) {
+                const std::size_t rows = static_cast<std::size_t>(pil->shape(0));
+                const std::size_t nc = static_cast<std::size_t>(pil->shape(1));
+                pm = Mat<int>(rows, nc);
+                pk = Mat<int>(rows, nc);
+                for (std::size_t i = 0; i < rows * nc; ++i) {
+                    pm.data[i] = static_cast<int>(pil->data()[2 * i]);
+                    pk.data[i] = static_cast<int>(pil->data()[2 * i + 1]);
+                }
+            } else {
+                const std::size_t nc = static_cast<std::size_t>(pil->shape(pil->ndim() - 1));
+                pm = Mat<int>(static_cast<std::size_t>(pil->size()) / nc, nc);
+                for (std::size_t i = 0; i < pm.data.size(); ++i) pm.data[i] = static_cast<int>(pil->data()[i]);
+            }
         }
-        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl, pil ? &pm : nullptr, close_at);
+        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl,
+                                        pil ? &pm : nullptr, close_at, pk.rows ? &pk : nullptr);
         return py::make_tuple(np3(f.raw, config::SYMS_PER_FRAME), np(f.hp), np(f.steps), np(f.slips));
     }, py::arg("z"), py::arg("p"), py::arg("n_f"), py::arg("shift"), py::arg("phi_ref"),
        py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none(),
@@ -436,7 +448,7 @@ void bind_modem(py::module_& m) {
             const auto c = mat(D);
             return np(t.fold(c.row_ptrs(), c.cols, a, lo, hi));
         });
-    d.def("cfo_aliases", &mo::cfo_aliases);
+    d.def("cfo_aliases", &mo::cfo_aliases, py::arg("d"), py::arg("centre"), py::arg("lag") = config::FRAME_SAMPLES);
     d.def("copy_header", [](const In<cd>& z, const py::dict& lock) {
         return header_dict(mo::copy_header(view(z), lock_of(lock)));
     });

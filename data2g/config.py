@@ -84,13 +84,14 @@ PILOTS = os.environ.get("DATA2G_PILOTS", "")
 SC_LAYOUT, _, _density = PILOTS.partition(":")
 # DATA2G_PILOTS=mix (round 5): the same sequence with a stride per band (modem.SC_STRIDES): k3d2's on w and w48
 # (2 nc + 1: gold's 179 on 48 carriers leaves holes that cost hilat-m a third of its gain), gold's on n10 and n4.
-if SC_LAYOUT not in ("", "k3d2", "gold", "mix") or _density not in ("", "1/6"):
-    raise ValueError(f"DATA2G_PILOTS={PILOTS}: k3d2, gold or mix, at 1/6")
+# k2d3 / fk2d3 / fk3d2 / mixs: Slepian-mode separable study layouts (intra-frame combs, 1/6 density).
+if SC_LAYOUT not in ("", "k3d2", "gold", "mix", "mixs", "k2d3", "fk2d3", "fk3d2") or _density not in ("", "1/6"):
+    raise ValueError(f"DATA2G_PILOTS={PILOTS}: k3d2, gold, mix, mixs, k2d3, fk2d3 or fk3d2, at 1/6")
 # HF only, at the stock frame: FM's bands (f55, f108), its estimate and interleaving windows, per-symbol noise
 # and decoding while the burst arrives have no scattered-pilot path, nor has another frame length.
 if SC_LAYOUT and (PROFILE != "hf" or SYMS_PER_FRAME != 6):
     raise ValueError("DATA2G_PILOTS: the HF profile and 6-symbol frames only")
-SC_BANDS = {"k3d2": ("w", "w48"), "gold": ("w", "w48", "n10", "n4"), "mix": ("w", "w48", "n10", "n4")}.get(SC_LAYOUT, ())
+SC_BANDS = () if not SC_LAYOUT else (("w", "w48") if SC_LAYOUT == "k3d2" else ("w", "w48", "n10", "n4"))
 DATA_SYMS_PER_FRAME = SYMS_PER_FRAME - 1
 FRAME_SAMPLES = SYMS_PER_FRAME * NSYM  # 1152 = 144 ms
 

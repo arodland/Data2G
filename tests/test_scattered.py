@@ -7,8 +7,18 @@ from data2g import codes, hfchannel, modem
 from data2g.arq import phy
 from data2g.config import SUBMODES
 
+pytestmark = pytest.mark.hf_only("scattered pilots are defined on the 8 kHz HF bands (w, w48, n10, n4)")
 
-LAYOUTS = {"k3d2": ("w", "w48"), "gold": ("w", "w48", "n10", "n4"), "mix": ("w", "w48", "n10", "n4")}
+
+LAYOUTS = {
+    "k3d2": ("w", "w48"),
+    "gold": ("w", "w48", "n10", "n4"),
+    "mix": ("w", "w48", "n10", "n4"),
+    "mixs": ("w", "w48", "n10", "n4"),
+    "k2d3": ("w", "w48", "n10", "n4"),
+    "fk2d3": ("w", "w48", "n10", "n4"),
+    "fk3d2": ("w", "w48", "n10", "n4"),
+}
 
 
 def _layout(monkeypatch, layout):
@@ -95,15 +105,15 @@ def test_a_copy_lock_reads_its_phase_reference_off_copy_open(monkeypatch):
     assert np.max(np.abs(r1["steps"])) <= np.max(np.abs(r0["steps"])) + 2
 
 
-@pytest.mark.parametrize("tone_hz", [2200.0, 825.0])
-def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, tone_hz):
-    """A steady tone 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]' level), on a carrier (2200 Hz)
-    or between two (825 Hz): the band's noise stays the floor's, the tone's carriers get their own, and the burst
-    decodes. Summed into one excess the tone told the decoder ~7 dB too much noise on every carrier (2200 Hz:
-    sc_tone 0.42 of codewords); in the preamble's noise (825 Hz) it put the pilots' power under it (0.53)."""
+@pytest.mark.parametrize("layout", ["mix", "mixs", "k2d3", "fk2d3", "fk3d2"])
+@pytest.mark.parametrize("tone_hz", [2200.0, 2150.0, 825.0])
+def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, layout, tone_hz):
+    """A steady tone 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]' level), on an odd carrier
+    (2200 Hz), an even carrier (2150 Hz), or between two (825 Hz): the band's noise stays the floor's, the tone's
+    carriers get their own, and the burst decodes."""
     from data2g.config import FS, LEADIN_SAMPLES
 
-    _layout(monkeypatch, "mix")
+    _layout(monkeypatch, layout)
     spec = SUBMODES["w48-qpsk-r1/3"]
     rng = np.random.default_rng(3)
     pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(4)]
@@ -122,14 +132,15 @@ def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, tone_hz):
     assert b.payloads == pl
 
 
-def test_find_copy_reads_past_a_steady_tone(monkeypatch):
+@pytest.mark.parametrize("layout", ["mix", "k2d3", "fk2d3", "fk3d2"])
+def test_find_copy_reads_past_a_steady_tone(monkeypatch, layout):
     """Two tones just outside the w band, 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]): a
     comb's matched filter lets them through, and their frame-apart products, the same at every frame phase, held
     every grid's place, so the copy of a burst whose preamble was lost was never read in a receiver's 2 s window
     (PR #308 review, item 8; at -2 dB 0 of 10 seeds found, 10 with each CFO bin's mean over the phases out)."""
     from data2g.config import BANDS, FS, LEADIN_SAMPLES
 
-    _layout(monkeypatch, "mix")
+    _layout(monkeypatch, layout)
     spec = SUBMODES["qpsk-r1/2"]
     rng = np.random.default_rng(0)
     pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(3)]

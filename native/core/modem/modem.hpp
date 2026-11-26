@@ -10,6 +10,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <complex>
 #include <cstdint>
 #include <memory>
@@ -114,22 +115,36 @@ struct ScFlags {
     bool copy_coherent = true;  // DATA2G_SC_COPY_COHERENT
     bool copy_rows = true;      // DATA2G_SC_COPY_ROWS
     double restore_ace = 1.0;   // DATA2G_SC_RESTORE_ACE
+    int slepian = -1;           // DATA2G_SC_SLEPIAN (-1 auto, 0 off, 1 on)
 };
 const ScFlags& sc_flags();
+bool use_slepian();
 // Whether a burst of n_f data frames of `spec` carries scattered pilots (modem.sc_spec).
 bool sc_spec(const Spec& spec, int n_f);
-// A frame's (6, nc) cells, flat (modem.sc_cells): the pilots' (ascending), their carriers, the data cells' in sending
-// order, per carrier its pilot's cell.
+// Intra-frame comb spec (k2d3, fk2d3, fk3d2 on wide bands nc >= 24): carrier stride K, pilot symbols in a frame,
+// frame period in combs (modem._sc_intra_spec).
+struct ScIntra {
+    int K = 0;
+    std::array<int, 3> syms{};
+    int n_syms = 0;
+    int n_combs = 0;
+};
+std::optional<ScIntra> sc_intra_spec(int nc);
+int sc_period(int nc);
+// A frame's (6, nc) cells, flat (modem.sc_cells / sc_frame_cells): the pilots' (ascending), their carriers, the data
+// cells' in sending order, per carrier its pilot's cell (own empty for intra-frame comb layouts).
 struct ScCells {
     std::vector<int> P, PK, Dc, own;
 };
 const ScCells& sc_cells(int nc);
+const ScCells& sc_frame_cells(int nc, int f = 0);
 bool sc_combs(int nc);  // the pilots are k3d2's three combs (modem._sc_combs)
 // The symbol opening and closing a scattered-pilot band's header-copy frame (modem.copy_open, copy_close).
 std::vector<cd> copy_open(const waveform::Band& b);
 // Per on-air frame (and the closing pilot) and carrier, the symbol its pilot is in (modem._sc_pil); empty off a
-// scattered-pilot band.
+// scattered-pilot band. For intra-frame comb layouts, sc_pil_intra returns both (sym, carrier) matrices.
 Mat<int> sc_pil(std::string_view band, int n_air, std::optional<int> kc);
+std::pair<Mat<int>, Mat<int>> sc_pil_intra(std::string_view band, int n_air, std::optional<int> kc);
 // n bytes of splitmix64, state its counter (modem._cal_payload): payloads both languages make the same, for
 // _sc_cal's calibration and arq/phy.peak_db's burst on a scattered-pilot band.
 std::vector<std::uint8_t> sc_payload(int n, std::uint64_t& state);
@@ -156,7 +171,7 @@ struct Frames {
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in = {}, std::string_view band = "w",
                     std::span<const std::int64_t> slips_in = {}, const Mat<int>* pil = nullptr,
-                    std::optional<int> close_at = {});
+                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr);
 
 struct HeaderRead {
     Header hdr;
@@ -250,6 +265,7 @@ public:
 private:
     void extend();
     std::string_view band_;
+    std::optional<ScIntra> intra_;
     std::vector<double> freqs_;
     std::vector<int> js_;
     std::vector<std::vector<cd>> filters_;
@@ -284,7 +300,7 @@ private:
     std::int64_t lo_ = 0, hi_ = 0;
     int n_ = 0;
 };
-std::vector<double> cfo_aliases(cd d, double centre);
+std::vector<double> cfo_aliases(cd d, double centre, int lag = config::FRAME_SAMPLES);
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock);
 
 // equalizer::Estimate scaled to the data's channel (data_channel's dict).

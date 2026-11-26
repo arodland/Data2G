@@ -230,7 +230,7 @@ def substitutions(native):
 
     small = {
         "_bin_phase_step": lambda h: N.bin_phase_step(np.asarray(h, complex)),
-        "_cfo_aliases": lambda d, centre: N.cfo_aliases(complex(d), float(centre)),
+        "_cfo_aliases": lambda d, centre, lag=config.FRAME_SAMPLES: N.cfo_aliases(complex(d), float(centre), int(lag)),
         "resolve_alias": lambda fine, coarse: N.resolve_alias(float(fine), float(coarse)),
     }
     return {

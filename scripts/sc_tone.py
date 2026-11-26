@@ -35,8 +35,8 @@ FAR_HZ = 300.0
 
 
 def one(args):
-    flag, name, chan, snr, tone, seed = args
-    D.setup("mix", flag)
+    arm, name, chan, snr, tone, seed = args
+    D.setup("mix" if arm == "off" else arm, arm != "off")
     spec = SUBMODES[name]
     b = ofdm.band(spec.band)
     rng = np.random.default_rng([seed, 3])
@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--snrs", default="8")
     ap.add_argument("--tones", default="0,825,2200")
     ap.add_argument("--flags", default="0,1")
+    ap.add_argument("--arms", default="", help="comma-separated arms (e.g. off,mix,fk2d3,fk3d2); overrides --flags")
     ap.add_argument("--bursts", type=int, default=24)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--genie-cfo", action="store_true", help="the residual CFO read as its true 0")
@@ -104,20 +105,21 @@ def main():
     if a.genie_cfo:
         from data2g import equalizer
 
-        equalizer.residual_cfo = lambda h: 0.0
-    jobs = [(f == "1", a.mode, c, float(s), float(t), seed) for f in a.flags.split(",") for c in a.chans.split(",")
+        equalizer.residual_cfo = lambda h, *x: 0.0
+    arms = a.arms.split(",") if a.arms else ["mix" if f == "1" else "off" for f in a.flags.split(",")]
+    jobs = [(arm, a.mode, c, float(s), float(t), seed) for arm in arms for c in a.chans.split(",")
             for s in a.snrs.split(",") for t in a.tones.split(",") for seed in range(a.bursts)]
     acc = {}
     with Pool(a.jobs, maxtasksperchild=200) as pool:
         for args, o in pool.imap_unordered(one, jobs, chunksize=2):
             acc.setdefault(args[:5], []).append(o)
     db = lambda v: 10 * np.log10(max(float(v), 1e-12))  # noqa: E731
-    print(f"{a.mode}: flag 0 pilot row, 1 scattered (mix); SNR PEP 5; medians over bursts")
-    print("| chan | SNR | tone | flag | ok | est_err dB | told dB | cfo Hz |\n|---|---|---|---|---|---|---|---|")
-    for (flag, _, c, s, t), outs in sorted(acc.items(), key=lambda kv: (kv[0][2], kv[0][3], kv[0][4], kv[0][0])):
+    print(f"{a.mode}: SNR PEP 5; medians over bursts")
+    print("| chan | SNR | tone | arm | ok | est_err dB | told dB | cfo Hz |\n|---|---|---|---|---|---|---|---|")
+    for (arm, _, c, s, t), outs in sorted(acc.items(), key=lambda kv: (kv[0][2], kv[0][3], kv[0][4], arms.index(kv[0][0]))):
         got = [o for o in outs if o is not None]
         okf = sum(o["ok"] for o in got) / max(sum(o["n_cw"] for o in outs if o), 1)
-        print(f"| {c} | {s:+.0f} | {t:.0f} | {int(flag)} | {okf:.2f} | {db(np.median([o['est_err'] for o in got])):+.1f} | "
+        print(f"| {c} | {s:+.0f} | {t:.0f} | {arm} | {okf:.2f} | {db(np.median([o['est_err'] for o in got])):+.1f} | "
               f"{db(np.median([o['told'] for o in got])):+.1f} | {np.median([o['cfo'] for o in got]):+.2f} |", flush=True)
 
 

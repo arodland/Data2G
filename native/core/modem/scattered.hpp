@@ -14,6 +14,10 @@
 
 namespace data2g::modem::sc {
 
+// modem._sc_residual_cfo: fine residual CFO (Hz) and pair lag (s) from intra-frame comb pairs.
+std::pair<double, double> residual_cfo(const Mat<cd>& raw0, const Mat<cd>& hp, std::optional<int> kc, int n_air,
+                                       std::string_view db, std::span<const char> exclude_db);
+
 // modem._sc_full: the burst's whole pilot symbols through the data's window (rows, nc of the data band) and their
 // seconds from the first frame's start.
 struct Full {

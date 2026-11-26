@@ -37,8 +37,10 @@ std::string_view sc_layout() {
         const std::string s = v ? v : "";
         const auto colon = s.find(':');
         const std::string name = s.substr(0, colon), density = colon == std::string::npos ? "" : s.substr(colon + 1);
-        if ((name != "" && name != "k3d2" && name != "gold" && name != "mix") || (density != "" && density != "1/6"))
-            throw std::invalid_argument("DATA2G_PILOTS=" + s + ": k3d2, gold or mix, at 1/6");
+        const bool ok = name.empty() || name == "k3d2" || name == "gold" || name == "mix" || name == "mixs" ||
+                        name == "k2d3" || name == "fk2d3" || name == "fk3d2";
+        if (!ok || (density != "" && density != "1/6"))
+            throw std::invalid_argument("DATA2G_PILOTS=" + s + ": k3d2, gold, mix, mixs, k2d3, fk2d3 or fk3d2, at 1/6");
         if (!name.empty() && (PROFILE != "hf" || SYMS_PER_FRAME != 6))
             throw std::invalid_argument("DATA2G_PILOTS: the HF profile and 6-symbol frames only");
         return name;

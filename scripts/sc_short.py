@@ -32,10 +32,11 @@ MODES = {"ack-1f": 1, "ack-4f": 2, "qpsk-r1/5": 1, "n10-ack-4f": 2, "n4-ack-2f":
 
 
 def setup(arm: str):
-    """off; mix; mix+<remedy>[+<remedy>]: short<N> (bursts of at most N data frames keep pilot rows), spreadall
+    """off; <layout>; <layout>+<remedy>[+<remedy>]: short<N> (bursts of at most N data frames keep pilot rows), spreadall
     (modem.SC_SPREAD_ALL), loo, coh, rows, restoreq[x], openpilot, closepilot (the copy frame's ends).
-    The round-6 defaults are mix+loo+coh+rows.""" 
-    modem.SC_BANDS, modem.SC_LAYOUT = ((), "") if arm == "off" else (("w", "w48", "n10", "n4"), "mix")
+    The round-6 defaults are <layout>+loo+coh+rows."""
+    base = arm.split("+")[0]
+    modem.SC_BANDS, modem.SC_LAYOUT = ((), "") if base == "off" else (("w", "w48", "n10", "n4"), base)
     modem.SC_SHORT_FRAMES, modem.SC_SPREAD_ALL, modem.SC_SPREAD_LOO, modem.SC_COPY_COHERENT = 0, False, False, False
     modem.SC_COPY_ROWS, modem.SC_RESTORE_QPSK = False, 0.0
     modem.copy_open = modem.copy_close = lambda b: np.conj(b.pilot)
