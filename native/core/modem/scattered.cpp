@@ -47,6 +47,7 @@ constexpr double SC_SLOW_RHO = 0.35;
 constexpr double SC_WIDEN = 1.25;
 constexpr int SC_FRAMES = 4;
 constexpr int SC_HOT_PASSES = 1;
+constexpr size_t SC_SOLVE_LANES = 2;  // joint()'s weight solves at once (its reason there)
 constexpr int SC_SEARCH_MIN = 4;  // modem.SC_SEARCH_MIN (its DATA2G_SC_SEARCH_MIN study switch is Python's)
 
 // modem._sc_interior: the spread search's frames, those whose widest reach holds every frame's pilots and no whole
@@ -473,10 +474,16 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
             for (int d = support.first - slack; d <= support.second + slack; ++d)
                 Bd[c][static_cast<size_t>(d - support.first + slack)] = std::polar(1.0, (-2.0 * PI * (bbv[c] * d)) * (1.0 / FS));
         std::vector<std::shared_ptr<const Weights>> made(missing.size());
-        pool::parallel_for(missing.size(), [&](size_t m) {
-            const size_t i = missing[m];
-            made[m] = make_weights(rels[i], std::span<const int>(o.k).subspan(lo[i], hi[i] - lo[i]),
-                                   std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, nk, pilots, Bd);
+        // at most SC_SOLVE_LANES solves at once: each streams a few MB (A's factor, the right-hand sides), and on a
+        // Pi 5 four at once were slower than one (w48 8 cw mpp: 1.3-1.5 s at 4 threads, 0.86 at 1, 0.66-0.92 at 2)
+        const size_t lanes = std::min(missing.size(), SC_SOLVE_LANES);
+        pool::parallel_for(lanes, [&](size_t lane) {
+            for (size_t m = lane; m < missing.size(); m += lanes) {
+                const size_t i = missing[m];
+                made[m] = make_weights(rels[i], std::span<const int>(o.k).subspan(lo[i], hi[i] - lo[i]),
+                                       std::span<const int>(o.kind).subspan(lo[i], hi[i] - lo[i]), Rf, nc, sq, nr, nk,
+                                       pilots, Bd);
+            }
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
