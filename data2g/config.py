@@ -80,10 +80,11 @@ SYMS_PER_FRAME = int(os.environ.get("DATA2G_SYMS_PER_FRAME", 6))  # 1 pilot + 5 
 # 6 nc / golden ratio coprime to 6 nc: each carrier once a frame on every band (so n10 and n4 take it), 1-2 fewer
 # or more than nc / 6 a symbol. Other densities are the sequence's other prefixes; only 1/6 keeps a frame's 5 nc
 # data cells, and only it is built.
-# On this branch (fast-fading-integration) the default is mix; "" or off: the pilot rows, as on air today. The
+# On this branch (fast-fading-integration) the default is fk3d2 (PR #337: mix's hilat-m gain at a fraction of
+# its receive CPU; mix stays selectable); "" or off: the pilot rows, as on air today. The
 # default yields to what the scattered pilots have no path for (below: it is rows there, an explicit value
 # raises): the FM profile, another frame length, and the FM-path study switches when set by hand.
-_SC_DEFAULT = "mix" if PROFILE == "hf" and SYMS_PER_FRAME == 6 and not any(
+_SC_DEFAULT = "fk3d2" if PROFILE == "hf" and SYMS_PER_FRAME == 6 and not any(
     os.environ.get(v) for v in ("DATA2G_SPREAD_WINDOW", "DATA2G_EST_WINDOW", "DATA2G_DECODE_EARLY",
                                 "DATA2G_SYMBOL_NOISE")) else ""
 PILOTS = os.environ.get("DATA2G_PILOTS", _SC_DEFAULT)
