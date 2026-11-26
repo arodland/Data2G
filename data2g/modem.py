@@ -1933,7 +1933,8 @@ def _sc_cal(spec) -> tuple:
     distortion is the closing pass's alone. ponytail: measured at first use
     (two bursts a submode and process); a table like clip_constants.json if
     this becomes wire."""
-    key = (spec.name, SC_BOOST, SC_RESTORE_ACE, _restore_plain(spec))
+    # (the layout too: a test that patches it measures its own)
+    key = (spec.name, SC_BOOST, SC_RESTORE_ACE, _restore_plain(spec), SC_LAYOUT, tuple(SC_BANDS), tuple(sorted(SC_STRIDE.items())))
     if key not in _SC_CAL:
         _SC_CAL[key] = (1.0, spec.clip.ratio)  # while measuring
         b = ofdm.band(spec.band)
