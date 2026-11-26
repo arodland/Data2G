@@ -407,6 +407,11 @@ class Receiver:
         self.cpm_wait: list = []
         self.expected = None  # expect()'s window, until it is looked at
         self._present = False  # data2g_on_air's latest reading with nothing locked
+        # after a reset (our own transmission, unheard), data2g_on_air holds
+        # until a reading can say "none" (SENSE_BLIND_S): a burst may have
+        # begun while we transmitted. Not BUSY: the host would see it after
+        # every one of our bursts
+        self._blind = self.sense
         self._heard_to = 0  # stream index where the last burst handled ended (_sense reads past it)
         for d in getattr(self, "detectors", {}).values():
             d.reset()
@@ -499,18 +504,24 @@ class Receiver:
         locked: a burst we never locked holds this as long as it lasts, plus up
         to its window. Unlike on_air, noise, carriers, CW, band-limited QRM or
         narrow SSB passbands can't hold it (scripts/presence_study.py)."""
-        return self.pending is not None or self._present
+        return self.pending is not None or self._present or self._blind
 
     # the newest audio data2g_on_air reads: the OFDM fold's and CPM tones'
     # (scripts/presence_study.py)
     PRESENCE_S = 1.75
     CPM_PRESENCE_S = 3.0
+    # audio after a reset before a reading can say "none" (_blind):
+    # cpm.PRESENCE_MIN_S, the longest one needs (OFDM: PRESENCE_MIN_M +
+    # COPY_PAIRS frames, 0.72 s)
+    SENSE_BLIND_S = 1.0
 
     def _sense(self):
         """data2g_on_air's reading, of audio past the last burst handled (a
         suspect one's kept tail would read its own pilots)."""
         start = max(self.off, self._heard_to)
         end = self.off + len(self.buf)
+        if end >= self.SENSE_BLIND_S * FS:  # (stream indices count from the reset)
+            self._blind = False
         for band, d in self.detectors.items():
             level = d.level()
             if level is None:
@@ -840,7 +851,7 @@ class Receiver:
                 # (a burst's own tail read as a header at 1e-6 noise). A
                 # radio's noise at the sound card is far above -80 dBFS.
                 if np.sqrt(np.mean(self.buf[-self.min_search :] ** 2)) < SILENCE_RMS:
-                    self._present = False
+                    self._present = self._blind = False
                     self._trim(self.keep)
                     for d in self.detectors.values():  # no noise level in silence: skip it
                         d.restart_at(self.off + len(self.buf))

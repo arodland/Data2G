@@ -1153,3 +1153,38 @@ def test_kiss_waits_for_a_data2g_burst_joined_partway():
             saw_busy = True
     assert saw_busy, "BUSY should light on a Data2G burst joined partway"
     assert tx_at is not None and tx_at >= 9.0, f"KISS keyed over the burst at {tx_at} s"
+
+
+def test_kiss_waits_after_its_own_burst_for_one_begun_under_it():
+    """Another station's burst begins while we transmit a KISS burst: the
+    receiver, reset at our TX end, can't read it for SENSE_BLIND_S, so
+    the KISS hold is held over that gap. A frame queued as our burst ends
+    waits for the other burst to finish."""
+    from data2g import codes, hfchannel, modem
+    from data2g.arq.policy import slots_for
+    from data2g.kisslink import KissLink
+
+    k = KissLink(persist=255, slot_s=0.1)
+    k.set_mode(0, "qpsk-r1/2")
+    e = Engine("W1AW", seed=91, kiss=k)
+    spec = modem.SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(92)
+    other = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(slots_for(spec, 12.0))], spec)
+    mid = other[2 * FS:11 * FS]  # 9 s of the other burst, under ours from 0.5 s
+    y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), mid, np.zeros(6 * FS)]), 6.0,
+                       seed=93, s_power=hfchannel.active_power(mid))
+    blk = FS // 10
+    k.enqueue(b"first")
+    keyed, ended, second = [], None, None
+    for i in range(0, len(y), blk):
+        _, ptt = e.step(y[i:i + blk])
+        t = (i + blk) / FS
+        if ptt:
+            keyed.append(t)
+            if ended is not None and second is None:
+                second = t
+        elif keyed and ended is None:
+            ended = t
+            k.enqueue(b"second")  # queued as our burst ends: nothing deferred it
+    assert keyed and ended is not None and ended < 7.0, (keyed[:1], ended)
+    assert second is None or second >= 9.5, f"KISS keyed over the other burst at {second} s"

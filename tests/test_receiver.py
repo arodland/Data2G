@@ -477,3 +477,37 @@ def test_interference_does_not_stick_busy(kind):
             total += 1
             busy += int(rx.channel_busy or rx.data2g_on_air)
     assert busy / total <= 0.01, (kind, busy, total)
+
+
+@pytest.mark.parametrize("patched", [False, True])
+def test_sense_holds_after_a_reset_until_a_full_reading(patched):
+    """After a reset (our own transmission, unheard) data2g_on_air holds
+    until SENSE_BLIND_S of audio is in (a burst that began under it could not
+    read yet), then lets go on noise; BUSY doesn't (the host would see it
+    after every burst of ours); never held without `sense`.
+    `patched`: a test's patched search keeps the Python receiver under
+    --native (its `sense` once shadowed _sense: TypeError on the first hop)."""
+    from data2g import cpm
+    from data2g.config import PROFILE
+
+    class Patched(receiver.Receiver):
+        def _stats(self, *a, **k):
+            return super()._stats(*a, **k)
+
+    grids = () if PROFILE == "fm" else tuple(cpm.GRIDS)
+    y = np.random.default_rng(6).normal(scale=0.05, size=4 * FS)
+    for sense in (True, False):
+        rx = (Patched if patched else receiver.Receiver)(modem.Accept.of(None, 16.0), cpm_grids=grids)
+        rx.sense = sense
+        rx.reset()
+        on = []
+        for i in range(0, len(y), FS // 10):
+            rx.feed(y[i:i + FS // 10])
+            on.append(((i + FS // 10) / FS, rx.data2g_on_air, rx.channel_busy))
+        held = [t for t, a, _ in on if a]
+        assert not any(c for _, _, c in on), on
+        if sense:
+            assert held and held[0] == 0.1 and max(held) <= receiver.Receiver.SENSE_BLIND_S + 0.5, on
+            assert not any(a or c for t, a, c in on if t >= 2.0), on
+        else:
+            assert not held, on

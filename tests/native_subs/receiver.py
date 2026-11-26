@@ -82,12 +82,12 @@ def substitutions(native):
 
         @property
         def sense(self):
-            return self.__dict__.get("_sense", False) if self._n is None else self._n.sense
+            return self.__dict__.get("_sense_on", False) if self._n is None else self._n.sense
 
         @sense.setter
         def sense(self, v):
             if self._n is None:
-                self.__dict__["_sense"] = bool(v)
+                self.__dict__["_sense_on"] = bool(v)
             else:
                 self._n.sense = bool(v)
 

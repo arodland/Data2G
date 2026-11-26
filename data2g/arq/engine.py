@@ -301,7 +301,7 @@ class Engine:
     def sense(self, on: bool):
         self.receiver.sense = bool(on)
         if not on:
-            self.receiver._present = False
+            self.receiver._present = self.receiver._blind = False
 
     @property
     def tx_submode(self) -> str | None:

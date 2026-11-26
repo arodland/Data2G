@@ -194,6 +194,7 @@ void Receiver::reset() {
     fresh_ = HOP;  // search at once
     last_start_ = -1;
     present_ = false;
+    blind_ = sense;  // receiver.Receiver._blind
     heard_to_ = 0;
     decided_.clear();
     decided_mid_.clear();
@@ -262,6 +263,7 @@ bool Receiver::on_air() const {
 void Receiver::sense_on_air() {
     const int64_t start = std::max(off_, heard_to_);
     const int64_t end = off_ + len();
+    if (end >= static_cast<int64_t>(SENSE_BLIND_S * config::FS)) blind_ = false;  // (stream indices count from the reset)
     constexpr int64_t FR = config::FRAME_SAMPLES;
     constexpr int64_t PF = static_cast<int64_t>(modem::COPY_PAIRS) * FR;
     for (auto& det : detectors_) {
@@ -615,7 +617,7 @@ std::vector<Receiver::Item> Receiver::feed_deferred(std::span<const double> x_in
                 std::vector<double> sq(tail.size());
                 for (std::size_t i = 0; i < tail.size(); ++i) sq[i] = tail[i] * tail[i];
                 if (std::sqrt(mean(sq)) < SILENCE_RMS) {
-                    present_ = false;
+                    present_ = blind_ = false;
                     trim(keep_);
                     for (auto& d : detectors_) d.d.restart_at(off_ + len());  // no noise level in silence: skip it
                     break;
