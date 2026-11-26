@@ -7,17 +7,32 @@ from data2g import codes, hfchannel, modem
 from data2g.arq import phy
 from data2g.config import SUBMODES
 
+pytestmark = pytest.mark.hf_only("scattered pilots are defined on the 8 kHz HF bands (w, w48, n10, n4)")
 
-LAYOUTS = {"k3d2": ("w", "w48"), "gold": ("w", "w48", "n10", "n4"), "mix": ("w", "w48", "n10", "n4")}
+
+LAYOUTS = {
+    "k3d2": ("w", "w48"),
+    "gold": ("w", "w48", "n10", "n4"),
+    "mix": ("w", "w48", "n10", "n4"),
+    "mixs": ("w", "w48", "n10", "n4"),
+    "k2d3": ("w", "w48", "n10", "n4"),
+    "fk2d3": ("w", "w48", "n10", "n4"),
+    "fk3d2": ("w", "w48", "n10", "n4"),
+}
+
+
+def _layout(monkeypatch, layout):
+    """The layout, patched in unless DATA2G_PILOTS set it (a patched one keeps --native's calls in Python)."""
+    if modem.SC_LAYOUT != layout:
+        monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS[layout])
+        monkeypatch.setattr(modem, "SC_LAYOUT", layout)
 
 
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 @pytest.mark.parametrize("name,n_cw", [("qpsk-r1/2", 1), ("16qam-r1/2", 3), ("w48-16qam-r1/2", 4), ("n10-qpsk-r1/2", 2),
                                        ("n4-qpsk-r1/2", 1), ("n10-16qam-r1/2", 3), ("ack-1f", 1)])
-@pytest.mark.python_only("scattered pilots (DATA2G_PILOTS) are not in native")
 def test_round_trip(monkeypatch, layout, name, n_cw):
-    monkeypatch.setattr(modem, "SC_BANDS", LAYOUTS[layout])
-    monkeypatch.setattr(modem, "SC_LAYOUT", layout)
+    _layout(monkeypatch, layout)
     spec = SUBMODES[name]
     rng = np.random.default_rng(5)
     pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(n_cw)]
@@ -40,7 +55,6 @@ def test_round_trip(monkeypatch, layout, name, n_cw):
         assert est["h"].shape == r["est"]["h"].shape and np.mean(est["mse"]) < np.mean(r["est"]["mse"])
 
 
-@pytest.mark.python_only("scattered pilots")
 def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     """A scattered-pilot copy frame closes on copy_close, not the pilot: closed on the pilot it had the first
     header's own shape (the preamble's last repeat, the header, the header pilot), so a preamble hypothesis two
@@ -49,8 +63,7 @@ def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     from data2g.config import BANDS, FRAME_SAMPLES, LEADIN_SAMPLES, NSYM
     from data2g.waveform import dsp
 
-    monkeypatch.setattr(modem, "SC_BANDS", ("w", "w48", "n10", "n4"))
-    monkeypatch.setattr(modem, "SC_LAYOUT", "mix")
+    _layout(monkeypatch, "mix")
     spec = SUBMODES["qpsk-r1/2"]
     rng = np.random.default_rng(1)
     x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(2)], spec)
@@ -62,3 +75,138 @@ def test_the_header_does_not_read_as_its_own_copy(monkeypatch):
     assert modem.decode_header(modem._copy_llr(z, p0 + kc * FRAME_SAMPLES, "w", 4), "w")[2] > 0.9  # the copy
     at_header = start + BANDS["w"].preamble_samples - NSYM  # where the header's shape starts
     assert modem.decode_header(modem._copy_llr(z, at_header, "w", 4), "w")[2] < floor
+
+
+def test_find_copy_on_a_band_without_copies(monkeypatch):
+    """A scattered-pilot band whose bursts carry no header copy (n10): find_copy finds none. It read a copy band's
+    frame there and raised on a strong tone (test_native_modem's pair-products signals)."""
+    from data2g.config import FS
+
+    _layout(monkeypatch, "mix")
+    n = 3 * FS
+    y = np.sin(2 * np.pi * 1510.0 * np.arange(n) / FS) + np.random.default_rng(7).normal(size=n)
+    assert modem.find_copy(y, "n10") is None
+
+
+def test_a_copy_lock_reads_its_phase_reference_off_copy_open(monkeypatch):
+    """receive(copy=...) takes the timing tracker's phase reference from the copy frame's first symbol, which on a
+    scattered-pilot band is copy_open: divided by the pilot instead, the reference was off by the pilots' own phases,
+    and the tracker stepped the window 8 samples over a 3-codeword burst the preamble-locked receive held at 2."""
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(1)
+    x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(3)], spec)
+    y = hfchannel.apply_channel(np.concatenate([np.zeros(2000), x, np.zeros(2000)]), snr_db=15, fading_preset="mpp", seed=3)
+    r0 = modem.receive(y)
+    lock = modem.find_copy(y, "w")
+    assert lock is not None
+    r1 = modem.receive(y, copy=lock)
+    assert abs(np.angle(np.exp(1j * (r1["phi_ref"] - r0["phi_ref"])))) < 0.3
+    assert np.max(np.abs(r1["steps"])) <= np.max(np.abs(r0["steps"])) + 2
+
+
+@pytest.mark.parametrize("layout", ["mix", "mixs", "k2d3", "fk2d3", "fk3d2"])
+@pytest.mark.parametrize("tone_hz", [2200.0, 2150.0, 825.0])
+def test_a_tone_raises_its_own_carriers_noise_alone(monkeypatch, layout, tone_hz):
+    """A steady tone 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]' level), on an odd carrier
+    (2200 Hz), an even carrier (2150 Hz), or between two (825 Hz): the band's noise stays the floor's, the tone's
+    carriers get their own, and the burst decodes."""
+    from data2g.config import FS, LEADIN_SAMPLES
+
+    _layout(monkeypatch, layout)
+    spec = SUBMODES["w48-qpsk-r1/3"]
+    rng = np.random.default_rng(3)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(4)]
+    x = np.concatenate([np.zeros(2400), modem.modulate(pl, spec), np.zeros(2400)])
+    sigma = np.sqrt(np.mean(x**2) / 10**0.5 / (2500 / (FS / 2)))  # 5 dB in 2500 Hz
+    y = x + np.random.default_rng(4).normal(scale=sigma, size=len(x))
+    known = dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4)
+    n0_clean = modem.receive(y, known=known)["est"]["n0"]
+    amp = np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10 ** 2.5)
+    y = y + amp * np.cos(2 * np.pi * tone_hz * np.arange(len(y)) / FS + 0.3)
+    r = modem.receive(y, known=known)
+    assert r["est"]["n0"] < 2 * n0_clean
+    nk = np.asarray(r["est"]["n0_k"])
+    assert nk.shape == r["est"]["h"].shape and nk.max() > 10 * r["est"]["n0"]
+    b = modem.decode_received(r)
+    assert b.payloads == pl
+
+
+@pytest.mark.parametrize("layout", ["mix", "k2d3", "fk2d3", "fk3d2"])
+def test_find_copy_reads_past_a_steady_tone(monkeypatch, layout):
+    """Two tones just outside the w band, 25 dB over the floor in 50 Hz (interference.PRESETS["carriers"]): a
+    comb's matched filter lets them through, and their frame-apart products, the same at every frame phase, held
+    every grid's place, so the copy of a burst whose preamble was lost was never read in a receiver's 2 s window
+    (PR #308 review, item 8; at -2 dB 0 of 10 seeds found, 10 with each CFO bin's mean over the phases out)."""
+    from data2g.config import BANDS, FS, LEADIN_SAMPLES
+
+    _layout(monkeypatch, layout)
+    spec = SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(0)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(3)]
+    x = np.concatenate([np.zeros(8000), modem.modulate(pl, spec), np.zeros(8000)])
+    start = 8000 + LEADIN_SAMPLES
+    x[start:start + BANDS["w"].preamble_samples + modem.header_samples("w")] = 0  # the head lost
+    sigma = np.sqrt(np.mean(x[x != 0] ** 2) / 10 ** -0.2 / (2500 / (FS / 2)))  # -2 dB in 2500 Hz
+    y = x + np.random.default_rng(100).normal(scale=sigma, size=len(x))
+    t = np.arange(len(y)) / FS
+    y += np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * (np.cos(2 * np.pi * 800 * t) + np.cos(2 * np.pi * 2200 * t + 1))
+    lock = modem.find_copy(y[start - 400:start - 400 + 16704], "w")
+    assert lock is not None and lock["spec"] == spec and lock["n_cw"] == 3
+
+
+def test_a_slow_channel_is_estimated_separably_and_alike(monkeypatch):
+    """Spreads up to SC_SEP_HZ get the separable estimate (per carrier in time, then across carriers): on a 1 Hz
+    channel it reads the joint estimate's channel and decodes the same; the spread search calls the channel slow."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(4)]
+    x = np.concatenate([np.zeros(2400), modem.modulate(pl, spec), np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpp", seed=3)
+    known = dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4)
+    r = modem.receive(y, known=known)
+    assert r["est"]["filter_spread_hz"] <= modem.SC_SEP_HZ
+    monkeypatch.setattr(modem, "SC_SEP_HZ", 0.0)
+    r0 = modem.receive(y, known=known)
+    h, h0 = r["est"]["h"], r0["est"]["h"]
+    assert np.mean(np.abs(h - h0) ** 2) < 0.02 * np.mean(np.abs(h0) ** 2)
+    assert modem.decode_received(r).payloads == pl == modem.decode_received(r0).payloads
+
+
+def test_a_separable_spread_is_reported_as_the_joint_search_read_it(monkeypatch):
+    """The separable search reads mpp's 1 Hz as 1.5 where the joint one read 1.0, and the outcome model learnt the
+    joint's reading: the report (spread_hz) is at most SC_SEP_REPORT_HZ, the filter keeps its own spread."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    x = np.concatenate([np.zeros(2400), modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(4)], spec),
+                        np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpp", seed=6)
+    est = modem.receive(y, known=dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4))["est"]
+    assert est["filter_spread_hz"] == 1.5 and est["spread_hz"] == modem.SC_SEP_REPORT_HZ
+
+
+@pytest.mark.python_only("reads Python's weight cache; native's reach is held by test_native_modem's w48 mpd case")
+def test_a_2_hz_channel_is_estimated_from_2_frames_either_side(monkeypatch):
+    """From SC_JOINT_REACH2_HZ up the joint estimate reaches 2 frames either side (3 by 0.7 / spread at 2 Hz):
+    w48's mpd burst took 1.8-2.3 s on a CM4 against TURN_S 1.3 with 3. Every weight pattern it solved spans at
+    most 2 frames and 3 symbols either side of its frame's centre."""
+    from data2g.config import LEADIN_SAMPLES
+
+    _layout(monkeypatch, "mix")
+    spec = SUBMODES["w48-qpsk-r1/2"]
+    rng = np.random.default_rng(2)
+    x = np.concatenate([np.zeros(2400), modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(4)], spec),
+                        np.zeros(2400)])
+    y = hfchannel.apply_channel(x, snr_db=15, fading_preset="mpd", seed=3)
+    modem._SC_WEIGHTS.clear()
+    est = modem.receive(y, known=dict(start=2400 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=4))["est"]
+    assert est["filter_spread_hz"] == 2.0
+    q2 = round(np.log2(2.0) * 8)
+    spans = [np.max(np.abs(np.frombuffer(k[7]) - 2.5)) for k in modem._SC_WEIGHTS if k[4] == q2]
+    assert spans and max(spans) <= 2 * modem.SYMS_PER_FRAME + 3

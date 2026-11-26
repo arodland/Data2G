@@ -44,7 +44,12 @@ FIELDS = ["arm", "flag", "mode", "chan", "snr", "bursts", "cw", "ok", "ok_dd", "
 
 
 def setup(arm: str, flag: bool):
-    modem.SC_LAYOUT = "gold" if arm.startswith("gold") else "mix" if arm == "mix" else "k3d2"
+    if arm in ("mix", "mixs", "k2d3", "fk2d3", "fk3d2", "gold", "k3d2"):
+        modem.SC_LAYOUT = arm
+    elif arm.startswith("gold"):
+        modem.SC_LAYOUT = "gold"
+    else:
+        modem.SC_LAYOUT = "k3d2"
     modem.SC_BANDS = (("w", "w48", "n10", "n4") if modem.SC_LAYOUT != "k3d2" else ("w", "w48")) if flag else ()
     modem.SC_BOOST, modem.SC_PILOT_FIX, modem.SC_SLACK, modem.SC_WIDEN = 1.0, None, None, 1.25
     modem.SC_RESTORE_ACE, modem.SC_RESTORE_PLAIN, modem.SC_MODES = 1.0, 0.0, "all"
@@ -78,8 +83,8 @@ def cells(r):
     nc = r["est"]["h"].shape[2]
     air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
     if "sc" in r:
-        Dc = modem.sc_cells(nc)[2]
-        return (air[:, None] * SYMS_PER_FRAME + Dc[None, :] // nc).ravel(), np.tile(Dc % nc, n_f)
+        Dc = np.array([modem.sc_frame_cells(nc, int(fa))[2] for fa in air])
+        return (air[:, None] * SYMS_PER_FRAME + Dc // nc).ravel(), (Dc % nc).ravel()
     sym = air[:, None, None] * SYMS_PER_FRAME + np.arange(1, SYMS_PER_FRAME)[None, :, None] + np.zeros((1, 1, nc), int)
     return sym.ravel(), np.tile(np.arange(nc), n_f * (SYMS_PER_FRAME - 1))
 

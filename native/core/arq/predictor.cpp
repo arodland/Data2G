@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
+#include <mutex>
+#include <string>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +13,11 @@
 #include <string_view>
 #include <utility>
 
+#include "arq/burst.hpp"
 #include "arq/modes.hpp"
+#include "arq/phy.hpp"
+#include "config/config.hpp"
+#include "modem/modem.hpp"
 #include "cpm/cpm.hpp"
 #include "dsp/dsp.hpp"
 #include "waveform/ofdm.hpp"
@@ -54,6 +61,44 @@ double capacity(double snr_db, std::string_view constellation) {
     return interp(snr_db, tables::CAPACITY_GRID, table(constellation).mi);
 }
 
+namespace {
+// arq/phy.peak_db measured, for an OFDM mode on a scattered-pilot band (DATA2G_PILOTS: the table is the flag-off
+// waveform's): the same burst as Python's (a control and a data codeword, modem.sc_payload's payloads).
+double measured_peak_db(const Mode& m) {
+    static std::mutex mu;
+    static std::map<std::string, double, std::less<>> done;
+    {
+        std::lock_guard lk(mu);
+        if (auto it = done.find(m.name); it != done.end()) return it->second;
+    }
+    std::uint64_t state = 0;
+    TxBurst b{std::string(m.name)};
+    auto ctl = modem::sc_payload(ctl_payload_bytes(m), state);
+    auto data = modem::sc_payload(payload_bytes(m), state);
+    b.slots.push_back({ctl_mask(0, 0, 5), 0, Bytes(ctl.begin(), ctl.end())});
+    b.slots.push_back({data_mask(0, 1, 5), 0, Bytes(data.begin(), data.end())});
+    const auto x = tx_audio(b);
+    const auto a = dsp::hilbert(x);
+    std::vector<double> env(a.size());
+    double peak = 0.0, ms = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        env[i] = std::abs(a[i]);
+        peak = std::max(peak, env[i] * env[i]);
+        ms += x[i] * x[i];
+    }
+    const double floor = 0.1 * std::sqrt(ms / static_cast<double>(x.size()));
+    double act = 0.0;
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < x.size(); ++i)
+        if (env[i] > floor) act += x[i] * x[i], ++n;
+    const double p = n ? act / static_cast<double>(n) : ms / static_cast<double>(x.size());  // dsp.active_power
+    const double db = std::nearbyint(10 * std::log10(peak / 2 / p) * 1000) / 1000;
+    std::lock_guard lk(mu);
+    done.emplace(std::string(m.name), db);
+    return db;
+}
+}  // namespace
+
 double inv_capacity(double mi, std::string_view constellation) {
     const auto& t = table(constellation).mi;
     if (mi >= t.back() - 1e-5) return std::numeric_limits<double>::infinity();
@@ -83,6 +128,7 @@ double fm_mer_offset_db() {
 
 double peak_db(std::string_view mode, int cap) {
     if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
+    if (const auto& m = mode_at(mode); !m.is_cpm() && config::sc_band(m.band)) return measured_peak_db(m);
     for (auto table : {tables::MODE_PEAK_DB, tables::MODE_PEAK_DB_WIDE})
         for (const auto& p : table)
             if (p.mode == mode) return p.db[cap];

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <numeric>
 #include <set>
+#include <tuple>
 
 #include "constellation/constellation.hpp"
 #include "util/cancel.hpp"
@@ -221,10 +222,7 @@ std::shared_ptr<const SlotSoft> soft_bits(const Heard& r) {
 namespace {
 
 double n0_k_at(const modem::DataEstimate& est, std::size_t row, std::size_t k) {
-    const auto nc = static_cast<std::size_t>(est.nc);
-    if (est.n0_k.empty()) return est.n0;
-    if (est.n0_k.size() == nc) return est.n0_k[k];
-    return est.n0_k[(row / config::DATA_SYMS_PER_FRAME) * nc + k];
+    return est.n0_at(row, k);  // per carrier, per frame, or per data cell (scattered pilots' hot carriers)
 }
 
 }  // namespace
@@ -268,12 +266,15 @@ Measured measure(const Heard& r) {
     for (std::size_t i = 0; i < h2.size(); ++i) h2[i] = std::norm(est.h.data[i]);
     out.mi = effective_mi_all(h2, var);
     // n0_spread_db (phy.py): only a per-frame noise estimate (config::EST_WINDOW) has frames to compare
-    if (nc > 0 && est.n0_k.size() >= 2 * nc && est.n0_k.size() % nc == 0) {
-        std::vector<double> db(est.n0_k.size() / nc);
+    // (per data cell, scattered pilots' hot carriers: a frame's 5 nc cells; the same every frame)
+    const std::size_t per = est.n0_k.size() == static_cast<std::size_t>(est.n_f) * config::DATA_SYMS_PER_FRAME * nc
+                                ? config::DATA_SYMS_PER_FRAME * nc : nc;
+    if (nc > 0 && est.n0_k.size() >= 2 * per && est.n0_k.size() % per == 0) {
+        std::vector<double> db(est.n0_k.size() / per);
         for (std::size_t f = 0; f < db.size(); ++f) {
             double s = 0.0;
-            for (std::size_t k = 0; k < nc; ++k) s += est.n0_k[f * nc + k];
-            db[f] = 10 * std::log10(s / static_cast<double>(nc));
+            for (std::size_t k = 0; k < per; ++k) s += est.n0_k[f * per + k];
+            db[f] = 10 * std::log10(s / static_cast<double>(per));
         }
         double mean = 0.0, ss = 0.0;
         for (double v : db) mean += v;
@@ -1172,9 +1173,15 @@ ModemRx::Est ModemRx::dd_estimate() const {
         z[row][c] = cache.z[j];
         w[row][c] = cache.w[j];
     }
-    const auto t = modem::symbol_times(R);
-    auto [h, mse] = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz, est.n0,
-                                      equalizer::bb(config::band(spec.band)), est.slack);
+    Mat<cd> h;
+    Mat<double> mse;
+    if (R.sc) {  // scattered pilots (modem::ScInfo): the cells at their own symbols
+        std::tie(h, mse) = modem::sc_refine(R, z, w);
+    } else {
+        const auto t = modem::symbol_times(R);
+        std::tie(h, mse) = equalizer::refine(R.hp, t.pilots, z, w, t.rows, R.support, est.p_sig, est.filter_spread_hz,
+                                             est.n0, equalizer::bb(config::band(spec.band)), est.slack);
+    }
     auto out = std::make_shared<modem::DataEstimate>(est);
     for (std::size_t i = 0; i < h.data.size(); ++i) {
         out->h.data[i] = g * h.data[i];

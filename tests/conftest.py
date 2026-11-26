@@ -98,10 +98,11 @@ def native():
     module, why = native_subs.import_native()
     if module is None:
         pytest.skip(f"data2g_native not built: {why}")
-    if native_subs.study_skip():
-        # a study toggle (any of them on: on this branch most are by default; native_subs.study_skip)
-        # makes the Python reference differ from what C++ ports, by design: parity is master's defaults'
-        pytest.skip("a study toggle is set: the Python reference is not what C++ ports")
+    if native_subs.study_skip() - native_subs.R23_MODEL_PY:
+        # a Python-only study switch (DATA2G_PILOTS's, native_subs.SC_STUDY_ENV) makes the
+        # Python reference differ from what C++ ports, by design (r2/3's zero-shot model only keeps the
+        # shifter in Python: the gear parity tests mark themselves)
+        pytest.skip("a Python-only study switch is set: the Python reference is not what C++ ports")
     return module
 
 

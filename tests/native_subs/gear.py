@@ -28,6 +28,8 @@ def substitutions(native):
     from data2g.arq import policy as G
     from data2g.arq import predictor as P
 
+    from . import sc_same
+
     T, A = native.timing, native.arq
     py = {k: getattr(modem, k) for k in ("_hosts", "header_layout", "header_samples", "copy_frame", "frames_on_air",
                                          "burst_end", "head_samples", "receive_head", "burst_seconds")}
@@ -35,15 +37,16 @@ def substitutions(native):
     py.update({f"G.{k}": getattr(G, k) for k in ("width_hz", "ctl_slots", "slots_for")})
     py["predict_outcome"] = P.predict_outcome
 
+    # (sc_same: a patched scattered-pilot layout changes the header, so the burst's timing: Python's)
     def own(spec):
-        return config.SUBMODES.get(spec.name) == spec
+        return config.SUBMODES.get(spec.name) == spec and sc_same()
 
     def own_mode(spec):
-        return modes.MODES.get(spec.name) == spec
+        return modes.MODES.get(spec.name) == spec and sc_same()
 
     def by_band(name):
         native_fn, py_fn = getattr(T, name.lstrip("_")), py[name]
-        return lambda band, *a: native_fn(band, *a) if band in config.BANDS else py_fn(band, *a)
+        return lambda band, *a: native_fn(band, *a) if band in config.BANDS and sc_same() else py_fn(band, *a)
 
     def by_spec(native_fn, py_fn, test=own_mode):
         return lambda spec, *a: native_fn(spec.name, *a) if test(spec) else py_fn(spec, *a)

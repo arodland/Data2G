@@ -116,6 +116,11 @@ def _peak_db(submode: str, cap: int) -> float:
     spec = MODES[submode]
     rng = np.random.default_rng(0)
     rand = lambda sp: bytes(rng.integers(0, 256, codes.payload_bytes(sp), dtype=np.uint8))  # noqa: E731
+    if not is_cpm(spec) and spec.band in modem.SC_BANDS:
+        # scattered pilots (DATA2G_PILOTS, a study flag): measured at run time natively too (the generated table
+        # is the flag-off burst's), on payloads both make the same way
+        state = [0]
+        rand = lambda sp: modem._cal_payload(codes.payload_bytes(sp), state)  # noqa: E731
     burst = TxBurst(submode, [Slot(ctl_mask(0, 0, 5), 0, rand(ctl_spec(spec))), Slot(data_mask(0, 1, 5), 0, rand(spec))], 0, cap)
     x = tx_audio(burst)
     return round(float(10 * np.log10(np.max(dsp.envelope(x) ** 2) / 2 / dsp.active_power(x))), 3)

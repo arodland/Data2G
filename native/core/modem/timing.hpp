@@ -11,7 +11,7 @@
 
 namespace data2g::modem {
 
-bool hosts(std::string_view band);                          // _hosts: other bands' frames follow its header
+bool hosts(std::string_view band);  // _hosts: other bands' frames follow its header, or it is a scattered-pilot band
 std::vector<bool> header_layout(std::string_view band);     // per header symbol: true = pilot
 int header_samples(std::string_view band);
 bool copies(std::string_view band);  // the band repeats its header after the first frames

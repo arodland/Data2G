@@ -368,6 +368,12 @@ class Receiver:
         self.detectors = {b: sync.StreamDetector(ofdm.band(b)) for b in self.bands}
         # per band, find_copy's fold and data2g_on_air's, kept running (modem.FoldTrack)
         self.folds = {b: (modem.FoldTrack(), modem.FoldTrack()) for b in self.bands}
+        # scattered-pilot copy bands: find_copy's comb outputs kept for the stream too (modem.CombStream), when the
+        # comb search is the only one (no pilot-row submodes: study switches DATA2G_SC_MODES / _SHORT_FRAMES)
+        comb = modem.SC_COPY_COHERENT and modem.SC_MODES == "all" and not modem.SC_SHORT_FRAMES
+        self.combs = {b: modem.CombStream(b) for b in self.bands
+                      if comb and b in modem.SC_BANDS and b in modem.HEADER_COPY_BANDS}
+        self.comb_folds = {b: modem.FoldTrack() for b in self.combs}
         self.blanker = audio.Blanker() if blank else None
         self.sense = False  # read data2g_on_air (arq.engine turns it on; offline searches leave it off)
         self.reset()
@@ -425,6 +431,10 @@ class Receiver:
         for pair in getattr(self, "folds", {}).values():
             for f in pair:
                 f.reset()
+        for c in getattr(self, "combs", {}).values():
+            c.reset()
+        for f in getattr(self, "comb_folds", {}).values():
+            f.reset()
 
     def expect(self, grids, lo: int, hi: int, cfo: float):
         """The expected slot (docs/arq.md §3a): a burst of one of these CPM
@@ -610,6 +620,8 @@ class Receiver:
             self.buf = self.buf[len(self.buf) - n:]  # not [-n:], which for n = 0 is everything
         for d in self.detectors.values():
             d.trim(self.off)
+        for c in self.combs.values():
+            c.trim(self.off)
 
     def _stats(self, w0: int = 0) -> dict:
         """Per band, the detection statistic for buf[w0:]'s starts (new audio
@@ -622,6 +634,12 @@ class Receiver:
             # no search looks further back than `keep` (the statistic grew
             # with a long burst in the buffer, and was copied every hop)
             d.trim(self.off + len(self.buf) - self.keep - d.span)
+            if b in self.combs:
+                c = self.combs[b]
+                if c.fed < self.off:
+                    c.restart_at(self.off)
+                c.feed(dsp.to_baseband(self.buf[c.fed - self.off:], c.fed))
+                c.trim(self.off + len(self.buf) - self.keep - d.span)
             n = len(self.buf) - w0 - d.span + 1
             if n <= 0:
                 continue
@@ -769,6 +787,24 @@ class Receiver:
         lock, as find_burst's dict (buffer indices), or None."""
         best = None
         for band in modem.HEADER_COPY_BANDS:
+            if band in self.combs:  # the coherent combs' outputs, kept for the stream (modem.CombStream)
+                c = self.combs[band]
+                level = c.level()
+                if level is None:
+                    continue
+                a, D = c.products_from(self.off)
+                x = self.buf[a - self.off:]
+                D = D[:, :max(0, len(x) - modem.M + 1 - c.lag - modem.COPY_PAIRS * modem.FRAME_SAMPLES)]
+                m = D.shape[1] // modem.FRAME_SAMPLES
+                fold = None
+                if m >= 1:
+                    d0, kept = c.kept_products()
+                    R = self.comb_folds[band].fold(kept, d0, a, a + m * modem.FRAME_SAMPLES)
+                    fold = np.roll(R, -(a % modem.FRAME_SAMPLES), axis=1)
+                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True)
+                if lock is not None and (best is None or lock["score"] > best[0]["score"]):
+                    best = (lock, a - self.off)
+                continue
             d = self.detectors.get(band)
             level = d.level() if d is not None else None
             if level is None:
