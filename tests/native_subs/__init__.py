@@ -73,7 +73,8 @@ def import_native():
 #   them: config::sc_layout throws.)
 # - r2/3's zero-shot outcome model (predictor.R23_MODEL: DATA2G_OUTCOME_R23, on with r2/3 here): C++ compiles the
 #   installed model, so the predictor and shifter stay Python (gear's own guard), and so do the C++ Station and
-#   Session that run a shifter of their own (arq), and the engine and host around them.
+#   Session that run a shifter of their own (arq), the engine and host around them, and phy (its C++ KissLink
+#   takes only C++ bursts: the Python engine's Hand bursts would reach it).
 # - the acquisition study (DATA2G_CPM_ACQ_K > 1, _ACQ_SCREEN, _ACQ_FLOOR; off by default): cpm.detect's extra
 #   placements; every provider that searches for CPM stays Python.
 PILOTS_ENV = "DATA2G_PILOTS"
@@ -82,7 +83,7 @@ SC_STUDY_ENV = ("DATA2G_SC_BOOST_DB", "DATA2G_SC_RESTORE_PLAIN", "DATA2G_SC_REST
                 "DATA2G_SC_HDR_PILOT", "DATA2G_SC_MODES", "DATA2G_SC_SEP_HZ", "DATA2G_SC_SEP_SEARCH",
                 "DATA2G_SC_SEARCH_MIN", "DATA2G_SC_SLEPIAN")
 PILOTS_NATIVE = {"base", "waveform", "cpm", "codes", "audio"}
-R23_MODEL_PY = {"gear", "arq", "engine", "host"}
+R23_MODEL_PY = {"gear", "arq", "phy", "engine", "host"}
 ACQ_PY = {"cpm", "receiver", "phy", "engine", "host", "arq"}
 
 
