@@ -148,7 +148,7 @@ SettingsDialog::SettingsDialog(const app::Args& a, const QStringList& inputs, co
     busy_sense_ = new QCheckBox(tr("Mid-burst BUSY"));
     busy_sense_->setObjectName(QStringLiteral("busy_sense"));
     busy_sense_->setChecked(a.busy_sense);
-    busy_sense_->setToolTip(tr("Detect ongoing Data2G transmissions whose start was missed and light BUSY. "
+    busy_sense_->setToolTip(tr("Detect ongoing Data2G transmissions whose start was missed: light BUSY and hold KISS broadcasts. "
                                "Turn off if interference keeps BUSY stuck on."));
     station->addRow(busy_sense_);
     // Decoder effort, the LDPC iteration cap: 15-40 in steps of 5 (the slider counts steps).

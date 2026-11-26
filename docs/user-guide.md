@@ -544,7 +544,7 @@ The web UI's Settings tab has the same fields on one page:
 - **Callsign**: your station's callsign.
 - **Decode on a worker thread**: leave on. It lets Data2G keep listening for new signals while it decodes a long burst.
 - **Live constellation**: fills in the constellation plot while a burst is still arriving, at a small cost in CPU. Turn it off on a slow machine.
-- **Mid-burst BUSY**: detects ongoing Data2G transmissions whose start was missed and lights BUSY. Leave on; turn it off if passband interference keeps BUSY stuck on.
+- **Mid-burst BUSY**: detects ongoing Data2G transmissions whose start was missed, lights BUSY and holds KISS broadcasts. Leave on; turn it off if passband interference keeps BUSY stuck on. It is off by default on FM, where it hasn't been tested yet.
 - **Decoder effort**: how hard the error-correction decoder works on each burst before giving up. Higher values recover slightly more in deep fades and take longer on bursts that fail anyway. The default is 25. On a slow machine such as a Raspberry Pi 4, try 15 or 20.
 - **CW ID**: adds a Morse ID (`DE` and your callsign, on 1500 Hz) to the normal ID bursts, or sends it in their place. The box beside it sets the speed, from 15 to 40 words per minute.
 

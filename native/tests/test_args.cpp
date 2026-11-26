@@ -225,9 +225,9 @@ void test_nods() {
 
 void test_busy_sense() {
     check::current_step = "busy_sense";
-    check::is_true(parse({}).busy_sense && !parse({"--no-busy-sense"}).busy_sense &&
+    check::is_true(parse({}).busy_sense == (config::PROFILE != "fm") && !parse({"--no-busy-sense"}).busy_sense &&
                        parse({"--no-busy-sense", "--busy-sense"}).busy_sense,
-                   "default on, --no-busy-sense, the last wins");
+                   "default on (off on FM), --no-busy-sense, the last wins");
     app::Args saved;
     saved.busy_sense = false;
     check::is_true(!app::from_settings(app::settings_map(saved), app::Args{}).busy_sense, "survives settings map");

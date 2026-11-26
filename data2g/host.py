@@ -87,7 +87,7 @@ from . import audio, cwid, hand, modem  # noqa: E402
 from .arq import modes  # noqa: E402
 from .arq import session as S  # noqa: E402
 from .arq.engine import Engine  # noqa: E402
-from .config import FS  # noqa: E402
+from .config import FS, PROFILE  # noqa: E402
 from .tnc import KissServer, Rigctld  # noqa: E402
 
 log = logging.getLogger("data2g.host")
@@ -97,6 +97,9 @@ BW = {"BW500": 0, "BW1200": 1, "BW2300": 2, "BW2750": 2}
 BW_NAME = modes.BW_NAME
 KISS_BW_CAP = {2400: 2, 500: 0}  # --kiss-bw -> the KISS link's cap
 BLOCK = FS // 10  # audio block: 0.1 s
+# --busy-sense: mid-burst Data2G presence (Receiver.data2g_on_air). Off on FM until its
+# thresholds are measured on FM audio (scripts/presence_study.py ran on HF bands only; #332)
+BUSY_SENSE_DEFAULT = PROFILE != "fm"
 VOLUME_DB = (-60.0, 0.0)  # TXPOWER's range: the native GUI's output volume setting. Above 0 only clips
 DIAL_TIMEOUT_S = 1.0  # ACCEPT's connection must be up by then (the caller waits ~3.5 s for an answer)
 MAX_RETRIES = 20  # RETRIES' most: fsk16r25 retries go ~13 s apart, so ~4.5 minutes of calling
@@ -648,7 +651,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     modem.TX_PATH = getattr(a, "tx_path", modem.TX_PATH)  # the station's radio path (FM's transmit)
     engine.hand_round = getattr(a, "hand_decoder", "full")
     engine.pending = getattr(a, "pending", "fsk")
-    engine.sense = getattr(a, "busy_sense", True)
+    engine.sense = getattr(a, "busy_sense", BUSY_SENSE_DEFAULT)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
     cmd = _Port((a.host, a.command_port), lambda line, cid: inbox.put(("cmd", (line, cid))), lines=True,
@@ -807,8 +810,9 @@ def main():
     ap.add_argument("--hand-decoder", choices=("full", "cheap"), default="full",
                     help="net control's Hand round: cheap, one fewer candidate and coarser grids, half the CPU"
                          " of a 40-channel round for 0.2-0.4 dB (docs/hand-burst.md)")
-    ap.add_argument("--busy-sense", action=argparse.BooleanOptionalAction, default=True,
-                    help="detect ongoing Data2G transmissions whose start was missed and light BUSY (default: on)")
+    ap.add_argument("--busy-sense", action=argparse.BooleanOptionalAction, default=BUSY_SENSE_DEFAULT,
+                    help="detect ongoing Data2G transmissions whose start was missed: light BUSY and hold KISS"
+                         " broadcasts (default: on; off on FM, its thresholds unmeasured there)")
     a = ap.parse_args()
     if a.list_modes:
         print("\n".join(mode_lines(KISS_BW_CAP[a.kiss_bw])))
