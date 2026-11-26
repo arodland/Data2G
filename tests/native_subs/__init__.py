@@ -103,7 +103,6 @@ def build(native, skip=()):
     unknown = set(skip) - PROVIDERS.keys()
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
-    skip = set(skip) | study_skip()
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:

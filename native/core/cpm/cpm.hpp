@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -26,11 +27,28 @@ namespace data2g::cpm {
 using Grid = tables::CpmGrid;
 using Spec = tables::CpmSpec;
 
-// nullptr if there is no such grid / spec (data modes and control codewords).
+// nullptr if there is no such grid / spec (data modes and control codewords). By name: the wide-bin
+// toolbox grids and their specs too (tables::CPM_WIDE_*, cpm.py's _Toolbox lookup), on air or not.
 const Grid* grid(std::string_view name);
 const Spec* spec(std::string_view name);
 const Grid& grid_of(const Spec& s);
 const Spec& ctl(const Grid& g);
+// cpm.GRIDS' and cpm.SPECS' iteration: the on-air grids (tables::CPM_GRIDS, then the wide grids
+// DATA2G_CPM_ONAIR names, cpm.ON_AIR_WIDE, read once) and their data specs (CPM_SPECS, then those wide
+// grids' in CPM_WIDE_SPECS' order). Unset, master's tables.
+const std::vector<const Grid*>& grids();
+const std::vector<const Spec*>& specs();
+// cpm.WIDE_ON (DATA2G_CPM_WIDE=1, read once): every wide spec in arq::modes() (studies).
+bool wide_on();
+// cpm.grid_specs: grid g's data specs (valid_words' order).
+std::vector<const Spec*> grid_specs(const Grid& g);
+// A wide grid's geometry (cpm.Grid's properties): samples per sub-window, symbols/s, sub-windows a tone
+// energy sums. The on-air grids: T, rate, 1.
+inline int nsub(const Grid& g) { return g.T / g.L; }
+inline double baud(const Grid& g) { return g.rate / g.L; }
+inline int kept(const Grid& g) { return g.L - g.guard; }
+// cpm.shares_rows: wide grid g's coarse rows are sums of on-air grid h's (c8w50 on c8r50).
+bool shares_rows(const Grid& g, const Grid& h);
 
 // The header's 10-bit value before its CRC-6: (mode index + 2 dup) << 6 | n_data.
 int header_value(int index, int n_data, bool dup);
@@ -62,7 +80,8 @@ std::vector<double> overshoot(const tables::CpmTxFilter& f);
 // clip and filter (waveform::tx_condition) over the tones +- its margin.
 std::vector<double> bandpass(const Grid& g, std::span<const double> x, int cap = 0);
 
-// (n_sym, m + 2 extra) tone energies from `start`, CFO removed; shares per row.
+// (n_sym, m + 2 extra) tone energies from `start`, CFO removed (a wide grid: its kept sub-windows'
+// summed); shares per row.
 Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo, int extra = 0);
 Mat<double> shares(const Mat<double>& E);
 
@@ -88,10 +107,13 @@ struct Header {
 };
 // cpm.CoarseTrack: a streaming receiver's coarse detection rows of grid g as audio arrives, on the stream's
 // T/4 timing grid, so each hop's searches (find, find_mid) read them instead of transforming their windows again.
-// Also keeps raw unnormalized bin powers for q in (0, 2) from the same FFTs for presence() / present().
+// Also keeps the raw bin powers from the same FFTs for presence() / present() (q in 0, 2) and a sourced track.
 class CoarseTrack {
 public:
-    explicit CoarseTrack(const Grid& g, double reach_hz = 150.0);
+    // source: the track of a grid g shares rows with (shares_rows), fed the same audio first: g's rows are sums
+    // of its symbols' energies, no transforms of its own (a start the source does not hold: g's own). It must
+    // outlive this track.
+    explicit CoarseTrack(const Grid& g, double reach_hz = 150.0, CoarseTrack* source = nullptr);
     // buf holds stream samples off..: rows for its new whole symbols; rows of samples it no longer holds dropped
     void feed(std::span<const double> buf, std::int64_t off);
     // detect's per-phase (first symbol's sample from a, rows n x 4 nb) of the whole symbols in [a, b)
@@ -119,12 +141,15 @@ public:
     };
     mutable std::vector<FineMemo> fine_memo;
     mutable std::vector<HeaderMemo> header_memo;
+    const Grid& grid() const { return *g_; }
 
 private:
+    bool sourced(std::int64_t nxt, std::int64_t n, std::vector<double>& out, std::vector<double>& raw) const;
     const Grid* g_;
     std::array<std::optional<std::int64_t>, 4> s_{};  // per phase: the stream sample of its first row
     std::array<std::vector<double>, 4> E_{};          // per phase: rows of 4 nb, flat (shares)
-    std::array<std::vector<double>, 4> R_{};          // per phase: rows of 2 nb, flat (raw powers for q in 0, 2)
+    std::array<std::vector<double>, 4> R_{};          // per phase: rows of 4 nb, flat (raw powers: presence, a sourced track)
+    CoarseTrack* source_ = nullptr;
 };
 
 // mid: the mid block alone, its first sample for the start (find_mid). track: its rows for the coarse stage
@@ -224,7 +249,9 @@ struct Received {
     Mat<double> E;
     double cfo;
     std::int64_t preamble_start, header_end;
-    Mat<std::complex<double>> Z;  // (burst rows, m) complex tone bins at the refined start and CFO (coherent DD)
+    // (burst rows, m) complex tone bins at the refined start and CFO (coherent DD; a wide grid's sub-windows,
+    // L rows a symbol; empty where the grid is not coherent())
+    Mat<std::complex<double>> Z;
     std::map<int, Pass> passes;   // data slots' passes a streaming receiver made (arq::CpmStream); ModemRx makes the rest
 };
 // cpm.refine: a lock's start and CFO by the likelihood of the burst's first refine_symbols symbols.
@@ -243,6 +270,11 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
 inline constexpr double FLOOR_SIGMAS = 6.0;  // cpm.FLOOR_SIGMAS: tone_floors' bar over the common N0
 inline constexpr int COH_W = 8;      // coh_metric's window for slots (+- rows, the row left out)
 inline constexpr int COH_HDR_W = 4;  // the header's
+// cpm._coh_w: coh_metric's window for grid g, in its rows (a wide grid's sub-windows: cpm.WIDE_COH_W).
+int coh_w(const Grid& g, bool hdr = false);
+// cpm.coherent: the coherent paths (lock, control, DD) read grid g: every on-air grid, a wide grid unless it
+// drops sub-windows.
+inline bool coherent(const Grid& g) { return g.L == 1 || g.guard == 0; }
 // cpm.COH_LOCK: the grid's coherent lock gates (score one copy, both; margin
 // one copy, both), nullopt for an uncalibrated grid or DATA2G_CPM_COH_LOCK != 1 (read once).
 std::optional<std::array<double, 4>> coh_lock(const Grid& g);
@@ -251,12 +283,15 @@ inline constexpr double COH_PREGATE[] = {12.0, 10.0};
 // cpm.COH_CTL (DATA2G_CPM_COH_CTL, read once).
 bool coh_ctl();
 
-// (n_sym, m) complex tone bins from `start`, CFO removed (energies before the square).
+// (n_sym, m) complex tone bins from `start`, CFO removed (energies before the square). A wide grid:
+// (n_sym L, m), each sub-window's, a symbol's L rows in turn.
 Mat<std::complex<double>> bins(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo);
 // (n, m) bins of consecutive rows and P (n, m) the tones' probabilities -> (n, m) coherent tone log-likelihoods.
-Mat<double> coh_metric(const Mat<std::complex<double>>& Z, const Mat<double>& P, int W, double n0);
-// cpm._n0: the noise level of energies E (all but each row's strongest, exponential).
-double noise_n0(const Mat<double>& E);
+// L > 1 (a wide grid): Z's rows are sub-windows, L a symbol, P a row per symbol, the result (n / L, m).
+Mat<double> coh_metric(const Mat<std::complex<double>>& Z, const Mat<double>& P, int W, double n0, int L = 1);
+// cpm._n0: the noise level of energies E (all but each row's strongest, over the median of a noise energy:
+// exponential ln 2, a wide grid's k-sum Grid::noise_median).
+double noise_n0(const Mat<double>& E, double noise_median = std::numbers::ln2);
 // cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows (coh_metric, n0).
 std::vector<double> coh_run_llr(const Grid& g, const Mat<std::complex<double>>& Z, std::span<const int> t, double n0);
 // read_header on coh_metric (cpm.coh_read_header).

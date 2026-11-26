@@ -166,6 +166,7 @@ ROBUST_START_DATA_MARGIN_DB = 2.0
 # (`last`) is in its last letter's mode, as master's is in ROBUST_FAST. Older names: DATA2G_ROBUST_RULE=connect
 # (WWWWW), alt (RWRWR); replace makes ROBUST_CONNECT itself ROBUST_WIDE (in sessions too).
 # DATA2G_ROBUST_FAST=wide: ROBUST_FAST is ROBUST_WIDE; always: the in-session robust mode is, at any spread.
+# Native: arq::robust() and connect_tries_default() read the same variables.
 ROBUST_WIDE = "fsk8w50-r1/2"
 ROBUST_RULE = os.environ.get("DATA2G_ROBUST_RULE", "").replace("off", "")
 ROBUST_FAST_RULE = os.environ.get("DATA2G_ROBUST_FAST", "").replace("off", "")

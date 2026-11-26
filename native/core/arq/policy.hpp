@@ -58,6 +58,21 @@ inline constexpr std::string_view ROBUST_CONNECT = config::PROFILE == "fm" ? "n1
 inline constexpr std::string_view ROBUST_FAST = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8r50-r1/3";
 inline constexpr int ROBUST_CONNECT_TRIES = 4;  // connect retries in ROBUST_CONNECT; the ones past them in ROBUST_FAST
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
+// policy.py's study rules (scripts/wide_fsk_study.py; need DATA2G_CPM_ONAIR=c8w50), read once: the wide-bin
+// grid c8w50 in the connect retries. DATA2G_CONNECT_SEQ: the retries' modes in order, one letter a try, R
+// ROBUST_CONNECT, F ROBUST_FAST, W ROBUST_WIDE (master's RRRRF); the session's CONNECT_TRIES is one more than its
+// length. DATA2G_ROBUST_RULE=connect (WWWWW), alt (RWRWR), replace (ROBUST_CONNECT itself ROBUST_WIDE, in
+// sessions too). DATA2G_ROBUST_FAST=wide: ROBUST_FAST is ROBUST_WIDE; always: the in-session robust mode is, at
+// any spread. Unset, master's constants above.
+inline constexpr std::string_view ROBUST_WIDE = "fsk8w50-r1/2";
+struct Robust {
+    std::string_view connect, fast;  // policy.py's ROBUST_CONNECT and ROBUST_FAST after the rules
+    std::vector<std::string_view> connects;  // ROBUST_CONNECTS: the retries' modes, CONNECT_SEQ's letters
+    std::vector<std::string_view> modes;     // ROBUST_MODES: connect, fast and the retries', each once
+    bool fast_always = false;                // DATA2G_ROBUST_FAST=always
+};
+const Robust& robust();
+bool is_robust(std::string_view submode);  // in ROBUST_MODES
 // policy.py: a session connected by a robust retry starts at the robust floor only if the caller's
 // CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
 inline constexpr double ROBUST_START_SNR_DB = -6.0;
@@ -114,6 +129,12 @@ public:
     std::string measured_band = "w";
     double measured_at = 0.0;
     std::optional<std::string> heard;  // the submode of the peer's last burst
+    // policy.py robust_mode: in a session, the robust control mode: robust().fast if the peer's last measured
+    // spread_est says fast fading (or DATA2G_ROBUST_FAST=always), else robust().connect
+    std::string_view robust_mode() const {
+        const bool fast = last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ;
+        return fast || arq::robust().fast_always ? arq::robust().fast : arq::robust().connect;
+    }
     int data_lost = 0;  // bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     std::optional<std::array<double, 4>> ceiling;  // the data ladder: per channel, the highest threshold data may have
     std::optional<std::array<double, 4>> ladder_top;  // the thresholds of the mode whose losses started it
@@ -194,7 +215,7 @@ public:
     std::string connect_mode(int cap, int tries, bool last) override;
     bool weak_path() override { return shifter.weak_path(); }
     void robust_started() override { shifter.start_bound = true; }
-    bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
+    bool robust(const std::string& submode) override { return is_robust(submode); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);
     }

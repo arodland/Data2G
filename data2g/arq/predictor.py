@@ -122,7 +122,7 @@ def band_span_hz(band: str) -> tuple[float, float]:
     from .. import cpm
     from ..waveform import ofdm
 
-    if band in cpm.GRIDS:
+    if band in cpm.GRIDS or band in cpm.WIDE_GRIDS:  # (a wide grid's modes are in MODES under DATA2G_CPM_WIDE=1)
         g = cpm.GRIDS[band]
         return g.f0 - g.bp, g.f0 + (g.m - 1) * g.rate + g.bp
     f = np.sort(ofdm.band(band).freqs)

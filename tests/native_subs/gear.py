@@ -38,10 +38,8 @@ def substitutions(native):
     def own(spec):
         return config.SUBMODES.get(spec.name) == spec
 
-    def own_mode(spec):  # (a wide grid's mode is Python only)
-        from data2g import cpm
-
-        return modes.MODES.get(spec.name) == spec and getattr(spec, "grid", None) not in cpm.WIDE_GRIDS
+    def own_mode(spec):
+        return modes.MODES.get(spec.name) == spec
 
     def by_band(name):
         native_fn, py_fn = getattr(T, name.lstrip("_")), py[name]
