@@ -223,6 +223,45 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               std::span<const cd* const> D_rows, std::size_t dcols, std::optional<double> level,
                               double* peak = nullptr, const Mat<cd>* fold = nullptr);
+// modem.CombStream: find_copy's coherent comb outputs (scattered pilots) kept for a stream, each start's computed
+// once as audio is fed; per fed chunk each bin's noise level, the median of the last CHUNKS; pair products extended
+// as asked and kept KEEP_BEHIND past a trim.
+class CombStream {
+public:
+    static constexpr int CHUNKS = 8;
+    static constexpr std::int64_t KEEP_BEHIND = 4000;
+    explicit CombStream(std::string_view band);
+    void reset();
+    void restart_at(std::int64_t pos);
+    void skip_to(std::int64_t pos);  // native only, as StreamDetector::skip_to
+    void feed(std::span<const cd> z);  // the next contiguous baseband samples (to_baseband with their stream index)
+    void trim(std::int64_t start);
+    std::optional<double> level() const;
+    struct Products {
+        std::int64_t start;
+        std::vector<const cd*> rows;
+        std::size_t cols;
+    };
+    Products products_from(std::int64_t start);  // pair products for stream starts from max(start, c0)
+    Products kept_products();                    // every pair product kept, from d0
+    std::int64_t fed = 0, c0 = 0, d0 = 0;
+    std::int64_t lag = 0;  // a start's output needs this and M samples after it
+
+private:
+    void extend();
+    std::string_view band_;
+    std::vector<double> freqs_;
+    std::vector<int> js_;
+    std::vector<std::vector<cd>> filters_;
+    std::vector<cd> tail_;
+    std::vector<std::vector<cd>> C_, D_;
+    std::size_t c_off_ = 0, d_off_ = 0;
+    std::vector<std::vector<double>> levels_;
+};
+// find_copy(comb=True) from a CombStream's pair products (x from their first start), its level and running fold.
+std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
+                                          std::span<const cd* const> D_rows, std::size_t dcols, double level,
+                                          double* peak = nullptr, const Mat<cd>* fold = nullptr);
 // modem.FoldTrack: the pilot fold kept running over a window of a stream's pair products that slides forward, per
 // CFO bin and absolute frame phase; entering products added and leaving ones subtracted in stream order, a frame
 // phase's run at a time, summed afresh every RENEW folds or when the window moves any other way.

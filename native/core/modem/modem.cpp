@@ -1081,19 +1081,11 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
                                    const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
                                    double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb);
 
-// modem.find_copy(comb=True): one matched filter per symbol holding pilots (the template's carriers whose pilot is
-// there), their outputs added coherently within the frame (SC_COPY_COHERENT, at SC_COPY_SUBBINS offsets per CFO bin)
-// or their pair products summed. ponytail: a stream's own C, D and fold are not used (Python's too)
-std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view band, const Accept* accept, double* peak) {
-    constexpr int SUBBINS = 5;  // modem.SC_COPY_SUBBINS
-    if (!copies(band)) {  // no copy to find: copy_llr reads a copy band's frame
-        if (peak) *peak = 0.0;
-        return std::nullopt;
-    }
+// modem._comb_filters: per symbol j holding scattered pilots, the preamble template's carriers whose pilot is in
+// symbol j, as a unit-norm template
+std::vector<std::pair<int, std::vector<cd>>> comb_filters(std::string_view band) {
     const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
-    const auto z0 = waveform::to_baseband(x);
-    const auto freqs = waveform::cfo_grid();
     const auto& cells = sc_cells(b.nc());
     std::vector<int> js;
     for (size_t k = 0; k < nc; ++k) js.push_back(cells.own[k] / b.nc());
@@ -1106,8 +1098,7 @@ std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view b
     std::vector<cd> proj(nc, 0.0);  // dem @ tpl
     for (size_t k = 0; k < nc; ++k)
         for (int n = 0; n < M; ++n) proj[k] += dem[k][static_cast<size_t>(n)] * b.preamble_template[static_cast<size_t>(PREAMBLE_CP + n)];
-    double lv = 0.0;
-    std::vector<Mat<cd>> Cs;
+    std::vector<std::pair<int, std::vector<cd>>> out;
     for (int j : js) {
         std::vector<cd> t(static_cast<size_t>(M), 0.0);
         for (size_t k = 0; k < nc; ++k)
@@ -1121,27 +1112,64 @@ std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view b
         }
         const double nrm = std::sqrt(re + im);
         for (auto& v : t) v /= nrm;
+        out.emplace_back(j, std::move(t));
+    }
+    return out;
+}
+
+// modem._comb_freqs: the grid's bins at SUBBINS offsets inside each
+std::vector<double> comb_freqs() {
+    constexpr int SUBBINS = 5;  // modem.SC_COPY_SUBBINS
+    std::vector<double> f2;
+    for (double f : waveform::cfo_grid())
+        for (int o = 0; o < SUBBINS; ++o) f2.push_back(f + (o - (SUBBINS - 1) / 2.0) * waveform::STEP_HZ / SUBBINS);
+    return f2;
+}
+
+// modem._comb_coherent: the combs' outputs (Cs, symbols js) added within the frame at each of f2's CFOs
+Mat<cd> comb_coherent(const std::vector<Mat<cd>>& Cs, const std::vector<int>& js, const std::vector<double>& f2) {
+    const size_t k = f2.size() / Cs[0].rows;
+    size_t n = SIZE_MAX;
+    for (size_t i = 0; i < js.size(); ++i) n = std::min(n, Cs[i].cols - std::min(Cs[i].cols, static_cast<size_t>(js[i] * NSYM)));
+    Mat<cd> C(f2.size(), n);
+    for (size_t i = 0; i < f2.size(); ++i)
+        for (size_t c = 0; c < js.size(); ++c) {
+            const cd rot = std::exp(cd(0.0, -2 * PI * f2[i] * js[c] * NSYM / FS));
+            const cd* src = Cs[c][i / k] + js[c] * NSYM;
+            cd* dst = C[i];
+            for (size_t t = 0; t < n; ++t) dst[t] += src[t] * rot;
+        }
+    return C;
+}
+
+// modem.find_copy(comb=True): one matched filter per symbol holding pilots (the template's carriers whose pilot is
+// there), their outputs added coherently within the frame (SC_COPY_COHERENT, at SC_COPY_SUBBINS offsets per CFO bin)
+// or their pair products summed. A stream's: CombStream and find_copy_comb_stream.
+std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view band, const Accept* accept, double* peak) {
+    if (!copies(band)) {  // no copy to find: copy_llr reads a copy band's frame
+        if (peak) *peak = 0.0;
+        return std::nullopt;
+    }
+    const auto z0 = waveform::to_baseband(x);
+    const auto freqs = waveform::cfo_grid();
+    const auto filters = comb_filters(band);
+    std::vector<int> js;
+    std::vector<Mat<cd>> Cs;
+    for (const auto& [j, t] : filters) {
+        js.push_back(j);
         Cs.push_back(waveform::repeat_corrs(z0, t, freqs));
-        const double l = waveform::noise_level(Cs.back());
-        lv += l * l;
     }
     if (sc_flags().copy_coherent) {
-        size_t n = SIZE_MAX;
-        for (size_t i = 0; i < js.size(); ++i) n = std::min(n, Cs[i].cols - static_cast<size_t>(js[i] * NSYM));
-        std::vector<double> f2;
-        for (double f : freqs)
-            for (int o = 0; o < SUBBINS; ++o) f2.push_back(f + (o - (SUBBINS - 1) / 2.0) * waveform::STEP_HZ / SUBBINS);
-        Mat<cd> C(f2.size(), n);
-        for (size_t i = 0; i < f2.size(); ++i)
-            for (size_t c = 0; c < js.size(); ++c) {
-                const cd rot = std::exp(cd(0.0, -2 * PI * f2[i] * js[c] * NSYM / FS));
-                const cd* src = Cs[c][i / SUBBINS] + js[c] * NSYM;
-                cd* dst = C[i];
-                for (size_t t = 0; t < n; ++t) dst[t] += src[t] * rot;
-            }
+        const auto f2 = comb_freqs();
+        const Mat<cd> C = comb_coherent(Cs, js, f2);
         const double level = waveform::noise_level(C);
         const Mat<cd> D = waveform::pair_products(C.row_ptrs(), C.cols, FRAME_SAMPLES, COPY_PAIRS);
         return find_copy_from(x, z0, band, accept, D.row_ptrs(), D.cols, level, peak, nullptr, f2, true);
+    }
+    double lv = 0.0;
+    for (const auto& C : Cs) {
+        const double l = waveform::noise_level(C);
+        lv += l * l;
     }
     std::vector<Mat<cd>> Ds;
     size_t n = SIZE_MAX;
@@ -1157,6 +1185,149 @@ std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view b
 }
 
 }  // namespace
+
+CombStream::CombStream(std::string_view band) : band_(band), freqs_(comb_freqs()) {
+    for (auto& [j, t] : comb_filters(band)) {
+        js_.push_back(j);
+        filters_.push_back(std::move(t));
+    }
+    lag = static_cast<std::int64_t>(*std::max_element(js_.begin(), js_.end())) * NSYM;
+    reset();
+}
+
+void CombStream::reset() {
+    tail_.clear();
+    C_.assign(freqs_.size(), {});
+    D_.assign(freqs_.size(), {});
+    c_off_ = d_off_ = 0;
+    c0 = d0 = fed = 0;
+    levels_.clear();
+}
+
+void CombStream::restart_at(std::int64_t pos) {
+    reset();
+    fed = pos;
+}
+
+void CombStream::skip_to(std::int64_t pos) {  // as StreamDetector::skip_to: the level history kept
+    tail_.clear();
+    for (auto& r : C_) r.clear();
+    for (auto& r : D_) r.clear();
+    c_off_ = d_off_ = 0;
+    c0 = d0 = fed = pos;
+}
+
+void CombStream::feed(std::span<const cd> z_new) {
+    const auto added = static_cast<std::int64_t>(z_new.size());
+    fed += added;
+    std::vector<cd> z(std::move(tail_));
+    z.insert(z.end(), z_new.begin(), z_new.end());
+    const auto len = static_cast<std::int64_t>(z.size());
+    const std::int64_t n = len - M + 1 - lag;
+    if (n < 1) {
+        tail_ = std::move(z);
+        return;
+    }
+    const std::int64_t zs = fed - len;
+    std::vector<Mat<cd>> Cs;
+    const auto grid = waveform::cfo_grid();
+    for (const auto& t : filters_) Cs.push_back(waveform::repeat_corrs(z, t, grid));
+    const Mat<cd> C = comb_coherent(Cs, js_, freqs_);
+    if (C_[0].size() == c_off_) {
+        for (auto& r : C_) r.clear();
+        c_off_ = 0;
+        c0 = zs;
+    }
+    const auto from = static_cast<std::size_t>(std::max<std::int64_t>(0, n - std::max<std::int64_t>(added, 2000)));
+    std::vector<double> q(C.rows);
+    for (std::size_t i = 0; i < C.rows; ++i) {
+        C_[i].insert(C_[i].end(), C[i], C[i] + C.cols);
+        std::vector<double> p(C.cols - from);  // np.partition's k-th of |C|^2, as StreamDetector's levels
+        for (std::size_t t = from; t < C.cols; ++t) p[t - from] = std::norm(C[i][t]);
+        const auto k = static_cast<std::size_t>(waveform::NOISE_QUANTILE * static_cast<double>(p.size() - 1));
+        std::nth_element(p.begin(), p.begin() + static_cast<std::ptrdiff_t>(k), p.end());
+        q[i] = p[k] / -std::log(1 - waveform::NOISE_QUANTILE);
+    }
+    levels_.push_back(std::move(q));
+    if (levels_.size() > static_cast<std::size_t>(CHUNKS)) levels_.erase(levels_.begin());
+    tail_.assign(z.begin() + n, z.end());
+}
+
+std::optional<double> CombStream::level() const {
+    if (levels_.empty()) return std::nullopt;
+    std::vector<double> v(levels_.size());
+    double lo = INFINITY;
+    for (std::size_t b = 0; b < levels_[0].size(); ++b) {
+        for (std::size_t k = 0; k < levels_.size(); ++k) v[k] = levels_[k][b];
+        std::sort(v.begin(), v.end());
+        const std::size_t h = v.size() / 2;
+        lo = std::min(lo, v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2);
+    }
+    return lo;
+}
+
+void CombStream::trim(std::int64_t start) {
+    const std::size_t nc = C_[0].size() - c_off_;
+    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>(start - c0, 0, static_cast<std::int64_t>(nc)));
+    c_off_ += k;
+    c0 += static_cast<std::int64_t>(k);
+    const std::size_t nd = D_[0].size() - d_off_;
+    const auto kd = static_cast<std::size_t>(std::clamp<std::int64_t>(start - KEEP_BEHIND - d0, 0, static_cast<std::int64_t>(nd)));
+    d_off_ += kd;
+    d0 += static_cast<std::int64_t>(kd);
+    auto compact = [](std::vector<std::vector<cd>>& rows, std::size_t& off) {
+        if (off <= rows[0].size() / 2) return;
+        for (auto& r : rows) r.erase(r.begin(), r.begin() + static_cast<std::ptrdiff_t>(off));
+        off = 0;
+    };
+    compact(C_, c_off_);
+    compact(D_, d_off_);
+}
+
+void CombStream::extend() {
+    if (d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) < c0) {  // not extended across a trim: start at C's
+        for (auto& r : D_) r.clear();
+        d_off_ = 0;
+        d0 = c0;
+    }
+    const auto have = static_cast<std::size_t>(d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) - c0);
+    const std::size_t nc = C_[0].size() - c_off_;
+    constexpr std::size_t PF = static_cast<std::size_t>(COPY_PAIRS) * FRAME_SAMPLES;
+    if (nc > have + PF) {
+        std::vector<const cd*> rows;
+        for (const auto& r : C_) rows.push_back(r.data() + c_off_ + have);
+        const Mat<cd> D = waveform::pair_products(rows, nc - have, FRAME_SAMPLES, COPY_PAIRS);
+        for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), D[i], D[i] + D.cols);
+    }
+}
+
+CombStream::Products CombStream::products_from(std::int64_t start) {
+    extend();
+    Products o{std::max(c0, start), {}, 0};
+    const std::size_t nd = D_[0].size() - d_off_;
+    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>(o.start - d0, 0, static_cast<std::int64_t>(nd)));
+    o.cols = nd - k;
+    for (const auto& r : D_) o.rows.push_back(r.data() + d_off_ + k);
+    return o;
+}
+
+CombStream::Products CombStream::kept_products() {
+    extend();
+    Products o{d0, {}, D_[0].size() - d_off_};
+    for (const auto& r : D_) o.rows.push_back(r.data() + d_off_);
+    return o;
+}
+
+std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
+                                          std::span<const cd* const> D_rows, std::size_t dcols, double level,
+                                          double* peak, const Mat<cd>* fold) {
+    if (!copies(band)) {
+        if (peak) *peak = 0.0;
+        return std::nullopt;
+    }
+    const auto z0 = waveform::to_baseband(x);
+    return find_copy_from(x, z0, band, accept, D_rows, dcols, level, peak, fold, comb_freqs(), true);
+}
 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               const Mat<cd>* C_in, std::optional<double> level, double* peak) {
@@ -1212,9 +1383,12 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
         }
     }
     const Mat<cd>& fold = fold_in && !comb ? *fold_in : own;
-    std::vector<double> mag(FR, -equalizer::INF);
+    // |fold| per phase, the max over bins: the max of |.|^2 then one sqrt a phase (a hypot per bin and phase was 6%
+    // of mix's listening; the same order, to an ulp)
+    std::vector<double> mag(FR, 0.0);
     for (size_t f = 0; f < F; ++f)
-        for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::abs(fold[f][ph]));
+        for (size_t ph = 0; ph < FR; ++ph) mag[ph] = std::max(mag[ph], std::norm(fold[f][ph]));
+    for (auto& v : mag) v = std::sqrt(v);
     const double pk = *std::max_element(mag.begin(), mag.end()) / (level * std::sqrt(static_cast<double>(m * COPY_PAIRS)));
     if (peak) *peak = pk;
     if (pk < COPY_DETECT) return std::nullopt;

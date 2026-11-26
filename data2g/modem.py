@@ -1159,32 +1159,20 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     b = ofdm.band(band)
     z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     freqs = _sync.cfo_grid()
-    if comb:
+    if comb and D is not None:  # a stream's (CombStream): the coherent combs' products and their level
+        freqs = _comb_freqs()
+    if comb and D is None:
         # scattered pilots: one matched filter per comb (the pilot's carriers k = j mod 3, in symbol 2 j of a
-        # frame), each one's frame-apart products, lined up on the frame's start. ponytail: a stream's own C, D
-        # and fold (the whole pilot symbol's) are not used, so a live receiver pays three filters a search
-        tpl = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
-        dem = np.exp(-2j * np.pi * np.outer(b.bb, np.arange(M)) / FS)
-        Ds, lv, Cs = [], 0.0, []
-        at = sc_cells(b.nc)[3] // b.nc
-        for j in np.unique(at):
-            t = (dem.conj().T * (at == j)) @ (dem @ tpl) / M  # the template's carriers whose pilot is in symbol j
-            Cj = _sync.repeat_corrs(z0, t / np.linalg.norm(t), list(freqs))
-            lv += _sync.noise_level(Cj) ** 2
-            Ds.append(_sync.pair_products(Cj, FRAME_SAMPLES, COPY_PAIRS)[:, j * NSYM:])
-            Cs.append((j, Cj))
-        n = min(d.shape[1] for d in Ds)
-        D, level, fold, C = sum(d[:, :n] for d in Ds), float(np.sqrt(lv)), None, None
+        # frame), lined up on the frame's start (a stream's: CombStream)
+        Cs = [(j, _sync.repeat_corrs(z0, t, list(freqs))) for j, t in _comb_filters(band)]
         if SC_COPY_COHERENT:
-            # the combs' outputs added within the frame, each turned back by its symbol's offset at the bin's CFO
-            # and at SC_COPY_SUBBINS offsets inside the bin (STEP_HZ: 12.5 Hz turns 0.6 cycles over 96 ms): the
-            # frame's whole pilot energy in one product, where the sum of the combs' products had a third of it
-            n = min(c.shape[1] - j * NSYM for j, c in Cs)
-            offs = (np.arange(SC_COPY_SUBBINS) - (SC_COPY_SUBBINS - 1) / 2) * _sync.STEP_HZ / SC_COPY_SUBBINS
-            freqs = np.array([f + o for f in freqs for o in offs])
-            C = np.array([sum(c[i // len(offs), j * NSYM:j * NSYM + n] * np.exp(-2j * np.pi * f * j * NSYM / FS)
-                              for j, c in Cs) for i, f in enumerate(freqs)])
-            level, D = _sync.noise_level(C), None
+            freqs = _comb_freqs()
+            C = _comb_coherent(Cs, freqs)
+            level = _sync.noise_level(C)
+        else:  # each comb's frame-apart products, added
+            Ds = [_sync.pair_products(Cj, FRAME_SAMPLES, COPY_PAIRS)[:, j * NSYM:] for j, Cj in Cs]
+            n = min(d.shape[1] for d in Ds)
+            D, level = sum(d[:, :n] for d in Ds), float(np.sqrt(sum(_sync.noise_level(Cj) ** 2 for _, Cj in Cs)))
     if C is None and D is None:
         C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
         level = _sync.noise_level(C)
@@ -1243,6 +1231,113 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE and pat >= COPY_PATTERN:
             return lock
     return None
+
+
+def _comb_filters(band: str) -> list:
+    """find_copy's comb matched filters, [(j, unit template)]: per symbol j holding scattered pilots, the
+    preamble template's carriers whose pilot is in symbol j."""
+    b = ofdm.band(band)
+    tpl = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
+    dem = np.exp(-2j * np.pi * np.outer(b.bb, np.arange(M)) / FS)
+    at = sc_cells(b.nc)[3] // b.nc
+    out = []
+    for j in np.unique(at):
+        t = (dem.conj().T * (at == j)) @ (dem @ tpl) / M
+        out.append((int(j), t / np.linalg.norm(t)))
+    return out
+
+
+def _comb_freqs() -> np.ndarray:
+    """The coherent comb search's CFOs: the grid's bins at SC_COPY_SUBBINS offsets inside each (STEP_HZ: 12.5 Hz
+    turns 0.6 cycles over 96 ms)."""
+    offs = (np.arange(SC_COPY_SUBBINS) - (SC_COPY_SUBBINS - 1) / 2) * _sync.STEP_HZ / SC_COPY_SUBBINS
+    return np.array([f + o for f in _sync.cfo_grid() for o in offs])
+
+
+def _comb_coherent(Cs: list, freqs: np.ndarray) -> np.ndarray:
+    """The combs' outputs [(j, C_j)] added within the frame, each turned back by its symbol's offset at each of
+    `freqs` (_comb_freqs): the frame's whole pilot energy in one output, for every start all combs cover."""
+    k = len(freqs) // len(Cs[0][1])
+    n = min(c.shape[1] - j * NSYM for j, c in Cs)
+    return np.array([sum(c[i // k, j * NSYM:j * NSYM + n] * np.exp(-2j * np.pi * f * j * NSYM / FS) for j, c in Cs)
+                     for i, f in enumerate(freqs)])
+
+
+class CombStream:
+    """find_copy's coherent comb outputs (_comb_coherent) for a stream, as sync.StreamDetector keeps the whole
+    pilot's: each start's computed once as audio is fed, not once per search hop over the buffer (mix's
+    listening: the comb search was ~90% of a listening receiver's CPU, each start filtered ~8 times). The noise
+    level likewise from each fed chunk's new outputs, per bin, the median of the last CHUNKS chunks' (the
+    StreamDetector's rule; find_copy's offline level is the whole window's quantile). The pair products are
+    extended as asked for and kept KEEP_BEHIND past a trim (a running FoldTrack subtracts what leaves)."""
+
+    CHUNKS = 8
+    KEEP_BEHIND = 4000
+
+    def __init__(self, band: str):
+        self.band = band
+        self.filters = _comb_filters(band)
+        self.freqs = _comb_freqs()
+        self.lag = max(j for j, _ in self.filters) * NSYM  # a start's output needs this and M samples after it
+        self.reset()
+
+    def reset(self):
+        self.tail = np.zeros(0, dtype=np.complex128)
+        self.fed = 0
+        self.levels: list = []
+        self.C = np.zeros((len(self.freqs), 0), dtype=np.complex128)
+        self.c0 = 0
+        self.D = np.zeros((len(self.freqs), 0), dtype=np.complex128)
+        self.d0 = 0
+
+    def restart_at(self, pos: int):
+        self.reset()
+        self.fed = pos
+
+    def feed(self, z: np.ndarray):
+        """The next baseband samples of the stream (contiguous; dsp.to_baseband with their stream index)."""
+        new = len(z)
+        self.fed += new
+        z = np.concatenate([self.tail, z])
+        n = len(z) - M + 1 - self.lag
+        if n < 1:
+            self.tail = z
+            return
+        zs = self.fed - len(z)  # stream index of z[0], so of this chunk's first output
+        C = _comb_coherent([(j, _sync.repeat_corrs(z, t, list(_sync.cfo_grid()))) for j, t in self.filters], self.freqs)
+        if not self.C.shape[1]:
+            self.c0 = zs
+        self.C = np.concatenate([self.C, C], axis=1)
+        p = np.abs(C[:, max(0, n - max(new, 2000)):]) ** 2
+        k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
+        self.levels = (self.levels + [np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE)])[-self.CHUNKS:]
+        self.tail = z[n:]
+
+    def level(self) -> float | None:
+        return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
+
+    def trim(self, start: int):
+        k = min(max(0, start - self.c0), self.C.shape[1])
+        self.C, self.c0 = self.C[:, k:], self.c0 + k
+        k = min(max(0, start - self.KEEP_BEHIND - self.d0), self.D.shape[1])
+        self.D, self.d0 = self.D[:, k:], self.d0 + k
+
+    def _extend(self):
+        if self.d0 + self.D.shape[1] < self.c0:
+            self.D, self.d0 = self.D[:, :0], self.c0
+        have, want = self.d0 + self.D.shape[1] - self.c0, max(0, self.C.shape[1] - COPY_PAIRS * FRAME_SAMPLES)
+        if want > have:
+            self.D = np.concatenate([self.D, _sync.pair_products(self.C[:, have:], FRAME_SAMPLES, COPY_PAIRS)], axis=1)
+
+    def products_from(self, start: int) -> tuple[int, np.ndarray]:
+        """(a, the pair products for stream starts from a = max(start, c0) on)."""
+        self._extend()
+        a = max(self.c0, start)
+        return a, self.D[:, a - self.d0:]
+
+    def kept_products(self) -> tuple[int, np.ndarray]:
+        self._extend()
+        return self.d0, self.D
 
 
 def _copy_rows(z0: np.ndarray, lock: Lock) -> tuple:
@@ -1857,7 +1952,8 @@ def _sc_cal(spec) -> tuple:
     distortion is the closing pass's alone. ponytail: measured at first use
     (two bursts a submode and process); a table like clip_constants.json if
     this becomes wire."""
-    key = (spec.name, SC_BOOST, SC_RESTORE_ACE, _restore_plain(spec))
+    # (the layout too: a test that patches it measures its own)
+    key = (spec.name, SC_BOOST, SC_RESTORE_ACE, _restore_plain(spec), SC_LAYOUT, tuple(SC_BANDS), tuple(sorted(SC_STRIDE.items())))
     if key not in _SC_CAL:
         _SC_CAL[key] = (1.0, spec.clip.ratio)  # while measuring
         b = ofdm.band(spec.band)

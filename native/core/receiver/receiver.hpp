@@ -184,6 +184,9 @@ private:
         std::string_view band;
         waveform::StreamDetector d;
         modem::FoldTrack copy_fold;  // find_copy's, kept running
+        // a scattered-pilot copy band's: find_copy's coherent comb outputs kept for the stream, and their fold
+        std::optional<modem::CombStream> comb;
+        modem::FoldTrack comb_fold;
     };
     struct Stats {  // per band, the statistic for buf[w0:]'s starts
         std::vector<Mat<double>> mats;
