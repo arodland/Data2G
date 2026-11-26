@@ -132,6 +132,7 @@ struct Run {
     double acq = 0, refine = 0;  // CPM: the lock search on the head (live, during the burst), refine (in receive)
     double plock = 0, primed = 0;  // --primed: prime_lock on the window, PRIME_TRIES decode_known
     bool genie = false, plocked = false, pok = false;
+    bool lost = false;  // no burst received (its header not read, or read as another length): 0 decoded
     int ok = 0, refines = 0;
     double total() const { return receive + soft + prepare + decode + mer; }
 };
@@ -180,14 +181,20 @@ Run run(const Burst& b, std::optional<double> dd_budget) {
     } else {
         const std::string_view bands[1] = {b.band};
         double t = now();
-        auto r = modem::receive(b.audio, bands, nullptr, b.head);
+        try {  // as receiver::Receiver: a burst whose header can't be read is lost, not the run
+            auto r = modem::receive(b.audio, bands, nullptr, b.head);
+            n_cw = r.n_cw;
+            h.ofdm = std::make_shared<const modem::Received>(std::move(r));
+        } catch (const modem::SyncError&) {
+            out.receive = now() - t;
+            out.lost = true;
+            return out;
+        }
         out.receive = now() - t;
-        n_cw = r.n_cw;
-        h.ofdm = std::make_shared<const modem::Received>(std::move(r));
     }
-    if (n_cw != static_cast<int>(b.payloads.size())) {
-        std::fprintf(stderr, "%s: heard %d codewords, sent %zu\n", b.name.c_str(), n_cw, b.payloads.size());
-        std::exit(1);
+    if (n_cw != static_cast<int>(b.payloads.size())) {  // a wrong header: the burst sent is lost
+        out.lost = true;
+        return out;
     }
     double t;
     t = now();
@@ -629,10 +636,11 @@ int main(int argc, char** argv) {
             const Run r = run(b, dd_budget);
             if (k == 0 || r.total() < best.total()) best = r;
         }
-        std::printf("%-44s %2d/%-2zu %7.1f %7.1f %8.1f %6.1f %8.1f %8.1f %6.2f %8.1f %4d %7.1f %7.1f%s%s%s\n",
+        std::printf("%-44s %2d/%-2zu %7.1f %7.1f %8.1f %6.1f %8.1f %8.1f %6.2f %8.1f %4d %7.1f %7.1f%s%s%s%s\n",
                     b.name.c_str(), best.ok, b.payloads.size(), 1e3 * best.acq, 1e3 * best.refine,
                     1e3 * best.receive, 1e3 * best.soft, 1e3 * best.prepare, 1e3 * best.decode, 1e3 * best.mer,
                     1e3 * best.total(), best.refines, 1e3 * best.plock, 1e3 * best.primed,
-                    best.genie ? " genie" : "", best.plocked ? " plock" : "", best.pok ? " pok" : "");
+                    best.genie ? " genie" : "", best.plocked ? " plock" : "", best.pok ? " pok" : "",
+                    best.lost ? " lost" : "");
     }
 }
