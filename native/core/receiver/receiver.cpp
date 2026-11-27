@@ -402,8 +402,9 @@ std::optional<modem::Lock> Receiver::find_copy() {
                                                static_cast<std::size_t>(FR_d));
                 fold_shift = static_cast<std::size_t>((a / D) % FR_d);
             }
+            const auto row_level = c.row_levels();
             const auto lock = modem::find_copy_comb_stream(x, band, &accept_, p.rows, cols, *level, nullptr,
-                                                           fold_ptr, fold_shift, D);
+                                                           fold_ptr, fold_shift, D, row_level);
             if (lock && (!best || lock->score > best->score)) {
                 best = lock;
                 best_k = a - off_;

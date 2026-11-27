@@ -257,6 +257,7 @@ public:
     int decim() const { return decim_; }
     void trim(std::int64_t start);
     std::optional<double> level() const;
+    std::vector<double> row_levels() const;  // per CFO bin, level()'s before its min (find_copy's row_level)
     struct Products {
         std::int64_t start;
         std::vector<const cd*> rows;
@@ -285,7 +286,8 @@ private:
 std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
                                           std::span<const cd* const> D_rows, std::size_t dcols, double level,
                                           double* peak = nullptr, const Mat<cd>* fold = nullptr,
-                                          std::size_t fold_shift = 0, int decim = 1);
+                                          std::size_t fold_shift = 0, int decim = 1,
+                                          std::span<const double> row_level = {});
 // modem.FoldTrack: the pilot fold kept running over a window of a stream's pair products that slides forward, per
 // CFO bin and absolute frame phase; entering products added and leaving ones subtracted in stream order, a frame
 // phase's run at a time, summed afresh every RENEW folds or when the window moves any other way.

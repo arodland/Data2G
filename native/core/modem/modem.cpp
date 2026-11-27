@@ -1187,7 +1187,38 @@ namespace {
 std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
                                    const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
                                    double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb,
-                                   int cfo_lag = FRAME_SAMPLES, size_t fold_shift = 0, int decim = 1);
+                                   int cfo_lag = FRAME_SAMPLES, size_t fold_shift = 0, int decim = 1,
+                                   std::span<const double> row_w = {});
+
+// modem.SC_COPY_BIN_SPREAD (its reason there): past this spread of the CFO bins' noise levels find_copy weighs each
+// bin's fold by the quietest bin's level over its own.
+constexpr double SC_COPY_BIN_SPREAD = 1.25;
+
+// modem._copy_row_weights: an intra-frame comb layout's fold rows (n_combs x the CFO bins), each the quietest bin's
+// level over its own; empty when the levels are within SC_COPY_BIN_SPREAD of each other.
+std::vector<double> copy_row_weights(std::span<const double> row_level, int n_combs) {
+    if (row_level.empty()) return {};
+    const auto [lo_it, hi_it] = std::minmax_element(row_level.begin(), row_level.end());
+    const double lo = *lo_it;
+    if (!(lo > 0) || *hi_it <= SC_COPY_BIN_SPREAD * lo) return {};
+    std::vector<double> w;
+    w.reserve(row_level.size() * static_cast<size_t>(n_combs));
+    for (int c = 0; c < n_combs; ++c)
+        for (double v : row_level) w.push_back(lo / v);
+    return w;
+}
+
+// The per-bin noise level of each comb's outputs (sync.noise_level's before its min over bins), the least over combs.
+std::vector<double> comb_row_levels(const std::vector<Mat<cd>>& Cs) {
+    std::vector<double> out(Cs[0].rows, INFINITY);
+    for (const auto& C : Cs)
+        for (size_t i = 0; i < C.rows; ++i) {
+            std::vector<double> p(C.cols);
+            for (size_t j = 0; j < p.size(); ++j) p[j] = std::norm(C[i][j]);
+            out[i] = std::min(out[i], dsp::quantile(std::move(p), waveform::NOISE_QUANTILE));
+        }
+    return out;
+}
 
 // modem._comb_filters: per symbol j (or comb phase c for intra-frame comb layouts) holding scattered pilots,
 // the preamble template's carriers as a unit-norm template
@@ -1373,7 +1404,9 @@ std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view b
         const auto [P1, level] = intra_frame_prods(Cs, *intra, 0);
         const Mat<cd> D = sum_frames(P1.row_ptrs(), P1.cols, FRAME_SAMPLES, COPY_PAIRS);
         const int cfo_lag = (intra->syms[1] - intra->syms[0]) * NSYM;
-        return find_copy_from(x, z0, band, accept, D.row_ptrs(), D.cols, level, peak, nullptr, f2, true, cfo_lag);
+        const auto w = copy_row_weights(comb_row_levels(Cs), intra->n_combs);
+        return find_copy_from(x, z0, band, accept, D.row_ptrs(), D.cols, level, peak, nullptr, f2, true, cfo_lag, 0, 1,
+                              w);
     }
     if (sc_flags().copy_coherent) {
         const auto f2 = comb_freqs();
@@ -1551,17 +1584,22 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
     tail_.assign(z.begin() + lead + n, z.end());
 }
 
-std::optional<double> CombStream::level() const {
-    if (levels_.empty()) return std::nullopt;
-    std::vector<double> v(levels_.size());
-    double lo = INFINITY;
+std::vector<double> CombStream::row_levels() const {
+    if (levels_.empty()) return {};
+    std::vector<double> v(levels_.size()), out(levels_[0].size());
     for (std::size_t b = 0; b < levels_[0].size(); ++b) {
         for (std::size_t k = 0; k < levels_.size(); ++k) v[k] = levels_[k][b];
         std::sort(v.begin(), v.end());
         const std::size_t h = v.size() / 2;
-        lo = std::min(lo, v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2);
+        out[b] = v.size() % 2 ? v[h] : (v[h - 1] + v[h]) / 2;
     }
-    return lo;
+    return out;
+}
+
+std::optional<double> CombStream::level() const {
+    if (levels_.empty()) return std::nullopt;
+    const auto r = row_levels();
+    return *std::min_element(r.begin(), r.end());
 }
 
 void CombStream::trim(std::int64_t start) {
@@ -1635,7 +1673,8 @@ CombStream::Products CombStream::kept_products() {
 
 std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
                                           std::span<const cd* const> D_rows, std::size_t dcols, double level,
-                                          double* peak, const Mat<cd>* fold, std::size_t fold_shift, int decim) {
+                                          double* peak, const Mat<cd>* fold, std::size_t fold_shift, int decim,
+                                          std::span<const double> row_level) {
     if (!copies(band)) {
         if (peak) *peak = 0.0;
         return std::nullopt;
@@ -1643,7 +1682,9 @@ std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string
     if (const auto intra = sc_intra_spec(config::band(band).nc)) {
         const auto f2 = intra_freqs(intra->n_combs);
         const int cfo_lag = (intra->syms[1] - intra->syms[0]) * NSYM;
-        return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, f2, true, cfo_lag, fold_shift, decim);
+        const auto w = copy_row_weights(row_level, intra->n_combs);
+        return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, f2, true, cfo_lag, fold_shift, decim,
+                              w);
     }
     return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, comb_freqs(), true, FRAME_SAMPLES,
                           fold_shift, decim);
@@ -1688,7 +1729,7 @@ namespace {
 std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
                                    const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
                                    double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb,
-                                   int cfo_lag, size_t fold_shift, int decim) {
+                                   int cfo_lag, size_t fold_shift, int decim, std::span<const double> row_w) {
     const size_t F = D_rows.size();
     const size_t FR = static_cast<size_t>(FRAME_SAMPLES / decim);
     const int64_t m = static_cast<int64_t>(dcols) / static_cast<int64_t>(FR);
@@ -1715,9 +1756,10 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
             }
             const double mr = sr / static_cast<double>(FR), mi = si / static_cast<double>(FR);
             row_mean[f] = cd(mr, mi);
+            const double w2 = row_w.empty() ? 1.0 : row_w[f] * row_w[f];  // modem._copy_row_weights
             for (size_t q = 0; q < FR; ++q) {
                 const double dr = row[q].real() - mr, di = row[q].imag() - mi;
-                mag2[q] = std::max(mag2[q], dr * dr + di * di);
+                mag2[q] = std::max(mag2[q], w2 * (dr * dr + di * di));
             }
         } else {
             for (size_t q = 0; q < FR; ++q) {
@@ -1757,17 +1799,28 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
     std::vector<Lock> found;
     for (int ph : grids) {
         const size_t col = (fold_shift + static_cast<size_t>(ph / decim)) % FR;
-        size_t i = 0;
-        double best_n = std::norm(src[0][col] - row_mean[0]);
-        for (size_t f = 1; f < F; ++f) {
-            const double cur_n = std::norm(src[f][col] - row_mean[f]);
-            if (cur_n > best_n) {
-                best_n = cur_n;
-                i = f;
+        // the strongest bin, and weighed (row_w) the strongest after weighing first: modem.py's reason
+        const auto best_bin = [&](bool weigh) {
+            size_t i = 0;
+            double best_n = -1.0;
+            for (size_t f = 0; f < F; ++f) {
+                const double cur_n = (weigh ? row_w[f] * row_w[f] : 1.0) * std::norm(src[f][col] - row_mean[f]);
+                if (cur_n > best_n) {
+                    best_n = cur_n;
+                    i = f;
+                }
             }
+            return i;
+        };
+        std::vector<size_t> bins{best_bin(false)};
+        if (!row_w.empty()) {
+            const size_t j = best_bin(true);
+            if (j != bins[0]) bins.insert(bins.begin(), j);
         }
-        const cd val = src[i][col] - row_mean[i];
-        for (double f : cfo_aliases(val, freqs[i], cfo_lag)) {
+        std::vector<double> cands;
+        for (size_t i : bins)
+            for (double f : cfo_aliases(src[i][col] - row_mean[i], freqs[i], cfo_lag)) cands.push_back(f);
+        for (double f : cands) {
             const auto z = waveform::freq_correct(z0, f);
             for (int early : COPY_EARLIER) {
                 for (int64_t pc = pymod(ph - early - NCP, FRAME_SAMPLES); pc < len - FRAME_SAMPLES; pc += FRAME_SAMPLES) {

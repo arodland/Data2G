@@ -1263,7 +1263,7 @@ COPY_DETECT = 14.0
 
 def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndarray | None = None,
               level: float | None = None, D: np.ndarray | None = None, fold: np.ndarray | None = None,
-              comb: bool | None = None, decim: int = 1) -> Lock | None:
+              comb: bool | None = None, decim: int = 1, row_level: np.ndarray | None = None) -> Lock | None:
     """A burst in real audio `x` found from its frame pilots and header copy
     alone (the preamble and first header lost): a Lock with "copy" (what
     receive() needs to rebuild the header), or None. The burst
@@ -1272,6 +1272,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     stream has them; computed here otherwise. `D`: their pair_products
     (StreamDetector.products_from), instead of C. `fold`: step 1's fold of
     D's whole frames, if kept running (FoldTrack.fold, rolled to D's start).
+    `row_level`: an intra-frame comb layout's noise level per CFO bin
+    (CombStream.row_levels; computed here otherwise), for _copy_row_weights.
 
     1. The matched filter's outputs one frame apart, correlated as the
        preamble's are one repeat apart (the frame pilot is the preamble's
@@ -1308,6 +1310,7 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         if intra is not None:
             freqs = _intra_freqs(intra[2])
             P1, level = _intra_frame_prods(Cs, intra, 0)
+            row_level = np.min([np.quantile(np.abs(Cc) ** 2, _sync.NOISE_QUANTILE, axis=1) for _, Cc in Cs], axis=0)
             D = _sum_frames(P1, FRAME_SAMPLES, COPY_PAIRS)
         elif SC_COPY_COHERENT:
             freqs = _comb_freqs()
@@ -1334,7 +1337,10 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         # mean over the phases, or it holds every grid's place and the burst's phase is never read (PR #308
         # review, item 8: mpp with tones at 800 and 2200 Hz, qpsk-r1/2's headers 8/17/20 of 24 at -2/0/+2 dB)
         fold = fold - fold.mean(axis=1, keepdims=True)
-    mag = np.abs(fold).max(axis=0)
+        w = _copy_row_weights(row_level, intra[2]) if intra is not None and row_level is not None else None
+    else:
+        w = None
+    mag = np.abs(fold if w is None else fold * w[:, None]).max(axis=0)
     # on noise each product's magnitude is about the level, and the m x
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
     # search's CPU) only past COPY_DETECT. Left on the function for tests
@@ -1355,7 +1361,11 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     for ph in grids:
         col = ph // decim
         i = int(np.argmax(np.abs(fold[:, col])))
-        for f in _cfo_aliases(fold[i, col], float(freqs[i]), cfo_lag):
+        # weighed, the bin the tone spares can outscore the burst's own (every 4th: a neighbour's 0.6-0.9 of its
+        # pilots' product over less noise), and the copy is read off the wrong CFO: both bins' (825 Hz: 89 of 144
+        # found by the weighed bin alone, 93 by both, 94 unweighed)
+        bins = [i] if w is None else list(dict.fromkeys([int(np.argmax(np.abs(fold[:, col]) * w)), i]))
+        for f in [f for i in bins for f in _cfo_aliases(fold[i, col], float(freqs[i]), cfo_lag)]:
             z = dsp.freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
@@ -1378,6 +1388,26 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE and pat >= COPY_PATTERN:
             return lock
     return None
+
+
+# A steady tone raises the comb filters' noise in most CFO bins (every 4th is spared), 1.5-26x the quietest on w and
+# w48 with +25 dB tones at 800+2200, 825 or 1500 Hz; on noise alone the bins are within 1.06x of each other (mpp
+# -2 dB, seeds 1-2). Past this spread find_copy weighs each bin's fold by the quietest bin's level over its own.
+SC_COPY_BIN_SPREAD = 1.25
+
+
+def _copy_row_weights(row_level: np.ndarray, n_combs: int) -> np.ndarray | None:
+    """An intra-frame comb layout's fold rows (n_combs x the CFO bins), each weighed by the quietest bin's noise
+    level over its own, or None when the bins' levels are within SC_COPY_BIN_SPREAD of each other. Without it a
+    tone's cross terms with the noise (the products' tone-only part is the phase mean find_copy takes out) win the
+    max over bins at random phases and take the COPY_GRIDS places (fk3d2, w qpsk-r1/2 and 16qam-r1/3 with the
+    preamble and first header erased, mpp -4..0 dB, tones at 800 and 2200 Hz: 97 -> 109 of 144 found, at 825 Hz
+    94 -> 93; without tones 109, unchanged; mix 111 and 117)."""
+    lv = np.asarray(row_level, dtype=np.float64)
+    lo = float(lv.min())
+    if not lo > 0 or float(lv.max()) <= SC_COPY_BIN_SPREAD * lo:
+        return None
+    return np.tile(lo / lv, n_combs)
 
 
 def _comb_filters(band: str) -> list:
@@ -1537,6 +1567,10 @@ class CombStream:
 
     def level(self) -> float | None:
         return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
+
+    def row_levels(self) -> np.ndarray | None:
+        """Per CFO bin, the noise level (level()'s before its min over bins); find_copy's row_level."""
+        return np.median(np.array(self.levels), axis=0) if self.levels else None
 
     def trim(self, start: int):
         D = self.decim

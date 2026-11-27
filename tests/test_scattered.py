@@ -155,6 +155,36 @@ def test_find_copy_reads_past_a_steady_tone(monkeypatch, layout):
     assert lock is not None and lock["spec"] == spec and lock["n_cw"] == 3
 
 
+def test_copy_row_weights_only_where_a_tone_spreads_the_bins():
+    """Bins within SC_COPY_BIN_SPREAD of each other (noise alone): no weights, the search as before. Past it each
+    row (n_combs x the bins) is the quietest bin's level over its own."""
+    assert modem._copy_row_weights(np.array([1.0, 1.1, 1.05]), 3) is None
+    w = modem._copy_row_weights(np.array([1.0, 4.0, 2.0]), 3)
+    assert np.allclose(w, np.tile([1.0, 0.25, 0.5], 3))
+
+
+def test_find_copy_weighs_the_bins_a_tone_leaves_noisy(monkeypatch):
+    """fk3d2's comb products next to in-band tones (800 and 2200 Hz, +25 dB over the floor in 50 Hz) on mpp at
+    -4 dB: the tone's cross terms with the noise, largest in the bins it leaks into, took the search's grid
+    places, and this burst's copy (its preamble and first header lost) was not found; weighed by each bin's noise
+    level (_copy_row_weights), it is."""
+    from data2g.config import BANDS, FS, LEADIN_SAMPLES
+
+    _layout(monkeypatch, "fk3d2")
+    spec = SUBMODES["qpsk-r1/2"]
+    rng = np.random.default_rng(9)
+    pl = [rng.bytes(codes.payload_bytes(spec)) for _ in range(3)]
+    x = np.concatenate([np.zeros(8000), modem.modulate(pl, spec), np.zeros(8000)])
+    start = 8000 + LEADIN_SAMPLES
+    x[start:start + BANDS["w"].preamble_samples + modem.header_samples("w")] = 0  # the head lost
+    y = hfchannel.apply_channel(x, snr_db=-4, fading_preset="mpp", seed=9)
+    sigma = np.std(y[:4000])
+    t = np.arange(len(y)) / FS
+    y = y + np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * (np.cos(2 * np.pi * 800 * t) + np.cos(2 * np.pi * 2200 * t + 1))
+    lock = modem.find_copy(y[start - 400:start - 400 + 16704], "w")
+    assert lock is not None and lock["spec"] == spec and lock["n_cw"] == 3
+
+
 def test_a_slow_channel_is_estimated_separably_and_alike(monkeypatch):
     """Spreads up to SC_SEP_HZ get the separable estimate (per carrier in time, then across carriers): on a 1 Hz
     channel it reads the joint estimate's channel and decodes the same; the spread search calls the channel slow."""

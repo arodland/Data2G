@@ -726,7 +726,8 @@ class Receiver:
                     d0, kept = c.kept_products()
                     R = self.comb_folds[band].fold(kept, d0 // D_dec, a // D_dec, a // D_dec + m * FR_d, period=FR_d)
                     fold = np.roll(R, -((a // D_dec) % FR_d), axis=1)
-                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True, decim=D_dec)
+                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True, decim=D_dec,
+                                       row_level=c.row_levels())
                 if lock is not None and (best is None or lock["score"] > best[0]["score"]):
                     best = (lock, a - self.off)
                 continue
