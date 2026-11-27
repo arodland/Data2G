@@ -1074,10 +1074,10 @@ ack-1f x2 (0.76 s) where the core alone is x1 (1.05 s, 0.43 s).
     (default 5, session.CONNECT_TRIES - 1). `RETRIES n` sets them, digits
     only, 0-20: OK, else WRONG. They apply to this command client's later
     CONNECTs, not one under way, and go back to the default when it leaves.
-    The first four retries go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart,
-    and any after them in ROBUST_FAST (fsk8r50-r1/3), for fast fading:
-    nothing is measured before a session. With fewer retries the last goes in
-    ROBUST_FAST, unless it is the only one (RETRIES 1: ROBUST_CONNECT).
+    The first three retries go in ROBUST_CONNECT (fsk16r25-r1/2), ~13 s apart,
+    and any after them in ROBUST_WIDE (fsk8w50-r1/2), for fast fading / extreme
+    Doppler: nothing is measured before a session. With fewer retries the last
+    goes in ROBUST_WIDE, unless it is the only one (RETRIES 1: ROBUST_CONNECT).
   - **DATA2G ON / OFF** marks a client that knows Data2G. Off again when the
     command client leaves. With it on:
     - BUFFER is the plain VARA count (no next-burst credit).

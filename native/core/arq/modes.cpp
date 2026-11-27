@@ -44,7 +44,9 @@ std::span<const Mode> modes() {
         for (const auto& s : config::SUBMODES)
             if (FM || std::any_of(codes.begin(), codes.end(), [&](const auto& b) { return b.first == s.sync_band; }))
                 v.push_back({s.name, s.band, &s, nullptr});
-        for (const auto& s : tables::CPM_SPECS) v.push_back({s.name, s.grid, nullptr, &s});
+        if (cpm::specs().size() > static_cast<std::size_t>(N10_HIGH))
+            throw std::length_error("cpm::specs(): more than N10_HIGH on air");
+        for (const auto* s : cpm::specs()) v.push_back({s->name, s->grid, nullptr, s});
         return v;
     }();
     return all;
@@ -124,7 +126,7 @@ std::vector<const Mode*> allowed(int cap) {
     return out;
 }
 
-// CPM_SPECS fits under N10_HIGH: modes.py asserts it, and the tables are generated from it
+// cpm::specs() fits under N10_HIGH: modes.py asserts it
 
 int encode(std::string_view submode) {
     const Mode& m = mode_at(submode);
@@ -133,7 +135,10 @@ int encode(std::string_view submode) {
         if (!selectable(m)) throw std::out_of_range(std::string(submode) + ": no recommendation code on FM");
         code = band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
     } else if (m.is_cpm()) {
-        code = CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
+        const auto& on = cpm::specs();
+        const auto it = std::find(on.begin(), on.end(), m.cpm);
+        if (it == on.end()) throw std::out_of_range(std::string(submode) + ": not on air, no recommendation code");
+        code = CPM_CODE << 4 | static_cast<int>(it - on.begin());
     } else if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
         if (m.ofdm->index >= 16 + 15 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
         code = CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
@@ -153,7 +158,7 @@ const Mode* decode(int rec) {
                 if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
             return nullptr;
         }
-        return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
+        return i < cpm::specs().size() ? mode(cpm::specs()[i]->name) : nullptr;
     }
     for (const auto& [band, code] : bands_code())
         if (code == rec >> 4) {

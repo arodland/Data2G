@@ -14,11 +14,15 @@ def substitutions(native):
                                        "read_header", "soft", "find", "late_lock", "find_mid", "measure", "refine",
                                        "prime_lock", "CoarseTrack")}
 
+    def frozen_grid(name):  # an on-air grid or a wide toolbox one (compiled in either way), or None
+        return cpm.GRIDS.get(name, cpm.WIDE_GRIDS.get(name))
+
     def own_grid(g):
-        return cpm.GRIDS.get(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+        return frozen_grid(g.name) == g and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
 
     def own_spec(s):
-        return cpm.SPECS.get(s.name, cpm.CTL.get(s.grid)) == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
+        frozen = cpm.SPECS.get(s.name, cpm.WIDE_SPECS.get(s.name, cpm.CTL.get(s.grid, cpm.WIDE_CTL.get(s.grid))))
+        return frozen == s and modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION
 
     def header_symbols(grid, word):
         # the native one recomputes the CRC-6 from word >> 6, with its own seed
@@ -39,8 +43,11 @@ def substitutions(native):
             return py["modulate"](spec, coded, dup, cap)
         return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
 
-    def CoarseTrack(g, reach_hz=150.0):  # a compiled-in grid's: native, for native detect to read
-        return n.CoarseTrack(g.name, reach_hz) if own_grid(g) else py["CoarseTrack"](g, reach_hz)
+    def CoarseTrack(g, reach_hz=150.0, source=None):  # a compiled-in grid's: native, for native detect to read
+        # (a wide grid's sums of another track's rows, `source`: native from a native track)
+        if own_grid(g) and (source is None or isinstance(source, n.CoarseTrack)):
+            return n.CoarseTrack(g.name, reach_hz, source)
+        return py["CoarseTrack"](g, reach_hz, source)
 
     def detect(g, x, reach_hz=150.0, fine=True, front_only=False, n_sym=0, floor=-1.0, mid=False, track=None, x0=0):
         if not own_grid(g):
@@ -102,7 +109,7 @@ def substitutions(native):
     def by_grid(native_fn, py_fn):
         return lambda g, *a, **k: native_fn(g.name, *a, **k) if own_grid(g) else py_fn(g, *a, **k)
 
-    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows")})
+    py.update({k: getattr(cpm, k) for k in ("coh_read_header", "dd_metric", "dd_soft", "slot_rows", "bins")})
 
     def coh_read_header(g, x, s0, cfo, copies=cpm.HDR_COPIES):
         if not own_grid(g):
@@ -114,13 +121,20 @@ def substitutions(native):
         g = cpm.GRIDS[r["band"]]
         if not own_grid(g) or not own_spec(r["spec"]):
             return py["dd_metric"](r, post, slot)
-        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], r["Z"], {int(k): v for k, v in post.items()}, slot)
+        Z = r["Z"].reshape(-1, g.m)  # (a wide grid's sub-windows: L rows a symbol)
+        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], Z, {int(k): v for k, v in post.items()}, slot)
 
     def dd_soft(r, metric, slot):
         g = cpm.GRIDS[r["band"]]
         if not own_grid(g) or not own_spec(r["spec"]):
             return py["dd_soft"](r, metric, slot)
         return n.dd_soft(r["spec"].name, r["dup"], r["n_cw"], metric, slot)
+
+    def bins(g, x, start, n_sym, cfo):
+        if not own_grid(g):
+            return py["bins"](g, x, start, n_sym, cfo)
+        Z = n.bins(g.name, x, start, n_sym, cfo)
+        return Z if g.L == 1 else Z.reshape(n_sym, g.L, g.m)
 
     def slot_rows(g, n_data, dup):
         if not own_grid(g):
@@ -155,9 +169,10 @@ def substitutions(native):
         (cpm, "prime_lock"): prime_lock,
         (cpm, "hdr_span"): lambda grid, copies: n.hdr_span(grid, copies),
         (cpm, "measure"): measure,
-        (cpm, "bins"): by_grid(n.bins, cpm.bins),
+        (cpm, "bins"): bins,
         (cpm, "coh_metric"): n.coh_metric,
-        (cpm, "_n0"): n.noise_n0,
+        # (a wide grid's k-sub-window sums: the median of their gamma(k), cpm._noise_median, from Python)
+        (cpm, "_n0"): lambda E, k=1: n.noise_n0(E, cpm._noise_median(k)),
         (cpm, "bit_llrs"): by_grid(n.bit_llrs, cpm.bit_llrs),
         (cpm, "coh_read_header"): coh_read_header,
         (cpm, "slot_rows"): slot_rows,

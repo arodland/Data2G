@@ -56,8 +56,16 @@ inline constexpr int ROBUST_ESCALATION = 4;  // from here on ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_CONNECT = config::PROFILE == "fm" ? "n10-qpsk-r1/5" : "fsk16r25-r1/2";
 // policy.py: in a session on fast fading; FM has no CPM modes, so its robust mode stays ROBUST_CONNECT
 inline constexpr std::string_view ROBUST_FAST = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8r50-r1/3";
-inline constexpr int ROBUST_CONNECT_TRIES = 4;  // connect retries in ROBUST_CONNECT; the ones past them in ROBUST_FAST
+inline constexpr std::string_view ROBUST_WIDE = config::PROFILE == "fm" ? ROBUST_CONNECT : "fsk8w50-r1/2";
+inline constexpr int ROBUST_CONNECT_TRIES = 3;  // connect retries in ROBUST_CONNECT before ROBUST_WIDE ("RRRWW")
 inline constexpr double ROBUST_FAST_SPREAD_HZ = 6.0;
+struct Robust {
+    std::string_view connect, fast;  // policy.py's ROBUST_CONNECT and ROBUST_FAST
+    std::vector<std::string_view> connects;  // ROBUST_CONNECTS: the retries' modes ("RRRWW")
+    std::vector<std::string_view> modes;     // ROBUST_MODES: connect, fast and wide, each once
+};
+const Robust& robust();
+bool is_robust(std::string_view submode);  // in ROBUST_MODES
 // policy.py: a session connected by a robust retry starts at the robust floor only if the caller's
 // CONNECT_ACK read under this SNR or at least this spread (GearShifter::weak_path)
 inline constexpr double ROBUST_START_SNR_DB = -6.0;
@@ -114,6 +122,12 @@ public:
     std::string measured_band = "w";
     double measured_at = 0.0;
     std::optional<std::string> heard;  // the submode of the peer's last burst
+    // policy.py robust_mode: in a session, the robust control mode: robust().fast if the peer's last measured
+    // spread_est says fast fading, else robust().connect
+    std::string_view robust_mode() const {
+        const bool fast = last_spread && *last_spread >= ROBUST_FAST_SPREAD_HZ;
+        return fast ? arq::robust().fast : arq::robust().connect;
+    }
     int data_lost = 0;  // bursts lost in a row in the data mode I recommended (LADDER_AFTER)
     std::optional<std::array<double, 4>> ceiling;  // the data ladder: per channel, the highest threshold data may have
     std::optional<std::array<double, 4>> ladder_top;  // the thresholds of the mode whose losses started it
@@ -194,7 +208,7 @@ public:
     std::string connect_mode(int cap, int tries, bool last) override;
     bool weak_path() override { return shifter.weak_path(); }
     void robust_started() override { shifter.start_bound = true; }
-    bool robust(const std::string& submode) override { return submode == ROBUST_CONNECT || submode == ROBUST_FAST; }
+    bool robust(const std::string& submode) override { return is_robust(submode); }
     std::optional<double> reply_hold(Station& st, const TxBurst& burst) override {
         return shifter.reply_hold(view(st), burst.submode);
     }

@@ -85,7 +85,7 @@ inline int soft_len(const Spec& s) { return s.gf ? n_sym(s) << s.bits_per_cu : s
 
 const Spec* spec(std::string_view name);  // nullptr if none
 const Spec& spec(const config::Submode& s);  // s an element of config::SUBMODES
-const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS or CPM_CTL
+const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS, CPM_CTL or CPM_WIDE_*
 
 const ldpc::Code& ldpc_code(const Spec& s);  // LDPC specs
 const polar::PolarCode& polar_code(const Spec& s);  // polar specs, on their frozen info set

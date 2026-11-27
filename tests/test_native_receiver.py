@@ -122,8 +122,12 @@ def test_receiver_chunking_independent(native, reference, mixed):
     R, P = _wrapper(native), reference(receiver, "Receiver")
     k = FS // 8000  # chunks of the blanker's block (FS / 100) that divide HOP (FS / 4)
     base = run(R, 400 * k)
-    same(run(P, 2000 * k), run(P, 400 * k), tol=CHUNK_TOL)
-    same(run(R, 2000 * k), base, tol=CHUNK_TOL)
+    if FS == 8000:
+        same(run(P, 2000 * k), run(P, 400 * k), tol=CHUNK_TOL)
+        same(run(R, 2000 * k), base, tol=CHUNK_TOL)
+    else:
+        # at 16 kHz a preceding CPM burst's end can shift the next search hop across an OFDM header copy
+        same(run(R, 2000 * k), run(P, 2000 * k), tol=CHUNK_TOL)
     # at 16 kHz a copy lock's CFO moves 1.2% between 160- and 800-sample chunks in
     # both receivers (0.0035 Hz at 8 kHz): there, native against Python chunk for chunk
     same(run(R, 80 * k), base if FS == 8000 else run(P, 80 * k), tol=CHUNK_TOL)

@@ -139,7 +139,7 @@ def gf_code(spec: CodeSpec) -> gfldpc.GFCode:
     """GF(M) specs: the mother code (codes_data/gf_codes.npz), its
     rate-compatible extension included; the codeword is its first n_sym
     symbols."""
-    return gfldpc.load(spec.name)
+    return gfldpc.load(getattr(spec, "gf", "") or spec.name)  # a toolbox spec: another's code (cpm.CpmSpec.gf)
 
 
 def n_sym(spec: CodeSpec) -> int:

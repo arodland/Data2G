@@ -45,7 +45,7 @@ Heard heard_of(receiver::Rx&& rx) {
 std::vector<std::string_view> all_grids() {
     std::vector<std::string_view> out;
     if (config::PROFILE == "fm") return out;  // FM has no CPM modes (plan Q2): no CPM lock search either
-    for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
+    for (const auto* g : cpm::grids()) out.push_back(g->name);  // DATA2G_CPM_ONAIR's wide grids too
     return out;
 }
 
@@ -1072,8 +1072,8 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            // a connect retry goes in either robust mode (connect_mode): engine.py PENDING_MODES
-            const bool robust = m && (m->name == ROBUST_CONNECT || m->name == ROBUST_FAST);
+            // a connect retry goes in any robust mode (connect_mode): engine.py PENDING_MODES
+            const bool robust = m && is_robust(m->name);
             if (m && !pend_ && h->header.n_cw() <= (robust ? max_ctl(*m) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
                 const std::string_view n = m->name;
                 bool hit = pending != "ofdm" && robust;
