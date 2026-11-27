@@ -104,21 +104,22 @@ def substitutions(native):
         return header(N.decode_header(f64(soft).reshape(-1), band, accept))
 
     # tx_path None: Python's station setting (modem.TX_PATH), read at each call
-    @guarded("modulate", lambda payloads, submode, rvs=None, tx_path=None: own(submode))
-    def modulate(payloads, submode, rvs=None, tx_path=None):
+    @guarded("modulate", lambda payloads, submode, rvs=None, tx_path=None, connect_hash=None: own(submode))
+    def modulate(payloads, submode, rvs=None, tx_path=None, connect_hash=None):
         top = config.max_codewords((config.SUBMODES[submode] if isinstance(submode, str) else submode).sync_band)
         if not 1 <= len(payloads) <= top:
             raise ValueError(f"1..{top} codewords per burst, got {len(payloads)}")
         return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)),
-                          tx_path or modem.TX_PATH)
+                          tx_path or modem.TX_PATH, connect_hash)
 
-    @guarded("modulate_bits", lambda bits, spec, tx_path=None: own(spec) and isinstance(bits, np.ndarray))
-    def modulate_bits(bits, spec, tx_path=None):
-        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec, tx_path or modem.TX_PATH)
+    @guarded("modulate_bits", lambda bits, spec, tx_path=None, connect_hash=None: own(spec) and isinstance(bits, np.ndarray))
+    def modulate_bits(bits, spec, tx_path=None, connect_hash=None):
+        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec, tx_path or modem.TX_PATH,
+                               connect_hash)
 
-    @guarded("burst_waveform", lambda data, spec: own(spec))
-    def burst_waveform(data, spec):
-        return N.burst_waveform(np.asarray(data, dtype=complex), spec)
+    @guarded("burst_waveform", lambda data, spec, connect_hash=None: own(spec))
+    def burst_waveform(data, spec, connect_hash=None):
+        return N.burst_waveform(np.asarray(data, dtype=complex), spec, connect_hash)
 
     @guarded("ace_cells", lambda spec, n_f: own(spec))
     def ace_cells(spec, n_f):

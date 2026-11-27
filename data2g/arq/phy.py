@@ -16,7 +16,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from .. import codes, constellation, cpm, equalizer, modem
+from .. import codes, config, constellation, cpm, equalizer, modem
 from ..config import FM_FLAT_NOCLIP_BITS, FM_TX_PEAK, PROFILE, RS, SNR_REF_BW_HZ
 from ..waveform import dsp, ofdm
 from . import predictor as P
@@ -157,9 +157,20 @@ def tx_audio(burst, tx_path: str | None = None, level: float | None = None) -> n
         n_ctl = sum(1 for s in burst.slots if s.mask_id[2] >= 128)
         coded = [codes.encode(ctl_spec(spec) if i < n_ctl else spec, s.payload, s.rv, mask_value(s.mask_id), i)
                  for i, s in enumerate(burst.slots)]
-        return cpm.modulate(spec, coded, dup=n_ctl == 2, cap=burst.cap)
+        ch = None
+        if getattr(burst, "connect_callee", "") and n_ctl == 1 and len(burst.slots) == 1:
+            info = cpm.connect_header_for(spec.name)
+            if info is not None:
+                ch = config.connect_hash(burst.connect_callee, info[2])
+        return cpm.modulate(spec, coded, dup=n_ctl == 2, cap=burst.cap, connect_hash=ch)
     bits = np.stack([codes.encode(spec, s.payload, s.rv, mask_value(s.mask_id), i) for i, s in enumerate(burst.slots)])
-    x = modem.modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path)
+    ch = None
+    if getattr(burst, "connect_callee", "") and len(burst.slots) == 1:
+        info = modem.connect_header_for(spec.name)
+        if info is not None:
+            ch = config.connect_hash(burst.connect_callee, info[2])
+    x = modem.modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path,
+                            connect_hash=ch)
     g = getattr(burst, "level", 1.0) if level is None else level
     x = x if g == 1.0 else x * g
     if getattr(burst, "probe", False):

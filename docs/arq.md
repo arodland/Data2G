@@ -1144,13 +1144,14 @@ ack-1f x2 (0.76 s) where the core alone is x1 (1.05 s, 0.43 s).
   BUFFER n (host bytes the peer has not acked, as VARA counts them; less the
   next-burst credit for VARA clients), PTT ON/OFF, BUSY ON/OFF, PENDING /
   CANCELPENDING, and a Data2G-specific `MODE name`.
-- **PENDING:** while listening, a header that may be a CONNECT (one codeword
-  in a connect mode, `--pending`: `fsk` ROBUST_CONNECT and ROBUST_FAST, the default;
-  `ofdm` the caps' first-try modes; `all`; `off`) raises PENDING before the
-  body is read. CONNECTED follows if the burst connects. Otherwise
-  CANCELPENDING follows once it is read, or 3 s past its end. The header has
-  no frame type, so ID, CQ and other stations' connects raise it too;
-  docs/pending-header.md parks a protocol change that would not.
+- **PENDING:** while listening, a CONNECT header (`docs/pending-header.md`,
+  pseudo-submode carrying an FNV-1a callee-callsign hash: 6 bits on `w`, 5 bits
+  on `n10`, 3 bits on `c16r25` and `c8w50`) whose hash matches any registered
+  MYCALL raises PENDING before the body is read (`--pending`: `all`, the
+  default; `robust`/`fsk`, robust connect modes only; `ofdm`, first-try modes;
+  `off`). CONNECTED follows if the burst connects; otherwise CANCELPENDING
+  follows once it is read, or 3 s past its end. ID, CQ, control bursts and
+  non-matching CONNECTs do not raise PENDING.
 
 ## 9a. Stream framing
 

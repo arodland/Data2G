@@ -49,6 +49,7 @@ py::dict cpm_lock_dict(const cpm::Lock& l) {
     d["band"] = std::string(l.spec->grid);
     d["family"] = "cpm";
     d["n_cw"] = 1 + l.dup + l.n_data;
+    if (l.connect_hash) d["connect_hash"] = *l.connect_hash;
     return d;
 }
 
@@ -79,6 +80,7 @@ py::dict rx_dict(const receiver::Rx& rx) {
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;
+    if (r.connect_hash) d["connect_hash"] = *r.connect_hash;
     return d;
 }
 

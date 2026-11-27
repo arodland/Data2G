@@ -42,10 +42,10 @@ def substitutions(native):
     def burst_seconds(spec, n_cw, dup=False):
         return n.burst_seconds(spec.name, n_cw, dup) if own_spec(spec) else py["burst_seconds"](spec, n_cw, dup)
 
-    def modulate(spec, coded, dup, cap=0):
+    def modulate(spec, coded, dup, cap=0, connect_hash=None):
         if not own_spec(spec):
-            return py["modulate"](spec, coded, dup, cap)
-        return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap), cap)
+            return py["modulate"](spec, coded, dup, cap, connect_hash=connect_hash)
+        return n.bandpass(spec.grid, n.modulate(spec.name, list(coded), dup, cap, connect_hash), cap)
 
     def CoarseTrack(g, reach_hz=150.0, source=None):  # a compiled-in grid's: native, for native detect to read
         # (a wide grid's sums of another track's rows, `source`: native from a native track)
@@ -64,10 +64,10 @@ def substitutions(native):
         name, nd, d, score, h2, front = n.read_header(g.name, x, s0, cfo, copies)
         return cpm.SPECS[name], nd, d, score, h2, front
 
-    def refine(g, x, s0, cfo, spec, n_data, dup):
+    def refine(g, x, s0, cfo, spec, n_data, dup, connect_hash=None):
         if not own_grid(g) or not own_spec(spec):
-            return py["refine"](g, x, s0, cfo, spec, n_data, dup)
-        return n.refine(g.name, x, s0, cfo, spec.name, n_data, dup)
+            return py["refine"](g, x, s0, cfo, spec, n_data, dup, connect_hash=connect_hash)
+        return n.refine(g.name, x, s0, cfo, spec.name, n_data, dup, connect_hash)
 
     def soft(g, spec, x, s0, cfo, n_data, dup):
         if not own_grid(g):
@@ -136,7 +136,8 @@ def substitutions(native):
         if not own_grid(g) or not own_spec(r["spec"]):
             return py["dd_metric"](r, post, slot)
         Z = r["Z"].reshape(-1, g.m)  # (a wide grid's sub-windows: L rows a symbol)
-        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], Z, {int(k): v for k, v in post.items()}, slot)
+        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], Z, {int(k): v for k, v in post.items()}, slot,
+                           r.get("connect_hash"))
 
     def dd_soft(r, metric, slot):
         g = cpm.GRIDS[r["band"]]

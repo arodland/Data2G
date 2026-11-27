@@ -112,6 +112,7 @@ py::dict lock_dict(const modem::Lock& l) {
         c["pc"] = l.copy->pc;
         d["copy"] = c;
     }
+    if (l.connect_hash) d["connect_hash"] = *l.connect_hash;
     return d;
 }
 
@@ -134,6 +135,7 @@ modem::Lock lock_of(const py::dict& d) {
         const auto c = d["copy"].cast<py::dict>();
         l.copy = modem::CopyRef{c["word"].cast<int>(), c["pc"].cast<std::int64_t>()};
     }
+    if (d.contains("connect_hash") && !d["connect_hash"].is_none()) l.connect_hash = d["connect_hash"].cast<int>();
     return l;
 }
 
@@ -323,24 +325,28 @@ void bind_modem(py::module_& m) {
         return header_tuple(mo::decode_header(view(soft), band, a ? &*a : nullptr));
     }, py::arg("soft"), py::arg("band") = "w", py::arg("accept") = py::none());
 
+    d.def("connect_hash", [](const std::string& call, int bits) { return config::connect_hash(call, bits); });
+    d.def("connect_hash_of", [](int word, const std::string& band) { return mo::connect_hash_of(word, band); });
     // tx_path "": the native setting (set_tx_path)
     d.def("modulate", [](const std::vector<py::bytes>& payloads, const py::object& s, const std::vector<int>& rvs,
-                         const std::string& tx_path) {
+                         const std::string& tx_path, std::optional<int> connect_hash) {
         std::vector<std::vector<std::uint8_t>> p;
         for (const auto& b : payloads) {
             const auto v = bytes_view(b);
             p.emplace_back(v.begin(), v.end());
         }
-        return np(mo::modulate(p, spec_of(s), rvs, tx_path));
-    }, py::arg("payloads"), py::arg("submode"), py::arg("rvs") = std::vector<int>{}, py::arg("tx_path") = "");
-    d.def("modulate_bits", [](const In<std::uint8_t>& bits, const py::object& s, const std::string& tx_path) {
-        return np(mo::modulate_bits(view(bits), spec_of(s), tx_path));
-    }, py::arg("bits"), py::arg("spec"), py::arg("tx_path") = "");
+        return np(mo::modulate(p, spec_of(s), rvs, tx_path, connect_hash));
+    }, py::arg("payloads"), py::arg("submode"), py::arg("rvs") = std::vector<int>{}, py::arg("tx_path") = "",
+       py::arg("connect_hash") = py::none());
+    d.def("modulate_bits", [](const In<std::uint8_t>& bits, const py::object& s, const std::string& tx_path,
+                              std::optional<int> connect_hash) {
+        return np(mo::modulate_bits(view(bits), spec_of(s), tx_path, connect_hash));
+    }, py::arg("bits"), py::arg("spec"), py::arg("tx_path") = "", py::arg("connect_hash") = py::none());
     d.def("tx_path", [] { return std::string(mo::tx_path()); });
     d.def("set_tx_path", [](const std::string& p) { mo::set_tx_path(p); });
-    d.def("burst_waveform", [](const In<cd>& data, const py::object& s) {
-        return np(mo::burst_waveform(mat2(data), spec_of(s)));
-    });
+    d.def("burst_waveform", [](const In<cd>& data, const py::object& s, std::optional<int> connect_hash) {
+        return np(mo::burst_waveform(mat2(data), spec_of(s), connect_hash));
+    }, py::arg("data"), py::arg("spec"), py::arg("connect_hash") = py::none());
     d.def("ace_cells", [](const py::object& s, int n_f) {
         const auto starts = mo::ace_cells(spec_of(s), n_f);
         const auto n = static_cast<py::ssize_t>(starts.size());

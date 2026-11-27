@@ -186,7 +186,11 @@ std::vector<double> tx_audio(const TxBurst& burst, std::string_view tx_path, std
             coded.push_back(codes::encode(static_cast<std::ptrdiff_t>(i) < n_ctl ? ctl_code(md) : data_code(md),
                                           s.payload, s.rv, mask_value(s.mask_id), static_cast<int>(i)));
         }
-        return cpm::bandpass(cpm::grid_of(*md.cpm), cpm::modulate(*md.cpm, coded, n_ctl == 2, burst.cap), burst.cap);
+        std::optional<int> ch;
+        if (!burst.connect_callee.empty() && n_ctl == 1 && n == 1)
+            if (const auto info = cpm::connect_header_for(md.cpm->name))
+                ch = config::connect_hash(burst.connect_callee, info->bits);
+        return cpm::bandpass(cpm::grid_of(*md.cpm), cpm::modulate(*md.cpm, coded, n_ctl == 2, burst.cap, ch), burst.cap);
     }
     const auto& s = codes::spec(*md.ofdm);
     std::vector<std::uint8_t> bits;
@@ -195,9 +199,13 @@ std::vector<double> tx_audio(const TxBurst& burst, std::string_view tx_path, std
                                      static_cast<int>(i));
         bits.insert(bits.end(), c.begin(), c.end());
     }
+    std::optional<int> ch;
+    if (!burst.connect_callee.empty() && n == 1)
+        if (const auto info = modem::connect_header_for(md.ofdm->name))
+            ch = config::connect_hash(burst.connect_callee, info->bits);
     auto x = modem::modulate_bits(
         codes::spread<std::uint8_t>(bits, static_cast<int>(n), md.ofdm->bits_per_cu, modem::spread_group(*md.ofdm)), *md.ofdm,
-        tx_path);
+        tx_path, ch);
     const double g = level.value_or(burst.level);
     if (g != 1.0)
         for (double& v : x) v *= g;

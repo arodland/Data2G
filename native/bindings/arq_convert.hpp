@@ -59,6 +59,7 @@ inline py::object burst_py(const TxBurstPtr& b) {
     py::object out = link_attr("TxBurst")(b->submode, slots, b->burst_seq, b->cap);
     out.attr("level") = b->level;
     out.attr("probe") = b->probe;
+    out.attr("connect_callee") = b->connect_callee;
     if (b->nod) {
         const auto& k = b->nod->second;
         out.attr("nod") = py::make_tuple(b->nod->first, py::make_tuple(k[0], k[1], k[2], k[3]));
@@ -75,6 +76,7 @@ inline TxBurstPtr burst_cpp(const py::handle& o) {
     b->cap = o.attr("cap").cast<int>();
     b->level = py::getattr(o, "level", py::float_(1.0)).cast<double>();
     b->probe = py::getattr(o, "probe", py::bool_(false)).cast<bool>();
+    b->connect_callee = py::getattr(o, "connect_callee", py::str("")).cast<std::string>();
     if (py::object n = py::getattr(o, "nod", py::none()); !n.is_none()) {
         auto t = n.cast<py::tuple>();
         auto k = t[1].cast<py::tuple>();

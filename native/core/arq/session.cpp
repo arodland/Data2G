@@ -557,6 +557,7 @@ TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std
         Bytes p = body;
         p.resize(static_cast<std::size_t>(cpb), 0);
         b->slots.push_back({COMPACT_CONNECT, 0, std::move(p)});
+        b->connect_callee = peer;
     } else {
         Core core;
         core.ftype = SESSION;

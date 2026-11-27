@@ -558,3 +558,46 @@ def test_leak_model(native, reference, name, chan):
                 want[s] = ref(reference, "dd_soft")(r, ref(reference, "dd_metric")(r, {}, s), s)
     for a, b in zip(native.cpm.receive_soft(y, spec.name, n_data, dup, s0, f), want, strict=True):
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+
+
+def test_connect_header_parity(native, reference):
+    """CPM CONNECT header words (docs/pending-header.md): modulate, find,
+    find_mid, confirm, refine and dd_metric carry and recover the 3-bit callee
+    hash identically on c16r25 and c8w50."""
+    from data2g.config import connect_hash
+
+    rng = np.random.default_rng(29)
+    for gname, mname in cpm.CONNECT_HEADER.items():
+        g = cpm.GRIDS[gname]
+        spec = cpm.SPECS[mname]
+        h = connect_hash("K2XYZ-10", cpm.CONNECT_HASH_BITS)
+        coded = _burst(spec, 0, False, rng)
+        x_py = ref(reference, "modulate")(spec, coded, False, 0, connect_hash=h)
+        x_nat = native.cpm.bandpass(gname, native.cpm.modulate(mname, coded, False, 0, h), 0)
+        np.testing.assert_allclose(x_nat, x_py, rtol=RTOL, atol=1e-12)
+        y = _channel(x_py, rng, lead=2400, cfo=3.5, sigma=0.05)
+        l_py = ref(reference, "find")(g, y)
+        l_nat = native.cpm.find(gname, y)
+        assert l_py is not None and l_nat is not None
+        assert l_py["spec"].name == l_nat["spec"] == mname
+        assert l_py["connect_hash"] == l_nat["connect_hash"] == h
+        c_py = cpm.confirm(g, y, l_py)
+        c_nat = native.cpm.confirm(gname, y, mname, 0, False, l_nat["start"], l_nat["cfo"], h)
+        assert c_py > 5.0 and c_nat == pytest.approx(c_py, rel=1e-9, abs=1e-9)
+        r_py = ref(reference, "refine")(g, y, l_py["start"], l_py["cfo"], spec, 0, False, connect_hash=h)
+        r_nat = native.cpm.refine(gname, y, l_nat["start"], l_nat["cfo"], mname, 0, False, h)
+        assert r_nat[0] == r_py[0] and r_nat[1] == pytest.approx(r_py[1], rel=RTOL)
+        # Wipe front so find_mid recovers the connect word from the mid block
+        y_mid = y.copy()
+        y_mid[:2400 + len(cpm.preamble_pattern(g)) * g.T] = 0.0
+        m_py = ref(reference, "find_mid")(g, y_mid)
+        m_nat = native.cpm.find_mid(gname, y_mid)
+        assert m_py is not None and m_nat is not None
+        assert m_py["connect_hash"] == m_nat["connect_hash"] == h
+        lay = cpm.layout(gname, cpm.stream_symbols(gname, 0, False))
+        Z = ref(reference, "bins")(g, y, r_py[0], lay.n, r_py[1])
+        Z_nat = Z if g.L == 1 else Z.reshape(-1, g.m)
+        rec = dict(spec=spec, band=gname, n_cw=1, n_ctl_slots=1, dup=False, Z=Z, connect_hash=h)
+        M_py = ref(reference, "dd_metric")(rec, {}, 0)
+        M_nat = native.cpm.dd_metric(mname, False, 1, Z_nat, {}, 0, h)
+        np.testing.assert_allclose(M_nat, M_py, rtol=1e-9, atol=1e-9)

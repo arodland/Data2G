@@ -1072,15 +1072,30 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            // a connect retry goes in any robust mode (connect_mode): engine.py PENDING_MODES
-            const bool robust = m && is_robust(m->name);
-            if (m && !pend_ && h->header.n_cw() <= (robust ? max_ctl(*m) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
-                const std::string_view n = m->name;
-                bool hit = pending != "ofdm" && robust;
-                for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
-                if (hit) {
-                    pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
-                    events_.emplace_back("PENDING");
+            // PENDING on a CONNECT header whose callee hash matches a registered call (docs/pending-header.md)
+            if (m && !pend_ && session_->state == SessionState::LISTEN && pending != "off") {
+                if (const auto ch = h->header.connect_hash()) {
+                    const std::string_view n = m->name;
+                    const bool robust = is_robust(n);
+                    bool hit = pending != "ofdm" && robust;
+                    for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
+                    int bits = 0;
+                    if (hit) {
+                        if (h->header.is_cpm()) {
+                            if (const auto info = cpm::connect_header_for(n)) bits = info->bits;
+                        } else {
+                            if (const auto info = modem::connect_header_for(n)) bits = info->bits;
+                        }
+                    }
+                    bool match = false;
+                    if (bits > 0) {
+                        match = config::connect_hash(call_, bits) == *ch;
+                        for (const auto& a : aliases_) match = match || config::connect_hash(a, bits) == *ch;
+                    }
+                    if (match) {
+                        pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
+                        events_.emplace_back("PENDING");
+                    }
                 }
             }
             continue;

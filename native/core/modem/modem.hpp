@@ -69,6 +69,17 @@ std::vector<int> valid_words(std::string_view band, const Accept* accept = nullp
 // ulps. Reentrant; the cost no longer grows with the number of valid words.
 std::vector<float> header_corr(std::span<const double> soft, std::string_view band, const Accept* accept = nullptr);
 
+// Dedicated CONNECT header words (modem.CONNECT_HEADER, docs/pending-header.md): spare
+// pseudo-submode indices whose n_cw field carries a hash of the destination call.
+struct ConnectHeader {
+    std::string_view band;
+    int index = 0;
+    std::string_view mode;
+    int bits = 0;
+};
+std::optional<ConnectHeader> connect_header_for(std::string_view mode);
+std::optional<int> connect_hash_of(int word, std::string_view band);
+
 struct Header {
     int word = 0;
     const Spec* spec = nullptr;
@@ -89,12 +100,14 @@ void set_tx_path(std::string_view path);  // throws std::invalid_argument unless
 // Codeword payloads -> unit-RMS audio (FM mic path: the top modes quieter,
 // config::FM_MIC_GAIN). rvs empty: all 0.
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
-                             std::span<const int> rvs = {}, std::string_view tx_path = {});
+                             std::span<const int> rvs = {}, std::string_view tx_path = {},
+                             std::optional<int> connect_hash = std::nullopt);
 // Coded bits in burst order (codes::spread) -> unit-RMS audio.
 std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec,
-                                  std::string_view tx_path = {});
+                                  std::string_view tx_path = {}, std::optional<int> connect_hash = std::nullopt);
 // (n_f * 5, nc) data symbols -> the unclipped burst waveform.
-std::vector<double> burst_waveform(const Mat<cd>& data, const Spec& spec);
+std::vector<double> burst_waveform(const Mat<cd>& data, const Spec& spec,
+                                   std::optional<int> connect_hash = std::nullopt);
 // First sample of each data symbol of a burst of n_f data frames (ace_cells' `full`[:, 0]).
 std::vector<std::int64_t> ace_cells(const Spec& spec, int n_f);
 
@@ -211,7 +224,8 @@ struct Lock {
     double score = 0.0;
     std::string_view band;
     double cfo = 0.0;
-    std::optional<CopyRef> copy;  // set by find_copy
+    std::optional<CopyRef> copy;      // set by find_copy
+    std::optional<int> connect_hash;  // set for CONNECT_HEADER words (docs/pending-header.md)
 };
 Lock find_burst(std::span<const double> x, std::span<const std::string_view> bands = {},
                 const Accept* accept = nullptr, std::span<const BandStat> stats = {});

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import codes, cpm, cwid, hand, modem
+from .. import codes, config, cpm, cwid, hand, modem
 from ..config import FS, LEADIN_SAMPLES, PROFILE, SPREAD_WINDOW, max_codewords
 from ..receiver import NoiseProfile, Receiver, ReplySlot
 from . import burst as B
@@ -75,24 +75,16 @@ ENERGY_FLOOR_DB = 3.0
 # the session is over: after its last burst (a DISC_ACK), else ID_GUARD_S
 # after it closed, when the peer's own ID (after its DISC_ACK) has been heard
 ID_INTERVAL_S = 600.0
-# PENDING / CANCELPENDING (host --pending): a header that may be a
-# CONNECT (one codeword in a connect mode) while listening raises PENDING,
-# before the body, and so the callee, is known. Its burst then not
+# PENDING / CANCELPENDING (host --pending, docs/pending-header.md): a CONNECT
+# header whose callee hash matches any registered call (self.call or aliases)
+# while listening raises PENDING, before the body is read. Its burst then not
 # connecting, or PENDING_SLACK_S past its end with no result, cancels it.
-# Scanners hold a frequency on PENDING. The header carries no frame type,
-# so ID, CQ and other stations' connects in those modes raise it too
-# (docs/pending-header.md: a protocol change that would not).
+# Scanners hold a frequency on PENDING. ID, CQ, control bursts and non-matching
+# CONNECTs do not raise it, so the default is "all".
 # `fsk`: both robust modes, as connect_mode sends a retry in either.
 PENDING_MODES = {"off": frozenset(), "fsk": frozenset(ROBUST_MODES), "ofdm": frozenset(CONNECT.values()),
                  "all": frozenset({*ROBUST_MODES, *CONNECT.values()})}
 PENDING_SLACK_S = 3.0
-
-
-def _connect_cw(submode: str) -> int:
-    """Codewords a CONNECT burst in `submode` carries: one, but a robust
-    retry its control's copies (FM's ROBUST_CONNECT is OFDM, control twice;
-    HF's robust modes are CPM, once)."""
-    return max_ctl(MODES[submode]) if submode in ROBUST_MODES else 1
 ID_GUARD_S = S.REPLY_START_S
 # CW ID (docs/arq.md §7b), Engine.cw_id: "off", ID frames only; "add", a CW
 # ID with each (ahead of a turn: CW, ID frame, burst; after a session: ID
@@ -251,7 +243,7 @@ class Engine:
         self._id_pending: list | None = None  # [session, earliest time]: its last ID, after it closed
         self._hold = 0.0  # nothing new goes before this (the peer's last ID may follow its DISC_ACK)
         self.cw_id = "off"  # CW_ID_MODES
-        self.pending = "fsk"  # PENDING_MODES' key
+        self.pending = "all"  # PENDING_MODES' key
         self._pend: list | None = None  # PENDING raised: [deadline, its burst heard]
         self.cw_wpm = cwid.WPM
         self._hand_round = "full"  # hand_round's
@@ -552,6 +544,20 @@ class Engine:
                 log.exception("hand decode failed")
         for line in lines + ([short] if short is not None else []) + ["HAND END"]:
             self._hand_event(line)
+
+    def _pending_match(self, ev: dict) -> bool:
+        """Whether header event `ev` is a CONNECT addressed to one of our registered calls (docs/pending-header.md)."""
+        ch = ev.get("connect_hash")
+        if ch is None:
+            return False
+        name = ev["spec"].name
+        if name not in PENDING_MODES[self.pending]:
+            return False
+        info = cpm.connect_header_for(name) if ev.get("family") == "cpm" else modem.connect_header_for(name)
+        if info is None:
+            return False
+        bits = info[2]
+        return any(config.connect_hash(c, bits) == ch for c in (self.call, *self.aliases))
 
     def _pending_resolve(self):
         """A PENDING whose burst has been read, or is overdue: CANCELPENDING
@@ -929,8 +935,7 @@ class Engine:
                 self.noise.mark(start, start + (burst_seconds(spec, ev["n_cw"]) if spec else MAX_BURST_S))
                 self._span = (start, start + burst_seconds(spec, ev["n_cw"]), spec.name) if spec else None
                 self._pending_resolve()  # a superseded header's
-                if (self._pend is None and ev["n_cw"] <= _connect_cw(ev["spec"].name) and self.session.state == S.LISTEN
-                        and ev["spec"].name in PENDING_MODES[self.pending]):
+                if self._pend is None and self.session.state == S.LISTEN and self._pending_match(ev):
                     self._pend = [start + burst_seconds(spec, ev["n_cw"]) + PENDING_SLACK_S, False]
                     self._events.append("PENDING")
                 continue

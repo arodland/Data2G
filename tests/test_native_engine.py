@@ -42,9 +42,9 @@ def test_a_session_between_cpp_and_python_engines(native, reference, cpp_calls, 
     assert bytes(got_b) == up and bytes(got_a) == down
     a.session.disconnect()
     assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=2)
-    for e, peer in ((a, b), (b, a)):
-        ev = e.events()
-        assert ev[0] == f"CONNECTED {peer.call}" and ev[-1].startswith("DISCONNECTED"), ev
+    ev_a, ev_b = a.events(), b.events()
+    assert ev_a[0] == f"CONNECTED {b.call}" and ev_a[-1].startswith("DISCONNECTED"), ev_a
+    assert ev_b[:2] == ["PENDING", f"CONNECTED {a.call}"] and ev_b[-1].startswith("DISCONNECTED"), ev_b
     _same_records(tmp_path)
 
 

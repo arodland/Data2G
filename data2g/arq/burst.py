@@ -48,6 +48,8 @@ class TxBurst:
     nod: tuple | None = None
     level: float = 1.0  # audio level against the mode's own (an FM ping goes at its top modes': arq.ping)
     probe: bool = False  # FM: the sounding probe follows on the same PTT (arq.probe; a ping)
+    # CONNECT burst: callee callsign for the header's callee hash (docs/pending-header.md); empty for all other bursts
+    connect_callee: str = ""
 
 
 def dup_ctl(burst) -> bool:

@@ -199,10 +199,26 @@ bool shares_rows(const Grid& g, const Grid& h) {
     return g.L > 1 && h.L == 1 && g.m == h.m && g.rate == h.rate && g.f0 == h.f0;
 }
 
+std::optional<ConnectHeader> connect_header_for(std::string_view mode) {
+    if (mode == "fsk16r25-r1/2") return ConnectHeader{"c16r25", CONNECT_INDEX, CONNECT_HASH_BITS};
+    if (mode == "fsk8w50-r1/2") return ConnectHeader{"c8w50", CONNECT_INDEX, CONNECT_HASH_BITS};
+    return std::nullopt;
+}
+
 int header_value(int index, int n_data, bool dup) {
     const int v = ((index + 2 * dup) << 6) | n_data;
     if (index < 0 || n_data < 0 || n_data >= 64 || v >= 1024) throw std::invalid_argument("cpm header out of range");
     return v;
+}
+
+int header_value_for(const Spec& s, int n_data, bool dup, std::optional<int> connect_hash) {
+    if (connect_hash) {
+        const auto ch = connect_header_for(s.name);
+        if (!ch || n_data != 0 || dup || *connect_hash < 0 || *connect_hash >= (1 << ch->bits))
+            throw std::invalid_argument("cpm connect_hash out of range");
+        return header_value(ch->index, *connect_hash, false);
+    }
+    return header_value(s.index, n_data, dup);
 }
 
 std::span<const std::uint8_t> header_symbols(const Grid& g, int value) {
@@ -321,7 +337,8 @@ std::vector<double> bandpass(const Grid& g, std::span<const double> x, int cap) 
                                   {g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp});
 }
 
-std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap) {
+std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap,
+                             std::optional<int> connect_hash) {
     const Grid& g = grid_of(s);
     const int n_data = static_cast<int>(coded.size()) - 1 - dup;
     std::vector<int> stream;
@@ -332,7 +349,7 @@ std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::u
     const Layout L = layout(g, static_cast<int>(stream.size()));
     std::vector<int> sym(L.n);
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i) sym[L.sync_rows[i]] = L.sync_tones[i];
-    const auto h = header_symbols(g, header_value(s.index, n_data, dup));
+    const auto h = header_symbols(g, header_value_for(s, n_data, dup, connect_hash));
     for (const auto& rows : L.hdr_rows)
         for (std::size_t i = 0; i < rows.size(); ++i) sym[rows[i]] = h[i];
     for (std::size_t i = 0; i < L.data_rows.size(); ++i) sym[L.data_rows[i]] = stream[i];
@@ -952,35 +969,54 @@ std::vector<double> bit_llrs(const Grid& g, const Mat<double>& metric, double sc
 
 namespace {
 
-// cpm.header_rows: per grid, per number of copies (1..HDR_COPIES), each valid
-// word's header rows (valid_words' order), and the span they reach (symbols).
+// cpm._all_words / header_rows / mid_rows: per grid, every valid word (regular + CONNECT_HEADER),
+// each word's header rows for 1..HDR_COPIES, and the span they reach (symbols).
+struct WordEntry {
+    const Spec* spec = nullptr;
+    int n_data = 0;
+    bool dup = false;
+    std::optional<int> connect_hash{};
+    int value = 0;
+};
+
 struct WordRows {
+    std::vector<WordEntry> words;
     std::vector<std::vector<std::vector<int>>> rows;  // [copies - 1][word]
     std::vector<int> span;                           // [copies - 1]
     std::vector<int> mid;                            // [word]: the row its mid block starts at (cpm.mid_rows)
 };
+
+const Spec* connect_spec(std::string_view grid_name) {
+    if (grid_name == "c16r25") return spec("fsk16r25-r1/2");
+    if (grid_name == "c8w50") return spec("fsk8w50-r1/2");
+    return nullptr;
+}
 
 const WordRows& word_rows(const Grid& g) {
     static const auto cache = [] {
         std::vector<std::pair<std::string_view, WordRows>> out;
         for (auto table : {tables::CPM_GRIDS, tables::CPM_WIDE_GRIDS})
         for (const auto& gg : table) {
-            WordRows w{std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
+            WordRows w{{}, std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
                        std::vector<int>(tables::CPM.hdr_copies, 0), {}};
-            for (const Spec* s : grid_specs(gg)) {
-                (void)s;
+            auto add_word = [&](const Spec* s, int n, bool d, std::optional<int> ch, int val) {
+                w.words.push_back({s, n, d, ch, val});
+                const Layout L = layout(gg, stream_symbols(gg, n, d));
+                w.mid.push_back(L.sync_rows[L.front]);
+                std::vector<int> r;
+                for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
+                    r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
+                    w.span[c] = std::max(w.span[c], r.back() + 1);
+                    w.rows[c].push_back(r);
+                }
+            };
+            for (const Spec* s : grid_specs(gg))
                 for (bool d : {false, true})
-                    for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                        const Layout L = layout(gg, stream_symbols(gg, n, d));
-                        w.mid.push_back(L.sync_rows[L.front]);
-                        std::vector<int> r;
-                        for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
-                            r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
-                            w.span[c] = std::max(w.span[c], r.back() + 1);
-                            w.rows[c].push_back(r);
-                        }
-                    }
-            }
+                    for (int n = 0; n <= tables::CPM.max_data; ++n)
+                        add_word(s, n, d, std::nullopt, header_value(s->index, n, d));
+            if (const Spec* cs = connect_spec(gg.name))
+                for (int h = 0; h < (1 << CONNECT_HASH_BITS); ++h)
+                    add_word(cs, 0, false, h, header_value(CONNECT_INDEX, h, false));
             out.emplace_back(gg.name, std::move(w));
         }
         return out;
@@ -995,6 +1031,7 @@ Lock make_lock(const Grid& g, std::int64_t s0, double cfo, double score, const H
     Lock l{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
            s0 + L.n * g.T, s0 + static_cast<std::int64_t>(L.hdr_rows[copies - 1].back() + 1) * g.T};
     l.copies = copies;
+    l.connect_hash = h.connect_hash;
     return l;
 }
 
@@ -1044,22 +1081,18 @@ Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, do
     const auto& rows = W.rows.at(copies - 1);
     const Mat<double> L = tone_llr(g, energies(g, x, s0, W.span[copies - 1], cfo));
     const double front = front_llr(g, L);
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, front};
-    std::size_t k = 0;
-    for (const Spec* sp : grid_specs(g)) {  // valid_words' order
-        const Spec& s = *sp;
-        for (bool d : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                const auto t = header_symbols(g, header_value(s.index, n, d));
-                const double score = std::max(front, 0.0) + segments(g, L, rows[k++], t);
-                // ties: the later word, as argsort(...)[::-1] over a stable sort
-                if (score >= best.score) {
-                    best.runner_up = best.score;
-                    best = {&s, n, d, score, best.runner_up, front};
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, front, std::nullopt};
+    for (std::size_t k = 0; k < W.words.size(); ++k) {
+        const WordEntry& we = W.words[k];
+        const auto t = header_symbols(g, we.value);
+        const double score = std::max(front, 0.0) + segments(g, L, rows[k], t);
+        // ties: the later word, as argsort(...)[::-1] over a stable sort
+        if (score >= best.score) {
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, front, we.connect_hash};
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     return best;
 }
@@ -1169,33 +1202,29 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
     const int copies = tables::CPM.hdr_copies;
     const auto& rows = W.rows[copies - 1];
     std::vector<std::pair<std::int64_t, Mat<double>>> L;
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0};
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0, std::nullopt};
     std::int64_t best_s = 0;
     std::vector<double> vm(g.mid_block.size());
-    std::size_t k = 0;
-    for (const Spec* sp : grid_specs(g)) {  // valid_words' order
-        const Spec& s = *sp;
-        for (bool dup : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n, ++k) {
-                const std::int64_t b1 = W.mid[k], s0 = d.start - b1 * T;
-                if (s0 < 0) continue;
-                auto it = std::find_if(L.begin(), L.end(), [&](const auto& e) { return e.first == s0; });
-                if (it == L.end()) {
-                    L.emplace_back(s0, tone_llr(g, energies(g, x, s0, W.span[copies - 1], d.cfo)));
-                    it = L.end() - 1;
-                }
-                const Mat<double>& Ls = it->second;
-                const auto t = header_symbols(g, header_value(s.index, n, dup));
-                for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = Ls[b1 + i][g.mid_block[i]];
-                const double score = std::max(front_llr(g, Ls), 0.0) + np_sum(vm) + segments(g, Ls, rows[k], t);
-                if (score >= best.score) {  // ties: the later word (read_header)
-                    best.runner_up = best.score;
-                    best = {&s, n, dup, score, best.runner_up, 0.0};
-                    best_s = s0;
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    for (std::size_t k = 0; k < W.words.size(); ++k) {
+        const WordEntry& we = W.words[k];
+        const std::int64_t b1 = W.mid[k], s0 = d.start - b1 * T;
+        if (s0 < 0) continue;
+        auto it = std::find_if(L.begin(), L.end(), [&](const auto& e) { return e.first == s0; });
+        if (it == L.end()) {
+            L.emplace_back(s0, tone_llr(g, energies(g, x, s0, W.span[copies - 1], d.cfo)));
+            it = L.end() - 1;
+        }
+        const Mat<double>& Ls = it->second;
+        const auto t = header_symbols(g, we.value);
+        for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = Ls[b1 + i][g.mid_block[i]];
+        const double score = std::max(front_llr(g, Ls), 0.0) + np_sum(vm) + segments(g, Ls, rows[k], t);
+        if (score >= best.score) {  // ties: the later word (read_header)
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, 0.0, we.connect_hash};
+            best_s = s0;
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     if (!best.spec || best.score < g.mid_llr || best.score - best.runner_up < tables::CPM.hdr_margin2)
         return std::nullopt;
@@ -1231,29 +1260,19 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
                 Mat<double> L(n_rows, all.cols);
                 std::copy(all[static_cast<std::size_t>(m)], all[static_cast<std::size_t>(m)] + n_rows * all.cols, L.data.begin());
                 const double front = std::max(front_llr(g, L), 0.0);
-                std::size_t k = 0;
-                for (const Spec* sp : grid_specs(g)) {  // valid_words' order
-                    const Spec& s = *sp;
-                    for (bool dup : {false, true})
-                        for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k) {
-                            const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
-                            for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
-                            const auto t = header_symbols(g, header_value(s.index, nd, dup));
-                            const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
-                            if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
-                        }
+                for (std::size_t k = 0; k < W.words.size(); ++k) {
+                    const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
+                    for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
+                    const auto t = header_symbols(g, W.words[k].value);
+                    const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
+                    if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
                 }
             }
         }
     }
     if (best < PRIME_LLR) return std::nullopt;
-    std::size_t k = 0;
-    for (const Spec* s : grid_specs(g)) {
-        for (bool dup : {false, true})
-            for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k)
-                if (k == best_k) return make_lock(g, best_s, best_cfo, best, Header{s, nd, dup, best, best, 0.0}, copies);
-    }
-    return std::nullopt;
+    const WordEntry& we = W.words[best_k];
+    return make_lock(g, best_s, best_cfo, best, Header{we.spec, we.n_data, we.dup, best, best, 0.0, we.connect_hash}, copies);
 }
 
 std::int64_t confirm_end(const Grid& g, const Lock& l) {
@@ -1264,7 +1283,7 @@ std::int64_t confirm_end(const Grid& g, const Lock& l) {
 double confirm(const Grid& g, std::span<const double> x, const Lock& l) {
     const Layout lay = layout(g, stream_symbols(g, l.n_data, l.dup));
     const Mat<double> L = tone_llr(g, energies(g, x, l.start, lay.hdr_rows[1].back() + 1, l.cfo));
-    const auto t = header_symbols(g, header_value(l.spec->index, l.n_data, l.dup));
+    const auto t = header_symbols(g, header_value_for(*l.spec, l.n_data, l.dup, l.connect_hash));
     const int b1 = lay.sync_rows[lay.front];
     std::vector<double> vm(g.mid_block.size()), vh(lay.hdr_rows[1].size());
     for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
@@ -1386,9 +1405,9 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
 }
 
 std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
-                                       const Spec& spec, int n_data, bool dup) {
+                                       const Spec& spec, int n_data, bool dup, std::optional<int> connect_hash) {
     const Layout L = layout(g, stream_symbols(g, n_data, dup));
-    const auto h = header_symbols(g, header_value(spec.index, n_data, dup));
+    const auto h = header_symbols(g, header_value_for(spec, n_data, dup, connect_hash));
     const int n = std::min(L.n, tables::CPM.refine_symbols);
     std::vector<int> known(n, -1);
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i)
@@ -1492,7 +1511,7 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
 
 Received receive(std::span<const double> x, const Lock& lock) {
     const Grid& g = grid_of(*lock.spec);
-    return receive_refined(x, lock, refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup));
+    return receive_refined(x, lock, refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup, lock.connect_hash));
 }
 
 Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<std::int64_t, double> at) {
@@ -1501,7 +1520,7 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
     Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
     Received r{lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
-               lock.header_end, {}, {}};
+               lock.header_end, {}, {}, lock.connect_hash};
     if (!coherent(g)) return r;  // the square law alone (no Z: arq::phy's DD stays off)
     r.Z = bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo);
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
@@ -1536,7 +1555,8 @@ void Stream::feed(std::span<const double> more) {
 void Stream::advance() {
     const Grid& g = grid_of(*lock_.spec);
     const auto len = static_cast<std::int64_t>(x_.size());
-    if (!at_ && len >= refine_need_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    if (!at_ && len >= refine_need_)
+        at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup, lock_.connect_hash);
     if (!at_ || !pass_) return;
     const int n_ctl = 1 + lock_.dup;
     const auto rows = slot_rows(g, lock_.n_data, lock_.dup);
@@ -1555,7 +1575,7 @@ void Stream::advance() {
 
 Received Stream::finish() {
     const Grid& g = grid_of(*lock_.spec);
-    if (!at_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    if (!at_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup, lock_.connect_hash);
     Received r = receive_refined(x_, lock_, *at_);
     r.passes = std::move(passes_);
     return r;
@@ -1788,35 +1808,31 @@ Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0
     const Mat<cdouble> Z = bins(g, x, s0, WR.span[copies - 1], cfo);
     const double n0 = noise_n0(power_of(Z));
     const int F = static_cast<int>(g.preamble.size()), H = g.hdr_len, nb = static_cast<int>(g.mid_block.size());
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0};
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0, std::nullopt};
     double front = 0.0;
-    std::size_t k = 0;
-    for (const Spec* sp : grid_specs(g)) {  // valid_words' order
-        const Spec& s = *sp;
-        for (bool d : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                const auto t = header_symbols(g, header_value(s.index, n, d));
-                const auto& r = rows[k++];
-                std::vector<int> ra, ta;
-                for (int i = 0; i < F; ++i) ra.push_back(i), ta.push_back(g.preamble[i]);
-                for (int i = 0; i < H; ++i) ra.push_back(r[i]), ta.push_back(t[i]);
-                const auto la = coh_run_llr(g, take_crows(Z, sub_rows(ra, g.L)), ta, n0);
-                front = std::max(front, np_sum(la.data(), F));
-                double score = std::max(np_sum(la), 0.0);
-                if (copies > 1) {
-                    std::vector<int> rb, tb;
-                    for (int i = 0; i < nb; ++i) rb.push_back(r[H] - nb + i), tb.push_back(g.mid_block[i]);
-                    for (int i = 0; i < H; ++i) rb.push_back(r[H + i]), tb.push_back(t[i]);
-                    score += std::max(np_sum(coh_run_llr(g, take_crows(Z, sub_rows(rb, g.L)), tb, n0)), 0.0);
-                }
-                // ties: the later word, as read_header
-                if (score >= best.score) {
-                    best.runner_up = best.score;
-                    best = {&s, n, d, score, best.runner_up, 0.0};
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    for (std::size_t k = 0; k < WR.words.size(); ++k) {
+        const WordEntry& we = WR.words[k];
+        const auto t = header_symbols(g, we.value);
+        const auto& r = rows[k];
+        std::vector<int> ra, ta;
+        for (int i = 0; i < F; ++i) ra.push_back(i), ta.push_back(g.preamble[i]);
+        for (int i = 0; i < H; ++i) ra.push_back(r[i]), ta.push_back(t[i]);
+        const auto la = coh_run_llr(g, take_crows(Z, sub_rows(ra, g.L)), ta, n0);
+        front = std::max(front, np_sum(la.data(), F));
+        double score = std::max(np_sum(la), 0.0);
+        if (copies > 1) {
+            std::vector<int> rb, tb;
+            for (int i = 0; i < nb; ++i) rb.push_back(r[H] - nb + i), tb.push_back(g.mid_block[i]);
+            for (int i = 0; i < H; ++i) rb.push_back(r[H + i]), tb.push_back(t[i]);
+            score += std::max(np_sum(coh_run_llr(g, take_crows(Z, sub_rows(rb, g.L)), tb, n0)), 0.0);
+        }
+        // ties: the later word, as read_header
+        if (score >= best.score) {
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, 0.0, we.connect_hash};
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     best.front = front;
     return best;
@@ -1857,7 +1873,7 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
         const double s = np_sum(P[i], g.m);
         for (int k = 0; k < g.m; ++k) P[i][k] /= s;
     }
-    const auto h = header_symbols(g, header_value(r.spec->index, n_data, r.dup));
+    const auto h = header_symbols(g, header_value_for(*r.spec, n_data, r.dup, r.connect_hash));
     const auto known = [&](int row, int tone) {
         if (row < a || row >= b) return;
         std::fill(P[row - a], P[row - a] + g.m, 0.0);
