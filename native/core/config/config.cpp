@@ -1,5 +1,6 @@
 #include "config/config.hpp"
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +29,11 @@ const Submode* by_index(std::string_view sync_band, int index) {
     for (const auto& s : SUBMODES)
         if (s.sync_band == sync_band && s.index == index) out = &s;
     return out;
+}
+
+bool sc_band(std::string_view name) {
+    if (PROFILE != "hf" || SYMS_PER_FRAME != 6) return false;
+    return name == "w" || name == "w48" || name == "n10" || name == "n4";
 }
 
 }  // namespace data2g::config

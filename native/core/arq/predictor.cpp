@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +11,11 @@
 #include <string_view>
 #include <utility>
 
+#include "arq/burst.hpp"
 #include "arq/modes.hpp"
+#include "arq/phy.hpp"
+#include "config/config.hpp"
+#include "modem/modem.hpp"
 #include "cpm/cpm.hpp"
 #include "dsp/dsp.hpp"
 #include "waveform/ofdm.hpp"

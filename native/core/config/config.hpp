@@ -17,4 +17,7 @@ std::size_t row(const Submode& spec);                            // its index in
 const Submode* by_index(std::string_view sync_band, int index);  // the header's index -> submode; nullptr if none
 inline int preamble_samples(const Band& b) { return PREAMBLE_CP + b.preamble_repeats * M; }
 
+// Scattered-pilot bands (config.SC_BANDS): HF 6-symbol OFDM bands (w, w48, n10, n4); none on FM.
+bool sc_band(std::string_view band);  // band in config.SC_BANDS
+
 }  // namespace data2g::config

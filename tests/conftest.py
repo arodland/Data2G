@@ -147,6 +147,10 @@ def protocol(monkeypatch):
 
     def use(v):
         monkeypatch.setattr(modem, "PROTOCOL_VERSION", v)
+        if v < 16:  # HF scattered pilots started at protocol 16
+            from data2g import config
+            monkeypatch.setattr(config, "SC_BANDS", ())
+            monkeypatch.setattr(modem, "SC_BANDS", ())
         for c in caches:
             c.cache_clear()
 

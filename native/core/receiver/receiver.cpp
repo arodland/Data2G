@@ -175,8 +175,26 @@ Receiver::Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids
     hold_ = keep_;
     for (const auto* g : grids_) hold_ = std::max(hold_, cpm::hdr_span(*g, 2) + config::FS);
     detectors_.reserve(bands_.size());
-    for (const auto b : bands_)  // matched filter outputs kept for find_copy and data2g_on_air
-        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, true), {}, {}});
+    bool has_n10 = false;
+    for (const auto b : bands_) {
+        const bool sc = config::sc_band(b);
+        const bool copy = std::find(config::HEADER_COPY_BANDS.begin(), config::HEADER_COPY_BANDS.end(), b) !=
+                          config::HEADER_COPY_BANDS.end();
+        const bool comb = copy && sc;
+        std::optional<modem::CombStream> cs;
+        if (comb) cs.emplace(b);
+        const bool keep_c = !sc || (comb && cs->can_use_full());
+        detectors_.push_back({b, waveform::StreamDetector(waveform::band(b), config::ACQUIRE_REACH_HZ, keep_c), {}, {},
+                              std::move(cs), {}, {}});
+        if (sc && !comb) sense_combs_.push_back({b, modem::CombStream(b), {}});
+        if (b == "n10") has_n10 = true;
+    }
+    if (has_n10 && config::sc_band("n4") &&
+        std::any_of(config::BANDS.begin(), config::BANDS.end(), [](const auto& b) { return b.name == "n4"; })) {
+        const bool already = std::any_of(sense_combs_.begin(), sense_combs_.end(),
+                                         [](const auto& s) { return s.band == "n4"; });
+        if (!already) sense_combs_.push_back({"n4", modem::CombStream("n4"), {}});
+    }
     if (blank) blanker_.emplace();
     reset();
 }
@@ -214,6 +232,13 @@ void Receiver::reset() {
         d.d.reset();
         d.copy_fold.reset();
         d.presence_fold.reset();
+        if (d.comb) d.comb->reset();
+        d.comb_fold.reset();
+        d.comb_presence_fold.reset();
+    }
+    for (auto& sc : sense_combs_) {
+        sc.comb.reset();
+        sc.presence_fold.reset();
     }
 }
 
@@ -275,6 +300,7 @@ void Receiver::sense_on_air() {
     constexpr int64_t FR = config::FRAME_SAMPLES;
     constexpr int64_t PF = static_cast<int64_t>(modem::COPY_PAIRS) * FR;
     for (auto& det : detectors_) {
+        if (config::sc_band(det.band)) continue;
         const auto level = det.d.level();
         if (!level) continue;
         const auto c = det.d.products_from(start, FR, modem::COPY_PAIRS);
@@ -286,13 +312,62 @@ void Receiver::sense_on_air() {
         const int64_t lo_f = c.start + t0;
         const auto& fold = det.presence_fold.fold(k.rows, k.cols, k.start, lo_f, lo_f + m * FR);
         const auto [pk, ct] = modem::fold_presence(fold, *level, m);
-        if (modem::presence_verdict(pk, ct, m) &&
+        if (modem::presence_verdict(pk, ct, m, det.band) &&
             modem::fold_verify(std::span<const double>(buf_).subspan(static_cast<std::size_t>(lo_f - off_)), det.band,
-                               fold, static_cast<int>(lo_f % FR))) {
+                               fold, lo_f)) {
             present_ = true;
             return;
         }
     }
+    auto check_comb = [&](std::string_view band, modem::CombStream& c, modem::FoldTrack& pfold, bool feed_here) -> bool {
+        if (feed_here) {
+            if (c.fed < off_) c.restart_at(off_);
+            if (c.fed < end)
+                c.feed(waveform::to_baseband(std::span<const double>(buf_).subspan(static_cast<std::size_t>(c.fed - off_)),
+                                             c.fed));
+            c.trim(end - keep_ - FR);
+        }
+        const auto level = c.level();
+        if (!level) return false;
+        const int D = c.decim();
+        const int64_t FR_d = FR / D;
+        const auto intra = modem::sc_intra_spec(config::band(band).nc);
+        const int pad_fr = intra ? (modem::COPY_PAIRS - 1) : modem::COPY_PAIRS;
+        const auto p = c.products_from(start);
+        const auto cols = static_cast<std::size_t>(std::max<int64_t>(
+            0, std::min<int64_t>(static_cast<int64_t>(p.cols),
+                                 (end - p.start - config::M + 1 - c.lag - static_cast<int64_t>(pad_fr) * FR) / D)));
+        const auto [t0_d, m] = modem::presence_window(cols, static_cast<int64_t>(PRESENCE_S * config::FS), D, pad_fr);
+        if (m < modem::PRESENCE_MIN_M) return false;
+        const auto k = c.kept_products();
+        const int64_t lo_d = p.start / D + t0_d;
+        const int64_t lo_f = lo_d * D;
+        const auto& raw_fold = pfold.fold(k.rows, k.cols, k.start / D, lo_d, lo_d + m * FR_d,
+                                          static_cast<std::size_t>(FR_d));
+        Mat<std::complex<double>> fold = raw_fold;
+        for (std::size_t r = 0; r < fold.rows; ++r) {
+            std::complex<double> mu{0, 0};
+            for (std::size_t col = 0; col < fold.cols; ++col) mu += fold[r][col];
+            mu /= static_cast<double>(fold.cols);
+            for (std::size_t col = 0; col < fold.cols; ++col) fold[r][col] -= mu;
+        }
+        std::vector<double> rw;
+        if (intra) rw = modem::copy_row_weights(c.row_levels(), intra->n_combs);
+        const auto [pk, ct] = modem::fold_presence(fold, *level, m, rw);
+        return modem::presence_verdict(pk, ct, m, band) &&
+               modem::fold_verify(std::span<const double>(buf_).subspan(static_cast<std::size_t>(lo_f - off_)), band,
+                                  fold, lo_f, D, rw);
+    };
+    for (auto& det : detectors_)
+        if (det.comb && check_comb(det.band, *det.comb, det.comb_presence_fold, false)) {
+            present_ = true;
+            return;
+        }
+    for (auto& sc : sense_combs_)
+        if (check_comb(sc.band, sc.comb, sc.presence_fold, true)) {
+            present_ = true;
+            return;
+        }
     const int64_t lo = std::max(start, end - static_cast<int64_t>(CPM_PRESENCE_S * config::FS));
     for (const auto* g : grids_) {
         auto& tr = coarse_.at(g->name);
@@ -335,12 +410,27 @@ void Receiver::trim(int64_t n) {
         const int64_t a = n > 0 ? L - n : n == 0 ? 0 : std::min(-n, L);  // buf[-n:]
         buf_.erase(buf_.begin(), buf_.begin() + a);
     }
-    for (auto& d : detectors_) d.d.trim(off_);
+    for (auto& d : detectors_) {
+        d.d.trim(off_);
+        if (d.comb) d.comb->trim(off_);
+    }
+    for (auto& sc : sense_combs_) sc.comb.trim(off_);
 }
 
 Receiver::Stats Receiver::stats(int64_t w0) {
     Stats out;
     out.mats.reserve(detectors_.size());
+    std::size_t z_from = 0;
+    int64_t z_fed = -1;
+    std::vector<std::complex<double>> z_buf;
+    auto baseband = [&](std::size_t from, int64_t fed_at) -> std::span<const std::complex<double>> {
+        if (z_fed != fed_at || z_from != from) {
+            z_buf = waveform::to_baseband(std::span<const double>(buf_).subspan(from), fed_at);
+            z_from = from;
+            z_fed = fed_at;
+        }
+        return z_buf;
+    };
     for (auto& det : detectors_) {
         const auto band = det.band;
         auto& d = det.d;
@@ -354,10 +444,21 @@ Receiver::Stats Receiver::stats(int64_t w0) {
             d.skip_to(d.fed + static_cast<int64_t>(want - from));
             from = want;
         }
-        d.feed(waveform::to_baseband(std::span<const double>(buf_).subspan(from), d.fed));
+        d.feed(baseband(from, d.fed));
         // no search looks further back than keep_ (the statistic grew with
         // a long burst in the buffer)
         d.trim(off_ + len() - keep_ - d.span);
+        if (det.comb) {  // the same audio through the combs (modem::CombStream), skipped over the same way
+            auto& c = *det.comb;
+            if (c.fed < off_) c.restart_at(off_);
+            auto cf = static_cast<std::size_t>(c.fed - off_);
+            if (cf < want) {
+                c.skip_to(c.fed + static_cast<int64_t>(want - cf));
+                cf = want;
+            }
+            c.feed(baseband(cf, c.fed), &d);
+            c.trim(off_ + len() - keep_ - d.span);
+        }
         const int64_t n = len() - w0 - d.span + 1;
         if (n <= 0) continue;
         const int64_t lo = off_ + w0;
@@ -395,6 +496,36 @@ std::optional<modem::Lock> Receiver::find_copy() {
     for (const auto band : config::HEADER_COPY_BANDS) {
         const auto it = std::find_if(detectors_.begin(), detectors_.end(), [&](const Detector& d) { return d.band == band; });
         if (it == detectors_.end()) continue;
+        if (it->comb) {  // the coherent combs' products, kept for the stream
+            auto& c = *it->comb;
+            const auto level = c.level();
+            if (!level) continue;
+            const auto p = c.products_from(off_);
+            const int64_t a = p.start;
+            const auto x = std::span<const double>(buf_).subspan(static_cast<std::size_t>(a - off_));
+            const int D = c.decim();
+            const int64_t FR_d = config::FRAME_SAMPLES / D;
+            const auto cols = static_cast<std::size_t>(std::max<int64_t>(
+                0, std::min(static_cast<int64_t>(p.cols),
+                            (static_cast<int64_t>(x.size()) - config::M + 1 - c.lag - PF) / D)));
+            const int64_t m = static_cast<int64_t>(cols) / FR_d;
+            const Mat<std::complex<double>>* fold_ptr = nullptr;
+            std::size_t fold_shift = 0;
+            if (m >= 1) {
+                const auto k = c.kept_products();
+                fold_ptr = &it->comb_fold.fold(k.rows, k.cols, k.start / D, a / D, a / D + m * FR_d,
+                                               static_cast<std::size_t>(FR_d));
+                fold_shift = static_cast<std::size_t>((a / D) % FR_d);
+            }
+            const auto row_level = c.row_levels();
+            const auto lock = modem::find_copy_comb_stream(x, band, &accept_, p.rows, cols, *level, nullptr,
+                                                           fold_ptr, fold_shift, D, row_level);
+            if (lock && (!best || lock->score > best->score)) {
+                best = lock;
+                best_k = a - off_;
+            }
+            continue;
+        }
         auto& d = it->d;
         const auto level = d.level();
         if (!level) continue;
@@ -405,16 +536,14 @@ std::optional<modem::Lock> Receiver::find_copy() {
         const auto cols = static_cast<std::size_t>(std::max<int64_t>(
             0, std::min(static_cast<int64_t>(c.cols), static_cast<int64_t>(x.size()) - config::M + 1 - PF)));
         const int64_t FR = config::FRAME_SAMPLES, m = static_cast<int64_t>(cols) / FR;
-        Mat<std::complex<double>> fold;
-        if (m >= 1) {  // the running fold, rolled to the products' start
+        const Mat<std::complex<double>>* fold_ptr = nullptr;
+        std::size_t fold_shift = 0;
+        if (m >= 1) {  // the running fold, scanned in-place with shift a % FR
             const auto k = d.kept_products(config::FRAME_SAMPLES, modem::COPY_PAIRS);
-            const auto& R = it->copy_fold.fold(k.rows, k.cols, k.start, a, a + m * FR);
-            fold = Mat<std::complex<double>>(R.rows, R.cols);
-            const auto s = static_cast<std::size_t>(a % FR);
-            for (std::size_t f = 0; f < R.rows; ++f)
-                for (std::size_t ph = 0; ph < R.cols; ++ph) fold[f][ph] = R[f][(s + ph) % R.cols];
+            fold_ptr = &it->copy_fold.fold(k.rows, k.cols, k.start, a, a + m * FR);
+            fold_shift = static_cast<std::size_t>(a % FR);
         }
-        const auto lock = modem::find_copy(x, band, &accept_, c.rows, cols, level, nullptr, m >= 1 ? &fold : nullptr);
+        const auto lock = modem::find_copy(x, band, &accept_, c.rows, cols, level, nullptr, fold_ptr, fold_shift);
         if (lock && (!best || lock->score > best->score)) {
             best = lock;
             best_k = a - off_;

@@ -1015,7 +1015,7 @@ void Engine::preview() {
             if (x.empty()) continue;
             std::vector<modem::cd> y;
             try {
-                y = modem::preview_frame(x, l.cfo, *l.spec, n_f);
+                y = modem::preview_frame(x, l.cfo, *l.spec, n_f, preview_.done);
             } catch (const modem::SyncError&) {  // a frame the preview cannot read: skipped, never the engine thread
                 continue;
             }

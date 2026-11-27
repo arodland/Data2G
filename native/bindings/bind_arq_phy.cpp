@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "arq_convert.hpp"
+#include "modem_dicts.hpp"
 #include "arq/ping.hpp"
 #include "arq/probe.hpp"
 
@@ -80,6 +81,7 @@ Heard heard_of(const py::dict& r) {
     const auto seen = (r.contains("seen_support") ? r["seen_support"] : r["support"]).cast<py::sequence>();
     o->seen_support = {seen[0].cast<int>(), seen[1].cast<int>()};
     o->frames_in = r.contains("frames_in") ? r["frames_in"].cast<int>() : o->n_cw * o->spec->frames_per_cw;
+    o->sc = modem_sc_of(r);
     h.ofdm = std::move(o);
     return h;
 }

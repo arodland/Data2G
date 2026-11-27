@@ -15,7 +15,7 @@ from native_subs.base import EQUALIZER_NATIVE
 
 from data2g import codes, equalizer, hfchannel, modem
 from data2g.arq import phy
-from data2g.config import BANDS, FS, NCP, SUBMODES
+from data2g.config import BANDS, FS, NCP, SC_BANDS, SUBMODES
 from data2g.hfchannel import FadingPreset
 from data2g.waveform import ofdm
 
@@ -66,6 +66,20 @@ def test_pilot_path(native, py, band, n_p, kind, snr):
     ne = native.equalizer
     h = pilots(bb.astype(float), n_p, kind, seed=n_p * 7 + len(bb), snr_db=snr)
     assert ne.residual_cfo(h) == pytest.approx(py.residual_cfo(h), rel=RTOL, abs=1e-12)
+    np.testing.assert_array_equal(ne.hot_carriers(h), py.hot_carriers(h))
+    if n_p > 2:  # a steady tone on one carrier (power & innovation gates) and an exclude mask (issue #330)
+        ht = h.copy()
+        ht[:, len(bb) // 2] += 3 * np.exp(-2j * np.pi * 0.2 * np.arange(n_p))
+        np.testing.assert_array_equal(ne.hot_carriers(ht), py.hot_carriers(ht))
+        assert ne.residual_cfo(ht) == pytest.approx(py.residual_cfo(ht), rel=RTOL, abs=1e-12)
+        hw = h.copy()
+        hw[:, len(bb) // 2] += 2 * np.exp(-2j * np.pi * 0.2 * np.arange(n_p))
+        assert ne.residual_cfo(hw) == pytest.approx(py.residual_cfo(hw), rel=RTOL, abs=1e-12)
+        pk = np.ones(len(bb))
+        pk[0] = 10.0
+        np.testing.assert_array_equal(ne.noisy_carriers(pk), py.noisy_carriers(pk))
+        ex = py.noisy_carriers(pk)
+        assert ne.residual_cfo(ht, ex) == pytest.approx(py.residual_cfo(ht, ex), rel=RTOL, abs=1e-12)
     close(ne.delay_profile(h, bb), py.delay_profile(h, bb), "delay_profile")
     sup = py.delay_support(h, bb=bb)
     assert ne.delay_support(h, bb=bb) == sup
@@ -182,12 +196,12 @@ def _capture(monkeypatch, name):
                                              ("w48-16qam-r1/2", 5, 30.0)] if c[0] in SUBMODES])  # FM has no n4
 def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n_cw, snr):
     # Python's receive, so its equalizer calls can be captured (--native
-    # substitutes the whole of modem.receive)
-    for name in ("receive", "data_channel"):
+    # substitutes the whole of modem.receive), and sc_refine (HF scattered pilots)
+    for name in ("receive", "data_channel", "sc_refine"):
         monkeypatch.setattr(modem, name, reference(modem, name))
     est_calls, ref_calls = _capture(monkeypatch, "estimate"), _capture(monkeypatch, "refine")
     r, post = _received(submode, n_cw, snr, seed=n_cw)
-    assert r is not None and est_calls
+    assert r is not None and (est_calls or SUBMODES[submode].band in SC_BANDS)
     phy._dd_estimate(r, post)  # every other codeword known
     phy._dd_estimate(r, {i: post[0] for i in range(n_cw)})  # all known
     assert len(ref_calls) == 2
