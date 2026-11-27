@@ -74,9 +74,10 @@ def allowed(cap: int) -> list:
 
 # --- the recommendation code ---------------------------------------------------------
 
+REC_EXT = 63  # sentinel in Core.recommend: read extended mode code from T_REC_EXT TLV
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
-# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
-# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
+# ... which leaves its indices 8-14 to n10's past 15 (16-22; index 15 is REC_EXT = 63):
+# the recommendation is 6 bits, band (2) | index (4), every band code taken
 N10_HIGH = 8
 assert len(cpm.SPECS) <= N10_HIGH
 BY_CODE = {code: band for band, code in BANDS_CODE.items()}
@@ -87,16 +88,21 @@ def encode(submode: str) -> int:
     if FM:  # every code a band, every index under 16 (SELECTABLE)
         if submode not in SELECTABLE:
             raise ValueError(f"{submode}: no recommendation code on FM")
-        return BANDS_CODE[s.sync_band] << 4 | s.index
-    if is_cpm(s):
-        return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
-    if s.sync_band == "n10" and s.index >= 16:
-        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
-        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
-    return BANDS_CODE[s.sync_band] << 4 | s.index
+        code = BANDS_CODE[s.sync_band] << 4 | s.index
+    elif is_cpm(s):
+        code = CPM_CODE << 4 | list(cpm.SPECS).index(submode)
+    elif s.sync_band == "n10" and s.index >= 16:
+        assert s.index < 16 + 15 - N10_HIGH, f"{submode}: no recommendation code"
+        code = CPM_CODE << 4 | (N10_HIGH + s.index - 16)
+    else:
+        code = BANDS_CODE[s.sync_band] << 4 | s.index
+    assert code < REC_EXT, f"{submode}: code {code} collides with REC_EXT"
+    return code
 
 
 def decode(rec: int) -> str | None:
+    if rec == REC_EXT or rec < 0 or rec > 63:
+        return None
     if FM:
         s = modem.BY_INDEX.get((BY_CODE[rec >> 4], rec & 15))
         return s.name if s and s.name in SELECTABLE else None

@@ -27,11 +27,11 @@ data2g/arq/__init__.py lists the modules and how they layer. By section (Python 
 | §6, §6a turns, timers, idle | `session.py` |
 | §7 session frames, §7a ID frames, §7b CW ID | `frames.py` (`Connect`, `ConnectAck`, `ConnectNak`, `pack_cq`, `pack_id`); `session.py`; `engine.py`; `cwid.py` |
 | §8 gear shifter | `policy.py` (`GearShifter`); `predictor.py`; `modes.py` (the recommendation code) |
-| §8a T_REPLY only on change | `frames.py` (`T_KEEP`); `link.py` (`Station._keeping`, `_reply_held`, `keep_peer`) |
+| §8a T_REPLY only on change | `link.py` (`Station._reply_held`) |
 | §9 host interface | `data2g/host.py` (native: `native/core/host/`) |
 | §9a stream framing, compression | `frames.py` (`to_records`, `deflate`); `link.py` (`TxSide`, `RxSide`) |
 | §3a primed reception | `link.py` (`Station.expect`, `_primed`, `_implausible`, `expected_modes`), `phy.py` (`ModemRx.decode_known`), `session.py` (`_primed_frame`, `expecting`), `cpm.py` (`prime_lock`), `receiver.py` (`ReplySlot`, `Receiver.expect`), `engine.py` (`_expect_reply`) |
-| §3b nods | `nod.py` (`family`, `detect`, `CODEBOOK`, `NodRx`); `frames.py` (`T_NODS`); `link.py` (`Station._nod_of`, `nod_family`, `nod_payload`, `nod_peer`); `session.py` (direct replies `build(nod=True)`); `engine.py` (`_watch_nods`, `_nod_feed`) |
+| §3b nods | `nod.py` (`family`, `detect`, `CODEBOOK`, `NodRx`); `frames.py` (`CAP_NODS`); `link.py` (`Station._nod_of`, `nod_family`, `nod_payload`, `nod_peer`); `session.py` (`nods`, `local_caps`, direct replies `build(nod=True)`); `engine.py` (`_watch_nods`, `_nod_feed`) |
 | §10 state agreement | `link.py` (`Station._check`, the watchdog) |
 
 ## 1. Terms
@@ -167,10 +167,10 @@ for Data2G).
     cumulative). A blind control saying otherwise fails the session (§10); a primed one is
     only dropped. Then `rx_primed` counts it.
 - **Connect frames** (`Session._primed_frame`). A caller waiting for its CONNECT_ACK knows
-  all of it but the callee's cap and t_turn: tried with those as mine, then unknown. A
-  listener knows a third of a compact CONNECT (the version, its own call), then a cap and
-  t_turn like its own: two tries. A forged CONNECT also has to unpack its caller's 10
-  characters from a 40-of-64 alphabet (about 7 bits more). At the forced floor most
+  all of it but the callee's cap, t_turn, caps and req: tried with defaults/mine, then unknown. A
+  listener knows over a third of a CONNECT (the version, its own base-40 callsign), then a cap,
+  t_turn, caps and req like its own: two tries. A forged CONNECT also has to unpack its caller's
+  54-bit base-40 value under 40^10 (about 55% of random 54-bit values reject). At the forced floor most
   sessions never connected.
 - **The expected slot** (`Receiver.expect`, `cpm.prime_lock`, `ReplySlot`). After my burst
   ends the engine tells the receiver where the peer's reply should start: the median of
@@ -236,23 +236,21 @@ for Data2G).
   outcome data is regenerated with priming on and the model retrained, the shifter picks
   modes as before and the session gains above are without it.
 
-## 3b. Nods (`T_NODS`, 2026-11)
+## 3b. Nods (`CAP_NODS`, 2026-11)
 
 At the floor a control-only reply costs a whole CPM burst (c16r25: 5.0 s) to say what its
 listener mostly knows already. A nod says it without words: one of M keyed c16r25 tone
 sequences, L = 64 tones (2.56 s), detected where the listener expects the reply, not
 decoded. The native host's "Nods" setting (`--no-nods`; default on, from the next session:
-`Engine::set_nods`) turns them off for a station, both directions: it neither sends
-`T_NODS` nor listens, so its peer sends it none. For a link whose reply timing is too
+`Engine::set_nods`) turns them off for a station, both directions: it clears `CAP_NODS` in
+its `CONNECT`/`CONNECT_ACK` and does not listen, so its peer sends it none. For a link whose reply timing is too
 unsteady for the slot (K2CR's TX playout lag on air, 2026-11-13). `DATA2G_NOD=0` turns them off
 everywhere (Python too) for A/B runs.
 
-- **Who nods to whom** (no session version bump). A station that hears nods says so with
-  `T_NODS` (empty), in its control's padding only, until the peer acts on a burst that
-  carried it. A station sends nods only to a peer whose `T_NODS` it has heard (latched
-  for the session); it listens for nods always and takes any that is valid. A peer
-  without nods ignores the TLV and never gets a nod. Drop `T_NODS` at the next session
-  version bump: from then on every peer hears nods.
+- **Who nods to whom.** Negotiated at connect via `CAP_NODS` (bit 0 of `caps` in `CONNECT`
+  and `CONNECT_ACK`, §7; replacing the pre-1.0 `T_NODS` TLV). A station sets `CAP_NODS` when
+  it listens for nods (`Session.nods` and `link.NOD` both on), and sends nods only to a peer
+  that advertised `CAP_NODS` (`Station.nod_peer`).
 - **Family.** M = 32 sequences of L tones, splitmix64 seeded with (0x5167, session key,
   sender's direction, the nod's burst number mod 8, the peer burst it acts on mod 8),
   16 tones per output (Python `nod.family` and C++ `nod::family` agree, pinned in
@@ -333,7 +331,7 @@ everywhere (Python too) for A/B runs.
 | 7 | peer cumulative | the next peer seq this station expects; all below received |
 | 1 | reply lost | the peer's last burst repeated one this station already had (§6) |
 | 6 | K | resends in this burst |
-| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-7; 8-15 under CPM are n10's indices 16-23, `policy.N10_HIGH`) |
+| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-7; 8-15 under CPM are n10's indices 16-23, `policy.N10_HIGH`). Value `63` (`modes.REC_EXT`) is reserved as an escape: the actual mode code rides in `T_REC_EXT` (§5) |
 | 2 | size hint | peer burst length: shrink / hold / grow / max |
 
 Where the rest comes from:
@@ -492,22 +490,31 @@ Where the rest comes from:
 
 ## 5. Extensions (TLV, in control codewords or spare control bytes)
 
+TLV type `0` begins zero padding. Types `1..127` are **ignorable**: a receiver that does not recognize the type skips its `len` bytes. Types `128..255` (`TLV_CRITICAL`) are **critical**: an unknown critical type makes the control malformed and drops the burst (§4).
+
 | type | contents | when |
 |---|---|---|
-| new | start seq (7 bits) of this burst's new codewords | any new codewords |
-| abandon | seq A, a reset flag (deprecated, see below) and the abandon epoch (7 bits) | mode change, resync |
-| rv | 2 bits per resend, slot order | K > 0 |
-| bitmap | 64-bit received map above the cumulative point | any gap |
-| resync | marks a resync burst (§10). Deprecated, see below | §10 |
-| report | SNR (0.5 dB), Doppler class, delay class, effective MI per constellation (4 x 4 bits) | every burst after a change, else every 4th turn |
-| survey | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
-| sound | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
-| buffer | bytes queued (log2), so the peer knows whether to expect data | when it changes |
-| id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
+| new (1) | start seq (7 bits) of this burst's new codewords | any new codewords |
+| abandon (2) | seq A (7 bits) and abandon epoch (8 bits) | mode change, resync |
+| rv (3) | 2 bits per resend, slot order | K > 0 |
+| bitmap (4) | 64-bit received map above the cumulative point | any gap |
+| report (6) | SNR (0.5 dB), Doppler class, delay class, effective MI per constellation (4 x 4 bits) | every burst after a change, else every 4th turn |
+| survey (7) | noise excess per band above the passband median (4 bits each), and busy flag | when it changes |
+| sound (8) | "send your next burst in band B" (for the ACK-sounding up-shift, plan 5b) | shifter asks |
+| buffer (9) | bytes queued (log2), so the peer knows whether to expect data | when it changes |
+| reply (11) | 6-bit mode code (1 B), or empty (0 B) to clear back to none | when the reply recommendation changes (§8a) |
+| chat (12) | empty: low-latency objective (§9) | when chat is on |
+| cq (13) | packed callsign (8 B) and bandwidth cap code (1 B) | CQ frame, mask 0 (§9) |
+| dupctl (14) | empty: ask peer to send data-burst control twice (`ARQ_DUP`) | when recommended data mode is marginal |
 | comp (15) | 1 bit per data slot (resends, then new), MSB first, cut after the last set byte: the codeword is deflated (§9a) | a compressed new codeword, or a compressed resend the peer may not know is one |
+| id (16) | packed callsign, session key: an ID frame, mask 0 (§7a) | periodically and after a session |
 | drained (17) | empty: this burst's new codewords end the sender's queued data (a hint, §6a reply hold) | the burst that slices the last queued byte, only if it fits the control's padding |
 | inline (18) | seq (7 bits) and comp flag, a data codeword's payload with trailing zeros cut, its 2-byte check (§5a) | the burst's last new codeword, when it fits the control's padding |
-| keep (20) | empty: the sender keeps `T_REPLY` (§8a) | until the peer acts on a burst that carried it |
+| ping (21) | FM sounding ping / reply body | FM ping burst, mask 0 |
+| rec_ext (22) | extended recommendation mode code (1 or 2 B, big-endian) | when `Core.recommend == 63` (`modes.REC_EXT`); unknown codes ignored |
+| caps (23) | reserved for extended capability bitmaps when `CAP_EXT` (bit 15 of `caps`) is set | future |
+
+Types 5 (`T_RESYNC`), 19 (`T_NODS`), and 20 (`T_KEEP`) were retired before 1.0 and remain unallocated.
 
 ## 5a. Inline codewords (session version 4)
 
@@ -669,24 +676,35 @@ without). So the last codeword of a write rides in the control's padding when it
   which have no clock. In a session it tripped on links that were slow but alive.
 - **Listen before talk** before any turn that isn't a reply (retries, polls): a
   station doesn't key over a carrier whose header it failed to decode.
-- **Connect frames need a mode with >= 28 B payloads,** so the frame fits one
-  control codeword. At 20% codeword loss, a 2-codeword CONNECT and CONNECT_ACK round
+- **Connect frames need a mode with >= 20 B payloads,** so the unified 20-byte `CONNECT`
+  fits one control codeword on every connect mode (OFDM and CPM alike, including FM's 23 B
+  `n10-qpsk-r1/5`). At 20% codeword loss, a 2-codeword CONNECT and CONNECT_ACK round
   trip got through only ~29% of the time.
 - **A closed callee keeps its session key,** and answers a repeated DISC with
   DISC_ACK, since its first DISC_ACK may have been lost.
 
 ## 7. Session control frames (type 1)
 
-These are sent in the most robust mode the bandwidth cap allows. The fields span
-several control codewords, and callsigns are packed 6 bits per character, up to 10
-characters plus SSID, space padded at the end (a space inside a name is kept).
+Session protocol version is `1` (`MIN_VERSION = 1`, `MAX_VERSION = 1`).
+`CONNECT` is sent as a single 20-byte codeword under `burst.COMPACT_CONNECT` (`ctl_mask(0, 4)`,
+no `Core` or `T_SESS` wrapper) in the most robust mode the bandwidth cap allows (both OFDM and CPM).
+Its two callsigns are base-40 packed into 54 bits each (up to 10 characters from the 40-character
+alphabet `A-Z 0-9 / -` and space, right-padded with space; `40^10 < 2^54`).
+Other session frames (`CONNECT_ACK`, `CONNECT_NAK`, `DISC`, `DISC_ACK`) ride in `T_SESS` inside a
+type-1 control codeword; CQ, ID and ping frames keep 6-bit callsign packing (8 B).
 
 | frame | contents |
 |---|---|
-| CONNECT | protocol version, caller, callee, nonce, bandwidth cap, `T_turn` |
-| CONNECT_ACK | nonce echo, accepted cap (the minimum of both), `T_turn` |
-| CONNECT_NAK | nonce echo, reason: 1 version, 2 not listening, 3 busy (a session or a call of its own under way), 4 refused by the host (ACCEPT couldn't connect) |
-| DISC / DISC_ACK | graceful close; DISC is retried 3 times |
+| CONNECT (20 B) | version (4 bits), caller (54 bits, base-40), callee (54 bits, base-40), nonce (16 bits), bandwidth cap (2 bits), `T_turn` (6 bits, tenths of a second), `caps` (16 bits, optional capabilities: bit 0 `CAP_NODS`, bit 15 `CAP_EXT`), `req` (8 bits, required-feature mask) |
+| CONNECT_ACK (8 B) | subtype, nonce echo (2 B), accepted cap (1 B, minimum of both), `T_turn` (1 B), `caps` (2 B), `req` (1 B) |
+| CONNECT_NAK (5 B) | subtype, nonce echo (2 B), reason (1 B: 1 version, 2 not listening, 3 busy, 4 refused by the host, 5 caps), detail (1 B: `(MIN_VERSION << 4) | MAX_VERSION` for reason 1, unsupported `req` bitmask for reason 5, 0 otherwise) |
+| DISC / DISC_ACK (1 B) | graceful close; DISC is retried 3 times |
+
+Capability negotiation: unknown bits in `caps` are ignored; an unknown bit in `req` (`req & ~SUPPORTED_REQ`)
+is rejected immediately by the callee with `CONNECT_NAK` reason 5 (`NAK_CAPS`, detail = unsupported mask),
+and a caller that receives an unsupported `req` in `CONNECT_ACK` closes immediately (`refused: CAPS 0x<hex>`).
+A callee whose `[MIN_VERSION, MAX_VERSION]` excludes the caller's version replies with `CONNECT_NAK` reason 1
+(`NAK_VERSION`, detail = `(MIN_VERSION << 4) | MAX_VERSION`).
 
 CONNECT retries: 6 tries, 3-5 s apart with jitter, then fail to the host.
 A CONNECT_NAK ends them at once: the caller closes with `refused: <reason>`.
@@ -890,61 +908,33 @@ As built (data2g/arq/policy.py):
 - Switching away from the mode of the peer's outstanding codewords abandons them (§4).
   The recommender charges a switch with the bytes it holds beyond its cumulative ACK.
 
-## 8a. T_REPLY only on change (`T_KEEP`, 2026-11)
+## 8a. T_REPLY only on change (2026-11)
 
 `T_REPLY` (3 B) rides in nearly every control though it changes in about a quarter of
 them (§3b's census), and it is what makes the usual OFDM ACK two codewords: the core is
 4 B and an ACK mode's codeword holds 4 B, so core + `T_REPLY` is ack-4f x2 (1.62 s) or
-ack-1f x2 (0.76 s) where the core alone is x1 (1.05 s, 0.43 s). `DATA2G_KEEP=0` turns it
-off (Python and native) for A/B runs.
+ack-1f x2 (0.76 s) where the core alone is x1 (1.05 s, 0.43 s).
 
-- **Who keeps it** (no session version bump). A station that keeps `T_REPLY` says so with
-  `T_KEEP` (empty) until the peer acts on a burst that carried it: in its control's
-  padding, or in `T_REPLY`'s place where the two together would cost a control codeword
-  more (an OFDM ACK mode's control, full with `T_REPLY`). That swap saves no airtime on
-  its own burst (ack-4f: 7 B and 6 B are both x2) and the peer replies in its own mode
-  meanwhile; it is the bootstrap cost, paid until the peer acts on one, since a control
-  that is always full would never carry `T_KEEP` otherwise. A control that cannot grow
-  (CPM's one codeword) keeps its `T_REPLY` and waits for room. A peer without it ignores
-  the TLV and never says it, so nothing changes for it: `T_REPLY` in every control, and
-  a control without one means none. Drop `T_KEEP` at the next session version bump.
-- **The handshake**, by acted-on alone (`Station._keeping`, `_peer_keeping`,
-  `_reply_held`). Each step is a burst of the peer's that acts on one of mine, so it is
-  known to have been heard:
-  1. *I keep it* once I have heard the peer's `T_KEEP` and the peer has acted on a burst
-     of mine that carried `T_KEEP`. From then on a change to none is said in so many
-     words (an empty `T_REPLY`, 2 B); none the peer already holds is still left out, as
-     "none" and "kept" agree on it.
-  2. *I read the peer's controls as kept* (one without `T_REPLY` leaves the
-     recommendation as it was) once the peer has acted on a burst of mine that carried
-     `T_KEEP` and on one that acted on a `T_KEEP` of its own. That is never before the
-     peer's step 1; until then a control without `T_REPLY` means none, as ever.
-  3. *I leave `T_REPLY` out as unchanged* only once I know the peer is at step 2 for me:
-     it has acted on a burst of mine that acted on its `T_KEEP`, and on one that acted
-     on a burst of its own which acted on mine. Before that, `T_REPLY` goes in full.
-  With step 2 alone a station could be read as "none" where it meant "unchanged" (its
-  peer heard a burst and never acted on it), and stay so until its recommendation moved;
-  step 3 closes that. tests/test_keep.py holds the two ends to the same value through
-  600 random loss patterns with nods and both control sizes.
-- **Rule.** A station leaves `T_REPLY` out when the peer holds the value whichever of its
-  bursts the peer has heard: the last burst of mine it acted on left it so, and none
-  since says otherwise. For a mode that needs step 3; for none it needs no step, as a
-  peer that does not keep yet reads the missing `T_REPLY` as none anyway.
-- **Shed.** `T_REPLY` is still among the TLVs a full control sheds (`OPTIONAL_TLVS`), but
-  once I keep it its value goes first (an empty `T_REPLY`, a byte less: none, said, and
-  the peer falls back to its own reply mode). With not a byte to spare it is dropped
-  altogether: then a peer at step 2 keeps its last value for that burst, what it holds
-  is unknown to me, and my next control says it in full.
+- **Unconditional from burst 0.** Keeping `T_REPLY` is part of session version 1 (the
+  pre-1.0 `T_KEEP` negotiation TLV is retired). Both ends start with no reply
+  recommendation (`None`). A control without `T_REPLY` leaves the peer's last
+  recommendation unchanged; changing back to none sends an empty `T_REPLY` (2 B).
+- **Rule** (`Station._reply_held`). A station leaves `T_REPLY` out when the peer holds the
+  value whichever of its bursts the peer has heard: the last burst of mine it acted on
+  left it so (with virtual burst `-1` holding `None` before burst 0), and none since says
+  otherwise.
+- **Shed.** `T_REPLY` is still among the TLVs a full control sheds (`OPTIONAL_TLVS`), with
+  its value going first (an empty `T_REPLY`, a byte less: none, said, and the peer falls
+  back to its own reply mode). With not a byte to spare it is dropped altogether: then the
+  peer keeps its last value for that burst, what it holds is unknown to me, and my next
+  control says it in full.
 - **Nods (§3b)** already keep `T_REPLY`; their "kept fields" test compares what the peer
   holds after each control (the value said, the value kept, none; never an unknown one).
-  **Primed controls (§3a)**: `T_REPLY` as the peer's last control had it (its value
-  known), until the peer has left a mode out as unchanged (its step 3); from then on
-  without. The other ways (left out, said with its value unknown, none) come after the
-  `T_DUPCTL` ones, as the value-unknown one always did, so the first `PRIME_TRIES` keep
-  the shapes they had before `T_KEEP`. No hypothesis carries `T_KEEP` once the peer has
-  stopped saying it. The expected reply slot listens for the reply mode the peer holds:
+  **Primed controls (§3a)**: `T_REPLY` omitted as unchanged once the peer has established a
+  recommendation, with `T_REPLY` said (unknown value) and empty `T_REPLY` (none) as
+  fallback hypotheses. The expected reply slot listens for the reply mode the peer holds:
   the one said, or where `T_REPLY` was shed, those said since the last burst the peer
-  acted on; not one left out for `T_KEEP` (the peer picks its own).
+  acted on.
 - **Measured** (shift+cpm, DATA2G_PEP_REF_DB=5, paired by seed against `DATA2G_KEEP=0`).
   Bulk (`scripts/loss_study.py`, 16 seeds x 300 s, delivered bps): awgn -10 +1.3% (SE
   0.7; 3 seeds better, 0 worse), awgn -6 +3.9% (0.3; 16/0), awgn -4 +4.9% (0.7; 14/0),
@@ -1104,8 +1094,9 @@ off (Python and native) for A/B runs.
     - DISCONNECTED carries a reason word, then detail words for some:
       CLIENT (DISCONNECT, or the command client left), IDLE (idle timeout),
       PEER (the peer's DISC), ABORT, LINK_LOST, LINK_FAILED why, NO_ANSWER,
-      PEER_RECONNECTED, and a CONNECT_NAK's BUSY, VERSION, NOT_LISTENING or
-      REFUSED (unknown NAK: REFUSED reason n). CLIENT and IDLE end in
+      PEER_RECONNECTED, and a CONNECT_NAK's BUSY, VERSION (with `min-max` range when
+      supplied), NOT_LISTENING, REFUSED, or CAPS (with `0xXX` unsupported `req` mask;
+      unknown NAK: REFUSED reason n). CLIENT and IDLE end in
       `unconfirmed` when the DISC was never acked.
     - Data read from the data port before CONNECTED is dropped, so the queue is
       empty at CONNECTED and offset 0 is the first byte written after it. VARA
@@ -1208,17 +1199,12 @@ forever without progress, because they disagree about protocol state.
   station delivered new bytes. Count turns in which both sides decode each other's
   control words but neither makes progress while data is queued. At 8 such turns,
   enter resync:
-  - The sender abandons from its window base, with the reset flag set. The base is
+  - The sender abandons from its window base with an incremented 8-bit abandon epoch
+    (the pre-1.0 `T_RESYNC` TLV and abandon reset bit are retired). The base is
     the receiver's cumulative ACK, which both sides know.
   - It re-slices from there at RV0.
-  - The receiver drops every stored soft bit for that direction.
-  - **Deprecated on the wire: the reset flag and the resync TLV.** They are still sent
-    and never read. Every new abandon (a new epoch) makes the receiver drop all its soft
-    bits for the direction, reset flag or not: the epoch is in each data codeword's CRC
-    mask, so nothing kept from before could combine anyway. A receiver has no use for
-    either; they label the sender's log line ("resync" rather than "abandon"). Not an
-    unused tool to wire up. Drop both at the next wire change that touches the abandon
-    TLV.
+  - The receiver drops every stored soft bit for that direction (the new epoch is in each
+    data codeword's CRC mask, so nothing kept from before could combine anyway).
 - **Burst seqs can't alias.**
   - Each station numbers its bursts absolutely; the wire carries the number mod 8.
   - It never has more than 7 bursts the peer hasn't acted on. At that limit its turn is

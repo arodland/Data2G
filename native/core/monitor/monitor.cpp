@@ -30,7 +30,7 @@ std::string ext_desc(const Ext& ext) {
     for (const auto& [t, v] : ext) {
         std::string s = ext_name(t);
         if (t == T_NEW && !v.empty()) s += " " + std::to_string(v[0]);
-        if (t == T_ABANDON && v.size() >= 2) s += " " + std::to_string(v[0]) + " epoch " + std::to_string(v[1] >> 1);
+        if (t == T_ABANDON && v.size() >= 2) s += " " + std::to_string(v[0]) + " epoch " + std::to_string(v[1]);
         if (t == T_BUFFER && v.size() == 2) s += " " + std::to_string(v[0] << 8 | v[1]);
         if (t == T_REPLY && !v.empty()) {
             const Mode* m = decode(v[0]);
@@ -255,11 +255,13 @@ bool Monitor::broadcast(PlainRx& rx, Dump& d) {
 }
 
 bool Monitor::keyed(PlainRx& rx, Dump& d) {
-    // a compact CONNECT (CPM's one short control codeword): its own mask
+    // unified 20-byte CONNECT (all modes): its own mask
     const Mode& m = mode_at(rx.submode());
-    if (ceil_div(CONNECT_CTL_BYTES, ctl_payload_bytes(m)) > max_ctl(m))
+    if (ctl_payload_bytes(m) >= COMPACT_BYTES)
         if (auto p = rx.decode_plain(0, COMPACT_CONNECT)) {
-            session_frame(unpack_connect(*p), 0, 0, d);
+            Bytes body{static_cast<std::uint8_t>(CONNECT)};
+            body.insert(body.end(), p->begin(), p->begin() + COMPACT_BYTES);
+            session_frame(body, 0, 0, d);
             return true;
         }
     std::vector<std::pair<int, int>> masks{{0, 0}, {1, 0}};  // (key, direction); key 0: CONNECT, CQ, ID
@@ -318,12 +320,12 @@ bool Monitor::keyed(PlainRx& rx, Dump& d) {
 void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
     const int sub = at(body, 0);
     std::string s;
-    if (sub == CONNECT && body.size() < Connect::BYTES) {  // another VERSION's: not ours to decode
+    if (sub == CONNECT && body.size() < 1 + Connect::BYTES) {  // another VERSION's: not ours to decode
         d.head += "  CONNECT of " + std::to_string(body.size()) + " B, not read\n";
         return;
     }
     if (sub == CONNECT) {
-        const Connect c = Connect::unpack(body);
+        const Connect c = Connect::unpack(ByteView(body).subspan(1));
         const std::string &caller = c.caller, &callee = c.callee;
         const int nonce = static_cast<int>(c.nonce);
         const int k = session_key(caller, callee, nonce);
@@ -336,9 +338,9 @@ void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
                 x.epoch = 0;  // a new session's slicing: no abandon yet, so resends are read (and combined) from the first
                 x.epoch_known = true;
             }
-        char t[96];
-        std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s -> key %04x", c.version, nonce, c.cap,
-                      c.t_turn10 / 10.0, k);
+        char t[128];
+        std::snprintf(t, sizeof t, " v%d nonce %04x cap %d t_turn %.1f s caps %04x req %02x -> key %04x", c.version, nonce,
+                      c.cap, c.t_turn10 / 10.0, c.caps, c.req, k);
         s = "CONNECT " + caller + ">" + callee + t;
     } else if (sub == CONNECT_ACK || sub == CONNECT_NAK) {
         const int nonce = be16(body, 1);
@@ -346,6 +348,16 @@ void Monitor::session_frame(const Bytes& body, int key, int dir, Dump& d) {
         s = std::string(sub == CONNECT_ACK ? "CONNECT_ACK " : "CONNECT_NAK ") +
             (it == connects_.end() ? "?>?" : it->second.second + ">" + it->second.first) + " nonce " + hex4(nonce) +
             (sub == CONNECT_ACK ? " cap " : " reason ") + std::to_string(at(body, 3));
+        if (sub == CONNECT_ACK && body.size() >= ConnectAck::BYTES) {
+            const ConnectAck a = ConnectAck::unpack(body);
+            char t[48];
+            std::snprintf(t, sizeof t, " caps %04x req %02x", a.caps, a.req);
+            s += t;
+        } else if (sub == CONNECT_NAK && body.size() >= ConnectNak::BYTES && body[4]) {
+            char t[24];
+            std::snprintf(t, sizeof t, " detail %02x", body[4]);
+            s += t;
+        }
     } else if (sub == DISC || sub == DISC_ACK) {
         s = std::string(sub == DISC ? "DISC " : "DISC_ACK ") + who(key, dir) + " key " + hex4(key);
     } else {
@@ -381,7 +393,7 @@ void Monitor::arq_burst(PlainRx& rx, const Control& ctl, int key, int dir, int d
     flush(o, key, 1 - dir, d);
 
     if (const auto e = ext.find(T_ABANDON); e != ext.end() && e->second.size() >= 2) {
-        const int epoch = e->second[1] >> 1;  // 7 bits; a scan (below) finds it mod EPOCH_MOD
+        const int epoch = e->second[1];  // 8 bits; a scan (below) finds it mod EPOCH_MOD
         if (!s.epoch_known || pmod(epoch, EPOCH_MOD) != pmod(s.epoch, EPOCH_MOD)) {
             s.epoch = epoch;
             s.epoch_known = true;

@@ -44,7 +44,7 @@ def test_core_and_control(native, pure):
         raw = bytes(rng.randrange(256) for _ in range(rng.randint(0, 6)))
         assert vars(F.Core.unpack(raw)) == {k: getattr(a.Core.unpack(raw), k) for k in kw}
         ext = {t: bytes(rng.randrange(256) for _ in range(rng.randint(0, 12)))
-               for t in rng.sample([F.T_NEW, F.T_RV, F.T_BITMAP, F.T_COMP, 200], rng.randint(0, 4))}
+               for t in rng.sample([F.T_NEW, F.T_RV, F.T_BITMAP, F.T_COMP, 100], rng.randint(0, 4))}
         for pb in (4, 20, 46):
             try:
                 want = F.Control(F.Core(**kw), dict(ext)).pack(pb)
@@ -56,6 +56,11 @@ def test_core_and_control(native, pure):
             assert a.Control(core, dict(ext)).pack(pb) == want and core.n_ctl == len(want)
             got = a.Control.unpack(want)
             assert got.ext == F.Control.unpack(want).ext and got.core.k == kw["k"]
+    # unknown critical TLV (>= 128) rejected identically by Python and native
+    crit = F.Control(F.Core(), {200: b"\x01"}).pack(20)
+    for codec in (F.Control, a.Control):
+        with pytest.raises(ValueError):
+            codec.unpack(crit)
     junk = [bytes([0, 0, 0, 0, F.T_NEW, 9, 1])]
     for codec in (F.Control, a.Control):
         with pytest.raises(ValueError):

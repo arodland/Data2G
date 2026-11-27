@@ -12,7 +12,7 @@ def substitutions(native):
     a = native.arq
     out = {(frames, f): getattr(a, f) for f in ("Core", "Control", "pack_bitmap", "unpack_bitmap", "pack_rv", "unpack_rv",
                                                  "pack_flags", "unpack_flags", "deflate", "deflate_fit", "inflate",
-                                                 "pack_call", "unpack_call", "pack_connect", "unpack_connect", "to_records",
+                                                 "pack_call", "unpack_call", "pack_call_b40", "unpack_call_b40", "to_records",
                                                  "RecordReader")}
     out.update({(link, f): getattr(a, f) for f in ("unwrap", "ctl_mask", "data_mask", "Station")})
     out.update({(burst, f): getattr(a, f) for f in ("ctl_mask", "data_mask")})

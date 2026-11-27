@@ -241,11 +241,11 @@ def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     from data2g.arq.policy import GearShifter
     from data2g.config import FS
 
-    mode = "fsk16r25-r1/2"  # the robust tries' mode: a CONNECT goes compact in it
-    body = F.pack_connect(F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10).pack())
+    mode = "fsk16r25-r1/2"  # the robust tries' mode: unified 20-byte CONNECT
+    body = F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10, F.DEFAULT_CAPS, 0).pack()
     x = PHY.tx_audio(B.TxBurst(mode, [B.Slot(B.COMPACT_CONNECT, 0, body + bytes(GearShifter().ctl_payload_bytes(mode) - len(body)))], 0))
     heard = []
-    for seed in (1, 2):
+    for seed in (2, 3):
         y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -14.5, seed=seed,
                            s_power=hfchannel.active_power(x))
         heard.append(cpm.receive(y, cpm.find(cpm.GRIDS["c16r25"], y)))

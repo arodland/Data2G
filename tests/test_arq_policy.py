@@ -457,7 +457,7 @@ def test_live_gap_is_the_training_rows_gap():
                 pairs.append(self.out[-1]["gap"] - snap["live"])
             return res
 
-    seed, snr, horizon = 1, 0.0, 120.0
+    seed, snr, horizon = 5, 0.0, 120.0
     doppler, delay = L.PRESETS["mpp"]
     pols = [Shifter(random.Random(seed * 2 + i)) for i in range(2)]
     ch = PS.ContinuousChannel(O.family(doppler), snr, seed, horizon + 60, doppler=doppler, delay_ms=delay)

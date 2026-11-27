@@ -128,19 +128,24 @@ std::vector<const Mode*> allowed(int cap) {
 
 int encode(std::string_view submode) {
     const Mode& m = mode_at(submode);
+    int code = 0;
     if (FM) {  // every code a band, every index under 16 (selectable)
         if (!selectable(m)) throw std::out_of_range(std::string(submode) + ": no recommendation code on FM");
-        return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
+        code = band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
+    } else if (m.is_cpm()) {
+        code = CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
+    } else if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
+        if (m.ofdm->index >= 16 + 15 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
+        code = CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
+    } else {
+        code = band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
     }
-    if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
-    if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
-        if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
-        return CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
-    }
-    return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
+    if (code >= REC_EXT) throw std::out_of_range(std::string(submode) + ": collides with REC_EXT");
+    return code;
 }
 
 const Mode* decode(int rec) {
+    if (rec == REC_EXT || rec < 0 || rec > 63) return nullptr;
     if (!FM && rec >> 4 == CPM_CODE) {
         const auto i = static_cast<std::size_t>(rec & 15);
         if (i >= static_cast<std::size_t>(N10_HIGH)) {
