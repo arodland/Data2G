@@ -114,6 +114,30 @@ const Wht& wht(std::string_view band) {
     throw std::out_of_range("no header code for band " + std::string(band));
 }
 
+// modem.CONNECT_HEADER (docs/pending-header.md)
+std::span<const ConnectHeader> connect_headers() {
+    if constexpr (PROFILE == "fm") {
+        static constexpr std::array<ConnectHeader, 3> T{{
+            {"w", 15, "qpsk-r1/5", 6},
+            {"n10", 31, "n10-qpsk-r1/3", 5},
+            {"n10", 30, "n10-qpsk-r1/5", 5},
+        }};
+        return T;
+    } else {
+        static constexpr std::array<ConnectHeader, 2> T{{
+            {"w", 15, "qpsk-r1/5", 6},
+            {"n10", 31, "n10-qpsk-r1/3", 5},
+        }};
+        return T;
+    }
+}
+
+const ConnectHeader* connect_header_at(std::string_view band, int index) {
+    for (const auto& ch : connect_headers())
+        if (ch.band == band && ch.index == index) return &ch;
+    return nullptr;
+}
+
 // valid_words' 10-bit values (word >> 6), in order
 std::vector<int> valid_values(std::string_view band, const Accept* accept) {
     const int b = cw_bits(band);
@@ -125,6 +149,12 @@ std::vector<int> valid_values(std::string_view band, const Accept* accept) {
     } else {
         for (const auto& s : SUBMODES)
             if (s.sync_band == band) lim[static_cast<size_t>(s.index)] = max_codewords(band);
+    }
+    for (const auto& ch : connect_headers()) {
+        if (ch.band != band) continue;
+        const Spec* target = config::submode(ch.mode);
+        if (target && lim[static_cast<size_t>(target->index)] >= 1)
+            lim[static_cast<size_t>(ch.index)] = 1 << ch.bits;
     }
     std::vector<int> out;
     for (int v = 0; v < 1024; ++v)
@@ -285,6 +315,18 @@ std::vector<float> header_corr(std::span<const double> soft, std::string_view ba
     return corr_of(soft, band, valid_values(band, accept));
 }
 
+std::optional<ConnectHeader> connect_header_for(std::string_view mode) {
+    for (const auto& ch : connect_headers())
+        if (ch.mode == mode) return ch;
+    return std::nullopt;
+}
+
+std::optional<int> connect_hash_of(int word, std::string_view band) {
+    const int v = word >> 6, b = cw_bits(band);
+    if (connect_header_at(band, v >> b)) return v & ((1 << b) - 1);
+    return std::nullopt;
+}
+
 Header decode_header(std::span<const double> soft, std::string_view band, const Accept* accept) {
     const auto vs = valid_values(band, accept);
     if (vs.empty()) throw std::invalid_argument("decode_header: no valid words");
@@ -299,9 +341,14 @@ Header decode_header(std::span<const double> soft, std::string_view band, const 
     h.word = vs[i] << 6 | crc6(vs[i]);
     h.score = static_cast<double>(corr[i]) / (norm + 1e-12);
     const int v = h.word >> 6, b = cw_bits(band);
-    h.spec = by_index(band, v >> b);
+    if (const auto* ch = connect_header_at(band, v >> b)) {
+        h.spec = config::submode(ch->mode);
+        h.n_cw = 1;
+    } else {
+        h.spec = by_index(band, v >> b);
+        h.n_cw = (v & ((1 << b) - 1)) + 1;
+    }
     if (!h.spec) throw std::logic_error("valid word without a submode");
-    h.n_cw = (v & ((1 << b) - 1)) + 1;
     return h;
 }
 
@@ -319,7 +366,7 @@ std::vector<int64_t> ace_cells(const Spec& spec, int n_f) {
     return out;
 }
 
-std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec) {
+std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec, std::optional<int> connect_hash) {
     const auto& b = waveform::band(spec.band);
     const auto& sb = waveform::band(spec.sync_band);
     const size_t nc = static_cast<size_t>(b.nc()), snc = static_cast<size_t>(sb.nc());
@@ -327,7 +374,15 @@ std::vector<double> burst_waveform(const Mat<cd>& data_in, const Spec& spec) {
         throw std::invalid_argument("burst_waveform: need (n_f * 5, nc) data symbols");
     int n_f = static_cast<int>(data_in.rows / DATA_SYMS_PER_FRAME);
     const int n_cw = n_f / spec.frames_per_cw;
-    const auto hbits = header_bits(spec.index, n_cw, spec.sync_band);
+    std::vector<std::uint8_t> hbits;
+    if (connect_hash) {
+        const auto ch = connect_header_for(spec.name);
+        if (!ch || n_cw != 1 || *connect_hash < 0 || *connect_hash >= (1 << ch->bits))
+            throw std::invalid_argument("burst_waveform: invalid connect_hash");
+        hbits = header_bits(ch->index, *connect_hash + 1, spec.sync_band);
+    } else {
+        hbits = header_bits(spec.index, n_cw, spec.sync_band);
+    }
     const auto hdr = constellation::modulate(hbits, qpsk());  // (header_syms * snc)
     const int hs = sb.spec->header_syms;
     const auto kc = copy_frame(spec.sync_band, n_f);
@@ -505,7 +560,8 @@ void set_tx_path(std::string_view path) {
     tx_path_ = std::string(path);
 }
 
-std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec, std::string_view path) {
+std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec, std::string_view path,
+                                  std::optional<int> connect_hash) {
     if (path.empty()) path = tx_path();
     if (path != "mic" && path != "flat")
         throw std::invalid_argument("tx_path: '" + std::string(path) + "', not mic or flat");
@@ -517,7 +573,7 @@ std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec
     if (sym.size() % (DATA_SYMS_PER_FRAME * nc)) throw std::invalid_argument("modulate_bits: not whole frames");
     Mat<cd> data(sym.size() / nc, nc);
     data.data = sym;
-    const auto x = burst_waveform(data, spec);
+    const auto x = burst_waveform(data, spec, connect_hash);
     waveform::Projector project;
     if (!spec.ace.empty()) {
         const int m = pts.m;
@@ -563,7 +619,7 @@ std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec
 }
 
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
-                             std::span<const int> rvs, std::string_view tx_path) {
+                             std::span<const int> rvs, std::string_view tx_path, std::optional<int> connect_hash) {
     if (payloads.empty() || payloads.size() > static_cast<size_t>(max_codewords(spec.sync_band)))
         throw std::invalid_argument("1.." + std::to_string(max_codewords(spec.sync_band)) + " codewords per burst, got " +
                                     std::to_string(payloads.size()));
@@ -576,7 +632,7 @@ std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads
     }
     const auto bits = codes::spread<std::uint8_t>(coded, static_cast<int>(payloads.size()), spec.bits_per_cu,
                                                   spread_group(spec));
-    return modulate_bits(bits, spec, tx_path);
+    return modulate_bits(bits, spec, tx_path, connect_hash);
 }
 
 // --- receive ------------------------------------------------------------------
@@ -990,6 +1046,7 @@ Lock find_burst(std::span<const double> x, std::span<const std::string_view> ban
     l.end = burst_end(b.hd.p0, *l.spec, l.n_cw);
     l.p0 = b.hd.p0;
     l.cfo = b.acq.freq_offset;
+    l.connect_hash = connect_hash_of(b.hd.hdr.word, l.band);
     return l;
 }
 
@@ -2082,6 +2139,7 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
                         l.p0 = p0;
                         l.cfo = f;
                         l.copy = CopyRef{h.word, pc};
+                        l.connect_hash = connect_hash_of(h.word, sb.name);
                         found.push_back(l);
                     }
                 }

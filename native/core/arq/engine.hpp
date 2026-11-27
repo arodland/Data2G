@@ -317,7 +317,7 @@ public:
     std::string cw_id = "off";  // "off", "add", "only" (CW_PLAN_S)
     double cw_wpm = cwid::WPM;
     std::string hand_round = "full";  // "cheap": --hand-decoder cheap's grids (hand::ROUND_CHEAP)
-    std::string pending = "fsk";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
+    std::string pending = "all";  // "off", "fsk", "ofdm", "all" (PENDING_SLACK_S)
     // Nods (docs/arq.md §3b) from the next session (one in progress keeps what it told its peer).
     void set_nods(bool on);
     bool nods() const { return nods_; }

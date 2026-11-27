@@ -299,7 +299,8 @@ def test_unknown_phy_header_index_treated_as_foreign_air():
     for sync_band in ("w", "n10", "w48"):
         if sync_band not in BANDS:
             continue
-        used = {s.index for s in SUBMODES.values() if s.sync_band == sync_band}
+        used = ({s.index for s in SUBMODES.values() if s.sync_band == sync_band}
+                | {idx for band, idx in modem.CONNECT_HEADER if band == sync_band})
         max_idx = (1 << (10 - config.CW_BITS.get(sync_band, 6))) - 1
         spare = next((idx for idx in range(max_idx, -1, -1) if idx not in used), None)
         if spare is None:

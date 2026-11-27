@@ -393,11 +393,53 @@ def header_symbols(grid: str, word: int) -> np.ndarray:
     return np.random.default_rng([g.m, int(g.rate * 100), word] + [g.L] * (g.L > 1)).integers(0, g.m, hdr_len(g))
 
 
+# Dedicated CONNECT header words (docs/pending-header.md): spare 4-bit header index 15
+# carrying a 3-bit callee-callsign hash in the n_data field (the burst is always control-only:
+# n_data=0, dup=False). Measured on the CPM floor: +8 words keeps fading floor identical and
+# AWGN within ~0.1 dB; +16 cost ~0.25 dB.
+CONNECT_INDEX = 15
+CONNECT_HASH_BITS = 3
+CONNECT_HEADER = {"c16r25": "fsk16r25-r1/2", "c8w50": "fsk8w50-r1/2"}
+_CONNECT_BY_MODE = {mode: (grid, CONNECT_INDEX, CONNECT_HASH_BITS) for grid, mode in CONNECT_HEADER.items()}
+
+
+def _connect_headers_active() -> bool:
+    from . import modem
+
+    return modem._connect_headers_active()
+
+
+def connect_header_for(name: str) -> tuple[str, int, int] | None:
+    """(grid, pseudo_index, hash_bits) if `name` carries a dedicated CPM CONNECT header, else None."""
+    return _CONNECT_BY_MODE.get(name) if _connect_headers_active() else None
+
+
+def _header_word_for(spec: CpmSpec, n_data: int, dup: bool, connect_hash: int | None = None) -> int:
+    if connect_hash is not None:
+        ch = connect_header_for(spec.name)
+        if ch is None or n_data != 0 or dup or not 0 <= connect_hash < (1 << ch[2]):
+            raise ValueError(f"connect_hash={connect_hash} invalid for {spec.name} (n_data={n_data}, dup={dup})")
+        return header_word(ch[1], connect_hash, False)
+    return header_word(spec.index, n_data, dup)
+
+
 @lru_cache(maxsize=None)
 def valid_words(grid: str) -> tuple:
-    """(spec, n_data, dup, tones) of every word this grid's header carries."""
+    """(spec, n_data, dup, tones) of every regular word this grid's header carries."""
     return tuple((s, n, d, header_symbols(grid, header_word(s.index, n, d))) for s in grid_specs(grid)
                  for d in (False, True) for n in range(MAX_DATA + 1))
+
+
+@lru_cache(maxsize=None)
+def _all_words(grid: str) -> tuple:
+    """(spec, n_data, dup, connect_hash, tones) of every word this grid's header carries,
+    including CONNECT_HEADER's callee-hash words."""
+    out = [(s, n, d, None, t) for s, n, d, t in valid_words(grid)]
+    if _connect_headers_active() and grid in CONNECT_HEADER:
+        s = SPECS[CONNECT_HEADER[grid]]
+        for h in range(1 << CONNECT_HASH_BITS):
+            out.append((s, 0, False, h, header_symbols(grid, header_word(CONNECT_INDEX, h, False))))
+    return tuple(out)
 
 
 # --- layout --------------------------------------------------------------------------
@@ -489,7 +531,7 @@ def bandpass(g: Grid, x: np.ndarray, cap: int = 0) -> np.ndarray:
     return tx_condition(x, g.clip_db, f.overshoot, bandpass=(g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp))
 
 
-def modulate(spec: CpmSpec, coded: list, dup: bool, cap: int = 0) -> np.ndarray:
+def modulate(spec: CpmSpec, coded: list, dup: bool, cap: int = 0, connect_hash: int | None = None) -> np.ndarray:
     """Every slot's coded bits (data2g.codes.encode's, mapping order; the
     control codeword first, twice if dup) -> audio, filtered for the
     bandwidth cap `cap` (TX_FILTERS)."""
@@ -499,7 +541,7 @@ def modulate(spec: CpmSpec, coded: list, dup: bool, cap: int = 0) -> np.ndarray:
     lay = layout(spec.grid, len(stream))
     sym = np.empty(lay.n, int)
     sym[lay.sync_rows] = lay.sync_tones
-    h = header_symbols(spec.grid, header_word(spec.index, n_data, dup))
+    h = header_symbols(spec.grid, _header_word_for(spec, n_data, dup, connect_hash))
     for rows in lay.hdr_rows:
         sym[rows] = h
     sym[lay.data_rows] = stream
@@ -1020,7 +1062,7 @@ def header_rows(grid: str, copies: int) -> tuple:
     """Per valid word, the rows of its first `copies` header copies: the
     second's depend on the word's length when the burst is short."""
     return tuple(np.concatenate(layout(grid, stream_symbols(grid, n, d)).hdr_rows[:copies])
-                 for _, n, d, _ in valid_words(grid))
+                 for _, n, d, _, _ in _all_words(grid))
 
 
 def tone_llr(g: Grid, E: np.ndarray) -> np.ndarray:
@@ -1040,22 +1082,26 @@ def _segments(L: np.ndarray, rows: np.ndarray, t: np.ndarray, H: int) -> float:
     return sum(max(float(L[rows[i:i + H], t].sum()), 0.0) for i in range(0, len(rows), H))
 
 
+def _read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
+    rows = header_rows(g.name, copies)
+    L = tone_llr(g, _energies(g, x, s0, max(r[-1] for r in rows) + 1, cfo))
+    f = preamble_pattern(g)
+    front = float(L[np.arange(len(f)), f].sum())
+    words = _all_words(g.name)
+    H = hdr_len(g)
+    scores = max(front, 0.0) + np.array([_segments(L, r, t, H) for r, (*_, t) in zip(rows, words)])
+    order = np.argsort(scores)[::-1]
+    spec, n, d, ch, _ = words[order[0]]
+    return spec, n, d, float(scores[order[0]]), float(scores[order[1]]), front, ch
+
+
 def read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
     """-> (spec, n_data, dup, score, runner-up score, front): ML over the
     grid's valid words of tone_llr summed over the front block and the first
     `copies` header copies (1: all an early lock has), each word's at its own
     rows, each block's sum floored at 0 (_segments); `front`: the front
     block's sum, unfloored."""
-    rows = header_rows(g.name, copies)
-    L = tone_llr(g, _energies(g, x, s0, max(r[-1] for r in rows) + 1, cfo))
-    f = preamble_pattern(g)
-    front = float(L[np.arange(len(f)), f].sum())
-    words = valid_words(g.name)
-    H = hdr_len(g)
-    scores = max(front, 0.0) + np.array([_segments(L, r, t, H) for r, (*_, t) in zip(rows, words)])
-    order = np.argsort(scores)[::-1]
-    spec, n, d, _ = words[order[0]]
-    return spec, n, d, float(scores[order[0]]), float(scores[order[1]]), front
+    return _read_header(g, x, s0, cfo, copies)[:6]
 
 
 def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int, dup: bool):
@@ -1074,7 +1120,8 @@ def soft(g: Grid, spec: CpmSpec, x: np.ndarray, s0: int, cfo: float, n_data: int
 REFINE_SYMBOLS = 300  # refine's look: the burst's first symbols (the full burst gained nothing more, 2026-10-26)
 
 
-def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: int, dup: bool) -> tuple:
+def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: int, dup: bool,
+           connect_hash: int | None = None) -> tuple:
     """A lock's (start, cfo) -> the noncoherent likelihood's best over the
     burst's first REFINE_SYMBOLS symbols: known tones (sync blocks, header
     copies of the word read) by llrs's metric, the rest (control, data) by
@@ -1082,7 +1129,7 @@ def refine(g: Grid, x: np.ndarray, s0: int, cfo: float, spec: CpmSpec, n_data: i
     detect's fine stage reads the front alone, and its residual error cost
     the data 0.5 dB at the AWGN floor (c16r25; 2 Hz or T/32 off: 0.2 dB)."""
     lay = layout(g.name, stream_symbols(g.name, n_data, dup))
-    h = header_symbols(g.name, header_word(spec.index, n_data, dup))
+    h = header_symbols(g.name, _header_word_for(spec, n_data, dup, connect_hash))
     n = min(lay.n, REFINE_SYMBOLS)
     known = np.full(n, -1)
     for rows, t in [(lay.sync_rows, lay.sync_tones)] + [(r, h) for r in lay.hdr_rows]:
@@ -1302,10 +1349,11 @@ def find(g: Grid, x: np.ndarray, threshold: float | None = None, reach_hz: float
     if s0 < 0:
         return None  # fine timing moved a lock at x's first sample before it: its front is cut off
     if threshold is not None:
-        return _lock(g, s0, cfo, score, read_header(g, x, s0, cfo, copies=1), 1)
+        h = _read_header(g, x, s0, cfo, copies=1)
+        return _lock(g, s0, cfo, score, h, 1, connect_hash=h[6])
     h, ok = _lock_header(g, x, s0, cfo, 1)
     if ok:
-        return _lock(g, s0, cfo, score, h, 1)
+        return _lock(g, s0, cfo, score, h, 1, connect_hash=h[6])
     if h[5] < WAIT_LLR[g.name]:
         return None  # noise, or a burst's data or a later sync block, its front missed
     # a front, its first header copy faded: both copies, once the second is in
@@ -1322,7 +1370,7 @@ def late_lock(g: Grid, x: np.ndarray, cand: dict):
     h, ok = _lock_header(g, x, cand["start"], cand["cfo"], HDR_COPIES)
     if not ok:
         return None
-    return _lock(g, cand["start"], cand["cfo"], cand["score"], h, HDR_COPIES)
+    return _lock(g, cand["start"], cand["cfo"], cand["score"], h, HDR_COPIES, connect_hash=h[6])
 
 
 def find_mid(g: Grid, x: np.ndarray, lo: int = 0, hi: int | None = None, track: CoarseTrack | None = None,
@@ -1344,17 +1392,17 @@ def find_mid(g: Grid, x: np.ndarray, lo: int = 0, hi: int | None = None, track: 
     h = read_mid(g, x, p, cfo)
     if h is None or h[3] < MID_LLR[g.name] or h[3] - h[4] < HDR_MARGIN[1]:
         return None
-    return _lock(g, h[5], cfo, score, h, HDR_COPIES)
+    return _lock(g, h[5], cfo, score, h, HDR_COPIES, connect_hash=h[6])
 
 
 def read_mid(g: Grid, x: np.ndarray, p: int, cfo: float):
-    """A mid block at p -> (spec, n_data, dup, score, runner-up, start) or
+    """A mid block at p -> (spec, n_data, dup, score, runner-up, start, connect_hash) or
     None: ML over the valid words of tone_llr summed over every known row
     (the mid block; front and both header copies as read_header floors
     them), each word read at the start its mid block row implies (a start
     before x is no reading)."""
     T = g.T
-    words, rows = valid_words(g.name), header_rows(g.name, HDR_COPIES)
+    words, rows = _all_words(g.name), header_rows(g.name, HDR_COPIES)
     n = max(r[-1] for r in rows) + 1
     f, mb = preamble_pattern(g), mid_block(g)
     L, scores = {}, np.full(len(words), -np.inf)
@@ -1369,8 +1417,8 @@ def read_mid(g: Grid, x: np.ndarray, p: int, cfo: float):
     order = np.argsort(scores)[::-1]
     if not np.isfinite(scores[order[0]]):
         return None
-    spec, nd, d, _ = words[order[0]]
-    return spec, nd, d, float(scores[order[0]]), float(scores[order[1]]), p - mid_rows(g.name)[order[0]] * T
+    spec, nd, d, ch, _ = words[order[0]]
+    return spec, nd, d, float(scores[order[0]]), float(scores[order[1]]), p - mid_rows(g.name)[order[0]] * T, ch
 
 
 # Expected-slot lock (docs/arq.md §3a): a station waiting for its peer's reply
@@ -1390,7 +1438,7 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     """A burst of grid g starting in [lo, hi] (x's samples), its CFO near
     `cfo`, any valid word: find's lock dict, or None under PRIME_LLR. x must
     hold the second header copy of a start at hi."""
-    words = valid_words(g.name)
+    words = _all_words(g.name)
     rows = header_rows(g.name, HDR_COPIES)
     f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
     n = max(r[-1] for r in rows) + 1
@@ -1414,8 +1462,8 @@ def prime_lock(g: Grid, x: np.ndarray, lo: int, hi: int, cfo: float):
     sc, s0, c, k = best
     if sc < PRIME_LLR:
         return None
-    spec, nd, d, _ = words[k]
-    return dict(_lock(g, s0, c, sc, (spec, nd, d, sc, sc), HDR_COPIES), primed=True)
+    spec, nd, d, ch, _ = words[k]
+    return dict(_lock(g, s0, c, sc, (spec, nd, d, sc, sc), HDR_COPIES, connect_hash=ch), primed=True)
 
 
 def confirm(g: Grid, x: np.ndarray, lock: dict) -> float:
@@ -1427,7 +1475,7 @@ def confirm(g: Grid, x: np.ndarray, lock: dict) -> float:
     lay = layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"]))
     L = tone_llr(g, _energies(g, x, lock["start"], int(lay.hdr_rows[1][-1]) + 1, lock["cfo"]))
     mb = mid_block(g)
-    t = header_symbols(g.name, header_word(lock["spec"].index, lock["n_data"], lock["dup"]))
+    t = header_symbols(g.name, _header_word_for(lock["spec"], lock["n_data"], lock["dup"], lock.get("connect_hash")))
     return float(L[int(lay.sync_rows[lay.front]) + np.arange(len(mb)), mb].sum() + L[lay.hdr_rows[1], t].sum())
 
 
@@ -1444,14 +1492,14 @@ def reread(g: Grid, x: np.ndarray, lock: dict) -> tuple:
     (spec, n_data, dup, score, runner-up): ML over the valid words of tone_llr
     over the front (floored at 0), each word's mid block and both header
     copies (read_mid's sum, at a known start)."""
-    words, rows = valid_words(g.name), header_rows(g.name, HDR_COPIES)
+    words, rows = _all_words(g.name), header_rows(g.name, HDR_COPIES)
     L = tone_llr(g, _energies(g, x, lock["start"], max(int(r[-1]) for r in rows) + 1, lock["cfo"]))
     f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
     front = max(float(L[np.arange(len(f)), f].sum()), 0.0)
     scores = np.array([front + float(L[b1 + np.arange(len(mb)), mb].sum()) + _segments(L, r, t, H)
                        for (*_, t), r, b1 in zip(words, rows, mid_rows(g.name))])
     order = np.argsort(scores)[::-1]
-    spec, n, d, _ = words[order[0]]
+    spec, n, d, _, _ = words[order[0]]
     return spec, n, d, float(scores[order[0]]), float(scores[order[1]])
 
 
@@ -1459,7 +1507,7 @@ def reread(g: Grid, x: np.ndarray, lock: dict) -> tuple:
 def mid_rows(grid: str) -> tuple:
     """Per valid word, the row its mid block starts at."""
     return tuple(int(layout(grid, stream_symbols(grid, n, d)).sync_rows[len(preamble_pattern(GRIDS[grid]))])
-                 for _, n, d, _ in valid_words(grid))
+                 for _, n, d, _, _ in _all_words(grid))
 
 
 @lru_cache(maxsize=None)
@@ -1469,13 +1517,17 @@ def hdr_span(grid: str, copies: int) -> int:
     return int(max(r[-1] for r in header_rows(grid, copies)) + 1) * GRIDS[grid].T
 
 
-def _lock(g: Grid, s0: int, cfo: float, score: float, h: tuple, copies: int) -> dict:
+def _lock(g: Grid, s0: int, cfo: float, score: float, h: tuple, copies: int,
+          connect_hash: int | None = None) -> dict:
     """find's lock dict from a header read at s0 over `copies` copies."""
     spec, n, d, hs, h2 = h[:5]
     lay = layout(g.name, stream_symbols(g.name, n, d))
-    return dict(spec=spec, n_data=n, dup=d, start=s0, cfo=cfo, score=score, header_score=hs, header_margin=hs - h2,
-                end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[copies - 1][-1] + 1) * g.T, band=g.name,
-                family="cpm", copies=copies)
+    out = dict(spec=spec, n_data=n, dup=d, start=s0, cfo=cfo, score=score, header_score=hs, header_margin=hs - h2,
+               end=s0 + lay.n * g.T, header_end=s0 + (lay.hdr_rows[copies - 1][-1] + 1) * g.T, band=g.name,
+               family="cpm", copies=copies)
+    if connect_hash is not None:
+        out["connect_hash"] = connect_hash
+    return out
 
 
 def receive(x: np.ndarray, lock: dict) -> dict:
@@ -1483,11 +1535,14 @@ def receive(x: np.ndarray, lock: dict) -> dict:
     result data2g.arq.phy reads: spec, n_cw (slots, control included), the
     per-slot soft bits and the tone energies."""
     g = GRIDS[lock["band"]]
-    s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"])
+    ch = lock.get("connect_hash")
+    s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"], connect_hash=ch)
     soft_, E = soft(g, lock["spec"], x, s0, cfo, lock["n_data"], lock["dup"])
     r = dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
              dup=lock["dup"], soft=soft_, E=E, cfo=lock["cfo"], preamble_start=lock["start"],
              header_end=lock.get("header_end"))
+    if ch is not None:
+        r["connect_hash"] = ch
     if not coherent(g):  # the square law alone (no Z: arq.phy's DD stays off)
         return r
     r["Z"] = bins(g, x, s0, layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"])).n, cfo)
@@ -1649,18 +1704,15 @@ def _coh_run_llr(g: Grid, Z: np.ndarray, t: np.ndarray, n0: float) -> np.ndarray
     return L[np.arange(len(t)), t]
 
 
-def coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
-    """read_header on coh_metric: per word, the front and its first copy as
-    one run, the block before its second copy and that copy as another,
-    each run's sum floored at 0. Same tuple (front: run 1's front rows)."""
-    words, rows = valid_words(g.name), header_rows(g.name, copies)
+def _coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
+    words, rows = _all_words(g.name), header_rows(g.name, copies)
     n = max(r[-1] for r in rows) + 1
     Z = bins(g, x, s0, n, cfo)
     n0 = _n0(_sq(Z).reshape(-1, g.m))
     f, mb, H = preamble_pattern(g), mid_block(g), hdr_len(g)
     F = len(f)
     scores, front = [], 0.0
-    for (_, _, _, t), r in zip(words, rows):
+    for (*_, t), r in zip(words, rows):
         la = _coh_run_llr(g, Z[np.concatenate([np.arange(F), r[:H]])], np.concatenate([f, t]), n0)
         front = max(front, float(la[:F].sum()))
         sc = max(float(la.sum()), 0.0)
@@ -1671,21 +1723,28 @@ def coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = H
         scores.append(sc)
     s = np.array(scores)
     o = np.argsort(s)[::-1]
-    spec, nd, d, _ = words[o[0]]
-    return spec, nd, d, float(s[o[0]]), float(s[o[1]]), front
+    spec, nd, d, ch, _ = words[o[0]]
+    return spec, nd, d, float(s[o[0]]), float(s[o[1]]), front, ch
+
+
+def coh_read_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int = HDR_COPIES):
+    """read_header on coh_metric: per word, the front and its first copy as
+    one run, the block before its second copy and that copy as another,
+    each run's sum floored at 0. Same tuple (front: run 1's front rows)."""
+    return _coh_read_header(g, x, s0, cfo, copies)[:6]
 
 
 def _lock_header(g: Grid, x: np.ndarray, s0: int, cfo: float, copies: int) -> tuple:
-    """-> (read_header's tuple, passed): the noncoherent reading if it passes
+    """-> (_read_header's tuple, passed): the noncoherent reading if it passes
     LOCK_LLR (copies 1: [0] gates, else [1]); else, if the grid has COH_LOCK
     and the noncoherent score reaches COH_PREGATE, the coherent reading if it
     passes COH_LOCK; else the noncoherent one, not passed."""
     i = 0 if copies == 1 else 1
-    h = read_header(g, x, s0, cfo, copies)
+    h = _read_header(g, x, s0, cfo, copies)
     if h[3] >= LOCK_LLR[g.name][i] and h[3] - h[4] >= HDR_MARGIN[i]:
         return h, True
     if g.name in COH_LOCK and h[3] >= COH_PREGATE[i]:
-        c = coh_read_header(g, x, s0, cfo, copies)
+        c = _coh_read_header(g, x, s0, cfo, copies)
         if c[3] >= COH_LOCK[g.name][i] and c[3] - c[4] >= COH_LOCK[g.name][2 + i]:
             return c, True
     return h, False
@@ -1719,7 +1778,7 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
     G = tone_metric(g, E, "dd")
     P = np.exp(G - G.max(axis=1, keepdims=True))
     P /= P.sum(axis=1, keepdims=True)
-    h = header_symbols(g.name, header_word(spec.index, n_data, dup))
+    h = header_symbols(g.name, _header_word_for(spec, n_data, dup, r.get("connect_hash")))
     known = np.concatenate([lay.sync_rows] + list(lay.hdr_rows))
     kt = np.concatenate([lay.sync_tones] + [h] * len(lay.hdr_rows))
     keep = (known >= a) & (known < b)

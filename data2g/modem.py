@@ -169,6 +169,7 @@ class Lock(TypedDict):
     p0: int  # the first frame's first sample
     cfo: float  # Hz
     copy: NotRequired[CopyRef]  # set by find_copy only
+    connect_hash: NotRequired[int]  # set for CONNECT_HEADER words (docs/pending-header.md)
 
 
 class HeaderRead(TypedDict):
@@ -512,15 +513,51 @@ class Accept:
         return sorted({SUBMODES[n].sync_band for n, _ in self.max_cw})
 
 
+# Dedicated CONNECT header words (docs/pending-header.md): spare pseudo-submode
+# indices whose n_cw field carries a hash of the destination call (the burst is
+# always 1 codeword). Active from HF protocol 16 / FM protocol 6.
+CONNECT_HEADER: dict[tuple[str, int], tuple[str, int]] = {
+    ("w", 15): ("qpsk-r1/5", 6),
+    ("n10", 31): ("n10-qpsk-r1/3", 5),
+    **({("n10", 30): ("n10-qpsk-r1/5", 5)} if config.PROFILE == "fm" else {}),
+}
+_CONNECT_BY_MODE = {mode: (band, idx, bits) for (band, idx), (mode, bits) in CONNECT_HEADER.items()}
+
+
+def _connect_headers_active() -> bool:
+    return PROTOCOL_VERSION >= (6 if config.PROFILE == "fm" else 16)
+
+
+def connect_header_for(name: str) -> tuple[str, int, int] | None:
+    """(sync_band, pseudo_index, hash_bits) if `name` carries a dedicated CONNECT header, else None."""
+    return _CONNECT_BY_MODE.get(name) if _connect_headers_active() else None
+
+
+def connect_hash_of(word: int, band: str) -> int | None:
+    """Callee-callsign hash carried by OFDM header word `word` on `band`, or None for a regular burst."""
+    if not _connect_headers_active():
+        return None
+    sub, n_val = _split(word >> 6, band)
+    return n_val - 1 if (band, sub) in CONNECT_HEADER else None
+
+
 @lru_cache(maxsize=None)
 def _valid_words(band: str, accept: Accept | None = None) -> np.ndarray:
     """Words with a right CRC-6 and a submode defined on the band (and
-    taken by `accept`)."""
+    taken by `accept`), including CONNECT_HEADER pseudo-indices."""
     v = np.arange(2**10)
+    active = _connect_headers_active()
     if accept is None:
-        v = v[[_split(int(x), band)[0] in {i for b, i in BY_INDEX if b == band} for x in v]]
+        idx = {i for b, i in BY_INDEX if b == band}
+        if active:
+            idx |= {i for b, i in CONNECT_HEADER if b == band}
+        v = v[[_split(int(x), band)[0] in idx for x in v]]
     else:
         lim = {SUBMODES[n].index: cw for n, cw in accept.max_cw if SUBMODES[n].sync_band == band}
+        if active:
+            for (b, pi), (m, bits) in CONNECT_HEADER.items():
+                if b == band and SUBMODES[m].index in lim and lim[SUBMODES[m].index] >= 1:
+                    lim[pi] = 1 << bits
         v = v[[(i := _split(int(x), band))[0] in lim and i[1] <= lim[i[0]] for x in v]]
     return (v << 6) | np.array([crc6(int(x)) for x in v], dtype=np.int64).reshape(-1)
 
@@ -545,6 +582,8 @@ def decode_header(soft: np.ndarray, band: str = "w",
     word = int(words[i])
     score = float(corr[i] / (np.sqrt(np.sum(soft**2) * len(soft)) + 1e-12))
     sub, n_cw = _split(word >> 6, band)
+    if _connect_headers_active() and (band, sub) in CONNECT_HEADER:
+        return word, (SUBMODES[CONNECT_HEADER[(band, sub)][0]], 1), score
     return word, (BY_INDEX[(band, sub)], n_cw), score
 
 
@@ -573,7 +612,8 @@ def tx_tilt_fir(band: str) -> np.ndarray:
     return signal.firwin2(255, f, g, fs=FS)
 
 
-def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None, tx_path: str | None = None) -> np.ndarray:
+def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None, tx_path: str | None = None,
+             connect_hash: int | None = None) -> np.ndarray:
     """Codeword payloads (each exactly codes.payload_bytes long) -> unit-RMS
     audio (FM, mic path: the top modes quieter, config.FM_MIC_GAIN). `rvs`:
     each codeword's redundancy version (codes.rv_positions), all 0 by
@@ -582,17 +622,19 @@ def modulate(payloads: list[bytes], submode: str | SubmodeSpec, rvs=None, tx_pat
     if not 1 <= len(payloads) <= max_codewords(spec.sync_band):
         raise ValueError(f"1..{max_codewords(spec.sync_band)} codewords per burst, got {len(payloads)}")
     bits = np.stack([codes.encode(spec, p, rv, index=i) for i, (p, rv) in enumerate(zip(payloads, rvs or [0] * len(payloads)))])
-    return modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path)
+    return modulate_bits(codes.spread(bits, spec.bits_per_cu, codes.spread_group(spec)), spec, tx_path,
+                         connect_hash=connect_hash)
 
 
-def modulate_bits(bits: np.ndarray, spec: SubmodeSpec, tx_path: str | None = None) -> np.ndarray:
+def modulate_bits(bits: np.ndarray, spec: SubmodeSpec, tx_path: str | None = None,
+                  connect_hash: int | None = None) -> np.ndarray:
     """Coded bits in burst order (whole codewords, after `codes.spread`)
     -> unit-RMS audio. The codec-free half of `modulate`, for
     measurements that send raw bits."""
     b = ofdm.band(spec.band)
     pts = constellation.load(spec.constellation)
     data = constellation.modulate(bits, pts).reshape(-1, DATA_SYMS_PER_FRAME, b.nc)
-    x = burst_waveform(data, spec)
+    x = burst_waveform(data, spec, connect_hash=connect_hash)
     project = None
     closing = spec.ace
     if spec.ace:
@@ -672,13 +714,20 @@ def ace_projector(spec: SubmodeSpec, data: np.ndarray, dirs: np.ndarray):
     return project
 
 
-def burst_waveform(data: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
+def burst_waveform(data: np.ndarray, spec: SubmodeSpec, connect_hash: int | None = None) -> np.ndarray:
     """(n_f, 5, nc) data symbols -> the unclipped burst waveform."""
     b = ofdm.band(spec.band)
     n_f = len(data)
     n_cw = n_f // spec.frames_per_cw
     sb = ofdm.band(spec.sync_band)
-    hdr = constellation.modulate(header_bits(spec.index, n_cw, spec.sync_band), QPSK)
+    if connect_hash is not None:
+        ch = connect_header_for(spec.name)
+        if ch is None or n_cw != 1 or not 0 <= connect_hash < (1 << ch[2]):
+            raise ValueError(f"connect_hash={connect_hash} invalid for {spec.name} x{n_cw}")
+        hbits = header_bits(ch[1], connect_hash + 1, spec.sync_band)
+    else:
+        hbits = header_bits(spec.index, n_cw, spec.sync_band)
+    hdr = constellation.modulate(hbits, QPSK)
     kc = copy_frame(spec.sync_band, n_f)
     if sc_spec(spec, n_f):
         per, df = sc_period(b.nc), data.reshape(n_f, -1)
@@ -1025,8 +1074,11 @@ def find_burst(x: np.ndarray, bands=None, accept: Accept | None = None, stats: d
     hd, acq, _ = _best_header(dsp.to_baseband(np.asarray(x, dtype=np.float64)), bands, complete=False, accept=accept,
                               stats=stats)
     spec, n_cw = hd["hdr"]
-    return dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
-                end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)
+    out: Lock = dict(spec=spec, n_cw=n_cw, start=hd["start"], score=hd["score"], band=hd["band"],
+                     end=burst_end(hd["p0"], spec, n_cw), p0=hd["p0"], cfo=acq.freq_offset)
+    if (ch := connect_hash_of(hd["word"], hd["band"])) is not None:
+        out["connect_hash"] = ch
+    return out
 
 
 # A burst's frame pilots, PILOT_PAIRS consecutive pairs, are there when both
@@ -1293,9 +1345,12 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
                     p0 = pc - (kc or 0) * FRAME_SAMPLES
                     start = p0 - header_samples(band) - sb.preamble_samples
                     if kc is not None and score >= floor and start >= 0:
-                        found.append(dict(spec=spec, n_cw=n_cw, start=start, score=score, band=band,
-                                          end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
-                                          copy=dict(word=word, pc=pc)))
+                        lk: Lock = dict(spec=spec, n_cw=n_cw, start=start, score=score, band=band,
+                                        end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
+                                        copy=dict(word=word, pc=pc))
+                        if (ch := connect_hash_of(word, band)) is not None:
+                            lk["connect_hash"] = ch
+                        found.append(lk)
     for lock in sorted(found, key=lambda k: -k["score"]):
         if comb:
             c, pat = _copy_rows(z0, lock)

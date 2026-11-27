@@ -47,8 +47,20 @@ inline int kept(const Grid& g) { return g.L - g.guard; }
 // cpm.shares_rows: wide grid g's coarse rows are sums of on-air grid h's (c8w50 on c8r50).
 bool shares_rows(const Grid& g, const Grid& h);
 
+// Dedicated CONNECT header words (cpm.CONNECT_HEADER, docs/pending-header.md): spare 4-bit header
+// index 15 carrying a 3-bit callee-callsign hash in the n_data field (always n_data=0, dup=false).
+inline constexpr int CONNECT_INDEX = 15;
+inline constexpr int CONNECT_HASH_BITS = 3;
+struct ConnectHeader {
+    std::string_view grid;
+    int index = CONNECT_INDEX;
+    int bits = CONNECT_HASH_BITS;
+};
+std::optional<ConnectHeader> connect_header_for(std::string_view mode);
+
 // The header's 10-bit value before its CRC-6: (mode index + 2 dup) << 6 | n_data.
 int header_value(int index, int n_data, bool dup);
+int header_value_for(const Spec& s, int n_data, bool dup, std::optional<int> connect_hash = std::nullopt);
 std::span<const std::uint8_t> header_symbols(const Grid& g, int value);
 
 struct Layout {
@@ -68,7 +80,8 @@ std::vector<int> to_tones(const Grid& g, std::span<const std::uint8_t> bits);
 std::vector<double> tones(const Grid& g, std::span<const int> sym, double glide = 0.0);
 // Every slot's coded bits (control first, twice if dup) -> audio before the
 // TX bandpass, with the bandwidth cap's glide (tx_filter).
-std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap = 0);
+std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap = 0,
+                             std::optional<int> connect_hash = std::nullopt);
 // cpm.tx_filter: the grid's TX filter under bandwidth cap code `cap` (0..2).
 const tables::CpmTxFilter& tx_filter(const Grid& g, int cap);
 // cpm.TxFilter.overshoot: CLIP_OVERSHOOT, its last factor repeated to `passes`.
@@ -101,6 +114,7 @@ struct Header {
     bool dup;
     double score, runner_up;
     double front;  // the front block's part of score
+    std::optional<int> connect_hash{};  // set for CONNECT_HEADER words (docs/pending-header.md)
 };
 // cpm.CoarseTrack: a streaming receiver's coarse detection rows of grid g as audio arrives, on the stream's
 // T/4 timing grid, so each hop's searches (find, find_mid) read them instead of transforming their windows again.
@@ -201,6 +215,7 @@ struct Lock {
     // for late_lock) are set; spec is nullptr.
     bool wait = false;
     int copies = 0;  // header copies the lock was read from (an early lock: 1)
+    std::optional<int> connect_hash{};  // set for CONNECT_HEADER words (docs/pending-header.md)
 };
 // threshold: nullopt = SYNC_THRESHOLD plus the lock floors (lock_llr, hdr_margin). hi: nullopt = len(x).
 // wait: a candidate instead of nullopt while the second header copy is still arriving.
@@ -264,10 +279,12 @@ struct Received {
     // L rows a symbol; empty where the grid is not coherent())
     Mat<std::complex<double>> Z;
     std::map<int, Pass> passes;   // data slots' passes a streaming receiver made (arq::CpmStream); ModemRx makes the rest
+    std::optional<int> connect_hash{};  // set for CONNECT_HEADER words (docs/pending-header.md)
 };
 // cpm.refine: a lock's start and CFO by the likelihood of the burst's first refine_symbols symbols.
 std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
-                                       const Spec& spec, int n_data, bool dup);
+                                       const Spec& spec, int n_data, bool dup,
+                                       std::optional<int> connect_hash = std::nullopt);
 // The control slots' soft bits are coherent (dd_soft of dd_metric with no
 // posteriors) unless coh_ctl() is off.
 Received receive(std::span<const double> x, const Lock& lock);

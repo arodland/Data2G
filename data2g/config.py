@@ -582,3 +582,12 @@ if PROFILE == "fm":
 # (sync band, header index) -> submode: what a header's index means
 # (native config::by_index)
 BY_INDEX = {(s.sync_band, s.index): s for s in SUBMODES.values()}
+
+
+def connect_hash(call: str, bits: int) -> int:
+    """Callee-callsign hash carried in a CONNECT burst's header (docs/pending-header.md):
+    FNV-1a 32-bit over upper-cased trimmed ASCII, folded to `bits` bits (native config::connect_hash)."""
+    h = 0x811C9DC5
+    for b in call.strip().upper().encode("ascii"):
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return (h ^ (h >> 16)) & ((1 << bits) - 1)

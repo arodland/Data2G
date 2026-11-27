@@ -20,4 +20,8 @@ inline int preamble_samples(const Band& b) { return PREAMBLE_CP + b.preamble_rep
 // Scattered-pilot bands (config.SC_BANDS): HF 6-symbol OFDM bands (w, w48, n10, n4); none on FM.
 bool sc_band(std::string_view band);  // band in config.SC_BANDS
 
+// Callee-callsign hash carried in a CONNECT burst's header (config.connect_hash, docs/pending-header.md):
+// FNV-1a 32-bit over upper-cased trimmed ASCII, folded to `bits` bits.
+int connect_hash(std::string_view call, int bits);
+
 }  // namespace data2g::config

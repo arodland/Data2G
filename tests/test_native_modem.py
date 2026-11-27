@@ -476,3 +476,34 @@ def test_presence_matches(native, py):
             assert native.modem.presence_verdict(pk, ct, m) == py.presence_verdict(pk, ct, m)
             assert native.modem.fold_verify(y[t0:], band, fold) == py.fold_verify(y[t0:], band, fold)
             assert native.modem.pilot_present(D, level, win, y, band) == py.pilot_present(D, level, win, y, band)
+
+
+def test_connect_header_parity(native, py):
+    """CONNECT header words (docs/pending-header.md): connect_hash, modulate,
+    find_burst and find_copy carry and recover the callee hash identically."""
+    for call in ("W1AW", " k2xyz-10 ", "n0call-15", "VE3ABC", "JA1XYZ-1"):
+        for bits in (3, 5, 6):
+            assert native.modem.connect_hash(call, bits) == config.connect_hash(call, bits)
+    rng = np.random.default_rng(17)
+    for (band, _idx), (mode, bits) in modem.CONNECT_HEADER.items():
+        spec = config.SUBMODES[mode]
+        h = config.connect_hash("K2XYZ-10", bits)
+        payload = [rng.bytes(codes.payload_bytes(spec))]
+        x_py = py.modulate(payload, spec, connect_hash=h)
+        x_nat = native.modem.modulate(payload, mode, [], modem.TX_PATH, h)
+        close(x_nat, x_py)
+        y = np.concatenate([np.zeros(2000), x_py, np.zeros(2000)])
+        l_py = py.find_burst(y)
+        l_nat = native.modem.find_burst(y)
+        assert l_py["spec"].name == l_nat["spec"] == mode
+        assert l_py["n_cw"] == l_nat["n_cw"] == 1
+        assert l_py["connect_hash"] == l_nat["connect_hash"] == h
+        if band in config.HEADER_COPY_BANDS:
+            # Wipe preamble and first header so find_copy recovers the connect word from the copy frame
+            cut = 2000 + config.LEADIN_SAMPLES + config.BANDS[band].preamble_samples + modem.header_samples(band)
+            y_cut = y.copy()
+            y_cut[:cut] = 0.0
+            c_py = py.find_copy(y_cut, band)
+            c_nat, _ = native.modem.find_copy(y_cut, band)
+            assert c_py is not None and c_nat is not None
+            assert c_py["connect_hash"] == c_nat["connect_hash"] == h

@@ -56,7 +56,7 @@ def test_connect_exchange_disconnect(tmp_path):
     a.session.disconnect()
     assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=2)
     ev_a, ev_b = a.events(), b.events()
-    assert ev_a[0] == "CONNECTED K2XYZ" and ev_b[0] == "CONNECTED W1AW"
+    assert ev_a[0] == "CONNECTED K2XYZ" and ev_b[:2] == ["PENDING", "CONNECTED W1AW"]
     assert ev_a[-1].startswith("DISCONNECTED") and ev_b[-1].startswith("DISCONNECTED")
     log = (tmp_path / "a" / "events.jsonl").read_text()
     assert '"kind": "tx"' in log and '"kind": "rx"' in log and list((tmp_path / "a").glob("rx_*.npz"))
@@ -1077,43 +1077,64 @@ def test_nods_on_audio(monkeypatch):
 
 @pytest.mark.hf_only("FM's ROBUST_FAST is its ROBUST_CONNECT")
 def test_pending_on_a_robust_fast_connect_retry():
-    """A CONNECT's last retry goes in ROBUST_FAST (policy.connect_mode): the
-    default "fsk" PENDING raises on it as on ROBUST_CONNECT's. Three tries:
-    the cap's mode (OFDM, none), ROBUST_CONNECT, then ROBUST_FAST, so the
-    second PENDING is ROBUST_FAST's."""
+    """A CONNECT's retries go in ROBUST_CONNECT (fsk16r25-r1/2) and ROBUST_FAST
+    (fsk8w50-r1/2), carrying a 3-bit callee hash in the CPM header. With
+    pending="fsk", a listening station whose call matches raises PENDING on both
+    retries (here accept_connect refuses so both tries are heard and cancelled)."""
     a, b = Engine("W1AW", seed=81), Engine("K2XYZ", seed=82)
+    b.pending = "fsk"
+    b.set_accept_connect(lambda *_: False)  # refuse after decode, or just drop replies: test with a matching hash
+    # Find a callsign that collides with K2XYZ on the 3-bit CPM hash (so b raises PENDING on CPM tries)
+    # without matching K2XYZ's actual call (so b never answers and a sends all 3 tries: OFDM, fsk16r25, fsk8w50).
+    from data2g.config import connect_hash
+
+    target_h3 = connect_hash("K2XYZ", 3)
+    other = next(f"N{i}CALL" for i in range(1, 50)
+                 if connect_hash(f"N{i}CALL", 3) == target_h3 and connect_hash(f"N{i}CALL", 6) != connect_hash("K2XYZ", 6))
     b.listen()
     seen = []
 
     def drain():
         seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING"))
         return len(seen) >= 4
-    a.connect("N0CALL", 2, tries=3)
+    a.connect(other, 2, tries=3)
     assert link(a, b, 20, 120, drain, seed=83)
     assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
 
 
 def test_pending_on_a_connect_header_then_connected_or_cancelled():
-    """PENDING: raised on a header that may be a CONNECT while
-    listening, before its callee is known; CONNECTED follows if it was mine,
-    CANCELPENDING otherwise. Default "fsk": the robust connect mode only,
-    so the first try (OFDM) raises nothing and the retries do."""
+    """PENDING (docs/pending-header.md): raised on a CONNECT header whose callee
+    hash matches a registered call (MYCALL or alias) while listening, before its
+    body is read; CONNECTED follows if it connects, CANCELPENDING on a hash
+    collision or failed body. Default "all" covers both OFDM and robust retries;
+    non-matching CONNECTs and CQ frames raise nothing."""
+    from data2g.config import connect_hash
+
     a, b = Engine("W1AW", seed=71), Engine("K2XYZ", seed=72)
+    b.set_call("K2XYZ", "K2XYZ-10")
     b.listen()
     seen = []
 
     def drain():
         seen.extend(e for e in b.events() if e in ("PENDING", "CANCELPENDING") or e.startswith("CONNECTED"))
-        return len(seen) >= 4
-    a.connect("N0CALL", 2)  # nobody: K2XYZ hears its tries, OFDM then FSK
-    assert link(a, b, 20, 5, drain, seed=73) is False and seen == []  # try 1, qpsk-r1/5: none
-    assert link(a, b, 20, 120, drain, seed=73)
-    assert seen == ["PENDING", "CANCELPENDING"] * 2, seen
+        return False
+
+    # Non-matching callee (different hash on both 6-bit OFDM and 3-bit CPM): no PENDING on any try
+    other = next(f"N{i}CALL" for i in range(1, 50)
+                 if connect_hash(f"N{i}CALL", 6) not in (connect_hash("K2XYZ", 6), connect_hash("K2XYZ-10", 6))
+                 and connect_hash(f"N{i}CALL", 3) not in (connect_hash("K2XYZ", 3), connect_hash("K2XYZ-10", 3)))
+    a.connect(other, 2, tries=2)
+    assert link(a, b, 20, 25, drain, seed=73) is False and seen == [], seen
     a.abort()
     b.events()
 
-    b.pending, seen[:] = "all", []
-    a.connect("K2XYZ", 2)  # mine, first try (OFDM): PENDING, then CONNECTED and no cancel
+    # CQ frame in the same connect mode: not a CONNECT header -> no PENDING
+    a.send_cq("W1AW", 2)
+    assert link(a, b, 20, 6, drain, seed=75) is False and seen == [], seen
+    b.events()
+
+    # Matching alias on default "all", first try (OFDM): PENDING, then CONNECTED and no cancel
+    a.connect("K2XYZ-10", 2)
     assert link(a, b, 20, 60, lambda: drain() or b.session.state == S.CONNECTED, seed=74)
     drain()
     assert seen == ["PENDING", "CONNECTED W1AW"], seen

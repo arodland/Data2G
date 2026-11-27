@@ -1,14 +1,14 @@
-# PENDING from the header: a protocol change for later
+# PENDING from the header
 
-Status: parked (2026-11-13). Do it at the next protocol version bump that
-touches headers anyway. The receiver-side version without a protocol change
-shipped as `--pending off|fsk|ofdm|all` (default `fsk`, engine.py
-`PENDING_MODES`).
+Status: shipped (HF protocol 16, FM protocol 6). `--pending off|fsk|robust|ofdm|all`
+now defaults to `all` (`engine.py` `PENDING_MODES`, `config.connect_hash`).
 
-TLDR: give CONNECT bursts their own header word, and use the n_cw field
-(always 1 for a CONNECT) to carry a hash of the destination call. PENDING
-then fires only for a CONNECT that is probably to us. On OFDM this costs no
-extra header bits.
+TLDR: CONNECT bursts carry their own pseudo-submode header word whose n_cw
+(OFDM) or n_data (CPM) field carries an FNV-1a hash of the destination call
+(upper-cased ASCII, SSID included). PENDING then fires only for a CONNECT
+whose callee hash matches a registered MYCALL. On OFDM this costs no extra
+header bits; on CPM it adds 8 valid words (3-bit hash) on `c16r25` (`fsk16r25-r1/2`)
+and `c8w50` (`fsk8w50-r1/2`).
 
 ## Why
 

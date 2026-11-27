@@ -52,6 +52,8 @@ Heard heard_of(const py::dict& r) {
             if (z.ndim() == 3) z = z.reshape({z.shape(0) * z.shape(1), z.shape(2)});
             c->Z = mat(z);
         }
+        if (r.contains("connect_hash") && !r["connect_hash"].is_none())
+            c->connect_hash = r["connect_hash"].cast<int>();
         h.cpm = std::move(c);
         return h;
     }

@@ -617,7 +617,7 @@ class Session:
             slots = [B.Slot(B.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
         retry = f" try {self._tries + 1}" if (is_connect or body[0] == F.DISC) else ""
         log.info("TX %s %s x%d%s", _frame_desc(body, sub), mode, len(slots), retry)
-        return B.TxBurst(mode, slots, 0, self.cap)
+        return B.TxBurst(mode, slots, 0, self.cap, connect_callee=self.peer if is_connect else "")
 
     def _connect_limit(self) -> int:
         return CONNECT_TRIES if self.connect_tries is None else self.connect_tries
