@@ -80,7 +80,7 @@ def test_modes_shift_from_reports_and_broadcasts_stay_robust():
     i1 = frame("KC2G", "W1AW", 0x00, b"connected hello")
     a.enqueue(i1)
     burst, got = over_air(a, b, seed=1)
-    assert burst.submode == BROADCAST[2] and got == [(0, i1)]  # no report yet: robust
+    assert burst.submode == BROADCAST[2] and got == [(0, i1, 0)]  # no report yet: robust
     t[0] += 3
     b.enqueue(frame("W1AW", "KC2G", 0x21))  # RR back: carries B's report on A
     burst, got = over_air(b, a, seed=2)
@@ -90,12 +90,16 @@ def test_modes_shift_from_reports_and_broadcasts_stay_robust():
     a.enqueue(i2)
     burst, got = over_air(a, b, seed=3)
     assert burst.submode != BROADCAST[2] and MODES[burst.submode] in G.allowed(2), burst.submode
-    assert got == [(0, i2)]
+    assert got == [(0, i2, 0)]
     # UI and non-AX.25 stay robust whoever they're for
     for f in (frame("KC2G", "W1AW", 0x03, b"UI to KC2G"), b"plain bytes, not AX.25"):
         a.enqueue(f)
         burst, got = over_air(a, b, seed=4)
-        assert burst.submode == BROADCAST[2] and got == [(0, f)]
+        assert burst.submode == BROADCAST[2] and got == [(0, f, 0)]
+    # a non-zero KISS command frame is not parsed as standard AX.25, so it stays robust too
+    a.enqueue(i2, cmd=1)
+    burst, got = over_air(a, b, seed=5)
+    assert burst.submode == BROADCAST[2] and got == [(0, i2, 1)]
     # a stale report is not followed
     t[0] += REPORT_MAX_S + 1
     a.enqueue(frame("KC2G", "W1AW", 0x24, b"late"))
@@ -126,7 +130,7 @@ def test_first_transmission_success_is_the_target():
         f = frame("KC2G", "W1AW", 0x00, b"x" * 256)
         a.enqueue(f)
         _, got = over_air(a, b, 0.0, seed=10 + k)
-        got_n += got == [(0, f)]
+        got_n += got == [(0, f, 0)]
         t[0] += 3
         b.enqueue(frame("W1AW", "KC2G", 0x21))
         over_air(b, a, 0.0, seed=20 + k)
@@ -141,7 +145,7 @@ def test_broadcast_mode_option():
     f = frame("APRS", "W1AW", 0x03, b"!beacon")
     a.enqueue(f)
     burst, got = over_air(a, b, seed=8)
-    assert burst.submode == NARROW and got == [(0, f)]
+    assert burst.submode == NARROW and got == [(0, f, 0)]
     with pytest.raises(ValueError):
         KissLink(cap=0, broadcast="w48-qpsk-r1/5")  # 2400 Hz under a 500 Hz cap
     with pytest.raises(ValueError):
@@ -178,13 +182,13 @@ def test_groups_go_to_their_ports_only():
     f = b"!beacon, not AX.25"
     a.enqueue(f, na)
     _, got = over_air(a, b, seed=30)
-    assert got == [(nb, f)] and abs(heard_snr(b.events, nb) - 20) < 3  # over_air's 20 dB
+    assert got == [(nb, f, 0)] and abs(heard_snr(b.events, nb) - 20) < 3  # over_air's 20 dB
     a.enqueue(f, na)  # a station without the group: a broadcast burst, nothing for it
     _, got = over_air(a, c, seed=31)
     assert got == [] and c.events == []
     a.enqueue(b"plain", 0)  # port 0 ("KISS 0") to port 0 only
     _, got = over_air(a, b, seed=32)
-    assert got == [(0, b"plain")]
+    assert got == [(0, b"plain", 0)]
 
 
 def test_group_from_names_the_sender():
@@ -192,7 +196,7 @@ def test_group_from_names_the_sender():
     na, nb = a.open("CHAT", from_call="w1aw"), b.open("CHAT")
     a.enqueue(b"hello", na)
     _, got = over_air(a, b, seed=33)
-    assert got == [(nb, b"hello")] and heard_snr(b.events, nb, "W1AW")
+    assert got == [(nb, b"hello", 0)] and heard_snr(b.events, nb, "W1AW")
 
 
 def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
@@ -200,7 +204,7 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     na, nb = a.open("APRS"), b.open("APRS")
     a.enqueue(b"x" * 40, na)
     r, rx = soft_rx(a.next_burst(), {0: None})  # the control lost
-    assert b.on_burst(r, rx) == [(nb, b"x" * 40)] and heard_snr(b.take_events(), nb)
+    assert b.on_burst(r, rx) == [(nb, b"x" * 40, 0)] and heard_snr(b.take_events(), nb)
     assert group_key("G102291") == group_key("APRS")  # another group, the same key: open it too
     nc = b.open("G102291")
     a.enqueue(b"y" * 40, na)
@@ -208,7 +212,7 @@ def test_control_lost_data_finds_its_port_but_never_a_colliding_one():
     assert b.on_burst(r, rx) == [] and sorted(b.take_events()) == sorted([f"BCAST {nb} LOST 1", f"BCAST {nc} LOST 1"])
     a.enqueue(b"z", na)  # with its control, the name settles it
     _, got = over_air(a, b, seed=36)
-    assert got == [(nb, b"z")] and heard_snr(b.events, nb)
+    assert got == [(nb, b"z", 0)] and heard_snr(b.events, nb)
 
 
 def test_a_lost_later_control_codeword_keeps_the_bursts_frames():
@@ -234,9 +238,9 @@ def test_a_lost_later_control_codeword_keeps_the_bursts_frames():
                     + [Slot(K.data_start_mask(i, 2, key), 0, s.payload) for i, s in enumerate(one.slots[1:], start=2)],
                     one.burst_seq)
     r, rx = soft_rx(burst, {})
-    assert b.on_burst(r, rx) == [(nb, b"x" * 20)] and heard_snr(b.take_events(), nb, "W1AW")
+    assert b.on_burst(r, rx) == [(nb, b"x" * 20, 0)] and heard_snr(b.take_events(), nb, "W1AW")
     r, rx = soft_rx(burst, {1: None})  # the second control codeword lost
-    assert b.on_burst(r, rx) == [(nb, b"x" * 20)] and heard_snr(b.take_events(), nb, "W1AW")
+    assert b.on_burst(r, rx) == [(nb, b"x" * 20, 0)] and heard_snr(b.take_events(), nb, "W1AW")
 
 
 def test_a_decoded_slot_0_that_is_no_control_is_another_burst():
@@ -307,7 +311,7 @@ def test_a_frame_starting_a_codeword_survives_the_codeword_before():
     assert len(payloads) == 4 and all(p[0] == 0 for p in payloads)
     for lost in range(4):
         ok = [i != lost for i in range(4)]
-        assert unpack_frames(payloads, ok) == ([f for i, f in enumerate(frames) if i != lost], 1)
+        assert unpack_frames(payloads, ok) == ([(f, 0) for i, f in enumerate(frames) if i != lost], 1)
 
 
 def soft_rx(burst, sigma: dict, seed: int = 0):
@@ -364,7 +368,7 @@ def test_dup_control_decodes_from_its_pair():
             if rx.decode(0, ctl_mask(0, 0, group_key("APRS")), 0, None) is not None:
                 continue  # decodes alone: not the case in question
             r, rx = soft_rx(burst, noisy, seed=1)
-            if b.on_burst(r, rx) == [(nb, b"dup control")]:
+            if b.on_burst(r, rx) == [(nb, b"dup control", 0)]:
                 found = True
                 break
         assert found, mode
@@ -383,7 +387,7 @@ def test_control_lost_finds_where_the_data_starts():
     burst = a.next_burst()
     assert len(burst.slots) == 7  # "h" framed: 4 bytes (a zero, COBS's 2, the ending zero), one codeword
     r, rx = soft_rx(burst, {i: None for i in range(6)})
-    assert b.on_burst(r, rx) == [(nb, b"h")] and statuses(b.take_events()) == [f"BCAST {nb} HEARD"]
+    assert b.on_burst(r, rx) == [(nb, b"h", 0)] and statuses(b.take_events()) == [f"BCAST {nb} HEARD"]
     # the first data codeword lost too: the frame it cut is lost, the next
     # found (slot 2 starts it, slot 3 agrees: one slot alone could be another
     # burst's codeword passing a CRC by chance)
@@ -393,7 +397,7 @@ def test_control_lost_finds_where_the_data_starts():
     burst = a.next_burst()
     assert len(burst.slots) == 4
     r, rx = soft_rx(burst, {0: None, 1: None})
-    assert b.on_burst(r, rx) == [(nb, b"y" * 10), (nb, b"z" * 40)]
+    assert b.on_burst(r, rx) == [(nb, b"y" * 10, 0), (nb, b"z" * 40, 0)]
     assert statuses(b.take_events()) == [f"BCAST {nb} HEARD", f"BCAST {nb} LOST 1"]
     r, rx = soft_rx(burst, {0: None, 1: None, 3: None})  # slot 2 alone: not believed
     assert b.on_burst(r, rx) is None
@@ -401,7 +405,7 @@ def test_control_lost_finds_where_the_data_starts():
     a.enqueue(b"z" * 30, na)
     burst = a.next_burst()
     r, rx = soft_rx(burst, {0: None, 1: None})
-    assert b.on_burst(r, rx) == [(nb, b"z" * 30)]
+    assert b.on_burst(r, rx) == [(nb, b"z" * 30, 0)]
 
 
 def test_dup_port_over_air():
@@ -411,7 +415,7 @@ def test_dup_port_over_air():
         a.set_mode(na, mode, dup=True)
         a.enqueue(b"twice", na)
         _, got = over_air(a, b, seed=50)
-        assert got == [(nb, b"twice")] and heard_snr(b.events, nb, "W1AW"), mode
+        assert got == [(nb, b"twice", 0)] and heard_snr(b.events, nb, "W1AW"), mode
 
 
 def test_acks_when_sent_and_drops_reported():
@@ -497,21 +501,22 @@ def test_a_256_byte_frame_burst_is_one_receivers_accept():
         if "ack" in spec.name:
             continue
         for dup in (False, True):
-            a = KissLink()
-            n = a.open("CHAT", from_call="VK2ABC-15")
-            try:
-                a.set_mode(n, spec.name, auto=True, dup=dup)
-            except ValueError:  # CPM: group+from and a report don't fit its 20 B
-                n = a.open("CHAT")
-                a.set_mode(n, spec.name, auto=True, dup=dup)
-            a.enqueue(frame("CQ", "VK2ABC", 0x03, bytes(range(1, 241))), n)  # no zero: COBS's most
-            burst = a.next_burst()
-            assert burst is not None and burst.submode == spec.name and not a.events, (spec.name, dup)
-            n_ctl = sum(s.mask_id[2] >= 128 for s in burst.slots)
-            if is_cpm(spec):
-                assert n_ctl == 1 + dup and len(burst.slots) - n_ctl <= cpm.MAX_DATA, (spec.name, dup)
-            else:
-                assert len(burst.slots) <= cap[spec.name], (spec.name, dup)
+            for cmd in (0, 1):
+                a = KissLink()
+                n = a.open("CHAT", from_call="VK2ABC-15")
+                try:
+                    a.set_mode(n, spec.name, auto=True, dup=dup)
+                except ValueError:  # CPM: group+from and a report don't fit its 20 B
+                    n = a.open("CHAT")
+                    a.set_mode(n, spec.name, auto=True, dup=dup)
+                a.enqueue(frame("CQ", "VK2ABC", 0x03, bytes(range(1, 241))), n, cmd=cmd)  # no zero: COBS's most
+                burst = a.next_burst()
+                assert burst is not None and burst.submode == spec.name and not a.events, (spec.name, dup, cmd)
+                n_ctl = sum(s.mask_id[2] >= 128 for s in burst.slots)
+                if is_cpm(spec):
+                    assert n_ctl == 1 + dup and len(burst.slots) - n_ctl <= cpm.MAX_DATA, (spec.name, dup, cmd)
+                else:
+                    assert len(burst.slots) <= cap[spec.name], (spec.name, dup, cmd)
 
 
 def test_framing_loses_only_what_a_bad_codeword_touches():
@@ -520,32 +525,81 @@ def test_framing_loses_only_what_a_bad_codeword_touches():
     packets = [bytes([i]) * n for i, n in enumerate((10, 60, 20, 5))]
     payloads = pack_frames(packets, 46)  # qpsk-r1/5's payload
     assert len(payloads) == 3 and all(len(p) == 46 for p in payloads)
-    assert unpack_frames(payloads, [True] * len(payloads)) == (packets, 0)
+    assert unpack_frames(payloads, [True] * len(payloads)) == ([(p, 0) for p in packets], 0)
     # codeword 1 (bytes 46-91) holds the end of packet 1 and all but the
     # zero ending packet 2: both lost (counted once: a lost codeword hides how
     # many it held), and packet 3 found again after the zero at byte 95
     ok = [True] * len(payloads)
     ok[1] = False
-    assert unpack_frames(payloads, ok) == ([packets[0], packets[3]], 1)
+    assert unpack_frames(payloads, ok) == ([(packets[0], 0), (packets[3], 0)], 1)
     ok = [False, True, True]  # the first lost: parsing picks up at the next good zero
-    assert unpack_frames(payloads, ok) == (packets[2:], 1)
+    assert unpack_frames(payloads, ok) == ([(p, 0) for p in packets[2:]], 1)
     ok = [True, True, False]  # the last, holding packet 3's zero
-    assert unpack_frames(payloads, ok) == (packets[:2], 1)
+    assert unpack_frames(payloads, ok) == ([(p, 0) for p in packets[:2]], 1)
 
 
 def test_cobs_framing_costs_what_framed_len_says():
-    from data2g.kisslink import cobs, framed_len, pack_frames, uncobs, unpack_frames
+    from data2g.kisslink import CMD_TAG, cobs, framed_len, pack_frames, uncobs, uncobs_cmd, unpack_frames
 
     rng = np.random.default_rng(0)
-    frames = [b"", b"\0", b"\0" * 300, bytes(range(1, 256)) * 3, b"\1" * 253, b"\1" * 254, b"\1" * 255, b"\1" * 508]
+    frames = [b"", b"\0", b"\0" * 300, bytes(range(1, 256)) * 3, b"\1" * 253, b"\1" * 254, b"\1" * 255, b"\1" * 508,
+              b"\xff", b"abc\0", b"\1" * 254 + b"\0"]
     frames += [bytes(rng.integers(0, 256, n, dtype=np.uint8)) for n in (1, 17, 253, 254, 256, 600)]
     for f in frames:
         c = cobs(f)
-        assert 0 not in c and uncobs(c) == f, len(f)
+        assert 0 not in c and uncobs(c) == f and uncobs_cmd(c) == (f, 0), len(f)
         assert len(c) + 1 <= framed_len(len(f))
         if 0 not in f:
             assert len(c) + 1 == framed_len(len(f))  # the bound is met
+        for cmd in (1, 2, 7, 15):
+            tagged = c + bytes([CMD_TAG | cmd])
+            assert 0 not in tagged and uncobs_cmd(tagged) == (f, cmd), (len(f), cmd)
+            assert len(tagged) + 1 <= framed_len(len(f), cmd)
+            if 0 not in f:
+                assert len(tagged) + 1 == framed_len(len(f), cmd)
     assert framed_len(253) == 255 and framed_len(256) == 259
-    payloads = pack_frames([f for f in frames if f], 46)
-    assert unpack_frames(payloads, [True] * len(payloads)) == ([f for f in frames if f], 0)
+    assert framed_len(253, 1) == 256 and framed_len(256, 1) == 260
+    nonempty = [f for f in frames if f]
+    payloads = pack_frames(nonempty, 46)
+    assert payloads == pack_frames(nonempty, 46, [0] * len(nonempty))  # zero overhead for cmd 0
+    assert unpack_frames(payloads, [True] * len(payloads)) == ([(f, 0) for f in nonempty], 0)
+    cmds = [i % 16 for i in range(len(nonempty))]
+    payloads_cmd = pack_frames(nonempty, 46, cmds)
+    assert unpack_frames(payloads_cmd, [True] * len(payloads_cmd)) == (list(zip(nonempty, cmds)), 0)
     assert uncobs(b"\5ab") is None and uncobs(b"\0") is None
+    for bad in (b"", b"\0", b"\5ab", b"\xf1", b"\xff", b"\x02a\x05", b"\x02a\xf0", b"\x02a\x02"):
+        assert uncobs_cmd(bad) is None, bad
+
+
+def test_kiss_command_nibble_roundtrips_mixed_and_without_control():
+    """Frames with mixed KISS command nibbles share one burst, survive
+    control-codeword loss (find_data) and mid-burst codeword loss, and reject
+    out-of-range command nibbles (#283)."""
+    import pytest
+
+    a, b = KissLink(), KissLink()
+    a.enqueue(b"std-0", 0, cmd=0)
+    a.enqueue(b"vara-ax25-7", 0, cmd=1)
+    a.enqueue(b"vara-beacon\0\xff", 0, cmd=2)
+    a.enqueue(b"ext-15", 0, cmd=15)
+    burst, got = over_air(a, b, seed=70)
+    assert a.queue == []  # all four shared one burst
+    assert got == [(0, b"std-0", 0), (0, b"vara-ax25-7", 1), (0, b"vara-beacon\0\xff", 2), (0, b"ext-15", 15)]
+
+    # Control lost: find_data recovers data without extra masks and preserves commands
+    a.enqueue(b"lost-ctl-1", 0, cmd=1)
+    a.enqueue(b"lost-ctl-2", 0, cmd=2)
+    r, rx = soft_rx(a.next_burst(), {0: None})
+    assert b.on_burst(r, rx) == [(0, b"lost-ctl-1", 1), (0, b"lost-ctl-2", 2)]
+
+    # Mid-burst codeword loss: surviving frames keep their command nibbles
+    a.enqueue(b"A" * 50, 0, cmd=1)
+    a.enqueue(b"B" * 10, 0, cmd=2)
+    a.enqueue(b"C" * 40, 0, cmd=1)
+    r, rx = soft_rx(a.next_burst(), {1: None})
+    assert b.on_burst(r, rx) == [(0, b"B" * 10, 2), (0, b"C" * 40, 1)]
+
+    with pytest.raises(ValueError):
+        a.enqueue(b"bad", 0, cmd=16)
+    with pytest.raises(ValueError):
+        a.enqueue(b"bad", 0, cmd=-1)

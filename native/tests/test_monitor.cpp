@@ -178,15 +178,19 @@ void broadcast() {
     const Bytes info = text("!beacon");
     ui.insert(ui.end(), info.begin(), info.end());
     ka.enqueue(ui);
+    const Bytes v1 = text("vara cmd 1");
+    ka.enqueue(v1, 0, std::nullopt, 1);
     monitor::Monitor m, own;
     std::vector<Dump> dumps, sent;
     a.set_on_send([&](const TxBurstPtr& t) { sent.push_back(own.sent(*t, "tx")); });
     check::is_true(run(a, b, m, dumps, 30, [&] { return !dumps.empty() && ka.queue.empty(); }, 5), "heard");
     run(a, b, m, dumps, 3, [] { return false; }, 6);
     const std::string out = all(dumps);
-    check::is_true(out.find("BCAST \"KISS 0\": 1 frame(s)") != std::string::npos, "group named");
+    check::is_true(out.find("BCAST \"KISS 0\": 2 frame(s)") != std::string::npos, "group named");
     check::is_true(stream(dumps, "frame 1 (AX.25 W1AW>APRS, UI)") == ui, "the frame, AX.25 addresses read");
     check::is_true(stream(sent, "frame 1 (AX.25 W1AW>APRS, UI)") == ui, "the frame, as sent");
+    check::is_true(stream(dumps, "frame 2 (cmd 1)") == v1, "non-zero cmd frame labeled");
+    check::is_true(stream(sent, "frame 2 (cmd 1)") == v1, "non-zero cmd frame labeled, as sent");
     if (check::failures) std::fputs(out.c_str(), stderr);
 }
 

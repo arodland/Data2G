@@ -79,3 +79,41 @@ def test_vara_send_commands_are_data():
     assert tnc.is_data(0x01, b"ab") and tnc.is_data(0x12, b"ab")
     assert not tnc.is_data(0x01, b"\x32") and not tnc.is_data(0x02, b"\x3f")
     assert not tnc.is_data(0x03, b"ab") and not tnc.is_data(0x06, b"MODE x")
+
+
+def test_kiss_server_preserves_command_nibble():
+    """KissServer forwards the data frame's command nibble to on_packet and
+    encodes broadcast() with the command nibble it is given (#283)."""
+    import socket
+    import threading
+    import time
+
+    packets, cmds = [], []
+    srv = tnc.KissServer(("127.0.0.1", 0), lambda port, f, ack, cmd: packets.append((port, f, ack is not None, cmd)),
+                         lambda cmd, p, port: cmds.append((cmd, p, port)))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        with socket.create_connection(srv.server_address, timeout=2) as c:
+            c.settimeout(2)
+            c.sendall(tnc.kiss_encode(b"std", 0, 0)
+                      + tnc.kiss_encode(b"vara7", 0, 1)
+                      + tnc.kiss_encode(b"beacon", 2, 2)
+                      + tnc.kiss_encode(b"\x12\x34acked", 1, tnc.ACKMODE)
+                      + tnc.kiss_encode(b"\x3f", 0, 2))  # 1-byte P command, not data
+            deadline = time.monotonic() + 2
+            while (len(packets) < 4 or len(cmds) < 1) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert packets == [(0, b"std", False, 0), (0, b"vara7", False, 1),
+                               (2, b"beacon", False, 2), (1, b"acked", True, 0)]
+            assert cmds == [(2, b"\x3f", 0)]
+            srv.broadcast(b"rx0", 0, 0)
+            srv.broadcast(b"rx1", 0, 1)
+            srv.broadcast(b"rx2", 2, 2)
+            dec, got = tnc.KissDecoder(), []
+            while len(got) < 3:
+                got += dec.feed(c.recv(4096))
+            assert got == [(0x00, b"rx0"), (0x01, b"rx1"), (0x22, b"rx2")]
+    finally:
+        srv.shutdown()
+        srv.close_clients()
+        srv.server_close()

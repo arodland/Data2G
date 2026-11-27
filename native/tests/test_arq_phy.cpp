@@ -86,14 +86,23 @@ int main() {
         const std::vector<Bytes> frames = {Bytes(10, 7), Bytes(60, 9), Bytes(1, 1)};
         const auto pl = kisslink::pack_frames(frames, 46);  // qpsk-r1/5's payload
         check::equal(static_cast<int>(pl.size()), 2, "pack_frames: codewords");
-        check::is_true(kisslink::unpack_frames(pl, {true, true}) == std::pair{frames, 0}, "unpack_frames all good");
-        check::is_true(kisslink::unpack_frames(pl, {true, false}) == std::pair{std::vector<Bytes>{frames[0]}, 1},
+        using F = kisslink::Frame;
+        check::is_true(kisslink::unpack_frames(pl, {true, true}) == std::pair{std::vector<F>{{frames[0], 0}, {frames[1], 0}, {frames[2], 0}}, 0},
+                       "unpack_frames all good");
+        check::is_true(kisslink::unpack_frames(pl, {true, false}) == std::pair{std::vector<F>{{frames[0], 0}}, 1},
                        "unpack_frames lost");
-        check::is_true(kisslink::unpack_frames(pl, {false, true}) == std::pair{std::vector<Bytes>{frames[2]}, 1},
+        check::is_true(kisslink::unpack_frames(pl, {false, true}) == std::pair{std::vector<F>{{frames[2], 0}}, 1},
                        "unpack_frames picks up after a lost codeword");
+        const auto plc = kisslink::pack_frames(frames, 46, {0, 1, 2});
+        check::is_true(kisslink::unpack_frames(plc, {true, true}) == std::pair{std::vector<F>{{frames[0], 0}, {frames[1], 1}, {frames[2], 2}}, 0},
+                       "unpack_frames with command nibbles");
+        check::is_true(kisslink::unpack_frames(plc, {false, true}) == std::pair{std::vector<F>{{frames[2], 2}}, 1},
+                       "unpack_frames preserves command after lost codeword");
         const Bytes run(254, 5), z(300, 0);
         check::equal(static_cast<int>(kisslink::cobs(run).size()) + 1, static_cast<int>(kisslink::framed_len(254)),
                      "cobs: framed_len's bound met");
+        check::equal(static_cast<int>(kisslink::framed_len(254, 1)), static_cast<int>(kisslink::framed_len(254)) + 1,
+                     "framed_len with non-zero cmd");
         check::is_true(kisslink::uncobs(kisslink::cobs(run)) == run && kisslink::uncobs(kisslink::cobs(z)) == z,
                        "uncobs undoes cobs");
     }
@@ -198,7 +207,7 @@ int main() {
         kisslink::KissLink a(2, "", clock), b(2, "", clock);
         a.set_mode(0, "qpsk-r1/5", true);  // rate shifting on (BCAST MODE 0 AUTO)
         b.set_mode(0, "qpsk-r1/5", true);
-        using Got = std::vector<std::pair<int, Bytes>>;
+        using Got = std::vector<kisslink::RxFrame>;
         auto over_air = [&](kisslink::KissLink& tx, kisslink::KissLink& rx, unsigned seed) {
             const auto bu = tx.next_burst();
             auto frames = rx.on_burst(hear(on_air(tx_audio(*bu), 0.02, seed)));
@@ -208,7 +217,7 @@ int main() {
         const auto i1 = frame("KC2G", "W1AW", 0x00, "connected hello");
         a.enqueue(i1);
         auto [b1, f1] = over_air(a, b, 1);
-        check::is_true(b1->submode == "qpsk-r1/5" && f1 == Got{{0, i1}}, "no report yet: broadcast");
+        check::is_true(b1->submode == "qpsk-r1/5" && f1 == Got{{0, i1, 0}}, "no report yet: broadcast");
         b.enqueue(frame("W1AW", "KC2G", 0x21, ""));
         auto [b2, f2] = over_air(b, a, 2);
         check::equal(static_cast<int>(f2.size()), 1, "the RR crosses with its report");

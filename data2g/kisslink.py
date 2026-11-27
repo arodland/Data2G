@@ -15,10 +15,12 @@ Burst: control codeword(s), then data codewords. Control: a 1-byte header
 (group and the sender's callsign, 120 bits packed together), and T_REPORTS
 on a port with rate shifting on. A DUP port (BCAST MODE n DUP mode) sends
 each control codeword twice, RV 0 then RV 1, and a receiver combines the
-two when the first fails alone. Data: each frame COBS-encoded and ended by
-a zero byte, back to back, zero padded, with a zero byte more wherever a
-frame would start a codeword (pack_frames, unpack_frames); each data
-codeword's mask carries the slot the data starts at (data_start_mask). A
+two when the first fails alone. Data: each frame COBS-encoded, with a
+trailing command tag (CMD_TAG | cmd, 0xF1..0xFF) when its KISS command nibble
+is non-zero (0 bytes overhead for command 0), and ended by a zero byte, back
+to back, zero padded, with a zero byte more wherever a frame would start a
+codeword (pack_frames, unpack_frames); each data codeword's mask carries the
+slot the data starts at (data_start_mask). A
 failed codeword loses only the frames it touches: the next zero byte in a
 good codeword starts a frame. No resends: AX.25 retries at layer 2.
 
@@ -66,6 +68,7 @@ log = logging.getLogger("data2g.kiss")
 VERSION = 3
 DUP = 0x08  # the control header's dup bit: each control codeword sent twice, RV 0 then RV 1
 T_GROUP, T_GROUP_FROM, T_REPORTS = 1, 2, 3  # control TLVs (docs/broadcast.md §3)
+CMD_TAG = 0xF0  # trailing byte CMD_TAG | cmd (0xF1..0xFF) after cobs(frame) for KISS command nibble 1..15
 PORT0_GROUP = "KISS 0"
 N_PORTS = 16  # KISS port numbers 0-15
 REPORT_MAX_S = 180.0  # a report older than this is not followed
@@ -212,11 +215,12 @@ def _tlv(t: int, v: bytes) -> bytes:
 
 # --- data -------------------------------------------------------------------
 
-def framed_len(n: int) -> int:
+def framed_len(n: int, cmd: int = 0) -> int:
     """The most bytes an n-byte frame takes in a burst's data: COBS adds a
-    byte per 254 and one more, then the zero that ends it. n + 2 up to 253
-    bytes, as the 2-byte length it replaced."""
-    return n + 2 + n // 254
+    byte per 254 and one more, then the optional trailing command byte (when
+    `cmd` is non-zero), then the zero that ends it. n + 2 up to 253 bytes for
+    command 0 (as the 2-byte length it replaced), 1 more for non-zero commands."""
+    return n + 2 + n // 254 + (1 if cmd else 0)
 
 
 def cobs(frame: bytes) -> bytes:
@@ -249,6 +253,30 @@ def uncobs(b: bytes) -> bytes | None:
     return bytes(out)
 
 
+def uncobs_cmd(b: bytes) -> tuple[bytes, int] | None:
+    """cobs() undone, with optional trailing command byte (CMD_TAG | cmd,
+    0xF1..0xFF for KISS command nibble 1..15) -> (frame, cmd); None if
+    malformed. Valid COBS always lands at i == len(b), never at len(b) - 1
+    with a code byte >= 2, so the tag is unambiguous and cmd 0 costs 0 B."""
+    if not b:
+        return None
+    out, i, prev_c = bytearray(), 0, 255
+    while i < len(b):
+        c = b[i]
+        if not c:
+            return None
+        if i + c > len(b):
+            if i > 0 and i == len(b) - 1 and c >= CMD_TAG + 1:
+                return bytes(out), c & 0x0F
+            return None
+        if i > 0 and prev_c < 255:
+            out.append(0)
+        out += b[i + 1:i + c]
+        prev_c = c
+        i += c
+    return bytes(out), 0
+
+
 def data_start_mask(slot: int, start: int, key: int) -> tuple:
     """A broadcast data codeword's identity: its slot, and the slot its
     burst's data starts at (the control slots before it), in the direction
@@ -270,28 +298,34 @@ DATA_STARTS = sorted({f * n for f in (1, 2) for n in range(1, F.MAX_CTL + 1)})
 PROBE_SLOTS = 8  # control lost: data looked for in slots 1-8
 
 
-def _framed(frame: bytes, at: int, pb: int) -> bytes:
-    """`frame` as it goes at byte `at` of a burst's data: COBS, its ending
-    zero, and a zero before it if it would start a codeword. Without that,
-    the zero telling a reader where it starts would be the last byte of the
-    codeword before, and the frame lost with that codeword."""
-    return (b"" if at % pb else b"\0") + cobs(frame) + b"\0"
+def _framed(frame: bytes, at: int, pb: int, cmd: int = 0) -> bytes:
+    """`frame` as it goes at byte `at` of a burst's data: COBS, an optional
+    trailing command tag (0xF0 | cmd for cmd 1..15; omitted for cmd 0), its
+    ending zero, and a zero before it if it would start a codeword. Without
+    that, the zero telling a reader where it starts would be the last byte of
+    the codeword before, and the frame lost with that codeword."""
+    return (b"" if at % pb else b"\0") + cobs(frame) + (bytes([CMD_TAG | cmd]) if cmd else b"") + b"\0"
 
 
-def pack_frames(frames: list[bytes], pb: int) -> list[bytes]:
-    """Frames -> data codeword payloads of `pb` bytes: each frame COBS-encoded
-    and ended by a zero, back to back, zero-padded (empty frames to a
-    reader); a frame that would start a codeword gets a zero before it."""
+def pack_frames(frames: list[bytes], pb: int, cmds: list[int] | None = None) -> list[bytes]:
+    """Frames -> data codeword payloads of `pb` bytes: each frame COBS-encoded,
+    optionally followed by a trailing command tag (0xF1..0xFF when its command
+    nibble is non-zero), and ended by a zero, back to back, zero-padded (empty
+    frames to a reader); a frame that would start a codeword gets a zero before it."""
+    if cmds is not None and len(cmds) != len(frames):
+        raise ValueError("cmds length mismatch")
     stream = b""
-    for f in frames:
-        stream += _framed(f, len(stream), pb)
+    for f, cmd in zip(frames, cmds or (0,) * len(frames)):
+        if not 0 <= cmd <= 0x0F:
+            raise ValueError(f"KISS command {cmd}: must be 0..15")
+        stream += _framed(f, len(stream), pb, cmd)
     stream += bytes(-len(stream) % pb)
     return [stream[i:i + pb] for i in range(0, len(stream), pb)]
 
 
-def unpack_frames(payloads: list[bytes], ok: list[bool]) -> tuple[list[bytes], int]:
-    """Data codeword payloads and their CRC results -> (whole frames,
-    frames lost). A zero byte in a good codeword always ends a frame, so
+def unpack_frames(payloads: list[bytes], ok: list[bool]) -> tuple[list[tuple[bytes, int]], int]:
+    """Data codeword payloads and their CRC results -> (whole (frame, cmd)
+    pairs, frames lost). A zero byte in a good codeword always ends a frame, so
     parsing picks up again after a failed codeword. Lost counts each run of
     frames a failed codeword touched as one: at least that many."""
     stream = b"".join(payloads)
@@ -304,7 +338,7 @@ def unpack_frames(payloads: list[bytes], ok: list[bool]) -> tuple[list[bytes], i
             if damaged:
                 lost += 1
             elif i > start:
-                f = uncobs(stream[start:i])
+                f = uncobs_cmd(stream[start:i])
                 if f is None:
                     lost += 1
                 else:
@@ -338,7 +372,7 @@ class Port:
 @dataclass
 class KissLink:
     cap: int = 2  # policy.CAP_HZ key: 2 = 2400 Hz, 0 = 500 Hz
-    queue: list = field(default_factory=list)  # (port, frame, ack or None) waiting
+    queue: list = field(default_factory=list)  # (port, frame, ack or None, cmd) waiting
     peers: dict = field(default_factory=dict)  # station hash -> Peer
     me: set = field(default_factory=set)  # hashes this TNC has sent as
     clock: callable = time.monotonic
@@ -442,15 +476,18 @@ class KissLink:
 
     # -- sending -------------------------------------------------------------
 
-    def enqueue(self, frame: bytes, port: int = 0, ack=None):
-        """A frame for `port`; `ack` (opaque, e.g. a KISS ACKMODE tag) comes
-        back in `acks` once the frame has gone. To a closed port: DROPPED."""
+    def enqueue(self, frame: bytes, port: int = 0, ack=None, cmd: int = 0):
+        """A frame for `port` with KISS command nibble `cmd` (0..15); `ack`
+        (opaque, e.g. a KISS ACKMODE tag) comes back in `acks` once the frame
+        has gone. To a closed port: DROPPED."""
+        if not 0 <= cmd <= 0x0F:
+            raise ValueError(f"KISS command {cmd}: must be 0..15")
         if port not in self.ports:
             self.events.append(f"BCAST {port} DROPPED 1")
             return
         if not frame:
             return  # nothing to send (and an empty frame reads as padding: unpack_frames)
-        self.queue.append((port, frame, ack))
+        self.queue.append((port, frame, ack, cmd))
 
     def take_events(self) -> list[str]:
         """The statuses since the last call, oldest first."""
@@ -477,9 +514,9 @@ class KissLink:
         reading (dB, snr_est's scale), if one was made."""
         self.events.append(f"BCAST * MISSED {submode} {n_cw}" + (f" {snr:.1f}" if snr is not None else ""))
 
-    def _route(self, port: Port, frame: bytes) -> tuple[str, int]:
+    def _route(self, port: Port, frame: bytes, cmd: int = 0) -> tuple[str, int]:
         """-> (mode, size hint) for a frame on `port`."""
-        if port.auto:
+        if port.auto and cmd == 0:
             ax = parse_ax25(frame)
             if ax is not None and ax.connected:
                 p = self.peers.get(station_hash(ax.next_hop))
@@ -532,12 +569,12 @@ class KissLink:
         queue order, as many as fit. None: nothing queued."""
         if not self.queue:
             return None
-        n, first, _ = self.queue[0]
+        n, first, _, first_cmd = self.queue[0]
         port = self.ports[n]
-        mode, hint = self._route(port, first)
+        mode, hint = self._route(port, first, first_cmd)
         spec = MODES[mode]
         sender = 0
-        if port.auto and (ax := parse_ax25(first)) is not None:
+        if port.auto and first_cmd == 0 and (ax := parse_ax25(first)) is not None:
             sender = station_hash(ax.sender)
             self.me.add(sender)
         ctl = self._control(spec, n, port, sender)
@@ -548,24 +585,24 @@ class KissLink:
         # (a 256-byte PACLEN I frame outgrew a 12 s qpsk-r1/5 burst), up to what
         # its header can say
         limit = start + cpm.MAX_DATA if is_cpm(spec) else max_codewords(spec.sync_band)
-        need = start + -(-len(_framed(first, 0, pb)) // pb)
+        need = start + -(-len(_framed(first, 0, pb, first_cmd)) // pb)
         n_max = min(limit, max(G.slots_for(spec, seconds), need))
         room = (n_max - start) * pb
         taken, rest, size = [], [], 0
         for q in self.queue:
-            k = len(_framed(q[1], size, pb))
-            if q[0] == n and self._route(port, q[1])[0] == mode and size + k <= room:
+            k = len(_framed(q[1], size, pb, q[3]))
+            if q[0] == n and self._route(port, q[1], q[3])[0] == mode and size + k <= room:
                 taken.append(q)
                 size += k
             else:
                 rest.append(q)
         if not taken:  # the first frame alone doesn't fit: it never will in this mode
-            log.error("%d-byte frame dropped: a %s burst carries at most %d", len(first), mode, room - 3)
+            log.error("%d-byte frame dropped: a %s burst carries at most %d", len(first), mode, room - (4 if first_cmd else 3))
             self.queue = self.queue[1:]
             self.events.append(f"BCAST {n} DROPPED 1")
             return self.next_burst()
         self.queue = rest
-        data = pack_frames([q[1] for q in taken], pb)
+        data = pack_frames([q[1] for q in taken], pb, [q[3] for q in taken])
         key = port.key
         slots = [Slot(ctl_mask(0, i, key), rv, p) for i, p in enumerate(ctl) for rv in range(1 + port.dup)]
         slots += [Slot(data_start_mask(start + j, start, key), 0, p) for j, p in enumerate(data)]
@@ -673,10 +710,10 @@ class KissLink:
         frames, lost = unpack_frames(payloads, ok) if payloads else ([], 0)
         return frames, ok, lost
 
-    def on_burst(self, r: dict, rx=None) -> list[tuple[int, bytes]] | None:
+    def on_burst(self, r: dict, rx=None) -> list[tuple[int, bytes, int]] | None:
         """A received burst (modem.receive's or cpm.receive's dict; `rx` its
         phy.ModemRx, shared with the engine's other checks) -> [(port,
-        frame)] for the open ports it belongs to ([] for another group's), or
+        frame, cmd)] for the open ports it belongs to ([] for another group's), or
         None if it isn't a broadcast burst (an ARQ burst, or one lost whole).
         Statuses go to `events`; a shifting port learns from its sender."""
         rx = rx or PHY.ModemRx(r, {}, PHY.DD_BUDGET_S)  # never DD unbounded
@@ -693,7 +730,7 @@ class KissLink:
                 self.events.append(f"BCAST {i} HEARD" + (f" {call}" if call else "") + snr)
                 if lost:
                     self.events.append(f"BCAST {i} LOST {lost}")
-            return [(i, f) for i in ports for f in frames]
+            return [(i, f, cmd) for i in ports for f, cmd in frames]
         # control lost: a data slot passing under an open port's key says the
         # burst is that group's, and its mask where the data starts (docs/broadcast.md §2).
         # OFDM: a slot 0 that decoded (alone or paired) but wasn't a broadcast
@@ -716,12 +753,12 @@ class KissLink:
             self.events.append(f"BCAST {i} HEARD{snr}")
             if lost:
                 self.events.append(f"BCAST {i} LOST {lost}")
-        return [(i, f) for i in ports for f in frames]
+        return [(i, f, cmd) for i in ports for f, cmd in frames]
 
     def _learn(self, rep: bytes, frames: list, r: dict, rx, ok: list, now: float):
         """A shifting port heard `rep` (T_REPORTS): what we know of its sender."""
         sender = struct.unpack(">H", rep[:2])[0]
-        if not sender and frames and (ax := parse_ax25(frames[0])) is not None:
+        if not sender and frames and frames[0][1] == 0 and (ax := parse_ax25(frames[0][0])) is not None:
             sender = station_hash(ax.sender)
         if not sender or sender in self.me:
             return

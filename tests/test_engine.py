@@ -663,7 +663,7 @@ def test_kiss_and_vara_personalities_share_one_engine():
     b = Engine("K2XYZ", seed=22, kiss=KissLink())
     ui = frame("APRS", "W1AW", 0x03, b"!beacon")
     a.kiss.enqueue(ui)
-    assert link(a, b, 12, 30, lambda: (0, ui) in b.kiss_rx)
+    assert link(a, b, 12, 30, lambda: (0, ui, 0) in b.kiss_rx)
     b.listen()
     a.connect("K2XYZ", 2)
     assert link(a, b, 12, 60, lambda: a.session.state == S.CONNECTED and b.session.state == S.CONNECTED)
@@ -673,8 +673,8 @@ def test_kiss_and_vara_personalities_share_one_engine():
     a.session.write(up)
     got = bytearray()
     assert link(a, b, 12, 120, lambda: got.extend(b.session.read()) or len(got) >= len(up), seed=1)
-    assert bytes(got) == up and (0, late) not in b.kiss_rx  # held while the session runs
-    assert link(a, b, 12, 90, lambda: (0, late) in b.kiss_rx, seed=2)  # then idle: it goes
+    assert bytes(got) == up and (0, late, 0) not in b.kiss_rx  # held while the session runs
+    assert link(a, b, 12, 90, lambda: (0, late, 0) in b.kiss_rx, seed=2)  # then idle: it goes
     assert a.session.state == b.session.state == S.CONNECTED
     more = np.random.default_rng(24).bytes(100)  # the session survived the broadcast burst
     a.session.write(more)

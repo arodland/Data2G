@@ -187,7 +187,7 @@ def receive_accept(min_header_score: float = 0.0) -> modem.Accept:
     for n, cw in a.max_cw:
         s = modem.SUBMODES[n]
         if "ack" not in n:
-            need = 2 * F.MAX_CTL + -(-(1 + framed_len(KISS_FRAME_BYTES)) // codes.payload_bytes(s))
+            need = 2 * F.MAX_CTL + -(-(1 + framed_len(KISS_FRAME_BYTES, 1)) // codes.payload_bytes(s))
             cw = max(cw, min(need, max_codewords(s.sync_band)))
         out.append((n, cw))
     return modem.Accept(tuple(out), a.min_score)
@@ -231,7 +231,7 @@ class Engine:
         self.kiss = kiss
         self.receiver.sense = True  # data2g_on_air: BUSY (channel_busy) and the KISS hold (_kiss_burst)
         self.stats_interval_s = stats_interval_s
-        self.kiss_rx: list[tuple[int, bytes]] = []  # (port, frame) heard for KISS clients
+        self.kiss_rx: list[tuple[int, bytes, int]] = []  # (port, frame, cmd) heard for KISS clients
         self._tx_kiss = False  # the burst on air is a KISS one
         self._carrier_for = None  # the burst end (_tx_end) a carrier hold was logged for
         self._kiss_busy = 0  # samples of unbroken BUSY a queued KISS burst has waited
@@ -300,8 +300,8 @@ class Engine:
         """The submode of the burst on air (the session's, when an ID rides with it), None if none."""
         return self.tx[0].submode if self.tx else None
 
-    def take_kiss_rx(self) -> list[tuple[int, bytes]]:
-        """(port, frame)s heard for KISS clients since the last call."""
+    def take_kiss_rx(self) -> list[tuple[int, bytes, int]]:
+        """(port, frame, cmd)s heard for KISS clients since the last call."""
         out, self.kiss_rx = self.kiss_rx, []
         return out
 

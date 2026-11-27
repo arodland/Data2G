@@ -194,7 +194,7 @@ void bind_engine(py::module_& m) {
         })
         .def("take_kiss_rx", [](PyEngine& self) {
             py::list out;
-            for (const auto& [port, f] : self.take_kiss_rx()) out.append(py::make_tuple(port, pyb(f)));
+            for (const auto& [port, f, cmd] : self.take_kiss_rx()) out.append(py::make_tuple(port, pyb(f), cmd));
             return out;
         })
         .def_property_readonly("kiss", [](const PyEngine& self) { return self.kiss_obj; })

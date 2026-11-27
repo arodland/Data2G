@@ -702,8 +702,8 @@ def serve(a, pa, stop: threading.Event | None = None):
                         log.info("ACCEPT: the far end closed: disconnecting")
                         engine.disconnect()
                 elif kind == "kiss":
-                    port, frame, ack = v
-                    link.enqueue(frame, port, ack)
+                    port, frame, ack, kcmd = v
+                    link.enqueue(frame, port, ack, kcmd)
                 else:
                     host.data_in(v)
             _send_cmd(cmd, host)  # replies at once, not after the audio step (clients time out at ~2 s)
@@ -743,8 +743,8 @@ def serve(a, pa, stop: threading.Event | None = None):
             for line in host.out_kiss_refs:  # same socket, ahead of the frames: no race with the command port
                 kiss.send_ref(line)
             host.out_kiss_refs.clear()
-            for port, f in engine.take_kiss_rx():
-                kiss.broadcast(f, port)
+            for port, f, kcmd in engine.take_kiss_rx():
+                kiss.broadcast(f, port, kcmd)
             for port, ack in link.take_acks():
                 kiss.send_ack(ack, port)
     finally:
