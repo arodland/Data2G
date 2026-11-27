@@ -147,6 +147,7 @@ std::map<int, Bytes> parse_tlvs(ByteView b, bool partial) {
             if (partial) break;
             throw std::invalid_argument("truncated TLV");
         }
+        if (t >= arq::TLV_CRITICAL) throw std::invalid_argument("unknown critical TLV " + std::to_string(t));
         out[t] = Bytes(b.begin() + static_cast<std::ptrdiff_t>(i + 2), b.begin() + static_cast<std::ptrdiff_t>(i + 2 + n));
         i += 2 + n;
     }

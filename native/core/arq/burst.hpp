@@ -27,7 +27,7 @@ struct MaskId {
 };
 
 inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
-inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // a compact CONNECT's mask (frames pack_connect); ctl_mask's i is 0-3
+inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // CONNECT's mask (frames::Connect); ctl_mask's i is 0-3
 inline constexpr int EPOCH_MOD = 64;  // abandon epochs in a data codeword's identity
 // comp: deflated (T_COMP); epoch: the sender's abandon epoch (its slicing).
 // Both folded into the direction byte, so a codeword decoded under the

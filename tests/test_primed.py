@@ -84,37 +84,34 @@ class BootstrapPolicy(L.Policy):
         return rec, 1, rec
 
 
-def bootstrap_control(cls, mode, dup, announcements, direction):
-    sender = cls(direction, BootstrapPolicy(mode, dup), master=direction == 0,
-                 nod=announcements, keep=announcements)
-    receiver = cls(1 - direction, BootstrapPolicy(mode, dup), master=direction == 1, nod=True, keep=True)
+def bootstrap_control(cls, mode, dup, direction):
+    sender = cls(direction, BootstrapPolicy(mode, dup), master=direction == 0, nod=True)
+    receiver = cls(1 - direction, BootstrapPolicy(mode, dup), master=direction == 1, nod=True)
     burst = sender.build()
     stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
     rx = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=1, p_known=1)
     rx.n_ctl_slots = 1 if M.is_cpm(M.MODES[mode]) else 0
     hypotheses = receiver.expect(rx)
     assert len(hypotheses) <= L.PRIME_TRIES
-    assert receiver.handle(rx), (mode, dup, announcements, direction, hypotheses)
+    assert receiver.handle(rx), (mode, dup, direction, hypotheses)
     assert receiver.stats["rx_primed"] == 1
     return _burst(burst), hypotheses
 
 
 @pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
-@pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
-def test_first_control_can_be_primed(mode, dup, announcements, direction):
-    """A first control is recovered after blind failure, with default or legacy announcements."""
-    bootstrap_control(L.Station, mode, dup, announcements, direction)
+def test_first_control_can_be_primed(mode, dup, direction):
+    """A first control is recovered after blind failure."""
+    bootstrap_control(L.Station, mode, dup, direction)
 
 
 @pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
-@pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
-def test_cpp_first_control_primes_identically(native, pure, mode, dup, announcements, direction):
-    assert bootstrap_control(native.arq.Station, mode, dup, announcements, direction) == \
-        bootstrap_control(L.Station, mode, dup, announcements, direction)
+def test_cpp_first_control_primes_identically(native, pure, mode, dup, direction):
+    assert bootstrap_control(native.arq.Station, mode, dup, direction) == \
+        bootstrap_control(L.Station, mode, dup, direction)
 
 
 class DataPolicy(BootstrapPolicy):
@@ -124,11 +121,9 @@ class DataPolicy(BootstrapPolicy):
 
 def reply_to_data(cls, dup):
     """The caller's first burst carries data (its bank is full of cumulative-ack ways); the
-    callee's control-only reply fails blind and must still be primed. An announcing callee
-    only: the announced ways come first, and a legacy one (nod, keep off) loses its
-    T_DUPCTL-toggled ways past PRIME_TRIES here (expect)."""
-    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True, keep=True)
-    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True, keep=True)
+    callee's control-only reply fails blind and must still be primed."""
+    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True)
+    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True)
     a.write(bytes(range(64)))
     stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
     first = PrimeRx(a.build(), random.Random(1), 0, {}, stats, p_ctl=0, p_known=1)
@@ -472,13 +467,13 @@ def test_primed_connect_and_connect_ack():
 
 
 def test_forged_connect_frames_rejected():
-    """Forged primed frames (random where unknown): a CONNECT's caller rarely
-    unpacks (10 characters in a 40 of 64 alphabet), a CONNECT_ACK's cap over
-    2 is dropped; whatever is accepted is a well-formed frame."""
+    """Forged primed frames (random where unknown): a base-40 caller unpacks only
+    for 39^10 / 2^54 (~45%) of 54-bit values, and a CONNECT_ACK's cap over 2 is
+    dropped; whatever is accepted is a well-formed frame."""
     from data2g.arq import session as S
     rng = random.Random(9)
     states = [handshake(S.Session, forge=rng)[1] for _ in range(200)]
-    assert states.count(S.CONNECTED) < 10  # (5/8)^10 of them, about 1%
+    assert 0 < states.count(S.CONNECTED) < 120  # 39^10 / 2^54 (~45%) unpack; ~55% rejected by base-40 check
 
 
 def test_cpp_sessions_prime_connect_identically(native, pure):
@@ -653,10 +648,9 @@ class PollPolicy(RandomPolicy):
 
 def poll_after_data(cls, reply_changes):
     """A caller's poll after a data exchange whose reply was lost, its control lost blind:
-    -> (burst, hypotheses, whether a primed retry read it). The caller said T_NODS and
-    T_KEEP in its first poll and stopped once the callee had acted on them."""
-    a = cls(0, PollPolicy(), master=True, nod=True, keep=True)
-    b = cls(1, PollPolicy(), nod=True, keep=True)
+    -> (burst, hypotheses, whether a primed retry read it)."""
+    a = cls(0, PollPolicy(), master=True, nod=True)
+    b = cls(1, PollPolicy(), nod=True)
 
     def rx(burst, lost=False):
         stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
@@ -666,7 +660,6 @@ def poll_after_data(cls, reply_changes):
 
     a.build()  # the first burst: lost
     first = a.on_timeout(allow_repeat=False)
-    assert F.T_NODS in F.Control.unpack([first.slots[0].payload]).ext
     assert b.handle(rx(first))
     reply = b.build()
     b.answered()
@@ -679,8 +672,7 @@ def poll_after_data(cls, reply_changes):
     if reply_changes:
         a.policy.reply = 6
     poll = a.on_timeout(allow_repeat=False)
-    ext = F.Control.unpack([poll.slots[0].payload]).ext
-    assert len(poll.slots) == 1 and F.T_NODS not in ext and F.T_KEEP not in ext
+    assert len(poll.slots) == 1
     r = rx(poll, True)
     hs = b.expect(r)
     assert len(hs) <= L.PRIME_TRIES
@@ -689,8 +681,8 @@ def poll_after_data(cls, reply_changes):
 
 @pytest.mark.parametrize("reply_changes", [False, True])
 def test_poll_after_data_can_be_primed(reply_changes):
-    """The callee knows the caller's T_NODS has stopped (the caller acted on the burst that
-    acted on it), though the caller's last control-only burst, its first poll, carried it."""
+    """The callee primes a caller's poll after data whose reply was lost,
+    whether T_REPLY stayed unchanged (omitted) or changed."""
     _, hs, read = poll_after_data(L.Station, reply_changes)
     assert read, hs
 

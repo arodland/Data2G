@@ -93,7 +93,7 @@ and reads any codeword. A mask only decides whose CRC check passes.
 ## 3. Burst format
 
 - **Control:** every burst's control, port 0's included, is a 1-byte header
-  `[version 4 bits | dup 1 | reserved 1 | n_ctl - 1 (2)]` (version 3), then TLVs, as `frames.Control` without the 32-bit core. The ARQ core's fields mean
+  `[version 4 bits | dup 1 | reserved 1 | n_ctl - 1 (2)]` (version 3), then TLVs, as `frames.Control` without the 32-bit core. Senders clear `reserved` (bit `0x04`); receivers ignore it. The ARQ core's fields mean
   nothing to a broadcast burst, and CPM gives control exactly one 20 B codeword.
   - Version 2 (before 2026-10-25: no dup bit, data framed by 2-byte lengths, data
     masks without the start) isn't read: its bursts are skipped as another kind.
@@ -106,7 +106,7 @@ and reads any codeword. A mask only decides whose CRC check passes.
   polar codeword of air time: the data codewords it can carry stay `cpm.MAX_DATA`).
   Broadcast has no feedback, so the sender's host chooses it, unlike ARQ's
   `T_DUPCTL`.
-- **TLVs:**
+- **TLVs:** types `1..127` are ignorable (unknown types are skipped by length); types `128..255` are critical (an unknown critical type makes the control invalid and drops it). Type `0` begins zero padding.
 
   | type | contents | when |
   |---|---|---|

@@ -157,7 +157,8 @@ def unpack_pair(b: bytes) -> tuple[str, str]:
 
 def parse_tlvs(b: bytes, partial: bool = False) -> dict:
     """[type][length][value]... up to a zero type (padding) -> {type: value};
-    ValueError if one runs past the end (`partial`: the whole ones before it)."""
+    ValueError if one runs past the end (`partial`: the whole ones before it)
+    or carries an unknown critical TLV (type >= frames.TLV_CRITICAL)."""
     out, i = {}, 0
     while i + 2 <= len(b) and b[i]:
         t, n = b[i], b[i + 1]
@@ -165,6 +166,8 @@ def parse_tlvs(b: bytes, partial: bool = False) -> dict:
             if partial:
                 break
             raise ValueError("truncated TLV")
+        if t >= F.TLV_CRITICAL and t not in F.KNOWN_CRITICAL_TLVS:
+            raise ValueError(f"unknown critical TLV {t}")
         out[t] = b[i + 2:i + 2 + n]
         i += 2 + n
     return out

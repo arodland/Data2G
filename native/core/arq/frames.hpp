@@ -30,26 +30,28 @@ inline constexpr int MAX_CTL = 4;  // control codewords a burst may have: the co
 
 // frame types (core word)
 inline constexpr int ARQ = 0, SESSION = 1, PROBE = 2, ARQ_DUP = 3;
-// extension types
-inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4, T_RESYNC = 5, T_REPORT = 6,
+// extension types (slots 5, 19, 20 retired at wire 1.0: T_RESYNC, T_NODS, T_KEEP).
+// Forward-compatibility split: 1..127 ignorable if unknown; 128..255 must-understand.
+inline constexpr int T_PAD = 0, T_NEW = 1, T_ABANDON = 2, T_RV = 3, T_BITMAP = 4, T_REPORT = 6,
                      T_SURVEY = 7, T_SOUND = 8, T_BUFFER = 9,
                      T_SESS = 10,  // a session frame's body (arq/session.hpp)
                      T_REPLY = 11, T_CHAT = 12, T_CQ = 13, T_DUPCTL = 14,
                      T_COMP = 15,
                      T_ID = 16,  // packed callsign + session key: an ID frame (docs/arq.md §7a), mask 0
                      T_DRAINED = 17,  // empty: this burst's new codewords end the sender's queued data
-                     // a data codeword in the control's padding (docs/arq.md §5a): seq | comp << 7, the
-                     // sender's abandon epoch, its payload with trailing zeros cut
+                     // a data codeword in the control's padding (docs/arq.md §5a): seq | comp << 7, its
+                     // payload with trailing zeros cut, then 2-byte inline_check
                      T_INLINE = 18,
-                     // empty: the sender hears nods (docs/arq.md §3b), in control padding until the peer
-                     // acted on it; nods go only to a peer that sent it. Dropped at the next version bump.
-                     T_NODS = 19,
-                     // empty: the sender keeps T_REPLY (docs/arq.md §8a), in control padding or in T_REPLY's
-                     // place until the peer acted on it. Both having said it is not enough to leave T_REPLY
-                     // out as unchanged, or to read a control without it so: §8a's three steps say when a
-                     // station may do either. Dropped at the next version bump.
-                     T_KEEP = 20,
-                     T_PING = 21;  // FM only (arq/ping): a ping or its reply, the TX path and level check
+                     T_PING = 21,     // FM only (arq/ping): a ping or its reply, the TX path and level check
+                     T_REC_EXT = 22,  // extended mode recommendation (1-2 B) when Core.recommend == REC_EXT (63)
+                     T_CAPS = 23;     // extended capability/constraint TLV reserved for CAP_EXT
+inline constexpr int TLV_CRITICAL = 128;  // 1..127 ignorable if unknown; 128..255 must-understand
+
+// Capability / constraint bitmasks exchanged in CONNECT and CONNECT_ACK (wire 1.0).
+inline constexpr int CAP_NODS = 1 << 0;  // this station listens for nods (docs/arq.md §3b; cleared by --no-nods)
+inline constexpr int CAP_EXT = 1 << 15;  // escape hatch: extended capability/constraint TLV (T_CAPS) follows
+inline constexpr int DEFAULT_CAPS = CAP_NODS;
+inline constexpr int SUPPORTED_REQ = 0;  // mandatory peer-constraint bits this version knows how to honor
 // An extension type's short name ("ext N" for one not listed): monitor/'s
 // dumps. A new T_* gets its name here too. (Native only.)
 std::string ext_name(int t);
@@ -112,44 +114,58 @@ std::optional<std::pair<std::int64_t, Bytes>> deflate_fit(ByteView hist, ByteVie
 Bytes inflate(ByteView hist, ByteView payload);
 
 inline constexpr int CALL_CHARS = 10;
+inline constexpr std::uint64_t CALL_BASE = 40;
+inline constexpr std::uint64_t CALL_B40_MAX = 10485760000000000ULL;  // 40^10 < 2^54
 Bytes pack_call(const std::string& call);
 std::string unpack_call(ByteView b);
+std::uint64_t pack_call_b40(const std::string& call);
+std::string unpack_call_b40(std::uint64_t v);
 
 // --- session frame bodies (docs/arq.md §7, §7a) ---
-// A T_SESS body is its subtype byte (CONNECT ... DISC_ACK) and the fields
-// below; DISC and DISC_ACK are the subtype alone. T_CQ and T_ID bodies have
-// no subtype. pack() throws std::invalid_argument for a call that won't
-// pack or a field over a byte; unpack() for a call that won't unpack.
+// CONNECT uses a single unified 20-byte (160-bit) bit-packed payload on all
+// modes under burst COMPACT_CONNECT: no Core or T_SESS wrapper.
+// CONNECT_ACK, CONNECT_NAK, DISC and DISC_ACK are T_SESS bodies led by their
+// subtype byte; DISC and DISC_ACK are the subtype alone. T_CQ and T_ID bodies
+// have no subtype.
 
-// subtype, version, caller and callee (pack_call, 8 B each), nonce (2 B),
-// bandwidth cap code, t_turn in tenths of a second
+inline constexpr int COMPACT_BYTES = 20;
+
+// Unified 20-byte (160-bit) CONNECT payload:
+// version (4 b) | caller (54 b base-40) | callee (54 b base-40) | nonce (16 b) |
+// cap (2 b) | t_turn10 (6 b) | caps (16 b) | req (8 b)
 struct Connect {
-    static constexpr std::size_t BYTES = 22;
+    static constexpr std::size_t BYTES = COMPACT_BYTES;
+    static constexpr unsigned F_VERSION = 1u << 0, F_CALLER = 1u << 1, F_CALLEE = 1u << 2, F_NONCE = 1u << 3,
+                              F_CAP = 1u << 4, F_TTURN = 1u << 5, F_CAPS = 1u << 6, F_REQ = 1u << 7;
     int version = 0;
     std::string caller, callee;
     std::int64_t nonce = 0;
     int cap = 0, t_turn10 = 0;
+    int caps = 0, req = 0;
 
     Bytes pack() const;
-    static Connect unpack(ByteView body);  // BYTES at least
-    static std::pair<std::string, std::string> calls(ByteView body);  // (caller, callee) from the first 18 bytes
+    static Connect unpack(ByteView p);  // BYTES (20 B) at least
+    static std::pair<std::string, std::string> calls(ByteView p);
+    static Bytes mask(unsigned field_bits);  // 20-byte bitmask for primed reception
 };
 
-// subtype, the CONNECT's nonce (2 B), the agreed cap code, the callee's t_turn in tenths
+// subtype, CONNECT's nonce (2 B), agreed cap code, callee's t_turn in tenths, caps (2 B), req (1 B)
 struct ConnectAck {
-    static constexpr std::size_t BYTES = 5;
+    static constexpr std::size_t BYTES = 8;
     std::int64_t nonce = 0;
     int cap = 0, t_turn10 = 0;
+    int caps = 0, req = 0;
 
     Bytes pack() const;
     static ConnectAck unpack(ByteView body);  // BYTES at least
 };
 
-// subtype, the CONNECT's nonce (2 B), the reason (NAK_*)
+// subtype, CONNECT's nonce (2 B), reason (NAK_*), detail (1 B)
 struct ConnectNak {
-    static constexpr std::size_t BYTES = 4;
+    static constexpr std::size_t BYTES = 5;
     std::int64_t nonce = 0;
     int reason = 0;
+    int detail = 0;
 
     Bytes pack() const;
     static ConnectNak unpack(ByteView body);  // BYTES at least
@@ -159,12 +175,6 @@ Bytes pack_cq(const std::string& call, int cap);  // a T_CQ body: the call and i
 std::pair<std::string, int> unpack_cq(ByteView body);  // invalid_argument: "CQ of n B"
 Bytes pack_id(const std::string& call, int key);  // a T_ID body: the call and the session key it identifies for
 std::pair<std::string, int> unpack_id(ByteView body);  // invalid_argument: "ID of n B"
-
-// A CONNECT in 20 B, for a CPM control codeword: no Core or TLV, bit-packed
-// under its own CRC mask (burst COMPACT_CONNECT). data2g/arq/frames.py.
-inline constexpr int COMPACT_BYTES = 20;
-Bytes pack_connect(ByteView body);  // a Connect body; throws std::invalid_argument
-Bytes unpack_connect(ByteView p);
 
 Bytes to_records(ByteView data);
 

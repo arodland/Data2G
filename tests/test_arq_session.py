@@ -654,8 +654,8 @@ def test_compact_connect_over_the_cpm_modem():
         t = max(t + 0.1, a.next_event() or t)
         retry = a.poll(t)
     assert retry.submode == G.ROBUST_CONNECT and [s.mask_id for s in retry.slots] == [L.COMPACT_CONNECT]
-    body = F.unpack_connect(retry.slots[0].payload)
-    assert F.unpack_call(body[2:10]) == "VE3/W1AW-1" and body[20:] == bytes([0, 25])
+    c = F.Connect.unpack(retry.slots[0].payload)
+    assert c.caller == "VE3/W1AW-1" and c.callee == "K2XYZ" and (c.cap, c.t_turn10) == (0, 25)
 
     spec = REAL[retry.submode]
     y = np.concatenate([np.zeros(2000), PHY.tx_audio(retry), np.zeros(2000)])
@@ -671,12 +671,11 @@ def test_compact_connect_over_the_cpm_modem():
 def test_compact_connect_round_trip():
     from data2g.arq import frames as F
 
-    body = (bytes([F.CONNECT, S.VERSION]) + F.pack_call("W1AW") + F.pack_call("K2XYZ/P")
-            + (0xBEEF).to_bytes(2, "big") + bytes([2, 63]))
-    p = F.pack_connect(body)
-    assert len(p) == F.COMPACT_BYTES and F.unpack_connect(p) == body
+    c = F.Connect(S.VERSION, "W1AW", "K2XYZ/P", 0xBEEF, 2, 63, F.CAP_NODS | 0x4200, 0x05)
+    p = c.pack()
+    assert len(p) == F.COMPACT_BYTES and F.Connect.unpack(p) == c
     with pytest.raises(ValueError):
-        F.pack_connect(body[:-1] + bytes([64]))  # t_turn over 6.3 s
+        F.Connect(S.VERSION, "W1AW", "K2XYZ/P", 0xBEEF, 2, 64).pack()  # t_turn over 6.3 s
 
 
 def test_reply_lost_is_answered_at_once():
