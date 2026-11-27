@@ -1135,23 +1135,8 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
     return out;
 }
 
-namespace {
-// modem._pilot_fold: fold[f, ph] = sum over frames i (in order) of D[f, t0 + i * FR + ph], D the pair products
-// (waveform::pair_products of the matched filter's outputs, COPY_PAIRS pairs a frame apart)
-Mat<cd> pilot_fold(std::span<const cd* const> D_rows, size_t t0, size_t mm) {
-    const size_t FR = FRAME_SAMPLES;
-    Mat<cd> fold(D_rows.size(), FR);
-    for (size_t f = 0; f < D_rows.size(); ++f) {
-        const cd* d = D_rows[f] + t0;
-        for (size_t i = 0; i < mm; ++i)
-            for (size_t ph = 0; ph < FR; ++ph) fold[f][ph] = i ? fold[f][ph] + d[i * FR + ph] : d[ph];
-    }
-    return fold;
-}
-}  // namespace
-
-void FoldTrack::acc(std::span<const cd* const> D_rows, int64_t a, int64_t u0, int64_t u1, bool add) {
-    const int64_t F = FRAME_SAMPLES;
+void FoldTrack::acc(std::span<const cd* const> D_rows, int64_t a, int64_t u0, int64_t u1, bool add, size_t period) {
+    const int64_t F = static_cast<int64_t>(period);
     for (int64_t u = u0; u < u1;) {
         const int64_t q = u % F, k = std::min(u1 - u, F - q);
         for (size_t f = 0; f < D_rows.size(); ++f) {
@@ -1167,16 +1152,17 @@ void FoldTrack::acc(std::span<const cd* const> D_rows, int64_t a, int64_t u0, in
     }
 }
 
-const Mat<cd>& FoldTrack::fold(std::span<const cd* const> D_rows, size_t dcols, int64_t a, int64_t lo, int64_t hi) {
-    if (!have_ || n_ >= RENEW || !(lo_ <= lo && lo <= hi_ && hi_ <= hi) || lo_ < a ||
+const Mat<cd>& FoldTrack::fold(std::span<const cd* const> D_rows, size_t dcols, int64_t a, int64_t lo, int64_t hi,
+                               size_t period) {
+    if (!have_ || n_ >= RENEW || R_.cols != period || !(lo_ <= lo && lo <= hi_ && hi_ <= hi) || lo_ < a ||
         hi > a + static_cast<int64_t>(dcols)) {
-        R_ = Mat<cd>(D_rows.size(), FRAME_SAMPLES);
-        acc(D_rows, a, lo, hi, true);
+        R_ = Mat<cd>(D_rows.size(), period);
+        acc(D_rows, a, lo, hi, true, period);
         have_ = true;
         n_ = 0;
     } else {
-        acc(D_rows, a, hi_, hi, true);
-        acc(D_rows, a, lo_, lo, false);
+        acc(D_rows, a, hi_, hi, true, period);
+        acc(D_rows, a, lo_, lo, false, period);
         ++n_;
     }
     lo_ = lo;
@@ -1201,7 +1187,7 @@ namespace {
 std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
                                    const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
                                    double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb,
-                                   int cfo_lag = FRAME_SAMPLES, size_t fold_shift = 0);
+                                   int cfo_lag = FRAME_SAMPLES, size_t fold_shift = 0, int decim = 1);
 
 // modem._comb_filters: per symbol j (or comb phase c for intra-frame comb layouts) holding scattered pilots,
 // the preamble template's carriers as a unit-norm template
@@ -1282,10 +1268,14 @@ Mat<cd> sum_frames(std::span<const cd* const> P_rows, size_t pcols, size_t F, si
 }
 
 std::pair<Mat<cd>, double> intra_frame_prods(const std::vector<Mat<cd>>& Cs, const ScIntra& intra, int64_t stream_s0,
-                                             bool need_level = true) {
-    const size_t step = static_cast<size_t>(intra.syms[1] - intra.syms[0]) * NSYM;
-    const size_t span = intra.n_combs == 1 ? static_cast<size_t>(FRAME_SAMPLES)
-                                           : static_cast<size_t>(intra.syms[static_cast<size_t>(intra.n_syms - 1)]) * NSYM;
+                                             bool need_level = true, int decim = 1) {
+    const size_t D = static_cast<size_t>(decim);
+    const size_t step = static_cast<size_t>(intra.syms[1] - intra.syms[0]) * NSYM / D;
+    const size_t span = (intra.n_combs == 1 ? static_cast<size_t>(FRAME_SAMPLES)
+                                            : static_cast<size_t>(intra.syms[static_cast<size_t>(intra.n_syms - 1)]) * NSYM) /
+                        D;
+    const size_t FR_d = FRAME_SAMPLES / D;
+    const int64_t s0_d = stream_s0 / decim;
     size_t n = SIZE_MAX;
     for (const auto& c : Cs) n = std::min(n, c.cols > span ? c.cols - span : size_t{0});
     const size_t nb = Cs[0].rows;
@@ -1325,7 +1315,7 @@ std::pair<Mat<cd>, double> intra_frame_prods(const std::vector<Mat<cd>>& Cs, con
     }
     Mat<cd> P(nc * nb, n);
     for (size_t t = 0; t < n; ++t) {
-        const size_t f_idx = static_cast<size_t>((stream_s0 + static_cast<int64_t>(t)) / FRAME_SAMPLES);
+        const size_t f_idx = static_cast<size_t>((s0_d + static_cast<int64_t>(t)) / static_cast<int64_t>(FR_d));
         for (size_t c0 = 0; c0 < nc; ++c0) {
             const Mat<cd>& Q = Qs[(c0 + f_idx) % nc];
             for (size_t b = 0; b < nb; ++b) P[c0 * nb + b][t] = Q[b][t];
@@ -1344,15 +1334,20 @@ std::vector<double> comb_freqs() {
 }
 
 // modem._comb_coherent: the combs' outputs (Cs, symbols js) added within the frame at each of f2's CFOs
-Mat<cd> comb_coherent(const std::vector<Mat<cd>>& Cs, const std::vector<int>& js, const std::vector<double>& f2) {
+Mat<cd> comb_coherent(const std::vector<Mat<cd>>& Cs, const std::vector<int>& js, const std::vector<double>& f2,
+                      int decim = 1) {
     const size_t k = f2.size() / Cs[0].rows;
+    const size_t D = static_cast<size_t>(decim);
     size_t n = SIZE_MAX;
-    for (size_t i = 0; i < js.size(); ++i) n = std::min(n, Cs[i].cols - std::min(Cs[i].cols, static_cast<size_t>(js[i] * NSYM)));
+    for (size_t i = 0; i < js.size(); ++i) {
+        const size_t off = static_cast<size_t>(js[i] * NSYM) / D;
+        n = std::min(n, Cs[i].cols - std::min(Cs[i].cols, off));
+    }
     Mat<cd> C(f2.size(), n);
     for (size_t i = 0; i < f2.size(); ++i)
         for (size_t c = 0; c < js.size(); ++c) {
             const cd rot = std::exp(cd(0.0, -2 * PI * f2[i] * js[c] * NSYM / FS));
-            const cd* src = Cs[c][i / k] + js[c] * NSYM;
+            const cd* src = Cs[c][i / k] + static_cast<size_t>(js[c] * NSYM) / D;
             cd* dst = C[i];
             for (size_t t = 0; t < n; ++t) dst[t] += src[t] * rot;
         }
@@ -1407,7 +1402,8 @@ std::optional<Lock> find_copy_comb(std::span<const double> x, std::string_view b
 
 }  // namespace
 
-CombStream::CombStream(std::string_view band) : band_(band), intra_(sc_intra_spec(config::band(band).nc)) {
+CombStream::CombStream(std::string_view band)
+    : band_(band), intra_(sc_intra_spec(config::band(band).nc)), decim_(sc_flags().copy_decim) {
     for (auto& [j, t] : comb_filters(band)) {
         js_.push_back(j);
         filters_.push_back(std::move(t));
@@ -1462,52 +1458,62 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
     std::vector<cd> z(std::move(tail_));
     z.insert(z.end(), z_new.begin(), z_new.end());
     const auto len = static_cast<std::int64_t>(z.size());
-    const std::int64_t n = len - M + 1 - lag;
-    if (n < 1) {
+    const std::int64_t zs0 = fed - len;
+    const std::int64_t D = static_cast<std::int64_t>(decim_);
+    const std::int64_t lead = (D - (zs0 % D)) % D;
+    const std::int64_t len_a = len - lead;
+    const std::int64_t n_raw = len_a - M + 1 - lag;
+    if (n_raw < D) {
         tail_ = std::move(z);
         return;
     }
-    const std::int64_t zs = fed - len;
+    const std::int64_t n_d = n_raw / D;
+    const std::int64_t n = n_d * D;
+    const std::int64_t zs = zs0 + lead;
+    const auto z_a = std::span<const cd>(z).subspan(static_cast<std::size_t>(lead));
     const auto grid = waveform::cfo_grid();
-    const std::size_t n_c = static_cast<std::size_t>(len - M + 1);
+    const std::size_t n_c_raw = static_cast<std::size_t>(len_a - M + 1);
+    const std::size_t n_c_d = (n_c_raw + static_cast<std::size_t>(D) - 1) / static_cast<std::size_t>(D);
     std::vector<Mat<cd>> Cs;
     if (can_use_full_ && full && full->bins() == grid.size()) {
         const auto fo = full->outputs_from(zs);
-        if (fo.start == zs && fo.cols >= n_c && fo.rows.size() == grid.size()) {
+        const std::size_t need_full = (n_c_d - 1) * static_cast<std::size_t>(D) + 1;
+        if (fo.start == zs && fo.cols >= need_full && fo.rows.size() == grid.size()) {
             const size_t K = filters_.size();
-            Cs = waveform::repeat_corrs_multi(z, std::span<const std::vector<cd>>(filters_).first(K - 1), grid);
+            Cs = waveform::repeat_corrs_multi(z_a, std::span<const std::vector<cd>>(filters_).first(K - 1), grid, decim_);
             const double sc = std::sqrt(static_cast<double>(K));
-            Mat<cd> last(grid.size(), n_c);
+            Mat<cd> last(grid.size(), n_c_d);
             for (size_t b = 0; b < grid.size(); ++b) {
                 const cd* frow = fo.rows[b];
                 cd* dst = last[b];
                 if (K == 3) {
                     const cd* r0 = Cs[0][b];
                     const cd* r1 = Cs[1][b];
-                    for (size_t t = 0; t < n_c; ++t) dst[t] = sc * frow[t] - r0[t] - r1[t];
+                    for (size_t t = 0; t < n_c_d; ++t) dst[t] = sc * frow[t * static_cast<size_t>(D)] - r0[t] - r1[t];
                 } else {
-                    for (size_t t = 0; t < n_c; ++t) dst[t] = sc * frow[t];
+                    for (size_t t = 0; t < n_c_d; ++t) dst[t] = sc * frow[t * static_cast<size_t>(D)];
                     for (size_t c = 0; c + 1 < K; ++c) {
                         const cd* rc = Cs[c][b];
-                        for (size_t t = 0; t < n_c; ++t) dst[t] -= rc[t];
+                        for (size_t t = 0; t < n_c_d; ++t) dst[t] -= rc[t];
                     }
                 }
             }
             Cs.push_back(std::move(last));
         }
     }
-    if (Cs.empty()) Cs = waveform::repeat_corrs_multi(z, filters_, grid);
+    if (Cs.empty()) Cs = waveform::repeat_corrs_multi(z_a, filters_, grid, decim_);
     Mat<cd> C;
     std::vector<double> q;
     std::vector<double> p;
+    const std::int64_t qwin_d = std::max<std::int64_t>(added, 2000) / D;
     if (intra_) {
-        C = intra_frame_prods(Cs, *intra_, zs, false).first;
+        C = intra_frame_prods(Cs, *intra_, zs, false, decim_).first;
         const double scale = std::sqrt(static_cast<double>(intra_->n_combs == 1 ? 2 : intra_->n_syms - 1));
         const size_t nb = Cs[0].rows;
         q.assign(nb, INFINITY);
         const double inv_log = 1.0 / -std::log(1 - waveform::NOISE_QUANTILE);
         for (const auto& Cc : Cs) {
-            const auto from = static_cast<std::size_t>(std::max<std::int64_t>(0, static_cast<int64_t>(Cc.cols) - std::max<std::int64_t>(added, 2000)));
+            const auto from = static_cast<std::size_t>(std::max<std::int64_t>(0, static_cast<int64_t>(Cc.cols) - qwin_d));
             const std::size_t np = Cc.cols - from;
             p.resize(np);
             const auto k = static_cast<std::size_t>(waveform::NOISE_QUANTILE * static_cast<double>(np - 1));
@@ -1519,8 +1525,8 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
             }
         }
     } else {
-        C = comb_coherent(Cs, js_, freqs_);
-        const auto from = static_cast<std::size_t>(std::max<std::int64_t>(0, n - std::max<std::int64_t>(added, 2000)));
+        C = comb_coherent(Cs, js_, freqs_, decim_);
+        const auto from = static_cast<std::size_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(C.cols) - qwin_d));
         const std::size_t np = C.cols - from;
         p.resize(np);
         const auto k = static_cast<std::size_t>(waveform::NOISE_QUANTILE * static_cast<double>(np - 1));
@@ -1533,15 +1539,16 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
             q[i] = p[k] * inv_log;
         }
     }
+    const std::size_t take = std::min(C.cols, static_cast<std::size_t>(n_d));
     if (C_[0].size() == c_off_) {
         for (auto& r : C_) r.clear();
         c_off_ = 0;
         c0 = zs;
     }
-    for (std::size_t i = 0; i < C.rows; ++i) C_[i].insert(C_[i].end(), C[i], C[i] + C.cols);
+    for (std::size_t i = 0; i < C.rows; ++i) C_[i].insert(C_[i].end(), C[i], C[i] + take);
     levels_.push_back(std::move(q));
     if (levels_.size() > static_cast<std::size_t>(CHUNKS)) levels_.erase(levels_.begin());
-    tail_.assign(z.begin() + n, z.end());
+    tail_.assign(z.begin() + lead + n, z.end());
 }
 
 std::optional<double> CombStream::level() const {
@@ -1558,14 +1565,16 @@ std::optional<double> CombStream::level() const {
 }
 
 void CombStream::trim(std::int64_t start) {
+    const std::int64_t D = static_cast<std::int64_t>(decim_);
     const std::size_t nc = C_[0].size() - c_off_;
-    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>(start - c0, 0, static_cast<std::int64_t>(nc)));
+    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>((start - c0) / D, 0, static_cast<std::int64_t>(nc)));
     c_off_ += k;
-    c0 += static_cast<std::int64_t>(k);
+    c0 += static_cast<std::int64_t>(k) * D;
     const std::size_t nd = D_[0].size() - d_off_;
-    const auto kd = static_cast<std::size_t>(std::clamp<std::int64_t>(start - KEEP_BEHIND - d0, 0, static_cast<std::int64_t>(nd)));
+    const auto kd = static_cast<std::size_t>(
+        std::clamp<std::int64_t>((start - KEEP_BEHIND - d0) / D, 0, static_cast<std::int64_t>(nd)));
     d_off_ += kd;
-    d0 += static_cast<std::int64_t>(kd);
+    d0 += static_cast<std::int64_t>(kd) * D;
     auto compact = [](std::vector<std::vector<cd>>& rows, std::size_t& off) {
         if (off <= rows[0].size() / 2) return;
         for (auto& r : rows) r.erase(r.begin(), r.begin() + static_cast<std::ptrdiff_t>(off));
@@ -1576,38 +1585,43 @@ void CombStream::trim(std::int64_t start) {
 }
 
 void CombStream::extend() {
-    if (d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) < c0) {  // not extended across a trim: start at C's
+    const std::int64_t D = static_cast<std::int64_t>(decim_);
+    const std::size_t FR_d = static_cast<std::size_t>(FRAME_SAMPLES / decim_);
+    if (d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) * D < c0) {  // not extended across a trim: start at C's
         for (auto& r : D_) r.clear();
         d_off_ = 0;
         d0 = c0;
     }
-    const auto have = static_cast<std::size_t>(d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) - c0);
+    const auto have = static_cast<std::size_t>((d0 - c0) / D) + (D_[0].size() - d_off_);
     const std::size_t nc = C_[0].size() - c_off_;
     if (intra_) {
-        constexpr std::size_t PF = static_cast<std::size_t>(COPY_PAIRS - 1) * FRAME_SAMPLES;
-        if (nc > have + PF) {
+        const std::size_t PF_d = static_cast<std::size_t>(COPY_PAIRS - 1) * FR_d;
+        if (nc > have + PF_d) {
             std::vector<const cd*> rows;
             for (const auto& r : C_) rows.push_back(r.data() + c_off_ + have);
-            const Mat<cd> D = sum_frames(rows, nc - have, FRAME_SAMPLES, COPY_PAIRS);
-            for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), D[i], D[i] + D.cols);
+            const Mat<cd> Dm = sum_frames(rows, nc - have, FR_d, COPY_PAIRS);
+            for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), Dm[i], Dm[i] + Dm.cols);
         }
         return;
     }
-    constexpr std::size_t PF = static_cast<std::size_t>(COPY_PAIRS) * FRAME_SAMPLES;
-    if (nc > have + PF) {
+    const std::size_t PF_d = static_cast<std::size_t>(COPY_PAIRS) * FR_d;
+    if (nc > have + PF_d) {
         std::vector<const cd*> rows;
         for (const auto& r : C_) rows.push_back(r.data() + c_off_ + have);
-        const Mat<cd> D = waveform::pair_products(rows, nc - have, FRAME_SAMPLES, COPY_PAIRS);
-        for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), D[i], D[i] + D.cols);
+        const Mat<cd> Dm = waveform::pair_products(rows, nc - have, static_cast<int>(FR_d), COPY_PAIRS);
+        for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), Dm[i], Dm[i] + Dm.cols);
     }
 }
 
 CombStream::Products CombStream::products_from(std::int64_t start) {
     extend();
-    Products o{std::max(c0, start), {}, 0};
+    const std::int64_t D = static_cast<std::int64_t>(decim_);
+    const std::int64_t want = std::max(c0, start);
     const std::size_t nd = D_[0].size() - d_off_;
-    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>(o.start - d0, 0, static_cast<std::int64_t>(nd)));
-    o.cols = nd - k;
+    const std::int64_t diff = want - d0;
+    const auto k = static_cast<std::size_t>(
+        std::clamp<std::int64_t>(diff > 0 ? (diff + D - 1) / D : 0, 0, static_cast<std::int64_t>(nd)));
+    Products o{d0 + static_cast<std::int64_t>(k) * D, {}, nd - k};
     for (const auto& r : D_) o.rows.push_back(r.data() + d_off_ + k);
     return o;
 }
@@ -1621,7 +1635,7 @@ CombStream::Products CombStream::kept_products() {
 
 std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
                                           std::span<const cd* const> D_rows, std::size_t dcols, double level,
-                                          double* peak, const Mat<cd>* fold, std::size_t fold_shift) {
+                                          double* peak, const Mat<cd>* fold, std::size_t fold_shift, int decim) {
     if (!copies(band)) {
         if (peak) *peak = 0.0;
         return std::nullopt;
@@ -1629,9 +1643,10 @@ std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string
     if (const auto intra = sc_intra_spec(config::band(band).nc)) {
         const auto f2 = intra_freqs(intra->n_combs);
         const int cfo_lag = (intra->syms[1] - intra->syms[0]) * NSYM;
-        return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, f2, true, cfo_lag, fold_shift);
+        return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, f2, true, cfo_lag, fold_shift, decim);
     }
-    return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, comb_freqs(), true, FRAME_SAMPLES, fold_shift);
+    return find_copy_from(x, {}, band, accept, D_rows, dcols, level, peak, fold, comb_freqs(), true, FRAME_SAMPLES,
+                          fold_shift, decim);
 }
 
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
@@ -1673,13 +1688,20 @@ namespace {
 std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd> z0, std::string_view band,
                                    const Accept* accept, std::span<const cd* const> D_rows, size_t dcols, double level,
                                    double* peak, const Mat<cd>* fold_in, std::span<const double> freqs, bool comb,
-                                   int cfo_lag, size_t fold_shift) {
+                                   int cfo_lag, size_t fold_shift, int decim) {
     const size_t F = D_rows.size();
-    const int64_t m = static_cast<int64_t>(dcols) / FRAME_SAMPLES;
+    const size_t FR = static_cast<size_t>(FRAME_SAMPLES / decim);
+    const int64_t m = static_cast<int64_t>(dcols) / static_cast<int64_t>(FR);
     if (m < 1) return std::nullopt;
-    const size_t FR = FRAME_SAMPLES;
     Mat<cd> own;
-    if (!fold_in) own = pilot_fold(D_rows, 0, static_cast<size_t>(m));
+    if (!fold_in) {
+        own = Mat<cd>(F, FR);
+        for (size_t f = 0; f < F; ++f) {
+            const cd* d = D_rows[f];
+            for (size_t i = 0; i < static_cast<size_t>(m); ++i)
+                for (size_t ph = 0; ph < FR; ++ph) own[f][ph] = i ? own[f][ph] + d[i * FR + ph] : d[ph];
+        }
+    }
     const Mat<cd>& src = fold_in ? *fold_in : own;
     std::vector<cd> row_mean(F, cd(0.0, 0.0));
     std::vector<double> mag2(FR, 0.0);
@@ -1720,7 +1742,8 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
     std::iota(order.begin(), order.end(), 0);
     std::stable_sort(order.begin(), order.end(), [&](int a, int c) { return -mag[static_cast<size_t>(a)] < -mag[static_cast<size_t>(c)]; });
     std::vector<int> grids;
-    for (int ph : order) {
+    for (int ph_d : order) {
+        const int ph = ph_d * decim;
         if (std::all_of(grids.begin(), grids.end(), [&](int g) {
                 return std::min(std::abs(ph - g), FRAME_SAMPLES - std::abs(ph - g)) >= NCP;
             })) {
@@ -1733,7 +1756,7 @@ std::optional<Lock> find_copy_from(std::span<const double> x, std::span<const cd
     const int64_t len = static_cast<int64_t>(z0.size());
     std::vector<Lock> found;
     for (int ph : grids) {
-        const size_t col = (fold_shift + static_cast<size_t>(ph)) % FR;
+        const size_t col = (fold_shift + static_cast<size_t>(ph / decim)) % FR;
         size_t i = 0;
         double best_n = std::norm(src[0][col] - row_mean[0]);
         for (size_t f = 1; f < F; ++f) {

@@ -388,18 +388,22 @@ std::optional<modem::Lock> Receiver::find_copy() {
             const auto p = c.products_from(off_);
             const int64_t a = p.start;
             const auto x = std::span<const double>(buf_).subspan(static_cast<std::size_t>(a - off_));
+            const int D = c.decim();
+            const int64_t FR_d = config::FRAME_SAMPLES / D;
             const auto cols = static_cast<std::size_t>(std::max<int64_t>(
-                0, std::min(static_cast<int64_t>(p.cols), static_cast<int64_t>(x.size()) - config::M + 1 - c.lag - PF)));
-            const int64_t FR = config::FRAME_SAMPLES, m = static_cast<int64_t>(cols) / FR;
+                0, std::min(static_cast<int64_t>(p.cols),
+                            (static_cast<int64_t>(x.size()) - config::M + 1 - c.lag - PF) / D)));
+            const int64_t m = static_cast<int64_t>(cols) / FR_d;
             const Mat<std::complex<double>>* fold_ptr = nullptr;
             std::size_t fold_shift = 0;
             if (m >= 1) {
                 const auto k = c.kept_products();
-                fold_ptr = &it->comb_fold.fold(k.rows, k.cols, k.start, a, a + m * FR);
-                fold_shift = static_cast<std::size_t>(a % FR);
+                fold_ptr = &it->comb_fold.fold(k.rows, k.cols, k.start / D, a / D, a / D + m * FR_d,
+                                               static_cast<std::size_t>(FR_d));
+                fold_shift = static_cast<std::size_t>((a / D) % FR_d);
             }
             const auto lock = modem::find_copy_comb_stream(x, band, &accept_, p.rows, cols, *level, nullptr,
-                                                           fold_ptr, fold_shift);
+                                                           fold_ptr, fold_shift, D);
             if (lock && (!best || lock->score > best->score)) {
                 best = lock;
                 best_k = a - off_;

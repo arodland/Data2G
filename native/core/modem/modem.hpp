@@ -116,6 +116,7 @@ struct ScFlags {
     bool copy_rows = true;      // DATA2G_SC_COPY_ROWS
     double restore_ace = 1.0;   // DATA2G_SC_RESTORE_ACE
     int slepian = -1;           // DATA2G_SC_SLEPIAN (-1 auto, 0 off, 1 on)
+    int copy_decim = 2;         // DATA2G_SC_COPY_DECIM (1, 2, or 4: CombStream decimation; 2 is Nyquist-exact on w/w48)
 };
 const ScFlags& sc_flags();
 bool use_slepian();
@@ -253,6 +254,7 @@ public:
     // the last comb via C_{K-1} = sqrt(K) * C_full - sum_{c < K-1} C_c (saving 1/K of the comb IFFTs).
     void feed(std::span<const cd> z, const waveform::StreamDetector* full = nullptr);
     bool can_use_full() const { return can_use_full_; }
+    int decim() const { return decim_; }
     void trim(std::int64_t start);
     std::optional<double> level() const;
     struct Products {
@@ -270,6 +272,7 @@ private:
     std::string_view band_;
     std::optional<ScIntra> intra_;
     bool can_use_full_ = false;
+    int decim_ = 1;
     std::vector<double> freqs_;
     std::vector<int> js_;
     std::vector<std::vector<cd>> filters_;
@@ -282,7 +285,7 @@ private:
 std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
                                           std::span<const cd* const> D_rows, std::size_t dcols, double level,
                                           double* peak = nullptr, const Mat<cd>* fold = nullptr,
-                                          std::size_t fold_shift = 0);
+                                          std::size_t fold_shift = 0, int decim = 1);
 // modem.FoldTrack: the pilot fold kept running over a window of a stream's pair products that slides forward, per
 // CFO bin and absolute frame phase; entering products added and leaving ones subtracted in stream order, a frame
 // phase's run at a time, summed afresh every RENEW folds or when the window moves any other way.
@@ -294,12 +297,14 @@ public:
         lo_ = hi_ = 0;
         n_ = 0;
     }
-    // the window [lo, hi) of stream starts (D: pair products from stream start a, dcols of them, covering it)
+    // the window [lo, hi) of stream starts (D: pair products from stream start a, dcols of them, covering it;
+    // period: columns per frame, FRAME_SAMPLES / decim)
     const Mat<cd>& fold(std::span<const cd* const> D_rows, std::size_t dcols, std::int64_t a, std::int64_t lo,
-                        std::int64_t hi);
+                        std::int64_t hi, std::size_t period = config::FRAME_SAMPLES);
 
 private:
-    void acc(std::span<const cd* const> D_rows, std::int64_t a, std::int64_t u0, std::int64_t u1, bool add);
+    void acc(std::span<const cd* const> D_rows, std::int64_t a, std::int64_t u0, std::int64_t u1, bool add,
+             std::size_t period);
     Mat<cd> R_;
     bool have_ = false;
     std::int64_t lo_ = 0, hi_ = 0;

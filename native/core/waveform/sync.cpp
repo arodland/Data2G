@@ -281,6 +281,32 @@ void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span
     });
 }
 
+// Zero-offset template spectrum: gp[(-n) mod L] = conj(t[n]) so IFFT_L(Z * roll(Gs, sh))[t] == corr[t] directly
+// (no m-1 offset, no trailing phase scale), enabling exact D-decimation via (L/D)-point IFFT.
+std::shared_ptr<const std::vector<cdouble>> template_spectrum_zero(std::span<const cdouble> t, std::size_t L) {
+    struct Entry {
+        std::vector<cdouble> t;
+        std::size_t L;
+        std::shared_ptr<const std::vector<cdouble>> G;
+    };
+    static std::mutex mu;
+    static std::vector<Entry> cache;
+    constexpr std::size_t KEEP = 16;
+    {
+        std::lock_guard lock(mu);
+        for (const Entry& e : cache)
+            if (e.L == L && std::equal(e.t.begin(), e.t.end(), t.begin(), t.end())) return e.G;
+    }
+    std::vector<cdouble> gp(L);
+    gp[0] = std::conj(t[0]);
+    for (std::size_t k = 1; k < t.size(); ++k) gp[L - k] = std::conj(t[k]);
+    auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
+    std::lock_guard lock(mu);
+    cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
+    if (cache.size() > KEEP) cache.erase(cache.begin());
+    return G;
+}
+
 }  // namespace
 
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs) {
@@ -291,30 +317,35 @@ Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t
 
 std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
                                              std::span<const std::vector<cdouble>> templates,
-                                             std::span<const double> freqs) {
+                                             std::span<const double> freqs, int decim) {
     std::vector<Mat<cdouble>> outs;
     if (templates.empty()) return outs;
+    const std::size_t D = static_cast<std::size_t>(decim);
     const std::size_t nt = templates.size(), m = templates[0].size(), nb = freqs.size();
     if (z.size() < m) throw std::invalid_argument("repeat_corrs_multi: signal shorter than the template");
     const std::size_t n = z.size() + m - 1, n_out = z.size() - m + 1;
+    const std::size_t n_out_d = (n_out + D - 1) / D;
     const std::size_t L = PER * dsp::next_fast_len((n + PER - 1) / PER), bins_per_step = L / PER;
+    const std::size_t Ld = L / D;
     outs.reserve(nt);
-    for (std::size_t ti = 0; ti < nt; ++ti) outs.emplace_back(nb, n_out);
+    for (std::size_t ti = 0; ti < nt; ++ti) outs.emplace_back(nb, n_out_d);
     std::vector<cdouble> zp(L);
     std::copy(z.begin(), z.end(), zp.begin());
     const std::vector<cdouble> Z = dsp::fft(zp, true);
     std::vector<std::shared_ptr<const std::vector<cdouble>>> Gs(nt);
-    for (std::size_t ti = 0; ti < nt; ++ti) Gs[ti] = template_spectrum(templates[ti], L);
+    for (std::size_t ti = 0; ti < nt; ++ti)
+        Gs[ti] = D == 1 ? template_spectrum(templates[ti], L) : template_spectrum_zero(templates[ti], L);
     constexpr std::size_t BATCH = 4, BATCH_MAX_L = 20480;
-    const std::size_t B = L <= BATCH_MAX_L ? BATCH : 1;
+    const std::size_t B = Ld <= BATCH_MAX_L ? BATCH : 1;
     const std::size_t tasks_per_t = (nb + B - 1) / B;
+    const double inv_d = 1.0 / static_cast<double>(D);
     per_bin(z.size(), nt * tasks_per_t, [&](std::size_t task) {
         Scratch& s = scratch();
         const std::size_t ti = task / tasks_per_t, t_task = task % tasks_per_t;
         const std::size_t i0 = t_task * B, rows = std::min(B, nb - i0);
         const std::vector<cdouble>& G0 = *Gs[ti];
-        s.prod.resize(rows * L);
-        s.c.resize(rows * L);
+        s.prod.resize(rows * Ld);
+        s.c.resize(rows * Ld);
         std::int64_t ks[BATCH];
         for (std::size_t r = 0; r < rows; ++r) {
             const auto k = static_cast<std::int64_t>(std::llround(freqs[i0 + r] / STEP_HZ));
@@ -323,16 +354,45 @@ std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
                 ((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L) +
                  static_cast<std::int64_t>(L)) %
                 static_cast<std::int64_t>(L));
-            cdouble* prod = s.prod.data() + r * L;
-            cmul(Z.data(), G0.data() + (L - shift), prod, shift);
-            cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
+            cdouble* prod = s.prod.data() + r * Ld;
+            if (D == 1) {
+                cmul(Z.data(), G0.data() + (L - shift), prod, shift);
+                cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
+            } else {
+                // Fold Z[q + p*Ld] * G0[(q + p*Ld - shift) mod L] over p = 0..D-1 into prod[q].
+                for (std::size_t q = 0; q < Ld; ++q) prod[q] = {0.0, 0.0};
+                for (std::size_t p = 0; p < D; ++p) {
+                    const std::size_t base = p * Ld;
+                    const std::size_t g0 = (base + L - shift) % L;
+                    const std::size_t first = std::min(Ld, L - g0);
+                    const cdouble* zp_ = Z.data() + base;
+                    const cdouble* gp_ = G0.data() + g0;
+                    for (std::size_t q = 0; q < first; ++q) {
+                        const double ar = zp_[q].real(), ai = zp_[q].imag(), br = gp_[q].real(), bi = gp_[q].imag();
+                        prod[q] += cdouble(ar * br - ai * bi, ar * bi + ai * br);
+                    }
+                    if (first < Ld) {
+                        const cdouble* zp2 = zp_ + first;
+                        const cdouble* gp2 = G0.data();
+                        for (std::size_t q = 0; q < Ld - first; ++q) {
+                            const double ar = zp2[q].real(), ai = zp2[q].imag(), br = gp2[q].real(), bi = gp2[q].imag();
+                            prod[first + q] += cdouble(ar * br - ai * bi, ar * bi + ai * br);
+                        }
+                    }
+                }
+                for (std::size_t q = 0; q < Ld; ++q) prod[q] *= inv_d;
+            }
         }
-        dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, L, false);
+        dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, Ld, false);
         for (std::size_t r = 0; r < rows; ++r) {
-            std::int64_t q = (ks[r] * static_cast<std::int64_t>(m - 1)) % PER;
-            if (q < 0) q += PER;
-            const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
-            cscale(s.c.data() + r * L + (m - 1), ph, outs[ti][i0 + r], n_out);
+            if (D == 1) {
+                std::int64_t q = (ks[r] * static_cast<std::int64_t>(m - 1)) % PER;
+                if (q < 0) q += PER;
+                const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
+                cscale(s.c.data() + r * L + (m - 1), ph, outs[ti][i0 + r], n_out);
+            } else {
+                std::copy(s.c.data() + r * Ld, s.c.data() + r * Ld + n_out_d, outs[ti][i0 + r]);
+            }
         }
         release_big(s);
     });

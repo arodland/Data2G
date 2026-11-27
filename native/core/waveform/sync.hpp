@@ -55,9 +55,11 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs);
 
 // repeat_corrs for several templates of the same length on the same z: shares one forward FFT of z.
+// `decim` (1, 2, or 4): evaluate at every `decim`-th output sample via an (L / decim)-point folded IFFT
+// (mathematically identical to repeat_corrs[:, ::decim]).
 std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
                                              std::span<const std::vector<cdouble>> templates,
-                                             std::span<const double> freqs);
+                                             std::span<const double> freqs, int decim = 1);
 
 // The noise level of matched filter outputs C (bins, starts): per bin
 // NOISE_QUANTILE of |c_f|^2 scaled to an exponential's mean, the lowest
