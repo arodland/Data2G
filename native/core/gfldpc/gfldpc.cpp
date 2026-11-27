@@ -14,9 +14,10 @@ constexpr unsigned POLY[] = {0, 0, 0, 0b1011, 0b10011, 0b100101};  // gfldpc.POL
 constexpr float FLOOR = 1e-20f;
 
 // Unnormalized Walsh-Hadamard transform in place (Sylvester order: scipy.linalg.hadamard's).
-// Compile-time Q (8, 16, 32) unrolls the butterfly stages into SIMD registers.
+// Compile-time Q (8, 16, 32) unrolls the butterfly stages into SIMD registers when inlined into
+// the non-template DATA2G_SIMD_CLONES step functions below (Clang forbids target_clones on templates).
 template <int Q>
-DATA2G_SIMD_CLONES void wht_q(double* __restrict a) {
+inline void wht_q(double* __restrict a) {
     for (int h = 1; h < Q; h *= 2)
         for (int i = 0; i < Q; i += 2 * h)
             for (int j = i; j < i + h; ++j) {
@@ -27,7 +28,7 @@ DATA2G_SIMD_CLONES void wht_q(double* __restrict a) {
 }
 
 template <int Q>
-DATA2G_SIMD_CLONES void mul_norm_q(float* __restrict v, const float* __restrict w) {
+inline void mul_norm_q(float* __restrict v, const float* __restrict w) {
     float mx = 0.0f;
     for (int a = 0; a < Q; ++a) {
         const float p = v[a] * w[a];
@@ -42,7 +43,7 @@ DATA2G_SIMD_CLONES void mul_norm_q(float* __restrict v, const float* __restrict 
 }
 
 template <int Q>
-DATA2G_SIMD_CLONES void mul_norm_into_q(const float* __restrict src, const float* __restrict w, float* __restrict dst) {
+inline void mul_norm_into_q(const float* __restrict src, const float* __restrict w, float* __restrict dst) {
     float mx = 0.0f;
     for (int a = 0; a < Q; ++a) {
         const float p = src[a] * w[a];
@@ -57,7 +58,7 @@ DATA2G_SIMD_CLONES void mul_norm_into_q(const float* __restrict src, const float
 }
 
 template <int Q>
-DATA2G_SIMD_CLONES void v2c_msg_q(const float* __restrict fwd_j, const float* __restrict tmp, float* __restrict m) {
+inline void v2c_msg_q(const float* __restrict fwd_j, const float* __restrict tmp, float* __restrict m) {
     float s = 0.0f;
     for (int a = 0; a < Q; ++a) {
         const float p = fwd_j[a] * tmp[a];
@@ -69,14 +70,114 @@ DATA2G_SIMD_CLONES void v2c_msg_q(const float* __restrict fwd_j, const float* __
 }
 
 template <int Q>
-DATA2G_SIMD_CLONES void cvec_mul(const double* __restrict a, const double* __restrict b, double* __restrict out) {
+inline void cvec_mul(const double* __restrict a, const double* __restrict b, double* __restrict out) {
     for (int i = 0; i < Q; ++i) out[i] = a[i] * b[i];
 }
 
 template <int Q>
-DATA2G_SIMD_CLONES void cvec_mul_inplace(double* __restrict a, const double* __restrict b) {
+inline void cvec_mul_inplace(double* __restrict a, const double* __restrict b) {
     for (int i = 0; i < Q; ++i) a[i] *= b[i];
 }
+
+template <int Q>
+inline void var_step_impl(int n, const int* col_ptr, const int* col_edges, const float* __restrict ch,
+                          const float* __restrict c2v, float* __restrict v2c, float* __restrict fwd,
+                          std::uint8_t* __restrict hard, float* __restrict last_post) {
+    for (int v = 0; v < n; ++v) {
+        const int* es = col_edges + col_ptr[v];
+        const int d = col_ptr[v + 1] - col_ptr[v];
+        for (int a = 0; a < Q; ++a) fwd[a] = ch[v * Q + a];  // fwd[j]: ch times the first j edges'
+        for (int j = 0; j < d; ++j)
+            mul_norm_into_q<Q>(&fwd[j * Q], &c2v[es[j] * Q], &fwd[(j + 1) * Q]);
+        const float* post = &fwd[d * Q];
+        int best = 0;
+        float best_v = post[0];
+        for (int a = 1; a < Q; ++a) {
+            if (post[a] > best_v) {
+                best_v = post[a];
+                best = a;
+            }
+        }
+        hard[v] = static_cast<std::uint8_t>(best);
+        if (last_post) {
+            for (int a = 0; a < Q; ++a) last_post[v * Q + a] = post[a];
+        }
+        float tmp[Q];
+        for (int a = 0; a < Q; ++a) tmp[a] = 1.0f;  // the product of the edges past j
+        for (int j = d - 1; j >= 0; --j) {
+            v2c_msg_q<Q>(&fwd[j * Q], tmp, &v2c[es[j] * Q]);
+            if (j) mul_norm_q<Q>(tmp, &c2v[es[j] * Q]);
+        }
+    }
+}
+
+template <int Q>
+inline void chk_step_impl(int m_rows, int D, const int* var, const std::uint8_t* h,
+                          const std::uint8_t* mul, const std::uint8_t* inv, const float* __restrict v2c,
+                          float* __restrict c2v, double* __restrict W, double* __restrict cf, int* __restrict act) {
+    for (int r = 0; r < m_rows; ++r) {
+        int deg = 0;
+        for (int d = 0; d < D; ++d) {
+            const int e = r * D + d;
+            if (var[e] < 0) continue;
+            act[deg] = e;
+            double* w = &W[deg * Q];
+            const std::uint8_t* mhi = mul + inv[h[e]] * Q;
+            const float* m = &v2c[e * Q];
+            for (int y = 0; y < Q; ++y) w[y] = m[mhi[y]];  // P_y[y] = P_x[h^-1 y]
+            wht_q<Q>(w);
+            ++deg;
+        }
+        if (deg == 0) continue;
+        // products of the others' transforms: forward (0..deg-2), then backward
+        for (int a = 0; a < Q; ++a) cf[a] = W[a];
+        for (int d = 1; d < deg - 1; ++d) cvec_mul<Q>(&cf[(d - 1) * Q], &W[d * Q], &cf[d * Q]);
+        double ct[Q];
+        for (int a = 0; a < Q; ++a) ct[a] = 1.0;  // the backward product past d
+        for (int d = deg - 1; d >= 0; --d) {
+            const int e = act[d];
+            double R[Q];
+            if (d) cvec_mul<Q>(&cf[(d - 1) * Q], ct, R);
+            else {
+                for (int a = 0; a < Q; ++a) R[a] = ct[a];
+            }
+            wht_q<Q>(R);
+            const std::uint8_t* mhv = mul + h[e] * Q;
+            double rp[Q];
+            double mx = 0.0;
+            for (int a = 0; a < Q; ++a) {
+                const double v = R[mhv[a]];
+                rp[a] = v;
+                mx = v > mx ? v : mx;
+            }
+            const double k = mx > 0.0 ? 1.0 / mx : 1.0;
+            float* m = &c2v[e * Q];
+            for (int a = 0; a < Q; ++a) {
+                const float v = static_cast<float>(rp[a] > 0.0 ? rp[a] * k : 0.0);
+                m[a] = v > FLOOR ? v : FLOOR;
+            }
+            if (d > 0) cvec_mul_inplace<Q>(ct, &W[d * Q]);
+        }
+    }
+}
+
+#define DATA2G_GFLDPC_STEPS(Q)                                                                                      \
+    DATA2G_SIMD_CLONES void var_step_##Q(int n, const int* col_ptr, const int* col_edges, const float* __restrict ch, \
+                                         const float* __restrict c2v, float* __restrict v2c, float* __restrict fwd,  \
+                                         std::uint8_t* __restrict hard, float* __restrict last_post) {               \
+        var_step_impl<Q>(n, col_ptr, col_edges, ch, c2v, v2c, fwd, hard, last_post);                                 \
+    }                                                                                                                \
+    DATA2G_SIMD_CLONES void chk_step_##Q(int m_rows, int D, const int* var, const std::uint8_t* h,                    \
+                                         const std::uint8_t* mul, const std::uint8_t* inv,                           \
+                                         const float* __restrict v2c, float* __restrict c2v, double* __restrict W,   \
+                                         double* __restrict cf, int* __restrict act) {                               \
+        chk_step_impl<Q>(m_rows, D, var, h, mul, inv, v2c, c2v, W, cf, act);                                         \
+    }
+
+DATA2G_GFLDPC_STEPS(8)
+DATA2G_GFLDPC_STEPS(16)
+DATA2G_GFLDPC_STEPS(32)
+#undef DATA2G_GFLDPC_STEPS
 
 }  // namespace
 
@@ -263,67 +364,22 @@ Decoded decode_q(const Code& c, const std::vector<int>& col_ptr, const std::vect
         bool ok = false;
         for (int it = 0;; ++it) {
             // symbols: the posterior's decision, and each edge's message (the others' product, sum 1)
-            for (int v = 0; v < n; ++v) {
-                const int* es = &col_edges[col_ptr[v]];
-                const int d = col_ptr[v + 1] - col_ptr[v];
-                std::copy_n(&ch[v * Q], Q, &fwd[0]);  // fwd[j]: ch times the first j edges'
-                for (int j = 0; j < d; ++j)
-                    mul_norm_into_q<Q>(&fwd[j * Q], &c2v[es[j] * Q], &fwd[(j + 1) * Q]);
-                const float* post = &fwd[d * Q];
-                hard[v] = static_cast<std::uint8_t>(std::max_element(post, post + Q) - post);
-                if (posterior) std::copy_n(post, Q, &last_post[v * Q]);
-                float tmp[Q];
-                for (int a = 0; a < Q; ++a) tmp[a] = 1.0f;  // the product of the edges past j
-                for (int j = d - 1; j >= 0; --j) {
-                    v2c_msg_q<Q>(&fwd[j * Q], tmp, &v2c[es[j] * Q]);
-                    if (j) mul_norm_q<Q>(tmp, &c2v[es[j] * Q]);
-                }
-            }
+            float* lp = posterior ? last_post.data() : nullptr;
+            if constexpr (Q == 8)
+                var_step_8(n, col_ptr.data(), col_edges.data(), ch.data(), c2v.data(), v2c.data(), fwd.data(), hard, lp);
+            else if constexpr (Q == 16)
+                var_step_16(n, col_ptr.data(), col_edges.data(), ch.data(), c2v.data(), v2c.data(), fwd.data(), hard, lp);
+            else
+                var_step_32(n, col_ptr.data(), col_edges.data(), ch.data(), c2v.data(), v2c.data(), fwd.data(), hard, lp);
             ok = c.syndrome_ok(hard);
             if (ok || it == iters) break;
             // checks
-            for (int r = 0; r < c.m; ++r) {
-                int deg = 0;
-                for (int d = 0; d < D; ++d) {
-                    const int e = r * D + d;
-                    if (c.var[e] < 0) continue;
-                    act[deg] = e;
-                    double* w = &W[deg * Q];
-                    const std::uint8_t* mhi = mul + inv[c.h[e]] * Q;
-                    const float* m = &v2c[e * Q];
-                    for (int y = 0; y < Q; ++y) w[y] = m[mhi[y]];  // P_y[y] = P_x[h^-1 y]
-                    wht_q<Q>(w);
-                    ++deg;
-                }
-                if (deg == 0) continue;
-                // products of the others' transforms: forward (0..deg-2), then backward
-                std::copy_n(&W[0], Q, &cf[0]);
-                for (int d = 1; d < deg - 1; ++d) cvec_mul<Q>(&cf[(d - 1) * Q], &W[d * Q], &cf[d * Q]);
-                double ct[Q];
-                for (int a = 0; a < Q; ++a) ct[a] = 1.0;  // the backward product past d
-                for (int d = deg - 1; d >= 0; --d) {
-                    const int e = act[d];
-                    double R[Q];
-                    if (d) cvec_mul<Q>(&cf[(d - 1) * Q], ct, R);
-                    else std::copy_n(ct, Q, R);
-                    wht_q<Q>(R);
-                    const std::uint8_t* mhv = mul + c.h[e] * Q;
-                    double rp[Q];
-                    double mx = 0.0;
-                    for (int a = 0; a < Q; ++a) {
-                        const double v = R[mhv[a]];
-                        rp[a] = v;
-                        mx = v > mx ? v : mx;
-                    }
-                    const double k = mx > 0.0 ? 1.0 / mx : 1.0;
-                    float* m = &c2v[e * Q];
-                    for (int a = 0; a < Q; ++a) {
-                        const double v = rp[a] > 0.0 ? rp[a] * k : 0.0;
-                        m[a] = std::max(static_cast<float>(v), FLOOR);
-                    }
-                    if (d > 0) cvec_mul_inplace<Q>(ct, &W[d * Q]);
-                }
-            }
+            if constexpr (Q == 8)
+                chk_step_8(c.m, D, c.var.data(), c.h.data(), mul, inv, v2c.data(), c2v.data(), W.data(), cf.data(), act.data());
+            else if constexpr (Q == 16)
+                chk_step_16(c.m, D, c.var.data(), c.h.data(), mul, inv, v2c.data(), c2v.data(), W.data(), cf.data(), act.data());
+            else
+                chk_step_32(c.m, D, c.var.data(), c.h.data(), mul, inv, v2c.data(), c2v.data(), W.data(), cf.data(), act.data());
         }
         // Compute log posteriors once on exit rather than on every iteration.
         if (posterior) {
