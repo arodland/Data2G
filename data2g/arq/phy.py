@@ -60,7 +60,7 @@ DD_BUDGET_S = 1.0
 # every length, one decode (scripts/ctl_prior_study.py --boundary). DATA2G_PIN_EST=0:
 # the fixed cuts, for A/B runs.
 PIN_CUTS = (16, 32)
-POLAR_PIN_CUTS = (12, 16)
+POLAR_PIN_CUTS = (6, 8, 12, 16)
 PIN_EST = os.environ.get("DATA2G_PIN_EST", "1") == "1"
 EST = 0  # an offset no cut gives: the estimated prior (codes.pad_prior) in place of a cut
 

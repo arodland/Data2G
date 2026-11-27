@@ -26,21 +26,33 @@ def test_scl_decodes(e):
     assert (u[:, 0] == bits).all(axis=1).mean() > 0.95
 
 
-def test_polar_payload_enters_reversed():
-    """codes.polar_order: the payload's last bit on the code's first info
-    position, the CRC in order after it; encode and every decode agree."""
+def test_polar_payload_enters_by_reliability():
+    """codes.polar_order: CRC sits on the most reliable channels, payload
+    bits follow in decreasing GA reliability (so freezing any byte tail
+    reduces the code to the GA-optimal shorter polar code), and encode
+    and every decode agree."""
     from data2g import codes, cpm
 
     spec = cpm.CTL["c8r50"]
     nb = 8 * codes.payload_bytes(spec)
     order = codes.polar_order(spec)
-    assert order[0] == nb - 1 and order[nb - 1] == 0 and (order[nb:] == np.arange(nb, spec.k)).all()
+    assert sorted(order.tolist()) == list(range(spec.k))
+    # Freezing the tail past any K payload bytes leaves the exact info_pos
+    # of a fresh GA-designed PolarCode of length 8*K + crc_bits.
+    code = codes.polar_code(spec)
+    cb = codes.crc_bits(spec)
+    for k_bytes in (4, 6, 8, 12, 16):
+        keep_info = set(range(8 * k_bytes)) | set(range(nb, nb + cb))
+        active = sorted(code.info_pos[j] for j in range(spec.k) if int(order[j]) in keep_info)
+        fresh = polar.PolarCode(8 * k_bytes + cb, spec.coded_bits,
+                                design_snr_db=codes.POLAR_DESIGN_SNR_DB)
+        assert active == list(fresh.info_pos)
     pay = bytes([1]) + bytes(codes.payload_bytes(spec) - 1)
     bits = codes.info_bits(spec, pay, 0, codes.PLAIN)[None]
-    u = np.zeros((1, codes.polar_code(spec).n), np.uint8)
-    u[:, np.asarray(codes.polar_code(spec).info_pos)] = bits[:, order]
+    u = np.zeros((1, code.n), np.uint8)
+    u[:, np.asarray(code.info_pos)] = bits[:, order]
     np.testing.assert_array_equal(codes.encode(spec, pay, 0, 0, codes.PLAIN),
-                                  polar.transform(u)[0, codes.polar_code(spec).sent][codes.interleaver(spec)])
+                                  polar.transform(u)[0, code.sent][codes.interleaver(spec)])
     soft = 4.0 * (1 - 2.0 * codes.encode(spec, pay, 0, 0x55, 3))
     assert codes.decode_many(spec, soft[None], 0x55, index=[3])[0] == (pay, True)
 

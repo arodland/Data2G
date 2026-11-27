@@ -307,8 +307,18 @@ def polar_ga_cpp() -> str:
     hc = polar.PolarCode(hand.K, hand.E, design_snr_db=codes.POLAR_DESIGN_SNR_DB)
     out.append(f"constexpr std::uint16_t ga_{len(rows)}[] = {{{ints(hc.info_pos)}}};\n")
     rows.append(f"    {{{hand.K}, {hand.E}, ga_{len(rows)}}},\n")
-    out.append(f"\nconstexpr PolarDesign designs[] = {{\n{''.join(rows)}}};\n\n}}  // namespace\n\n"
-               "const std::span<const PolarDesign> POLAR_GA = designs;\n\n}  // namespace data2g::tables\n")
+    out.append(f"\nconstexpr PolarDesign designs[] = {{\n{''.join(rows)}}};\n\n")
+    ord_rows, seen_ord = [], set()
+    for s in [*config.SUBMODES.values(), *cpm.CTL.values(), *cpm.WIDE_CTL.values()]:
+        if s.code != "polar" or s.name in seen_ord:
+            continue
+        seen_ord.add(s.name)
+        o = codes.polar_order(s)
+        out.append(f"constexpr std::uint16_t ord_{len(ord_rows)}[] = {{{ints(o)}}};\n")
+        ord_rows.append(f'    {{"{s.name}", ord_{len(ord_rows)}}},\n')
+    out.append(f"\nconstexpr PolarOrder orders[] = {{\n{''.join(ord_rows)}}};\n\n}}  // namespace\n\n"
+               "const std::span<const PolarDesign> POLAR_GA = designs;\n"
+               "const std::span<const PolarOrder> POLAR_ORDERS = orders;\n\n}  // namespace data2g::tables\n")
     return "".join(out)
 
 
