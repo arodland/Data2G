@@ -18,6 +18,7 @@
 #include "constellation/constellation.hpp"
 #include "dsp/dsp.hpp"
 #include "modem/scattered.hpp"
+#include "util/simd.hpp"
 #include "waveform/dsp.hpp"
 #include "waveform/ofdm.hpp"
 
@@ -1192,18 +1193,46 @@ std::vector<double> pilot_coherence(std::span<const double> x, const Lock& lock,
     return out;
 }
 
+namespace {
+
+DATA2G_SIMD_CLONES void add_doubles(double* __restrict r, const double* __restrict d, size_t n) {
+    for (size_t i = 0; i < n; ++i) r[i] += d[i];
+}
+
+DATA2G_SIMD_CLONES void sub_doubles(double* __restrict r, const double* __restrict d, size_t n) {
+    for (size_t i = 0; i < n; ++i) r[i] -= d[i];
+}
+
+DATA2G_SIMD_CLONES void row_max_mag2(const double* __restrict row, double mur, double mui, double w2,
+                                     double* __restrict mag2, size_t n) {
+    for (size_t ph = 0; ph < n; ++ph) {
+        const double dr = row[2 * ph] - mur, di = row[2 * ph + 1] - mui;
+        const double p = (dr * dr + di * di) * w2;
+        if (p > mag2[ph]) mag2[ph] = p;
+    }
+}
+
+DATA2G_SIMD_CLONES void cmac_const(const double* __restrict src, double rr, double ri, double* __restrict dst, size_t n) {
+    for (size_t t = 0; t < n; ++t) {
+        const double sr = src[2 * t], si = src[2 * t + 1];
+        dst[2 * t] += sr * rr - si * ri;
+        dst[2 * t + 1] += sr * ri + si * rr;
+    }
+}
+
+}  // namespace
+
 void FoldTrack::acc(std::span<const cd* const> D_rows, int64_t a, int64_t u0, int64_t u1, bool add, size_t period) {
     const int64_t F = static_cast<int64_t>(period);
     for (int64_t u = u0; u < u1;) {
         const int64_t q = u % F, k = std::min(u1 - u, F - q);
+        const size_t n2 = static_cast<size_t>(2 * k);
         for (size_t f = 0; f < D_rows.size(); ++f) {
             // as doubles (std::complex is two, array-compatible): the same sums, and the loop vectorizes
             double* __restrict r = reinterpret_cast<double*>(R_[f] + q);
             const double* __restrict d = reinterpret_cast<const double*>(D_rows[f] + (u - a));
-            if (add)
-                for (int64_t i = 0; i < 2 * k; ++i) r[i] += d[i];
-            else
-                for (int64_t i = 0; i < 2 * k; ++i) r[i] -= d[i];
+            if (add) add_doubles(r, d, n2);
+            else sub_doubles(r, d, n2);
         }
         u += k;
     }
@@ -1235,16 +1264,24 @@ std::pair<int64_t, int> presence_window(size_t dcols, int64_t window, int decim,
     return {n_d - W_d, static_cast<int>((W_d - PF_d) / FR_d)};
 }
 
-std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m, std::span<const double> row_w) {
+std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m, std::span<const double> row_w,
+                                        bool demean) {
     const size_t FR = fold.cols;
     std::vector<double> mag2(FR, 0.0);
+    const double inv_fr = 1.0 / static_cast<double>(FR);
     for (size_t f = 0; f < fold.rows; ++f) {
         const double w2 = row_w.empty() ? 1.0 : row_w[f] * row_w[f];
-        const cd* row = fold[f];
-        for (size_t ph = 0; ph < FR; ++ph) {
-            const double p = (row[ph].real() * row[ph].real() + row[ph].imag() * row[ph].imag()) * w2;
-            if (p > mag2[ph]) mag2[ph] = p;
+        const double* row = reinterpret_cast<const double*>(fold[f]);
+        double mur = 0.0, mui = 0.0;
+        if (demean) {
+            for (size_t ph = 0; ph < FR; ++ph) {
+                mur += row[2 * ph];
+                mui += row[2 * ph + 1];
+            }
+            mur *= inv_fr;
+            mui *= inv_fr;
         }
+        row_max_mag2(row, mur, mui, w2, mag2.data(), FR);
     }
     const double mx = std::sqrt(*std::max_element(mag2.begin(), mag2.end()));
     std::nth_element(mag2.begin(), mag2.begin() + FR / 2, mag2.end());
@@ -1691,13 +1728,19 @@ Mat<cd> comb_coherent(const std::vector<Mat<cd>>& Cs, const std::vector<int>& js
         n = std::min(n, Cs[i].cols - std::min(Cs[i].cols, off));
     }
     Mat<cd> C(f2.size(), n);
-    for (size_t i = 0; i < f2.size(); ++i)
+    for (size_t i = 0; i < f2.size(); ++i) {
+        double* dst = reinterpret_cast<double*>(C[i]);
         for (size_t c = 0; c < js.size(); ++c) {
-            const cd rot = std::exp(cd(0.0, -2 * PI * f2[i] * js[c] * NSYM / FS));
             const cd* src = Cs[c][i / k] + static_cast<size_t>(js[c] * NSYM) / D;
-            cd* dst = C[i];
-            for (size_t t = 0; t < n; ++t) dst[t] += src[t] * rot;
+            if (js[c] == 0) {
+                if (c == 0) std::copy_n(src, n, C[i]);
+                else add_doubles(dst, reinterpret_cast<const double*>(src), 2 * n);
+                continue;
+            }
+            const double th = -2 * PI * f2[i] * js[c] * NSYM / FS;
+            cmac_const(reinterpret_cast<const double*>(src), std::cos(th), std::sin(th), dst, n);
         }
+    }
     return C;
 }
 
@@ -1741,14 +1784,24 @@ CombStream::CombStream(std::string_view band)
     }
     if (filters_.size() >= 2) {
         const auto tf = waveform::unit_template(waveform::band(band));
-        const double sc = std::sqrt(static_cast<double>(filters_.size()));
+        const size_t K = filters_.size();
+        std::vector<double> w(K, 0.0);
+        for (size_t c = 0; c < K; ++c) {
+            double re = 0.0;
+            for (size_t n = 0; n < tf.size(); ++n)
+                re += tf[n].real() * filters_[c][n].real() + tf[n].imag() * filters_[c][n].imag();
+            w[c] = re;
+        }
         double max_err = 0.0;
         for (size_t n = 0; n < tf.size(); ++n) {
             cd s = 0.0;
-            for (const auto& t : filters_) s += t[n];
-            max_err = std::max(max_err, std::abs(s - sc * tf[n]));
+            for (size_t c = 0; c < K; ++c) s += w[c] * filters_[c][n];
+            max_err = std::max(max_err, std::abs(s - tf[n]));
         }
-        can_use_full_ = max_err < 1e-12;
+        if (max_err < 1e-12 && w[K - 1] > 1e-6) {
+            can_use_full_ = true;
+            full_weights_ = std::move(w);
+        }
     }
     if (intra_) {
         freqs_ = intra_freqs(intra_->n_combs);
@@ -1812,22 +1865,18 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
         if (fo.start == zs && fo.cols >= need_full && fo.rows.size() == grid.size()) {
             const size_t K = filters_.size();
             Cs = waveform::repeat_corrs_multi(z_a, std::span<const std::vector<cd>>(filters_).first(K - 1), grid, decim_);
-            const double sc = std::sqrt(static_cast<double>(K));
+            const double inv_last = 1.0 / full_weights_[K - 1];
             Mat<cd> last(grid.size(), n_c_d);
             for (size_t b = 0; b < grid.size(); ++b) {
                 const cd* frow = fo.rows[b];
                 cd* dst = last[b];
-                if (K == 3) {
-                    const cd* r0 = Cs[0][b];
-                    const cd* r1 = Cs[1][b];
-                    for (size_t t = 0; t < n_c_d; ++t) dst[t] = sc * frow[t * static_cast<size_t>(D)] - r0[t] - r1[t];
-                } else {
-                    for (size_t t = 0; t < n_c_d; ++t) dst[t] = sc * frow[t * static_cast<size_t>(D)];
-                    for (size_t c = 0; c + 1 < K; ++c) {
-                        const cd* rc = Cs[c][b];
-                        for (size_t t = 0; t < n_c_d; ++t) dst[t] -= rc[t];
-                    }
+                for (size_t t = 0; t < n_c_d; ++t) dst[t] = frow[t * static_cast<size_t>(D)];
+                for (size_t c = 0; c + 1 < K; ++c) {
+                    const double wc = full_weights_[c];
+                    const cd* rc = Cs[c][b];
+                    for (size_t t = 0; t < n_c_d; ++t) dst[t] -= wc * rc[t];
                 }
+                for (size_t t = 0; t < n_c_d; ++t) dst[t] *= inv_last;
             }
             Cs.push_back(std::move(last));
         }

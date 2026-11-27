@@ -277,6 +277,7 @@ private:
     std::string_view band_;
     std::optional<ScIntra> intra_;
     bool can_use_full_ = false;
+    std::vector<double> full_weights_;
     int decim_ = 1;
     std::vector<double> freqs_;
     std::vector<int> js_;
@@ -324,7 +325,7 @@ std::vector<double> copy_row_weights(std::span<const double> row_level, int n_co
 std::pair<std::int64_t, int> presence_window(std::size_t dcols, std::int64_t window, int decim = 1,
                                              int pad_frames = COPY_PAIRS);
 std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m,
-                                        std::span<const double> row_w = {});
+                                        std::span<const double> row_w = {}, bool demean = false);
 bool presence_verdict(double peak, double contrast, int m, std::string_view band = {});
 std::pair<double, double> pilot_presence(std::span<const cd* const> D_rows, std::size_t dcols, double level,
                                          std::int64_t window);

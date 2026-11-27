@@ -67,6 +67,54 @@ DATA2G_SIMD_CLONES void cmul(const cdouble* __restrict a, const cdouble* __restr
     }
 }
 
+// out[j] += a[j] * b[j]
+DATA2G_SIMD_CLONES void cmul_acc(const cdouble* __restrict a, const cdouble* __restrict b, cdouble* __restrict out,
+                                 std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    double* o = reinterpret_cast<double*>(out);
+    for (std::size_t j = 0; j < n; ++j) {
+        const double ar = x[2 * j], ai = x[2 * j + 1], br = y[2 * j], bi = y[2 * j + 1];
+        o[2 * j] += ar * br - ai * bi;
+        o[2 * j + 1] += ar * bi + ai * br;
+    }
+}
+
+// out[j] *= s, s real
+DATA2G_SIMD_CLONES void rscale(cdouble* __restrict out, double s, std::size_t n) {
+    double* o = reinterpret_cast<double*>(out);
+    for (std::size_t j = 0; j < 2 * n; ++j) o[j] *= s;
+}
+
+// Single-frame lag products: out[u] = a[u] * conj(b[u]), split real/imag for SIMD.
+DATA2G_SIMD_CLONES void lag_prod_conj(const cdouble* __restrict a, const cdouble* __restrict b, double* __restrict out,
+                                      std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    for (std::size_t u = 0; u < n; ++u) {
+        const double ar = x[2 * u], ai = x[2 * u + 1], br = y[2 * u], bi = y[2 * u + 1];
+        out[2 * u] = ar * br + ai * bi;
+        out[2 * u + 1] = ai * br - ar * bi;
+    }
+}
+
+// dst[i] += src[i] over n complex values (2n doubles).
+DATA2G_SIMD_CLONES void cadd_acc(const double* __restrict src, double* __restrict dst, std::size_t n2) {
+    for (std::size_t i = 0; i < n2; ++i) dst[i] += src[i];
+}
+
+// dst[t] += a[t] * conj(b[t]) over n complex values.
+DATA2G_SIMD_CLONES void lag_prod_conj_acc(const cdouble* __restrict a, const cdouble* __restrict b, double* __restrict dst,
+                                          std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    for (std::size_t t = 0; t < n; ++t) {
+        const double ar = x[2 * t], ai = x[2 * t + 1], br = y[2 * t], bi = y[2 * t + 1];
+        dst[2 * t] += ar * br + ai * bi;
+        dst[2 * t + 1] += ai * br - ar * bi;
+    }
+}
+
 // out[j] = a[j] * w, w one complex factor
 DATA2G_SIMD_CLONES void cscale(const cdouble* __restrict a, cdouble w, cdouble* __restrict out, std::size_t n) {
     const double* x = reinterpret_cast<const double*>(a);
@@ -378,27 +426,21 @@ std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
                 cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
             } else {
                 // Fold Z[q + p*Ld] * G0[(q + p*Ld - shift) mod L] over p = 0..D-1 into prod[q].
-                for (std::size_t q = 0; q < Ld; ++q) prod[q] = {0.0, 0.0};
                 for (std::size_t p = 0; p < D; ++p) {
                     const std::size_t base = p * Ld;
                     const std::size_t g0 = (base + L - shift) % L;
                     const std::size_t first = std::min(Ld, L - g0);
                     const cdouble* zp_ = Z.data() + base;
                     const cdouble* gp_ = G0.data() + g0;
-                    for (std::size_t q = 0; q < first; ++q) {
-                        const double ar = zp_[q].real(), ai = zp_[q].imag(), br = gp_[q].real(), bi = gp_[q].imag();
-                        prod[q] += cdouble(ar * br - ai * bi, ar * bi + ai * br);
-                    }
-                    if (first < Ld) {
-                        const cdouble* zp2 = zp_ + first;
-                        const cdouble* gp2 = G0.data();
-                        for (std::size_t q = 0; q < Ld - first; ++q) {
-                            const double ar = zp2[q].real(), ai = zp2[q].imag(), br = gp2[q].real(), bi = gp2[q].imag();
-                            prod[first + q] += cdouble(ar * br - ai * bi, ar * bi + ai * br);
-                        }
+                    if (p == 0) {
+                        cmul(zp_, gp_, prod, first);
+                        if (first < Ld) cmul(zp_ + first, G0.data(), prod + first, Ld - first);
+                    } else {
+                        cmul_acc(zp_, gp_, prod, first);
+                        if (first < Ld) cmul_acc(zp_ + first, G0.data(), prod + first, Ld - first);
                     }
                 }
-                for (std::size_t q = 0; q < Ld; ++q) prod[q] *= inv_d;
+                rscale(prod, inv_d, Ld);
             }
         }
         dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, Ld, false);
@@ -628,22 +670,26 @@ Acquisition acquire(std::span<const cdouble> z, const Band& band, std::optional<
 }
 
 Mat<cdouble> pair_products(std::span<const cdouble* const> rows, std::size_t cols, int F, int P) {
-    const std::size_t FR = static_cast<std::size_t>(F), PF = static_cast<std::size_t>(P) * FR;
+    const std::size_t FR = static_cast<std::size_t>(F), UP = static_cast<std::size_t>(P), PF = UP * FR;
     const std::size_t n = cols > PF ? cols - PF : 0;
     Mat<cdouble> D(rows.size(), n);
+    if (!n || !UP) return D;
+    // Compute each 1-frame product c[u + FR] * conj(c[u]) once when n > FR (saves (P-1)/P multiplies),
+    // then sum j = 0..P-1 in the exact same order (bit-identical, j-outer / t-inner SIMD).
+    const std::size_t np = n + (UP - 1) * FR;
+    const bool reuse = UP > 1 && np < UP * n;
+    std::vector<double> lag;
+    if (reuse) lag.resize(2 * np);
     for (std::size_t f = 0; f < rows.size(); ++f) {
         const cdouble* c = rows[f];
-        // c[FR + u] * conj(c[u]) with the products spelled out: std::complex's operator* carries
-        // numpy-unlike NaN handling that stops the loop vectorizing (same values for finite input)
-        for (std::size_t t = 0; t < n; ++t) {
-            double sr = 0.0, si = 0.0;
-            for (std::size_t j = 0; j < static_cast<std::size_t>(P); ++j) {
-                const std::size_t u = j * FR + t;
-                const double ar = c[FR + u].real(), ai = c[FR + u].imag(), br = c[u].real(), bi = c[u].imag();
-                sr += ar * br + ai * bi;
-                si += ai * br - ar * bi;
-            }
-            D[f][t] = {sr, si};
+        double* dst = reinterpret_cast<double*>(D[f]);
+        if (reuse) {
+            lag_prod_conj(c + FR, c, lag.data(), np);
+            std::copy_n(lag.data(), 2 * n, dst);
+            for (std::size_t j = 1; j < UP; ++j) cadd_acc(lag.data() + 2 * j * FR, dst, 2 * n);
+        } else {
+            lag_prod_conj(c + FR, c, dst, n);
+            for (std::size_t j = 1; j < UP; ++j) lag_prod_conj_acc(c + (j + 1) * FR, c + j * FR, dst, n);
         }
     }
     return D;

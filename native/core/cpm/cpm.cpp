@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -434,18 +435,18 @@ struct RawSlice {
 double presence_from_raw(const Grid& g, std::span<const RawSlice> raws, int extra) {
     const int m = g.m;
     const std::size_t nb = static_cast<std::size_t>(m + 2 * extra);
+    const int nk = 2 * extra + 1;
     const int drop = std::max(2, m / 8);
     const int keep = m - drop;
     double best = 0.0;
-    std::vector<double> col, med(nb), Ew, u, pt(static_cast<std::size_t>(m));
-    std::vector<int> tone;
+    std::vector<double> col, med(nb), Ew, pt(static_cast<std::size_t>(nk) * static_cast<std::size_t>(m));
+    std::vector<double> ps1(nb + 1), ps2(nb + 1), prev_u(static_cast<std::size_t>(nk));
+    std::vector<int> dq(nb), prev_tone(static_cast<std::size_t>(nk));
     for (const auto& rs : raws) {
         const std::size_t n = rs.n;
         if (n < 2) continue;
         col.resize(n);
         Ew.resize(n * nb);
-        u.resize(n);
-        tone.resize(n);
         for (int fr = 0; fr < PRESENCE_FRACS; ++fr) {
             double max_med = 0.0;
             for (std::size_t b = 0; b < nb; ++b) {
@@ -460,48 +461,59 @@ double presence_from_raw(const Grid& g, std::span<const RawSlice> raws, int extr
                 double* dst = Ew.data() + r * nb;
                 for (std::size_t b = 0; b < nb; ++b) dst[b] = src[b] * med[b];
             }
-            for (int k = 0; k < 2 * extra + 1; ++k) {
-                for (std::size_t r = 0; r < n; ++r) {
-                    const double* row = Ew.data() + r * nb + static_cast<std::size_t>(k);
-                    int a = 0;
-                    double top = row[0], s1 = 0.0, s2 = 0.0;
-                    for (int j = 0; j < m; ++j) {
-                        const double v = row[j];
-                        s1 += v;
-                        s2 += v * v;
-                        if (v > top) {
-                            top = v;
-                            a = j;
+            std::fill(pt.begin(), pt.end(), 0.0);
+            // Single O(n * nb) pass over Ew: prefix sums for s1/s2 and monotonic deque for sliding-window argmax.
+            for (std::size_t r = 0; r < n; ++r) {
+                const double* row = Ew.data() + r * nb;
+                ps1[0] = 0.0;
+                ps2[0] = 0.0;
+                std::size_t head = 0, tail = 0;
+                for (std::size_t b = 0; b < nb; ++b) {
+                    const double v = row[b];
+                    ps1[b + 1] = ps1[b] + v;
+                    ps2[b + 1] = ps2[b] + v * v;
+                    while (tail > head && row[dq[tail - 1]] < v) --tail;  // strict <: first index wins ties
+                    dq[tail++] = static_cast<int>(b);
+                    if (b + 1 >= static_cast<std::size_t>(m)) {
+                        const int k = static_cast<int>(b + 1) - m;
+                        if (dq[head] < k) ++head;
+                        const int best_b = dq[head];
+                        const int a = best_b - k;
+                        const double top = row[best_b];
+                        double s1 = ps1[static_cast<std::size_t>(k + m)] - ps1[static_cast<std::size_t>(k)] - top;
+                        double s2 = ps2[static_cast<std::size_t>(k + m)] - ps2[static_cast<std::size_t>(k)] - top * top;
+                        if (a > 0) {
+                            const double vl = row[best_b - 1];
+                            s1 -= vl;
+                            s2 -= vl * vl;
                         }
-                    }
-                    s1 -= top;
-                    s2 -= top * top;
-                    if (a > 0) {
-                        const double vl = row[a - 1];
-                        s1 -= vl;
-                        s2 -= vl * vl;
-                    }
-                    if (a + 1 < m) {
-                        const double vr = row[a + 1];
-                        s1 -= vr;
-                        s2 -= vr * vr;
-                    }
-                    const double nt = s2 / (2.0 * s1 + 1e-30);
-                    const double ratio = top / (nt + 1e-30);
-                    tone[r] = a;
-                    u[r] = ratio / (ratio + PRESENCE_C);
-                }
-                std::fill(pt.begin(), pt.end(), 0.0);
-                for (std::size_t r = 1; r < n; ++r) {
-                    if (tone[r] != tone[r - 1]) {
-                        const double w = std::min(u[r], u[r - 1]);
-                        pt[static_cast<std::size_t>(tone[r])] += w;
-                        pt[static_cast<std::size_t>(tone[r - 1])] += w;
+                        if (a + 1 < m) {
+                            const double vr = row[best_b + 1];
+                            s1 -= vr;
+                            s2 -= vr * vr;
+                        }
+                        s1 = std::max(s1, 0.0);
+                        s2 = std::max(s2, 0.0);
+                        const double nt = s2 / (2.0 * s1 + 1e-30);
+                        const double ratio = top / (nt + 1e-30);
+                        const double ur = ratio / (ratio + PRESENCE_C);
+                        const auto ku = static_cast<std::size_t>(k);
+                        if (r > 0 && a != prev_tone[ku]) {
+                            const double w = std::min(ur, prev_u[ku]);
+                            double* ptk = pt.data() + ku * static_cast<std::size_t>(m);
+                            ptk[static_cast<std::size_t>(a)] += w;
+                            ptk[static_cast<std::size_t>(prev_tone[ku])] += w;
+                        }
+                        prev_tone[ku] = a;
+                        prev_u[ku] = ur;
                     }
                 }
-                std::sort(pt.begin(), pt.end());
+            }
+            for (int k = 0; k < nk; ++k) {
+                double* ptk = pt.data() + static_cast<std::size_t>(k) * static_cast<std::size_t>(m);
+                std::sort(ptk, ptk + m);
                 double sum = 0.0;
-                for (int j = 0; j < keep; ++j) sum += pt[static_cast<std::size_t>(j)];
+                for (int j = 0; j < keep; ++j) sum += ptk[j];
                 const double v = 0.5 * sum / static_cast<double>(n - 1);
                 if (v > best) best = v;
             }
@@ -1624,13 +1636,14 @@ Mat<cdouble> take_crows(const Mat<cdouble>& Z, std::span<const int> rows) {
     return out;
 }
 
-}  // namespace
+Mat<double> coh_metric_impl(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls,
+                            const std::vector<double>* precomp_nb);
 
-// cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric.
-std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0) {
+std::vector<double> coh_run_llr_impl(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0,
+                                     const std::vector<double>* precomp_nb) {
     Mat<double> P(t.size(), Z.cols, 0.0);
     for (std::size_t i = 0; i < t.size(); ++i) P[i][t[i]] = 1.0;
-    const Mat<double> L = coh_metric(Z, P, coh_w(g, true), n0, g.L);
+    const Mat<double> L = coh_metric_impl(Z, P, coh_w(g, true), n0, g.L, precomp_nb);
     const double lm = std::log(static_cast<double>(g.m));
     const double keep = std::log1p(-tables::CPM.llr_eps), floor_ = std::log(tables::CPM.llr_eps);
     std::vector<double> out(t.size());
@@ -1640,6 +1653,13 @@ std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<
         out[r] = logaddexp(keep + (L[r][t[r]] - tot + lm), floor_);
     }
     return out;
+}
+
+}  // namespace
+
+// cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric.
+std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0) {
+    return coh_run_llr_impl(g, Z, t, n0, nullptr);
 }
 
 std::optional<std::array<double, 4>> coh_lock(const Grid& g) {
@@ -1686,7 +1706,10 @@ Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, 
     return out;
 }
 
-Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls) {
+namespace {
+
+Mat<double> coh_metric_impl(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls,
+                            const std::vector<double>* precomp_nb) {
     const std::size_t n = Z0.rows, m = Z0.cols, L = static_cast<std::size_t>(Ls);
     Mat<double> out(n, m);
     if (!n) return L == 1 ? out : Mat<double>(0, m);
@@ -1723,31 +1746,56 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, dou
     std::vector<cdouble> q;
     for (std::size_t j = 0; j < qd.size(); ++j)
         if (seen[j]) dv.push_back(static_cast<int>(j) - static_cast<int>(m) + 1), q.push_back(qd[j]);
-    double delta = 0.0, best = -1.0;
-    for (int k = 0; k < 401; ++k) {
-        const double gk = k == 400 ? 0.5 : k * (1.0 / 400) + -0.5;  // np.linspace(-0.5, 0.5, 401)
-        cdouble s = 0.0;
-        for (std::size_t i = 0; i < q.size(); ++i) {
-            const double th = (2 * PI) * (gk * dv[i]);
-            s += cdouble(std::cos(th), std::sin(th)) * q[i];
+    // Grid points are (k - 200) / 400 and tone steps dv[i] are integers, so all 2*pi*gk*dv angles lie on a 400-pt circle.
+    struct Trig400 {
+        double c[400], s[400];
+        Trig400() {
+            for (int i = 0; i < 400; ++i) {
+                const double th = (2.0 * PI) * (static_cast<double>(i) / 400.0);
+                c[i] = std::cos(th);
+                s[i] = std::sin(th);
+            }
         }
-        const double v = std::abs(s);
-        if (v > best) best = v, delta = gk;
+    };
+    static const Trig400 trig;
+    int best_k = 200;
+    double best2 = -1.0;
+    for (int k = 0; k < 401; ++k) {
+        const int kk = k - 200;
+        double sr = 0.0, si = 0.0;
+        for (std::size_t i = 0; i < q.size(); ++i) {
+            int idx = (kk * dv[i]) % 400;
+            if (idx < 0) idx += 400;
+            const double cr = trig.c[idx], ci = trig.s[idx];
+            const double qr = q[i].real(), qi = q[i].imag();
+            sr += cr * qr - ci * qi;
+            si += cr * qi + ci * qr;
+        }
+        const double v2 = sr * sr + si * si;
+        if (v2 > best2) best2 = v2, best_k = k;
     }
-    cdouble s = 0.0;
+    const double delta = best_k == 400 ? 0.5 : best_k * (1.0 / 400) + -0.5;
+    const int best_kk = best_k - 200;
+    double sr = 0.0, si = 0.0;
     for (std::size_t i = 0; i < p.size(); ++i) {
-        const double th = (2 * PI) * delta * d[i];
-        s += p[i] * cdouble(std::cos(th), std::sin(th));
+        int idx = (best_kk * d[i]) % 400;
+        if (idx < 0) idx += 400;
+        const double cr = trig.c[idx], ci = trig.s[idx];
+        const double pr = p[i].real(), pi = p[i].imag();
+        sr += pr * cr - pi * ci;
+        si += pr * ci + pi * cr;
     }
-    const double nu = std::arg(s);
+    const double nu = std::atan2(si, sr);
+    std::vector<cdouble> tk_rot(m);
+    for (std::size_t k = 0; k < m; ++k) {
+        const double tk = (2 * PI) * delta * static_cast<double>(k);
+        tk_rot[k] = cdouble(std::cos(tk), std::sin(tk));
+    }
     Mat<cdouble> Z(n, m);
     for (std::size_t r = 0; r < n; ++r) {
         const double tr = -nu * static_cast<double>(r);
         const cdouble rot(std::cos(tr), std::sin(tr));
-        for (std::size_t k = 0; k < m; ++k) {
-            const double tk = (2 * PI) * delta * static_cast<double>(k);
-            Z[r][k] = Z0[r][k] * cdouble(std::cos(tk), std::sin(tk)) * rot;
-        }
+        for (std::size_t k = 0; k < m; ++k) Z[r][k] = Z0[r][k] * tk_rot[k] * rot;
     }
     for (std::size_t r = 0; r < n; ++r) {
         cdouble v = 0.0;
@@ -1782,22 +1830,26 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, dou
         return S;
     };
     std::vector<double> res(n), row(m);
-    {
+    std::vector<double> local_nb;
+    const std::vector<double>* nbp = precomp_nb;
+    if (!nbp) {
         Mat<double> E(n, m);
         for (std::size_t r = 0; r < n; ++r)
             for (std::size_t k = 0; k < m; ++k) E[r][k] = sq_abs(Z[r][k]);
-        const auto nb = tone_floors(E, n0);
-        if (!nb.empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
-            for (std::size_t r = 0; r < n; ++r) {
-                for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - h[r]) - nb[k]);
-                res[r] = np_sum(row);
-            }
-            const double s2 = std::max(np_mean(res), n0 * 1e-3);
-            for (std::size_t r = 0; r < n; ++r)
-                for (std::size_t k = 0; k < m; ++k)
-                    out[r][k] = E[r][k] / nb[k] - sq_abs(Z[r][k] - h[r]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
-            return by_symbol(out);
+        local_nb = tone_floors(E, n0);
+        nbp = &local_nb;
+    }
+    if (!nbp->empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
+        const auto& nb = *nbp;
+        for (std::size_t r = 0; r < n; ++r) {
+            for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - h[r]) - nb[k]);
+            res[r] = np_sum(row);
         }
+        const double s2 = std::max(np_mean(res), n0 * 1e-3);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k)
+                out[r][k] = sq_abs(Z[r][k]) / nb[k] - sq_abs(Z[r][k] - h[r]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
+        return by_symbol(out);
     }
     for (std::size_t r = 0; r < n; ++r) {
         for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * sq_abs(Z[r][k] - h[r]);
@@ -1807,6 +1859,12 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, dou
     for (std::size_t r = 0; r < n; ++r)
         for (std::size_t k = 0; k < m; ++k) out[r][k] = sq_abs(Z[r][k]) / n0 - sq_abs(Z[r][k] - h[r]) / var;
     return by_symbol(out);
+}
+
+}  // namespace
+
+Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls) {
+    return coh_metric_impl(Z0, P1, W, n0, Ls, nullptr);
 }
 
 double noise_n0(const Mat<double>& E, double noise_median) { return std::max(median_rest(E) / noise_median, 1e-30); }
@@ -1819,21 +1877,39 @@ Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0
     const int F = static_cast<int>(g.preamble.size()), H = g.hdr_len, nb = static_cast<int>(g.mid_block.size());
     Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0, std::nullopt};
     double front = 0.0;
+    // Cache extracted Z submatrix and its tone_floors per unique row set (shared across words).
+    struct RowPrep {
+        Mat<cdouble> Zsub;
+        std::vector<double> floors;
+    };
+    std::map<std::vector<int>, RowPrep> prep_cache;
+    auto prep_for = [&](const std::vector<int>& rr) -> const RowPrep& {
+        if (auto it = prep_cache.find(rr); it != prep_cache.end()) return it->second;
+        Mat<cdouble> Zsub = take_crows(Z, sub_rows(rr, g.L));
+        auto fl = tone_floors(power_of(Zsub), n0);
+        return prep_cache.emplace(rr, RowPrep{std::move(Zsub), std::move(fl)}).first->second;
+    };
     for (std::size_t k = 0; k < WR.words.size(); ++k) {
         const WordEntry& we = WR.words[k];
         const auto t = header_symbols(g, we.value);
         const auto& r = rows[k];
         std::vector<int> ra, ta;
+        ra.reserve(static_cast<std::size_t>(F + H));
+        ta.reserve(static_cast<std::size_t>(F + H));
         for (int i = 0; i < F; ++i) ra.push_back(i), ta.push_back(g.preamble[i]);
         for (int i = 0; i < H; ++i) ra.push_back(r[i]), ta.push_back(t[i]);
-        const auto la = coh_run_llr(g, take_crows(Z, sub_rows(ra, g.L)), ta, n0);
+        const auto& pa = prep_for(ra);
+        const auto la = coh_run_llr_impl(g, pa.Zsub, ta, n0, &pa.floors);
         front = std::max(front, np_sum(la.data(), F));
         double score = std::max(np_sum(la), 0.0);
         if (copies > 1) {
             std::vector<int> rb, tb;
+            rb.reserve(static_cast<std::size_t>(nb + H));
+            tb.reserve(static_cast<std::size_t>(nb + H));
             for (int i = 0; i < nb; ++i) rb.push_back(r[H] - nb + i), tb.push_back(g.mid_block[i]);
             for (int i = 0; i < H; ++i) rb.push_back(r[H + i]), tb.push_back(t[i]);
-            score += std::max(np_sum(coh_run_llr(g, take_crows(Z, sub_rows(rb, g.L)), tb, n0)), 0.0);
+            const auto& pb = prep_for(rb);
+            score += std::max(np_sum(coh_run_llr_impl(g, pb.Zsub, tb, n0, &pb.floors)), 0.0);
         }
         // ties: the later word, as read_header
         if (score >= best.score) {

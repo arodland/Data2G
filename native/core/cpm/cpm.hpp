@@ -155,6 +155,7 @@ public:
     mutable std::vector<FineMemo> fine_memo;
     mutable std::vector<HeaderMemo> header_memo;
     const Grid& grid() const { return *g_; }
+    bool has_source() const { return source_ != nullptr; }
 
 private:
     bool sourced(std::int64_t nxt, std::int64_t n, std::vector<double>& out_e, std::vector<double>& out_r) const;
