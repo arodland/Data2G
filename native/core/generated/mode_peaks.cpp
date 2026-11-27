@@ -56,7 +56,8 @@ constexpr ModePeak peaks[] = {
     {"fsk32r62-r1/3", {0.521, 0.521, 0.521}},
     {"fsk32r62-r1/2", {0.523, 0.523, 0.523}},
     {"fsk8w50-r1/3", {0.357, 0.127, 0.127}},
-    {"fsk8w50-r1/2", {0.354, 0.126, 0.126}}};
+    {"fsk8w50-r1/2", {0.354, 0.126, 0.126}},
+    {"fsk32r62-r2/3", {0.524, 0.524, 0.524}}};
 }  // namespace
 
 const std::span<const ModePeak> MODE_PEAK_DB = peaks;

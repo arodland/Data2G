@@ -148,15 +148,23 @@ def train_labels(a):
              **{f"p_{k}": v for k, v in sd.items()})
 
 
-def redescribe(src: str, out: str):
+def redescribe(src: str, out: str, add=()):
     """`src`'s CNP with every mode's descriptor row recomputed (descriptor:
     MODE_THRESHOLDS as they are now), weights and normalization kept: a
-    mode's re-measured ladder reaches the model without a retrain."""
+    mode's re-measured ladder reaches the model without a retrain. `add`:
+    modes the model has no row for, appended with theirs (zero-shot: the
+    head never saw them; a stopgap until a retrain, e.g. fsk32r62-r2/3,
+    whose rate is past any CPM mode's it trained on)."""
     d = dict(np.load(src))
     assert str(d["kind"]) == "cnp", src
     modes = [str(m) for m in d["modes"]]
     new = np.array([descriptor(m) for m in modes], dtype=d["desc"].dtype)
     print("changed:", [m for m, a, b in zip(modes, new, d["desc"]) if not np.array_equal(a, b)])
+    add = [m for m in add if m not in modes]
+    if add:
+        new = np.concatenate([new, np.array([descriptor(m) for m in add], dtype=new.dtype)])
+        d["modes"] = np.array(modes + add)
+        print("added:", add)
     np.savez(out, **dict(d, desc=new))
 
 
@@ -164,6 +172,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data", nargs="?")
     ap.add_argument("--redescribe", metavar="NPZ", help="rewrite NPZ's descriptors (no training) into --out")
+    ap.add_argument("--add", default="", help="--redescribe: modes to append a descriptor row for (zero-shot)")
     ap.add_argument("--teacher", default=str(P.DATA / "outcome_predictor.npz"))
     ap.add_argument("--teacher-cpm", default="", help="the CPM modes' targets from this model instead")
     ap.add_argument("--teacher-polar", action="store_true",
@@ -195,7 +204,7 @@ def main():
     if a.device.startswith("cuda"):  # the GPU is shared with the desktop
         torch.cuda.set_per_process_memory_fraction(0.12)
     if a.redescribe:
-        return redescribe(a.redescribe, a.out)
+        return redescribe(a.redescribe, a.out, [m for m in a.add.split(",") if m])
     if a.labels:
         return train_labels(a)
     x, *_, rows, _ = T.load(a.data, energy=True)

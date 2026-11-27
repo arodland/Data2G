@@ -1,5 +1,5 @@
 {
- "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never; CPM rows rerun 2026-10-27 on cpm-gfm-on-acq (GF(M) data code on the cpm-acq-gap receiver, the same seeded study, native; runs/cpm-combined/ladder_cpm_combined.csv); fsk8w50-r1/3 and fsk8w50-r1/2 added 2026-11-27 (scripts/ladder_study.py --fail 0.1, native)",
+ "_source": "runs/ladder_dd_10pct.csv (e5519aa): 10% codeword failure SNR (dB) per channel; 99: never reached in the study; its n10-64l-r3/4 and n10-256l-r3/4 rows added 2026-10-06 (runs/n10_top_ladder.sh, the same seeded study); n10 cells moved by support_slack (2026-10-19, runs/support_ladder.sh, paired with the commit before it, same seeds, DD unbudgeted, native): the paired difference added, or the new threshold where the old was never; CPM rows rerun 2026-10-27 on cpm-gfm-on-acq (GF(M) data code on the cpm-acq-gap receiver, the same seeded study, native; runs/cpm-combined/ladder_cpm_combined.csv); fsk8w50-r1/3 and fsk8w50-r1/2 added 2026-11-27 (scripts/ladder_study.py --fail 0.1, native); fsk32r62-r2/3 (2026-11-25): fsk32r62-r1/2's row plus paired delta (scripts/c32_rate_study.py: +0.03 awgn, +0.83 mpg, +0.93 mpp, +1.10 mpd)",
  "channels": [
   "awgn",
   "mpg",
@@ -318,6 +318,12 @@
    24.6875,
    20.875,
    99
+  ],
+  "fsk32r62-r2/3": [
+   -7.97,
+   -1.17,
+   -1.82,
+   -1.65
   ]
  }
 }

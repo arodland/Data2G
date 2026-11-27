@@ -98,7 +98,7 @@ LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 _THRESHOLDS = json.load(open(data_path("mode_thresholds.json")))  # FM: its own, provisional (scripts/fm_threshold_table.py)
-MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items()}
+MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items() if m in MODES}  # a mode not offered: no row
 MODE_CHANNELS = tuple(_THRESHOLDS["channels"])  # native: tables::MODE_CHANNELS
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
 # vs ack-4f's 79%): the loss study got worse in every cell (MPP 0 dB 248 ->

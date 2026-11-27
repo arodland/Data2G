@@ -826,6 +826,33 @@ ToneGain tone_gain(const Mat<double>& E, const Grid& g) {
     return out;
 }
 
+// cpm._spill_level: N0, the per-tone floors (empty: none), the energies whitened by them, Es and spill().
+struct SpillLevel {
+    double n0;
+    std::vector<double> nb;
+    Mat<double> Ew;
+    double es, a;
+};
+
+SpillLevel spill_level(const Mat<double>& E) {
+    SpillLevel s;
+    s.n0 = std::max(median_rest(E) / std::numbers::ln2, 1e-12 * np_mean(row_max(E)) + 1e-300);
+    s.nb = tone_floors(E, s.n0);
+    s.Ew = E;
+    if (!s.nb.empty())
+        for (std::size_t r = 0; r < E.rows; ++r)
+            for (std::size_t k = 0; k < E.cols; ++k) s.Ew[r][k] = E[r][k] * (s.n0 / s.nb[k]);
+    s.es = std::max(np_mean(row_max(s.Ew)) - s.n0, 1e-3 * s.n0);
+    s.a = spill(s.Ew, s.n0, s.es);
+    return s;
+}
+
+// tone_metric(g, E, use) where `use` uses leak_metric (ctl/data/dd on L=1 grids) and E's spill is significant.
+std::optional<Mat<double>> leak_of(const Grid& g, const Mat<double>& E, Use use) {
+    if (kept(g) != 1 || use == Use::lock || !spill_significant(E)) return std::nullopt;
+    return leak_metric(E, LEAK_K);
+}
+
 // cpm.tone_metric where a tone has a floor of its own (one N0: E * scale, left to the callers).
 Mat<double> tone_metric(const Mat<double>& E, const ToneGain& tg) {
     Mat<double> G(E.rows, E.cols);
@@ -836,16 +863,67 @@ Mat<double> tone_metric(const Mat<double>& E, const ToneGain& tg) {
 
 }  // namespace
 
-std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E) {
+Mat<double> tone_metric(const Grid& g, const Mat<double>& E, Use use) {
+    if (auto G = leak_of(g, E, use)) return std::move(*G);
     const ToneGain tg = tone_gain(E, g);
+    return tone_metric(E, tg);
+}
+
+bool spill_significant(const Mat<double>& E) {
+    const SpillLevel s = spill_level(E);
+    if (s.a <= 0) return false;
+    std::vector<double> x(E.rows);  // the per-row terms spill() takes the mean of
+    for (std::size_t r = 0; r < E.rows; ++r) {
+        const double* w = s.Ew[r];
+        const auto a = static_cast<std::size_t>(std::max_element(w, w + E.cols) - w);  // np.argmax: first
+        x[r] = ((a > 0 ? w[a - 1] : s.n0) + (a + 1 < E.cols ? w[a + 1] : s.n0) - 2 * s.n0) / 2 / s.es;
+    }
+    const double mean = np_mean(x);
+    std::vector<double> d2(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) d2[i] = (x[i] - mean) * (x[i] - mean);
+    const double sd = std::sqrt(np_mean(d2));  // np.std
+    return s.a >= LEAK_Z * sd / std::sqrt(static_cast<double>(x.size()));
+}
+
+Mat<double> leak_metric(const Mat<double>& E, double k) {
+    const SpillLevel s = spill_level(E);
+    const std::size_t m = E.cols;
+    const double ka = k * s.a * s.es, leak = s.a * s.es;
+    std::vector<double> N(m), side_g(m), side_o(m), own_g(m), own_o(m, 0.0);
+    for (std::size_t t = 0; t < m; ++t) {
+        N[t] = (s.nb.empty() ? s.n0 : s.nb[t]) + ka;
+        side_g[t] = leak / (N[t] + leak) / N[t];
+        side_o[t] = std::log1p(leak / N[t]);
+        own_g[t] = s.es / (N[t] + s.es) / N[t];
+        if (!s.nb.empty()) own_o[t] = std::log1p(s.es / N[t]);  // a row constant only when the floors are equal
+    }
+    Mat<double> G(E.rows, m);
+    for (std::size_t r = 0; r < E.rows; ++r)
+        for (std::size_t t = 0; t < m; ++t) {
+            double v = s.nb.empty() ? E[r][t] * own_g[t] : E[r][t] * own_g[t] - own_o[t];
+            v += t > 0 ? E[r][t - 1] * side_g[t - 1] - side_o[t - 1] : 0.0;  // outside the grid: no term
+            v += t + 1 < m ? E[r][t + 1] * side_g[t + 1] - side_o[t + 1] : 0.0;
+            G[r][t] = v;
+        }
+    return G;
+}
+
+std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E) {
     const auto gr = gray(g.m);
     std::vector<double> out(E.rows * g.m);
+    if (const auto G = leak_of(g, E, Use::data)) {
+        for (std::size_t r = 0; r < E.rows; ++r)
+            for (int v = 0; v < g.m; ++v) out[r * g.m + v] = (*G)[r][gr[v]];
+        return out;
+    }
+    const ToneGain tg = tone_gain(E, g);
     for (std::size_t r = 0; r < E.rows; ++r)
         for (int v = 0; v < g.m; ++v) out[r * g.m + v] = tg.at(E[r][gr[v]], gr[v]);
     return out;
 }
 
 std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
+    if (const auto G = leak_of(g, E, Use::ctl)) return bit_llrs(g, *G);
     const ToneGain tg = tone_gain(E, g);
     return tg.flat() ? bit_llrs(g, E, tg.scale) : bit_llrs(g, tone_metric(E, tg));
 }
@@ -928,13 +1006,14 @@ std::int64_t hdr_span(const Grid& g, int copies) {
 
 Mat<double> tone_llr(const Grid& g, const Mat<double>& E) {
     const ToneGain tg = tone_gain(E, g);
+    const auto at = [&](std::size_t r, std::size_t k) { return tg.at(E[r][k], k); };
     const double lm = std::log(static_cast<double>(g.m));
     const double keep = std::log1p(-tables::CPM.llr_eps), floor_ = std::log(tables::CPM.llr_eps);
     Mat<double> L(E.rows, E.cols);
     for (std::size_t r = 0; r < E.rows; ++r) {
-        double tot = tg.at(E[r][0], 0);  // np.logaddexp.reduce: left to right
-        for (std::size_t k = 1; k < E.cols; ++k) tot = logaddexp(tot, tg.at(E[r][k], k));
-        for (std::size_t k = 0; k < E.cols; ++k) L[r][k] = logaddexp(keep + (tg.at(E[r][k], k) - tot + lm), floor_);
+        double tot = at(r, 0);  // np.logaddexp.reduce: left to right
+        for (std::size_t k = 1; k < E.cols; ++k) tot = logaddexp(tot, at(r, k));
+        for (std::size_t k = 0; k < E.cols; ++k) L[r][k] = logaddexp(keep + (at(r, k) - tot + lm), floor_);
     }
     return L;
 }
@@ -1426,8 +1505,17 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
     if (!coherent(g)) return r;  // the square law alone (no Z: arq::phy's DD stays off)
     r.Z = bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo);
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
-        for (int k = 0; k < r.n_ctl_slots; ++k) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
+        for (int k = 0; k < r.n_ctl_slots; ++k)
+            if (!ctl_square(g, r.E, k)) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
     return r;
+}
+
+bool ctl_square(const Grid& g, const Mat<double>& E, int slot) {
+    if (kept(g) != 1) return false;
+    const std::size_t n = ctl(g).n_sym, a = std::min(E.rows, slot * n), b = std::min(E.rows, (slot + 1) * n);
+    Mat<double> Es(b - a, E.cols);
+    std::copy(E[a], E[a] + (b - a) * E.cols, Es.data.begin());
+    return spill_level(Es).a >= CTL_SQ && spill_significant(Es);
 }
 
 Stream::Stream(std::vector<double> x, const Lock& lock, PassFn pass)
@@ -1760,12 +1848,12 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
     Mat<double> E(b - a, g.m);  // per symbol, its sub-windows' energies summed
     for (std::size_t i = 0; i < Esub.rows; ++i)
         for (int k = 0; k < g.m; ++k) E[i / g.L][k] = i % g.L ? E[i / g.L][k] + Esub[i][k] : Esub[i][k];
-    const ToneGain tg = tone_gain(E, g);
+    const Mat<double> G = tone_metric(g, E, Use::dd);
     Mat<double> P(E.rows, E.cols);
-    for (std::size_t i = 0; i < E.rows; ++i) {  // the square law's probabilities
+    for (std::size_t i = 0; i < E.rows; ++i) {  // the square law's probabilities (or the leak model's)
         double mx = -INFINITY;
-        for (int k = 0; k < g.m; ++k) mx = std::max(mx, tg.at(E[i][k], k));
-        for (int k = 0; k < g.m; ++k) P[i][k] = std::exp(tg.at(E[i][k], k) - mx);
+        for (int k = 0; k < g.m; ++k) mx = std::max(mx, G[i][k]);
+        for (int k = 0; k < g.m; ++k) P[i][k] = std::exp(G[i][k] - mx);
         const double s = np_sum(P[i], g.m);
         for (int k = 0; k < g.m; ++k) P[i][k] /= s;
     }

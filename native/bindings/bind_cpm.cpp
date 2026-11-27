@@ -3,6 +3,10 @@
 #include "convert.hpp"
 #include "cpm/cpm.hpp"
 
+#include <map>
+#include <set>
+#include <string>
+
 namespace data2g::bind {
 
 namespace {
@@ -239,6 +243,28 @@ void bind_cpm(py::module_& m) {
         return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
     });
     c.def("coh_ctl", &cpm::coh_ctl);
+    // --- neighbour-leak tone likelihood (cpm.py LEAK_K, LEAK_Z, CTL_SQ) ---
+    static constexpr const char* uses[] = {"lock", "ctl", "data", "dd"};
+    const auto use_of = [](const std::string& u) {
+        for (int i = 0; i < 4; ++i)
+            if (u == uses[i]) return static_cast<cpm::Use>(i);
+        throw py::key_error("no tone_metric consumer " + u);
+    };
+    c.def("tone_metric", [use_of](const std::string& g, const In<double>& E, const std::string& use) {
+        return np(cpm::tone_metric(grid(g), mat(E), use_of(use)));
+    });
+    c.def("leak_metric", [](const In<double>& E, double k) { return np(cpm::leak_metric(mat(E), k)); });
+    c.def("spill_significant", [](const In<double>& E) { return cpm::spill_significant(mat(E)); });
+    c.def("ctl_square", [](const std::string& g, const In<double>& E, int slot) {
+        return cpm::ctl_square(grid(g), mat(E), slot);
+    });
+    // cpm.receive's per-slot soft values for a lock at (start, cfo) (the parity tests)
+    c.def("receive_soft", [](const In<double>& x, const std::string& spec, int n_data, bool dup, long start, double cfo) {
+        cpm::Lock l{&cspec(spec), n_data, dup, start, cfo, 0.0, 0.0, 0.0, 0, 0};
+        py::list out;
+        for (const auto& s : cpm::receive(view(x), l).soft) out.append(np(s));
+        return out;
+    });
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
     });

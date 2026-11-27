@@ -206,13 +206,17 @@ PICKS = {
     "fsk16r25-r1/2": (((80, 4),), 1, 2),
     "fsk32r62-r1/3": (((50, 4),), 1, 2),
     "fsk32r62-r1/2": (((60, 4),), 1, 2),
+    # 2026-11-23, 300 codewords a point: 10% / 1% ideal Rayleigh 11.94 / 12.79 (60x4 11.99 / 12.90, 100x4
+    # 12.09 / 12.92, 130x4 12.33 / 13.33, 60x5 11.89 / 12.47 with 2 undetected, no heavy columns 12.95 / never
+    # with 35), AWGN 7.9 / 8.3; undetected 0 of 2700
+    "fsk32r62-r2/3": (((80, 4),), 1, 2),
 }
 
 
 def write(a):
     out = {}
     for name, (heavy, seed, d) in PICKS.items():
-        spec = MODES[name]
+        spec = MODES.get(name, cpm.R23_SPEC)  # fsk32r62-r2/3: its code is frozen whether it is offered or not
         p = cpm.GRIDS[spec.grid].bits
         n, k = spec.coded_bits // p, -(-spec.k // p)
         c = gfldpc.design(p, n, k, heavy, seed)
