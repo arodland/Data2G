@@ -76,9 +76,9 @@ def allowed(cap: int) -> list:
 
 REC_EXT = 63  # sentinel in Core.recommend: read extended mode code from T_REC_EXT TLV
 CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
-# ... which leaves its indices 8-14 to n10's past 15 (16-22; index 15 is REC_EXT = 63):
+# ... which leaves its indices 12-14 to n10's past 15 (16-18; index 15 is REC_EXT = 63):
 # the recommendation is 6 bits, band (2) | index (4), every band code taken
-N10_HIGH = 8
+N10_HIGH = 12
 assert len(cpm.SPECS) <= N10_HIGH
 BY_CODE = {code: band for band, code in BANDS_CODE.items()}
 

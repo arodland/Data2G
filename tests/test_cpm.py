@@ -266,6 +266,37 @@ def test_coarse_track_is_a_fresh_transform_of_the_stream(pure):  # (native's: te
         assert ref[0] > 0 and got[1:] == (ref[1] + ph, ref[2]) and got[0] == pytest.approx(ref[0], rel=1e-12), g.name
 
 
+def test_r23_announced_at_index_4_and_older_words_unchanged():
+    """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
+    the two older modes' words are what they were, the recommendation codes
+    of the older modes too, and a burst of it (control twice, two data
+    codewords) locks and decodes."""
+    from data2g.arq import modes
+    from data2g.arq import phy as PHY
+    from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
+
+    spec = cpm.SPECS["fsk32r62-r2/3"]
+    g = cpm.GRIDS[spec.grid]
+    assert (spec.index, spec.k, spec.coded_bits, codes.payload_bytes(spec)) == (4, 640, 960, 76)
+    old = {cpm.header_word(i, n, d) for i in (0, 1) for d in (False, True) for n in range(cpm.MAX_DATA + 1)}
+    words = [cpm.header_word(s.index, n, d) for s, n, d, _ in cpm.valid_words(g.name)]
+    assert len(set(words)) == len(words) == 3 * 2 * (cpm.MAX_DATA + 1) and old < set(words)
+    if not modes.FM:
+        assert [modes.encode(m) & 15 for m in cpm.SPECS] == list(range(len(cpm.SPECS)))
+        assert modes.decode(modes.encode(spec.name)) == spec.name
+    assert list(cpm.SPECS)[-1] == spec.name
+    rng = np.random.default_rng(5)
+    ctl = rng.bytes(codes.payload_bytes(cpm.CTL[g.name]))
+    slots = [Slot(ctl_mask(0, 0, 3), 0, ctl), Slot(ctl_mask(0, 0, 3), 1, ctl)]
+    slots += [Slot(data_mask(0, i, 3), 0, rng.bytes(codes.payload_bytes(spec))) for i in range(2, 4)]
+    x = PHY.tx_audio(TxBurst(spec.name, slots, 0, 2))
+    y = np.concatenate([np.zeros(2000), x, np.zeros(2000)]) + rng.normal(0, 0.05, len(x) + 4000)
+    r = cpm.receive(y, cpm.find(g, y))
+    assert r["spec"].name == spec.name and r["dup"] and r["n_cw"] == 4
+    rx = PHY.ModemRx(r, {})
+    assert [rx.decode(i, s.mask_id, 0, None) for i, s in enumerate(slots) if not s.rv] == [s.payload for s in slots if not s.rv]
+
+
 def _carrier_burst(seed, snr_db=-8.0, carrier_hz=1573.4, inr_db=12.0):
     """A one-control fsk16r25 burst in white noise (SNR in 2500 Hz) with a
     steady carrier `inr_db` over the noise in 50 Hz (None: no carrier)."""
@@ -380,3 +411,30 @@ def test_cpm_presence_detects_bursts_and_rejects_carriers_and_colored_noise():
     for label, sig in negatives.items():
         for gn, g in cpm.GRIDS.items():
             assert not cpm.present(g, sig), (label, gn)
+
+
+def test_leak_metric_only_where_the_spill_is_significant():
+    """The leak model leaves a codeword on the square-law metric unless its
+    spill stands LEAK_Z standard errors out: AWGN codewords match lock's
+    square-law metric; a tone leaking a fifth of its energy into each
+    neighbour (c16r25 on 30 Hz) goes on leak_metric."""
+    g = cpm.GRIDS["c16r25"]
+    rng = np.random.default_rng(4)
+
+    def codeword(leak, esn0=8.0, n=240):
+        t = rng.integers(0, g.m, n)
+        h = np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        y = (rng.normal(size=(n, g.m)) + 1j * rng.normal(size=(n, g.m))) / np.sqrt(2)
+        y[np.arange(n), t] += h
+        for d in (-1, 1):
+            k = np.clip(t + d, 0, g.m - 1)
+            y[np.arange(n), k] += np.sqrt(leak) * np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        return np.abs(y) ** 2
+
+    awgn = [codeword(0.0, esn0) for esn0 in (0.5, 2.0, 8.0, 30.0) for _ in range(5)]
+    leaky = codeword(0.2)
+    today = [cpm.tone_metric(g, E, "lock") for E in awgn]
+    assert sum(cpm.spill_significant(E) for E in awgn) <= 1
+    assert sum(np.array_equal(cpm.tone_metric(g, E, "data"), t) for E, t in zip(awgn, today)) >= len(awgn) - 1
+    assert cpm.spill_significant(leaky)
+    assert np.array_equal(cpm.tone_metric(g, leaky, "data"), cpm.leak_metric(leaky, cpm.LEAK_K))

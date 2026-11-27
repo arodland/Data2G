@@ -331,7 +331,7 @@ everywhere (Python too) for A/B runs.
 | 7 | peer cumulative | the next peer seq this station expects; all below received |
 | 1 | reply lost | the peer's last burst repeated one this station already had (§6) |
 | 6 | K | resends in this burst |
-| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-7; 8-15 under CPM are n10's indices 16-23, `policy.N10_HIGH`). Value `63` (`modes.REC_EXT`) is reserved as an escape: the actual mode code rides in `T_REC_EXT` (§5) |
+| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-11; 12-14 under CPM are n10's indices 16-18, `modes.N10_HIGH`). Value `63` (`modes.REC_EXT`) is reserved as an escape: the actual mode code rides in `T_REC_EXT` (§5) |
 | 2 | size hint | peer burst length: shrink / hold / grow / max |
 
 Where the rest comes from:

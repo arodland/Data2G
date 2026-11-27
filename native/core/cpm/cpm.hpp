@@ -167,6 +167,18 @@ std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E);
 // cpm.tone_llr: per row and tone, that tone's log-likelihood ratio against a random one (floored by llr_eps).
 Mat<double> tone_llr(const Grid& g, const Mat<double>& E);
 
+// Neighbour-leak tone likelihood (cpm.py LEAK_K, LEAK_Z, CTL_SQ): applied to ctl, data, and dd on L=1 grids
+// whenever a codeword's spill stands LEAK_Z standard errors above 0 (lock stays on the spill-inflated square law).
+enum class Use { lock, ctl, data, dd };
+inline constexpr double LEAK_K = 0.5, LEAK_Z = 2.0, CTL_SQ = 0.15;
+// cpm.tone_metric: (n_sym, m) tone energies -> log P(E | tone) up to a row constant, for `use`.
+Mat<double> tone_metric(const Grid& g, const Mat<double>& E, Use use);
+// cpm.leak_metric: the Doppler spill as signal beside the sent tone.
+Mat<double> leak_metric(const Mat<double>& E, double k);
+// cpm.spill_significant: the codeword's spill stands LEAK_Z standard errors over 0.
+bool spill_significant(const Mat<double>& E);
+// cpm.ctl_square: control slot `slot` of a burst's data-row energies E stays on the square law (CTL_SQ).
+bool ctl_square(const Grid& g, const Mat<double>& E, int slot);
 Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies = 2);
 
 struct Soft {

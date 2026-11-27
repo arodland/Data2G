@@ -18,7 +18,7 @@ def test_toolbox_is_not_on_air():
     from data2g.config import PROFILE
 
     assert set(cpm.GRIDS) == {"c16r25", "c8r50", "c32r62", "c8w50"} and len(cpm.CTL) == 4
-    assert len(cpm.SPECS) == 8
+    assert len(cpm.SPECS) == 9
     for g in (cpm.GRIDS["c8w50"], *cpm.WIDE_GRIDS.values()):
         assert g.L > 1 and g.T == g.L * g.nsub and g.baud * g.T == pytest.approx(FS)
         assert cpm.coherent(g) and not cpm.coherent(replace(g, guard=1))

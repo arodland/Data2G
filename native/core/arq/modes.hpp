@@ -42,8 +42,8 @@ std::vector<const Mode*> allowed(int cap);  // within the cap, MODES' order (pol
 // (frames BANDS_CODE) << 4 | index; CPM modes take the spare band code.
 inline constexpr int REC_EXT = 63;  // sentinel: read extended mode code from T_REC_EXT TLV
 inline constexpr int CPM_CODE = 3;
-// CPM_CODE's indices 8-14 carry n10's past 15 (16-22; index 15 is REC_EXT = 63)
-inline constexpr int N10_HIGH = 8;
+// CPM_CODE's indices 12-14 carry n10's past 15 (16-18; index 15 is REC_EXT = 63)
+inline constexpr int N10_HIGH = 12;
 int encode(std::string_view submode);  // throws for an unknown mode
 const Mode* decode(int rec);           // nullptr: no such mode
 
