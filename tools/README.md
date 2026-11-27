@@ -9,7 +9,7 @@ Each file's header has its usage.
 | `freeze_format.py` | `data2g/format/*.npz`: each submode's interleaver and polar info set, frozen so the on-air format can't drift with numpy. |
 | `gen_icons.py` | The app icons from `native/packaging/data2g.svg`. |
 | **Checks (CI)** | |
-| `check_layering.py` | native/'s include rules: no Qt in `core/` outside device backends, Widgets only in `gui/`, ldpc/polar below codes, generated files only generated. |
+| `check_layering.py` | native/'s include rules: no Qt in `core/` outside device backends, Widgets only in `gui/`, ldpc/polar below codes, `embed/` on the core alone with a plain C header, generated files only generated. |
 | `check_includes.py` | Every `std::` name a native source uses has its header included (MSVC is strict where GCC and Clang are not). |
 | **Native build and parity** | |
 | `build_native.sh` | Configure and build `native/` for the project's venv; `--test` also builds the ctests and runs them and `pytest --native`. |

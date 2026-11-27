@@ -103,7 +103,10 @@ The seams worth knowing:
 
 Native keeps the same layers (`core/<module>/`), with `core/dsp` and
 `core/util` underneath, `core/rig`, `core/monitor` and the audio backends
-beside, and `app/`, `apps/`, `gui/` on top (`native/README.md`).
+beside, and `app/`, `apps/`, `gui/` on top (`native/README.md`). `embed/`
+is a second top, on the core alone: the engine and the host as a library with
+a C API, for an application that brings its own audio and PTT
+([EMBEDDING.md](EMBEDDING.md)).
 
 ## Python and native
 
@@ -121,7 +124,7 @@ The exceptions:
 | `config.py` | `core/generated/config.hpp` (generated) and `core/config` (lookups) |
 | `arq/policy.py` | `GearShifter` (the model) and `GearPolicy` (its link.Policy) in `core/arq/policy` |
 | `bulk.py` | none (experimental, Python only) |
-| none | `core/rig`, `core/monitor`, `core/util`, `gui/` |
+| none | `core/rig`, `core/monitor`, `core/util`, `gui/`, `embed/` |
 
 `native/README.md` has the full table, with each area's binding, parity
 test and ctest.

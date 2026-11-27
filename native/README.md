@@ -19,6 +19,7 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 | `core/{dsp,util}/` | Native only: numpy/scipy primitives (`dsp/`, *not* `data2g/waveform/dsp.py`, which is `core/waveform/dsp`), `Mat`, the shared worker pool, cancellation, linear algebra, SIMD clones. |
 | `core/{rig,monitor}/` | Native only: rig control and PTT (`rig/hamlib/` is the libhamlib backend, `data2g_rig`; `rig/bridge*` hands Hamlib a USB or Bluetooth link as a loopback socket, `rig/android/` is that link, `data2g_rig_android`); the promiscuous receiver behind `data2g-monitor`. |
 | `core/audio/{qt,miniaudio,android}/` | Sound card backends (`data2g_audio`), outside `data2g_core`; Android always gets `android/` (Java `AudioRecord`/`AudioTrack`). |
+| `embed/` | `data2g_embed`: the modem for an application that owns the audio and the PTT, stepped by its caller. `data2g_core` only: no Qt, no threads of its own. `embed/include/CData2G/data2g.h` is its C API; `docs/EMBEDDING.md` is the contract. HF profile only. |
 | `app/` | `data2g_station`: the runtime both front ends share (`host.py`'s `serve()`), Qt Core + Network only. `app/station.hpp` lists its threads. `app/tci.*` (`--tci`, with Qt WebSockets): the radio's audio, PTT and dial over TCI instead of a sound card and Hamlib. |
 | `apps/` | The command-line programs' `main()`s. |
 | `gui/` | `data2g-gui`: the only place Qt Widgets may appear. |
@@ -26,7 +27,7 @@ it (`docs/ARCHITECTURE.md`, "The parity contract").
 | `web/` | `data2g-web`: the station headless, the GUI as a web page (`--web-listen`, `--web-port`, default 127.0.0.1:8400). Core, Network and WebSockets (the Monitor tab is a WebSocket). One password: `data2g-web --set-password` or data2g-gui's settings (`app/web_password.*`). Settings shared with data2g-gui (`app::settings_store()`). |
 | `bindings/` | `data2g_native`, the pybind11 module that `pytest --native` substitutes into the Python suite (`tests/native_subs/`). |
 | `tests/` | One ctest per area (`test_<area>.cpp`), Python-free. |
-| `cmake/`, `packaging/`, `third_party/` | Pinned dependencies (Hamlib, zlib), icons and installers, vendored pocketfft and miniaudio. |
+| `cmake/`, `packaging/`, `third_party/` | Pinned dependencies (Hamlib, zlib), icons and installers, vendored pocketfft and miniaudio. `packaging/apple/` builds `data2g_embed` as an XCFramework and holds its Swift package. |
 
 ## Targets
 
@@ -35,6 +36,7 @@ data2g_core ─┬─ data2g_audio (sound cards) ─┐
              ├─ data2g_rig (libhamlib) ─────┤
              ├─ data2g_applog (app/log) ────┼─ data2g_station (app/) ─┬─ data2g-host
              │                              │                         └─ data2g_gui ─ data2g-gui
+             ├─ data2g_embed (embed/, the C API) ─ test_embed, test_embed_smoke
              ├─ data2g-monitor, data2g-replay, data2g-audio-check
              ├─ test_* (ctest)
              └─ data2g_native (bindings/, pybind11)
@@ -42,7 +44,8 @@ data2g_core ─┬─ data2g_audio (sound cards) ─┐
 
 `tools/check_layering.py` enforces the walls: no Qt in `core/` outside the
 device backends, Widgets only in `gui/`, `core/ldpc` and `core/polar`
-below `codes/`, and `core/generated/` only as generated.
+below `codes/`, `embed/` on the core alone with a plain C header, and
+`core/generated/` only as generated.
 `tools/check_includes.py` catches `std::` names used without their header
 (MSVC is the strict one).
 
@@ -78,6 +81,7 @@ Binding: `bindings/bind_<x>.cpp`, registering `data2g_native.<x>`. Parity:
 | `host.py` `serve()`, `main()` | `app/`, `apps/data2g_host.cpp` | | `test_native_host_e2e` | `args`, `station_tx`, `realtime`, `rx_plot` |
 | | `monitor/`, `rig/`, `util/` | | | `monitor`, `rig`, `rig_hamlib`, `pool` |
 | | `gui/` | | | `gui` |
+| | `embed/` | | | `embed`, `embed_smoke` |
 
 `tests/native_subs/<area>.py` holds the substitutions for each area: which
 Python names the binding stands in for, and when it falls back to Python.

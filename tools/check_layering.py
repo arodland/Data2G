@@ -9,6 +9,9 @@
   must still carry its header.
 - core/ldpc and core/polar are code primitives: they know nothing of
   submodes, so they include no codes/ (codes:: keys them by spec).
+- embed/ (the embedding library, docs/EMBEDDING.md) is the core and nothing
+  else: no Qt, nothing of app/, apps/, gui/ or web/. Its public header
+  includes only the C standard library.
 
     python tools/check_layering.py   # exit 1 and list violations
 """
@@ -44,6 +47,14 @@ def main() -> int:
                     for inc in INCLUDE.findall(text) if inc.startswith(("codes/", "generated/config"))]
         if "generated" in rel.parts and not text.startswith(GENERATED):
             bad.append(f"{rel}: in core/generated/ but not generated")
+    for path in sorted(p for pat in ("*.[ch]pp", "*.[ch]") for p in (NATIVE / "embed").rglob(pat)):
+        rel = path.relative_to(NATIVE)
+        public = "include" in rel.parts
+        for inc in INCLUDE.findall(path.read_text()):
+            if re.match(r"Q[A-Za-z]", inc) or inc.startswith(("app/", "apps/", "gui/", "web/")):
+                bad.append(f"{rel}: includes <{inc}>: embed/ is the core alone")
+            elif public and not re.fullmatch(r"std[a-z]+\.h", inc):
+                bad.append(f"{rel}: includes <{inc}>: the public header is plain C")
     for path in sorted(NATIVE.rglob("*.[ch]pp")):
         rel = path.relative_to(NATIVE)
         if rel.parts[0] in ("gui", "build", "third_party") or rel.parts[0].startswith("build"):

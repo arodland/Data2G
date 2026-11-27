@@ -112,6 +112,49 @@ jobs:
           TAG: ${{ inputs.release-tag }}
         run: gh release upload "$TAG" "$pkg.AppImage" "$pkg.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
 
+  # The embedding library (native/embed, docs/EMBEDDING.md) as an application
+  # gets it. The main matrix builds data2g_embed with everything else and runs
+  # its ctests (embed, embed_smoke) on every platform; this job is what that
+  # does not see:
+  # - the core and the library alone, no Qt installed at all: the configure an
+  #   embedder runs, with the session test and the C smoke test on it;
+  # - the Apple package: cross builds for iOS and the simulator, the
+  #   XCFramework, and the Swift package's loopback test on its macOS slice
+  #   (which proves the module map's libc++ and zlib links).
+  # No release asset: the XCFramework is a workflow artifact only.
+  embed:
+    name: Embedding library (Apple XCFramework)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Configure without Qt
+        run: |
+          cmake -S native -B native/build-embed \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DDATA2G_BUILD_EMBED=ON -DDATA2G_BUILD_TOOLS=OFF -DDATA2G_BUILD_PYMODULE=OFF \
+            -DDATA2G_BUILD_HOST=OFF -DDATA2G_BUILD_GUI=OFF -DDATA2G_BUILD_QTAUDIO=OFF \
+            -DDATA2G_BUILD_RIG=OFF
+      - name: Build the library and its tests
+        run: cmake --build native/build-embed --target test_embed test_embed_smoke --parallel
+      - name: C++ and C tests
+        run: ctest --test-dir native/build-embed -R '^embed' --output-on-failure --timeout 600
+      - name: Build the XCFramework, run the Swift tests
+        run: native/packaging/apple/build-xcframework.sh --test
+      - name: Name the package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          pkg="data2g${VERSION:+-$VERSION}-apple-xcframework"
+          cp native/packaging/apple/build/Data2G.xcframework.zip "$pkg.zip"
+          echo "pkg=$pkg" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.pkg }}.zip
+          archive: false
+          if-no-files-found: error
+
   native:
     name: Native (${{ matrix.label }})
     runs-on: ${{ matrix.os }}

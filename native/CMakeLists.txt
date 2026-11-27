@@ -22,6 +22,12 @@
 #   DATA2G_BUILD_RIG       data2g_rig (libhamlib, pinned: cmake/hamlib.cmake;
 #                          DATA2G_HAMLIB_SYSTEM=ON takes pkg-config's). OFF
 #                          still builds the rig controller and PTT keyer.
+#   DATA2G_BUILD_TOOLS     the command-line tools on the core alone (monitor,
+#                          replay, the benches). OFF where a program can't be
+#                          built or run (iOS: packaging/apple).
+#   DATA2G_BUILD_EMBED     data2g_embed (embed/): the modem as a library with
+#                          a C ABI, for an application that owns audio and
+#                          PTT (docs/EMBEDDING.md). No Qt. HF profile only.
 
 cmake_minimum_required(VERSION 3.24)
 project(data2g_native VERSION 0.5.3 LANGUAGES CXX)
@@ -44,6 +50,8 @@ set_property(CACHE DATA2G_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 set(DATA2G_AUDIO_BACKEND "qt" CACHE STRING "Sound card backend (qt/miniaudio)")
 set_property(CACHE DATA2G_AUDIO_BACKEND PROPERTY STRINGS qt miniaudio)
 option(DATA2G_BUILD_RIG "Build libhamlib rig control" ON)
+option(DATA2G_BUILD_TOOLS "Build the command-line tools on the core alone (monitor, replay, benches)" ON)
+option(DATA2G_BUILD_EMBED "Build data2g_embed, the C ABI for embedding the modem (embed/)" ON)
 set(DATA2G_BUILD_HOST "AUTO" CACHE STRING "Build the data2g-host app (ON/OFF/AUTO)")
 set_property(CACHE DATA2G_BUILD_HOST PROPERTY STRINGS ON OFF AUTO)
 set(DATA2G_BUILD_GUI "AUTO" CACHE STRING "Build the data2g-gui app (ON/OFF/AUTO)")
@@ -208,25 +216,38 @@ if(TARGET data2g_audio)
   add_executable(data2g-audio-check apps/data2g_audio_check.cpp)
   target_link_libraries(data2g-audio-check PRIVATE data2g_audio)
 endif()
-# data2g-monitor: receive only, every burst as a packet dump. A sound card
-# with data2g_audio; raw float32 input (--input-file) always.
-add_executable(data2g-monitor apps/data2g_monitor.cpp)
-target_link_libraries(data2g-monitor PRIVATE data2g_core)
-if(TARGET data2g_audio)
-  target_link_libraries(data2g-monitor PRIVATE data2g_audio)
-  target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
+if(DATA2G_BUILD_TOOLS)
+  # data2g-monitor: receive only, every burst as a packet dump. A sound card
+  # with data2g_audio; raw float32 input (--input-file) always.
+  add_executable(data2g-monitor apps/data2g_monitor.cpp)
+  target_link_libraries(data2g-monitor PRIVATE data2g_core)
+  if(TARGET data2g_audio)
+    target_link_libraries(data2g-monitor PRIVATE data2g_audio)
+    target_compile_definitions(data2g-monitor PRIVATE DATA2G_HAVE_AUDIO)
+  endif()
+  # data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
+  add_executable(data2g-replay apps/data2g_replay.cpp)
+  target_link_libraries(data2g-replay PRIVATE data2g_core data2g_applog)
+
+  # data2g-bench-turn: two engines in real time over AWGN, the receiving station's turnaround on the air.
+  add_executable(data2g-bench-turn apps/data2g_bench_turn.cpp)
+  target_link_libraries(data2g-bench-turn PRIVATE data2g_core)
+
+  # data2g-bench-rx: a burst's decode latency by stage (receive, soft bits, prepare, decodes), offline.
+  add_executable(data2g-bench-rx apps/data2g_bench_rx.cpp)
+  target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
 endif()
-# data2g-replay: a recording's receive audio through the engine, offline, for timing the receive path.
-add_executable(data2g-replay apps/data2g_replay.cpp)
-target_link_libraries(data2g-replay PRIVATE data2g_core data2g_applog)
 
-# data2g-bench-turn: two engines in real time over AWGN, the receiving station's turnaround on the air.
-add_executable(data2g-bench-turn apps/data2g_bench_turn.cpp)
-target_link_libraries(data2g-bench-turn PRIVATE data2g_core)
-
-# data2g-bench-rx: a burst's decode latency by stage (receive, soft bits, prepare, decodes), offline.
-add_executable(data2g-bench-rx apps/data2g_bench_rx.cpp)
-target_link_libraries(data2g-bench-rx PRIVATE data2g_core)
+# data2g_embed: the modem for an application that owns audio and PTT (embed/, docs/EMBEDDING.md):
+# an Engine and a Host stepped by the caller, behind a C ABI. The core and nothing else: no Qt,
+# no sound card, no sockets, no thread of its own. The HF profile's only: its header says HF's
+# sample rate and bandwidths, and a second profile's library would define the same symbols.
+if(DATA2G_BUILD_EMBED AND DATA2G_PROFILE STREQUAL "hf")
+  add_library(data2g_embed STATIC embed/modem.cpp embed/data2g_c.cpp)
+  set_target_properties(data2g_embed PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(data2g_embed PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/embed/include)
+  target_link_libraries(data2g_embed PUBLIC data2g_core)
+endif()
 
 # data2g_station: the runtime both apps share (app/station.*, with its
 # options, TCP servers and plot conversion beside it). Qt Core + Network,
