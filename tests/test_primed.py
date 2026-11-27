@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from data2g import codes, cpm
-from data2g.config import FS
+from data2g.config import FS, SUBMODES
 from data2g.arq import frames as F
 from data2g.arq import link as L
 from data2g.arq import phy as PHY
@@ -335,8 +335,53 @@ def test_known_bits_and_score():
     assert (k[16:8 * pb + codes.crc_bits(spec)] == -1).all() and (k[8 * pb + codes.crc_bits(spec):] == 0).all()
     p = bytes(range(pb))
     x = 30.0 * (1 - 2.0 * codes.encode(spec, p, 0, 7, 0))
-    assert codes.score(spec, x, p, 7, 0) == pytest.approx(spec.coded_bits * np.log(2), rel=1e-6)
+    best = np.log(2) - np.log1p(np.exp(-codes.SCORE_POLAR_CAP))  # polar: |L| clipped
+    assert codes.score(spec, x, p, 7, 0) == pytest.approx(spec.coded_bits * best, rel=1e-6)
     assert codes.score(spec, np.zeros(spec.coded_bits), p, 7, 0) == 0.0
+
+
+def _ack(spec) -> bytes:
+    return F.Control(F.Core(burst_seq=3, acted_on=2, cum=77, recommend=50, size_hint=2),
+                     {F.T_REPLY: bytes([50]), F.T_DUPCTL: b""}).pack(codes.payload_bytes(spec))[0]
+
+
+@pytest.mark.parametrize("grid", ["c32r62", "c16r25"])
+def test_score_survives_confident_outliers(grid):
+    """#342: a control with 11% of its bits confidently wrong (|L| 30: an
+    echo past a symbol) still scores PRIMED_SCORE; uncapped it scored about
+    -900. A related control (another T_REPLY value) received cleanly does not."""
+    spec = cpm.CTL[grid]
+    ctl = _ack(spec)
+    x = 30.0 * (1 - 2.0 * codes.encode(spec, ctl, 0, 7, 0))
+    bad = np.random.default_rng(342).choice(len(x), 39, replace=False)
+    x[bad] *= -1
+    assert codes.score(spec, x, ctl, 7, 0) >= PHY.PRIMED_SCORE
+    wrong = bytearray(ctl)
+    wrong[6] ^= 1
+    clean = 30.0 * (1 - 2.0 * codes.encode(spec, bytes(wrong), 0, 7, 0))
+    assert codes.score(spec, clean, ctl, 7, 0) < -PHY.PRIMED_SCORE
+
+
+def test_score_leaves_ldpc_uncapped():
+    """An LDPC control's neighbours can be 4% of its bits away, under the
+    cap's ~17%: its score keeps the full |L|."""
+    spec = SUBMODES["w48-16qam-r5/6"]
+    p = bytes(i % 256 for i in range(codes.payload_bytes(spec)))
+    x = 30.0 * (1 - 2.0 * codes.encode(spec, p, 0, 7, 0))
+    assert codes.score(spec, x, p, 7, 0) == pytest.approx(spec.coded_bits * np.log(2), rel=1e-6)
+    q = bytearray(p)
+    q[0] ^= 1
+    assert codes.score(spec, x, bytes(q), 7, 0) < -PHY.PRIMED_SCORE
+
+
+@pytest.mark.parametrize("name", ["fsk32r62-ctl", "ack-4f", "w48-16qam-r5/6"])
+def test_cpp_score_matches_at_large_llrs(native, pure, name):
+    """codes.score, C++ against Python, with |L| past the polar cap."""
+    spec = cpm.CTL["c32r62"] if name == "fsk32r62-ctl" else SUBMODES[name]
+    rng = np.random.default_rng(7)
+    p = bytes(rng.integers(0, 256, codes.payload_bytes(spec), dtype=np.uint8))
+    x = rng.uniform(-30, 30, spec.coded_bits)
+    assert native.codes.score(spec.name, x, p, 7, 0) == pytest.approx(codes.score(spec, x, p, 7, 0), rel=1e-12)
 
 
 def test_cpp_decode_known_matches(native, pure):

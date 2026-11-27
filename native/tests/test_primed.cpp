@@ -97,7 +97,9 @@ int main() {
         const auto c = codes::encode(ctl, p, 0, 5, 0);
         std::vector<double> x(c.size());
         for (std::size_t i = 0; i < c.size(); ++i) x[i] = 30.0 * (1 - 2.0 * c[i]);
-        check::is_true(std::abs(codes::score(ctl, x, p, 5, 0) - ctl.coded_bits * std::log(2.0)) < 1e-6, "score: certain");
+        // polar: |L| clipped to kScorePolarCap (#342)
+        const double best = std::log(2.0) - std::log1p(std::exp(-codes::kScorePolarCap));
+        check::is_true(std::abs(codes::score(ctl, x, p, 5, 0) - ctl.coded_bits * best) < 1e-6, "score: certain");
         check::equal(codes::score(ctl, std::vector<double>(c.size(), 0.0), p, 5, 0), 0.0, "score: erased");
     }
 

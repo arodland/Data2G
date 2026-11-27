@@ -166,6 +166,13 @@ for Data2G).
     (`_implausible`: acted-on resolves, `cum` in `[base, next]`, an abandon at my
     cumulative). A blind control saying otherwise fails the session (§10); a primed one is
     only dropped. Then `rx_primed` counts it.
+  - The score clips polar soft bits to ±`codes.SCORE_POLAR_CAP` (4), so a few confidently
+    wrong bits (an echo past a CPM symbol) cannot veto a right codeword. Under a
+    one-symbol echo as strong as the direct path (8 dB per tone), 22% of CRC-right primed
+    controls scored 10 uncapped and 47% capped. The noise bound is unchanged (noise passes
+    scoring 10: 44/305 and 24/328 at every cap). A related codeword is still rejected
+    when over ~17% of its bits differ: polar controls' neighbours were 20% or more away,
+    high-rate LDPC's 3.7%, so LDPC is not clipped (issue #342).
 - **Connect frames** (`Session._primed_frame`). A caller waiting for its CONNECT_ACK knows
   all of it but the callee's cap and t_turn: tried with those as mine, then unknown. A
   listener knows a third of a compact CONNECT (the version, its own call), then a cap and

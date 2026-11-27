@@ -693,13 +693,29 @@ def known_bits(spec: CodeSpec, template: bytes, mask: bytes) -> np.ndarray:
     return known
 
 
+# codes.score clips polar soft bits to +-SCORE_POLAR_CAP (#342). A few
+# confidently wrong bits (an echo past a CPM symbol) cost up to -30 nats each
+# uncapped, and vetoed CRC-passing primed controls: echo 1.0 at 8 dB, 22% of
+# them kept at 30, 47% at 4. A cap keeps the noise bound (any function of L
+# has E[e^score] = 1 against bits independent of it). It loosens the bound
+# against a related codeword (d bits away): at cap C one is rejected only if
+# d/n > ~g(C)/C, g(C) = ln 2 - ln(1 + e^-C): 0.17 at 4. Polar controls'
+# neighbours sit >= 0.20 away (sampled), high-rate LDPC's 0.037, so LDPC stays
+# uncapped. Study: issue #342.
+SCORE_POLAR_CAP = 4.0
+
+
 def score(spec: CodeSpec, soft: np.ndarray, payload: bytes, crc_mask: int, index: int) -> float:
     """Log-likelihood ratio (nats) of `payload`'s RV 0 codeword, sent at
     burst position `index`, against uniformly random bits, from its soft
-    bits (mapping order). On noise, or anything that is not this codeword,
-    P(score >= T) <= e^-T for calibrated LLRs (Markov: E[e^score] = 1)."""
+    bits (mapping order; polar: clipped to +-SCORE_POLAR_CAP). On noise, or
+    anything independent of this codeword, P(score >= T) <= e^-T for
+    calibrated LLRs (Markov: E[e^score] = 1)."""
     c = 1.0 - 2.0 * encode(spec, payload, 0, crc_mask, index)
-    return float(np.sum(np.log(2.0) - np.logaddexp(0.0, -c * np.asarray(soft, float))))
+    x = np.asarray(soft, float)
+    if spec.code == "polar":
+        x = np.clip(x, -SCORE_POLAR_CAP, SCORE_POLAR_CAP)
+    return float(np.sum(np.log(2.0) - np.logaddexp(0.0, -c * x)))
 
 
 def pin(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> np.ndarray:
