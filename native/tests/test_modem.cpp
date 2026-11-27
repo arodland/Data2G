@@ -41,13 +41,13 @@ int main() {
     check::Watchdog watchdog(300, "test_modem");
 
     check::current_step = "header";
-    // PROTOCOL_VERSION 15's seed (Python's modem.crc6 and header_bits)
+    // PROTOCOL_VERSION 16's seed (Python's modem.crc6 and header_bits)
     if (check::hf_only("crc6 goldens seeded with HF's version")) {
-        check::equal(modem::crc6(0), 28, "crc6(0)");
-        check::equal(modem::crc6(100), 54, "crc6(100)");
-        check::equal(modem::crc6(1023), 45, "crc6(1023)");
+        check::equal(modem::crc6(0), 20, "crc6(0)");
+        check::equal(modem::crc6(100), 62, "crc6(100)");
+        check::equal(modem::crc6(1023), 37, "crc6(1023)");
     }
-    const std::vector<std::uint8_t> want{1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1};
+    const std::vector<std::uint8_t> want{0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0};
     const auto hb = modem::header_bits(7, 3, "w");
     if (check::hf_only("header_bits golden: its CRC-6 is seeded with HF's version"))
         check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");

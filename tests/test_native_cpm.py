@@ -221,7 +221,7 @@ def test_confirm(native, reference, name, n_data):
     its word): on the burst, and on one that stops after its first copy."""
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(n_data)
+    rng = np.random.default_rng(n_data + 1)
     assert native.cpm.CONFIRM_LLR == cpm.CONFIRM_LLR
     x = ref(reference, "modulate")(spec, _burst(spec, n_data, False, rng), False).copy()
     rows = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, False)).hdr_rows[0]

@@ -192,14 +192,16 @@ PROFILE_TAG = {"hf": 0, "fm": 0x20}[PROFILE]
 # preambles, headers and submode indices; the FM plan's M4/M5 bands); 4: f55's and
 # f108's measured ladders (14 modes each, runs/fm_ladder/final_proposal.md); 5: no n4 (its
 # header indices on n10's sync band unused) and FM's ARQ band codes w, n10, f55, f108 (no w48,
-# no CPM). FM's ARQ session VERSION is HF's: PROFILE_TAG and this keep the profiles apart.
-PROTOCOL_VERSION = {"hf": 15, "fm": 5}[PROFILE]  # HF: 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
+# no CPM); 6: `next` compatibility-break line (wire-extensibility-1.0 and scattered pilots on w).
+# FM's ARQ session VERSION is HF's: PROFILE_TAG and this keep the profiles apart.
+PROTOCOL_VERSION = {"hf": 16, "fm": 6}[PROFILE]  # HF: 10: first frozen submode table; n4 on n10 sync (2026-09-23); 11: header copy;
 # 12: polar codewords carry CRC-24 (k + 8, payloads kept); n10's header 5 | 5 (CW_BITS, 2026-10-06,
 # in place: development, one operator); 13: a non-periodic c8r50 front (2026-10-24: the tiled
 # Costas array matched one period off, sync 0.76, and its header read as another word); 14: the CPM
 # modes' data codewords GF(M) LDPC on tone likelihoods (data2g.gfldpc, 2026-10-27: 0.7-1.5 dB on
 # ideal channels over the binary LDPC on bit LLRs), same payloads and burst framing; 15: 20 ms lead-in
-# and lead-out silence, not 100 ms (2026-10-27, scripts/burst_trim.py): every OFDM burst 160 ms shorter
+# and lead-out silence, not 100 ms (2026-10-27, scripts/burst_trim.py): every OFDM burst 160 ms shorter;
+# 16: `next` compatibility-break line (wire-extensibility-1.0, wide FSK bins, c32r62-r2/3, scattered pilots)
 # A second header copy, time-diverse, on the 4-symbol headers (w, w48): a
 # frame of its own (pilot, the 4 header symbols, the first again) after
 # data frame HEADER_COPY_AFTER, or after the last on a shorter burst. The
