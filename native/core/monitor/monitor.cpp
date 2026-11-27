@@ -247,9 +247,11 @@ bool Monitor::broadcast(PlainRx& rx, Dump& d) {
               " frame(s)" + (lost ? ", " + std::to_string(lost) + " lost" : "") + (c.reports ? ", rate reports" : "") + "\n";
     for (std::size_t i = 0; i < frames.size(); ++i) {
         std::string label = "frame " + std::to_string(i + 1);
-        if (const auto ax = kisslink::parse_ax25(frames[i]))
+        if (frames[i].cmd)
+            label += " (cmd " + std::to_string(frames[i].cmd) + ")";
+        else if (const auto ax = kisslink::parse_ax25(frames[i].data))
             label += " (AX.25 " + ax->src + ">" + ax->dst + (ax->connected ? ", connected" : ", UI") + ")";
-        d.payloads.push_back({label, std::move(frames[i]), {}});
+        d.payloads.push_back({label, std::move(frames[i].data), {}});
     }
     return true;
 }

@@ -54,16 +54,17 @@ private:
 };
 
 // tnc.py's KissServer: any number of clients; data and ACKMODE frames to
-// on_packet (port, frame, ack id), other KISS commands to on_command; frames
+// on_packet (port, frame, ack id, cmd), other KISS commands to on_command; frames
 // heard go to every client, an ack to the client that asked for it.
 class KissServer : public QObject {
 public:
     // Throws std::runtime_error if it can't listen.
-    KissServer(const QHostAddress& addr, quint16 port, std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
+    KissServer(const QHostAddress& addr, quint16 port,
+               std::function<void(int, tnc::Bytes, std::optional<std::int64_t>, int)> on_packet,
                std::function<void(int, tnc::Bytes, int)> on_command);  // (cmd, payload, port)
     ~KissServer() override;
 
-    void broadcast(const tnc::Bytes& data, int port);
+    void broadcast(const tnc::Bytes& data, int port, int cmd = tnc::KISS_DATA);
     // A heard burst's REF line, to the clients that sent REFS ON (call it before that burst's broadcast()).
     void send_ref(const std::string& line);
     // An ACKMODE frame went out: its tag back to the client that sent it.
@@ -76,7 +77,7 @@ private:
     std::set<QTcpSocket*> refs_;  // clients that sent REFS ON
     std::map<std::int64_t, std::pair<QTcpSocket*, tnc::Bytes>> acks_;  // ACKMODE id -> (client, tag)
     std::int64_t n_acks_ = 0;
-    std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet_;
+    std::function<void(int, tnc::Bytes, std::optional<std::int64_t>, int)> on_packet_;
     std::function<void(int, tnc::Bytes, int)> on_command_;
 };
 

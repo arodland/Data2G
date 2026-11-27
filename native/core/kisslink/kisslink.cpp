@@ -285,13 +285,14 @@ void KissLink::drop_where(int port, const std::function<bool(const Queued&)>& wh
     events.push_back("BCAST " + std::to_string(port) + " DROPPED " + std::to_string(k));
 }
 
-void KissLink::enqueue(Bytes frame, int port, std::optional<std::int64_t> ack) {
+void KissLink::enqueue(Bytes frame, int port, std::optional<std::int64_t> ack, int cmd) {
+    if (cmd < 0 || cmd > 0x0F) throw std::invalid_argument("KISS command " + std::to_string(cmd) + ": must be 0..15");
     if (!ports.count(port)) {
         events.push_back("BCAST " + std::to_string(port) + " DROPPED 1");
         return;
     }
     if (frame.empty()) return;  // nothing to send (and an empty frame reads as padding: unpack_frames)
-    queue.push_back({port, std::move(frame), ack});
+    queue.push_back({port, std::move(frame), ack, cmd});
 }
 
 namespace {
@@ -329,8 +330,8 @@ Peer* KissLink::peer(int h) {
     return nullptr;
 }
 
-std::pair<std::string, int> KissLink::route(const Port& port, ByteView frame) const {
-    if (port.shift) {
+std::pair<std::string, int> KissLink::route(const Port& port, ByteView frame, int cmd) const {
+    if (port.shift && cmd == 0) {
         const auto ax = parse_ax25(frame);
         if (ax && ax->connected) {
             const int h = station_hash(ax->next_hop);
@@ -412,21 +413,46 @@ std::optional<Bytes> uncobs(ByteView b) {
     return out;
 }
 
-// `frame` as it goes at byte `at` of a burst's data: COBS, its ending zero, and a zero before it if it would
-// start a codeword (else where it starts would be known only from the codeword before).
-static Bytes framed(ByteView frame, std::size_t at, std::size_t pb) {
+std::optional<Frame> uncobs_cmd(ByteView b) {
+    if (b.empty()) return std::nullopt;
+    Bytes out;
+    std::size_t i = 0, prev_c = 255;
+    while (i < b.size()) {
+        const std::size_t c = b[i];
+        if (!c) return std::nullopt;
+        if (i + c > b.size()) {
+            if (i > 0 && i == b.size() - 1 && c >= static_cast<std::size_t>(CMD_TAG + 1))
+                return Frame{std::move(out), static_cast<int>(c & 0x0Fu)};
+            return std::nullopt;
+        }
+        if (i > 0 && prev_c < 255) out.push_back(0);
+        out.insert(out.end(), b.begin() + static_cast<std::ptrdiff_t>(i + 1), b.begin() + static_cast<std::ptrdiff_t>(i + c));
+        prev_c = c;
+        i += c;
+    }
+    return Frame{std::move(out), 0};
+}
+
+// `frame` as it goes at byte `at` of a burst's data: COBS, optional trailing command tag (0xF1..0xFF for cmd 1..15),
+// its ending zero, and a zero before it if it would start a codeword (else where it starts would be known only from
+// the codeword before).
+static Bytes framed(ByteView frame, std::size_t at, std::size_t pb, int cmd = 0) {
     Bytes out;
     if (at % pb == 0) out.push_back(0);
     const auto c = cobs(frame);
     out.insert(out.end(), c.begin(), c.end());
+    if (cmd) out.push_back(static_cast<std::uint8_t>(CMD_TAG | cmd));
     out.push_back(0);
     return out;
 }
 
-std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb) {
+std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb, const std::vector<int>& cmds) {
+    if (!cmds.empty() && cmds.size() != frames.size()) throw std::invalid_argument("cmds length mismatch");
     Bytes stream;
-    for (const auto& f : frames) {
-        const auto c = framed(f, stream.size(), pb);
+    for (std::size_t idx = 0; idx < frames.size(); ++idx) {
+        const int cmd = cmds.empty() ? 0 : cmds[idx];
+        if (cmd < 0 || cmd > 0x0F) throw std::invalid_argument("KISS command " + std::to_string(cmd) + ": must be 0..15");
+        const auto c = framed(frames[idx], stream.size(), pb, cmd);
         stream.insert(stream.end(), c.begin(), c.end());
     }
     stream.resize((stream.size() + pb - 1) / pb * pb, 0);
@@ -435,14 +461,14 @@ std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb)
     return out;
 }
 
-std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok) {
+std::pair<std::vector<Frame>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok) {
     Bytes stream;
     std::vector<bool> good;
     for (std::size_t i = 0; i < payloads.size(); ++i) {
         stream.insert(stream.end(), payloads[i].begin(), payloads[i].end());
         good.insert(good.end(), payloads[i].size(), ok.at(i));
     }
-    std::vector<Bytes> out;
+    std::vector<Frame> out;
     int lost = 0;
     std::size_t start = 0;
     bool damaged = false;
@@ -453,7 +479,7 @@ std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& paylo
             if (damaged) {
                 ++lost;
             } else if (i > start) {
-                if (auto f = uncobs(ByteView(stream).subspan(start, i - start))) out.push_back(std::move(*f));
+                if (auto f = uncobs_cmd(ByteView(stream).subspan(start, i - start))) out.push_back(std::move(*f));
                 else ++lost;
             }
             start = i + 1;
@@ -477,11 +503,12 @@ std::vector<arq::TxBurstPtr> KissLink::next_bursts() {
 arq::TxBurstPtr KissLink::next_burst() {
     while (!queue.empty()) {
         const int n = queue[0].port;
+        const int first_cmd = queue[0].cmd;
         const Port& port = ports.at(n);
-        const auto [mode, hint] = route(port, queue[0].frame);
+        const auto [mode, hint] = route(port, queue[0].frame, first_cmd);
         const arq::Mode& m = arq::mode_at(mode);
         int sender = 0;
-        if (port.shift)
+        if (port.shift && first_cmd == 0)
             if (const auto ax = parse_ax25(queue[0].frame)) {
                 sender = station_hash(ax->sender);
                 me.insert(sender);
@@ -493,14 +520,14 @@ arq::TxBurstPtr KissLink::next_burst() {
         // the size class is a preference: a burst grows to carry its first
         // frame, up to what its header can say
         const int limit = m.is_cpm() ? start + tables::CPM.max_data : config::max_codewords(m.ofdm->sync_band);
-        const int need = start + ceil_div(framed(queue[0].frame, 0, pb).size(), pb);
+        const int need = start + ceil_div(framed(queue[0].frame, 0, pb, first_cmd).size(), pb);
         const int n_max = std::min(limit, std::max(arq::slots_for(m, seconds), need));
         const std::size_t room = static_cast<std::size_t>(n_max - start) * pb;
         std::vector<Queued> taken, rest;
         std::size_t size = 0;
         for (auto& q : queue) {
-            const std::size_t k = framed(q.frame, size, pb).size();
-            if (q.port == n && route(port, q.frame).first == mode && size + k <= room) {
+            const std::size_t k = framed(q.frame, size, pb, q.cmd).size();
+            if (q.port == n && route(port, q.frame, q.cmd).first == mode && size + k <= room) {
                 size += k;
                 taken.push_back(std::move(q));
             } else {
@@ -510,7 +537,7 @@ arq::TxBurstPtr KissLink::next_burst() {
         if (taken.empty()) {  // the first frame alone doesn't fit: it never will in this mode
             if (arq::log_enabled(LOG, 40))
                 arq::log_write(LOG, 40, arq::format("%zu-byte frame dropped: a %s burst carries at most %zu",
-                                                    rest[0].frame.size(), mode.c_str(), room - 3));
+                                                    rest[0].frame.size(), mode.c_str(), room - (first_cmd ? 4u : 3u)));
             rest.erase(rest.begin());
             queue = std::move(rest);
             events.push_back("BCAST " + std::to_string(n) + " DROPPED 1");
@@ -518,8 +545,12 @@ arq::TxBurstPtr KissLink::next_burst() {
         }
         queue = std::move(rest);
         std::vector<Bytes> frames;
-        for (auto& q : taken) frames.push_back(std::move(q.frame));
-        auto data = pack_frames(frames, pb);
+        std::vector<int> cmds;
+        for (auto& q : taken) {
+            frames.push_back(std::move(q.frame));
+            cmds.push_back(q.cmd);
+        }
+        auto data = pack_frames(frames, pb, cmds);
         const int key = port.key();
         auto b = std::make_shared<arq::TxBurst>();
         b->submode = mode;
@@ -603,7 +634,7 @@ std::optional<std::tuple<ControlRead, int>> KissLink::read_burst_control(arq::Pl
     return std::nullopt;
 }
 
-std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_frames(arq::PlainRx& rx, int start, int key) {
+std::tuple<std::vector<Frame>, std::vector<bool>, int> KissLink::read_burst_frames(arq::PlainRx& rx, int start, int key) {
     const auto pb = static_cast<std::size_t>(arq::payload_bytes(arq::mode_at(rx.submode())));
     std::vector<Bytes> payloads;
     std::vector<bool> ok;
@@ -612,7 +643,7 @@ std::tuple<std::vector<Bytes>, std::vector<bool>, int> KissLink::read_burst_fram
         ok.push_back(p.has_value());
         payloads.push_back(p ? std::move(*p) : Bytes(pb, 0));
     }
-    auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Bytes>, int>{} : unpack_frames(payloads, ok);
+    auto [frames, lost] = payloads.empty() ? std::pair<std::vector<Frame>, int>{} : unpack_frames(payloads, ok);
     return {std::move(frames), std::move(ok), lost};
 }
 
@@ -648,14 +679,14 @@ std::optional<std::pair<int, int>> KissLink::find_data(arq::PlainRx& rx, const s
 // A heard burst's status suffix: its pilot SNR (snr_est, dB), as the monitor shows it.
 static std::string snr_suffix(const arq::Heard& r) { return arq::format(" %.1f", arq::measure(r).snr_est); }
 
-std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::Heard& r,
-                                                                     std::shared_ptr<const arq::SlotSoft> soft,
-                                                                     std::optional<double> dd_budget) {
+std::optional<std::vector<RxFrame>> KissLink::on_burst(const arq::Heard& r,
+                                                       std::shared_ptr<const arq::SlotSoft> soft,
+                                                       std::optional<double> dd_budget) {
     arq::ModemRx rx(r, nullptr, dd_budget, std::move(soft));
     return on_burst(r, rx);
 }
 
-std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::Heard& r, arq::ModemRx& rx) {
+std::optional<std::vector<RxFrame>> KissLink::on_burst(const arq::Heard& r, arq::ModemRx& rx) {
     const int n = rx.n_cw();
     const double now = clock();
     auto ports_where = [&](auto pred) {
@@ -664,7 +695,7 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
             if (pred(p)) out.push_back(i);
         return out;
     };
-    std::vector<std::pair<int, Bytes>> out;
+    std::vector<RxFrame> out;
     if (auto ctl = read_burst_control(rx, n)) {
         auto& [c, start] = *ctl;
         auto [frames, ok, lost] = read_burst_frames(rx, start, group_key(c.group));
@@ -675,7 +706,7 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
         for (int i : mine) {
             events.push_back("BCAST " + std::to_string(i) + " HEARD" + (c.call ? " " + *c.call : "") + snr);
             if (lost) events.push_back("BCAST " + std::to_string(i) + " LOST " + std::to_string(lost));
-            for (const auto& f : frames) out.emplace_back(i, f);
+            for (const auto& f : frames) out.push_back({i, f.data, f.cmd});
         }
         return out;
     }
@@ -703,17 +734,17 @@ std::optional<std::vector<std::pair<int, Bytes>>> KissLink::on_burst(const arq::
     for (int i : mine) {
         events.push_back("BCAST " + std::to_string(i) + " HEARD" + snr);
         if (lost) events.push_back("BCAST " + std::to_string(i) + " LOST " + std::to_string(lost));
-        for (const auto& f : frames) out.emplace_back(i, f);
+        for (const auto& f : frames) out.push_back({i, f.data, f.cmd});
     }
     return out;
 }
 
 // A shifting port heard `rep` (T_REPORTS): what we know of its sender.
-void KissLink::learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, arq::ModemRx& rx,
+void KissLink::learn(const Bytes& rep, const std::vector<Frame>& frames, const arq::Heard& r, arq::ModemRx& rx,
                      const std::vector<bool>& ok, double now) {
     int sender = be16(rep.data());
-    if (!sender && !frames.empty())
-        if (const auto ax = parse_ax25(frames[0])) sender = station_hash(ax->sender);
+    if (!sender && !frames.empty() && frames[0].cmd == 0)
+        if (const auto ax = parse_ax25(frames[0].data)) sender = station_hash(ax->sender);
     if (!sender || me.count(sender)) return;
     const std::string mode(r.mode().name);
     Peer* p = peer(sender);

@@ -62,7 +62,7 @@ def test_burst_through_the_audio_path_and_streaming_receiver():
         for kind, ev in rx.feed(dec(card[i : i + 24000])):
             if kind == "burst":
                 b = modem.decode_received(ev["rx"])
-                got += unpack_frames(b.payloads, b.crc_ok)[0]
+                got += [f for f, _ in unpack_frames(b.payloads, b.crc_ok)[0]]
     assert got == packets
 
 

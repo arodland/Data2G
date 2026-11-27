@@ -84,7 +84,7 @@ void Port::read(QTcpSocket* c) {
 }
 
 KissServer::KissServer(const QHostAddress& addr, quint16 port,
-                       std::function<void(int, tnc::Bytes, std::optional<std::int64_t>)> on_packet,
+                       std::function<void(int, tnc::Bytes, std::optional<std::int64_t>, int)> on_packet,
                        std::function<void(int, tnc::Bytes, int)> on_command)
     : on_packet_(std::move(on_packet)), on_command_(std::move(on_command)) {
     if (!srv_.listen(addr, port))
@@ -102,12 +102,12 @@ KissServer::KissServer(const QHostAddress& addr, quint16 port,
                 const auto* p = reinterpret_cast<const std::uint8_t*>(d.constData());
                 for (auto& [cmd, payload] : it->second.feed({p, static_cast<std::size_t>(d.size())})) {
                     if (tnc::kiss_is_data(cmd, payload.size())) {
-                        on_packet_(cmd >> 4, std::move(payload), std::nullopt);
+                        on_packet_(cmd >> 4, std::move(payload), std::nullopt, cmd & 0x0F);
                     } else if ((cmd & 0x0F) == tnc::KISS_ACKMODE && payload.size() >= 2) {  // [tag, 2][frame]
                         // tnc.py's: an id with the tag in its low 16 bits, big-endian (arq::ack_tag)
                         const std::int64_t id = (++n_acks_ << 16) | (payload[0] << 8 | payload[1]);
                         acks_[id] = {c, tnc::Bytes(payload.begin(), payload.begin() + 2)};
-                        on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id);
+                        on_packet_(cmd >> 4, tnc::Bytes(payload.begin() + 2, payload.end()), id, tnc::KISS_DATA);
                     } else if (const auto on = (cmd & 0x0F) == tnc::KISS_SETHARDWARE ? tnc::refs_command(payload) : std::nullopt) {
                         if (*on) refs_.insert(c);
                         else refs_.erase(c);
@@ -132,8 +132,8 @@ KissServer::~KissServer() {  // as ~Port
     for (auto* c : srv_.findChildren<QTcpSocket*>()) c->disconnect(this);
 }
 
-void KissServer::broadcast(const tnc::Bytes& data, int port) {
-    const auto f = tnc::kiss_encode(data, port);
+void KissServer::broadcast(const tnc::Bytes& data, int port, int cmd) {
+    const auto f = tnc::kiss_encode(data, port, cmd);
     const QByteArray b(reinterpret_cast<const char*>(f.data()), static_cast<qsizetype>(f.size()));
     for (auto& [c, _] : clients_) c->write(b);
 }

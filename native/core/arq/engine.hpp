@@ -336,8 +336,8 @@ public:
     // Session stage, from the next session on: EngineConfig's noise_rule.
     void set_noise_rule(double w) { cfg_.noise_rule = w; }
     const std::deque<TxBurstPtr>& extra() const { return extra_; }
-    // (port, frame)s heard for KISS clients since the last call
-    std::vector<std::pair<int, Bytes>> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
+    // (port, frame, cmd)s heard for KISS clients since the last call
+    std::vector<kisslink::RxFrame> take_kiss_rx() { return std::exchange(kiss_rx_, {}); }
     kisslink::KissLink* kiss() const { return cfg_.kiss; }
 
     // -- Hand bursts (the D2G net's show of hands: hand/hand.hpp, docs/arq.md §9), session stage.
@@ -470,7 +470,7 @@ private:
     };
     std::optional<Pend> pend_;  // PENDING raised
     void pending_resolve();
-    std::vector<std::pair<int, Bytes>> kiss_rx_;
+    std::vector<kisslink::RxFrame> kiss_rx_;
     bool tx_kiss_ = false;  // the burst on air is a KISS one
     std::int64_t kiss_busy_ = 0;  // samples of unbroken BUSY a queued KISS burst has waited
     bool kiss_deferred_ = false;  // ... and it has waited on BUSY

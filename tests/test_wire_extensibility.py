@@ -276,7 +276,7 @@ def test_broadcast_tlv_ignorable_vs_critical_and_reserved_bit():
     y = np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)])
     r = receiver.receive_any(y, lead=FS)
     assert r is not None
-    assert rx.on_burst(r) == [(0, b"hello broadcast")]
+    assert rx.on_burst(r) == [(0, b"hello broadcast", 0)]
 
     # Same burst with an unknown critical TLV (type 130) must drop the burst
     c0_bad = bytearray(burst.slots[0].payload)

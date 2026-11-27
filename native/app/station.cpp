@@ -137,7 +137,7 @@ struct Station::Outbox {
     std::vector<std::pair<std::string, std::uint64_t>> cmd;  // (line, client it is for; 0: all)
     arq::Bytes data;
     std::vector<std::string> refs;  // REF lines for KISS REFS ON clients, ahead of kiss
-    std::vector<std::pair<int, arq::Bytes>> kiss;  // (port, frame) heard
+    std::vector<kisslink::RxFrame> kiss;  // (port, frame, cmd) heard
     std::vector<std::pair<int, std::int64_t>> acks;  // (port, ACKMODE id) gone out
     unsigned dial = 0;     // data goes to ACCEPT's connection of this dial generation (0: the data port)
     unsigned hang_up = 0;  // then that connection closes: its session is over
@@ -208,7 +208,7 @@ void Station::deliver(const Outbox& o) {
     if (o.hang_up && dialed_gen_ == o.hang_up) hang_up();
     if (kiss_) {
         for (const auto& line : o.refs) kiss_->send_ref(line);  // same socket, ahead of the frames
-        for (const auto& [port, f] : o.kiss) kiss_->broadcast(f, port);
+        for (const auto& [port, f, cmd] : o.kiss) kiss_->broadcast(f, port, cmd);
         for (const auto& [port, id] : o.acks) kiss_->send_ack(id, port);
     }
 }
@@ -586,8 +586,8 @@ void Station::start() {
         }
         kiss_ = std::make_unique<KissServer>(
             resolve(a_.listen), a_.kiss_port,
-            [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack) {
-                post([this, port, ack, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack); });
+            [this, post](int port, tnc::Bytes f, std::optional<std::int64_t> ack, int cmd) {
+                post([this, port, ack, cmd, f = std::move(f)]() mutable { link_->enqueue(std::move(f), port, ack, cmd); });
             },
             [this, post](int cmd, tnc::Bytes p, int port) { post([this, cmd, port, p = std::move(p)] { link_->command(cmd, p, port); }); });
 
