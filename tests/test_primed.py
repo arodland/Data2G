@@ -690,3 +690,78 @@ def test_poll_after_data_can_be_primed(reply_changes):
 @pytest.mark.parametrize("reply_changes", [False, True])
 def test_cpp_poll_after_data_primes_identically(native, pure, reply_changes):
     assert poll_after_data(native.arq.Station, reply_changes) == poll_after_data(L.Station, reply_changes)
+
+
+def burst1_omits_reply_under_data(cls, dup):
+    """After burst 0 establishes T_REPLY, burst 1 omits T_REPLY unconditionally in
+    wire 1.0. Even with unacked data in flight (tx.base != tx.next filling the
+    cum/bitmap bank), burst 1 must prime on hypothesis 0."""
+    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True)
+    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True)
+    stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
+
+    def rx(burst, lost=False):
+        r = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=int(lost), p_known=1)
+        r.n_ctl_slots = 1
+        return r
+
+    # burst 0: caller establishes T_REPLY; callee replies with unacked data
+    b0 = a.build()
+    assert b.handle(rx(b0))
+    b.write(bytes(range(64)))
+    r0 = b.build()
+    b.answered()
+    assert b.tx.base < b.tx.next and a.handle(rx(r0))
+    # burst 1: caller omits T_REPLY (unchanged); fails blind -> callee primes on hyp 0
+    b1 = a.build()
+    assert F.T_REPLY not in F.Control.unpack([b1.slots[0].payload]).ext
+    r1 = rx(b1, lost=True)
+    hs = b.expect(r1)
+    assert len(hs) <= L.PRIME_TRIES
+    assert F.T_REPLY not in F.Control.unpack([hs[0][0]]).ext
+    assert b.handle(r1), (dup, hs)
+    assert b.stats["rx_primed"] == 1
+    return _burst(b1), hs
+
+
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
+@pytest.mark.parametrize("dup", [False, True])
+def test_burst1_omitted_reply_primes_under_unacked_data(dup):
+    burst1_omits_reply_under_data(L.Station, dup)
+
+
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
+@pytest.mark.parametrize("dup", [False, True])
+def test_cpp_burst1_omitted_reply_primes_identically(native, pure, dup):
+    assert burst1_omits_reply_under_data(native.arq.Station, dup) == \
+        burst1_omits_reply_under_data(L.Station, dup)
+
+
+def bare_first_control(cls, mode):
+    """A peer's very first ARQ burst with reply=None and want_dup=False (empty ext)
+    is still primed."""
+    class BarePolicy(BootstrapPolicy):
+        def recommend(self, station):
+            return M.encode(ROBUST_CONNECT), 1, None
+
+    sender = cls(0, BarePolicy(mode, False), master=True, nod=True)
+    receiver = cls(1, BarePolicy(mode, False), master=False, nod=True)
+    burst = sender.build()
+    assert not F.Control.unpack([s.payload for s in burst.slots]).ext
+    stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
+    rx = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=1, p_known=1)
+    rx.n_ctl_slots = 1 if M.is_cpm(M.MODES[mode]) else 0
+    hs = receiver.expect(rx)
+    assert len(hs) <= L.PRIME_TRIES
+    assert receiver.handle(rx), (mode, hs)
+    return _burst(burst), hs
+
+
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
+def test_bare_first_control_can_be_primed(mode):
+    bare_first_control(L.Station, mode)
+
+
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
+def test_cpp_bare_first_control_primes_identically(native, pure, mode):
+    assert bare_first_control(native.arq.Station, mode) == bare_first_control(L.Station, mode)

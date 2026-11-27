@@ -282,7 +282,6 @@ public:
     bool asked_dup_ = false;
     // my latest build's recommendations as the peer has them: its data mode, its reply modes
     std::vector<int> asked_;
-    bool peer_omits_ = false;  // the peer has left T_REPLY out as unchanged (a mode, kept)
     // The modes the peer's next burst likely comes in (link.Station.expected_modes).
     std::vector<std::string> expected_modes() const;
     Bytes last_stream_;  // the control stream read_control read last

@@ -537,7 +537,6 @@ class Station:
     _peer_next: int | None = None
     _repeated: bool = False
     _asked_dup: bool = False  # my latest burst carried T_DUPCTL
-    _peer_omits: bool = False  # the peer has left T_REPLY out as unchanged (a mode, kept)
     _asked: tuple = (None, None)  # my latest build's recommendations as the peer has them: its data mode, its reply modes
     _last_stream: bytes = b""  # the control stream _read_control read last
     _primed_ctl: bool = False  # ... and only a primed retry read it
@@ -1086,7 +1085,6 @@ class Station:
             # without T_REPLY: keep the previous reply recommendation (docs/arq.md §8a)
             if F.T_REPLY not in ext:
                 self.peer_reply_recommend = reply_was
-                self._peer_omits |= reply_was is not None
             abandoned = self._take_abandon(rx, ext)
             slots, n_dec, n_old, delivered = self._take_data(rx, core, ext, dup, acted)
         except ProtocolError as e:
@@ -1235,13 +1233,13 @@ class Station:
         for data, pair in kinds:
             base = list(self._variants(data, rx.n_cw, ctl_slots, pair))
             # then the same with T_DUPCTL the other way (the peer's outcome model
-            # asks for it, or stops), with T_REPLY's recommendation unknown, and
-            # T_REPLY the other ways a peer that keeps it sends it
+            # asks for it, or stops), then T_REPLY the other ways it can be sent
             dupctl = (F.T_DUPCTL, b"", b"")
             ways = (base + [(c, [t for t in e if t[0] != F.T_DUPCTL] if dupctl in e else e + [dupctl]) for c, e in base]
-                    + [(c, [(t, v, b"\xc0") if t == F.T_REPLY and v else (t, v, m) for t, v, m in e]) for c, e in base
-                       if any(t == F.T_REPLY and v for t, v, _ in e)]
                     + self._reply_changes(base))
+            if not self._peer_ctl:
+                # first ARQ burst with neither T_REPLY nor T_DUPCTL (e.g. reply=None, want_dup=False)
+                ways += [(c, [t for t in e if t[0] not in (F.T_REPLY, F.T_DUPCTL)]) for c, e in base]
             for core, ext in ways:
                 # an OFDM control-only burst is its control: n_cw codewords, the
                 # last ones maybe all padding (build reserves room for data it may not send)
@@ -1258,16 +1256,18 @@ class Station:
 
     def _reply_changes(self, ways: list) -> list:
         """Each way with T_REPLY the other ways it can be: left out (unchanged),
-        said (its value unknown), or none (empty). After T_DUPCTL's and the
-        value-unknown ways, as they are no likelier."""
-        forms = [None, (F.T_REPLY, b"\0", b"\xc0"), (F.T_REPLY, b"", b"")]
+        said (its value unknown), or none (empty, only when the peer currently
+        holds a reply recommendation). After T_DUPCTL's ways."""
+        forms = [None, (F.T_REPLY, b"\0", b"\xc0")]
+        if self.peer_reply_recommend is not None:
+            forms.append((F.T_REPLY, b"", b""))
         out = []
         for c, e in ways:
             rest = [t for t in e if t[0] != F.T_REPLY]
             have = next(((t, bool(v)) for t, v, _ in e if t == F.T_REPLY), None)
             for f in forms:
                 if (f is None and have is None) or (f is not None and have == (f[0], bool(f[1]))):
-                    continue  # the way itself (a said value: its unknown-value way)
+                    continue  # the way itself
                 out.append((c, rest + [f] * (f is not None)))
         return out
 
@@ -1300,10 +1300,9 @@ class Station:
             recommend=(0, 0),
             size_hint=(self.peer_size_hint, 3 if base else 0))
         common = [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_CHAT, F.T_DUPCTL) if t in pe]
-        # T_REPLY, a recommendation: as last time (80% of them at the floor; its
-        # bits sit on weak polar positions, where 6 unknown cost 1-2 dB). Once the
-        # peer omits it as unchanged, leave it out; the other ways come last (_reply_changes)
-        common += [(t, pe[t], b"\xff" * len(pe[t])) for t in (F.T_REPLY,) if t in pe and not self._peer_omits]
+        # T_REPLY is kept unconditionally across bursts (docs/arq.md §8a), so once
+        # any peer control has been read (`base`), expect T_REPLY omitted (unchanged)
+        # first; a changed or cleared T_REPLY comes from _reply_changes.
         common += [(t, pe[t], bytes(len(pe[t]))) for t in (F.T_BUFFER,) if t in pe]
         if not base:  # its first ARQ burst: the gear shifter's (T_REPLY, T_DUPCTL)
             common = [(F.T_REPLY, b"\0", b"\xc0"), (F.T_DUPCTL, b"", b"")]

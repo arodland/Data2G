@@ -150,14 +150,16 @@ for Data2G).
       the one before), `cum` (my `next` if nothing of mine is outstanding, else the bits all
       of `[base, next]` agree on), reply-lost (0 unless my latest went again), K (data: from
       what my latest ACK reported missing), recommend unknown, size hint as last time.
-    - TLVs: the last control's `T_CHAT`, `T_DUPCTL`, `T_BUFFER` (value unknown) and
-      `T_REPLY` (value as last time: 80% of them at the floor); data: `T_NEW` at the
-      peer's next seq, `T_RV` sized for K (values unknown), `T_DRAINED` as last time.
-      Before any: the gear shifter's (`T_REPLY`, `T_DUPCTL`).
+    - TLVs: the last control's `T_CHAT`, `T_DUPCTL`, and `T_BUFFER` (value unknown), with
+      `T_REPLY` omitted as unchanged (kept unconditionally across bursts, §8a); data: `T_NEW`
+      at the peer's next seq, `T_RV` sized for K (values unknown), `T_DRAINED` as last time.
+      Before any peer control: the gear shifter's (`T_REPLY` value unknown, `T_DUPCTL`).
     - The ways it may differ, in order: what arrived of my data (everything; a gap with a
       1-byte bitmap; a gap without), K and K+1 and 0 resends, then each with `T_DUPCTL` the
-      other way, then with `T_REPLY` unknown. A callee whose header matches the caller's
-      last burst tries that burst's control second (the caller repeated: my reply was lost).
+      other way, then `T_REPLY` changed (value unknown) or cleared (empty, only when the peer
+      currently holds a reply recommendation). Before any peer control, the bare form without
+      `T_REPLY` or `T_DUPCTL` is also tried. A callee whose header matches the caller's last
+      burst tries that burst's control second (the caller repeated: my reply was lost).
   - Hit rates at the floor cells (shift+cpm sessions, the hypothesis' known bits all right):
     80-94% of controls within 9 tries, 76-81% within 6.
   - Accepted only if the masked CRC passes on one of the polar list's first

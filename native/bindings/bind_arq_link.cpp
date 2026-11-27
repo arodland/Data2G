@@ -522,7 +522,6 @@ void bind_arq_link(py::module_& m) {
              py::arg("max_misses") = LINK_LOST_MISSES, py::arg("cap") = 2, py::arg("chat") = false, py::arg("nod") = false,
              py::arg("nod_peer") = false)
         .def_readwrite("nod", &Station::nod)
-        .def_readonly("_peer_omits", &Station::peer_omits_)
         .def("_said", [](const Station& s, std::int64_t bn) -> py::object {
             const int v = s.said(bn);
             return v == REPLY_NONE ? py::object(py::none()) : py::object(py::int_(v));
