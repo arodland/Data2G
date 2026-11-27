@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "dsp/dsp.hpp"
 #include "waveform/dsp.hpp"
@@ -42,7 +44,7 @@ std::optional<Rx> receive_any(std::span<const double> y, int64_t lead,
     std::vector<std::string_view> grids;
     if (cpm_grids) grids = *cpm_grids;
     else
-        for (const auto& g : tables::CPM_GRIDS) grids.push_back(g.name);
+        for (const auto* g : cpm::grids()) grids.push_back(g->name);
     std::vector<std::string_view> all_bands;
     for (const auto& b : config::BANDS) all_bands.push_back(b.name);
     const int64_t head = lead + search_span(all_bands, grids);
@@ -199,7 +201,13 @@ void Receiver::reset() {
     decided_.clear();
     decided_mid_.clear();
     coarse_.clear();
-    for (const auto* g : grids_) coarse_.emplace(g->name, cpm::CoarseTrack(*g));
+    // each grid's search rows; a wide grid's from the on-air grid of its tones
+    for (std::size_t i = 0; i < grids_.size(); ++i) {
+        cpm::CoarseTrack* src = nullptr;
+        for (std::size_t j = 0; j < i && !src; ++j)
+            if (cpm::shares_rows(*grids_[i], *grids_[j])) src = &coarse_.at(grids_[j]->name);
+        coarse_.emplace(grids_[i]->name, cpm::CoarseTrack(*grids_[i], 150.0, src));
+    }
     cpm_wait_.clear();
     expected_.reset();
     for (auto& d : detectors_) {

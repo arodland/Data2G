@@ -104,13 +104,14 @@ std::vector<Spec> build_specs() {
         v.push_back({s.name, s.code == "polar", s.k, s.coded_bits, s.bits_per_cu, s.crc_bits, s.payload_bytes,
                      tables::FORMATS[i].perm, tables::FORMATS[i].info_pos});
     }
-    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL, tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL})
         for (const auto& s : table) {
             const bool polar = s.code == "polar";
             const int crc = crc_bits(s);
             int bits = 0;
-            for (const auto& g : tables::CPM_GRIDS)
-                if (g.name == s.grid) bits = g.bits;
+            for (auto grids : {tables::CPM_GRIDS, tables::CPM_WIDE_GRIDS})
+                for (const auto& g : grids)
+                    if (g.name == s.grid) bits = g.bits;
             v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, payload_bytes(s), s.perm,
                          polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{},
                          s.code == "gf" ? &s.gf : nullptr});
@@ -275,15 +276,15 @@ const Spec* spec(std::string_view name) {
 const Spec& spec(const config::Submode& s) { return specs().at(config::row(s)); }
 
 const Spec& spec(const tables::CpmSpec& s) {
-    // specs() is SUBMODES, then CPM_SPECS, then CPM_CTL
+    // specs() is SUBMODES, then CPM_SPECS, CPM_CTL, CPM_WIDE_SPECS, CPM_WIDE_CTL
     const std::less<const tables::CpmSpec*> lt;
     std::size_t at = config::SUBMODES.size();
-    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL}) {
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL, tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL}) {
         if (!lt(&s, table.data()) && lt(&s, table.data() + table.size()))
             return specs()[at + static_cast<std::size_t>(&s - table.data())];
         at += table.size();
     }
-    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_SPECS or CPM_CTL row");
+    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_* spec row");
 }
 
 const gfldpc::Code& gf_code(const Spec& s) {

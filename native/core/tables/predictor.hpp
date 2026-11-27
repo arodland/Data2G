@@ -54,6 +54,7 @@ struct ModePeak {
     double db[3];
 };
 extern const std::span<const ModePeak> MODE_PEAK_DB;
+extern const std::span<const ModePeak> MODE_PEAK_DB_WIDE;  // the wide-bin grids' modes (generated/cpm_wide.cpp)
 extern const std::span<const std::string_view> OUTCOME_MODES, OUTCOME_BANDS;
 // The data ladder's robustness order (data2g/arq/policy.py MODE_THRESHOLDS):
 // per mode, its 10% codeword failure SNR (dB) on awgn, mpg, mpp, mpd.

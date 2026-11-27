@@ -25,7 +25,7 @@ def test_500hz_cap_only_narrow_modes():
     from data2g import config
 
     # FM: n10 alone (no n4, no CPM: plan Q2)
-    assert {s.band for s in G.allowed(0)} == ({"n10"} if config.PROFILE == "fm" else {"n10", "n4", "c16r25", "c8r50"})
+    assert {s.band for s in G.allowed(0)} == ({"n10"} if config.PROFILE == "fm" else {"n10", "n4", "c16r25", "c8r50", "c8w50"})
     assert G.FALLBACK[0] in {s.name for s in G.allowed(0)} and G.CONNECT[0] in {s.name for s in G.allowed(0)}
 
 

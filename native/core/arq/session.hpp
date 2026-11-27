@@ -25,7 +25,7 @@ namespace data2g::arq {
 inline constexpr int VERSION = 1;
 inline constexpr int MIN_VERSION = 1;
 inline constexpr int MAX_VERSION = 1;
-inline constexpr int CONNECT_TRIES = 6;  // session.py: the last in ROBUST_FAST
+inline constexpr int CONNECT_TRIES = 6;  // session.py: cap's connect mode, then RRRWW retries
 inline constexpr int DISC_TRIES = 3;
 // DISC tries stop within this of the first one keyed: BPQ32's ABORT comes 30 s after its DISCONNECT (session.py)
 inline constexpr double DISC_BUDGET_S = 29.0;
