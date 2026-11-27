@@ -78,7 +78,8 @@ int main() {
         arq::GearShifter w;
         w.observe(clean(-13.8, 24), "fsk16r25-r1/2", 0.0);
         arq::StationView wide;
-        check::equal(std::string(arq::decode(w.recommend(wide).data)->name), std::string("fsk32r62-r1/2"), "unbounded");
+        const auto* u = arq::decode(w.recommend(wide).data);
+        check::is_true(u && u->name.substr(0, 8) == "fsk32r62", "unbounded");
         arq::GearPolicy p;
         p.shifter.observe(clean(-13.8, 24), "fsk16r25-r1/2", 0.0);
         p.robust_started();

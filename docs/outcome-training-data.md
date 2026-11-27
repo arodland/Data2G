@@ -101,7 +101,14 @@ the same `--first` seeds draw other kinds after it.
 | `session_data_spr4_fastlow.csv` | `--fastlow`, as spr3 | fastlow | same | 9f2314e | |
 | `session_data_spr4_floor.csv` | `--floor`, as spr3 | floor | same | 9f2314e | |
 | `session_data_spr5_sev.csv` | `--severe`, as spr3 (`runs/spr5_chain.sh`) | severe | same | 54f4c62 (+ #244: Doppler spill in the CPM tone metric; fsk16r25 locks on 30 Hz) | the spr5 students' severe set (the fix changes nothing else measurable, so spr4's other sets stand) |
-| `session_data_<round>_short.csv` (available, not generated yet) | `--short --sessions 800`, the round's next free `--first` | AWGN 40%, MPG 30%, else Doppler 0.01-0.1 Hz; 0..15 dB drifting; linksim's chat or winlink workload (half each), 300 s | the round's | (#261) | on-air rows sit at snr_est 5..15, spread_est < 0.1 with ack replies measured on short bursts (22% of real rows; 4.1% of the spr4/spr5 session rows, mostly measured on 70-80 frame bulk bursts) |
+| `session_data_next.csv` | `with_native session_data --agc --sessions 2900 --first 19000000` (`runs/next_retrain/next_round.sh`), `DATA2G_SPREAD_CARRY=1` | regular + AGC (#257) | `steer_next.npz` (sprs46f redescribed with zero-shot rows for `fsk8w50-r1/3`, `fsk8w50-r1/2`, `fsk32r62-r2/3`), offsets as shipped, Python shifter | 4d210db (`next` post-#306/#307/#337/#341/#343: scattered pilots, c8w50, fsk32r62-r2/3, flat rec table, pending header) | full retrain on `next` (8 bands, 53 modes; 137,246 rows) |
+| `session_data_next_slow.csv` | `--slow --agc --sessions 800 --first 19100000` (same) | slow + AGC | same | 4d210db | 70,176 rows |
+| `session_data_next_high.csv` | `--high --agc --sessions 1200 --first 19200000` (same) | high + AGC | same | 4d210db | 58,621 rows |
+| `session_data_next_awgnhigh.csv` | `--high --kinds awgn --agc --sessions 400 --first 19300000` (same) | high AWGN + AGC | same | 4d210db | 19,453 rows |
+| `session_data_next_fastlow.csv` | `--fastlow --agc --sessions 1200 --first 19400000` (same) | fastlow + AGC | same | 4d210db | 120,891 rows |
+| `session_data_next_floor.csv` | `--floor --agc --sessions 3000 --first 19500000` (same) | floor + AGC | same | 4d210db | 161,059 rows |
+| `session_data_next_sev.csv` | `--severe --agc --sessions 2000 --first 19700000` (same) | severe + AGC | same | 4d210db | 68,712 rows |
+| `session_data_next_short.csv` | `--short --agc --sessions 800 --first 19800000` (same) | short chat/winlink + AGC (#261) | same | 4d210db | 31,167 rows |
 
 **Sizing `--short`.** A 100-session pilot (seeds 18000000-18000099, 2.6 min on 4 workers, peak RSS 0.3 GB) gave
 37.5 rows per session, 38% of them in that cell: median 4 frames measured and 1.05 s per burst (on air 4 and 1.05 s;
@@ -145,6 +152,8 @@ sent at the same moment; one row per candidate.
 | `outcome_data_general_spr.csv` | `with_native outcome_data --samples 40000 --first 17600000` (`runs/spr_round.sh`) | none | abdbef3 | the general set on the lag-fit CPM spread_est |
 | `outcome_data_general_spr3.csv` | as `outcome_data_general_spr.csv` (same seeds; `runs/spr3`) | none | 4af9731 | the general set on the fixed estimator and GF decoder |
 | `outcome_data_general_spr4.csv` | as spr3 (same seeds; `runs/spr4`) | none | 9f2314e | the spr5 students' offline set |
+| `outcome_data_general_next.csv` | `with_native outcome_data --samples 40000 --first 19600000` (`runs/next_retrain/next_round.sh`) | none | 4d210db | general offline set on `next` (scattered pilots + c8w50 + fsk32r62-r2/3; 158,936 rows) |
+| `outcome_data_n10top_next.csv` | `with_native outcome_data --cands n10-64l-r3/4,n10-256l-r3/4 --samples 8000 --first 19900000` (same) | none | 4d210db | top n10 modes on scattered pilots (31,984 rows) |
 
 ## Mixes
 
@@ -218,3 +227,18 @@ sent at the same moment; one row per candidate.
   -14 +4..+10%, mpd -13 +3%; OFDM and high cells within 0.7%. cohc0 and cohca lost mpp -6 -9% (SE 3.7) on the
   first set (the cord trap: CPM targets above -4 dB); cohc4 +3% / +0.9% there. Open: mpd -17 -22% (SE 11.5) /
   -8% (SE 7.8), mpp -16 +8% / -5%: noise-level at 7-14 bps.
+- **nextle12 / nextd_lcb025 (installed on `next`; CNP):** full 8-band, 53-mode retrain on `next` (`runs/next_retrain/next_round.sh`,
+  `next_judge.sh`, `next_confirm.sh`; 858,245 rows across the 8 `--agc` session sets including `--short` plus both
+  offline sets, covering scattered pilots #337, `c8w50` #306, `fsk32r62-r2/3` #307, flat recommendation table #341,
+  and pending headers #343). `nextle12`: twelve CNPs on the outcomes (`--labels`, seeds 1-12, 60 epochs; best val
+  1.153-1.163, held-out test 1.183-1.198). `nextd_lcb025`: single 53-mode, 8-band CNP (`secs_col=28`, `desc` 25 dims)
+  distilled 40 epochs from `nextle12` at `DATA2G_OUTCOME_LCB=0.25` (held-out mean `|dP|` 0.0023, max 0.0032). Against
+  installed `sprs46f` on `next` (PEP 5, 24 seeds × 600 s per cell, `shift+cpm`):
+  - Selection seeds `2000..2023` (36 cells, 2400 Hz cap): mean +20.90% (median +2.26%), 21 wins >1%, 4 dips <-1%
+    (vs. `lcb05` +20.46% with 9 dips; `lcb025` eliminated `lcb05`'s dips at `awgn:4` -0.1%, `awgn:-18` +0.6%, `nvis-d:20` +0.7%).
+  - Confirmation on untouched seeds `3000..3023` (36 cells, 2400 Hz cap): mean +20.21% (median +4.09%), 23 wins >1%:
+    `lowlat-d` 0/10/20 +41%/+147%/+193%, `hilat-m` +9%/+59%/+98%, `hilat-d` +46%/+31%/+17%, `nvis-d:0` +12%,
+    `mpd:20` +17%, `mpp:-6` +9%, `awgn:-14` +21%, `awgn:-8` +13%, `mpg:-8` +13%, `mpp:-8` +6%, `mpd:-13` +5%, `mpp:-14` +4.5%.
+    Only dips >2 SE: `awgn:20` -2.7% (±0.4%) and `awgn:-18` -7.2% (±2.7%).
+  - Confirmation on untouched seeds `4000..4023` (18 cells, 500 Hz cap): mean +1.44% (median +0.35%):
+    `lowlat-d` 0/10 +12%/+16%, `hilat-d` +4%/+3%, `mpd:0` +10%, `awgn:10` +3%, `awgn:20` +0.5%.

@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 import torch
 
-from data2g import codes, constellation
+from data2g import codes, constellation, cpm
 from data2g.arq import policy as G
 from data2g.arq import predictor as P
 from data2g.config import BANDS, SUBMODES
@@ -50,14 +50,15 @@ def legacy_cpm_spread(x: np.ndarray, rows: list) -> np.ndarray:
     return x
 
 
-def descriptor(name: str) -> list:
+def descriptor(name: str, bands=None) -> list:
     """What the query head knows of a mode."""
     s = SD.MODES[name]
     th = G.MODE_THRESHOLDS[name]
     d = [min(t, NEVER_DB) / 10 for t in th] + [float(t >= 90) for t in th]
     is_cpm = name not in SUBMODES
     if is_cpm:
-        tones, rate = int(s.grid[1:].split("r")[0]), float(s.grid.split("r")[1])
+        g = cpm.GRIDS[s.grid]
+        tones, rate = g.m, g.baud
         bits, nc = np.log2(tones), 0.0
         band = s.grid
     else:
@@ -65,7 +66,7 @@ def descriptor(name: str) -> list:
         tones, rate, band = 0, 0.0, s.band
     d += [s.k / s.coded_bits, bits / 8, np.log2(codes.payload_bytes(s)), s.frames_per_cw / 16, nc / 48, float(is_cpm),
           np.log2(1 + tones) / 6, rate / 100, float("ack" in name or "polar" in name)]
-    d += [float(band == b) for b in T.BANDS]
+    d += [float(band == b) for b in (T.BANDS if bands is None else bands)]
     return d
 
 
@@ -87,7 +88,15 @@ class CNP(torch.nn.Module):
         return self.head(q)
 
 
-SECS_COL = 27  # outcome_inputs' log2(seconds) column (after gap); the encoder gets the rest
+def _secs_col(bands=T.BANDS) -> int:
+    """outcome_inputs' log2(seconds) column (after gap); shifts if BANDS grows."""
+    m = dict({k: 0.0 for k in T.MEAS}, frames=16.0)
+    x = P.outcome_inputs(m, bands[0], 0.123, 7.654, None, bands, energy=True)
+    (c,) = np.flatnonzero(np.isclose(x, np.log2(7.654)))
+    return int(c)
+
+
+SECS_COL = _secs_col()  # outcome_inputs' log2(seconds) column (after gap); the encoder gets the rest
 
 
 def train_labels(a):
@@ -95,6 +104,7 @@ def train_labels(a):
     (train_outcome's loss: the burst's usability, its codewords binomial),
     early stopping on held-out sessions."""
     x, mode, bok, dsent, dok, rows, bmask = T.load(a.data, energy=True)
+    assert np.allclose(x[:200, SECS_COL], [np.log2(float(r["cand_seconds"])) for r in rows[:200]])
     secs = x[:, SECS_COL].copy()
     xe = np.delete(x, SECS_COL, axis=1)
     desc = np.array([descriptor(m) for m in T.MODES], dtype=np.float64)
@@ -158,11 +168,12 @@ def redescribe(src: str, out: str, add=()):
     d = dict(np.load(src))
     assert str(d["kind"]) == "cnp", src
     modes = [str(m) for m in d["modes"]]
-    new = np.array([descriptor(m) for m in modes], dtype=d["desc"].dtype)
+    bands = tuple(str(b) for b in d["bands"])
+    new = np.array([descriptor(m, bands) for m in modes], dtype=d["desc"].dtype)
     print("changed:", [m for m, a, b in zip(modes, new, d["desc"]) if not np.array_equal(a, b)])
     add = [m for m in add if m not in modes]
     if add:
-        new = np.concatenate([new, np.array([descriptor(m) for m in add], dtype=new.dtype)])
+        new = np.concatenate([new, np.array([descriptor(m, bands) for m in add], dtype=new.dtype)])
         d["modes"] = np.array(modes + add)
         print("added:", add)
     np.savez(out, **dict(d, desc=new))

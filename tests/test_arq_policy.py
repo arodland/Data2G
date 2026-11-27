@@ -235,14 +235,15 @@ def test_a_robust_start_bounds_the_first_data_request():
             g.robust_started()
         return g, G.decode(g.recommend(station(2))[0])
 
-    assert first(-13.8, False)[1] == "fsk32r62-r1/2"
+    assert first(-13.8, False)[1].startswith("fsk32r62")
     g, mode = first(-13.8, True)
     assert mode.startswith("fsk16r25") and g.want_dup
     assert G.MODE_THRESHOLDS[mode][0] <= -13.8 + G.ROBUST_START_DATA_MARGIN_DB
     assert first(-12.0, True)[1].startswith("fsk8r50")  # the margin moves with the reading
-    assert first(-9.0, True)[1] == first(-9.0, False)[1] == "fsk32r62-r1/2"
+    assert first(-9.0, True)[1] == first(-9.0, False)[1] and first(-9.0, True)[1].startswith("fsk32r62")
     g.outcome(mode, 0, 1, usable=False)  # a data burst lost: still bounded
-    assert g.start_bound and G.decode(g.recommend(station(2))[0]).startswith("fsk16r25")
+    m2 = G.decode(g.recommend(station(2))[0])
+    assert g.start_bound and G.MODE_THRESHOLDS[m2][0] <= -13.8 + G.ROBUST_START_DATA_MARGIN_DB
     g.outcome(mode, 1, 1, usable=True)  # one usable: the model's own from here
     assert not g.start_bound
     g.observe(measured(-22.0, 0.0), G.ROBUST_CONNECT, 9.0)  # under every threshold: the most robust there is

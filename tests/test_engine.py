@@ -257,8 +257,10 @@ def test_vara_commands_drive_a_session(tmp_path):
         pump()
         return bytes(b.out_data) == b"hello from W1AW"
     assert link(a.engine, b.engine, 12, 120, got, seed=4)
-    b.command("SN")  # the last of W1AW's bursts: the link's 12 dB
-    assert b.out_cmd[-1].startswith("SN ") and abs(float(b.out_cmd[-1].split()[1]) - 12) < 3
+    b.command("SN")  # the last of W1AW's bursts: link()'s 12 dB adjusted for full_scale's envelope peak (HF g=2.2)
+    last_tx = [json.loads(line)["submode"] for line in open(tmp_path / "a" / "events.jsonl") if '"kind": "tx"' in line][-1]
+    expected_snr = 12 + (20 * np.log10(2.2) - (PHY.peak_db(last_tx, 0) + 10 * np.log10(2)) if PROFILE == "hf" else 0.0)
+    assert b.out_cmd[-1].startswith("SN ") and abs(float(b.out_cmd[-1].split()[1]) - expected_snr) < 3
     a.command("DATA2G ON")  # DISCONNECTED says why
     b.command("DATA2G ON")
     a.command("DISCONNECT")
