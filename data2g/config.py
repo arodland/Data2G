@@ -71,6 +71,11 @@ assert FCENTER * NSYM % FS == 0, "FCENTER * NSYM must be a multiple of FS"
 assert (CARRIER0 + FCENTER) % RS == 0, "CARRIER0 + FCENTER must be a multiple of RS"
 
 SYMS_PER_FRAME = int(os.environ.get("DATA2G_SYMS_PER_FRAME", 6))  # 1 pilot + 5 data (env: studies only, scripts/fm_pilot_study.py)
+# HF scattered pilots (6-symbol frames): wide bands (w, w48) carry frame-staggered
+# intra-frame combs (fk3d2: nc/3 pilots on symbols 0, 2, 4, comb fa % 3); narrow bands
+# (n10, n4) carry one pilot per carrier per frame (gold). FM (12-symbol frames) keeps
+# whole pilot rows.
+SC_BANDS = ("w", "w48", "n10", "n4") if (PROFILE == "hf" and SYMS_PER_FRAME == 6) else ()
 DATA_SYMS_PER_FRAME = SYMS_PER_FRAME - 1
 FRAME_SAMPLES = SYMS_PER_FRAME * NSYM  # 1152 = 144 ms
 

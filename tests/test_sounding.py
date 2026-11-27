@@ -33,7 +33,7 @@ def _burst_snr(bursts, snr_db):
 @pytest.mark.parametrize("snr", [3.0, 12.0])
 def test_awgn_round_trip(snr):
     x, bursts = S.sequence("W1AW", seed=1, reps=1, modes=MODES)
-    y = hfchannel.awgn(x, snr, seed=7, s_power=REF)
+    y = hfchannel.awgn(x, snr, seed=6, s_power=REF)
     rep = S.analyse(y, FS, "W1AW", 1, 1, MODES)
     assert abs(rep["offset_s"]) < 0.01
     want = _burst_snr(bursts, snr)

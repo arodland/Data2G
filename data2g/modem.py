@@ -39,6 +39,7 @@ modem/timing.hpp (burst timing), generated/modem.hpp (the constants and
 header codes, written by tools/gen_native_tables.py).
 """
 
+import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -69,6 +70,7 @@ from .config import (
     PROFILE_TAG,
     PROTOCOL_VERSION,
     RS,
+    SC_BANDS,
     SNR_REF_BW_HZ,
     SUBMODES,
     SYMBOL_NOISE,
@@ -225,8 +227,125 @@ class Received(TypedDict):
 # --- burst timing (native: modem/timing.hpp) ----------------------------------
 
 def _hosts(band: str) -> bool:
-    """Whether other bands' frames follow this band's header."""
-    return any(b.sync == band for b in BANDS.values())
+    """Whether the header closes with a pilot of its own: other bands' frames
+    follow it, or frames without a pilot symbol (config.SC_BANDS)."""
+    return band in SC_BANDS or any(b.sync == band for b in BANDS.values())
+
+
+# Scattered pilots on HF 6-symbol OFDM bands (config.SC_BANDS):
+# - Wide bands (w, w48, nc >= 24): frame-staggered intra-frame combs (fk3d2: K=3, symbols 0/2/4, comb fa % 3)
+#   estimated by the Slepian-mode separable 2-D LMMSE.
+# - Narrow bands (n10, n4): one pilot per carrier per frame (gold: SC_STRIDES).
+# After each ACE clip pass, scattered pilots are restored onto their constellation points (SC_RESTORE_ACE = 1.0);
+# plain (non-ACE) modes keep pilots as clipped (0.0) to preserve PEP.
+SC_RESTORE_ACE = 1.0
+
+
+def sc_spec(spec, n_f: int) -> bool:
+    """Whether a burst of `n_f` data frames of this submode carries scattered pilots (the header says both)."""
+    return spec.band in SC_BANDS and n_f > 0
+
+
+SC_SPREADS_SLOW = (0.1, 0.25, 0.5, 1.0, 1.5)
+SC_LOO_TOL = 0.1
+SC_COPY_SUBBINS = 5
+
+
+def sc_cells(nc: int) -> tuple:
+    """A scattered-pilot frame's (6, nc) cells, flat: (the pilots', their
+    carriers, the data cells' in sending order, per carrier its pilot's).
+    Used on narrow bands (n10, n4) whose gold mask repeats every frame."""
+    return _sc_cells(nc)
+
+
+def _sc_intra_spec(nc: int) -> tuple[int, tuple[int, ...], int] | None:
+    """Intra-frame comb layout on wide bands (nc >= 24, fk3d2): (carrier stride K,
+    pilot symbols in a frame, frame period in combs); n10/n4 keep gold."""
+    if nc < 24:
+        return None
+    return 3, (0, 2, 4), 3
+
+
+def sc_period(nc: int) -> int:
+    """Period in data frames of the scattered-pilot cell mask."""
+    sp = _sc_intra_spec(nc)
+    return sp[2] if sp is not None else 1
+
+
+@lru_cache(maxsize=None)
+def _sc_frame_cells_cached(nc: int, f_mod: int) -> tuple:
+    sp = _sc_intra_spec(nc)
+    if sp is None:
+        P, PK, Dc, _ = _sc_cells(nc)
+        return P, PK, Dc
+    K, syms, n_combs = sp
+    N = SYMS_PER_FRAME * nc
+    sym, k = np.divmod(np.arange(N), nc)
+    c = f_mod % n_combs
+    pil = np.isin(sym, syms) & (k % K == c)
+    P = np.flatnonzero(pil)
+    assert len(P) == nc, (nc, len(P))
+    return P, k[P], np.flatnonzero(~pil)
+
+
+def sc_frame_cells(nc: int, f: int = 0) -> tuple:
+    """Data frame `f`'s (P, PK, Dc): `nc` pilot indices, their carriers, and `5 * nc` data indices."""
+    return _sc_frame_cells_cached(nc, f % sc_period(nc))
+
+
+SC_STRIDES = {24: 49, 48: 97, 10: 37, 4: 17}
+
+
+@lru_cache(maxsize=None)
+def _sc_cells(nc: int) -> tuple:
+    """Every gold-stride layout is the first nc terms of cell i * g mod 6 nc."""
+    N = SYMS_PER_FRAME * nc
+    _, k = np.divmod(np.arange(N), nc)
+    g = SC_STRIDES[nc]
+    pil = np.zeros(N, dtype=bool)
+    pil[np.arange(nc) * g % N] = True
+    P = np.flatnonzero(pil)
+    assert np.array_equal(np.sort(k[P]), np.arange(nc)), "a pilot layout must give each carrier one pilot a frame"
+    own = np.empty(nc, dtype=int)
+    own[k[P]] = P
+    return P, k[P], np.flatnonzero(~pil), own
+
+
+def copy_open(b) -> np.ndarray:
+    """The symbol opening a scattered-pilot band's header-copy frame: see copy_close."""
+    return np.conj(b.pilot)
+
+
+def copy_close(b) -> np.ndarray:
+    """The symbol opening and closing a scattered-pilot band's header-copy frame (this, the 4 header symbols,
+    this): the pilot's conjugate (the same envelope), not the pilot. With the pilot at both ends the frame was the
+    first header's own shape (the preamble's last repeat, the header, the header pilot), so a preamble hypothesis
+    two frames and a symbol early read the real header as its copy (0.96 on a clean burst; with conj(pilot) at
+    the close alone still 0.62, the open end's channel being right) and held the streaming receiver past the real
+    burst (tests/test_receiver.py false lock, seed 0). conj(pilot) correlates with the pilot at about
+    1 / sqrt(nc)."""
+    return np.conj(b.pilot)
+
+
+def _sc_pil(band: str, n_air: int, kc: int | None) -> np.ndarray | None:
+    """Per on-air frame (and the closing pilot) and pilot slot 0..nc-1, (symbol, carrier) when intra-frame comb,
+    or per-carrier symbol (n_air + 1, nc) for 1-pilot-per-carrier layouts; None on pilot-row bands."""
+    if band not in SC_BANDS:
+        return None
+    nc = BANDS[band].nc
+    if _sc_intra_spec(nc) is not None:
+        pil = np.zeros((n_air + 1, nc, 2), dtype=int)
+        pil[:, :, 1] = np.arange(nc)
+        for fa in range(n_air):
+            if fa != kc:
+                P, PK, _ = sc_frame_cells(nc, fa)
+                pil[fa, :, 0], pil[fa, :, 1] = P // nc, PK
+        return pil
+    pil = np.tile(sc_cells(nc)[3] // nc, (n_air + 1, 1))
+    pil[n_air] = 0
+    if kc is not None:
+        pil[kc] = 0
+    return pil
 
 
 def header_layout(band: str) -> np.ndarray:
@@ -475,6 +594,7 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec, tx_path: str | None = Non
     data = constellation.modulate(bits, pts).reshape(-1, DATA_SYMS_PER_FRAME, b.nc)
     x = burst_waveform(data, spec)
     project = None
+    closing = spec.ace
     if spec.ace:
         m = constellation.bits_per_symbol(pts)
         idx = (bits.reshape(-1, m) @ (1 << np.arange(m - 1, -1, -1))).reshape(data.shape)
@@ -490,7 +610,7 @@ def modulate_bits(bits: np.ndarray, spec: SubmodeSpec, tx_path: str | None = Non
     y = dsp.tx_condition(
         x, headroom, b.spec.clip_overshoot,
         active=slice(LEADIN_SAMPLES, len(x) - LEADOUT_SAMPLES), bandpass=BANDS[spec.sync_band].tx_bandpass,
-        project=project, closing=spec.ace,
+        project=project, closing=closing,
     )
     if not fm:
         return y
@@ -506,7 +626,7 @@ def ace_cells(spec: SubmodeSpec, n_f: int) -> tuple[np.ndarray, np.ndarray]:
     useful windows (n_f * 5, M), the whole symbols (n_f * 5, NSYM))."""
     kc = copy_frame(spec.sync_band, n_f)
     frames = [f for f in range(n_f + (kc is not None)) if f != kc]
-    j = np.array([f * SYMS_PER_FRAME + s for f in frames for s in range(1, SYMS_PER_FRAME)])
+    j = np.array([f * SYMS_PER_FRAME + s for f in frames for s in range(not sc_spec(spec, n_f), SYMS_PER_FRAME)])
     f0 = LEADIN_SAMPLES + BANDS[spec.sync_band].preamble_samples + header_samples(spec.sync_band)
     full = f0 + j[:, None] * NSYM + np.arange(NSYM)
     return full[:, NCP:], full
@@ -520,6 +640,22 @@ def ace_projector(spec: SubmodeSpec, data: np.ndarray, dirs: np.ndarray):
     b = ofdm.band(spec.band)
     win, full = ace_cells(spec, len(data))
     X, D = data.reshape(-1, b.nc), dirs.reshape(-1, b.nc, 2)
+    hold = None
+    if sc_spec(spec, len(data)):  # the pilots among the cells
+        n_f, per = len(data), sc_period(b.nc)
+        kc = copy_frame(spec.sync_band, n_f)
+        norm = np.array([f for f in range(n_f + (kc is not None)) if f != kc])
+        X6 = np.empty((n_f, SYMS_PER_FRAME * b.nc), dtype=np.complex128)
+        D6 = np.zeros(X6.shape + (2,), dtype=np.complex128)
+        hold = np.zeros(X6.shape, dtype=bool)
+        df, dr = data.reshape(n_f, -1), dirs.reshape(n_f, -1, 2)
+        for f_ in range(per):
+            idx = np.flatnonzero(norm % per == f_)
+            if len(idx):
+                P, PK, Dc = sc_frame_cells(b.nc, f_)
+                X6[idx[:, None], P], X6[idx[:, None], Dc] = b.pilot[PK], df[idx]
+                D6[idx[:, None], Dc], hold[idx[:, None], P] = dr[idx], True
+        X, D, hold = X6.reshape(-1, b.nc), D6.reshape(-1, b.nc, 2), hold.reshape(-1, b.nc)
     dem = b.mod[NCP:].conj()
 
     def project(x):
@@ -527,7 +663,10 @@ def ace_projector(spec: SubmodeSpec, data: np.ndarray, dirs: np.ndarray):
         # per carrier: the TX bandpass shapes the band edges, pilots included
         g = np.sum(X.conj() * got, axis=0).real / np.sum(np.abs(X) ** 2, axis=0)
         x = x.copy()
-        x[full] += np.real((constellation.ace_project(got, g * X, D) - got) @ b.mod.T)
+        fix = constellation.ace_project(got, g * X, D) - got if spec.ace else np.zeros_like(got)
+        if hold is not None and spec.ace:
+            fix[hold] = SC_RESTORE_ACE * (g * X - got)[hold]
+        x[full] += np.real(fix @ b.mod.T)
         return x
 
     return project
@@ -541,14 +680,31 @@ def burst_waveform(data: np.ndarray, spec: SubmodeSpec) -> np.ndarray:
     sb = ofdm.band(spec.sync_band)
     hdr = constellation.modulate(header_bits(spec.index, n_cw, spec.sync_band), QPSK)
     kc = copy_frame(spec.sync_band, n_f)
-    if kc is not None:  # the header copy: a frame of its own (data band = sync band here)
-        h = hdr.reshape(sb.spec.header_syms, sb.nc)
-        row = np.resize(h, (DATA_SYMS_PER_FRAME, sb.nc))  # the header, repeated to fill the frame
-        data = np.insert(data, kc, row, axis=0)
-        n_f += 1
-    syms = np.empty((n_f * SYMS_PER_FRAME + 1, b.nc), dtype=np.complex128)
-    syms[::SYMS_PER_FRAME] = b.pilot  # frame pilots and the closing pilot
-    syms[:-1].reshape(n_f, SYMS_PER_FRAME, b.nc)[:, 1:] = data
+    if sc_spec(spec, n_f):
+        per, df = sc_period(b.nc), data.reshape(n_f, -1)
+        norm = np.array([f for f in range(n_f + (kc is not None)) if f != kc])
+        fr = np.empty((n_f, SYMS_PER_FRAME * b.nc), dtype=np.complex128)
+        for f_ in range(per):
+            idx = np.flatnonzero(norm % per == f_)
+            if len(idx):
+                P, PK, Dc = sc_frame_cells(b.nc, f_)
+                fr[idx[:, None], P], fr[idx[:, None], Dc] = b.pilot[PK], df[idx]
+        fr = fr.reshape(n_f, SYMS_PER_FRAME, b.nc)
+        if kc is not None:  # the header copy's frame: copy_close, the 4 header symbols, copy_close
+            fr = np.insert(fr, kc, np.concatenate([copy_open(b)[None], hdr.reshape(-1, b.nc), copy_close(b)[None]]), axis=0)
+        syms = np.concatenate([fr.reshape(-1, b.nc), b.pilot[None]])
+    else:
+        if kc is not None:  # the header copy: a frame of its own (data band = sync band here)
+            h = hdr.reshape(sb.spec.header_syms, sb.nc)
+            # (a scattered-pilot band's copy frame ends on a pilot whatever the submode: _copy_llr)
+            row = np.concatenate([h, copy_close(sb)[None]]) if spec.band in SC_BANDS else np.resize(h, (DATA_SYMS_PER_FRAME, sb.nc))
+            data = np.insert(data, kc, row, axis=0)
+            n_f += 1
+        syms = np.empty((n_f * SYMS_PER_FRAME + 1, b.nc), dtype=np.complex128)
+        syms[::SYMS_PER_FRAME] = b.pilot  # frame pilots and the closing pilot
+        syms[:-1].reshape(n_f, SYMS_PER_FRAME, b.nc)[:, 1:] = data
+        if kc is not None and spec.band in SC_BANDS:
+            syms[kc * SYMS_PER_FRAME] = copy_open(b)  # a scattered-pilot band's copy frame, whatever the submode
     layout = header_layout(spec.sync_band)
     hsyms = np.empty((len(layout), sb.nc), dtype=np.complex128)
     hsyms[layout] = sb.pilot
@@ -617,6 +773,7 @@ def _find_slip(z: np.ndarray, p: int, n_left: int, prev: np.ndarray, b) -> int:
 def _demod_frames(
     z: np.ndarray, p: int, n_f: int, shift: int, phi_ref: float,
     steps_in: np.ndarray | None = None, band: str = "w", slips_in: np.ndarray | None = None,
+    pil: np.ndarray | None = None, close_at: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Demodulate n_f frames and the closing pilot, window moved `shift`
     samples later than nominal.
@@ -631,6 +788,11 @@ def _demod_frames(
     total, and each frame's slip. `steps_in` replays a previous run's
     steps instead of tracking (scripts/eq_floor.py's genie uses it), and
     `slips_in` its slips (searched for only when neither is given).
+    `close_at`: the header-copy frame of a scattered-pilot band, whose
+    first symbol is copy_close, not the pilot. `pil` (_sc_pil): scattered pilots. A frame's "pilot" is then each
+    carrier's own, from three symbols 48 ms apart; the drift is read
+    between a symbol's pilots (3 carriers apart), and slips are not
+    searched for.
     """
     b = ofdm.band(band)
     phi_ref = phi_ref + 2 * np.pi * RS * shift / FS  # the shift's own slope
@@ -638,7 +800,13 @@ def _demod_frames(
     raw = np.zeros((n_f + 1, SYMS_PER_FRAME, b.nc), dtype=np.complex128)
     steps = np.zeros(n_f + 1)
     slips = np.zeros(n_f + 1, dtype=np.int64)
-    search = steps_in is None and slips_in is None
+    search = steps_in is None and slips_in is None and pil is None
+    ar = np.arange(b.nc)
+    intra = pil is not None and pil.ndim == 3
+    if pil is not None and not intra:  # a symbol's neighbouring pilots: the drift's phase slope is read between them
+        row = pil[np.argmax(pil.any(axis=1))]
+        pr = [(a_, b_) for s in np.unique(row) for a_, b_ in zip(np.flatnonzero(row == s)[:-1], np.flatnonzero(row == s)[1:])]
+        k1, k2 = (np.array(v, dtype=int) for v in zip(*pr)) if pr else (np.zeros(0, int), np.zeros(0, int))
     tau_ema, powers, total = 0.0, [], 0
     for f in range(n_f + 1):
         n_s = SYMS_PER_FRAME if f < n_f else 1
@@ -658,10 +826,28 @@ def _demod_frames(
                 p += int(steps_in[f + 1] - steps_in[f])
             p += FRAME_SAMPLES
             continue
-        hf = raw[f, 0] / b.pilot
+        if intra:
+            ps, pk = pil[f, :, 0], pil[f, :, 1]
+            hf = raw[f, ps, pk] / (copy_open(b)[pk] if f == close_at else b.pilot[pk])
+        else:
+            hf = (raw[f, 0] if pil is None else raw[f, pil[f], ar]) / (copy_open(b) if f == close_at else b.pilot)
         powers.append(float(np.mean(np.abs(hf) ** 2)))
         if powers[-1] > 0.1 * np.median(powers):
-            d = np.angle(np.exp(1j * (_bin_phase_step(hf) - phi_ref)))
+            if intra and f != close_at and f < n_f:
+                acc, lags = 0j, []
+                for s in np.unique(ps):
+                    m = ps == s
+                    ks, hs = pk[m], hf[m]
+                    if len(ks) > 1:
+                        dk = ks[1:] - ks[:-1]
+                        acc += np.sum(hs[1:] * np.conj(hs[:-1]) * np.exp(-1j * dk * phi_ref))
+                        lags.extend(dk)
+                d = float(np.angle(acc) / np.mean(lags)) if lags else 0.0
+            elif pil is not None and not intra and pil[f].any():
+                d = (np.angle(np.sum(hf[k2] * np.conj(hf[k1]) * np.exp(-1j * (k2 - k1) * phi_ref))) / np.mean(k2 - k1)
+                     if len(k1) else 0.0)
+            else:
+                d = np.angle(np.exp(1j * (_bin_phase_step(hf) - phi_ref)))
             tau_ema += 0.02 * (-d * FS / (2 * np.pi * RS) - tau_ema)
             if abs(tau_ema) >= 2:
                 step = int(np.clip(round(tau_ema), -2, 2))
@@ -670,7 +856,15 @@ def _demod_frames(
                 tau_ema -= step
         p += FRAME_SAMPLES
     raw *= equalizer.time_shift_phase(steps, b.bb)[:, None, :]
-    return raw[:n_f], raw[:, 0] / b.pilot, steps, slips
+    if intra:
+        hp = raw[np.arange(n_f + 1)[:, None], pil[:, :, 0], pil[:, :, 1]] / b.pilot[pil[:, :, 1]]
+        if close_at is not None:
+            hp[close_at] *= b.pilot[pil[close_at, :, 1]] / copy_open(b)[pil[close_at, :, 1]]
+    else:
+        hp = (raw[:, 0] if pil is None else raw[np.arange(n_f + 1)[:, None], pil, ar]) / b.pilot
+        if close_at is not None:
+            hp[close_at] *= b.pilot / copy_open(b)
+    return raw[:n_f], hp, steps, slips
 
 
 def _read_header(z: np.ndarray, start: int, band: str = "w", accept: Accept | None = None) -> HeaderRead:
@@ -742,6 +936,11 @@ def _copy_llr(z: np.ndarray, p: int, band: str, n_hdr: int) -> np.ndarray | None
     if p + FRAME_SAMPLES + NSYM > len(z):
         return None
     win = [b.demod_window(z, p + s * NSYM + NCP, HEADER_BACKOFF) for s in range(SYMS_PER_FRAME + 1)]
+    if band in SC_BANDS:  # pilot, the header's 4 symbols, pilot
+        h0, h1 = win[0] / copy_open(b), win[5] / copy_close(b)
+        a = (np.arange(1, 5) / 5)[:, None]
+        ys = np.array(win[1:5])
+        return constellation.llr(ys, (1 - a) * h0 + a * h1, np.ones(ys.shape), QPSK)
     h0, h1 = win[0] / b.pilot, win[SYMS_PER_FRAME] / b.pilot
     a = (np.arange(1, SYMS_PER_FRAME) / SYMS_PER_FRAME)[:, None]
     ys, hs = np.array(win[1:SYMS_PER_FRAME]), (1 - a) * h0 + a * h1
@@ -891,13 +1090,72 @@ def pilot_coherence(x: np.ndarray, lock: Lock, n_max: int = 8, latest: bool = Fa
     hi = lock["p0"] + (f1 - 1) * FRAME_SAMPLES + 3 * NSYM
     z = dsp.freq_correct(dsp.to_baseband(np.asarray(x[lo:hi], dtype=np.float64)), lock["cfo"])
     y = [b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + NCP, DEMOD_BACKOFF) for f in range(f0, f1)]
+    kc = copy_frame(spec.sync_band, lock["n_cw"] * spec.frames_per_cw)
+    if spec.band in SC_BANDS and kc is not None and f0 <= kc < f1:
+        y[kc - f0] = y[kc - f0] * b.pilot / copy_open(b)  # its first symbol is copy_close
+    sc = sc_spec(spec, lock["n_cw"] * spec.frames_per_cw)
+    intra = _sc_intra_spec(b.nc) if sc else None
+    if intra is not None:
+        K, syms, _ = intra
+        ds = syms[1] - syms[0]
+        # pair ds-spaced pilot symbols within each frame (and into full-row copy/closing frames), grouped to ~nc cells
+        segs = []
+        a_lag = np.zeros(b.nc - K, dtype=np.complex128)
+        for fa in range(f0, f1):
+            p_fa = lock["p0"] - lo + fa * FRAME_SAMPLES
+            if fa in (kc, total - 1):
+                ref = copy_open(b) if fa == kc else b.pilot
+                h0 = b.demod_window(z, p_fa + NCP, DEMOD_BACKOFF) / ref
+                segs.append((fa * SYMS_PER_FRAME, np.arange(b.nc), h0))
+                a_lag += h0[K:] * np.conj(h0[:-K])
+            else:
+                _, PK, _ = sc_frame_cells(b.nc, fa)
+                ks = PK[: b.nc // K]
+                for s_ in syms:
+                    hs = b.demod_window(z, p_fa + s_ * NSYM + NCP, DEMOD_BACKOFF)[ks] / b.pilot[ks]
+                    segs.append((fa * SYMS_PER_FRAME + s_, ks, hs))
+                    if len(ks) > 1:
+                        a_lag[ks[:-1]] += hs[1:] * np.conj(hs[:-1])
+        pairs = []
+        for idx in range(1, len(segs)):
+            s0, k0, h0 = segs[idx - 1]
+            s1, k1, h1 = segs[idx]
+            if s1 - s0 == ds:
+                common, i0, i1 = np.intersect1d(k0, k1, return_indices=True)
+                if len(common):
+                    pairs.append((h0[i0], h1[i1]))
+        if not pairs:
+            return ([], 0.0) if pattern else []
+        # group K consecutive comb-pairs so each coherence reading spans ~nc cells (noise floor matches PILOT_NOISE)
+        grp = min(K, len(pairs))
+        c = []
+        for g0 in range(max(1, len(pairs) - grp + 1)):
+            u = np.concatenate([pairs[j][0] for j in range(g0, g0 + grp)])
+            v = np.concatenate([pairs[j][1] for j in range(g0, g0 + grp)])
+            c.append(float(np.abs(np.vdot(u, v)) / (np.linalg.norm(u) * np.linalg.norm(v) + 1e-30)))
+        if not pattern:
+            return c
+        act = np.abs(a_lag) > 0
+        if act.any():
+            aa = a_lag[act]
+            return c, float(np.abs(np.sum(aa / np.abs(aa))) / len(aa))
+        return c, 0.0
+    if sc:  # each carrier's own pilot (symbols 0, 2, 4), but the copy's frame and the closing pilot
+        kc = copy_frame(spec.sync_band, lock["n_cw"] * spec.frames_per_cw)
+        for i, f in enumerate(range(f0, f1)):
+            if f not in (kc, total - 1):
+                at = sc_cells(b.nc)[3] // b.nc
+                for j in np.unique(at[at > 0]):
+                    y[i][at == j] = b.demod_window(z, lock["p0"] - lo + f * FRAME_SAMPLES + j * NSYM + NCP,
+                                                   DEMOD_BACKOFF)[at == j]
     c = [float(np.abs(np.sum(y[f] * np.conj(y[f - 1])))
                / (np.sqrt(np.sum(np.abs(y[f]) ** 2) * np.sum(np.abs(y[f - 1]) ** 2)) + 1e-30))
          for f in range(1, len(y))]
     if not pattern:
         return c
     zs = [v * np.conj(b.pilot) for v in y]
-    a = sum(z[1:] * np.conj(z[:-1]) for z in zs)
+    lag = 3 if sc and _sc_combs(b.nc) else 1  # k3d2: neighbours in one symbol's comb
+    a = sum(z[lag:] * np.conj(z[:-lag]) for z in zs)
     return c, float(np.abs(np.sum(a / (np.abs(a) + 1e-30))) / len(a))
 
 
@@ -925,7 +1183,8 @@ COPY_DETECT = 14.0
 
 
 def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndarray | None = None,
-              level: float | None = None, D: np.ndarray | None = None, fold: np.ndarray | None = None) -> Lock | None:
+              level: float | None = None, D: np.ndarray | None = None, fold: np.ndarray | None = None,
+              comb: bool | None = None, decim: int = 1, row_level: np.ndarray | None = None) -> Lock | None:
     """A burst in real audio `x` found from its frame pilots and header copy
     alone (the preamble and first header lost): a Lock with "copy" (what
     receive() needs to rebuild the header), or None. The burst
@@ -934,6 +1193,8 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     stream has them; computed here otherwise. `D`: their pair_products
     (StreamDetector.products_from), instead of C. `fold`: step 1's fold of
     D's whole frames, if kept running (FoldTrack.fold, rolled to D's start).
+    `row_level`: an intra-frame comb layout's noise level per CFO bin
+    (CombStream.row_levels; computed here otherwise), for _copy_row_weights.
 
     1. The matched filter's outputs one frame apart, correlated as the
        preamble's are one repeat apart (the frame pilot is the preamble's
@@ -952,20 +1213,50 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
        is coherent too)."""
     if (C is not None or D is not None) and level is None:
         raise ValueError("find_copy: C or D needs its noise level")
+    if comb is None and band in SC_BANDS:
+        if band not in HEADER_COPY_BANDS:  # no copy to find: _copy_llr reads a copy band's frame
+            find_copy.peak = 0.0
+            return None
+        return find_copy(x, band, accept, comb=True)
     b = ofdm.band(band)
     z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     freqs = _sync.cfo_grid()
+    intra = _sc_intra_spec(b.nc) if comb else None
+    cfo_lag = (intra[1][1] - intra[1][0]) * NSYM if intra is not None else FRAME_SAMPLES
+    if comb and D is not None:  # a stream's (CombStream)
+        freqs = _intra_freqs(intra[2]) if intra is not None else _comb_freqs()
+    if comb and D is None:
+        Cs = [(j, _sync.repeat_corrs(z0, t, list(freqs))) for j, t in _comb_filters(band)]
+        if intra is not None:
+            freqs = _intra_freqs(intra[2])
+            P1, level = _intra_frame_prods(Cs, intra, 0)
+            row_level = np.min([np.quantile(np.abs(Cc) ** 2, _sync.NOISE_QUANTILE, axis=1) for _, Cc in Cs], axis=0)
+            D = _sum_frames(P1, FRAME_SAMPLES, COPY_PAIRS)
+        else:
+            freqs = _comb_freqs()
+            C = _comb_coherent(Cs, freqs)
+            level = _sync.noise_level(C)
     if C is None and D is None:
         C = _sync.repeat_corrs(z0, _sync.unit_template(b), list(freqs))
         level = _sync.noise_level(C)
     if D is None:
         D = _sync.pair_products(C, FRAME_SAMPLES, COPY_PAIRS)
-    m = D.shape[1] // FRAME_SAMPLES
+    FR = FRAME_SAMPLES // decim
+    m = D.shape[1] // FR
     if m < 1:
         return None
     if fold is None:
-        fold = _pilot_fold(D, 0, m)
-    mag = np.abs(fold).max(axis=0)
+        fold = D[:, :m * FR].reshape(len(D), m, FR).sum(axis=1)
+    if comb:
+        # a steady tone's products are the same at every frame phase (a comb's filter, a third of the band's
+        # carriers, lets more of a tone outside the band through than the whole pilot's): out with each CFO bin's
+        # mean over the phases, or it holds every grid's place and the burst's phase is never read (PR #308
+        # review, item 8: mpp with tones at 800 and 2200 Hz, qpsk-r1/2's headers 8/17/20 of 24 at -2/0/+2 dB)
+        fold = fold - fold.mean(axis=1, keepdims=True)
+        w = _copy_row_weights(row_level, intra[2]) if intra is not None and row_level is not None else None
+    else:
+        w = None
+    mag = np.abs(fold if w is None else fold * w[:, None]).max(axis=0)
     # on noise each product's magnitude is about the level, and the m x
     # COPY_PAIRS of them add at random: the header reads (nearly all of the
     # search's CPU) only past COPY_DETECT. Left on the function for tests
@@ -974,17 +1265,23 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     if find_copy.peak < COPY_DETECT:
         return None
     grids = []
-    for ph in np.argsort(-mag):
-        if all(min(abs(int(ph) - g), FRAME_SAMPLES - abs(int(ph) - g)) >= NCP for g in grids):
-            grids.append(int(ph))
+    for ph_d in np.argsort(-mag):
+        ph = int(ph_d) * decim
+        if all(min(abs(ph - g), FRAME_SAMPLES - abs(ph - g)) >= NCP for g in grids):
+            grids.append(ph)
             if len(grids) == COPY_GRIDS:
                 break
     sb = BANDS[band]
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
     found = []
     for ph in grids:
-        i = int(np.argmax(np.abs(fold[:, ph])))
-        for f in _cfo_aliases(fold[i, ph], float(freqs[i])):
+        col = ph // decim
+        i = int(np.argmax(np.abs(fold[:, col])))
+        # weighed, the bin the tone spares can outscore the burst's own (every 4th: a neighbour's 0.6-0.9 of its
+        # pilots' product over less noise), and the copy is read off the wrong CFO: both bins' (825 Hz: 89 of 144
+        # found by the weighed bin alone, 93 by both, 94 unweighed)
+        bins = [i] if w is None else list(dict.fromkeys([int(np.argmax(np.abs(fold[:, col]) * w)), i]))
+        for f in [f for i in bins for f in _cfo_aliases(fold[i, col], float(freqs[i]), cfo_lag)]:
             z = dsp.freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
@@ -1000,10 +1297,248 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
                                           end=burst_end(p0, spec, n_cw), p0=p0, cfo=f,
                                           copy=dict(word=word, pc=pc)))
     for lock in sorted(found, key=lambda k: -k["score"]):
-        c, pat = pilot_coherence(x, lock, n_max=10**4, pattern=True)
+        if comb:
+            c, pat = _copy_rows(z0, lock)
+        else:
+            c, pat = pilot_coherence(x, lock, n_max=10**4, pattern=True)
         if len(c) >= 2 and np.mean(c) >= COPY_COHERENCE and pat >= COPY_PATTERN:
             return lock
     return None
+
+
+# A steady tone raises the comb filters' noise in most CFO bins (every 4th is spared), 1.5-26x the quietest on w and
+# w48 with +25 dB tones at 800+2200, 825 or 1500 Hz; on noise alone the bins are within 1.06x of each other (mpp
+# -2 dB, seeds 1-2). Past this spread find_copy weighs each bin's fold by the quietest bin's level over its own.
+SC_COPY_BIN_SPREAD = 1.25
+
+
+def _copy_row_weights(row_level: np.ndarray, n_combs: int) -> np.ndarray | None:
+    """An intra-frame comb layout's fold rows (n_combs x the CFO bins), each weighed by the quietest bin's noise
+    level over its own, or None when the bins' levels are within SC_COPY_BIN_SPREAD of each other. Without it a
+    tone's cross terms with the noise (the products' tone-only part is the phase mean find_copy takes out) win the
+    max over bins at random phases and take the COPY_GRIDS places (fk3d2, w qpsk-r1/2 and 16qam-r1/3 with the
+    preamble and first header erased, mpp -4..0 dB, tones at 800 and 2200 Hz: 97 -> 109 of 144 found, at 825 Hz
+    94 -> 93; without tones 109, unchanged; mix 111 and 117)."""
+    lv = np.asarray(row_level, dtype=np.float64)
+    lo = float(lv.min())
+    if not lo > 0 or float(lv.max()) <= SC_COPY_BIN_SPREAD * lo:
+        return None
+    return np.tile(lo / lv, n_combs)
+
+
+def _comb_filters(band: str) -> list:
+    """find_copy's comb matched filters, [(j, unit template)]."""
+    b = ofdm.band(band)
+    tpl = b.preamble_template()[PREAMBLE_CP:PREAMBLE_CP + M]
+    dem = np.exp(-2j * np.pi * np.outer(b.bb, np.arange(M)) / FS)
+    intra = _sc_intra_spec(b.nc)
+    if intra is not None:
+        K, _, n_combs = intra
+        out = []
+        for c in range(n_combs):
+            t = (dem.conj().T * (np.arange(b.nc) % K == c)) @ (dem @ tpl) / M
+            out.append((c, t / np.linalg.norm(t)))
+        return out
+    at = sc_cells(b.nc)[3] // b.nc
+    out = []
+    for j in np.unique(at):
+        t = (dem.conj().T * (at == j)) @ (dem @ tpl) / M
+        out.append((int(j), t / np.linalg.norm(t)))
+    return out
+
+
+def _intra_freqs(n_combs: int) -> np.ndarray:
+    """Standard 25 CFO bins, repeated across `n_combs` cyclic frame-comb phases (no sub-bin expansion)."""
+    return np.tile(_sync.cfo_grid(), n_combs)
+
+
+def _sum_frames(P: np.ndarray, F: int, pairs: int) -> np.ndarray:
+    """Sum `pairs` consecutive frame-spaced values: D[:, t] = sum_{j < pairs} P[:, t + j * F]."""
+    n = max(0, P.shape[1] - (pairs - 1) * F)
+    if not n:
+        return np.zeros((len(P), 0), dtype=np.complex128)
+    return sum((P[:, j * F:j * F + n] for j in range(pairs)), np.zeros((len(P), n), dtype=np.complex128))
+
+
+def _intra_frame_prods(Cs: list, intra: tuple, stream_s0: int, decim: int = 1) -> tuple[np.ndarray, float]:
+    """Per-frame intra-comb lag products on the 25 CFO bins, cyclic-muxed by `(stream_s0 + t) // FRAME_SAMPLES`
+    when frame-staggered so each burst frame takes only its active comb."""
+    _, syms, n_combs = intra
+    step = (syms[1] - syms[0]) * NSYM // decim
+    span = (FRAME_SAMPLES if n_combs == 1 else syms[-1] * NSYM) // decim
+    FR_d = FRAME_SAMPLES // decim
+    n = min(c.shape[1] - span for _, c in Cs)
+    if n <= 0:
+        return np.zeros((len(_intra_freqs(n_combs)), 0), dtype=np.complex128), 1.0
+    if n_combs == 1:
+        C0 = Cs[0][1]
+        P = C0[:, step:step + n] * np.conj(C0[:, :n]) + C0[:, 2 * step:2 * step + n] * np.conj(C0[:, step:step + n])
+        return P, float(np.sqrt(2.0) * _sync.noise_level(C0))
+    Qs = []
+    n_lags = len(syms) - 1
+    for _, Cc in Cs:
+        q = sum(Cc[:, (m + 1) * step:(m + 1) * step + n] * np.conj(Cc[:, m * step:m * step + n]) for m in range(n_lags))
+        Qs.append(q)
+    Q = np.stack(Qs, axis=0)  # (n_combs, n_bins, n)
+    f_idx = (stream_s0 // decim + np.arange(n)) // FR_d
+    rows = [Q[(c0 + f_idx) % n_combs, :, np.arange(n)].T for c0 in range(n_combs)]  # each (n_bins, n)
+    lvl = float(np.sqrt(n_lags) * min(_sync.noise_level(Cc) for _, Cc in Cs))
+    return np.concatenate(rows, axis=0), lvl
+
+
+def _comb_freqs() -> np.ndarray:
+    """The coherent comb search's CFOs: the grid's bins at SC_COPY_SUBBINS offsets inside each (STEP_HZ: 12.5 Hz
+    turns 0.6 cycles over 96 ms)."""
+    offs = (np.arange(SC_COPY_SUBBINS) - (SC_COPY_SUBBINS - 1) / 2) * _sync.STEP_HZ / SC_COPY_SUBBINS
+    return np.array([f + o for f in _sync.cfo_grid() for o in offs])
+
+
+def _comb_coherent(Cs: list, freqs: np.ndarray, decim: int = 1) -> np.ndarray:
+    """The combs' outputs [(j, C_j)] added within the frame, each turned back by its symbol's offset at each of
+    `freqs` (_comb_freqs): the frame's whole pilot energy in one output, for every start all combs cover."""
+    k = len(freqs) // len(Cs[0][1])
+    n = min(c.shape[1] - (j * NSYM) // decim for j, c in Cs)
+    return np.array([sum(c[i // k, (j * NSYM) // decim:(j * NSYM) // decim + n] * np.exp(-2j * np.pi * f * j * NSYM / FS)
+                         for j, c in Cs)
+                     for i, f in enumerate(freqs)])
+
+
+SC_COPY_DECIM = 2  # CombStream decimation (2 is Nyquist-exact on w/w48)
+
+
+class CombStream:
+    """find_copy's coherent comb outputs (_comb_coherent) for a stream, as sync.StreamDetector keeps the whole
+    pilot's: each start's computed once as audio is fed, not once per search hop over the buffer (mix's
+    listening: the comb search was ~90% of a listening receiver's CPU, each start filtered ~8 times). The noise
+    level likewise from each fed chunk's new outputs, per bin, the median of the last CHUNKS chunks' (the
+    StreamDetector's rule; find_copy's offline level is the whole window's quantile). The pair products are
+    extended as asked for and kept KEEP_BEHIND past a trim (a running FoldTrack subtracts what leaves)."""
+
+    CHUNKS = 8
+    KEEP_BEHIND = 4000
+
+    def __init__(self, band: str):
+        self.band = band
+        self.intra = _sc_intra_spec(BANDS[band].nc)
+        self.decim = SC_COPY_DECIM if SC_COPY_DECIM in (1, 2, 4) else 2
+        self.filters = _comb_filters(band)
+        if self.intra is not None:
+            _, syms, n_combs = self.intra
+            self.freqs = _intra_freqs(n_combs)
+            self.lag = FRAME_SAMPLES if n_combs == 1 else syms[-1] * NSYM
+        else:
+            self.freqs = _comb_freqs()
+            self.lag = max(j for j, _ in self.filters) * NSYM  # a start's output needs this and M samples after it
+        self.reset()
+
+    def reset(self):
+        self.tail = np.zeros(0, dtype=np.complex128)
+        self.fed = 0
+        self.levels: list = []
+        self.C = np.zeros((len(self.freqs), 0), dtype=np.complex128)
+        self.c0 = 0
+        self.D = np.zeros((len(self.freqs), 0), dtype=np.complex128)
+        self.d0 = 0
+
+    def restart_at(self, pos: int):
+        self.reset()
+        self.fed = pos
+
+    def feed(self, z: np.ndarray):
+        """The next baseband samples of the stream (contiguous; dsp.to_baseband with their stream index)."""
+        new = len(z)
+        self.fed += new
+        z = np.concatenate([self.tail, z])
+        zs0 = self.fed - len(z)
+        D = self.decim
+        lead = (D - (zs0 % D)) % D
+        z_a = z[lead:]
+        n_raw = len(z_a) - M + 1 - self.lag
+        if n_raw < D:
+            self.tail = z
+            return
+        n_d = n_raw // D
+        n = n_d * D
+        zs = zs0 + lead
+        Cs = [(j, _sync.repeat_corrs(z_a, t, list(_sync.cfo_grid()))[:, ::D]) for j, t in self.filters]
+        qwin_d = max(new, 2000) // D
+        if self.intra is not None:
+            C, _ = _intra_frame_prods(Cs, self.intra, zs, decim=D)
+            n_lags = 2 if self.intra[2] == 1 else len(self.intra[1]) - 1
+            per_comb = []
+            for _, Cc in Cs:
+                p = np.abs(Cc[:, max(0, Cc.shape[1] - qwin_d):]) ** 2
+                k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
+                per_comb.append(np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE))
+            self.levels = (self.levels + [np.sqrt(n_lags) * np.min(per_comb, axis=0)])[-self.CHUNKS:]
+        else:
+            C = _comb_coherent(Cs, self.freqs, decim=D)
+            p = np.abs(C[:, max(0, C.shape[1] - qwin_d):]) ** 2
+            k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
+            self.levels = (self.levels + [np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE)])[-self.CHUNKS:]
+        if not self.C.shape[1]:
+            self.c0 = zs
+        self.C = np.concatenate([self.C, C[:, :n_d]], axis=1)
+        self.tail = z[lead + n:]
+
+    def level(self) -> float | None:
+        return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
+
+    def row_levels(self) -> np.ndarray | None:
+        """Per CFO bin, the noise level (level()'s before its min over bins); find_copy's row_level."""
+        return np.median(np.array(self.levels), axis=0) if self.levels else None
+
+    def trim(self, start: int):
+        D = self.decim
+        k = min(max(0, (start - self.c0) // D), self.C.shape[1])
+        self.C, self.c0 = self.C[:, k:], self.c0 + k * D
+        k = min(max(0, (start - self.KEEP_BEHIND - self.d0) // D), self.D.shape[1])
+        self.D, self.d0 = self.D[:, k:], self.d0 + k * D
+
+    def _extend(self):
+        D = self.decim
+        FR_d = FRAME_SAMPLES // D
+        if self.d0 + self.D.shape[1] * D < self.c0:
+            self.D, self.d0 = self.D[:, :0], self.c0
+        have = (self.d0 - self.c0) // D + self.D.shape[1]
+        if self.intra is not None:
+            want = max(0, self.C.shape[1] - (COPY_PAIRS - 1) * FR_d)
+            if want > have:
+                self.D = np.concatenate([self.D, _sum_frames(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
+            return
+        want = max(0, self.C.shape[1] - COPY_PAIRS * FR_d)
+        if want > have:
+            self.D = np.concatenate([self.D, _sync.pair_products(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
+
+    def products_from(self, start: int) -> tuple[int, np.ndarray]:
+        """(a, the pair products for stream starts from a = max(start, c0) on)."""
+        self._extend()
+        D = self.decim
+        want = max(self.c0, start)
+        diff = want - self.d0
+        k = min(max(0, (diff + D - 1) // D if diff > 0 else 0), self.D.shape[1])
+        return self.d0 + k * D, self.D[:, k:]
+
+    def kept_products(self) -> tuple[int, np.ndarray]:
+        self._extend()
+        return self.d0, self.D
+
+
+def _copy_rows(z0: np.ndarray, lock: Lock) -> tuple:
+    """find_copy's gates for a scattered-pilot burst, from its copy frame's two whole rows (the pilot, and the
+    closing, both copy_close, 120 ms apart) where pilot_coherence reads each carrier's own pilot from another symbol (their
+    pattern's neighbours three carriers apart, on k3d2; hilat-m's real copies read 0.3-0.5 against COPY_PATTERN
+    0.6): -> ([coherence, coherence], pattern), pilot_coherence's shapes."""
+    b = ofdm.band(lock["band"])
+    z = dsp.freq_correct(z0, lock["cfo"])
+    pc = lock["copy"]["pc"]
+    if pc + SYMS_PER_FRAME * NSYM > len(z):
+        return [], 0.0
+    r0 = b.demod_window(z, pc + NCP, DEMOD_BACKOFF) / copy_open(b)
+    r5 = b.demod_window(z, pc + (SYMS_PER_FRAME - 1) * NSYM + NCP, DEMOD_BACKOFF) / copy_close(b)
+    c = float(np.abs(np.vdot(r5, r0)) / (np.linalg.norm(r0) * np.linalg.norm(r5) + 1e-30))
+    a = r0[1:] * np.conj(r0[:-1]) + r5[1:] * np.conj(r5[:-1])
+    return [c, c], float(np.abs(np.sum(a / (np.abs(a) + 1e-30))) / len(a))
 
 
 def _pilot_fold(D: np.ndarray, t0: int, m: int) -> np.ndarray:
@@ -1032,8 +1567,8 @@ class FoldTrack:
         self.lo = self.hi = 0  # the window summed: stream starts [lo, hi)
         self.n = 0  # folds since the last fresh sum
 
-    def _acc(self, D: np.ndarray, a: int, u0: int, u1: int, sign: int):
-        F, u = FRAME_SAMPLES, u0
+    def _acc(self, D: np.ndarray, a: int, u0: int, u1: int, sign: int, period: int = FRAME_SAMPLES):
+        F, u = period, u0
         while u < u1:
             q = u % F
             k = min(u1 - u, F - q)
@@ -1043,19 +1578,19 @@ class FoldTrack:
                 self.R[:, q:q + k] -= D[:, u - a:u - a + k]
             u += k
 
-    def fold(self, D: np.ndarray, a: int, lo: int, hi: int) -> np.ndarray:
+    def fold(self, D: np.ndarray, a: int, lo: int, hi: int, period: int = FRAME_SAMPLES) -> np.ndarray:
         """The window [lo, hi) of stream starts (D: pair products from
         stream start a, covering it), summed by frame phase: R[:, q] for
-        absolute phase q. np.roll(R, -(lo % FRAME_SAMPLES), axis=1) is
+        absolute phase q. np.roll(R, -(lo % period), axis=1) is
         _pilot_fold's from lo."""
-        if (self.R is None or self.n >= self.RENEW or not self.lo <= lo <= self.hi <= hi or self.lo < a
-                or hi > a + D.shape[1]):
-            self.R = np.zeros((len(D), FRAME_SAMPLES), dtype=np.complex128)
-            self._acc(D, a, lo, hi, 1)
+        if (self.R is None or self.R.shape[1] != period or self.n >= self.RENEW or not self.lo <= lo <= self.hi <= hi
+                or self.lo < a or hi > a + D.shape[1]):
+            self.R = np.zeros((len(D), period), dtype=np.complex128)
+            self._acc(D, a, lo, hi, 1, period)
             self.n = 0
         else:
-            self._acc(D, a, self.hi, hi, 1)
-            self._acc(D, a, self.lo, lo, -1)
+            self._acc(D, a, self.hi, hi, 1, period)
+            self._acc(D, a, self.lo, lo, -1, period)
             self.n += 1
         self.lo, self.hi = lo, hi
         return self.R
@@ -1071,32 +1606,34 @@ class FoldTrack:
 # while keeping mid-burst OFDM detection across w, w48, n10 and n4).
 PRESENCE_PEAK = 8.0
 PRESENCE_CONTRAST = (4.9, 4.9, 4.9, 4.75, 4.35, 4.25, 4.05, 3.9)
+PRESENCE_CONTRAST_N4_SCALE = 0.75  # n4's 4-carrier gold comb has wider sidelobes (noise max 2.30, n4 -3 dB 3.75)
 PRESENCE_MIN_M = 2
 PRESENCE_PATTERN_SCALE = 1.4
 PRESENCE_PATTERN_CAP = 0.876
 
 
-def presence_window(dcols: int, window: int) -> tuple[int, int]:
+def presence_window(dcols: int, window: int, decim: int = 1, pad_frames: int = COPY_PAIRS) -> tuple[int, int]:
     """(t0, m): the newest `window` outputs' pilot fold, over m whole frames
-    from pair product t0 (`dcols` of them; m < 1: too few)."""
-    P = COPY_PAIRS
-    n = dcols + P * FRAME_SAMPLES  # the outputs the products were made from
-    W = min(n, window)
-    return n - W, (W - P * FRAME_SAMPLES) // FRAME_SAMPLES
+    from pair product t0 (`dcols` of them, at stride `decim`; m < 1: too few)."""
+    FR_d = FRAME_SAMPLES // decim
+    n_d = dcols + pad_frames * FR_d  # the outputs the products were made from
+    W_d = min(n_d, window // decim)
+    return n_d - W_d, (W_d - pad_frames * FR_d) // FR_d
 
 
-def fold_presence(fold: np.ndarray, level: float, m: int) -> tuple[float, float]:
+def fold_presence(fold: np.ndarray, level: float, m: int, row_w: np.ndarray | None = None) -> tuple[float, float]:
     """(peak, contrast) of an m-frame pilot fold (any rotation of its phases
     reads the same): find_copy's normalized peak, and the peak over the
     fold's median over frame phases."""
-    mag = np.abs(fold).max(axis=0)
+    mag = np.abs(fold if row_w is None else fold * row_w[:, None]).max(axis=0)
     return float(mag.max() / (level * np.sqrt(m * COPY_PAIRS))), float(mag.max() / (np.median(mag) + 1e-300))
 
 
-def presence_verdict(peak: float, contrast: float, m: int) -> bool:
+def presence_verdict(peak: float, contrast: float, m: int, band: str = "") -> bool:
     """Stage 1 of pilot_present: PRESENCE_PEAK, and PRESENCE_CONTRAST for m frames."""
+    scale = PRESENCE_CONTRAST_N4_SCALE if (band == "n4" and band in SC_BANDS) else 1.0
     return (m >= PRESENCE_MIN_M and peak >= PRESENCE_PEAK
-            and contrast >= PRESENCE_CONTRAST[min(m - PRESENCE_MIN_M, len(PRESENCE_CONTRAST) - 1)])
+            and contrast >= scale * PRESENCE_CONTRAST[min(m - PRESENCE_MIN_M, len(PRESENCE_CONTRAST) - 1)])
 
 
 def pilot_presence(D: np.ndarray, level: float, window: int) -> tuple[float, float]:
@@ -1112,7 +1649,17 @@ def pilot_presence(D: np.ndarray, level: float, window: int) -> tuple[float, flo
 def _verify_band(z0: np.ndarray, ph: int, n_frames: int, band: str, cfo: float) -> bool:
     b = ofdm.band(band)
     z = dsp.freq_correct(z0, cfo)
-    y = [b.demod_window(z, ph + k * FRAME_SAMPLES, DEMOD_BACKOFF) for k in range(n_frames)]
+    if band in SC_BANDS:
+        at = sc_cells(b.nc)[3] // b.nc
+        y = []
+        for k in range(n_frames):
+            v = np.empty(b.nc, dtype=np.complex128)
+            for j in np.unique(at):
+                w = b.demod_window(z, ph + k * FRAME_SAMPLES + int(j) * NSYM, DEMOD_BACKOFF)
+                v[at == j] = w[at == j]
+            y.append(v)
+    else:
+        y = [b.demod_window(z, ph + k * FRAME_SAMPLES, DEMOD_BACKOFF) for k in range(n_frames)]
     c = [float(np.abs(np.sum(y[k] * np.conj(y[k - 1])))
                / (np.sqrt(np.sum(np.abs(y[k]) ** 2) * np.sum(np.abs(y[k - 1]) ** 2)) + 1e-30))
          for k in range(1, len(y))]
@@ -1123,27 +1670,76 @@ def _verify_band(z0: np.ndarray, ph: int, n_frames: int, band: str, cfo: float) 
     return float(np.mean(c)) > PILOT_NOISE[band] and pat > pat_floor
 
 
-def fold_verify(x: np.ndarray, band: str, fold: np.ndarray, fold_phase0: int = 0) -> bool:
+def _verify_intra(z0: np.ndarray, ph: int, n_frames: int, band: str, cfo: float, c_start: int, intra: tuple) -> bool:
+    b = ofdm.band(band)
+    nc = b.nc
+    K, syms, n_combs = intra
+    z = dsp.freq_correct(z0, cfo)
+    pairs = []
+    a_lag = np.zeros(nc - K, dtype=np.complex128)
+    for k in range(n_frames):
+        c = (c_start + k) % n_combs
+        ks = np.arange(c, nc, K)
+        hs = [b.demod_window(z, ph + k * FRAME_SAMPLES + s * NSYM, DEMOD_BACKOFF)[ks] / b.pilot[ks] for s in syms]
+        for h in hs:
+            a_lag[ks[:-1]] += h[1:] * np.conj(h[:-1])
+        for m_ in range(len(hs) - 1):
+            pairs.append((hs[m_], hs[m_ + 1]))
+    if not pairs:
+        return False
+    grp = min(K, len(pairs))
+    cs = []
+    for g0 in range(max(1, len(pairs) - grp + 1)):
+        u = np.concatenate([pairs[j][0] for j in range(g0, g0 + grp)])
+        v = np.concatenate([pairs[j][1] for j in range(g0, g0 + grp)])
+        cs.append(float(np.abs(np.vdot(u, v)) / (np.linalg.norm(u) * np.linalg.norm(v) + 1e-30)))
+    act = np.abs(a_lag) > 0
+    pat = float(np.abs(np.sum(a_lag[act] / np.abs(a_lag[act]))) / act.sum()) if act.any() else 0.0
+    pat_floor = min(PRESENCE_PATTERN_CAP, PRESENCE_PATTERN_SCALE * PILOT_PATTERN[band])
+    return float(np.mean(cs)) > PILOT_NOISE[band] and pat > pat_floor
+
+
+def fold_verify(x: np.ndarray, band: str, fold: np.ndarray, fold_phase0: int = 0,
+                decim: int = 1, row_w: np.ndarray | None = None) -> bool:
     """Stage 2 of pilot_present: verify that `fold`'s peak in real audio `x`
-    (`x[0]` at stream phase `fold_phase0`, 0 for a relative fold) carries
-    `band`'s known frame-pilot sequence (on `n10`, also checks `n4` at the two
-    frozen cross-correlation shifts where n4's 4-carrier pilot matches n10's
-    template). Rejects impulse trains and QRM power steps that clear Stage 1."""
-    mag = np.abs(fold).max(axis=0)
+    (`x[0]` at stream index `fold_phase0`, 0 for a relative fold) carries
+    `band`'s known pilots (fk3d2 intra-frame combs on w/w48, gold scattered
+    pilots on n10/n4, whole pilot rows on FM). Rejects impulse trains and QRM
+    power steps that clear Stage 1."""
+    wfold = fold if row_w is None else fold * row_w[:, None]
+    mag = np.abs(wfold).max(axis=0)
     q = int(np.argmax(mag))
-    fi = int(np.argmax(np.abs(fold[:, q])))
-    ph = (q - fold_phase0) % FRAME_SAMPLES
-    n_frames = (len(x) - ph - M) // FRAME_SAMPLES + 1
+    fi = int(np.argmax(np.abs(wfold[:, q])))
+    ph = (q * decim - fold_phase0) % FRAME_SAMPLES
+    sc = band in SC_BANDS
+    intra = _sc_intra_spec(BANDS[band].nc) if sc else None
+    if intra is not None:
+        _, syms, n_combs = intra
+        n_frames = (len(x) - ph - syms[-1] * NSYM - M) // FRAME_SAMPLES + 1
+        if n_frames < 2:
+            return False
+        freqs = _intra_freqs(n_combs)
+        c0 = fi // len(_sync.cfo_grid())
+        c_start = (c0 + (fold_phase0 + ph) // FRAME_SAMPLES) % n_combs
+        z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
+        d = fold[fi, q]
+        cfo_lag = (syms[1] - syms[0]) * NSYM
+        for f in _cfo_aliases(d, float(freqs[fi]), cfo_lag):
+            if _verify_intra(z0, ph, n_frames, band, f, c_start, intra):
+                return True
+        return False
+    max_j = int((sc_cells(BANDS[band].nc)[3] // BANDS[band].nc).max()) if sc else 0
+    n_frames = (len(x) - ph - max_j * NSYM - M) // FRAME_SAMPLES + 1
     if n_frames < 2:
         return False
-    freqs = _sync.cfo_grid()
+    freqs = _comb_freqs() if sc else _sync.cfo_grid()
     z0 = dsp.to_baseband(np.asarray(x, dtype=np.float64))
     d = fold[fi, q]
     centre = float(freqs[fi])
     for f in _cfo_aliases(d, centre):
         if _verify_band(z0, ph, n_frames, band, f):
             return True
-    if band == "n10" and "n4" in BANDS:
+    if not sc and band == "n10" and "n4" in BANDS:
         # n4's 4-carrier pilot peaks against n10's template at +100 Hz (0.62)
         # and -137.5 Hz (0.52), so n4's true CFO sits at centre - 100 or + 137.5
         for df in (-100.0, 137.5):
@@ -1156,25 +1752,36 @@ def fold_verify(x: np.ndarray, band: str, fold: np.ndarray, fold_phase0: int = 0
 
 
 def pilot_present(D: np.ndarray, level: float, window: int, x: np.ndarray | None = None,
-                  band: str | None = None) -> bool:
+                  band: str | None = None, decim: int = 1, stream_lo: int = 0,
+                  row_w: np.ndarray | None = None) -> bool:
     """pilot_presence's verdict over the newest `window` outputs (fewer when
     there are fewer: the threshold rises as the window shrinks). When `x` (same
     origin as D) and `band` are given, also runs Stage 2 (fold_verify)."""
-    t0, m = presence_window(D.shape[1], window)
+    sc = band is not None and band in SC_BANDS
+    intra = _sc_intra_spec(BANDS[band].nc) if sc else None
+    pad_fr = (COPY_PAIRS - 1) if intra is not None else COPY_PAIRS
+    FR_d = FRAME_SAMPLES // decim
+    t0_d, m = presence_window(D.shape[1], window, decim, pad_fr)
     if m < PRESENCE_MIN_M:
         return False
-    fold = _pilot_fold(D, t0, m)
-    if not presence_verdict(*fold_presence(fold, level, m), m):
+    fold = D[:, t0_d:t0_d + m * FR_d].reshape(len(D), m, FR_d).sum(axis=1)
+    if sc:
+        fold = fold - fold.mean(axis=1, keepdims=True)
+    if not presence_verdict(*fold_presence(fold, level, m, row_w), m, band or ""):
         return False
-    return True if x is None or band is None else fold_verify(x[t0:], band, fold)
+    if x is None or band is None:
+        return True
+    shift = (stream_lo // decim + t0_d) % FR_d
+    if shift:
+        fold = np.roll(fold, shift, axis=1)
+    return fold_verify(x[t0_d * decim:], band, fold, stream_lo + t0_d * decim, decim, row_w)
 
 
-def _cfo_aliases(d: complex, centre: float) -> list[float]:
-    """CFOs whose turn over one frame is d's phase, within the bin at
-    `centre`. A frame-pair product carries the whole CFO modulo 1 / FRAME_S
-    (6.94 Hz), not its offset from the bin: read as the offset, the copy
-    reads ran up to 3.5 Hz off (receive() then fixed it from the copy)."""
-    alias = FS / FRAME_SAMPLES
+def _cfo_aliases(d: complex, centre: float, lag: int = FRAME_SAMPLES) -> list[float]:
+    """CFOs whose turn over `lag` samples is d's phase, within the bin at
+    `centre`. A frame-pair product carries the whole CFO modulo FS / lag
+    (6.94 Hz at a frame; 13.89 or 20.83 Hz for intra-frame comb pairs)."""
+    alias = FS / lag
     frac = float(np.angle(d)) / (2 * np.pi) * alias
     k0 = round((centre - frac) / alias)
     return [frac + k * alias for k in (k0 - 1, k0, k0 + 1) if abs(frac + k * alias - centre) <= _sync.STEP_HZ / 2 + 0.5]
@@ -1187,8 +1794,9 @@ def _copy_header(z: np.ndarray, lock: Lock) -> HeaderRead:
     band = lock["band"]
     b = ofdm.band(band)
     hd = _read_header(z, lock["start"], band)
+    # (a scattered-pilot band's copy frame opens on copy_open, not the pilot)
     hd.update(hdr=(lock["spec"], lock["n_cw"]), word=lock["copy"]["word"], score=lock["score"],
-              h_pre=b.demod_window(z, lock["copy"]["pc"] + NCP, HEADER_BACKOFF) / b.pilot)
+              h_pre=b.demod_window(z, lock["copy"]["pc"] + NCP, HEADER_BACKOFF) / (copy_open(b) if band in SC_BANDS else b.pilot))
     return hd
 
 
@@ -1264,34 +1872,90 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
     ref_syms[layout] = b.pilot
     ref_syms[~layout] = constellation.modulate(_word_bits(word) @ header_code(band) % 2, QPSK).reshape(-1, b.nc)
     # (not `known`: that is the argument, a bulk burst's, and the alias choice below reads it)
-    ref = list(hd["y_all"] * np.conj(ref_syms)) + ([h_first] if db == band else [])
+    sc, scb = sc_spec(spec, n_f), db in SC_BANDS
+    if sc and partial:
+        # ponytail: a burst still arriving has no closing pilot symbol, and the frame after the last one in starts
+        # with scattered cells, not a pilot row; decoding while it arrives (config.DECODE_EARLY, FM) waits for the end
+        raise SyncError("scattered pilots: the whole burst only")
+    pil = _sc_pil(db, n_air, kc) if sc else None
+    ref = list(hd["y_all"] * np.conj(ref_syms)) + ([h_first] if db == band and not sc else [])
     runs = [ref]
     if kc is not None:
         # the header copy's frame is known symbols too (pilot, copy, next
         # pilot): the estimate survives a fade on the first copy
         pc = p0 + kc * FRAME_SAMPLES
-        ys = [b.demod_window(z, pc + s * NSYM + NCP, HEADER_BACKOFF) for s in range(SYMS_PER_FRAME + 1)]
+        ys = [b.demod_window(z, pc + s * NSYM + NCP, HEADER_BACKOFF) for s in range(SYMS_PER_FRAME + (not scb))]
         h = ref_syms[~layout]
-        ref2 = [b.pilot, *np.resize(h, (DATA_SYMS_PER_FRAME, b.nc)), b.pilot]
+        ref2 = [copy_open(b), *h, copy_close(b)] if scb else [b.pilot, *np.resize(h, (DATA_SYMS_PER_FRAME, b.nc)), b.pilot]
         runs.append([y * np.conj(r) for y, r in zip(ys, ref2)])
-    d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
+    # Leave carriers hit by a steady tone or its off-carrier sidelobes out of
+    # coarse and residual_cfo (issue #330): a +25 dB tone at 800 Hz otherwise
+    # pulls coarse across the +-3.47 Hz alias boundary (-6.94 Hz jump) and biases
+    # residual_cfo by ~0.5 Hz. Bit-identical when no carrier is flagged.
+    noisy_sync = equalizer.noisy_carriers(hd["n0_pre_k"])
+    hot_sync = equalizer.hot_carriers(np.array([row for run in runs for row in run])) | noisy_sync
+    if hot_sync.all():
+        hot_sync[:] = False
+    if hot_sync.any():
+        keep_sync = ~hot_sync
+        d = sum(np.sum((run[i + 1] * np.conj(run[i]))[keep_sync]) for run in runs for i in range(len(run) - 1))
+    else:
+        d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
     coarse = float(np.angle(d) / (2 * np.pi * NSYM / FS))
     # slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
-    _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
-    fine = equalizer.residual_cfo(hp)
-    # a known burst's CFO is the same transmitter's, measured seconds ago: its
-    # header may be the part that faded, so the alias nearest no change
-    cfo_res = resolve_alias(fine, 0.0 if known is not None else coarse)
+    raw0, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, pil=pil, close_at=kc if scb else None)
+    k0_off = BANDS[db].k0 - b.spec.k0
+    exclude_db = noisy_sync[k0_off : k0_off + BANDS[db].nc]
+    if db != band:
+        # n4 (4 carriers hosted on n10's 10): carry the wider sync band's power
+        # check too so a mid-carrier tone hitting 2 of 4 carriers cannot mask
+        # itself in n4's 4-carrier median.
+        exclude_db = exclude_db | hot_sync[k0_off : k0_off + BANDS[db].nc]
+    if sc and _sc_intra_spec(BANDS[db].nc) is not None:
+        fine, cfo_dt = _sc_residual_cfo(raw0, hp, kc if scb else None, n_air, db, exclude_db)
+        ref_cfo = 0.0 if known is not None else coarse
+        cfo_res = fine + round((ref_cfo - fine) * cfo_dt) / cfo_dt
+    else:
+        fine = equalizer.residual_cfo(hp, exclude_db)
+        # a known burst's CFO is the same transmitter's, measured seconds ago: its
+        # header may be the part that faded, so the alias nearest no change
+        cfo_res = resolve_alias(fine, 0.0 if known is not None else coarse)
     z = dsp.freq_correct(z, cfo_res)
-    _, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips)
+    raw, hp, _, _ = _demod_frames(z, p0, n_air, 0, phi_ref, band=db, slips_in=slips, pil=pil, close_at=kc if scb else None)
+    def _sup_rows(rows: np.ndarray) -> np.ndarray:
+        hot_s = equalizer.hot_carriers(rows)
+        if len(exclude_db) == rows.shape[1]:
+            hot_s = hot_s | exclude_db
+        return np.where(hot_s, 0.0, rows) if hot_s.any() and not hot_s.all() else rows
+
+    if sc:  # the support from whole pilot symbols: a frame's scattered pilots are 96 ms apart
+        hp = _sup_rows(_sc_full(z, hd, raw, hp, kc, 0, db)[0])
     # the window and the reported delay on the support as before the noise
     # gate (the gear shifter was trained on it); the estimate on the gated one
     seen = equalizer.delay_support(hp, bb=ofdm.band(db).bb)
     support = equalizer.delay_support(hp, bb=ofdm.band(db).bb, n0=hd["n0_pre"])
+    if sc:  # a handful of pilot symbols: the ungated support picks up noise
+        seen = support
     shift = equalizer.window_shift(seen)
-    raw, hp, steps, _ = _demod_frames(z, p0, n_air, shift, phi_ref, band=db, slips_in=slips)
+    raw, hp, steps, _ = _demod_frames(z, p0, n_air, shift, phi_ref, band=db, slips_in=slips, pil=pil, close_at=kc if scb else None)
     support = (support[0] - shift, support[1] - shift)
     seen = (seen[0] - shift, seen[1] - shift)
+    if sc:
+        # once more through the moved window: with a path outside the first one, a pilot symbol's profile
+        # has lobes of its own (mpd, locked on the later path: one 32 samples before the earlier)
+        support = equalizer.delay_support(_sup_rows(_sc_full(z, hd, raw, hp, kc, shift, db)[0]), bb=ofdm.band(db).bb, n0=hd["n0_pre"])
+        more = equalizer.window_shift(support)
+        if more:
+            shift += more
+            raw, hp, steps, _ = _demod_frames(z, p0, n_air, shift, phi_ref, band=db, slips_in=slips, pil=pil, close_at=kc if scb else None)
+            support = (support[0] - more, support[1] - more)
+        seen = support
+        raw, est, info = _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec)
+        return dict(
+            spec=spec, n_cw=n_cw, raw=raw, est=est, acq=acq, band=db, hp=hp, kc=kc, sc=info, frames_in=n_in,
+            cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support,
+            seen_support=seen, preamble_start=hd["start"], score=hd["score"],
+        )
     # the copy frame's pilot keeps the pilot grid regular for the channel
     # estimate; its symbols are then dropped from the data
     est = data_channel(hp, support, db, hd["n0_pre"], spec.clip,
@@ -1306,6 +1970,765 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         cfo=acq.freq_offset + cfo_res, p0=p0, shift=shift, steps=steps, slips=slips, phi_ref=phi_ref, support=support, seen_support=seen,
         preamble_start=hd["start"], score=hd["score"],
     )
+
+
+def _sc_residual_cfo(raw0: np.ndarray, hp: np.ndarray, kc: int | None, n_air: int, db: str,
+                     exclude_db: np.ndarray | None = None) -> tuple[float, float]:
+    """Fine residual CFO (Hz) and pair lag (s) from intra-frame ds-spaced pilot comb pairs."""
+    b = ofdm.band(db)
+    nc = b.nc
+    intra = _sc_intra_spec(nc)
+    assert intra is not None
+    K, syms, n_combs = intra
+    ds = syms[1] - syms[0]
+    dt = ds * NSYM / FS
+    u0s, u1s, ks_all = [], [], []
+    for fa in range(n_air):
+        if fa == kc:
+            continue
+        ks = sc_frame_cells(nc, fa)[1][: nc // K]
+        scale = b.pilot[ks]
+        rows = [raw0[fa, s_, ks] / scale for s_ in syms]
+        for m in range(len(syms) - 1):
+            u0s.append(rows[m])
+            u1s.append(rows[m + 1])
+            ks_all.append(ks)
+        if fa + 1 in (kc, n_air):
+            u0s.append(rows[-1])
+            u1s.append(hp[fa + 1, ks])
+            ks_all.append(ks)
+        elif n_combs == 1 and fa + 1 < n_air:
+            u0s.append(rows[-1])
+            u1s.append(raw0[fa + 1, 0, ks] / scale)
+            ks_all.append(ks)
+    if not u0s:
+        return 0.0, dt
+    u0, u1, kk = np.concatenate(u0s), np.concatenate(u1s), np.concatenate(ks_all)
+    cnt = np.bincount(kk, minlength=nc)
+    act = cnt > 0
+    pk = np.zeros(nc)
+    pk[act] = np.bincount(kk, 0.5 * (np.abs(u0) ** 2 + np.abs(u1) ** 2), minlength=nc)[act] / cnt[act]
+    hot = (~act) | (pk > equalizer.HOT_CARRIER * float(np.median(pk[act])))
+    if exclude_db is not None and len(exclude_db) == nc:
+        hot = hot | np.asarray(exclude_db, dtype=bool)
+    if hot[act].all():
+        hot = ~act
+    prod_k = np.bincount(kk, (u1 * np.conj(u0)).real, minlength=nc) + 1j * np.bincount(
+        kk, (u1 * np.conj(u0)).imag, minlength=nc)
+    d = np.sum(prod_k[~hot])
+    if int(cnt.max()) >= equalizer.HOT_INNOV_MIN_PILOTS - 1 and np.abs(d) > 0:
+        ph = d / np.abs(d)
+        innov_k = np.zeros(nc)
+        innov_k[act] = np.bincount(kk, np.abs(u1 - ph * u0) ** 2, minlength=nc)[act] / cnt[act]
+        hot2 = hot | (innov_k > equalizer.HOT_INNOV * float(np.median(innov_k[act])))
+        if not hot2[act].all() and not np.array_equal(hot2, hot):
+            d = np.sum(prod_k[~hot2])
+    return (float(np.angle(d) / (2 * np.pi * dt)) if np.abs(d) > 0 else 0.0), dt
+
+
+def _sc_full(z: np.ndarray, hd: HeaderRead, raw: np.ndarray, hp: np.ndarray, kc: int | None, shift: int, db: str) -> tuple:
+    """A scattered-pilot burst's whole pilot symbols, through the data's
+    window: (LS (P, nc), their seconds from the first frame's start): the
+    preamble's last REF_REPEATS repeats' mean, the header's closing pilot, the
+    copy frame's two, the burst's closing one (hp's rows, _demod_frames')."""
+    b = ofdm.band(hd["band"])
+    R, p0 = b.spec.preamble_repeats, hd["p0"]
+    ref = min(R, REF_REPEATS)
+    u = hd["start"] + PREAMBLE_CP + np.arange(R - ref, R) * M
+    # (frames on a narrower band than their header's: n4 on n10's: its carriers of the sync band's symbols)
+    col = BANDS[db].k0 - b.spec.k0 + np.arange(BANDS[db].nc)
+    rows = [(np.mean([b.demod_window(z, int(a) + shift, DEMOD_BACKOFF) for a in u], axis=0) / b.pilot)[col]]
+    t = [(u.mean() - NCP - p0) / FS]  # as symbol starts, like the frames'
+    rows.append((b.demod_window(z, p0 - NSYM + NCP + shift, DEMOD_BACKOFF) / b.pilot)[col])
+    t.append(-NSYM / FS)
+    if kc is not None:
+        rows += [hp[kc], raw[kc, SYMS_PER_FRAME - 1] / copy_close(b)]  # (a copy frame: data band = sync band)
+        t += [kc * FRAME_SAMPLES / FS, (kc * FRAME_SAMPLES + (SYMS_PER_FRAME - 1) * NSYM) / FS]
+    return np.array(rows + [hp[-1]]), np.array(t + [(len(hp) - 1) * FRAME_SAMPLES / FS])
+
+
+def _sc_combs(nc: int) -> bool:
+    """Whether the band's pilots are k3d2's three combs (symbols 0, 2, 4; carriers 0, 1, 2 mod 3)."""
+    if _sc_intra_spec(nc) is not None:
+        return False
+    P, PK = sc_cells(nc)[:2]
+    return nc % 3 == 0 and np.array_equal(P // nc, 2 * (PK % 3))
+
+
+SC_FAST_HZ = 3.0  # the symbol-to-symbol spread estimate takes over from the frame-to-frame one past this
+
+
+def _sc_pilot_counts(nc: int, frames: np.ndarray) -> np.ndarray:
+    if sc_period(nc) == 1 and _sc_intra_spec(nc) is None:
+        return np.full(nc, len(frames), dtype=int)
+    out = np.zeros(nc, dtype=int)
+    per = sc_period(nc)
+    for f_ in range(per):
+        cnt = int(np.sum(frames % per == f_))
+        if cnt:
+            out += cnt * np.bincount(sc_frame_cells(nc, f_)[1], minlength=nc)
+    return out
+
+
+def _sc_estimate(z, hd, raw, hp, kc, n_f, shift, support, spec) -> tuple:
+    """receive()'s raw and estimate from scattered pilots, in the shapes the
+    pilot-row frames give ((n_f, 6, nc) with a row of the frame's pilots first
+    and its 5 nc data cells in sending order after; h and mse (n_f, 5, nc)),
+    plus what a decision-directed pass needs (sc_refine)."""
+    db = spec.band
+    b = ofdm.band(db)
+    nc, n_air = b.nc, len(raw)
+    per = sc_period(nc)
+    intra = _sc_intra_spec(nc)
+    c = ClipConsts(*(spec.clip or CLIP[db]))
+    g = c.gain  # the pilots clip with the data at any length (measured within 2%; ACE modes' whole pilot symbols 7% off)
+    norm = np.array([f for f in range(n_air) if f != kc])
+    cells = raw[norm].reshape(n_f, -1)
+    est: DataEstimate = {
+        "h": np.empty((0, 0, 0), dtype=np.complex128),
+        "mse": np.empty((0, 0, 0)),
+        "n0": hd["n0_pre"],
+        "n0_k": np.empty(0),
+        "n0_snr": hd["n0_pre"],
+        "p_sig": 1.0,
+        "spread_hz": 1.0,
+        "filter_spread_hz": 1.0,
+        "slack": equalizer.SUPPORT_SLACK,
+        "clip_ratio": c.ratio,
+        "gain": c.gain_for(n_f),
+        "band": db,
+    }
+    ls = np.empty((n_f, nc), dtype=np.complex128)
+    for f_ in range(per):
+        idx = np.flatnonzero(norm % per == f_)
+        if len(idx):
+            P_f, PK_f, _ = sc_frame_cells(nc, f_)
+            ls[idx] = cells[idx[:, None], P_f] / b.pilot[PK_f]
+    ratio = _sc_cal(spec)[1]
+    sb = ofdm.band(hd["band"])  # the preamble's band (n4's frames follow n10's)
+    R = sb.spec.preamble_repeats
+    reps = np.array([sb.demod_window(z, hd["start"] + PREAMBLE_CP + r * M, HEADER_BACKOFF) for r in range(R)])
+    V = np.vander(np.arange(R) / R, 4)
+    n0 = hd["n0_pre"]
+    if R > 4:
+        n0_k = np.sum(np.abs(reps - V @ np.linalg.lstsq(V, reps, rcond=None)[0]) ** 2, axis=0) / (R - 4)
+        n0 = float(np.min(equalizer.per_carrier_noise(n0_k, R - 4)))
+    # per-carrier pilot power for hot-carrier masking in p_y
+    n_p_norm = _sc_pilot_counts(nc, norm)
+    pk_sum = np.zeros(nc)
+    for f_ in range(per):
+        idx = np.flatnonzero(norm % per == f_)
+        if len(idx):
+            PK_f = sc_frame_cells(nc, f_)[1]
+            pk_sum += np.bincount(PK_f, np.sum(np.abs(ls[idx]) ** 2, axis=0), minlength=nc)
+    act_p = n_p_norm > 0
+    pk = np.zeros(nc)
+    pk[act_p] = pk_sum[act_p] / n_p_norm[act_p]
+    med_pk = float(np.median(pk[act_p]))
+    cool_ls = np.zeros_like(ls, dtype=bool)
+    for f_ in range(per):
+        idx = np.flatnonzero(norm % per == f_)
+        if len(idx):
+            PK_f = sc_frame_cells(nc, f_)[1]
+            cool_ls[idx] = (pk[PK_f] <= SC_HOT_POWER * med_pk)[None, :]
+    p_y = max(float(np.mean(np.abs(ls[cool_ls]) ** 2)) - n0, 1e-12) / (1 + ratio)
+    n0_y = n0 + ratio * p_y  # the scattered pilots': thermal + clip
+    p_sig = p_y / g**2
+    est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0), p_sig=p_sig)
+    max_comb_d = 52  # fk3d2 (K=3) single-comb Nyquist window (52 samples = 6.5 ms)
+    slack = int(np.clip((max_comb_d - (support[1] - support[0])) // 2, 0, equalizer.SUPPORT_SLACK))
+    est["slack"] = slack if nc >= 24 else _sc_slack(nc)
+    # slow or fast by same-carrier pilots `per` frames apart (or intra-frame ds symbols apart on intra layouts)
+    pair = np.flatnonzero(np.diff(norm) == 1)
+    rho, rho_dt = 0.0, equalizer.FRAME_S
+    hm = hp[norm]
+    pair_p = np.array([i for i in range(len(norm) - per) if norm[i + per] - norm[i] == per], dtype=int)
+    if len(pair_p):
+        rho = abs(np.vdot(hm[pair_p], hm[pair_p + per])) / (len(pair_p) * nc * p_y)
+        rho_dt = per * equalizer.FRAME_S
+    if intra is not None and rho <= SC_SLOW_RHO and len(hm):
+        K_in, syms_in, _ = intra
+        w_in = nc // K_in
+        rho_in = abs(np.vdot(hm[:, :w_in], hm[:, -w_in:])) / (len(hm) * w_in * p_y)
+        if rho_in > 0.60:
+            rho, rho_dt = rho_in, (syms_in[-1] - syms_in[0]) * NSYM / FS
+    loo_rule = nc >= 24
+    if loo_rule:
+        spread = None
+    elif rho > SC_SLOW_RHO:
+        spread = float(np.clip(SC_WIDEN * np.sqrt(-2 * np.log(min(rho, 0.99999))) / (np.pi * rho_dt), 0.05, SC_FAST_HZ))
+    else:
+        spread = None
+    full, t_full = _sc_full(z, hd, raw, hp, kc, shift, db)
+    # observations: (symbol from the first frame's start, carrier, kind 0 scattered | 1 whole | 2 the preamble's mean)
+    sc_syms = np.empty((n_f, nc), dtype=float)
+    sc_ks = np.empty((n_f, nc), dtype=int)
+    for f_ in range(per):
+        idx = np.flatnonzero(norm % per == f_)
+        if len(idx):
+            P_f, PK_f, _ = sc_frame_cells(nc, f_)
+            sc_syms[idx] = norm[idx, None] * SYMS_PER_FRAME + (P_f // nc)[None, :]
+            sc_ks[idx] = PK_f[None, :]
+    o_sym = np.concatenate([sc_syms.ravel(), np.repeat(np.round(t_full * FS / NSYM, 2), nc)])
+    o_k = np.concatenate([sc_ks.ravel(), np.tile(np.arange(nc), len(full))])
+    kind = np.ones(len(full), dtype=int)
+    kind[0] = 2
+    o_kind = np.concatenate([np.zeros(n_f * nc, dtype=int), np.repeat(kind, nc)])
+    o_val = np.concatenate([(ls / g).ravel(), full.ravel()])
+    sup = support
+    slep = nc >= 24
+    # When delay span fits inside single-comb Nyquist (52 samples for K=3), _sc_slepian handles all spreads;
+    # wider supports on K=3 (e.g. nvis-d's 56 samples at 1 Hz) keep _sc_separable for slow spreads <= SC_SEP_HZ.
+    slep_all = slep and intra is not None and (sup[1] - sup[0]) <= max_comb_d
+    fast_est = _sc_slepian if slep else _sc_joint
+
+    # detect steady tones on carriers with zero scattered pilots via whole pilot rows
+    u_mask = n_p_norm == 0
+    hot_u = np.zeros(nc, dtype=bool)
+    extra_u = np.zeros(nc)
+    if u_mask.any() and len(full) > 1:
+        from scipy.stats import gamma
+
+        f_rows = full[1:]
+        hs_f, _, r_f, keep_f = equalizer.freq_smooth(f_rows, sup, b.bb, est["slack"])
+        if nc - r_f >= 2:
+            n_fr = len(f_rows)
+            pk_f = np.mean(np.abs(f_rows - hs_f) ** 2, axis=0) / np.maximum(keep_f, 1e-3)
+            qf = gamma.ppf(0.999, n_fr) / n_fr
+            ex_f = np.maximum(pk_f - float(np.median(pk_f)), 0.0) / g**2
+            hot_u = u_mask & (pk_f > float(np.median(pk_f)) * n_fr / max(n_fr - 1 / 3, 0.5) * qf) & (
+                ex_f >= SC_HOT_EXCESS * (n0_y / g**2))
+            extra_u = np.where(hot_u, ex_f, 0.0)
+
+    kw_init = (1 + extra_u / (n0_y / g**2)) if hot_u.any() else None
+    hot_pow = act_p & (pk > SC_HOT_POWER * med_pk)
+    kw_pick = kw_init
+    if hot_pow.any():
+        ex_p = np.where(hot_pow, np.maximum(pk - med_pk, 0.0) / g**2, extra_u)
+        kw_pick = 1 + ex_p / (n0_y / g**2)
+
+    if spread is None:
+        cand = [v for v in SC_SPREADS if v >= (SC_FAST_HZ if len(pair) else equalizer.DEFAULT_SPREAD_HZ)]
+        if loo_rule:
+            cand = [*SC_SPREADS_SLOW, *SC_SPREADS]
+        search = _sc_interior(norm, o_sym[o_kind > 0], n_air)
+        n_p_search = _sc_pilot_counts(nc, search)
+
+        def pick(est_fn, cand):
+            prep = _sc_slepian_prep(o_sym, o_k, o_kind, o_val, db, sup, n0_y / g**2 / p_sig, n0 / p_sig, kw_pick) \
+                if est_fn is _sc_slepian else None
+            fits = [(est_fn(o_sym, o_k, o_kind, o_val, search, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw_pick,
+                            _prep=prep) if prep is not None else
+                     est_fn(o_sym, o_k, o_kind, o_val, search, db, sup, v, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw_pick))[2:]
+                    for v in cand]
+            valid = n_p_search > 0
+            i = int(np.argmin([np.sum(f[0][valid & (~hot_pow)]) for f in fits]))
+            hot_s = _sc_hot(*fits[i], n_p_search, n0_y / g**2)[0] | hot_pow
+            keep_s = valid & (~hot_s)
+            if not keep_s.any():
+                keep_s = valid
+            loo = np.array([np.sum(f[0][keep_s]) for f in fits])
+            if not loo_rule:
+                return cand[int(np.argmin(loo))]
+            i = int(np.argmin(loo))
+            return max(v for v, e in zip(cand, loo) if e <= loo[i] + SC_LOO_TOL * max(loo[i] - np.sum(fits[i][1][keep_s]), 0.0))
+
+        if slep_all:
+            spread = pick(_sc_slepian, cand)
+        elif SC_SEP_HZ and loo_rule:
+            spread = pick(_sc_separable, cand)
+            if spread > SC_SEP_HZ:
+                spread = pick(fast_est, [v for v in cand if v > SC_SEP_HZ])
+        else:
+            spread = pick(fast_est, cand)
+    sep = loo_rule and spread <= SC_SEP_HZ
+    est.update(spread_hz=min(spread, SC_SEP_REPORT_HZ if sep else 4.0), filter_spread_hz=spread)
+
+    def joint(kw=None):
+        est_fn = _sc_slepian if slep_all else (_sc_separable if sep else fast_est)
+        return est_fn(o_sym, o_k, o_kind, o_val, norm, db, sup, spread, n0_y / g**2 / p_sig, n0 / p_sig, p_sig, kw)
+
+    h6, mse6, loo_k, model_k = joint(kw_init)
+    hot, extra = _sc_hot(loo_k, model_k, n_p_norm, n0_y / g**2)
+    if hot_u.any():
+        hot = hot | hot_u
+        extra = np.where(hot_u, extra_u, extra)
+    kw = kw_init
+    for _ in range(SC_HOT_PASSES if (hot & act_p).any() else 0):
+        kw = 1 + extra / (n0_y / g**2)
+        h6, mse6, loo_k, model_k = joint(kw)
+        extra = np.where(hot & act_p, np.maximum(extra + (loo_k - model_k) / np.maximum(n_p_norm, 1), 0.0), extra)
+    cool = (~hot) & act_p
+    if not cool.any():
+        cool = act_p
+    excess = max(float(np.sum(loo_k[cool] - model_k[cool])), 0.0) / max(int(np.sum(n_p_norm[cool])), 1)
+    if excess > 0.25 * n0_y / g**2:
+        n0, n0_y = n0 + excess * g**2, n0_y + excess * g**2
+        extra = np.maximum(extra - excess, 0.0)
+        h6, mse6, _, _ = joint(None if kw is None else 1 + extra / (n0_y / g**2))
+    est.update(n0=n0, n0_snr=n0, n0_k=np.full(nc, n0))
+    if hot.any():  # per data cell, as h: a frame's cells (n_f, 5, nc) are in sending order, not by carrier
+        nk_base = n0 + extra * g**2
+        nk_arr = np.empty((n_f, DATA_SYMS_PER_FRAME, nc))
+        for f_ in range(per):
+            idx = np.flatnonzero(norm % per == f_)
+            if len(idx):
+                Dc_f = sc_frame_cells(nc, f_)[2]
+                nk_arr[idx] = nk_base[Dc_f % nc].reshape(1, DATA_SYMS_PER_FRAME, nc)
+        est["n0_k"] = nk_arr
+    h_flat, m_flat = h6.reshape(n_f, -1), mse6.reshape(n_f, -1)
+    hj = np.empty((n_f, DATA_SYMS_PER_FRAME, nc), dtype=np.complex128)
+    mj = np.empty((n_f, DATA_SYMS_PER_FRAME, nc))
+    rv = np.empty((n_f, SYMS_PER_FRAME, nc), dtype=np.complex128)
+    pil_k = _sc_pil(db, n_air, kc)
+    rv[:, 0] = hp[norm] * (b.pilot[pil_k[norm, :, 1]] if pil_k is not None and pil_k.ndim == 3 else b.pilot)
+    for f_ in range(per):
+        idx = np.flatnonzero(norm % per == f_)
+        if len(idx):
+            Dc_f = sc_frame_cells(nc, f_)[2]
+            hj[idx] = h_flat[idx[:, None], Dc_f].reshape(len(idx), DATA_SYMS_PER_FRAME, nc)
+            mj[idx] = m_flat[idx[:, None], Dc_f].reshape(len(idx), DATA_SYMS_PER_FRAME, nc)
+            rv[idx, 1:] = cells[idx[:, None], Dc_f].reshape(len(idx), DATA_SYMS_PER_FRAME, nc)
+    z6 = np.zeros((n_air, SYMS_PER_FRAME * nc), dtype=np.complex128)
+    w6 = np.zeros(z6.shape)
+    t_rows = (np.arange(n_air)[:, None] * SYMS_PER_FRAME + np.arange(SYMS_PER_FRAME)) * NSYM / FS
+    info = dict(z=z6, w=w6, t_rows=t_rows, norm=norm, h=hj, mse=mj, full=full, ls=ls, n0_y=n0_y)
+    est["h"], est["mse"] = g * hj, g**2 * mj
+    return rv, est, info
+
+
+SC_SPREADS = (2.0, 3.0, 4.5, 7.0, 10.0, 15.0)  # Hz: the fast spread's candidates where no comb measures it (gold)
+SC_SLOW_RHO = 0.35  # frame-apart pilot correlation over this: the spread from it (under ~3.2 Hz)
+SC_WIDEN = 1.25  # that spread, widened: too narrow a filter costs more than too wide (equalizer.filter_spread)
+SC_FRAMES = 4  # the joint estimate's reach, frames either side, at most (0.7 / spread otherwise)
+# ... and at most 2 from SC_JOINT_REACH2_HZ up (w48's 2 Hz mpd took 1.8-2.3 s against TURN_S 1.3 on a CM4 with 3;
+# 1.0 s with 2, 10% points within 0.04 dB, see the commit)
+SC_JOINT_REACH2_HZ = 2.0
+_SC_WEIGHTS: dict = {}  # _sc_joint's, by pattern position and quantized statistics
+
+
+def _sc_slack(nc: int, support: tuple[int, int] | None = None) -> int:
+    """The joint estimate's delay-support padding, samples either side: equalizer.SUPPORT_SLACK, or on a narrow
+    band its delay resolution (FS / bandwidth: 16 on n10, 40 on n4), where a second path inside it reads as one
+    delay (equalizer.support_slack's reason: unpadded, n10 on mpp held to -8 dB of estimate error)."""
+    if nc < 24:
+        return int(round(FS / (nc * RS)))
+    if support is not None:
+        return int(np.clip((52 - (support[1] - support[0])) // 2, 0, equalizer.SUPPORT_SLACK))
+    return equalizer.SUPPORT_SLACK
+
+
+SC_HOT_POWER = 8.0  # _sc_estimate's p_y leaves out carriers this many times the median's power (a tone)
+SC_SEARCH_MIN = 4  # minimum interior frames for spread search (0: every frame)
+
+
+def _sc_interior(frames: np.ndarray, whole: np.ndarray, n_air: int) -> np.ndarray:
+    """The spread search's frames: those whose widest reach (SC_FRAMES frames either side) holds every frame's
+    pilots and no whole pilot symbol (whole: their symbols), which all share one pattern of observations, so one
+    solve a candidate spread; every frame when fewer than SC_SEARCH_MIN do."""
+    reach = SYMS_PER_FRAME * SC_FRAMES + 3
+    c = frames * SYMS_PER_FRAME + 2.5
+    inner = (c - reach >= 0) & (c + reach <= n_air * SYMS_PER_FRAME)
+    inner &= ~np.any(np.abs(whole[None, :] - c[:, None]) < reach, axis=1)
+    return frames[inner] if SC_SEARCH_MIN and inner.sum() >= SC_SEARCH_MIN else frames
+
+
+SC_HOT_PASSES = 1
+SC_HOT_EXCESS = 1.0
+
+
+def _sc_hot(loo_k, model_k, n_p_k, nn: float) -> tuple:
+    """Carriers whose pilots' leave-one-out error (loo_k, model_k) is over the 99th percentile of
+    n_p_k observations' scatter about the median carrier's (equalizer.per_carrier_noise's test), and by at least
+    SC_HOT_EXCESS x the pilots' noise `nn`: -> (hot, their error past the model per pilot (0 elsewhere))."""
+    from scipy.stats import gamma
+
+    n_p = np.broadcast_to(np.asarray(n_p_k, dtype=float), loo_k.shape)
+    act = n_p > 0
+    if not act.any():
+        return np.zeros(loo_k.shape, dtype=bool), np.zeros_like(loo_k)
+    n_eff = np.maximum(n_p, 1.0)
+    t = np.zeros_like(loo_k)
+    t[act] = loo_k[act] / np.maximum(model_k[act], 1e-30)
+    q = gamma.ppf(0.99, n_eff) / n_eff
+    extra = np.where(act, np.maximum(loo_k - model_k, 0.0) / n_eff, 0.0)
+    hot = act & (t > float(np.median(t[act])) * n_eff / np.maximum(n_eff - 1 / 3, 0.5) * q) & (extra >= SC_HOT_EXCESS * nn)
+    if hot[act].all():
+        hot[:] = False
+    return hot, np.where(hot, extra, 0.0)
+
+
+SC_SEP_HZ = 1.5
+SC_SEP_REPORT_HZ = 1.0
+_SC_SEP: dict = {}  # _sc_separable's time weights, by pattern and quantized statistics
+
+
+def _sc_separable(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float,
+                  nr_full: float, p_sig: float, kw=None) -> tuple:
+    """_sc_joint's estimate, separably (its arguments and returns): per carrier in time from its own
+    observations (Wiener, Gaussian Doppler correlation, the same reach), then per symbol across carriers
+    through the delay support (LMMSE), the time step's outputs taken as unbiased observations with the noise
+    their posterior variance implies (e / (1 - e), the prior's unit power)."""
+    b = ofdm.band(band)
+    nc = b.nc
+    q = lambda v, n: round(np.log2(max(v, 1e-9)) * n)  # noqa: E731
+    qs, q1, q2 = q(spread, 8), q(nr_sc, 6), q(nr_full, 6)
+    spread, nr = 2 ** (qs / 8), np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
+    kq = None if kw is None else np.array([q(v, 2) for v in kw])
+    nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
+    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1, SC_FRAMES)) + 3
+    slack = _sc_slack(nc)
+    d = np.arange(support[0] - slack, support[1] + slack + 1)
+    Bd = np.exp(-2j * np.pi * np.outer(b.bb, d) / FS)
+    Rf = Bd @ Bd.conj().T / len(d)
+    tsym = NSYM / FS
+    S = SYMS_PER_FRAME
+    F = len(frames)
+    per = sc_period(nc)
+    p_syms_by_mod = []
+    for f_ in range(per):
+        P_f, PK_f, _ = sc_frame_cells(nc, f_)
+        p_syms_by_mod.append([(P_f // nc)[PK_f == k] for k in range(nc)])
+    xh = np.zeros((F, S, nc), dtype=np.complex128)
+    ev = np.full((F, S, nc), 1e8)
+    pil_obs = []
+    for k in range(nc):
+        m = o_k == k
+        ts, kd, vs = o_sym[m], o_kind[m], o_val[m]
+        order = np.argsort(ts, kind="stable")
+        ts, kd, vs = ts[order], kd[order], vs[order]
+        for i, f in enumerate(frames):
+            lo, hi = np.searchsorted(ts, [f * S + 2.5 - reach, f * S + 2.5 + reach])
+            if lo == hi:
+                continue
+            rel, kk = ts[lo:hi] - f * S, kd[lo:hi]
+            psyms = p_syms_by_mod[int(f) % per][k]
+            key = (qs, q1, q2, int(kq[k]) if kq is not None else 0, psyms.tobytes(), rel.tobytes(), kk.tobytes())
+            got = _SC_SEP.get(key)
+            if got is None:
+                A = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread)
+                A[np.diag_indices_from(A)] += nr[kk] * nk[k]
+                Bm = equalizer._doppler_corr((np.arange(S)[:, None] - rel[None, :]) * tsym, spread)
+                W = np.linalg.solve(A, Bm.T).T  # (S, n), real
+                e = np.clip(1 - np.sum(W * Bm, axis=1), 1e-9, 0.999)
+                cols = np.array([int(np.flatnonzero((rel == s_p) & (kk == 0))[0]) for s_p in psyms], dtype=int)
+                got = (W / (1 - e)[:, None], e / (1 - e), cols)
+                if len(_SC_SEP) >= 4096:
+                    _SC_SEP.clear()
+                _SC_SEP[key] = got
+            Wu, nu, cols = got
+            v_win = vs[lo:hi]
+            xh[i, :, k] = Wu @ v_win
+            ev[i, :, k] = nu
+            for s_p, col in zip(psyms, cols):
+                pil_obs.append((i, k, int(s_p), float(Wu[int(s_p), col]), v_win[col]))
+    h = np.empty((F, S, nc), dtype=np.complex128)
+    mse = np.empty((F, S, nc))
+    loo, model = np.zeros(nc), np.zeros(nc)
+    cache: dict = {}
+    for i in range(F):
+        for s_ in range(S):
+            e = ev[i, s_]
+            ck = e.tobytes()
+            G = cache.get(ck)
+            if G is None:
+                G = np.linalg.solve(Rf + np.diag(e), Rf).conj().T
+                cache[ck] = G = (G, np.maximum(np.real(np.diag(Rf) - np.sum(G * Rf.conj(), axis=1)), 0.0))
+            h[i, s_] = G[0] @ xh[i, s_]
+            mse[i, s_] = p_sig * G[1]
+    for i, k, s_p, ownt_v, yp_v in pil_obs:
+        own = min(float(np.real(cache[ev[i, s_p].tobytes()][0][k, k])) * ownt_v, 0.99)
+        loo[k] += abs((yp_v - h[i, s_p, k]) / (1 - own)) ** 2
+        model[k] += p_sig * nr[0] * nk[k] / (1 - own)
+    return h, mse, loo, model
+
+
+@lru_cache(maxsize=512)
+def _slepian_basis(bb_bytes: bytes, d0: int, d1: int, slack: int) -> tuple:
+    """Orthonormal DPSS/Slepian basis Uf (nc, r) and eigenvalues lam (r,) of the delay-support covariance Rf.
+    For uniform carrier grids uses Grunbaum's (1981) commuting symmetric tridiagonal matrix whose eigenvalues
+    are strictly simple (avoiding arbitrary rotations inside Rf's near-degenerate top eigenspace)."""
+    bb = np.frombuffer(bb_bytes)
+    nc = len(bb)
+    d = np.arange(d0 - slack, d1 + slack + 1)
+    W = len(d)
+    Bd = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
+    Rf = Bd @ Bd.conj().T / W
+    df = float(bb[1] - bb[0]) if nc > 1 else float(RS)
+    M_eff = FS / df if df > 0 else 0.0
+    if nc > 1 and W < M_eff and np.allclose(np.diff(bb), df, rtol=0.0, atol=1e-6):
+        k = np.arange(nc, dtype=np.float64)
+        diag = -np.cos(np.pi * W / M_eff) * np.cos(np.pi * (2.0 * k - (nc - 1)) / M_eff)
+        off = np.sin(np.pi * (k[:-1] + 1.0) / M_eff) * np.sin(np.pi * (nc - 1.0 - k[:-1]) / M_eff)
+        T = np.diag(diag) + np.diag(off, 1) + np.diag(off, -1)
+        ev_t, V = np.linalg.eigh(T)
+        V = V[:, np.argsort(-ev_t, kind="stable")]
+        d_mid = 0.5 * ((d0 - slack) + (d1 + slack))
+        evecs = np.exp(-2j * np.pi * bb * d_mid / FS)[:, None] * V
+        evals = np.real(np.einsum("ij,ik,kj->j", evecs.conj(), Rf, evecs))
+    else:
+        evals, evecs = np.linalg.eigh(Rf)
+        order = np.argsort(-evals, kind="stable")
+        evals, evecs = evals[order], evecs[:, order]
+    keep = evals > 1e-4 * evals[0]
+    lam = np.ascontiguousarray(evals[keep])
+    Uf = np.ascontiguousarray(evecs[:, keep])
+    Uf_abs2 = np.ascontiguousarray(np.abs(Uf) ** 2)
+    rem_diag = np.ascontiguousarray(np.maximum(np.real(np.diag(Rf)) - Uf_abs2 @ lam, 0.0))
+    Rf = np.ascontiguousarray(Rf)
+    for a in (lam, Uf, Uf_abs2, rem_diag, Rf):
+        a.setflags(write=False)
+    return Rf, Uf, lam, Uf_abs2, rem_diag
+
+
+def _sc_slepian_prep(o_sym, o_k, o_kind, o_val, band: str, support, nr_sc: float, nr_full: float, kw=None) -> tuple:
+    """Frequency projection onto the Slepian subspace (independent of Doppler spread)."""
+    b = ofdm.band(band)
+    nc = b.nc
+    q = lambda v, n: round(np.log2(max(v, 1e-9)) * n)  # noqa: E731
+    q1, q2 = q(nr_sc, 6), q(nr_full, 6)
+    nr = np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
+    kq = None if kw is None else np.array([q(v, 2) for v in kw])
+    nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
+    d0, d1 = int(support[0]), int(support[1])
+    intra = _sc_intra_spec(nc)
+    max_d = 79 if (intra is not None and intra[0] == 2) else 52
+    if d1 - d0 > max_d:
+        mid = (d0 + d1) // 2
+        d0, d1 = mid - max_d // 2, mid - max_d // 2 + max_d
+    slack = _sc_slack(nc, (d0, d1))
+    Rf, Uf, lam, Uf_abs2, rem_diag = _slepian_basis(
+        np.asarray(b.bb, dtype=np.float64).tobytes(), d0, d1, int(slack))
+    r = len(lam)
+    order = np.argsort(o_sym, kind="stable")
+    os_s, ok_s, okd_s, ov_s = o_sym[order], o_k[order], o_kind[order], o_val[order]
+    u_syms, starts = np.unique(os_s, return_index=True)
+    ends = np.append(starts[1:], len(os_s))
+    Q = len(u_syms)
+    y_tilde = np.empty((Q, r), dtype=np.complex128)
+    nu_row = np.empty((Q, r))
+    Wu_list = [None] * Q
+    row_cache: dict = {}
+    kq_bytes = None if kq is None else kq.tobytes()
+    full_k = np.arange(nc)
+    for q_idx in range(Q):
+        a, b_ = starts[q_idx], ends[q_idx]
+        ks, kd, yq = ok_s[a:b_], okd_s[a:b_], ov_s[a:b_]
+        rkey = (ks.tobytes(), kd.tobytes(), kq_bytes)
+        rg = row_cache.get(rkey)
+        if rg is None:
+            if kq is None and len(ks) == nc and np.array_equal(ks, full_k) and np.all(kd == kd[0]):
+                Wu = Uf.conj().T
+                nu = np.full(r, nr[kd[0]])
+            else:
+                eta = nr[kd] * nk[ks]
+                B = Rf[ks, :] @ Uf
+                G = np.linalg.solve(Rf[np.ix_(ks, ks)] + np.diag(eta), B).conj().T
+                c = np.clip(np.real(np.sum(G * B.T, axis=1)), 1e-8 * lam, (1.0 - 1e-7) * lam)
+                Wu = G * (lam / c)[:, None]
+                nu = np.minimum(lam * (lam - c) / c, 1e8 * lam)
+            row_cache[rkey] = rg = (Wu, nu)
+        Wu, nu = rg
+        Wu_list[q_idx] = Wu
+        y_tilde[q_idx] = Wu @ yq
+        nu_row[q_idx] = nu
+    return nc, nr, nk, Uf, lam, Uf_abs2, rem_diag, u_syms, starts, ends, ok_s, okd_s, ov_s, y_tilde, nu_row, Wu_list
+
+
+def _sc_slepian(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float, nr_full: float,
+                p_sig: float, kw=None, _prep=None) -> tuple:
+    """Slepian-mode separable 2-D LMMSE: project each pilot symbol's comb onto orthonormal eigenvectors of Rf
+    (unbiased mode observations + posterior noise), then run r decoupled 1-D real Wiener solves in time."""
+    if _prep is None:
+        _prep = _sc_slepian_prep(o_sym, o_k, o_kind, o_val, band, support, nr_sc, nr_full, kw)
+    nc, nr, nk, Uf, lam, Uf_abs2, rem_diag, u_syms, starts, ends, ok_s, okd_s, ov_s, y_tilde, nu_row, Wu_list = _prep
+    qs = round(np.log2(max(spread, 1e-9)) * 8)
+    spread = 2 ** (qs / 8)
+    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1, SC_FRAMES)) + 3
+    tsym = NSYM / FS
+    S = SYMS_PER_FRAME
+    F = len(frames)
+    r = len(lam)
+    h = np.empty((F, S, nc), dtype=np.complex128)
+    mse = np.empty((F, S, nc))
+    loo, model = np.zeros(nc), np.zeros(nc)
+    t_cache: dict = {}
+    s_grid = np.arange(S)[:, None]
+    for i, f in enumerate(frames):
+        lo, hi = np.searchsorted(u_syms, [f * S + 2.5 - reach, f * S + 2.5 + reach])
+        rel = u_syms[lo:hi] - f * S
+        nu_win = nu_row[lo:hi]
+        tkey = (rel.tobytes(), nu_win.tobytes())
+        tg = t_cache.get(tkey)
+        if tg is None:
+            J = len(rel)
+            Kt = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread)
+            Kdt = equalizer._doppler_corr((s_grid - rel[None, :]) * tsym, spread)
+            A_t = np.broadcast_to(Kt, (r, J, J)).copy()
+            idx_j = np.arange(J)
+            A_t[:, idx_j, idx_j] += (nu_win / lam).T
+            W_t = np.linalg.solve(A_t, np.broadcast_to(Kdt.T, (r, J, S))).swapaxes(1, 2)  # (r, S, J)
+            e_mode = lam[:, None] * np.maximum(1.0 - np.sum(W_t * Kdt[None, :, :], axis=2), 0.0)
+            mse_f = p_sig * (rem_diag[None, :] + e_mode.T @ Uf_abs2.T)
+            t_cache[tkey] = tg = (W_t, mse_f)
+        W_t, mse_f = tg
+        a_hat = np.einsum("rsj,jr->sr", W_t, y_tilde[lo:hi])
+        h[i] = a_hat @ Uf.T
+        mse[i] = mse_f
+        for j in range(len(rel)):
+            rj = rel[j]
+            if 0.0 <= rj < S and rj == int(rj):
+                q_idx = lo + j
+                a, b_ = starts[q_idx], ends[q_idx]
+                if okd_s[a] == 0:
+                    s_p = int(rj)
+                    ks, yq, Wu = ok_s[a:b_], ov_s[a:b_], Wu_list[q_idx]
+                    own = np.minimum(np.real(np.sum(Uf[ks, :].T * (W_t[:, s_p, j][:, None] * Wu), axis=0)), 0.99)
+                    np.add.at(loo, ks, np.abs((yq - h[i, s_p, ks]) / (1.0 - own)) ** 2)
+                    np.add.at(model, ks, p_sig * nr[0] * nk[ks] / (1.0 - own))
+    return h, mse, loo, model
+
+
+def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float, nr_full: float,
+              p_sig: float, kw=None) -> tuple:
+    """2-D LMMSE of the channel at every cell of `frames` (on-air frame
+    indices) from the observations within reach in time, all carriers."""
+    b = ofdm.band(band)
+    nc = b.nc
+    q = lambda v, n: round(np.log2(max(v, 1e-9)) * n)  # noqa: E731
+    qs, q1, q2 = q(spread, 8), q(nr_sc, 6), q(nr_full, 6)
+    spread, nr = 2 ** (qs / 8), np.array([2 ** (q1 / 6), 2 ** (q2 / 6), 2 ** (q2 / 6) / REF_REPEATS])
+    kq = None if kw is None else np.array([q(v, 2) for v in kw])  # to 1.5 dB
+    nk = np.ones(nc) if kq is None else 2 ** (kq / 2)
+    reach = SYMS_PER_FRAME * float(np.clip(np.ceil(0.7 / spread / equalizer.FRAME_S), 1,
+                                           2 if spread >= SC_JOINT_REACH2_HZ else SC_FRAMES)) + 3
+    slack = _sc_slack(nc)
+    d = np.arange(support[0] - slack, support[1] + slack + 1)
+    Rf = None
+    tsym = NSYM / FS
+    cs, ck = np.divmod(np.arange(SYMS_PER_FRAME * nc), nc)
+    loo, model = np.zeros(nc), np.zeros(nc)
+    h = np.empty((len(frames), SYMS_PER_FRAME * nc), dtype=np.complex128)
+    mse = np.empty(h.shape)
+    order = np.argsort(o_sym, kind="stable")
+    o_sym, o_k, o_kind, o_val = o_sym[order], o_k[order], o_kind[order], o_val[order]
+    for i, f in enumerate(frames):
+        P, PK, _ = sc_frame_cells(nc, int(f))
+        lo, hi = np.searchsorted(o_sym, [f * SYMS_PER_FRAME + 2.5 - reach, f * SYMS_PER_FRAME + 2.5 + reach])
+        rel, k, kd = o_sym[lo:hi] - f * SYMS_PER_FRAME, o_k[lo:hi], o_kind[lo:hi]
+        key = (band, int(support[0]), int(support[1]), slack, qs, q1, q2, rel.tobytes(), k.tobytes(), kd.tobytes(),
+               None if kq is None else kq.tobytes())
+        got = _SC_WEIGHTS.get(key)
+        if got is None:
+            if Rf is None:
+                Bd = np.exp(-2j * np.pi * np.outer(b.bb, d) / FS)
+                Rf = Bd @ Bd.conj().T / len(d)
+            A = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread) * Rf[k[:, None], k[None, :]]
+            A[np.diag_indices_from(A)] += nr[kd] * nk[k]
+            Bm = equalizer._doppler_corr((cs[:, None] - rel[None, :]) * tsym, spread) * Rf[ck[:, None], k[None, :]]
+            W = np.linalg.solve(A, Bm.conj().T).conj().T
+            col = np.array([np.flatnonzero((rel == c // nc) & (k == kk) & (kd == 0))[0] for c, kk in zip(P, PK)])
+            got = (W, np.maximum(1 - np.real(np.sum(W * Bm.conj(), axis=1)), 0.0), col, np.real(W[P, col]))
+            if len(_SC_WEIGHTS) >= 256:
+                _SC_WEIGHTS.clear()
+            _SC_WEIGHTS[key] = got
+        h[i] = got[0] @ o_val[lo:hi]
+        mse[i] = p_sig * got[1]
+        own = np.minimum(got[3], 0.99)
+        np.add.at(loo, PK, np.abs((o_val[lo:hi][got[2]] - h[i][P]) / (1 - own)) ** 2)
+        np.add.at(model, PK, p_sig * nr[0] * nk[PK] / (1 - own))
+    return h.reshape(len(frames), SYMS_PER_FRAME, nc), mse.reshape(len(frames), SYMS_PER_FRAME, nc), loo, model
+
+
+_SC_CAL: dict = {}
+
+
+def _cal_payload(n: int, state: list) -> bytes:
+    """n bytes of splitmix64 (state[0] its counter): _sc_cal's payloads, which native (modem/scattered.cpp) makes
+    the same way; numpy's generator has no port there."""
+    out = b""
+    m = (1 << 64) - 1
+    while len(out) < n:
+        state[0] = (state[0] + 0x9E3779B97F4A7C15) & m
+        z = state[0]
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & m
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & m
+        out += (z ^ (z >> 31)).to_bytes(8, "little")
+    return out[:n]
+
+
+def _sc_cal(spec) -> tuple:
+    """A submode's scattered pilots as its transmitter leaves them, measured
+    once on clean bursts of its own: (their gain over the data cells', their
+    distortion over their own power)."""
+    if codes.payload_bytes(spec) <= 0:
+        return (1.0, spec.clip.ratio)
+    key = (spec.name, SC_RESTORE_ACE, tuple(SC_BANDS))
+    if key not in _SC_CAL:
+        _SC_CAL[key] = (1.0, spec.clip.ratio)  # while measuring
+        b = ofdm.band(spec.band)
+        state = [0]
+        num_p = np.zeros(b.nc, dtype=np.complex128)
+        den_p = np.zeros(b.nc)
+        num_d = np.zeros(b.nc, dtype=np.complex128)
+        den_d = np.zeros(b.nc)
+        parts = []
+        for _ in range(2):
+            n_cw = min(4, max_codewords(spec.sync_band))
+            bits = np.stack([codes.encode(spec, _cal_payload(codes.payload_bytes(spec), state), 0, index=i)
+                             for i in range(n_cw)])
+            x = modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
+            r = receive(np.concatenate([np.zeros(800), x, np.zeros(800)]),
+                        known=dict(start=800 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=n_cw))
+            X = constellation.modulate(codes.spread(bits, spec.bits_per_cu), constellation.load(spec.constellation))
+            Y = data_symbols(r["raw"]).reshape(len(r["raw"]), -1)
+            X = X.reshape(Y.shape)
+            ls, norm = r["sc"]["ls"], r["sc"]["norm"]
+            for idx, fa in enumerate(norm):
+                _, PK_f, Dc_f = sc_frame_cells(b.nc, int(fa))
+                yx = Y[idx] * X[idx].conj()
+                num_d += np.bincount(Dc_f % b.nc, yx.real, b.nc) + 1j * np.bincount(Dc_f % b.nc, yx.imag, b.nc)
+                den_d += np.bincount(Dc_f % b.nc, np.abs(X[idx]) ** 2, b.nc)
+                num_p += np.bincount(PK_f, ls[idx].real, b.nc) + 1j * np.bincount(PK_f, ls[idx].imag, b.nc)
+                den_p += np.bincount(PK_f, minlength=b.nc)
+            parts.append((ls, norm))
+        p_mask = den_p > 0
+        gd = num_d / den_d
+        gp = np.zeros(b.nc, dtype=np.complex128)
+        gp[p_mask] = num_p[p_mask] / den_p[p_mask]
+        err = sum(float(np.sum(np.abs(ls[idx] - gp[sc_frame_cells(b.nc, int(fa))[1]]) ** 2))
+                  for ls, norm in parts for idx, fa in enumerate(norm))
+        tot_gp = sum(float(np.sum(np.abs(gp[sc_frame_cells(b.nc, int(fa))[1]]) ** 2))
+                     for _, norm in parts for fa in norm)
+        _SC_CAL[key] = (float(np.real(np.vdot(gd[p_mask], gp[p_mask]) / np.vdot(gd[p_mask], gd[p_mask]))),
+                        err / max(tot_gp, 1e-30))
+    return _SC_CAL[key]
+
+
+def sc_refine(r: dict, z: np.ndarray | None, w: np.ndarray | None) -> tuple:
+    """Decision-directed pass on a scattered-pilot burst: data cells z with
+    inverse variances w ((n_f, 5, nc) as est["h"], the pilots' units) ->
+    h, mse (n_f, 5, nc), the pilots' units."""
+    i, b = r["sc"], ofdm.band(r["band"])
+    norm = i["norm"]
+    n_f = len(norm)
+    z6, w6 = i["z"].copy(), i["w"].copy()
+    zf, wf, hf = z.reshape(n_f, -1), w.reshape(n_f, -1), i["h"].reshape(n_f, -1)
+    for idx, fa in enumerate(norm):
+        Dc = sc_frame_cells(b.nc, int(fa))[2]
+        z6[fa, Dc] = np.where(wf[idx] > 0, zf[idx] - hf[idx], 0)
+        w6[fa, Dc] = wf[idx]
+    prior = dict(r["est"], p_sig=float(np.mean(i["mse"])))
+    dh, mse = equalizer.refine(np.zeros((0, b.nc), dtype=np.complex128), np.zeros(0), z6.reshape(-1, b.nc),
+                               w6.reshape(-1, b.nc), i["t_rows"], r["support"], prior, b.bb)
+    dh6, mse6 = dh.reshape(len(i["t_rows"]), -1), mse.reshape(len(i["t_rows"]), -1)
+    out_h = np.empty((n_f, DATA_SYMS_PER_FRAME, b.nc), dtype=np.complex128)
+    out_m = np.empty((n_f, DATA_SYMS_PER_FRAME, b.nc))
+    for idx, fa in enumerate(norm):
+        Dc = sc_frame_cells(b.nc, int(fa))[2]
+        out_h[idx] = dh6[fa, Dc].reshape(DATA_SYMS_PER_FRAME, b.nc)
+        out_m[idx] = mse6[fa, Dc].reshape(DATA_SYMS_PER_FRAME, b.nc)
+    return i["h"] + out_h, out_m
 
 
 def resolve_alias(fine: float, coarse: float) -> float:

@@ -62,10 +62,28 @@ def import_native():
     return data2g_native, None
 
 
+# modem's scattered-pilot globals (and the constants its estimate reads): native has them as the process started.
+# A test that patches one (e.g. SC_SEP_HZ) keeps that call in Python; compared by identity.
+SC_NAMES = ("SC_BANDS", "SC_STRIDES", "SC_RESTORE_ACE", "SC_SPREADS_SLOW", "SC_LOO_TOL", "SC_COPY_SUBBINS",
+            "SC_FAST_HZ", "SC_SPREADS", "SC_SLOW_RHO", "SC_WIDEN", "SC_FRAMES", "SC_SEP_HZ", "SC_SEP_REPORT_HZ",
+            "SC_JOINT_REACH2_HZ", "SC_SEARCH_MIN", "SC_HOT_PASSES", "SC_HOT_EXCESS", "SC_HOT_POWER")
+_sc0 = {}
+
+
+def sc_same() -> bool:
+    """Whether modem's scattered-pilot globals are what native has (see SC_NAMES)."""
+    from data2g import modem
+
+    if not _sc0:
+        _sc0.update({n: getattr(modem, n) for n in SC_NAMES})
+    return all(getattr(modem, n) is v for n, v in _sc0.items())
+
+
 def build(native, skip=()):
     unknown = set(skip) - PROVIDERS.keys()
     if unknown:
         raise KeyError(f"no provider {', '.join(sorted(unknown))}")
+    sc_same()  # the unpatched globals, before any test runs
     subs = {}
     for name, p in PROVIDERS.items():
         if name not in skip:

@@ -353,9 +353,12 @@ def _dd_estimate(r: modem.Received, post: dict) -> modem.DataEstimate:
         z = np.where(k, y / (g * x), 0)
     # modem.noise_var's with |h|^2 at its expectation g^2 p, plus the soft symbol's own variance
     w = np.where(k, g**2 * np.abs(x) ** 2 / (est.get("n0_k", est["n0"]) + est["clip_ratio"] * g**2 * p + g**2 * p * v), 0)
-    t_rows, t_pilot = modem.symbol_times(r)
-    h, mse = equalizer.refine(r["hp"], t_pilot, z.reshape(-1, nc), w.reshape(-1, nc), t_rows, r["support"], est,
-                              ofdm.band(spec.band).bb)
+    if "sc" in r:  # scattered pilots (config.SC_BANDS): the cells at their own symbols
+        h, mse = modem.sc_refine(r, z, w)
+    else:
+        t_rows, t_pilot = modem.symbol_times(r)
+        h, mse = equalizer.refine(r["hp"], t_pilot, z.reshape(-1, nc), w.reshape(-1, nc), t_rows, r["support"], est,
+                                  ofdm.band(spec.band).bb)
     out = dict(est)
     out["h"] = g * h.reshape(shape)
     out["mse"] = g**2 * mse.reshape(shape)

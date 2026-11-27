@@ -36,7 +36,8 @@ host.Host / kisslink.KissLink          what to send (ARQ stream, broadcast frame
                                         rate matching at the RV, BICM interleave
        codes.spread                     codewords across the burst's symbols
        modem.modulate_bits              constellation.modulate -> ofdm.Band.modulate_symbols
-                                        (preamble, header, frames of 1 pilot + 5 data symbols)
+                                        (preamble, header, 6-symbol frames: 1/6 scattered pilots
+                                        on HF, 1 pilot + 5 data rows on FM)
                                         -> waveform.dsp.tx_condition (clip and filter)
        or cpm.modulate                  tones, Costas sync blocks, header; cpm.bandpass
   -> arq.engine.Engine.step             plays it out, PTT, half duplex
@@ -113,7 +114,7 @@ The exceptions:
 
 | Python | Native |
 |---|---|
-| `modem.py` | `core/modem/modem` and `core/modem/timing` (burst timing arithmetic) |
+| `modem.py` | `core/modem/modem`, `core/modem/scattered` (HF scattered pilots) and `core/modem/timing` (burst timing arithmetic) |
 | `waveform/dsp.py` | `core/waveform/dsp`. `core/dsp/` is numpy/scipy, with no Python twin. |
 | `audio.py` | `core/audio/filters` (Decimator, Interpolator, Blanker), `fifo` (Capture, Player), `audio` (device selection), and the backends |
 | `tnc.py` | `core/tnc` (KISS codec); its TCP server is `app/tcp_servers`, PTT `core/rig` |
@@ -232,7 +233,9 @@ tests are marked `slow` and skipped unless asked for (`-m slow`).
   whose preamble and header it uses (`n4` syncs on `n10`). A CPM **grid**
   (tones, spacing) is CPM's band.
 - **cu**: channel use, one carrier in one data symbol.
-- **Frame**: 1 pilot + 5 data symbols on every carrier of the band.
+- **Frame**: 6 OFDM symbols on every carrier of the band (1/6 scattered pilots
+  on HF — rotating 3-symbol combs on `w`/`w48`, scattered cells on `n10`/`n4`;
+  1 whole pilot + 5 data rows on FM).
 - **RV / IR**: redundancy version; incremental redundancy. A resend at
   another RV carries other parity bits, combined with the first copy's soft
   bits (HARQ).

@@ -143,8 +143,12 @@ py::dict est_dict(const modem::DataEstimate& e) {
     d["h"] = np3(e.h, S);
     d["mse"] = np3(e.mse, S);
     d["n0"] = e.n0;
-    // per frame (EST_WINDOW) as Python keeps it, (F, 1, nc); else (nc,)
-    if (e.h.cols && e.n0_k.size() > e.h.cols)
+    // per data cell as h (scattered pilots' hot carriers), (F, 5, nc); per frame (EST_WINDOW) as Python keeps it,
+    // (F, 1, nc); else (nc,)
+    if (e.h.cols && e.n0_k.size() == e.h.data.size())
+        d["n0_k"] = np(e.n0_k).reshape(std::vector<py::ssize_t>{static_cast<py::ssize_t>(e.h.rows / S),
+                                                                 static_cast<py::ssize_t>(S), static_cast<py::ssize_t>(e.h.cols)});
+    else if (e.h.cols && e.n0_k.size() > e.h.cols)
         d["n0_k"] = np(e.n0_k).reshape(std::vector<py::ssize_t>{
             static_cast<py::ssize_t>(e.n0_k.size() / e.h.cols), 1, static_cast<py::ssize_t>(e.h.cols)});
     else
@@ -175,6 +179,40 @@ modem::DataEstimate est_of(const py::dict& d) {
     return e;
 }
 
+py::dict sc_dict(const modem::ScInfo& i) {
+    constexpr std::size_t S = config::DATA_SYMS_PER_FRAME;
+    const std::size_t nc = i.h.cols, n_air = static_cast<std::size_t>(i.n_air), C = config::SYMS_PER_FRAME * nc;
+    py::dict d;
+    d["z"] = np(Mat<cd>(n_air, C));  // the DD pass's starting cells (Python's): zeros
+    d["w"] = np(Mat<double>(n_air, C));
+    Mat<double> t(n_air, config::SYMS_PER_FRAME);
+    for (std::size_t a = 0; a < n_air; ++a)
+        for (std::size_t s = 0; s < static_cast<std::size_t>(config::SYMS_PER_FRAME); ++s)
+            t[a][s] = static_cast<double>((a * config::SYMS_PER_FRAME + s) * config::NSYM) / config::FS;
+    d["t_rows"] = np(t);
+    d["norm"] = np<std::int64_t>(std::span<const int>(i.norm));
+    d["h"] = np3(i.h, S);
+    d["mse"] = np3(i.mse, S);
+    d["full"] = np(i.full);
+    d["ls"] = np(i.ls);
+    d["n0_y"] = i.n0_y;
+    return d;
+}
+
+std::shared_ptr<const modem::ScInfo> sc_of(const py::dict& r) {
+    if (!r.contains("sc")) return nullptr;
+    const auto d = r["sc"].cast<py::dict>();
+    auto i = std::make_shared<modem::ScInfo>();
+    for (auto v : vec(d["norm"].cast<In<std::int64_t>>())) i->norm.push_back(static_cast<int>(v));
+    i->h = mat2(d["h"].cast<In<cd>>());
+    i->mse = mat2(d["mse"].cast<In<double>>());
+    if (d.contains("full")) i->full = mat2(d["full"].cast<In<cd>>());
+    if (d.contains("ls")) i->ls = mat2(d["ls"].cast<In<cd>>());
+    i->n0_y = d.contains("n0_y") ? d["n0_y"].cast<double>() : 0.0;
+    i->n_air = static_cast<int>(d["t_rows"].cast<In<double>>().shape(0));
+    return i;
+}
+
 // The Received fields the decode helpers read (burst_soft .. decode_received), from receive()'s dict.
 modem::Received received_of(const py::dict& r) {
     modem::Received rx;
@@ -187,6 +225,7 @@ modem::Received received_of(const py::dict& r) {
     rx.cfo = get<double>(r, "cfo", 0.0);
     rx.preamble_start = get<std::int64_t>(r, "preamble_start", 0);
     rx.frames_in = get<int>(r, "frames_in", rx.n_cw * rx.spec->frames_per_cw);
+    rx.sc = sc_of(r);
     return rx;
 }
 
@@ -211,6 +250,7 @@ py::dict received_dict(const modem::Received& r) {
     d["seen_support"] = py::make_tuple(r.seen_support.first, r.seen_support.second);
     d["preamble_start"] = r.preamble_start;
     d["score"] = r.score;
+    if (r.sc) d["sc"] = sc_dict(*r.sc);
     return d;
 }
 
@@ -251,6 +291,7 @@ using OptStats = std::optional<std::map<std::string, std::optional<In<double>>>>
 py::dict modem_lock_dict(const modem::Lock& l) { return lock_dict(l); }
 py::dict modem_received_dict(const modem::Received& r) { return received_dict(r); }
 std::optional<modem::Accept> modem_accept_of(const py::object& a) { return accept_of(a); }
+std::shared_ptr<const modem::ScInfo> modem_sc_of(const py::dict& r) { return sc_of(r); }
 
 void bind_modem(py::module_& m) {
     namespace mo = modem;
@@ -312,13 +353,33 @@ void bind_modem(py::module_& m) {
     d.def("bin_phase_step", [](const In<cd>& h) { return mo::bin_phase_step(view(h)); });
     d.def("demod_frames", [](const In<cd>& z, std::int64_t p, int n_f, int shift, double phi_ref,
                              const std::optional<In<double>>& steps_in, const std::string& band,
-                             const std::optional<In<std::int64_t>>& slips_in) {
+                             const std::optional<In<std::int64_t>>& slips_in, const std::optional<In<std::int64_t>>& pil,
+                             std::optional<int> close_at) {
         const std::vector<double> si = steps_in ? vec(*steps_in) : std::vector<double>();
         const std::vector<std::int64_t> sl = slips_in ? vec(*slips_in) : std::vector<std::int64_t>();
-        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl);
+        Mat<int> pm, pk;
+        if (pil) {
+            if (pil->ndim() == 3) {
+                const std::size_t rows = static_cast<std::size_t>(pil->shape(0));
+                const std::size_t nc = static_cast<std::size_t>(pil->shape(1));
+                pm = Mat<int>(rows, nc);
+                pk = Mat<int>(rows, nc);
+                for (std::size_t i = 0; i < rows * nc; ++i) {
+                    pm.data[i] = static_cast<int>(pil->data()[2 * i]);
+                    pk.data[i] = static_cast<int>(pil->data()[2 * i + 1]);
+                }
+            } else {
+                const std::size_t nc = static_cast<std::size_t>(pil->shape(pil->ndim() - 1));
+                pm = Mat<int>(static_cast<std::size_t>(pil->size()) / nc, nc);
+                for (std::size_t i = 0; i < pm.data.size(); ++i) pm.data[i] = static_cast<int>(pil->data()[i]);
+            }
+        }
+        const auto f = mo::demod_frames(view(z), p, n_f, shift, phi_ref, si, band, sl,
+                                        pil ? &pm : nullptr, close_at, pk.rows ? &pk : nullptr);
         return py::make_tuple(np3(f.raw, config::SYMS_PER_FRAME), np(f.hp), np(f.steps), np(f.slips));
     }, py::arg("z"), py::arg("p"), py::arg("n_f"), py::arg("shift"), py::arg("phi_ref"),
-       py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none());
+       py::arg("steps_in") = py::none(), py::arg("band") = "w", py::arg("slips_in") = py::none(),
+       py::arg("pil") = py::none(), py::arg("close_at") = py::none());
     d.def("read_header", [](const In<cd>& z, std::int64_t start, const std::string& band, const py::object& accept) {
         const auto a = accept_of(accept);
         return header_dict(mo::read_header(view(z), start, band, a ? &*a : nullptr));
@@ -380,23 +441,35 @@ void bind_modem(py::module_& m) {
                               std::isnan(peak) ? py::object(py::none()) : py::object(py::float_(peak)));
     }, py::arg("x"), py::arg("band"), py::arg("accept") = py::none(), py::arg("C") = py::none(),
        py::arg("level") = py::none(), py::arg("D") = py::none(), py::arg("fold") = py::none());
-    d.def("presence_window", [](std::size_t dcols, std::int64_t window) { return mo::presence_window(dcols, window); });
-    d.def("fold_presence", [](const In<cd>& fold, double level, int mm) { return mo::fold_presence(mat(fold), level, mm); });
-    d.def("presence_verdict", &mo::presence_verdict);
+    d.def("presence_window", [](std::size_t dcols, std::int64_t window, int decim, int pad_frames) {
+        return mo::presence_window(dcols, window, decim, pad_frames);
+    }, py::arg("dcols"), py::arg("window"), py::arg("decim") = 1, py::arg("pad_frames") = mo::COPY_PAIRS);
+    d.def("fold_presence", [](const In<cd>& fold, double level, int mm, const std::optional<In<double>>& row_w) {
+        return mo::fold_presence(mat(fold), level, mm, row_w ? view(*row_w) : std::span<const double>{});
+    }, py::arg("fold"), py::arg("level"), py::arg("m"), py::arg("row_w") = py::none());
+    d.def("presence_verdict", [](double peak, double contrast, int m, const std::string& band) {
+        return mo::presence_verdict(peak, contrast, m, band);
+    }, py::arg("peak"), py::arg("contrast"), py::arg("m"), py::arg("band") = "");
     d.def("pilot_presence", [](const In<cd>& D, double level, std::int64_t window) {
         const auto dm = mat(D);
         return mo::pilot_presence(dm.row_ptrs(), dm.cols, level, window);
     });
-    d.def("fold_verify", [](const In<double>& x, const std::string& band, const In<cd>& fold, int fold_phase0) {
-        return mo::fold_verify(view(x), band_view(band), mat(fold), fold_phase0);
-    }, py::arg("x"), py::arg("band"), py::arg("fold"), py::arg("fold_phase0") = 0);
+    d.def("fold_verify", [](const In<double>& x, const std::string& band, const In<cd>& fold, std::int64_t fold_phase0,
+                            int decim, const std::optional<In<double>>& row_w) {
+        return mo::fold_verify(view(x), band_view(band), mat(fold), fold_phase0, decim,
+                               row_w ? view(*row_w) : std::span<const double>{});
+    }, py::arg("x"), py::arg("band"), py::arg("fold"), py::arg("fold_phase0") = 0, py::arg("decim") = 1,
+       py::arg("row_w") = py::none());
     d.def("pilot_present", [](const In<cd>& D, double level, std::int64_t window,
-                              const std::optional<In<double>>& x, const std::optional<std::string>& band) {
+                              const std::optional<In<double>>& x, const std::optional<std::string>& band,
+                              int decim, std::int64_t stream_lo, const std::optional<In<double>>& row_w) {
         const auto dm = mat(D);
         return mo::pilot_present(dm.row_ptrs(), dm.cols, level, window,
                                  x ? view(*x) : std::span<const double>{},
-                                 band ? band_view(*band) : std::string_view{});
-    }, py::arg("D"), py::arg("level"), py::arg("window"), py::arg("x") = py::none(), py::arg("band") = py::none());
+                                 band ? band_view(*band) : std::string_view{},
+                                 decim, stream_lo, row_w ? view(*row_w) : std::span<const double>{});
+    }, py::arg("D"), py::arg("level"), py::arg("window"), py::arg("x") = py::none(), py::arg("band") = py::none(),
+       py::arg("decim") = 1, py::arg("stream_lo") = 0, py::arg("row_w") = py::none());
     py::class_<mo::FoldTrack>(d, "FoldTrack")
         .def(py::init<>())
         .def("reset", &mo::FoldTrack::reset)
@@ -404,25 +477,56 @@ void bind_modem(py::module_& m) {
             const auto c = mat(D);
             return np(t.fold(c.row_ptrs(), c.cols, a, lo, hi));
         });
-    d.def("cfo_aliases", &mo::cfo_aliases);
+    d.def("cfo_aliases", &mo::cfo_aliases, py::arg("d"), py::arg("centre"), py::arg("lag") = config::FRAME_SAMPLES);
     d.def("copy_header", [](const In<cd>& z, const py::dict& lock) {
         return header_dict(mo::copy_header(view(z), lock_of(lock)));
     });
+    // known: {start, cfo, spec, n_cw} (receive(known=...); bands, accept, head, copy and partial unused)
     d.def("receive", [](const In<double>& x, const OptBands& bands, const py::object& accept,
-                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy, bool partial) {
+                        std::optional<std::int64_t> head, const std::optional<py::dict>& copy, bool partial,
+                        const std::optional<py::dict>& known) {
         const auto a = accept_of(accept);
         const auto bs = bands_of(bands);
         std::optional<mo::Lock> c;
         if (copy) c = lock_of(*copy);
         mo::Received r;
-        {
+        if (known) {
+            const auto start = (*known)["start"].cast<std::int64_t>();
+            const auto cfo = (*known)["cfo"].cast<double>();
+            const auto& sp = spec_of((*known)["spec"]);
+            const int n_cw = (*known)["n_cw"].cast<int>();
+            py::gil_scoped_release nogil;
+            r = mo::receive_known(view(x), start, cfo, sp, n_cw);
+        } else {
             py::gil_scoped_release nogil;
             r = mo::receive(view(x), bs, a ? &*a : nullptr, head, c ? &*c : nullptr, partial);
         }
         return received_dict(r);
     }, py::arg("x"), py::arg("bands") = py::none(), py::arg("accept") = py::none(), py::arg("head") = py::none(),
-       py::arg("copy") = py::none(), py::arg("partial") = false);
+       py::arg("copy") = py::none(), py::arg("partial") = false, py::arg("known") = py::none());
+    d.def("sc_clear_weights", &mo::sc_clear_weights);
     d.def("resolve_alias", &mo::resolve_alias);
+    d.def("sc_refine", [](const py::dict& r, const In<cd>& z, const In<double>& w) {
+        auto rx = received_of(r);
+        rx.band = band_view(r["band"].cast<std::string>());
+        const auto sup = r["support"].cast<py::sequence>();
+        rx.support = {sup[0].cast<int>(), sup[1].cast<int>()};
+        const auto e = r["est"].cast<py::dict>();
+        rx.est.filter_spread_hz = e["filter_spread_hz"].cast<double>();
+        rx.est.slack = e["slack"].cast<int>();
+        const std::size_t nc = rx.est.h.cols;
+        Mat<cd> zm(static_cast<std::size_t>(z.size()) / nc, nc);
+        std::copy(z.data(), z.data() + z.size(), zm.data.begin());
+        Mat<double> wm(static_cast<std::size_t>(w.size()) / nc, nc);
+        std::copy(w.data(), w.data() + w.size(), wm.data.begin());
+        const auto [h, mse] = mo::sc_refine(rx, zm, wm);
+        return py::make_tuple(np3(h, config::DATA_SYMS_PER_FRAME), np3(mse, config::DATA_SYMS_PER_FRAME));
+    });
+    d.def("sc_cells", [](int nc) {
+        const auto& c = mo::sc_cells(nc);
+        auto a = [](const std::vector<int>& v) { return np<std::int64_t>(std::span<const int>(v)); };
+        return py::make_tuple(a(c.P), a(c.PK), a(c.Dc), a(c.own));
+    });
     d.def("data_channel", [](const In<cd>& h_pilot, equalizer::Support support, const std::string& band, double n0_pre,
                              const std::optional<py::tuple>& clip, const std::optional<In<double>>& n0_pre_k,
                              std::optional<int> n_frames) {
@@ -443,7 +547,8 @@ void bind_modem(py::module_& m) {
         e.n0_k = vec(n0_k);
         e.clip_ratio = clip_ratio;
         const auto hm = mat2(h);
-        e.nc = static_cast<int>(hm.cols);  // n0_k per carrier, or per frame (F, 1, nc) flattened
+        e.nc = static_cast<int>(hm.cols);  // n0_k per carrier, per frame (F, 1, nc) or per cell (F, 5, nc) flattened
+        e.n_f = static_cast<int>(hm.rows / config::DATA_SYMS_PER_FRAME);
         const auto v = mo::noise_var(hm, e);
         return np(v).reshape(std::vector<py::ssize_t>(h.shape(), h.shape() + h.ndim()));
     });
