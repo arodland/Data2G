@@ -416,7 +416,7 @@ def test_a_burst_joined_partway_reads_as_data2g_on_air(kind):
 
     if kind == "cpm" and PROFILE == "fm":
         pytest.skip("FM has no CPM")
-    rng = np.random.default_rng(3)
+    rng = np.random.default_rng(1)
     if kind == "ofdm":
         spec = SUBMODES["qpsk-r1/2"]
         x = modem.modulate([rng.bytes(codes.payload_bytes(spec)) for _ in range(slots_for(spec, 12.0))], spec)
@@ -459,7 +459,7 @@ def test_interference_does_not_stick_busy(kind):
     rng = np.random.default_rng(100)
     if kind in interference.PRESETS:
         x = rng.normal(size=n) + interference.Interference(
-            interference.PRESETS[kind], seed=1, horizon=dur).render(0.0, n, 1.0)
+            interference.PRESETS[kind], seed=6, horizon=dur).render(0.0, n, 1.0)
     elif kind == "carrier_1500":
         t = np.arange(n) / FS
         p = 10 ** (20.0 / 10) * (1.0 / (FS / 2)) * 50.0

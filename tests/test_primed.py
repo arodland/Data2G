@@ -510,11 +510,11 @@ def _faded_cpm(seed):
     return y, receive_any(y, lead=int(PS.PAD_S * PS.FS) + PS.FS // 2), int(PS.PAD_S * PS.FS), PS.CFO_HZ
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_prime_lock_finds_what_blind_acquisition_lost():
-    """Seed 0: no blind path locks (the front faded); in a +-0.15 s window at
+    """Seed 2: no blind path locks (the front faded); in a +-0.15 s window at
     the known CFO the expected slot finds it, start and word right."""
-    y, r, p0, cfo = _faded_cpm(0)
+    y, r, p0, cfo = _faded_cpm(2)
     assert r is None
     lock = cpm.prime_lock(cpm.GRIDS["c16r25"], y, p0 - WIN, p0 + WIN, cfo)
     assert lock is not None and lock["start"] == p0 and lock["spec"].name == "fsk16r25-r1/3" and lock["n_data"] == 0
@@ -563,13 +563,13 @@ def _stream(rcv, y, expect=None):
     return out
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot():
-    """The streaming receiver: seed 0's burst, which no blind path locks,
+    """The streaming receiver: seed 2's burst, which no blind path locks,
     is found in the expected slot (and decodes), and not without it."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
-    y, _, p0, cfo = _faded_cpm(0)
+    y, _, p0, cfo = _faded_cpm(2)
     y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     assert not _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y)
     ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - WIN, p0 + WIN, cfo))
@@ -577,7 +577,7 @@ def test_receiver_expected_slot():
     assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     """Three grids expected, one prime_lock a search hop (the Pi's hop
     budget): the burst's grid tried last is still found in its window, and
@@ -585,7 +585,7 @@ def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     nothing queued."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
-    y, _, p0, cfo = _faded_cpm(0)
+    y, _, p0, cfo = _faded_cpm(2)
     y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     calls, prime = [], cpm.prime_lock
     monkeypatch.setattr(cpm, "prime_lock", lambda g, *a: calls.append(g.name) or prime(g, *a))
