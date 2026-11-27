@@ -106,6 +106,8 @@ def main():
         from data2g import equalizer
 
         equalizer.residual_cfo = lambda h, *x: 0.0
+        _sc_fine = modem._sc_residual_cfo  # the intra-frame comb layouts' (fk3d2): its pair lag kept
+        modem._sc_residual_cfo = lambda *x: (0.0, _sc_fine(*x)[1])
     arms = a.arms.split(",") if a.arms else ["mix" if f == "1" else "off" for f in a.flags.split(",")]
     jobs = [(arm, a.mode, c, float(s), float(t), seed) for arm in arms for c in a.chans.split(",")
             for s in a.snrs.split(",") for t in a.tones.split(",") for seed in range(a.bursts)]
