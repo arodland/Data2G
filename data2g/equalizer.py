@@ -68,11 +68,61 @@ NOISE_SHAPE_PRIOR = 8.0
 # default 8 repeats (config.PREAMBLE_REPEATS - 1). Fixed: a repeats
 # override (DATA2G_PREAMBLE_REPEATS) does not reach it.
 PREAMBLE_DIFFS = 7
+# Carriers hit by a steady tone (hot_carriers) or its off-carrier sidelobes
+# (noisy_carriers): left out of residual_cfo and modem.receive's coarse alias
+# estimate (issue #330). On-carrier tones cancel in preamble_noise_k (integer
+# cycles per M-sample repeat) so pilot power catches them; off-carrier tones
+# leak across neighbours below HOT_CARRIER x median power, where preamble noise
+# sees them at 5-160x median. 0/500 clean bursts (w48, w, ack-1f, n10, n4;
+# awgn/mpp/mpd) and 0/2000 Gamma(7) draws flag either check.
+HOT_CARRIER = 8.0
+HOT_PREAMBLE_NOISE = 4.0
+# Per-carrier pilot innovation |h[p] - e^{j phi0} h[p-1]|^2 over HOT_INNOV x
+# median catches weaker on-carrier tones at high SNR or on narrow bands (where
+# pilot power stays under HOT_CARRIER x median, e.g. w48 at 18 dB or n10 at 8 dB)
+# and mid-burst tones absent during the preamble. Gated on HOT_INNOV_MIN_PILOTS
+# (4+ transitions) so short bursts (ack-1f) do not false-flag (0/500 clean bursts).
+HOT_INNOV = 8.0
+HOT_INNOV_MIN_PILOTS = 5
 
 
-def residual_cfo(h_pilot: np.ndarray) -> float:
-    """Hz. Unambiguous within +-1/(2*FRAME_S) = +-3.47 Hz."""
-    d = np.sum(h_pilot[1:] * np.conj(h_pilot[:-1]))
+def hot_carriers(h_pilot: np.ndarray) -> np.ndarray:
+    """Carriers whose mean pilot power is over HOT_CARRIER times the median
+    carrier's: a steady tone on (or leaking strongly into) them."""
+    if h_pilot.size == 0:
+        return np.zeros(h_pilot.shape[1] if h_pilot.ndim == 2 else 0, dtype=bool)
+    p = np.mean(np.abs(h_pilot) ** 2, axis=0)
+    return p > HOT_CARRIER * float(np.median(p))
+
+
+def noisy_carriers(n0_pre_k: np.ndarray) -> np.ndarray:
+    """Carriers whose preamble noise (preamble_noise_k) is over
+    HOT_PREAMBLE_NOISE times the median carrier's: an off-carrier steady tone
+    and its coherent sidelobes."""
+    arr = np.asarray(n0_pre_k)
+    if arr.size == 0:
+        return np.zeros(0, dtype=bool)
+    return arr > HOT_PREAMBLE_NOISE * float(np.median(arr))
+
+
+def residual_cfo(h_pilot: np.ndarray, exclude: np.ndarray | None = None) -> float:
+    """Hz. Unambiguous within +-1/(2*FRAME_S) = +-3.47 Hz. Carriers hit by a
+    steady tone (hot_carriers), flagged in `exclude` (noisy_carriers), or whose
+    frame-to-frame innovation disagrees with the burst's rotation (HOT_INNOV)
+    are left out; bit-identical to the plain sum when no carrier is flagged."""
+    hot = hot_carriers(h_pilot)
+    if exclude is not None and len(exclude) == h_pilot.shape[1]:
+        hot = hot | np.asarray(exclude, dtype=bool)
+    if hot.all():
+        hot[:] = False
+    prod = h_pilot[1:] * np.conj(h_pilot[:-1])
+    d = np.sum(prod[:, ~hot] if hot.any() else prod)
+    if len(h_pilot) >= HOT_INNOV_MIN_PILOTS and np.abs(d) > 0:
+        ph = d / np.abs(d)
+        innov = np.mean(np.abs(h_pilot[1:] - ph * h_pilot[:-1]) ** 2, axis=0)
+        hot2 = hot | (innov > HOT_INNOV * float(np.median(innov)))
+        if hot2.any() and not hot2.all() and not np.array_equal(hot2, hot):
+            d = np.sum(prod[:, ~hot2])
     return float(np.angle(d) / (2 * np.pi * FRAME_S)) if np.abs(d) > 0 else 0.0
 
 

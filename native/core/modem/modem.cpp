@@ -922,6 +922,123 @@ const Mat<cd>& FoldTrack::fold(std::span<const cd* const> D_rows, size_t dcols, 
     return R_;
 }
 
+std::pair<int64_t, int> presence_window(size_t dcols, int64_t window) {
+    constexpr int64_t PF = static_cast<int64_t>(COPY_PAIRS) * FRAME_SAMPLES;
+    const int64_t n = static_cast<int64_t>(dcols) + PF;
+    const int64_t W = std::min(n, window);
+    return {n - W, static_cast<int>((W - PF) / FRAME_SAMPLES)};
+}
+
+std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m) {
+    const size_t FR = FRAME_SAMPLES;
+    std::vector<double> mag2(FR, 0.0);
+    for (size_t f = 0; f < fold.rows; ++f) {
+        const cd* row = fold[f];
+        for (size_t ph = 0; ph < FR; ++ph) {
+            const double p = row[ph].real() * row[ph].real() + row[ph].imag() * row[ph].imag();
+            if (p > mag2[ph]) mag2[ph] = p;
+        }
+    }
+    const double mx = std::sqrt(*std::max_element(mag2.begin(), mag2.end()));
+    std::nth_element(mag2.begin(), mag2.begin() + FR / 2, mag2.end());
+    const double hi = std::sqrt(mag2[FR / 2]);
+    const double med = (FR % 2) ? hi : 0.5 * (std::sqrt(*std::max_element(mag2.begin(), mag2.begin() + FR / 2)) + hi);
+    return {mx / (level * std::sqrt(static_cast<double>(m * COPY_PAIRS))), mx / (med + 1e-300)};
+}
+
+bool presence_verdict(double peak, double contrast, int m) {
+    if (m < PRESENCE_MIN_M || peak < PRESENCE_PEAK) return false;
+    const auto idx = static_cast<size_t>(std::min(m - PRESENCE_MIN_M, static_cast<int>(PRESENCE_CONTRAST.size()) - 1));
+    return contrast >= PRESENCE_CONTRAST[idx];
+}
+
+std::pair<double, double> pilot_presence(std::span<const cd* const> D_rows, size_t dcols, double level, int64_t window) {
+    const auto [t0, m] = presence_window(dcols, window);
+    if (m < 1) return {0.0, 0.0};
+    return fold_presence(pilot_fold(D_rows, static_cast<size_t>(t0), static_cast<size_t>(m)), level, m);
+}
+
+namespace {
+bool verify_band(std::span<const cd> z0, int64_t ph, int n_frames, std::string_view band, double cfo) {
+    const auto& b = waveform::band(band);
+    const auto z = waveform::freq_correct(z0, cfo);
+    std::vector<std::vector<cd>> y;
+    y.reserve(static_cast<size_t>(n_frames));
+    for (int k = 0; k < n_frames; ++k)
+        y.push_back(b.demod_window(z, ph + static_cast<int64_t>(k) * FRAME_SAMPLES, DEMOD_BACKOFF));
+    double c_sum = 0.0;
+    for (size_t k = 1; k < y.size(); ++k)
+        c_sum += std::abs(dot_conj(y[k], y[k - 1])) / (std::sqrt(energy(y[k]) * energy(y[k - 1])) + 1e-30);
+    const double mc = c_sum / static_cast<double>(y.size() - 1);
+    const size_t nc = b.pilot.size();
+    std::vector<cd> a(nc - 1, cd{0, 0});
+    for (const auto& v : y)
+        for (size_t k = 0; k + 1 < nc; ++k)
+            a[k] += (v[k + 1] * std::conj(b.pilot[k + 1])) * std::conj(v[k] * std::conj(b.pilot[k]));
+    cd s{0, 0};
+    for (const cd& t : a) s += t / (std::abs(t) + 1e-30);
+    const double pat = std::abs(s) / static_cast<double>(a.size());
+    const double pat_floor = std::min(PRESENCE_PATTERN_CAP, PRESENCE_PATTERN_SCALE * pilot_pattern(band));
+    return mc > pilot_noise(band) && pat > pat_floor;
+}
+}  // namespace
+
+bool fold_verify(std::span<const double> x, std::string_view band, const Mat<cd>& fold, int fold_phase0) {
+    const size_t FR = FRAME_SAMPLES;
+    size_t q = 0, fi = 0;
+    double best = -1.0;
+    for (size_t ph = 0; ph < FR; ++ph) {
+        size_t bf = 0;
+        double bm = -1.0;
+        for (size_t f = 0; f < fold.rows; ++f) {
+            const cd z = fold[f][ph];
+            const double v = z.real() * z.real() + z.imag() * z.imag();
+            if (v > bm) {
+                bm = v;
+                bf = f;
+            }
+        }
+        if (bm > best) {
+            best = bm;
+            q = ph;
+            fi = bf;
+        }
+    }
+    const int64_t ph = ((static_cast<int64_t>(q) - fold_phase0) % FRAME_SAMPLES + FRAME_SAMPLES) % FRAME_SAMPLES;
+    const int64_t avail = static_cast<int64_t>(x.size()) - ph - M;
+    if (avail < 0) return false;
+    const int n_frames = static_cast<int>(avail / FRAME_SAMPLES) + 1;
+    if (n_frames < 2) return false;
+    const auto freqs = waveform::cfo_grid();
+    const auto z0 = waveform::to_baseband(x);
+    const cd d = fold[fi][q];
+    const double centre = freqs[fi];
+    for (double f : cfo_aliases(d, centre))
+        if (verify_band(z0, ph, n_frames, band, f)) return true;
+    const bool has_n4 = std::any_of(config::BANDS.begin(), config::BANDS.end(), [](const auto& b) { return b.name == "n4"; });
+    if (band == "n10" && has_n4) {
+        for (double df : {-100.0, 137.5}) {
+            const double c4 = centre + df;
+            if (std::abs(c4) <= config::ACQUIRE_REACH_HZ + 25.0)
+                for (double f : cfo_aliases(d, c4))
+                    if (verify_band(z0, ph, n_frames, "n4", f)) return true;
+        }
+    }
+    return false;
+}
+
+bool pilot_present(std::span<const cd* const> D_rows, size_t dcols, double level, int64_t window,
+                   std::span<const double> x, std::string_view band) {
+    const auto [t0, m] = presence_window(dcols, window);
+    if (m < PRESENCE_MIN_M) return false;
+    const Mat<cd> fold = pilot_fold(D_rows, static_cast<size_t>(t0), static_cast<size_t>(m));
+    const auto [pk, ct] = fold_presence(fold, level, m);
+    if (!presence_verdict(pk, ct, m)) return false;
+    if (x.empty() || band.empty()) return true;
+    if (static_cast<size_t>(t0) >= x.size()) return false;
+    return fold_verify(x.subspan(static_cast<size_t>(t0)), band, fold);
+}
+
 std::vector<double> cfo_aliases(cd d, double centre) {
     const double alias = static_cast<double>(FS) / FRAME_SAMPLES;
     const double frac = std::arg(d) / (2 * PI) * alias;
@@ -1188,13 +1305,41 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
             run.push_back(times_conj(b.demod_window(z, pc + s * NSYM + NCP, HB), ref2[static_cast<size_t>(s)]));
         runs.push_back(std::move(run));
     }
+    // Leave carriers hit by a steady tone or its off-carrier sidelobes out of
+    // coarse and residual_cfo (issue #330; modem.py's notes).
+    const std::vector<char> noisy_sync = equalizer::noisy_carriers(hd.n0_pre_k);
+    size_t hdr_rows = 0;
+    for (const auto& run : runs) hdr_rows += run.size();
+    Mat<cd> hdr_h(hdr_rows, nc);
+    for (size_t r = 0; const auto& run : runs)
+        for (const auto& row : run) {
+            std::copy(row.begin(), row.end(), hdr_h[r]);
+            ++r;
+        }
+    std::vector<char> hot_sync = equalizer::hot_carriers(hdr_h);
+    if (noisy_sync.size() == nc)
+        for (size_t c = 0; c < nc; ++c) hot_sync[c] = hot_sync[c] || noisy_sync[c];
+    if (std::ranges::all_of(hot_sync, [](char x) { return x != 0; })) std::ranges::fill(hot_sync, 0);
     cd dsum = 0.0;
     for (const auto& run : runs)
-        for (size_t i = 0; i + 1 < run.size(); ++i) dsum += dot_conj(run[i + 1], run[i]);
+        for (size_t i = 0; i + 1 < run.size(); ++i)
+            for (size_t c = 0; c < nc; ++c)
+                if (!hot_sync[c]) dsum += run[i + 1][c] * std::conj(run[i][c]);
     const double coarse = std::arg(dsum) / (2 * PI * NSYM / FS);
     // slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
     auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db);
-    const double fine = equalizer::residual_cfo(first.hp);
+    const auto& dbs = config::band(db);
+    const auto& sbs = config::band(sband);
+    const size_t k0_off = static_cast<size_t>(dbs.k0 - sbs.k0);
+    const size_t nc_db = static_cast<size_t>(dbs.nc);
+    std::vector<char> exclude_db(nc_db, 0);
+    if (k0_off + nc_db <= noisy_sync.size()) {
+        for (size_t c = 0; c < nc_db; ++c) {
+            exclude_db[c] = noisy_sync[k0_off + c];
+            if (db != sband) exclude_db[c] = exclude_db[c] || hot_sync[k0_off + c];
+        }
+    }
+    const double fine = equalizer::residual_cfo(first.hp, exclude_db);
     const auto slips = std::move(first.slips);
     const double cfo_res = resolve_alias(fine, coarse);
     z = waveform::freq_correct(z, cfo_res);

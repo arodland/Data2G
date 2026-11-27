@@ -389,6 +389,7 @@ StreamRun run_stream(const Burst& b, bool early, std::optional<double> dd_budget
 
 // The streaming Receiver on Gaussian noise, 20 ms feeds: CPU per feed (the listening load per audio feed).
 bool engine_rx = false;  // --engine: arq::receive_accept() and arq::all_grids(), not every band and grid
+bool sense_on = false;   // --sense: rx.sense = true (data2g_on_air)
 bool cwsense_on = BENCH_CWID;  // --no-cwsense: #134's tree without its detector (#135's listening load alone)
 
 std::string listen_bands;  // --bands w,w48: only these OFDM sync bands' modes (the CPM grids as ever)
@@ -402,6 +403,7 @@ void listen(double seconds, bool cpm_only, int expect) {
         if (("," + listen_bands + ",").find("," + std::string(m.sync_band) + ",") != std::string::npos)
             names.push_back(m.name);
     receiver::Receiver rx(cpm_only ? modem::Accept{} : engine_rx ? arq::receive_accept() : listen_bands.empty() ? modem::Accept::of() : modem::Accept::of(names), grids);
+    rx.sense = sense_on;
 #if BENCH_CWID
     cwid::CwSense cw;
 #endif
@@ -557,6 +559,7 @@ int main(int argc, char** argv) {
         else if (a == "--reps" && more) reps = std::max(1, std::atoi(argv[++i]));
         else if (a == "--listen" && more) listen_s = std::atof(argv[++i]);
         else if (a == "--engine") engine_rx = true;
+        else if (a == "--sense") sense_on = true;
         else if (a == "--cpm-only") cpm_only = true;
         else if (a == "--bands" && more) listen_bands = argv[++i];
         else if (a == "--expect" && more) expect = std::atoi(argv[++i]);

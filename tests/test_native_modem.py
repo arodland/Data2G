@@ -362,6 +362,25 @@ def test_demodulate_matches(native, py):
     assert n[0] == b.submode.name and n[1] == b.payloads and n[2] == b.crc_ok and n[4] == b.preamble_start
 
 
+@pytest.mark.hf_only("w48/n4 HF bands and 800/825/1525 Hz tones from issue #330")
+@pytest.mark.parametrize("name,n_cw,tone", [("w48-qpsk-r1/3", 4, 800.0), ("w48-qpsk-r1/3", 4, 825.0),
+                                             ("n4-qpsk-r1/2", 1, 1525.0)])
+def test_receive_with_in_band_tone_matches(native, py, name, n_cw, tone):
+    """Python and native agree on coarse and residual CFO under strong on- and
+    off-carrier tones (including n4 hosted on n10, issue #330)."""
+    from scipy import signal
+
+    spec = SUBMODES[name]
+    pad = 2000
+    x = np.concatenate([np.zeros(pad), modem.modulate(_payloads(spec, n_cw, 3), spec), np.zeros(pad)])
+    peak = float(np.max(np.abs(signal.hilbert(x)) ** 2) / 2)
+    sigma = np.sqrt(peak / 10 ** 0.5 * (FS / 2) / config.SNR_REF_BW_HZ / 10 ** (8.0 / 10))
+    y = x + np.random.default_rng(5).normal(scale=sigma, size=len(x))
+    amp = np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10 ** (25.0 / 10))
+    y = y + amp * np.cos(2 * np.pi * tone * np.arange(len(y)) / FS + 0.7)
+    same_received(native.modem.receive(y), py.receive(y))
+
+
 def test_fold_track_matches(native):
     """The running fold: the same adds and subtractions in the same order,
     so the same sums bit for bit."""
@@ -375,3 +394,35 @@ def test_fold_track_matches(native):
     a_py, a_n = modem.FoldTrack(), native.modem.FoldTrack()
     for a, lo, hi in steps:
         np.testing.assert_array_equal(a_n.fold(D[:, a:], a, lo, hi), a_py.fold(D[:, a:], a, lo, hi))
+
+
+def test_presence_matches(native, py):
+    """OFDM presence helpers (presence_window, fold_presence, presence_verdict,
+    pilot_presence, fold_verify, pilot_present) match Python across bursts,
+    tones and noise."""
+    from data2g.waveform import ofdm, sync
+
+    n = 3 * config.FS
+    win = int(1.75 * config.FS)
+    rng = np.random.default_rng(19)
+    sigs = [
+        ("w", _burst("qpsk-r1/2", 8, snr=-3.0, preset="mpp")[2 * config.FS:2 * config.FS + n]),
+        ("w", rng.normal(size=n)),
+        ("w", np.sin(2 * np.pi * 1510.0 * np.arange(n) / config.FS) + rng.normal(size=n)),
+        ("n10", _burst("n10-qpsk-r1/2", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]),
+    ]
+    if "n4-qpsk-r1/3" in SUBMODES:
+        sigs.append(("n10", _burst("n4-qpsk-r1/3", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]))
+    for band, y in sigs:
+        C = sync.repeat_corrs(dsp.to_baseband(y), sync.unit_template(ofdm.band(band)), list(sync.cfo_grid()))
+        level = sync.noise_level(C)
+        D = sync.pair_products(C, config.FRAME_SAMPLES, modem.COPY_PAIRS)
+        assert native.modem.presence_window(D.shape[1], win) == py.presence_window(D.shape[1], win)
+        t0, m = py.presence_window(D.shape[1], win)
+        fold = py._pilot_fold(D, t0, m)
+        close(native.modem.fold_presence(fold, level, m), py.fold_presence(fold, level, m), CORR_TOL)
+        close(native.modem.pilot_presence(D, level, win), py.pilot_presence(D, level, win), CORR_TOL)
+        pk, ct = py.fold_presence(fold, level, m)
+        assert native.modem.presence_verdict(pk, ct, m) == py.presence_verdict(pk, ct, m)
+        assert native.modem.fold_verify(y[t0:], band, fold) == py.fold_verify(y[t0:], band, fold)
+        assert native.modem.pilot_present(D, level, win, y, band) == py.pilot_present(D, level, win, y, band)

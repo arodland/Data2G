@@ -4,8 +4,9 @@ data2g.equalizer and data2g.ldpc. Applied first. See __init__.py."""
 
 # Every data2g.equalizer function but _support_basis (its cache is internal
 # to the C++ one).
-EQUALIZER_NATIVE = ("residual_cfo", "delay_profile", "delay_support", "window_shift", "freq_smooth",
-                    "support_slack", "snr_noise", "preamble_noise", "preamble_noise_k", "per_carrier_noise", "_doppler_corr", "measure_spread",
+EQUALIZER_NATIVE = ("hot_carriers", "noisy_carriers", "residual_cfo", "delay_profile", "delay_support",
+                    "window_shift", "freq_smooth", "support_slack", "snr_noise", "preamble_noise",
+                    "preamble_noise_k", "per_carrier_noise", "_doppler_corr", "measure_spread",
                     "estimate", "time_shift_phase", "refine")
 
 

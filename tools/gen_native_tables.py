@@ -195,6 +195,7 @@ def cpm_cpp() -> str:
                     f"{cxx(float(cpm.SYNC_THRESHOLD[g.name]))}, {cxx(float(cpm.MID_THRESHOLD[g.name]))}, "
                     f"{cxx(float(cpm.LOCK_LLR[g.name][0]))}, {cxx(float(cpm.LOCK_LLR[g.name][1]))}, "
                     f"{cxx(float(cpm.WAIT_LLR[g.name]))}, {cxx(float(cpm.MID_LLR[g.name]))}, "
+                    f"{cxx(float(cpm.PRESENCE[g.name][0]))}, {cxx(float(cpm.PRESENCE[g.name][1]))}, "
                     f"{cpm.hdr_len(g)}, pre_{i}, mid_{i}, hdr_{i}, "
                     f"{{{', '.join(f'{{{cxx(float(f.bp))}, {cxx(float(f.glide))}, {f.passes}}}' for f in cpm.TX_FILTERS[g.name])}}}}},\n")
 
@@ -479,10 +480,12 @@ def modem_hpp() -> str:
            "#include <utility>\n\nnamespace data2g::modem {\n\n"]
     for name in ("REF_REPEATS", "HEADER_BACKOFF", "STREAM_COMMIT_SCORE", "COPY_COMMIT_SCORE", "ALT_PENALTY",
                  "SLIP_MIN", "SLIP_MAX", "SLIP_TRIGGER", "SLIP_ACCEPT", "PILOT_PAIRS", "COPY_PAIRS", "COPY_GRIDS",
-                 "COPY_COHERENCE", "COPY_PATTERN", "COPY_DETECT"):
+                 "COPY_COHERENCE", "COPY_PATTERN", "COPY_DETECT", "PRESENCE_PEAK", "PRESENCE_MIN_M",
+                 "PRESENCE_PATTERN_SCALE", "PRESENCE_PATTERN_CAP"):
         v = getattr(modem, name)
         out.append(f"inline constexpr {'double' if isinstance(v, float) else 'int'} {name} = {cxx(v)};\n")
     out.append(array("COPY_EARLIER", modem.COPY_EARLIER, "int"))
+    out.append(array("PRESENCE_CONTRAST", modem.PRESENCE_CONTRAST, "double"))
     out.append(array("SYNC_BANDS", modem.SYNC_BANDS, "std::string_view"))
 
     def per_band(name, d):

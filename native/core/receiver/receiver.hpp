@@ -128,6 +128,11 @@ public:
     static constexpr int CPM_TAIL = config::FS / 20;  // kept before a CPM burst's end (receiver.Receiver.CPM_TAIL)
     static constexpr double SUPERSEDE_MARGIN = 0.05;
     static constexpr double SUSPECT_SCORE = 0.36;
+    static constexpr double PRESENCE_S = 1.75;
+    static constexpr double CPM_PRESENCE_S = 3.0;
+    // receiver.Receiver.SENSE_BLIND_S: audio after a reset before a presence reading can say "none"
+    // (cpm::PRESENCE_MIN_S, the longest one needs); blind_ holds data2g_on_air until then.
+    static constexpr double SENSE_BLIND_S = 1.0;
     // receiver.Receiver.RELEASE_S: a suspect OFDM lock (a header copy under COPY_COMMIT_SCORE) whose pilots have been measurably absent this long in
     // a row (pilot checks, one a HOP) is let go: reported lost, the search goes on past it.
     // 0: never. A member so a study can set it (scripts/false_lock_study.py).
@@ -135,6 +140,8 @@ public:
     // PartialRequests (decoding while the burst arrives): config::DECODE_EARLY, with interleaving windows
     // (config::SPREAD_WINDOW). A member so a bench can compare without them.
     bool decode_early = config::DECODE_EARLY;
+    // Read data2g_on_air (arq::Engine turns it on; offline searches leave it off).
+    bool sense = false;
 
     explicit Receiver(modem::Accept accept, std::vector<std::string_view> cpm_grids = {}, bool blank = true);
 
@@ -166,7 +173,9 @@ public:
     }
 
     bool busy() const { return pending_.has_value(); }
-    bool channel_busy() const { return pending_ && (pilots_ok_ || on_air()); }
+    bool channel_busy() const { return pending_ ? (pilots_ok_ || on_air()) : present_; }
+    bool data2g_on_air() const { return pending_.has_value() || present_ || blind_; }
+    void clear_presence() { present_ = blind_ = false; }
     bool on_air() const;
     const std::optional<Pending>& pending() const { return pending_; }
     // The (blanked) audio fed so far: its end's stream index, and n samples from stream index
@@ -183,7 +192,8 @@ private:
     struct Detector {
         std::string_view band;
         waveform::StreamDetector d;
-        modem::FoldTrack copy_fold;  // find_copy's, kept running
+        modem::FoldTrack copy_fold;      // find_copy's, kept running
+        modem::FoldTrack presence_fold;  // data2g_on_air's, kept running
     };
     struct Stats {  // per band, the statistic for buf[w0:]'s starts
         std::vector<Mat<double>> mats;
@@ -191,6 +201,7 @@ private:
     };
 
     void check_pilots();
+    void sense_on_air();
     void partial(std::vector<Item>& out, const Pending& p);
     void trim(std::int64_t n);
     Stats stats(std::int64_t w0 = 0);
@@ -230,6 +241,9 @@ private:
     double ps_ = 0.0;
     int pn_ = 0;
     std::int64_t fresh_ = HOP, last_start_ = -1;
+    bool present_ = false;      // data2g_on_air's latest reading with nothing locked
+    bool blind_ = false;        // receiver.Receiver._blind: data2g_on_air held after a reset until SENSE_BLIND_S is in
+    std::int64_t heard_to_ = 0; // stream index where the last burst handled ended (sense_on_air reads past it)
     std::map<std::string_view, std::int64_t> decided_;
     std::map<std::string_view, std::int64_t> decided_mid_;  // per CPM grid, its mid block's (Python's "<grid>/mid")
     std::map<std::string_view, cpm::CoarseTrack> coarse_;  // per CPM grid, its search rows (find_cpm)

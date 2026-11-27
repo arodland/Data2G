@@ -275,6 +275,9 @@ public:
     // FFTs per block. Set before the engine runs.
     void set_on_preview(std::function<void(const BurstPreview&)> f) { on_preview_ = std::move(f); }
     void set_preview(bool on) { preview_on_ = on; }
+    // Mid-burst Data2G BUSY sensing (Receiver::sense). Callable from any thread; takes effect on the next block.
+    void set_sense(bool on) { sense_on_.store(on, std::memory_order_relaxed); }
+    bool sense() const { return sense_on_.load(std::memory_order_relaxed); }
 
     const std::string& call() const { return call_; }
     const std::vector<std::string>& aliases() const { return aliases_; }
@@ -375,6 +378,7 @@ protected:
     }
     virtual bool receiver_busy() { return receiver_.busy(); }
     virtual bool receiver_channel_busy() { return receiver_.channel_busy(); }
+    virtual bool receiver_data2g_on_air() { return receiver_.data2g_on_air(); }
     virtual void receiver_reset() { receiver_.reset(); }
     virtual void receiver_expect(const std::vector<std::string_view>& grids, std::int64_t lo, std::int64_t hi, double cfo) {
         receiver_.expect(grids, lo, hi, cfo);
@@ -390,6 +394,7 @@ private:
         std::vector<double> x;
         std::vector<receiver::Receiver::Item> items;
         bool busy = false;
+        bool on_air = false;  // receiver_.data2g_on_air() (a locked or headerless Data2G burst on air)
         bool cw = false;  // a CW ID heard (cwid::CwSense) with no burst locked
         std::uint64_t gen = 0, seq = 0;
         std::int64_t gap = 0;  // samples dropped just before this block
@@ -522,6 +527,7 @@ private:
     std::function<void(int, int)> on_decoded_;
     std::function<void(const BurstPreview&)> on_preview_;
     std::atomic<bool> preview_on_{false};
+    std::atomic<bool> sense_on_{true};
     // the receiving thread's: the burst being previewed, keyed by its lock's start
     struct Preview {
         std::int64_t start = -1;

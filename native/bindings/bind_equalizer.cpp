@@ -34,12 +34,29 @@ void bind_equalizer(py::module_& m) {
     const auto no_bb = py::arg("bb") = std::optional<In<double>>();
     e.attr("FRAME_S") = eq::FRAME_S;
     e.attr("BB_FREQS") = np(wide_bb());
+    e.attr("HOT_CARRIER") = eq::HOT_CARRIER;
+    e.attr("HOT_PREAMBLE_NOISE") = eq::HOT_PREAMBLE_NOISE;
     e.def("bb", [](const std::string& name) {
         for (const auto& b : config::BANDS)
             if (b.name == name) return np(eq::bb(b));
         throw py::key_error("no band " + name);
     });
-    e.def("residual_cfo", [](const In<cd>& h) { return eq::residual_cfo(mat(h)); });
+    e.def("hot_carriers", [](const In<cd>& h) {
+        const auto v = eq::hot_carriers(mat(h));
+        return np<bool>(std::span<const char>(v));
+    }, py::arg("h_pilot"));
+    e.def("noisy_carriers", [](const In<double>& n0_pre_k) {
+        const auto v = eq::noisy_carriers(vec(n0_pre_k));
+        return np<bool>(std::span<const char>(v));
+    }, py::arg("n0_pre_k"));
+    e.def("residual_cfo", [](const In<cd>& h, const std::optional<In<bool>>& exclude) {
+        std::vector<char> ex;
+        if (exclude) {
+            ex.resize(static_cast<std::size_t>(exclude->size()));
+            for (std::size_t i = 0; i < ex.size(); ++i) ex[i] = exclude->data()[i] ? 1 : 0;
+        }
+        return eq::residual_cfo(mat(h), ex);
+    }, py::arg("h_pilot"), py::arg("exclude") = std::optional<In<bool>>());
     e.def("delay_profile", [](const In<cd>& h, const std::optional<In<double>>& bb) {
         return np(eq::delay_profile(mat(h), bb_of(bb)));
     }, py::arg("h_pilot"), no_bb);
