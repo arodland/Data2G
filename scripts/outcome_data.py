@@ -72,6 +72,8 @@ def threshold(name: str, kind: str) -> float:
     """The mode's ladder threshold (1% codeword failures) on this channel family."""
     if name in CPM_THRESHOLDS:
         return CPM_THRESHOLDS[name][("awgn", "mpg", "mpp", "mpd").index(kind)]
+    if name in cpm.SPECS and name in G.MODE_THRESHOLDS:
+        return G.MODE_THRESHOLDS[name][("awgn", "mpg", "mpp", "mpd").index(kind)]
     t = THRESHOLDS.get((I.ladder_name(MODES[name]), kind))
     return t if t is not None else 99.0
 
