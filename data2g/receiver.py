@@ -792,16 +792,18 @@ class Receiver:
                 level = c.level()
                 if level is None:
                     continue
+                D_dec = c.decim
+                FR_d = modem.FRAME_SAMPLES // D_dec
                 a, D = c.products_from(self.off)
                 x = self.buf[a - self.off:]
-                D = D[:, :max(0, len(x) - modem.M + 1 - c.lag - modem.COPY_PAIRS * modem.FRAME_SAMPLES)]
-                m = D.shape[1] // modem.FRAME_SAMPLES
+                D = D[:, :max(0, (len(x) - modem.M + 1 - c.lag - modem.COPY_PAIRS * modem.FRAME_SAMPLES) // D_dec)]
+                m = D.shape[1] // FR_d
                 fold = None
                 if m >= 1:
                     d0, kept = c.kept_products()
-                    R = self.comb_folds[band].fold(kept, d0, a, a + m * modem.FRAME_SAMPLES)
-                    fold = np.roll(R, -(a % modem.FRAME_SAMPLES), axis=1)
-                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True)
+                    R = self.comb_folds[band].fold(kept, d0 // D_dec, a // D_dec, a // D_dec + m * FR_d, period=FR_d)
+                    fold = np.roll(R, -((a // D_dec) % FR_d), axis=1)
+                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True, decim=D_dec)
                 if lock is not None and (best is None or lock["score"] > best[0]["score"]):
                     best = (lock, a - self.off)
                 continue

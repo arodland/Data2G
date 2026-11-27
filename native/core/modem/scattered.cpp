@@ -1388,6 +1388,10 @@ const ScFlags& sc_flags() {
             if (std::string_view(v) == "1") out.slepian = 1;
             else if (std::string_view(v) == "0") out.slepian = 0;
         }
+        if (const char* v = std::getenv("DATA2G_SC_COPY_DECIM")) {
+            const int d = std::atoi(v);
+            if (d == 1 || d == 2 || d == 4) out.copy_decim = d;
+        }
         return out;
     }();
     return f;

@@ -1263,7 +1263,7 @@ COPY_DETECT = 14.0
 
 def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndarray | None = None,
               level: float | None = None, D: np.ndarray | None = None, fold: np.ndarray | None = None,
-              comb: bool | None = None) -> Lock | None:
+              comb: bool | None = None, decim: int = 1) -> Lock | None:
     """A burst in real audio `x` found from its frame pilots and header copy
     alone (the preamble and first header lost): a Lock with "copy" (what
     receive() needs to rebuild the header), or None. The burst
@@ -1322,11 +1322,12 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
         level = _sync.noise_level(C)
     if D is None:
         D = _sync.pair_products(C, FRAME_SAMPLES, COPY_PAIRS)
-    m = D.shape[1] // FRAME_SAMPLES
+    FR = FRAME_SAMPLES // decim
+    m = D.shape[1] // FR
     if m < 1:
         return None
     if fold is None:
-        fold = _pilot_fold(D, 0, m)
+        fold = D[:, :m * FR].reshape(len(D), m, FR).sum(axis=1)
     if comb:
         # a steady tone's products are the same at every frame phase (a comb's filter, a third of the band's
         # carriers, lets more of a tone outside the band through than the whole pilot's): out with each CFO bin's
@@ -1342,17 +1343,19 @@ def find_copy(x: np.ndarray, band: str, accept: Accept | None = None, C: np.ndar
     if find_copy.peak < COPY_DETECT:
         return None
     grids = []
-    for ph in np.argsort(-mag):
-        if all(min(abs(int(ph) - g), FRAME_SAMPLES - abs(int(ph) - g)) >= NCP for g in grids):
-            grids.append(int(ph))
+    for ph_d in np.argsort(-mag):
+        ph = int(ph_d) * decim
+        if all(min(abs(ph - g), FRAME_SAMPLES - abs(ph - g)) >= NCP for g in grids):
+            grids.append(ph)
             if len(grids) == COPY_GRIDS:
                 break
     sb = BANDS[band]
     floor = max(HEADER_MIN_SCORE[band], accept.min_score if accept else 0.0)
     found = []
     for ph in grids:
-        i = int(np.argmax(np.abs(fold[:, ph])))
-        for f in _cfo_aliases(fold[i, ph], float(freqs[i]), cfo_lag):
+        col = ph // decim
+        i = int(np.argmax(np.abs(fold[:, col])))
+        for f in _cfo_aliases(fold[i, col], float(freqs[i]), cfo_lag):
             z = dsp.freq_correct(z0, f)
             for early in COPY_EARLIER:
                 for pc in range((ph - early - NCP) % FRAME_SAMPLES, len(z0) - FRAME_SAMPLES, FRAME_SAMPLES):
@@ -1411,12 +1414,13 @@ def _sum_frames(P: np.ndarray, F: int, pairs: int) -> np.ndarray:
     return sum((P[:, j * F:j * F + n] for j in range(pairs)), np.zeros((len(P), n), dtype=np.complex128))
 
 
-def _intra_frame_prods(Cs: list, intra: tuple, stream_s0: int) -> tuple[np.ndarray, float]:
+def _intra_frame_prods(Cs: list, intra: tuple, stream_s0: int, decim: int = 1) -> tuple[np.ndarray, float]:
     """Per-frame intra-comb lag products on the 25 CFO bins, cyclic-muxed by `(stream_s0 + t) // FRAME_SAMPLES`
     when frame-staggered so each burst frame takes only its active comb."""
     _, syms, n_combs = intra
-    step = (syms[1] - syms[0]) * NSYM
-    span = FRAME_SAMPLES if n_combs == 1 else syms[-1] * NSYM
+    step = (syms[1] - syms[0]) * NSYM // decim
+    span = (FRAME_SAMPLES if n_combs == 1 else syms[-1] * NSYM) // decim
+    FR_d = FRAME_SAMPLES // decim
     n = min(c.shape[1] - span for _, c in Cs)
     if n <= 0:
         return np.zeros((len(_intra_freqs(n_combs)), 0), dtype=np.complex128), 1.0
@@ -1430,7 +1434,7 @@ def _intra_frame_prods(Cs: list, intra: tuple, stream_s0: int) -> tuple[np.ndarr
         q = sum(Cc[:, (m + 1) * step:(m + 1) * step + n] * np.conj(Cc[:, m * step:m * step + n]) for m in range(n_lags))
         Qs.append(q)
     Q = np.stack(Qs, axis=0)  # (n_combs, n_bins, n)
-    f_idx = (stream_s0 + np.arange(n)) // FRAME_SAMPLES
+    f_idx = (stream_s0 // decim + np.arange(n)) // FR_d
     rows = [Q[(c0 + f_idx) % n_combs, :, np.arange(n)].T for c0 in range(n_combs)]  # each (n_bins, n)
     lvl = float(np.sqrt(n_lags) * min(_sync.noise_level(Cc) for _, Cc in Cs))
     return np.concatenate(rows, axis=0), lvl
@@ -1443,13 +1447,17 @@ def _comb_freqs() -> np.ndarray:
     return np.array([f + o for f in _sync.cfo_grid() for o in offs])
 
 
-def _comb_coherent(Cs: list, freqs: np.ndarray) -> np.ndarray:
+def _comb_coherent(Cs: list, freqs: np.ndarray, decim: int = 1) -> np.ndarray:
     """The combs' outputs [(j, C_j)] added within the frame, each turned back by its symbol's offset at each of
     `freqs` (_comb_freqs): the frame's whole pilot energy in one output, for every start all combs cover."""
     k = len(freqs) // len(Cs[0][1])
-    n = min(c.shape[1] - j * NSYM for j, c in Cs)
-    return np.array([sum(c[i // k, j * NSYM:j * NSYM + n] * np.exp(-2j * np.pi * f * j * NSYM / FS) for j, c in Cs)
+    n = min(c.shape[1] - (j * NSYM) // decim for j, c in Cs)
+    return np.array([sum(c[i // k, (j * NSYM) // decim:(j * NSYM) // decim + n] * np.exp(-2j * np.pi * f * j * NSYM / FS)
+                         for j, c in Cs)
                      for i, f in enumerate(freqs)])
+
+
+SC_COPY_DECIM = int(os.environ.get("DATA2G_SC_COPY_DECIM", "2"))  # 1, 2, or 4 (2 is Nyquist-exact on w/w48)
 
 
 class CombStream:
@@ -1466,6 +1474,7 @@ class CombStream:
     def __init__(self, band: str):
         self.band = band
         self.intra = _sc_intra_spec(BANDS[band].nc)
+        self.decim = SC_COPY_DECIM if SC_COPY_DECIM in (1, 2, 4) else 2
         self.filters = _comb_filters(band)
         if self.intra is not None:
             _, syms, n_combs = self.intra
@@ -1494,57 +1503,71 @@ class CombStream:
         new = len(z)
         self.fed += new
         z = np.concatenate([self.tail, z])
-        n = len(z) - M + 1 - self.lag
-        if n < 1:
+        zs0 = self.fed - len(z)
+        D = self.decim
+        lead = (D - (zs0 % D)) % D
+        z_a = z[lead:]
+        n_raw = len(z_a) - M + 1 - self.lag
+        if n_raw < D:
             self.tail = z
             return
-        zs = self.fed - len(z)  # stream index of z[0], so of this chunk's first output
-        Cs = [(j, _sync.repeat_corrs(z, t, list(_sync.cfo_grid()))) for j, t in self.filters]
+        n_d = n_raw // D
+        n = n_d * D
+        zs = zs0 + lead
+        Cs = [(j, _sync.repeat_corrs(z_a, t, list(_sync.cfo_grid()))[:, ::D]) for j, t in self.filters]
+        qwin_d = max(new, 2000) // D
         if self.intra is not None:
-            C, _ = _intra_frame_prods(Cs, self.intra, zs)
+            C, _ = _intra_frame_prods(Cs, self.intra, zs, decim=D)
             n_lags = 2 if self.intra[2] == 1 else len(self.intra[1]) - 1
             per_comb = []
             for _, Cc in Cs:
-                p = np.abs(Cc[:, max(0, Cc.shape[1] - max(new, 2000)):]) ** 2
+                p = np.abs(Cc[:, max(0, Cc.shape[1] - qwin_d):]) ** 2
                 k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
                 per_comb.append(np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE))
             self.levels = (self.levels + [np.sqrt(n_lags) * np.min(per_comb, axis=0)])[-self.CHUNKS:]
         else:
-            C = _comb_coherent(Cs, self.freqs)
-            p = np.abs(C[:, max(0, n - max(new, 2000)):]) ** 2
+            C = _comb_coherent(Cs, self.freqs, decim=D)
+            p = np.abs(C[:, max(0, C.shape[1] - qwin_d):]) ** 2
             k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
             self.levels = (self.levels + [np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE)])[-self.CHUNKS:]
         if not self.C.shape[1]:
             self.c0 = zs
-        self.C = np.concatenate([self.C, C], axis=1)
-        self.tail = z[n:]
+        self.C = np.concatenate([self.C, C[:, :n_d]], axis=1)
+        self.tail = z[lead + n:]
 
     def level(self) -> float | None:
         return float(np.median(np.array(self.levels), axis=0).min()) if self.levels else None
 
     def trim(self, start: int):
-        k = min(max(0, start - self.c0), self.C.shape[1])
-        self.C, self.c0 = self.C[:, k:], self.c0 + k
-        k = min(max(0, start - self.KEEP_BEHIND - self.d0), self.D.shape[1])
-        self.D, self.d0 = self.D[:, k:], self.d0 + k
+        D = self.decim
+        k = min(max(0, (start - self.c0) // D), self.C.shape[1])
+        self.C, self.c0 = self.C[:, k:], self.c0 + k * D
+        k = min(max(0, (start - self.KEEP_BEHIND - self.d0) // D), self.D.shape[1])
+        self.D, self.d0 = self.D[:, k:], self.d0 + k * D
 
     def _extend(self):
-        if self.d0 + self.D.shape[1] < self.c0:
+        D = self.decim
+        FR_d = FRAME_SAMPLES // D
+        if self.d0 + self.D.shape[1] * D < self.c0:
             self.D, self.d0 = self.D[:, :0], self.c0
+        have = (self.d0 - self.c0) // D + self.D.shape[1]
         if self.intra is not None:
-            have, want = self.d0 + self.D.shape[1] - self.c0, max(0, self.C.shape[1] - (COPY_PAIRS - 1) * FRAME_SAMPLES)
+            want = max(0, self.C.shape[1] - (COPY_PAIRS - 1) * FR_d)
             if want > have:
-                self.D = np.concatenate([self.D, _sum_frames(self.C[:, have:], FRAME_SAMPLES, COPY_PAIRS)], axis=1)
+                self.D = np.concatenate([self.D, _sum_frames(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
             return
-        have, want = self.d0 + self.D.shape[1] - self.c0, max(0, self.C.shape[1] - COPY_PAIRS * FRAME_SAMPLES)
+        want = max(0, self.C.shape[1] - COPY_PAIRS * FR_d)
         if want > have:
-            self.D = np.concatenate([self.D, _sync.pair_products(self.C[:, have:], FRAME_SAMPLES, COPY_PAIRS)], axis=1)
+            self.D = np.concatenate([self.D, _sync.pair_products(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
 
     def products_from(self, start: int) -> tuple[int, np.ndarray]:
         """(a, the pair products for stream starts from a = max(start, c0) on)."""
         self._extend()
-        a = max(self.c0, start)
-        return a, self.D[:, a - self.d0:]
+        D = self.decim
+        want = max(self.c0, start)
+        diff = want - self.d0
+        k = min(max(0, (diff + D - 1) // D if diff > 0 else 0), self.D.shape[1])
+        return self.d0 + k * D, self.D[:, k:]
 
     def kept_products(self) -> tuple[int, np.ndarray]:
         self._extend()
@@ -1594,8 +1617,8 @@ class FoldTrack:
         self.lo = self.hi = 0  # the window summed: stream starts [lo, hi)
         self.n = 0  # folds since the last fresh sum
 
-    def _acc(self, D: np.ndarray, a: int, u0: int, u1: int, sign: int):
-        F, u = FRAME_SAMPLES, u0
+    def _acc(self, D: np.ndarray, a: int, u0: int, u1: int, sign: int, period: int = FRAME_SAMPLES):
+        F, u = period, u0
         while u < u1:
             q = u % F
             k = min(u1 - u, F - q)
@@ -1605,19 +1628,19 @@ class FoldTrack:
                 self.R[:, q:q + k] -= D[:, u - a:u - a + k]
             u += k
 
-    def fold(self, D: np.ndarray, a: int, lo: int, hi: int) -> np.ndarray:
+    def fold(self, D: np.ndarray, a: int, lo: int, hi: int, period: int = FRAME_SAMPLES) -> np.ndarray:
         """The window [lo, hi) of stream starts (D: pair products from
         stream start a, covering it), summed by frame phase: R[:, q] for
-        absolute phase q. np.roll(R, -(lo % FRAME_SAMPLES), axis=1) is
+        absolute phase q. np.roll(R, -(lo % period), axis=1) is
         _pilot_fold's from lo."""
-        if (self.R is None or self.n >= self.RENEW or not self.lo <= lo <= self.hi <= hi or self.lo < a
-                or hi > a + D.shape[1]):
-            self.R = np.zeros((len(D), FRAME_SAMPLES), dtype=np.complex128)
-            self._acc(D, a, lo, hi, 1)
+        if (self.R is None or self.R.shape[1] != period or self.n >= self.RENEW or not self.lo <= lo <= self.hi <= hi
+                or self.lo < a or hi > a + D.shape[1]):
+            self.R = np.zeros((len(D), period), dtype=np.complex128)
+            self._acc(D, a, lo, hi, 1, period)
             self.n = 0
         else:
-            self._acc(D, a, self.hi, hi, 1)
-            self._acc(D, a, self.lo, lo, -1)
+            self._acc(D, a, self.hi, hi, 1, period)
+            self._acc(D, a, self.lo, lo, -1, period)
             self.n += 1
         self.lo, self.hi = lo, hi
         return self.R
