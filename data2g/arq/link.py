@@ -42,7 +42,7 @@ from . import nod as nodmod
 # the PHY abstraction; named here too, for link's callers
 from .burst import COMPACT_CONNECT, EPOCH_MOD, RxBurst, Slot, TxBurst, ctl_mask, data_mask, dup_ctl  # noqa: F401
 from .frames import SEQ_MOD, WINDOW
-from .modes import MODES, REC_EXT, is_cpm
+from .modes import MODES, REC_EXT, decode as decode_rec, is_cpm
 
 NO_PROGRESS_TURNS = 8
 RESYNCS_BEFORE_FAIL = 3
@@ -908,8 +908,8 @@ class Station:
         r_cum, r_rec, _, _, r_kept = self._sent_ctl[self._latest]
         ack = ("all" if pa[3] is not None and self.rx.cum == pa[3] else
                "unchanged" if self.rx.cum == r_cum else None)
-        step = (core.recommend & 15) - (r_rec & 15)
-        if (ack is None or core.recommend >> 4 != r_rec >> 4 or step not in nodmod.REPLY_STEPS
+        step = core.recommend - r_rec
+        if (ack is None or step not in nodmod.REPLY_STEPS
                 or _UNKNOWN in (said, r_kept[1])
                 or self._kept(core, said, ext) != r_kept):  # the peer keeps R's
             return None
@@ -947,11 +947,11 @@ class Station:
             cum = mine[3] % SEQ_MOD
         else:
             cum = r[0]
-        idx = (r[1] & 15) + step
-        if not 0 <= idx < 16:
+        rec = r[1] + step
+        if not 0 <= rec < REC_EXT or decode_rec(rec) is None:
             return None
         core = F.Core(ftype=F.ARQ, burst_seq=(mine[2] + 1) % F.BURST_MOD, acted_on=self._latest % F.BURST_MOD,
-                      cum=cum, reply_lost=False, k=0, recommend=(r[1] & 0x30) | idx, size_hint=self.peer_size_hint)
+                      cum=cum, reply_lost=False, k=0, recommend=rec, size_hint=self.peer_size_hint)
         ext = {F.T_DUPCTL: b""} if dup else {}
         if self.peer_reply_recommend is not None:
             ext[F.T_REPLY] = bytes([self.peer_reply_recommend])

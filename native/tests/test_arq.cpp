@@ -35,12 +35,17 @@ int main() {
     check::equal(modem::header_samples("n10"), 12 * config::NSYM, "n10 header: 10 symbols, a pilot, the closing pilot");
 
     check::current_step = "modes";
-    if (config::PROFILE == "hf") check::equal(static_cast<int>(arq::modes().size()), 53, "modes");
-    if (check::hf_only("CPM's band code: FM has no CPM"))
-        check::equal(arq::encode("n10-256l-r3/4"), 3 << 4 | 13, "encode n10-256l-r3/4 (CPM code, past N10_HIGH)");
-    check::equal(arq::encode("qpsk-r1/2"), 7, "encode qpsk-r1/2");
-    if (check::hf_only("CPM's band code: FM has no CPM")) check::equal(arq::encode("fsk8r50-r1/2"), 51, "encode fsk8r50-r1/2");
-    if (config::PROFILE == "fm") check::equal(arq::encode("f108-qpsk-r21"), 3 << 4, "encode f108-qpsk-r21 (FM's band code 3)");
+    if (config::PROFILE == "hf") {
+        check::equal(static_cast<int>(arq::modes().size()), 53, "modes");
+        check::equal(arq::encode("fsk8r50-r1/2"), 5, "encode fsk8r50-r1/2");
+        check::equal(arq::encode("fsk32r62-r1/2"), 7, "encode fsk32r62-r1/2");
+        check::equal(arq::encode("qpsk-r1/5"), 9, "encode qpsk-r1/5 (within +2 of fsk32r62-r1/2)");
+        check::equal(arq::encode("qpsk-r1/2"), 12, "encode qpsk-r1/2");
+        check::equal(arq::encode("n10-256l-r3/4"), 39, "encode n10-256l-r3/4 (contiguous n10 ladder)");
+    } else {
+        check::equal(arq::encode("qpsk-r1/2"), 10, "encode qpsk-r1/2 (FM flat table)");
+        check::equal(arq::encode("f108-qpsk-r21"), 28, "encode f108-qpsk-r21 (FM flat table)");
+    }
     for (const auto& m : arq::modes())  // what the ARQ may name on air (every mode on HF)
         if (arq::selectable(m)) check::is_true(arq::decode(arq::encode(m.name)) == &m, std::string(m.name) + " roundtrip");
     check::is_true(arq::decode(0x3F) == nullptr, "no such cpm mode");

@@ -748,9 +748,9 @@ std::optional<std::pair<int, nod::FamilyKey>> Station::nod_of(std::int64_t bn, c
         all = true;
     else if (rx.cum == r.cum)
         all = false;
-    const int step = (core.recommend & 15) - (r.rec & 15);
+    const int step = core.recommend - r.rec;
     const auto idx = nod::index(all.value_or(false), step, ext.count(T_DUPCTL) > 0);
-    if (!all || (core.recommend >> 4) != (r.rec >> 4) || !idx || said == REPLY_UNKNOWN ||
+    if (!all || !idx || said == REPLY_UNKNOWN ||
         std::get<1>(r.kept) == REPLY_UNKNOWN || kept(core, said, ext) != r.kept)
         return std::nullopt;
     return std::make_pair(*idx, nod::FamilyKey{key, direction, static_cast<int>(pmod(bn, BURST_MOD)), core.acted_on});
@@ -776,14 +776,14 @@ std::optional<Bytes> Station::nod_payload(int meaning) const {
     } else {
         core.cum = r->second.cum;
     }
-    const int idx = (r->second.rec & 15) + m.step;
-    if (idx < 0 || idx >= 16) return std::nullopt;
+    const int rec = r->second.rec + m.step;
+    if (rec < 0 || rec >= REC_EXT || !arq::decode(rec)) return std::nullopt;
     core.ftype = ARQ;
     core.burst_seq = static_cast<int>(pmod(mine->second.acted + 1, BURST_MOD));
     core.acted_on = static_cast<int>(pmod(latest, BURST_MOD));
     core.reply_lost = false;
     core.k = 0;
-    core.recommend = (r->second.rec & 0x30) | idx;
+    core.recommend = rec;
     core.size_hint = peer_size_hint;
     Ext ext;
     if (m.dup) ext[T_DUPCTL] = Bytes{};
