@@ -846,10 +846,7 @@ bool Station::handle_inner(RxBurst& rxb) {
         // never guess on a protocol error: a blind resync can corrupt
         std::tie(acted, progress) = take_ack(core, ext);
         // without T_REPLY: keep the previous reply recommendation (docs/arq.md §8a)
-        if (!ext.count(T_REPLY)) {
-            peer_reply_recommend = reply_was;
-            peer_omits_ = peer_omits_ || reply_was.has_value();
-        }
+        if (!ext.count(T_REPLY)) peer_reply_recommend = reply_was;
         abandoned = take_abandon(rxb, ext);
         data = take_data(rxb, core, ext, dup, acted, outcome);
     } catch (const ProtocolError& e) {
@@ -1027,8 +1024,7 @@ std::vector<Station::Hypothesis> Station::expect(const RxBurst& rxb) const {
     }
     for (const auto& [data, pair] : kinds) {
         std::vector<Way> ways = variants(data, n_cw, ctl_slots, pair);
-        // then the same with T_DUPCTL the other way, with T_REPLY's recommendation unknown, and T_REPLY the
-        // other ways a peer that keeps it sends it
+        // then the same with T_DUPCTL the other way, then T_REPLY the other ways it can be sent
         const Tlv dupctl{T_DUPCTL, {}, {}};
         const std::vector<Way> base = ways;
         const std::size_t n0 = ways.size();
@@ -1040,17 +1036,15 @@ std::vector<Station::Hypothesis> Station::expect(const RxBurst& rxb) const {
                 w.ext.push_back(dupctl);
             ways.push_back(std::move(w));
         }
-        for (std::size_t j = 0; j < n0; ++j) {
-            Way w = ways[j];
-            bool has = false;
-            for (auto& t : w.ext)
-                if (t.type == T_REPLY && !t.value.empty()) {
-                    t.mask = Bytes{0xC0};
-                    has = true;
-                }
-            if (has) ways.push_back(std::move(w));
-        }
         for (auto& w : reply_changes(base)) ways.push_back(std::move(w));
+        if (peer_ctl_.empty()) {
+            // first ARQ burst with neither T_REPLY nor T_DUPCTL (e.g. reply=None, want_dup=False)
+            for (const auto& b : base) {
+                Way w = b;
+                std::erase_if(w.ext, [](const Tlv& t) { return t.type == T_REPLY || t.type == T_DUPCTL; });
+                ways.push_back(std::move(w));
+            }
+        }
         for (const auto& w : ways) {
             // an OFDM control-only burst is its control: n_cw codewords, the last ones maybe all padding
             auto h = pack_hypothesis(w, cpb, max_ctl, pair, (ctl_slots || data) ? 0 : n_cw);
@@ -1068,15 +1062,16 @@ std::vector<Station::Hypothesis> Station::expect(const RxBurst& rxb) const {
 }
 
 // Each way with T_REPLY the other ways it can be: left out (unchanged), said (its value unknown),
-// or none (empty) (link.Station._reply_changes).
+// or none (empty, only when the peer currently holds a reply recommendation) (link.Station._reply_changes).
 std::vector<Station::Way> Station::reply_changes(const std::vector<Way>& ways) const {
+    const int n_forms = peer_reply_recommend.has_value() ? 3 : 2;
     std::vector<Way> out;
     for (const auto& w : ways) {
         int have = 0;  // 0: left out, 1: said, 2: none
         for (const auto& t : w.ext)
             if (t.type == T_REPLY) have = t.value.empty() ? 2 : 1;
-        for (int f = 0; f < 3; ++f) {
-            if (f == have) continue;  // the way itself (a said value: its unknown-value way)
+        for (int f = 0; f < n_forms; ++f) {
+            if (f == have) continue;  // the way itself
             Way v = w;
             std::erase_if(v.ext, [](const Tlv& t) { return t.type == T_REPLY; });
             if (f == 1) v.ext.push_back({T_REPLY, Bytes{0}, Bytes{0xC0}});
@@ -1117,10 +1112,9 @@ std::vector<Station::Way> Station::variants(bool data, int n_cw, int ctl_slots, 
     for (int t : {T_CHAT, T_DUPCTL})
         if (auto e = pe.find(t); e != pe.end())
             common.push_back({t, e->second, Bytes(e->second.size(), 0xFF)});
-    // T_REPLY, a recommendation: as last time. Once the peer leaves it out as unchanged,
-    // omit it; the other ways come last (reply_changes)
-    if (auto e = pe.find(T_REPLY); e != pe.end() && !peer_omits_)
-        common.push_back({T_REPLY, e->second, Bytes(e->second.size(), 0xFF)});
+    // T_REPLY is kept unconditionally across bursts (docs/arq.md §8a), so once any peer
+    // control has been read (`base`), expect T_REPLY omitted (unchanged) first; a changed
+    // or cleared T_REPLY comes from reply_changes.
     if (auto e = pe.find(T_BUFFER); e != pe.end()) common.push_back({T_BUFFER, e->second, Bytes(e->second.size(), 0)});
     if (!base) common = {{T_REPLY, Bytes{0}, Bytes{0xC0}}, {T_DUPCTL, {}, {}}};  // its first ARQ burst: the shifter's
     std::vector<Way> ways;

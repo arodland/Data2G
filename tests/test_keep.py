@@ -318,5 +318,4 @@ def test_primed_hypotheses_follow_the_peers_t_reply():
         assert receiver.handle(FullRx(burst))
         burst, sender, receiver = receiver.build(), receiver, sender
         sender.answered()
-    assert a._peer_omits and b._peer_omits
-    assert max(missed) <= 2, missed
+    assert max(missed) <= 1, missed  # only turn 8 (deliberate change to None); burst 1+ omits T_REPLY first
