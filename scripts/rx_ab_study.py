@@ -55,7 +55,10 @@ def median_bin_phase_step(h):
     return _cmedian(np.angle(h[1:] * np.conj(h[:-1])))
 
 
-def median_residual_cfo(h_pilot):
+def median_residual_cfo(h_pilot, exclude=None):
+    """equalizer.residual_cfo's signature: carriers flagged in `exclude` are left out."""
+    if exclude is not None and len(exclude) == h_pilot.shape[1] and not np.all(exclude):
+        h_pilot = h_pilot[:, ~np.asarray(exclude, dtype=bool)]
     return _cmedian(np.angle(h_pilot[1:] * np.conj(h_pilot[:-1])).ravel()) / (2 * np.pi * FRAME_S)
 
 

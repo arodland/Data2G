@@ -1305,13 +1305,41 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
             run.push_back(times_conj(b.demod_window(z, pc + s * NSYM + NCP, HB), ref2[static_cast<size_t>(s)]));
         runs.push_back(std::move(run));
     }
+    // Leave carriers hit by a steady tone or its off-carrier sidelobes out of
+    // coarse and residual_cfo (issue #330; modem.py's notes).
+    const std::vector<char> noisy_sync = equalizer::noisy_carriers(hd.n0_pre_k);
+    size_t hdr_rows = 0;
+    for (const auto& run : runs) hdr_rows += run.size();
+    Mat<cd> hdr_h(hdr_rows, nc);
+    for (size_t r = 0; const auto& run : runs)
+        for (const auto& row : run) {
+            std::copy(row.begin(), row.end(), hdr_h[r]);
+            ++r;
+        }
+    std::vector<char> hot_sync = equalizer::hot_carriers(hdr_h);
+    if (noisy_sync.size() == nc)
+        for (size_t c = 0; c < nc; ++c) hot_sync[c] = hot_sync[c] || noisy_sync[c];
+    if (std::ranges::all_of(hot_sync, [](char x) { return x != 0; })) std::ranges::fill(hot_sync, 0);
     cd dsum = 0.0;
     for (const auto& run : runs)
-        for (size_t i = 0; i + 1 < run.size(); ++i) dsum += dot_conj(run[i + 1], run[i]);
+        for (size_t i = 0; i + 1 < run.size(); ++i)
+            for (size_t c = 0; c < nc; ++c)
+                if (!hot_sync[c]) dsum += run[i + 1][c] * std::conj(run[i][c]);
     const double coarse = std::arg(dsum) / (2 * PI * NSYM / FS);
     // slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
     auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db);
-    const double fine = equalizer::residual_cfo(first.hp);
+    const auto& dbs = config::band(db);
+    const auto& sbs = config::band(sband);
+    const size_t k0_off = static_cast<size_t>(dbs.k0 - sbs.k0);
+    const size_t nc_db = static_cast<size_t>(dbs.nc);
+    std::vector<char> exclude_db(nc_db, 0);
+    if (k0_off + nc_db <= noisy_sync.size()) {
+        for (size_t c = 0; c < nc_db; ++c) {
+            exclude_db[c] = noisy_sync[k0_off + c];
+            if (db != sband) exclude_db[c] = exclude_db[c] || hot_sync[k0_off + c];
+        }
+    }
+    const double fine = equalizer::residual_cfo(first.hp, exclude_db);
     const auto slips = std::move(first.slips);
     const double cfo_res = resolve_alias(fine, coarse);
     z = waveform::freq_correct(z, cfo_res);

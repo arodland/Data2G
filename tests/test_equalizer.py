@@ -67,6 +67,74 @@ def test_a_tone_on_one_carrier_does_not_sink_the_burst():
         assert b.payloads == sent and all(b.crc_ok)
 
 
+def test_residual_cfo_leaves_a_tones_carriers_out():
+    """An on-carrier tone (caught by hot_carriers) and off-carrier sidelobes
+    (caught by noisy_carriers) are left out of residual_cfo; without flagged
+    carriers the result is bit-identical to the plain sum (issue #330)."""
+    from data2g import equalizer
+
+    rng = np.random.default_rng(0)
+    h = np.ones((20, 48), complex) + 0.05 * (rng.standard_normal((20, 48)) + 1j * rng.standard_normal((20, 48)))
+    plain = float(np.angle(np.sum(h[1:] * np.conj(h[:-1]))) / (2 * np.pi * equalizer.FRAME_S))
+    assert not equalizer.hot_carriers(h).any()
+    assert equalizer.residual_cfo(h) == pytest.approx(plain, abs=1e-12)
+    assert equalizer.residual_cfo(h, np.zeros(48, bool)) == equalizer.residual_cfo(h)
+
+    # On-carrier tone, 9x signal power, rotating -0.2 cyc/frame (2200 Hz on w48)
+    h_on = h.copy()
+    h_on[:, 37] += 3 * np.exp(-2j * np.pi * 0.2 * np.arange(20))
+    assert equalizer.hot_carriers(h_on).tolist() == [k == 37 for k in range(48)]
+    assert abs(equalizer.residual_cfo(h_on) - plain) < 0.01
+
+    # Weaker on-carrier tone (under HOT_CARRIER x median power, e.g. high SNR or narrow band),
+    # caught by the frame-to-frame innovation check
+    h_weak = h.copy()
+    h_weak[:, 12] += 2 * np.exp(-2j * np.pi * 0.2 * np.arange(20))
+    assert not equalizer.hot_carriers(h_weak).any()
+    assert abs(equalizer.residual_cfo(h_weak) - plain) < 0.01
+
+    # Off-carrier sidelobes under HOT_CARRIER x median power, flagged via noisy_carriers
+    h_off = h.copy()
+    for k, amp in ((8, 1.2), (9, 3.3), (10, 3.3), (11, 1.2)):
+        h_off[:, k] += amp * np.exp(-2j * np.pi * 0.2 * np.arange(20))
+    n0_pre_k = np.ones(48)
+    n0_pre_k[[8, 9, 10, 11]] = [16.0, 160.0, 160.0, 16.0]
+    noisy = equalizer.noisy_carriers(n0_pre_k)
+    assert noisy.tolist() == [k in (8, 9, 10, 11) for k in range(48)]
+    assert abs(equalizer.residual_cfo(h_off, noisy) - plain) < 0.01
+
+
+@pytest.mark.hf_only("w48 HF band and 800/825/2200 Hz tones from issue #330")
+def test_in_band_tone_does_not_bias_ofdm_cfo_or_jump_alias():
+    """Strong (+25 dB in 50 Hz) on-carrier (800, 2200 Hz) and off-carrier (825 Hz)
+    tones keep r['cfo'] within 0.05 Hz of the no-tone reading and do not pull
+    coarse across the +-3.47 Hz alias boundary on live reception (issue #330)."""
+    from data2g.config import FS, LEADIN_SAMPLES, SNR_REF_BW_HZ
+
+    spec = SUBMODES["w48-qpsk-r1/3"]
+    rng = np.random.default_rng(3)
+    sent = [rng.bytes(codes.payload_bytes(spec)) for _ in range(6)]
+    pad = 2000
+    x = np.concatenate([np.zeros(pad), modem.modulate(sent, spec), np.zeros(pad)])
+    known = dict(start=pad + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=len(sent))
+    peak = float(np.max(np.abs(signal.hilbert(x)) ** 2) / 2)
+    sigma = np.sqrt(peak / 10 ** 0.5 * (FS / 2) / SNR_REF_BW_HZ / 10 ** (8.0 / 10))
+    y_clean = x + np.random.default_rng(5).normal(scale=sigma, size=len(x))
+    base_known = modem.receive(y_clean, known=known)["cfo"]
+    base_full = modem.receive(y_clean)["cfo"]
+
+    amp = np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10 ** (25.0 / 10))
+    t = np.arange(len(y_clean)) / FS
+    for tone in (800.0, 825.0, 2200.0):
+        y = y_clean + amp * np.cos(2 * np.pi * tone * t + 0.7)
+        rk = modem.receive(y, known=known)
+        assert abs(rk["cfo"] - base_known) < 0.05, f"known tone={tone}: {rk['cfo']} vs {base_known}"
+        rf = modem.receive(y)
+        assert abs(rf["cfo"] - base_full) < 0.05, f"full tone={tone}: {rf['cfo']} vs {base_full}"
+        dec = modem.decode_received(rf)
+        assert dec.payloads == sent and all(dec.crc_ok), f"full decode failed for tone={tone}"
+
+
 def test_per_carrier_noise_is_the_band_level_on_a_clean_channel():
     rng = np.random.default_rng(0)
     for m in (5, 20, 60):

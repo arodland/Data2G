@@ -1274,11 +1274,30 @@ def receive(x: np.ndarray, bands=None, accept: Accept | None = None, head: int |
         h = ref_syms[~layout]
         ref2 = [b.pilot, *np.resize(h, (DATA_SYMS_PER_FRAME, b.nc)), b.pilot]
         runs.append([y * np.conj(r) for y, r in zip(ys, ref2)])
-    d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
+    # Leave carriers hit by a steady tone or its off-carrier sidelobes out of
+    # coarse and residual_cfo (issue #330): a +25 dB tone at 800 Hz otherwise
+    # pulls coarse across the +-3.47 Hz alias boundary (-6.94 Hz jump) and biases
+    # residual_cfo by ~0.5 Hz. Bit-identical when no carrier is flagged.
+    noisy_sync = equalizer.noisy_carriers(hd["n0_pre_k"])
+    hot_sync = equalizer.hot_carriers(np.array([row for run in runs for row in run])) | noisy_sync
+    if hot_sync.all():
+        hot_sync[:] = False
+    if hot_sync.any():
+        keep_sync = ~hot_sync
+        d = sum(np.sum((run[i + 1] * np.conj(run[i]))[keep_sync]) for run in runs for i in range(len(run) - 1))
+    else:
+        d = sum(np.sum(run[i + 1] * np.conj(run[i])) for run in runs for i in range(len(run) - 1))
     coarse = float(np.angle(d) / (2 * np.pi * NSYM / FS))
     # slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
     _, hp, _, slips = _demod_frames(z, p0, n_air, 0, phi_ref, band=db)
-    fine = equalizer.residual_cfo(hp)
+    k0_off = BANDS[db].k0 - b.spec.k0
+    exclude_db = noisy_sync[k0_off : k0_off + BANDS[db].nc]
+    if db != band:
+        # n4 (4 carriers hosted on n10's 10): carry the wider sync band's power
+        # check too so a mid-carrier tone hitting 2 of 4 carriers cannot mask
+        # itself in n4's 4-carrier median.
+        exclude_db = exclude_db | hot_sync[k0_off : k0_off + BANDS[db].nc]
+    fine = equalizer.residual_cfo(hp, exclude_db)
     # a known burst's CFO is the same transmitter's, measured seconds ago: its
     # header may be the part that faded, so the alias nearest no change
     cfo_res = resolve_alias(fine, 0.0 if known is not None else coarse)
