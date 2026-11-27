@@ -94,6 +94,21 @@ int main() {
                 err = std::max(err, std::abs(got[k] * waveform::phasor(6 * b.bb[k]) - s[i][k]));
         }
         check::is_true(err < 1e-9, name + " symbol loopback");
+        // demod_window (FFT path on wide bands) matches direct DFT (b.demod)
+        {
+            const std::int64_t pos = config::NSYM + config::NCP;
+            const auto got = b.demod_window(z, pos, 6);
+            double dft_err = 0.0;
+            const std::size_t off = static_cast<std::size_t>(pos - 6);
+            constexpr double scale = 2.0 / config::M;
+            for (int k = 0; k < b.nc(); ++k) {
+                cdouble acc{};
+                const cdouble* row = b.demod[static_cast<std::size_t>(k)];
+                for (int t = 0; t < config::M; ++t) acc += row[t] * z[off + static_cast<std::size_t>(t)];
+                dft_err = std::max(dft_err, std::abs(got[static_cast<std::size_t>(k)] - scale * acc));
+            }
+            check::is_true(dft_err < 1e-13, name + " demod_window matches direct DFT");
+        }
         const auto w = b.preamble_waveform();
         double per = 0;
         for (std::size_t n = config::M; n < w.size(); ++n) per = std::max(per, std::abs(w[n] - w[n - config::M]));
@@ -110,6 +125,15 @@ int main() {
         check::close(part, std::vector<cdouble>(whole.begin() + 1234, whole.end()), 0.0, "to_baseband n0 continues the phase");
         const auto back = waveform::freq_correct(waveform::freq_correct(whole, 37.3), -37.3);
         check::close(back, whole, 1e-12, "freq_correct inverts");
+        check::close(waveform::freq_correct(whole, 0.0), whole, 0.0, "freq_correct(0) exact");
+        {
+            const auto fc = waveform::freq_correct(whole, -19.7);
+            double max_e = 0.0;
+            const double w0 = 2.0 * PI * 19.7 / config::FS;
+            for (std::size_t i = 0; i < whole.size(); ++i)
+                max_e = std::max(max_e, std::abs(fc[i] - whole[i] * std::polar(1.0, w0 * static_cast<double>(i))));
+            check::is_true(max_e < 1e-12, "freq_correct matches std::polar across >64-sample blocks");
+        }
         // the clipper: unit RMS over the active part, lower PAPR
         const auto& b = waveform::band("w");
         Mat<cdouble> s(20, 24);

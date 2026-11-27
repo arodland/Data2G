@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <map>
 #include <mutex>
 #include <numbers>
@@ -17,9 +18,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "codes/codes.hpp"
 #include "config/config.hpp"
-#include "constellation/constellation.hpp"
 #include "tables/gamma_q99.hpp"
 #include "util/linalg.hpp"
 #include "util/pool.hpp"
@@ -154,15 +153,18 @@ struct Weights {
     std::vector<double> Yr, Yi;  // (n x rhs)
     Mat<cd> Bd;                  // factored: the support's steering vectors (nc x nd)
     size_t bytes() const {
-        return W.data.size() * sizeof(cd) + 64 * m.size() + 8 * (Lr.size() + Li.size() + Yr.size() + Yi.size());
+        return W.data.size() * sizeof(cd) + (m.size() + own.size() + Lr.size() + Li.size() + Yr.size() + Yi.size()) * sizeof(double) +
+               col.size() * sizeof(size_t) + Bd.data.size() * sizeof(cd);
     }
 };
 
-// Python keeps 256 patterns; a w48 pattern's W is up to ~3 MB, so the C++ also caps the bytes.
-// ponytail: a full cache starts over (Python's rule); an LRU if sessions thrash it.
-constexpr size_t CACHE_ENTRIES = 256, CACHE_BYTES = size_t{192} << 20;
+// Bounded LRU cache for _sc_joint weights (issue #348: Slepian handles w/w48 normal delay spreads,
+// and narrow bands rarely reuse weights across bursts, so cap tightly and evict LRU).
+constexpr size_t CACHE_ENTRIES = 64, CACHE_BYTES = size_t{32} << 20;
+using CacheNode = std::pair<std::string, std::shared_ptr<const Weights>>;
 std::mutex cache_mu;
-std::unordered_map<std::string, std::shared_ptr<const Weights>> cache;
+std::list<CacheNode> cache_lru;  // front = MRU, back = LRU
+std::unordered_map<std::string_view, std::list<CacheNode>::iterator> cache;
 size_t cache_bytes = 0;
 
 int quant(double v, int n) { return static_cast<int>(std::nearbyint(std::log2(std::max(v, 1e-9)) * n)); }
@@ -478,8 +480,12 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         std::lock_guard lk(cache_mu);
         std::set<std::string_view> seen;
         for (size_t i = 0; i < F; ++i) {
-            if (auto it = cache.find(keys[i]); it != cache.end()) got[i] = it->second;
-            else if (seen.insert(keys[i]).second) missing.push_back(i);
+            if (auto it = cache.find(keys[i]); it != cache.end()) {
+                cache_lru.splice(cache_lru.begin(), cache_lru, it->second);
+                got[i] = it->second->second;
+            } else if (seen.insert(keys[i]).second) {
+                missing.push_back(i);
+            }
         }
     }
     if (!missing.empty()) {
@@ -503,11 +509,22 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
-            if (cache.size() >= CACHE_ENTRIES || cache_bytes + made[m]->bytes() > CACHE_BYTES) {
-                cache.clear();
-                cache_bytes = 0;
+            const auto& key = keys[missing[m]];
+            if (auto it = cache.find(key); it != cache.end()) {
+                cache_lru.splice(cache_lru.begin(), cache_lru, it->second);
+                continue;
             }
-            if (cache.emplace(keys[missing[m]], made[m]).second) cache_bytes += made[m]->bytes();
+            const size_t entry_bytes = made[m]->bytes();
+            if (entry_bytes > CACHE_BYTES) continue;
+            while (!cache_lru.empty() && (cache.size() >= CACHE_ENTRIES || cache_bytes + entry_bytes > CACHE_BYTES)) {
+                const auto& oldest = cache_lru.back();
+                cache_bytes -= oldest.second->bytes();
+                cache.erase(oldest.first);
+                cache_lru.pop_back();
+            }
+            cache_lru.emplace_front(key, made[m]);
+            cache.emplace(std::string_view(cache_lru.front().first), cache_lru.begin());
+            cache_bytes += entry_bytes;
         }
         for (size_t i = 0; i < F; ++i)
             if (!got[i])
@@ -1224,87 +1241,8 @@ std::pair<std::vector<char>, std::vector<double>> sc_hot(const std::vector<doubl
 }
 
 // modem._sc_cal's second value: the submode's scattered pilots' distortion over their power, as its transmitter leaves
-// them, measured once on two clean bursts (the first value, their gain, is not used). While measuring, the default
-// clip ratio (Python's placeholder).
-double sc_cal_ratio(const Spec& spec) {
-    static std::mutex mu;
-    static std::map<size_t, double> done;
-    thread_local std::set<size_t> measuring;
-    const size_t key = config::row(spec);
-    {
-        std::lock_guard lk(mu);
-        if (auto it = done.find(key); it != done.end()) return it->second;
-    }
-    if (measuring.count(key)) return clip_consts(spec).ratio;
-    measuring.insert(key);
-    struct Unmark {
-        size_t k;
-        ~Unmark() { measuring.erase(k); }
-    } unmark{key};
-    const auto& b = waveform::band(spec.band);
-    const size_t nc = static_cast<size_t>(b.nc());
-    const auto& cs = codes::spec(spec);
-    const auto& pts = *constellation::find(spec.constellation);
-    const int n_cw = std::min(4, max_codewords(spec.sync_band));
-    std::uint64_t state = 0;
-    std::vector<cd> num_d(nc, 0.0), num_p(nc, 0.0);
-    std::vector<double> den_d(nc, 0.0), den_p(nc, 0.0);
-    struct Part {
-        Mat<cd> ls;
-        std::vector<int> norm;
-    };
-    std::vector<Part> parts;
-    for (int burst = 0; burst < 2; ++burst) {
-        std::vector<std::uint8_t> coded;
-        for (int i = 0; i < n_cw; ++i) {
-            const auto c = codes::encode(cs, sc_payload(spec.payload_bytes, state), 0, 0, i);
-            coded.insert(coded.end(), c.begin(), c.end());
-        }
-        const auto bits = codes::spread<std::uint8_t>(coded, n_cw, spec.bits_per_cu, 0);
-        const auto x = modulate_bits(bits, spec);
-        std::vector<double> padded(800, 0.0);
-        padded.insert(padded.end(), x.begin(), x.end());
-        padded.insert(padded.end(), 800, 0.0);
-        const auto r = receive_known(padded, 800 + LEADIN_SAMPLES, 0.0, spec, n_cw);
-        const auto X = constellation::modulate(bits, pts);
-        const size_t n_f = r.raw.rows / SYMS_PER_FRAME, per = DATA_SYMS_PER_FRAME * nc;
-        const Mat<cd>& ls = r.sc->ls;
-        const auto& norm = r.sc->norm;
-        for (size_t f = 0; f < n_f; ++f) {
-            const auto& cells = sc_frame_cells(b.nc(), norm[f]);
-            for (size_t j = 0; j < per; ++j) {
-                const cd y = data_row(r.raw, f * DATA_SYMS_PER_FRAME + j / nc)[j % nc], xx = X[f * per + j];
-                const size_t k = static_cast<size_t>(cells.Dc[j]) % nc;
-                num_d[k] += y * std::conj(xx);
-                den_d[k] += std::norm(xx);
-            }
-            for (size_t i = 0; i < nc; ++i) {
-                const size_t k = static_cast<size_t>(cells.PK[i]);
-                num_p[k] += ls[f][i];
-                den_p[k] += 1.0;
-            }
-        }
-        parts.push_back({ls, norm});
-    }
-    std::vector<cd> gp(nc, 0.0);
-    for (size_t k = 0; k < nc; ++k)
-        if (den_p[k] > 0.0) gp[k] = num_p[k] / den_p[k];
-    double err = 0.0, tot_gp = 0.0;
-    for (const auto& pt : parts) {
-        for (size_t f = 0; f < pt.ls.rows; ++f) {
-            const auto& cells = sc_frame_cells(b.nc(), pt.norm[f]);
-            for (size_t i = 0; i < nc; ++i) {
-                const cd gpk = gp[static_cast<size_t>(cells.PK[i])];
-                err += std::norm(pt.ls[f][i] - gpk);
-                tot_gp += std::norm(gpk);
-            }
-        }
-    }
-    const double ratio = err / std::max(tot_gp, 1e-30);
-    std::lock_guard lk(mu);
-    done.emplace(key, ratio);
-    return ratio;
-}
+// them, precomputed in generated/modem.hpp (SC_CAL_RATIO) by tools/gen_native_tables.py.
+double sc_cal_ratio(const Spec& spec) { return SC_CAL_RATIO[config::row(spec)]; }
 
 // The thermal noise from the preamble's repeats about a cubic in time per carrier (modem._sc_estimate's n0):
 // the least-squares residual's power per carrier, by an orthonormal basis of the (R, 4) Vandermonde matrix.
@@ -1447,19 +1385,18 @@ std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, c
     if (z.data.size() != n_f * per || w.data.size() != n_f * per) throw std::invalid_argument("sc_refine: shapes disagree");
     Mat<cd> z6(n_air * SYMS_PER_FRAME, nc);
     Mat<double> w6(n_air * SYMS_PER_FRAME, nc);
-    auto at = [&](size_t f, size_t j) {
-        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
-        const size_t c = static_cast<size_t>(cells.Dc[j]);
-        return (static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME + c / nc) * nc + c % nc;
-    };
     double msum = 0.0;
     for (double v : i.mse.data) msum += v;
-    for (size_t f = 0; f < n_f; ++f)
+    for (size_t f = 0; f < n_f; ++f) {
+        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
+        const size_t base = static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME * nc;
         for (size_t j = 0; j < per; ++j) {
             const size_t q = f * per + j;
-            if (w.data[q] > 0) z6.data[at(f, j)] = z.data[q] - i.h.data[q];
-            w6.data[at(f, j)] = w.data[q];
+            const size_t dst = base + static_cast<size_t>(cells.Dc[j]);
+            if (w.data[q] > 0) z6.data[dst] = z.data[q] - i.h.data[q];
+            w6.data[dst] = w.data[q];
         }
+    }
     Mat<double> t_rows(n_air, SYMS_PER_FRAME);
     for (size_t a = 0; a < n_air; ++a)
         for (size_t s = 0; s < static_cast<size_t>(SYMS_PER_FRAME); ++s)
@@ -1469,12 +1406,16 @@ std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, c
                                             r.est.n0, equalizer::bb(config::band(r.band)), r.est.slack);
     Mat<cd> h(n_f * DATA_SYMS_PER_FRAME, nc);
     Mat<double> mse(h.rows, nc);
-    for (size_t f = 0; f < n_f; ++f)
+    for (size_t f = 0; f < n_f; ++f) {
+        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
+        const size_t base = static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME * nc;
         for (size_t j = 0; j < per; ++j) {
             const size_t q = f * per + j;
-            h.data[q] = i.h.data[q] + dh.data[at(f, j)];
-            mse.data[q] = dm.data[at(f, j)];
+            const size_t dst = base + static_cast<size_t>(cells.Dc[j]);
+            h.data[q] = i.h.data[q] + dh.data[dst];
+            mse.data[q] = dm.data[dst];
         }
+    }
     return {std::move(h), std::move(mse)};
 }
 

@@ -131,6 +131,9 @@ public:
     void skip_to(std::int64_t pos);
     void feed(std::span<const cdouble> z);  // the next contiguous baseband samples
     void trim(std::int64_t start);          // drop starts before stream index `start`
+    // Drop matched-filter outputs C before stream index `start` without touching S or D
+    // (scattered-pilot bands read C once per hop via CombStream and never need older outputs).
+    void trim_outputs(std::int64_t start);
     std::optional<double> level() const;    // the noise level stat() divides by
     Mat<double> stat(std::int64_t lo, std::int64_t hi) const;  // starts [lo, hi), -1 where not computed
     // max of stat(lo, hi) without building it (read-only): -1 if none was computed. Under the band's preamble

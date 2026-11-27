@@ -102,21 +102,44 @@ DATA2G_SIMD_CLONES void exp_nonpos(double* __restrict v, std::size_t n) {
 }
 #endif
 
+// Equalized squared distances: d[p] = scale * ((zr - xr[p])^2 + (zi - xi[p])^2) and returns max(d).
+DATA2G_SIMD_CLONES double dist_general(double zr, double zi, double scale, const double* __restrict xr,
+                                       const double* __restrict xi, double* __restrict d, std::size_t M) {
+    double mx = -std::numeric_limits<double>::infinity();
+    for (std::size_t p = 0; p < M; ++p) {
+        const double dr = zr - xr[p], di = zi - xi[p];
+        const double v = scale * (dr * dr + di * di);
+        d[p] = v;
+        mx = v > mx ? v : mx;
+    }
+    return mx;
+}
+
 void llr_general(std::span<const cd> y, std::span<const cd> h, std::span<const double> var, const Constellation& c,
                  double* out) {
     const std::size_t M = c.points.size();
+    // Split constellation points once so the inner distance loop vectorizes cleanly without std::fma PLT calls.
+    std::vector<double> xr(M), xi(M), d(M), ping(M), pong(M), s0(c.m), s1(c.m);
+    for (std::size_t p = 0; p < M; ++p) {
+        xr[p] = c.points[p].real();
+        xi[p] = c.points[p].imag();
+    }
     // The sums over the points whose bit j is 0 / 1, from a tree of partial sums: each pass pairs
     // neighbouring entries (labels differing in their last remaining bit), so the even and odd entries
     // summed on the way are bit j's two halves, 2 M adds in all instead of M c.m data-dependent ones.
-    std::vector<double> d(M), ping(M), pong(M), s0(c.m), s1(c.m);
     for (std::size_t i = 0; i < y.size(); ++i) {
-        double mx = -std::numeric_limits<double>::infinity();
-        for (std::size_t p = 0; p < M; ++p) {
-            const cd hx = mul(h[i], c.points[p]);
-            const double dr = y[i].real() - hx.real(), di = y[i].imag() - hx.imag();
-            d[p] = -(dr * dr + di * di) / var[i];  // numpy's hypot, squared, to rounding
-            mx = std::max(mx, d[p]);
+        const double hr = h[i].real(), hi = h[i].imag();
+        const double h2 = hr * hr + hi * hi;
+        double* o = out + i * c.m;
+        if (!(h2 > 0.0)) {  // dead carrier (h == 0): every point has identical distance -> LLR = 0
+            std::fill_n(o, static_cast<std::size_t>(c.m), 0.0);
+            continue;
         }
+        const double inv_h2 = 1.0 / h2;
+        const double yr = y[i].real(), yi = y[i].imag();
+        const double zr = (yr * hr + yi * hi) * inv_h2;
+        const double zi = (yi * hr - yr * hi) * inv_h2;
+        const double mx = dist_general(zr, zi, -h2 / var[i], xr.data(), xi.data(), d.data(), M);
 #ifdef DATA2G_HAVE_SIMD_CLONES
         for (std::size_t p = 0; p < M; ++p) ping[p] = d[p] - mx;
         exp_nonpos(ping.data(), M);
@@ -137,7 +160,6 @@ void llr_general(std::span<const cd> y, std::span<const cd> h, std::span<const d
             n /= 2;
             std::swap(a, b);
         }
-        double* o = out + i * c.m;
         // A half underflowing (|LLR| > ~690) is floored, as in the reference.
         for (int j = 0; j < c.m; ++j) o[j] = std::log(std::max(s0[j], 1e-300)) - std::log(std::max(s1[j], 1e-300));
     }

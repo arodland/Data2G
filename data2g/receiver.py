@@ -570,7 +570,7 @@ class Receiver:
                     c.restart_at(self.off)
                 if c.fed < end:
                     c.feed(dsp.to_baseband(self.buf[c.fed - self.off:], c.fed))
-                c.trim(end - self.keep - modem.FRAME_SAMPLES)
+                c.trim(end - int(self.PRESENCE_S * FS) - c.lag - modem.M - c.decim)
             level = c.level()
             if level is None:
                 continue
@@ -678,7 +678,10 @@ class Receiver:
                 if c.fed < self.off:
                     c.restart_at(self.off)
                 c.feed(dsp.to_baseband(self.buf[c.fed - self.off:], c.fed))
+                d.trim_outputs(c.fed - len(c.tail))
                 c.trim(self.off + len(self.buf) - self.keep - d.span)
+            elif b in modem.SC_BANDS:
+                d.trim_outputs(d.fed)
             n = len(self.buf) - w0 - d.span + 1
             if n <= 0:
                 continue

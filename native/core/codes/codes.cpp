@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -793,33 +794,54 @@ const std::vector<int>& polar_order(const Spec& s) {
 
 namespace {
 
-// The full code, and the decoder of the code with `known` (code-order info indices) frozen; built once per pattern.
+// The full code, and the decoder of the code with `known` (code-order info indices) frozen; built once per pattern
+// and held in a bounded LRU cache.
 struct PinnedPolar {
     std::unique_ptr<polar::PolarCode> full;
     std::unique_ptr<polar::SCLDecoder> dec;
     std::vector<int> rest;  // code-order info indices it decodes
 };
+using PinnedKey = std::pair<const Spec*, std::vector<int>>;
+using PinnedNode = std::pair<PinnedKey, std::shared_ptr<const PinnedPolar>>;
+constexpr std::size_t PINNED_CACHE_MAX = 128;
 std::mutex pinned_mutex;
-std::map<std::pair<const Spec*, std::vector<int>>, PinnedPolar> pinned_cache;
+std::list<PinnedNode> pinned_lru;
+std::map<PinnedKey, std::list<PinnedNode>::iterator> pinned_cache;
 
-const PinnedPolar& pinned_polar(const Spec& s, const std::vector<int>& known) {
+std::shared_ptr<const PinnedPolar> pinned_polar(const Spec& s, const std::vector<int>& known) {
     const auto& code = polar_code(s);
-    std::lock_guard lock(pinned_mutex);
-    auto& p = pinned_cache[{&s, known}];
-    if (!p.dec) {
-        std::vector<std::uint16_t> info;
-        std::vector<std::uint8_t> is_known(static_cast<std::size_t>(s.k), 0);
-        for (int j : known) is_known[static_cast<std::size_t>(j)] = 1;
-        for (int j = 0; j < s.k; ++j)
-            if (!is_known[static_cast<std::size_t>(j)]) {
-                p.rest.push_back(j);
-                info.push_back(code.info_pos[static_cast<std::size_t>(j)]);
-            }
-        p.full = std::make_unique<polar::PolarCode>(s.k, s.coded_bits, code.info_pos);
-        p.dec = std::make_unique<polar::SCLDecoder>(polar::PolarCode(static_cast<int>(info.size()), s.coded_bits, info),
-                                                    POLAR_LIST);
+    PinnedKey key{&s, known};
+    {
+        std::lock_guard lock(pinned_mutex);
+        if (auto it = pinned_cache.find(key); it != pinned_cache.end()) {
+            pinned_lru.splice(pinned_lru.begin(), pinned_lru, it->second);
+            return it->second->second;
+        }
     }
-    return p;
+    auto p = std::make_shared<PinnedPolar>();
+    std::vector<std::uint16_t> info;
+    std::vector<std::uint8_t> is_known(static_cast<std::size_t>(s.k), 0);
+    for (int j : known) is_known[static_cast<std::size_t>(j)] = 1;
+    for (int j = 0; j < s.k; ++j)
+        if (!is_known[static_cast<std::size_t>(j)]) {
+            p->rest.push_back(j);
+            info.push_back(code.info_pos[static_cast<std::size_t>(j)]);
+        }
+    p->full = std::make_unique<polar::PolarCode>(s.k, s.coded_bits, code.info_pos);
+    p->dec = std::make_unique<polar::SCLDecoder>(polar::PolarCode(static_cast<int>(info.size()), s.coded_bits, info),
+                                                 POLAR_LIST);
+    std::lock_guard lock(pinned_mutex);
+    if (auto it = pinned_cache.find(key); it != pinned_cache.end()) {
+        pinned_lru.splice(pinned_lru.begin(), pinned_lru, it->second);
+        return it->second->second;
+    }
+    while (pinned_cache.size() >= PINNED_CACHE_MAX && !pinned_lru.empty()) {
+        pinned_cache.erase(pinned_lru.back().first);
+        pinned_lru.pop_back();
+    }
+    pinned_lru.emplace_front(std::move(key), std::move(p));
+    pinned_cache.emplace(pinned_lru.front().first, pinned_lru.begin());
+    return pinned_lru.front().second;
 }
 
 // codes._pinned_paths: (B, coded_bits) code-order LLRs, sent at `index` -> (B, L * k) info bits, scrambled, in
@@ -839,7 +861,8 @@ Mat<std::uint8_t> pinned_paths(const Spec& s, const Mat<float>& deint, std::span
             kp.push_back(static_cast<int>(j));
         }
     }
-    const auto& p = pinned_polar(s, kp);
+    const auto pp = pinned_polar(s, kp);
+    const auto& p = *pp;
     Mat<std::uint8_t> ub(1, k);
     ub.data = u;
     const auto xk = p.full->encode(ub);

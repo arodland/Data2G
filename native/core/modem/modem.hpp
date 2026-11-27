@@ -174,7 +174,8 @@ struct Frames {
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in = {}, std::string_view band = "w",
                     std::span<const std::int64_t> slips_in = {}, const Mat<int>* pil = nullptr,
-                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr);
+                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr, bool pilots_only = false,
+                    bool need_copy_close = false);
 
 struct HeaderRead {
     Header hdr;
@@ -258,6 +259,7 @@ public:
     void feed(std::span<const cd> z, const waveform::StreamDetector* full = nullptr);
     bool can_use_full() const { return can_use_full_; }
     int decim() const { return decim_; }
+    std::int64_t tail_size() const { return static_cast<std::int64_t>(tail_.size()); }
     void trim(std::int64_t start);
     std::optional<double> level() const;
     std::vector<double> row_levels() const;  // per CFO bin, level()'s before its min (find_copy's row_level)
@@ -276,6 +278,7 @@ private:
     std::string_view band_;
     std::optional<ScIntra> intra_;
     bool can_use_full_ = false;
+    std::vector<double> full_weights_;
     int decim_ = 1;
     std::vector<double> freqs_;
     std::vector<int> js_;
@@ -283,6 +286,7 @@ private:
     std::vector<cd> tail_;
     std::vector<std::vector<cd>> C_, D_;
     std::size_t c_off_ = 0, d_off_ = 0;
+    std::int64_t c_head_ = 0;  // stream index of C_[i][c_off_] (advances past c0 as extend() drains consumed cols)
     std::vector<std::vector<double>> levels_;
 };
 // find_copy(comb=True) from a CombStream's pair products (x from their first start), its level and running fold.
@@ -322,7 +326,7 @@ std::vector<double> copy_row_weights(std::span<const double> row_level, int n_co
 std::pair<std::int64_t, int> presence_window(std::size_t dcols, std::int64_t window, int decim = 1,
                                              int pad_frames = COPY_PAIRS);
 std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m,
-                                        std::span<const double> row_w = {});
+                                        std::span<const double> row_w = {}, bool demean = false);
 bool presence_verdict(double peak, double contrast, int m, std::string_view band = {});
 std::pair<double, double> pilot_presence(std::span<const cd* const> D_rows, std::size_t dcols, double level,
                                          std::int64_t window);

@@ -127,6 +127,8 @@ public:
     explicit CoarseTrack(const Grid& g, double reach_hz = 150.0, CoarseTrack* source = nullptr);
     // buf holds stream samples off..: rows for its new whole symbols; rows of samples it no longer holds dropped
     void feed(std::span<const double> buf, std::int64_t off);
+    // Drop memoized fine/header results for starts already decided by Receiver.
+    void prune_memos(std::int64_t decided, std::int64_t decided_mid);
     // detect's per-phase (first symbol's sample from a, rows n x 4 nb) of the whole symbols in [a, b)
     std::vector<std::pair<std::int64_t, Mat<double>>> rows(std::int64_t a, std::int64_t b) const;
     // presence() / present() over the whole symbols in stream samples [lo, hi)
@@ -153,6 +155,7 @@ public:
     mutable std::vector<FineMemo> fine_memo;
     mutable std::vector<HeaderMemo> header_memo;
     const Grid& grid() const { return *g_; }
+    bool has_source() const { return source_ != nullptr; }
 
 private:
     bool sourced(std::int64_t nxt, std::int64_t n, std::vector<double>& out_e, std::vector<double>& out_r) const;

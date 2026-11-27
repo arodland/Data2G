@@ -191,14 +191,13 @@ PADDED_SLACK = 20
 PADDED_GAIN = 2.0
 
 
-@lru_cache(maxsize=1024)
-def _support_basis(bb_bytes: bytes, d0: int, d1: int, slack: int = SUPPORT_SLACK) -> tuple:
-    """(orthonormal basis of the support's delays across the carriers, its
-    rank, the uncapped rank): geometry only, so computed once per band and
-    support (the SVD was 7% of a Pat exchange's CPU, once per header read)."""
+@lru_cache(maxsize=256)
+def _support_basis_0(bb_bytes: bytes, width: int) -> tuple:
+    """(orthonormal basis of delays 0..width-1 across carriers, its rank,
+    the uncapped rank): shift-invariant geometry, cached by (band, width)."""
     bb = np.frombuffer(bb_bytes)
     nc = len(bb)
-    d = np.arange(d0 - slack, d1 + slack + 1)
+    d = np.arange(width)
     B = np.exp(-2j * np.pi * np.outer(bb, d) / FS)
     U, s, _ = np.linalg.svd(B, full_matrices=False)
     r_full = int(np.sum(s > s[0] * 1e-2))
@@ -206,6 +205,26 @@ def _support_basis(bb_bytes: bytes, d0: int, d1: int, slack: int = SUPPORT_SLACK
     U = np.ascontiguousarray(U[:, :r])
     U.setflags(write=False)
     return U, r, r_full
+
+
+def _support_basis(bb_bytes: bytes, d0: int, d1: int, slack: int = SUPPORT_SLACK) -> tuple:
+    """(orthonormal basis of the support's delays across the carriers, its
+    rank, the uncapped rank): geometry only, factored as phase shift times
+    _support_basis_0(bb, width) so the SVD is computed once per (band, width)."""
+    width = d1 - d0 + 2 * slack + 1
+    U0, r, r_full = _support_basis_0(bb_bytes, width)
+    shift = d0 - slack
+    if shift == 0:
+        return U0, r, r_full
+    bb = np.frombuffer(bb_bytes)
+    U = np.ascontiguousarray(np.exp(-2j * np.pi * bb * shift / FS)[:, None] * U0)
+    U.setflags(write=False)
+    return U, r, r_full
+
+
+_support_basis.cache_clear = _support_basis_0.cache_clear
+_support_basis.cache_info = _support_basis_0.cache_info
+_support_basis.__wrapped__ = _support_basis
 
 
 def freq_smooth(h_pilot: np.ndarray, support: tuple[int, int], bb: np.ndarray = BB_FREQS,

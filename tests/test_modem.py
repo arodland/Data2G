@@ -427,3 +427,36 @@ def test_pilot_present_detects_mid_burst_and_rejects_noise_tones_and_impulses():
         interference.PRESETS["imp_long"], seed=1, horizon=10.0).render(0.0, 10 * FS, 1.0))
     for band in ("w", "n10") + (("n4",) if "n4" in SC_BANDS else ()):
         assert not any(check(imp[i:i + n], band) for i in range(0, 7 * FS, FS)), band
+
+
+@pytest.mark.hf_only("CombStream is for HF scattered-pilot bands")
+@pytest.mark.parametrize("band", ["w", "n10"])
+def test_comb_stream_drains_consumed_c(band):
+    """CombStream drops consumed C columns after _extend() while keeping
+    products_from() and kept_products() identical to a single-shot feed."""
+    from data2g.config import FRAME_SAMPLES, FS
+    from data2g.waveform import dsp
+
+    rng = np.random.default_rng(13)
+    x = rng.normal(size=5 * FS)
+    hop = FS // 4
+    stream = modem.CombStream(band)
+    ref = modem.CombStream(band)
+    PF_d = (modem.COPY_PAIRS - 1 if stream.intra is not None else modem.COPY_PAIRS) * (FRAME_SAMPLES // stream.decim)
+    for pos in range(0, len(x), hop):
+        z = dsp.to_baseband(x[pos:pos + hop], pos)
+        stream.feed(z)
+        ref.feed(z)
+        a_s, D_s = stream.products_from(max(0, pos - 2 * FS))
+        assert stream.C.shape[1] <= PF_d
+        if pos >= 2 * FS:
+            stream.trim(pos - 2 * FS)
+            ref.trim(pos - 2 * FS)
+            a_s, D_s = stream.products_from(pos - 2 * FS)
+            a_r, D_r = ref.products_from(pos - 2 * FS)
+            assert a_s == a_r
+            np.testing.assert_allclose(D_s, D_r, rtol=0, atol=1e-12)
+            d0_s, K_s = stream.kept_products()
+            d0_r, K_r = ref.kept_products()
+            assert d0_s == d0_r
+            np.testing.assert_allclose(K_s, K_r, rtol=0, atol=1e-12)
