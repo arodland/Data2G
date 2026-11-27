@@ -40,6 +40,7 @@ header codes, written by tools/gen_native_tables.py).
 """
 
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -1492,6 +1493,7 @@ class CombStream:
         self.levels: list = []
         self.C = np.zeros((len(self.freqs), 0), dtype=np.complex128)
         self.c0 = 0
+        self._c_head = 0  # stream index of C[:, 0] (advances past c0 as _extend() drains consumed cols)
         self.D = np.zeros((len(self.freqs), 0), dtype=np.complex128)
         self.d0 = 0
 
@@ -1532,7 +1534,7 @@ class CombStream:
             k = int(_sync.NOISE_QUANTILE * (p.shape[1] - 1))
             self.levels = (self.levels + [np.partition(p, k, axis=1)[:, k] / -np.log(1 - _sync.NOISE_QUANTILE)])[-self.CHUNKS:]
         if not self.C.shape[1]:
-            self.c0 = zs
+            self.c0 = self._c_head = zs
         self.C = np.concatenate([self.C, C[:, :n_d]], axis=1)
         self.tail = z[lead + n:]
 
@@ -1545,25 +1547,33 @@ class CombStream:
 
     def trim(self, start: int):
         D = self.decim
-        k = min(max(0, (start - self.c0) // D), self.C.shape[1])
-        self.C, self.c0 = self.C[:, k:], self.c0 + k * D
+        c_end = self._c_head + self.C.shape[1] * D
+        k0 = min(max(0, (start - self.c0) // D), max(0, (c_end - self.c0) // D))
+        self.c0 += k0 * D
+        kc = min(max(0, (self.c0 - self._c_head) // D), self.C.shape[1])
+        if kc:
+            self.C, self._c_head = self.C[:, kc:], self._c_head + kc * D
         k = min(max(0, (start - self.KEEP_BEHIND - self.d0) // D), self.D.shape[1])
         self.D, self.d0 = self.D[:, k:], self.d0 + k * D
 
     def _extend(self):
         D = self.decim
         FR_d = FRAME_SAMPLES // D
-        if self.d0 + self.D.shape[1] * D < self.c0:
-            self.D, self.d0 = self.D[:, :0], self.c0
-        have = (self.d0 - self.c0) // D + self.D.shape[1]
-        if self.intra is not None:
-            want = max(0, self.C.shape[1] - (COPY_PAIRS - 1) * FR_d)
-            if want > have:
-                self.D = np.concatenate([self.D, _sum_frames(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
-            return
-        want = max(0, self.C.shape[1] - COPY_PAIRS * FR_d)
+        if self.d0 + self.D.shape[1] * D < self._c_head:
+            self.D, self.d0 = self.D[:, :0], self._c_head
+        have = (self.d0 - self._c_head) // D + self.D.shape[1]
+        PF_d = (COPY_PAIRS - 1 if self.intra is not None else COPY_PAIRS) * FR_d
+        want = max(0, self.C.shape[1] - PF_d)
         if want > have:
-            self.D = np.concatenate([self.D, _sync.pair_products(self.C[:, have:], FR_d, COPY_PAIRS)], axis=1)
+            if self.intra is not None:
+                Dm = _sum_frames(self.C[:, have:], FR_d, COPY_PAIRS)
+            else:
+                Dm = _sync.pair_products(self.C[:, have:], FR_d, COPY_PAIRS)
+            self.D = np.concatenate([self.D, Dm], axis=1)
+        # Drop consumed columns before the trailing PF_d needed for the next extend().
+        if self.C.shape[1] > PF_d:
+            drop = self.C.shape[1] - PF_d
+            self.C, self._c_head = self.C[:, drop:], self._c_head + drop * D
 
     def products_from(self, start: int) -> tuple[int, np.ndarray]:
         """(a, the pair products for stream starts from a = max(start, c0) on)."""
@@ -2359,7 +2369,7 @@ SC_FRAMES = 4  # the joint estimate's reach, frames either side, at most (0.7 / 
 # ... and at most 2 from SC_JOINT_REACH2_HZ up (w48's 2 Hz mpd took 1.8-2.3 s against TURN_S 1.3 on a CM4 with 3;
 # 1.0 s with 2, 10% points within 0.04 dB, see the commit)
 SC_JOINT_REACH2_HZ = 2.0
-_SC_WEIGHTS: dict = {}  # _sc_joint's, by pattern position and quantized statistics
+_SC_WEIGHTS: OrderedDict = OrderedDict()  # _sc_joint's LRU cache (bounded at 64 entries)
 
 
 def _sc_slack(nc: int, support: tuple[int, int] | None = None) -> int:
@@ -2415,7 +2425,7 @@ def _sc_hot(loo_k, model_k, n_p_k, nn: float) -> tuple:
 
 SC_SEP_HZ = 1.5
 SC_SEP_REPORT_HZ = 1.0
-_SC_SEP: dict = {}  # _sc_separable's time weights, by pattern and quantized statistics
+_SC_SEP: OrderedDict = OrderedDict()  # _sc_separable's time weights LRU cache (bounded at 512 entries)
 
 
 def _sc_separable(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: float, nr_sc: float,
@@ -2460,7 +2470,9 @@ def _sc_separable(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread:
             psyms = p_syms_by_mod[int(f) % per][k]
             key = (qs, q1, q2, int(kq[k]) if kq is not None else 0, psyms.tobytes(), rel.tobytes(), kk.tobytes())
             got = _SC_SEP.get(key)
-            if got is None:
+            if got is not None:
+                _SC_SEP.move_to_end(key)
+            else:
                 A = equalizer._doppler_corr((rel[:, None] - rel[None, :]) * tsym, spread)
                 A[np.diag_indices_from(A)] += nr[kk] * nk[k]
                 Bm = equalizer._doppler_corr((np.arange(S)[:, None] - rel[None, :]) * tsym, spread)
@@ -2468,8 +2480,8 @@ def _sc_separable(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread:
                 e = np.clip(1 - np.sum(W * Bm, axis=1), 1e-9, 0.999)
                 cols = np.array([int(np.flatnonzero((rel == s_p) & (kk == 0))[0]) for s_p in psyms], dtype=int)
                 got = (W / (1 - e)[:, None], e / (1 - e), cols)
-                if len(_SC_SEP) >= 4096:
-                    _SC_SEP.clear()
+                if len(_SC_SEP) >= 512:
+                    _SC_SEP.popitem(last=False)
                 _SC_SEP[key] = got
             Wu, nu, cols = got
             v_win = vs[lo:hi]
@@ -2674,7 +2686,9 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
         key = (band, int(support[0]), int(support[1]), slack, qs, q1, q2, rel.tobytes(), k.tobytes(), kd.tobytes(),
                None if kq is None else kq.tobytes())
         got = _SC_WEIGHTS.get(key)
-        if got is None:
+        if got is not None:
+            _SC_WEIGHTS.move_to_end(key)
+        else:
             if Rf is None:
                 Bd = np.exp(-2j * np.pi * np.outer(b.bb, d) / FS)
                 Rf = Bd @ Bd.conj().T / len(d)
@@ -2684,8 +2698,8 @@ def _sc_joint(o_sym, o_k, o_kind, o_val, frames, band: str, support, spread: flo
             W = np.linalg.solve(A, Bm.conj().T).conj().T
             col = np.array([np.flatnonzero((rel == c // nc) & (k == kk) & (kd == 0))[0] for c, kk in zip(P, PK)])
             got = (W, np.maximum(1 - np.real(np.sum(W * Bm.conj(), axis=1)), 0.0), col, np.real(W[P, col]))
-            if len(_SC_WEIGHTS) >= 256:
-                _SC_WEIGHTS.clear()
+            if len(_SC_WEIGHTS) >= 64:
+                _SC_WEIGHTS.popitem(last=False)
             _SC_WEIGHTS[key] = got
         h[i] = got[0] @ o_val[lo:hi]
         mse[i] = p_sig * got[1]

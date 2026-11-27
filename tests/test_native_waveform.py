@@ -279,6 +279,15 @@ def test_stream_detector(native, py, name):
         if k == 7:
             a.trim(fed - 5000)
             c.trim(fed - 5000)
+        if k == 8:
+            # trim_outputs drops C only without disturbing S or D, and subsequent feed resumes cleanly
+            cut = fed - 1500
+            a.trim_outputs(cut)
+            c.trim_outputs(cut)
+            assert (c.s0, c.c0, c.d0) == (a.s0, a.c0, a.d0)
+            assert c.S.shape == a.S.shape and c.C.shape == a.C.shape
+            if a.C.shape[1]:
+                close(c.C, a.C, SUM_TOL)
         if k == 10:  # the receiver: trimmed away, start over
             a.restart_at(fed)
             c.restart_at(fed)

@@ -1766,7 +1766,7 @@ void CombStream::reset() {
     C_.assign(freqs_.size(), {});
     D_.assign(freqs_.size(), {});
     c_off_ = d_off_ = 0;
-    c0 = d0 = fed = 0;
+    c0 = d0 = c_head_ = fed = 0;
     levels_.clear();
 }
 
@@ -1780,7 +1780,7 @@ void CombStream::skip_to(std::int64_t pos) {  // as StreamDetector::skip_to: the
     for (auto& r : C_) r.clear();
     for (auto& r : D_) r.clear();
     c_off_ = d_off_ = 0;
-    c0 = d0 = fed = pos;
+    c0 = d0 = c_head_ = fed = pos;
 }
 
 void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector* full) {
@@ -1874,7 +1874,7 @@ void CombStream::feed(std::span<const cd> z_new, const waveform::StreamDetector*
     if (C_[0].size() == c_off_) {
         for (auto& r : C_) r.clear();
         c_off_ = 0;
-        c0 = zs;
+        c_head_ = c0 = zs;
     }
     for (std::size_t i = 0; i < C.rows; ++i) C_[i].insert(C_[i].end(), C[i], C[i] + take);
     levels_.push_back(std::move(q));
@@ -1903,9 +1903,13 @@ std::optional<double> CombStream::level() const {
 void CombStream::trim(std::int64_t start) {
     const std::int64_t D = static_cast<std::int64_t>(decim_);
     const std::size_t nc = C_[0].size() - c_off_;
-    const auto k = static_cast<std::size_t>(std::clamp<std::int64_t>((start - c0) / D, 0, static_cast<std::int64_t>(nc)));
-    c_off_ += k;
-    c0 += static_cast<std::int64_t>(k) * D;
+    const std::int64_t c_end = c_head_ + static_cast<std::int64_t>(nc) * D;
+    const auto k0 = static_cast<std::size_t>(
+        std::clamp<std::int64_t>((start - c0) / D, 0, std::max<std::int64_t>(0, (c_end - c0) / D)));
+    c0 += static_cast<std::int64_t>(k0) * D;
+    const auto kc = static_cast<std::size_t>(std::clamp<std::int64_t>((c0 - c_head_) / D, 0, static_cast<std::int64_t>(nc)));
+    c_off_ += kc;
+    c_head_ += static_cast<std::int64_t>(kc) * D;
     const std::size_t nd = D_[0].size() - d_off_;
     const auto kd = static_cast<std::size_t>(
         std::clamp<std::int64_t>((start - KEEP_BEHIND - d0) / D, 0, static_cast<std::int64_t>(nd)));
@@ -1923,29 +1927,31 @@ void CombStream::trim(std::int64_t start) {
 void CombStream::extend() {
     const std::int64_t D = static_cast<std::int64_t>(decim_);
     const std::size_t FR_d = static_cast<std::size_t>(FRAME_SAMPLES / decim_);
-    if (d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) * D < c0) {  // not extended across a trim: start at C's
+    if (d0 + static_cast<std::int64_t>(D_[0].size() - d_off_) * D < c_head_) {  // not extended across a trim: start at C's
         for (auto& r : D_) r.clear();
         d_off_ = 0;
-        d0 = c0;
+        d0 = c_head_;
     }
-    const auto have = static_cast<std::size_t>((d0 - c0) / D) + (D_[0].size() - d_off_);
+    const auto have = static_cast<std::size_t>((d0 - c_head_) / D) + (D_[0].size() - d_off_);
     const std::size_t nc = C_[0].size() - c_off_;
-    if (intra_) {
-        const std::size_t PF_d = static_cast<std::size_t>(COPY_PAIRS - 1) * FR_d;
-        if (nc > have + PF_d) {
-            std::vector<const cd*> rows;
-            for (const auto& r : C_) rows.push_back(r.data() + c_off_ + have);
-            const Mat<cd> Dm = sum_frames(rows, nc - have, FR_d, COPY_PAIRS);
-            for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), Dm[i], Dm[i] + Dm.cols);
-        }
-        return;
-    }
-    const std::size_t PF_d = static_cast<std::size_t>(COPY_PAIRS) * FR_d;
+    const std::size_t PF_d = static_cast<std::size_t>(intra_ ? COPY_PAIRS - 1 : COPY_PAIRS) * FR_d;
     if (nc > have + PF_d) {
         std::vector<const cd*> rows;
+        rows.reserve(C_.size());
         for (const auto& r : C_) rows.push_back(r.data() + c_off_ + have);
-        const Mat<cd> Dm = waveform::pair_products(rows, nc - have, static_cast<int>(FR_d), COPY_PAIRS);
+        const Mat<cd> Dm = intra_ ? sum_frames(rows, nc - have, FR_d, COPY_PAIRS)
+                                  : waveform::pair_products(rows, nc - have, static_cast<int>(FR_d), COPY_PAIRS);
         for (std::size_t i = 0; i < D_.size(); ++i) D_[i].insert(D_[i].end(), Dm[i], Dm[i] + Dm.cols);
+    }
+    // Columns before the trailing PF_d have been folded into D_ and are never read again.
+    if (nc > PF_d) {
+        const std::size_t drop = nc - PF_d;
+        c_off_ += drop;
+        c_head_ += static_cast<std::int64_t>(drop) * D;
+        if (c_off_ > C_[0].size() / 2) {
+            for (auto& r : C_) r.erase(r.begin(), r.begin() + static_cast<std::ptrdiff_t>(c_off_));
+            c_off_ = 0;
+        }
     }
 }
 

@@ -117,5 +117,29 @@ int main() {
         check::is_true(std::find(on.begin(), on.end(), w8) != on.end(), "c8w50 on air");
         check::is_true(std::find(on.begin(), on.end(), w16) == on.end(), "c16w125 dormant");
     }
+
+    check::current_step = "coarse memo pruning";
+    {
+        const auto& g = *cpm::grids().front();
+        cpm::CoarseTrack tr(g);
+        const std::int64_t T = g.T;
+        tr.fine_memo.push_back({1000, 0.0, true, false, {0.5, 1000, 0.0}});
+        tr.fine_memo.push_back({5000, 0.0, true, false, {0.5, 5000, 0.0}});
+        tr.fine_memo.push_back({2000, 0.0, false, true, {0.5, 2000, 0.0}});
+        tr.fine_memo.push_back({6000, 0.0, false, true, {0.5, 6000, 0.0}});
+        tr.header_memo.push_back({1500, 0.0, {}, false});
+        tr.header_memo.push_back({5500, 0.0, {}, false});
+        tr.prune_memos(4000, 3000);
+        check::equal(tr.fine_memo.size(), std::size_t{2}, "prune_memos drops decided front and mid fine entries");
+        check::is_true(tr.fine_memo[0].s == 5000 && !tr.fine_memo[0].mid, "kept undecided front fine");
+        check::is_true(tr.fine_memo[1].s == 6000 && tr.fine_memo[1].mid, "kept undecided mid fine");
+        check::equal(tr.header_memo.size(), std::size_t{1}, "prune_memos drops decided header entries");
+        check::equal(tr.header_memo[0].s, std::int64_t{5500}, "kept undecided header");
+        // Boundary: s == decided - T stays for fine, s < decided - T drops
+        tr.fine_memo.push_back({4000 - T, 0.0, true, false, {0.5, 4000 - T, 0.0}});
+        tr.fine_memo.push_back({4000 - T - 1, 0.0, true, false, {0.5, 4000 - T - 1, 0.0}});
+        tr.prune_memos(4000, 3000);
+        check::equal(tr.fine_memo.size(), std::size_t{3}, "fine boundary decided - T kept");
+    }
     return check::report("test_cpm");
 }

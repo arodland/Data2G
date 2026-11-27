@@ -569,6 +569,12 @@ bool CoarseTrack::sourced(std::int64_t nxt, std::int64_t n, std::vector<double>&
     return false;
 }
 
+void CoarseTrack::prune_memos(std::int64_t decided, std::int64_t decided_mid) {
+    const std::int64_t T = g_->T;
+    std::erase_if(fine_memo, [&](const FineMemo& m) { return m.s < (m.mid ? decided_mid : decided) - T; });
+    std::erase_if(header_memo, [&](const HeaderMemo& m) { return m.s < decided; });
+}
+
 void CoarseTrack::feed(std::span<const double> buf, std::int64_t off) {
     const std::int64_t T = g_->T, end = off + static_cast<std::int64_t>(buf.size());
     std::erase_if(fine_memo, [&](const FineMemo& m) { return m.s < off + T; });  // (fine reaches T/8 before)
@@ -1166,7 +1172,10 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     std::optional<std::pair<Header, bool>> got;
     if (track)
         for (const auto& m : track->header_memo)
-            if (m.s == x0 + d.start && m.cfo == d.cfo) got = {m.h, m.ok};
+            if (m.s == x0 + d.start && m.cfo == d.cfo) {
+                got = {m.h, m.ok};
+                break;
+            }
     if (!got) {
         got = lock_header(g, x, d.start, d.cfo, 1);
         if (track) track->header_memo.push_back({x0 + d.start, d.cfo, got->first, got->second});

@@ -258,6 +258,7 @@ public:
     void feed(std::span<const cd> z, const waveform::StreamDetector* full = nullptr);
     bool can_use_full() const { return can_use_full_; }
     int decim() const { return decim_; }
+    std::int64_t tail_size() const { return static_cast<std::int64_t>(tail_.size()); }
     void trim(std::int64_t start);
     std::optional<double> level() const;
     std::vector<double> row_levels() const;  // per CFO bin, level()'s before its min (find_copy's row_level)
@@ -283,6 +284,7 @@ private:
     std::vector<cd> tail_;
     std::vector<std::vector<cd>> C_, D_;
     std::size_t c_off_ = 0, d_off_ = 0;
+    std::int64_t c_head_ = 0;  // stream index of C_[i][c_off_] (advances past c0 as extend() drains consumed cols)
     std::vector<std::vector<double>> levels_;
 };
 // find_copy(comb=True) from a CombStream's pair products (x from their first start), its level and running fold.

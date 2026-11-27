@@ -157,6 +157,7 @@ void bind_waveform(py::module_& m) {
             }));
         })
         .def("trim", &SD::trim)
+        .def("trim_outputs", &SD::trim_outputs)
         .def("level", &SD::level)
         .def("stat", [](const SD& d, std::int64_t lo, std::int64_t hi) { return np_move(d.stat(lo, hi)); })
         .def("peak", &SD::peak)

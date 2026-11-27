@@ -325,7 +325,7 @@ void Receiver::sense_on_air() {
             if (c.fed < end)
                 c.feed(waveform::to_baseband(std::span<const double>(buf_).subspan(static_cast<std::size_t>(c.fed - off_)),
                                              c.fed));
-            c.trim(end - keep_ - FR);
+            c.trim(end - static_cast<int64_t>(PRESENCE_S * config::FS) - c.lag - config::M - c.decim());
         }
         const auto level = c.level();
         if (!level) return false;
@@ -457,6 +457,7 @@ Receiver::Stats Receiver::stats(int64_t w0) {
                 cf = want;
             }
             c.feed(baseband(cf, c.fed), &d);
+            if (c.can_use_full()) d.trim_outputs(c.fed - c.tail_size());
             c.trim(off_ + len() - keep_ - d.span);
         }
         const int64_t n = len() - w0 - d.span + 1;
@@ -486,6 +487,7 @@ void Receiver::searched() {
         // a mid block is decided once its second header copy is in
         decided_mid_[g->name] = std::max(
             decided_mid(*g), end - (static_cast<int64_t>(g->mid_block.size()) + g->hdr_len) * g->T - g->T);
+        coarse_.at(g->name).prune_memos(decided(g->name), decided_mid(*g));
     }
 }
 

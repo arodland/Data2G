@@ -130,6 +130,7 @@ def test_support_rank_and_subspace(native, band):
     off-centre: the 1e-2 threshold's nearest miss is 4e-4 decades
     (n10 width 93), far above rounding."""
     bb = ofdm.band(band).bb.astype(np.float64)
+    equalizer._support_basis.cache_clear()
     py_basis = equalizer._support_basis.__wrapped__
     for slack in (equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK):
         for width in range(4 * NCP + 1):
@@ -141,6 +142,9 @@ def test_support_rank_and_subspace(native, band):
                     continue  # support_slack never uses a capped padded basis: its subspace is arbitrary
                 close(u @ u.conj().T, U @ U.conj().T, f"projector {width} {d0} {slack}")
                 close(keep, 1 - np.sum(np.abs(U) ** 2, axis=1), "keep")
+    # Shift-invariant cache key: two d0 shifts per width hit the same (bb, width) SVD entry
+    info = equalizer._support_basis.cache_info()
+    assert info.currsize <= 256 and info.hits >= 4 * NCP + 1
 
 
 def test_per_carrier_noise(native, py):

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <list>
 #include <map>
 #include <mutex>
 #include <numbers>
@@ -154,15 +155,18 @@ struct Weights {
     std::vector<double> Yr, Yi;  // (n x rhs)
     Mat<cd> Bd;                  // factored: the support's steering vectors (nc x nd)
     size_t bytes() const {
-        return W.data.size() * sizeof(cd) + 64 * m.size() + 8 * (Lr.size() + Li.size() + Yr.size() + Yi.size());
+        return W.data.size() * sizeof(cd) + (m.size() + own.size() + Lr.size() + Li.size() + Yr.size() + Yi.size()) * sizeof(double) +
+               col.size() * sizeof(size_t) + Bd.data.size() * sizeof(cd);
     }
 };
 
-// Python keeps 256 patterns; a w48 pattern's W is up to ~3 MB, so the C++ also caps the bytes.
-// ponytail: a full cache starts over (Python's rule); an LRU if sessions thrash it.
-constexpr size_t CACHE_ENTRIES = 256, CACHE_BYTES = size_t{192} << 20;
+// Bounded LRU cache for _sc_joint weights (issue #348: Slepian handles w/w48 normal delay spreads,
+// and narrow bands rarely reuse weights across bursts, so cap tightly and evict LRU).
+constexpr size_t CACHE_ENTRIES = 64, CACHE_BYTES = size_t{32} << 20;
+using CacheNode = std::pair<std::string, std::shared_ptr<const Weights>>;
 std::mutex cache_mu;
-std::unordered_map<std::string, std::shared_ptr<const Weights>> cache;
+std::list<CacheNode> cache_lru;  // front = MRU, back = LRU
+std::unordered_map<std::string_view, std::list<CacheNode>::iterator> cache;
 size_t cache_bytes = 0;
 
 int quant(double v, int n) { return static_cast<int>(std::nearbyint(std::log2(std::max(v, 1e-9)) * n)); }
@@ -478,8 +482,12 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         std::lock_guard lk(cache_mu);
         std::set<std::string_view> seen;
         for (size_t i = 0; i < F; ++i) {
-            if (auto it = cache.find(keys[i]); it != cache.end()) got[i] = it->second;
-            else if (seen.insert(keys[i]).second) missing.push_back(i);
+            if (auto it = cache.find(keys[i]); it != cache.end()) {
+                cache_lru.splice(cache_lru.begin(), cache_lru, it->second);
+                got[i] = it->second->second;
+            } else if (seen.insert(keys[i]).second) {
+                missing.push_back(i);
+            }
         }
     }
     if (!missing.empty()) {
@@ -503,11 +511,22 @@ Joint joint(const Obs& o, std::span<const int> frames, std::string_view band, eq
         });
         std::lock_guard lk(cache_mu);
         for (size_t m = 0; m < missing.size(); ++m) {
-            if (cache.size() >= CACHE_ENTRIES || cache_bytes + made[m]->bytes() > CACHE_BYTES) {
-                cache.clear();
-                cache_bytes = 0;
+            const auto& key = keys[missing[m]];
+            if (auto it = cache.find(key); it != cache.end()) {
+                cache_lru.splice(cache_lru.begin(), cache_lru, it->second);
+                continue;
             }
-            if (cache.emplace(keys[missing[m]], made[m]).second) cache_bytes += made[m]->bytes();
+            const size_t entry_bytes = made[m]->bytes();
+            if (entry_bytes > CACHE_BYTES) continue;
+            while (!cache_lru.empty() && (cache.size() >= CACHE_ENTRIES || cache_bytes + entry_bytes > CACHE_BYTES)) {
+                const auto& oldest = cache_lru.back();
+                cache_bytes -= oldest.second->bytes();
+                cache.erase(oldest.first);
+                cache_lru.pop_back();
+            }
+            cache_lru.emplace_front(key, made[m]);
+            cache.emplace(std::string_view(cache_lru.front().first), cache_lru.begin());
+            cache_bytes += entry_bytes;
         }
         for (size_t i = 0; i < F; ++i)
             if (!got[i])

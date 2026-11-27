@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <list>
 #include <map>
 #include <mutex>
 #include <numbers>
@@ -205,20 +206,27 @@ int window_shift(Support s) {
     return static_cast<int>(std::nearbyint((s.first + s.second - NCP) / 2.0));
 }
 
-std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack) {
-    using Key = std::tuple<std::vector<double>, int, int, int>;
+namespace {
+
+std::shared_ptr<const Basis> support_basis_0(std::span<const double> bb, int width) {
+    using Key = std::pair<std::vector<double>, int>;
+    using Node = std::pair<Key, std::shared_ptr<const Basis>>;
+    constexpr size_t MAX_ENTRIES = 256;
     static std::mutex mutex;
-    static std::map<Key, std::shared_ptr<const Basis>> cache;
-    Key key{std::vector<double>(bb.begin(), bb.end()), d0, d1, slack};
+    static std::list<Node> lru;
+    static std::map<Key, std::list<Node>::iterator> cache;
+    Key key{std::vector<double>(bb.begin(), bb.end()), width};
     {
         std::lock_guard lock(mutex);
-        if (auto it = cache.find(key); it != cache.end()) return it->second;
+        if (auto it = cache.find(key); it != cache.end()) {
+            lru.splice(lru.begin(), lru, it->second);
+            return it->second->second;
+        }
     }
     const int nc = static_cast<int>(bb.size());
-    if (nc < 3 || slack < 0 || d1 < d0 - 2 * slack) throw std::invalid_argument("support_basis: bad band or support");
     // The SVD from an eigen-solve of the smaller Gram matrix: B B^H's
     // eigenvectors are U, B^H B's are V (then U = B V / s); s = sqrt(lambda).
-    const auto B = steering(bb, d0, d1, slack);
+    const auto B = steering(bb, 0, width - 1, 0);
     const size_t NC = static_cast<size_t>(nc), nd = B.size() / NC;
     const bool left = NC <= nd;
     const size_t n = left ? NC : nd;
@@ -261,9 +269,39 @@ std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, i
         b->keep[k] = 1 - lev;
     }
     std::lock_guard lock(mutex);
-    // ponytail: wholesale clear at Python's lru_cache size; supports per band are few
-    if (cache.size() >= 1024) cache.clear();
-    return cache.emplace(std::move(key), std::move(b)).first->second;
+    if (auto it = cache.find(key); it != cache.end()) {
+        lru.splice(lru.begin(), lru, it->second);
+        return it->second->second;
+    }
+    while (cache.size() >= MAX_ENTRIES && !lru.empty()) {
+        cache.erase(lru.back().first);
+        lru.pop_back();
+    }
+    lru.emplace_front(std::move(key), std::move(b));
+    cache.emplace(lru.front().first, lru.begin());
+    return lru.front().second;
+}
+
+}  // namespace
+
+std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack) {
+    const int nc = static_cast<int>(bb.size());
+    if (nc < 3 || slack < 0 || d1 < d0 - 2 * slack) throw std::invalid_argument("support_basis: bad band or support");
+    const int width = d1 - d0 + 2 * slack + 1;
+    const int shift = d0 - slack;
+    const auto base = support_basis_0(bb, width);
+    if (shift == 0) return base;
+    auto out = std::make_shared<Basis>();
+    out->r = base->r;
+    out->r_full = base->r_full;
+    out->keep = base->keep;
+    const size_t NC = static_cast<size_t>(nc), r = static_cast<size_t>(base->r);
+    out->u = Mat<cd>(NC, r);
+    for (size_t k = 0; k < NC; ++k) {
+        const cd ph = phasor(bb[k] * shift);
+        for (size_t j = 0; j < r; ++j) out->u[k][j] = ph * base->u[k][j];
+    }
+    return out;
 }
 
 Smoothed freq_smooth(const Mat<cd>& h, Support support, std::span<const double> bb, int slack) {

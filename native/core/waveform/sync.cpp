@@ -202,7 +202,7 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 namespace {
 
 // FFT(conj(reversed t)) zero-padded to L: the same for every call of a given length, and a
-// StreamDetector calls at a handful of lengths, so the last few are kept.
+// StreamDetector calls at a handful of lengths, so the most recent KEEP are kept (LRU).
 std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cdouble> t, std::size_t L) {
     struct Entry {
         std::vector<cdouble> t;
@@ -211,16 +211,25 @@ std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cd
     };
     static std::mutex mu;
     static std::vector<Entry> cache;
-    constexpr std::size_t KEEP = 8;
+    constexpr std::size_t KEEP = 32;
     {
         std::lock_guard lock(mu);
-        for (const Entry& e : cache)
-            if (e.L == L && std::equal(e.t.begin(), e.t.end(), t.begin(), t.end())) return e.G;
+        for (std::size_t i = 0; i < cache.size(); ++i)
+            if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) {
+                if (i + 1 < cache.size()) {
+                    Entry hit = std::move(cache[i]);
+                    cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(i));
+                    cache.push_back(std::move(hit));
+                }
+                return cache.back().G;
+            }
     }
     std::vector<cdouble> gp(L);
     for (std::size_t k = 0; k < t.size(); ++k) gp[k] = std::conj(t[t.size() - 1 - k]);
     auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
     std::lock_guard lock(mu);
+    for (std::size_t i = 0; i < cache.size(); ++i)
+        if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) return cache[i].G;
     cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
     if (cache.size() > KEEP) cache.erase(cache.begin());
     return G;
@@ -291,17 +300,26 @@ std::shared_ptr<const std::vector<cdouble>> template_spectrum_zero(std::span<con
     };
     static std::mutex mu;
     static std::vector<Entry> cache;
-    constexpr std::size_t KEEP = 16;
+    constexpr std::size_t KEEP = 64;
     {
         std::lock_guard lock(mu);
-        for (const Entry& e : cache)
-            if (e.L == L && std::equal(e.t.begin(), e.t.end(), t.begin(), t.end())) return e.G;
+        for (std::size_t i = 0; i < cache.size(); ++i)
+            if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) {
+                if (i + 1 < cache.size()) {
+                    Entry hit = std::move(cache[i]);
+                    cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(i));
+                    cache.push_back(std::move(hit));
+                }
+                return cache.back().G;
+            }
     }
     std::vector<cdouble> gp(L);
     gp[0] = std::conj(t[0]);
     for (std::size_t k = 1; k < t.size(); ++k) gp[L - k] = std::conj(t[k]);
     auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
     std::lock_guard lock(mu);
+    for (std::size_t i = 0; i < cache.size(); ++i)
+        if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) return cache[i].G;
     cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
     if (cache.size() > KEEP) cache.erase(cache.begin());
     return G;
@@ -746,14 +764,18 @@ void drop_front(std::vector<std::vector<T>>& rows, std::size_t& off, std::size_t
 }
 }  // namespace
 
-void StreamDetector::trim(std::int64_t start) {
-    const std::size_t k = clamp_to(start - s0, S(0).size());
-    drop_front(S_, s_off_, k);
-    s0 += static_cast<std::int64_t>(k);
+void StreamDetector::trim_outputs(std::int64_t start) {
     const std::size_t kc = clamp_to(start - c0, c_n_);
     if (keep_c_) drop_front(C_, c_off_, kc);
     c_n_ -= kc;
     c0 += static_cast<std::int64_t>(kc);
+}
+
+void StreamDetector::trim(std::int64_t start) {
+    const std::size_t k = clamp_to(start - s0, S(0).size());
+    drop_front(S_, s_off_, k);
+    s0 += static_cast<std::int64_t>(k);
+    trim_outputs(start);
     const std::size_t kd = clamp_to(start - KEEP_BEHIND - d0, D_[0].size() - d_off_);
     drop_front(D_, d_off_, kd);
     d0 += static_cast<std::int64_t>(kd);
