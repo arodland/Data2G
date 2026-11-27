@@ -16,6 +16,7 @@
 #include "util/linalg.hpp"
 #include "util/cancel.hpp"
 #include "util/pool.hpp"
+#include "util/simd.hpp"
 
 namespace data2g::equalizer {
 
@@ -531,6 +532,80 @@ Mat<cd> time_shift_phase(std::span<const double> shift, std::span<const double> 
     return out;
 }
 
+namespace {
+
+// Unit-prior Doppler eigenbasis for refine()'s low-rank time pass, cached by (rel_0.1us, spread) across DD passes.
+struct DopplerBasis {
+    std::vector<double> lam, u;  // (Js), (Js, Js) row-major
+};
+
+std::shared_ptr<const DopplerBasis> doppler_eigen_cached(const std::vector<double>& rel,
+                                                         const std::vector<std::int64_t>& rel_q, double spread) {
+    using Key = std::pair<std::vector<std::int64_t>, double>;
+    using Node = std::pair<Key, std::shared_ptr<const DopplerBasis>>;
+    constexpr size_t MAX_ENTRIES = 32;
+    static std::mutex mu;
+    static std::list<Node> lru;
+    static std::map<Key, std::list<Node>::iterator> cache;
+    Key key{rel_q, spread};
+    {
+        std::lock_guard lk(mu);
+        if (auto it = cache.find(key); it != cache.end()) {
+            lru.splice(lru.begin(), lru, it->second);
+            return it->second->second;
+        }
+    }
+    const size_t Js = rel.size();
+    auto b = std::make_shared<DopplerBasis>();
+    b->lam.resize(Js);
+    b->u.resize(Js * Js);
+    std::vector<cd> a(Js * Js), v;
+    for (size_t i = 0; i < Js; ++i)
+        for (size_t j = 0; j < Js; ++j) a[i * Js + j] = doppler_corr(rel[i] - rel[j], spread);
+    const auto lam = linalg::hermitian_eigen(a, v, static_cast<int>(Js));
+    std::vector<size_t> ord(Js);
+    std::iota(ord.begin(), ord.end(), size_t{0});
+    std::stable_sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return lam[x] > lam[y]; });
+    for (size_t k = 0; k < Js; ++k) {
+        b->lam[k] = lam[ord[k]];
+        for (size_t i = 0; i < Js; ++i) b->u[i * Js + k] = v[i * Js + ord[k]].real();
+    }
+    std::lock_guard lk(mu);
+    if (auto it = cache.find(key); it != cache.end()) {
+        lru.splice(lru.begin(), lru, it->second);
+        return it->second->second;
+    }
+    while (cache.size() >= MAX_ENTRIES && !lru.empty()) {
+        cache.erase(lru.back().first);
+        lru.pop_back();
+    }
+    lru.emplace_front(std::move(key), std::move(b));
+    cache.emplace(lru.front().first, lru.begin());
+    return lru.front().second;
+}
+
+// Accumulate U^T D^-1 U (lower triangle) and U^T D^-1 v across nc carriers for one observation u.
+DATA2G_SIMD_CLONES void accum_lowrank_row(const double* __restrict uu, const double* __restrict d0,
+                                          const double* __restrict d1, const double* __restrict d2, size_t r, size_t nc,
+                                          double* __restrict mall, double* __restrict qall) {
+    for (size_t k = 0, kl = 0; k < r; ++k) {
+        const double uk = uu[k];
+        for (size_t l = 0; l <= k; ++l, ++kl) {
+            const double a = uk * uu[l];
+            double* __restrict mc = mall + kl * nc;
+            for (size_t c = 0; c < nc; ++c) mc[c] += a * d0[c];
+        }
+        double* __restrict qr = qall + (2 * k) * nc;
+        double* __restrict qi = qall + (2 * k + 1) * nc;
+        for (size_t c = 0; c < nc; ++c) {
+            qr[c] += uk * d1[c];
+            qi[c] += uk * d2[c];
+        }
+    }
+}
+
+}  // namespace
+
 std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const double> t_pilot, const Mat<cd>& z,
                                        const Mat<double>& w, const Mat<double>& t_rows, Support support,
                                        double p_sig, double spread, double n0, std::span<const double> bb,
@@ -641,33 +716,31 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
     // a subset of them (rows with nothing known, the burst's ends): its observations take their rows of U.
     std::map<std::int64_t, size_t> at;  // a time less the middle, in 0.1 us: its index in rel
     std::vector<double> rel;
+    std::vector<std::int64_t> rel_q;
     std::vector<std::vector<size_t>> idx_of(F);
     for (size_t f = 0; f < F; ++f)
         for (size_t o : obs_of[f]) {
             const double t = times[o] - mid_of[f];
-            const auto [it, fresh] = at.try_emplace(std::llround(t * 1e7), rel.size());
-            if (fresh) rel.push_back(t);
+            const std::int64_t tq = std::llround(t * 1e7);
+            const auto [it, fresh] = at.try_emplace(tq, rel.size());
+            if (fresh) {
+                rel.push_back(t);
+                rel_q.push_back(tq);
+            }
             idx_of[f].push_back(it->second);
         }
     const size_t Js = rel.size();
-    std::vector<double> lam_s(Js), u_s(Js * Js);  // (Js), (Js, Js) row-major, column k: eigenvector k
+    std::vector<double> lam_s(Js);
+    std::shared_ptr<const DopplerBasis> dbasis;
     if (Js) {
-        std::vector<cd> a(Js * Js), v;
-        for (size_t i = 0; i < Js; ++i)
-            for (size_t j = 0; j < Js; ++j) a[i * Js + j] = p_sig * doppler_corr(rel[i] - rel[j], spread);
-        const auto lam = linalg::hermitian_eigen(a, v, static_cast<int>(Js));
-        std::vector<size_t> ord(Js);
-        std::iota(ord.begin(), ord.end(), size_t{0});
-        std::stable_sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return lam[x] > lam[y]; });
-        for (size_t k = 0; k < Js; ++k) {
-            lam_s[k] = lam[ord[k]];
-            for (size_t i = 0; i < Js; ++i) u_s[i * Js + k] = v[i * Js + ord[k]].real();  // real input: real vectors
-        }
+        dbasis = doppler_eigen_cached(rel, rel_q, spread);
+        for (size_t k = 0; k < Js; ++k) lam_s[k] = p_sig * dbasis->lam[k];
     }
+    const double* u_s = dbasis ? dbasis->u.data() : nullptr;
     pool::parallel_for(F, [&](size_t f) {
         cancel::check();
         const std::vector<size_t>& obs = obs_of[f];
-        std::vector<double> rt, rdp, ar, xr, mm, xl, ub, psi, mall, qall, dinv;
+        std::vector<double> rt, rdp, ar, xr, mm, xl, ub, psi, mall, qall, dinv, prior_s;
         const size_t J = obs.size();
         auto exact_prior = [&] {  // the exact solve's Rt and Rdp, made at its first carrier
             if (rt.size() == J * J && rdp.size() == S * J) return;
@@ -703,6 +776,9 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
                 }
             for (size_t s = 0; s < S; ++s)
                 for (size_t k = 0; k < r; ++k) psi[s * r + k] /= lam_s[k];
+            prior_s.assign(S, 0.0);
+            for (size_t s = 0; s < S; ++s)
+                for (size_t k = 0; k < r; ++k) prior_s[s] += psi[s * r + k] * psi[s * r + k] * lam_s[k];
             // U^T D^-1 U (its lower triangle) and U^T D^-1 v, every carrier at once (the carriers innermost)
             mall.assign(R2 * nc, 0.0);
             qall.assign(2 * r * nc, 0.0);
@@ -715,20 +791,8 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
                     dinv[nc + c] = dinv[c] * vv[c].real();
                     dinv[2 * nc + c] = dinv[c] * vv[c].imag();
                 }
-                const double* uu = &ub[u * r];
-                for (size_t k = 0, kl = 0; k < r; ++k) {
-                    for (size_t l = 0; l <= k; ++l, ++kl) {
-                        const double a = uu[k] * uu[l];
-                        double* mc = &mall[kl * nc];
-                        for (size_t c = 0; c < nc; ++c) mc[c] += a * dinv[c];
-                    }
-                    double* qr = &qall[(2 * k) * nc];
-                    double* qi = &qall[(2 * k + 1) * nc];
-                    for (size_t c = 0; c < nc; ++c) {
-                        qr[c] += uu[k] * dinv[nc + c];
-                        qi[c] += uu[k] * dinv[2 * nc + c];
-                    }
-                }
+                accum_lowrank_row(&ub[u * r], dinv.data(), dinv.data() + nc, dinv.data() + 2 * nc, r, nc, mall.data(),
+                                  qall.data());
             }
         }
         for (size_t c = 0; c < nc; ++c) {
@@ -748,16 +812,15 @@ std::pair<Mat<cd>, Mat<double>> refine(const Mat<cd>& h_pilot, std::span<const d
                     }
                     linalg::forward_solve(mm.data(), static_cast<int>(r), xl.data(), static_cast<int>(W));
                     for (size_t s = 0; s < S; ++s) {
-                        double hr = 0.0, hi = 0.0, y2 = 0.0, prior = 0.0;
+                        double hr = 0.0, hi = 0.0, y2 = 0.0;
                         for (size_t k = 0; k < r; ++k) {
                             const double y = xl[k * W + s];
                             hr += y * xl[k * W + S];
                             hi += y * xl[k * W + S + 1];
                             y2 += y * y;
-                            prior += psi[s * r + k] * psi[s * r + k] * lam_s[k];
                         }
                         h[f * S + s][c] = cd(hr, hi);
-                        mse[f * S + s][c] = std::max(p_sig - prior + y2, 0.0);
+                        mse[f * S + s][c] = std::max(p_sig - prior_s[s] + y2, 0.0);
                     }
                     continue;
                 }

@@ -4,23 +4,78 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "util/simd.hpp"
+
 namespace data2g::gfldpc {
 
 namespace {
 
 constexpr unsigned POLY[] = {0, 0, 0, 0b1011, 0b10011, 0b100101};  // gfldpc.POLY by p
+constexpr float FLOOR = 1e-20f;
 
 // Unnormalized Walsh-Hadamard transform in place (Sylvester order: scipy.linalg.hadamard's).
-// Double: the inverse transform of a product cancels, and float32 turns small
-// probabilities negative (clamped away), so valid codewords were missed (#242).
-void wht(double* a, int q) {
-    for (int h = 1; h < q; h *= 2)
-        for (int i = 0; i < q; i += 2 * h)
+// Compile-time Q (8, 16, 32) unrolls the butterfly stages into SIMD registers.
+template <int Q>
+DATA2G_SIMD_CLONES void wht_q(double* __restrict a) {
+    for (int h = 1; h < Q; h *= 2)
+        for (int i = 0; i < Q; i += 2 * h)
             for (int j = i; j < i + h; ++j) {
                 const double x = a[j], y = a[j + h];
                 a[j] = x + y;
                 a[j + h] = x - y;
             }
+}
+
+template <int Q>
+DATA2G_SIMD_CLONES void mul_norm_q(float* __restrict v, const float* __restrict w) {
+    float mx = 0.0f;
+    for (int a = 0; a < Q; ++a) {
+        const float p = v[a] * w[a];
+        v[a] = p;
+        mx = p > mx ? p : mx;
+    }
+    const float k = mx > 0.0f ? 1.0f / mx : 1.0f;
+    for (int a = 0; a < Q; ++a) {
+        const float s = v[a] * k;
+        v[a] = s > FLOOR ? s : FLOOR;
+    }
+}
+
+template <int Q>
+DATA2G_SIMD_CLONES void mul_norm_into_q(const float* __restrict src, const float* __restrict w, float* __restrict dst) {
+    float mx = 0.0f;
+    for (int a = 0; a < Q; ++a) {
+        const float p = src[a] * w[a];
+        dst[a] = p;
+        mx = p > mx ? p : mx;
+    }
+    const float k = mx > 0.0f ? 1.0f / mx : 1.0f;
+    for (int a = 0; a < Q; ++a) {
+        const float s = dst[a] * k;
+        dst[a] = s > FLOOR ? s : FLOOR;
+    }
+}
+
+template <int Q>
+DATA2G_SIMD_CLONES void v2c_msg_q(const float* __restrict fwd_j, const float* __restrict tmp, float* __restrict m) {
+    float s = 0.0f;
+    for (int a = 0; a < Q; ++a) {
+        const float p = fwd_j[a] * tmp[a];
+        m[a] = p;
+        s += p;
+    }
+    const float k = 1.0f / s;
+    for (int a = 0; a < Q; ++a) m[a] *= k;
+}
+
+template <int Q>
+DATA2G_SIMD_CLONES void cvec_mul(const double* __restrict a, const double* __restrict b, double* __restrict out) {
+    for (int i = 0; i < Q; ++i) out[i] = a[i] * b[i];
+}
+
+template <int Q>
+DATA2G_SIMD_CLONES void cvec_mul_inplace(double* __restrict a, const double* __restrict b) {
+    for (int i = 0; i < Q; ++i) a[i] *= b[i];
 }
 
 }  // namespace
@@ -180,13 +235,108 @@ Decoder::Decoder(const Code& code) : code_(code) {
 
 namespace {
 
-// v *= w, then scaled to a maximum of 1 (no underflow over a product), floored at FLOOR.
-constexpr float FLOOR = 1e-20f;
-void mul_norm(float* v, const float* w, int q) {
-    float mx = 0.0f;
-    for (int a = 0; a < q; ++a) mx = std::max(mx, v[a] *= w[a]);
-    const float k = mx > 0.0f ? 1.0f / mx : 1.0f;
-    for (int a = 0; a < q; ++a) v[a] = std::max(v[a] * k, FLOOR);
+template <int Q>
+Decoded decode_q(const Code& c, const std::vector<int>& col_ptr, const std::vector<int>& col_edges,
+                 const Mat<float>& ll, int iters, bool posterior) {
+    const int n = c.n, D = c.dmax;
+    const auto* mul = c.gf().mul.data();
+    const auto* inv = c.gf().inv.data();
+    Decoded out{Mat<std::uint8_t>(ll.rows, static_cast<std::size_t>(n)), std::vector<std::uint8_t>(ll.rows, 0),
+                posterior ? Mat<float>(ll.rows, static_cast<std::size_t>(n * Q)) : Mat<float>()};
+    const std::size_t E = static_cast<std::size_t>(c.m * D);
+    int dv = 0;
+    for (int v = 0; v < n; ++v) dv = std::max(dv, col_ptr[v + 1] - col_ptr[v]);
+    std::vector<float> ch(static_cast<std::size_t>(n * Q)), c2v(E * Q), v2c(E * Q),
+        fwd(static_cast<std::size_t>((std::max(D, dv) + 1) * Q));
+    std::vector<float> last_post;
+    if (posterior) last_post.resize(static_cast<std::size_t>(n * Q));
+    std::vector<double> W(static_cast<std::size_t>(D * Q)), cf(static_cast<std::size_t>(D * Q));
+    std::vector<int> act(static_cast<std::size_t>(D));
+    for (std::size_t b = 0; b < ll.rows; ++b) {
+        std::uint8_t* hard = out.hard[b];
+        for (int v = 0; v < n; ++v) {  // exp(ll - its max)
+            const float* l = ll[b] + v * Q;
+            const float mx = *std::max_element(l, l + Q);
+            for (int a = 0; a < Q; ++a) ch[v * Q + a] = std::max(std::exp(l[a] - mx), FLOOR);
+        }
+        std::fill(c2v.begin(), c2v.end(), 1.0f);
+        bool ok = false;
+        for (int it = 0;; ++it) {
+            // symbols: the posterior's decision, and each edge's message (the others' product, sum 1)
+            for (int v = 0; v < n; ++v) {
+                const int* es = &col_edges[col_ptr[v]];
+                const int d = col_ptr[v + 1] - col_ptr[v];
+                std::copy_n(&ch[v * Q], Q, &fwd[0]);  // fwd[j]: ch times the first j edges'
+                for (int j = 0; j < d; ++j)
+                    mul_norm_into_q<Q>(&fwd[j * Q], &c2v[es[j] * Q], &fwd[(j + 1) * Q]);
+                const float* post = &fwd[d * Q];
+                hard[v] = static_cast<std::uint8_t>(std::max_element(post, post + Q) - post);
+                if (posterior) std::copy_n(post, Q, &last_post[v * Q]);
+                float tmp[Q];
+                for (int a = 0; a < Q; ++a) tmp[a] = 1.0f;  // the product of the edges past j
+                for (int j = d - 1; j >= 0; --j) {
+                    v2c_msg_q<Q>(&fwd[j * Q], tmp, &v2c[es[j] * Q]);
+                    if (j) mul_norm_q<Q>(tmp, &c2v[es[j] * Q]);
+                }
+            }
+            ok = c.syndrome_ok(hard);
+            if (ok || it == iters) break;
+            // checks
+            for (int r = 0; r < c.m; ++r) {
+                int deg = 0;
+                for (int d = 0; d < D; ++d) {
+                    const int e = r * D + d;
+                    if (c.var[e] < 0) continue;
+                    act[deg] = e;
+                    double* w = &W[deg * Q];
+                    const std::uint8_t* mhi = mul + inv[c.h[e]] * Q;
+                    const float* m = &v2c[e * Q];
+                    for (int y = 0; y < Q; ++y) w[y] = m[mhi[y]];  // P_y[y] = P_x[h^-1 y]
+                    wht_q<Q>(w);
+                    ++deg;
+                }
+                if (deg == 0) continue;
+                // products of the others' transforms: forward (0..deg-2), then backward
+                std::copy_n(&W[0], Q, &cf[0]);
+                for (int d = 1; d < deg - 1; ++d) cvec_mul<Q>(&cf[(d - 1) * Q], &W[d * Q], &cf[d * Q]);
+                double ct[Q];
+                for (int a = 0; a < Q; ++a) ct[a] = 1.0;  // the backward product past d
+                for (int d = deg - 1; d >= 0; --d) {
+                    const int e = act[d];
+                    double R[Q];
+                    if (d) cvec_mul<Q>(&cf[(d - 1) * Q], ct, R);
+                    else std::copy_n(ct, Q, R);
+                    wht_q<Q>(R);
+                    const std::uint8_t* mhv = mul + c.h[e] * Q;
+                    double rp[Q];
+                    double mx = 0.0;
+                    for (int a = 0; a < Q; ++a) {
+                        const double v = R[mhv[a]];
+                        rp[a] = v;
+                        mx = v > mx ? v : mx;
+                    }
+                    const double k = mx > 0.0 ? 1.0 / mx : 1.0;
+                    float* m = &c2v[e * Q];
+                    for (int a = 0; a < Q; ++a) {
+                        const double v = rp[a] > 0.0 ? rp[a] * k : 0.0;
+                        m[a] = std::max(static_cast<float>(v), FLOOR);
+                    }
+                    if (d > 0) cvec_mul_inplace<Q>(ct, &W[d * Q]);
+                }
+            }
+        }
+        // Compute log posteriors once on exit rather than on every iteration.
+        if (posterior) {
+            for (int v = 0; v < n; ++v) {
+                const float* post = &last_post[v * Q];
+                const float mx = post[hard[v]];
+                float* op = out.post[b] + v * Q;
+                for (int a = 0; a < Q; ++a) op[a] = std::log(post[a] / mx);
+            }
+        }
+        out.ok[b] = ok;
+    }
+    return out;
 }
 
 }  // namespace
@@ -196,95 +346,10 @@ void mul_norm(float* v, const float* w, int q) {
 // exp or log in the loop, decisions alike.
 Decoded Decoder::decode(const Mat<float>& ll, int iters, bool posterior) const {
     const Code& c = code_;
-    const int q = c.q, n = c.n, D = c.dmax;
-    if (ll.cols != static_cast<std::size_t>(n * q)) throw std::invalid_argument("gfldpc::Decoder: expected (B, n * q)");
-    const auto* mul = c.gf().mul.data();
-    const auto* inv = c.gf().inv.data();
-    Decoded out{Mat<std::uint8_t>(ll.rows, static_cast<std::size_t>(n)), std::vector<std::uint8_t>(ll.rows, 0),
-                posterior ? Mat<float>(ll.rows, static_cast<std::size_t>(n * q)) : Mat<float>()};
-    const std::size_t E = static_cast<std::size_t>(c.m * D);
-    int dv = 0;
-    for (int v = 0; v < n; ++v) dv = std::max(dv, col_ptr_[v + 1] - col_ptr_[v]);
-    std::vector<float> ch(static_cast<std::size_t>(n * q)), c2v(E * q), v2c(E * q),
-        fwd(static_cast<std::size_t>((std::max(D, dv) + 1) * q)), tmp(static_cast<std::size_t>(q));
-    std::vector<double> W(static_cast<std::size_t>(D * q)), cf(static_cast<std::size_t>(D * q)), ct(static_cast<std::size_t>(q));
-    for (std::size_t b = 0; b < ll.rows; ++b) {
-        std::uint8_t* hard = out.hard[b];
-        for (int v = 0; v < n; ++v) {  // exp(ll - its max)
-            const float* l = ll[b] + v * q;
-            const float mx = *std::max_element(l, l + q);
-            for (int a = 0; a < q; ++a) ch[v * q + a] = std::max(std::exp(l[a] - mx), FLOOR);
-        }
-        std::fill(c2v.begin(), c2v.end(), 1.0f);
-        bool ok = false;
-        for (int it = 0;; ++it) {
-            // symbols: the posterior's decision, and each edge's message (the others' product, sum 1)
-            for (int v = 0; v < n; ++v) {
-                const int* es = &col_edges_[col_ptr_[v]];
-                const int d = col_ptr_[v + 1] - col_ptr_[v];
-                std::copy_n(&ch[v * q], q, &fwd[0]);  // fwd[j]: ch times the first j edges'
-                for (int j = 0; j < d; ++j) {
-                    std::copy_n(&fwd[j * q], q, &fwd[(j + 1) * q]);
-                    mul_norm(&fwd[(j + 1) * q], &c2v[es[j] * q], q);
-                }
-                const float* post = &fwd[d * q];
-                hard[v] = static_cast<std::uint8_t>(std::max_element(post, post + q) - post);
-                if (posterior) {
-                    const float mx = post[hard[v]];
-                    for (int a = 0; a < q; ++a) out.post[b][v * q + a] = std::log(post[a] / mx);
-                }
-                std::fill(tmp.begin(), tmp.end(), 1.0f);  // the product of the edges past j
-                for (int j = d - 1; j >= 0; --j) {
-                    float* m = &v2c[es[j] * q];
-                    float s = 0.0f;
-                    for (int a = 0; a < q; ++a) s += m[a] = fwd[j * q + a] * tmp[a];
-                    const float k = 1.0f / s;
-                    for (int a = 0; a < q; ++a) m[a] *= k;
-                    if (j) mul_norm(tmp.data(), &c2v[es[j] * q], q);
-                }
-            }
-            ok = c.syndrome_ok(hard);
-            if (ok || it == iters) break;
-            // checks
-            for (int r = 0; r < c.m; ++r) {
-                for (int d = 0; d < D; ++d) {
-                    const int e = r * D + d;
-                    double* w = &W[d * q];
-                    if (c.var[e] < 0) {  // padding: a known zero, whose transform is all ones
-                        std::fill(w, w + q, 1.0);
-                        continue;
-                    }
-                    const int hi = inv[c.h[e]];
-                    const float* m = &v2c[e * q];
-                    for (int y = 0; y < q; ++y) w[y] = m[mul[hi * q + y]];  // P_y[y] = P_x[h^-1 y]
-                    wht(w, q);
-                }
-                // products of the others' transforms: forward, then backward
-                std::copy(W.begin(), W.begin() + q, cf.begin());
-                for (int d = 1; d < D; ++d)
-                    for (int a = 0; a < q; ++a) cf[d * q + a] = cf[(d - 1) * q + a] * W[d * q + a];
-                std::fill(ct.begin(), ct.end(), 1.0);  // the backward product past d
-                for (int d = D - 1; d >= 0; --d) {
-                    const int e = r * D + d;
-                    if (c.var[e] >= 0) {
-                        double R[32];
-                        for (int a = 0; a < q; ++a) R[a] = (d ? cf[(d - 1) * q + a] : 1.0) * ct[a];
-                        wht(R, q);
-                        const int hv = c.h[e];
-                        float* m = &c2v[e * q];
-                        double mx = 0.0;
-                        for (int a = 0; a < q; ++a) mx = std::max(mx, R[mul[hv * q + a]]);
-                        const double k = mx > 0.0 ? 1.0 / mx : 1.0;
-                        for (int a = 0; a < q; ++a)
-                            m[a] = std::max(static_cast<float>(std::max(R[mul[hv * q + a]], 0.0) * k), FLOOR);
-                    }
-                    for (int a = 0; a < q; ++a) ct[a] *= W[d * q + a];
-                }
-            }
-        }
-        out.ok[b] = ok;
-    }
-    return out;
+    if (ll.cols != static_cast<std::size_t>(c.n * c.q)) throw std::invalid_argument("gfldpc::Decoder: expected (B, n * q)");
+    if (c.q == 8) return decode_q<8>(c, col_ptr_, col_edges_, ll, iters, posterior);
+    if (c.q == 16) return decode_q<16>(c, col_ptr_, col_edges_, ll, iters, posterior);
+    return decode_q<32>(c, col_ptr_, col_edges_, ll, iters, posterior);
 }
 
 Mat<std::uint8_t> pack(const Mat<std::uint8_t>& bits, int p, int k) {

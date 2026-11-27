@@ -174,7 +174,8 @@ struct Frames {
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in = {}, std::string_view band = "w",
                     std::span<const std::int64_t> slips_in = {}, const Mat<int>* pil = nullptr,
-                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr);
+                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr, bool pilots_only = false,
+                    bool need_copy_close = false);
 
 struct HeaderRead {
     Header hdr;

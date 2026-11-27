@@ -696,9 +696,27 @@ int64_t find_slip(std::span<const cd> z, int64_t p, int n_left, std::span<const 
 
 }  // namespace
 
+namespace {
+
+unsigned pilot_sym_mask(int f, int n_f, size_t nc, const Mat<int>* pil, std::optional<int> close_at,
+                        bool need_copy_close) {
+    unsigned mask = 0u;
+    if (f == n_f || !pil || (close_at && f == *close_at)) {
+        mask = 1u;
+    } else {
+        const int* row = (*pil)[static_cast<size_t>(f)];
+        for (size_t i = 0; i < nc; ++i) mask |= 1u << row[i];
+    }
+    if (need_copy_close && close_at && f == *close_at) mask |= 1u << (SYMS_PER_FRAME - 1);
+    return mask;
+}
+
+}  // namespace
+
 Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in, std::string_view band, std::span<const std::int64_t> slips_in,
-                    const Mat<int>* pil, std::optional<int> close_at, const Mat<int>* pil_k) {
+                    const Mat<int>* pil, std::optional<int> close_at, const Mat<int>* pil_k, bool pilots_only,
+                    bool need_copy_close) {
     const auto& b = waveform::band(band);
     const size_t nc = static_cast<size_t>(b.nc());
     phi_ref = phi_ref + 2 * PI * RS * shift / FS;  // the shift's own slope
@@ -760,7 +778,10 @@ Frames demod_frames(std::span<const cd> z, int64_t p, int n_f, int shift, double
         }
         p += slip;
         if (p + n_s * NSYM > zlen) throw SyncError("burst truncated");
+        const unsigned sym_mask =
+            pilots_only ? pilot_sym_mask(f, n_f, nc, pil, close_at, need_copy_close) : ((1u << n_s) - 1u);
         for (int s = 0; s < n_s; ++s) {
+            if (!((sym_mask >> s) & 1u)) continue;
             const auto w = b.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
             std::copy(w.begin(), w.end(), raw[static_cast<size_t>(f * SYMS_PER_FRAME + s)]);
         }
@@ -2446,7 +2467,7 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     // slips are searched for once, here (residual CFO left: the search is blind to a common phase), and replayed
     const Mat<int>* pp = sc ? &pil : nullptr;
     const Mat<int>* pk = sc_intra ? &pil_k : nullptr;
-    auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, {}, pp, close_at, pk);
+    auto first = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, {}, pp, close_at, pk, true, false);
     const auto& dbs = config::band(db);
     const auto& sbs = config::band(sband);
     const size_t k0_off = static_cast<size_t>(dbs.k0 - sbs.k0);
@@ -2472,7 +2493,8 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
     const auto bbd = bb_of(db);
     // the window and the reported delay on the support as before the noise
     // gate (the gear shifter was trained on it); the estimate on the gated one
-    auto fr0 = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips, pp, close_at, pk);
+    const bool need_cc = sc && kc.has_value();
+    auto fr0 = demod_frames(z, hd.p0, n_air, 0, phi_ref, {}, db, slips, pp, close_at, pk, true, need_cc);
     auto sup_rows = [&](Mat<cd> rows) {
         auto hot_s = equalizer::hot_carriers(rows);
         if (exclude_db.size() == rows.cols)
@@ -2485,11 +2507,30 @@ Received receive_from(HeaderRead hd, waveform::Acquisition acq, std::vector<cd> 
                     if (hot_s[c]) rows[r][c] = 0.0;
         return rows;
     };
-    const Mat<cd> hp0 = sc ? sup_rows(sc::full(z, hd, fr0.raw, fr0.hp, kc, 0, db).rows) : std::move(fr0.hp);
+    const Mat<cd> hp0 = sc ? sup_rows(sc::full(z, hd, fr0.raw, fr0.hp, kc, 0, db).rows) : fr0.hp;
     auto support = equalizer::delay_support(hp0, bbd, -15.0, hd.n0_pre);
     auto seen = sc ? support : equalizer::delay_support(hp0, bbd);
     int shift = equalizer::window_shift(seen);
-    auto fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips, pp, close_at, pk);
+    Frames fr;
+    if (shift == 0) {
+        // Reuse pass 2's pilots, steps, and slips; demodulate only the skipped non-pilot symbols.
+        const auto& db_band = waveform::band(db);
+        int64_t p = hd.p0;
+        for (int f = 0; f < n_air; ++f) {
+            p += slips[static_cast<size_t>(f)];
+            const int64_t pf = p + static_cast<int64_t>(fr0.steps[static_cast<size_t>(f)]);
+            const unsigned mask = pilot_sym_mask(f, n_air, nc_db, pp, close_at, need_cc);
+            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                if ((mask >> s) & 1u) continue;
+                const auto w = db_band.demod_window(z, pf + s * NSYM + NCP, DEMOD_BACKOFF);
+                std::copy(w.begin(), w.end(), fr0.raw[static_cast<size_t>(f * SYMS_PER_FRAME + s)]);
+            }
+            p += FRAME_SAMPLES;
+        }
+        fr = std::move(fr0);
+    } else {
+        fr = demod_frames(z, hd.p0, n_air, shift, phi_ref, {}, db, slips, pp, close_at, pk);
+    }
     support = {support.first - shift, support.second - shift};
     seen = {seen.first - shift, seen.second - shift};
     const auto clip = clip_consts(spec);

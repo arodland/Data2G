@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "dsp/dsp.hpp"
+#include "util/simd.hpp"
 
 namespace data2g::waveform {
 namespace {
@@ -50,12 +51,58 @@ std::vector<cdouble> to_baseband(std::span<const double> x, std::int64_t n0) {
     return out;
 }
 
-std::vector<cdouble> freq_correct(std::span<const cdouble> z, double f_hz) {
-    std::vector<cdouble> out(z.size());
-    for (std::size_t n = 0; n < z.size(); ++n) {
-        const double c = f_hz * static_cast<double>(n) / FS;
-        out[n] = z[n] * std::polar(1.0, -TWO_PI * (c - std::floor(c)));
+namespace {
+
+// Vectorized exp(-2*pi*i * wrap_cycles(f_hz * n / FS)) * z[n]: exact same cycle rounding as
+// data2g.waveform.dsp.freq_correct, with quarter-turn reduction + degree-16/15 Taylor on [-pi/4, pi/4]
+// (< 1e-16 truncation error) so the whole loop auto-vectorizes in DATA2G_SIMD_CLONES.
+DATA2G_SIMD_CLONES void freq_correct_kernel(const cdouble* __restrict z, cdouble* __restrict out, std::size_t n,
+                                            double f_hz) {
+    const double* src = reinterpret_cast<const double*>(z);
+    double* dst = reinterpret_cast<double*>(out);
+    constexpr double fs = static_cast<double>(FS);
+    for (std::size_t i = 0; i < n; ++i) {
+        const double c = (f_hz * static_cast<double>(i)) / fs;
+        const double f = c - std::floor(c);  // [0, 1)
+        const double qf = std::floor(4.0 * f + 0.5);  // nearest quarter-turn: 0..4
+        const double t = -TWO_PI * (f - 0.25 * qf);   // [-pi/4, pi/4]
+        const double t2 = t * t;
+        const double cv =
+            1.0 +
+            t2 * (-1.0 / 2.0 +
+                  t2 * (1.0 / 24.0 +
+                        t2 * (-1.0 / 720.0 +
+                              t2 * (1.0 / 40320.0 +
+                                    t2 * (-1.0 / 3628800.0 +
+                                          t2 * (1.0 / 479001600.0 +
+                                                t2 * (-1.0 / 87178291200.0 + t2 * (1.0 / 20922789888000.0))))))));
+        const double sv =
+            t * (1.0 +
+                 t2 * (-1.0 / 6.0 +
+                       t2 * (1.0 / 120.0 +
+                             t2 * (-1.0 / 5040.0 +
+                                   t2 * (1.0 / 362880.0 +
+                                         t2 * (-1.0 / 39916800.0 +
+                                               t2 * (1.0 / 6227020800.0 + t2 * (-1.0 / 1307674368000.0))))))));
+        const int q = static_cast<int>(qf);
+        double pr = (q & 1) ? sv : cv;
+        double pi = (q & 1) ? -cv : sv;
+        if (q & 2) {
+            pr = -pr;
+            pi = -pi;
+        }
+        const double zr = src[2 * i], zi = src[2 * i + 1];
+        dst[2 * i] = zr * pr - zi * pi;
+        dst[2 * i + 1] = zr * pi + zi * pr;
     }
+}
+
+}  // namespace
+
+std::vector<cdouble> freq_correct(std::span<const cdouble> z, double f_hz) {
+    if (f_hz == 0.0) return std::vector<cdouble>(z.begin(), z.end());
+    std::vector<cdouble> out(z.size());
+    freq_correct_kernel(z.data(), out.data(), z.size(), f_hz);
     return out;
 }
 

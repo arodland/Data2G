@@ -568,6 +568,13 @@ def modem_hpp() -> str:
     subs = [clip(s.clip) for s in config.SUBMODES.values()]
     out.append(f"// receive()'s, per config::SUBMODES row\ninline constexpr std::array<Clip, {len(subs)}> CLIP_SUBMODE = "
                f"{{{{\n    {', '.join(subs)}}}}};\n")
+    # Scattered-pilot TX distortion calibration ratio per config::SUBMODES row (modem._sc_cal(s)[1]),
+    # rounded to 12 decimal places for cross-platform FFT reproducibility.
+    sc_cal = [round(float(modem._sc_cal(s)[1]), 12) + 0.0 if s.band in config.SC_BANDS else float(s.clip[2])
+              for s in config.SUBMODES.values()]
+    out.append(f"// modem._sc_cal's distortion ratio, per config::SUBMODES row\n"
+               f"inline constexpr std::array<double, {len(sc_cal)}> SC_CAL_RATIO = "
+               f"{{{{\n    {', '.join(cxx(v) for v in sc_cal)}}}}};\n")
     bands = [clip(config.CLIP[b]) for b in config.BANDS]
     out.append(f"// config.CLIP, per config::BANDS row\ninline constexpr std::array<Clip, {len(bands)}> CLIP_BAND = "
                f"{{{{{', '.join(bands)}}}}};\n")

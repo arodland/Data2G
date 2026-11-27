@@ -18,9 +18,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "codes/codes.hpp"
 #include "config/config.hpp"
-#include "constellation/constellation.hpp"
 #include "tables/gamma_q99.hpp"
 #include "util/linalg.hpp"
 #include "util/pool.hpp"
@@ -1243,87 +1241,8 @@ std::pair<std::vector<char>, std::vector<double>> sc_hot(const std::vector<doubl
 }
 
 // modem._sc_cal's second value: the submode's scattered pilots' distortion over their power, as its transmitter leaves
-// them, measured once on two clean bursts (the first value, their gain, is not used). While measuring, the default
-// clip ratio (Python's placeholder).
-double sc_cal_ratio(const Spec& spec) {
-    static std::mutex mu;
-    static std::map<size_t, double> done;
-    thread_local std::set<size_t> measuring;
-    const size_t key = config::row(spec);
-    {
-        std::lock_guard lk(mu);
-        if (auto it = done.find(key); it != done.end()) return it->second;
-    }
-    if (measuring.count(key)) return clip_consts(spec).ratio;
-    measuring.insert(key);
-    struct Unmark {
-        size_t k;
-        ~Unmark() { measuring.erase(k); }
-    } unmark{key};
-    const auto& b = waveform::band(spec.band);
-    const size_t nc = static_cast<size_t>(b.nc());
-    const auto& cs = codes::spec(spec);
-    const auto& pts = *constellation::find(spec.constellation);
-    const int n_cw = std::min(4, max_codewords(spec.sync_band));
-    std::uint64_t state = 0;
-    std::vector<cd> num_d(nc, 0.0), num_p(nc, 0.0);
-    std::vector<double> den_d(nc, 0.0), den_p(nc, 0.0);
-    struct Part {
-        Mat<cd> ls;
-        std::vector<int> norm;
-    };
-    std::vector<Part> parts;
-    for (int burst = 0; burst < 2; ++burst) {
-        std::vector<std::uint8_t> coded;
-        for (int i = 0; i < n_cw; ++i) {
-            const auto c = codes::encode(cs, sc_payload(spec.payload_bytes, state), 0, 0, i);
-            coded.insert(coded.end(), c.begin(), c.end());
-        }
-        const auto bits = codes::spread<std::uint8_t>(coded, n_cw, spec.bits_per_cu, 0);
-        const auto x = modulate_bits(bits, spec);
-        std::vector<double> padded(800, 0.0);
-        padded.insert(padded.end(), x.begin(), x.end());
-        padded.insert(padded.end(), 800, 0.0);
-        const auto r = receive_known(padded, 800 + LEADIN_SAMPLES, 0.0, spec, n_cw);
-        const auto X = constellation::modulate(bits, pts);
-        const size_t n_f = r.raw.rows / SYMS_PER_FRAME, per = DATA_SYMS_PER_FRAME * nc;
-        const Mat<cd>& ls = r.sc->ls;
-        const auto& norm = r.sc->norm;
-        for (size_t f = 0; f < n_f; ++f) {
-            const auto& cells = sc_frame_cells(b.nc(), norm[f]);
-            for (size_t j = 0; j < per; ++j) {
-                const cd y = data_row(r.raw, f * DATA_SYMS_PER_FRAME + j / nc)[j % nc], xx = X[f * per + j];
-                const size_t k = static_cast<size_t>(cells.Dc[j]) % nc;
-                num_d[k] += y * std::conj(xx);
-                den_d[k] += std::norm(xx);
-            }
-            for (size_t i = 0; i < nc; ++i) {
-                const size_t k = static_cast<size_t>(cells.PK[i]);
-                num_p[k] += ls[f][i];
-                den_p[k] += 1.0;
-            }
-        }
-        parts.push_back({ls, norm});
-    }
-    std::vector<cd> gp(nc, 0.0);
-    for (size_t k = 0; k < nc; ++k)
-        if (den_p[k] > 0.0) gp[k] = num_p[k] / den_p[k];
-    double err = 0.0, tot_gp = 0.0;
-    for (const auto& pt : parts) {
-        for (size_t f = 0; f < pt.ls.rows; ++f) {
-            const auto& cells = sc_frame_cells(b.nc(), pt.norm[f]);
-            for (size_t i = 0; i < nc; ++i) {
-                const cd gpk = gp[static_cast<size_t>(cells.PK[i])];
-                err += std::norm(pt.ls[f][i] - gpk);
-                tot_gp += std::norm(gpk);
-            }
-        }
-    }
-    const double ratio = err / std::max(tot_gp, 1e-30);
-    std::lock_guard lk(mu);
-    done.emplace(key, ratio);
-    return ratio;
-}
+// them, precomputed in generated/modem.hpp (SC_CAL_RATIO) by tools/gen_native_tables.py.
+double sc_cal_ratio(const Spec& spec) { return SC_CAL_RATIO[config::row(spec)]; }
 
 // The thermal noise from the preamble's repeats about a cubic in time per carrier (modem._sc_estimate's n0):
 // the least-squares residual's power per carrier, by an orthonormal basis of the (R, 4) Vandermonde matrix.
@@ -1466,19 +1385,18 @@ std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, c
     if (z.data.size() != n_f * per || w.data.size() != n_f * per) throw std::invalid_argument("sc_refine: shapes disagree");
     Mat<cd> z6(n_air * SYMS_PER_FRAME, nc);
     Mat<double> w6(n_air * SYMS_PER_FRAME, nc);
-    auto at = [&](size_t f, size_t j) {
-        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
-        const size_t c = static_cast<size_t>(cells.Dc[j]);
-        return (static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME + c / nc) * nc + c % nc;
-    };
     double msum = 0.0;
     for (double v : i.mse.data) msum += v;
-    for (size_t f = 0; f < n_f; ++f)
+    for (size_t f = 0; f < n_f; ++f) {
+        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
+        const size_t base = static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME * nc;
         for (size_t j = 0; j < per; ++j) {
             const size_t q = f * per + j;
-            if (w.data[q] > 0) z6.data[at(f, j)] = z.data[q] - i.h.data[q];
-            w6.data[at(f, j)] = w.data[q];
+            const size_t dst = base + static_cast<size_t>(cells.Dc[j]);
+            if (w.data[q] > 0) z6.data[dst] = z.data[q] - i.h.data[q];
+            w6.data[dst] = w.data[q];
         }
+    }
     Mat<double> t_rows(n_air, SYMS_PER_FRAME);
     for (size_t a = 0; a < n_air; ++a)
         for (size_t s = 0; s < static_cast<size_t>(SYMS_PER_FRAME); ++s)
@@ -1488,12 +1406,16 @@ std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, c
                                             r.est.n0, equalizer::bb(config::band(r.band)), r.est.slack);
     Mat<cd> h(n_f * DATA_SYMS_PER_FRAME, nc);
     Mat<double> mse(h.rows, nc);
-    for (size_t f = 0; f < n_f; ++f)
+    for (size_t f = 0; f < n_f; ++f) {
+        const auto& cells = sc_frame_cells(b.nc(), i.norm[f]);
+        const size_t base = static_cast<size_t>(i.norm[f]) * SYMS_PER_FRAME * nc;
         for (size_t j = 0; j < per; ++j) {
             const size_t q = f * per + j;
-            h.data[q] = i.h.data[q] + dh.data[at(f, j)];
-            mse.data[q] = dm.data[at(f, j)];
+            const size_t dst = base + static_cast<size_t>(cells.Dc[j]);
+            h.data[q] = i.h.data[q] + dh.data[dst];
+            mse.data[q] = dm.data[dst];
         }
+    }
     return {std::move(h), std::move(mse)};
 }
 
