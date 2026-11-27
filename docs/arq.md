@@ -262,9 +262,10 @@ everywhere (Python too) for A/B runs.
   recommend step {0, +1, -1, +2, -2} x T_DUPCTL {absent, present}. Anchors: A is the
   peer burst I act on, R my burst A acted on. A reply nods only if R is my previous
   burst (so the peer knows which burst I answer). "all": cum is one past the highest new
-  codeword A carried (A carried new data); "unchanged": cum is R's. The step is a code
-  index within R's recommendation's band. A control the codebook does not cover (a
-  partial ACK, a band change, resends, any other TLV) goes in full.
+  codeword A carried (A carried new data); "unchanged": cum is R's. The step is a flat
+  offset `core.recommend - r_rec` in `modes.RECOMMEND_TABLE` (no band fence, so cross-band
+  steps within ±2 nod directly). A control the codebook does not cover (a partial ACK, a
+  recommendation jump past ±2, resends, any other TLV) goes in full.
 - **Kept fields.** `size_hint`, `T_REPLY` and `T_CHAT` are not carried: the listener
   keeps the peer's last values, so a control nods only if they equal my previous
   burst's (all three are absolute: a nod leaving an old size hint in force shrank every
@@ -333,7 +334,7 @@ everywhere (Python too) for A/B runs.
 | 7 | peer cumulative | the next peer seq this station expects; all below received |
 | 1 | reply lost | the peer's last burst repeated one this station already had (§6) |
 | 6 | K | resends in this burst |
-| 6 | recommend | the submode the peer should use next: sync band 2 bits (0 w, 1 n10, 2 w48; 3 CPM), index 4 (for CPM: the order of `data2g.cpm.SPECS`, 0-11; 12-14 under CPM are n10's indices 16-18, `modes.N10_HIGH`). Value `63` (`modes.REC_EXT`) is reserved as an escape: the actual mode code rides in `T_REC_EXT` (§5) |
+| 6 | recommend | the submode the peer should use next: flat index in `modes.RECOMMEND_TABLE` (`0..52` on HF: `0..5` 500 Hz CPM floor, `6..8` 2300 Hz CPM, `9..19` `w` + low `w48` interleaved by threshold, `20..29` high `w48`, `30..39` `n10`, `40..44` `n4`, `45..52` polar & ACK-only; `0..47` on FM). Value `63` (`modes.REC_EXT`) is reserved as an escape: the actual mode code rides in `T_REC_EXT` (§5) |
 | 2 | size hint | peer burst length: shrink / hold / grow / max |
 
 Where the rest comes from:

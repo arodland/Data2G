@@ -104,7 +104,7 @@ class AskingPolicy(L.Policy):
 
     def recommend(self, station):
         if self.rng.random() < 0.3:
-            self.idx = min(15, max(0, self.idx + self.rng.choice((-2, -1, 1, 2))))
+            self.idx = min(47, max(0, self.idx + self.rng.choice((-2, -1, 1, 2))))
         if self.rng.random() < self.p_kept:
             self.hint = self.rng.randrange(4)
         if self.rng.random() < self.p_kept:
@@ -208,6 +208,55 @@ def test_a_kept_field_change_goes_in_full(nodding):
         assert r.nod is not None
         assert F.Control.unpack([a.nod_payload(r.nod[0])]).core.size_hint == b.policy.hint
         assert a.handle(a.nod_rx(r.nod[0]))
+
+
+@pytest.mark.hf_only("HF flat recommendation table and CPM nods")
+def test_cross_band_nods_and_bounds(nodding):
+    """The flat 0..52 recommendation table has no band fence: cross-band steps
+    within +-2 (fsk8r50-r1/2 <-> fsk32r62-r1/2 <-> qpsk-r1/5, and n10-qpsk-r1/5
+    <-> n10-qpsk-r1/3) nod directly; steps past the table end are rejected."""
+    from data2g.arq import modes as M
+
+    class FixedRecPolicy(AskingPolicy):
+        def recommend(self, station):
+            return self.idx, self.hint, self.reply
+
+    for src, dst in (("fsk8r50-r1/2", "fsk32r62-r1/2"),
+                     ("fsk32r62-r1/2", "qpsk-r1/5"),
+                     ("qpsk-r1/5", "fsk32r62-r1/2"),
+                     ("fsk32r62-r1/2", "fsk32r62-r2/3"),
+                     ("n10-qpsk-r1/5", "n10-qpsk-r1/3")):
+        r0, r1 = M.encode(src), M.encode(dst)
+        assert (r1 - r0) in N.REPLY_STEPS, (src, dst, r0, r1)
+        pa = FixedRecPolicy(random.Random(1), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+        pb = FixedRecPolicy(random.Random(2), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+        pb.idx = r0
+        a = L.Station(0, pa, master=True, nod=True, nod_peer=True)
+        b = L.Station(1, pb, nod=True, nod_peer=True)
+        a.write(payload(random.Random(3), 2000, "mixed"))
+        for _ in range(3):
+            assert b.handle(FullRx(a.build(nod=True)))
+            r = b.build(nod=True)
+            assert a.handle(FullRx(r))
+        assert b.handle(FullRx(a.build(nod=True)))
+        pb.idx = r1
+        r = b.build(nod=True)
+        assert r.nod is not None, (src, dst, r0, r1)
+        p = a.nod_payload(r.nod[0])
+        assert p is not None and F.Control.unpack([p]).core.recommend == r1
+        assert a.handle(a.nod_rx(r.nod[0])) and a.peer_recommend == r1
+
+    # Out-of-table step (+1 past the last valid HF mode 52) is rejected by nod_payload
+    pa = FixedRecPolicy(random.Random(1), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+    pb = FixedRecPolicy(random.Random(2), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+    pb.idx = len(M.RECOMMEND_TABLE) - 1
+    a = L.Station(0, pa, master=True, nod=True, nod_peer=True)
+    b = L.Station(1, pb, nod=True, nod_peer=True)
+    a.write(payload(random.Random(3), 2000, "mixed"))
+    for _ in range(2):
+        assert b.handle(FullRx(a.build(nod=True)))
+        assert a.handle(FullRx(b.build(nod=True)))
+    assert a.nod_payload(N.INDEX[("unchanged", 1, 0)]) is None
 
 
 def test_cpp_detects_as_python(native, reference):

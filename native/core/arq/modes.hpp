@@ -38,12 +38,9 @@ double width_hz(const Mode& m);
 bool selectable(const Mode& m);  // modes.py SELECTABLE: the ARQ may choose it and name it on air
 std::vector<const Mode*> allowed(int cap);  // within the cap, MODES' order (policy.py allowed)
 
-// The recommendation code (the core word's 6-bit recommend): sync band code
-// (frames BANDS_CODE) << 4 | index; CPM modes take the spare band code.
+// The recommendation code (the core word's 6-bit recommend): flat table 0..62
+// (modes.py RECOMMEND_TABLE), ordered on HF to maximize nods' +-2 step.
 inline constexpr int REC_EXT = 63;  // sentinel: read extended mode code from T_REC_EXT TLV
-inline constexpr int CPM_CODE = 3;
-// CPM_CODE's indices 12-14 carry n10's past 15 (16-18; index 15 is REC_EXT = 63)
-inline constexpr int N10_HIGH = 12;
 int encode(std::string_view submode);  // throws for an unknown mode
 const Mode* decode(int rec);           // nullptr: no such mode
 

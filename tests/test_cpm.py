@@ -282,7 +282,7 @@ def test_r23_announced_at_index_4_and_older_words_unchanged():
     words = [cpm.header_word(s.index, n, d) for s, n, d, _ in cpm.valid_words(g.name)]
     assert len(set(words)) == len(words) == 3 * 2 * (cpm.MAX_DATA + 1) and old < set(words)
     if not modes.FM:
-        assert [modes.encode(m) & 15 for m in cpm.SPECS] == list(range(len(cpm.SPECS)))
+        assert sorted(modes.encode(m) for m in cpm.SPECS) == list(range(len(cpm.SPECS)))
         assert modes.decode(modes.encode(spec.name)) == spec.name
     assert list(cpm.SPECS)[-1] == spec.name
     rng = np.random.default_rng(5)
