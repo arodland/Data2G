@@ -93,6 +93,17 @@ public:
         if (m.is_none() || !py::isinstance<py::dict>(m) || !m.contains("snr_est")) return std::nullopt;
         return measured(m.cast<py::dict>());
     }
+    std::optional<std::array<double, 4>> last_mi() const override {
+        auto m = py::getattr(obj, "measured", py::none());
+        if (m.is_none() || !py::isinstance<py::dict>(m)) return std::nullopt;
+        std::array<double, 4> out{};
+        for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) {
+            const py::str k("mi_" + std::string(arq::CONSTS[i]));
+            if (!m.contains(k)) return std::nullopt;
+            out[i] = m[k].cast<double>();
+        }
+        return out;
+    }
     void update_measured(const Measured& m) override {
         if (overrides("update_measured")) obj.attr("update_measured")(to_dict(m));
     }
@@ -500,8 +511,17 @@ void bind_arq_link(py::module_& m) {
 
     py::class_<RxSide>(a, "RxSide")
         .def_readonly("cum", &RxSide::cum)
+        .def_readonly("submode", &RxSide::submode)
         .def_property_readonly("buf", [](const RxSide& r) {
             return dict_of(r.buf, [](const std::pair<Bytes, bool>& v) { return py::make_tuple(pyb(v.first), v.second); });
+        })
+        .def_property_readonly("harq", [](const RxSide& r) {
+            return dict_of(r.harq, [](const std::vector<RxSide::HarqTx>& txs) {
+                py::list out;
+                for (const auto& t : txs)
+                    out.append(py::make_tuple(t.rv, py::make_tuple(t.mi[0], t.mi[1], t.mi[2], t.mi[3])));
+                return out;
+            });
         })
         .def_property_readonly("reader", [](RxSide& r) { return &r.reader; }, py::return_value_policy::reference_internal)
         .def_property_readonly("out", [](const RxSide& r) { return pyb(r.out); })

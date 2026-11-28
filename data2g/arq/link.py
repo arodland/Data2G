@@ -76,6 +76,10 @@ _UNKNOWN = -1  # the reply recommendation the peer holds: not known to me
 NOD_MODE = "fsk16r25-r1/3"  # the mode a nod's control is packed and named in (its grid's control codeword)
 # soft-bit store keys of controls kept for that (RxBurst.decode_repeat): the link's, the session's connect frames
 REPEAT_KEY, REPEAT_SESSION_KEY = ("rep", 1, 0), ("rep", 2, 0)
+# predictor.CONSTS keys in Policy.measured, for stored HARQ reception quality (RxSide.harq)
+MI_KEYS = ("mi_gray-qam4", "mi_gray-qam16", "mi_c64-snr18", "mi_c256-snr26")
+# cap per-seq HARQ history at the watchdog's resync window (resync clears rx.harq; bounds growth when tx is idle)
+HARQ_MAX_TX = NO_PROGRESS_TURNS
 # core word fields, most significant first (frames.Core.pack): widths
 CORE_BITS = (2, 2, 3, 3, 7, 1, 6, 6, 2)
 
@@ -428,6 +432,9 @@ class RxSide:
     def __init__(self):
         self.cum = 0
         self.buf: dict[int, tuple[bytes, bool]] = {}  # held above cum: (payload, compressed)
+        self.submode: str | None = None  # submode of buffered / HARQ codewords
+        # undecoded seqs >= cum with soft bits stored: seq -> [(rv, (mi0, mi1, mi2, mi3)), ...]
+        self.harq: dict[int, list[tuple[int, tuple[float, float, float, float]]]] = {}
         self.reader = F.RecordReader()
         self.out = bytearray()
         self.hist = b""  # the last HIST stream bytes delivered (compression's history)
@@ -441,10 +448,12 @@ class RxSide:
         inflated in seq order, primed with the stream delivered before it."""
         if seq < self.cum or seq in self.buf or seq >= self.cum + WINDOW:
             return False
+        self.harq.pop(seq, None)
         self.buf[seq] = (payload, comp)
         delivered = False
         while self.cum in self.buf:
             p, z = self.buf.pop(self.cum)
+            self.harq.pop(self.cum, None)
             self.comp_seqs.discard(self.cum)
             self.wire += len(p)
             if z:
@@ -457,6 +466,8 @@ class RxSide:
             self.out += self.reader.feed(p)
             self.cum += 1
             delivered = True
+        if not self.buf and not self.harq:
+            self.submode = None
         return delivered
 
     def abandon(self, a: int) -> list[int]:
@@ -465,6 +476,10 @@ class RxSide:
         gone = [s for s in self.buf if s >= lo]
         for s in gone:
             del self.buf[s]
+        for s in [s for s in self.harq if s >= lo]:
+            del self.harq[s]
+        if not self.buf and not self.harq:
+            self.submode = None
         self.comp_seqs = {s for s in self.comp_seqs if s < lo}
         return gone
 
@@ -592,6 +607,7 @@ class Station:
     _sent_ctl: dict = field(default_factory=dict)  # my bn -> (cum, recommend, acted-on seq, new end | None, _kept)
     _peer_ctl_core: dict = field(default_factory=dict)  # seq -> (cum 7-bit, recommend, my bn acted on, new end | None)
     _rx_new_end: int | None = None  # the last peer burst's new data end (1 + its highest new seq)
+    _rx_failed: list = field(default_factory=list)  # (seq, rv) data slots that failed in _take_data
 
     @property
     def peer(self) -> int:
@@ -1092,6 +1108,20 @@ class Station:
             if upd is not None:
                 self.policy.update_measured(upd)
 
+    def _note_harq(self, submode: str, has_data: bool):
+        """Record post-refinement reception MIs for undecoded HARQ slots (issue #360)."""
+        m = self.policy.measured
+        mi = tuple(float(m[k]) for k in MI_KEYS) if self._rx_failed and m and all(k in m for k in MI_KEYS) else None
+        if mi is not None:
+            for seq, rv in self._rx_failed:
+                if self.rx.cum <= seq < self.rx.cum + WINDOW and seq not in self.rx.buf:
+                    txs = self.rx.harq.setdefault(seq, [])
+                    txs.append((rv, mi))
+                    del txs[:-HARQ_MAX_TX]
+        self._rx_failed = []
+        if has_data:
+            self.rx.submode = submode if (self.rx.buf or self.rx.harq) else None
+
     def _comp_bit(self, seq: int) -> bool:
         c = self.tx.cws[seq]
         return c.comp and not c.comp_known
@@ -1181,6 +1211,7 @@ class Station:
             self._fail(f"protocol: {e}")
             return True
         self._refine_measured(rx)
+        self._note_harq(rx.submode, bool(slots) or F.T_INLINE in ext)
         if log.isEnabledFor(logging.INFO):
             self._log_rx(rx, core, dup, slots, n_dec, n_old, before, was, repeat, abandoned)
         self.reply_lost = repeat
@@ -1585,6 +1616,9 @@ class Station:
                               if z and seq is not None and seq >= self.rx.cum}
         comp = [z or seq in self.rx.comp_seqs for (seq, _), z in zip(slots, bits)]
         self.last_rx_data = bool(slots)
+        self._rx_failed = []
+        if (slots or F.T_INLINE in ext) and self.rx.submode is not None and self.rx.submode != rx.submode:
+            self.rx.harq.clear()
         progress = False
         n_ok = n_new = n_dec = n_old = 0
         for i, (seq, rv) in enumerate(slots, start=n_ctl_slots):
@@ -1600,6 +1634,8 @@ class Station:
                 n_dec += 1
                 rx.forget(key)
                 progress |= self.rx.accept(seq, p, comp[i - n_ctl_slots])
+            elif seq < self.rx.cum + WINDOW and seq not in self.rx.buf:
+                self._rx_failed.append((seq, rv))
         news = [seq for seq, _ in slots[core.k:] if seq is not None]
         self._rx_new_end = news[-1] + 1 if news else None
         if news:
