@@ -224,8 +224,10 @@ std::vector<std::int8_t> zero_tail(const Spec& s, int nbytes);
 // (k,) known info bits, -1 unknown: the payload bits `mask` sets are `tmpl`'s (MSB first; each zero-extended
 // to payload_bytes), and the zero fill past the CRC; never the CRC (codes.known_bits, docs/arq.md §3a).
 std::vector<std::int8_t> known_bits(const Spec& s, std::span<const std::uint8_t> tmpl, std::span<const std::uint8_t> mask);
+// codes.SCORE_POLAR_CAP: score clips polar soft bits to +-this (#342; the reasoning is in data2g/codes.py).
+inline constexpr double kScorePolarCap = 4.0;
 // Log-likelihood ratio (nats) of payload's RV 0 codeword sent at `index` against random bits, from its soft
-// bits in mapping order (codes.score).
+// bits in mapping order, polar clipped to +-kScorePolarCap (codes.score).
 double score(const Spec& s, std::span<const double> soft, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
              int index);
 // An RV 0 codeword's soft bits (sent at burst position `index`) with every

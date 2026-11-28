@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -684,9 +685,10 @@ std::vector<std::int8_t> known_bits(const Spec& s, std::span<const std::uint8_t>
 double score(const Spec& s, std::span<const double> soft, std::span<const std::uint8_t> payload, std::uint32_t crc_mask,
              int index) {
     const auto c = encode(s, payload, 0, crc_mask, index);
+    const double cap = s.polar ? kScorePolarCap : std::numeric_limits<double>::infinity();
     double sum = 0.0;
     for (std::size_t i = 0; i < c.size() && i < soft.size(); ++i) {
-        const double x = -(1.0 - 2.0 * c[i]) * soft[i];  // log 2 - logaddexp(0, x), as numpy
+        const double x = -(1.0 - 2.0 * c[i]) * std::clamp(soft[i], -cap, cap);  // log 2 - logaddexp(0, x), as numpy
         sum += std::log(2.0) - (x > 0.0 ? x + std::log1p(std::exp(-x)) : std::log1p(std::exp(x)));
     }
     return sum;
