@@ -304,7 +304,16 @@ int ctl_size(const Ext& e, int pb, int k, bool has_new, int zk = 0) {
 Station::Station(int direction_, std::shared_ptr<Policy> policy_, bool master_, int key_, std::optional<int> max_misses_,
                  int cap_, bool chat_)
     : direction(direction_), policy(std::move(policy_)), master(master_), key(key_), max_misses(max_misses_), cap(cap_),
-      chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")), prime(env_on("DATA2G_PRIME")) {}
+      chat(chat_), compress(env_on("DATA2G_COMPRESS")), inline_data(env_on("DATA2G_INLINE")), prime(env_on("DATA2G_PRIME")),
+      salvage(salvage_default()) {}
+
+int salvage_default() {
+    static const int n = [] {
+        const char* v = std::getenv("DATA2G_CTL_SALVAGE");
+        return v ? std::atoi(v) : 2;
+    }();
+    return n;
+}
 
 bool repeat_default() {
     static const bool on = env_on("DATA2G_REPEAT");
@@ -381,9 +390,11 @@ TxBurstPtr Station::build(bool fresh, bool nod_ok) {
         return last_sent;
     }
     const std::int64_t bn = latest + 1;
+    const bool salvage_reply = std::exchange(salvage_reply_, false);
+    if (salvage_reply) nod_ok = false;
     const int esc = sent_esc_ = escalation();
     auto [submode, max_cw] = policy->choose(*this, esc);
-    if (!data_allowed(fresh, submode)) max_cw = 0;  // control only
+    if (salvage_reply || !data_allowed(fresh, submode)) max_cw = 0;  // control only
     const std::vector<std::int64_t> missing = fresh ? tx.missing() : std::vector<std::int64_t>{};
     tx_end = est_tx_end(submode, max_cw, missing.size(), fresh);
     const auto r = policy->recommend(*this);
@@ -853,7 +864,7 @@ bool Station::handle(RxBurst& rx_) {
 bool Station::handle_inner(RxBurst& rxb) {
     const bool outcome = policy->has_outcome();
     auto got = read_control(rxb, outcome);
-    if (!got) return false;
+    if (!got) return salvage ? salvage_data(rxb) : false;
     const auto& [ctl, dup] = *got;
     const Core& core = ctl.core;
     const Ext& ext = ctl.ext;
@@ -898,6 +909,100 @@ bool Station::handle_inner(RxBurst& rxb) {
     answered_ = false;
     watchdog(progress || data.progress);
     return true;
+}
+
+// Control failed: check mask-free converged data slots against the receive window under peer_epoch
+// (data_mask folds key, direction, comp, epoch and seq into the CRC). Deduces contiguous new RV 0
+// slots from any hit >= m_prev so their RV 0 soft bits enter the soft store (link.py _salvage_data).
+bool Station::salvage_data(RxBurst& rxb) {
+    if (rxb.n_cw() < 2) return false;
+    const int start_slot = rxb.n_ctl_slots() ? rxb.n_ctl_slots() : 1;
+    const std::int64_t cum0 = rx.cum;
+    std::set<std::int64_t> held0;
+    std::int64_t m_prev = std::max<std::int64_t>(cum0, peer_next_.value_or(0));
+    for (const auto& [s, _] : rx.buf) {
+        held0.insert(s);
+        m_prev = std::max(m_prev, s + 1);
+    }
+    struct Hit {
+        std::int64_t seq;
+        bool comp;
+        Bytes payload;
+    };
+    std::map<int, Hit> hits;
+    for (int s = start_slot; s < rxb.n_cw(); ++s) {
+        if (!rxb.converged(s)) continue;
+        bool found = false;
+        for (std::int64_t seq = cum0; seq < cum0 + WINDOW && !found; ++seq) {
+            for (bool z : {false, true}) {
+                if (auto p = rxb.decode(s, data_mask(peer(), seq, key, z, peer_epoch), 0, nullptr)) {
+                    hits.emplace(s, Hit{seq, z, std::move(*p)});
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (hits.empty()) return false;
+    bool fresh_hit = false;
+    for (const auto& [_, h] : hits)
+        if (h.seq >= cum0 && !held0.count(h.seq)) fresh_hit = true;
+    std::int64_t max_hit_seq = 0;
+    std::vector<std::pair<int, std::int64_t>> new_hits;
+    for (auto& [s, h] : hits) {
+        max_hit_seq = std::max(max_hit_seq, h.seq);
+        if (h.seq >= m_prev) new_hits.emplace_back(s, h.seq);
+        rxb.forget(SoftKey{false, peer(), h.seq, 0});
+        if (h.comp && h.seq >= rx.cum) rx.comp_seqs.insert(h.seq);
+        rx.accept(h.seq, std::move(h.payload), h.comp);
+    }
+    if (!new_hits.empty()) {
+        const auto [s_hit, seq_hit] = new_hits[0];
+        const std::int64_t delta = seq_hit - s_hit;
+        bool aligned = true;
+        for (const auto& [s, seq] : new_hits)
+            if (seq != s + delta) aligned = false;
+        if (aligned) {
+            for (int s_u = s_hit + 1; s_u < rxb.n_cw(); ++s_u) {
+                const std::int64_t seq_u = s_u + delta;
+                if (hits.count(s_u) || seq_u < rx.cum || rx.buf.count(seq_u) || seq_u >= rx.cum + WINDOW) continue;
+                const SoftKey skey{false, peer(), seq_u, 0};
+                const MaskId mp = data_mask(peer(), seq_u, key, false, peer_epoch);
+                std::optional<Bytes> p;
+                bool z_u = false;
+                if (compress) {
+                    std::tie(p, z_u) = rxb.decode_either(s_u, mp, data_mask(peer(), seq_u, key, true, peer_epoch), 0, skey);
+                } else {
+                    p = rxb.decode(s_u, mp, 0, &skey);
+                }
+                if (p) {
+                    rxb.forget(skey);
+                    if (z_u && seq_u >= rx.cum) rx.comp_seqs.insert(seq_u);
+                    rx.accept(seq_u, std::move(*p), z_u);
+                    fresh_hit = true;
+                }
+            }
+            const std::int64_t new_end = static_cast<std::int64_t>(rxb.n_cw() - 1) + delta + 1;
+            peer_next_ = std::max<std::int64_t>(peer_next_.value_or(0), new_end);
+            salvaged_end_ = std::max(salvaged_end_, new_end);
+        }
+    }
+    salvaged_end_ = std::max(salvaged_end_, max_hit_seq + 1);
+    stats["rx_salvaged"] += 1;
+    if (log_enabled(LOG, INFO))
+        log_write(LOG, INFO,
+                  format("RX %s%s | control lost, salvaged %zu slots (cum %lld->%lld, +%zu held)",
+                         burst_desc(rxb.submode(), rxb.n_cw()).c_str(), snr().c_str(), hits.size(),
+                         static_cast<long long>(cum0), static_cast<long long>(rx.cum), rx.buf.size()));
+    if (salvage >= 2 && fresh_hit && !tx.pending() && !abandon_tlv) {
+        refine_measured(rxb);
+        misses = 0;
+        last_rx_data = true;
+        peer_drained = false;
+        salvage_reply_ = true;
+        return true;
+    }
+    return false;
 }
 
 // The burst's control and its dup factor; nullopt if lost or malformed. A control codeword that fails blind
@@ -1364,6 +1469,8 @@ bool Station::take_abandon(RxBurst& rxb, const Ext& ext) {
     const std::int64_t a = unwrap(at(e_ab->second, 0), rx.cum);
     if (a != rx.cum) throw ProtocolError("abandon at " + str(a) + ", cumulative " + str(rx.cum));
     peer_epoch = e_ab->second[1] >> 1;
+    peer_next_ = a;
+    salvaged_end_ = a;
     rx.abandon(a);
     forget_all(rxb);
     return true;
@@ -1401,7 +1508,16 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
             continue;
         }
         const SoftKey skey{false, peer(), *seq, 0};
-        auto p = rxb.decode(i, data_mask(peer(), *seq, key, comp[j], peer_epoch), rv, &skey);
+        std::optional<Bytes> p;
+        if (salvage && i < n_ctl_slots + core.k && !comp[j] && *seq < salvaged_end_) {
+            bool used_comp = false;
+            std::tie(p, used_comp) = rxb.decode_either(
+                i, data_mask(peer(), *seq, key, false, peer_epoch),
+                data_mask(peer(), *seq, key, true, peer_epoch), rv, skey);
+            if (p && used_comp) comp[j] = true;
+        } else {
+            p = rxb.decode(i, data_mask(peer(), *seq, key, comp[j], peer_epoch), rv, &skey);
+        }
         if (i >= n_ctl_slots + core.k) {
             n_new += 1;
             n_ok += p.has_value();

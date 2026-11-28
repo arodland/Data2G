@@ -38,6 +38,8 @@ inline constexpr int LINK_LOST_MISSES = 12;
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
 bool prime_default();
+// link.SALVAGE: DATA2G_CTL_SALVAGE (0 off, 1 silent salvage, 2 + immediate ACK when rx-only; default 2).
+int salvage_default();
 // link.REPEAT: DATA2G_REPEAT=0 turns the combining of repeated controls off (read once).
 bool repeat_default();
 // link.NOD: DATA2G_NOD=0 turns nods off (docs/arq.md §3b; read once).
@@ -290,6 +292,8 @@ public:
     // link.PRIME (DATA2G_PRIME=0 turns it off at construction): a peer control that fails blind is retried
     // primed (docs/arq.md §3a)
     bool prime;
+    // link.SALVAGE (DATA2G_CTL_SALVAGE, default 2): data-slot salvage when control fails (docs/arq.md §3a)
+    int salvage;
     // primed reception: the peer's last control stream per kind (true: with data), its last one with its
     // header (submode, n_cw), the seq its next new codeword takes, whether my latest burst went again
     // identical, whether it carried T_DUPCTL
@@ -357,6 +361,8 @@ public:
     };
     std::map<int, PeerCtl> peer_ctl_core_;
     std::optional<std::int64_t> rx_new_end_;  // the last peer burst's new data end
+    std::int64_t salvaged_end_ = 0;  // 1 + highest seq mapped from a ctl_lost burst (T_COMP may have been missed)
+    bool salvage_reply_ = false;     // next build() answers a salvaged ctl_lost burst (control-only, no nod)
     // The family key of the peer's nod I may hear next (a reply to my latest burst), or nullopt.
     std::optional<nod::FamilyKey> nod_family() const;
     // A detected nod -> the control it stands for, as I know its anchors, or nullopt.
@@ -436,6 +442,7 @@ private:
         bool progress = false;
     };
     bool handle_inner(RxBurst& rx);
+    bool salvage_data(RxBurst& rx);
     std::optional<std::pair<Control, int>> read_control(RxBurst& rx, bool outcome);
     // primed reception (§3a), as link.py's
     struct Field {

@@ -120,6 +120,14 @@ public:
     virtual bool is_nod() const { return false; }
     // Post-decode data-aided MER refinement of the burst's measurements (ModemRx::measure_data; nullopt: unsupported).
     virtual std::optional<Measured> measure_data(const Measured&) { return std::nullopt; }
+    // Mask-free LDPC/GF-LDPC parity convergence for `slot` (ModemRx::converged; false for polar / unsupported).
+    virtual bool converged(int /*slot*/) { return false; }
+    // Decode `slot` at `rv` under `mask_plain`, falling back to `mask_comp` without double-combining soft bits.
+    // -> (payload, true if mask_comp succeeded).
+    virtual std::pair<std::optional<Bytes>, bool> decode_either(int slot, const MaskId& mask_plain,
+                                                                const MaskId& /*mask_comp*/, int rv, const SoftKey& key) {
+        return {decode(slot, mask_plain, rv, &key), false};
+    }
 };
 
 }  // namespace data2g::arq

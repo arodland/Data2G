@@ -437,9 +437,27 @@ Where the rest comes from:
   - A compact CONNECT's four robust tries (fsk16r25-r1/2, 150 a cell), heard by try 4
     alone -> combined: AWGN -15 dB 0% -> 97%, -14 dB 33% -> 100%; MPP -14 dB 5% -> 61%,
     -12 dB 61% -> 98%; MPD -12 dB 50% -> 100%. No wrong frame in 1650 runs.
-- **If any control codeword fails** (blind, pinned, and primed: §3a), **the burst is discarded** and not answered. Without
-  the control word the receiver can't tell our burst from another station's, and
-  guessing the mapping is a divergence risk. The sender times out and repeats.
+- **If any control codeword fails** (blind, pinned, and primed: §3a), **data salvage** runs before
+  discarding the burst (`Station._salvage_data`, `DATA2G_CTL_SALVAGE`, default `2`; `0` off, `1`
+  silent salvage, `2` salvage plus immediate rx-only ACK):
+  - Each data codeword carries its own 24/32-bit CRC masked with `(session_key, direction, comp,
+    abandon_epoch, seq % 128)`. On LDPC / GF-LDPC modes, slots that converged mask-free
+    (`RxBurst.converged`) are checked against `seq` in `[rx.cum, rx.cum + WINDOW)` under the
+    receiver's current `_peer_epoch` (and `comp` in `{False, True}`), so foreign bursts and
+    post-abandon slicings are rejected.
+  - Because resends always precede contiguous `+1` new RV 0 slots, any slot strictly after the first
+    verified new slot (`seq >= m_prev`, `s > s_hit`) is known to be a new RV 0 slot; its RV 0 soft
+    bits are stashed into `rx.store` so later IR resends can combine with them.
+  - When a salvaged `seq` is later ACKed, the sender infers the burst was mapped and may omit
+    `T_COMP` on resends of failed slots from that burst (`comp_known`); for resends below
+    `_salvaged_end` with `comp=False` that fail, `RxBurst.decode_either` retries under `comp=True`
+    without double-combining soft bits.
+  - When an rx-only station (`not tx.pending()` and no pending abandon) salvages a fresh codeword,
+    it replies immediately with a control-only ACK (`_salvage_reply`, no nod) instead of waiting for
+    a timeout and poll; otherwise salvage is silent and the sender times out and repeats as before.
+  - Paired `loss_study.py` (20 seeds × 600 s, PEP ref 5, fresh seeds `6500..6519`, 8 fading cells):
+    `+3.23%` mean (`+3.69%` median), 7/8 cells > `+1%`, 0 losses (`mpp:-14` `+7.15%`, `mpd:-10`
+    `+4.34%`, `mpd:-13` `+3.92%`).
 - **Another station's burst is not the peer's loss.** A burst whose first codeword
   converges (LDPC: a whole codeword, so what was on air) under neither the session key
   nor a session frame's is someone else's: the engine drops it before the gear shifter

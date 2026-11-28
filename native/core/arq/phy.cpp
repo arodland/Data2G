@@ -593,6 +593,23 @@ void ModemRx::forget(const SoftKey& key) {
     if (store_) store_->erase(key);
 }
 
+std::pair<std::optional<Bytes>, bool> ModemRx::decode_either(int slot, const MaskId& mask_plain,
+                                                             const MaskId& mask_comp, int rv, const SoftKey& key) {
+    std::optional<SoftEntry> prev;
+    if (store_) {
+        if (auto it = store_->find(key); it != store_->end()) prev = it->second;
+    }
+    if (auto p = decode(slot, mask_plain, rv, &key)) return {std::move(p), false};
+    if (store_) {
+        if (prev)
+            (*store_)[key] = std::move(*prev);
+        else
+            store_->erase(key);
+        if (auto p = decode(slot, mask_comp, rv, &key)) return {std::move(p), true};
+    }
+    return {std::nullopt, false};
+}
+
 std::optional<Bytes> ModemRx::early_read(int slot, std::uint32_t m, int rv) const {
     if (rv != 0 || !early_.count(slot)) return std::nullopt;
     const auto it = raw_.find(slot);

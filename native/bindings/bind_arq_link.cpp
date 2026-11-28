@@ -162,6 +162,16 @@ public:
         if (r.is_none()) return std::nullopt;
         return measured(r.cast<py::dict>());
     }
+    bool converged(int slot) override {
+        return py::hasattr(obj, "converged") && obj.attr("converged")(slot).cast<bool>();
+    }
+    std::pair<std::optional<Bytes>, bool> decode_either(int slot, const MaskId& mask_plain, const MaskId& mask_comp,
+                                                        int rv, const SoftKey& k) override {
+        if (!py::hasattr(obj, "decode_either")) return RxBurst::decode_either(slot, mask_plain, mask_comp, rv, k);
+        auto t = obj.attr("decode_either")(slot, mask_tuple(mask_plain), mask_tuple(mask_comp), rv, key(&k)).cast<py::tuple>();
+        if (t[0].is_none()) return {std::nullopt, false};
+        return {bytes_of(t[0]), t[1].cast<bool>()};
+    }
 };
 
 class PyRng : public Rng {

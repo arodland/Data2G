@@ -888,3 +888,140 @@ def test_inline_off_sends_slots(monkeypatch):
     a.write(b"73")
     p = a.build()
     assert len(p.slots) == 2 and b.handle(clean(p)) and b.read() == b"73"
+
+
+class SalvageRx:
+    """FakeRx with mask-free parity convergence (`converged`) and lossless
+    `decode_either`, for testing ctl_lost data salvage (#362)."""
+
+    def __init__(self, burst, good, store, stats=None, combine_at=2):
+        self.burst, self.good, self.store = burst, list(good), store
+        self.stats = stats if stats is not None else {"mismatch": 0}
+        self.combine_at = combine_at
+        self.submode, self.n_cw = burst.submode, len(burst.slots)
+        self.n_ctl_slots = sum(s.mask_id[2] >= F.SEQ_MOD for s in burst.slots) if burst.submode in CPM_LIKE else 0
+
+    def converged(self, i):
+        return 0 <= i < self.n_cw and self.good[i]
+
+    def decode(self, i, mask_id, rv, key):
+        s = self.burst.slots[i]
+        if mask_id[2] >= F.SEQ_MOD:  # control: fresh, never combined in FakeRx
+            return s.payload if (mask_id == s.mask_id and self.good[i]) else None
+        if key is None:
+            return s.payload if (self.good[i] and mask_id == s.mask_id and rv == s.rv) else None
+        if mask_id != s.mask_id or rv != s.rv:
+            if rv != s.rv:
+                self.stats["mismatch"] += 1
+            held = self.store.setdefault(key, [])
+            held.append((self.submode, s.payload))
+            return None
+        if self.good[i]:
+            return s.payload
+        held = self.store.setdefault(key, [])
+        if any(h != (self.submode, s.payload) for h in held):
+            self.stats["mismatch"] += 1
+        held.append((self.submode, s.payload))
+        if len(held) >= self.combine_at:
+            return s.payload
+        return None
+
+    def decode_either(self, i, mask_plain, mask_comp, rv, key):
+        prev = list(self.store[key]) if key in self.store else None
+        p = self.decode(i, mask_plain, rv, key)
+        if p is not None:
+            return p, False
+        if prev is None:
+            self.store.pop(key, None)
+        else:
+            self.store[key] = prev
+        p = self.decode(i, mask_comp, rv, key)
+        return (p, True) if p is not None else (None, False)
+
+    def forget(self, key):
+        self.store.pop(key, None)
+
+
+def test_ctl_lost_salvage_and_immediate_ack():
+    """On a ctl_lost burst with converged data slots: an rx-only station
+    salvages the payloads and replies immediately with a control-only ACK;
+    a bidirectional station with pending TX data salvages silently."""
+    a = L.Station(0, Script([("m46", 4)]), master=True)
+    b = L.Station(1, Script([("m46", 4)]))
+    a.write(bytes(range(256)) * 2)
+    d = a.build()
+    a.answered()
+    assert len(d.slots) == 4
+    # Control slot 0 lost, data slots 1..3 converged
+    rx = SalvageRx(d, [False, True, True, True], {})
+    assert b.handle(rx) is True
+    assert b.stats["rx_salvaged"] == 1
+    assert b.rx.cum == 3
+    ack = b.build()
+    assert len(ack.slots) == 1  # control-only immediate ACK
+    assert a.handle(clean(ack)) and a.tx.base == 3
+
+    # Bidirectional: receiver has pending TX data -> salvage silently (handle returns False)
+    a2 = L.Station(0, Script([("m46", 4)]), master=True)
+    b2 = L.Station(1, Script([("m46", 4)]))
+    a2.write(bytes(range(256)) * 2)
+    b2.write(b"reply payload waiting")
+    d2 = a2.build()
+    a2.answered()
+    assert b2.handle(SalvageRx(d2, [False, True, True, True], {})) is False
+    assert b2.stats["rx_salvaged"] == 1 and b2.rx.cum == 3
+
+
+def test_ctl_lost_salvage_new_tail_stash_and_comp_fallback():
+    """When ctl fails and slot 1 (new seq 0) converges while slot 2 (new seq 1,
+    compressed) fails: seq 1's RV 0 soft bits are stashed once; after the ACK
+    for seq 0 lets the sender omit T_COMP on seq 1's RV 1 resend, decode_either
+    combines RV 0 + RV 1 under comp=True and delivers the exact stream."""
+    a = L.Station(0, Script([("m46", 3)]), master=True)
+    b = L.Station(1, Script([("m46", 3)]))
+    data = text(random.Random(7), 200)
+    a.write(data)
+    d = a.build()
+    a.answered()
+    assert len(d.slots) == 3 and a.tx.cws[1].comp  # seq 1 is compressed
+    store, stats = {}, {"mismatch": 0}
+    # Slot 0 (ctl) lost, slot 1 (seq 0) ok, slot 2 (seq 1) fails -> stashed at RV 0
+    assert b.handle(SalvageRx(d, [False, True, False], store, stats)) is True
+    assert b.rx.cum == 1 and len(store[(0, 1)]) == 1
+    b.build()  # immediate ACK lost; sender polls so b's next ACK acts on bn >= 1 and vouches for d (bn 0)
+    b.answered()
+    q = a.build(fresh=False)
+    a.answered()
+    assert b.handle(clean(q))
+    ack2 = b.build()
+    b.answered()
+    assert a.handle(clean(ack2))
+    assert a.tx.cws[1].comp_known  # sender infers b mapped the burst -> omits T_COMP on resend
+    d2 = a.build()
+    a.answered()
+    # Slot 0 (ctl) ok, slot 1 (seq 1 resend at RV 1) fails alone -> combines with stashed RV 0 under comp=True
+    assert b.handle(SalvageRx(d2, [True, False] + [True] * (len(d2.slots) - 2), store, stats, combine_at=2)) is True
+    assert stats["mismatch"] == 0
+    assert b.rx.cum >= 2 and data.startswith(b.read())
+
+
+def test_ctl_lost_salvage_rejects_post_abandon_epoch():
+    """A ctl_lost burst from a newer abandon epoch must not be salvaged under
+    the old epoch."""
+    a = L.Station(0, Script([("m22", 4), ("m46", 4)]), master=True)
+    b = L.Station(1, Script([("m22", 4), ("m46", 4)]))
+    a.write(bytes(range(256)) * 2)
+    d1 = a.build()
+    a.answered()
+    # Deliver only slot 0 (ctl) of d1 so seq 0..2 fail and remain outstanding in m22
+    assert b.handle(clean(d1, lost=(1, 2, 3)))
+    r1 = b.build()
+    b.answered()
+    assert a.handle(clean(r1))
+    # Mode switches m22 -> m46: a abandons (epoch 0 -> 1) and sends new slicing
+    d2 = a.build()
+    a.answered()
+    assert F.T_ABANDON in F.Control.unpack([d2.slots[0].payload]).ext
+    # Control of d2 is lost: none of d2's epoch-1 data slots may be salvaged under epoch 0
+    assert b.handle(SalvageRx(d2, [False] + [True] * (len(d2.slots) - 1), {})) is False
+    assert b.stats["rx_salvaged"] == 0 and b.rx.cum == 0 and not b.rx.buf

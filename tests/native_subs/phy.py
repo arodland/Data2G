@@ -45,6 +45,9 @@ def substitutions(native):
         def decode(self, slot, mask_id, rv, key):
             return self._n.decode(slot, mask_id, rv, key)
 
+        def decode_either(self, slot, mask_plain, mask_comp, rv, key):
+            return self._n.decode_either(slot, mask_plain, mask_comp, rv, key)
+
         def advance(self, r, budget_s=None):
             self.r = r
             return self._n.advance(r, budget_s)

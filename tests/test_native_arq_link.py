@@ -252,6 +252,63 @@ def test_compression_off_matches(native, pure, monkeypatch):
     assert lockstep(5, cc, cc, 0.1, 0.1, 2000, 500, "text") == want
 
 
+@pytest.mark.parametrize("seed", range(10))
+def test_ctl_lost_salvage_matches_native(native, pure, caplog, seed):
+    """Python and C++ stations behave identically (bursts, stats and logs)
+    under ctl_lost data salvage, new-tail RV 0 soft stash, comp_known resend
+    fallback, and immediate rx-only ACKs (#362)."""
+    from test_arq import SalvageRx
+
+    caplog.set_level(logging.INFO)
+    py, cc = L.Station, native.arq.Station
+
+    def run_salvage(cls_a, cls_b):
+        rng = random.Random(2000 + seed)
+        data_a = payload(rng, 2500, "mixed")
+        data_b = b"" if seed % 2 == 0 else payload(rng, 800, "mixed")
+        modes = ("m4", "m46", "c60", "c40") if seed % 2 else ("m22", "m46")
+        a = cls_a(0, RandomPolicy(random.Random(2100 + seed), 0.25, modes, 12), master=True)
+        b = cls_b(1, RandomPolicy(random.Random(2200 + seed), 0.25, modes, 12))
+        a.write(data_a)
+        if data_b:
+            b.write(data_b)
+        stores, stats, trace = {0: {}, 1: {}}, {"mismatch": 0}, []
+        got_a, got_b = bytearray(), bytearray()
+        burst, sender = a.build(), a
+        for _ in range(3000):
+            trace.append((sender.direction, _burst(burst)))
+            receiver = b if sender is a else a
+            ok = False
+            if rng.random() >= 0.05:
+                good = [rng.random() >= 0.25 for _ in burst.slots]
+                if len(burst.slots) >= 2 and rng.random() < 0.4:
+                    good[0] = False  # extra control loss to exercise salvage
+                ok = receiver.handle(SalvageRx(burst, good, stores[receiver.direction], stats, combine_at=2))
+            got_a += a.read()
+            got_b += b.read()
+            assert bytes(got_b) == data_a[:len(got_b)] and bytes(got_a) == data_b[:len(got_a)]
+            if a.state == L.FAILED or b.state == L.FAILED:
+                return trace, ("failed", a.fail_reason or b.fail_reason, stats["mismatch"])
+            if got_a == data_b and got_b == data_a and not a.tx.pending() and not b.tx.pending():
+                return trace, ("done", dict(a.stats), dict(b.stats), stats["mismatch"])
+            if ok:
+                burst, sender = receiver.build(), receiver
+                receiver.answered()
+            else:
+                burst, sender = a.on_timeout(), a
+                if burst is None:
+                    return trace, ("failed", a.fail_reason, stats["mismatch"])
+        return trace, ("stuck",)
+
+    want, want_log = logged(caplog, run_salvage, py, py)
+    assert want[1][0] in ("done", "failed") and want[1][-1] == 0
+    assert want[1][1].get("rx_salvaged", 0) + want[1][2].get("rx_salvaged", 0) > 0 if want[1][0] == "done" else True
+    got, got_log = logged(caplog, run_salvage, cc, cc)
+    assert got == want and got_log == want_log
+    for pair in ((py, cc), (cc, py)):
+        assert run_salvage(*pair) == want
+
+
 # --- two sessions on the simulated clock ----------------------------------------------------
 
 def recording(cls, trace, tag, dup_seed, p_dup):

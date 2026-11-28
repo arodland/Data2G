@@ -202,6 +202,19 @@ public:
         py::gil_scoped_release nogil;
         return rx_->converged(slot, pair);
     }
+    py::tuple decode_either(int slot, const py::handle& mask_plain, const py::handle& mask_comp, int rv,
+                            const py::object& key) {
+        py::object prev = store_.attr("get")(key);
+        py::object p = decode(slot, mask_plain, rv, key);
+        if (!p.is_none()) return py::make_tuple(p, false);
+        if (prev.is_none())
+            store_.attr("pop")(key, py::none());
+        else
+            store_[key] = prev;
+        p = decode(slot, mask_comp, rv, key);
+        if (!p.is_none()) return py::make_tuple(p, true);
+        return py::make_tuple(py::none(), false);
+    }
     // phy.ModemRx.decode_repeat over the Python store
     py::object decode_repeat(int slot, const py::handle& mask, const py::object& key) {
         py::object held = store_.attr("get")(key);
@@ -381,6 +394,7 @@ void bind_arq_phy(py::module_& m) {
         .def(py::init<py::dict, py::object, std::optional<double>, bool, py::object>(), py::arg("r"), py::arg("store"),
              py::arg("dd_budget") = py::none(), py::arg("dd") = dd_default(), py::arg("clock") = py::none())
         .def("decode", &PyModemRx::decode)
+        .def("decode_either", &PyModemRx::decode_either)
         .def("advance", &PyModemRx::advance, py::arg("r"), py::arg("budget_s") = py::none())
         .def("raw", &PyModemRx::raw)
         .def("raw_pair", &PyModemRx::raw_pair)

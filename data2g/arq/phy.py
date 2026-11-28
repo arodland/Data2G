@@ -566,6 +566,21 @@ class ModemRx:
         self.store[key] = (buf, top, self.submode, (slot, rv, mask_id))
         return None
 
+    def decode_either(self, slot: int, mask_plain: tuple, mask_comp: tuple, rv: int,
+                      key: tuple) -> tuple[bytes | None, bool]:
+        """Decode `slot` at `rv` under `mask_plain`, falling back to `mask_comp`
+        without double-combining soft bits in `self.store`. -> (payload, used_comp)."""
+        prev = self.store.get(key)
+        p = self.decode(slot, mask_plain, rv, key)
+        if p is not None:
+            return p, False
+        if prev is None:
+            self.store.pop(key, None)
+        else:
+            self.store[key] = prev
+        p = self.decode(slot, mask_comp, rv, key)
+        return (p, True) if p is not None else (None, False)
+
     def raw(self, slot: int) -> list[bytes]:
         """`slot`'s mask-free decode as payload bytes, CRC unchecked: polar's
         list best first, LDPC's one candidate if it converged. A broadcast

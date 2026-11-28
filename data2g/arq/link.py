@@ -64,6 +64,8 @@ COMPRESS = os.environ.get("DATA2G_COMPRESS", "1") != "0"
 INLINE = os.environ.get("DATA2G_INLINE", "1") != "0"
 # DATA2G_PRIME=0: no primed retry of a peer control that failed blind (docs/arq.md §3a; for A/B runs)
 PRIME = os.environ.get("DATA2G_PRIME", "1") != "0"
+# DATA2G_CTL_SALVAGE: 0 off, 1 silent data-slot salvage on ctl_lost, 2 + immediate ACK when rx-only (docs/arq.md §3a)
+SALVAGE = int(os.environ.get("DATA2G_CTL_SALVAGE", "2"))
 # DATA2G_REPEAT=0: a failed control is not combined with the failed ones before it (docs/arq.md §3a; for A/B runs)
 REPEAT = os.environ.get("DATA2G_REPEAT", "1") != "0"
 # DATA2G_NOD (default 1; 0 turns it off, for A/B): a CPM control-only reply
@@ -592,6 +594,8 @@ class Station:
     _sent_ctl: dict = field(default_factory=dict)  # my bn -> (cum, recommend, acted-on seq, new end | None, _kept)
     _peer_ctl_core: dict = field(default_factory=dict)  # seq -> (cum 7-bit, recommend, my bn acted on, new end | None)
     _rx_new_end: int | None = None  # the last peer burst's new data end (1 + its highest new seq)
+    _salvaged_end: int = 0  # 1 + highest seq mapped from a ctl_lost burst (T_COMP may have been missed)
+    _salvage_reply: bool = False  # next build() answers a salvaged ctl_lost burst (control-only, no nod)
 
     @property
     def peer(self) -> int:
@@ -631,9 +635,12 @@ class Station:
             self._repeated = True
             return self.last_sent
         bn = self._latest + 1  # this burst's absolute number; wire seq bn mod 8
+        salvage_reply, self._salvage_reply = self._salvage_reply, False
+        if salvage_reply:
+            nod = False
         escalation = self._sent_esc = self._escalation()
         submode, max_cw = self.policy.choose(self, escalation)
-        if not self._data_allowed(fresh, submode):
+        if salvage_reply or not self._data_allowed(fresh, submode):
             max_cw = 0  # control only
         missing = self.tx.missing() if fresh else []
         self.tx_end = self._tx_end(submode, max_cw, missing, fresh)
@@ -1156,7 +1163,7 @@ class Station:
     def _handle(self, rx: RxBurst) -> bool:
         got = self._read_control(rx)
         if not got:
-            return False
+            return self._salvage_data(rx) if SALVAGE else False
         ctl, dup = got
         core, ext = ctl.core, ctl.ext
         reply_was = self.peer_reply_recommend
@@ -1199,6 +1206,82 @@ class Station:
         self._answered = False
         self._watchdog(progress or delivered)
         return True
+
+    def _salvage_data(self, rx: RxBurst) -> bool:
+        """Control failed: check mask-free converged data slots against the
+        receive window under self._peer_epoch (data_mask folds key, direction,
+        comp, epoch and seq into the CRC). Deduces contiguous new RV 0 slots
+        from any hit >= m_prev so their RV 0 soft bits enter rx.store."""
+        if rx.n_cw < 2 or not hasattr(rx, "converged"):
+            return False
+        start_slot = getattr(rx, "n_ctl_slots", 0) or 1
+        cum0 = self.rx.cum
+        held0 = set(self.rx.buf)
+        m_prev = max([cum0, self._peer_next or 0, *(s + 1 for s in held0)])
+        hits: dict[int, tuple[int, bool, bytes]] = {}
+        for s in range(start_slot, rx.n_cw):
+            if not rx.converged(s):
+                continue
+            found = None
+            for seq in range(cum0, cum0 + WINDOW):
+                for z in (False, True):
+                    p = rx.decode(s, data_mask(self.peer, seq, self.key, z, self._peer_epoch), 0, None)
+                    if p is not None:
+                        found = (seq, z, p)
+                        break
+                if found is not None:
+                    break
+            if found is not None:
+                hits[s] = found
+        if not hits:
+            return False
+        fresh_hit = any(seq >= cum0 and seq not in held0 for seq, _, _ in hits.values())
+        delivered = False
+        for s, (seq, z, p) in sorted(hits.items()):
+            rx.forget((self.peer, seq))
+            if z and seq >= self.rx.cum:
+                self.rx.comp_seqs.add(seq)
+            delivered |= self.rx.accept(seq, p, z)
+        new_hits = [(s, h[0]) for s, h in sorted(hits.items()) if h[0] >= m_prev]
+        has_either = hasattr(rx, "decode_either")
+        if new_hits:
+            s_hit, seq_hit = new_hits[0]
+            delta = seq_hit - s_hit
+            # Resends precede new slots (and a resend of m_prev - 1 at rv > 0 can
+            # sit right before new m_prev), whereas every slot after s_hit is new (rv 0).
+            if all(seq == s + delta for s, seq in new_hits):
+                for s_u in range(s_hit + 1, rx.n_cw):
+                    seq_u = s_u + delta
+                    if s_u in hits or seq_u < self.rx.cum or seq_u in self.rx.buf or seq_u >= self.rx.cum + WINDOW:
+                        continue
+                    key = (self.peer, seq_u)
+                    mp = data_mask(self.peer, seq_u, self.key, False, self._peer_epoch)
+                    if COMPRESS and has_either:
+                        p, z_u = rx.decode_either(s_u, mp, data_mask(self.peer, seq_u, self.key, True, self._peer_epoch),
+                                                  0, key)
+                    else:
+                        p, z_u = rx.decode(s_u, mp, 0, key), False
+                    if p is not None:
+                        rx.forget(key)
+                        if z_u and seq_u >= self.rx.cum:
+                            self.rx.comp_seqs.add(seq_u)
+                        delivered |= self.rx.accept(seq_u, p, z_u)
+                        fresh_hit = True
+                new_end = (rx.n_cw - 1) + delta + 1
+                self._peer_next = max(self._peer_next or 0, new_end)
+                self._salvaged_end = max(self._salvaged_end, new_end)
+        self._salvaged_end = max(self._salvaged_end, max(h[0] for h in hits.values()) + 1)
+        self.stats["rx_salvaged"] += 1
+        log.info("RX %s%s | control lost, salvaged %d slots (cum %d->%d, +%d held)",
+                 self._burst_desc(rx.submode, rx.n_cw), self._snr(), len(hits), cum0, self.rx.cum, len(self.rx.buf))
+        if SALVAGE >= 2 and fresh_hit and not self.tx.pending() and self._abandon is None:
+            self._refine_measured(rx)
+            self.misses = 0
+            self.last_rx_data = True
+            self.peer_drained = False
+            self._salvage_reply = True
+            return True
+        return False
 
     def _read_control(self, rx: RxBurst) -> tuple[F.Control, int] | None:
         """The burst's control and its dup factor; falsy if lost or malformed.
@@ -1566,6 +1649,8 @@ class Station:
         if a != self.rx.cum:
             raise ProtocolError(f"abandon at {a}, cumulative {self.rx.cum}")  # only sent against an exact ACK
         self._peer_epoch = ext[F.T_ABANDON][1] >> 1
+        self._peer_next = a
+        self._salvaged_end = a
         self.rx.abandon(a)
         # every seq from a on is re-sliced: soft bits held for any of
         # them (the failed ones, not only the decoded ones) belong to
@@ -1592,7 +1677,15 @@ class Station:
                 n_old += 1
                 continue
             key = (self.peer, seq)
-            p = rx.decode(i, data_mask(self.peer, seq, self.key, comp[i - n_ctl_slots], self._peer_epoch), rv, key)
+            if (SALVAGE and i < n_ctl_slots + core.k and not comp[i - n_ctl_slots]
+                    and seq < self._salvaged_end and hasattr(rx, "decode_either")):
+                p, used_comp = rx.decode_either(
+                    i, data_mask(self.peer, seq, self.key, False, self._peer_epoch),
+                    data_mask(self.peer, seq, self.key, True, self._peer_epoch), rv, key)
+                if p is not None and used_comp:
+                    comp[i - n_ctl_slots] = True
+            else:
+                p = rx.decode(i, data_mask(self.peer, seq, self.key, comp[i - n_ctl_slots], self._peer_epoch), rv, key)
             if i >= n_ctl_slots + core.k:
                 n_new += 1
                 n_ok += p is not None
