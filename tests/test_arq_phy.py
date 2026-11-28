@@ -227,7 +227,7 @@ def test_a_repeated_control_combines_but_never_reads_as_the_burst_before():
 
 def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     """A CONNECT's robust tries are one compact codeword (same nonce). Two
-    at -14.5 dB, neither decoding alone or primed, connect a listener once
+    at -15.0 dB, neither decoding alone or primed, connect a listener once
     the second is combined with the first (Session._repeated_frame).
     Square-law control soft bits (cpm.COH_CTL off): coherent ones decode a try alone."""
     import random
@@ -245,8 +245,8 @@ def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     body = F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10, F.DEFAULT_CAPS, 0).pack()
     x = PHY.tx_audio(B.TxBurst(mode, [B.Slot(B.COMPACT_CONNECT, 0, body + bytes(GearShifter().ctl_payload_bytes(mode) - len(body)))], 0))
     heard = []
-    for seed in (2, 3):
-        y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -14.5, seed=seed,
+    for seed in (2, 4):
+        y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -15.0, seed=seed,
                            s_power=hfchannel.active_power(x))
         heard.append(cpm.receive(y, cpm.find(cpm.GRIDS["c16r25"], y)))
     assert all(PHY.ModemRx(r, {}).decode(0, B.COMPACT_CONNECT, 0, None) is None for r in heard)

@@ -288,13 +288,13 @@ def test_decode_known_rescues_a_cpm_control():
     """An ACK control (8 B) that neither the plain decode nor the padding
     cuts recover: the whole control known but the cumulative ACK (7 bits)
     does, and only with the right template. Erasures (not noise) make the
-    premise hold on every platform: 30% of the soft bits kept, seed 5."""
+    premise hold on every platform: 20% of the soft bits kept, seed 5."""
     spec = cpm.CTL["c16r25"]
     mid = ctl_mask(1, 0, 0x5A5A)
     m = PHY.mask_value(mid)
     ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=77, recommend=50, size_hint=2),
                     {F.T_REPLY: bytes([50]), F.T_DUPCTL: b""}).pack(codes.payload_bytes(spec))[0]
-    rx = _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5))
+    rx = _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5))
     assert rx.decode(0, mid, 0, None) is None
     known = bytearray(b"\xff" * len(ctl))
     known[2] &= 0x80  # cum: core bits 21..15
@@ -302,9 +302,9 @@ def test_decode_known_rescues_a_cpm_control():
     assert rx.decode_known(0, mid, ctl, bytes(known)) == ctl
     wrong = bytearray(ctl)
     wrong[6] ^= 1  # another T_REPLY value, pinned
-    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, mid, bytes(wrong), bytes(known)) is None
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5)).decode_known(0, mid, bytes(wrong), bytes(known)) is None
     other = ctl_mask(1, 0, 0x1234)  # another session's mask: its CRC fails
-    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, other, ctl, bytes(known)) is None
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5)).decode_known(0, other, ctl, bytes(known)) is None
 
 
 def test_decode_known_on_noise_and_erasures():

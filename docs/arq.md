@@ -399,12 +399,16 @@ Where the rest comes from:
   `DATA2G_PIN_EST=0` (`phy.PIN_EST`) pins at fixed cuts instead, 16 then 32 B
   (`phy.PIN_CUTS`, `codes.pin`), for A/B runs.
   - Polar sends no info bits: known ones are frozen instead (`codes.decode_raw_pinned`), and
-    a polar codeword's payload enters its info set reversed (`codes.polar_order`, a wire
-    format choice) so that a control's padding sits on the weakest positions. Cuts 12 and
-    16 B (`phy.POLAR_PIN_CUTS`: CPM's control carries 9-16 B of its 20), counted along the
-    control stream, so a control spanning two polar codewords has its second one pinned.
-    Code level (`ctl_prior_study.py --polar`, BPSK): CPM control 1.0 dB, polar-k192 1.5 dB,
-    polar-k96's last codeword 3-4 dB; the ACK modes (4 B codewords) none.
+    a polar codeword's info bits enter its info set ordered by Gaussian-approximation synthetic-
+    channel reliability (`codes.polar_order`, a wire format choice): the CRC sits on the most
+    reliable channels, payload bytes follow in decreasing reliability, and any fill sits on the
+    weakest. Freezing a control's zero tail at any byte count `K` therefore reduces the code to
+    the exact GA-optimal shorter polar code for `8K + crc_bits` bits. Cuts 6, 8, 12, and 16 B
+    (`phy.POLAR_PIN_CUTS`: CPM's control carries 5-16 B of its 20), counted along the control
+    stream, so a control spanning two polar codewords has its second one pinned. End-to-end on
+    CPM (`fsk16r25`, `fsk8r50`, `fsk8w50`, `fsk32r62`, 200 paired trials): 6-8 B blind controls
+    gain 1.1-3.1 dB on fading (and 0.4-1.8 dB at 12 B), primed controls gain a further 0.2-1.2 dB,
+    and full 20 B payloads are unchanged.
   - Measured at code level (`scripts/ctl_prior_study.py`, AWGN through each mode's
     constellation, a 12 B control): the 10% failure point moves 1.0-6.0 dB lower, 4.0 dB
     the median over the 36 LDPC modes. Least in n4/n10 r1/5 (22-23 B payloads, 1 dB),

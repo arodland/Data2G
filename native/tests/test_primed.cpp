@@ -110,8 +110,8 @@ int main() {
         Bytes known(p.size(), 0xFF);
         known[1] &= 0xC0;  // the cumulative ACK, core bits 21..15
         known[2] &= 0x7F;
-        const auto soft = erased(codes::encode(ctl, p, 0, mask_value(mid), 0), 30, 11);
-        check::is_true(!cpm_rx(soft).decode(0, mid, 0, nullptr), "premise: no blind decode (30% kept)");
+        const auto soft = erased(codes::encode(ctl, p, 0, mask_value(mid), 0), 20, 11);
+        check::is_true(!cpm_rx(soft).decode(0, mid, 0, nullptr), "premise: no blind decode (20% kept)");
         check::is_true(cpm_rx(soft).decode_known(0, mid, p, known, false) == p, "primed: the control");
         Bytes wrong = p;
         wrong[6] ^= 1;  // another T_REPLY value, pinned

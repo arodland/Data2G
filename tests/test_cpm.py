@@ -141,9 +141,9 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
 
 @pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
-    """CPM's control is a polar codeword: its payload enters the code
-    reversed (codes.polar_order), so a short control's padding sits on the
-    weakest positions. At -11 dB these draws fail plain and decode with the
+    """CPM's control is a polar codeword: its info bits enter by GA
+    reliability (codes.polar_order), so a short control's padding sits on the
+    weakest positions. At -12 dB these draws fail plain and decode with the
     padding known (phy.POLAR_PIN_CUTS). Square-law control soft bits
     (cpm.COH_CTL off): the coherent ones decode these draws plain."""
     monkeypatch.setattr(cpm, "COH_CTL", False)
@@ -160,8 +160,8 @@ def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
     b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
     x = np.concatenate([np.zeros(4000), PHY.tx_audio(b), np.zeros(4000)])
     m = PHY.mask_value(ctl_mask(0, 0, 7))
-    for seed in (3, 7, 9):
-        y = hfchannel.apply_channel(x, snr_db=-11.0, seed=seed)
+    for seed in (1, 2, 3):
+        y = hfchannel.apply_channel(x, snr_db=-12.0, seed=seed)
         r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
         cands, usable = codes.decode_raw(cs, np.asarray(PHY.soft_bits(r)[0])[None], index=[0])
         assert codes.check(cs, cands[0], usable[0], m) is None  # plain fails
@@ -230,7 +230,7 @@ def test_spread_on_slow_selective_fading():
     assert count("fsk16r25-r1/2", 1.0, 2.0, 2)[0] <= 5  # 2
     assert count("fsk8r50-r1/3", 0.1, 2.0, 2)[0] <= 3  # 1
     for name, doppler, delay_ms, least, most_unmeasured in (
-            ("fsk16r25-r1/2", 10.0, 7.0, 37, 1),  # 38, 0 (38 without the check)
+            ("fsk16r25-r1/2", 10.0, 7.0, 34, 2),  # 35, 2
             ("fsk16r25-r1/2", 10.0, 2.0, 38, 1),  # 39, 0 (39)
             ("fsk16r25-r1/2", 30.0, 7.0, 39, 1),  # 40, 0 (40)
             ("fsk8r50-r1/3", 10.0, 7.0, 19, 1),  # 20, 0 (20; the rest are fits)

@@ -59,7 +59,7 @@ inline constexpr double DD_BUDGET_S = 1.0;
 bool pin_est_default();
 inline constexpr int EST = 0;
 inline constexpr int PIN_CUTS[] = {16, 32};
-inline constexpr int POLAR_PIN_CUTS[] = {12, 16};
+inline constexpr int POLAR_PIN_CUTS[] = {6, 8, 12, 16};
 // A primed control (docs/arq.md §3a) must also score this many nats over random bits (codes::score).
 inline constexpr double PRIMED_SCORE = 10.0;
 // ... and passes the CRC on one of the polar list's first PRIMED_PATHS paths (phy.PRIMED_PATHS).

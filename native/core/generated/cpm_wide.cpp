@@ -27,8 +27,8 @@ constexpr CpmSpec ctl_w[] = {
     {"fsk16w125-ctl", "c16w125", "polar", -1, 184, 360, 90, perm_w_2, {}},
 };
 constexpr ModePeak peaks_w[] = {
-    {"fsk16w125-r1/3", {0.406, 0.406, 0.406}},
-    {"fsk16w125-r1/2", {0.41, 0.41, 0.41}}};
+    {"fsk16w125-r1/3", {0.408, 0.408, 0.408}},
+    {"fsk16w125-r1/2", {0.412, 0.412, 0.412}}};
 
 }  // namespace
 
