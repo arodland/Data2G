@@ -101,9 +101,9 @@ struct Submode {
     std::span<const double> ace;
 };
 
-inline constexpr std::array<double, 1> ACE_28 = {1.0};
-inline constexpr std::array<double, 1> ACE_29 = {1.0};
-inline constexpr std::array<double, 1> ACE_31 = {1.0};
+inline constexpr std::array<double, 2> ACE_28 = {1.0, 1.0};
+inline constexpr std::array<double, 2> ACE_29 = {1.0, 1.0};
+inline constexpr std::array<double, 2> ACE_31 = {1.0, 1.0};
 
 inline constexpr std::array<Submode, 65> SUBMODES = {{
     {0, "ack-4f", "polar", "gray-qam4", "w", "w", 4, 56, 2, 960, 24, 4, 0.0, {}},

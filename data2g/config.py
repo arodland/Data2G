@@ -528,10 +528,13 @@ SUBMODES = dict([
     _m(3, "w48-qpsk-r2/3", "ldpc", "gray-qam4", 4, 1280, band="w48", headroom=0),  # 2167 bps
     _m(4, "w48-16qam-r1/3", "ldpc", "gray-qam16", 4, 1280, band="w48", headroom=1),  # 2167 bps
     _m(5, "w48-qpsk-r3/4", "ldpc", "gray-qam4", 4, 1440, band="w48", headroom=0),  # 2444 bps
-    _m(6, "w48-16qam-r1/2", "ldpc", "gray-qam16", 4, 1920, band="w48", headroom=1, ace=(1.0,)),  # 3278 bps
-    _m(7, "w48-16qam-r2/3", "ldpc", "gray-qam16", 4, 2560, band="w48", headroom=1, ace=(1.0,)),  # 4389 bps
+    # Two closing clip passes on HF scattered-pilot ACE modes: pilot restore
+    # (SC_RESTORE_ACE) regrows envelope peaks after ACE projection, and a second
+    # closing pass recovers 0.3-0.4 dB of PEP-fair SNR across awgn/mpg/mpp/mpd.
+    _m(6, "w48-16qam-r1/2", "ldpc", "gray-qam16", 4, 1920, band="w48", headroom=1, ace=(1.0, 1.0)),  # 3278 bps
+    _m(7, "w48-16qam-r2/3", "ldpc", "gray-qam16", 4, 2560, band="w48", headroom=1, ace=(1.0, 1.0)),  # 4389 bps
     _m(8, "w48-64l-r1/2", "ldpc", "c64-w48-r12", 2, 1440, band="w48", headroom=4),  # 4889 bps
-    _m(9, "w48-16qam-r3/4", "ldpc", "gray-qam16", 4, 2880, band="w48", headroom=3, ace=(1.0,)),  # 4944 bps
+    _m(9, "w48-16qam-r3/4", "ldpc", "gray-qam16", 4, 2880, band="w48", headroom=3, ace=(1.0, 1.0)),  # 4944 bps
     _m(10, "w48-16qam-r5/6", "ldpc", "gray-qam16", 4, 3200, band="w48", headroom=5),  # 5500 bps
     _m(11, "w48-64l-r7/12", "ldpc", "c64-w48-r712", 2, 1680, band="w48", headroom=5),  # 5722 bps
     _m(12, "w48-64l-r2/3", "ldpc", "c64-w48-r23", 2, 1920, band="w48", headroom=6),  # 6556 bps
