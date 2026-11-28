@@ -29,7 +29,8 @@ constexpr int RAKE_SHIFT_MS = 3;
 constexpr int RAKE_MAX_T = static_cast<int>(FS) / 50;
 constexpr double RAKE_SNR_GATE = 0.35;
 constexpr double RAKE_COMB_WEIGHT = 0.5;
-constexpr double RAKE_FINGER_RATIO = 1.08;
+constexpr int RAKE_MIN_CAL_ROWS = 4;
+constexpr double RAKE_TIE_EPS = 1e-9;
 
 bool env_flag_on(const char* name, bool def_val = true) {
     const char* v = std::getenv(name);
@@ -1859,10 +1860,12 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
         for (int k = 0; k < g.m; ++k) P[i][k] /= s;
     }
     const auto h = header_symbols(g, header_value(r.spec->index, n_data, r.dup));
+    std::vector<bool> cal(static_cast<std::size_t>(b - a), false);
     const auto known = [&](int row, int tone) {
         if (row < a || row >= b) return;
         std::fill(P[row - a], P[row - a] + g.m, 0.0);
         P[row - a][tone] = 1.0;
+        cal[row - a] = true;
     };
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i) known(L.sync_rows[i], L.sync_tones[i]);
     for (const auto& hr : L.hdr_rows)
@@ -1878,6 +1881,7 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
             for (int k = 0; k < g.m; ++k) q[k] = std::exp(lp[k] - mx);
             const double tot = np_sum(q);
             for (int k = 0; k < g.m; ++k) P[rr[i] - a][gr[k]] = q[k] / tot;  // value k on tone gray(k)
+            cal[rr[i] - a] = true;
         }
     }
     const Mat<double> M = coh_metric(Z, P, COH_W, noise_n0(E));
@@ -1889,6 +1893,7 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
         double best_snr = 0.0;
         Mat<cdouble> best_U, best_Zf;
         double best_n0u = 0.0;
+        std::vector<double> rbuf(m_u);
         for (int sgn : {-1, 1}) {
             const int dt = sgn * r.finger_dt;
             const Mat<cdouble>& Zsrc = sgn < 0 ? r.Z_early : r.Z_late;
@@ -1904,9 +1909,11 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
                 for (std::size_t k = 0; k < m_u; ++k) U[i][k] = Zf[i][k] * rot[k] - rho * Z[i][k];
             const Mat<double> Eu = power_of(U);
             const double n0_u = noise_n0(Eu);
-            std::vector<double> rsum(n_win, 0.0);
-            for (std::size_t i = 0; i < n_win; ++i)
-                for (std::size_t k = 0; k < m_u; ++k) rsum[i] += P[i][k] * Eu[i][k];
+            std::vector<double> rsum(n_win);
+            for (std::size_t i = 0; i < n_win; ++i) {
+                for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = P[i][k] * Eu[i][k];
+                rsum[i] = np_sum(rbuf);
+            }
             const double snr_u = (np_mean(rsum) - n0_u) / std::max(n0_u, 1e-30);
             if (snr_u > best_snr) {
                 best_snr = snr_u;
@@ -1918,26 +1925,50 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
         if (best_snr > RAKE_SNR_GATE && best_U.rows == n_win) {
             const Mat<double> Mu_all = coh_metric(best_U, P, COH_W, best_n0u);
             const Mat<double> Mf_all = coh_metric(best_Zf, P, COH_W, noise_n0(power_of(best_Zf)));
-            Mat<double> Mf(sr.size(), m_u), Mcomb(sr.size(), m_u);
-            for (std::size_t i = 0; i < sr.size(); ++i) {
-                const int ri = sr[i] - a;
-                for (std::size_t k = 0; k < m_u; ++k) {
-                    Mf[i][k] = Mf_all[ri][k];
-                    Mcomb[i][k] = out[i][k] + RAKE_COMB_WEIGHT * Mu_all[ri][k];
+            Mat<double> Mc_all(n_win, m_u);
+            for (std::size_t i = 0; i < n_win; ++i)
+                for (std::size_t k = 0; k < m_u; ++k) Mc_all[i][k] = M[i][k] + RAKE_COMB_WEIGHT * Mu_all[i][k];
+            std::vector<std::size_t> cal_idx;
+            for (std::size_t i = 0; i < n_win; ++i)
+                if (cal[i]) cal_idx.push_back(i);
+            const bool use_cal = static_cast<int>(cal_idx.size()) >= RAKE_MIN_CAL_ROWS;
+            const auto row_lse = [&](const double* row) {
+                double acc = row[0];
+                for (std::size_t k = 1; k < m_u; ++k) acc = logaddexp(acc, row[k]);
+                return acc;
+            };
+            Mat<double> W_cal(use_cal ? cal_idx.size() : n_win, m_u);
+            if (use_cal) {
+                for (std::size_t j = 0; j < cal_idx.size(); ++j) std::copy_n(P[cal_idx[j]], m_u, W_cal[j]);
+            } else {
+                for (std::size_t i = 0; i < n_win; ++i) {
+                    const double lse0 = row_lse(M[i]), lsef = row_lse(Mf_all[i]);
+                    for (std::size_t k = 0; k < m_u; ++k)
+                        W_cal[i][k] = 0.5 * (std::exp(M[i][k] - lse0) + std::exp(Mf_all[i][k] - lsef));
                 }
             }
-            const auto row_peak = [&](const Mat<double>& Mmat) {
-                std::vector<double> pk(Mmat.rows);
-                for (std::size_t i = 0; i < Mmat.rows; ++i) {
-                    const double mx = *std::max_element(Mmat[i], Mmat[i] + m_u);
-                    const double mn = np_sum(Mmat[i], m_u) / static_cast<double>(m_u);
-                    pk[i] = mx - mn;
+            const auto log_post = [&](const Mat<double>& Mmat) {
+                const std::size_t nr = W_cal.rows;
+                std::vector<double> rsum(nr);
+                for (std::size_t j = 0; j < nr; ++j) {
+                    const double* row = Mmat[use_cal ? cal_idx[j] : j];
+                    const double lse = row_lse(row);
+                    for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = W_cal[j][k] * (row[k] - lse);
+                    rsum[j] = np_sum(rbuf);
                 }
-                return np_mean(pk);
+                return np_mean(rsum);
             };
-            const double sc0 = row_peak(out), scf = row_peak(Mf), scc = row_peak(Mcomb);
-            if (scf > std::max(sc0, scc) * RAKE_FINGER_RATIO) return Mf;
-            if (scc > sc0) return Mcomb;
+            const double lp0 = log_post(M), lpf = log_post(Mf_all), lpc = log_post(Mc_all);
+            if (lpf > std::max(lp0, lpc) + RAKE_TIE_EPS) {
+                Mat<double> Mf(sr.size(), m_u);
+                for (std::size_t i = 0; i < sr.size(); ++i) std::copy_n(Mf_all[sr[i] - a], m_u, Mf[i]);
+                return Mf;
+            }
+            if (lpc > lp0 + RAKE_TIE_EPS) {
+                Mat<double> Mc(sr.size(), m_u);
+                for (std::size_t i = 0; i < sr.size(); ++i) std::copy_n(Mc_all[sr[i] - a], m_u, Mc[i]);
+                return Mc;
+            }
         }
     }
     return out;

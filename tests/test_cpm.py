@@ -453,7 +453,7 @@ def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
     dat = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
     x = cpm.modulate(spec, [ctl, dat], dup=False)
     delay = int(round(0.0035 * FS))  # 3.5 ms second path
-    # Lead + 2-path multipath (equal amplitude, 90 deg phase shift) + light noise
+    # Lead + 2-path multipath (0.9 real delayed echo) + light noise
     pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
     y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
     lock = cpm.find(g, y)
@@ -466,7 +466,8 @@ def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
 
     monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
     r1 = cpm.receive(y, lock)
-    assert r1["finger_dt"] == 24
+    want_dt = lambda grid: min(cpm.RAKE_SHIFT_MS * FS // 1000, grid.T // 4)
+    assert r1["finger_dt"] == want_dt(g)
     assert r1["Z_early"].shape == r1["Z"].shape == r1["Z_late"].shape
     M1 = cpm.dd_metric(r1, {}, 1)
 
@@ -478,7 +479,7 @@ def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
     sc1 = float(np.mean(M1[np.arange(len(sent)), sent] - M1.mean(axis=1)))
     assert sc1 > sc0 + 1.0, (sc0, sc1)
 
-    # c16r25 (T = 320 > RAKE_MAX_T) never populates finger_dt
+    # c16r25 (T > RAKE_MAX_T) never populates finger_dt
     assert cpm._rake_dt(cpm.GRIDS["c16r25"]) == 0
-    assert cpm._rake_dt(cpm.GRIDS["c8r50"]) == 24
-    assert cpm._rake_dt(cpm.GRIDS["c32r62"]) == 24
+    assert cpm._rake_dt(cpm.GRIDS["c8r50"]) == want_dt(cpm.GRIDS["c8r50"])
+    assert cpm._rake_dt(cpm.GRIDS["c32r62"]) == want_dt(cpm.GRIDS["c32r62"])

@@ -284,8 +284,9 @@ Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0
 std::vector<std::vector<int>> slot_rows(const Grid& g, int n_data, bool dup);
 // cpm.dd_metric: (slot's rows, m) coh_metric over the burst rows from the
 // slot's first less COH_W to its last plus COH_W; `post` {data slot: GF
-// log-probabilities as sent, decode_posterior's}. It reads r.Z on those rows
-// only, so a streaming receiver can run it once they are in.
+// log-probabilities as sent, decode_posterior's}. It reads r.Z (and
+// r.Z_early / r.Z_late when r.finger_dt > 0) on those rows only, so a
+// streaming receiver can run it once they plus finger_dt samples are in.
 using Posts = std::map<int, std::vector<double>>;
 Mat<double> dd_metric(const Received& r, const Posts& post, int slot);
 // cpm.dd_soft: a slot's soft values from its dd_metric (control: bit LLRs, data: symbol log-likelihoods).
@@ -293,11 +294,12 @@ std::vector<double> dd_soft(const Received& r, const Mat<double>& metric, int sl
 
 // A pending lock's receive, made as its burst arrives: refine once its
 // window is in (refine_symbols, or the whole burst), then each data slot's
-// pass (`pass`, arq::cpm_pass) once the slot and coh_w rows more are in,
-// each on a Received of the audio so far (a slot's rows and its metric's
-// window are complete then, and rows are computed alone, so it is bitwise
-// the pass made on the whole burst). finish(): the burst's Received, with
-// the passes made, as receive(x, lock) gives it.
+// pass (`pass`, arq::cpm_pass) once the slot, coh_w rows more, and any
+// Rake finger shift (finger_dt samples) are in, each on a Received of the
+// audio so far (a slot's rows and its metric's window are complete then,
+// and rows are computed alone, so it is bitwise the pass made on the whole
+// burst). finish(): the burst's Received, with the passes made, as
+// receive(x, lock) gives it.
 // Not thread-safe: feed and finish from one thread at a time, in order.
 using PassFn = std::function<Pass(const Received&, int slot, const Posts& earlier)>;
 class Stream {

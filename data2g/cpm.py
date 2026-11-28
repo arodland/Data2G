@@ -1279,19 +1279,22 @@ def receive(x: np.ndarray, lock: dict) -> dict:
 COH_W = 8  # coh_metric's channel window for data (+- rows, the row left out): best of 1-64 on fading
 COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
 # Early/late shifted-window Rake in dd_metric for short-symbol grids (T <= 20 ms: c8r50, c32r62).
-# Tuned on loss_study.py fading cells (issue #364, seeds 7500..7519): +4.0% mean over #363, mpd:-10 +18.4%,
-# AWGN/mpg untouched (gated by innovation SNR > RAKE_SNR_GATE).
+# Tuned on loss_study.py fading cells (issue #364); confirmed on untouched seeds.
+# AWGN/mpg untouched (gated by orthogonalized innovation SNR > RAKE_SNR_GATE).
 RAKE_SHIFT_MS = 3  # +-3 ms finger shift (clamped to T // 4)
-RAKE_MAX_T = FS // 50  # 20 ms max symbol length (160 samples at 8 kHz)
+RAKE_MAX_T = FS // 50  # 20 ms max symbol length (160 samples at 8 kHz, 320 under FM)
 RAKE_SNR_GATE = 0.35  # min orthogonalized innovation SNR before scoring the shifted finger
 RAKE_COMB_WEIGHT = 0.5  # weight on orthogonalized innovation metric M0 + w * Mu
-RAKE_FINGER_RATIO = 1.08  # margin to select shifted-finger Mf outright over max(M0, M_comb)
+RAKE_MIN_CAL_ROWS = 4  # min known/decoded rows to score calibrated log-posterior on cal_mask
+RAKE_TIE_EPS = 1e-9  # tie-breaking margin (nats/row) for Python/C++ selector parity
 
 
 def _rake_dt(g: Grid) -> int:
     if os.environ.get("DATA2G_CPM_RAKE", "1") == "1" and g.T <= RAKE_MAX_T:
         return min(RAKE_SHIFT_MS * FS // 1000, g.T // 4)
     return 0
+
+
 # Lock gates on coh_read_header's scale (one copy, both), grids calibrated:
 # 6000 noise windows' maxima (26.2, 33.3); (32, 36) gave 1 false lock in 8 h
 # on noise and on own-grid traffic, (34, 38) none in 16 h of either
@@ -1537,8 +1540,9 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
     the burst rows from its first less COH_W to its last plus COH_W (timing
     ramp and CFO fitted there): sync and header rows known, those slots'
     rows their posteriors, every other row its square-law probabilities.
-    Local to the slot, so a receiver can run it once the slot and COH_W
-    rows more are in, while the burst's later codewords arrive."""
+    When Rake is active (r['finger_dt'] > 0), also reads r['Z_early'] and
+    r['Z_late'] on those rows, so a streaming receiver waits finger_dt
+    samples past the window while the burst's later codewords arrive."""
     g, spec = GRIDS[r["band"]], r["spec"]
     n_data, dup = r["n_cw"] - r["n_ctl_slots"], r["dup"]
     lay = layout(g.name, stream_symbols(g.name, n_data, dup))
@@ -1549,12 +1553,14 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
     G = tone_metric(g, E)
     P = np.exp(G - G.max(axis=1, keepdims=True))
     P /= P.sum(axis=1, keepdims=True)
+    cal = np.zeros(b - a, dtype=bool)
     h = header_symbols(g.name, header_word(spec.index, n_data, dup))
     known = np.concatenate([lay.sync_rows] + list(lay.hdr_rows))
     kt = np.concatenate([lay.sync_tones] + [h] * len(lay.hdr_rows))
     keep = (known >= a) & (known < b)
     P[known[keep] - a] = 0.0
     P[known[keep] - a, kt[keep]] = 1.0
+    cal[known[keep] - a] = True
     gray = _gray(g.m)
     for s, v in post.items():
         rr = rows[s]
@@ -1565,8 +1571,10 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
         q = np.exp(lp - lp.max(axis=1, keepdims=True))
         q /= q.sum(axis=1, keepdims=True)
         P[rr[keep][:, None] - a, gray[None]] = q  # value v on tone gray(v)
+        cal[rr[keep] - a] = True
     idx_s = rows[slot] - a
-    M0 = coh_metric(Z, P, COH_W, _n0(E))[idx_s]
+    M0_all = coh_metric(Z, P, COH_W, _n0(E))
+    M0 = M0_all[idx_s]
     fdt = int(r.get("finger_dt", 0))
     if fdt > 0 and "Z_early" in r and "Z_late" in r:
         best_snr = 0.0
@@ -1584,16 +1592,26 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
                 best_u = (U, n0_u, Zf)
         if best_u is not None and best_snr > RAKE_SNR_GATE:
             U, n0_u, Zf = best_u
-            Mu = coh_metric(U, P, COH_W, n0_u)[idx_s]
-            Mf = coh_metric(Zf, P, COH_W, _n0(_sq(Zf)))[idx_s]
-            M_comb = M0 + RAKE_COMB_WEIGHT * Mu
-            sc0 = float(np.mean(M0.max(axis=1) - M0.mean(axis=1)))
-            scf = float(np.mean(Mf.max(axis=1) - Mf.mean(axis=1)))
-            scc = float(np.mean(M_comb.max(axis=1) - M_comb.mean(axis=1)))
-            if scf > max(sc0, scc) * RAKE_FINGER_RATIO:
-                return Mf
-            if scc > sc0:
-                return M_comb
+            Mu_all = coh_metric(U, P, COH_W, n0_u)
+            Mf_all = coh_metric(Zf, P, COH_W, _n0(_sq(Zf)))
+            Mc_all = M0_all + RAKE_COMB_WEIGHT * Mu_all
+            # Calibrated proper log-posterior score: on known/decoded rows when available,
+            # else under the symmetric prompt/finger posterior (never rewards overconfidence).
+            if int(cal.sum()) >= RAKE_MIN_CAL_ROWS:
+                W_cal = P[cal]
+                S0, Sf, Sc = M0_all[cal], Mf_all[cal], Mc_all[cal]
+            else:
+                q0 = np.exp(M0_all - np.logaddexp.reduce(M0_all, axis=1, keepdims=True))
+                qf = np.exp(Mf_all - np.logaddexp.reduce(Mf_all, axis=1, keepdims=True))
+                W_cal = 0.5 * (q0 + qf)
+                S0, Sf, Sc = M0_all, Mf_all, Mc_all
+            lp0 = float(np.mean((W_cal * (S0 - np.logaddexp.reduce(S0, axis=1, keepdims=True))).sum(axis=1)))
+            lpf = float(np.mean((W_cal * (Sf - np.logaddexp.reduce(Sf, axis=1, keepdims=True))).sum(axis=1)))
+            lpc = float(np.mean((W_cal * (Sc - np.logaddexp.reduce(Sc, axis=1, keepdims=True))).sum(axis=1)))
+            if lpf > max(lp0, lpc) + RAKE_TIE_EPS:
+                return Mf_all[idx_s]
+            if lpc > lp0 + RAKE_TIE_EPS:
+                return Mc_all[idx_s]
     return M0
 
 
