@@ -18,6 +18,7 @@ grouped below the tuned constants; native has their defaults.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -161,6 +162,10 @@ ROBUST_CONNECT_TRIES = 3
 ROBUST_CONNECTS = (ROBUST_CONNECT, ROBUST_CONNECT, ROBUST_CONNECT, ROBUST_WIDE, ROBUST_WIDE)
 # ROBUST_CONNECT and ROBUST_FAST stay among ROBUST_MODES for in-session robust polls; ROBUST_WIDE for retries.
 ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST, ROBUST_WIDE)))  # one on FM
+# Quantization step (dB) for predictor.harq_boost_db in recommend(): exact in
+# binary float and <= 32 levels across 0..HARQ_MAX_BOOST_DB, bounding extra
+# outcome-model evaluations inside turnaround on a full 63-codeword window.
+HARQ_BOOST_STEP_DB = 0.25
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -193,6 +198,9 @@ BIAS_MAX = 6.0 if BIAS_FIX else 3.0
 # DATA2G_NOISE_RULE: a weight, or '' / 'off' for none.
 _NR = os.environ.get("DATA2G_NOISE_RULE")
 NOISE_RULE = 1.0 if _NR is None else (None if _NR in ("", "off") else float(_NR))
+# Credit staying in the peer's slice mode with the RV1+ combining gain of
+# undecoded HARQ codewords (issue #360); DATA2G_HARQ_CREDIT=0 turns it off for A/B runs.
+HARQ_CREDIT = os.environ.get("DATA2G_HARQ_CREDIT", "1") != "0"
 
 
 def _env_cpm_floor():
@@ -246,6 +254,15 @@ def slots_for(spec, seconds: float, data: bool = True, dup: bool = False) -> int
     return n
 
 
+def _rx_harq(rx) -> tuple:
+    """Per missing seq above rx.cum (ascending, as TxSide.missing() resends them),
+    its stored ((rv, mi4), ...) HARQ receptions, or () for an unheard gap."""
+    if rx is None or not getattr(rx, "harq", None):
+        return ()
+    top = max(max(rx.buf, default=-1), max(rx.harq)) + 1
+    return tuple(tuple(rx.harq.get(s, ())) for s in range(rx.cum, min(top, rx.cum + F.WINDOW)) if s not in rx.buf)
+
+
 class StationView(NamedTuple):
     """What the shifter reads of its link.Station (native: arq::StationView).
     KISS, with no station, passes one of its own."""
@@ -263,6 +280,8 @@ class StationView(NamedTuple):
     timeouts: int = 0  # stats["timeouts"] (link_features: Python only)
     last_rx_data: bool = True  # the peer's last burst carried data (expected_reply)
     tx_end: float | None = None  # when my burst being built should end (link.Station._tx_end; None: gap_s)
+    rx_mode: str | None = None  # submode of buffered / HARQ codewords (rx.submode)
+    harq: tuple = ()  # per missing seq above rx.cum, its stored ((rv, mi4), ...) receptions
 
 
 def view(station) -> StationView:
@@ -275,7 +294,8 @@ def view(station) -> StationView:
         return StationView(station.cap, station.tx.pending(), station.peer_recommend, station.peer_reply_recommend,
                            station.peer_size_hint, station.peer_wants_dup, bool(station.chat or station.peer_chat),
                            station.peer_queued, len(station.rx.buf), station.misses, station.esc_floor,
-                           station.stats.get("timeouts", 0), station.last_rx_data, station.tx_end)
+                           station.stats.get("timeouts", 0), station.last_rx_data, station.tx_end,
+                           station.rx.submode, _rx_harq(station.rx))
     except AttributeError:
         pass
 
@@ -289,7 +309,8 @@ def view(station) -> StationView:
                        chat=bool(g("chat", False) or g("peer_chat", False)), peer_queued=g("peer_queued", 0),
                        held=len(rx.buf) if rx is not None else 0, misses=g("misses", 0), esc_floor=g("esc_floor", 0),
                        timeouts=g("stats", {}).get("timeouts", 0), last_rx_data=g("last_rx_data", True),
-                       tx_end=g("tx_end", None))
+                       tx_end=g("tx_end", None), rx_mode=getattr(rx, "submode", None) if rx is not None else None,
+                       harq=_rx_harq(rx))
 
 
 @dataclass
@@ -668,10 +689,15 @@ class GearShifter(L.Policy):
         if NOISE_RULE is not None:
             shift = {s.band: P.noise_shift_db(m.get("noise"), self.measured_band, s.band, NOISE_RULE) for s in cands}
 
-        def predicted(s, n_cw):
-            key = (round(burst_seconds(s, n_cw), 2), shift.get(s.band, 0.0))
+        def quantize_boost(b):
+            return math.floor(b / HARQ_BOOST_STEP_DB + 0.5) * HARQ_BOOST_STEP_DB if b > 0.0 else 0.0
+
+        def predicted(s, n_cw, boost_db=0.0):
+            qb = quantize_boost(boost_db)
+            sh = shift.get(s.band, 0.0) - qb if qb > 0.0 else shift.get(s.band, 0.0)
+            key = (round(burst_seconds(s, n_cw), 2), sh)
             if key not in omemo:
-                omemo[key] = P.predict_outcome(P.shifted(m, key[1]), self.measured_band, gap, key[0], cands, prev,
+                omemo[key] = P.predict_outcome(P.shifted(m, sh), self.measured_band, gap, key[0], cands, prev,
                                                gated, cond)
             return omemo[key][s.name]
 
@@ -683,9 +709,9 @@ class GearShifter(L.Policy):
             """P(a burst of s, n_cw long, is usable: synced, header, control)."""
             return logit_shift(predicted(s, n_cw)[0], self.bias_burst.get(s.name, 0.0))
 
-        def q_cw(s, n_cw):
+        def q_cw(s, n_cw, boost_db=0.0):
             """P(one of its data codewords decodes | the burst is usable)."""
-            return logit_shift(predicted(s, n_cw)[1], self.bias.get(s.name, 0.0))
+            return logit_shift(predicted(s, n_cw, boost_db)[1], self.bias.get(s.name, 0.0))
 
         best, best_v = None, -1.0
         # my reply to the peer: the cheapest in expectation. A lost reply costs
@@ -702,11 +728,12 @@ class GearShifter(L.Policy):
         # data: expected delivered payload per second of expected turn time,
         # losses priced as timeouts. Switching away from the mode the peer's
         # outstanding codewords use abandons them (link.py: a resend keeps its
-        # submode), and what I hold beyond my cumulative ACK is sent again:
-        # priced as payload not delivered this turn (linksim: mpg rate hopping
-        # scored below every fixed mode it hopped between).
-        cur = self.log[-1][0] if self.log else None
+        # submode): decoded codewords above my cumulative ACK are sent again
+        # (priced against a switch), and undecoded HARQ codewords get their
+        # RV1+ combining gain when staying in that mode (issue #360).
+        cur = (st.rx_mode if HARQ_CREDIT and st.rx_mode in MODES else None) or (self.log[-1][0] if self.log else None)
         held = st.held * codes.payload_bytes(MODES[cur]) if cur else 0
+        harq = st.harq if HARQ_CREDIT and (st.rx_mode is None or cur == st.rx_mode) else ()
         # CHAT ON: the least expected time to deliver what the peer has queued
         # (its T_BUFFER; a chat line at least). A file is then sent in full
         # bursts, a line in the fewest codewords (a VARA client with CHAT ON
@@ -728,6 +755,20 @@ class GearShifter(L.Policy):
             lim = self.measured["snr_est"] + ROBUST_START_DATA_MARGIN_DB
             data_cands = ([s for s in data_cands if MODE_THRESHOLDS[s.name][0] <= lim]
                           or [min(cands, key=lambda s: MODE_THRESHOLDS[s.name][0])])
+        cur_boosts = ()
+        if not chat and cur and harq and any(s.name == cur for s in data_cands):
+            s_cur = MODES[cur]
+            ci = 0 if is_cpm(s_cur) else P.CONSTS.index(P.const_family(s_cur.constellation))
+            cur_mi = P.shifted(m, shift.get(s_cur.band, 0.0))[f"mi_{P.CONSTS[ci]}"]
+            bmemo = {}
+            max_data = max(max(0, slots_for(s_cur, target) - ctl_slots(s_cur)) for target in SIZE_S)
+            boosts = []
+            for txs in harq[:max_data]:
+                key_tx = tuple((rv, mi4[ci]) for rv, mi4 in txs)
+                if key_tx not in bmemo:
+                    bmemo[key_tx] = quantize_boost(P.harq_boost_db(s_cur, key_tx, cur_mi)) if key_tx else 0.0
+                boosts.append(bmemo[key_tx])
+            cur_boosts = tuple(boosts)
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
@@ -741,7 +782,10 @@ class GearShifter(L.Policy):
                     n = min(n, k + c)
                 pn = q_cw(s, n)
                 ok_ctl = q_burst(s, n)  # the burst survives sync and its control codeword
-                if ok_ctl * pn < self.min_success:
+                bonus = 0.0
+                if not chat and s.name == cur and cur_boosts:
+                    bonus = sum(max(0.0, q_cw(s, n, b) - pn) for b in cur_boosts[:max(0, n - c)] if b > 0.0)
+                if ok_ctl * (pn + bonus / max(n - c, 1)) < self.min_success:
                     continue
                 # a CPM burst whose control is at risk goes with it twice (one
                 # more slot, its short control codeword: choose(), slots_for)
@@ -765,7 +809,7 @@ class GearShifter(L.Policy):
                     # carrying more, for whatever follows it
                     v = -t * bursts / ok + 1e-6 * (n - c) * pb
                 else:
-                    v = (ok_ctl * pn * (n - c) * pb - (held if s.name != cur else 0)) / t
+                    v = (ok_ctl * (pn * (n - c) + bonus) * pb - (held if s.name != cur else 0)) / t
                 if v > best_v:
                     best, best_v = (s.name, hint), v
                 if chat:

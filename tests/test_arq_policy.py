@@ -467,3 +467,249 @@ def test_live_gap_is_the_training_rows_gap():
     d = np.array(pairs)
     assert len(d) >= 15
     assert d.min() >= -0.1 and np.median(np.abs(d)) <= 0.1 and np.mean(np.abs(d) <= 0.6) >= 0.8, np.round(d, 2)
+
+
+def test_harq_boost_db_has_no_phantom_gain_from_dead_burst():
+    """A near-zero-MI reception contributes ~0 mutual information on fresh
+    parity as well as Chase: harq_boost_db gives ~0 dB boost when the stored
+    burst was noise, and positive IR gain when both receptions have signal."""
+    s = MODES["w48-16qam-r2/3"]
+    m_dead = float(P.capacity(-25.0, "gray-qam16"))
+    m_near = float(P.capacity(7.0, "gray-qam16"))
+    assert P.harq_boost_db(s, [(0, m_dead)], m_near) < 0.05
+    assert P.harq_boost_db(s, [(0, m_near)], m_near) > 4.0
+    if "fsk16r25-r1/3" in MODES:
+        sc = MODES["fsk16r25-r1/3"]
+        mc = float(P.capacity(-5.0, "gray-qam4"))
+        assert P.harq_boost_db(sc, [(0, float(P.capacity(-25.0, "gray-qam4")))], mc) < 0.05
+        assert P.harq_boost_db(sc, [(0, mc)], mc) > 2.5
+
+
+@pytest.mark.hf_only("tests HF ladder transitions on a marginal 0/M burst vs deep fade")
+def test_harq_credit_holds_mode_on_marginal_loss_and_drops_on_deep_fade():
+    """Issue #360: a 0/M burst (held == 0) 1-2 dB below RV0 threshold steps
+    bias[cur] down; without HARQ credit recommend() switches down and abandons
+    the M stored RV0 codewords, while with HARQ credit RV1's combining gain
+    keeps cur. On a deep SNR drop where RV1 also fails, recommend() drops."""
+    from data2g.arq import link as L
+
+    class FakeRx:
+        def __init__(self, submode, slots, ok_set):
+            self.submode, self.n_cw = submode, len(slots)
+            self._slots, self._ok = slots, ok_set
+
+        def decode(self, slot, mask_id, rv, key):
+            s = self._slots[slot]
+            return s.payload if (slot in self._ok and s.mask_id == mask_id and s.rv == rv) else None
+
+        def forget(self, key):
+            pass
+
+    def make_b():
+        bb = L.Station(1, G.GearShifter(), master=False, key=7)
+        bb.policy.observe(m_hi, "w48-qpsk-r1/2", 1.0)
+        bb.build()
+        bb.policy.observe(m_dip, cur, 4.0)
+        assert bb.handle(FakeRx(cur, tx1.slots, set(range(n_ctl))))
+        return bb
+
+    a = L.Station(0, G.GearShifter(), master=True, key=7)
+    b0 = L.Station(1, G.GearShifter(), master=False, key=7)
+    # Initial exchange at 10 dB AWGN so B recommends an upper mode, then A sends incompressible data
+    m_hi = measured(10.0, 0.05, "w48")
+    b0.policy.observe(m_hi, "w48-qpsk-r1/2", 1.0)
+    ack0 = b0.build()
+    a.policy.observe(m_hi, ack0.submode, 2.0)
+    assert a.handle(FakeRx(ack0.submode, ack0.slots, set(range(len(ack0.slots)))))
+    a.write(np.random.default_rng(0).bytes(8000))
+    tx1 = a.build()
+    cur = tx1.submode
+    n_ctl = sum(1 for s in tx1.slots if s.mask_id[2] >= 128)
+    n_data = len(tx1.slots) - n_ctl
+    assert n_data >= 3
+
+    # Burst arrives 2 dB lower: control decodes, 0/n_data data codewords decode (held == 0)
+    m_dip = measured(8.0, 0.05, MODES[cur].band)
+    b = make_b()
+    assert len(b.rx.buf) == 0 and len(b.rx.harq) == n_data and b.rx.submode == cur
+
+    st = G.view(b)
+    assert st.held == 0 and st.rx_mode == cur and len(st.harq) == n_data
+    # Without HARQ credit, shifter switches away from cur; with HARQ credit, it keeps cur
+    rec_no = G.decode(make_b().policy.recommend(st._replace(harq=()))[0])
+    rec_yes = G.decode(b.policy.recommend(st)[0])
+    if not G.HARQ_CREDIT:
+        assert rec_yes == rec_no
+        return
+    assert rec_no != cur and rec_yes == cur
+    # CHAT ON ignores HARQ credit
+    assert G.decode(make_b().policy.recommend(st._replace(chat=True))[0]) == G.decode(
+        make_b().policy.recommend(st._replace(chat=True, harq=()))[0])
+
+    # Deep drop (-6 dB): even RV1 cannot rescue cur, so shifter drops to a robust mode
+    m_deep = measured(-6.0, 0.05, MODES[cur].band)
+    b.policy.observe(m_deep, cur, 8.0)
+    rec_deep = G.decode(b.policy.recommend(G.view(b))[0])
+    assert rec_deep != cur
+
+    # Control-only poll in ack-4f preserves rx.submode and rx.harq
+    poll = a.on_timeout(allow_repeat=False)
+    b.policy.observe(m_dip, poll.submode, 10.0)
+    assert b.handle(FakeRx(poll.submode, poll.slots, set(range(len(poll.slots)))))
+    assert b.rx.submode == cur and len(b.rx.harq) == n_data
+
+    # Resend decoding all slots clears rx.harq and rx.submode
+    reply = b.build()
+    a.policy.observe(m_hi, reply.submode, 11.0)
+    assert a.handle(FakeRx(reply.submode, reply.slots, set(range(len(reply.slots)))))
+    # Force A to stay in cur so it resends without abandon, then decode all slots at B
+    a.peer_recommend = G.encode(cur)
+    tx2 = a.build()
+    b.policy.observe(m_hi, tx2.submode, 13.0)
+    assert b.handle(FakeRx(tx2.submode, tx2.slots, set(range(len(tx2.slots)))))
+    assert not b.rx.harq and not b.rx.buf and b.rx.submode is None
+
+    # Abandon clears rx.harq and rx.submode
+    ack2 = b.build()
+    a.policy.observe(m_hi, ack2.submode, 14.0)
+    assert a.handle(FakeRx(ack2.submode, ack2.slots, set(range(len(ack2.slots)))))
+    a.write(np.random.default_rng(1).bytes(4000))
+    a.peer_recommend = G.encode(cur)
+    tx3 = a.build()
+    b.policy.observe(m_dip, tx3.submode, 15.0)
+    assert b.handle(FakeRx(tx3.submode, tx3.slots, set(range(sum(1 for s in tx3.slots if s.mask_id[2] >= 128)))))
+    assert b.rx.harq and b.rx.submode == tx3.submode
+    b_ack = b.build()
+    a.policy.observe(m_dip, b_ack.submode, 16.0)
+    assert a.handle(FakeRx(b_ack.submode, b_ack.slots, set(range(len(b_ack.slots)))))
+    a.peer_recommend = G.encode("qpsk-r1/5" if tx3.submode != "qpsk-r1/5" else "qpsk-r1/3")
+    tx_ab = a.build()
+    b.policy.observe(m_dip, tx_ab.submode, 18.0)
+    assert b.handle(FakeRx(tx_ab.submode, tx_ab.slots, set(range(len(tx_ab.slots)))))
+    assert not b.rx.harq and b.rx.submode is None
+
+
+def test_harq_boost_db_rv_wrap_uses_latest_rv():
+    """After wrapping the 4-RV cycle ([0, 1, 2, 3, 0]), the next resend is RV 1
+    ((txs[-1][0] + 1) % cyc), not RV 0 ((max + 1) % cyc): when [0, 1) already
+    holds a strong reception and [1, 2) only a weak one, ending at RV 0 puts
+    the next transmission on fresh parity [1, 2) for a much larger boost than
+    ending the same multiset of stored RVs at RV 3 (which resends RV 0)."""
+    s = MODES["w48-16qam-r2/3"]
+    m_lo = float(P.capacity(-10.0, "gray-qam16"))
+    m_hi = float(P.capacity(4.0, "gray-qam16"))
+    txs_end0 = [(0, m_lo), (1, m_lo), (2, m_lo), (3, m_lo), (0, m_hi)]  # next resend is RV 1
+    txs_end3 = [(0, m_hi), (0, m_lo), (1, m_lo), (2, m_lo), (3, m_lo)]  # same stored slices, next resend is RV 0
+    assert P.harq_boost_db(s, txs_end0, m_hi) > P.harq_boost_db(s, txs_end3, m_hi) + 2.0
+
+
+@pytest.mark.hf_only("tests HF GearShifter min_success gate with pending HARQ resends")
+def test_harq_credit_applies_before_min_success():
+    """With min_success > 0, a mode whose RV0 probability alone dropped below
+    min_success still passes the gate when pending HARQ resends lift the
+    burst's effective per-slot decode probability above min_success."""
+    from data2g.arq import link as L
+
+    class FakeRx:
+        def __init__(self, submode, slots, ok_set):
+            self.submode, self.n_cw = submode, len(slots)
+            self._slots, self._ok = slots, ok_set
+
+        def decode(self, slot, mask_id, rv, key):
+            s = self._slots[slot]
+            return s.payload if (slot in self._ok and s.mask_id == mask_id and s.rv == rv) else None
+
+        def forget(self, key):
+            pass
+
+    m_hi = measured(10.0, 0.05, "w48")
+    a = L.Station(0, G.GearShifter(), master=True, key=7)
+    b0 = L.Station(1, G.GearShifter(), master=False, key=7)
+    b0.policy.observe(m_hi, "w48-qpsk-r1/2", 1.0)
+    ack0 = b0.build()
+    a.policy.observe(m_hi, ack0.submode, 2.0)
+    assert a.handle(FakeRx(ack0.submode, ack0.slots, set(range(len(ack0.slots)))))
+    a.write(np.random.default_rng(0).bytes(8000))
+    tx1 = a.build()
+    cur = tx1.submode
+    n_ctl = sum(1 for s in tx1.slots if s.mask_id[2] >= 128)
+    m_dip = measured(8.0, 0.05, MODES[cur].band)
+
+    def make_b():
+        bb = L.Station(1, G.GearShifter(min_success=0.88), master=False, key=7)
+        bb.policy.observe(m_hi, "w48-qpsk-r1/2", 1.0)
+        bb.build()
+        bb.policy.observe(m_dip, cur, 4.0)
+        assert bb.handle(FakeRx(cur, tx1.slots, set(range(n_ctl))))
+        return bb
+
+    b_yes = make_b()
+    st = G.view(b_yes)
+    rec_no = G.decode(make_b().policy.recommend(st._replace(harq=()))[0])
+    rec_yes = G.decode(b_yes.policy.recommend(st)[0])
+    if not G.HARQ_CREDIT:
+        assert rec_yes == rec_no
+        return
+    p_rv0 = b_yes.policy.predicted[cur][0] * b_yes.policy.predicted[cur][1]
+    assert p_rv0 < 0.88  # RV0 alone is below min_success; only the HARQ bonus passes the gate
+    assert rec_no != cur and rec_yes == cur
+
+
+def test_note_harq_requires_all_mi_keys_without_skipping_refine_measured():
+    """A Policy.measured dict missing one of the four MI keys skips rx.harq
+    without throwing, while refine_measured still runs update_measured."""
+    from data2g.arq import link as L
+
+    class PartialPolicy(L.Policy):
+        def __init__(self, measured_dict):
+            self.measured = measured_dict
+            self.updated = []
+
+        def choose(self, station, escalation):
+            return "w48-qpsk-r1/2", 4
+
+        def payload_bytes(self, submode):
+            return 32
+
+        def rv_cycle(self, submode):
+            return 4
+
+        def update_measured(self, m):
+            self.updated.append(m)
+            self.measured = m
+
+    class FakeRx:
+        def __init__(self, submode, slots, ok_set, upd=None):
+            self.submode, self.n_cw = submode, len(slots)
+            self._slots, self._ok, self._upd = slots, ok_set, upd
+
+        def decode(self, slot, mask_id, rv, key):
+            s = self._slots[slot]
+            return s.payload if (slot in self._ok and s.mask_id == mask_id and s.rv == rv) else None
+
+        def forget(self, key):
+            pass
+
+        def measure_data(self, m):
+            return self._upd
+
+    full = measured(8.0, 0.05, "w48")
+    missing_one = {k: v for k, v in full.items() if k != "mi_c256-snr26"}
+
+    a = L.Station(0, PartialPolicy(dict(full)), master=True, key=3)
+    a.write(np.random.default_rng(2).bytes(200))
+    tx = a.build()
+    n_ctl = sum(1 for s in tx.slots if s.mask_id[2] >= 128)
+    assert len(tx.slots) > n_ctl
+
+    # Missing one MI key: measure_data runs (returning None), rx.harq stays empty without KeyError
+    b1 = L.Station(1, PartialPolicy(dict(missing_one)), master=False, key=3)
+    assert b1.handle(FakeRx(tx.submode, tx.slots, set(range(n_ctl)), upd=None))
+    assert not b1.rx.harq and b1.rx.submode is None
+
+    # measure_data refines measured to include all four MI keys: update_measured runs before note_harq
+    b2 = L.Station(1, PartialPolicy(dict(full)), master=False, key=3)
+    upd = dict(full, snr_est=5.0)
+    assert b2.handle(FakeRx(tx.submode, tx.slots, set(range(n_ctl)), upd=upd))
+    assert len(b2.policy.updated) == 1 and b2.policy.updated[0]["snr_est"] == 5.0
+    assert len(b2.rx.harq) == len(tx.slots) - n_ctl and b2.rx.submode == tx.submode

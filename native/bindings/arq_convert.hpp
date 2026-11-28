@@ -89,10 +89,12 @@ inline TxBurstPtr burst_cpp(const py::handle& o) {
 inline arq::Measured measured(const py::dict& d) {
     arq::Measured m;
     m.snr_est = d["snr_est"].cast<double>();
-    m.spread_est = d["spread_est"].cast<double>();
-    m.delay_est_ms = d["delay_est_ms"].cast<double>();
-    for (std::size_t i = 0; i < arq::CONSTS.size(); ++i)
-        m.mi[i] = d[py::str("mi_" + std::string(arq::CONSTS[i]))].cast<double>();
+    if (d.contains("spread_est")) m.spread_est = d["spread_est"].cast<double>();
+    if (d.contains("delay_est_ms")) m.delay_est_ms = d["delay_est_ms"].cast<double>();
+    for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) {
+        const py::str k("mi_" + std::string(arq::CONSTS[i]));
+        if (d.contains(k)) m.mi[i] = d[k].cast<double>();
+    }
     if (d.contains("headroom")) m.headroom = d["headroom"].cast<double>();
     if (d.contains("frames")) m.frames = d["frames"].cast<double>();
     if (d.contains("n0_spread_db")) m.n0_spread_db = d["n0_spread_db"].cast<double>();

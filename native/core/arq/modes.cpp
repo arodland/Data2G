@@ -121,6 +121,11 @@ int min_cw(const Mode& m, bool data) { return data && m.is_cpm() ? 2 : 1; }
 
 int rv_cycle(const Mode& m) { return m.is_cpm() ? codes::rv_cycle(*m.cpm) : codes::rv_cycle(*m.ofdm); }
 
+double mother_blocks(const Mode& m) {
+    const codes::Spec& sp = m.is_cpm() ? codes::spec(*m.cpm) : codes::spec(*m.ofdm);
+    return static_cast<double>(codes::buffer_len(sp)) / static_cast<double>(codes::soft_len(sp));
+}
+
 int cap_hz(int cap) {
     // modes.py CAP_HZ. FM: 500 Hz (the n10 floor), narrow (w, f55), wide (f108)
     switch (cap) {
