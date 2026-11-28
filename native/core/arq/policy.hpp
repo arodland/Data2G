@@ -73,6 +73,8 @@ inline constexpr double ROBUST_START_SPREAD_HZ = 6.0;
 // policy.py: such a session's caller asks for its first data only in modes whose steady-channel threshold
 // is at most the measured snr_est plus this, and for its control twice (GearShifter::start_bound)
 inline constexpr double ROBUST_START_DATA_MARGIN_DB = 2.0;
+// policy.py HARQ_BOOST_STEP_DB: quantization step (dB) for harq_boost_db in recommend() (<= 32 levels over 0..8 dB)
+inline constexpr double HARQ_BOOST_STEP_DB = 0.25;
 
 std::string_view fallback(int cap);
 std::string_view connect_mode(int cap, int tries = 0, bool last = false);
@@ -94,6 +96,8 @@ struct StationView {
     int esc_floor = 0;
     bool last_rx_data = true;  // the peer's last burst carried data (expected_reply)
     std::optional<double> tx_end;  // when my burst being built should end (Station::tx_end; nullopt: gap_s)
+    std::optional<std::string> rx_mode;  // submode of buffered / HARQ codewords (rx.submode)
+    std::vector<std::vector<RxSide::HarqTx>> harq;  // per missing seq above rx.cum, its stored receptions
 };
 
 struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)

@@ -237,6 +237,7 @@ void TxSide::settle(std::int64_t lo) {
 
 bool RxSide::accept(std::int64_t seq, Bytes payload, bool comp) {
     if (seq < cum || buf.count(seq) || seq >= cum + WINDOW) return false;
+    harq.erase(seq);
     buf[seq] = {std::move(payload), comp};
     bool delivered = false;
     while (true) {
@@ -244,6 +245,7 @@ bool RxSide::accept(std::int64_t seq, Bytes payload, bool comp) {
         if (it == buf.end()) break;
         auto [p, z] = std::move(it->second);
         buf.erase(it);
+        harq.erase(cum);
         comp_seqs.erase(cum);
         wire += static_cast<std::int64_t>(p.size());
         if (z) {
@@ -261,6 +263,7 @@ bool RxSide::accept(std::int64_t seq, Bytes payload, bool comp) {
         cum += 1;
         delivered = true;
     }
+    if (buf.empty() && harq.empty()) submode.reset();
     return delivered;
 }
 
@@ -271,6 +274,8 @@ std::vector<std::int64_t> RxSide::abandon(std::int64_t a) {
         gone.push_back(it->first);
         it = buf.erase(it);
     }
+    harq.erase(harq.lower_bound(lo), harq.end());
+    if (buf.empty() && harq.empty()) submode.reset();
     comp_seqs.erase(comp_seqs.lower_bound(lo), comp_seqs.end());
     return gone;
 }
@@ -818,6 +823,27 @@ void Station::refine_measured(RxBurst& rxb) {
         if (const auto upd = rxb.measure_data(*m)) policy->update_measured(*upd);
 }
 
+void Station::note_harq(const std::string& submode, bool has_data) {
+    if (!rx_failed_.empty()) {
+        if (const auto mi = policy->last_mi()) {
+            for (const auto& [seq, rv] : rx_failed_) {
+                if (rx.cum <= seq && seq < rx.cum + WINDOW && !rx.buf.count(seq)) {
+                    auto& txs = rx.harq[seq];
+                    txs.push_back({rv, *mi});
+                    if (txs.size() > HARQ_MAX_TX) txs.erase(txs.begin(), txs.end() - HARQ_MAX_TX);
+                }
+            }
+        }
+    }
+    rx_failed_.clear();
+    if (has_data) {
+        if (!rx.buf.empty() || !rx.harq.empty())
+            rx.submode = submode;
+        else
+            rx.submode.reset();
+    }
+}
+
 bool Station::handle(RxBurst& rx_) {
     const bool ok = handle_inner(rx_);
     stats[ok ? "rx_ok" : "rx_lost"] += 1;
@@ -854,6 +880,7 @@ bool Station::handle_inner(RxBurst& rxb) {
         return true;
     }
     refine_measured(rxb);
+    note_harq(rxb.submode(), !data.slots.empty() || ext.count(T_INLINE));
     if (log_enabled(LOG, INFO)) log_rx(rxb, core, dup, data, base0, next0, cum0, was, repeat, abandoned);
     reply_lost = repeat;
     stale_ = repeat;
@@ -1322,6 +1349,8 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
     std::vector<bool> comp;
     for (std::size_t j = 0; j < slots.size(); ++j) comp.push_back(bits[j] || (slots[j].first && rx.comp_seqs.count(*slots[j].first)));
     last_rx_data = !slots.empty();
+    rx_failed_.clear();
+    if ((!slots.empty() || ext.count(T_INLINE)) && rx.submode && *rx.submode != rxb.submode()) rx.harq.clear();
     int n_ok = 0, n_new = 0;
     {
         std::vector<DecodeRequest> reqs;
@@ -1350,6 +1379,8 @@ Station::DataTaken Station::take_data(RxBurst& rxb, const Core& core, const Ext&
             out.n_dec += 1;
             rxb.forget(skey);
             out.progress |= rx.accept(*seq, std::move(*p), comp[j]);
+        } else if (*seq < rx.cum + WINDOW && !rx.buf.count(*seq)) {
+            rx_failed_.emplace_back(*seq, rv);
         }
     }
     rx_new_end_.reset();

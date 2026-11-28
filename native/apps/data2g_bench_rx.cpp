@@ -507,6 +507,45 @@ void shifter(int steps) {
     const auto q = [&](double p) { return 1e3 * ts[static_cast<std::size_t>(p * (ts.size() - 1))]; };
     std::printf("recommend: median %.2f ms, p90 %.2f ms, max %.2f ms over %zu\n", q(0.5), q(0.9), 1e3 * ts.back(),
                 ts.size());
+    ts.clear();
+    for (int step = 0; step < steps; ++step) {
+        const arq::Mode* m = modes[static_cast<std::size_t>(u(rng) * modes.size())];
+        const double bits[4] = {2, 4, 6, 8};
+        auto make_mi = [&](double snr) {
+            std::array<double, 4> mi{};
+            for (int c = 0; c < 4; ++c) mi[c] = std::min(bits[c], std::log2(1 + std::pow(10, snr / 10)));
+            return mi;
+        };
+        arq::Measured me;
+        me.snr_est = step % 2 ? -12 + 8 * u(rng) : -8 + 33 * u(rng);
+        me.spread_est = u(rng) < 0.5 ? 0.0 : 3 * u(rng);
+        me.delay_est_ms = 4 * u(rng);
+        me.mi = make_mi(me.snr_est);
+        now_s += 5;
+        g.observe(me, m->name, now_s);
+        g.observe_energy(-12 + 42 * u(rng), now_s);
+        std::array<std::array<double, 4>, 4> burst_mi{};
+        for (auto& bmi : burst_mi) bmi = make_mi(me.snr_est - 4 + 8 * u(rng));
+        arq::StationView st;
+        st.cap = 2;
+        st.pending = true;
+        st.chat = false;
+        st.rx_mode = std::string(m->name);
+        st.harq.resize(arq::WINDOW - 1);
+        const int cyc = arq::rv_cycle(*m);
+        for (std::size_t j = 0; j < st.harq.size(); ++j) {
+            const std::size_t n_tx = 1 + (j % 4);
+            for (std::size_t r = 0; r < n_tx; ++r)
+                st.harq[j].push_back({static_cast<int>(r % cyc), burst_mi[(j + r) % burst_mi.size()]});
+        }
+        const double t = now();
+        (void)g.recommend(st);
+        ts.push_back(now() - t);
+    }
+    ts.erase(ts.begin(), ts.begin() + std::min<std::size_t>(ts.size(), 20));
+    std::sort(ts.begin(), ts.end());
+    std::printf("recommend (63-seq harq): median %.2f ms, p90 %.2f ms, max %.2f ms over %zu\n", q(0.5), q(0.9),
+                1e3 * ts.back(), ts.size());
 }
 
 }  // namespace
