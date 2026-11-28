@@ -888,3 +888,13 @@ def test_inline_off_sends_slots(monkeypatch):
     a.write(b"73")
     p = a.build()
     assert len(p.slots) == 2 and b.handle(clean(p)) and b.read() == b"73"
+
+
+@pytest.mark.hf_only
+def test_size_s_3_fits_scattered_pilot_ofdm_bursts():
+    """SIZE_S[3] (12.05 s) keeps scattered-pilot OFDM bursts (12.016 s) at
+    10 cws (qpsk-*) and 20 cws (w48-qpsk/16qam-*) instead of dropping 1 cw."""
+    from data2g.arq import modes, policy
+
+    assert modes.burst_seconds(modes.MODES["qpsk-r1/3"], 10) <= policy.SIZE_S[3]
+    assert modes.burst_seconds(modes.MODES["w48-16qam-r1/2"], 20) <= policy.SIZE_S[3]

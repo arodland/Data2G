@@ -22,7 +22,7 @@
 
 namespace data2g::arq {
 
-inline constexpr std::array<double, 4> SIZE_S = {1.0, 3.0, 6.0, 12.0};
+inline constexpr std::array<double, 4> SIZE_S = {1.0, 3.0, 6.0, 12.05};
 inline constexpr double TURN_S = 1.3;
 inline constexpr double TIMEOUT_S = 1.0 + 1.0 + 1.5;
 inline constexpr double PREV_MAX_S = 30.0;
