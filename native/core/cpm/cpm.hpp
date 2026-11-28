@@ -250,6 +250,23 @@ std::optional<std::array<double, 4>> coh_lock(const Grid& g);
 inline constexpr double COH_PREGATE[] = {12.0, 10.0};
 // cpm.COH_CTL (DATA2G_CPM_COH_CTL, read once).
 bool coh_ctl();
+// cpm.COH2D (DATA2G_CPM_COH2D, read once) and its tuning constants (#363).
+bool coh2d();
+inline constexpr int COH2D_MIN_ROWS = 12;
+inline constexpr int COH2D_NEAR_TONE_STEP = 2;
+inline constexpr int COH2D_MIN_NEAR_PAIRS = 4;
+inline constexpr int COH2D_FAST_W = 3;
+inline constexpr double COH2D_FAST_TAU = 1.5;
+inline constexpr double COH2D_TIE_REL = 1e-9;
+inline constexpr double COH2D_DELAY_S = 0.0035;
+inline constexpr int COH2D_NARROW_SLOW_W = 12, COH2D_NARROW_SLOW_D = 4;
+inline constexpr double COH2D_NARROW_SLOW_TAU = 6.0, COH2D_NARROW_SLOW_LAM = 0.30;
+inline constexpr int COH2D_NARROW_FAST_W = 5, COH2D_NARROW_FAST_D = 3;
+inline constexpr double COH2D_NARROW_FAST_TAU = 2.2, COH2D_NARROW_FAST_LAM = 0.45;
+inline constexpr int COH2D_WIDE_SLOW_W = 18, COH2D_WIDE_SLOW_D = 5;
+inline constexpr double COH2D_WIDE_SLOW_TAU = 8.0, COH2D_WIDE_SLOW_BW = 0.08, COH2D_WIDE_SLOW_LAM = 0.35;
+inline constexpr int COH2D_WIDE_FAST_W = 12, COH2D_WIDE_FAST_D = 9;
+inline constexpr double COH2D_WIDE_FAST_TAU = 5.0, COH2D_WIDE_FAST_BW = 0.15, COH2D_WIDE_FAST_LAM = 0.50;
 
 // (n_sym, m) complex tone bins from `start`, CFO removed (energies before the square).
 Mat<std::complex<double>> bins(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo);

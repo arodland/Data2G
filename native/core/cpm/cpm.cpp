@@ -1401,6 +1401,11 @@ bool coh_ctl() {
     return on;
 }
 
+bool coh2d() {
+    static const bool on = env_on("DATA2G_CPM_COH2D");
+    return on;
+}
+
 Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo) {
     const std::size_t T = g.T, N = static_cast<std::size_t>(n_sym) * T;
     const double w = (-2 * PI) * (g.f0 + cfo);
@@ -1419,12 +1424,6 @@ Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, 
 }
 
 namespace {
-
-bool env_flag_on(const char* name, bool def_val = true) {
-    const char* v = std::getenv(name);
-    if (!v) return def_val;
-    return std::strcmp(v, "1") == 0;
-}
 
 // Cyclic Jacobi eigensolver for real symmetric m x m C -> top d_dim eigenvectors scaled by sqrt(m) (cpm._slepian_basis).
 Mat<double> slepian_basis(std::size_t m, std::size_t d_dim, double bw) {
@@ -1658,7 +1657,7 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
     for (std::size_t r = 0; r < n; ++r)
         for (std::size_t k = 0; k < m; ++k) H[r][k] = h[r];
 
-    if (env_flag_on("DATA2G_CPM_COH2D", true) && W > COH_HDR_W && n >= 12) {
+    if (coh2d() && W > COH_HDR_W && static_cast<int>(n) >= COH2D_MIN_ROWS) {
         Mat<double> Pw = P;
         if (!nb.empty()) {
             for (std::size_t r = 0; r < n; ++r)
@@ -1667,11 +1666,11 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
         int near_cnt = 0;
         cdouble s_near = 0.0;
         for (std::size_t i = 0; i < p_rot.size(); ++i)
-            if (std::abs(d[i]) <= 2) s_near += p_rot[i], ++near_cnt;
-        const bool has_sel = near_cnt >= 4;
+            if (std::abs(d[i]) <= COH2D_NEAR_TONE_STEP) s_near += p_rot[i], ++near_cnt;
+        const bool has_sel = near_cnt >= COH2D_MIN_NEAR_PAIRS;
         const Mat<cdouble> Z_sel = has_sel ? rot_z(std::arg(s_near)) : Z;
 
-        const int wf = std::min(W, 3);
+        const int wf = std::min(W, COH2D_FAST_W);
         std::vector<cdouble> pwz_sum(n, 0.0);
         std::vector<double> pw_sum(n, 0.0);
         for (std::size_t r = 0; r < n; ++r)
@@ -1684,7 +1683,7 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
             const std::size_t hi = std::min(n, i + static_cast<std::size_t>(wf) + 1);
             for (std::size_t j = lo; j < hi; ++j) {
                 if (j == i) continue;
-                const double kw = std::exp(-static_cast<double>(j > i ? j - i : i - j) / 1.5);
+                const double kw = std::exp(-static_cast<double>(j > i ? j - i : i - j) / COH2D_FAST_TAU);
                 num_v += kw * pwz_sum[j];
                 den_v += kw * pw_sum[j];
             }
@@ -1694,24 +1693,30 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
         Mat<cdouble> H2(n, m), H3(n, m);
         const int n1 = static_cast<int>(n) - 1;
         if (m <= 16) {
-            const double bw = 0.0035 * (m <= 8 ? 50.0 : 25.0);
-            H2 = loo_slepian(Z_sel, Pw, std::min(n1, 12), 6.0, slepian_basis(m, std::min<std::size_t>(m, 4), bw), 0.30);
-            H3 = loo_slepian(Z_sel, Pw, std::min(n1, 5), 2.2, slepian_basis(m, std::min<std::size_t>(m, 3), bw), 0.45);
+            const double bw = COH2D_DELAY_S * (m <= 8 ? 50.0 : 25.0);
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_SLOW_W), COH2D_NARROW_SLOW_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_SLOW_D), bw), COH2D_NARROW_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_FAST_W), COH2D_NARROW_FAST_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_FAST_D), bw), COH2D_NARROW_FAST_LAM);
         } else {
-            H2 = loo_slepian(Z_sel, Pw, std::min(n1, 18), 8.0, slepian_basis(m, 5, 0.08), 0.35);
-            H3 = loo_slepian(Z_sel, Pw, std::min(n1, 12), 5.0, slepian_basis(m, 9, 0.15), 0.50);
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_SLOW_W), COH2D_WIDE_SLOW_TAU,
+                             slepian_basis(m, COH2D_WIDE_SLOW_D, COH2D_WIDE_SLOW_BW), COH2D_WIDE_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_FAST_W), COH2D_WIDE_FAST_TAU,
+                             slepian_basis(m, COH2D_WIDE_FAST_D, COH2D_WIDE_FAST_BW), COH2D_WIDE_FAST_LAM);
         }
         const auto loo_loss = [&](const Mat<cdouble>& Zc, const Mat<cdouble>& Hc) {
-            std::vector<double> rsum(n);
+            std::vector<double> rsum(n), rbuf(m);
             for (std::size_t r = 0; r < n; ++r) {
-                double sr = 0.0;
-                for (std::size_t k = 0; k < m; ++k) sr += Pw[r][k] * sq_abs(Zc[r][k] - Hc[r][k]);
-                rsum[r] = sr;
+                for (std::size_t k = 0; k < m; ++k) rbuf[k] = Pw[r][k] * sq_abs(Zc[r][k] - Hc[r][k]);
+                rsum[r] = np_sum(rbuf);
             }
             return np_mean(rsum);
         };
         const double losses[4] = {loo_loss(Z, H), loo_loss(Z, H1), loo_loss(Z_sel, H2), loo_loss(Z_sel, H3)};
-        const int best_idx = static_cast<int>(std::min_element(losses, losses + 4) - losses);
+        int best_idx = 0;
+        double best_loss = losses[0];
+        for (int i = 1; i < 4; ++i)
+            if (losses[i] < best_loss * (1.0 - COH2D_TIE_REL)) best_idx = i, best_loss = losses[i];
         if (best_idx > 0) {
             const bool use_sel = best_idx >= 2 && has_sel;
             if (use_sel) Z = Z_sel;

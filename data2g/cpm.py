@@ -1303,6 +1303,21 @@ COH_PREGATE = (12.0, 10.0)
 # within +-0.12 (after the data's DD, as ModemRx's soft then gives it:
 # awgn -1.70, -1.89, -1.13). DATA2G_CPM_COH_CTL=0: the square law.
 COH_CTL = os.environ.get("DATA2G_CPM_COH_CTL", "1") == "1"
+# 2D Slepian (time, tone) LOO channel estimation in coh_metric (#363).
+# Tuned on paired scripts/loss_study.py fading cells (seeds 7000..7019, confirmed 7500..7519):
+# +13.5% mean on master (+8.2% on next). DATA2G_CPM_COH2D=1 (default); any other value disables.
+COH2D = os.environ.get("DATA2G_CPM_COH2D", "1") == "1"
+COH2D_MIN_ROWS = 12  # minimum window length (rows) to enable 2D estimation
+COH2D_NEAR_TONE_STEP = 2  # max |d| tone jump for near-tone residual CFO estimate
+COH2D_MIN_NEAR_PAIRS = 4  # min near-tone pairs needed to estimate nu_sel
+COH2D_FAST_W = 3  # fast exponential flat kernel half-width (rows)
+COH2D_FAST_TAU = 1.5  # fast exponential flat kernel decay (rows)
+COH2D_TIE_REL = 1e-9  # relative LOO-loss margin to replace incumbent (Python/C++ tie-breaking parity)
+COH2D_DELAY_S = 0.0035  # nominal multipath delay spread (s) for m <= 16 (bw = delay * df_hz cycles/tone)
+COH2D_NARROW_SLOW = (12, 6.0, 4, 0.30)  # (W rows, tau rows, D basis, lam ridge) for m <= 16 slow fading
+COH2D_NARROW_FAST = (5, 2.2, 3, 0.45)  # (W rows, tau rows, D basis, lam ridge) for m <= 16 fast fading
+COH2D_WIDE_SLOW = (18, 8.0, 5, 0.08, 0.35)  # (W, tau, D, bw cycles/tone, lam) for m > 16 slow fading
+COH2D_WIDE_FAST = (12, 5.0, 9, 0.15, 0.50)  # (W, tau, D, bw cycles/tone, lam) for m > 16 fast fading
 
 
 @lru_cache(maxsize=None)
@@ -1323,10 +1338,10 @@ def _loo_slepian(Z: np.ndarray, Pw: np.ndarray, W: int, tau: float, Phi: np.ndar
     kern[W] = 0.0
     b_row = (Pw * Z) @ Phi  # (n, D) complex
     G_row = np.einsum("jk,ka,kb->jab", Pw, Phi, Phi)  # (n, D, D) real symmetric
-    B_re = np.column_stack([np.convolve(b_row[:, d].real, kern, "same") for d in range(D)])
-    B_im = np.column_stack([np.convolve(b_row[:, d].imag, kern, "same") for d in range(D)])
+    B_re = np.column_stack([np.convolve(b_row[:, d].real, kern, "full")[W:W + n] for d in range(D)])
+    B_im = np.column_stack([np.convolve(b_row[:, d].imag, kern, "full")[W:W + n] for d in range(D)])
     G_flat = G_row.reshape(n, D * D)
-    G_sum = np.column_stack([np.convolve(G_flat[:, d], kern, "same") for d in range(D * D)]).reshape(n, D, D)
+    G_sum = np.column_stack([np.convolve(G_flat[:, d], kern, "full")[W:W + n] for d in range(D * D)]).reshape(n, D, D)
     G_reg = G_sum + lam * np.eye(D)[None]
     rhs = np.stack([B_re, B_im], axis=-1)  # (n, D, 2)
     sol = np.linalg.solve(G_reg, rhs)
@@ -1351,12 +1366,13 @@ def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float) -> np.ndarray:
     per-tone phase ramp and the residual CFO come out first, from the
     decided tones' consecutive pairs weighted by their probabilities.
 
-    For slot metrics (W > COH_HDR_W, n >= 12, DATA2G_CPM_COH2D != 0), selects
-    by leave-one-row-out error among the +-W flat boxcar, a fast exponential
-    flat kernel, and two real-Slepian delay-subspace ridge predictors using
-    near-tone (|d| <= 2) CFO, whitened by tone_floors when a carrier is
-    present, with closed-form LOO Stein shrinkage toward the boxcar (#363).
-    Header reads (W <= COH_HDR_W) stay on the flat boxcar unchanged."""
+    For slot metrics (W > COH_HDR_W, n >= COH2D_MIN_ROWS, DATA2G_CPM_COH2D=1
+    (default); any other value disables), selects by leave-one-row-out error
+    among the +-W flat boxcar, a fast exponential flat kernel, and two
+    real-Slepian delay-subspace ridge predictors using near-tone (|d| <= 2)
+    CFO, whitened by tone_floors when a carrier is present, with closed-form
+    LOO Stein shrinkage toward the boxcar (#363). Header reads
+    (W <= COH_HDR_W) stay on the flat boxcar unchanged."""
     Z0 = Z
     n, m = Z0.shape
     r = np.arange(n)
@@ -1379,35 +1395,44 @@ def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float) -> np.ndarray:
     a = (P * Z).sum(axis=1)
     k0 = np.ones(2 * W + 1)
     k0[W] = 0.0
-    cnt0 = np.maximum(np.convolve(np.ones(n), k0, "same"), 1)
-    h_base = (np.convolve(a, k0, "same") / cnt0)[:, None]
+    cnt0 = np.maximum(np.convolve(np.ones(n), k0, "full")[W:W + n], 1)
+    h_base = (np.convolve(a, k0, "full")[W:W + n] / cnt0)[:, None]
     H = h_base
-    if os.environ.get("DATA2G_CPM_COH2D", "1") == "1" and W > COH_HDR_W and n >= 12:
+    if COH2D and W > COH_HDR_W and n >= COH2D_MIN_ROWS:
         Pw = P if nb is None else P * (n0 / nb)[None]
-        near = np.abs(d) <= 2
-        if int(near.sum()) >= 4:
+        near = np.abs(d) <= COH2D_NEAR_TONE_STEP
+        if int(near.sum()) >= COH2D_MIN_NEAR_PAIRS:
             nu_sel = np.angle(np.sum(p_rot[near]))
             Z_sel = Z0 * tone_rot * np.exp(-1j * nu_sel * r)[:, None]
         else:
             Z_sel = Z
-        wf = min(W, 3)
-        k1 = np.exp(-np.abs(np.arange(-wf, wf + 1, dtype=np.float64)) / 1.5)
+        wf = min(W, COH2D_FAST_W)
+        k1 = np.exp(-np.abs(np.arange(-wf, wf + 1, dtype=np.float64)) / COH2D_FAST_TAU)
         k1[wf] = 0.0
-        h1 = (np.convolve((Pw * Z).sum(axis=1), k1, "same")
-              / np.maximum(np.convolve(Pw.sum(axis=1), k1, "same"), 1e-9))[:, None]
+        h1 = (np.convolve((Pw * Z).sum(axis=1), k1, "full")[wf:wf + n]
+              / np.maximum(np.convolve(Pw.sum(axis=1), k1, "full")[wf:wf + n], 1e-9))[:, None]
         if m <= 16:
-            bw = 0.0035 * (50.0 if m <= 8 else 25.0)
-            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, 12), 6.0, _slepian_basis(m, min(m, 4), bw), 0.30)
-            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, 5), 2.2, _slepian_basis(m, min(m, 3), bw), 0.45)
+            bw = COH2D_DELAY_S * (50.0 if m <= 8 else 25.0)
+            w2, t2, d2, l2 = COH2D_NARROW_SLOW
+            w3, t3, d3, l3 = COH2D_NARROW_FAST
+            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, w2), t2, _slepian_basis(m, min(m, d2), bw), l2)
+            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, w3), t3, _slepian_basis(m, min(m, d3), bw), l3)
         else:
-            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, 18), 8.0, _slepian_basis(m, 5, 0.08), 0.35)
-            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, 12), 5.0, _slepian_basis(m, 9, 0.15), 0.50)
+            w2, t2, d2, bw2, l2 = COH2D_WIDE_SLOW
+            w3, t3, d3, bw3, l3 = COH2D_WIDE_FAST
+            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, w2), t2, _slepian_basis(m, d2, bw2), l2)
+            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, w3), t3, _slepian_basis(m, d3, bw3), l3)
         cands = [(Z, np.broadcast_to(h_base, (n, m))), (Z, np.broadcast_to(h1, (n, m))), (Z_sel, h2), (Z_sel, h3)]
         losses = [float(np.mean((Pw * _sq(Zc - hc)).sum(axis=1))) for Zc, hc in cands]
-        best_idx = int(np.argmin(losses))
+        best_idx = 0
+        best_loss = losses[0]
+        for i in range(1, len(losses)):
+            if losses[i] < best_loss * (1.0 - COH2D_TIE_REL):
+                best_idx = i
+                best_loss = losses[i]
         if best_idx > 0:
             Z, hb = cands[best_idx]
-            hb0 = ((np.convolve((P * Z).sum(axis=1), k0, "same") / cnt0)[:, None]
+            hb0 = ((np.convolve((P * Z).sum(axis=1), k0, "full")[W:W + n] / cnt0)[:, None]
                    if Z is Z_sel else h_base)
             diff = hb - hb0
             num = float(np.real(np.sum(Pw * (Z - hb0) * np.conj(diff))))
