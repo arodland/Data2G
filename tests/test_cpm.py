@@ -541,3 +541,36 @@ def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
     assert cpm._rake_dt(cpm.GRIDS["c16r25"]) == 0
     assert cpm._rake_dt(cpm.GRIDS["c8r50"]) == want_dt(cpm.GRIDS["c8r50"])
     assert cpm._rake_dt(cpm.GRIDS["c32r62"]) == want_dt(cpm.GRIDS["c32r62"])
+
+    # Clean high-SNR AWGN on c32r62: Rake must not fire (dd_metric matches DATA2G_CPM_RAKE=0)
+    from data2g import hfchannel
+
+    y_awgn = hfchannel.awgn(pad, 10.0, seed=7)
+    lock_a = cpm.find(g, y_awgn)
+    assert lock_a is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    ra0 = cpm.receive(y_awgn, lock_a)
+    Ma0 = cpm.dd_metric(ra0, {}, 1)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    ra1 = cpm.receive(y_awgn, lock_a)
+    Ma1 = cpm.dd_metric(ra1, {}, 1)
+    np.testing.assert_array_equal(Ma1, Ma0)
+
+    # A slot with < RAKE_MIN_CAL_ROWS external calibration rows (slot 2 of a 2-data-slot burst
+    # has 0 sync/header rows in its window) must ignore a wrong posterior for itself and return M0
+    dat2 = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
+    x2 = cpm.modulate(spec, [ctl, dat, dat2], dup=False)
+    pad2 = np.concatenate([np.zeros(2000), x2, np.zeros(2000)])
+    y2 = pad2 + 0.9 * np.roll(pad2, delay) + rng.normal(0, 0.15, len(pad2))
+    lock2 = cpm.find(g, y2)
+    assert lock2 is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    r2_0 = cpm.receive(y2, lock2)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    r2_1 = cpm.receive(y2, lock2)
+    wrong_lp = np.full((len(vals), g.m), -20.0)
+    wrong_lp[np.arange(len(vals)), (vals + 1) % g.m] = 0.0
+    np.testing.assert_array_equal(
+        cpm.dd_metric(r2_1, {2: wrong_lp.reshape(-1)}, 2),
+        cpm.dd_metric(r2_0, {2: wrong_lp.reshape(-1)}, 2),
+    )

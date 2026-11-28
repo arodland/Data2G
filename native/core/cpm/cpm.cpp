@@ -2245,14 +2245,18 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
             for (int k = 0; k < g.m; ++k) q[k] = std::exp(lp[k] - mx);
             const double tot = np_sum(q);
             for (int k = 0; k < g.m; ++k) P[rr[i] - a][gr[k]] = q[k] / tot;  // value k on tone gray(k)
-            cal[rr[i] - a] = true;
+            if (s != slot) cal[rr[i] - a] = true;
         }
     }
     const Mat<double> M = coh_metric(Z, P, W, noise_n0(E, g.noise_median), g.L);
     Mat<double> out(sr.size(), g.m);
     for (std::size_t i = 0; i < sr.size(); ++i) std::copy(M[sr[i] - a], M[sr[i] - a] + g.m, out[i]);
 
-    if (g.L == 1 && r.finger_dt > 0 && r.Z_early.rows == r.Z.rows && r.Z_late.rows == r.Z.rows) {
+    std::vector<std::size_t> cal_idx;
+    for (std::size_t i = 0; i < cal.size(); ++i)
+        if (cal[i]) cal_idx.push_back(i);
+    if (g.L == 1 && r.finger_dt > 0 && r.Z_early.rows == r.Z.rows && r.Z_late.rows == r.Z.rows &&
+        static_cast<int>(cal_idx.size()) >= RAKE_MIN_CAL_ROWS) {
         const std::size_t n_win = static_cast<std::size_t>(b - a), m_u = static_cast<std::size_t>(g.m);
         double best_snr = 0.0;
         Mat<cdouble> best_U, best_Zf;
@@ -2292,32 +2296,19 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
             Mat<double> Mc_all(n_win, m_u);
             for (std::size_t i = 0; i < n_win; ++i)
                 for (std::size_t k = 0; k < m_u; ++k) Mc_all[i][k] = M[i][k] + RAKE_COMB_WEIGHT * Mu_all[i][k];
-            std::vector<std::size_t> cal_idx;
-            for (std::size_t i = 0; i < n_win; ++i)
-                if (cal[i]) cal_idx.push_back(i);
-            const bool use_cal = static_cast<int>(cal_idx.size()) >= RAKE_MIN_CAL_ROWS;
             const auto row_lse = [&](const double* row) {
                 double acc = row[0];
                 for (std::size_t k = 1; k < m_u; ++k) acc = logaddexp(acc, row[k]);
                 return acc;
             };
-            Mat<double> W_cal(use_cal ? cal_idx.size() : n_win, m_u);
-            if (use_cal) {
-                for (std::size_t j = 0; j < cal_idx.size(); ++j) std::copy_n(P[cal_idx[j]], m_u, W_cal[j]);
-            } else {
-                for (std::size_t i = 0; i < n_win; ++i) {
-                    const double lse0 = row_lse(M[i]), lsef = row_lse(Mf_all[i]);
-                    for (std::size_t k = 0; k < m_u; ++k)
-                        W_cal[i][k] = 0.5 * (std::exp(M[i][k] - lse0) + std::exp(Mf_all[i][k] - lsef));
-                }
-            }
             const auto log_post = [&](const Mat<double>& Mmat) {
-                const std::size_t nr = W_cal.rows;
+                const std::size_t nr = cal_idx.size();
                 std::vector<double> rsum(nr);
                 for (std::size_t j = 0; j < nr; ++j) {
-                    const double* row = Mmat[use_cal ? cal_idx[j] : j];
+                    const std::size_t ri = cal_idx[j];
+                    const double* row = Mmat[ri];
                     const double lse = row_lse(row);
-                    for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = W_cal[j][k] * (row[k] - lse);
+                    for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = P[ri][k] * (row[k] - lse);
                     rsum[j] = np_sum(rbuf);
                 }
                 return np_mean(rsum);

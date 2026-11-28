@@ -1919,12 +1919,13 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
         q = np.exp(lp - lp.max(axis=1, keepdims=True))
         q /= q.sum(axis=1, keepdims=True)
         P[rr[keep][:, None] - a, gray[None]] = q  # value v on tone gray(v)
-        cal[rr[keep] - a] = True
+        if s != slot:
+            cal[rr[keep] - a] = True
     idx_s = rows[slot] - a
     M0_all = coh_metric(Z.reshape(-1, g.m), P, W, _n0(E, g.k) if g.L > 1 else _n0(E), g.L)
     M0 = M0_all[idx_s]
     fdt = int(r.get("finger_dt", 0))
-    if g.L == 1 and fdt > 0 and "Z_early" in r and "Z_late" in r:
+    if g.L == 1 and fdt > 0 and "Z_early" in r and "Z_late" in r and int(cal.sum()) >= RAKE_MIN_CAL_ROWS:
         best_snr = 0.0
         best_u = None
         for dt, Zf_all in ((-fdt, r["Z_early"]), (fdt, r["Z_late"])):
@@ -1943,16 +1944,10 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
             Mu_all = coh_metric(U, P, W, n0_u)
             Mf_all = coh_metric(Zf, P, W, _n0(_sq(Zf)))
             Mc_all = M0_all + RAKE_COMB_WEIGHT * Mu_all
-            # Calibrated proper log-posterior score: on known/decoded rows when available,
-            # else under the symmetric prompt/finger posterior (never rewards overconfidence).
-            if int(cal.sum()) >= RAKE_MIN_CAL_ROWS:
-                W_cal = P[cal]
-                S0, Sf, Sc = M0_all[cal], Mf_all[cal], Mc_all[cal]
-            else:
-                q0 = np.exp(M0_all - np.logaddexp.reduce(M0_all, axis=1, keepdims=True))
-                qf = np.exp(Mf_all - np.logaddexp.reduce(Mf_all, axis=1, keepdims=True))
-                W_cal = 0.5 * (q0 + qf)
-                S0, Sf, Sc = M0_all, Mf_all, Mc_all
+            # Calibrated proper log-posterior score on known/decoded calibration rows
+            # (sync, header, and other decoded slots; never the current slot itself).
+            W_cal = P[cal]
+            S0, Sf, Sc = M0_all[cal], Mf_all[cal], Mc_all[cal]
             lp0 = float(np.mean((W_cal * (S0 - np.logaddexp.reduce(S0, axis=1, keepdims=True))).sum(axis=1)))
             lpf = float(np.mean((W_cal * (Sf - np.logaddexp.reduce(Sf, axis=1, keepdims=True))).sum(axis=1)))
             lpc = float(np.mean((W_cal * (Sc - np.logaddexp.reduce(Sc, axis=1, keepdims=True))).sum(axis=1)))
