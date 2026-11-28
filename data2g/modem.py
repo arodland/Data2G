@@ -2729,13 +2729,17 @@ def _cal_payload(n: int, state: list) -> bytes:
 def _sc_cal(spec) -> tuple:
     """A submode's scattered pilots as its transmitter leaves them, measured
     once on clean bursts of its own: (their gain over the data cells', their
-    distortion over their own power)."""
+    distortion over their own power). Demodulated directly at exact timing
+    (CP midpoint, HEADER_BACKOFF) and zero CFO so residual CFO estimation
+    noise does not rotate pilot phases across frames (issue #358)."""
     if codes.payload_bytes(spec) <= 0:
         return (1.0, spec.clip.ratio)
     key = (spec.name, SC_RESTORE_ACE, tuple(SC_BANDS))
     if key not in _SC_CAL:
-        _SC_CAL[key] = (1.0, spec.clip.ratio)  # while measuring
         b = ofdm.band(spec.band)
+        sb = ofdm.band(spec.sync_band)
+        per = sc_period(b.nc)
+        p0 = 800 + LEADIN_SAMPLES + sb.spec.preamble_samples + header_samples(spec.sync_band)
         state = [0]
         num_p = np.zeros(b.nc, dtype=np.complex128)
         den_p = np.zeros(b.nc)
@@ -2747,12 +2751,23 @@ def _sc_cal(spec) -> tuple:
             bits = np.stack([codes.encode(spec, _cal_payload(codes.payload_bytes(spec), state), 0, index=i)
                              for i in range(n_cw)])
             x = modulate_bits(codes.spread(bits, spec.bits_per_cu), spec)
-            r = receive(np.concatenate([np.zeros(800), x, np.zeros(800)]),
-                        known=dict(start=800 + LEADIN_SAMPLES, cfo=0.0, spec=spec, n_cw=n_cw))
+            z = dsp.to_baseband(np.concatenate([np.zeros(800), x, np.zeros(800)]))
+            n_f = n_cw * spec.frames_per_cw
+            kc = copy_frame(spec.sync_band, n_f)
+            n_air = n_f + (kc is not None)
+            norm = np.array([f for f in range(n_air) if f != kc])
+            raw = np.array([[b.demod_window(z, p0 + int(f) * FRAME_SAMPLES + s * NSYM + NCP, HEADER_BACKOFF)
+                             for s in range(SYMS_PER_FRAME)] for f in norm])
+            cells = raw.reshape(n_f, -1)
+            ls = np.empty((n_f, b.nc), dtype=np.complex128)
+            for f_ in range(per):
+                idx = np.flatnonzero(norm % per == f_)
+                if len(idx):
+                    P_f, PK_f, _ = sc_frame_cells(b.nc, f_)
+                    ls[idx] = cells[idx[:, None], P_f] / b.pilot[PK_f]
             X = constellation.modulate(codes.spread(bits, spec.bits_per_cu), constellation.load(spec.constellation))
-            Y = data_symbols(r["raw"]).reshape(len(r["raw"]), -1)
+            Y = np.array([cells[idx, sc_frame_cells(b.nc, int(fa))[2]] for idx, fa in enumerate(norm)])
             X = X.reshape(Y.shape)
-            ls, norm = r["sc"]["ls"], r["sc"]["norm"]
             for idx, fa in enumerate(norm):
                 _, PK_f, Dc_f = sc_frame_cells(b.nc, int(fa))
                 yx = Y[idx] * X[idx].conj()
