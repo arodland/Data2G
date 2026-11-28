@@ -11,6 +11,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "tables/cpm.hpp"
 #include "tables/format.hpp"
@@ -146,14 +147,18 @@ const ldpc::Code& mother_code(const Spec& s) {
     return *c.mother;
 }
 
-// numpy's broadcast of a scalar-or-per-row argument.
+// numpy's broadcast of a scalar-or-per-row argument. The default takes the span's type and
+// is not deduced: where std::uint32_t is unsigned long (Xtensa GCC, many bare-metal ARM
+// toolchains), mask_at's 0u would otherwise deduce a conflicting T and fail to compile.
 template <typename T>
-T at(std::span<const T> v, std::size_t row, std::size_t rows, T dflt) {
+T at(std::span<const T> v, std::size_t row, std::size_t rows, std::type_identity_t<T> dflt) {
     if (v.empty()) return dflt;
     if (v.size() == 1) return v[0];
     if (v.size() != rows) throw std::invalid_argument("per-row argument: expected 1 or one per row");
     return v[row];
 }
+static_assert(std::is_same_v<decltype(at(std::span<const unsigned long>{}, 0, 0, 0u)), unsigned long>,
+              "at's default must convert to the span's type, whatever std::uint32_t is");
 
 std::uint32_t mask_at(std::span<const std::uint32_t> m, std::size_t b, std::size_t rows) { return at(m, b, rows, 0u); }
 int index_at(std::span<const int> i, std::size_t b, std::size_t rows) { return at(i, b, rows, static_cast<int>(b)); }
