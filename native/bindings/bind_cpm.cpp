@@ -249,6 +249,7 @@ void bind_cpm(py::module_& m) {
         return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
     });
     c.def("coh_ctl", &cpm::coh_ctl);
+    c.def("coh2d", &cpm::coh2d);
     // --- neighbour-leak tone likelihood (cpm.py LEAK_K, LEAK_Z, CTL_SQ) ---
     static constexpr const char* uses[] = {"lock", "ctl", "data", "dd"};
     const auto use_of = [](const std::string& u) {
