@@ -15,6 +15,7 @@
 
 #include "tables/cpm.hpp"
 #include "tables/format.hpp"
+#include "tables/polar_ga.hpp"
 
 namespace data2g::codes {
 
@@ -226,7 +227,7 @@ Info decode_gf(const Spec& s, const gfldpc::Decoder& dec, const Mat<float>& dein
     return out;
 }
 
-// (B, L * k) polar paths in the code's order -> the info bits' (polar_order is its own inverse).
+// (B, L * k) polar paths in the code's order -> the info bits' (inverse of polar_order).
 void reorder_paths(const Spec& s, Mat<std::uint8_t>& paths) {
     const auto& order = polar_order(s);
     const std::size_t k = order.size();
@@ -234,7 +235,7 @@ void reorder_paths(const Spec& s, Mat<std::uint8_t>& paths) {
     for (std::size_t r = 0; r < paths.rows; ++r)
         for (std::size_t off = 0; off + k <= paths.cols; off += k) {
             std::uint8_t* p = paths[r] + off;
-            for (std::size_t j = 0; j < k; ++j) tmp[j] = p[order[j]];
+            for (std::size_t j = 0; j < k; ++j) tmp[static_cast<std::size_t>(order[j])] = p[j];
             std::copy(tmp.begin(), tmp.end(), p);
         }
 }
@@ -783,12 +784,17 @@ std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf,
 }
 
 const std::vector<int>& polar_order(const Spec& s) {
-    const int nb = 8 * s.payload_bytes;
-    std::vector<int> out(static_cast<std::size_t>(s.k));
-    for (int j = 0; j < s.k; ++j) out[static_cast<std::size_t>(j)] = j < nb ? nb - 1 - j : j;
     std::lock_guard lock(cache_mutex);
     auto& c = cache[&s];
-    if (!c.order) c.order = std::move(out);
+    if (!c.order) {
+        for (const auto& o : tables::POLAR_ORDERS) {
+            if (o.name == s.name) {
+                c.order.emplace(o.order.begin(), o.order.end());
+                return *c.order;
+            }
+        }
+        throw std::out_of_range(std::string(s.name) + ": no POLAR_ORDERS entry");
+    }
     return *c.order;
 }
 

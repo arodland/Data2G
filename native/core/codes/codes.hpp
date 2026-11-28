@@ -247,7 +247,8 @@ std::vector<double> pad_prior(const Spec& s, std::span<const double> llr);
 // combined IR buffer row the same (codes.add_prior_buffer).
 std::vector<float> add_prior(const Spec& s, std::span<const double> soft, std::span<const double> prior, int index);
 std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf, std::span<const double> prior);
-// The order info bits enter a polar code (codes.polar_order): the payload's bits reversed, then CRC and fill.
+// The order info bits enter a polar code (codes.polar_order): CRC on the strongest GA synthetic channels,
+// payload bits in decreasing reliability, then fill on the weakest.
 const std::vector<int>& polar_order(const Spec& s);
 // decode_raw with the info bits `known` gives known (0/1, -1 unknown; unscrambled), every row sent at burst
 // position `index`: LDPC pinned (pin), polar frozen in a code of the rest (codes.decode_raw_pinned).
