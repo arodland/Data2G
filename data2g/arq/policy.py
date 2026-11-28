@@ -37,7 +37,7 @@ from . import link as L
 from . import predictor as P
 from .session import LINK_LOST_S
 
-SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
+SIZE_S = (1.0, 3.0, 6.0, 12.05)  # size-hint airtime classes (s): 0 shortest (+0.05 s for scattered-pilot 12.016 s)
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 # the predictor's training range for the previous burst's age (scripts/predictor_data.py).
