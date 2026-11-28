@@ -442,3 +442,27 @@ def test_presence_matches(native, reference):
             tp.feed(sig, 123)
             assert tn.presence(123, 123 + L) == pytest.approx(tp.presence(123, 123 + L), rel=RTOL, abs=1e-12)
             assert tn.present(123, 123 + L) == tp.present(123, 123 + L)
+
+
+@pytest.mark.parametrize("name", ("fsk32r62-r1/2", "fsk8r50-r1/2"))
+def test_dd_metric_rake_parity(native, reference, name, monkeypatch):
+    """Shifted-window Rake (#364) in dd_metric matches Python on a 2-path
+    multipath channel with DATA2G_CPM_RAKE=1 and 0."""
+    rng = np.random.default_rng(42)
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    coded = _burst(spec, 1, False, rng)
+    x = ref(reference, "modulate")(spec, coded, False)
+    pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
+    delay = int(round(0.0035 * FS))
+    y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
+    lock = ref(reference, "find")(g, y)
+    assert lock is not None
+    for flag in ("0", "1"):
+        monkeypatch.setenv("DATA2G_CPM_RAKE", flag)
+        r = ref(reference, "receive")(y, lock)
+        for slot in range(r["n_cw"]):
+            M_py = ref(reference, "dd_metric")(r, {}, slot)
+            M_cc = native.cpm.dd_metric(spec.name, r["dup"], r["n_cw"], r["Z"], {}, slot,
+                                        int(r.get("finger_dt", 0)), r.get("Z_early"), r.get("Z_late"))
+            np.testing.assert_allclose(M_cc, M_py, rtol=1e-9, atol=1e-9)

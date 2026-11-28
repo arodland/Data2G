@@ -69,6 +69,11 @@ py::dict rx_dict(const receiver::Rx& rx) {
     d["soft"] = soft;
     d["E"] = np(r.E);
     d["Z"] = np(r.Z);
+    if (r.finger_dt > 0) {
+        d["finger_dt"] = r.finger_dt;
+        d["Z_early"] = np(r.Z_early);
+        d["Z_late"] = np(r.Z_late);
+    }
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;

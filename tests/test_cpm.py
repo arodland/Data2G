@@ -438,3 +438,81 @@ def test_coh_metric_2d_slepian_vs_boxcar(monkeypatch):
     m0 = float(np.mean(M0[np.arange(n), tones] - M0.mean(axis=1)))
     m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
     assert m1 > m0 + 2.0, (m0, m1)
+
+
+def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
+    """Shifted-window Rake (#364) fires on short-symbol grids (c8r50, c32r62)
+    when multipath creates strong innovation at +-3 ms, improves the metric
+    margin on a 2-path 3.5 ms channel, and leaves c16r25 untouched."""
+    from data2g.config import FS
+
+    rng = np.random.default_rng(123)
+    spec = cpm.SPECS["fsk32r62-r1/2"]
+    g = cpm.GRIDS[spec.grid]
+    ctl = codes.encode(cpm.CTL[g.name], rng.bytes(codes.payload_bytes(cpm.CTL[g.name])))
+    dat = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
+    x = cpm.modulate(spec, [ctl, dat], dup=False)
+    delay = int(round(0.0035 * FS))  # 3.5 ms second path
+    # Lead + 2-path multipath (0.9 real delayed echo) + light noise
+    pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
+    y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
+    lock = cpm.find(g, y)
+    assert lock is not None
+
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    r0 = cpm.receive(y, lock)
+    assert "finger_dt" not in r0
+    M0 = cpm.dd_metric(r0, {}, 1)
+
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    r1 = cpm.receive(y, lock)
+    want_dt = lambda grid: min(cpm.RAKE_SHIFT_MS * FS // 1000, grid.T // 4)
+    assert r1["finger_dt"] == want_dt(g)
+    assert r1["Z_early"].shape == r1["Z"].shape == r1["Z_late"].shape
+    M1 = cpm.dd_metric(r1, {}, 1)
+
+    # Sent tones of data slot 1
+    bits = dat.reshape(-1, g.bits)
+    vals = bits @ (1 << np.arange(g.bits - 1, -1, -1))
+    sent = cpm._gray(g.m)[vals]
+    sc0 = float(np.mean(M0[np.arange(len(sent)), sent] - M0.mean(axis=1)))
+    sc1 = float(np.mean(M1[np.arange(len(sent)), sent] - M1.mean(axis=1)))
+    assert sc1 > sc0 + 1.0, (sc0, sc1)
+
+    # c16r25 (T > RAKE_MAX_T) never populates finger_dt
+    assert cpm._rake_dt(cpm.GRIDS["c16r25"]) == 0
+    assert cpm._rake_dt(cpm.GRIDS["c8r50"]) == want_dt(cpm.GRIDS["c8r50"])
+    assert cpm._rake_dt(cpm.GRIDS["c32r62"]) == want_dt(cpm.GRIDS["c32r62"])
+
+    # Clean high-SNR AWGN on c32r62: Rake must not fire (dd_metric matches DATA2G_CPM_RAKE=0)
+    from data2g import hfchannel
+
+    y_awgn = hfchannel.awgn(pad, 10.0, seed=7)
+    lock_a = cpm.find(g, y_awgn)
+    assert lock_a is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    ra0 = cpm.receive(y_awgn, lock_a)
+    Ma0 = cpm.dd_metric(ra0, {}, 1)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    ra1 = cpm.receive(y_awgn, lock_a)
+    Ma1 = cpm.dd_metric(ra1, {}, 1)
+    np.testing.assert_array_equal(Ma1, Ma0)
+
+    # A slot with < RAKE_MIN_CAL_ROWS external calibration rows (slot 2 of a 2-data-slot burst
+    # has 0 sync/header rows in its window) must ignore a wrong posterior for itself and return M0
+    dat2 = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
+    x2 = cpm.modulate(spec, [ctl, dat, dat2], dup=False)
+    pad2 = np.concatenate([np.zeros(2000), x2, np.zeros(2000)])
+    y2 = pad2 + 0.9 * np.roll(pad2, delay) + rng.normal(0, 0.15, len(pad2))
+    lock2 = cpm.find(g, y2)
+    assert lock2 is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    r2_0 = cpm.receive(y2, lock2)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    r2_1 = cpm.receive(y2, lock2)
+    wrong_lp = np.full((len(vals), g.m), -20.0)
+    wrong_lp[np.arange(len(vals)), (vals + 1) % g.m] = 0.0
+    np.testing.assert_array_equal(
+        cpm.dd_metric(r2_1, {2: wrong_lp.reshape(-1)}, 2),
+        cpm.dd_metric(r2_0, {2: wrong_lp.reshape(-1)}, 2),
+    )
