@@ -137,12 +137,10 @@ double harq_boost_db(const Mode& m, std::span<const std::pair<int, double>> txs,
     if (txs.empty()) return 0.0;
     const auto cf = m.is_cpm() ? std::string_view("gray-qam4") : const_family(m.ofdm->constellation);
     const auto& tab = table(cf).mi;
-    const double lo = tab.front() + 1e-6, hi = tab.back() - 1e-3;
+    const double lo = tab.front() + HARQ_MI_FLOOR, hi = tab.back() - HARQ_MI_CEIL_MARGIN;
     const double snr_cur = interp(std::clamp(cur_mi, lo, hi), tab, tables::CAPACITY_GRID);
     const int cyc = rv_cycle(m);
-    int max_prev = 0;
-    for (const auto& [rv, _] : txs) max_prev = std::max(max_prev, rv);
-    const int rv_next = (max_prev + 1) % cyc;
+    const int rv_next = ((txs.back().first % cyc + cyc) % cyc + 1) % cyc;
     const double B = mother_blocks(m);
     struct Seg {
         double a, b, g;

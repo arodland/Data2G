@@ -78,7 +78,8 @@ NOD_MODE = "fsk16r25-r1/3"  # the mode a nod's control is packed and named in (i
 REPEAT_KEY, REPEAT_SESSION_KEY = ("rep", 1, 0), ("rep", 2, 0)
 # predictor.CONSTS keys in Policy.measured, for stored HARQ reception quality (RxSide.harq)
 MI_KEYS = ("mi_gray-qam4", "mi_gray-qam16", "mi_c64-snr18", "mi_c256-snr26")
-HARQ_MAX_TX = 8  # stored receptions per undecoded seq at most
+# cap per-seq HARQ history at the watchdog's resync window (resync clears rx.harq; bounds growth when tx is idle)
+HARQ_MAX_TX = NO_PROGRESS_TURNS
 # core word fields, most significant first (frames.Core.pack): widths
 CORE_BITS = (2, 2, 3, 3, 7, 1, 6, 6, 2)
 
@@ -1110,7 +1111,7 @@ class Station:
     def _note_harq(self, submode: str, has_data: bool):
         """Record post-refinement reception MIs for undecoded HARQ slots (issue #360)."""
         m = self.policy.measured
-        mi = tuple(float(m[k]) for k in MI_KEYS) if m and all(k in m for k in MI_KEYS) else None
+        mi = tuple(float(m[k]) for k in MI_KEYS) if self._rx_failed and m and all(k in m for k in MI_KEYS) else None
         if mi is not None:
             for seq, rv in self._rx_failed:
                 if self.rx.cum <= seq < self.rx.cum + WINDOW and seq not in self.rx.buf:

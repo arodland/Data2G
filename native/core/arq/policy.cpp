@@ -22,6 +22,10 @@ double round2(double x) {
     return std::strtod(buf, nullptr);
 }
 
+double quantize_boost(double b) {
+    return b > 0.0 ? std::floor(b / HARQ_BOOST_STEP_DB + 0.5) * HARQ_BOOST_STEP_DB : 0.0;
+}
+
 double logit_shift(double q, double b) {
     q = std::clamp(q, 1e-6, 1 - 1e-6);
     return 1 / (1 + std::exp(-(std::log(q / (1 - q)) + b)));
@@ -272,8 +276,9 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
         const auto sh = shift.find(s.band);
-        return std::tuple<double, double, int>{round2(burst_seconds(s, n_cw)),
-                                               (sh == shift.end() ? 0.0 : sh->second) - round2(boost), i};
+        const double sh0 = sh == shift.end() ? 0.0 : sh->second;
+        const double qb = quantize_boost(boost);
+        return std::tuple<double, double, int>{round2(burst_seconds(s, n_cw)), qb > 0.0 ? sh0 - qb : sh0, i};
     };
     auto predicted_at = [&](const Mode& s, int n_cw, double boost = 0.0) -> const Outcome& {
         const auto key = key_of(s, n_cw, boost);
@@ -328,17 +333,58 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             })};
         data_cands = std::move(c);
     }
+    const Mode* cur = st.rx_mode ? arq::mode(*st.rx_mode) : nullptr;
+    if (!cur && !log.empty()) cur = &mode_at(log.back().data);
+    const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
+    const bool use_harq = cur && (!st.rx_mode || cur->name == *st.rx_mode) && !st.harq.empty();
+    const bool chat = st.chat;
+    std::vector<double> cur_boosts;
+    if (!chat && use_harq && std::find(data_cands.begin(), data_cands.end(), cur) != data_cands.end()) {
+        std::size_t ci = 0;
+        if (!cur->is_cpm()) {
+            const auto cf = const_family(cur->ofdm->constellation);
+            for (std::size_t j = 0; j < CONSTS.size(); ++j)
+                if (CONSTS[j] == cf) {
+                    ci = j;
+                    break;
+                }
+        }
+        const auto sh_it = shift.find(cur->band);
+        const double cur_mi = shifted(me, sh_it == shift.end() ? 0.0 : sh_it->second).mi[ci];
+        int max_data = 0;
+        for (const double sz : SIZE_S) max_data = std::max(max_data, slots_for(*cur, sz) - ctl_slots(*cur));
+        const std::size_t lim = std::min<std::size_t>(st.harq.size(), static_cast<std::size_t>(max_data));
+        std::map<std::vector<std::pair<int, double>>, double> bmemo;
+        cur_boosts.reserve(lim);
+        for (std::size_t j = 0; j < lim; ++j) {
+            std::vector<std::pair<int, double>> key_tx;
+            key_tx.reserve(st.harq[j].size());
+            for (const auto& h : st.harq[j]) key_tx.emplace_back(h.rv, h.mi[ci]);
+            auto [it, inserted] = bmemo.emplace(key_tx, 0.0);
+            if (inserted && !key_tx.empty()) it->second = quantize_boost(harq_boost_db(*cur, key_tx, cur_mi));
+            cur_boosts.push_back(it->second);
+        }
+    }
     {  // every prediction the loops below ask for, in one batch (the weights read once);
        // predicted_at computes any other lazily (the chat size cut, the final pick)
         std::vector<std::tuple<double, double, int>> keys;
-        auto want = [&](const Mode& s, int n_cw) {
-            const auto key = key_of(s, n_cw);
+        auto want = [&](const Mode& s, int n_cw, double boost = 0.0) {
+            const auto key = key_of(s, n_cw, boost);
             if (!memo.count(key) && std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
         };
         for (const Mode* s : cands) want(*s, 1);
         for (const Mode* s : data_cands)
             for (const double sz : SIZE_S) want(*s, slots_for(*s, sz));
-        std::map<double, std::vector<std::size_t>> by_shift;  // one batch per noise-rule shift
+        if (!cur_boosts.empty()) {
+            const int c_cur = ctl_slots(*cur);
+            for (const double sz : SIZE_S) {
+                const int n = slots_for(*cur, sz);
+                const std::size_t lim = std::min<std::size_t>(cur_boosts.size(), static_cast<std::size_t>(std::max(0, n - c_cur)));
+                for (std::size_t j = 0; j < lim; ++j)
+                    if (cur_boosts[j] > 0.0) want(*cur, n, cur_boosts[j]);
+            }
+        }
+        std::map<double, std::vector<std::size_t>> by_shift;  // one batch per noise-rule / HARQ-boost shift
         for (std::size_t k = 0; k < keys.size(); ++k) by_shift[std::get<1>(keys[k])].push_back(k);
         for (const auto& [sh, ks] : by_shift) {
             std::vector<ModeQuery> qs;
@@ -358,11 +404,6 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         if (c < reply_c) reply = s, reply_c = c, reply_p = ok;
     }
 
-    const Mode* cur = st.rx_mode ? arq::mode(*st.rx_mode) : nullptr;
-    if (!cur && !log.empty()) cur = &mode_at(log.back().data);
-    const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
-    const bool use_harq = cur && (!st.rx_mode || cur->name == *st.rx_mode) && !st.harq.empty();
-    const bool chat = st.chat;
     const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
     const Mode* best = nullptr;
     int best_hint = 0;
@@ -379,7 +420,13 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
             }
             const double pn = q_cw(*s, n);
             const double ok_ctl = q_burst(*s, n);
-            if (ok_ctl * pn < min_success) continue;
+            double bonus = 0.0;
+            if (!chat && s == cur && !cur_boosts.empty()) {
+                const std::size_t lim = std::min<std::size_t>(cur_boosts.size(), static_cast<std::size_t>(std::max(0, n - c)));
+                for (std::size_t j = 0; j < lim; ++j)
+                    if (cur_boosts[j] > 0.0) bonus += std::max(0.0, q_cw(*s, n, cur_boosts[j]) - pn);
+            }
+            if (ok_ctl * (pn + bonus / std::max(n - c, 1)) < min_success) continue;
             const bool dup = s->is_cpm() && ok_ctl < DUP_BELOW;
             const double tb = burst_seconds(*s, n + dup, dup);
             double t = tb + 2 * TURN_S + reply_c + (1 - ok_ctl) * TIMEOUT_S;
@@ -395,29 +442,6 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
                 const double ok = std::max(ok_ctl * (bursts == 1 ? std::pow(pn, static_cast<double>(n - c)) : pn), 1e-3);
                 v = -t * bursts / ok + 1e-6 * (n - c) * pb;
             } else {
-                double bonus = 0.0;
-                if (s == cur && use_harq) {
-                    std::size_t ci = 0;
-                    if (!s->is_cpm()) {
-                        const auto cf = const_family(s->ofdm->constellation);
-                        for (std::size_t j = 0; j < CONSTS.size(); ++j)
-                            if (CONSTS[j] == cf) {
-                                ci = j;
-                                break;
-                            }
-                    }
-                    const auto sh_it = shift.find(s->band);
-                    const double cur_mi = shifted(me, sh_it == shift.end() ? 0.0 : sh_it->second).mi[ci];
-                    const std::size_t lim = std::min<std::size_t>(st.harq.size(), static_cast<std::size_t>(std::max(0, n - c)));
-                    for (std::size_t j = 0; j < lim; ++j) {
-                        if (st.harq[j].empty()) continue;
-                        std::vector<std::pair<int, double>> txs;
-                        txs.reserve(st.harq[j].size());
-                        for (const auto& h : st.harq[j]) txs.emplace_back(h.rv, h.mi[ci]);
-                        const double b = harq_boost_db(*s, txs, cur_mi);
-                        bonus += std::max(0.0, q_cw(*s, n, b) - pn);
-                    }
-                }
                 v = (ok_ctl * (pn * (n - c) + bonus) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
             if (v > best_v) best = s, best_hint = hint, best_v = v;

@@ -18,6 +18,7 @@ grouped below the tuned constants; native has their defaults.
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -159,6 +160,10 @@ ROBUST_START_SPREAD_HZ = 6.0
 # 7 ms / 1 Hz -8 dB cells and two carrier cells ran the same events; 7 ms /
 # 10 Hz +1.5 s, 30 Hz -5 s by mean. Not tuned: 2 dB is the one value tried.
 ROBUST_START_DATA_MARGIN_DB = 2.0
+# Quantization step (dB) for predictor.harq_boost_db in recommend(): exact in
+# binary float and <= 32 levels across 0..HARQ_MAX_BOOST_DB, bounding extra
+# outcome-model evaluations inside turnaround on a full 63-codeword window.
+HARQ_BOOST_STEP_DB = 0.25
 
 # --- study toggles (Python only; native has the defaults) --------------------
 # Set any and tests/native_subs/gear.py's GEAR_STUDY_ENV keeps the shifter in Python.
@@ -678,8 +683,12 @@ class GearShifter(L.Policy):
         if NOISE_RULE is not None:
             shift = {s.band: P.noise_shift_db(m.get("noise"), self.measured_band, s.band, NOISE_RULE) for s in cands}
 
+        def quantize_boost(b):
+            return math.floor(b / HARQ_BOOST_STEP_DB + 0.5) * HARQ_BOOST_STEP_DB if b > 0.0 else 0.0
+
         def predicted(s, n_cw, boost_db=0.0):
-            sh = shift.get(s.band, 0.0) - round(boost_db, 2)
+            qb = quantize_boost(boost_db)
+            sh = shift.get(s.band, 0.0) - qb if qb > 0.0 else shift.get(s.band, 0.0)
             key = (round(burst_seconds(s, n_cw), 2), sh)
             if key not in omemo:
                 omemo[key] = P.predict_outcome(P.shifted(m, sh), self.measured_band, gap, key[0], cands, prev,
@@ -740,6 +749,20 @@ class GearShifter(L.Policy):
             lim = self.measured["snr_est"] + ROBUST_START_DATA_MARGIN_DB
             data_cands = ([s for s in data_cands if MODE_THRESHOLDS[s.name][0] <= lim]
                           or [min(cands, key=lambda s: MODE_THRESHOLDS[s.name][0])])
+        cur_boosts = ()
+        if not chat and cur and harq and any(s.name == cur for s in data_cands):
+            s_cur = MODES[cur]
+            ci = 0 if is_cpm(s_cur) else P.CONSTS.index(P.const_family(s_cur.constellation))
+            cur_mi = P.shifted(m, shift.get(s_cur.band, 0.0))[f"mi_{P.CONSTS[ci]}"]
+            bmemo = {}
+            max_data = max(max(0, slots_for(s_cur, target) - ctl_slots(s_cur)) for target in SIZE_S)
+            boosts = []
+            for txs in harq[:max_data]:
+                key_tx = tuple((rv, mi4[ci]) for rv, mi4 in txs)
+                if key_tx not in bmemo:
+                    bmemo[key_tx] = quantize_boost(P.harq_boost_db(s_cur, key_tx, cur_mi)) if key_tx else 0.0
+                boosts.append(bmemo[key_tx])
+            cur_boosts = tuple(boosts)
         for s in data_cands:
             pb, c = codes.payload_bytes(s), ctl_slots(s)
             for hint, target in enumerate(SIZE_S):
@@ -753,7 +776,10 @@ class GearShifter(L.Policy):
                     n = min(n, k + c)
                 pn = q_cw(s, n)
                 ok_ctl = q_burst(s, n)  # the burst survives sync and its control codeword
-                if ok_ctl * pn < self.min_success:
+                bonus = 0.0
+                if not chat and s.name == cur and cur_boosts:
+                    bonus = sum(max(0.0, q_cw(s, n, b) - pn) for b in cur_boosts[:max(0, n - c)] if b > 0.0)
+                if ok_ctl * (pn + bonus / max(n - c, 1)) < self.min_success:
                     continue
                 # a CPM burst whose control is at risk goes with it twice (one
                 # more slot, its short control codeword: choose(), slots_for)
@@ -777,14 +803,6 @@ class GearShifter(L.Policy):
                     # carrying more, for whatever follows it
                     v = -t * bursts / ok + 1e-6 * (n - c) * pb
                 else:
-                    bonus = 0.0
-                    if s.name == cur and harq:
-                        ci = 0 if is_cpm(s) else P.CONSTS.index(P.const_family(s.constellation))
-                        cur_mi = P.shifted(m, shift.get(s.band, 0.0))[f"mi_{P.CONSTS[ci]}"]
-                        for txs in harq[:max(0, n - c)]:
-                            if txs:
-                                b = P.harq_boost_db(s, [(rv, mi4[ci]) for rv, mi4 in txs], cur_mi)
-                                bonus += max(0.0, q_cw(s, n, b) - pn)
                     v = (ok_ctl * (pn * (n - c) + bonus) * pb - (held if s.name != cur else 0)) / t
                 if v > best_v:
                     best, best_v = (s.name, hint), v

@@ -34,7 +34,8 @@ inline constexpr int REPEATS_BEFORE_SHRINK = 1;
 inline constexpr int MAX_ESCALATION = 4;
 inline constexpr int FLOOR_DECAY_TURNS = 4;  // clean turns (no escalation) that lower the escalation floor by one
 inline constexpr int LINK_LOST_MISSES = 12;
-inline constexpr std::size_t HARQ_MAX_TX = 8;  // link.HARQ_MAX_TX: stored receptions per undecoded seq at most
+// link.HARQ_MAX_TX: cap per-seq HARQ history at the watchdog's resync window (bounds growth when tx is idle)
+inline constexpr std::size_t HARQ_MAX_TX = NO_PROGRESS_TURNS;
 // Primed retries of a failed control codeword at most (link.PRIME_TRIES; DATA2G_PRIME_TRIES, read once).
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
@@ -125,6 +126,10 @@ public:
     virtual void observe(const Measured&, const std::string& /*submode*/, double /*now*/) {}
     // post-decode data-aided MER update (issue #290)
     virtual std::optional<Measured> last_measured() const { return std::nullopt; }
+    virtual std::optional<std::array<double, 4>> last_mi() const {
+        if (const auto m = last_measured()) return m->mi;
+        return std::nullopt;
+    }
     virtual void update_measured(const Measured&) {}
     // engine: a peer burst's in-band SNR from power alone (the energy inputs)
     virtual void observe_energy(double /*snr_db*/, double /*now*/) {}

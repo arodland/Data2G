@@ -183,7 +183,9 @@ def shifted(measured: dict, shift_db: float) -> dict:
 
 
 HARQ_IR_LOSS = 0.06  # combining loss relative to exact slice MI (scripts/ir_study.py, runs/ir_study.csv)
-HARQ_MAX_BOOST_DB = 8.0  # cap on effective single-shot SNR boost (runs/ir_study.csv: r3/4 IR ~8 dB)
+HARQ_MAX_BOOST_DB = 8.0  # cap on effective single-shot SNR boost, dB (runs/ir_study.csv: r3/4 IR ~8 dB)
+HARQ_MI_FLOOR = 1e-6  # bits/coded-bit guard above capacity table bottom (-30 dB) before inverting
+HARQ_MI_CEIL_MARGIN = 1e-3  # bits/coded-bit guard below constellation saturation so inverted SNR stays finite
 
 
 def harq_boost_db(spec, txs, cur_mi: float) -> float:
@@ -197,10 +199,10 @@ def harq_boost_db(spec, txs, cur_mi: float) -> float:
     cf = "gray-qam4" if getattr(spec, "family", "") == "cpm" else const_family(spec.constellation)
     grid, tables = _capacity()
     tab = tables[cf]
-    lo, hi = float(tab[0]) + 1e-6, float(tab[-1]) - 1e-3
+    lo, hi = float(tab[0]) + HARQ_MI_FLOOR, float(tab[-1]) - HARQ_MI_CEIL_MARGIN
     snr_cur = float(np.interp(np.clip(cur_mi, lo, hi), tab, grid))
     cyc = codes.rv_cycle(spec)
-    rv_next = (max(rv for rv, _ in txs) + 1) % cyc
+    rv_next = (txs[-1][0] + 1) % cyc
     B = codes.buffer_len(spec) / codes.soft_len(spec)
     segs = []
     pts = {0.0, B}

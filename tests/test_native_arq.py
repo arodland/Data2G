@@ -167,7 +167,7 @@ def station(rng, cap, rec=None):
         submode = rng.choice(G.allowed(cap)).name
         for s in range(rng.choice([1, 3, 6])):
             if s not in buf:
-                harq[s] = [(r, tuple(rng.uniform(0.01, 0.9) for _ in range(4))) for r in range(rng.choice([1, 2]))]
+                harq[s] = [(r % 4, tuple(rng.uniform(0.01, 0.9) for _ in range(4))) for r in range(rng.choice([1, 2, 5]))]
     return SimpleNamespace(cap=cap, chat=rng.random() < 0.2, peer_chat=rng.random() < 0.1,
                            peer_queued=rng.choice([0, 0, 150, 900, 5000]),
                            rx=SimpleNamespace(cum=0, buf=buf, submode=submode, harq=harq),
@@ -278,6 +278,7 @@ def test_noise_rule_helpers_match(A, pure):
         assert all(got[f"mi_{c}"] == pytest.approx(want[f"mi_{c}"], abs=1e-12) for c in P.CONSTS)
     assert A.noise_shift_db(None, "w", "w48") == 0.0
     for name, s in modes.MODES.items():
-        txs = [(0, float(rng.uniform(0.01, 0.9))), (1, float(rng.uniform(0.01, 0.9)))]
-        cur_mi = float(rng.uniform(0.01, 0.9))
-        assert A.harq_boost_db(name, txs, cur_mi) == pytest.approx(P.harq_boost_db(s, txs, cur_mi), abs=1e-12), name
+        for n_tx in (2, 5):  # 5 wraps the 4-RV LDPC cycle
+            txs = [(r % 4, float(rng.uniform(0.01, 0.9))) for r in range(n_tx)]
+            cur_mi = float(rng.uniform(0.01, 0.9))
+            assert A.harq_boost_db(name, txs, cur_mi) == pytest.approx(P.harq_boost_db(s, txs, cur_mi), abs=1e-12), name

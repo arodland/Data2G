@@ -845,12 +845,14 @@ void Station::refine_measured(RxBurst& rxb) {
 }
 
 void Station::note_harq(const std::string& submode, bool has_data) {
-    if (const auto m = policy->last_measured()) {
-        for (const auto& [seq, rv] : rx_failed_) {
-            if (rx.cum <= seq && seq < rx.cum + WINDOW && !rx.buf.count(seq)) {
-                auto& txs = rx.harq[seq];
-                txs.push_back({rv, m->mi});
-                if (txs.size() > HARQ_MAX_TX) txs.erase(txs.begin(), txs.end() - HARQ_MAX_TX);
+    if (!rx_failed_.empty()) {
+        if (const auto mi = policy->last_mi()) {
+            for (const auto& [seq, rv] : rx_failed_) {
+                if (rx.cum <= seq && seq < rx.cum + WINDOW && !rx.buf.count(seq)) {
+                    auto& txs = rx.harq[seq];
+                    txs.push_back({rv, *mi});
+                    if (txs.size() > HARQ_MAX_TX) txs.erase(txs.begin(), txs.end() - HARQ_MAX_TX);
+                }
             }
         }
     }

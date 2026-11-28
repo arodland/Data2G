@@ -895,9 +895,10 @@ As built (data2g/arq/policy.py):
   - Undecoded codewords whose soft bits are stored for HARQ combining (`RxSide.harq`,
     issue #360) still take a resend slot next turn either way, so staying in `cur`
     credits its first $\min(U, n - c)$ data slots with their RV1+ combining gain
-    $\max(0, p_{\text{comb}} - p_{\text{rv0}}) \cdot \text{pb}$, where $p_{\text{comb}}$
-    evaluates `q_cw` under the effective per-cell SNR boost of the exact mother-buffer
-    slice MI (`predictor.harq_boost_db`, `HARQ_IR_LOSS = 0.06`, capped at 8 dB).
+    $\max(0, p_{\text{comb}} - p_{\text{rv0}}) \cdot \text{pb}$ (before the
+    `min_success` gate), where $p_{\text{comb}}$ evaluates `q_cw` under the effective
+    per-cell SNR boost of the exact mother-buffer slice MI (`predictor.harq_boost_db`,
+    `HARQ_IR_LOSS = 0.06`, capped at 8 dB and quantized to `HARQ_BOOST_STEP_DB = 0.25` dB).
     `DATA2G_HARQ_CREDIT=0` disables it in Python for paired A/B studies.
   - Measured (`scripts/loss_study.py`, `shift+cpm`, `DATA2G_PEP_REF_DB=5`, `--dd-budget inf`,
     24 paired seeds 0..23 x 600 s; delivered bps): `awgn/slow +4` +5.5% (SE 0.5, 24/0),

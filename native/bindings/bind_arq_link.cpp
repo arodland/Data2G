@@ -90,9 +90,19 @@ public:
     }
     std::optional<Measured> last_measured() const override {
         auto m = py::getattr(obj, "measured", py::none());
-        if (m.is_none() || !py::isinstance<py::dict>(m) || !m.contains("snr_est") || !m.contains("mi_gray-qam4"))
-            return std::nullopt;
+        if (m.is_none() || !py::isinstance<py::dict>(m) || !m.contains("snr_est")) return std::nullopt;
         return measured(m.cast<py::dict>());
+    }
+    std::optional<std::array<double, 4>> last_mi() const override {
+        auto m = py::getattr(obj, "measured", py::none());
+        if (m.is_none() || !py::isinstance<py::dict>(m)) return std::nullopt;
+        std::array<double, 4> out{};
+        for (std::size_t i = 0; i < arq::CONSTS.size(); ++i) {
+            const py::str k("mi_" + std::string(arq::CONSTS[i]));
+            if (!m.contains(k)) return std::nullopt;
+            out[i] = m[k].cast<double>();
+        }
+        return out;
     }
     void update_measured(const Measured& m) override {
         if (overrides("update_measured")) obj.attr("update_measured")(to_dict(m));
