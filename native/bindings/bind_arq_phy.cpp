@@ -54,6 +54,11 @@ Heard heard_of(const py::dict& r) {
         }
         if (r.contains("connect_hash") && !r["connect_hash"].is_none())
             c->connect_hash = r["connect_hash"].cast<int>();
+        if (r.contains("finger_dt")) {
+            c->finger_dt = r["finger_dt"].cast<int>();
+            if (r.contains("Z_early")) c->Z_early = mat(r["Z_early"].cast<In<cd>>());
+            if (r.contains("Z_late")) c->Z_late = mat(r["Z_late"].cast<In<cd>>());
+        }
         h.cpm = std::move(c);
         return h;
     }

@@ -306,12 +306,21 @@ void bind_cpm(py::module_& m) {
         return r;
     };
     c.def("dd_metric", [burst](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z,
-                               const std::map<int, In<double>>& post, int slot, std::optional<int> connect_hash) {
+                               const std::map<int, In<double>>& post, int slot, std::optional<int> connect_hash,
+                               int finger_dt, std::optional<In<std::complex<double>>> Z_early,
+                               std::optional<In<std::complex<double>>> Z_late) {
         cpm::Posts p;
         for (const auto& [s, v] : post) p[s] = vec(v);
-        return np(cpm::dd_metric(burst(spec, dup, n_cw, Z, connect_hash), p, slot));
+        auto b = burst(spec, dup, n_cw, Z, connect_hash);
+        if (finger_dt > 0 && Z_early && Z_late) {
+            b.finger_dt = finger_dt;
+            b.Z_early = mat(*Z_early);
+            b.Z_late = mat(*Z_late);
+        }
+        return np(cpm::dd_metric(b, p, slot));
     }, py::arg("spec"), py::arg("dup"), py::arg("n_cw"), py::arg("Z"), py::arg("post"), py::arg("slot"),
-       py::arg("connect_hash") = py::none());
+       py::arg("connect_hash") = py::none(), py::arg("finger_dt") = 0, py::arg("Z_early") = std::nullopt,
+       py::arg("Z_late") = std::nullopt);
     c.def("dd_soft", [burst](const std::string& spec, bool dup, int n_cw, const In<double>& metric, int slot) {
         In<std::complex<double>> none(std::vector<py::ssize_t>{0, 1});
         return np(cpm::dd_soft(burst(spec, dup, n_cw, none), mat(metric), slot));

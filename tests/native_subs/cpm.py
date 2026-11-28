@@ -137,7 +137,7 @@ def substitutions(native):
             return py["dd_metric"](r, post, slot)
         Z = r["Z"].reshape(-1, g.m)  # (a wide grid's sub-windows: L rows a symbol)
         return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], Z, {int(k): v for k, v in post.items()}, slot,
-                           r.get("connect_hash"))
+                           r.get("connect_hash"), int(r.get("finger_dt", 0)), r.get("Z_early"), r.get("Z_late"))
 
     def dd_soft(r, metric, slot):
         g = cpm.GRIDS[r["band"]]

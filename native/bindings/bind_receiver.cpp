@@ -77,6 +77,11 @@ py::dict rx_dict(const receiver::Rx& rx) {
                            static_cast<py::ssize_t>(g.m)});
         d["Z"] = z;
     }
+    if (r.finger_dt > 0) {
+        d["finger_dt"] = r.finger_dt;
+        d["Z_early"] = np(r.Z_early);
+        d["Z_late"] = np(r.Z_late);
+    }
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;

@@ -338,8 +338,8 @@ def test_coherent(native, reference, case):
     np.testing.assert_allclose(native.cpm.coh_metric(Zr, P, W, n0, g.L), ref(reference, "coh_metric")(Zr, P, W, n0, g.L),
                                rtol=1e-9, atol=1e-9)
     # Short window (n=12 <= 2*W2): Python and native match
-    np.testing.assert_allclose(native.cpm.coh_metric(Z[:12], P[:12], cpm.COH_W, n0),
-                               ref(reference, "coh_metric")(Z[:12], P[:12], cpm.COH_W, n0), rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr[:12 * g.L], P[:12], W, n0, g.L),
+                               ref(reference, "coh_metric")(Zr[:12 * g.L], P[:12], W, n0, g.L), rtol=1e-9, atol=1e-9)
     L = rng.normal(size=(30, g.m))
     np.testing.assert_allclose(native.cpm.bit_llrs(g.name, L), ref(reference, "bit_llrs")(g, L), rtol=RTOL, atol=1e-12)
 
@@ -411,8 +411,8 @@ def test_per_tone_floors(native, reference, case):
     np.testing.assert_allclose(native.cpm.coh_metric(Zr, P, W, n0, g.L), ref(reference, "coh_metric")(Zr, P, W, n0, g.L),
                                rtol=1e-9, atol=1e-9)
     # Short window (n=12 <= 2*W2): Python and native match
-    np.testing.assert_allclose(native.cpm.coh_metric(Z[:12], P[:12], cpm.COH_W, n0),
-                               ref(reference, "coh_metric")(Z[:12], P[:12], cpm.COH_W, n0), rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr[:12 * g.L], P[:12], W, n0, g.L),
+                               ref(reference, "coh_metric")(Zr[:12 * g.L], P[:12], W, n0, g.L), rtol=1e-9, atol=1e-9)
     n_cw = 1 + dup + n_data
     r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
     for slot in range(n_cw):
@@ -559,6 +559,11 @@ def test_leak_model(native, reference, name, chan):
     assert a[0] == s1 and a[1] == pytest.approx(f1, rel=RTOL)
     want, E1 = ref(reference, "soft")(g, spec, y, s1, f1, n_data, dup)
     r = dict(r, Z=ref(reference, "bins")(g, y, s1, lay.n, f1))
+    dt = cpm._rake_dt(g)
+    if dt > 0:
+        r["finger_dt"] = dt
+        r["Z_early"] = ref(reference, "bins")(g, y, s1 - dt, lay.n, f1)
+        r["Z_late"] = ref(reference, "bins")(g, y, s1 + dt, lay.n, f1)
     if cpm.COH_CTL:
         for s in range(1 + dup):
             if not ref(reference, "ctl_square")(g, E1, s):
@@ -608,3 +613,28 @@ def test_connect_header_parity(native, reference):
         M_py = ref(reference, "dd_metric")(rec, {}, 0)
         M_nat = native.cpm.dd_metric(mname, False, 1, Z_nat, {}, 0, h)
         np.testing.assert_allclose(M_nat, M_py, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("name", ("fsk32r62-r1/2", "fsk8r50-r1/2"))
+def test_dd_metric_rake_parity(native, reference, name, monkeypatch):
+    """Shifted-window Rake (#364) in dd_metric matches Python on a 2-path
+    multipath channel with DATA2G_CPM_RAKE=1 and 0."""
+    rng = np.random.default_rng(42)
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    coded = _burst(spec, 1, False, rng)
+    x = ref(reference, "modulate")(spec, coded, False)
+    pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
+    delay = int(round(0.0035 * FS))
+    y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
+    lock = ref(reference, "find")(g, y)
+    assert lock is not None
+    for flag in ("0", "1"):
+        monkeypatch.setenv("DATA2G_CPM_RAKE", flag)
+        r = ref(reference, "receive")(y, lock)
+        for slot in range(r["n_cw"]):
+            M_py = ref(reference, "dd_metric")(r, {}, slot)
+            M_cc = native.cpm.dd_metric(spec.name, r["dup"], r["n_cw"], r["Z"], {}, slot,
+                                        finger_dt=int(r.get("finger_dt", 0)),
+                                        Z_early=r.get("Z_early"), Z_late=r.get("Z_late"))
+            np.testing.assert_allclose(M_cc, M_py, rtol=1e-9, atol=1e-9)
