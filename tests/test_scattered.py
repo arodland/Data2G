@@ -202,3 +202,14 @@ def test_a_2_hz_channel_is_estimated_from_2_frames_either_side():
         q = round(np.log2(est["filter_spread_hz"]) * 8)
         spans = [np.max(np.abs(np.frombuffer(k[7]) - 2.5)) for k in modem._SC_WEIGHTS if k[4] == q]
         assert spans and max(spans) <= 2 * modem.SYMS_PER_FRAME + 3
+
+
+def test_w48_ace_closing_passes_bound_pep():
+    """Scattered-pilot ACE modes restore pilots after projection, so two closing
+    clip passes are needed to keep envelope PEP under control (w48-16qam)."""
+    from data2g.arq import phy
+
+    for name, ceiling in [("w48-16qam-r1/2", 5.15), ("w48-16qam-r2/3", 5.25), ("w48-16qam-r3/4", 5.95)]:
+        assert len(SUBMODES[name].ace) >= 2
+        assert phy.peak_db(name) <= ceiling
+

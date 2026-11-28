@@ -228,6 +228,20 @@
    "sdr_db": 31.61,
    "papr_db": 8.23,
    "peak_db": 8.13
+  },
+  "w48@1+ace1-1:gray-qam16": {
+   "gain_1f": 0.7263,
+   "gain": 0.733,
+   "sdr_db": 13.82,
+   "papr_db": 4.6,
+   "peak_db": 4.68
+  },
+  "w48@3+ace1-1:gray-qam16": {
+   "gain_1f": 0.8598,
+   "gain": 0.8692,
+   "sdr_db": 16.13,
+   "papr_db": 5.58,
+   "peak_db": 5.68
   }
  }
 }
