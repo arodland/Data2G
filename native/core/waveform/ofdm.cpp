@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "dsp/fft.hpp"
 #include "util/simd.hpp"
 
 namespace data2g::waveform {
@@ -63,6 +64,20 @@ Band make_band(const config::Band& s) {
             b.demod_re[n][k] = b.demod[k][n].real();
             b.demod_im[n][k] = b.demod[k][n].imag();
         }
+    if (nc >= 24) {
+        bool exact = true;
+        std::vector<std::size_t> bins(nc);
+        for (std::size_t k = 0; k < nc; ++k) {
+            const std::int64_t num = b.bb[k] * static_cast<std::int64_t>(M);
+            if (num % FS != 0) {
+                exact = false;
+                break;
+            }
+            const std::int64_t q = ((num / FS) % M + M) % M;
+            bins[k] = static_cast<std::size_t>(q);
+        }
+        if (exact) b.fft_bins = std::move(bins);
+    }
     // the pilot as an exact rational turn, as ofdm.band builds it
     for (int num : s.pilot_num) {
         const int q = ((num % config::PILOT_PHASE_DEN) + config::PILOT_PHASE_DEN) % config::PILOT_PHASE_DEN;
@@ -117,14 +132,21 @@ std::vector<cdouble> Band::demod_window(std::span<const cdouble> z, std::int64_t
     const std::int64_t s = start - backoff, a = slice_bound(s, len), e = slice_bound(s + M, len);
     std::array<cdouble, M> win{};
     for (std::int64_t i = a; i < e; ++i) win[static_cast<std::size_t>(i - a)] = z[static_cast<std::size_t>(i)];
+    const std::size_t nc = static_cast<std::size_t>(spec->nc);
+    std::vector<cdouble> out(nc);
+    if (!fft_bins.empty()) {
+        std::array<cdouble, M> spec_out;
+        dsp::fft_rows_into(win.data(), spec_out.data(), 1, static_cast<std::size_t>(M), true);
+        constexpr double scale = 2.0 / M;
+        for (std::size_t k = 0; k < nc; ++k) out[k] = scale * spec_out[fft_bins[k]];
+        return out;
+    }
     // Each carrier's sum in order, as the complex loop `acc += demod[k][n] *
     // win[n]` would (the same doubles: no FMA in an ISO build), but over all
     // carriers at once in real arithmetic, so it vectorizes and no NaN
     // check intervenes (modem's receive spent a third of its time here).
-    const std::size_t nc = static_cast<std::size_t>(spec->nc);
     std::vector<double> re(nc, 0.0), im(nc, 0.0);
     demod_sums(win.data(), demod_re.data.data(), demod_im.data.data(), nc, re.data(), im.data());
-    std::vector<cdouble> out(nc);
     for (std::size_t k = 0; k < nc; ++k) out[k] = (2.0 / M) * cdouble(re[k], im[k]);
     return out;
 }

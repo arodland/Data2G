@@ -6,7 +6,7 @@ import pytest
 from data2g import codes, hfchannel, modem
 from data2g.arq import phy as PHY
 from data2g.arq.link import Slot, TxBurst
-from data2g.config import SUBMODES
+from data2g.config import SC_BANDS, SUBMODES
 
 SPEC = SUBMODES["w48-qpsk-r1/2"]
 
@@ -227,7 +227,7 @@ def test_a_repeated_control_combines_but_never_reads_as_the_burst_before():
 
 def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     """A CONNECT's robust tries are one compact codeword (same nonce). Two
-    at -14.5 dB, neither decoding alone or primed, connect a listener once
+    at -15.0 dB, neither decoding alone or primed, connect a listener once
     the second is combined with the first (Session._repeated_frame).
     Square-law control soft bits (cpm.COH_CTL off): coherent ones decode a try alone."""
     import random
@@ -241,12 +241,12 @@ def test_a_listener_connects_on_two_weak_tries_of_one_connect(monkeypatch):
     from data2g.arq.policy import GearShifter
     from data2g.config import FS
 
-    mode = "fsk16r25-r1/2"  # the robust tries' mode: a CONNECT goes compact in it
-    body = F.pack_connect(F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10).pack())
+    mode = "fsk16r25-r1/2"  # the robust tries' mode: unified 20-byte CONNECT
+    body = F.Connect(S.VERSION, "W1AW", "K2XYZ", 0x1234, 2, 10, F.DEFAULT_CAPS, 0).pack()
     x = PHY.tx_audio(B.TxBurst(mode, [B.Slot(B.COMPACT_CONNECT, 0, body + bytes(GearShifter().ctl_payload_bytes(mode) - len(body)))], 0))
     heard = []
-    for seed in (1, 2):
-        y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -14.5, seed=seed,
+    for seed in (2, 4):
+        y = hfchannel.awgn(np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)]), -15.0, seed=seed,
                            s_power=hfchannel.active_power(x))
         heard.append(cpm.receive(y, cpm.find(cpm.GRIDS["c16r25"], y)))
     assert all(PHY.ModemRx(r, {}).decode(0, B.COMPACT_CONNECT, 0, None) is None for r in heard)
@@ -283,18 +283,28 @@ def test_data_mer_catches_tx_distortion_and_leaves_clean_links_unchanged():
     assert all(u_clean[f"mi_{c}"] == m_clean[f"mi_{c}"] for c in P.CONSTS)
     assert u_clean["mer_db"] > 20.0
 
-    # Mildly clipped burst (1.5x RMS): pilots barely clip (~28 dB), data fail 0/8
+    # Mildly clipped burst (1.5x RMS): on whole-pilot rows pilots barely clip
+    # (~28 dB) while data fail; on HF scattered pilots the pilots share symbols
+    # with data and already see the distortion directly.
     rms = float(np.sqrt(np.mean(x[np.abs(x) > 0] ** 2)))
     xc = np.clip(x, -1.5 * rms, 1.5 * rms)
     r_dist = modem.receive(hfchannel.apply_channel(np.concatenate([pad, xc, pad]), snr_db=28.0, seed=1))
     m_dist = PHY.measure(r_dist)
-    assert m_dist["snr_est"] > 25.0  # pilots fooled
-    rx_dist = PHY.ModemRx(r_dist, {}, dd_budget=0.0)
-    # Blind EM (0 slots decoded) and exact coded bits both catch the distortion
-    u_em = rx_dist.measure_data(m_dist)
+    if spec.band in SC_BANDS:
+        assert m_dist["snr_est"] < 18.0  # scattered pilots catch the clipping directly
+        # Also verify data_mer pulls down an over-optimistic pilot estimate (clean est, clipped raw)
+        r_check = dict(r_dist, est=r_clean["est"])
+        base = m_clean
+    else:
+        assert m_dist["snr_est"] > 25.0  # whole-row pilots fooled
+        r_check = r_dist
+        base = m_dist
+    rx_dist = PHY.ModemRx(r_check, {}, dd_budget=0.0)
     exact = {i: codes.encode(spec, pl[i], 0, PHY.mask_value((7, 0, i)), index=i) for i in range(8)}
-    u_ex = PHY.data_mer(r_dist, exact, m_dist)
-    assert u_em["snr_est"] < m_dist["snr_est"] - 5.0
-    assert u_ex["snr_est"] < m_dist["snr_est"] - 5.0
-    assert u_em["mer_db"] < m_dist["snr_est"] - 5.0
-    assert u_em["mi_c256-snr26"] < m_dist["mi_c256-snr26"] - 0.06
+    # Blind EM (0 slots decoded) and exact coded bits both catch the distortion
+    u_em = rx_dist.measure_data(base)
+    u_ex = PHY.data_mer(r_check, exact, base)
+    assert u_em["snr_est"] < base["snr_est"] - 5.0
+    assert u_ex["snr_est"] < base["snr_est"] - 5.0
+    assert u_em["mer_db"] < base["snr_est"] - 5.0
+    assert u_em["mi_c256-snr26"] < base["mi_c256-snr26"] - 0.06

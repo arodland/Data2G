@@ -88,6 +88,7 @@ class BurstChannel:
             self.points = torch.tensor(pts, dtype=cdtype, device=device)
             self.dirs = torch.tensor(constellation.ace_dirs(spec.constellation), dtype=cdtype, device=device)
         self.nc = b.nc
+        self.sc = modem.sc_spec(spec, n_frames)
         self.kc = modem.copy_frame(spec.sync_band, n_frames)  # the header copy's frame (in self.base)
         self.n_air = n_frames + (self.kc is not None)
         zeros = np.zeros((n_frames, DATA_SYMS_PER_FRAME, b.nc), dtype=np.complex128)
@@ -108,16 +109,44 @@ class BurstChannel:
         b = data.shape[0]
         syms = torch.zeros(b, self.n_air, SYMS_PER_FRAME, self.nc, dtype=self.cdtype, device=self.device)
         frames = [f for f in range(self.n_air) if f != self.kc]
-        syms[:, frames, 1:] = data
+        if self.sc:
+            flat = syms.reshape(b, self.n_air, -1)
+            df = data.reshape(b, self.n_f, -1)
+            for i, f in enumerate(frames):
+                _, _, Dc = modem.sc_frame_cells(self.nc, f)
+                flat[:, f, Dc] = df[:, i]
+        else:
+            syms[:, frames, 1:] = data
         wav = torch.einsum("bfsc,nc->bfsn", syms, self.mod).real.reshape(b, -1)
         x = self.base.expand(b, -1).clone()
         x[:, self.frames0 : self.frames0 + wav.shape[1]] += wav
-        self.sent = data.reshape(b, -1, self.nc) if self.ace else None
+        self.sent = None
+        self.ace_hold = None
         if self.ace:
+            sent_d = data.reshape(b, -1, self.nc)
             # the point each cell was sent as, a few bursts at a time: the
             # (cells x points) table was 2 GB for 2000 one-frame 256-point bursts
-            self.sent_dirs = torch.cat([self.dirs[(s[..., None] - self.points).abs().argmin(dim=-1)]
-                                        for s in self.sent.split(32)])
+            dirs_d = torch.cat([self.dirs[(s[..., None] - self.points).abs().argmin(dim=-1)]
+                                for s in sent_d.split(32)])
+            if self.sc:
+                pilot = torch.tensor(self.band.pilot, dtype=self.cdtype, device=self.device)
+                X6 = torch.zeros(b, self.n_f, SYMS_PER_FRAME * self.nc, dtype=self.cdtype, device=self.device)
+                D6 = torch.zeros(b, self.n_f, SYMS_PER_FRAME * self.nc, 2, dtype=self.cdtype, device=self.device)
+                hold = torch.zeros(self.n_f, SYMS_PER_FRAME * self.nc, dtype=torch.bool, device=self.device)
+                df = data.reshape(b, self.n_f, -1)
+                dr = dirs_d.reshape(b, self.n_f, -1, 2)
+                for i, f in enumerate(frames):
+                    P, PK, Dc = modem.sc_frame_cells(self.nc, f)
+                    X6[:, i, P] = pilot[PK]
+                    X6[:, i, Dc] = df[:, i]
+                    D6[:, i, Dc] = dr[:, i]
+                    hold[i, P] = True
+                self.sent = X6.reshape(b, -1, self.nc)
+                self.sent_dirs = D6.reshape(b, -1, self.nc, 2)
+                self.ace_hold = hold.reshape(-1, self.nc)
+            else:
+                self.sent = sent_d
+                self.sent_dirs = dirs_d
         return self.tx_condition(x)
 
     def _ace(self, x: torch.Tensor) -> torch.Tensor:
@@ -125,9 +154,11 @@ class BurstChannel:
         X = self.sent
         got = (2.0 / M) * torch.einsum("bjm,mc->bjc", x[:, self.ace_win].to(self.cdtype), self.mod[NCP:].conj())
         g = (torch.sum(X.conj() * got, dim=1).real / torch.sum(X.abs() ** 2, dim=1))[:, None, :]
-        new = constellation.ace_project(got, g * X, self.sent_dirs)
+        fix = constellation.ace_project(got, g * X, self.sent_dirs) - got
+        if self.ace_hold is not None:
+            fix = torch.where(self.ace_hold[None], modem.SC_RESTORE_ACE * (g * X - got), fix)
         x = x.clone()
-        x[:, self.ace_full] += torch.einsum("bjc,nc->bjn", new - got, self.mod).real
+        x[:, self.ace_full] += torch.einsum("bjc,nc->bjn", fix, self.mod).real
         return x
 
     def _filter(self, x: torch.Tensor) -> torch.Tensor:
@@ -198,6 +229,33 @@ class BurstChannel:
         with `points` and config.SYMBOL_NOISE, the per-symbol noise scale
         (clicks). Off: the HF path, unchanged."""
         b = y.shape[0]
+        if self.sc:
+            # Scattered pilots: numpy's receive(known=...) gives each burst's cfo, shift, steps, h and var (no grad),
+            # while data is demodulated differentiably at those shifts/steps/CFOs and unpacked in Dc order.
+            y_np = y.detach().cpu().numpy().astype(np.float64)
+            known = dict(start=LEADIN_SAMPLES, cfo=0.0, spec=self.spec, n_cw=self.n_f // self.spec.frames_per_cw)
+            cfos, shifts, steps_l, hs, vs = [], [], [], [], []
+            for i in range(b):
+                r = modem.receive(y_np[i], known=known)
+                cfos.append(float(r["cfo"]))
+                shifts.append(int(r["shift"]))
+                steps_l.append(np.asarray(r["steps"], dtype=np.int64))
+                hs.append(r["est"]["h"])
+                vs.append(modem._data_var(r, r["est"]))
+            n = torch.arange(y.shape[1], device=self.device, dtype=torch.float64)
+            cfo_t = torch.tensor(cfos, device=self.device, dtype=torch.float64)[:, None]
+            het = self.het * torch.exp(-2j * torch.pi * (cfo_t * n[None, :]) / FS).to(self.cdtype)
+            z = y.to(self.cdtype) * het
+            raw = self._demod(z, shifts, steps_l)[:, :-1].reshape(b, self.n_air, SYMS_PER_FRAME, self.nc)
+            ph = torch.tensor(np.stack([equalizer.time_shift_phase(st[:-1], self.band.bb) for st in steps_l]),
+                              dtype=self.cdtype, device=self.device)
+            raw = (raw * ph[:, :, None, :]).reshape(b, self.n_air, -1)
+            frames = [f for f in range(self.n_air) if f != self.kc]
+            data = torch.stack([raw[:, f, modem.sc_frame_cells(self.nc, f)[2]].reshape(b, DATA_SYMS_PER_FRAME, self.nc)
+                                for f in frames], dim=1)
+            h = torch.tensor(np.stack(hs), dtype=self.cdtype, device=self.device)
+            var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
+            return data, h, var
         z = y.to(self.cdtype) * self.het
         d = int(round(ch.delay_ms * 1e-3 * FS))
         support = [(DEMOD_BACKOFF, d + DEMOD_BACKOFF)] * b  # apparent delays before the shift
@@ -235,14 +293,16 @@ class BurstChannel:
         var = torch.tensor(np.stack(vs), dtype=self.dtype, device=self.device)
         return data, h, var
 
-    def _demod(self, z: torch.Tensor, shifts: list) -> torch.Tensor:
+    def _demod(self, z: torch.Tensor, shifts: list, steps: list | None = None) -> torch.Tensor:
         """Every symbol of every burst, burst i's window `shifts[i]` later: (B, S, nc)."""
         start = torch.tensor([self.frames0 + NCP - DEMOD_BACKOFF + s for s in shifts], device=self.device)
-        idx = (
-            start[:, None, None]
-            + torch.arange(self.n_air * SYMS_PER_FRAME + 1, device=self.device)[None, :, None] * NSYM
-            + torch.arange(M, device=self.device)[None, None, :]
-        )
+        sym_off = torch.arange(self.n_air * SYMS_PER_FRAME + 1, device=self.device)[None, :] * NSYM
+        if steps is not None:
+            st = torch.tensor(np.stack(steps), device=self.device)  # (B, n_air + 1)
+            per_sym = torch.cat([st[:, :-1, None].expand(-1, -1, SYMS_PER_FRAME).reshape(len(shifts), -1),
+                                 st[:, -1:]], dim=1)
+            sym_off = sym_off + per_sym
+        idx = start[:, None, None] + sym_off[:, :, None] + torch.arange(M, device=self.device)[None, None, :]
         win = torch.gather(z, 1, idx.reshape(len(shifts), -1)).reshape(idx.shape)  # (B, S, M)
         return (2.0 / M) * torch.einsum("bsm,cm->bsc", win, self.demod)
 

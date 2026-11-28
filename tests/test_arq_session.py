@@ -209,20 +209,21 @@ def test_connect_retries_in_the_robust_mode_and_is_answered_in_it():
 
 def test_connect_retries_end_in_the_fast_fading_robust_mode():
     """Nothing is measured before a session: the retries go in
-    ROBUST_CONNECT (four, their soft bits adding), then one in ROBUST_FAST,
-    whose wider tones survive fast fading (30 Hz / 7 ms, 0 dB: 2 of 8
-    sessions connected with every retry in ROBUST_CONNECT, 8 of 8 with the
-    last in ROBUST_FAST). One mode on FM."""
+    ROBUST_CONNECT (three, their soft bits adding), then two in ROBUST_WIDE
+    (RRRWW), whose wider 50 Hz bins survive fast fading and extreme Doppler
+    (hilat-d -16 dB: 0.82 vs 0.20; 60 Hz / 7 ms -12 dB: 0.97 vs 0.00).
+    One mode on FM."""
     from data2g.arq import policy as G
 
     g = G.GearShifter()
-    want = [G.CONNECT[2]] + [G.ROBUST_CONNECT] * G.ROBUST_CONNECT_TRIES + [G.ROBUST_FAST]
+    want = [G.CONNECT[2], *G.ROBUST_CONNECTS]
     assert len(want) == S.CONNECT_TRIES and [g.connect_mode(2, k) for k in range(S.CONNECT_TRIES)] == want
-    assert g.connect_mode(2, 12) == G.ROBUST_FAST  # a host's RETRIES past the default
-    # a host's RETRIES under the default: the last try in ROBUST_FAST, unless it is the only retry
+    assert g.connect_mode(2, 12) == G.ROBUST_WIDE  # a host's RETRIES past the default
+    # a host's RETRIES under the default: the last try in ROBUST_WIDE, unless it is the only retry
     for n in range(2, S.CONNECT_TRIES + 1):
         got = [g.connect_mode(2, k, last=k == n - 1) for k in range(n)]
-        assert got[1:] == ([G.ROBUST_CONNECT] if n == 2 else [G.ROBUST_CONNECT] * (n - 2) + [G.ROBUST_FAST])
+        exp = [G.ROBUST_CONNECT] if n == 2 else list(G.ROBUST_CONNECTS[:n - 2]) + [G.ROBUST_WIDE]
+        assert got[1:] == exp
     assert g.connect_mode(2, 1) == g.connect_mode(2, 1, last=False) == G.ROBUST_CONNECT
     a = S.Session("W1AW", g, rng=random.Random(1))
     a.connect("K2XYZ", 2, 0.0)
@@ -654,8 +655,8 @@ def test_compact_connect_over_the_cpm_modem():
         t = max(t + 0.1, a.next_event() or t)
         retry = a.poll(t)
     assert retry.submode == G.ROBUST_CONNECT and [s.mask_id for s in retry.slots] == [L.COMPACT_CONNECT]
-    body = F.unpack_connect(retry.slots[0].payload)
-    assert F.unpack_call(body[2:10]) == "VE3/W1AW-1" and body[20:] == bytes([0, 25])
+    c = F.Connect.unpack(retry.slots[0].payload)
+    assert c.caller == "VE3/W1AW-1" and c.callee == "K2XYZ" and (c.cap, c.t_turn10) == (0, 25)
 
     spec = REAL[retry.submode]
     y = np.concatenate([np.zeros(2000), PHY.tx_audio(retry), np.zeros(2000)])
@@ -671,12 +672,11 @@ def test_compact_connect_over_the_cpm_modem():
 def test_compact_connect_round_trip():
     from data2g.arq import frames as F
 
-    body = (bytes([F.CONNECT, S.VERSION]) + F.pack_call("W1AW") + F.pack_call("K2XYZ/P")
-            + (0xBEEF).to_bytes(2, "big") + bytes([2, 63]))
-    p = F.pack_connect(body)
-    assert len(p) == F.COMPACT_BYTES and F.unpack_connect(p) == body
+    c = F.Connect(S.VERSION, "W1AW", "K2XYZ/P", 0xBEEF, 2, 63, F.CAP_NODS | 0x4200, 0x05)
+    p = c.pack()
+    assert len(p) == F.COMPACT_BYTES and F.Connect.unpack(p) == c
     with pytest.raises(ValueError):
-        F.pack_connect(body[:-1] + bytes([64]))  # t_turn over 6.3 s
+        F.Connect(S.VERSION, "W1AW", "K2XYZ/P", 0xBEEF, 2, 64).pack()  # t_turn over 6.3 s
 
 
 def test_reply_lost_is_answered_at_once():

@@ -16,7 +16,7 @@ def ctl_mask(direction: int, i: int, key: int = 0) -> tuple:
     return (key, direction, SEQ_MOD + i)
 
 
-COMPACT_CONNECT = ctl_mask(0, 4)  # a compact CONNECT's mask (frames.pack_connect); ctl_mask's i is 0-3
+COMPACT_CONNECT = ctl_mask(0, 4)  # CONNECT's mask (frames.Connect); ctl_mask's i is 0-3
 EPOCH_MOD = 64  # abandon epochs in a data codeword's identity: the direction byte's 6 spare bits
 
 
@@ -48,6 +48,8 @@ class TxBurst:
     nod: tuple | None = None
     level: float = 1.0  # audio level against the mode's own (an FM ping goes at its top modes': arq.ping)
     probe: bool = False  # FM: the sounding probe follows on the same PTT (arq.probe; a ping)
+    # CONNECT burst: callee callsign for the header's callee hash (docs/pending-header.md); empty for all other bursts
+    connect_callee: str = ""
 
 
 def dup_ctl(burst) -> bool:

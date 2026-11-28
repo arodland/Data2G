@@ -93,7 +93,7 @@ and reads any codeword. A mask only decides whose CRC check passes.
 ## 3. Burst format
 
 - **Control:** every burst's control, port 0's included, is a 1-byte header
-  `[version 4 bits | dup 1 | reserved 1 | n_ctl - 1 (2)]` (version 3), then TLVs, as `frames.Control` without the 32-bit core. The ARQ core's fields mean
+  `[version 4 bits | dup 1 | reserved 1 | n_ctl - 1 (2)]` (version 3), then TLVs, as `frames.Control` without the 32-bit core. Senders clear `reserved` (bit `0x04`); receivers ignore it. The ARQ core's fields mean
   nothing to a broadcast burst, and CPM gives control exactly one 20 B codeword.
   - Version 2 (before 2026-10-25: no dup bit, data framed by 2-byte lengths, data
     masks without the start) isn't read: its bursts are skipped as another kind.
@@ -106,7 +106,7 @@ and reads any codeword. A mask only decides whose CRC check passes.
   polar codeword of air time: the data codewords it can carry stay `cpm.MAX_DATA`).
   Broadcast has no feedback, so the sender's host chooses it, unlike ARQ's
   `T_DUPCTL`.
-- **TLVs:**
+- **TLVs:** types `1..127` are ignorable (unknown types are skipped by length); types `128..255` are critical (an unknown critical type makes the control invalid and drops it). Type `0` begins zero padding.
 
   | type | contents | when |
   |---|---|---|
@@ -117,9 +117,18 @@ and reads any codeword. A mask only decides whose CRC check passes.
   - group+from on CPM: 1 + 2 + 15 = 18 B, which fits 20 B. Separate group and from TLVs
     would be 1 + 10 + 10 = 21 B, which doesn't fit.
 - **Data:** each frame COBS-encoded (Consistent Overhead Byte Stuffing: no zero byte
-  left) and ended by a zero byte, back to back, zero padded; one burst carries one
-  group's frames. A frame that would start a codeword, the data's first included,
-  gets a zero byte before it.
+  left), optionally followed by a 1-byte command tag `0xF0 | cmd` (`0xF1..0xFF`) when
+  its KISS command nibble `cmd` is non-zero (omitted for command `0`), and ended by a
+  zero byte, back to back, zero padded; one burst carries one group's frames. A frame
+  that would start a codeword, the data's first included, gets a zero byte before it.
+  - Every valid COBS block walks chunk lengths to the exact end of the segment, never
+    leaving a single trailing byte `>= 2`. So a trailing `0xF1..0xFF` after at least
+    one COBS chunk unambiguously carries KISS command nibbles `1..15` (such as VARA's
+    commands `1` and `2`, issue #283) at 1 byte per frame, while command `0` frames
+    (standard KISS, APRS, ACKMODE, native Data2G apps) pay **0 bytes** of overhead.
+    Because each frame carries its own tag inside its `0x00`-delimited segment,
+    command nibbles survive both control-codeword loss (`find_data`) and mid-burst
+    codeword loss, and frames with different command nibbles share one burst.
   - A zero byte in a good codeword always ends a frame, so a failed codeword loses
     only the frames it touches: parsing picks up at the next zero in a good codeword.
   - The zero before a frame starting a codeword puts where it starts in its own
@@ -129,11 +138,12 @@ and reads any codeword. A mask only decides whose CRC check passes.
   - `BCAST n LOST k` counts each run of frames one failed codeword touched as one:
     at least k frames were lost. With frames filling whole codewords, a lost
     codeword holds one frame and k is exact.
-  - Cost: `kisslink.framed_len(n) = n + 2 + n // 254` bytes at most, equal when the
-    frame has no zero byte (n + 2 up to 253 bytes, as the 2-byte length it
-    replaced; 259 for a 256-byte frame), and 1 more for a frame that starts a
-    codeword. A client that wants its frames to fill k codewords each makes them
-    k x bytes-per-codeword - 3 bytes long (up to 253).
+  - Cost: `kisslink.framed_len(n, cmd=0) = n + 2 + n // 254 + (1 if cmd else 0)`
+    bytes at most, equal when the frame has no zero byte (n + 2 up to 253 bytes for
+    command 0, as the 2-byte length it replaced; 259 for a 256-byte frame; 1 more
+    for a non-zero command), and 1 more for a frame that starts a codeword. A client
+    that wants its frames to fill k codewords each makes them k x bytes-per-codeword
+    - 3 bytes long for command 0 (up to 253).
 - **What fits:** `BCAST MODE` refuses a mode whose control codewords (at most 4) can't
   hold the port's control: the header, its group TLV, and on a shifting port a
   reports TLV with at least its sender.
@@ -146,8 +156,9 @@ and reads any codeword. A mask only decides whose CRC check passes.
   size class to carry its first frame, up to what its header can say
   (`kisslink.next_burst`), and receivers take a header that long:
   `engine.receive_accept` raises each OFDM submode's max codewords to hold 4
-  control codewords, sent twice, and a 256-byte frame framed as a burst's first
-  (8 + ⌈260 / bytes per codeword⌉). CPM's 8 data codewords hold 304-464 B whatever the control.
+  control codewords, sent twice, and a 256-byte frame (including a non-zero command
+  tag) framed as a burst's first (8 + ⌈261 / bytes per codeword⌉). CPM's 8 data
+  codewords hold 304-464 B whatever the control.
 
 ## 4. Modes and channel access
 
@@ -255,7 +266,12 @@ and QtSoundModem):
 
 - **Ask per frame:** the app sends `0x0C` (with the port in the high nibble), a 2-byte
   tag of its choosing, then the frame. Plain data frames (`0x00`) get no ack, so apps
-  that don't ask see no change. Works on every port, port 0 included.
+  that don't ask see no change. Works on every port, port 0 included. On receive,
+  ACKMODE frames are delivered with command `0`.
+- **VARA broadcast commands (`0x01`, `0x02`):** KISS frames with command nibble `1`
+  or `2` and payload length > 1 byte (standard KISS TXDELAY and P carry 1 byte) are
+  sent as broadcast data frames and delivered to receiving KISS clients with the same
+  command nibble (§3, Data).
 - **The ack:** `0x0C`, the same port, and just the tag, sent on the KISS port to the
   client that sent the frame, when the burst carrying that frame finishes transmitting. Frames sharing a burst are acked
   together, in queue order.

@@ -130,18 +130,19 @@ class KissServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
     def __init__(self, addr, on_packet, on_command=None):
-        """`on_packet(port, frame, ack)`: a data frame, or an ACKMODE one
-        (`ack` an id for send_ack, its low 16 bits the tag big-endian, as
-        native's: engine.ack_tag; else None). `on_command(cmd, payload,
-        port)`: KISS commands other than those."""
+        """`on_packet(port, frame, ack, cmd)`: a data frame (`cmd` its low
+        nibble: 0, or VARA's 1 / 2), or an ACKMODE one (`ack` an id for
+        send_ack, its low 16 bits the tag big-endian, as native's:
+        engine.ack_tag, `cmd` 0; else `ack` is None). `on_command(cmd,
+        payload, port)`: KISS commands other than those."""
         self.clients, self.lock, self.on_packet, self.on_command = set(), threading.Lock(), on_packet, on_command
         self.refs = set()  # clients that sent REFS ON
         self.acks, self._n_acks = {}, 0  # ACKMODE id -> (client, tag)
         super().__init__(addr, _KissHandler)
 
-    def broadcast(self, data: bytes, port: int = 0):
-        """A frame heard on `port`, to every client."""
-        frame = kiss_encode(data, port)
+    def broadcast(self, data: bytes, port: int = 0, cmd: int = DATA):
+        """A frame heard on `port` with command nibble `cmd`, to every client."""
+        frame = kiss_encode(data, port, cmd)
         with self.lock:
             for c in list(self.clients):
                 try:
@@ -190,13 +191,13 @@ class _KissHandler(socketserver.BaseRequestHandler):
             while data := self.request.recv(4096):
                 for cmd, payload in dec.feed(data):
                     if is_data(cmd, payload):
-                        srv.on_packet(cmd >> 4, payload, None)
+                        srv.on_packet(cmd >> 4, payload, None, cmd & 0x0F)
                     elif cmd & 0x0F == ACKMODE and len(payload) >= 2:  # [tag, 2][frame]: ack it once sent
                         with srv.lock:
                             srv._n_acks += 1
                             ack = srv._n_acks << 16 | int.from_bytes(payload[:2], "big")
                             srv.acks[ack] = (self.request, payload[:2])
-                        srv.on_packet(cmd >> 4, payload[2:], ack)
+                        srv.on_packet(cmd >> 4, payload[2:], ack, DATA)
                     elif cmd & 0x0F == SETHARDWARE and (on := refs_command(payload)) is not None:
                         with srv.lock:
                             (srv.refs.add if on else srv.refs.discard)(self.request)

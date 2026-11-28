@@ -48,7 +48,14 @@ def test_ace_transmit_matches_numpy_and_keeps_points_in_their_regions():
 
     def harm(x):
         """Mean square of the error that isn't outward along a point's axes."""
-        cells = ((2.0 / modem.M) * (x[win] @ dem)).reshape(-1)
+        got_c = (2.0 / modem.M) * (x[win] @ dem)
+        if modem.sc_spec(spec, n_f):
+            kc = modem.copy_frame(spec.sync_band, n_f)
+            frames = [f for f in range(n_f + (kc is not None)) if f != kc]
+            got_c = got_c.reshape(n_f, -1)
+            cells = np.concatenate([got_c[i, modem.sc_frame_cells(NC, f)[2]] for i, f in enumerate(frames)])
+        else:
+            cells = got_c.reshape(-1)
         cells = cells * np.vdot(cells, data) / np.vdot(cells, cells)  # the clip's gain out
         return np.mean(np.abs(cells - constellation.ace_project(cells, data, dirs)) ** 2)
 

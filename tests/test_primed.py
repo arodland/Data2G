@@ -84,37 +84,34 @@ class BootstrapPolicy(L.Policy):
         return rec, 1, rec
 
 
-def bootstrap_control(cls, mode, dup, announcements, direction):
-    sender = cls(direction, BootstrapPolicy(mode, dup), master=direction == 0,
-                 nod=announcements, keep=announcements)
-    receiver = cls(1 - direction, BootstrapPolicy(mode, dup), master=direction == 1, nod=True, keep=True)
+def bootstrap_control(cls, mode, dup, direction):
+    sender = cls(direction, BootstrapPolicy(mode, dup), master=direction == 0, nod=True)
+    receiver = cls(1 - direction, BootstrapPolicy(mode, dup), master=direction == 1, nod=True)
     burst = sender.build()
     stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
     rx = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=1, p_known=1)
     rx.n_ctl_slots = 1 if M.is_cpm(M.MODES[mode]) else 0
     hypotheses = receiver.expect(rx)
     assert len(hypotheses) <= L.PRIME_TRIES
-    assert receiver.handle(rx), (mode, dup, announcements, direction, hypotheses)
+    assert receiver.handle(rx), (mode, dup, direction, hypotheses)
     assert receiver.stats["rx_primed"] == 1
     return _burst(burst), hypotheses
 
 
 @pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
-@pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
-def test_first_control_can_be_primed(mode, dup, announcements, direction):
-    """A first control is recovered after blind failure, with default or legacy announcements."""
-    bootstrap_control(L.Station, mode, dup, announcements, direction)
+def test_first_control_can_be_primed(mode, dup, direction):
+    """A first control is recovered after blind failure."""
+    bootstrap_control(L.Station, mode, dup, direction)
 
 
 @pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
 @pytest.mark.parametrize("dup", [False, True])
-@pytest.mark.parametrize("announcements", [False, True])
 @pytest.mark.parametrize("direction", [0, 1])
-def test_cpp_first_control_primes_identically(native, pure, mode, dup, announcements, direction):
-    assert bootstrap_control(native.arq.Station, mode, dup, announcements, direction) == \
-        bootstrap_control(L.Station, mode, dup, announcements, direction)
+def test_cpp_first_control_primes_identically(native, pure, mode, dup, direction):
+    assert bootstrap_control(native.arq.Station, mode, dup, direction) == \
+        bootstrap_control(L.Station, mode, dup, direction)
 
 
 class DataPolicy(BootstrapPolicy):
@@ -124,11 +121,9 @@ class DataPolicy(BootstrapPolicy):
 
 def reply_to_data(cls, dup):
     """The caller's first burst carries data (its bank is full of cumulative-ack ways); the
-    callee's control-only reply fails blind and must still be primed. An announcing callee
-    only: the announced ways come first, and a legacy one (nod, keep off) loses its
-    T_DUPCTL-toggled ways past PRIME_TRIES here (expect)."""
-    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True, keep=True)
-    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True, keep=True)
+    callee's control-only reply fails blind and must still be primed."""
+    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True)
+    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True)
     a.write(bytes(range(64)))
     stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
     first = PrimeRx(a.build(), random.Random(1), 0, {}, stats, p_ctl=0, p_known=1)
@@ -293,13 +288,13 @@ def test_decode_known_rescues_a_cpm_control():
     """An ACK control (8 B) that neither the plain decode nor the padding
     cuts recover: the whole control known but the cumulative ACK (7 bits)
     does, and only with the right template. Erasures (not noise) make the
-    premise hold on every platform: 30% of the soft bits kept, seed 5."""
+    premise hold on every platform: 20% of the soft bits kept, seed 5."""
     spec = cpm.CTL["c16r25"]
     mid = ctl_mask(1, 0, 0x5A5A)
     m = PHY.mask_value(mid)
     ctl = F.Control(F.Core(burst_seq=3, acted_on=2, cum=77, recommend=50, size_hint=2),
                     {F.T_REPLY: bytes([50]), F.T_DUPCTL: b""}).pack(codes.payload_bytes(spec))[0]
-    rx = _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5))
+    rx = _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5))
     assert rx.decode(0, mid, 0, None) is None
     known = bytearray(b"\xff" * len(ctl))
     known[2] &= 0x80  # cum: core bits 21..15
@@ -307,9 +302,9 @@ def test_decode_known_rescues_a_cpm_control():
     assert rx.decode_known(0, mid, ctl, bytes(known)) == ctl
     wrong = bytearray(ctl)
     wrong[6] ^= 1  # another T_REPLY value, pinned
-    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, mid, bytes(wrong), bytes(known)) is None
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5)).decode_known(0, mid, bytes(wrong), bytes(known)) is None
     other = ctl_mask(1, 0, 0x1234)  # another session's mask: its CRC fails
-    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.3, 5)).decode_known(0, other, ctl, bytes(known)) is None
+    assert _cpm_rx(ctl, _erased(spec, ctl, m, 0.2, 5)).decode_known(0, other, ctl, bytes(known)) is None
 
 
 def test_decode_known_on_noise_and_erasures():
@@ -472,13 +467,13 @@ def test_primed_connect_and_connect_ack():
 
 
 def test_forged_connect_frames_rejected():
-    """Forged primed frames (random where unknown): a CONNECT's caller rarely
-    unpacks (10 characters in a 40 of 64 alphabet), a CONNECT_ACK's cap over
-    2 is dropped; whatever is accepted is a well-formed frame."""
+    """Forged primed frames (random where unknown): a base-40 caller unpacks only
+    for 39^10 / 2^54 (~45%) of 54-bit values, and a CONNECT_ACK's cap over 2 is
+    dropped; whatever is accepted is a well-formed frame."""
     from data2g.arq import session as S
     rng = random.Random(9)
     states = [handshake(S.Session, forge=rng)[1] for _ in range(200)]
-    assert states.count(S.CONNECTED) < 10  # (5/8)^10 of them, about 1%
+    assert 0 < states.count(S.CONNECTED) < 120  # 39^10 / 2^54 (~45%) unpack; ~55% rejected by base-40 check
 
 
 def test_cpp_sessions_prime_connect_identically(native, pure):
@@ -510,11 +505,11 @@ def _faded_cpm(seed):
     return y, receive_any(y, lead=int(PS.PAD_S * PS.FS) + PS.FS // 2), int(PS.PAD_S * PS.FS), PS.CFO_HZ
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_prime_lock_finds_what_blind_acquisition_lost():
-    """Seed 0: no blind path locks (the front faded); in a +-0.15 s window at
+    """Seed 2: no blind path locks (the front faded); in a +-0.15 s window at
     the known CFO the expected slot finds it, start and word right."""
-    y, r, p0, cfo = _faded_cpm(0)
+    y, r, p0, cfo = _faded_cpm(2)
     assert r is None
     lock = cpm.prime_lock(cpm.GRIDS["c16r25"], y, p0 - WIN, p0 + WIN, cfo)
     assert lock is not None and lock["start"] == p0 and lock["spec"].name == "fsk16r25-r1/3" and lock["n_data"] == 0
@@ -563,13 +558,13 @@ def _stream(rcv, y, expect=None):
     return out
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot():
-    """The streaming receiver: seed 0's burst, which no blind path locks,
+    """The streaming receiver: seed 2's burst, which no blind path locks,
     is found in the expected slot (and decodes), and not without it."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
-    y, _, p0, cfo = _faded_cpm(0)
+    y, _, p0, cfo = _faded_cpm(2)
     y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     assert not _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y)
     ev = _stream(Receiver(receive_accept(), cpm_grids=tuple(cpm.GRIDS)), y, (["c16r25"], p0 - WIN, p0 + WIN, cfo))
@@ -577,7 +572,7 @@ def test_receiver_expected_slot():
     assert ev[0][1]["start"] == p0 and ev[1][1]["rx"] is not None and ev[1][1]["rx"]["spec"].name == "fsk16r25-r1/3"
 
 
-@pytest.mark.hf_only("seed 0 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
+@pytest.mark.hf_only("seed 2 is picked as a burst blind acquisition loses on HF mpp at -17 dB; at 16 kHz other seeds are")
 def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     """Three grids expected, one prime_lock a search hop (the Pi's hop
     budget): the burst's grid tried last is still found in its window, and
@@ -585,7 +580,7 @@ def test_receiver_expected_slot_one_grid_a_hop(monkeypatch):
     nothing queued."""
     from data2g.arq.engine import receive_accept
     from data2g.receiver import Receiver
-    y, _, p0, cfo = _faded_cpm(0)
+    y, _, p0, cfo = _faded_cpm(2)
     y = np.concatenate([y, np.random.default_rng(1).normal(0, np.std(y[:p0]), 2 * FS)])
     calls, prime = [], cpm.prime_lock
     monkeypatch.setattr(cpm, "prime_lock", lambda g, *a: calls.append(g.name) or prime(g, *a))
@@ -653,10 +648,9 @@ class PollPolicy(RandomPolicy):
 
 def poll_after_data(cls, reply_changes):
     """A caller's poll after a data exchange whose reply was lost, its control lost blind:
-    -> (burst, hypotheses, whether a primed retry read it). The caller said T_NODS and
-    T_KEEP in its first poll and stopped once the callee had acted on them."""
-    a = cls(0, PollPolicy(), master=True, nod=True, keep=True)
-    b = cls(1, PollPolicy(), nod=True, keep=True)
+    -> (burst, hypotheses, whether a primed retry read it)."""
+    a = cls(0, PollPolicy(), master=True, nod=True)
+    b = cls(1, PollPolicy(), nod=True)
 
     def rx(burst, lost=False):
         stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
@@ -666,7 +660,6 @@ def poll_after_data(cls, reply_changes):
 
     a.build()  # the first burst: lost
     first = a.on_timeout(allow_repeat=False)
-    assert F.T_NODS in F.Control.unpack([first.slots[0].payload]).ext
     assert b.handle(rx(first))
     reply = b.build()
     b.answered()
@@ -679,8 +672,7 @@ def poll_after_data(cls, reply_changes):
     if reply_changes:
         a.policy.reply = 6
     poll = a.on_timeout(allow_repeat=False)
-    ext = F.Control.unpack([poll.slots[0].payload]).ext
-    assert len(poll.slots) == 1 and F.T_NODS not in ext and F.T_KEEP not in ext
+    assert len(poll.slots) == 1
     r = rx(poll, True)
     hs = b.expect(r)
     assert len(hs) <= L.PRIME_TRIES
@@ -689,8 +681,8 @@ def poll_after_data(cls, reply_changes):
 
 @pytest.mark.parametrize("reply_changes", [False, True])
 def test_poll_after_data_can_be_primed(reply_changes):
-    """The callee knows the caller's T_NODS has stopped (the caller acted on the burst that
-    acted on it), though the caller's last control-only burst, its first poll, carried it."""
+    """The callee primes a caller's poll after data whose reply was lost,
+    whether T_REPLY stayed unchanged (omitted) or changed."""
     _, hs, read = poll_after_data(L.Station, reply_changes)
     assert read, hs
 
@@ -698,3 +690,78 @@ def test_poll_after_data_can_be_primed(reply_changes):
 @pytest.mark.parametrize("reply_changes", [False, True])
 def test_cpp_poll_after_data_primes_identically(native, pure, reply_changes):
     assert poll_after_data(native.arq.Station, reply_changes) == poll_after_data(L.Station, reply_changes)
+
+
+def burst1_omits_reply_under_data(cls, dup):
+    """After burst 0 establishes T_REPLY, burst 1 omits T_REPLY unconditionally in
+    wire 1.0. Even with unacked data in flight (tx.base != tx.next filling the
+    cum/bitmap bank), burst 1 must prime on hypothesis 0."""
+    a = cls(0, DataPolicy("fsk16r25-r1/2", dup), master=True, nod=True)
+    b = cls(1, DataPolicy("fsk16r25-r1/2", dup), nod=True)
+    stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
+
+    def rx(burst, lost=False):
+        r = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=int(lost), p_known=1)
+        r.n_ctl_slots = 1
+        return r
+
+    # burst 0: caller establishes T_REPLY; callee replies with unacked data
+    b0 = a.build()
+    assert b.handle(rx(b0))
+    b.write(bytes(range(64)))
+    r0 = b.build()
+    b.answered()
+    assert b.tx.base < b.tx.next and a.handle(rx(r0))
+    # burst 1: caller omits T_REPLY (unchanged); fails blind -> callee primes on hyp 0
+    b1 = a.build()
+    assert F.T_REPLY not in F.Control.unpack([b1.slots[0].payload]).ext
+    r1 = rx(b1, lost=True)
+    hs = b.expect(r1)
+    assert len(hs) <= L.PRIME_TRIES
+    assert F.T_REPLY not in F.Control.unpack([hs[0][0]]).ext
+    assert b.handle(r1), (dup, hs)
+    assert b.stats["rx_primed"] == 1
+    return _burst(b1), hs
+
+
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
+@pytest.mark.parametrize("dup", [False, True])
+def test_burst1_omitted_reply_primes_under_unacked_data(dup):
+    burst1_omits_reply_under_data(L.Station, dup)
+
+
+@pytest.mark.hf_only("its bursts are CPM (one control slot): FM has none")
+@pytest.mark.parametrize("dup", [False, True])
+def test_cpp_burst1_omitted_reply_primes_identically(native, pure, dup):
+    assert burst1_omits_reply_under_data(native.arq.Station, dup) == \
+        burst1_omits_reply_under_data(L.Station, dup)
+
+
+def bare_first_control(cls, mode):
+    """A peer's very first ARQ burst with reply=None and want_dup=False (empty ext)
+    is still primed."""
+    class BarePolicy(BootstrapPolicy):
+        def recommend(self, station):
+            return M.encode(ROBUST_CONNECT), 1, None
+
+    sender = cls(0, BarePolicy(mode, False), master=True, nod=True)
+    receiver = cls(1, BarePolicy(mode, False), master=False, nod=True)
+    burst = sender.build()
+    assert not F.Control.unpack([s.payload for s in burst.slots]).ext
+    stats = dict(mismatch=0, primed=0, primed_ok=0, forged=0)
+    rx = PrimeRx(burst, random.Random(1), 0, {}, stats, p_ctl=1, p_known=1)
+    rx.n_ctl_slots = 1 if M.is_cpm(M.MODES[mode]) else 0
+    hs = receiver.expect(rx)
+    assert len(hs) <= L.PRIME_TRIES
+    assert receiver.handle(rx), (mode, hs)
+    return _burst(burst), hs
+
+
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
+def test_bare_first_control_can_be_primed(mode):
+    bare_first_control(L.Station, mode)
+
+
+@pytest.mark.parametrize("mode", ["ack-4f", pytest.param("fsk16r25-r1/2", marks=pytest.mark.hf_only("CPM: FM has none"))])
+def test_cpp_bare_first_control_primes_identically(native, pure, mode):
+    assert bare_first_control(native.arq.Station, mode) == bare_first_control(L.Station, mode)

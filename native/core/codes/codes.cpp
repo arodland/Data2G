@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,7 @@
 
 #include "tables/cpm.hpp"
 #include "tables/format.hpp"
+#include "tables/polar_ga.hpp"
 
 namespace data2g::codes {
 
@@ -104,13 +106,14 @@ std::vector<Spec> build_specs() {
         v.push_back({s.name, s.code == "polar", s.k, s.coded_bits, s.bits_per_cu, s.crc_bits, s.payload_bytes,
                      tables::FORMATS[i].perm, tables::FORMATS[i].info_pos});
     }
-    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL, tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL})
         for (const auto& s : table) {
             const bool polar = s.code == "polar";
             const int crc = crc_bits(s);
             int bits = 0;
-            for (const auto& g : tables::CPM_GRIDS)
-                if (g.name == s.grid) bits = g.bits;
+            for (auto grids : {tables::CPM_GRIDS, tables::CPM_WIDE_GRIDS})
+                for (const auto& g : grids)
+                    if (g.name == s.grid) bits = g.bits;
             v.push_back({s.name, polar, s.k, s.coded_bits, bits, crc, payload_bytes(s), s.perm,
                          polar ? polar::ga_info_pos(s.k, s.coded_bits) : std::span<const std::uint16_t>{},
                          s.code == "gf" ? &s.gf : nullptr});
@@ -224,7 +227,7 @@ Info decode_gf(const Spec& s, const gfldpc::Decoder& dec, const Mat<float>& dein
     return out;
 }
 
-// (B, L * k) polar paths in the code's order -> the info bits' (polar_order is its own inverse).
+// (B, L * k) polar paths in the code's order -> the info bits' (inverse of polar_order).
 void reorder_paths(const Spec& s, Mat<std::uint8_t>& paths) {
     const auto& order = polar_order(s);
     const std::size_t k = order.size();
@@ -232,7 +235,7 @@ void reorder_paths(const Spec& s, Mat<std::uint8_t>& paths) {
     for (std::size_t r = 0; r < paths.rows; ++r)
         for (std::size_t off = 0; off + k <= paths.cols; off += k) {
             std::uint8_t* p = paths[r] + off;
-            for (std::size_t j = 0; j < k; ++j) tmp[j] = p[order[j]];
+            for (std::size_t j = 0; j < k; ++j) tmp[static_cast<std::size_t>(order[j])] = p[j];
             std::copy(tmp.begin(), tmp.end(), p);
         }
 }
@@ -275,15 +278,15 @@ const Spec* spec(std::string_view name) {
 const Spec& spec(const config::Submode& s) { return specs().at(config::row(s)); }
 
 const Spec& spec(const tables::CpmSpec& s) {
-    // specs() is SUBMODES, then CPM_SPECS, then CPM_CTL
+    // specs() is SUBMODES, then CPM_SPECS, CPM_CTL, CPM_WIDE_SPECS, CPM_WIDE_CTL
     const std::less<const tables::CpmSpec*> lt;
     std::size_t at = config::SUBMODES.size();
-    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL}) {
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL, tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL}) {
         if (!lt(&s, table.data()) && lt(&s, table.data() + table.size()))
             return specs()[at + static_cast<std::size_t>(&s - table.data())];
         at += table.size();
     }
-    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_SPECS or CPM_CTL row");
+    throw std::invalid_argument(std::string(s.name) + ": not a tables::CPM_* spec row");
 }
 
 const gfldpc::Code& gf_code(const Spec& s) {
@@ -781,44 +784,70 @@ std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf,
 }
 
 const std::vector<int>& polar_order(const Spec& s) {
-    const int nb = 8 * s.payload_bytes;
-    std::vector<int> out(static_cast<std::size_t>(s.k));
-    for (int j = 0; j < s.k; ++j) out[static_cast<std::size_t>(j)] = j < nb ? nb - 1 - j : j;
     std::lock_guard lock(cache_mutex);
     auto& c = cache[&s];
-    if (!c.order) c.order = std::move(out);
+    if (!c.order) {
+        for (const auto& o : tables::POLAR_ORDERS) {
+            if (o.name == s.name) {
+                c.order.emplace(o.order.begin(), o.order.end());
+                return *c.order;
+            }
+        }
+        throw std::out_of_range(std::string(s.name) + ": no POLAR_ORDERS entry");
+    }
     return *c.order;
 }
 
 namespace {
 
-// The full code, and the decoder of the code with `known` (code-order info indices) frozen; built once per pattern.
+// The full code, and the decoder of the code with `known` (code-order info indices) frozen; built once per pattern
+// and held in a bounded LRU cache.
 struct PinnedPolar {
     std::unique_ptr<polar::PolarCode> full;
     std::unique_ptr<polar::SCLDecoder> dec;
     std::vector<int> rest;  // code-order info indices it decodes
 };
+using PinnedKey = std::pair<const Spec*, std::vector<int>>;
+using PinnedNode = std::pair<PinnedKey, std::shared_ptr<const PinnedPolar>>;
+constexpr std::size_t PINNED_CACHE_MAX = 128;
 std::mutex pinned_mutex;
-std::map<std::pair<const Spec*, std::vector<int>>, PinnedPolar> pinned_cache;
+std::list<PinnedNode> pinned_lru;
+std::map<PinnedKey, std::list<PinnedNode>::iterator> pinned_cache;
 
-const PinnedPolar& pinned_polar(const Spec& s, const std::vector<int>& known) {
+std::shared_ptr<const PinnedPolar> pinned_polar(const Spec& s, const std::vector<int>& known) {
     const auto& code = polar_code(s);
-    std::lock_guard lock(pinned_mutex);
-    auto& p = pinned_cache[{&s, known}];
-    if (!p.dec) {
-        std::vector<std::uint16_t> info;
-        std::vector<std::uint8_t> is_known(static_cast<std::size_t>(s.k), 0);
-        for (int j : known) is_known[static_cast<std::size_t>(j)] = 1;
-        for (int j = 0; j < s.k; ++j)
-            if (!is_known[static_cast<std::size_t>(j)]) {
-                p.rest.push_back(j);
-                info.push_back(code.info_pos[static_cast<std::size_t>(j)]);
-            }
-        p.full = std::make_unique<polar::PolarCode>(s.k, s.coded_bits, code.info_pos);
-        p.dec = std::make_unique<polar::SCLDecoder>(polar::PolarCode(static_cast<int>(info.size()), s.coded_bits, info),
-                                                    POLAR_LIST);
+    PinnedKey key{&s, known};
+    {
+        std::lock_guard lock(pinned_mutex);
+        if (auto it = pinned_cache.find(key); it != pinned_cache.end()) {
+            pinned_lru.splice(pinned_lru.begin(), pinned_lru, it->second);
+            return it->second->second;
+        }
     }
-    return p;
+    auto p = std::make_shared<PinnedPolar>();
+    std::vector<std::uint16_t> info;
+    std::vector<std::uint8_t> is_known(static_cast<std::size_t>(s.k), 0);
+    for (int j : known) is_known[static_cast<std::size_t>(j)] = 1;
+    for (int j = 0; j < s.k; ++j)
+        if (!is_known[static_cast<std::size_t>(j)]) {
+            p->rest.push_back(j);
+            info.push_back(code.info_pos[static_cast<std::size_t>(j)]);
+        }
+    p->full = std::make_unique<polar::PolarCode>(s.k, s.coded_bits, code.info_pos);
+    p->dec = std::make_unique<polar::SCLDecoder>(polar::PolarCode(static_cast<int>(info.size()), s.coded_bits, info),
+                                                 POLAR_LIST);
+    std::lock_guard lock(pinned_mutex);
+    if (auto it = pinned_cache.find(key); it != pinned_cache.end()) {
+        pinned_lru.splice(pinned_lru.begin(), pinned_lru, it->second);
+        return it->second->second;
+    }
+    while (pinned_cache.size() >= PINNED_CACHE_MAX && !pinned_lru.empty()) {
+        pinned_cache.erase(pinned_lru.back().first);
+        pinned_lru.pop_back();
+    }
+    pinned_lru.emplace_front(std::move(key), std::move(p));
+    pinned_cache.emplace(pinned_lru.front().first, pinned_lru.begin());
+    return pinned_lru.front().second;
 }
 
 // codes._pinned_paths: (B, coded_bits) code-order LLRs, sent at `index` -> (B, L * k) info bits, scrambled, in
@@ -838,7 +867,8 @@ Mat<std::uint8_t> pinned_paths(const Spec& s, const Mat<float>& deint, std::span
             kp.push_back(static_cast<int>(j));
         }
     }
-    const auto& p = pinned_polar(s, kp);
+    const auto pp = pinned_polar(s, kp);
+    const auto& p = *pp;
     Mat<std::uint8_t> ub(1, k);
     ub.data = u;
     const auto xk = p.full->encode(ub);

@@ -30,17 +30,23 @@ int main() {
 
     check::current_step = "timing";
     if (check::hf_only("burst timing golden at 8 kHz"))
-        check::equal(modem::burst_seconds(arq::mode_at("qpsk-r1/2").ofdm[0], 3), 3.928, "qpsk-r1/2 x3 seconds");
-    check::equal(modem::header_samples("n4"), 28 * config::NSYM, "n4 header: 24 symbols, 4 pilots");
+        check::equal(modem::burst_seconds(arq::mode_at("qpsk-r1/2").ofdm[0], 3), 3.952, "qpsk-r1/2 x3 seconds");
+    check::equal(modem::header_samples("n4"), (config::sc_band("n4") ? 29 : 28) * config::NSYM,
+                 "n4 header: 24 symbols, 4 pilots (+ closing pilot on scattered)");
     check::equal(modem::header_samples("n10"), 12 * config::NSYM, "n10 header: 10 symbols, a pilot, the closing pilot");
 
     check::current_step = "modes";
-    if (config::PROFILE == "hf") check::equal(static_cast<int>(arq::modes().size()), 50, "modes");
-    if (check::hf_only("CPM's band code: FM has no CPM"))
-        check::equal(arq::encode("n10-256l-r3/4"), 3 << 4 | 9, "encode n10-256l-r3/4 (CPM code, past N10_HIGH)");
-    check::equal(arq::encode("qpsk-r1/2"), 7, "encode qpsk-r1/2");
-    if (check::hf_only("CPM's band code: FM has no CPM")) check::equal(arq::encode("fsk8r50-r1/2"), 51, "encode fsk8r50-r1/2");
-    if (config::PROFILE == "fm") check::equal(arq::encode("f108-qpsk-r21"), 3 << 4, "encode f108-qpsk-r21 (FM's band code 3)");
+    if (config::PROFILE == "hf") {
+        check::equal(static_cast<int>(arq::modes().size()), 53, "modes");
+        check::equal(arq::encode("fsk8r50-r1/2"), 5, "encode fsk8r50-r1/2");
+        check::equal(arq::encode("fsk32r62-r1/2"), 7, "encode fsk32r62-r1/2");
+        check::equal(arq::encode("qpsk-r1/5"), 9, "encode qpsk-r1/5 (within +2 of fsk32r62-r1/2)");
+        check::equal(arq::encode("qpsk-r1/2"), 12, "encode qpsk-r1/2");
+        check::equal(arq::encode("n10-256l-r3/4"), 39, "encode n10-256l-r3/4 (contiguous n10 ladder)");
+    } else {
+        check::equal(arq::encode("qpsk-r1/2"), 10, "encode qpsk-r1/2 (FM flat table)");
+        check::equal(arq::encode("f108-qpsk-r21"), 28, "encode f108-qpsk-r21 (FM flat table)");
+    }
     for (const auto& m : arq::modes())  // what the ARQ may name on air (every mode on HF)
         if (arq::selectable(m)) check::is_true(arq::decode(arq::encode(m.name)) == &m, std::string(m.name) + " roundtrip");
     check::is_true(arq::decode(0x3F) == nullptr, "no such cpm mode");
@@ -72,7 +78,8 @@ int main() {
         arq::GearShifter w;
         w.observe(clean(-13.8, 24), "fsk16r25-r1/2", 0.0);
         arq::StationView wide;
-        check::equal(std::string(arq::decode(w.recommend(wide).data)->name), std::string("fsk32r62-r1/2"), "unbounded");
+        const auto* u = arq::decode(w.recommend(wide).data);
+        check::is_true(u && u->name.substr(0, 8) == "fsk32r62", "unbounded");
         arq::GearPolicy p;
         p.shifter.observe(clean(-13.8, 24), "fsk16r25-r1/2", 0.0);
         p.robust_started();

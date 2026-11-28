@@ -73,6 +73,10 @@ struct Basis {
 };
 std::shared_ptr<const Basis> support_basis(std::span<const double> bb, int d0, int d1, int slack = SUPPORT_SLACK);
 
+// B B^H, B the support's steering vectors (nc x (d1 - d0 + 2 slack + 1), B[k, j] = exp(-2j pi bb_k d_j / FS)):
+// (nc x nc) row-major. Times p_sig / that width, the LMMSE frequency prior refine uses (modem's joint estimate too).
+std::vector<cd> gram(std::span<const double> bb, int d0, int d1, int slack);
+
 struct Smoothed {
     Mat<cd> hs;
     double n0 = INF;  // inf where the residual has < 2 dimensions
@@ -102,14 +106,17 @@ struct Estimate {
     double n0_snr = 0;  // snr_est's noise (snr_noise; modem::snr_db)
     double filter_spread_hz = 0;  // the time filters' (refine's too); spread_hz is the reported one
     int slack = SUPPORT_SLACK;  // the support's padding (support_slack; refine's too)
-    // per carrier (nc), or per frame and carrier (n_f * nc: a per-window estimate, modem's
-    // config::EST_WINDOW); empty: n0. Read it with n0_at.
+    // per carrier (nc), per frame and carrier (n_f * nc: a per-window estimate, modem's
+    // config::EST_WINDOW), or per data cell as h (n_f * 5 * nc: scattered pilots' hot carriers, whose
+    // cells are in sending order); empty: n0. Read it with n0_at.
     std::vector<double> n0_k;
     // The noise variance at data row `row` (frame row / DATA_SYMS_PER_FRAME), carrier k.
     double n0_at(std::size_t row, std::size_t k) const {
         if (n0_k.empty()) return n0;
-        if (n0_k.size() == static_cast<std::size_t>(nc)) return n0_k[k];
-        return n0_k[(row / config::DATA_SYMS_PER_FRAME) * static_cast<std::size_t>(nc) + k];
+        const auto unc = static_cast<std::size_t>(nc);
+        if (n0_k.size() == unc) return n0_k[k];
+        if (n0_k.size() == static_cast<std::size_t>(n_f) * config::DATA_SYMS_PER_FRAME * unc) return n0_k[row * unc + k];
+        return n0_k[(row / config::DATA_SYMS_PER_FRAME) * unc + k];
     }
 };
 // n0_pre_k empty: None. Throws std::invalid_argument without a noise estimate.

@@ -32,6 +32,7 @@ struct Band {
     Mat<cdouble> mod;                 // (NSYM, nc), phase reference at n = NCP
     Mat<cdouble> demod;               // (nc, M), one useful window
     Mat<double> demod_re, demod_im;   // demod transposed, (M, nc), split (demod_window's layout)
+    std::vector<std::size_t> fft_bins;  // non-empty when nc >= 24 and every bb[k] is an exact M-point FFT bin
     std::vector<cdouble> pilot;       // (nc,), unit magnitude
     std::vector<cdouble> preamble_template;  // complex baseband preamble replica
 

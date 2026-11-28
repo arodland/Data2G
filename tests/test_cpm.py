@@ -141,9 +141,9 @@ def test_a_lock_before_the_buffer_is_a_miss(monkeypatch):
 
 @pytest.mark.hf_only("seed-picked draws at an HF-calibrated SNR on HF channels; FM picks its own on fmchannel")
 def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
-    """CPM's control is a polar codeword: its payload enters the code
-    reversed (codes.polar_order), so a short control's padding sits on the
-    weakest positions. At -11 dB these draws fail plain and decode with the
+    """CPM's control is a polar codeword: its info bits enter by GA
+    reliability (codes.polar_order), so a short control's padding sits on the
+    weakest positions. At -12 dB these draws fail plain and decode with the
     padding known (phy.POLAR_PIN_CUTS). Square-law control soft bits
     (cpm.COH_CTL off): the coherent ones decode these draws plain."""
     monkeypatch.setattr(cpm, "COH_CTL", False)
@@ -160,8 +160,8 @@ def test_cpm_control_padding_is_known_when_it_fails(monkeypatch):
     b = TxBurst(spec.name, [Slot(ctl_mask(0, 0, 7), 0, ctl), Slot(data_mask(0, 1, 7), 0, data)], 0)
     x = np.concatenate([np.zeros(4000), PHY.tx_audio(b), np.zeros(4000)])
     m = PHY.mask_value(ctl_mask(0, 0, 7))
-    for seed in (3, 7, 9):
-        y = hfchannel.apply_channel(x, snr_db=-11.0, seed=seed)
+    for seed in (1, 2, 3):
+        y = hfchannel.apply_channel(x, snr_db=-12.0, seed=seed)
         r = cpm.receive(y, cpm.find(cpm.GRIDS[spec.grid], y))
         cands, usable = codes.decode_raw(cs, np.asarray(PHY.soft_bits(r)[0])[None], index=[0])
         assert codes.check(cs, cands[0], usable[0], m) is None  # plain fails
@@ -230,7 +230,7 @@ def test_spread_on_slow_selective_fading():
     assert count("fsk16r25-r1/2", 1.0, 2.0, 2)[0] <= 5  # 2
     assert count("fsk8r50-r1/3", 0.1, 2.0, 2)[0] <= 3  # 1
     for name, doppler, delay_ms, least, most_unmeasured in (
-            ("fsk16r25-r1/2", 10.0, 7.0, 37, 1),  # 38, 0 (38 without the check)
+            ("fsk16r25-r1/2", 10.0, 7.0, 34, 2),  # 35, 2
             ("fsk16r25-r1/2", 10.0, 2.0, 38, 1),  # 39, 0 (39)
             ("fsk16r25-r1/2", 30.0, 7.0, 39, 1),  # 40, 0 (40)
             ("fsk8r50-r1/3", 10.0, 7.0, 19, 1),  # 20, 0 (20; the rest are fits)
@@ -264,6 +264,37 @@ def test_coarse_track_is_a_fresh_transform_of_the_stream(pure):  # (native's: te
         kw = dict(front_only=True, fine=False)  # (the whole pattern is longer than the second held)
         got, ref = cpm.detect(g, x[a:b], track=track, x0=a, **kw), cpm.detect(g, x[a + ph:b], **kw)
         assert ref[0] > 0 and got[1:] == (ref[1] + ph, ref[2]) and got[0] == pytest.approx(ref[0], rel=1e-12), g.name
+
+
+def test_r23_announced_at_index_4_and_older_words_unchanged():
+    """fsk32r62-r2/3: its header words (index 4, 6 duplicated) are new ones,
+    the two older modes' words are what they were, the recommendation codes
+    of the older modes too, and a burst of it (control twice, two data
+    codewords) locks and decodes."""
+    from data2g.arq import modes
+    from data2g.arq import phy as PHY
+    from data2g.arq.link import Slot, TxBurst, ctl_mask, data_mask
+
+    spec = cpm.SPECS["fsk32r62-r2/3"]
+    g = cpm.GRIDS[spec.grid]
+    assert (spec.index, spec.k, spec.coded_bits, codes.payload_bytes(spec)) == (4, 640, 960, 76)
+    old = {cpm.header_word(i, n, d) for i in (0, 1) for d in (False, True) for n in range(cpm.MAX_DATA + 1)}
+    words = [cpm.header_word(s.index, n, d) for s, n, d, _ in cpm.valid_words(g.name)]
+    assert len(set(words)) == len(words) == 3 * 2 * (cpm.MAX_DATA + 1) and old < set(words)
+    if not modes.FM:
+        assert sorted(modes.encode(m) for m in cpm.SPECS) == list(range(len(cpm.SPECS)))
+        assert modes.decode(modes.encode(spec.name)) == spec.name
+    assert list(cpm.SPECS)[-1] == spec.name
+    rng = np.random.default_rng(5)
+    ctl = rng.bytes(codes.payload_bytes(cpm.CTL[g.name]))
+    slots = [Slot(ctl_mask(0, 0, 3), 0, ctl), Slot(ctl_mask(0, 0, 3), 1, ctl)]
+    slots += [Slot(data_mask(0, i, 3), 0, rng.bytes(codes.payload_bytes(spec))) for i in range(2, 4)]
+    x = PHY.tx_audio(TxBurst(spec.name, slots, 0, 2))
+    y = np.concatenate([np.zeros(2000), x, np.zeros(2000)]) + rng.normal(0, 0.05, len(x) + 4000)
+    r = cpm.receive(y, cpm.find(g, y))
+    assert r["spec"].name == spec.name and r["dup"] and r["n_cw"] == 4
+    rx = PHY.ModemRx(r, {})
+    assert [rx.decode(i, s.mask_id, 0, None) for i, s in enumerate(slots) if not s.rv] == [s.payload for s in slots if not s.rv]
 
 
 def _carrier_burst(seed, snr_db=-8.0, carrier_hz=1573.4, inr_db=12.0):
@@ -380,3 +411,166 @@ def test_cpm_presence_detects_bursts_and_rejects_carriers_and_colored_noise():
     for label, sig in negatives.items():
         for gn, g in cpm.GRIDS.items():
             assert not cpm.present(g, sig), (label, gn)
+
+
+def test_leak_metric_only_where_the_spill_is_significant():
+    """The leak model leaves a codeword on the square-law metric unless its
+    spill stands LEAK_Z standard errors out: AWGN codewords match lock's
+    square-law metric; a tone leaking a fifth of its energy into each
+    neighbour (c16r25 on 30 Hz) goes on leak_metric."""
+    g = cpm.GRIDS["c16r25"]
+    rng = np.random.default_rng(4)
+
+    def codeword(leak, esn0=8.0, n=240):
+        t = rng.integers(0, g.m, n)
+        h = np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        y = (rng.normal(size=(n, g.m)) + 1j * rng.normal(size=(n, g.m))) / np.sqrt(2)
+        y[np.arange(n), t] += h
+        for d in (-1, 1):
+            k = np.clip(t + d, 0, g.m - 1)
+            y[np.arange(n), k] += np.sqrt(leak) * np.sqrt(esn0 / 2) * (rng.normal(size=n) + 1j * rng.normal(size=n))
+        return np.abs(y) ** 2
+
+    awgn = [codeword(0.0, esn0) for esn0 in (0.5, 2.0, 8.0, 30.0) for _ in range(5)]
+    leaky = codeword(0.2)
+    today = [cpm.tone_metric(g, E, "lock") for E in awgn]
+    assert sum(cpm.spill_significant(E) for E in awgn) <= 1
+    assert sum(np.array_equal(cpm.tone_metric(g, E, "data"), t) for E, t in zip(awgn, today)) >= len(awgn) - 1
+    assert cpm.spill_significant(leaky)
+    assert np.array_equal(cpm.tone_metric(g, leaky, "data"), cpm.leak_metric(leaky, cpm.LEAK_K))
+
+
+def test_coh_metric_2d_slepian_selective_fading():
+    """2D Slepian coh_metric (#363) tracks frequency-selective multipath phase
+    across tones on slot windows (W > COH_HDR_W) and handles short windows
+    (12 <= n <= 2*W2) without crashing for all grid widths."""
+    rng = np.random.default_rng(77)
+    n, m = 120, 16
+    tones = rng.integers(0, m, n)
+    # 2-path frequency-selective channel: phase rotates ~1.4 turns across 16 tones
+    k = np.arange(m)
+    H_true = 0.7 * np.exp(1j * 0.2) + 0.7 * np.exp(-2j * np.pi * 0.08 * k)
+    Z = (rng.normal(0, 0.35, (n, m)) + 1j * rng.normal(0, 0.35, (n, m))) / np.sqrt(2)
+    Z[np.arange(n), tones] += H_true[tones]
+    P = np.full((n, m), 0.02 / (m - 1))
+    P[np.arange(n), tones] = 0.98
+    n0 = cpm._n0(np.abs(Z) ** 2)
+
+    M1 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
+    if cpm.COH2D:
+        assert m1 > 10.0, m1  # flat boxcar scores ~3.5 on this channel
+
+    # Short windows (12 <= n <= 2*W2) must not crash in _loo_slepian for any grid width
+    for m_short in (8, 16, 32):
+        Zs = (rng.normal(0, 0.5, (12, m_short)) + 1j * rng.normal(0, 0.5, (12, m_short))) / np.sqrt(2)
+        Ps = rng.dirichlet(np.ones(m_short) * 0.3, 12)
+        Ms = cpm.coh_metric(Zs, Ps, cpm.COH_W, cpm._n0(np.abs(Zs) ** 2))
+        assert Ms.shape == (12, m_short) and np.all(np.isfinite(Ms))
+
+
+@pytest.mark.python_only("monkeypatches module-level cpm.COH2D; native caches DATA2G_CPM_COH2D once")
+def test_coh_metric_2d_slepian_vs_boxcar(monkeypatch):
+    """COH2D=True beats the flat boxcar on frequency-selective fading while
+    leaving header windows (W <= COH_HDR_W) bit-identical."""
+    rng = np.random.default_rng(77)
+    n, m = 120, 16
+    tones = rng.integers(0, m, n)
+    k = np.arange(m)
+    H_true = 0.7 * np.exp(1j * 0.2) + 0.7 * np.exp(-2j * np.pi * 0.08 * k)
+    Z = (rng.normal(0, 0.35, (n, m)) + 1j * rng.normal(0, 0.35, (n, m))) / np.sqrt(2)
+    Z[np.arange(n), tones] += H_true[tones]
+    P = np.full((n, m), 0.02 / (m - 1))
+    P[np.arange(n), tones] = 0.98
+    n0 = cpm._n0(np.abs(Z) ** 2)
+
+    monkeypatch.setattr(cpm, "COH2D", False)
+    M0 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H0 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    monkeypatch.setattr(cpm, "COH2D", True)
+    M1 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H1 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    np.testing.assert_array_equal(H1, H0)  # header window untouched
+    m0 = float(np.mean(M0[np.arange(n), tones] - M0.mean(axis=1)))
+    m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
+    assert m1 > m0 + 2.0, (m0, m1)
+
+
+def test_dd_metric_rake_multipath_and_grid_gate(monkeypatch):
+    """Shifted-window Rake (#364) fires on short-symbol grids (c8r50, c32r62)
+    when multipath creates strong innovation at +-3 ms, improves the metric
+    margin on a 2-path 3.5 ms channel, and leaves c16r25 untouched."""
+    from data2g.config import FS
+
+    rng = np.random.default_rng(123)
+    spec = cpm.SPECS["fsk32r62-r1/2"]
+    g = cpm.GRIDS[spec.grid]
+    ctl = codes.encode(cpm.CTL[g.name], rng.bytes(codes.payload_bytes(cpm.CTL[g.name])))
+    dat = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
+    x = cpm.modulate(spec, [ctl, dat], dup=False)
+    delay = int(round(0.0035 * FS))  # 3.5 ms second path
+    # Lead + 2-path multipath (0.9 real delayed echo) + light noise
+    pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
+    y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
+    lock = cpm.find(g, y)
+    assert lock is not None
+
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    r0 = cpm.receive(y, lock)
+    assert "finger_dt" not in r0
+    M0 = cpm.dd_metric(r0, {}, 1)
+
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    r1 = cpm.receive(y, lock)
+    want_dt = lambda grid: min(cpm.RAKE_SHIFT_MS * FS // 1000, grid.T // 4)
+    assert r1["finger_dt"] == want_dt(g)
+    assert r1["Z_early"].shape == r1["Z"].shape == r1["Z_late"].shape
+    M1 = cpm.dd_metric(r1, {}, 1)
+
+    # Sent tones of data slot 1
+    bits = dat.reshape(-1, g.bits)
+    vals = bits @ (1 << np.arange(g.bits - 1, -1, -1))
+    sent = cpm._gray(g.m)[vals]
+    sc0 = float(np.mean(M0[np.arange(len(sent)), sent] - M0.mean(axis=1)))
+    sc1 = float(np.mean(M1[np.arange(len(sent)), sent] - M1.mean(axis=1)))
+    assert sc1 > sc0 + 1.0, (sc0, sc1)
+
+    # c16r25 (T > RAKE_MAX_T) never populates finger_dt
+    assert cpm._rake_dt(cpm.GRIDS["c16r25"]) == 0
+    assert cpm._rake_dt(cpm.GRIDS["c8r50"]) == want_dt(cpm.GRIDS["c8r50"])
+    assert cpm._rake_dt(cpm.GRIDS["c32r62"]) == want_dt(cpm.GRIDS["c32r62"])
+
+    # Clean high-SNR AWGN on c32r62: Rake must not fire (dd_metric matches DATA2G_CPM_RAKE=0)
+    from data2g import hfchannel
+
+    y_awgn = hfchannel.awgn(pad, 10.0, seed=7)
+    lock_a = cpm.find(g, y_awgn)
+    assert lock_a is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    ra0 = cpm.receive(y_awgn, lock_a)
+    Ma0 = cpm.dd_metric(ra0, {}, 1)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    ra1 = cpm.receive(y_awgn, lock_a)
+    Ma1 = cpm.dd_metric(ra1, {}, 1)
+    np.testing.assert_array_equal(Ma1, Ma0)
+
+    # A slot with < RAKE_MIN_CAL_ROWS external calibration rows (slot 2 of a 2-data-slot burst
+    # has 0 sync/header rows in its window) must ignore a wrong posterior for itself and return M0
+    dat2 = codes.encode(spec, rng.bytes(codes.payload_bytes(spec)))
+    x2 = cpm.modulate(spec, [ctl, dat, dat2], dup=False)
+    pad2 = np.concatenate([np.zeros(2000), x2, np.zeros(2000)])
+    y2 = pad2 + 0.9 * np.roll(pad2, delay) + rng.normal(0, 0.15, len(pad2))
+    lock2 = cpm.find(g, y2)
+    assert lock2 is not None
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "0")
+    r2_0 = cpm.receive(y2, lock2)
+    monkeypatch.setenv("DATA2G_CPM_RAKE", "1")
+    r2_1 = cpm.receive(y2, lock2)
+    wrong_lp = np.full((len(vals), g.m), -20.0)
+    wrong_lp[np.arange(len(vals)), (vals + 1) % g.m] = 0.0
+    np.testing.assert_array_equal(
+        cpm.dd_metric(r2_1, {2: wrong_lp.reshape(-1)}, 2),
+        cpm.dd_metric(r2_0, {2: wrong_lp.reshape(-1)}, 2),
+    )

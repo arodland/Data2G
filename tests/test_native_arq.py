@@ -52,6 +52,7 @@ def test_timing(native, pure):
 
 def test_modes(A, pure):
     assert A.modes() == list(modes.MODES)
+    assert A.mode_thresholds() == G.MODE_THRESHOLDS
     for name, s in modes.MODES.items():
         assert A.is_cpm(name) == modes.is_cpm(s)
         assert (A.payload_bytes(name), A.ctl_payload_bytes(name), A.max_ctl(name), A.rv_cycle(name)) == \

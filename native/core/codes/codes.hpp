@@ -85,7 +85,7 @@ inline int soft_len(const Spec& s) { return s.gf ? n_sym(s) << s.bits_per_cu : s
 
 const Spec* spec(std::string_view name);  // nullptr if none
 const Spec& spec(const config::Submode& s);  // s an element of config::SUBMODES
-const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS or CPM_CTL
+const Spec& spec(const tables::CpmSpec& s);  // s an element of tables::CPM_SPECS, CPM_CTL or CPM_WIDE_*
 
 const ldpc::Code& ldpc_code(const Spec& s);  // LDPC specs
 const polar::PolarCode& polar_code(const Spec& s);  // polar specs, on their frozen info set
@@ -247,7 +247,8 @@ std::vector<double> pad_prior(const Spec& s, std::span<const double> llr);
 // combined IR buffer row the same (codes.add_prior_buffer).
 std::vector<float> add_prior(const Spec& s, std::span<const double> soft, std::span<const double> prior, int index);
 std::vector<double> add_prior_buffer(const Spec& s, std::span<const double> buf, std::span<const double> prior);
-// The order info bits enter a polar code (codes.polar_order): the payload's bits reversed, then CRC and fill.
+// The order info bits enter a polar code (codes.polar_order): CRC on the strongest GA synthetic channels,
+// payload bits in decreasing reliability, then fill on the weakest.
 const std::vector<int>& polar_order(const Spec& s);
 // decode_raw with the info bits `known` gives known (0/1, -1 unknown; unscrambled), every row sent at burst
 // position `index`: LDPC pinned (pin), polar frozen in a code of the rest (codes.decode_raw_pinned).

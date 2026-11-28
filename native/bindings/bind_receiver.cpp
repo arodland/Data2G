@@ -49,6 +49,7 @@ py::dict cpm_lock_dict(const cpm::Lock& l) {
     d["band"] = std::string(l.spec->grid);
     d["family"] = "cpm";
     d["n_cw"] = 1 + l.dup + l.n_data;
+    if (l.connect_hash) d["connect_hash"] = *l.connect_hash;
     return d;
 }
 
@@ -68,10 +69,23 @@ py::dict rx_dict(const receiver::Rx& rx) {
     for (const auto& s : r.soft) soft.append(np(s));
     d["soft"] = soft;
     d["E"] = np(r.E);
-    d["Z"] = np(r.Z);
+    if (r.Z.rows) {  // cpm.receive's (n, m) bins, a wide grid's (n, L, m); none where the grid is not coherent
+        const auto& g = cpm::grid_of(*r.spec);
+        py::array z = np(r.Z);
+        if (g.L > 1)
+            z = z.reshape({static_cast<py::ssize_t>(r.Z.rows / g.L), static_cast<py::ssize_t>(g.L),
+                           static_cast<py::ssize_t>(g.m)});
+        d["Z"] = z;
+    }
+    if (r.finger_dt > 0) {
+        d["finger_dt"] = r.finger_dt;
+        d["Z_early"] = np(r.Z_early);
+        d["Z_late"] = np(r.Z_late);
+    }
     d["cfo"] = r.cfo;
     d["preamble_start"] = r.preamble_start;
     d["header_end"] = r.header_end;
+    if (r.connect_hash) d["connect_hash"] = *r.connect_hash;
     return d;
 }
 

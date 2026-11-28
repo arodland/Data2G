@@ -42,9 +42,9 @@ def test_a_session_between_cpp_and_python_engines(native, reference, cpp_calls, 
     assert bytes(got_b) == up and bytes(got_a) == down
     a.session.disconnect()
     assert link(a, b, 12, 60, lambda: a.session.state == S.CLOSED and b.session.state == S.CLOSED, seed=2)
-    for e, peer in ((a, b), (b, a)):
-        ev = e.events()
-        assert ev[0] == f"CONNECTED {peer.call}" and ev[-1].startswith("DISCONNECTED"), ev
+    ev_a, ev_b = a.events(), b.events()
+    assert ev_a[0] == f"CONNECTED {b.call}" and ev_a[-1].startswith("DISCONNECTED"), ev_a
+    assert ev_b[:2] == ["PENDING", f"CONNECTED {a.call}"] and ev_b[-1].startswith("DISCONNECTED"), ev_b
     _same_records(tmp_path)
 
 
@@ -104,9 +104,12 @@ def test_kiss_between_cpp_and_python_engines(native, reference):
     heard = []
     to_py, to_cpp = frame("APRS", "W1AW", 0x03, b"!from C++"), frame("APRS", "K2XYZ", 0x03, b"!from Python")
     cpp.kiss.enqueue(to_py)
-    assert link(cpp, py, 12, 30, lambda: (0, to_py) in py.kiss_rx)
+    cpp.kiss.enqueue(b"vara cmd1 from C++", cmd=1)
+    assert link(cpp, py, 12, 30, lambda: (0, to_py, 0) in py.kiss_rx and (0, b"vara cmd1 from C++", 1) in py.kiss_rx)
     py.kiss.enqueue(to_cpp)
-    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (0, to_cpp) in heard, seed=1)
+    py.kiss.enqueue(b"vara cmd2 from Python", cmd=2)
+    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx())
+                or ((0, to_cpp, 0) in heard and (0, b"vara cmd2 from Python", 2) in heard), seed=1)
 
 
 def test_broadcast_groups_between_cpp_and_python_engines(native, reference):
@@ -116,11 +119,11 @@ def test_broadcast_groups_between_cpp_and_python_engines(native, reference):
     py = reference(E, "Engine")("K2XYZ", seed=6, kiss=kisslink.KissLink())
     nc, np_ = cpp.kiss.open("CHAT", "W1AW"), py.kiss.open("chat", "k2xyz")
     cpp.kiss.enqueue(b"hello from C++", nc, ack="tag-c")
-    assert link(cpp, py, 12, 30, lambda: (np_, b"hello from C++") in py.kiss_rx)
+    assert link(cpp, py, 12, 30, lambda: (np_, b"hello from C++", 0) in py.kiss_rx)
     assert any(e.startswith(f"BCAST {np_} HEARD W1AW ") for e in py.kiss.take_events()) and cpp.kiss.take_acks() == [(nc, "tag-c")]
     heard = []
     py.kiss.enqueue(b"hello from Python", np_, ack="tag-p")
-    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (nc, b"hello from Python") in heard, seed=1)
+    assert link(cpp, py, 12, 30, lambda: heard.extend(cpp.take_kiss_rx()) or (nc, b"hello from Python", 0) in heard, seed=1)
     assert any(e.startswith(f"BCAST {nc} HEARD K2XYZ ") for e in cpp.kiss.take_events()) and py.kiss.take_acks() == [(np_, "tag-p")]
 
 

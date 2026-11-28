@@ -86,6 +86,7 @@ Control Control::unpack(const std::vector<Bytes>& payloads) {
         const int t = stream[i], n = stream[i + 1];
         if (t == T_PAD) break;
         if (i + 2 + n > stream.size()) throw std::invalid_argument("truncated extension");
+        if (t >= TLV_CRITICAL) throw std::invalid_argument("unknown critical extension " + std::to_string(t));
         c.ext[t] = Bytes(stream.begin() + i + 2, stream.begin() + i + 2 + n);
         i += 2 + n;
     }
@@ -267,10 +268,31 @@ std::string unpack_call(ByteView b) {
     return out;
 }
 
-namespace {
-struct CompactField { int bits, at, n; };  // bits, body offset, body bytes
-constexpr CompactField COMPACT[] = {{4, 1, 1}, {60, 2, 8}, {60, 10, 8}, {16, 18, 2}, {2, 20, 1}, {6, 21, 1}};
-}  // namespace
+std::uint64_t pack_call_b40(const std::string& call_in) {
+    std::string call = call_in;
+    for (auto& c : call)
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    bool ok = call.size() <= CALL_CHARS;
+    for (char c : call) ok = ok && CALL_ALPHABET.find(c) != std::string_view::npos;
+    if (!ok) throw std::invalid_argument("callsign '" + call + "': up to 10 of A-Z 0-9 / - space");
+    std::uint64_t v = 0;
+    for (int i = 0; i < CALL_CHARS; ++i)
+        v = v * CALL_BASE + (static_cast<std::size_t>(i) < call.size() ? CALL_ALPHABET.find(call[i]) : 0);
+    return v;
+}
+
+std::string unpack_call_b40(std::uint64_t v) {
+    if (v >= CALL_B40_MAX) throw std::invalid_argument("callsign code " + std::to_string(v));
+    std::string out(CALL_CHARS, ' ');
+    for (int i = CALL_CHARS - 1; i >= 0; --i) {
+        const auto d = v % CALL_BASE;
+        v /= CALL_BASE;
+        if (d >= CALL_ALPHABET.size()) throw std::invalid_argument("callsign code " + std::to_string(d));
+        out[static_cast<std::size_t>(i)] = CALL_ALPHABET[d];
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
 
 // --- session frame bodies -------------------------------------------------------------
 
@@ -282,40 +304,104 @@ std::uint8_t u8(std::int64_t v) {  // bytes([v])
 }
 
 void put_u16(Bytes& out, std::int64_t v) {  // v.to_bytes(2, "big")
+    if (v < 0 || v > 65535) throw std::invalid_argument("u16 out of range");
     out.push_back(static_cast<std::uint8_t>(v >> 8));
     out.push_back(static_cast<std::uint8_t>(v));
 }
 
 std::int64_t u16_at(ByteView b, std::size_t i) { return b[i] << 8 | b[i + 1]; }
 
+void write_bits(Bytes& out, int& pos, std::uint64_t val, int bits) {
+    if (bits < 64 && (val >> bits))
+        throw std::invalid_argument("CONNECT field " + std::to_string(val) + " over " + std::to_string(bits) + " bits");
+    for (int b = bits - 1; b >= 0; --b, ++pos)
+        if ((val >> b) & 1) out[static_cast<std::size_t>(pos / 8)] |= static_cast<std::uint8_t>(0x80 >> (pos % 8));
+}
+
+std::uint64_t read_bits(ByteView p, int& pos, int bits) {
+    std::uint64_t x = 0;
+    for (int b = 0; b < bits; ++b, ++pos)
+        x = (x << 1) | ((p[static_cast<std::size_t>(pos / 8)] >> (7 - pos % 8)) & 1);
+    return x;
+}
+
+constexpr std::pair<unsigned, int> CONNECT_BIT_LAYOUT[] = {
+    {Connect::F_VERSION, 4}, {Connect::F_CALLER, 54}, {Connect::F_CALLEE, 54}, {Connect::F_NONCE, 16},
+    {Connect::F_CAP, 2},     {Connect::F_TTURN, 6},   {Connect::F_CAPS, 16},   {Connect::F_REQ, 8},
+};
+
 }  // namespace
 
 Bytes Connect::pack() const {
-    Bytes out{CONNECT, u8(version)};
-    const Bytes from = pack_call(caller), to = pack_call(callee);
-    out.insert(out.end(), from.begin(), from.end());
-    out.insert(out.end(), to.begin(), to.end());
-    put_u16(out, nonce);
-    out.push_back(u8(cap));
-    out.push_back(u8(t_turn10));
+    if (version < 0 || nonce < 0 || cap < 0 || t_turn10 < 0 || caps < 0 || req < 0)
+        throw std::invalid_argument("CONNECT negative field");
+    Bytes out(COMPACT_BYTES, 0);
+    int pos = 0;
+    write_bits(out, pos, static_cast<std::uint64_t>(version), 4);
+    write_bits(out, pos, pack_call_b40(caller), 54);
+    write_bits(out, pos, pack_call_b40(callee), 54);
+    write_bits(out, pos, static_cast<std::uint64_t>(nonce), 16);
+    write_bits(out, pos, static_cast<std::uint64_t>(cap), 2);
+    write_bits(out, pos, static_cast<std::uint64_t>(t_turn10), 6);
+    write_bits(out, pos, static_cast<std::uint64_t>(caps), 16);
+    write_bits(out, pos, static_cast<std::uint64_t>(req), 8);
     return out;
 }
 
 std::string ext_name(int t) {
-    static const char* names[] = {"pad",  "new",   "abandon", "rv",    "bitmap", "resync", "report", "survey", "sound",
-                                  "buffer", "sess", "reply",  "chat",  "cq",     "dupctl", "comp",   "id",     "drained", "inline", "nods",
-                                  "keep"};
-    static_assert(std::size(names) == T_KEEP + 1);
-    return t >= 0 && t < static_cast<int>(std::size(names)) ? names[t] : "ext " + std::to_string(t);
+    switch (t) {
+        case T_PAD: return "pad";
+        case T_NEW: return "new";
+        case T_ABANDON: return "abandon";
+        case T_RV: return "rv";
+        case T_BITMAP: return "bitmap";
+        case T_REPORT: return "report";
+        case T_SURVEY: return "survey";
+        case T_SOUND: return "sound";
+        case T_BUFFER: return "buffer";
+        case T_SESS: return "sess";
+        case T_REPLY: return "reply";
+        case T_CHAT: return "chat";
+        case T_CQ: return "cq";
+        case T_DUPCTL: return "dupctl";
+        case T_COMP: return "comp";
+        case T_ID: return "id";
+        case T_DRAINED: return "drained";
+        case T_INLINE: return "inline";
+        case T_PING: return "ping";
+        case T_REC_EXT: return "rec_ext";
+        case T_CAPS: return "caps";
+        default: return "ext " + std::to_string(t);
+    }
 }
 
-Connect Connect::unpack(ByteView body) {
-    auto [caller, callee] = calls(body);
-    return {body[1], std::move(caller), std::move(callee), u16_at(body, 18), body[20], body[21]};
+Connect Connect::unpack(ByteView p) {
+    if (p.size() < BYTES) throw std::invalid_argument("CONNECT of " + std::to_string(p.size()) + " B");
+    int pos = 0;
+    const int ver = static_cast<int>(read_bits(p, pos, 4));
+    const std::uint64_t caller_i = read_bits(p, pos, 54);
+    const std::uint64_t callee_i = read_bits(p, pos, 54);
+    const std::int64_t nonce_v = static_cast<std::int64_t>(read_bits(p, pos, 16));
+    const int cap_v = static_cast<int>(read_bits(p, pos, 2));
+    const int t10_v = static_cast<int>(read_bits(p, pos, 6));
+    const int caps_v = static_cast<int>(read_bits(p, pos, 16));
+    const int req_v = static_cast<int>(read_bits(p, pos, 8));
+    return {ver, unpack_call_b40(caller_i), unpack_call_b40(callee_i), nonce_v, cap_v, t10_v, caps_v, req_v};
 }
 
-std::pair<std::string, std::string> Connect::calls(ByteView body) {
-    return {unpack_call(body.subspan(2, 8)), unpack_call(body.subspan(10, 8))};
+std::pair<std::string, std::string> Connect::calls(ByteView p) {
+    const Connect c = unpack(p);
+    return {c.caller, c.callee};
+}
+
+Bytes Connect::mask(unsigned field_bits) {
+    Bytes out(COMPACT_BYTES, 0);
+    int pos = 0;
+    for (const auto& [flag, bits] : CONNECT_BIT_LAYOUT) {
+        const std::uint64_t v = (field_bits & flag) ? ((std::uint64_t{1} << bits) - 1) : 0;
+        write_bits(out, pos, v, bits);
+    }
+    return out;
 }
 
 Bytes ConnectAck::pack() const {
@@ -323,19 +409,28 @@ Bytes ConnectAck::pack() const {
     put_u16(out, nonce);
     out.push_back(u8(cap));
     out.push_back(u8(t_turn10));
+    put_u16(out, caps);
+    out.push_back(u8(req));
     return out;
 }
 
-ConnectAck ConnectAck::unpack(ByteView body) { return {u16_at(body, 1), body[3], body[4]}; }
+ConnectAck ConnectAck::unpack(ByteView body) {
+    if (body.size() < BYTES) throw std::invalid_argument("CONNECT_ACK of " + std::to_string(body.size()) + " B");
+    return {u16_at(body, 1), body[3], body[4], static_cast<int>(u16_at(body, 5)), body[7]};
+}
 
 Bytes ConnectNak::pack() const {
     Bytes out{CONNECT_NAK};
     put_u16(out, nonce);
     out.push_back(u8(reason));
+    out.push_back(u8(detail));
     return out;
 }
 
-ConnectNak ConnectNak::unpack(ByteView body) { return {u16_at(body, 1), body[3]}; }
+ConnectNak ConnectNak::unpack(ByteView body) {
+    if (body.size() < BYTES) throw std::invalid_argument("CONNECT_NAK of " + std::to_string(body.size()) + " B");
+    return {u16_at(body, 1), body[3], body[4]};
+}
 
 Bytes pack_cq(const std::string& call, int cap) {
     Bytes out = pack_call(call);
@@ -358,37 +453,6 @@ Bytes pack_id(const std::string& call, int key) {
 std::pair<std::string, int> unpack_id(ByteView body) {
     if (body.size() < 10) throw std::invalid_argument("ID of " + std::to_string(body.size()) + " B");
     return {unpack_call(body.first(8)), body[8] << 8 | body[9]};
-}
-
-Bytes pack_connect(ByteView body) {
-    if (body.size() < Connect::BYTES) throw std::invalid_argument("CONNECT body of " + std::to_string(body.size()) + " B");
-    Bytes out(COMPACT_BYTES, 0);
-    int pos = 0;  // bits written, MSB first
-    for (const auto& f : COMPACT) {
-        std::uint64_t x = 0;
-        for (int i = 0; i < f.n; ++i) x = x << 8 | body[static_cast<std::size_t>(f.at + i)];
-        if (f.bits < 64 && x >> f.bits)
-            throw std::invalid_argument("CONNECT field at " + std::to_string(f.at) + ": " + std::to_string(x) +
-                                        " over " + std::to_string(f.bits) + " bits");
-        for (int b = f.bits - 1; b >= 0; --b, ++pos)
-            if (x >> b & 1) out[static_cast<std::size_t>(pos / 8)] |= static_cast<std::uint8_t>(0x80 >> (pos % 8));
-    }
-    return out;
-}
-
-Bytes unpack_connect(ByteView p) {
-    Bytes out(Connect::BYTES, 0);
-    out[0] = CONNECT;
-    int pos = 0;
-    for (const auto& f : COMPACT) {
-        std::uint64_t x = 0;
-        for (int b = 0; b < f.bits; ++b, ++pos) {
-            const auto i = static_cast<std::size_t>(pos / 8);
-            x = x << 1 | (i < p.size() ? (p[i] >> (7 - pos % 8) & 1) : 0);
-        }
-        for (int i = f.n - 1; i >= 0; --i, x >>= 8) out[static_cast<std::size_t>(f.at + i)] = static_cast<std::uint8_t>(x);
-    }
-    return out;
 }
 
 // --- stream records -----------------------------------------------------------------

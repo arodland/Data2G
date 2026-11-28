@@ -25,10 +25,12 @@ MAX_CTL = 4  # control codewords a burst may have: the core's 2-bit n_ctl
 # RV 1 (the receiver combines the pair if the first fails); the peer asks
 # for it with T_DUPCTL when it predicts this burst's control is at risk
 ARQ, SESSION, PROBE, ARQ_DUP = 0, 1, 2, 3
-# extension types (T_RESYNC: deprecated, sent with a resync's abandon and never read; docs/arq.md §10)
-T_PAD, T_NEW, T_ABANDON, T_RV, T_BITMAP, T_RESYNC, T_REPORT, T_SURVEY, T_SOUND, T_BUFFER = range(10)
+# extension types (slots 5, 19, 20 retired at wire 1.0: T_RESYNC, T_NODS, T_KEEP).
+# Forward-compatibility split: 1..127 ignorable if unknown; 128..255 must-understand (drop control if unknown).
+T_PAD, T_NEW, T_ABANDON, T_RV, T_BITMAP = range(5)
+T_REPORT, T_SURVEY, T_SOUND, T_BUFFER = range(6, 10)
 T_SESS = 10  # a session frame's body (data2g.arq.session)
-T_REPLY = 11  # recommended submode for the peer's control-only bursts
+T_REPLY = 11  # recommended submode for the peer's control-only bursts (kept unconditionally across bursts)
 T_CHAT = 12  # empty: the sender's host has CHAT ON (latency over throughput, docs/arq.md §9)
 CHAT_LINE_BYTES = 200  # CHAT ON plans for at least a chat line; T_BUFFER is sent only above it
 T_DUPCTL = 14  # empty: "duplicate your control codewords" (ARQ_DUP), from the burst's receiver
@@ -51,19 +53,22 @@ T_DRAINED = 17  # empty: this burst's new codewords end the sender's queued data
 # payload with trailing zeros cut (zero padded back to the data mode's payload), then inline_check.
 # Only the last new codeword of a burst, and only where it fits the padding.
 T_INLINE = 18
-# empty: the sender hears nods (docs/arq.md §3b). In control padding only, until
-# the peer acts on a burst that carried it; nods go only to a peer that sent it.
-# Drop it (everyone hears nods) at the next session version bump.
-T_NODS = 19
-# empty: the sender keeps T_REPLY (docs/arq.md §8a): a control without it leaves the reply
-# recommendation as it was. In control padding, or in T_REPLY's place where the two would
-# cost a codeword more, until the peer acts on a burst that carried it. Both having said
-# it is not enough to leave T_REPLY out as unchanged, or to read a control without it so:
-# §8a's three steps, each a burst acted on, say when a station may do either.
-# Drop it (everyone keeps it) at the next session version bump.
-T_KEEP = 20
 # FM only (arq.ping): a ping or its reply, a measurement burst for the TX path and level check (FM plan M7)
 T_PING = 21
+# Extended mode recommendation (1-2 B big-endian) when Core.recommend == modes.REC_EXT (63)
+T_REC_EXT = 22
+# Extended capability/constraint TLV reserved for CAP_EXT (bit 15 of caps)
+T_CAPS = 23
+
+TLV_CRITICAL = 128  # 1..127 ignorable if unknown; 128..255 must-understand (Control.unpack rejects unknown)
+KNOWN_CRITICAL_TLVS: frozenset[int] = frozenset()
+
+# Capability / constraint bitmasks exchanged in CONNECT and CONNECT_ACK (wire 1.0):
+# caps (16 bits): permissive/ignorable abilities; req (8 bits): mandatory peer constraints.
+CAP_NODS = 1 << 0   # this station listens for nods (docs/arq.md §3b; cleared by --no-nods)
+CAP_EXT = 1 << 15   # escape hatch: extended capability/constraint TLV (T_CAPS) follows
+DEFAULT_CAPS = CAP_NODS
+SUPPORTED_REQ = 0   # mandatory peer-constraint bits this version knows how to honor
 
 
 def inline_check(mask_id: tuple, payload: bytes) -> bytes:
@@ -145,6 +150,8 @@ class Control:
                 break
             if i + 2 + n > len(stream):
                 raise ValueError("truncated extension")
+            if t >= TLV_CRITICAL and t not in KNOWN_CRITICAL_TLVS:
+                raise ValueError(f"unknown critical extension {t}")
             ext[t] = stream[i + 2:i + 2 + n]
             i += 2 + n
         return cls(core, ext)
@@ -256,68 +263,145 @@ def unpack_call(b: bytes) -> str:
     return "".join(CALL_ALPHABET[c] for c in codes).rstrip()
 
 
+CALL_BASE = 40  # base-40 packs 10 chars of CALL_ALPHABET (39 chars) in 54 bits (40^10 < 2^54)
+CALL_B40_MAX = CALL_BASE ** CALL_CHARS
+
+
+def pack_call_b40(call: str) -> int:
+    """Callsign (up to 10 chars of CALL_ALPHABET) -> 54-bit base-40 integer."""
+    call = call.upper()
+    if len(call) > CALL_CHARS or any(c not in CALL_ALPHABET for c in call):
+        raise ValueError(f"callsign {call!r}: up to {CALL_CHARS} of A-Z 0-9 / - space")
+    v = 0
+    for c in call.ljust(CALL_CHARS):
+        v = v * CALL_BASE + CALL_ALPHABET.index(c)
+    return v
+
+
+def unpack_call_b40(v: int) -> str:
+    """54-bit base-40 integer -> callsign (ValueError if out of range or invalid digit)."""
+    if v < 0 or v >= CALL_B40_MAX:
+        raise ValueError(f"callsign code {v}")
+    chars = []
+    for _ in range(CALL_CHARS):
+        v, d = divmod(v, CALL_BASE)
+        if d >= len(CALL_ALPHABET):
+            raise ValueError(f"callsign code {d}")
+        chars.append(CALL_ALPHABET[d])
+    return "".join(reversed(chars)).rstrip()
+
+
 # --- session frame bodies (docs/arq.md §7, §7a) ------------------------------------
-# A T_SESS body is its subtype byte (CONNECT ... DISC_ACK) and the fields
-# below; DISC and DISC_ACK are the subtype alone. T_CQ and T_ID bodies have
-# no subtype.
+# CONNECT uses a single unified 20-byte bit-packed payload on all modes (OFDM
+# and CPM) under burst.COMPACT_CONNECT: no Core or T_SESS wrapper.
+# CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK are T_SESS bodies led by their
+# subtype byte; DISC and DISC_ACK are the subtype alone. T_CQ and T_ID bodies
+# have no subtype.
+
+COMPACT_BYTES = 20
+# Bit widths of the 160-bit (20 B) CONNECT wire payload, MSB first:
+# version(4) | caller(54) | callee(54) | nonce(16) | cap(2) | t_turn10(6) | caps(16) | req(8)
+_CONNECT_FIELDS = (("version", 4), ("caller", 54), ("callee", 54), ("nonce", 16),
+                   ("cap", 2), ("t_turn10", 6), ("caps", 16), ("req", 8))
+
 
 @dataclass(frozen=True)
 class Connect:
-    """subtype, version, caller and callee (pack_call, 8 B each), nonce
-    (2 B), bandwidth cap code, t_turn in tenths of a second."""
+    """Unified 20-byte (160-bit) CONNECT payload on all modes:
+    version (4 b, wire major version), caller and callee (54 b base-40 each),
+    nonce (16 b), bandwidth cap code (2 b), t_turn in tenths (6 b),
+    caps (16 b, permissive), req (8 b, mandatory peer constraints)."""
     version: int
     caller: str
     callee: str
     nonce: int
     cap: int
     t_turn10: int
-    BYTES = 22
+    caps: int = 0
+    req: int = 0
+    BYTES = COMPACT_BYTES
 
     def pack(self) -> bytes:
-        return (bytes([CONNECT, self.version]) + pack_call(self.caller) + pack_call(self.callee)
-                + self.nonce.to_bytes(2, "big") + bytes([self.cap, self.t_turn10]))
+        vals = (
+            (self.version, 4), (pack_call_b40(self.caller), 54), (pack_call_b40(self.callee), 54),
+            (self.nonce, 16), (self.cap, 2), (self.t_turn10, 6), (self.caps, 16), (self.req, 8),
+        )
+        v = 0
+        for x, bits in vals:
+            if not 0 <= x < (1 << bits):
+                raise ValueError(f"CONNECT field {x} over {bits} bits")
+            v = (v << bits) | x
+        return v.to_bytes(COMPACT_BYTES, "big")
 
     @classmethod
-    def unpack(cls, body: bytes) -> "Connect":
-        """A body of BYTES at least; ValueError for a callsign that won't unpack."""
-        caller, callee = cls.calls(body)
-        return cls(body[1], caller, callee, int.from_bytes(body[18:20], "big"), body[20], body[21])
+    def unpack(cls, p: bytes) -> "Connect":
+        """A payload of at least BYTES (20 B); ValueError if too short or callsigns invalid."""
+        if len(p) < cls.BYTES:
+            raise ValueError(f"CONNECT of {len(p)} B")
+        v = int.from_bytes(p[:cls.BYTES], "big")
+        fields = []
+        for _, bits in reversed(_CONNECT_FIELDS):
+            fields.append(v & ((1 << bits) - 1))
+            v >>= bits
+        req, caps, t_turn10, cap, nonce, callee_i, caller_i, version = fields
+        return cls(version, unpack_call_b40(caller_i), unpack_call_b40(callee_i),
+                   nonce, cap, t_turn10, caps, req)
+
+    @classmethod
+    def calls(cls, p: bytes) -> tuple[str, str]:
+        """(caller, callee) from a 20-byte CONNECT payload."""
+        c = cls.unpack(p)
+        return c.caller, c.callee
 
     @staticmethod
-    def calls(body: bytes) -> tuple[str, str]:
-        """(caller, callee) from the first 18 bytes."""
-        return unpack_call(body[2:10]), unpack_call(body[10:18])
+    def mask(fields: set[str] | frozenset[str]) -> bytes:
+        """20-byte bitmask with 1-bits on the named CONNECT fields (for primed reception)."""
+        v = 0
+        for name, bits in _CONNECT_FIELDS:
+            v = (v << bits) | (((1 << bits) - 1) if name in fields else 0)
+        return v.to_bytes(COMPACT_BYTES, "big")
 
 
 @dataclass(frozen=True)
 class ConnectAck:
-    """subtype, the CONNECT's nonce (2 B), the agreed cap code, the callee's t_turn in tenths."""
+    """subtype, CONNECT's nonce (2 B), agreed cap code, callee's t_turn in tenths,
+    caps (2 B), req (1 B)."""
     nonce: int
     cap: int
     t_turn10: int
-    BYTES = 5
+    caps: int = 0
+    req: int = 0
+    BYTES = 8
 
     def pack(self) -> bytes:
-        return bytes([CONNECT_ACK]) + self.nonce.to_bytes(2, "big") + bytes([self.cap, self.t_turn10])
+        return (bytes([CONNECT_ACK]) + self.nonce.to_bytes(2, "big") + bytes([self.cap, self.t_turn10])
+                + self.caps.to_bytes(2, "big") + bytes([self.req]))
 
     @classmethod
     def unpack(cls, body: bytes) -> "ConnectAck":
-        return cls(int.from_bytes(body[1:3], "big"), body[3], body[4])
+        if len(body) < cls.BYTES:
+            raise ValueError(f"CONNECT_ACK of {len(body)} B")
+        return cls(int.from_bytes(body[1:3], "big"), body[3], body[4],
+                   int.from_bytes(body[5:7], "big"), body[7])
 
 
 @dataclass(frozen=True)
 class ConnectNak:
-    """subtype, the CONNECT's nonce (2 B), the reason (session.NAK_*)."""
+    """subtype, CONNECT's nonce (2 B), reason (session.NAK_*), detail (1 B:
+    [min_major:4 | max_major:4] for NAK_VERSION, unsupported req mask for NAK_CAPS)."""
     nonce: int
     reason: int
-    BYTES = 4
+    detail: int = 0
+    BYTES = 5
 
     def pack(self) -> bytes:
-        return bytes([CONNECT_NAK]) + self.nonce.to_bytes(2, "big") + bytes([self.reason])
+        return bytes([CONNECT_NAK]) + self.nonce.to_bytes(2, "big") + bytes([self.reason, self.detail])
 
     @classmethod
     def unpack(cls, body: bytes) -> "ConnectNak":
-        return cls(int.from_bytes(body[1:3], "big"), body[3])
+        if len(body) < cls.BYTES:
+            raise ValueError(f"CONNECT_NAK of {len(body)} B")
+        return cls(int.from_bytes(body[1:3], "big"), body[3], body[4])
 
 
 def pack_cq(call: str, cap: int) -> bytes:
@@ -340,34 +424,6 @@ def unpack_id(body: bytes) -> tuple[str, int]:
     if len(body) < 10:
         raise ValueError(f"ID of {len(body)} B")
     return unpack_call(body[:8]), int.from_bytes(body[8:10], "big")
-
-
-# A CONNECT in 20 B, for a CPM control codeword: no Core or TLV (28 B with
-# them), bit-packed. Its own CRC mask (burst.COMPACT_CONNECT) says what it is.
-# (bits, offset, bytes) in Connect's body of version, the two calls, nonce, cap, t_turn x10
-_COMPACT = ((4, 1, 1), (60, 2, 8), (60, 10, 8), (16, 18, 2), (2, 20, 1), (6, 21, 1))
-COMPACT_BYTES = 20
-
-
-def pack_connect(body: bytes) -> bytes:
-    """A Connect body (Connect.BYTES) -> COMPACT_BYTES."""
-    v = 0
-    for bits, at, n in _COMPACT:
-        x = int.from_bytes(body[at:at + n], "big")
-        if x >= 1 << bits:
-            raise ValueError(f"CONNECT field at {at}: {x} over {bits} bits")
-        v = (v << bits) | x
-    return (v << (8 * COMPACT_BYTES - 148)).to_bytes(COMPACT_BYTES, "big")
-
-
-def unpack_connect(p: bytes) -> bytes:
-    v = int.from_bytes(p, "big") >> (8 * COMPACT_BYTES - 148)
-    out = bytearray(Connect.BYTES)
-    out[0] = CONNECT
-    for bits, at, n in reversed(_COMPACT):
-        out[at:at + n] = (v & ((1 << bits) - 1)).to_bytes(n, "big")
-        v >>= bits
-    return bytes(out)
 
 
 # --- stream records -------------------------------------------------------------

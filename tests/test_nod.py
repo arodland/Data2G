@@ -104,7 +104,7 @@ class AskingPolicy(L.Policy):
 
     def recommend(self, station):
         if self.rng.random() < 0.3:
-            self.idx = min(15, max(0, self.idx + self.rng.choice((-2, -1, 1, 2))))
+            self.idx = min(47, max(0, self.idx + self.rng.choice((-2, -1, 1, 2))))
         if self.rng.random() < self.p_kept:
             self.hint = self.rng.randrange(4)
         if self.rng.random() < self.p_kept:
@@ -121,11 +121,12 @@ def _ctl(burst):
 
 
 def run(seed, a_nods=True, b_nods=True, max_turns=3000):
-    """Lockstep, 15% of bursts lost: -> (a, b, nods expanded, nods taken)."""
+    """Lockstep, 15% of bursts lost: -> (a, b, nods expanded, nods taken).
+    Peer nod capability (nod_peer) comes from CAP_NODS in CONNECT/CONNECT_ACK."""
     rng = random.Random(seed)
     data_a, data_b = payload(rng, 1500, "mixed"), payload(rng, 100, "mixed")
-    a = L.Station(0, AskingPolicy(random.Random(seed + 1)), master=True, nod=a_nods)
-    b = L.Station(1, AskingPolicy(random.Random(seed + 2)), nod=b_nods)
+    a = L.Station(0, AskingPolicy(random.Random(seed + 1)), master=True, nod=a_nods, nod_peer=b_nods)
+    b = L.Station(1, AskingPolicy(random.Random(seed + 2)), nod=b_nods, nod_peer=a_nods)
     a.write(data_a)
     b.write(data_b)
     got_a, got_b, nods = bytearray(), bytearray(), [0, 0]
@@ -143,7 +144,12 @@ def run(seed, a_nods=True, b_nods=True, max_turns=3000):
                 assert want.core == have.core, (want.core, have.core)
                 for t in (F.T_DUPCTL, F.T_CHAT):
                     assert (t in want.ext) == (t in have.ext)
-                assert _reply(want.ext) == _reply(have.ext)
+                # T_REPLY is kept unconditionally across bursts: if omitted on a burst
+                # whose reply was unchanged, receiver's peer_reply_recommend holds it
+                if F.T_REPLY in want.ext:
+                    assert _reply(want.ext) == _reply(have.ext)
+                else:
+                    assert _reply(have.ext) == receiver.peer_reply_recommend
                 nods[0] += 1
                 ok = receiver.handle(receiver.nod_rx(meaning))
                 nods[1] += ok
@@ -168,42 +174,22 @@ def run(seed, a_nods=True, b_nods=True, max_turns=3000):
 def test_nods_stand_for_their_controls(nodding, seed):
     a, b, nods = run(seed)
     assert nods[1] >= 3 and nods[1] == nods[0], nods
-    assert a.nod_peer and b.nod_peer and a._nods_told and b._nods_told
+    assert a.nod_peer and b.nod_peer
 
 
 @pytest.mark.parametrize("seed", range(3))
-def test_no_nods_to_a_peer_that_never_said(nodding, seed):
-    """b without nods (a v5 peer, or DATA2G_NOD=0) never sends T_NODS: a
-    never nods to it (it stops telling once b acted on it, as with any
-    peer); b's own replies stay full."""
+def test_no_nods_to_a_peer_that_never_advertised(nodding, seed):
+    """b without nods (--no-nods / no CAP_NODS): a never nods to it; b's own replies stay full."""
     a, b, nods = run(seed, b_nods=False)
-    assert nods == [0, 0] and not a.nod_peer and a._nods_told and b.nod_peer
-
-
-def test_t_nods_until_acted_on(nodding):
-    modes = ("fsk16r25-r1/2",)
-    a = L.Station(0, AskingPolicy(random.Random(1), 0.0, modes, p_kept=0.0), master=True, nod=True)
-    b = L.Station(1, AskingPolicy(random.Random(2), 0.0, modes, p_kept=0.0), nod=True)
-    a.write(payload(random.Random(3), 2000, "mixed"))
-    x = a.build(nod=True)
-    assert F.T_NODS in _ctl(x).ext
-    a.on_timeout()  # lost: still unacknowledged
-    x = a.on_timeout(allow_repeat=False)
-    assert F.T_NODS in _ctl(x).ext and not a._nods_told
-    assert b.handle(FullRx(x)) and b.nod_peer
-    r = b.build(nod=True)
-    assert r.nod is None and F.T_NODS in _ctl(r).ext  # a has not told b yet: b sends in full
-    assert a.handle(FullRx(r)) and a._nods_told and a.nod_peer
-    x = a.build(nod=True)
-    assert F.T_NODS not in _ctl(x).ext
+    assert nods == [0, 0] and not a.nod_peer and b.nod_peer
 
 
 def test_a_kept_field_change_goes_in_full(nodding):
     """A control-only reply whose size_hint (or T_REPLY) differs from my
     previous burst's goes in full: a nod would leave the peer's old one."""
     modes = ("fsk16r25-r1/2",)
-    a = L.Station(0, AskingPolicy(random.Random(1), 0.0, modes, p_kept=0.0), master=True, nod=True)
-    b = L.Station(1, AskingPolicy(random.Random(2), 0.0, modes, p_kept=0.0), nod=True)
+    a = L.Station(0, AskingPolicy(random.Random(1), 0.0, modes, p_kept=0.0), master=True, nod=True, nod_peer=True)
+    b = L.Station(1, AskingPolicy(random.Random(2), 0.0, modes, p_kept=0.0), nod=True, nod_peer=True)
     a.write(payload(random.Random(3), 2000, "mixed"))
     for _ in range(3):  # a's data, b's control-only reply: nods once anchored
         assert b.handle(FullRx(a.build(nod=True)))
@@ -222,6 +208,55 @@ def test_a_kept_field_change_goes_in_full(nodding):
         assert r.nod is not None
         assert F.Control.unpack([a.nod_payload(r.nod[0])]).core.size_hint == b.policy.hint
         assert a.handle(a.nod_rx(r.nod[0]))
+
+
+@pytest.mark.hf_only("HF flat recommendation table and CPM nods")
+def test_cross_band_nods_and_bounds(nodding):
+    """The flat 0..52 recommendation table has no band fence: cross-band steps
+    within +-2 (fsk8r50-r1/2 <-> fsk32r62-r1/2 <-> qpsk-r1/5, and n10-qpsk-r1/5
+    <-> n10-qpsk-r1/3) nod directly; steps past the table end are rejected."""
+    from data2g.arq import modes as M
+
+    class FixedRecPolicy(AskingPolicy):
+        def recommend(self, station):
+            return self.idx, self.hint, self.reply
+
+    for src, dst in (("fsk8r50-r1/2", "fsk32r62-r1/2"),
+                     ("fsk32r62-r1/2", "qpsk-r1/5"),
+                     ("qpsk-r1/5", "fsk32r62-r1/2"),
+                     ("fsk32r62-r1/2", "fsk32r62-r2/3"),
+                     ("n10-qpsk-r1/5", "n10-qpsk-r1/3")):
+        r0, r1 = M.encode(src), M.encode(dst)
+        assert (r1 - r0) in N.REPLY_STEPS, (src, dst, r0, r1)
+        pa = FixedRecPolicy(random.Random(1), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+        pb = FixedRecPolicy(random.Random(2), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+        pb.idx = r0
+        a = L.Station(0, pa, master=True, nod=True, nod_peer=True)
+        b = L.Station(1, pb, nod=True, nod_peer=True)
+        a.write(payload(random.Random(3), 2000, "mixed"))
+        for _ in range(3):
+            assert b.handle(FullRx(a.build(nod=True)))
+            r = b.build(nod=True)
+            assert a.handle(FullRx(r))
+        assert b.handle(FullRx(a.build(nod=True)))
+        pb.idx = r1
+        r = b.build(nod=True)
+        assert r.nod is not None, (src, dst, r0, r1)
+        p = a.nod_payload(r.nod[0])
+        assert p is not None and F.Control.unpack([p]).core.recommend == r1
+        assert a.handle(a.nod_rx(r.nod[0])) and a.peer_recommend == r1
+
+    # Out-of-table step (+1 past the last valid HF mode 52) is rejected by nod_payload
+    pa = FixedRecPolicy(random.Random(1), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+    pb = FixedRecPolicy(random.Random(2), 0.0, ("fsk16r25-r1/2",), p_kept=0.0)
+    pb.idx = len(M.RECOMMEND_TABLE) - 1
+    a = L.Station(0, pa, master=True, nod=True, nod_peer=True)
+    b = L.Station(1, pb, nod=True, nod_peer=True)
+    a.write(payload(random.Random(3), 2000, "mixed"))
+    for _ in range(2):
+        assert b.handle(FullRx(a.build(nod=True)))
+        assert a.handle(FullRx(b.build(nod=True)))
+    assert a.nod_payload(N.INDEX[("unchanged", 1, 0)]) is None
 
 
 def test_cpp_detects_as_python(native, reference):

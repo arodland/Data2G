@@ -67,8 +67,8 @@ int main() {
         Mat<std::uint8_t> xc(x.rows, static_cast<std::size_t>(code.n));
         for (std::size_t b = 0; b < x.rows; ++b) std::copy_n(x[b], code.n, xc[b]);
         const auto& dec = codes::gf_decoder(s);
-        // 3 dB over the r1/2 codes' 10% Rayleigh point (gf_study): nearly every codeword decodes
-        const double good = s.k == 320 ? 9.5 : 12.0, hopeless = 0.0;
+        // 3 dB over each rate's 10% Rayleigh point (gf_study): nearly every codeword decodes
+        const double good = s.k == 320 ? 9.5 : s.k == 480 ? 12.0 : 15.0, hopeless = 0.0;
         const auto d = dec.decode(channel(code, xc, good, rng), codes::GF_ITERS);
         int right = 0;
         for (int b = 0; b < B; ++b) right += d.ok[b] && std::equal(xc[b], xc[b] + code.n, d.hard[b]);

@@ -15,7 +15,7 @@ from native_subs.base import EQUALIZER_NATIVE
 
 from data2g import codes, equalizer, hfchannel, modem
 from data2g.arq import phy
-from data2g.config import BANDS, FS, NCP, SUBMODES
+from data2g.config import BANDS, FS, NCP, SC_BANDS, SUBMODES
 from data2g.hfchannel import FadingPreset
 from data2g.waveform import ofdm
 
@@ -130,6 +130,7 @@ def test_support_rank_and_subspace(native, band):
     off-centre: the 1e-2 threshold's nearest miss is 4e-4 decades
     (n10 width 93), far above rounding."""
     bb = ofdm.band(band).bb.astype(np.float64)
+    equalizer._support_basis.cache_clear()
     py_basis = equalizer._support_basis.__wrapped__
     for slack in (equalizer.SUPPORT_SLACK, equalizer.PADDED_SLACK):
         for width in range(4 * NCP + 1):
@@ -141,6 +142,9 @@ def test_support_rank_and_subspace(native, band):
                     continue  # support_slack never uses a capped padded basis: its subspace is arbitrary
                 close(u @ u.conj().T, U @ U.conj().T, f"projector {width} {d0} {slack}")
                 close(keep, 1 - np.sum(np.abs(U) ** 2, axis=1), "keep")
+    # Shift-invariant cache key: two d0 shifts per width hit the same (bb, width) SVD entry
+    info = equalizer._support_basis.cache_info()
+    assert info.currsize <= 256 and info.hits >= 4 * NCP + 1
 
 
 def test_per_carrier_noise(native, py):
@@ -196,12 +200,12 @@ def _capture(monkeypatch, name):
                                              ("w48-16qam-r1/2", 5, 30.0)] if c[0] in SUBMODES])  # FM has no n4
 def test_live_estimate_and_refine(native, py, reference, monkeypatch, submode, n_cw, snr):
     # Python's receive, so its equalizer calls can be captured (--native
-    # substitutes the whole of modem.receive)
-    for name in ("receive", "data_channel"):
+    # substitutes the whole of modem.receive), and sc_refine (HF scattered pilots)
+    for name in ("receive", "data_channel", "sc_refine"):
         monkeypatch.setattr(modem, name, reference(modem, name))
     est_calls, ref_calls = _capture(monkeypatch, "estimate"), _capture(monkeypatch, "refine")
     r, post = _received(submode, n_cw, snr, seed=n_cw)
-    assert r is not None and est_calls
+    assert r is not None and (est_calls or SUBMODES[submode].band in SC_BANDS)
     phy._dd_estimate(r, post)  # every other codeword known
     phy._dd_estimate(r, {i: post[0] for i in range(n_cw)})  # all known
     assert len(ref_calls) == 2

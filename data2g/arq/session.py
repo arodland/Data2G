@@ -26,14 +26,13 @@ from . import burst as B
 from . import frames as F
 from . import link as L
 
-T_SESS = F.T_SESS  # the extension carrying a session frame
-VERSION = 5  # 2: T_COMP (a v1 peer would deliver compressed codewords raw); 3: deflate primed with frames.ZDICT;
-# 4: T_INLINE (a v3 peer ignores it: each inline codeword waits for its resend in a slot);
-# 5: a CW ID may go ahead of a turn (docs/arq.md §7b): a v4 caller times out under it and keys over the reply
-# (nods, docs/arq.md §3b, need no bump: each side says it knows them, T_NODS; nor T_REPLY only on change,
-# §8a: T_KEEP)
+T_SESS = F.T_SESS  # the extension carrying a session frame (CONNECT_ACK, CONNECT_NAK, DISC, DISC_ACK)
+# Wire 1.0 major version (4-bit field in CONNECT): 1 for all of 1.x.
+# Pre-1.0 versions (1-5) are retired; incompatible PHY PROTOCOL_VERSION separates them on air.
+VERSION = 1
+MIN_VERSION = 1
+MAX_VERSION = 1
 CONNECT_TRIES = 6  # the cap's connect mode, policy.ROBUST_CONNECT_TRIES in ROBUST_CONNECT, one in ROBUST_FAST
-CONNECT_CTL_BYTES = 4 + 2 + F.Connect.BYTES  # a CONNECT's Control: core, T_SESS header, body
 DISC_TRIES = 3
 # DISC tries stop within this of the first one keyed, a retry going only if
 # its reply window ends inside it: BPQ32 sends ABORT 30 s after an unanswered
@@ -82,9 +81,18 @@ log = logging.getLogger("data2g.session")
 IDLE, LISTEN, CONNECTING, CONNECTED, DISCONNECTING, CLOSED = (
     "idle", "listen", "connecting", "connected", "disconnecting", "closed")
 # CONNECT_NAK reasons: the caller stops dialing on any of them
-NAK_VERSION, NAK_NOT_LISTENING, NAK_BUSY, NAK_REFUSED = 1, 2, 3, 4
+NAK_VERSION, NAK_NOT_LISTENING, NAK_BUSY, NAK_REFUSED, NAK_CAPS = 1, 2, 3, 4, 5
 # close reasons (DISCONNECTED's, docs/arq.md §9) are one of these words, then detail if any
-NAK_NAMES = {NAK_VERSION: "VERSION", NAK_NOT_LISTENING: "NOT_LISTENING", NAK_BUSY: "BUSY", NAK_REFUSED: "REFUSED"}
+NAK_NAMES = {NAK_VERSION: "VERSION", NAK_NOT_LISTENING: "NOT_LISTENING", NAK_BUSY: "BUSY",
+             NAK_REFUSED: "REFUSED", NAK_CAPS: "CAPS"}
+
+
+def _nak_close_reason(reason: int, detail: int) -> str:
+    if reason == NAK_VERSION:
+        return f"VERSION {detail >> 4}-{detail & 15}" if detail else "VERSION"
+    if reason == NAK_CAPS:
+        return f"CAPS 0x{detail:02x}" if detail else "CAPS"
+    return NAK_NAMES.get(reason, f"REFUSED reason {reason}")
 
 
 def session_key(caller: str, callee: str, nonce: int) -> int:
@@ -134,6 +142,11 @@ class Session:
     _rx_mode: str = ""  # the mode of the peer's last burst my link took (_session_mode)
     _disc_mode: str | None = None  # every try of this DISC goes in it; None: the policy's connect_mode
     chat: bool = False  # CHAT ON: set with set_chat()
+    nods: bool = True  # nods (docs/arq.md §3b): advertises CAP_NODS in CONNECT/CONNECT_ACK unless off
+    caps: int | None = None  # override local caps bitmask (None: CAP_NODS when nods enabled)
+    req: int = 0  # local mandatory peer-constraint bitmask (8 bits)
+    peer_caps: int = 0  # peer's caps from CONNECT / CONNECT_ACK
+    peer_req: int = 0  # peer's req from CONNECT / CONNECT_ACK
     idle_close_s: float | None = None  # host TIMEOUT; None: IDLE_CLOSE_S
     connect_tries: int | None = None  # host RETRIES (plus the first); None: CONNECT_TRIES
     aliases: tuple = ()  # more calls this station answers to (VARA's MYCALL takes several)
@@ -578,37 +591,41 @@ class Session:
             else:
                 self._queue(b, now)
 
-    # session frames: control-only bursts with a T_SESS extension. Connect
-    # frames use key 0 (no session yet); DISC / DISC_ACK the session key.
+    def local_caps(self) -> int:
+        """This station's 16-bit capability bitmask for CONNECT / CONNECT_ACK."""
+        if self.caps is not None:
+            return self.caps
+        return F.CAP_NODS if (L.NOD and self.nods) else 0
 
-    def _session_burst(self, direction: int, key: int, body: bytes, mode: str | None = None) -> B.TxBurst:
+    # session frames: CONNECT uses the unified 20-byte COMPACT_CONNECT format
+    # on all modes (key 0); CONNECT_ACK, CONNECT_NAK, DISC and DISC_ACK use a
+    # control-only burst with T_SESS (key 0 for connect answers, session key for DISC).
+
+    def _session_burst(self, direction: int, key: int, body: bytes, mode: str | None = None,
+                       sub: int | None = None) -> B.TxBurst:
         """`mode`: an answer goes in the mode its frame came in (a caller that
         needed the robust connect mode hears its answer in it); otherwise
         the policy's, more robust on retries."""
+        is_connect = sub == F.CONNECT
         mode = mode or self.policy.connect_mode(self.cap, self._tries,
-                                                last=body[0] == F.CONNECT and self._tries == self._connect_limit() - 1)
+                                                last=is_connect and self._tries == self._connect_limit() - 1)
         cpb = self.policy.ctl_payload_bytes(mode)
-        if body[0] == F.CONNECT and self._compact(mode):
-            slots = [B.Slot(B.COMPACT_CONNECT, 0, F.pack_connect(body) + bytes(cpb - F.COMPACT_BYTES))]
+        if is_connect:
+            slots = [B.Slot(B.COMPACT_CONNECT, 0, body + bytes(cpb - F.Connect.BYTES))]
         else:
             ctl = F.Control(F.Core(ftype=F.SESSION), {F.T_SESS: body}).pack(cpb)
             slots = [B.Slot(B.ctl_mask(direction, i, key), 0, p) for i, p in enumerate(ctl)]
-        retry = f" try {self._tries + 1}" if body[0] in (F.CONNECT, F.DISC) else ""
-        log.info("TX %s %s x%d%s", _frame_desc(body), mode, len(slots), retry)
-        return B.TxBurst(mode, slots, 0, self.cap)
+        retry = f" try {self._tries + 1}" if (is_connect or body[0] == F.DISC) else ""
+        log.info("TX %s %s x%d%s", _frame_desc(body, sub), mode, len(slots), retry)
+        return B.TxBurst(mode, slots, 0, self.cap, connect_callee=self.peer if is_connect else "")
 
     def _connect_limit(self) -> int:
         return CONNECT_TRIES if self.connect_tries is None else self.connect_tries
 
-    def _compact(self, mode: str) -> bool:
-        """A CONNECT in `mode` goes compact (frames.pack_connect): in its
-        Control envelope it needs more codewords than the mode's control
-        may have (CPM: one of 20 B)."""
-        return -(-CONNECT_CTL_BYTES // self.policy.ctl_payload_bytes(mode)) > self.policy.max_ctl(mode)
-
     def _connect_burst(self) -> B.TxBurst:
-        body = F.Connect(VERSION, self.call, self.peer, self._nonce, self.cap, round(self.t_turn * 10)).pack()
-        return self._session_burst(0, 0, body)
+        body = F.Connect(VERSION, self.call, self.peer, self._nonce, self.cap,
+                         round(self.t_turn * 10), self.local_caps(), self.req).pack()
+        return self._session_burst(0, 0, body, sub=F.CONNECT)
 
     def _disc_burst(self) -> B.TxBurst:
         st = self.station
@@ -619,22 +636,21 @@ class Session:
         What each state accepts:
           station exists   DISC / DISC_ACK from the peer under the session key
           CONNECTING       CONNECT_ACK / CONNECT_NAK, key 0
-          any              CONNECT, key 0: answered, or refused with a CONNECT_NAK
+          any              CONNECT (unified 20 B under COMPACT_CONNECT): answered or refused
         A decode is memoised per slot (ModemRx), so each extra mask is a CRC check."""
         tries = []
         if self.station is not None:
             tries.append((self.station.peer, self.station.key))
         elif self.state == CONNECTING:
             tries.append((1, 0))
-        tries.append((0, 0))
-        if (0, 0) in tries and self._compact(rx.submode):
+        if self.policy.ctl_payload_bytes(rx.submode) >= F.Connect.BYTES:
             p = rx.decode(0, B.COMPACT_CONNECT, 0, None)
             if p is not None:
-                body = F.unpack_connect(p[:F.COMPACT_BYTES])
-                if why := _check_frame(body):
+                body = p[:F.Connect.BYTES]
+                if why := _check_connect(body):
                     log.warning("RX malformed %s: dropped", why)
                     return None
-                return {"key": 0, "body": body, "mode": rx.submode}
+                return {"key": 0, "sub": F.CONNECT, "body": body, "mode": rx.submode}
         for direction, key in tries:
             first = rx.decode(0, B.ctl_mask(direction, 0, key), 0, None)
             if first is None:
@@ -660,7 +676,7 @@ class Session:
             if body and (why := _check_frame(body)):
                 log.warning("RX malformed %s: dropped", why)
                 return None
-            return {"key": key, "body": body, "mode": rx.submode} if body else None
+            return {"key": key, "sub": body[0], "body": body, "mode": rx.submode} if body else None
         return self._primed_frame(rx)
 
     def _robust_start(self, mode: str):
@@ -694,21 +710,22 @@ class Session:
 
     def _primed_frame(self, rx) -> dict | None:
         """A connect frame that failed blind, retried primed (docs/arq.md §3a):
-        the caller knows nearly all of its CONNECT_ACK (the nonce it sent, its
-        own cap and t_turn as likely), a listener a third of a compact CONNECT
-        (the version, its own call, then a peer like itself). Each still has
-        to pass its CRC, score and _check_frame (a call's 10 characters each
-        in the alphabet: about 7 bits more against a forged one)."""
+        the caller knows nearly all of its CONNECT_ACK (nonce, likely cap, t_turn
+        and default caps/req=0), a listener a third of CONNECT (version, its own
+        call, then default peer fields). Each still has to pass its CRC, score
+        and validation."""
         if not (L.PRIME and hasattr(rx, "decode_known")):
             return None
         cpb = self.policy.ctl_payload_bytes(rx.submode)
         t10 = round(self.t_turn * 10)
         if self.state == CONNECTING and self.station is None:
-            body = F.ConnectAck(self._nonce, self.cap, t10).pack()
+            body = F.ConnectAck(self._nonce, self.cap, t10, F.DEFAULT_CAPS, 0).pack()
             t = F.Control(F.Core(ftype=F.SESSION), {F.T_SESS: body}).pack(cpb)
             if len(t) != 1:
                 return None
-            known = b"\xff" * 9 + b"\0\0" + b"\xff" * (cpb - 11)  # its cap and t_turn: as mine, then unknown
+            # Core (4) + T_SESS hdr (2) + subtype (1) + nonce (2) = 9 B known;
+            # cap (1) + t_turn10 (1) + caps (2) + req (1) = 5 B unknown on hyp 2; trailing zero pad known
+            known = b"\xff" * 9 + b"\0" * 5 + b"\xff" * (cpb - 14)
             for m in (b"\xff" * cpb, known):
                 p = rx.decode_known(0, B.ctl_mask(1, 0, 0), t[0], m)
                 if p is not None:
@@ -718,33 +735,26 @@ class Session:
                         body = b""
                     return self._primed_body(body, 0, rx)
             return None
-        if self.state == LISTEN and self._compact(rx.submode) and cpb >= F.COMPACT_BYTES:
-            body = bytearray(F.Connect(VERSION, "", self.call, 0, self.cap, t10).pack())
-            t = F.pack_connect(bytes(body)) + bytes(cpb - F.COMPACT_BYTES)
-            # the fields' masks packed the same way (frames._COMPACT), the padding known
-            for fields in ((1, 10, 20, 21), (1, 10)):  # version, callee, cap, t_turn; then the first two
-                mb = bytearray(F.Connect.BYTES)
-                for at, n in ((1, 1), (2, 8), (10, 8), (18, 2), (20, 1), (21, 1)):
-                    if at in fields:
-                        bits = next(b for b, a, _ in F._COMPACT if a == at)
-                        mb[at:at + n] = ((1 << bits) - 1).to_bytes(n, "big")
-                m = int.from_bytes(F.pack_connect(bytes(mb)), "big") | (1 << (8 * F.COMPACT_BYTES - 148)) - 1
-                p = rx.decode_known(0, B.COMPACT_CONNECT, t, m.to_bytes(F.COMPACT_BYTES, "big") + b"\xff" * (cpb - F.COMPACT_BYTES))
+        if self.state == LISTEN and cpb >= F.Connect.BYTES:
+            t = F.Connect(VERSION, "", self.call, 0, self.cap, t10, F.DEFAULT_CAPS, 0).pack() + bytes(cpb - F.Connect.BYTES)
+            for fields in ({"version", "callee", "cap", "t_turn10", "caps", "req"}, {"version", "callee"}):
+                m = F.Connect.mask(fields) + b"\xff" * (cpb - F.Connect.BYTES)
+                p = rx.decode_known(0, B.COMPACT_CONNECT, t, m)
                 if p is not None:
-                    return self._primed_body(F.unpack_connect(p[:F.COMPACT_BYTES]), 0, rx)
+                    return self._primed_body(p[:F.Connect.BYTES], 0, rx, sub=F.CONNECT)
         return None
 
     def _repeated_frame(self, rx, now: float) -> dict | None:
         """A one-codeword connect frame that failed blind and primed, combined
         with the failed ones before it (RxBurst.decode_repeat, docs/arq.md
-        §3a): a CONNECT's robust tries are the same compact codeword (one
-        nonce), and so are the CONNECT_ACKs that answer them. Ones more than
+        §3a): a CONNECT's retries are the same compact codeword (one nonce),
+        and so are the CONNECT_ACKs that answer them. Ones more than
         REPEAT_GAP_S apart are not one CONNECT's."""
         if not (L.REPEAT and hasattr(rx, "decode_repeat")) or rx.n_cw != 1 or self.station is not None:
             return None
         if self.state == CONNECTING:
             mask = B.ctl_mask(1, 0, 0)
-        elif self.state == LISTEN and self._compact(rx.submode):
+        elif self.state == LISTEN and self.policy.ctl_payload_bytes(rx.submode) >= F.Connect.BYTES:
             mask = B.COMPACT_CONNECT
         else:
             return None
@@ -756,24 +766,29 @@ class Session:
             return None
         rx.forget(L.REPEAT_SESSION_KEY)
         if mask == B.COMPACT_CONNECT:
-            return self._primed_body(F.unpack_connect(p[:F.COMPACT_BYTES]), 0, rx, "repeated")
+            return self._primed_body(p[:F.Connect.BYTES], 0, rx, "repeated", sub=F.CONNECT)
         try:
             body = F.Control.unpack([p]).ext.get(F.T_SESS, b"")
         except ValueError:
             body = b""
         return self._primed_body(body, 0, rx, "repeated")
 
-    def _primed_body(self, body: bytes, key: int, rx, how: str = "primed") -> dict | None:
+    def _primed_body(self, body: bytes, key: int, rx, how: str = "primed", sub: int | None = None) -> dict | None:
+        if sub == F.CONNECT:
+            if why := _check_connect(body):
+                log.info("RX %s session frame malformed (%s): dropped", how, why)
+                return None
+            log.info("RX %s %s", how, _frame_desc(body, F.CONNECT))
+            return {"key": key, "sub": F.CONNECT, "body": body, "mode": rx.submode}
         if not body or (why := _check_frame(body)):
             log.info("RX %s session frame malformed (%s): dropped", how, why if body else "empty")
             return None
         log.info("RX %s %s", how, _frame_desc(body))
-        return {"key": key, "body": body, "mode": rx.submode}
+        return {"key": key, "sub": body[0], "body": body, "mode": rx.submode}
 
     def _on_session_frame(self, f: dict, now: float):
-        body, key = f["body"], f["key"]
-        sub = body[0]
-        log.info("RX %s %s", _frame_desc(body), f["mode"])
+        body, key, sub = f["body"], f["key"], f["sub"]
+        log.info("RX %s %s", _frame_desc(body, sub), f["mode"])
         if sub == F.CONNECT and len(body) >= F.Connect.BYTES and key == 0:
             c = F.Connect.unpack(body)
             caller, callee, nonce = c.caller, c.callee, c.nonce
@@ -798,15 +813,19 @@ class Session:
             if self.state != LISTEN:
                 busy = self.state in (CONNECTING, CONNECTED, DISCONNECTING)
                 return self._refuse(c, f["mode"], NAK_BUSY if busy else NAK_NOT_LISTENING, now)
-            if c.version != VERSION:
-                return self._refuse(c, f["mode"], NAK_VERSION, now)
+            if not (MIN_VERSION <= c.version <= MAX_VERSION):
+                return self._refuse(c, f["mode"], NAK_VERSION, now, detail=(MIN_VERSION << 4) | MAX_VERSION)
+            if bad_req := c.req & ~F.SUPPORTED_REQ:
+                return self._refuse(c, f["mode"], NAK_CAPS, now, detail=bad_req)
             if self.accept_connect is not None and not self.accept_connect(caller, callee):
                 return self._refuse(c, f["mode"], NAK_REFUSED, now)
             self.call = callee  # the call it dialed (the session key derives from it)
             self.peer, self._nonce, self.cap = caller, nonce, min(c.cap, self.cap)
             self.peer_t_turn = c.t_turn10 / 10
+            self.peer_caps, self.peer_req = c.caps, c.req
             self.station = L.Station(1, self.policy, master=False, key=session_key(caller, self.call, nonce),
-                                     cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+                                     cap=self.cap, max_misses=None, chat=self.chat,
+                                     nod=self.nods, nod_peer=bool(c.caps & F.CAP_NODS))
             self._follow_start = False
             self._robust_start(f["mode"])
             self._flush_writes()
@@ -818,10 +837,15 @@ class Session:
             a = F.ConnectAck.unpack(body)
             if a.nonce != self._nonce:
                 return
+            if bad_req := a.req & ~F.SUPPORTED_REQ:
+                self._close(_nak_close_reason(NAK_CAPS, bad_req))
+                return
             self.cap = min(a.cap, self.cap)
             self.peer_t_turn = a.t_turn10 / 10
+            self.peer_caps, self.peer_req = a.caps, a.req
             self.station = L.Station(0, self.policy, master=True, key=session_key(self.call, self.peer, self._nonce),
-                                     cap=self.cap, max_misses=None, chat=self.chat, nod=True, keep=True)
+                                     cap=self.cap, max_misses=None, chat=self.chat,
+                                     nod=self.nods, nod_peer=bool(a.caps & F.CAP_NODS))
             self._follow_start = False
             self._robust_start(f["mode"])
             self._flush_writes()
@@ -832,7 +856,7 @@ class Session:
         elif sub == F.CONNECT_NAK and self.state == CONNECTING and key == 0:
             n = F.ConnectNak.unpack(body)
             if n.nonce == self._nonce:
-                self._close(NAK_NAMES.get(n.reason, f"REFUSED reason {n.reason}"))
+                self._close(_nak_close_reason(n.reason, n.detail))
         elif sub == F.DISC and self.station is not None and key == self.station.key:
             # also when already closed: our DISC_ACK may have been lost
             self._heard(now)
@@ -841,16 +865,16 @@ class Session:
         elif sub == F.DISC_ACK and self.state == DISCONNECTING and key == self.station.key:
             self._close(self._disc_why)
 
-    def _refuse(self, c: F.Connect, mode: str, reason: int, now: float):
+    def _refuse(self, c: F.Connect, mode: str, reason: int, now: float, detail: int = 0):
         """A CONNECT_NAK for this CONNECT, unless a burst of the session's own
         is queued (that goes; the caller's next try is refused instead)."""
-        log.info("refusing CONNECT from %s: %s", c.caller, NAK_NAMES[reason])
+        log.info("refusing CONNECT from %s: %s", c.caller, _nak_close_reason(reason, detail))
         if self._out is None:
-            self._nak = self._session_burst(1, 0, F.ConnectNak(c.nonce, reason).pack(), mode)
+            self._nak = self._session_burst(1, 0, F.ConnectNak(c.nonce, reason, detail).pack(), mode)
             self._queue(self._nak, now)
 
     def _accept_burst(self) -> B.TxBurst:
-        body = F.ConnectAck(self._nonce, self.cap, round(self.t_turn * 10)).pack()
+        body = F.ConnectAck(self._nonce, self.cap, round(self.t_turn * 10), self.local_caps(), self.req).pack()
         return self._session_burst(1, 0, body, self._answer_mode)
 
     def _flush_writes(self):
@@ -861,27 +885,40 @@ class Session:
 
 FRAME_NAMES = {F.CONNECT: "CONNECT", F.CONNECT_ACK: "CONNECT_ACK", F.CONNECT_NAK: "CONNECT_NAK",
                F.DISC: "DISC", F.DISC_ACK: "DISC_ACK"}
-FRAME_BYTES = {F.CONNECT: F.Connect.BYTES, F.CONNECT_ACK: F.ConnectAck.BYTES, F.CONNECT_NAK: F.ConnectNak.BYTES}
+FRAME_BYTES = {F.CONNECT_ACK: F.ConnectAck.BYTES, F.CONNECT_NAK: F.ConnectNak.BYTES}
+
+
+def _check_connect(body: bytes) -> str | None:
+    """What is wrong with a CRC-valid compact CONNECT payload, or None."""
+    if len(body) < F.Connect.BYTES:
+        return f"CONNECT of {len(body)} B"
+    try:
+        c = F.Connect.unpack(body)
+    except ValueError as e:
+        return f"CONNECT: {e}"
+    if c.cap > 2:
+        return f"CONNECT: cap code {c.cap}"
+    return None
 
 
 def _check_frame(body: bytes) -> str | None:
-    """What is wrong with a CRC-valid session frame body, or None. A bad
+    """What is wrong with a CRC-valid T_SESS frame body, or None. A bad
     one is dropped as if it had not decoded (the peer retries)."""
     name = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
     if len(body) < FRAME_BYTES.get(body[0], 1):
         return f"{name} of {len(body)} B"
-    if body[0] == F.CONNECT:
-        try:
-            F.Connect.unpack(body)
-        except ValueError as e:
-            return f"{name}: {e}"
     if body[0] == F.CONNECT_ACK and (cap := F.ConnectAck.unpack(body).cap) > 2:
         return f"{name}: cap code {cap}"
     return None
 
 
-def _frame_desc(body: bytes) -> str:
-    out = FRAME_NAMES.get(body[0], f"session frame {body[0]}")
-    if body[0] == F.CONNECT and len(body) >= 18:
-        out += " {}>{}".format(*F.Connect.calls(body))
-    return out
+def _frame_desc(body: bytes, sub: int | None = None) -> str:
+    if sub == F.CONNECT:
+        out = "CONNECT"
+        if len(body) >= F.Connect.BYTES:
+            try:
+                out += " {}>{}".format(*F.Connect.calls(body))
+            except ValueError:
+                pass
+        return out
+    return FRAME_NAMES.get(body[0], f"session frame {body[0]}")

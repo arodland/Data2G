@@ -30,6 +30,7 @@ using arq::ByteView;
 inline constexpr int VERSION = 3;
 inline constexpr int DUP = 0x08;  // the control header's dup bit: each control codeword sent twice, RV 0 then RV 1
 inline constexpr int T_GROUP = 1, T_GROUP_FROM = 2, T_REPORTS = 3;  // control TLVs
+inline constexpr std::uint8_t CMD_TAG = 0xF0;  // trailing byte CMD_TAG | cmd (0xF1..0xFF) after cobs(frame) for KISS cmd 1..15
 inline constexpr std::string_view PORT0_GROUP = "KISS 0";
 inline constexpr int N_PORTS = 16;  // KISS port numbers 0-15
 inline constexpr double REPORT_MAX_S = 180.0;  // a report older than this is not followed
@@ -62,23 +63,36 @@ struct ControlRead {
 };
 ControlRead read_control(const std::map<int, Bytes>& tlvs);
 
-// The most bytes an n-byte frame takes in a burst's data (COBS, then its ending zero).
-inline std::size_t framed_len(std::size_t n) { return n + 2 + n / 254; }
+// The most bytes an n-byte frame takes in a burst's data (COBS, optional trailing command tag when cmd != 0, ending zero).
+inline std::size_t framed_len(std::size_t n, int cmd = 0) { return n + 2 + n / 254 + (cmd ? 1u : 0u); }
 Bytes cobs(ByteView frame);                   // Consistent Overhead Byte Stuffing: no zero byte left
 std::optional<Bytes> uncobs(ByteView b);      // nullopt: not one cobs() makes
+struct Frame {
+    Bytes data;
+    int cmd = 0;  // KISS command nibble (0..15)
+    bool operator==(const Frame&) const = default;
+};
+struct RxFrame {
+    int port = 0;
+    Bytes frame;
+    int cmd = 0;  // KISS command nibble (0..15)
+    bool operator==(const RxFrame&) const = default;
+};
+// cobs() undone, with optional trailing command byte (0xF1..0xFF for cmd 1..15); nullopt if malformed.
+std::optional<Frame> uncobs_cmd(ByteView b);
 // A broadcast data codeword's identity: its slot, and the slot its burst's data starts at.
 inline arq::MaskId data_start_mask(int slot, int start, int key) { return arq::data_mask(0, slot, key, false, start); }
 // First data slots a burst may have: 1-4 control codewords, each sent once or twice (DUP).
 inline constexpr int DATA_STARTS[] = {1, 2, 3, 4, 6, 8};
 inline constexpr int PROBE_SLOTS = 8;  // control lost: data looked for in slots 1-8
 
-// Data codewords: each frame COBS-encoded and ended by a zero, back to back, zero-padded; a frame that would start
-// a codeword (the data's first included) gets a zero before it.
-std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb);
-// Payloads and their CRC results -> (whole frames, frames lost). A zero byte
+// Data codewords: each frame COBS-encoded, optionally followed by CMD_TAG | cmd (when cmd != 0), and ended by a
+// zero, back to back, zero-padded; a frame that would start a codeword (the data's first included) gets a zero before it.
+std::vector<Bytes> pack_frames(const std::vector<Bytes>& frames, std::size_t pb, const std::vector<int>& cmds = {});
+// Payloads and their CRC results -> (whole (frame, cmd)s, frames lost). A zero byte
 // in a good codeword always ends a frame, so parsing picks up again after a
 // failed codeword; lost counts each run of frames one touched as one.
-std::pair<std::vector<Bytes>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
+std::pair<std::vector<Frame>, int> unpack_frames(const std::vector<Bytes>& payloads, const std::vector<bool>& ok);
 
 struct Peer {
     arq::GearShifter shifter;
@@ -99,6 +113,7 @@ struct Queued {
     int port;
     Bytes frame;
     std::optional<std::int64_t> ack;  // opaque to the link: back in `acks` once sent
+    int cmd = 0;                      // KISS command nibble (0..15)
 };
 
 class KissLink {
@@ -133,8 +148,8 @@ public:
     // Ports as a new link has them: 1-15 closed (DROPPED, in port order), port 0 in the broadcast mode.
     void reset();
 
-    // A frame for `port`; to a closed port: DROPPED.
-    void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt);
+    // A frame for `port` with KISS command nibble `cmd` (0..15); to a closed port: DROPPED.
+    void enqueue(Bytes frame, int port = 0, std::optional<std::int64_t> ack = std::nullopt, int cmd = 0);
     std::vector<std::string> take_events();                  // the statuses since the last call
     std::vector<std::pair<int, std::int64_t>> take_acks();   // (port, ack) gone out since the last call
     // A burst finished transmitting: its acks are due. -> those (port, ack), which the engine also
@@ -148,15 +163,15 @@ public:
     // Every queued frame, in bursts to go back to back on one PTT (no listening
     // between them); their acks are due when the last has gone.
     std::vector<arq::TxBurstPtr> next_bursts();
-    // A received burst -> (port, frame)s for the open ports it belongs to
+    // A received burst -> (port, frame, cmd)s for the open ports it belongs to
     // (empty for another group's), nullopt if it isn't a broadcast burst.
     // rx: the burst's decoder, shared with the engine's other checks.
-    std::optional<std::vector<std::pair<int, Bytes>>> on_burst(const arq::Heard& r, arq::ModemRx& rx);
+    std::optional<std::vector<RxFrame>> on_burst(const arq::Heard& r, arq::ModemRx& rx);
     // As above with a decoder of its own. soft: arq::soft_bits(r), if made.
     // dd_budget: as the engine's (never DD unbounded; nullopt only for tests).
-    std::optional<std::vector<std::pair<int, Bytes>>> on_burst(const arq::Heard& r,
-                                                               std::shared_ptr<const arq::SlotSoft> soft = nullptr,
-                                                               std::optional<double> dd_budget = arq::DD_BUDGET_S);
+    std::optional<std::vector<RxFrame>> on_burst(const arq::Heard& r,
+                                                 std::shared_ptr<const arq::SlotSoft> soft = nullptr,
+                                                 std::optional<double> dd_budget = arq::DD_BUDGET_S);
 
     // A burst's broadcast control, checked under the key of the group it
     // names -> (control, the first data slot); nullopt: not a broadcast burst.
@@ -170,15 +185,15 @@ public:
     // must pass under the same key and start too. Stops at a slot that decoded
     // to a codeword that is neither an open port's data nor the rest of its control.
     static std::optional<std::pair<int, int>> find_data(arq::PlainRx& rx, const std::set<int>& keys);
-    // Its data slots from `start` under `key` -> (frames, per-slot ok, frames lost).
-    static std::tuple<std::vector<Bytes>, std::vector<bool>, int> read_burst_frames(arq::PlainRx& rx, int start, int key);
+    // Its data slots from `start` under `key` -> ((frame, cmd)s, per-slot ok, frames lost).
+    static std::tuple<std::vector<Frame>, std::vector<bool>, int> read_burst_frames(arq::PlainRx& rx, int start, int key);
 
 private:
     void check_fits(int n, const Port& p, const std::string& mode, bool shift) const;
     void drop_where(int port, const std::function<bool(const Queued&)>& which);
-    std::pair<std::string, int> route(const Port& port, ByteView frame) const;
+    std::pair<std::string, int> route(const Port& port, ByteView frame, int cmd = 0) const;
     std::vector<Bytes> control(const arq::Mode& m, int n, const Port& port, int sender);
-    void learn(const Bytes& rep, const std::vector<Bytes>& frames, const arq::Heard& r, arq::ModemRx& rx,
+    void learn(const Bytes& rep, const std::vector<Frame>& frames, const arq::Heard& r, arq::ModemRx& rx,
                const std::vector<bool>& ok, double now);
     Peer* peer(int h);
 

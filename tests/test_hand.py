@@ -797,7 +797,7 @@ def test_hand_overhear_yields_and_refuses():
         assert h.out_cmd.pop() == want, line
 
 
-@pytest.mark.hf_only("its 0.3 s cut leaves HF's header just under receiver.SUSPECT_SCORE (0.343), the release path that marks it LOST; FM's header reads 0.46 there (a clear lock, received at its end), and 0.22 s hears no header at all")
+@pytest.mark.hf_only("its 0.297 s cut leaves HF's header just under receiver.SUSPECT_SCORE, the release path that marks it LOST; FM's header reads above it there")
 def test_lost_burst_is_a_ref():
     """A burst whose header was heard but whose receive failed (behind BUSY and
     BCAST * MISSED) is a Hand reference too, marked LOST: the case where a
@@ -812,7 +812,7 @@ def test_lost_burst_is_a_ref():
     x = (2.2 if PROFILE == "hf" else FM_TX_PEAK) * np.concatenate(out)  # back to ~unit RMS (test_engine.run_pair)
     rng = np.random.default_rng(0)
     y = np.concatenate([np.zeros(FS), x, np.zeros(2 * FS)])
-    y[FS + int(0.3 * FS):FS + len(x)] = 0.0  # gone after its header
+    y[FS + int(0.297 * FS):FS + len(x)] = 0.0  # gone after its header
     y += rng.normal(0, 0.05, len(y))
     a = Engine("W1AW", seed=1, kiss=KissLink())
     lines = []

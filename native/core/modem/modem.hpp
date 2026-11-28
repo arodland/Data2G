@@ -10,12 +10,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <complex>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "equalizer/equalizer.hpp"
@@ -23,6 +25,7 @@
 #include "generated/modem.hpp"
 #include "modem/timing.hpp"
 #include "util/mat.hpp"
+#include "waveform/ofdm.hpp"
 #include "waveform/sync.hpp"
 
 namespace data2g::modem {
@@ -66,6 +69,17 @@ std::vector<int> valid_words(std::string_view band, const Accept* accept = nullp
 // ulps. Reentrant; the cost no longer grows with the number of valid words.
 std::vector<float> header_corr(std::span<const double> soft, std::string_view band, const Accept* accept = nullptr);
 
+// Dedicated CONNECT header words (modem.CONNECT_HEADER, docs/pending-header.md): spare
+// pseudo-submode indices whose n_cw field carries a hash of the destination call.
+struct ConnectHeader {
+    std::string_view band;
+    int index = 0;
+    std::string_view mode;
+    int bits = 0;
+};
+std::optional<ConnectHeader> connect_header_for(std::string_view mode);
+std::optional<int> connect_hash_of(int word, std::string_view band);
+
 struct Header {
     int word = 0;
     const Spec* spec = nullptr;
@@ -86,18 +100,66 @@ void set_tx_path(std::string_view path);  // throws std::invalid_argument unless
 // Codeword payloads -> unit-RMS audio (FM mic path: the top modes quieter,
 // config::FM_MIC_GAIN). rvs empty: all 0.
 std::vector<double> modulate(std::span<const std::vector<std::uint8_t>> payloads, const Spec& spec,
-                             std::span<const int> rvs = {}, std::string_view tx_path = {});
+                             std::span<const int> rvs = {}, std::string_view tx_path = {},
+                             std::optional<int> connect_hash = std::nullopt);
 // Coded bits in burst order (codes::spread) -> unit-RMS audio.
 std::vector<double> modulate_bits(std::span<const std::uint8_t> bits, const Spec& spec,
-                                  std::string_view tx_path = {});
+                                  std::string_view tx_path = {}, std::optional<int> connect_hash = std::nullopt);
 // (n_f * 5, nc) data symbols -> the unclipped burst waveform.
-std::vector<double> burst_waveform(const Mat<cd>& data, const Spec& spec);
+std::vector<double> burst_waveform(const Mat<cd>& data, const Spec& spec,
+                                   std::optional<int> connect_hash = std::nullopt);
 // First sample of each data symbol of a burst of n_f data frames (ace_cells' `full`[:, 0]).
 std::vector<std::int64_t> ace_cells(const Spec& spec, int n_f);
 
 // --- receive --------------------------------------------------------------
 
 double bin_phase_step(std::span<const cd> h);
+
+// --- scattered pilots (config.SC_BANDS: HF 6-symbol OFDM bands w, w48, n10, n4) --------------------------------
+//
+// Wide bands (w, w48, nc >= 24) carry frame-staggered intra-frame combs (fk3d2: K=3, symbols 0/2/4, comb fa % 3)
+// estimated by the Slepian-mode separable 2-D LMMSE; narrow bands (n10, n4) carry one pilot per carrier per frame
+// (gold). The header closes with a pilot of its own (timing.hpp's hosts) and a header-copy frame opens and closes
+// on conj(pilot) (copy_open).
+inline constexpr int SC_COPY_DECIM = 2;  // CombStream decimation (2 is Nyquist-exact on w/w48)
+// Whether a burst of n_f data frames of `spec` carries scattered pilots (modem.sc_spec).
+bool sc_spec(const Spec& spec, int n_f);
+// Intra-frame comb spec (k2d3, fk2d3, fk3d2 on wide bands nc >= 24): carrier stride K, pilot symbols in a frame,
+// frame period in combs (modem._sc_intra_spec).
+struct ScIntra {
+    int K = 0;
+    std::array<int, 3> syms{};
+    int n_syms = 0;
+    int n_combs = 0;
+};
+std::optional<ScIntra> sc_intra_spec(int nc);
+int sc_period(int nc);
+// A frame's (6, nc) cells, flat (modem.sc_cells / sc_frame_cells): the pilots' (ascending), their carriers, the data
+// cells' in sending order, per carrier its pilot's cell (own empty for intra-frame comb layouts).
+struct ScCells {
+    std::vector<int> P, PK, Dc, own;
+};
+const ScCells& sc_cells(int nc);
+const ScCells& sc_frame_cells(int nc, int f = 0);
+bool sc_combs(int nc);  // the pilots are k3d2's three combs (modem._sc_combs)
+// The symbol opening and closing a scattered-pilot band's header-copy frame (modem.copy_open, copy_close).
+std::vector<cd> copy_open(const waveform::Band& b);
+// Per on-air frame (and the closing pilot) and carrier, the symbol its pilot is in (modem._sc_pil); empty off a
+// scattered-pilot band. For intra-frame comb layouts, sc_pil_intra returns both (sym, carrier) matrices.
+Mat<int> sc_pil(std::string_view band, int n_air, std::optional<int> kc);
+std::pair<Mat<int>, Mat<int>> sc_pil_intra(std::string_view band, int n_air, std::optional<int> kc);
+// n bytes of splitmix64, state its counter (modem._cal_payload): payloads both languages make the same, for
+// _sc_cal's calibration and arq/phy.peak_db's burst on a scattered-pilot band.
+std::vector<std::uint8_t> sc_payload(int n, std::uint64_t& state);
+// What a decision-directed pass needs of a scattered-pilot burst (receive()'s "sc"), in the pilots' units.
+struct ScInfo {
+    std::vector<int> norm;  // the data frames' on-air indices
+    Mat<cd> h;              // (n_f * 5, nc): the joint estimate at the data cells, sending order
+    Mat<double> mse;
+    Mat<cd> full, ls;       // the whole pilot symbols (_sc_full), the scattered pilots' LS (n_f, nc)
+    double n0_y = 0.0;
+    int n_air = 0;
+};
 
 struct Frames {
     Mat<cd> raw;  // (n_f * 6, nc): frame f, symbol s at row f * 6 + s
@@ -106,10 +168,14 @@ struct Frames {
     std::vector<std::int64_t> slips;  // (n_f + 1,): each frame's timing jump (modem._find_slip), samples
 };
 // steps_in / slips_in: replay a previous run's steps / slips (searched for
-// only when neither is given). Throws SyncError past the buffer.
+// only when neither is given). Throws SyncError past the buffer. pil (sc_pil):
+// scattered pilots, each carrier's own read for hp and the drift (no slip
+// search); close_at: a scattered-pilot band's copy frame (opens on copy_open).
 Frames demod_frames(std::span<const cd> z, std::int64_t p, int n_f, int shift, double phi_ref,
                     std::span<const double> steps_in = {}, std::string_view band = "w",
-                    std::span<const std::int64_t> slips_in = {});
+                    std::span<const std::int64_t> slips_in = {}, const Mat<int>* pil = nullptr,
+                    std::optional<int> close_at = {}, const Mat<int>* pil_k = nullptr, bool pilots_only = false,
+                    bool need_copy_close = false);
 
 struct HeaderRead {
     Header hdr;
@@ -159,7 +225,8 @@ struct Lock {
     double score = 0.0;
     std::string_view band;
     double cfo = 0.0;
-    std::optional<CopyRef> copy;  // set by find_copy
+    std::optional<CopyRef> copy;      // set by find_copy
+    std::optional<int> connect_hash;  // set for CONNECT_HEADER words (docs/pending-header.md)
 };
 Lock find_burst(std::span<const double> x, std::span<const std::string_view> bands = {},
                 const Accept* accept = nullptr, std::span<const BandStat> stats = {});
@@ -172,10 +239,62 @@ std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, 
                               const Mat<cd>* C = nullptr, std::optional<double> level = {}, double* peak = nullptr);
 // The same from C's pair products (modem.find_copy's D: StreamDetector::products_from rows, each `dcols` long, used
 // in place; empty: compute them, as C == nullptr).
-// `fold`: step 1's fold of D's whole frames, if kept running (FoldTrack, rolled to D's start).
+// `fold`: step 1's fold of D's whole frames, if kept running (FoldTrack; `fold_shift` is its column shift a % FRAME_SAMPLES).
 std::optional<Lock> find_copy(std::span<const double> x, std::string_view band, const Accept* accept,
                               std::span<const cd* const> D_rows, std::size_t dcols, std::optional<double> level,
-                              double* peak = nullptr, const Mat<cd>* fold = nullptr);
+                              double* peak = nullptr, const Mat<cd>* fold = nullptr, std::size_t fold_shift = 0);
+// modem.CombStream: find_copy's coherent comb outputs (scattered pilots) kept for a stream, each start's computed
+// once as audio is fed; per fed chunk each bin's noise level, the median of the last CHUNKS; pair products extended
+// as asked and kept KEEP_BEHIND past a trim.
+class CombStream {
+public:
+    static constexpr int CHUNKS = 8;
+    static constexpr std::int64_t KEEP_BEHIND = 4000;
+    explicit CombStream(std::string_view band);
+    void reset();
+    void restart_at(std::int64_t pos);
+    void skip_to(std::int64_t pos);  // native only, as StreamDetector::skip_to
+    // `full`: optional StreamDetector on the same band whose kept full-band correlation C_full lets us derive
+    // the last comb via C_{K-1} = sqrt(K) * C_full - sum_{c < K-1} C_c (saving 1/K of the comb IFFTs).
+    void feed(std::span<const cd> z, const waveform::StreamDetector* full = nullptr);
+    bool can_use_full() const { return can_use_full_; }
+    int decim() const { return decim_; }
+    std::int64_t tail_size() const { return static_cast<std::int64_t>(tail_.size()); }
+    void trim(std::int64_t start);
+    std::optional<double> level() const;
+    std::vector<double> row_levels() const;  // per CFO bin, level()'s before its min (find_copy's row_level)
+    struct Products {
+        std::int64_t start;
+        std::vector<const cd*> rows;
+        std::size_t cols;
+    };
+    Products products_from(std::int64_t start);  // pair products for stream starts from max(start, c0)
+    Products kept_products();                    // every pair product kept, from d0
+    std::int64_t fed = 0, c0 = 0, d0 = 0;
+    std::int64_t lag = 0;  // a start's output needs this and M samples after it
+
+private:
+    void extend();
+    std::string_view band_;
+    std::optional<ScIntra> intra_;
+    bool can_use_full_ = false;
+    std::vector<double> full_weights_;
+    int decim_ = 1;
+    std::vector<double> freqs_;
+    std::vector<int> js_;
+    std::vector<std::vector<cd>> filters_;
+    std::vector<cd> tail_;
+    std::vector<std::vector<cd>> C_, D_;
+    std::size_t c_off_ = 0, d_off_ = 0;
+    std::int64_t c_head_ = 0;  // stream index of C_[i][c_off_] (advances past c0 as extend() drains consumed cols)
+    std::vector<std::vector<double>> levels_;
+};
+// find_copy(comb=True) from a CombStream's pair products (x from their first start), its level and running fold.
+std::optional<Lock> find_copy_comb_stream(std::span<const double> x, std::string_view band, const Accept* accept,
+                                          std::span<const cd* const> D_rows, std::size_t dcols, double level,
+                                          double* peak = nullptr, const Mat<cd>* fold = nullptr,
+                                          std::size_t fold_shift = 0, int decim = 1,
+                                          std::span<const double> row_level = {});
 // modem.FoldTrack: the pilot fold kept running over a window of a stream's pair products that slides forward, per
 // CFO bin and absolute frame phase; entering products added and leaving ones subtracted in stream order, a frame
 // phase's run at a time, summed afresh every RENEW folds or when the window moves any other way.
@@ -187,12 +306,14 @@ public:
         lo_ = hi_ = 0;
         n_ = 0;
     }
-    // the window [lo, hi) of stream starts (D: pair products from stream start a, dcols of them, covering it)
+    // the window [lo, hi) of stream starts (D: pair products from stream start a, dcols of them, covering it;
+    // period: columns per frame, FRAME_SAMPLES / decim)
     const Mat<cd>& fold(std::span<const cd* const> D_rows, std::size_t dcols, std::int64_t a, std::int64_t lo,
-                        std::int64_t hi);
+                        std::int64_t hi, std::size_t period = config::FRAME_SAMPLES);
 
 private:
-    void acc(std::span<const cd* const> D_rows, std::int64_t a, std::int64_t u0, std::int64_t u1, bool add);
+    void acc(std::span<const cd* const> D_rows, std::int64_t a, std::int64_t u0, std::int64_t u1, bool add,
+             std::size_t period);
     Mat<cd> R_;
     bool have_ = false;
     std::int64_t lo_ = 0, hi_ = 0;
@@ -200,15 +321,21 @@ private:
 };
 // modem.presence_window / fold_presence / presence_verdict / pilot_presence / fold_verify / pilot_present:
 // Receiver.data2g_on_air's OFDM reading (Stage 1 running fold + Stage 2 known-pilot verification).
-std::pair<std::int64_t, int> presence_window(std::size_t dcols, std::int64_t window);
-std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m);
-bool presence_verdict(double peak, double contrast, int m);
+inline constexpr double PRESENCE_CONTRAST_N4_SCALE = 0.75;
+std::vector<double> copy_row_weights(std::span<const double> row_level, int n_combs);
+std::pair<std::int64_t, int> presence_window(std::size_t dcols, std::int64_t window, int decim = 1,
+                                             int pad_frames = COPY_PAIRS);
+std::pair<double, double> fold_presence(const Mat<cd>& fold, double level, int m,
+                                        std::span<const double> row_w = {}, bool demean = false);
+bool presence_verdict(double peak, double contrast, int m, std::string_view band = {});
 std::pair<double, double> pilot_presence(std::span<const cd* const> D_rows, std::size_t dcols, double level,
                                          std::int64_t window);
-bool fold_verify(std::span<const double> x, std::string_view band, const Mat<cd>& fold, int fold_phase0 = 0);
+bool fold_verify(std::span<const double> x, std::string_view band, const Mat<cd>& fold, std::int64_t fold_phase0 = 0,
+                 int decim = 1, std::span<const double> row_w = {});
 bool pilot_present(std::span<const cd* const> D_rows, std::size_t dcols, double level, std::int64_t window,
-                   std::span<const double> x = {}, std::string_view band = {});
-std::vector<double> cfo_aliases(cd d, double centre);
+                   std::span<const double> x = {}, std::string_view band = {}, int decim = 1,
+                   std::int64_t stream_lo = 0, std::span<const double> row_w = {});
+std::vector<double> cfo_aliases(cd d, double centre, int lag = config::FRAME_SAMPLES);
 HeaderRead copy_header(std::span<const cd> z, const Lock& lock);
 
 // equalizer::Estimate scaled to the data's channel (data_channel's dict).
@@ -255,6 +382,8 @@ struct Received {
     std::int64_t preamble_start = 0;
     double score = 0.0;
     int frames_in = -1;  // data frames received (receive's partial: fewer than the burst's); -1: all
+    std::shared_ptr<const ScInfo> sc;  // scattered pilots (sc_spec): raw's row 0 is then each frame's own pilots'
+                                       // LS times the pilot, rows 1..5 its data cells in sending order
     int n_frames() const { return n_cw * spec->frames_per_cw; }
     bool partial() const { return frames_in >= 0 && frames_in < n_frames(); }
 };
@@ -265,6 +394,14 @@ Received receive(std::span<const double> x, std::span<const std::string_view> ba
                  const Accept* accept = nullptr, std::optional<std::int64_t> head = {}, const Lock* copy = nullptr,
                  bool partial = false);
 double resolve_alias(double fine, double coarse);
+// modem.sc_refine: the decision-directed re-estimate of a scattered-pilot burst (r.sc): data cells z with inverse
+// variances w ((n_f * 5, nc) as est.h, the pilots' units) -> h, mse, the pilots' units.
+std::pair<Mat<cd>, Mat<double>> sc_refine(const Received& r, const Mat<cd>& z, const Mat<double>& w);
+// Empties the joint estimate's weights cache (modem._SC_WEIGHTS.clear()): benchmarks' cold start.
+void sc_clear_weights();
+// receive(known=...): a burst whose start, CFO, submode and length the receiver knows (data2g.bulk, _sc_cal): no
+// search, the header not read for its word. Throws SyncError past the buffer.
+Received receive_known(std::span<const double> x, std::int64_t start, double cfo, const Spec& spec, int n_cw);
 
 // var (rows, nc): n0_k (n0 if empty) per carrier + clip_ratio |h|^2.
 Mat<double> noise_var(const Mat<cd>& h, const DataEstimate& est);
@@ -313,7 +450,7 @@ std::vector<cd> equalized(const Received& r);
 // from the frame's start; cfo: the lock's. No residual CFO, timing tracking, delay window or
 // smoothing across frames, so rougher than equalized(receive()).
 inline constexpr int PREVIEW_SAMPLES = config::FRAME_SAMPLES + config::NSYM;
-std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f);
+std::vector<cd> preview_frame(std::span<const double> x, double cfo, const Spec& spec, int n_f, int air_frame = 0);
 
 struct Burst {
     const Spec* spec = nullptr;

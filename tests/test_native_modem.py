@@ -214,7 +214,23 @@ def test_windowed_data_channel_matches(native, py):
 
 @pytest.mark.parametrize("name,n_cw,snr,preset", RX_CASES)
 def test_receive_matches(native, py, name, n_cw, snr, preset):
-    y = _burst(name, n_cw, snr, preset, seed=n_cw + 3)
+    _receive_parity(native, py, _burst(name, n_cw, snr, preset, seed=n_cw + 3), name)
+
+
+@pytest.mark.hf_only("HF w48 carrier frequencies (825/1440/2200 Hz at FS=8000)")
+@pytest.mark.parametrize("tone_hz,preset", [(2200.0, None), (825.0, "mpp"), (1440.0, "mpp")])
+def test_receive_matches_with_a_tone(native, py, tone_hz, preset):
+    """A steady tone 25 dB over the floor in 50 Hz: the residual CFO's hot carriers, and with HF scattered pilots
+    the hot carriers' noise and pilot weights."""
+    from data2g.config import FS
+
+    y = _burst("w48-qpsk-r1/3", 3, 8.0, preset, seed=4)
+    sigma = np.sqrt(np.mean(y[3000:-3000] ** 2) / 10**0.8 / (2500 / (FS / 2)))  # the burst's noise, roughly
+    y = y + np.sqrt(2 * sigma**2 * 50.0 / (FS / 2) * 10**2.5) * np.cos(2 * np.pi * tone_hz * np.arange(len(y)) / FS)
+    _receive_parity(native, py, y, "w48-qpsk-r1/3")
+
+
+def _receive_parity(native, py, y, name):
     r = py.receive(y)
     same_received(native.modem.receive(y), r)
     # the streaming path: head-limited search
@@ -265,19 +281,28 @@ def test_search_parts_match(native, py):
     close(nhp, hp)
     replay = np.array([0, 1, 1, 0, -1, 0, 0, 2, 2, 2], float)
     close(native.modem.demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0], py._demod_frames(z, hd["p0"], 9, 0, 0.0, replay)[0])
-    # a slip found (the sliding DFT against the matrix) and replayed
-    zs = dsp.to_baseband(_burst("qpsk-r1/3", 2, 15.0, seed=3))
-    shd, _, zs = py._best_header(zs)
-    cut = shd["p0"] + 4 * config.FRAME_SAMPLES + 300  # after frame 4's pilot
+    # a slip found (the sliding DFT against the matrix) and replayed (whole pilot rows)
+    from data2g.waveform import ofdm
+    bw = ofdm.band("w")
+    rng_s = np.random.default_rng(3)
+    syms_s = np.tile(bw.pilot, (9 * config.SYMS_PER_FRAME + 1, 1))
+    for f_ in range(9):
+        syms_s[f_ * config.SYMS_PER_FRAME + 1:(f_ + 1) * config.SYMS_PER_FRAME] = (
+            rng_s.choice([-1, 1], (config.DATA_SYMS_PER_FRAME, bw.nc))
+            + 1j * rng_s.choice([-1, 1], (config.DATA_SYMS_PER_FRAME, bw.nc))) / np.sqrt(2)
+    xs = np.concatenate([np.zeros(3000), bw.modulate_symbols(syms_s), np.zeros(3000)])
+    zs = dsp.to_baseband(hfchannel.awgn(xs, 15.0, seed=3))
+    p0_s = 3000
+    cut = p0_s + 4 * config.FRAME_SAMPLES + 300  # after frame 4's pilot
     zs = np.concatenate([zs[:cut], np.zeros(85), zs[cut:]])
-    phi = py._bin_phase_step(shd["h_pre"])
-    raw, hp, steps, slips = py._demod_frames(zs, shd["p0"], 8, 0, phi)
-    nraw, nhp, nsteps, nslips = native.modem.demod_frames(zs, shd["p0"], 8, 0, phi)
+    phi = py._bin_phase_step(bw.demod_window(zs, p0_s + config.NCP, modem.DEMOD_BACKOFF) / bw.pilot)
+    raw, hp, steps, slips = py._demod_frames(zs, p0_s, 8, 0, phi)
+    nraw, nhp, nsteps, nslips = native.modem.demod_frames(zs, p0_s, 8, 0, phi)
     assert slips[5] == 85 and not np.delete(slips, 5).any()
     np.testing.assert_array_equal(nslips, slips)
     close(nraw, raw)
-    close(native.modem.demod_frames(zs, shd["p0"], 8, 0, phi, None, "w", slips)[0],
-          py._demod_frames(zs, shd["p0"], 8, 0, phi, None, "w", slips)[0])
+    close(native.modem.demod_frames(zs, p0_s, 8, 0, phi, None, "w", slips)[0],
+          py._demod_frames(zs, p0_s, 8, 0, phi, None, "w", slips)[0])
     est = py.data_channel(hp, (-3, 20), "w", 0.1, None, None, 8)
     nest = native.modem.data_channel(hp, (-3, 20), "w", 0.1, None, None, 8)
     for k in ("h", "mse", "n0", "gain", "clip_ratio"):
@@ -412,17 +437,73 @@ def test_presence_matches(native, py):
         ("n10", _burst("n10-qpsk-r1/2", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]),
     ]
     if "n4-qpsk-r1/3" in SUBMODES:
-        sigs.append(("n10", _burst("n4-qpsk-r1/3", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]))
+        sigs.append(("n4" if "n4" in config.SC_BANDS else "n10",
+                     _burst("n4-qpsk-r1/3", 8, snr=-3.0)[2 * config.FS:2 * config.FS + n]))
     for band, y in sigs:
-        C = sync.repeat_corrs(dsp.to_baseband(y), sync.unit_template(ofdm.band(band)), list(sync.cfo_grid()))
-        level = sync.noise_level(C)
-        D = sync.pair_products(C, config.FRAME_SAMPLES, modem.COPY_PAIRS)
-        assert native.modem.presence_window(D.shape[1], win) == py.presence_window(D.shape[1], win)
-        t0, m = py.presence_window(D.shape[1], win)
-        fold = py._pilot_fold(D, t0, m)
-        close(native.modem.fold_presence(fold, level, m), py.fold_presence(fold, level, m), CORR_TOL)
-        close(native.modem.pilot_presence(D, level, win), py.pilot_presence(D, level, win), CORR_TOL)
-        pk, ct = py.fold_presence(fold, level, m)
-        assert native.modem.presence_verdict(pk, ct, m) == py.presence_verdict(pk, ct, m)
-        assert native.modem.fold_verify(y[t0:], band, fold) == py.fold_verify(y[t0:], band, fold)
-        assert native.modem.pilot_present(D, level, win, y, band) == py.pilot_present(D, level, win, y, band)
+        if band in config.SC_BANDS:
+            c = modem.CombStream(band)
+            c.feed(dsp.to_baseband(y, 0))
+            a, D = c.products_from(0)
+            xs = y[a:]
+            pad_fr = (modem.COPY_PAIRS - 1) if c.intra is not None else modem.COPY_PAIRS
+            D = D[:, :max(0, (len(xs) - modem.M + 1 - c.lag - pad_fr * config.FRAME_SAMPLES) // c.decim)]
+            level, decim = c.level(), c.decim
+            row_w = modem._copy_row_weights(c.row_levels(), c.intra[2]) if c.intra is not None else None
+            assert native.modem.presence_window(D.shape[1], win, decim, pad_fr) == py.presence_window(
+                D.shape[1], win, decim, pad_fr)
+            t0_d, m = py.presence_window(D.shape[1], win, decim, pad_fr)
+            FR_d = config.FRAME_SAMPLES // decim
+            fold = D[:, t0_d:t0_d + m * FR_d].reshape(len(D), m, FR_d).sum(axis=1)
+            fold = fold - fold.mean(axis=1, keepdims=True)
+            close(native.modem.fold_presence(fold, level, m, row_w), py.fold_presence(fold, level, m, row_w), CORR_TOL)
+            pk, ct = py.fold_presence(fold, level, m, row_w)
+            assert native.modem.presence_verdict(pk, ct, m, band) == py.presence_verdict(pk, ct, m, band)
+            fold_abs = np.roll(fold, (a // decim + t0_d) % FR_d, axis=1)
+            assert native.modem.fold_verify(xs[t0_d * decim:], band, fold_abs, a + t0_d * decim, decim, row_w) == (
+                py.fold_verify(xs[t0_d * decim:], band, fold_abs, a + t0_d * decim, decim, row_w))
+            assert native.modem.pilot_present(D, level, win, xs, band, decim, a, row_w) == (
+                py.pilot_present(D, level, win, xs, band, decim, a, row_w))
+        else:
+            C = sync.repeat_corrs(dsp.to_baseband(y), sync.unit_template(ofdm.band(band)), list(sync.cfo_grid()))
+            level = sync.noise_level(C)
+            D = sync.pair_products(C, config.FRAME_SAMPLES, modem.COPY_PAIRS)
+            assert native.modem.presence_window(D.shape[1], win) == py.presence_window(D.shape[1], win)
+            t0, m = py.presence_window(D.shape[1], win)
+            fold = py._pilot_fold(D, t0, m)
+            close(native.modem.fold_presence(fold, level, m), py.fold_presence(fold, level, m), CORR_TOL)
+            close(native.modem.pilot_presence(D, level, win), py.pilot_presence(D, level, win), CORR_TOL)
+            pk, ct = py.fold_presence(fold, level, m)
+            assert native.modem.presence_verdict(pk, ct, m) == py.presence_verdict(pk, ct, m)
+            assert native.modem.fold_verify(y[t0:], band, fold) == py.fold_verify(y[t0:], band, fold)
+            assert native.modem.pilot_present(D, level, win, y, band) == py.pilot_present(D, level, win, y, band)
+
+
+def test_connect_header_parity(native, py):
+    """CONNECT header words (docs/pending-header.md): connect_hash, modulate,
+    find_burst and find_copy carry and recover the callee hash identically."""
+    for call in ("W1AW", " k2xyz-10 ", "n0call-15", "VE3ABC", "JA1XYZ-1"):
+        for bits in (3, 5, 6):
+            assert native.modem.connect_hash(call, bits) == config.connect_hash(call, bits)
+    rng = np.random.default_rng(17)
+    for (band, _idx), (mode, bits) in modem.CONNECT_HEADER.items():
+        spec = config.SUBMODES[mode]
+        h = config.connect_hash("K2XYZ-10", bits)
+        payload = [rng.bytes(codes.payload_bytes(spec))]
+        x_py = py.modulate(payload, spec, connect_hash=h)
+        x_nat = native.modem.modulate(payload, mode, [], modem.TX_PATH, h)
+        close(x_nat, x_py)
+        y = np.concatenate([np.zeros(2000), x_py, np.zeros(2000)])
+        l_py = py.find_burst(y)
+        l_nat = native.modem.find_burst(y)
+        assert l_py["spec"].name == l_nat["spec"] == mode
+        assert l_py["n_cw"] == l_nat["n_cw"] == 1
+        assert l_py["connect_hash"] == l_nat["connect_hash"] == h
+        if band in config.HEADER_COPY_BANDS:
+            # Wipe preamble and first header so find_copy recovers the connect word from the copy frame
+            cut = 2000 + config.LEADIN_SAMPLES + config.BANDS[band].preamble_samples + modem.header_samples(band)
+            y_cut = y.copy()
+            y_cut[:cut] = 0.0
+            c_py = py.find_copy(y_cut, band)
+            c_nat, _ = native.modem.find_copy(y_cut, band)
+            assert c_py is not None and c_nat is not None
+            assert c_py["connect_hash"] == c_nat["connect_hash"] == h

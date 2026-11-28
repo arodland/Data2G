@@ -38,7 +38,7 @@ from . import link as L
 from . import predictor as P
 from .session import LINK_LOST_S
 
-SIZE_S = (1.0, 3.0, 6.0, 12.0)  # size-hint airtime classes (s): 0 shortest
+SIZE_S = (1.0, 3.0, 6.0, 12.05)  # size-hint airtime classes (s): 0 shortest (+0.05 s for scattered-pilot 12.016 s)
 TURN_S = 1.3  # a turnaround's dead time (decode + PTT + audio), for goodput
 TIMEOUT_S = 1.0 + 1.0 + 1.5  # t_turn + reply start margin + a poll: what a lost turn costs before recovery
 # the predictor's training range for the previous burst's age (scripts/predictor_data.py).
@@ -99,7 +99,7 @@ LINK_HIST = 8  # the link history's window: peer bursts I expected (predictor.N_
 ENERGY_HIST = 4  # the energy inputs' window: the peer's last bursts (predictor.N_ENERGY)
 # per mode, its 10% codeword failure SNR on awgn, mpg, mpp, mpd (codes_data/mode_thresholds.json)
 _THRESHOLDS = json.load(open(data_path("mode_thresholds.json")))  # FM: its own, provisional (scripts/fm_threshold_table.py)
-MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items()}
+MODE_THRESHOLDS = {m: tuple(v) for m, v in _THRESHOLDS["modes"].items() if m in MODES}  # a mode not offered: no row
 MODE_CHANNELS = tuple(_THRESHOLDS["channels"])  # native: tables::MODE_CHANNELS
 # robust per cap. n10-ack-4f everywhere was tried (usable at -4 dB: MPP 95%
 # vs ack-4f's 79%): the loss study got worse in every cell (MPP 0 dB 248 ->
@@ -124,13 +124,6 @@ ROBUST_CONNECT = "n10-qpsk-r1/5" if PROFILE == "fm" else "fsk16r25-r1/2"  # sess
 # FM has no CPM modes: its robust mode stays ROBUST_CONNECT whatever the spread.
 ROBUST_FAST = ROBUST_CONNECT if PROFILE == "fm" else "fsk8r50-r1/3"
 ROBUST_FAST_SPREAD_HZ = 6.0
-ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST)))  # one on FM
-# Connect retries in ROBUST_CONNECT before the ones in ROBUST_FAST. Live sessions, 8 seeds a cell
-# (scripts/stream_session), every retry in ROBUST_CONNECT -> these four and then one in ROBUST_FAST:
-# 30 Hz / 7 ms at 0 dB 2 -> 8 connected and done; AWGN -14, -15 and -16 dB the same events in all 24.
-# Alternating from the first retry connected 30 Hz 36 s sooner, but at -16 dB 2 of 8 against 6
-# (two ROBUST_CONNECT tries to combine, not four).
-ROBUST_CONNECT_TRIES = 4
 # A session whose connect was made by a retry in the robust mode starts at the
 # robust floor (session._robust_start) only if the caller's reading of the
 # CONNECT_ACK says the path is the reason (weak_path()): snr_est under
@@ -160,6 +153,15 @@ ROBUST_START_SPREAD_HZ = 6.0
 # 7 ms / 1 Hz -8 dB cells and two carrier cells ran the same events; 7 ms /
 # 10 Hz +1.5 s, 30 Hz -5 s by mean. Not tuned: 2 dB is the one value tried.
 ROBUST_START_DATA_MARGIN_DB = 2.0
+# Connect retries: three in ROBUST_CONNECT (fsk16r25-r1/2), then two in ROBUST_WIDE (fsk8w50-r1/2)
+# ("RRRWW", scripts/wide_fsk_study.py). fsk8w50-r1/2 decodes where fsk16r25's 25 Hz bins stop
+# (hilat-d -16 dB: 0.82 vs 0.20; 60 Hz / 7 ms -12 dB: 0.97 vs 0.00) while keeping 3 fsk16r25 retries
+# for in-grid carrier resistance (awgn -16 carrier: 0.68). On FM all retries stay ROBUST_CONNECT.
+ROBUST_WIDE = ROBUST_CONNECT if PROFILE == "fm" else "fsk8w50-r1/2"
+ROBUST_CONNECT_TRIES = 3
+ROBUST_CONNECTS = (ROBUST_CONNECT, ROBUST_CONNECT, ROBUST_CONNECT, ROBUST_WIDE, ROBUST_WIDE)
+# ROBUST_CONNECT and ROBUST_FAST stay among ROBUST_MODES for in-session robust polls; ROBUST_WIDE for retries.
+ROBUST_MODES = tuple(dict.fromkeys((ROBUST_CONNECT, ROBUST_FAST, ROBUST_WIDE)))  # one on FM
 # Quantization step (dB) for predictor.harq_boost_db in recommend(): exact in
 # binary float and <= 32 levels across 0..HARQ_MAX_BOOST_DB, bounding extra
 # outcome-model evaluations inside turnaround on a full 63-codeword window.
@@ -375,10 +377,14 @@ class GearShifter(L.Policy):
         ROBUST_CONNECT's 25 Hz tones decode nothing, and nothing is measured
         yet to say so. `last`, the host's last try (RETRIES under the
         default): ROBUST_FAST too, once one ROBUST_CONNECT retry went ahead
-        of it (RETRIES 1 keeps its one retry in ROBUST_CONNECT)."""
+        of it (RETRIES 1 keeps its one retry in ROBUST_CONNECT). A study's
+        DATA2G_CONNECT_SEQ the same way: its letters in turn, the last one past
+        its end and on the host's last try."""
         if tries == 0:
             return CONNECT[cap]
-        return ROBUST_FAST if tries > ROBUST_CONNECT_TRIES or (last and tries >= 2) else ROBUST_CONNECT
+        if last and tries >= 2:
+            return ROBUST_CONNECTS[-1]
+        return ROBUST_CONNECTS[min(tries, len(ROBUST_CONNECTS)) - 1]
 
     def weak_path(self) -> bool:
         """The peer's last burst (the caller's CONNECT_ACK, in a retry's

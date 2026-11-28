@@ -28,10 +28,53 @@ std::span<const std::pair<std::string_view, int>> bands_code() {
     return HF_BANDS_CODE;
 }
 
-int band_code(std::string_view sync_band) {
-    for (const auto& [b, c] : bands_code())
-        if (b == sync_band) return c;
-    throw std::out_of_range("no band code for " + std::string(sync_band));
+constexpr std::array<std::string_view, 53> HF_RECOMMEND = {
+    // 0..5: 500 Hz CPM floor (all caps; r1/3<->r1/2 = +-1, cross-grid same rate = +-2)
+    "fsk8w50-r1/3", "fsk8w50-r1/2",
+    "fsk16r25-r1/3", "fsk16r25-r1/2",
+    "fsk8r50-r1/3", "fsk8r50-r1/2",
+    // 6..8: 2300 Hz CPM (fsk8r50-r1/2 <-> fsk32r62-r1/2 = +-2; r1/2 <-> r2/3 = +-1)
+    "fsk32r62-r1/3", "fsk32r62-r1/2", "fsk32r62-r2/3",
+    // 9..19: w + low w48 interleaved by threshold (fsk32r62-r1/2 <-> qpsk-r1/5 = +-2)
+    "qpsk-r1/5", "qpsk-r1/3", "w48-qpsk-r1/5", "qpsk-r1/2", "w48-qpsk-r1/3",
+    "16qam-r1/3", "w48-qpsk-r1/2", "qpsk-r3/4", "w48-16qam-r1/3", "16qam-r1/2", "w48-qpsk-r2/3",
+    // 20..29: high w48
+    "w48-qpsk-r3/4", "w48-16qam-r1/2", "w48-16qam-r2/3", "w48-64l-r1/2",
+    "w48-16qam-r3/4", "w48-64l-r7/12", "w48-16qam-r5/6", "w48-64l-r2/3",
+    "w48-64l-r3/4", "w48-256l-r5/8",
+    // 30..39: n10 (500 Hz OFDM, contiguous)
+    "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n10-16qam-r1/3",
+    "n10-qpsk-r3/4", "n10-16qam-r1/2", "n10-16qam-r2/3", "n10-16qam-r3/4",
+    "n10-64l-r3/4", "n10-256l-r3/4",
+    // 40..44: n4 (200 Hz OFDM, contiguous)
+    "n4-qpsk-r1/5", "n4-qpsk-r1/3", "n4-qpsk-r1/2", "n4-qpsk-r2/3", "n4-16qam-r1/3",
+    // 45..52: polar & ACK-only
+    "polar-k96-f8", "polar-k96-f4", "polar-k192-f8",
+    "ack-4f", "ack-1f", "n10-ack-4f", "n4-ack-8f", "n4-ack-2f",
+};
+
+constexpr std::array<std::string_view, 48> FM_RECOMMEND = {
+    // 0..7: n10 data
+    "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n10-16qam-r1/3",
+    "n10-qpsk-r3/4", "n10-16qam-r1/2", "n10-16qam-r2/3", "n10-16qam-r3/4",
+    // 8..13: w data
+    "qpsk-r1/5", "qpsk-r1/3", "qpsk-r1/2", "16qam-r1/3", "qpsk-r3/4", "16qam-r1/2",
+    // 14..27: f55 data
+    "f55-qpsk-r21", "f55-qpsk-r40", "f55-qpsk-r60", "f55-16qam-r47",
+    "f55-64l-r50", "f55-64l-r67", "f55-64l-r75", "f55-64l-r80", "f55-64l-r83",
+    "f55-256l-r67", "f55-256l-r72", "f55-256l-r80", "f55-256l-r83", "f55-256l-r88",
+    // 28..41: f108 data
+    "f108-qpsk-r21", "f108-qpsk-r41", "f108-qpsk-r60", "f108-16qam-r41",
+    "f108-64l-r40", "f108-64l-r50", "f108-64l-r59", "f108-64l-r67", "f108-64l-r75", "f108-64l-r80",
+    "f108-256l-r67", "f108-256l-r75", "f108-256l-r80", "f108-256l-r87",
+    // 42..47: polar & ACK-only
+    "polar-k96-f8", "polar-k96-f4", "polar-k192-f8",
+    "ack-4f", "ack-1f", "n10-ack-4f",
+};
+
+std::span<const std::string_view> recommend_table() {
+    if constexpr (FM) return FM_RECOMMEND;
+    return HF_RECOMMEND;
 }
 
 }  // namespace
@@ -44,7 +87,7 @@ std::span<const Mode> modes() {
         for (const auto& s : config::SUBMODES)
             if (FM || std::any_of(codes.begin(), codes.end(), [&](const auto& b) { return b.first == s.sync_band; }))
                 v.push_back({s.name, s.band, &s, nullptr});
-        for (const auto& s : tables::CPM_SPECS) v.push_back({s.name, s.grid, nullptr, &s});
+        for (const auto* s : cpm::specs()) v.push_back({s->name, s->grid, nullptr, s});
         return v;
     }();
     return all;
@@ -129,42 +172,18 @@ std::vector<const Mode*> allowed(int cap) {
     return out;
 }
 
-// CPM_SPECS fits under N10_HIGH: modes.py asserts it, and the tables are generated from it
-
 int encode(std::string_view submode) {
-    const Mode& m = mode_at(submode);
-    if (FM) {  // every code a band, every index under 16 (selectable)
-        if (!selectable(m)) throw std::out_of_range(std::string(submode) + ": no recommendation code on FM");
-        return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
-    }
-    if (m.is_cpm()) return CPM_CODE << 4 | static_cast<int>(m.cpm - tables::CPM_SPECS.data());
-    if (m.ofdm->sync_band == "n10" && m.ofdm->index >= 16) {
-        if (m.ofdm->index >= 16 + 16 - N10_HIGH) throw std::out_of_range(std::string(submode) + ": no recommendation code");
-        return CPM_CODE << 4 | (N10_HIGH + m.ofdm->index - 16);
-    }
-    return band_code(m.ofdm->sync_band) << 4 | m.ofdm->index;
+    (void)mode_at(submode);
+    const auto table = recommend_table();
+    for (std::size_t i = 0; i < table.size(); ++i)
+        if (table[i] == submode) return static_cast<int>(i);
+    throw std::out_of_range(std::string(submode) + (FM ? ": no recommendation code on FM" : ": no recommendation code on HF"));
 }
 
 const Mode* decode(int rec) {
-    if (!FM && rec >> 4 == CPM_CODE) {
-        const auto i = static_cast<std::size_t>(rec & 15);
-        if (i >= static_cast<std::size_t>(N10_HIGH)) {
-            for (const auto& s : config::SUBMODES)
-                if (s.sync_band == "n10" && s.index == 16 + static_cast<int>(i) - N10_HIGH) return mode(s.name);
-            return nullptr;
-        }
-        return i < tables::CPM_SPECS.size() ? mode(tables::CPM_SPECS[i].name) : nullptr;
-    }
-    for (const auto& [band, code] : bands_code())
-        if (code == rec >> 4) {
-            for (const auto& s : config::SUBMODES)
-                if (s.sync_band == band && s.index == (rec & 15)) {
-                    const Mode* m = mode(s.name);
-                    return m && selectable(*m) ? m : nullptr;
-                }
-            return nullptr;
-        }
-    return nullptr;
+    const auto table = recommend_table();
+    if (rec < 0 || static_cast<std::size_t>(rec) >= table.size()) return nullptr;
+    return mode(table[static_cast<std::size_t>(rec)]);
 }
 
 }  // namespace data2g::arq

@@ -153,6 +153,11 @@ void bind_arq(py::module_& m) {
     }, py::arg("measured"), py::arg("band"), py::arg("gap"), py::arg("seconds"), py::arg("prev") = py::none(),
        py::arg("bands") = py::none(), py::arg("energy") = false);
     a.def("peak_db", [](const std::string& m, int cap) { return arq::peak_db(m, cap); }, py::arg("mode"), py::arg("cap") = 0);
+    a.def("mode_thresholds", [] {  // policy.MODE_THRESHOLDS: the table's rows
+        py::dict d;
+        for (const auto& t : tables::MODE_THRESHOLDS) d[py::str(std::string(t.name))] = py::make_tuple(t.db[0], t.db[1], t.db[2], t.db[3]);
+        return d;
+    });
     a.def("outcome_logits", [](const In<double>& x, int model) {
         return np(arq::outcome_logits({x.data(), static_cast<std::size_t>(x.size())}, model));
     }, py::arg("x"), py::arg("model") = 0);

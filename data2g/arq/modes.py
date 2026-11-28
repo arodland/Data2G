@@ -74,38 +74,72 @@ def allowed(cap: int) -> list:
 
 # --- the recommendation code ---------------------------------------------------------
 
-CPM_CODE = 3  # the recommendation's band code for CPM modes (index: data2g.cpm.SPECS' order)
-# ... which leaves its indices 8-15 to n10's past 15 (16-23; CW_BITS gave n10
-# 32): the recommendation is 6 bits, band (2) | index (4), every band code taken
-N10_HIGH = 8
-assert len(cpm.SPECS) <= N10_HIGH
-BY_CODE = {code: band for band, code in BANDS_CODE.items()}
+REC_EXT = 63  # sentinel in Core.recommend: read extended mode code from T_REC_EXT TLV
+
+# Flat 0..62 recommendation table (docs/arq.md §4). Ordered on HF to maximize
+# nods' +-2 step across the 500 Hz CPM floor, the wide CPM / OFDM crossover, and
+# each band's data ladder, with polar and ACK-only modes at the top.
+HF_RECOMMEND = (
+    # 0..5: 500 Hz CPM floor (all caps; r1/3<->r1/2 = +-1, cross-grid same rate = +-2)
+    "fsk8w50-r1/3", "fsk8w50-r1/2",
+    "fsk16r25-r1/3", "fsk16r25-r1/2",
+    "fsk8r50-r1/3", "fsk8r50-r1/2",
+    # 6..8: 2300 Hz CPM (fsk8r50-r1/2 <-> fsk32r62-r1/2 = +-2; r1/2 <-> r2/3 = +-1)
+    "fsk32r62-r1/3", "fsk32r62-r1/2", "fsk32r62-r2/3",
+    # 9..19: w + low w48 interleaved by threshold (fsk32r62-r1/2 <-> qpsk-r1/5 = +-2;
+    #        adjacent cap-1 (w) and cap-2 (w48) rungs are <= 2 steps apart)
+    "qpsk-r1/5", "qpsk-r1/3", "w48-qpsk-r1/5", "qpsk-r1/2", "w48-qpsk-r1/3",
+    "16qam-r1/3", "w48-qpsk-r1/2", "qpsk-r3/4", "w48-16qam-r1/3", "16qam-r1/2", "w48-qpsk-r2/3",
+    # 20..29: high w48
+    "w48-qpsk-r3/4", "w48-16qam-r1/2", "w48-16qam-r2/3", "w48-64l-r1/2",
+    "w48-16qam-r3/4", "w48-64l-r7/12", "w48-16qam-r5/6", "w48-64l-r2/3",
+    "w48-64l-r3/4", "w48-256l-r5/8",
+    # 30..39: n10 (500 Hz OFDM, contiguous)
+    "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n10-16qam-r1/3",
+    "n10-qpsk-r3/4", "n10-16qam-r1/2", "n10-16qam-r2/3", "n10-16qam-r3/4",
+    "n10-64l-r3/4", "n10-256l-r3/4",
+    # 40..44: n4 (200 Hz OFDM, contiguous)
+    "n4-qpsk-r1/5", "n4-qpsk-r1/3", "n4-qpsk-r1/2", "n4-qpsk-r2/3", "n4-16qam-r1/3",
+    # 45..52: polar & ACK-only (out of every data ladder)
+    "polar-k96-f8", "polar-k96-f4", "polar-k192-f8",
+    "ack-4f", "ack-1f", "n10-ack-4f", "n4-ack-8f", "n4-ack-2f",
+)
+
+FM_RECOMMEND = (
+    # 0..7: n10 data
+    "n10-qpsk-r1/5", "n10-qpsk-r1/3", "n10-qpsk-r1/2", "n10-16qam-r1/3",
+    "n10-qpsk-r3/4", "n10-16qam-r1/2", "n10-16qam-r2/3", "n10-16qam-r3/4",
+    # 8..13: w data
+    "qpsk-r1/5", "qpsk-r1/3", "qpsk-r1/2", "16qam-r1/3", "qpsk-r3/4", "16qam-r1/2",
+    # 14..27: f55 data
+    "f55-qpsk-r21", "f55-qpsk-r40", "f55-qpsk-r60", "f55-16qam-r47",
+    "f55-64l-r50", "f55-64l-r67", "f55-64l-r75", "f55-64l-r80", "f55-64l-r83",
+    "f55-256l-r67", "f55-256l-r72", "f55-256l-r80", "f55-256l-r83", "f55-256l-r88",
+    # 28..41: f108 data
+    "f108-qpsk-r21", "f108-qpsk-r41", "f108-qpsk-r60", "f108-16qam-r41",
+    "f108-64l-r40", "f108-64l-r50", "f108-64l-r59", "f108-64l-r67", "f108-64l-r75", "f108-64l-r80",
+    "f108-256l-r67", "f108-256l-r75", "f108-256l-r80", "f108-256l-r87",
+    # 42..47: polar & ACK-only
+    "polar-k96-f8", "polar-k96-f4", "polar-k192-f8",
+    "ack-4f", "ack-1f", "n10-ack-4f",
+)
+
+RECOMMEND_TABLE = FM_RECOMMEND if FM else HF_RECOMMEND
+_REC_BY_NAME = {name: i for i, name in enumerate(RECOMMEND_TABLE)}
+assert len(RECOMMEND_TABLE) < REC_EXT and len(_REC_BY_NAME) == len(RECOMMEND_TABLE)
+assert set(RECOMMEND_TABLE) == SELECTABLE, set(RECOMMEND_TABLE) ^ SELECTABLE
 
 
 def encode(submode: str) -> int:
-    s = MODES[submode]
-    if FM:  # every code a band, every index under 16 (SELECTABLE)
-        if submode not in SELECTABLE:
-            raise ValueError(f"{submode}: no recommendation code on FM")
-        return BANDS_CODE[s.sync_band] << 4 | s.index
-    if is_cpm(s):
-        return CPM_CODE << 4 | list(cpm.SPECS).index(submode)
-    if s.sync_band == "n10" and s.index >= 16:
-        assert s.index < 16 + 16 - N10_HIGH, f"{submode}: no recommendation code"
-        return CPM_CODE << 4 | (N10_HIGH + s.index - 16)
-    return BANDS_CODE[s.sync_band] << 4 | s.index
+    code = _REC_BY_NAME.get(submode)
+    if code is None:
+        if submode not in MODES:
+            raise KeyError(submode)
+        raise ValueError(f"{submode}: no recommendation code on {'FM' if FM else 'HF'}")
+    return code
 
 
 def decode(rec: int) -> str | None:
-    if FM:
-        s = modem.BY_INDEX.get((BY_CODE[rec >> 4], rec & 15))
-        return s.name if s and s.name in SELECTABLE else None
-    if rec >> 4 == CPM_CODE:
-        i, names = rec & 15, list(cpm.SPECS)
-        if i >= N10_HIGH:
-            s = modem.BY_INDEX.get(("n10", 16 + i - N10_HIGH))
-            return s.name if s else None
-        return names[i] if i < len(names) else None
-    band = BY_CODE.get(rec >> 4)
-    s = modem.BY_INDEX.get((band, rec & 15)) if band else None
-    return s.name if s else None
+    if 0 <= rec < len(RECOMMEND_TABLE):
+        return RECOMMEND_TABLE[rec]
+    return None

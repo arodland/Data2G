@@ -10,6 +10,9 @@
 #include "check.hpp"
 #include "codes/codes.hpp"
 #include "modem/modem.hpp"
+#include "waveform/dsp.hpp"
+#include "waveform/ofdm.hpp"
+#include "waveform/sync.hpp"
 
 using namespace data2g;
 
@@ -41,13 +44,13 @@ int main() {
     check::Watchdog watchdog(300, "test_modem");
 
     check::current_step = "header";
-    // PROTOCOL_VERSION 15's seed (Python's modem.crc6 and header_bits)
+    // PROTOCOL_VERSION 16's seed (Python's modem.crc6 and header_bits)
     if (check::hf_only("crc6 goldens seeded with HF's version")) {
-        check::equal(modem::crc6(0), 28, "crc6(0)");
-        check::equal(modem::crc6(100), 54, "crc6(100)");
-        check::equal(modem::crc6(1023), 45, "crc6(1023)");
+        check::equal(modem::crc6(0), 20, "crc6(0)");
+        check::equal(modem::crc6(100), 62, "crc6(100)");
+        check::equal(modem::crc6(1023), 37, "crc6(1023)");
     }
-    const std::vector<std::uint8_t> want{1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1};
+    const std::vector<std::uint8_t> want{0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0};
     const auto hb = modem::header_bits(7, 3, "w");
     if (check::hf_only("header_bits golden: its CRC-6 is seeded with HF's version"))
         check::is_true(std::vector<std::uint8_t>(hb.begin(), hb.begin() + 16) == want, "header_bits(7, 3) first 16");
@@ -151,6 +154,42 @@ int main() {
             }
         }
         check::equal(threw, 0, "preview_frame never throws on a whole frame (" + std::to_string(n) + " tried)");
+    }
+
+    check::current_step = "comb full reuse and fold_presence demean";
+    if (check::hf_only("n10 scattered-pilot CombStream is HF-only")) {
+        std::mt19937 rng(23);
+        std::normal_distribution<double> g;
+        std::vector<double> x(3 * config::FS);
+        for (auto& v : x) v = g(rng);
+        const auto z = waveform::to_baseband(x, 0);
+        waveform::StreamDetector det(waveform::band("n10"));
+        det.feed(z);
+        modem::CombStream a("n10"), b("n10");
+        check::is_true(a.can_use_full(), "n10 CombStream derives last comb from full StreamDetector");
+        a.feed(z, &det);
+        b.feed(z, nullptr);
+        const auto pa = a.products_from(0), pb = b.products_from(0);
+        check::equal(pa.start, pb.start, "n10 comb full start");
+        check::equal(pa.cols, pb.cols, "n10 comb full cols");
+        double max_diff = 0.0;
+        for (std::size_t r = 0; r < pa.rows.size(); ++r)
+            for (std::size_t c = 0; c < pa.cols; ++c) max_diff = std::max(max_diff, std::abs(pa.rows[r][c] - pb.rows[r][c]));
+        check::is_true(max_diff < 1e-11, "n10 comb full matches standalone");
+        // fold_presence(..., demean=true) matches explicit row-mean subtraction
+        Mat<std::complex<double>> raw(12, 64), dm(12, 64);
+        for (std::size_t r = 0; r < raw.rows; ++r) {
+            std::complex<double> mu{0, 0};
+            for (std::size_t c = 0; c < raw.cols; ++c) {
+                raw[r][c] = {g(rng) + 2.5, g(rng) - 1.3};
+                mu += raw[r][c];
+            }
+            mu /= static_cast<double>(raw.cols);
+            for (std::size_t c = 0; c < raw.cols; ++c) dm[r][c] = raw[r][c] - mu;
+        }
+        const auto [pk1, ct1] = modem::fold_presence(raw, 1.5, 4, {}, true);
+        const auto [pk2, ct2] = modem::fold_presence(dm, 1.5, 4, {}, false);
+        check::is_true(std::abs(pk1 - pk2) < 1e-12 && std::abs(ct1 - ct2) < 1e-12, "fold_presence demean matches");
     }
 
     return check::report("test_modem");

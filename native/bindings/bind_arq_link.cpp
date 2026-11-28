@@ -286,8 +286,8 @@ public:
 protected:
     std::shared_ptr<Station> make_station(int direction, bool master_, int key) override {
         auto st = std::make_shared<PyStation>(direction, policy, master_, key, std::nullopt, cap, chat);
-        st->nod = true;  // as Session::make_station
-        st->keep = true;
+        st->nod = nods;  // as Session::make_station
+        st->nod_peer = (peer_caps & CAP_NODS) != 0;
         return st;
     }
 };
@@ -448,8 +448,8 @@ void bind_arq_link(py::module_& m) {
     a.def("inflate", [](const py::bytes& hist, const py::bytes& payload) { return pyb(inflate(bytes_of(hist), bytes_of(payload))); });
     a.def("pack_call", [](const std::string& c) { return pyb(pack_call(c)); });
     a.def("unpack_call", [](const py::bytes& b) { return unpack_call(bytes_of(b)); });
-    a.def("pack_connect", [](const py::bytes& b) { return pyb(pack_connect(bytes_of(b))); });
-    a.def("unpack_connect", [](const py::bytes& b) { return pyb(unpack_connect(bytes_of(b))); });
+    a.def("pack_call_b40", &pack_call_b40);
+    a.def("unpack_call_b40", &unpack_call_b40);
     a.attr("COMPACT_BYTES") = COMPACT_BYTES;
     a.def("to_records", [](const py::bytes& b) { return pyb(to_records(bytes_of(b))); });
     py::class_<RecordReader>(a, "RecordReader")
@@ -532,27 +532,21 @@ void bind_arq_link(py::module_& m) {
 
     py::class_<Station, std::shared_ptr<Station>>(a, "Station", py::dynamic_attr())
         .def(py::init([](int direction, py::object policy, bool master, int key, std::optional<int> max_misses, int cap, bool chat,
-                         bool nod, bool keep) {
+                         bool nod, bool nod_peer) {
                  auto s = std::make_shared<PyStation>(direction, policy_of(std::move(policy)), master, key, max_misses, cap, chat);
                  s->nod = nod;
-                 s->keep = keep;
+                 s->nod_peer = nod_peer;
                  return std::shared_ptr<Station>(s);
              }),
              py::arg("direction"), py::arg("policy"), py::arg("master") = false, py::arg("key") = 0,
              py::arg("max_misses") = LINK_LOST_MISSES, py::arg("cap") = 2, py::arg("chat") = false, py::arg("nod") = false,
-             py::arg("keep") = false)
+             py::arg("nod_peer") = false)
         .def_readwrite("nod", &Station::nod)
-        .def_readwrite("keep", &Station::keep)
-        .def_readwrite("keep_peer", &Station::keep_peer)
-        .def_property_readonly("_keep_told", [](const Station& s) { return s.keep_told_.done; })
-        .def_property_readonly("_keeping", &Station::keeping)
-        .def_readonly("_peer_omits", &Station::peer_omits_)
         .def("_said", [](const Station& s, std::int64_t bn) -> py::object {
             const int v = s.said(bn);
             return v == REPLY_NONE ? py::object(py::none()) : py::object(py::int_(v));
         })
         .def_readwrite("nod_peer", &Station::nod_peer)
-        .def_property_readonly("_nods_told", [](const Station& s) { return s.nods_told_.done; })
         .def("nod_family", [](const Station& s) -> py::object {
             const auto k = s.nod_family();
             if (!k) return py::none();
@@ -640,7 +634,8 @@ void bind_arq_link(py::module_& m) {
 
     // --- session ---
     a.def("session_key", &session_key);
-    a.def("_frame_desc", [](const py::bytes& b) { return frame_desc(bytes_of(b)); });
+    a.def("_frame_desc", [](const py::bytes& b, std::optional<int> sub) { return frame_desc(bytes_of(b), sub.value_or(0)); },
+          py::arg("body"), py::arg("sub") = py::none());
 
     // The session's Python view keeps one wrapper per station in its
     // __dict__, so attributes set on it (a test's build override) last.
@@ -695,6 +690,12 @@ void bind_arq_link(py::module_& m) {
         })
         .def_readonly("close_reason", &Session::close_reason)
         .def_readwrite("chat", &Session::chat)  // Python's attribute: set_chat() is the one that reaches the station
+        .def_readwrite("nods", &Session::nods)
+        .def_readwrite("caps", &Session::caps)
+        .def_readwrite("req", &Session::req)
+        .def_readwrite("peer_caps", &Session::peer_caps)
+        .def_readwrite("peer_req", &Session::peer_req)
+        .def("local_caps", &Session::local_caps)
         .def_property_readonly("aliases", [](const Session& s) { return py::tuple(py::cast(s.aliases)); })
         .def_readwrite("stats_interval_s", &Session::stats_interval_s)
         .def_readwrite("accept_connect", &Session::accept_connect)

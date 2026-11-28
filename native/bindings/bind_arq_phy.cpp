@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "arq_convert.hpp"
+#include "modem_dicts.hpp"
 #include "arq/ping.hpp"
 #include "arq/probe.hpp"
 
@@ -46,7 +47,18 @@ Heard heard_of(const py::dict& r) {
         c->E = mat(r["E"].cast<In<double>>());
         c->n_cw = static_cast<int>(c->soft.size());
         c->n_ctl_slots = 1 + c->dup;
-        if (r.contains("Z")) c->Z = mat(r["Z"].cast<In<cd>>());  // coherent DD (cpm.receive's bins)
+        if (r.contains("Z")) {  // coherent DD (cpm.receive's bins; a wide grid's (n, L, m): its sub-window rows)
+            auto z = r["Z"].cast<In<cd>>();
+            if (z.ndim() == 3) z = z.reshape({z.shape(0) * z.shape(1), z.shape(2)});
+            c->Z = mat(z);
+        }
+        if (r.contains("connect_hash") && !r["connect_hash"].is_none())
+            c->connect_hash = r["connect_hash"].cast<int>();
+        if (r.contains("finger_dt")) {
+            c->finger_dt = r["finger_dt"].cast<int>();
+            if (r.contains("Z_early")) c->Z_early = mat(r["Z_early"].cast<In<cd>>());
+            if (r.contains("Z_late")) c->Z_late = mat(r["Z_late"].cast<In<cd>>());
+        }
         h.cpm = std::move(c);
         return h;
     }
@@ -76,6 +88,7 @@ Heard heard_of(const py::dict& r) {
     const auto seen = (r.contains("seen_support") ? r["seen_support"] : r["support"]).cast<py::sequence>();
     o->seen_support = {seen[0].cast<int>(), seen[1].cast<int>()};
     o->frames_in = r.contains("frames_in") ? r["frames_in"].cast<int>() : o->n_cw * o->spec->frames_per_cw;
+    o->sc = modem_sc_of(r);
     h.ofdm = std::move(o);
     return h;
 }

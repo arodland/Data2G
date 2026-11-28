@@ -3,8 +3,8 @@ themselves (ldpc.py, polar.py) know nothing of submodes: this module keys
 them by spec (CodeSpec) and frames what they carry.
 
 TX: payload -> info_bits (payload, its CRC XORed with the ARQ's mask, zero
-fill, PN9-scrambled by burst position) -> encode_info (LDPC, or polar with
-the payload's bits reversed: polar_order; then the BICM interleaver) ->
+fill, PN9-scrambled by burst position) -> encode_info (LDPC, or polar ordered
+by GA synthetic-channel reliability: polar_order; then the BICM interleaver) ->
 spread (burst symbol order). RX undoes it:
 despread -> a decode -> descramble and check the CRC.
 
@@ -139,7 +139,7 @@ def gf_code(spec: CodeSpec) -> gfldpc.GFCode:
     """GF(M) specs: the mother code (codes_data/gf_codes.npz), its
     rate-compatible extension included; the codeword is its first n_sym
     symbols."""
-    return gfldpc.load(spec.name)
+    return gfldpc.load(getattr(spec, "gf", "") or spec.name)  # a toolbox spec: another's code (cpm.CpmSpec.gf)
 
 
 def n_sym(spec: CodeSpec) -> int:
@@ -187,13 +187,28 @@ def frozen(spec: CodeSpec) -> dict | None:
 @lru_cache(maxsize=None)
 def polar_order(spec: CodeSpec) -> np.ndarray:
     """(k,) the order info bits enter a polar code (its info set, increasing
-    index): the payload's bits reversed, then the CRC and fill. A control's
-    trailing zeros (frames.Control.pack) then sit on the least reliable
-    positions, where knowing them buys most (decode_raw_pinned): CPM control
-    with 12 B of content, 10% failure about -4.3 dB pinned against -3.0 with
-    the payload in order (-2.8 plain). Its own inverse."""
+    index): ranked by GA synthetic-channel reliability so CRC bits take the
+    most reliable channels, payload bytes 0..pb-1 descend in reliability,
+    and trailing padding/fill sits on the least reliable channels. Freezing
+    trailing zeros at any byte cut K then yields the exact GA-optimal polar
+    code of length 8*K + crc_bits."""
+    pc = polar_code(spec)
+    mean = np.full(pc.n, 4 * 10 ** (POLAR_DESIGN_SNR_DB / 10))
+    mean[pc.punctured] = 0.0
+    rel = polar.ga_reliability(mean)[pc.info_pos]
+    by_rel_desc = np.argsort(-rel, kind="stable")
     nb = 8 * payload_bytes(spec)
-    return np.concatenate([np.arange(nb)[::-1], np.arange(nb, spec.k)])
+    nc = crc_bits(spec)
+    prio = np.concatenate([np.arange(nb, nb + nc), np.arange(nb), np.arange(nb + nc, spec.k)])
+    out = np.empty(spec.k, dtype=np.int64)
+    out[by_rel_desc] = prio
+    return out
+
+
+@lru_cache(maxsize=None)
+def polar_inv_order(spec: CodeSpec) -> np.ndarray:
+    """Inverse of polar_order(spec): code-order positions -> info-bit order."""
+    return np.argsort(polar_order(spec))
 
 
 @lru_cache(maxsize=None)
@@ -589,7 +604,7 @@ def decode_raw(spec: CodeSpec, soft: np.ndarray, index=None) -> tuple[np.ndarray
         out, ok = _decode_code_order(spec, _decoder(spec), deint)
         cands, usable = out[:, None], ok[:, None]
     else:
-        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)]
+        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_inv_order(spec)]
         usable = np.ones(cands.shape[:2], bool)
     idx = np.arange(len(soft)) if index is None else np.broadcast_to(index, len(soft))
     return np.stack([descramble(spec, c, i) for c, i in zip(cands, idx)]), usable
@@ -609,7 +624,7 @@ def decode_buffer_raw(spec: CodeSpec, buf: np.ndarray, max_rv: int = 0, known=No
         return out[:, None].astype(np.uint8), ok[:, None]
     deint = np.asarray(buf[:, : spec.coded_bits], np.float32)
     if known is None:
-        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_order(spec)].astype(np.uint8)
+        cands = _numpy(_decoder(spec).decode(deint)[0])[..., polar_inv_order(spec)].astype(np.uint8)
     else:
         cands = _pinned_paths(spec, deint, known, PLAIN)
     return cands, np.ones(cands.shape[:2], bool)
@@ -641,8 +656,10 @@ def check(spec: CodeSpec, cands: np.ndarray, usable: np.ndarray, crc_mask: int) 
 # is then effectively shortened (the punctured first 2Z info columns have no
 # soft bit to pin). Polar sends no info bits: known ones are frozen instead,
 # in a code with the rest as its info set, after their own codeword is taken
-# off the soft bits (the code is linear); polar_order puts the payload's tail
-# on its weakest positions so that this pays. LDPC: nothing on air changes.
+# off the soft bits (the code is linear); polar_order puts the CRC on the
+# strongest synthetic channels and payload bytes in decreasing GA reliability,
+# so freezing a zero tail at any byte count K leaves the GA-optimal shorter code.
+# LDPC: nothing on air changes.
 # decode_raw_pinned and decode_buffer_pinned do either.
 
 @lru_cache(maxsize=None)
@@ -811,7 +828,7 @@ def _pinned_paths(spec: CodeSpec, deint: np.ndarray, known: np.ndarray, index: i
     out = np.empty((*paths.shape[:2], spec.k), np.uint8)
     out[..., rest] = paths
     out[..., kp] = u[kp]
-    return out[..., order]
+    return out[..., polar_inv_order(spec)]
 
 
 def decode_raw_pinned(spec: CodeSpec, soft: np.ndarray, known: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray]:
@@ -852,7 +869,7 @@ def _decode_code_order(spec: CodeSpec, dec, deint, iters: int = LDPC_ITERS, crc_
         out, ok = dec.decode(deint, iters=iters)
         return _numpy(out), _numpy(ok)
     paths, _ = dec.decode(deint)
-    paths = _numpy(paths)[..., polar_order(spec)]  # (B, L, k), best first
+    paths = _numpy(paths)[..., polar_inv_order(spec)]  # (B, L, k), best first
     rep = lambda v: np.repeat(np.broadcast_to(v, len(paths)), paths.shape[1])  # noqa: E731
     crc = crc_ok(spec, paths.reshape(-1, spec.k), rep(crc_mask), rep(index)).reshape(paths.shape[:2])
     pick = np.where(crc.any(axis=1), crc.argmax(axis=1), 0)

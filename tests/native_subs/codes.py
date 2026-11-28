@@ -25,9 +25,11 @@ def substitutions(native):
         "add_prior_buffer", "known_bits", "score")}
 
     @functools.lru_cache(maxsize=None)
-    def own(spec):
-        return (config.SUBMODES.get(spec.name) == spec or cpm.SPECS.get(spec.name) == spec
-                or cpm.CTL.get(getattr(spec, "grid", None)) == spec)
+    def own(spec):  # (the wide toolbox grids' specs too, on air or not: compiled in)
+        grid = getattr(spec, "grid", None)
+        return (config.SUBMODES.get(spec.name) == spec
+                or cpm.SPECS.get(spec.name, cpm.WIDE_SPECS.get(spec.name)) == spec
+                or cpm.CTL.get(grid, cpm.WIDE_CTL.get(grid)) == spec)
 
     def by_name(attr):
         f, p = getattr(n, attr), py[attr]

@@ -14,18 +14,21 @@ def substitutions(native):
     from data2g import config, modem
     from data2g.waveform import sync
 
+    from . import sc_same
+
     N, W = native.modem, native.waveform
     names = ("crc6", "header_bits", "_signs", "_valid_words", "_valid_signs", "decode_header", "modulate",
              "modulate_bits", "burst_waveform", "ace_cells", "_bin_phase_step", "_demod_frames", "_read_header",
              "_copy_llr", "_best_header", "find_burst", "pilot_coherence", "find_copy", "presence_window",
              "fold_presence", "presence_verdict", "pilot_presence", "fold_verify", "pilot_present", "_cfo_aliases",
              "_copy_header", "receive", "resolve_alias", "data_channel", "noise_var", "soft_bits", "burst_soft",
-             "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received")
+             "slot_soft", "snr_db", "symbol_times", "demodulate", "decode_received", "sc_refine")
     py = {k: getattr(modem, k) for k in names}
     min_score = dict(modem.HEADER_MIN_SCORE)
 
     def same_config():
-        return modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION and modem.HEADER_MIN_SCORE == min_score
+        return (modem.PROTOCOL_VERSION == config.PROTOCOL_VERSION and modem.HEADER_MIN_SCORE == min_score
+                and sc_same())
 
     def own(spec):
         return spec in config.SUBMODES if isinstance(spec, str) else config.SUBMODES.get(spec.name) == spec
@@ -101,21 +104,22 @@ def substitutions(native):
         return header(N.decode_header(f64(soft).reshape(-1), band, accept))
 
     # tx_path None: Python's station setting (modem.TX_PATH), read at each call
-    @guarded("modulate", lambda payloads, submode, rvs=None, tx_path=None: own(submode))
-    def modulate(payloads, submode, rvs=None, tx_path=None):
+    @guarded("modulate", lambda payloads, submode, rvs=None, tx_path=None, connect_hash=None: own(submode))
+    def modulate(payloads, submode, rvs=None, tx_path=None, connect_hash=None):
         top = config.max_codewords((config.SUBMODES[submode] if isinstance(submode, str) else submode).sync_band)
         if not 1 <= len(payloads) <= top:
             raise ValueError(f"1..{top} codewords per burst, got {len(payloads)}")
         return N.modulate([bytes(p) for p in payloads], submode, list(rvs or [0] * len(payloads)),
-                          tx_path or modem.TX_PATH)
+                          tx_path or modem.TX_PATH, connect_hash)
 
-    @guarded("modulate_bits", lambda bits, spec, tx_path=None: own(spec) and isinstance(bits, np.ndarray))
-    def modulate_bits(bits, spec, tx_path=None):
-        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec, tx_path or modem.TX_PATH)
+    @guarded("modulate_bits", lambda bits, spec, tx_path=None, connect_hash=None: own(spec) and isinstance(bits, np.ndarray))
+    def modulate_bits(bits, spec, tx_path=None, connect_hash=None):
+        return N.modulate_bits(np.asarray(bits, dtype=np.uint8).reshape(-1), spec, tx_path or modem.TX_PATH,
+                               connect_hash)
 
-    @guarded("burst_waveform", lambda data, spec: own(spec))
-    def burst_waveform(data, spec):
-        return N.burst_waveform(np.asarray(data, dtype=complex), spec)
+    @guarded("burst_waveform", lambda data, spec, connect_hash=None: own(spec))
+    def burst_waveform(data, spec, connect_hash=None):
+        return N.burst_waveform(np.asarray(data, dtype=complex), spec, connect_hash)
 
     @guarded("ace_cells", lambda spec, n_f: own(spec))
     def ace_cells(spec, n_f):
@@ -123,8 +127,10 @@ def substitutions(native):
         return full[:, config.NCP:], full
 
     @guarded("_demod_frames")
-    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w", slips_in=None):
-        return N.demod_frames(z, int(p), int(n_f), int(shift), float(phi_ref), steps_in, band, slips_in)
+    def _demod_frames(z, p, n_f, shift, phi_ref, steps_in=None, band="w", slips_in=None, pil=None, close_at=None):
+        return N.demod_frames(z, int(p), int(n_f), int(shift), float(phi_ref), steps_in, band, slips_in,
+                              None if pil is None else np.asarray(pil, dtype=np.int64),
+                              None if close_at is None else int(close_at))
 
     @guarded("_read_header")
     def _read_header(z, start, band="w", accept=None):
@@ -147,31 +153,37 @@ def substitutions(native):
     def pilot_coherence(x, lock, n_max=8, latest=False, pattern=False):
         return N.pilot_coherence(f64(x), lock, int(n_max), bool(latest), bool(pattern))
 
-    @guarded("find_copy")
-    def find_copy(x, band, accept=None, C=None, level=None, D=None, fold=None):
+    # comb (scattered pilots' own passes): Python's recursion; native's find_copy makes them itself
+    @guarded("find_copy", lambda *a, comb=None, **k: comb is None)
+    def find_copy(x, band, accept=None, C=None, level=None, D=None, fold=None, comb=None):
         lock, peak = N.find_copy(f64(x), band, accept, C, level, D, fold)
         if peak is not None:
             py["find_copy"].peak = find_copy.peak = peak
         return specs(lock)
 
     @guarded("fold_verify")
-    def fold_verify(x, band, fold, fold_phase0=0):
-        return N.fold_verify(f64(x), band, np.asarray(fold, dtype=complex), int(fold_phase0))
+    def fold_verify(x, band, fold, fold_phase0=0, decim=1, row_w=None):
+        return N.fold_verify(f64(x), band, np.asarray(fold, dtype=complex), int(fold_phase0), int(decim),
+                             None if row_w is None else f64(row_w))
 
     @guarded("pilot_present")
-    def pilot_present(D, level, window, x=None, band=None):
+    def pilot_present(D, level, window, x=None, band=None, decim=1, stream_lo=0, row_w=None):
         return N.pilot_present(np.asarray(D, dtype=complex), float(level), int(window),
-                               None if x is None else f64(x), band)
+                               None if x is None else f64(x), band, int(decim), int(stream_lo),
+                               None if row_w is None else f64(row_w))
 
     @guarded("_copy_header", lambda z, lock: lock_ok(lock))
     def _copy_header(z, lock):
         return hdr_dict(N.copy_header(z, lock))
 
-    # `known` (data2g-bulk's receive at a known position) has no native port: Python's
     @guarded("receive", lambda x, bands=None, accept=None, head=None, copy=None, known=None, partial=False:
-             known is None and (copy is None or lock_ok(copy)))
-    def receive(x, bands=None, accept=None, head=None, copy=None, partial=False):
-        d = N.receive(f64(x), bands_arg(bands), accept, None if head is None else int(head), copy, bool(partial))
+             (known is None or own(known["spec"])) and (copy is None or lock_ok(copy)))
+    def receive(x, bands=None, accept=None, head=None, copy=None, known=None, partial=False):
+        if known is not None:
+            known = dict(start=int(known["start"]), cfo=float(known["cfo"]), spec=known["spec"].name,
+                         n_cw=int(known["n_cw"]))
+        d = N.receive(f64(x), bands_arg(bands), accept, None if head is None else int(head), copy, bool(partial),
+                      known)
         return dict(d, spec=config.SUBMODES[d["spec"]], acq=acq(d["acq"]))
 
     @guarded("data_channel", lambda h_pilot, support, band="w", *a, **k: band in config.BANDS)
@@ -212,6 +224,10 @@ def substitutions(native):
     def symbol_times(r):
         return N.symbol_times(r)
 
+    @guarded("sc_refine", lambda r, z, w: own(r["spec"]))
+    def sc_refine(r, z, w):
+        return N.sc_refine(r, np.asarray(z, dtype=complex), np.asarray(w, dtype=np.float64))
+
     def burst(t):
         name, payloads, ok, f, start, snr, soft = t
         return modem.Burst(submode=config.SUBMODES[name], payloads=payloads, crc_ok=ok, freq_offset=f,
@@ -227,11 +243,13 @@ def substitutions(native):
 
     small = {
         "_bin_phase_step": lambda h: N.bin_phase_step(np.asarray(h, complex)),
-        "_cfo_aliases": lambda d, centre: N.cfo_aliases(complex(d), float(centre)),
+        "_cfo_aliases": lambda d, centre, lag=config.FRAME_SAMPLES: N.cfo_aliases(complex(d), float(centre), int(lag)),
         "resolve_alias": lambda fine, coarse: N.resolve_alias(float(fine), float(coarse)),
-        "presence_window": lambda dcols, window: N.presence_window(int(dcols), int(window)),
-        "fold_presence": lambda fold, level, m: N.fold_presence(np.asarray(fold, complex), float(level), int(m)),
-        "presence_verdict": lambda peak, contrast, m: N.presence_verdict(float(peak), float(contrast), int(m)),
+        "presence_window": lambda dcols, window, decim=1, pad_frames=None: N.presence_window(
+            int(dcols), int(window), int(decim), modem.COPY_PAIRS if pad_frames is None else int(pad_frames)),
+        "fold_presence": lambda fold, level, m, row_w=None: N.fold_presence(
+            np.asarray(fold, complex), float(level), int(m), None if row_w is None else f64(row_w)),
+        "presence_verdict": lambda peak, contrast, m, band="": N.presence_verdict(float(peak), float(contrast), int(m), band),
         "pilot_presence": lambda D, level, window: N.pilot_presence(np.asarray(D, complex), float(level), int(window)),
     }
     return {
@@ -245,6 +263,6 @@ def substitutions(native):
             "find_copy": find_copy, "fold_verify": fold_verify, "pilot_present": pilot_present,
             "_copy_header": _copy_header, "receive": receive, "data_channel": data_channel,
             "noise_var": noise_var, "soft_bits": soft_bits, "burst_soft": burst_soft, "slot_soft": slot_soft,
-            "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received,
+            "snr_db": snr_db, "symbol_times": symbol_times, "decode_received": decode_received, "sc_refine": sc_refine,
             "demodulate": demodulate}.items()},
     }

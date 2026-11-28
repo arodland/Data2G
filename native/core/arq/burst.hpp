@@ -27,7 +27,7 @@ struct MaskId {
 };
 
 inline MaskId ctl_mask(int direction, int i, int key = 0) { return {key, direction, SEQ_MOD + i}; }
-inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // a compact CONNECT's mask (frames pack_connect); ctl_mask's i is 0-3
+inline const MaskId COMPACT_CONNECT = ctl_mask(0, 4);  // CONNECT's mask (frames::Connect); ctl_mask's i is 0-3
 inline constexpr int EPOCH_MOD = 64;  // abandon epochs in a data codeword's identity
 // comp: deflated (T_COMP); epoch: the sender's abandon epoch (its slicing).
 // Both folded into the direction byte, so a codeword decoded under the
@@ -60,6 +60,8 @@ struct TxBurst {
     std::optional<std::pair<int, std::array<int, 4>>> nod{};
     double level = 1.0;  // audio level against the mode's own (an FM ping: its top modes', arq/ping)
     bool probe = false;  // FM: the sounding probe follows on the same PTT (arq/probe; a ping)
+    // CONNECT burst: callee callsign for the header's callee hash (docs/pending-header.md); empty for all other bursts
+    std::string connect_callee{};
 };
 using TxBurstPtr = std::shared_ptr<const TxBurst>;
 

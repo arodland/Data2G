@@ -67,6 +67,54 @@ DATA2G_SIMD_CLONES void cmul(const cdouble* __restrict a, const cdouble* __restr
     }
 }
 
+// out[j] += a[j] * b[j]
+DATA2G_SIMD_CLONES void cmul_acc(const cdouble* __restrict a, const cdouble* __restrict b, cdouble* __restrict out,
+                                 std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    double* o = reinterpret_cast<double*>(out);
+    for (std::size_t j = 0; j < n; ++j) {
+        const double ar = x[2 * j], ai = x[2 * j + 1], br = y[2 * j], bi = y[2 * j + 1];
+        o[2 * j] += ar * br - ai * bi;
+        o[2 * j + 1] += ar * bi + ai * br;
+    }
+}
+
+// out[j] *= s, s real
+DATA2G_SIMD_CLONES void rscale(cdouble* __restrict out, double s, std::size_t n) {
+    double* o = reinterpret_cast<double*>(out);
+    for (std::size_t j = 0; j < 2 * n; ++j) o[j] *= s;
+}
+
+// Single-frame lag products: out[u] = a[u] * conj(b[u]), split real/imag for SIMD.
+DATA2G_SIMD_CLONES void lag_prod_conj(const cdouble* __restrict a, const cdouble* __restrict b, double* __restrict out,
+                                      std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    for (std::size_t u = 0; u < n; ++u) {
+        const double ar = x[2 * u], ai = x[2 * u + 1], br = y[2 * u], bi = y[2 * u + 1];
+        out[2 * u] = ar * br + ai * bi;
+        out[2 * u + 1] = ai * br - ar * bi;
+    }
+}
+
+// dst[i] += src[i] over n complex values (2n doubles).
+DATA2G_SIMD_CLONES void cadd_acc(const double* __restrict src, double* __restrict dst, std::size_t n2) {
+    for (std::size_t i = 0; i < n2; ++i) dst[i] += src[i];
+}
+
+// dst[t] += a[t] * conj(b[t]) over n complex values.
+DATA2G_SIMD_CLONES void lag_prod_conj_acc(const cdouble* __restrict a, const cdouble* __restrict b, double* __restrict dst,
+                                          std::size_t n) {
+    const double* x = reinterpret_cast<const double*>(a);
+    const double* y = reinterpret_cast<const double*>(b);
+    for (std::size_t t = 0; t < n; ++t) {
+        const double ar = x[2 * t], ai = x[2 * t + 1], br = y[2 * t], bi = y[2 * t + 1];
+        dst[2 * t] += ar * br + ai * bi;
+        dst[2 * t + 1] += ai * br - ar * bi;
+    }
+}
+
 // out[j] = a[j] * w, w one complex factor
 DATA2G_SIMD_CLONES void cscale(const cdouble* __restrict a, cdouble w, cdouble* __restrict out, std::size_t n) {
     const double* x = reinterpret_cast<const double*>(a);
@@ -202,7 +250,7 @@ std::vector<cdouble> repeat_corr(std::span<const cdouble> z, std::span<const cdo
 namespace {
 
 // FFT(conj(reversed t)) zero-padded to L: the same for every call of a given length, and a
-// StreamDetector calls at a handful of lengths, so the last few are kept.
+// StreamDetector calls at a handful of lengths, so the most recent KEEP are kept (LRU).
 std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cdouble> t, std::size_t L) {
     struct Entry {
         std::vector<cdouble> t;
@@ -211,16 +259,25 @@ std::shared_ptr<const std::vector<cdouble>> template_spectrum(std::span<const cd
     };
     static std::mutex mu;
     static std::vector<Entry> cache;
-    constexpr std::size_t KEEP = 8;
+    constexpr std::size_t KEEP = 32;
     {
         std::lock_guard lock(mu);
-        for (const Entry& e : cache)
-            if (e.L == L && std::equal(e.t.begin(), e.t.end(), t.begin(), t.end())) return e.G;
+        for (std::size_t i = 0; i < cache.size(); ++i)
+            if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) {
+                if (i + 1 < cache.size()) {
+                    Entry hit = std::move(cache[i]);
+                    cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(i));
+                    cache.push_back(std::move(hit));
+                }
+                return cache.back().G;
+            }
     }
     std::vector<cdouble> gp(L);
     for (std::size_t k = 0; k < t.size(); ++k) gp[k] = std::conj(t[t.size() - 1 - k]);
     auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
     std::lock_guard lock(mu);
+    for (std::size_t i = 0; i < cache.size(); ++i)
+        if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) return cache[i].G;
     cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
     if (cache.size() > KEEP) cache.erase(cache.begin());
     return G;
@@ -281,12 +338,125 @@ void corr_rows(std::span<const cdouble> z, std::span<const cdouble> t, std::span
     });
 }
 
+// Zero-offset template spectrum: gp[(-n) mod L] = conj(t[n]) so IFFT_L(Z * roll(Gs, sh))[t] == corr[t] directly
+// (no m-1 offset, no trailing phase scale), enabling exact D-decimation via (L/D)-point IFFT.
+std::shared_ptr<const std::vector<cdouble>> template_spectrum_zero(std::span<const cdouble> t, std::size_t L) {
+    struct Entry {
+        std::vector<cdouble> t;
+        std::size_t L;
+        std::shared_ptr<const std::vector<cdouble>> G;
+    };
+    static std::mutex mu;
+    static std::vector<Entry> cache;
+    constexpr std::size_t KEEP = 64;
+    {
+        std::lock_guard lock(mu);
+        for (std::size_t i = 0; i < cache.size(); ++i)
+            if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) {
+                if (i + 1 < cache.size()) {
+                    Entry hit = std::move(cache[i]);
+                    cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(i));
+                    cache.push_back(std::move(hit));
+                }
+                return cache.back().G;
+            }
+    }
+    std::vector<cdouble> gp(L);
+    gp[0] = std::conj(t[0]);
+    for (std::size_t k = 1; k < t.size(); ++k) gp[L - k] = std::conj(t[k]);
+    auto G = std::make_shared<const std::vector<cdouble>>(dsp::fft(gp, true));
+    std::lock_guard lock(mu);
+    for (std::size_t i = 0; i < cache.size(); ++i)
+        if (cache[i].L == L && std::equal(cache[i].t.begin(), cache[i].t.end(), t.begin(), t.end())) return cache[i].G;
+    cache.push_back({std::vector<cdouble>(t.begin(), t.end()), L, G});
+    if (cache.size() > KEEP) cache.erase(cache.begin());
+    return G;
+}
+
 }  // namespace
 
 Mat<cdouble> repeat_corrs(std::span<const cdouble> z, std::span<const cdouble> t, std::span<const double> freqs) {
     Mat<cdouble> out(freqs.size(), z.size() >= t.size() ? z.size() - t.size() + 1 : 0);
     corr_rows(z, t, freqs, [&](std::size_t i) { return out[i]; }, nullptr);
     return out;
+}
+
+std::vector<Mat<cdouble>> repeat_corrs_multi(std::span<const cdouble> z,
+                                             std::span<const std::vector<cdouble>> templates,
+                                             std::span<const double> freqs, int decim) {
+    std::vector<Mat<cdouble>> outs;
+    if (templates.empty()) return outs;
+    const std::size_t D = static_cast<std::size_t>(decim);
+    const std::size_t nt = templates.size(), m = templates[0].size(), nb = freqs.size();
+    if (z.size() < m) throw std::invalid_argument("repeat_corrs_multi: signal shorter than the template");
+    const std::size_t n = z.size() + m - 1, n_out = z.size() - m + 1;
+    const std::size_t n_out_d = (n_out + D - 1) / D;
+    const std::size_t L = PER * dsp::next_fast_len((n + PER - 1) / PER), bins_per_step = L / PER;
+    const std::size_t Ld = L / D;
+    outs.reserve(nt);
+    for (std::size_t ti = 0; ti < nt; ++ti) outs.emplace_back(nb, n_out_d);
+    std::vector<cdouble> zp(L);
+    std::copy(z.begin(), z.end(), zp.begin());
+    const std::vector<cdouble> Z = dsp::fft(zp, true);
+    std::vector<std::shared_ptr<const std::vector<cdouble>>> Gs(nt);
+    for (std::size_t ti = 0; ti < nt; ++ti)
+        Gs[ti] = D == 1 ? template_spectrum(templates[ti], L) : template_spectrum_zero(templates[ti], L);
+    constexpr std::size_t BATCH = 4, BATCH_MAX_L = 20480;
+    const std::size_t B = Ld <= BATCH_MAX_L ? BATCH : 1;
+    const std::size_t tasks_per_t = (nb + B - 1) / B;
+    const double inv_d = 1.0 / static_cast<double>(D);
+    per_bin(z.size(), nt * tasks_per_t, [&](std::size_t task) {
+        Scratch& s = scratch();
+        const std::size_t ti = task / tasks_per_t, t_task = task % tasks_per_t;
+        const std::size_t i0 = t_task * B, rows = std::min(B, nb - i0);
+        const std::vector<cdouble>& G0 = *Gs[ti];
+        s.prod.resize(rows * Ld);
+        s.c.resize(rows * Ld);
+        std::int64_t ks[BATCH];
+        for (std::size_t r = 0; r < rows; ++r) {
+            const auto k = static_cast<std::int64_t>(std::llround(freqs[i0 + r] / STEP_HZ));
+            ks[r] = k;
+            const auto shift = static_cast<std::size_t>(
+                ((k * static_cast<std::int64_t>(bins_per_step)) % static_cast<std::int64_t>(L) +
+                 static_cast<std::int64_t>(L)) %
+                static_cast<std::int64_t>(L));
+            cdouble* prod = s.prod.data() + r * Ld;
+            if (D == 1) {
+                cmul(Z.data(), G0.data() + (L - shift), prod, shift);
+                cmul(Z.data() + shift, G0.data(), prod + shift, L - shift);
+            } else {
+                // Fold Z[q + p*Ld] * G0[(q + p*Ld - shift) mod L] over p = 0..D-1 into prod[q].
+                for (std::size_t p = 0; p < D; ++p) {
+                    const std::size_t base = p * Ld;
+                    const std::size_t g0 = (base + L - shift) % L;
+                    const std::size_t first = std::min(Ld, L - g0);
+                    const cdouble* zp_ = Z.data() + base;
+                    const cdouble* gp_ = G0.data() + g0;
+                    if (p == 0) {
+                        cmul(zp_, gp_, prod, first);
+                        if (first < Ld) cmul(zp_ + first, G0.data(), prod + first, Ld - first);
+                    } else {
+                        cmul_acc(zp_, gp_, prod, first);
+                        if (first < Ld) cmul_acc(zp_ + first, G0.data(), prod + first, Ld - first);
+                    }
+                }
+                rscale(prod, inv_d, Ld);
+            }
+        }
+        dsp::fft_rows_into(s.prod.data(), s.c.data(), rows, Ld, false);
+        for (std::size_t r = 0; r < rows; ++r) {
+            if (D == 1) {
+                std::int64_t q = (ks[r] * static_cast<std::int64_t>(m - 1)) % PER;
+                if (q < 0) q += PER;
+                const cdouble ph = std::polar(1.0, -TWO_PI * static_cast<double>(q) / PER);
+                cscale(s.c.data() + r * L + (m - 1), ph, outs[ti][i0 + r], n_out);
+            } else {
+                std::copy(s.c.data() + r * Ld, s.c.data() + r * Ld + n_out_d, outs[ti][i0 + r]);
+            }
+        }
+        release_big(s);
+    });
+    return outs;
 }
 
 double noise_level(const Mat<cdouble>& C) {
@@ -500,22 +670,26 @@ Acquisition acquire(std::span<const cdouble> z, const Band& band, std::optional<
 }
 
 Mat<cdouble> pair_products(std::span<const cdouble* const> rows, std::size_t cols, int F, int P) {
-    const std::size_t FR = static_cast<std::size_t>(F), PF = static_cast<std::size_t>(P) * FR;
+    const std::size_t FR = static_cast<std::size_t>(F), UP = static_cast<std::size_t>(P), PF = UP * FR;
     const std::size_t n = cols > PF ? cols - PF : 0;
     Mat<cdouble> D(rows.size(), n);
+    if (!n || !UP) return D;
+    // Compute each 1-frame product c[u + FR] * conj(c[u]) once when n > FR (saves (P-1)/P multiplies),
+    // then sum j = 0..P-1 in the exact same order (bit-identical, j-outer / t-inner SIMD).
+    const std::size_t np = n + (UP - 1) * FR;
+    const bool reuse = UP > 1 && np < UP * n;
+    std::vector<double> lag;
+    if (reuse) lag.resize(2 * np);
     for (std::size_t f = 0; f < rows.size(); ++f) {
         const cdouble* c = rows[f];
-        // c[FR + u] * conj(c[u]) with the products spelled out: std::complex's operator* carries
-        // numpy-unlike NaN handling that stops the loop vectorizing (same values for finite input)
-        for (std::size_t t = 0; t < n; ++t) {
-            double sr = 0.0, si = 0.0;
-            for (std::size_t j = 0; j < static_cast<std::size_t>(P); ++j) {
-                const std::size_t u = j * FR + t;
-                const double ar = c[FR + u].real(), ai = c[FR + u].imag(), br = c[u].real(), bi = c[u].imag();
-                sr += ar * br + ai * bi;
-                si += ai * br - ar * bi;
-            }
-            D[f][t] = {sr, si};
+        double* dst = reinterpret_cast<double*>(D[f]);
+        if (reuse) {
+            lag_prod_conj(c + FR, c, lag.data(), np);
+            std::copy_n(lag.data(), 2 * n, dst);
+            for (std::size_t j = 1; j < UP; ++j) cadd_acc(lag.data() + 2 * j * FR, dst, 2 * n);
+        } else {
+            lag_prod_conj(c + FR, c, dst, n);
+            for (std::size_t j = 1; j < UP; ++j) lag_prod_conj_acc(c + (j + 1) * FR, c + j * FR, dst, n);
         }
     }
     return D;
@@ -636,14 +810,18 @@ void drop_front(std::vector<std::vector<T>>& rows, std::size_t& off, std::size_t
 }
 }  // namespace
 
-void StreamDetector::trim(std::int64_t start) {
-    const std::size_t k = clamp_to(start - s0, S(0).size());
-    drop_front(S_, s_off_, k);
-    s0 += static_cast<std::int64_t>(k);
+void StreamDetector::trim_outputs(std::int64_t start) {
     const std::size_t kc = clamp_to(start - c0, c_n_);
     if (keep_c_) drop_front(C_, c_off_, kc);
     c_n_ -= kc;
     c0 += static_cast<std::int64_t>(kc);
+}
+
+void StreamDetector::trim(std::int64_t start) {
+    const std::size_t k = clamp_to(start - s0, S(0).size());
+    drop_front(S_, s_off_, k);
+    s0 += static_cast<std::int64_t>(k);
+    trim_outputs(start);
     const std::size_t kd = clamp_to(start - KEEP_BEHIND - d0, D_[0].size() - d_off_);
     drop_front(D_, d_off_, kd);
     d0 += static_cast<std::int64_t>(kd);

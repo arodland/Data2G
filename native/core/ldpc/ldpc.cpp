@@ -406,12 +406,12 @@ Decoded Decoder::decode(const Mat<float>& llr, int iters, std::span<const float>
                 // once) from the totals less their old messages, then the totals take the new ones at once
                 for (int l = 0; l < layers_; ++l) {
                     const int lo = chk_ptr_[l * z], hi = chk_ptr_[(l + 1) * z], n = hi - lo;
-                    for (int e = lo; e < hi; ++e) w.m[e] = t[var_[e]] - c[e];
                     for (int e = lo; e < hi; ++e) {
-                        neg[e] = w.m[e] < 0;
-                        mag[e] = std::fabs(w.m[e]);
+                        const float mv = t[var_[e]] - c[e];
+                        w.m[e] = mv;
+                        neg[e] = mv < 0;
+                        ph[e] = std::fabs(mv);
                     }
-                    std::copy(mag.begin() + lo, mag.begin() + hi, ph.begin() + lo);
                     phi_fn(ph.data() + lo, static_cast<std::size_t>(n));
                     for (int q = l * z; q < (l + 1) * z; ++q) {
                         const int e0 = chk_ptr_[q], d = chk_ptr_[q + 1] - e0;

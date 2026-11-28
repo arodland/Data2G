@@ -1,8 +1,7 @@
 // data2g/arq/predictor.py's live path: the MIESM features (effective MI
-// over the AWGN BICM capacity tables) and the outcome model, the frozen
-// bootstrap ensemble (tables::OUTCOME_MEMBERS) with the installed
-// LOGIT_OFFSETS. The study toggles (DATA2G_OUTCOME_MODEL, _OUTCOME_LCB,
-// _LOGIT_OFFSETS) and the link abstraction are Python only.
+// over the AWGN BICM capacity tables) and the installed outcome model.
+// The study toggles (DATA2G_OUTCOME_MODEL, _OUTCOME_LCB, _LOGIT_OFFSETS)
+// and the link abstraction are Python only.
 #pragma once
 
 #include <array>
@@ -83,7 +82,7 @@ struct Outcome {
     double burst;  // P(burst usable)
     double cw;     // P(a codeword decodes | usable)
 };
-// Indexed by outcome_index, LOGIT_OFFSETS applied.
+// Indexed by outcome_index.
 std::vector<Outcome> predict_outcome(const Measured& m, std::string_view band, double gap, double seconds,
                                      const Prev* prev = nullptr, int model = 0);
 // predict_outcome for several (measurements, burst length) pairs in one batch.
@@ -94,8 +93,8 @@ struct OutcomeQuery {
 std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuery>& qs, std::string_view band,
                                                    double gap, const Prev* prev = nullptr, int model = 0);
 // One measurement, several (burst length, mode index) queries: each its
-// Outcome, LOGIT_OFFSETS applied. A CNP encodes once and runs its head per
-// query; MLP members run once per distinct burst length.
+// Outcome. A CNP encodes once and runs its head per query; MLP members run
+// once per distinct burst length.
 struct ModeQuery {
     double seconds;
     int mode;

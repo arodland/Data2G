@@ -3,6 +3,10 @@
 #include "convert.hpp"
 #include "cpm/cpm.hpp"
 
+#include <map>
+#include <set>
+#include <string>
+
 namespace data2g::bind {
 
 namespace {
@@ -26,9 +30,16 @@ py::array_t<std::int64_t> ints(std::span<const int> v) { return np<std::int64_t>
 
 void bind_cpm(py::module_& m) {
     auto c = m.def_submodule("cpm");
-    c.def("grids", [] {
+    // the on-air grids (cpm.GRIDS' iteration: DATA2G_CPM_ONAIR's too); wide=True: the wide toolbox grids
+    c.def("grids", [](bool wide) {
         py::list out;
-        for (const auto& g : tables::CPM_GRIDS) {
+        std::vector<const cpm::Grid*> gs;
+        if (wide)
+            for (const auto& g : tables::CPM_WIDE_GRIDS) gs.push_back(&g);
+        else
+            gs = cpm::grids();
+        for (const auto* gp : gs) {
+            const auto& g = *gp;
             py::dict d;
             d["name"] = std::string(g.name);
             d["m"] = g.m;
@@ -44,13 +55,20 @@ void bind_cpm(py::module_& m) {
             d["hdr_len"] = g.hdr_len;
             d["preamble"] = np<std::int64_t>(g.preamble);
             d["mid_block"] = np<std::int64_t>(g.mid_block);
+            d["L"] = g.L;
+            d["guard"] = g.guard;
+            d["noise_median"] = g.noise_median;
+            d["median_se"] = g.median_se;
             out.append(d);
         }
         return out;
-    });
-    c.def("specs", [] {
+    }, py::arg("wide") = false);
+    // every compiled-in spec (tables::CPM_SPECS, CPM_CTL); wide=True: CPM_WIDE_SPECS, CPM_WIDE_CTL
+    c.def("specs", [](bool wide) {
         py::list out;
-        for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+        const std::array<std::span<const cpm::Spec>, 2> which =
+            wide ? std::array{tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL} : std::array{tables::CPM_SPECS, tables::CPM_CTL};
+        for (auto table : which)
             for (const auto& s : table) {
                 py::dict d;
                 d["name"] = std::string(s.name);
@@ -62,6 +80,11 @@ void bind_cpm(py::module_& m) {
                 d["n_sym"] = s.n_sym;
                 out.append(d);
             }
+        return out;
+    }, py::arg("wide") = false);
+    c.def("on_air_specs", [] {  // cpm.SPECS' iteration (DATA2G_CPM_ONAIR's too)
+        py::list out;
+        for (const auto* s : cpm::specs()) out.append(std::string(s->name));
         return out;
     });
     c.def("header_symbols", [](const std::string& g, int value) {
@@ -93,11 +116,13 @@ void bind_cpm(py::module_& m) {
     c.def("tones", [](const std::string& g, const In<int>& sym, double glide) {
         return np(cpm::tones(grid(g), {sym.data(), static_cast<std::size_t>(sym.size())}, glide));
     }, py::arg("g"), py::arg("sym"), py::arg("glide") = 0.0);
-    c.def("modulate", [](const std::string& s, const std::vector<In<std::uint8_t>>& coded, bool dup, int cap) {
+    c.def("modulate", [](const std::string& s, const std::vector<In<std::uint8_t>>& coded, bool dup, int cap,
+                         std::optional<int> connect_hash) {
         std::vector<std::vector<std::uint8_t>> v;
         for (const auto& a : coded) v.push_back(vec(a));
-        return np(cpm::modulate(cspec(s), v, dup, cap));
-    }, "audio before the TX bandpass", py::arg("spec"), py::arg("coded"), py::arg("dup"), py::arg("cap") = 0);
+        return np(cpm::modulate(cspec(s), v, dup, cap, connect_hash));
+    }, "audio before the TX bandpass", py::arg("spec"), py::arg("coded"), py::arg("dup"), py::arg("cap") = 0,
+       py::arg("connect_hash") = py::none());
     c.def("bandpass", [](const std::string& g, const In<double>& x, int cap) {
         return np(cpm::bandpass(grid(g), view(x), cap));
     }, py::arg("g"), py::arg("x"), py::arg("cap") = 0);
@@ -112,8 +137,10 @@ void bind_cpm(py::module_& m) {
         return cpm::present(grid(g), view(x));
     }, py::arg("grid"), py::arg("x"));
     py::class_<cpm::CoarseTrack>(c, "CoarseTrack")
-        .def(py::init([](const std::string& g, double reach_hz) { return cpm::CoarseTrack(grid(g), reach_hz); }),
-             py::arg("grid"), py::arg("reach_hz") = 150.0)
+        .def(py::init([](const std::string& g, double reach_hz, cpm::CoarseTrack* source) {
+                 return cpm::CoarseTrack(grid(g), reach_hz, source);
+             }),
+             py::arg("grid"), py::arg("reach_hz") = 150.0, py::arg("source") = nullptr, py::keep_alive<1, 4>())
         .def("feed", [](cpm::CoarseTrack& t, const In<double>& buf, long off) { t.feed(view(buf), off); })
         .def("presence", &cpm::CoarseTrack::presence)
         .def("present", &cpm::CoarseTrack::present)
@@ -133,10 +160,11 @@ void bind_cpm(py::module_& m) {
     }, py::arg("grid"), py::arg("x"), py::arg("s0"), py::arg("cfo"), py::arg("copies") = 2);
     c.def("tone_llr", [](const std::string& g, const In<double>& E) { return np(cpm::tone_llr(grid(g), mat(E))); });
     c.def("refine", [](const std::string& g, const In<double>& x, long s0, double cfo, const std::string& spec,
-                       int n_data, bool dup) {
-        const auto r = cpm::refine(grid(g), view(x), s0, cfo, cspec(spec), n_data, dup);
+                       int n_data, bool dup, std::optional<int> connect_hash) {
+        const auto r = cpm::refine(grid(g), view(x), s0, cfo, cspec(spec), n_data, dup, connect_hash);
         return py::make_tuple(r.first, r.second);
-    });
+    }, py::arg("grid"), py::arg("x"), py::arg("s0"), py::arg("cfo"), py::arg("spec"), py::arg("n_data"),
+       py::arg("dup"), py::arg("connect_hash") = py::none());
     c.def("soft", [](const std::string& g, const In<double>& x, long s0, double cfo, int n_data, bool dup) {
         const auto r = cpm::soft(grid(g), view(x), s0, cfo, n_data, dup);
         py::list slots;
@@ -169,6 +197,7 @@ void bind_cpm(py::module_& m) {
         d["end"] = l->end;
         d["header_end"] = l->header_end;
         d["copies"] = l->copies;
+        if (l->connect_hash) d["connect_hash"] = *l->connect_hash;
         return d;
     };
     c.def("find", [lock_dict](const std::string& g, const In<double>& x, std::optional<double> threshold,
@@ -198,15 +227,17 @@ void bind_cpm(py::module_& m) {
     });
     c.def("hdr_span",[](const std::string& g, int copies) { return cpm::hdr_span(grid(g), copies); });
     c.def("confirm", [](const std::string& g, const In<double>& x, const std::string& spec, int n_data, bool dup,
-                        long start, double cfo) {
+                        long start, double cfo, std::optional<int> connect_hash) {
         cpm::Lock l{};
         l.spec = cpm::spec(spec);
         l.n_data = n_data;
         l.dup = dup;
         l.start = start;
         l.cfo = cfo;
+        l.connect_hash = connect_hash;
         return cpm::confirm(grid(g), view(x), l);
-    });
+    }, py::arg("grid"), py::arg("x"), py::arg("spec"), py::arg("n_data"), py::arg("dup"), py::arg("start"),
+       py::arg("cfo"), py::arg("connect_hash") = py::none());
     c.attr("CONFIRM_LLR") = cpm::CONFIRM_LLR;
     // --- coherent detection ---
     c.attr("COH_W") = cpm::COH_W;
@@ -218,13 +249,39 @@ void bind_cpm(py::module_& m) {
         return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
     });
     c.def("coh_ctl", &cpm::coh_ctl);
+    c.def("coh2d", &cpm::coh2d);
+    // --- neighbour-leak tone likelihood (cpm.py LEAK_K, LEAK_Z, CTL_SQ) ---
+    static constexpr const char* uses[] = {"lock", "ctl", "data", "dd"};
+    const auto use_of = [](const std::string& u) {
+        for (int i = 0; i < 4; ++i)
+            if (u == uses[i]) return static_cast<cpm::Use>(i);
+        throw py::key_error("no tone_metric consumer " + u);
+    };
+    c.def("tone_metric", [use_of](const std::string& g, const In<double>& E, const std::string& use) {
+        return np(cpm::tone_metric(grid(g), mat(E), use_of(use)));
+    });
+    c.def("leak_metric", [](const In<double>& E, double k) { return np(cpm::leak_metric(mat(E), k)); });
+    c.def("spill_significant", [](const In<double>& E) { return cpm::spill_significant(mat(E)); });
+    c.def("ctl_square", [](const std::string& g, const In<double>& E, int slot) {
+        return cpm::ctl_square(grid(g), mat(E), slot);
+    });
+    // cpm.receive's per-slot soft values for a lock at (start, cfo) (the parity tests)
+    c.def("receive_soft", [](const In<double>& x, const std::string& spec, int n_data, bool dup, long start, double cfo) {
+        cpm::Lock l{&cspec(spec), n_data, dup, start, cfo, 0.0, 0.0, 0.0, 0, 0};
+        py::list out;
+        for (const auto& s : cpm::receive(view(x), l).soft) out.append(np(s));
+        return out;
+    });
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
     });
-    c.def("coh_metric", [](const In<std::complex<double>>& Z, const In<double>& P, int W, double n0) {
-        return np(cpm::coh_metric(mat(Z), mat(P), W, n0));
-    });
-    c.def("noise_n0", [](const In<double>& E) { return cpm::noise_n0(mat(E)); });
+    c.def("coh_metric", [](const In<std::complex<double>>& Z, const In<double>& P, int W, double n0, int L) {
+        return np(cpm::coh_metric(mat(Z), mat(P), W, n0, L));
+    }, py::arg("Z"), py::arg("P"), py::arg("W"), py::arg("n0"), py::arg("L") = 1);
+    c.def("noise_n0", [](const In<double>& E, double noise_median) { return cpm::noise_n0(mat(E), noise_median); },
+          py::arg("E"), py::arg("noise_median") = std::numbers::ln2);
+    c.def("coh_w", [](const std::string& g, bool hdr) { return cpm::coh_w(grid(g), hdr); }, py::arg("grid"),
+          py::arg("hdr") = false);
     c.def("bit_llrs", [](const std::string& g, const In<double>& L) { return np(cpm::bit_llrs(grid(g), mat(L))); });
     c.def("coh_read_header", [](const std::string& g, const In<double>& x, long s0, double cfo, int copies) {
         const auto h = cpm::coh_read_header(grid(g), view(x), s0, cfo, copies);
@@ -236,7 +293,8 @@ void bind_cpm(py::module_& m) {
         return out;
     });
     // dd_metric / dd_soft on a burst given by its spec, dup, slots (control included) and bins
-    const auto burst = [](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z) {
+    const auto burst = [](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z,
+                          std::optional<int> connect_hash = std::nullopt) {
         cpm::Received r{};
         r.spec = &cspec(spec);
         r.dup = dup;
@@ -244,14 +302,25 @@ void bind_cpm(py::module_& m) {
         r.n_ctl_slots = 1 + dup;
         r.soft.resize(n_cw);
         r.Z = mat(Z);
+        r.connect_hash = connect_hash;
         return r;
     };
     c.def("dd_metric", [burst](const std::string& spec, bool dup, int n_cw, const In<std::complex<double>>& Z,
-                               const std::map<int, In<double>>& post, int slot) {
+                               const std::map<int, In<double>>& post, int slot, std::optional<int> connect_hash,
+                               int finger_dt, std::optional<In<std::complex<double>>> Z_early,
+                               std::optional<In<std::complex<double>>> Z_late) {
         cpm::Posts p;
         for (const auto& [s, v] : post) p[s] = vec(v);
-        return np(cpm::dd_metric(burst(spec, dup, n_cw, Z), p, slot));
-    });
+        auto b = burst(spec, dup, n_cw, Z, connect_hash);
+        if (finger_dt > 0 && Z_early && Z_late) {
+            b.finger_dt = finger_dt;
+            b.Z_early = mat(*Z_early);
+            b.Z_late = mat(*Z_late);
+        }
+        return np(cpm::dd_metric(b, p, slot));
+    }, py::arg("spec"), py::arg("dup"), py::arg("n_cw"), py::arg("Z"), py::arg("post"), py::arg("slot"),
+       py::arg("connect_hash") = py::none(), py::arg("finger_dt") = 0, py::arg("Z_early") = std::nullopt,
+       py::arg("Z_late") = std::nullopt);
     c.def("dd_soft", [burst](const std::string& spec, bool dup, int n_cw, const In<double>& metric, int slot) {
         In<std::complex<double>> none(std::vector<py::ssize_t>{0, 1});
         return np(cpm::dd_soft(burst(spec, dup, n_cw, none), mat(metric), slot));

@@ -122,7 +122,7 @@ def band_span_hz(band: str) -> tuple[float, float]:
     from .. import cpm
     from ..waveform import ofdm
 
-    if band in cpm.GRIDS:
+    if band in cpm.GRIDS or band in cpm.WIDE_GRIDS:  # (a wide grid's modes are in MODES under DATA2G_CPM_WIDE=1)
         g = cpm.GRIDS[band]
         return g.f0 - g.bp, g.f0 + (g.m - 1) * g.rate + g.bp
     f = np.sort(ofdm.band(band).freqs)
@@ -499,14 +499,12 @@ def outcome_knows(submode: str) -> bool:
 
 
 # Logit offsets on P(burst usable), per submode, for the installed model.
-# v7 needed six (2026-09-28), but they were a patch for a coverage loop:
-# they kept modes out of the sessions later models trained on, so those
-# never saw them fail, and they cost AWGN 0 dB 32% (16qam-r1/3 never
-# picked). v12 keeps one: w48-16qam-r1/2 at MPG +8 dB, +6.7% (10/2 seeds),
-# nothing elsewhere (old README in git history, outcome model v12).
-# n10-256l-r3/4 (v12 + the n10 extension): tried below its threshold at AWGN
-# 20 dB, BW500 (speedtrials); -0.5 trades some of 25 dB for it (the user's call, 2026-09-29)
-LOGIT_OFFSETS = {"w48-16qam-r1/2": -1.0, "n10-256l-r3/4": -0.5}
+# v7 needed six (2026-09-28); v12 kept two (w48-16qam-r1/2: -1.0,
+# n10-256l-r3/4: -0.5). Retired on `next` after the #346 retrain
+# (nextd_lcb025): paired confirmation on fresh seeds 3000..3023 (36 cells,
+# 2400 Hz cap) was +20.29% without offsets vs +20.21% with them, and
+# identical (+1.44%) on seeds 4000..4023 (18 cells, 500 Hz cap).
+LOGIT_OFFSETS: dict[str, float] = {}
 # DATA2G_LOGIT_OFFSETS="mode:logit,..." (studies): this table instead, for
 # whatever model is loaded ("" = none); unset, LOGIT_OFFSETS apply to the
 # installed model only.

@@ -45,7 +45,7 @@ Heard heard_of(receiver::Rx&& rx) {
 std::vector<std::string_view> all_grids() {
     std::vector<std::string_view> out;
     if (config::PROFILE == "fm") return out;  // FM has no CPM modes (plan Q2): no CPM lock search either
-    for (const auto& g : tables::CPM_GRIDS) out.push_back(g.name);
+    for (const auto* g : cpm::grids()) out.push_back(g->name);  // DATA2G_CPM_ONAIR's wide grids too
     return out;
 }
 
@@ -330,9 +330,10 @@ modem::Accept receive_accept(double min_header_score) {
     auto a = modem::Accept::of(names, MAX_BURST_S, min_header_score);
     for (auto& [s, cw] : a.max_cw) {
         if (s->name.find("ack") != std::string_view::npos) continue;
-        // a full control, each codeword twice (DUP), and the frame framed as a burst's first (a zero before it)
+        // a full control, each codeword twice (DUP), and the frame framed as a burst's first (a zero before it),
+        // with room for a non-zero KISS command nibble tag
         const int pb = codes::payload_bytes(*s);
-        const int need = 2 * MAX_CTL + static_cast<int>((1 + kisslink::framed_len(KISS_FRAME_BYTES) + pb - 1) / pb);
+        const int need = 2 * MAX_CTL + static_cast<int>((1 + kisslink::framed_len(KISS_FRAME_BYTES, 1) + pb - 1) / pb);
         cw = std::max(cw, std::min(need, config::max_codewords(s->sync_band)));
     }
     return a;
@@ -1015,7 +1016,7 @@ void Engine::preview() {
             if (x.empty()) continue;
             std::vector<modem::cd> y;
             try {
-                y = modem::preview_frame(x, l.cfo, *l.spec, n_f);
+                y = modem::preview_frame(x, l.cfo, *l.spec, n_f, preview_.done);
             } catch (const modem::SyncError&) {  // a frame the preview cannot read: skipped, never the engine thread
                 continue;
             }
@@ -1072,15 +1073,30 @@ void Engine::hear(std::vector<receiver::Receiver::Item>& items, double t) {
             span_ = m ? std::optional(Span{start, start + burst_seconds(*m, h->header.n_cw()), std::string(m->name)})
                       : std::nullopt;
             pending_resolve();  // a superseded header's
-            // a connect retry goes in either robust mode (connect_mode): engine.py PENDING_MODES
-            const bool robust = m && (m->name == ROBUST_CONNECT || m->name == ROBUST_FAST);
-            if (m && !pend_ && h->header.n_cw() <= (robust ? max_ctl(*m) : 1) && session_->state == SessionState::LISTEN && pending != "off") {
-                const std::string_view n = m->name;
-                bool hit = pending != "ofdm" && robust;
-                for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
-                if (hit) {
-                    pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
-                    events_.emplace_back("PENDING");
+            // PENDING on a CONNECT header whose callee hash matches a registered call (docs/pending-header.md)
+            if (m && !pend_ && session_->state == SessionState::LISTEN && pending != "off") {
+                if (const auto ch = h->header.connect_hash()) {
+                    const std::string_view n = m->name;
+                    const bool robust = is_robust(n);
+                    bool hit = pending != "ofdm" && robust;
+                    for (int cap = 0; cap <= 2; ++cap) hit = hit || (pending != "fsk" && n == connect_mode(cap));
+                    int bits = 0;
+                    if (hit) {
+                        if (h->header.is_cpm()) {
+                            if (const auto info = cpm::connect_header_for(n)) bits = info->bits;
+                        } else {
+                            if (const auto info = modem::connect_header_for(n)) bits = info->bits;
+                        }
+                    }
+                    bool match = false;
+                    if (bits > 0) {
+                        match = config::connect_hash(call_, bits) == *ch;
+                        for (const auto& a : aliases_) match = match || config::connect_hash(a, bits) == *ch;
+                    }
+                    if (match) {
+                        pend_ = Pend{start + burst_seconds(*m, h->header.n_cw()) + PENDING_SLACK_S, false};
+                        events_.emplace_back("PENDING");
+                    }
                 }
             }
             continue;

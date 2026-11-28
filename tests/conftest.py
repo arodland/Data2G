@@ -141,12 +141,16 @@ def protocol(monkeypatch):
     --native's and the Python ones behind them; put back after the test."""
     from data2g import cpm, modem
 
-    names = ((modem, "_valid_words"), (modem, "_valid_signs"), (cpm, "valid_words"), (cpm, "header_rows"),
-             (cpm, "mid_rows"))
+    names = ((modem, "_valid_words"), (modem, "_valid_signs"), (cpm, "valid_words"), (cpm, "_all_words"),
+             (cpm, "header_rows"), (cpm, "mid_rows"))
     caches = {f for m, n in names for f in (getattr(m, n), native_subs.reference(m, n)) if hasattr(f, "cache_clear")}
 
     def use(v):
         monkeypatch.setattr(modem, "PROTOCOL_VERSION", v)
+        if v < 16:  # HF scattered pilots started at protocol 16
+            from data2g import config
+            monkeypatch.setattr(config, "SC_BANDS", ())
+            monkeypatch.setattr(modem, "SC_BANDS", ())
         for c in caches:
             c.cache_clear()
 

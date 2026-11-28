@@ -650,7 +650,7 @@ def serve(a, pa, stop: threading.Event | None = None):
     engine.cw_id, engine.cw_wpm = getattr(a, "cw_id", "off"), getattr(a, "cw_wpm", cwid.WPM)  # (a test's args may lack them)
     modem.TX_PATH = getattr(a, "tx_path", modem.TX_PATH)  # the station's radio path (FM's transmit)
     engine.hand_round = getattr(a, "hand_decoder", "full")
-    engine.pending = getattr(a, "pending", "fsk")
+    engine.pending = getattr(a, "pending", "all")
     engine.sense = getattr(a, "busy_sense", BUSY_SENSE_DEFAULT)
     host = Host(engine, None if a.buffer_credit < 0 else a.buffer_credit)
     inbox: queue.Queue = queue.Queue()
@@ -702,8 +702,8 @@ def serve(a, pa, stop: threading.Event | None = None):
                         log.info("ACCEPT: the far end closed: disconnecting")
                         engine.disconnect()
                 elif kind == "kiss":
-                    port, frame, ack = v
-                    link.enqueue(frame, port, ack)
+                    port, frame, ack, kcmd = v
+                    link.enqueue(frame, port, ack, kcmd)
                 else:
                     host.data_in(v)
             _send_cmd(cmd, host)  # replies at once, not after the audio step (clients time out at ~2 s)
@@ -743,8 +743,8 @@ def serve(a, pa, stop: threading.Event | None = None):
             for line in host.out_kiss_refs:  # same socket, ahead of the frames: no race with the command port
                 kiss.send_ref(line)
             host.out_kiss_refs.clear()
-            for port, f in engine.take_kiss_rx():
-                kiss.broadcast(f, port)
+            for port, f, kcmd in engine.take_kiss_rx():
+                kiss.broadcast(f, port, kcmd)
             for port, ack in link.take_acks():
                 kiss.send_ack(ack, port)
     finally:
@@ -786,11 +786,11 @@ def main():
                     help="TX audio queued ahead of the sound card: slack for a late audio step")
     ap.add_argument("--min-header-score", type=float, default=0.0)
     # "robust" names what "fsk" always meant: the robust connect mode, FSK on HF but n10 OFDM on FM
-    ap.add_argument("--pending", choices=("off", "fsk", "robust", "ofdm", "all"), default="fsk",
+    ap.add_argument("--pending", choices=("off", "fsk", "robust", "ofdm", "all"), default="all",
                     type=lambda v: "fsk" if v == "robust" else v,
-                    help="PENDING (CANCELPENDING after) on a header that may be a CONNECT while listening: "
-                         "robust (alias fsk), the robust connect mode only (HF: FSK; FM: n10 OFDM); "
-                         "ofdm, the first-try connect modes; all, both")
+                    help="PENDING (CANCELPENDING after) on a CONNECT header whose callee hash matches a registered "
+                         "call while listening: all, every connect mode (default); robust (alias fsk), the robust "
+                         "connect modes only (HF: FSK; FM: n10 OFDM); ofdm, the first-try connect modes; off")
     ap.add_argument("--buffer-credit", type=int, default=-1,
                     help="bytes queued for the next burst that BUFFER leaves out, at most, so VARA clients "
                          "that throttle on it (Pat) keep a whole burst queued; -1: the next burst's full "

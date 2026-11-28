@@ -32,20 +32,27 @@ void bind_kisslink(py::module_& m) {
         const auto f = kisslink::uncobs(bytes_view(b));
         return f ? py::object(pyb(*f)) : py::none();
     });
-    k.def("framed_len", &kisslink::framed_len);
-    k.def("pack_frames", [](const py::list& frames, std::size_t pb) {
+    k.def("uncobs_cmd", [](const py::bytes& b) -> py::object {
+        const auto f = kisslink::uncobs_cmd(bytes_view(b));
+        return f ? py::object(py::make_tuple(pyb(f->data), f->cmd)) : py::none();
+    });
+    k.def("framed_len", &kisslink::framed_len, py::arg("n"), py::arg("cmd") = 0);
+    k.def("pack_frames", [](const py::list& frames, std::size_t pb, const py::object& cmds) {
         std::vector<Bytes> f;
         for (const auto& x : frames) f.push_back(bytes_of(x));
+        std::vector<int> cs;
+        if (!cmds.is_none())
+            for (const auto& x : cmds) cs.push_back(x.cast<int>());
         py::list out;
-        for (const auto& p : kisslink::pack_frames(f, pb)) out.append(pyb(p));
+        for (const auto& p : kisslink::pack_frames(f, pb, cs)) out.append(pyb(p));
         return out;
-    });
+    }, py::arg("frames"), py::arg("pb"), py::arg("cmds") = py::none());
     k.def("unpack_frames", [](const py::list& payloads, const std::vector<bool>& ok) {
         std::vector<Bytes> pl;
         for (const auto& x : payloads) pl.push_back(bytes_of(x));
         auto [frames, lost] = kisslink::unpack_frames(pl, ok);
         py::list out;
-        for (const auto& f : frames) out.append(pyb(f));
+        for (const auto& f : frames) out.append(py::make_tuple(pyb(f.data), f.cmd));
         return py::make_tuple(out, lost);
     });
     py::class_<kisslink::Port>(k, "Port")
@@ -95,7 +102,7 @@ void bind_kisslink(py::module_& m) {
             for (const auto& q : l.queue) {
                 py::object ack = py::none();
                 if (q.ack && d.contains(py::int_(*q.ack))) ack = d[py::int_(*q.ack)];
-                out.append(py::make_tuple(q.port, pyb(q.frame), ack));
+                out.append(py::make_tuple(q.port, pyb(q.frame), ack, q.cmd));
             }
             return out;
         })
@@ -134,7 +141,7 @@ void bind_kisslink(py::module_& m) {
              py::arg("dup") = false)
         .def("reset", &KissLink::reset)
         .def("enqueue",
-             [ack_objs](const py::object& self, const py::handle& f, int port, const py::object& ack) {
+             [ack_objs](const py::object& self, const py::handle& f, int port, const py::object& ack, int cmd) {
                  std::optional<std::int64_t> id;
                  if (!ack.is_none()) {
                      py::dict d = ack_objs(self);
@@ -144,9 +151,9 @@ void bind_kisslink(py::module_& m) {
                      id = next << 16 | (py::isinstance<py::int_>(ack) ? (ack.cast<std::int64_t>() & 0xFFFF) : 0);
                      d[py::int_(*id)] = ack;
                  }
-                 self.cast<KissLink&>().enqueue(bytes_of(f), port, id);
+                 self.cast<KissLink&>().enqueue(bytes_of(f), port, id, cmd);
              },
-             py::arg("frame"), py::arg("port") = 0, py::arg("ack") = py::none())
+             py::arg("frame"), py::arg("port") = 0, py::arg("ack") = py::none(), py::arg("cmd") = 0)
         .def("on_sent", [acks_py](const py::object& self, const py::handle& burst) {
             return acks_py(self, self.cast<KissLink&>().on_sent(burst_cpp(burst)), false);  // take_acks still has them
         })
@@ -162,14 +169,14 @@ void bind_kisslink(py::module_& m) {
             auto soft = cached_soft(r, h);
             // Python's PHY.DD_BUDGET_S as it stands, so a test patching it applies here too
             const auto budget = py::module_::import("data2g.arq.phy").attr("DD_BUDGET_S").cast<double>();
-            std::optional<std::vector<std::pair<int, Bytes>>> frames;
+            std::optional<std::vector<kisslink::RxFrame>> frames;
             {
                 py::gil_scoped_release nogil;  // the clock takes the GIL back if it is Python's
                 frames = l.on_burst(h, std::move(soft), std::isfinite(budget) ? std::optional(budget) : std::nullopt);
             }
             if (!frames) return py::none();
             py::list out;
-            for (const auto& [port, f] : *frames) out.append(py::make_tuple(port, pyb(f)));
+            for (const auto& [port, f, cmd] : *frames) out.append(py::make_tuple(port, pyb(f), cmd));
             return out;
         }, py::arg("r"), py::arg("rx") = py::none());
 }

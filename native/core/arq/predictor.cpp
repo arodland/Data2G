@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <string>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +11,11 @@
 #include <string_view>
 #include <utility>
 
+#include "arq/burst.hpp"
 #include "arq/modes.hpp"
+#include "arq/phy.hpp"
+#include "config/config.hpp"
+#include "modem/modem.hpp"
 #include "cpm/cpm.hpp"
 #include "dsp/dsp.hpp"
 #include "waveform/ofdm.hpp"
@@ -18,9 +23,6 @@
 namespace data2g::arq {
 
 namespace {
-
-// predictor.LOGIT_OFFSETS for the installed model.
-constexpr std::pair<std::string_view, double> LOGIT_OFFSETS[] = {{"w48-16qam-r1/2", -1.0}, {"n10-256l-r3/4", -0.5}};
 
 const tables::CapacityTable& table(std::string_view constellation) {
     const auto family = const_family(constellation);
@@ -83,8 +85,9 @@ double fm_mer_offset_db() {
 
 double peak_db(std::string_view mode, int cap) {
     if (cap < 0 || cap > 2) throw std::out_of_range("no bandwidth cap " + std::to_string(cap));
-    for (const auto& p : tables::MODE_PEAK_DB)
-        if (p.mode == mode) return p.db[cap];
+    for (auto table : {tables::MODE_PEAK_DB, tables::MODE_PEAK_DB_WIDE})
+        for (const auto& p : table)
+            if (p.mode == mode) return p.db[cap];
     throw std::out_of_range("no peak for mode " + std::string(mode));
 }
 
@@ -434,9 +437,7 @@ std::vector<std::vector<Outcome>> predict_outcomes(const std::vector<OutcomeQuer
     const std::size_t n = tables::OUTCOME_MODES.size();
     std::vector<std::vector<Outcome>> out(qs.size(), std::vector<Outcome>(n));
     for (std::size_t q = 0; q < qs.size(); ++q) {
-        auto& z = zs[q];
-        for (const auto& [name, off] : LOGIT_OFFSETS)
-            if (const int i = outcome_index(name); i >= 0) z[i] += off;
+        const auto& z = zs[q];
         for (std::size_t i = 0; i < n; ++i)
             out[q][i] = {sigmoid(std::clamp(z[i], -40.0, 40.0)), sigmoid(std::clamp(z[n + i], -40.0, 40.0))};
     }
@@ -450,19 +451,13 @@ std::vector<Outcome> predict_queries(const Measured& m, std::string_view band, d
         for (std::size_t i = 0; i < qs.size(); ++i) out[i] = fm_outcome(m, qs[i].mode, band);
         return out;
     }
-    auto offset = [](int mode) {
-        double off = 0.0;
-        for (const auto& [name, o] : LOGIT_OFFSETS)
-            if (outcome_index(name) == mode) off += o;
-        return off;
-    };
     if (is_cnp(model)) {
         const auto x = outcome_inputs(m, band, gap, 1.0, prev, tables::OUTCOME_BANDS, tables::OUTCOME_ENERGY);
         std::vector<std::pair<int, double>> q;
         for (const auto& mq : qs) q.push_back({mq.mode, std::log2(mq.seconds)});
         const auto z = cnp_heads(cnp_encode(x), q);
         for (std::size_t i = 0; i < qs.size(); ++i)
-            out[i] = {sigmoid(std::clamp(z[i][0] + offset(qs[i].mode), -40.0, 40.0)), sigmoid(std::clamp(z[i][1], -40.0, 40.0))};
+            out[i] = {sigmoid(std::clamp(z[i][0], -40.0, 40.0)), sigmoid(std::clamp(z[i][1], -40.0, 40.0))};
         return out;
     }
     std::vector<double> secs;

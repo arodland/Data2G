@@ -37,6 +37,7 @@ from . import threads
 # real time (a 32 s burst in ~4 s). An explicit setting still wins.
 threads.cap_env(1)
 
+import os
 import logging  # noqa: E402
 from collections import deque  # noqa: E402
 
@@ -366,6 +367,15 @@ class Receiver:
         self.detectors = {b: sync.StreamDetector(ofdm.band(b)) for b in self.bands}
         # per band, find_copy's fold and data2g_on_air's, kept running (modem.FoldTrack)
         self.folds = {b: (modem.FoldTrack(), modem.FoldTrack()) for b in self.bands}
+        # scattered-pilot copy bands (w, w48): find_copy's comb outputs kept for the stream (modem.CombStream),
+        # reused by data2g_on_air; non-copy scattered bands (n10, n4) keep sense-only CombStreams fed only when sense=True.
+        self.combs = {b: modem.CombStream(b) for b in self.bands
+                      if b in modem.SC_BANDS and b in modem.HEADER_COPY_BANDS}
+        self.comb_folds = {b: (modem.FoldTrack(), modem.FoldTrack()) for b in self.combs}
+        sense_sc = [b for b in self.bands if b in modem.SC_BANDS and b not in self.combs]
+        if "n10" in self.bands and "n4" in BANDS and "n4" in modem.SC_BANDS and "n4" not in self.combs:
+            sense_sc.append("n4")
+        self.sense_combs = {b: (modem.CombStream(b), modem.FoldTrack()) for b in sense_sc}
         self.blanker = audio.Blanker() if blank else None
         self.sense = False  # read data2g_on_air (arq.engine turns it on; offline searches leave it off)
         self.reset()
@@ -401,7 +411,11 @@ class Receiver:
         # searched with all the audio their header needs (not searched again)
         self.decided: dict = {}
         from . import cpm
-        self.coarse = {g.name: cpm.CoarseTrack(g) for g in self.grids}  # each grid's search rows (_find_cpm)
+        self.coarse = {}  # each grid's search rows (_find_cpm); a wide grid's from the on-air grid of its tones
+        for g in self.grids:
+            src = next((t for t in self.coarse.values()  # (a Python track: a compiled one keeps its rows to itself)
+                        if hasattr(t, "_sourced") and cpm.shares_rows(g, t.g)), None)
+            self.coarse[g.name] = cpm.CoarseTrack(g, source=src)
         # CPM fronts whose first header copy fell short (cpm.find's candidates,
         # stream indices): read again with both copies once the second is in
         self.cpm_wait: list = []
@@ -418,6 +432,14 @@ class Receiver:
         for pair in getattr(self, "folds", {}).values():
             for f in pair:
                 f.reset()
+        for c in getattr(self, "combs", {}).values():
+            c.reset()
+        for pair in getattr(self, "comb_folds", {}).values():
+            for f in pair:
+                f.reset()
+        for c, f in getattr(self, "sense_combs", {}).values():
+            c.reset()
+            f.reset()
 
     def expect(self, grids, lo: int, hi: int, cfo: float):
         """The expected slot (docs/arq.md §3a): a burst of one of these CPM
@@ -523,6 +545,8 @@ class Receiver:
         if end >= self.SENSE_BLIND_S * FS:  # (stream indices count from the reset)
             self._blind = False
         for band, d in self.detectors.items():
+            if band in modem.SC_BANDS:
+                continue
             level = d.level()
             if level is None:
                 continue
@@ -534,8 +558,38 @@ class Receiver:
             d0, kept = d.kept_products(modem.FRAME_SAMPLES, modem.COPY_PAIRS)
             lo_f = a + t0
             fold = self.folds[band][1].fold(kept, d0, lo_f, lo_f + m * modem.FRAME_SAMPLES)
-            if (modem.presence_verdict(*modem.fold_presence(fold, level, m), m)
-                    and modem.fold_verify(self.buf[lo_f - self.off:], band, fold, lo_f % modem.FRAME_SAMPLES)):
+            if (modem.presence_verdict(*modem.fold_presence(fold, level, m), m, band)
+                    and modem.fold_verify(self.buf[lo_f - self.off:], band, fold, lo_f)):
+                log.debug("data2g on air: %s pilots", band)
+                self._present = True
+                return
+        for band, (c, pfold) in ([(b, (self.combs[b], self.comb_folds[b][1])) for b in self.combs]
+                                 + list(self.sense_combs.items())):
+            if band in self.sense_combs:
+                if c.fed < self.off:
+                    c.restart_at(self.off)
+                if c.fed < end:
+                    c.feed(dsp.to_baseband(self.buf[c.fed - self.off:], c.fed))
+                c.trim(end - int(self.PRESENCE_S * FS) - c.lag - modem.M - c.decim)
+            level = c.level()
+            if level is None:
+                continue
+            decim = c.decim
+            FR_d = modem.FRAME_SAMPLES // decim
+            pad_fr = (modem.COPY_PAIRS - 1) if c.intra is not None else modem.COPY_PAIRS
+            a, D = c.products_from(start)
+            D = D[:, :max(0, (end - a - modem.M + 1 - c.lag - pad_fr * modem.FRAME_SAMPLES) // decim)]
+            t0_d, m = modem.presence_window(D.shape[1], int(self.PRESENCE_S * FS), decim, pad_fr)
+            if m < modem.PRESENCE_MIN_M:
+                continue
+            d0, kept = c.kept_products()
+            lo_d = a // decim + t0_d
+            lo_f = lo_d * decim
+            fold = pfold.fold(kept, d0 // decim, lo_d, lo_d + m * FR_d, period=FR_d)
+            fold = fold - fold.mean(axis=1, keepdims=True)
+            row_w = modem._copy_row_weights(c.row_levels(), c.intra[2]) if c.intra is not None else None
+            if (modem.presence_verdict(*modem.fold_presence(fold, level, m, row_w), m, band)
+                    and modem.fold_verify(self.buf[lo_f - self.off:], band, fold, lo_f, decim, row_w)):
                 log.debug("data2g on air: %s pilots", band)
                 self._present = True
                 return
@@ -603,6 +657,10 @@ class Receiver:
             self.buf = self.buf[len(self.buf) - n:]  # not [-n:], which for n = 0 is everything
         for d in self.detectors.values():
             d.trim(self.off)
+        for c in self.combs.values():
+            c.trim(self.off)
+        for c, _ in self.sense_combs.values():
+            c.trim(self.off)
 
     def _stats(self, w0: int = 0) -> dict:
         """Per band, the detection statistic for buf[w0:]'s starts (new audio
@@ -615,6 +673,15 @@ class Receiver:
             # no search looks further back than `keep` (the statistic grew
             # with a long burst in the buffer, and was copied every hop)
             d.trim(self.off + len(self.buf) - self.keep - d.span)
+            if b in self.combs:
+                c = self.combs[b]
+                if c.fed < self.off:
+                    c.restart_at(self.off)
+                c.feed(dsp.to_baseband(self.buf[c.fed - self.off:], c.fed))
+                d.trim_outputs(c.fed - len(c.tail))
+                c.trim(self.off + len(self.buf) - self.keep - d.span)
+            elif b in modem.SC_BANDS:
+                d.trim_outputs(d.fed)
             n = len(self.buf) - w0 - d.span + 1
             if n <= 0:
                 continue
@@ -762,6 +829,27 @@ class Receiver:
         lock, as find_burst's dict (buffer indices), or None."""
         best = None
         for band in modem.HEADER_COPY_BANDS:
+            if band in self.combs:  # the coherent combs' outputs, kept for the stream (modem.CombStream)
+                c = self.combs[band]
+                level = c.level()
+                if level is None:
+                    continue
+                D_dec = c.decim
+                FR_d = modem.FRAME_SAMPLES // D_dec
+                a, D = c.products_from(self.off)
+                x = self.buf[a - self.off:]
+                D = D[:, :max(0, (len(x) - modem.M + 1 - c.lag - modem.COPY_PAIRS * modem.FRAME_SAMPLES) // D_dec)]
+                m = D.shape[1] // FR_d
+                fold = None
+                if m >= 1:
+                    d0, kept = c.kept_products()
+                    R = self.comb_folds[band][0].fold(kept, d0 // D_dec, a // D_dec, a // D_dec + m * FR_d, period=FR_d)
+                    fold = np.roll(R, -((a // D_dec) % FR_d), axis=1)
+                lock = modem.find_copy(x, band, self.accept, level=level, D=D, fold=fold, comb=True, decim=D_dec,
+                                       row_level=c.row_levels())
+                if lock is not None and (best is None or lock["score"] > best[0]["score"]):
+                    best = (lock, a - self.off)
+                continue
             d = self.detectors.get(band)
             level = d.level() if d is not None else None
             if level is None:

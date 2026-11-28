@@ -55,7 +55,7 @@ struct Args {
     std::string tx_path = "mic";  // modem::set_tx_path: the radio's TX audio path on FM (mic, flat)
     double cw_wpm = 20.0;
     std::string hand_decoder = "full";  // "full" or "cheap": net control's Hand round grids
-    std::string pending = "fsk";  // arq::Engine::pending: off, fsk, ofdm, all
+    std::string pending = "all";  // arq::Engine::pending: off, fsk, ofdm, all
     bool nods = true;             // arq::Engine::set_nods: short keyed CPM replies (docs/arq.md §3b)
     // additions
     bool decode_worker = true;

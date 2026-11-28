@@ -278,6 +278,21 @@ def genie_ofdm(r: dict, b: dict) -> dict:
     n_f, _, nc = Y.shape
     kc = r["kc"]
     air = np.arange(n_f) + (0 if kc is None else (np.arange(n_f) >= kc))
+    if r.get("sc") is not None:
+        # Scattered pilots pack each frame's pilots into row 0 and data cells into rows 1..5:
+        # unpack back onto the on-air (symbol, carrier) grid so adjacent carriers and symbols align.
+        intra = modem._sc_intra_spec(nc) is not None
+        def _unpack(raw):
+            out = np.empty_like(raw)
+            for f in range(n_f):
+                P, _, Dc = modem.sc_frame_cells(nc, int(air[f]))
+                p_idx = P if intra else modem.sc_cells(nc)[3]
+                flat = out[f].reshape(-1)
+                flat[p_idx] = raw[f, 0]
+                flat[Dc] = raw[f, 1:].reshape(-1)
+            return out
+
+        Y, X = _unpack(Y), _unpack(X)
     ti = (air[:, None] * SYMS_PER_FRAME + np.arange(SYMS_PER_FRAME)).ravel()  # symbol index on air
     Y, X = Y.reshape(-1, nc), X.reshape(-1, nc)
     H = Y / X

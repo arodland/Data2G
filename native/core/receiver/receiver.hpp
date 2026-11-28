@@ -55,6 +55,7 @@ struct Pending {
     double cfo() const;
     int n_cw() const;  // CPM: slots, control included
     bool copy() const { return !is_cpm() && ofdm().copy.has_value(); }
+    std::optional<int> connect_hash() const { return is_cpm() ? cpm().connect_hash : ofdm().connect_hash; }
     void shift(std::int64_t d);  // every position (but a CPM header_end) by d
 };
 
@@ -193,7 +194,16 @@ private:
         std::string_view band;
         waveform::StreamDetector d;
         modem::FoldTrack copy_fold;      // find_copy's, kept running
-        modem::FoldTrack presence_fold;  // data2g_on_air's, kept running
+        modem::FoldTrack presence_fold;  // data2g_on_air's, kept running (non-SC bands)
+        // a scattered-pilot copy band's: find_copy's coherent comb outputs kept for the stream, and their folds
+        std::optional<modem::CombStream> comb;
+        modem::FoldTrack comb_fold;
+        modem::FoldTrack comb_presence_fold;
+    };
+    struct SenseComb {  // sense-only scattered-pilot bands (n10, n4): fed only when sense=true
+        std::string_view band;
+        modem::CombStream comb;
+        modem::FoldTrack presence_fold;
     };
     struct Stats {  // per band, the statistic for buf[w0:]'s starts
         std::vector<Mat<double>> mats;
@@ -221,6 +231,7 @@ private:
     std::vector<const cpm::Grid*> grids_;
     std::int64_t min_search_, keep_, hold_;
     std::vector<Detector> detectors_;
+    std::vector<SenseComb> sense_combs_;
     std::optional<audio::Blanker> blanker_;
 
     std::vector<double> buf_;

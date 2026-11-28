@@ -21,9 +21,11 @@
 
 namespace data2g::arq {
 
-inline constexpr int VERSION = 5;  // session.py VERSION: 4 added T_INLINE, 5 the CW ID ahead of a turn
-inline constexpr int CONNECT_TRIES = 6;  // session.py: the last in ROBUST_FAST
-inline constexpr int CONNECT_CTL_BYTES = 4 + 2 + Connect::BYTES;  // a CONNECT's Control: core, T_SESS header, body
+// Wire 1.0 major version (4-bit field in CONNECT): 1 for all of 1.x.
+inline constexpr int VERSION = 1;
+inline constexpr int MIN_VERSION = 1;
+inline constexpr int MAX_VERSION = 1;
+inline constexpr int CONNECT_TRIES = 6;  // session.py: cap's connect mode, then RRRWW retries
 inline constexpr int DISC_TRIES = 3;
 // DISC tries stop within this of the first one keyed: BPQ32's ABORT comes 30 s after its DISCONNECT (session.py)
 inline constexpr double DISC_BUDGET_S = 29.0;
@@ -45,8 +47,9 @@ inline constexpr double COALESCE_S = 0.1;  // CHAT OFF: a short write to an idle
 inline constexpr double REPLY_HOLD_S = 0.25;
 inline constexpr double REPEAT_MAX_S = 3.0;
 // CONNECT_NAK reasons: the caller stops dialing on any of them
-inline constexpr int NAK_VERSION = 1, NAK_NOT_LISTENING = 2, NAK_BUSY = 3, NAK_REFUSED = 4;
+inline constexpr int NAK_VERSION = 1, NAK_NOT_LISTENING = 2, NAK_BUSY = 3, NAK_REFUSED = 4, NAK_CAPS = 5;
 const char* nak_name(int reason);  // nullptr for an unknown one
+std::string nak_close_reason(int reason, int detail = 0);
 
 // random.Random's two draws the session makes. Not bit-exact with Python's
 // by default; a binding passes Python's own generator to keep seeded runs.
@@ -72,7 +75,7 @@ const char* state_name(SessionState s);  // as session.py's strings
 
 // Nonzero 16-bit key; 0 means no session (connect frames).
 int session_key(const std::string& caller, const std::string& callee, std::int64_t nonce);
-std::string frame_desc(ByteView body);
+std::string frame_desc(ByteView body, int sub = 0);
 
 // session.py's module constants that a study patches (scripts/idle_study.py's
 // variants). Defaults are the constants; a binding copies Python's values in
@@ -106,7 +109,12 @@ public:
     std::vector<std::string> events;  // host notifications, oldest first
     std::string close_reason;
     bool chat = false;
-    bool nods = true;  // nods (docs/arq.md §3b) for the stations it makes; DATA2G_NOD=0 overrides
+    bool nods = true;  // nods (docs/arq.md §3b): advertises CAP_NODS in CONNECT/CONNECT_ACK unless off
+    std::optional<int> caps;  // override local caps bitmask (nullopt: CAP_NODS when nods enabled)
+    int req = 0;  // local mandatory peer-constraint bitmask (8 bits)
+    int peer_caps = 0;  // peer's caps from CONNECT / CONNECT_ACK
+    int peer_req = 0;  // peer's req from CONNECT / CONNECT_ACK
+    int local_caps() const { return caps ? *caps : ((nod_default() && nods) ? CAP_NODS : 0); }
     std::vector<std::string> aliases;
     // before a CONNECT is answered: false refuses it (host ACCEPT)
     std::function<bool(const std::string& caller, const std::string& callee)> accept_connect;
@@ -192,6 +200,7 @@ protected:
 private:
     struct Frame {
         int key;
+        int sub;
         Bytes body;
         std::string mode;
     };
@@ -200,16 +209,16 @@ private:
     void close(const std::string& why, TxBurstPtr final_burst = nullptr, double now = 0.0);
     void connected(double now);
     void log_stats(const char* label, double now, double since, const std::map<std::string, std::int64_t>& prev);
-    TxBurstPtr session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode = std::nullopt);
+    TxBurstPtr session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode = std::nullopt,
+                             int sub = 0);
     TxBurstPtr connect_burst();
     TxBurstPtr disc_burst();
     std::optional<std::string> session_mode() const;
     TxBurstPtr accept_burst();
-    void refuse(const Connect& c, const std::string& mode, int reason, double now);
-    bool compact(const std::string& mode);  // a CONNECT in `mode` goes compact (frames pack_connect)
+    void refuse(const Connect& c, const std::string& mode, int reason, double now, int detail = 0);
     std::optional<Frame> session_frame(RxBurst& rx);
     std::optional<Frame> primed_frame(RxBurst& rx);  // a connect frame that failed blind (session.py's, §3a)
-    std::optional<Frame> primed_body(Bytes body, RxBurst& rx, const char* how = "primed");
+    std::optional<Frame> primed_body(Bytes body, RxBurst& rx, const char* how = "primed", int sub = 0);
     std::optional<Frame> repeated_frame(RxBurst& rx, double now);  // one that failed, combined with the failed ones before it
     double repeat_at = -1e300;  // the last failed connect frame kept for combining
     void on_session_frame(const Frame& f, double now);

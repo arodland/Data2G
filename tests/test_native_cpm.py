@@ -8,8 +8,12 @@ from data2g import codes, cpm
 from data2g.config import FS
 from data2g.modem import crc6
 
-GRIDS = list(cpm.GRIDS.values())
-ALL_SPECS = list(cpm.SPECS.values()) + list(cpm.CTL.values())
+# every compiled-in grid: the on-air ones, then the wide toolbox ones (DATA2G_CPM_ONAIR may put some on air)
+GRIDS = list(cpm.GRIDS.values()) + [g for n, g in cpm.WIDE_GRIDS.items() if n not in cpm.GRIDS]
+DATA_SPECS = {**cpm.SPECS, **cpm.WIDE_SPECS}  # every data spec, on air or not
+# tables::CPM_SPECS, CPM_CTL (master's grids), then CPM_WIDE_SPECS, CPM_WIDE_CTL
+ALL_SPECS = ([s for s in cpm.SPECS.values() if s.name not in cpm.WIDE_SPECS] + [cpm.CTL[g] for g in cpm.GRIDS if g not in cpm.WIDE_GRIDS]
+             + list(cpm.WIDE_SPECS.values()) + list(cpm.WIDE_CTL.values()))
 RTOL = 1e-12  # anything through exp, FFT or a reduction
 
 
@@ -33,15 +37,21 @@ def test_header_tables_are_the_rng_draws(native, reference):
 
 def test_grid_and_spec_tables(native):
     rows = native.cpm.grids()
-    assert [r["name"] for r in rows] == list(cpm.GRIDS)
-    for r, g in zip(rows, GRIDS):
+    assert [r["name"] for r in rows] == list(cpm.GRIDS)  # on air: DATA2G_CPM_ONAIR's too
+    assert native.cpm.on_air_specs() == list(cpm.SPECS)
+    rows = [r for r in rows if r["name"] not in cpm.WIDE_GRIDS] + native.cpm.grids(wide=True)
+    assert [r["name"] for r in rows] == [g.name for g in GRIDS if g.name not in cpm.WIDE_GRIDS] + list(cpm.WIDE_GRIDS)
+    for r in rows:
+        g = cpm.GRIDS[r["name"]]
+        assert (r["L"], r["guard"]) == (g.L, g.guard)
+        assert (r["noise_median"], r["median_se"]) == (cpm._noise_median(g.k), cpm._median_se(g.k))
         assert (r["m"], r["rate"], r["center"], r["bp"], r["clip_db"], r["T"], r["bits"], r["f0"]) == \
             (g.m, g.rate, g.center, g.bp, g.clip_db, g.T, g.bits, g.f0)
         assert (r["sync_threshold"], r["lock_llr"]) == (cpm.SYNC_THRESHOLD[g.name], cpm.LOCK_LLR[g.name])
         assert r["hdr_len"] == cpm.hdr_len(g)
         np.testing.assert_array_equal(r["preamble"], cpm.preamble_pattern(g))
         np.testing.assert_array_equal(r["mid_block"], cpm.mid_block(g))
-    assert native.cpm.specs() == [dict(name=s.name, grid=s.grid, code=s.code, index=s.index, k=s.k,
+    assert native.cpm.specs() + native.cpm.specs(wide=True) == [dict(name=s.name, grid=s.grid, code=s.code, index=s.index, k=s.k,
                                        coded_bits=s.coded_bits, n_sym=s.n_sym) for s in ALL_SPECS]
 
 
@@ -59,7 +69,7 @@ def test_layout_and_timing(native, reference):
         for n_data in range(cpm.MAX_DATA + 1):
             for dup in (False, True):
                 assert native.cpm.stream_symbols(g.name, n_data, dup) == stream_symbols(g.name, n_data, dup)
-    for s in cpm.SPECS.values():
+    for s in DATA_SPECS.values():
         for n_cw in range(0, cpm.MAX_DATA + 3):
             for dup in (False, True):
                 assert native.cpm.burst_seconds(s.name, n_cw, dup) == burst_seconds(s, n_cw, dup)
@@ -83,7 +93,7 @@ def _channel(x, rng, lead=2000, cfo=0.0, sigma=0.3):
 
 def test_modulate(native, reference):
     rng = np.random.default_rng(3)
-    for spec in cpm.SPECS.values():
+    for spec in DATA_SPECS.values():
         g = cpm.GRIDS[spec.grid]
         for n_data, dup in ((0, False), (2, True), (3, False)):
             coded = _burst(spec, n_data, dup, rng)
@@ -103,14 +113,17 @@ def test_modulate(native, reference):
 # (spec, n_data, dup, cfo Hz, noise sigma)
 CASES = [("fsk16r25-r1/2", 1, False, 0.0, 0.3), ("fsk8r50-r1/3", 2, True, 17.0, 0.5),
          ("fsk32r62-r1/2", 1, True, -40.0, 0.4), ("fsk8r50-r1/2", 0, False, 3.0, 1.0)]
+# the wide toolbox grids (cpm.WIDE_GRIDS: sub-window sums, sub-window coherent rows)
+WIDE_CASES = [("fsk8w50-r1/2", 1, False, 7.0, 0.4), ("fsk16w125-r1/3", 2, True, -20.0, 0.3),
+              ("fsk8w50-r1/3", 0, True, -3.0, 0.8)]
 
 
-@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+@pytest.mark.parametrize("case", CASES + WIDE_CASES, ids=[c[0] for c in CASES + WIDE_CASES])
 def test_receive_chain(native, reference, case):
     name, n_data, dup, cfo, sigma = case
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(CASES.index(case))
+    rng = np.random.default_rng((CASES + WIDE_CASES).index(case))
     coded = _burst(spec, n_data, dup, rng)
     y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
 
@@ -183,7 +196,7 @@ def test_spread_on_selective_fading_matches(native, reference, name):
     assert seen == {cpm.UNMEASURED_SPREAD_HZ, cpm.SPREAD_MAX_HZ, "fit"}
 
 
-@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in DATA_SPECS.values() if s.name.endswith("r1/2")
                                          for n in (0, 3)])
 def test_late_lock(native, reference, name, n_data):
     """A burst whose first header copy faded: find's candidate before the
@@ -214,14 +227,14 @@ def test_late_lock(native, reference, name, n_data):
                 assert a[k] == pytest.approx(b[k], rel=RTOL, abs=1e-12), k
 
 
-@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in DATA_SPECS.values() if s.name.endswith("r1/2")
                                          for n in (0, 3)])
 def test_confirm(native, reference, name, n_data):
     """An early lock's second look (the mid block and second header copy at
     its word): on the burst, and on one that stops after its first copy."""
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(n_data)
+    rng = np.random.default_rng(n_data + 9)
     assert native.cpm.CONFIRM_LLR == cpm.CONFIRM_LLR
     x = ref(reference, "modulate")(spec, _burst(spec, n_data, False, rng), False).copy()
     rows = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, False)).hdr_rows[0]
@@ -257,7 +270,7 @@ def test_codes_roundtrip_through_native_modulate(native):
     assert lock is not None and lock["n_data"] == 1 and lock["spec"] is spec
 
 
-@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in cpm.SPECS.values() if s.name.endswith("r1/2")
+@pytest.mark.parametrize("name,n_data", [(s.name, n) for s in DATA_SPECS.values() if s.name.endswith("r1/2")
                                          for n in (0, 3)])
 def test_find_mid(native, reference, name, n_data):
     """A burst whose front and first header copy faded: the mid block's
@@ -285,25 +298,28 @@ def test_find_mid(native, reference, name, n_data):
                 assert a[k] == pytest.approx(c[k], rel=RTOL, abs=1e-12), (kw, k)
 
 
-@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+@pytest.mark.parametrize("case", CASES + WIDE_CASES, ids=[c[0] for c in CASES + WIDE_CASES])
 def test_coherent(native, reference, case):
     """Coherent detection (cpm.py's section): bins, coh_metric, the coherent
     header, the per-slot DD metric and its soft values, alike in both."""
     name, n_data, dup, cfo, sigma = case
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(20 + CASES.index(case))
+    rng = np.random.default_rng(20 + (CASES + WIDE_CASES).index(case))
     coded = _burst(spec, n_data, dup, rng)
     y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
     assert (native.cpm.COH_W, native.cpm.COH_HDR_W) == (cpm.COH_W, cpm.COH_HDR_W)
     assert native.cpm.coh_lock(g.name) == cpm.COH_LOCK.get(g.name)
     assert native.cpm.COH_PREGATE == cpm.COH_PREGATE
     assert native.cpm.coh_ctl() == cpm.COH_CTL
+    assert native.cpm.coh2d() == cpm.COH2D
+    assert [native.cpm.coh_w(g.name, h) for h in (False, True)] == [cpm._coh_w(g, h) for h in (False, True)]
+    W = cpm._coh_w(g)
 
     s0, f = ref(reference, "detect")(g, y)[1:]
-    for start, n in ((s0, 40), (-50, 10)):
-        np.testing.assert_allclose(native.cpm.bins(g.name, y, start, n, f), ref(reference, "bins")(g, y, start, n, f),
-                                   rtol=RTOL, atol=1e-9)
+    for start, n in ((s0, 40), (-50, 10)):  # (a wide grid's: sub-window rows, L a symbol)
+        np.testing.assert_allclose(native.cpm.bins(g.name, y, start, n, f),
+                                   ref(reference, "bins")(g, y, start, n, f).reshape(-1, g.m), rtol=RTOL, atol=1e-9)
     for copies in (1, 2):
         a = native.cpm.coh_read_header(g.name, y, s0, f, copies)
         b = ref(reference, "coh_read_header")(g, y, s0, f, copies)
@@ -312,12 +328,18 @@ def test_coherent(native, reference, case):
 
     lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
     Z = ref(reference, "bins")(g, y, s0, lay.n, f)
-    E = np.abs(Z) ** 2
+    Zr = Z.reshape(-1, g.m)
+    E = np.abs(Zr) ** 2
     n0 = ref(reference, "_n0")(E)
     assert native.cpm.noise_n0(E) == pytest.approx(n0, rel=1e-15)
-    P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
-    np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
+    Es = E.reshape(-1, g.L, g.m).sum(axis=1)  # a wide grid's symbol sums: gamma(k)'s median
+    assert native.cpm.noise_n0(Es, cpm._noise_median(g.k)) == pytest.approx(ref(reference, "_n0")(Es, g.k), rel=1e-15)
+    P = rng.dirichlet(np.ones(g.m) * 0.3, lay.n)
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr, P, W, n0, g.L), ref(reference, "coh_metric")(Zr, P, W, n0, g.L),
                                rtol=1e-9, atol=1e-9)
+    # Short window (n=12 <= 2*W2): Python and native match
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr[:12 * g.L], P[:12], W, n0, g.L),
+                               ref(reference, "coh_metric")(Zr[:12 * g.L], P[:12], W, n0, g.L), rtol=1e-9, atol=1e-9)
     L = rng.normal(size=(30, g.m))
     np.testing.assert_allclose(native.cpm.bit_llrs(g.name, L), ref(reference, "bit_llrs")(g, L), rtol=RTOL, atol=1e-12)
 
@@ -330,13 +352,13 @@ def test_coherent(native, reference, case):
         post[1 + dup] = np.log(rng.dirichlet(np.ones(g.m), cpm.DATA_N // g.bits)).reshape(-1)
     for slot in range(n_cw):
         for p in ({}, post):
-            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, p, slot)
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Zr, p, slot)
             np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
             np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot), ref(reference, "dd_soft")(r, M, slot),
                                        rtol=1e-12, atol=1e-12)
 
 
-@pytest.mark.parametrize("case", CASES[:2], ids=[c[0] for c in CASES[:2]])
+@pytest.mark.parametrize("case", CASES[:2] + WIDE_CASES[:2], ids=[c[0] for c in CASES[:2] + WIDE_CASES[:2]])
 def test_per_tone_floors(native, reference, case):
     """A steady carrier in the passband: tone_floors' path through the tone
     metric, the header reads, refine, the soft values and the coherent
@@ -344,7 +366,7 @@ def test_per_tone_floors(native, reference, case):
     name, n_data, dup, cfo, sigma = case
     spec = cpm.SPECS[name]
     g = cpm.GRIDS[spec.grid]
-    rng = np.random.default_rng(40 + CASES.index(case))
+    rng = np.random.default_rng(40 + (CASES + WIDE_CASES).index(case))
     coded = _burst(spec, n_data, dup, rng)
     y = _channel(ref(reference, "modulate")(spec, coded, dup), rng, lead=1777, cfo=cfo, sigma=sigma)
     hz = g.f0 + 5.4 * g.rate  # between two tones
@@ -354,7 +376,7 @@ def test_per_tone_floors(native, reference, case):
     s0, f = 1777, cfo
     lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
     E = ref(reference, "_energies")(g, y, s0, lay.n, f)
-    assert cpm.tone_floors(E[:60], cpm._n0(E[:60])) is not None, "the case must take the per-tone path"
+    assert cpm.tone_floors(E[:60], cpm._n0(E[:60], g.k), g.k) is not None, "the case must take the per-tone path"
     for rows in (E[:22], E[:60], E):
         np.testing.assert_allclose(native.cpm.tone_llr(g.name, rows), ref(reference, "tone_llr")(g, rows), rtol=1e-9,
                                    atol=1e-9)
@@ -383,14 +405,18 @@ def test_per_tone_floors(native, reference, case):
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
 
     Z = ref(reference, "bins")(g, y, s0, lay.n, f)
-    n0 = ref(reference, "_n0")(np.abs(Z) ** 2)
-    P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
-    np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
+    Zr, W = Z.reshape(-1, g.m), cpm._coh_w(g)
+    n0 = ref(reference, "_n0")(np.abs(Zr) ** 2)
+    P = rng.dirichlet(np.ones(g.m) * 0.3, lay.n)
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr, P, W, n0, g.L), ref(reference, "coh_metric")(Zr, P, W, n0, g.L),
                                rtol=1e-9, atol=1e-9)
+    # Short window (n=12 <= 2*W2): Python and native match
+    np.testing.assert_allclose(native.cpm.coh_metric(Zr[:12 * g.L], P[:12], W, n0, g.L),
+                               ref(reference, "coh_metric")(Zr[:12 * g.L], P[:12], W, n0, g.L), rtol=1e-9, atol=1e-9)
     n_cw = 1 + dup + n_data
     r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
     for slot in range(n_cw):
-        M = native.cpm.dd_metric(spec.name, dup, n_cw, Z, {}, slot)
+        M = native.cpm.dd_metric(spec.name, dup, n_cw, Zr, {}, slot)
         np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, {}, slot), rtol=1e-9, atol=1e-9)
 
 
@@ -425,7 +451,7 @@ def test_presence_matches(native, reference):
     noise = rng.normal(size=L)
     carrier = noise + 5.0 * np.cos(2 * np.pi * 1500.0 * t + 0.3)
     for g in GRIDS:
-        burst = ref(reference, "bandpass")(g, ref(reference, "tones")(g, rng.integers(0, g.m, int(4 * g.rate))))[:L]
+        burst = ref(reference, "bandpass")(g, ref(reference, "tones")(g, rng.integers(0, g.m, int(4 * g.baud))))[:L]
         burst = burst + 0.4 * rng.normal(size=L)
         for sig in (noise, carrier, burst):
             assert native.cpm.presence(g.name, sig) == pytest.approx(ref(reference, "presence")(g, sig), rel=RTOL, abs=1e-12)
@@ -435,3 +461,180 @@ def test_presence_matches(native, reference):
             tp.feed(sig, 123)
             assert tn.presence(123, 123 + L) == pytest.approx(tp.presence(123, 123 + L), rel=RTOL, abs=1e-12)
             assert tn.present(123, 123 + L) == tp.present(123, 123 + L)
+
+
+def test_coarse_track_shared(native, reference):
+    """A wide grid's rows summed from its on-air grid's (c8w50 on c8r50):
+    the same as its own transforms, in C++ and in Python, as a receiver feeds them."""
+    g, h = cpm.GRIDS["c8w50"], cpm.GRIDS["c8r50"]
+    rng = np.random.default_rng(8)
+    x = rng.normal(0, 1, 4 * FS)
+    src = native.cpm.CoarseTrack(h.name)
+    tn, own = native.cpm.CoarseTrack(g.name, source=src), native.cpm.CoarseTrack(g.name)
+    psrc = ref(reference, "CoarseTrack")(h)
+    tp = ref(reference, "CoarseTrack")(g, source=psrc)
+    off, buf = 0, np.zeros(0)
+    for i in range(0, len(x), FS // 50):
+        buf = np.concatenate([buf, x[i:i + FS // 50]])
+        if len(buf) > FS:
+            off, buf = off + len(buf) - FS, buf[len(buf) - FS:]
+        for t in (src, tn, own, psrc, tp):
+            t.feed(buf, off)
+    for kw in (dict(front_only=True, fine=False), dict(mid=True)):
+        a, b = (native.cpm.detect(g.name, buf[37:], track=t, x0=off + 37, **kw) for t in (tn, own))
+        c = ref(reference, "detect")(g, buf[37:], track=tp, x0=off + 37, **kw)
+        assert a == b, kw  # summed rows: bit for bit the grid's own
+        assert a[1:] == c[1:] and a[0] == pytest.approx(c[0], rel=RTOL), kw
+    assert tn.presence(off, off + len(buf)) == pytest.approx(own.presence(off, off + len(buf)), rel=RTOL, abs=1e-12)
+    assert tn.presence(off, off + len(buf)) == pytest.approx(tp.presence(off, off + len(buf)), rel=RTOL, abs=1e-12)
+
+
+def _leak_case(spec, chan, rng, n_data=2, dup=True, sigma=0.08):
+    """A burst of `spec` from sample 1777, CFO 0: on AWGN, with a steady carrier between two tones, or on hilat-d."""
+    from data2g import hfchannel
+
+    g = cpm.GRIDS[spec.grid]
+    x = cpm.modulate(spec, _burst(spec, n_data, dup, rng), dup)
+    if chan == "hilat-d":
+        x = hfchannel.fading(np.concatenate([np.zeros(1777), x, np.zeros(1777)]), hfchannel.ITU_PRESETS["hilat-d"],
+                             seed=int(rng.integers(1 << 30)))
+        y = x + rng.normal(0, sigma, len(x))
+    else:
+        y = _channel(x, rng, lead=1777, sigma=sigma)
+    if chan == "carrier":
+        y = y + 20 * sigma * np.cos(2 * np.pi * (g.f0 + 5.4 * g.rate) * np.arange(len(y)) / FS + 1.0)
+    return y
+
+
+@pytest.mark.parametrize("chan", ["awgn", "carrier", "hilat-d"])
+@pytest.mark.parametrize("name", list(cpm.SPECS))
+def test_leak_model(native, reference, name, chan):
+    """Neighbour-leak tone likelihood on every grid and rate, on AWGN, beside an
+    in-grid carrier and on hilat-d: tone_metric per consumer, spill_significant,
+    leak_metric, ctl_square, soft values, DD metric/soft, and receive alike in both."""
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    rng = np.random.default_rng(list(cpm.SPECS).index(name) * 3 + ["awgn", "carrier", "hilat-d"].index(chan))
+    n_data, dup, s0, f = 2, True, 1777, 0.0
+    y = _leak_case(spec, chan, rng, n_data, dup)
+    slots, E = native.cpm.soft(g.name, y, s0, f, n_data, dup)
+    slots_ref, E_ref = ref(reference, "soft")(g, spec, y, s0, f, n_data, dup)
+    np.testing.assert_allclose(E, E_ref, rtol=RTOL, atol=1e-12)
+    for a, b in zip(slots, slots_ref, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+    n_ctl, n_dat = cpm.CTL[g.name].n_sym, cpm.DATA_N // g.bits
+    cws = [E_ref[:n_ctl], E_ref[n_ctl:2 * n_ctl]] + [E_ref[2 * n_ctl + i * n_dat:2 * n_ctl + (i + 1) * n_dat] for i in range(n_data)]
+    significant = [ref(reference, "spill_significant")(e) for e in cws]
+    assert [native.cpm.spill_significant(e) for e in cws] == significant
+    for e in cws:
+        np.testing.assert_allclose(native.cpm.tone_llr(g.name, e), ref(reference, "tone_llr")(g, e), rtol=1e-9, atol=1e-9)
+        for use in ("lock", "ctl", "data", "dd"):
+            np.testing.assert_allclose(native.cpm.tone_metric(g.name, e, use), ref(reference, "tone_metric")(g, e, use),
+                                       rtol=1e-12, atol=1e-12)
+        if g.k == 1:
+            for k in (0.0, cpm.LEAK_K):
+                np.testing.assert_allclose(native.cpm.leak_metric(e, k), ref(reference, "leak_metric")(e, k), rtol=1e-12,
+                                           atol=1e-12)
+    square = [ref(reference, "ctl_square")(g, E_ref, s) for s in range(1 + dup)]
+    assert [native.cpm.ctl_square(g.name, E_ref, s) for s in range(1 + dup)] == square
+    if chan == "hilat-d" and g.k == 1:  # the case must reach the leak model on L=1 grids
+        assert all(significant), significant
+
+    lay = cpm.layout(g.name, cpm.stream_symbols(g.name, n_data, dup))
+    Z = ref(reference, "bins")(g, y, s0, lay.n, f)
+    Z_nat = Z if g.L == 1 else Z.reshape(-1, g.m)
+    n_cw = 1 + dup + n_data
+    r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
+    post = {1 + dup: np.log(rng.dirichlet(np.ones(g.m), n_dat)).reshape(-1)}
+    for slot in range(n_cw):
+        for p in ({}, post):
+            M = native.cpm.dd_metric(spec.name, dup, n_cw, Z_nat, p, slot)
+            np.testing.assert_allclose(M, ref(reference, "dd_metric")(r, p, slot), rtol=1e-9, atol=1e-9)
+            np.testing.assert_allclose(native.cpm.dd_soft(spec.name, dup, n_cw, M, slot),
+                                       ref(reference, "dd_soft")(r, M, slot), rtol=1e-9, atol=1e-9)
+
+    # receive: cpm.receive's steps on the Python reference
+    s1, f1 = ref(reference, "refine")(g, y, s0, f, spec, n_data, dup)
+    a = native.cpm.refine(g.name, y, s0, f, spec.name, n_data, dup)
+    assert a[0] == s1 and a[1] == pytest.approx(f1, rel=RTOL)
+    want, E1 = ref(reference, "soft")(g, spec, y, s1, f1, n_data, dup)
+    r = dict(r, Z=ref(reference, "bins")(g, y, s1, lay.n, f1))
+    dt = cpm._rake_dt(g)
+    if dt > 0:
+        r["finger_dt"] = dt
+        r["Z_early"] = ref(reference, "bins")(g, y, s1 - dt, lay.n, f1)
+        r["Z_late"] = ref(reference, "bins")(g, y, s1 + dt, lay.n, f1)
+    if cpm.COH_CTL:
+        for s in range(1 + dup):
+            if not ref(reference, "ctl_square")(g, E1, s):
+                want[s] = ref(reference, "dd_soft")(r, ref(reference, "dd_metric")(r, {}, s), s)
+    for a, b in zip(native.cpm.receive_soft(y, spec.name, n_data, dup, s0, f), want, strict=True):
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-9)
+
+
+def test_connect_header_parity(native, reference):
+    """CPM CONNECT header words (docs/pending-header.md): modulate, find,
+    find_mid, confirm, refine and dd_metric carry and recover the 3-bit callee
+    hash identically on c16r25 and c8w50."""
+    from data2g.config import connect_hash
+
+    rng = np.random.default_rng(29)
+    for gname, mname in cpm.CONNECT_HEADER.items():
+        g = cpm.GRIDS[gname]
+        spec = cpm.SPECS[mname]
+        h = connect_hash("K2XYZ-10", cpm.CONNECT_HASH_BITS)
+        coded = _burst(spec, 0, False, rng)
+        x_py = ref(reference, "modulate")(spec, coded, False, 0, connect_hash=h)
+        x_nat = native.cpm.bandpass(gname, native.cpm.modulate(mname, coded, False, 0, h), 0)
+        np.testing.assert_allclose(x_nat, x_py, rtol=RTOL, atol=1e-12)
+        y = _channel(x_py, rng, lead=2400, cfo=3.5, sigma=0.05)
+        l_py = ref(reference, "find")(g, y)
+        l_nat = native.cpm.find(gname, y)
+        assert l_py is not None and l_nat is not None
+        assert l_py["spec"].name == l_nat["spec"] == mname
+        assert l_py["connect_hash"] == l_nat["connect_hash"] == h
+        c_py = cpm.confirm(g, y, l_py)
+        c_nat = native.cpm.confirm(gname, y, mname, 0, False, l_nat["start"], l_nat["cfo"], h)
+        assert c_py > 5.0 and c_nat == pytest.approx(c_py, rel=1e-9, abs=1e-9)
+        r_py = ref(reference, "refine")(g, y, l_py["start"], l_py["cfo"], spec, 0, False, connect_hash=h)
+        r_nat = native.cpm.refine(gname, y, l_nat["start"], l_nat["cfo"], mname, 0, False, h)
+        assert r_nat[0] == r_py[0] and r_nat[1] == pytest.approx(r_py[1], rel=RTOL)
+        # Wipe front so find_mid recovers the connect word from the mid block
+        y_mid = y.copy()
+        y_mid[:2400 + len(cpm.preamble_pattern(g)) * g.T] = 0.0
+        m_py = ref(reference, "find_mid")(g, y_mid)
+        m_nat = native.cpm.find_mid(gname, y_mid)
+        assert m_py is not None and m_nat is not None
+        assert m_py["connect_hash"] == m_nat["connect_hash"] == h
+        lay = cpm.layout(gname, cpm.stream_symbols(gname, 0, False))
+        Z = ref(reference, "bins")(g, y, r_py[0], lay.n, r_py[1])
+        Z_nat = Z if g.L == 1 else Z.reshape(-1, g.m)
+        rec = dict(spec=spec, band=gname, n_cw=1, n_ctl_slots=1, dup=False, Z=Z, connect_hash=h)
+        M_py = ref(reference, "dd_metric")(rec, {}, 0)
+        M_nat = native.cpm.dd_metric(mname, False, 1, Z_nat, {}, 0, h)
+        np.testing.assert_allclose(M_nat, M_py, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("name", ("fsk32r62-r1/2", "fsk8r50-r1/2"))
+def test_dd_metric_rake_parity(native, reference, name, monkeypatch):
+    """Shifted-window Rake (#364) in dd_metric matches Python on a 2-path
+    multipath channel with DATA2G_CPM_RAKE=1 and 0."""
+    rng = np.random.default_rng(42)
+    spec = cpm.SPECS[name]
+    g = cpm.GRIDS[spec.grid]
+    coded = _burst(spec, 1, False, rng)
+    x = ref(reference, "modulate")(spec, coded, False)
+    pad = np.concatenate([np.zeros(2000), x, np.zeros(2000)])
+    delay = int(round(0.0035 * FS))
+    y = pad + 0.9 * np.roll(pad, delay) + rng.normal(0, 0.15, len(pad))
+    lock = ref(reference, "find")(g, y)
+    assert lock is not None
+    for flag in ("0", "1"):
+        monkeypatch.setenv("DATA2G_CPM_RAKE", flag)
+        r = ref(reference, "receive")(y, lock)
+        for slot in range(r["n_cw"]):
+            M_py = ref(reference, "dd_metric")(r, {}, slot)
+            M_cc = native.cpm.dd_metric(spec.name, r["dup"], r["n_cw"], r["Z"], {}, slot,
+                                        finger_dt=int(r.get("finger_dt", 0)),
+                                        Z_early=r.get("Z_early"), Z_late=r.get("Z_late"))
+            np.testing.assert_allclose(M_cc, M_py, rtol=1e-9, atol=1e-9)

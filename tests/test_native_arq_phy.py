@@ -232,15 +232,24 @@ def test_data_framing(native, pure):
     rng = np.random.default_rng(0)
     for pb in (46, 9, 120):
         frames = [bytes(rng.integers(0, 256, int(n), dtype=np.uint8)) for n in rng.integers(1, 90, 5)]
-        payloads = native.kisslink.pack_frames(frames, pb)
-        assert payloads == KL.pack_frames(frames, pb)
-        for _ in range(10):
-            ok = list(rng.random(len(payloads)) > 0.3)
-            assert tuple(native.kisslink.unpack_frames(payloads, ok)) == KL.unpack_frames(payloads, ok)
-    for f in (b"", b"\0" * 3, b"\1" * 254, b"\1" * 255, bytes(rng.integers(0, 4, 600, dtype=np.uint8))):
-        assert native.kisslink.cobs(f) == KL.cobs(f) and native.kisslink.uncobs(KL.cobs(f)) == f
+        for cmds in (None, [0, 1, 2, 0, 15]):
+            payloads = native.kisslink.pack_frames(frames, pb, cmds)
+            assert payloads == KL.pack_frames(frames, pb, cmds)
+            for _ in range(10):
+                ok = list(rng.random(len(payloads)) > 0.3)
+                assert tuple(native.kisslink.unpack_frames(payloads, ok)) == KL.unpack_frames(payloads, ok)
+    for f in (b"", b"\0" * 3, b"\1" * 254, b"\1" * 255, b"\xff", bytes(rng.integers(0, 4, 600, dtype=np.uint8))):
+        c = KL.cobs(f)
+        assert native.kisslink.cobs(f) == c and native.kisslink.uncobs(c) == f
+        assert native.kisslink.uncobs_cmd(c) == KL.uncobs_cmd(c) == (f, 0)
+        for cmd in (1, 2, 15):
+            tagged = c + bytes([KL.CMD_TAG | cmd])
+            assert native.kisslink.uncobs_cmd(tagged) == KL.uncobs_cmd(tagged) == (f, cmd)
+            assert native.kisslink.framed_len(len(f), cmd) == KL.framed_len(len(f), cmd)
         assert native.kisslink.framed_len(len(f)) == KL.framed_len(len(f))
     assert native.kisslink.uncobs(b"\5ab") is None and native.kisslink.uncobs(b"\0") is None
+    for bad in (b"", b"\0", b"\5ab", b"\xf1", b"\x02a\x05", b"\x02a\xf0"):
+        assert native.kisslink.uncobs_cmd(bad) is None and KL.uncobs_cmd(bad) is None
 
 
 def test_kiss_links_match(native, pure):
@@ -253,12 +262,12 @@ def test_kiss_links_match(native, pure):
     py = [KL.KissLink(clock=clock), KL.KissLink(clock=clock)]
     nat = [native.kisslink.KissLink(clock=clock), native.kisslink.KissLink(clock=clock)]
     f = _frames()
-    script = [(0, f[0]), (1, f[1]), (0, f[2]), (0, f[3]), (1, f[4]), (0, f[5]), (0, f[2] + f[2])]
-    for k, (who, frame) in enumerate(script):
+    script = [(0, f[0], 0), (1, f[1], 0), (0, f[2], 1), (0, f[3], 2), (1, f[4], 0), (0, f[5], 15), (0, f[2] + f[2], 0)]
+    for k, (who, frame, cmd) in enumerate(script):
         out = []
         for a, b in (py, nat):
             src, dst = (a, b) if who == 0 else (b, a)
-            src.enqueue(frame)
+            src.enqueue(frame, cmd=cmd)
             burst = src.next_burst()
             x = PHY.tx_audio(burst)
             y = np.concatenate([np.zeros(FS // 2), x, np.zeros(FS // 2)])

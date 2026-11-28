@@ -19,18 +19,24 @@ std::uint8_t byte(std::int64_t v) {
 }
 
 std::uint8_t tenths(double t_turn) { return byte(static_cast<std::int64_t>(std::nearbyint(t_turn * 10))); }  // round(): half to even
-// What is wrong with a CRC-valid session frame body, or nullopt. A bad one
+// What is wrong with a CRC-valid compact CONNECT payload, or nullopt.
+std::optional<std::string> check_connect(ByteView body) {
+    if (body.size() < Connect::BYTES) return "CONNECT of " + std::to_string(body.size()) + " B";
+    try {
+        const Connect c = Connect::unpack(body);
+        if (c.cap > 2) return "CONNECT: cap code " + std::to_string(c.cap);
+    } catch (const std::invalid_argument& e) {
+        return std::string("CONNECT: ") + e.what();
+    }
+    return std::nullopt;
+}
+
+// What is wrong with a CRC-valid T_SESS frame body, or nullopt. A bad one
 // is dropped as if it had not decoded (the peer retries).
 std::optional<std::string> check_frame(ByteView body) {
     const int sub = body[0];
-    const std::size_t need = sub == CONNECT ? Connect::BYTES : sub == CONNECT_ACK ? ConnectAck::BYTES
-                             : sub == CONNECT_NAK ? ConnectNak::BYTES : 1;
+    const std::size_t need = sub == CONNECT_ACK ? ConnectAck::BYTES : sub == CONNECT_NAK ? ConnectNak::BYTES : 1;
     if (body.size() < need) return frame_desc(body.first(1)) + " of " + std::to_string(body.size()) + " B";
-    try {
-        if (sub == CONNECT) Connect::unpack(body);
-    } catch (const std::invalid_argument& e) {
-        return frame_desc(body.first(1)) + ": " + e.what();
-    }
     if (sub == CONNECT_ACK) {
         const int cap = ConnectAck::unpack(body).cap;
         if (cap > 2) return "CONNECT_ACK: cap code " + std::to_string(cap);
@@ -45,8 +51,17 @@ const char* state_name(SessionState s) {
 }
 
 const char* nak_name(int reason) {
-    static const char* names[] = {nullptr, "VERSION", "NOT_LISTENING", "BUSY", "REFUSED"};
-    return reason >= NAK_VERSION && reason <= NAK_REFUSED ? names[reason] : nullptr;
+    static const char* names[] = {nullptr, "VERSION", "NOT_LISTENING", "BUSY", "REFUSED", "CAPS"};
+    return reason >= NAK_VERSION && reason <= NAK_CAPS ? names[reason] : nullptr;
+}
+
+std::string nak_close_reason(int reason, int detail) {
+    if (reason == NAK_VERSION)
+        return detail ? format("VERSION %d-%d", detail >> 4, detail & 15) : std::string("VERSION");
+    if (reason == NAK_CAPS)
+        return detail ? format("CAPS 0x%02x", detail & 0xFF) : std::string("CAPS");
+    const char* why = nak_name(reason);
+    return why ? std::string(why) : "REFUSED reason " + std::to_string(reason);
 }
 
 int session_key(const std::string& caller, const std::string& callee, std::int64_t nonce) {
@@ -55,15 +70,21 @@ int session_key(const std::string& caller, const std::string& callee, std::int64
     return (h & 0xFFFF) ? static_cast<int>(h & 0xFFFF) : 1;
 }
 
-std::string frame_desc(ByteView body) {
-    const int sub = at(body, 0);
-    static const char* names[] = {nullptr, "CONNECT", "CONNECT_ACK", "CONNECT_NAK", "DISC", "DISC_ACK"};
-    std::string out = (sub >= CONNECT && sub <= DISC_ACK) ? names[sub] : "session frame " + std::to_string(sub);
-    if (sub == CONNECT && body.size() >= 18) {
-        const auto [caller, callee] = Connect::calls(body);
-        out += " " + caller + ">" + callee;
+std::string frame_desc(ByteView body, int sub) {
+    if (sub == CONNECT) {
+        std::string out = "CONNECT";
+        if (body.size() >= Connect::BYTES) {
+            try {
+                const auto [caller, callee] = Connect::calls(body);
+                out += " " + caller + ">" + callee;
+            } catch (const std::invalid_argument&) {
+            }
+        }
+        return out;
     }
-    return out;
+    const int s = sub ? sub : at(body, 0);
+    static const char* names[] = {nullptr, "CONNECT", "CONNECT_ACK", "CONNECT_NAK", "DISC", "DISC_ACK"};
+    return (s >= CONNECT && s <= DISC_ACK) ? names[s] : "session frame " + std::to_string(s);
 }
 
 Session::Session(std::string call_, std::shared_ptr<Policy> policy_, double t_turn_, std::shared_ptr<Rng> rng_,
@@ -92,7 +113,7 @@ void Session::robust_start(const std::string& mode) {
 std::shared_ptr<Station> Session::make_station(int direction, bool master_, int key) {
     auto st = std::make_shared<Station>(direction, policy, master_, key, std::nullopt, cap, chat);
     st->nod = nods;  // nods (docs/arq.md §3b): a session's station, unless the host turned them off
-    st->keep = true;  // T_REPLY only on change, once the peer keeps it too (T_KEEP, docs/arq.md §8a)
+    st->nod_peer = (peer_caps & CAP_NODS) != 0;
     return st;
 }
 
@@ -522,19 +543,21 @@ void Session::on_timeout(double now) {
     }
 }
 
-// session frames: control-only bursts with a T_SESS extension. Connect
-// frames use key 0 (no session yet); DISC / DISC_ACK the session key.
+// session frames: CONNECT uses the unified 20-byte COMPACT_CONNECT format on all modes (key 0);
+// CONNECT_ACK, CONNECT_NAK, DISC and DISC_ACK use a control-only burst with T_SESS.
 
-TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode) {
-    const std::string m = (mode && !mode->empty()) ? *mode : policy->connect_mode(cap, tries, body[0] == CONNECT && tries == tune.connect_tries - 1);
+TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std::optional<std::string> mode, int sub) {
+    const bool is_connect = sub == CONNECT;
+    const std::string m = (mode && !mode->empty()) ? *mode : policy->connect_mode(cap, tries, is_connect && tries == tune.connect_tries - 1);
     const int cpb = policy->ctl_payload_bytes(m);
     auto b = std::make_shared<TxBurst>();
     b->submode = m;
     b->cap = cap;
-    if (body[0] == CONNECT && compact(m)) {
-        Bytes p = pack_connect(body);
+    if (is_connect) {
+        Bytes p = body;
         p.resize(static_cast<std::size_t>(cpb), 0);
         b->slots.push_back({COMPACT_CONNECT, 0, std::move(p)});
+        b->connect_callee = peer;
     } else {
         Core core;
         core.ftype = SESSION;
@@ -542,34 +565,29 @@ TxBurstPtr Session::session_burst(int direction, int key, const Bytes& body, std
         const auto ctl = control.pack(cpb);
         for (std::size_t i = 0; i < ctl.size(); ++i) b->slots.push_back({ctl_mask(direction, static_cast<int>(i), key), 0, ctl[i]});
     }
-    const std::string retry = (body[0] == CONNECT || body[0] == DISC) ? " try " + std::to_string(tries + 1) : "";
-    const std::string desc = frame_desc(body);
+    const std::string retry = (is_connect || body[0] == DISC) ? " try " + std::to_string(tries + 1) : "";
+    const std::string desc = frame_desc(body, sub);
     log_write(LOG, INFO, format("TX %s %s x%d%s", desc.c_str(), m.c_str(), static_cast<int>(b->slots.size()), retry.c_str()));
     return b;
 }
 
-bool Session::compact(const std::string& mode) {
-    // in its Control envelope it needs more codewords than the mode's control may have (CPM: one of 20 B)
-    const int cpb = policy->ctl_payload_bytes(mode);
-    return (CONNECT_CTL_BYTES + cpb - 1) / cpb > policy->max_ctl(mode);
-}
-
 TxBurstPtr Session::connect_burst() {
-    return session_burst(0, 0, Connect{VERSION, call, peer, nonce, cap, tenths(t_turn)}.pack());
+    return session_burst(0, 0, Connect{VERSION, call, peer, nonce, cap, tenths(t_turn), local_caps(), req}.pack(),
+                         std::nullopt, CONNECT);
 }
 
 TxBurstPtr Session::disc_burst() { return session_burst(station->direction, station->key, Bytes{DISC}, disc_mode); }
 
 TxBurstPtr Session::accept_burst() {
-    return session_burst(1, 0, ConnectAck{nonce, cap, tenths(t_turn)}.pack(), answer_mode);
+    return session_burst(1, 0, ConnectAck{nonce, cap, tenths(t_turn), local_caps(), req}.pack(), answer_mode);
 }
 
 // A CONNECT_NAK for this CONNECT, unless a burst of the session's own is
 // queued (that goes; the caller's next try is refused instead).
-void Session::refuse(const Connect& c, const std::string& mode, int reason, double now) {
-    log_write(LOG, INFO, "refusing CONNECT from " + c.caller + ": " + nak_name(reason));
+void Session::refuse(const Connect& c, const std::string& mode, int reason, double now, int detail) {
+    log_write(LOG, INFO, "refusing CONNECT from " + c.caller + ": " + nak_close_reason(reason, detail));
     if (out) return;
-    nak = session_burst(1, 0, ConnectNak{c.nonce, reason}.pack(), mode);
+    nak = session_burst(1, 0, ConnectNak{c.nonce, reason, detail}.pack(), mode);
     queue(nak, now);
 }
 
@@ -577,15 +595,14 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
     std::vector<std::pair<int, int>> keys;  // (direction, key)
     if (station) keys.emplace_back(station->peer(), station->key);
     else if (state == SessionState::CONNECTING) keys.emplace_back(1, 0);
-    keys.emplace_back(0, 0);  // a CONNECT, in any state: answered or refused
-    if (compact(rx.submode())) {
+    if (policy->ctl_payload_bytes(rx.submode()) >= COMPACT_BYTES) {
         if (auto p = rx.decode(0, COMPACT_CONNECT, 0, nullptr)) {
-            Bytes body = unpack_connect(*p);
-            if (auto why = check_frame(body)) {
+            Bytes body(p->begin(), p->begin() + COMPACT_BYTES);
+            if (auto why = check_connect(body)) {
                 log_write(LOG, WARNING, "RX malformed " + *why + ": dropped");
                 return std::nullopt;
             }
-            return Frame{0, std::move(body), rx.submode()};
+            return Frame{0, CONNECT, std::move(body), rx.submode()};
         }
     }
     for (auto [direction, key] : keys) {
@@ -617,7 +634,7 @@ std::optional<Session::Frame> Session::session_frame(RxBurst& rx) {
             log_write(LOG, WARNING, "RX malformed " + *why + ": dropped");
             return std::nullopt;
         }
-        return Frame{key, std::move(body), rx.submode()};
+        return Frame{key, body[0], std::move(body), rx.submode()};
     }
     return primed_frame(rx);
 }
@@ -627,12 +644,14 @@ std::optional<Session::Frame> Session::primed_frame(RxBurst& rx) {
     const int cpb = policy->ctl_payload_bytes(rx.submode());
     const int t10 = tenths(t_turn);
     if (state == SessionState::CONNECTING && !station) {
-        Control c{Core{}, {{T_SESS, ConnectAck{nonce, cap, t10}.pack()}}};
+        Control c{Core{}, {{T_SESS, ConnectAck{nonce, cap, t10, DEFAULT_CAPS, 0}.pack()}}};
         c.core.ftype = SESSION;
         const auto t = c.pack(cpb);
         if (t.size() != 1) return std::nullopt;
-        Bytes known(static_cast<std::size_t>(cpb), 0xFF);  // its cap and t_turn: as mine, then unknown
-        known[9] = known[10] = 0;
+        // Core (4) + T_SESS hdr (2) + subtype (1) + nonce (2) = 9 B known;
+        // cap (1) + t_turn10 (1) + caps (2) + req (1) = 5 B unknown on hyp 2; trailing zero pad known
+        Bytes known(static_cast<std::size_t>(cpb), 0xFF);
+        for (std::size_t j = 9; j < 14; ++j) known[j] = 0;
         for (const Bytes& m : {Bytes(static_cast<std::size_t>(cpb), 0xFF), known})
             if (auto p = rx.decode_known(0, ctl_mask(1, 0, 0), t[0], m, false)) {
                 Bytes body;
@@ -645,43 +664,33 @@ std::optional<Session::Frame> Session::primed_frame(RxBurst& rx) {
             }
         return std::nullopt;
     }
-    if (state == SessionState::LISTEN && compact(rx.submode()) && cpb >= COMPACT_BYTES) {
-        Bytes t = pack_connect(Connect{VERSION, "", call, 0, cap, t10}.pack());
+    if (state == SessionState::LISTEN && cpb >= COMPACT_BYTES) {
+        Bytes t = Connect{VERSION, "", call, 0, cap, t10, DEFAULT_CAPS, 0}.pack();
         t.resize(static_cast<std::size_t>(cpb), 0);
-        // the fields' masks packed the same way, the padding known: version, callee, cap, t_turn; then the first two
-        for (const std::vector<int>& fields : {std::vector<int>{1, 10, 20, 21}, std::vector<int>{1, 10}}) {
-            Bytes mb(Connect::BYTES, 0);
-            const auto set = [&](int at, int n, int bits) {
-                if (std::find(fields.begin(), fields.end(), at) == fields.end()) return;
-                const std::uint64_t v = (std::uint64_t{1} << bits) - 1;
-                for (int i = 0; i < n; ++i) mb[static_cast<std::size_t>(at + i)] = static_cast<std::uint8_t>(v >> (8 * (n - 1 - i)));
-            };
-            set(1, 1, 4);
-            set(10, 8, 60);
-            set(20, 1, 2);
-            set(21, 1, 6);
-            Bytes m = pack_connect(mb);
-            m[COMPACT_BYTES - 2] |= 0x0F;  // the last 12 bits: padding
-            m[COMPACT_BYTES - 1] = 0xFF;
+        constexpr unsigned hyp1 = Connect::F_VERSION | Connect::F_CALLEE | Connect::F_CAP | Connect::F_TTURN |
+                                  Connect::F_CAPS | Connect::F_REQ;
+        constexpr unsigned hyp2 = Connect::F_VERSION | Connect::F_CALLEE;
+        for (unsigned fields : {hyp1, hyp2}) {
+            Bytes m = Connect::mask(fields);
             m.resize(static_cast<std::size_t>(cpb), 0xFF);
             if (auto p = rx.decode_known(0, COMPACT_CONNECT, t, m, false))
-                return primed_body(unpack_connect(ByteView(*p).first(COMPACT_BYTES)), rx);
+                return primed_body(Bytes(p->begin(), p->begin() + COMPACT_BYTES), rx, "primed", CONNECT);
         }
     }
     return std::nullopt;
 }
 
-// session.py _repeated_frame: a CONNECT's robust tries are the same compact codeword, and so are their CONNECT_ACKs.
+// session.py _repeated_frame: a CONNECT's retries are the same compact codeword, and so are their CONNECT_ACKs.
 std::optional<Session::Frame> Session::repeated_frame(RxBurst& rx, double now) {
     if (!repeat_default() || !rx.can_repeat() || rx.n_cw() != 1 || station) return std::nullopt;
     const bool ack = state == SessionState::CONNECTING;
-    if (!ack && !(state == SessionState::LISTEN && compact(rx.submode()))) return std::nullopt;
+    if (!ack && !(state == SessionState::LISTEN && policy->ctl_payload_bytes(rx.submode()) >= COMPACT_BYTES)) return std::nullopt;
     if (now - repeat_at > REPEAT_GAP_S) rx.forget(REPEAT_SESSION_KEY);
     repeat_at = now;
     auto p = rx.decode_repeat(0, ack ? ctl_mask(1, 0, 0) : COMPACT_CONNECT, REPEAT_SESSION_KEY);
     if (!p) return std::nullopt;
     rx.forget(REPEAT_SESSION_KEY);
-    if (!ack) return primed_body(unpack_connect(ByteView(*p).first(COMPACT_BYTES)), rx, "repeated");
+    if (!ack) return primed_body(Bytes(p->begin(), p->begin() + COMPACT_BYTES), rx, "repeated", CONNECT);
     Bytes body;
     try {
         const auto ext = Control::unpack({*p}).ext;
@@ -691,27 +700,35 @@ std::optional<Session::Frame> Session::repeated_frame(RxBurst& rx, double now) {
     return primed_body(std::move(body), rx, "repeated");
 }
 
-std::optional<Session::Frame> Session::primed_body(Bytes body, RxBurst& rx, const char* how) {
+std::optional<Session::Frame> Session::primed_body(Bytes body, RxBurst& rx, const char* how, int sub) {
+    if (sub == CONNECT) {
+        if (auto why = check_connect(body)) {
+            log_write(LOG, INFO, std::string("RX ") + how + " session frame malformed (" + *why + "): dropped");
+            return std::nullopt;
+        }
+        log_write(LOG, INFO, std::string("RX ") + how + " " + frame_desc(body, CONNECT));
+        return Frame{0, CONNECT, std::move(body), rx.submode()};
+    }
     std::optional<std::string> why;
     if (body.empty() || (why = check_frame(body))) {
         log_write(LOG, INFO, std::string("RX ") + how + " session frame malformed (" + (body.empty() ? std::string("empty") : *why) + "): dropped");
         return std::nullopt;
     }
     log_write(LOG, INFO, std::string("RX ") + how + " " + frame_desc(body));
-    return Frame{0, std::move(body), rx.submode()};
+    return Frame{0, body[0], std::move(body), rx.submode()};
 }
 
 void Session::on_session_frame(const Frame& f, double now) {
     const Bytes& body = f.body;
-    const int sub = body[0];
-    log_write(LOG, INFO, "RX " + frame_desc(body) + " " + f.mode);
+    const int sub = f.sub;
+    log_write(LOG, INFO, "RX " + frame_desc(body, sub) + " " + f.mode);
     if (sub == CONNECT && body.size() >= Connect::BYTES && f.key == 0) {
         const Connect c = Connect::unpack(body);
         const std::string &caller = c.caller, &callee = c.callee;
         const std::int64_t n = c.nonce;
         std::string me = call;
-        for (auto& c : me)
-            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        for (auto& ch : me)
+            if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
         if (callee != me && std::find(aliases.begin(), aliases.end(), callee) == aliases.end()) return;
         if (station && !master() && n == nonce) {
             answer_mode = f.mode;
@@ -730,13 +747,18 @@ void Session::on_session_frame(const Frame& f, double now) {
             const bool busy = state == SessionState::CONNECTING || live(state);
             return refuse(c, f.mode, busy ? NAK_BUSY : NAK_NOT_LISTENING, now);
         }
-        if (c.version != VERSION) return refuse(c, f.mode, NAK_VERSION, now);
+        if (c.version < MIN_VERSION || c.version > MAX_VERSION)
+            return refuse(c, f.mode, NAK_VERSION, now, (MIN_VERSION << 4) | MAX_VERSION);
+        if (const int bad_req = c.req & ~SUPPORTED_REQ; bad_req != 0)
+            return refuse(c, f.mode, NAK_CAPS, now, bad_req);
         if (accept_connect && !accept_connect(caller, callee)) return refuse(c, f.mode, NAK_REFUSED, now);
         call = callee;  // the call it dialed (the session key derives from it)
         peer = caller;
         nonce = n;
         cap = std::min(c.cap, cap);
         peer_t_turn = c.t_turn10 / 10.0;
+        peer_caps = c.caps;
+        peer_req = c.req;
         station = make_station(1, false, session_key(caller, call, n));
         follow_start = false;
         robust_start(f.mode);
@@ -748,8 +770,14 @@ void Session::on_session_frame(const Frame& f, double now) {
     } else if (sub == CONNECT_ACK && state == SessionState::CONNECTING && f.key == 0) {
         const ConnectAck a = ConnectAck::unpack(body);
         if (a.nonce != nonce) return;
+        if (const int bad_req = a.req & ~SUPPORTED_REQ; bad_req != 0) {
+            close(nak_close_reason(NAK_CAPS, bad_req));
+            return;
+        }
         cap = std::min(a.cap, cap);
         peer_t_turn = a.t_turn10 / 10.0;
+        peer_caps = a.caps;
+        peer_req = a.req;
         station = make_station(0, true, session_key(call, peer, nonce));
         follow_start = false;
         robust_start(f.mode);
@@ -759,8 +787,7 @@ void Session::on_session_frame(const Frame& f, double now) {
         if (!disc(now)) queue(station->build(), now);  // a dial the host gave up on, answered: DISC first
     } else if (sub == CONNECT_NAK && state == SessionState::CONNECTING && f.key == 0) {
         if (const ConnectNak k = ConnectNak::unpack(body); k.nonce == nonce) {
-            const char* why = nak_name(k.reason);
-            close(why ? why : "REFUSED reason " + std::to_string(k.reason));
+            close(nak_close_reason(k.reason, k.detail));
         }
     } else if (sub == DISC && station && f.key == station->key) {
         // also when already closed: our DISC_ACK may have been lost

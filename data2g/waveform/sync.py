@@ -289,10 +289,14 @@ class StreamDetector:
         """Drop the statistic of starts before stream index `start`."""
         k = min(max(0, start - self.s0), len(self.S[0]))
         self.S, self.s0 = self.S[:, k:], self.s0 + k
-        k = min(max(0, start - self.c0), len(self.C[0]))
-        self.C, self.c0 = self.C[:, k:], self.c0 + k
+        self.trim_outputs(start)
         k = min(max(0, start - self.KEEP_BEHIND - self.d0), self.D.shape[1])
         self.D, self.d0 = self.D[:, k:], self.d0 + k
+
+    def trim_outputs(self, start: int):
+        """Drop matched-filter outputs C before stream index `start` without touching S or D."""
+        k = min(max(0, start - self.c0), len(self.C[0]))
+        self.C, self.c0 = self.C[:, k:], self.c0 + k
 
     def outputs_from(self, start: int) -> tuple[int, np.ndarray]:
         """(a, the kept matched filter outputs c_f for stream starts from

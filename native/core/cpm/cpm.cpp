@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,26 @@ namespace {
 using cdouble = std::complex<double>;
 constexpr double FS = config::FS;
 constexpr double PI = std::numbers::pi;
+
+// Early/late shifted-window Rake constants (cpm.py, issue #364).
+constexpr int RAKE_SHIFT_MS = 3;
+constexpr int RAKE_MAX_T = static_cast<int>(FS) / 50;
+constexpr double RAKE_SNR_GATE = 0.35;
+constexpr double RAKE_COMB_WEIGHT = 0.5;
+constexpr int RAKE_MIN_CAL_ROWS = 4;
+constexpr double RAKE_TIE_EPS = 1e-9;
+
+bool env_flag_on(const char* name, bool def_val = true) {
+    const char* v = std::getenv(name);
+    if (!v) return def_val;
+    return std::strcmp(v, "1") == 0;
+}
+
+int rake_dt(const Grid& g) {
+    if (env_flag_on("DATA2G_CPM_RAKE", true) && g.L == 1 && g.T <= RAKE_MAX_T)
+        return std::min(RAKE_SHIFT_MS * static_cast<int>(FS) / 1000, g.T / 4);
+    return 0;
+}
 
 // numpy's pairwise summation (add.reduce over a contiguous run), so sums,
 // means and shares round as the reference's do.
@@ -82,6 +104,23 @@ Mat<double> power(const std::vector<cdouble>& Z, std::size_t rows, std::size_t T
     return E;
 }
 
+// cpm._tone_energy: n_sym symbols of mixed samples z (bin 0 at DC) -> (n_sym, nb) energies: one FFT a symbol,
+// or (a wide grid) one per sub-window, the kept sub-windows' energies summed in turn. Bins `rate` apart either way.
+Mat<double> tone_energy(const Grid& g, const std::vector<cdouble>& z, std::size_t n_sym, std::size_t nb) {
+    if (g.L == 1) return power(fft_rows(z, n_sym, g.T), n_sym, g.T, nb);
+    const std::size_t L = g.L, ns = nsub(g);
+    const auto F = fft_rows(z, n_sym * L, ns);
+    Mat<double> E(n_sym, nb);
+    for (std::size_t r = 0; r < n_sym; ++r)
+        for (std::size_t l = g.guard; l < L; ++l)
+            for (std::size_t k = 0; k < nb; ++k) {
+                const cdouble v = F[(r * L + l) * ns + k];
+                const double e = v.real() * v.real() + v.imag() * v.imag();
+                E[r][k] = l == static_cast<std::size_t>(g.guard) ? e : E[r][k] + e;
+            }
+    return E;
+}
+
 // Python's round() for the half-way cases (banker's), as the layout uses it.
 int py_round(double v) { return static_cast<int>(std::nearbyint(v)); }
 
@@ -125,13 +164,14 @@ Mat<double> take_rows(const Mat<double>& E, std::span<const int> rows) {
 }  // namespace
 
 const Grid* grid(std::string_view name) {
-    for (const auto& g : tables::CPM_GRIDS)
-        if (g.name == name) return &g;
+    for (auto table : {tables::CPM_GRIDS, tables::CPM_WIDE_GRIDS})
+        for (const auto& g : table)
+            if (g.name == name) return &g;
     return nullptr;
 }
 
 const Spec* spec(std::string_view name) {
-    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL})
+    for (auto table : {tables::CPM_SPECS, tables::CPM_CTL, tables::CPM_WIDE_SPECS, tables::CPM_WIDE_CTL})
         for (const auto& s : table)
             if (s.name == name) return &s;
     return nullptr;
@@ -139,12 +179,68 @@ const Spec* spec(std::string_view name) {
 
 const Grid& grid_of(const Spec& s) { return *grid(s.grid); }
 
-const Spec& ctl(const Grid& g) { return tables::CPM_CTL[&g - tables::CPM_GRIDS.data()]; }
+const Spec& ctl(const Grid& g) {
+    const std::less<const Grid*> lt;
+    const auto on = tables::CPM_GRIDS;
+    if (!lt(&g, on.data()) && lt(&g, on.data() + on.size())) return tables::CPM_CTL[&g - on.data()];
+    return tables::CPM_WIDE_CTL[&g - tables::CPM_WIDE_GRIDS.data()];
+}
+
+namespace {
+
+// cpm.ON_AIR_WIDE: the wide grids DATA2G_CPM_ONAIR names (comma-separated; unset or empty: none).
+}  // namespace
+
+const std::vector<const Grid*>& grids() {
+    static const std::vector<const Grid*> v = [] {
+        std::vector<const Grid*> out;
+        for (const auto& g : tables::CPM_GRIDS) out.push_back(&g);
+        return out;
+    }();
+    return v;
+}
+
+const std::vector<const Spec*>& specs() {
+    static const std::vector<const Spec*> v = [] {
+        std::vector<const Spec*> out;
+        for (const auto& s : tables::CPM_SPECS) out.push_back(&s);
+        return out;
+    }();
+    return v;
+}
+
+std::vector<const Spec*> grid_specs(const Grid& g) {
+    std::vector<const Spec*> out;
+    for (auto table : {tables::CPM_SPECS, tables::CPM_WIDE_SPECS})
+        for (const auto& s : table)
+            if (s.grid == g.name) out.push_back(&s);
+    return out;
+}
+
+bool shares_rows(const Grid& g, const Grid& h) {
+    return g.L > 1 && h.L == 1 && g.m == h.m && g.rate == h.rate && g.f0 == h.f0;
+}
+
+std::optional<ConnectHeader> connect_header_for(std::string_view mode) {
+    if (mode == "fsk16r25-r1/2") return ConnectHeader{"c16r25", CONNECT_INDEX, CONNECT_HASH_BITS};
+    if (mode == "fsk8w50-r1/2") return ConnectHeader{"c8w50", CONNECT_INDEX, CONNECT_HASH_BITS};
+    return std::nullopt;
+}
 
 int header_value(int index, int n_data, bool dup) {
     const int v = ((index + 2 * dup) << 6) | n_data;
     if (index < 0 || n_data < 0 || n_data >= 64 || v >= 1024) throw std::invalid_argument("cpm header out of range");
     return v;
+}
+
+int header_value_for(const Spec& s, int n_data, bool dup, std::optional<int> connect_hash) {
+    if (connect_hash) {
+        const auto ch = connect_header_for(s.name);
+        if (!ch || n_data != 0 || dup || *connect_hash < 0 || *connect_hash >= (1 << ch->bits))
+            throw std::invalid_argument("cpm connect_hash out of range");
+        return header_value(ch->index, *connect_hash, false);
+    }
+    return header_value(s.index, n_data, dup);
 }
 
 std::span<const std::uint8_t> header_symbols(const Grid& g, int value) {
@@ -156,7 +252,7 @@ int stream_symbols(const Grid& g, int n_data, bool dup) {
 }
 
 Layout layout(const Grid& g, int n_sym) {
-    const int H = g.hdr_len, D = std::max(1, py_round(tables::CPM.spacing_s * g.rate));
+    const int H = g.hdr_len, D = std::max(1, py_round(tables::CPM.spacing_s * baud(g)));
     Layout L;
     int r = 0, i = 0;
     auto block = [&](std::span<const std::uint8_t> b) {
@@ -263,7 +359,8 @@ std::vector<double> bandpass(const Grid& g, std::span<const double> x, int cap) 
                                   {g.f0 - f.bp, g.f0 + (g.m - 1) * g.rate + f.bp});
 }
 
-std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap) {
+std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::uint8_t>>& coded, bool dup, int cap,
+                             std::optional<int> connect_hash) {
     const Grid& g = grid_of(s);
     const int n_data = static_cast<int>(coded.size()) - 1 - dup;
     std::vector<int> stream;
@@ -274,7 +371,7 @@ std::vector<double> modulate(const Spec& s, const std::vector<std::vector<std::u
     const Layout L = layout(g, static_cast<int>(stream.size()));
     std::vector<int> sym(L.n);
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i) sym[L.sync_rows[i]] = L.sync_tones[i];
-    const auto h = header_symbols(g, header_value(s.index, n_data, dup));
+    const auto h = header_symbols(g, header_value_for(s, n_data, dup, connect_hash));
     for (const auto& rows : L.hdr_rows)
         for (std::size_t i = 0; i < rows.size(); ++i) sym[rows[i]] = h[i];
     for (std::size_t i = 0; i < L.data_rows.size(); ++i) sym[L.data_rows[i]] = stream[i];
@@ -292,7 +389,7 @@ Mat<double> energies(const Grid& g, std::span<const double> x, std::int64_t star
         const double arg = w * (static_cast<double>(s) / FS);
         z[i] = {x[s] * std::cos(arg), x[s] * std::sin(arg)};
     }
-    return power(fft_rows(z, n_sym, T), n_sym, T, g.m + 2 * extra);
+    return tone_energy(g, z, n_sym, g.m + 2 * extra);
 }
 
 Mat<double> shares(const Mat<double>& E) {
@@ -304,23 +401,32 @@ Mat<double> shares(const Mat<double>& E) {
     return out;
 }
 
-// cpm._coarse_powers: x's whole symbols -> (shares n x 4 nb, raw powers for q in (0, 2) n x 2 nb).
-// One rfft per symbol zero-padded to 4T, bins R / 4 apart: a tone at f0 + k R is bin 4 (f0 / R + k)
-// (f0 a whole number of bins), so fraction q / 4 is that bin + q, what mixing by it and a T-point FFT would give.
-std::pair<Mat<double>, Mat<double>> coarse_powers(const Grid& g, std::span<const double> x, int extra) {
+// cpm._coarse_powers: x's whole symbols -> (shares n x 4 nb, raw powers for q in (0, 2) n x 2 nb),
+// plus all 4 CFO fractions' raw powers into raw4 when requested (CoarseTrack row sharing).
+std::pair<Mat<double>, Mat<double>> coarse_powers(const Grid& g, std::span<const double> x, int extra,
+                                                  Mat<double>* raw4 = nullptr) {
     const std::size_t T = static_cast<std::size_t>(g.T), n = x.size() / T, nb = g.m + 2 * extra;
     Mat<double> sh(n, 4 * nb), raw(n, 2 * nb);
+    if (raw4) *raw4 = Mat<double>(n, 4 * nb);
     if (!n) return {std::move(sh), std::move(raw)};
-    const Mat<double> P = padded_power(x.data(), n, T);
+    const std::size_t L = static_cast<std::size_t>(g.L), ns = static_cast<std::size_t>(nsub(g));
+    const Mat<double> P = padded_power(x.data(), n * L, ns);  // a wide grid's every sub-window; the kept summed
     const std::int64_t bin0 = 4 * (static_cast<std::int64_t>(std::lround(g.f0 / g.rate)) - extra);
     Mat<double> E(n, nb);
     for (int q = 0; q < 4; ++q) {
         for (std::size_t r = 0; r < n; ++r)
-            for (std::size_t b = 0; b < nb; ++b) E[r][b] = P[r][bin0 + q + 4 * static_cast<std::int64_t>(b)];
+            for (std::size_t b = 0; b < nb; ++b) {
+                const std::size_t c = static_cast<std::size_t>(bin0 + q + 4 * static_cast<std::int64_t>(b));
+                double e = P[r * L + g.guard][c];
+                for (std::size_t l = g.guard + 1; l < L; ++l) e += P[r * L + l][c];
+                E[r][b] = e;
+            }
         if (q == 0 || q == 2) {
             const std::size_t fr = q == 0 ? 0 : 1;
             for (std::size_t r = 0; r < n; ++r) std::copy(E[r], E[r] + nb, raw[r] + fr * nb);
         }
+        if (raw4)
+            for (std::size_t r = 0; r < n; ++r) std::copy(E[r], E[r] + nb, (*raw4)[r] + q * nb);
         const Mat<double> S = shares(E);
         for (std::size_t r = 0; r < n; ++r) std::copy(S[r], S[r] + nb, sh[r] + q * nb);
     }
@@ -350,18 +456,18 @@ struct RawSlice {
 double presence_from_raw(const Grid& g, std::span<const RawSlice> raws, int extra) {
     const int m = g.m;
     const std::size_t nb = static_cast<std::size_t>(m + 2 * extra);
+    const int nk = 2 * extra + 1;
     const int drop = std::max(2, m / 8);
     const int keep = m - drop;
     double best = 0.0;
-    std::vector<double> col, med(nb), Ew, u, pt(static_cast<std::size_t>(m));
-    std::vector<int> tone;
+    std::vector<double> col, med(nb), Ew, pt(static_cast<std::size_t>(nk) * static_cast<std::size_t>(m));
+    std::vector<double> ps1(nb + 1), ps2(nb + 1), prev_u(static_cast<std::size_t>(nk));
+    std::vector<int> dq(nb), prev_tone(static_cast<std::size_t>(nk));
     for (const auto& rs : raws) {
         const std::size_t n = rs.n;
         if (n < 2) continue;
         col.resize(n);
         Ew.resize(n * nb);
-        u.resize(n);
-        tone.resize(n);
         for (int fr = 0; fr < PRESENCE_FRACS; ++fr) {
             double max_med = 0.0;
             for (std::size_t b = 0; b < nb; ++b) {
@@ -376,48 +482,59 @@ double presence_from_raw(const Grid& g, std::span<const RawSlice> raws, int extr
                 double* dst = Ew.data() + r * nb;
                 for (std::size_t b = 0; b < nb; ++b) dst[b] = src[b] * med[b];
             }
-            for (int k = 0; k < 2 * extra + 1; ++k) {
-                for (std::size_t r = 0; r < n; ++r) {
-                    const double* row = Ew.data() + r * nb + static_cast<std::size_t>(k);
-                    int a = 0;
-                    double top = row[0], s1 = 0.0, s2 = 0.0;
-                    for (int j = 0; j < m; ++j) {
-                        const double v = row[j];
-                        s1 += v;
-                        s2 += v * v;
-                        if (v > top) {
-                            top = v;
-                            a = j;
+            std::fill(pt.begin(), pt.end(), 0.0);
+            // Single O(n * nb) pass over Ew: prefix sums for s1/s2 and monotonic deque for sliding-window argmax.
+            for (std::size_t r = 0; r < n; ++r) {
+                const double* row = Ew.data() + r * nb;
+                ps1[0] = 0.0;
+                ps2[0] = 0.0;
+                std::size_t head = 0, tail = 0;
+                for (std::size_t b = 0; b < nb; ++b) {
+                    const double v = row[b];
+                    ps1[b + 1] = ps1[b] + v;
+                    ps2[b + 1] = ps2[b] + v * v;
+                    while (tail > head && row[dq[tail - 1]] < v) --tail;  // strict <: first index wins ties
+                    dq[tail++] = static_cast<int>(b);
+                    if (b + 1 >= static_cast<std::size_t>(m)) {
+                        const int k = static_cast<int>(b + 1) - m;
+                        if (dq[head] < k) ++head;
+                        const int best_b = dq[head];
+                        const int a = best_b - k;
+                        const double top = row[best_b];
+                        double s1 = ps1[static_cast<std::size_t>(k + m)] - ps1[static_cast<std::size_t>(k)] - top;
+                        double s2 = ps2[static_cast<std::size_t>(k + m)] - ps2[static_cast<std::size_t>(k)] - top * top;
+                        if (a > 0) {
+                            const double vl = row[best_b - 1];
+                            s1 -= vl;
+                            s2 -= vl * vl;
                         }
-                    }
-                    s1 -= top;
-                    s2 -= top * top;
-                    if (a > 0) {
-                        const double vl = row[a - 1];
-                        s1 -= vl;
-                        s2 -= vl * vl;
-                    }
-                    if (a + 1 < m) {
-                        const double vr = row[a + 1];
-                        s1 -= vr;
-                        s2 -= vr * vr;
-                    }
-                    const double nt = s2 / (2.0 * s1 + 1e-30);
-                    const double ratio = top / (nt + 1e-30);
-                    tone[r] = a;
-                    u[r] = ratio / (ratio + PRESENCE_C);
-                }
-                std::fill(pt.begin(), pt.end(), 0.0);
-                for (std::size_t r = 1; r < n; ++r) {
-                    if (tone[r] != tone[r - 1]) {
-                        const double w = std::min(u[r], u[r - 1]);
-                        pt[static_cast<std::size_t>(tone[r])] += w;
-                        pt[static_cast<std::size_t>(tone[r - 1])] += w;
+                        if (a + 1 < m) {
+                            const double vr = row[best_b + 1];
+                            s1 -= vr;
+                            s2 -= vr * vr;
+                        }
+                        s1 = std::max(s1, 0.0);
+                        s2 = std::max(s2, 0.0);
+                        const double nt = s2 / (2.0 * s1 + 1e-30);
+                        const double ratio = top / (nt + 1e-30);
+                        const double ur = ratio / (ratio + PRESENCE_C);
+                        const auto ku = static_cast<std::size_t>(k);
+                        if (r > 0 && a != prev_tone[ku]) {
+                            const double w = std::min(ur, prev_u[ku]);
+                            double* ptk = pt.data() + ku * static_cast<std::size_t>(m);
+                            ptk[static_cast<std::size_t>(a)] += w;
+                            ptk[static_cast<std::size_t>(prev_tone[ku])] += w;
+                        }
+                        prev_tone[ku] = a;
+                        prev_u[ku] = ur;
                     }
                 }
-                std::sort(pt.begin(), pt.end());
+            }
+            for (int k = 0; k < nk; ++k) {
+                double* ptk = pt.data() + static_cast<std::size_t>(k) * static_cast<std::size_t>(m);
+                std::sort(ptk, ptk + m);
                 double sum = 0.0;
-                for (int j = 0; j < keep; ++j) sum += pt[static_cast<std::size_t>(j)];
+                for (int j = 0; j < keep; ++j) sum += ptk[j];
                 const double v = 0.5 * sum / static_cast<double>(n - 1);
                 if (v > best) best = v;
             }
@@ -441,12 +558,55 @@ double presence(const Grid& g, std::span<const double> x, double reach_hz) {
 
 bool present(const Grid& g, std::span<const double> x) {
     const double n = static_cast<double>(x.size() / static_cast<std::size_t>(g.T));
-    if (n < PRESENCE_MIN_S * g.rate) return false;
+    if (n < PRESENCE_MIN_S * baud(g)) return false;
     return presence(g, x) >= g.presence_a + g.presence_b / std::sqrt(n);
 }
 
-CoarseTrack::CoarseTrack(const Grid& g, double reach_hz)
-    : extra(static_cast<int>(std::ceil(reach_hz / g.rate))), g_(&g) {}
+CoarseTrack::CoarseTrack(const Grid& g, double reach_hz, CoarseTrack* source)
+    : extra(static_cast<int>(std::ceil(reach_hz / g.rate))), g_(&g), source_(source) {
+    if (source) {
+        if (!shares_rows(g, *source->g_) || source->extra != extra)
+            throw std::invalid_argument("CoarseTrack: " + std::string(g.name) + " does not share " +
+                                        std::string(source->g_->name) + "'s rows");
+        source->keep_raw_ = true;
+        for (auto& p : source->P_) p.clear();
+    }
+}
+
+// cpm.CoarseTrack._sourced: n rows (shares + raw q in (0, 2)) from stream sample nxt out of the source's energies.
+bool CoarseTrack::sourced(std::int64_t nxt, std::int64_t n, std::vector<double>& out_e, std::vector<double>& out_r) const {
+    const CoarseTrack& src = *source_;
+    const std::int64_t Tp = src.g_->T, L = g_->L;
+    const std::size_t nb = static_cast<std::size_t>(g_->m + 2 * extra), w = 4 * nb, wr = 2 * nb;
+    for (int ph = 0; ph < 4; ++ph) {
+        if (!src.s_[ph] || *src.s_[ph] > nxt || (nxt - *src.s_[ph]) % Tp) continue;
+        const std::size_t i = static_cast<std::size_t>((nxt - *src.s_[ph]) / Tp), have = src.P_[ph].size() / w;
+        if (i + static_cast<std::size_t>(L * n) > have || have != src.E_[ph].size() / w) continue;
+        out_e.assign(static_cast<std::size_t>(n) * w, 0.0);
+        out_r.assign(static_cast<std::size_t>(n) * wr, 0.0);
+        for (std::int64_t r = 0; r < n; ++r) {
+            for (std::size_t c = 0; c < w; ++c) {
+                double e = src.P_[ph][(i + r * L + g_->guard) * w + c];
+                for (std::int64_t l = g_->guard + 1; l < L; ++l) e += src.P_[ph][(i + r * L + l) * w + c];
+                out_e[r * w + c] = e;
+            }
+            std::copy(&out_e[r * w], &out_e[r * w + nb], &out_r[r * wr]);
+            std::copy(&out_e[r * w + 2 * nb], &out_e[r * w + 3 * nb], &out_r[r * wr + nb]);
+        }
+        for (std::size_t j = 0; j < out_e.size(); j += nb) {  // shares per (row, CFO fraction)
+            const double tot = np_sum(&out_e[j], nb) + 1e-30;
+            for (std::size_t b = 0; b < nb; ++b) out_e[j + b] /= tot;
+        }
+        return true;
+    }
+    return false;
+}
+
+void CoarseTrack::prune_memos(std::int64_t decided, std::int64_t decided_mid) {
+    const std::int64_t T = g_->T;
+    std::erase_if(fine_memo, [&](const FineMemo& m) { return m.s < (m.mid ? decided_mid : decided) - T; });
+    std::erase_if(header_memo, [&](const HeaderMemo& m) { return m.s < decided; });
+}
 
 void CoarseTrack::feed(std::span<const double> buf, std::int64_t off) {
     const std::int64_t T = g_->T, end = off + static_cast<std::int64_t>(buf.size());
@@ -464,11 +624,30 @@ void CoarseTrack::feed(std::span<const double> buf, std::int64_t off) {
                 const auto drop = std::min<std::size_t>(E.size() / w, static_cast<std::size_t>((first - *s) / T));
                 E.erase(E.begin(), E.begin() + static_cast<std::ptrdiff_t>(drop * w));
                 R.erase(R.begin(), R.begin() + static_cast<std::ptrdiff_t>(drop * wr));
+                if (keep_raw_) {
+                    auto& P = P_[ph];
+                    const auto dp = std::min<std::size_t>(P.size() / w, static_cast<std::size_t>((first - *s) / T));
+                    P.erase(P.begin(), P.begin() + static_cast<std::ptrdiff_t>(dp * w));
+                }
             }
             s = first;
         }
         const std::int64_t nxt = *s + static_cast<std::int64_t>(E.size() / w) * T;
         if (end - nxt < T) continue;
+        if (keep_raw_) {
+            Mat<double> raw4;
+            auto [e_new, r_new] = coarse_powers(*g_, buf.subspan(static_cast<std::size_t>(nxt - off)), extra, &raw4);
+            P_[ph].insert(P_[ph].end(), raw4.data.begin(), raw4.data.end());
+            E.insert(E.end(), e_new.data.begin(), e_new.data.end());
+            R.insert(R.end(), r_new.data.begin(), r_new.data.end());
+            continue;
+        }
+        std::vector<double> got_e, got_r;
+        if (source_ && sourced(nxt, (end - nxt) / T, got_e, got_r)) {
+            E.insert(E.end(), got_e.begin(), got_e.end());
+            R.insert(R.end(), got_r.begin(), got_r.end());
+            continue;
+        }
         auto [e_new, r_new] = coarse_powers(*g_, buf.subspan(static_cast<std::size_t>(nxt - off)), extra);
         E.insert(E.end(), e_new.data.begin(), e_new.data.end());
         R.insert(R.end(), r_new.data.begin(), r_new.data.end());
@@ -508,7 +687,7 @@ double CoarseTrack::presence(std::int64_t lo, std::int64_t hi) const {
 
 bool CoarseTrack::present(std::int64_t lo, std::int64_t hi) const {
     const double n = static_cast<double>(std::max<std::int64_t>(0, hi - lo) / g_->T);
-    if (n < PRESENCE_MIN_S * g_->rate) return false;
+    if (n < PRESENCE_MIN_S * baud(*g_)) return false;
     return presence(lo, hi) >= g_->presence_a + g_->presence_b / std::sqrt(n);
 }
 
@@ -602,7 +781,7 @@ Detection detect(const Grid& g, std::span<const double> x, double reach_hz, bool
             for (std::int64_t dt = lo; dt < hi + 1; dt += step) {
                 const std::int64_t s = best.start + dt;
                 std::copy(zq.begin() + (dt - lo), zq.begin() + (dt - lo) + N, seg.begin());
-                const Mat<double> E = power(fft_rows(seg, span, T), span, T, g.m);
+                const Mat<double> E = tone_energy(g, seg, span, g.m);
                 for (std::size_t r = 0; r < R; ++r) {
                     on[r] = E[rows[r]][tones_[r]];
                     std::copy(E[rows[r]], E[rows[r]] + g.m, all.begin() + r * g.m);
@@ -644,8 +823,9 @@ double np_median(std::vector<double>& v) {
 }
 
 // cpm.tone_floors: per-tone noise floors, N0 times the tone's median over the tones' median where it stands
-// FLOOR_SIGMAS standard errors over that (a steady carrier), N0 elsewhere; empty where none does.
-std::vector<double> tone_floors(const Mat<double>& E, double n0) {
+// FLOOR_SIGMAS standard errors over that (a steady carrier), N0 elsewhere; empty where none does. median_se:
+// sqrt(n) times the median's relative standard error (cpm._median_se: 1.44 exponential, a wide grid's k-sum less).
+std::vector<double> tone_floors(const Mat<double>& E, double n0, double median_se = 1.44) {
     if (!E.rows) return {};
     std::vector<double> med(E.cols), col(E.rows);
     for (std::size_t k = 0; k < E.cols; ++k) {
@@ -654,7 +834,7 @@ std::vector<double> tone_floors(const Mat<double>& E, double n0) {
     }
     std::vector<double> sorted = med;
     const double ref = np_median(sorted);
-    const double bar = ref * (1 + FLOOR_SIGMAS * 1.44 / std::sqrt(static_cast<double>(E.rows)));
+    const double bar = ref * (1 + FLOOR_SIGMAS * median_se / std::sqrt(static_cast<double>(E.rows)));
     std::vector<double> nb(E.cols, n0);
     bool any = false;
     for (std::size_t k = 0; k < E.cols; ++k)
@@ -664,7 +844,8 @@ std::vector<double> tone_floors(const Mat<double>& E, double n0) {
 
 // cpm._tone_gain: tone_metric as E * gain - offset. One N0 (gain, off empty): the square law's
 // scale = Es / (N0 (N0 + Es)), the codeword's Es, N0 plus the spill. Per-tone floors (tone_floors):
-// gain[k] = Es / (N_k (N_k + Es)), off[k] = ln(1 + Es / N_k).
+// gain[k] = Es / (N_k (N_k + Es)), off[k] = ln(1 + Es / N_k). A wide grid's energies sum k sub-windows:
+// Es and N0 are a sub-window's, the offset once per sub-window (k ln(1 + Es / N_k)).
 struct ToneGain {
     double scale = 0.0;
     std::vector<double> gain, off;
@@ -672,32 +853,60 @@ struct ToneGain {
     double at(double e, std::size_t k) const { return flat() ? e * scale : e * gain[k] - off[k]; }
 };
 
-ToneGain tone_gain(const Mat<double>& E) {
+ToneGain tone_gain(const Mat<double>& E, const Grid& g) {
+    const double kd = kept(g);
     const auto top = row_max(E);
     const double mtop = np_mean(top);
-    double n0 = median_rest(E) / std::numbers::ln2;  // exponential: median = N0 ln 2
+    double n0 = median_rest(E) / g.noise_median;  // exponential: median = N0 ln 2 (k summed: gamma(k)'s)
     n0 = std::max(n0, 1e-12 * mtop + 1e-300);
     ToneGain out;
-    auto nb = tone_floors(E, n0);
+    auto nb = tone_floors(E, n0, g.median_se);
     if (!nb.empty()) {
         Mat<double> Ew(E.rows, E.cols);  // whitened, for Es and the spill
         for (std::size_t r = 0; r < E.rows; ++r)
             for (std::size_t k = 0; k < E.cols; ++k) Ew[r][k] = E[r][k] * (n0 / nb[k]);
-        const double es = std::max(np_mean(row_max(Ew)) - n0, 1e-3 * n0);
-        const double sp = spill(Ew, n0, es) * es;
+        const double es = std::max(np_mean(row_max(Ew)) / kd - n0, 1e-3 * n0);
+        const double sp = spill(Ew, kd * n0, kd * es) * es;
         out.gain.resize(E.cols);
         out.off.resize(E.cols);
         for (std::size_t k = 0; k < E.cols; ++k) {
             const double n = nb[k] + sp;
             out.gain[k] = es / (n + es) / n;
-            out.off[k] = std::log1p(es / n);
+            out.off[k] = kd * std::log1p(es / n);
         }
         return out;
     }
-    const double es = std::max(mtop - n0, 1e-3 * n0);
-    n0 += spill(E, n0, es) * es;
+    const double es = std::max(mtop / kd - n0, 1e-3 * n0);
+    n0 += spill(E, kd * n0, kd * es) * es;
     out.scale = es / (n0 + es) / n0;
     return out;
+}
+
+// cpm._spill_level: N0, the per-tone floors (empty: none), the energies whitened by them, Es and spill().
+struct SpillLevel {
+    double n0;
+    std::vector<double> nb;
+    Mat<double> Ew;
+    double es, a;
+};
+
+SpillLevel spill_level(const Mat<double>& E) {
+    SpillLevel s;
+    s.n0 = std::max(median_rest(E) / std::numbers::ln2, 1e-12 * np_mean(row_max(E)) + 1e-300);
+    s.nb = tone_floors(E, s.n0);
+    s.Ew = E;
+    if (!s.nb.empty())
+        for (std::size_t r = 0; r < E.rows; ++r)
+            for (std::size_t k = 0; k < E.cols; ++k) s.Ew[r][k] = E[r][k] * (s.n0 / s.nb[k]);
+    s.es = std::max(np_mean(row_max(s.Ew)) - s.n0, 1e-3 * s.n0);
+    s.a = spill(s.Ew, s.n0, s.es);
+    return s;
+}
+
+// tone_metric(g, E, use) where `use` uses leak_metric (ctl/data/dd on L=1 grids) and E's spill is significant.
+std::optional<Mat<double>> leak_of(const Grid& g, const Mat<double>& E, Use use) {
+    if (kept(g) != 1 || use == Use::lock || !spill_significant(E)) return std::nullopt;
+    return leak_metric(E, LEAK_K);
 }
 
 // cpm.tone_metric where a tone has a floor of its own (one N0: E * scale, left to the callers).
@@ -710,17 +919,68 @@ Mat<double> tone_metric(const Mat<double>& E, const ToneGain& tg) {
 
 }  // namespace
 
+Mat<double> tone_metric(const Grid& g, const Mat<double>& E, Use use) {
+    if (auto G = leak_of(g, E, use)) return std::move(*G);
+    const ToneGain tg = tone_gain(E, g);
+    return tone_metric(E, tg);
+}
+
+bool spill_significant(const Mat<double>& E) {
+    const SpillLevel s = spill_level(E);
+    if (s.a <= 0) return false;
+    std::vector<double> x(E.rows);  // the per-row terms spill() takes the mean of
+    for (std::size_t r = 0; r < E.rows; ++r) {
+        const double* w = s.Ew[r];
+        const auto a = static_cast<std::size_t>(std::max_element(w, w + E.cols) - w);  // np.argmax: first
+        x[r] = ((a > 0 ? w[a - 1] : s.n0) + (a + 1 < E.cols ? w[a + 1] : s.n0) - 2 * s.n0) / 2 / s.es;
+    }
+    const double mean = np_mean(x);
+    std::vector<double> d2(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i) d2[i] = (x[i] - mean) * (x[i] - mean);
+    const double sd = std::sqrt(np_mean(d2));  // np.std
+    return s.a >= LEAK_Z * sd / std::sqrt(static_cast<double>(x.size()));
+}
+
+Mat<double> leak_metric(const Mat<double>& E, double k) {
+    const SpillLevel s = spill_level(E);
+    const std::size_t m = E.cols;
+    const double ka = k * s.a * s.es, leak = s.a * s.es;
+    std::vector<double> N(m), side_g(m), side_o(m), own_g(m), own_o(m, 0.0);
+    for (std::size_t t = 0; t < m; ++t) {
+        N[t] = (s.nb.empty() ? s.n0 : s.nb[t]) + ka;
+        side_g[t] = leak / (N[t] + leak) / N[t];
+        side_o[t] = std::log1p(leak / N[t]);
+        own_g[t] = s.es / (N[t] + s.es) / N[t];
+        if (!s.nb.empty()) own_o[t] = std::log1p(s.es / N[t]);  // a row constant only when the floors are equal
+    }
+    Mat<double> G(E.rows, m);
+    for (std::size_t r = 0; r < E.rows; ++r)
+        for (std::size_t t = 0; t < m; ++t) {
+            double v = s.nb.empty() ? E[r][t] * own_g[t] : E[r][t] * own_g[t] - own_o[t];
+            v += t > 0 ? E[r][t - 1] * side_g[t - 1] - side_o[t - 1] : 0.0;  // outside the grid: no term
+            v += t + 1 < m ? E[r][t + 1] * side_g[t + 1] - side_o[t + 1] : 0.0;
+            G[r][t] = v;
+        }
+    return G;
+}
+
 std::vector<double> symbol_ll(const Grid& g, const Mat<double>& E) {
-    const ToneGain tg = tone_gain(E);
     const auto gr = gray(g.m);
     std::vector<double> out(E.rows * g.m);
+    if (const auto G = leak_of(g, E, Use::data)) {
+        for (std::size_t r = 0; r < E.rows; ++r)
+            for (int v = 0; v < g.m; ++v) out[r * g.m + v] = (*G)[r][gr[v]];
+        return out;
+    }
+    const ToneGain tg = tone_gain(E, g);
     for (std::size_t r = 0; r < E.rows; ++r)
         for (int v = 0; v < g.m; ++v) out[r * g.m + v] = tg.at(E[r][gr[v]], gr[v]);
     return out;
 }
 
 std::vector<double> llrs(const Grid& g, const Mat<double>& E) {
-    const ToneGain tg = tone_gain(E);
+    if (const auto G = leak_of(g, E, Use::ctl)) return bit_llrs(g, *G);
+    const ToneGain tg = tone_gain(E, g);
     return tg.flat() ? bit_llrs(g, E, tg.scale) : bit_llrs(g, tone_metric(E, tg));
 }
 
@@ -748,34 +1008,54 @@ std::vector<double> bit_llrs(const Grid& g, const Mat<double>& metric, double sc
 
 namespace {
 
-// cpm.header_rows: per grid, per number of copies (1..HDR_COPIES), each valid
-// word's header rows (valid_words' order), and the span they reach (symbols).
+// cpm._all_words / header_rows / mid_rows: per grid, every valid word (regular + CONNECT_HEADER),
+// each word's header rows for 1..HDR_COPIES, and the span they reach (symbols).
+struct WordEntry {
+    const Spec* spec = nullptr;
+    int n_data = 0;
+    bool dup = false;
+    std::optional<int> connect_hash{};
+    int value = 0;
+};
+
 struct WordRows {
+    std::vector<WordEntry> words;
     std::vector<std::vector<std::vector<int>>> rows;  // [copies - 1][word]
     std::vector<int> span;                           // [copies - 1]
     std::vector<int> mid;                            // [word]: the row its mid block starts at (cpm.mid_rows)
 };
 
+const Spec* connect_spec(std::string_view grid_name) {
+    if (grid_name == "c16r25") return spec("fsk16r25-r1/2");
+    if (grid_name == "c8w50") return spec("fsk8w50-r1/2");
+    return nullptr;
+}
+
 const WordRows& word_rows(const Grid& g) {
     static const auto cache = [] {
         std::vector<std::pair<std::string_view, WordRows>> out;
-        for (const auto& gg : tables::CPM_GRIDS) {
-            WordRows w{std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
+        for (auto table : {tables::CPM_GRIDS, tables::CPM_WIDE_GRIDS})
+        for (const auto& gg : table) {
+            WordRows w{{}, std::vector<std::vector<std::vector<int>>>(tables::CPM.hdr_copies),
                        std::vector<int>(tables::CPM.hdr_copies, 0), {}};
-            for (const auto& s : tables::CPM_SPECS) {
-                if (s.grid != gg.name) continue;
+            auto add_word = [&](const Spec* s, int n, bool d, std::optional<int> ch, int val) {
+                w.words.push_back({s, n, d, ch, val});
+                const Layout L = layout(gg, stream_symbols(gg, n, d));
+                w.mid.push_back(L.sync_rows[L.front]);
+                std::vector<int> r;
+                for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
+                    r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
+                    w.span[c] = std::max(w.span[c], r.back() + 1);
+                    w.rows[c].push_back(r);
+                }
+            };
+            for (const Spec* s : grid_specs(gg))
                 for (bool d : {false, true})
-                    for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                        const Layout L = layout(gg, stream_symbols(gg, n, d));
-                        w.mid.push_back(L.sync_rows[L.front]);
-                        std::vector<int> r;
-                        for (int c = 0; c < tables::CPM.hdr_copies; ++c) {
-                            r.insert(r.end(), L.hdr_rows[c].begin(), L.hdr_rows[c].end());
-                            w.span[c] = std::max(w.span[c], r.back() + 1);
-                            w.rows[c].push_back(r);
-                        }
-                    }
-            }
+                    for (int n = 0; n <= tables::CPM.max_data; ++n)
+                        add_word(s, n, d, std::nullopt, header_value(s->index, n, d));
+            if (const Spec* cs = connect_spec(gg.name))
+                for (int h = 0; h < (1 << CONNECT_HASH_BITS); ++h)
+                    add_word(cs, 0, false, h, header_value(CONNECT_INDEX, h, false));
             out.emplace_back(gg.name, std::move(w));
         }
         return out;
@@ -790,6 +1070,7 @@ Lock make_lock(const Grid& g, std::int64_t s0, double cfo, double score, const H
     Lock l{h.spec, h.n_data, h.dup, s0, cfo, score, h.score, h.score - h.runner_up,
            s0 + L.n * g.T, s0 + static_cast<std::int64_t>(L.hdr_rows[copies - 1].back() + 1) * g.T};
     l.copies = copies;
+    l.connect_hash = h.connect_hash;
     return l;
 }
 
@@ -800,14 +1081,15 @@ std::int64_t hdr_span(const Grid& g, int copies) {
 }
 
 Mat<double> tone_llr(const Grid& g, const Mat<double>& E) {
-    const ToneGain tg = tone_gain(E);
+    const ToneGain tg = tone_gain(E, g);
+    const auto at = [&](std::size_t r, std::size_t k) { return tg.at(E[r][k], k); };
     const double lm = std::log(static_cast<double>(g.m));
     const double keep = std::log1p(-tables::CPM.llr_eps), floor_ = std::log(tables::CPM.llr_eps);
     Mat<double> L(E.rows, E.cols);
     for (std::size_t r = 0; r < E.rows; ++r) {
-        double tot = tg.at(E[r][0], 0);  // np.logaddexp.reduce: left to right
-        for (std::size_t k = 1; k < E.cols; ++k) tot = logaddexp(tot, tg.at(E[r][k], k));
-        for (std::size_t k = 0; k < E.cols; ++k) L[r][k] = logaddexp(keep + (tg.at(E[r][k], k) - tot + lm), floor_);
+        double tot = at(r, 0);  // np.logaddexp.reduce: left to right
+        for (std::size_t k = 1; k < E.cols; ++k) tot = logaddexp(tot, at(r, k));
+        for (std::size_t k = 0; k < E.cols; ++k) L[r][k] = logaddexp(keep + (at(r, k) - tot + lm), floor_);
     }
     return L;
 }
@@ -838,22 +1120,18 @@ Header read_header(const Grid& g, std::span<const double> x, std::int64_t s0, do
     const auto& rows = W.rows.at(copies - 1);
     const Mat<double> L = tone_llr(g, energies(g, x, s0, W.span[copies - 1], cfo));
     const double front = front_llr(g, L);
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, front};
-    std::size_t k = 0;
-    for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
-        if (s.grid != g.name) continue;
-        for (bool d : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                const auto t = header_symbols(g, header_value(s.index, n, d));
-                const double score = std::max(front, 0.0) + segments(g, L, rows[k++], t);
-                // ties: the later word, as argsort(...)[::-1] over a stable sort
-                if (score >= best.score) {
-                    best.runner_up = best.score;
-                    best = {&s, n, d, score, best.runner_up, front};
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, front, std::nullopt};
+    for (std::size_t k = 0; k < W.words.size(); ++k) {
+        const WordEntry& we = W.words[k];
+        const auto t = header_symbols(g, we.value);
+        const double score = std::max(front, 0.0) + segments(g, L, rows[k], t);
+        // ties: the later word, as argsort(...)[::-1] over a stable sort
+        if (score >= best.score) {
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, front, we.connect_hash};
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     return best;
 }
@@ -927,7 +1205,10 @@ std::optional<Lock> find(const Grid& g, std::span<const double> x, std::optional
     std::optional<std::pair<Header, bool>> got;
     if (track)
         for (const auto& m : track->header_memo)
-            if (m.s == x0 + d.start && m.cfo == d.cfo) got = {m.h, m.ok};
+            if (m.s == x0 + d.start && m.cfo == d.cfo) {
+                got = {m.h, m.ok};
+                break;
+            }
     if (!got) {
         got = lock_header(g, x, d.start, d.cfo, 1);
         if (track) track->header_memo.push_back({x0 + d.start, d.cfo, got->first, got->second});
@@ -963,33 +1244,29 @@ std::optional<Lock> find_mid(const Grid& g, std::span<const double> x, std::int6
     const int copies = tables::CPM.hdr_copies;
     const auto& rows = W.rows[copies - 1];
     std::vector<std::pair<std::int64_t, Mat<double>>> L;
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0};
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0, std::nullopt};
     std::int64_t best_s = 0;
     std::vector<double> vm(g.mid_block.size());
-    std::size_t k = 0;
-    for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
-        if (s.grid != g.name) continue;
-        for (bool dup : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n, ++k) {
-                const std::int64_t b1 = W.mid[k], s0 = d.start - b1 * T;
-                if (s0 < 0) continue;
-                auto it = std::find_if(L.begin(), L.end(), [&](const auto& e) { return e.first == s0; });
-                if (it == L.end()) {
-                    L.emplace_back(s0, tone_llr(g, energies(g, x, s0, W.span[copies - 1], d.cfo)));
-                    it = L.end() - 1;
-                }
-                const Mat<double>& Ls = it->second;
-                const auto t = header_symbols(g, header_value(s.index, n, dup));
-                for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = Ls[b1 + i][g.mid_block[i]];
-                const double score = std::max(front_llr(g, Ls), 0.0) + np_sum(vm) + segments(g, Ls, rows[k], t);
-                if (score >= best.score) {  // ties: the later word (read_header)
-                    best.runner_up = best.score;
-                    best = {&s, n, dup, score, best.runner_up, 0.0};
-                    best_s = s0;
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    for (std::size_t k = 0; k < W.words.size(); ++k) {
+        const WordEntry& we = W.words[k];
+        const std::int64_t b1 = W.mid[k], s0 = d.start - b1 * T;
+        if (s0 < 0) continue;
+        auto it = std::find_if(L.begin(), L.end(), [&](const auto& e) { return e.first == s0; });
+        if (it == L.end()) {
+            L.emplace_back(s0, tone_llr(g, energies(g, x, s0, W.span[copies - 1], d.cfo)));
+            it = L.end() - 1;
+        }
+        const Mat<double>& Ls = it->second;
+        const auto t = header_symbols(g, we.value);
+        for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = Ls[b1 + i][g.mid_block[i]];
+        const double score = std::max(front_llr(g, Ls), 0.0) + np_sum(vm) + segments(g, Ls, rows[k], t);
+        if (score >= best.score) {  // ties: the later word (read_header)
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, 0.0, we.connect_hash};
+            best_s = s0;
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     if (!best.spec || best.score < g.mid_llr || best.score - best.runner_up < tables::CPM.hdr_margin2)
         return std::nullopt;
@@ -1025,30 +1302,19 @@ std::optional<Lock> prime_lock(const Grid& g, std::span<const double> x, std::in
                 Mat<double> L(n_rows, all.cols);
                 std::copy(all[static_cast<std::size_t>(m)], all[static_cast<std::size_t>(m)] + n_rows * all.cols, L.data.begin());
                 const double front = std::max(front_llr(g, L), 0.0);
-                std::size_t k = 0;
-                for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
-                    if (s.grid != g.name) continue;
-                    for (bool dup : {false, true})
-                        for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k) {
-                            const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
-                            for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
-                            const auto t = header_symbols(g, header_value(s.index, nd, dup));
-                            const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
-                            if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
-                        }
+                for (std::size_t k = 0; k < W.words.size(); ++k) {
+                    const std::size_t b1 = static_cast<std::size_t>(W.mid[k]);
+                    for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
+                    const auto t = header_symbols(g, W.words[k].value);
+                    const double sc = front + std::max(np_sum(vm), 0.0) + segments(g, L, rows[k], t);
+                    if (sc > best) best = sc, best_s = s0, best_cfo = cfo + PRIME_CFO[ci] * g.rate, best_k = k;
                 }
             }
         }
     }
     if (best < PRIME_LLR) return std::nullopt;
-    std::size_t k = 0;
-    for (const auto& s : tables::CPM_SPECS) {
-        if (s.grid != g.name) continue;
-        for (bool dup : {false, true})
-            for (int nd = 0; nd <= tables::CPM.max_data; ++nd, ++k)
-                if (k == best_k) return make_lock(g, best_s, best_cfo, best, Header{&s, nd, dup, best, best, 0.0}, copies);
-    }
-    return std::nullopt;
+    const WordEntry& we = W.words[best_k];
+    return make_lock(g, best_s, best_cfo, best, Header{we.spec, we.n_data, we.dup, best, best, 0.0, we.connect_hash}, copies);
 }
 
 std::int64_t confirm_end(const Grid& g, const Lock& l) {
@@ -1059,7 +1325,7 @@ std::int64_t confirm_end(const Grid& g, const Lock& l) {
 double confirm(const Grid& g, std::span<const double> x, const Lock& l) {
     const Layout lay = layout(g, stream_symbols(g, l.n_data, l.dup));
     const Mat<double> L = tone_llr(g, energies(g, x, l.start, lay.hdr_rows[1].back() + 1, l.cfo));
-    const auto t = header_symbols(g, header_value(l.spec->index, l.n_data, l.dup));
+    const auto t = header_symbols(g, header_value_for(*l.spec, l.n_data, l.dup, l.connect_hash));
     const int b1 = lay.sync_rows[lay.front];
     std::vector<double> vm(g.mid_block.size()), vh(lay.hdr_rows[1].size());
     for (std::size_t i = 0; i < vm.size(); ++i) vm[i] = L[b1 + i][g.mid_block[i]];
@@ -1108,8 +1374,9 @@ static double spread(const Grid& g, const std::vector<double>& top, double n0, c
         double num = 0.0;
         std::size_t pairs = 0;
         // cpm._near_lags: the pairs NEAR_S0..NEAR_S1 apart in time
-        const auto lag0 = std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(NEAR_S0 * g.rate - 1e-9)));
-        const auto lag1 = static_cast<std::size_t>(std::floor(NEAR_S1 * g.rate + 1e-9));
+        // (a wide grid's at its symbol rate, baud)
+        const auto lag0 = std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(NEAR_S0 * baud(g) - 1e-9)));
+        const auto lag1 = static_cast<std::size_t>(std::floor(NEAR_S1 * baud(g) + 1e-9));
         for (std::size_t lag = lag0; lag <= lag1 && lag < n; ++lag) {
             std::vector<double> p;
             for (std::size_t i = 0; i + lag < n; ++i)
@@ -1132,19 +1399,22 @@ static double spread(const Grid& g, const std::vector<double>& top, double n0, c
         sxx[i] = (x[i] - mx) * (x[i] - mx);
     }
     const double b = -np_sum(sxy) / np_sum(sxx);
-    return std::min(std::sqrt(std::max(b, 0.0)) * g.rate / PI, MAX_HZ);
+    return std::min(std::sqrt(std::max(b, 0.0)) * baud(g) / PI, MAX_HZ);
 }
 
 Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
-    const auto top = row_max(E);
-    const double n0 = std::max(median_rest(E) / std::numbers::ln2, 1e-300);
+    // a wide grid: per sub-window (spread's noise variance is then approximate)
+    const double kd = kept(g);
+    auto top = row_max(E);
+    for (auto& t : top) t /= kd;
+    const double n0 = std::max(median_rest(E) / g.noise_median, 1e-300);
     Measure out;
     out.snr.resize(top.size());
     for (std::size_t i = 0; i < top.size(); ++i) out.snr[i] = std::max(top[i] / n0 - 1, 1e-6);
     double es_n0 = std::max(np_mean(top) - n0, 1e-12) / n0;
     // a carrier: for snr_est only, every tone scaled down to the quietest quarter's floor and Es back up
     // by the share kept (cpm.measure); the per-symbol snr and the spread stay as read
-    if (!tone_floors(E, n0).empty()) {
+    if (!tone_floors(E, n0, g.median_se).empty()) {
         std::vector<double> med(E.cols), col(E.rows);
         for (std::size_t k = 0; k < E.cols; ++k) {
             for (std::size_t r = 0; r < E.rows; ++r) col[r] = E[r][k];
@@ -1160,8 +1430,8 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
         Mat<double> Ew(E.rows, E.cols);
         for (std::size_t r = 0; r < E.rows; ++r)
             for (std::size_t k = 0; k < E.cols; ++k) Ew[r][k] = E[r][k] * sc[k];
-        const double n0w = std::max(median_rest(Ew) / std::numbers::ln2, 1e-300);
-        es_n0 = std::max((np_mean(row_max(Ew)) - n0w) / np_mean(sc), 1e-12) / n0w;
+        const double n0w = std::max(median_rest(Ew) / g.noise_median, 1e-300);
+        es_n0 = std::max((np_mean(row_max(Ew)) / kd - n0w) / np_mean(sc), 1e-12) / n0w;
     }
     std::vector<int> tones(E.rows);  // np.argmax: the first of equals
     for (std::size_t r = 0; r < E.rows; ++r) {
@@ -1177,9 +1447,9 @@ Measure measure(const Grid& g, const Mat<double>& E, int n_sym) {
 }
 
 std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,
-                                       const Spec& spec, int n_data, bool dup) {
+                                       const Spec& spec, int n_data, bool dup, std::optional<int> connect_hash) {
     const Layout L = layout(g, stream_symbols(g, n_data, dup));
-    const auto h = header_symbols(g, header_value(spec.index, n_data, dup));
+    const auto h = header_symbols(g, header_value_for(spec, n_data, dup, connect_hash));
     const int n = std::min(L.n, tables::CPM.refine_symbols);
     std::vector<int> known(n, -1);
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i)
@@ -1195,7 +1465,7 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
     double w = 0.0;
     ToneGain tg;  // per-tone floors: the tones' own gains and offsets in place of w
     if (tot > 0) {
-        tg = tone_gain(E0);
+        tg = tone_gain(E0, g);
         if (tg.flat()) {
             std::vector<double> G0(E0.data.size());
             for (std::size_t i = 0; i < G0.size(); ++i) G0[i] = E0.data[i] * tg.scale;
@@ -1208,7 +1478,7 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
     // logaddexp.reduce rounds otherwise, within 1e-15: no tie it could break was seen)
     const auto ll = [&](const cdouble* z) {
         const std::vector<cdouble> seg(z, z + N);
-        const Mat<double> E = power(fft_rows(seg, n, T), n, T, g.m);
+        const Mat<double> E = tone_energy(g, seg, n, g.m);
         std::vector<double> vk(kr.size()), vu(ur.size());
         for (std::size_t i = 0; i < kr.size(); ++i) vk[i] = sc(E[kr[i]][known[kr[i]]], known[kr[i]]);
         for (std::size_t i = 0; i < ur.size(); ++i) {
@@ -1283,7 +1553,7 @@ std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x,
 
 Received receive(std::span<const double> x, const Lock& lock) {
     const Grid& g = grid_of(*lock.spec);
-    return receive_refined(x, lock, refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup));
+    return receive_refined(x, lock, refine(g, x, lock.start, lock.cfo, *lock.spec, lock.n_data, lock.dup, lock.connect_hash));
 }
 
 Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<std::int64_t, double> at) {
@@ -1291,11 +1561,29 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
     const auto [s0, cfo] = at;
     Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
+    const int n_sym = layout(g, stream_symbols(g, lock.n_data, lock.dup)).n;
     Received r{lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
-               lock.header_end, bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo), {}};
+               lock.header_end, {}, {}, lock.connect_hash, 0, {}, {}};
+    if (!coherent(g)) return r;  // the square law alone (no Z: arq::phy's DD stays off)
+    r.Z = bins(g, x, s0, n_sym, cfo);
+    const int dt = rake_dt(g);
+    if (dt > 0) {
+        r.finger_dt = dt;
+        r.Z_early = bins(g, x, s0 - dt, n_sym, cfo);
+        r.Z_late = bins(g, x, s0 + dt, n_sym, cfo);
+    }
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
-        for (int k = 0; k < r.n_ctl_slots; ++k) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
+        for (int k = 0; k < r.n_ctl_slots; ++k)
+            if (!ctl_square(g, r.E, k)) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
     return r;
+}
+
+bool ctl_square(const Grid& g, const Mat<double>& E, int slot) {
+    if (kept(g) != 1) return false;
+    const std::size_t n = ctl(g).n_sym, a = std::min(E.rows, slot * n), b = std::min(E.rows, (slot + 1) * n);
+    Mat<double> Es(b - a, E.cols);
+    std::copy(E[a], E[a] + (b - a) * E.cols, Es.data.begin());
+    return spill_level(Es).a >= CTL_SQ && spill_significant(Es);
 }
 
 Stream::Stream(std::vector<double> x, const Lock& lock, PassFn pass)
@@ -1316,16 +1604,18 @@ void Stream::feed(std::span<const double> more) {
 void Stream::advance() {
     const Grid& g = grid_of(*lock_.spec);
     const auto len = static_cast<std::int64_t>(x_.size());
-    if (!at_ && len >= refine_need_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    if (!at_ && len >= refine_need_)
+        at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup, lock_.connect_hash);
     if (!at_ || !pass_) return;
     const int n_ctl = 1 + lock_.dup;
     const auto rows = slot_rows(g, lock_.n_data, lock_.dup);
     const int n = layout(g, stream_symbols(g, lock_.n_data, lock_.dup)).n;
     std::optional<Received> r;
+    const int dt_rake = rake_dt(g);
     for (int k = n_ctl; k < n_ctl + lock_.n_data; ++k) {
         if (passes_.count(k)) continue;
-        const std::int64_t b = std::min(n, rows[k].back() + 1 + COH_W);
-        if (len < at_->first + b * g.T) break;  // its rows and its metric's window are not all in yet
+        const std::int64_t b = std::min(n, rows[k].back() + 1 + (coh_w(g) + g.L - 1) / g.L);  // dd_metric's window
+        if (len < at_->first + b * g.T + dt_rake) break;  // its rows and its metric's window (plus Rake shift) are not all in yet
         if (!r) r = receive_refined(x_, lock_, *at_);  // rows past the audio read as zeros; this slot's don't
         Pass p = pass_(*r, k, earlier_);
         if (!p.post.empty()) earlier_[k] = p.post;
@@ -1335,7 +1625,7 @@ void Stream::advance() {
 
 Received Stream::finish() {
     const Grid& g = grid_of(*lock_.spec);
-    if (!at_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup);
+    if (!at_) at_ = refine(g, x_, lock_.start, lock_.cfo, *lock_.spec, lock_.n_data, lock_.dup, lock_.connect_hash);
     Received r = receive_refined(x_, lock_, *at_);
     r.passes = std::move(passes_);
     return r;
@@ -1360,19 +1650,29 @@ Mat<double> power_of(const Mat<cdouble>& Z) {
     return E;
 }
 
+// symbol rows -> their sub-window rows (a wide grid's bins: L a symbol)
+std::vector<int> sub_rows(std::span<const int> rows, int L) {
+    std::vector<int> out;
+    out.reserve(rows.size() * L);
+    for (int r : rows)
+        for (int l = 0; l < L; ++l) out.push_back(r * L + l);
+    return out;
+}
+
 Mat<cdouble> take_crows(const Mat<cdouble>& Z, std::span<const int> rows) {
     Mat<cdouble> out(rows.size(), Z.cols);
     for (std::size_t i = 0; i < rows.size(); ++i) std::copy(Z[rows[i]], Z[rows[i]] + Z.cols, out[i]);
     return out;
 }
 
-}  // namespace
+Mat<double> coh_metric_impl(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls,
+                            const std::vector<double>* precomp_nb);
 
-// cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric.
-std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0) {
-    Mat<double> P(Z.rows, Z.cols, 0.0);
+std::vector<double> coh_run_llr_impl(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0,
+                                     const std::vector<double>* precomp_nb) {
+    Mat<double> P(t.size(), Z.cols, 0.0);
     for (std::size_t i = 0; i < t.size(); ++i) P[i][t[i]] = 1.0;
-    const Mat<double> L = coh_metric(Z, P, COH_HDR_W, n0);
+    const Mat<double> L = coh_metric_impl(Z, P, coh_w(g, true), n0, g.L, precomp_nb);
     const double lm = std::log(static_cast<double>(g.m));
     const double keep = std::log1p(-tables::CPM.llr_eps), floor_ = std::log(tables::CPM.llr_eps);
     std::vector<double> out(t.size());
@@ -1384,6 +1684,13 @@ std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<
     return out;
 }
 
+}  // namespace
+
+// cpm._coh_run_llr: per-row tone_llr of known tones t over a run of consecutive rows, on coh_metric.
+std::vector<double> coh_run_llr(const Grid& g, const Mat<cdouble>& Z, std::span<const int> t, double n0) {
+    return coh_run_llr_impl(g, Z, t, n0, nullptr);
+}
+
 std::optional<std::array<double, 4>> coh_lock(const Grid& g) {
     static const bool on = env_on("DATA2G_CPM_COH_LOCK");
     if (!on) return std::nullopt;
@@ -1392,11 +1699,26 @@ std::optional<std::array<double, 4>> coh_lock(const Grid& g) {
     // c8r50's one-copy margin: early locks read another word where two of its bursts overlap (cpm.COH_LOCK)
     if (g.name == "c8r50") return std::array{36.0, 40.0, 14.0, m2};
     if (g.name == "c32r62") return std::array{36.0, 42.0, m1, m2};
+    // the wide grids: 3000 noise hops' maxima (22.7, 28.6) and (22.8, 28.9) (wide_fsk_study.py cohcal)
+    if (g.name == "c16w125" || g.name == "c8w50") return std::array{30.0, 34.0, m1, m2};
     return std::nullopt;
+}
+
+int coh_w(const Grid& g, bool hdr) {
+    if (g.L == 1) return hdr ? COH_HDR_W : COH_W;
+    // cpm.WIDE_COH_W (data, header), in sub-window rows: about their on-air neighbours' windows in time
+    if (g.name == "c16w125") return 8;
+    if (g.name == "c8w50") return hdr ? 4 : 8;
+    throw std::out_of_range("no coherent window for " + std::string(g.name));
 }
 
 bool coh_ctl() {
     static const bool on = env_on("DATA2G_CPM_COH_CTL");
+    return on;
+}
+
+bool coh2d() {
+    static const bool on = env_on("DATA2G_CPM_COH2D");
     return on;
 }
 
@@ -1411,16 +1733,164 @@ Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, 
         const double arg = (w * static_cast<double>(s)) / FS;  // cpm.bins: (-2 pi i (f0 + cfo) idx) / FS
         z[i] = {x[s] * std::cos(arg), x[s] * std::sin(arg)};
     }
-    const auto F = fft_rows(z, n_sym, T);
-    Mat<cdouble> out(n_sym, g.m);
-    for (int r = 0; r < n_sym; ++r) std::copy_n(&F[r * T], g.m, out[r]);
+    const std::size_t rows = static_cast<std::size_t>(n_sym) * g.L, ns = nsub(g);  // a wide grid: its sub-windows
+    const auto F = fft_rows(z, rows, ns);
+    Mat<cdouble> out(rows, g.m);
+    for (std::size_t r = 0; r < rows; ++r) std::copy_n(&F[r * ns], g.m, out[r]);
     return out;
 }
 
-Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, double n0) {
-    const std::size_t n = Z0.rows, m = Z0.cols;
+namespace {
+
+// Cyclic Jacobi eigensolver for real symmetric m x m C -> top d_dim eigenvectors scaled by sqrt(m) (cpm._slepian_basis).
+Mat<double> slepian_basis(std::size_t m, std::size_t d_dim, double bw) {
+    struct Key {
+        std::size_t m, d;
+        double bw;
+    };
+    static std::mutex mu;
+    static std::vector<std::pair<Key, Mat<double>>> memo;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        for (const auto& [k, v] : memo)
+            if (k.m == m && k.d == d_dim && k.bw == bw) return v;
+    }
+    Mat<double> A(m, m, 0.0), V(m, m, 0.0);
+    for (std::size_t i = 0; i < m; ++i) {
+        V[i][i] = 1.0;
+        for (std::size_t j = 0; j < m; ++j) {
+            if (i == j) {
+                A[i][j] = 1.0;
+            } else {
+                const double x = 2.0 * bw * (static_cast<double>(i) - static_cast<double>(j));
+                A[i][j] = std::sin(PI * x) / (PI * x);
+            }
+        }
+    }
+    for (int sweep = 0; sweep < 40; ++sweep) {
+        double off = 0.0;
+        for (std::size_t p = 0; p < m; ++p)
+            for (std::size_t q = p + 1; q < m; ++q) off += A[p][q] * A[p][q];
+        if (off < 1e-30) break;
+        for (std::size_t p = 0; p < m; ++p) {
+            for (std::size_t q = p + 1; q < m; ++q) {
+                const double apq = A[p][q];
+                if (std::abs(apq) < 1e-18) continue;
+                const double tau = (A[q][q] - A[p][p]) / (2.0 * apq);
+                const double t = (tau >= 0.0 ? 1.0 : -1.0) / (std::abs(tau) + std::sqrt(1.0 + tau * tau));
+                const double cs = 1.0 / std::sqrt(1.0 + t * t), sn = t * cs;
+                A[p][p] -= t * apq;
+                A[q][q] += t * apq;
+                A[p][q] = A[q][p] = 0.0;
+                for (std::size_t r = 0; r < m; ++r) {
+                    if (r != p && r != q) {
+                        const double arp = A[r][p], arq = A[r][q];
+                        A[r][p] = A[p][r] = cs * arp - sn * arq;
+                        A[r][q] = A[q][r] = sn * arp + cs * arq;
+                    }
+                    const double vrp = V[r][p], vrq = V[r][q];
+                    V[r][p] = cs * vrp - sn * vrq;
+                    V[r][q] = sn * vrp + cs * vrq;
+                }
+            }
+        }
+    }
+    std::vector<std::size_t> idx(m);
+    for (std::size_t i = 0; i < m; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](std::size_t i, std::size_t j) { return A[i][i] > A[j][j]; });
+    Mat<double> Phi(m, d_dim);
+    const double scale = std::sqrt(static_cast<double>(m));
+    for (std::size_t r = 0; r < m; ++r)
+        for (std::size_t d = 0; d < d_dim; ++d) Phi[r][d] = V[r][idx[d]] * scale;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        memo.emplace_back(Key{m, d_dim, bw}, Phi);
+    }
+    return Phi;
+}
+
+// Leave-one-row-out 2D Slepian channel estimate (cpm._loo_slepian).
+Mat<cdouble> loo_slepian(const Mat<cdouble>& Z, const Mat<double>& Pw, int W, double tau, const Mat<double>& Phi,
+                         double lam) {
+    const std::size_t n = Z.rows, m = Z.cols, D = Phi.cols;
+    std::vector<double> kern(W + 1, 0.0);
+    for (int l = 1; l <= W; ++l) kern[l] = std::exp(-static_cast<double>(l) / tau);
+    Mat<cdouble> b_row(n, D, 0.0);
+    Mat<double> G_row(n, D * D, 0.0);
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t k = 0; k < m; ++k) {
+            const double pw = Pw[r][k];
+            const cdouble pwz = pw * Z[r][k];
+            const double* ph = Phi[k];
+            for (std::size_t a = 0; a < D; ++a) {
+                b_row[r][a] += pwz * ph[a];
+                const double pwa = pw * ph[a];
+                for (std::size_t b = a; b < D; ++b) G_row[r][a * D + b] += pwa * ph[b];
+            }
+        }
+    }
+    Mat<cdouble> H(n, m, 0.0);
+    std::vector<double> L(D * D), rhs_re(D), rhs_im(D), c_re(D), c_im(D);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::fill(L.begin(), L.end(), 0.0);
+        std::fill(rhs_re.begin(), rhs_re.end(), 0.0);
+        std::fill(rhs_im.begin(), rhs_im.end(), 0.0);
+        const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0;
+        const std::size_t hi = std::min(n, i + static_cast<std::size_t>(W) + 1);
+        for (std::size_t j = lo; j < hi; ++j) {
+            if (j == i) continue;
+            const double w = kern[j > i ? j - i : i - j];
+            for (std::size_t a = 0; a < D; ++a) {
+                rhs_re[a] += w * b_row[j][a].real();
+                rhs_im[a] += w * b_row[j][a].imag();
+                for (std::size_t b = a; b < D; ++b) L[a * D + b] += w * G_row[j][a * D + b];
+            }
+        }
+        for (std::size_t a = 0; a < D; ++a) {
+            L[a * D + a] += lam;
+            for (std::size_t b = a + 1; b < D; ++b) L[b * D + a] = L[a * D + b];
+        }
+        // Cholesky LL^T on D x D real SPD matrix L
+        for (std::size_t a = 0; a < D; ++a) {
+            for (std::size_t b = 0; b <= a; ++b) {
+                double s = L[a * D + b];
+                for (std::size_t c = 0; c < b; ++c) s -= L[a * D + c] * L[b * D + c];
+                L[a * D + b] = (a == b) ? std::sqrt(std::max(s, 1e-30)) : s / L[b * D + b];
+            }
+        }
+        for (std::size_t a = 0; a < D; ++a) {
+            double sr = rhs_re[a], si = rhs_im[a];
+            for (std::size_t b = 0; b < a; ++b) sr -= L[a * D + b] * c_re[b], si -= L[a * D + b] * c_im[b];
+            c_re[a] = sr / L[a * D + a];
+            c_im[a] = si / L[a * D + a];
+        }
+        for (std::size_t a = D; a-- > 0;) {
+            double sr = c_re[a], si = c_im[a];
+            for (std::size_t b = a + 1; b < D; ++b) sr -= L[b * D + a] * c_re[b], si -= L[b * D + a] * c_im[b];
+            c_re[a] = sr / L[a * D + a];
+            c_im[a] = si / L[a * D + a];
+        }
+        for (std::size_t k = 0; k < m; ++k) {
+            double hr = 0.0, hi_ = 0.0;
+            const double* ph = Phi[k];
+            for (std::size_t a = 0; a < D; ++a) hr += c_re[a] * ph[a], hi_ += c_im[a] * ph[a];
+            H[i][k] = {hr, hi_};
+        }
+    }
+    return H;
+}
+
+Mat<double> coh_metric_impl(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls,
+                            const std::vector<double>* precomp_nb) {
+    const std::size_t n = Z0.rows, m = Z0.cols, L = static_cast<std::size_t>(Ls);
     Mat<double> out(n, m);
-    if (!n) return out;
+    if (!n) return L == 1 ? out : Mat<double>(0, m);
+    Mat<double> Prep;  // a wide grid: each symbol's row for each of its L sub-windows (np.repeat)
+    if (L > 1) {
+        Prep = Mat<double>(n, m);
+        for (std::size_t r = 0; r < n; ++r) std::copy(P1[r / L], P1[r / L] + m, Prep[r]);
+    }
+    const Mat<double>& P = L > 1 ? Prep : P1;
     std::vector<int> t(n);
     std::vector<double> c(n);
     std::vector<cdouble> a(n);
@@ -1448,76 +1918,221 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
     std::vector<cdouble> q;
     for (std::size_t j = 0; j < qd.size(); ++j)
         if (seen[j]) dv.push_back(static_cast<int>(j) - static_cast<int>(m) + 1), q.push_back(qd[j]);
-    double delta = 0.0, best = -1.0;
+    // Grid points are (k - 200) / 400 and tone steps dv[i] are integers, so all 2*pi*gk*dv angles lie on a 400-pt circle.
+    struct Trig400 {
+        double c[400], s[400];
+        Trig400() {
+            for (int i = 0; i < 400; ++i) {
+                const double th = (2.0 * PI) * (static_cast<double>(i) / 400.0);
+                c[i] = std::cos(th);
+                s[i] = std::sin(th);
+            }
+        }
+    };
+    static const Trig400 trig;
+    int best_k = 200;
+    double best2 = -1.0;
     for (int k = 0; k < 401; ++k) {
-        const double gk = k == 400 ? 0.5 : k * (1.0 / 400) + -0.5;  // np.linspace(-0.5, 0.5, 401)
-        cdouble s = 0.0;
+        const int kk = k - 200;
+        double sr = 0.0, si = 0.0;
         for (std::size_t i = 0; i < q.size(); ++i) {
-            const double th = (2 * PI) * (gk * dv[i]);
-            s += cdouble(std::cos(th), std::sin(th)) * q[i];
+            int idx = (kk * dv[i]) % 400;
+            if (idx < 0) idx += 400;
+            const double cr = trig.c[idx], ci = trig.s[idx];
+            const double qr = q[i].real(), qi = q[i].imag();
+            sr += cr * qr - ci * qi;
+            si += cr * qi + ci * qr;
         }
-        const double v = std::abs(s);
-        if (v > best) best = v, delta = gk;
+        const double v2 = sr * sr + si * si;
+        if (v2 > best2) best2 = v2, best_k = k;
     }
-    cdouble s = 0.0;
+    const double delta = best_k == 400 ? 0.5 : best_k * (1.0 / 400) + -0.5;
+    const int best_kk = best_k - 200;
+    std::vector<cdouble> p_rot(p.size());
+    double sr = 0.0, si = 0.0;
     for (std::size_t i = 0; i < p.size(); ++i) {
-        const double th = (2 * PI) * delta * d[i];
-        s += p[i] * cdouble(std::cos(th), std::sin(th));
+        int idx = (best_kk * d[i]) % 400;
+        if (idx < 0) idx += 400;
+        const double cr = trig.c[idx], ci = trig.s[idx];
+        const double pr = p[i].real(), pi = p[i].imag();
+        p_rot[i] = {pr * cr - pi * ci, pr * ci + pi * cr};
+        sr += p_rot[i].real();
+        si += p_rot[i].imag();
     }
-    const double nu = std::arg(s);
-    Mat<cdouble> Z(n, m);
-    for (std::size_t r = 0; r < n; ++r) {
-        const double tr = -nu * static_cast<double>(r);
-        const cdouble rot(std::cos(tr), std::sin(tr));
-        for (std::size_t k = 0; k < m; ++k) {
-            const double tk = (2 * PI) * delta * static_cast<double>(k);
-            Z[r][k] = Z0[r][k] * cdouble(std::cos(tk), std::sin(tk)) * rot;
+    const double nu = std::atan2(si, sr);
+    std::vector<cdouble> tk_rot(m);
+    for (std::size_t k = 0; k < m; ++k) {
+        const double tk = (2 * PI) * delta * static_cast<double>(k);
+        tk_rot[k] = cdouble(std::cos(tk), std::sin(tk));
+    }
+    const auto rot_z = [&](double nu_val) {
+        Mat<cdouble> Zout(n, m);
+        for (std::size_t r = 0; r < n; ++r) {
+            const double tr = -nu_val * static_cast<double>(r);
+            const cdouble rot(std::cos(tr), std::sin(tr));
+            for (std::size_t k = 0; k < m; ++k) Zout[r][k] = Z0[r][k] * tk_rot[k] * rot;
         }
-    }
-    for (std::size_t r = 0; r < n; ++r) {
-        cdouble v = 0.0;
-        for (std::size_t k = 0; k < m; ++k) v += P[r][k] * Z[r][k];
-        a[r] = v;
-    }
-    // h_i: the mean over rows j != i within +-W (cpm.coh_metric's convolve "same")
-    std::vector<cdouble> h(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        cdouble v = 0.0;
-        int cnt = 0;
-        const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0, hi = std::min(n, i + W + 1);
-        for (std::size_t j = lo; j < hi; ++j)
-            if (j != i) v += a[j], ++cnt;
-        h[i] = v / static_cast<double>(std::max(cnt, 1));
-    }
-    std::vector<double> res(n), row(m);
-    {
+        return Zout;
+    };
+    Mat<cdouble> Z = rot_z(nu);
+    const auto boxcar = [&](const Mat<cdouble>& Zmat) {
+        std::vector<cdouble> ar(n), hr(n);
+        for (std::size_t r = 0; r < n; ++r) {
+            cdouble v = 0.0;
+            for (std::size_t k = 0; k < m; ++k) v += P[r][k] * Zmat[r][k];
+            ar[r] = v;
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            cdouble v = 0.0;
+            int cnt = 0;
+            const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0, hi = std::min(n, i + W + 1);
+            if (L == 1) {
+                for (std::size_t j = lo; j < hi; ++j)
+                    if (j != i) v += ar[j], ++cnt;
+                hr[i] = v / static_cast<double>(std::max(cnt, 1));
+                continue;
+            }
+            for (std::size_t j = lo; j < hi; ++j) v += ar[j], ++cnt;
+            const std::size_t s0 = i / L * L;
+            cdouble own = ar[s0];
+            for (std::size_t j = s0 + 1; j < s0 + L; ++j) own += ar[j];
+            hr[i] = (v - own) / std::max(static_cast<double>(cnt) - static_cast<double>(L), 1.0);
+        }
+        return hr;
+    };
+    const std::vector<cdouble> h = boxcar(Z);
+    Mat<cdouble> H(n, m);
+    for (std::size_t r = 0; r < n; ++r)
+        for (std::size_t k = 0; k < m; ++k) H[r][k] = h[r];
+
+    std::vector<double> local_nb;
+    const std::vector<double>* nbp = precomp_nb;
+    if (!nbp) {
         Mat<double> E(n, m);
         for (std::size_t r = 0; r < n; ++r)
             for (std::size_t k = 0; k < m; ++k) E[r][k] = sq_abs(Z[r][k]);
-        const auto nb = tone_floors(E, n0);
-        if (!nb.empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
-            for (std::size_t r = 0; r < n; ++r) {
-                for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - h[r]) - nb[k]);
-                res[r] = np_sum(row);
-            }
-            const double s2 = std::max(np_mean(res), n0 * 1e-3);
+        local_nb = tone_floors(E, n0);
+        nbp = &local_nb;
+    }
+
+    if (L == 1 && coh2d() && W > COH_HDR_W && static_cast<int>(n) >= COH2D_MIN_ROWS) {
+        Mat<double> Pw = P;
+        if (!nbp->empty()) {
+            const auto& nb = *nbp;
             for (std::size_t r = 0; r < n; ++r)
-                for (std::size_t k = 0; k < m; ++k)
-                    out[r][k] = E[r][k] / nb[k] - sq_abs(Z[r][k] - h[r]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
-            return out;
+                for (std::size_t k = 0; k < m; ++k) Pw[r][k] *= (n0 / nb[k]);
+        }
+        int near_cnt = 0;
+        cdouble s_near = 0.0;
+        for (std::size_t i = 0; i < p_rot.size(); ++i)
+            if (std::abs(d[i]) <= COH2D_NEAR_TONE_STEP) s_near += p_rot[i], ++near_cnt;
+        const bool has_sel = near_cnt >= COH2D_MIN_NEAR_PAIRS;
+        const Mat<cdouble> Z_sel = has_sel ? rot_z(std::arg(s_near)) : Z;
+
+        const int wf = std::min(W, COH2D_FAST_W);
+        std::vector<cdouble> pwz_sum(n, 0.0);
+        std::vector<double> pw_sum(n, 0.0);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k) pwz_sum[r] += Pw[r][k] * Z[r][k], pw_sum[r] += Pw[r][k];
+        Mat<cdouble> H1(n, m);
+        for (std::size_t i = 0; i < n; ++i) {
+            cdouble num_v = 0.0;
+            double den_v = 0.0;
+            const std::size_t lo = i >= static_cast<std::size_t>(wf) ? i - wf : 0;
+            const std::size_t hi = std::min(n, i + static_cast<std::size_t>(wf) + 1);
+            for (std::size_t j = lo; j < hi; ++j) {
+                if (j == i) continue;
+                const double kw = std::exp(-static_cast<double>(j > i ? j - i : i - j) / COH2D_FAST_TAU);
+                num_v += kw * pwz_sum[j];
+                den_v += kw * pw_sum[j];
+            }
+            const cdouble hv = num_v / std::max(den_v, 1e-9);
+            for (std::size_t k = 0; k < m; ++k) H1[i][k] = hv;
+        }
+        Mat<cdouble> H2(n, m), H3(n, m);
+        const int n1 = static_cast<int>(n) - 1;
+        if (m <= 16) {
+            const double bw = COH2D_DELAY_S * (m <= 8 ? 50.0 : 25.0);
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_SLOW_W), COH2D_NARROW_SLOW_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_SLOW_D), bw), COH2D_NARROW_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_FAST_W), COH2D_NARROW_FAST_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_FAST_D), bw), COH2D_NARROW_FAST_LAM);
+        } else {
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_SLOW_W), COH2D_WIDE_SLOW_TAU,
+                             slepian_basis(m, COH2D_WIDE_SLOW_D, COH2D_WIDE_SLOW_BW), COH2D_WIDE_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_FAST_W), COH2D_WIDE_FAST_TAU,
+                             slepian_basis(m, COH2D_WIDE_FAST_D, COH2D_WIDE_FAST_BW), COH2D_WIDE_FAST_LAM);
+        }
+        const auto loo_loss = [&](const Mat<cdouble>& Zc, const Mat<cdouble>& Hc) {
+            std::vector<double> rsum(n), rbuf(m);
+            for (std::size_t r = 0; r < n; ++r) {
+                for (std::size_t k = 0; k < m; ++k) rbuf[k] = Pw[r][k] * sq_abs(Zc[r][k] - Hc[r][k]);
+                rsum[r] = np_sum(rbuf);
+            }
+            return np_mean(rsum);
+        };
+        const double losses[4] = {loo_loss(Z, H), loo_loss(Z, H1), loo_loss(Z_sel, H2), loo_loss(Z_sel, H3)};
+        int best_idx = 0;
+        double best_loss = losses[0];
+        for (int i = 1; i < 4; ++i)
+            if (losses[i] < best_loss * (1.0 - COH2D_TIE_REL)) best_idx = i, best_loss = losses[i];
+        if (best_idx > 0) {
+            const bool use_sel = best_idx >= 2 && has_sel;
+            if (use_sel) Z = Z_sel;
+            const Mat<cdouble>& Hb = best_idx == 1 ? H1 : (best_idx == 2 ? H2 : H3);
+            const std::vector<cdouble> hb0 = use_sel ? boxcar(Z) : h;
+            double num = 0.0, den = 0.0;
+            for (std::size_t r = 0; r < n; ++r) {
+                for (std::size_t k = 0; k < m; ++k) {
+                    const cdouble df = Hb[r][k] - hb0[r];
+                    num += Pw[r][k] * ((Z[r][k] - hb0[r]) * std::conj(df)).real();
+                    den += Pw[r][k] * sq_abs(df);
+                }
+            }
+            const double alpha = std::clamp(num / std::max(den, 1e-30), 0.0, 1.0);
+            for (std::size_t r = 0; r < n; ++r)
+                for (std::size_t k = 0; k < m; ++k) H[r][k] = hb0[r] + alpha * (Hb[r][k] - hb0[r]);
         }
     }
+
+    // a wide grid: the symbol's rows' log-likelihoods summed (n / L, m)
+    const auto by_symbol = [&](Mat<double>& M) {
+        if (L == 1) return std::move(M);
+        Mat<double> S(n / L, m);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k) S[r / L][k] = r % L ? S[r / L][k] + M[r][k] : M[r][k];
+        return S;
+    };
+    std::vector<double> res(n), row(m);
+    if (!nbp->empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
+        const auto& nb = *nbp;
+        for (std::size_t r = 0; r < n; ++r) {
+            for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - H[r][k]) - nb[k]);
+            res[r] = np_sum(row);
+        }
+        const double s2 = std::max(np_mean(res), n0 * 1e-3);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k)
+                out[r][k] = sq_abs(Z[r][k]) / nb[k] - sq_abs(Z[r][k] - H[r][k]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
+        return by_symbol(out);
+    }
     for (std::size_t r = 0; r < n; ++r) {
-        for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * sq_abs(Z[r][k] - h[r]);
+        for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * sq_abs(Z[r][k] - H[r][k]);
         res[r] = np_sum(row);
     }
     const double var = std::max(np_mean(res), n0 * (1 + 1e-3));
     for (std::size_t r = 0; r < n; ++r)
-        for (std::size_t k = 0; k < m; ++k) out[r][k] = sq_abs(Z[r][k]) / n0 - sq_abs(Z[r][k] - h[r]) / var;
-    return out;
+        for (std::size_t k = 0; k < m; ++k) out[r][k] = sq_abs(Z[r][k]) / n0 - sq_abs(Z[r][k] - H[r][k]) / var;
+    return by_symbol(out);
 }
 
-double noise_n0(const Mat<double>& E) { return std::max(median_rest(E) / std::numbers::ln2, 1e-30); }
+}  // namespace
+
+Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P1, int W, double n0, int Ls) {
+    return coh_metric_impl(Z0, P1, W, n0, Ls, nullptr);
+}
+
+double noise_n0(const Mat<double>& E, double noise_median) { return std::max(median_rest(E) / noise_median, 1e-30); }
 
 Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo, int copies) {
     const WordRows& WR = word_rows(g);
@@ -1525,35 +2140,49 @@ Header coh_read_header(const Grid& g, std::span<const double> x, std::int64_t s0
     const Mat<cdouble> Z = bins(g, x, s0, WR.span[copies - 1], cfo);
     const double n0 = noise_n0(power_of(Z));
     const int F = static_cast<int>(g.preamble.size()), H = g.hdr_len, nb = static_cast<int>(g.mid_block.size());
-    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0};
+    Header best{nullptr, 0, false, -INFINITY, -INFINITY, 0.0, std::nullopt};
     double front = 0.0;
-    std::size_t k = 0;
-    for (const auto& s : tables::CPM_SPECS) {  // valid_words' order
-        if (s.grid != g.name) continue;
-        for (bool d : {false, true})
-            for (int n = 0; n <= tables::CPM.max_data; ++n) {
-                const auto t = header_symbols(g, header_value(s.index, n, d));
-                const auto& r = rows[k++];
-                std::vector<int> ra, ta;
-                for (int i = 0; i < F; ++i) ra.push_back(i), ta.push_back(g.preamble[i]);
-                for (int i = 0; i < H; ++i) ra.push_back(r[i]), ta.push_back(t[i]);
-                const auto la = coh_run_llr(g, take_crows(Z, ra), ta, n0);
-                front = std::max(front, np_sum(la.data(), F));
-                double score = std::max(np_sum(la), 0.0);
-                if (copies > 1) {
-                    std::vector<int> rb, tb;
-                    for (int i = 0; i < nb; ++i) rb.push_back(r[H] - nb + i), tb.push_back(g.mid_block[i]);
-                    for (int i = 0; i < H; ++i) rb.push_back(r[H + i]), tb.push_back(t[i]);
-                    score += std::max(np_sum(coh_run_llr(g, take_crows(Z, rb), tb, n0)), 0.0);
-                }
-                // ties: the later word, as read_header
-                if (score >= best.score) {
-                    best.runner_up = best.score;
-                    best = {&s, n, d, score, best.runner_up, 0.0};
-                } else if (score > best.runner_up) {
-                    best.runner_up = score;
-                }
-            }
+    // Cache extracted Z submatrix and its tone_floors per unique row set (shared across words).
+    struct RowPrep {
+        Mat<cdouble> Zsub;
+        std::vector<double> floors;
+    };
+    std::map<std::vector<int>, RowPrep> prep_cache;
+    auto prep_for = [&](const std::vector<int>& rr) -> const RowPrep& {
+        if (auto it = prep_cache.find(rr); it != prep_cache.end()) return it->second;
+        Mat<cdouble> Zsub = take_crows(Z, sub_rows(rr, g.L));
+        auto fl = tone_floors(power_of(Zsub), n0);
+        return prep_cache.emplace(rr, RowPrep{std::move(Zsub), std::move(fl)}).first->second;
+    };
+    for (std::size_t k = 0; k < WR.words.size(); ++k) {
+        const WordEntry& we = WR.words[k];
+        const auto t = header_symbols(g, we.value);
+        const auto& r = rows[k];
+        std::vector<int> ra, ta;
+        ra.reserve(static_cast<std::size_t>(F + H));
+        ta.reserve(static_cast<std::size_t>(F + H));
+        for (int i = 0; i < F; ++i) ra.push_back(i), ta.push_back(g.preamble[i]);
+        for (int i = 0; i < H; ++i) ra.push_back(r[i]), ta.push_back(t[i]);
+        const auto& pa = prep_for(ra);
+        const auto la = coh_run_llr_impl(g, pa.Zsub, ta, n0, &pa.floors);
+        front = std::max(front, np_sum(la.data(), F));
+        double score = std::max(np_sum(la), 0.0);
+        if (copies > 1) {
+            std::vector<int> rb, tb;
+            rb.reserve(static_cast<std::size_t>(nb + H));
+            tb.reserve(static_cast<std::size_t>(nb + H));
+            for (int i = 0; i < nb; ++i) rb.push_back(r[H] - nb + i), tb.push_back(g.mid_block[i]);
+            for (int i = 0; i < H; ++i) rb.push_back(r[H + i]), tb.push_back(t[i]);
+            const auto& pb = prep_for(rb);
+            score += std::max(np_sum(coh_run_llr_impl(g, pb.Zsub, tb, n0, &pb.floors)), 0.0);
+        }
+        // ties: the later word, as read_header
+        if (score >= best.score) {
+            best.runner_up = best.score;
+            best = {we.spec, we.n_data, we.dup, score, best.runner_up, 0.0, we.connect_hash};
+        } else if (score > best.runner_up) {
+            best.runner_up = score;
+        }
     }
     best.front = front;
     return best;
@@ -1577,24 +2206,30 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
     const Layout L = layout(g, stream_symbols(g, n_data, r.dup));
     const auto rows = slot_rows(g, n_data, r.dup);
     const auto& sr = rows.at(slot);
-    const int a = std::max(0, sr.front() - COH_W), b = std::min(L.n, sr.back() + 1 + COH_W);
-    Mat<cdouble> Z(b - a, g.m);
-    std::copy(r.Z[a], r.Z[b - 1] + g.m, Z.data.begin());
-    const Mat<double> E = power_of(Z);
-    const ToneGain tg = tone_gain(E);
+    const int W = coh_w(g), ws = (W + g.L - 1) / g.L;  // the window in symbols
+    const int a = std::max(0, sr.front() - ws), b = std::min(L.n, sr.back() + 1 + ws);
+    Mat<cdouble> Z((b - a) * g.L, g.m);  // a wide grid: the symbols' sub-windows
+    std::copy(r.Z[a * g.L], r.Z[b * g.L - 1] + g.m, Z.data.begin());
+    const Mat<double> Esub = power_of(Z);
+    Mat<double> E(b - a, g.m);  // per symbol, its sub-windows' energies summed
+    for (std::size_t i = 0; i < Esub.rows; ++i)
+        for (int k = 0; k < g.m; ++k) E[i / g.L][k] = i % g.L ? E[i / g.L][k] + Esub[i][k] : Esub[i][k];
+    const Mat<double> G = tone_metric(g, E, Use::dd);
     Mat<double> P(E.rows, E.cols);
-    for (std::size_t i = 0; i < E.rows; ++i) {  // the square law's probabilities
+    for (std::size_t i = 0; i < E.rows; ++i) {  // the square law's probabilities (or the leak model's)
         double mx = -INFINITY;
-        for (int k = 0; k < g.m; ++k) mx = std::max(mx, tg.at(E[i][k], k));
-        for (int k = 0; k < g.m; ++k) P[i][k] = std::exp(tg.at(E[i][k], k) - mx);
+        for (int k = 0; k < g.m; ++k) mx = std::max(mx, G[i][k]);
+        for (int k = 0; k < g.m; ++k) P[i][k] = std::exp(G[i][k] - mx);
         const double s = np_sum(P[i], g.m);
         for (int k = 0; k < g.m; ++k) P[i][k] /= s;
     }
-    const auto h = header_symbols(g, header_value(r.spec->index, n_data, r.dup));
+    const auto h = header_symbols(g, header_value_for(*r.spec, n_data, r.dup, r.connect_hash));
+    std::vector<bool> cal(static_cast<std::size_t>(b - a), false);
     const auto known = [&](int row, int tone) {
         if (row < a || row >= b) return;
         std::fill(P[row - a], P[row - a] + g.m, 0.0);
         P[row - a][tone] = 1.0;
+        cal[row - a] = true;
     };
     for (std::size_t i = 0; i < L.sync_rows.size(); ++i) known(L.sync_rows[i], L.sync_tones[i]);
     for (const auto& hr : L.hdr_rows)
@@ -1610,11 +2245,87 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
             for (int k = 0; k < g.m; ++k) q[k] = std::exp(lp[k] - mx);
             const double tot = np_sum(q);
             for (int k = 0; k < g.m; ++k) P[rr[i] - a][gr[k]] = q[k] / tot;  // value k on tone gray(k)
+            if (s != slot) cal[rr[i] - a] = true;
         }
     }
-    const Mat<double> M = coh_metric(Z, P, COH_W, noise_n0(E));
+    const Mat<double> M = coh_metric(Z, P, W, noise_n0(E, g.noise_median), g.L);
     Mat<double> out(sr.size(), g.m);
     for (std::size_t i = 0; i < sr.size(); ++i) std::copy(M[sr[i] - a], M[sr[i] - a] + g.m, out[i]);
+
+    std::vector<std::size_t> cal_idx;
+    for (std::size_t i = 0; i < cal.size(); ++i)
+        if (cal[i]) cal_idx.push_back(i);
+    if (g.L == 1 && r.finger_dt > 0 && r.Z_early.rows == r.Z.rows && r.Z_late.rows == r.Z.rows &&
+        static_cast<int>(cal_idx.size()) >= RAKE_MIN_CAL_ROWS) {
+        const std::size_t n_win = static_cast<std::size_t>(b - a), m_u = static_cast<std::size_t>(g.m);
+        double best_snr = 0.0;
+        Mat<cdouble> best_U, best_Zf;
+        double best_n0u = 0.0;
+        std::vector<double> rbuf(m_u);
+        for (int sgn : {-1, 1}) {
+            const int dt = sgn * r.finger_dt;
+            const Mat<cdouble>& Zsrc = sgn < 0 ? r.Z_early : r.Z_late;
+            Mat<cdouble> Zf(n_win, m_u), U(n_win, m_u);
+            std::copy(Zsrc[a], Zsrc[b - 1] + m_u, Zf.data.begin());
+            const double rho = 1.0 - static_cast<double>(std::abs(dt)) / static_cast<double>(g.T);
+            std::vector<cdouble> rot(m_u);
+            for (std::size_t k = 0; k < m_u; ++k) {
+                const double th = (-2 * PI) * static_cast<double>(k) * static_cast<double>(dt) / static_cast<double>(g.T);
+                rot[k] = {std::cos(th), std::sin(th)};
+            }
+            for (std::size_t i = 0; i < n_win; ++i)
+                for (std::size_t k = 0; k < m_u; ++k) U[i][k] = Zf[i][k] * rot[k] - rho * Z[i][k];
+            const Mat<double> Eu = power_of(U);
+            const double n0_u = noise_n0(Eu);
+            std::vector<double> rsum(n_win);
+            for (std::size_t i = 0; i < n_win; ++i) {
+                for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = P[i][k] * Eu[i][k];
+                rsum[i] = np_sum(rbuf);
+            }
+            const double snr_u = (np_mean(rsum) - n0_u) / std::max(n0_u, 1e-30);
+            if (snr_u > best_snr) {
+                best_snr = snr_u;
+                best_U = std::move(U);
+                best_Zf = std::move(Zf);
+                best_n0u = n0_u;
+            }
+        }
+        if (best_snr > RAKE_SNR_GATE && best_U.rows == n_win) {
+            const Mat<double> Mu_all = coh_metric(best_U, P, COH_W, best_n0u);
+            const Mat<double> Mf_all = coh_metric(best_Zf, P, COH_W, noise_n0(power_of(best_Zf)));
+            Mat<double> Mc_all(n_win, m_u);
+            for (std::size_t i = 0; i < n_win; ++i)
+                for (std::size_t k = 0; k < m_u; ++k) Mc_all[i][k] = M[i][k] + RAKE_COMB_WEIGHT * Mu_all[i][k];
+            const auto row_lse = [&](const double* row) {
+                double acc = row[0];
+                for (std::size_t k = 1; k < m_u; ++k) acc = logaddexp(acc, row[k]);
+                return acc;
+            };
+            const auto log_post = [&](const Mat<double>& Mmat) {
+                const std::size_t nr = cal_idx.size();
+                std::vector<double> rsum(nr);
+                for (std::size_t j = 0; j < nr; ++j) {
+                    const std::size_t ri = cal_idx[j];
+                    const double* row = Mmat[ri];
+                    const double lse = row_lse(row);
+                    for (std::size_t k = 0; k < m_u; ++k) rbuf[k] = P[ri][k] * (row[k] - lse);
+                    rsum[j] = np_sum(rbuf);
+                }
+                return np_mean(rsum);
+            };
+            const double lp0 = log_post(M), lpf = log_post(Mf_all), lpc = log_post(Mc_all);
+            if (lpf > std::max(lp0, lpc) + RAKE_TIE_EPS) {
+                Mat<double> Mf(sr.size(), m_u);
+                for (std::size_t i = 0; i < sr.size(); ++i) std::copy_n(Mf_all[sr[i] - a], m_u, Mf[i]);
+                return Mf;
+            }
+            if (lpc > lp0 + RAKE_TIE_EPS) {
+                Mat<double> Mc(sr.size(), m_u);
+                for (std::size_t i = 0; i < sr.size(); ++i) std::copy_n(Mc_all[sr[i] - a], m_u, Mc[i]);
+                return Mc;
+            }
+        }
+    }
     return out;
 }
 
