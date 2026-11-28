@@ -259,6 +259,7 @@ public:
     bool peer_chat = false;
     int peer_queued = 0;
     bool peer_drained = false;  // the peer's last burst ended its queued data (T_DRAINED)
+    bool sent_drained = false;  // so did my latest: the peer may hold its reply (session REPLY_HOLD_S)
     bool peer_wants_dup = false;
     bool peer_reply_lost = false;  // the peer's last burst said its previous reply was lost
     bool peer_abandon = false;  // the peer's last burst carried T_ABANDON: it holds re-sliced data

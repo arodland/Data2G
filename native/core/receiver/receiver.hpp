@@ -271,15 +271,17 @@ public:
     static constexpr std::size_t GAPS = 8;
     static constexpr double MAX_GAP_S = 3.0;
     static constexpr double NOD_HALF_S = 0.6;  // nod_window either side of the median
-    void heard(std::optional<double> gap_s, std::optional<double> cfo);
+    // `late` (all three): the peer may have held the reply that long by design (receiver.ReplySlot.heard)
+    void heard(std::optional<double> gap_s, std::optional<double> cfo, double late = 0.0);
     // (earliest, latest) start of the reply to my burst that ended at tx_end; nullopt before anything was learned
-    std::optional<std::pair<double, double>> window(double tx_end) const;
+    std::optional<std::pair<double, double>> window(double tx_end, double late = 0.0) const;
     // window() for a nod (receiver.ReplySlot.nod_window): NOD_HALF_S either side of the median (a
     // station's TX lag can vary by a second; a nod has no blind fallback)
-    std::optional<std::pair<double, double>> nod_window(double tx_end) const;
+    std::optional<std::pair<double, double>> nod_window(double tx_end, double late = 0.0) const;
     std::optional<double> cfo;
 
 private:
+    double median() const;  // of gaps_, not empty
     std::deque<double> gaps_;
 };
 

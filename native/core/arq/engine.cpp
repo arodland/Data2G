@@ -699,7 +699,6 @@ void Engine::apply_reset() {
 void Engine::expect_reply() {
     // the receiver's expected slot for the peer's reply: the CPM grids my session expects it in, where its
     // replies have started (stream indices from the reset at my burst's end), its CFO (engine.py)
-    const auto w = slot_.window(0.0);
     std::vector<std::string_view> grids;
     for (const auto& m : session_->expecting()) {
         const Mode* md = mode(m);
@@ -707,11 +706,17 @@ void Engine::expect_reply() {
         const std::string_view g = cpm::grid_of(*md->cpm).name;
         if (std::find(grids.begin(), grids.end(), g) == grids.end()) grids.push_back(g);
     }
+    // my burst said `drained`: the peer may hold its reply REPLY_HOLD_S for its host (session). The window
+    // reaches that far, the nod search too (watch_nods), and the slot learns a start that late less the hold
+    // (hear_burst). Not a DISC's reply: `sent_drained` is my last link burst's
+    late_ = session_->station && session_->state == SessionState::CONNECTED && session_->station->sent_drained ? REPLY_HOLD_S : 0.0;
+    const auto w = slot_.window(0.0, late_);
     if (!w || grids.empty() || !prime_default()) return;
     std::lock_guard lock(mu_);
     expect_next_ = Expect{want_gen_ + 1, std::move(grids),
                           std::max<std::int64_t>(0, static_cast<std::int64_t>(std::nearbyint(w->first * config::FS))),
-                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)), *slot_.cfo};
+                          static_cast<std::int64_t>(std::nearbyint(w->second * config::FS)),
+                          *slot_.cfo};
 }
 
 void Engine::request_reset() {
@@ -1330,7 +1335,7 @@ void Engine::hand_close() {
 void Engine::watch_nods(std::int64_t end) {
     nod_watch_.reset();
     const auto& st = session_->station;
-    const auto w = slot_.nod_window(0.0);
+    const auto w = slot_.nod_window(0.0, late_);
     if (!st || !slot_.cfo || !w ||
         !(session_->state == SessionState::CONNECTED || session_->state == SessionState::DISCONNECTING))
         return;
@@ -1531,7 +1536,8 @@ void Engine::hear_burst(receiver::BurstEvent& ev, double t) {
     if (ours) {
         session_snr_ = meas->snr_est;
         // its start from my burst's end (the receiver was reset there): the expected slot learns
-        if (r->cpm) slot_.heard(static_cast<double>(ev.header.start()) / config::FS, r->cpm->cfo);
+        if (r->cpm)
+            slot_.heard(static_cast<double>(ev.header.start()) / config::FS, r->cpm->cfo, late_);
     }
     if (cfg_.kiss && !ours) {
         if (auto frames = cfg_.kiss->on_burst(*r, rx)) {  // a broadcast burst: not the session's

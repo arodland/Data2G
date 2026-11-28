@@ -229,28 +229,32 @@ std::optional<cpm::Lock> Receiver::primed() {
     return cpm::prime_lock(g, buf_, std::max<std::int64_t>(0, lo - off_), hi - off_, cfo);  // (receiver.py logs it)
 }
 
-void ReplySlot::heard(std::optional<double> gap_s, std::optional<double> c) {
+void ReplySlot::heard(std::optional<double> gap_s, std::optional<double> c, double late) {
     if (gap_s && *gap_s >= 0.0 && *gap_s < MAX_GAP_S) {
-        gaps_.push_back(*gap_s);
+        const bool held = late != 0.0 && !gaps_.empty() && *gap_s - median() > late / 2;
+        gaps_.push_back(held ? *gap_s - late : *gap_s);
         if (gaps_.size() > GAPS) gaps_.pop_front();
     }
     if (c) cfo = c;
 }
 
-std::optional<std::pair<double, double>> ReplySlot::window(double tx_end) const {
-    if (gaps_.empty() || !cfo) return std::nullopt;
+double ReplySlot::median() const {
     std::vector<double> v(gaps_.begin(), gaps_.end());
     std::sort(v.begin(), v.end());
     const std::size_t n = v.size();
-    const double g = n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;  // np.median
-    return std::make_pair(tx_end + g - TOL_S, tx_end + g + TOL_S);
+    return n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;  // np.median
 }
 
-std::optional<std::pair<double, double>> ReplySlot::nod_window(double tx_end) const {
-    const auto w = window(tx_end);
-    if (!w) return std::nullopt;
-    const double g = w->first + TOL_S - tx_end;  // the median
-    return std::make_pair(tx_end + g - NOD_HALF_S, tx_end + g + NOD_HALF_S);
+std::optional<std::pair<double, double>> ReplySlot::window(double tx_end, double late) const {
+    if (gaps_.empty() || !cfo) return std::nullopt;
+    const double g = median();
+    return std::make_pair(tx_end + g - TOL_S, tx_end + g + TOL_S + late);
+}
+
+std::optional<std::pair<double, double>> ReplySlot::nod_window(double tx_end, double late) const {
+    if (gaps_.empty() || !cfo) return std::nullopt;
+    const double g = median();
+    return std::make_pair(tx_end + g - NOD_HALF_S, tx_end + g + NOD_HALF_S + late);
 }
 
 bool Receiver::on_air() const {

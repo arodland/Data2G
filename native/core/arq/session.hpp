@@ -124,6 +124,7 @@ public:
     // The peer's turnaround my reply timers allow: its advertised t_turn in a session, else mine (session.py).
     double peer_turn() const;
     std::optional<double> due, deadline, build_at;
+    bool hold = false;  // build_at is a held reply (REPLY_HOLD_S), not an idle poll: the air is not free, and it may nod
     std::optional<double> coalesce_until;  // write(): an idle poll or wake held for more data
     std::optional<std::string> answer_mode;
     int tries = 0;
@@ -167,7 +168,7 @@ public:
     // connected with nothing in flight or queued, either way: free air for a broadcast burst
     bool idle_connected() const {
         return state == SessionState::CONNECTED && station && !out && !deadline && !want_disc
-               && pending_write.empty() && !station->tx.pending();
+               && pending_write.empty() && !hold && !station->tx.pending();
     }
     void on_tx_end(const TxBurstPtr& burst, double now);
     void on_header(const std::string& submode, int n_cw, double now);

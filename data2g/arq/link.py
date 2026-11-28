@@ -527,6 +527,7 @@ class Station:
     peer_chat: bool = False  # the peer's, from its last burst
     peer_queued: int = 0  # bytes the peer had queued at its last burst (T_BUFFER, chat only)
     peer_drained: bool = False  # the peer's last burst ended its queued data (T_DRAINED)
+    sent_drained: bool = False  # so did my latest: the peer may hold its reply (session.REPLY_HOLD_S)
     peer_wants_dup: bool = False  # the peer asked for duplicated control (T_DUPCTL)
     peer_reply_lost: bool = False  # the peer's last burst said its previous reply was lost
     peer_abandon: bool = False  # the peer's last burst carried T_ABANDON: it holds re-sliced data
@@ -736,6 +737,7 @@ class Station:
             self._nods_seen.mark(bn)  # ... or T_NODS
         if self._peer_acked_keep:
             self._keep_sure.mark(bn)  # ... on one that acted on a T_KEEP of mine
+        self.sent_drained = F.T_DRAINED in ext
         ctl = F.Control(core, ext).pack(cpb)
         assert core.n_ctl <= n_ctl, (core.n_ctl, n_ctl)  # T_COMP stayed in the padding
         self._asked_dup = F.T_DUPCTL in ext
