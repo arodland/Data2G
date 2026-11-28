@@ -460,3 +460,17 @@ def test_comb_stream_drains_consumed_c(band):
             d0_r, K_r = ref.kept_products()
             assert d0_s == d0_r
             np.testing.assert_allclose(K_s, K_r, rtol=0, atol=1e-12)
+
+
+@pytest.mark.hf_only("scattered-pilot calibration is for HF SC_BANDS")
+def test_sc_cal_ratio_matches_clip_without_cfo_drift():
+    """Issue #358: _sc_cal demodulates clean bursts at exact zero CFO, so
+    residual CFO estimation noise cannot rotate pilot phases across frames
+    and inflate SC_CAL_RATIO past the transmitter's clipping distortion."""
+    for spec in SUBMODES.values():
+        if spec.band not in SC_BANDS or codes.payload_bytes(spec) <= 0:
+            continue
+        gain, ratio = modem._sc_cal(spec)
+        assert 0.85 <= gain <= 1.05, (spec.name, gain)
+        cap = 1.2 if spec.band in ("w", "w48") else 1.6
+        assert 0.0 < ratio <= cap * spec.clip.ratio, (spec.name, ratio, spec.clip.ratio)
