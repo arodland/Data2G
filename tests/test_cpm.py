@@ -380,3 +380,61 @@ def test_cpm_presence_detects_bursts_and_rejects_carriers_and_colored_noise():
     for label, sig in negatives.items():
         for gn, g in cpm.GRIDS.items():
             assert not cpm.present(g, sig), (label, gn)
+
+
+def test_coh_metric_2d_slepian_selective_fading():
+    """2D Slepian coh_metric (#363) tracks frequency-selective multipath phase
+    across tones on slot windows (W > COH_HDR_W) and handles short windows
+    (12 <= n <= 2*W2) without crashing for all grid widths."""
+    rng = np.random.default_rng(77)
+    n, m = 120, 16
+    tones = rng.integers(0, m, n)
+    # 2-path frequency-selective channel: phase rotates ~1.4 turns across 16 tones
+    k = np.arange(m)
+    H_true = 0.7 * np.exp(1j * 0.2) + 0.7 * np.exp(-2j * np.pi * 0.08 * k)
+    Z = (rng.normal(0, 0.35, (n, m)) + 1j * rng.normal(0, 0.35, (n, m))) / np.sqrt(2)
+    Z[np.arange(n), tones] += H_true[tones]
+    P = np.full((n, m), 0.02 / (m - 1))
+    P[np.arange(n), tones] = 0.98
+    n0 = cpm._n0(np.abs(Z) ** 2)
+
+    M1 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
+    if cpm.COH2D:
+        assert m1 > 10.0, m1  # flat boxcar scores ~3.5 on this channel
+
+    # Short windows (12 <= n <= 2*W2) must not crash in _loo_slepian for any grid width
+    for m_short in (8, 16, 32):
+        Zs = (rng.normal(0, 0.5, (12, m_short)) + 1j * rng.normal(0, 0.5, (12, m_short))) / np.sqrt(2)
+        Ps = rng.dirichlet(np.ones(m_short) * 0.3, 12)
+        Ms = cpm.coh_metric(Zs, Ps, cpm.COH_W, cpm._n0(np.abs(Zs) ** 2))
+        assert Ms.shape == (12, m_short) and np.all(np.isfinite(Ms))
+
+
+@pytest.mark.python_only("monkeypatches module-level cpm.COH2D; native caches DATA2G_CPM_COH2D once")
+def test_coh_metric_2d_slepian_vs_boxcar(monkeypatch):
+    """COH2D=True beats the flat boxcar on frequency-selective fading while
+    leaving header windows (W <= COH_HDR_W) bit-identical."""
+    rng = np.random.default_rng(77)
+    n, m = 120, 16
+    tones = rng.integers(0, m, n)
+    k = np.arange(m)
+    H_true = 0.7 * np.exp(1j * 0.2) + 0.7 * np.exp(-2j * np.pi * 0.08 * k)
+    Z = (rng.normal(0, 0.35, (n, m)) + 1j * rng.normal(0, 0.35, (n, m))) / np.sqrt(2)
+    Z[np.arange(n), tones] += H_true[tones]
+    P = np.full((n, m), 0.02 / (m - 1))
+    P[np.arange(n), tones] = 0.98
+    n0 = cpm._n0(np.abs(Z) ** 2)
+
+    monkeypatch.setattr(cpm, "COH2D", False)
+    M0 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H0 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    monkeypatch.setattr(cpm, "COH2D", True)
+    M1 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H1 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    np.testing.assert_array_equal(H1, H0)  # header window untouched
+    m0 = float(np.mean(M0[np.arange(n), tones] - M0.mean(axis=1)))
+    m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
+    assert m1 > m0 + 2.0, (m0, m1)

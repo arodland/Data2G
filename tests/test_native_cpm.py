@@ -299,6 +299,7 @@ def test_coherent(native, reference, case):
     assert native.cpm.coh_lock(g.name) == cpm.COH_LOCK.get(g.name)
     assert native.cpm.COH_PREGATE == cpm.COH_PREGATE
     assert native.cpm.coh_ctl() == cpm.COH_CTL
+    assert native.cpm.coh2d() == cpm.COH2D
 
     s0, f = ref(reference, "detect")(g, y)[1:]
     for start, n in ((s0, 40), (-50, 10)):
@@ -318,6 +319,9 @@ def test_coherent(native, reference, case):
     P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
     np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
                                rtol=1e-9, atol=1e-9)
+    # Short window (n=12 <= 2*W2): Python and native match
+    np.testing.assert_allclose(native.cpm.coh_metric(Z[:12], P[:12], cpm.COH_W, n0),
+                               ref(reference, "coh_metric")(Z[:12], P[:12], cpm.COH_W, n0), rtol=1e-9, atol=1e-9)
     L = rng.normal(size=(30, g.m))
     np.testing.assert_allclose(native.cpm.bit_llrs(g.name, L), ref(reference, "bit_llrs")(g, L), rtol=RTOL, atol=1e-12)
 
@@ -387,6 +391,9 @@ def test_per_tone_floors(native, reference, case):
     P = rng.dirichlet(np.ones(g.m) * 0.3, len(Z))
     np.testing.assert_allclose(native.cpm.coh_metric(Z, P, cpm.COH_W, n0), ref(reference, "coh_metric")(Z, P, cpm.COH_W, n0),
                                rtol=1e-9, atol=1e-9)
+    # Short window (n=12 <= 2*W2): Python and native match
+    np.testing.assert_allclose(native.cpm.coh_metric(Z[:12], P[:12], cpm.COH_W, n0),
+                               ref(reference, "coh_metric")(Z[:12], P[:12], cpm.COH_W, n0), rtol=1e-9, atol=1e-9)
     n_cw = 1 + dup + n_data
     r = dict(spec=spec, band=g.name, n_cw=n_cw, n_ctl_slots=1 + dup, dup=dup, Z=Z)
     for slot in range(n_cw):

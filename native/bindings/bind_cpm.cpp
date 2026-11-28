@@ -218,6 +218,7 @@ void bind_cpm(py::module_& m) {
         return v ? py::object(py::make_tuple((*v)[0], (*v)[1], (*v)[2], (*v)[3])) : py::object(py::none());
     });
     c.def("coh_ctl", &cpm::coh_ctl);
+    c.def("coh2d", &cpm::coh2d);
     c.def("bins", [](const std::string& g, const In<double>& x, long start, int n_sym, double cfo) {
         return np(cpm::bins(grid(g), view(x), start, n_sym, cfo));
     });

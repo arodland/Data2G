@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -1400,6 +1401,11 @@ bool coh_ctl() {
     return on;
 }
 
+bool coh2d() {
+    static const bool on = env_on("DATA2G_CPM_COH2D");
+    return on;
+}
+
 Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, int n_sym, double cfo) {
     const std::size_t T = g.T, N = static_cast<std::size_t>(n_sym) * T;
     const double w = (-2 * PI) * (g.f0 + cfo);
@@ -1416,6 +1422,148 @@ Mat<cdouble> bins(const Grid& g, std::span<const double> x, std::int64_t start, 
     for (int r = 0; r < n_sym; ++r) std::copy_n(&F[r * T], g.m, out[r]);
     return out;
 }
+
+namespace {
+
+// Cyclic Jacobi eigensolver for real symmetric m x m C -> top d_dim eigenvectors scaled by sqrt(m) (cpm._slepian_basis).
+Mat<double> slepian_basis(std::size_t m, std::size_t d_dim, double bw) {
+    struct Key {
+        std::size_t m, d;
+        double bw;
+    };
+    static std::mutex mu;
+    static std::vector<std::pair<Key, Mat<double>>> memo;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        for (const auto& [k, v] : memo)
+            if (k.m == m && k.d == d_dim && k.bw == bw) return v;
+    }
+    Mat<double> A(m, m, 0.0), V(m, m, 0.0);
+    for (std::size_t i = 0; i < m; ++i) {
+        V[i][i] = 1.0;
+        for (std::size_t j = 0; j < m; ++j) {
+            if (i == j) {
+                A[i][j] = 1.0;
+            } else {
+                const double x = 2.0 * bw * (static_cast<double>(i) - static_cast<double>(j));
+                A[i][j] = std::sin(PI * x) / (PI * x);
+            }
+        }
+    }
+    for (int sweep = 0; sweep < 40; ++sweep) {
+        double off = 0.0;
+        for (std::size_t p = 0; p < m; ++p)
+            for (std::size_t q = p + 1; q < m; ++q) off += A[p][q] * A[p][q];
+        if (off < 1e-30) break;
+        for (std::size_t p = 0; p < m; ++p) {
+            for (std::size_t q = p + 1; q < m; ++q) {
+                const double apq = A[p][q];
+                if (std::abs(apq) < 1e-18) continue;
+                const double tau = (A[q][q] - A[p][p]) / (2.0 * apq);
+                const double t = (tau >= 0.0 ? 1.0 : -1.0) / (std::abs(tau) + std::sqrt(1.0 + tau * tau));
+                const double cs = 1.0 / std::sqrt(1.0 + t * t), sn = t * cs;
+                A[p][p] -= t * apq;
+                A[q][q] += t * apq;
+                A[p][q] = A[q][p] = 0.0;
+                for (std::size_t r = 0; r < m; ++r) {
+                    if (r != p && r != q) {
+                        const double arp = A[r][p], arq = A[r][q];
+                        A[r][p] = A[p][r] = cs * arp - sn * arq;
+                        A[r][q] = A[q][r] = sn * arp + cs * arq;
+                    }
+                    const double vrp = V[r][p], vrq = V[r][q];
+                    V[r][p] = cs * vrp - sn * vrq;
+                    V[r][q] = sn * vrp + cs * vrq;
+                }
+            }
+        }
+    }
+    std::vector<std::size_t> idx(m);
+    for (std::size_t i = 0; i < m; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(), [&](std::size_t i, std::size_t j) { return A[i][i] > A[j][j]; });
+    Mat<double> Phi(m, d_dim);
+    const double scale = std::sqrt(static_cast<double>(m));
+    for (std::size_t r = 0; r < m; ++r)
+        for (std::size_t d = 0; d < d_dim; ++d) Phi[r][d] = V[r][idx[d]] * scale;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        memo.emplace_back(Key{m, d_dim, bw}, Phi);
+    }
+    return Phi;
+}
+
+// Leave-one-row-out 2D Slepian channel estimate (cpm._loo_slepian).
+Mat<cdouble> loo_slepian(const Mat<cdouble>& Z, const Mat<double>& Pw, int W, double tau, const Mat<double>& Phi,
+                         double lam) {
+    const std::size_t n = Z.rows, m = Z.cols, D = Phi.cols;
+    std::vector<double> kern(W + 1, 0.0);
+    for (int l = 1; l <= W; ++l) kern[l] = std::exp(-static_cast<double>(l) / tau);
+    Mat<cdouble> b_row(n, D, 0.0);
+    Mat<double> G_row(n, D * D, 0.0);
+    for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t k = 0; k < m; ++k) {
+            const double pw = Pw[r][k];
+            const cdouble pwz = pw * Z[r][k];
+            const double* ph = Phi[k];
+            for (std::size_t a = 0; a < D; ++a) {
+                b_row[r][a] += pwz * ph[a];
+                const double pwa = pw * ph[a];
+                for (std::size_t b = a; b < D; ++b) G_row[r][a * D + b] += pwa * ph[b];
+            }
+        }
+    }
+    Mat<cdouble> H(n, m, 0.0);
+    std::vector<double> L(D * D), rhs_re(D), rhs_im(D), c_re(D), c_im(D);
+    for (std::size_t i = 0; i < n; ++i) {
+        std::fill(L.begin(), L.end(), 0.0);
+        std::fill(rhs_re.begin(), rhs_re.end(), 0.0);
+        std::fill(rhs_im.begin(), rhs_im.end(), 0.0);
+        const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0;
+        const std::size_t hi = std::min(n, i + static_cast<std::size_t>(W) + 1);
+        for (std::size_t j = lo; j < hi; ++j) {
+            if (j == i) continue;
+            const double w = kern[j > i ? j - i : i - j];
+            for (std::size_t a = 0; a < D; ++a) {
+                rhs_re[a] += w * b_row[j][a].real();
+                rhs_im[a] += w * b_row[j][a].imag();
+                for (std::size_t b = a; b < D; ++b) L[a * D + b] += w * G_row[j][a * D + b];
+            }
+        }
+        for (std::size_t a = 0; a < D; ++a) {
+            L[a * D + a] += lam;
+            for (std::size_t b = a + 1; b < D; ++b) L[b * D + a] = L[a * D + b];
+        }
+        // Cholesky LL^T on D x D real SPD matrix L
+        for (std::size_t a = 0; a < D; ++a) {
+            for (std::size_t b = 0; b <= a; ++b) {
+                double s = L[a * D + b];
+                for (std::size_t c = 0; c < b; ++c) s -= L[a * D + c] * L[b * D + c];
+                L[a * D + b] = (a == b) ? std::sqrt(std::max(s, 1e-30)) : s / L[b * D + b];
+            }
+        }
+        for (std::size_t a = 0; a < D; ++a) {
+            double sr = rhs_re[a], si = rhs_im[a];
+            for (std::size_t b = 0; b < a; ++b) sr -= L[a * D + b] * c_re[b], si -= L[a * D + b] * c_im[b];
+            c_re[a] = sr / L[a * D + a];
+            c_im[a] = si / L[a * D + a];
+        }
+        for (std::size_t a = D; a-- > 0;) {
+            double sr = c_re[a], si = c_im[a];
+            for (std::size_t b = a + 1; b < D; ++b) sr -= L[b * D + a] * c_re[b], si -= L[b * D + a] * c_im[b];
+            c_re[a] = sr / L[a * D + a];
+            c_im[a] = si / L[a * D + a];
+        }
+        for (std::size_t k = 0; k < m; ++k) {
+            double hr = 0.0, hi_ = 0.0;
+            const double* ph = Phi[k];
+            for (std::size_t a = 0; a < D; ++a) hr += c_re[a] * ph[a], hi_ += c_im[a] * ph[a];
+            H[i][k] = {hr, hi_};
+        }
+    }
+    return H;
+}
+
+}  // namespace
 
 Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, double n0) {
     const std::size_t n = Z0.rows, m = Z0.cols;
@@ -1459,61 +1607,154 @@ Mat<double> coh_metric(const Mat<cdouble>& Z0, const Mat<double>& P, int W, doub
         const double v = std::abs(s);
         if (v > best) best = v, delta = gk;
     }
+    std::vector<cdouble> p_rot(p.size());
     cdouble s = 0.0;
     for (std::size_t i = 0; i < p.size(); ++i) {
         const double th = (2 * PI) * delta * d[i];
-        s += p[i] * cdouble(std::cos(th), std::sin(th));
+        p_rot[i] = p[i] * cdouble(std::cos(th), std::sin(th));
+        s += p_rot[i];
     }
     const double nu = std::arg(s);
-    Mat<cdouble> Z(n, m);
-    for (std::size_t r = 0; r < n; ++r) {
-        const double tr = -nu * static_cast<double>(r);
-        const cdouble rot(std::cos(tr), std::sin(tr));
-        for (std::size_t k = 0; k < m; ++k) {
-            const double tk = (2 * PI) * delta * static_cast<double>(k);
-            Z[r][k] = Z0[r][k] * cdouble(std::cos(tk), std::sin(tk)) * rot;
+    std::vector<cdouble> tone_rot(m);
+    for (std::size_t k = 0; k < m; ++k) {
+        const double tk = (2 * PI) * delta * static_cast<double>(k);
+        tone_rot[k] = cdouble(std::cos(tk), std::sin(tk));
+    }
+    const auto rot_z = [&](double nu_val) {
+        Mat<cdouble> Zout(n, m);
+        for (std::size_t r = 0; r < n; ++r) {
+            const double tr = -nu_val * static_cast<double>(r);
+            const cdouble rot(std::cos(tr), std::sin(tr));
+            for (std::size_t k = 0; k < m; ++k) Zout[r][k] = Z0[r][k] * tone_rot[k] * rot;
         }
-    }
-    for (std::size_t r = 0; r < n; ++r) {
-        cdouble v = 0.0;
-        for (std::size_t k = 0; k < m; ++k) v += P[r][k] * Z[r][k];
-        a[r] = v;
-    }
-    // h_i: the mean over rows j != i within +-W (cpm.coh_metric's convolve "same")
-    std::vector<cdouble> h(n);
-    for (std::size_t i = 0; i < n; ++i) {
-        cdouble v = 0.0;
-        int cnt = 0;
-        const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0, hi = std::min(n, i + W + 1);
-        for (std::size_t j = lo; j < hi; ++j)
-            if (j != i) v += a[j], ++cnt;
-        h[i] = v / static_cast<double>(std::max(cnt, 1));
-    }
-    std::vector<double> res(n), row(m);
-    {
-        Mat<double> E(n, m);
-        for (std::size_t r = 0; r < n; ++r)
-            for (std::size_t k = 0; k < m; ++k) E[r][k] = sq_abs(Z[r][k]);
-        const auto nb = tone_floors(E, n0);
-        if (!nb.empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
-            for (std::size_t r = 0; r < n; ++r) {
-                for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - h[r]) - nb[k]);
-                res[r] = np_sum(row);
-            }
-            const double s2 = std::max(np_mean(res), n0 * 1e-3);
+        return Zout;
+    };
+    Mat<cdouble> Z = rot_z(nu);
+    Mat<double> E(n, m);
+    for (std::size_t r = 0; r < n; ++r)
+        for (std::size_t k = 0; k < m; ++k) E[r][k] = sq_abs(Z[r][k]);
+    const auto nb = tone_floors(E, n0);
+
+    const auto boxcar = [&](const Mat<cdouble>& Zmat) {
+        std::vector<cdouble> ar(n), hr(n);
+        for (std::size_t r = 0; r < n; ++r) {
+            cdouble v = 0.0;
+            for (std::size_t k = 0; k < m; ++k) v += P[r][k] * Zmat[r][k];
+            ar[r] = v;
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            cdouble v = 0.0;
+            int cnt = 0;
+            const std::size_t lo = i >= static_cast<std::size_t>(W) ? i - W : 0, hi = std::min(n, i + W + 1);
+            for (std::size_t j = lo; j < hi; ++j)
+                if (j != i) v += ar[j], ++cnt;
+            hr[i] = v / static_cast<double>(std::max(cnt, 1));
+        }
+        return hr;
+    };
+    const std::vector<cdouble> h = boxcar(Z);
+    Mat<cdouble> H(n, m);
+    for (std::size_t r = 0; r < n; ++r)
+        for (std::size_t k = 0; k < m; ++k) H[r][k] = h[r];
+
+    if (coh2d() && W > COH_HDR_W && static_cast<int>(n) >= COH2D_MIN_ROWS) {
+        Mat<double> Pw = P;
+        if (!nb.empty()) {
             for (std::size_t r = 0; r < n; ++r)
-                for (std::size_t k = 0; k < m; ++k)
-                    out[r][k] = E[r][k] / nb[k] - sq_abs(Z[r][k] - h[r]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
-            return out;
+                for (std::size_t k = 0; k < m; ++k) Pw[r][k] *= (n0 / nb[k]);
+        }
+        int near_cnt = 0;
+        cdouble s_near = 0.0;
+        for (std::size_t i = 0; i < p_rot.size(); ++i)
+            if (std::abs(d[i]) <= COH2D_NEAR_TONE_STEP) s_near += p_rot[i], ++near_cnt;
+        const bool has_sel = near_cnt >= COH2D_MIN_NEAR_PAIRS;
+        const Mat<cdouble> Z_sel = has_sel ? rot_z(std::arg(s_near)) : Z;
+
+        const int wf = std::min(W, COH2D_FAST_W);
+        std::vector<cdouble> pwz_sum(n, 0.0);
+        std::vector<double> pw_sum(n, 0.0);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k) pwz_sum[r] += Pw[r][k] * Z[r][k], pw_sum[r] += Pw[r][k];
+        Mat<cdouble> H1(n, m);
+        for (std::size_t i = 0; i < n; ++i) {
+            cdouble num_v = 0.0;
+            double den_v = 0.0;
+            const std::size_t lo = i >= static_cast<std::size_t>(wf) ? i - wf : 0;
+            const std::size_t hi = std::min(n, i + static_cast<std::size_t>(wf) + 1);
+            for (std::size_t j = lo; j < hi; ++j) {
+                if (j == i) continue;
+                const double kw = std::exp(-static_cast<double>(j > i ? j - i : i - j) / COH2D_FAST_TAU);
+                num_v += kw * pwz_sum[j];
+                den_v += kw * pw_sum[j];
+            }
+            const cdouble hv = num_v / std::max(den_v, 1e-9);
+            for (std::size_t k = 0; k < m; ++k) H1[i][k] = hv;
+        }
+        Mat<cdouble> H2(n, m), H3(n, m);
+        const int n1 = static_cast<int>(n) - 1;
+        if (m <= 16) {
+            const double bw = COH2D_DELAY_S * (m <= 8 ? 50.0 : 25.0);
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_SLOW_W), COH2D_NARROW_SLOW_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_SLOW_D), bw), COH2D_NARROW_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_NARROW_FAST_W), COH2D_NARROW_FAST_TAU,
+                             slepian_basis(m, std::min<std::size_t>(m, COH2D_NARROW_FAST_D), bw), COH2D_NARROW_FAST_LAM);
+        } else {
+            H2 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_SLOW_W), COH2D_WIDE_SLOW_TAU,
+                             slepian_basis(m, COH2D_WIDE_SLOW_D, COH2D_WIDE_SLOW_BW), COH2D_WIDE_SLOW_LAM);
+            H3 = loo_slepian(Z_sel, Pw, std::min(n1, COH2D_WIDE_FAST_W), COH2D_WIDE_FAST_TAU,
+                             slepian_basis(m, COH2D_WIDE_FAST_D, COH2D_WIDE_FAST_BW), COH2D_WIDE_FAST_LAM);
+        }
+        const auto loo_loss = [&](const Mat<cdouble>& Zc, const Mat<cdouble>& Hc) {
+            std::vector<double> rsum(n), rbuf(m);
+            for (std::size_t r = 0; r < n; ++r) {
+                for (std::size_t k = 0; k < m; ++k) rbuf[k] = Pw[r][k] * sq_abs(Zc[r][k] - Hc[r][k]);
+                rsum[r] = np_sum(rbuf);
+            }
+            return np_mean(rsum);
+        };
+        const double losses[4] = {loo_loss(Z, H), loo_loss(Z, H1), loo_loss(Z_sel, H2), loo_loss(Z_sel, H3)};
+        int best_idx = 0;
+        double best_loss = losses[0];
+        for (int i = 1; i < 4; ++i)
+            if (losses[i] < best_loss * (1.0 - COH2D_TIE_REL)) best_idx = i, best_loss = losses[i];
+        if (best_idx > 0) {
+            const bool use_sel = best_idx >= 2 && has_sel;
+            if (use_sel) Z = Z_sel;
+            const Mat<cdouble>& Hb = best_idx == 1 ? H1 : (best_idx == 2 ? H2 : H3);
+            const std::vector<cdouble> hb0 = use_sel ? boxcar(Z) : h;
+            double num = 0.0, den = 0.0;
+            for (std::size_t r = 0; r < n; ++r) {
+                for (std::size_t k = 0; k < m; ++k) {
+                    const cdouble df = Hb[r][k] - hb0[r];
+                    num += Pw[r][k] * ((Z[r][k] - hb0[r]) * std::conj(df)).real();
+                    den += Pw[r][k] * sq_abs(df);
+                }
+            }
+            const double alpha = std::clamp(num / std::max(den, 1e-30), 0.0, 1.0);
+            for (std::size_t r = 0; r < n; ++r)
+                for (std::size_t k = 0; k < m; ++k) H[r][k] = hb0[r] + alpha * (Hb[r][k] - hb0[r]);
         }
     }
+
+    std::vector<double> res(n), row(m);
+    if (!nb.empty()) {  // per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
+        for (std::size_t r = 0; r < n; ++r) {
+            for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * (sq_abs(Z[r][k] - H[r][k]) - nb[k]);
+            res[r] = np_sum(row);
+        }
+        const double s2 = std::max(np_mean(res), n0 * 1e-3);
+        for (std::size_t r = 0; r < n; ++r)
+            for (std::size_t k = 0; k < m; ++k)
+                out[r][k] = E[r][k] / nb[k] - sq_abs(Z[r][k] - H[r][k]) / (nb[k] + s2) - std::log1p(s2 / nb[k]);
+        return out;
+    }
     for (std::size_t r = 0; r < n; ++r) {
-        for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * sq_abs(Z[r][k] - h[r]);
+        for (std::size_t k = 0; k < m; ++k) row[k] = P[r][k] * sq_abs(Z[r][k] - H[r][k]);
         res[r] = np_sum(row);
     }
     const double var = std::max(np_mean(res), n0 * (1 + 1e-3));
     for (std::size_t r = 0; r < n; ++r)
-        for (std::size_t k = 0; k < m; ++k) out[r][k] = sq_abs(Z[r][k]) / n0 - sq_abs(Z[r][k] - h[r]) / var;
+        for (std::size_t k = 0; k < m; ++k) out[r][k] = E[r][k] / n0 - sq_abs(Z[r][k] - H[r][k]) / var;
     return out;
 }
 
