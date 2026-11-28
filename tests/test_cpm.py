@@ -380,3 +380,33 @@ def test_cpm_presence_detects_bursts_and_rejects_carriers_and_colored_noise():
     for label, sig in negatives.items():
         for gn, g in cpm.GRIDS.items():
             assert not cpm.present(g, sig), (label, gn)
+
+
+def test_coh_metric_2d_slepian_selective_fading(monkeypatch):
+    """2D Slepian coh_metric (#363) tracks frequency-selective multipath phase
+    across tones on slot windows (W > COH_HDR_W), while header windows
+    (W <= COH_HDR_W) remain bit-identical."""
+    rng = np.random.default_rng(77)
+    n, m = 120, 16
+    tones = rng.integers(0, m, n)
+    # 2-path frequency-selective channel: phase rotates ~1.4 turns across 16 tones
+    k = np.arange(m)
+    H_true = 0.7 * np.exp(1j * 0.2) + 0.7 * np.exp(-2j * np.pi * 0.08 * k)
+    Z = (rng.normal(0, 0.35, (n, m)) + 1j * rng.normal(0, 0.35, (n, m))) / np.sqrt(2)
+    Z[np.arange(n), tones] += H_true[tones]
+    P = np.full((n, m), 0.02 / (m - 1))
+    P[np.arange(n), tones] = 0.98
+    n0 = cpm._n0(np.abs(Z) ** 2)
+
+    monkeypatch.setenv("DATA2G_CPM_COH2D", "0")
+    M0 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H0 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    monkeypatch.setenv("DATA2G_CPM_COH2D", "1")
+    M1 = cpm.coh_metric(Z, P, cpm.COH_W, n0)
+    H1 = cpm.coh_metric(Z[:24], P[:24], cpm.COH_HDR_W, n0)
+
+    np.testing.assert_array_equal(H1, H0)  # header window untouched
+    m0 = float(np.mean(M0[np.arange(n), tones] - M0.mean(axis=1)))
+    m1 = float(np.mean(M1[np.arange(n), tones] - M1.mean(axis=1)))
+    assert m1 > m0 + 2.0, (m0, m1)

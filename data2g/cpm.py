@@ -1305,6 +1305,35 @@ COH_PREGATE = (12.0, 10.0)
 COH_CTL = os.environ.get("DATA2G_CPM_COH_CTL", "1") == "1"
 
 
+@lru_cache(maxsize=None)
+def _slepian_basis(m: int, d_dim: int, bw: float) -> np.ndarray:
+    """Top `d_dim` real Slepian sequences on `m` tones for normalized delay
+    half-width `bw` (cycles/tone), scaled to column norm sqrt(m)."""
+    idx = np.arange(m, dtype=np.float64)
+    C = np.sinc(2.0 * bw * (idx[:, None] - idx[None, :]))
+    _, vecs = np.linalg.eigh(C)
+    return vecs[:, -d_dim:][:, ::-1] * np.sqrt(m)
+
+
+def _loo_slepian(Z: np.ndarray, Pw: np.ndarray, W: int, tau: float, Phi: np.ndarray, lam: float) -> np.ndarray:
+    """Leave-one-row-out 2D time-frequency channel estimate on real Slepian basis Phi."""
+    n = len(Z)
+    D = Phi.shape[1]
+    kern = np.exp(-np.abs(np.arange(-W, W + 1, dtype=np.float64)) / tau)
+    kern[W] = 0.0
+    b_row = (Pw * Z) @ Phi  # (n, D) complex
+    G_row = np.einsum("jk,ka,kb->jab", Pw, Phi, Phi)  # (n, D, D) real symmetric
+    B_re = np.column_stack([np.convolve(b_row[:, d].real, kern, "same") for d in range(D)])
+    B_im = np.column_stack([np.convolve(b_row[:, d].imag, kern, "same") for d in range(D)])
+    G_flat = G_row.reshape(n, D * D)
+    G_sum = np.column_stack([np.convolve(G_flat[:, d], kern, "same") for d in range(D * D)]).reshape(n, D, D)
+    G_reg = G_sum + lam * np.eye(D)[None]
+    rhs = np.stack([B_re, B_im], axis=-1)  # (n, D, 2)
+    sol = np.linalg.solve(G_reg, rhs)
+    c = sol[..., 0] + 1j * sol[..., 1]
+    return c @ Phi.T
+
+
 def bins(g: Grid, x: np.ndarray, start: int, n_sym: int, cfo: float) -> np.ndarray:
     """(n_sym, m) complex tone bins from `start`, CFO removed: _energies before the square."""
     T = g.T
@@ -1317,16 +1346,23 @@ def bins(g: Grid, x: np.ndarray, start: int, n_sym: int, cfo: float) -> np.ndarr
 def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float) -> np.ndarray:
     """(n, m) complex bins of consecutive rows and P (n, m) the probability
     of each tone sent (one-hot where known) -> (n, m) tone log-likelihoods,
-    coherent: Z_k = h_i + CN(0, N0 + s2) on the sent tone, noise alone
-    elsewhere, h_i = sum over rows j != i within +-W of sum_k P_j(k) Z_j[k],
-    s2 its error (the residual's mean less N0). The residual timing's
+    coherent: Z_k = h_{i,k} + CN(0, N0 + s2) on the sent tone, noise alone
+    elsewhere, s2 its error (the residual's mean less N0). The residual timing's
     per-tone phase ramp and the residual CFO come out first, from the
-    decided tones' consecutive pairs weighted by their probabilities."""
-    n, m = Z.shape
+    decided tones' consecutive pairs weighted by their probabilities.
+
+    For slot metrics (W > COH_HDR_W, n >= 12, DATA2G_CPM_COH2D != 0), selects
+    by leave-one-row-out error among the +-W flat boxcar, a fast exponential
+    flat kernel, and two real-Slepian delay-subspace ridge predictors using
+    near-tone (|d| <= 2) CFO, whitened by tone_floors when a carrier is
+    present, with closed-form LOO Stein shrinkage toward the boxcar (#363).
+    Header reads (W <= COH_HDR_W) stay on the flat boxcar unchanged."""
+    Z0 = Z
+    n, m = Z0.shape
     r = np.arange(n)
     t = P.argmax(axis=1)
     c = P[r, t]
-    a = Z[r, t]
+    a = Z0[r, t]
     d = np.diff(t)
     p = a[1:] * np.conj(a[:-1]) * c[1:] * c[:-1]  # ~ exp(i (nu - 2 pi d delta))
     grid = np.linspace(-0.5, 0.5, 401)
@@ -1334,19 +1370,55 @@ def coh_metric(Z: np.ndarray, P: np.ndarray, W: int, n0: float) -> np.ndarray:
     q = np.zeros(len(dv), complex)
     np.add.at(q, inv, p)
     delta = grid[np.argmax(np.abs(np.exp(2j * np.pi * np.outer(grid, dv)) @ q))]
-    nu = np.angle(np.sum(p * np.exp(2j * np.pi * delta * d)))
-    Z = Z * np.exp(2j * np.pi * delta * np.arange(m))[None] * np.exp(-1j * nu * r)[:, None]
+    p_rot = p * np.exp(2j * np.pi * delta * d)
+    nu = np.angle(np.sum(p_rot))
+    tone_rot = np.exp(2j * np.pi * delta * np.arange(m))[None]
+    Z = Z0 * tone_rot * np.exp(-1j * nu * r)[:, None]
+    Ez = _sq(Z)
+    nb = tone_floors(Ez, n0)
     a = (P * Z).sum(axis=1)
-    k = np.ones(2 * W + 1)
-    k[W] = 0.0
-    h = np.convolve(a, k, "same") / np.maximum(np.convolve(np.ones(n), k, "same"), 1)
-    res = _sq(Z - h[:, None])
-    nb = tone_floors(_sq(Z), n0)
+    k0 = np.ones(2 * W + 1)
+    k0[W] = 0.0
+    cnt0 = np.maximum(np.convolve(np.ones(n), k0, "same"), 1)
+    h_base = (np.convolve(a, k0, "same") / cnt0)[:, None]
+    H = h_base
+    if os.environ.get("DATA2G_CPM_COH2D", "1") == "1" and W > COH_HDR_W and n >= 12:
+        Pw = P if nb is None else P * (n0 / nb)[None]
+        near = np.abs(d) <= 2
+        if int(near.sum()) >= 4:
+            nu_sel = np.angle(np.sum(p_rot[near]))
+            Z_sel = Z0 * tone_rot * np.exp(-1j * nu_sel * r)[:, None]
+        else:
+            Z_sel = Z
+        wf = min(W, 3)
+        k1 = np.exp(-np.abs(np.arange(-wf, wf + 1, dtype=np.float64)) / 1.5)
+        k1[wf] = 0.0
+        h1 = (np.convolve((Pw * Z).sum(axis=1), k1, "same")
+              / np.maximum(np.convolve(Pw.sum(axis=1), k1, "same"), 1e-9))[:, None]
+        if m <= 16:
+            bw = 0.0035 * (50.0 if m <= 8 else 25.0)
+            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, 12), 6.0, _slepian_basis(m, min(m, 4), bw), 0.30)
+            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, 5), 2.2, _slepian_basis(m, min(m, 3), bw), 0.45)
+        else:
+            h2 = _loo_slepian(Z_sel, Pw, min(n - 1, 18), 8.0, _slepian_basis(m, 5, 0.08), 0.35)
+            h3 = _loo_slepian(Z_sel, Pw, min(n - 1, 12), 5.0, _slepian_basis(m, 9, 0.15), 0.50)
+        cands = [(Z, np.broadcast_to(h_base, (n, m))), (Z, np.broadcast_to(h1, (n, m))), (Z_sel, h2), (Z_sel, h3)]
+        losses = [float(np.mean((Pw * _sq(Zc - hc)).sum(axis=1))) for Zc, hc in cands]
+        best_idx = int(np.argmin(losses))
+        if best_idx > 0:
+            Z, hb = cands[best_idx]
+            hb0 = ((np.convolve((P * Z).sum(axis=1), k0, "same") / cnt0)[:, None]
+                   if Z is Z_sel else h_base)
+            diff = hb - hb0
+            num = float(np.real(np.sum(Pw * (Z - hb0) * np.conj(diff))))
+            den = float(np.sum(Pw * _sq(diff)))
+            H = hb0 + np.clip(num / max(den, 1e-30), 0.0, 1.0) * diff
+    res = _sq(Z - H)
     if nb is not None:  # per-tone floors: Z_k = h_i + CN(0, N_k + s2) on the sent tone, CN(0, N_k) elsewhere
         s2 = max(float(np.mean((P * (res - nb[None])).sum(axis=1))), n0 * 1e-3)
-        return _sq(Z) / nb - res / (nb + s2) - np.log1p(s2 / nb)
+        return Ez / nb - res / (nb + s2) - np.log1p(s2 / nb)
     v = max(float(np.mean((P * res).sum(axis=1))), n0 * (1 + 1e-3))
-    return _sq(Z) / n0 - res / v
+    return Ez / n0 - res / v
 
 
 def _n0(E: np.ndarray) -> float:
