@@ -30,6 +30,7 @@ int ctl_payload_bytes(const Mode& m);  // its control codeword's (CPM: the grid'
 int max_ctl(const Mode& m);
 int min_cw(const Mode& m, bool data);
 int rv_cycle(const Mode& m);
+double mother_blocks(const Mode& m);  // buffer_len / soft_len, for HARQ slice MI
 
 // Bandwidth: a cap code (a session's, KISS's) and what each mode occupies.
 int cap_hz(int cap);  // CAP_HZ; throws for an unknown cap

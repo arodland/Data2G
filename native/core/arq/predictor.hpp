@@ -11,12 +11,15 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "arq/measured.hpp"
 #include "tables/tables.hpp"
 
 namespace data2g::arq {
+
+struct Mode;
 
 // A submode's constellation -> the capacity table standing in for it.
 std::string_view const_family(std::string_view name);
@@ -46,6 +49,10 @@ double noise_shift_db(const std::optional<NoiseLevels>& noise, std::string_view 
                       double tail_weight = 1.0, double deadband_db = 1.0);
 // The measurements as if the SNR were shift_db lower (predictor.shifted).
 Measured shifted(const Measured& m, double shift_db);
+inline constexpr double HARQ_IR_LOSS = 0.06;
+inline constexpr double HARQ_MAX_BOOST_DB = 8.0;
+// Effective per-cell SNR boost (dB, >= 0) of stored HARQ receptions combined with cur_mi (predictor.harq_boost_db).
+double harq_boost_db(const Mode& m, std::span<const std::pair<int, double>> txs, double cur_mi);
 
 // The burst before the last: its measurements, band, and age (s).
 struct Prev {

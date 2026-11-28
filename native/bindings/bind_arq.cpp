@@ -38,6 +38,21 @@ std::optional<int> opt_int(const py::object& o, const char* name) {
 // policy.view(): a policy.StationView field by field, else a link.Station
 // (or a test's stub of one: a missing attribute keeps the default)
 arq::StationView station(const py::object& s) {
+    if (py::isinstance<arq::Station>(s)) return arq::view(s.cast<const arq::Station&>());
+    auto to_harq = [](const py::handle& h) {
+        std::vector<std::vector<arq::RxSide::HarqTx>> out;
+        for (auto seq_txs : h) {
+            std::vector<arq::RxSide::HarqTx> row;
+            for (auto item : seq_txs) {
+                auto t = item.cast<py::sequence>();
+                auto mi = t[1].cast<py::sequence>();
+                row.push_back({t[0].cast<int>(),
+                               {mi[0].cast<double>(), mi[1].cast<double>(), mi[2].cast<double>(), mi[3].cast<double>()}});
+            }
+            out.push_back(std::move(row));
+        }
+        return out;
+    };
     arq::StationView v;
     if (py::isinstance(s, py::module_::import("data2g.arq.policy").attr("StationView"))) {
         v.cap = s.attr("cap").cast<int>();
@@ -53,6 +68,8 @@ arq::StationView station(const py::object& s) {
         v.esc_floor = s.attr("esc_floor").cast<int>();
         v.last_rx_data = s.attr("last_rx_data").cast<bool>();
         v.tx_end = s.attr("tx_end").cast<std::optional<double>>();
+        v.rx_mode = s.attr("rx_mode").cast<std::optional<std::string>>();
+        v.harq = to_harq(s.attr("harq"));
         return v;
     }
     v.cap = s.attr("cap").cast<int>();
@@ -64,7 +81,13 @@ arq::StationView station(const py::object& s) {
     v.chat = py::bool_(attr<py::object>(s, "chat", py::bool_(false))) ||
              py::bool_(attr<py::object>(s, "peer_chat", py::bool_(false)));
     v.peer_queued = attr(s, "peer_queued", 0L);
-    if (py::hasattr(s, "rx")) v.held = static_cast<long>(py::len(s.attr("rx").attr("buf")));
+    if (py::hasattr(s, "rx") && !s.attr("rx").is_none()) {
+        py::object rx = s.attr("rx");
+        v.held = static_cast<long>(py::len(rx.attr("buf")));
+        v.rx_mode = attr<std::optional<std::string>>(rx, "submode", std::nullopt);
+        if (py::hasattr(rx, "harq") && py::bool_(rx.attr("harq")))
+            v.harq = to_harq(py::module_::import("data2g.arq.policy").attr("_rx_harq")(rx));
+    }
     v.misses = attr(s, "misses", 0);
     v.esc_floor = attr(s, "esc_floor", 0);
     v.last_rx_data = py::bool_(attr<py::object>(s, "last_rx_data", py::bool_(true)));
@@ -159,6 +182,9 @@ void bind_arq(py::module_& m) {
     }, py::arg("noise"), py::arg("measured_band"), py::arg("band"), py::arg("tail_weight") = 1.0,
        py::arg("deadband_db") = 1.0);
     a.def("shifted", [](const py::dict& m, double shift) { return to_dict(arq::shifted(measured(m), shift)); });
+    a.def("harq_boost_db", [](const std::string& n, const std::vector<std::pair<int, double>>& txs, double cur_mi) {
+        return arq::harq_boost_db(amode(n), txs, cur_mi);
+    });
     a.def("cap_hz", &arq::cap_hz);
     a.def("fallback", [](int cap) { return std::string(arq::fallback(cap)); });
     a.def("connect_mode", [](int cap, int tries, bool last) { return std::string(arq::connect_mode(cap, tries, last)); },

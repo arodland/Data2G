@@ -887,8 +887,25 @@ As built (data2g/arq/policy.py):
   against P(codeword). Each moves a logit bias per submode by the difference, bounded at
   ±6 (`BIAS_MAX`; a family-wide bias, bounded at ±3, came first).
   This absorbs what the predictor gets wrong on the actual link.
-- Switching away from the mode of the peer's outstanding codewords abandons them (§4).
-  The recommender charges a switch with the bytes it holds beyond its cumulative ACK.
+- Switching away from the mode of the peer's outstanding codewords (`RxSide.submode`)
+  abandons them (§4):
+  - Decoded out-of-order codewords buffered above the cumulative ACK (`RxSide.buf`) must
+    be re-sent, so switching away subtracts their payload bytes from a candidate's
+    expected turn yield.
+  - Undecoded codewords whose soft bits are stored for HARQ combining (`RxSide.harq`,
+    issue #360) still take a resend slot next turn either way, so staying in `cur`
+    credits its first $\min(U, n - c)$ data slots with their RV1+ combining gain
+    $\max(0, p_{\text{comb}} - p_{\text{rv0}}) \cdot \text{pb}$, where $p_{\text{comb}}$
+    evaluates `q_cw` under the effective per-cell SNR boost of the exact mother-buffer
+    slice MI (`predictor.harq_boost_db`, `HARQ_IR_LOSS = 0.06`, capped at 8 dB).
+    `DATA2G_HARQ_CREDIT=0` disables it in Python for paired A/B studies.
+  - Measured (`scripts/loss_study.py`, `shift+cpm`, `DATA2G_PEP_REF_DB=5`, `--dd-budget inf`,
+    24 paired seeds 0..23 x 600 s; delivered bps): `awgn/slow +4` +5.5% (SE 0.5, 24/0),
+    `mpp/slow 0` +5.2% (1.0, 21/2), `mpg/slow +8` +4.7% (1.5, 18/6), `mpd/slow 0` +4.6%
+    (2.1, 15/8), `mpp +4` +4.6% (1.2, 18/4), `mpg +8` +4.1% (1.0, 20/3), `mpg -4` +3.9%
+    (1.4, 18/5), `mpg +4` +3.7% (1.1, 20/4), `mpp -4` +3.1% (0.9, 18/2), `mpp -6` +2.7%
+    (1.5, 7/2); `mpd -6/0/+8` +1.2..+1.5%; steady `awgn -8..+8` and floor `mpp/mpd -10`
+    +0.0% (no cell negative).
 
 ## 8a. T_REPLY only on change (`T_KEEP`, 2026-11)
 

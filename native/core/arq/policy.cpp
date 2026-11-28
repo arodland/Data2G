@@ -268,14 +268,15 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
     const int gated = gate();
     Measured me = *measured;  // with the energy inputs (a model with them reads them)
     me.energy = energy_features();
-    auto key_of = [&](const Mode& s, int n_cw) {
+    auto key_of = [&](const Mode& s, int n_cw, double boost = 0.0) {
         const int i = outcome_index(s.name);
         if (i < 0) throw std::out_of_range("outcome model lacks " + std::string(s.name));
         const auto sh = shift.find(s.band);
-        return std::tuple<double, double, int>{round2(burst_seconds(s, n_cw)), sh == shift.end() ? 0.0 : sh->second, i};
+        return std::tuple<double, double, int>{round2(burst_seconds(s, n_cw)),
+                                               (sh == shift.end() ? 0.0 : sh->second) - round2(boost), i};
     };
-    auto predicted_at = [&](const Mode& s, int n_cw) -> const Outcome& {
-        const auto key = key_of(s, n_cw);
+    auto predicted_at = [&](const Mode& s, int n_cw, double boost = 0.0) -> const Outcome& {
+        const auto key = key_of(s, n_cw, boost);
         auto it = memo.find(key);
         if (it == memo.end()) {
             const auto [sec, sh, i] = key;
@@ -285,7 +286,9 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         return it->second;
     };
     auto q_burst = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).burst, get(bias_burst, s.name)); };
-    auto q_cw = [&](const Mode& s, int n_cw) { return logit_shift(predicted_at(s, n_cw).cw, get(bias, s.name)); };
+    auto q_cw = [&](const Mode& s, int n_cw, double boost = 0.0) {
+        return logit_shift(predicted_at(s, n_cw, boost).cw, get(bias, s.name));
+    };
 
     std::vector<const Mode*> data_cands = cands;
     if (ceiling && !cands.empty()) {
@@ -355,8 +358,10 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
         if (c < reply_c) reply = s, reply_c = c, reply_p = ok;
     }
 
-    const Mode* cur = log.empty() ? nullptr : &mode_at(log.back().data);
+    const Mode* cur = st.rx_mode ? arq::mode(*st.rx_mode) : nullptr;
+    if (!cur && !log.empty()) cur = &mode_at(log.back().data);
     const std::int64_t held = cur ? st.held * payload_bytes(*cur) : 0;
+    const bool use_harq = cur && (!st.rx_mode || cur->name == *st.rx_mode) && !st.harq.empty();
     const bool chat = st.chat;
     const std::int64_t queued = std::max<std::int64_t>(CHAT_LINE_BYTES, st.peer_queued);
     const Mode* best = nullptr;
@@ -390,7 +395,30 @@ GearRecommendation GearShifter::recommend(const StationView& st) {
                 const double ok = std::max(ok_ctl * (bursts == 1 ? std::pow(pn, static_cast<double>(n - c)) : pn), 1e-3);
                 v = -t * bursts / ok + 1e-6 * (n - c) * pb;
             } else {
-                v = (ok_ctl * pn * (n - c) * pb - static_cast<double>(s != cur ? held : 0)) / t;
+                double bonus = 0.0;
+                if (s == cur && use_harq) {
+                    std::size_t ci = 0;
+                    if (!s->is_cpm()) {
+                        const auto cf = const_family(s->ofdm->constellation);
+                        for (std::size_t j = 0; j < CONSTS.size(); ++j)
+                            if (CONSTS[j] == cf) {
+                                ci = j;
+                                break;
+                            }
+                    }
+                    const auto sh_it = shift.find(s->band);
+                    const double cur_mi = shifted(me, sh_it == shift.end() ? 0.0 : sh_it->second).mi[ci];
+                    const std::size_t lim = std::min<std::size_t>(st.harq.size(), static_cast<std::size_t>(std::max(0, n - c)));
+                    for (std::size_t j = 0; j < lim; ++j) {
+                        if (st.harq[j].empty()) continue;
+                        std::vector<std::pair<int, double>> txs;
+                        txs.reserve(st.harq[j].size());
+                        for (const auto& h : st.harq[j]) txs.emplace_back(h.rv, h.mi[ci]);
+                        const double b = harq_boost_db(*s, txs, cur_mi);
+                        bonus += std::max(0.0, q_cw(*s, n, b) - pn);
+                    }
+                }
+                v = (ok_ctl * (pn * (n - c) + bonus) * pb - static_cast<double>(s != cur ? held : 0)) / t;
             }
             if (v > best_v) best = s, best_hint = hint, best_v = v;
             if (chat) break;
@@ -427,6 +455,17 @@ StationView view(const Station& st) {
     v.esc_floor = st.esc_floor;
     v.last_rx_data = st.last_rx_data;
     v.tx_end = st.tx_end;
+    v.rx_mode = st.rx.submode;
+    if (!st.rx.harq.empty()) {
+        std::int64_t top = st.rx.harq.rbegin()->first + 1;
+        if (!st.rx.buf.empty()) top = std::max(top, st.rx.buf.rbegin()->first + 1);
+        top = std::min(top, st.rx.cum + WINDOW);
+        for (std::int64_t s = st.rx.cum; s < top; ++s) {
+            if (st.rx.buf.count(s)) continue;
+            const auto it = st.rx.harq.find(s);
+            v.harq.push_back(it == st.rx.harq.end() ? std::vector<RxSide::HarqTx>{} : it->second);
+        }
+    }
     return v;
 }
 

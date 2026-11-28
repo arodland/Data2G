@@ -133,6 +133,54 @@ Measured shifted(const Measured& m, double shift_db) {
     return out;
 }
 
+double harq_boost_db(const Mode& m, std::span<const std::pair<int, double>> txs, double cur_mi) {
+    if (txs.empty()) return 0.0;
+    const auto cf = m.is_cpm() ? std::string_view("gray-qam4") : const_family(m.ofdm->constellation);
+    const auto& tab = table(cf).mi;
+    const double lo = tab.front() + 1e-6, hi = tab.back() - 1e-3;
+    const double snr_cur = interp(std::clamp(cur_mi, lo, hi), tab, tables::CAPACITY_GRID);
+    const int cyc = rv_cycle(m);
+    int max_prev = 0;
+    for (const auto& [rv, _] : txs) max_prev = std::max(max_prev, rv);
+    const int rv_next = (max_prev + 1) % cyc;
+    const double B = mother_blocks(m);
+    struct Seg {
+        double a, b, g;
+    };
+    std::vector<Seg> segs;
+    std::vector<double> pts{0.0, B};
+    auto add_tx = [&](int rv, double mi) {
+        const double g = std::pow(10.0, interp(std::clamp(mi, lo, hi), tab, tables::CAPACITY_GRID) / 10.0);
+        double a = std::fmod(static_cast<double>((rv % cyc + cyc) % cyc), B);
+        double rem = 1.0;
+        while (rem > 1e-9) {
+            const double step = std::min(rem, B - a);
+            const double b = a + step;
+            segs.push_back({a, b, g});
+            pts.push_back(a);
+            pts.push_back(b);
+            rem -= step;
+            a = std::abs(b - B) < 1e-9 ? 0.0 : b;
+        }
+    };
+    for (const auto& [rv, mi] : txs) add_tx(rv, mi);
+    add_tx(rv_next, cur_mi);
+    std::sort(pts.begin(), pts.end());
+    double mi_comb = 0.0;
+    for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+        const double w = pts[i + 1] - pts[i];
+        if (w < 1e-9) continue;
+        const double mid = 0.5 * (pts[i] + pts[i + 1]);
+        double g_tot = 0.0;
+        for (const auto& s : segs)
+            if (s.a <= mid && mid < s.b) g_tot += s.g;
+        if (g_tot > 0.0) mi_comb += w * interp(10.0 * std::log10(g_tot), tables::CAPACITY_GRID, tab);
+    }
+    mi_comb = std::min(hi, mi_comb * (1.0 - HARQ_IR_LOSS));
+    const double snr_eq = interp(mi_comb, tab, tables::CAPACITY_GRID);
+    return std::clamp(snr_eq - snr_cur, 0.0, HARQ_MAX_BOOST_DB);
+}
+
 double effective_mi(std::span<const std::complex<double>> h, std::span<const double> var,
                     std::string_view constellation) {
     if (h.size() != var.size() || h.empty()) throw std::invalid_argument("effective_mi: h and var must match");

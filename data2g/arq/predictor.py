@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import codes
 from ..config import BANDS as CFG_BANDS, PROFILE, RS, SNR_REF_BW_HZ, SUBMODES, data_path
 
 DATA = Path(__file__).parent.parent / "codes_data"
@@ -179,6 +180,55 @@ def shifted(measured: dict, shift_db: float) -> dict:
         snr = np.interp(measured[f"mi_{c}"], t, grid)  # the curve is increasing
         m[f"mi_{c}"] = float(np.interp(snr - shift_db, grid, t))
     return m
+
+
+HARQ_IR_LOSS = 0.06  # combining loss relative to exact slice MI (scripts/ir_study.py, runs/ir_study.csv)
+HARQ_MAX_BOOST_DB = 8.0  # cap on effective single-shot SNR boost (runs/ir_study.csv: r3/4 IR ~8 dB)
+
+
+def harq_boost_db(spec, txs, cur_mi: float) -> float:
+    """Effective per-cell SNR boost (dB, >= 0) of combining stored HARQ
+    receptions `txs` [(rv, mi), ...] with a next transmission at `cur_mi` in
+    `spec`: exact mother-buffer slice MI over [0, buffer_len / soft_len),
+    Chase where RVs overlap and additive MI on fresh parity, inverted back
+    along the constellation's capacity curve."""
+    if not txs:
+        return 0.0
+    cf = "gray-qam4" if getattr(spec, "family", "") == "cpm" else const_family(spec.constellation)
+    grid, tables = _capacity()
+    tab = tables[cf]
+    lo, hi = float(tab[0]) + 1e-6, float(tab[-1]) - 1e-3
+    snr_cur = float(np.interp(np.clip(cur_mi, lo, hi), tab, grid))
+    cyc = codes.rv_cycle(spec)
+    rv_next = (max(rv for rv, _ in txs) + 1) % cyc
+    B = codes.buffer_len(spec) / codes.soft_len(spec)
+    segs = []
+    pts = {0.0, B}
+    for rv, mi in (*txs, (rv_next, cur_mi)):
+        g = 10.0 ** (float(np.interp(np.clip(mi, lo, hi), tab, grid)) / 10.0)
+        a = float((rv % cyc) % B)
+        rem = 1.0
+        while rem > 1e-9:
+            step = min(rem, B - a)
+            b = a + step
+            segs.append((a, b, g))
+            pts.add(a)
+            pts.add(b)
+            rem -= step
+            a = 0.0 if abs(b - B) < 1e-9 else b
+    xs = sorted(pts)
+    mi_comb = 0.0
+    for u0, u1 in zip(xs[:-1], xs[1:]):
+        w = u1 - u0
+        if w < 1e-9:
+            continue
+        mid = 0.5 * (u0 + u1)
+        g_tot = sum(g for a, b, g in segs if a <= mid < b)
+        if g_tot > 0.0:
+            mi_comb += w * float(np.interp(10.0 * np.log10(g_tot), grid, tab))
+    mi_comb = min(hi, mi_comb * (1.0 - HARQ_IR_LOSS))
+    snr_eq = float(np.interp(mi_comb, tab, grid))
+    return float(np.clip(snr_eq - snr_cur, 0.0, HARQ_MAX_BOOST_DB))
 
 
 def outcome_inputs(measured: dict, band: str, gap: float, seconds: float, prev=None, bands=BANDS,

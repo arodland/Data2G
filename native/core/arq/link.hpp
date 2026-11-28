@@ -34,6 +34,7 @@ inline constexpr int REPEATS_BEFORE_SHRINK = 1;
 inline constexpr int MAX_ESCALATION = 4;
 inline constexpr int FLOOR_DECAY_TURNS = 4;  // clean turns (no escalation) that lower the escalation floor by one
 inline constexpr int LINK_LOST_MISSES = 12;
+inline constexpr std::size_t HARQ_MAX_TX = 8;  // link.HARQ_MAX_TX: stored receptions per undecoded seq at most
 // Primed retries of a failed control codeword at most (link.PRIME_TRIES; DATA2G_PRIME_TRIES, read once).
 int prime_tries();
 // link.PRIME: DATA2G_PRIME=0 turns primed reception off (read once).
@@ -214,8 +215,14 @@ private:
 
 class RxSide {
 public:
+    struct HarqTx {
+        int rv = 0;
+        std::array<double, 4> mi{};
+    };
     std::int64_t cum = 0;
     std::map<std::int64_t, std::pair<Bytes, bool>> buf;  // held above cum: (payload, compressed)
+    std::optional<std::string> submode;                  // submode of buffered / HARQ codewords
+    std::map<std::int64_t, std::vector<HarqTx>> harq;    // undecoded seqs >= cum with soft bits stored
     RecordReader reader;
     Bytes out;
     Bytes hist;
@@ -475,6 +482,8 @@ private:
     std::string burst_desc(const std::string& submode, int n_cw, bool dup = false);
     std::string snr();
     void refine_measured(RxBurst& rx);
+    std::vector<std::pair<std::int64_t, int>> rx_failed_;
+    void note_harq(const std::string& submode, bool has_data);
 };
 
 }  // namespace data2g::arq

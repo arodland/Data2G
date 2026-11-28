@@ -86,6 +86,8 @@ struct StationView {
     int esc_floor = 0;
     bool last_rx_data = true;  // the peer's last burst carried data (expected_reply)
     std::optional<double> tx_end;  // when my burst being built should end (Station::tx_end; nullopt: gap_s)
+    std::optional<std::string> rx_mode;  // submode of buffered / HARQ codewords (rx.submode)
+    std::vector<std::vector<RxSide::HarqTx>> harq;  // per missing seq above rx.cum, its stored receptions
 };
 
 struct GearRecommendation {  // link.hpp has Recommendation (the Policy's)
