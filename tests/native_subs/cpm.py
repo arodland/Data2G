@@ -114,7 +114,8 @@ def substitutions(native):
         g = cpm.GRIDS[r["band"]]
         if not own_grid(g) or not own_spec(r["spec"]):
             return py["dd_metric"](r, post, slot)
-        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], r["Z"], {int(k): v for k, v in post.items()}, slot)
+        return n.dd_metric(r["spec"].name, r["dup"], r["n_cw"], r["Z"], {int(k): v for k, v in post.items()}, slot,
+                           int(r.get("finger_dt", 0)), r.get("Z_early"), r.get("Z_late"))
 
     def dd_soft(r, metric, slot):
         g = cpm.GRIDS[r["band"]]

@@ -226,6 +226,8 @@ struct Received {
     std::int64_t preamble_start, header_end;
     Mat<std::complex<double>> Z;  // (burst rows, m) complex tone bins at the refined start and CFO (coherent DD)
     std::map<int, Pass> passes;   // data slots' passes a streaming receiver made (arq::CpmStream); ModemRx makes the rest
+    int finger_dt = 0;            // +-samples shift of Z_early/Z_late for dd_metric Rake (0 = disabled)
+    Mat<std::complex<double>> Z_early, Z_late;
 };
 // cpm.refine: a lock's start and CFO by the likelihood of the burst's first refine_symbols symbols.
 std::pair<std::int64_t, double> refine(const Grid& g, std::span<const double> x, std::int64_t s0, double cfo,

@@ -47,6 +47,11 @@ Heard heard_of(const py::dict& r) {
         c->n_cw = static_cast<int>(c->soft.size());
         c->n_ctl_slots = 1 + c->dup;
         if (r.contains("Z")) c->Z = mat(r["Z"].cast<In<cd>>());  // coherent DD (cpm.receive's bins)
+        if (r.contains("finger_dt")) {
+            c->finger_dt = r["finger_dt"].cast<int>();
+            if (r.contains("Z_early")) c->Z_early = mat(r["Z_early"].cast<In<cd>>());
+            if (r.contains("Z_late")) c->Z_late = mat(r["Z_late"].cast<In<cd>>());
+        }
         h.cpm = std::move(c);
         return h;
     }

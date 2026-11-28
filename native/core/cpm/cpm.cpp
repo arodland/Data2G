@@ -24,6 +24,25 @@ using cdouble = std::complex<double>;
 constexpr double FS = config::FS;
 constexpr double PI = std::numbers::pi;
 
+// Early/late shifted-window Rake constants (cpm.py, issue #364).
+constexpr int RAKE_SHIFT_MS = 3;
+constexpr int RAKE_MAX_T = static_cast<int>(FS) / 50;
+constexpr double RAKE_SNR_GATE = 0.35;
+constexpr double RAKE_COMB_WEIGHT = 0.5;
+constexpr double RAKE_FINGER_RATIO = 1.08;
+
+bool env_flag_on(const char* name, bool def_val = true) {
+    const char* v = std::getenv(name);
+    if (!v) return def_val;
+    return std::strcmp(v, "1") == 0;
+}
+
+int rake_dt(const Grid& g) {
+    if (env_flag_on("DATA2G_CPM_RAKE", true) && g.T <= RAKE_MAX_T)
+        return std::min(RAKE_SHIFT_MS * static_cast<int>(FS) / 1000, g.T / 4);
+    return 0;
+}
+
 // numpy's pairwise summation (add.reduce over a contiguous run), so sums,
 // means and shares round as the reference's do.
 double np_sum(const double* a, std::size_t n) { return dsp::pairwise_sum(std::span<const double>(a, n)); }
@@ -1292,8 +1311,15 @@ Received receive_refined(std::span<const double> x, const Lock& lock, std::pair<
     const auto [s0, cfo] = at;
     Soft s = soft(g, x, s0, cfo, lock.n_data, lock.dup);
     const int n = static_cast<int>(s.slots.size());
+    const int n_sym = layout(g, stream_symbols(g, lock.n_data, lock.dup)).n;
     Received r{lock.spec, n, 1 + lock.dup, lock.dup, std::move(s.slots), std::move(s.E), lock.cfo, lock.start,
-               lock.header_end, bins(g, x, s0, layout(g, stream_symbols(g, lock.n_data, lock.dup)).n, cfo), {}};
+               lock.header_end, bins(g, x, s0, n_sym, cfo), {}, 0, {}, {}};
+    const int dt = rake_dt(g);
+    if (dt > 0) {
+        r.finger_dt = dt;
+        r.Z_early = bins(g, x, s0 - dt, n_sym, cfo);
+        r.Z_late = bins(g, x, s0 + dt, n_sym, cfo);
+    }
     if (coh_ctl())  // the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
         for (int k = 0; k < r.n_ctl_slots; ++k) r.soft[k] = dd_soft(r, dd_metric(r, {}, k), k);
     return r;
@@ -1323,10 +1349,11 @@ void Stream::advance() {
     const auto rows = slot_rows(g, lock_.n_data, lock_.dup);
     const int n = layout(g, stream_symbols(g, lock_.n_data, lock_.dup)).n;
     std::optional<Received> r;
+    const int dt_rake = rake_dt(g);
     for (int k = n_ctl; k < n_ctl + lock_.n_data; ++k) {
         if (passes_.count(k)) continue;
         const std::int64_t b = std::min(n, rows[k].back() + 1 + COH_W);
-        if (len < at_->first + b * g.T) break;  // its rows and its metric's window are not all in yet
+        if (len < at_->first + b * g.T + dt_rake) break;  // its rows and its metric's window (plus Rake shift) are not all in yet
         if (!r) r = receive_refined(x_, lock_, *at_);  // rows past the audio read as zeros; this slot's don't
         Pass p = pass_(*r, k, earlier_);
         if (!p.post.empty()) earlier_[k] = p.post;
@@ -1856,6 +1883,63 @@ Mat<double> dd_metric(const Received& r, const Posts& post, int slot) {
     const Mat<double> M = coh_metric(Z, P, COH_W, noise_n0(E));
     Mat<double> out(sr.size(), g.m);
     for (std::size_t i = 0; i < sr.size(); ++i) std::copy(M[sr[i] - a], M[sr[i] - a] + g.m, out[i]);
+
+    if (r.finger_dt > 0 && r.Z_early.rows == r.Z.rows && r.Z_late.rows == r.Z.rows) {
+        const std::size_t n_win = static_cast<std::size_t>(b - a), m_u = static_cast<std::size_t>(g.m);
+        double best_snr = 0.0;
+        Mat<cdouble> best_U, best_Zf;
+        double best_n0u = 0.0;
+        for (int sgn : {-1, 1}) {
+            const int dt = sgn * r.finger_dt;
+            const Mat<cdouble>& Zsrc = sgn < 0 ? r.Z_early : r.Z_late;
+            Mat<cdouble> Zf(n_win, m_u), U(n_win, m_u);
+            std::copy(Zsrc[a], Zsrc[b - 1] + m_u, Zf.data.begin());
+            const double rho = 1.0 - static_cast<double>(std::abs(dt)) / static_cast<double>(g.T);
+            std::vector<cdouble> rot(m_u);
+            for (std::size_t k = 0; k < m_u; ++k) {
+                const double th = (-2 * PI) * static_cast<double>(k) * static_cast<double>(dt) / static_cast<double>(g.T);
+                rot[k] = {std::cos(th), std::sin(th)};
+            }
+            for (std::size_t i = 0; i < n_win; ++i)
+                for (std::size_t k = 0; k < m_u; ++k) U[i][k] = Zf[i][k] * rot[k] - rho * Z[i][k];
+            const Mat<double> Eu = power_of(U);
+            const double n0_u = noise_n0(Eu);
+            std::vector<double> rsum(n_win, 0.0);
+            for (std::size_t i = 0; i < n_win; ++i)
+                for (std::size_t k = 0; k < m_u; ++k) rsum[i] += P[i][k] * Eu[i][k];
+            const double snr_u = (np_mean(rsum) - n0_u) / std::max(n0_u, 1e-30);
+            if (snr_u > best_snr) {
+                best_snr = snr_u;
+                best_U = std::move(U);
+                best_Zf = std::move(Zf);
+                best_n0u = n0_u;
+            }
+        }
+        if (best_snr > RAKE_SNR_GATE && best_U.rows == n_win) {
+            const Mat<double> Mu_all = coh_metric(best_U, P, COH_W, best_n0u);
+            const Mat<double> Mf_all = coh_metric(best_Zf, P, COH_W, noise_n0(power_of(best_Zf)));
+            Mat<double> Mf(sr.size(), m_u), Mcomb(sr.size(), m_u);
+            for (std::size_t i = 0; i < sr.size(); ++i) {
+                const int ri = sr[i] - a;
+                for (std::size_t k = 0; k < m_u; ++k) {
+                    Mf[i][k] = Mf_all[ri][k];
+                    Mcomb[i][k] = out[i][k] + RAKE_COMB_WEIGHT * Mu_all[ri][k];
+                }
+            }
+            const auto row_peak = [&](const Mat<double>& Mmat) {
+                std::vector<double> pk(Mmat.rows);
+                for (std::size_t i = 0; i < Mmat.rows; ++i) {
+                    const double mx = *std::max_element(Mmat[i], Mmat[i] + m_u);
+                    const double mn = np_sum(Mmat[i], m_u) / static_cast<double>(m_u);
+                    pk[i] = mx - mn;
+                }
+                return np_mean(pk);
+            };
+            const double sc0 = row_peak(out), scf = row_peak(Mf), scc = row_peak(Mcomb);
+            if (scf > std::max(sc0, scc) * RAKE_FINGER_RATIO) return Mf;
+            if (scc > sc0) return Mcomb;
+        }
+    }
     return out;
 }
 

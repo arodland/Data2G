@@ -1250,10 +1250,16 @@ def receive(x: np.ndarray, lock: dict) -> dict:
     g = GRIDS[lock["band"]]
     s0, cfo = refine(g, x, lock["start"], lock["cfo"], lock["spec"], lock["n_data"], lock["dup"])
     soft_, E = soft(g, lock["spec"], x, s0, cfo, lock["n_data"], lock["dup"])
-    Z = bins(g, x, s0, layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"])).n, cfo)
+    n_sym = layout(g.name, stream_symbols(g.name, lock["n_data"], lock["dup"])).n
+    Z = bins(g, x, s0, n_sym, cfo)
     r = dict(family="cpm", spec=lock["spec"], band=g.name, n_cw=len(soft_), n_ctl_slots=1 + lock["dup"],
              dup=lock["dup"], soft=soft_, E=E, Z=Z, cfo=lock["cfo"], preamble_start=lock["start"],
              header_end=lock.get("header_end"))
+    dt = _rake_dt(g)
+    if dt > 0:
+        r["finger_dt"] = dt
+        r["Z_early"] = bins(g, x, s0 - dt, n_sym, cfo)
+        r["Z_late"] = bins(g, x, s0 + dt, n_sym, cfo)
     if COH_CTL:  # the control slots on the coherent metric (sync and header rows known, the rest square-law decided)
         for s in range(r["n_ctl_slots"]):
             soft_[s] = dd_soft(r, dd_metric(r, {}, s), s)
@@ -1272,6 +1278,20 @@ def receive(x: np.ndarray, lock: dict) -> dict:
 
 COH_W = 8  # coh_metric's channel window for data (+- rows, the row left out): best of 1-64 on fading
 COH_HDR_W = 4  # the header's (front + copy: ~22 rows)
+# Early/late shifted-window Rake in dd_metric for short-symbol grids (T <= 20 ms: c8r50, c32r62).
+# Tuned on loss_study.py fading cells (issue #364, seeds 7500..7519): +4.0% mean over #363, mpd:-10 +18.4%,
+# AWGN/mpg untouched (gated by innovation SNR > RAKE_SNR_GATE).
+RAKE_SHIFT_MS = 3  # +-3 ms finger shift (clamped to T // 4)
+RAKE_MAX_T = FS // 50  # 20 ms max symbol length (160 samples at 8 kHz)
+RAKE_SNR_GATE = 0.35  # min orthogonalized innovation SNR before scoring the shifted finger
+RAKE_COMB_WEIGHT = 0.5  # weight on orthogonalized innovation metric M0 + w * Mu
+RAKE_FINGER_RATIO = 1.08  # margin to select shifted-finger Mf outright over max(M0, M_comb)
+
+
+def _rake_dt(g: Grid) -> int:
+    if os.environ.get("DATA2G_CPM_RAKE", "1") == "1" and g.T <= RAKE_MAX_T:
+        return min(RAKE_SHIFT_MS * FS // 1000, g.T // 4)
+    return 0
 # Lock gates on coh_read_header's scale (one copy, both), grids calibrated:
 # 6000 noise windows' maxima (26.2, 33.3); (32, 36) gave 1 false lock in 8 h
 # on noise and on own-grid traffic, (34, 38) none in 16 h of either
@@ -1545,7 +1565,36 @@ def dd_metric(r: dict, post: dict, slot: int) -> np.ndarray:
         q = np.exp(lp - lp.max(axis=1, keepdims=True))
         q /= q.sum(axis=1, keepdims=True)
         P[rr[keep][:, None] - a, gray[None]] = q  # value v on tone gray(v)
-    return coh_metric(Z, P, COH_W, _n0(E))[rows[slot] - a]
+    idx_s = rows[slot] - a
+    M0 = coh_metric(Z, P, COH_W, _n0(E))[idx_s]
+    fdt = int(r.get("finger_dt", 0))
+    if fdt > 0 and "Z_early" in r and "Z_late" in r:
+        best_snr = 0.0
+        best_u = None
+        for dt, Zf_all in ((-fdt, r["Z_early"]), (fdt, r["Z_late"])):
+            Zf = Zf_all[a:b]
+            rot = np.exp(-2j * np.pi * np.arange(g.m) * dt / g.T)[None]
+            rho = 1.0 - abs(dt) / g.T
+            U = Zf * rot - rho * Z
+            Eu = _sq(U)
+            n0_u = _n0(Eu)
+            snr_u = (float(np.mean((P * Eu).sum(axis=1))) - n0_u) / max(n0_u, 1e-30)
+            if snr_u > best_snr:
+                best_snr = snr_u
+                best_u = (U, n0_u, Zf)
+        if best_u is not None and best_snr > RAKE_SNR_GATE:
+            U, n0_u, Zf = best_u
+            Mu = coh_metric(U, P, COH_W, n0_u)[idx_s]
+            Mf = coh_metric(Zf, P, COH_W, _n0(_sq(Zf)))[idx_s]
+            M_comb = M0 + RAKE_COMB_WEIGHT * Mu
+            sc0 = float(np.mean(M0.max(axis=1) - M0.mean(axis=1)))
+            scf = float(np.mean(Mf.max(axis=1) - Mf.mean(axis=1)))
+            scc = float(np.mean(M_comb.max(axis=1) - M_comb.mean(axis=1)))
+            if scf > max(sc0, scc) * RAKE_FINGER_RATIO:
+                return Mf
+            if scc > sc0:
+                return M_comb
+    return M0
 
 
 def dd_soft(r: dict, metric: np.ndarray, slot: int) -> np.ndarray:
